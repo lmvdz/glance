@@ -120,7 +120,7 @@ import {
 	VOICE_MINT_AUDIT_ACTION,
 	type VoiceKeyScope,
 } from "./voice-token.ts";
-import { appendOrgAudit, countRecentOrgAudit, deleteOrgSecret, getOrgSecret, putOrgSecret, setOrgSecretEnabled } from "./dal/store.ts";
+import { appendOrgAudit, deleteOrgAuditRow, deleteOrgSecret, finalizeOrgAuditDetail, getOrgSecret, putOrgSecret, reserveOrgAuditSlot, setOrgSecretEnabled } from "./dal/store.ts";
 
 /** The agent id/name a `ClientCommand` mutates, if any — "create"/"snapshot"/"commission" name no
  *  agent (they don't need cross-manager resolution); "message" targets a peer by `to`, but that's
@@ -455,8 +455,10 @@ let voiceMaxConcurrentWarned = false;
 /** OMP_SQUAD_VOICE_MAX_CONCURRENT_PER_ORG — the durable, per-org concurrency cap
  *  (plans/voice-db-mode/04-spend-controls.md, DESIGN.md "Org spend bound" row): count this org's
  *  `voice.mint` audit rows inside the provider's own max-session window and refuse beyond N. Derived
- *  from the `audit` table (see `countRecentOrgAudit`), so it's restart-safe and correct across
- *  replicas — unlike the rejected draft's "second in-memory map keyed by org", which would have
+ *  from the `audit` table (see `reserveOrgAuditSlot`, which counts and reserves the row atomically
+ *  in one transaction — closing the check-then-act race a separate count-then-insert would have),
+ *  so it's restart-safe and correct across replicas — unlike the rejected draft's "second in-memory
+ *  map keyed by org", which would have
  *  inherited both defects of `voiceMintRate` above. Same non-positive clamp-and-warn-once discipline
  *  as `resolveVoiceMintRatePerMin`: a misconfigured `0`/negative must not silently zero out the cap. */
 function resolveVoiceMaxConcurrentPerOrg(): number {
@@ -538,7 +540,7 @@ export class SquadServer {
 	 *  by plans/voice-db-mode/04-spend-controls.md: it keys `actor.id`, is per-process, and resets on
 	 *  restart, same ponytail as `feedbackRate` above — it never bounded an ORG and must not be
 	 *  described as if it did. The durable per-org bound now lives in the `audit` table
-	 *  (`countRecentOrgAudit`, `resolveVoiceMaxConcurrentPerOrg`). */
+	 *  (`reserveOrgAuditSlot`, `resolveVoiceMaxConcurrentPerOrg`). */
 	private readonly voiceMintRate = new Map<string, { minute: number; count: number }>();
 	/** Per-actor `PUT /api/org/voice-key` rate cap (plans/voice-db-mode/05-admin-endpoints.md):
 	 *  "Verification before persist uses GET /v1/models... PUT carries its own rate limit"
@@ -1335,9 +1337,15 @@ export class SquadServer {
 			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
 			const orgId = session.session.activeOrganizationId;
 			if (!orgId) return new Response("no active org", { status: 400 });
+			// `provider` query param, defaulting to "openai" — mirrors PUT/POST's body field so the
+			// four voice-key admin routes can't drift apart the moment a second provider is
+			// registered (today the registry has exactly one, so this is a no-op default). Session-
+			// org-scoped like every other field here; never trusts anything beyond `isKnownVoiceProvider`.
+			const getProviderId = url.searchParams.get("provider") || "openai";
+			if (!isKnownVoiceProvider(getProviderId)) return new Response("unknown voice provider", { status: 400 });
 			// Status only, never the key itself (DESIGN.md admin-surface row) — `getOrgSecret`'s
 			// `plaintext` field is read here but never placed on the response.
-			const secret = await getOrgSecret({ db: this.db.db, type: this.db.type }, orgId, "openai");
+			const secret = await getOrgSecret({ db: this.db.db, type: this.db.type }, orgId, getProviderId);
 			if (!secret) return Response.json({ configured: false });
 			return Response.json({ configured: true, last4: secret.last4, enabled: secret.enabled, updatedAt: secret.updatedAt, updatedBy: secret.updatedBy });
 		}
@@ -1371,7 +1379,11 @@ export class SquadServer {
 			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
 			const orgId = session.session.activeOrganizationId;
 			if (!orgId) return new Response("no active org", { status: 400 });
-			await deleteOrgSecret({ db: this.db.db, type: this.db.type }, orgId, "openai");
+			// `provider` query param, same default + validation as GET above — the row PUT stored under
+			// a non-default provider must be reachable to delete, not stranded.
+			const deleteProviderId = url.searchParams.get("provider") || "openai";
+			if (!isKnownVoiceProvider(deleteProviderId)) return new Response("unknown voice provider", { status: 400 });
+			await deleteOrgSecret({ db: this.db.db, type: this.db.type }, orgId, deleteProviderId);
 			return Response.json({ configured: false });
 		}
 		if (url.pathname === "/api/org/voice/enabled" && req.method === "POST") {
@@ -1528,22 +1540,38 @@ export class SquadServer {
 			// Durable per-org concurrency cap (plans/voice-db-mode/04-spend-controls.md, DESIGN.md "Org
 			// spend bound" row): count this ORG's own `voice.mint` audit rows inside the provider's
 			// max-session window and refuse beyond N — restart-safe and correct across replicas because
-			// it's derived from the `audit` table (this route's own write, below), not an in-memory map
-			// (the rejected draft's "second in-memory map keyed by org"). File mode has no org concept
-			// and is exempt — its only daemon-side bound is the per-actor pre-filter above.
-			if (apiKey && voiceScope.mode === "db" && voiceScope.ctx && voiceScope.orgId && isKnownVoiceProvider(providerId)) {
+			// it's derived from the `audit` table, not an in-memory map (the rejected draft's "second
+			// in-memory map keyed by org"). File mode has no org concept and is exempt — its only
+			// daemon-side bound is the per-actor pre-filter above.
+			//
+			// The slot is RESERVED (row written) here, BEFORE `mintVoiceToken`'s network round trip —
+			// not counted-then-written-after like the earlier draft. That earlier shape let every
+			// request in flight during the mint's latency window see the same stale pre-mint count,
+			// so N+K parallel mints could all pass; reserving first closes that race (proven with a
+			// parallel-mint regression test, tests/voice-spend.test.ts). `reserveOrgAuditSlot` counts
+			// and inserts inside one transaction (Postgres additionally advisory-locks per org+action —
+			// see its doc comment for why SQLite doesn't need to).
+			const dbAuditable = voiceScope.mode === "db" && voiceScope.ctx && voiceScope.orgId ? { ctx: voiceScope.ctx, orgId: voiceScope.orgId } : undefined;
+			let reservedAuditId: number | undefined;
+			if (apiKey && dbAuditable && isKnownVoiceProvider(providerId)) {
 				const windowMs = voiceProviderMaxSessionWindowMs(providerId);
 				const cap = resolveVoiceMaxConcurrentPerOrg();
-				const recent = await countRecentOrgAudit(voiceScope.ctx, voiceScope.orgId, VOICE_MINT_AUDIT_ACTION, Date.now() - windowMs);
-				if (recent >= cap) {
+				const reservation = await reserveOrgAuditSlot(dbAuditable.ctx, dbAuditable.orgId, { actor: actor.id, action: VOICE_MINT_AUDIT_ACTION, target: providerId, source: "voice" }, cap, Date.now() - windowMs);
+				if (!reservation.reserved) {
 					// The refusal is itself auditable — a DISTINCT action so a burst of refusals can never
 					// inflate the very count they're a consequence of.
-					await appendOrgAudit(voiceScope.ctx, voiceScope.orgId, { actor: actor.id, action: "voice.mint.refused", target: providerId, detail: { cap, windowMs } });
+					await appendOrgAudit(dbAuditable.ctx, dbAuditable.orgId, { actor: actor.id, action: "voice.mint.refused", target: providerId, detail: { cap, windowMs } });
 					return new Response("voice concurrency cap reached for this organization", { status: 429 });
 				}
+				reservedAuditId = reservation.auditId;
 			}
 			const result = await mintVoiceToken(providerId, apiKey);
-			if (!result.ok) return new Response(result.message, { status: result.status });
+			if (!result.ok) {
+				// Compensate: the mint never happened, so the reserved slot must not count against the
+				// org's cap — a provider 502 must not permanently consume a concurrency slot.
+				if (dbAuditable && reservedAuditId !== undefined) await deleteOrgAuditRow(dbAuditable.ctx, dbAuditable.orgId, reservedAuditId);
+				return new Response(result.message, { status: result.status });
+			}
 			// Mint audit, in BOTH modes (mints are unaudited today, everywhere) — actor `db:<userId>` in
 			// DB mode (never role-derived: `actor` was already resolved that way above, not re-derived
 			// here), provider, and the provider's OWN session id (previously discarded). Awaited (not
@@ -1551,14 +1579,20 @@ export class SquadServer {
 			// browser receives is only sent once the audit trail actually reflects the mint that
 			// produced it — `recordAudit` itself still swallows a disk failure rather than throwing.
 			if (manager) await manager.recordAudit(actor, VOICE_MINT_AUDIT_ACTION, providerId, "ok", result.providerSessionId ? `provider session ${result.providerSessionId}` : undefined, "voice");
-			if (voiceScope.mode === "db" && voiceScope.ctx && voiceScope.orgId) {
-				await appendOrgAudit(voiceScope.ctx, voiceScope.orgId, {
-					actor: actor.id,
-					action: VOICE_MINT_AUDIT_ACTION,
-					target: providerId,
-					detail: result.providerSessionId ? { providerSessionId: result.providerSessionId } : undefined,
-					source: "voice",
-				});
+			if (dbAuditable) {
+				const detail = result.providerSessionId ? { providerSessionId: result.providerSessionId } : undefined;
+				if (reservedAuditId !== undefined) {
+					// The common path: the reserved row already exists (id/actor/action/target/at) —
+					// finalize just overwrites its detail with the provider session id now that the mint
+					// actually happened.
+					await finalizeOrgAuditDetail(dbAuditable.ctx, dbAuditable.orgId, reservedAuditId, { detail, source: "voice" });
+				} else {
+					// No reservation was made (apiKey/provider gating above didn't match — can only
+					// happen if mintVoiceToken succeeded despite that, which its own no-apiKey/unknown-
+					// provider guards make unreachable in practice). Fall back to the old direct write
+					// rather than silently dropping the audit row.
+					await appendOrgAudit(dbAuditable.ctx, dbAuditable.orgId, { actor: actor.id, action: VOICE_MINT_AUDIT_ACTION, target: providerId, detail, source: "voice" });
+				}
 			}
 			return Response.json(result.token);
 		}

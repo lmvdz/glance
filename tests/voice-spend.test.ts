@@ -71,6 +71,21 @@ function mockOpenAiMintAlwaysOk(): void {
 	}) as typeof fetch;
 }
 
+/** Same as `mockOpenAiMintAlwaysOk` but with a real `setTimeout` delay before resolving — the shape
+ *  a real provider round trip has. Regression fixture for the check-then-act race: the old cap
+ *  counted `voice.mint` audit rows BEFORE this delay and only wrote the row AFTER it, so every
+ *  request in flight during the delay saw the same stale count. Reserving the audit row before the
+ *  delay (the fix) closes that window regardless of how long the mint takes. */
+function mockOpenAiMintAlwaysOkWithLatency(delayMs: number): void {
+	globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+		const url = typeof input === "string" ? input : (input as { url?: string } | undefined)?.url;
+		if (url !== OPENAI_MINT_URL) return realFetch(input as never, init);
+		await new Promise((resolve) => setTimeout(resolve, delayMs));
+		mintSeq++;
+		return new Response(JSON.stringify({ value: `ek_${mintSeq}`, expires_at: 1, session: { id: `sess_${mintSeq}` } }), { status: 200 });
+	}) as typeof fetch;
+}
+
 interface DbUser {
 	id: string;
 	orgId?: string;
@@ -163,6 +178,43 @@ test("durable per-org concurrency cap: N=2 admits two mints, the third 429s, and
 	// by the successful-mint count staying exactly 2 despite the refusal row existing.
 	const mintRows = await handle.db.selectFrom("audit").selectAll().where("org_id", "=", "orgCap").where("action", "=", "voice.mint").execute();
 	expect(mintRows.length).toBe(2);
+});
+
+test("durable per-org concurrency cap holds under PARALLEL mints: cap=1, 8 concurrent POSTs against a mint mock with real provider latency admit exactly 1 and write exactly 1 voice.mint audit row", async () => {
+	// Regression for the check-then-act race: the old cap read `countRecentOrgAudit` BEFORE
+	// `mintVoiceToken`'s network round trip and only wrote the audit row it counts AFTER the mint
+	// returned. Every request in flight during that window saw the same stale (pre-insert) count,
+	// so N+K parallel mints could all pass regardless of the configured cap — proven live (8 parallel
+	// POSTs, cap=1, all 8 returned 200). The fix reserves the audit row BEFORE the mint
+	// (`reserveOrgAuditSlot`, count+insert in one transaction), so a burst of concurrent requests can
+	// no longer all observe the same pre-reservation count.
+	initMasterKey({ OMP_SQUAD_SECRETS_KEY: KEY_HEX });
+	process.env.OMP_SQUAD_VOICE_ENABLED = "1";
+	process.env.OMP_SQUAD_VOICE_MAX_CONCURRENT_PER_ORG = "1";
+	// Isolate the org-level concurrency cap from the per-actor pre-filter (default 6/min) — this test
+	// proves the DURABLE cap holds under concurrency, not the pre-filter, so the pre-filter must not
+	// itself absorb any of the 8 parallel requests.
+	process.env.OMP_SQUAD_VOICE_MINT_RATE_PER_MIN = "100";
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "voice-spend-parallel-"));
+	process.env.DATABASE_URL = `sqlite:${path.join(dir, "app.sqlite")}`;
+	const { url, handle, ctx, stop } = await bootDbModeServer(dir, ["orgParallel"], { userP: { id: "user-p", orgId: "orgParallel", role: "member" } });
+	cleanups.push(async () => {
+		await stop();
+		await fs.rm(dir, { recursive: true, force: true });
+	});
+	await putOrgSecret(ctx, "orgParallel", "openai", "sk-org-parallel-key", "db:user-p");
+	mockOpenAiMintAlwaysOkWithLatency(150);
+
+	const mint = () => fetch(`${url}/api/voice/token`, { method: "POST", headers: { cookie: "session=userP" } });
+	const results = await Promise.all(Array.from({ length: 8 }, () => mint()));
+	const statuses = results.map((r) => r.status).sort((a, b) => a - b);
+	// Exactly one 200, the other seven 429 — not "at least one 429", the exact N/N+K boundary.
+	expect(statuses).toEqual([200, 429, 429, 429, 429, 429, 429, 429]);
+
+	const mintRows = await handle.db.selectFrom("audit").selectAll().where("org_id", "=", "orgParallel").where("action", "=", "voice.mint").execute();
+	expect(mintRows.length).toBe(1);
+	const refusalRows = await handle.db.selectFrom("audit").selectAll().where("org_id", "=", "orgParallel").where("action", "=", "voice.mint.refused").execute();
+	expect(refusalRows.length).toBe(7);
 });
 
 test("durable per-org concurrency cap survives a simulated daemon restart (a fresh in-memory map could not)", async () => {

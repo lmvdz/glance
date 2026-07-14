@@ -17,6 +17,7 @@
 import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { sql } from "kysely";
 import type { PersistedAgent, PersistedFeature, RunReceipt, TranscriptEntry } from "../types.ts";
 import { normalizeCapabilitySnapshot, type CapabilitySnapshot } from "../capabilities/index.ts";
 import { emptyFeedbackSnapshot, type FeedbackSnapshot } from "../feedback.ts";
@@ -407,6 +408,16 @@ export class DbStore implements Store {
  * `appendOrgAudit` so there is exactly one write path, not two that could drift.
  */
 
+/** Fold `entry.source` into `entry.detail` (no dedicated `source` column — no migration for this
+ *  concern) the same way in every write path, so DB-mode never silently loses the provenance tag
+ *  the file-mode audit trail carries natively. Shared by `appendOrgAudit`, `reserveOrgAuditSlot`,
+ *  and `finalizeOrgAuditDetail` so the three writers of an `audit` row can never drift on shape. */
+function normalizeAuditDetail(entry: Pick<AuditEntry, "detail" | "source">): unknown {
+	return entry.source === undefined
+		? entry.detail
+		: { ...(isPlainObject(entry.detail) ? entry.detail : entry.detail !== undefined ? { detail: entry.detail } : {}), source: entry.source };
+}
+
 /** Write one row directly into the org-scoped `audit` table. `entry.actor` is caller-supplied — the
  *  voice mint route passes `actor.id`, already `db:<userId>` in DB mode (never role-derived; see
  *  server.ts's actor construction), never re-derived here. No active org ⇒ no-op, never a throw —
@@ -414,13 +425,7 @@ export class DbStore implements Store {
 export async function appendOrgAudit(ctx: OrgContext, orgId: string, entry: AuditEntry): Promise<void> {
 	if (!orgId) return;
 	await withOrg(ctx, orgId, async (trx) => {
-		// No dedicated `source` column (no migration for this concern) — fold it into the JSON
-		// `detail` blob instead of dropping it, so DB-mode never silently loses the provenance tag
-		// the file-mode audit trail carries natively.
-		const detail =
-			entry.source === undefined
-				? entry.detail
-				: { ...(isPlainObject(entry.detail) ? entry.detail : entry.detail !== undefined ? { detail: entry.detail } : {}), source: entry.source };
+		const detail = normalizeAuditDetail(entry);
 		await trx
 			.insertInto("audit")
 			.values({
@@ -436,12 +441,10 @@ export async function appendOrgAudit(ctx: OrgContext, orgId: string, entry: Audi
 	});
 }
 
-/** Count this org's `action`-matching audit rows written since `sinceMs` — the durable, restart-safe
- *  data source for the per-org voice-mint concurrency cap (plans/voice-db-mode/04-spend-controls.md,
- *  DESIGN.md "Org spend bound" row). `appendOrgAudit`'s `VOICE_MINT_AUDIT_ACTION` writes (server.ts)
- *  are this query's ONLY input, so the count survives a daemon restart and is correct across
- *  replicas — the durability the draft's rejected "second in-memory map keyed by org" could never
- *  offer. No active org ⇒ 0, never a throw. */
+/** Count this org's `action`-matching audit rows written since `sinceMs`. Standalone read helper —
+ *  no longer the voice-mint concurrency cap's data source (see `reserveOrgAuditSlot` below, which
+ *  counts and inserts atomically); kept for callers that only need an observational count. No
+ *  active org ⇒ 0, never a throw. */
 export async function countRecentOrgAudit(ctx: OrgContext, orgId: string, action: string, sinceMs: number): Promise<number> {
 	if (!orgId) return 0;
 	const row = await withOrg(ctx, orgId, (trx) =>
@@ -454,6 +457,90 @@ export async function countRecentOrgAudit(ctx: OrgContext, orgId: string, action
 			.executeTakeFirst(),
 	);
 	return row ? Number(row.n) : 0;
+}
+
+/**
+ * Atomically reserve one `audit` row for `entry.action`, refusing the write (no row, `reserved:
+ * false`) once `cap` matching rows already exist inside `[sinceMs, now]`. This is the fix for the
+ * check-then-act race the old count-before-mint/insert-after-mint split had: the row that reserves
+ * a slot is now written BEFORE the caller's network round trip (the voice provider mint), not
+ * after it returns, so a burst of concurrent requests can no longer all observe the same
+ * pre-insert count and all pass. Count + insert happen inside ONE `withOrg` transaction.
+ *
+ * SQLite (bun:sqlite, self-host) serializes writers on its single connection, so the transaction
+ * alone closes the race there. Postgres's default READ COMMITTED does NOT — two concurrent
+ * transactions can each take their own snapshot before either commits and both see the pre-insert
+ * count — so on Postgres this also takes a per-(org, action) transaction-scoped advisory lock
+ * before counting. The lock serializes reservations for the same org+action only (unrelated orgs/
+ * actions never contend) and releases automatically at commit/rollback, so a request that never
+ * finalizes (crash mid-mint) can't wedge a future one.
+ *
+ * On success the caller MUST eventually call `finalizeOrgAuditDetail` (mint succeeded — the row
+ * stays, now carrying the real detail) or `deleteOrgAuditRow` (mint failed — compensate, the
+ * refused slot is freed) with the returned `auditId`. No active org ⇒ refused, never a throw. */
+export async function reserveOrgAuditSlot(
+	ctx: OrgContext,
+	orgId: string,
+	entry: AuditEntry,
+	cap: number,
+	sinceMs: number,
+): Promise<{ reserved: true; auditId: number } | { reserved: false }> {
+	if (!orgId) return { reserved: false };
+	return withOrg(ctx, orgId, async (trx) => {
+		if (ctx.type === "postgres") {
+			// Scoped to this org+action so unrelated reservations (a different org, or a different
+			// audit action entirely) never contend for the same lock.
+			await sql`select pg_advisory_xact_lock(hashtext(${`voice-audit-reserve:${orgId}:${entry.action}`}))`.execute(trx);
+		}
+		const row = await trx
+			.selectFrom("audit")
+			.select(({ fn }) => fn.countAll().as("n"))
+			.where("org_id", "=", orgId)
+			.where("action", "=", entry.action)
+			.where("at", ">=", sinceMs)
+			.executeTakeFirst();
+		const count = row ? Number(row.n) : 0;
+		if (count >= cap) return { reserved: false } as const;
+		const id = nextAuditId();
+		const detail = normalizeAuditDetail(entry);
+		await trx
+			.insertInto("audit")
+			.values({
+				id,
+				org_id: orgId,
+				actor: entry.actor,
+				action: entry.action,
+				target: entry.target ?? null,
+				detail: detail === undefined ? null : JSON.stringify(detail),
+				at: Date.now(),
+			})
+			.execute();
+		return { reserved: true, auditId: id } as const;
+	});
+}
+
+/** Overwrite a reserved row's `detail`/`source` once the caller's operation (the provider mint)
+ *  actually completed — the row itself (id, actor, action, target, at) was already committed by
+ *  `reserveOrgAuditSlot`, so this only ever updates the JSON blob. No active org ⇒ no-op. */
+export async function finalizeOrgAuditDetail(ctx: OrgContext, orgId: string, auditId: number, entry: Pick<AuditEntry, "detail" | "source">): Promise<void> {
+	if (!orgId) return;
+	const detail = normalizeAuditDetail(entry);
+	await withOrg(ctx, orgId, (trx) =>
+		trx
+			.updateTable("audit")
+			.set({ detail: detail === undefined ? null : JSON.stringify(detail) })
+			.where("org_id", "=", orgId)
+			.where("id", "=", auditId)
+			.execute(),
+	);
+}
+
+/** Compensate a reservation whose downstream operation (the provider mint) failed — deletes the
+ *  reserved row so it stops counting toward the cap it was never actually spent against, and never
+ *  shows up as a phantom success in the audit trail. No active org ⇒ no-op. */
+export async function deleteOrgAuditRow(ctx: OrgContext, orgId: string, auditId: number): Promise<void> {
+	if (!orgId) return;
+	await withOrg(ctx, orgId, (trx) => trx.deleteFrom("audit").where("org_id", "=", orgId).where("id", "=", auditId).execute());
 }
 
 /**

@@ -141,10 +141,42 @@ test("GET /api/org/voice: unconfigured org reads configured:false, no last4/ciph
 	expect(JSON.stringify(body)).not.toMatch(/sk-|last4/);
 });
 
+test("GET/DELETE /api/org/voice(-key): a ?provider= query param is honored (explicit \"openai\" behaves exactly like the default) and an unknown provider 400s rather than silently falling back to openai — the four voice-key routes can't drift apart the moment a second provider is registered", async () => {
+	const { url } = await startVoiceAdminServer(["orgI"], { admI: { id: "admin-i", orgId: "orgI", role: "admin" } });
+	mockOpenAiVerify(() => ({ status: 200 }));
+	const put = await fetch(`${url}/api/org/voice-key`, { method: "PUT", headers: { ...cookie("admI"), "content-type": "application/json" }, body: JSON.stringify({ apiKey: "sk-provider-param-key" }) });
+	expect(put.status).toBe(200);
+
+	const bareGet = await (await fetch(`${url}/api/org/voice`, { headers: cookie("admI") })).json();
+	const explicitGet = await (await fetch(`${url}/api/org/voice?provider=openai`, { headers: cookie("admI") })).json();
+	expect(explicitGet).toEqual(bareGet);
+	expect(explicitGet.configured).toBe(true);
+
+	const unknownGet = await fetch(`${url}/api/org/voice?provider=not-a-real-provider`, { headers: cookie("admI") });
+	expect(unknownGet.status).toBe(400);
+	const unknownDelete = await fetch(`${url}/api/org/voice-key?provider=not-a-real-provider`, { method: "DELETE", headers: cookie("admI") });
+	expect(unknownDelete.status).toBe(400);
+	// The unknown-provider DELETE must not have touched the real row.
+	const stillThere = await (await fetch(`${url}/api/org/voice`, { headers: cookie("admI") })).json();
+	expect(stillThere.configured).toBe(true);
+
+	const explicitDelete = await fetch(`${url}/api/org/voice-key?provider=openai`, { method: "DELETE", headers: cookie("admI") });
+	expect(explicitDelete.status).toBe(200);
+	const afterDelete = await (await fetch(`${url}/api/org/voice`, { headers: cookie("admI") })).json();
+	expect(afterDelete).toEqual({ configured: false });
+});
+
 test("GET /api/org/voice: configured org reports last4 (exactly 4 chars), enabled, updatedAt/By — never ciphertext or plaintext", async () => {
 	const { url } = await startVoiceAdminServer(["orgB"], { admB: { id: "admin-b", orgId: "orgB", role: "admin" } });
-	mockOpenAiVerify(() => ({ status: 200 }));
-	const put = await fetch(`${url}/api/org/voice-key`, { method: "PUT", headers: { ...cookie("admB"), "content-type": "application/json" }, body: JSON.stringify({ apiKey: "sk-test-abcd1234wxyz" }) });
+	const candidateKey = "sk-test-abcd1234wxyz";
+	// Load-bearing: the verify call must carry the CANDIDATE key from the PUT body, not the
+	// operator's env key or a previously-stored row — a regression that verified against the wrong
+	// bytes would still 200 and persist without this assertion ever going red.
+	mockOpenAiVerify((headers) => {
+		expect(headers.get("authorization")).toBe(`Bearer ${candidateKey}`);
+		return { status: 200 };
+	});
+	const put = await fetch(`${url}/api/org/voice-key`, { method: "PUT", headers: { ...cookie("admB"), "content-type": "application/json" }, body: JSON.stringify({ apiKey: candidateKey }) });
 	expect(put.status).toBe(200);
 	const res = await fetch(`${url}/api/org/voice`, { headers: cookie("admB") });
 	expect(res.status).toBe(200);
@@ -156,7 +188,7 @@ test("GET /api/org/voice: configured org reports last4 (exactly 4 chars), enable
 	expect(typeof body.updatedAt).toBe("number");
 	expect(body.updatedBy).toBe("db:admin-b");
 	const raw = JSON.stringify(body);
-	expect(raw).not.toContain("sk-test-abcd1234wxyz"); // never the plaintext key
+	expect(raw).not.toContain(candidateKey); // never the plaintext key
 	expect(raw).not.toMatch(/ciphertext|nonce/); // never the encrypted row shape
 });
 
