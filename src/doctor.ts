@@ -127,6 +127,10 @@ export interface DoctorProbe {
 	gateImage(): Promise<{ dockerUsable: boolean; imagePresent: boolean; image: string; strict: boolean }>;
 	projects(): Promise<RepoFacts[]>;
 	webappBuilt(): Promise<boolean>;
+	/** Are the foreign-harness lifecycle hooks registered (fleet-ide-bridge B03)? One entry per
+	 *  harness; `ok: false` on an UNVERIFIED harness is a fact, not a fault — we decline to write
+	 *  config schemas we have not confirmed, and say so. */
+	harnessHooks(): Promise<Array<{ harness: string; ok: boolean; detail: string }>>;
 	/** Agents parked in a terminal-but-listed state: the zombies `glance rm` is for. */
 	zombieAgents(): Promise<number>;
 }
@@ -322,6 +326,19 @@ export async function runDoctor(probe: DoctorProbe): Promise<DoctorReport> {
 		}),
 		attempt("projects", "Which repos is glance working on?", async () => repoChecks(await probe.projects())),
 		attempt("webapp.dist", "Is the UI built?", async () => [(await probe.webappBuilt()) ? { id: "webapp.dist", title: "Is the UI built?", status: "ok" as const, detail: "webapp/dist is present" } : { id: "webapp.dist", title: "Is the UI built?", status: "error" as const, detail: "webapp/dist is missing — the UI will 404", remedy: "cd webapp && bun run build" }]),
+		// A harness whose hooks are not installed is invisible while it runs — glance learns of the
+		// session only when a transcript walk catches up minutes later. `warn`, never `error`: the
+		// fleet works fine without it, and an UNVERIFIED harness is honest reporting, not a fault.
+		attempt("harness.hooks", "Do foreign harness sessions report in?", async () => {
+			const rows = await probe.harnessHooks();
+			return rows.map((r) => ({
+				id: `harness.hooks.${r.harness}`,
+				title: `Does a raw \`${r.harness}\` session report in?`,
+				status: r.ok ? ("ok" as const) : ("warn" as const),
+				detail: r.detail,
+				...(r.ok ? {} : { remedy: "glance install-hooks --harness" }),
+			}));
+		}),
 		attempt("zombies", "Any stuck units?", async () => {
 			const n = await probe.zombieAgents();
 			return [n === 0 ? { id: "zombies", title: "Any stuck units?", status: "ok" as const, detail: "none" } : { id: "zombies", title: "Any stuck units?", status: "warn" as const, detail: `${n} unit(s) parked in a terminal state`, remedy: "glance rm <name>" }];

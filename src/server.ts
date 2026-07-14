@@ -66,6 +66,7 @@ import {
 	PushSubscriptionBodySchema,
 	SpawnBodySchema,
 	AskBodySchema,
+	HarnessEventBodySchema,
 	ProjectRegisterBodySchema,
 	TaskStartBodySchema,
 	VoiceTokenBodySchema,
@@ -92,6 +93,7 @@ import { readAllReceipts } from "./receipts.ts";
 import { fetchIssueDetail, listPlaneIssues, planeConfig, planeRepos } from "./plane.ts";
 import { runVisionPass } from "./vision.ts";
 import { checkVisionUrl } from "./ssrf.ts";
+import { harnessEventDecision } from "./harness-hooks.ts";
 import { all, claim, release, who } from "./presence.ts";
 import { type LeaseEntry, leasesFor } from "./leases.ts";
 import { discoverRepos, planSpawn } from "./smart-spawn.ts";
@@ -1394,6 +1396,27 @@ export class SquadServer {
 		// create worktrees in and spawn agents against. The manager validates it is an ABSOLUTE path to a
 		// real git repo — a relative path is refused, never resolved against the daemon's cwd (which is an
 		// accident of how the operator launched it).
+		// Foreign harness CLIs self-report liveness here (fleet-ide-bridge B03). Cost is already
+		// covered by the transcript ingesters; this lane exists for LIVENESS — a human's raw
+		// `claude` session inside a fleet repo shows up in `who` the instant it starts, so the
+		// fleet can warn about a shared tree and (Epic E) offer to adopt the session.
+		//
+		// The daemon is the scope authority: `harnessEventDecision` drops anything whose cwd is
+		// not inside a REGISTERED project, so a hook firing in the operator's unrelated work
+		// never becomes a presence row. Events map onto the existing presence registry — one
+		// claim per (repo, session), refreshed on every prompt, released on stop.
+		if (url.pathname === "/api/harness-events" && req.method === "POST") {
+			const decoded = decodeBody(HarnessEventBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response("bad event", { status: 400 });
+			const decision = harnessEventDecision(decoded.success, manager.projects().map((p) => p.repo));
+			if (decision.action === "drop") return Response.json({ ok: true, dropped: decision.reason });
+			if (decision.action === "release") {
+				await release(decision.claimId, decision.repo);
+				return Response.json({ ok: true, released: decision.claimId });
+			}
+			await claim({ id: decision.claimId, repo: decision.repo, agent: decision.agent, source: "other" });
+			return Response.json({ ok: true, claimed: decision.claimId });
+		}
 		if (url.pathname === "/api/projects" && req.method === "POST") {
 			const decoded = decodeBody(ProjectRegisterBodySchema, await req.json().catch(() => null));
 			if (Result.isFailure(decoded)) return new Response("repo required", { status: 400 });

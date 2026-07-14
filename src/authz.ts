@@ -90,6 +90,12 @@ export function restActionTier(method: string, pathname: string): Role {
 	// FINER "is this actor even one of the round's assignees" check happens app-layer, in
 	// server.ts, on top of this tier gate (feature-assignees.ts's membership helpers).
 	if (/^\/api\/features\/[^/]+\/plan-vote(\/(call|cast))?$/.test(pathname)) return method === "GET" ? "viewer" : "admin";
+	// Harness lifecycle self-reports (fleet-ide-bridge B03) WRITE to the shared presence roster —
+	// mint or release a liveness row. That is a mutation, so operator, not viewer: a read-only token
+	// must not be able to spoof or clear another session's presence. The shim reads the daemon's
+	// access-token (operator-or-higher in practice), so it clears this bar; the scope gate still
+	// drops anything outside a registered project on top.
+	if (pathname === "/api/harness-events") return "operator";
 	if (pathname === "/api/auth/check" || pathname.startsWith("/api/push/")) return "viewer";
 	return method === "GET" ? "viewer" : "operator";
 }
