@@ -41,6 +41,12 @@ Product identity at the end: **glance = daemon (factory) + desktop (cockpit) + w
 
 Runs under `.claude/skills/fleet-ide-loop/SKILL.md`: each iteration orients here, picks the highest-priority unblocked open concern, implements it (worktree in omp-squad, or the glance-desktop clone for cockpit concerns), gates it, ships a draft PR, flips STATUS, appends to the ledger, and schedules its own next wakeup. Stop condition: every epic's concerns done or explicitly descoped by Lars.
 
+## Merge state (2026-07-14, Lars's first merge pass)
+
+- MERGED: #174 (meta-plan), #177 (B01 OSC lane), #179 (B03 harness hooks), glance-desktop#2 (C01 bootstrap).
+- #178 (B02 glance-open) conflicted with B03 on `src/server.ts` imports + `src/index.ts` (help/case/cmd) + `.env.example` — the sibling-squash composition-drift pattern (see [[omp-squad-merge-train-ratchet-drift]]). Rebased onto new main, resolved keep-both, re-gated (tsc + touched tests + live smoke: B02 route and B03 harness-events co-resident, help lists both), force-pushed with lease → now MERGEABLE. Awaiting Lars's merge.
+- **C01 merged ⇒ Epic C unblocked** (C02 rebrand-lite, C03 rebase-protocol, C04 fleet-module-skeleton all now selectable by the loop).
+
 ## Ledger
 
 (loop appends one line per iteration: date, concern, outcome, PR)
