@@ -148,6 +148,65 @@ data locality for IP secrecy and must be surfaced to the buyer as such. Tier D i
 
 ---
 
+## 6a. The two-sided confidentiality problem (mutual distrust)
+
+The marketplace has two confidentiality guarantees to make, and **they pull in opposite directions**: the
+buyer's data must not be read, stored, trained on, or exfiltrated by the seller's flow; and the seller's flow
+must not be scraped or copied by the buyer. No single mechanism delivers both — you tier by flow sensitivity,
+and full mutual distrust is only resolved by hardware.
+
+### Protecting the buyer's data (enforced by the buyer's sandbox, not by trusting the seller)
+
+The seller's flow is untrusted code; the guarantee is containment the *buyer* controls. Load-bearing control:
+
+- **Egress-deny-by-default.** The sandbox blocks all network egress except a declared, buyer-approved allowlist.
+  This makes "your data can't leave" a technical fact: no egress path to the seller ⇒ the seller structurally
+  *cannot* receive, store, or train on the buyer's data. Stronger than any contract because it's enforced.
+- **"Doesn't train on my data" decomposes into three layers**, only the first structural: (1) the seller never
+  receives the data (no egress to them) ⇒ training is impossible; (2) for the LLM calls the flow legitimately
+  makes, the egress allowlist points only at zero-retention / no-train endpoints (OpenAI ZDR tier, Anthropic
+  no-train), backed by a DPA, with the buyer approving *which* model endpoints are reachable; (3) every egress
+  attempt (including blocked ones) is logged in the buyer's audit trail, so exfiltration is answerable after
+  the fact.
+- **Capability-scoped least privilege** — the flow declares which repos/files/tools it reads; the buyer grants a
+  subset; the sandbox enforces. A flow scoped to repo X cannot touch repo Y or the buyer's secrets.
+- **Ephemerality** — the sandbox is torn down per run; no buyer data accumulates or caches across invocations.
+- **Structural cross-enterprise isolation (free from single-tenancy)** — a flow bought by Enterprise A runs in
+  A's instance; B's runs in B's. The marketplace never co-locates two buyers' data, so "the seller's flow reads
+  *another enterprise's* data" is not mitigated — it is **impossible**: there is no other enterprise's data in
+  the instance to read.
+
+### The paradox and its resolution
+
+Tiers A/B run the flow locally (buyer data safe) but let the buyer observe it (weaker IP protection). Tier C
+hides the IP but sends the buyer's inputs to the seller (weaker data protection). You can have naive
+IP-secrecy **or** naive data-locality, not both — *unless* the execution environment is one **neither** party's
+host can introspect. That is **confidential computing** (Tier D), and its elegance is that a single primitive —
+**remote attestation** — proves both guarantees at once:
+
+- **To the buyer:** the enclave runs the flow's certified measurement *and* the attested egress policy is locked
+  ⇒ it cannot exfiltrate my data.
+- **To the seller:** the enclave's memory is hardware-encrypted (SEV-SNP / TDX) ⇒ the buyer's root and
+  hypervisor cannot read my flow.
+
+Realized as AWS Nitro Enclaves, Azure Confidential VMs, or **GCP Confidential Space** (purpose-built for
+"workload from party A, data from party B, neither trusts the host"). The enclave can be provisioned **inside
+the buyer's own VPC**: data residency preserved (never leaves the buyer's cloud), buyer cannot introspect it
+(seller IP), egress attested-policy-locked (buyer data cannot leak). This is the north star the earlier tiers
+approximate — hardware-dependent and heavy, hence v3, but the only architecture that resolves mutual distrust by
+technology rather than contract.
+
+### What ships when
+
+- **Now (Phase 0–3):** egress-deny-by-default + capability least-privilege + ephemeral runs + full audit +
+  publish-time static analysis (buyer-data side) and licensed-open / sealed packs (seller-IP side) — safe for
+  the ~90% of flows whose value is curation, not secrecy.
+- **Later (Tier C):** remote-node protocol + brokered buyer↔seller DPA — for a secret algorithm with a
+  data-tolerant buyer.
+- **North star (Tier D):** TEE + dual attestation — for a secret algorithm with a data-sensitive buyer.
+
+---
+
 ## 7. Marketplace supply-chain security
 
 A malicious or compromised pack is a supply-chain attack on every buyer that installs it. The marketplace needs:
