@@ -441,24 +441,6 @@ export async function appendOrgAudit(ctx: OrgContext, orgId: string, entry: Audi
 	});
 }
 
-/** Count this org's `action`-matching audit rows written since `sinceMs`. Standalone read helper —
- *  no longer the voice-mint concurrency cap's data source (see `reserveOrgAuditSlot` below, which
- *  counts and inserts atomically); kept for callers that only need an observational count. No
- *  active org ⇒ 0, never a throw. */
-export async function countRecentOrgAudit(ctx: OrgContext, orgId: string, action: string, sinceMs: number): Promise<number> {
-	if (!orgId) return 0;
-	const row = await withOrg(ctx, orgId, (trx) =>
-		trx
-			.selectFrom("audit")
-			.select(({ fn }) => fn.countAll().as("n"))
-			.where("org_id", "=", orgId)
-			.where("action", "=", action)
-			.where("at", ">=", sinceMs)
-			.executeTakeFirst(),
-	);
-	return row ? Number(row.n) : 0;
-}
-
 /**
  * Atomically reserve one `audit` row for `entry.action`, refusing the write (no row, `reserved:
  * false`) once `cap` matching rows already exist inside `[sinceMs, now]`. This is the fix for the
@@ -477,7 +459,14 @@ export async function countRecentOrgAudit(ctx: OrgContext, orgId: string, action
  *
  * On success the caller MUST eventually call `finalizeOrgAuditDetail` (mint succeeded — the row
  * stays, now carrying the real detail) or `deleteOrgAuditRow` (mint failed — compensate, the
- * refused slot is freed) with the returned `auditId`. No active org ⇒ refused, never a throw. */
+ * refused slot is freed) with the returned `auditId`. No active org ⇒ refused, never a throw.
+ *
+ * The inserted row's `detail` always carries `pending: true`, regardless of `entry.detail` — a
+ * crash/SIGKILL between reservation and `finalizeOrgAuditDetail`/`deleteOrgAuditRow` (the window
+ * `!result.ok` compensation can't cover) then leaves a row that is self-identifying as
+ * unfinalized rather than indistinguishable from a real completed mint in the admin's audit
+ * trail. `finalizeOrgAuditDetail` overwrites `detail` wholesale with the caller's real detail, so
+ * the flag is cleared the instant the mint actually completes. */
 export async function reserveOrgAuditSlot(
 	ctx: OrgContext,
 	orgId: string,
@@ -502,7 +491,11 @@ export async function reserveOrgAuditSlot(
 		const count = row ? Number(row.n) : 0;
 		if (count >= cap) return { reserved: false } as const;
 		const id = nextAuditId();
-		const detail = normalizeAuditDetail(entry);
+		const baseDetail = normalizeAuditDetail(entry);
+		// Always a plain object carrying `pending: true` — never `undefined`/non-object — so a row
+		// that never reaches finalize/delete is unambiguously flagged in the stored JSON, not just
+		// inferred from a missing providerSessionId (which is also legitimately absent on success).
+		const detail: Record<string, unknown> = { ...(isPlainObject(baseDetail) ? baseDetail : baseDetail !== undefined ? { detail: baseDetail } : {}), pending: true };
 		await trx
 			.insertInto("audit")
 			.values({
@@ -511,7 +504,7 @@ export async function reserveOrgAuditSlot(
 				actor: entry.actor,
 				action: entry.action,
 				target: entry.target ?? null,
-				detail: detail === undefined ? null : JSON.stringify(detail),
+				detail: JSON.stringify(detail),
 				at: Date.now(),
 			})
 			.execute();

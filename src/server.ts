@@ -1561,7 +1561,11 @@ export class SquadServer {
 					// The refusal is itself auditable — a DISTINCT action so a burst of refusals can never
 					// inflate the very count they're a consequence of.
 					await appendOrgAudit(dbAuditable.ctx, dbAuditable.orgId, { actor: actor.id, action: "voice.mint.refused", target: providerId, detail: { cap, windowMs } });
-					return new Response("voice concurrency cap reached for this organization", { status: 429 });
+					// Named honestly as a rate cap, not a "someone else is on a call" concurrency signal: it's
+					// mints-per-window (the daemon can't see a session end), so a burst of short calls can trip
+					// it with nobody else active. DESIGN.md "Cap tuning": "a rate cap is not a budget, and must
+					// not be described as one" — the flip side holds too, it must not be described as presence.
+					return new Response(`this organization has reached its voice mint limit (${cap} per ${Math.round(windowMs / 60_000)} minutes); try again later`, { status: 429 });
 				}
 				reservedAuditId = reservation.auditId;
 			}

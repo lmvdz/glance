@@ -76,8 +76,14 @@ export interface DeadExport {
  *  2026-07-14 (voice-db-mode concern 05, admin endpoints): still 216 — `putOrgSecret`/
  *  `deleteOrgSecret`/`setOrgSecretEnabled` left the `@substrate`-exempt bucket the same way, now that
  *  server.ts's four admin routes call all three for real; `dead.length` unaffected, only re-bucketed.
- *  The `org_secret` substrate born in concern 02 is now fully wired end to end. */
-export const BASELINE = 216;
+ *  The `org_secret` substrate born in concern 02 is now fully wired end to end.
+ *  2026-07-14 (voice-db-mode concern 04 review round 2): 216→215 — `reserveOrgAuditSlot` (the
+ *  check-then-act race fix) orphaned `countRecentOrgAudit`, which had zero callers anywhere; deleted
+ *  outright rather than tagged `@substrate` since nothing plans to call it. The 216 the prior round
+ *  reported was a false green: this deletion made `src/audit.ts`'s `nextAuditId` flip dead→live on
+ *  the SAME diff via the raw scanner's comment/backtick fragility, offsetting the real orphan and
+ *  holding the total steady — the true count was 217, not 216. Tightening for real this time. */
+export const BASELINE = 215;
 
 function scriptKindFor(rel: string): ts.ScriptKind {
 	return rel.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS;

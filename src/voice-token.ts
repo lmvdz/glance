@@ -86,7 +86,7 @@ const VOICE_PROVIDERS: Record<VoiceProviderId, VoiceProviderConfig> = {
 	},
 };
 
-/** The window the durable per-org concurrency cap (server.ts, `countRecentOrgAudit`) counts this
+/** The window the durable per-org concurrency cap (server.ts, `reserveOrgAuditSlot`) counts this
  *  provider's mint-audit rows over — a mint older than its own provider's session cap can no longer
  *  correspond to a live session, so it drops out of the count once the window slides past it. */
 export function voiceProviderMaxSessionWindowMs(id: VoiceProviderId): number {
@@ -94,7 +94,7 @@ export function voiceProviderMaxSessionWindowMs(id: VoiceProviderId): number {
 }
 
 /** The audit `action` every successful mint is recorded under (server.ts) — exported so the durable
- *  per-org concurrency cap's counting query (`countRecentOrgAudit`) reads the exact same string the
+ *  per-org concurrency cap's counting query (`reserveOrgAuditSlot`) reads the exact same string the
  *  write uses, rather than two call sites having to agree on a literal by hand. */
 export const VOICE_MINT_AUDIT_ACTION = "voice.mint";
 

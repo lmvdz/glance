@@ -24,8 +24,9 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Kysely, PostgresDialect } from "kysely";
 import type { OrgContext } from "../src/dal/context.ts";
-import { FileStore, putOrgSecret } from "../src/dal/store.ts";
+import { deleteOrgAuditRow, finalizeOrgAuditDetail, FileStore, putOrgSecret, reserveOrgAuditSlot } from "../src/dal/store.ts";
 import { openDatabase, type DbHandle } from "../src/db/index.ts";
 import { ManagerRegistry } from "../src/manager-registry.ts";
 import { initMasterKey } from "../src/secrets.ts";
@@ -170,6 +171,13 @@ test("durable per-org concurrency cap: N=2 admits two mints, the third 429s, and
 	// The mutation-sensitive boundary: N=2 admitted, the very next one must be refused.
 	const third = await mint();
 	expect(third.status).toBe(429);
+	// Named honestly as a mints-per-window rate cap, not a "someone else is on a call" concurrency
+	// signal a member could misread as presence — DESIGN.md "a rate cap is not a budget" cuts both
+	// ways.
+	const thirdBody = await third.text();
+	expect(thirdBody).toContain("voice mint limit");
+	expect(thirdBody).toContain("per 60 minutes");
+	expect(thirdBody).not.toContain("concurrency");
 
 	const refusalRows = await handle.db.selectFrom("audit").selectAll().where("org_id", "=", "orgCap").where("action", "=", "voice.mint.refused").execute();
 	expect(refusalRows.length).toBe(1);
@@ -181,7 +189,7 @@ test("durable per-org concurrency cap: N=2 admits two mints, the third 429s, and
 });
 
 test("durable per-org concurrency cap holds under PARALLEL mints: cap=1, 8 concurrent POSTs against a mint mock with real provider latency admit exactly 1 and write exactly 1 voice.mint audit row", async () => {
-	// Regression for the check-then-act race: the old cap read `countRecentOrgAudit` BEFORE
+	// Regression for the check-then-act race: the old cap counted this org's mint-audit rows BEFORE
 	// `mintVoiceToken`'s network round trip and only wrote the audit row it counts AFTER the mint
 	// returned. Every request in flight during that window saw the same stale (pre-insert) count,
 	// so N+K parallel mints could all pass regardless of the configured cap — proven live (8 parallel
@@ -298,6 +306,10 @@ test("mint audit in DB mode: actor is db:<userId> (never role-derived) and the p
 	expect(typeof detail.providerSessionId).toBe("string");
 	expect(detail.providerSessionId?.startsWith("sess_")).toBe(true);
 	expect(detail.source).toBe("voice");
+	// `reserveOrgAuditSlot` stamps `pending: true` on insert (self-identifying reservation) —
+	// `finalizeOrgAuditDetail` must overwrite `detail` wholesale on a successful mint, so a
+	// completed row never carries the pending flag its own reservation left on it.
+	expect((detail as { pending?: boolean }).pending).toBeUndefined();
 });
 
 test("mint audit in file mode: a voice.mint entry lands in the JSONL trail with the provider session id in its detail", async () => {
@@ -322,4 +334,109 @@ test("mint audit in file mode: a voice.mint entry lands in the JSONL trail with 
 	expect(entries.length).toBe(1);
 	expect(entries[0]?.target).toBe("openai");
 	expect(entries[0]?.detail).toContain("sess_");
+});
+
+// ── Postgres SQL shape: reserveOrgAuditSlot / finalizeOrgAuditDetail / deleteOrgAuditRow ────────
+//
+// Every voice test above runs SQLite, where the transaction alone closes the check-then-act race
+// (a single-writer connection serializes it for free). Postgres READ COMMITTED does NOT — that's
+// the dialect the advisory lock exists for — yet nothing exercised the Postgres branch at all.
+// Mirrors tests/org-secret-rls.test.ts's "Layer 2": a fake `pg`-shaped pool wired into a REAL
+// `PostgresDialect` so the captured SQL text is what Kysely's real Postgres compiler would send to
+// a live server, without needing one reachable in this sandbox.
+
+function fakePostgresDb(opts: { countValue?: number } = {}): { db: Kysely<any>; calls: Array<{ sql: string; params: readonly unknown[] }> } {
+	const calls: Array<{ sql: string; params: readonly unknown[] }> = [];
+	const client = {
+		query: async (sql: string, params: readonly unknown[] = []) => {
+			calls.push({ sql, params });
+			if (/select count/i.test(sql)) return { command: "SELECT", rowCount: 1, rows: [{ n: opts.countValue ?? 0 }] };
+			return { command: "SELECT", rowCount: 0, rows: [] };
+		},
+		release: () => {},
+	};
+	const pool = { connect: async () => client, end: async () => {} };
+	const db = new Kysely<any>({ dialect: new PostgresDialect({ pool: pool as any }) });
+	return { db, calls };
+}
+
+test("Postgres: reserveOrgAuditSlot takes the advisory lock inside the transaction, after set_config, before counting, before inserting", async () => {
+	const { db, calls } = fakePostgresDb({ countValue: 0 });
+	const ctx: OrgContext = { db, type: "postgres" };
+	const reservation = await reserveOrgAuditSlot(ctx, "orgPG", { actor: "db:user-pg", action: "voice.mint", target: "openai", source: "voice" }, 5, Date.now() - 1000);
+	expect(reservation.reserved).toBe(true);
+
+	const idxBegin = calls.findIndex((c) => /^begin$/i.test(c.sql.trim()));
+	const idxSetConfig = calls.findIndex((c) => /set_config/i.test(c.sql));
+	const idxLock = calls.findIndex((c) => /pg_advisory_xact_lock/i.test(c.sql));
+	const idxCount = calls.findIndex((c) => /select count/i.test(c.sql));
+	const idxInsert = calls.findIndex((c) => /insert into "audit"/i.test(c.sql));
+	const idxCommit = calls.findIndex((c) => /^commit$/i.test(c.sql.trim()));
+	// -1 (not found) would make every comparison below vacuously pass, so a missing statement must
+	// fail loudly here rather than silently no-op the ordering assertion.
+	for (const [name, idx] of [["begin", idxBegin], ["set_config", idxSetConfig], ["advisory lock", idxLock], ["count", idxCount], ["insert", idxInsert], ["commit", idxCommit]] as const) {
+		expect(idx, `expected a "${name}" statement`).toBeGreaterThanOrEqual(0);
+	}
+	expect(idxBegin).toBeLessThan(idxSetConfig);
+	expect(idxSetConfig).toBeLessThan(idxLock);
+	expect(idxLock).toBeLessThan(idxCount);
+	expect(idxCount).toBeLessThan(idxInsert);
+	expect(idxInsert).toBeLessThan(idxCommit);
+
+	// Scoped to this org+action specifically — a different org or a different action must hash to a
+	// different lock key, so unrelated reservations never contend.
+	expect(calls[idxLock]?.params).toContain("voice-audit-reserve:orgPG:voice.mint");
+
+	// The reserved row is self-identifying as unfinalized even on the dialect the fix targets.
+	const insertDetailParam = calls[idxInsert]?.params.find((p) => typeof p === "string" && p.includes("pending"));
+	expect(insertDetailParam).toBeDefined();
+	expect(JSON.parse(insertDetailParam as string)).toMatchObject({ pending: true, source: "voice" });
+});
+
+test("Postgres: reserveOrgAuditSlot refuses (no insert) once the count already meets cap, lock still taken", async () => {
+	const { db, calls } = fakePostgresDb({ countValue: 5 });
+	const ctx: OrgContext = { db, type: "postgres" };
+	const reservation = await reserveOrgAuditSlot(ctx, "orgPG", { actor: "db:user-pg", action: "voice.mint", target: "openai" }, 5, Date.now() - 1000);
+	expect(reservation.reserved).toBe(false);
+	expect(calls.some((c) => /pg_advisory_xact_lock/i.test(c.sql))).toBe(true);
+	expect(calls.some((c) => /insert into "audit"/i.test(c.sql))).toBe(false);
+});
+
+test("Postgres: reserveOrgAuditSlot takes no advisory lock under type=sqlite (SQLite serializes writers on its own)", async () => {
+	const { db, calls } = fakePostgresDb({ countValue: 0 }); // dialect is irrelevant — the branch is gated on ctx.type, not the driver
+	const ctx: OrgContext = { db, type: "sqlite" };
+	await reserveOrgAuditSlot(ctx, "orgPG", { actor: "db:user-pg", action: "voice.mint", target: "openai" }, 5, Date.now() - 1000);
+	expect(calls.some((c) => /pg_advisory_xact_lock/i.test(c.sql))).toBe(false);
+	expect(calls.some((c) => /set_config/i.test(c.sql))).toBe(false);
+});
+
+test("Postgres: finalizeOrgAuditDetail updates exactly the reserved row (org_id + id) and clears the pending flag", async () => {
+	const { db, calls } = fakePostgresDb();
+	const ctx: OrgContext = { db, type: "postgres" };
+	await finalizeOrgAuditDetail(ctx, "orgPG", 42, { detail: { providerSessionId: "sess_pg" }, source: "voice" });
+
+	const update = calls.find((c) => /update "audit"/i.test(c.sql));
+	expect(update).toBeDefined();
+	expect(update?.sql).toMatch(/"org_id"\s*=\s*\$/);
+	expect(update?.sql).toMatch(/"id"\s*=\s*\$/);
+	expect(update?.params).toContain("orgPG");
+	expect(update?.params).toContain(42);
+	const detailParam = update?.params.find((p) => typeof p === "string" && p.includes("providerSessionId"));
+	expect(detailParam).toBeDefined();
+	const parsed = JSON.parse(detailParam as string);
+	expect(parsed.providerSessionId).toBe("sess_pg");
+	expect(parsed.pending).toBeUndefined();
+});
+
+test("Postgres: deleteOrgAuditRow deletes exactly the reserved row (org_id + id)", async () => {
+	const { db, calls } = fakePostgresDb();
+	const ctx: OrgContext = { db, type: "postgres" };
+	await deleteOrgAuditRow(ctx, "orgPG", 42);
+
+	const del = calls.find((c) => /delete from "audit"/i.test(c.sql));
+	expect(del).toBeDefined();
+	expect(del?.sql).toMatch(/"org_id"\s*=\s*\$/);
+	expect(del?.sql).toMatch(/"id"\s*=\s*\$/);
+	expect(del?.params).toContain("orgPG");
+	expect(del?.params).toContain(42);
 });
