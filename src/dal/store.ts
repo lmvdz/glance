@@ -550,7 +550,7 @@ export async function getOrgSecret(ctx: OrgContext, orgId: string, provider: str
  *  configured the key almost certainly wants it live; disabling is the separate kill-switch call
  *  below). Returns `OrgSecretSummary` (no `plaintext`) — the admin HTTP handler can echo this
  *  response body directly without re-deriving a safe projection.
- *  @substrate consumed by concern 05's admin PUT endpoint (not yet landed) */
+ *  Consumed by the admin PUT endpoint (server.ts, concern 05). */
 export async function putOrgSecret(ctx: OrgContext, orgId: string, provider: string, plaintext: string, actor: string): Promise<OrgSecretSummary | undefined> {
 	if (!orgId) return undefined;
 	const enc = encryptSecret(plaintext);
@@ -589,7 +589,7 @@ export async function putOrgSecret(ctx: OrgContext, orgId: string, provider: str
 
 /** Delete one org's provider secret (admin DELETE). `ON DELETE CASCADE` on the org FK handles the
  *  bulk case (an org itself being deleted); this is the single-row admin-initiated removal.
- *  @substrate consumed by concern 05's admin DELETE endpoint (not yet landed) */
+ *  Consumed by the admin DELETE endpoint (server.ts, concern 05). */
 export async function deleteOrgSecret(ctx: OrgContext, orgId: string, provider: string): Promise<void> {
 	if (!orgId) return;
 	await withOrg(ctx, orgId, (trx) => trx.deleteFrom("org_secret").where("org_id", "=", orgId).where("provider", "=", provider).execute());
@@ -598,7 +598,7 @@ export async function deleteOrgSecret(ctx: OrgContext, orgId: string, provider: 
 /** Flip the synchronous kill switch (DESIGN.md "Kill switch" row) without touching the stored
  *  key — instant, reversible, no re-paste. A no-op (not an error) when the org has no row for
  *  this provider yet: there is nothing to enable/disable.
- *  @substrate consumed by concern 05's admin enable/disable endpoint (not yet landed) */
+ *  Consumed by the admin enable/disable endpoint (server.ts, concern 05). */
 export async function setOrgSecretEnabled(ctx: OrgContext, orgId: string, provider: string, enabled: boolean, actor: string): Promise<void> {
 	if (!orgId) return;
 	await withOrg(ctx, orgId, (trx) =>

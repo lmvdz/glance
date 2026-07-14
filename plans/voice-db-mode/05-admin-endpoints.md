@@ -1,5 +1,5 @@
 # Org-admin voice endpoints — set, verify, disable, remove the key
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural

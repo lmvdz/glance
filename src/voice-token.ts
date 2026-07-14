@@ -56,6 +56,11 @@ interface VoiceProviderConfig {
 	readonly id: VoiceProviderId;
 	/** The provider's OWN mint endpoint. Never derived from a request — a closed constant. */
 	readonly baseUrl: string;
+	/** The provider's OWN free, side-effect-free auth-check endpoint (plans/voice-db-mode/
+	 *  05-admin-endpoints.md, DESIGN.md "Key verification on save"): a candidate key is verified
+	 *  against THIS before the admin PUT persists it — never `baseUrl`, which mints a real, billable
+	 *  credential. A closed constant, same SSRF doctrine as `baseUrl`. */
+	readonly verifyUrl: string;
 	readonly transport: "webrtc";
 	/** Whether the SERVER pins the session's cost-bearing params into the mint request. */
 	readonly pinnedAtMint: boolean;
@@ -73,6 +78,7 @@ const VOICE_PROVIDERS: Record<VoiceProviderId, VoiceProviderConfig> = {
 	openai: {
 		id: "openai",
 		baseUrl: "https://api.openai.com/v1/realtime/client_secrets",
+		verifyUrl: "https://api.openai.com/v1/models",
 		transport: "webrtc",
 		pinnedAtMint: true,
 		flatPrice: false,
@@ -211,6 +217,35 @@ export async function orgHasKey(scope: VoiceKeyScope): Promise<boolean> {
 		if (await voiceKeyFor(scope, id)) return true;
 	}
 	return false;
+}
+
+/**
+ * Verify a CANDIDATE key before the admin PUT persists it (plans/voice-db-mode/
+ * 05-admin-endpoints.md, DESIGN.md "Key verification on save" row): a free, side-effect-free `GET`
+ * against the provider's own auth-check endpoint (`verifyUrl` — 200 authenticates, anything else
+ * doesn't) — deliberately NEVER `mintVoiceToken`/`baseUrl`: minting issues a real, billable,
+ * hour-scale provider credential, and an unbounded PUT would mint them without limit. The caller
+ * (server.ts) supplies the PUT route's own rate limit; this function has no rate awareness of its
+ * own. An unknown provider id or an empty key returns `false` before any fetch — same SSRF doctrine
+ * as `mintVoiceToken`'s closed switch — and a network failure degrades to `false`, never a throw:
+ * "can't verify" and "verified as invalid" are the same outcome for a PUT (write nothing either way).
+ */
+export async function verifyVoiceProviderKey(providerId: string, apiKey: string): Promise<boolean> {
+	if (!isKnownVoiceProvider(providerId) || !apiKey) return false;
+	const cfg = VOICE_PROVIDERS[providerId];
+	try {
+		const res = await fetch(cfg.verifyUrl, {
+			headers: { authorization: `Bearer ${apiKey}` },
+			// Same bound as the mint fetch — a hung provider connection must not hold the admin's PUT
+			// request open forever.
+			signal: AbortSignal.timeout(15_000),
+		});
+		return res.ok;
+	} catch {
+		// Never interpolate the caught error (may echo request context) — a network failure is simply
+		// "not verified", the same outcome as a 401.
+		return false;
+	}
 }
 
 // The voice model's system prompt: mouth/ears framing (it narrates and dispatches; it does not

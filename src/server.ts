@@ -59,6 +59,8 @@ import {
 	OrgMemberInviteBodySchema,
 	OrgMemberRoleBodySchema,
 	OrgPatchBodySchema,
+	OrgVoiceEnabledBodySchema,
+	OrgVoiceKeyBodySchema,
 	PlanCandidateCreateBodySchema,
 	PlanCandidateTransitionBodySchema,
 	PlanVoteCallBodySchema,
@@ -110,6 +112,7 @@ import {
 	isKnownVoiceProvider,
 	mintVoiceToken,
 	orgHasKey,
+	verifyVoiceProviderKey,
 	voiceConnectSrcOrigins,
 	voiceKeyFor,
 	voiceProviderMaxSessionWindowMs,
@@ -117,7 +120,7 @@ import {
 	VOICE_MINT_AUDIT_ACTION,
 	type VoiceKeyScope,
 } from "./voice-token.ts";
-import { appendOrgAudit, countRecentOrgAudit } from "./dal/store.ts";
+import { appendOrgAudit, countRecentOrgAudit, deleteOrgSecret, getOrgSecret, putOrgSecret, setOrgSecretEnabled } from "./dal/store.ts";
 
 /** The agent id/name a `ClientCommand` mutates, if any — "create"/"snapshot"/"commission" name no
  *  agent (they don't need cross-manager resolution); "message" targets a peer by `to`, but that's
@@ -468,6 +471,26 @@ function resolveVoiceMaxConcurrentPerOrg(): number {
 	return VOICE_MAX_CONCURRENT_PER_ORG_DEFAULT;
 }
 
+const VOICE_KEY_PUT_RATE_DEFAULT_PER_MIN = 10;
+let voiceKeyPutRateLimitWarned = false;
+
+/** OMP_SQUAD_VOICE_KEY_PUT_RATE_PER_MIN (plans/voice-db-mode/05-admin-endpoints.md): the admin
+ *  `PUT /api/org/voice-key` route's own rate limit (DESIGN.md "Key verification on save" row) —
+ *  verification is a free provider call, but still a call, and an unbounded PUT would hammer it
+ *  without limit. Same non-positive clamp-and-warn-once discipline as the two voice rate resolvers
+ *  above: a misconfigured `0`/negative must not silently remove the bound. */
+function resolveVoiceKeyPutRatePerMin(): number {
+	const configured = envInt("OMP_SQUAD_VOICE_KEY_PUT_RATE_PER_MIN", VOICE_KEY_PUT_RATE_DEFAULT_PER_MIN);
+	if (configured > 0) return configured;
+	if (!voiceKeyPutRateLimitWarned) {
+		voiceKeyPutRateLimitWarned = true;
+		console.warn(
+			`[server] OMP_SQUAD_VOICE_KEY_PUT_RATE_PER_MIN="${configured}" is not a positive rate — falling back to the default (${VOICE_KEY_PUT_RATE_DEFAULT_PER_MIN}/min)`,
+		);
+	}
+	return VOICE_KEY_PUT_RATE_DEFAULT_PER_MIN;
+}
+
 export class SquadServer {
 	private readonly singleManager?: SquadManager;
 	/** DB-registry mode fleet (per-org managers); undefined ⇒ single-manager (file mode / db-single). */
@@ -517,6 +540,11 @@ export class SquadServer {
 	 *  described as if it did. The durable per-org bound now lives in the `audit` table
 	 *  (`countRecentOrgAudit`, `resolveVoiceMaxConcurrentPerOrg`). */
 	private readonly voiceMintRate = new Map<string, { minute: number; count: number }>();
+	/** Per-actor `PUT /api/org/voice-key` rate cap (plans/voice-db-mode/05-admin-endpoints.md):
+	 *  "Verification before persist uses GET /v1/models... PUT carries its own rate limit"
+	 *  (DESIGN.md "Key verification on save" row) — bounds a hammered PUT from burning provider
+	 *  auth-check calls, independent of the mint cap above. Same shape as `voiceMintRate`. */
+	private readonly voiceKeyPutRate = new Map<string, { minute: number; count: number }>();
 
 	constructor(manager: SquadManager | undefined, opts: SquadServerOptions = {}) {
 		this.singleManager = manager;
@@ -601,6 +629,22 @@ export class SquadServer {
 		const rec = this.voiceMintRate.get(key);
 		if (!rec || rec.minute !== minute) {
 			this.voiceMintRate.set(key, { minute, count: 1 });
+			return true;
+		}
+		rec.count++;
+		return rec.count <= limit;
+	}
+
+	/** Per-actor `PUT /api/org/voice-key` rate cap, mirroring `voiceMintRateAllowed`'s shape exactly
+	 *  but keyed by the caller's own actor id rather than the mint route's resolved `Actor` (this
+	 *  route runs before the fleet-manager `actor` is resolved — see the route's own comment). */
+	private voiceKeyPutRateAllowed(actorId: string): boolean {
+		const limit = resolveVoiceKeyPutRatePerMin();
+		const minute = Math.floor(Date.now() / 60_000);
+		const key = actorId || "unknown";
+		const rec = this.voiceKeyPutRate.get(key);
+		if (!rec || rec.minute !== minute) {
+			this.voiceKeyPutRate.set(key, { minute, count: 1 });
 			return true;
 		}
 		rec.count++;
@@ -1276,6 +1320,77 @@ export class SquadServer {
 			const body = decodeBodyOrEmpty(OrgJoinPolicyBodySchema, await req.json().catch(() => null));
 			const policy = body.policy === "auto" ? "auto" : "approval";
 			return Response.json({ ok: await setWorkosOrgPolicy(profile.workosOrgId, policy), policy });
+		}
+		// Org voice-key admin surface (plans/voice-db-mode/05-admin-endpoints.md): set / verify /
+		// disable / remove the org's own BYO voice provider key. Org id comes from the SESSION only,
+		// never a request parameter (the PR #152 lesson: one org's admin registering another org's
+		// worktree via a body-supplied id) — every handler below reads
+		// `session.session.activeOrganizationId` and nothing else names the org. All four routes are
+		// admin-tier, pinned in `authz.ts` (stricter than the rest of `/api/org`, whose profile GET is
+		// viewer-readable) AND re-checked here inline, mirroring the `renameOrg` idiom every other
+		// admin mutation under `/api/org` above already follows — belt and suspenders, not redundant
+		// with the authz.ts gate: a future authz.ts regression still fails closed at the handler.
+		if (url.pathname === "/api/org/voice" && req.method === "GET") {
+			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
+			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
+			const orgId = session.session.activeOrganizationId;
+			if (!orgId) return new Response("no active org", { status: 400 });
+			// Status only, never the key itself (DESIGN.md admin-surface row) — `getOrgSecret`'s
+			// `plaintext` field is read here but never placed on the response.
+			const secret = await getOrgSecret({ db: this.db.db, type: this.db.type }, orgId, "openai");
+			if (!secret) return Response.json({ configured: false });
+			return Response.json({ configured: true, last4: secret.last4, enabled: secret.enabled, updatedAt: secret.updatedAt, updatedBy: secret.updatedBy });
+		}
+		if (url.pathname === "/api/org/voice-key" && req.method === "PUT") {
+			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
+			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
+			const orgId = session.session.activeOrganizationId;
+			if (!orgId) return new Response("no active org", { status: 400 });
+			// `db:<userId>`, never role-derived — same actor-tagging convention as the mint audit write
+			// below (voiceScope's `actor.id`), computed locally: the fleet-manager `actor`/`manager`
+			// resolution further down in this handler hasn't run yet at this point in the function.
+			const actorId = `db:${session.user.id}`;
+			if (!this.voiceKeyPutRateAllowed(actorId)) return new Response("rate limited", { status: 429 });
+			const decoded = decodeBody(OrgVoiceKeyBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded) || !decoded.success.apiKey) return new Response("apiKey is required", { status: 400 });
+			const { apiKey, provider: providerRaw } = decoded.success;
+			const providerId = typeof providerRaw === "string" && providerRaw ? providerRaw : "openai";
+			if (!isKnownVoiceProvider(providerId)) return new Response("unknown voice provider", { status: 400 });
+			// Verify BEFORE persist (DESIGN.md "Key verification on save"): a free GET against the
+			// provider's own auth-check endpoint, NEVER the mint endpoint (that issues a real, billable
+			// credential). A rejected key writes NOTHING — no row, no last4, no partial state.
+			if (!(await verifyVoiceProviderKey(providerId, apiKey))) return new Response("key rejected by provider", { status: 400 });
+			const summary = await putOrgSecret({ db: this.db.db, type: this.db.type }, orgId, providerId, apiKey, actorId);
+			// `undefined` only when no master key is configured server-side (secrets.ts: a write that
+			// can't be encrypted persists nothing) — an honest 501, not a silent no-op 200.
+			if (!summary) return new Response("voice key storage unavailable", { status: 501 });
+			return Response.json({ configured: true, last4: summary.last4, enabled: summary.enabled, updatedAt: summary.updatedAt, updatedBy: summary.updatedBy });
+		}
+		if (url.pathname === "/api/org/voice-key" && req.method === "DELETE") {
+			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
+			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
+			const orgId = session.session.activeOrganizationId;
+			if (!orgId) return new Response("no active org", { status: 400 });
+			await deleteOrgSecret({ db: this.db.db, type: this.db.type }, orgId, "openai");
+			return Response.json({ configured: false });
+		}
+		if (url.pathname === "/api/org/voice/enabled" && req.method === "POST") {
+			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
+			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
+			const orgId = session.session.activeOrganizationId;
+			if (!orgId) return new Response("no active org", { status: 400 });
+			const actorId = `db:${session.user.id}`;
+			const decoded = decodeBody(OrgVoiceEnabledBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response("enabled boolean required", { status: 400 });
+			const { enabled, provider: providerRaw } = decoded.success;
+			const providerId = typeof providerRaw === "string" && providerRaw ? providerRaw : "openai";
+			if (!isKnownVoiceProvider(providerId)) return new Response("unknown voice provider", { status: 400 });
+			// Synchronous kill switch (DESIGN.md "Kill switch" row): flips a bit without deleting the
+			// stored key — instant, reversible, no re-paste. A no-op (not an error) when the org has no
+			// row for this provider yet, matching `setOrgSecretEnabled`'s own doc comment.
+			await setOrgSecretEnabled({ db: this.db.db, type: this.db.type }, orgId, providerId, enabled, actorId);
+			const secret = await getOrgSecret({ db: this.db.db, type: this.db.type }, orgId, providerId);
+			return Response.json(secret ? { configured: true, last4: secret.last4, enabled: secret.enabled, updatedAt: secret.updatedAt, updatedBy: secret.updatedBy } : { configured: false });
 		}
 		if (url.pathname === "/api/auth/check") return Response.json({ ok: true });
 		if (url.pathname === "/api/push/key") return Response.json({ publicKey: this.opts.push?.publicKey ?? "" });

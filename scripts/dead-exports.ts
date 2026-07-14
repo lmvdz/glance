@@ -72,8 +72,11 @@ export interface DeadExport {
  *  2026-07-14 (voice-db-mode concern 03, org-aware resolver): still 216 — `getOrgSecret` left the
  *  `@substrate`-exempt bucket for a REAL one (voice-token.ts's `voiceKeyFor` now imports it), so its
  *  tag was removed rather than left stale; `dead.length` is unaffected either way (it was never
- *  counted as dead, only re-bucketed), so the ceiling doesn't move. `putOrgSecret`/`deleteOrgSecret`/
- *  `setOrgSecretEnabled` still await concern 05's admin endpoints. */
+ *  counted as dead, only re-bucketed), so the ceiling doesn't move.
+ *  2026-07-14 (voice-db-mode concern 05, admin endpoints): still 216 — `putOrgSecret`/
+ *  `deleteOrgSecret`/`setOrgSecretEnabled` left the `@substrate`-exempt bucket the same way, now that
+ *  server.ts's four admin routes call all three for real; `dead.length` unaffected, only re-bucketed.
+ *  The `org_secret` substrate born in concern 02 is now fully wired end to end. */
 export const BASELINE = 216;
 
 function scriptKindFor(rel: string): ts.ScriptKind {

@@ -90,6 +90,13 @@ export function restActionTier(method: string, pathname: string): Role {
 	// FINER "is this actor even one of the round's assignees" check happens app-layer, in
 	// server.ts, on top of this tier gate (feature-assignees.ts's membership helpers).
 	if (/^\/api\/features\/[^/]+\/plan-vote(\/(call|cast))?$/.test(pathname)) return method === "GET" ? "viewer" : "admin";
+	// Org voice-key admin surface (plans/voice-db-mode/05-admin-endpoints.md): status, set/rotate,
+	// remove, and the kill switch are ALL admin-tier — even the GET, unlike the rest of /api/org
+	// (whose profile GET is viewer-readable). A voice key's mere presence/last4/enabled state is
+	// provider posture (DESIGN.md red-team: "leaks provider posture" — the same reasoning already
+	// keeps GET /api/voice/config's `providers` field below operator), so this is stricter than the
+	// general /api/org default.
+	if (pathname === "/api/org/voice" || pathname === "/api/org/voice-key" || pathname === "/api/org/voice/enabled") return "admin";
 	if (pathname === "/api/auth/check" || pathname.startsWith("/api/push/")) return "viewer";
 	return method === "GET" ? "viewer" : "operator";
 }

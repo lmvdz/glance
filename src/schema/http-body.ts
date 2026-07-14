@@ -378,6 +378,24 @@ export const VoiceTokenBodySchema = Schema.Struct({
 	provider: Schema.optional(Schema.Unknown),
 });
 
+/** PUT /api/org/voice-key — set/rotate the session org's voice provider key
+ *  (plans/voice-db-mode/05-admin-endpoints.md). `apiKey` required: an empty PUT can never verify
+ *  against anything, and the handler must reject before it ever reaches the store. `provider`
+ *  defaults to `"openai"` downstream, mirroring `VoiceTokenBodySchema` — an unknown provider id
+ *  400s post-decode in the handler, not here. */
+export const OrgVoiceKeyBodySchema = Schema.Struct({
+	apiKey: Schema.String,
+	provider: Schema.optional(Schema.Unknown),
+});
+
+/** POST /api/org/voice/enabled — the synchronous kill switch (DESIGN.md "Kill switch" row).
+ *  `enabled` required: there is no honest default for "on or off" the way other endpoints default
+ *  an absent optional field. */
+export const OrgVoiceEnabledBodySchema = Schema.Struct({
+	enabled: Schema.Boolean,
+	provider: Schema.optional(Schema.Unknown),
+});
+
 /** POST /api/tasks/:id/start — no required field (`repo` falls back to `process.cwd()`). */
 export const TaskStartBodySchema = Schema.Struct({
 	repo: Schema.optional(Schema.Unknown),
