@@ -17,6 +17,7 @@ import { existsSync } from "node:fs";
 import * as path from "node:path";
 import type { Subprocess } from "bun";
 import type { AgentDriver } from "./agent-driver.ts";
+import { harnessAuthEnv, scrubbedSpawnEnv } from "./spawn-env.ts";
 import type { RpcSessionState } from "./types.ts";
 
 export interface FlueInvocation {
@@ -139,12 +140,17 @@ export class FlueServiceDriver extends EventEmitter implements AgentDriver {
 	}
 
 	private async exec(inv: FlueInvocation): Promise<{ stdout: string; stderr: string; code: number }> {
+		// `inv.bin` prefers the worker repo's OWN node_modules/.bin/flue (defaultInvocation, above) —
+		// this is a tenant-agent spawn site like agent-host/omp-call/acp-agent-driver, running
+		// repo-supplied code that must not see the daemon's DATABASE_URL / OMP_SQUAD_*/GLANCE_* secrets.
+		// Route through the same scrub; harnessAuthEnv() so the worker's own `.flue/agents` config can
+		// still make a model call.
 		const proc = Bun.spawn([inv.bin, ...inv.args], {
 			cwd: this.dir,
 			stdin: "ignore",
 			stdout: "pipe",
 			stderr: "pipe",
-			env: { ...process.env },
+			env: scrubbedSpawnEnv(process.env, harnessAuthEnv()),
 		});
 		this.child = proc;
 		const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);

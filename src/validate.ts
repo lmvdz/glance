@@ -81,7 +81,10 @@ async function lintWorker(dir: string, spec: CommissionSpec): Promise<GateCheck>
 async function typecheckWorker(dir: string): Promise<GateCheck> {
 	const tscBin = path.join(dir, "node_modules", ".bin", "tsc");
 	if (!existsSync(tscBin)) return { name: "typecheck", status: "skip", detail: "typescript not installed in worker" };
-	const proc = Bun.spawn([tscBin, "-p", "tsconfig.json", "--noEmit"], { cwd: dir, stdout: "pipe", stderr: "pipe" });
+	// `tscBin` resolves the worker repo's OWN node_modules/.bin/tsc — repo-supplied code, same as
+	// acceptanceWorker below. `tsc --noEmit` needs no secret and no provider key, so ENV_BASELINE
+	// alone (no capability allowance) is the correct — and narrower — env for this check.
+	const proc = Bun.spawn([tscBin, "-p", "tsconfig.json", "--noEmit"], { cwd: dir, stdout: "pipe", stderr: "pipe", env: baselineEnv() });
 	const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
 	const code = await proc.exited;
 	return code === 0
@@ -94,6 +97,17 @@ async function typecheckWorker(dir: string): Promise<GateCheck> {
  * binaries and a temp dir. No credentials — secrets only flow through capability grants.
  */
 const ENV_BASELINE = ["PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "TZ"];
+
+/** ENV_BASELINE only, no capability/provider allowance — for a check (typecheck) that runs
+ *  repo-supplied tooling but needs no secret and makes no model call. */
+function baselineEnv(source: Record<string, string | undefined> = process.env): Record<string, string> {
+	const env: Record<string, string> = {};
+	for (const key of ENV_BASELINE) {
+		const v = source[key];
+		if (typeof v === "string") env[key] = v;
+	}
+	return env;
+}
 
 /**
  * Deny-by-default environment for the acceptance run. The daemon's full env — every provider

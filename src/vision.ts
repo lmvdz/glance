@@ -10,6 +10,7 @@
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { gitNoSignEnv } from "./git-harden.ts";
+import { harnessAuthEnv, scrubbedSpawnEnv } from "./spawn-env.ts";
 
 /** Drives a browser against `url`, leaving screenshots + notes.md under `dir`. Injectable so
  *  tests need no real omp/browser; the default spawns a one-shot `omp -p`. */
@@ -32,11 +33,13 @@ const ompProducer: VisionProducer = async ({ worktree, url, dir }) => {
 		`Then write ${path.join(dir, "notes.md")} as a short bullet list of what you saw — does the page ` +
 		`load, are the main elements present, any obvious visual breakage. ` +
 		`You are EVIDENCE ONLY: do not pass or fail anything. Be brief.`;
+	// This agent opens the worktree's own repo content in a browser — scrub the daemon's secrets
+	// from its env like every other tenant-agent omp spawn (spawn-env.ts).
 	const proc = Bun.spawn(["omp", "-p", "--approval-mode", "yolo", prompt], {
 		cwd: worktree,
 		stdout: "ignore",
 		stderr: "ignore",
-		env: { ...process.env, ...gitNoSignEnv() },
+		env: scrubbedSpawnEnv(process.env, { ...gitNoSignEnv(), ...harnessAuthEnv() }),
 		signal: AbortSignal.timeout(VISION_TIMEOUT_MS),
 	});
 	await proc.exited;

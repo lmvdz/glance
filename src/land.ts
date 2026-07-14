@@ -18,6 +18,7 @@ import { gateExec, gateRunUnrunnable, greenGateUnproven } from "./gate-runner.ts
 import { proofGate, recordProof } from "./proof.ts";
 import { landRiskGateEnabled, landRiskReason } from "./land-risk.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV, gitNoSignEnv } from "./git-harden.ts";
+import { harnessAuthEnv, scrubbedSpawnEnv } from "./spawn-env.ts";
 import type { FeatureCriterion } from "./types.ts";
 
 export interface LandResult {
@@ -952,7 +953,9 @@ async function attemptAutoResolve(a: {
 function defaultResolver(): ConflictResolver {
 	return async ({ worktree, files }) => {
 		const prompt = `You are resolving git rebase conflicts in this repository. These files contain conflict markers (<<<<<<<, =======, >>>>>>>): ${files.join(", ")}. Edit each file into a correct, compiling resolution that preserves the intent of BOTH sides and removes every conflict marker. Do not run git or commit — just leave the files resolved.`;
-		const proc = Bun.spawn(["omp", "-p", "--approval-mode", "yolo", prompt], { cwd: worktree, stdout: "ignore", stderr: "ignore", env: { ...process.env, ...gitNoSignEnv() }, signal: AbortSignal.timeout(RESOLVE_TIMEOUT_MS) });
+		// A tenant repo's own conflicted content is what this agent reads/acts on — scrub the daemon's
+		// secrets from its env like every other tenant-agent omp spawn (spawn-env.ts).
+		const proc = Bun.spawn(["omp", "-p", "--approval-mode", "yolo", prompt], { cwd: worktree, stdout: "ignore", stderr: "ignore", env: scrubbedSpawnEnv(process.env, { ...gitNoSignEnv(), ...harnessAuthEnv() }), signal: AbortSignal.timeout(RESOLVE_TIMEOUT_MS) });
 		return (await proc.exited.catch(() => 1)) === 0;
 	};
 }
@@ -970,7 +973,8 @@ export function parseApproval(raw: string): boolean {
 function defaultReviewer(): ResolutionReviewer {
 	return async ({ repo, branch }) => {
 		const prompt = `An automated tool just rebased and merged branch "${branch}" into main in this repository. Inspect the result (e.g. \`git show HEAD\`, \`git diff HEAD~1\`) for semantic conflicts a test suite might not catch. Reply with exactly the single word APPROVE if the merge is correct, otherwise reply REJECT.`;
-		const proc = Bun.spawn(["omp", "-p", "--approval-mode", "yolo", prompt], { cwd: repo, stdout: "pipe", stderr: "ignore", env: { ...process.env, ...gitNoSignEnv() }, signal: AbortSignal.timeout(RESOLVE_TIMEOUT_MS) });
+		// Same tenant-agent scrub as defaultResolver above: this agent inspects merged repo content.
+		const proc = Bun.spawn(["omp", "-p", "--approval-mode", "yolo", prompt], { cwd: repo, stdout: "pipe", stderr: "ignore", env: scrubbedSpawnEnv(process.env, { ...gitNoSignEnv(), ...harnessAuthEnv() }), signal: AbortSignal.timeout(RESOLVE_TIMEOUT_MS) });
 		const text = await new Response(proc.stdout).text();
 		await proc.exited.catch(() => undefined);
 		return parseApproval(text);

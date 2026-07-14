@@ -40,8 +40,10 @@ const SECRET_EXACT = new Set(["DATABASE_URL"]);
  *  added anywhere in the daemon's env is safe by default as long as it's named like a credential. */
 const SECRET_NAME_SHAPE = /(_KEY|_SECRET|_TOKEN|_PASSWORD|_CREDENTIALS?)$/i;
 
-/** True if `key` names a daemon secret that must never reach a spawned tenant agent process. */
-export function isDaemonSecretEnvKey(key: string): boolean {
+/** True if `key` names a daemon secret that must never reach a spawned tenant agent process.
+ *  Not exported: `scrubbedSpawnEnv` (below, same file) is the only production caller — test
+ *  through it instead of this predicate directly (dead-exports-ratchet precedent). */
+function isDaemonSecretEnvKey(key: string): boolean {
 	if (isSquadEnvCompatKey(key)) return true;
 	if (SECRET_EXACT.has(key)) return true;
 	if (SECRET_PREFIXES.some((p) => key.startsWith(p))) return true;
@@ -49,10 +51,14 @@ export function isDaemonSecretEnvKey(key: string): boolean {
 }
 
 /** Non-secret operational vars a spawned agent process legitimately needs regardless of what the
- *  deny-by-shape check says: locate binaries/home/shell, speak the right locale, format timestamps. */
+ *  deny-by-shape check says: locate binaries/home/shell, speak the right locale, format timestamps,
+ *  and (proxy vars) reach the harness's provider API at all in a proxied deployment — none of these
+ *  are credentials, but dropping them silently breaks agents behind a corporate/CI proxy. */
+const PROXY_VAR_NAMES = new Set(["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "no_proxy", "all_proxy"]);
 function isKeepListed(key: string): boolean {
 	if (key === "PATH" || key === "HOME" || key === "SHELL" || key === "TERM" || key === "TZ" || key === "LANG") return true;
-	return key.startsWith("LC_");
+	if (key.startsWith("LC_") || key.startsWith("XDG_")) return true;
+	return PROXY_VAR_NAMES.has(key);
 }
 
 /** LLM-provider credential var names a harness reads directly, by its own SDK's convention — never

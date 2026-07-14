@@ -10,9 +10,10 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AcpAgentDriver } from "../src/acp-agent-driver.ts";
+import { FlueServiceDriver } from "../src/flue-service-driver.ts";
 import { ompOneShot } from "../src/omp-call.ts";
 import { RpcAgent } from "../src/rpc-agent.ts";
-import { harnessAuthEnv, isDaemonSecretEnvKey, isSquadEnvCompatKey, scrubbedSpawnEnv } from "../src/spawn-env.ts";
+import { harnessAuthEnv, isSquadEnvCompatKey, scrubbedSpawnEnv } from "../src/spawn-env.ts";
 
 const tmps: string[] = [];
 const drivers: AcpAgentDriver[] = [];
@@ -114,13 +115,18 @@ test("isSquadEnvCompatKey matches both prefixes only", () => {
 	expect(isSquadEnvCompatKey("SOMETHING_ELSE")).toBe(false);
 });
 
-test("isDaemonSecretEnvKey is true for every deny class and false for ordinary vars", () => {
+test("the deny predicate (via scrubbedSpawnEnv) is true for every deny class and false for ordinary vars", () => {
+	// isDaemonSecretEnvKey is not exported (dead-exports ratchet: scrubbedSpawnEnv is its only
+	// production caller) — exercise the same deny classes through the public surface instead.
 	for (const secret of ["OMP_SQUAD_FOO", "GLANCE_FOO", "DATABASE_URL", "GITHUB_ANYTHING", "PLANE_ANYTHING", "WORKOS_ANYTHING", "BETTER_AUTH_ANYTHING", "FOO_API_KEY", "FOO_SECRET", "FOO_TOKEN", "FOO_PASSWORD", "FOO_CREDENTIALS", "FOO_CREDENTIAL"]) {
-		expect(isDaemonSecretEnvKey(secret)).toBe(true);
+		const env = scrubbedSpawnEnv({ PATH: "/usr/bin", [secret]: "value" });
+		expect(env[secret]).toBeUndefined();
 	}
-	for (const ok of ["PATH", "HOME", "CARGO_HOME", "NODE_ENV"]) {
-		expect(isDaemonSecretEnvKey(ok)).toBe(false);
-	}
+	// "ordinary" vars that are neither secret-shaped nor on the narrow keep-list: dropped, but for
+	// a DIFFERENT reason (not on the keep-list) — assert via the keep-listed PATH/HOME instead, which
+	// prove the predicate isn't over-matching and stripping vars it shouldn't.
+	const env = scrubbedSpawnEnv({ PATH: "/usr/bin", HOME: "/home/t", CARGO_HOME: "/cargo", NODE_ENV: "test" });
+	expect(env).toEqual({ PATH: "/usr/bin", HOME: "/home/t" });
 });
 
 // ── Unit: harnessAuthEnv ───────────────────────────────────────────────────────────────────────
@@ -134,7 +140,26 @@ test("harnessAuthEnv returns empty when none of the named vars are set", () => {
 	expect(harnessAuthEnv({ PATH: "/usr/bin" })).toEqual({});
 });
 
-// ── Mutation proof: real spawns at all three sites, each with a real DATABASE_URL in process.env ─
+// ── Mutation proof: real spawns at all four sites, each with a real DATABASE_URL in process.env ──
+
+test("mutation proof (flue-service-driver.ts): the fourth tenant-agent spawn — a flue worker — never sees DATABASE_URL, even though it prefers the worker repo's OWN node_modules/.bin/flue", async () => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "sqt-spawn-env-flue-"));
+	tmps.push(dir);
+	const dumpPath = path.join(dir, "env.json");
+	const script = path.join(dir, "fake-flue-envdump.ts");
+	await fs.writeFile(script, `require("fs").writeFileSync(${JSON.stringify(dumpPath)}, JSON.stringify(process.env));\nconsole.log(JSON.stringify({ ok: true }));\n`);
+
+	await withEnv("DATABASE_URL", "postgres://mutation-proof-flue", async () => {
+		const driver = new FlueServiceDriver({ dir, workflow: "w", target: "node", buildInvocation: () => ({ bin: "bun", args: [script] }) });
+		await driver.start();
+		await driver.prompt("{}");
+		await driver.stop();
+	});
+
+	const dumped = JSON.parse(await fs.readFile(dumpPath, "utf8")) as Record<string, string>;
+	expect(dumped.DATABASE_URL).toBeUndefined();
+	expect(dumped.PATH).toBeDefined(); // sanity: the worker still got a usable env
+});
 
 test("mutation proof (omp-call.ts): a real one-shot child spawned via ompOneShot never sees DATABASE_URL", async () => {
 	await withEnv("DATABASE_URL", "postgres://mutation-proof-omp-call", async () => {
@@ -226,6 +251,50 @@ test("mutation proof (acp-agent-driver.ts): the real ACP child — the site with
 		expect(dumped.DATABASE_URL).toBeUndefined();
 		expect(dumped.PATH).toBeDefined(); // sanity: the child still got a usable env
 	});
+});
+
+test("mutation proof (acp-agent-driver.ts, hardened): a real spawn-time environ carrying DATABASE_URL — not a process.env runtime mutation — never survives the scrub", async () => {
+	// The proof above sets DATABASE_URL via `process.env.X = …` at TEST runtime (withEnv). Bun.spawn
+	// without an `env` option inherits the process's ORIGINAL environ, not runtime process.env
+	// mutations (documented at rpc-agent.ts:164) — so deleting acp-agent-driver.ts's `env:` option
+	// entirely (the exact regression this module exists to catch) makes the child inherit an environ
+	// that never had DATABASE_URL in it, and the proof above stays green even with the scrub gone.
+	// This version runs the driver inside a CHILD bun process whose own environ genuinely carries
+	// DATABASE_URL from its creation (the same shape as the daemon's real process.env) — deleting the
+	// scrub then makes the grandchild inherit that real environ and this test goes red for real.
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "sqt-spawn-env-acp-hardened-"));
+	tmps.push(dir);
+	const acpScript = path.join(dir, "fake-acp-envdump.ts");
+	const dumpPath = path.join(dir, "env.json");
+	await fs.writeFile(acpScript, fakeAcpEnvDump(dumpPath));
+
+	const acpDriverPath = path.join(import.meta.dir, "..", "src", "acp-agent-driver.ts");
+	const harnessPath = path.join(dir, "harness.ts");
+	await fs.writeFile(
+		harnessPath,
+		[
+			`import { AcpAgentDriver } from ${JSON.stringify(acpDriverPath)};`,
+			`const driver = new AcpAgentDriver({ cwd: ${JSON.stringify(dir)}, command: ["bun", ${JSON.stringify(acpScript)}] });`,
+			`await driver.start();`,
+			`await driver.stop();`,
+		].join("\n"),
+	);
+
+	const proc = Bun.spawn(["bun", harnessPath], {
+		cwd: dir,
+		stdout: "pipe",
+		stderr: "pipe",
+		// This IS the grandchild's real process-start environ — not a runtime mutation — exactly what
+		// the daemon's own process.env looks like when it spawns an ACP unit.
+		env: { ...process.env, DATABASE_URL: "postgres://mutation-proof-acp-hardened" },
+	});
+	const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+	const code = await proc.exited;
+	if (code !== 0) throw new Error(`harness process failed (exit ${code}):\n${err}\n${out}`);
+
+	const dumped = JSON.parse(await fs.readFile(dumpPath, "utf8")) as Record<string, string>;
+	expect(dumped.DATABASE_URL).toBeUndefined();
+	expect(dumped.PATH).toBeDefined(); // sanity: the grandchild still got a usable env
 });
 
 test("mutation proof (acp-agent-driver.ts): the harness's own provider key DOES survive the scrub when set, via the deliberate injection allowance", async () => {
