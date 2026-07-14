@@ -68,7 +68,12 @@ export interface DeadExport {
  *  (initMasterKey/hasMasterKey in secrets.ts, appMigrations in migrations.ts, and store.ts's
  *  getOrgSecret/putOrgSecret/deleteOrgSecret/setOrgSecretEnabled) is genuinely built ahead of its
  *  callers — concerns 03 and 05 wire it up in later batches — so each got an honest `@substrate`
- *  tag instead of sitting uncounted; the ceiling still tightens by one net. */
+ *  tag instead of sitting uncounted; the ceiling still tightens by one net.
+ *  2026-07-14 (voice-db-mode concern 03, org-aware resolver): still 216 — `getOrgSecret` left the
+ *  `@substrate`-exempt bucket for a REAL one (voice-token.ts's `voiceKeyFor` now imports it), so its
+ *  tag was removed rather than left stale; `dead.length` is unaffected either way (it was never
+ *  counted as dead, only re-bucketed), so the ceiling doesn't move. `putOrgSecret`/`deleteOrgSecret`/
+ *  `setOrgSecretEnabled` still await concern 05's admin endpoints. */
 export const BASELINE = 216;
 
 function scriptKindFor(rel: string): ts.ScriptKind {

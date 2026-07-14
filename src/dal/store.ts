@@ -493,8 +493,7 @@ function toSummary(record: OrgSecretRecord): OrgSecretSummary {
  *  them (nor should they: all three mean "voice unavailable for this org"). Does NOT consult
  *  `enabled` — the synchronous kill switch is a separate check the caller applies on the returned
  *  record, matching DESIGN.md's "Kill switch" row (deleting a key and disabling it are distinct
- *  levers).
- *  @substrate consumed by the org-aware voice resolver, concern 03 (not yet landed) */
+ *  levers). Consumed by the org-aware voice resolver's `voiceKeyFor` (voice-token.ts, concern 03). */
 export async function getOrgSecret(ctx: OrgContext, orgId: string, provider: string): Promise<OrgSecretRecord | undefined> {
 	if (!orgId) return undefined;
 	const row = await withOrg(ctx, orgId, (trx) =>

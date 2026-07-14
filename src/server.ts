@@ -106,7 +106,7 @@ import { actorForRole, type AuthPolicy, RbacDenied, requestToken, requiredRole, 
 import { handleFeedbackRoutes } from "./feedback-routes.ts";
 import { configuredSocialProviders, signupOpen } from "./db/auth.ts";
 import { getWorkosOrgPolicy, parseWorkosEvent, setWorkosOrgPolicy, ssoEnabled, verifyWorkosSignature } from "./workos.ts";
-import { hasAnyVoiceKey, isKnownVoiceProvider, mintVoiceToken, voiceConnectSrcOrigins, voiceProviderApiKey, voiceProviderPublicInfo } from "./voice-token.ts";
+import { isKnownVoiceProvider, mintVoiceToken, orgHasKey, voiceConnectSrcOrigins, voiceKeyFor, voiceProviderPublicInfo, type VoiceKeyScope } from "./voice-token.ts";
 
 /** The agent id/name a `ClientCommand` mutates, if any — "create"/"snapshot"/"commission" name no
  *  agent (they don't need cross-manager resolution); "message" targets a peer by `to`, but that's
@@ -1299,31 +1299,46 @@ export class SquadServer {
 		const manager = await this.managerFor(actor);
 		// Voice token mint + capability probe (webapp-voice-lane/05, DESIGN.md "Token mint" row).
 		// Deliberately placed BEFORE the `!manager` gate below: minting is independent of any specific
-		// fleet manager, and the DB-mode refusal must fire even for a DB-mode session with no active
+		// fleet manager, and a DB-mode refusal must fire even for a DB-mode session with no active
 		// org (which would otherwise hit `noFleet` first and never see the real reason). Both routes
 		// are gated by `restActionTier`'s existing default (GET=viewer/POST=operator for `/api/voice/*`,
 		// pinned by a regression test) — no new authz branch.
+		//
+		// `voiceScope` is the ONE org-aware resolver's input (plans/voice-db-mode/
+		// 03-org-aware-resolver.md) — both routes below build their key-presence answer from it, so
+		// they can never drift onto two different notions of "does this caller have a voice key".
+		// File mode (`!this.dbMode`): `mode: "file"` reads the env key, byte-for-byte unchanged. DB
+		// mode: `orgId` is this session's active org, already resolved above (including the
+		// ROOT_FACTORY_ORG bootstrap-admin case — no bypass, it's just another org id to the
+		// resolver), and `ctx` is the open DB handle; a DB-mode boot with no handle wired resolves the
+		// same as "no usable secret", never the file lane's env read.
+		const voiceScope: VoiceKeyScope = this.dbMode
+			? { mode: "db", ctx: this.db ? { db: this.db.db, type: this.db.type } : undefined, orgId }
+			: { mode: "file" };
 		if (url.pathname === "/api/voice/config" && req.method === "GET") {
 			if (!envBool("OMP_SQUAD_VOICE_ENABLED", false)) return new Response("not found", { status: 404 });
-			// MEDIUM-4: POST /api/voice/token 403s in DB mode (no per-org attribution/budget in v1)
-			// and 501s when no provider key is configured — a flag-on daemon in either shape would
-			// otherwise advertise {enabled:true} and show a voice button that dies at the very first
-			// mint attempt (the "old mic scar" this capability probe exists to prevent). Fold both
-			// into the SAME honest signal the flag represents, for every role tier, before any
-			// provider-posture detail is even considered.
-			if (this.dbMode || !hasAnyVoiceKey()) return Response.json({ enabled: false });
+			// MEDIUM-4, rewritten (concern 03): the old premise — no per-org attribution/budget in v1,
+			// so DB mode is refused mode-wide — is gone. Mint now runs against the SESSION ORG's own
+			// key under a durable per-org cap (concern 04), so the honest signal is per-org, not
+			// per-mode: `enabled` reflects whether `voiceScope` actually resolves a key, in EITHER
+			// mode, via the same resolver POST /api/voice/token mints through below — a flag-on daemon
+			// with no resolvable key would otherwise advertise a voice button that dies at the very
+			// first mint attempt (the "old mic scar" this capability probe exists to prevent).
+			if (!(await orgHasKey(voiceScope))) return Response.json({ enabled: false });
 			// Viewer tier gets the bare capability probe only — provider posture (which keys are
 			// configured) is never leaked below operator (DESIGN.md red-team: "leaks provider posture").
 			if (role === "viewer") return Response.json({ enabled: true });
-			return Response.json({ enabled: true, providers: voiceProviderPublicInfo() });
+			return Response.json({ enabled: true, providers: await voiceProviderPublicInfo(voiceScope) });
 		}
 		if (url.pathname === "/api/voice/token" && req.method === "POST") {
 			if (!envBool("OMP_SQUAD_VOICE_ENABLED", false)) return new Response("not found", { status: 404 });
-			// A single shared provider key with no per-org attribution or budget is the uncapped-shared-
-			// dollar shape (DESIGN.md "Token mint" row) — refuse outright in DB/org mode rather than
-			// silently pooling spend across tenants. `dbMode` is `!!this.auth`, true regardless of
-			// whether this particular session resolved an org/manager.
-			if (this.dbMode) return new Response("voice token mint is unavailable in multi-tenant (DB) mode in v1 — file mode only", { status: 403 });
+			// MEDIUM-4, rewritten (concern 03): DB mode no longer refuses outright — the uncapped-
+			// shared-dollar shape this used to guard against (DESIGN.md "Token mint" row) is gone once
+			// mint resolves the SESSION ORG's own key (`voiceScope` below) with no fallback to the
+			// operator's env key, ever, and no root-factory bypass. A per-org refusal falls out of the
+			// ordinary "no key configured" 501 further down — the SAME path file mode has always used
+			// — rather than a mode-wide 403; no active org, no configured row, and a disabled row all
+			// read identically as "no key", by design (DESIGN.md Security model).
 			// Per-actor mint rate cap: audio never transits the daemon, so the mint count is the ONLY
 			// spend signal the daemon has — this cap is load-bearing, not hygiene (DESIGN.md).
 			if (!this.voiceMintRateAllowed(actor)) return new Response("rate limited", { status: 429 });
@@ -1350,11 +1365,12 @@ export class SquadServer {
 			}
 			const body = Result.isSuccess(decoded) ? decoded.success : ({} as { provider?: unknown });
 			const providerId = typeof body.provider === "string" && body.provider ? body.provider : "openai";
-			// Mint via the SAME trimmed key `hasAnyVoiceKey`/`voiceProviderApiKey`/`GET /api/voice/config`
-			// already read — a newline/space-padded env value used to make the config probe advertise
-			// `enabled:true` while every mint 502s against the untrimmed, invalid key (config-honesty and
-			// mint disagreeing on the same env var).
-			const apiKey = isKnownVoiceProvider(providerId) ? voiceProviderApiKey(providerId) : undefined;
+			// Mint via the SAME resolver `orgHasKey`/`GET /api/voice/config` already consulted — a
+			// newline/space-padded env value (file mode) used to make the config probe advertise
+			// `enabled:true` while every mint 502s against the untrimmed, invalid key (config-honesty
+			// and mint disagreeing on the same key). Routing both through `voiceKeyFor` keeps that
+			// impossible by construction, in either mode.
+			const apiKey = isKnownVoiceProvider(providerId) ? await voiceKeyFor(voiceScope, providerId) : undefined;
 			const result = await mintVoiceToken(providerId, apiKey);
 			if (!result.ok) return new Response(result.message, { status: result.status });
 			return Response.json(result.token);

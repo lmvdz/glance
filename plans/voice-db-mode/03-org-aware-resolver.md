@@ -1,5 +1,5 @@
 # One org-aware voice resolver — all four gates move in lockstep
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural

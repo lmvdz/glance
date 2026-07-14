@@ -5,6 +5,16 @@
  * never transits the daemon). See plans/webapp-voice-lane/05-voice-token-endpoints.md and
  * DESIGN.md's "Token mint" row.
  *
+ * Org-aware key resolution (plans/voice-db-mode/03-org-aware-resolver.md): `voiceKeyFor` is the
+ * ONE resolver every capability read routes through — the key lookup itself, the "any key?"
+ * probe (`orgHasKey`), the public provider list (`voiceProviderPublicInfo`), the config probe,
+ * and the mint path (server.ts). File mode (`VoiceKeyScope.mode === "file"`) reads the keyed env
+ * var, byte-for-byte unchanged from before this concern. DB mode reads the session org's stored,
+ * enabled key via `dal/store.ts`'s `getOrgSecret` — never the operator's env key, no fallback, no
+ * root-factory bypass (it's resolved as an org id like any other). The invariant this buys:
+ * config-probe truth and mint outcome cannot disagree for any (mode, org, key-state) combination
+ * (DESIGN.md "Gate lockstep" — the "old mic scar" this resolver exists to prevent).
+ *
  * Provider resolution is a CLOSED switch over the static registry below (SSRF doctrine, red-team
  * pinned by test): an unknown provider id 400s BEFORE any fetch — it never falls through to a
  * caller-supplied URL, and the registry itself is the only source of `baseUrl`s.
@@ -21,6 +31,9 @@
  * cannot drive the fleet — tools still require the glance bearer token), but it is still a live
  * secret for its ~60-minute lifetime.
  */
+
+import type { OrgContext } from "./dal/context.ts";
+import { getOrgSecret } from "./dal/store.ts";
 
 export type VoiceProviderId = "openai";
 
@@ -71,25 +84,63 @@ function voiceVoice(): string {
 	return process.env.OMP_SQUAD_VOICE_VOICE?.trim() || "marin";
 }
 
-/** Public (viewer/operator-safe) shape of the registry for `GET /api/voice/config` at operator+
- *  tier — no key material, ever (the route's own viewer/operator tier split lives in server.ts).
- *  Only providers whose API key is actually configured are advertised: the config probe is the one
- *  honest discovery channel (DESIGN.md "Flagging" row), and advertising a provider whose mint would
- *  501 makes it lie. */
-export function voiceProviderPublicInfo(): Array<{ id: VoiceProviderId; transport: "webrtc"; model?: string }> {
-	return voiceProviderIds()
-		.filter((id) => !!voiceProviderApiKey(id))
-		.map((id) => ({
-			id,
-			transport: VOICE_PROVIDERS[id].transport,
-			model: id === "openai" ? voiceModel() : undefined,
-		}));
-}
+/** Which lane a voice-key lookup resolves in — the ONE signal every consumer below reads instead
+ *  of touching `process.env` or a raw `dbMode` boolean directly (plans/voice-db-mode/
+ *  03-org-aware-resolver.md). `"file"` is today's env-only lane, byte-for-byte unchanged — file
+ *  mode never reads the org secret store (DESIGN.md Security model). `"db"` is DB mode: `ctx` is
+ *  the store handle (`undefined` only if DB mode somehow booted without one — that resolves
+ *  identically to "no usable secret", it never falls back to the `"file"` lane's env read) and
+ *  `orgId` is the session's active org (`undefined` ⇒ no active org, a real reachable state ⇒
+ *  clean refusal, never a throw). A discriminated union rather than a bare `orgId: string | null`
+ *  so "DB mode, no active org" and "file mode" can never be confused with each other — the two
+ *  states this concern exists to keep apart. */
+export type VoiceKeyScope = { mode: "file" } | { mode: "db"; ctx: OrgContext | undefined; orgId: string | undefined };
 
-/** Where each provider's key lives; read per-call like every `src/config.ts` reader. */
-export function voiceProviderApiKey(id: VoiceProviderId): string | undefined {
+/** Raw env read for a provider's key — the file-mode lane's ONLY implementation, and the sole
+ *  remaining direct `process.env` read for a voice key in this module (everything else routes
+ *  through `voiceKeyFor`). Also backs `voiceConnectSrcOrigins`, which CSP keeps deliberately
+ *  non-org-aware (DESIGN.md Key Decisions: "the origin is identical for every org — only the key
+ *  differs, and the key never touches CSP"; per-org widening is concern 07's territory, not this
+ *  one's). */
+function envVoiceApiKey(id: VoiceProviderId): string | undefined {
 	if (id === "openai") return process.env.OMP_SQUAD_VOICE_OPENAI_API_KEY?.trim() || undefined;
 	return undefined;
+}
+
+/**
+ * THE org-aware voice-key resolver (plans/voice-db-mode/03-org-aware-resolver.md, DESIGN.md "Gate
+ * lockstep"). Every other capability read in this module — `orgHasKey`, `voiceProviderPublicInfo`
+ * — and the mint path in server.ts call this, so the config probe and the mint outcome can never
+ * disagree for any (mode, org, key-state) combination (the "old mic scar" this resolver exists to
+ * prevent).
+ *
+ * File mode: today's env read, unchanged. DB mode: store lookup + decrypt (fail-closed, see
+ * secrets.ts) + the row's own `enabled` kill switch — NO fallback to the operator's env key,
+ * ever, and no root-factory bypass (a root-factory org id is just another org id here; the caller
+ * decides what org id to pass, this function never special-cases one). No active org, no row, a
+ * disabled row, and a decrypt failure all resolve identically to `undefined` — the daemon never
+ * distinguishes "why" in what it tells the caller, by design.
+ */
+export async function voiceKeyFor(scope: VoiceKeyScope, id: VoiceProviderId): Promise<string | undefined> {
+	if (scope.mode === "file") return envVoiceApiKey(id);
+	if (!scope.ctx || !scope.orgId || id !== "openai") return undefined;
+	const secret = await getOrgSecret(scope.ctx, scope.orgId, id);
+	return secret && secret.enabled ? secret.plaintext : undefined;
+}
+
+/** Public (viewer/operator-safe) shape of the registry for `GET /api/voice/config` at operator+
+ *  tier — no key material, ever (the route's own viewer/operator tier split lives in server.ts).
+ *  Only providers `voiceKeyFor` actually resolves a key for are advertised: the config probe is
+ *  the one honest discovery channel (DESIGN.md "Flagging" row), and advertising a provider whose
+ *  mint would 501 makes it lie. */
+export async function voiceProviderPublicInfo(scope: VoiceKeyScope): Promise<Array<{ id: VoiceProviderId; transport: "webrtc"; model?: string }>> {
+	const out: Array<{ id: VoiceProviderId; transport: "webrtc"; model?: string }> = [];
+	for (const id of voiceProviderIds()) {
+		if (await voiceKeyFor(scope, id)) {
+			out.push({ id, transport: VOICE_PROVIDERS[id].transport, model: id === "openai" ? voiceModel() : undefined });
+		}
+	}
+	return out;
 }
 
 /** The browser-facing origins CSP `connect-src` must name for each KEYED provider — the voice
@@ -97,20 +148,25 @@ export function voiceProviderApiKey(id: VoiceProviderId): string | undefined {
  *  daemon), so a `connect-src 'self'` webapp cannot place a call at all: the failure is silent and
  *  happens AFTER a successful mint (live-found 2026-07-13 — every reviewer missed it because
  *  nothing drove the served page against the real endpoint). Only providers whose key is actually
- *  configured contribute an origin; an unkeyed provider must not widen the exfil-blocking default. */
+ *  configured contribute an origin; an unkeyed provider must not widen the exfil-blocking default.
+ *  Deliberately stays env-only / non-org-aware (see `envVoiceApiKey` doc comment) — kept
+ *  synchronous because `securityHeaders()` is called on every response and must stay nullary. */
 export function voiceConnectSrcOrigins(): string[] {
 	const origins: string[] = [];
-	if (voiceProviderApiKey("openai")) origins.push("https://api.openai.com");
+	if (envVoiceApiKey("openai")) origins.push("https://api.openai.com");
 	return origins;
 }
 
-/** Whether ANY registered voice provider has an API key configured (MEDIUM-4). `GET
- *  /api/voice/config` uses this — alongside the caller's DB-mode check — to decide whether
- *  `enabled` is honestly `true`: `POST /api/voice/token` 403s in DB mode and 501s when no provider
- *  key is configured, so a flag-on daemon in either shape would otherwise advertise a voice button
- *  that dies at the very first mint attempt. */
-export function hasAnyVoiceKey(): boolean {
-	return voiceProviderIds().some((id) => !!voiceProviderApiKey(id));
+/** Whether ANY registered voice provider resolves a key in `scope` (MEDIUM-4, rewritten for
+ *  plans/voice-db-mode/03-org-aware-resolver.md). `GET /api/voice/config` uses this to decide
+ *  whether `enabled` is honestly `true` — file mode: an env key is configured; DB mode: the
+ *  session's active org has a configured, enabled key. A flag-on daemon with no resolvable key in
+ *  either shape would otherwise advertise a voice button that dies at the very first mint attempt. */
+export async function orgHasKey(scope: VoiceKeyScope): Promise<boolean> {
+	for (const id of voiceProviderIds()) {
+		if (await voiceKeyFor(scope, id)) return true;
+	}
+	return false;
 }
 
 // The voice model's system prompt: mouth/ears framing (it narrates and dispatches; it does not
