@@ -1,6 +1,6 @@
 # OSC attention emitter — terminal-native attention lane
 
-STATUS: in-review (PR #177)
+STATUS: done (PR #177, merged)
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical

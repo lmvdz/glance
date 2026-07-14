@@ -1,6 +1,6 @@
 # glance open — fleet→worktree jump
 
-STATUS: in-review (PR #178)
+STATUS: done (PR #178, merged)
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
