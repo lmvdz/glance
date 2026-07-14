@@ -14,6 +14,7 @@
 import { createCipheriv, createHmac, randomBytes } from "node:crypto";
 import * as path from "node:path";
 import { getStorageBackend } from "./dal/storage.ts";
+import type { AgentDTO, AgentStatus } from "./types.ts";
 
 export interface PushSubscription {
 	endpoint: string;
@@ -27,6 +28,16 @@ export interface PushPayload {
 	url?: string;
 	/** collapse key so repeated alerts for one agent replace rather than stack */
 	tag?: string;
+}
+
+/** Pure: does this status transition warrant a human-attention push, and with what payload?
+ *  Shared by the web-push lane (server) and the terminal OSC lane (tui) so they never drift. */
+export function escalationPayload(prev: AgentStatus | undefined, a: AgentDTO, seeded: boolean): PushPayload | null {
+	if (!seeded || prev === undefined || prev === a.status) return null;
+	if (a.status !== "input" && a.status !== "error") return null;
+	const title = a.status === "input" ? `⛔ ${a.name} needs you` : `⚠ ${a.name} errored`;
+	const body = a.status === "input" ? a.pending[0]?.title ?? "waiting for input" : a.error ?? "agent error";
+	return { title, body, url: `/#/agent/${a.id}`, tag: a.id };
 }
 
 /** Injectable transport (default = real fetch) so tests assert dispatch without a push service. */

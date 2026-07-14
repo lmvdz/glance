@@ -134,7 +134,7 @@ function requestScope(body: unknown): Pick<CreateAgentOptions, "requires" | "own
 import { approveJoinRequest, denyJoinRequest, ensurePersonalWorkspace, listPendingJoinRequests, onboardWorkosUser, provisionScimEvent } from "./workos-provision.ts";
 import { addMemberByEmail, getOrgProfile, listOrgMembers, removeMember, renameOrg, setMemberRole } from "./org-admin.ts";
 import type { DbHandle } from "./db/index.ts";
-import type { PushPayload, PushService } from "./push.ts";
+import { escalationPayload, type PushPayload, type PushService } from "./push.ts";
 import type { Actor, AgentDTO, AgentStatus, AuditEntry, OperatorPresence, Role, RunReceipt } from "./types.ts";
 import type { TraceResponse } from "./spans.ts";
 import { type FederationSnapshot, federationView } from "./federation.ts";
@@ -379,14 +379,9 @@ export function computeUiVersion(html: string): string {
 	return createHash("sha256").update(html).digest("hex").slice(0, 12);
 }
 
-/** Pure: does this status transition warrant a human-attention push, and with what payload? */
-export function escalationPayload(prev: AgentStatus | undefined, a: AgentDTO, seeded: boolean): PushPayload | null {
-	if (!seeded || prev === undefined || prev === a.status) return null;
-	if (a.status !== "input" && a.status !== "error") return null;
-	const title = a.status === "input" ? `⛔ ${a.name} needs you` : `⚠ ${a.name} errored`;
-	const body = a.status === "input" ? a.pending[0]?.title ?? "waiting for input" : a.error ?? "agent error";
-	return { title, body, url: `/#/agent/${a.id}`, tag: a.id };
-}
+// escalationPayload moved to push.ts (fleet-ide-bridge B01) so the TUI's OSC lane can share
+// the exact transition rule without importing the server module; re-exported for existing callers.
+export { escalationPayload };
 
 // ponytail: 'unsafe-inline' is forced by the single-file inline-script/style SPA;
 // connect-src 'self' is the compensating control (blocks token exfil to other origins).
