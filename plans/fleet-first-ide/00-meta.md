@@ -46,3 +46,4 @@ Runs under `.claude/skills/fleet-ide-loop/SKILL.md`: each iteration orients here
 (loop appends one line per iteration: date, concern, outcome, PR)
 
 - 2026-07-14 — meta-plan authored; Epics B + C expanded; loop armed.
+- 2026-07-14 — iteration 1: B01 osc-attention-emitter shipped as draft PR #177 (suite 2790/0, tsc clean; live-toast check owed). Bonus: fixed a real escape-injection hole in the existing TUI bell. Next: C01 repo bootstrap.

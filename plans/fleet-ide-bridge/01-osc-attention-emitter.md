@@ -1,6 +1,6 @@
 # OSC attention emitter — terminal-native attention lane
 
-STATUS: open
+STATUS: in-review (PR #177)
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -21,6 +21,14 @@ When a unit transitions to a state that already fires web-push (needs-input / er
 - TUI (`src/tui.ts`): additionally emit OSC 133 prompt markers (`133;A`/`133;B`) around interactive prompts so terminals with prompt-jump navigate glance sessions.
 - Cockpit-compat note: before shipping, read terax's `src-tauri/src/modules/pty/agent_detect.rs` OSC 777 grammar (via `gh api`, read-only) and, if their marker payload differs from `777;notify`, emit their exact form as a third sequence behind the same call. Record the grammar found in this doc.
 - Flag: `GLANCE_OSC_NOTIFY` env, default ON when TTY (it is inert when piped).
+
+## Reality deltas found during implementation (2026-07-14, PR #177)
+
+- The TUI already emitted bell + OSC 9 in `signal()` (`src/tui.ts`) — the concern reduced to adding OSC 777, fixing raw `a.name` interpolation (real injection hole), and unifying on `escalationPayload` (moved `server.ts` → `src/push.ts`, re-exported).
+- OSC 133 dropped: shell-prompt semantics, inapplicable to an alt-screen TUI.
+- terax 777 grammar verified in `agent_detect.rs` @ a2c8329: `notify;Terax;<agent>;<event>` with `working|attention|finished`, and it DROPS unknown agent names — so their dialect is deliberately not emitted; cockpit notifications come from the daemon SSE lane (C08).
+- Flag is `OMP_SQUAD_OSC_NOTIFY` (repo env convention + alias expansion in env-example gate), not `GLANCE_OSC_NOTIFY`.
+- Live-toast acceptance NOT RUN (headless session) — one manual run in a GUI terminal still owed before `done`.
 
 ## Acceptance
 
