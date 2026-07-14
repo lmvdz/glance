@@ -99,3 +99,14 @@ The original verdict ("don't integrate") stands only against terax's *extension 
 - Risk: upstream builds its own orchestration (issue #549 demand exists) and collides with our module; counter-position is that the daemon, worktree isolation, and merge pipeline are years of moat they'd be rebuilding from zero.
 
 **Recommendation**: ship v0 now (it's small and reversible, and living with it tells us if the suite thesis holds in practice), decide the fork after. Patterns 1–2 from the original analysis are prerequisites of v0 anyway.
+
+### End state (2026-07-14, on Lars's "what is the end state?")
+
+**One desktop app that is the developer's entire interface to a software factory — fleet-first where VS Code is file-first — with zero-friction drop-down from supervising N units to hands-on-keyboard in one worktree.**
+
+- **Two altitudes, one window.** Fleet altitude = glance webapp content gone native (roster, attention queue, merge train, cost/outcome ledgers). Ground altitude = terax's substance (terminal, LSP editor, git). The seam disappears: a failing gate in the fleet pane opens that unit's worktree as a Space, editor on the failing test, terminal on the gate logs. The worktree is the join everywhere.
+- **Intervention = shared workspace, not a form.** Intervening opens the unit's Space; human and agent are peers in the same worktree — file edits visible to the agent (lease/presence hooks), conversation over ACP instead of keystroke injection, unit handed back to the pipeline when done. This is the interaction terax's blind `send_to_agent` gestures at and cannot deliver without a protocol; glance has the protocol.
+- **Chat and units are the same thing at different sizes.** The BYOK chat panel becomes a glance-backed session: a conversation that outgrows chat escalates into a worktree-isolated, gated, landable unit without changing windows (the reverse of intervene). Terax's in-app agent becomes another harness behind the daemon; every agent CLI anywhere (in-app, over SSH) is detected/attributed/adoptable via the v0 OSC+hooks lane.
+- **Multi-machine.** terax's merged SSH lane + headless daemons → cockpit connects to N daemons, fleet spans hosts; web + push stay the away-from-desk surface. Product identity: **glance = daemon (factory) + desktop (cockpit, née terax fork) + web (remote/mobile)** — the IDE for supervising software that writes itself.
+- **Permanent boundaries.** The two-process split never merges (terax Rust core ↔ glance Bun daemon; the VS Code/language-server shape). The fork eventually hard-diverges: v0–v1 stay additive/rebaseable, but once the fleet module is the primary surface, upstream terax becomes vendored substrate.
+- **Ladder**: v0 bridge → v1 thin fork (native fleet module) → v2 intervene-as-shared-workspace + chat→unit escalation → v3 multi-daemon + own identity. Each rung independently useful; each tests the thesis before the next is funded.
