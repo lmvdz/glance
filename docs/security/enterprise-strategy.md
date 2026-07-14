@@ -196,6 +196,43 @@ the buyer's own VPC**: data residency preserved (never leaves the buyer's cloud)
 approximate — hardware-dependent and heavy, hence v3, but the only architecture that resolves mutual distrust by
 technology rather than contract.
 
+### The load-bearing subtlety: confidentiality follows the plaintext, not the enclave
+
+A TEE protects state *inside* its boundary; it does nothing for data the enclave deliberately sends *out* in
+cleartext. **The most common mistake is to enclave the workflow but leave inference as a normal API call.** If
+the flow (seller B's IP) runs in an enclave but calls the data-owner A's model endpoint, the inference request —
+which carries B's prompts, and *the prompts are most of B's IP* — crosses the boundary into A's plane in
+plaintext, and A reads it. The enclave protected B's code and then handed A the prompts through the front door.
+
+So the boundary must be drawn to **enclose the inference itself**, not stop at the workflow. Three configurations,
+only the last two safe:
+
+- **Model outside, A-hosted (the trap):** A sees every prompt. Broken.
+- **Model in the same enclave:** B's workflow and A's weights co-reside; the workflow calls the model over
+  localhost *inside* the enclave; no prompt crosses the boundary in cleartext.
+- **Model in a second attested enclave:** A runs a *confidential-inference* endpoint (A's weights, but in an
+  enclave A's own operators cannot read), and the workflow-enclave sends prompts over an attested encrypted
+  channel. A provides model capacity while structurally blind to request contents.
+
+For the canonical split **A = data + inference, B = workflow**: one confidential VM on A's infra holds all three —
+B's workflow, A's weights, A's data (never leaves A's cloud). The workflow calls the model in-process; only a
+mutually-agreed *output* leaves. Dual attestation, rooted in the CPU vendor (not either party): A attests the
+workflow measurement (egress-locked, won't exfiltrate A's data); B attests the model+runtime measurement (won't
+log or persist B's prompts anywhere A can read).
+
+Honest residuals — this is very high assurance, not absolute:
+1. **The in-enclave runtime is part of the TCB.** An in-enclave model server that logs prompts to a volume A can
+   read defeats everything; the attested measurement must cover the whole stack, incl. "no prompt logging,
+   egress-locked."
+2. **Side channels** (timing, cache, memory-access, power) have repeatedly leaked from SEV-SNP/TDX in the
+   literature. Encryption + attestation raise the bar enormously; padding/constant-time/batching reduce the
+   residual; never market it as information-theoretically perfect.
+3. **The output channel** returns to A (who owns the data), so A learns what the flow produced — usually fine,
+   task-dependent.
+4. **Independent discovery is not a technical boundary.** A owns the model and can always run candidate prompts
+   to mimic B's behavior — not *reading* B's prompt but re-deriving it; a licensing/legal matter, the flip side
+   of "most flow IP is curation, not an unguessable secret."
+
 ### What ships when
 
 - **Now (Phase 0–3):** egress-deny-by-default + capability least-privilege + ephemeral runs + full audit +
