@@ -26,6 +26,7 @@ function probe(over: Partial<DoctorProbe> = {}): DoctorProbe {
 		gateImage: async () => ({ dockerUsable: true, imagePresent: true, image: "glance-gate:bun1-v2", strict: false }),
 		projects: async () => [CLEAN_REPO],
 		webappBuilt: async () => true,
+		harnessHooks: async () => [{ harness: "claude-code", ok: true, detail: "all 4 hooks registered" }],
 		zombieAgents: async () => 0,
 		...over,
 	};
@@ -276,7 +277,7 @@ test("a report full of unknowns never prints the all-clear", async () => {
 	const boom = () => {
 		throw new Error("probe exploded");
 	};
-	const report = await runDoctor(probe({ daemon: boom, autonomy: boom, stateDir: boom, planeArmed: boom, gateImage: boom, projects: boom, webappBuilt: boom, zombieAgents: boom }));
+	const report = await runDoctor(probe({ daemon: boom, autonomy: boom, stateDir: boom, planeArmed: boom, gateImage: boom, projects: boom, webappBuilt: boom, zombieAgents: boom, harnessHooks: boom }));
 
 	expect(report.checks.every((c) => c.status === "unknown")).toBe(true);
 	expect(report.healthy).toBe(true); // nothing is BLOCKING — the exit code stays 0
