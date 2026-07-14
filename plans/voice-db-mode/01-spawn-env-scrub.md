@@ -4,6 +4,11 @@ PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
 TOUCHES: src/agent-host.ts, src/omp-call.ts, src/acp-agent-driver.ts, src/gate-env.ts (extract shared scrub), src/spawn-env.ts (new), tests/spawn-env.test.ts (new), tests/gate-env.test.ts
+  Fix round 2 (review findings, inside this concern's Goal per adjudication): src/worktree.ts,
+  src/squad-manager.ts (bun-install provisioning spawns also scrubbed — a hostile tenant repo's root
+  postinstall runs under them too); src/land.ts, src/vision.ts, src/flue-service-driver.ts
+  (harnessAuthEnv narrowed per-spawn instead of admitting every configured provider credential); src/
+  model-lineage.ts (resolveProvider reused, no changes needed there)
 
 ## Goal
 No secret in the daemon's environment reaches a tenant agent's process. Today every agent spawn inherits the
@@ -45,4 +50,17 @@ None.
 - Live: spawn a real agent (scratch daemon) whose task is `printenv | sort`, and assert the transcript contains
   no `DATABASE_URL`, no `*_SECRET`, no `*_KEY` other than the harness's own. This is the only check that proves
   the whole chain; fakes cannot.
+  **RUN 2026-07-14** (fix round 2, after two prior deferrals): isolated scratch daemon (own state dir, port
+  18790, autodispatch/autodrive/autoland/autosupervise OFF), `glance add <throwaway repo> --task 'printenv |
+  sort, paste verbatim' --approval yolo --plain`. Traversed the real chain end to end — squad-manager →
+  `resolveHarness`/`makeDriver` → `RpcAgent.spawnHost` → `agent-host-main.ts` → `runAgentHost` →
+  `scrubbedSpawnEnv`+`harnessAuthEnv` — confirmed via `ps` (daemon pid → `agent-host-main.ts --harness omp`
+  pid → the spawned `omp --mode rpc` pid). Agent completed the task and reported its own env (61 vars) back
+  in the transcript; parsed every `KEY=VALUE` line programmatically against the same deny classes
+  (`OMP_SQUAD_*`/`GLANCE_*`, `DATABASE_URL`, `BETTER_AUTH_*`/`GITHUB_*`/`WORKOS_*`/`PLANE_*`,
+  `*_KEY|*_SECRET|*_TOKEN|*_PASSWORD|*_CREDENTIALS?`) — zero violations. No `ANTHROPIC_API_KEY` was present
+  in the daemon's own env at boot, so `harnessAuthEnv` had nothing to (correctly) inject; the keep-list/
+  behavior-control vars (`PATH`, `HOME`, `PI_RPC_EMIT_TITLE`, etc.) and omp's own tool-sandbox vars
+  (`GIT_PAGER`, `CI`, …) were the only things present. Scratch daemon + worktree + throwaway repo torn down
+  after capture; the live production daemon (port 7878, db mode) was never touched.
 - Full suite + both typechecks green (spawn tests are PATH-sensitive — run with `node_modules/.bin` on PATH).

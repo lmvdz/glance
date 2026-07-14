@@ -42,6 +42,11 @@ export interface AcpAgentDriverOptions {
 	model?: string;
 	/** Injectable child argv. Default: `buildAcpCommand(model)`. Tests inject a fake ACP agent. */
 	command?: string[];
+	/** Registered harness NAME (e.g. "grok"/"gemini"/"codex"/"auggie") — narrows `harnessAuthEnv()` to
+	 *  the vendor THIS spawn needs instead of every configured provider credential. Absent (e.g. a test
+	 *  injecting a raw `command`) falls back to the full credential list — same as before this field
+	 *  existed. */
+	harness?: string;
 	/** Approval intent from the manager. Mapped best-effort to an ACP session mode after session/new
 	 *  (`yolo` → an auto-approve mode); ACP's setSessionMode is `unstable_`, so a missing/failing call
 	 *  falls back silently to the per-call session/request_permission round-trip.
@@ -202,7 +207,7 @@ export class AcpAgentDriver extends EventEmitter implements AgentDriver {
 		// Passing NO `env` option here inherited the daemon's FULL environment (Bun.spawn's default) —
 		// the easiest of the three spawn sites to miss, because the absence of an `env` key reads as
 		// "nothing leaks" when it actually means the opposite. Scrub explicitly (spawn-env.ts).
-		const proc = Bun.spawn(cmd, { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: scrubbedSpawnEnv(process.env, harnessAuthEnv()) });
+		const proc = Bun.spawn(cmd, { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: scrubbedSpawnEnv(process.env, harnessAuthEnv(process.env, this.opts.harness, this.opts.model)) });
 		this.proc = proc;
 		void this.pumpStdout(proc.stdout);
 		void this.pumpStderr(proc.stderr);

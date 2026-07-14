@@ -140,6 +140,67 @@ test("harnessAuthEnv returns empty when none of the named vars are set", () => {
 	expect(harnessAuthEnv({ PATH: "/usr/bin" })).toEqual({});
 });
 
+// ── Unit: harnessAuthEnv NARROWING by harness/model — concern 01's "keep it narrow" ──────────────
+// A multi-provider operator sets every credential; a spawn for harness X must not see provider Y's
+// key. The pin the reviewer named directly.
+
+const ALL_PROVIDER_ENV = {
+	PATH: "/usr/bin",
+	ANTHROPIC_API_KEY: "sk-anthropic",
+	OPENAI_API_KEY: "sk-openai",
+	GOOGLE_API_KEY: "sk-google",
+	GEMINI_API_KEY: "sk-gemini",
+	XAI_API_KEY: "sk-xai",
+	OPENROUTER_API_KEY: "sk-openrouter",
+	AUGMENT_API_KEY: "sk-augment",
+};
+
+test("harnessAuthEnv(source, 'codex') admits only OPENAI_API_KEY — not anthropic/google/xai/augment", () => {
+	expect(harnessAuthEnv(ALL_PROVIDER_ENV, "codex")).toEqual({ OPENAI_API_KEY: "sk-openai" });
+});
+
+test("harnessAuthEnv(source, 'gemini') admits GOOGLE_API_KEY and GEMINI_API_KEY only", () => {
+	expect(harnessAuthEnv(ALL_PROVIDER_ENV, "gemini")).toEqual({ GOOGLE_API_KEY: "sk-google", GEMINI_API_KEY: "sk-gemini" });
+});
+
+test("harnessAuthEnv(source, 'grok') admits only XAI_API_KEY", () => {
+	expect(harnessAuthEnv(ALL_PROVIDER_ENV, "grok")).toEqual({ XAI_API_KEY: "sk-xai" });
+});
+
+test("harnessAuthEnv(source, 'auggie') admits only AUGMENT_API_KEY, even though auggie has no ModelLineage", () => {
+	expect(harnessAuthEnv(ALL_PROVIDER_ENV, "auggie")).toEqual({ AUGMENT_API_KEY: "sk-augment" });
+});
+
+test("harnessAuthEnv(source, 'omp') with no model pin defaults to ANTHROPIC_API_KEY only (omp's own default vendor)", () => {
+	expect(harnessAuthEnv(ALL_PROVIDER_ENV, "omp")).toEqual({ ANTHROPIC_API_KEY: "sk-anthropic" });
+});
+
+test("harnessAuthEnv(source, 'pi') with no model pin defaults to ANTHROPIC_API_KEY only", () => {
+	expect(harnessAuthEnv(ALL_PROVIDER_ENV, "pi")).toEqual({ ANTHROPIC_API_KEY: "sk-anthropic" });
+});
+
+test("harnessAuthEnv(source, 'omp', 'openai/gpt-5') follows the PINNED MODEL's real vendor, not omp's default", () => {
+	expect(harnessAuthEnv(ALL_PROVIDER_ENV, "omp", "openai/gpt-5")).toEqual({ OPENAI_API_KEY: "sk-openai" });
+});
+
+test("harnessAuthEnv(source, 'grok', 'gemini-2.5-pro') follows the pinned model over the harness's static vendor pin", () => {
+	// Contrived (grok's ACP command never actually takes a cross-vendor model), but proves model wins.
+	expect(harnessAuthEnv(ALL_PROVIDER_ENV, "grok", "gemini-2.5-pro")).toEqual({ GOOGLE_API_KEY: "sk-google", GEMINI_API_KEY: "sk-gemini" });
+});
+
+test("harnessAuthEnv(source, 'opencode') — a genuinely multi-vendor harness with no model pin — falls back to the full list (honest ignorance, not a narrowing)", () => {
+	expect(harnessAuthEnv(ALL_PROVIDER_ENV, "opencode")).toEqual(admitAllProviders());
+});
+
+test("harnessAuthEnv with an unknown harness name and no model falls back to the full list", () => {
+	expect(harnessAuthEnv(ALL_PROVIDER_ENV, "some-future-harness")).toEqual(admitAllProviders());
+});
+
+function admitAllProviders(): Record<string, string> {
+	const { PATH: _PATH, ...rest } = ALL_PROVIDER_ENV;
+	return rest;
+}
+
 // ── Mutation proof: real spawns at all four sites, each with a real DATABASE_URL in process.env ──
 
 test("mutation proof (flue-service-driver.ts): the fourth tenant-agent spawn — a flue worker — never sees DATABASE_URL, even though it prefers the worker repo's OWN node_modules/.bin/flue", async () => {
@@ -312,4 +373,124 @@ test("mutation proof (acp-agent-driver.ts): the harness's own provider key DOES 
 		const dumped = JSON.parse(await fs.readFile(dumpPath, "utf8")) as Record<string, string>;
 		expect(dumped.ANTHROPIC_API_KEY).toBe("sk-mutation-proof-harness-key");
 	});
+});
+
+test("mutation proof (acp-agent-driver.ts): a spawn for harness 'codex' never sees ANTHROPIC_API_KEY, even though the operator has it set for a DIFFERENT unit's harness — the narrowing pin", async () => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "sqt-spawn-env-acp-narrow-"));
+	tmps.push(dir);
+	const script = path.join(dir, "fake-acp-envdump.ts");
+	const dumpPath = path.join(dir, "env.json");
+	await fs.writeFile(script, fakeAcpEnvDump(dumpPath));
+
+	const prevAnthropic = process.env.ANTHROPIC_API_KEY;
+	const prevOpenai = process.env.OPENAI_API_KEY;
+	process.env.ANTHROPIC_API_KEY = "sk-anthropic-belongs-to-a-different-unit";
+	process.env.OPENAI_API_KEY = "sk-openai-this-codex-spawn-needs";
+	try {
+		const driver = new AcpAgentDriver({ cwd: dir, command: ["bun", script], harness: "codex" });
+		drivers.push(driver);
+		await driver.start();
+		await driver.stop();
+		const dumped = JSON.parse(await fs.readFile(dumpPath, "utf8")) as Record<string, string>;
+		expect(dumped.OPENAI_API_KEY).toBe("sk-openai-this-codex-spawn-needs");
+		expect(dumped.ANTHROPIC_API_KEY).toBeUndefined();
+	} finally {
+		if (prevAnthropic === undefined) delete process.env.ANTHROPIC_API_KEY;
+		else process.env.ANTHROPIC_API_KEY = prevAnthropic;
+		if (prevOpenai === undefined) delete process.env.OPENAI_API_KEY;
+		else process.env.OPENAI_API_KEY = prevOpenai;
+	}
+});
+
+// ── Mutation proof: `bun install` PROVISIONING spawns are tenant repo content too ────────────────
+//
+// `installNodeModules` (worktree.ts) and `SquadManager.installWorker` (squad-manager.ts) run `bun
+// install` in a TENANT repo directory — its root `package.json` can declare a `postinstall` script.
+// Bun blocks *dependency* lifecycle scripts by default but always runs the project's OWN scripts, so
+// a hostile tenant repo's postinstall runs under whatever env `bun install` was spawned with, at
+// provisioning time, before any agent even starts. Confirmed empirically (not asserted): a real
+// `bun install` with no `env` option lets a planted postinstall read `DATABASE_URL` straight out of
+// the inherited environ.
+//
+// Both proofs below use the SAME hardened shape as the ACP "hardened" proof above, for the SAME
+// reason: `Bun.spawn` without an `env` option inherits the process's ORIGINAL start-time environ, not
+// runtime `process.env` mutations (`withEnv` here, or rpc-agent.ts:164's note) — so a naive proof that
+// sets `process.env.DATABASE_URL` at test runtime and then calls `installNodeModules`/`installWorker`
+// directly stays green even with the scrub deleted (verified: it does). Each proof instead spawns a
+// CHILD bun process whose own environ genuinely carries `DATABASE_URL` from process creation — the
+// same shape as the daemon's real `process.env` — and calls the function under test from inside that
+// child, so a deleted scrub makes the grandchild `bun install` inherit the real secret for real.
+
+/** Writes a `package.json` with a `postinstall` script that dumps `process.env` to `leakPath`, plus
+ *  the script itself. No dependencies, so `bun install` never needs the network — the postinstall
+ *  hook alone is what's under test. */
+async function writePostinstallProbe(dir: string, leakPath: string): Promise<void> {
+	await fs.writeFile(path.join(dir, "package.json"), JSON.stringify({ name: "postinstall-probe", version: "0.0.0", scripts: { postinstall: "bun leak.ts" } }));
+	await fs.writeFile(path.join(dir, "leak.ts"), `require("fs").writeFileSync(${JSON.stringify(leakPath)}, JSON.stringify(process.env));\n`);
+}
+
+/** Runs `harnessScript` in a child bun process whose real spawn-time environ carries
+ *  `DATABASE_URL=value` (not a runtime `process.env` mutation), and asserts it exits 0. */
+async function runHardenedHarness(harnessPath: string, script: string, value: string): Promise<void> {
+	await fs.writeFile(harnessPath, script);
+	const proc = Bun.spawn(["bun", harnessPath], {
+		stdout: "pipe",
+		stderr: "pipe",
+		env: { ...process.env, DATABASE_URL: value },
+	});
+	const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+	const code = await proc.exited;
+	if (code !== 0) throw new Error(`harness process failed (exit ${code}):\n${err}\n${out}`);
+}
+
+test("mutation proof (worktree.ts installNodeModules): a hostile tenant repo's root postinstall never sees DATABASE_URL", async () => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "sqt-spawn-env-postinstall-"));
+	tmps.push(dir);
+	const leakPath = path.join(dir, "leaked-env.json");
+	await writePostinstallProbe(dir, leakPath);
+
+	const worktreePath = path.join(import.meta.dir, "..", "src", "worktree.ts");
+	const harnessPath = path.join(dir, "harness.ts");
+	await runHardenedHarness(
+		harnessPath,
+		[
+			`import { installNodeModules } from ${JSON.stringify(worktreePath)};`,
+			`const err = await installNodeModules(${JSON.stringify(dir)});`,
+			`if (err) throw new Error("installNodeModules failed: " + err);`,
+		].join("\n"),
+		"postgres://mutation-proof-postinstall",
+	);
+
+	const leaked = JSON.parse(await fs.readFile(leakPath, "utf8")) as Record<string, string>;
+	expect(leaked.DATABASE_URL).toBeUndefined();
+	expect(leaked.PATH).toBeDefined(); // sanity: bun install still had a usable env, not an empty one
+});
+
+test("mutation proof (squad-manager.ts installWorker): a hostile flue-worker repo's root postinstall never sees DATABASE_URL", async () => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "sqt-spawn-env-postinstall-worker-"));
+	tmps.push(dir);
+	const leakPath = path.join(dir, "leaked-env.json");
+	await writePostinstallProbe(dir, leakPath);
+
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "sqt-spawn-env-postinstall-worker-state-"));
+	tmps.push(stateDir);
+
+	const squadManagerPath = path.join(import.meta.dir, "..", "src", "squad-manager.ts");
+	const harnessPath = path.join(dir, "harness.ts");
+	// installWorker is private — reached through the real call site (cast, same as production code
+	// never does) instead of reimplementing its body, so a regression that drops ITS `env:` option
+	// (not just installNodeModules') fails this test too.
+	await runHardenedHarness(
+		harnessPath,
+		[
+			`import { SquadManager } from ${JSON.stringify(squadManagerPath)};`,
+			`const mgr = new SquadManager({ stateDir: ${JSON.stringify(stateDir)} });`,
+			`await mgr.installWorker(${JSON.stringify(dir)});`,
+		].join("\n"),
+		"postgres://mutation-proof-postinstall-worker",
+	);
+
+	const leaked = JSON.parse(await fs.readFile(leakPath, "utf8")) as Record<string, string>;
+	expect(leaked.DATABASE_URL).toBeUndefined();
+	expect(leaked.PATH).toBeDefined(); // sanity: the install still had a usable env, not an empty one
 });

@@ -172,7 +172,7 @@ export async function runAgentHost(opts: AgentHostOptions): Promise<void> {
 		stdin: "pipe",
 		stdout: "pipe",
 		stderr: "pipe",
-		env: scrubbedSpawnEnv(process.env, { PI_RPC_EMIT_TITLE: "0", ...gitNoSignEnv(), ...harnessAuthEnv() }),
+		env: scrubbedSpawnEnv(process.env, { PI_RPC_EMIT_TITLE: "0", ...gitNoSignEnv(), ...harnessAuthEnv(process.env, opts.harness, opts.model) }),
 	});
 
 	let ready = false;

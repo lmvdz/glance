@@ -34,12 +34,13 @@ const ompProducer: VisionProducer = async ({ worktree, url, dir }) => {
 		`load, are the main elements present, any obvious visual breakage. ` +
 		`You are EVIDENCE ONLY: do not pass or fail anything. Be brief.`;
 	// This agent opens the worktree's own repo content in a browser — scrub the daemon's secrets
-	// from its env like every other tenant-agent omp spawn (spawn-env.ts).
+	// from its env like every other tenant-agent omp spawn (spawn-env.ts). Always the `omp` harness
+	// (hardcoded argv[0] below) — narrow harnessAuthEnv() to it explicitly.
 	const proc = Bun.spawn(["omp", "-p", "--approval-mode", "yolo", prompt], {
 		cwd: worktree,
 		stdout: "ignore",
 		stderr: "ignore",
-		env: scrubbedSpawnEnv(process.env, { ...gitNoSignEnv(), ...harnessAuthEnv() }),
+		env: scrubbedSpawnEnv(process.env, { ...gitNoSignEnv(), ...harnessAuthEnv(process.env, "omp") }),
 		signal: AbortSignal.timeout(VISION_TIMEOUT_MS),
 	});
 	await proc.exited;

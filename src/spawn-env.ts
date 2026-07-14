@@ -21,6 +21,8 @@
  * has no legitimate use for ANY of the daemon's Plane configuration.
  */
 
+import { resolveProvider } from "./model-lineage.ts";
+
 /** `OMP_SQUAD_*` and its env-compat twin `GLANCE_*` (env-compat.ts mirrors every `OMP_SQUAD_*` secret
  *  into a canonical `GLANCE_` name at boot) — denied in full by both the gate scrub and the tenant
  *  agent scrub below. */
@@ -66,20 +68,73 @@ function isKeepListed(key: string): boolean {
  *  agent harness (omp, pi, or an ACP runtime) needs its own provider key to make a model call at all,
  *  so these survive by NAME, not by falling through the shape filter that strips everything else
  *  ending in `_KEY`. Narrow and explicit — extend this list (don't loosen SECRET_NAME_SHAPE) when a
- *  new harness needs a credential this doesn't yet cover. */
+ *  new harness needs a credential this doesn't yet cover. This is also the FALLBACK `harnessAuthEnv`
+ *  admits when it cannot narrow to a single vendor (harness/model unknown or genuinely multi-vendor,
+ *  e.g. a flue worker's own `.flue/agents` config) — every named var, not none, because withholding a
+ *  credential a real spawn needs is the failure mode concern 01 warns will get the whole scrub
+ *  reverted ("do not silently drop a var an agent needs").
+ */
 const HARNESS_AUTH_VARS = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "XAI_API_KEY", "OPENROUTER_API_KEY", "AUGMENT_API_KEY"];
 
-/** The subset of `source` naming a harness's own provider credential — spread this into
- *  `scrubbedSpawnEnv`'s `inject` argument at a spawn site. Callers don't need to know which of the
- *  named vars their harness actually reads; only the ones actually set in the daemon's env come back,
- *  so an operator running a single-provider fleet never sees the others appear. */
-export function harnessAuthEnv(source: NodeJS.ProcessEnv = process.env): Record<string, string> {
+/** Vendor lineage (model-lineage.ts) → the credential var(s) that vendor's SDK convention reads.
+ *  Google gets BOTH names because different Gemini-speaking libraries read different var names —
+ *  narrowing to only one would silently break whichever library reads the other. `unknown` is not a
+ *  key here on purpose: callers fall back to `HARNESS_AUTH_VARS` (the full list) instead, since a
+ *  vendor we can't identify might need any of them. */
+const LINEAGE_AUTH_VARS: Record<"anthropic" | "openai" | "google" | "xai", string[]> = {
+	anthropic: ["ANTHROPIC_API_KEY"],
+	openai: ["OPENAI_API_KEY"],
+	google: ["GOOGLE_API_KEY", "GEMINI_API_KEY"],
+	xai: ["XAI_API_KEY"],
+};
+
+/** Harness names whose vendor `resolveProvider`/`modelLineage` cannot express — Augment routes model
+ *  calls through its own key regardless of which model family a unit pins, so it is not a
+ *  `ModelLineage` at all. Checked before lineage resolution, and independent of `model`: an
+ *  auggie ACP spawn needs `AUGMENT_API_KEY` no matter what model string (if any) rode along. */
+const HARNESS_ONLY_AUTH_VARS: Record<string, string[]> = {
+	auggie: ["AUGMENT_API_KEY"],
+};
+
+/** Harnesses that are multi-model by design (`harnessLineage` honestly returns "unknown" for them —
+ *  see model-lineage.ts) but whose OWN default model, absent an explicit per-unit pin, is Anthropic's
+ *  (`DEFAULT_PROVIDER`) — the same assumption `resolveProvider`'s callers already make for rate-limit
+ *  gating. Narrowing an omp/pi spawn with no model info to "every credential" would defeat the whole
+ *  point on the two most common harnesses in the fleet; narrowing it to Anthropic matches what the
+ *  spawn will actually use unless a unit explicitly pins a cross-vendor model (in which case `model`
+ *  is passed and `resolveProvider` resolves the REAL vendor before this fallback is ever consulted). */
+const DEFAULT_ANTHROPIC_HARNESSES = new Set(["omp", "pi"]);
+
+function admit(source: NodeJS.ProcessEnv, names: string[]): Record<string, string> {
 	const env: Record<string, string> = {};
-	for (const name of HARNESS_AUTH_VARS) {
+	for (const name of names) {
 		const v = source[name];
 		if (typeof v === "string") env[name] = v;
 	}
 	return env;
+}
+
+/**
+ * The subset of `source` naming THIS spawn's harness's own provider credential — spread this into
+ * `scrubbedSpawnEnv`'s `inject` argument at a spawn site. Concern 01: "the harness key for *this*
+ * spawn, injected deliberately... keep it narrow" — every OTHER provider credential the operator has
+ * configured (a multi-provider fleet sets all of them) must NOT reach a spawn that doesn't need it.
+ *
+ * `harness` (a registered harness NAME, e.g. "omp"/"codex"/"gemini"/"grok"/"auggie") and `model` (the
+ * unit's pinned model spec, when known) narrow the result to the single vendor this spawn actually
+ * needs, via the SAME `resolveProvider` combinator rate-limit gating already trusts (model wins when
+ * classifiable; the harness's static vendor pin is the fallback). Omitting `harness` — or a harness/
+ * model combination `resolveProvider` can't classify and isn't one of the omp/pi default-vendor cases
+ * above — falls back to the full `HARNESS_AUTH_VARS` list: the honest "we don't know" case, and
+ * strictly what every call site did before this narrowing existed.
+ */
+export function harnessAuthEnv(source: NodeJS.ProcessEnv = process.env, harness?: string, model?: string): Record<string, string> {
+	const h = harness?.toLowerCase();
+	if (h && HARNESS_ONLY_AUTH_VARS[h]) return admit(source, HARNESS_ONLY_AUTH_VARS[h]);
+	const lineage = resolveProvider(model, harness);
+	if (lineage !== "unknown") return admit(source, LINEAGE_AUTH_VARS[lineage]);
+	if (h && DEFAULT_ANTHROPIC_HARNESSES.has(h)) return admit(source, LINEAGE_AUTH_VARS.anthropic);
+	return admit(source, HARNESS_AUTH_VARS);
 }
 
 /**

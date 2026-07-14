@@ -8,6 +8,7 @@ import * as path from "node:path";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV } from "./git-harden.ts";
 import { existsSync, symlinkSync } from "node:fs";
 import { errText } from "./err-text.ts";
+import { scrubbedSpawnEnv } from "./spawn-env.ts";
 
 export interface GitResult {
 	code: number;
@@ -71,11 +72,18 @@ const RETRY_DELAYS_MS = [100, 300]; // ponytail: 3 attempts (2 backoffs); fleet 
  * Shared by `installScratchDeps` (land-pr.ts's disposable scratch-merge worktree) and
  * `provisionWorktreeDeps` below (a freshly-cut unit/fork worktree) — both need the identical
  * "does this dir even have a package.json, and if so did `bun install` actually succeed" check.
+ *
+ * `dir` is TENANT repo content — its root `package.json` can declare a `postinstall` that `bun
+ * install` runs (bun blocks *dependency* lifecycle scripts by default, but always runs the
+ * project's OWN scripts). A hostile repo's postinstall would otherwise read the daemon's full
+ * env — DATABASE_URL, the voice boot secret, etc — at provisioning time, before any agent even
+ * starts. Scrub it exactly like every other tenant-agent spawn (spawn-env.ts); no harness auth
+ * injection needed, `bun install` never makes a model call.
  */
 export async function installNodeModules(dir: string, timeoutMs = 120_000): Promise<string | null> {
 	if (!existsSync(path.join(dir, "package.json"))) return null;
 	try {
-		const proc = Bun.spawn(["bun", "install"], { cwd: dir, stdout: "pipe", stderr: "pipe" });
+		const proc = Bun.spawn(["bun", "install"], { cwd: dir, env: scrubbedSpawnEnv(process.env), stdout: "pipe", stderr: "pipe" });
 		const timer = setTimeout(() => proc.kill(), timeoutMs);
 		try {
 			const [, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);

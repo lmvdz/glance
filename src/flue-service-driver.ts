@@ -144,7 +144,10 @@ export class FlueServiceDriver extends EventEmitter implements AgentDriver {
 		// this is a tenant-agent spawn site like agent-host/omp-call/acp-agent-driver, running
 		// repo-supplied code that must not see the daemon's DATABASE_URL / OMP_SQUAD_*/GLANCE_* secrets.
 		// Route through the same scrub; harnessAuthEnv() so the worker's own `.flue/agents` config can
-		// still make a model call.
+		// still make a model call. Deliberately un-narrowed (no harness/model passed): a flue worker's
+		// `.flue/agents` config picks its own model/vendor independent of anything the daemon knows about
+		// this commission, so there is no vendor to narrow to — the full credential list is the honest
+		// answer here, not a missed narrowing (spawn-env.ts's HARNESS_AUTH_VARS doc).
 		const proc = Bun.spawn([inv.bin, ...inv.args], {
 			cwd: this.dir,
 			stdin: "ignore",
