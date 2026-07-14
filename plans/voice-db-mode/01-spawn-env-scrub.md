@@ -1,5 +1,5 @@
 # Spawn-env scrub — tenant agents must not inherit the daemon's secrets
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
