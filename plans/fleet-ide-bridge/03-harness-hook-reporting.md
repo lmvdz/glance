@@ -1,6 +1,10 @@
 # Harness hook self-reporting — close the attribution gap
 
-STATUS: open
+STATUS: in-review (PR #179)
+
+## Reality delta (2026-07-14, PR #179)
+
+The concern's stated premise — cost attribution gap — was WRONG: `src/ingest/claude-code.ts` + `codex.ts` already walk transcripts and attribute spend. The actual gap this closes is LIVENESS (a raw `claude` session is invisible to `glance who` until a transcript walk catches up). Events map onto the EXISTING presence registry, not a new store. Only claude-code's hook schema is verified/written; codex (schema undocumented in CLI) and gemini (not installed) are declared `unverified` and skipped — honesty-tier discipline. Both foreign-lineage reviews found real defects on the config-write + shim surface (path-traversal via sessionId, dead token path, non-atomic write, FD-blocking curl); all fixed + pinned. See PR body for the full table.
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
