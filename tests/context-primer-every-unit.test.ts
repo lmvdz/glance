@@ -191,6 +191,19 @@ test("the isolated tester lineage gets the same context, its own model", async (
 	expect(tester.model).toBe("opus"); // override wins for the tester
 });
 
+/**
+ * Round-3 review minor: `innerAgentOptions` built its RpcAgentOptions with no `harness`, so
+ * `harnessAuthEnv`'s no-model fallback couldn't narrow to Anthropic and admitted every configured
+ * provider credential instead — `actualUnitHarness` (squad-manager.ts) already documents "a
+ * workflow-kind unit's inner coder/tester is ALWAYS an omp-dialect RpcAgent" as an architectural fact,
+ * so this call site can name the harness precisely instead of leaving RpcAgent to guess.
+ */
+test("both workflow inner lineages (coder and tester) name harness 'omp' — narrows the auth-key fallback instead of admitting every provider credential", async () => {
+	const { innerAgentOptions } = await import("../src/workflow-driver.ts");
+	expect(innerAgentOptions({ id: "u1", cwd: "/wt" }, "coder").harness).toBe("omp");
+	expect(innerAgentOptions({ id: "u1", cwd: "/wt" }, "tester", "opus").harness).toBe("omp");
+});
+
 test("no context ⇒ nothing is fabricated onto the inner agent", async () => {
 	const { innerAgentOptions } = await import("../src/workflow-driver.ts");
 	expect(innerAgentOptions({ id: "u1", cwd: "/wt" }, "coder").appendSystemPrompt).toBeUndefined();

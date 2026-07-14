@@ -46,6 +46,21 @@ type Pending = {
 };
 
 const HOST_ENTRY = path.join(import.meta.dir, "agent-host-main.ts");
+/**
+ * The `bun agent-host-main.ts` process is spawned with THIS directory as its cwd — never the tenant
+ * worktree. Bun auto-loads a `bunfig.toml` from a process's spawn cwd and RUNS its `preload` scripts
+ * before the entry file's own imports execute (verified empirically: `bun <absolute-entry-path>` run
+ * from a cwd containing `bunfig.toml` executes that cwd's preload regardless of the entry path form).
+ * `agent-host-main.ts`'s only use of `--cwd` is to hand `opts.cwd` to `runAgentHost`, which uses it
+ * solely for the tenant's own omp/pi child (spawned through `scrubbedSpawnEnv` — see agent-host.ts) —
+ * so a tenant worktree committing `bunfig.toml` + a preload script must never get to run inside THIS
+ * process, which still carries the daemon's full, unscrubbed env (see the `Bun.spawn` call below): that
+ * would bypass the scrub one level up, before it ever applies. `HOST_ENTRY` is always an absolute path,
+ * so moving this process's cwd here does not change what gets loaded — only where a hostile `bunfig.toml`
+ * could be picked up from, and this directory is part of the daemon's own trusted checkout, never tenant
+ * content.
+ */
+const HOST_SPAWN_CWD = path.dirname(HOST_ENTRY);
 
 /**
  * Events emitted:
@@ -166,12 +181,22 @@ export class RpcAgent extends EventEmitter implements AgentDriver {
 		// `process.env.X = …` is invisible to a default-env child). The test preload's hermetic model
 		// source (tests/setup.ts's dummy ANTHROPIC_API_KEY) — and any operator tooling that adjusts
 		// env in-process before spawning agents — must reach the host, or omp boots model-less and
-		// every spawn times out inside the gate sandbox while "working" on logged-in hosts.
+		// every spawn times out inside the gate sandbox while "working" on logged-in hosts. This full,
+		// unscrubbed env is exactly why `cwd` below is `HOST_SPAWN_CWD`, not `this.opts.cwd` — see the
+		// doc on `HOST_SPAWN_CWD` above: this process must never load a tenant-controlled `bunfig.toml`.
+		//
+		// A worktree that vanished before its host spawns is a real, previously-seen incident (OMPSQ-188)
+		// — checked explicitly here (rather than relying on Bun.spawn's own ENOENT, which now names
+		// HOST_SPAWN_CWD, not the tenant cwd, since that's what this spawn actually uses) so the
+		// diagnostic still names the tenant worktree as the cause.
+		if (!existsSync(this.opts.cwd)) {
+			throw new Error(diagnoseSpawnFailure(new Error(`ENOENT: no such file or directory, posix_spawn '${cmd[0]}'`), cmd[0] as string, this.opts.cwd));
+		}
 		let proc: ReturnType<typeof Bun.spawn>;
 		try {
-			proc = Bun.spawn(cmd, { cwd: this.opts.cwd, stdin: "ignore", stdout: "ignore", stderr: "ignore", detached: true, env: { ...process.env } });
+			proc = Bun.spawn(cmd, { cwd: HOST_SPAWN_CWD, stdin: "ignore", stdout: "ignore", stderr: "ignore", detached: true, env: { ...process.env } });
 		} catch (err) {
-			throw new Error(diagnoseSpawnFailure(err, cmd[0] as string, this.opts.cwd));
+			throw new Error(diagnoseSpawnFailure(err, cmd[0] as string, HOST_SPAWN_CWD));
 		}
 		proc.unref();
 	}

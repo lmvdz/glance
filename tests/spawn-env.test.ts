@@ -273,6 +273,67 @@ test("mutation proof (agent-host.ts): the real omp child agent-host spawns never
 	});
 });
 
+// ── Mutation proof: the round-3 hole — a tenant worktree's OWN bunfig.toml/preload, one level above ─
+//    the scrubbed omp/pi child (RpcAgent.spawnHost's `bun agent-host-main.ts` process itself) ────────
+//
+// Bun auto-loads a `bunfig.toml` from a process's spawn cwd and RUNS its `preload` scripts before the
+// entry file's own imports execute — verified empirically (not asserted): `bun <absolute-entry-path>`
+// run from a cwd containing `bunfig.toml` executes that cwd's preload regardless of the entry path
+// form, and a cwd WITHOUT its own `bunfig.toml` never picks one up from a parent directory (no upward
+// search, unlike package.json resolution). Before the fix, `RpcAgent.spawnHost` ran `bun
+// agent-host-main.ts` with `cwd: this.opts.cwd` (the TENANT worktree) and the daemon's full,
+// unscrubbed `process.env` (documented at rpc-agent.ts, "env is passed EXPLICITLY as the live
+// process.env") — so a tenant repo committing `bunfig.toml` + a preload script got that preload
+// executed inside the HOST process, with every daemon secret, before `runAgentHost`'s own scrub
+// (`scrubbedSpawnEnv`) ever applied to the inner omp/pi child one level down.
+//
+// The SAME `bunfig.toml` also legitimately fires a second time, inside the INNER omp/pi child itself
+// (agent-host.ts's own `Bun.spawn` also uses `cwd: opts.cwd` — the tenant worktree, by necessity, since
+// that's where the agent operates) — but that spawn's env is already `scrubbedSpawnEnv`-scrubbed, so its
+// preload only ever sees the scrubbed env. Per the design ruling this concern operates under ("Scrubbed
+// omp/land/vision spawns are fine — their preloads only see the scrubbed env"), that second firing is
+// expected and NOT a hole. So the preload here APPENDS one JSON line per invocation (never overwrites —
+// overwriting would let the inner child's later, scrubbed-and-safe run silently mask an earlier
+// unscrubbed leak from the host) and the assertion covers every captured invocation: DATABASE_URL must
+// never appear in ANY of them. If `spawnHost` regresses to `cwd: this.opts.cwd`, the HOST process's
+// preload fires first with the daemon's real, unscrubbed env (DATABASE_URL included) and this goes red.
+test("mutation proof (rpc-agent.ts spawnHost): a hostile bunfig.toml + preload committed in the tenant worktree never sees DATABASE_URL in ANY invocation, including inside the host process itself", async () => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "sqt-spawn-env-bunfig-"));
+	tmps.push(dir);
+	const leakPath = path.join(dir, "leaked-preload-env.ndjson");
+	await fs.writeFile(path.join(dir, "bunfig.toml"), `preload = ["./preload.ts"]\n`);
+	await fs.writeFile(path.join(dir, "preload.ts"), `require("fs").appendFileSync(${JSON.stringify(leakPath)}, JSON.stringify(process.env) + "\\n");\n`);
+
+	const binPath = path.join(dir, "fake-omp-envdump.ts");
+	const dumpPath = path.join(dir, "env.json");
+	await fs.writeFile(binPath, fakeOmpEnvDump(dumpPath));
+	await fs.chmod(binPath, 0o755);
+	const socket = path.join(dir, "agent.sock");
+
+	await withEnv("DATABASE_URL", "postgres://mutation-proof-bunfig-preload", async () => {
+		const agent = new RpcAgent({ id: `spawn-env-bunfig-${Date.now().toString(36)}`, cwd: dir, bin: binPath, socket, approvalMode: "yolo", thinking: "minimal" });
+		agents.push(agent);
+		await agent.start(20_000);
+		await agent.stop();
+
+		// Sanity: the tenant's actual omp/pi child (the legitimately-scrubbed inner spawn) still ran fine
+		// and still never saw DATABASE_URL — the fix didn't just move the leak, it closed it.
+		const dumped = JSON.parse(await fs.readFile(dumpPath, "utf8")) as Record<string, string>;
+		expect(dumped.DATABASE_URL).toBeUndefined();
+		expect(dumped.PATH).toBeDefined();
+
+		// Every captured preload invocation (host process and/or inner child, however many fired) never
+		// saw DATABASE_URL — the property this test exists to prove, independent of firing count.
+		const raw = await fs.readFile(leakPath, "utf8").catch(() => "");
+		const invocations = raw
+			.split("\n")
+			.filter((l) => l.trim())
+			.map((l) => JSON.parse(l) as Record<string, string>);
+		expect(invocations.length).toBeGreaterThan(0); // sanity: the hostile preload really did fire at least once (via the inner child)
+		for (const env of invocations) expect(env.DATABASE_URL).toBeUndefined();
+	});
+});
+
 /** A minimal ACP agent that dumps its env to `dumpPath` before anything else, then answers the
  *  handshake (`initialize`, `session/new`) so `start()` resolves. */
 function fakeAcpEnvDump(dumpPath: string): string {
