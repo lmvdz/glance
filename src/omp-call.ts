@@ -6,6 +6,7 @@
 
 import { gitNoSignEnv } from "./git-harden.ts";
 import { extractOutermostJson } from "./json-extract.ts";
+import { harnessAuthEnv, scrubbedSpawnEnv } from "./spawn-env.ts";
 
 const DEFAULT_TIMEOUT_MS = 1_000;
 
@@ -22,7 +23,8 @@ export async function ompOneShot(args: string[], opts: { bin?: string; timeoutMs
 			stdin: "ignore",
 			stdout: "pipe",
 			stderr: "ignore",
-			env: { ...process.env, ...gitNoSignEnv() },
+			// A tenant agent runs THIS omp -p call — scrub the daemon's secrets from its env (spawn-env.ts).
+			env: scrubbedSpawnEnv(process.env, { ...gitNoSignEnv(), ...harnessAuthEnv() }),
 			signal: AbortSignal.timeout(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS),
 		});
 		const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);

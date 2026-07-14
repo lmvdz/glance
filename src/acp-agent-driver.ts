@@ -30,6 +30,7 @@ import type { Subprocess } from "bun";
 import type { TodoPhase, TodoStatus } from "@oh-my-pi/pi-coding-agent/tools/todo";
 import type { AgentDriver } from "./agent-driver.ts";
 import { toAcpMcpServers } from "./mcp-config.ts";
+import { harnessAuthEnv, scrubbedSpawnEnv } from "./spawn-env.ts";
 import type { McpServerSpec, RpcSessionState } from "./types.ts";
 
 export interface AcpAgentDriverOptions {
@@ -198,7 +199,10 @@ export class AcpAgentDriver extends EventEmitter implements AgentDriver {
 
 	async start(timeoutMs = 60_000): Promise<void> {
 		const cmd = this.opts.command ?? buildAcpCommand(this.opts.model);
-		const proc = Bun.spawn(cmd, { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+		// Passing NO `env` option here inherited the daemon's FULL environment (Bun.spawn's default) —
+		// the easiest of the three spawn sites to miss, because the absence of an `env` key reads as
+		// "nothing leaks" when it actually means the opposite. Scrub explicitly (spawn-env.ts).
+		const proc = Bun.spawn(cmd, { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: scrubbedSpawnEnv(process.env, harnessAuthEnv()) });
 		this.proc = proc;
 		void this.pumpStdout(proc.stdout);
 		void this.pumpStderr(proc.stderr);

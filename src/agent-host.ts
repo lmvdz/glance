@@ -29,6 +29,7 @@ import type { Socket } from "bun";
 import type { ApprovalMode, ThinkingLevel } from "./types.ts";
 import { getHarness } from "./harness-registry.ts";
 import { gitNoSignEnv } from "./git-harden.ts";
+import { harnessAuthEnv, scrubbedSpawnEnv } from "./spawn-env.ts";
 
 export interface AgentHostOptions {
 	id: string;
@@ -164,12 +165,14 @@ export async function runAgentHost(opts: AgentHostOptions): Promise<void> {
 
 	// Force commit/tag signing OFF (see gitNoSignEnv) so a global
 	// commit.gpgsign=true can't block the agent on a pinentry prompt.
+	// This is the omp/pi child a tenant agent actually runs as — its env must be scrubbed of the
+	// daemon's secrets (DATABASE_URL etc; see spawn-env.ts), not just deny/allow-listed by call site.
 	const proc = Bun.spawn([opts.bin ?? "omp", ...args], {
 		cwd: opts.cwd,
 		stdin: "pipe",
 		stdout: "pipe",
 		stderr: "pipe",
-		env: { ...process.env, PI_RPC_EMIT_TITLE: "0", ...gitNoSignEnv() },
+		env: scrubbedSpawnEnv(process.env, { PI_RPC_EMIT_TITLE: "0", ...gitNoSignEnv(), ...harnessAuthEnv() }),
 	});
 
 	let ready = false;
