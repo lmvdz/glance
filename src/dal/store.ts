@@ -14,6 +14,7 @@
  * for the expected per-org roster size; upgrade to diff-upsert only if it bites.
  */
 
+import { randomInt } from "node:crypto";
 import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -157,10 +158,25 @@ export class FileStore implements Store {
 	async appendUsage(): Promise<void> {}
 }
 
+// A per-process random salt, drawn once at module load, folded into every id this process mints.
+// Without it, two freshly-booted replicas both start `auditSeq` at 0 — if both write an audit row
+// in the SAME millisecond (the exact scenario a fleet of replicas booting together produces), the
+// pre-fix `Date.now() * 1000 + (auditSeq++ % 1000)` shape computed the IDENTICAL id on both, and
+// `audit.id` is a global PK, so the second insert 500s. The salt means that scenario now only
+// collides when two replicas independently draw the same salt (1-in-1000, not guaranteed).
+const auditSeqSalt = randomInt(0, 1000);
 let auditSeq = 0;
-/** Monotonic, collision-free audit id (epoch-ms × 1000 + per-process counter). */
+/** Collision-resistant audit id: epoch-ms × 1000 + ((per-boot random salt + a per-process
+ *  monotonic counter) mod 1000). Ordering never relies on `id` — `reserveOrgAuditSlot`'s cap check
+ *  counts rows by the `at` column, not `id` — so `id` only needs to be unique, not strictly time-
+ *  ordered; trading a sliver of the old (deterministic, collision-prone) ordering guarantee for
+ *  actual cross-process collision resistance is safe. Residual risk: >1000 calls from ANY mix of
+ *  processes landing on the same millisecond can still collide (a 1-in-1000-ish birthday bound,
+ *  not zero) — acceptable for this table's write rate (one row per voice mint attempt, rate-capped
+ *  well below 1000/ms per org); a DB-generated id (serial/identity column) would close the residual
+ *  gap entirely but is a schema migration, out of scope for this fix. */
 function nextAuditId(): number {
-	return Date.now() * 1000 + (auditSeq++ % 1000);
+	return Date.now() * 1000 + ((auditSeqSalt + auditSeq++) % 1000);
 }
 
 /**
@@ -570,20 +586,25 @@ export interface OrgSecretRecord {
  *  concern 05's admin handler remembering to strip the field by hand. */
 export type OrgSecretSummary = Omit<OrgSecretRecord, "plaintext">;
 
-function toRecord(row: {
-	provider: string;
-	ciphertext: string;
-	nonce: string;
-	last4: string;
-	enabled: number;
-	created_by: string;
-	updated_by: string;
-	created_at: number;
-	updated_at: number;
-}): OrgSecretRecord | undefined {
-	// Fail-closed: a corrupted row or a wrong/rotated master key decrypts to `undefined` here, and
-	// that degrades to "no secret" for this org — never a throw into the caller's request.
-	const plaintext = decryptSecret({ ciphertext: row.ciphertext, nonce: row.nonce });
+function toRecord(
+	orgId: string,
+	row: {
+		provider: string;
+		ciphertext: string;
+		nonce: string;
+		last4: string;
+		enabled: number;
+		created_by: string;
+		updated_by: string;
+		created_at: number;
+		updated_at: number;
+	},
+): OrgSecretRecord | undefined {
+	// Fail-closed: a corrupted row, a wrong/rotated master key, OR an AAD mismatch (this row's
+	// ciphertext didn't actually originate from THIS org+provider pairing — e.g. a raw-row copy
+	// across orgs) decrypts to `undefined` here, and that degrades to "no secret" for this org —
+	// never a throw into the caller's request.
+	const plaintext = decryptSecret({ ciphertext: row.ciphertext, nonce: row.nonce }, `${orgId}:${row.provider}`);
 	if (plaintext === undefined) return undefined;
 	return {
 		provider: row.provider,
@@ -600,13 +621,6 @@ function toRecord(row: {
 	};
 }
 
-/** Strip `plaintext` from a full record. The one place that projection happens, so `putOrgSecret`
- *  and any future caller share the exact same shape instead of each hand-rolling a subset. */
-function toSummary(record: OrgSecretRecord): OrgSecretSummary {
-	const { plaintext: _plaintext, ...summary } = record;
-	return summary;
-}
-
 /** Read + decrypt one org's provider secret. `undefined` covers every "no usable secret" case
  *  uniformly — no row, no active org, or a decrypt failure — callers don't get to distinguish
  *  them (nor should they: all three mean "voice unavailable for this org"). Does NOT consult
@@ -619,25 +633,30 @@ export async function getOrgSecret(ctx: OrgContext, orgId: string, provider: str
 		trx.selectFrom("org_secret").selectAll().where("org_id", "=", orgId).where("provider", "=", provider).executeTakeFirst(),
 	);
 	if (!row) return undefined;
-	return toRecord(row);
+	return toRecord(orgId, row);
 }
 
 /** Encrypt and upsert one org's provider secret (admin PUT). Returns `undefined` — never throws
  *  — when no master key is configured server-side: a write that can't be encrypted must not
  *  persist plaintext, so it persists nothing at all. `actor` is the `db:<userId>` tag (never
- *  role-derived, per DESIGN.md's "Mint audit discipline" row). A re-PUT keeps `enabled` at
- *  whatever it already was UNLESS this is a fresh row, which starts enabled (the admin who just
- *  configured the key almost certainly wants it live; disabling is the separate kill-switch call
- *  below). Returns `OrgSecretSummary` (no `plaintext`) — the admin HTTP handler can echo this
- *  response body directly without re-deriving a safe projection.
+ *  role-derived, per DESIGN.md's "Mint audit discipline" row). A re-PUT ALWAYS sets `enabled: 1`,
+ *  matching the insert path — a freshly provider-verified key re-save is an explicit
+ *  re-provision, and must actually re-enable a previously-disabled row (the admin who just pasted
+ *  a working key almost certainly wants it live now; the OFF-only-going-forward lever is the
+ *  separate synchronous kill switch below). Returns `OrgSecretSummary` (no `plaintext`) — the
+ *  admin HTTP handler can echo this response body directly without re-deriving a safe projection.
+ *  Built entirely from the single `INSERT … ON CONFLICT … RETURNING` round trip below (no
+ *  follow-up `getOrgSecret` SELECT + AES decrypt — the summary never needs the plaintext, and the
+ *  RETURNING clause already carries the row's true `created_by`/`created_at`, which a
+ *  build-from-scope shortcut would get wrong on the update path).
  *  Consumed by the admin PUT endpoint (server.ts, concern 05). */
 export async function putOrgSecret(ctx: OrgContext, orgId: string, provider: string, plaintext: string, actor: string): Promise<OrgSecretSummary | undefined> {
 	if (!orgId) return undefined;
-	const enc = encryptSecret(plaintext);
+	const enc = encryptSecret(plaintext, `${orgId}:${provider}`);
 	if (!enc) return undefined;
 	const now = Date.now();
 	const last4Val = secretLast4(plaintext);
-	await withOrg(ctx, orgId, (trx) =>
+	const row = await withOrg(ctx, orgId, (trx) =>
 		trx
 			.insertInto("org_secret")
 			.values({
@@ -657,14 +676,26 @@ export async function putOrgSecret(ctx: OrgContext, orgId: string, provider: str
 					ciphertext: enc.ciphertext,
 					nonce: enc.nonce,
 					last4: last4Val,
+					enabled: 1,
 					updated_by: actor,
 					updated_at: now,
 				}),
 			)
-			.execute(),
+			.returning(["provider", "last4", "enabled", "created_by", "updated_by", "created_at", "updated_at"])
+			.executeTakeFirst(),
 	);
-	const written = await getOrgSecret(ctx, orgId, provider);
-	return written === undefined ? undefined : toSummary(written);
+	if (!row) return undefined;
+	return {
+		provider: row.provider,
+		last4: row.last4,
+		enabled: !!row.enabled,
+		createdBy: row.created_by,
+		updatedBy: row.updated_by,
+		// Postgres returns bigint (int8) columns as strings; SQLite returns a real number — coerce
+		// explicitly, matching `toRecord`'s handling of the same columns.
+		createdAt: Number(row.created_at),
+		updatedAt: Number(row.updated_at),
+	};
 }
 
 /** Delete one org's provider secret (admin DELETE). `ON DELETE CASCADE` on the org FK handles the

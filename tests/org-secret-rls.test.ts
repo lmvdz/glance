@@ -198,6 +198,108 @@ test("DAL: putOrgSecret persists nothing when no master key is configured (fail-
 	}
 });
 
+test("DAL: AAD binds ciphertext to its (org, provider) — copying org A's ciphertext into org B's row fails to decrypt, fail-closed, even under the same shared master key (the raw-row-copy hole a cross-lineage audit found: SQLite has no RLS, only a where-clause guard)", async () => {
+	initMasterKey({ OMP_SQUAD_SECRETS_KEY: KEY_HEX });
+	await setup();
+	try {
+		await putOrgSecret(ctx, "A", "openai", "sk-org-a-only", "db:user-a");
+		await putOrgSecret(ctx, "B", "openai", "sk-org-b-placeholder", "db:user-b");
+		const rowA = await handle.db
+			.selectFrom("org_secret")
+			.select(["ciphertext", "nonce"])
+			.where("org_id", "=", "A")
+			.where("provider", "=", "openai")
+			.executeTakeFirstOrThrow();
+		// Raw-row write: splice org A's (ciphertext, nonce) into org B's row — exactly the scenario
+		// the AAD binding (not the where-clause, which this bypasses by construction) defends
+		// against.
+		await handle.db
+			.updateTable("org_secret")
+			.set({ ciphertext: rowA.ciphertext, nonce: rowA.nonce })
+			.where("org_id", "=", "B")
+			.where("provider", "=", "openai")
+			.execute();
+		await expect(getOrgSecret(ctx, "B", "openai")).resolves.toBeUndefined();
+		// Org A's own read is unaffected by the tampering done to org B's row.
+		expect((await getOrgSecret(ctx, "A", "openai"))?.plaintext).toBe("sk-org-a-only");
+	} finally {
+		await teardown();
+	}
+});
+
+test("DAL: AAD binds ciphertext to its provider too — splicing between two providers within the SAME org fails to decrypt", async () => {
+	initMasterKey({ OMP_SQUAD_SECRETS_KEY: KEY_HEX });
+	await setup();
+	try {
+		await putOrgSecret(ctx, "A", "openai", "sk-openai-only", "db:user-a");
+		await putOrgSecret(ctx, "A", "anthropic", "sk-anthropic-placeholder", "db:user-a");
+		const openaiRow = await handle.db
+			.selectFrom("org_secret")
+			.select(["ciphertext", "nonce"])
+			.where("org_id", "=", "A")
+			.where("provider", "=", "openai")
+			.executeTakeFirstOrThrow();
+		await handle.db
+			.updateTable("org_secret")
+			.set({ ciphertext: openaiRow.ciphertext, nonce: openaiRow.nonce })
+			.where("org_id", "=", "A")
+			.where("provider", "=", "anthropic")
+			.execute();
+		await expect(getOrgSecret(ctx, "A", "anthropic")).resolves.toBeUndefined();
+	} finally {
+		await teardown();
+	}
+});
+
+test("DAL: putOrgSecret re-enables a previously-disabled row (a fresh verified-key re-save is an explicit re-provision, not just a rotation) — RED without the fix: mint stays silently 501ing after a re-PUT", async () => {
+	initMasterKey({ OMP_SQUAD_SECRETS_KEY: KEY_HEX });
+	await setup();
+	try {
+		await putOrgSecret(ctx, "A", "openai", "sk-first-key", "db:user-a");
+		await setOrgSecretEnabled(ctx, "A", "openai", false, "db:admin-a");
+		expect((await getOrgSecret(ctx, "A", "openai"))?.enabled).toBe(false);
+
+		const written = await putOrgSecret(ctx, "A", "openai", "sk-rotated-key", "db:user-a");
+		expect(written?.enabled).toBe(true);
+		const after = await getOrgSecret(ctx, "A", "openai");
+		expect(after?.enabled).toBe(true);
+		expect(after?.plaintext).toBe("sk-rotated-key");
+	} finally {
+		await teardown();
+	}
+});
+
+test("DAL: putOrgSecret's returned summary preserves the ORIGINAL createdBy/createdAt across an update (not the update's actor/now) while updatedBy/updatedAt do change — proves the RETURNING-based rewrite didn't regress the shape a naive 'build from values in scope' shortcut would have gotten wrong", async () => {
+	initMasterKey({ OMP_SQUAD_SECRETS_KEY: KEY_HEX });
+	await setup();
+	try {
+		const first = await putOrgSecret(ctx, "A", "openai", "sk-v1", "db:user-a");
+		expect(first).not.toBeUndefined();
+		expect(first?.createdBy).toBe("db:user-a");
+		await new Promise((r) => setTimeout(r, 5)); // ensure a distinguishable updatedAt
+		const second = await putOrgSecret(ctx, "A", "openai", "sk-v2", "db:user-b");
+		expect(second?.createdBy).toBe("db:user-a"); // unchanged — the ORIGINAL creator
+		expect(second?.createdAt).toBe(first?.createdAt); // unchanged — the ORIGINAL creation time
+		expect(second?.updatedBy).toBe("db:user-b"); // changed — this write's actor
+		expect(second?.updatedAt).toBeGreaterThanOrEqual(first!.updatedAt);
+	} finally {
+		await teardown();
+	}
+});
+
+test("DAL: putOrgSecret's summary never carries a plaintext field even on the update path (RETURNING-based rewrite)", async () => {
+	initMasterKey({ OMP_SQUAD_SECRETS_KEY: KEY_HEX });
+	await setup();
+	try {
+		await putOrgSecret(ctx, "A", "openai", "sk-first", "db:user-a");
+		const updated = await putOrgSecret(ctx, "A", "openai", "sk-second-should-not-leak", "db:user-a");
+		expect(updated).not.toHaveProperty("plaintext");
+		expect(JSON.stringify(updated)).not.toContain("sk-second-should-not-leak");
+	} finally {
+		await teardown();
+	}
+});
+
 // ── Layer 2: Postgres RLS policy SQL shape (no live server required) ────────────────────────
 
 /** A `pg`-shaped fake pool: `PostgresDriver.acquireConnection` calls `pool.connect()` and gets
