@@ -1,5 +1,5 @@
 # Voice card in Organization settings — paste, verify, disable, remove
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
