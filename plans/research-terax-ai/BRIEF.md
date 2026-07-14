@@ -65,3 +65,37 @@ Cheap Apache-2.0 PR adding a glance marker spec to `agent_detect.rs` (or simply 
 **Direct integration of glance into terax-ai is a shape mismatch — recommend against.** terax is a single-user, single-window, single-workspace desktop client with no server, no headless mode, and no agent protocol; glance is a multi-tenant daemon with its own web UI, worktree isolation, and merge pipeline. There is no surface for terax to host, drive, or display the fleet, and terax is not a drivable harness glance could adopt (it's a GUI, not a CLI/ACP agent). The realistic touchpoints are shallow: run the `glance` TUI in a terax terminal tab and emit OSC 777 markers (pattern 1) so terax's notification bell surfaces fleet attention — that's visibility, not integration, and it comes free with pattern 1.
 
 **The real payoff of this research is patterns 1 and 2** (a zero-dependency terminal attention lane; hook-based self-reporting to close the attribution gap) **plus the architectural validation in 3.**
+
+---
+
+## 2026-07-14 (later): suite reframe — "terax + glance as one product"
+
+Lars reframed the question: not "plug glance into terax's extension points" but **one suite — manage the fleet AND dig into the nitty gritty** — and explicitly put **forking terax into our own desktop app** on the table. A second scout pass verified the three facts that decide the economics (same commit `a2c8329`), and adjudicated one contradiction.
+
+### Verified seams (second scout, source-quoted)
+
+1. **Preview tab renders arbitrary URLs — the glance webapp embeds in terax TODAY, zero code.** `PreviewTab.url` is a free string; `PreviewPane.tsx` is a plain sandboxed iframe; `tauri.conf.json` CSP has `frame-src 'self' http: https:` (wide open). A localhost SPA framed at `http://localhost:<port>` runs its own SSE/websocket traffic under its own origin, unconstrained by the shell CSP. User opens via command palette → "New web preview" → types the daemon URL. (Iframe sandbox omits `allow-top-navigation*` to protect Tauri IPC — fine for us.)
+2. **`terax <directory>` opens that directory as the active workspace on all three platforms** — plain argv parsing in `src-tauri/src/lib.rs` (`parse_launch_target`: first dir arg becomes workspace root, authorized in `WorkspaceRegistry`). No `terax://` URL scheme exists (no deep-link plugin). macOS Finder "Open With" is file-only, but direct CLI invocation with a dir works everywhere. → "open this unit's worktree in terax" = the glance daemon/CLI spawning `terax <worktree-path>`.
+3. **Spaces are plain unvalidated JSON** (`terax-spaces.json` via tauri-plugin-store; `SpaceMeta {id,name,root,env,color,...}` + `state:<id>` with serialized tabs incl. `{kind:"preview",url}`). An external tool could pre-register a Space per glance worktree — including a pre-seeded preview tab pointing at the daemon — by writing the file while terax is closed. LOW-CONFIDENCE only on the exact per-OS data-dir path.
+4. **CSP `connect-src` already allows `http://localhost:*` and `http://127.0.0.1:*`** — a native (forked) fleet module in terax's webview can fetch/SSE the glance daemon directly, no proxy needed.
+
+### Adjudication: terax has NO ACP (first scout confirmed)
+
+Second scout claimed ACP shipped via PRs #193/#684. Checked against source: GitHub code search for `acp` in the repo returns **0 hits**, and both #193 ("external coding agents over ACP") and #684 ("universal agent registry — 22 coding CLIs") are **CLOSED, unmerged**. Issue #121 (add ACP) remains open. Reading: contributors tried twice to bring protocol-grade agent integration upstream and it didn't land — the maintainer gatekeeps hard (consistent with the documented provider-list gatekeeping). **An upstream fleet-module PR would likely meet the same fate; the fork is the realistic route to native integration.** Meanwhile open issue #549 (native multi-agent orchestration) and the MCP requests (#1002/#378/#388, all unaddressed) show upstream demand drifting toward glance's territory.
+
+### Suite architecture (revised verdict)
+
+The original verdict ("don't integrate") stands only against terax's *extension points*. The suite is a different shape: **glance daemon = fleet brain, terax = local cockpit, joined at the worktree.** The complementarity is exact — glance's webapp is weakest where terax is strongest (dropping into a worktree with a real terminal, LSP editor, git surface) and terax has no multi-agent model at all.
+
+**v0 — zero fork, assembled from verified seams (glance-side work only):**
+- `glance open <unit>` (CLI + daemon endpoint + webapp button) → spawns `terax <worktree-path>`. Terminal, editor, git in the unit's worktree, one action from the fleet view.
+- Glance webapp embedded in a terax preview tab (daemon URL). Optionally pre-seed a "Fleet" Space via `terax-spaces.json`.
+- OSC 777 attention markers from glance TUI/CLI (pattern 1 above) → terax's notification bell surfaces fleet attention. Note: terax's detector self-arms on their OSC 777 marker convention, so matching their format lights the bell without any terax-side change.
+
+**v1 — thin fork = the glance desktop app:**
+- Fork terax (Apache-2.0, clean), add an additive `src/modules/fleet/` module — native client of the daemon's existing REST/SSE API (CSP already permits it). Roster, attention lane, intervene view, land controls; bell deep-links to fleet panes.
+- Add a `glance://`-style deep-link plugin and dir-open polish (the fork closes terax's own gaps where useful).
+- **Rebase economics**: upstream merges dozens of PRs/week under one maintainer — a hard fork diverges fast. Mitigation: terax's `src/modules/<area>/` barrel-export convention is designed for additive modules; keep the fork additive-only (new module + minimal registration touches + name/icon rebrand), rebase on a cadence. Defer deep rebrand — it multiplies conflict surface.
+- Risk: upstream builds its own orchestration (issue #549 demand exists) and collides with our module; counter-position is that the daemon, worktree isolation, and merge pipeline are years of moat they'd be rebuilding from zero.
+
+**Recommendation**: ship v0 now (it's small and reversible, and living with it tells us if the suite thesis holds in practice), decide the fork after. Patterns 1–2 from the original analysis are prerequisites of v0 anyway.
