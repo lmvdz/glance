@@ -20,6 +20,7 @@ import * as path from "node:path";
 import type { PersistedAgent, PersistedFeature, RunReceipt, TranscriptEntry } from "../types.ts";
 import { normalizeCapabilitySnapshot, type CapabilitySnapshot } from "../capabilities/index.ts";
 import { emptyFeedbackSnapshot, type FeedbackSnapshot } from "../feedback.ts";
+import { decryptSecret, encryptSecret, last4 as secretLast4 } from "../secrets.ts";
 import { type OrgContext, withOrg } from "./context.ts";
 import { getStorageBackend } from "./storage.ts";
 
@@ -414,4 +415,136 @@ export class DbStore implements Store {
 			await writeFileDurable(this.transcriptsFile, JSON.stringify(transcripts));
 		} catch {}
 	}
+}
+
+/**
+ * `org_secret` accessors — NOT part of the `Store` interface above: FileStore has no DB and no
+ * org concept (DESIGN.md: "file mode never reads the table"), so these are free functions taking
+ * an `OrgContext` directly, called only from DB-mode code paths (concern 03's resolver, concern
+ * 05's admin endpoints).
+ *
+ * Every one of the four guards `if (!orgId)` BEFORE calling `withOrg` — `withOrg` itself THROWS
+ * on an empty org id (see dal/context.ts), and a DB session with no active org is a real,
+ * reachable state (an unauthenticated caller, a session mid-org-switch). Throwing a decrypt/store
+ * call into a request because of that is exactly the "never a 500 at call time" posture this
+ * concern rules out — the guard turns it into a clean "no secret" instead.
+ */
+
+/** One org's decrypted provider secret plus its metadata. `plaintext` is the raw credential —
+ *  never logged, never returned to any HTTP response (the admin GET route returns `last4` only). */
+export interface OrgSecretRecord {
+	provider: string;
+	plaintext: string;
+	last4: string;
+	enabled: boolean;
+	createdBy: string;
+	updatedBy: string;
+	createdAt: number;
+	updatedAt: number;
+}
+
+function toRecord(row: {
+	provider: string;
+	ciphertext: string;
+	nonce: string;
+	last4: string;
+	enabled: number;
+	created_by: string;
+	updated_by: string;
+	created_at: number;
+	updated_at: number;
+}): OrgSecretRecord | undefined {
+	// Fail-closed: a corrupted row or a wrong/rotated master key decrypts to `undefined` here, and
+	// that degrades to "no secret" for this org — never a throw into the caller's request.
+	const plaintext = decryptSecret({ ciphertext: row.ciphertext, nonce: row.nonce });
+	if (plaintext === undefined) return undefined;
+	return {
+		provider: row.provider,
+		plaintext,
+		last4: row.last4,
+		enabled: !!row.enabled,
+		createdBy: row.created_by,
+		updatedBy: row.updated_by,
+		createdAt: row.created_at,
+		updatedAt: row.updated_at,
+	};
+}
+
+/** Read + decrypt one org's provider secret. `undefined` covers every "no usable secret" case
+ *  uniformly — no row, no active org, or a decrypt failure — callers don't get to distinguish
+ *  them (nor should they: all three mean "voice unavailable for this org"). Does NOT consult
+ *  `enabled` — the synchronous kill switch is a separate check the caller applies on the returned
+ *  record, matching DESIGN.md's "Kill switch" row (deleting a key and disabling it are distinct
+ *  levers). */
+export async function getOrgSecret(ctx: OrgContext, orgId: string, provider: string): Promise<OrgSecretRecord | undefined> {
+	if (!orgId) return undefined;
+	const row = await withOrg(ctx, orgId, (trx) =>
+		trx.selectFrom("org_secret").selectAll().where("org_id", "=", orgId).where("provider", "=", provider).executeTakeFirst(),
+	);
+	if (!row) return undefined;
+	return toRecord(row);
+}
+
+/** Encrypt and upsert one org's provider secret (admin PUT). Returns `undefined` — never throws
+ *  — when no master key is configured server-side: a write that can't be encrypted must not
+ *  persist plaintext, so it persists nothing at all. `actor` is the `db:<userId>` tag (never
+ *  role-derived, per DESIGN.md's "Mint audit discipline" row). A re-PUT keeps `enabled` at
+ *  whatever it already was UNLESS this is a fresh row, which starts enabled (the admin who just
+ *  configured the key almost certainly wants it live; disabling is the separate kill-switch call
+ *  below). */
+export async function putOrgSecret(ctx: OrgContext, orgId: string, provider: string, plaintext: string, actor: string): Promise<OrgSecretRecord | undefined> {
+	if (!orgId) return undefined;
+	const enc = encryptSecret(plaintext);
+	if (!enc) return undefined;
+	const now = Date.now();
+	const last4Val = secretLast4(plaintext);
+	await withOrg(ctx, orgId, (trx) =>
+		trx
+			.insertInto("org_secret")
+			.values({
+				org_id: orgId,
+				provider,
+				ciphertext: enc.ciphertext,
+				nonce: enc.nonce,
+				last4: last4Val,
+				enabled: 1,
+				created_by: actor,
+				updated_by: actor,
+				created_at: now,
+				updated_at: now,
+			})
+			.onConflict((oc) =>
+				oc.columns(["org_id", "provider"]).doUpdateSet({
+					ciphertext: enc.ciphertext,
+					nonce: enc.nonce,
+					last4: last4Val,
+					updated_by: actor,
+					updated_at: now,
+				}),
+			)
+			.execute(),
+	);
+	return getOrgSecret(ctx, orgId, provider);
+}
+
+/** Delete one org's provider secret (admin DELETE). `ON DELETE CASCADE` on the org FK handles the
+ *  bulk case (an org itself being deleted); this is the single-row admin-initiated removal. */
+export async function deleteOrgSecret(ctx: OrgContext, orgId: string, provider: string): Promise<void> {
+	if (!orgId) return;
+	await withOrg(ctx, orgId, (trx) => trx.deleteFrom("org_secret").where("org_id", "=", orgId).where("provider", "=", provider).execute());
+}
+
+/** Flip the synchronous kill switch (DESIGN.md "Kill switch" row) without touching the stored
+ *  key — instant, reversible, no re-paste. A no-op (not an error) when the org has no row for
+ *  this provider yet: there is nothing to enable/disable. */
+export async function setOrgSecretEnabled(ctx: OrgContext, orgId: string, provider: string, enabled: boolean, actor: string): Promise<void> {
+	if (!orgId) return;
+	await withOrg(ctx, orgId, (trx) =>
+		trx
+			.updateTable("org_secret")
+			.set({ enabled: enabled ? 1 : 0, updated_by: actor, updated_at: Date.now() })
+			.where("org_id", "=", orgId)
+			.where("provider", "=", provider)
+			.execute(),
+	);
 }

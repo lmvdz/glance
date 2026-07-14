@@ -155,6 +155,26 @@ export interface FeedbackRewardsTable {
 	created_at: number;
 }
 
+/** One provider credential per org — the voice lane's BYO OpenAI key (plans/voice-db-mode/
+ *  02-secret-store.md). `ciphertext`/`nonce` are AES-256-GCM under the boot master key
+ *  (src/secrets.ts), per-row nonce. `last4` is PLAINTEXT and exists only for the admin UI's
+ *  rotation check — it is not an identifier (OpenAI keys share long prefixes), so it must never
+ *  be treated as one. `enabled` is the synchronous kill switch (DESIGN.md "Kill switch" row),
+ *  independent of key deletion. `created_by`/`updated_by` are `db:<userId>` actor tags, never
+ *  role-derived. Primary key `(org_id, provider)` — one credential per provider per org. */
+export interface OrgSecretTable {
+	org_id: string;
+	provider: string;
+	ciphertext: string;
+	nonce: string;
+	last4: string;
+	enabled: number;
+	created_by: string;
+	updated_by: string;
+	created_at: number;
+	updated_at: number;
+}
+
 export interface AppDatabase {
 	organization: OrganizationTable;
 	roster_index: RosterIndexTable;
@@ -167,6 +187,7 @@ export interface AppDatabase {
 	feedback_items: FeedbackItemsTable;
 	feedback_validation_responses: FeedbackValidationResponsesTable;
 	feedback_rewards: FeedbackRewardsTable;
+	org_secret: OrgSecretTable;
 }
 
 export type RosterRow = Selectable<RosterIndexTable>;
@@ -179,3 +200,4 @@ export type FeedbackCampaignRow = Selectable<FeedbackCampaignsTable>;
 export type FeedbackItemRow = Selectable<FeedbackItemsTable>;
 export type FeedbackValidationResponseRow = Selectable<FeedbackValidationResponsesTable>;
 export type FeedbackRewardRow = Selectable<FeedbackRewardsTable>;
+export type OrgSecretRow = Selectable<OrgSecretTable>;
