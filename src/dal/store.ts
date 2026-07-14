@@ -431,7 +431,9 @@ export class DbStore implements Store {
  */
 
 /** One org's decrypted provider secret plus its metadata. `plaintext` is the raw credential —
- *  never logged, never returned to any HTTP response (the admin GET route returns `last4` only). */
+ *  never logged, never returned to any HTTP response (the admin GET route returns `last4` only).
+ *  Only `getOrgSecret` returns this full shape; `putOrgSecret` returns `OrgSecretSummary` (below)
+ *  so the plaintext-free projection is enforced by the type checker, not by caller discipline. */
 export interface OrgSecretRecord {
 	provider: string;
 	plaintext: string;
@@ -442,6 +444,12 @@ export interface OrgSecretRecord {
 	createdAt: number;
 	updatedAt: number;
 }
+
+/** `OrgSecretRecord` minus `plaintext` — the admin PUT response shape. DESIGN.md pins the admin
+ *  GET at `{configured, last4, updatedAt, updatedBy, enabled}`; this is the write-path analogue
+ *  that makes `return json(await putOrgSecret(...))` structurally safe instead of relying on
+ *  concern 05's admin handler remembering to strip the field by hand. */
+export type OrgSecretSummary = Omit<OrgSecretRecord, "plaintext">;
 
 function toRecord(row: {
 	provider: string;
@@ -465,9 +473,19 @@ function toRecord(row: {
 		enabled: !!row.enabled,
 		createdBy: row.created_by,
 		updatedBy: row.updated_by,
-		createdAt: row.created_at,
-		updatedAt: row.updated_at,
+		// Postgres returns bigint (int8) columns as strings (no pg.types.setTypeParser(20, ...) is
+		// registered — see src/db/index.ts); SQLite returns a real number. Coerce explicitly so the
+		// field is a `number` on both backends, matching the type this function declares.
+		createdAt: Number(row.created_at),
+		updatedAt: Number(row.updated_at),
 	};
+}
+
+/** Strip `plaintext` from a full record. The one place that projection happens, so `putOrgSecret`
+ *  and any future caller share the exact same shape instead of each hand-rolling a subset. */
+function toSummary(record: OrgSecretRecord): OrgSecretSummary {
+	const { plaintext: _plaintext, ...summary } = record;
+	return summary;
 }
 
 /** Read + decrypt one org's provider secret. `undefined` covers every "no usable secret" case
@@ -475,7 +493,8 @@ function toRecord(row: {
  *  them (nor should they: all three mean "voice unavailable for this org"). Does NOT consult
  *  `enabled` — the synchronous kill switch is a separate check the caller applies on the returned
  *  record, matching DESIGN.md's "Kill switch" row (deleting a key and disabling it are distinct
- *  levers). */
+ *  levers).
+ *  @substrate consumed by the org-aware voice resolver, concern 03 (not yet landed) */
 export async function getOrgSecret(ctx: OrgContext, orgId: string, provider: string): Promise<OrgSecretRecord | undefined> {
 	if (!orgId) return undefined;
 	const row = await withOrg(ctx, orgId, (trx) =>
@@ -491,8 +510,10 @@ export async function getOrgSecret(ctx: OrgContext, orgId: string, provider: str
  *  role-derived, per DESIGN.md's "Mint audit discipline" row). A re-PUT keeps `enabled` at
  *  whatever it already was UNLESS this is a fresh row, which starts enabled (the admin who just
  *  configured the key almost certainly wants it live; disabling is the separate kill-switch call
- *  below). */
-export async function putOrgSecret(ctx: OrgContext, orgId: string, provider: string, plaintext: string, actor: string): Promise<OrgSecretRecord | undefined> {
+ *  below). Returns `OrgSecretSummary` (no `plaintext`) — the admin HTTP handler can echo this
+ *  response body directly without re-deriving a safe projection.
+ *  @substrate consumed by concern 05's admin PUT endpoint (not yet landed) */
+export async function putOrgSecret(ctx: OrgContext, orgId: string, provider: string, plaintext: string, actor: string): Promise<OrgSecretSummary | undefined> {
 	if (!orgId) return undefined;
 	const enc = encryptSecret(plaintext);
 	if (!enc) return undefined;
@@ -524,11 +545,13 @@ export async function putOrgSecret(ctx: OrgContext, orgId: string, provider: str
 			)
 			.execute(),
 	);
-	return getOrgSecret(ctx, orgId, provider);
+	const written = await getOrgSecret(ctx, orgId, provider);
+	return written === undefined ? undefined : toSummary(written);
 }
 
 /** Delete one org's provider secret (admin DELETE). `ON DELETE CASCADE` on the org FK handles the
- *  bulk case (an org itself being deleted); this is the single-row admin-initiated removal. */
+ *  bulk case (an org itself being deleted); this is the single-row admin-initiated removal.
+ *  @substrate consumed by concern 05's admin DELETE endpoint (not yet landed) */
 export async function deleteOrgSecret(ctx: OrgContext, orgId: string, provider: string): Promise<void> {
 	if (!orgId) return;
 	await withOrg(ctx, orgId, (trx) => trx.deleteFrom("org_secret").where("org_id", "=", orgId).where("provider", "=", provider).execute());
@@ -536,7 +559,8 @@ export async function deleteOrgSecret(ctx: OrgContext, orgId: string, provider: 
 
 /** Flip the synchronous kill switch (DESIGN.md "Kill switch" row) without touching the stored
  *  key — instant, reversible, no re-paste. A no-op (not an error) when the org has no row for
- *  this provider yet: there is nothing to enable/disable. */
+ *  this provider yet: there is nothing to enable/disable.
+ *  @substrate consumed by concern 05's admin enable/disable endpoint (not yet landed) */
 export async function setOrgSecretEnabled(ctx: OrgContext, orgId: string, provider: string, enabled: boolean, actor: string): Promise<void> {
 	if (!orgId) return;
 	await withOrg(ctx, orgId, (trx) =>

@@ -64,7 +64,12 @@ export interface DeadExport {
  *  way, so the ceiling tightens by one instead of quietly absorbing a new entry. */
 /** 2026-07-13 (voice lane PR): 217 — voice-token.ts's voiceModel/voiceProviderIds/voiceVoice were
  *  exported with zero external or test references (pure over-exports); unexported, ceiling tightens. */
-export const BASELINE = 217;
+/** 2026-07-14 (voice-db-mode secret-store review fixes): 216 — the org_secret substrate
+ *  (initMasterKey/hasMasterKey in secrets.ts, appMigrations in migrations.ts, and store.ts's
+ *  getOrgSecret/putOrgSecret/deleteOrgSecret/setOrgSecretEnabled) is genuinely built ahead of its
+ *  callers — concerns 03 and 05 wire it up in later batches — so each got an honest `@substrate`
+ *  tag instead of sitting uncounted; the ceiling still tightens by one net. */
+export const BASELINE = 216;
 
 function scriptKindFor(rel: string): ts.ScriptKind {
 	return rel.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS;

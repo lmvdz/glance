@@ -274,7 +274,8 @@ const createJoinRequests: Migration = {
 /** The full, ordered app migration set. Exported so tests can invoke an individual migration's
  *  `up()` directly (e.g. proving the org_secret RLS policy's exact SQL against a fake Postgres
  *  connection) without needing to simulate the Migrator's advisory-lock bookkeeping end to end —
- *  `migrateApp` below is the only production caller. */
+ *  `migrateApp` below is the only production caller.
+ *  @substrate exported so tests/org-secret-rls.test.ts can invoke a single migration's up() directly */
 export function appMigrations(type: DbKind): Record<string, Migration> {
 	return {
 		"0001_app_tables": createAppTables,

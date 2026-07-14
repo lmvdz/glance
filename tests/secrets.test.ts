@@ -112,11 +112,15 @@ test("the GLANCE_ twin is honored when OMP_SQUAD_SECRETS_KEY is absent", () => {
 	expect(hasMasterKey()).toBe(true);
 });
 
-test("OMP_SQUAD_SECRETS_KEY wins over the GLANCE_ twin when both are set", () => {
+test("GLANCE_SECRETS_KEY wins over the OMP_SQUAD_ twin when both are set (matches env-compat.ts's documented precedence)", () => {
+	// GLANCE_SECRETS_KEY=KEY_HEX_B, OMP_SQUAD_SECRETS_KEY=KEY_HEX — GLANCE_ must be the effective key.
 	initMasterKey({ OMP_SQUAD_SECRETS_KEY: KEY_HEX, GLANCE_SECRETS_KEY: KEY_HEX_B });
 	const enc = encryptSecret("probe")!;
-	// If GLANCE_ had won, decrypting under KEY_HEX (OMP_SQUAD_'s value) would fail.
+	// RED proof: if OMP_SQUAD_ had won (the pre-fix behavior), decrypting under KEY_HEX would succeed.
 	initMasterKey({ OMP_SQUAD_SECRETS_KEY: KEY_HEX });
+	expect(decryptSecret(enc)).toBeUndefined();
+	// GREEN proof: decrypting under KEY_HEX_B (the GLANCE_ value) succeeds — GLANCE_ actually won.
+	initMasterKey({ GLANCE_SECRETS_KEY: KEY_HEX_B });
 	expect(decryptSecret(enc)).toBe("probe");
 });
 

@@ -58,9 +58,18 @@ let masterKey: Buffer | undefined;
  * process env) and a reusable test seam (tests pass a synthetic env object so the real
  * `process.env` is never touched by test setup). Returns the decoded key, or `undefined` when
  * absent/malformed — callers never see a throw here.
+ *
+ * Precedence: `GLANCE_SECRETS_KEY` wins when both are set, matching env-compat.ts's documented
+ * "GLANCE_ wins on conflict" rule (env-compat.ts:16) — src/index.ts loads env-compat.ts first and
+ * mirrors the twins to identical values before this module's boot call, so the two normally agree,
+ * but any other entrypoint that imports this module first must see the same precedence contract.
+ *
+ * @substrate test seam + boot mechanism — exported so tests can drive different boot states
+ * against a synthetic env without a fresh module instance; production must call this at most once
+ * (the unconditional call at the bottom of this file), never again from request-handling code.
  */
 export function initMasterKey(source: NodeJS.ProcessEnv = process.env): Buffer | undefined {
-	const raw = source.OMP_SQUAD_SECRETS_KEY ?? source.GLANCE_SECRETS_KEY;
+	const raw = source.GLANCE_SECRETS_KEY ?? source.OMP_SQUAD_SECRETS_KEY;
 	delete source.OMP_SQUAD_SECRETS_KEY;
 	delete source.GLANCE_SECRETS_KEY;
 	masterKey = raw === undefined ? undefined : decodeKey(raw);
@@ -68,7 +77,8 @@ export function initMasterKey(source: NodeJS.ProcessEnv = process.env): Buffer |
 }
 
 /** True once boot has established a usable 32-byte master key. Concern 03's resolver (and the
- *  voice config probe / mint gate) key the whole lane's `enabled:false` / 501 posture on this. */
+ *  voice config probe / mint gate) key the whole lane's `enabled:false` / 501 posture on this.
+ *  @substrate consumed by the org-aware voice resolver, concern 03 (not yet landed) */
 export function hasMasterKey(): boolean {
 	return masterKey !== undefined;
 }

@@ -64,7 +64,11 @@ test("DAL: org A's secret is invisible to org B (explicit org_id predicate)", as
 	await setup();
 	try {
 		const written = await putOrgSecret(ctx, "A", "openai", "sk-org-a-secret", "db:user-a");
-		expect(written?.plaintext).toBe("sk-org-a-secret");
+		// putOrgSecret returns OrgSecretSummary — no `plaintext` field, so an admin PUT handler that
+		// echoes this response body can never leak the credential over the wire.
+		expect(written).not.toHaveProperty("plaintext");
+		expect(JSON.stringify(written)).not.toContain("sk-org-a-secret");
+		expect(written?.last4).toBe("cret");
 
 		const fromB = await getOrgSecret(ctx, "B", "openai");
 		expect(fromB).toBeUndefined();

@@ -1,5 +1,5 @@
 # Encrypted per-org secret store — table, migration, RLS, crypto
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
