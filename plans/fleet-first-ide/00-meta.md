@@ -47,3 +47,4 @@ Runs under `.claude/skills/fleet-ide-loop/SKILL.md`: each iteration orients here
 
 - 2026-07-14 — meta-plan authored; Epics B + C expanded; loop armed.
 - 2026-07-14 — iteration 1: B01 osc-attention-emitter shipped as draft PR #177 (suite 2790/0, tsc clean; live-toast check owed). Bonus: fixed a real escape-injection hole in the existing TUI bell. Next: C01 repo bootstrap.
+- 2026-07-14 — iteration 2: C01 bootstrap DONE-except-cargo — private repo lmvdz/glance-desktop live (terax @ a2c8329, upstream remote, main pushed), lint/types/vitest(351)/build all green, UPSTREAM.md as glance-desktop#2. OWED (Lars): `sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libssl-dev libdbus-1-dev` then cargo re-check. Next: B02 or B03.

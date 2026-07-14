@@ -39,4 +39,5 @@ A private `glance-desktop` repo (terax fork, `upstream` remote, additive-only di
 
 - Cockpit clone lives at `~/sui/glance-desktop` (created by C01). Branch-per-concern, PRs within glance-desktop repo, additive-only: new files under `src/modules/fleet/` plus the minimal registration touches upstream's module convention requires.
 - Gates: `pnpm install && pnpm build`, `pnpm vitest run`, `cargo check` (full `cargo build` at least once per batch); Biome clean. Linux (WSL2) needs webkit2gtk/Tauri apt deps — C01 documents the exact set it installed.
+- Gotcha (hit in C01): with an `upstream` remote present, bare `gh pr create` resolves the BASE repo to crynta/terax-ai and tries to open the PR upstream. `gh repo set-default lmvdz/glance-desktop` is set in the clone; still pass `--repo lmvdz/glance-desktop` explicitly in scripts.
 - Daemon API additions belong in omp-squad PRs, never in the fork. The fork consumes the daemon's existing REST/SSE surface; when a gap is found, the loop files the daemon concern in this dir (new NN doc) and stacks accordingly.
