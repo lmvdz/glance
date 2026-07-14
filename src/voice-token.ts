@@ -29,9 +29,24 @@
  * NEVER log the provider's raw mint response or the minted `value` (an `ek_...` ephemeral token) —
  * neither this module nor its callers may do so; exfiltrating one is bounded to cost abuse (it
  * cannot drive the fleet — tools still require the glance bearer token), but it is still a live
- * secret for its ~60-minute lifetime.
+ * secret for its establishment window (`voiceTokenTtlSeconds`, default 120s — see its doc comment:
+ * that bounds *establishment*, not the call itself, which the provider caps independently on its
+ * own session clock).
+ *
+ * Spend controls (plans/voice-db-mode/04-spend-controls.md, DESIGN.md "Spend & abuse controls"):
+ * the daemon never sees audio or dollars, so mints are its only signal. Three layers, each honest
+ * about what it measures — the 120s establishment TTL above, server.ts's durable per-org
+ * concurrency cap (mint-audit rows inside the provider's `maxSessionWindowMs`, restart-safe by
+ * construction since it's derived from the DB, not an in-memory map), and the existing per-actor
+ * per-minute limiter as a cheap pre-filter that was NEVER an org bound and isn't described as one.
+ * A rate cap is not a budget: no surface may render a per-member or per-call dollar figure. The
+ * `enabled` kill switch (`voiceKeyFor`, `dal/store.ts`'s `setOrgSecretEnabled`) stops the NEXT mint
+ * synchronously, but neither it nor a key deletion can recall a browser session already connected —
+ * that live session drains for up to the provider's own session cap (revocation reality, DESIGN.md
+ * "Revocation reality" row; not a gap this concern can close, just one it must not hide).
  */
 
+import { envInt } from "./config.ts";
 import type { OrgContext } from "./dal/context.ts";
 import { getOrgSecret } from "./dal/store.ts";
 
@@ -47,6 +62,11 @@ interface VoiceProviderConfig {
 	/** Whether this provider bills a flat rate regardless of session params — the only condition
 	 *  under which `pinnedAtMint: false` is ever safe (module doc comment). */
 	readonly flatPrice: boolean;
+	/** The provider's OWN cap on a live session's duration (DESIGN.md "Org spend bound" row) —
+	 *  the window the durable per-org concurrency cap counts mint-audit rows over
+	 *  (plans/voice-db-mode/04-spend-controls.md). Not env-overridable: it describes the
+	 *  provider's behavior, not daemon policy. */
+	readonly maxSessionWindowMs: number;
 }
 
 const VOICE_PROVIDERS: Record<VoiceProviderId, VoiceProviderConfig> = {
@@ -56,8 +76,21 @@ const VOICE_PROVIDERS: Record<VoiceProviderId, VoiceProviderConfig> = {
 		transport: "webrtc",
 		pinnedAtMint: true,
 		flatPrice: false,
+		maxSessionWindowMs: 60 * 60_000, // 60 min
 	},
 };
+
+/** The window the durable per-org concurrency cap (server.ts, `countRecentOrgAudit`) counts this
+ *  provider's mint-audit rows over — a mint older than its own provider's session cap can no longer
+ *  correspond to a live session, so it drops out of the count once the window slides past it. */
+export function voiceProviderMaxSessionWindowMs(id: VoiceProviderId): number {
+	return VOICE_PROVIDERS[id].maxSessionWindowMs;
+}
+
+/** The audit `action` every successful mint is recorded under (server.ts) — exported so the durable
+ *  per-org concurrency cap's counting query (`countRecentOrgAudit`) reads the exact same string the
+ *  write uses, rather than two call sites having to agree on a literal by hand. */
+export const VOICE_MINT_AUDIT_ACTION = "voice.mint";
 
 // Registry-definition-time guard (red-team, see module doc comment): runs once at import time over
 // the static constants above — this is a build-time-shaped failure (a bad registry entry), never
@@ -82,6 +115,17 @@ function voiceModel(): string {
 
 function voiceVoice(): string {
 	return process.env.OMP_SQUAD_VOICE_VOICE?.trim() || "marin";
+}
+
+/** Seconds until the minted token itself expires (`expires_after.seconds`) — an ESTABLISHMENT
+ *  window, not the call length: the provider caps a live session's duration independently, on its
+ *  own clock, once the browser has connected (DESIGN.md "Mint TTL" row). Default 120s is long
+ *  enough to establish the WebRTC connection right after mint, short enough that hoarding hundreds
+ *  of unused tokens for later stops being possible. `OMP_SQUAD_VOICE_TOKEN_TTL_S`-overridable;
+ *  `envInt` respects an operator-configured `0`/negative faithfully (a provider 400 is the honest
+ *  outcome of misconfiguring this to something nonsensical, not a silently-substituted default). */
+function voiceTokenTtlSeconds(): number {
+	return envInt("OMP_SQUAD_VOICE_TOKEN_TTL_S", 120);
 }
 
 /** Which lane a voice-key lookup resolves in — the ONE signal every consumer below reads instead
@@ -239,7 +283,30 @@ export interface VoiceMintToken {
 	pinnedAtMint: boolean;
 }
 
-export type VoiceMintResult = { ok: true; token: VoiceMintToken } | { ok: false; status: number; message: string };
+export type VoiceMintResult =
+	| {
+			ok: true;
+			token: VoiceMintToken;
+			/** The provider's OWN session id, when it returned one — never the ephemeral `value`
+			 *  (DESIGN.md "Mint audit discipline" row). NOT part of `VoiceMintToken`: the browser never
+			 *  needs it, and every response the browser sees is `Response.json(result.token)` — keeping
+			 *  it a sibling field, not a token property, means it can never leak there by accident.
+			 *  server.ts's audit write is its only consumer, so an admin can cross-reference their own
+			 *  OpenAI dashboard. `undefined` when the provider's response didn't include one — audit
+			 *  writers must contain-or-omit, never invent a placeholder. */
+			providerSessionId: string | undefined;
+	  }
+	| { ok: false; status: number; message: string };
+
+/** Pull `session.id` out of a mint response's `session` object, if present and string-shaped. The
+ *  response shape isn't otherwise validated field-by-field beyond `value`/`expires_at` below, so this
+ *  stays defensive rather than assuming the provider always sends one. */
+function extractProviderSessionId(session: unknown): string | undefined {
+	if (session && typeof session === "object" && "id" in session && typeof (session as { id: unknown }).id === "string") {
+		return (session as { id: string }).id;
+	}
+	return undefined;
+}
 
 /**
  * Mint a short-lived provider token. Unknown provider ids 400 before any fetch (SSRF doctrine,
@@ -294,7 +361,9 @@ async function mintOpenAiToken(cfg: VoiceProviderConfig, apiKey: string): Promis
 			},
 			tools: VOICE_SESSION_TOOLS,
 		},
-		expires_after: { anchor: "created_at", seconds: 3600 },
+		// Establishment window, NOT call length (see `voiceTokenTtlSeconds` doc comment) — the
+		// provider caps a live session's own duration independently of this.
+		expires_after: { anchor: "created_at", seconds: voiceTokenTtlSeconds() },
 	};
 	let res: Response;
 	try {
@@ -317,7 +386,7 @@ async function mintOpenAiToken(cfg: VoiceProviderConfig, apiKey: string): Promis
 		// from the daemon operator's own provider-side dashboard.
 		return { ok: false, status: 502, message: `voice provider mint failed (upstream status ${res.status})` };
 	}
-	const data = (await res.json().catch(() => null)) as { value?: unknown; expires_at?: unknown } | null;
+	const data = (await res.json().catch(() => null)) as { value?: unknown; expires_at?: unknown; session?: unknown } | null;
 	if (!data || typeof data.value !== "string" || typeof data.expires_at !== "number") {
 		return { ok: false, status: 502, message: "voice provider mint returned an unexpected shape" };
 	}
@@ -330,5 +399,8 @@ async function mintOpenAiToken(cfg: VoiceProviderConfig, apiKey: string): Promis
 			transport: cfg.transport,
 			pinnedAtMint: cfg.pinnedAtMint,
 		},
+		// Currently discarded pre-concern-04 — this is what lets an admin cross-reference their own
+		// OpenAI dashboard against a mint audit row (DESIGN.md "Mint audit discipline" row).
+		providerSessionId: extractProviderSessionId(data.session),
 	};
 }

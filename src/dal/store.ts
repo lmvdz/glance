@@ -354,27 +354,7 @@ export class DbStore implements Store {
 	}
 
 	async appendAudit(entry: AuditEntry): Promise<void> {
-		await withOrg(this.ctx, this.orgId, async (trx) => {
-			// No dedicated `source` column (no migration for this concern) — fold it into the JSON
-			// `detail` blob instead of dropping it, so DB-mode never silently loses the provenance tag
-			// the file-mode audit trail carries natively.
-			const detail =
-				entry.source === undefined
-					? entry.detail
-					: { ...(isPlainObject(entry.detail) ? entry.detail : entry.detail !== undefined ? { detail: entry.detail } : {}), source: entry.source };
-			await trx
-				.insertInto("audit")
-				.values({
-					id: nextAuditId(),
-					org_id: this.orgId,
-					actor: entry.actor,
-					action: entry.action,
-					target: entry.target ?? null,
-					detail: detail === undefined ? null : JSON.stringify(detail),
-					at: Date.now(),
-				})
-				.execute();
-		});
+		await appendOrgAudit(this.ctx, this.orgId, entry);
 	}
 
 	async appendUsage(receipt: RunReceipt): Promise<void> {
@@ -415,6 +395,65 @@ export class DbStore implements Store {
 			await writeFileDurable(this.transcriptsFile, JSON.stringify(transcripts));
 		} catch {}
 	}
+}
+
+/**
+ * Free-standing `audit` table primitives — NOT part of the `Store` interface, so callers that don't
+ * hold a `Store` instance can still write/read org-scoped audit rows. The voice mint route
+ * (server.ts, plans/voice-db-mode/04-spend-controls.md) is the reason: it runs BEFORE the
+ * `!manager` gate (minting is independent of any specific fleet manager, and a DB-mode refusal must
+ * fire even with no active org), so it may have `ctx`/`orgId` from `voiceScope` with no per-org
+ * `SquadManager`/`DbStore` resolved at all. `DbStore.appendAudit` above is now a thin wrapper over
+ * `appendOrgAudit` so there is exactly one write path, not two that could drift.
+ */
+
+/** Write one row directly into the org-scoped `audit` table. `entry.actor` is caller-supplied — the
+ *  voice mint route passes `actor.id`, already `db:<userId>` in DB mode (never role-derived; see
+ *  server.ts's actor construction), never re-derived here. No active org ⇒ no-op, never a throw —
+ *  same guard discipline as the `org_secret` accessors below. */
+export async function appendOrgAudit(ctx: OrgContext, orgId: string, entry: AuditEntry): Promise<void> {
+	if (!orgId) return;
+	await withOrg(ctx, orgId, async (trx) => {
+		// No dedicated `source` column (no migration for this concern) — fold it into the JSON
+		// `detail` blob instead of dropping it, so DB-mode never silently loses the provenance tag
+		// the file-mode audit trail carries natively.
+		const detail =
+			entry.source === undefined
+				? entry.detail
+				: { ...(isPlainObject(entry.detail) ? entry.detail : entry.detail !== undefined ? { detail: entry.detail } : {}), source: entry.source };
+		await trx
+			.insertInto("audit")
+			.values({
+				id: nextAuditId(),
+				org_id: orgId,
+				actor: entry.actor,
+				action: entry.action,
+				target: entry.target ?? null,
+				detail: detail === undefined ? null : JSON.stringify(detail),
+				at: Date.now(),
+			})
+			.execute();
+	});
+}
+
+/** Count this org's `action`-matching audit rows written since `sinceMs` — the durable, restart-safe
+ *  data source for the per-org voice-mint concurrency cap (plans/voice-db-mode/04-spend-controls.md,
+ *  DESIGN.md "Org spend bound" row). `appendOrgAudit`'s `VOICE_MINT_AUDIT_ACTION` writes (server.ts)
+ *  are this query's ONLY input, so the count survives a daemon restart and is correct across
+ *  replicas — the durability the draft's rejected "second in-memory map keyed by org" could never
+ *  offer. No active org ⇒ 0, never a throw. */
+export async function countRecentOrgAudit(ctx: OrgContext, orgId: string, action: string, sinceMs: number): Promise<number> {
+	if (!orgId) return 0;
+	const row = await withOrg(ctx, orgId, (trx) =>
+		trx
+			.selectFrom("audit")
+			.select(({ fn }) => fn.countAll().as("n"))
+			.where("org_id", "=", orgId)
+			.where("action", "=", action)
+			.where("at", ">=", sinceMs)
+			.executeTakeFirst(),
+	);
+	return row ? Number(row.n) : 0;
 }
 
 /**

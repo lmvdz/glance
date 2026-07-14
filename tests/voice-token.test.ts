@@ -58,6 +58,8 @@ const SAVED_ENV: Record<string, string | undefined> = {
 	OMP_SQUAD_VOICE_MODEL: process.env.OMP_SQUAD_VOICE_MODEL,
 	OMP_SQUAD_VOICE_VOICE: process.env.OMP_SQUAD_VOICE_VOICE,
 	OMP_SQUAD_VOICE_MINT_RATE_PER_MIN: process.env.OMP_SQUAD_VOICE_MINT_RATE_PER_MIN,
+	OMP_SQUAD_VOICE_TOKEN_TTL_S: process.env.OMP_SQUAD_VOICE_TOKEN_TTL_S,
+	OMP_SQUAD_VOICE_MAX_CONCURRENT_PER_ORG: process.env.OMP_SQUAD_VOICE_MAX_CONCURRENT_PER_ORG,
 	DATABASE_URL: process.env.DATABASE_URL,
 };
 const cleanups: Array<() => Promise<void> | void> = [];
@@ -144,13 +146,16 @@ function dbAuthStubFor(users: Record<string, DbUser>): AuthInstance {
 }
 
 /** Minimal stand-in for the bits of `SquadManager` the registry's own lifecycle code touches
- *  (list/off/stop) — mirrors tests/ws-org-isolation.test.ts's `fakeManager`/`seed` pair. The
- *  voice routes never dereference `manager` at all (they return before the `!manager` gate), so a
- *  real per-org fleet would be pure overhead here; seeding sidesteps spinning one up. */
+ *  (list/off/stop) — mirrors tests/ws-org-isolation.test.ts's `fakeManager`/`seed` pair. Rewritten
+ *  for concern 04: the voice routes still resolve/refuse independently of `manager` (they can return
+ *  before the `!manager` gate), but a SUCCESSFUL mint now best-effort-calls `manager.recordAudit`
+ *  for the JSONL trail (both modes carry a mint audit line) — `recordAudit` is a real, if inert,
+ *  method here rather than omitted, so that write doesn't crash against this stand-in. */
 interface FakeManager {
 	list(): unknown[];
 	off(event: "event", listener: (e: unknown) => void): void;
 	stop(): Promise<void>;
+	recordAudit(actor: unknown, action: string, target: string | null, outcome?: "ok" | "error", detail?: string, source?: string): Promise<void>;
 }
 
 interface RegistryInternals {
@@ -160,7 +165,7 @@ interface RegistryInternals {
 function seedOrgs(registry: ManagerRegistry, orgIds: string[]): void {
 	const internals = registry as unknown as RegistryInternals;
 	for (const id of orgIds) {
-		internals.managers.set(id, { manager: { list: () => [], off: () => {}, stop: async () => {} }, listener: () => {}, lastUsed: Date.now() });
+		internals.managers.set(id, { manager: { list: () => [], off: () => {}, stop: async () => {}, recordAudit: async () => {} }, listener: () => {}, lastUsed: Date.now() });
 	}
 }
 
@@ -233,7 +238,24 @@ test("mintVoiceToken maps a successful OpenAI mint to the uniform shape and pins
 		"fleet_status",
 		"interrupt",
 	]);
-	expect(capturedBody.expires_after).toEqual({ anchor: "created_at", seconds: 3600 });
+	// Flipped deliberately (plans/voice-db-mode/04-spend-controls.md): 3600s used to be pinned here.
+	// The ephemeral token bounds ESTABLISHMENT, not call length (the provider caps a live session's
+	// own duration independently) — 120s is the new default, env-overridable below.
+	expect(capturedBody.expires_after).toEqual({ anchor: "created_at", seconds: 120 });
+	// Currently discarded pre-concern-04 — the mint-audit write's cross-reference field.
+	expect(result.providerSessionId).toBe("sess_1");
+});
+
+test("mintVoiceToken's expires_after seconds honors OMP_SQUAD_VOICE_TOKEN_TTL_S (concern 04's establishment window is env-overridable)", async () => {
+	process.env.OMP_SQUAD_VOICE_TOKEN_TTL_S = "45";
+	let capturedBody: any;
+	mockOpenAiMint((body) => {
+		capturedBody = body;
+		return { status: 200, json: { value: "ek_ttl", expires_at: 1, session: {} } };
+	});
+	const result = await mintVoiceToken("openai", "sk-key");
+	expect(result.ok).toBe(true);
+	expect(capturedBody.expires_after).toEqual({ anchor: "created_at", seconds: 45 });
 });
 
 test("VOICE_SESSION_TOOLS stays deep-equal with the webapp dispatcher's VOICE_TOOL_DEFS (cross-build sync pin)", async () => {

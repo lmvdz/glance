@@ -106,7 +106,18 @@ import { actorForRole, type AuthPolicy, RbacDenied, requestToken, requiredRole, 
 import { handleFeedbackRoutes } from "./feedback-routes.ts";
 import { configuredSocialProviders, signupOpen } from "./db/auth.ts";
 import { getWorkosOrgPolicy, parseWorkosEvent, setWorkosOrgPolicy, ssoEnabled, verifyWorkosSignature } from "./workos.ts";
-import { isKnownVoiceProvider, mintVoiceToken, orgHasKey, voiceConnectSrcOrigins, voiceKeyFor, voiceProviderPublicInfo, type VoiceKeyScope } from "./voice-token.ts";
+import {
+	isKnownVoiceProvider,
+	mintVoiceToken,
+	orgHasKey,
+	voiceConnectSrcOrigins,
+	voiceKeyFor,
+	voiceProviderMaxSessionWindowMs,
+	voiceProviderPublicInfo,
+	VOICE_MINT_AUDIT_ACTION,
+	type VoiceKeyScope,
+} from "./voice-token.ts";
+import { appendOrgAudit, countRecentOrgAudit } from "./dal/store.ts";
 
 /** The agent id/name a `ClientCommand` mutates, if any — "create"/"snapshot"/"commission" name no
  *  agent (they don't need cross-manager resolution); "message" targets a peer by `to`, but that's
@@ -414,13 +425,15 @@ function isLoopbackAddr(ip: string): boolean {
 const VOICE_MINT_RATE_DEFAULT_PER_MIN = 6;
 let voiceMintRateLimitWarned = false;
 
-/** OMP_SQUAD_VOICE_MINT_RATE_PER_MIN is the ONLY spend brake on voice mint (audio never transits
- *  the daemon, so the mint count is the daemon's only signal). `envInt` faithfully returns a
- *  configured `0` or negative value rather than silently substituting the default — correct for
- *  every OTHER env reader, but here a non-positive value must never be read as "unlimited": that's
- *  the same absence-as-success shape as an empty array meaning "nothing to report" (the audit
- *  gauntlet's naming). Clamp to the default and warn once (not on every request) so a misconfigured
- *  `0` can't silently remove the only cap on cost abuse. */
+/** OMP_SQUAD_VOICE_MINT_RATE_PER_MIN — a cheap PRE-FILTER, not the org bound (rewritten,
+ *  plans/voice-db-mode/04-spend-controls.md): it keys `actor.id`, i.e. per USER, is per-process, and
+ *  resets on restart — it never bounded an org and must not be described as if it did. The durable
+ *  per-org bound is `resolveVoiceMaxConcurrentPerOrg` below, derived from the mint-audit table.
+ *  `envInt` faithfully returns a configured `0` or negative value rather than silently substituting
+ *  the default — correct for every OTHER env reader, but here a non-positive value must never be
+ *  read as "unlimited": that's the same absence-as-success shape as an empty array meaning "nothing
+ *  to report" (the audit gauntlet's naming). Clamp to the default and warn once (not on every
+ *  request) so a misconfigured `0` can't silently remove this pre-filter. */
 function resolveVoiceMintRatePerMin(): number {
 	const configured = envInt("OMP_SQUAD_VOICE_MINT_RATE_PER_MIN", VOICE_MINT_RATE_DEFAULT_PER_MIN);
 	if (configured > 0) return configured;
@@ -431,6 +444,28 @@ function resolveVoiceMintRatePerMin(): number {
 		);
 	}
 	return VOICE_MINT_RATE_DEFAULT_PER_MIN;
+}
+
+const VOICE_MAX_CONCURRENT_PER_ORG_DEFAULT = 5;
+let voiceMaxConcurrentWarned = false;
+
+/** OMP_SQUAD_VOICE_MAX_CONCURRENT_PER_ORG — the durable, per-org concurrency cap
+ *  (plans/voice-db-mode/04-spend-controls.md, DESIGN.md "Org spend bound" row): count this org's
+ *  `voice.mint` audit rows inside the provider's own max-session window and refuse beyond N. Derived
+ *  from the `audit` table (see `countRecentOrgAudit`), so it's restart-safe and correct across
+ *  replicas — unlike the rejected draft's "second in-memory map keyed by org", which would have
+ *  inherited both defects of `voiceMintRate` above. Same non-positive clamp-and-warn-once discipline
+ *  as `resolveVoiceMintRatePerMin`: a misconfigured `0`/negative must not silently zero out the cap. */
+function resolveVoiceMaxConcurrentPerOrg(): number {
+	const configured = envInt("OMP_SQUAD_VOICE_MAX_CONCURRENT_PER_ORG", VOICE_MAX_CONCURRENT_PER_ORG_DEFAULT);
+	if (configured > 0) return configured;
+	if (!voiceMaxConcurrentWarned) {
+		voiceMaxConcurrentWarned = true;
+		console.warn(
+			`[server] OMP_SQUAD_VOICE_MAX_CONCURRENT_PER_ORG="${configured}" is not a positive cap — falling back to the default (${VOICE_MAX_CONCURRENT_PER_ORG_DEFAULT})`,
+		);
+	}
+	return VOICE_MAX_CONCURRENT_PER_ORG_DEFAULT;
 }
 
 export class SquadServer {
@@ -476,9 +511,11 @@ export class SquadServer {
 	private readonly trustedOrigins: Set<string>;
 	/** ponytail: in-process public intake limiter; restart resets it, campaign token + origin + byte caps are the real controls. */
 	private readonly feedbackRate = new Map<string, { minute: number; count: number }>();
-	/** Per-actor voice mint rate cap (webapp-voice-lane/05): audio never transits the daemon, so the
-	 *  mint count is the daemon's ONLY spend signal — this cap is load-bearing, not hygiene. Restart
-	 *  resets it, same ponytail as `feedbackRate` above. */
+	/** Per-actor (per-USER) voice mint rate cap (webapp-voice-lane/05), demoted to a cheap PRE-FILTER
+	 *  by plans/voice-db-mode/04-spend-controls.md: it keys `actor.id`, is per-process, and resets on
+	 *  restart, same ponytail as `feedbackRate` above — it never bounded an ORG and must not be
+	 *  described as if it did. The durable per-org bound now lives in the `audit` table
+	 *  (`countRecentOrgAudit`, `resolveVoiceMaxConcurrentPerOrg`). */
 	private readonly voiceMintRate = new Map<string, { minute: number; count: number }>();
 
 	constructor(manager: SquadManager | undefined, opts: SquadServerOptions = {}) {
@@ -1339,8 +1376,10 @@ export class SquadServer {
 			// ordinary "no key configured" 501 further down — the SAME path file mode has always used
 			// — rather than a mode-wide 403; no active org, no configured row, and a disabled row all
 			// read identically as "no key", by design (DESIGN.md Security model).
-			// Per-actor mint rate cap: audio never transits the daemon, so the mint count is the ONLY
-			// spend signal the daemon has — this cap is load-bearing, not hygiene (DESIGN.md).
+			// Per-actor mint rate cap: a cheap PRE-FILTER, not the org bound (rewritten, concern 04) — it
+			// keys `actor.id` (per USER, per-process, resets on restart) and never bounded an org's
+			// spend. The durable per-org bound is the concurrency check below, derived from the audit
+			// table this same route writes to on a successful mint.
 			if (!this.voiceMintRateAllowed(actor)) return new Response("rate limited", { status: 429 });
 			// A genuinely-empty body (nothing sent) is a lenient default-to-openai case, same as every
 			// other `decodeBodyOrEmpty` endpoint. But `req.json().catch(() => null)` used to collapse a
@@ -1371,8 +1410,41 @@ export class SquadServer {
 			// and mint disagreeing on the same key). Routing both through `voiceKeyFor` keeps that
 			// impossible by construction, in either mode.
 			const apiKey = isKnownVoiceProvider(providerId) ? await voiceKeyFor(voiceScope, providerId) : undefined;
+			// Durable per-org concurrency cap (plans/voice-db-mode/04-spend-controls.md, DESIGN.md "Org
+			// spend bound" row): count this ORG's own `voice.mint` audit rows inside the provider's
+			// max-session window and refuse beyond N — restart-safe and correct across replicas because
+			// it's derived from the `audit` table (this route's own write, below), not an in-memory map
+			// (the rejected draft's "second in-memory map keyed by org"). File mode has no org concept
+			// and is exempt — its only daemon-side bound is the per-actor pre-filter above.
+			if (apiKey && voiceScope.mode === "db" && voiceScope.ctx && voiceScope.orgId && isKnownVoiceProvider(providerId)) {
+				const windowMs = voiceProviderMaxSessionWindowMs(providerId);
+				const cap = resolveVoiceMaxConcurrentPerOrg();
+				const recent = await countRecentOrgAudit(voiceScope.ctx, voiceScope.orgId, VOICE_MINT_AUDIT_ACTION, Date.now() - windowMs);
+				if (recent >= cap) {
+					// The refusal is itself auditable — a DISTINCT action so a burst of refusals can never
+					// inflate the very count they're a consequence of.
+					await appendOrgAudit(voiceScope.ctx, voiceScope.orgId, { actor: actor.id, action: "voice.mint.refused", target: providerId, detail: { cap, windowMs } });
+					return new Response("voice concurrency cap reached for this organization", { status: 429 });
+				}
+			}
 			const result = await mintVoiceToken(providerId, apiKey);
 			if (!result.ok) return new Response(result.message, { status: result.status });
+			// Mint audit, in BOTH modes (mints are unaudited today, everywhere) — actor `db:<userId>` in
+			// DB mode (never role-derived: `actor` was already resolved that way above, not re-derived
+			// here), provider, and the provider's OWN session id (previously discarded). Awaited (not
+			// `void`, unlike most other `recordAudit` call sites in this file) so the response the
+			// browser receives is only sent once the audit trail actually reflects the mint that
+			// produced it — `recordAudit` itself still swallows a disk failure rather than throwing.
+			if (manager) await manager.recordAudit(actor, VOICE_MINT_AUDIT_ACTION, providerId, "ok", result.providerSessionId ? `provider session ${result.providerSessionId}` : undefined, "voice");
+			if (voiceScope.mode === "db" && voiceScope.ctx && voiceScope.orgId) {
+				await appendOrgAudit(voiceScope.ctx, voiceScope.orgId, {
+					actor: actor.id,
+					action: VOICE_MINT_AUDIT_ACTION,
+					target: providerId,
+					detail: result.providerSessionId ? { providerSessionId: result.providerSessionId } : undefined,
+					source: "voice",
+				});
+			}
 			return Response.json(result.token);
 		}
 		// Seed identity for features created this request: a real signed-in user's `db:<userId>` when
