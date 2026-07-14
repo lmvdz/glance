@@ -136,6 +136,7 @@ function requestScope(body: unknown): Pick<CreateAgentOptions, "requires" | "own
 import { approveJoinRequest, denyJoinRequest, ensurePersonalWorkspace, listPendingJoinRequests, onboardWorkosUser, provisionScimEvent } from "./workos-provision.ts";
 import { addMemberByEmail, getOrgProfile, listOrgMembers, removeMember, renameOrg, setMemberRole } from "./org-admin.ts";
 import type { DbHandle } from "./db/index.ts";
+import { openRouteDecision } from "./open-worktree.ts";
 import { escalationPayload, type PushPayload, type PushService } from "./push.ts";
 import type { Actor, AgentDTO, AgentStatus, AuditEntry, OperatorPresence, Role, RunReceipt } from "./types.ts";
 import type { TraceResponse } from "./spans.ts";
@@ -2046,6 +2047,16 @@ export class SquadServer {
 			}
 			const result = await manager.land(id, message, { auto: false, force, reason, actor });
 			return Response.json(result, { status: result.ok ? 200 : 409 });
+		}
+		// Fleet→worktree jump (fleet-ide-bridge B02): launch the operator's configured editor on this
+		// unit's worktree. Host actuation, so: refused in db/org mode (a multi-tenant daemon must never
+		// spawn host GUI processes), and only the daemon's own worktree record + operator env template
+		// ever reach exec — no client-supplied path or command. The path rides in the 403 body so a
+		// remote webapp can still offer copy-path.
+		const mopen = url.pathname.match(/^\/api\/agents\/([^/]+)\/open$/);
+		if (mopen && req.method === "POST") {
+			const decision = openRouteDecision(manager.getAgent(decodeURIComponent(mopen[1])) ?? undefined, this.dbMode);
+			return Response.json(decision.body, { status: decision.status });
 		}
 		const mverify = url.pathname.match(/^\/api\/agents\/([^/]+)\/verify$/);
 		if (mverify && req.method === "POST") {

@@ -30,6 +30,7 @@ import { installHarnessHooks, uninstallHarnessHooks } from "./harness-hooks.ts";
 import { PushService } from "./push.ts";
 import { LocalFederationBus, NullFederationBus } from "./federation.ts";
 import { all as allPresence, who as whoPresence } from "./presence.ts";
+import { matchUnit, openWorktree } from "./open-worktree.ts";
 import { SquadServer, type AuthInstance } from "./server.ts";
 import { SquadManager } from "./squad-manager.ts";
 import { ManagerRegistry } from "./manager-registry.ts";
@@ -82,6 +83,7 @@ USAGE
   glance list [--json]                          Show the roster
   glance harnesses [--json]                     Honest capability tiers for every registered harness
   glance install-hooks --harness [--uninstall]  Register lifecycle hooks so raw claude/codex sessions report in
+  glance open <id|name|branch>                  Open a unit's worktree in your editor (OMP_SQUAD_OPEN_CMD, else terax/code)
   glance prompt <id> <message...>               Send an instruction to an agent
   glance notify <id> <summary...> [--detail x]  Flag an agent needs a human's attention (non-blocking)
   glance kill <id>                              Stop an agent but keep it in the roster
@@ -607,6 +609,34 @@ async function cmdInstallHooks(args: string[]): Promise<void> {
 	}
 }
 
+/** `glance open <id|name|branch>` — the fleet→worktree jump (fleet-ide-bridge B02):
+ *  resolve the unit's worktree from the roster and launch the configured opener
+ *  LOCALLY (this machine), falling back to printing the path when no opener exists. */
+async function cmdOpen(args: string[]): Promise<void> {
+	const { positional, flags } = parseArgs(args);
+	const key = positional[0];
+	if (!key) {
+		process.stderr.write("usage: glance open <id|name|branch>\n");
+		process.exit(1);
+	}
+	const res = await fetch(`${base(flags)}/api/agents`, { headers: tokenHeader() });
+	if (!res.ok) {
+		process.stderr.write(`daemon unreachable or refused: ${res.status}\n`);
+		process.exit(1);
+	}
+	const unit = matchUnit((await res.json()) as AgentDTO[], key);
+	if (!unit) {
+		process.stderr.write(`no unit matching "${key}" (tried id, name, branch, unique id prefix)\n`);
+		process.exit(1);
+	}
+	const out = openWorktree(unit.worktree);
+	if (out.spawned && out.argv) process.stdout.write(`opening ${out.path} (${out.argv[0]})\n`);
+	else {
+		process.stdout.write(`${out.path}\n`);
+		if (out.hint) process.stderr.write(`${out.hint}\n`);
+	}
+}
+
 async function cmdNotify(args: string[]): Promise<void> {
 	const { positional, flags } = parseArgs(args);
 	const id = positional[0];
@@ -1016,6 +1046,9 @@ async function main(): Promise<void> {
 			break;
 		case "install-hooks":
 			await cmdInstallHooks(rest);
+			break;
+		case "open":
+			await cmdOpen(rest);
 			break;
 		case "kill":
 		case "stop":

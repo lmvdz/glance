@@ -112,6 +112,43 @@ export const AgentLandControls = ({ agent, showToast }: { agent?: AgentDTO; show
   );
 };
 
+/**
+ * Fleet→worktree jump (fleet-ide-bridge B02). Asks the daemon to launch the operator's
+ * configured editor on this unit's worktree; when the daemon can't spawn (multi-tenant
+ * mode, remote host, no opener) the path comes back in the body and we copy it instead —
+ * the button is never a dead end.
+ */
+export const AgentOpenWorktreeButton = ({ agent, showToast }: { agent?: AgentDTO; showToast: (message: string, type?: ToastTone) => void }) => {
+  const [busy, setBusy] = React.useState(false);
+  if (!agent?.worktree) return null;
+  const open = async () => {
+    setBusy(true);
+    try {
+      const res = await apiFetch(`/api/agents/${encodeURIComponent(agent.id)}/open`, jsonInit('POST', {}));
+      const body = await res.json().catch(() => null) as { path?: string; spawned?: boolean; opener?: string | null; reason?: string; hint?: string | null } | null;
+      if (body?.spawned) { showToast(`Opened worktree in ${body.opener ?? 'editor'}`); return; }
+      const path = body?.path ?? agent.worktree;
+      await navigator.clipboard.writeText(path).catch(() => {});
+      showToast(`Worktree path copied — ${body?.reason ?? body?.hint ?? `daemon couldn't spawn an editor`}`, 'error');
+    } catch (error) {
+      showToast(`Open failed: ${error instanceof Error ? error.message : String(error)}`, 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <button
+      type="button"
+      disabled={busy}
+      onClick={() => void open()}
+      title={`Open ${agent.worktree} in your editor (daemon-side; copies the path when it can't)`}
+      className="flex min-h-6 items-center gap-1 rounded-full border border-gray-200 px-2 text-[11px] font-medium text-gray-600 transition-colors hover:bg-gray-100 focus-visible:ring-2 focus-visible:ring-amber-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800"
+    >
+      {busy ? 'Opening…' : 'Open worktree'}
+    </button>
+  );
+};
+
 export const ComposerStats = ({ agent }: { agent?: AgentDTO }) => {
   if (!agent) return null;
   const ctx = agent.contextPct == null ? undefined : `${(agent.contextPct * 100).toFixed(1)}%${agent.contextWindow ? `/${fmtTokens(agent.contextWindow)}` : ''}`;
