@@ -28,6 +28,13 @@ This is not the "many companies commingled in one daemon" model. That model was 
 fix for the isolation findings, the precondition for safely running a third-party flow, and a core SOC 2 /
 ISO 42001 control.
 
+**On seller IP, the strategy is provenance, not secrecy** (§6). A flow's value splits into a *depreciating*
+layer (prompt-craft, generic orchestration — the base model absorbs it) and a *durable* layer (proprietary
+data, integration, certified behavior, maintenance, trust, data flywheels — model progress doesn't erode it).
+Secrecy protects only the depreciating layer; the durable moats are guarded by access control, licensing, and
+the marketplace's trust role. So the default is **mostly-open, signed, fingerprinted, entitlement-gated flows**,
+with cryptographic secrecy (sealed / remote-node / TEE) reserved for the rare genuinely-secret algorithm.
+
 ---
 
 ## 2. Why glance's threat model is not normal SaaS
@@ -92,15 +99,14 @@ the PR #152 class, only half-closed (`src/squad-manager.ts:2404`).
 
 Only three cross-boundary flows exist, and each is clean:
 
-1. **Pack: seller → marketplace → buyer.** Signed, checksum-pinned, licensed. The marketplace stores it (sealed
-   or as a pointer, per the IP tier in §6); it is never anyone's *data*.
+1. **Pack: seller → marketplace → buyer.** Signed, checksum-pinned, fingerprinted, licensed — mostly-open by
+   default (sealed or a pointer only for the secrecy niche, §6). It is never anyone's *data*.
 2. **Entitlement / license: marketplace → buyer instance.** A token proving the buyer may run the pack;
    revocable.
 3. **Usage / billing: buyer → marketplace.** Counts (mints, runs), never content.
 
-The buyer's data, the buyer's secrets, and the seller's plaintext flow (in the sealed/remote tiers) each stay on
-exactly one side. **The marketplace operator is a sub-processor of none of them** — which is what makes the
-platform's own compliance surface small.
+The buyer's data and the buyer's secrets each stay on exactly one side. **The marketplace operator is a
+sub-processor of neither** — which is what makes the platform's own compliance surface small.
 
 The existing capability-pack system (checksum-pinned packs of profiles/workflows/recipes) is the substrate; the
 marketplace is that plus signing, entitlement, revocation, and vetting (§7).
@@ -130,30 +136,79 @@ marketplace's safety and a genuine AI-governance differentiator.
 
 ---
 
-## 6. Preserving seller IP — the honest tier menu
+## 6. Seller IP — provenance and durable moats, not secrecy
 
-There is an unavoidable tension: if the buyer can *run* a flow, they can usually *read* it. Most flows are
-declarative (prompts, model routing, graph structure, tool bindings) — their value is curation, maintenance, and
-domain expertise, not a secret binary. Name the protection tier per flow:
+The instinct is to protect a flow by hiding it. That is mostly the wrong frame, for a specific reason: **a
+flow's value splits into a depreciating layer and a durable layer, and secrecy only protects the depreciating
+one.**
 
-| Tier | Mechanism | Seller IP exposure | Buyer data exposure | Use for |
-|---|---|---|---|---|
-| **A — Licensed-open** | Signed, checksummed, revocable; buyer can read it | Readable (protected legally + by value-in-updates) | None | Most flows |
-| **B — Sealed** | Encrypted pack, decrypted just-in-time in buyer memory under an entitlement token | Blocks casual copying; a root user can still dump memory (stated honestly) | None | Flows with modest secrecy needs |
-| **C — Remote node** | Seller hosts the flow; buyer's graph calls it as a remote node | None (never leaves the seller) | Buyer *inputs* go to the seller → needs a buyer↔seller DPA the marketplace brokers | Genuinely secret algorithms, data-tolerant buyers |
-| **D — Confidential compute** | TEE (SEV-SNP / TDX) + remote attestation | None — buyer, seller, and platform all blind | None | Gold standard; v3+ effort |
+**Depreciating (the base model absorbs it).** Prompt-craft, chain-of-thought scaffolds, generic task
+decompositions, reasoning structure built to compensate for a weak model. The clever prompt that made last year's
+model behave is next year's default — the bitter lesson applied to agentic scaffolding: the scaffold around a
+model's weakness becomes dead weight as the weakness disappears. As agents get better at planning, the
+workflow-as-explicit-plan matters less too. "Every model will eventually know every *generic* skill" is true, and
+a flow whose whole value is prompt-cleverness is a depreciating asset with a half-life of one model release.
 
-Tiers A and B keep the clean single-tenant data topology (nothing leaves the buyer). Tier C deliberately trades
-data locality for IP secrecy and must be surfaced to the buyer as such. Tier D is the long-horizon ambition.
+**Durable (the model structurally cannot absorb it).**
+
+| Durable moat | Why model progress doesn't erode it |
+|---|---|
+| Proprietary data / context binding | A base model never knows your internal rules, customer records, or curated domain examples unless fed them |
+| Integration with proprietary systems | Orchestrating *this* enterprise's Salesforce + SAP + internal DB is in no foundation model's weights |
+| Certified / verified behavior + liability | The value is the *guarantee* ("audited to do X, accountable if not"), a warranty product, not the tokens |
+| Maintenance & freshness | Kept current with the newest model, regulation, API — subscription IP, not static IP |
+| Trust / brand / distribution | "The compliance flow *Deloitte* certifies" — the moat is accountability |
+| Data flywheel | A flow that improves from usage under a private eval harness — the loop is the moat |
+
+**None of these durable moats is protected by hiding prompt tokens.** They are protected by access control
+(the data), the sandbox and egress rules (§6a), licensing and entitlement, and the marketplace's role as the
+trusted party. So the primary IP strategy is **not** encryption — it is **provenance + fingerprinting +
+licensing over mostly-open flows**, with the durable value living in layers secrecy was never going to guard.
+
+### Provenance & fingerprinting — prevention → attribution
+
+This mirrors how real IP markets already work: patents do not *prevent* copying, they make it *provable and
+prosecutable*. Cheaper than secrecy, and it doesn't fight physics.
+
+- **Provenance signing** (extends today's checksum-pinning) — every pack cryptographically signed; origin
+  provable. The foundation of attribution.
+- **Canary markers** — functionally-inert distinctive elements seeded into a flow (an unusual fallback, a benign
+  no-op node, a signature phrasing), the way mapmakers plant fake streets. Their appearance in a competitor's
+  flow proves derivation.
+- **Behavioral fingerprint** — the flow's characteristic outputs on a set of unusual probe inputs; a suspected
+  copy can be tested against it. Survives re-wording, which canaries do not.
+- **Runtime entitlement** — a flow runs only against a valid marketplace token, so even a lifted copy can be
+  detected or denied when it checks in.
+
+Honest limit: fingerprinting is detection + attribution, so it needs legal teeth to bite, and a determined copier
+can *launder* a flow by re-implementing its behavior — which, per independent discovery (§6a), may not even be
+infringement. That is acceptable, because if the durable value is data / integration / trust / maintenance,
+re-deriving the prompt steals nothing that mattered.
+
+### Secrecy as a niche, not the centerpiece
+
+Cryptographic secrecy earns its cost only for the rare flow that genuinely *is* a secret algorithm **and** whose
+buyer will not send data out. For those, escalate deliberately:
+
+| Tier | Mechanism | When |
+|---|---|---|
+| **Sealed pack** | Encrypted, decrypted just-in-time in sandbox memory under an entitlement token | Modest secrecy; deters casual copying (a root user can still dump memory — stated honestly) |
+| **Remote node** | Seller hosts the secret part; buyer's graph calls it | Genuinely secret algorithm, data-tolerant buyer — sends buyer inputs to the seller, needs a brokered DPA |
+| **Confidential compute (TEE)** | Hardware enclave + dual remote attestation | Secret algorithm *and* data-sensitive buyer — the only tech (not contract) resolution of mutual distrust (§6a) |
+
+The default is **licensed-open**: signed, fingerprinted, entitlement-gated, revocable — the buyer can read it,
+and that is fine because the moat is elsewhere.
 
 ---
 
-## 6a. The two-sided confidentiality problem (mutual distrust)
+## 6a. Confidentiality mechanics (buyer data, and the secrecy niche)
 
-The marketplace has two confidentiality guarantees to make, and **they pull in opposite directions**: the
-buyer's data must not be read, stored, trained on, or exfiltrated by the seller's flow; and the seller's flow
-must not be scraped or copied by the buyer. No single mechanism delivers both — you tier by flow sensitivity,
-and full mutual distrust is only resolved by hardware.
+Two confidentiality concerns, handled asymmetrically. **Protecting the buyer's data is a first-class,
+always-on guarantee** (below) — it is what makes running any third-party flow safe, and it does not depend on
+how the seller's IP is protected. **Protecting the seller's flow by secrecy is the niche escalation from §6**
+(sealed / remote-node / TEE), reserved for a genuinely secret algorithm; for most flows the seller's protection
+is provenance + fingerprinting + licensing + durable moats, not confidentiality. The two only *collide* in the
+secret-algorithm-plus-data-sensitive-buyer corner, which is the sole case that needs hardware.
 
 ### Protecting the buyer's data (enforced by the buyer's sandbox, not by trusting the seller)
 
@@ -235,12 +290,14 @@ Honest residuals — this is very high assurance, not absolute:
 
 ### What ships when
 
-- **Now (Phase 0–3):** egress-deny-by-default + capability least-privilege + ephemeral runs + full audit +
-  publish-time static analysis (buyer-data side) and licensed-open / sealed packs (seller-IP side) — safe for
-  the ~90% of flows whose value is curation, not secrecy.
-- **Later (Tier C):** remote-node protocol + brokered buyer↔seller DPA — for a secret algorithm with a
-  data-tolerant buyer.
-- **North star (Tier D):** TEE + dual attestation — for a secret algorithm with a data-sensitive buyer.
+- **Now (Phase 0–3):** *buyer-data side* — egress-deny-by-default + capability least-privilege + ephemeral runs
+  + full audit + publish-time static analysis. *Seller-IP side* — signed, fingerprinted, entitlement-gated
+  mostly-open flows (§6). Safe and sufficient for the ~90% of flows whose durable value is data / integration /
+  trust / maintenance, not secrecy.
+- **Later (secrecy niche):** sealed packs, then the remote-node protocol + brokered buyer↔seller DPA — for a
+  genuinely secret algorithm with a data-tolerant buyer.
+- **North star (mutual-distrust corner only):** TEE + dual attestation — a secret algorithm *and* a
+  data-sensitive buyer; the sole case that needs hardware.
 
 ---
 
@@ -249,7 +306,11 @@ Honest residuals — this is very high assurance, not absolute:
 A malicious or compromised pack is a supply-chain attack on every buyer that installs it. The marketplace needs:
 
 - **Signing + provenance** — every pack cryptographically signed (sigstore/cosign model), SLSA provenance
-  attestation, building on the checksum-pinning that already exists.
+  attestation, building on the checksum-pinning that already exists. This is also the seller's primary IP
+  protection (§6): provenance makes theft *attributable*, not impossible.
+- **Fingerprinting + entitlement** — canary markers and behavioral fingerprints for after-the-fact attribution;
+  a runtime entitlement check so a lifted copy is detectable/deniable. The enforcement backbone of the
+  mostly-open flow model.
 - **A revocation channel** — a compromised or malicious pack must be killable across all installs (a CRL-like
   feed the buyer's instance honors).
 - **Publisher vetting** — identity verification for sellers; optional pack review / static analysis.
@@ -345,8 +406,10 @@ flow is still untrusted code).
   protection** (fastest evidence win).
 - **Phase 2 — Data lifecycle (Confidentiality/Privacy).** Org deletion + right-to-erasure with on-disk cascade;
   data export; backup/DR runbook; sub-processor DPAs + zero-retention with LLM vendors.
-- **Phase 3 — Marketplace.** Signing + SLSA provenance; entitlement/licensing; revocation channel; publisher
-  vetting; capability-declaration + least-privilege enforcement (consumes Phase 0's sandbox).
+- **Phase 3 — Marketplace.** Signing + SLSA provenance; **fingerprinting (canary + behavioral) + runtime
+  entitlement** as the seller-IP backbone over mostly-open flows; licensing; revocation channel; publisher
+  vetting; capability-declaration + least-privilege enforcement (consumes Phase 0's sandbox). Cryptographic
+  secrecy (sealed / remote-node / TEE) is a later, niche add-on — not on this phase's critical path.
 - **Phase 4 — Formalize.** Compliance-automation platform; policy set; readiness assessment; Type I; pentest;
   Type II observation window; ISO 27001/42001 to follow.
 
@@ -360,7 +423,10 @@ on the critical path for both the security story and the marketplace.
 - **Shared multi-tenant SaaS for mutually-untrusting tenants** — declined in the current architecture; it
   requires microVM-grade isolation (a year+ of platform work) and offers a worse compliance story than
   single-tenant. Revisit only as a deliberate, separately-designed prosumer posture.
-- **Confidential-computing (TEE) flow execution (IP tier D)** — a v3+ ambition, not a v1 requirement.
+- **Cryptographic flow-secrecy as a primary strategy** — declined. Seller IP is protected by provenance +
+  fingerprinting + licensing + durable moats (§6); secrecy (sealed / remote-node / TEE) is a niche escalation
+  for a genuinely secret algorithm, and confidential-computing execution specifically is a v3+ ambition, not a
+  v1 requirement.
 - **FedRAMP** — declined pre-scale.
 - **HIPAA** — deferred until a health-data customer requires it (then: BAA + the Phase 0–2 controls likely
   suffice as the technical base).
