@@ -1,6 +1,6 @@
 # C08 — bell + deep links
 
-STATUS: in-review (glance-desktop#16, stacked on #15)
+STATUS: done (glance-desktop#16, merged)
 
 ## Reality notes (2026-07-15, glance-desktop#16)
 
