@@ -65,6 +65,7 @@ import {
 	PlanCandidateTransitionBodySchema,
 	PlanVoteCallBodySchema,
 	PlanVoteCastBodySchema,
+	PromoteBodySchema,
 	PushSubscriptionBodySchema,
 	SpawnBodySchema,
 	AskBodySchema,
@@ -95,6 +96,7 @@ import { readModelOutcomes } from "./model-outcomes.ts";
 import { readTaskOutcomes } from "./task-outcomes.ts";
 import { readAllReceipts } from "./receipts.ts";
 import { fetchIssueDetail, listPlaneIssues, planeConfig, planeRepos } from "./plane.ts";
+import { promoteIssue } from "./promote.ts";
 import { runVisionPass } from "./vision.ts";
 import { checkVisionUrl } from "./ssrf.ts";
 import { harnessEventDecision } from "./harness-hooks.ts";
@@ -2476,6 +2478,18 @@ export class SquadServer {
 			const detail = await fetchIssueDetail(url.searchParams.get("repo") ?? process.cwd(), id);
 			if (detail === null) return new Response("plane not configured", { status: 501 });
 			return Response.json(detail);
+		}
+		// adw-factory-borrows concern 05: enrich a Backlog Plane issue with Tier-1/Tier-2 context via
+		// the manager's ask-mode seam, fail-closed validated. Blocks for the same wait window `glance
+		// ask` does (it IS an ask-mode unit under the hood) — the result body always carries `ok` +
+		// `message`, never a bare 4xx/5xx, so the caller always gets the specific refusal reason.
+		const mpromote = url.pathname.match(/^\/api\/issues\/([^/]+)\/promote$/);
+		if (mpromote && req.method === "POST") {
+			const id = decodeURIComponent(mpromote[1]);
+			if (!id) return new Response("issue id required", { status: 400 });
+			const body = decodeBodyOrEmpty(PromoteBodySchema, await req.json().catch(() => null));
+			const repo = typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
+			return Response.json(await promoteIssue(manager, repo, id, actor));
 		}
 		if (url.pathname === "/api/comments" && req.method === "GET") {
 			const subject = url.searchParams.get("subject") ?? "";

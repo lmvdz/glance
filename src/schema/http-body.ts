@@ -431,6 +431,12 @@ export const TaskStartBodySchema = Schema.Struct({
 	repo: Schema.optional(Schema.Unknown),
 });
 
+/** POST /api/issues/:id/promote (adw-factory-borrows concern 05) — no required field, same shape as
+ *  `TaskStartBodySchema` (`repo` falls back to `process.cwd()`). */
+export const PromoteBodySchema = Schema.Struct({
+	repo: Schema.optional(Schema.Unknown),
+});
+
 /** POST /api/comments — `subject` and `body` both required (non-empty-after-trim on `body`
  *  stays a post-decode check, combined into the same "subject and body required" message). */
 export const CommentsCreateBodySchema = Schema.Struct({
