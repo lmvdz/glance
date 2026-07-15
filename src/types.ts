@@ -316,6 +316,10 @@ export interface ProjectDTO {
 	featureCount: number;
 	/** The operator explicitly registered this repo (vs it merely having agents/features today). */
 	registered: boolean;
+	/** Whether the repo path currently exists on disk (statted at list time). `false` = a stale
+	 *  registration or a since-deleted checkout — the UI badges it and never default-selects it,
+	 *  and agents spawned into it would ENOENT (live finding 2026-07-15: `~/sui/omp-graph`). */
+	exists: boolean;
 }
 
 /** Lifecycle stage of a feature — derived from observable evidence (plan dir, agents, land status). */

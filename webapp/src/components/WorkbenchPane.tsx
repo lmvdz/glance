@@ -607,7 +607,15 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
                         <div className="flex items-center gap-2"><ListChecks className="h-3 w-3" aria-hidden="true" /> Features <span className="font-mono text-gray-400">{dto?.featureCount ?? 0}</span></div>
                         <div className="flex items-center gap-2"><ChevronRight className="h-3 w-3" aria-hidden="true" /> Agents <span className="font-mono text-gray-400">{dto?.agentCount ?? 0}</span></div>
                         <div className="truncate font-mono text-[10px] text-gray-400" title={project.id}>{project.id}</div>
-                        {dto?.registered && (
+                        {dto?.exists === false && (
+                          <div className="text-[11px] font-medium text-amber-600 dark:text-amber-400">path missing on disk</div>
+                        )}
+                        {/* Shown for derived projects too, not only registered ones: removal also
+                            purges dead-by-error agents server-side, and a phantom project whose
+                            only legs are an archived feature + a boot-dead agent (the stale-path
+                            case) is exactly the one that needs removing. A project with LIVE
+                            agents/features keeps listing after removal, with a toast. */}
+                        {dto && (
                           <button
                             onClick={() => void removeProject(project.id)}
                             className="text-[11px] text-gray-400 underline-offset-2 transition-colors hover:text-red-500 hover:underline focus-visible:ring-2 focus-visible:ring-amber-500"

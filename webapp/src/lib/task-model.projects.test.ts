@@ -117,3 +117,36 @@ test('a feature whose repo is spelled with a trailing slash still joins its proj
   const current = resolveCurrentProject(Object.values(projectsByTeam(projects, [])).flat(), null);
   expect(tasksForProject(tasks, current)).toHaveLength(1);
 });
+
+// Live finding 2026-07-15: a persisted selection pointing at a deleted repo path kept default-
+// loading a dead project; everything downstream (console agents, voice dispatches) died on it.
+const HEALTHY = { id: '/a', name: 'a', shortCode: 'A', colorClass: 'c' };
+const BROKEN = { id: '/gone', name: 'gone', shortCode: 'G', colorClass: 'c', pathMissing: true as const };
+
+test('resolveCurrentProject: a persisted selection whose path is gone falls back to the first healthy project', () => {
+  expect(resolveCurrentProject([BROKEN, HEALTHY], '/gone')).toBe(HEALTHY);
+});
+
+test('resolveCurrentProject: no selection defaults to the first healthy project, skipping broken ones', () => {
+  expect(resolveCurrentProject([BROKEN, HEALTHY], null)).toBe(HEALTHY);
+});
+
+test('resolveCurrentProject: all-broken workspace still returns something (the broken selection) rather than null', () => {
+  expect(resolveCurrentProject([BROKEN], '/gone')).toBe(BROKEN);
+});
+
+test('resolveCurrentProject: healthy selection honored exactly as before', () => {
+  expect(resolveCurrentProject([BROKEN, HEALTHY], '/a')).toBe(HEALTHY);
+});
+
+test('projectsByTeam: daemon exists=false surfaces as pathMissing; absent exists (older daemon) reads healthy', () => {
+  const dtos = [
+    { repo: '/gone', exists: false },
+    { repo: '/here', exists: true },
+    { repo: '/old-daemon' },
+  ] as Parameters<typeof projectsByTeam>[0];
+  const list = projectsByTeam(dtos)['OMP SQUAD'];
+  expect(list.find((p) => p.id === '/gone')?.pathMissing).toBe(true);
+  expect(list.find((p) => p.id === '/here')?.pathMissing).toBeUndefined();
+  expect(list.find((p) => p.id === '/old-daemon')?.pathMissing).toBeUndefined();
+});

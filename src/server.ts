@@ -1769,7 +1769,7 @@ export class SquadServer {
 		if (url.pathname === "/api/projects" && req.method === "DELETE") {
 			const repoParam = url.searchParams.get("repo");
 			if (!repoParam) return new Response("repo query param required", { status: 400 });
-			const dropped = manager.unregisterProject(repoParam);
+			const dropped = await manager.unregisterProject(repoParam);
 			if (!dropped.ok) return new Response(dropped.reason, { status: 500 }); // registry write failed; nothing changed
 			return Response.json({ ok: true, repo: dropped.repo, removed: dropped.removed, projects: manager.projects() });
 		}

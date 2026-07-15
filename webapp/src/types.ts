@@ -3,6 +3,10 @@ export interface Project {
   name: string;
   shortCode: string;
   colorClass: string;
+  /** The daemon statted the repo path and it is GONE (stale registration / deleted checkout) —
+   *  badged in the switcher and never default-selected (live finding 2026-07-15: a broken
+   *  `~/sui/omp-graph` was the boot default and every console agent spawned into it died). */
+  pathMissing?: boolean;
 }
 
 export interface TaskDecision {

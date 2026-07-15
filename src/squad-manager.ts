@@ -2397,14 +2397,17 @@ export class SquadManager extends EventEmitter {
 			const key = normalizeRepoPath(repo);
 			let p = byRepo.get(key);
 			if (!p) {
-				p = { id: key, name: path.basename(key) || key, repo: key, agentCount: 0, statusCounts: {}, pendingCount: 0, lastActivity: 0, featureCount: 0, registered: false };
+				p = { id: key, name: path.basename(key) || key, repo: key, agentCount: 0, statusCounts: {}, pendingCount: 0, lastActivity: 0, featureCount: 0, registered: false, exists: true };
 				byRepo.set(key, p);
 			}
 			return p;
 		};
 
 		for (const repo of this.projectRegistry.list()) ensure(repo).registered = true;
-		for (const pf of this.featureStore.values()) if (pf.repo) ensure(pf.repo).featureCount++;
+		// Archived features are the garbage bin — they must not keep a phantom project alive (live
+		// finding 2026-07-15: a dead `~/sui/omp-graph` project kept re-deriving from one archived
+		// feature row and could never be removed from the workspace).
+		for (const pf of this.featureStore.values()) if (pf.repo && !pf.archived) ensure(pf.repo).featureCount++;
 		for (const { dto } of this.agents.values()) {
 			const p = ensure(dto.repo);
 			p.agentCount++;
@@ -2412,6 +2415,7 @@ export class SquadManager extends EventEmitter {
 			p.pendingCount += dto.pending.length;
 			p.lastActivity = Math.max(p.lastActivity, dto.lastActivity);
 		}
+		for (const p of byRepo.values()) p.exists = existsSync(p.repo);
 		// Busiest first, then a stable alphabetical tail so idle registered projects don't shuffle.
 		return [...byRepo.values()].sort((a, b) => b.lastActivity - a.lastActivity || a.name.localeCompare(b.name));
 	}
@@ -2467,8 +2471,17 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/** Un-register a repo. Deletes NOTHING on disk; a repo with live agents or features keeps listing. */
-	unregisterProject(repo: string): { ok: true; repo: string; removed: boolean } | { ok: false; reason: string } {
+	async unregisterProject(repo: string): Promise<{ ok: true; repo: string; removed: boolean } | { ok: false; reason: string }> {
 		const key = normalizeRepoPath(repo ?? "");
+		// Purge dead-by-error agents in this repo FIRST: an error-status agent (harness never booted —
+		// e.g. the repo path no longer exists) is one of the derivation legs that resurrect a removed
+		// project in `projects()`, and it has no work to lose. Live agents are deliberately left
+		// alone — a project with real work keeps listing, per the route's own doctrine below.
+		const deadIds = [...this.agents.values()].filter((r) => normalizeRepoPath(r.dto.repo) === key && r.dto.status === "error").map((r) => r.dto.id);
+		for (const id of deadIds) {
+			await this.remove(id, false).catch(() => {});
+			this.log("info", `project un-register purged dead agent ${id} (${key})`);
+		}
 		const outcome = this.projectRegistry.delete(key);
 		if (outcome === "error") return { ok: false, reason: `could not persist the project registry — ${key} was NOT removed` };
 		if (outcome === "removed") this.log("info", `project un-registered: ${key}`);

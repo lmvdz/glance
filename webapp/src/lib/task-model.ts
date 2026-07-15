@@ -12,13 +12,18 @@ function shortCode(name: string): string {
   return (initials || name.slice(0, 4)).slice(0, 4).toUpperCase();
 }
 
-function projectForRepo(repo: string, index = 0): Project {
+function projectForRepo(repo: string, index = 0, pathMissing = false): Project {
   const name = repoName(repo);
-  return { id: repo, name, shortCode: shortCode(name), colorClass: PROJECT_COLORS[index % PROJECT_COLORS.length] };
+  return { id: repo, name, shortCode: shortCode(name), colorClass: PROJECT_COLORS[index % PROJECT_COLORS.length], ...(pathMissing ? { pathMissing: true } : {}) };
 }
 
 export function projectsByTeam(projects: ProjectDTO[], features: FeatureDTO[] = []): Record<string, Project[]> {
-  const repos = projects.length ? projects.map((project) => project.repo) : [...new Set(features.map((feature) => feature.repo))];
+  if (projects.length) {
+    // `exists === false` (daemon statted the path, it's gone) → pathMissing; absent (older daemon)
+    // reads as healthy.
+    return { "OMP SQUAD": projects.map((project, index) => projectForRepo(project.repo, index, project.exists === false)) };
+  }
+  const repos = [...new Set(features.map((feature) => feature.repo))];
   return { "OMP SQUAD": repos.map((repo, index) => projectForRepo(repo, index)) };
 }
 
@@ -176,7 +181,13 @@ export function tasksFromSquad(features: FeatureDTO[], agents: AgentDTO[], proje
  * Pure + exported so the fallback rule is unit-tested.
  */
 export function resolveCurrentProject(projects: Project[], selectedId: string | null): Project | null {
-  return projects.find((project) => project.id === selectedId) ?? projects[0] ?? null;
+  const selected = projects.find((project) => project.id === selectedId);
+  // A selection whose repo path is GONE is never honored — not even a persisted one (live finding
+  // 2026-07-15: localStorage kept default-loading a deleted `~/sui/omp-graph`, and everything
+  // downstream — console agents, voice dispatches — died against it). There is nothing to inspect
+  // in a project with no directory, so falling to the first healthy project loses nothing.
+  if (selected && !selected.pathMissing) return selected;
+  return projects.find((project) => !project.pathMissing) ?? selected ?? projects[0] ?? null;
 }
 
 /**

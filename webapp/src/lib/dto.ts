@@ -74,6 +74,8 @@ export interface ProjectDTO {
   featureCount: number;
   /** The operator explicitly registered this repo (vs it merely having agents/features today). */
   registered: boolean;
+  /** Repo path exists on disk (absent on older daemons = assume true). */
+  exists?: boolean;
 }
 
 export interface FeatureCriterionDTO {
