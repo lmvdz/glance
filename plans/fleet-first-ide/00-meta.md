@@ -27,8 +27,8 @@ Product identity at the end: **glance = daemon (factory) + desktop (cockpit) + w
 |---|---|---|---|---|
 | B | 01-bridge-substrate.md | OSC attention lane, `glance open`, hook self-reporting (glance-side; no fork needed) | plans/fleet-ide-bridge/ | expanded, open |
 | C | 02-cockpit-fork.md | Private fork bootstrapped, rebrand-lite, rebase protocol, native fleet module (roster/attention/intervene/Space-join/bell) | plans/fleet-ide-cockpit/ | expanded, open |
-| I | 03-shared-workspace-intervention.md | Intervene = shared worktree: presence/leases in editor, ACP conversation pane, hand-back | **EXPANDED → plans/fleet-ide-intervention/** (I01–I05) | open |
-| E | 04-chat-unit-escalation.md | Chat panel backed by daemon; promote conversation → gated landable unit; adopt ad-hoc CLI sessions | charter only — loop expands when I unblocks | blocked |
+| I | 03-shared-workspace-intervention.md | Intervene = shared worktree: presence/leases in editor, ACP conversation pane, hand-back | **EXPANDED → plans/fleet-ide-intervention/** (I01–I05) | **complete-on-delivery** — I01/I02/I03/I04 merged; I05 in-review (gd#19) |
+| E | 04-chat-unit-escalation.md | Chat panel backed by daemon; promote conversation → gated landable unit; adopt ad-hoc CLI sessions | charter only — loop expands next (I trigger met) | **unblocked** |
 | M | 05-multidaemon-identity.md | Multi-daemon connection manager, cross-host fleet, identity/branding pass, release pipeline (installers) | charter only — loop expands when C lands | blocked |
 
 ## Dependency graph
@@ -48,6 +48,8 @@ Runs under `.claude/skills/fleet-ide-loop/SKILL.md`: each iteration orients here
 - **C01 merged ⇒ Epic C unblocked** (C02 rebrand-lite, C03 rebase-protocol, C04 fleet-module-skeleton all now selectable by the loop).
 
 ## Ledger
+
+- 2026-07-15 — iteration 17: I05 takeover-handback shipped as glance-desktop#19 — **the capstone of Epic I.** Take over = interrupt + setMode(observe) + claimPresence(worktree, glance-cockpit:<sessionId>); Hand back = restore prior mode + releasePresence + steer a resume prompt that NAMES the files the human touched (so the agent re-reads deliberately). Cockpit-composed from primitives already reviewed+merged (interrupt/setMode/presence-write) → **no daemon change, no new trust surface, no gauntlet.** Phase state machine (idle→taking-over→active→handing-back) keeps a half-applied takeover recoverable; a daemon-atomic takeover primitive is a deferred hardening pass. fleetTakeover.ts pure+tested (cockpitAgentLabel/resumePrompt/guards). Gate green (vitest 399, build clean, lint baseline 103). **EPIC I COMPLETE-ON-DELIVERY** (I01/I02/I03/I04 merged; I05 #19 pending). **Epic E (chat→unit escalation) trigger now MET** — next iteration EXPANDS Epic E into plans/fleet-ide-escalation/ via a /plan-quality decomposition against the merged cockpit + intervention code. Lars merges #19.
 
 (loop appends one line per iteration: date, concern, outcome, PR)
 

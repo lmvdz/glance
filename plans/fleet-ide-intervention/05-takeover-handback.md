@@ -1,6 +1,6 @@
 # I05 — take over / hand back (the explicit peer handoff)
 
-STATUS: open
+STATUS: in-review (gd#19 — cockpit-composed, no daemon change; daemon-atomic primitive deferred)
 PRIORITY: p2
 REPOS: glance-desktop, omp-squad
 COMPLEXITY: architectural
