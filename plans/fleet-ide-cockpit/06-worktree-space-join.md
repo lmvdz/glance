@@ -1,14 +1,14 @@
 # C06 — worktree↔Space join
 
-STATUS: in-review (glance-desktop#14)
-
-## Reality notes (2026-07-15, glance-desktop#14)
-
-The fleet→ground gesture. Key mechanics: create-or-focus needs App's useTabs (not a global store), so an App-registered handler singleton (mirrors lsp's setWorktreeOpener) — RosterView calls getWorktreeOpener()?.open(unit). `resolveOpenAction` PURE+tested (focus existing Space by root, else create — no dupes). `isLoopbackDaemon` gates the button (remote daemon's worktree is on another host). worktree field source-verified on the real DTO (squad-manager.ts:1765/1888 `worktree: p.worktree`). App.handleOpenWorktree mirrors handleNewSpace (create + newTab(worktree) + setActive). Gate: tsc/lint(103)/vitest 370/build green. GUI click-through not driven under WSLg (noted); all pieces verified in isolation + proven wiring pattern. No cross-lineage gauntlet (UI action, terminal at a daemon-provided cwd like any terax tab).
+STATUS: done (glance-desktop#14, merged)
 PRIORITY: p1
 REPOS: glance-desktop
 COMPLEXITY: architectural
 TOUCHES: src/modules/fleet/ (open-in-space action), spaces module store interaction
+
+## Reality notes (2026-07-15, glance-desktop#14)
+
+The fleet→ground gesture. Key mechanics: create-or-focus needs App's useTabs (not a global store), so an App-registered handler singleton (mirrors lsp's setWorktreeOpener) — RosterView calls getWorktreeOpener()?.open(unit). `resolveOpenAction` PURE+tested (focus existing Space by root, else create — no dupes). `isLoopbackDaemon` gates the button (remote daemon's worktree is on another host). worktree field source-verified on the real DTO (squad-manager.ts:1765/1888 `worktree: p.worktree`). App.handleOpenWorktree mirrors handleNewSpace (create + newTab(worktree) + setActive). Gate: tsc/lint(103)/vitest 370/build green. GUI click-through not driven under WSLg (noted); all pieces verified in isolation + proven wiring pattern. No cross-lineage gauntlet (UI action, terminal at a daemon-provided cwd like any terax tab).
 BLOCKED_BY: C05
 
 ## Goal
