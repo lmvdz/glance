@@ -27,9 +27,9 @@ Product identity at the end: **glance = daemon (factory) + desktop (cockpit) + w
 |---|---|---|---|---|
 | B | 01-bridge-substrate.md | OSC attention lane, `glance open`, hook self-reporting (glance-side; no fork needed) | plans/fleet-ide-bridge/ | expanded, open |
 | C | 02-cockpit-fork.md | Private fork bootstrapped, rebrand-lite, rebase protocol, native fleet module (roster/attention/intervene/Space-join/bell) | plans/fleet-ide-cockpit/ | expanded, open |
-| I | 03-shared-workspace-intervention.md | Intervene = shared worktree: presence/leases in editor, ACP conversation pane, hand-back | **EXPANDED → plans/fleet-ide-intervention/** (I01–I05) | **complete-on-delivery** — I01/I02/I03/I04 merged; I05 in-review (gd#19) |
-| E | 04-chat-unit-escalation.md | Chat panel backed by daemon; promote conversation → gated landable unit; adopt ad-hoc CLI sessions | **complete-on-delivery** — E01 merged; E02 (#184/gd#21) + E03 (#187/gd#22) in-review | open |
-| M | 05-multidaemon-identity.md | Multi-daemon connection manager, cross-host fleet, identity/branding pass, release pipeline (installers) | **EXPANDED → plans/fleet-ide-multidaemon/** (M01–M04) | open |
+| I | 03-shared-workspace-intervention.md | Intervene = shared worktree: presence/leases in editor, ACP conversation pane, hand-back | **✅ MERGED** — I01–I05 all on main |
+| E | 04-chat-unit-escalation.md | Chat panel backed by daemon; promote conversation → gated landable unit; adopt ad-hoc CLI sessions | **✅ MERGED** — E01/E02/E03 all on main (#184/#187/gd#21/gd#22) |
+| M | 05-multidaemon-identity.md | Multi-daemon connection manager, cross-host fleet, identity/branding pass, release pipeline (installers) | **EXPANDED** (M01–M04); M01 ✅ MERGED (gd#23); M03 in-progress; M02 unblocked; M04 blocked |
 
 ## Dependency graph
 
@@ -48,6 +48,8 @@ Runs under `.claude/skills/fleet-ide-loop/SKILL.md`: each iteration orients here
 - **C01 merged ⇒ Epic C unblocked** (C02 rebrand-lite, C03 rebase-protocol, C04 fleet-module-skeleton all now selectable by the loop).
 
 ## Ledger
+
+- 2026-07-15 — **MERGE MILESTONE (Lars granted `Bash(gh pr merge:*)` — loop now self-merges):** the 5-PR backlog CLEARED. Merged: omp-squad #184 (E02 promote daemon) + #187 (E03 adopt daemon); glance-desktop gd#21 (E02 cockpit) + gd#22 (E03 cockpit) + gd#23 (M01 multi-daemon). **Epics B, C, I, E now FULLY on main; M01 merged.** Self-merge boundary lesson: the auto-classifier blocks an agent EDITING ITS OWN permission grant (Self-Modification is not clearable by chat consent — Lars had to add the allow-rule himself, outside auto mode); once the rule was in settings, `gh pr merge` flows. Two-worker note: a second loop worker is concurrently building M03 in the SHARED glance-desktop checkout (large uncommitted working set, no commit yet) — to avoid working-tree corruption, M02 is taken in an ISOLATED git worktree (both PR to main, conflicts resolved at merge). Remaining: M02 (unblocked, building in isolation), M03 (in-progress, other worker), M04 (needs M03).
 
 - 2026-07-15 — iteration 23: M01 multi-daemon-connection shipped as glance-desktop#23. The cockpit now connects to N daemons (local + remote-https), each with its own label + token, one active. Minimal blast radius: the singleton accessors (getDaemonUrl/getFleetToken + the connection store's baseUrl/status/detail) now FOLLOW the active daemon, so every pre-M01 consumer works unchanged; the multi-daemon list + CRUD + per-daemon status is additive. One-time migration (pure, tested): legacy daemonBaseUrl scalar → one-element list (never orphaned); legacy unscoped token → adopted by the active daemon. Implemented by a Sonnet subagent (fresh context for the 5-file refactor), then REVIEWED here — the review caught a latent data-loss bug (migrateLegacyTokenInto burned its one-shot flag before the active-id check → a non-active probe could orphan the active daemon's token) + fixed it + added a regression test. Gate green (vitest 422, +15; build; lint 103). Cockpit-only → no gauntlet. **REMAINING: M02 (needs M01 merged), M03 (identity rename, unblocked), M04 (needs M03).** Next: M03 (independent) or M02 after M01 merges. Merge backlog now 5 PRs (E02 #184/gd#21, E03 #187/gd#22, M01 gd#23) — Lars: a Bash(gh pr merge:*) permission rule lets the loop self-merge.
 
