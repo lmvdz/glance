@@ -25,7 +25,7 @@
 | 2 | 02, 03, 06, 07 | Consumers of batch 1; pairwise-disjoint TOUCHES (02 webapp+CLI, 03 fog+route, 06 PR body, 07 doctor/fabric/CLI) |
 | 3 | 04, 08, 09 | UI + episode; depend on 03/05/06 |
 | 4 | 10 | Depends on 09's resurfacing slot |
-| — | 11 | BLOCKED_BY external PR #186; lands whenever voice-loop merges |
+| 5 | 11 | Voice delivery — unblocked (PR #186 merged 2026-07-15), lands after 09 |
 
 ## Dependency graph
 | Concern | Blocked by | 30s check |
@@ -38,7 +38,7 @@
 | 08 | 01, 05 | both checks above |
 | 09 | 03, 05, 06 | checks above + `grep -q prBodyFor src/pr-body.ts` |
 | 10 | 09 | `grep -q staleAnswer src/weekly-episode.ts` |
-| 11 | 09 + external PR #186 | `git merge-base --is-ancestor <voice-loop-head> origin/main` |
+| 11 | 09 | episode API exists (`grep -q buildEpisode src/weekly-episode.ts`) |
 
 ## Not yet specified
 - (none)
