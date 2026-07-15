@@ -21,7 +21,7 @@
  * has no legitimate use for ANY of the daemon's Plane configuration.
  */
 
-import { resolveProvider } from "./model-lineage.ts";
+import { DEFAULT_PROVIDER, resolveProvider } from "./model-lineage.ts";
 
 /** `OMP_SQUAD_*` and its env-compat twin `GLANCE_*` (env-compat.ts mirrors every `OMP_SQUAD_*` secret
  *  into a canonical `GLANCE_` name at boot) — denied in full by both the gate scrub and the tenant
@@ -35,17 +35,31 @@ export function isSquadEnvCompatKey(key: string): boolean {
 const SECRET_PREFIXES = ["BETTER_AUTH_", "GITHUB_", "WORKOS_", "PLANE_"];
 
 /** Daemon credentials denied by exact name — don't carry a secret-shaped suffix, so the shape regex
- *  below can't catch them. */
-const SECRET_EXACT = new Set(["DATABASE_URL"]);
+ *  below can't catch them. Grok's audit: common DB/cloud credential names that pass through the shape
+ *  regex untouched — `PGPASSWORD`/`MYSQL_PWD` have no `_` before the suffix the regex requires,
+ *  `AWS_ACCESS_KEY_ID` ends in `_ID` (not `_KEY`) despite carrying the key material, and
+ *  `DOCKER_AUTH_CONFIG` carries a base64 registry credential under a name shaped like neither `_KEY`
+ *  nor `_TOKEN`. (`AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN` are already caught by the shape
+ *  regex below — `_KEY`/`_TOKEN` respectively — and don't need listing here; see spawn-env.test.ts.) */
+const SECRET_EXACT = new Set(["DATABASE_URL", "PGPASSWORD", "MYSQL_PWD", "AWS_ACCESS_KEY_ID", "DOCKER_AUTH_CONFIG"]);
 
 /** Vars denied by name SHAPE — catches secrets under names this module has never seen; a var newly
  *  added anywhere in the daemon's env is safe by default as long as it's named like a credential. */
 const SECRET_NAME_SHAPE = /(_KEY|_SECRET|_TOKEN|_PASSWORD|_CREDENTIALS?)$/i;
 
+/** Vars that MATCH `SECRET_NAME_SHAPE` by name but are not themselves secret material — they name a
+ *  file PATH a harness must read, not a credential value. Checked first in `isDaemonSecretEnvKey` so
+ *  the shape deny can never catch them; still gated by `isKeepListed` below like everything else, so
+ *  listing a name here only lifts the shape veto, it doesn't grant passage on its own.
+ *  `GOOGLE_APPLICATION_CREDENTIALS` is the ADC convention Vertex/Gemini SDKs read: a path to a
+ *  service-account JSON file on the daemon's own filesystem, not a secret string in the env itself. */
+const SHAPE_EXCEPTIONS = new Set(["GOOGLE_APPLICATION_CREDENTIALS"]);
+
 /** True if `key` names a daemon secret that must never reach a spawned tenant agent process.
  *  Not exported: `scrubbedSpawnEnv` (below, same file) is the only production caller — test
  *  through it instead of this predicate directly (dead-exports-ratchet precedent). */
 function isDaemonSecretEnvKey(key: string): boolean {
+	if (SHAPE_EXCEPTIONS.has(key)) return false;
 	if (isSquadEnvCompatKey(key)) return true;
 	if (SECRET_EXACT.has(key)) return true;
 	if (SECRET_PREFIXES.some((p) => key.startsWith(p))) return true;
@@ -57,30 +71,47 @@ function isDaemonSecretEnvKey(key: string): boolean {
  *  and (proxy vars) reach the harness's provider API at all in a proxied deployment — none of these
  *  are credentials, but dropping them silently breaks agents behind a corporate/CI proxy. */
 const PROXY_VAR_NAMES = new Set(["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "no_proxy", "all_proxy"]);
+
+/** The proxy vars' siblings: non-secret RUNTIME config every major harness SDK honors, needed by the
+ *  same proxied/CA/ADC deployments the proxy vars exist for. None of these carry credential material —
+ *  they're a base URL, a CA bundle path, or a Node runtime flag — but dropping them silently breaks a
+ *  harness that can't reach its provider at all (wrong/no base URL) or can't verify TLS (missing CA)
+ *  in exactly the enterprise deployments concern 01 was built to not regress.
+ *   - `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` / `OPENAI_API_BASE` (legacy OpenAI SDK spelling) /
+ *     `GEMINI_BASE_URL` / `GOOGLE_GENAI_BASE_URL`: SDK-read endpoint overrides for a proxied or
+ *     self-hosted-gateway deployment — swapping the URL, not a secret.
+ *   - `NODE_EXTRA_CA_CERTS` / `SSL_CERT_FILE` / `SSL_CERT_DIR`: a CA bundle PATH so TLS verification
+ *     succeeds against a corporate MITM proxy or internal CA — the path, never the private key.
+ *   - `NODE_OPTIONS`: process-level Node/Bun flags (`--max-old-space-size`, `--dns-result-order`, …) an
+ *     operator sets fleet-wide; dropping it is a functional regression (validate.ts's `typecheckWorker`
+ *     spuriously OOMs on a large repo without it), not a security boundary.
+ *  `GOOGLE_APPLICATION_CREDENTIALS` rides here too — it's a file PATH (ADC convention), re-admitted
+ *  from the shape-deny via `SHAPE_EXCEPTIONS` above; keep-listing it here is what actually lets it
+ *  through once the shape veto no longer blocks it. */
+const RUNTIME_CONFIG_VAR_NAMES = new Set([
+	"ANTHROPIC_BASE_URL",
+	"OPENAI_BASE_URL",
+	"OPENAI_API_BASE",
+	"GEMINI_BASE_URL",
+	"GOOGLE_GENAI_BASE_URL",
+	"NODE_EXTRA_CA_CERTS",
+	"SSL_CERT_FILE",
+	"SSL_CERT_DIR",
+	"NODE_OPTIONS",
+	"GOOGLE_APPLICATION_CREDENTIALS",
+]);
+
 function isKeepListed(key: string): boolean {
 	if (key === "PATH" || key === "HOME" || key === "SHELL" || key === "TERM" || key === "TZ" || key === "LANG") return true;
 	if (key.startsWith("LC_") || key.startsWith("XDG_")) return true;
-	return PROXY_VAR_NAMES.has(key);
+	return PROXY_VAR_NAMES.has(key) || RUNTIME_CONFIG_VAR_NAMES.has(key);
 }
-
-/** LLM-provider credential var names a harness reads directly, by its own SDK's convention — never
- *  minted or namespaced by glance. This is the ONE deliberate widening of the deny-by-shape scrub: an
- *  agent harness (omp, pi, or an ACP runtime) needs its own provider key to make a model call at all,
- *  so these survive by NAME, not by falling through the shape filter that strips everything else
- *  ending in `_KEY`. Narrow and explicit — extend this list (don't loosen SECRET_NAME_SHAPE) when a
- *  new harness needs a credential this doesn't yet cover. This is also the FALLBACK `harnessAuthEnv`
- *  admits when it cannot narrow to a single vendor (harness/model unknown or genuinely multi-vendor,
- *  e.g. a flue worker's own `.flue/agents` config) — every named var, not none, because withholding a
- *  credential a real spawn needs is the failure mode concern 01 warns will get the whole scrub
- *  reverted ("do not silently drop a var an agent needs").
- */
-const HARNESS_AUTH_VARS = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "XAI_API_KEY", "OPENROUTER_API_KEY", "AUGMENT_API_KEY"];
 
 /** Vendor lineage (model-lineage.ts) → the credential var(s) that vendor's SDK convention reads.
  *  Google gets BOTH names because different Gemini-speaking libraries read different var names —
  *  narrowing to only one would silently break whichever library reads the other. `unknown` is not a
- *  key here on purpose: callers fall back to `HARNESS_AUTH_VARS` (the full list) instead, since a
- *  vendor we can't identify might need any of them. */
+ *  key here on purpose: `harnessAuthEnv` never looks this map up with lineage `"unknown"` — it falls
+ *  back to `DEFAULT_PROVIDER` (a real, known key) before it ever would. */
 const LINEAGE_AUTH_VARS: Record<"anthropic" | "openai" | "google" | "xai", string[]> = {
 	anthropic: ["ANTHROPIC_API_KEY"],
 	openai: ["OPENAI_API_KEY"],
@@ -95,15 +126,6 @@ const LINEAGE_AUTH_VARS: Record<"anthropic" | "openai" | "google" | "xai", strin
 const HARNESS_ONLY_AUTH_VARS: Record<string, string[]> = {
 	auggie: ["AUGMENT_API_KEY"],
 };
-
-/** Harnesses that are multi-model by design (`harnessLineage` honestly returns "unknown" for them —
- *  see model-lineage.ts) but whose OWN default model, absent an explicit per-unit pin, is Anthropic's
- *  (`DEFAULT_PROVIDER`) — the same assumption `resolveProvider`'s callers already make for rate-limit
- *  gating. Narrowing an omp/pi spawn with no model info to "every credential" would defeat the whole
- *  point on the two most common harnesses in the fleet; narrowing it to Anthropic matches what the
- *  spawn will actually use unless a unit explicitly pins a cross-vendor model (in which case `model`
- *  is passed and `resolveProvider` resolves the REAL vendor before this fallback is ever consulted). */
-const DEFAULT_ANTHROPIC_HARNESSES = new Set(["omp", "pi"]);
 
 function admit(source: NodeJS.ProcessEnv, names: string[]): Record<string, string> {
 	const env: Record<string, string> = {};
@@ -123,18 +145,34 @@ function admit(source: NodeJS.ProcessEnv, names: string[]): Record<string, strin
  * `harness` (a registered harness NAME, e.g. "omp"/"codex"/"gemini"/"grok"/"auggie") and `model` (the
  * unit's pinned model spec, when known) narrow the result to the single vendor this spawn actually
  * needs, via the SAME `resolveProvider` combinator rate-limit gating already trusts (model wins when
- * classifiable; the harness's static vendor pin is the fallback). Omitting `harness` — or a harness/
- * model combination `resolveProvider` can't classify and isn't one of the omp/pi default-vendor cases
- * above — falls back to the full `HARNESS_AUTH_VARS` list: the honest "we don't know" case, and
- * strictly what every call site did before this narrowing existed.
+ * classifiable; the harness's static vendor pin is the fallback).
+ *
+ * Round-2 cross-lineage audit (both codex and grok, independently): the ORIGINAL fallback for "we
+ * genuinely can't classify this spawn's vendor" admitted EVERY configured provider credential —
+ * ANTHROPIC_API_KEY through AUGMENT_API_KEY, all seven, into a spawn that at most needed one of them.
+ * That is not "honest ignorance", it's the widest possible grant dressed up as one: a multi-provider
+ * operator's opencode-with-no-pinned-model spawn, or a Flue worker's `harnessAuthEnv()` call with no
+ * harness/model at all, walked away with every vendor's key regardless of which (if any) it would ever
+ * call. FIX: unknown lineage now fails closed to `DEFAULT_PROVIDER` alone (model-lineage.ts's
+ * documented "an unclassifiable unit's provider" answer, already trusted for rate-limit gating) —
+ * ONE credential, not seven, for every harness/model combination this function cannot classify. A
+ * spawn that genuinely needs a non-Anthropic vendor must be classifiable (a pinned model, or a
+ * vendor-pinned harness name `model-lineage.ts`'s `HARNESS_LINEAGE` already knows) — withholding six
+ * credentials a spawn never asked for is the correct failure mode, not a functionality regression: no
+ * verified harness in the registry relies on the old seven-key grant (spawn-env.test.ts proves it for
+ * every registered vendor-pinned harness plus the omp/pi default).
  */
 export function harnessAuthEnv(source: NodeJS.ProcessEnv = process.env, harness?: string, model?: string): Record<string, string> {
 	const h = harness?.toLowerCase();
 	if (h && HARNESS_ONLY_AUTH_VARS[h]) return admit(source, HARNESS_ONLY_AUTH_VARS[h]);
 	const lineage = resolveProvider(model, harness);
 	if (lineage !== "unknown") return admit(source, LINEAGE_AUTH_VARS[lineage]);
-	if (h && DEFAULT_ANTHROPIC_HARNESSES.has(h)) return admit(source, LINEAGE_AUTH_VARS.anthropic);
-	return admit(source, HARNESS_AUTH_VARS);
+	// DEFAULT_PROVIDER is a fixed model-lineage.ts constant ("anthropic" today), typed as the broader
+	// ModelLineage union — the `!== "unknown"` guard is redundant at runtime (it can never actually be
+	// "unknown") but narrows the type for LINEAGE_AUTH_VARS' index, same pattern as the `lineage` check
+	// just above. The `[]` arm is unreachable in practice, never a silent broad grant if it somehow were.
+	if (DEFAULT_PROVIDER !== "unknown") return admit(source, LINEAGE_AUTH_VARS[DEFAULT_PROVIDER]);
+	return admit(source, []);
 }
 
 /**

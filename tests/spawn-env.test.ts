@@ -12,7 +12,7 @@ import * as path from "node:path";
 import { AcpAgentDriver } from "../src/acp-agent-driver.ts";
 import { FlueServiceDriver } from "../src/flue-service-driver.ts";
 import { ompOneShot } from "../src/omp-call.ts";
-import { RpcAgent } from "../src/rpc-agent.ts";
+import { hostSpawnEnv, RpcAgent } from "../src/rpc-agent.ts";
 import { harnessAuthEnv, isSquadEnvCompatKey, scrubbedSpawnEnv } from "../src/spawn-env.ts";
 
 const tmps: string[] = [];
@@ -107,6 +107,72 @@ test("scrubbedSpawnEnv skips undefined values in base", () => {
 	expect("GHOST" in env).toBe(false);
 });
 
+// ── Unit: runtime-config keep-list additions (concern 01 round-2 audit) ──────────────────────────
+// Non-secret proxy/CA/base-URL/runtime-flag vars a harness needs in a proxied/CA/ADC deployment —
+// dropped silently before this fix, breaking every harness behind a corporate proxy or custom CA.
+
+test("scrubbedSpawnEnv preserves provider base-URL overrides (proxied/self-hosted-gateway deployments)", () => {
+	const env = scrubbedSpawnEnv({
+		PATH: "/usr/bin",
+		ANTHROPIC_BASE_URL: "https://proxy.internal/anthropic",
+		OPENAI_BASE_URL: "https://proxy.internal/openai",
+		OPENAI_API_BASE: "https://proxy.internal/openai-legacy",
+		GEMINI_BASE_URL: "https://proxy.internal/gemini",
+		GOOGLE_GENAI_BASE_URL: "https://proxy.internal/genai",
+	});
+	expect(env.ANTHROPIC_BASE_URL).toBe("https://proxy.internal/anthropic");
+	expect(env.OPENAI_BASE_URL).toBe("https://proxy.internal/openai");
+	expect(env.OPENAI_API_BASE).toBe("https://proxy.internal/openai-legacy");
+	expect(env.GEMINI_BASE_URL).toBe("https://proxy.internal/gemini");
+	expect(env.GOOGLE_GENAI_BASE_URL).toBe("https://proxy.internal/genai");
+});
+
+test("scrubbedSpawnEnv preserves CA/TLS vars and NODE_OPTIONS (non-secret runtime config, not credentials)", () => {
+	const env = scrubbedSpawnEnv({
+		PATH: "/usr/bin",
+		NODE_EXTRA_CA_CERTS: "/etc/ssl/corp-ca.pem",
+		SSL_CERT_FILE: "/etc/ssl/cert.pem",
+		SSL_CERT_DIR: "/etc/ssl/certs",
+		NODE_OPTIONS: "--max-old-space-size=8192",
+	});
+	expect(env.NODE_EXTRA_CA_CERTS).toBe("/etc/ssl/corp-ca.pem");
+	expect(env.SSL_CERT_FILE).toBe("/etc/ssl/cert.pem");
+	expect(env.SSL_CERT_DIR).toBe("/etc/ssl/certs");
+	expect(env.NODE_OPTIONS).toBe("--max-old-space-size=8192");
+});
+
+test("scrubbedSpawnEnv re-admits GOOGLE_APPLICATION_CREDENTIALS (a service-account file PATH, not a secret value) despite matching the *_CREDENTIALS? shape rule", () => {
+	const env = scrubbedSpawnEnv({ PATH: "/usr/bin", GOOGLE_APPLICATION_CREDENTIALS: "/var/secrets/vertex-sa.json" });
+	expect(env.GOOGLE_APPLICATION_CREDENTIALS).toBe("/var/secrets/vertex-sa.json");
+});
+
+test("scrubbedSpawnEnv still strips an arbitrary *_CREDENTIALS name that ISN'T the named ADC exception (the shape exception is narrow, not a loosened rule)", () => {
+	const env = scrubbedSpawnEnv({ PATH: "/usr/bin", SOME_OTHER_APP_CREDENTIALS: "should-still-be-stripped" });
+	expect(env.SOME_OTHER_APP_CREDENTIALS).toBeUndefined();
+});
+
+// ── Unit: new deny-by-exact-name secrets (grok audit — shapes the shape regex misses) ────────────
+
+test("scrubbedSpawnEnv strips PGPASSWORD, MYSQL_PWD, AWS_ACCESS_KEY_ID, and DOCKER_AUTH_CONFIG — names the *_KEY/*_SECRET/*_TOKEN/*_PASSWORD/*_CREDENTIALS shape regex does not match", () => {
+	const env = scrubbedSpawnEnv({
+		PATH: "/usr/bin",
+		PGPASSWORD: "pg-secret",
+		MYSQL_PWD: "mysql-secret",
+		AWS_ACCESS_KEY_ID: "AKIAEXAMPLE",
+		DOCKER_AUTH_CONFIG: "eyJhdXRocyI6e319",
+	});
+	expect(env.PATH).toBe("/usr/bin");
+	for (const gone of ["PGPASSWORD", "MYSQL_PWD", "AWS_ACCESS_KEY_ID", "DOCKER_AUTH_CONFIG"]) {
+		expect(env[gone]).toBeUndefined();
+	}
+});
+
+test("scrubbedSpawnEnv still strips AWS_SECRET_ACCESS_KEY and AWS_SESSION_TOKEN via the existing shape regex (*_KEY / *_TOKEN) — no regression alongside the new exact-name additions", () => {
+	const env = scrubbedSpawnEnv({ PATH: "/usr/bin", AWS_SECRET_ACCESS_KEY: "secret", AWS_SESSION_TOKEN: "session-token" });
+	expect(env.AWS_SECRET_ACCESS_KEY).toBeUndefined();
+	expect(env.AWS_SESSION_TOKEN).toBeUndefined();
+});
+
 // ── Unit: isDaemonSecretEnvKey / isSquadEnvCompatKey (the predicates gate-env.ts now shares) ─────
 
 test("isSquadEnvCompatKey matches both prefixes only", () => {
@@ -131,9 +197,14 @@ test("the deny predicate (via scrubbedSpawnEnv) is true for every deny class and
 
 // ── Unit: harnessAuthEnv ───────────────────────────────────────────────────────────────────────
 
-test("harnessAuthEnv passes through only the named LLM-provider credential vars that are actually set", () => {
+test("harnessAuthEnv with no harness/model narrows to DEFAULT_PROVIDER's own key only — never a random-shaped var, and never a DIFFERENT provider's key just because it happens to be set", () => {
 	const env = harnessAuthEnv({ PATH: "/usr/bin", ANTHROPIC_API_KEY: "sk-a", OPENAI_API_KEY: "sk-o", RANDOM_OTHER_KEY: "not a harness credential" });
-	expect(env).toEqual({ ANTHROPIC_API_KEY: "sk-a", OPENAI_API_KEY: "sk-o" });
+	expect(env).toEqual({ ANTHROPIC_API_KEY: "sk-a" });
+});
+
+test("harnessAuthEnv(source, 'gemini') passes through only the named LLM-provider credential vars for that vendor that are actually set — never an unrelated var", () => {
+	const env = harnessAuthEnv({ PATH: "/usr/bin", GOOGLE_API_KEY: "sk-g", GEMINI_API_KEY: "sk-gg", RANDOM_OTHER_KEY: "not a harness credential" }, "gemini");
+	expect(env).toEqual({ GOOGLE_API_KEY: "sk-g", GEMINI_API_KEY: "sk-gg" });
 });
 
 test("harnessAuthEnv returns empty when none of the named vars are set", () => {
@@ -188,18 +259,34 @@ test("harnessAuthEnv(source, 'grok', 'gemini-2.5-pro') follows the pinned model 
 	expect(harnessAuthEnv(ALL_PROVIDER_ENV, "grok", "gemini-2.5-pro")).toEqual({ GOOGLE_API_KEY: "sk-google", GEMINI_API_KEY: "sk-gemini" });
 });
 
-test("harnessAuthEnv(source, 'opencode') — a genuinely multi-vendor harness with no model pin — falls back to the full list (honest ignorance, not a narrowing)", () => {
-	expect(harnessAuthEnv(ALL_PROVIDER_ENV, "opencode")).toEqual(admitAllProviders());
+// Round-2 cross-lineage audit (both codex and grok): the PRE-fix behavior of the two tests below was
+// "falls back to the full list (honest ignorance, not a narrowing)" — admitting every configured
+// provider credential (all 7) to a spawn whose vendor we simply couldn't classify. Both foreign-lineage
+// reviewers flagged that as the opposite of narrow: an opencode spawn with no pinned model, or a Flue
+// worker's harnessAuthEnv() call with no harness/model at all, walked away with six credentials it
+// never asked for. Fixed: unknown lineage now fails closed to DEFAULT_PROVIDER (anthropic) alone —
+// ONE key, matching the same honest-default answer omp/pi already used, extended to every
+// unclassifiable case instead of being the one narrow exception among several broad ones.
+
+test("harnessAuthEnv(source, 'opencode') — a genuinely multi-vendor harness with no model pin — fails closed to DEFAULT_PROVIDER (anthropic) alone, not the full list", () => {
+	expect(harnessAuthEnv(ALL_PROVIDER_ENV, "opencode")).toEqual({ ANTHROPIC_API_KEY: "sk-anthropic" });
 });
 
-test("harnessAuthEnv with an unknown harness name and no model falls back to the full list", () => {
-	expect(harnessAuthEnv(ALL_PROVIDER_ENV, "some-future-harness")).toEqual(admitAllProviders());
+test("harnessAuthEnv with an unknown harness name and no model fails closed to DEFAULT_PROVIDER (anthropic) alone, not the full list", () => {
+	expect(harnessAuthEnv(ALL_PROVIDER_ENV, "some-future-harness")).toEqual({ ANTHROPIC_API_KEY: "sk-anthropic" });
 });
 
-function admitAllProviders(): Record<string, string> {
-	const { PATH: _PATH, ...rest } = ALL_PROVIDER_ENV;
-	return rest;
-}
+test("harnessAuthEnv() with NO harness and NO model at all (the Flue-worker call shape, flue-service-driver.ts) fails closed to DEFAULT_PROVIDER (anthropic) alone, not the full list", () => {
+	expect(harnessAuthEnv(ALL_PROVIDER_ENV)).toEqual({ ANTHROPIC_API_KEY: "sk-anthropic" });
+});
+
+test("harnessAuthEnv for a known-vendor ACP harness (gemini) returns exactly its ONE vendor's key set, never the other providers' keys", () => {
+	const env = harnessAuthEnv(ALL_PROVIDER_ENV, "gemini");
+	expect(env).toEqual({ GOOGLE_API_KEY: "sk-google", GEMINI_API_KEY: "sk-gemini" });
+	for (const leaked of ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "XAI_API_KEY", "OPENROUTER_API_KEY", "AUGMENT_API_KEY"]) {
+		expect(env[leaked]).toBeUndefined();
+	}
+});
 
 // ── Mutation proof: real spawns at all four sites, each with a real DATABASE_URL in process.env ──
 
@@ -271,6 +358,91 @@ test("mutation proof (agent-host.ts): the real omp child agent-host spawns never
 		expect(dumped.DATABASE_URL).toBeUndefined();
 		expect(dumped.PATH).toBeDefined(); // sanity: the child still got a usable env
 	});
+});
+
+// ── Unit + smoke: hostSpawnEnv (rpc-agent.ts) — the OUTER `bun agent-host-main.ts` spawn's own env ──
+//
+// Round-2 cross-lineage audit (both codex and grok, independently, CRITICAL): `RpcAgent.spawnHost`
+// passed `{ ...process.env }` verbatim to the detached agent-host process — the daemon's FULL env,
+// `DATABASE_URL`/`BETTER_AUTH_SECRET`/the voice boot secret (`OMP_SQUAD_SECRETS_KEY`/
+// `GLANCE_SECRETS_KEY`) included. A same-uid tenant process can read that straight back out of
+// `/proc/<host-pid>/environ` — the kernel's immutable snapshot of a process's environ at exec time —
+// even after secrets.ts deletes the key from the DAEMON's own `process.env` at boot: deleting a
+// runtime `process.env` entry can never retroactively edit an already-exec'd process's kernel environ.
+// Fixed: `spawnHost` now routes through `hostSpawnEnv`, the SAME `scrubbedSpawnEnv` the inner tenant
+// omp/pi child already uses, narrowed to exactly what `agent-host-main.ts`'s transitive imports read
+// from `process.env` (state-dir.ts's `GLANCE_STATE_DIR`/`OMP_SQUAD_STATE_DIR`, and the ONE provider
+// credential the inner child's own `harnessAuthEnv` call will need) — see rpc-agent.ts's doc on
+// `hostSpawnEnv` for the full grep-verified inventory.
+
+test("hostSpawnEnv strips DATABASE_URL, BETTER_AUTH_SECRET, and the voice master key (both OMP_SQUAD_SECRETS_KEY and its GLANCE_ twin) from the outer agent-host-main.ts spawn", () => {
+	const env = hostSpawnEnv({
+		PATH: "/usr/bin",
+		DATABASE_URL: "postgres://daemon-secret",
+		BETTER_AUTH_SECRET: "auth-secret",
+		OMP_SQUAD_SECRETS_KEY: "voice-master-key-legacy",
+		GLANCE_SECRETS_KEY: "voice-master-key-canonical",
+	});
+	for (const gone of ["DATABASE_URL", "BETTER_AUTH_SECRET", "OMP_SQUAD_SECRETS_KEY", "GLANCE_SECRETS_KEY"]) {
+		expect(env[gone]).toBeUndefined();
+	}
+	expect(env.PATH).toBe("/usr/bin"); // sanity: the host still gets a usable env, not an empty one
+});
+
+test("hostSpawnEnv re-admits GLANCE_STATE_DIR/OMP_SQUAD_STATE_DIR under BOTH names despite the OMP_SQUAD_*/GLANCE_* prefix denial — agent-host-main.ts resolves its OWN socket dir via state-dir.ts (pruneStaleSockets) and must agree with the daemon's, or a custom state dir (every test run) leaves it scanning the wrong directory for its opportunistic stale-socket GC", () => {
+	const env = hostSpawnEnv({ PATH: "/usr/bin", OMP_SQUAD_STATE_DIR: "/tmp/glance-test-state-abc" });
+	expect(env.OMP_SQUAD_STATE_DIR).toBe("/tmp/glance-test-state-abc");
+	expect(env.GLANCE_STATE_DIR).toBe("/tmp/glance-test-state-abc");
+});
+
+test("hostSpawnEnv prefers GLANCE_STATE_DIR over OMP_SQUAD_STATE_DIR when both are set, matching resolveStateDir's own precedence", () => {
+	const env = hostSpawnEnv({ PATH: "/usr/bin", GLANCE_STATE_DIR: "/tmp/canonical", OMP_SQUAD_STATE_DIR: "/tmp/legacy" });
+	expect(env.GLANCE_STATE_DIR).toBe("/tmp/canonical");
+	expect(env.OMP_SQUAD_STATE_DIR).toBe("/tmp/canonical");
+});
+
+test("hostSpawnEnv omits GLANCE_STATE_DIR/OMP_SQUAD_STATE_DIR entirely when neither is set in source (nothing to mirror, no spurious injection)", () => {
+	const env = hostSpawnEnv({ PATH: "/usr/bin" });
+	expect("GLANCE_STATE_DIR" in env).toBe(false);
+	expect("OMP_SQUAD_STATE_DIR" in env).toBe(false);
+});
+
+test("hostSpawnEnv narrows the injected provider credential to the harness's own vendor — a 'codex' host spawn carries OPENAI_API_KEY forward for agent-host.ts's own harnessAuthEnv call, never the operator's other configured provider keys", () => {
+	const env = hostSpawnEnv({ PATH: "/usr/bin", ANTHROPIC_API_KEY: "sk-anthropic", OPENAI_API_KEY: "sk-openai", GOOGLE_API_KEY: "sk-google" }, "codex");
+	expect(env.OPENAI_API_KEY).toBe("sk-openai");
+	expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+	expect(env.GOOGLE_API_KEY).toBeUndefined();
+});
+
+test("mutation proof (rpc-agent.ts spawnHost, host env): a real agent-host spawn boots successfully with DATABASE_URL, BETTER_AUTH_SECRET, and the voice master key all present in the daemon's env — the new outer-spawn scrub doesn't break the host (the required 'agent-host still starts' smoke), and the inner tenant child still never sees any of the three", async () => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "sqt-spawn-env-host-secrets-"));
+	tmps.push(dir);
+	const binPath = path.join(dir, "fake-omp-envdump.ts");
+	const dumpPath = path.join(dir, "env.json");
+	await fs.writeFile(binPath, fakeOmpEnvDump(dumpPath));
+	await fs.chmod(binPath, 0o755);
+	const socket = path.join(dir, "agent.sock");
+
+	const secrets = { DATABASE_URL: "postgres://host-env-smoke", BETTER_AUTH_SECRET: "auth-secret-smoke", OMP_SQUAD_SECRETS_KEY: "voice-master-key-smoke" };
+	const prev: Record<string, string | undefined> = {};
+	for (const [k, v] of Object.entries(secrets)) {
+		prev[k] = process.env[k];
+		process.env[k] = v;
+	}
+	try {
+		const agent = new RpcAgent({ id: `spawn-env-host-secrets-${Date.now().toString(36)}`, cwd: dir, bin: binPath, socket, approvalMode: "yolo", thinking: "minimal" });
+		agents.push(agent);
+		await agent.start(20_000); // must not throw — the host still boots fine with the scrubbed env
+		await agent.stop();
+		const dumped = JSON.parse(await fs.readFile(dumpPath, "utf8")) as Record<string, string>;
+		for (const k of Object.keys(secrets)) expect(dumped[k]).toBeUndefined();
+		expect(dumped.PATH).toBeDefined();
+	} finally {
+		for (const [k, v] of Object.entries(prev)) {
+			if (v === undefined) delete process.env[k];
+			else process.env[k] = v;
+		}
+	}
 });
 
 // ── Mutation proof: the round-3 hole — a tenant worktree's OWN bunfig.toml/preload, one level above ─

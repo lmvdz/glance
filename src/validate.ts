@@ -95,8 +95,19 @@ async function typecheckWorker(dir: string): Promise<GateCheck> {
 /**
  * Fixed baseline of non-secret operational vars the Node/Bun toolchain needs to locate
  * binaries and a temp dir. No credentials — secrets only flow through capability grants.
+ *
+ * `NODE_OPTIONS`/`NODE_EXTRA_CA_CERTS`/`SSL_CERT_FILE` (code-review round-2, CONFIRMED): dropping
+ * `NODE_OPTIONS` here meant a worker repo whose toolchain sets `NODE_OPTIONS=--max-old-space-size=…`
+ * (common for a large repo's own tsc/build config) had that override silently discarded for
+ * `typecheckWorker`'s `tsc --noEmit` spawn, which then OOMs on a big worker and the typecheck gate
+ * fails spuriously against code that would pass with the operator's own memory ceiling honored.
+ * `NODE_EXTRA_CA_CERTS`/`SSL_CERT_FILE` ride along because this SAME baseline also feeds
+ * `acceptanceEnv()` below, whose `flue run` spawn makes real network calls (a model call, or the
+ * worker's own HTTP dependencies) — behind a corporate proxy or custom CA those calls need the CA
+ * bundle path to verify TLS at all. None of the three carry secret material: a runtime flag and two
+ * file paths, not credentials.
  */
-const ENV_BASELINE = ["PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "TZ"];
+const ENV_BASELINE = ["PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "TZ", "NODE_OPTIONS", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE"];
 
 /** ENV_BASELINE only, no capability/provider allowance — for a check (typecheck) that runs
  *  repo-supplied tooling but needs no secret and makes no model call. */
