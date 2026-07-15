@@ -1,6 +1,10 @@
 # C07 — intervene pane
 
-STATUS: open
+STATUS: in-review (glance-desktop#15)
+
+## Reality notes (2026-07-15, glance-desktop#15)
+
+Master-detail in the fleet pane: row click → IntervenePane (why-stopped card + colorized unified diff + steer composer). Endpoints consumed: GET /api/agents/:id/diff (FileDiff[] {file,status,diff}) and POST /api/command {type:"prompt",id,message} (webapp's exact steer shape). Pure helpers tested (diffLineKind, whyStopped, normalizeDiff — 6 tests). a11y fix: selectable area is a real <button> sibling of the folder button (no nested interactives — restructured to clear the useSemanticElements warning). BOTH endpoint contracts verified live against a real daemon (diff routes/404s; command 200 well-formed / 400 malformed). Gate: tsc/lint(103)/vitest 376/build green. GUI click-through not driven (WSLg). Steer is operator-tier, mirrors webapp — no gauntlet.
 PRIORITY: p1
 REPOS: glance-desktop
 COMPLEXITY: architectural
