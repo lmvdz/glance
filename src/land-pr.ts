@@ -27,6 +27,7 @@ import { gateExec, greenGateUnproven } from "./gate-runner.ts";
 import { detectVerify, packageManifestError } from "./intake.ts";
 import { proofGate } from "./proof.ts";
 import { gh, ghJson } from "./gh.ts";
+import { hasModelDeltaMarker } from "./pr-body.ts";
 import { isAncestor, recordDoneProof } from "./done-proof.ts";
 import { cherryCheck, orphanedShas } from "./orphan-audit.ts";
 import { repoIdentity } from "./repo-identity.ts";
@@ -169,6 +170,11 @@ export interface PendingPr {
 	 *  from the roster) can still confirm its Plane close via the reconciler's fallback `IssueRef`. */
 	issueProjectId?: string;
 	agentId?: string;
+	/** The unit's feature id at float/adopt time (comprehension lane concern 06) — persisted here so a
+	 *  LATER reconcile (or a re-render of the PR body) can resolve "whose mental-model deltas/symptoms
+	 *  does this PR belong to" without re-deriving it from a possibly-removed agent record. Populated
+	 *  by `ensurePr`'s caller (`squad-manager.ts`'s `prBodyFor` call sites); never fabricated here. */
+	featureId?: string;
 	createdAt: number;
 	state: "open" | "merged" | "closed";
 	mergedAt?: number;
@@ -266,6 +272,8 @@ export interface EnsurePrInput {
 	issueIdentifier?: string;
 	issueProjectId?: string;
 	agentId?: string;
+	/** The unit's feature id, threaded straight onto the recorded `PendingPr` entry (concern 06). */
+	featureId?: string;
 }
 
 export interface EnsurePrResult {
@@ -331,9 +339,26 @@ export async function ensurePr(input: EnsurePrInput): Promise<EnsurePrResult> {
 				issueIdentifier: input.issueIdentifier,
 				issueProjectId: input.issueProjectId,
 				agentId: input.agentId,
+				featureId: input.featureId,
 				createdAt: Date.now(),
 				state: "open",
 			});
+		}
+		// Adopt-path repair (concern 06): a PR opened before this daemon rendered bodies — or opened by a
+		// prior daemon version, or created bare by a human — carries no rendered teaching. Repair it
+		// in place ONLY when both (a) we actually have a body to write, and (b) the marker is ABSENT —
+		// its presence means a prior float already rendered this exact body, possibly with human edits
+		// layered around it since, and those edits must win (never overwritten). Best-effort: a failed
+		// repair here must never fail the float/land it's riding along with.
+		if (input.body) {
+			try {
+				const view = await ghJson<{ body?: string }>(["pr", "view", String(openPr.number), "--repo", repoSlug, "--json", "body"], input.repo);
+				if (!hasModelDeltaMarker(view?.body)) {
+					await gh(["pr", "edit", String(openPr.number), "--repo", repoSlug, "--body", input.body], input.repo);
+				}
+			} catch {
+				/* best-effort: a body-repair failure must never fail the adopt */
+			}
 		}
 		return { ok: true, prNumber: openPr.number, prUrl: openPr.url, prState: openPr.isDraft === undefined ? undefined : openPr.isDraft ? "draft" : "open" };
 	}
@@ -366,6 +391,7 @@ export async function ensurePr(input: EnsurePrInput): Promise<EnsurePrResult> {
 		issueIdentifier: input.issueIdentifier,
 		issueProjectId: input.issueProjectId,
 		agentId: input.agentId,
+		featureId: input.featureId,
 		createdAt: Date.now(),
 		state: "open",
 	});

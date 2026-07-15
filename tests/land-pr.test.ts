@@ -27,12 +27,14 @@ let nextPrNumber = 100;
 let mergeShouldSucceed = true;
 let readyShouldSucceed = true;
 let mergeSimulator: ((cwd: string) => Promise<void>) | undefined;
-let prViewResponse: GhPr | undefined;
+let prViewResponse: GhPr | { body?: string } | undefined;
 const createCalls: string[][] = [];
 const pushCalls: string[][] = [];
 const readyCalls: string[][] = [];
 const mergeCalls: string[][] = [];
+const editCalls: string[][] = [];
 let mergeCalled = false;
+let editShouldThrow = false;
 
 async function mockGh(args: string[], cwd: string): Promise<{ code: number; stdout: string; stderr: string }> {
 	if (args[0] === "pr" && args[1] === "list") {
@@ -42,6 +44,11 @@ async function mockGh(args: string[], cwd: string): Promise<{ code: number; stdo
 		createCalls.push(args);
 		const num = nextPrNumber++;
 		return { code: 0, stdout: `https://github.com/acme/app/pull/${num}\n`, stderr: "" };
+	}
+	if (args[0] === "pr" && args[1] === "edit") {
+		editCalls.push(args);
+		if (editShouldThrow) throw new Error("gh pr edit: simulated network failure");
+		return { code: 0, stdout: "", stderr: "" };
 	}
 	if (args[0] === "pr" && args[1] === "ready") {
 		readyCalls.push(args);
@@ -95,7 +102,9 @@ afterEach(() => {
 	pushCalls.length = 0;
 	readyCalls.length = 0;
 	mergeCalls.length = 0;
+	editCalls.length = 0;
 	mergeCalled = false;
+	editShouldThrow = false;
 });
 
 const tmps: string[] = [];
@@ -329,6 +338,113 @@ test("ensurePr adopting a FRESH open PR overwrites a stale ledger entry left ove
 	expect(entry?.prNumber).toBe(9);
 	expect(entry?.state).toBe("open");
 	expect(entry?.mergedAt).toBeUndefined(); // never carries the old #5 entry's lifecycle fields forward
+});
+
+// ── featureId round-trip (comprehension lane concern 06) ────────────────────────────────────────
+
+test("ensurePr threads featureId onto a freshly-created PendingPr entry", async () => {
+	const { repo } = await baseline("ep-feat-new-");
+	const stateDir = await tmpDir("ep-feat-new-state-");
+	await branchWorktree(repo, "squad/a1", { "feature.txt": "new\n" });
+	prList = [];
+
+	await ensurePr({ repo, branch: "squad/a1", defaultBranch: "main", title: "t", stateDir, featureId: "feat-123" });
+
+	expect(getPendingPr(stateDir, "squad/a1")?.featureId).toBe("feat-123");
+});
+
+test("ensurePr threads featureId onto an adopted-OPEN-PR's PendingPr entry", async () => {
+	const { repo } = await baseline("ep-feat-adopt-");
+	const stateDir = await tmpDir("ep-feat-adopt-state-");
+	prList = [{ number: 77, url: "https://github.com/acme/app/pull/77", state: "OPEN" }];
+
+	await ensurePr({ repo, branch: "squad/a1", defaultBranch: "main", title: "t", stateDir, featureId: "feat-456" });
+
+	expect(getPendingPr(stateDir, "squad/a1")?.featureId).toBe("feat-456");
+});
+
+test("no featureId given ⇒ the PendingPr entry carries none (never fabricated)", async () => {
+	const { repo } = await baseline("ep-feat-none-");
+	const stateDir = await tmpDir("ep-feat-none-state-");
+	await branchWorktree(repo, "squad/a1", { "feature.txt": "new\n" });
+	prList = [];
+
+	await ensurePr({ repo, branch: "squad/a1", defaultBranch: "main", title: "t", stateDir });
+
+	expect(getPendingPr(stateDir, "squad/a1")?.featureId).toBeUndefined();
+});
+
+// ── adopt-path body repair (comprehension lane concern 06) ──────────────────────────────────────
+
+test("adopting an OPEN PR with no marker in its body: a provided body triggers gh pr edit --body", async () => {
+	const { repo } = await baseline("ep-repair-");
+	const stateDir = await tmpDir("ep-repair-state-");
+	prList = [{ number: 77, url: "https://github.com/acme/app/pull/77", state: "OPEN" }];
+	prViewResponse = { body: "" };
+
+	const body = "## Mental model delta\n<!-- omp-squad:model-delta:v1 -->\nno delta recorded";
+	const r = await ensurePr({ repo, branch: "squad/a1", defaultBranch: "main", title: "t", stateDir, body });
+
+	expect(r.ok).toBe(true);
+	expect(editCalls.length).toBe(1);
+	expect(editCalls[0]).toContain("--body");
+	expect(editCalls[0]).toContain(body);
+	expect(editCalls[0][0]).toBe("pr");
+	expect(editCalls[0][1]).toBe("edit");
+	expect(editCalls[0]).toContain("77");
+});
+
+test("adopting an OPEN PR whose body ALREADY carries the marker: never overwritten, even with a different rendered body", async () => {
+	const { repo } = await baseline("ep-repair-marked-");
+	const stateDir = await tmpDir("ep-repair-marked-state-");
+	prList = [{ number: 78, url: "https://github.com/acme/app/pull/78", state: "OPEN" }];
+	prViewResponse = { body: "## Mental model delta\n<!-- omp-squad:model-delta:v1 -->\n- an earlier delta — evidence: `src/a.ts`\n\n(human notes added below)" };
+
+	const newBody = "## Mental model delta\n<!-- omp-squad:model-delta:v1 -->\n- a completely different later delta — evidence: `src/b.ts`";
+	const r = await ensurePr({ repo, branch: "squad/a1", defaultBranch: "main", title: "t", stateDir, body: newBody });
+
+	expect(r.ok).toBe(true);
+	expect(editCalls.length).toBe(0); // marker present ⇒ a human may have edited around it — never touched
+});
+
+test("adopting an OPEN PR with no body provided at all: no gh pr view / edit calls made", async () => {
+	const { repo } = await baseline("ep-repair-nobody-");
+	const stateDir = await tmpDir("ep-repair-nobody-state-");
+	prList = [{ number: 79, url: "https://github.com/acme/app/pull/79", state: "OPEN" }];
+
+	const r = await ensurePr({ repo, branch: "squad/a1", defaultBranch: "main", title: "t", stateDir });
+
+	expect(r.ok).toBe(true);
+	expect(editCalls.length).toBe(0);
+});
+
+test("adopt-path body repair is idempotent: a second ensurePr call with the same rendered body edits at most once more (marker now present)", async () => {
+	const { repo } = await baseline("ep-repair-idem-");
+	const stateDir = await tmpDir("ep-repair-idem-state-");
+	prList = [{ number: 80, url: "https://github.com/acme/app/pull/80", state: "OPEN" }];
+	prViewResponse = { body: "" };
+	const body = "## Mental model delta\n<!-- omp-squad:model-delta:v1 -->\nno delta recorded";
+
+	await ensurePr({ repo, branch: "squad/a1", defaultBranch: "main", title: "t", stateDir, body });
+	expect(editCalls.length).toBe(1);
+
+	// Simulate the edit having actually landed: the next `gh pr view` now sees the marker.
+	prViewResponse = { body };
+	await ensurePr({ repo, branch: "squad/a1", defaultBranch: "main", title: "t", stateDir, body });
+	expect(editCalls.length).toBe(1); // no second edit — marker is now present
+});
+
+test("a body-repair gh failure (a thrown exception, e.g. a network error) never fails the adopt itself (best-effort)", async () => {
+	const { repo } = await baseline("ep-repair-fail-");
+	const stateDir = await tmpDir("ep-repair-fail-state-");
+	prList = [{ number: 81, url: "https://github.com/acme/app/pull/81", state: "OPEN" }];
+	prViewResponse = undefined; // gh pr view returns {} ⇒ no body/marker ⇒ an edit is attempted
+	editShouldThrow = true;
+
+	const r = await ensurePr({ repo, branch: "squad/a1", defaultBranch: "main", title: "t", stateDir, body: "## Mental model delta\n<!-- omp-squad:model-delta:v1 -->\nno delta recorded" });
+	expect(r.ok).toBe(true);
+	expect(r.prNumber).toBe(81);
+	expect(editCalls.length).toBe(1); // the attempt was made and threw; the throw was swallowed
 });
 
 // ── landAgentPr — commitWip ──────────────────────────────────────────────────────────────────────
