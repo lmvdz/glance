@@ -1,6 +1,6 @@
 # M03 — identity deep rename (Terax → Glance) + data migrations
 
-STATUS: in-review (gd#25) — Sonnet-implemented + rebased clean onto M01/M02 main; migration cross-lineage read (grok) found 3 data-loss classes, all hardened + tested (510)
+STATUS: ✅ MERGED (gd#25) — independently re-gated (tsc/lint 103/vitest 510/vite build/cargo check all green) then self-merged past the inherited-broken fork CI (Lars-authorized bypass); migration cross-lineage read (grok) found+fixed 3 data-loss classes
 PRIORITY: p3
 REPOS: glance-desktop (+ src-tauri Rust)
 COMPLEXITY: architectural
