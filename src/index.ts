@@ -9,6 +9,7 @@
  *   glance rm <id> [--delete-worktree]
  *   glance ask "<question>" [--repo …]           answer a question; no branch, nothing to merge
  *   glance answers [<id>]                        list or read durable answers
+ *   glance promote <issue> [--repo …]            enrich a Backlog Plane ticket with Tier-1/Tier-2 context
  *   glance open
  *   glance doctor [--json]                        diagnose the factory: on? armed? pointed where?
  *
@@ -93,6 +94,7 @@ USAGE
   glance automation [--window 1h] [--loop L]    Show what the background loops are doing (and Scout's LLM cost)
   glance ask "<question>" [--repo R]            Ask; the deliverable is a written answer, not a branch
   glance answers [<id>] [--repo R]              List answers, or print one
+  glance promote <issue> [--repo R] [--json]    Enrich a Backlog Plane ticket with Tier-1/Tier-2 context
   glance open                                   Print the dashboard URL
   glance doctor [--json]                       Is the factory on, armed, and pointed at the right world?
   glance curate-plane [repo] [--file]             Group recurring Plane issues into unified fixes
@@ -1005,6 +1007,53 @@ async function cmdAnswers(args: string[]): Promise<void> {
 }
 
 /**
+ * `glance promote <issue> [--repo <path>] [--json]`
+ *
+ * adw-factory-borrows concern 05: enrich a Backlog Plane ticket with Tier-1/Tier-2 context through
+ * the daemon's ask-mode seam, fail-closed validated against the same truncation `dispatchSpec`
+ * applies at dispatch time. Never moves the ticket's state — Backlog stays Backlog; dragging it to
+ * Todo in Plane is the release (concern 03's dispatcher state gate is what makes that drag mean
+ * something). Blocks for the same wait window `glance ask` does — the enrichment IS an ask-mode unit
+ * under the hood, so this can take several minutes on a non-trivial ticket.
+ */
+async function cmdPromote(args: string[]): Promise<void> {
+	const { positional, flags } = parseArgs(args);
+	const issue = positional[0];
+	if (!issue) {
+		process.stderr.write("usage: glance promote <issue-id-or-identifier> [--repo <path>] [--json]\n");
+		process.exit(1);
+	}
+	const repo = typeof flags.repo === "string" ? path.resolve(flags.repo) : process.cwd();
+	if (!flags.json) process.stderr.write(`promoting ${issue}… (waits for an ask-mode unit to investigate; can take several minutes)\n`);
+	const res = await fetch(`${base(flags)}/api/issues/${encodeURIComponent(issue)}/promote`, {
+		method: "POST",
+		headers: { ...tokenHeader(), "content-type": "application/json" },
+		body: JSON.stringify({ repo }),
+	}).catch(() => null);
+	if (!res) {
+		process.stderr.write(`No glance daemon on ${base(flags)}. Start one with: glance up\n`);
+		process.exit(1);
+	}
+	const result = (await res.json().catch(() => null)) as { ok: boolean; issue?: string; message: string; error?: string; draft?: string } | null;
+	if (!result) {
+		process.stderr.write(`promote failed: ${res.status} ${res.statusText}\n`);
+		process.exit(1);
+	}
+	if (flags.json) {
+		process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+		if (!result.ok) process.exit(1);
+		return;
+	}
+	if (result.ok) {
+		process.stdout.write(`${result.message}\n`);
+		return;
+	}
+	process.stderr.write(`${result.message}\n`);
+	if (result.draft) process.stderr.write(`\n--- draft (not written) ---\n${result.draft}\n`);
+	process.exit(1);
+}
+
+/**
  * `glance doctor` — R6's answer. Exit code IS the verdict, so CI and the operator's `&&` both work:
  * 0 = nothing blocking, 1 = the factory cannot do its job. A warning never fails the command; a warning
  * that failed the command would be turned off within a week.
@@ -1086,6 +1135,9 @@ async function main(): Promise<void> {
 			break;
 		case "answers":
 			await cmdAnswers(rest);
+			break;
+		case "promote":
+			await cmdPromote(rest);
 			break;
 		case "doctor":
 			await cmdDoctor(rest);
