@@ -1,6 +1,12 @@
 # C05 — roster + attention panes
 
-STATUS: open
+STATUS: in-review (glance-desktop#11)
+
+## Reality notes (2026-07-14, glance-desktop#11)
+
+Transport reality differs from the concern's SSE assumption: the daemon pushes over a **WebSocket at /ws**, and the fork CSP `connect-src` allows `http://127.0.0.1:*` but NOT `ws://`. So C05 POLLS `GET /api/agents` (2s) behind one swappable store method — a push upgrade (widen CSP for ws, or a daemon SSE endpoint) is a deliberate follow-up, not smuggled into a roster PR. `rankUnit` mirrors the daemon TUI `agentRank` exactly (verified against src/tui.ts). Poll-failure keeps last-good roster + shows "reconnecting"; recovers to "live". Gate: tsc/lint(103)/vitest 364/build green; /api/agents array contract verified live (empty case) + field mapping source-verified. GUI populated-render not driven (noted). No cross-lineage gauntlet (read-only poller+UI).
+
+**Follow-up filed here**: push transport for the roster — either widen the fork CSP `connect-src` to `ws://127.0.0.1:* ws://localhost:*` and reuse the daemon's `/ws` socket, OR add a daemon-side SSE endpoint (cleaner — no CSP widening). Security-surface decision (connect-src is the exfil control), so deliberate, not default.
 PRIORITY: p1
 REPOS: glance-desktop
 COMPLEXITY: architectural
