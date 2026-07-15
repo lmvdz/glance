@@ -43,13 +43,19 @@ import { usePageContext, type PageContext } from '../context/PageContext';
  * package's `lib/voice/tools.ts` `VOICE_TOOL_DEFS` by `tests/voice-token.test.ts`'s cross-build sync
  * pin (the daemon (`src/`) and this webapp package build separately, so the two arrays are
  * duplicated by necessity, not drifted-apart by accident). See the final report for the remaining
- * gap (`input_audio_transcription` is never requested at mint, so `onCaption`'s `'user'` branch —
- * used below for spoken displayText — is dormant per voiceSession.ts's own doc comment; this hook
- * still wires it so it activates for free the day that's turned on, exactly as 06 anticipated for
- * its own `onCaption`).
+ * gap — RESOLVED at the 2026-07-13 live pass: the mint now pins `transcription: {model:
+ * 'whisper-1'}`, so `onCaption`'s `'user'` branch (used below for spoken displayText) is LIVE.
+ * whisper delivers the transcript asynchronously (often mid-reply, usually via the `completed`
+ * event rather than deltas), so the buffer below may or may not be populated by dispatch time —
+ * `message` (the model's own paraphrase) remains the fallback.
  */
 
-const ECHO_TIMEOUT_MS = 10_000;
+/** Live finding 2026-07-15 (DB mode): a cold bootstrap — mint the console agent, boot its omp
+ *  process, ACP handshake, THEN deliver the prompt and wait for the transcript echo — can honestly
+ *  take >10s, and the old 10s window fired a false "not sure that got delivered" warning on healthy
+ *  dispatches. 20s keeps the honest-failure lane (a genuinely lost send still gets confessed) while
+ *  covering a slow cold boot. */
+const ECHO_TIMEOUT_MS = 20_000;
 /** Mirrors `AssistantChat.tsx`'s `stopTimeoutRef` 8s debounce window for its own `handleStop`. */
 const INTERRUPT_DEBOUNCE_MS = 8_000;
 /** How long a just-minted agent id is trusted as "live" before the roster broadcast catches up.
@@ -92,6 +98,27 @@ export interface UseVoiceDispatcherOptions {
    *  already covers once the transcript echoes it back — see `SpokenSummaryEvent`'s doc comment)
    *  and the narrated completion (role:'model', no clientTurnId of its own). */
   onSpokenSummary?: (event: SpokenSummaryEvent) => void;
+  /** Fired once a `spawn_agent` dispatch's `/api/spawn` call succeeds (concern 04's durable-voice-
+   *  spawns fix) — the caller persists this onto the bound session's `spawnedUnits` so a voice-
+   *  spawned agent is visible to the NEXT call's debrief tracked-agent set, exactly like a typed
+   *  spawn already is. `prompt` rides along despite DESIGN.md's own `{id, name}` shorthand: the
+   *  caller's durable `SpawnedUnitRecord` has a REQUIRED `prompt` field ("the exact prompt sent to
+   *  `/api/spawn`" — spawnProposal.ts), and `dispatchSpawnAgent` already has it in scope (the tool
+   *  call's own argument) — omitting it would force the caller to either fabricate a placeholder or
+   *  leave the field dishonestly blank. */
+  onAgentSpawned?: (agent: { id: string; name: string; prompt: string }) => void;
+  /** Fired when a completion narration `sweepPromptWatchers` just queued was actually SPOKEN — i.e.
+   *  its own `queueInjection` batch resolved `{cancelled: false}` — with the narrated entry's own
+   *  `ts`. The debrief lane's other cursor-advance path (`VoiceCallContext`'s call-start debrief is
+   *  the first): a completion narrated LIVE, mid-call, counts as "heard" exactly the same as one
+   *  spoken from the away-summary, so the persisted cursor must move past it too — otherwise the
+   *  operator's very NEXT call would re-debrief something they were just told about seconds ago. */
+  onCompletionNarrated?: (entryTs: number) => void;
+  /** Fired when a live completion narration was CUT (barge-in / teardown — its `onDone` came back
+   *  `cancelled: true`), with the completion entry's `ts`. Review finding: the caller uses this as
+   *  an unheard-floor so a LATER successful narration's forward-only cursor commit can't advance
+   *  past this never-heard completion and silently drop it from every future debrief. */
+  onNarrationLost?: (entryTs: number) => void;
 }
 
 /**
@@ -125,7 +152,7 @@ export interface UseVoiceDispatcherResult {
   /** Pass directly as `VoiceSessionOptions.onCaption` (composed with the caller's own UI caption
    *  handler, if any — this hook only needs the `'user'` deltas, for `prompt_agent`'s spoken
    *  displayText). Stable identity, same as above. */
-  onCaption: (text: string, speaker: 'assistant' | 'user') => void;
+  onCaption: (text: string, speaker: 'assistant' | 'user', final?: boolean) => void;
   /** Hand the hook the constructed `VoiceSession` right after building it (and again if the
    *  caller ever tears down and rebuilds one, e.g. on `disconnect()`+reconnect at a NEW instance —
    *  not needed for `voiceSession.ts`'s own internal rotation, which keeps the same instance). */
@@ -227,9 +254,14 @@ export async function dispatchPromptAgent(
         { apiJson, subscribeConsole: deps.subscribeConsole, roster: deps.agents, currentProject: deps.currentProject, selectedModel: deps.selectedModel },
         deps.sessionId,
       );
-    } catch {
+    } catch (err) {
       refs.promptInFlightRef.current = false; // MAJOR-1: never dispatched — don't wedge the lock open
-      session.sendFunctionOutput(callId, failedOutput('could not start a console agent'));
+      // Live finding 2026-07-15: the daemon's create error names the ACTUAL problem ("the working
+      // directory does not exist — ~/sui/omp-graph") — swallowing it into a generic "could not
+      // start" left the operator with no idea anything was wrong for an entire afternoon. Carry
+      // the reason through (fenced/truncated: it can echo daemon paths, never instructions).
+      const reason = err instanceof Error && err.message ? ` — ${err.message.replace(/[\r\n\t]+/g, ' ').slice(0, 200)}` : '';
+      session.sendFunctionOutput(callId, failedOutput(`could not start a console agent${reason}`));
       return;
     }
     refs.boundAgentIdRef.current = targetId;
@@ -298,6 +330,9 @@ export interface DispatchSpawnAgentRefs {
 
 export interface DispatchSpawnAgentDeps {
   transcripts: Map<string, TranscriptEntry[]>;
+  /** Concern 04's durable-voice-spawns dep — see `UseVoiceDispatcherOptions.onAgentSpawned`'s doc
+   *  comment for why `prompt` rides along here despite the concern doc's `{id, name}` shorthand. */
+  onAgentSpawned?: (agent: { id: string; name: string; prompt: string }) => void;
   /** Injectable for tests — defaults to the real `apiJson` imported above. */
   apiJsonFn?: typeof apiJson;
 }
@@ -335,6 +370,9 @@ export async function dispatchSpawnAgent(
   } finally {
     refs.spawnInFlightRef.current = false;
   }
+  // Concern 04: the caller persists this as a durable SpawnedUnitRecord — see the dep's doc comment
+  // for why `prompt` (this function's own argument, already in scope) rides along.
+  deps.onAgentSpawned?.({ id: agent.id, name: agent.name, prompt });
   const cursor = deps.transcripts.get(agent.id)?.length ?? 0;
   // LOW batch: push, don't overwrite — a spawned agent's own id is fresh per spawn, so this can
   // only collide with a prior watcher if a PRIOR spawn's watcher (same id — never happens, ids are
@@ -350,6 +388,11 @@ export interface SweepWatchersDeps {
   transcripts: Map<string, TranscriptEntry[]>;
   agents: AgentDTO[];
   onSpokenSummary?: (event: SpokenSummaryEvent) => void;
+  /** Concern 04: fired with a completion's own `ts` once its narration was actually SPOKEN
+   *  (`{cancelled: false}`) — see `UseVoiceDispatcherOptions.onCompletionNarrated`'s doc comment. */
+  onCompletionNarrated?: (entryTs: number) => void;
+  /** The cancelled branch's twin — see `UseVoiceDispatcherOptions.onNarrationLost`. */
+  onNarrationLost?: (entryTs: number) => void;
   clearTimerFn?: (handle: ReturnType<typeof setTimeout>) => void;
 }
 
@@ -424,7 +467,15 @@ export function sweepPromptWatchers(session: Pick<VoiceSession, 'queueInjection'
       }
       floor = entries.indexOf(completion);
       const label = labelForAgent(deps.agents, agentId, current.label);
-      session.queueInjection(buildCompletionInjectionItems(label, completion.text));
+      const completionTs = completion.ts;
+      // Concern 04: the debrief lane's OTHER cursor-advance path — a completion narrated LIVE
+      // counts as "heard" exactly like one spoken from the away-summary, so onCompletionNarrated
+      // only fires once THIS narration's own response actually completed uncancelled (a barge-in
+      // mid-narration must not advance the cursor past something the operator never actually heard).
+      session.queueInjection(buildCompletionInjectionItems(label, completion.text), ({ cancelled }) => {
+        if (!cancelled) deps.onCompletionNarrated?.(completionTs);
+        else deps.onNarrationLost?.(completionTs);
+      });
       // MAJOR-2(a): role:'model', no clientTurnId — this isn't a dispatched turn of its own. Its
       // double-render risk is fixed on the OTHER side, by extending partitionSessionMessages
       // (AssistantChat.tsx) to dedupe a role:'model' durable Message against a matching finished
@@ -458,7 +509,7 @@ export function clearAllPendingTimers(refs: TimerCleanupRefs, clearTimerFn: (han
 }
 
 export function useVoiceDispatcher(opts: UseVoiceDispatcherOptions): UseVoiceDispatcherResult {
-  const { sessionId, agentId: pinnedAgentId, selectedModel = '', onAgentBound, onSpokenSummary } = opts;
+  const { sessionId, agentId: pinnedAgentId, selectedModel = '', onAgentBound, onSpokenSummary, onAgentSpawned, onCompletionNarrated, onNarrationLost } = opts;
   const { agents, features, audit, transcripts, currentProject, sendConsoleCommand, subscribeConsole } = useTaskContext();
   // The live page-context store (single shared store under the root PageContextProvider, published
   // by whichever view is mounted). Read here so a spoken prompt grounds to what the operator is
@@ -503,8 +554,8 @@ export function useVoiceDispatcher(opts: UseVoiceDispatcherOptions): UseVoiceDis
    *  agent's (concern text: "if multiple prompts are in flight, narrate per-completion"). */
   const watchersRef = useRef<Map<string, CompletionWatcher[]>>(new Map());
   /** Accumulates the live `'user'`-speaker caption text since the last prompt_agent dispatch
-   *  consumed it — see the module doc comment on why this is currently always empty in practice
-   *  (input_audio_transcription dormant per 06) and why it's still wired. */
+   *  consumed it — see the module doc comment: whisper's transcript arrives asynchronously, so
+   *  this may still be empty at dispatch time (falls back to the model's `message` paraphrase). */
   const userCaptionBufferRef = useRef('');
 
   // Bundles the refs above for the framework-free dispatch core (MAJOR-1/MAJOR-2/MINOR-9) — a
@@ -545,7 +596,7 @@ export function useVoiceDispatcher(opts: UseVoiceDispatcherOptions): UseVoiceDis
   useEffect(() => {
     const session = sessionRef.current;
     if (!session) return;
-    sweepPromptWatchers(session, refs, { transcripts, agents, onSpokenSummary });
+    sweepPromptWatchers(session, refs, { transcripts, agents, onSpokenSummary, onCompletionNarrated, onNarrationLost });
   }, [transcripts, agents]);
 
   // MINOR-9: clear every pending echo timer + the interrupt debounce timer on unmount — a component
@@ -587,7 +638,7 @@ export function useVoiceDispatcher(opts: UseVoiceDispatcherOptions): UseVoiceDis
   // before dereferencing `agent.id`, so a malformed 2xx can't wedge the session in toolPending).
   // ---------------------------------------------------------------------------
   async function executeSpawnAgent(session: VoiceSession, callId: string, prompt: string): Promise<void> {
-    await dispatchSpawnAgent(session, callId, prompt, { spawnInFlightRef, watchersRef }, { transcripts });
+    await dispatchSpawnAgent(session, callId, prompt, { spawnInFlightRef, watchersRef }, { transcripts, onAgentSpawned });
   }
 
   // ---------------------------------------------------------------------------
@@ -676,13 +727,17 @@ export function useVoiceDispatcher(opts: UseVoiceDispatcherOptions): UseVoiceDis
   };
   const getRecap = useRef(() => getRecapRef.current?.() ?? '').current;
 
-  const onCaptionRef = useRef<((text: string, speaker: 'assistant' | 'user') => void) | undefined>(undefined);
-  onCaptionRef.current = (text, speaker) => {
+  const onCaptionRef = useRef<((text: string, speaker: 'assistant' | 'user', final?: boolean) => void) | undefined>(undefined);
+  onCaptionRef.current = (text, speaker, final) => {
     // Only the 'user' side feeds prompt_agent's spoken displayText (see the module doc comment —
-    // this is currently always dormant since 06's mint doesn't request input_audio_transcription).
-    if (speaker === 'user') userCaptionBufferRef.current += text;
+    // live since the mint pins whisper-1 input transcription; arrival timing is asynchronous).
+    // A FINAL user caption is one complete whisper utterance — REPLACE the buffer rather than
+    // append (live finding 2026-07-15: appending concatenated every utterance since the last
+    // dispatch, so a turn-1 "Hello." rode into turn-2's dispatched displayText as
+    // "Hello.Can you tell me about…"). Streaming deltas (non-final) still accumulate.
+    if (speaker === 'user') userCaptionBufferRef.current = final ? text : userCaptionBufferRef.current + text;
   };
-  const onCaption = useRef((text: string, speaker: 'assistant' | 'user') => onCaptionRef.current?.(text, speaker)).current;
+  const onCaption = useRef((text: string, speaker: 'assistant' | 'user', final?: boolean) => onCaptionRef.current?.(text, speaker, final)).current;
 
   const registerSession = useCallback((session: VoiceSession | null) => {
     sessionRef.current = session;

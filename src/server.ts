@@ -10,6 +10,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { CONSOLE_SYSTEM_PROMPT } from "./console-prompt.ts";
 import { existsSync, readFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -25,8 +26,10 @@ import { errText } from "./err-text.ts";
 import { globalDefaultHarness, listHarnesses, listHarnessTiers } from "./harness-registry.ts";
 import { decodeClientCommand } from "./schema/client-command.ts";
 import {
+	AdoptBodySchema,
 	AgentLandBodySchema,
 	AgentModeBodySchema,
+	AgentPromoteBodySchema,
 	AgentVisionBodySchema,
 	AnnotationCreateBodySchema,
 	AnnotationSendBodySchema,
@@ -156,7 +159,7 @@ import { approveJoinRequest, denyJoinRequest, ensurePersonalWorkspace, listPendi
 import { addMemberByEmail, getOrgProfile, listOrgMembers, removeMember, renameOrg, setMemberRole } from "./org-admin.ts";
 import { dbMode as voiceDbBootMode, type DbHandle } from "./db/index.ts";
 import { openRouteDecision } from "./open-worktree.ts";
-import { escalationPayload, type PushPayload, type PushService } from "./push.ts";
+import { escalationPayload, type PushPayload, PushService, voiceDonePayload } from "./push.ts";
 import type { Actor, AgentDTO, AgentStatus, AuditEntry, OperatorPresence, Role, RunReceipt } from "./types.ts";
 import type { TraceResponse } from "./spans.ts";
 import { type FederationSnapshot, federationView } from "./federation.ts";
@@ -190,9 +193,9 @@ function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T
 	]);
 }
 
-export const CONSOLE_SYSTEM_PROMPT = `You are the omp-squad interactive console agent.
-
-Default to chat, diagnosis, and concise guidance. Do not create features, issues, worktrees, workflows, files, commits, or other durable changes unless the user explicitly asks you to start/implement/change something. When the user asks a question, answer the question directly. When current feature context is included, use it as background, not as an instruction to mutate state. Keep replies terse and operator-focused.`;
+// The console system prompt now lives in ./console-prompt.ts so promote() (squad-manager) can detect
+// and strip it precisely; re-exported here for existing importers.
+export { CONSOLE_SYSTEM_PROMPT };
 
 /**
  * Inert opt-in serve seam for the Vite SPA rewrite. DEFAULT OFF: requires BOTH the explicit
@@ -385,6 +388,11 @@ export interface SquadServerOptions {
 	 *  When a session's active org equals this, requests/WS route to the root `manager` (the factory) instead
 	 *  of a lazy tenant manager. Unset ⇒ the factory is reachable only via the on-box loopback admin. */
 	rootOrgId?: string;
+	/** State-dir root for PER-ORG push services (DB-registry mode) — each org's VAPID keypair +
+	 *  subscription store lives under `<pushRoot>/orgs/<orgId>` (the same per-org state dirs
+	 *  ManagerRegistry uses), so one org's notify() can never fan out to another org's devices.
+	 *  The single global `push` service above remains the FILE-MODE lane only. */
+	pushRoot?: string;
 	/** Whether the EXTERNAL supervisor client actually started. It is gated on a CLI flag (`--no-supervise`)
 	 *  and on DB mode, neither of which the flag resolver can see — so `glance doctor` would report a
 	 *  supervisor that is not running, or miss one that is. Set by `up`; absent ⇒ fall back to the flag. */
@@ -551,6 +559,13 @@ export class SquadServer {
 	private readonly lastPush = new Map<string, number>();
 	/** seeded after the first roster so a reconnect replay never alerts in bulk. */
 	private pushSeeded = false;
+	/** DB-registry mode: per-org push services (lazy; `<pushRoot>/orgs/<orgId>`) and per-org alert
+	 *  tracking — the org-scoped twins of `push`/`lastStatus`/`lastPush`/`pushSeeded` above. Kept
+	 *  strictly separate so a tenant's completion/escalation alerts ride ONLY that tenant's own
+	 *  subscription store (the global `push-subs.json` is file-mode-only; wiring it into the per-org
+	 *  fan-out would be a cross-org broadcast — voice-loop DESIGN.md's named prerequisite, done here). */
+	private readonly orgPush = new Map<string, Promise<PushService>>();
+	private readonly orgAlertState = new Map<string, { lastStatus: Map<string, AgentStatus>; lastPush: Map<string, number>; seeded: boolean }>();
 	/** Fingerprint of the served UI at boot; sent on every roster so stale tabs self-refresh after an upgrade. */
 	private uiVersion = "";
 	/** This host's operator identity (labels the local roster in the federation view). */
@@ -1007,7 +1022,21 @@ export class SquadServer {
 	}
 
 	start(): string {
-		if (this.singleManager) for (const a of this.singleManager.list()) this.startupAgentIds.add(a.id);
+		if (this.singleManager) {
+			for (const a of this.singleManager.list()) this.startupAgentIds.add(a.id);
+			// Push-seed fix (plans/voice-loop concern 01 risk, also fixes the PRE-EXISTING input/error
+			// escalation lane): `pushSeeded` used to become true ONLY via a `roster` SquadEvent reaching
+			// maybePushAlert through broadcast() — and the ONLY caller that ever sends the `snapshot`
+			// command that produces one is the legacy (non-webapp) client. The React webapp never sends
+			// `snapshot`, so on a fresh boot the whole push lane sat dead — no escalation, no completion
+			// push — until a legacy client happened to connect. Seed directly from the manager's live
+			// roster here, at start(), file-mode only (`singleManager` is unset in DB-registry mode, where
+			// push never fires anyway — see broadcastTo's doc comment). The roster-event seeding inside
+			// maybePushAlert stays in place too: seeding twice with the same statuses is a harmless no-op,
+			// and it remains the live reseed path across a manager swap that doesn't restart the server.
+			for (const a of this.singleManager.list()) this.lastStatus.set(a.id, a.status);
+			this.pushSeeded = true;
+		}
 		this.uiVersion = computeUiVersion(readFileSync(webappEnabled() ? WEBAPP_INDEX : INDEX_HTML, "utf8"));
 
 		this.server = Bun.serve<SocketData>({
@@ -1438,12 +1467,30 @@ export class SquadServer {
 			return Response.json(secret ? { configured: true, last4: secret.last4, enabled: secret.enabled, updatedAt: secret.updatedAt, updatedBy: secret.updatedBy } : { configured: false });
 		}
 		if (url.pathname === "/api/auth/check") return Response.json({ ok: true });
-		if (url.pathname === "/api/push/key") return Response.json({ publicKey: this.opts.push?.publicKey ?? "" });
+		// DB-registry mode routes push key/subscribe to the CALLER'S ORG's own service (own VAPID
+		// keypair, own subscription store under `<pushRoot>/orgs/<orgId>`) — the global service (and
+		// its `push-subs.json`) stays file-mode-only. A DB-mode caller with no active org (loopback
+		// bootstrap admin, or a session mid-org-switch) gets an honest 400/empty key, never a write
+		// into a store some other tenant's alerts fan out to.
+		if (url.pathname === "/api/push/key") {
+			if (this.registry && this.opts.pushRoot) {
+				const orgId = session?.session.activeOrganizationId;
+				if (!orgId) return Response.json({ publicKey: "" });
+				return Response.json({ publicKey: (await this.pushForOrg(orgId)).publicKey });
+			}
+			return Response.json({ publicKey: this.opts.push?.publicKey ?? "" });
+		}
 		if (url.pathname === "/api/push/subscribe" && req.method === "POST") {
-			if (!this.opts.push) return new Response("push unavailable", { status: 501 });
 			const decoded = decodeBody(PushSubscriptionBodySchema, await req.json().catch(() => null));
 			if (Result.isFailure(decoded)) return new Response("invalid subscription", { status: 400 });
 			const sub = decoded.success;
+			if (this.registry && this.opts.pushRoot) {
+				const orgId = session?.session.activeOrganizationId;
+				if (!orgId) return new Response("no active org", { status: 400 });
+				await (await this.pushForOrg(orgId)).subscribe({ endpoint: sub.endpoint, keys: { p256dh: sub.keys.p256dh, auth: sub.keys.auth } });
+				return Response.json({ ok: true });
+			}
+			if (!this.opts.push) return new Response("push unavailable", { status: 501 });
 			await this.opts.push.subscribe({ endpoint: sub.endpoint, keys: { p256dh: sub.keys.p256dh, auth: sub.keys.auth } });
 			return Response.json({ ok: true });
 		}
@@ -2318,6 +2365,13 @@ export class SquadServer {
 				return new Response(err instanceof Error ? err.message : String(err), { status: 409 });
 			}
 		}
+		if (url.pathname === "/api/agents/adopt" && req.method === "POST") {
+			const decoded = decodeBody(AdoptBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response("invalid adopt request", { status: 400 });
+			const { harness, sessionId, cwd } = decoded.success;
+			const result = await manager.adopt({ harness, sessionId, cwd }, actor);
+			return Response.json(result, { status: result.ok ? 200 : 409 });
+		}
 		if (url.pathname === "/api/console" && req.method === "POST") {
 			const body = decodeBodyOrEmpty(ConsoleBodySchema, await req.json().catch(() => null));
 			const repo = typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
@@ -2432,6 +2486,16 @@ export class SquadServer {
 			const dto = await manager.transitionMode(decodeURIComponent(mmode[1]), mode, actor, reason);
 			if (!dto) return new Response("no such agent", { status: 404 });
 			return Response.json(dto);
+		}
+		const mpromote = url.pathname.match(/^\/api\/agents\/([^/]+)\/promote$/);
+		if (mpromote && req.method === "POST") {
+			const body = decodeBodyOrEmpty(AgentPromoteBodySchema, await req.json().catch(() => null));
+			const task = typeof body.task === "string" ? body.task : undefined;
+			const mode = body.mode != null ? validateRequestedMode(body.mode) : undefined;
+			if (body.mode != null && !mode) return new Response("invalid mode", { status: 400 });
+			const result = await manager.promote(decodeURIComponent(mpromote[1]), { task, mode: mode ?? undefined }, actor);
+			const status = result.ok ? 200 : result.reason === "no such agent" ? 404 : 409;
+			return Response.json(result, { status });
 		}
 		const mvision = url.pathname.match(/^\/api\/agents\/([^/]+)\/vision$/);
 		if (mvision && req.method === "POST") {
@@ -2572,6 +2636,9 @@ export class SquadServer {
 	/** DB-registry per-org fan-out: serialize once, deliver only to that org's sockets (risk #3).
 	 *  Background push + global presence are file-mode-only, so neither fires here. */
 	private broadcastTo(orgId: string, e: SquadEvent): void {
+		// Per-org push alerts fire regardless of whether any WS client is currently connected for the
+		// org — the whole point of a push is that nobody has a tab open (voice-loop away flow).
+		this.maybePushAlertOrg(orgId, e);
 		const bucket = this.clientsByOrg.get(orgId);
 		if (!bucket) return;
 		const s = JSON.stringify(e.type === "roster" ? { ...e, version: this.uiVersion } : e);
@@ -2599,11 +2666,110 @@ export class SquadServer {
 		const prev = this.lastStatus.get(a.id);
 		this.lastStatus.set(a.id, a.status);
 		const payload = escalationPayload(prev, a, this.pushSeeded);
+		if (payload) {
+			const now = Date.now();
+			if (now - (this.lastPush.get(a.id) ?? 0) >= 3000) {
+				this.lastPush.set(a.id, now);
+				void push.notify(payload);
+			}
+		}
+		this.maybePushVoiceDone(prev, a, push);
+	}
+
+	/** Voice-loop completion push (plans/voice-loop concern 01): a SEPARATE `done:` tag/debounce
+	 *  namespace from the escalation lane above, so a "finished" toast can never REPLACE (sw.js
+	 *  renotify) or debounce-eat an unactioned "needs you" alert for the same agent. File-mode only —
+	 *  explicit guard here rather than relying solely on `broadcast()` only being wired in the file-mode
+	 *  branch today (see `start()`), so a future `broadcastTo` push wiring can never silently ride this
+	 *  one global subscription list across orgs (`broadcastTo`'s own doc comment already asserts this;
+	 *  this is defense in depth at the new payload site itself). Disarms the manager's `voicePushArmed`
+	 *  latch only once the push actually sends — that's the "exactly one push per voice dispatch"
+	 *  invariant's other half. */
+	private maybePushVoiceDone(prev: AgentStatus | undefined, a: AgentDTO, push: PushService): void {
+		if (this.registry) return;
+		const payload = voiceDonePayload(prev, a, this.pushSeeded);
 		if (!payload) return;
+		const key = `done:${a.id}`;
 		const now = Date.now();
-		if (now - (this.lastPush.get(a.id) ?? 0) < 3000) return;
-		this.lastPush.set(a.id, now);
+		if (now - (this.lastPush.get(key) ?? 0) < 3000) return;
+		this.lastPush.set(key, now);
+		// Disarm SYNCHRONOUSLY, before the (seconds-long, per-subscription) network send — review
+		// finding: an async post-send disarm races a NEWER voice dispatch's arm on the same agent
+		// (applyCommand skips re-arming while the latch still reads true, then the late disarm
+		// consumes the latch that second dispatch was riding — its push is silently lost). The cost
+		// of sync-consume is that a totally-failed notify() doesn't retry on a later idle — accepted:
+		// the push is best-effort by design, the debrief cursor is the guarantee (DESIGN.md).
+		this.singleManager?.clearVoicePushArmed(a.id);
 		void push.notify(payload);
+	}
+
+	/** DB-registry twin of `maybePushAlert`: same payload rules (escalation + voice-done), same
+	 *  debounce discipline, but keyed entirely to ONE org's own alert state, manager, and push
+	 *  service. Seeding is lazy (first event for the org snapshots that org manager's roster) —
+	 *  identical suppression semantics to the file-mode seed: the transition that materializes the
+	 *  state never alerts, everything after does. */
+	private maybePushAlertOrg(orgId: string, e: SquadEvent): void {
+		if (!this.registry || !this.opts.pushRoot) return;
+		let state = this.orgAlertState.get(orgId);
+		if (!state) {
+			state = { lastStatus: new Map(), lastPush: new Map(), seeded: false };
+			this.orgAlertState.set(orgId, state);
+		}
+		if (!state.seeded) {
+			const mgr = this.orgManager(orgId);
+			if (mgr) {
+				for (const a of mgr.list()) state.lastStatus.set(a.id, a.status);
+				state.seeded = true;
+			}
+		}
+		if (e.type === "roster") {
+			for (const a of e.agents) state.lastStatus.set(a.id, a.status);
+			state.seeded = true;
+			return;
+		}
+		if (e.type !== "agent") return;
+		const a = e.agent;
+		const prev = state.lastStatus.get(a.id);
+		state.lastStatus.set(a.id, a.status);
+		const escalation = escalationPayload(prev, a, state.seeded);
+		const done = voiceDonePayload(prev, a, state.seeded);
+		if (!escalation && !done) return;
+		const now = Date.now();
+		if (escalation && now - (state.lastPush.get(a.id) ?? 0) >= 3000) {
+			state.lastPush.set(a.id, now);
+			void this.pushForOrg(orgId).then((push) => void push.notify(escalation));
+		}
+		if (done) {
+			const key = `done:${a.id}`;
+			if (now - (state.lastPush.get(key) ?? 0) >= 3000) {
+				state.lastPush.set(key, now);
+				// Same sync-disarm-before-send discipline as the file-mode lane (audit finding: an async
+				// post-send disarm races a newer dispatch's re-arm).
+				this.orgManager(orgId)?.clearVoicePushArmed(a.id);
+				void this.pushForOrg(orgId).then((push) => void push.notify(done));
+			}
+		}
+	}
+
+	/** The manager whose agents `orgId`'s events describe — a registry tenant, or the root factory
+	 *  for the root buckets (`broadcastTo` fans singleManager events out under ROOT_FACTORY_ORG /
+	 *  rootOrgId). Never creates a manager. */
+	private orgManager(orgId: string): SquadManager | undefined {
+		return this.registry?.peek(orgId) ?? (this.isRootOrg(orgId) ? (this.singleManager ?? undefined) : undefined);
+	}
+
+	/** Lazy per-org PushService (see `orgPush`) — memoized as a promise so two concurrent alerts /
+	 *  subscribe calls share one init. */
+	private pushForOrg(orgId: string): Promise<PushService> {
+		const existing = this.orgPush.get(orgId);
+		if (existing) return existing;
+		const created = (async () => {
+			const service = new PushService(path.join(this.opts.pushRoot as string, "orgs", orgId));
+			await service.init();
+			return service;
+		})();
+		this.orgPush.set(orgId, created);
+		return created;
 	}
 
 	private schedulePresence(): void {

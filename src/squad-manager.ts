@@ -41,6 +41,7 @@ import { Dispatcher } from "./dispatch.ts";
 import { openDispatchLedger } from "./dispatch-ledger.ts";
 import { type Answer, answerBrief, listAnswers, readAnswer, saveAnswer } from "./answers.ts";
 import { errText } from "./err-text.ts";
+import { isConsolePrompt, stripConsolePrompt } from "./console-prompt.ts";
 import { openRemovedLedger, type RemovedLedger } from "./removed-ledger.ts";
 import { normalizeRepoPath, openProjectRegistry, type ProjectRegistry } from "./project-registry.ts";
 import { Orchestrator } from "./orchestrator.ts";
@@ -85,7 +86,9 @@ import { reapDeadSessions, releaseSession, sweepLeases } from "./leases.ts";
 import { agentActor, scopeFor } from "./agent-scope.ts";
 import { buildFabricSnapshot, loadScoutFacts, type FabricSnapshot } from "./fabric.ts";
 import { buildContextPrimer, searchFabric, type KbDocType } from "./fabric-search.ts";
-import { sweepPresence } from "./presence.ts";
+import { sweepPresence, who } from "./presence.ts";
+import { harnessEventDecision } from "./harness-hooks.ts";
+import { adoptBranchName, adoptBrief, isSafeUntrackedPath, parseNulList } from "./adopt.ts";
 import { chooseFallback } from "./supervisor.ts";
 import { availableActions, effectiveAutonomyMode, modeFromApproval, validateRequestedMode, type AutonomyMode, type VerificationState } from "./autonomy.ts";
 import type {
@@ -683,6 +686,14 @@ interface AgentRecord {
 	 *  closeOrphanedPending seeds this from the (already-hydrated, so cheap) in-memory ring's entries for
 	 *  the prior agent id, so a fresh-id lineage stitch doesn't reset the flapping signal to zero. */
 	errorTransitionTimestamps?: number[];
+	/** Voice-loop completion push: set true when a `workflow_done` frame lands, consumed (and cleared) by
+	 *  the `agent_end` frame the workflow driver always pairs it with immediately after (execRun's
+	 *  cleanup — see workflow-driver.ts) — distinguishes the graph's real terminal completion from an
+	 *  intermediate per-run `agent_end` (a human-gate/checkpoint boundary mid-graph, which never carries a
+	 *  preceding `workflow_done`). In-memory only, never persisted — a fresh daemon boot has no in-flight
+	 *  frame pair to track. Read by `onAgentEvent`'s `agent_end` case to gate `dto.voicePushArmed`
+	 *  exposure so a multi-node workflow never mistakes a mid-graph idle blip for its actual finish. */
+	workflowJustFinished?: boolean;
 }
 
 export interface SquadManagerOptions {
@@ -1614,6 +1625,10 @@ export class SquadManager extends EventEmitter {
 				// Resume the graph from its checkpoint; without this the adopted workflow restarts from
 				// scratch — re-running completed stages and re-committing their work (OMPSQ-165).
 				workflowState: p.workflowState,
+				// Completion-push arm survives orphan-adoption too — a voice-dispatched agent that produced
+				// real work, went idle, and never got its push before the daemon restarted still owes it
+				// under its freshly-minted post-adopt id (see createWithId's own comment on this field).
+				voicePushArmed: p.voicePushArmed,
 				sandbox: p.sandbox,
 				autoRoute: false,
 				bypassCap: true,
@@ -4016,6 +4031,105 @@ export class SquadManager extends EventEmitter {
 		await this.store.appendAudit({ actor: actor.id, action: "set-mode", target: id, detail: { oldMode, requestedMode: mode, effectiveMode: rec.dto.effectiveMode, reason } }).catch(() => {});
 		return rec.dto;
 	}
+
+	/**
+	 * Promote a console chat unit into a working, landable unit IN PLACE (fleet-ide-escalation E02) —
+	 * the reverse of intervene. Keeps the SAME worktree, live session, and transcript (zero context
+	 * loss): the daemon-backed cockpit chat (E01) is already an `omp-operator` unit named "chat" at
+	 * `assist` mode with its own worktree; the only thing holding it back is the CONSOLE_SYSTEM_PROMPT,
+	 * a SOFT restriction ("do not create … unless the user explicitly asks"). Promotion has two halves:
+	 *   1. State (durable, failure-atomic): strip ONLY the console segment from the composite
+	 *      `appendSystemPrompt` — preserving profile memory / tool grants / membrane disciplines — set a
+	 *      durable `promoted` marker, optionally set autonomy; assign synchronously, then persist once.
+	 *      On a throwing persist (DB mode) the in-memory record is rolled back and nothing is
+	 *      emitted/audited/steered. (File-mode persist is best-effort — swallows I/O errors — the same
+	 *      as every other mutation on this manager; not made worse here.)
+	 *   2. Behavioral (live, zero context loss): steer the explicit task into the SAME session — that IS
+	 *      "the user explicitly asks", so the running agent (console prompt still baked into its child)
+	 *      starts working without a respawn.
+	 * Idempotent + retry-safe: a re-promote of an already-`promoted` unit re-delivers the task instead
+	 * of falsely refusing (a first call that persisted but died before the steer is recoverable).
+	 * `ok:true` means the state change is durable and the task was DISPATCHED — not that the agent has
+	 * finished; behavioral confirmation is the unit's live transcript. Gating is NOT re-wired: a
+	 * landable unit is already gated by the land PROOF gate (`detectVerify` at land time, same as any
+	 * unit); attaching a `workflow` would be inert on an omp-operator's already-built driver.
+	 */
+	async promote(
+		id: string,
+		opts: { task?: string; mode?: AutonomyMode },
+		actor: Actor = LOCAL_ACTOR,
+	): Promise<{ ok: boolean; reason?: string; agent?: AgentDTO }> {
+		const rec = this.agents.get(id);
+		if (!rec) return { ok: false, reason: "no such agent" };
+		// Observe forbids prompting (availableActions), so promoting a unit INTO observe and then
+		// steering it would drive a unit its own authority says is read-only. Refuse it.
+		if (opts.mode === "observe") return { ok: false, reason: "cannot promote to observe mode" };
+		const o = rec.options;
+
+		// Already promoted → idempotent re-steer (retry-safe): the state change is done; just apply any
+		// mode change and (re)deliver the task into the same session.
+		if (o.promoted) {
+			if (opts.mode && opts.mode !== rec.dto.autonomyMode) {
+				rec.dto.autonomyMode = opts.mode;
+				o.autonomyMode = opts.mode;
+				this.syncAuthority(rec.dto);
+				this.emitAgent(rec);
+				await this.persist();
+			}
+			this.steerPromoteTask(id, opts.task, actor);
+			return { ok: true, agent: rec.dto };
+		}
+
+		// Fresh promote: must be a genuine console unit — identity is the console PROMPT (not merely
+		// "has some appendSystemPrompt", which would also match a profile bundle / custom safety text).
+		if (o.kind !== "omp-operator" || rec.dto.name !== "chat" || !isConsolePrompt(o.appendSystemPrompt)) {
+			return { ok: false, reason: "not a promotable console chat unit" };
+		}
+		if (o.executionRole || o.workflow || o.ask) {
+			return { ok: false, reason: "unit is not a plain console chat" };
+		}
+
+		// 1. State promotion — assign synchronously, persist once, FAILURE-ATOMIC: on a throwing persist
+		//    roll the record back and surface the error (emit/audit/steer only AFTER durability).
+		const prior = { append: o.appendSystemPrompt, mode: rec.dto.autonomyMode, oMode: o.autonomyMode };
+		o.appendSystemPrompt = stripConsolePrompt(o.appendSystemPrompt); // strip ONLY the console rule
+		o.promoted = true;
+		if (opts.mode && opts.mode !== rec.dto.autonomyMode) {
+			rec.dto.autonomyMode = opts.mode;
+			o.autonomyMode = opts.mode;
+		}
+		this.syncAuthority(rec.dto);
+		try {
+			await this.persist();
+		} catch (err) {
+			o.appendSystemPrompt = prior.append;
+			o.promoted = undefined;
+			rec.dto.autonomyMode = prior.mode;
+			o.autonomyMode = prior.oMode;
+			this.syncAuthority(rec.dto);
+			return { ok: false, reason: `promote persist failed: ${errText(err)}` };
+		}
+		this.emitAgent(rec);
+		void this.recordAudit(actor, "promote", id, "ok", `console→unit; mode ${prior.mode}→${rec.dto.autonomyMode}`);
+		await this.store.appendAudit({ actor: actor.id, action: "promote", target: id, detail: { priorMode: prior.mode, mode: rec.dto.autonomyMode, task: opts.task ? truncate(opts.task, 120) : undefined } }).catch(() => {});
+
+		// 2. Behavioral promotion — steer the explicit task into the same live session.
+		this.steerPromoteTask(id, opts.task, actor);
+		return { ok: true, agent: rec.dto };
+	}
+
+	/** Steer a promotion's explicit work instruction into the live session (fire-and-forget with a
+	 *  catcher, exactly as every prompt route drives applyCommand — a bare await could surface a
+	 *  spawn-failure rejection as an unhandled rejection; see the "prompt" case). The console prompt is
+	 *  baked into the live child, but it's soft ("unless the user explicitly asks"), so an explicit task
+	 *  lifts it in-session. A silent steer failure is recoverable — a re-promote re-delivers. */
+	private steerPromoteTask(id: string, task: string | undefined, actor: Actor): void {
+		if (task && typeof task === "string" && task.trim()) {
+			void this.applyCommand({ type: "prompt", id, message: task.trim() }, actor).catch((err) =>
+				this.log("warn", `promote steer failed for ${id}: ${errText(err)}`),
+			);
+		}
+	}
 	/**
 	 * Run the acceptance gate (the repo's own verify command, via detectVerify) on main → {ok, firstFailure?}.
 	 * Total by contract: any spawn failure yields ok:false, never a throw (the observer tick must not crash).
@@ -4113,6 +4227,158 @@ export class SquadManager extends EventEmitter {
 	private emitFeaturesChanged(): void {
 		void this.persist();
 		this.emit("event", { type: "features-changed" } satisfies SquadEvent);
+	}
+
+	/**
+	 * Adopt an ad-hoc CLI session into a fleet unit (fleet-ide-escalation E03). A developer ran a raw
+	 * harness (e.g. `claude`) in a terminal; B03 harness-hooks registered it as presence
+	 * (`harness:sessionId`, source "other"). Adoption captures that session's uncommitted WORK — not its
+	 * conversation (the daemon has no handle on the harness's own context) — into a FRESH worktree and
+	 * wraps it in a gated unit, leaving the developer's original GIT checkout UNTOUCHED.
+	 *
+	 * Hardened against a cross-lineage gauntlet (codex + grok). Fail-closed throughout: the source dir
+	 * is only ever READ (diff + ls-files + file copies OUT of it; `--no-textconv`/`--no-ext-diff` so no
+	 * configured diff driver runs against the source; never a write/index mutation). Any capture/apply
+	 * failure removes the half-made worktree; after `create()` the worktree belongs to the unit, so it
+	 * is NOT removed on a create error (that would strand the roster record). Validity binds the cwd to
+	 * the session's real repo (realpath + repoRoot) AND requires the session's exact live presence
+	 * claimId — adopt can't be pointed at a sibling checkout or a spoofed label.
+	 *
+	 * Known limits (documented, not defects): submodule (gitlink) changes are NOT captured (a plain
+	 * `git apply` skips them); the adopted worktree shares `node_modules` with the primary checkout per
+	 * the standard worktree model (the git tree/index is what's untouched); if the harness fails to
+	 * start, the unit still appears in the roster in `error` state with its captured worktree — restart
+	 * it, the work is not lost. Operator-tier (same as /api/spawn); the presence gate is a validity
+	 * check, not a privilege boundary (an operator can already create units in its projects).
+	 */
+	async adopt(
+		args: { harness: string; sessionId: string; cwd: string },
+		actor: Actor = LOCAL_ACTOR,
+	): Promise<{ ok: boolean; reason?: string; agent?: AgentDTO }> {
+		const MAX_PATCH_BYTES = 64 * 1024 * 1024; // 64 MiB — cap the in-memory/tmp patch (DoS)
+		const MAX_UNTRACKED = 10_000; // cap the untracked file count (DoS)
+
+		// 1. Validate. Resolve symlinks in the cwd FIRST (a lexical containment check alone lets
+		//    `/r/../victim` or `/r/symlink-to-victim` escape), then gate exactly like the hooks.
+		let realCwd: string;
+		try {
+			realCwd = await fs.realpath(args.cwd);
+		} catch {
+			return { ok: false, reason: "cwd does not exist" };
+		}
+		const decision = harnessEventDecision(
+			{ harness: args.harness, event: "prompt", sessionId: args.sessionId, cwd: realCwd },
+			this.projects().map((p) => p.repo),
+		);
+		if (decision.action !== "claim") {
+			return { ok: false, reason: decision.action === "drop" ? decision.reason : "not an adoptable session" };
+		}
+		const repo = decision.repo;
+		const label = decision.agent; // `harness:sessionId`
+		// Bind the cwd to the session's ACTUAL git repo — the resolved cwd's git top-level must be the
+		// registered project root, so a sibling checkout that merely lives under the same base is refused.
+		const topLevel = await repoRoot(realCwd).catch(() => null);
+		if (!topLevel || topLevel !== repo) {
+			return { ok: false, reason: "cwd is not the registered project's git repository" };
+		}
+		// Require the session's EXACT live presence row — match the deterministic claimId (the presence
+		// entry id), not just the display label, so `a:b` can't satisfy `a:b:c` and spoofed rows still
+		// need the right harness+sessionId hash.
+		const present = await who(repo);
+		if (!present.some((e) => e.id === decision.claimId && e.source === "other")) {
+			return { ok: false, reason: "no live ad-hoc session for that harness/sessionId in this project" };
+		}
+
+		// 2. Refuse a re-adopt of the same session@HEAD up front (fail-closed, clear message) rather
+		//    than relying on addWorktree's branch/dir-exists error.
+		const head = await hardenedGit(["rev-parse", "HEAD"], { cwd: repo });
+		if (head.code !== 0) return { ok: false, reason: "repo has no HEAD commit (not a git checkout?)" };
+		const headSha = head.stdout.trim();
+		const branch = adoptBranchName(args.harness, args.sessionId, headSha);
+		const branchExists = await hardenedGit(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: repo });
+		if (branchExists.code === 0) {
+			return { ok: false, reason: "this session's current state is already adopted" };
+		}
+
+		// 3. Capture the repo's working state READ-ONLY, against the SAME sha we'll cut from (coherent
+		//    snapshot even if HEAD moves under us). `--no-textconv` + `--no-ext-diff` keep any configured
+		//    diff driver from running against the source; `--binary` replays binary edits; `-z` is
+		//    lossless for odd filenames.
+		const diffArgs = ["diff", "--no-ext-diff", "--no-textconv", "--binary", headSha];
+		const tracked = await hardenedGit(diffArgs, { cwd: repo });
+		if (tracked.code !== 0) return { ok: false, reason: `git diff failed: ${tracked.stderr.trim()}` };
+		if (tracked.stdout.length > MAX_PATCH_BYTES) {
+			return { ok: false, reason: "uncommitted diff is too large to adopt" };
+		}
+		const names = await hardenedGit(["diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z", headSha], { cwd: repo });
+		const changedCount = names.code === 0 ? parseNulList(names.stdout).length : 0;
+		const others = await hardenedGit(["ls-files", "-z", "--others", "--exclude-standard"], { cwd: repo });
+		if (others.code !== 0) return { ok: false, reason: `git ls-files failed: ${others.stderr.trim()}` };
+		const untracked = parseNulList(others.stdout);
+		if (untracked.length > MAX_UNTRACKED) return { ok: false, reason: "too many untracked files to adopt" };
+		// Fail closed (not silent drop) if any untracked path is anomalous — git never emits these.
+		if (untracked.some((p) => !isSafeUntrackedPath(p))) {
+			return { ok: false, reason: "unsafe path in the untracked set" };
+		}
+
+		// 4. Cut a FRESH worktree from the captured HEAD sha (never the developer's checkout).
+		let worktree: string;
+		try {
+			const created = await addWorktree({ repo, branch, startPoint: headSha, base: this.worktreeBaseDir });
+			worktree = created.worktree;
+		} catch (err) {
+			return { ok: false, reason: `could not create worktree: ${errText(err)}` };
+		}
+		const cleanup = async (): Promise<void> => {
+			await removeWorktree(repo, worktree).catch(() => {});
+			if (existsSync(worktree)) this.log("warn", `adopt: worktree not fully removed after failure: ${worktree}`);
+		};
+
+		// 5. Replay the captured state into the new worktree; FAIL CLOSED (remove the worktree, no unit).
+		try {
+			const patch = tracked.stdout;
+			if (patch.trim().length > 0) {
+				// A private, freshly-created temp dir (0700, unique name) — never a predictable path an
+				// attacker could pre-plant as a symlink, and no concurrent-adopt filename race.
+				const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "glance-adopt-"));
+				try {
+					const patchFile = path.join(tmpDir, "capture.patch");
+					await fs.writeFile(patchFile, patch);
+					const applied = await hardenedGit(["apply", "--whitespace=nowarn", patchFile], { cwd: worktree });
+					if (applied.code !== 0) throw new Error(`captured changes did not apply: ${applied.stderr.trim()}`);
+				} finally {
+					await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+				}
+			}
+			for (const rel of untracked) {
+				// Skip symlinks: fs.cp preserves them, and an untracked `link -> /original/file` would let
+				// the adopted unit write THROUGH to the developer's tree. Regular files/dirs only.
+				const src = path.join(realCwd, rel);
+				const st = await fs.lstat(src).catch(() => null);
+				if (!st || st.isSymbolicLink()) continue;
+				const dst = path.join(worktree, rel);
+				await fs.mkdir(path.dirname(dst), { recursive: true });
+				await fs.cp(src, dst, { recursive: true });
+			}
+		} catch (err) {
+			await cleanup();
+			return { ok: false, reason: `adopt failed (your checkout is untouched): ${errText(err)}` };
+		}
+
+		// 6. Wrap the prepared worktree in a gated unit. existingPath uses it verbatim (no second cut);
+		//    a task + autoRoute wires the verify gate (if the repo has a detectable verify command). Once
+		//    create() owns the worktree we do NOT remove it on error — the unit record may already exist
+		//    (removing it would strand the record + driver); a truly orphaned worktree is reaped later.
+		try {
+			const dto = await this.create(
+				{ repo, existingPath: worktree, task: adoptBrief(args.harness, changedCount, untracked.length), autoRoute: true },
+				actor,
+			);
+			void this.recordAudit(actor, "adopt", dto.id, "ok", `${label} → ${dto.name} (${changedCount} changed, ${untracked.length} new)`);
+			return { ok: true, agent: dto };
+		} catch (err) {
+			return { ok: false, reason: `unit creation failed (worktree ${worktree} left for the reaper): ${errText(err)}` };
+		}
 	}
 
 	// ── Roster mutation ───────────────────────────────────────────────────────
@@ -4473,6 +4739,16 @@ export class SquadManager extends EventEmitter {
 			// `opts.verifyMode` at the routing call site) — so this formula covers BOTH the routed and the
 			// explicit-verify-mode paths without re-deriving the router's decision here.
 			routing: { mode: opts.verifyMode ?? "none", tier: tierOf(thinking), thinking, routedAt: Date.now(), routedModel },
+			// Completion-push arm (voice-loop): a voice-sourced spawn (`/api/spawn` with `source:"voice"`)
+			// owes the operator exactly one "finished" push once this dispatch's TERMINAL signal lands (see
+			// onAgentEvent's "agent_end"/"workflow_done" handling — a workflow spawn arms here but only
+			// fires once the whole graph, not an intermediate node, is done). Persisted so the latch
+			// survives a daemon restart mid-dispatch. `opts.voicePushArmed` (not just `source`) also arms:
+			// the orphan-adopt boot path (adoptOrphanedAgents) mints a fresh id via THIS same createWithId
+			// rather than reusing the persisted record verbatim, so it carries the latch forward through
+			// `opts` — without this an armed agent that restart-adopts under a new id silently loses the
+			// one push it owed.
+			voicePushArmed: source === "voice" || opts.voicePushArmed === true ? true : undefined,
 		};
 
 		// Delivery confirmation (concern 02 / DESIGN.md "Membrane measurement"): a requested efficiency
@@ -5193,6 +5469,15 @@ export class SquadManager extends EventEmitter {
 				// agent actually received. `displayText` (when the client sent one) is the user's bare
 				// typed text; the UI renders that and falls back to `text` for older clients.
 				this.append(rec, "user", cmd.message, { clientTurnId: cmd.clientTurnId, displayText: cmd.displayText });
+				// Completion-push arm (voice-loop): a voice-sourced prompt owes the operator exactly one
+				// "finished" push once this dispatch settles — armed here (persisted, restart-safe),
+				// disarmed by the push actually sending or by a voice-sourced interrupt (see the "interrupt"
+				// case below and push.ts's `voiceDonePayload`). Re-arming an already-armed agent (a second
+				// voice prompt before the first one's push fired) is a harmless no-op write.
+				if (commandSource(cmd) === "voice" && rec.options.voicePushArmed !== true) {
+					rec.options.voicePushArmed = true;
+					void this.persist();
+				}
 				rec.streaming = true;
 				this.transition(rec, "working", "task-start");
 				this.emitAgent(rec);
@@ -5239,6 +5524,16 @@ export class SquadManager extends EventEmitter {
 			}
 			case "interrupt":
 				await rec.agent.abort().catch(() => {});
+				// Completion-push disarm (voice-loop): the operator cancelled the work themselves — a
+				// "finished" push would be a lie. Deliberately source-blind: a TYPED stop of voice-dispatched
+				// work is still the operator killing it (the cancel's own agent_end would otherwise read as a
+				// terminal idle and fire the push). Clears both the persisted latch and its DTO projection so
+				// no stale `true` can ride a later unrelated idle transition.
+				if (rec.options.voicePushArmed === true) {
+					rec.options.voicePushArmed = false;
+					rec.dto.voicePushArmed = false;
+					void this.persist();
+				}
 				void this.recordAudit(actor, "interrupt", cmd.id, "ok", undefined, commandSource(cmd));
 				break;
 			case "kill":
@@ -5942,9 +6237,26 @@ export class SquadManager extends EventEmitter {
 				rec.completedTurn = true; // a fully completed turn — see the field comment; feeds the exit classifier
 				this.expireReplayedPending(rec); // a completed live turn proves any still-open replayed pending is stale
 				void this.finalizeRun(rec);
+				// Completion-push exposure (voice-loop): a non-workflow agent's `agent_end` IS its terminal
+				// signal — every turn ends the one voice-armed dispatch it was armed for. A workflow-kind
+				// agent's `agent_end` is terminal ONLY when `workflow_done` just fired for this exact frame
+				// pair (`workflowJustFinished`, set in that case below) — an intermediate per-run `agent_end`
+				// (a human-gate/checkpoint boundary mid-graph) must never expose the latch, or a multi-node
+				// workflow would push — and self-disarm — on the first mid-graph idle, long before the graph
+				// is actually done. `dto.voicePushArmed` is deliberately re-derived on EVERY agent_end (not
+				// just when armed) so a stale `true` from a prior cycle can never leak onto an unrelated idle.
+				{
+					const isTerminal = rec.options.kind !== "workflow" || rec.workflowJustFinished === true;
+					rec.workflowJustFinished = false; // consume — never leak into the next agent_end
+					rec.dto.voicePushArmed = isTerminal && rec.options.voicePushArmed === true;
+				}
 				break;
 			}
 			case "workflow_done":
+				// Completion-push exposure (voice-loop): workflow-driver.ts's execRun cleanup always emits
+				// this frame immediately followed by `agent_end` — set here, consumed there (see the
+				// `agent_end` case above and `workflowJustFinished`'s field comment).
+				rec.workflowJustFinished = true;
 				// Baseline (concern 01): first-try-green / fixups-to-green / escalation, unconditional —
 				// the measurement the rest of the learning loop is A/B'd against. Never gates anything.
 				this.recordWorkflowOutcomeMetrics(rec, frame.outcome as string | undefined);
@@ -8188,6 +8500,17 @@ export class SquadManager extends EventEmitter {
 	/** Available slash commands for an agent (builtin + skills + extensions), if known. */
 	commandsFor(id: string): CommandInfo[] | undefined {
 		return this.agents.get(id)?.commands;
+	}
+
+	/** Completion-push disarm (voice-loop): called by the server, after its background push actually
+	 *  sends, to consume the one-push-per-voice-dispatch latch. A no-op if the agent isn't resident (a
+	 *  raced remove/eviction between the push firing and this call landing) or already disarmed. */
+	clearVoicePushArmed(id: string): void {
+		const rec = this.agents.get(id);
+		if (!rec || rec.options.voicePushArmed !== true) return;
+		rec.options.voicePushArmed = false;
+		rec.dto.voicePushArmed = false;
+		void this.persist();
 	}
 
 	/** Proactively pull commands on (re)connect — omp's startup push may predate our wiring. */

@@ -912,6 +912,13 @@ export interface AgentDTO {
 	 *  from before this shipped (or from a restart, which doesn't recompute it) simply renders without one.
 	 *  Advisory only: nothing reads this field to gate, delay, or retry a spawn. */
 	harnessScorecard?: HarnessScorecard;
+	/** Mirrors `PersistedAgent.voicePushArmed`, but ONLY at the exact emitted event that is this agent's
+	 *  genuine terminal completion (see squad-manager.ts's `onAgentEvent` — a workflow's per-node
+	 *  `agent_end` idles are deliberately NOT terminal; only the one paired with `workflow_done` is).
+	 *  False/absent on every other emitted event even while the underlying latch is still armed, so the
+	 *  server-side push hook (`maybePushAlert`) can key a push off this field plus the working→idle edge
+	 *  without ever reaching into the manager or risking a push storm on a multi-node workflow. */
+	voicePushArmed?: boolean;
 }
 
 /**
@@ -994,6 +1001,10 @@ export interface PersistedAgent {
 	task?: string;
 	/** Extra system-prompt text appended for specialized surfaces, e.g. console chat. */
 	appendSystemPrompt?: string;
+	/** Set once when a console chat unit is promoted into a work unit (E02). Durable so a re-promote
+	 *  (retry) re-steers the task instead of falsely refusing, and so the promoted state survives a
+	 *  restart even though the console segment was stripped from `appendSystemPrompt`. */
+	promoted?: boolean;
 	thinking?: ThinkingLevel;
 	issue?: IssueRef;
 	featureId?: string;
@@ -1068,6 +1079,12 @@ export interface PersistedAgent {
 	/** The question this unit was asked, when it is an answer unit (R5). Persisted so a daemon restart
 	 *  still knows the unit owes an answer. */
 	ask?: string;
+	/** Completion-push arm/disarm latch (voice-loop): set true when a voice-sourced dispatch (a
+	 *  `prompt`/`create` command whose `source` is "voice") is applied to this agent; cleared once the
+	 *  completion push actually sends, or by a voice-sourced `interrupt` (the operator cancelled — a
+	 *  "finished" push would be a lie). Persisted (not just in-memory) so the latch — and the ONE push
+	 *  it owes — survives a daemon restart mid-dispatch. See push.ts's `voiceDonePayload`. */
+	voicePushArmed?: boolean;
 }
 
 /** Persisted feature envelope — additive `features[]` in `<stateDir>/state.json`. */
@@ -1194,6 +1211,12 @@ export interface CreateAgentOptions {
 	 *  final message is captured verbatim as a durable `Answer`. Implies `executionRole: "observer"`, which
 	 *  already means "never commits, never lands". */
 	ask?: string;
+	/** Carries a persisted voice-loop completion-push arm through the orphan-adopt boot path
+	 *  (adoptOrphanedAgents mints a FRESH id via `create()` rather than reusing the persisted record
+	 *  verbatim like the warm-reattach path does, so the latch needs an explicit carry — see
+	 *  squad-manager.ts's `createWithId`). Absent on a genuinely fresh create(); a fresh voice-sourced
+	 *  dispatch arms via the `source` param instead. */
+	voicePushArmed?: boolean;
 }
 
 /** Sandboxed execution: run the agent's omp inside a container. */

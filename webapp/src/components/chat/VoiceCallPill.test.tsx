@@ -4,12 +4,14 @@ import { VoiceCallPillView } from './VoiceCallPill';
 
 const baseProps = {
   bindingBanner: 'voice → Fix the flaky test',
-  stateLabel: 'Listening — hold to talk',
-  captionSpeaker: null as 'assistant' | 'user' | null,
-  captionText: '',
+  stateLabel: 'Muted — hold or tap to talk',
   elapsedLabel: '0:07',
   costLabel: '~$0.02',
   reconnectNotice: null as string | null,
+  showPushNudge: false,
+  onEnablePush: () => {},
+  onDismissPushNudge: () => {},
+  onViewAgent: null as (() => void) | null,
   pttEngaged: false,
   panelOpen: false,
   onPttDown: () => {},
@@ -35,18 +37,8 @@ describe('VoiceCallPillView', () => {
     }
   });
 
-  test('renders the live caption line, tagged by speaker', () => {
-    const assistantHtml = renderToStaticMarkup(<VoiceCallPillView {...baseProps} captionSpeaker="assistant" captionText="On it." />);
-    expect(assistantHtml).toContain('Agent:');
-    expect(assistantHtml).toContain('On it.');
-
-    const userHtml = renderToStaticMarkup(<VoiceCallPillView {...baseProps} captionSpeaker="user" captionText="Stop the deploy" />);
-    expect(userHtml).toContain('You:');
-    expect(userHtml).toContain('Stop the deploy');
-  });
-
-  test('omits the caption line entirely when there is nothing to show', () => {
-    const html = renderToStaticMarkup(<VoiceCallPillView {...baseProps} captionText="" />);
+  test('carries NO caption line — the spoken back-and-forth renders in the chat thread, not the pill', () => {
+    const html = renderToStaticMarkup(<VoiceCallPillView {...baseProps} />);
     expect(html).not.toContain('You:');
     expect(html).not.toContain('Agent:');
   });
@@ -63,6 +55,32 @@ describe('VoiceCallPillView', () => {
     const idleHtml = renderToStaticMarkup(<VoiceCallPillView {...baseProps} pttEngaged={false} />);
     const engagedHtml = renderToStaticMarkup(<VoiceCallPillView {...baseProps} pttEngaged />);
     expect(idleHtml).not.toBe(engagedHtml);
+  });
+
+  // voice-loop concern 05: the push-enable nudge (shown only while `shouldShowPushNudge` says so —
+  // its own decision table is tested in callHud.test.ts; this pins the two render branches).
+  describe('push-enable nudge', () => {
+    test('shows the nudge copy and Enable action when showPushNudge is true', () => {
+      const html = renderToStaticMarkup(<VoiceCallPillView {...baseProps} showPushNudge />);
+      expect(html).toContain('Enable notifications to get pinged when agents finish');
+      expect(html).toContain('Enable');
+      expect(html).toContain('Dismiss notification nudge');
+    });
+
+    test('omits the nudge entirely when showPushNudge is false', () => {
+      const html = renderToStaticMarkup(<VoiceCallPillView {...baseProps} showPushNudge={false} />);
+      expect(html).not.toContain('Enable notifications to get pinged when agents finish');
+      expect(html).not.toContain('Dismiss notification nudge');
+    });
+  });
+
+  describe('view-agent jump (voice-loop follow-up)', () => {
+    test('renders the console-agent button only once an agent is bound', () => {
+      const bound = renderToStaticMarkup(<VoiceCallPillView {...baseProps} onViewAgent={() => {}} />);
+      expect(bound).toContain('View console agent');
+      const unbound = renderToStaticMarkup(<VoiceCallPillView {...baseProps} onViewAgent={null} />);
+      expect(unbound).not.toContain('View console agent');
+    });
   });
 
   // MAJOR-1: the pill's own fixed anchor must clear both the Agent FAB (App.tsx: `fixed bottom-4

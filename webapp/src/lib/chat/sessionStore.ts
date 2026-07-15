@@ -13,6 +13,15 @@
  * Everything except the three browser-only functions at the bottom (`loadPersistedSessions`,
  * `persistSessions`, `subscribeSessionStore`) is pure and directly unit-tested.
  *
+ * DEBRIEF LANE (webapp-voice-lane concern 04, DESIGN.md's "Debrief lane" row): `Session.metadata.
+ * voiceDebrief` is the ts-cursor a fresh voice call reads at connect time to decide what finished
+ * "while you were away". Wall-clock `ts` ONLY, never `seq` — `seq` is assigned at stream start,
+ * mutated in place, and resets on a daemon restart, so it cannot durably mark "already spoken".
+ * `advanceVoiceDebriefCursor`/`commitVoiceDebrief` are the two-phase commit's browser-side half:
+ * `VoiceCallContext`'s `queueInjection(items, onDone)` only calls them once the debrief's OWN
+ * response completes uncancelled (concern 03's primitive) — a barge-in or early hang-up leaves the
+ * cursor untouched and the next call simply re-debriefs the same backlog.
+ *
  * KNOWN GAP (report, not hacked around): while `AssistantChat` is mounted and showing the bound
  * session, a voice-authored write lands here, `notifySessionStoreListeners()` fires, and
  * `AssistantChat`'s own subscriber (added in this pass) merges it into its local `sessions` state
@@ -22,6 +31,8 @@
  * currently holds the array, which is a best-effort dedupe, not last-write-wins by wall clock.
  * Out of scope for a single-operator SPA; noted for the record.
  */
+
+import type { SpawnedUnitRecord } from '../spawnProposal';
 
 export interface Message {
   role: 'user' | 'model';
@@ -44,8 +55,13 @@ export interface Session {
     tasksDiscussed?: string[];
     stage?: string;
     agentId?: string;
+    /** Debrief lane ts-cursor (concern 04) — absent means "never debriefed" (first call, or every
+     *  debrief so far skipped silently for lack of backlog). `cursorTs` only ever moves forward
+     *  (see `advanceVoiceDebriefCursor`); `lastCallEndedAt` is stamped by `endCall()` on every call,
+     *  purely for observability + seeding a fresh cursor on this session's first-ever call end. */
+    voiceDebrief?: { cursorTs: number; lastCallEndedAt?: number };
   };
-  spawnedUnits?: import('../spawnProposal').SpawnedUnitRecord[];
+  spawnedUnits?: SpawnedUnitRecord[];
 }
 
 export const CHAT_SESSIONS_KEY = 'assistant-chat-sessions';
@@ -108,15 +124,23 @@ export function appendModelMessage(sessions: Session[], sessionId: string, text:
  *  suppressed and the operator's spoken turn renders from the transcript itself, as the USER — not
  *  as a `role:'model'` bubble (the bug this fixes: `appendSpokenSummary` used to persist BOTH the
  *  operator's prompt and the assistant's completion as `role:'model'`). Returns the SAME array
- *  reference when `sessionId` isn't found or `text` is blank, same discipline as `appendModelMessage`. */
-export function appendUserMessage(sessions: Session[], sessionId: string, text: string, clientTurnId: string, now: number): Session[] {
+ *  reference when `sessionId` isn't found or `text` is blank, same discipline as `appendModelMessage`.
+ *
+ *  `clientTurnId` is optional: a plain voice turn (the operator speaking to the voice model with
+ *  no `prompt_agent` dispatch behind it — VoiceCallContext's caption flush) never reaches the
+ *  agent transcript, so it has no echo to dedupe against and no turn id to carry. */
+export function appendUserMessage(sessions: Session[], sessionId: string, text: string, clientTurnId: string | undefined, now: number): Session[] {
   const trimmed = text.trim();
   if (!trimmed) return sessions;
   let changed = false;
   const next = sessions.map((session) => {
     if (session.id !== sessionId) return session;
     changed = true;
-    return { ...session, messages: [...session.messages, { role: 'user' as const, text: trimmed, timestamp: now, clientTurnId }], updatedAt: now };
+    return {
+      ...session,
+      messages: [...session.messages, { role: 'user' as const, text: trimmed, timestamp: now, ...(clientTurnId ? { clientTurnId } : {}) }],
+      updatedAt: now,
+    };
   });
   return changed ? next : sessions;
 }
@@ -136,6 +160,69 @@ export function updateSessionAgentId(sessions: Session[], sessionId: string, age
     if (session.id !== sessionId || session.metadata?.agentId === agentId) return session;
     changed = true;
     return { ...session, metadata: { ...session.metadata, agentId }, updatedAt: now };
+  });
+  return changed ? next : sessions;
+}
+
+const VOICE_DEBRIEF_DAY_MS = 24 * 60 * 60 * 1000;
+
+/** The debrief lane's two-phase commit primitive (concern 04): bump `sessionId`'s
+ *  `voiceDebrief.cursorTs` to `cursorTs` — but ONLY forward. `VoiceCallContext`'s
+ *  `queueInjection(items, ({cancelled}) => ...)` calls this exclusively from the `cancelled:false`
+ *  branch (the debrief's own response actually completed) and from `sweepPromptWatchers`' live
+ *  narration `onDone` (a completion narrated DURING the call counts as "heard" too) — never from
+ *  effect cleanup, never unconditionally at call end. A `cursorTs` at or behind the existing value
+ *  is a no-op (same array reference) — a stale/racing commit (e.g. a superseded call's late-
+ *  resolving injection) must never erase a later advance. Bumps `updatedAt` on a real move
+ *  (MEDIUM-3 class — see `updateSessionAgentId`'s doc comment: a non-bumping write is invisible to
+ *  `mergeSessions`' tie-break and can be silently clobbered by the very next unrelated persist).
+ *  Preserves any existing `lastCallEndedAt` on the same metadata field. */
+export function advanceVoiceDebriefCursor(sessions: Session[], sessionId: string, cursorTs: number, now = Date.now()): Session[] {
+  let changed = false;
+  const next = sessions.map((session) => {
+    if (session.id !== sessionId) return session;
+    const existing = session.metadata?.voiceDebrief;
+    if (existing && cursorTs <= existing.cursorTs) return session; // never move backward
+    changed = true;
+    return { ...session, metadata: { ...session.metadata, voiceDebrief: { ...existing, cursorTs } }, updatedAt: now };
+  });
+  return changed ? next : sessions;
+}
+
+/** `endCall()`'s explicit stamp (a REAL user intent — never the effect cleanup, since StrictMode's
+ *  synthetic double-cleanup and every other teardown path must not touch this). Always records
+ *  `lastCallEndedAt = now`. When this session has never had a debrief cursor before (`voiceDebrief`
+ *  entirely absent — first call ever, or every debrief so far returned null and skipped silently),
+ *  ALSO seeds `cursorTs` at `max(now, now - 24h)` — collapses to `now` in practice, kept as the
+ *  same 24h-floor formula `buildVoiceDebrief` itself applies at build time (belt-and-braces against
+ *  a future caller passing an out-of-band `now`) — so the NEXT call's debrief starts from THIS
+ *  call's end instead of relying solely on `buildVoiceDebrief`'s own clamp. Never touches an
+ *  EXISTING `cursorTs` — only `advanceVoiceDebriefCursor`'s two-phase commit may move that. Bumps
+ *  `updatedAt` — MEDIUM-3 class, same as every other write in this module. */
+export function recordVoiceCallEnded(sessions: Session[], sessionId: string, now = Date.now()): Session[] {
+  let changed = false;
+  const next = sessions.map((session) => {
+    if (session.id !== sessionId) return session;
+    changed = true;
+    const existing = session.metadata?.voiceDebrief;
+    const cursorTs = existing?.cursorTs ?? Math.max(now, now - VOICE_DEBRIEF_DAY_MS);
+    return { ...session, metadata: { ...session.metadata, voiceDebrief: { cursorTs, lastCallEndedAt: now } }, updatedAt: now };
+  });
+  return changed ? next : sessions;
+}
+
+/** Append a durable `SpawnedUnitRecord` (voice-lane spawn — concern 04) to `sessionId`'s
+ *  `spawnedUnits`, the same durable "I asked -> here's the PR" record `AssistantChat`'s own typed
+ *  spawn-confirm flow writes (`handleConfirmSpawn`) — so a voice-dispatched spawn becomes visible to
+ *  the NEXT call's debrief tracked-agent set (`VoiceCallContext`) exactly like a typed one already
+ *  is. Bumps `updatedAt` — MEDIUM-3 class. Returns the SAME array reference when the session isn't
+ *  found. */
+export function appendSpawnedUnit(sessions: Session[], sessionId: string, record: SpawnedUnitRecord, now = Date.now()): Session[] {
+  let changed = false;
+  const next = sessions.map((session) => {
+    if (session.id !== sessionId) return session;
+    changed = true;
+    return { ...session, spawnedUnits: [...(session.spawnedUnits ?? []), record], updatedAt: now };
   });
   return changed ? next : sessions;
 }
@@ -233,8 +320,10 @@ export function appendSpokenSummary(sessionId: string, text: string, now = Date.
 
 /** The voice dispatcher's `onSpokenSummary` `role:'user'` half (MAJOR-2a) lands here — same
  *  read-modify-write shape as `appendSpokenSummary`, but persists as a user Message stamped with
- *  the dispatch's `clientTurnId` (see `appendUserMessage`'s own doc comment for why). */
-export function appendSpokenUserMessage(sessionId: string, text: string, clientTurnId: string, now = Date.now()): void {
+ *  the dispatch's `clientTurnId` (see `appendUserMessage`'s own doc comment for why).
+ *  `VoiceCallContext`'s caption flush also lands plain (dispatch-less) voice turns here, with no
+ *  `clientTurnId` — those turns exist nowhere else, so there is nothing to dedupe them against. */
+export function appendSpokenUserMessage(sessionId: string, text: string, clientTurnId: string | undefined, now = Date.now()): void {
   const sessions = loadPersistedSessions();
   const next = appendUserMessage(sessions, sessionId, text, clientTurnId, now);
   if (next !== sessions) persistSessions(next);
@@ -245,5 +334,31 @@ export function appendSpokenUserMessage(sessionId: string, text: string, clientT
 export function bindSessionAgent(sessionId: string, agentId: string, now = Date.now()): void {
   const sessions = loadPersistedSessions();
   const next = updateSessionAgentId(sessions, sessionId, agentId, now);
+  if (next !== sessions) persistSessions(next);
+}
+
+/** The debrief lane's two-phase commit lands here — `VoiceCallContext`'s `queueInjection` onDone
+ *  (cancelled:false) and `sweepPromptWatchers`' live-narration onDone both call this. Same read-
+ *  modify-write shape as `appendSpokenSummary`. */
+export function commitVoiceDebrief(sessionId: string, cursorTs: number, now = Date.now()): void {
+  const sessions = loadPersistedSessions();
+  const next = advanceVoiceDebriefCursor(sessions, sessionId, cursorTs, now);
+  if (next !== sessions) persistSessions(next);
+}
+
+/** `endCall()`'s explicit `lastCallEndedAt` stamp (+ cursor seed for a never-debriefed session) —
+ *  same read-modify-write shape as `appendSpokenSummary`. */
+export function stampVoiceCallEnded(sessionId: string, now = Date.now()): void {
+  const sessions = loadPersistedSessions();
+  const next = recordVoiceCallEnded(sessions, sessionId, now);
+  if (next !== sessions) persistSessions(next);
+}
+
+/** The voice dispatcher's `onAgentSpawned` lands here — same read-modify-write shape as
+ *  `appendSpokenSummary`. `record` is built by the caller (`VoiceCallContext`) from the
+ *  dispatcher's `{id, name, prompt}` event. */
+export function recordVoiceSpawn(sessionId: string, record: SpawnedUnitRecord, now = Date.now()): void {
+  const sessions = loadPersistedSessions();
+  const next = appendSpawnedUnit(sessions, sessionId, record, now);
   if (next !== sessions) persistSessions(next);
 }

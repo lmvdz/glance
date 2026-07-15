@@ -48,6 +48,8 @@ function makeFakePeerConnection(dc: DataChannelLike): PeerConnectionLike {
     close: () => undefined,
     localDescription: { sdp: 'fake-offer-sdp', type: 'offer' },
     ontrack: null,
+    connectionState: 'connected',
+    onconnectionstatechange: null,
   };
 }
 
@@ -66,6 +68,9 @@ interface Harness {
   session: VoiceSession;
   deps: VoiceSessionDeps;
   dataChannels: (DataChannelLike & { sent: Record<string, unknown>[] })[];
+  /** Every fake peer connection ever created, in order — lets tests drive
+   *  `onconnectionstatechange` (silent ICE death detection). */
+  pcs: PeerConnectionLike[];
   mintCalls: number;
   mintImpl: () => Promise<VoiceMintTokenLike>;
   postSdpOfferImpl: () => Promise<string>;
@@ -88,6 +93,7 @@ interface Harness {
 
 function makeHarness(optsOverride: VoiceSessionOptions = {}): Harness {
   const dataChannels: (DataChannelLike & { sent: Record<string, unknown>[] })[] = [];
+  const pcs: PeerConnectionLike[] = [];
   let mintCalls = 0;
   let mintImpl: () => Promise<VoiceMintTokenLike> = async () => ({ value: `ek_fake_${++mintCalls}`, expiresAt: Date.now() + 3600_000 });
   let postSdpOfferImpl: PostSdpOfferImpl = async () => 'fake-answer-sdp';
@@ -118,7 +124,9 @@ function makeHarness(optsOverride: VoiceSessionOptions = {}): Harness {
     createPeerConnection: () => {
       const dc = makeFakeDataChannel();
       dataChannels.push(dc);
-      return makeFakePeerConnection(dc);
+      const pc = makeFakePeerConnection(dc);
+      pcs.push(pc);
+      return pc;
     },
     getUserMedia: () => {
       getUserMediaCalls++;
@@ -159,6 +167,7 @@ function makeHarness(optsOverride: VoiceSessionOptions = {}): Harness {
     session,
     deps,
     dataChannels,
+    pcs,
     get mintCalls() {
       return mintCalls;
     },
@@ -254,7 +263,13 @@ const NON_PTT_EVENTS: VoiceEvent[] = [
 
 test('nextVoiceState: exhaustive table — every state reacts to every event without throwing and returns a defined next state', () => {
   for (const state of ALL_STATES) {
-    for (const event of [...NON_PTT_EVENTS, { type: 'ptt-press' } as VoiceEvent, { type: 'ptt-release' } as VoiceEvent, { type: 'reset' } as VoiceEvent]) {
+    for (const event of [
+      ...NON_PTT_EVENTS,
+      { type: 'ptt-press' } as VoiceEvent,
+      { type: 'ptt-release' } as VoiceEvent,
+      { type: 'ptt-abort' } as VoiceEvent,
+      { type: 'reset' } as VoiceEvent,
+    ]) {
       const result = nextVoiceState(state, event);
       expect(ALL_STATES).toContain(result.state);
       expect(Array.isArray(result.effects)).toBe(true);
@@ -272,8 +287,9 @@ test('nextVoiceState: exhaustive table — every state reacts to every event wit
 const NOOP_CELLS: Array<{ state: VoiceState; event: VoiceEvent }> = [
   // idle: only ptt-press and injection-flushed transition; everything else (including ptt-release —
   // there's no recording to release) is a no-op.
+  // (idle + response-started is NOT here: it resyncs to 'speaking' — see its dedicated test.)
   { state: 'idle', event: { type: 'ptt-release' } },
-  { state: 'idle', event: { type: 'response-started' } },
+  { state: 'idle', event: { type: 'ptt-abort' } },
   { state: 'idle', event: { type: 'function-call-ready', call: SAMPLE_CALL } },
   { state: 'idle', event: { type: 'response-done' } },
   { state: 'idle', event: { type: 'ack-sent' } },
@@ -286,12 +302,14 @@ const NOOP_CELLS: Array<{ state: VoiceState; event: VoiceEvent }> = [
   { state: 'userRecording', event: { type: 'ack-sent' } },
   { state: 'userRecording', event: { type: 'injection-flushed' } },
   // awaitingResponse: ptt-press/response-started/function-call-ready/response-done all transition;
-  // ptt-release/ack-sent/injection-flushed don't apply here.
+  // ptt-release/ptt-abort/ack-sent/injection-flushed don't apply here.
   { state: 'awaitingResponse', event: { type: 'ptt-release' } },
+  { state: 'awaitingResponse', event: { type: 'ptt-abort' } },
   { state: 'awaitingResponse', event: { type: 'ack-sent' } },
   { state: 'awaitingResponse', event: { type: 'injection-flushed' } },
   // speaking: ptt-press/function-call-ready/response-done transition; the rest don't.
   { state: 'speaking', event: { type: 'ptt-release' } },
+  { state: 'speaking', event: { type: 'ptt-abort' } },
   { state: 'speaking', event: { type: 'response-started' } },
   { state: 'speaking', event: { type: 'ack-sent' } },
   { state: 'speaking', event: { type: 'injection-flushed' } },
@@ -299,6 +317,7 @@ const NOOP_CELLS: Array<{ state: VoiceState; event: VoiceEvent }> = [
   // function-call-ready before the first is acked, and the wrapping response's own response-done —
   // is REQUIRED protocol handling (waiting for sendFunctionOutput), not a "stray" edge case.
   { state: 'toolPending', event: { type: 'ptt-release' } },
+  { state: 'toolPending', event: { type: 'ptt-abort' } },
   { state: 'toolPending', event: { type: 'response-started' } },
   { state: 'toolPending', event: { type: 'function-call-ready', call: SAMPLE_CALL } },
   { state: 'toolPending', event: { type: 'response-done' } },
@@ -347,13 +366,22 @@ test('nextVoiceState: userRecording + ptt-release -> awaitingResponse, commits t
   ]);
 });
 
+test('nextVoiceState: userRecording + ptt-abort -> idle, discards the buffer — no commit, no response.create (empty-turn rule)', () => {
+  const result = nextVoiceState('userRecording', { type: 'ptt-abort' });
+  expect(result.state).toBe('idle');
+  expect(result.effects).toEqual([{ type: 'send', payload: { type: 'input_audio_buffer.clear' } }]);
+});
+
 test('nextVoiceState: rule (b) — response.create is NEVER among the effects for any event while in userRecording', () => {
-  for (const event of [...NON_PTT_EVENTS, { type: 'ptt-press' } as VoiceEvent]) {
+  for (const event of [...NON_PTT_EVENTS, { type: 'ptt-press' } as VoiceEvent, { type: 'ptt-abort' } as VoiceEvent]) {
     const result = nextVoiceState('userRecording', event);
-    expect(result.state).toBe('userRecording');
     const hasResponseCreate = result.effects.some((e) => e.type === 'send' && e.payload.type === 'response.create');
     expect(hasResponseCreate).toBe(false);
   }
+});
+
+test('nextVoiceState: idle + response-started -> speaking (resync — the server just asserted a response is live)', () => {
+  expect(nextVoiceState('idle', { type: 'response-started' })).toEqual({ state: 'speaking', effects: [] });
 });
 
 test('nextVoiceState: awaitingResponse + response-started -> speaking', () => {
@@ -434,6 +462,27 @@ test('VoiceSession.connect: a mint failure surfaces a mint-failed error', async 
   expect(h.errors).toEqual([{ code: 'mint-failed', message: 'rate limited' }]);
 });
 
+test('VoiceSession.connect: a 429 mint failure (org mint cap / rate limit) surfaces mint-rate-limited, not the generic mint-failed', async () => {
+  const h = makeHarness();
+  h.mintImpl = async () => {
+    // What ApiError (api.ts) produces for the daemon's 429: an Error carrying a numeric `status`.
+    throw Object.assign(new Error('this organization has reached its voice mint limit (5 per 62 minutes); try again later'), { status: 429 });
+  };
+  await h.session.connect();
+  expect(h.errors).toEqual([
+    { code: 'mint-rate-limited', message: 'this organization has reached its voice mint limit (5 per 62 minutes); try again later' },
+  ]);
+});
+
+test('VoiceSession.connect: a non-429 mint failure stays mint-failed (the 429 branch is specific, not a catch-all)', async () => {
+  const h = makeHarness();
+  h.mintImpl = async () => {
+    throw Object.assign(new Error('voice key storage unavailable'), { status: 501 });
+  };
+  await h.session.connect();
+  expect(h.errors).toEqual([{ code: 'mint-failed', message: 'voice key storage unavailable' }]);
+});
+
 test('VoiceSession.connect: a successful connect leaves the session idle', async () => {
   const h = makeHarness();
   await h.session.connect();
@@ -503,6 +552,90 @@ test('VoiceSession: pttPress -> pttRelease sends clear, then commit + response.c
   h.session.pttRelease();
   expect(h.session.getState()).toBe('awaitingResponse');
   expect(lastSent(h)).toEqual([{ type: 'input_audio_buffer.clear' }, { type: 'input_audio_buffer.commit' }, { type: 'response.create' }]);
+});
+
+// -------------------------------------------------------------------------------------------------
+// Empty-turn rule (live bug, 2026-07-15): an engagement the gesture layer deemed too short to
+// contain speech ends via pttAbort — discard, re-mute, and critically NO response.create, so the
+// model can never answer an empty commit by re-answering the previous context ("it immediately
+// said the same thing again" while the operator's mic was freshly muted under them).
+// -------------------------------------------------------------------------------------------------
+
+test('VoiceSession: pttPress -> pttAbort discards the recording — clear only, no commit, no response.create, back to idle', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  h.session.pttPress();
+  expect(lastMicTrack(h).enabled).toBe(true);
+
+  h.session.pttAbort();
+
+  expect(h.session.getState()).toBe('idle');
+  expect(lastMicTrack(h).enabled).toBe(false); // the engagement is over — hot-mic privacy re-mutes
+  const sent = lastSent(h);
+  expect(sent.some((s) => s.type === 'input_audio_buffer.commit')).toBe(false);
+  expect(sent.some((s) => s.type === 'response.create')).toBe(false);
+  expect(sent[sent.length - 1]).toEqual({ type: 'input_audio_buffer.clear' }); // the discard
+});
+
+test('VoiceSession: an aborted barge-in stays cancelled — the press cancels the response, the abort never asks for a new one', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  h.session.pttPress();
+  h.session.pttRelease();
+  serverEvent(h, { type: 'response.created' });
+  expect(h.session.getState()).toBe('speaking');
+
+  h.session.pttPress(); // barge-in: response.cancel + stop playback + clear
+  h.session.pttAbort(); // ...but the engagement was an accidental click — discard it
+
+  expect(h.session.getState()).toBe('idle');
+  serverEvent(h, { type: 'response.done' }); // the cancelled response unwinds
+  expect(h.session.getState()).toBe('idle');
+  const responseCreates = lastSent(h).filter((s) => s.type === 'response.create');
+  expect(responseCreates).toHaveLength(1); // only the original turn's — nothing from the aborted engagement
+});
+
+test('VoiceSession: pttAbort with no recording in progress is a no-op (bar the idempotent re-mute)', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  const sentBefore = lastSent(h).length;
+  h.session.pttAbort();
+  expect(h.session.getState()).toBe('idle');
+  expect(lastSent(h).length).toBe(sentBefore); // no wire traffic from an idle abort
+});
+
+test('empty-commit backstop: input_audio_buffer_commit_empty withdraws the paired response.create via response.cancel, no onError', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  h.session.pttPress();
+  h.session.pttRelease(); // commit + response.create for a turn that turns out to be empty
+
+  serverEvent(h, { type: 'error', error: { code: 'input_audio_buffer_commit_empty', message: 'buffer too small' } });
+
+  expect(h.errors).toEqual([]); // still benign — never surfaced as a failure
+  expect(lastSent(h)[lastSent(h).length - 1]).toEqual({ type: 'response.cancel' }); // the withdrawal
+  serverEvent(h, { type: 'response.done' }); // the cancelled response unwinds the machine
+  expect(h.session.getState()).toBe('idle');
+});
+
+test('empty-commit backstop: when the empty turn\'s response.create was DEFERRED behind a wrapping response, it is dropped, not cancelled', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  h.session.pttPress();
+  h.session.pttRelease(); // response.create #1 — outstandingResponses: 1
+  serverEvent(h, { type: 'response.created', response: { id: 'resp-1' } });
+
+  h.session.pttPress(); // barge-in on resp-1 (cancel sent; its response.done hasn't arrived yet)
+  h.session.pttRelease(); // empty second turn: commit + a response.create that sendRaw DEFERS (outstanding > 0)
+  expect(lastSent(h).filter((s) => s.type === 'response.create')).toHaveLength(1); // #2 deferred, not sent
+
+  serverEvent(h, { type: 'error', error: { code: 'input_audio_buffer_commit_empty', message: 'buffer too small' } });
+  serverEvent(h, { type: 'response.done', response: { id: 'resp-1' } }); // resp-1's cancel unwinds
+
+  // The deferred continuation was dropped by the backstop — nothing fires into the empty turn.
+  expect(lastSent(h).filter((s) => s.type === 'response.create')).toHaveLength(1);
+  expect(h.session.getState()).toBe('idle');
+  expect(h.errors).toEqual([]);
 });
 
 test('MINOR-8: hot-mic privacy — the mic track is muted by default, unmuted only while PTT is held', async () => {
@@ -597,6 +730,28 @@ test('MINOR-10: user-side input-transcription deltas are tagged user (dormant un
   await h.session.connect();
   serverEvent(h, { type: 'conversation.item.input_audio_transcription.delta', delta: 'user said something' });
   expect(h.captions).toEqual([{ text: 'user said something', speaker: 'user' }]);
+});
+
+test("input-transcription completed with NO prior deltas emits the full transcript as a user caption (whisper-1, the pinned model, doesn't stream)", async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  serverEvent(h, { type: 'conversation.item.input_audio_transcription.completed', item_id: 'item-u1', transcript: 'stop the deploy' });
+  expect(h.captions).toEqual([{ text: 'stop the deploy', speaker: 'user' }]);
+});
+
+test('input-transcription completed AFTER streamed deltas for the same item does NOT re-emit the utterance', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  serverEvent(h, { type: 'conversation.item.input_audio_transcription.delta', delta: 'stop the ', item_id: 'item-u1' });
+  serverEvent(h, { type: 'conversation.item.input_audio_transcription.delta', delta: 'deploy', item_id: 'item-u1' });
+  serverEvent(h, { type: 'conversation.item.input_audio_transcription.completed', item_id: 'item-u1', transcript: 'stop the deploy' });
+  expect(h.captions).toEqual([
+    { text: 'stop the ', speaker: 'user' },
+    { text: 'deploy', speaker: 'user' },
+  ]);
+  // A LATER item with no deltas of its own still emits — the guard is per-item, not global.
+  serverEvent(h, { type: 'conversation.item.input_audio_transcription.completed', item_id: 'item-u2', transcript: 'and restart it' });
+  expect(h.captions[h.captions.length - 1]).toEqual({ text: 'and restart it', speaker: 'user' });
 });
 
 test('VoiceSession: a full spoken turn returns to idle on response.done', async () => {
@@ -977,8 +1132,9 @@ describe('LOW batch: SDP POST timeout + abort', () => {
     const h = makeHarness();
     await h.session.connect();
     expect(h.session.getState()).toBe('idle');
-    // Only the re-mint timer (55min) should remain scheduled — the SDP-POST timeout was cleared.
-    expect(h.timers.map((t) => t.ms)).toEqual([55 * 60_000]);
+    // Only the re-mint timer (55min) + the idle keepalive (15s) remain scheduled — the SDP-POST
+    // timeout was cleared.
+    expect(h.timers.map((t) => t.ms).sort((a, b) => a - b)).toEqual([15_000, 55 * 60_000]);
   });
 });
 
@@ -1207,16 +1363,250 @@ test('VoiceSession.queueInjection: two queued batches drain one at a time, never
 });
 
 // =================================================================================================
+// Concern 03: queueInjection's optional onDone completion callback. `cancelled: false` fires ONLY
+// when the batch's OWN response (correlated by response id, never the outstanding counter) reaches
+// response.done with status 'completed'. Every other fate — barge-in, disconnect, rotation/reconnect
+// tearing down the connection it was sent on, and the wedge watchdog — resolves cancelled: true.
+// =================================================================================================
+
+test('VoiceSession.queueInjection: existing one-arg call sites are unaffected (no onDone, no crash)', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  h.session.queueInjection([{ text: 'no callback' }]);
+  serverEvent(h, { type: 'response.created' });
+  serverEvent(h, { type: 'response.done' });
+  expect(h.session.getState()).toBe('idle');
+});
+
+test("VoiceSession.queueInjection: onDone fires {cancelled:false} once the injection's OWN response completes normally", async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  const results: { cancelled: boolean }[] = [];
+  h.session.queueInjection([{ text: 'debrief' }], (info) => results.push(info));
+  expect(h.session.getState()).toBe('awaitingResponse'); // flushed immediately (idle)
+  expect(results).toEqual([]);
+
+  serverEvent(h, { type: 'response.created', response: { id: 'resp-inj' } });
+  expect(results).toEqual([]); // response.created alone never resolves it
+
+  serverEvent(h, { type: 'response.done', response: { id: 'resp-inj', status: 'completed' } });
+  expect(results).toEqual([{ cancelled: false }]);
+});
+
+test('VoiceSession.queueInjection: barge-in mid-injection resolves onDone {cancelled:true} via the cancelled response.done', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  const results: { cancelled: boolean }[] = [];
+  h.session.queueInjection([{ text: 'debrief' }], (info) => results.push(info));
+  serverEvent(h, { type: 'response.created', response: { id: 'resp-inj' } });
+  expect(h.session.getState()).toBe('speaking');
+
+  h.session.pttPress(); // barge-in: response.cancel sent, state -> userRecording
+  expect(results).toEqual([]); // still correlated to resp-inj's own eventual response.done
+
+  serverEvent(h, { type: 'response.done', response: { id: 'resp-inj', status: 'cancelled' } });
+  expect(results).toEqual([{ cancelled: true }]);
+});
+
+test("VoiceSession.queueInjection: response.done status 'failed' or 'incomplete' both resolve onDone {cancelled:true}", async () => {
+  for (const status of ['failed', 'incomplete']) {
+    const h = makeHarness();
+    await h.session.connect();
+    const results: { cancelled: boolean }[] = [];
+    h.session.queueInjection([{ text: 'debrief' }], (info) => results.push(info));
+    serverEvent(h, { type: 'response.created', response: { id: 'resp-inj' } });
+    serverEvent(h, { type: 'response.done', response: { id: 'resp-inj', status } });
+    expect(results).toEqual([{ cancelled: true }]);
+  }
+});
+
+test('VoiceSession.queueInjection: disconnect() with the batch still queued (never flushed) resolves onDone {cancelled:true}', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  h.session.pttPress(); // userRecording — the injection can't flush yet
+  const results: { cancelled: boolean }[] = [];
+  h.session.queueInjection([{ text: 'debrief' }], (info) => results.push(info));
+  expect(h.session.getState()).toBe('userRecording');
+
+  h.session.disconnect();
+  expect(results).toEqual([{ cancelled: true }]);
+});
+
+test('VoiceSession.queueInjection: disconnect() with the batch already sent, awaiting response.created, resolves onDone {cancelled:true}', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  const results: { cancelled: boolean }[] = [];
+  h.session.queueInjection([{ text: 'debrief' }], (info) => results.push(info));
+  expect(h.session.getState()).toBe('awaitingResponse'); // flushed immediately, response.created not yet arrived
+
+  h.session.disconnect();
+  expect(results).toEqual([{ cancelled: true }]);
+});
+
+test('VoiceSession.queueInjection: disconnect() after response.created but before response.done resolves onDone {cancelled:true}', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  const results: { cancelled: boolean }[] = [];
+  h.session.queueInjection([{ text: 'debrief' }], (info) => results.push(info));
+  serverEvent(h, { type: 'response.created', response: { id: 'resp-inj' } });
+
+  h.session.disconnect();
+  expect(results).toEqual([{ cancelled: true }]);
+});
+
+test('VoiceSession.queueInjection: two queued batches each resolve their own onDone in order', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  const results: string[] = [];
+  h.session.queueInjection([{ text: 'first' }], (info) => results.push(`first:${info.cancelled}`));
+  h.session.queueInjection([{ text: 'second' }], (info) => results.push(`second:${info.cancelled}`));
+
+  serverEvent(h, { type: 'response.created', response: { id: 'resp-1' } });
+  expect(results).toEqual([]);
+  serverEvent(h, { type: 'response.done', response: { id: 'resp-1', status: 'completed' } });
+  expect(results).toEqual(['first:false']); // first batch's own response.done — second hasn't flushed yet
+
+  serverEvent(h, { type: 'response.created', response: { id: 'resp-2' } });
+  serverEvent(h, { type: 'response.done', response: { id: 'resp-2', status: 'completed' } });
+  expect(results).toEqual(['first:false', 'second:false']);
+});
+
+test('VoiceSession.queueInjection: a throwing onDone is caught and never breaks the state machine (never invoked into the reducer)', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  h.session.queueInjection([{ text: 'debrief' }], () => {
+    throw new Error('boom');
+  });
+  serverEvent(h, { type: 'response.created', response: { id: 'resp-inj' } });
+  expect(() => serverEvent(h, { type: 'response.done', response: { id: 'resp-inj', status: 'completed' } })).not.toThrow();
+  expect(h.session.getState()).toBe('idle');
+});
+
+test('VoiceSession.queueInjection: response.created with no response id on the wire cannot correlate the eventual response.done, resolves onDone {cancelled:true} immediately', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  const results: { cancelled: boolean }[] = [];
+  h.session.queueInjection([{ text: 'debrief' }], (info) => results.push(info));
+  serverEvent(h, { type: 'response.created' }); // no response.id on the wire
+  expect(results).toEqual([{ cancelled: true }]);
+});
+
+test('VoiceSession.queueInjection: a conversation_already_has_active_response rejection resolves the popped onDone {cancelled:true} (CRITICAL-1 belt-and-braces)', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  const results: { cancelled: boolean }[] = [];
+  h.session.queueInjection([{ text: 'debrief' }], (info) => results.push(info));
+  expect(h.session.getState()).toBe('awaitingResponse');
+
+  serverEvent(h, { type: 'error', error: { code: 'conversation_already_has_active_response', message: 'already active' } });
+  expect(results).toEqual([{ cancelled: true }]);
+});
+
+test('wedge watchdog: recovery resolves any injection onDone sent-but-uncorrelated as {cancelled:true}', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  const results: { cancelled: boolean }[] = [];
+  h.session.queueInjection([{ text: 'debrief' }], (info) => results.push(info));
+  expect(h.session.getState()).toBe('awaitingResponse'); // sent, but no response.created ever arrives
+
+  h.nowValue = 13_000; // past AWAITING_WEDGE_MS with zero server events
+  fireTimer(h, 5_000); // the watchdog poll
+
+  expect(h.session.getState()).toBe('idle');
+  expect(results).toEqual([{ cancelled: true }]);
+});
+
+test('rotation/reconnect: an unexpected disconnect while an injection response is in flight resolves onDone {cancelled:true}', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  const results: { cancelled: boolean }[] = [];
+  h.session.queueInjection([{ text: 'debrief' }], (info) => results.push(info));
+  serverEvent(h, { type: 'response.created', response: { id: 'resp-inj' } });
+  expect(h.session.getState()).toBe('speaking');
+
+  const dc = h.dataChannels[h.dataChannels.length - 1]!;
+  dc.onclose?.(); // unexpected drop -> silent reconnect; teardownConnection() runs synchronously first
+  expect(results).toEqual([{ cancelled: true }]);
+  await flush(); // let the reconnect attempt itself settle — no further callback fires
+  expect(results).toEqual([{ cancelled: true }]);
+});
+
+// -------------------------------------------------------------------------------------------------
+// Deferred edge case: the flush's OWN response.create can itself be the thing CRITICAL-1's
+// sendRaw defers, when the machine lands on idle (via ptt-abort) while outstandingResponses hasn't
+// yet dropped to zero (a barge-in's response.cancel was sent, but its response.done hasn't arrived).
+// flushInjectionQueue's dispatch({type:'injection-flushed'}) still fires unconditionally (moving the
+// machine to awaitingResponse) even though the actual wire send was deferred, not sent.
+// -------------------------------------------------------------------------------------------------
+
+/** Drives the machine into the deferred-flush shape: a user turn, barged in on before its own
+ *  response.done arrives, with an injection queued and then ptt-abort'd into idle — landing
+ *  `flushInjectionQueue`'s own response.create in `deferredResponseCreate` (not actually sent). */
+function setupDeferredInjectionFlush(h: Harness, onDone: (info: { cancelled: boolean }) => void): void {
+  h.session.pttPress();
+  h.session.pttRelease();
+  serverEvent(h, { type: 'response.created', response: { id: 'resp-user' } });
+  expect(h.session.getState()).toBe('speaking');
+  h.session.pttPress(); // barge-in on resp-user: response.cancel sent, resp-user's response.done pending
+  expect(h.session.getState()).toBe('userRecording');
+  h.session.queueInjection([{ text: 'debrief' }], onDone);
+  expect(h.session.getState()).toBe('userRecording'); // just queued, not flushed
+  h.session.pttAbort(); // discard the (empty) recording -> idle -> flush fires while resp-user is still open
+  expect(h.session.getState()).toBe('awaitingResponse'); // injection-flushed dispatch fires regardless of the defer
+}
+
+test('deferred flush: eventually sends for real once the wrapping response.done arrives, and correlates normally', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  const results: { cancelled: boolean }[] = [];
+  setupDeferredInjectionFlush(h, (info) => results.push(info));
+  expect(results).toEqual([]); // not sent yet
+
+  const createsBefore = lastSent(h).filter((s) => s.type === 'response.create').length;
+  serverEvent(h, { type: 'response.done', response: { id: 'resp-user', status: 'cancelled' } }); // releases the deferred send
+  expect(lastSent(h).filter((s) => s.type === 'response.create').length).toBe(createsBefore + 1);
+  expect(results).toEqual([]); // now correlating against ITS OWN response, not resp-user's
+
+  serverEvent(h, { type: 'response.created', response: { id: 'resp-inj' } });
+  serverEvent(h, { type: 'response.done', response: { id: 'resp-inj', status: 'completed' } });
+  expect(results).toEqual([{ cancelled: false }]);
+});
+
+test('deferred flush: dropped by a subsequent pttPress (a second barge-in) resolves onDone {cancelled:true} and is never sent', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  const results: { cancelled: boolean }[] = [];
+  setupDeferredInjectionFlush(h, (info) => results.push(info));
+
+  const createsBefore = lastSent(h).filter((s) => s.type === 'response.create').length;
+  h.session.pttPress(); // a SECOND barge-in supersedes the still-deferred injection continuation
+  expect(results).toEqual([{ cancelled: true }]);
+  expect(lastSent(h).filter((s) => s.type === 'response.create').length).toBe(createsBefore); // never sent
+});
+
+test('deferred flush: dropped by an input_audio_buffer_commit_empty error resolves onDone {cancelled:true} and is never sent', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  const results: { cancelled: boolean }[] = [];
+  setupDeferredInjectionFlush(h, (info) => results.push(info));
+
+  const createsBefore = lastSent(h).filter((s) => s.type === 'response.create').length;
+  serverEvent(h, { type: 'error', error: { code: 'input_audio_buffer_commit_empty', message: 'buffer too small' } });
+  expect(results).toEqual([{ cancelled: true }]);
+  expect(lastSent(h).filter((s) => s.type === 'response.create').length).toBe(createsBefore); // never sent
+});
+
+// =================================================================================================
 // Lifecycle: proactive re-mint quiescence gating + recap carry-over
 // =================================================================================================
 
 test('VoiceSession: proactive re-mint fires immediately from idle and injects the recap into the new session', async () => {
   const h = makeHarness({ getRecap: () => 'we fixed the ENOENT bug', agentId: 'agent-9' });
   await h.session.connect();
-  expect(h.timers).toHaveLength(1);
-  expect(h.timers[0]!.ms).toBe(55 * 60_000);
+  const reMints = h.timers.filter((t) => t.ms === 55 * 60_000);
+  expect(reMints).toHaveLength(1); // (plus the 15s idle keepalive, which is not under test here)
 
-  const dueFn = h.timers[0]!.fn;
+  const dueFn = reMints[0]!.fn;
   dueFn(); // simulate the timer firing while idle
 
   await flush();
@@ -1235,7 +1625,7 @@ test('VoiceSession: proactive re-mint fires immediately from idle and injects th
     },
   ]);
   // A fresh re-mint timer was scheduled for the new session.
-  expect(h.timers).toHaveLength(1);
+  expect(h.timers.filter((t) => t.ms === 55 * 60_000)).toHaveLength(1);
 });
 
 test('GAP-1: setAgentId lets a bootstrap call (no agentId at construction) carry the real binding into rotation, instead of a permanently blank line', async () => {
@@ -1630,4 +2020,311 @@ test('ek_ hygiene: the minted token value never appears in a console.* call acro
   } finally {
     for (const spy of spies) spy.mockRestore();
   }
+});
+
+// =================================================================================================
+// Wedge watchdog (live bug 2026-07-15: the HUD sat on "Thinking…" forever after a mid-call audio
+// cutoff). `awaitingResponse` has no guaranteed outbound edge — a response.create silently dropped
+// on a non-open channel (sendRaw drops, never queues) leaves the machine waiting for a
+// response.created that can never come. The watchdog recovers it back to idle.
+// =================================================================================================
+
+test('wedge watchdog: a release whose sends were dropped (channel closed) recovers to idle AND silently reconnects', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  h.dataChannels[0]!.readyState = 'closing'; // sends will silently drop from here on
+  h.session.pttPress();
+  h.session.pttRelease(); // commit + response.create both dropped -> outstanding stays 0
+  expect(h.session.getState()).toBe('awaitingResponse'); // the wedge shape: waiting on nothing
+
+  h.nowValue = 13_000; // past AWAITING_WEDGE_MS (12s of zero server events)
+  fireTimer(h, 5_000); // the watchdog poll
+
+  expect(h.session.getState()).toBe('idle'); // recovered — the operator can talk again
+  expect(h.stopPlaybackCalls).toBeGreaterThanOrEqual(1); // recovery goes through reset
+  await flush();
+  // The wedge is dead-connection evidence — recovery rebuilds the connection, same as a channel
+  // close would (live evidence 2026-07-15: ICE death never fires dc.onclose).
+  expect(h.mintCalls).toBe(2);
+  expect(h.dataChannels).toHaveLength(2);
+  expect(h.reconnected).toEqual([{ recap: '' }]);
+});
+
+test('wedge watchdog: a create in flight with 12s of TOTAL silence (no events at all) is also declared dead and reconnected', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  h.session.pttPress();
+  h.session.pttRelease(); // create actually sent -> outstanding = 1, but the connection is dead: nothing ever comes back
+  expect(h.session.getState()).toBe('awaitingResponse');
+
+  h.nowValue = 13_000;
+  fireTimer(h, 5_000);
+  expect(h.session.getState()).toBe('idle');
+  await flush();
+  expect(h.dataChannels).toHaveLength(2); // silently rebuilt
+});
+
+test('wedge watchdog: transcript deltas refresh liveness — a long wrapping narration behind a deferred ack is never cut off', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  h.session.pttPress();
+  h.session.pttRelease();
+  serverEvent(h, { type: 'response.created' });
+  serverEvent(h, { type: 'response.function_call_arguments.done', call_id: 'c1', name: 'fleet_status', arguments: '{}' });
+  h.session.sendFunctionOutput('c1', { ok: true }); // ack -> awaitingResponse, create DEFERRED behind the wrapping response
+  expect(h.session.getState()).toBe('awaitingResponse');
+
+  h.nowValue = 39_000;
+  serverEvent(h, { type: 'response.output_audio_transcript.delta', delta: 'still narrating…' }); // sign of life
+
+  h.nowValue = 45_000; // 45s in, but only 6s since the last delta
+  fireTimer(h, 5_000);
+  expect(h.session.getState()).toBe('awaitingResponse'); // NOT recovered — the turn is demonstrably alive
+});
+
+test('wedge watchdog: leaving awaitingResponse normally disarms the poll (no stray 5s timer left behind)', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  h.session.pttPress();
+  h.session.pttRelease();
+  expect(h.timers.some((t) => t.ms === 5_000)).toBe(true); // armed on entry
+  serverEvent(h, { type: 'response.created' }); // -> speaking
+  expect(h.timers.some((t) => t.ms === 5_000)).toBe(false); // disarmed on exit
+});
+
+test('resync end-to-end: a response.created arriving while idle moves the machine to speaking and resumes playback', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  expect(h.session.getState()).toBe('idle');
+  serverEvent(h, { type: 'response.created', response: { id: 'resp-stray' } });
+  expect(h.session.getState()).toBe('speaking');
+  expect(h.resumePlaybackCalls).toBe(1);
+  serverEvent(h, { type: 'response.done', response: { id: 'resp-stray' } });
+  expect(h.session.getState()).toBe('idle');
+});
+
+// =================================================================================================
+// Diagnostic ring buffer (getDebugLog) — the live-triage flight recorder.
+// =================================================================================================
+
+test('getDebugLog records sends, receives, state transitions, ptt calls, and dropped sends', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  h.session.pttPress();
+  h.session.pttRelease();
+  serverEvent(h, { type: 'response.created', response: { id: 'resp-1' } });
+
+  const log = h.session.getDebugLog();
+  const labels = log.map((e) => `${e.kind}:${e.label}`);
+  expect(labels).toContain('ptt:press');
+  expect(labels).toContain('ptt:release');
+  expect(labels).toContain('send:input_audio_buffer.commit');
+  expect(labels).toContain('send:response.create');
+  expect(labels).toContain('recv:response.created');
+  expect(labels).toContain('state:userRecording -> awaitingResponse');
+
+  h.dataChannels[0]!.readyState = 'closed';
+  h.session.pttPress(); // a barge-in press: its cancel + clear sends are both dropped and logged
+  const dropped = h.session.getDebugLog().filter((e) => e.label.startsWith('send-dropped')).map((e) => e.label);
+  expect(dropped).toContain('send-dropped response.cancel');
+  expect(dropped).toContain('send-dropped input_audio_buffer.clear');
+});
+
+test('getDebugLog never contains caption/transcript text (event types and ids only)', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  h.session.pttPress();
+  h.session.pttRelease();
+  serverEvent(h, { type: 'response.created' });
+  serverEvent(h, { type: 'response.output_audio_transcript.delta', delta: 'SECRET SPOKEN CONTENT', item_id: 'item-1' });
+  serverEvent(h, { type: 'conversation.item.input_audio_transcription.completed', item_id: 'item-u1', transcript: 'SECRET USER WORDS' });
+  expect(JSON.stringify(h.session.getDebugLog())).not.toMatch(/SECRET/);
+});
+
+test('silent ICE death: connectionState "failed" triggers the same bounded silent reconnect a channel close does', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  expect(h.dataChannels).toHaveLength(1);
+
+  const pc = h.pcs[0]! as PeerConnectionLike & { connectionState: string };
+  pc.connectionState = 'failed';
+  pc.onconnectionstatechange?.();
+  await flush();
+
+  expect(h.mintCalls).toBe(2);
+  expect(h.dataChannels).toHaveLength(2);
+  expect(h.reconnected).toEqual([{ recap: '' }]);
+});
+
+test('connectionState "disconnected" alone does NOT reconnect (transient flaps) — only "failed" does', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  const pc = h.pcs[0]! as PeerConnectionLike & { connectionState: string };
+  pc.connectionState = 'disconnected';
+  pc.onconnectionstatechange?.();
+  await flush();
+  expect(h.mintCalls).toBe(1);
+  expect(h.dataChannels).toHaveLength(1);
+});
+
+// =================================================================================================
+// Context brief + silent context updates (live gap 2026-07-15: "tell me about this repository" ->
+// "which repository?" — the voice model knew nothing about the project/screen).
+// =================================================================================================
+
+test('getContextBrief is injected as a system item on connect, before anything else is sent', async () => {
+  const h = makeHarness({ getContextBrief: () => '[Session context]\nActive project: omp-squad' });
+  await h.session.connect();
+  const sent = lastSent(h);
+  expect(sent[0]).toEqual({
+    type: 'conversation.item.create',
+    item: { type: 'message', role: 'system', content: [{ type: 'input_text', text: '[Session context]\nActive project: omp-squad' }] },
+  });
+});
+
+test('a silent reconnect re-injects a FRESH context brief into the new session', async () => {
+  let brief = '[Session context]\nActive project: alpha';
+  const h = makeHarness({ getContextBrief: () => brief });
+  await h.session.connect();
+
+  brief = '[Session context]\nActive project: beta'; // the world moved while the call was live
+  const dc = h.dataChannels[0]!;
+  dc.onclose?.(); // unexpected drop -> silent reconnect
+  await flush();
+
+  expect(h.dataChannels).toHaveLength(2);
+  const sentOnNew = h.dataChannels[1]!.sent;
+  expect(sentOnNew[0]).toEqual({
+    type: 'conversation.item.create',
+    item: { type: 'message', role: 'system', content: [{ type: 'input_text', text: '[Session context]\nActive project: beta' }] },
+  });
+});
+
+test('an empty getContextBrief injects nothing', async () => {
+  const h = makeHarness({ getContextBrief: () => '' });
+  await h.session.connect();
+  expect(lastSent(h)).toEqual([]);
+});
+
+test('updateSystemContext sends a bare system item immediately on an open channel — and never a response.create', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  h.session.updateSystemContext('[Context update]\nView: tasks');
+  const sent = lastSent(h);
+  expect(sent).toEqual([
+    { type: 'conversation.item.create', item: { type: 'message', role: 'system', content: [{ type: 'input_text', text: '[Context update]\nView: tasks' }] } },
+  ]);
+  expect(h.session.getState()).toBe('idle'); // silent — no turn was started
+});
+
+test('updateSystemContext queues while the channel is not yet open and flushes on dc.onopen', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  const dc = h.dataChannels[0]!;
+  dc.readyState = 'connecting';
+  h.session.updateSystemContext('[Context update]\nView: fleet');
+  expect(dc.sent).toEqual([]); // parked, NOT silently dropped
+
+  dc.readyState = 'open';
+  dc.onopen?.();
+  expect(dc.sent).toEqual([
+    { type: 'conversation.item.create', item: { type: 'message', role: 'system', content: [{ type: 'input_text', text: '[Context update]\nView: fleet' }] } },
+  ]);
+});
+
+test('updateSystemContext with blank text is a no-op', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  h.session.updateSystemContext('   ');
+  expect(lastSent(h)).toEqual([]);
+});
+
+test('audit fix: a second deferral displacing a pending deferred injection create resolves the displaced onDone cancelled:true (never leaks unfired)', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  // Open a response and barge in so its response.done is still outstanding while the machine
+  // can flush an injection (ptt-abort lands it on idle with outstanding=1).
+  h.session.pttPress();
+  h.session.pttRelease(); // create #1 — outstanding: 1
+  serverEvent(h, { type: 'response.created', response: { id: 'resp-1' } });
+  h.session.pttPress(); // barge-in: cancel sent, resp-1's done still in flight
+  h.session.pttAbort(); // -> idle (outstanding still 1)
+
+  const fates: boolean[] = [];
+  h.session.queueInjection([{ kind: 'debrief' }], ({ cancelled }) => fates.push(cancelled));
+  // idle -> flush ran; its response.create DEFERRED (outstanding=1) with onDone in the slot.
+  expect(fates).toEqual([]);
+
+  // A tool ack now defers its own continuation create into the same single-occupancy slot.
+  serverEvent(h, { type: 'response.function_call_arguments.done', response_id: 'resp-1', call_id: 'c1', name: 'fleet_status', arguments: '{}' });
+  h.session.sendFunctionOutput('c1', { ok: true });
+
+  // The displaced injection create can now never send — its callback must have resolved cancelled.
+  expect(fates).toEqual([true]);
+
+  // And the machine still unwinds normally: resp-1's done fires the ack's (superseding) deferred create.
+  serverEvent(h, { type: 'response.done', response: { id: 'resp-1', status: 'cancelled' } });
+  const creates = lastSent(h).filter((s) => s.type === 'response.create');
+  expect(creates.length).toBeGreaterThanOrEqual(1);
+});
+
+test('an unexpected-drop reconnect carries the recap into the fresh session (not just proactive rotation)', async () => {
+  const h = makeHarness({ getRecap: () => 'operator asked about the repo; assistant relayed to the console agent' });
+  await h.session.connect();
+
+  h.dataChannels[0]!.onclose?.(); // silent ICE death -> bounded reconnect
+  await flush();
+
+  expect(h.dataChannels).toHaveLength(2);
+  expect(h.reconnected).toEqual([{ recap: 'operator asked about the repo; assistant relayed to the console agent' }]);
+  const carryOver = h.dataChannels[1]!.sent.find(
+    (s) => s.type === 'conversation.item.create' && JSON.stringify(s).includes('carried over from a prior connection'),
+  );
+  expect(carryOver).toBeDefined();
+  expect(JSON.stringify(carryOver)).toContain('operator asked about the repo');
+});
+
+// =================================================================================================
+// Idle keepalive + fast dead-connection detection (live finding 2026-07-15: silent connection
+// deaths were only discovered at the operator's next press).
+// =================================================================================================
+
+test('keepalive: sends a benign buffer clear every interval while connected and idle', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  const before = lastSent(h).filter((s) => s.type === 'input_audio_buffer.clear').length;
+  h.nowValue = 15_000;
+  serverEvent(h, { type: 'rate_limits.updated' }); // any event keeps liveness fresh
+  fireTimer(h, 15_000);
+  expect(lastSent(h).filter((s) => s.type === 'input_audio_buffer.clear').length).toBe(before + 1);
+  expect(h.timers.some((t) => t.ms === 15_000)).toBe(true); // re-armed
+});
+
+test('keepalive: NEVER clears the buffer mid-recording (it would destroy in-flight speech)', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  h.session.pttPress(); // one clear from the press itself
+  const before = lastSent(h).filter((s) => s.type === 'input_audio_buffer.clear').length;
+  h.nowValue = 15_000;
+  serverEvent(h, { type: 'rate_limits.updated' });
+  fireTimer(h, 15_000);
+  expect(lastSent(h).filter((s) => s.type === 'input_audio_buffer.clear').length).toBe(before); // no probe
+});
+
+test('keepalive: 45s with zero server events declares the connection dead and silently reconnects', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  expect(h.dataChannels).toHaveLength(1);
+  h.nowValue = 46_000; // no serverEvent() calls at all — total silence
+  fireTimer(h, 15_000);
+  await flush();
+  expect(h.dataChannels).toHaveLength(2); // rebuilt before the operator ever noticed
+  expect(h.reconnected).toEqual([{ recap: '' }]);
+});
+
+test('keepalive: disconnect() stops the loop (no probe after hangup)', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  h.session.disconnect();
+  expect(h.timers.some((t) => t.ms === 15_000)).toBe(false);
 });
