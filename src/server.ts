@@ -2290,7 +2290,15 @@ export class SquadServer {
 			return new Response(new Uint8Array(bytes), { headers: { "content-type": "image/png", "cache-control": "private, max-age=31536000, immutable" } });
 		}
 		const mt = url.pathname.match(/^\/api\/agents\/([^/]+)\/transcript$/);
-		if (mt) return Response.json(manager.getTranscript(decodeURIComponent(mt[1])));
+		if (mt) {
+			const id = decodeURIComponent(mt[1]);
+			// `?since=<seq>` returns only the delta (entries with seq > since) so a polling client
+			// (the cockpit conversation pane) never refetches the whole transcript. A missing or
+			// non-integer `since` falls back to the full transcript — never a 400/500.
+			const sinceRaw = url.searchParams.get("since");
+			const since = sinceRaw !== null ? Number.parseInt(sinceRaw, 10) : Number.NaN;
+			return Response.json(Number.isFinite(since) ? manager.getTranscriptSince(id, since) : manager.getTranscript(id));
+		}
 		const mtrans = url.pathname.match(/^\/api\/agents\/([^/]+)\/transitions$/);
 		if (mtrans) {
 			const full = url.searchParams.get("full") === "1";

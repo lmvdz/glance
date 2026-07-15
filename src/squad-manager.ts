@@ -176,6 +176,7 @@ import { redact } from "./redact.ts";
 import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
 import { buildTrace, traceMaxSpans, traceSampleRatio, traceSpansEnabled, type TraceResponse } from "./spans.ts";
 import { traceExporterFromEnv, type TraceExportQueue } from "./trace-exporter.ts";
+import { transcriptSince } from "./transcript-delta.ts";
 import { ManualProvider, type PaymentProvider, paymentProviderFromEnv } from "./payments/index.ts";
 import {
 	acceptFeedbackSubmission,
@@ -1959,6 +1960,12 @@ export class SquadManager extends EventEmitter {
 
 	getTranscript(id: string): TranscriptEntry[] {
 		return this.agents.get(id)?.transcript ?? [];
+	}
+
+	/** Transcript delta (`seq > since`) — what a polling client (the cockpit conversation pane,
+	 *  fleet-ide-intervention I01) reads to avoid refetching the whole transcript each poll. */
+	getTranscriptSince(id: string, since: number): TranscriptEntry[] {
+		return transcriptSince(this.getTranscript(id), since);
 	}
 
 	getAgent(id: string): AgentDTO | undefined {
