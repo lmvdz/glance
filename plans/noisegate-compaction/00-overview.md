@@ -41,7 +41,17 @@
 - Transcript tool-result offload — deferred to plans/fleet-ide-cockpit ([07](07-transcript-offload-deferred.md)).
 
 ## Decisions so far
-- (populated at close)
+- [01 reducer module](01-reducer-module.md) — shipped 22170e9; review round added work-bounded fill (50k lines/31ms), exact offload-first pointer budgeting, neutralized-marker CRITICAL tier
+- [02 redact hardening](02-redact-hardening.md) — shipped 4242628; also fixed pre-existing ENV_LINE case-insensitivity false positives (evidence: git-stash baseline)
+- [03 executor steer](03-executor-steer.md) — shipped f6e111e; STEER_BODY_BUDGET 3800, fenced steer injection, identityNormalize on both detectors
+- [04 checkpoint persistence](04-checkpoint-log.md) — shipped 41486d3; fit path still neutralizes pointers → identityNormalize also drops neutralized markers (cold-resume identity)
+- [05 land + consolidation](05-land-and-consolidation.md) — shipped 3fe0924; agentId threaded into applyRegressionGate/attemptAutoResolve; removed dead branchAhead (ratchet was red on pristine main)
+- [06 contract doc](06-contract-doc.md) — shipped 3a462eb
+- merge of origin/main (#184–#191) — semantic conflict fixed (promote's truncate → truncateLabel); two new main-side dead exports marked @substrate (test-only, in-file-used)
+
+## Completion
+- 6/7 concerns done; [07](07-transcript-offload-deferred.md) deferred to plans/fleet-ide-cockpit by design (MODE hitl).
+- Live-drive verified: real 32,680-byte bun failure → 3,751-char steer text, tail failure line + summary survived, offload on disk redacted, decision logged (reason reduced, preservedLines 6).
 
 ## Notes
 - Proceeded over 13 plans with open work (41 open concerns; scanner run 2026-07-15) — user explicitly commissioned this plan ("lets do it plan and execute").
