@@ -69,6 +69,8 @@ import {
 	SpawnBodySchema,
 	AskBodySchema,
 	HarnessEventBodySchema,
+	LeaseClaimBodySchema,
+	PresenceClaimBodySchema,
 	ProjectRegisterBodySchema,
 	TaskStartBodySchema,
 	VoiceTokenBodySchema,
@@ -97,7 +99,8 @@ import { runVisionPass } from "./vision.ts";
 import { checkVisionUrl } from "./ssrf.ts";
 import { harnessEventDecision } from "./harness-hooks.ts";
 import { all, claim, release, who } from "./presence.ts";
-import { type LeaseEntry, leasesFor } from "./leases.ts";
+import { type LeaseEntry, claimLease, leasesFor, releaseSession } from "./leases.ts";
+import { isDaemonWorkspace, isReservedIdentity, isSafePresenceId } from "./presence-write.ts";
 import { discoverRepos, planSpawn } from "./smart-spawn.ts";
 import { hardAgentCeiling } from "./spawn-identity.ts";
 import { liveAgents as liveAgentCount } from "./scheduler.ts";
@@ -603,6 +606,15 @@ export class SquadServer {
 		return !!this.auth;
 	}
 
+	/** Paths a presence/lease WRITE (I02) may target: registered projects + live agents' repo/worktree.
+	 *  The scope authority for the cockpit's presence-write — a client can't mint presence elsewhere. */
+	private knownWorkspaces(manager: SquadManager): { projects: string[]; agentPaths: string[] } {
+		return {
+			projects: manager.projects().map((p) => p.repo),
+			agentPaths: manager.list().flatMap((a) => [a.repo, a.worktree]),
+		};
+	}
+
 	/** Bridge identity → RBAC tier: active-org role owner|admin ⇒ admin; member ⇒ operator;
 	 *  authed but with NO active org (or the lookup fails) ⇒ viewer (read-only, never operator).
 	 *  Only called in DB mode. */
@@ -871,7 +883,8 @@ export class SquadServer {
 			const repo = url.searchParams.get("repo");
 			// File mode (no registry): the lease registry IS this one host's whole world — serve it
 			// directly, unchanged from before this fix. DB-registry mode: union each reachable
-			// manager's own org-scoped leases (see orgScopedLeasesAcross).
+			// manager's own org-scoped leases (see orgScopedLeasesAcross). WRITES (POST/DELETE) are
+			// handled in the mutation scope below (next to /api/presence), not here.
 			return Response.json(this.registry ? await this.orgScopedLeasesAcross(managers, repo) : await leasesFor(repo ?? process.cwd()));
 		}
 		if (url.pathname === "/api/fabric") {
@@ -2173,10 +2186,63 @@ export class SquadServer {
 		if (url.pathname === "/api/presence") {
 			// risk #6: the global presence registry is machine-wide; never serve it in DB-registry mode.
 			if (this.registry) return Response.json([]);
+			if (req.method === "POST") {
+				// The cockpit registers the HUMAN as present in a unit's worktree (I02). Presence is a
+				// machine-wide file-mode concept — refuse in DB/registry mode. The write may only target
+				// a daemon-known path (registered project or a live agent's repo/worktree); `source` is
+				// forced to "other" so a client can never masquerade as a squad/omp session.
+				const decoded = decodeBody(PresenceClaimBodySchema, await req.json().catch(() => null));
+				if (Result.isFailure(decoded)) return new Response("bad presence body", { status: 400 });
+				const body = decoded.success;
+				// The id is a ttl-registry FILENAME — reject a traversal id before it reaches path.join.
+				if (body.id !== undefined && !isSafePresenceId(body.id)) return new Response("invalid id", { status: 400 });
+				// The cockpit can't masquerade as an omp/squad session (would let it clobber agent presence).
+				if (isReservedIdentity(body.agent)) return new Response("agent uses a reserved namespace", { status: 400 });
+				if (!isDaemonWorkspace(body.repo, this.knownWorkspaces(manager))) return new Response("repo is not a daemon-managed workspace", { status: 403 });
+				const id = await claim({ repo: body.repo, agent: body.agent, branch: body.branch, task: body.task, id: body.id, source: "other" });
+				return Response.json({ ok: true, id });
+			}
+			if (req.method === "DELETE") {
+				const id = url.searchParams.get("id");
+				const repo = url.searchParams.get("repo");
+				if (!id || !repo) return new Response("id and repo required", { status: 400 });
+				// Same traversal guard as POST — `id` becomes a ttl-registry filename in reg.remove.
+				if (!isSafePresenceId(id)) return new Response("invalid id", { status: 400 });
+				// Scope-gate the DELETE too (codex): a write of any kind must name a daemon-managed path.
+				if (!isDaemonWorkspace(repo, this.knownWorkspaces(manager))) return new Response("repo is not a daemon-managed workspace", { status: 403 });
+				await release(id, repo);
+				return Response.json({ ok: true });
+			}
 			const repo = url.searchParams.get("repo");
 			return Response.json(repo ? await who(repo) : await all());
 		}
-		// /api/leases and the rest of the fabric/audit/automation/metrics-learning-loop observability
+		// /api/leases READS are handled by handleObservability (GET-gated, above). WRITES land here:
+		// the cockpit marks the file the human is editing in a unit's worktree (I02) so the agent's
+		// advisory lease-hook sees it held. File-mode only; scope-gated to a daemon-known path.
+		if (url.pathname === "/api/leases" && (req.method === "POST" || req.method === "DELETE")) {
+			if (this.registry) return new Response("lease writes are file-mode only", { status: 403 });
+			if (req.method === "POST") {
+				const decoded = decodeBody(LeaseClaimBodySchema, await req.json().catch(() => null));
+				if (Result.isFailure(decoded)) return new Response("bad lease body", { status: 400 });
+				const body = decoded.success;
+				// A lease id is deterministic from (session, file); reject a reserved-namespace session so
+				// the cockpit can't refresh/clobber an omp/squad agent's own lease (codex review).
+				if (isReservedIdentity(body.session)) return new Response("session uses a reserved namespace", { status: 400 });
+				if (!isDaemonWorkspace(body.repo, this.knownWorkspaces(manager))) return new Response("repo is not a daemon-managed workspace", { status: 403 });
+				const id = await claimLease({ repo: body.repo, file: body.file, session: body.session });
+				return Response.json({ ok: true, id });
+			}
+			const session = url.searchParams.get("session");
+			const repo = url.searchParams.get("repo");
+			if (!session || !repo) return new Response("session and repo required", { status: 400 });
+			// Reserved-namespace + scope guards on DELETE too: a cockpit must not release an agent's
+			// leases (reserved session) or write outside a daemon-managed path.
+			if (isReservedIdentity(session)) return new Response("session uses a reserved namespace", { status: 400 });
+			if (!isDaemonWorkspace(repo, this.knownWorkspaces(manager))) return new Response("repo is not a daemon-managed workspace", { status: 403 });
+			await releaseSession(session, repo);
+			return Response.json({ ok: true });
+		}
+		// The rest of the fabric/audit/automation/metrics-learning-loop observability
 		// family are handled by handleObservability (above, before the `!manager` gate) — see its doc.
 		if (url.pathname === "/api/opportunities") {
 			const repos = url.searchParams.get("repo") ? [url.searchParams.get("repo") as string] : (planeRepos().length ? planeRepos() : manager.projects().map((p) => p.repo));

@@ -80,6 +80,25 @@ export const HarnessEventBodySchema = Schema.Struct({
 	cwd: Schema.String,
 });
 
+/** POST /api/presence — the cockpit registers the HUMAN as present in a unit's worktree
+ *  (fleet-ide-intervention I02), so the agent's lease-hook and `glance who` see a peer. `source`
+ *  is NOT client-controlled — the route forces "other". `id` refreshes an existing claim. */
+export const PresenceClaimBodySchema = Schema.Struct({
+	repo: Schema.String,
+	agent: Schema.String,
+	branch: Schema.optional(Schema.String),
+	task: Schema.optional(Schema.String),
+	id: Schema.optional(Schema.String),
+});
+
+/** POST /api/leases — the cockpit marks the file the human is editing in a unit's worktree
+ *  (fleet-ide-intervention I02), so the running agent's advisory lease-hook sees it held. */
+export const LeaseClaimBodySchema = Schema.Struct({
+	repo: Schema.String,
+	file: Schema.String,
+	session: Schema.String,
+});
+
 /** POST /api/answers — ask a question of a repo (R5). The unit that answers is an observer: it never
  *  commits and never lands, so `repo` grants read, not write. */
 export const AskBodySchema = Schema.Struct({

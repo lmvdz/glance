@@ -103,6 +103,10 @@ export function restActionTier(method: string, pathname: string): Role {
 	// access-token (operator-or-higher in practice), so it clears this bar; the scope gate still
 	// drops anything outside a registered project on top.
 	if (pathname === "/api/harness-events") return "operator";
+	// Presence/lease reads are viewer; WRITES (the cockpit registering the human as present /
+	// holding a file — fleet-ide-intervention I02) mutate shared machine-wide state, so operator.
+	// The route additionally scope-gates writes to a daemon-known workspace and refuses DB mode.
+	if (pathname === "/api/presence" || pathname === "/api/leases") return method === "GET" ? "viewer" : "operator";
 	if (pathname === "/api/auth/check" || pathname.startsWith("/api/push/")) return "viewer";
 	return method === "GET" ? "viewer" : "operator";
 }
