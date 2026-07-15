@@ -251,8 +251,12 @@ export function membraneDisciplinePrompt(gatedTokens: string[] | undefined): str
 // primer, since `dispatchSpawn` calls `create({repo, name, branch, task, issue})` with no profileId).
 // Static repo-authored text, so — unlike the primer/authored-spec blocks, which fence fabric/issue-
 // sourced content as untrusted — no fence is needed here.
+/** First line of DO_NOT_BLOCK — the idempotence marker squad-manager checks before appending, so a
+ *  cold-adopted unit whose PERSISTED appendSystemPrompt already carries the block (composed at its
+ *  original create) doesn't grow a second copy on every daemon restart. */
+export const DO_NOT_HEADER = "--- Do-Not: recurring failure modes ---";
 export const DO_NOT_BLOCK = [
-	"--- Do-Not: recurring failure modes ---",
+	DO_NOT_HEADER,
 	"Do not report the Vite/bundler chunk-size warning as a finding — it is known and benign in this repo.",
 	"Do not re-run a failing verify loop a third time hoping for a different outcome — after two failures, stop and report the blocker.",
 	'Do not treat a passing test suite as proof the gate ran — a gate that never executed also prints no failures; check for evidence the tests actually ran (e.g. "N pass").',

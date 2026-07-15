@@ -61,7 +61,7 @@ import { RateLimitGate } from "./rate-limit.ts";
 import { addIssueIdsToFeatureModule, addIssuesToFeatureModule, addPlaneBlockedByRelation, addPlaneIssueComment, closePlaneIssue, createPlaneIssue, deletePlaneModule, ensureFeatureModule, featureTickets, fetchIssueDetail, listPlaneIssues, listPlaneIssuesAllStates, planeRepos, reopenPlaneIssue, startPlaneIssue } from "./plane.ts";
 import { syncPlanStatuses } from "./plan-sync.ts";
 import { agentsToAdopt, deferredResumable, hardAgentCeiling, newAgentId, planeIssueBranch, selectAdoptable, slugPart } from "./spawn-identity.ts";
-import { DO_NOT_BLOCK, effectSkillPointerLine, gateMembraneTokens, loadRepoProfiles, membraneDisciplinePrompt, membraneProfilesEnabled, modelOptionsFromRuntime, profileOptionsFromEnv, toolGrantsPrompt, type RuntimeModelOption } from "./agent-profiles.ts";
+import { DO_NOT_BLOCK, DO_NOT_HEADER, effectSkillPointerLine, gateMembraneTokens, loadRepoProfiles, membraneDisciplinePrompt, membraneProfilesEnabled, modelOptionsFromRuntime, profileOptionsFromEnv, toolGrantsPrompt, type RuntimeModelOption } from "./agent-profiles.ts";
 import { escapeHtml, planConcernTicketMatches, renderPlanConcernIssueHtml } from "./concern-tickets.ts";
 import { capabilityWorkflowToDot, loadCommissionWorkflow, resolveWorkflowPath, slugifyForFile } from "./workflow-source.ts";
 export { capabilityWorkflowToDot, resolveWorkflowPath };
@@ -4472,10 +4472,16 @@ export class SquadManager extends EventEmitter {
 		// `primerDelivered`) can tell whether this ACTUALLY reached the child, not just whether it was
 		// composed — the join is unconditional so this is always true, but delivery still depends on the
 		// harness having a system-prompt channel at all.
-		const effectPointer = effectSkillPointerLine([opts.task, opts.issue?.name, opts.issue?.description].filter((t): t is string => typeof t === "string").join("\n"));
+		// IDEMPOTENT: cold-adopt re-runs this composition over the PERSISTED appendSystemPrompt (which
+		// already carries the block from the unit's original create) — without the marker check, every
+		// daemon restart would append another copy. A pre-04 persisted unit (no block yet) still gets
+		// upgraded on adopt, which is the desired behavior, not drift.
+		const hasDoNots = opts.appendSystemPrompt?.includes(DO_NOT_HEADER) ?? false;
+		const hasEffectPointer = opts.appendSystemPrompt?.includes(".claude/skills/effect") ?? false;
+		const effectPointer = hasEffectPointer ? undefined : effectSkillPointerLine([opts.task, opts.issue?.name, opts.issue?.description].filter((t): t is string => typeof t === "string").join("\n"));
 		opts = {
 			...opts,
-			appendSystemPrompt: [opts.appendSystemPrompt, DO_NOT_BLOCK, effectPointer].filter((text): text is string => typeof text === "string" && text.length > 0).join("\n\n") || undefined,
+			appendSystemPrompt: [opts.appendSystemPrompt, hasDoNots ? undefined : DO_NOT_BLOCK, effectPointer].filter((text): text is string => typeof text === "string" && text.length > 0).join("\n\n") || undefined,
 		};
 		const doNotsInjected = true;
 		// Authored-spec injection (concern 01): a dispatched unit works toward its actual contract
