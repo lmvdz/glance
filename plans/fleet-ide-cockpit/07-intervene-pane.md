@@ -1,6 +1,6 @@
 # C07 — intervene pane
 
-STATUS: in-review (glance-desktop#15)
+STATUS: done (glance-desktop#15, merged)
 
 ## Reality notes (2026-07-15, glance-desktop#15)
 
