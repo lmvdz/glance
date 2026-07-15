@@ -16,6 +16,7 @@ import type { ModelLineage } from "./model-lineage.ts";
 import type { LensId } from "./lens-select.ts";
 import type { HarnessScorecard } from "./harness-scorecard.ts";
 import type { WorkLane, WorkLaneSource } from "./lane.ts";
+import type { ComplexityTier } from "./model-outcomes.ts";
 
 /** Derived, human-meaningful lifecycle state of one managed agent. */
 export type AgentStatus =
@@ -974,6 +975,13 @@ export interface RunReceipt {
 	/** Work lane the unit resolved at create time (adw-factory-borrows concern 02) — prerequisite for
 	 *  concern 08's lane-keyed cost aggregate. Stamped from the seed at `RunAccumulator.snapshot()`. */
 	lane?: WorkLane;
+	/** Complexity tier this run was bucketed under (`model-outcomes.ts`'s `tierOf(thinking)`) —
+	 *  the other half of concern 08's `(model, tier, lane)` cost-aggregate key, alongside `lane` above.
+	 *  Absent until a spawn caller stamps `RunSeed.tier` (mirrors `lane`'s own rollout exactly — see
+	 *  `cost-aggregate.ts`'s module doc "rollout note"); a receipt with no `tier` buckets under the
+	 *  aggregate's literal "unknown" tier, which a real `ComplexityTier` query never matches, so this
+	 *  field's absence is inert rather than silently misclassifying. */
+	tier?: ComplexityTier;
 }
 
 /** Compact run summary carried on the DTO for the dashboard. */
