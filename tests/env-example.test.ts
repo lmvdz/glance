@@ -13,8 +13,8 @@ import { expect, test } from "bun:test";
 // Scanning approach — this is a set of regex heuristics over the literal TypeScript source, not a
 // real parser, chosen to match how this codebase ACTUALLY reads env vars:
 //   1. `process.env.NAME` / `process.env["NAME"]` — the direct form.
-//   2. `envBool("NAME", …)` / `envInt("NAME", …)` / `envNumber("NAME", …)` — the typed readers in
-//      src/config.ts.
+//   2. `envBool("NAME", …)` / `envInt("NAME", …)` / `envNumber("NAME", …)` / `envStringList("NAME", …)`
+//      — the typed readers in src/config.ts.
 //   3. `<param>.NAME` where `<param>` is a function parameter whose default value is literally
 //      `process.env` (this codebase's dependency-injection convention for testable env reads —
 //      e.g. `function f(env: NodeJS.ProcessEnv = process.env)` or
@@ -52,7 +52,7 @@ function readsInFile(file: string): Set<string> {
 
 	for (const m of body.matchAll(/process\.env\.([A-Z_][A-Z0-9_]*)/g)) names.add(m[1]);
 	for (const m of body.matchAll(/process\.env\[["']([A-Z_][A-Z0-9_]*)["']\]/g)) names.add(m[1]);
-	for (const m of body.matchAll(/env(?:Bool|Int|Number)\(\s*["']([A-Z_][A-Z0-9_]*)["']/g)) names.add(m[1]);
+	for (const m of body.matchAll(/env(?:Bool|Int|Number|StringList)\(\s*["']([A-Z_][A-Z0-9_]*)["']/g)) names.add(m[1]);
 
 	// DI-env-param convention: a parameter or local binding that resolves to `process.env`, either
 	// directly as a parameter default (`env: NodeJS.ProcessEnv = process.env`, or the

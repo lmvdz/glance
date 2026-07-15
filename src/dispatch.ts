@@ -19,6 +19,9 @@ import type { AgentDTO, AutomationSkipReason, IssueRef } from "./types.ts";
 
 const PRIORITY_RANK: Record<string, number> = { urgent: 0, high: 1, medium: 2, low: 3, none: 4 };
 
+// Plane's five native state groups — the only values the state gate may act on.
+const PLANE_STATE_GROUPS = new Set(["backlog", "unstarted", "started", "completed", "cancelled"]);
+
 function norm(p: string): string {
 	const out: string[] = [];
 	for (const seg of p.trim().split("/")) {
@@ -287,7 +290,10 @@ export class Dispatcher {
 					// re-dispatch after enrichment/release. Skip here means it's never added to `dispatched`
 					// or the ledger, so it's re-checked every tick and dispatches the moment its state moves
 					// into the releasable set.
-					if (issue.state !== undefined && !releasableStates.has(issue.state)) {
+					// Gate only on recognized Plane state GROUPS. When the /states fetch degrades,
+					// toIssueRef leaves a raw state UUID here — an unrecognized value must fail open
+					// (like a missing state), or a Plane hiccup silently holds every issue.
+					if (issue.state !== undefined && PLANE_STATE_GROUPS.has(issue.state) && !releasableStates.has(issue.state)) {
 						if (!this.stateGateLogged.has(issue.id)) {
 							this.stateGateLogged.add(issue.id);
 							this.deps.log(`skip ${issue.identifier ?? issue.id} — state "${issue.state}" not in releasable set (${[...releasableStates].join(",")})`);
