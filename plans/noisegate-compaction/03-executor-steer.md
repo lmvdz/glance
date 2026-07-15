@@ -1,5 +1,5 @@
 # Verify-loop steer path: signal-preserving reduce + identity safety
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
