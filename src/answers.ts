@@ -37,6 +37,7 @@
 import * as path from "node:path";
 import { Schema } from "effect";
 import { getStorageBackend } from "./dal/storage.ts";
+import { normalizeRepoPath } from "./project-registry.ts";
 import { decodeJsonWith } from "./schema/external-json.ts";
 
 export interface Answer {
@@ -100,7 +101,12 @@ export async function listAnswers(stateDir: string, opts: { repo?: string } = {}
 	for (const name of names.filter((n) => n.endsWith(".json"))) {
 		const a = await readAnswer(stateDir, name.slice(0, -5));
 		if (!a) continue;
-		if (opts.repo && a.repo !== opts.repo) continue;
+		// Normalized both sides — a raw `!==` compare made "/srv/app/" a different repo from "/srv/app"
+		// and silently dropped that repo's answers from `glance answers`/the ask→fabric join (the same
+		// bug class the fabric leak incident already fixed for every other repo-scoped read; live
+		// cross-tenant-class since two different callers spelling the same repo differently is exactly
+		// the DB-mode-adjacent shape that class covers).
+		if (opts.repo && normalizeRepoPath(a.repo) !== normalizeRepoPath(opts.repo)) continue;
 		out.push(a);
 	}
 	return out.sort((x, y) => (y.answeredAt ?? y.askedAt) - (x.answeredAt ?? x.askedAt));

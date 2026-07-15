@@ -40,6 +40,10 @@ import type { WorkflowDefinition } from "./workflow-catalog.ts";
 import { Dispatcher } from "./dispatch.ts";
 import { openDispatchLedger } from "./dispatch-ledger.ts";
 import { type Answer, answerBrief, listAnswers, readAnswer, saveAnswer } from "./answers.ts";
+// Aliased: `types.ts` already exports an UNRELATED `AttentionEvent` (an agent's own notify signal,
+// used pervasively below via `AgentDTO.attentionEvents`) — importing this module's same-named type
+// bare would collide. `OperatorAttentionEvent` disambiguates at every use site in this file.
+import { AttentionStore, type AttentionEvent as OperatorAttentionEvent, type AttentionRecordInput, type RecordResult, type SeenMap } from "./attention.ts";
 import { errText } from "./err-text.ts";
 import { isConsolePrompt, stripConsolePrompt } from "./console-prompt.ts";
 import { openRemovedLedger, type RemovedLedger } from "./removed-ledger.ts";
@@ -83,7 +87,7 @@ import { type Judge, validatorGate } from "./validator.ts";
 import { evaluateCompliance, type ComplianceFinding } from "./compliance.ts";
 import { reapDeadSessions, releaseSession, sweepLeases } from "./leases.ts";
 import { agentActor, scopeFor } from "./agent-scope.ts";
-import { buildFabricSnapshot, loadScoutFacts, type FabricSnapshot } from "./fabric.ts";
+import { actorVisibleRepoSet, buildFabricSnapshot, loadScoutFacts, type FabricSnapshot } from "./fabric.ts";
 import { buildContextPrimer, searchFabric, type KbDocType } from "./fabric-search.ts";
 import { sweepPresence, who } from "./presence.ts";
 import { harnessEventDecision } from "./harness-hooks.ts";
@@ -147,6 +151,8 @@ import { selectReapable, type WorktreeInfo } from "./worktree-reaper.ts";
 import { scrubbedSpawnEnv } from "./spawn-env.ts";
 import { changedFiles, filesTouchedSinceBase } from "./explore.ts";
 import { appendReceipt, confirmDeliveredFlags, EFFICIENCY_FLAG_PREFIX, readAllReceipts, readReceipts, RunAccumulator, splitCapabilityTokens } from "./receipts.ts";
+import { validateModelDelta } from "./decision-evidence.ts";
+import { classifyWhereToLookEntry, listSymptoms, readSymptom, saveSymptom, statWhereToLookEntry, symptomId, validateSymptomText, validateWhereToLookCount, type SymptomEntry } from "./symptoms.ts";
 import { membraneBreakerCadence } from "./membrane-breaker-cadence.ts";
 import { appendAudit, type AuditQuery, makeAuditEntry, readAudit } from "./audit.ts";
 import { AutomationLog, type AutomationQuery } from "./automation-log.ts";
@@ -236,6 +242,12 @@ const REPORT_TOOL = "squad_report";
  *  when the OMP_SQUAD_DECISION_CAPTURE flag is on. Writes a source:"agent" decision to the agent's
  *  feature so future agents inherit it via the cold-start primer / squad_kb_search. */
 const RECORD_DECISION_TOOL = "squad_record_decision";
+/** Comprehension lane concern 05 ("teaching producers"): NON-blocking, same shape as
+ *  RECORD_DECISION_TOOL. Advertised/dispatched behind the SAME OMP_SQUAD_DECISION_CAPTURE flag (no new
+ *  flag invented — DESIGN.md's flag-discipline instruction) since both are teaching-content producers
+ *  that write into the same cold-start/kb-search pipeline. Writes a `SymptomEntry` when this run FIXED
+ *  a defect, phrased as the operator would observe it. */
+const RECORD_SYMPTOM_TOOL = "squad_record_symptom";
 /** cmux-research concern 03: NON-blocking, same shape as REPORT_TOOL — a bare "look here", not a gate. */
 const ATTENTION_TOOL = "squad_attention";
 
@@ -306,13 +318,40 @@ const SQUAD_HOST_TOOLS: HostToolDef[] = [
 const RECORD_DECISION_TOOL_DEF: HostToolDef = {
 	name: RECORD_DECISION_TOOL,
 	description:
-		"Record a consequential decision you made and WHY (an architecture choice, a tradeoff, an approach picked over an alternative) so future agents on this work inherit it instead of re-deciding it. Non-blocking — you keep working. Use SPARINGLY, only for genuinely load-bearing decisions, not routine steps.",
+		'Record a consequential decision you made and WHY (an architecture choice, a tradeoff, an approach picked over an alternative) so future agents on this work inherit it instead of re-deciding it. Non-blocking — you keep working. Use SPARINGLY, only for genuinely load-bearing decisions, not routine steps.\n\n' +
+		'ALSO, before you finish: if you changed how the system actually works (not just what code exists), set source:"model-delta" and record up to 3 such deltas — state what was true BEFORE and what is true NOW. Each model-delta entry REQUIRES `evidence`: one or more repo-relative files (or `file:start-end`) THIS RUN touched — an anchorless or made-up-file delta is rejected. Skip entirely when nothing architectural changed; an empty record is honest, slop is not.',
 	parameters: {
 		type: "object",
 		properties: {
-			text: { type: "string", description: "The decision and its rationale, in one or two sentences." },
+			text: { type: "string", description: "The decision and its rationale, in one or two sentences. For a model-delta, state what was true before and what is true now (min 20 chars)." },
+			source: { type: "string", enum: ["model-delta"], description: 'Optional. Set to "model-delta" to record a mental-model delta instead of a routine decision — requires `evidence`.' },
+			evidence: {
+				type: "array",
+				items: { type: "string" },
+				description: 'Required when source is "model-delta": repo-relative file paths (or `file:start-end`) this run touched, each proving the delta. Ignored for a routine decision.',
+			},
 		},
 		required: ["text"],
+	},
+};
+
+/** Advertised only when OMP_SQUAD_DECISION_CAPTURE is on, alongside RECORD_DECISION_TOOL_DEF — same
+ *  flag, no new one invented (DESIGN.md's flag-discipline instruction). */
+const RECORD_SYMPTOM_TOOL_DEF: HostToolDef = {
+	name: RECORD_SYMPTOM_TOOL,
+	description:
+		'Record a symptom card when THIS RUN FIXED a defect — phrased the way an OPERATOR would observe it (e.g. "daemon healthy but dispatch stalled"), never as the fix itself (not "added a null check in dispatch.ts"). Non-blocking. Use once per fix. `whereToLook` must be 1-5 entries, each either an existing repo-relative path (a specific file, or a directory at least two levels deep — a bare top-level directory like "src/" is rejected) or a literal `glance …` command.',
+	parameters: {
+		type: "object",
+		properties: {
+			symptom: { type: "string", description: "The defect as the operator would observe it, min 20 characters." },
+			whereToLook: {
+				type: "array",
+				items: { type: "string" },
+				description: '1-5 entries: an existing repo-relative path (file, or a directory at least two levels deep) or a `glance …` command. Bare "src/" is rejected.',
+			},
+		},
+		required: ["symptom", "whereToLook"],
 	},
 };
 
@@ -910,6 +949,9 @@ export class SquadManager extends EventEmitter {
 	 *  file best-effort. recordTransition/recordDenied append here; transitionHistory() reads it for
 	 *  GET /api/agents/:id/transitions. Constructed in the constructor (needs stateDir). */
 	private readonly transitionLog: JsonlLog<TransitionEntry>;
+	/** Operator-attention substrate (comprehension concern 01) — raw JsonlLog feed + compacted
+	 *  last-seen map, constructed ONCE here (mirrors `transitionLog` above), never per-request. */
+	private readonly attentionStore: AttentionStore;
 	private readonly traceExporter?: TraceExportQueue;
 	/** Reward disbursement provider (Tremendous / Manual). Injectable for tests; default from env. */
 	private readonly paymentProvider: PaymentProvider;
@@ -936,6 +978,7 @@ export class SquadManager extends EventEmitter {
 		this.automation = new AutomationLog(this.stateDir, { onEvent: (event) => this.emit("event", { type: "automation", event } satisfies SquadEvent) });
 		this.learningMetrics = new LearningMetrics(this.stateDir, { log: (m) => this.log("warn", `learning-metrics: ${m}`) });
 		this.transitionLog = new JsonlLog<TransitionEntry>({ path: path.join(this.stateDir, "transitions.jsonl"), log: (m) => this.log("warn", `transitions.jsonl: ${m}`) });
+		this.attentionStore = new AttentionStore({ stateDir: this.stateDir, log: (m) => this.log("warn", `attention: ${m}`) });
 		this.bin = opts.bin;
 		this.autoLand = opts.autoLand ?? false;
 		this.worktreeBaseDir = opts.worktreeBase;
@@ -1457,6 +1500,9 @@ export class SquadManager extends EventEmitter {
 		for (const o of this.opportunities) o.stop();
 		for (const p of this.residentPlanners) p.stop();
 		clearInterval(this.leaseGossipTimer);
+		// Flush the attention store's debounced last-seen-map write (comprehension concern 01) — same
+		// "only a crash may lose it" contract as the pendingPersistTimers flush above.
+		this.attentionStore.stop();
 		await this.persist();
 		// Best-effort timeline marker (#lifecycle-truth finding 4 / DESIGN's "a best-effort daemon-stop
 		// entry in stop()") — a graceful shutdown DETACHES agents (below), it does not actually stop them,
@@ -6923,6 +6969,68 @@ export class SquadManager extends EventEmitter {
 		return readAnswer(this.stateDir, id);
 	}
 
+	/** Symptom cards recorded by `squad_record_symptom`, newest first — the read surface for later
+	 *  projections (doctor's `remedy` match, `glance symptom`, fabric/⌘K search), mirroring `answers()`
+	 *  above. Nothing in concern 05's scope renders these; this is the stable entry point they'll call. */
+	symptoms(repo?: string): Promise<SymptomEntry[]> {
+		return listSymptoms(this.stateDir, { repo });
+	}
+
+	symptom(id: string): Promise<SymptomEntry | undefined> {
+		return readSymptom(this.stateDir, id);
+	}
+
+	/** The decisions currently stored on a persisted feature — the server's PATCH sanitizer merges
+	 *  client edits against these so server-authoritative fields (source/evidence/sourceRef) survive
+	 *  the webapp's full-array round-trip. Derived (not-yet-adopted) features return undefined, which
+	 *  is correct: model-deltas only ever live on persisted features (recordAgentDecision adopts
+	 *  before writing). */
+	storedFeatureDecisions(id: string): FeatureDecision[] | undefined {
+		return this.featureStore.get(id)?.decisions;
+	}
+
+	// ── operator-attention substrate (comprehension concern 01) ──────────────────────────────────
+
+	/** The repo set `actor` may name in `POST /api/attention`'s `repo` field or an unfiltered GET —
+	 *  identical derivation to `fabric()`'s own unrestricted-repos fallback (fabric.ts's
+	 *  `actorVisibleRepoSet`), so the two can never disagree about what a given actor may see. Fails
+	 *  closed: no scoped agents and no persisted features ⇒ an empty set. */
+	attentionVisibleRepos(actor: Actor): Set<string> {
+		return actorVisibleRepoSet(actor, this.list(), [...this.featureStore.values()]);
+	}
+
+	/** Whether the kill switch (`GLANCE_ATTENTION=0`) is currently set — checked live, not cached. */
+	attentionDisabled(): boolean {
+		return this.attentionStore.disabled();
+	}
+
+	/** Record one attention event. `rateLimitKey` is the caller's per-actor rate-limit bucket
+	 *  (typically `actor.id`) — never persisted. Server routes are responsible for stamping
+	 *  `viewerId` from the session (never the client body) before calling this. */
+	recordAttention(event: AttentionRecordInput, rateLimitKey: string): RecordResult {
+		return this.attentionStore.record(event, rateLimitKey);
+	}
+
+	/** Raw feed, restricted to `repos` when given. `undefined` means unrestricted; an EXPLICIT empty
+	 *  array restricts to NOTHING (a caller whose actor-visible repo set is genuinely empty passes
+	 *  `[]` on purpose — see `AttentionStore.seenMapFor`'s matching doc for why that must fail closed,
+	 *  not fall open). Telemetry only, per attention.ts's module doc; callers still owe redaction via
+	 *  `redactAttentionForActor`. */
+	attentionEvents(repos?: string[]): OperatorAttentionEvent[] {
+		const events = this.attentionStore.recentEvents();
+		if (repos === undefined) return events;
+		if (repos.length === 0) return [];
+		const keys = new Set(repos.map(normalizeRepoPath));
+		return events.filter((e) => keys.has(normalizeRepoPath(e.repo)));
+	}
+
+	/** The compacted last-seen map, restricted to `repos` (`undefined` ⇒ unrestricted; `[]` ⇒
+	 *  nothing — see `attentionEvents` above) — fog's read path. Callers still owe redaction via
+	 *  `redactSeenMapForActor`. */
+	attentionSeen(repos?: string[]): SeenMap {
+		return this.attentionStore.seenMapFor(repos);
+	}
+
 	/**
 	 * Persist an answer unit's final message. Best-effort and idempotent: a unit may end several turns
 	 * (a steer, a follow-up question), and the LAST one is the answer — re-answering overwrites, because
@@ -7821,9 +7929,10 @@ export class SquadManager extends EventEmitter {
 		// absent descriptor (workflow/flue kinds) keeps today's behavior — host tools advertised.
 		const caps = (rec.harness ?? this.harnessFor(rec.options))?.capabilities;
 		if (caps && !caps.hostTools) return;
-		// Decision capture is flag-gated (default off): advertise squad_record_decision only when on,
-		// so a fresh agent's tool list matches what onHostTool will actually dispatch.
-		const tools = isOn(learningFlags(rec.dto.id).decisionCapture) ? [...SQUAD_HOST_TOOLS, RECORD_DECISION_TOOL_DEF] : SQUAD_HOST_TOOLS;
+		// Decision capture is flag-gated (default off): advertise squad_record_decision (+ its
+		// squad_record_symptom sibling, same flag — concern 05) only when on, so a fresh agent's tool
+		// list matches what onHostTool will actually dispatch.
+		const tools = isOn(learningFlags(rec.dto.id).decisionCapture) ? [...SQUAD_HOST_TOOLS, RECORD_DECISION_TOOL_DEF, RECORD_SYMPTOM_TOOL_DEF] : SQUAD_HOST_TOOLS;
 		try {
 			rec.agent.setHostTools?.(tools);
 		} catch (err) {
@@ -7850,6 +7959,15 @@ export class SquadManager extends EventEmitter {
 			// hiding the tool while a carried-over / resumed / guessed call still writes decisions.
 			if (isOn(learningFlags(rec.dto.id).decisionCapture)) {
 				void this.handleRecordDecisionTool(rec, call);
+			} else {
+				rec.agent.respondHostTool(call.id, "decision capture is disabled", true);
+			}
+			return;
+		}
+		if (call.toolName === RECORD_SYMPTOM_TOOL) {
+			// Same flag as RECORD_DECISION_TOOL — see the comment there.
+			if (isOn(learningFlags(rec.dto.id).decisionCapture)) {
+				void this.handleRecordSymptomTool(rec, call);
 			} else {
 				rec.agent.respondHostTool(call.id, "decision capture is disabled", true);
 			}
@@ -7955,31 +8073,51 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
-	 * squad_record_decision (research-tencentdb-agent-memory): capture a consequential decision into the
-	 * agent's feature as a source:"agent" FeatureDecision, so it surfaces in the cold-start primer /
-	 * squad_kb_search for future agents. NON-blocking like handleReportTool — responds immediately,
-	 * never setPending. Best-effort: any failure is reported to the agent + warn-logged, never thrown.
-	 * Idempotent: a normalized-text match against the feature's existing decisions is a no-op.
+	 * squad_record_decision (research-tencentdb-agent-memory; model-delta extension: comprehension lane
+	 * concern 05 "teaching producers"): capture a consequential decision into the agent's feature as a
+	 * FeatureDecision, so it surfaces in the cold-start primer / squad_kb_search for future agents.
+	 * NON-blocking like handleReportTool — responds immediately, never setPending. Best-effort: any
+	 * failure is reported to the agent + warn-logged, never thrown. Idempotent: a normalized-text match
+	 * against the feature's existing decisions is a no-op.
+	 *
+	 * `source:"model-delta"` is the teaching-content path: it REQUIRES `evidence` naming a file this run
+	 * actually touched (`validateModelDelta`, decision-evidence.ts) — an anchorless or fabricated-anchor
+	 * delta is rejected with a tool error naming the violated rule, BEFORE anything is written. This is
+	 * the only mechanical anti-slop pressure on the lane (DESIGN.md "Delta quality floor").
 	 */
 	private async handleRecordDecisionTool(rec: AgentRecord, call: { id: string; arguments: unknown }): Promise<void> {
 		try {
 			const args = call.arguments && typeof call.arguments === "object" ? (call.arguments as Record<string, unknown>) : {};
 			const text = typeof args.text === "string" ? args.text.trim() : "";
 			if (!text) {
-				rec.agent.respondHostTool(call.id, `usage: ${RECORD_DECISION_TOOL}({ text: string })`, true);
+				rec.agent.respondHostTool(call.id, `usage: ${RECORD_DECISION_TOOL}({ text: string, source?: "model-delta", evidence?: string[] })`, true);
 				return;
 			}
+			const isModelDelta = args.source === "model-delta";
+			const evidence = Array.isArray(args.evidence) ? args.evidence.filter((e): e is string => typeof e === "string" && e.trim().length > 0) : undefined;
 			const featureId = rec.dto.featureId;
 			if (!featureId) {
 				rec.agent.respondHostTool(call.id, "no feature is attached to this agent, so the decision was not recorded", true);
 				return;
 			}
+			if (isModelDelta) {
+				// Live blast-radius since fork (committed AND working-tree) — the SAME computation
+				// finalizeRun uses for the persisted receipt's filesTouched, so mid-run validation and a
+				// completed receipt agree on what counts as "this run touched".
+				const filesTouched = await this.runFilesTouched(rec);
+				const check = validateModelDelta(text, evidence, filesTouched);
+				if (!check.ok) {
+					rec.agent.respondHostTool(call.id, `model-delta rejected (${check.rule}): ${check.message}`, true);
+					return;
+				}
+			}
 			const decision: FeatureDecision = {
 				id: randomUUID(),
 				text,
-				source: "agent",
+				source: isModelDelta ? "model-delta" : "agent",
 				createdAt: Date.now(),
 				sourceRef: { agentId: rec.dto.id, runId: rec.run?.snapshot().runId },
+				...(isModelDelta ? { evidence } : {}),
 			};
 			// Atomic, adopt-aware append (resolves plan-derived features + can't clobber a concurrent capture).
 			const outcome = await this.recordAgentDecision(featureId, decision, rec.dto.repo);
@@ -7994,9 +8132,9 @@ export class SquadManager extends EventEmitter {
 			// Durably written. Respond success FIRST so a throw in the cosmetic post-steps below can never
 			// flip an already-persisted decision to a "failed" reply (which would make the agent retry).
 			this.learningMetrics.record("decision-captured", 1, { flag: "decision-capture", variant: learningFlags(rec.dto.id).decisionCapture });
-			rec.agent.respondHostTool(call.id, "decision recorded — future agents on this work will inherit it");
+			rec.agent.respondHostTool(call.id, isModelDelta ? "model-delta recorded — future agents on this work will inherit it" : "decision recorded — future agents on this work will inherit it");
 			try {
-				this.append(rec, "system", `📝 decision recorded: ${truncate(text, 200)}`, { status: "ok", tool: { callId: call.id, name: RECORD_DECISION_TOOL, args: call.arguments, argsText: safeJson(call.arguments) } });
+				this.append(rec, "system", `📝 ${isModelDelta ? "model-delta" : "decision"} recorded: ${truncate(text, 200)}`, { status: "ok", tool: { callId: call.id, name: RECORD_DECISION_TOOL, args: call.arguments, argsText: safeJson(call.arguments) } });
 				void this.recordAudit(agentActor(rec.dto.id), "decision.recorded", featureId, "ok", truncate(text, 120));
 			} catch (postErr) {
 				this.log("warn", `record-decision post-step failed for ${rec.dto.name} (decision was saved): ${String(postErr)}`);
@@ -8008,6 +8146,74 @@ export class SquadManager extends EventEmitter {
 				/* respond best-effort */
 			}
 			this.log("warn", `record-decision failed for ${rec.dto.name}: ${String(err)}`);
+		}
+	}
+
+	/**
+	 * squad_record_symptom (comprehension lane concern 05 "teaching producers"): record a symptom card
+	 * when THIS RUN fixed a defect, phrased as the operator would observe it. Producer-first, like
+	 * `squad_record_decision` — non-blocking, responds immediately, never setPending. The mechanical
+	 * floor (`validateSymptomText`, `validateWhereToLookCount`, `classifyWhereToLookEntry` in
+	 * symptoms.ts) rejects a too-short symptom, a wrong-count `whereToLook`, or any entry that isn't
+	 * either an existing repo-relative path (not a bare top-level directory) or a `glance …` command —
+	 * with a tool error naming the violated rule, before anything is written.
+	 */
+	private async handleRecordSymptomTool(rec: AgentRecord, call: { id: string; arguments: unknown }): Promise<void> {
+		try {
+			const args = call.arguments && typeof call.arguments === "object" ? (call.arguments as Record<string, unknown>) : {};
+			const symptom = typeof args.symptom === "string" ? args.symptom.trim() : "";
+			const whereToLook = Array.isArray(args.whereToLook) ? args.whereToLook.filter((e): e is string => typeof e === "string") : [];
+			if (!symptom || whereToLook.length === 0) {
+				rec.agent.respondHostTool(call.id, `usage: ${RECORD_SYMPTOM_TOOL}({ symptom: string, whereToLook: string[] })`, true);
+				return;
+			}
+			const textCheck = validateSymptomText(symptom);
+			if (!textCheck.ok) {
+				rec.agent.respondHostTool(call.id, `symptom rejected (${textCheck.rule}): ${textCheck.message}`, true);
+				return;
+			}
+			const countCheck = validateWhereToLookCount(whereToLook);
+			if (!countCheck.ok) {
+				rec.agent.respondHostTool(call.id, `symptom rejected (${countCheck.rule}): ${countCheck.message}`, true);
+				return;
+			}
+			for (const entry of whereToLook) {
+				const kind = await statWhereToLookEntry(rec.dto.repo, entry);
+				const entryCheck = classifyWhereToLookEntry(entry, kind);
+				if (!entryCheck.ok) {
+					rec.agent.respondHostTool(call.id, `symptom rejected (${entryCheck.rule}): ${entryCheck.message}`, true);
+					return;
+				}
+			}
+			const now = Date.now();
+			const entry: SymptomEntry = {
+				id: symptomId(symptom, rec.dto.id, new Date(now)),
+				symptom,
+				whereToLook,
+				repo: rec.dto.repo,
+				fixedBy: { agentId: rec.dto.id, runId: rec.run?.snapshot().runId },
+				landedAt: now,
+			};
+			const saved = await saveSymptom(this.stateDir, entry);
+			if (!saved) {
+				rec.agent.respondHostTool(call.id, "failed to record symptom — the daemon's disk write did not succeed", true);
+				return;
+			}
+			this.learningMetrics.record("symptom-captured", 1, { flag: "decision-capture", variant: learningFlags(rec.dto.id).decisionCapture });
+			rec.agent.respondHostTool(call.id, "symptom recorded");
+			try {
+				this.append(rec, "system", `📝 symptom recorded: ${truncate(symptom, 200)}`, { status: "ok", tool: { callId: call.id, name: RECORD_SYMPTOM_TOOL, args: call.arguments, argsText: safeJson(call.arguments) } });
+				void this.recordAudit(agentActor(rec.dto.id), "symptom.recorded", entry.id, "ok", truncate(symptom, 120));
+			} catch (postErr) {
+				this.log("warn", `record-symptom post-step failed for ${rec.dto.name} (symptom was saved): ${String(postErr)}`);
+			}
+		} catch (err) {
+			try {
+				rec.agent.respondHostTool(call.id, `failed to record symptom: ${String(err)}`, true);
+			} catch {
+				/* respond best-effort */
+			}
+			this.log("warn", `record-symptom failed for ${rec.dto.name}: ${String(err)}`);
 		}
 	}
 

@@ -3,7 +3,7 @@ import { ChevronLeft, ChevronRight, Copy, X, Plus, Box, CheckCircle2, Search, Su
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { MarkdownComponents, PlanBlockContext } from './PlanBlocks';
-import { AgentSourceBadge } from './AgentSourceBadge';
+import { AgentSourceBadge, ModelDeltaBadge } from './AgentSourceBadge';
 import { TaskProperties } from './TaskProperties';
 import { AssigneesEditor } from './AssigneesEditor';
 import { ProofProvenancePanel } from './ProofProvenancePanel';
@@ -1777,7 +1777,7 @@ export const TaskDetail = () => {
 
               <div className="mb-6">
                 <div className="flex items-center justify-between border-b border-gray-100 dark:border-gray-800 pb-2 mb-3"><div className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest">Decisions</div></div>
-                <div className="space-y-2 mb-3">{task.decisions.map(decision => <div key={decision.id} className="text-sm text-gray-700 dark:text-gray-300 border border-gray-200 dark:border-gray-800 rounded p-3"><div>{decision.text}</div>{decision.source === 'agent' && <AgentSourceBadge className="mt-1" />}</div>)}</div>
+                <div className="space-y-2 mb-3">{task.decisions.map(decision => <div key={decision.id} className="text-sm text-gray-700 dark:text-gray-300 border border-gray-200 dark:border-gray-800 rounded p-3"><div>{decision.text}</div>{decision.source === 'agent' && <AgentSourceBadge className="mt-1" />}{decision.source === 'model-delta' && (<><ModelDeltaBadge className="mt-1" />{!!decision.evidence?.length && <ul className="mt-1 list-disc pl-4 text-xs text-gray-500 dark:text-gray-400">{decision.evidence.map((e, i) => <li key={i} className="font-mono">{e}</li>)}</ul>}</>)}</div>)}</div>
                 <div className="flex gap-2"><input value={newDecisionText} onChange={(e) => setNewDecisionText(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && addDecision()} placeholder="Record a decision for future agents..." className="flex-1 text-sm bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded px-3 py-2" /><button onClick={addDecision} className="px-3 py-2 rounded bg-gray-900 text-white dark:bg-gray-100 dark:text-gray-900 text-xs"><Plus className="w-3 h-3 inline" /> Add</button></div>
               </div>
 
