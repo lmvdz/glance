@@ -6,6 +6,13 @@
  * Enforce mode (a hard park/deny) is deliberately deferred: it needs an O(1) $ ledger, and `readAll-
  * Receipts` is an async full scan, so v1 keeps the projection opt-in and off the blocking path.
  *
+ * adw-factory-borrows concern 08 closes that deferral's prerequisite: `projectCost` now has an O(1)
+ * fast path over `cost-aggregate.ts`'s lane-keyed rolling doc (`(model, tier, lane)`, with a
+ * lane-agnostic fallback per DESIGN.md), falling back to the ORIGINAL full-scan computation below
+ * unchanged whenever the aggregate can't yet answer (cold cache, thin sample) — so this concern makes
+ * NO behavior change to verdicts, only a new data shape underneath (same shadow posture; enforce
+ * itself is a later concern's flip).
+ *
  * Two guards keep a noisy signal quiet: no verdict below `OMP_SQUAD_COST_MIN_SAMPLE` attempts (thin
  * history stays silent), and no verdict at all unless the operator set a ceiling `OMP_SQUAD_COST_MAX_
  * PER_CHANGE` (> 0). Default `OMP_SQUAD_COST_GATE=off` ⇒ nothing runs.
@@ -15,6 +22,15 @@ import { buildScoreboard } from "./attribution-scoreboard.ts";
 import { envInt, envNumber } from "./config.ts";
 import { type ComplexityTier, modelFamily, modelOutcomes, readModelOutcomes } from "./model-outcomes.ts";
 import { readAllReceipts } from "./receipts.ts";
+import type { WorkLane } from "./lane.ts";
+import {
+	buildCostAggregateFromReceipts,
+	costAggregateNeedsRebuild,
+	type CostAggregateDoc,
+	persistCostAggregateDoc,
+	projectFromCostAggregate,
+	readCostAggregateDoc,
+} from "./cost-aggregate.ts";
 
 export type CostGateMode = "off" | "shadow" | "enforce";
 
@@ -35,13 +51,37 @@ export interface CostProjection {
 	costPerLandedChange: number | null;
 }
 
-/** Project the expected cost/land-rate for a (model, tier) from existing history. Never throws. */
-export async function projectCost(stateDir: string, model: string | undefined, tier: ComplexityTier): Promise<CostProjection> {
+/**
+ * Full-scan rebuild wrapper (adw-factory-borrows concern 08): fetch receipts + the model-outcomes
+ * ledger, replay them through `cost-aggregate.ts`'s pure builder, and persist the result. Invoked from
+ * `projectCost`'s fast path on first run or schema-version mismatch (`costAggregateNeedsRebuild`) —
+ * receipts remain the source of truth; the aggregate doc is a derived cache, corruption-safe by
+ * rebuild. Lives here (not in cost-aggregate.ts) so that module stays receipts.ts-independent (see
+ * its module doc — avoids an import cycle with `receipts.ts`'s own `recordCostAttempt` call).
+ */
+export async function rebuildCostAggregate(stateDir: string): Promise<CostAggregateDoc> {
+	const receipts = await readAllReceipts(stateDir);
+	const doc = buildCostAggregateFromReceipts(receipts, readModelOutcomes(stateDir));
+	persistCostAggregateDoc(stateDir, doc);
+	return doc;
+}
+
+/** Project the expected cost/land-rate for a (model, tier[, lane]) from existing history. Never throws. */
+export async function projectCost(stateDir: string, model: string | undefined, tier: ComplexityTier, lane?: WorkLane): Promise<CostProjection> {
 	const oc = modelOutcomes(stateDir, model, tier);
 	const sample = oc.landed + oc.rejected;
 	let landRate: number | null = oc.landed + oc.rejected > 0 ? oc.landed / (oc.landed + oc.rejected) : null;
 	let costPerLandedChange: number | null = null;
 	try {
+		const minSample = envInt("OMP_SQUAD_COST_MIN_SAMPLE", 5);
+		const doc = costAggregateNeedsRebuild(stateDir) ? await rebuildCostAggregate(stateDir) : readCostAggregateDoc(stateDir);
+		const fast = projectFromCostAggregate(doc, model, tier, lane, minSample);
+		if (fast) {
+			return { model: model ?? "unknown", tier, sample: fast.sample, landRate: fast.landRate ?? landRate, costPerLandedChange: fast.costPerLandedChange };
+		}
+		// Fast path missed (aggregate present but too thin for either the lane-keyed or lane-agnostic
+		// cell) — fall back to the ORIGINAL full-scan computation, unchanged, so a thin aggregate never
+		// silently regresses a verdict the old path could already make.
 		const board = buildScoreboard(await readAllReceipts(stateDir), readModelOutcomes(stateDir));
 		const key = modelFamily(model);
 		const score = board.models.find((m) => modelFamily(m.model) === key);
@@ -77,11 +117,16 @@ export function costGateVerdict(p: CostProjection): CostVerdict | undefined {
 }
 
 /** Shadow entry point for the caller: project + emit a warn line if the gate would fire. Fire-and-
- *  forget safe (never throws, never blocks); no-op unless the gate is on. */
-export async function shadowCostCheck(stateDir: string, model: string | undefined, tier: ComplexityTier, log: (line: string) => void): Promise<void> {
+ *  forget safe (never throws, never blocks); no-op unless the gate is on. `lane` is a trailing
+ *  optional parameter (not inserted before `log`) so the EXISTING call site in `squad-manager.ts`
+ *  (`shadowCostCheck(this.stateDir, opts.model, tierOf(opts.thinking), (line) => this.log("warn",
+ *  line))`) keeps compiling unchanged — passing `resolvedLane` there is a follow-up wire outside this
+ *  concern's declared scope (see cost-aggregate.ts's rollout note); omitting it here just means the
+ *  projection falls back to the lane-agnostic cell, identical to today's behavior. */
+export async function shadowCostCheck(stateDir: string, model: string | undefined, tier: ComplexityTier, log: (line: string) => void, lane?: WorkLane): Promise<void> {
 	if (costGateMode() === "off") return;
 	try {
-		const verdict = costGateVerdict(await projectCost(stateDir, model, tier));
+		const verdict = costGateVerdict(await projectCost(stateDir, model, tier, lane));
 		if (verdict) log(verdict.line);
 	} catch {
 		/* shadow check must never affect a spawn */

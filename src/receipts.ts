@@ -8,8 +8,10 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentStatus, ReceiptRollup, RunReceipt } from "./types.ts";
 import type { WorkLane } from "./lane.ts";
+import type { ComplexityTier } from "./model-outcomes.ts";
 import { shouldKeepSpans, SpanCollector, traceMaxSpans, traceSampleRatio } from "./spans.ts";
 import { getStorageBackend } from "./dal/storage.ts";
+import { recordCostAttempt } from "./cost-aggregate.ts";
 
 /** Assistant usage shape we care about (subset of pi-catalog `Usage`). */
 interface AssistantUsage {
@@ -43,6 +45,9 @@ export interface RunSeed {
 	/** Resolved work lane (adw-factory-borrows concern 02), carried into the seed so a restarted-and-
 	 *  resumed run's receipt stamps the SAME lane the whole run, not whatever is live on the record. */
 	lane?: WorkLane;
+	/** Complexity tier (adw-factory-borrows concern 08's cost-aggregate key, alongside `lane`) —
+	 *  absent until a spawn caller stamps it (see `types.ts`'s `RunReceipt.tier` doc). */
+	tier?: ComplexityTier;
 }
 
 /** Marker prefix for `AgentProfile.capabilities` tokens that request a PROMPT-DELIVERED discipline
@@ -220,6 +225,7 @@ export class RunAccumulator {
 			harness: this.seed.harness ?? "omp",
 			efficiencyFlags: this.seed.efficiencyFlags,
 			lane: this.seed.lane,
+			tier: this.seed.tier,
 		};
 		receipt.spans = tools ? this.spans.snapshot(opts.maxSpans ?? traceMaxSpans()) : this.spans.structuralSnapshot();
 		receipt.sampled = !tools && this.spans.hasToolSpans();
@@ -280,6 +286,15 @@ export async function appendReceipt(baseDir: string, receipt: RunReceipt): Promi
 	// and rides whatever substrate is configured. The read path (readReceipts) is per-line tolerant, so
 	// fsync only narrows the torn-tail window.
 	await getStorageBackend().appendDurable(receiptPath(baseDir, receipt.agentId), `${JSON.stringify(receipt)}\n`);
+	// Lane-keyed cost aggregate (adw-factory-borrows concern 08): the durable JSONL line above is the
+	// source of truth; this is a best-effort derived-cache update so `cost-gate.ts`'s O(1) fast path
+	// stays current — a cache-write failure must never surface as a receipt-append failure (the cache
+	// is corruption-safe by rebuild; see cost-aggregate.ts's module doc).
+	try {
+		recordCostAttempt(baseDir, receipt.model, receipt.tier, receipt.lane, receipt.costUsd ?? 0, receipt.endedAt ?? receipt.startedAt);
+	} catch {
+		/* best-effort: see above */
+	}
 }
 
 export async function readReceipts(baseDir: string, agentId: string): Promise<RunReceipt[]> {
