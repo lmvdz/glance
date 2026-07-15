@@ -40,6 +40,10 @@ import type { WorkflowDefinition } from "./workflow-catalog.ts";
 import { Dispatcher } from "./dispatch.ts";
 import { openDispatchLedger } from "./dispatch-ledger.ts";
 import { type Answer, answerBrief, listAnswers, readAnswer, saveAnswer } from "./answers.ts";
+// Aliased: `types.ts` already exports an UNRELATED `AttentionEvent` (an agent's own notify signal,
+// used pervasively below via `AgentDTO.attentionEvents`) — importing this module's same-named type
+// bare would collide. `OperatorAttentionEvent` disambiguates at every use site in this file.
+import { AttentionStore, type AttentionEvent as OperatorAttentionEvent, type AttentionRecordInput, type RecordResult, type SeenMap } from "./attention.ts";
 import { errText } from "./err-text.ts";
 import { isConsolePrompt, stripConsolePrompt } from "./console-prompt.ts";
 import { openRemovedLedger, type RemovedLedger } from "./removed-ledger.ts";
@@ -83,7 +87,7 @@ import { type Judge, validatorGate } from "./validator.ts";
 import { evaluateCompliance, type ComplianceFinding } from "./compliance.ts";
 import { reapDeadSessions, releaseSession, sweepLeases } from "./leases.ts";
 import { agentActor, scopeFor } from "./agent-scope.ts";
-import { buildFabricSnapshot, loadScoutFacts, type FabricSnapshot } from "./fabric.ts";
+import { actorVisibleRepoSet, buildFabricSnapshot, loadScoutFacts, type FabricSnapshot } from "./fabric.ts";
 import { buildContextPrimer, searchFabric, type KbDocType } from "./fabric-search.ts";
 import { sweepPresence, who } from "./presence.ts";
 import { harnessEventDecision } from "./harness-hooks.ts";
@@ -945,6 +949,9 @@ export class SquadManager extends EventEmitter {
 	 *  file best-effort. recordTransition/recordDenied append here; transitionHistory() reads it for
 	 *  GET /api/agents/:id/transitions. Constructed in the constructor (needs stateDir). */
 	private readonly transitionLog: JsonlLog<TransitionEntry>;
+	/** Operator-attention substrate (comprehension concern 01) — raw JsonlLog feed + compacted
+	 *  last-seen map, constructed ONCE here (mirrors `transitionLog` above), never per-request. */
+	private readonly attentionStore: AttentionStore;
 	private readonly traceExporter?: TraceExportQueue;
 	/** Reward disbursement provider (Tremendous / Manual). Injectable for tests; default from env. */
 	private readonly paymentProvider: PaymentProvider;
@@ -971,6 +978,7 @@ export class SquadManager extends EventEmitter {
 		this.automation = new AutomationLog(this.stateDir, { onEvent: (event) => this.emit("event", { type: "automation", event } satisfies SquadEvent) });
 		this.learningMetrics = new LearningMetrics(this.stateDir, { log: (m) => this.log("warn", `learning-metrics: ${m}`) });
 		this.transitionLog = new JsonlLog<TransitionEntry>({ path: path.join(this.stateDir, "transitions.jsonl"), log: (m) => this.log("warn", `transitions.jsonl: ${m}`) });
+		this.attentionStore = new AttentionStore({ stateDir: this.stateDir, log: (m) => this.log("warn", `attention: ${m}`) });
 		this.bin = opts.bin;
 		this.autoLand = opts.autoLand ?? false;
 		this.worktreeBaseDir = opts.worktreeBase;
@@ -1492,6 +1500,9 @@ export class SquadManager extends EventEmitter {
 		for (const o of this.opportunities) o.stop();
 		for (const p of this.residentPlanners) p.stop();
 		clearInterval(this.leaseGossipTimer);
+		// Flush the attention store's debounced last-seen-map write (comprehension concern 01) — same
+		// "only a crash may lose it" contract as the pendingPersistTimers flush above.
+		this.attentionStore.stop();
 		await this.persist();
 		// Best-effort timeline marker (#lifecycle-truth finding 4 / DESIGN's "a best-effort daemon-stop
 		// entry in stop()") — a graceful shutdown DETACHES agents (below), it does not actually stop them,
@@ -6967,6 +6978,48 @@ export class SquadManager extends EventEmitter {
 
 	symptom(id: string): Promise<SymptomEntry | undefined> {
 		return readSymptom(this.stateDir, id);
+	}
+
+	// ── operator-attention substrate (comprehension concern 01) ──────────────────────────────────
+
+	/** The repo set `actor` may name in `POST /api/attention`'s `repo` field or an unfiltered GET —
+	 *  identical derivation to `fabric()`'s own unrestricted-repos fallback (fabric.ts's
+	 *  `actorVisibleRepoSet`), so the two can never disagree about what a given actor may see. Fails
+	 *  closed: no scoped agents and no persisted features ⇒ an empty set. */
+	attentionVisibleRepos(actor: Actor): Set<string> {
+		return actorVisibleRepoSet(actor, this.list(), [...this.featureStore.values()]);
+	}
+
+	/** Whether the kill switch (`GLANCE_ATTENTION=0`) is currently set — checked live, not cached. */
+	attentionDisabled(): boolean {
+		return this.attentionStore.disabled();
+	}
+
+	/** Record one attention event. `rateLimitKey` is the caller's per-actor rate-limit bucket
+	 *  (typically `actor.id`) — never persisted. Server routes are responsible for stamping
+	 *  `viewerId` from the session (never the client body) before calling this. */
+	recordAttention(event: AttentionRecordInput, rateLimitKey: string): RecordResult {
+		return this.attentionStore.record(event, rateLimitKey);
+	}
+
+	/** Raw feed, restricted to `repos` when given. `undefined` means unrestricted; an EXPLICIT empty
+	 *  array restricts to NOTHING (a caller whose actor-visible repo set is genuinely empty passes
+	 *  `[]` on purpose — see `AttentionStore.seenMapFor`'s matching doc for why that must fail closed,
+	 *  not fall open). Telemetry only, per attention.ts's module doc; callers still owe redaction via
+	 *  `redactAttentionForActor`. */
+	attentionEvents(repos?: string[]): OperatorAttentionEvent[] {
+		const events = this.attentionStore.recentEvents();
+		if (repos === undefined) return events;
+		if (repos.length === 0) return [];
+		const keys = new Set(repos.map(normalizeRepoPath));
+		return events.filter((e) => keys.has(normalizeRepoPath(e.repo)));
+	}
+
+	/** The compacted last-seen map, restricted to `repos` (`undefined` ⇒ unrestricted; `[]` ⇒
+	 *  nothing — see `attentionEvents` above) — fog's read path. Callers still owe redaction via
+	 *  `redactSeenMapForActor`. */
+	attentionSeen(repos?: string[]): SeenMap {
+		return this.attentionStore.seenMapFor(repos);
 	}
 
 	/**

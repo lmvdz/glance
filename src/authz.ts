@@ -108,5 +108,11 @@ export function restActionTier(method: string, pathname: string): Role {
 	// The route additionally scope-gates writes to a daemon-known workspace and refuses DB mode.
 	if (pathname === "/api/presence" || pathname === "/api/leases") return method === "GET" ? "viewer" : "operator";
 	if (pathname === "/api/auth/check" || pathname.startsWith("/api/push/")) return "viewer";
+	// Operator-attention substrate (comprehension concern 01): recording "I looked at this" is not
+	// operational driving — the coarse mutation=operator default would blind fog to every non-operator
+	// viewer's own attention, which defeats the point of a per-viewer signal. Explicit viewer tier for
+	// BOTH the write and the reads (privacy is enforced by `redactAttentionForActor`/
+	// `redactSeenMapForActor`, not by the RBAC tier — registered here anyway per DESIGN.md).
+	if (pathname === "/api/attention" || pathname === "/api/attention/seen") return "viewer";
 	return method === "GET" ? "viewer" : "operator";
 }

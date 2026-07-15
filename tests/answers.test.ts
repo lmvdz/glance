@@ -65,6 +65,27 @@ test("a durable answer round-trips, and is listed newest-first", async () => {
 	expect((await listAnswers(dir, { repo: "/other" })).length).toBe(0);
 });
 
+/**
+ * Regression (comprehension concern 01): `listAnswers`'s repo filter used a raw `a.repo !==
+ * opts.repo` compare — the exact bug class the fabric leak incident already fixed for every other
+ * repo-scoped read (fabric.ts's `repoAdmitter`). Two callers spelling the same repo differently
+ * (a trailing slash, an un-normalized segment) made an answer invisible to a query for its own repo
+ * — live cross-tenant-class, since a DB-mode org boundary is exactly this kind of string-identity
+ * mismatch away from silently admitting or dropping the wrong tenant's data.
+ */
+test("listAnswers matches a repo filter through normalizeRepoPath, not raw string equality", async () => {
+	const dir = await tmpDir();
+	await saveAnswer(dir, { id: "a1", question: "q", repo: "/srv/app/", markdown: "m", askedAt: 1 });
+
+	// A trailing slash on the STORED repo must not hide the answer from a query without one.
+	expect((await listAnswers(dir, { repo: "/srv/app" })).map((a) => a.id)).toEqual(["a1"]);
+	// And the reverse: a trailing slash on the QUERY must not hide an answer stored without one.
+	await saveAnswer(dir, { id: "a2", question: "q2", repo: "/srv/other", markdown: "m2", askedAt: 2 });
+	expect((await listAnswers(dir, { repo: "/srv/other/" })).map((a) => a.id)).toEqual(["a2"]);
+	// A genuinely different repo still filters out, unchanged.
+	expect((await listAnswers(dir, { repo: "/srv/unrelated" })).length).toBe(0);
+});
+
 test("a missing or corrupt answer reads as absent — never a crashed daemon", async () => {
 	const dir = await tmpDir();
 	expect(await readAnswer(dir, "nope")).toBeUndefined();

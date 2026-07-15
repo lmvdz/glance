@@ -34,6 +34,7 @@ import {
 	AnnotationCreateBodySchema,
 	AnnotationSendBodySchema,
 	AssigneesBodySchema,
+	AttentionEventBodySchema,
 	CapabilityInstallBodySchema,
 	CapabilityInstallPatchBodySchema,
 	CapabilityInstallRunBodySchema,
@@ -85,6 +86,8 @@ import { planVoteGateOpen, tallyPlanVoteRound } from "./plan-votes.ts";
 import { hardenedGit } from "./git-harden.ts";
 import { searchFabric, type KbDocType } from "./fabric-search.ts";
 import type { FabricSnapshot } from "./fabric.ts";
+import { redactAttentionForActor, redactSeenMapForActor } from "./attention.ts";
+import { normalizeRepoPath } from "./project-registry.ts";
 import { readAudit, type AuditQuery } from "./audit.ts";
 import type { AutomationEvent, AutomationLoop, AutomationQuery, AutomationRollupRow } from "./automation-log.ts";
 import { learningFlags, type MetricName, type MetricRollupRow } from "./metrics.ts";
@@ -1730,6 +1733,47 @@ export class SquadServer {
 			} catch (err) {
 				return new Response(errText(err), { status: 400 });
 			}
+		}
+		// Operator-attention substrate (comprehension concern 01): a durable, tenant-scoped record of
+		// what the human has actually looked at. `viewerId`/`at` are stamped HERE, server-side, from the
+		// same `session`-derived identity `featureAuthor` above uses — never accepted from the client
+		// body (a client-supplied viewerId would let any actor impersonate another's attention, and a
+		// client-supplied `at` would let a flood backdate the seen map). `isAdmin` for redaction is the
+		// SAME `role` this request already resolved above, not re-derived.
+		if (url.pathname === "/api/attention" && req.method === "POST") {
+			if (manager.attentionDisabled()) return Response.json({ ok: false, disabled: true });
+			const decoded = decodeBody(AttentionEventBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response("expected { kind, repo }", { status: 400 });
+			const body = decoded.success;
+			// Fail CLOSED: validated against the actor-visible repo set the same way buildFabricSnapshot
+			// derives it (fabric.ts's `actorVisibleRepoSet`) — an actor with no derivable repos (no live
+			// agents, no persisted features) rejects EVERY repo, never falls open to "unrestricted".
+			if (!manager.attentionVisibleRepos(actor).has(normalizeRepoPath(body.repo))) return new Response("unknown repo", { status: 400 });
+			const viewerId = session ? actor.id : undefined;
+			const result = manager.recordAttention({ kind: body.kind, repo: body.repo, file: body.file, agentId: body.agentId, answerId: body.answerId, prNumber: body.prNumber, viewerId }, actor.id);
+			if (!result.ok && result.reason === "rate-limited") return new Response("rate limited", { status: 429 });
+			return Response.json({ ok: result.ok });
+		}
+		if (url.pathname === "/api/attention" && req.method === "GET") {
+			if (manager.attentionDisabled()) return Response.json({ disabled: true });
+			const visible = manager.attentionVisibleRepos(actor);
+			const repoParam = url.searchParams.get("repo");
+			// A foreign/unresolvable `?repo=` reads as "nothing" rather than a 400 — GETs are lenient
+			// (module doc: only the POST fail-closes loudly), but never leak a repo outside the actor's
+			// own visible set just because the query string named one.
+			const repos = repoParam ? (visible.has(normalizeRepoPath(repoParam)) ? [repoParam] : []) : [...visible];
+			const events = manager.attentionEvents(repos);
+			const redacted = redactAttentionForActor(events, { viewerId: session ? actor.id : undefined, isAdmin: roleAtLeast(role, "admin") });
+			return Response.json({ events: redacted });
+		}
+		if (url.pathname === "/api/attention/seen" && req.method === "GET") {
+			if (manager.attentionDisabled()) return Response.json({ disabled: true });
+			const visible = manager.attentionVisibleRepos(actor);
+			const repoParam = url.searchParams.get("repo");
+			const repos = repoParam ? (visible.has(normalizeRepoPath(repoParam)) ? [repoParam] : []) : [...visible];
+			const seen = manager.attentionSeen(repos);
+			const redacted = redactSeenMapForActor(seen, { viewerId: session ? actor.id : undefined, isAdmin: roleAtLeast(role, "admin") });
+			return Response.json({ seen: redacted });
 		}
 		if (url.pathname === "/api/projects" && req.method === "GET") return Response.json(manager.projects());
 		// Add a repo to the workspace. Admin-tiered in authz.ts: this names a path the daemon will later

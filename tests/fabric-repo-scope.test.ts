@@ -22,9 +22,9 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { writeDigest } from "../src/digest.ts";
-import { buildFabricSnapshot } from "../src/fabric.ts";
+import { actorVisibleRepoSet, buildFabricSnapshot } from "../src/fabric.ts";
 import { appendReceipt } from "../src/receipts.ts";
-import type { Actor, AgentDTO } from "../src/types.ts";
+import type { Actor, AgentDTO, PersistedFeature } from "../src/types.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -138,4 +138,42 @@ test("a reused agent id cannot smuggle repo B's digest into a repo-A snapshot", 
 
 	const b = await snap(dir, [], ["/srv/beta"]);
 	expect(b.digests.map((d) => d.source.agentId)).toEqual(["x"]); // and it IS visible from repo B
+});
+
+/**
+ * `actorVisibleRepoSet` (comprehension concern 01): the standalone repo-derivation `POST
+ * /api/attention` validates against, without building a whole snapshot. It MUST use the identical
+ * fallback chain `buildFabricSnapshot` computes internally for its own unrestricted `repos` (scoped
+ * agents' repos, falling back to persisted features) — any drift between the two would let the
+ * attention route accept a repo the fabric itself would never admit, or vice versa.
+ */
+function feature(repo: string): PersistedFeature {
+	return { id: `f-${repo}`, title: "t", repo } as PersistedFeature;
+}
+
+test("actorVisibleRepoSet: a human actor's visible set is every scoped agent's repo, normalized", () => {
+	const agents = [dto("a1", "/srv/alpha/"), dto("a2", "/srv/beta")];
+	const set = actorVisibleRepoSet(HUMAN, agents);
+	expect(set).toEqual(new Set(["/srv/alpha", "/srv/beta"]));
+});
+
+test("actorVisibleRepoSet: no live agents falls back to the actor's persisted features", () => {
+	const set = actorVisibleRepoSet(HUMAN, [], [feature("/srv/gamma")]);
+	expect(set).toEqual(new Set(["/srv/gamma"]));
+});
+
+/** The fail-closed floor `POST /api/attention` depends on: nothing running, nothing persisted ⇒
+ *  an empty set ⇒ every repo a client could name gets rejected, never "everything is visible". */
+test("actorVisibleRepoSet: no agents and no features ⇒ empty set (fail closed)", () => {
+	expect(actorVisibleRepoSet(HUMAN, [], [])).toEqual(new Set());
+	expect(actorVisibleRepoSet(HUMAN, [])).toEqual(new Set());
+});
+
+/** An agent-origin actor's scope is its own restricted subtree (agent-scope.ts), not the whole
+ *  roster — `actorVisibleRepoSet` must inherit that restriction, not silently widen it back out. */
+test("actorVisibleRepoSet: an agent actor only sees its own scoped subtree's repos", () => {
+	const self: AgentDTO = { ...dto("self", "/srv/mine"), parentId: undefined } as AgentDTO;
+	const other = dto("other", "/srv/elsewhere");
+	const agentActor: Actor = { id: "self", origin: "agent" };
+	expect(actorVisibleRepoSet(agentActor, [self, other])).toEqual(new Set(["/srv/mine"]));
 });
