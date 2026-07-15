@@ -78,6 +78,9 @@ test("restActionTier: reads viewer, mutations operator, destructive admin, auth/
 	expect(restActionTier("POST", "/api/attention")).toBe("viewer");
 	expect(restActionTier("GET", "/api/attention")).toBe("viewer");
 	expect(restActionTier("GET", "/api/attention/seen")).toBe("viewer");
+	// Comprehension fog (concern 03): a read-only per-file debt number, explicitly registered viewer
+	// tier like the attention reads it joins against.
+	expect(restActionTier("GET", "/api/fog")).toBe("viewer");
 });
 
 test("applyCommand: operator denied destructive ops (RbacDenied + audited); admin allowed", async () => {

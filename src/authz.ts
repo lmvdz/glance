@@ -114,5 +114,9 @@ export function restActionTier(method: string, pathname: string): Role {
 	// BOTH the write and the reads (privacy is enforced by `redactAttentionForActor`/
 	// `redactSeenMapForActor`, not by the RBAC tier — registered here anyway per DESIGN.md).
 	if (pathname === "/api/attention" || pathname === "/api/attention/seen") return "viewer";
+	// Comprehension debt read (concern 03): a per-file "how far behind is the human" number, joined
+	// from receipts + the attention substrate above — same read-only, per-viewer-signal reasoning as
+	// /api/attention/seen, so the same explicit viewer tier rather than the coarse GET default.
+	if (pathname === "/api/fog") return "viewer";
 	return method === "GET" ? "viewer" : "operator";
 }
