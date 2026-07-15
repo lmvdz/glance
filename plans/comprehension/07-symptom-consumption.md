@@ -20,3 +20,6 @@ None.
 
 ## Verify
 `bun test` green: BM25 symptom ranking, doctor match threshold + remedy append (the acceptance test above), fabric scoping (foreign-repo symptom never in snapshot), grouping newest-first, dead-path flagging. Manual: `glance symptom "dispatch stalled"` returns the seeded card.
+
+## Resolution
+Shipped: fbaafb3 (salvage-retry) + review fix (actor-scoped /api/symptoms). glance symptom CLI, doctor failing-check auto-match with acceptance test, fabric symptom fact.

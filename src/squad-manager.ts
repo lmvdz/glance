@@ -3394,7 +3394,9 @@ export class SquadManager extends EventEmitter {
 	 */
 	private async prBodyFor(rec: AgentRecord): Promise<string> {
 		const dto = rec.dto;
-		const deltas = (dto.featureId ? this.storedFeatureDecisions(dto.featureId) : undefined)?.filter((d) => d.source === "model-delta") ?? [];
+		// sourceRef filter (batch-2 review): two units can share one feature — only THIS unit's recorded
+		// deltas belong in its PR body, or unit B's teaching renders under unit A's diff.
+		const deltas = (dto.featureId ? this.storedFeatureDecisions(dto.featureId) : undefined)?.filter((d) => d.source === "model-delta" && d.sourceRef?.agentId === dto.id) ?? [];
 		let symptom: SymptomEntry | undefined;
 		try {
 			symptom = (await this.symptoms(dto.repo)).find((s) => s.fixedBy.agentId === dto.id);

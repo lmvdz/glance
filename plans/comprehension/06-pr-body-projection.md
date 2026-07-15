@@ -1,5 +1,5 @@
 # PR body projection: render recorded teaching into fleet PR bodies
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -40,3 +40,6 @@ None (PR bodies are visible on GitHub — content is repo-derived, no secrets; d
 
 ## Verify
 `bun test` green: builder (delta rendering with evidence, empty→"no delta recorded", symptom omission, observed-only test lines, cap+Not covered accounting), PendingPr featureId round-trip, adopt-arm marker idempotency (unit-test the decision function; gh calls behind the existing exec seam). Manual: float a scratch unit's PR → body present on GitHub with all sections.
+
+## Resolution
+Shipped: d6f2330 + review fix (sourceRef filter). First non-empty fleet PR bodies; adopt-path marker repair; featureId on PendingPr. testExecutions honestly empty (receipts carry no command provenance — follow-up named in overview).

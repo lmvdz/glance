@@ -1755,11 +1755,16 @@ export class SquadServer {
 		// fixedBy, landedAt) instead of a lossy KbDoc snippet. An empty/missing `q` returns no results
 		// (never the unranked full list) — this route ranks, it doesn't browse.
 		if (url.pathname === "/api/symptoms" && req.method === "GET") {
-			const repo = url.searchParams.get("repo") ?? undefined;
+			// Actor-derived repo scoping (batch-2 review): same discipline as /api/fog above — a `?repo=`
+			// outside the actor-visible set yields nothing, and no param means "everything visible",
+			// never "everything on the manager".
+			const visible = manager.attentionVisibleRepos(actor);
+			const repoParam = url.searchParams.get("repo");
+			const repos = repoParam ? (visible.has(normalizeRepoPath(repoParam)) ? [repoParam] : []) : [...visible];
 			const q = url.searchParams.get("q") ?? "";
 			const topK = boundedNumber(url.searchParams.get("topK"), 20, 1, 100);
-			if (!q.trim()) return Response.json({ query: q, results: [] as SymptomSearchHit[] });
-			const all = await manager.symptoms(repo);
+			if (!q.trim() || repos.length === 0) return Response.json({ query: q, results: [] as SymptomSearchHit[] });
+			const all = (await Promise.all(repos.map((r) => manager.symptoms(r)))).flat();
 			const docs: KbDoc[] = all.map((s) => ({ type: "symptom", id: s.id, title: s.symptom, text: `${s.symptom} ${s.whereToLook.join(" ")}`, repo: s.repo, ts: s.landedAt }));
 			const byId = new Map(all.map((s) => [s.id, s]));
 			const results: SymptomSearchHit[] = rankKbDocs(docs, q, { topK })

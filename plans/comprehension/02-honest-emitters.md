@@ -1,5 +1,5 @@
 # Honest attention emitters: viewport diff-viewed, pr-reviewed, answer-read
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -22,3 +22,6 @@ None.
 
 ## Verify
 `cd webapp && bun test && bunx tsc --noEmit` green (pure helpers: floor keying, visibility gating decisions). Manual: open Intervene on a multi-file diff, don't scroll — only above-the-fold files appear in `attention-seen.json`; scroll to the bottom — the rest appear; background the tab and scroll — nothing new; `glance ask --json` marks nothing read.
+
+## Resolution
+Shipped: 95e8a53, review PASS. Viewport+visibility-gated diff-viewed, pr-reviewed click-through, CLI answer-read (display paths only).

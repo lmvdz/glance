@@ -481,6 +481,9 @@ test("push-retry renders the unit's recorded model-delta + symptom into the crea
 			source: "model-delta",
 			evidence: ["src/dispatch.ts"],
 			createdAt: Date.now(),
+			// The tool path always stamps the recording run (concern 05); prBodyFor filters on it so a
+			// sibling unit's deltas can't render into this unit's PR (batch-2 review).
+			sourceRef: { agentId: "a6", runId: "run-a6" },
 		},
 		repo,
 	);

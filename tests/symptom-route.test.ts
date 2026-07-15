@@ -25,9 +25,13 @@ function authed(init: RequestInit = {}): RequestInit {
 	return { ...init, headers: { "content-type": "application/json", authorization: "Bearer viewer-token-xxxxxxxx", ...init.headers } };
 }
 
-async function fixture() {
+async function fixture(visibleRepos: string[] = ["/srv/app"]) {
 	const state = await fs.mkdtemp(path.join(os.tmpdir(), "symptom-route-"));
 	const manager = new SquadManager({ stateDir: state, store: new FileStore(state) });
+	// The route derives its repo scope from the actor-visible set (batch-2 review) — with no live
+	// agents that falls back to persisted features, so seed one per repo the test expects to see.
+	const featureStore = (manager as unknown as { featureStore: Map<string, unknown> }).featureStore;
+	for (const [i, repo] of visibleRepos.entries()) featureStore.set(`f${i}`, { id: `f${i}`, repo, title: `feat-${i}`, archived: false, decisions: [] });
 	const server = new SquadServer(manager, { port: 0, token: "admin-token-xxxxxxxx", roleTokens: { viewer: "viewer-token-xxxxxxxx" } });
 	const url = server.start();
 	cleanups.push(async () => {
@@ -64,7 +68,7 @@ test("GET /api/symptoms with an empty/missing q ranks nothing — this route ran
 });
 
 test("GET /api/symptoms respects ?repo= scoping", async () => {
-	const { url, state } = await fixture();
+	const { url, state } = await fixture(["/srv/alpha", "/srv/beta"]);
 	await saveSymptom(state, { id: "s1", symptom: "alpha's dispatch stalls under load", whereToLook: ["src/alpha.ts"], repo: "/srv/alpha", fixedBy: {}, landedAt: 1000 });
 	await saveSymptom(state, { id: "s2", symptom: "beta's dispatch stalls under load", whereToLook: ["src/beta.ts"], repo: "/srv/beta", fixedBy: {}, landedAt: 1000 });
 
@@ -78,4 +82,13 @@ test("a viewer token is enough — this is deliberately not operator-gated like 
 	await saveSymptom(state, { id: "s1", symptom: "daemon healthy but dispatch stalled", whereToLook: ["src/dispatch.ts"], repo: "/srv/app", fixedBy: {}, landedAt: 1000 });
 	const res = await fetch(`${url}/api/symptoms?q=dispatch`, authed());
 	expect(res.status).toBe(200);
+});
+
+test("a ?repo= outside the actor-visible set yields nothing — fail closed, never 'everything on the manager'", async () => {
+	const { url, state } = await fixture(["/srv/app"]);
+	await saveSymptom(state, { id: "s1", symptom: "gamma's dispatch stalls under load", whereToLook: ["src/gamma.ts"], repo: "/srv/gamma", fixedBy: {}, landedAt: 1000 });
+
+	const res = await fetch(`${url}/api/symptoms?q=${encodeURIComponent("dispatch stalls")}&repo=${encodeURIComponent("/srv/gamma")}`, authed());
+	const body = (await res.json()) as { results: SymptomSearchHit[] };
+	expect(body.results).toEqual([]);
 });
