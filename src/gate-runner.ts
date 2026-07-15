@@ -333,9 +333,9 @@ export interface GateRunLike {
 /** Executable-resolution failure shapes across the shells/runtimes gates run under (bash, sh, Bun). */
 const NOT_FOUND_RE = /Executable not found in \$PATH|command not found|not found in \$PATH|is not recognized as an internal or external command/i;
 /** bun test's explicit nothing-ran markers. Deliberately narrow — only confidently parseable shapes. */
-const ZERO_TESTS_RE = /\bRan 0 tests\b|did not match any test files/i;
+export const ZERO_TESTS_RE = /\bRan 0 tests\b|did not match any test files/i;
 /** bun test's summary marker that at least one test demonstrably executed ("N pass", N ≥ 1). */
-const TESTS_RAN_RE = /\b[1-9]\d* pass\b/;
+export const TESTS_RAN_RE = /\b[1-9]\d* pass\b/;
 
 /**
  * Did this FAILED gate run demonstrably NOT exercise the code under test? Returns a human-readable

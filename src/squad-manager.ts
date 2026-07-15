@@ -78,6 +78,7 @@ import { autoLandOnSuccess } from "./autoland.ts";
 import { ownershipConflict, requiresConflict, outOfScopeWrites, producesAllowlist } from "./ownership.ts";
 import { headCommit, isFresh, proofFingerprint, proofFor, proofGate, runProof, setProofRoot, sweepProofs } from "./proof.ts";
 import { setGateLogRoot, sweepGateLogs } from "./gate-logs.ts";
+import { setCompactionLogRoot } from "./output-reduce.ts";
 import { type Judge, validatorGate } from "./validator.ts";
 import { evaluateCompliance, type ComplianceFinding } from "./compliance.ts";
 import { reapDeadSessions, releaseSession, sweepLeases } from "./leases.ts";
@@ -919,6 +920,7 @@ export class SquadManager extends EventEmitter {
 		setProofRoot(this.stateDir);
 		setThresholdTunerRoot(this.stateDir);
 		setGateLogRoot(this.stateDir);
+		setCompactionLogRoot(this.stateDir);
 		this.scoutCursor = readScoutCursors(this.stateDir);
 		this.removedLedger = openRemovedLedger(this.stateDir);
 		this.projectRegistry = openProjectRegistry(this.stateDir);

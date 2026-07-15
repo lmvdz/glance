@@ -190,7 +190,7 @@ function packDiffToBudget(diff: string, budget: number): string {
 
 /** head 0.5 + tail 0.5 — conclusions (pass/fail summary) live in tails, so a pure head-truncate used
  *  to cut exactly the part a reviewer needs most. */
-function headTail(s: string, budget: number): string {
+export function headTail(s: string, budget: number): string {
 	if (budget <= 0) return "";
 	const sep = "\n…\n";
 	const usable = Math.max(0, budget - sep.length);
