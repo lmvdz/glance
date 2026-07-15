@@ -480,6 +480,31 @@ export function buildFreshAgentNoticeItems(agentLabel: string): unknown[] {
   ];
 }
 
+/**
+ * Compose the FULL reconnect/rotation recap: the spoken voice conversation (persisted as durable
+ * session Messages by VoiceCallContext's caption flush) FIRST, then the bound agent's transcript
+ * recap (`buildVoiceRecap` below). Live finding 2026-07-15: a connection death mid-call rebuilt the
+ * session with only the agent-transcript recap — for a chit-chat call (no dispatches yet) that is
+ * EMPTY, so the model forgot its own previous turns seconds after speaking them. The session
+ * messages ARE the voice conversation's durable record; carrying their tail forward is what makes a
+ * silent reconnect actually silent. Both halves optional; '' when neither has content.
+ */
+export function composeVoiceRecap(
+  sessionMessages: Array<{ role: 'user' | 'model'; text: string }>,
+  transcriptRecap: string,
+  opts: { maxMessages?: number; maxCharsPerMessage?: number } = {},
+): string {
+  const maxMessages = opts.maxMessages ?? 8;
+  const maxChars = opts.maxCharsPerMessage ?? 200;
+  const tail = sessionMessages.slice(-maxMessages).map((m) => {
+    const who = m.role === 'user' ? 'Operator' : 'Assistant';
+    return `${who}: ${truncateForVoice(stripControlChars(m.text), maxChars)}`;
+  });
+  const spoken = tail.length > 0 ? `Recent conversation:\n${tail.join('\n')}` : '';
+  if (spoken && transcriptRecap) return `${spoken}\n${transcriptRecap}`;
+  return spoken || transcriptRecap;
+}
+
 /** Rolling recap of the bound agent's recent exchanges — `VoiceSessionOptions.getRecap`'s backing
  *  data. Built straight from the durable transcript (already the source of truth for reload/replay)
  *  rather than live captions, so it works whether or not the realtime session ever had captions

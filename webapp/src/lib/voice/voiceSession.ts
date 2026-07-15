@@ -1544,18 +1544,26 @@ export class VoiceSession {
       return;
     }
     this.connected = true;
-    if (recap) {
-      this.sendRaw({
-        type: 'conversation.item.create',
-        item: {
-          type: 'message',
-          role: 'system',
-          content: [{ type: 'input_text', text: this.buildCarryOverText(recap) }],
-        },
-      });
-    }
+    this.sendCarryOver(recap);
     this.scheduleReMint();
     this.opts.onReconnected?.({ recap });
+  }
+
+  /** Inject the rolling-recap carry-over into a freshly rebuilt session — shared by proactive
+   *  rotation AND unexpected-drop reconnects (live finding 2026-07-15: a mid-call connection death
+   *  used to rebuild with recap '' — only the context brief — so the model forgot its own previous
+   *  turns and answered "there wasn't a previous action in this session" seconds after offering
+   *  one). No-op for an empty recap. */
+  private sendCarryOver(recap: string): void {
+    if (!recap) return;
+    this.sendRaw({
+      type: 'conversation.item.create',
+      item: {
+        type: 'message',
+        role: 'system',
+        content: [{ type: 'input_text', text: this.buildCarryOverText(recap) }],
+      },
+    });
   }
 
   private buildCarryOverText(recap: string): string {
@@ -1624,6 +1632,10 @@ export class VoiceSession {
   private async attemptReconnect(): Promise<boolean> {
     const myEpoch = ++this.epoch;
     if (!this.micStream) return false;
+    // Read the recap BEFORE teardown, exactly like rotateSession — an unexpected-drop rebuild is
+    // just an unplanned rotation from the model's point of view, and arriving amnesiac mid-
+    // conversation is worse than arriving amnesiac at a 55-minute boundary.
+    const recap = this.opts.getRecap?.() ?? '';
     this.teardownConnection();
     try {
       await this.establishConnection(this.micStream, myEpoch);
@@ -1635,8 +1647,9 @@ export class VoiceSession {
       return false;
     }
     this.connected = true;
+    this.sendCarryOver(recap);
     this.scheduleReMint();
-    this.opts.onReconnected?.({ recap: '' });
+    this.opts.onReconnected?.({ recap });
     return true;
   }
 }

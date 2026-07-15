@@ -11,7 +11,7 @@ import {
   type CaptionState,
 } from '../lib/voice/callHud';
 import { useVoiceDispatcher } from '../hooks/useVoiceDispatcher';
-import { buildVoiceContextBrief, buildVoiceDebrief } from '../lib/voice/tools';
+import { buildVoiceContextBrief, buildVoiceDebrief, composeVoiceRecap } from '../lib/voice/tools';
 import {
   appendSpokenSummary,
   appendSpokenUserMessage,
@@ -412,7 +412,15 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
     prevTurnClaimedRef.current = false;
     const session = createVoiceSession(mintVoiceToken, {
       agentId: binding.agentId,
-      getRecap: dispatcher.getRecap,
+      // Reconnect/rotation carry-over: the SPOKEN conversation (this session's durable Messages —
+      // the voice turns the caption flush persists) plus the agent-transcript recap. Without the
+      // spoken half, a chit-chat call rebuilt after a connection death arrives amnesiac (live
+      // finding 2026-07-15: "there wasn't a previous action in this session" seconds after there was).
+      getRecap: () => {
+        const sessions = loadPersistedSessionsOrNull() ?? [];
+        const messages = sessions.find((s) => s.id === boundSessionId)?.messages ?? [];
+        return composeVoiceRecap(messages, dispatcher.getRecap());
+      },
       getContextBrief: () => contextBriefRef.current,
       onFunctionCall: dispatcher.onFunctionCall,
       onCaption: (text, speaker) => {

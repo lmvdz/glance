@@ -2266,3 +2266,19 @@ test('audit fix: a second deferral displacing a pending deferred injection creat
   const creates = lastSent(h).filter((s) => s.type === 'response.create');
   expect(creates.length).toBeGreaterThanOrEqual(1);
 });
+
+test('an unexpected-drop reconnect carries the recap into the fresh session (not just proactive rotation)', async () => {
+  const h = makeHarness({ getRecap: () => 'operator asked about the repo; assistant relayed to the console agent' });
+  await h.session.connect();
+
+  h.dataChannels[0]!.onclose?.(); // silent ICE death -> bounded reconnect
+  await flush();
+
+  expect(h.dataChannels).toHaveLength(2);
+  expect(h.reconnected).toEqual([{ recap: 'operator asked about the repo; assistant relayed to the console agent' }]);
+  const carryOver = h.dataChannels[1]!.sent.find(
+    (s) => s.type === 'conversation.item.create' && JSON.stringify(s).includes('carried over from a prior connection'),
+  );
+  expect(carryOver).toBeDefined();
+  expect(JSON.stringify(carryOver)).toContain('operator asked about the repo');
+});

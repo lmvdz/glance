@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   buildVoiceContextBrief,
+  composeVoiceRecap,
   ALREADY_DISPATCHED_DETAIL,
   DEAD_AGENT_DETAIL,
   HUMAN_TURN_GATE_DETAIL,
@@ -793,5 +794,38 @@ describe('buildVoiceContextBrief', () => {
     const brief = buildVoiceContextBrief({ projectName: 'x'.repeat(500) });
     expect(brief).toContain('…');
     expect(brief.length).toBeLessThan(600);
+  });
+});
+
+describe('composeVoiceRecap (reconnect carry-over: spoken conversation + agent transcript)', () => {
+  test('composes both halves, spoken conversation first', () => {
+    const out = composeVoiceRecap(
+      [
+        { role: 'user', text: 'hello' },
+        { role: 'model', text: 'hi there' },
+      ],
+      'Agent transcript recap here',
+    );
+    expect(out).toBe('Recent conversation:\nOperator: hello\nAssistant: hi there\nAgent transcript recap here');
+  });
+
+  test('spoken-only (a chit-chat call with no dispatches — the amnesiac-reconnect live finding)', () => {
+    const out = composeVoiceRecap([{ role: 'model', text: 'I offered to retry the dispatch' }], '');
+    expect(out).toBe('Recent conversation:\nAssistant: I offered to retry the dispatch');
+  });
+
+  test('transcript-only and fully-empty degrade cleanly', () => {
+    expect(composeVoiceRecap([], 'just the transcript')).toBe('just the transcript');
+    expect(composeVoiceRecap([], '')).toBe('');
+  });
+
+  test('keeps only the tail, truncates each message, and strips control chars', () => {
+    const messages = Array.from({ length: 12 }, (_, i) => ({ role: 'user' as const, text: `msg ${i}` }));
+    messages.push({ role: 'user', text: `a\nb\tc${'x'.repeat(300)}` });
+    const out = composeVoiceRecap(messages, '', { maxMessages: 3, maxCharsPerMessage: 20 });
+    expect(out.split('\n')).toHaveLength(4); // header + 3 messages
+    expect(out).not.toContain('msg 0');
+    expect(out).toContain('a b c'); // control chars -> spaces
+    expect(out).toContain('…'); // truncated
   });
 });
