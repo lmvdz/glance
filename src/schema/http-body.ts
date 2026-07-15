@@ -108,6 +108,20 @@ export const AskBodySchema = Schema.Struct({
 	harness: Schema.optional(Schema.String),
 });
 
+/** POST /api/attention — record one operator-attention event (comprehension concern 01). `viewerId`
+ *  and `at` are deliberately ABSENT: both are stamped server-side (the DB-mode session user id, and
+ *  the store's own clock) and must never be accepted from the client. `repo` is validated post-decode
+ *  against the actor-visible repo set (fail-closed — see server.ts) before anything is written; the
+ *  length caps below bound a hostile/misbehaving client's payload, not correctness. */
+export const AttentionEventBodySchema = Schema.Struct({
+	kind: Schema.Literals(["diff-viewed", "answer-read", "debrief-heard", "pr-reviewed", "surprise"]),
+	repo: Schema.String.pipe(Schema.check(Schema.isMaxLength(512))),
+	file: Schema.optional(Schema.String.pipe(Schema.check(Schema.isMaxLength(1024)))),
+	agentId: Schema.optional(Schema.String.pipe(Schema.check(Schema.isMaxLength(128)))),
+	answerId: Schema.optional(Schema.String.pipe(Schema.check(Schema.isMaxLength(128)))),
+	prNumber: Schema.optional(Schema.Number),
+});
+
 export const JoinRequestDecideBodySchema = Schema.Struct({
 	id: Schema.String,
 	action: Schema.optional(Schema.Unknown),

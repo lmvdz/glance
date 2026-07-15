@@ -8,8 +8,10 @@ export interface Project {
 export interface TaskDecision {
   id: string;
   text: string;
-  source?: "plan" | "human" | "agent";
+  source?: "plan" | "human" | "agent" | "model-delta";
   createdAt?: number;
+  /** Evidence anchors for a `source:"model-delta"` decision (repo-relative `file` or `file:start-end`). */
+  evidence?: string[];
 }
 
 export interface TaskRelationship {

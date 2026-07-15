@@ -34,6 +34,7 @@ import {
 	AnnotationCreateBodySchema,
 	AnnotationSendBodySchema,
 	AssigneesBodySchema,
+	AttentionEventBodySchema,
 	CapabilityInstallBodySchema,
 	CapabilityInstallPatchBodySchema,
 	CapabilityInstallRunBodySchema,
@@ -85,6 +86,8 @@ import { planVoteGateOpen, tallyPlanVoteRound } from "./plan-votes.ts";
 import { hardenedGit } from "./git-harden.ts";
 import { searchFabric, type KbDocType } from "./fabric-search.ts";
 import type { FabricSnapshot } from "./fabric.ts";
+import { redactAttentionForActor, redactSeenMapForActor } from "./attention.ts";
+import { normalizeRepoPath } from "./project-registry.ts";
 import { readAudit, type AuditQuery } from "./audit.ts";
 import type { AutomationEvent, AutomationLoop, AutomationQuery, AutomationRollupRow } from "./automation-log.ts";
 import { learningFlags, type MetricName, type MetricRollupRow } from "./metrics.ts";
@@ -269,14 +272,30 @@ function featureCriteria(value: unknown): FeatureCriterion[] | undefined {
 	});
 }
 
-function featureDecisions(value: unknown): FeatureDecision[] | undefined {
+/**
+ * Sanitize a PATCH body's `decisions` array against the feature's STORED decisions. The incoming
+ * array defines membership and order (so deleting a decision still works), but for an entry whose
+ * id already exists on the feature, the server-authoritative fields — `source`, `evidence`,
+ * `sourceRef`, `createdAt` — are kept from the stored record and only the text is taken from the
+ * client. Without this merge, the webapp's routine "add one decision" round-trip (it PATCHes the
+ * FULL array back) coerced every stored `model-delta` decision to `source:"human"` and silently
+ * dropped its evidence anchors — destroying the teaching content the comprehension lane exists to
+ * produce. New entries (id not on the feature) are down-tiered exactly as before: a PATCH client
+ * can never mint `model-delta` records, because those are only minted through
+ * `squad_record_decision`'s evidence validation. (Model-deltas always live on persisted features —
+ * `recordAgentDecision` adopts before writing — so `stored` is never missing for them.)
+ */
+export function featureDecisions(value: unknown, stored: FeatureDecision[] | undefined): FeatureDecision[] | undefined {
 	if (!Array.isArray(value)) return undefined;
+	const byId = new Map((stored ?? []).map((d) => [d.id, d]));
 	return value.flatMap((item): FeatureDecision[] => {
 		if (!item || typeof item !== "object") return [];
 		const rec = item as Record<string, unknown>;
 		const id = typeof rec.id === "string" ? rec.id : undefined;
 		const text = typeof rec.text === "string" ? rec.text.trim() : "";
 		if (!id || !text) return [];
+		const existing = byId.get(id);
+		if (existing) return [{ ...existing, text }];
 		return [{ id, text, source: rec.source === "plan" || rec.source === "human" || rec.source === "agent" ? rec.source : "human", createdAt: typeof rec.createdAt === "number" ? rec.createdAt : undefined }];
 	});
 }
@@ -1731,6 +1750,47 @@ export class SquadServer {
 				return new Response(errText(err), { status: 400 });
 			}
 		}
+		// Operator-attention substrate (comprehension concern 01): a durable, tenant-scoped record of
+		// what the human has actually looked at. `viewerId`/`at` are stamped HERE, server-side, from the
+		// same `session`-derived identity `featureAuthor` above uses — never accepted from the client
+		// body (a client-supplied viewerId would let any actor impersonate another's attention, and a
+		// client-supplied `at` would let a flood backdate the seen map). `isAdmin` for redaction is the
+		// SAME `role` this request already resolved above, not re-derived.
+		if (url.pathname === "/api/attention" && req.method === "POST") {
+			if (manager.attentionDisabled()) return Response.json({ ok: false, disabled: true });
+			const decoded = decodeBody(AttentionEventBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response("expected { kind, repo }", { status: 400 });
+			const body = decoded.success;
+			// Fail CLOSED: validated against the actor-visible repo set the same way buildFabricSnapshot
+			// derives it (fabric.ts's `actorVisibleRepoSet`) — an actor with no derivable repos (no live
+			// agents, no persisted features) rejects EVERY repo, never falls open to "unrestricted".
+			if (!manager.attentionVisibleRepos(actor).has(normalizeRepoPath(body.repo))) return new Response("unknown repo", { status: 400 });
+			const viewerId = session ? actor.id : undefined;
+			const result = manager.recordAttention({ kind: body.kind, repo: body.repo, file: body.file, agentId: body.agentId, answerId: body.answerId, prNumber: body.prNumber, viewerId }, actor.id);
+			if (!result.ok && result.reason === "rate-limited") return new Response("rate limited", { status: 429 });
+			return Response.json({ ok: result.ok });
+		}
+		if (url.pathname === "/api/attention" && req.method === "GET") {
+			if (manager.attentionDisabled()) return Response.json({ disabled: true });
+			const visible = manager.attentionVisibleRepos(actor);
+			const repoParam = url.searchParams.get("repo");
+			// A foreign/unresolvable `?repo=` reads as "nothing" rather than a 400 — GETs are lenient
+			// (module doc: only the POST fail-closes loudly), but never leak a repo outside the actor's
+			// own visible set just because the query string named one.
+			const repos = repoParam ? (visible.has(normalizeRepoPath(repoParam)) ? [repoParam] : []) : [...visible];
+			const events = manager.attentionEvents(repos);
+			const redacted = redactAttentionForActor(events, { viewerId: session ? actor.id : undefined, isAdmin: roleAtLeast(role, "admin") });
+			return Response.json({ events: redacted });
+		}
+		if (url.pathname === "/api/attention/seen" && req.method === "GET") {
+			if (manager.attentionDisabled()) return Response.json({ disabled: true });
+			const visible = manager.attentionVisibleRepos(actor);
+			const repoParam = url.searchParams.get("repo");
+			const repos = repoParam ? (visible.has(normalizeRepoPath(repoParam)) ? [repoParam] : []) : [...visible];
+			const seen = manager.attentionSeen(repos);
+			const redacted = redactSeenMapForActor(seen, { viewerId: session ? actor.id : undefined, isAdmin: roleAtLeast(role, "admin") });
+			return Response.json({ seen: redacted });
+		}
 		if (url.pathname === "/api/projects" && req.method === "GET") return Response.json(manager.projects());
 		// Add a repo to the workspace. Admin-tiered in authz.ts: this names a path the daemon will later
 		// create worktrees in and spawn agents against. The manager validates it is an ABSOLUTE path to a
@@ -1876,7 +1936,7 @@ export class SquadServer {
 			if ("stageOverride" in body) patch.stageOverride = typeof body.stageOverride === "string" ? (body.stageOverride as FeatureStage) : null;
 			if ("category" in body) patch.category = typeof body.category === "string" ? (body.category as FeatureCategory) : null;
 			if ("acceptanceCriteria" in body) patch.acceptanceCriteria = featureCriteria(body.acceptanceCriteria);
-			if ("decisions" in body) patch.decisions = featureDecisions(body.decisions);
+			if ("decisions" in body) patch.decisions = featureDecisions(body.decisions, manager.storedFeatureDecisions(decodeURIComponent(mfpatch[1])));
 			if ("relationships" in body) patch.relationships = featureRelationships(body.relationships);
 			const pf = await manager.updateFeature(decodeURIComponent(mfpatch[1]), patch);
 			return pf ? Response.json(pf) : new Response("no such feature", { status: 404 });
