@@ -114,5 +114,10 @@ export function restActionTier(method: string, pathname: string): Role {
 	// BOTH the write and the reads (privacy is enforced by `redactAttentionForActor`/
 	// `redactSeenMapForActor`, not by the RBAC tier — registered here anyway per DESIGN.md).
 	if (pathname === "/api/attention" || pathname === "/api/attention/seen") return "viewer";
+	// Known-symptom cards (comprehension concern 07, RT2-16 "doctor-tier discovery"): reading the
+	// symptom index is viewer-tier, same as `/api/fabric/search` — it's the pull-search half of the
+	// SAME index the doctor auto-match pushes into a failing check's remedy at operator tier. There is
+	// no REST write route here (symptoms are recorded via the `squad_record_symptom` MCP tool only).
+	if (pathname === "/api/symptoms") return "viewer";
 	return method === "GET" ? "viewer" : "operator";
 }

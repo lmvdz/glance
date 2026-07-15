@@ -10,6 +10,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	classifyWhereToLookEntry,
+	formatWhereToLookEntry,
+	groupSymptomHits,
 	isoWeekKey,
 	listSymptoms,
 	MAX_WHERE_TO_LOOK,
@@ -21,6 +23,7 @@ import {
 	validateSymptomText,
 	validateWhereToLookCount,
 	type SymptomEntry,
+	type SymptomSearchHit,
 } from "../src/symptoms.ts";
 
 const dirs: string[] = [];
@@ -209,4 +212,48 @@ test("a whereToLook entry with a .. segment reads as missing — it must not esc
 	// an inert interior `..` that still resolves inside the repo is ALSO rejected — the floor is
 	// lexical, not resolved, because a stored pointer should be a plain repo-relative path
 	expect(await statWhereToLookEntry(repo, "src/../src/dispatch.ts")).toBe("missing");
+});
+
+// ── consumption: query-time grouping + dead-path flagging (concern 07) ─────────────────────────
+
+function hit(over: Partial<SymptomSearchHit> = {}): SymptomSearchHit {
+	return {
+		id: "h1",
+		symptom: "daemon healthy but dispatch stalled",
+		whereToLook: ["src/dispatch.ts"],
+		repo: "/srv/app",
+		fixedBy: { agentId: "a1" },
+		landedAt: 100,
+		score: 1,
+		...over,
+	};
+}
+
+test("groupSymptomHits folds identical (normalized) symptom text into one group, newest first", () => {
+	const groups = groupSymptomHits([
+		hit({ id: "h1", landedAt: 100 }),
+		hit({ id: "h2", landedAt: 300, symptom: "  Daemon Healthy But Dispatch Stalled  " }), // same text, different case/whitespace
+		hit({ id: "h3", landedAt: 200, symptom: "verify green but land never fires" }),
+	]);
+	expect(groups).toHaveLength(2);
+	expect(groups[0]!.entries.map((e) => e.id)).toEqual(["h2", "h1"]); // newest first within the group
+	expect(groups[0]!.symptom).toBe("  Daemon Healthy But Dispatch Stalled  "); // newest member's raw phrasing wins the header
+	expect(groups[1]!.entries.map((e) => e.id)).toEqual(["h3"]);
+});
+
+test("groupSymptomHits preserves the incoming (ranked) order across groups — it never re-ranks", () => {
+	const groups = groupSymptomHits([hit({ id: "a", symptom: "second topic", score: 5 }), hit({ id: "b", symptom: "first topic", score: 9 })]);
+	expect(groups.map((g) => g.symptom)).toEqual(["second topic", "first topic"]); // input order, not score order
+});
+
+test("groupSymptomHits on an empty/single-entry list is a no-op", () => {
+	expect(groupSymptomHits([])).toEqual([]);
+	expect(groupSymptomHits([hit()])).toHaveLength(1);
+});
+
+test("formatWhereToLookEntry flags a dead path, leaves a live one untouched", () => {
+	expect(formatWhereToLookEntry("src/dispatch.ts", "file")).toBe("src/dispatch.ts");
+	expect(formatWhereToLookEntry("src/lib", "dir")).toBe("src/lib");
+	expect(formatWhereToLookEntry("src/gone.ts", "missing")).toBe("src/gone.ts (path missing)");
+	expect(formatWhereToLookEntry("glance doctor", "missing")).toBe("glance doctor (path missing)"); // caller decides what stat to pass; this helper only renders it
 });

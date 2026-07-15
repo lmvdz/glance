@@ -78,6 +78,9 @@ test("restActionTier: reads viewer, mutations operator, destructive admin, auth/
 	expect(restActionTier("POST", "/api/attention")).toBe("viewer");
 	expect(restActionTier("GET", "/api/attention")).toBe("viewer");
 	expect(restActionTier("GET", "/api/attention/seen")).toBe("viewer");
+	// Known-symptom cards (comprehension concern 07): reading the symptom index is viewer-tier, same
+	// as /api/fabric/search — the pull half of the doctor auto-match's push half.
+	expect(restActionTier("GET", "/api/symptoms")).toBe("viewer");
 });
 
 test("applyCommand: operator denied destructive ops (RbacDenied + audited); admin allowed", async () => {
