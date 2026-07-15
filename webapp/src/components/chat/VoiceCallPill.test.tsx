@@ -11,6 +11,7 @@ const baseProps = {
   showPushNudge: false,
   onEnablePush: () => {},
   onDismissPushNudge: () => {},
+  onViewAgent: null as (() => void) | null,
   pttEngaged: false,
   panelOpen: false,
   onPttDown: () => {},
@@ -70,6 +71,15 @@ describe('VoiceCallPillView', () => {
       const html = renderToStaticMarkup(<VoiceCallPillView {...baseProps} showPushNudge={false} />);
       expect(html).not.toContain('Enable notifications to get pinged when agents finish');
       expect(html).not.toContain('Dismiss notification nudge');
+    });
+  });
+
+  describe('view-agent jump (voice-loop follow-up)', () => {
+    test('renders the console-agent button only once an agent is bound', () => {
+      const bound = renderToStaticMarkup(<VoiceCallPillView {...baseProps} onViewAgent={() => {}} />);
+      expect(bound).toContain('View console agent');
+      const unbound = renderToStaticMarkup(<VoiceCallPillView {...baseProps} onViewAgent={null} />);
+      expect(unbound).not.toContain('View console agent');
     });
   });
 

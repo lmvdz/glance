@@ -26,6 +26,7 @@
  */
 
 import path from "node:path";
+import * as os from "node:os";
 import { Schema } from "effect";
 import { getStorageBackend } from "./dal/storage.ts";
 import { decodeJsonWith } from "./schema/external-json.ts";
@@ -75,6 +76,17 @@ function writeRepos(stateDir: string, repos: Set<string>): boolean {
 	}
 }
 
+/** Leading-`~` expansion (see `normalizeRepoPath`'s live-finding comment). Exported so the agent
+ *  spawn path (squad-manager) can apply the same defense to repo paths that reach it WITHOUT going
+ *  through the registry (older persisted state, direct API callers).
+ *  @substrate exported for tests + the spawn-path defense described above; the in-file
+ *  `normalizeRepoPath` is the current production caller. */
+export function expandHomePath(p2: string): string {
+	if (p2 === "~") return os.homedir();
+	if (p2.startsWith("~/")) return path.join(os.homedir(), p2.slice(2));
+	return p2;
+}
+
 /**
  * Normalize a repo root to the key everything else uses: `AgentDTO.repo` and `FeatureDTO.repo` are
  * absolute paths, and `ProjectDTO.id` IS the repo path, so the union in `projects()` only collapses if
@@ -83,7 +95,14 @@ function writeRepos(stateDir: string, repos: Set<string>): boolean {
  * cwd — that cwd is an accident of how the operator launched it.
  */
 export function normalizeRepoPath(repo: string): string {
-	const normalized = path.normalize(repo.trim());
+	// Live finding 2026-07-15: a project registered as `~/sui/omp-graph` (literal tilde — shells
+	// expand it, nothing else does) rode all the way into an agent's spawn cwd, where posix_spawn
+	// ENOENT'd on the un-expanded path and the console agent error-looped for an afternoon. Expand
+	// a leading `~/` (or bare `~`) to the daemon user's home BEFORE normalizing, so the tilde form
+	// and the absolute form collapse to the same registry key and every downstream consumer
+	// (AgentDTO.repo, spawn cwd) sees a real path.
+	const expanded = expandHomePath(repo.trim());
+	const normalized = path.normalize(expanded);
 	const stripped = normalized.replace(/\/+$/, "");
 	// `"/"` normalizes to `""` under a naive trailing-slash strip, and an empty key reads as "repo is
 	// required" — a nonsense error for a real (if bizarre) path. Preserve the filesystem root; the git

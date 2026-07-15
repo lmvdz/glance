@@ -87,6 +87,7 @@ import { hardenedGit } from "./git-harden.ts";
 import { searchFabric, type KbDocType } from "./fabric-search.ts";
 import type { FabricSnapshot } from "./fabric.ts";
 import { redactAttentionForActor, redactSeenMapForActor } from "./attention.ts";
+import { computeFog, repoHasHistory } from "./comprehension-fog.ts";
 import { normalizeRepoPath } from "./project-registry.ts";
 import { readAudit, type AuditQuery } from "./audit.ts";
 import type { AutomationEvent, AutomationLoop, AutomationQuery, AutomationRollupRow } from "./automation-log.ts";
@@ -1792,6 +1793,26 @@ export class SquadServer {
 			const seen = manager.attentionSeen(repos);
 			const redacted = redactSeenMapForActor(seen, { viewerId: session ? actor.id : undefined, isAdmin: roleAtLeast(role, "admin") });
 			return Response.json({ seen: redacted });
+		}
+		// Comprehension fog (concern 03): a monotone per-file comprehension-debt read, joined from every
+		// completed receipt against the attention substrate's seen map. Repos are derived from the actor
+		// exactly like the two attention GETs above — NEVER solely from `?repo=` — so a foreign repo named
+		// in the query string reads as "nothing" rather than leaking another tenant's debt. `computeFog`
+		// itself re-filters both inputs through this same repo list before joining (DESIGN.md's tenant-
+		// scoping row: a tested deliverable, not a single call site's discipline), so this route's own
+		// pre-filtering is belt-and-suspenders, not the only guard.
+		if (url.pathname === "/api/fog" && req.method === "GET") {
+			if (manager.attentionDisabled()) return Response.json({ entries: [], repoHasHistory: {}, disabled: true });
+			const visible = manager.attentionVisibleRepos(actor);
+			const repoParam = url.searchParams.get("repo");
+			const repos = repoParam ? (visible.has(normalizeRepoPath(repoParam)) ? [repoParam] : []) : [...visible];
+			const now = Date.now();
+			const receipts = await manager.allReceipts();
+			const seen = manager.attentionSeen(repos);
+			const entries = computeFog({ receipts, seen, repos, now });
+			const historyByRepo: Record<string, boolean> = {};
+			for (const repo of repos) historyByRepo[repo] = repoHasHistory(seen, repo, now);
+			return Response.json({ entries, repoHasHistory: historyByRepo });
 		}
 		if (url.pathname === "/api/projects" && req.method === "GET") return Response.json(manager.projects());
 		// Add a repo to the workspace. Admin-tiered in authz.ts: this names a path the daemon will later

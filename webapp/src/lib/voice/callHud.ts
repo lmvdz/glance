@@ -209,8 +209,11 @@ export function shouldEndCall(errorInfo: Pick<VoiceSessionErrorInfo, 'code' | 'f
 export const MAX_CALL_DURATION_MS = 2 * 60 * 60 * 1000;
 
 /** No PTT activity (press OR release) for this long ends the call — an unattended session
- *  shouldn't keep re-minting and narrating completions into an empty room. */
-export const CALL_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+ *  shouldn't keep re-minting and narrating completions into an empty room. Tightened 10min -> 3min
+ *  (Lars, 2026-07-15): an open realtime session is billable surface, and the away-loop (completion
+ *  push + next-call debrief) means hanging up early costs nothing — anything that finishes after
+ *  the auto-hangup pushes a notification and gets spoken at the next call. */
+export const CALL_IDLE_TIMEOUT_MS = 3 * 60 * 1000;
 
 export function shouldEndCallForMaxDuration(elapsedMs: number, maxDurationMs = MAX_CALL_DURATION_MS): boolean {
   return elapsedMs >= maxDurationMs;

@@ -159,7 +159,9 @@ describe('MAJOR-1: bootstrap prompt_agent single-flight', () => {
 
     await dispatchPromptAgent(session, 'call-1', 'hi', refs, deps);
 
-    expect(outputs).toEqual([{ callId: 'call-1', output: { status: 'failed', detail: 'could not start a console agent' } }]);
+    // The daemon's actual reason rides along (live finding 2026-07-15: a generic "could not start"
+    // hid a nonexistent-working-directory error for an entire afternoon).
+    expect(outputs).toEqual([{ callId: 'call-1', output: { status: 'failed', detail: 'could not start a console agent — mint failed' } }]);
     expect(refs.promptInFlightRef.current).toBe(false); // MAJOR-1: reset in the mint-failure catch
 
     // A follow-up bootstrap call is allowed through decideToolCall, not blocked by a stuck lock.

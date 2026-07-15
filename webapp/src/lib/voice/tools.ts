@@ -302,9 +302,16 @@ export function isRosterLive(roster: ReadonlyArray<Pick<AgentDTO, 'id'>>, agentI
  *  (including `fleet_status`, which doesn't even need a bound agent). Only a NON-EMPTY roster that
  *  affirmatively lacks the bound id is real evidence of death. `withinMintGrace` still applies on
  *  top — a freshly-minted agent the roster broadcast hasn't caught up to yet is also live. */
-export function isBoundAgentLive(roster: ReadonlyArray<Pick<AgentDTO, 'id'>>, agentId: string, withinMintGrace: boolean): boolean {
+export function isBoundAgentLive(roster: ReadonlyArray<Pick<AgentDTO, 'id' | 'status'>>, agentId: string, withinMintGrace: boolean): boolean {
   if (roster.length === 0) return true;
-  return isRosterLive(roster, agentId) || withinMintGrace;
+  // Live finding 2026-07-15: an agent in status 'error' is IN the roster but cannot do work — a
+  // console agent whose harness fails to boot (e.g. its project's working directory no longer
+  // exists) error-loops forever, and treating it as live meant every voice dispatch said "I've
+  // sent that to the agent" at a corpse, with no reply ever coming. Dead-by-error routes through
+  // the same recovery as gone-from-roster: clear the binding, mint fresh on the next prompt, and
+  // speak the fresh-agent notice.
+  const found = roster.find((a) => a.id === agentId);
+  return (!!found && found.status !== 'error') || withinMintGrace;
 }
 
 // =============================================================================
