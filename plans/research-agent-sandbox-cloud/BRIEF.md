@@ -104,6 +104,22 @@ What glance actually has today on the same three pillars:
 - **Hierarchical multi-node control plane** — glance is single-node by design (`src/state-lock.ts`); federation is presence-only. The pattern's single-node residue (snapshot-aware placement → warm-worktree preference) is captured in concept 3.
 - **gVisor** — dominated on both sides of its own tradeoff, per the talk and per glance's needs.
 
+## Addendum (2026-07-15): wslc (WSL containers), evaluated as the container tier
+
+Lars asked whether `wslc` — Microsoft's new WSL container feature — could serve as the isolation runtime, given the daemon already develops inside WSL2.
+
+**What it is** (announced Build 2026; public preview 2026-06-30 in WSL pre-release 2.9.3; GA targeted fall 2026): a Windows-side `wslc.exe` CLI with Docker-shaped commands (`wslc run/build/container ps`) plus a `Microsoft.WSL.Containers` API for Windows apps. Architecture per the hands-on coverage: **each session is its own Hyper-V-backed VM** with per-session `CpuCount`/`MemoryMB` caps — not Docker Desktop's one shared VM, and not the dev distro's kernel. New virtiofs filesystem and experimental "consomme" networking, currently exclusive to wslc.
+Sources: https://learn.microsoft.com/en-us/windows/wsl/wsl-container · https://devblogs.microsoft.com/commandline/wsl-container-is-now-available-for-public-preview/ · https://www.windowslatest.com/2026/07/02/hands-on-with-linux-container-using-wsl-container-on-windows-11-without-docker-desktop/ · https://www.theregister.com/virtualization/2026/06/30/microsoft-previews-linux-containers-that-run-in-windows/5264468
+
+**Verdict: not the container tier for the daemon — three structural mismatches when the orchestrator lives inside a WSL distro:**
+1. **Cross-VM filesystem.** Worktrees live on the distro's ext4; a wslc container in a separate VM can only reach them via the `\\wsl.localhost\` share (9p/virtiofs across VMs) — the historically slow path, and our workloads (`bun install`, git, test suites) are its worst case. Docker-in-distro bind-mounts the same ext4 at native speed.
+2. **Interop hop.** `wslc.exe` is Windows-side; every daemon call crosses Linux→Windows→second VM. `SandboxAgentDriver`'s long-lived `exec -i` RPC stream is the flakiest shape for WSL interop.
+3. **Preview-grade.** Experimental networking, no verified support for the flags `sandboxPlan` needs (`--network none`, `--user`, Linux-path `-v`, `--init`).
+
+**Where it does matter:**
+- At GA it is effectively a **zero-install microVM-tier candidate** (hardware boundary + per-session resource caps — the caps we otherwise lack entirely). Re-evaluate fall 2026 against Firecracker-in-WSL for tier 3; Firecracker keeps everything Linux-side (same-distro mounts, no interop) so it remains the daemon-side default candidate.
+- The `Microsoft.WSL.Containers` API is built for Windows apps to own container sessions — i.e. the natural sandbox lane for **glance-desktop** (`plans/fleet-first-ide` terax fork, a Windows app), independent of the daemon's ladder.
+
 ## Suggested next step
 
 Concepts 1+4 are one coherent `/plan` (isolation ladder + legibility — they ship together or the ladder is unauditable); concept 2 is a natural `plans/never-lose-work` follow-on; concept 3 stands alone as a latency plan. 5 is a note for the storage-seam re-land.
