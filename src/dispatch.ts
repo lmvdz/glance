@@ -13,6 +13,7 @@ import * as path from "node:path";
 import { existsSync } from "node:fs";
 import type { AutomationRecorder } from "./automation-log.ts";
 import type { DispatchLedger } from "./dispatch-ledger.ts";
+import { dispatchStates } from "./config.ts";
 import { harnessScorecardLogLine } from "./harness-scorecard.ts";
 import type { AgentDTO, AutomationSkipReason, IssueRef } from "./types.ts";
 
@@ -167,6 +168,8 @@ export class Dispatcher {
 	private readonly blockedLogged = new Set<string>();
 	/** Issue ids skipped for human-review / no-auto-land — tracked only to log the skip once per episode. */
 	private readonly skipLogged = new Set<string>();
+	/** Issue ids skipped by the state gate — tracked only to log the skip once per episode (concern 03). */
+	private readonly stateGateLogged = new Set<string>();
 	private timer?: Timer;
 	private running = false;
 	/** True while a rate-limit pause is in effect — so the pause/resume is logged once per episode, not per tick.
@@ -243,6 +246,7 @@ export class Dispatcher {
 			}
 		};
 		try {
+			const releasableStates = new Set(dispatchStates());
 			const claimed = this.deps.claimed();
 			let budget = this.maxActive - this.deps.activeCount();
 			if (budget <= 0) noteSkip("wip-cap", "dispatch concurrency cap reached");
@@ -278,6 +282,20 @@ export class Dispatcher {
 						noteSkip("wip-cap", "global WIP cap reached", true); // recheck per spawn: each spawned agent counts toward the global cap
 						break;
 					}
+					// State gate (concern 03): must run BEFORE the claim checks below — the dispatch ledger is
+					// add-only, so an issue claimed while its Plane state is still e.g. Backlog can never
+					// re-dispatch after enrichment/release. Skip here means it's never added to `dispatched`
+					// or the ledger, so it's re-checked every tick and dispatches the moment its state moves
+					// into the releasable set.
+					if (issue.state !== undefined && !releasableStates.has(issue.state)) {
+						if (!this.stateGateLogged.has(issue.id)) {
+							this.stateGateLogged.add(issue.id);
+							this.deps.log(`skip ${issue.identifier ?? issue.id} — state "${issue.state}" not in releasable set (${[...releasableStates].join(",")})`);
+						}
+						noteSkip("unreleased-state", `open issue's state "${issue.state}" isn't releasable`);
+						continue;
+					}
+					this.stateGateLogged.delete(issue.id); // released ⇒ no longer gated, in case it regresses later
 					if (claimed.has(issue.id) || this.dispatched.has(issue.id) || this.deps.ledger?.has(issue.id)) {
 						noteSkip("already-handled", "all open issues already claimed or dispatched");
 						continue;
