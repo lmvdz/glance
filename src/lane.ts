@@ -22,6 +22,11 @@ import { extractJsonObject } from "./omp-call.ts";
 
 export type WorkLane = "hotfix" | "feature" | "chore";
 
+/** Where a resolved lane came from — the privilege clamp keys on this (only "operator" may move a
+ *  privilege axis), so it is persisted alongside the lane: a restart must not upgrade a classifier
+ *  lane into an operator one. */
+export type WorkLaneSource = "operator" | "label" | "classifier" | "default";
+
 /** Every `WorkLane` value, for exhaustive iteration (tests, dashboards) without re-deriving the list
  *  from `LANE_POLICY`'s keys. */
 export const WORK_LANES: readonly WorkLane[] = ["hotfix", "feature", "chore"];

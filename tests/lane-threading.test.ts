@@ -164,11 +164,15 @@ test("coverage: an explicit workflow spawn never runs the classifier — lane fa
 
 // ── clamp: label/classifier-sourced lane cannot flip model-route apply mode ─────────────────────
 
-test("clamp: a labeled hotfix does not flip model-route apply mode even with the global flags set to apply", async () => {
+test("clamp: a labeled hotfix is marked [shadow] but does NOT suppress the operator's global apply flag", async () => {
 	stashEnv("OMP_SQUAD_MODEL_OUTCOMES", "OMP_SQUAD_MODEL_ROUTE_SHADOW");
 	process.env.OMP_SQUAD_MODEL_OUTCOMES = "1";
-	process.env.OMP_SQUAD_MODEL_ROUTE_SHADOW = "0"; // global apply mode requested
+	process.env.OMP_SQUAD_MODEL_ROUTE_SHADOW = "0"; // global apply mode: operator config, lane-independent
 	const { mgr, repo } = await makeMgr("lane-clamp-label");
+	const logs: string[] = [];
+	const spy = spyOn(mgr as unknown as { log: (level: string, line: string) => void }, "log").mockImplementation((_level: string, line: string) => {
+		logs.push(line);
+	});
 	const dto = await mgr.create({
 		name: "u",
 		repo,
@@ -176,9 +180,15 @@ test("clamp: a labeled hotfix does not flip model-route apply mode even with the
 		issue: { id: "i3", name: "revert the outage", lane: "hotfix" }, // label-sourced, not operator
 		autoRoute: false,
 	});
+	spy.mockRestore();
 	expect(dto.lane).toBe("hotfix");
-	// The clamp: model-route apply mode never fires off a non-operator-sourced lane, regardless of the
-	// global apply flags — dto.model stays whatever the operator/profile declared (undefined here).
+	// The clamp binds where lane parameterizes the router (concern 09's minEdge/frontier overrides),
+	// NOT on the global apply flag: the model-route decision here takes no lane input, so a label
+	// lane must not silently kill apply mode for the whole fleet. The lane line stays [shadow]; the
+	// model-route line does not get lane-forced into shadow.
+	expect(logs.some((l) => l === "lane [shadow]: hotfix source=label")).toBe(true);
+	expect(logs.some((l) => l.startsWith("model-route [shadow]"))).toBe(false);
+	// No task-outcome history in this fresh state dir ⇒ the router still declines to pick a model.
 	expect(dto.model).toBeUndefined();
 	await mgr.stop();
 });

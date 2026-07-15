@@ -15,7 +15,7 @@ import type { SubagentNode } from "./subagents.ts";
 import type { ModelLineage } from "./model-lineage.ts";
 import type { LensId } from "./lens-select.ts";
 import type { HarnessScorecard } from "./harness-scorecard.ts";
-import type { WorkLane } from "./lane.ts";
+import type { WorkLane, WorkLaneSource } from "./lane.ts";
 
 /** Derived, human-meaningful lifecycle state of one managed agent. */
 export type AgentStatus =
@@ -1012,6 +1012,9 @@ export interface PersistedAgent {
 	issue?: IssueRef;
 	/** Resolved work lane, persisted so a restart doesn't lose the precedence decision (concern 02). */
 	lane?: WorkLane;
+	/** The lane's resolved SOURCE, persisted with it: restore must not upgrade a classifier/label lane
+	 *  into an operator-sourced (privilege-bearing) one. */
+	laneSource?: WorkLaneSource;
 	featureId?: string;
 	/** Runtime class; defaults to "omp-operator" when absent (back-compat). */
 	kind?: AgentKind;
@@ -1198,6 +1201,11 @@ export interface CreateAgentOptions {
 	 *  label (`opts.issue.lane`) or the classifier (`routeIntake`'s `decision.lane`) in the precedence
 	 *  clamp resolved in `createWithId` (adw-factory-borrows concern 02). */
 	lane?: WorkLane;
+	/** RESTORE-ONLY: the persisted lane source, passed by the daemon-restart resume paths so the
+	 *  original precedence decision survives verbatim. Never set this from user/API input — doing so
+	 *  would let a caller forge a non-operator source (harmless) or, worse, restore code forgetting it
+	 *  would upgrade classifier lanes to operator privilege. */
+	laneSource?: WorkLaneSource;
 	/** Skip the global live-agent WIP cap (restore / fan-out paths that recreate already-accounted-for agents). */
 	bypassCap?: boolean;
 	/** Re-created from a surviving worktree during restart adoption (OMPSQ-164). Marks the agent so the

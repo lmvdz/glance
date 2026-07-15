@@ -36,7 +36,7 @@ import type { EngineCheckpoint, NodeResult, Workflow, WorkflowGraphSnapshot, Wor
 import { appendCheckpoint, type CheckpointLogEntry, deleteCheckpointLog, evictCheckpointChain, getLastSeq, readCheckpoints } from "./workflow/checkpoint-log.ts";
 import { buildObserveWorkflow, buildTddVerifyWorkflow, buildVerifyWorkflow } from "./workflow/verify-workflow.ts";
 import { type Classify, detectVerify, detectVerifyStages, ompClassify, routeIntake } from "./intake.ts";
-import type { WorkLane } from "./lane.ts";
+import type { WorkLane, WorkLaneSource } from "./lane.ts";
 import type { WorkflowDefinition } from "./workflow-catalog.ts";
 import { Dispatcher } from "./dispatch.ts";
 import { openDispatchLedger } from "./dispatch-ledger.ts";
@@ -1601,6 +1601,10 @@ export class SquadManager extends EventEmitter {
 				// — cosmetic, idempotent content, no behavioral effect; non-profiled fleet units compose cleanly.
 				appendSystemPrompt: p.appendSystemPrompt,
 				issue: p.issue,
+				// Restore the resolved lane + its SOURCE verbatim (concern 02): without the source, a
+				// restart would re-resolve a persisted classifier lane as operator-sourced (privilege upgrade).
+				lane: p.lane,
+				laneSource: p.laneSource,
 				parentId: p.parentId,
 				...lineageFieldsFrom(p),
 				// Restore the harness lineage so a cold-adopted/restored pi or ACP unit keeps its harness
@@ -1778,6 +1782,7 @@ export class SquadManager extends EventEmitter {
 			lastActivity: Date.now(),
 			messageCount: 0,
 			issue: p.issue,
+			lane: p.lane,
 			kind: p.kind ?? "omp-operator",
 			executionRole: p.executionRole,
 			parentId: p.parentId,
@@ -1901,6 +1906,7 @@ export class SquadManager extends EventEmitter {
 			lastActivity: Date.now(),
 			messageCount: transcript.length,
 			issue: p.issue,
+			lane: p.lane,
 			kind: p.kind ?? "omp-operator",
 			executionRole: p.executionRole,
 			parentId: p.parentId,
@@ -4287,7 +4293,9 @@ export class SquadManager extends EventEmitter {
 		// and must never buy privilege on its own (mirrors `do-not-auto-land`'s fail-safe-only
 		// direction); it still logs and parameterizes shadow decisions. `laneAppliesPrivilege` gates
 		// exactly that below, at the model-route apply-mode decision.
-		const laneSource: "operator" | "label" | "classifier" | "default" = opts.lane ? "operator" : opts.issue?.lane ? "label" : classifierLane ? "classifier" : "default";
+		// Restore paths pass the persisted source verbatim (opts.laneSource) so a daemon restart can
+		// never upgrade a classifier/label lane into an operator-sourced, privilege-bearing one.
+		const laneSource: WorkLaneSource = opts.laneSource ?? (opts.lane ? "operator" : opts.issue?.lane ? "label" : classifierLane ? "classifier" : "default");
 		const resolvedLane: WorkLane = opts.lane ?? opts.issue?.lane ?? classifierLane ?? "feature";
 		const laneAppliesPrivilege = laneSource === "operator";
 		this.log("info", `lane${laneAppliesPrivilege ? "" : " [shadow]"}: ${resolvedLane} source=${laneSource}`);
@@ -4334,11 +4342,13 @@ export class SquadManager extends EventEmitter {
 				const rows = await readTaskOutcomes(this.stateDir);
 				const matrix = buildTaskClassMatrix(rows, this.landingRosterRouting(), { start: Date.now() - 30 * DAY_MS, end: Date.now() });
 				const decision = routeModelForTaskClass(taskClass, matrix);
-				// Lane clamp (concern 02): the global apply flag alone is not enough — a label/classifier
-				// -sourced lane forces shadow regardless, so a ticket's own text can never buy the model
-				// -apply privilege axis. Only an operator-sourced lane (or an explicit opts.lane) may ride
-				// the global flag through to apply mode.
-				const shadow = process.env.OMP_SQUAD_MODEL_ROUTE_SHADOW !== "0" || !laneAppliesPrivilege;
+				// Lane clamp (concern 02): this decision takes NO lane input today, so the lane source
+				// must not gate the operator's global apply flag (doing so would silently kill apply for
+				// every spawn without an explicit opts.lane — the dispatcher never sets one). The clamp
+				// binds where lane actually parameterizes the router (concern 09): lane-derived minEdge/
+				// frontier overrides may only be passed when `laneAppliesPrivilege` — a label/classifier
+				// lane is ticket text and must never buy the privilege axis.
+				const shadow = process.env.OMP_SQUAD_MODEL_ROUTE_SHADOW !== "0";
 				this.learningMetrics.record("model-route-decision", decision.model ? 1 : 0, {
 					mode: shadow ? "shadow" : "apply",
 					taskClass: `${taskClass.mode}:${taskClass.tier}`,
@@ -4468,6 +4478,7 @@ export class SquadManager extends EventEmitter {
 			appendSystemPrompt: opts.appendSystemPrompt,
 			issue: opts.issue,
 			lane: resolvedLane,
+			laneSource,
 			kind,
 			executionRole: opts.executionRole,
 			// Persisted, not just passed: `captureAnswer` reads `rec.options.ask` at `agent_end`, and a unit
@@ -8446,6 +8457,10 @@ export class SquadManager extends EventEmitter {
 				// — cosmetic, idempotent content, no behavioral effect; non-profiled fleet units compose cleanly.
 				appendSystemPrompt: p.appendSystemPrompt,
 				issue: p.issue,
+				// Restore the resolved lane + its SOURCE verbatim (concern 02): without the source, a
+				// restart would re-resolve a persisted classifier lane as operator-sourced (privilege upgrade).
+				lane: p.lane,
+				laneSource: p.laneSource,
 				parentId: p.parentId,
 				...lineageFieldsFrom(p),
 				// Restore the harness lineage so a cold-adopted/restored pi or ACP unit keeps its harness
