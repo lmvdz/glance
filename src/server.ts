@@ -84,10 +84,11 @@ import { appendConcernDecision, listPlanDirs, parsePlanConcerns, parsePlanDocume
 import { isPlanDocPath, planDocDiffSince, planDocHeadRevision, readPlanDoc } from "./plan-doc.ts";
 import { planVoteGateOpen, tallyPlanVoteRound } from "./plan-votes.ts";
 import { hardenedGit } from "./git-harden.ts";
-import { searchFabric, type KbDocType } from "./fabric-search.ts";
+import { rankKbDocs, searchFabric, type KbDoc, type KbDocType } from "./fabric-search.ts";
 import type { FabricSnapshot } from "./fabric.ts";
 import { redactAttentionForActor, redactSeenMapForActor } from "./attention.ts";
 import { computeFog, repoHasHistory } from "./comprehension-fog.ts";
+import type { SymptomSearchHit } from "./symptoms.ts";
 import { normalizeRepoPath } from "./project-registry.ts";
 import { readAudit, type AuditQuery } from "./audit.ts";
 import type { AutomationEvent, AutomationLoop, AutomationQuery, AutomationRollupRow } from "./automation-log.ts";
@@ -840,6 +841,10 @@ export class SquadServer {
 			gate: { image: process.env.OMP_SQUAD_GATE_SANDBOX?.trim() || process.env.OMP_SQUAD_GATE_SANDBOX_IMAGE?.trim() || DERIVED_SANDBOX_IMAGE, strict: envBool("OMP_SQUAD_GATE_SANDBOX_STRICT", false) },
 			projects: [...new Set(managers.flatMap((m) => m.projects().map((p) => p.repo)))],
 			zombieAgents: agents.filter((a) => a.status === "error").length,
+			// Known-symptom index (comprehension concern 07), fleet-wide across every manager — feeds both
+			// `glance doctor`'s summary row and the per-check auto-match. Stripped to the two fields
+			// `matchSymptom` needs; the daemon's stateDir stays the only place a full `SymptomEntry` lives.
+			symptoms: (await Promise.all(managers.map((m) => m.symptoms()))).flat().map((s) => ({ symptom: s.symptom, whereToLook: s.whereToLook })),
 		};
 	}
 
@@ -1742,6 +1747,28 @@ export class SquadServer {
 		if (url.pathname.startsWith("/api/answers/") && req.method === "GET") {
 			const answer = await manager.answer(decodeURIComponent(url.pathname.slice("/api/answers/".length)));
 			return answer ? Response.json(answer) : new Response("no such answer", { status: 404 });
+		}
+		// `glance symptom <query>` (comprehension concern 07): ranking stays server-side, reusing
+		// fabric-search's BM25 core (`rankKbDocs`) over symptom+whereToLook text rather than forking a
+		// second scorer — the same machinery `GET /api/fabric/search` drives off the flattened snapshot,
+		// applied here directly to `listSymptoms` so the CLI gets the FULL entry back (whereToLook array,
+		// fixedBy, landedAt) instead of a lossy KbDoc snippet. An empty/missing `q` returns no results
+		// (never the unranked full list) — this route ranks, it doesn't browse.
+		if (url.pathname === "/api/symptoms" && req.method === "GET") {
+			const repo = url.searchParams.get("repo") ?? undefined;
+			const q = url.searchParams.get("q") ?? "";
+			const topK = boundedNumber(url.searchParams.get("topK"), 20, 1, 100);
+			if (!q.trim()) return Response.json({ query: q, results: [] as SymptomSearchHit[] });
+			const all = await manager.symptoms(repo);
+			const docs: KbDoc[] = all.map((s) => ({ type: "symptom", id: s.id, title: s.symptom, text: `${s.symptom} ${s.whereToLook.join(" ")}`, repo: s.repo, ts: s.landedAt }));
+			const byId = new Map(all.map((s) => [s.id, s]));
+			const results: SymptomSearchHit[] = rankKbDocs(docs, q, { topK })
+				.map((r) => {
+					const entry = byId.get(r.id);
+					return entry ? { id: entry.id, symptom: entry.symptom, whereToLook: entry.whereToLook, repo: entry.repo, fixedBy: entry.fixedBy, landedAt: entry.landedAt, score: r.score } : undefined;
+				})
+				.filter((r): r is SymptomSearchHit => r !== undefined);
+			return Response.json({ query: q, results });
 		}
 		if (url.pathname === "/api/answers" && req.method === "POST") {
 			const decoded = decodeBody(AskBodySchema, await req.json().catch(() => null));
@@ -3063,7 +3090,7 @@ async function allReceiptsAcross(managers: SquadManager[]): Promise<RunReceipt[]
  */
 async function fabricSnapshotAcross(managers: SquadManager[], actor: Actor, opts: { repos?: string[]; includeLeases?: boolean }): Promise<FabricSnapshot> {
 	const snapshots = await Promise.all(managers.map((m) => m.fabric(actor, opts)));
-	if (snapshots.length <= 1) return snapshots[0] ?? { actor: actor.id, generatedAt: Date.now(), scope: [], agents: [], digests: [], hotAreas: [], scout: [], leases: [], decisions: [], failures: [] };
+	if (snapshots.length <= 1) return snapshots[0] ?? { actor: actor.id, generatedAt: Date.now(), scope: [], agents: [], digests: [], hotAreas: [], scout: [], leases: [], decisions: [], failures: [], symptoms: [] };
 	return {
 		actor: actor.id,
 		generatedAt: Math.max(...snapshots.map((s) => s.generatedAt)),
@@ -3078,6 +3105,7 @@ async function fabricSnapshotAcross(managers: SquadManager[], actor: Actor, opts
 		leases: snapshots.flatMap((s) => s.leases),
 		decisions: snapshots.flatMap((s) => s.decisions),
 		failures: snapshots.flatMap((s) => s.failures),
+		symptoms: snapshots.flatMap((s) => s.symptoms),
 	};
 }
 

@@ -57,6 +57,7 @@ function snapshotWith(featureTitle: string, text: string): FabricSnapshot {
 		leases: [],
 		decisions: [{ type: "decision", source: { repo: "/srv/app", featureId: "f0" }, featureTitle, text, createdAt: Date.now() }],
 		failures: [],
+		symptoms: [],
 	} as unknown as FabricSnapshot;
 }
 

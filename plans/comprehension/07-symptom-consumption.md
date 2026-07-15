@@ -1,5 +1,5 @@
 # Symptom consumption: glance symptom, doctor-failure auto-match, fabric fact
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural

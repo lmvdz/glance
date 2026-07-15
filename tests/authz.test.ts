@@ -81,6 +81,9 @@ test("restActionTier: reads viewer, mutations operator, destructive admin, auth/
 	// Comprehension fog (concern 03): a read-only per-file debt number, explicitly registered viewer
 	// tier like the attention reads it joins against.
 	expect(restActionTier("GET", "/api/fog")).toBe("viewer");
+	// Known-symptom cards (comprehension concern 07): reading the symptom index is viewer-tier, same
+	// as /api/fabric/search — the pull half of the doctor auto-match's push half.
+	expect(restActionTier("GET", "/api/symptoms")).toBe("viewer");
 });
 
 test("applyCommand: operator denied destructive ops (RbacDenied + audited); admin allowed", async () => {

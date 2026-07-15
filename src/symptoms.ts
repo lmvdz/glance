@@ -273,3 +273,59 @@ export async function statWhereToLookEntry(repoRoot: string, entry: string): Pro
 		return "missing";
 	}
 }
+
+// ── consumption (comprehension lane, concern 07) ────────────────────────────────────────────────
+
+/** One ranked hit off `GET /api/symptoms?q=…` — a `SymptomEntry` plus its BM25 score. Shaped for
+ *  both `glance symptom` (CLI render) and the fabric/⌘K search projection. */
+export interface SymptomSearchHit {
+	id: string;
+	symptom: string;
+	whereToLook: string[];
+	repo: string;
+	fixedBy: SymptomEntry["fixedBy"];
+	landedAt: number;
+	score: number;
+}
+
+/** Query-time collapse of the same recurring defect (RT2-14's "symptom dedup collisions"): entries
+ *  whose NORMALIZED symptom text is identical fold into one group, newest first — a defect that
+ *  recurred across three weeks reads as one card with a history, not three duplicate hits. */
+export interface SymptomGroup {
+	/** The group's display text — the newest member's raw phrasing (case/whitespace as recorded). */
+	symptom: string;
+	/** This group's members, newest (`landedAt`) first. */
+	entries: SymptomSearchHit[];
+}
+
+/**
+ * Group `hits` by normalized symptom text, newest-first within each group. Group ORDER mirrors the
+ * position each group's first-encountered member held in `hits` — this never re-ranks anything (the
+ * caller already ranked `hits`, e.g. by BM25 score); it only folds duplicates together without
+ * disturbing relative order. Pure: no I/O, so every branch is directly testable.
+ */
+export function groupSymptomHits<T extends { symptom: string; landedAt: number }>(hits: T[]): Array<{ symptom: string; entries: T[] }> {
+	const order: string[] = [];
+	const byKey = new Map<string, T[]>();
+	for (const hit of hits) {
+		const key = normalizeSymptomText(hit.symptom);
+		const bucket = byKey.get(key);
+		if (bucket) bucket.push(hit);
+		else {
+			byKey.set(key, [hit]);
+			order.push(key);
+		}
+	}
+	return order.map((key) => {
+		const entries = byKey.get(key)!.slice().sort((a, b) => b.landedAt - a.landedAt);
+		return { symptom: entries[0]!.symptom, entries };
+	});
+}
+
+/** Render one `whereToLook` entry, flagging it `(path missing)` when `stat` says it no longer exists
+ *  on disk — a dead pointer surfaced mid-incident is worse than none (DESIGN.md). Pure: the CALLER
+ *  resolves the real stat via `statWhereToLookEntry`, so this stays filesystem-free and is testable
+ *  without a real repo. */
+export function formatWhereToLookEntry(entry: string, stat: WhereToLookStat): string {
+	return stat === "missing" ? `${entry} (path missing)` : entry;
+}
