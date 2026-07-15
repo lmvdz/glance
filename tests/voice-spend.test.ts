@@ -46,6 +46,7 @@ const SAVED_ENV: Record<string, string | undefined> = {
 	OMP_SQUAD_VOICE_OPENAI_API_KEY: process.env.OMP_SQUAD_VOICE_OPENAI_API_KEY,
 	OMP_SQUAD_VOICE_MINT_RATE_PER_MIN: process.env.OMP_SQUAD_VOICE_MINT_RATE_PER_MIN,
 	OMP_SQUAD_VOICE_MAX_CONCURRENT_PER_ORG: process.env.OMP_SQUAD_VOICE_MAX_CONCURRENT_PER_ORG,
+	OMP_SQUAD_VOICE_TOKEN_TTL_S: process.env.OMP_SQUAD_VOICE_TOKEN_TTL_S,
 	DATABASE_URL: process.env.DATABASE_URL,
 };
 const cleanups: Array<() => Promise<void> | void> = [];
@@ -176,7 +177,9 @@ test("durable per-org concurrency cap: N=2 admits two mints, the third 429s, and
 	// ways.
 	const thirdBody = await third.text();
 	expect(thirdBody).toContain("voice mint limit");
-	expect(thirdBody).toContain("per 60 minutes");
+	// 62 minutes, not 60 — the window is the provider's own session cap (60 min) PLUS the mint token's
+	// establishment TTL (default 120s ⇒ 2 min), per concern 02's fix.
+	expect(thirdBody).toContain("per 62 minutes");
 	expect(thirdBody).not.toContain("concurrency");
 
 	const refusalRows = await handle.db.selectFrom("audit").selectAll().where("org_id", "=", "orgCap").where("action", "=", "voice.mint.refused").execute();
@@ -271,9 +274,106 @@ test("durable per-org concurrency cap: once the window slides past the old mints
 	expect((await mint()).status).toBe(200);
 	expect((await mint()).status).toBe(429); // cap of 1 already hit
 
-	// Backdate the existing mint row to well outside the provider's max-session window (60 min) —
-	// simulating time passing, since a live test can't actually wait an hour.
-	await handle.db.updateTable("audit").set({ at: Date.now() - 61 * 60_000 }).where("org_id", "=", "orgSlide").where("action", "=", "voice.mint").execute();
+	// Backdate the existing mint row to well outside the counting window — the provider's max-session
+	// window (60 min) PLUS the mint token's establishment TTL (default 120s ⇒ 62 min total, concern
+	// 02's fix below) — simulating time passing, since a live test can't actually wait 62 minutes.
+	await handle.db.updateTable("audit").set({ at: Date.now() - 63 * 60_000 }).where("org_id", "=", "orgSlide").where("action", "=", "voice.mint").execute();
+	expect((await mint()).status).toBe(200);
+});
+
+// ── Concern 02 fix: the counting window must include the establishment TTL, not just the
+// provider's own session-length cap ─────────────────────────────────────────────────────────
+
+test("durable per-org concurrency cap counts a mint over maxSessionWindowMs + the establishment TTL, not maxSessionWindowMs alone — a late-established session must still be bounded", async () => {
+	// Regression for concern 02: the old window was `voiceProviderMaxSessionWindowMs(id)` alone (60
+	// min), measured from MINT time. But a token isn't established the instant it's minted — the
+	// caller has up to `voiceTokenTtlSeconds()` (default 120s) to open the WebRTC connection, and only
+	// THEN does the provider's own 60-min session clock start. A session established at
+	// mint + 120s can stay live until ~mint + 120s + 60min, while the old window dropped its
+	// reservation out of the count at mint + 60min — a gap of up to the TTL (here: the 61-minute mark)
+	// during which a genuinely-still-live session no longer counted against the cap, letting the org
+	// mint over its configured limit. The fixed window is 62 min (60 + 2); a mint backdated to 61
+	// minutes ago must STILL count — proven here by asserting the very next mint is refused, not
+	// admitted, at that mark.
+	initMasterKey({ OMP_SQUAD_SECRETS_KEY: KEY_HEX });
+	process.env.OMP_SQUAD_VOICE_ENABLED = "1";
+	process.env.OMP_SQUAD_VOICE_MAX_CONCURRENT_PER_ORG = "1";
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "voice-spend-ttl-window-"));
+	process.env.DATABASE_URL = `sqlite:${path.join(dir, "app.sqlite")}`;
+	const { url, ctx, handle, stop } = await bootDbModeServer(dir, ["orgTtlWindow"], { userT: { id: "user-t", orgId: "orgTtlWindow", role: "member" } });
+	cleanups.push(async () => {
+		await stop();
+		await fs.rm(dir, { recursive: true, force: true });
+	});
+	await putOrgSecret(ctx, "orgTtlWindow", "openai", "sk-org-ttl-window-key", "db:user-t");
+	mockOpenAiMintAlwaysOk();
+
+	const mint = () => fetch(`${url}/api/voice/token`, { method: "POST", headers: { cookie: "session=userT" } });
+	expect((await mint()).status).toBe(200);
+
+	// Backdate to 61 minutes ago: past the OLD (buggy) 60-min-only window, so the pre-fix cap would
+	// have dropped this row from the count and wrongly admitted a second concurrent mint. It is still
+	// inside the FIXED 62-min window (60 min provider cap + 120s default TTL), so the fix must refuse.
+	await handle.db.updateTable("audit").set({ at: Date.now() - 61 * 60_000 }).where("org_id", "=", "orgTtlWindow").where("action", "=", "voice.mint").execute();
+	const secondAtSixtyOne = await mint();
+	expect(secondAtSixtyOne.status).toBe(429);
+
+	// Past the fixed 62-min window too (63 min): the mint is genuinely gone, and a new one is admitted.
+	await handle.db.updateTable("audit").set({ at: Date.now() - 63 * 60_000 }).where("org_id", "=", "orgTtlWindow").where("action", "=", "voice.mint").execute();
+	expect((await mint()).status).toBe(200);
+});
+
+test("durable per-org concurrency cap window respects a configured OMP_SQUAD_VOICE_TOKEN_TTL_S, not just the provider's default", async () => {
+	// Same mutation-sensitive shape as above, but with a non-default TTL override, proving the window
+	// actually reads the configured value rather than a hardcoded 120s.
+	initMasterKey({ OMP_SQUAD_SECRETS_KEY: KEY_HEX });
+	process.env.OMP_SQUAD_VOICE_ENABLED = "1";
+	process.env.OMP_SQUAD_VOICE_MAX_CONCURRENT_PER_ORG = "1";
+	process.env.OMP_SQUAD_VOICE_TOKEN_TTL_S = "600"; // 10 min ⇒ window = 60 + 10 = 70 min
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "voice-spend-ttl-configured-"));
+	process.env.DATABASE_URL = `sqlite:${path.join(dir, "app.sqlite")}`;
+	const { url, ctx, handle, stop } = await bootDbModeServer(dir, ["orgTtlCfg"], { userV: { id: "user-v", orgId: "orgTtlCfg", role: "member" } });
+	cleanups.push(async () => {
+		await stop();
+		await fs.rm(dir, { recursive: true, force: true });
+	});
+	await putOrgSecret(ctx, "orgTtlCfg", "openai", "sk-org-ttl-cfg-key", "db:user-v");
+	mockOpenAiMintAlwaysOk();
+
+	const mint = () => fetch(`${url}/api/voice/token`, { method: "POST", headers: { cookie: "session=userV" } });
+	expect((await mint()).status).toBe(200);
+
+	// 65 minutes ago: past the un-configured 62-min window but inside the configured 70-min window.
+	await handle.db.updateTable("audit").set({ at: Date.now() - 65 * 60_000 }).where("org_id", "=", "orgTtlCfg").where("action", "=", "voice.mint").execute();
+	expect((await mint()).status).toBe(429);
+
+	// 71 minutes ago: past the configured 70-min window too.
+	await handle.db.updateTable("audit").set({ at: Date.now() - 71 * 60_000 }).where("org_id", "=", "orgTtlCfg").where("action", "=", "voice.mint").execute();
+	expect((await mint()).status).toBe(200);
+});
+
+test("OMP_SQUAD_VOICE_TOKEN_TTL_S is clamped to a sane ceiling (1 hour) — an absurdly large configured value cannot inflate the concurrency window without bound", async () => {
+	initMasterKey({ OMP_SQUAD_SECRETS_KEY: KEY_HEX });
+	process.env.OMP_SQUAD_VOICE_ENABLED = "1";
+	process.env.OMP_SQUAD_VOICE_MAX_CONCURRENT_PER_ORG = "1";
+	process.env.OMP_SQUAD_VOICE_TOKEN_TTL_S = "999999"; // clamps to 3600s (1h) ⇒ window = 60 + 60 = 120 min
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "voice-spend-ttl-clamp-"));
+	process.env.DATABASE_URL = `sqlite:${path.join(dir, "app.sqlite")}`;
+	const { url, ctx, handle, stop } = await bootDbModeServer(dir, ["orgTtlClamp"], { userW: { id: "user-w", orgId: "orgTtlClamp", role: "member" } });
+	cleanups.push(async () => {
+		await stop();
+		await fs.rm(dir, { recursive: true, force: true });
+	});
+	await putOrgSecret(ctx, "orgTtlClamp", "openai", "sk-org-ttl-clamp-key", "db:user-w");
+	mockOpenAiMintAlwaysOk();
+
+	const mint = () => fetch(`${url}/api/voice/token`, { method: "POST", headers: { cookie: "session=userW" } });
+	expect((await mint()).status).toBe(200);
+
+	// 121 minutes ago: past the clamped 120-min window (60 + 60). If the TTL were NOT clamped, the
+	// configured 999999s (~11.5 days) would keep this row counted for over a week, permanently locking
+	// the org out — the clamp bounds that blast radius to a sane ceiling.
+	await handle.db.updateTable("audit").set({ at: Date.now() - 121 * 60_000 }).where("org_id", "=", "orgTtlClamp").where("action", "=", "voice.mint").execute();
 	expect((await mint()).status).toBe(200);
 });
 

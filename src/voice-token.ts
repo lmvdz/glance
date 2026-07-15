@@ -123,15 +123,43 @@ function voiceVoice(): string {
 	return process.env.OMP_SQUAD_VOICE_VOICE?.trim() || "marin";
 }
 
+/** Ceiling on `OMP_SQUAD_VOICE_TOKEN_TTL_S` (1 hour) — generous vs. the 120s default, but a hard
+ *  upper bound. server.ts's durable per-org concurrency cap (`reserveOrgAuditSlot`) now counts mint-
+ *  audit rows over `voiceProviderMaxSessionWindowMs(id) + voiceTokenTtlSeconds() * 1000`
+ *  (plans/voice-db-mode/04-spend-controls.md) — an unbounded TTL would let this SAME env var that
+ *  widens a token's establishment window also widen the counting window it feeds, without limit.
+ *  Exported so server.ts reads the identical, already-clamped value it adds to the window (never a
+ *  second, independently-read/clamped copy that could drift from what `mintOpenAiToken` actually
+ *  puts on the wire). */
+export const VOICE_TOKEN_TTL_MAX_S = 3600;
+
+let voiceTokenTtlWarned = false;
+
 /** Seconds until the minted token itself expires (`expires_after.seconds`) — an ESTABLISHMENT
  *  window, not the call length: the provider caps a live session's duration independently, on its
  *  own clock, once the browser has connected (DESIGN.md "Mint TTL" row). Default 120s is long
  *  enough to establish the WebRTC connection right after mint, short enough that hoarding hundreds
  *  of unused tokens for later stops being possible. `OMP_SQUAD_VOICE_TOKEN_TTL_S`-overridable;
  *  `envInt` respects an operator-configured `0`/negative faithfully (a provider 400 is the honest
- *  outcome of misconfiguring this to something nonsensical, not a silently-substituted default). */
-function voiceTokenTtlSeconds(): number {
-	return envInt("OMP_SQUAD_VOICE_TOKEN_TTL_S", 120);
+ *  outcome of misconfiguring this to something nonsensical, not a silently-substituted default) —
+ *  only the UPPER end is clamped (`VOICE_TOKEN_TTL_MAX_S`), because a too-large value doesn't just
+ *  leave tokens establishable for longer, it also inflates the durable per-org concurrency window
+ *  above that adds this TTL to the provider's own session cap (plans/voice-db-mode/
+ *  04-spend-controls.md concern 02 fix) — clamping keeps that window bounded even under a
+ *  misconfigured operator env, same non-positive/too-large clamp-and-warn-once discipline as
+ *  `resolveVoiceMaxConcurrentPerOrg` and its siblings in server.ts. */
+export function voiceTokenTtlSeconds(): number {
+	const configured = envInt("OMP_SQUAD_VOICE_TOKEN_TTL_S", 120);
+	if (configured > VOICE_TOKEN_TTL_MAX_S) {
+		if (!voiceTokenTtlWarned) {
+			voiceTokenTtlWarned = true;
+			console.warn(
+				`[voice-token] OMP_SQUAD_VOICE_TOKEN_TTL_S="${configured}" exceeds the maximum (${VOICE_TOKEN_TTL_MAX_S}s) — clamping (a larger value would both leave tokens valid to establish for too long and inflate the durable per-org concurrency window that adds this TTL to the provider's own session cap)`,
+			);
+		}
+		return VOICE_TOKEN_TTL_MAX_S;
+	}
+	return configured;
 }
 
 /** Which lane a voice-key lookup resolves in — the ONE signal every consumer below reads instead

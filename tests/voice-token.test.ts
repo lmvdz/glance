@@ -42,7 +42,7 @@ import { ManagerRegistry } from "../src/manager-registry.ts";
 import { initMasterKey } from "../src/secrets.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import { ROOT_FACTORY_ORG, SquadServer, type AuthInstance, type SquadServerOptions } from "../src/server.ts";
-import { isKnownVoiceProvider, mintVoiceToken, orgHasKey, VOICE_SESSION_TOOLS, voiceKeyFor, type VoiceKeyScope } from "../src/voice-token.ts";
+import { isKnownVoiceProvider, mintVoiceToken, orgHasKey, VOICE_SESSION_TOOLS, VOICE_TOKEN_TTL_MAX_S, voiceKeyFor, voiceTokenTtlSeconds, type VoiceKeyScope } from "../src/voice-token.ts";
 
 const OPENAI_MINT_URL = "https://api.openai.com/v1/realtime/client_secrets";
 const realFetch = globalThis.fetch;
@@ -258,6 +258,37 @@ test("mintVoiceToken's expires_after seconds honors OMP_SQUAD_VOICE_TOKEN_TTL_S 
 	expect(capturedBody.expires_after).toEqual({ anchor: "created_at", seconds: 45 });
 });
 
+test("voiceTokenTtlSeconds clamps an absurdly large OMP_SQUAD_VOICE_TOKEN_TTL_S to VOICE_TOKEN_TTL_MAX_S (1 hour) — server.ts's durable per-org concurrency window (concern 02) adds this value to the provider's session cap, so an unbounded TTL would inflate it without limit", () => {
+	process.env.OMP_SQUAD_VOICE_TOKEN_TTL_S = "999999";
+	expect(voiceTokenTtlSeconds()).toBe(VOICE_TOKEN_TTL_MAX_S);
+});
+
+test("voiceTokenTtlSeconds passes a value at or below the ceiling through unchanged", () => {
+	process.env.OMP_SQUAD_VOICE_TOKEN_TTL_S = String(VOICE_TOKEN_TTL_MAX_S);
+	expect(voiceTokenTtlSeconds()).toBe(VOICE_TOKEN_TTL_MAX_S);
+	process.env.OMP_SQUAD_VOICE_TOKEN_TTL_S = "45";
+	expect(voiceTokenTtlSeconds()).toBe(45);
+});
+
+test("voiceTokenTtlSeconds still passes a non-positive configured value through faithfully — only the UPPER end is clamped, per its own doc comment", () => {
+	process.env.OMP_SQUAD_VOICE_TOKEN_TTL_S = "0";
+	expect(voiceTokenTtlSeconds()).toBe(0);
+	process.env.OMP_SQUAD_VOICE_TOKEN_TTL_S = "-5";
+	expect(voiceTokenTtlSeconds()).toBe(-5);
+});
+
+test("mintVoiceToken's expires_after seconds is clamped to VOICE_TOKEN_TTL_MAX_S even when OMP_SQUAD_VOICE_TOKEN_TTL_S is configured absurdly large", async () => {
+	process.env.OMP_SQUAD_VOICE_TOKEN_TTL_S = "999999";
+	let capturedBody: any;
+	mockOpenAiMint((body) => {
+		capturedBody = body;
+		return { status: 200, json: { value: "ek_ttl_clamped", expires_at: 1, session: {} } };
+	});
+	const result = await mintVoiceToken("openai", "sk-key");
+	expect(result.ok).toBe(true);
+	expect(capturedBody.expires_after).toEqual({ anchor: "created_at", seconds: VOICE_TOKEN_TTL_MAX_S });
+});
+
 test("VOICE_SESSION_TOOLS stays deep-equal with the webapp dispatcher's VOICE_TOOL_DEFS (cross-build sync pin)", async () => {
 	// The daemon pins the tool schemas at mint; the webapp dispatcher validates and executes the
 	// resulting calls. Two builds, one contract — this pin is what keeps them from drifting apart
@@ -335,16 +366,22 @@ test("both voice routes 404 when OMP_SQUAD_VOICE_ENABLED=0 explicitly", async ()
 	expect((await fetch(`${url}/api/voice/config`, { headers: { authorization: "Bearer admin-tok" } })).status).toBe(404);
 });
 
-test("GET /api/voice/config: viewer tier gets {enabled} ONLY (no providers key); operator+ gets providers", async () => {
+test("GET /api/voice/config: viewer tier gets {enabled:false} — never a live button for a tier that can't mint; operator+ gets providers", async () => {
 	process.env.OMP_SQUAD_VOICE_ENABLED = "1";
 	process.env.OMP_SQUAD_VOICE_OPENAI_API_KEY = "sk-test";
 	const { url } = await startServer({ token: "admin-tok", roleTokens: { operator: "op-tok", viewer: "view-tok" } });
 
+	// A key IS configured, so before this fix the probe advertised {enabled:true} to a viewer — a
+	// "Start voice call" button that always 403s on click, since POST /api/voice/token is
+	// operator-tier (restActionTier). The probe must now agree with the mint route's own floor.
 	const viewerRes = await fetch(`${url}/api/voice/config`, { headers: { authorization: "Bearer view-tok" } });
 	expect(viewerRes.status).toBe(200);
 	const viewerBody = await viewerRes.json();
-	expect(viewerBody).toEqual({ enabled: true });
+	expect(viewerBody).toEqual({ enabled: false });
 	expect("providers" in viewerBody).toBe(false);
+	// Prove the button really would have died: the same viewer's own mint attempt 403s.
+	const viewerMint = await fetch(`${url}/api/voice/token`, { method: "POST", headers: { authorization: "Bearer view-tok" } });
+	expect(viewerMint.status).toBe(403);
 
 	const opRes = await fetch(`${url}/api/voice/config`, { headers: { authorization: "Bearer op-tok" } });
 	expect(opRes.status).toBe(200);

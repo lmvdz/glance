@@ -118,6 +118,7 @@ import {
 	voiceProviderMaxSessionWindowMs,
 	voiceProviderOrigins,
 	voiceProviderPublicInfo,
+	voiceTokenTtlSeconds,
 	VOICE_MINT_AUDIT_ACTION,
 	type VoiceKeyScope,
 } from "./voice-token.ts";
@@ -505,6 +506,24 @@ function resolveVoiceKeyPutRatePerMin(): number {
 	return VOICE_KEY_PUT_RATE_DEFAULT_PER_MIN;
 }
 
+/** Shared minute-bucket limiter body for `voiceMintRateAllowed`/`voiceKeyPutRateAllowed` — the two
+ *  used to duplicate this verbatim (two identical `Map`-based limiters differing only in which map
+ *  they bucket into), so a future rollover fix (e.g. a sliding window) had to be applied twice by
+ *  hand or silently drift. `bucket` is the caller's own `Map` (mutated in place, same as before);
+ *  `key` falls back to `"unknown"` on an empty/missing actor id, matching both call sites' prior
+ *  behavior exactly. */
+function minuteRateAllowed(bucket: Map<string, { minute: number; count: number }>, key: string, limit: number): boolean {
+	const minute = Math.floor(Date.now() / 60_000);
+	const k = key || "unknown";
+	const rec = bucket.get(k);
+	if (!rec || rec.minute !== minute) {
+		bucket.set(k, { minute, count: 1 });
+		return true;
+	}
+	rec.count++;
+	return rec.count <= limit;
+}
+
 export class SquadServer {
 	private readonly singleManager?: SquadManager;
 	/** DB-registry mode fleet (per-org managers); undefined ⇒ single-manager (file mode / db-single). */
@@ -592,7 +611,16 @@ export class SquadServer {
 	private async bridgeRole(req: Request, activeOrgId: string | null | undefined): Promise<Role> {
 		if (!this.auth || !activeOrgId) return "viewer";
 		try {
-			const { role } = await this.auth.api.getActiveMemberRole({ headers: req.headers });
+			// Bind the role lookup to the SAME org id every caller uses for the resource it's about to
+			// act on (`session.session.activeOrganizationId`, read again by each route below). Without
+			// `query.organizationId`, better-auth resolves the role against whatever org is active AT
+			// CALL TIME — its own fresh lookup, not the snapshot this function was handed. A member-of-A
+			// + admin-of-B user can flip their active org to B between `getSession` (which produced
+			// `activeOrgId` = A) and this call: the unqualified call would then report "admin" (of B,
+			// the now-current active org) while the handler goes on to write org A's key, using the
+			// earlier snapshot. Passing the org explicitly makes role and resource bind to the one org,
+			// closing that cross-tenant write.
+			const { role } = await this.auth.api.getActiveMemberRole({ headers: req.headers, query: { organizationId: activeOrgId } });
 			return role === "owner" || role === "admin" ? "admin" : "operator";
 		} catch {
 			return "viewer";
@@ -637,32 +665,14 @@ export class SquadServer {
 	 *  but keyed by `actor.id` (not IP) — voice mint is authenticated, so the actor identity is the
 	 *  natural per-caller bucket, same as everywhere else RBAC-scoped state is keyed. */
 	private voiceMintRateAllowed(actor: Actor): boolean {
-		const limit = resolveVoiceMintRatePerMin();
-		const minute = Math.floor(Date.now() / 60_000);
-		const key = actor.id || "unknown";
-		const rec = this.voiceMintRate.get(key);
-		if (!rec || rec.minute !== minute) {
-			this.voiceMintRate.set(key, { minute, count: 1 });
-			return true;
-		}
-		rec.count++;
-		return rec.count <= limit;
+		return minuteRateAllowed(this.voiceMintRate, actor.id, resolveVoiceMintRatePerMin());
 	}
 
 	/** Per-actor `PUT /api/org/voice-key` rate cap, mirroring `voiceMintRateAllowed`'s shape exactly
 	 *  but keyed by the caller's own actor id rather than the mint route's resolved `Actor` (this
 	 *  route runs before the fleet-manager `actor` is resolved — see the route's own comment). */
 	private voiceKeyPutRateAllowed(actorId: string): boolean {
-		const limit = resolveVoiceKeyPutRatePerMin();
-		const minute = Math.floor(Date.now() / 60_000);
-		const key = actorId || "unknown";
-		const rec = this.voiceKeyPutRate.get(key);
-		if (!rec || rec.minute !== minute) {
-			this.voiceKeyPutRate.set(key, { minute, count: 1 });
-			return true;
-		}
-		rec.count++;
-		return rec.count <= limit;
+		return minuteRateAllowed(this.voiceKeyPutRate, actorId, resolveVoiceKeyPutRatePerMin());
 	}
 
 	/** True when this org id names the operator's root factory (DB mode): the on-box loopback admin's
@@ -1501,9 +1511,16 @@ export class SquadServer {
 			// with no resolvable key would otherwise advertise a voice button that dies at the very
 			// first mint attempt (the "old mic scar" this capability probe exists to prevent).
 			if (!(await orgHasKey(voiceScope))) return Response.json({ enabled: false });
-			// Viewer tier gets the bare capability probe only — provider posture (which keys are
-			// configured) is never leaked below operator (DESIGN.md red-team: "leaks provider posture").
-			if (role === "viewer") return Response.json({ enabled: true });
+			// POST /api/voice/token (the mint route, below) is operator-tier via `restActionTier`'s
+			// GET=viewer/POST=operator default — a viewer can never mint. Advertising `enabled: true` to
+			// a viewer anyway used to draw a "Start voice call" button that always 403s on click: config-
+			// honesty and mint-capability disagreeing by RBAC tier, the same shape `orgHasKey` above
+			// exists to prevent for key state. Gate the boolean itself on the SAME floor the mint route
+			// enforces (never a viewer, never a hand-picked tier that could drift from it) so a viewer
+			// sees `enabled: false` — no button — rather than one that can never succeed. Provider
+			// posture (which keys are configured) stays gated to operator+ too (DESIGN.md red-team:
+			// "leaks provider posture"), now simply implied by the same check.
+			if (!roleAtLeast(role, "operator")) return Response.json({ enabled: false });
 			return Response.json({ enabled: true, providers: await voiceProviderPublicInfo(voiceScope) });
 		}
 		if (url.pathname === "/api/voice/token" && req.method === "POST") {
@@ -1566,7 +1583,16 @@ export class SquadServer {
 			const dbAuditable = voiceScope.mode === "db" && voiceScope.ctx && voiceScope.orgId ? { ctx: voiceScope.ctx, orgId: voiceScope.orgId } : undefined;
 			let reservedAuditId: number | undefined;
 			if (apiKey && dbAuditable && isKnownVoiceProvider(providerId)) {
-				const windowMs = voiceProviderMaxSessionWindowMs(providerId);
+				// The window a mint counts as "possibly still live" is the provider's own session cap
+				// PLUS the token's establishment TTL (`voiceTokenTtlSeconds`, already clamped there) — a
+				// token isn't established the instant it's minted; the caller has up to the TTL to open
+				// the WebRTC connection, and only then does the provider's own session clock start.
+				// Counting only `maxSessionWindowMs` from mint time let a session established late
+				// (mint + up to TTL) stay live until mint + TTL + maxSessionWindowMs, while its
+				// reservation dropped out of the count at mint + maxSessionWindowMs — a gap of up to the
+				// TTL during which the cap undercounts genuinely-live sessions (plans/voice-db-mode/
+				// 04-spend-controls.md concern 02 fix).
+				const windowMs = voiceProviderMaxSessionWindowMs(providerId) + voiceTokenTtlSeconds() * 1000;
 				const cap = resolveVoiceMaxConcurrentPerOrg();
 				const reservation = await reserveOrgAuditSlot(dbAuditable.ctx, dbAuditable.orgId, { actor: actor.id, action: VOICE_MINT_AUDIT_ACTION, target: providerId, source: "voice" }, cap, Date.now() - windowMs);
 				if (!reservation.reserved) {
