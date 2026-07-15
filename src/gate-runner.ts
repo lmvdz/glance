@@ -26,6 +26,14 @@
  *   - OMP_SQUAD_GATE_SANDBOX_USER     `--user` for the container (default: the daemon's uid:gid;
  *                                     set `root` to restore the old root-in-container behavior)
  *
+ * Per-call overrides: `gateExec`/`execGatedCommand` also accept an `opts.network` and `opts.env`
+ * for the ONE call, layered on top of everything above — `opts.network` beats
+ * `OMP_SQUAD_GATE_SANDBOX_NETWORK` for that call only (used by validate.ts's acceptance worker,
+ * whose `flue run` needs real network), and `opts.env` replaces the computed `gateEnv(source)`
+ * for callers that enforce their own narrower scrub. Precedence note for operators: a per-call
+ * `network` override wins even over an explicit gate-wide `OMP_SQUAD_GATE_SANDBOX_NETWORK=none` —
+ * it is a scoped, documented widening for that one caller, never a change to the shared default.
+ *
  * Async planner: returns argv + env + whether it is sandboxed; the three gate spawn sites
  * await it and execute. Host mode is byte-identical to the pre-sandbox behavior.
  *
@@ -225,8 +233,18 @@ function sandboxUser(source: NodeJS.ProcessEnv): string | undefined {
 	return `${process.getuid()}:${process.getgid()}`;
 }
 
-function sandboxPlan(command: string, cwd: string, image: string, source: NodeJS.ProcessEnv, env: Record<string, string>, mounts?: string[]): GateExec {
-	const network = source.OMP_SQUAD_GATE_SANDBOX_NETWORK?.trim() || "none";
+function sandboxPlan(
+	command: string,
+	cwd: string,
+	image: string,
+	source: NodeJS.ProcessEnv,
+	env: Record<string, string>,
+	mounts?: string[],
+	networkOverride?: string,
+): GateExec {
+	// A per-call override (validate.ts's acceptance worker) beats the gate-wide env var; lint/typecheck
+	// callers never pass one, so they still get the gate-wide OMP_SQUAD_GATE_SANDBOX_NETWORK default.
+	const network = networkOverride?.trim() || source.OMP_SQUAD_GATE_SANDBOX_NETWORK?.trim() || "none";
 	const dirs = [...new Set([cwd, ...(mounts ?? [])])].filter(Boolean);
 	const containerEnv: Record<string, string> = {};
 	for (const [key, value] of Object.entries(env)) {
@@ -266,10 +284,28 @@ function sandboxPlan(command: string, cwd: string, image: string, source: NodeJS
 export async function gateExec(
 	command: string,
 	cwd: string,
-	opts: { mounts?: string[]; source?: NodeJS.ProcessEnv; dockerProbe?: () => boolean | Promise<boolean>; imageBuilder?: () => Promise<string> } = {},
+	opts: {
+		mounts?: string[];
+		source?: NodeJS.ProcessEnv;
+		dockerProbe?: () => boolean | Promise<boolean>;
+		imageBuilder?: () => Promise<string>;
+		/**
+		 * Override the child env instead of computing it from `gateEnv(source)`. Callers that already
+		 * enforce a NARROWER (deny-by-default) env of their own — validate.ts's commissioning gate,
+		 * whose `acceptanceEnv`/`baselineEnv` scrub is stricter than gate-env's pass-through-minus-secrets
+		 * — pass their own env here so the sandbox/host plan never widens back out to gateEnv's set.
+		 */
+		env?: Record<string, string>;
+		/**
+		 * Per-call container network, beating `OMP_SQUAD_GATE_SANDBOX_NETWORK` for THIS call only.
+		 * Used by validate.ts's acceptance worker (its `flue run` makes real model/network calls);
+		 * every other caller omits this and gets the gate-wide setting (default `none`).
+		 */
+		network?: string;
+	} = {},
 ): Promise<GateExec> {
 	const source = opts.source ?? process.env;
-	const env = gateEnv(source);
+	const env = opts.env ?? gateEnv(source);
 	const strict = isTruthy(source.OMP_SQUAD_GATE_SANDBOX_STRICT);
 	const raw = source.OMP_SQUAD_GATE_SANDBOX?.trim();
 	const disabled = isTruthy(source.OMP_SQUAD_GATE_SANDBOX_DISABLE) || (raw !== undefined && HOST_SENTINELS.has(raw.toLowerCase()));
@@ -281,7 +317,7 @@ export async function gateExec(
 	}
 
 	// Explicit image ⇒ always sandbox with it, as before (no probe — the operator asked for it).
-	if (raw) return sandboxPlan(command, cwd, raw, source, env, opts.mounts);
+	if (raw) return sandboxPlan(command, cwd, raw, source, env, opts.mounts, opts.network);
 
 	// Auto (default): sandbox if docker is usable, else a legible host fallback (or fail closed under STRICT).
 	const available = await (opts.dockerProbe ? opts.dockerProbe() : dockerAvailable());
@@ -291,7 +327,7 @@ export async function gateExec(
 		// image has no git, which is fatal to any real gate (see the header + ompsq-432).
 		const named = source.OMP_SQUAD_GATE_SANDBOX_IMAGE?.trim();
 		const image = named || (await (opts.imageBuilder ? opts.imageBuilder() : defaultGateImage()));
-		const plan = sandboxPlan(command, cwd, image, source, env, opts.mounts);
+		const plan = sandboxPlan(command, cwd, image, source, env, opts.mounts, opts.network);
 		// The builder resolves the bare base image ONLY on build failure — mark the plan degraded so
 		// callers (gateRunUnrunnable) can refuse to trust a failed run in it instead of misreading a
 		// missing-binary death as a code failure.
@@ -312,9 +348,9 @@ export async function gateExec(
 export async function execGatedCommand(
 	command: string,
 	cwd: string,
-	opts: { mounts?: string[] } = {},
+	opts: { mounts?: string[]; env?: Record<string, string>; network?: string } = {},
 ): Promise<{ code: number; stdout: string; stderr: string }> {
-	const plan = await gateExec(command, cwd, { mounts: opts.mounts });
+	const plan = await gateExec(command, cwd, { mounts: opts.mounts, env: opts.env, network: opts.network });
 	const proc = Bun.spawn(plan.argv, { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", env: plan.env });
 	const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
 	return { code: await proc.exited, stdout, stderr };
