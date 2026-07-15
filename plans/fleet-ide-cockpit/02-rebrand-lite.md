@@ -1,14 +1,14 @@
 # C02 — rebrand-lite
 
-STATUS: in-review (glance-desktop#10)
-
-## Reality notes (2026-07-14, glance-desktop#10)
-
-Glance brand asset found: `webapp/src/assets/logo-mark.png` + `brand.md` (ember `#F0A35A`). Icons regenerated via `tauri icon` (PIL padded the 514×483 mark to a 1024² canvas first). Changed: productName, identifier (`app.glance.desktop` — re-homes the store dir), window title, package name, `useWindowTitle` APP_NAME, AboutSection name+identifier. Deferred to Epic M (deep rename): Rust crate name, in-app AI-assistant "Terax" strings, theme ids, internal store filenames. Gate green incl. cargo check. Boot verified under WSLg; window title is Spotify-style (shows active folder, "Glance" only when idle) and Linux WM_CLASS stays `terax` (binary-derived) — both deep-rename territory, noted honestly in the PR.
+STATUS: done (glance-desktop#10, merged)
 PRIORITY: p2
 REPOS: glance-desktop
 COMPLEXITY: mechanical
 TOUCHES: src-tauri/tauri.conf.json (productName, identifier, window title), package.json name, app icons, About/title strings surfaced in the UI shell
+
+## Reality notes (2026-07-14, glance-desktop#10)
+
+Glance brand asset found: `webapp/src/assets/logo-mark.png` + `brand.md` (ember `#F0A35A`). Icons regenerated via `tauri icon` (PIL padded the 514×483 mark to a 1024² canvas first). Changed: productName, identifier (`app.glance.desktop` — re-homes the store dir), window title, package name, `useWindowTitle` APP_NAME, AboutSection name+identifier. Deferred to Epic M (deep rename): Rust crate name, in-app AI-assistant "Terax" strings, theme ids, internal store filenames. Gate green incl. cargo check. Boot verified under WSLg; window title is Spotify-style (shows active folder, "Glance" only when idle) and Linux WM_CLASS stays `terax` (binary-derived) — both deep-rename territory, noted honestly in the PR.
 BLOCKED_BY: C01
 
 ## Goal
