@@ -1,6 +1,6 @@
 # I01 — incremental transcript delta
 
-STATUS: open
+STATUS: in-review (PR #181)
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
