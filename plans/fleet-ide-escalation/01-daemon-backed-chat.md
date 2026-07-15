@@ -1,6 +1,6 @@
 # E01 — daemon-backed chat session (the substrate)
 
-STATUS: open
+STATUS: in-review (gd#20 — cockpit-only, no gauntlet; in-app stream render NOT RUN, needs WSLg+key)
 PRIORITY: p2
 REPOS: glance-desktop (+ tiny omp-squad if needed)
 COMPLEXITY: architectural
