@@ -1,6 +1,6 @@
 # M04 — release re-credential + rebrand (shippable installers)
 
-STATUS: open
+STATUS: ✅ MERGED (gd#26) — updater/release URLs repointed to the fork, copy rebranded, docs/RELEASE.md runbook; real signed release is a Lars secrets rider (NOT RUN)
 PRIORITY: p3
 REPOS: glance-desktop (config/CI) + a Lars ops rider (secrets)
 COMPLEXITY: architectural

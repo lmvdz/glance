@@ -1,6 +1,6 @@
 # Fleet-first IDE — meta-plan
 
-STATUS: in-progress
+STATUS: ✅ COMPLETE (2026-07-15) — all 5 epics (B, C, I, E, M) merged to main
 PRIORITY: p0
 REPOS: omp-squad, glance-desktop (to be created)
 COMPLEXITY: architectural
@@ -29,7 +29,7 @@ Product identity at the end: **glance = daemon (factory) + desktop (cockpit) + w
 | C | 02-cockpit-fork.md | Private fork bootstrapped, rebrand-lite, rebase protocol, native fleet module (roster/attention/intervene/Space-join/bell) | plans/fleet-ide-cockpit/ | expanded, open |
 | I | 03-shared-workspace-intervention.md | Intervene = shared worktree: presence/leases in editor, ACP conversation pane, hand-back | **✅ MERGED** — I01–I05 all on main |
 | E | 04-chat-unit-escalation.md | Chat panel backed by daemon; promote conversation → gated landable unit; adopt ad-hoc CLI sessions | **✅ MERGED** — E01/E02/E03 all on main (#184/#187/gd#21/gd#22) |
-| M | 05-multidaemon-identity.md | Multi-daemon connection manager, cross-host fleet, identity/branding pass, release pipeline (installers) | **EXPANDED** (M01–M04); M01 ✅ M02 ✅ M03 ✅ MERGED (gd#23/24/25); **M04 building (last concern)** |
+| M | 05-multidaemon-identity.md | Multi-daemon connection manager, cross-host fleet, identity/branding pass, release pipeline (installers) | **✅ MERGED** — M01/M02/M03/M04 all on main (gd#23/24/25/26) |
 
 ## Dependency graph
 
@@ -48,6 +48,9 @@ Runs under `.claude/skills/fleet-ide-loop/SKILL.md`: each iteration orients here
 - **C01 merged ⇒ Epic C unblocked** (C02 rebrand-lite, C03 rebase-protocol, C04 fleet-module-skeleton all now selectable by the loop).
 
 ## Ledger
+
+- 2026-07-15 — 🎉 **PROGRAM COMPLETE. All 5 epics (B, C, I, E, M) merged to main.** M04 release-recredential shipped as gd#26 (updater/release URLs repointed crynta/terax-ai → lmvdz/glance-desktop, release copy rebranded Glance, docs/RELEASE.md ops runbook). The fleet-first IDE end state is delivered: glance = daemon (factory) + a private terax fork `glance-desktop` (cockpit) joined at the worktree — connect to N daemons, live roster+attention spanning hosts, drop into a unit's worktree as a Space, intervene as a peer of the running agent (presence/leases/live ACP conversation/take-over/hand-back), and escalate chat↔unit (daemon-backed chat → promote-in-place → adopt ad-hoc CLI sessions). Fully branded Glance with zero-data-loss migrations. 26 glance-desktop PRs + the omp-squad daemon side (B01–B03 + I01/I02 + E02/E03 endpoints). Cross-lineage gauntlet (codex+grok) earned its keep on every git-write/trust surface — E02 (3 HIGH), E03 (8 findings incl. source-mutation/escape), M03 migrations (3 data-loss classes). **Lars-open follow-ups (post-completion, non-blocking):** (1) provision the release secrets per docs/RELEASE.md (updater keypair + Apple/SignPath) for a real signed/notarized/auto-updating build — the one NOT-RUN acceptance across M04; (2) fix the fork's inherited-broken CI (frontend/rust jobs fail at startup — unresolvable action versions); (3) hardening pass on M01's fleetConfig/fleetKeyring (share the same unlatched-write migration pattern grok found+fixed in M03); (4) live Tauri upgrade drive to confirm the M03 data migrations carry user data over (no WSLg harness here — logic is fake-backed-tested). **Two-worker coda:** the program finished under two concurrent loop workers that self-coordinated by concern (isolated worktrees kept them collision-free after the initial M01 overlap); consolidate to ONE loop for future work.
+
 
 - 2026-07-15 — M03 identity-deep-rename MERGED (gd#25). Independently RE-GATED by the finisher worker in an isolated worktree (tsc clean, lint 103, vitest 510 incl. 34 migration race/loss tests, vite build, cargo check — crate compiles as `glance`), then self-merged past the fork's inherited-broken CI (Lars-authorized the bypass — proven infra-broken: gd#24 on main had identical 2s startup_failures). Full Terax→Glance rename now on main (persona, crate, stores w/ zero-data-loss migrations, TERAX.md→GLANCE.md, JS↔Rust events, copy). **Epics B/C/I/E + M01/M02/M03 all merged — only M04 (release re-credential/rebrand) remains, building now in an isolated worktree.** Broken fork CI (unresolvable action versions, likely) flagged for M04's runbook + a Lars follow-up.
 
