@@ -198,7 +198,7 @@ test("un-registering does NOT hide a repo that still has agents or features", as
 	await mgr.registerProject(repo);
 	seedAgent(mgr, "a1", repo);
 
-	const dropped = mgr.unregisterProject(repo);
+	const dropped = await mgr.unregisterProject(repo);
 	expect(dropped.ok && dropped.removed).toBe(true);
 
 	const projects = mgr.projects();
@@ -213,7 +213,7 @@ test("un-registering an idle, workless project removes it from the list", async 
 	await mgr.registerProject(repo);
 	expect(mgr.projects()).toHaveLength(1);
 
-	mgr.unregisterProject(repo);
+	await mgr.unregisterProject(repo);
 	expect(mgr.projects()).toEqual([]);
 });
 
