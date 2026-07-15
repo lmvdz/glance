@@ -97,6 +97,12 @@ export function restActionTier(method: string, pathname: string): Role {
 	// keeps GET /api/voice/config's `providers` field below operator), so this is stricter than the
 	// general /api/org default.
 	if (pathname === "/api/org/voice" || pathname === "/api/org/voice-key" || pathname === "/api/org/voice/enabled") return "admin";
+	// Harness lifecycle self-reports (fleet-ide-bridge B03) WRITE to the shared presence roster —
+	// mint or release a liveness row. That is a mutation, so operator, not viewer: a read-only token
+	// must not be able to spoof or clear another session's presence. The shim reads the daemon's
+	// access-token (operator-or-higher in practice), so it clears this bar; the scope gate still
+	// drops anything outside a registered project on top.
+	if (pathname === "/api/harness-events") return "operator";
 	if (pathname === "/api/auth/check" || pathname.startsWith("/api/push/")) return "viewer";
 	return method === "GET" ? "viewer" : "operator";
 }

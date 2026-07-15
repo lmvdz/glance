@@ -68,6 +68,7 @@ import {
 	PushSubscriptionBodySchema,
 	SpawnBodySchema,
 	AskBodySchema,
+	HarnessEventBodySchema,
 	ProjectRegisterBodySchema,
 	TaskStartBodySchema,
 	VoiceTokenBodySchema,
@@ -94,6 +95,7 @@ import { readAllReceipts } from "./receipts.ts";
 import { fetchIssueDetail, listPlaneIssues, planeConfig, planeRepos } from "./plane.ts";
 import { runVisionPass } from "./vision.ts";
 import { checkVisionUrl } from "./ssrf.ts";
+import { harnessEventDecision } from "./harness-hooks.ts";
 import { all, claim, release, who } from "./presence.ts";
 import { type LeaseEntry, leasesFor } from "./leases.ts";
 import { discoverRepos, planSpawn } from "./smart-spawn.ts";
@@ -150,7 +152,8 @@ function requestScope(body: unknown): Pick<CreateAgentOptions, "requires" | "own
 import { approveJoinRequest, denyJoinRequest, ensurePersonalWorkspace, listPendingJoinRequests, onboardWorkosUser, provisionScimEvent } from "./workos-provision.ts";
 import { addMemberByEmail, getOrgProfile, listOrgMembers, removeMember, renameOrg, setMemberRole } from "./org-admin.ts";
 import { dbMode as voiceDbBootMode, type DbHandle } from "./db/index.ts";
-import type { PushPayload, PushService } from "./push.ts";
+import { openRouteDecision } from "./open-worktree.ts";
+import { escalationPayload, type PushPayload, type PushService } from "./push.ts";
 import type { Actor, AgentDTO, AgentStatus, AuditEntry, OperatorPresence, Role, RunReceipt } from "./types.ts";
 import type { TraceResponse } from "./spans.ts";
 import { type FederationSnapshot, federationView } from "./federation.ts";
@@ -395,14 +398,9 @@ export function computeUiVersion(html: string): string {
 	return createHash("sha256").update(html).digest("hex").slice(0, 12);
 }
 
-/** Pure: does this status transition warrant a human-attention push, and with what payload? */
-export function escalationPayload(prev: AgentStatus | undefined, a: AgentDTO, seeded: boolean): PushPayload | null {
-	if (!seeded || prev === undefined || prev === a.status) return null;
-	if (a.status !== "input" && a.status !== "error") return null;
-	const title = a.status === "input" ? `⛔ ${a.name} needs you` : `⚠ ${a.name} errored`;
-	const body = a.status === "input" ? a.pending[0]?.title ?? "waiting for input" : a.error ?? "agent error";
-	return { title, body, url: `/#/agent/${a.id}`, tag: a.id };
-}
+// escalationPayload moved to push.ts (fleet-ide-bridge B01) so the TUI's OSC lane can share
+// the exact transition rule without importing the server module; re-exported for existing callers.
+export { escalationPayload };
 
 // ponytail: 'unsafe-inline' is forced by the single-file inline-script/style SPA;
 // connect-src 'self' is the compensating control (blocks token exfil to other origins).
@@ -1678,6 +1676,27 @@ export class SquadServer {
 		// create worktrees in and spawn agents against. The manager validates it is an ABSOLUTE path to a
 		// real git repo — a relative path is refused, never resolved against the daemon's cwd (which is an
 		// accident of how the operator launched it).
+		// Foreign harness CLIs self-report liveness here (fleet-ide-bridge B03). Cost is already
+		// covered by the transcript ingesters; this lane exists for LIVENESS — a human's raw
+		// `claude` session inside a fleet repo shows up in `who` the instant it starts, so the
+		// fleet can warn about a shared tree and (Epic E) offer to adopt the session.
+		//
+		// The daemon is the scope authority: `harnessEventDecision` drops anything whose cwd is
+		// not inside a REGISTERED project, so a hook firing in the operator's unrelated work
+		// never becomes a presence row. Events map onto the existing presence registry — one
+		// claim per (repo, session), refreshed on every prompt, released on stop.
+		if (url.pathname === "/api/harness-events" && req.method === "POST") {
+			const decoded = decodeBody(HarnessEventBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response("bad event", { status: 400 });
+			const decision = harnessEventDecision(decoded.success, manager.projects().map((p) => p.repo));
+			if (decision.action === "drop") return Response.json({ ok: true, dropped: decision.reason });
+			if (decision.action === "release") {
+				await release(decision.claimId, decision.repo);
+				return Response.json({ ok: true, released: decision.claimId });
+			}
+			await claim({ id: decision.claimId, repo: decision.repo, agent: decision.agent, source: "other" });
+			return Response.json({ ok: true, claimed: decision.claimId });
+		}
 		if (url.pathname === "/api/projects" && req.method === "POST") {
 			const decoded = decodeBody(ProjectRegisterBodySchema, await req.json().catch(() => null));
 			if (Result.isFailure(decoded)) return new Response("repo required", { status: 400 });
@@ -2307,6 +2326,16 @@ export class SquadServer {
 			}
 			const result = await manager.land(id, message, { auto: false, force, reason, actor });
 			return Response.json(result, { status: result.ok ? 200 : 409 });
+		}
+		// Fleet→worktree jump (fleet-ide-bridge B02): launch the operator's configured editor on this
+		// unit's worktree. Host actuation, so: refused in db/org mode (a multi-tenant daemon must never
+		// spawn host GUI processes), and only the daemon's own worktree record + operator env template
+		// ever reach exec — no client-supplied path or command. The path rides in the 403 body so a
+		// remote webapp can still offer copy-path.
+		const mopen = url.pathname.match(/^\/api\/agents\/([^/]+)\/open$/);
+		if (mopen && req.method === "POST") {
+			const decision = openRouteDecision(manager.getAgent(decodeURIComponent(mopen[1])) ?? undefined, this.dbMode);
+			return Response.json(decision.body, { status: decision.status });
 		}
 		const mverify = url.pathname.match(/^\/api\/agents\/([^/]+)\/verify$/);
 		if (mverify && req.method === "POST") {

@@ -10,6 +10,8 @@
  */
 
 import { CURSOR_MARKER, Editor, type EditorTheme, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
+import { writeOscNotify } from "./osc-notify.ts";
+import { escalationPayload } from "./push.ts";
 import type { SquadManager } from "./squad-manager.ts";
 import type { AgentDTO, AgentStatus, SquadEvent, TranscriptEntry } from "./types.ts";
 
@@ -443,16 +445,18 @@ export class SquadTui {
 	}
 
 	/** Out-of-band attention signal on a status transition into a blocking/error state:
-	 *  terminal bell + OSC 9 desktop notify. Guarded by the initial seed + a per-agent
-	 *  throttle so a reconnect/replay never rings a storm. */
+	 *  terminal bell + desktop-notify sequences (OSC 9 + OSC 777, sanitized). The transition
+	 *  rule and payload text are escalationPayload — shared with the web-push lane so the
+	 *  two can never drift. Guarded by the initial seed + a per-agent throttle so a
+	 *  reconnect/replay never rings a storm. */
 	private signal(a: AgentDTO, prev?: AgentStatus): void {
-		if (!this.seeded || prev === a.status) return;
-		if (a.status !== "input" && a.status !== "error") return;
+		const payload = escalationPayload(prev, a, this.seeded);
+		if (!payload) return;
 		const now = Date.now();
 		if (now - (this.lastBell.get(a.id) ?? 0) < 2000) return;
 		this.lastBell.set(a.id, now);
 		process.stdout.write("\x07");
-		process.stdout.write(`\x1b]9;${a.name} ${a.status === "input" ? "needs input" : "errored"}\x07`);
+		writeOscNotify(payload.title, payload.body);
 	}
 
 	private syncTranscript(): void {

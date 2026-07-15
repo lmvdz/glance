@@ -69,6 +69,17 @@ export const ProjectRegisterBodySchema = Schema.Struct({
 	repo: Schema.String,
 });
 
+/** POST /api/harness-events — a foreign harness CLI's hook reporting its own session lifecycle
+ *  (fleet-ide-bridge B03). Written by a shim on the operator's machine, so it is untrusted input
+ *  like any other body: decoded, never cast. `cwd` grants nothing on its own — the route drops any
+ *  cwd outside a registered project. */
+export const HarnessEventBodySchema = Schema.Struct({
+	harness: Schema.String,
+	event: Schema.Literals(["start", "prompt", "attention", "stop"]),
+	sessionId: Schema.String,
+	cwd: Schema.String,
+});
+
 /** POST /api/answers — ask a question of a repo (R5). The unit that answers is an observer: it never
  *  commits and never lands, so `repo` grants read, not write. */
 export const AskBodySchema = Schema.Struct({

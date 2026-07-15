@@ -18,6 +18,7 @@ import { existsSync } from "node:fs";
 import { access, constants } from "node:fs/promises";
 import * as path from "node:path";
 import { errText } from "./err-text.ts";
+import { harnessHooksInstalled } from "./harness-hooks.ts";
 import { hardenedGit } from "./git-harden.ts";
 import { planeConfig } from "./plane.ts";
 import { resolveStateDir } from "./state-dir.ts";
@@ -246,6 +247,11 @@ export function makeDoctorProbe(opts: ProbeOptions): DoctorProbe {
 			const f = await facts();
 			if (f) return f.daemon.webappDist !== false;
 			return existsSync(path.join(opts.cwd, "webapp", "dist", "index.html"));
+		},
+		// Read from the operator's OWN home config — hooks live in the human's CLI settings, not in
+		// the daemon's state (a remote daemon has no idea what this laptop's ~/.claude says).
+		harnessHooks() {
+			return harnessHooksInstalled();
 		},
 		async zombieAgents() {
 			return (await facts())?.zombieAgents ?? 0;
