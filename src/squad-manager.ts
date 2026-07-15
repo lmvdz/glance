@@ -36,6 +36,7 @@ import type { EngineCheckpoint, NodeResult, Workflow, WorkflowGraphSnapshot, Wor
 import { appendCheckpoint, type CheckpointLogEntry, deleteCheckpointLog, evictCheckpointChain, getLastSeq, readCheckpoints } from "./workflow/checkpoint-log.ts";
 import { buildObserveWorkflow, buildTddVerifyWorkflow, buildVerifyWorkflow } from "./workflow/verify-workflow.ts";
 import { type Classify, detectVerify, detectVerifyStages, ompClassify, routeIntake } from "./intake.ts";
+import type { WorkLane } from "./lane.ts";
 import type { WorkflowDefinition } from "./workflow-catalog.ts";
 import { Dispatcher } from "./dispatch.ts";
 import { openDispatchLedger } from "./dispatch-ledger.ts";
@@ -57,7 +58,7 @@ import { DECOMPOSE_TIMEOUT_MS } from "./planner.ts";
 import { hardenedGit, hardenedGitSync } from "./git-harden.ts";
 import { Scheduler, liveAgents, occupyingAgents } from "./scheduler.ts";
 import { RateLimitGate } from "./rate-limit.ts";
-import { addIssueIdsToFeatureModule, addIssuesToFeatureModule, addPlaneBlockedByRelation, addPlaneIssueComment, closePlaneIssue, createPlaneIssue, deletePlaneModule, ensureFeatureModule, featureTickets, fetchIssueDetail, listPlaneIssues, listPlaneIssuesAllStates, planeRepos, reopenPlaneIssue, startPlaneIssue } from "./plane.ts";
+import { addIssueIdsToFeatureModule, addIssuesToFeatureModule, addPlaneBlockedByRelation, addPlaneIssueComment, closePlaneIssue, createPlaneIssue, deletePlaneModule, ensureFeatureModule, featureTickets, fetchIssueDetail, laneFromLabels, listPlaneIssues, listPlaneIssuesAllStates, planeRepos, reopenPlaneIssue, startPlaneIssue } from "./plane.ts";
 import { syncPlanStatuses } from "./plan-sync.ts";
 import { agentsToAdopt, deferredResumable, hardAgentCeiling, newAgentId, planeIssueBranch, selectAdoptable, slugPart } from "./spawn-identity.ts";
 import { gateMembraneTokens, loadRepoProfiles, membraneDisciplinePrompt, membraneProfilesEnabled, modelOptionsFromRuntime, profileOptionsFromEnv, toolGrantsPrompt, type RuntimeModelOption } from "./agent-profiles.ts";
@@ -1355,11 +1356,15 @@ export class SquadManager extends EventEmitter {
 		if (issue.description) return issue;
 		try {
 			const detail = await fetchIssueDetail(repo, issue.id);
+			// Lane from the Plane LABEL, resolved off the SAME detail fetch (concern 02) — never from
+			// title text (a fail-open privilege key, DESIGN.md). `undefined` when no `lane:*` label is
+			// present, letting the precedence clamp in `createWithId` fall through to the classifier.
+			const lane = laneFromLabels(detail?.labels);
 			const body = detail?.body?.trim();
-			if (!body) return issue;
+			if (!body) return lane ? { ...issue, lane } : issue;
 			const cap = envInt("OMP_SQUAD_SPEC_MAX_CHARS", 4000);
 			const spec = body.length > cap ? `${body.slice(0, cap)}\n…(spec truncated at ${cap} chars)` : body;
-			return { ...issue, description: spec };
+			return { ...issue, description: spec, ...(lane ? { lane } : {}) };
 		} catch {
 			return issue;
 		}
@@ -4257,8 +4262,13 @@ export class SquadManager extends EventEmitter {
 			this.log("info", `cleared removal tombstone for ${id} — explicitly re-created`);
 		}
 		const branch = opts.branch ?? `squad/${id}`;
+		// Lane classification only happens on the SAME autoRoute path as process routing (documented
+		// coverage, red-team M3): an explicit workflow/verify/sandbox spawn never runs `routeIntake`, so
+		// its lane comes from `opts.lane`/the Plane label or the "feature" default only, below.
+		let classifierLane: WorkLane | undefined;
 		if (opts.task && opts.autoRoute !== false && !opts.workflow && !opts.verify && !opts.sandbox) {
 			const decision = await routeIntake(opts.task, opts.repo, this.llmClassify);
+			classifierLane = decision.lane;
 			opts = {
 				...opts,
 				workflow: decision.workflow,
@@ -4270,6 +4280,17 @@ export class SquadManager extends EventEmitter {
 			};
 			this.log("info", `routed "${name}": ${decision.reason}`);
 		}
+		// Lane precedence + clamp (adw-factory-borrows concern 02, DESIGN.md): operator `opts.lane` >
+		// Plane label (`opts.issue.lane`, resolved at dispatch time by `dispatchSpec`) > classifier
+		// (`routeIntake` above) > "feature" default. THE CLAMP: only an operator-sourced lane may move a
+		// privilege axis (model apply-mode, ceiling raise) — a label or classifier lane is ticket text
+		// and must never buy privilege on its own (mirrors `do-not-auto-land`'s fail-safe-only
+		// direction); it still logs and parameterizes shadow decisions. `laneAppliesPrivilege` gates
+		// exactly that below, at the model-route apply-mode decision.
+		const laneSource: "operator" | "label" | "classifier" | "default" = opts.lane ? "operator" : opts.issue?.lane ? "label" : classifierLane ? "classifier" : "default";
+		const resolvedLane: WorkLane = opts.lane ?? opts.issue?.lane ?? classifierLane ?? "feature";
+		const laneAppliesPrivilege = laneSource === "operator";
+		this.log("info", `lane${laneAppliesPrivilege ? "" : " [shadow]"}: ${resolvedLane} source=${laneSource}`);
 		// Pre-execution cost projection (C-COST) — shadow-only: warns when this (model,tier) is projected
 		// to run over budget, BEFORE the spawn spends anything. Fire-and-forget so it never delays a spawn;
 		// no-op unless OMP_SQUAD_COST_GATE is on. Enforce (hard park) is deferred.
@@ -4313,7 +4334,11 @@ export class SquadManager extends EventEmitter {
 				const rows = await readTaskOutcomes(this.stateDir);
 				const matrix = buildTaskClassMatrix(rows, this.landingRosterRouting(), { start: Date.now() - 30 * DAY_MS, end: Date.now() });
 				const decision = routeModelForTaskClass(taskClass, matrix);
-				const shadow = process.env.OMP_SQUAD_MODEL_ROUTE_SHADOW !== "0";
+				// Lane clamp (concern 02): the global apply flag alone is not enough — a label/classifier
+				// -sourced lane forces shadow regardless, so a ticket's own text can never buy the model
+				// -apply privilege axis. Only an operator-sourced lane (or an explicit opts.lane) may ride
+				// the global flag through to apply mode.
+				const shadow = process.env.OMP_SQUAD_MODEL_ROUTE_SHADOW !== "0" || !laneAppliesPrivilege;
 				this.learningMetrics.record("model-route-decision", decision.model ? 1 : 0, {
 					mode: shadow ? "shadow" : "apply",
 					taskClass: `${taskClass.mode}:${taskClass.tier}`,
@@ -4442,6 +4467,7 @@ export class SquadManager extends EventEmitter {
 			thinking,
 			appendSystemPrompt: opts.appendSystemPrompt,
 			issue: opts.issue,
+			lane: resolvedLane,
 			kind,
 			executionRole: opts.executionRole,
 			// Persisted, not just passed: `captureAnswer` reads `rec.options.ask` at `agent_end`, and a unit
@@ -4497,6 +4523,7 @@ export class SquadManager extends EventEmitter {
 			lastActivity: Date.now(),
 			messageCount: 0,
 			issue: opts.issue,
+			lane: resolvedLane,
 			kind,
 			harness: harnessDesc?.name,
 			harnessCaps: harnessDesc ? { toolApproval: harnessDesc.capabilities.toolApproval, resumable: harnessDesc.capabilities.resumable, hostTools: harnessDesc.capabilities.hostTools, contextInjection: harnessDesc.capabilities.contextInjection } : undefined,
@@ -5878,6 +5905,9 @@ export class SquadManager extends EventEmitter {
 						// Confirmed-delivered efficiency flags (concern 02), fixed at spawn — see
 						// AgentRecord.efficiencyFlags / receipts.ts#confirmDeliveredFlags.
 						efficiencyFlags: rec.efficiencyFlags,
+						// Resolved work lane (adw-factory-borrows concern 02) — prerequisite for concern 08's
+						// lane-keyed cost aggregate.
+						lane: rec.dto.lane,
 					});
 				}
 				rec.run.start(rec.dto.model);

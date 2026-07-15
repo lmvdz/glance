@@ -24,6 +24,7 @@ import { makeCache, throttledFetch } from "./plane-throttle.ts";
 import { decodeJsonWith, PlaneProjectMapSchema } from "./schema/external-json.ts";
 import { parseTier2 } from "./tier2.ts";
 import { dbMode } from "./db/index.ts";
+import type { WorkLane } from "./lane.ts";
 
 interface PlaneConfig {
 	apiKey: string;
@@ -150,6 +151,21 @@ export async function listPlaneIssuesRaw(repo: string): Promise<PlaneIssueTempor
  *  but they still appear in the UI's issue list (no filtering here). */
 export function noAutoDispatchName(name: string): boolean {
 	return /do not auto-?land|human[ -]?review|do-?not-?auto/i.test(name);
+}
+
+const LANE_LABEL = /^lane:(hotfix|feature|chore)$/i;
+
+/** Resolve a `WorkLane` from Plane label NAMES (`lane:hotfix|feature|chore`) — never from title text
+ *  (adw-factory-borrows concern 02, DESIGN.md): titles are LLM-writable (Scout files them verbatim), a
+ *  fail-open privilege key, while labels are human-set. First matching label wins; `undefined` when
+ *  none present, e.g. bulk-listed issues (`listPlaneIssues`), which stay label-free by design — only
+ *  the per-issue detail fetch (`fetchIssueDetail`) resolves label names in the first place. */
+export function laneFromLabels(labels: string[] | undefined): WorkLane | undefined {
+	for (const label of labels ?? []) {
+		const m = LANE_LABEL.exec(label.trim());
+		if (m) return m[1].toLowerCase() as WorkLane;
+	}
+	return undefined;
 }
 
 function toIssueRef(raw: PlaneIssue, cfg: PlaneConfig, projectId: string, prefix?: string): IssueRef {

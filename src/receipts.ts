@@ -7,6 +7,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentStatus, ReceiptRollup, RunReceipt } from "./types.ts";
+import type { WorkLane } from "./lane.ts";
 import { shouldKeepSpans, SpanCollector, traceMaxSpans, traceSampleRatio } from "./spans.ts";
 import { getStorageBackend } from "./dal/storage.ts";
 
@@ -39,6 +40,9 @@ export interface RunSeed {
 	 *  accumulator stamps the SAME confirmed set the whole run, not whatever is live on the record at
 	 *  finish() time. */
 	efficiencyFlags?: string[];
+	/** Resolved work lane (adw-factory-borrows concern 02), carried into the seed so a restarted-and-
+	 *  resumed run's receipt stamps the SAME lane the whole run, not whatever is live on the record. */
+	lane?: WorkLane;
 }
 
 /** Marker prefix for `AgentProfile.capabilities` tokens that request a PROMPT-DELIVERED discipline
@@ -215,6 +219,7 @@ export class RunAccumulator {
 			parentId: this.seed.parentId,
 			harness: this.seed.harness ?? "omp",
 			efficiencyFlags: this.seed.efficiencyFlags,
+			lane: this.seed.lane,
 		};
 		receipt.spans = tools ? this.spans.snapshot(opts.maxSpans ?? traceMaxSpans()) : this.spans.structuralSnapshot();
 		receipt.sampled = !tools && this.spans.hasToolSpans();
