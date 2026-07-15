@@ -1,14 +1,14 @@
 # C03 — rebase protocol
 
-STATUS: in-review (glance-desktop#12)
-
-## Reality notes (2026-07-14, glance-desktop#12)
-
-`scripts/upstream-drift.sh` verified live against the real drift (2 behind → CLEAN/0-conflicts, genuine: upstream touched TabBar/AgentTabBadge/terminal, we touched tabs/index+useTabs — no overlap); conflict-detection path proven by forcing a package.json overlap. Weekly Action + `workflow_dispatch` keeps one living "Upstream drift tracker" issue. Discovery: GH Actions already ON — terax's inherited `ci.yml` runs GREEN on our PRs (independent gate confirmation). Action's first live run is post-merge (GitHub only dispatches default-branch workflows) — noted honestly. Inherited release/signpath/nix workflows dormant until we tag; triage deferred (not C03).
+STATUS: done (glance-desktop#12, merged)
 PRIORITY: p2
 REPOS: glance-desktop
 COMPLEXITY: mechanical
 TOUCHES: UPSTREAM.md, scripts/upstream-drift.sh (new), GitHub Actions workflow (weekly, private repo)
+
+## Reality notes (2026-07-14, glance-desktop#12)
+
+`scripts/upstream-drift.sh` verified live against the real drift (2 behind → CLEAN/0-conflicts, genuine: upstream touched TabBar/AgentTabBadge/terminal, we touched tabs/index+useTabs — no overlap); conflict-detection path proven by forcing a package.json overlap. Weekly Action + `workflow_dispatch` keeps one living "Upstream drift tracker" issue. Discovery: GH Actions already ON — terax's inherited `ci.yml` runs GREEN on our PRs (independent gate confirmation). Action VERIFIED GREEN post-merge: dispatched run 29384237925 succeeded and opened the living tracker (issue #13) with the real CLEAN forecast. Inherited release/signpath/nix workflows dormant until we tag; triage deferred (not C03).
 BLOCKED_BY: C01
 
 ## Goal
