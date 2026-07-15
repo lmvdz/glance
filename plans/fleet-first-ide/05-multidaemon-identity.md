@@ -1,10 +1,10 @@
 # Epic M — Multi-daemon, identity, release
 
-STATUS: blocked
+STATUS: EXPANDED → plans/fleet-ide-multidaemon/ (M01–M04), 2026-07-15
 PRIORITY: p3
 REPOS: glance-desktop
 COMPLEXITY: architectural
-BLOCKED_BY: epic C
+BLOCKED_BY: epic C (met — merged)
 
 ## Charter (loop expands into a sub-plan when unblocked)
 
