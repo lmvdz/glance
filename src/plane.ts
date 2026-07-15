@@ -23,6 +23,7 @@ import type { IssueRef, PlaneTicket, TaskDetail } from "./types.ts";
 import { makeCache, throttledFetch } from "./plane-throttle.ts";
 import { decodeJsonWith, PlaneProjectMapSchema } from "./schema/external-json.ts";
 import { parseTier2 } from "./tier2.ts";
+import { dbMode } from "./db/index.ts";
 
 interface PlaneConfig {
 	apiKey: string;
@@ -405,13 +406,14 @@ export type PlaneWriteResult = { ok: true } | { ok: false; error: PlaneWriteErro
  *  per-org (squad-manager.ts:1052-1056 documents the same hazard for the dispatcher; writers are
  *  worse than reads — a single global Plane project would receive cross-tenant writes). */
 function multiOrgWriteGuard(fnName: string): PlaneWriteResult | undefined {
-	if (process.env.DATABASE_URL == null) return undefined;
+	if (dbMode() !== "db") return undefined;
 	console.warn(`plane: refusing ${fnName} — DB/multi-org mode has no per-org Plane wiring yet (squad-manager.ts:1052-1056)`);
 	return { ok: false, error: "multi-org" };
 }
 
 /** Stable content hash for clobber-protection markers. Plane has no If-Match/ETag; callers read a
- *  body, hash it with this, and pass the hash back to `updatePlaneIssueBody` as `expectHash`. */
+ *  body, hash it with this, and pass the hash back to `updatePlaneIssueBody` as `expectHash`.
+ *  @substrate consumed by concern 05 promoter */
 export function hashPlaneBody(descriptionHtml: string): string {
 	return createHash("sha256").update(descriptionHtml).digest("hex");
 }
@@ -420,7 +422,8 @@ export function hashPlaneBody(descriptionHtml: string): string {
  *  Clobber protection is application-level (Plane has no ETag): pass `opts.expectHash` — the hash
  *  (via `hashPlaneBody`) of the body the caller read before composing this write. If the live body's
  *  hash no longer matches, the write is refused with `conflict` and NOTHING is sent — a re-fetch-then-
- *  compare, not a blind overwrite, so two promoters racing the same ticket can't clobber each other. */
+ *  compare, not a blind overwrite, so two promoters racing the same ticket can't clobber each other.
+ *  @substrate consumed by concern 05 promoter */
 export async function updatePlaneIssueBody(
 	repo: string,
 	issueId: string,
@@ -456,7 +459,8 @@ export async function updatePlaneIssueBody(
  *  `reopenPlaneIssue`'s name-then-group fallback (a deliberate best-effort posture for that seam),
  *  this primitive is for state machines: a missing named state must never fall through to
  *  "whatever sorts first in the group", which could silently auto-release an issue (e.g. into Todo).
- *  No match ⇒ `unknown-state`, zero writes. */
+ *  No match ⇒ `unknown-state`, zero writes.
+ *  @substrate consumed by concern 05 promoter */
 export async function movePlaneIssueToState(repo: string, issueId: string, stateName: string): Promise<PlaneWriteResult> {
 	const guard = multiOrgWriteGuard("movePlaneIssueToState");
 	if (guard) return guard;
