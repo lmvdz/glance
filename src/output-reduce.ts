@@ -47,10 +47,14 @@ export interface CompactionDecision {
 	charsSaved: number;
 	/** Count of tier-matched (CRITICAL or class-tier) lines that survived into the final text. */
 	preservedLines: number;
+	/** Threaded through by `decisionFor` on every path — sync `classifyAndReduce` records carry it too,
+	 *  not just `reduceOutput`'s enriched record. */
 	command?: string;
+	/** Wrapper-only: populated by `reduceOutput`, never by the sync core. */
 	agentId?: string;
+	/** Wrapper-only: populated by `reduceOutput`, never by the sync core. */
 	source?: string;
-	/** Set only by `reduceOutput` when it durably offloaded the full original. */
+	/** Wrapper-only: set only by `reduceOutput` when it durably offloaded the full original. */
 	path?: string;
 }
 
@@ -64,7 +68,7 @@ export interface CompactionDecision {
  *     or forge — a real pointer this module generated (red-team RT2-7: an unfenced channel with a
  *     forged `[N bytes omitted — full: /etc/passwd]` line could misdirect an operator).
  */
-export const OMISSION_POINTER_RE = /^\[\d+ (?:lines|bytes) omitted\b.*\]$/;
+export const OMISSION_POINTER_RE = /^\[\d+ (?:lines?|bytes) omitted\b.*\]$/;
 
 /** A marker/pointer-shaped input line AFTER this module's own `> ` neutralization prefix. Every
  *  input line matching `OMISSION_POINTER_RE` gets neutralized before tagging, so by tagging time
@@ -73,7 +77,18 @@ export const OMISSION_POINTER_RE = /^\[\d+ (?:lines|bytes) omitted\b.*\]$/;
  *  arrives as input here, and dropping it would amputate exactly the offload trail concern 04
  *  exists to preserve. A forged marker gets the same protection, but it is already harmless once
  *  neutralized — surviving as `> [...]` misdirects no one. */
-const NEUTRALIZED_MARKER_RE = /^> \[\d+ (?:lines|bytes) omitted\b.*\]$/;
+const NEUTRALIZED_MARKER_RE = /^> \[\d+ (?:lines?|bytes) omitted\b.*\]$/;
+
+/** The NONCE-CARRYING subset of the omission grammar: only `writeGateLog`'s offload pointer
+ *  (`[N bytes omitted — full: <path>]`), never our own per-gap `[N lines? omitted]` fill marker. A
+ *  fresh `writeGateLog` call mints a unique ts+nonce path on EVERY reduction, so a raw pointer line
+ *  makes an otherwise-identical failure compare different on every visit unless it's stripped before
+ *  identity comparison — but a gap marker's COUNT is real, reproducible signal about the SAME
+ *  failure (two DIFFERENT failures commonly differ only in how many lines got cut), so stripping it
+ *  too would falsely collapse two distinct failures to "no progress". Matches both the raw form (a
+ *  reducer-generated pointer, never re-input) and the `> `-neutralized form (what re-reducing a
+ *  prior pointer line, or a checkpoint round-trip, leaves behind). */
+const OFFLOAD_POINTER_RE = /^(?:> )?\[\d+ bytes omitted — full: .*\]$/;
 
 /** Tier 0, unioned into EVERY class — these patterns are high-signal regardless of what the
  *  command/shape classifier decided, so a misclassified or compound command (`tsc && bun test`)
@@ -84,6 +99,11 @@ const CRITICAL_PATTERNS: RegExp[] = [
 	NEUTRALIZED_MARKER_RE,
 	/error TS\d+:/,
 	/^error(:| )/,
+	// Node-style error heads (`Error: something`, `TypeError: x is not a function`,
+	// `RangeError: …`) — the lowercase `^error(:| )` above only catches gate-runner/bun-style lowercase
+	// heads, so a thrown-and-printed JS Error's class name+message was falling through with no
+	// dedicated tier protection at all.
+	/^[A-Za-z]*Error[: ]/,
 	/\bAssertionError\b/,
 	/ERESOLVE|EACCES|EPERM/,
 	/panic:/,
@@ -230,11 +250,13 @@ function headTailSelectWithinGroup(lines: string[], base: ReadonlySet<number>, g
 }
 
 /** Fill tiers ascending (0 = CRITICAL first), document order within a tier. Whichever tier first
- *  overflows the remaining budget gets head/tail-selected WITHIN ITSELF and fill stops there — no
- *  lower-priority tier is ever considered once one has overflowed. If every matched tier fits
- *  whole, whatever budget remains is finally split head/tail across the untagged lines. Every
- *  group is pre-collapsed to `MAX_GROUP_CANDIDATES` candidates first (see `headTailCap`) so total
- *  work is bounded regardless of document size. */
+ *  GENUINELY overflows the remaining budget gets head/tail-selected WITHIN ITSELF and fill stops
+ *  there — no lower-priority tier is ever considered once one has overflowed. A tier that was
+ *  pre-capped to `MAX_GROUP_CANDIDATES` (see `headTailCap`) but whose capped subset still fits the
+ *  budget WHOLE does not count as an overflow — it admits and fill continues to lower tiers/mop-up,
+ *  same as any other tier that fit. If every matched tier fits whole, whatever budget remains is
+ *  finally split head/tail across the untagged lines. Every group is pre-collapsed to
+ *  `MAX_GROUP_CANDIDATES` candidates first so total work is bounded regardless of document size. */
 function fillTiers(lines: string[], tierGroups: number[][], untaggedIndices: number[], budget: number, totalLines: number): { admitted: Set<number>; tooSmall: boolean } {
 	let admitted = new Set<number>();
 	if (reconstruct(lines, admitted, totalLines).length > budget) {
@@ -249,10 +271,12 @@ function fillTiers(lines: string[], tierGroups: number[][], untaggedIndices: num
 		const candidate = new Set(admitted);
 		for (const idx of group) candidate.add(idx);
 		if (reconstruct(lines, candidate, totalLines).length <= budget) {
+			// The capped subset fit WHOLE. A capped group (`group.length < rawGroup.length`) did drop its
+			// unrepresented middle indices — those are gone regardless — but fitting whole is not an
+			// overflow: only the `else` branch below (genuine overflow, requiring within-group head/tail
+			// selection) stops fill early. A capped-but-fitting group must still let lower tiers and the
+			// untagged mop-up use whatever budget remains, or the budget goes needlessly under-filled.
 			admitted = candidate;
-			// A capped group is ALREADY a partial admission of its tier — the dropped middle overflowed
-			// by construction, so lower tiers must not backfill past it (same rule as an overflow).
-			if (group.length < rawGroup.length) stopped = true;
 		} else {
 			admitted = headTailSelectWithinGroup(lines, admitted, group, budget, totalLines);
 			stopped = true;
@@ -279,7 +303,11 @@ function countPreserved(taggedIndices: ReadonlySet<number>, lines: string[], fin
 	return n;
 }
 
-function decisionFor(text: string, reason: ReduceReason, classes: ReduceClass[], originalChars: number, taggedIndices: ReadonlySet<number>, lines: string[]): CompactionDecision {
+/** `command` (and nothing else — `agentId`/`source`/`path` stay wrapper-only, populated by
+ *  `reduceOutput`) is threaded through so EVERY logged decision, including `classifyAndReduce`'s own
+ *  sync-path records, carries the command that produced it — previously only `reduceOutput`'s
+ *  separately-enriched record had it. */
+function decisionFor(text: string, reason: ReduceReason, classes: ReduceClass[], originalChars: number, taggedIndices: ReadonlySet<number>, lines: string[], command?: string): CompactionDecision {
 	return {
 		ts: Date.now(),
 		class: classes[0] ?? "generic",
@@ -288,6 +316,7 @@ function decisionFor(text: string, reason: ReduceReason, classes: ReduceClass[],
 		originalChars,
 		charsSaved: originalChars - text.length,
 		preservedLines: countPreserved(taggedIndices, lines, text),
+		command,
 	};
 }
 
@@ -333,7 +362,7 @@ function computeReduction(text: string, budget: number, opts: { command?: string
 			tiersOf.forEach((t, i) => {
 				if (t !== undefined) taggedIndices.add(i);
 			});
-			return { text: workingText, decision: decisionFor(workingText, "fit", matchedClasses, originalChars, taggedIndices, lines) };
+			return { text: workingText, decision: decisionFor(workingText, "fit", matchedClasses, originalChars, taggedIndices, lines, opts.command) };
 		}
 
 		const tierOrder = tierOrderFor(matchedClasses);
@@ -354,26 +383,37 @@ function computeReduction(text: string, budget: number, opts: { command?: string
 			// Zero priority lines matched anywhere — the tiered machinery degenerates to exactly the
 			// untagged head/tail split, which is no better than the simpler, well-tested headTail. Prefer it.
 			const fallback = boundedHeadTail(workingText, budget);
-			return { text: fallback, decision: decisionFor(fallback, "headtail-fallback", matchedClasses, originalChars, taggedIndices, lines) };
+			return { text: fallback, decision: decisionFor(fallback, "headtail-fallback", matchedClasses, originalChars, taggedIndices, lines, opts.command) };
 		}
 
 		const { admitted, tooSmall } = fillTiers(lines, tierGroups, untaggedIndices, budget, lines.length);
 		if (tooSmall) {
 			const fallback = boundedHeadTail(workingText, budget);
-			return { text: fallback, decision: decisionFor(fallback, "headtail-fallback", matchedClasses, originalChars, taggedIndices, lines) };
+			return { text: fallback, decision: decisionFor(fallback, "headtail-fallback", matchedClasses, originalChars, taggedIndices, lines, opts.command) };
 		}
 
 		const tierText = reconstruct(lines, admitted, lines.length);
-		const headTailText = boundedHeadTail(workingText, budget);
-		if (!(tierText.length < headTailText.length)) {
-			// No demonstrated gain over the simple char-slice (headTail's result is always exactly
-			// `budget` chars here; tierText not being STRICTLY smaller means it bought nothing).
-			return { text: headTailText, decision: decisionFor(headTailText, "headtail-fallback", matchedClasses, originalChars, taggedIndices, lines) };
+		let admittedTaggedCount = 0;
+		for (const idx of taggedIndices) if (admitted.has(idx)) admittedTaggedCount++;
+		if (admittedTaggedCount === 0) {
+			// Degenerate: tagged lines EXIST but every one of them was too costly to admit even alone
+			// (e.g. a single overlong CRITICAL line blew the whole remaining budget) — the tiered result
+			// carries zero signal, so it's no better than the simpler, well-tested headTail. Prefer it.
+			//
+			// The stale alternative this replaced — discarding tierText whenever it wasn't STRICTLY
+			// shorter than headTailText — was wrong: headTail routinely returns EXACTLY `budget` chars,
+			// and once the untagged mop-up saturates the budget tierText ALSO lands at exactly `budget`
+			// chars, so the two compare equal (not "tierText bought nothing") even though tierText is the
+			// one carrying the actual tagged failure lines headTail would otherwise have blindly cut.
+			// Preferring tierText whenever at least one tagged line survived into it is the correct test —
+			// length parity with headTail is not evidence of "no gain".
+			const headTailText = boundedHeadTail(workingText, budget);
+			return { text: headTailText, decision: decisionFor(headTailText, "headtail-fallback", matchedClasses, originalChars, taggedIndices, lines, opts.command) };
 		}
-		return { text: tierText, decision: decisionFor(tierText, "reduced", matchedClasses, originalChars, taggedIndices, lines) };
+		return { text: tierText, decision: decisionFor(tierText, "reduced", matchedClasses, originalChars, taggedIndices, lines, opts.command) };
 	} catch {
 		const fallback = boundedHeadTail(text, budget);
-		return { text: fallback, decision: decisionFor(fallback, "error", ["generic"], originalChars, new Set(), []) };
+		return { text: fallback, decision: decisionFor(fallback, "error", ["generic"], originalChars, new Set(), [], opts.command) };
 	}
 }
 
@@ -484,23 +524,31 @@ export async function reduceOutput(text: string, budget: number, opts: { command
 
 /**
  * Strip everything that varies run-to-run without the underlying failure actually changing, so two
- * runs of the SAME logical failure hash/compare identically: ANSI, our own omission/pointer lines
- * (a fresh `writeGateLog` call mints a unique ts+nonce path EVERY reduction, so a raw pointer line
- * would make an otherwise-identical failure compare different on every single visit — red-team
- * RT2-1, "pointer nonce poisons identity detectors"), and bun's per-test duration suffix
- * (`[0.23ms]`) which jitters run to run for the SAME test. Exported for concern 03's
- * `noProgressRoute`/`hashOutput` identity checks — this module does not call it itself.
+ * runs of the SAME logical failure hash/compare identically: ANSI, our own NONCE-CARRYING offload
+ * pointer lines (a fresh `writeGateLog` call mints a unique ts+nonce path EVERY reduction, so a raw
+ * pointer line would make an otherwise-identical failure compare different on every single visit —
+ * red-team RT2-1, "pointer nonce poisons identity detectors"), and bun's per-test duration suffix
+ * (`[0.23ms]`) which jitters run to run for the SAME test.
+ *
+ * Deliberately does NOT strip `[N lines? omitted]` GAP markers — only `OFFLOAD_POINTER_RE`'s
+ * nonce-carrying `— full:` pointer lines are dropped. Gap counts are real signal: two DIFFERENT
+ * failures whose reductions differ only by how many lines got cut (`[12 lines omitted]` vs
+ * `[7 lines omitted]`) must NOT compare equal, or the no-progress detector falsely aborts a
+ * converging fixup loop by mistaking two distinct failures for the same one.
+ *
+ * Exported for concern 03's `noProgressRoute`/`hashOutput` identity checks — this module does not
+ * call it itself.
  */
 export function identityNormalize(text: string): string {
 	const stripped = stripAnsi(text);
 	return stripped
 		.split("\n")
-		// Drop pointer/marker lines in BOTH forms: raw (`[N bytes omitted — full: …]`, minted with a
-		// fresh ts+nonce every reduction) and `> `-neutralized (what a checkpoint round-trip leaves —
-		// concern 04's persistence pass neutralizes even on the fit path, so a cold-resume-restored
-		// lastOutput differs from a fresh run's ONLY by that prefix; without this, the first refutation
-		// check after every daemon restart would miss once and waste one reflect() LLM call).
-		.filter((line) => !OMISSION_POINTER_RE.test(line) && !NEUTRALIZED_MARKER_RE.test(line))
+		// Drop ONLY offload-pointer lines (both raw and `> `-neutralized form — concern 04's persistence
+		// pass neutralizes even on the fit path, so a cold-resume-restored lastOutput differs from a
+		// fresh run's ONLY by that prefix; without stripping it too, the first refutation check after
+		// every daemon restart would miss once and waste one reflect() LLM call). Gap markers pass
+		// through untouched — their counts are kept as real signal (see doc comment above).
+		.filter((line) => !OFFLOAD_POINTER_RE.test(line))
 		.join("\n")
 		.replace(/\[\d+(\.\d+)?ms\]/g, "");
 }

@@ -104,6 +104,40 @@ describe("<= budget invariant", () => {
 	});
 });
 
+// ── Marker grammar: singular "1 line omitted" must match, same as the plural form ──────────────────
+
+describe("marker grammar: singular vs plural", () => {
+	test("a 1-line gap marker matches OMISSION_POINTER_RE and gets neutralized on re-reduction", () => {
+		expect(OMISSION_POINTER_RE.test("[1 line omitted]")).toBe(true);
+		expect(OMISSION_POINTER_RE.test("[2 lines omitted]")).toBe(true);
+
+		// A prior reduction's SINGULAR marker, fed back in as input, must be neutralized (`> ` prefix)
+		// exactly like the plural form — before this fix it escaped neutralization entirely.
+		const filler = Array.from({ length: 100 }, (_, i) => `boring uneventful log line ${i} with nothing special about it at all`);
+		const input = ["[1 line omitted]", ...filler, "error TS9999: the real signal"].join("\n");
+		const { text } = classifyAndReduce(input, 120, { command: "tsc" });
+		expect(text).toContain("error TS9999");
+		expect(text).toContain("> [1 line omitted]");
+		expect(text).not.toMatch(/(^|\n)\[1 line omitted\](\n|$)/);
+	});
+
+	test("reconstruct actually emits the singular form for a true 1-line gap", () => {
+		// A single tagged line surrounded by exactly one line of filler on each side, at a budget tight
+		// enough to force cutting exactly one filler line, produces a genuine `[1 line omitted]` marker
+		// (not "[1 lines omitted]") — the grammar this module emits and the grammar it recognizes on
+		// re-input must agree. Full document is 55 chars ("filler line before\nerror TS1234: boom\nfiller
+		// line after"); 54 is one short of that (forces reduction) but is exactly enough to fit the
+		// tagged line plus one single-line gap marker on one side.
+		const input = ["filler line before", "error TS1234: boom", "filler line after"].join("\n");
+		const tightBudget = 54;
+		const { text } = classifyAndReduce(input, tightBudget, { command: "tsc" });
+		expect(text.length).toBeLessThanOrEqual(tightBudget);
+		expect(text).toContain("error TS1234: boom");
+		expect(/\[\d+ lines? omitted\]/.test(text)).toBe(true);
+		expect(text).toMatch(/\[1 line omitted\]/);
+	});
+});
+
 // ── Tier ordering: fill ascending, a tier that overflows gets head/tail-selected WITHIN itself ────
 
 describe("tier ordering", () => {
@@ -118,6 +152,90 @@ describe("tier ordering", () => {
 		// Not every stack frame could have survived — the tier legitimately overflowed.
 		const survivingFrames = frames.filter((f) => text.includes(f));
 		expect(survivingFrames.length).toBeLessThan(frames.length);
+	});
+
+	test("a >MAX_GROUP_CANDIDATES tier group capped-but-fitting still lets mop-up admit untagged filler after it", () => {
+		// Regression: fillTiers used to treat ANY capped group (group.length < rawGroup.length) as an
+		// overflow and stop fill dead — even when the capped subset fit the budget whole. That
+		// under-filled the budget by skipping the untagged mop-up entirely. 1200 tagged lines exceed
+		// MAX_GROUP_CANDIDATES (1000), so this tier is guaranteed to get capped to a 500-head/500-tail
+		// split with a gap marker for the dropped middle 200.
+		const failLines = Array.from({ length: 1200 }, (_, i) => `(fail) test number ${i}`);
+		const filler = Array.from({ length: 20 }, (_, i) => `untagged filler line ${i}`);
+		const input = [...failLines, ...filler].join("\n");
+
+		// Budget sized to comfortably hold the capped-to-1000 tier group (with its gap marker for the
+		// dropped middle 200) AND all the untagged filler, but well short of the full document — so
+		// classification actually reduces instead of hitting the "fit" fast path.
+		const cappedGroupOnly = [...failLines.slice(0, 500), "[200 lines omitted]", ...failLines.slice(700)].join("\n");
+		const budget = cappedGroupOnly.length + filler.join("\n").length + 200;
+		expect(budget).toBeLessThan(input.length);
+
+		const { text, decision } = classifyAndReduce(input, budget, { command: "bun test" });
+		expect(text.length).toBeLessThanOrEqual(budget);
+		expect(decision.reason).toBe("reduced");
+		for (const f of filler) expect(text).toContain(f);
+	});
+});
+
+// ── no-gain discard (FIX 6): tierText must not be thrown away just because it matches headTail's
+// exact length ──────────────────────────────────────────────────────────────────────────────────
+
+describe("no-gain discard is based on admitted tagged lines, not a length comparison with headTail", () => {
+	test("land-sized budget (500) where mop-up saturates AND a tagged (fail) line exists mid-document: output contains the tagged line, reason 'reduced'", () => {
+		// Regression: the old check discarded tierText whenever `!(tierText.length < headTailText.length)`
+		// — but once the untagged mop-up saturates the budget, tierText ALSO lands at exactly `budget`
+		// chars (same as headTail), so the two compare equal and the tagged failure line the whole
+		// module exists to keep got thrown away in favor of a blind head/tail cut.
+		const before = Array.from({ length: 200 }, (_, i) => `plain filler log line ${i}, nothing to see here at all`);
+		const after = Array.from({ length: 200 }, (_, i) => `plain filler log line ${200 + i}, nothing to see here at all`);
+		const input = [...before, "(fail) the one test that actually matters", ...after].join("\n");
+		const budget = 500;
+		const { text, decision } = classifyAndReduce(input, budget, { command: "bun test" });
+		expect(text.length).toBeLessThanOrEqual(budget);
+		expect(text).toContain("(fail) the one test that actually matters");
+		expect(decision.reason).toBe("reduced");
+	});
+});
+
+// ── decision.command (FIX 8) ────────────────────────────────────────────────────────────────────
+
+describe("decision.command is threaded through every logged decision, not just reduceOutput's", () => {
+	test("classifyAndReduce's own sync-path decision carries the command", () => {
+		const input = Array.from({ length: 80 }, (_, i) => `boring uneventful log line ${i} with nothing special about it at all`).join("\n");
+		const { decision } = classifyAndReduce(input, 300, { command: "bun test" });
+		expect(decision.command).toBe("bun test");
+		const recent = recentCompactionDecisions();
+		expect(recent[0]?.command).toBe("bun test");
+	});
+
+	test("the fit-path decision (not logged, but still returned) also carries the command", () => {
+		const { decision } = classifyAndReduce("small\nfine", 1000, { command: "tsc" });
+		expect(decision.command).toBe("tsc");
+	});
+});
+
+// ── CRITICAL tier: Node-style Error heads (FIX 9) ───────────────────────────────────────────────
+
+describe("CRITICAL tier catches Node-style Error heads", () => {
+	test("a TypeError line past the cut zone survives a generic-class reduction", () => {
+		const before = Array.from({ length: 200 }, (_, i) => `plain filler log line ${i}, nothing to see here at all`);
+		const after = Array.from({ length: 200 }, (_, i) => `plain filler log line ${200 + i}, nothing to see here at all`);
+		// No command given and no test/diagnostics/install shape signal in the filler — this classifies
+		// "generic", which has no dedicated class tier, so only the CRITICAL tier can save the line.
+		const input = [...before, "TypeError: x is not a function", ...after].join("\n");
+		const { text, decision } = classifyAndReduce(input, 300);
+		expect(text.length).toBeLessThanOrEqual(300);
+		expect(text).toContain("TypeError: x is not a function");
+		expect(decision.classes).toEqual(["generic"]);
+	});
+
+	test("a plain Error: head also survives", () => {
+		const before = Array.from({ length: 200 }, (_, i) => `plain filler log line ${i}, nothing to see here at all`);
+		const after = Array.from({ length: 200 }, (_, i) => `plain filler log line ${200 + i}, nothing to see here at all`);
+		const input = [...before, "Error: something went wrong deep in the stack", ...after].join("\n");
+		const { text } = classifyAndReduce(input, 300);
+		expect(text).toContain("Error: something went wrong deep in the stack");
 	});
 });
 
@@ -399,5 +517,28 @@ describe("identityNormalize", () => {
 	test("strips bun's real per-test duration suffix format ([0.23ms])", () => {
 		const normalized = identityNormalize("✗ fixture suite > checks authorization header [0.23ms]");
 		expect(normalized).not.toContain("[0.23ms]");
+	});
+
+	// FIX 5: identityNormalize used to strip ALL omission markers (both the nonce-carrying offload
+	// pointer AND our own per-gap `[N lines omitted]` fill marker), which made two DIFFERENT failures
+	// whose reductions differ only in gap counts compare EQUAL — falsely tripping the no-progress
+	// detector on a genuinely converging fixup loop. Gap counts must now survive normalization.
+
+	test("does NOT collapse two runs that differ only in GAP COUNTS — those counts are real signal", () => {
+		const a = "line one\n[12 lines omitted]\nline two";
+		const b = "line one\n[7 lines omitted]\nline two";
+		expect(identityNormalize(a)).not.toBe(identityNormalize(b));
+	});
+
+	test("still collapses two runs that differ ONLY by the offload pointer's nonce (path/byte count)", () => {
+		const a = "line one\n[12 lines omitted]\n[42 bytes omitted — full: /tmp/gate-logs/a/1-aaaa-log.log]\nline two";
+		const b = "line one\n[12 lines omitted]\n[7 bytes omitted — full: /tmp/gate-logs/b/2-bbbb-log.log]\nline two";
+		expect(identityNormalize(a)).toBe(identityNormalize(b));
+	});
+
+	test("strips the neutralized (`> `-prefixed) offload pointer form too, gap markers untouched", () => {
+		const a = "line one\n[12 lines omitted]\n> [42 bytes omitted — full: /tmp/a-log.log]\nline two";
+		const b = "line one\n[12 lines omitted]\nline two";
+		expect(identityNormalize(a)).toBe(identityNormalize(b));
 	});
 });

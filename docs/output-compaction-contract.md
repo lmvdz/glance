@@ -68,6 +68,13 @@ out of the reducer or documents its deliberate boundary here first.
       archive — the gate-log files are the durable record.
 - [ ] The log root follows the org state dir (`setCompactionLogRoot`, called beside
       `setGateLogRoot`) — never resolved at module scope.
+- [ ] Honesty: the compaction log root is last-writer-wins across managers in one process — exact
+      parity with `setGateLogRoot`/`setProofRoot` today, not a regression specific to this module. A
+      multi-org process (multiple `SquadManager`s sharing one Node/Bun process) commingles decision
+      records into whichever org's root was set most recently; there is no per-call org tag that
+      routes a record back to its own org's log. This is a known seam, not a silent one — the fix
+      belongs alongside the gate-log/proof-root fix as one shared change, not patched here in
+      isolation.
 
 ## 7. Identity surfaces stay pointer-free
 

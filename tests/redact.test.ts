@@ -76,6 +76,55 @@ test("redact: bearer/authorization never crosses a newline to eat the next line'
 	expect(redact(text)).toBe(text);
 });
 
+test("redact: the timing suffix on a failed-test line can't donate a digit across whitespace", () => {
+	// `middleware-check` alone is the AUTH_TAIL candidate (space and `[` aren't in the tail charset,
+	// so the charset run ends before `[0.16ms]`) and it has no digit — this must stay safe even though
+	// digits exist later in the same line.
+	const line = "(fail) authorization middleware-check fails [0.16ms]";
+	expect(redact(line)).toBe(line);
+});
+
+test("redact: a dotted bearer token (Google OAuth ya29.… shape) still redacts", () => {
+	const line = "Authorization: Bearer ya29.a0AfB_byDdE1234567890abc";
+	const out = redact(line);
+	expect(out).toBe("Authorization [REDACTED]");
+	expect(out).not.toContain("ya29");
+});
+
+test("redact: a tail whose only digit is past position 12 still redacts", () => {
+	expect(redact("authorization=AbCdEfGhIjKlMnOpQrSt99887766")).toBe("authorization [REDACTED]");
+});
+
+test("redact: a folded header (authorization:\\n  <value>) still redacts across the one allowed newline", () => {
+	const out = redact("authorization:\n  c2VjcmV0dG9rZW4xMjM0NTY=");
+	expect(out).toBe("authorization [REDACTED]");
+});
+
+test("redact: a folded NON-header (no separator) still never crosses the newline", () => {
+	const text = "authorization\n  refreshSessionToken();";
+	expect(redact(text)).toBe(text);
+});
+
+// ── ENV_LINE: lowercase key alternative (concern 02 regression from dropping the `i` flag) ────────
+
+test("redact: a lowercase env assignment (password=) is redacted", () => {
+	expect(redact("password=hunter2")).toBe("password=[REDACTED]");
+});
+
+test("redact: a lowercase exported key (export api_key=) is redacted", () => {
+	expect(redact("export api_key=abc123")).toBe("export api_key=[REDACTED]");
+});
+
+test("redact: a mixed-case camelCase identifier (voiceTokenTtlWarned) is left untouched", () => {
+	const line = "voiceTokenTtlWarned = true;";
+	expect(redact(line)).toBe(line);
+});
+
+test("redact: a mixed-case key (Token=) is left untouched — deliberate false-negative cost of excluding camelCase", () => {
+	const line = "Token=xyz";
+	expect(redact(line)).toBe(line);
+});
+
 // ── private key: bounded span perf regression ───────────────────────────────────────────────────
 
 test("redact: a real private-key block still redacts end to end", () => {
