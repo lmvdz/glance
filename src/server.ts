@@ -25,6 +25,7 @@ import { errText } from "./err-text.ts";
 import { globalDefaultHarness, listHarnesses, listHarnessTiers } from "./harness-registry.ts";
 import { decodeClientCommand } from "./schema/client-command.ts";
 import {
+	AdoptBodySchema,
 	AgentLandBodySchema,
 	AgentModeBodySchema,
 	AgentVisionBodySchema,
@@ -2317,6 +2318,13 @@ export class SquadServer {
 			} catch (err) {
 				return new Response(err instanceof Error ? err.message : String(err), { status: 409 });
 			}
+		}
+		if (url.pathname === "/api/agents/adopt" && req.method === "POST") {
+			const decoded = decodeBody(AdoptBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response("invalid adopt request", { status: 400 });
+			const { harness, sessionId, cwd } = decoded.success;
+			const result = await manager.adopt({ harness, sessionId, cwd }, actor);
+			return Response.json(result, { status: result.ok ? 200 : 409 });
 		}
 		if (url.pathname === "/api/console" && req.method === "POST") {
 			const body = decodeBodyOrEmpty(ConsoleBodySchema, await req.json().catch(() => null));

@@ -84,7 +84,9 @@ import { reapDeadSessions, releaseSession, sweepLeases } from "./leases.ts";
 import { agentActor, scopeFor } from "./agent-scope.ts";
 import { buildFabricSnapshot, loadScoutFacts, type FabricSnapshot } from "./fabric.ts";
 import { buildContextPrimer, searchFabric, type KbDocType } from "./fabric-search.ts";
-import { sweepPresence } from "./presence.ts";
+import { sweepPresence, who } from "./presence.ts";
+import { harnessEventDecision } from "./harness-hooks.ts";
+import { adoptBranchName, adoptBrief, isSafeUntrackedPath, parseUntracked } from "./adopt.ts";
 import { chooseFallback } from "./supervisor.ts";
 import { availableActions, effectiveAutonomyMode, modeFromApproval, validateRequestedMode, type AutonomyMode, type VerificationState } from "./autonomy.ts";
 import type {
@@ -4110,6 +4112,98 @@ export class SquadManager extends EventEmitter {
 	private emitFeaturesChanged(): void {
 		void this.persist();
 		this.emit("event", { type: "features-changed" } satisfies SquadEvent);
+	}
+
+	/**
+	 * Adopt an ad-hoc CLI session into a fleet unit (fleet-ide-escalation E03). A developer ran a raw
+	 * harness (e.g. `claude`) in a terminal; B03 harness-hooks registered it as presence
+	 * (`harness:sessionId`, source "other"). Adoption captures that session's uncommitted WORK — not its
+	 * conversation (the daemon has no handle on the harness's own context) — into a FRESH worktree and
+	 * wraps it in a gated unit, leaving the developer's original checkout UNTOUCHED.
+	 *
+	 * Fail-closed throughout: the source dir is only ever READ (diff + ls-files + file copies out of it,
+	 * never a write or index mutation); any capture/apply/create failure removes the half-made worktree
+	 * and creates no unit. Validity is gated exactly like the hooks (registered project) PLUS a live
+	 * presence row, so adopt can't be pointed at an arbitrary path.
+	 */
+	async adopt(
+		args: { harness: string; sessionId: string; cwd: string },
+		actor: Actor = LOCAL_ACTOR,
+	): Promise<{ ok: boolean; reason?: string; agent?: AgentDTO }> {
+		// 1. Validate: same registered-project gate the hooks use (resolves the repo root), AND a live
+		//    presence row for this exact session — not just any path under a registered project.
+		const decision = harnessEventDecision(
+			{ harness: args.harness, event: "prompt", sessionId: args.sessionId, cwd: args.cwd },
+			this.projects().map((p) => p.repo),
+		);
+		if (decision.action !== "claim") {
+			return { ok: false, reason: decision.action === "drop" ? decision.reason : "not an adoptable session" };
+		}
+		const repo = decision.repo;
+		const label = decision.agent; // `harness:sessionId`
+		const present = await who(repo);
+		if (!present.some((e) => e.agent === label && e.source === "other")) {
+			return { ok: false, reason: "no live ad-hoc session for that harness/sessionId in this project" };
+		}
+
+		// 2. Capture the cwd's working state READ-ONLY (never mutate the developer's checkout/index).
+		const head = await hardenedGit(["rev-parse", "HEAD"], { cwd: args.cwd });
+		if (head.code !== 0) return { ok: false, reason: "cwd has no HEAD commit (not a git checkout?)" };
+		const headSha = head.stdout.trim();
+		// `--no-ext-diff` is load-bearing: the hardened git env neutralizes `diff.external`, so without it
+		// `git diff` tries to run an empty external-diff command and dies ("external diff died").
+		const tracked = await hardenedGit(["diff", "--no-ext-diff", "--binary", "HEAD"], { cwd: args.cwd });
+		if (tracked.code !== 0) return { ok: false, reason: `git diff failed: ${tracked.stderr.trim()}` };
+		const names = await hardenedGit(["diff", "--no-ext-diff", "--name-only", "HEAD"], { cwd: args.cwd });
+		const changedCount = names.code === 0 ? parseUntracked(names.stdout).length : 0;
+		const others = await hardenedGit(["ls-files", "--others", "--exclude-standard"], { cwd: args.cwd });
+		if (others.code !== 0) return { ok: false, reason: `git ls-files failed: ${others.stderr.trim()}` };
+		const untracked = parseUntracked(others.stdout).filter(isSafeUntrackedPath);
+
+		// 3. Cut a FRESH worktree from the captured HEAD sha (never the developer's checkout).
+		const branch = adoptBranchName(args.harness, args.sessionId, headSha);
+		let worktree: string;
+		try {
+			const created = await addWorktree({ repo, branch, startPoint: headSha, base: this.worktreeBaseDir });
+			worktree = created.worktree;
+		} catch (err) {
+			return { ok: false, reason: `could not create worktree: ${errText(err)}` };
+		}
+
+		// 4. Replay the captured state into the new worktree; FAIL CLOSED — on any failure remove the
+		//    worktree and create no unit (the source is already untouched).
+		try {
+			const patch = tracked.stdout;
+			if (patch.trim().length > 0) {
+				const patchFile = path.join(os.tmpdir(), `glance-adopt-${headSha.slice(0, 12)}.patch`);
+				await fs.writeFile(patchFile, patch);
+				const applied = await hardenedGit(["apply", "--whitespace=nowarn", patchFile], { cwd: worktree });
+				await fs.rm(patchFile, { force: true });
+				if (applied.code !== 0) throw new Error(`captured changes did not apply: ${applied.stderr.trim()}`);
+			}
+			for (const rel of untracked) {
+				const dst = path.join(worktree, rel);
+				await fs.mkdir(path.dirname(dst), { recursive: true });
+				await fs.cp(path.join(args.cwd, rel), dst, { recursive: true });
+			}
+		} catch (err) {
+			await removeWorktree(repo, worktree).catch(() => {});
+			return { ok: false, reason: `adopt failed (your checkout is untouched): ${errText(err)}` };
+		}
+
+		// 5. Wrap the prepared worktree in a gated unit. existingPath uses it verbatim (no second cut);
+		//    a task + autoRoute wires the verify gate (if the repo has a detectable verify command).
+		try {
+			const dto = await this.create(
+				{ repo, existingPath: worktree, task: adoptBrief(args.harness, changedCount, untracked.length), autoRoute: true },
+				actor,
+			);
+			void this.recordAudit(actor, "adopt", dto.id, "ok", `${label} → ${dto.name} (${changedCount} changed, ${untracked.length} new)`);
+			return { ok: true, agent: dto };
+		} catch (err) {
+			await removeWorktree(repo, worktree).catch(() => {});
+			return { ok: false, reason: `unit creation failed: ${errText(err)}` };
+		}
 	}
 
 	// ── Roster mutation ───────────────────────────────────────────────────────

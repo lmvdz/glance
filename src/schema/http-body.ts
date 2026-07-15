@@ -368,6 +368,14 @@ export const SpawnBodySchema = Schema.Struct({
 	source: Schema.optional(Schema.Unknown),
 });
 
+/** POST /api/agents/adopt (fleet-ide-escalation E03) — adopt an ad-hoc B03 harness session into a
+ *  unit; the three fields identify the live presence row + its cwd (all validated server-side). */
+export const AdoptBodySchema = Schema.Struct({
+	harness: Schema.String,
+	sessionId: Schema.String,
+	cwd: Schema.String,
+});
+
 /** POST /api/console — no required field. */
 export const ConsoleBodySchema = Schema.Struct({
 	repo: Schema.optional(Schema.Unknown),
