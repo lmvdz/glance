@@ -153,6 +153,7 @@ import { changedFiles, filesTouchedSinceBase } from "./explore.ts";
 import { appendReceipt, confirmDeliveredFlags, EFFICIENCY_FLAG_PREFIX, readAllReceipts, readReceipts, RunAccumulator, splitCapabilityTokens } from "./receipts.ts";
 import { validateModelDelta } from "./decision-evidence.ts";
 import { classifyWhereToLookEntry, listSymptoms, readSymptom, saveSymptom, statWhereToLookEntry, symptomId, validateSymptomText, validateWhereToLookCount, type SymptomEntry } from "./symptoms.ts";
+import { buildPrBody } from "./pr-body.ts";
 import { membraneBreakerCadence } from "./membrane-breaker-cadence.ts";
 import { appendAudit, type AuditQuery, makeAuditEntry, readAudit } from "./audit.ts";
 import { AutomationLog, type AutomationQuery } from "./automation-log.ts";
@@ -176,7 +177,7 @@ import { buildTaskClassMatrix } from "./omp-graph/task-class-matrix.ts";
 import { DAY_MS } from "./omp-graph/schema.ts";
 import { routeModelForTaskClass } from "./model-route.ts";
 import { openOrchestratorState } from "./orchestrator-state.ts";
-import { authoredSpecBlock, buildDigest, type DigestReward, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
+import { authoredSpecBlock, buildDigest, type DigestReward, digestSummaryExcerpt, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
 import { readChatAttachment, reapStaleChatAttachments, type SavedChatAttachment, writeChatAttachment } from "./chat-attachment.ts";
 import { harnessScorecardEnabled, scoreHarness } from "./harness-scorecard.ts";
 import { isArmed } from "./convergence-oracle.ts";
@@ -3368,6 +3369,48 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
+	 * PR-body content resolver (comprehension lane concern 06) — the ONE place both `floatPrOnLandReady`
+	 * and `retryPushFloat` call to render a unit's PR body from what was actually recorded during the
+	 * run, so the two float call sites can never drift on what a body contains. Record-then-render:
+	 * this reads already-persisted state only, never parses anything back out of a PR body.
+	 *
+	 * Data sources:
+	 *  - `deltas`: the unit's feature's `source:"model-delta"` decisions (`storedFeatureDecisions`) —
+	 *    empty (not omitted) when the unit carries no `featureId`, which `buildPrBody` renders as the
+	 *    declared "no delta recorded" line rather than a silent gap.
+	 *  - `symptom`: the newest symptom card whose `fixedBy.agentId` matches this unit, scoped to the
+	 *    unit's own repo (`symptoms(repo)` already returns newest-first, so `.find` picks the latest).
+	 *  - `testExecutions`: honestly empty. `RunReceipt` (`receipts.ts`) records `toolTally` — COUNTS of
+	 *    tool names invoked (e.g. `{ Bash: 12 }`) — never the command text or its outcome, and no other
+	 *    persisted structure captures "this exact command ran and passed/failed". Inventing a command
+	 *    string from a tool-call count would be exactly the fabricated-verification pattern DESIGN.md's
+	 *    honesty rule exists to prevent, so this stays `[]` until a real command+outcome producer
+	 *    exists (a declared gap, not a silent one — `buildPrBody` renders "no observed test runs
+	 *    recorded" for an empty list, never a fabricated bullet).
+	 *  - `digestExcerpt`: the run's own digest's Summary section only (`digestSummaryExcerpt`) — never
+	 *    the digest's Goal/Where-we-left-off, which quote transcript text verbatim.
+	 * Best-effort throughout: any read failure here degrades to that input's empty/undefined value
+	 * rather than throwing — a PR body must never block a float.
+	 */
+	private async prBodyFor(rec: AgentRecord): Promise<string> {
+		const dto = rec.dto;
+		const deltas = (dto.featureId ? this.storedFeatureDecisions(dto.featureId) : undefined)?.filter((d) => d.source === "model-delta") ?? [];
+		let symptom: SymptomEntry | undefined;
+		try {
+			symptom = (await this.symptoms(dto.repo)).find((s) => s.fixedBy.agentId === dto.id);
+		} catch {
+			symptom = undefined;
+		}
+		let digestExcerpt: string | undefined;
+		try {
+			digestExcerpt = digestSummaryExcerpt(await readDigest(this.stateDir, dto.id));
+		} catch {
+			digestExcerpt = undefined;
+		}
+		return buildPrBody({ deltas, symptom, testExecutions: [], omitted: [], digestExcerpt });
+	}
+
+	/**
 	 * PR-mode landReady float (concern 06/DESIGN mode-dispatch ruling + the autoLand×PR matrix's
 	 * "landConfirm ON (default): landReady ⇒ push+draft" row): the moment an agent is flagged
 	 * ready-to-land — confirm-mode verified GREEN, or a staged auto-resolved conflict — PR mode should
@@ -3391,10 +3434,12 @@ export class SquadManager extends EventEmitter {
 					branch: dto.branch as string,
 					defaultBranch: mode.defaultBranch,
 					title: `squad(${dto.name}): land ${dto.branch}`,
+					body: await this.prBodyFor(rec),
 					issueId: dto.issue?.id,
 					issueIdentifier: dto.issue?.identifier,
 					issueProjectId: dto.issue?.projectId,
 					agentId: dto.id,
+					featureId: dto.featureId,
 					stateDir: this.stateDir,
 				});
 				if (ensure.ok && ensure.prNumber !== undefined && ensure.prUrl !== undefined) {
@@ -6809,10 +6854,12 @@ export class SquadManager extends EventEmitter {
 			branch: dto.branch,
 			defaultBranch: mode.defaultBranch,
 			title: `squad(${dto.name}): land ${dto.branch}`,
+			body: await this.prBodyFor(rec),
 			issueId: dto.issue?.id,
 			issueIdentifier: dto.issue?.identifier,
 			issueProjectId: dto.issue?.projectId,
 			agentId: dto.id,
+			featureId: dto.featureId,
 			stateDir: this.stateDir,
 		});
 		if (ensure.ok && ensure.prNumber !== undefined && ensure.prUrl !== undefined) {

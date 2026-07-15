@@ -78,7 +78,10 @@ function writeRepos(stateDir: string, repos: Set<string>): boolean {
 
 /** Leading-`~` expansion (see `normalizeRepoPath`'s live-finding comment). Exported so the agent
  *  spawn path (squad-manager) can apply the same defense to repo paths that reach it WITHOUT going
- *  through the registry (older persisted state, direct API callers). */
+ *  through the registry (older persisted state, direct API callers).
+ *  @substrate exported for tests + spawn-path defense-in-depth — squad-manager's create() routes repo
+ *  through `normalizeRepoPath` (same file, calls this), so today's only external references are the
+ *  tests that pin the tilde-expansion behavior. */
 export function expandHomePath(p2: string): string {
 	if (p2 === "~") return os.homedir();
 	if (p2.startsWith("~/")) return path.join(os.homedir(), p2.slice(2));
