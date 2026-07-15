@@ -11,6 +11,7 @@
  *   glance answers [<id>]                        list or read durable answers
  *   glance open
  *   glance doctor [--json]                        diagnose the factory: on? armed? pointed where?
+ *   glance symptom "<query>" [--repo …]           search recorded symptom cards
  *
  * `up` is the long-lived process that owns the agents. The other verbs are thin
  * HTTP clients that talk to a running daemon's REST surface.
@@ -53,6 +54,7 @@ import { ompClassify } from "./intake.ts";
 import { RuntimeSettingsStore } from "./runtime-settings.ts";
 import { PolicyStore } from "./policy.ts";
 import { backendFromEnv, setStorageBackend } from "./dal/storage.ts";
+import { formatWhereToLookEntry, groupSymptomHits, statWhereToLookEntry, type SymptomSearchHit } from "./symptoms.ts";
 import type { AutomationRollupRow } from "./automation-log.ts";
 import type { Actor, AgentDTO, ApprovalMode, AutomationEvent, ClientCommand, CommissionResult, CommissionSpec, CreateAgentOptions, ThinkingLevel, TranscriptEntry } from "./types.ts";
 
@@ -95,6 +97,7 @@ USAGE
   glance answers [<id>] [--repo R]              List answers, or print one
   glance open                                   Print the dashboard URL
   glance doctor [--json]                       Is the factory on, armed, and pointed at the right world?
+  glance symptom "<query>" [--repo R] [--json]  Search recorded symptom cards (glance doctor's known-symptom index)
   glance curate-plane [repo] [--file]             Group recurring Plane issues into unified fixes
   glance plan-validate <dir> [--json]           Check a plan dir's dep graph for cycles / dangling deps (offline)
   glance plan-decompose <dir> [--json]          One-shot: decompose <dir>/OBJECTIVE.md into a concern-DAG (needs \`omp\`)
@@ -1043,6 +1046,63 @@ async function cmdDoctor(args: string[]): Promise<void> {
 	if (!report.healthy) process.exit(1);
 }
 
+/** Coarse "how long ago" label for a symptom's `landedAt` — mirrors `fabric-search.ts`'s internal
+ *  `agoLabel`, kept local here since that one isn't exported (it's fenced-primer-specific). */
+function symptomAge(landedAt: number): string {
+	const mins = Math.round(Math.max(0, Date.now() - landedAt) / 60_000);
+	if (mins < 1) return "just now";
+	if (mins < 60) return `${mins}m ago`;
+	const hours = Math.round(mins / 60);
+	if (hours < 24) return `${hours}h ago`;
+	return `${Math.round(hours / 24)}d ago`;
+}
+
+/**
+ * `glance symptom "<query>" [--repo <path>] [--json]` — the pull-search half of DESIGN.md's "push at
+ * motivation" (`glance doctor`'s auto-match is the push half: it surfaces the same index unprompted
+ * inside a failing check's remedy). Ranking happens server-side (`GET /api/symptoms`, reusing
+ * fabric-search's BM25 core); this renders the ranked hits, folding recurrences of the same symptom
+ * text into one card (newest first) and flagging any `whereToLook` entry that no longer exists in
+ * THIS repo tree — a dead pointer surfaced mid-incident is worse than none.
+ */
+async function cmdSymptom(args: string[]): Promise<void> {
+	const { positional, flags } = parseArgs(args);
+	const query = positional.join(" ").trim();
+	if (!query) {
+		process.stderr.write('usage: glance symptom "<query>" [--repo <path>] [--json]\n');
+		process.exit(1);
+	}
+	const repo = typeof flags.repo === "string" ? path.resolve(flags.repo) : undefined;
+	const qs = new URLSearchParams({ q: query });
+	if (repo) qs.set("repo", repo);
+	const res = await fetch(`${base(flags)}/api/symptoms?${qs.toString()}`, { headers: tokenHeader() }).catch(() => null);
+	if (!res || !res.ok) {
+		process.stderr.write(res ? `symptom search failed: ${res.status} ${await res.text()}\n` : `No glance daemon on ${base(flags)}. Start one with: glance up\n`);
+		process.exit(1);
+	}
+	const body = (await res.json()) as { query: string; results: SymptomSearchHit[] };
+	if (flags.json) {
+		process.stdout.write(`${JSON.stringify(body, null, 2)}\n`);
+		return;
+	}
+	if (body.results.length === 0) {
+		process.stdout.write(`no matching symptom found for "${query}".\n`);
+		return;
+	}
+	const repoRoot = repo ?? process.cwd();
+	for (const group of groupSymptomHits(body.results)) {
+		process.stdout.write(`\n${group.symptom}\n`);
+		for (const hit of group.entries) {
+			const pr = hit.fixedBy.prNumber ? ` (PR #${hit.fixedBy.prNumber})` : "";
+			process.stdout.write(`  ${symptomAge(hit.landedAt)}${pr}\n`);
+			for (const w of hit.whereToLook) {
+				const stat = await statWhereToLookEntry(repoRoot, w);
+				process.stdout.write(`    - ${formatWhereToLookEntry(w, stat)}\n`);
+			}
+		}
+	}
+}
+
 async function main(): Promise<void> {
 	const [cmd, ...rest] = process.argv.slice(2);
 	switch (cmd) {
@@ -1115,6 +1175,9 @@ async function main(): Promise<void> {
 			break;
 		case "doctor":
 			await cmdDoctor(rest);
+			break;
+		case "symptom":
+			await cmdSymptom(rest);
 			break;
 		case "open": {
 			const { flags } = parseArgs(rest);

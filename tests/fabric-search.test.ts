@@ -4,7 +4,7 @@
  */
 
 import { afterEach, expect, test, describe } from "bun:test";
-import { tokenize, fabricDocuments, searchFabric, buildContextPrimer } from "../src/fabric-search.ts";
+import { tokenize, fabricDocuments, rankKbDocs, searchFabric, buildContextPrimer, type KbDoc } from "../src/fabric-search.ts";
 import { formatRewardTag } from "../src/digest.ts";
 import type { FabricSnapshot } from "../src/fabric.ts";
 
@@ -34,6 +34,9 @@ function snapshot(over: Partial<FabricSnapshot> = {}): FabricSnapshot {
 			{ type: "decision", source: { repo: "/r", featureId: "feat-ui" }, featureTitle: "Dashboard", text: "Adopt the magma colormap for the heat graph.", decisionSource: "human", createdAt: 0 },
 		],
 		failures: [],
+		symptoms: [
+			{ type: "symptom", source: { repo: "/r" }, id: "s1", symptom: "daemon healthy but dispatch stalled", whereToLook: ["src/dispatch.ts"], fixedBy: { agentId: "a1" }, landedAt: 500 },
+		],
 		...over,
 	};
 }
@@ -56,6 +59,15 @@ describe("fabricDocuments", () => {
 		expect(byType("scout")).toBe(1);
 		expect(byType("lease")).toBe(1);
 		expect(byType("decision")).toBe(2);
+		expect(byType("symptom")).toBe(1);
+	});
+
+	test("a symptom doc's text carries whereToLook too (concern 07: BM25 over symptom+whereToLook)", () => {
+		const docs = fabricDocuments(snapshot());
+		const doc = docs.find((d) => d.type === "symptom")!;
+		expect(doc.title).toBe("daemon healthy but dispatch stalled");
+		expect(doc.text).toContain("src/dispatch.ts");
+		expect(doc.ref).toBe("src/dispatch.ts");
 	});
 });
 
@@ -96,6 +108,45 @@ describe("searchFabric", () => {
 		const results = searchFabric(snapshot(), "src", { type: "hot-area" });
 		expect(results[0].ref).toBe("src/auth/token.ts"); // score 9.5 > 1.2
 	});
+
+	test("a recorded symptom card is searchable via ⌘K/fabric (concern 07)", () => {
+		const results = searchFabric(snapshot(), "dispatch stalled", { type: "symptom" });
+		expect(results).toHaveLength(1);
+		expect(results[0]!.title).toBe("daemon healthy but dispatch stalled");
+		expect(results[0]!.ref).toBe("src/dispatch.ts");
+	});
+});
+
+describe("rankKbDocs — the reusable BM25 core (concern 07: GET /api/symptoms reuses this directly)", () => {
+	function docs(): KbDoc[] {
+		return [
+			{ type: "symptom", id: "s1", title: "daemon healthy but dispatch stalled", text: "daemon healthy but dispatch stalled src/dispatch.ts" },
+			{ type: "symptom", id: "s2", title: "verify green but land never fires", text: "verify green but land never fires src/land.ts" },
+		];
+	}
+
+	test("ranks the matching doc top, mirroring searchFabric's own scoring", () => {
+		const results = rankKbDocs(docs(), "dispatch stalled");
+		expect(results[0]!.id).toBe("s1");
+		expect(results.some((r) => r.id === "s2")).toBe(false);
+	});
+
+	test("empty query or empty corpus returns nothing", () => {
+		expect(rankKbDocs(docs(), "")).toEqual([]);
+		expect(rankKbDocs([], "dispatch")).toEqual([]);
+	});
+
+	test("respects topK", () => {
+		const results = rankKbDocs([...docs(), { type: "symptom", id: "s3", title: "dispatch stalled again", text: "dispatch stalled again" }], "dispatch stalled", { topK: 1 });
+		expect(results).toHaveLength(1);
+	});
+
+	test("searchFabric and rankKbDocs agree on the same underlying corpus", () => {
+		const viaSnapshot = searchFabric(snapshot(), "dispatch stalled", { type: "symptom" });
+		const viaDocs = rankKbDocs(fabricDocuments(snapshot()).filter((d) => d.type === "symptom"), "dispatch stalled");
+		expect(viaDocs.map((r) => r.id)).toEqual(viaSnapshot.map((r) => r.id));
+		expect(viaDocs[0]!.score).toBeCloseTo(viaSnapshot[0]!.score, 6);
+	});
 });
 
 describe("buildContextPrimer", () => {
@@ -108,6 +159,12 @@ describe("buildContextPrimer", () => {
 
 	test("returns empty string when nothing is relevant (caller injects nothing)", () => {
 		expect(buildContextPrimer(snapshot(), "kubernetes helm chart")).toBe("");
+	});
+
+	test("a recorded symptom is folded into the cold-start primer as a Known symptom (concern 07)", () => {
+		const primer = buildContextPrimer(snapshot(), "dispatch stalled", { topK: 4 });
+		expect(primer).toContain("**Known symptom**");
+		expect(primer).toContain("dispatch stalled");
 	});
 
 	test("output is always fenced as untrusted internally — no unfenced path (concern 02)", () => {

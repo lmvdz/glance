@@ -17,7 +17,7 @@ import { fenceUntrusted, parseDigestReward, rewardWeight } from "./digest.ts";
 import type { FabricSnapshot } from "./fabric.ts";
 import { isOn, learningFlags } from "./metrics.ts";
 
-export type KbDocType = "agent" | "digest" | "hot-area" | "scout" | "lease" | "decision" | "failure";
+export type KbDocType = "agent" | "digest" | "hot-area" | "scout" | "lease" | "decision" | "failure" | "symptom";
 
 /** A flattened, searchable unit of knowledge. */
 export interface KbDoc {
@@ -114,6 +114,17 @@ export function fabricDocuments(snapshot: FabricSnapshot): KbDoc[] {
 		}
 	}
 
+	// Known-symptom cards (comprehension concern 07): searchable via `glance symptom`/⌘K and folded
+	// into the cold-start primer for free, alongside decisions/hot-areas — the whole point of a
+	// symptom card is that a FUTURE unit (or the doctor) can find it without knowing this happened
+	// before. `text` carries whereToLook too, per DESIGN.md's "reuse fabric-search's BM25 over
+	// symptom+whereToLook text". `?? []`: a snapshot minted by an older daemon (federation peer, a
+	// serialized snapshot from before this field existed) simply has no symptom docs — that must read
+	// as "none", never crash the search that's ranking everything else.
+	for (const s of snapshot.symptoms ?? []) {
+		docs.push({ type: "symptom", id: `symptom:${s.id}`, title: s.symptom, text: `${s.symptom} ${s.whereToLook.join(" ")}`, repo: s.source.repo, ref: s.whereToLook[0], source: "symptom", ts: s.landedAt });
+	}
+
 	return docs;
 }
 
@@ -157,18 +168,14 @@ function snippetFor(doc: KbDoc, terms: string[]): string {
 }
 
 /**
- * BM25-rank the snapshot's documents against `query`. A small log-scaled
- * hot-area weight is folded in so a hot file beats a cold one on an equal text
- * match. Returns the top `topK` (default 20), optionally filtered to one type.
+ * BM25-rank an arbitrary `KbDoc[]` corpus against `query`. This is the reusable scoring core
+ * `searchFabric` (below) drives off a fabric snapshot's flattened docs — but any other caller with
+ * its OWN doc set (comprehension concern 07: `GET /api/symptoms` ranking `listSymptoms` entries, and
+ * `glance doctor`'s symptom auto-match) reuses this directly instead of forking the BM25 math.
+ * Returns the top `topK` (default 20).
  */
-export function searchFabric(
-	snapshot: FabricSnapshot,
-	query: string,
-	opts: { topK?: number; type?: KbDocType } = {},
-): FabricSearchResult[] {
+export function rankKbDocs(docs: KbDoc[], query: string, opts: { topK?: number } = {}): FabricSearchResult[] {
 	const terms = [...new Set(tokenize(query))];
-	let docs = fabricDocuments(snapshot);
-	if (opts.type) docs = docs.filter((d) => d.type === opts.type);
 	if (docs.length === 0 || terms.length === 0) return [];
 
 	const indexed = docs.map(indexDoc);
@@ -197,6 +204,21 @@ export function searchFabric(
 		.map(({ doc, score }) => ({ type: doc.type, id: doc.id, title: doc.title, snippet: snippetFor(doc, terms), score, repo: doc.repo, ref: doc.ref, source: doc.source, ranAt: doc.ts }));
 }
 
+/**
+ * BM25-rank the snapshot's documents against `query`. A small log-scaled
+ * hot-area weight is folded in so a hot file beats a cold one on an equal text
+ * match. Returns the top `topK` (default 20), optionally filtered to one type.
+ */
+export function searchFabric(
+	snapshot: FabricSnapshot,
+	query: string,
+	opts: { topK?: number; type?: KbDocType } = {},
+): FabricSearchResult[] {
+	let docs = fabricDocuments(snapshot);
+	if (opts.type) docs = docs.filter((d) => d.type === opts.type);
+	return rankKbDocs(docs, query, { topK: opts.topK });
+}
+
 // ───────────────────────────── agent cold-start primer ─────────────────────────────
 
 const PRIMER_LABEL: Record<KbDocType, string> = {
@@ -207,6 +229,7 @@ const PRIMER_LABEL: Record<KbDocType, string> = {
 	scout: "Latent work",
 	lease: "Being edited",
 	failure: "Recurring failure",
+	symptom: "Known symptom",
 };
 
 /** Coarse "how long ago" label for a provenance timestamp. Undefined input ⇒ undefined output

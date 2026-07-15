@@ -24,6 +24,7 @@ import * as path from "node:path";
 import { writeDigest } from "../src/digest.ts";
 import { actorVisibleRepoSet, buildFabricSnapshot } from "../src/fabric.ts";
 import { appendReceipt } from "../src/receipts.ts";
+import { saveSymptom } from "../src/symptoms.ts";
 import type { Actor, AgentDTO, PersistedFeature } from "../src/types.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -176,4 +177,30 @@ test("actorVisibleRepoSet: an agent actor only sees its own scoped subtree's rep
 	const other = dto("other", "/srv/elsewhere");
 	const agentActor: Actor = { id: "self", origin: "agent" };
 	expect(actorVisibleRepoSet(agentActor, [self, other])).toEqual(new Set(["/srv/mine"]));
+});
+
+/**
+ * Symptom cards (comprehension concern 07): the SAME leak-incident class as the digest tests above,
+ * proven for the new fact type — a repo-A snapshot must never surface repo B's recorded symptom, in
+ * either the structured field or anywhere in the serialized snapshot.
+ */
+test("a repo-B symptom card is never reachable through a repo-A snapshot", async () => {
+	const { dir, agents } = await twoRepos();
+	await saveSymptom(dir, { id: "sym-a", symptom: "alpha's dispatch stalls under load", whereToLook: ["src/alpha.ts"], repo: "/srv/alpha", fixedBy: { agentId: "alpha" }, landedAt: 500 });
+	await saveSymptom(dir, { id: "sym-b", symptom: "beta leaks the customer key rotation schedule", whereToLook: ["src/secret.ts"], repo: "/srv/beta", fixedBy: { agentId: "beta" }, landedAt: 500 });
+
+	const a = await snap(dir, agents, ["/srv/alpha"]);
+	expect(a.symptoms.map((s) => s.id)).toEqual(["sym-a"]);
+	expect(JSON.stringify(a)).not.toContain("key rotation schedule");
+
+	const b = await snap(dir, agents, ["/srv/beta"]);
+	expect(b.symptoms.map((s) => s.id)).toEqual(["sym-b"]);
+});
+
+test("no repos named ⇒ symptoms are unrestricted too, like every other fact type", async () => {
+	const { dir, agents } = await twoRepos();
+	await saveSymptom(dir, { id: "sym-a", symptom: "alpha's dispatch stalls under load", whereToLook: ["src/alpha.ts"], repo: "/srv/alpha", fixedBy: {}, landedAt: 500 });
+	await saveSymptom(dir, { id: "sym-b", symptom: "beta symptom", whereToLook: ["src/beta.ts"], repo: "/srv/beta", fixedBy: {}, landedAt: 500 });
+	const s = await snap(dir, agents);
+	expect(s.symptoms.map((x) => x.id).sort()).toEqual(["sym-a", "sym-b"]);
 });

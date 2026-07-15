@@ -6,6 +6,7 @@ import { readFailureAnnotations } from "./failure-memory.ts";
 import { leasesFor, type LeaseEntry } from "./leases.ts";
 import { normalizeRepoPath } from "./project-registry.ts";
 import { readReceipts } from "./receipts.ts";
+import { listSymptoms, type SymptomEntry } from "./symptoms.ts";
 import type { Actor, AgentDTO, IssueRef, PersistedFeature, RunReceipt } from "./types.ts";
 
 export interface FactSource {
@@ -79,6 +80,23 @@ export interface FabricFailureFact {
 	at: number;
 }
 
+/**
+ * A recorded symptom card (comprehension lane concern 05's `squad_record_symptom`), projected into
+ * the fabric so it's searchable via `glance symptom`/⌘K and folded into the cold-start primer for
+ * free — a fresh unit inherits known failure modes without anyone re-teaching them. Repo-scoped like
+ * `FabricDecisionFact`/`FabricFailureFact` (a symptom outlives the worktree that recorded it, so
+ * there is no live `agentId` to scope through `scopeFor`).
+ */
+export interface FabricSymptomFact {
+	type: "symptom";
+	source: FactSource;
+	id: string;
+	symptom: string;
+	whereToLook: string[];
+	fixedBy: SymptomEntry["fixedBy"];
+	landedAt: number;
+}
+
 export interface FabricSnapshot {
 	actor: string;
 	generatedAt: number;
@@ -90,6 +108,7 @@ export interface FabricSnapshot {
 	leases: FabricLeaseFact[];
 	decisions: FabricDecisionFact[];
 	failures: FabricFailureFact[];
+	symptoms: FabricSymptomFact[];
 }
 
 interface ScoutSeenEntry {
@@ -377,6 +396,20 @@ export async function buildFabricSnapshot(deps: FabricDeps): Promise<FabricSnaps
 
 	const failures = loadFailureFacts(deps.stateDir, deps.repos);
 
+	// Symptom cards (comprehension concern 07): `listSymptoms` already filters by repo internally, so
+	// looping `repos` (the SAME computed set decisions/leases/scout use above) never asks it for a
+	// repo outside that set — but the `repoSet.has(normalizeRepoPath(...))` guard is copied VERBATIM
+	// from the decisions block above anyway. Belt-and-suspenders, on purpose: this file documents a
+	// leak incident (see `repoAdmitter`'s doc comment) where a per-call filter alone wasn't trusted to
+	// be the only line of defense for a fact type that gets pasted into a spawned unit's system prompt.
+	const symptoms: FabricSymptomFact[] = [];
+	for (const repo of repos) {
+		for (const s of await listSymptoms(deps.stateDir, { repo }).catch(() => [] as SymptomEntry[])) {
+			if (!repoSet.has(normalizeRepoPath(s.repo))) continue;
+			symptoms.push({ type: "symptom", source: { repo: s.repo }, id: s.id, symptom: s.symptom, whereToLook: s.whereToLook, fixedBy: s.fixedBy, landedAt: s.landedAt });
+		}
+	}
+
 	return {
 		actor: deps.actor.id,
 		generatedAt,
@@ -388,5 +421,6 @@ export async function buildFabricSnapshot(deps: FabricDeps): Promise<FabricSnaps
 		leases,
 		decisions,
 		failures,
+		symptoms,
 	};
 }

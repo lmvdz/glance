@@ -10,8 +10,8 @@
  * find out" and "it is off" are different answers, and only one of them is safe to act on.
  */
 
-import { expect, test } from "bun:test";
-import { type AutonomyFacts, type DoctorProbe, type DoctorReport, type RepoFacts, renderDoctor, runDoctor } from "../src/doctor.ts";
+import { describe, expect, test } from "bun:test";
+import { type AutonomyFacts, type DoctorProbe, type DoctorReport, type RepoFacts, type SymptomIndexEntry, matchSymptom, renderDoctor, runDoctor, SYMPTOM_MATCH_THRESHOLD } from "../src/doctor.ts";
 
 const ARMED: AutonomyFacts = { autodispatch: true, autodrive: true, autoland: true, autosupervise: false, landConfirm: true, regressionGate: true };
 const CLEAN_REPO: RepoFacts = { repo: "/srv/app", exists: true, isGitRepo: true, dirtyFiles: 0, hasOrigin: true, defaultBranch: "main", staleBranches: 0 };
@@ -28,6 +28,7 @@ function probe(over: Partial<DoctorProbe> = {}): DoctorProbe {
 		webappBuilt: async () => true,
 		harnessHooks: async () => [{ harness: "claude-code", ok: true, detail: "all 4 hooks registered" }],
 		zombieAgents: async () => 0,
+		symptoms: async () => [],
 		...over,
 	};
 }
@@ -277,7 +278,7 @@ test("a report full of unknowns never prints the all-clear", async () => {
 	const boom = () => {
 		throw new Error("probe exploded");
 	};
-	const report = await runDoctor(probe({ daemon: boom, autonomy: boom, stateDir: boom, planeArmed: boom, gateImage: boom, projects: boom, webappBuilt: boom, zombieAgents: boom, harnessHooks: boom }));
+	const report = await runDoctor(probe({ daemon: boom, autonomy: boom, stateDir: boom, planeArmed: boom, gateImage: boom, projects: boom, webappBuilt: boom, zombieAgents: boom, harnessHooks: boom, symptoms: boom }));
 
 	expect(report.checks.every((c) => c.status === "unknown")).toBe(true);
 	expect(report.healthy).toBe(true); // nothing is BLOCKING — the exit code stays 0
@@ -364,4 +365,96 @@ test("no docker under STRICT is an error, not a graceful fallback", async () => 
 test("the gate check names the image the gate will actually use", async () => {
 	const report = await runDoctor(probe({ gateImage: async () => ({ dockerUsable: true, imagePresent: false, image: "acme/custom-gate:3", strict: false }) }));
 	expect(find(report, "gate")?.detail).toContain("acme/custom-gate:3");
+});
+
+// ── doctor-failure auto-match (comprehension concern 07, DESIGN.md "push at motivation") ────────
+
+describe("matchSymptom — the pure overlap-coefficient matcher", () => {
+	const symptoms: SymptomIndexEntry[] = [
+		{ symptom: "uncommitted files on default branch make every land refuse forever", whereToLook: ["src/land.ts"] },
+		{ symptom: "verify green but land never fires", whereToLook: ["src/land-trigger.ts"] },
+	];
+
+	test("a strongly-overlapping check text clears the threshold and returns the right symptom", () => {
+		const top = matchSymptom("Repo app 3 uncommitted file(s) — every land will refuse, and retry forever", symptoms);
+		expect(top?.whereToLook[0]).toBe("src/land.ts");
+	});
+
+	test("an unrelated check text matches nothing", () => {
+		expect(matchSymptom("Is the daemon up? pid 123, up 5m", symptoms)).toBeUndefined();
+	});
+
+	test("an empty symptom index matches nothing", () => {
+		expect(matchSymptom("uncommitted files every land refuse forever", [])).toBeUndefined();
+	});
+
+	test("a score just under the threshold does not match (the threshold is real, not decorative)", () => {
+		// Only ONE shared token ("land") out of many — well under SYMPTOM_MATCH_THRESHOLD.
+		expect(matchSymptom("the land of a thousand different unrelated words entirely", symptoms, SYMPTOM_MATCH_THRESHOLD)).toBeUndefined();
+	});
+});
+
+/**
+ * THE ACCEPTANCE TEST (DESIGN.md's red-team resolution, RT2-6 "all-pull consumption"): a seeded
+ * symptom entry + a deliberately failing doctor check whose title/detail matches it ⇒ the check's
+ * remedy contains the symptom pointer. This is the loop closing at the moment of maximum motivation
+ * — a doctor failure, not a search a nobody opens mid-incident.
+ */
+test("ACCEPTANCE: a failing repo-dirty check gets the matching symptom's pointer appended to its remedy", async () => {
+	const symptoms: SymptomIndexEntry[] = [
+		{ symptom: "uncommitted files on default branch make every land refuse forever", whereToLook: ["src/land.ts", "glance doctor"] },
+	];
+	const dirtyRepo: RepoFacts = { ...CLEAN_REPO, dirtyFiles: 3 };
+	const report = await runDoctor(probe({ projects: async () => [dirtyRepo], symptoms: async () => symptoms }));
+
+	const check = report.checks.find((c) => c.id.endsWith(".dirty"));
+	expect(check).toBeDefined();
+	expect(check?.status).not.toBe("ok");
+	expect(check?.remedy).toContain('known symptom: "uncommitted files on default branch make every land refuse forever"');
+	expect(check?.remedy).toContain("src/land.ts");
+	expect(check?.remedy).toContain("glance symptom for more");
+	// The ORIGINAL remedy survives — the pointer is appended, not a replacement.
+	expect(check?.remedy).toContain("commit or stash them");
+});
+
+test("a check with no matching symptom keeps its original remedy untouched", async () => {
+	const symptoms: SymptomIndexEntry[] = [{ symptom: "completely unrelated topic about something else entirely", whereToLook: ["glance doctor"] }];
+	const report = await runDoctor(probe({ daemon: async () => ({ running: false }), symptoms: async () => symptoms }));
+	const check = find(report, "daemon.running");
+	expect(check?.remedy).toBe("glance up"); // unchanged — no match cleared the threshold
+});
+
+test("an ok check is never touched, even if it happens to share text with a recorded symptom", async () => {
+	const symptoms: SymptomIndexEntry[] = [{ symptom: "the daemon is up and running healthily right now", whereToLook: ["glance doctor"] }];
+	const report = await runDoctor(probe({ symptoms: async () => symptoms }));
+	const check = find(report, "daemon.running");
+	expect(check?.status).toBe("ok");
+	expect(check?.remedy).toBeUndefined();
+});
+
+describe("the symptom-index summary row", () => {
+	test("reports the count, and is ALWAYS ok — informational, never warn/error", async () => {
+		const report = await runDoctor(probe({ symptoms: async () => [{ symptom: "x", whereToLook: ["glance doctor"] }, { symptom: "y", whereToLook: ["glance doctor"] }] }));
+		const row = find(report, "symptom-index");
+		expect(row?.status).toBe("ok");
+		expect(row?.detail).toContain("2 known symptom(s)");
+		expect(row?.detail).toContain("glance symptom");
+		// No `remedy`: DoctorCheck's own contract is "remedy present iff status is not ok" — this row
+		// is always ok, so the nudge lives in `detail`, not `remedy`.
+		expect(row?.remedy).toBeUndefined();
+	});
+
+	test("an empty index is still ok, and says so honestly", async () => {
+		const report = await runDoctor(probe());
+		const row = find(report, "symptom-index");
+		expect(row?.status).toBe("ok");
+		expect(row?.detail).toContain("no symptoms recorded yet");
+		expect(row?.remedy).toBeUndefined();
+	});
+
+	test("a healthy factory with a populated symptom index is still reported fully healthy", async () => {
+		const report = await runDoctor(probe({ symptoms: async () => [{ symptom: "x", whereToLook: ["glance doctor"] }] }));
+		expect(report.healthy).toBe(true);
+		expect(report.worst).toBe("ok");
+	});
 });
