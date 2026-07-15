@@ -12,6 +12,7 @@ Distilled 2026-07-04 by mining all ~40 Claude Code session transcripts (~250MB J
 | `scratch-daemon` | Isolated throwaway daemon for live verification: boot/seed/drive/teardown + controlled pipeline dogfood + prove-preexisting | 6 sessions, ~10 spinups in one |
 | `execute-plan` | Adversarial design panel → review-gated batches → audit gauntlet → stacked PRs → crash recovery (scripts in `references/`) | 6 workflow executions, 13/13 concerns shipped clean |
 | `make-it-work` | (pre-existing) one lies→works fix per iteration, proven by running it | — |
+| `effect` | Vendored from [kitlangton/skills](https://github.com/kitlangton/skills) (MIT, SHA `30dee860`; see `effect/PROVENANCE.md`) — opinionated Effect v4 guide (services/layers, schema, config, scheduling, caching, streams, HTTP clients, testing), adapted to this repo's `effect@4.0.0-beta.98` pin and gate-proven: every fenced TS example compiles in-process against that exact version | first `skills-verify`-gated skill; router + 8 references |
 
 ## Proposed skills (worth writing when the shape next fires)
 

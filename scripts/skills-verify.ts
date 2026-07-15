@@ -62,6 +62,7 @@ const SYNTH_DIR = join(REPO_ROOT, ".skills-verify");
 export const COMMITTED_SKILL_NAMES: readonly string[] = [
 	"blind-review",
 	"bounce",
+	"effect",
 	"execute-plan",
 	"fleet-ide-loop",
 	"land-sweep",
@@ -70,15 +71,27 @@ export const COMMITTED_SKILL_NAMES: readonly string[] = [
 	"scratch-daemon",
 ].sort();
 
-// Size caps over ALL files in a skill dir (not just SKILL.md) — generous headroom for now; tighten
-// once 02's vendored corpus measures real reality (see DESIGN.md's "Size lint" row).
+// Size caps over ALL files in a skill dir (not just SKILL.md). Measured against reality by 02's
+// vendored `effect` skill (the largest corpus in the tree): SKILL.md tops out at ~7.6KB (48%
+// headroom under the SKILL.md cap), and the largest reference doc (SERVICES_LAYERS.md) is ~8.9KB.
+// The size lint walks every file in the skill dir, not just markdown — that includes the
+// committed `vendor.patch` (a pristine→edited unified diff, ~27KB, the actual largest file in any
+// skill dir today: a diff of ~30KB of adapted prose/code is naturally denser than any single
+// source file it's diffing). SKILL_FILE_MAX_BYTES raised from the original provisional 24KB to
+// 32KB to give that real file ~15% headroom rather than sitting right at the ceiling; SKILL.md's
+// cap is untouched since nothing in that class has come close to it (see DESIGN.md's "Size lint"
+// row, which sanctions setting these from vendor-time measurement).
 export const SKILL_MD_MAX_BYTES = 16 * 1024;
-export const SKILL_FILE_MAX_BYTES = 24 * 1024;
+export const SKILL_FILE_MAX_BYTES = 32 * 1024;
 
 // Per-skill `no-verify reason="..."` ceiling — ratcheted like `defect-ratchet.ts`'s PATTERNS[].
-// Empty today: the current 8 skills have zero ts blocks, so zero opt-outs. A skill that starts
-// opting blocks out of verification must raise its own entry here in the same PR.
-export const NO_VERIFY_BASELINE: Record<string, number> = {};
+// A skill that starts opting blocks out of verification must raise its own entry here in the
+// same PR. "effect" carries 2: TESTING.md's two `it.effect(...)` examples come from
+// `@effect/vitest`, which this repo does not depend on (this repo's test runner is `bun:test`) —
+// see .claude/skills/effect/PROVENANCE.md item 9.
+export const NO_VERIFY_BASELINE: Record<string, number> = {
+	effect: 2,
+};
 
 // Identifier-tier false positives — committed, and the array's size is itself ratcheted (below)
 // so growing the allowlist is a deliberate, reviewed act, not a silent skip. Each entry names the
@@ -97,8 +110,16 @@ export const IDENTIFIER_ALLOWLIST: readonly string[] = [
 	"docs/full-overhaul",
 	"feat/lifecycle-truth",
 	"feat/never-lose-work",
+	// npm/module import specifiers named in the vendored effect skill's prose (SKILL.md, CACHING.md,
+	// HTTP_CLIENTS.md) — they contain "/" and look path-shaped to the identifier-tier regex, but
+	// they name a package subpath (resolved through node_modules), not a repo-relative file.
+	"effect/Cache",
+	"effect/unstable/http/HttpClient",
+	"effect/unstable/http/HttpClientRequest",
+	"effect/unstable/http/HttpClientResponse",
+	"effect/unstable/http/HttpClientError",
 ];
-export const IDENTIFIER_ALLOWLIST_BASELINE = 6;
+export const IDENTIFIER_ALLOWLIST_BASELINE = 11;
 
 // ---------------------------------------------------------------------------------------------
 // Types

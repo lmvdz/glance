@@ -70,13 +70,13 @@ test("skills-verify: identifier-tier allowlist stays at/under its committed size
 	expect(new Set(IDENTIFIER_ALLOWLIST).size).toBe(IDENTIFIER_ALLOWLIST.length);
 });
 
-test('skills-verify: "effect" tripwire is a no-op until concern 02 adds the skill (by design)', () => {
-	expect(report.skillsScanned.includes("effect")).toBe(false);
-	expect(report.effectSkillHasVerifiedBlock).toBeNull();
+test('skills-verify: "effect" tripwire is armed now that concern 02 vendored the skill', () => {
+	expect(report.skillsScanned.includes("effect")).toBe(true);
+	expect(report.effectSkillHasVerifiedBlock).toBe(true);
 });
 
-test("skills-verify: current tree has zero ts blocks (8 skills are prose/bash only)", () => {
-	expect(report.tsBlocksVerified).toBe(0);
+test("skills-verify: the vendored effect skill contributes verified ts blocks (8 prose/bash-only skills plus effect)", () => {
+	expect(report.tsBlocksVerified).toBeGreaterThan(0);
 	expect(report.tsErrors).toEqual([]);
 });
 

@@ -81,10 +81,12 @@ test("effectSkillPointerLine: import-specifier and version-pin shapes also match
 	expect(effectSkillPointerLine("this change takes effect immediately", dir)).toBeUndefined();
 });
 
-test("effectSkillPointerLine: with the real (default) skill dir, undefined today — concern 02 hasn't vendored it yet", () => {
+test("effectSkillPointerLine: with the real (default) skill dir, fires now that concern 02 vendored it", () => {
 	// No skillDir override: exercises the actual `.claude/skills/effect` path in THIS repo, proving the
-	// gate holds in production wiring right now (the directory genuinely doesn't exist yet).
-	expect(effectSkillPointerLine("write an Effect service layer")).toBeUndefined();
+	// gate holds in production wiring now that the directory genuinely exists.
+	const line = effectSkillPointerLine("write an Effect service layer");
+	expect(line).toBeDefined();
+	expect(line).toContain(".claude/skills/effect");
 });
 
 // ── End-to-end delivery: SquadManager wiring (dispatchSpawn shape: no profileId) ──────────────────────
@@ -180,12 +182,12 @@ test("create() WITH a profile: DO_NOT_BLOCK appears exactly once (not duplicated
 	await mgr.stop();
 });
 
-test("create() with an Effect-shaped task: no pointer line reaches the prompt today (skill dir not vendored yet), DO_NOT_BLOCK still lands", async () => {
+test("create() with an Effect-shaped task: the pointer line reaches the prompt now that concern 02 vendored the skill, alongside DO_NOT_BLOCK", async () => {
 	const { mgr, repo } = await makeMgr("donot-effect-shaped");
 	const dto = await mgr.create({ repo, name: "u3", task: "write an Effect service layer for the ingest pipeline", approvalMode: "yolo", autoRoute: false });
 	const rec = (mgr as unknown as InternalHost).agents.get(dto.id)!;
 	const prompt = rec.options.appendSystemPrompt ?? "";
 	expect(prompt).toContain(DO_NOT_BLOCK);
-	expect(prompt).not.toContain(".claude/skills/effect");
+	expect(prompt).toContain(".claude/skills/effect");
 	await mgr.stop();
 });
