@@ -1025,13 +1025,29 @@ async function cmdPromote(args: string[]): Promise<void> {
 	}
 	const repo = typeof flags.repo === "string" ? path.resolve(flags.repo) : process.cwd();
 	if (!flags.json) process.stderr.write(`promoting ${issue}… (waits for an ask-mode unit to investigate; can take several minutes)\n`);
-	const res = await fetch(`${base(flags)}/api/issues/${encodeURIComponent(issue)}/promote`, {
-		method: "POST",
-		headers: { ...tokenHeader(), "content-type": "application/json" },
-		body: JSON.stringify({ repo }),
-	}).catch(() => null);
-	if (!res) {
-		process.stderr.write(`No glance daemon on ${base(flags)}. Start one with: glance up\n`);
+	const requestStarted = Date.now();
+	let res: Response | null = null;
+	try {
+		res = await fetch(`${base(flags)}/api/issues/${encodeURIComponent(issue)}/promote`, {
+			method: "POST",
+			headers: { ...tokenHeader(), "content-type": "application/json" },
+			body: JSON.stringify({ repo }),
+		});
+	} catch (err) {
+		// A refused connection fails near-instantly — that's genuinely "no daemon". A drop after the
+		// request was already minutes into waiting (ECONNRESET, or any other mid-flight socket error) means
+		// the daemon WAS there and the promotion may still be running server-side; reporting both as "no
+		// daemon" sent an operator chasing a dead lead while a live promotion kept going unseen and a
+		// confused retry could hit the idempotency guard.
+		const elapsedMs = Date.now() - requestStarted;
+		const code = typeof err === "object" && err !== null && "code" in err ? String((err as { code: unknown }).code) : undefined;
+		if (elapsedMs > 5_000) {
+			process.stderr.write(
+				`lost connection to the daemon ${Math.round(elapsedMs / 1000)}s into the promotion${code ? ` (${code})` : ""} — it may still be running server-side; check the Plane ticket for ${issue} or the daemon logs, then retry (an already-promoted ticket is refused, not re-enriched, so a retry is safe).\n`,
+			);
+		} else {
+			process.stderr.write(`No glance daemon on ${base(flags)}. Start one with: glance up\n`);
+		}
 		process.exit(1);
 	}
 	const result = (await res.json().catch(() => null)) as { ok: boolean; issue?: string; message: string; error?: string; draft?: string } | null;

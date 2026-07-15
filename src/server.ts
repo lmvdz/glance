@@ -2489,6 +2489,13 @@ export class SquadServer {
 			if (!id) return new Response("issue id required", { status: 400 });
 			const body = decodeBodyOrEmpty(PromoteBodySchema, await req.json().catch(() => null));
 			const repo = typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
+			// A real promotion dispatches an ask-mode unit and waits up to GLANCE_ASK_TIMEOUT_MS (default
+			// 30 min) for its answer — routinely several minutes even in the fast case. That's well past
+			// Bun's 120s idleTimeout (see the comment at Bun.serve above, whose own point is that a
+			// handler stalled this long gets its socket dropped with "request timed out"). Disable the
+			// per-request idle timeout for this one route (0 = no timeout) so the connection survives the
+			// wait; every other route keeps the 120s default.
+			server.timeout(req, 0);
 			return Response.json(await promoteIssue(manager, repo, id, actor));
 		}
 		if (url.pathname === "/api/comments" && req.method === "GET") {
