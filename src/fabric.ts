@@ -60,7 +60,7 @@ export interface FabricDecisionFact {
 	source: FactSource;
 	featureTitle: string;
 	text: string;
-	decisionSource?: "plan" | "human" | "agent";
+	decisionSource?: "plan" | "human" | "agent" | "model-delta";
 	createdAt?: number;
 }
 
