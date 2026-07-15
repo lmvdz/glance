@@ -1,5 +1,17 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { appendModelMessage, appendUserMessage, loadPersistedSessionsOrNull, mergeSessions, normalizeAssistantSessions, updateSessionAgentId, type Session } from './sessionStore';
+import {
+  advanceVoiceDebriefCursor,
+  appendModelMessage,
+  appendSpawnedUnit,
+  appendUserMessage,
+  loadPersistedSessionsOrNull,
+  mergeSessions,
+  normalizeAssistantSessions,
+  recordVoiceCallEnded,
+  updateSessionAgentId,
+  type Session,
+} from './sessionStore';
+import type { SpawnedUnitRecord } from '../spawnProposal';
 
 function session(overrides: Partial<Session> & Pick<Session, 'id'>): Session {
   return { title: overrides.id, messages: [], updatedAt: 0, ...overrides };
@@ -134,6 +146,116 @@ describe('mergeSessions', () => {
     const current = [session({ id: 'a', updatedAt: 5 })];
     const persisted = [session({ id: 'a', updatedAt: 5 })]; // an echo of current's own write
     expect(mergeSessions(current, persisted)).toBe(current);
+  });
+});
+
+// Concern 04: the debrief lane's ts-cursor two-phase commit primitive.
+describe('advanceVoiceDebriefCursor', () => {
+  test('sets cursorTs on a session with no prior voiceDebrief metadata, and bumps updatedAt', () => {
+    const sessions = [session({ id: 'a', updatedAt: 1 })];
+    const next = advanceVoiceDebriefCursor(sessions, 'a', 100, 42);
+    expect(next[0].metadata?.voiceDebrief).toEqual({ cursorTs: 100 });
+    expect(next[0].updatedAt).toBe(42);
+  });
+
+  test('advances a strictly newer cursorTs and bumps updatedAt', () => {
+    const sessions = [session({ id: 'a', updatedAt: 1, metadata: { voiceDebrief: { cursorTs: 50 } } })];
+    const next = advanceVoiceDebriefCursor(sessions, 'a', 100, 42);
+    expect(next[0].metadata?.voiceDebrief?.cursorTs).toBe(100);
+    expect(next[0].updatedAt).toBe(42);
+  });
+
+  test('NEVER moves the cursor backward — same array reference, no updatedAt bump', () => {
+    const sessions = [session({ id: 'a', updatedAt: 1, metadata: { voiceDebrief: { cursorTs: 100 } } })];
+    const next = advanceVoiceDebriefCursor(sessions, 'a', 50, 42);
+    expect(next).toBe(sessions);
+    expect(next[0].updatedAt).toBe(1);
+  });
+
+  test('an EQUAL cursorTs is also a no-op (same reference) — advancing means strictly forward', () => {
+    const sessions = [session({ id: 'a', updatedAt: 1, metadata: { voiceDebrief: { cursorTs: 100 } } })];
+    expect(advanceVoiceDebriefCursor(sessions, 'a', 100, 42)).toBe(sessions);
+  });
+
+  test('preserves an existing lastCallEndedAt when only cursorTs advances', () => {
+    const sessions = [session({ id: 'a', metadata: { voiceDebrief: { cursorTs: 10, lastCallEndedAt: 5 } } })];
+    const next = advanceVoiceDebriefCursor(sessions, 'a', 20, 42);
+    expect(next[0].metadata?.voiceDebrief).toEqual({ cursorTs: 20, lastCallEndedAt: 5 });
+  });
+
+  test('returns the SAME array reference when the session id is not found', () => {
+    const sessions = [session({ id: 'a' })];
+    expect(advanceVoiceDebriefCursor(sessions, 'missing', 100, 1)).toBe(sessions);
+  });
+
+  test('an untouched sibling session keeps its own reference', () => {
+    const sessions = [session({ id: 'a', updatedAt: 1 }), session({ id: 'b', updatedAt: 1 })];
+    const next = advanceVoiceDebriefCursor(sessions, 'a', 100, 42);
+    expect(next.find((s) => s.id === 'b')).toBe(sessions[1]);
+  });
+});
+
+describe('recordVoiceCallEnded', () => {
+  test('stamps lastCallEndedAt and seeds a fresh cursorTs for a NEVER-debriefed session (no voiceDebrief at all)', () => {
+    const sessions = [session({ id: 'a', updatedAt: 1 })];
+    const now = 1_000_000_000_000; // arbitrary wall-clock ms, far past 24h from epoch
+    const next = recordVoiceCallEnded(sessions, 'a', now);
+    expect(next[0].metadata?.voiceDebrief).toEqual({ cursorTs: now, lastCallEndedAt: now });
+    expect(next[0].updatedAt).toBe(now);
+  });
+
+  test('stamps lastCallEndedAt WITHOUT touching an existing cursorTs', () => {
+    const sessions = [session({ id: 'a', metadata: { voiceDebrief: { cursorTs: 50 } } })];
+    const next = recordVoiceCallEnded(sessions, 'a', 999);
+    expect(next[0].metadata?.voiceDebrief).toEqual({ cursorTs: 50, lastCallEndedAt: 999 });
+  });
+
+  test('always bumps updatedAt and always "changes" (returns a fresh array) for a found session', () => {
+    const sessions = [session({ id: 'a', updatedAt: 1 })];
+    const next = recordVoiceCallEnded(sessions, 'a', 500);
+    expect(next).not.toBe(sessions);
+    expect(next[0].updatedAt).toBe(500);
+  });
+
+  test('returns the SAME array reference when the session id is not found', () => {
+    const sessions = [session({ id: 'a' })];
+    expect(recordVoiceCallEnded(sessions, 'missing', 500)).toBe(sessions);
+  });
+
+  test('repeated calls on a never-debriefed session only seed cursorTs once (the first call wins)', () => {
+    const sessions = [session({ id: 'a' })];
+    const first = recordVoiceCallEnded(sessions, 'a', 1_000);
+    const second = recordVoiceCallEnded(first, 'a', 2_000);
+    expect(second[0].metadata?.voiceDebrief).toEqual({ cursorTs: 1_000, lastCallEndedAt: 2_000 });
+  });
+});
+
+describe('appendSpawnedUnit', () => {
+  const record: SpawnedUnitRecord = { id: 'spawn:1', agentId: 'agent-9', createdAt: 42, prompt: 'build a widget' };
+
+  test('appends a durable SpawnedUnitRecord to the matching session and bumps updatedAt', () => {
+    const sessions = [session({ id: 'a', updatedAt: 1 })];
+    const next = appendSpawnedUnit(sessions, 'a', record, 99);
+    expect(next[0].spawnedUnits).toEqual([record]);
+    expect(next[0].updatedAt).toBe(99);
+  });
+
+  test('appends onto an existing spawnedUnits list without disturbing prior entries', () => {
+    const existing: SpawnedUnitRecord = { id: 'spawn:0', agentId: 'agent-1', createdAt: 1, prompt: 'earlier task' };
+    const sessions = [session({ id: 'a', spawnedUnits: [existing] })];
+    const next = appendSpawnedUnit(sessions, 'a', record, 99);
+    expect(next[0].spawnedUnits).toEqual([existing, record]);
+  });
+
+  test('returns the SAME array reference when the session id is not found', () => {
+    const sessions = [session({ id: 'a' })];
+    expect(appendSpawnedUnit(sessions, 'missing', record, 1)).toBe(sessions);
+  });
+
+  test('an untouched sibling session keeps its own reference', () => {
+    const sessions = [session({ id: 'a', updatedAt: 1 }), session({ id: 'b', updatedAt: 1 })];
+    const next = appendSpawnedUnit(sessions, 'a', record, 99);
+    expect(next.find((s) => s.id === 'b')).toBe(sessions[1]);
   });
 });
 

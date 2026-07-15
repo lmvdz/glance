@@ -93,6 +93,22 @@ export interface UseVoiceDispatcherOptions {
    *  already covers once the transcript echoes it back — see `SpokenSummaryEvent`'s doc comment)
    *  and the narrated completion (role:'model', no clientTurnId of its own). */
   onSpokenSummary?: (event: SpokenSummaryEvent) => void;
+  /** Fired once a `spawn_agent` dispatch's `/api/spawn` call succeeds (concern 04's durable-voice-
+   *  spawns fix) — the caller persists this onto the bound session's `spawnedUnits` so a voice-
+   *  spawned agent is visible to the NEXT call's debrief tracked-agent set, exactly like a typed
+   *  spawn already is. `prompt` rides along despite DESIGN.md's own `{id, name}` shorthand: the
+   *  caller's durable `SpawnedUnitRecord` has a REQUIRED `prompt` field ("the exact prompt sent to
+   *  `/api/spawn`" — spawnProposal.ts), and `dispatchSpawnAgent` already has it in scope (the tool
+   *  call's own argument) — omitting it would force the caller to either fabricate a placeholder or
+   *  leave the field dishonestly blank. */
+  onAgentSpawned?: (agent: { id: string; name: string; prompt: string }) => void;
+  /** Fired when a completion narration `sweepPromptWatchers` just queued was actually SPOKEN — i.e.
+   *  its own `queueInjection` batch resolved `{cancelled: false}` — with the narrated entry's own
+   *  `ts`. The debrief lane's other cursor-advance path (`VoiceCallContext`'s call-start debrief is
+   *  the first): a completion narrated LIVE, mid-call, counts as "heard" exactly the same as one
+   *  spoken from the away-summary, so the persisted cursor must move past it too — otherwise the
+   *  operator's very NEXT call would re-debrief something they were just told about seconds ago. */
+  onCompletionNarrated?: (entryTs: number) => void;
 }
 
 /**
@@ -299,6 +315,9 @@ export interface DispatchSpawnAgentRefs {
 
 export interface DispatchSpawnAgentDeps {
   transcripts: Map<string, TranscriptEntry[]>;
+  /** Concern 04's durable-voice-spawns dep — see `UseVoiceDispatcherOptions.onAgentSpawned`'s doc
+   *  comment for why `prompt` rides along here despite the concern doc's `{id, name}` shorthand. */
+  onAgentSpawned?: (agent: { id: string; name: string; prompt: string }) => void;
   /** Injectable for tests — defaults to the real `apiJson` imported above. */
   apiJsonFn?: typeof apiJson;
 }
@@ -336,6 +355,9 @@ export async function dispatchSpawnAgent(
   } finally {
     refs.spawnInFlightRef.current = false;
   }
+  // Concern 04: the caller persists this as a durable SpawnedUnitRecord — see the dep's doc comment
+  // for why `prompt` (this function's own argument, already in scope) rides along.
+  deps.onAgentSpawned?.({ id: agent.id, name: agent.name, prompt });
   const cursor = deps.transcripts.get(agent.id)?.length ?? 0;
   // LOW batch: push, don't overwrite — a spawned agent's own id is fresh per spawn, so this can
   // only collide with a prior watcher if a PRIOR spawn's watcher (same id — never happens, ids are
@@ -351,6 +373,9 @@ export interface SweepWatchersDeps {
   transcripts: Map<string, TranscriptEntry[]>;
   agents: AgentDTO[];
   onSpokenSummary?: (event: SpokenSummaryEvent) => void;
+  /** Concern 04: fired with a completion's own `ts` once its narration was actually SPOKEN
+   *  (`{cancelled: false}`) — see `UseVoiceDispatcherOptions.onCompletionNarrated`'s doc comment. */
+  onCompletionNarrated?: (entryTs: number) => void;
   clearTimerFn?: (handle: ReturnType<typeof setTimeout>) => void;
 }
 
@@ -425,7 +450,14 @@ export function sweepPromptWatchers(session: Pick<VoiceSession, 'queueInjection'
       }
       floor = entries.indexOf(completion);
       const label = labelForAgent(deps.agents, agentId, current.label);
-      session.queueInjection(buildCompletionInjectionItems(label, completion.text));
+      const completionTs = completion.ts;
+      // Concern 04: the debrief lane's OTHER cursor-advance path — a completion narrated LIVE
+      // counts as "heard" exactly like one spoken from the away-summary, so onCompletionNarrated
+      // only fires once THIS narration's own response actually completed uncancelled (a barge-in
+      // mid-narration must not advance the cursor past something the operator never actually heard).
+      session.queueInjection(buildCompletionInjectionItems(label, completion.text), ({ cancelled }) => {
+        if (!cancelled) deps.onCompletionNarrated?.(completionTs);
+      });
       // MAJOR-2(a): role:'model', no clientTurnId — this isn't a dispatched turn of its own. Its
       // double-render risk is fixed on the OTHER side, by extending partitionSessionMessages
       // (AssistantChat.tsx) to dedupe a role:'model' durable Message against a matching finished
@@ -459,7 +491,7 @@ export function clearAllPendingTimers(refs: TimerCleanupRefs, clearTimerFn: (han
 }
 
 export function useVoiceDispatcher(opts: UseVoiceDispatcherOptions): UseVoiceDispatcherResult {
-  const { sessionId, agentId: pinnedAgentId, selectedModel = '', onAgentBound, onSpokenSummary } = opts;
+  const { sessionId, agentId: pinnedAgentId, selectedModel = '', onAgentBound, onSpokenSummary, onAgentSpawned, onCompletionNarrated } = opts;
   const { agents, features, audit, transcripts, currentProject, sendConsoleCommand, subscribeConsole } = useTaskContext();
   // The live page-context store (single shared store under the root PageContextProvider, published
   // by whichever view is mounted). Read here so a spoken prompt grounds to what the operator is
@@ -546,7 +578,7 @@ export function useVoiceDispatcher(opts: UseVoiceDispatcherOptions): UseVoiceDis
   useEffect(() => {
     const session = sessionRef.current;
     if (!session) return;
-    sweepPromptWatchers(session, refs, { transcripts, agents, onSpokenSummary });
+    sweepPromptWatchers(session, refs, { transcripts, agents, onSpokenSummary, onCompletionNarrated });
   }, [transcripts, agents]);
 
   // MINOR-9: clear every pending echo timer + the interrupt debounce timer on unmount — a component
@@ -588,7 +620,7 @@ export function useVoiceDispatcher(opts: UseVoiceDispatcherOptions): UseVoiceDis
   // before dereferencing `agent.id`, so a malformed 2xx can't wedge the session in toolPending).
   // ---------------------------------------------------------------------------
   async function executeSpawnAgent(session: VoiceSession, callId: string, prompt: string): Promise<void> {
-    await dispatchSpawnAgent(session, callId, prompt, { spawnInFlightRef, watchersRef }, { transcripts });
+    await dispatchSpawnAgent(session, callId, prompt, { spawnInFlightRef, watchersRef }, { transcripts, onAgentSpawned });
   }
 
   // ---------------------------------------------------------------------------

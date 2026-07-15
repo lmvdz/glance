@@ -1,5 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
-import { getVoiceConfig, mintVoiceToken } from '../lib/api';
+import { fetchAgentTranscript, getVoiceConfig, mintVoiceToken } from '../lib/api';
 import createVoiceSession, { type VoiceSession, type VoiceSessionErrorInfo, type VoiceState } from '../lib/voice/voiceSession';
 import {
   errorToastMessage,
@@ -11,12 +11,23 @@ import {
   type CaptionState,
 } from '../lib/voice/callHud';
 import { useVoiceDispatcher } from '../hooks/useVoiceDispatcher';
-import { buildVoiceContextBrief } from '../lib/voice/tools';
-import { appendSpokenSummary, appendSpokenUserMessage, bindSessionAgent, loadPersistedSessionsOrNull, subscribeSessionStore } from '../lib/chat/sessionStore';
+import { buildVoiceContextBrief, buildVoiceDebrief } from '../lib/voice/tools';
+import {
+  appendSpokenSummary,
+  appendSpokenUserMessage,
+  bindSessionAgent,
+  commitVoiceDebrief,
+  loadPersistedSessionsOrNull,
+  recordVoiceSpawn,
+  stampVoiceCallEnded,
+  subscribeSessionStore,
+} from '../lib/chat/sessionStore';
 import { useTaskContext } from './TaskContext';
 import { useAuth } from './AuthContext';
 import { usePageContext } from './PageContext';
 import { serializePageContextForPrompt } from '../lib/pageContextDerive';
+import type { TranscriptEntry } from '../lib/dto';
+import type { SpawnedUnitRecord } from '../lib/spawnProposal';
 
 /**
  * Live voice call, owned ABOVE the chat panel (webapp-voice-lane concern 08, DESIGN.md "Session
@@ -139,6 +150,12 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
   /** The context brief, rebuilt every render and read through this ref at connection-wiring time
    *  (`getContextBrief`) — the VoiceSession's closure is fixed per call, the ref keeps it live. */
   const contextBriefRef = useRef('');
+  /** Mirrors `binding` every render (plain assignment, same pattern as `contextBriefRef` below) —
+   *  `endCall` reads `sessionId` through this instead of depending on `binding` directly, so its own
+   *  identity stays stable across an in-call agent rebind (`onAgentBound` calls `setBinding`) and
+   *  doesn't churn the several OTHER effects that list `endCall` in their dependency arrays. */
+  const bindingRef = useRef<VoiceCallBinding | null>(null);
+  bindingRef.current = binding;
 
   // Capability probe (DESIGN.md "Flagging" row) — the only honest discovery channel; a flag-off
   // 404 is mapped to `{enabled:false}` by `getVoiceConfig` itself, never surfaced as an error here.
@@ -183,6 +200,26 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
       } else {
         appendSpokenSummary(binding.sessionId, event.text);
       }
+    },
+    // Concern 04: durable voice spawns — a voice-dispatched spawn is invisible to the NEXT call's
+    // debrief tracked-agent set until it's written onto the bound session's `spawnedUnits`, the
+    // same durable record AssistantChat's own typed spawn-confirm flow writes.
+    onAgentSpawned: (agent) => {
+      if (!binding) return;
+      const record: SpawnedUnitRecord = {
+        id: `spawn:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+        agentId: agent.id,
+        createdAt: Date.now(),
+        prompt: agent.prompt,
+      };
+      recordVoiceSpawn(binding.sessionId, record);
+    },
+    // Concern 04: a completion narrated LIVE mid-call is "heard" exactly like one spoken from the
+    // away-summary — advance the cursor past it too, once its own response actually completed
+    // uncancelled (the dispatcher only calls this from that branch — see its own doc comment).
+    onCompletionNarrated: (entryTs) => {
+      if (!binding) return;
+      commitVoiceDebrief(binding.sessionId, entryTs);
     },
   });
 
@@ -260,6 +297,11 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const endCall = useCallback(() => {
+    // Concern 04: a REAL user/system intent to end the call (as opposed to the connect-effect's
+    // cleanup, which also fires on a StrictMode synthetic remount and must never touch this) — the
+    // one place `lastCallEndedAt` is stamped, and a never-debriefed session's cursor gets seeded.
+    const sessionId = bindingRef.current?.sessionId;
+    if (sessionId) stampVoiceCallEnded(sessionId);
     teardown(); // the connect-effect's cleanup (keyed on callToken) tears down the VoiceSession itself
   }, [teardown]);
 
@@ -338,6 +380,7 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
     if (!callToken || !binding) return;
     let cancelled = false;
     const boundSessionId = binding.sessionId; // fixed for the call's lifetime (only agentId rebinds)
+    const boundAgentIdAtConnect = binding.agentId; // may be undefined pre-bootstrap — see runDebrief
     const session = createVoiceSession(mintVoiceToken, {
       agentId: binding.agentId,
       getRecap: dispatcher.getRecap,
@@ -393,8 +436,64 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
     // diagnostic ring buffer (event types + state transitions + correlation ids, no transcript
     // text) — the flight recorder for wire-level bug reports. Cleared with the call.
     (window as unknown as Record<string, unknown>).__glanceVoiceDebug = () => session.getDebugLog();
+    // Debrief lane (concern 04) — "while you were away". Runs once, right after THIS call's own
+    // connect() resolves; never re-runs on an in-place agentId rebind (this effect is keyed on
+    // `callToken` only). Tracked set: the bound console agent (if any — a call can start
+    // pre-bootstrap, before the first prompt_agent has bound one) plus every spawn recorded on this
+    // session's `spawnedUnits` (typed OR voice — concern 04's durable-spawn fix), pruned to
+    // whichever of those the LIVE roster still lists. A unit that's already fallen out of the
+    // roster (landed + cleaned up, evicted, removed) is not this lane's job — the daemon-side push
+    // lane (DESIGN.md) is what tells the operator about that, independent of whether they ever
+    // start another call on this session.
+    const runDebrief = async () => {
+      const sessions = loadPersistedSessionsOrNull() ?? [];
+      const boundSession = sessions.find((s) => s.id === boundSessionId);
+      // Review fix: no cursor means this session has never completed a voice call — debriefing here
+      // would narrate up to 24h of possibly TYPED work the operator was present for ("while you
+      // were away" as the first-ever call's opening line is a lie). Stay silent; `endCall()` seeds
+      // the cursor, so the flagship flow (call 1 dispatches, hang up, work finishes, call 2
+      // debriefs it) works from the second call onward.
+      const voiceDebrief = boundSession?.metadata?.voiceDebrief;
+      if (!voiceDebrief) return;
+      // Review fix (MINOR-6's roster doctrine): an EMPTY roster is a transient WS-flap/cold-load
+      // read, never evidence the tracked agents are gone — prune against it only when it has
+      // content. A pruned-in-error id would just 404 harmlessly below (allSettled), but an
+      // empty-roster prune would silently skip the whole debrief on exactly the push-tap →
+      // fresh-page-load → call-back flow this feature exists for.
+      const rosterIds = new Set(agents.map((a) => a.id));
+      const inRoster = (id: string) => rosterIds.size === 0 || rosterIds.has(id);
+      const trackedIds = new Set<string>();
+      if (boundAgentIdAtConnect && inRoster(boundAgentIdAtConnect)) trackedIds.add(boundAgentIdAtConnect);
+      for (const unit of boundSession?.spawnedUnits ?? []) {
+        if (inRoster(unit.agentId)) trackedIds.add(unit.agentId);
+      }
+      if (trackedIds.size === 0) return; // nothing tracked — silent, no fetch needed at all
+
+      // Promise.allSettled: a dead/evicted agent's 404 (or any other per-agent fetch failure) must
+      // not sink the whole debrief — the other tracked agents' transcripts still speak.
+      const fetched = await Promise.allSettled(
+        [...trackedIds].map(async (id) => ({ id, entries: await fetchAgentTranscript(id) })),
+      );
+      if (cancelled) return; // superseded (endCall/org-switch/unmount) while the fetch was in flight
+
+      const perAgent = fetched
+        .filter((r): r is PromiseFulfilledResult<{ id: string; entries: TranscriptEntry[] }> => r.status === 'fulfilled')
+        .map(({ value }) => ({ label: agents.find((a) => a.id === value.id)?.name ?? value.id, entries: value.entries }));
+      const cursorTs = voiceDebrief.cursorTs;
+      const debrief = buildVoiceDebrief({ perAgent, cursorTs, nowTs: Date.now() });
+      if (!debrief) return; // no cursor + no backlog, or already fully caught up — stay silent
+
+      // Two-phase commit (concern 03/04's primitive): the cursor only advances once THIS debrief's
+      // own response completes uncancelled — a barge-in or an early hang-up leaves it untouched and
+      // the next call simply re-debriefs the same backlog. NEVER advance from effect cleanup (see
+      // below) — only from here, or from `onCompletionNarrated` above for a live narration.
+      session.queueInjection(debrief.items, ({ cancelled: turnCancelled }) => {
+        if (!turnCancelled) commitVoiceDebrief(boundSessionId, debrief.maxCompletionTs);
+      });
+    };
     void session.connect().then(() => {
       if (!cancelled) setConnecting(false); // no error fired — the connection is live
+      if (!cancelled) void runDebrief();
     });
     return () => {
       cancelled = true;

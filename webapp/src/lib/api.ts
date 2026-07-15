@@ -1,3 +1,5 @@
+import type { TranscriptEntry } from "./dto";
+
 const TOKEN_KEY = "ompsq_token";
 
 export function captureToken(): void {
@@ -159,6 +161,21 @@ export function deleteOrgVoiceKey(): Promise<VoiceKeyStatus> {
 /** Flip the synchronous kill switch without touching the stored key. */
 export function setOrgVoiceEnabled(enabled: boolean): Promise<VoiceKeyStatus> {
   return apiJson<VoiceKeyStatus>("/api/org/voice/enabled", jsonInit("POST", { enabled }));
+}
+
+// -----------------------------------------------------------------------------------------------
+// Debrief lane (webapp-voice-lane/04) — the REST truth source for "while you were away". The WS
+// `transcripts` mirror (TaskContext) is NOT used for this: it's empty on a cold page load (a
+// fresh voice call may be the first thing the operator does after opening the tab) and a resumed
+// WS stream has no completion marker to tell "already known" apart from "finished while away".
+// -----------------------------------------------------------------------------------------------
+
+/** `GET /api/agents/:id/transcript` — a plain `TranscriptEntry[]`, oldest-first (see
+ *  `src/index.ts`'s `cmdLogs` for the same shape consumed CLI-side). Throws (via `apiJson`) on any
+ *  non-2xx, including a 404 for a dead/evicted agent id — callers wrap this in `Promise.allSettled`
+ *  so one dead tracked agent never sinks the whole debrief. */
+export function fetchAgentTranscript(agentId: string): Promise<TranscriptEntry[]> {
+  return apiJson<TranscriptEntry[]>(`/api/agents/${encodeURIComponent(agentId)}/transcript`);
 }
 
 /** Voice capability probe (`GET /api/voice/config`) — the one honest discovery channel for whether
