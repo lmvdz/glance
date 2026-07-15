@@ -4,9 +4,7 @@ import { VoiceCallPillView } from './VoiceCallPill';
 
 const baseProps = {
   bindingBanner: 'voice → Fix the flaky test',
-  stateLabel: 'Listening — hold to talk',
-  captionSpeaker: null as 'assistant' | 'user' | null,
-  captionText: '',
+  stateLabel: 'Muted — hold or tap to talk',
   elapsedLabel: '0:07',
   costLabel: '~$0.02',
   reconnectNotice: null as string | null,
@@ -35,18 +33,8 @@ describe('VoiceCallPillView', () => {
     }
   });
 
-  test('renders the live caption line, tagged by speaker', () => {
-    const assistantHtml = renderToStaticMarkup(<VoiceCallPillView {...baseProps} captionSpeaker="assistant" captionText="On it." />);
-    expect(assistantHtml).toContain('Agent:');
-    expect(assistantHtml).toContain('On it.');
-
-    const userHtml = renderToStaticMarkup(<VoiceCallPillView {...baseProps} captionSpeaker="user" captionText="Stop the deploy" />);
-    expect(userHtml).toContain('You:');
-    expect(userHtml).toContain('Stop the deploy');
-  });
-
-  test('omits the caption line entirely when there is nothing to show', () => {
-    const html = renderToStaticMarkup(<VoiceCallPillView {...baseProps} captionText="" />);
+  test('carries NO caption line — the spoken back-and-forth renders in the chat thread, not the pill', () => {
+    const html = renderToStaticMarkup(<VoiceCallPillView {...baseProps} />);
     expect(html).not.toContain('You:');
     expect(html).not.toContain('Agent:');
   });

@@ -108,15 +108,23 @@ export function appendModelMessage(sessions: Session[], sessionId: string, text:
  *  suppressed and the operator's spoken turn renders from the transcript itself, as the USER — not
  *  as a `role:'model'` bubble (the bug this fixes: `appendSpokenSummary` used to persist BOTH the
  *  operator's prompt and the assistant's completion as `role:'model'`). Returns the SAME array
- *  reference when `sessionId` isn't found or `text` is blank, same discipline as `appendModelMessage`. */
-export function appendUserMessage(sessions: Session[], sessionId: string, text: string, clientTurnId: string, now: number): Session[] {
+ *  reference when `sessionId` isn't found or `text` is blank, same discipline as `appendModelMessage`.
+ *
+ *  `clientTurnId` is optional: a plain voice turn (the operator speaking to the voice model with
+ *  no `prompt_agent` dispatch behind it — VoiceCallContext's caption flush) never reaches the
+ *  agent transcript, so it has no echo to dedupe against and no turn id to carry. */
+export function appendUserMessage(sessions: Session[], sessionId: string, text: string, clientTurnId: string | undefined, now: number): Session[] {
   const trimmed = text.trim();
   if (!trimmed) return sessions;
   let changed = false;
   const next = sessions.map((session) => {
     if (session.id !== sessionId) return session;
     changed = true;
-    return { ...session, messages: [...session.messages, { role: 'user' as const, text: trimmed, timestamp: now, clientTurnId }], updatedAt: now };
+    return {
+      ...session,
+      messages: [...session.messages, { role: 'user' as const, text: trimmed, timestamp: now, ...(clientTurnId ? { clientTurnId } : {}) }],
+      updatedAt: now,
+    };
   });
   return changed ? next : sessions;
 }
@@ -233,8 +241,10 @@ export function appendSpokenSummary(sessionId: string, text: string, now = Date.
 
 /** The voice dispatcher's `onSpokenSummary` `role:'user'` half (MAJOR-2a) lands here — same
  *  read-modify-write shape as `appendSpokenSummary`, but persists as a user Message stamped with
- *  the dispatch's `clientTurnId` (see `appendUserMessage`'s own doc comment for why). */
-export function appendSpokenUserMessage(sessionId: string, text: string, clientTurnId: string, now = Date.now()): void {
+ *  the dispatch's `clientTurnId` (see `appendUserMessage`'s own doc comment for why).
+ *  `VoiceCallContext`'s caption flush also lands plain (dispatch-less) voice turns here, with no
+ *  `clientTurnId` — those turns exist nowhere else, so there is nothing to dedupe them against. */
+export function appendSpokenUserMessage(sessionId: string, text: string, clientTurnId: string | undefined, now = Date.now()): void {
   const sessions = loadPersistedSessions();
   const next = appendUserMessage(sessions, sessionId, text, clientTurnId, now);
   if (next !== sessions) persistSessions(next);

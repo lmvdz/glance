@@ -8,7 +8,6 @@ import {
   nextPttUiState,
   shouldForceReleaseForWatchdog,
   voiceStateLabel,
-  type CaptionState,
   type CallHudPhase,
   type PttGestureEvent,
   type PttUiMode,
@@ -28,8 +27,6 @@ import { useTaskContext } from '../../context/TaskContext';
 export interface VoiceCallPillViewProps {
   bindingBanner: string;
   stateLabel: string;
-  captionSpeaker: 'assistant' | 'user' | null;
-  captionText: string;
   elapsedLabel: string;
   costLabel: string;
   reconnectNotice: string | null;
@@ -53,8 +50,6 @@ export interface VoiceCallPillViewProps {
 export const VoiceCallPillView = ({
   bindingBanner,
   stateLabel,
-  captionSpeaker,
-  captionText,
   elapsedLabel,
   costLabel,
   reconnectNotice,
@@ -91,13 +86,9 @@ export const VoiceCallPillView = ({
       </button>
     </div>
 
-    {captionText && (
-      <p className="line-clamp-2 text-xs text-gray-700 dark:text-gray-300">
-        <span className="font-medium text-gray-500 dark:text-gray-400">{captionSpeaker === 'user' ? 'You: ' : 'Agent: '}</span>
-        {captionText}
-      </p>
-    )}
-
+    {/* No caption line here — the spoken back-and-forth renders in the chat thread itself
+        (AssistantChat: durable turn Messages + a live streaming bubble); this pill is purely the
+        call CONTROLS (PTT, end, state, meter). */}
     <div className="flex items-center justify-between gap-3">
       <button
         type="button"
@@ -141,14 +132,19 @@ export const VoiceCallPill = () => {
     setPttMode(result.mode);
     if (result.action === 'press') call.pttPress();
     if (result.action === 'release') call.pttRelease();
+    if (result.action === 'abort') call.pttAbort(); // empty-turn rule (callHud.ts): discard, don't send
   };
 
   const handleDown = () => {
     // MINOR-6: no mic stream exists yet during 'connecting' — a press here would have nothing to
     // start recording, and would desync pttMode from the (still idle) VoiceSession state machine.
     if (call.phase === 'connecting') return;
+    // Measure the CURRENT engagement's length before restarting the clock — a 'down' landing on
+    // 'locked' is the engagement-ending second tap, and the gesture machine needs its true length
+    // to tell a double-click (abort) from a deliberate toggle-off (release).
+    const heldMs = Date.now() - pressedAtRef.current;
     pressedAtRef.current = Date.now();
-    applyGesture('down', 0);
+    applyGesture('down', heldMs);
   };
   const handleUp = () => applyGesture('up', Date.now() - pressedAtRef.current);
   const handleLeave = () => applyGesture('leave', Date.now() - pressedAtRef.current);
@@ -188,14 +184,11 @@ export const VoiceCallPill = () => {
   if (!call.isCallActive || !call.binding) return null;
 
   const phase: CallHudPhase = call.phase;
-  const caption: CaptionState | null = call.caption;
 
   return (
     <VoiceCallPillView
       bindingBanner={bindingBannerText(call.binding.sessionTitle)}
       stateLabel={voiceStateLabel(phase)}
-      captionSpeaker={caption?.speaker ?? null}
-      captionText={caption?.text ?? ''}
       elapsedLabel={formatElapsed(call.elapsedMs)}
       costLabel={formatCallCost(estimateCallCostUsd(call.elapsedMs))}
       reconnectNotice={call.reconnectNotice}

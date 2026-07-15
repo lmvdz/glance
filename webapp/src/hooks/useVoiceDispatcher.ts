@@ -43,10 +43,11 @@ import { usePageContext, type PageContext } from '../context/PageContext';
  * package's `lib/voice/tools.ts` `VOICE_TOOL_DEFS` by `tests/voice-token.test.ts`'s cross-build sync
  * pin (the daemon (`src/`) and this webapp package build separately, so the two arrays are
  * duplicated by necessity, not drifted-apart by accident). See the final report for the remaining
- * gap (`input_audio_transcription` is never requested at mint, so `onCaption`'s `'user'` branch —
- * used below for spoken displayText — is dormant per voiceSession.ts's own doc comment; this hook
- * still wires it so it activates for free the day that's turned on, exactly as 06 anticipated for
- * its own `onCaption`).
+ * gap — RESOLVED at the 2026-07-13 live pass: the mint now pins `transcription: {model:
+ * 'whisper-1'}`, so `onCaption`'s `'user'` branch (used below for spoken displayText) is LIVE.
+ * whisper delivers the transcript asynchronously (often mid-reply, usually via the `completed`
+ * event rather than deltas), so the buffer below may or may not be populated by dispatch time —
+ * `message` (the model's own paraphrase) remains the fallback.
  */
 
 const ECHO_TIMEOUT_MS = 10_000;
@@ -503,8 +504,8 @@ export function useVoiceDispatcher(opts: UseVoiceDispatcherOptions): UseVoiceDis
    *  agent's (concern text: "if multiple prompts are in flight, narrate per-completion"). */
   const watchersRef = useRef<Map<string, CompletionWatcher[]>>(new Map());
   /** Accumulates the live `'user'`-speaker caption text since the last prompt_agent dispatch
-   *  consumed it — see the module doc comment on why this is currently always empty in practice
-   *  (input_audio_transcription dormant per 06) and why it's still wired. */
+   *  consumed it — see the module doc comment: whisper's transcript arrives asynchronously, so
+   *  this may still be empty at dispatch time (falls back to the model's `message` paraphrase). */
   const userCaptionBufferRef = useRef('');
 
   // Bundles the refs above for the framework-free dispatch core (MAJOR-1/MAJOR-2/MINOR-9) — a
@@ -679,7 +680,7 @@ export function useVoiceDispatcher(opts: UseVoiceDispatcherOptions): UseVoiceDis
   const onCaptionRef = useRef<((text: string, speaker: 'assistant' | 'user') => void) | undefined>(undefined);
   onCaptionRef.current = (text, speaker) => {
     // Only the 'user' side feeds prompt_agent's spoken displayText (see the module doc comment —
-    // this is currently always dormant since 06's mint doesn't request input_audio_transcription).
+    // live since the mint pins whisper-1 input transcription; arrival timing is asynchronous).
     if (speaker === 'user') userCaptionBufferRef.current += text;
   };
   const onCaption = useRef((text: string, speaker: 'assistant' | 'user') => onCaptionRef.current?.(text, speaker)).current;

@@ -459,6 +459,26 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
   const todoPhases = selectedAgent?.todoPhases ?? [];
   const sessionPendingSends = activeSessionId ? pendingSends.filter((entry) => entry.id?.startsWith(`pending:${activeSessionId}:`)) : EMPTY_TRANSCRIPT;
   const { entries: mainEntries, trailingEntries } = buildTranscriptRenderEntries(messages, transcriptEntries, sessionPendingSends, selectedAgent?.startedAt);
+  // Voice back-and-forth in the thread: COMPLETED spoken turns persist as durable session
+  // Messages (VoiceCallContext's caption flush) and render through the normal partition above;
+  // this is only the IN-PROGRESS utterance — a live trailing bubble (assistant left, operator
+  // right, same as any typed turn) that streams while the call is bound to the open session and
+  // hands off to the durable copy the moment the turn completes (flush clears the caption in the
+  // same tick it persists).
+  const voiceLiveCaption = voiceCall.isCallActive && voiceCall.binding?.sessionId === activeSessionId ? voiceCall.caption : null;
+  const voiceTrailingEntries: TranscriptEntry[] = voiceLiveCaption?.text.trim()
+    ? [
+        ...trailingEntries,
+        {
+          id: 'voice:live',
+          kind: voiceLiveCaption.speaker === 'user' ? 'user' : 'assistant',
+          text: voiceLiveCaption.text,
+          ts: Date.now(),
+          format: 'markdown',
+          status: 'ok',
+        },
+      ]
+    : trailingEntries;
   const transcriptRunning = transcriptIsRunning(transcriptEntries);
   const agentRunning = agentIsRunning(selectedAgent) || transcriptRunning || isLoading;
   const isStopShown = !!selectedAgent && interruptibleAgents([selectedAgent]).length > 0;
@@ -943,7 +963,7 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
       <ChatMessagesViewport
         key={activeSessionId ?? 'none'}
         entries={mainEntries}
-        trailingEntries={trailingEntries}
+        trailingEntries={voiceTrailingEntries}
         transcriptEntries={transcriptEntries}
         selectedAgent={selectedAgent}
         agentDiffs={agentDiffs ?? EMPTY_DIFFS}

@@ -89,6 +89,13 @@ describe('appendUserMessage', () => {
     const sessions = [session({ id: 'a' })];
     expect(appendUserMessage(sessions, 'a', '   ', 'turn-1', 1)).toBe(sessions);
   });
+
+  test('a plain voice turn (no dispatch behind it) persists WITHOUT a clientTurnId field — nothing to dedupe against', () => {
+    const sessions = [session({ id: 'a', updatedAt: 1 })];
+    const next = appendUserMessage(sessions, 'a', 'what is the fleet doing?', undefined, 42);
+    expect(next[0].messages).toEqual([{ role: 'user', text: 'what is the fleet doing?', timestamp: 42 }]);
+    expect('clientTurnId' in next[0].messages[0]).toBe(false);
+  });
 });
 
 // MEDIUM-3's binding fix, end to end: mergeSessions now actually adopts a voice binding write.

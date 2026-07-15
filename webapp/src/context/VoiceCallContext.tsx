@@ -2,8 +2,8 @@ import React, { createContext, useCallback, useContext, useEffect, useRef, useSt
 import { getVoiceConfig, mintVoiceToken } from '../lib/api';
 import createVoiceSession, { type VoiceSession, type VoiceSessionErrorInfo, type VoiceState } from '../lib/voice/voiceSession';
 import {
-  appendCaption,
   errorToastMessage,
+  finalizeVoiceTurn,
   reconnectNoticeText,
   shouldEndCall,
   shouldEndCallForIdle,
@@ -11,9 +11,12 @@ import {
   type CaptionState,
 } from '../lib/voice/callHud';
 import { useVoiceDispatcher } from '../hooks/useVoiceDispatcher';
+import { buildVoiceContextBrief } from '../lib/voice/tools';
 import { appendSpokenSummary, appendSpokenUserMessage, bindSessionAgent, loadPersistedSessionsOrNull, subscribeSessionStore } from '../lib/chat/sessionStore';
 import { useTaskContext } from './TaskContext';
 import { useAuth } from './AuthContext';
+import { usePageContext } from './PageContext';
+import { serializePageContextForPrompt } from '../lib/pageContextDerive';
 
 /**
  * Live voice call, owned ABOVE the chat panel (webapp-voice-lane concern 08, DESIGN.md "Session
@@ -83,6 +86,9 @@ export interface VoiceCallContextValue {
   endCall: () => void;
   pttPress: () => void;
   pttRelease: () => void;
+  /** End the engagement WITHOUT sending it (empty-turn rule, callHud.ts) — the gesture layer
+   *  decided it was an accidental click/drift/double-click, not a spoken turn. */
+  pttAbort: () => void;
 }
 
 const VoiceCallContext = createContext<VoiceCallContextValue | undefined>(undefined);
@@ -90,7 +96,11 @@ const VoiceCallContext = createContext<VoiceCallContextValue | undefined>(undefi
 const RECONNECT_NOTICE_DURATION_MS = 6_000;
 
 export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
-  const { showToast } = useTaskContext();
+  const { showToast, agents, currentProject } = useTaskContext();
+  // What the operator is looking at RIGHT NOW (live page-context store) — folded into the
+  // connect-time context brief and streamed as silent mid-call updates on navigation, so the
+  // voice model can resolve "this repository" / "this task" / "what I'm looking at".
+  const pageContext = usePageContext();
   // File mode: `me` is always null, so `activeOrganizationId` reads as `null` throughout — the
   // org-switch check below never fires there (see `shouldEndCallForOrgSwitch`'s doc comment).
   const { me } = useAuth();
@@ -107,6 +117,18 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
 
   const sessionRef = useRef<VoiceSession | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Per-speaker in-progress turn buffers. Two INDEPENDENT buffers, not one speaker-switching
+   *  caption: whisper-1 delivers the operator's transcript asynchronously — routinely landing in
+   *  the MIDDLE of the assistant's streaming reply — so a single buffer would split the
+   *  assistant's turn in two around the late user transcript. The user buffer flushes the moment
+   *  the assistant starts replying (or at any turn boundary); the assistant buffer keeps
+   *  accumulating regardless. */
+  const assistantCaptionRef = useRef('');
+  const userCaptionRef = useRef('');
+  /** True once the current user turn's spoken text was claimed by a `prompt_agent` dispatch
+   *  (`onSpokenSummary` `role:'user'` fired) — the caption flush skips persisting a second copy
+   *  (see `finalizeVoiceTurn`). Reset at the start of every fresh recording. */
+  const turnClaimedByDispatchRef = useRef(false);
   /** MEDIUM-6: wall-clock time of the last PTT press/release — the idle-timeout cap's clock. Reset
    *  at call start (so an unattended call that never touches PTT still starts the idle clock from
    *  connection time, not from `undefined`). */
@@ -114,6 +136,9 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
   /** Org-switch call termination's pinned value (`shouldEndCallForOrgSwitch` above) — set once at
    *  `startCall`, compared against the LIVE `me.activeOrganizationId` on every render thereafter. */
   const pinnedOrgIdRef = useRef<string | null>(null);
+  /** The context brief, rebuilt every render and read through this ref at connection-wiring time
+   *  (`getContextBrief`) — the VoiceSession's closure is fixed per call, the ref keeps it live. */
+  const contextBriefRef = useRef('');
 
   // Capability probe (DESIGN.md "Flagging" row) — the only honest discovery channel; a flag-off
   // 404 is mapped to `{enabled:false}` by `getVoiceConfig` itself, never surfaced as an error here.
@@ -150,10 +175,73 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
       // clientTurnId, so it rides the existing user-side render dedupe); the assistant's narrated
       // completion persists as role:'model' (deduped on the OTHER side — see
       // partitionSessionMessages' MAJOR-2b doc comment).
-      if (event.role === 'user') appendSpokenUserMessage(binding.sessionId, event.text, event.clientTurnId);
-      else appendSpokenSummary(binding.sessionId, event.text);
+      if (event.role === 'user') {
+        appendSpokenUserMessage(binding.sessionId, event.text, event.clientTurnId);
+        // The dispatch owns this user turn's persistence — the caption flush must not write a
+        // second, id-less copy of the same utterance (see `finalizeVoiceTurn`).
+        turnClaimedByDispatchRef.current = true;
+      } else {
+        appendSpokenSummary(binding.sessionId, event.text);
+      }
     },
   });
+
+  // Rebuilt every render so `getContextBrief` (read at connection-wiring time, and again on every
+  // silent reconnect/rotation) always describes the CURRENT project/session/agent/screen.
+  contextBriefRef.current = buildVoiceContextBrief({
+    projectName: currentProject?.name,
+    sessionTitle: binding?.sessionTitle,
+    agentName: binding?.agentId ? agents.find((a) => a.id === binding.agentId)?.name : undefined,
+    pageContextBlock: serializePageContextForPrompt(pageContext),
+  });
+
+  /** The live caption (pill state + AssistantChat's streaming voice bubble) mirrors whichever
+   *  buffer matters most right now: a streaming assistant reply wins; otherwise a pending user
+   *  transcript; otherwise nothing. */
+  const refreshLiveCaption = useCallback(() => {
+    setCaption(
+      assistantCaptionRef.current
+        ? { speaker: 'assistant', text: assistantCaptionRef.current }
+        : userCaptionRef.current
+          ? { speaker: 'user', text: userCaptionRef.current }
+          : null,
+    );
+  }, []);
+
+  /** Turn boundaries: persist a completed side of the spoken back-and-forth as a durable session
+   *  Message (the chat thread's copy) and clear its buffer. Safe to call redundantly — a
+   *  blank/claimed turn persists nothing (`finalizeVoiceTurn`), and a flush into a since-deleted
+   *  session is a store-level no-op. */
+  const flushUserTurn = useCallback(
+    (sessionId: string) => {
+      const turn = finalizeVoiceTurn(
+        userCaptionRef.current ? { speaker: 'user', text: userCaptionRef.current } : null,
+        turnClaimedByDispatchRef.current,
+      );
+      userCaptionRef.current = '';
+      if (turn) appendSpokenUserMessage(sessionId, turn.text, undefined);
+      refreshLiveCaption();
+    },
+    [refreshLiveCaption],
+  );
+  const flushAssistantTurn = useCallback(
+    (sessionId: string) => {
+      const turn = finalizeVoiceTurn(assistantCaptionRef.current ? { speaker: 'assistant', text: assistantCaptionRef.current } : null, false);
+      assistantCaptionRef.current = '';
+      if (turn) appendSpokenSummary(sessionId, turn.text);
+      refreshLiveCaption();
+    },
+    [refreshLiveCaption],
+  );
+  /** Every boundary flushes the user side first — the operator's utterance precedes the reply it
+   *  provoked, and durable messages render in append order. */
+  const flushCaptionTurns = useCallback(
+    (sessionId: string) => {
+      flushUserTurn(sessionId);
+      flushAssistantTurn(sessionId);
+    },
+    [flushUserTurn, flushAssistantTurn],
+  );
 
   const teardown = useCallback(() => {
     setCallToken(null);
@@ -249,18 +337,36 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!callToken || !binding) return;
     let cancelled = false;
+    const boundSessionId = binding.sessionId; // fixed for the call's lifetime (only agentId rebinds)
     const session = createVoiceSession(mintVoiceToken, {
       agentId: binding.agentId,
       getRecap: dispatcher.getRecap,
+      getContextBrief: () => contextBriefRef.current,
       onFunctionCall: dispatcher.onFunctionCall,
       onCaption: (text, speaker) => {
         dispatcher.onCaption(text, speaker);
-        setCaption((current) => appendCaption(current, text, speaker));
+        if (speaker === 'user') {
+          userCaptionRef.current += text;
+        } else {
+          // The reply starting is the user turn's boundary: whisper's transcript of the operator's
+          // utterance (however late it landed) belongs BEFORE the reply it provoked, so persist it
+          // now — the assistant buffer keeps streaming independently.
+          if (userCaptionRef.current) flushUserTurn(boundSessionId);
+          assistantCaptionRef.current += text;
+        }
+        refreshLiveCaption();
       },
       onStateChange: (state, previous) => {
         setVoiceState(state);
         setConnecting(false);
-        if (state === 'userRecording' && previous !== 'userRecording') setCaption(null); // fresh turn
+        if (state === 'userRecording' && previous !== 'userRecording') {
+          flushCaptionTurns(boundSessionId); // turn boundary: whatever was said before this recording is complete
+          turnClaimedByDispatchRef.current = false; // a fresh user turn — no dispatch has claimed it yet
+        } else if (state === 'idle' && previous !== 'idle') {
+          // The response (and thus the assistant's spoken turn) finished — flush so the chat
+          // thread gets the completed turn promptly, not only when the operator next speaks.
+          flushCaptionTurns(boundSessionId);
+        }
       },
       onReconnected: (info) => {
         setReconnectNotice(reconnectNoticeText(!!info.recap));
@@ -283,17 +389,52 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
     });
     sessionRef.current = session;
     dispatcher.registerSession(session);
+    // Live-triage hook: `__glanceVoiceDebug()` in the browser console dumps the session's
+    // diagnostic ring buffer (event types + state transitions + correlation ids, no transcript
+    // text) — the flight recorder for wire-level bug reports. Cleared with the call.
+    (window as unknown as Record<string, unknown>).__glanceVoiceDebug = () => session.getDebugLog();
     void session.connect().then(() => {
       if (!cancelled) setConnecting(false); // no error fired — the connection is live
     });
     return () => {
       cancelled = true;
+      // Call over (endCall/org-switch/session-delete/unmount): whatever was mid-utterance is the
+      // final turn — persist it so the chat thread's record of the call is complete. A flush into
+      // a just-deleted session is a store-level no-op.
+      flushCaptionTurns(boundSessionId);
       dispatcher.registerSession(null);
       session.disconnect();
+      // Safe unconditionally: React runs this cleanup BEFORE a successor call's own effect body,
+      // which re-installs the hook for the new session.
+      delete (window as unknown as Record<string, unknown>).__glanceVoiceDebug;
       if (sessionRef.current === session) sessionRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on callToken only, see comment above
   }, [callToken]);
+
+  // Mid-call navigation: when the operator moves to a different screen, silently inject a context
+  // update (no response requested — the model absorbs it and uses it on the next turn). Debounced,
+  // deduped against the last sent block, and the connect-time brief covers the initial view (the
+  // `null` sentinel skips the first run per call so connect isn't immediately followed by a
+  // duplicate update).
+  const lastSentPageContextRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!callToken) {
+      lastSentPageContextRef.current = null;
+      return;
+    }
+    const serialized = serializePageContextForPrompt(pageContext);
+    if (lastSentPageContextRef.current === null) {
+      lastSentPageContextRef.current = serialized;
+      return;
+    }
+    if (!serialized || serialized === lastSentPageContextRef.current) return;
+    const timer = setTimeout(() => {
+      lastSentPageContextRef.current = serialized;
+      sessionRef.current?.updateSystemContext(`[Context update — the operator's screen changed.]\n${serialized}`);
+    }, 1_500);
+    return () => clearTimeout(timer);
+  }, [callToken, pageContext]);
 
   // MEDIUM-6: every PTT press/release resets the idle-timeout clock — this is the ONLY activity
   // signal the idle cap watches (fleet narration/completions don't count; an operator who's stepped
@@ -305,6 +446,10 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
   const pttRelease = useCallback(() => {
     lastPttActivityAtRef.current = Date.now();
     sessionRef.current?.pttRelease();
+  }, []);
+  const pttAbort = useCallback(() => {
+    lastPttActivityAtRef.current = Date.now(); // an aborted click is still operator activity
+    sessionRef.current?.pttAbort();
   }, []);
 
   const value: VoiceCallContextValue = {
@@ -319,6 +464,7 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
     endCall,
     pttPress,
     pttRelease,
+    pttAbort,
   };
 
   return <VoiceCallContext.Provider value={value}>{children}</VoiceCallContext.Provider>;
