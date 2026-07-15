@@ -14,7 +14,7 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, Inbox, Send, FileText, MessageSquarePlus, X, Square, RotateCcw, GitBranch, ExternalLink } from 'lucide-react';
+import { ArrowLeft, Inbox, Send, FileText, MessageSquarePlus, X, Square, RotateCcw, GitBranch, GitMerge, ExternalLink } from 'lucide-react';
 import { apiJson } from '../lib/api';
 import { useTaskContext } from '../context/TaskContext';
 import {
@@ -24,7 +24,7 @@ import {
   restartCommand,
   forkCommand,
 } from '../lib/agent-control';
-import { agentStatusBadgeClass } from '../lib/agent-badges';
+import { agentStatusBadgeClass, prStateBadgeLabel } from '../lib/agent-badges';
 import {
   whyStopped,
   intervenePrimaryAction,
@@ -34,6 +34,7 @@ import {
   diffLineStats,
   type DiffLineKind,
 } from '../lib/intervene';
+import { reportAttention, prReviewedEvents, shouldEmitDiffViewed, diffViewedKey, DIFF_VIEWPORT_THRESHOLD } from '../lib/attention';
 import type { AgentDTO } from '../lib/dto';
 import type { AgentFileDiff } from './chat/DiffReviewPanel';
 import { GateWidget } from './chat/GateWidget';
@@ -151,6 +152,7 @@ export const IntervenceView: React.FC = () => {
   // "diff lags what the agent is saying" gap from the client side (a true WS diff-push is the
   // backend follow-up).
   const agentId = agent?.id;
+  const repo = agent?.repo;
   const messageCount = agent?.messageCount;
   const status = agent?.status;
   const loadDiff = useCallback(() => {
@@ -165,6 +167,81 @@ export const IntervenceView: React.FC = () => {
     const t = setInterval(loadDiff, 4000);
     return () => clearInterval(t);
   }, [status, loadDiff]);
+
+  // diff-viewed (comprehension concern 02): one shared IntersectionObserver watches every rendered
+  // file section; `attentionFloorRef` is this view's (agentId,file) floor-state map, shared by both
+  // the viewport observer and the PR click-through below so the two paths can never double-report
+  // the same file inside one 5-minute window. `diffNodesRef` tracks the currently-mounted DOM node
+  // per file so a re-render that keeps the same `key` never re-registers it, and unmounting a file
+  // (diff refresh drops it) always unobserves its old node instead of leaking an observation target.
+  // All threshold/visibility/floor DECISIONS live in lib/attention.ts's `shouldEmitDiffViewed` —
+  // this component only wires the browser API and calls it.
+  const attentionFloorRef = useRef<Record<string, number>>({});
+  const observerRef = useRef<IntersectionObserver | null>(null);
+  const diffNodesRef = useRef<Map<string, HTMLDivElement>>(new Map());
+
+  const handleIntersections = useCallback((entries: IntersectionObserverEntry[]) => {
+    if (!agentId || !repo) return;
+    const now = Date.now();
+    for (const entry of entries) {
+      const file = (entry.target as HTMLElement).dataset.attentionFile;
+      if (!file) continue;
+      if (shouldEmitDiffViewed({
+        state: attentionFloorRef.current,
+        agentId,
+        file,
+        intersectionRatio: entry.intersectionRatio,
+        visibilityState: document.visibilityState,
+        now,
+      })) {
+        reportAttention({ kind: 'diff-viewed', repo, file, agentId });
+        attentionFloorRef.current[diffViewedKey(agentId, file)] = now;
+      }
+    }
+  }, [agentId, repo]);
+
+  // Root left at its default (the browser viewport): a target's rect is clipped by every ancestor's
+  // overflow box — including this screen's own `overflow-y-auto` diff panel — before it's ever
+  // intersected against the root, observer-root-choice or not, so this is correct without a ref to
+  // that panel. Recreated only when the callback identity changes (agent/repo switch, never on the
+  // 4s poll), and every already-mounted file node is re-observed so a diff-content refresh under an
+  // unchanged `key` is never silently dropped from observation.
+  useEffect(() => {
+    const observer = new IntersectionObserver(handleIntersections, { threshold: [0, DIFF_VIEWPORT_THRESHOLD, 1] });
+    observerRef.current = observer;
+    for (const node of diffNodesRef.current.values()) observer.observe(node);
+    return () => { observer.disconnect(); observerRef.current = null; };
+  }, [handleIntersections]);
+
+  const registerDiffNode = useCallback((file: string, el: HTMLDivElement | null) => {
+    const prev = diffNodesRef.current.get(file);
+    if (prev && prev !== el && observerRef.current) observerRef.current.unobserve(prev);
+    if (el) {
+      diffNodesRef.current.set(file, el);
+      observerRef.current?.observe(el);
+    } else {
+      diffNodesRef.current.delete(file);
+    }
+  }, []);
+
+  // pr-reviewed (comprehension concern 02): click-through to the PR link is itself the signal (an
+  // explicit action, unlike viewport entry) and retroactively counts every file in the *currently
+  // loaded* diff set as reviewed — floor-gated the same way as the observer above so a file already
+  // marked seen by scrolling isn't double-counted.
+  const onPrReviewed = useCallback(() => {
+    if (!agentId || !repo) return;
+    const now = Date.now();
+    const { events, markKeys } = prReviewedEvents({
+      state: attentionFloorRef.current,
+      repo,
+      agentId,
+      prNumber: agent?.prNumber,
+      files: (diffs ?? []).map((d) => d.file),
+      now,
+    });
+    for (const evt of events) reportAttention(evt);
+    for (const key of markKeys) attentionFloorRef.current[key] = now;
+  }, [agentId, repo, agent?.prNumber, diffs]);
 
   const sendSteer = useCallback(() => {
     if (!agentId || !steerText.trim()) return;
@@ -223,7 +300,22 @@ export const IntervenceView: React.FC = () => {
       </div>
 
       {/* On-track strip: validation / confidence / proof / branch — reused verbatim from the console. */}
-      <AgentMetaBar agent={agent} changedFiles={diffs?.length ?? null} />
+      <AgentMetaBar agent={agent} changedFiles={diffs?.length ?? null}>
+        {/* Click-through is the pr-reviewed signal (concern 02) — an explicit action, so it fires
+            unconditionally on every click, unlike the floor-gated per-file diff-viewed events it
+            also emits for the currently loaded diff set. */}
+        {agent.prUrl && (
+          <a
+            href={agent.prUrl}
+            target="_blank"
+            rel="noreferrer"
+            onClick={onPrReviewed}
+            className="flex items-center gap-1 rounded-full border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700 transition-colors hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300 dark:hover:bg-emerald-900/40"
+          >
+            <GitMerge className="h-3 w-3" aria-hidden /> PR #{agent.prNumber}{agent.prState ? ` · ${prStateBadgeLabel(agent.prState)}` : ''}
+          </a>
+        )}
+      </AgentMetaBar>
 
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
         {/* Why it needs you — the single most important line on the screen. */}
@@ -252,7 +344,11 @@ export const IntervenceView: React.FC = () => {
             <div className="rounded-md border border-dashed border-gray-200 px-3 py-4 text-center text-xs text-gray-400 dark:border-gray-800">No file changes yet.</div>
           )}
           <div className="space-y-2">
-            {diffs?.map((d) => <InterveneFileDiff key={d.file} diff={d} onComment={commentSteer} />)}
+            {diffs?.map((d) => (
+              <div key={d.file} ref={(el) => registerDiffNode(d.file, el)} data-attention-file={d.file}>
+                <InterveneFileDiff diff={d} onComment={commentSteer} />
+              </div>
+            ))}
           </div>
         </div>
       </div>
