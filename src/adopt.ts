@@ -35,12 +35,11 @@ export function adoptBrief(harness: string, changedCount: number, newCount: numb
 	);
 }
 
-/** Split `git ls-files --others --exclude-standard` output into paths. */
-export function parseUntracked(stdout: string): string[] {
-	return stdout
-		.split("\n")
-		.map((l) => l.trim())
-		.filter((l) => l.length > 0);
+/** Split a NUL-delimited git list (`-z` output) into paths. `-z` is load-bearing: without it git
+ *  C-quotes unusual filenames and trims spaces, so a valid but odd name would parse to a wrong/missing
+ *  path. NUL never appears in a path, so this is lossless. */
+export function parseNulList(stdout: string): string[] {
+	return stdout.split("\0").filter((p) => p.length > 0);
 }
 
 /** Defense-in-depth on untracked paths before they become copy destinations: `git ls-files` only ever

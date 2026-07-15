@@ -3,7 +3,7 @@ import {
 	adoptBranchName,
 	adoptBrief,
 	isSafeUntrackedPath,
-	parseUntracked,
+	parseNulList,
 	sanitizeBranchComponent,
 } from "../src/adopt.ts";
 
@@ -37,9 +37,10 @@ describe("adoptBrief", () => {
 	});
 });
 
-describe("parseUntracked", () => {
-	test("splits, trims, drops blanks", () => {
-		expect(parseUntracked("a.ts\nb/c.ts\n\n  d.ts  \n")).toEqual(["a.ts", "b/c.ts", "d.ts"]);
+describe("parseNulList", () => {
+	test("splits NUL-delimited paths, drops the trailing empty", () => {
+		expect(parseNulList("a.ts\0b/c.ts\0with space.ts\0")).toEqual(["a.ts", "b/c.ts", "with space.ts"]);
+		expect(parseNulList("")).toEqual([]);
 	});
 });
 
