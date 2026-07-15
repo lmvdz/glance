@@ -1,6 +1,6 @@
 # E01 — daemon-backed chat session (the substrate)
 
-STATUS: in-review (gd#20 — cockpit-only, no gauntlet; in-app stream render NOT RUN, needs WSLg+key)
+STATUS: MERGED (gd#20, 2026-07-15; rebased past I05, fleetClient conflict resolved keep-both, re-gated green)
 PRIORITY: p2
 REPOS: glance-desktop (+ tiny omp-squad if needed)
 COMPLEXITY: architectural

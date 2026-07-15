@@ -1,6 +1,6 @@
 # I05 — take over / hand back (the explicit peer handoff)
 
-STATUS: in-review (gd#19 — cockpit-composed, no daemon change; daemon-atomic primitive deferred)
+STATUS: MERGED (gd#19, 2026-07-15) — EPIC I COMPLETE (I01–I05 all on main)
 PRIORITY: p2
 REPOS: glance-desktop, omp-squad
 COMPLEXITY: architectural

@@ -5,7 +5,7 @@ PRIORITY: p2
 REPOS: omp-squad + glance-desktop
 COMPLEXITY: architectural
 TOUCHES: omp-squad src/server.ts (POST /api/agents/:id/promote) + src/squad-manager.ts (the re-wire) + src/schema/ (body) + tests; glance-desktop src/modules/ai/ (Promote button) + src/modules/fleet/lib/fleetClient.ts (promote method)
-BLOCKED_BY: E01
+BLOCKED_BY: E01 (MERGED gd#20 — now unblocked)
 
 ## Goal
 
