@@ -1,7 +1,15 @@
 # E02 — promote in place (chat → gated landable unit)
 
-STATUS: open
+STATUS: in-review (daemon omp-squad#184 + cockpit gd#21) — cross-lineage-hardened (codex+grok)
 PRIORITY: p2
+
+## Reality corrections (recon + gauntlet overturned parts of the plan below)
+
+Two ground-truth findings reshaped the implementation from the original Approach:
+1. **No verify-workflow attach — gating is the land PROOF gate.** Setting `rec.options.workflow` would be INERT: a console unit is `kind:"omp-operator"` whose driver was built at create, and only `kind:"workflow"` selects a WorkflowDriver. But any landable unit is already gated by the land proof gate (`land()` → `detectVerify(repo)` → `runProof` → `verificationState`), so a promoted unit is verify-gated on land like any other. Faking a workflow was rejected as theater; the doc's "wire a verify workflow" step is replaced by "rely on the existing land proof gate".
+2. **Clearing `appendSystemPrompt` is inert on the live child + it's a COMPOSITE.** The console restriction is baked into the omp child via `--append-system-prompt` at spawn (never re-read live), and the stored value is `[profile.memory, toolGrants, membrane, CONSOLE].join("\n\n")`. So promote (a) strips ONLY the console segment (preserving profile/tool-grants/membrane — cross-lineage HIGH), and (b) lifts the restriction behaviorally via a superseding steer that the SOFT console prompt ("unless the user explicitly asks") honors — zero context loss, no respawn. A durable `promoted` marker makes it idempotent/retry-safe.
+
+Cross-lineage (codex gpt-5.6-sol + grok-4.5) drove: precise strip (not nuke), identity-detect, `promoted` idempotency, failure-atomic persist+rollback, observe-mode refusal, 404. Auth kept operator (the strip removed the "clears arbitrary prompts" basis); no cross-tenant escape (both confirmed).
 REPOS: omp-squad + glance-desktop
 COMPLEXITY: architectural
 TOUCHES: omp-squad src/server.ts (POST /api/agents/:id/promote) + src/squad-manager.ts (the re-wire) + src/schema/ (body) + tests; glance-desktop src/modules/ai/ (Promote button) + src/modules/fleet/lib/fleetClient.ts (promote method)
