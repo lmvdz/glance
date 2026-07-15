@@ -1,6 +1,6 @@
 # E03 — adopt an ad-hoc CLI session
 
-STATUS: open
+STATUS: in-review (daemon omp-squad#187 + cockpit gd#22) — cross-lineage-hardened (codex+grok), 8 findings fixed+live-verified
 PRIORITY: p3
 REPOS: omp-squad + glance-desktop
 COMPLEXITY: architectural
