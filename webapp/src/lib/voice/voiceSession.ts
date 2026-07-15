@@ -398,7 +398,7 @@ export interface VoiceSessionOptions {
    *  buffer per speaker, not per arrival order (see `VoiceCallContext`'s per-speaker buffers).
    *  Optional server behavior either way — callers should treat captions as a nice-to-have, never
    *  a required signal. */
-  onCaption?: (text: string, speaker: 'assistant' | 'user') => void;
+  onCaption?: (text: string, speaker: 'assistant' | 'user', final?: boolean) => void;
   onFunctionCall?: (call: PendingFunctionCall) => void;
   onError?: (error: VoiceSessionErrorInfo) => void;
   /** Fired after a successful reconnect — proactive rotation (with `recap`) or an unexpected-drop
@@ -616,6 +616,19 @@ export class VoiceSession {
    *  real; carried forward and re-attached (via `nextInjectionOnDone`) if it IS eventually sent. */
   private deferredResponseCreate: { trigger: 'user' | 'injection'; onDone: InjectionOnDone | undefined } | undefined;
 
+  /** Idle keepalive + fast dead-connection detection (live finding 2026-07-15: connections die
+   *  silently mid-call in some environments — NAT/idle-UDP timeouts — and were only discovered when
+   *  the operator's next turn hit a dead wall, or 12s into an awaitingResponse wedge). Every 15s
+   *  while connected and IDLE, send a benign `input_audio_buffer.clear` (harmless: the buffer holds
+   *  only stale muted-mic silence between turns, and every ptt-press clears it anyway) — its
+   *  `cleared` ack proves the connection is alive. Independently, if NO server event of any kind
+   *  has arrived for KEEPALIVE_DEAD_MS while connected, declare the connection dead and run the
+   *  same bounded silent reconnect a channel close would — BEFORE the operator discovers it. */
+  private keepaliveTimer: VoiceTimerHandle | undefined;
+  private lastServerEventAt: number | undefined;
+  private static readonly KEEPALIVE_INTERVAL_MS = 15_000;
+  private static readonly KEEPALIVE_DEAD_MS = 45_000;
+
   /** LOW batch: the AbortController backing the current SDP POST's 15s timeout — aborted by
    *  `disconnect()` (hanging up mid-connect shouldn't leave a POST in flight) and superseded by the
    *  next `establishConnection` attempt's own controller. */
@@ -747,6 +760,7 @@ export class VoiceSession {
       }
       this.connected = true;
       this.scheduleReMint();
+      this.startKeepalive();
     } finally {
       this.connecting = false;
     }
@@ -759,6 +773,10 @@ export class VoiceSession {
     if (this.awaitingWatchdogTimer !== undefined) {
       this.deps.clearTimer(this.awaitingWatchdogTimer);
       this.awaitingWatchdogTimer = undefined;
+    }
+    if (this.keepaliveTimer !== undefined) {
+      this.deps.clearTimer(this.keepaliveTimer);
+      this.keepaliveTimer = undefined;
     }
     this.awaitingSince = undefined;
     this.sdpAbortController?.abort(); // LOW batch: cancel a hanging SDP POST rather than let it run
@@ -876,6 +894,7 @@ export class VoiceSession {
     // timeout measures true silence, so a long wrapping narration (or a slow tool-arguments
     // stream) behind a parked awaitingResponse never reads as dead.
     if (this.awaitingSince !== undefined) this.awaitingSince = this.deps.now();
+    this.lastServerEventAt = this.deps.now(); // keepalive dead-detection's liveness stamp
     // Flight recorder: every event type this module acts on, plus errors (with their code).
     // Transcript deltas are deliberately NOT logged per-delta (they'd flood the ring buffer) —
     // they instead refresh the wedge watchdog's liveness stamp below.
@@ -938,7 +957,11 @@ export class VoiceSession {
         const alreadyStreamed = itemId !== undefined && this.userTranscriptDeltaItems.has(itemId);
         if (itemId !== undefined) this.userTranscriptDeltaItems.delete(itemId);
         if (!alreadyStreamed && typeof evt.transcript === 'string' && evt.transcript.length > 0) {
-          this.opts.onCaption?.(evt.transcript, 'user');
+          // final=true: this is ONE complete utterance (whisper's unit of delivery) — callers can
+          // persist it per-utterance instead of accumulating a cross-turn buffer (live finding
+          // 2026-07-15: two late utterances concatenated into one "Yes.Tell me about the project."
+          // chat message).
+          this.opts.onCaption?.(evt.transcript, 'user', true);
         }
         return;
       }
@@ -1546,6 +1569,7 @@ export class VoiceSession {
     this.connected = true;
     this.sendCarryOver(recap);
     this.scheduleReMint();
+    this.startKeepalive();
     this.opts.onReconnected?.({ recap });
   }
 
@@ -1649,8 +1673,31 @@ export class VoiceSession {
     this.connected = true;
     this.sendCarryOver(recap);
     this.scheduleReMint();
+    this.startKeepalive();
     this.opts.onReconnected?.({ recap });
     return true;
+  }
+
+  private startKeepalive(): void {
+    if (this.keepaliveTimer !== undefined) this.deps.clearTimer(this.keepaliveTimer);
+    this.lastServerEventAt = this.deps.now();
+    const tick = () => {
+      this.keepaliveTimer = undefined;
+      if (!this.connected) return; // disconnect()/give-up already cleaned up — do not re-arm
+      const now = this.deps.now();
+      if (this.lastServerEventAt !== undefined && now - this.lastServerEventAt >= VoiceSession.KEEPALIVE_DEAD_MS) {
+        this.logDebug('note', 'keepalive-dead', `no server events for ${now - this.lastServerEventAt}ms`);
+        void this.handleUnexpectedDisconnect('keepalive silence');
+        return; // reconnect success re-arms via startKeepalive
+      }
+      // Benign probe ONLY while idle — a clear during userRecording would destroy the operator's
+      // in-flight speech, and an active response already generates its own event stream.
+      if (this.state === 'idle' && this.dataChannel?.readyState === 'open') {
+        this.sendRaw({ type: 'input_audio_buffer.clear' });
+      }
+      this.keepaliveTimer = this.deps.setTimer(tick, VoiceSession.KEEPALIVE_INTERVAL_MS);
+    };
+    this.keepaliveTimer = this.deps.setTimer(tick, VoiceSession.KEEPALIVE_INTERVAL_MS);
   }
 }
 

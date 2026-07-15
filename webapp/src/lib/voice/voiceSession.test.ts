@@ -1132,8 +1132,9 @@ describe('LOW batch: SDP POST timeout + abort', () => {
     const h = makeHarness();
     await h.session.connect();
     expect(h.session.getState()).toBe('idle');
-    // Only the re-mint timer (55min) should remain scheduled — the SDP-POST timeout was cleared.
-    expect(h.timers.map((t) => t.ms)).toEqual([55 * 60_000]);
+    // Only the re-mint timer (55min) + the idle keepalive (15s) remain scheduled — the SDP-POST
+    // timeout was cleared.
+    expect(h.timers.map((t) => t.ms).sort((a, b) => a - b)).toEqual([15_000, 55 * 60_000]);
   });
 });
 
@@ -1602,10 +1603,10 @@ test('deferred flush: dropped by an input_audio_buffer_commit_empty error resolv
 test('VoiceSession: proactive re-mint fires immediately from idle and injects the recap into the new session', async () => {
   const h = makeHarness({ getRecap: () => 'we fixed the ENOENT bug', agentId: 'agent-9' });
   await h.session.connect();
-  expect(h.timers).toHaveLength(1);
-  expect(h.timers[0]!.ms).toBe(55 * 60_000);
+  const reMints = h.timers.filter((t) => t.ms === 55 * 60_000);
+  expect(reMints).toHaveLength(1); // (plus the 15s idle keepalive, which is not under test here)
 
-  const dueFn = h.timers[0]!.fn;
+  const dueFn = reMints[0]!.fn;
   dueFn(); // simulate the timer firing while idle
 
   await flush();
@@ -1624,7 +1625,7 @@ test('VoiceSession: proactive re-mint fires immediately from idle and injects th
     },
   ]);
   // A fresh re-mint timer was scheduled for the new session.
-  expect(h.timers).toHaveLength(1);
+  expect(h.timers.filter((t) => t.ms === 55 * 60_000)).toHaveLength(1);
 });
 
 test('GAP-1: setAgentId lets a bootstrap call (no agentId at construction) carry the real binding into rotation, instead of a permanently blank line', async () => {
@@ -2281,4 +2282,49 @@ test('an unexpected-drop reconnect carries the recap into the fresh session (not
   );
   expect(carryOver).toBeDefined();
   expect(JSON.stringify(carryOver)).toContain('operator asked about the repo');
+});
+
+// =================================================================================================
+// Idle keepalive + fast dead-connection detection (live finding 2026-07-15: silent connection
+// deaths were only discovered at the operator's next press).
+// =================================================================================================
+
+test('keepalive: sends a benign buffer clear every interval while connected and idle', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  const before = lastSent(h).filter((s) => s.type === 'input_audio_buffer.clear').length;
+  h.nowValue = 15_000;
+  serverEvent(h, { type: 'rate_limits.updated' }); // any event keeps liveness fresh
+  fireTimer(h, 15_000);
+  expect(lastSent(h).filter((s) => s.type === 'input_audio_buffer.clear').length).toBe(before + 1);
+  expect(h.timers.some((t) => t.ms === 15_000)).toBe(true); // re-armed
+});
+
+test('keepalive: NEVER clears the buffer mid-recording (it would destroy in-flight speech)', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  h.session.pttPress(); // one clear from the press itself
+  const before = lastSent(h).filter((s) => s.type === 'input_audio_buffer.clear').length;
+  h.nowValue = 15_000;
+  serverEvent(h, { type: 'rate_limits.updated' });
+  fireTimer(h, 15_000);
+  expect(lastSent(h).filter((s) => s.type === 'input_audio_buffer.clear').length).toBe(before); // no probe
+});
+
+test('keepalive: 45s with zero server events declares the connection dead and silently reconnects', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  expect(h.dataChannels).toHaveLength(1);
+  h.nowValue = 46_000; // no serverEvent() calls at all — total silence
+  fireTimer(h, 15_000);
+  await flush();
+  expect(h.dataChannels).toHaveLength(2); // rebuilt before the operator ever noticed
+  expect(h.reconnected).toEqual([{ recap: '' }]);
+});
+
+test('keepalive: disconnect() stops the loop (no probe after hangup)', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  h.session.disconnect();
+  expect(h.timers.some((t) => t.ms === 15_000)).toBe(false);
 });

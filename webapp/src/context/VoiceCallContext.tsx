@@ -170,6 +170,13 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
    *  (see onCaption below) needs both synchronously inside the session callbacks. */
   const voiceStateRef = useRef<VoiceState>('idle');
   const prevTurnClaimedRef = useRef(false);
+  /** One COMPLETE whisper utterance parked for a grace window before persisting (live finding
+   *  2026-07-15: whisper vs prompt_agent dispatch ordering is racy in BOTH directions — the
+   *  dispatch's clientTurnId-stamped copy must win whichever side lands first, or the same
+   *  utterance persists twice; and without per-utterance handling two late transcripts
+   *  concatenated into one bogus "Yes.Tell me about the project." message). A dispatch claim
+   *  arriving within the window drops the parked copy; the timer firing persists it. */
+  const parkedUtteranceRef = useRef<{ text: string; timer: ReturnType<typeof setTimeout> } | null>(null);
 
   // Capability probe (DESIGN.md "Flagging" row) — the only honest discovery channel; a flag-off
   // 404 is mapped to `{enabled:false}` by `getVoiceConfig` itself, never surfaced as an error here.
@@ -209,8 +216,13 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
       if (event.role === 'user') {
         appendSpokenUserMessage(binding.sessionId, event.text, event.clientTurnId);
         // The dispatch owns this user turn's persistence — the caption flush must not write a
-        // second, id-less copy of the same utterance (see `finalizeVoiceTurn`).
+        // second, id-less copy of the same utterance (see `finalizeVoiceTurn`), and an utterance
+        // already PARKED (whisper landed first) is dropped rather than persisted.
         turnClaimedByDispatchRef.current = true;
+        if (parkedUtteranceRef.current) {
+          clearTimeout(parkedUtteranceRef.current.timer);
+          parkedUtteranceRef.current = null;
+        }
       } else {
         appendSpokenSummary(binding.sessionId, event.text);
       }
@@ -423,7 +435,7 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
       },
       getContextBrief: () => contextBriefRef.current,
       onFunctionCall: dispatcher.onFunctionCall,
-      onCaption: (text, speaker) => {
+      onCaption: (text, speaker, final) => {
         dispatcher.onCaption(text, speaker);
         if (speaker === 'user') {
           // Review fix (audit finding): whisper transcribes only COMMITTED audio, so a 'user'
@@ -434,6 +446,34 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
           // turn was never persisted anywhere else).
           if (voiceStateRef.current === 'userRecording' && prevTurnClaimedRef.current) return;
           userCaptionRef.current += text;
+          if (final) {
+            // One complete utterance (whisper's delivery unit) — handle it NOW, per-utterance,
+            // instead of letting a cross-turn buffer accumulate (the "Yes.Tell me about the
+            // project." concatenation, live 2026-07-15). Claimed turn → the dispatch's copy owns
+            // persistence; otherwise park for a grace window so a dispatch claim that's still in
+            // flight (whisper won the race) can drop it before it persists.
+            const utterance = userCaptionRef.current.trim();
+            userCaptionRef.current = '';
+            refreshLiveCaption();
+            if (!utterance) return;
+            if (turnClaimedByDispatchRef.current) {
+              turnClaimedByDispatchRef.current = false; // consumed — the claim covers exactly one utterance
+              return;
+            }
+            if (parkedUtteranceRef.current) {
+              // A previous utterance is still parked and no claim arrived for it — it's real,
+              // persist it before parking the new one (each utterance is its own message).
+              clearTimeout(parkedUtteranceRef.current.timer);
+              appendSpokenUserMessage(boundSessionId, parkedUtteranceRef.current.text, undefined);
+            }
+            const timer = setTimeout(() => {
+              const parked = parkedUtteranceRef.current;
+              parkedUtteranceRef.current = null;
+              if (parked) appendSpokenUserMessage(boundSessionId, parked.text, undefined);
+            }, 3_000);
+            parkedUtteranceRef.current = { text: utterance, timer };
+            return;
+          }
         } else {
           // The reply starting is the user turn's boundary: whisper's transcript of the operator's
           // utterance (however late it landed) belongs BEFORE the reply it provoked, so persist it
@@ -552,13 +592,22 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
       cancelled = true;
       // Call over (endCall/org-switch/session-delete/unmount): whatever was mid-utterance is the
       // final turn — persist it so the chat thread's record of the call is complete. A flush into
-      // a just-deleted session is a store-level no-op.
+      // a just-deleted session is a store-level no-op. A parked utterance whose grace window
+      // hasn't elapsed is real speech — persist it now rather than losing it with the timer.
+      if (parkedUtteranceRef.current) {
+        clearTimeout(parkedUtteranceRef.current.timer);
+        appendSpokenUserMessage(boundSessionId, parkedUtteranceRef.current.text, undefined);
+        parkedUtteranceRef.current = null;
+      }
       flushCaptionTurns(boundSessionId);
       dispatcher.registerSession(null);
       session.disconnect();
-      // Safe unconditionally: React runs this cleanup BEFORE a successor call's own effect body,
-      // which re-installs the hook for the new session.
-      delete (window as unknown as Record<string, unknown>).__glanceVoiceDebug;
+      // Live finding 2026-07-15: the hook used to be DELETED here — but crashed/errored calls are
+      // exactly the ones that need post-mortem dumps, and the deletion meant the operator could
+      // never run __glanceVoiceDebug() after the call died. Freeze a snapshot instead; a successor
+      // call's own effect re-points the hook at its live session.
+      const finalLog = session.getDebugLog().slice();
+      (window as unknown as Record<string, unknown>).__glanceVoiceDebug = () => finalLog;
       if (sessionRef.current === session) sessionRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on callToken only, see comment above
