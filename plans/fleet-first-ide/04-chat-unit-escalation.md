@@ -1,10 +1,10 @@
 # Epic E — Chat→unit escalation
 
-STATUS: blocked
+STATUS: EXPANDED → plans/fleet-ide-escalation/ (E01–E03), 2026-07-15
 PRIORITY: p2
 REPOS: glance-desktop, omp-squad
 COMPLEXITY: architectural
-BLOCKED_BY: epic I
+BLOCKED_BY: epic I (met — I01–I04 merged, I05 gd#19 in-review)
 
 ## Charter (loop expands into a sub-plan when unblocked)
 
