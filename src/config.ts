@@ -103,6 +103,36 @@ export function envBool(name: string, fallback: boolean): boolean {
 	return fallback
 }
 
+/**
+ * Read a comma-separated list env var, trimming and dropping blank entries.
+ * Returns `fallback` (already trimmed/deduped by the caller if needed) when
+ * unset/blank. No warning path: any nonempty token is valid — there's no
+ * "not a valid list" shape to misconfigure into.
+ */
+export function envStringList(name: string, fallback: string[]): string[] {
+	const raw = process.env[name]
+	if (raw === undefined || raw.trim() === "") return fallback
+	const parsed = raw
+		.split(",")
+		.map((s) => s.trim())
+		.filter((s) => s.length > 0)
+	return parsed.length > 0 ? parsed : fallback
+}
+
+/**
+ * Releasable Plane state groups the Dispatcher will auto-dispatch from.
+ *
+ * Default `backlog,unstarted,started` is today's behavior (no change) — the
+ * Dispatcher has never checked `issue.state` before this concern, so flipping
+ * the default here would silently starve dispatch of raw Backlog tickets an
+ * operator relies on. The migration to `unstarted,started` (Backlog becomes a
+ * real holding pen for promotion) is an explicit operator step, not a code
+ * default flip.
+ */
+export function dispatchStates(): string[] {
+	return envStringList("OMP_SQUAD_DISPATCH_STATES", ["backlog", "unstarted", "started"])
+}
+
 /** Test-only: reset the once-per-var warning guard. */
 export function __resetConfigWarnings(): void {
 	warned.clear()

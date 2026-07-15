@@ -451,3 +451,85 @@ test("stale-issue guard: absent (undefined) keeps the old behavior byte-for-byte
 	expect(await new Dispatcher(deps).tick()).toBe(3);
 	expect(spawned.sort()).toEqual(["A", "B", "C"]);
 });
+
+// Dispatcher state gate (concern 03): Backlog is a real holding pen once the
+// operator narrows OMP_SQUAD_DISPATCH_STATES away from its no-change default.
+test("state gate: a backlog-state issue is skipped when the gate is configured to unstarted,started", async () => {
+	process.env.OMP_SQUAD_DISPATCH_STATES = "unstarted,started";
+	try {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "dispatch-ledger-"));
+		const ledger = openDispatchLedger(dir);
+		const events: AutomationReport[] = [];
+		const logs: string[] = [];
+		const { deps, spawned } = harness({
+			listIssues: async () => [{ ...issue("A"), state: "backlog" }, issue("B"), issue("C")],
+			record: (r) => events.push(r),
+			log: (m) => logs.push(m),
+			ledger,
+		});
+		expect(await new Dispatcher(deps).tick()).toBe(2);
+		expect(spawned.sort()).toEqual(["B", "C"]); // A held by the state gate
+		expect(ledger.has("A")).toBe(false); // never claimed — the whole point of the gate
+		expect(logs.some((m) => m.includes("A") && m.includes("not in releasable set"))).toBe(true);
+		await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+	} finally {
+		delete process.env.OMP_SQUAD_DISPATCH_STATES;
+	}
+});
+
+test("state gate: the held issue's ledger entry is never written across multiple ticks", async () => {
+	process.env.OMP_SQUAD_DISPATCH_STATES = "unstarted,started";
+	try {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "dispatch-ledger-"));
+		const ledger = openDispatchLedger(dir);
+		const { deps } = harness({
+			listIssues: async () => [{ ...issue("A"), state: "backlog" }],
+			ledger,
+		});
+		const dispatcher = new Dispatcher(deps);
+		expect(await dispatcher.tick()).toBe(0);
+		expect(await dispatcher.tick()).toBe(0);
+		expect(ledger.has("A")).toBe(false);
+		await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+	} finally {
+		delete process.env.OMP_SQUAD_DISPATCH_STATES;
+	}
+});
+
+test("state gate: the same issue dispatches once its state moves to a releasable group", async () => {
+	process.env.OMP_SQUAD_DISPATCH_STATES = "unstarted,started";
+	try {
+		let state = "backlog";
+		const { deps, spawned } = harness({
+			listIssues: async () => [{ ...issue("A"), state }],
+		});
+		const dispatcher = new Dispatcher(deps);
+		expect(await dispatcher.tick()).toBe(0);
+		expect(spawned).toEqual([]);
+		state = "unstarted"; // drag to Todo in Plane
+		expect(await dispatcher.tick()).toBe(1);
+		expect(spawned).toEqual(["A"]);
+	} finally {
+		delete process.env.OMP_SQUAD_DISPATCH_STATES;
+	}
+});
+
+test("state gate: default (no env set) preserves today's behavior — backlog/unstarted/started all dispatch", async () => {
+	delete process.env.OMP_SQUAD_DISPATCH_STATES;
+	const { deps, spawned } = harness({
+		listIssues: async () => [{ ...issue("A"), state: "backlog" }, { ...issue("B"), state: "unstarted" }, { ...issue("C"), state: "started" }],
+	});
+	expect(await new Dispatcher(deps).tick()).toBe(3);
+	expect(spawned.sort()).toEqual(["A", "B", "C"]);
+});
+
+test("state gate: an issue with no state field is unaffected (fail open — no group to gate on)", async () => {
+	process.env.OMP_SQUAD_DISPATCH_STATES = "unstarted,started";
+	try {
+		const { deps, spawned } = harness({ listIssues: async () => [issue("A")] });
+		expect(await new Dispatcher(deps).tick()).toBe(1);
+		expect(spawned).toEqual(["A"]);
+	} finally {
+		delete process.env.OMP_SQUAD_DISPATCH_STATES;
+	}
+});

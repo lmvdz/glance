@@ -1335,6 +1335,7 @@ export type AutomationSkipReason =
 	| "human-review" //    work exists but is gated on human review / do-not-auto-land
 	| "blocked" //         work exists but is blocked by open dependency issues
 	| "already-done" //    open issue's work is already recorded done in the repo (closed plan concern)
+	| "unreleased-state" // open issue's Plane state group isn't in the releasable dispatch set
 	| "dirty-main"; //     land loop only: main checkout has uncommitted tracked changes — land refused
 
 /**
