@@ -1,5 +1,5 @@
 # Checkpoint persistence: tail-preserving fields + redaction
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical

@@ -13,6 +13,9 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { headTail } from "../gate-logs.ts";
+import { classifyAndReduce } from "../output-reduce.ts";
+import { redact } from "../redact.ts";
 import type { WorkflowRunState } from "./types.ts";
 
 /** Projection of the full logged WorkflowRunState shown to the fork-step picker (never `vars`). */
@@ -29,7 +32,6 @@ export interface CheckpointLogEntry {
 export type CheckpointLogLine = WorkflowRunState & { headSha?: string; seq: number; at: number };
 
 const MAX_FIELD_BYTES = 4096;
-const TRUNCATED_SUFFIX = "…(truncated)";
 
 export function checkpointLogPath(stateDir: string, runId: string): string {
 	return path.join(stateDir, "workflow-checkpoints", `${runId}.jsonl`);
@@ -82,11 +84,6 @@ async function repairAndCountLines(file: string): Promise<number> {
 	return complete;
 }
 
-function truncateField(value: string): string {
-	if (value.length <= MAX_FIELD_BYTES) return value;
-	return value.slice(0, MAX_FIELD_BYTES) + TRUNCATED_SUFFIX;
-}
-
 /** Reserve (or reuse) this runId's chain entry SYNCHRONOUSLY — no `await` before `chains.set` — so N
  *  concurrent `appendCheckpoint` calls for the same runId in the same tick all observe the one entry this
  *  function creates, instead of each racing `repairAndCountLines` independently and all starting at seq 0.
@@ -105,16 +102,46 @@ function chainFor(runId: string, file: string): { seq: number; chain: Promise<vo
 	return entry;
 }
 
-/** Append one checkpoint line for `runId`, serialized per-runId so concurrent emissions never interleave
- *  or race the seq counter. `state.vars.lastOutput`/`lastText` are truncated to 4KB before serializing —
- *  a long-running fix-up loop otherwise appends hundreds of multi-KB gate outputs per run. */
+/**
+ * Append one checkpoint line for `runId`, serialized per-runId so concurrent emissions never interleave
+ * or race the seq counter. `state.vars.lastOutput`/`lastText` are redacted and bounded to `MAX_FIELD_BYTES`
+ * before serializing — a long-running fix-up loop otherwise appends hundreds of multi-KB gate outputs per
+ * run, and the checkpoint log is persisted to disk raw (unlike the compaction/gate-log stores, which
+ * redact at their own boundary) so redaction has to happen HERE, not upstream.
+ *
+ * The two fields get different treatment because they're different KINDS of text (noisegate-compaction
+ * concern 04, DESIGN.md "Budget headroom"/"Marker integrity"):
+ *  - `lastOutput` is raw command output — already offloaded and signal-reduced once, upstream, by the
+ *    executor's `reduceOutput` call (STEER_BODY_BUDGET headroom keeps that result ≤ ~3870 chars, safely
+ *    under this field's 4096 cap, so the common case is a same-length pass-through). `classifyAndReduce`
+ *    (the SYNC core only — no `reduceOutput`/offload here, since a second offload would durably write the
+ *    same content twice) is still run so the rare over-cap value (a caller that never went through the
+ *    executor, or a future widened budget) gets the SAME signal-ranked re-cut instead of a blind slice —
+ *    and because the reducer's CRITICAL tier includes the offload pointer/marker grammar (raw AND its
+ *    `> `-neutralized form), a pointer line from the upstream reduction survives any real re-reduction
+ *    here rather than being amputated.
+ *  - `lastText` is agent-authored PROSE (a fixup agent's own commentary), not command output — running it
+ *    through `classifyAndReduce` would let a quoted `error TS2304:` line inside a sentence get treated as
+ *    diagnostics signal and reorder/displace prose around it. `headTail` (plain head+tail, no shape
+ *    classification) is the correct tool: conclusions in prose tend to live at both ends anyway, and it
+ *    never misreads a quote as a failure.
+ *  - Both are redacted BEFORE the size check/cut, not after: `redact()` can lengthen text slightly (a
+ *    secret substring becomes `[REDACTED]`), so redact-then-cut is the only order that guarantees the
+ *    PERSISTED field is both fully redacted and within budget. Redaction is scoped to exactly these two
+ *    fields (documented scope claim, DESIGN.md) — every other `vars` entry persists raw, unchanged.
+ */
 export async function appendCheckpoint(stateDir: string, runId: string, state: WorkflowRunState & { headSha?: string }): Promise<void> {
 	const file = checkpointLogPath(stateDir, runId);
 	const entry = chainFor(runId, file);
 	const run = entry.chain.then(async () => {
 		const vars = state.vars ? { ...state.vars } : state.vars;
-		if (vars?.lastOutput !== undefined) vars.lastOutput = truncateField(vars.lastOutput);
-		if (vars?.lastText !== undefined) vars.lastText = truncateField(vars.lastText);
+		if (vars?.lastOutput !== undefined) {
+			vars.lastOutput = classifyAndReduce(redact(vars.lastOutput), MAX_FIELD_BYTES, { command: undefined }).text;
+		}
+		if (vars?.lastText !== undefined) {
+			const r = redact(vars.lastText);
+			vars.lastText = r.length <= MAX_FIELD_BYTES ? r : headTail(r, MAX_FIELD_BYTES);
+		}
 		const seq = entry.seq;
 		const line: CheckpointLogLine = { ...state, vars, seq, at: Date.now() };
 		await fs.mkdir(path.dirname(file), { recursive: true });

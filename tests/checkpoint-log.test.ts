@@ -131,17 +131,104 @@ test("readCheckpoints on a missing file returns an empty array", async () => {
 	expect(await readCheckpoints(stateDir, "never-existed")).toEqual([]);
 });
 
-test("appendCheckpoint truncates vars.lastOutput/lastText beyond 4KB with a truncated suffix", async () => {
+// noisegate-compaction concern 04: lastOutput/lastText are no longer blind-truncated. lastOutput goes
+// through `classifyAndReduce`'s sync core (signal-ranked, CRITICAL-tier pointer/marker preservation);
+// lastText goes through plain `headTail` (agent prose, never shape-classified). Both are redacted first.
+
+test("oversized lastOutput with a pointer line and a failure line survives re-reduction under budget, with the pointer intact and no raw mid-word head-cut", async () => {
 	const stateDir = await tmpStateDir();
-	const runId = "run-truncate";
-	const long = "x".repeat(5000);
-	await appendCheckpoint(stateDir, runId, state({ runId, vars: { lastOutput: long, lastText: long, keep: "short" } }));
+	const runId = "run-lastoutput-oversized";
+	// Realistic shape: a prior (upstream) reduction already appended an offload pointer, and the body still
+	// carries a test-failure line — both need to survive a checkpoint-boundary re-reduction.
+	const pointerLine = "[12345 bytes omitted — full: /tmp/gate-logs/agent-1/123-abcd-log.log]";
+	const filler = Array.from({ length: 200 }, (_, i) => `line ${i}: some ordinary noisy build output that nobody needs to keep`).join("\n");
+	const failureLine = "3 fail, 42 pass";
+	const long = `${filler}\n${failureLine}\n${filler}\n${pointerLine}`;
+	expect(long.length).toBeGreaterThan(4096);
+
+	await appendCheckpoint(stateDir, runId, state({ runId, vars: { lastOutput: long } }));
 
 	const [entry] = await readCheckpoints(stateDir, runId);
-	expect(entry!.vars!.lastOutput!.length).toBe(4096 + "…(truncated)".length);
-	expect(entry!.vars!.lastOutput!.endsWith("…(truncated)")).toBe(true);
-	expect(entry!.vars!.lastText!.endsWith("…(truncated)")).toBe(true);
-	expect(entry!.vars!.keep).toBe("short"); // untouched field survives verbatim
+	const persisted = entry!.vars!.lastOutput!;
+	expect(persisted.length).toBeLessThanOrEqual(4096);
+	// The pointer's path is load-bearing evidence; the module may neutralize a marker-shaped line with a
+	// `> ` prefix, so assert on the path substring rather than the exact original prefix/bytes.
+	expect(persisted).toContain("/tmp/gate-logs/agent-1/123-abcd-log.log");
+	expect(persisted).toContain(failureLine);
+	// No raw mid-word head-cut: the old blind truncateField sliced at an arbitrary byte offset — the
+	// signal-ranked reducer instead cuts at line boundaries (via `[N lines omitted]` markers) or, in the
+	// headTail fallback, at its own budget-aware boundary. Either way every line that DID survive is a
+	// complete, unmangled original line (never a fragment ending mid-word without an omission marker).
+	const survivingLines = persisted.split("\n");
+	for (const line of survivingLines) {
+		expect(line === failureLine || line === pointerLine || /^\[\d+ lines? omitted\]$/.test(line) || line.startsWith("> ") || filler.includes(line) || /^\.\.\.$|^…$/.test(line) || line === "").toBe(true);
+	}
+});
+
+test("boundary: a realistic post-fix executor lastOutput (~3870 chars, under STEER_BODY_BUDGET headroom) hits the fit path — no line dropped, no re-reduction, only the documented marker neutralization applied", async () => {
+	const stateDir = await tmpStateDir();
+	const runId = "run-lastoutput-boundary";
+	// Mirrors executor.ts's documented worst case: STEER_BODY_BUDGET (3800) body+pointer, plus the ~70-char
+	// "[environment not provisioned…]\n" prefix runCommand may prepend AFTER reduceOutput — total ≈ 3870,
+	// safely under checkpoint-log's MAX_FIELD_BYTES (4096) so the checkpoint boundary must NOT re-cut it.
+	const prefix = "[environment not provisioned: node_modules missing, tsc/bun run unresolved]\n";
+	const pointerLine = "[9999 bytes omitted — full: /tmp/gate-logs/agent-2/456-ef01-log.log]";
+	const body = "y".repeat(3800 - pointerLine.length - 1);
+	const value = `${prefix}${body}\n${pointerLine}`;
+	expect(value.length).toBeLessThan(4096);
+	expect(value.length).toBeGreaterThan(3800); // exercises the >3800 headroom claim, still under the 4096 cap
+
+	await appendCheckpoint(stateDir, runId, state({ runId, vars: { lastOutput: value } }));
+
+	const [entry] = await readCheckpoints(stateDir, runId);
+	// Fit path (in-budget input): classifyAndReduce's core drops/reorders NOTHING and never re-cuts — but it
+	// unconditionally neutralizes any line that already looks like ITS OWN omission grammar (`> ` prefix,
+	// output-reduce.ts's "marker neutralization", proven even on comfortably-in-budget input) so a
+	// pre-existing pointer from the executor's upstream reduction can never be mistaken for one this call
+	// generated. So the arithmetic pin is: identical byte-for-byte EXCEPT that one `> ` insertion — no line
+	// dropped, no headTail cut, no [N lines omitted] marker introduced, redaction a no-op (no secret shapes).
+	const expected = `${prefix}${body}\n> ${pointerLine}`;
+	expect(entry!.vars!.lastOutput).toBe(expected);
+	expect(entry!.vars!.lastOutput!.length).toBeLessThanOrEqual(4096);
+});
+
+test("oversized lastText prose with an embedded error-shaped quote persists via headTail (head and tail survive, not signal-classified)", async () => {
+	const stateDir = await tmpStateDir();
+	const runId = "run-lasttext-oversized";
+	const head = "The fixup agent begins its explanation here, describing the approach it is about to take. ".repeat(20);
+	const middle = 'It then quotes the failing line verbatim: "error TS2304: Cannot find name \'Foo\'." as context for the reader, buried deep in the middle of this paragraph.'.repeat(3);
+	const tail = "Finally, the agent concludes with its planned next steps and a summary of the fix it intends to apply.".repeat(20);
+	const long = `${head}${middle}${tail}`;
+	expect(long.length).toBeGreaterThan(4096);
+
+	await appendCheckpoint(stateDir, runId, state({ runId, vars: { lastText: long } }));
+
+	const [entry] = await readCheckpoints(stateDir, runId);
+	const persisted = entry!.vars!.lastText!;
+	expect(persisted.length).toBeLessThanOrEqual(4096);
+	// headTail keeps the head and tail; the middle (where the quoted error line lives) is allowed to be cut —
+	// prose must never be shape-classified into keeping the diagnostics-looking quote over the surrounding
+	// sentence structure.
+	expect(persisted.startsWith(head.slice(0, 50))).toBe(true);
+	expect(persisted.endsWith(tail.slice(-50))).toBe(true);
+});
+
+test("redaction is scoped to lastOutput/lastText only: a secret-shaped lastOutput is redacted, but an unrelated var with the same secret shape persists raw", async () => {
+	const stateDir = await tmpStateDir();
+	const runId = "run-redact-scope";
+	const secret = `sk-${"a".repeat(20)}`;
+	await appendCheckpoint(
+		stateDir,
+		runId,
+		state({ runId, vars: { lastOutput: `token in use: ${secret}`, otherVar: `also has ${secret} in it`, keep: "short" } }),
+	);
+
+	const [entry] = await readCheckpoints(stateDir, runId);
+	expect(entry!.vars!.lastOutput).toContain("[REDACTED]");
+	expect(entry!.vars!.lastOutput).not.toContain(secret);
+	// Documented two-field scope: any other vars key persists RAW, secret shape and all.
+	expect(entry!.vars!.otherVar).toBe(`also has ${secret} in it`);
+	expect(entry!.vars!.keep).toBe("short");
 });
 
 test("getLastSeq reflects the count of durably appended entries", async () => {

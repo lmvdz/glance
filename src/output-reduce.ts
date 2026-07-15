@@ -495,7 +495,12 @@ export function identityNormalize(text: string): string {
 	const stripped = stripAnsi(text);
 	return stripped
 		.split("\n")
-		.filter((line) => !OMISSION_POINTER_RE.test(line))
+		// Drop pointer/marker lines in BOTH forms: raw (`[N bytes omitted — full: …]`, minted with a
+		// fresh ts+nonce every reduction) and `> `-neutralized (what a checkpoint round-trip leaves —
+		// concern 04's persistence pass neutralizes even on the fit path, so a cold-resume-restored
+		// lastOutput differs from a fresh run's ONLY by that prefix; without this, the first refutation
+		// check after every daemon restart would miss once and waste one reflect() LLM call).
+		.filter((line) => !OMISSION_POINTER_RE.test(line) && !NEUTRALIZED_MARKER_RE.test(line))
 		.join("\n")
 		.replace(/\[\d+(\.\d+)?ms\]/g, "");
 }
