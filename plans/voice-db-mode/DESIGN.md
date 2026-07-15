@@ -50,10 +50,23 @@ says so rather than implying at-rest crypto defeats a hostile tenant repo.
 full environment inheritance today (`agent-host.ts`, `omp-call.ts`, and `acp-agent-driver.ts`, which passes no
 env at all). Only *gates* are scrubbed. So a master secret — and `DATABASE_URL`, already, today — lands in
 every tenant's agent process: one hostile repo running `printenv` reads them. The scrub extends the gate
-discipline to all three spawn sites (both `GLANCE_*` and `OMP_SQUAD_*` twins, since env-compat mirrors them),
-and the boot secret is read once into a module-local and removed from `process.env` so no future spawn site can
-re-leak it. Boot check fails closed: DB mode + voice flag + missing/malformed secret ⇒ voice routes report
-`enabled:false` and mint 501s, never a 500 at call time.
+discipline to **all** tenant-agent spawn sites — the implementation found and closed *five* the draft's "three"
+missed (`flue-service-driver.ts`, `validate.ts`, the workflow command nodes, and the `bun install` provisioning
+in `worktree.ts`/`squad-manager.ts` whose hostile-postinstall reach was live-reproduced), plus a scrub *bypass*
+one level up: `rpc-agent.ts` spawns the agent-host with the tenant worktree as cwd, so Bun auto-loaded a
+tenant-controlled `bunfig.toml` preload inside the privileged host — closed by pinning `HOST_SPAWN_CWD` **and**
+scrubbing the host spawn's own env (both `GLANCE_*` and `OMP_SQUAD_*` twins throughout).
+
+The master-secret residual, corrected honestly after cross-lineage review (codex + grok independently):
+`delete process.env.OMP_SQUAD_SECRETS_KEY` clears Bun's `process.env` object but **not** the kernel's
+exec-time environ, so a key ingested via an env var still leaks through `/proc/<pid>/environ` to any same-uid
+reader. The isolation-safe ingestion is therefore a **file**: `OMP_SQUAD_SECRETS_KEY_FILE` (and its `GLANCE_`
+twin) names a path whose bytes are read straight into the module-local and never enter the environ at all. The
+env-var path is kept for back-compat but is no longer claimed to be leak-proof. Boot check fails closed: DB
+mode + voice flag + missing/malformed/unreadable secret ⇒ voice routes report `enabled:false` and mint 501s,
+never a 500 at call time. The *irreducible* same-uid residual — a determined scan of every same-uid process's
+`/proc` for the harness's own provider credential — remains owned by the sandbox workstream (Risks, below);
+what this plan closes is the daemon-secret (`DATABASE_URL` / auth secret / master key) exposure specifically.
 
 **RLS is explicit, not assumed.** App tables are created only by the migration provider map; the schema file is
 types-only and protects nothing. The table ships as a numbered migration + an `AppDatabase` type entry + an
