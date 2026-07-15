@@ -51,6 +51,7 @@ Runs under `.claude/skills/fleet-ide-loop/SKILL.md`: each iteration orients here
 
 (loop appends one line per iteration: date, concern, outcome, PR)
 
+- 2026-07-14 — iteration 6: C02 rebrand-lite shipped as glance-desktop#10 (independent of unmerged C04). App presents as Glance — productName/identifier/icon/name-surfaces; deep rename (crate, AI-assistant name, store filenames) deferred to Epic M. Gate green incl. cargo; boots under WSLg. Now 2 cockpit PRs open (C04 #9, C02 #10). Next unblocked: C03 (rebase-protocol, independent) or C05 (needs C04 merged).
 - 2026-07-14 — iteration 5 (Lars: "continue now"): C04 fleet-module-skeleton shipped as glance-desktop#9 — the FIRST cockpit-side feature and the first place the two halves of the suite meet. Native `src/modules/fleet/` (FleetClient + keyring token + zustand connection store + FleetPane + palette command + Space persistence + Settings→Fleet). Client state-map VERIFIED against a live daemon's real /api/auth/check responses; CSP confirmed to allow loopback fetch (no Rust). Gate green (tsc/lint/vitest 357/build). Also flipped B01/B02/B03+C01 to done post-merge. Next unblocked: C05 (roster+attention panes, needs C04) — or C02/C03 (rebrand/rebase, independent).
 
 - 2026-07-14 — meta-plan authored; Epics B + C expanded; loop armed.
