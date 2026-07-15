@@ -1,6 +1,6 @@
 # I02 — cockpit presence + lease WRITE
 
-STATUS: in-review (PR #182)
+STATUS: done (PR #182, merged)
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
