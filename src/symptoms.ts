@@ -75,6 +75,10 @@ const DIR = "symptoms";
 export const MIN_SYMPTOM_LEN = 20;
 export const MIN_WHERE_TO_LOOK = 1;
 export const MAX_WHERE_TO_LOOK = 5;
+// Upper bounds: agent-tier input, but an unbounded-write path into the state dir without them
+// (batch-1 review, minor #2). Generous enough that no honest entry ever hits them.
+export const MAX_SYMPTOM_LEN = 2000;
+export const MAX_WHERE_TO_LOOK_ENTRY_LEN = 512;
 
 function file(stateDir: string, id: string): string {
 	return path.join(stateDir, DIR, `${sanitizeId(id)}.json`);
@@ -185,6 +189,13 @@ export function validateSymptomText(symptom: string): SymptomValidation {
 			message: `symptom must be at least ${MIN_SYMPTOM_LEN} characters, phrased as the operator would observe it (e.g. "daemon healthy but dispatch stalled")`,
 		};
 	}
+	if (symptom.trim().length > MAX_SYMPTOM_LEN) {
+		return {
+			ok: false,
+			rule: "symptom-text-too-long",
+			message: `symptom must be at most ${MAX_SYMPTOM_LEN} characters — one operator-observable line, not a post-mortem`,
+		};
+	}
 	return { ok: true };
 }
 
@@ -218,6 +229,13 @@ export function classifyWhereToLookEntry(entry: string, kind: WhereToLookStat): 
 	if (!trimmed) {
 		return { ok: false, rule: "symptom-where-to-look-empty", message: "whereToLook entries cannot be blank" };
 	}
+	if (trimmed.length > MAX_WHERE_TO_LOOK_ENTRY_LEN) {
+		return {
+			ok: false,
+			rule: "symptom-where-to-look-entry-too-long",
+			message: `whereToLook entries must be at most ${MAX_WHERE_TO_LOOK_ENTRY_LEN} characters (a path or a \`glance …\` command)`,
+		};
+	}
 	if (GLANCE_COMMAND_RE.test(trimmed)) return { ok: true };
 	if (kind === "missing") {
 		return {
@@ -245,6 +263,9 @@ export async function statWhereToLookEntry(repoRoot: string, entry: string): Pro
 	if (GLANCE_COMMAND_RE.test(trimmed)) return "file"; // short-circuited by classifyWhereToLookEntry before this matters
 	const normalized = trimmed.replace(/^\.\//, "").replace(/^\/+/, "");
 	if (!normalized) return "missing";
+	// A `..` segment would escape repoRoot — both a stored pointer outside the repo and (in DB-root
+	// mode) a cross-tenant existence oracle. Fails the floor as "missing" rather than a bespoke rule.
+	if (normalized.split("/").includes("..")) return "missing";
 	try {
 		const st = await fs.stat(path.join(repoRoot, normalized));
 		return st.isDirectory() ? "dir" : "file";

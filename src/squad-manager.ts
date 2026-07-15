@@ -6980,6 +6980,15 @@ export class SquadManager extends EventEmitter {
 		return readSymptom(this.stateDir, id);
 	}
 
+	/** The decisions currently stored on a persisted feature — the server's PATCH sanitizer merges
+	 *  client edits against these so server-authoritative fields (source/evidence/sourceRef) survive
+	 *  the webapp's full-array round-trip. Derived (not-yet-adopted) features return undefined, which
+	 *  is correct: model-deltas only ever live on persisted features (recordAgentDecision adopts
+	 *  before writing). */
+	storedFeatureDecisions(id: string): FeatureDecision[] | undefined {
+		return this.featureStore.get(id)?.decisions;
+	}
+
 	// ── operator-attention substrate (comprehension concern 01) ──────────────────────────────────
 
 	/** The repo set `actor` may name in `POST /api/attention`'s `repo` field or an unfiltered GET —

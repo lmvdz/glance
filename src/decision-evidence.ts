@@ -18,6 +18,11 @@
  */
 
 const MIN_DELTA_TEXT_LEN = 20;
+// Upper bounds: agent-tier input, but still an unbounded-write path into persisted feature state
+// without them (batch-1 review, minor #2). Generous enough that no honest bullet ever hits them.
+const MAX_DELTA_TEXT_LEN = 2000;
+const MAX_EVIDENCE_ENTRIES = 8;
+const MAX_EVIDENCE_ENTRY_LEN = 512;
 
 export interface EvidenceRejection {
 	ok: false;
@@ -70,11 +75,32 @@ export function validateModelDelta(text: string, evidence: string[] | undefined,
 			message: `a model-delta bullet must be at least ${MIN_DELTA_TEXT_LEN} characters — state what was true before and what is true now`,
 		};
 	}
+	if (trimmedText.length > MAX_DELTA_TEXT_LEN) {
+		return {
+			ok: false,
+			rule: "model-delta-text-too-long",
+			message: `a model-delta bullet must be at most ${MAX_DELTA_TEXT_LEN} characters — it is a bullet, not a document`,
+		};
+	}
 	if (!evidence || evidence.length === 0) {
 		return {
 			ok: false,
 			rule: "model-delta-requires-evidence",
 			message: "model-delta decisions require at least one evidence entry (a repo-relative file or file:start-end) — delta bullets must cite a file this run touched",
+		};
+	}
+	if (evidence.length > MAX_EVIDENCE_ENTRIES) {
+		return {
+			ok: false,
+			rule: "model-delta-evidence-count",
+			message: `at most ${MAX_EVIDENCE_ENTRIES} evidence entries per delta — cite the load-bearing files, not the whole diff`,
+		};
+	}
+	if (evidence.some((e) => e.length > MAX_EVIDENCE_ENTRY_LEN)) {
+		return {
+			ok: false,
+			rule: "model-delta-evidence-entry-too-long",
+			message: `each evidence entry must be at most ${MAX_EVIDENCE_ENTRY_LEN} characters (a repo-relative path, optionally :start-end)`,
 		};
 	}
 	const touched = new Set(filesTouched.map(normalizeForCompare));

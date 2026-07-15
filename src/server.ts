@@ -272,14 +272,30 @@ function featureCriteria(value: unknown): FeatureCriterion[] | undefined {
 	});
 }
 
-function featureDecisions(value: unknown): FeatureDecision[] | undefined {
+/**
+ * Sanitize a PATCH body's `decisions` array against the feature's STORED decisions. The incoming
+ * array defines membership and order (so deleting a decision still works), but for an entry whose
+ * id already exists on the feature, the server-authoritative fields — `source`, `evidence`,
+ * `sourceRef`, `createdAt` — are kept from the stored record and only the text is taken from the
+ * client. Without this merge, the webapp's routine "add one decision" round-trip (it PATCHes the
+ * FULL array back) coerced every stored `model-delta` decision to `source:"human"` and silently
+ * dropped its evidence anchors — destroying the teaching content the comprehension lane exists to
+ * produce. New entries (id not on the feature) are down-tiered exactly as before: a PATCH client
+ * can never mint `model-delta` records, because those are only minted through
+ * `squad_record_decision`'s evidence validation. (Model-deltas always live on persisted features —
+ * `recordAgentDecision` adopts before writing — so `stored` is never missing for them.)
+ */
+export function featureDecisions(value: unknown, stored: FeatureDecision[] | undefined): FeatureDecision[] | undefined {
 	if (!Array.isArray(value)) return undefined;
+	const byId = new Map((stored ?? []).map((d) => [d.id, d]));
 	return value.flatMap((item): FeatureDecision[] => {
 		if (!item || typeof item !== "object") return [];
 		const rec = item as Record<string, unknown>;
 		const id = typeof rec.id === "string" ? rec.id : undefined;
 		const text = typeof rec.text === "string" ? rec.text.trim() : "";
 		if (!id || !text) return [];
+		const existing = byId.get(id);
+		if (existing) return [{ ...existing, text }];
 		return [{ id, text, source: rec.source === "plan" || rec.source === "human" || rec.source === "agent" ? rec.source : "human", createdAt: typeof rec.createdAt === "number" ? rec.createdAt : undefined }];
 	});
 }
@@ -1920,7 +1936,7 @@ export class SquadServer {
 			if ("stageOverride" in body) patch.stageOverride = typeof body.stageOverride === "string" ? (body.stageOverride as FeatureStage) : null;
 			if ("category" in body) patch.category = typeof body.category === "string" ? (body.category as FeatureCategory) : null;
 			if ("acceptanceCriteria" in body) patch.acceptanceCriteria = featureCriteria(body.acceptanceCriteria);
-			if ("decisions" in body) patch.decisions = featureDecisions(body.decisions);
+			if ("decisions" in body) patch.decisions = featureDecisions(body.decisions, manager.storedFeatureDecisions(decodeURIComponent(mfpatch[1])));
 			if ("relationships" in body) patch.relationships = featureRelationships(body.relationships);
 			const pf = await manager.updateFeature(decodeURIComponent(mfpatch[1]), patch);
 			return pf ? Response.json(pf) : new Response("no such feature", { status: 404 });

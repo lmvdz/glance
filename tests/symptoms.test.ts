@@ -183,3 +183,30 @@ test("statWhereToLookEntry resolves file/dir/missing against a real repo root", 
 	expect(await statWhereToLookEntry(repo, "src/nope.ts")).toBe("missing");
 	expect(await statWhereToLookEntry(repo, "./src/dispatch.ts")).toBe("file"); // leading ./ tolerated
 });
+
+// ── upper bounds + traversal (batch-1 review: minors #1/#2) ─────────────────────────────────────
+
+test("symptom text over the max length is rejected, naming the rule", () => {
+	const result = validateSymptomText(`daemon healthy but ${"x".repeat(2001)}`);
+	expect(result.ok).toBe(false);
+	if (!result.ok) expect(result.rule).toBe("symptom-text-too-long");
+});
+
+test("an over-long whereToLook entry is rejected before any stat", () => {
+	const result = classifyWhereToLookEntry(`src/${"a".repeat(600)}.ts`, "file");
+	expect(result.ok).toBe(false);
+	if (!result.ok) expect(result.rule).toBe("symptom-where-to-look-entry-too-long");
+});
+
+test("a whereToLook entry with a .. segment reads as missing — it must not escape the repo root", async () => {
+	const wrapper = await tmpDir();
+	const repo = path.join(wrapper, "repo");
+	await fs.mkdir(path.join(repo, "src"), { recursive: true });
+	await fs.writeFile(path.join(repo, "src", "dispatch.ts"), "// stub");
+	await fs.writeFile(path.join(wrapper, "outside.ts"), "// exists outside the repo root");
+	expect(await statWhereToLookEntry(repo, "../outside.ts")).toBe("missing");
+	expect(await statWhereToLookEntry(repo, "src/../../outside.ts")).toBe("missing");
+	// an inert interior `..` that still resolves inside the repo is ALSO rejected — the floor is
+	// lexical, not resolved, because a stored pointer should be a plain repo-relative path
+	expect(await statWhereToLookEntry(repo, "src/../src/dispatch.ts")).toBe("missing");
+});

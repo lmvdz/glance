@@ -77,3 +77,24 @@ test("evidence and filesTouched paths are compared after stripping a leading ./ 
 	);
 	expect(result).toEqual({ ok: true });
 });
+
+// ── upper bounds (batch-1 review, minor #2: agent-tier input must not be an unbounded write) ────
+
+test("delta text over the max length is rejected, naming the rule", () => {
+	const result = validateModelDelta(`before/after ${"x".repeat(2001)}`, ["src/dispatch.ts"], ["src/dispatch.ts"]);
+	expect(result.ok).toBe(false);
+	if (!result.ok) expect(result.rule).toBe("model-delta-text-too-long");
+});
+
+test("more than 8 evidence entries are rejected even when every anchor is valid", () => {
+	const evidence = Array.from({ length: 9 }, () => "src/dispatch.ts");
+	const result = validateModelDelta("Dispatch used to serialize spawns; it now fans out concurrently.", evidence, ["src/dispatch.ts"]);
+	expect(result.ok).toBe(false);
+	if (!result.ok) expect(result.rule).toBe("model-delta-evidence-count");
+});
+
+test("an over-long single evidence entry is rejected before anchor matching", () => {
+	const result = validateModelDelta("Dispatch used to serialize spawns; it now fans out concurrently.", [`src/${"a".repeat(600)}.ts`], ["src/dispatch.ts"]);
+	expect(result.ok).toBe(false);
+	if (!result.ok) expect(result.rule).toBe("model-delta-evidence-entry-too-long");
+});
