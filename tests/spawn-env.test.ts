@@ -13,7 +13,7 @@ import { AcpAgentDriver } from "../src/acp-agent-driver.ts";
 import { FlueServiceDriver } from "../src/flue-service-driver.ts";
 import { ompOneShot } from "../src/omp-call.ts";
 import { hostSpawnEnv, RpcAgent } from "../src/rpc-agent.ts";
-import { harnessAuthEnv, isSquadEnvCompatKey, scrubbedSpawnEnv } from "../src/spawn-env.ts";
+import { allProviderAuthEnv, harnessAuthEnv, isSquadEnvCompatKey, scrubbedSpawnEnv } from "../src/spawn-env.ts";
 
 const tmps: string[] = [];
 const drivers: AcpAgentDriver[] = [];
@@ -259,14 +259,18 @@ test("harnessAuthEnv(source, 'grok', 'gemini-2.5-pro') follows the pinned model 
 	expect(harnessAuthEnv(ALL_PROVIDER_ENV, "grok", "gemini-2.5-pro")).toEqual({ GOOGLE_API_KEY: "sk-google", GEMINI_API_KEY: "sk-gemini" });
 });
 
-// Round-2 cross-lineage audit (both codex and grok): the PRE-fix behavior of the two tests below was
+// Round-2 cross-lineage audit (both codex and grok): the PRE-fix behavior of the tests below was
 // "falls back to the full list (honest ignorance, not a narrowing)" — admitting every configured
 // provider credential (all 7) to a spawn whose vendor we simply couldn't classify. Both foreign-lineage
-// reviewers flagged that as the opposite of narrow: an opencode spawn with no pinned model, or a Flue
-// worker's harnessAuthEnv() call with no harness/model at all, walked away with six credentials it
-// never asked for. Fixed: unknown lineage now fails closed to DEFAULT_PROVIDER (anthropic) alone —
-// ONE key, matching the same honest-default answer omp/pi already used, extended to every
-// unclassifiable case instead of being the one narrow exception among several broad ones.
+// reviewers flagged that as the opposite of narrow: an opencode spawn with no pinned model walked away
+// with six credentials it never asked for. Fixed: unknown lineage now fails closed to DEFAULT_PROVIDER
+// (anthropic) alone — ONE key, matching the same honest-default answer omp/pi already used, extended to
+// every classifiable-in-principle case.
+//
+// The blind review then caught the over-reach: a Flue worker's vendor is chosen by the tenant's
+// `.flue/agents` config AT RUNTIME (no harness/model to pass), so narrowing it broke every non-Anthropic
+// Flue workflow. Flue now uses `allProviderAuthEnv` — the one deliberate full-grant exception — proven by
+// the two `allProviderAuthEnv` tests below.
 
 test("harnessAuthEnv(source, 'opencode') — a genuinely multi-vendor harness with no model pin — fails closed to DEFAULT_PROVIDER (anthropic) alone, not the full list", () => {
 	expect(harnessAuthEnv(ALL_PROVIDER_ENV, "opencode")).toEqual({ ANTHROPIC_API_KEY: "sk-anthropic" });
@@ -276,8 +280,24 @@ test("harnessAuthEnv with an unknown harness name and no model fails closed to D
 	expect(harnessAuthEnv(ALL_PROVIDER_ENV, "some-future-harness")).toEqual({ ANTHROPIC_API_KEY: "sk-anthropic" });
 });
 
-test("harnessAuthEnv() with NO harness and NO model at all (the Flue-worker call shape, flue-service-driver.ts) fails closed to DEFAULT_PROVIDER (anthropic) alone, not the full list", () => {
+test("harnessAuthEnv() with NO harness and NO model at all fails closed to DEFAULT_PROVIDER (anthropic) alone, not the full list", () => {
 	expect(harnessAuthEnv(ALL_PROVIDER_ENV)).toEqual({ ANTHROPIC_API_KEY: "sk-anthropic" });
+});
+
+test("allProviderAuthEnv() — the Flue-worker grant, whose vendor is unknowable in advance — admits EVERY configured provider credential, so a non-Anthropic flue workflow keeps its key", () => {
+	expect(allProviderAuthEnv(ALL_PROVIDER_ENV)).toEqual({
+		ANTHROPIC_API_KEY: "sk-anthropic",
+		OPENAI_API_KEY: "sk-openai",
+		GOOGLE_API_KEY: "sk-google",
+		GEMINI_API_KEY: "sk-gemini",
+		XAI_API_KEY: "sk-xai",
+		OPENROUTER_API_KEY: "sk-openrouter",
+		AUGMENT_API_KEY: "sk-augment",
+	});
+});
+
+test("allProviderAuthEnv admits only what is set — a missing provider key is simply absent, never an empty/placeholder value", () => {
+	expect(allProviderAuthEnv({ PATH: "/usr/bin", OPENAI_API_KEY: "sk-o" })).toEqual({ OPENAI_API_KEY: "sk-o" });
 });
 
 test("harnessAuthEnv for a known-vendor ACP harness (gemini) returns exactly its ONE vendor's key set, never the other providers' keys", () => {

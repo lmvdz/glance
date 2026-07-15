@@ -17,7 +17,7 @@ import { existsSync } from "node:fs";
 import * as path from "node:path";
 import type { Subprocess } from "bun";
 import type { AgentDriver } from "./agent-driver.ts";
-import { harnessAuthEnv, scrubbedSpawnEnv } from "./spawn-env.ts";
+import { allProviderAuthEnv, scrubbedSpawnEnv } from "./spawn-env.ts";
 import type { RpcSessionState } from "./types.ts";
 
 export interface FlueInvocation {
@@ -143,17 +143,19 @@ export class FlueServiceDriver extends EventEmitter implements AgentDriver {
 		// `inv.bin` prefers the worker repo's OWN node_modules/.bin/flue (defaultInvocation, above) —
 		// this is a tenant-agent spawn site like agent-host/omp-call/acp-agent-driver, running
 		// repo-supplied code that must not see the daemon's DATABASE_URL / OMP_SQUAD_*/GLANCE_* secrets.
-		// Route through the same scrub; harnessAuthEnv() so the worker's own `.flue/agents` config can
-		// still make a model call. Deliberately un-narrowed (no harness/model passed): a flue worker's
-		// `.flue/agents` config picks its own model/vendor independent of anything the daemon knows about
-		// this commission, so there is no vendor to narrow to — the full credential list is the honest
-		// answer here, not a missed narrowing (spawn-env.ts's HARNESS_AUTH_VARS doc).
+		// Route through the same scrub. `allProviderAuthEnv()` (NOT the narrowing `harnessAuthEnv`): a flue
+		// worker's `.flue/agents` config picks its own model/vendor AT RUNTIME, independent of anything the
+		// daemon knows about this commission, so there is no harness or model to narrow by — narrowing to
+		// DEFAULT_PROVIDER would silently break every non-Anthropic flue workflow. This is the one deliberate
+		// full-provider-grant exception (see allProviderAuthEnv's doc); the residual (a flue worker sees every
+		// provider key) is the same same-uid tenant exposure the sandbox workstream owns, no worse than the
+		// pre-scrub full-env inheritance this call site used to have.
 		const proc = Bun.spawn([inv.bin, ...inv.args], {
 			cwd: this.dir,
 			stdin: "ignore",
 			stdout: "pipe",
 			stderr: "pipe",
-			env: scrubbedSpawnEnv(process.env, harnessAuthEnv()),
+			env: scrubbedSpawnEnv(process.env, allProviderAuthEnv()),
 		});
 		this.child = proc;
 		const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);

@@ -127,6 +127,22 @@ const HARNESS_ONLY_AUTH_VARS: Record<string, string[]> = {
 	auggie: ["AUGMENT_API_KEY"],
 };
 
+/** Every provider credential the fleet knows about — the union across every vendor lineage plus the
+ *  harness-only (Augment) and router (OpenRouter) credentials. This is the FULL grant, and it exists for
+ *  exactly ONE caller: `allProviderAuthEnv`, for the genuinely-unknowable-vendor spawn class. Kept as an
+ *  explicit list (not derived from the maps above) so OPENROUTER_API_KEY — which is not a `ModelLineage`
+ *  and lives in neither map — is included on purpose, and so a newly added provider is a deliberate,
+ *  review-visible one-line edit here rather than a silent omission. */
+const ALL_PROVIDER_AUTH_VARS: string[] = [
+	"ANTHROPIC_API_KEY",
+	"OPENAI_API_KEY",
+	"GOOGLE_API_KEY",
+	"GEMINI_API_KEY",
+	"XAI_API_KEY",
+	"OPENROUTER_API_KEY",
+	"AUGMENT_API_KEY",
+];
+
 function admit(source: NodeJS.ProcessEnv, names: string[]): Record<string, string> {
 	const env: Record<string, string> = {};
 	for (const name of names) {
@@ -151,16 +167,20 @@ function admit(source: NodeJS.ProcessEnv, names: string[]): Record<string, strin
  * genuinely can't classify this spawn's vendor" admitted EVERY configured provider credential —
  * ANTHROPIC_API_KEY through AUGMENT_API_KEY, all seven, into a spawn that at most needed one of them.
  * That is not "honest ignorance", it's the widest possible grant dressed up as one: a multi-provider
- * operator's opencode-with-no-pinned-model spawn, or a Flue worker's `harnessAuthEnv()` call with no
- * harness/model at all, walked away with every vendor's key regardless of which (if any) it would ever
- * call. FIX: unknown lineage now fails closed to `DEFAULT_PROVIDER` alone (model-lineage.ts's
- * documented "an unclassifiable unit's provider" answer, already trusted for rate-limit gating) —
- * ONE credential, not seven, for every harness/model combination this function cannot classify. A
- * spawn that genuinely needs a non-Anthropic vendor must be classifiable (a pinned model, or a
- * vendor-pinned harness name `model-lineage.ts`'s `HARNESS_LINEAGE` already knows) — withholding six
- * credentials a spawn never asked for is the correct failure mode, not a functionality regression: no
- * verified harness in the registry relies on the old seven-key grant (spawn-env.test.ts proves it for
- * every registered vendor-pinned harness plus the omp/pi default).
+ * operator's opencode-with-no-pinned-model spawn walked away with every vendor's key regardless of
+ * which (if any) it would ever call. FIX: unknown lineage now fails closed to `DEFAULT_PROVIDER` alone
+ * (model-lineage.ts's documented "an unclassifiable unit's provider" answer, already trusted for
+ * rate-limit gating) — ONE credential, not seven, for every harness/model combination this function
+ * cannot classify. Such a spawn is classifiable IN PRINCIPLE (pin a model, or name a vendor-pinned
+ * harness `model-lineage.ts`'s `HARNESS_LINEAGE` knows), so withholding six credentials it never asked
+ * for is the correct failure mode: no verified harness in the registry relies on the old seven-key
+ * grant (spawn-env.test.ts proves it for every registered vendor-pinned harness plus the omp/pi default).
+ *
+ * The ONE spawn class where this narrowing does NOT apply is a Flue worker: its model/vendor is chosen
+ * by the tenant's own `.flue/agents` config AT RUNTIME, so there is no harness or model the daemon could
+ * pass to classify it in advance — narrowing it to `DEFAULT_PROVIDER` would silently break every
+ * non-Anthropic Flue workflow. That call site uses `allProviderAuthEnv` (below), the deliberate,
+ * named full-grant exception, NOT `harnessAuthEnv`.
  */
 export function harnessAuthEnv(source: NodeJS.ProcessEnv = process.env, harness?: string, model?: string): Record<string, string> {
 	const h = harness?.toLowerCase();
@@ -173,6 +193,21 @@ export function harnessAuthEnv(source: NodeJS.ProcessEnv = process.env, harness?
 	// just above. The `[]` arm is unreachable in practice, never a silent broad grant if it somehow were.
 	if (DEFAULT_PROVIDER !== "unknown") return admit(source, LINEAGE_AUTH_VARS[DEFAULT_PROVIDER]);
 	return admit(source, []);
+}
+
+/**
+ * The full provider-credential grant, for the ONE spawn class whose vendor is genuinely unknowable to the
+ * daemon in advance: a Flue worker (`flue-service-driver.ts`), which picks its model/vendor from the
+ * tenant's own `.flue/agents` config at runtime. There is no harness or model to hand `harnessAuthEnv`,
+ * so narrowing would fail closed on every non-Anthropic Flue workflow. This admits every provider key the
+ * operator has configured — the same breadth Flue spawns had before this narrowing, and still strictly
+ * tighter than Flue's pre-scrub full-env inheritance (no DATABASE_URL / auth secret / master key). The
+ * residual — a Flue worker repo can read every provider credential — is the same same-uid tenant-agent
+ * exposure the sandbox workstream owns; it is NOT reopened by narrowing everything else. Every non-Flue
+ * spawn stays narrowed via `harnessAuthEnv`; this exception is used at exactly one call site.
+ */
+export function allProviderAuthEnv(source: NodeJS.ProcessEnv = process.env): Record<string, string> {
+	return admit(source, ALL_PROVIDER_AUTH_VARS);
 }
 
 /**
