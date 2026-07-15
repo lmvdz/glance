@@ -34,7 +34,14 @@
 - Auto-start call from notification click — mic capture requires a real user gesture
 
 ## Decisions so far
-- (populated at close)
+- [Completion push lane (01)](01-completion-push-lane.md) — one push per voice dispatch via a persisted arm/disarm latch; `done:` tag+debounce namespace; interrupt disarms source-blind; pushSeeded now seeds at start() (fixes pre-existing all-pushes-dead-after-restart)
+- [SW visibility gate (02)](02-sw-visibility-gate.md) — no OS buzz while a glance window is visible; the designed replacement for the cut live-call beacon
+- [Injection completion callback (03)](03-injection-completion-callback.md) — queueInjection onDone correlated by response id in lockstep with the MINOR-4 FIFO; every discard path fires cancelled:true exactly once
+- [Debrief lane (04)](04-debrief-lane.md) — ts-cursor (never seq) with two-phase commit on uncancelled narration; REST transcript truth, not the WS mirror; empty roster = no signal; cursorless first call stays silent (endCall seeds)
+- [Push-enable nudge (05)](05-push-enable-nudge.md) — one dismissible per-call whisper when permission is 'default'
+
+## Completion
+- 5/5 concerns done on branch voice-loop (commits 19f0f0e batch 1, d86f430 batch 2), each inline-reviewed with 4 review fixes applied across the batches. Full webapp suite 1241 green, daemon push/voice suites green, tsc clean both builds, dist rebuilt. High-effort code-review audit run post-merge of both batches. Remaining before merge: Lars's live smoke of the full loop (dispatch → hang up → push → call back → spoken debrief) — the push + debrief lanes need a real subscribed device.
 
 ## Notes
 - Phase 0 snapshot: proceeded over 275 plans with open work (oldest: meta-plan-autonomous-fleet, 2026-07-05); user explicitly pre-authorized plan+execute ("do it").

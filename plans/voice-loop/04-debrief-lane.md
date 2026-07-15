@@ -1,5 +1,5 @@
 # Debrief lane: ts-cursor, REST fetch, fenced spoken backlog, durable voice spawns
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -72,3 +72,6 @@ None (webapp only).
 let it finish, start a new call on the same session → spoken "while you were away" naming the
 agent; barge into the debrief mid-sentence, hang up, call again → debrief REPEATS (cursor never
 committed); let it finish speaking, call again → silence about old items.
+
+## Resolution
+Shipped on branch voice-loop, commit d86f430. voiceDebrief ts-cursor + two-phase commit, REST transcript fetch, buildVoiceDebrief (fenced, no-tools preamble, 24h clamp, 3-cap), durable voice-spawn records, live-narration cursor advance. Review fixes: empty-roster no-signal; cursorless first call stays silent.

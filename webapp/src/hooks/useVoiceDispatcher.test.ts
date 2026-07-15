@@ -331,19 +331,21 @@ describe('concern 04: sweepPromptWatchers onCompletionNarrated', () => {
     expect(narrated).toEqual([42]);
   });
 
-  test('does NOT fire when the narration was barged into / cancelled', () => {
+  test('does NOT fire when the narration was barged into / cancelled — onNarrationLost fires with the same ts instead (the unheard-floor signal)', () => {
     const refs = makeRefs({
       boundAgentIdRef: { current: 'agent-1' },
       watchersRef: { current: new Map([['agent-1', [{ kind: 'prompt', clientTurnId: 'turn-1', echoed: true, cursor: 0, label: 'the agent' }]]]) },
     });
     const { session, onDones } = makeFakeSession();
     const narrated: number[] = [];
+    const lost: number[] = [];
     const transcripts = new Map<string, TranscriptEntry[]>([['agent-1', [{ id: 'e1', kind: 'assistant', text: 'fixed it', ts: 42, status: 'ok' }]]]);
 
-    sweepPromptWatchers(session, refs, { transcripts, agents: [], onCompletionNarrated: (ts) => narrated.push(ts) });
+    sweepPromptWatchers(session, refs, { transcripts, agents: [], onCompletionNarrated: (ts) => narrated.push(ts), onNarrationLost: (ts) => lost.push(ts) });
     onDones[0]!({ cancelled: true });
 
     expect(narrated).toEqual([]);
+    expect(lost).toEqual([42]);
   });
 
   test('is optional — a caller that never supplies it does not throw when the narration completes', () => {

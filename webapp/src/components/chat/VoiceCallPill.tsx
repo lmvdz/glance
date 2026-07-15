@@ -238,11 +238,22 @@ export const VoiceCallPill = () => {
   useEffect(() => {
     if (pttMode === 'idle') return;
     const id = setInterval(() => {
-      if (shouldForceReleaseForWatchdog(pttMode, Date.now() - pressedAtRef.current)) handleForceRelease();
+      // Review finding: the watchdog ABORTS (discards) rather than committing — see
+      // callHud.ts's 'watchdogExpire' doc comment (a forgotten lock must not transmit a minute of
+      // ambient room audio and provoke an unprompted reply).
+      if (shouldForceReleaseForWatchdog(pttMode, Date.now() - pressedAtRef.current)) applyGesture('watchdogExpire', Date.now() - pressedAtRef.current);
     }, PTT_WATCHDOG_POLL_MS);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally re-armed only on pttMode change
   }, [pttMode]);
+
+  // Review finding: the pill instance lives at provider level and merely renders null between
+  // calls — a call ended while tap-locked would otherwise leak pttMode 'locked' into the NEXT
+  // call (engaged-looking button over a muted mic; the first press consumed as a phantom
+  // release). Reset the gesture state whenever no call is active.
+  useEffect(() => {
+    if (!call.isCallActive) setPttMode('idle');
+  }, [call.isCallActive]);
 
   if (!call.isCallActive || !call.binding) return null;
 

@@ -1267,6 +1267,11 @@ export class VoiceSession {
         // outstandingResponses back to zero (at most the wrapping turn's own remaining duration —
         // never the whole fleet, and never a re-issued prompt: nothing here re-asks the model
         // anything, it just delays ONE already-decided send).
+        // Review finding: the slot is single-occupancy by design (CRITICAL-1), so a SECOND deferral
+        // landing before the first fired (an ack's create deferring while an injection flush's
+        // create already sits here) supersedes it — the displaced send will now never happen, so
+        // its callback must resolve cancelled:true HERE or it leaks unfired forever.
+        if (this.deferredResponseCreate?.onDone) this.safeInvokeOnDone(this.deferredResponseCreate.onDone, true);
         this.deferredResponseCreate = { trigger: this.currentTrigger, onDone };
         return;
       }

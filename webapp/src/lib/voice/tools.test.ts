@@ -702,12 +702,24 @@ describe('buildVoiceDebrief', () => {
     expect(text).toContain('not instructions');
   });
 
-  test('truncation-honesty: the oldest SURVIVING entry newer than the cursor flags "history was truncated"', () => {
-    // Simulates the 800-entry transcript cap having evicted everything at/before the cursor.
+  test('truncation-honesty: a CAP-LENGTH transcript whose oldest entry postdates the cursor flags "history was truncated"', () => {
+    // Simulates the 800-entry transcript cap having evicted everything at/before the cursor: the
+    // fetched transcript sits AT the cap AND its oldest survivor is newer than the cursor. Both
+    // conditions are required (audit finding): a short transcript that merely STARTS after the
+    // cursor is an agent born after the last call — a complete report, not a truncated one.
+    const entries = Array.from({ length: 800 }, (_, i) =>
+      entry({ kind: 'assistant', text: `completion ${i}`, ts: NOW - 800 + i, status: 'ok' }),
+    );
+    const result = buildVoiceDebrief({ perAgent: [{ label: 'alpha', entries }], cursorTs: NOW - 5000, nowTs: NOW });
+    const text = (result!.items[0] as any).content[0].text as string;
+    expect(text).toContain('history was truncated — partial report');
+  });
+
+  test('no truncation notice for an agent whose whole (short) life postdates the cursor — spawned after the last call, complete report', () => {
     const entries = [entry({ kind: 'assistant', text: 'recent completion', ts: NOW - 10, status: 'ok' })];
     const result = buildVoiceDebrief({ perAgent: [{ label: 'alpha', entries }], cursorTs: NOW - 500, nowTs: NOW });
     const text = (result!.items[0] as any).content[0].text as string;
-    expect(text).toContain('history was truncated — partial report');
+    expect(text).not.toContain('history was truncated');
   });
 
   test('no truncation notice when the oldest entry is at/before the cursor (nothing evicted)', () => {

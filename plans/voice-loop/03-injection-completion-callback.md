@@ -1,5 +1,5 @@
 # queueInjection completion callback: know when a narration was actually spoken
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -38,3 +38,6 @@ None.
 
 ## Verify
 `cd webapp && bun test src/lib/voice/ && bunx tsc --noEmit` green.
+
+## Resolution
+Shipped on branch voice-loop, commit 19f0f0e. queueInjection(items, onDone?) with response-id correlation in lockstep with the MINOR-4 FIFO; every discard path resolves cancelled:true exactly once; 16 new tests. Review fix: establishConnection resets the callback twins.

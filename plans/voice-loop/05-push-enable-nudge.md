@@ -1,5 +1,5 @@
 # Push-enable nudge at call start
-STATUS: open
+STATUS: done
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -26,3 +26,6 @@ None.
 `cd webapp && bun test src/components/chat/VoiceCallPill.test.tsx src/lib/voice/callHud.test.ts`
 green; markup test pins nudge-present (default) and nudge-absent (granted/denied/unsupported/
 dismissed) branches.
+
+## Resolution
+Shipped on branch voice-loop, commit 19f0f0e. shouldShowPushNudge + pinned copy in callHud; dismissible pill banner wired to enablePush(); reset on isCallActive rising edge.

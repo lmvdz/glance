@@ -2237,3 +2237,32 @@ test('updateSystemContext with blank text is a no-op', async () => {
   h.session.updateSystemContext('   ');
   expect(lastSent(h)).toEqual([]);
 });
+
+test('audit fix: a second deferral displacing a pending deferred injection create resolves the displaced onDone cancelled:true (never leaks unfired)', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  // Open a response and barge in so its response.done is still outstanding while the machine
+  // can flush an injection (ptt-abort lands it on idle with outstanding=1).
+  h.session.pttPress();
+  h.session.pttRelease(); // create #1 — outstanding: 1
+  serverEvent(h, { type: 'response.created', response: { id: 'resp-1' } });
+  h.session.pttPress(); // barge-in: cancel sent, resp-1's done still in flight
+  h.session.pttAbort(); // -> idle (outstanding still 1)
+
+  const fates: boolean[] = [];
+  h.session.queueInjection([{ kind: 'debrief' }], ({ cancelled }) => fates.push(cancelled));
+  // idle -> flush ran; its response.create DEFERRED (outstanding=1) with onDone in the slot.
+  expect(fates).toEqual([]);
+
+  // A tool ack now defers its own continuation create into the same single-occupancy slot.
+  serverEvent(h, { type: 'response.function_call_arguments.done', response_id: 'resp-1', call_id: 'c1', name: 'fleet_status', arguments: '{}' });
+  h.session.sendFunctionOutput('c1', { ok: true });
+
+  // The displaced injection create can now never send — its callback must have resolved cancelled.
+  expect(fates).toEqual([true]);
+
+  // And the machine still unwinds normally: resp-1's done fires the ack's (superseding) deferred create.
+  serverEvent(h, { type: 'response.done', response: { id: 'resp-1', status: 'cancelled' } });
+  const creates = lastSent(h).filter((s) => s.type === 'response.create');
+  expect(creates.length).toBeGreaterThanOrEqual(1);
+});

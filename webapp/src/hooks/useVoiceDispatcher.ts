@@ -109,6 +109,11 @@ export interface UseVoiceDispatcherOptions {
    *  spoken from the away-summary, so the persisted cursor must move past it too — otherwise the
    *  operator's very NEXT call would re-debrief something they were just told about seconds ago. */
   onCompletionNarrated?: (entryTs: number) => void;
+  /** Fired when a live completion narration was CUT (barge-in / teardown — its `onDone` came back
+   *  `cancelled: true`), with the completion entry's `ts`. Review finding: the caller uses this as
+   *  an unheard-floor so a LATER successful narration's forward-only cursor commit can't advance
+   *  past this never-heard completion and silently drop it from every future debrief. */
+  onNarrationLost?: (entryTs: number) => void;
 }
 
 /**
@@ -376,6 +381,8 @@ export interface SweepWatchersDeps {
   /** Concern 04: fired with a completion's own `ts` once its narration was actually SPOKEN
    *  (`{cancelled: false}`) — see `UseVoiceDispatcherOptions.onCompletionNarrated`'s doc comment. */
   onCompletionNarrated?: (entryTs: number) => void;
+  /** The cancelled branch's twin — see `UseVoiceDispatcherOptions.onNarrationLost`. */
+  onNarrationLost?: (entryTs: number) => void;
   clearTimerFn?: (handle: ReturnType<typeof setTimeout>) => void;
 }
 
@@ -457,6 +464,7 @@ export function sweepPromptWatchers(session: Pick<VoiceSession, 'queueInjection'
       // mid-narration must not advance the cursor past something the operator never actually heard).
       session.queueInjection(buildCompletionInjectionItems(label, completion.text), ({ cancelled }) => {
         if (!cancelled) deps.onCompletionNarrated?.(completionTs);
+        else deps.onNarrationLost?.(completionTs);
       });
       // MAJOR-2(a): role:'model', no clientTurnId — this isn't a dispatched turn of its own. Its
       // double-render risk is fixed on the OTHER side, by extending partitionSessionMessages
@@ -491,7 +499,7 @@ export function clearAllPendingTimers(refs: TimerCleanupRefs, clearTimerFn: (han
 }
 
 export function useVoiceDispatcher(opts: UseVoiceDispatcherOptions): UseVoiceDispatcherResult {
-  const { sessionId, agentId: pinnedAgentId, selectedModel = '', onAgentBound, onSpokenSummary, onAgentSpawned, onCompletionNarrated } = opts;
+  const { sessionId, agentId: pinnedAgentId, selectedModel = '', onAgentBound, onSpokenSummary, onAgentSpawned, onCompletionNarrated, onNarrationLost } = opts;
   const { agents, features, audit, transcripts, currentProject, sendConsoleCommand, subscribeConsole } = useTaskContext();
   // The live page-context store (single shared store under the root PageContextProvider, published
   // by whichever view is mounted). Read here so a spoken prompt grounds to what the operator is
@@ -578,7 +586,7 @@ export function useVoiceDispatcher(opts: UseVoiceDispatcherOptions): UseVoiceDis
   useEffect(() => {
     const session = sessionRef.current;
     if (!session) return;
-    sweepPromptWatchers(session, refs, { transcripts, agents, onSpokenSummary, onCompletionNarrated });
+    sweepPromptWatchers(session, refs, { transcripts, agents, onSpokenSummary, onCompletionNarrated, onNarrationLost });
   }, [transcripts, agents]);
 
   // MINOR-9: clear every pending echo timer + the interrupt debounce timer on unmount — a component

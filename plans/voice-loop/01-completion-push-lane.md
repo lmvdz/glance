@@ -1,5 +1,5 @@
 # Completion push lane: one push per voice dispatch, alive after restarts
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -55,3 +55,6 @@ field added for tsc, no behavior.
 a voice prompt (or simulate: prompt with meta.source='voice'), close the tab, let the agent
 finish → exactly one OS notification, name-only body; run again with an interrupt → no push.
 Restart the daemon, drive an agent to `input` → escalation push still fires (seed fix).
+
+## Resolution
+Shipped on branch voice-loop, commit 19f0f0e. voicePushArmed latch (persisted + orphan-adopt carry), voiceDonePayload (done: tag/debounce namespace, name-only body), registry guard, workflow_done terminality, pushSeeded startup seed (fixes the pre-existing all-pushes-dead-after-restart bug). Review fix: interrupt disarms source-blind.

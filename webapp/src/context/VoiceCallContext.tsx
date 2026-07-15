@@ -156,6 +156,20 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
    *  doesn't churn the several OTHER effects that list `endCall` in their dependency arrays. */
   const bindingRef = useRef<VoiceCallBinding | null>(null);
   bindingRef.current = binding;
+  /** Live roster mirror — `runDebrief` runs inside the callToken-keyed effect whose closure
+   *  captured `agents` at call START (often [] on a cold page load); labels and roster pruning
+   *  must read the roster as of fetch-completion time instead (review fix: the debrief was
+   *  speaking raw agent UUIDs on exactly the push-tap → fresh-load → call-back flow). */
+  const agentsRef = useRef<typeof agents>(agents);
+  agentsRef.current = agents;
+  /** Min `ts` of any live narration whose response was CUT this call (barge-in/teardown) — the
+   *  unheard floor that stops a later successful narration's cursor commit from burying it. Reset
+   *  per call (connect effect). */
+  const unheardNarrationTsRef = useRef<number | null>(null);
+  /** Mirror of `voiceState` + the PREVIOUS turn's dispatch claim — the late-whisper discard rule
+   *  (see onCaption below) needs both synchronously inside the session callbacks. */
+  const voiceStateRef = useRef<VoiceState>('idle');
+  const prevTurnClaimedRef = useRef(false);
 
   // Capability probe (DESIGN.md "Flagging" row) — the only honest discovery channel; a flag-off
   // 404 is mapped to `{enabled:false}` by `getVoiceConfig` itself, never surfaced as an error here.
@@ -217,9 +231,19 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
     // Concern 04: a completion narrated LIVE mid-call is "heard" exactly like one spoken from the
     // away-summary — advance the cursor past it too, once its own response actually completed
     // uncancelled (the dispatcher only calls this from that branch — see its own doc comment).
+    // Review fix (audit finding): the cursor is a session-wide forward-only high-water mark, so a
+    // successful narration must NOT advance it past an EARLIER completion whose own narration was
+    // cut (barge-in) — that completion would be silently dropped from every future debrief. The
+    // unheard floor (min ts of any lost narration this call) blocks such commits; the next call's
+    // debrief then re-speaks both, which is the designed idempotent outcome.
     onCompletionNarrated: (entryTs) => {
       if (!binding) return;
+      const floor = unheardNarrationTsRef.current;
+      if (floor !== null && floor <= entryTs) return; // an older completion is still unheard — hold the cursor
       commitVoiceDebrief(binding.sessionId, entryTs);
+    },
+    onNarrationLost: (entryTs) => {
+      unheardNarrationTsRef.current = unheardNarrationTsRef.current === null ? entryTs : Math.min(unheardNarrationTsRef.current, entryTs);
     },
   });
 
@@ -281,6 +305,13 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
   );
 
   const teardown = useCallback(() => {
+    // Review fix (audit finding): stamp/seed the debrief cursor on EVERY real call end — endCall,
+    // org-switch, session-delete, AND a terminal error's teardown (previously only endCall stamped,
+    // so a session whose first-ever call died on reconnect-failed never seeded a cursor and its
+    // next call's debrief silently never ran). Safe here: teardown is only ever invoked by those
+    // real end paths, never by the connect effect's cleanup (StrictMode's synthetic remount).
+    const endedSessionId = bindingRef.current?.sessionId;
+    if (endedSessionId) stampVoiceCallEnded(endedSessionId);
     setCallToken(null);
     setBinding(null);
     setVoiceState('idle');
@@ -297,12 +328,7 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const endCall = useCallback(() => {
-    // Concern 04: a REAL user/system intent to end the call (as opposed to the connect-effect's
-    // cleanup, which also fires on a StrictMode synthetic remount and must never touch this) — the
-    // one place `lastCallEndedAt` is stamped, and a never-debriefed session's cursor gets seeded.
-    const sessionId = bindingRef.current?.sessionId;
-    if (sessionId) stampVoiceCallEnded(sessionId);
-    teardown(); // the connect-effect's cleanup (keyed on callToken) tears down the VoiceSession itself
+    teardown(); // stamps the debrief cursor + resets state; the connect-effect's cleanup (keyed on callToken) tears down the VoiceSession itself
   }, [teardown]);
 
   const startCall = useCallback(
@@ -381,6 +407,9 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
     let cancelled = false;
     const boundSessionId = binding.sessionId; // fixed for the call's lifetime (only agentId rebinds)
     const boundAgentIdAtConnect = binding.agentId; // may be undefined pre-bootstrap — see runDebrief
+    unheardNarrationTsRef.current = null; // per-call state — a lost narration last call was already re-debriefed
+    voiceStateRef.current = 'idle';
+    prevTurnClaimedRef.current = false;
     const session = createVoiceSession(mintVoiceToken, {
       agentId: binding.agentId,
       getRecap: dispatcher.getRecap,
@@ -389,6 +418,13 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
       onCaption: (text, speaker) => {
         dispatcher.onCaption(text, speaker);
         if (speaker === 'user') {
+          // Review fix (audit finding): whisper transcribes only COMMITTED audio, so a 'user'
+          // caption arriving while a NEW recording is in progress belongs to the PREVIOUS turn —
+          // and if that turn was claimed by a prompt_agent dispatch (which persisted its own
+          // clientTurnId-stamped copy), appending it here would flush later as a second, id-less
+          // duplicate. Discard exactly that case; an unclaimed late transcript still appends (its
+          // turn was never persisted anywhere else).
+          if (voiceStateRef.current === 'userRecording' && prevTurnClaimedRef.current) return;
           userCaptionRef.current += text;
         } else {
           // The reply starting is the user turn's boundary: whisper's transcript of the operator's
@@ -400,10 +436,14 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
         refreshLiveCaption();
       },
       onStateChange: (state, previous) => {
+        voiceStateRef.current = state;
         setVoiceState(state);
         setConnecting(false);
         if (state === 'userRecording' && previous !== 'userRecording') {
           flushCaptionTurns(boundSessionId); // turn boundary: whatever was said before this recording is complete
+          // Remember whether the turn we just closed was dispatch-claimed — the late-whisper
+          // discard rule above needs it AFTER the live flag resets for the fresh turn.
+          prevTurnClaimedRef.current = turnClaimedByDispatchRef.current;
           turnClaimedByDispatchRef.current = false; // a fresh user turn — no dispatch has claimed it yet
         } else if (state === 'idle' && previous !== 'idle') {
           // The response (and thus the assistant's spoken turn) finished — flush so the chat
@@ -460,7 +500,7 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
       // content. A pruned-in-error id would just 404 harmlessly below (allSettled), but an
       // empty-roster prune would silently skip the whole debrief on exactly the push-tap →
       // fresh-page-load → call-back flow this feature exists for.
-      const rosterIds = new Set(agents.map((a) => a.id));
+      const rosterIds = new Set(agentsRef.current.map((a) => a.id));
       const inRoster = (id: string) => rosterIds.size === 0 || rosterIds.has(id);
       const trackedIds = new Set<string>();
       if (boundAgentIdAtConnect && inRoster(boundAgentIdAtConnect)) trackedIds.add(boundAgentIdAtConnect);
@@ -478,7 +518,12 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
 
       const perAgent = fetched
         .filter((r): r is PromiseFulfilledResult<{ id: string; entries: TranscriptEntry[] }> => r.status === 'fulfilled')
-        .map(({ value }) => ({ label: agents.find((a) => a.id === value.id)?.name ?? value.id, entries: value.entries }));
+        .map(({ value }) => ({
+          // agentsRef, not the effect closure's `agents`: the roster typically arrives AFTER this
+          // effect ran on a cold load — the stale closure made the debrief speak raw agent UUIDs.
+          label: agentsRef.current.find((a) => a.id === value.id)?.name ?? value.id,
+          entries: value.entries,
+        }));
       const cursorTs = voiceDebrief.cursorTs;
       const debrief = buildVoiceDebrief({ perAgent, cursorTs, nowTs: Date.now() });
       if (!debrief) return; // no cursor + no backlog, or already fully caught up — stay silent

@@ -1,5 +1,5 @@
 # Service-worker visibility gate: no buzz while the operator is looking
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -29,3 +29,6 @@ Manual (sw.js has no test harness): with the daemon running and push subscribed,
 (e.g. drive an agent to `input`) with the glance tab focused → no OS notification; minimize the
 window / switch apps and trigger again → notification appears. Confirm notificationclick focusing
 still works.
+
+## Resolution
+Shipped on branch voice-loop, commit 19f0f0e. sw.js push handler skips showNotification when any window client is visible; fail-toward-notifying on matchAll failure; node --check clean.

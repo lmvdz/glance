@@ -320,3 +320,16 @@ describe('shouldEndCallForMaxDuration / shouldEndCallForIdle (MEDIUM-6: idle/max
     expect(shouldEndCallForIdle(5 * 60_000, 5 * 60_000)).toBe(true);
   });
 });
+
+  // Audit finding (voice-loop branch): the 60s watchdog ABORTS — a forgotten lock must never
+  // transmit a minute of ambient room audio; committing is for interactive force-releases only.
+  describe('"watchdogExpire" event (privacy backstop: always abort, never commit)', () => {
+    test('aborts from "holding" and "locked" regardless of engagement length', () => {
+      expect(nextPttUiState('holding', 'watchdogExpire', MAX_PTT_HOLD_MS)).toEqual({ mode: 'idle', action: 'abort' });
+      expect(nextPttUiState('locked', 'watchdogExpire', MAX_PTT_HOLD_MS)).toEqual({ mode: 'idle', action: 'abort' });
+    });
+
+    test('a no-op from "idle"', () => {
+      expect(nextPttUiState('idle', 'watchdogExpire', MAX_PTT_HOLD_MS)).toEqual({ mode: 'idle', action: 'none' });
+    });
+  });

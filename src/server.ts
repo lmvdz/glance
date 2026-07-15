@@ -2640,9 +2640,14 @@ export class SquadServer {
 		const now = Date.now();
 		if (now - (this.lastPush.get(key) ?? 0) < 3000) return;
 		this.lastPush.set(key, now);
-		void push.notify(payload).then((sent) => {
-			if (sent > 0) this.singleManager?.clearVoicePushArmed(a.id);
-		});
+		// Disarm SYNCHRONOUSLY, before the (seconds-long, per-subscription) network send — review
+		// finding: an async post-send disarm races a NEWER voice dispatch's arm on the same agent
+		// (applyCommand skips re-arming while the latch still reads true, then the late disarm
+		// consumes the latch that second dispatch was riding — its push is silently lost). The cost
+		// of sync-consume is that a totally-failed notify() doesn't retry on a later idle — accepted:
+		// the push is best-effort by design, the debrief cursor is the guarantee (DESIGN.md).
+		this.singleManager?.clearVoicePushArmed(a.id);
+		void push.notify(payload);
 	}
 
 	private schedulePresence(): void {

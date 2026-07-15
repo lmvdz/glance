@@ -253,7 +253,14 @@ export type PttUiMode = 'idle' | 'holding' | 'locked';
  *  "lock", but surviving the user tabbing away entirely is a hot mic with nobody watching the HUD
  *  to notice. The PTT watchdog (`shouldForceReleaseForWatchdog` below) fires the same event as a
  *  last-resort backstop if none of those signals ever arrive. */
-export type PttGestureEvent = 'down' | 'up' | 'leave' | 'forceRelease';
+/** `'watchdogExpire'` (review finding, voice-loop branch): the 60s hot-mic watchdog firing means
+ *  NOBODY has interacted with the pill for the whole window — overwhelmingly a forgotten/accidental
+ *  lock, not a deliberate dictation. Unlike `'forceRelease'` (blur/tab-hide mid-interaction, where
+ *  committing preserves real speech), the watchdog ABORTS: transmitting up to a minute of ambient
+ *  room audio to the provider — and having the model answer it unprompted — is a privacy failure,
+ *  while discarding a genuinely-forgotten recording costs nothing. A present operator who dictated
+ *  60s+ sees the pill flip to "Muted" and can re-record. */
+export type PttGestureEvent = 'down' | 'up' | 'leave' | 'forceRelease' | 'watchdogExpire';
 export interface PttGestureResult {
   mode: PttUiMode;
   /** `'abort'` (empty-turn rule, see the section comment): end the engagement and DISCARD the
@@ -282,11 +289,16 @@ export function nextPttUiState(
   /** Ends the engagement: a turn long enough to plausibly contain speech commits (release);
    *  anything shorter is an accident of pointer mechanics and discards (abort). */
   const endEngagement = (): PttGestureResult => ({ mode: 'idle', action: holdMs < minTurnMs ? 'abort' : 'release' });
+  if (event === 'watchdogExpire') {
+    // Always an ABORT from an engaged mode (see the event's doc comment) — never a commit.
+    if (mode === 'idle') return { mode: 'idle', action: 'none' };
+    return { mode: 'idle', action: 'abort' };
+  }
   if (event === 'forceRelease') {
     // HIGH-3: unconditional — ends 'holding' AND 'locked' engagements alike; a true no-op only
     // from 'idle' (nothing was engaged to release). A blur/cancel landing within the min-turn
-    // window aborts like any other short engagement (nothing was said yet); the 60s watchdog is
-    // always far past the window and still commits.
+    // window aborts like any other short engagement (nothing was said yet); a long-held one
+    // commits — the operator was mid-interaction (tab switch, OS dialog), so their speech is real.
     if (mode === 'idle') return { mode: 'idle', action: 'none' };
     return endEngagement();
   }

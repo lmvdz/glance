@@ -517,6 +517,10 @@ const VOICE_DEBRIEF_ENTRY_MAX_CHARS = 400;
  *  session that's gone silent for weeks must not resurface a stale backlog the moment it finally
  *  gets a fresh call. */
 const VOICE_DEBRIEF_CLAMP_MS = 24 * 60 * 60 * 1000;
+/** Mirrors the daemon's MAX_TRANSCRIPT (src/squad-manager.ts trims at 800 via shift()) — a fetched
+ *  transcript this long is plausibly missing its head; anything shorter provably is not. Duplicated
+ *  by necessity across the build boundary (same posture as VOICE_TOOL_DEFS' cross-build twin). */
+const VOICE_DEBRIEF_TRANSCRIPT_CAP = 800;
 
 export interface VoiceDebriefResult {
   items: unknown[];
@@ -557,10 +561,13 @@ export function buildVoiceDebrief(input: {
 
   for (const agent of input.perAgent) {
     const oldest = agent.entries[0];
-    // The transcript cap (src/squad-manager.ts) can evict away-window entries out from under a
-    // long-silent session. If this agent's OLDEST SURVIVING entry is already newer than the
-    // cursor, something that qualified may have been evicted — flagged honestly, not guessed at.
-    if (oldest && oldest.ts > input.cursorTs) truncatedHistory = true;
+    // The transcript cap (src/squad-manager.ts trims at 800 via shift()) can evict away-window
+    // entries out from under a long-silent session. Review finding: "oldest surviving entry is
+    // newer than the cursor" ALONE is trivially true for any agent spawned after the last call
+    // ended (its whole life postdates the cursor) — that's a complete report, not a truncated
+    // one. Only a transcript sitting AT the cap is plausibly missing its head, so both conditions
+    // are required before the debrief confesses to a partial report.
+    if (oldest && oldest.ts > input.cursorTs && agent.entries.length >= VOICE_DEBRIEF_TRANSCRIPT_CAP) truncatedHistory = true;
     for (const agentEntry of agent.entries) {
       if (agentEntry.kind !== 'assistant' || agentEntry.status === 'running') continue;
       if (agentEntry.ts <= floor) continue;
