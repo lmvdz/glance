@@ -26,6 +26,14 @@
  *   - OMP_SQUAD_GATE_SANDBOX_USER     `--user` for the container (default: the daemon's uid:gid;
  *                                     set `root` to restore the old root-in-container behavior)
  *
+ * Per-call overrides: `gateExec`/`execGatedCommand` also accept an `opts.network` and `opts.env`
+ * for the ONE call, layered on top of everything above — `opts.network` beats
+ * `OMP_SQUAD_GATE_SANDBOX_NETWORK` for that call only (used by validate.ts's acceptance worker,
+ * whose `flue run` needs real network), and `opts.env` replaces the computed `gateEnv(source)`
+ * for callers that enforce their own narrower scrub. Precedence note for operators: a per-call
+ * `network` override wins even over an explicit gate-wide `OMP_SQUAD_GATE_SANDBOX_NETWORK=none` —
+ * it is a scoped, documented widening for that one caller, never a change to the shared default.
+ *
  * Async planner: returns argv + env + whether it is sandboxed; the three gate spawn sites
  * await it and execute. Host mode is byte-identical to the pre-sandbox behavior.
  *
