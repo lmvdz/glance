@@ -73,6 +73,11 @@ test("restActionTier: reads viewer, mutations operator, destructive admin, auth/
 	expect(restActionTier("PUT", "/api/org/voice-key")).toBe("admin");
 	expect(restActionTier("DELETE", "/api/org/voice-key")).toBe("admin");
 	expect(restActionTier("POST", "/api/org/voice/enabled")).toBe("admin");
+	// Operator-attention substrate (comprehension concern 01): recording one's own "I looked at this"
+	// is deliberately viewer-tier, not the coarse mutation=operator default — see authz.ts's comment.
+	expect(restActionTier("POST", "/api/attention")).toBe("viewer");
+	expect(restActionTier("GET", "/api/attention")).toBe("viewer");
+	expect(restActionTier("GET", "/api/attention/seen")).toBe("viewer");
 });
 
 test("applyCommand: operator denied destructive ops (RbacDenied + audited); admin allowed", async () => {
