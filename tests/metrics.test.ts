@@ -28,11 +28,11 @@ describe("isFirstTryGreen", () => {
 });
 
 describe("learningFlags", () => {
-	test("defaults every flag to off", () => {
+	test("defaults every flag to off, except failureMemory which defaults on (skills-hardening concern 05)", () => {
 		const f = learningFlags();
 		expect(f.reflexion).toBe("off");
 		expect(f.rewardBoost).toBe("off");
-		expect(f.failureMemory).toBe("off");
+		expect(f.failureMemory).toBe("on");
 		expect(f.modelOutcomes).toBe("off");
 	});
 
@@ -41,6 +41,12 @@ describe("learningFlags", () => {
 		expect(learningFlags().reflexion).toBe("on");
 		expect(learningFlags("agent-42").reflexion).toBe("on");
 		expect(isOn(learningFlags().reflexion)).toBe(true);
+	});
+
+	test('"0" is the explicit off-switch for a default-on flag (failureMemory)', () => {
+		process.env.OMP_SQUAD_FAILURE_MEMORY = "0";
+		expect(learningFlags().failureMemory).toBe("off");
+		expect(isOn(learningFlags().failureMemory)).toBe(false);
 	});
 
 	test('"ab" hashes the id into a stable variant — same id always resolves the same way', () => {
@@ -57,9 +63,11 @@ describe("learningFlags", () => {
 		expect(a).toBe(b);
 	});
 
-	test("unrecognized env values fall back to off", () => {
+	test("unrecognized env values fall back to the flag's own default (off for reflexion, on for failureMemory)", () => {
+		process.env.OMP_SQUAD_REFLEXION = "yes-please";
+		expect(learningFlags().reflexion).toBe("off");
 		process.env.OMP_SQUAD_FAILURE_MEMORY = "yes-please";
-		expect(learningFlags().failureMemory).toBe("off");
+		expect(learningFlags().failureMemory).toBe("on");
 	});
 });
 

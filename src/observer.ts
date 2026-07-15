@@ -98,7 +98,8 @@ export interface ObserverDeps {
 	/** Recurring-failure memory (concern 05, downscoped): annotate a land-failure streak's root cause
 	 *  ONCE per fingerprint (the callee is responsible for its own idempotency — a fingerprint already
 	 *  annotated is a no-op) so a later cold-start on the same branch can warn the next agent. Absent
-	 *  ⇒ disabled (no annotation, matches OMP_SQUAD_FAILURE_MEMORY default off). */
+	 *  ⇒ disabled regardless of the flag (no wiring, not a flag read) — but when wired,
+	 *  `OMP_SQUAD_FAILURE_MEMORY` now defaults ON (skills-hardening concern 05; `=0` disables). */
 	annotateFailure?: (finding: Finding, branch: string) => Promise<void>;
 	/** Epic 3's compliance evaluator (src/compliance.ts) — real policy findings (forced lands,
 	 *  overridden validator vetoes, repeatedly-failing branches) fed into the SAME observe → file →

@@ -3282,7 +3282,8 @@ export class SquadManager extends EventEmitter {
 	 * streak's root cause ONCE per fingerprint, reusing concern 04's `reflect()` (no second LLM path).
 	 * Idempotency lives HERE (not in the caller's timing) — a fingerprint already annotated short-
 	 * circuits before ever calling `reflect()`, so a capped/retried observer tick can call this every
-	 * time without spending a second LLM call. Gated behind `OMP_SQUAD_FAILURE_MEMORY` (default off).
+	 * time without spending a second LLM call. Gated behind `OMP_SQUAD_FAILURE_MEMORY` (default on
+	 * as of skills-hardening concern 05; `=0` is the explicit off-switch).
 	 */
 	private async annotateRecurringFailure(repo: string, finding: Finding, branch: string): Promise<void> {
 		if (!isOn(learningFlags().failureMemory)) return;

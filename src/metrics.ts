@@ -15,9 +15,12 @@
  *   - primer-undelivered    — a primer was built for a harness that cannot receive one.
  *
  * Flag pattern (reused by concerns 03/04/05/06/07): `learningFlags()` resolves each
- * `OMP_SQUAD_*` flag to "on"/"off", defaulting OFF. `=ab` hashes a caller-supplied id (agent
- * or branch) to a STABLE 50/50 variant, so half the fleet can run each arm for a fair A/B
- * comparison without flapping the same id between runs.
+ * `OMP_SQUAD_*` flag to "on"/"off" against a per-flag default (`FLAG_DEFAULT`) — every flag
+ * defaults OFF except `failureMemory`, flipped ON by concern 05 (skills-hardening) once the
+ * write→read→primer pipeline was proven wired and dark. `=1`/`=0` are the explicit on/off
+ * switches regardless of default (mirrors `envBool`'s "0"/"1" convention in config.ts); `=ab`
+ * hashes a caller-supplied id (agent or branch) to a STABLE 50/50 variant, so half the fleet
+ * can run each arm for a fair A/B comparison without flapping the same id between runs.
  */
 
 import { readFileSync } from "node:fs";
@@ -63,11 +66,25 @@ export function stableVariant(envVar: string, id: string): Variant {
 	return stableHash(`${envVar}:${id}`) % 2 === 0 ? "on" : "off";
 }
 
-function resolveVariant(envVar: string, id: string): Variant {
+/** The SINGLE source of truth for each flag's default arm when the env var is unset (or set to
+ *  a value that isn't "0"/"1"/"ab"). Every flag defaults "off" except `failureMemory` (concern
+ *  05: the failure→primer pipeline is built, wired, and otherwise dark) — flip a flag's default
+ *  by editing its entry here, not by special-casing `resolveVariant`. */
+const FLAG_DEFAULT: Record<keyof LearningFlags, Variant> = {
+	reflexion: "off",
+	rewardBoost: "off",
+	failureMemory: "on",
+	modelOutcomes: "off",
+	thresholdTuner: "off",
+	decisionCapture: "off",
+};
+
+function resolveVariant(envVar: string, id: string, defaultVariant: Variant): Variant {
 	const raw = process.env[envVar];
 	if (raw === "1") return "on";
+	if (raw === "0") return "off"; // explicit off-switch, regardless of this flag's default
 	if (raw === "ab") return stableVariant(envVar, id);
-	return "off"; // unset or any other value ⇒ off (safe default)
+	return defaultVariant; // unset or any other value ⇒ this flag's default (FLAG_DEFAULT)
 }
 
 /** Resolve every learning-loop flag at once. `id` (agent or branch id) is only consulted for
@@ -75,12 +92,12 @@ function resolveVariant(envVar: string, id: string): Variant {
  *  cached) so tests/ops can flip env vars per-case, matching autodrive()/landFailCap() etc. */
 export function learningFlags(id = ""): LearningFlags {
 	return {
-		reflexion: resolveVariant(FLAG_ENV.reflexion, id),
-		rewardBoost: resolveVariant(FLAG_ENV.rewardBoost, id),
-		failureMemory: resolveVariant(FLAG_ENV.failureMemory, id),
-		modelOutcomes: resolveVariant(FLAG_ENV.modelOutcomes, id),
-		thresholdTuner: resolveVariant(FLAG_ENV.thresholdTuner, id),
-		decisionCapture: resolveVariant(FLAG_ENV.decisionCapture, id),
+		reflexion: resolveVariant(FLAG_ENV.reflexion, id, FLAG_DEFAULT.reflexion),
+		rewardBoost: resolveVariant(FLAG_ENV.rewardBoost, id, FLAG_DEFAULT.rewardBoost),
+		failureMemory: resolveVariant(FLAG_ENV.failureMemory, id, FLAG_DEFAULT.failureMemory),
+		modelOutcomes: resolveVariant(FLAG_ENV.modelOutcomes, id, FLAG_DEFAULT.modelOutcomes),
+		thresholdTuner: resolveVariant(FLAG_ENV.thresholdTuner, id, FLAG_DEFAULT.thresholdTuner),
+		decisionCapture: resolveVariant(FLAG_ENV.decisionCapture, id, FLAG_DEFAULT.decisionCapture),
 	};
 }
 
