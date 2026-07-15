@@ -284,6 +284,8 @@ function featureCriteria(value: unknown): FeatureCriterion[] | undefined {
  * can never mint `model-delta` records, because those are only minted through
  * `squad_record_decision`'s evidence validation. (Model-deltas always live on persisted features —
  * `recordAgentDecision` adopts before writing — so `stored` is never missing for them.)
+ * @substrate exported for tests only — the PATCH handler in this file is the one production caller;
+ * the merge semantics above are exactly what tests/feature-decisions-merge.test.ts pins.
  */
 export function featureDecisions(value: unknown, stored: FeatureDecision[] | undefined): FeatureDecision[] | undefined {
 	if (!Array.isArray(value)) return undefined;
