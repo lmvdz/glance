@@ -66,6 +66,13 @@ test("restActionTier: reads viewer, mutations operator, destructive admin, auth/
 	expect(restActionTier("GET", "/api/features/f1/plan-vote")).toBe("viewer");
 	expect(restActionTier("POST", "/api/features/f1/plan-vote/call")).toBe("admin");
 	expect(restActionTier("POST", "/api/features/f1/plan-vote/cast")).toBe("admin");
+	// Org voice-key admin surface (plans/voice-db-mode/05-admin-endpoints.md): ALL FOUR routes are
+	// admin-tier, including the GET — stricter than the rest of /api/org (whose profile GET is
+	// viewer-readable), because a voice key's presence/last4/enabled state is provider posture.
+	expect(restActionTier("GET", "/api/org/voice")).toBe("admin");
+	expect(restActionTier("PUT", "/api/org/voice-key")).toBe("admin");
+	expect(restActionTier("DELETE", "/api/org/voice-key")).toBe("admin");
+	expect(restActionTier("POST", "/api/org/voice/enabled")).toBe("admin");
 });
 
 test("applyCommand: operator denied destructive ops (RbacDenied + audited); admin allowed", async () => {

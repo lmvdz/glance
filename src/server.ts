@@ -59,6 +59,8 @@ import {
 	OrgMemberInviteBodySchema,
 	OrgMemberRoleBodySchema,
 	OrgPatchBodySchema,
+	OrgVoiceEnabledBodySchema,
+	OrgVoiceKeyBodySchema,
 	PlanCandidateCreateBodySchema,
 	PlanCandidateTransitionBodySchema,
 	PlanVoteCallBodySchema,
@@ -108,7 +110,21 @@ import { actorForRole, type AuthPolicy, RbacDenied, requestToken, requiredRole, 
 import { handleFeedbackRoutes } from "./feedback-routes.ts";
 import { configuredSocialProviders, signupOpen } from "./db/auth.ts";
 import { getWorkosOrgPolicy, parseWorkosEvent, setWorkosOrgPolicy, ssoEnabled, verifyWorkosSignature } from "./workos.ts";
-import { hasAnyVoiceKey, isKnownVoiceProvider, mintVoiceToken, voiceConnectSrcOrigins, voiceProviderApiKey, voiceProviderPublicInfo } from "./voice-token.ts";
+import {
+	isKnownVoiceProvider,
+	mintVoiceToken,
+	orgHasKey,
+	verifyVoiceProviderKey,
+	voiceConnectSrcOrigins,
+	voiceKeyFor,
+	voiceProviderMaxSessionWindowMs,
+	voiceProviderOrigins,
+	voiceProviderPublicInfo,
+	voiceTokenTtlSeconds,
+	VOICE_MINT_AUDIT_ACTION,
+	type VoiceKeyScope,
+} from "./voice-token.ts";
+import { appendOrgAudit, deleteOrgAuditRow, deleteOrgSecret, finalizeOrgAuditDetail, getOrgSecret, putOrgSecret, reserveOrgAuditSlot, setOrgSecretEnabled } from "./dal/store.ts";
 
 /** The agent id/name a `ClientCommand` mutates, if any — "create"/"snapshot"/"commission" name no
  *  agent (they don't need cross-manager resolution); "message" targets a peer by `to`, but that's
@@ -135,7 +151,7 @@ function requestScope(body: unknown): Pick<CreateAgentOptions, "requires" | "own
 }
 import { approveJoinRequest, denyJoinRequest, ensurePersonalWorkspace, listPendingJoinRequests, onboardWorkosUser, provisionScimEvent } from "./workos-provision.ts";
 import { addMemberByEmail, getOrgProfile, listOrgMembers, removeMember, renameOrg, setMemberRole } from "./org-admin.ts";
-import type { DbHandle } from "./db/index.ts";
+import { dbMode as voiceDbBootMode, type DbHandle } from "./db/index.ts";
 import { openRouteDecision } from "./open-worktree.ts";
 import { escalationPayload, type PushPayload, type PushService } from "./push.ts";
 import type { Actor, AgentDTO, AgentStatus, AuditEntry, OperatorPresence, Role, RunReceipt } from "./types.ts";
@@ -389,11 +405,22 @@ export { escalationPayload };
 // ponytail: 'unsafe-inline' is forced by the single-file inline-script/style SPA;
 // connect-src 'self' is the compensating control (blocks token exfil to other origins).
 /** Security response headers stamped on every dashboard + API response (finding F-3).
- *  Voice (webapp-voice-lane): the ONLY sanctioned widening of `connect-src` — the keyed provider's
- *  origin, and only while the lane is armed (flag AND key). Every other daemon keeps the tight
- *  exfil-blocking default. Read per-call so a flag flip doesn't need a restart to tighten back. */
+ *  Voice (webapp-voice-lane, plans/voice-db-mode/07-csp-and-org-switch.md): the ONLY sanctioned
+ *  widening of `connect-src` — the keyed provider's origin, only while the lane is armed. CSP stays
+ *  GLOBAL and this function stays NULLARY (DESIGN.md CSP row rejected per-org widening outright: the
+ *  origin is identical for every org, only the *key* differs, and the key never touches CSP — and
+ *  the response-header path runs with no session/org in scope anyway). That forces the two modes to
+ *  arm on different signals: FILE mode is unchanged from before this concern — flag AND the env key
+ *  actually being configured (byte-identical output; `tests/ws-auth.test.ts`'s pinned substrings
+ *  depend on this exact condition). DB mode cannot see any one org's key here, so it arms on the
+ *  flag ALONE — an org with no key gets a slightly looser `connect-src` than it strictly needs and
+ *  no voice button, a legibility cost accepted in exchange for not shipping the silent-dead-call
+ *  class found live 2026-07-13 (a mint succeeds, then the browser's own SDP POST dies silently
+ *  against a tight 'self'). Every other daemon keeps the tight exfil-blocking default. Read per-call
+ *  so a flag flip doesn't need a restart to tighten back. */
 export function securityHeaders(): Record<string, string> {
-	const voiceOrigins = envBool("OMP_SQUAD_VOICE_ENABLED", false) ? voiceConnectSrcOrigins() : [];
+	const flagOn = envBool("OMP_SQUAD_VOICE_ENABLED", false);
+	const voiceOrigins = flagOn ? (voiceDbBootMode() === "db" ? voiceProviderOrigins() : voiceConnectSrcOrigins()) : [];
 	const connectSrc = ["'self'", ...voiceOrigins].join(" ");
 	return {
 		"Content-Security-Policy":
@@ -412,13 +439,15 @@ function isLoopbackAddr(ip: string): boolean {
 const VOICE_MINT_RATE_DEFAULT_PER_MIN = 6;
 let voiceMintRateLimitWarned = false;
 
-/** OMP_SQUAD_VOICE_MINT_RATE_PER_MIN is the ONLY spend brake on voice mint (audio never transits
- *  the daemon, so the mint count is the daemon's only signal). `envInt` faithfully returns a
- *  configured `0` or negative value rather than silently substituting the default — correct for
- *  every OTHER env reader, but here a non-positive value must never be read as "unlimited": that's
- *  the same absence-as-success shape as an empty array meaning "nothing to report" (the audit
- *  gauntlet's naming). Clamp to the default and warn once (not on every request) so a misconfigured
- *  `0` can't silently remove the only cap on cost abuse. */
+/** OMP_SQUAD_VOICE_MINT_RATE_PER_MIN — a cheap PRE-FILTER, not the org bound (rewritten,
+ *  plans/voice-db-mode/04-spend-controls.md): it keys `actor.id`, i.e. per USER, is per-process, and
+ *  resets on restart — it never bounded an org and must not be described as if it did. The durable
+ *  per-org bound is `resolveVoiceMaxConcurrentPerOrg` below, derived from the mint-audit table.
+ *  `envInt` faithfully returns a configured `0` or negative value rather than silently substituting
+ *  the default — correct for every OTHER env reader, but here a non-positive value must never be
+ *  read as "unlimited": that's the same absence-as-success shape as an empty array meaning "nothing
+ *  to report" (the audit gauntlet's naming). Clamp to the default and warn once (not on every
+ *  request) so a misconfigured `0` can't silently remove this pre-filter. */
 function resolveVoiceMintRatePerMin(): number {
 	const configured = envInt("OMP_SQUAD_VOICE_MINT_RATE_PER_MIN", VOICE_MINT_RATE_DEFAULT_PER_MIN);
 	if (configured > 0) return configured;
@@ -429,6 +458,68 @@ function resolveVoiceMintRatePerMin(): number {
 		);
 	}
 	return VOICE_MINT_RATE_DEFAULT_PER_MIN;
+}
+
+const VOICE_MAX_CONCURRENT_PER_ORG_DEFAULT = 5;
+let voiceMaxConcurrentWarned = false;
+
+/** OMP_SQUAD_VOICE_MAX_CONCURRENT_PER_ORG — the durable, per-org concurrency cap
+ *  (plans/voice-db-mode/04-spend-controls.md, DESIGN.md "Org spend bound" row): count this org's
+ *  `voice.mint` audit rows inside the provider's own max-session window and refuse beyond N. Derived
+ *  from the `audit` table (see `reserveOrgAuditSlot`, which counts and reserves the row atomically
+ *  in one transaction — closing the check-then-act race a separate count-then-insert would have),
+ *  so it's restart-safe and correct across replicas — unlike the rejected draft's "second in-memory
+ *  map keyed by org", which would have
+ *  inherited both defects of `voiceMintRate` above. Same non-positive clamp-and-warn-once discipline
+ *  as `resolveVoiceMintRatePerMin`: a misconfigured `0`/negative must not silently zero out the cap. */
+function resolveVoiceMaxConcurrentPerOrg(): number {
+	const configured = envInt("OMP_SQUAD_VOICE_MAX_CONCURRENT_PER_ORG", VOICE_MAX_CONCURRENT_PER_ORG_DEFAULT);
+	if (configured > 0) return configured;
+	if (!voiceMaxConcurrentWarned) {
+		voiceMaxConcurrentWarned = true;
+		console.warn(
+			`[server] OMP_SQUAD_VOICE_MAX_CONCURRENT_PER_ORG="${configured}" is not a positive cap — falling back to the default (${VOICE_MAX_CONCURRENT_PER_ORG_DEFAULT})`,
+		);
+	}
+	return VOICE_MAX_CONCURRENT_PER_ORG_DEFAULT;
+}
+
+const VOICE_KEY_PUT_RATE_DEFAULT_PER_MIN = 10;
+let voiceKeyPutRateLimitWarned = false;
+
+/** OMP_SQUAD_VOICE_KEY_PUT_RATE_PER_MIN (plans/voice-db-mode/05-admin-endpoints.md): the admin
+ *  `PUT /api/org/voice-key` route's own rate limit (DESIGN.md "Key verification on save" row) —
+ *  verification is a free provider call, but still a call, and an unbounded PUT would hammer it
+ *  without limit. Same non-positive clamp-and-warn-once discipline as the two voice rate resolvers
+ *  above: a misconfigured `0`/negative must not silently remove the bound. */
+function resolveVoiceKeyPutRatePerMin(): number {
+	const configured = envInt("OMP_SQUAD_VOICE_KEY_PUT_RATE_PER_MIN", VOICE_KEY_PUT_RATE_DEFAULT_PER_MIN);
+	if (configured > 0) return configured;
+	if (!voiceKeyPutRateLimitWarned) {
+		voiceKeyPutRateLimitWarned = true;
+		console.warn(
+			`[server] OMP_SQUAD_VOICE_KEY_PUT_RATE_PER_MIN="${configured}" is not a positive rate — falling back to the default (${VOICE_KEY_PUT_RATE_DEFAULT_PER_MIN}/min)`,
+		);
+	}
+	return VOICE_KEY_PUT_RATE_DEFAULT_PER_MIN;
+}
+
+/** Shared minute-bucket limiter body for `voiceMintRateAllowed`/`voiceKeyPutRateAllowed` — the two
+ *  used to duplicate this verbatim (two identical `Map`-based limiters differing only in which map
+ *  they bucket into), so a future rollover fix (e.g. a sliding window) had to be applied twice by
+ *  hand or silently drift. `bucket` is the caller's own `Map` (mutated in place, same as before);
+ *  `key` falls back to `"unknown"` on an empty/missing actor id, matching both call sites' prior
+ *  behavior exactly. */
+function minuteRateAllowed(bucket: Map<string, { minute: number; count: number }>, key: string, limit: number): boolean {
+	const minute = Math.floor(Date.now() / 60_000);
+	const k = key || "unknown";
+	const rec = bucket.get(k);
+	if (!rec || rec.minute !== minute) {
+		bucket.set(k, { minute, count: 1 });
+		return true;
+	}
+	rec.count++;
+	return rec.count <= limit;
 }
 
 export class SquadServer {
@@ -474,10 +565,17 @@ export class SquadServer {
 	private readonly trustedOrigins: Set<string>;
 	/** ponytail: in-process public intake limiter; restart resets it, campaign token + origin + byte caps are the real controls. */
 	private readonly feedbackRate = new Map<string, { minute: number; count: number }>();
-	/** Per-actor voice mint rate cap (webapp-voice-lane/05): audio never transits the daemon, so the
-	 *  mint count is the daemon's ONLY spend signal — this cap is load-bearing, not hygiene. Restart
-	 *  resets it, same ponytail as `feedbackRate` above. */
+	/** Per-actor (per-USER) voice mint rate cap (webapp-voice-lane/05), demoted to a cheap PRE-FILTER
+	 *  by plans/voice-db-mode/04-spend-controls.md: it keys `actor.id`, is per-process, and resets on
+	 *  restart, same ponytail as `feedbackRate` above — it never bounded an ORG and must not be
+	 *  described as if it did. The durable per-org bound now lives in the `audit` table
+	 *  (`reserveOrgAuditSlot`, `resolveVoiceMaxConcurrentPerOrg`). */
 	private readonly voiceMintRate = new Map<string, { minute: number; count: number }>();
+	/** Per-actor `PUT /api/org/voice-key` rate cap (plans/voice-db-mode/05-admin-endpoints.md):
+	 *  "Verification before persist uses GET /v1/models... PUT carries its own rate limit"
+	 *  (DESIGN.md "Key verification on save" row) — bounds a hammered PUT from burning provider
+	 *  auth-check calls, independent of the mint cap above. Same shape as `voiceMintRate`. */
+	private readonly voiceKeyPutRate = new Map<string, { minute: number; count: number }>();
 
 	constructor(manager: SquadManager | undefined, opts: SquadServerOptions = {}) {
 		this.singleManager = manager;
@@ -511,7 +609,16 @@ export class SquadServer {
 	private async bridgeRole(req: Request, activeOrgId: string | null | undefined): Promise<Role> {
 		if (!this.auth || !activeOrgId) return "viewer";
 		try {
-			const { role } = await this.auth.api.getActiveMemberRole({ headers: req.headers });
+			// Bind the role lookup to the SAME org id every caller uses for the resource it's about to
+			// act on (`session.session.activeOrganizationId`, read again by each route below). Without
+			// `query.organizationId`, better-auth resolves the role against whatever org is active AT
+			// CALL TIME — its own fresh lookup, not the snapshot this function was handed. A member-of-A
+			// + admin-of-B user can flip their active org to B between `getSession` (which produced
+			// `activeOrgId` = A) and this call: the unqualified call would then report "admin" (of B,
+			// the now-current active org) while the handler goes on to write org A's key, using the
+			// earlier snapshot. Passing the org explicitly makes role and resource bind to the one org,
+			// closing that cross-tenant write.
+			const { role } = await this.auth.api.getActiveMemberRole({ headers: req.headers, query: { organizationId: activeOrgId } });
 			return role === "owner" || role === "admin" ? "admin" : "operator";
 		} catch {
 			return "viewer";
@@ -556,16 +663,14 @@ export class SquadServer {
 	 *  but keyed by `actor.id` (not IP) — voice mint is authenticated, so the actor identity is the
 	 *  natural per-caller bucket, same as everywhere else RBAC-scoped state is keyed. */
 	private voiceMintRateAllowed(actor: Actor): boolean {
-		const limit = resolveVoiceMintRatePerMin();
-		const minute = Math.floor(Date.now() / 60_000);
-		const key = actor.id || "unknown";
-		const rec = this.voiceMintRate.get(key);
-		if (!rec || rec.minute !== minute) {
-			this.voiceMintRate.set(key, { minute, count: 1 });
-			return true;
-		}
-		rec.count++;
-		return rec.count <= limit;
+		return minuteRateAllowed(this.voiceMintRate, actor.id, resolveVoiceMintRatePerMin());
+	}
+
+	/** Per-actor `PUT /api/org/voice-key` rate cap, mirroring `voiceMintRateAllowed`'s shape exactly
+	 *  but keyed by the caller's own actor id rather than the mint route's resolved `Actor` (this
+	 *  route runs before the fleet-manager `actor` is resolved — see the route's own comment). */
+	private voiceKeyPutRateAllowed(actorId: string): boolean {
+		return minuteRateAllowed(this.voiceKeyPutRate, actorId, resolveVoiceKeyPutRatePerMin());
 	}
 
 	/** True when this org id names the operator's root factory (DB mode): the on-box loopback admin's
@@ -1238,6 +1343,87 @@ export class SquadServer {
 			const policy = body.policy === "auto" ? "auto" : "approval";
 			return Response.json({ ok: await setWorkosOrgPolicy(profile.workosOrgId, policy), policy });
 		}
+		// Org voice-key admin surface (plans/voice-db-mode/05-admin-endpoints.md): set / verify /
+		// disable / remove the org's own BYO voice provider key. Org id comes from the SESSION only,
+		// never a request parameter (the PR #152 lesson: one org's admin registering another org's
+		// worktree via a body-supplied id) — every handler below reads
+		// `session.session.activeOrganizationId` and nothing else names the org. All four routes are
+		// admin-tier, pinned in `authz.ts` (stricter than the rest of `/api/org`, whose profile GET is
+		// viewer-readable) AND re-checked here inline, mirroring the `renameOrg` idiom every other
+		// admin mutation under `/api/org` above already follows — belt and suspenders, not redundant
+		// with the authz.ts gate: a future authz.ts regression still fails closed at the handler.
+		if (url.pathname === "/api/org/voice" && req.method === "GET") {
+			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
+			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
+			const orgId = session.session.activeOrganizationId;
+			if (!orgId) return new Response("no active org", { status: 400 });
+			// `provider` query param, defaulting to "openai" — mirrors PUT/POST's body field so the
+			// four voice-key admin routes can't drift apart the moment a second provider is
+			// registered (today the registry has exactly one, so this is a no-op default). Session-
+			// org-scoped like every other field here; never trusts anything beyond `isKnownVoiceProvider`.
+			const getProviderId = url.searchParams.get("provider") || "openai";
+			if (!isKnownVoiceProvider(getProviderId)) return new Response("unknown voice provider", { status: 400 });
+			// Status only, never the key itself (DESIGN.md admin-surface row) — `getOrgSecret`'s
+			// `plaintext` field is read here but never placed on the response.
+			const secret = await getOrgSecret({ db: this.db.db, type: this.db.type }, orgId, getProviderId);
+			if (!secret) return Response.json({ configured: false });
+			return Response.json({ configured: true, last4: secret.last4, enabled: secret.enabled, updatedAt: secret.updatedAt, updatedBy: secret.updatedBy });
+		}
+		if (url.pathname === "/api/org/voice-key" && req.method === "PUT") {
+			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
+			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
+			const orgId = session.session.activeOrganizationId;
+			if (!orgId) return new Response("no active org", { status: 400 });
+			// `db:<userId>`, never role-derived — same actor-tagging convention as the mint audit write
+			// below (voiceScope's `actor.id`), computed locally: the fleet-manager `actor`/`manager`
+			// resolution further down in this handler hasn't run yet at this point in the function.
+			const actorId = `db:${session.user.id}`;
+			if (!this.voiceKeyPutRateAllowed(actorId)) return new Response("rate limited", { status: 429 });
+			const decoded = decodeBody(OrgVoiceKeyBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded) || !decoded.success.apiKey) return new Response("apiKey is required", { status: 400 });
+			const { apiKey, provider: providerRaw } = decoded.success;
+			const providerId = typeof providerRaw === "string" && providerRaw ? providerRaw : "openai";
+			if (!isKnownVoiceProvider(providerId)) return new Response("unknown voice provider", { status: 400 });
+			// Verify BEFORE persist (DESIGN.md "Key verification on save"): a free GET against the
+			// provider's own auth-check endpoint, NEVER the mint endpoint (that issues a real, billable
+			// credential). A rejected key writes NOTHING — no row, no last4, no partial state.
+			if (!(await verifyVoiceProviderKey(providerId, apiKey))) return new Response("key rejected by provider", { status: 400 });
+			const summary = await putOrgSecret({ db: this.db.db, type: this.db.type }, orgId, providerId, apiKey, actorId);
+			// `undefined` only when no master key is configured server-side (secrets.ts: a write that
+			// can't be encrypted persists nothing) — an honest 501, not a silent no-op 200.
+			if (!summary) return new Response("voice key storage unavailable", { status: 501 });
+			return Response.json({ configured: true, last4: summary.last4, enabled: summary.enabled, updatedAt: summary.updatedAt, updatedBy: summary.updatedBy });
+		}
+		if (url.pathname === "/api/org/voice-key" && req.method === "DELETE") {
+			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
+			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
+			const orgId = session.session.activeOrganizationId;
+			if (!orgId) return new Response("no active org", { status: 400 });
+			// `provider` query param, same default + validation as GET above — the row PUT stored under
+			// a non-default provider must be reachable to delete, not stranded.
+			const deleteProviderId = url.searchParams.get("provider") || "openai";
+			if (!isKnownVoiceProvider(deleteProviderId)) return new Response("unknown voice provider", { status: 400 });
+			await deleteOrgSecret({ db: this.db.db, type: this.db.type }, orgId, deleteProviderId);
+			return Response.json({ configured: false });
+		}
+		if (url.pathname === "/api/org/voice/enabled" && req.method === "POST") {
+			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
+			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
+			const orgId = session.session.activeOrganizationId;
+			if (!orgId) return new Response("no active org", { status: 400 });
+			const actorId = `db:${session.user.id}`;
+			const decoded = decodeBody(OrgVoiceEnabledBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response("enabled boolean required", { status: 400 });
+			const { enabled, provider: providerRaw } = decoded.success;
+			const providerId = typeof providerRaw === "string" && providerRaw ? providerRaw : "openai";
+			if (!isKnownVoiceProvider(providerId)) return new Response("unknown voice provider", { status: 400 });
+			// Synchronous kill switch (DESIGN.md "Kill switch" row): flips a bit without deleting the
+			// stored key — instant, reversible, no re-paste. A no-op (not an error) when the org has no
+			// row for this provider yet, matching `setOrgSecretEnabled`'s own doc comment.
+			await setOrgSecretEnabled({ db: this.db.db, type: this.db.type }, orgId, providerId, enabled, actorId);
+			const secret = await getOrgSecret({ db: this.db.db, type: this.db.type }, orgId, providerId);
+			return Response.json(secret ? { configured: true, last4: secret.last4, enabled: secret.enabled, updatedAt: secret.updatedAt, updatedBy: secret.updatedBy } : { configured: false });
+		}
 		if (url.pathname === "/api/auth/check") return Response.json({ ok: true });
 		if (url.pathname === "/api/push/key") return Response.json({ publicKey: this.opts.push?.publicKey ?? "" });
 		if (url.pathname === "/api/push/subscribe" && req.method === "POST") {
@@ -1297,33 +1483,57 @@ export class SquadServer {
 		const manager = await this.managerFor(actor);
 		// Voice token mint + capability probe (webapp-voice-lane/05, DESIGN.md "Token mint" row).
 		// Deliberately placed BEFORE the `!manager` gate below: minting is independent of any specific
-		// fleet manager, and the DB-mode refusal must fire even for a DB-mode session with no active
+		// fleet manager, and a DB-mode refusal must fire even for a DB-mode session with no active
 		// org (which would otherwise hit `noFleet` first and never see the real reason). Both routes
 		// are gated by `restActionTier`'s existing default (GET=viewer/POST=operator for `/api/voice/*`,
 		// pinned by a regression test) — no new authz branch.
+		//
+		// `voiceScope` is the ONE org-aware resolver's input (plans/voice-db-mode/
+		// 03-org-aware-resolver.md) — both routes below build their key-presence answer from it, so
+		// they can never drift onto two different notions of "does this caller have a voice key".
+		// File mode (`!this.dbMode`): `mode: "file"` reads the env key, byte-for-byte unchanged. DB
+		// mode: `orgId` is this session's active org, already resolved above (including the
+		// ROOT_FACTORY_ORG bootstrap-admin case — no bypass, it's just another org id to the
+		// resolver), and `ctx` is the open DB handle; a DB-mode boot with no handle wired resolves the
+		// same as "no usable secret", never the file lane's env read.
+		const voiceScope: VoiceKeyScope = this.dbMode
+			? { mode: "db", ctx: this.db ? { db: this.db.db, type: this.db.type } : undefined, orgId }
+			: { mode: "file" };
 		if (url.pathname === "/api/voice/config" && req.method === "GET") {
 			if (!envBool("OMP_SQUAD_VOICE_ENABLED", false)) return new Response("not found", { status: 404 });
-			// MEDIUM-4: POST /api/voice/token 403s in DB mode (no per-org attribution/budget in v1)
-			// and 501s when no provider key is configured — a flag-on daemon in either shape would
-			// otherwise advertise {enabled:true} and show a voice button that dies at the very first
-			// mint attempt (the "old mic scar" this capability probe exists to prevent). Fold both
-			// into the SAME honest signal the flag represents, for every role tier, before any
-			// provider-posture detail is even considered.
-			if (this.dbMode || !hasAnyVoiceKey()) return Response.json({ enabled: false });
-			// Viewer tier gets the bare capability probe only — provider posture (which keys are
-			// configured) is never leaked below operator (DESIGN.md red-team: "leaks provider posture").
-			if (role === "viewer") return Response.json({ enabled: true });
-			return Response.json({ enabled: true, providers: voiceProviderPublicInfo() });
+			// MEDIUM-4, rewritten (concern 03): the old premise — no per-org attribution/budget in v1,
+			// so DB mode is refused mode-wide — is gone. Mint now runs against the SESSION ORG's own
+			// key under a durable per-org cap (concern 04), so the honest signal is per-org, not
+			// per-mode: `enabled` reflects whether `voiceScope` actually resolves a key, in EITHER
+			// mode, via the same resolver POST /api/voice/token mints through below — a flag-on daemon
+			// with no resolvable key would otherwise advertise a voice button that dies at the very
+			// first mint attempt (the "old mic scar" this capability probe exists to prevent).
+			if (!(await orgHasKey(voiceScope))) return Response.json({ enabled: false });
+			// POST /api/voice/token (the mint route, below) is operator-tier via `restActionTier`'s
+			// GET=viewer/POST=operator default — a viewer can never mint. Advertising `enabled: true` to
+			// a viewer anyway used to draw a "Start voice call" button that always 403s on click: config-
+			// honesty and mint-capability disagreeing by RBAC tier, the same shape `orgHasKey` above
+			// exists to prevent for key state. Gate the boolean itself on the SAME floor the mint route
+			// enforces (never a viewer, never a hand-picked tier that could drift from it) so a viewer
+			// sees `enabled: false` — no button — rather than one that can never succeed. Provider
+			// posture (which keys are configured) stays gated to operator+ too (DESIGN.md red-team:
+			// "leaks provider posture"), now simply implied by the same check.
+			if (!roleAtLeast(role, "operator")) return Response.json({ enabled: false });
+			return Response.json({ enabled: true, providers: await voiceProviderPublicInfo(voiceScope) });
 		}
 		if (url.pathname === "/api/voice/token" && req.method === "POST") {
 			if (!envBool("OMP_SQUAD_VOICE_ENABLED", false)) return new Response("not found", { status: 404 });
-			// A single shared provider key with no per-org attribution or budget is the uncapped-shared-
-			// dollar shape (DESIGN.md "Token mint" row) — refuse outright in DB/org mode rather than
-			// silently pooling spend across tenants. `dbMode` is `!!this.auth`, true regardless of
-			// whether this particular session resolved an org/manager.
-			if (this.dbMode) return new Response("voice token mint is unavailable in multi-tenant (DB) mode in v1 — file mode only", { status: 403 });
-			// Per-actor mint rate cap: audio never transits the daemon, so the mint count is the ONLY
-			// spend signal the daemon has — this cap is load-bearing, not hygiene (DESIGN.md).
+			// MEDIUM-4, rewritten (concern 03): DB mode no longer refuses outright — the uncapped-
+			// shared-dollar shape this used to guard against (DESIGN.md "Token mint" row) is gone once
+			// mint resolves the SESSION ORG's own key (`voiceScope` below) with no fallback to the
+			// operator's env key, ever, and no root-factory bypass. A per-org refusal falls out of the
+			// ordinary "no key configured" 501 further down — the SAME path file mode has always used
+			// — rather than a mode-wide 403; no active org, no configured row, and a disabled row all
+			// read identically as "no key", by design (DESIGN.md Security model).
+			// Per-actor mint rate cap: a cheap PRE-FILTER, not the org bound (rewritten, concern 04) — it
+			// keys `actor.id` (per USER, per-process, resets on restart) and never bounded an org's
+			// spend. The durable per-org bound is the concurrency check below, derived from the audit
+			// table this same route writes to on a successful mint.
 			if (!this.voiceMintRateAllowed(actor)) return new Response("rate limited", { status: 429 });
 			// A genuinely-empty body (nothing sent) is a lenient default-to-openai case, same as every
 			// other `decodeBodyOrEmpty` endpoint. But `req.json().catch(() => null)` used to collapse a
@@ -1348,13 +1558,82 @@ export class SquadServer {
 			}
 			const body = Result.isSuccess(decoded) ? decoded.success : ({} as { provider?: unknown });
 			const providerId = typeof body.provider === "string" && body.provider ? body.provider : "openai";
-			// Mint via the SAME trimmed key `hasAnyVoiceKey`/`voiceProviderApiKey`/`GET /api/voice/config`
-			// already read — a newline/space-padded env value used to make the config probe advertise
-			// `enabled:true` while every mint 502s against the untrimmed, invalid key (config-honesty and
-			// mint disagreeing on the same env var).
-			const apiKey = isKnownVoiceProvider(providerId) ? voiceProviderApiKey(providerId) : undefined;
+			// Mint via the SAME resolver `orgHasKey`/`GET /api/voice/config` already consulted — a
+			// newline/space-padded env value (file mode) used to make the config probe advertise
+			// `enabled:true` while every mint 502s against the untrimmed, invalid key (config-honesty
+			// and mint disagreeing on the same key). Routing both through `voiceKeyFor` keeps that
+			// impossible by construction, in either mode.
+			const apiKey = isKnownVoiceProvider(providerId) ? await voiceKeyFor(voiceScope, providerId) : undefined;
+			// Durable per-org concurrency cap (plans/voice-db-mode/04-spend-controls.md, DESIGN.md "Org
+			// spend bound" row): count this ORG's own `voice.mint` audit rows inside the provider's
+			// max-session window and refuse beyond N — restart-safe and correct across replicas because
+			// it's derived from the `audit` table, not an in-memory map (the rejected draft's "second
+			// in-memory map keyed by org"). File mode has no org concept and is exempt — its only
+			// daemon-side bound is the per-actor pre-filter above.
+			//
+			// The slot is RESERVED (row written) here, BEFORE `mintVoiceToken`'s network round trip —
+			// not counted-then-written-after like the earlier draft. That earlier shape let every
+			// request in flight during the mint's latency window see the same stale pre-mint count,
+			// so N+K parallel mints could all pass; reserving first closes that race (proven with a
+			// parallel-mint regression test, tests/voice-spend.test.ts). `reserveOrgAuditSlot` counts
+			// and inserts inside one transaction (Postgres additionally advisory-locks per org+action —
+			// see its doc comment for why SQLite doesn't need to).
+			const dbAuditable = voiceScope.mode === "db" && voiceScope.ctx && voiceScope.orgId ? { ctx: voiceScope.ctx, orgId: voiceScope.orgId } : undefined;
+			let reservedAuditId: number | undefined;
+			if (apiKey && dbAuditable && isKnownVoiceProvider(providerId)) {
+				// The window a mint counts as "possibly still live" is the provider's own session cap
+				// PLUS the token's establishment TTL (`voiceTokenTtlSeconds`, already clamped there) — a
+				// token isn't established the instant it's minted; the caller has up to the TTL to open
+				// the WebRTC connection, and only then does the provider's own session clock start.
+				// Counting only `maxSessionWindowMs` from mint time let a session established late
+				// (mint + up to TTL) stay live until mint + TTL + maxSessionWindowMs, while its
+				// reservation dropped out of the count at mint + maxSessionWindowMs — a gap of up to the
+				// TTL during which the cap undercounts genuinely-live sessions (plans/voice-db-mode/
+				// 04-spend-controls.md concern 02 fix).
+				const windowMs = voiceProviderMaxSessionWindowMs(providerId) + voiceTokenTtlSeconds() * 1000;
+				const cap = resolveVoiceMaxConcurrentPerOrg();
+				const reservation = await reserveOrgAuditSlot(dbAuditable.ctx, dbAuditable.orgId, { actor: actor.id, action: VOICE_MINT_AUDIT_ACTION, target: providerId, source: "voice" }, cap, Date.now() - windowMs);
+				if (!reservation.reserved) {
+					// The refusal is itself auditable — a DISTINCT action so a burst of refusals can never
+					// inflate the very count they're a consequence of.
+					await appendOrgAudit(dbAuditable.ctx, dbAuditable.orgId, { actor: actor.id, action: "voice.mint.refused", target: providerId, detail: { cap, windowMs } });
+					// Named honestly as a rate cap, not a "someone else is on a call" concurrency signal: it's
+					// mints-per-window (the daemon can't see a session end), so a burst of short calls can trip
+					// it with nobody else active. DESIGN.md "Cap tuning": "a rate cap is not a budget, and must
+					// not be described as one" — the flip side holds too, it must not be described as presence.
+					return new Response(`this organization has reached its voice mint limit (${cap} per ${Math.round(windowMs / 60_000)} minutes); try again later`, { status: 429 });
+				}
+				reservedAuditId = reservation.auditId;
+			}
 			const result = await mintVoiceToken(providerId, apiKey);
-			if (!result.ok) return new Response(result.message, { status: result.status });
+			if (!result.ok) {
+				// Compensate: the mint never happened, so the reserved slot must not count against the
+				// org's cap — a provider 502 must not permanently consume a concurrency slot.
+				if (dbAuditable && reservedAuditId !== undefined) await deleteOrgAuditRow(dbAuditable.ctx, dbAuditable.orgId, reservedAuditId);
+				return new Response(result.message, { status: result.status });
+			}
+			// Mint audit, in BOTH modes (mints are unaudited today, everywhere) — actor `db:<userId>` in
+			// DB mode (never role-derived: `actor` was already resolved that way above, not re-derived
+			// here), provider, and the provider's OWN session id (previously discarded). Awaited (not
+			// `void`, unlike most other `recordAudit` call sites in this file) so the response the
+			// browser receives is only sent once the audit trail actually reflects the mint that
+			// produced it — `recordAudit` itself still swallows a disk failure rather than throwing.
+			if (manager) await manager.recordAudit(actor, VOICE_MINT_AUDIT_ACTION, providerId, "ok", result.providerSessionId ? `provider session ${result.providerSessionId}` : undefined, "voice");
+			if (dbAuditable) {
+				const detail = result.providerSessionId ? { providerSessionId: result.providerSessionId } : undefined;
+				if (reservedAuditId !== undefined) {
+					// The common path: the reserved row already exists (id/actor/action/target/at) —
+					// finalize just overwrites its detail with the provider session id now that the mint
+					// actually happened.
+					await finalizeOrgAuditDetail(dbAuditable.ctx, dbAuditable.orgId, reservedAuditId, { detail, source: "voice" });
+				} else {
+					// No reservation was made (apiKey/provider gating above didn't match — can only
+					// happen if mintVoiceToken succeeded despite that, which its own no-apiKey/unknown-
+					// provider guards make unreachable in practice). Fall back to the old direct write
+					// rather than silently dropping the audit row.
+					await appendOrgAudit(dbAuditable.ctx, dbAuditable.orgId, { actor: actor.id, action: VOICE_MINT_AUDIT_ACTION, target: providerId, detail, source: "voice" });
+				}
+			}
 			return Response.json(result.token);
 		}
 		// Seed identity for features created this request: a real signed-in user's `db:<userId>` when

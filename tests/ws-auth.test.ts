@@ -50,3 +50,39 @@ test("CSP connect-src widens to the voice provider origin only when flag AND key
 		else process.env.OMP_SQUAD_VOICE_OPENAI_API_KEY = stash.key;
 	}
 });
+
+// plans/voice-db-mode/07-csp-and-org-switch.md: DB mode has no per-org key to check at this
+// (nullary, response-header-path) call site, so it widens on the flag ALONE — unlike file mode
+// above, which still needs the env key too. Matrix over both modes x both flag states.
+test("CSP connect-src: DB mode widens on the flag alone; file mode still needs the env key too", () => {
+	const stash = {
+		flag: process.env.OMP_SQUAD_VOICE_ENABLED,
+		key: process.env.OMP_SQUAD_VOICE_OPENAI_API_KEY,
+		dbUrl: process.env.DATABASE_URL,
+	};
+	try {
+		delete process.env.OMP_SQUAD_VOICE_OPENAI_API_KEY; // DB mode never reads this — file-mode-only lane
+
+		// DB mode + flag on ⇒ widened, with NO env key configured at all.
+		process.env.DATABASE_URL = "sqlite::memory:";
+		process.env.OMP_SQUAD_VOICE_ENABLED = "1";
+		expect(securityHeaders()["Content-Security-Policy"]).toContain("connect-src 'self' https://api.openai.com;");
+
+		// DB mode + flag off ⇒ tight, same as file mode.
+		process.env.OMP_SQUAD_VOICE_ENABLED = "0";
+		expect(securityHeaders()["Content-Security-Policy"]).toContain("connect-src 'self';");
+
+		// File mode (no DATABASE_URL) + flag on + no env key ⇒ still tight — the file-mode condition
+		// above is untouched by this concern.
+		delete process.env.DATABASE_URL;
+		process.env.OMP_SQUAD_VOICE_ENABLED = "1";
+		expect(securityHeaders()["Content-Security-Policy"]).toContain("connect-src 'self';");
+	} finally {
+		if (stash.flag === undefined) delete process.env.OMP_SQUAD_VOICE_ENABLED;
+		else process.env.OMP_SQUAD_VOICE_ENABLED = stash.flag;
+		if (stash.key === undefined) delete process.env.OMP_SQUAD_VOICE_OPENAI_API_KEY;
+		else process.env.OMP_SQUAD_VOICE_OPENAI_API_KEY = stash.key;
+		if (stash.dbUrl === undefined) delete process.env.DATABASE_URL;
+		else process.env.DATABASE_URL = stash.dbUrl;
+	}
+});

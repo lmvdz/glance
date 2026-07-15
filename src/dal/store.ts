@@ -14,12 +14,15 @@
  * for the expected per-org roster size; upgrade to diff-upsert only if it bites.
  */
 
+import { randomInt } from "node:crypto";
 import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { sql } from "kysely";
 import type { PersistedAgent, PersistedFeature, RunReceipt, TranscriptEntry } from "../types.ts";
 import { normalizeCapabilitySnapshot, type CapabilitySnapshot } from "../capabilities/index.ts";
 import { emptyFeedbackSnapshot, type FeedbackSnapshot } from "../feedback.ts";
+import { decryptSecret, encryptSecret, last4 as secretLast4 } from "../secrets.ts";
 import { type OrgContext, withOrg } from "./context.ts";
 import { getStorageBackend } from "./storage.ts";
 
@@ -155,10 +158,25 @@ export class FileStore implements Store {
 	async appendUsage(): Promise<void> {}
 }
 
+// A per-process random salt, drawn once at module load, folded into every id this process mints.
+// Without it, two freshly-booted replicas both start `auditSeq` at 0 — if both write an audit row
+// in the SAME millisecond (the exact scenario a fleet of replicas booting together produces), the
+// pre-fix `Date.now() * 1000 + (auditSeq++ % 1000)` shape computed the IDENTICAL id on both, and
+// `audit.id` is a global PK, so the second insert 500s. The salt means that scenario now only
+// collides when two replicas independently draw the same salt (1-in-1000, not guaranteed).
+const auditSeqSalt = randomInt(0, 1000);
 let auditSeq = 0;
-/** Monotonic, collision-free audit id (epoch-ms × 1000 + per-process counter). */
+/** Collision-resistant audit id: epoch-ms × 1000 + ((per-boot random salt + a per-process
+ *  monotonic counter) mod 1000). Ordering never relies on `id` — `reserveOrgAuditSlot`'s cap check
+ *  counts rows by the `at` column, not `id` — so `id` only needs to be unique, not strictly time-
+ *  ordered; trading a sliver of the old (deterministic, collision-prone) ordering guarantee for
+ *  actual cross-process collision resistance is safe. Residual risk: >1000 calls from ANY mix of
+ *  processes landing on the same millisecond can still collide (a 1-in-1000-ish birthday bound,
+ *  not zero) — acceptable for this table's write rate (one row per voice mint attempt, rate-capped
+ *  well below 1000/ms per org); a DB-generated id (serial/identity column) would close the residual
+ *  gap entirely but is a schema migration, out of scope for this fix. */
 function nextAuditId(): number {
-	return Date.now() * 1000 + (auditSeq++ % 1000);
+	return Date.now() * 1000 + ((auditSeqSalt + auditSeq++) % 1000);
 }
 
 /**
@@ -353,27 +371,7 @@ export class DbStore implements Store {
 	}
 
 	async appendAudit(entry: AuditEntry): Promise<void> {
-		await withOrg(this.ctx, this.orgId, async (trx) => {
-			// No dedicated `source` column (no migration for this concern) — fold it into the JSON
-			// `detail` blob instead of dropping it, so DB-mode never silently loses the provenance tag
-			// the file-mode audit trail carries natively.
-			const detail =
-				entry.source === undefined
-					? entry.detail
-					: { ...(isPlainObject(entry.detail) ? entry.detail : entry.detail !== undefined ? { detail: entry.detail } : {}), source: entry.source };
-			await trx
-				.insertInto("audit")
-				.values({
-					id: nextAuditId(),
-					org_id: this.orgId,
-					actor: entry.actor,
-					action: entry.action,
-					target: entry.target ?? null,
-					detail: detail === undefined ? null : JSON.stringify(detail),
-					at: Date.now(),
-				})
-				.execute();
-		});
+		await appendOrgAudit(this.ctx, this.orgId, entry);
 	}
 
 	async appendUsage(receipt: RunReceipt): Promise<void> {
@@ -414,4 +412,312 @@ export class DbStore implements Store {
 			await writeFileDurable(this.transcriptsFile, JSON.stringify(transcripts));
 		} catch {}
 	}
+}
+
+/**
+ * Free-standing `audit` table primitives — NOT part of the `Store` interface, so callers that don't
+ * hold a `Store` instance can still write/read org-scoped audit rows. The voice mint route
+ * (server.ts, plans/voice-db-mode/04-spend-controls.md) is the reason: it runs BEFORE the
+ * `!manager` gate (minting is independent of any specific fleet manager, and a DB-mode refusal must
+ * fire even with no active org), so it may have `ctx`/`orgId` from `voiceScope` with no per-org
+ * `SquadManager`/`DbStore` resolved at all. `DbStore.appendAudit` above is now a thin wrapper over
+ * `appendOrgAudit` so there is exactly one write path, not two that could drift.
+ */
+
+/** Fold `entry.source` into `entry.detail` (no dedicated `source` column — no migration for this
+ *  concern) the same way in every write path, so DB-mode never silently loses the provenance tag
+ *  the file-mode audit trail carries natively. Shared by `appendOrgAudit`, `reserveOrgAuditSlot`,
+ *  and `finalizeOrgAuditDetail` so the three writers of an `audit` row can never drift on shape. */
+function normalizeAuditDetail(entry: Pick<AuditEntry, "detail" | "source">): unknown {
+	return entry.source === undefined
+		? entry.detail
+		: { ...(isPlainObject(entry.detail) ? entry.detail : entry.detail !== undefined ? { detail: entry.detail } : {}), source: entry.source };
+}
+
+/** Write one row directly into the org-scoped `audit` table. `entry.actor` is caller-supplied — the
+ *  voice mint route passes `actor.id`, already `db:<userId>` in DB mode (never role-derived; see
+ *  server.ts's actor construction), never re-derived here. No active org ⇒ no-op, never a throw —
+ *  same guard discipline as the `org_secret` accessors below. */
+export async function appendOrgAudit(ctx: OrgContext, orgId: string, entry: AuditEntry): Promise<void> {
+	if (!orgId) return;
+	await withOrg(ctx, orgId, async (trx) => {
+		const detail = normalizeAuditDetail(entry);
+		await trx
+			.insertInto("audit")
+			.values({
+				id: nextAuditId(),
+				org_id: orgId,
+				actor: entry.actor,
+				action: entry.action,
+				target: entry.target ?? null,
+				detail: detail === undefined ? null : JSON.stringify(detail),
+				at: Date.now(),
+			})
+			.execute();
+	});
+}
+
+/**
+ * Atomically reserve one `audit` row for `entry.action`, refusing the write (no row, `reserved:
+ * false`) once `cap` matching rows already exist inside `[sinceMs, now]`. This is the fix for the
+ * check-then-act race the old count-before-mint/insert-after-mint split had: the row that reserves
+ * a slot is now written BEFORE the caller's network round trip (the voice provider mint), not
+ * after it returns, so a burst of concurrent requests can no longer all observe the same
+ * pre-insert count and all pass. Count + insert happen inside ONE `withOrg` transaction.
+ *
+ * SQLite (bun:sqlite, self-host) serializes writers on its single connection, so the transaction
+ * alone closes the race there. Postgres's default READ COMMITTED does NOT — two concurrent
+ * transactions can each take their own snapshot before either commits and both see the pre-insert
+ * count — so on Postgres this also takes a per-(org, action) transaction-scoped advisory lock
+ * before counting. The lock serializes reservations for the same org+action only (unrelated orgs/
+ * actions never contend) and releases automatically at commit/rollback, so a request that never
+ * finalizes (crash mid-mint) can't wedge a future one.
+ *
+ * On success the caller MUST eventually call `finalizeOrgAuditDetail` (mint succeeded — the row
+ * stays, now carrying the real detail) or `deleteOrgAuditRow` (mint failed — compensate, the
+ * refused slot is freed) with the returned `auditId`. No active org ⇒ refused, never a throw.
+ *
+ * The inserted row's `detail` always carries `pending: true`, regardless of `entry.detail` — a
+ * crash/SIGKILL between reservation and `finalizeOrgAuditDetail`/`deleteOrgAuditRow` (the window
+ * `!result.ok` compensation can't cover) then leaves a row that is self-identifying as
+ * unfinalized rather than indistinguishable from a real completed mint in the admin's audit
+ * trail. `finalizeOrgAuditDetail` overwrites `detail` wholesale with the caller's real detail, so
+ * the flag is cleared the instant the mint actually completes. */
+export async function reserveOrgAuditSlot(
+	ctx: OrgContext,
+	orgId: string,
+	entry: AuditEntry,
+	cap: number,
+	sinceMs: number,
+): Promise<{ reserved: true; auditId: number } | { reserved: false }> {
+	if (!orgId) return { reserved: false };
+	return withOrg(ctx, orgId, async (trx) => {
+		if (ctx.type === "postgres") {
+			// Scoped to this org+action so unrelated reservations (a different org, or a different
+			// audit action entirely) never contend for the same lock.
+			await sql`select pg_advisory_xact_lock(hashtext(${`voice-audit-reserve:${orgId}:${entry.action}`}))`.execute(trx);
+		}
+		const row = await trx
+			.selectFrom("audit")
+			.select(({ fn }) => fn.countAll().as("n"))
+			.where("org_id", "=", orgId)
+			.where("action", "=", entry.action)
+			.where("at", ">=", sinceMs)
+			.executeTakeFirst();
+		const count = row ? Number(row.n) : 0;
+		if (count >= cap) return { reserved: false } as const;
+		const id = nextAuditId();
+		const baseDetail = normalizeAuditDetail(entry);
+		// Always a plain object carrying `pending: true` — never `undefined`/non-object — so a row
+		// that never reaches finalize/delete is unambiguously flagged in the stored JSON, not just
+		// inferred from a missing providerSessionId (which is also legitimately absent on success).
+		const detail: Record<string, unknown> = { ...(isPlainObject(baseDetail) ? baseDetail : baseDetail !== undefined ? { detail: baseDetail } : {}), pending: true };
+		await trx
+			.insertInto("audit")
+			.values({
+				id,
+				org_id: orgId,
+				actor: entry.actor,
+				action: entry.action,
+				target: entry.target ?? null,
+				detail: JSON.stringify(detail),
+				at: Date.now(),
+			})
+			.execute();
+		return { reserved: true, auditId: id } as const;
+	});
+}
+
+/** Overwrite a reserved row's `detail`/`source` once the caller's operation (the provider mint)
+ *  actually completed — the row itself (id, actor, action, target, at) was already committed by
+ *  `reserveOrgAuditSlot`, so this only ever updates the JSON blob. No active org ⇒ no-op. */
+export async function finalizeOrgAuditDetail(ctx: OrgContext, orgId: string, auditId: number, entry: Pick<AuditEntry, "detail" | "source">): Promise<void> {
+	if (!orgId) return;
+	const detail = normalizeAuditDetail(entry);
+	await withOrg(ctx, orgId, (trx) =>
+		trx
+			.updateTable("audit")
+			.set({ detail: detail === undefined ? null : JSON.stringify(detail) })
+			.where("org_id", "=", orgId)
+			.where("id", "=", auditId)
+			.execute(),
+	);
+}
+
+/** Compensate a reservation whose downstream operation (the provider mint) failed — deletes the
+ *  reserved row so it stops counting toward the cap it was never actually spent against, and never
+ *  shows up as a phantom success in the audit trail. No active org ⇒ no-op. */
+export async function deleteOrgAuditRow(ctx: OrgContext, orgId: string, auditId: number): Promise<void> {
+	if (!orgId) return;
+	await withOrg(ctx, orgId, (trx) => trx.deleteFrom("audit").where("org_id", "=", orgId).where("id", "=", auditId).execute());
+}
+
+/**
+ * `org_secret` accessors — NOT part of the `Store` interface above: FileStore has no DB and no
+ * org concept (DESIGN.md: "file mode never reads the table"), so these are free functions taking
+ * an `OrgContext` directly, called only from DB-mode code paths (concern 03's resolver, concern
+ * 05's admin endpoints).
+ *
+ * Every one of the four guards `if (!orgId)` BEFORE calling `withOrg` — `withOrg` itself THROWS
+ * on an empty org id (see dal/context.ts), and a DB session with no active org is a real,
+ * reachable state (an unauthenticated caller, a session mid-org-switch). Throwing a decrypt/store
+ * call into a request because of that is exactly the "never a 500 at call time" posture this
+ * concern rules out — the guard turns it into a clean "no secret" instead.
+ */
+
+/** One org's decrypted provider secret plus its metadata. `plaintext` is the raw credential —
+ *  never logged, never returned to any HTTP response (the admin GET route returns `last4` only).
+ *  Only `getOrgSecret` returns this full shape; `putOrgSecret` returns `OrgSecretSummary` (below)
+ *  so the plaintext-free projection is enforced by the type checker, not by caller discipline. */
+export interface OrgSecretRecord {
+	provider: string;
+	plaintext: string;
+	last4: string;
+	enabled: boolean;
+	createdBy: string;
+	updatedBy: string;
+	createdAt: number;
+	updatedAt: number;
+}
+
+/** `OrgSecretRecord` minus `plaintext` — the admin PUT response shape. DESIGN.md pins the admin
+ *  GET at `{configured, last4, updatedAt, updatedBy, enabled}`; this is the write-path analogue
+ *  that makes `return json(await putOrgSecret(...))` structurally safe instead of relying on
+ *  concern 05's admin handler remembering to strip the field by hand. */
+export type OrgSecretSummary = Omit<OrgSecretRecord, "plaintext">;
+
+function toRecord(
+	orgId: string,
+	row: {
+		provider: string;
+		ciphertext: string;
+		nonce: string;
+		last4: string;
+		enabled: number;
+		created_by: string;
+		updated_by: string;
+		created_at: number;
+		updated_at: number;
+	},
+): OrgSecretRecord | undefined {
+	// Fail-closed: a corrupted row, a wrong/rotated master key, OR an AAD mismatch (this row's
+	// ciphertext didn't actually originate from THIS org+provider pairing — e.g. a raw-row copy
+	// across orgs) decrypts to `undefined` here, and that degrades to "no secret" for this org —
+	// never a throw into the caller's request.
+	const plaintext = decryptSecret({ ciphertext: row.ciphertext, nonce: row.nonce }, `${orgId}:${row.provider}`);
+	if (plaintext === undefined) return undefined;
+	return {
+		provider: row.provider,
+		plaintext,
+		last4: row.last4,
+		enabled: !!row.enabled,
+		createdBy: row.created_by,
+		updatedBy: row.updated_by,
+		// Postgres returns bigint (int8) columns as strings (no pg.types.setTypeParser(20, ...) is
+		// registered — see src/db/index.ts); SQLite returns a real number. Coerce explicitly so the
+		// field is a `number` on both backends, matching the type this function declares.
+		createdAt: Number(row.created_at),
+		updatedAt: Number(row.updated_at),
+	};
+}
+
+/** Read + decrypt one org's provider secret. `undefined` covers every "no usable secret" case
+ *  uniformly — no row, no active org, or a decrypt failure — callers don't get to distinguish
+ *  them (nor should they: all three mean "voice unavailable for this org"). Does NOT consult
+ *  `enabled` — the synchronous kill switch is a separate check the caller applies on the returned
+ *  record, matching DESIGN.md's "Kill switch" row (deleting a key and disabling it are distinct
+ *  levers). Consumed by the org-aware voice resolver's `voiceKeyFor` (voice-token.ts, concern 03). */
+export async function getOrgSecret(ctx: OrgContext, orgId: string, provider: string): Promise<OrgSecretRecord | undefined> {
+	if (!orgId) return undefined;
+	const row = await withOrg(ctx, orgId, (trx) =>
+		trx.selectFrom("org_secret").selectAll().where("org_id", "=", orgId).where("provider", "=", provider).executeTakeFirst(),
+	);
+	if (!row) return undefined;
+	return toRecord(orgId, row);
+}
+
+/** Encrypt and upsert one org's provider secret (admin PUT). Returns `undefined` — never throws
+ *  — when no master key is configured server-side: a write that can't be encrypted must not
+ *  persist plaintext, so it persists nothing at all. `actor` is the `db:<userId>` tag (never
+ *  role-derived, per DESIGN.md's "Mint audit discipline" row). A re-PUT ALWAYS sets `enabled: 1`,
+ *  matching the insert path — a freshly provider-verified key re-save is an explicit
+ *  re-provision, and must actually re-enable a previously-disabled row (the admin who just pasted
+ *  a working key almost certainly wants it live now; the OFF-only-going-forward lever is the
+ *  separate synchronous kill switch below). Returns `OrgSecretSummary` (no `plaintext`) — the
+ *  admin HTTP handler can echo this response body directly without re-deriving a safe projection.
+ *  Built entirely from the single `INSERT … ON CONFLICT … RETURNING` round trip below (no
+ *  follow-up `getOrgSecret` SELECT + AES decrypt — the summary never needs the plaintext, and the
+ *  RETURNING clause already carries the row's true `created_by`/`created_at`, which a
+ *  build-from-scope shortcut would get wrong on the update path).
+ *  Consumed by the admin PUT endpoint (server.ts, concern 05). */
+export async function putOrgSecret(ctx: OrgContext, orgId: string, provider: string, plaintext: string, actor: string): Promise<OrgSecretSummary | undefined> {
+	if (!orgId) return undefined;
+	const enc = encryptSecret(plaintext, `${orgId}:${provider}`);
+	if (!enc) return undefined;
+	const now = Date.now();
+	const last4Val = secretLast4(plaintext);
+	const row = await withOrg(ctx, orgId, (trx) =>
+		trx
+			.insertInto("org_secret")
+			.values({
+				org_id: orgId,
+				provider,
+				ciphertext: enc.ciphertext,
+				nonce: enc.nonce,
+				last4: last4Val,
+				enabled: 1,
+				created_by: actor,
+				updated_by: actor,
+				created_at: now,
+				updated_at: now,
+			})
+			.onConflict((oc) =>
+				oc.columns(["org_id", "provider"]).doUpdateSet({
+					ciphertext: enc.ciphertext,
+					nonce: enc.nonce,
+					last4: last4Val,
+					enabled: 1,
+					updated_by: actor,
+					updated_at: now,
+				}),
+			)
+			.returning(["provider", "last4", "enabled", "created_by", "updated_by", "created_at", "updated_at"])
+			.executeTakeFirst(),
+	);
+	if (!row) return undefined;
+	return {
+		provider: row.provider,
+		last4: row.last4,
+		enabled: !!row.enabled,
+		createdBy: row.created_by,
+		updatedBy: row.updated_by,
+		// Postgres returns bigint (int8) columns as strings; SQLite returns a real number — coerce
+		// explicitly, matching `toRecord`'s handling of the same columns.
+		createdAt: Number(row.created_at),
+		updatedAt: Number(row.updated_at),
+	};
+}
+
+/** Delete one org's provider secret (admin DELETE). `ON DELETE CASCADE` on the org FK handles the
+ *  bulk case (an org itself being deleted); this is the single-row admin-initiated removal.
+ *  Consumed by the admin DELETE endpoint (server.ts, concern 05). */
+export async function deleteOrgSecret(ctx: OrgContext, orgId: string, provider: string): Promise<void> {
+	if (!orgId) return;
+	await withOrg(ctx, orgId, (trx) => trx.deleteFrom("org_secret").where("org_id", "=", orgId).where("provider", "=", provider).execute());
+}
+
+/** Flip the synchronous kill switch (DESIGN.md "Kill switch" row) without touching the stored
+ *  key — instant, reversible, no re-paste. A no-op (not an error) when the org has no row for
+ *  this provider yet: there is nothing to enable/disable.
+ *  Consumed by the admin enable/disable endpoint (server.ts, concern 05). */
+export async function setOrgSecretEnabled(ctx: OrgContext, orgId: string, provider: string, enabled: boolean, actor: string): Promise<void> {
+	if (!orgId) return;
+	await withOrg(ctx, orgId, (trx) =>
+		trx
+			.updateTable("org_secret")
+			.set({ enabled: enabled ? 1 : 0, updated_by: actor, updated_at: Date.now() })
+			.where("org_id", "=", orgId)
+			.where("provider", "=", provider)
+			.execute(),
+	);
 }

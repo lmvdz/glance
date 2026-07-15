@@ -64,7 +64,26 @@ export interface DeadExport {
  *  way, so the ceiling tightens by one instead of quietly absorbing a new entry. */
 /** 2026-07-13 (voice lane PR): 217 — voice-token.ts's voiceModel/voiceProviderIds/voiceVoice were
  *  exported with zero external or test references (pure over-exports); unexported, ceiling tightens. */
-export const BASELINE = 217;
+/** 2026-07-14 (voice-db-mode secret-store review fixes): 216 — the org_secret substrate
+ *  (initMasterKey/hasMasterKey in secrets.ts, appMigrations in migrations.ts, and store.ts's
+ *  getOrgSecret/putOrgSecret/deleteOrgSecret/setOrgSecretEnabled) is genuinely built ahead of its
+ *  callers — concerns 03 and 05 wire it up in later batches — so each got an honest `@substrate`
+ *  tag instead of sitting uncounted; the ceiling still tightens by one net.
+ *  2026-07-14 (voice-db-mode concern 03, org-aware resolver): still 216 — `getOrgSecret` left the
+ *  `@substrate`-exempt bucket for a REAL one (voice-token.ts's `voiceKeyFor` now imports it), so its
+ *  tag was removed rather than left stale; `dead.length` is unaffected either way (it was never
+ *  counted as dead, only re-bucketed), so the ceiling doesn't move.
+ *  2026-07-14 (voice-db-mode concern 05, admin endpoints): still 216 — `putOrgSecret`/
+ *  `deleteOrgSecret`/`setOrgSecretEnabled` left the `@substrate`-exempt bucket the same way, now that
+ *  server.ts's four admin routes call all three for real; `dead.length` unaffected, only re-bucketed.
+ *  The `org_secret` substrate born in concern 02 is now fully wired end to end.
+ *  2026-07-14 (voice-db-mode concern 04 review round 2): 216→215 — `reserveOrgAuditSlot` (the
+ *  check-then-act race fix) orphaned `countRecentOrgAudit`, which had zero callers anywhere; deleted
+ *  outright rather than tagged `@substrate` since nothing plans to call it. The 216 the prior round
+ *  reported was a false green: this deletion made `src/audit.ts`'s `nextAuditId` flip dead→live on
+ *  the SAME diff via the raw scanner's comment/backtick fragility, offsetting the real orphan and
+ *  holding the total steady — the true count was 217, not 216. Tightening for real this time. */
+export const BASELINE = 215;
 
 function scriptKindFor(rel: string): ts.ScriptKind {
 	return rel.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS;

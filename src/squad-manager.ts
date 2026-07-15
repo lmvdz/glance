@@ -141,6 +141,7 @@ import { hostAlive, pruneStaleSockets, reapOrphanHosts, shutdownHost, socketPath
 import { addWorktree, deleteBranchIfMerged, isGitRepo, listWorktrees, provisionWorktreeDeps, removeWorktree, repoRoot, resolveWorktree, worktreeBase, worktreeStatus } from "./worktree.ts";
 import { toAcpMcpServers, writeMcpConfig } from "./mcp-config.ts";
 import { selectReapable, type WorktreeInfo } from "./worktree-reaper.ts";
+import { scrubbedSpawnEnv } from "./spawn-env.ts";
 import { changedFiles, filesTouchedSinceBase } from "./explore.ts";
 import { appendReceipt, confirmDeliveredFlags, EFFICIENCY_FLAG_PREFIX, readAllReceipts, readReceipts, RunAccumulator, splitCapabilityTokens } from "./receipts.ts";
 import { membraneBreakerCadence } from "./membrane-breaker-cadence.ts";
@@ -4724,7 +4725,7 @@ export class SquadManager extends EventEmitter {
 			// Single-sourced with the scorecard's honesty predicate so the two can never drift: whatever
 			// `contextReachesAgent` promised at create() is exactly what the driver does here.
 			const contextInjection = contextReachesAgent(p) ? "prompt" : "none";
-			const acp = new AcpAgentDriver({ id: p.id, cwd: p.worktree, model: p.model, command, approvalMode: p.approvalMode, appendSystemPrompt: p.appendSystemPrompt, contextInjection, mcpServers: p.mcp });
+			const acp = new AcpAgentDriver({ id: p.id, cwd: p.worktree, model: p.model, command, approvalMode: p.approvalMode, appendSystemPrompt: p.appendSystemPrompt, contextInjection, mcpServers: p.mcp, harness: harness.name });
 			acp.on("acpcapabilities", (caps: unknown) => this.log("info", `acp ${harness.name} ${p.id} advertised capabilities: ${JSON.stringify(caps)}`));
 			return acp;
 		}
@@ -4941,7 +4942,11 @@ export class SquadManager extends EventEmitter {
 	}
 
 	private async installWorker(dir: string): Promise<void> {
-		const proc = Bun.spawn(["bun", "install"], { cwd: dir, stdout: "pipe", stderr: "pipe" });
+		// dir is tenant repo content — its root package.json can run a postinstall under `bun install`
+		// (bun blocks dependency lifecycle scripts but always runs the project's own), so scrub the
+		// daemon's secrets from this spawn like every other tenant-agent site (spawn-env.ts). No harness
+		// auth injection needed: `bun install` never makes a model call.
+		const proc = Bun.spawn(["bun", "install"], { cwd: dir, env: scrubbedSpawnEnv(process.env), stdout: "pipe", stderr: "pipe" });
 		const [, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
 		if ((await proc.exited) !== 0) throw new Error(`worker install failed: ${err.trim().slice(0, 200)}`);
 	}

@@ -62,7 +62,11 @@ export class OmpArchitect implements Architect {
 		}
 		await fs.mkdir(path.join(dir, ".flue", "workflows"), { recursive: true });
 
-		const agent = new RpcAgent({ id: `architect-${Date.now().toString(36)}`, cwd: dir, approvalMode: "yolo", thinking: "medium", model: this.opts.model, bin: this.opts.bin });
+		// harness: "omp" — OmpArchitect always drives a real `omp --mode rpc` agent (see the module doc
+		// above); naming it explicitly narrows RpcAgent's spawn to Anthropic's credential by default
+		// (spawn-env.ts's DEFAULT_ANTHROPIC_HARNESSES) instead of the honest-ignorance fallback that
+		// admits every configured provider credential.
+		const agent = new RpcAgent({ id: `architect-${Date.now().toString(36)}`, cwd: dir, approvalMode: "yolo", thinking: "medium", model: this.opts.model, bin: this.opts.bin, harness: "omp" });
 		await agent.start();
 		try {
 			await this.runTurn(agent, buildTask(spec, workflowRel, feedback), this.opts.timeoutMs ?? 300_000);

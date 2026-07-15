@@ -17,6 +17,8 @@
  * default leak without breaking legitimate suites.
  */
 
+import { isSquadEnvCompatKey } from "./spawn-env.ts";
+
 const SECRET_NAME =
 	/(_API_KEY|_APIKEY|_TOKEN|_SECRET|_SECRET_KEY|_PASSWORD|_PASSWD|_CREDENTIALS?|_PRIVATE_KEY|_ACCESS_KEY|_SESSION_KEY|_SIGNING_KEY|_ENCRYPTION_KEY|_TLS_KEY|_AUTH)$/i;
 
@@ -36,7 +38,9 @@ export function gateEnv(source: NodeJS.ProcessEnv = process.env): Record<string,
 		if (typeof value !== "string") continue;
 		// Strip BOTH prefixes: env-compat.ts mirrors every OMP_SQUAD_* secret into a canonical GLANCE_
 		// twin, so scrubbing only OMP_SQUAD_ would leak the twin (e.g. GLANCE_TLS_KEY) to gate test code.
-		if (!allow.has(key) && (key.startsWith("OMP_SQUAD_") || key.startsWith("GLANCE_") || SECRET_NAME.test(key) || SECRET_EXACT.has(key))) continue;
+		// isSquadEnvCompatKey is shared with spawn-env.ts's tenant-agent scrub so the two can't drift
+		// apart on this one prefix pair — everything else here stays gate-env's own, unshared logic.
+		if (!allow.has(key) && (isSquadEnvCompatKey(key) || SECRET_NAME.test(key) || SECRET_EXACT.has(key))) continue;
 		env[key] = value;
 	}
 	return env;

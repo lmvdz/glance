@@ -4,8 +4,16 @@
  */
 
 import React from 'react';
-import { Loader2, Check, X, Trash2, Building2, UserPlus, ShieldCheck } from 'lucide-react';
-import { apiJson, jsonInit } from '../lib/api';
+import { Loader2, Check, X, Trash2, Building2, UserPlus, ShieldCheck, Mic } from 'lucide-react';
+import {
+  apiJson,
+  jsonInit,
+  getOrgVoiceStatus,
+  putOrgVoiceKey,
+  deleteOrgVoiceKey,
+  setOrgVoiceEnabled,
+  type VoiceKeyStatus,
+} from '../lib/api';
 import { useAuth } from '../context/AuthContext';
 
 interface OrgProfile {
@@ -37,6 +45,11 @@ export const OrgSettings = () => {
   const [inviteRole, setInviteRole] = React.useState('member');
   const [inviting, setInviting] = React.useState(false);
   const [joinPolicy, setJoinPolicy] = React.useState<'auto' | 'approval' | null>(null);
+  const [voice, setVoice] = React.useState<VoiceKeyStatus | null>(null);
+  const [voiceKey, setVoiceKey] = React.useState('');
+  const [savingVoice, setSavingVoice] = React.useState(false);
+  const [voiceBusy, setVoiceBusy] = React.useState(false);
+  const [voiceErr, setVoiceErr] = React.useState<string | null>(null);
 
   const load = React.useCallback(async () => {
     setLoading(true);
@@ -48,6 +61,8 @@ export const OrgSettings = () => {
         setMembers(await apiJson<Member[]>('/api/org/members').catch(() => []));
         setRequests(await apiJson<JoinReq[]>('/api/workos/join-requests').catch(() => []));
         if (p.workosOrgId) setJoinPolicy((await apiJson<{ policy: 'auto' | 'approval' | null }>('/api/org/join-policy').catch(() => ({ policy: null }))).policy);
+        // Admin-tier only; a non-admin GET 403s, so members never fetch it (they see a read-only line).
+        setVoice(await getOrgVoiceStatus().catch(() => ({ configured: false })));
       }
     } finally {
       setLoading(false);
@@ -115,6 +130,49 @@ export const OrgSettings = () => {
     }
   };
 
+  const saveVoiceKey = async () => {
+    const candidate = voiceKey.trim();
+    if (!candidate || savingVoice) return;
+    setSavingVoice(true);
+    setVoiceErr(null);
+    try {
+      // The server verifies the key before persisting; a rejected key throws with its message and the
+      // card stays in "not configured" (setVoice is only reached on success).
+      setVoice(await putOrgVoiceKey(candidate));
+      setVoiceKey('');
+    } catch (e) {
+      setVoiceErr(e instanceof Error && e.message ? e.message : 'That key was rejected.');
+    } finally {
+      setSavingVoice(false);
+    }
+  };
+
+  const toggleVoiceEnabled = async () => {
+    if (!voice?.configured || voiceBusy) return;
+    setVoiceBusy(true);
+    setVoiceErr(null);
+    try {
+      setVoice(await setOrgVoiceEnabled(!voice.enabled));
+    } catch (e) {
+      setVoiceErr(e instanceof Error && e.message ? e.message : 'Could not update voice.');
+    } finally {
+      setVoiceBusy(false);
+    }
+  };
+
+  const removeVoiceKey = async () => {
+    if (!voice?.configured || voiceBusy) return;
+    setVoiceBusy(true);
+    setVoiceErr(null);
+    try {
+      setVoice(await deleteOrgVoiceKey());
+    } catch (e) {
+      setVoiceErr(e instanceof Error && e.message ? e.message : 'Could not remove the key.');
+    } finally {
+      setVoiceBusy(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex flex-1 items-center justify-center text-gray-400">
@@ -173,11 +231,38 @@ export const OrgSettings = () => {
         </section>
 
         {!isAdmin && (
-          <p className="text-sm text-gray-500 dark:text-gray-400">Only organization admins can manage members.</p>
+          <>
+            <p className="mb-5 text-sm text-gray-500 dark:text-gray-400">Only organization admins can manage members.</p>
+            <VoiceKeyCard
+              isAdmin={false}
+              status={null}
+              keyInput=""
+              onKeyInput={() => {}}
+              onSave={() => {}}
+              saving={false}
+              onToggleEnabled={() => {}}
+              onRemove={() => {}}
+              busy={false}
+              error={null}
+            />
+          </>
         )}
 
         {isAdmin && (
           <>
+            <VoiceKeyCard
+              isAdmin
+              status={voice}
+              keyInput={voiceKey}
+              onKeyInput={setVoiceKey}
+              onSave={saveVoiceKey}
+              saving={savingVoice}
+              onToggleEnabled={toggleVoiceEnabled}
+              onRemove={removeVoiceKey}
+              busy={voiceBusy}
+              error={voiceErr}
+            />
+
             {/* Domain-join policy (WorkOS-backed orgs) */}
             {joinPolicy !== null && (
               <section className={`${card} mb-5 p-4`}>
@@ -297,5 +382,139 @@ export const OrgSettings = () => {
         )}
       </div>
     </div>
+  );
+};
+
+function fmtWhen(ms: number): string {
+  try {
+    return new Date(ms).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  } catch {
+    return '';
+  }
+}
+
+interface VoiceKeyCardProps {
+  isAdmin: boolean;
+  /** Session-org status, or `null` for a non-admin (who never fetches it). */
+  status: VoiceKeyStatus | null;
+  keyInput: string;
+  onKeyInput: (value: string) => void;
+  onSave: () => void;
+  saving: boolean;
+  onToggleEnabled: () => void;
+  onRemove: () => void;
+  busy: boolean;
+  error: string | null;
+}
+
+/**
+ * The org voice-key card. Kept a pure, prop-driven component (like `TaskProperties`' `CategoryChip`)
+ * so its three honest states SSR-render standalone in the test suite without an `AuthProvider` stack.
+ *
+ * The funding + attribution copy is load-bearing, not decoration: enabling voice spends every
+ * operator-tier member's dispatches on the org's own OpenAI key, and glance can only ever show *who*
+ * started a session — never *what it cost* (audio never transits the daemon). No dollar figure appears
+ * anywhere in this card by design; the honest daemon-side controls live on the OpenAI dashboard.
+ */
+export const VoiceKeyCard = ({
+  isAdmin,
+  status,
+  keyInput,
+  onKeyInput,
+  onSave,
+  saving,
+  onToggleEnabled,
+  onRemove,
+  busy,
+  error,
+}: VoiceKeyCardProps) => {
+  const alert = error ? (
+    <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-300" role="alert">
+      {error}
+    </div>
+  ) : null;
+
+  return (
+    <section className={`${card} mb-5 p-4`}>
+      <h2 className="mb-1 flex items-center gap-1.5 text-sm font-semibold text-gray-900 dark:text-gray-100">
+        <Mic className="h-4 w-4" /> Voice
+      </h2>
+      <p className="mb-3 text-xs text-gray-500 dark:text-gray-400">
+        Enabling voice funds every operator-tier member’s voice sessions — including the agents they spawn
+        against this organization’s repositories — on this organization’s own OpenAI key. glance can show you
+        who started a session, never what it spent: audio never passes through the daemon.
+      </p>
+
+      {!isAdmin ? (
+        <p className="text-sm text-gray-500 dark:text-gray-400">Voice is configured by an organization admin.</p>
+      ) : status?.configured ? (
+        <div className="space-y-3">
+          <div>
+            <div className="text-sm text-gray-700 dark:text-gray-200">
+              Key ending in <span className="font-mono">{status.last4}</span> — check this matches your OpenAI key when you rotate it.
+            </div>
+            <div className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+              Set by {status.updatedBy ?? 'an admin'}{status.updatedAt ? ` · ${fmtWhen(status.updatedAt)}` : ''}
+            </div>
+          </div>
+          {status.enabled === false && (
+            <p className="text-xs font-medium text-amber-600 dark:text-amber-400">
+              Voice is turned off for this organization. The key is still stored — enable it to allow calls again.
+            </p>
+          )}
+          {alert}
+          <div className="flex gap-2">
+            {/* Kill switch — reversible, keeps the key. Deliberately styled as a neutral toggle so it
+                cannot be mistaken for the destructive Remove beside it. */}
+            <button
+              onClick={() => onToggleEnabled()}
+              disabled={busy}
+              className="rounded-md border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:opacity-40 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-800"
+              aria-label={status.enabled === false ? 'Enable voice' : 'Disable voice'}
+            >
+              {status.enabled === false ? 'Enable' : 'Disable'}
+            </button>
+            {/* Destructive — forgets the key entirely (a re-paste is needed to restore voice). */}
+            <button
+              onClick={() => onRemove()}
+              disabled={busy}
+              className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-red-600 transition-colors hover:bg-red-50 disabled:opacity-40 dark:text-red-400 dark:hover:bg-red-950/40"
+              aria-label="Remove voice key"
+            >
+              <Trash2 className="h-3.5 w-3.5" /> Remove key
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          <label htmlFor="voice-key" className="block text-xs font-medium text-gray-500 dark:text-gray-400">
+            OpenAI API key
+          </label>
+          {alert}
+          <div className="flex gap-2">
+            <input
+              id="voice-key"
+              type="password"
+              autoComplete="off"
+              spellCheck={false}
+              value={keyInput}
+              onChange={(e) => onKeyInput(e.target.value)}
+              placeholder="sk-…"
+              className="min-w-0 flex-1 rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 outline-none focus:border-[#f0a35a] focus:ring-2 focus:ring-[#f0a35a]/20 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100"
+            />
+            <button
+              onClick={() => onSave()}
+              disabled={saving || !keyInput.trim()}
+              className="flex items-center rounded-md bg-gray-900 px-4 text-sm font-medium text-white transition-colors hover:bg-gray-700 disabled:opacity-40 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
+            >
+              {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Save'}
+            </button>
+          </div>
+          <p className="text-xs text-gray-400">
+            The key is verified with OpenAI before it’s saved, then stored encrypted. It goes to the daemon and nowhere else.
+          </p>
+        </div>
+      )}
+    </section>
   );
 };

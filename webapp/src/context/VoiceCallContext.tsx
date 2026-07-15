@@ -13,6 +13,7 @@ import {
 import { useVoiceDispatcher } from '../hooks/useVoiceDispatcher';
 import { appendSpokenSummary, appendSpokenUserMessage, bindSessionAgent, loadPersistedSessionsOrNull, subscribeSessionStore } from '../lib/chat/sessionStore';
 import { useTaskContext } from './TaskContext';
+import { useAuth } from './AuthContext';
 
 /**
  * Live voice call, owned ABOVE the chat panel (webapp-voice-lane concern 08, DESIGN.md "Session
@@ -28,6 +29,26 @@ import { useTaskContext } from './TaskContext';
  * inert — the hook only does anything once `registerSession` has actually been handed a live
  * `VoiceSession`.
  */
+
+/**
+ * Org-switch call termination (plans/voice-db-mode/07-csp-and-org-switch.md, DESIGN.md "Org switch
+ * mid-call" row). A voice call is bound to a chat session, but the tool dispatches (`prompt_agent`,
+ * `spawn_agent`, …) resolve the fleet from the CURRENT session's active org — so if the operator
+ * switches orgs mid-call, the call would keep narrating under org A's minted token while
+ * dispatching into org B's fleet. `pinnedOrgId` is captured once, at `startCall`; `currentOrgId` is
+ * re-read live off `useAuth()`'s `me.activeOrganizationId` on every render. Server-side dispatch
+ * binding is deliberately NOT done instead: the operator is a legitimate member of both orgs, so
+ * this is attribution confusion, not privilege escalation, and ending client-side is enough.
+ *
+ * Pulled out as a pure, framework-free function per this package's hook-testing convention (see
+ * `useVoiceDispatcher.test.ts`'s header) — there is no jsdom/render harness here, so the org-switch
+ * DECISION is unit-tested directly; the effect below is the untested imperative shell around it.
+ * `null` pinned values never trigger: file mode has no org concept, so both sides stay permanently
+ * `null` there and no call ever ends over this.
+ */
+export function shouldEndCallForOrgSwitch(pinnedOrgId: string | null, currentOrgId: string | null): boolean {
+  return pinnedOrgId !== null && currentOrgId !== pinnedOrgId;
+}
 
 export interface VoiceCallBinding {
   /** The `AssistantChat` `Session.id` this call is pinned to at start — `useVoiceDispatcher`'s
@@ -70,6 +91,9 @@ const RECONNECT_NOTICE_DURATION_MS = 6_000;
 
 export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
   const { showToast } = useTaskContext();
+  // File mode: `me` is always null, so `activeOrganizationId` reads as `null` throughout — the
+  // org-switch check below never fires there (see `shouldEndCallForOrgSwitch`'s doc comment).
+  const { me } = useAuth();
 
   const [voiceEnabled, setVoiceEnabled] = useState(false);
   const [binding, setBinding] = useState<VoiceCallBinding | null>(null);
@@ -87,6 +111,9 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
    *  at call start (so an unattended call that never touches PTT still starts the idle clock from
    *  connection time, not from `undefined`). */
   const lastPttActivityAtRef = useRef<number | null>(null);
+  /** Org-switch call termination's pinned value (`shouldEndCallForOrgSwitch` above) — set once at
+   *  `startCall`, compared against the LIVE `me.activeOrganizationId` on every render thereafter. */
+  const pinnedOrgIdRef = useRef<string | null>(null);
 
   // Capability probe (DESIGN.md "Flagging" row) — the only honest discovery channel; a flag-off
   // 404 is mapped to `{enabled:false}` by `getVoiceConfig` itself, never surfaced as an error here.
@@ -137,6 +164,7 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
     setReconnectNotice(null);
     setCallStartedAt(null);
     lastPttActivityAtRef.current = null;
+    pinnedOrgIdRef.current = null;
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
@@ -154,9 +182,10 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
       setCallToken(`call:${Date.now()}:${Math.random().toString(36).slice(2)}`);
       setCallStartedAt(Date.now());
       lastPttActivityAtRef.current = Date.now(); // MEDIUM-6: idle clock starts at connection time
+      pinnedOrgIdRef.current = me?.activeOrganizationId ?? null; // org-switch check's baseline
       setConnecting(true);
     },
-    [callToken],
+    [callToken, me],
   );
 
   // Session-store deletion watch (DESIGN.md "Session binding" row: "session delete ends the call
@@ -178,6 +207,18 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
       }
     });
   }, [binding, showToast, endCall]);
+
+  // Org switch ends the call (plans/voice-db-mode/07-csp-and-org-switch.md, DESIGN.md "Org switch
+  // mid-call" row) — see `shouldEndCallForOrgSwitch`'s doc comment above for why this is client-side
+  // and why it's a toast, not a hard error. Fires before any further tool dispatch can resolve
+  // against the new org.
+  useEffect(() => {
+    if (!callToken) return;
+    if (shouldEndCallForOrgSwitch(pinnedOrgIdRef.current, me?.activeOrganizationId ?? null)) {
+      showToast('Voice call ended — the active organization changed.', 'info');
+      endCall();
+    }
+  }, [callToken, me?.activeOrganizationId, showToast, endCall]);
 
   // Elapsed-time tick — re-renders once a second while a call is up so `elapsedMs` (read below)
   // stays live without a separate ref/interval per consumer. MEDIUM-6: the same tick also drives

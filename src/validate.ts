@@ -81,7 +81,10 @@ async function lintWorker(dir: string, spec: CommissionSpec): Promise<GateCheck>
 async function typecheckWorker(dir: string): Promise<GateCheck> {
 	const tscBin = path.join(dir, "node_modules", ".bin", "tsc");
 	if (!existsSync(tscBin)) return { name: "typecheck", status: "skip", detail: "typescript not installed in worker" };
-	const proc = Bun.spawn([tscBin, "-p", "tsconfig.json", "--noEmit"], { cwd: dir, stdout: "pipe", stderr: "pipe" });
+	// `tscBin` resolves the worker repo's OWN node_modules/.bin/tsc — repo-supplied code, same as
+	// acceptanceWorker below. `tsc --noEmit` needs no secret and no provider key, so ENV_BASELINE
+	// alone (no capability allowance) is the correct — and narrower — env for this check.
+	const proc = Bun.spawn([tscBin, "-p", "tsconfig.json", "--noEmit"], { cwd: dir, stdout: "pipe", stderr: "pipe", env: baselineEnv() });
 	const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
 	const code = await proc.exited;
 	return code === 0
@@ -92,8 +95,30 @@ async function typecheckWorker(dir: string): Promise<GateCheck> {
 /**
  * Fixed baseline of non-secret operational vars the Node/Bun toolchain needs to locate
  * binaries and a temp dir. No credentials — secrets only flow through capability grants.
+ *
+ * `NODE_OPTIONS`/`NODE_EXTRA_CA_CERTS`/`SSL_CERT_FILE` (code-review round-2, CONFIRMED): dropping
+ * `NODE_OPTIONS` here meant a worker repo whose toolchain sets `NODE_OPTIONS=--max-old-space-size=…`
+ * (common for a large repo's own tsc/build config) had that override silently discarded for
+ * `typecheckWorker`'s `tsc --noEmit` spawn, which then OOMs on a big worker and the typecheck gate
+ * fails spuriously against code that would pass with the operator's own memory ceiling honored.
+ * `NODE_EXTRA_CA_CERTS`/`SSL_CERT_FILE` ride along because this SAME baseline also feeds
+ * `acceptanceEnv()` below, whose `flue run` spawn makes real network calls (a model call, or the
+ * worker's own HTTP dependencies) — behind a corporate proxy or custom CA those calls need the CA
+ * bundle path to verify TLS at all. None of the three carry secret material: a runtime flag and two
+ * file paths, not credentials.
  */
-const ENV_BASELINE = ["PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "TZ"];
+const ENV_BASELINE = ["PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "TZ", "NODE_OPTIONS", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE"];
+
+/** ENV_BASELINE only, no capability/provider allowance — for a check (typecheck) that runs
+ *  repo-supplied tooling but needs no secret and makes no model call. */
+function baselineEnv(source: Record<string, string | undefined> = process.env): Record<string, string> {
+	const env: Record<string, string> = {};
+	for (const key of ENV_BASELINE) {
+		const v = source[key];
+		if (typeof v === "string") env[key] = v;
+	}
+	return env;
+}
 
 /**
  * Deny-by-default environment for the acceptance run. The daemon's full env — every provider

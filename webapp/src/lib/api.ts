@@ -103,6 +103,50 @@ export interface VoiceConfigResponse {
   providers?: Array<{ id: string; transport: "webrtc"; model?: string }>;
 }
 
+// -----------------------------------------------------------------------------------------------
+// Per-org voice key admin (voice-db-mode/06) — the four session-org-scoped admin routes concern 05
+// landed (`/api/org/voice*`). The org's OpenAI key is passed to `putOrgVoiceKey` and travels ONLY
+// into the request body of the server call below: it is never written to localStorage, never logged,
+// and never returned by the server (GET/PUT answer with `last4` only). Everything here is a thin
+// `apiJson` wrapper so the key has exactly one destination — the daemon.
+// -----------------------------------------------------------------------------------------------
+
+/** Session-org voice-key status. Mirrors `GET /api/org/voice` (and the PUT/enabled responses):
+ *  `configured:false` alone when no key is stored, otherwise the non-secret posture. Never the key. */
+export interface VoiceKeyStatus {
+  configured: boolean;
+  /** Last four chars of the stored key — a rotation cross-check, not an identifier. */
+  last4?: string;
+  /** Kill switch: a stored-but-disabled key mints nothing until re-enabled. */
+  enabled?: boolean;
+  updatedAt?: number;
+  /** `db:<userId>` of the admin who last set the key. */
+  updatedBy?: string;
+}
+
+/** Read the session org's voice-key status (admin tier server-side; a non-admin call 403s). */
+export function getOrgVoiceStatus(): Promise<VoiceKeyStatus> {
+  return apiJson<VoiceKeyStatus>("/api/org/voice");
+}
+
+/** Persist a candidate key for the session org. The server verifies it against the provider BEFORE
+ *  storing (a rejected key writes nothing) and this wrapper never persists or logs `apiKey` — it goes
+ *  into the request body and nowhere else. Throws (via `apiJson`) with the server's message on reject. */
+export function putOrgVoiceKey(apiKey: string): Promise<VoiceKeyStatus> {
+  return apiJson<VoiceKeyStatus>("/api/org/voice-key", jsonInit("PUT", { apiKey }));
+}
+
+/** Hard-delete the session org's stored key (reverts to `configured:false`). Distinct from the kill
+ *  switch below: this forgets the key, `setOrgVoiceEnabled(false)` keeps it and only stops minting. */
+export function deleteOrgVoiceKey(): Promise<VoiceKeyStatus> {
+  return apiJson<VoiceKeyStatus>("/api/org/voice-key", { method: "DELETE" });
+}
+
+/** Flip the synchronous kill switch without touching the stored key. */
+export function setOrgVoiceEnabled(enabled: boolean): Promise<VoiceKeyStatus> {
+  return apiJson<VoiceKeyStatus>("/api/org/voice/enabled", jsonInit("POST", { enabled }));
+}
+
 /** Voice capability probe (`GET /api/voice/config`) — the one honest discovery channel for whether
  *  voice is enabled/configured (no webapp code consumes `/api/settings` flags; see DESIGN.md's
  *  "Flagging" row). A 404 means the feature flag is off — that's a normal, expected state (not an

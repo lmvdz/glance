@@ -15,6 +15,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentDriver } from "../agent-driver.ts";
 import { fenceUntrusted } from "../digest.ts";
+import { gateEnv } from "../gate-env.ts";
 import { GateSemaphore, sharedGateSemaphore } from "../gate-semaphore.ts";
 import { isOn, learningFlags } from "../metrics.ts";
 import { appendReflection, hashOutput, latestReflection, reflect, renderReflectionNote, renderRefutationNote, type ReflectLlm } from "../reflection.ts";
@@ -438,8 +439,17 @@ export function withLocalBinOnPath(script: string, cwd: string): string {
 	return `export PATH=${quoted}:"$PATH"\n${script}`;
 }
 
+/**
+ * Ruling (spawn-env-scrub batch 1 follow-up): a command node's `script` is authored in the
+ * workflow's DOT graph (verify/lint/build steps a plan or its human author wrote), not
+ * per-turn tenant-agent output — the same shape as the proof/land/regression gates that
+ * `gate-env.ts` already scrubs, NOT the deny-by-default tenant-agent scrub in `spawn-env.ts`
+ * (a `bun test`/`tsc` verify step legitimately needs CARGO_HOME/GOPATH/NVM_DIR/CI, which
+ * spawn-env's keep-list deliberately excludes). It runs unsandboxed on the daemon host like
+ * those gates, so it gets the same env: `gateEnv()`, not full `process.env` inheritance.
+ */
 async function defaultExecCommand(script: string, cwd: string): Promise<CommandResult> {
-	const proc = Bun.spawn(["bash", "-lc", withLocalBinOnPath(script, cwd)], { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...process.env } });
+	const proc = Bun.spawn(["bash", "-lc", withLocalBinOnPath(script, cwd)], { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", env: gateEnv() });
 	const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
 	const code = await proc.exited;
 	return { code, stdout, stderr };

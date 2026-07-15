@@ -114,8 +114,19 @@ export function deriveBranchAgentId(runId: string, branchKey: string, nodeId: st
  * the unit's system-prompt context" rule is unit-tested — it silently did not, for every workflow unit.
  * The tester lineage takes its own model but the SAME context: it must know the spec it is writing a
  * test for.
+ *
+ * `harness: "omp"` is hardcoded, not threaded from `opts` — `actualUnitHarness` (squad-manager.ts) already
+ * documents this as an architectural fact: "a workflow-kind unit's inner coder/tester is ALWAYS an
+ * omp-dialect RpcAgent". Without it, `RpcAgent`'s `spawnHost` never passes `--harness` to the host, and
+ * `harnessAuthEnv`'s no-harness fallback admits every configured provider credential instead of narrowing
+ * to Anthropic (spawn-env.ts's `DEFAULT_ANTHROPIC_HARNESSES` case) — the honest-ignorance case, but one
+ * this call site can name precisely since the runtime is never in question here.
  */
-export function innerAgentOptions(opts: { id: string; cwd: string; model?: string; approvalMode?: ApprovalMode; thinking?: ThinkingLevel; bin?: string; appendSystemPrompt?: string }, role: "coder" | "tester", modelOverride?: string): { id: string; cwd: string; model?: string; approvalMode?: ApprovalMode; thinking?: ThinkingLevel; bin?: string; appendSystemPrompt?: string } {
+export function innerAgentOptions(
+	opts: { id: string; cwd: string; model?: string; approvalMode?: ApprovalMode; thinking?: ThinkingLevel; bin?: string; appendSystemPrompt?: string },
+	role: "coder" | "tester",
+	modelOverride?: string,
+): { id: string; cwd: string; model?: string; approvalMode?: ApprovalMode; thinking?: ThinkingLevel; bin?: string; appendSystemPrompt?: string; harness: string } {
 	return {
 		id: `${opts.id}-${role === "coder" ? "wf" : "tester"}`,
 		cwd: opts.cwd,
@@ -124,6 +135,7 @@ export function innerAgentOptions(opts: { id: string; cwd: string; model?: strin
 		thinking: opts.thinking,
 		bin: opts.bin,
 		appendSystemPrompt: opts.appendSystemPrompt,
+		harness: "omp",
 	};
 }
 

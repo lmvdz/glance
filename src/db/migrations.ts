@@ -210,6 +210,34 @@ function rlsMigration(type: DbKind, tables: readonly string[]): Migration {
 	};
 }
 
+// One provider credential per org (plans/voice-db-mode/02-secret-store.md) — see schema.ts's
+// OrgSecretTable doc comment for the column shapes. This table alone creates nothing without the
+// matching RLS entry below: `org_secret` is NOT in BASE_APP_TABLES/FEEDBACK_TABLES (the existing
+// RLS backstop's coverage), so it needs its own explicit rlsMigration call in the provider map —
+// forgetting it leaves the table protected only by the DAL's `where org_id`, unacceptable for a
+// secret table.
+const createOrgSecretTable: Migration = {
+	async up(db: Kysely<any>) {
+		await db.schema
+			.createTable("org_secret")
+			.addColumn("org_id", "text", (c) => c.notNull().references("organization.id").onDelete("cascade"))
+			.addColumn("provider", "text", (c) => c.notNull())
+			.addColumn("ciphertext", "text", (c) => c.notNull())
+			.addColumn("nonce", "text", (c) => c.notNull())
+			.addColumn("last4", "text", (c) => c.notNull())
+			.addColumn("enabled", "integer", (c) => c.notNull().defaultTo(1))
+			.addColumn("created_by", "text", (c) => c.notNull())
+			.addColumn("updated_by", "text", (c) => c.notNull())
+			.addColumn("created_at", "bigint", (c) => c.notNull())
+			.addColumn("updated_at", "bigint", (c) => c.notNull())
+			.addPrimaryKeyConstraint("org_secret_pk", ["org_id", "provider"])
+			.execute();
+	},
+	async down(db: Kysely<any>) {
+		await db.schema.dropTable("org_secret").ifExists().execute();
+	},
+};
+
 const usageTraceId: Migration = {
 	async up(db: Kysely<any>) {
 		await db.schema.alterTable("usage").addColumn("trace_id", "text").execute();
@@ -243,18 +271,29 @@ const createJoinRequests: Migration = {
 	},
 };
 
+/** The full, ordered app migration set. Exported so tests can invoke an individual migration's
+ *  `up()` directly (e.g. proving the org_secret RLS policy's exact SQL against a fake Postgres
+ *  connection) without needing to simulate the Migrator's advisory-lock bookkeeping end to end —
+ *  `migrateApp` below is the only production caller.
+ *  @substrate exported so tests/org-secret-rls.test.ts can invoke a single migration's up() directly */
+export function appMigrations(type: DbKind): Record<string, Migration> {
+	return {
+		"0001_app_tables": createAppTables,
+		"0002_rls_backstop": rlsMigration(type, BASE_APP_TABLES),
+		"0003_usage_trace_id": usageTraceId,
+		"0004_feedback_tables": createFeedbackTables,
+		"0005_feedback_rls": rlsMigration(type, FEEDBACK_TABLES),
+		"0006_join_requests": createJoinRequests,
+		"0007_org_secret": createOrgSecretTable,
+		"0008_org_secret_rls": rlsMigration(type, ["org_secret"]),
+	};
+}
+
 /** Apply app-table + RLS migrations idempotently via Kysely's Migrator. */
 export async function migrateApp(db: Kysely<any>, type: DbKind): Promise<void> {
 	const provider: MigrationProvider = {
 		async getMigrations(): Promise<Record<string, Migration>> {
-			return {
-				"0001_app_tables": createAppTables,
-				"0002_rls_backstop": rlsMigration(type, BASE_APP_TABLES),
-				"0003_usage_trace_id": usageTraceId,
-				"0004_feedback_tables": createFeedbackTables,
-				"0005_feedback_rls": rlsMigration(type, FEEDBACK_TABLES),
-				"0006_join_requests": createJoinRequests,
-			};
+			return appMigrations(type);
 		},
 	};
 	const migrator = new Migrator({ db, provider });

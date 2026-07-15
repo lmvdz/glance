@@ -20,6 +20,7 @@ import { socketPathFor } from "./agent-host.ts";
 import { Result } from "effect";
 import type { ApprovalMode, RpcExtensionUIRequest, RpcSessionState, ThinkingLevel } from "./types.ts";
 import { decodeHostToolCall, decodeResponseFrame, type HostToolCallFrame } from "./schema/agent-host-frame.ts";
+import { harnessAuthEnv, scrubbedSpawnEnv } from "./spawn-env.ts";
 
 export interface RpcAgentOptions {
 	/** Stable id (socket path derives from it). Omit for a transient auto-generated id. */
@@ -46,6 +47,74 @@ type Pending = {
 };
 
 const HOST_ENTRY = path.join(import.meta.dir, "agent-host-main.ts");
+/**
+ * The `bun agent-host-main.ts` process is spawned with THIS directory as its cwd — never the tenant
+ * worktree. Bun auto-loads a `bunfig.toml` from a process's spawn cwd and RUNS its `preload` scripts
+ * before the entry file's own imports execute (verified empirically: `bun <absolute-entry-path>` run
+ * from a cwd containing `bunfig.toml` executes that cwd's preload regardless of the entry path form).
+ * `agent-host-main.ts`'s only use of `--cwd` is to hand `opts.cwd` to `runAgentHost`, which uses it
+ * solely for the tenant's own omp/pi child (spawned through `scrubbedSpawnEnv` — see agent-host.ts) —
+ * so a tenant worktree committing `bunfig.toml` + a preload script must never get to run inside THIS
+ * process: that would bypass the scrub one level up, before it ever applies. `HOST_ENTRY` is always an
+ * absolute path, so moving this process's cwd here does not change what gets loaded — only where a
+ * hostile `bunfig.toml` could be picked up from, and this directory is part of the daemon's own trusted
+ * checkout, never tenant content. (This process's OWN env is a separate concern from its cwd — see
+ * `hostSpawnEnv` below: it used to carry the daemon's full, unscrubbed env too, which is what let a
+ * same-uid tenant recover DATABASE_URL/BETTER_AUTH_SECRET/the voice master key straight out of this
+ * process's own `/proc/<pid>/environ`, bunfig hole or not.)
+ */
+const HOST_SPAWN_CWD = path.dirname(HOST_ENTRY);
+
+/**
+ * The environment `bun agent-host-main.ts` itself boots with — the OUTER spawn below, one level above
+ * the tenant omp/pi child agent-host.ts's own `scrubbedSpawnEnv` call already scrubs. Before this fix
+ * `spawnHost` passed `{ ...process.env }` verbatim: the daemon's FULL environment — `DATABASE_URL`,
+ * `BETTER_AUTH_SECRET`, and the voice boot secret (`OMP_SQUAD_SECRETS_KEY`/`GLANCE_SECRETS_KEY`, which
+ * secrets.ts deletes from the DAEMON's own `process.env` at boot but can never retroactively erase from
+ * an ALREADY-SPAWNED process's environ) — reaching a process any same-uid tenant child can read back
+ * out of `/proc/<host-pid>/environ`, the kernel's immutable snapshot of a process's environ at exec
+ * time. Cross-lineage audit (round 2, both codex and grok independently): decrypt every org's voice key
+ * or forge a cross-org session from there.
+ *
+ * Routes the outer spawn through the SAME `scrubbedSpawnEnv` the inner child already uses, narrowed to
+ * exactly what `agent-host-main.ts` and its transitive imports (`env-compat.ts`, `agent-host.ts`,
+ * `harness-registry.ts`, `git-harden.ts`, `spawn-env.ts`, `state-dir.ts`) actually read from
+ * `process.env` — grepped, not guessed:
+ *   - `state-dir.ts`'s `resolveStateDir()` (via `squadSocketDir`/`pruneStaleSockets`, called inside
+ *     `runAgentHost` for opportunistic stale-socket GC) reads `GLANCE_STATE_DIR`/`OMP_SQUAD_STATE_DIR`
+ *     directly. Both names are `OMP_SQUAD_*`/`GLANCE_*`-prefixed, so `scrubbedSpawnEnv`'s shared
+ *     prefix-denial rule (isSquadEnvCompatKey) strips them like any other daemon-namespaced var —
+ *     re-admitted explicitly here, since this is trusted DAEMON config (an operator/test path override),
+ *     never tenant-controlled content. Without this, a daemon running with a custom state dir (every
+ *     test run — tests/setup.ts sets `OMP_SQUAD_STATE_DIR` to an isolated temp dir) spawns a host that
+ *     resolves the DEFAULT `~/.glance` for its own socket-dir GC instead — silently wrong in tests, and
+ *     in a real deployment a host that scans/prunes the wrong directory entirely (up to and including
+ *     the operator's real `~/.glance` if a differently-configured daemon shares the machine).
+ *   - `harness-registry.ts`'s `resolveBin`/`globalDefaultHarness` (which read `GLANCE_BIN`/`GLANCE_HARNESS`)
+ *     are NOT on this path — `squad-manager.ts` resolves the binary BEFORE constructing `RpcAgent` and
+ *     hands it down as `opts.bin`/the `--bin` flag, so the host process itself never needs those vars.
+ *   - `agent-host.ts`'s own `harnessAuthEnv(process.env, opts.harness, opts.model)` call — one level
+ *     further in, building the INNER child's env — reads the HOST's OWN `process.env` at that point, so
+ *     the host process itself must already carry whatever single provider credential the tenant child
+ *     will need. Narrowed here the SAME way (`harnessAuthEnv` with the SAME harness/model the daemon
+ *     already knows about this agent), so the outer spawn never carries a wider credential grant than
+ *     the inner one it exists to forward — never the other six providers' keys.
+ * Pure and exported so the exact env this spawn gets can be asserted without a real process (spawn-env
+ * test style already used elsewhere) — `spawnHost` below is the only production caller.
+ *
+ * @substrate exported for tests only — spawn-env.test.ts asserts this multi-tenant-secrets boundary
+ * directly (DATABASE_URL/BETTER_AUTH_SECRET/the voice master key absent, GLANCE_STATE_DIR/provider
+ * credential narrowing correct) instead of only through a real, slower end-to-end host spawn.
+ */
+export function hostSpawnEnv(source: NodeJS.ProcessEnv, harness?: string, model?: string): Record<string, string> {
+	const inject: Record<string, string> = { ...harnessAuthEnv(source, harness, model) };
+	const stateDir = source.GLANCE_STATE_DIR ?? source.OMP_SQUAD_STATE_DIR;
+	if (stateDir) {
+		inject.GLANCE_STATE_DIR = stateDir;
+		inject.OMP_SQUAD_STATE_DIR = stateDir;
+	}
+	return scrubbedSpawnEnv(source, inject);
+}
 
 /**
  * Events emitted:
@@ -161,17 +230,29 @@ export class RpcAgent extends EventEmitter implements AgentDriver {
 		if (this.opts.appendSystemPrompt) cmd.push("--append-system-prompt", this.opts.appendSystemPrompt);
 		if (this.opts.bin) cmd.push("--bin", this.opts.bin);
 		if (this.opts.harness) cmd.push("--harness", this.opts.harness);
-		// env is passed EXPLICITLY as the live process.env: Bun.spawn without `env` inherits the
-		// process's ORIGINAL environ, silently dropping runtime mutations (verified: a var set via
-		// `process.env.X = …` is invisible to a default-env child). The test preload's hermetic model
-		// source (tests/setup.ts's dummy ANTHROPIC_API_KEY) — and any operator tooling that adjusts
-		// env in-process before spawning agents — must reach the host, or omp boots model-less and
-		// every spawn times out inside the gate sandbox while "working" on logged-in hosts.
+		// env is passed EXPLICITLY as a SCRUBBED snapshot of the live process.env (hostSpawnEnv, above):
+		// Bun.spawn without `env` inherits the process's ORIGINAL environ, silently dropping runtime
+		// mutations (verified: a var set via `process.env.X = …` is invisible to a default-env child), so
+		// `process.env` is still read explicitly here — just narrowed before the child ever sees it. The
+		// test preload's hermetic model source (tests/setup.ts's dummy ANTHROPIC_API_KEY) — and any
+		// operator tooling that adjusts env in-process before spawning agents — must still reach the host
+		// (via `harnessAuthEnv` in `hostSpawnEnv`), or omp boots model-less and every spawn times out
+		// inside the gate sandbox while "working" on logged-in hosts. `cwd` below is `HOST_SPAWN_CWD`, not
+		// `this.opts.cwd` — see the doc on `HOST_SPAWN_CWD` above: this process must never load a
+		// tenant-controlled `bunfig.toml`, independent of and in addition to the env now being scrubbed.
+		//
+		// A worktree that vanished before its host spawns is a real, previously-seen incident (OMPSQ-188)
+		// — checked explicitly here (rather than relying on Bun.spawn's own ENOENT, which now names
+		// HOST_SPAWN_CWD, not the tenant cwd, since that's what this spawn actually uses) so the
+		// diagnostic still names the tenant worktree as the cause.
+		if (!existsSync(this.opts.cwd)) {
+			throw new Error(diagnoseSpawnFailure(new Error(`ENOENT: no such file or directory, posix_spawn '${cmd[0]}'`), cmd[0] as string, this.opts.cwd));
+		}
 		let proc: ReturnType<typeof Bun.spawn>;
 		try {
-			proc = Bun.spawn(cmd, { cwd: this.opts.cwd, stdin: "ignore", stdout: "ignore", stderr: "ignore", detached: true, env: { ...process.env } });
+			proc = Bun.spawn(cmd, { cwd: HOST_SPAWN_CWD, stdin: "ignore", stdout: "ignore", stderr: "ignore", detached: true, env: hostSpawnEnv(process.env, this.opts.harness, this.opts.model) });
 		} catch (err) {
-			throw new Error(diagnoseSpawnFailure(err, cmd[0] as string, this.opts.cwd));
+			throw new Error(diagnoseSpawnFailure(err, cmd[0] as string, HOST_SPAWN_CWD));
 		}
 		proc.unref();
 	}
