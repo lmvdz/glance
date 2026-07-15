@@ -85,7 +85,9 @@ import { reapDeadSessions, releaseSession, sweepLeases } from "./leases.ts";
 import { agentActor, scopeFor } from "./agent-scope.ts";
 import { buildFabricSnapshot, loadScoutFacts, type FabricSnapshot } from "./fabric.ts";
 import { buildContextPrimer, searchFabric, type KbDocType } from "./fabric-search.ts";
-import { sweepPresence } from "./presence.ts";
+import { sweepPresence, who } from "./presence.ts";
+import { harnessEventDecision } from "./harness-hooks.ts";
+import { adoptBranchName, adoptBrief, isSafeUntrackedPath, parseNulList } from "./adopt.ts";
 import { chooseFallback } from "./supervisor.ts";
 import { availableActions, effectiveAutonomyMode, modeFromApproval, validateRequestedMode, type AutonomyMode, type VerificationState } from "./autonomy.ts";
 import type {
@@ -4222,6 +4224,158 @@ export class SquadManager extends EventEmitter {
 	private emitFeaturesChanged(): void {
 		void this.persist();
 		this.emit("event", { type: "features-changed" } satisfies SquadEvent);
+	}
+
+	/**
+	 * Adopt an ad-hoc CLI session into a fleet unit (fleet-ide-escalation E03). A developer ran a raw
+	 * harness (e.g. `claude`) in a terminal; B03 harness-hooks registered it as presence
+	 * (`harness:sessionId`, source "other"). Adoption captures that session's uncommitted WORK — not its
+	 * conversation (the daemon has no handle on the harness's own context) — into a FRESH worktree and
+	 * wraps it in a gated unit, leaving the developer's original GIT checkout UNTOUCHED.
+	 *
+	 * Hardened against a cross-lineage gauntlet (codex + grok). Fail-closed throughout: the source dir
+	 * is only ever READ (diff + ls-files + file copies OUT of it; `--no-textconv`/`--no-ext-diff` so no
+	 * configured diff driver runs against the source; never a write/index mutation). Any capture/apply
+	 * failure removes the half-made worktree; after `create()` the worktree belongs to the unit, so it
+	 * is NOT removed on a create error (that would strand the roster record). Validity binds the cwd to
+	 * the session's real repo (realpath + repoRoot) AND requires the session's exact live presence
+	 * claimId — adopt can't be pointed at a sibling checkout or a spoofed label.
+	 *
+	 * Known limits (documented, not defects): submodule (gitlink) changes are NOT captured (a plain
+	 * `git apply` skips them); the adopted worktree shares `node_modules` with the primary checkout per
+	 * the standard worktree model (the git tree/index is what's untouched); if the harness fails to
+	 * start, the unit still appears in the roster in `error` state with its captured worktree — restart
+	 * it, the work is not lost. Operator-tier (same as /api/spawn); the presence gate is a validity
+	 * check, not a privilege boundary (an operator can already create units in its projects).
+	 */
+	async adopt(
+		args: { harness: string; sessionId: string; cwd: string },
+		actor: Actor = LOCAL_ACTOR,
+	): Promise<{ ok: boolean; reason?: string; agent?: AgentDTO }> {
+		const MAX_PATCH_BYTES = 64 * 1024 * 1024; // 64 MiB — cap the in-memory/tmp patch (DoS)
+		const MAX_UNTRACKED = 10_000; // cap the untracked file count (DoS)
+
+		// 1. Validate. Resolve symlinks in the cwd FIRST (a lexical containment check alone lets
+		//    `/r/../victim` or `/r/symlink-to-victim` escape), then gate exactly like the hooks.
+		let realCwd: string;
+		try {
+			realCwd = await fs.realpath(args.cwd);
+		} catch {
+			return { ok: false, reason: "cwd does not exist" };
+		}
+		const decision = harnessEventDecision(
+			{ harness: args.harness, event: "prompt", sessionId: args.sessionId, cwd: realCwd },
+			this.projects().map((p) => p.repo),
+		);
+		if (decision.action !== "claim") {
+			return { ok: false, reason: decision.action === "drop" ? decision.reason : "not an adoptable session" };
+		}
+		const repo = decision.repo;
+		const label = decision.agent; // `harness:sessionId`
+		// Bind the cwd to the session's ACTUAL git repo — the resolved cwd's git top-level must be the
+		// registered project root, so a sibling checkout that merely lives under the same base is refused.
+		const topLevel = await repoRoot(realCwd).catch(() => null);
+		if (!topLevel || topLevel !== repo) {
+			return { ok: false, reason: "cwd is not the registered project's git repository" };
+		}
+		// Require the session's EXACT live presence row — match the deterministic claimId (the presence
+		// entry id), not just the display label, so `a:b` can't satisfy `a:b:c` and spoofed rows still
+		// need the right harness+sessionId hash.
+		const present = await who(repo);
+		if (!present.some((e) => e.id === decision.claimId && e.source === "other")) {
+			return { ok: false, reason: "no live ad-hoc session for that harness/sessionId in this project" };
+		}
+
+		// 2. Refuse a re-adopt of the same session@HEAD up front (fail-closed, clear message) rather
+		//    than relying on addWorktree's branch/dir-exists error.
+		const head = await hardenedGit(["rev-parse", "HEAD"], { cwd: repo });
+		if (head.code !== 0) return { ok: false, reason: "repo has no HEAD commit (not a git checkout?)" };
+		const headSha = head.stdout.trim();
+		const branch = adoptBranchName(args.harness, args.sessionId, headSha);
+		const branchExists = await hardenedGit(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: repo });
+		if (branchExists.code === 0) {
+			return { ok: false, reason: "this session's current state is already adopted" };
+		}
+
+		// 3. Capture the repo's working state READ-ONLY, against the SAME sha we'll cut from (coherent
+		//    snapshot even if HEAD moves under us). `--no-textconv` + `--no-ext-diff` keep any configured
+		//    diff driver from running against the source; `--binary` replays binary edits; `-z` is
+		//    lossless for odd filenames.
+		const diffArgs = ["diff", "--no-ext-diff", "--no-textconv", "--binary", headSha];
+		const tracked = await hardenedGit(diffArgs, { cwd: repo });
+		if (tracked.code !== 0) return { ok: false, reason: `git diff failed: ${tracked.stderr.trim()}` };
+		if (tracked.stdout.length > MAX_PATCH_BYTES) {
+			return { ok: false, reason: "uncommitted diff is too large to adopt" };
+		}
+		const names = await hardenedGit(["diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z", headSha], { cwd: repo });
+		const changedCount = names.code === 0 ? parseNulList(names.stdout).length : 0;
+		const others = await hardenedGit(["ls-files", "-z", "--others", "--exclude-standard"], { cwd: repo });
+		if (others.code !== 0) return { ok: false, reason: `git ls-files failed: ${others.stderr.trim()}` };
+		const untracked = parseNulList(others.stdout);
+		if (untracked.length > MAX_UNTRACKED) return { ok: false, reason: "too many untracked files to adopt" };
+		// Fail closed (not silent drop) if any untracked path is anomalous — git never emits these.
+		if (untracked.some((p) => !isSafeUntrackedPath(p))) {
+			return { ok: false, reason: "unsafe path in the untracked set" };
+		}
+
+		// 4. Cut a FRESH worktree from the captured HEAD sha (never the developer's checkout).
+		let worktree: string;
+		try {
+			const created = await addWorktree({ repo, branch, startPoint: headSha, base: this.worktreeBaseDir });
+			worktree = created.worktree;
+		} catch (err) {
+			return { ok: false, reason: `could not create worktree: ${errText(err)}` };
+		}
+		const cleanup = async (): Promise<void> => {
+			await removeWorktree(repo, worktree).catch(() => {});
+			if (existsSync(worktree)) this.log("warn", `adopt: worktree not fully removed after failure: ${worktree}`);
+		};
+
+		// 5. Replay the captured state into the new worktree; FAIL CLOSED (remove the worktree, no unit).
+		try {
+			const patch = tracked.stdout;
+			if (patch.trim().length > 0) {
+				// A private, freshly-created temp dir (0700, unique name) — never a predictable path an
+				// attacker could pre-plant as a symlink, and no concurrent-adopt filename race.
+				const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "glance-adopt-"));
+				try {
+					const patchFile = path.join(tmpDir, "capture.patch");
+					await fs.writeFile(patchFile, patch);
+					const applied = await hardenedGit(["apply", "--whitespace=nowarn", patchFile], { cwd: worktree });
+					if (applied.code !== 0) throw new Error(`captured changes did not apply: ${applied.stderr.trim()}`);
+				} finally {
+					await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+				}
+			}
+			for (const rel of untracked) {
+				// Skip symlinks: fs.cp preserves them, and an untracked `link -> /original/file` would let
+				// the adopted unit write THROUGH to the developer's tree. Regular files/dirs only.
+				const src = path.join(realCwd, rel);
+				const st = await fs.lstat(src).catch(() => null);
+				if (!st || st.isSymbolicLink()) continue;
+				const dst = path.join(worktree, rel);
+				await fs.mkdir(path.dirname(dst), { recursive: true });
+				await fs.cp(src, dst, { recursive: true });
+			}
+		} catch (err) {
+			await cleanup();
+			return { ok: false, reason: `adopt failed (your checkout is untouched): ${errText(err)}` };
+		}
+
+		// 6. Wrap the prepared worktree in a gated unit. existingPath uses it verbatim (no second cut);
+		//    a task + autoRoute wires the verify gate (if the repo has a detectable verify command). Once
+		//    create() owns the worktree we do NOT remove it on error — the unit record may already exist
+		//    (removing it would strand the record + driver); a truly orphaned worktree is reaped later.
+		try {
+			const dto = await this.create(
+				{ repo, existingPath: worktree, task: adoptBrief(args.harness, changedCount, untracked.length), autoRoute: true },
+				actor,
+			);
+			void this.recordAudit(actor, "adopt", dto.id, "ok", `${label} → ${dto.name} (${changedCount} changed, ${untracked.length} new)`);
+			return { ok: true, agent: dto };
+		} catch (err) {
+			return { ok: false, reason: `unit creation failed (worktree ${worktree} left for the reaper): ${errText(err)}` };
+		}
 	}
 
 	// ── Roster mutation ───────────────────────────────────────────────────────
