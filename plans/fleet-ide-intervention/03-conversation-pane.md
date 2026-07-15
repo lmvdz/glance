@@ -1,6 +1,6 @@
 # I03 — conversation pane (the unit's live ACP conversation)
 
-STATUS: in-review (glance-desktop#18)
+STATUS: done (glance-desktop#18, merged)
 PRIORITY: p1
 REPOS: glance-desktop
 COMPLEXITY: architectural
