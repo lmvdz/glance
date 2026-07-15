@@ -1,5 +1,5 @@
 # Signal-ranked reducer module (output-reduce.ts + text-util.ts)
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural

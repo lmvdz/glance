@@ -6,7 +6,12 @@
  * validator.ts). That drops evidence a human investigating a veto/pass can never recover. This
  * module keeps the FULL text durable on disk (one plain log file per write, path = pointer) and
  * hands the judge a deterministic, budget-bounded excerpt instead, with a pointer line back to
- * the full file.
+ * the full file. "Full" here means lossless except secret-shaped substrings, which are redacted
+ * (`redact()`, src/redact.ts) before the write — the judge-facing excerpt built by
+ * `budgetedExcerpt` is sliced from the UNREDACTED input by design (redaction happens at the
+ * persistence boundary only, never mid-pipeline, so a judge excerpting an oversized diff never
+ * sees a `[REDACTED]` substitution where a real line was — see plans/noisegate-compaction/DESIGN.md
+ * "Redaction").
  *
  * Storage shape: `<stateDir>/gate-logs/<agentId>/<ts>-<nonce>-<kind>.log`. `<nonce>` (not just the
  * millisecond timestamp) is load-bearing — the criteria judge and up to `OMP_SQUAD_LENS_MAX` lens
@@ -20,6 +25,7 @@ import { randomBytes } from "node:crypto";
 import * as path from "node:path";
 import { getStorageBackend } from "./dal/storage.ts";
 import { errText } from "./err-text.ts";
+import { redact } from "./redact.ts";
 import { resolveStateDir } from "./state-dir.ts";
 
 let gateLogRoot = path.join(resolveStateDir(), "gate-logs");
@@ -36,14 +42,17 @@ function safeSegment(s: string, fallback: string): string {
 	return cleaned.length > 0 ? cleaned : fallback;
 }
 
-/** Durably persist the FULL `content` for one agent's gate-log stream. Returns the pointer path and
- *  byte size. Unique path per call — see module doc; never reused, never appended to. */
+/** Durably persist `content` (redacted — see module doc) for one agent's gate-log stream. Returns
+ *  the pointer path and the ORIGINAL (pre-redaction) byte size: callers report this in a
+ *  `[N bytes omitted — full: <path>]` pointer describing how much of the ORIGINAL text isn't in
+ *  their excerpt, so it must stay original-length even though fewer bytes actually hit disk.
+ *  Unique path per call — see module doc; never reused, never appended to. */
 export async function writeGateLog(agentId: string, kind: string, content: string): Promise<{ path: string; bytes: number }> {
 	const ts = Date.now();
 	const nonce = randomBytes(4).toString("hex");
 	const dir = path.join(gateLogRoot, safeSegment(agentId, "unknown"));
 	const file = path.join(dir, `${ts}-${nonce}-${safeSegment(kind, "log")}.log`);
-	await getStorageBackend().writeDurable(file, content);
+	await getStorageBackend().writeDurable(file, redact(content));
 	return { path: file, bytes: Buffer.byteLength(content, "utf8") };
 }
 
