@@ -1,6 +1,6 @@
 # Epic I — Shared-workspace intervention
 
-STATUS: blocked
+STATUS: expanded (plans/fleet-ide-intervention/, 2026-07-15 — trigger met, C04–C07+B03 merged)
 PRIORITY: p2
 REPOS: glance-desktop, omp-squad
 COMPLEXITY: architectural
