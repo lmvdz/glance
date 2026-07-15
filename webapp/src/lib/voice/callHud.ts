@@ -131,6 +131,27 @@ export function reconnectNoticeText(hasRecap: boolean): string {
 }
 
 // =============================================================================
+// Push-enable nudge (voice-loop concern 05, DESIGN.md "Push lane": the whole away-loop is inert if
+// notification permission was never requested). Pure decision + pinned copy; the pill renders it
+// styled like the `reconnectNotice` banner above. `permission` mirrors `../push.ts`'s
+// `pushPermission()` return shape exactly — `NotificationPermission`'s three values plus
+// `'unsupported'` for a browser with no Notification API at all. `dismissedThisCall` is per-call
+// React state owned by `VoiceCallPill.tsx` (no persistence) — a once-per-call whisper, not a nag,
+// that resets on the next call regardless of what happened on this one.
+// =============================================================================
+
+/** The nudge's one-line copy — pinned here, not inline in the component, so this file and the
+ *  concern doc can never quietly drift apart (same convention as `reconnectNoticeText`). */
+export const PUSH_NUDGE_TEXT = 'Enable notifications to get pinged when agents finish';
+
+/** `'default'` (never asked) is the only state that shows anything: `'granted'`/`'denied'` are
+ *  already-settled browser-side decisions (nothing left to nudge toward, and "the browser said
+ *  no" must be respected, not re-prompted), and `'unsupported'` has no Notification API to ask. */
+export function shouldShowPushNudge(permission: 'default' | 'granted' | 'denied' | 'unsupported', dismissedThisCall: boolean): boolean {
+  return permission === 'default' && !dismissedThisCall;
+}
+
+// =============================================================================
 // Error → toast copy (BUILD item 5: "distinct toasts ... no retry loops"). One sentence per code,
 // exhaustive over `VoiceSessionErrorInfo['code']` — a future 5th code fails this file's build
 // (missing switch arm) rather than silently falling through to a generic message.

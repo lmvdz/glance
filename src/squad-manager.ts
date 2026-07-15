@@ -681,6 +681,14 @@ interface AgentRecord {
 	 *  closeOrphanedPending seeds this from the (already-hydrated, so cheap) in-memory ring's entries for
 	 *  the prior agent id, so a fresh-id lineage stitch doesn't reset the flapping signal to zero. */
 	errorTransitionTimestamps?: number[];
+	/** Voice-loop completion push: set true when a `workflow_done` frame lands, consumed (and cleared) by
+	 *  the `agent_end` frame the workflow driver always pairs it with immediately after (execRun's
+	 *  cleanup — see workflow-driver.ts) — distinguishes the graph's real terminal completion from an
+	 *  intermediate per-run `agent_end` (a human-gate/checkpoint boundary mid-graph, which never carries a
+	 *  preceding `workflow_done`). In-memory only, never persisted — a fresh daemon boot has no in-flight
+	 *  frame pair to track. Read by `onAgentEvent`'s `agent_end` case to gate `dto.voicePushArmed`
+	 *  exposure so a multi-node workflow never mistakes a mid-graph idle blip for its actual finish. */
+	workflowJustFinished?: boolean;
 }
 
 export interface SquadManagerOptions {
@@ -1611,6 +1619,10 @@ export class SquadManager extends EventEmitter {
 				// Resume the graph from its checkpoint; without this the adopted workflow restarts from
 				// scratch — re-running completed stages and re-committing their work (OMPSQ-165).
 				workflowState: p.workflowState,
+				// Completion-push arm survives orphan-adoption too — a voice-dispatched agent that produced
+				// real work, went idle, and never got its push before the daemon restarted still owes it
+				// under its freshly-minted post-adopt id (see createWithId's own comment on this field).
+				voicePushArmed: p.voicePushArmed,
 				sandbox: p.sandbox,
 				autoRoute: false,
 				bypassCap: true,
@@ -4470,6 +4482,16 @@ export class SquadManager extends EventEmitter {
 			// `opts.verifyMode` at the routing call site) — so this formula covers BOTH the routed and the
 			// explicit-verify-mode paths without re-deriving the router's decision here.
 			routing: { mode: opts.verifyMode ?? "none", tier: tierOf(thinking), thinking, routedAt: Date.now(), routedModel },
+			// Completion-push arm (voice-loop): a voice-sourced spawn (`/api/spawn` with `source:"voice"`)
+			// owes the operator exactly one "finished" push once this dispatch's TERMINAL signal lands (see
+			// onAgentEvent's "agent_end"/"workflow_done" handling — a workflow spawn arms here but only
+			// fires once the whole graph, not an intermediate node, is done). Persisted so the latch
+			// survives a daemon restart mid-dispatch. `opts.voicePushArmed` (not just `source`) also arms:
+			// the orphan-adopt boot path (adoptOrphanedAgents) mints a fresh id via THIS same createWithId
+			// rather than reusing the persisted record verbatim, so it carries the latch forward through
+			// `opts` — without this an armed agent that restart-adopts under a new id silently loses the
+			// one push it owed.
+			voicePushArmed: source === "voice" || opts.voicePushArmed === true ? true : undefined,
 		};
 
 		// Delivery confirmation (concern 02 / DESIGN.md "Membrane measurement"): a requested efficiency
@@ -5190,6 +5212,15 @@ export class SquadManager extends EventEmitter {
 				// agent actually received. `displayText` (when the client sent one) is the user's bare
 				// typed text; the UI renders that and falls back to `text` for older clients.
 				this.append(rec, "user", cmd.message, { clientTurnId: cmd.clientTurnId, displayText: cmd.displayText });
+				// Completion-push arm (voice-loop): a voice-sourced prompt owes the operator exactly one
+				// "finished" push once this dispatch settles — armed here (persisted, restart-safe),
+				// disarmed by the push actually sending or by a voice-sourced interrupt (see the "interrupt"
+				// case below and push.ts's `voiceDonePayload`). Re-arming an already-armed agent (a second
+				// voice prompt before the first one's push fired) is a harmless no-op write.
+				if (commandSource(cmd) === "voice" && rec.options.voicePushArmed !== true) {
+					rec.options.voicePushArmed = true;
+					void this.persist();
+				}
 				rec.streaming = true;
 				this.transition(rec, "working", "task-start");
 				this.emitAgent(rec);
@@ -5236,6 +5267,16 @@ export class SquadManager extends EventEmitter {
 			}
 			case "interrupt":
 				await rec.agent.abort().catch(() => {});
+				// Completion-push disarm (voice-loop): the operator cancelled the work themselves — a
+				// "finished" push would be a lie. Deliberately source-blind: a TYPED stop of voice-dispatched
+				// work is still the operator killing it (the cancel's own agent_end would otherwise read as a
+				// terminal idle and fire the push). Clears both the persisted latch and its DTO projection so
+				// no stale `true` can ride a later unrelated idle transition.
+				if (rec.options.voicePushArmed === true) {
+					rec.options.voicePushArmed = false;
+					rec.dto.voicePushArmed = false;
+					void this.persist();
+				}
 				void this.recordAudit(actor, "interrupt", cmd.id, "ok", undefined, commandSource(cmd));
 				break;
 			case "kill":
@@ -5939,9 +5980,26 @@ export class SquadManager extends EventEmitter {
 				rec.completedTurn = true; // a fully completed turn — see the field comment; feeds the exit classifier
 				this.expireReplayedPending(rec); // a completed live turn proves any still-open replayed pending is stale
 				void this.finalizeRun(rec);
+				// Completion-push exposure (voice-loop): a non-workflow agent's `agent_end` IS its terminal
+				// signal — every turn ends the one voice-armed dispatch it was armed for. A workflow-kind
+				// agent's `agent_end` is terminal ONLY when `workflow_done` just fired for this exact frame
+				// pair (`workflowJustFinished`, set in that case below) — an intermediate per-run `agent_end`
+				// (a human-gate/checkpoint boundary mid-graph) must never expose the latch, or a multi-node
+				// workflow would push — and self-disarm — on the first mid-graph idle, long before the graph
+				// is actually done. `dto.voicePushArmed` is deliberately re-derived on EVERY agent_end (not
+				// just when armed) so a stale `true` from a prior cycle can never leak onto an unrelated idle.
+				{
+					const isTerminal = rec.options.kind !== "workflow" || rec.workflowJustFinished === true;
+					rec.workflowJustFinished = false; // consume — never leak into the next agent_end
+					rec.dto.voicePushArmed = isTerminal && rec.options.voicePushArmed === true;
+				}
 				break;
 			}
 			case "workflow_done":
+				// Completion-push exposure (voice-loop): workflow-driver.ts's execRun cleanup always emits
+				// this frame immediately followed by `agent_end` — set here, consumed there (see the
+				// `agent_end` case above and `workflowJustFinished`'s field comment).
+				rec.workflowJustFinished = true;
 				// Baseline (concern 01): first-try-green / fixups-to-green / escalation, unconditional —
 				// the measurement the rest of the learning loop is A/B'd against. Never gates anything.
 				this.recordWorkflowOutcomeMetrics(rec, frame.outcome as string | undefined);
@@ -8185,6 +8243,17 @@ export class SquadManager extends EventEmitter {
 	/** Available slash commands for an agent (builtin + skills + extensions), if known. */
 	commandsFor(id: string): CommandInfo[] | undefined {
 		return this.agents.get(id)?.commands;
+	}
+
+	/** Completion-push disarm (voice-loop): called by the server, after its background push actually
+	 *  sends, to consume the one-push-per-voice-dispatch latch. A no-op if the agent isn't resident (a
+	 *  raced remove/eviction between the push firing and this call landing) or already disarmed. */
+	clearVoicePushArmed(id: string): void {
+		const rec = this.agents.get(id);
+		if (!rec || rec.options.voicePushArmed !== true) return;
+		rec.options.voicePushArmed = false;
+		rec.dto.voicePushArmed = false;
+		void this.persist();
 	}
 
 	/** Proactively pull commands on (re)connect — omp's startup push may predate our wiring. */

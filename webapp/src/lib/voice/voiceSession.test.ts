@@ -1362,6 +1362,240 @@ test('VoiceSession.queueInjection: two queued batches drain one at a time, never
 });
 
 // =================================================================================================
+// Concern 03: queueInjection's optional onDone completion callback. `cancelled: false` fires ONLY
+// when the batch's OWN response (correlated by response id, never the outstanding counter) reaches
+// response.done with status 'completed'. Every other fate — barge-in, disconnect, rotation/reconnect
+// tearing down the connection it was sent on, and the wedge watchdog — resolves cancelled: true.
+// =================================================================================================
+
+test('VoiceSession.queueInjection: existing one-arg call sites are unaffected (no onDone, no crash)', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  h.session.queueInjection([{ text: 'no callback' }]);
+  serverEvent(h, { type: 'response.created' });
+  serverEvent(h, { type: 'response.done' });
+  expect(h.session.getState()).toBe('idle');
+});
+
+test("VoiceSession.queueInjection: onDone fires {cancelled:false} once the injection's OWN response completes normally", async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  const results: { cancelled: boolean }[] = [];
+  h.session.queueInjection([{ text: 'debrief' }], (info) => results.push(info));
+  expect(h.session.getState()).toBe('awaitingResponse'); // flushed immediately (idle)
+  expect(results).toEqual([]);
+
+  serverEvent(h, { type: 'response.created', response: { id: 'resp-inj' } });
+  expect(results).toEqual([]); // response.created alone never resolves it
+
+  serverEvent(h, { type: 'response.done', response: { id: 'resp-inj', status: 'completed' } });
+  expect(results).toEqual([{ cancelled: false }]);
+});
+
+test('VoiceSession.queueInjection: barge-in mid-injection resolves onDone {cancelled:true} via the cancelled response.done', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  const results: { cancelled: boolean }[] = [];
+  h.session.queueInjection([{ text: 'debrief' }], (info) => results.push(info));
+  serverEvent(h, { type: 'response.created', response: { id: 'resp-inj' } });
+  expect(h.session.getState()).toBe('speaking');
+
+  h.session.pttPress(); // barge-in: response.cancel sent, state -> userRecording
+  expect(results).toEqual([]); // still correlated to resp-inj's own eventual response.done
+
+  serverEvent(h, { type: 'response.done', response: { id: 'resp-inj', status: 'cancelled' } });
+  expect(results).toEqual([{ cancelled: true }]);
+});
+
+test("VoiceSession.queueInjection: response.done status 'failed' or 'incomplete' both resolve onDone {cancelled:true}", async () => {
+  for (const status of ['failed', 'incomplete']) {
+    const h = makeHarness();
+    await h.session.connect();
+    const results: { cancelled: boolean }[] = [];
+    h.session.queueInjection([{ text: 'debrief' }], (info) => results.push(info));
+    serverEvent(h, { type: 'response.created', response: { id: 'resp-inj' } });
+    serverEvent(h, { type: 'response.done', response: { id: 'resp-inj', status } });
+    expect(results).toEqual([{ cancelled: true }]);
+  }
+});
+
+test('VoiceSession.queueInjection: disconnect() with the batch still queued (never flushed) resolves onDone {cancelled:true}', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  h.session.pttPress(); // userRecording — the injection can't flush yet
+  const results: { cancelled: boolean }[] = [];
+  h.session.queueInjection([{ text: 'debrief' }], (info) => results.push(info));
+  expect(h.session.getState()).toBe('userRecording');
+
+  h.session.disconnect();
+  expect(results).toEqual([{ cancelled: true }]);
+});
+
+test('VoiceSession.queueInjection: disconnect() with the batch already sent, awaiting response.created, resolves onDone {cancelled:true}', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  const results: { cancelled: boolean }[] = [];
+  h.session.queueInjection([{ text: 'debrief' }], (info) => results.push(info));
+  expect(h.session.getState()).toBe('awaitingResponse'); // flushed immediately, response.created not yet arrived
+
+  h.session.disconnect();
+  expect(results).toEqual([{ cancelled: true }]);
+});
+
+test('VoiceSession.queueInjection: disconnect() after response.created but before response.done resolves onDone {cancelled:true}', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  const results: { cancelled: boolean }[] = [];
+  h.session.queueInjection([{ text: 'debrief' }], (info) => results.push(info));
+  serverEvent(h, { type: 'response.created', response: { id: 'resp-inj' } });
+
+  h.session.disconnect();
+  expect(results).toEqual([{ cancelled: true }]);
+});
+
+test('VoiceSession.queueInjection: two queued batches each resolve their own onDone in order', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  const results: string[] = [];
+  h.session.queueInjection([{ text: 'first' }], (info) => results.push(`first:${info.cancelled}`));
+  h.session.queueInjection([{ text: 'second' }], (info) => results.push(`second:${info.cancelled}`));
+
+  serverEvent(h, { type: 'response.created', response: { id: 'resp-1' } });
+  expect(results).toEqual([]);
+  serverEvent(h, { type: 'response.done', response: { id: 'resp-1', status: 'completed' } });
+  expect(results).toEqual(['first:false']); // first batch's own response.done — second hasn't flushed yet
+
+  serverEvent(h, { type: 'response.created', response: { id: 'resp-2' } });
+  serverEvent(h, { type: 'response.done', response: { id: 'resp-2', status: 'completed' } });
+  expect(results).toEqual(['first:false', 'second:false']);
+});
+
+test('VoiceSession.queueInjection: a throwing onDone is caught and never breaks the state machine (never invoked into the reducer)', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  h.session.queueInjection([{ text: 'debrief' }], () => {
+    throw new Error('boom');
+  });
+  serverEvent(h, { type: 'response.created', response: { id: 'resp-inj' } });
+  expect(() => serverEvent(h, { type: 'response.done', response: { id: 'resp-inj', status: 'completed' } })).not.toThrow();
+  expect(h.session.getState()).toBe('idle');
+});
+
+test('VoiceSession.queueInjection: response.created with no response id on the wire cannot correlate the eventual response.done, resolves onDone {cancelled:true} immediately', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  const results: { cancelled: boolean }[] = [];
+  h.session.queueInjection([{ text: 'debrief' }], (info) => results.push(info));
+  serverEvent(h, { type: 'response.created' }); // no response.id on the wire
+  expect(results).toEqual([{ cancelled: true }]);
+});
+
+test('VoiceSession.queueInjection: a conversation_already_has_active_response rejection resolves the popped onDone {cancelled:true} (CRITICAL-1 belt-and-braces)', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  const results: { cancelled: boolean }[] = [];
+  h.session.queueInjection([{ text: 'debrief' }], (info) => results.push(info));
+  expect(h.session.getState()).toBe('awaitingResponse');
+
+  serverEvent(h, { type: 'error', error: { code: 'conversation_already_has_active_response', message: 'already active' } });
+  expect(results).toEqual([{ cancelled: true }]);
+});
+
+test('wedge watchdog: recovery resolves any injection onDone sent-but-uncorrelated as {cancelled:true}', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  const results: { cancelled: boolean }[] = [];
+  h.session.queueInjection([{ text: 'debrief' }], (info) => results.push(info));
+  expect(h.session.getState()).toBe('awaitingResponse'); // sent, but no response.created ever arrives
+
+  h.nowValue = 13_000; // past AWAITING_WEDGE_MS with zero server events
+  fireTimer(h, 5_000); // the watchdog poll
+
+  expect(h.session.getState()).toBe('idle');
+  expect(results).toEqual([{ cancelled: true }]);
+});
+
+test('rotation/reconnect: an unexpected disconnect while an injection response is in flight resolves onDone {cancelled:true}', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  const results: { cancelled: boolean }[] = [];
+  h.session.queueInjection([{ text: 'debrief' }], (info) => results.push(info));
+  serverEvent(h, { type: 'response.created', response: { id: 'resp-inj' } });
+  expect(h.session.getState()).toBe('speaking');
+
+  const dc = h.dataChannels[h.dataChannels.length - 1]!;
+  dc.onclose?.(); // unexpected drop -> silent reconnect; teardownConnection() runs synchronously first
+  expect(results).toEqual([{ cancelled: true }]);
+  await flush(); // let the reconnect attempt itself settle — no further callback fires
+  expect(results).toEqual([{ cancelled: true }]);
+});
+
+// -------------------------------------------------------------------------------------------------
+// Deferred edge case: the flush's OWN response.create can itself be the thing CRITICAL-1's
+// sendRaw defers, when the machine lands on idle (via ptt-abort) while outstandingResponses hasn't
+// yet dropped to zero (a barge-in's response.cancel was sent, but its response.done hasn't arrived).
+// flushInjectionQueue's dispatch({type:'injection-flushed'}) still fires unconditionally (moving the
+// machine to awaitingResponse) even though the actual wire send was deferred, not sent.
+// -------------------------------------------------------------------------------------------------
+
+/** Drives the machine into the deferred-flush shape: a user turn, barged in on before its own
+ *  response.done arrives, with an injection queued and then ptt-abort'd into idle — landing
+ *  `flushInjectionQueue`'s own response.create in `deferredResponseCreate` (not actually sent). */
+function setupDeferredInjectionFlush(h: Harness, onDone: (info: { cancelled: boolean }) => void): void {
+  h.session.pttPress();
+  h.session.pttRelease();
+  serverEvent(h, { type: 'response.created', response: { id: 'resp-user' } });
+  expect(h.session.getState()).toBe('speaking');
+  h.session.pttPress(); // barge-in on resp-user: response.cancel sent, resp-user's response.done pending
+  expect(h.session.getState()).toBe('userRecording');
+  h.session.queueInjection([{ text: 'debrief' }], onDone);
+  expect(h.session.getState()).toBe('userRecording'); // just queued, not flushed
+  h.session.pttAbort(); // discard the (empty) recording -> idle -> flush fires while resp-user is still open
+  expect(h.session.getState()).toBe('awaitingResponse'); // injection-flushed dispatch fires regardless of the defer
+}
+
+test('deferred flush: eventually sends for real once the wrapping response.done arrives, and correlates normally', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  const results: { cancelled: boolean }[] = [];
+  setupDeferredInjectionFlush(h, (info) => results.push(info));
+  expect(results).toEqual([]); // not sent yet
+
+  const createsBefore = lastSent(h).filter((s) => s.type === 'response.create').length;
+  serverEvent(h, { type: 'response.done', response: { id: 'resp-user', status: 'cancelled' } }); // releases the deferred send
+  expect(lastSent(h).filter((s) => s.type === 'response.create').length).toBe(createsBefore + 1);
+  expect(results).toEqual([]); // now correlating against ITS OWN response, not resp-user's
+
+  serverEvent(h, { type: 'response.created', response: { id: 'resp-inj' } });
+  serverEvent(h, { type: 'response.done', response: { id: 'resp-inj', status: 'completed' } });
+  expect(results).toEqual([{ cancelled: false }]);
+});
+
+test('deferred flush: dropped by a subsequent pttPress (a second barge-in) resolves onDone {cancelled:true} and is never sent', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  const results: { cancelled: boolean }[] = [];
+  setupDeferredInjectionFlush(h, (info) => results.push(info));
+
+  const createsBefore = lastSent(h).filter((s) => s.type === 'response.create').length;
+  h.session.pttPress(); // a SECOND barge-in supersedes the still-deferred injection continuation
+  expect(results).toEqual([{ cancelled: true }]);
+  expect(lastSent(h).filter((s) => s.type === 'response.create').length).toBe(createsBefore); // never sent
+});
+
+test('deferred flush: dropped by an input_audio_buffer_commit_empty error resolves onDone {cancelled:true} and is never sent', async () => {
+  const h = makeHarness();
+  await h.session.connect();
+  const results: { cancelled: boolean }[] = [];
+  setupDeferredInjectionFlush(h, (info) => results.push(info));
+
+  const createsBefore = lastSent(h).filter((s) => s.type === 'response.create').length;
+  serverEvent(h, { type: 'error', error: { code: 'input_audio_buffer_commit_empty', message: 'buffer too small' } });
+  expect(results).toEqual([{ cancelled: true }]);
+  expect(lastSent(h).filter((s) => s.type === 'response.create').length).toBe(createsBefore); // never sent
+});
+
+// =================================================================================================
 // Lifecycle: proactive re-mint quiescence gating + recap carry-over
 // =================================================================================================
 

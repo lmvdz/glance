@@ -8,6 +8,9 @@ const baseProps = {
   elapsedLabel: '0:07',
   costLabel: '~$0.02',
   reconnectNotice: null as string | null,
+  showPushNudge: false,
+  onEnablePush: () => {},
+  onDismissPushNudge: () => {},
   pttEngaged: false,
   panelOpen: false,
   onPttDown: () => {},
@@ -51,6 +54,23 @@ describe('VoiceCallPillView', () => {
     const idleHtml = renderToStaticMarkup(<VoiceCallPillView {...baseProps} pttEngaged={false} />);
     const engagedHtml = renderToStaticMarkup(<VoiceCallPillView {...baseProps} pttEngaged />);
     expect(idleHtml).not.toBe(engagedHtml);
+  });
+
+  // voice-loop concern 05: the push-enable nudge (shown only while `shouldShowPushNudge` says so —
+  // its own decision table is tested in callHud.test.ts; this pins the two render branches).
+  describe('push-enable nudge', () => {
+    test('shows the nudge copy and Enable action when showPushNudge is true', () => {
+      const html = renderToStaticMarkup(<VoiceCallPillView {...baseProps} showPushNudge />);
+      expect(html).toContain('Enable notifications to get pinged when agents finish');
+      expect(html).toContain('Enable');
+      expect(html).toContain('Dismiss notification nudge');
+    });
+
+    test('omits the nudge entirely when showPushNudge is false', () => {
+      const html = renderToStaticMarkup(<VoiceCallPillView {...baseProps} showPushNudge={false} />);
+      expect(html).not.toContain('Enable notifications to get pinged when agents finish');
+      expect(html).not.toContain('Dismiss notification nudge');
+    });
   });
 
   // MAJOR-1: the pill's own fixed anchor must clear both the Agent FAB (App.tsx: `fixed bottom-4

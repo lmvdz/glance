@@ -45,14 +45,28 @@ self.addEventListener("push", (e) => {
 	}
 	const title = d.title || "glance";
 	e.waitUntil(
-		self.registration.showNotification(title, {
-			body: d.body || "",
-			tag: d.tag || "ompsq",
-			data: { url: d.url || "/" },
-			icon: "/icon-192.png",
-			badge: "/icon-192.png",
-			renotify: true,
-		}),
+		// If a glance window is visible on this device right now, the operator is
+		// already looking at whatever the push points at — an OS notification would
+		// just be noise on top of the live view. This also stands in for the
+		// live-call beacon that was cut from the voice-loop design: during a call the
+		// tab is normally visible, so completion pushes go quiet on that device and
+		// still fire on any other (pocket) device that isn't looking. On matchAll
+		// failure, fail toward notifying — never toward silence.
+		self.clients
+			.matchAll({ type: "window", includeUncontrolled: true })
+			.then((cls) => cls.some((c) => c.visibilityState === "visible"))
+			.catch(() => false)
+			.then((visible) => {
+				if (visible) return;
+				return self.registration.showNotification(title, {
+					body: d.body || "",
+					tag: d.tag || "ompsq",
+					data: { url: d.url || "/" },
+					icon: "/icon-192.png",
+					badge: "/icon-192.png",
+					renotify: true,
+				});
+			}),
 	);
 });
 

@@ -12,10 +12,12 @@ import {
   shouldEndCallForIdle,
   shouldEndCallForMaxDuration,
   shouldForceReleaseForWatchdog,
+  shouldShowPushNudge,
   voiceStateLabel,
   CALL_IDLE_TIMEOUT_MS,
   MAX_CALL_DURATION_MS,
   MAX_PTT_HOLD_MS,
+  PUSH_NUDGE_TEXT,
   VOICE_COST_PER_MINUTE_USD_ESTIMATE,
   PTT_MIN_TURN_MS,
   PTT_TAP_THRESHOLD_MS,
@@ -110,6 +112,35 @@ describe('reconnectNoticeText', () => {
 
   test('is honest when there was nothing to recap', () => {
     expect(reconnectNoticeText(false)).toBe('Reconnected.');
+  });
+});
+
+describe('shouldShowPushNudge (voice-loop concern 05: notification-permission nudge)', () => {
+  test('pins the exact nudge copy so this file and the concern doc can never quietly drift apart', () => {
+    expect(PUSH_NUDGE_TEXT).toBe('Enable notifications to get pinged when agents finish');
+  });
+
+  test('shows only for "default" (never asked) permission, undismissed', () => {
+    expect(shouldShowPushNudge('default', false)).toBe(true);
+  });
+
+  test('a per-call dismiss hides it even while permission is still "default"', () => {
+    expect(shouldShowPushNudge('default', true)).toBe(false);
+  });
+
+  test('granted permission hides it — nothing left to nudge toward', () => {
+    expect(shouldShowPushNudge('granted', false)).toBe(false);
+    expect(shouldShowPushNudge('granted', true)).toBe(false);
+  });
+
+  test('denied permission hides it — the browser said no, don\'t re-prompt', () => {
+    expect(shouldShowPushNudge('denied', false)).toBe(false);
+    expect(shouldShowPushNudge('denied', true)).toBe(false);
+  });
+
+  test('unsupported (no Notification API) hides it — nothing to ask', () => {
+    expect(shouldShowPushNudge('unsupported', false)).toBe(false);
+    expect(shouldShowPushNudge('unsupported', true)).toBe(false);
   });
 });
 

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Mic, PhoneOff } from 'lucide-react';
+import { Mic, PhoneOff, X } from 'lucide-react';
 import {
   bindingBannerText,
   estimateCallCostUsd,
@@ -7,11 +7,14 @@ import {
   formatElapsed,
   nextPttUiState,
   shouldForceReleaseForWatchdog,
+  shouldShowPushNudge,
   voiceStateLabel,
+  PUSH_NUDGE_TEXT,
   type CallHudPhase,
   type PttGestureEvent,
   type PttUiMode,
 } from '../../lib/voice/callHud';
+import { enablePush, pushPermission } from '../../lib/push';
 import { useVoiceCall } from '../../context/VoiceCallContext';
 import { useTaskContext } from '../../context/TaskContext';
 
@@ -30,6 +33,11 @@ export interface VoiceCallPillViewProps {
   elapsedLabel: string;
   costLabel: string;
   reconnectNotice: string | null;
+  /** Push-enable nudge (voice-loop concern 05): `true` only while the decision helper
+   *  (`shouldShowPushNudge`) says so — `default` permission, not yet dismissed this call. */
+  showPushNudge: boolean;
+  onEnablePush: () => void;
+  onDismissPushNudge: () => void;
   pttEngaged: boolean;
   /** MAJOR-1: the chat panel is docked to the right edge of the screen, and the composer sits at
    *  ITS bottom — the same rectangle a bottom-right `fixed` pill would otherwise sit on top of.
@@ -53,6 +61,9 @@ export const VoiceCallPillView = ({
   elapsedLabel,
   costLabel,
   reconnectNotice,
+  showPushNudge,
+  onEnablePush,
+  onDismissPushNudge,
   pttEngaged,
   panelOpen,
   onPttDown,
@@ -69,6 +80,35 @@ export const VoiceCallPillView = ({
     {reconnectNotice && (
       <div className="rounded-lg bg-amber-50 px-2 py-1 text-[11px] font-medium text-amber-700 dark:bg-amber-900/20 dark:text-amber-400" role="alert">
         {reconnectNotice}
+      </div>
+    )}
+    {/* Push-enable nudge (voice-loop concern 05): styled like the reconnect banner above it — same
+        amber "heads up" treatment — but interactive (an inline Enable action + a per-call dismiss),
+        since unlike the reconnect notice this one asks for something rather than just reporting. */}
+    {showPushNudge && (
+      <div
+        className="flex items-center justify-between gap-2 rounded-lg bg-amber-50 px-2 py-1 text-[11px] font-medium text-amber-700 dark:bg-amber-900/20 dark:text-amber-400"
+        role="status"
+      >
+        <span className="truncate">{PUSH_NUDGE_TEXT}</span>
+        <div className="flex flex-shrink-0 items-center gap-1">
+          <button
+            type="button"
+            onClick={onEnablePush}
+            className="rounded px-1.5 py-0.5 font-semibold text-amber-800 underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-amber-300"
+          >
+            Enable
+          </button>
+          <button
+            type="button"
+            aria-label="Dismiss notification nudge"
+            title="Dismiss"
+            onClick={onDismissPushNudge}
+            className="flex h-4 w-4 flex-shrink-0 items-center justify-center rounded text-amber-500 hover:text-amber-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-amber-500 dark:hover:text-amber-300"
+          >
+            <X className="h-3 w-3" aria-hidden />
+          </button>
+        </div>
       </div>
     )}
     <div className="flex items-center justify-between gap-2">
@@ -126,6 +166,29 @@ export const VoiceCallPill = () => {
   const { isChatOpen } = useTaskContext();
   const [pttMode, setPttMode] = useState<PttUiMode>('idle');
   const pressedAtRef = useRef(0);
+  // Push-enable nudge (voice-loop concern 05): permission is read once at mount (this pill is
+  // mounted once at provider level, see the header comment, and just renders null between calls)
+  // and refreshed on every call-start edge plus after `enablePush()` resolves. `pushNudgeDismissed`
+  // is per-call — reset on the SAME edge — so a dismiss on one call never suppresses the nudge on
+  // the next.
+  const [pushPerm, setPushPerm] = useState<'default' | 'granted' | 'denied' | 'unsupported'>(() => pushPermission());
+  const [pushNudgeDismissed, setPushNudgeDismissed] = useState(false);
+
+  useEffect(() => {
+    if (!call.isCallActive) return;
+    setPushPerm(pushPermission());
+    setPushNudgeDismissed(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally re-armed only on the isCallActive rising edge, not on every binding update (e.g. mid-call agentId rebinding)
+  }, [call.isCallActive]);
+
+  const handleEnablePush = () => {
+    // enablePush() itself requires a user gesture (browsers reject Notification.requestPermission
+    // otherwise) — this handler IS that gesture, wired straight to the button's onClick. Re-read
+    // permission from the source of truth after it resolves rather than trusting its return value
+    // directly, so this stays correct even if a future call site of pushPermission() diverges.
+    void enablePush().then(() => setPushPerm(pushPermission()));
+  };
+  const handleDismissPushNudge = () => setPushNudgeDismissed(true);
 
   const applyGesture = (event: PttGestureEvent, holdMs: number) => {
     const result = nextPttUiState(pttMode, event, holdMs);
@@ -192,6 +255,9 @@ export const VoiceCallPill = () => {
       elapsedLabel={formatElapsed(call.elapsedMs)}
       costLabel={formatCallCost(estimateCallCostUsd(call.elapsedMs))}
       reconnectNotice={call.reconnectNotice}
+      showPushNudge={shouldShowPushNudge(pushPerm, pushNudgeDismissed)}
+      onEnablePush={handleEnablePush}
+      onDismissPushNudge={handleDismissPushNudge}
       pttEngaged={pttMode !== 'idle'}
       panelOpen={isChatOpen}
       onPttDown={handleDown}
