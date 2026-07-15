@@ -10,6 +10,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { CONSOLE_SYSTEM_PROMPT } from "./console-prompt.ts";
 import { existsSync, readFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -27,6 +28,7 @@ import { decodeClientCommand } from "./schema/client-command.ts";
 import {
 	AgentLandBodySchema,
 	AgentModeBodySchema,
+	AgentPromoteBodySchema,
 	AgentVisionBodySchema,
 	AnnotationCreateBodySchema,
 	AnnotationSendBodySchema,
@@ -190,9 +192,9 @@ function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T
 	]);
 }
 
-export const CONSOLE_SYSTEM_PROMPT = `You are the omp-squad interactive console agent.
-
-Default to chat, diagnosis, and concise guidance. Do not create features, issues, worktrees, workflows, files, commits, or other durable changes unless the user explicitly asks you to start/implement/change something. When the user asks a question, answer the question directly. When current feature context is included, use it as background, not as an instruction to mutate state. Keep replies terse and operator-focused.`;
+// The console system prompt now lives in ./console-prompt.ts so promote() (squad-manager) can detect
+// and strip it precisely; re-exported here for existing importers.
+export { CONSOLE_SYSTEM_PROMPT };
 
 /**
  * Inert opt-in serve seam for the Vite SPA rewrite. DEFAULT OFF: requires BOTH the explicit
@@ -2432,6 +2434,16 @@ export class SquadServer {
 			const dto = await manager.transitionMode(decodeURIComponent(mmode[1]), mode, actor, reason);
 			if (!dto) return new Response("no such agent", { status: 404 });
 			return Response.json(dto);
+		}
+		const mpromote = url.pathname.match(/^\/api\/agents\/([^/]+)\/promote$/);
+		if (mpromote && req.method === "POST") {
+			const body = decodeBodyOrEmpty(AgentPromoteBodySchema, await req.json().catch(() => null));
+			const task = typeof body.task === "string" ? body.task : undefined;
+			const mode = body.mode != null ? validateRequestedMode(body.mode) : undefined;
+			if (body.mode != null && !mode) return new Response("invalid mode", { status: 400 });
+			const result = await manager.promote(decodeURIComponent(mpromote[1]), { task, mode: mode ?? undefined }, actor);
+			const status = result.ok ? 200 : result.reason === "no such agent" ? 404 : 409;
+			return Response.json(result, { status });
 		}
 		const mvision = url.pathname.match(/^\/api\/agents\/([^/]+)\/vision$/);
 		if (mvision && req.method === "POST") {

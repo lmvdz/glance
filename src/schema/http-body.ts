@@ -394,6 +394,14 @@ export const AgentVisionBodySchema = Schema.Struct({
 	url: Schema.optional(Schema.Unknown),
 });
 
+/** POST /api/agents/:id/promote (fleet-ide-escalation E02) — no required field; `task` is the explicit
+ *  work instruction steered into the promoted unit, `mode` an optional autonomy override validated
+ *  downstream by `validateRequestedMode`. */
+export const AgentPromoteBodySchema = Schema.Struct({
+	task: Schema.optional(Schema.Unknown),
+	mode: Schema.optional(Schema.Unknown),
+});
+
 /** POST /api/chat-attachments — `dataUrl` required (a `data:image/png;base64,...` payload; Feature
  *  2 D2, chat-attachment.ts). Mime/size/PNG-magic validation happens post-decode in
  *  `decodeChatAttachmentDataUrl` — this schema only asserts the envelope shape. */

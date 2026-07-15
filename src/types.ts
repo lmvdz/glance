@@ -994,6 +994,10 @@ export interface PersistedAgent {
 	task?: string;
 	/** Extra system-prompt text appended for specialized surfaces, e.g. console chat. */
 	appendSystemPrompt?: string;
+	/** Set once when a console chat unit is promoted into a work unit (E02). Durable so a re-promote
+	 *  (retry) re-steers the task instead of falsely refusing, and so the promoted state survives a
+	 *  restart even though the console segment was stripped from `appendSystemPrompt`. */
+	promoted?: boolean;
 	thinking?: ThinkingLevel;
 	issue?: IssueRef;
 	featureId?: string;

@@ -41,6 +41,7 @@ import { Dispatcher } from "./dispatch.ts";
 import { openDispatchLedger } from "./dispatch-ledger.ts";
 import { type Answer, answerBrief, listAnswers, readAnswer, saveAnswer } from "./answers.ts";
 import { errText } from "./err-text.ts";
+import { isConsolePrompt, stripConsolePrompt } from "./console-prompt.ts";
 import { openRemovedLedger, type RemovedLedger } from "./removed-ledger.ts";
 import { normalizeRepoPath, openProjectRegistry, type ProjectRegistry } from "./project-registry.ts";
 import { Orchestrator } from "./orchestrator.ts";
@@ -4012,6 +4013,105 @@ export class SquadManager extends EventEmitter {
 		void this.recordAudit(actor, "set-mode", id, "ok", `${oldMode} → ${mode}; effective ${rec.dto.effectiveMode}${reason ? `; ${reason}` : ""}`);
 		await this.store.appendAudit({ actor: actor.id, action: "set-mode", target: id, detail: { oldMode, requestedMode: mode, effectiveMode: rec.dto.effectiveMode, reason } }).catch(() => {});
 		return rec.dto;
+	}
+
+	/**
+	 * Promote a console chat unit into a working, landable unit IN PLACE (fleet-ide-escalation E02) —
+	 * the reverse of intervene. Keeps the SAME worktree, live session, and transcript (zero context
+	 * loss): the daemon-backed cockpit chat (E01) is already an `omp-operator` unit named "chat" at
+	 * `assist` mode with its own worktree; the only thing holding it back is the CONSOLE_SYSTEM_PROMPT,
+	 * a SOFT restriction ("do not create … unless the user explicitly asks"). Promotion has two halves:
+	 *   1. State (durable, failure-atomic): strip ONLY the console segment from the composite
+	 *      `appendSystemPrompt` — preserving profile memory / tool grants / membrane disciplines — set a
+	 *      durable `promoted` marker, optionally set autonomy; assign synchronously, then persist once.
+	 *      On a throwing persist (DB mode) the in-memory record is rolled back and nothing is
+	 *      emitted/audited/steered. (File-mode persist is best-effort — swallows I/O errors — the same
+	 *      as every other mutation on this manager; not made worse here.)
+	 *   2. Behavioral (live, zero context loss): steer the explicit task into the SAME session — that IS
+	 *      "the user explicitly asks", so the running agent (console prompt still baked into its child)
+	 *      starts working without a respawn.
+	 * Idempotent + retry-safe: a re-promote of an already-`promoted` unit re-delivers the task instead
+	 * of falsely refusing (a first call that persisted but died before the steer is recoverable).
+	 * `ok:true` means the state change is durable and the task was DISPATCHED — not that the agent has
+	 * finished; behavioral confirmation is the unit's live transcript. Gating is NOT re-wired: a
+	 * landable unit is already gated by the land PROOF gate (`detectVerify` at land time, same as any
+	 * unit); attaching a `workflow` would be inert on an omp-operator's already-built driver.
+	 */
+	async promote(
+		id: string,
+		opts: { task?: string; mode?: AutonomyMode },
+		actor: Actor = LOCAL_ACTOR,
+	): Promise<{ ok: boolean; reason?: string; agent?: AgentDTO }> {
+		const rec = this.agents.get(id);
+		if (!rec) return { ok: false, reason: "no such agent" };
+		// Observe forbids prompting (availableActions), so promoting a unit INTO observe and then
+		// steering it would drive a unit its own authority says is read-only. Refuse it.
+		if (opts.mode === "observe") return { ok: false, reason: "cannot promote to observe mode" };
+		const o = rec.options;
+
+		// Already promoted → idempotent re-steer (retry-safe): the state change is done; just apply any
+		// mode change and (re)deliver the task into the same session.
+		if (o.promoted) {
+			if (opts.mode && opts.mode !== rec.dto.autonomyMode) {
+				rec.dto.autonomyMode = opts.mode;
+				o.autonomyMode = opts.mode;
+				this.syncAuthority(rec.dto);
+				this.emitAgent(rec);
+				await this.persist();
+			}
+			this.steerPromoteTask(id, opts.task, actor);
+			return { ok: true, agent: rec.dto };
+		}
+
+		// Fresh promote: must be a genuine console unit — identity is the console PROMPT (not merely
+		// "has some appendSystemPrompt", which would also match a profile bundle / custom safety text).
+		if (o.kind !== "omp-operator" || rec.dto.name !== "chat" || !isConsolePrompt(o.appendSystemPrompt)) {
+			return { ok: false, reason: "not a promotable console chat unit" };
+		}
+		if (o.executionRole || o.workflow || o.ask) {
+			return { ok: false, reason: "unit is not a plain console chat" };
+		}
+
+		// 1. State promotion — assign synchronously, persist once, FAILURE-ATOMIC: on a throwing persist
+		//    roll the record back and surface the error (emit/audit/steer only AFTER durability).
+		const prior = { append: o.appendSystemPrompt, mode: rec.dto.autonomyMode, oMode: o.autonomyMode };
+		o.appendSystemPrompt = stripConsolePrompt(o.appendSystemPrompt); // strip ONLY the console rule
+		o.promoted = true;
+		if (opts.mode && opts.mode !== rec.dto.autonomyMode) {
+			rec.dto.autonomyMode = opts.mode;
+			o.autonomyMode = opts.mode;
+		}
+		this.syncAuthority(rec.dto);
+		try {
+			await this.persist();
+		} catch (err) {
+			o.appendSystemPrompt = prior.append;
+			o.promoted = undefined;
+			rec.dto.autonomyMode = prior.mode;
+			o.autonomyMode = prior.oMode;
+			this.syncAuthority(rec.dto);
+			return { ok: false, reason: `promote persist failed: ${errText(err)}` };
+		}
+		this.emitAgent(rec);
+		void this.recordAudit(actor, "promote", id, "ok", `console→unit; mode ${prior.mode}→${rec.dto.autonomyMode}`);
+		await this.store.appendAudit({ actor: actor.id, action: "promote", target: id, detail: { priorMode: prior.mode, mode: rec.dto.autonomyMode, task: opts.task ? truncate(opts.task, 120) : undefined } }).catch(() => {});
+
+		// 2. Behavioral promotion — steer the explicit task into the same live session.
+		this.steerPromoteTask(id, opts.task, actor);
+		return { ok: true, agent: rec.dto };
+	}
+
+	/** Steer a promotion's explicit work instruction into the live session (fire-and-forget with a
+	 *  catcher, exactly as every prompt route drives applyCommand — a bare await could surface a
+	 *  spawn-failure rejection as an unhandled rejection; see the "prompt" case). The console prompt is
+	 *  baked into the live child, but it's soft ("unless the user explicitly asks"), so an explicit task
+	 *  lifts it in-session. A silent steer failure is recoverable — a re-promote re-delivers. */
+	private steerPromoteTask(id: string, task: string | undefined, actor: Actor): void {
+		if (task && typeof task === "string" && task.trim()) {
+			void this.applyCommand({ type: "prompt", id, message: task.trim() }, actor).catch((err) =>
+				this.log("warn", `promote steer failed for ${id}: ${errText(err)}`),
+			);
+		}
 	}
 	/**
 	 * Run the acceptance gate (the repo's own verify command, via detectVerify) on main → {ok, firstFailure?}.
