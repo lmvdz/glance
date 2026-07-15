@@ -139,6 +139,16 @@ export function __resetConfigWarnings(): void {
 }
 
 /**
+ * Race-once at workflow catastrophe (adw-factory-borrows concern 07): default OFF. Flipping this on
+ * only ARMS the mechanism — an individual unit still only races when its resolved lane's
+ * `LANE_POLICY[lane].race === 1` (today: hotfix only, DESIGN.md). Two gates, not one, so enabling the
+ * feature globally never races a lane the constants table didn't already opt in.
+ */
+export function raceOnceEnabled(): boolean {
+	return envBool("OMP_SQUAD_RACE_ONCE", false)
+}
+
+/**
  * Should the operator's own autonomous factory run alongside the tenant registry?
  *
  * Enabling multi-tenancy once silently turned the factory off: the per-org managers behind the registry

@@ -8,7 +8,7 @@
  */
 
 import { EventEmitter } from "node:events";
-import { envBool, envInt, envNumber } from "./config.ts";
+import { envBool, envInt, envNumber, raceOnceEnabled } from "./config.ts";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -36,10 +36,11 @@ import type { EngineCheckpoint, NodeResult, Workflow, WorkflowGraphSnapshot, Wor
 import { appendCheckpoint, type CheckpointLogEntry, deleteCheckpointLog, evictCheckpointChain, getLastSeq, readCheckpoints } from "./workflow/checkpoint-log.ts";
 import { buildObserveWorkflow, buildTddVerifyWorkflow, buildVerifyWorkflow } from "./workflow/verify-workflow.ts";
 import { type Classify, detectVerify, detectVerifyStages, ompClassify, routeIntake } from "./intake.ts";
-import type { WorkLane, WorkLaneSource } from "./lane.ts";
+import { LANE_POLICY, type WorkLane, type WorkLaneSource } from "./lane.ts";
 import type { WorkflowDefinition } from "./workflow-catalog.ts";
 import { Dispatcher } from "./dispatch.ts";
 import { openDispatchLedger } from "./dispatch-ledger.ts";
+import { openRaceLedger, type RaceLedger } from "./race-ledger.ts";
 import { type Answer, answerBrief, listAnswers, readAnswer, saveAnswer } from "./answers.ts";
 import { errText } from "./err-text.ts";
 import { openRemovedLedger, type RemovedLedger } from "./removed-ledger.ts";
@@ -388,6 +389,30 @@ function landBlockedEscalateCap(): number {
  */
 function aheadUnknownEscalateCap(): number {
 	return envInt("OMP_SQUAD_AHEAD_UNKNOWN_ESCALATE_CAP", 3);
+}
+
+/** The three angles fan-out's own workflow (workflows/fan-out/workflow.fabro:12-14) forks a goal into —
+ *  reused verbatim as `tryRaceOnce`'s prompt variants so a race-once sibling gets a genuinely different
+ *  approach instruction instead of re-running the exact same prompt into the exact same failure mode. */
+const RACE_STRATEGIES = [
+	{ key: "simplicity", keyword: /simpl(e|est|icity|ify)/i, prompt: "Implement the goal, optimizing for the simplest, clearest solution." },
+	{ key: "performance", keyword: /perf(ormance)?|slow|timeout|latency/i, prompt: "Implement the goal, optimizing for runtime performance." },
+	{ key: "minimal deps", keyword: /depend(ency|encies)?|package|import/i, prompt: "Implement the goal using the fewest external dependencies." },
+] as const;
+
+/**
+ * Pick the race-once sibling's alternate-strategy prompt (DESIGN.md: "pick the strategy furthest from
+ * the original's failure mode, default 'simplicity'"). A workflow catastrophe's `reason` is almost
+ * always the generic engine message ("node \"X\" exceeded its visit cap (N)") with no strategy signal
+ * in it — the keyword match below only ever fires on the rare detail that happens to name one of the
+ * three axes, so "simplicity" (index 0) IS the honest default this function returns in the overwhelming
+ * majority of cases. Skips whichever strategy's own axis is named in the detail (that axis is plausibly
+ * what the original was already doing when it tripped the cap) rather than re-offering it.
+ */
+function pickAlternateStrategy(failureDetail: string): (typeof RACE_STRATEGIES)[number] {
+	const named = RACE_STRATEGIES.find((s) => s.keyword.test(failureDetail));
+	if (!named) return RACE_STRATEGIES[0]; // no signal at all — "simplicity" default
+	return RACE_STRATEGIES.find((s) => s.key !== named.key) ?? RACE_STRATEGIES[0];
 }
 
 /**
@@ -820,6 +845,15 @@ export class SquadManager extends EventEmitter {
 	private readonly removedLedger: RemovedLedger;
 	/** Durable repos-this-operator-works-in set; unioned into `projects()`. See project-registry.ts. */
 	private readonly projectRegistry: ProjectRegistry;
+	/** Restart-safe "raced this issue already, ever" ledger (adw-factory-borrows concern 07). Consulted
+	 *  and stamped by `tryRaceOnce` — see race-ledger.ts for why this must be persisted, not in-memory. */
+	private readonly raceLedger: RaceLedger;
+	/** Closes the TOCTOU window between `tryRaceOnce`'s ledger check and the ledger actually being
+	 *  stamped (which only happens once the sibling's own `create()` call — worktree cut, driver
+	 *  start — resolves): a second catastrophe for the SAME issue arriving inside that window would
+	 *  otherwise see no ledger entry yet and race a second sibling. Mirrors `fork()`'s own
+	 *  `forkInFlight` synchronous-claim precedent. */
+	private readonly raceInFlight = new Set<string>();
 	/** In-flight spawn-time dependency provisioning, keyed by agent id (cross-lineage review HIGH 1).
 	 *  createWithId KICKS provisioning here without awaiting it — the invariant is "the verify gate
 	 *  must not run before provisioning settles", NOT "the dispatch tick must wait", so the await
@@ -923,6 +957,7 @@ export class SquadManager extends EventEmitter {
 		this.scoutCursor = readScoutCursors(this.stateDir);
 		this.removedLedger = openRemovedLedger(this.stateDir);
 		this.projectRegistry = openProjectRegistry(this.stateDir);
+		this.raceLedger = openRaceLedger(this.stateDir);
 		this.automation = new AutomationLog(this.stateDir, { onEvent: (event) => this.emit("event", { type: "automation", event } satisfies SquadEvent) });
 		this.learningMetrics = new LearningMetrics(this.stateDir, { log: (m) => this.log("warn", `learning-metrics: ${m}`) });
 		this.transitionLog = new JsonlLog<TransitionEntry>({ path: path.join(this.stateDir, "transitions.jsonl"), log: (m) => this.log("warn", `transitions.jsonl: ${m}`) });
@@ -1927,6 +1962,17 @@ export class SquadManager extends EventEmitter {
 		const rec: AgentRecord = { dto, agent, options: p, harness: this.harnessFor(p), transcript, assistantBuf: "", thinkingBuf: "", streaming: false, subs, toolEntries: new Map() };
 		this.agents.set(p.id, rec);
 		this.wire(rec); // no-op until/unless something ever starts `agent`, which this path never does
+		// Race-once (concern 07): if THIS run is the race ledger's `originalAgentId` for its issue, its
+		// catastrophe escalation was deliberately suppressed the first time (a sibling raced in its place)
+		// — a restart must not resurrect the suppressed CATASTROPHE either, or the "suppress the human
+		// escalation while the sibling runs" invariant only holds until the next reboot. Stay parked
+		// ("stopped", no error) instead of falling through to the ordinary reattach escalation below.
+		const raced = p.issue ? this.raceLedger.get(p.issue.id) : undefined;
+		if (raced && raced.originalAgentId === p.id) {
+			this.transition(rec, "stopped", "kill");
+			this.emitAgent(rec);
+			return;
+		}
 		this.markCatastrophe(p.id, p.workflowState!.terminal!.reason);
 	}
 
@@ -6058,12 +6104,109 @@ export class SquadManager extends EventEmitter {
 		rec.options.workflowState = state;
 		rec.dto.workflowState = state;
 		rec.dto.forkAvailable = this.deriveForkAvailable(state);
-		this.markCatastrophe(rec.dto.id, reason);
+		await this.raceOnceOrEscalate(rec, reason);
 		void this.persist();
 		// The run is dead — no further checkpoints will ever append for this runId (a fork, if any, mints
 		// its own new runId). Evict the in-memory chain entry now; `readCheckpoints`/fork (concern 04) read
 		// the file directly and never touch this map, so eviction here is always safe.
 		evictCheckpointChain(runId);
+	}
+
+	/**
+	 * Race-once decision point for a workflow catastrophe (adw-factory-borrows concern 07, DESIGN.md).
+	 * `tryRaceOnce` returning true means the original is already parked and a fresh-context sibling is
+	 * already racing — the human summon for THIS catastrophe is suppressed. Every other outcome (flag
+	 * off, not issue-carrying, lane doesn't allow racing, this issue's race budget is already spent, or
+	 * the sibling itself failed to spawn) falls through to the ordinary `markCatastrophe` escalation —
+	 * enriched to name both attempts when the ledger already holds a race for this issue (the sibling's
+	 * OWN catastrophe, or a second catastrophe on the original after its sibling was already raced).
+	 */
+	private async raceOnceOrEscalate(rec: AgentRecord, reason: string): Promise<void> {
+		if (await this.tryRaceOnce(rec, reason)) return;
+		const raced = rec.dto.issue ? this.raceLedger.get(rec.dto.issue.id) : undefined;
+		const detail = raced
+			? `${reason} (race already spent for this issue: original ${raced.originalAgentId} — ${raced.originalDetail}; sibling ${raced.siblingAgentId} raced with strategy "${raced.strategy}" and also failed)`
+			: reason;
+		this.markCatastrophe(rec.dto.id, detail);
+	}
+
+	/**
+	 * Attempt the race-once sibling spawn. Returns true only once the sibling is durably ledgered — that
+	 * is the ONLY case `raceOnceOrEscalate` suppresses the human escalation for. Never races twice for the
+	 * same issue (the persisted `raceLedger` is checked first, same tiny-JSON-per-stateDir shape as
+	 * `dispatch-ledger.ts` — an in-memory-only guard would re-fire after a daemon restart between this
+	 * catastrophe and the sibling's own completion, red-team C3.3).
+	 */
+	private async tryRaceOnce(rec: AgentRecord, reason: string): Promise<boolean> {
+		if (!raceOnceEnabled()) return false;
+		const issue = rec.dto.issue;
+		if (!issue) return false; // race-once only ever applies to Plane-driven, issue-carrying work
+		if (this.raceLedger.get(issue.id)) return false; // budget already spent for this issue
+		const lane: WorkLane = rec.dto.lane ?? "feature";
+		if (LANE_POLICY[lane].race !== 1) return false; // operator-config lanes only (concern-02 clamp)
+		// Claim the slot SYNCHRONOUSLY, before the first `await` below — closes the TOCTOU window between
+		// the `raceLedger.get` check above and the ledger actually being stamped (which only happens once
+		// the sibling's own worktree-cutting `create()` call resolves, several turns of the event loop
+		// later). Without this, a second catastrophe for the SAME issue arriving inside that window sees
+		// no ledger entry yet and races a second sibling (mirrors `fork()`'s own `forkInFlight` precedent).
+		if (this.raceInFlight.has(issue.id)) return false;
+		this.raceInFlight.add(issue.id);
+
+		// Park the original FIRST (DESIGN.md): the sibling must never run concurrently with a live
+		// original — racing both at once would double-land the same issue. Mirrors applyCommand's "kill"
+		// case (stop, then transition to the terminal `stopped` status) but without `killedByOperator` —
+		// this is a system park kept around for forensics, not an operator-directed kill.
+		await rec.agent.stop().catch((err) => this.log("warn", `race-once: stop() failed while parking ${rec.dto.id}: ${String(err)}`));
+		this.transition(rec, "stopped", "kill");
+		this.emitAgent(rec);
+
+		const strategy = pickAlternateStrategy(reason);
+		// deterministic planeIssueBranch collides with the original's own branch on the same issue — suffix it.
+		const branch = `${planeIssueBranch(issue)}-race`;
+		try {
+			const sibling = await this.create({
+				repo: rec.dto.repo,
+				name: `${rec.dto.name}-race`,
+				branch,
+				task: [rec.options.task, strategy.prompt].filter((t): t is string => typeof t === "string" && t.length > 0).join("\n\n"),
+				issue,
+				// Inherit the original's exact resolved lane/source verbatim (mirrors fork()'s "one issue, one
+				// active claimant" precedent) — never re-derive from `opts.lane` alone, which would upgrade a
+				// label/classifier-sourced lane into an operator-privileged one (the concern-02 clamp).
+				lane: rec.dto.lane,
+				laneSource: rec.options.laneSource,
+				// Carry the original's EXACT process shape (workflow file or synthesized verify loop) instead
+				// of re-classifying the alternate-strategy task text from scratch — a race sibling is the same
+				// process retried with a different approach, not a fresh intake decision. Setting `verify`/
+				// `workflow` also short-circuits `routeIntake` (createWithId's own `!opts.workflow && !opts.verify`
+				// guard), so `autoRoute` below is inert either way; false documents that this is deliberate.
+				workflow: rec.options.workflow?.path,
+				verify: rec.options.workflow?.verify?.command,
+				verifyMode: rec.options.workflow?.verify?.mode,
+				executionRole: rec.options.executionRole,
+				model: rec.dto.model,
+				autoRoute: false,
+				approvalMode: "yolo",
+			});
+			// claimed() bookkeeping: the Dispatcher's claimed set is derived live from `this.agents` (both
+			// the parked original and this sibling carry the same `issue.id`), so the issue reads as claimed
+			// throughout — nothing else to stamp.
+			this.raceLedger.record({ issueId: issue.id, originalAgentId: rec.dto.id, originalDetail: reason, siblingAgentId: sibling.id, strategy: strategy.key, racedAt: Date.now() });
+			this.log("warn", `race-once: ${issue.identifier ?? issue.id} catastrophe'd (${reason}) — parked ${rec.dto.id}, racing sibling ${sibling.id} (strategy "${strategy.key}")`);
+			void this.recordAudit(LOCAL_ACTOR, "race-once", rec.dto.id, "ok", `sibling ${sibling.id} strategy=${strategy.key}`);
+			return true;
+		} catch (err) {
+			this.log("warn", `race-once: sibling spawn failed for ${issue.identifier ?? issue.id}: ${String(err)} — escalating the original instead`);
+			void this.recordAudit(LOCAL_ACTOR, "race-once", rec.dto.id, "error", String(err));
+			return false;
+		} finally {
+			// The persisted ledger (on success) is the long-term once-per-issue-ever guard; this in-memory
+			// claim only ever needed to hold for the single event-loop window between the check above and
+			// the ledger write. Always release it here so a genuinely LATER catastrophe on the same issue
+			// (e.g. this attempt failed to spawn and the operator wants another shot) is never permanently
+			// wedged by a stale in-memory flag.
+			this.raceInFlight.delete(issue.id);
+		}
 	}
 
 	private updateThinkingStream(rec: AgentRecord, delta: string): void {
