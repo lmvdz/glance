@@ -1,5 +1,5 @@
 # Teaching producers: model-delta decisions + squad_record_symptom (record-then-render)
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -25,3 +25,6 @@ None.
 
 ## Verify
 `bun test` green: evidence-anchor validation (anchorless delta rejected; anchor outside filesTouched rejected; valid accepted), symptom floor (bare dir rejected, existing path accepted, command accepted), id stability/week-bucketing, store round-trip with repo normalization. Manual: run a scratch unit, have it call both tools, inspect the feature's decisions and `<stateDir>/symptoms/`.
+
+## Resolution
+Shipped: 3ce74de (merged c40cddb) + fixer round b7bbe2e. Evidence-anchored model-delta decisions, squad_record_symptom with mechanical floors, briefing via flag-gated tool descriptions. Review critical (featureDecisions round-trip destroying model-deltas) fixed via merge-by-id; traversal + length-cap minors fixed.
