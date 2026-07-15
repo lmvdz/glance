@@ -1,6 +1,6 @@
 # M02 — cross-host merged fleet view
 
-STATUS: open
+STATUS: ✅ MERGED (gd#24) — Sonnet-implemented in an isolated worktree + reviewed; cockpit-only, no gauntlet; live two-daemon UI smoke NOT RUN (logic unit-tested)
 PRIORITY: p3
 REPOS: glance-desktop
 COMPLEXITY: architectural

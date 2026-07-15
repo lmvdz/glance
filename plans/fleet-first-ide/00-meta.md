@@ -29,7 +29,7 @@ Product identity at the end: **glance = daemon (factory) + desktop (cockpit) + w
 | C | 02-cockpit-fork.md | Private fork bootstrapped, rebrand-lite, rebase protocol, native fleet module (roster/attention/intervene/Space-join/bell) | plans/fleet-ide-cockpit/ | expanded, open |
 | I | 03-shared-workspace-intervention.md | Intervene = shared worktree: presence/leases in editor, ACP conversation pane, hand-back | **✅ MERGED** — I01–I05 all on main |
 | E | 04-chat-unit-escalation.md | Chat panel backed by daemon; promote conversation → gated landable unit; adopt ad-hoc CLI sessions | **✅ MERGED** — E01/E02/E03 all on main (#184/#187/gd#21/gd#22) |
-| M | 05-multidaemon-identity.md | Multi-daemon connection manager, cross-host fleet, identity/branding pass, release pipeline (installers) | **EXPANDED** (M01–M04); M01 ✅ MERGED (gd#23); M03 in-progress; M02 unblocked; M04 blocked |
+| M | 05-multidaemon-identity.md | Multi-daemon connection manager, cross-host fleet, identity/branding pass, release pipeline (installers) | **EXPANDED** (M01–M04); M01 ✅ + M02 ✅ MERGED (gd#23/gd#24); M03 in-progress; M04 blocked on M03 |
 
 ## Dependency graph
 
