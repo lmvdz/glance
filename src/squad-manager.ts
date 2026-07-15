@@ -61,7 +61,7 @@ import { RateLimitGate } from "./rate-limit.ts";
 import { addIssueIdsToFeatureModule, addIssuesToFeatureModule, addPlaneBlockedByRelation, addPlaneIssueComment, closePlaneIssue, createPlaneIssue, deletePlaneModule, ensureFeatureModule, featureTickets, fetchIssueDetail, listPlaneIssues, listPlaneIssuesAllStates, planeRepos, reopenPlaneIssue, startPlaneIssue } from "./plane.ts";
 import { syncPlanStatuses } from "./plan-sync.ts";
 import { agentsToAdopt, deferredResumable, hardAgentCeiling, newAgentId, planeIssueBranch, selectAdoptable, slugPart } from "./spawn-identity.ts";
-import { gateMembraneTokens, loadRepoProfiles, membraneDisciplinePrompt, membraneProfilesEnabled, modelOptionsFromRuntime, profileOptionsFromEnv, toolGrantsPrompt, type RuntimeModelOption } from "./agent-profiles.ts";
+import { DO_NOT_BLOCK, effectSkillPointerLine, gateMembraneTokens, loadRepoProfiles, membraneDisciplinePrompt, membraneProfilesEnabled, modelOptionsFromRuntime, profileOptionsFromEnv, toolGrantsPrompt, type RuntimeModelOption } from "./agent-profiles.ts";
 import { escapeHtml, planConcernTicketMatches, renderPlanConcernIssueHtml } from "./concern-tickets.ts";
 import { capabilityWorkflowToDot, loadCommissionWorkflow, resolveWorkflowPath, slugifyForFile } from "./workflow-source.ts";
 export { capabilityWorkflowToDot, resolveWorkflowPath };
@@ -4460,6 +4460,24 @@ export class SquadManager extends EventEmitter {
 		const primed = await this.primeContext(opts, actor);
 		opts = primed.opts;
 		const primerBuilt = primed.hasPrimer;
+		// Evergreen Do-Not block (skills-hardening concern 04): every spawn — profiled or not, dispatched
+		// or ad-hoc — carries the same short list of recorded recurring failure modes. Joined here,
+		// UNCONDITIONALLY, alongside the primer above and the authored-spec block below — specifically NOT
+		// via `profile.memory` (line ~4439, which only runs `if (profile)`): a profile-less dispatched unit
+		// never reaches that branch, the exact delivery-gap class R3 (above) fixed for the primer. Static
+		// repo-authored text (DO_NOT_BLOCK), so unlike the primer/specBlock it needs no untrusted fence.
+		// The Effect pointer line rides the SAME join but is conditional — see `effectSkillPointerLine`
+		// (gated on the task/issue text looking Effect-shaped AND the vendored skill dir existing).
+		// `doNotsInjected` is hoisted (mirrors `primerBuilt` above) so the delivery check below (alongside
+		// `primerDelivered`) can tell whether this ACTUALLY reached the child, not just whether it was
+		// composed — the join is unconditional so this is always true, but delivery still depends on the
+		// harness having a system-prompt channel at all.
+		const effectPointer = effectSkillPointerLine([opts.task, opts.issue?.name, opts.issue?.description].filter((t): t is string => typeof t === "string").join("\n"));
+		opts = {
+			...opts,
+			appendSystemPrompt: [opts.appendSystemPrompt, DO_NOT_BLOCK, effectPointer].filter((text): text is string => typeof text === "string" && text.length > 0).join("\n\n") || undefined,
+		};
+		const doNotsInjected = true;
 		// Authored-spec injection (concern 01): a dispatched unit works toward its actual contract
 		// (acceptance criteria / verification / scope) instead of reconstructing intent from an 8-word
 		// title. The body is human/skills-MCP-writable, so fence it as UNTRUSTED data — never let issue
@@ -4822,6 +4840,15 @@ export class SquadManager extends EventEmitter {
 			// Measured from OUTSIDE the branch it measures — the mistake `primer-empty` made.
 			this.learningMetrics.record("primer-undelivered", 1, { flag: "context-primer", variant: resolveHarnessName(opts) });
 			this.log("warn", `${opts.name ?? "unit"}: context primer built but harness "${resolveHarnessName(opts)}" has no system-prompt channel — running unscoped (set OMP_SQUAD_ACP_CONTEXT=prompt to inject it)`);
+		}
+		// Same delivery check for the Do-Not block: doNotsInjected is unconditionally true (the join above
+		// never skips it), so this measures ONLY the harness-channel gap, not a composition gap —
+		// deliberately NOT folded into hasInstructions below (a discipline block is not task orientation, so
+		// it must not inflate that dimension the way a delivered primer legitimately does).
+		const doNotsDelivered = doNotsInjected && contextDelivers;
+		if (doNotsInjected && !doNotsDelivered) {
+			this.learningMetrics.record("donots-undelivered", 1, { flag: "do-not-block", variant: resolveHarnessName(opts) });
+			this.log("warn", `${opts.name ?? "unit"}: Do-Not block composed but harness "${resolveHarnessName(opts)}" has no system-prompt channel — running without it (set OMP_SQUAD_ACP_CONTEXT=prompt to inject it)`);
 		}
 		if (harnessScorecardEnabled()) {
 			dto.harnessScorecard = scoreHarness({

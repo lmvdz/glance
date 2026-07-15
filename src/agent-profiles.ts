@@ -240,3 +240,66 @@ export function membraneDisciplinePrompt(gatedTokens: string[] | undefined): str
 	const blocks = [...new Set(gatedTokens)].map((token) => MEMBRANE_BLOCKS[token]).filter((b): b is string => !!b);
 	return blocks.length ? blocks.join("\n\n") : undefined;
 }
+
+// ── Evergreen Do-Not block (skills-hardening concern 04) ────────────────────────────────────────────
+// Distilled from this repo's recorded recurring failure modes (memory lessons + failure-memory
+// annotations), phrased to name the rationalization where one is known (the negative-space-spec
+// pattern). UNLIKE the membrane blocks above, this is never profile-gated and never opt-in — it rides
+// squad-manager.ts's UNCONDITIONAL appendSystemPrompt join (createWithId, alongside the primer +
+// authored-spec joins), specifically NOT via `profile.memory` (only assembled `if (profile)` — a
+// profile-less dispatched unit never reaches that branch: the exact delivery-gap class R3 fixed for the
+// primer, since `dispatchSpawn` calls `create({repo, name, branch, task, issue})` with no profileId).
+// Static repo-authored text, so — unlike the primer/authored-spec blocks, which fence fabric/issue-
+// sourced content as untrusted — no fence is needed here.
+export const DO_NOT_BLOCK = [
+	"--- Do-Not: recurring failure modes ---",
+	"Do not report the Vite/bundler chunk-size warning as a finding — it is known and benign in this repo.",
+	"Do not re-run a failing verify loop a third time hoping for a different outcome — after two failures, stop and report the blocker.",
+	'Do not treat a passing test suite as proof the gate ran — a gate that never executed also prints no failures; check for evidence the tests actually ran (e.g. "N pass").',
+	"Do not trust `git grep 'a|b'` without -E — bare alternation silently matches nothing.",
+	"Do not trust empty grep/search output from a wrapped shell — verify a null result with a second, differently-shaped query before concluding absence.",
+	"Do not use bare `git stash`/`git stash pop` — the stash stack is shared across worktrees and other sessions; make a WIP commit instead.",
+	"Do not conclude a feature is unwired from one call-site search — check exports, dynamic dispatch, and registration tables before claiming zero callers.",
+	"Do not delete or overwrite a file you did not create without reading it first.",
+	"Do not mark work done because the diff looks right — run the affected flow and observe it.",
+	"Do not widen scope to fix adjacent code you were not asked to touch — report it instead.",
+].join("\n");
+
+/** Loose but code-shaped match for "this task/issue is about the `effect` library" — bare word "effect"
+ *  is too noisy (it is common English), so this also accepts the shapes that only show up in code:
+ *  an import specifier (`effect/...`, `from "effect"`) or a version pin (`effect@...`). Capital-E
+ *  "Effect" (the module/type name) is the common case for prose task text. */
+const EFFECT_TASK_PATTERN = /\bEffect\b|\beffect\/|from ["']effect["']|\beffect@/;
+
+/** Resolved once at daemon start (module load), not per-spawn — `effectSkillPointerLine` below is
+ *  called on every create(), and re-reading + re-parsing package.json that often is wasted work for a
+ *  value that cannot change without a daemon restart. */
+function resolveEffectVersion(): string | undefined {
+	try {
+		const pkg = JSON.parse(fs.readFileSync(path.join(import.meta.dir, "..", "package.json"), "utf8")) as {
+			dependencies?: Record<string, string>;
+			devDependencies?: Record<string, string>;
+		};
+		return pkg.dependencies?.effect ?? pkg.devDependencies?.effect;
+	} catch {
+		return undefined;
+	}
+}
+const EFFECT_RESOLVED_VERSION = resolveEffectVersion();
+const EFFECT_SKILL_DIR = path.join(import.meta.dir, "..", ".claude", "skills", "effect");
+
+/**
+ * A pointer line appended ONLY when (a) the unit's task/issue text looks Effect-shaped and (b) the
+ * vendored `.claude/skills/effect` directory actually exists. (b) matters because this concern lands
+ * BEFORE the concern that vendors the skill (skills-hardening concern 02) — without the gate, every
+ * Effect-shaped unit would be pointed at a skill directory that doesn't exist yet. Checked fresh (not
+ * cached) so the pointer starts firing the moment the skill lands, with no daemon restart required.
+ *
+ * `skillDir` defaults to this repo's real vendored path; callers never pass it — it's an injection seam
+ * so tests can exercise the "directory exists" branch without mutating the real repo tree.
+ */
+export function effectSkillPointerLine(text: string | undefined, skillDir: string = EFFECT_SKILL_DIR): string | undefined {
+	if (!EFFECT_RESOLVED_VERSION || !text || !EFFECT_TASK_PATTERN.test(text)) return undefined;
+	if (!fs.existsSync(skillDir)) return undefined;
+	return `This repo pins effect@${EFFECT_RESOLVED_VERSION}; load .claude/skills/effect before writing Effect code — its examples are compile-proven at that pin.`;
+}

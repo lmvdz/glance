@@ -99,6 +99,9 @@ export type MetricName =
 	/** A primer was built, but the chosen harness has no channel to deliver it (ACP without
 	 *  OMP_SQUAD_ACP_CONTEXT=prompt). Recorded OUTSIDE the branch it measures. */
 	| "primer-undelivered"
+	/** The evergreen Do-Not block (skills-hardening concern 04) was composed into appendSystemPrompt, but
+	 *  the chosen harness has no channel to deliver it — same shape as `primer-undelivered`. */
+	| "donots-undelivered"
 	| "model-outcome-recorded"
 	| "model-outcome-blocked"
 	| "veto-reprompt"
