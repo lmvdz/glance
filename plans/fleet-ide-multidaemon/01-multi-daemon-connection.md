@@ -1,6 +1,6 @@
 # M01 — multi-daemon connection model
 
-STATUS: open
+STATUS: in-review (gd#23) — Sonnet-implemented + reviewed (caught a legacy-token orphan bug); cockpit-only, no gauntlet
 PRIORITY: p3
 REPOS: glance-desktop
 COMPLEXITY: architectural
