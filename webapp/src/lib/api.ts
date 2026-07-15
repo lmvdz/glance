@@ -55,9 +55,23 @@ export async function apiFetch(path: string, init?: RequestInit): Promise<Respon
   return fetch(path, { ...init, headers });
 }
 
+/** Thrown by `apiJson` on any non-2xx response. Carries the HTTP `status` alongside the server's
+ *  body text (the `message`) so a caller can branch on it — e.g. voice-mint distinguishing a 429
+ *  org-cap refusal from a generic failure — without re-parsing the message string. Extends `Error`,
+ *  so existing `catch` blocks that only read `.message` keep working unchanged. */
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 export async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await apiFetch(path, init);
-  if (!response.ok) throw new Error(await response.text());
+  if (!response.ok) throw new ApiError(await response.text(), response.status);
   return response.json() as Promise<T>;
 }
 

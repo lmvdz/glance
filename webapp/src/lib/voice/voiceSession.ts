@@ -329,7 +329,7 @@ export interface VoiceSessionErrorInfo {
    *  was exhausted. Kept as four distinct codes (rather than folding SDP failures into
    *  `mint-failed`) so the caller can tell "the daemon route is the problem" apart from "the
    *  provider itself rejected the connection". */
-  code: 'mic-denied' | 'mint-failed' | 'connect-failed' | 'reconnect-failed';
+  code: 'mic-denied' | 'mint-failed' | 'mint-rate-limited' | 'connect-failed' | 'reconnect-failed';
   message: string;
   /** Set on errors the caller should treat as "give up on voice for this session, fall back to the
    *  text composer" — the bounded-retry and mic-denied paths both set this; a single transient send
@@ -387,7 +387,16 @@ export type InjectionItem = unknown;
 /** Thrown by `establishConnection` when `deps.mint()` itself fails — distinguishes a mint-side
  *  failure (daemon route: rate limit, flag off, auth) from anything that fails AFTER a successful
  *  mint (peer connection / SDP exchange), which callers report as `connect-failed` instead. */
-class VoiceMintError extends Error {}
+class VoiceMintError extends Error {
+  constructor(
+    message: string,
+    /** The daemon's HTTP status for the failed mint, when known — lets the caller tell an org
+     *  mint-cap refusal (429) apart from a generic mint failure. */
+    readonly status?: number,
+  ) {
+    super(message);
+  }
+}
 
 /** Thrown by `establishConnection` when a `disconnect()` (or a newer connect/rotate/reconnect
  *  attempt) invalidated this attempt's epoch while it was still in flight. Callers catch this and
@@ -564,7 +573,11 @@ export class VoiceSession {
         for (const track of this.micStream?.getTracks() ?? []) track.stop();
         this.micStream = undefined;
         this.opts.onError?.({
-          code: err instanceof VoiceMintError ? 'mint-failed' : 'connect-failed',
+          // A 429 from the mint route is the org's durable per-org mint cap (or the per-actor rate
+          // limiter) refusing — a known, expected, self-clearing state, NOT a generic failure. Give
+          // it its own code so the operator is told "you hit the limit, wait" instead of the vague
+          // "try again in a moment" that reads as a bug.
+          code: err instanceof VoiceMintError ? (err.status === 429 ? 'mint-rate-limited' : 'mint-failed') : 'connect-failed',
           message: err instanceof Error ? err.message : 'Failed to start the voice session.',
         });
         return;
@@ -920,7 +933,8 @@ export class VoiceSession {
     try {
       token = await this.deps.mint(); // `token.value` (the ek_ secret) never leaves this scope
     } catch (err) {
-      throw new VoiceMintError(err instanceof Error ? err.message : 'Failed to mint a voice token.');
+      const status = typeof (err as { status?: unknown })?.status === 'number' ? (err as { status: number }).status : undefined;
+      throw new VoiceMintError(err instanceof Error ? err.message : 'Failed to mint a voice token.', status);
     }
     if (myEpoch !== this.epoch) throw new EpochStaleError();
 

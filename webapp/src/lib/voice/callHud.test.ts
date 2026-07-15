@@ -104,12 +104,16 @@ describe('errorToastMessage', () => {
     const messages = new Set([
       errorToastMessage('mic-denied'),
       errorToastMessage('mint-failed'),
+      errorToastMessage('mint-rate-limited'),
       errorToastMessage('connect-failed'),
       errorToastMessage('reconnect-failed'),
     ]);
-    expect(messages.size).toBe(4); // no two codes collapse to the same copy
+    expect(messages.size).toBe(5); // no two codes collapse to the same copy
     expect(errorToastMessage('mic-denied')).toContain('Microphone');
     expect(errorToastMessage('reconnect-failed')).toContain('falling back to text');
+    // The org mint-cap message must name the limit, not read as a generic transient failure.
+    expect(errorToastMessage('mint-rate-limited')).toContain('limit');
+    expect(errorToastMessage('mint-rate-limited')).not.toBe(errorToastMessage('mint-failed'));
   });
 });
 

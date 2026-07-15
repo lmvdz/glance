@@ -120,6 +120,8 @@ export function errorToastMessage(code: VoiceSessionErrorInfo['code']): string {
       return 'Microphone access was denied — voice call ended. You can keep typing.';
     case 'mint-failed':
       return 'Could not start the voice call — try again in a moment.';
+    case 'mint-rate-limited':
+      return 'Your organization has reached its voice-call limit for now — try again in a few minutes.';
     case 'connect-failed':
       return 'Voice call connection failed — falling back to text.';
     case 'reconnect-failed':

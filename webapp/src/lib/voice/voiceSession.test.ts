@@ -434,6 +434,27 @@ test('VoiceSession.connect: a mint failure surfaces a mint-failed error', async 
   expect(h.errors).toEqual([{ code: 'mint-failed', message: 'rate limited' }]);
 });
 
+test('VoiceSession.connect: a 429 mint failure (org mint cap / rate limit) surfaces mint-rate-limited, not the generic mint-failed', async () => {
+  const h = makeHarness();
+  h.mintImpl = async () => {
+    // What ApiError (api.ts) produces for the daemon's 429: an Error carrying a numeric `status`.
+    throw Object.assign(new Error('this organization has reached its voice mint limit (5 per 62 minutes); try again later'), { status: 429 });
+  };
+  await h.session.connect();
+  expect(h.errors).toEqual([
+    { code: 'mint-rate-limited', message: 'this organization has reached its voice mint limit (5 per 62 minutes); try again later' },
+  ]);
+});
+
+test('VoiceSession.connect: a non-429 mint failure stays mint-failed (the 429 branch is specific, not a catch-all)', async () => {
+  const h = makeHarness();
+  h.mintImpl = async () => {
+    throw Object.assign(new Error('voice key storage unavailable'), { status: 501 });
+  };
+  await h.session.connect();
+  expect(h.errors).toEqual([{ code: 'mint-failed', message: 'voice key storage unavailable' }]);
+});
+
 test('VoiceSession.connect: a successful connect leaves the session idle', async () => {
   const h = makeHarness();
   await h.session.connect();
