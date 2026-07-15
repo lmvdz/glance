@@ -4111,7 +4111,7 @@ export class SquadManager extends EventEmitter {
 		}
 		this.emitAgent(rec);
 		void this.recordAudit(actor, "promote", id, "ok", `console→unit; mode ${prior.mode}→${rec.dto.autonomyMode}`);
-		await this.store.appendAudit({ actor: actor.id, action: "promote", target: id, detail: { priorMode: prior.mode, mode: rec.dto.autonomyMode, task: opts.task ? truncate(opts.task, 120) : undefined } }).catch(() => {});
+		await this.store.appendAudit({ actor: actor.id, action: "promote", target: id, detail: { priorMode: prior.mode, mode: rec.dto.autonomyMode, task: opts.task ? truncateLabel(opts.task, 120) : undefined } }).catch(() => {});
 
 		// 2. Behavioral promotion — steer the explicit task into the same live session.
 		this.steerPromoteTask(id, opts.task, actor);
