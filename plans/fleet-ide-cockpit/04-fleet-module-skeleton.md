@@ -1,6 +1,10 @@
 # C04 — fleet module skeleton
 
-STATUS: open
+STATUS: in-review (glance-desktop#9)
+
+## Reality notes (2026-07-14, glance-desktop#9)
+
+Built from a scout-mapped wiring guide. Key decisions: (1) daemon URL persists in the module's OWN Tauri store (`glance-fleet.json`), NOT the shared preferences schema — tighter additive discipline than the concern assumed. (2) Token via the existing `secrets_*` keyring seam. (3) Plain `fetch` confirmed sufficient — CSP `connect-src` already allows `http://127.0.0.1:*`/`localhost:*`; no Rust proxy. (4) `health()` maps `/api/auth/check` 200/401/throw → connected/unauthorized/unreachable, VERIFIED against a live scratch daemon's actual responses (not just mocked). Gate: tsc clean, lint baseline, vitest 357/357, build green. GUI palette→pane click-through under WSLg not automated (noted honestly). No cross-lineage gauntlet — read-only client + UI, no git-write/spawn/trust surface (per the review-scope rule).
 PRIORITY: p1
 REPOS: glance-desktop
 COMPLEXITY: architectural

@@ -51,6 +51,8 @@ Runs under `.claude/skills/fleet-ide-loop/SKILL.md`: each iteration orients here
 
 (loop appends one line per iteration: date, concern, outcome, PR)
 
+- 2026-07-14 — iteration 5 (Lars: "continue now"): C04 fleet-module-skeleton shipped as glance-desktop#9 — the FIRST cockpit-side feature and the first place the two halves of the suite meet. Native `src/modules/fleet/` (FleetClient + keyring token + zustand connection store + FleetPane + palette command + Space persistence + Settings→Fleet). Client state-map VERIFIED against a live daemon's real /api/auth/check responses; CSP confirmed to allow loopback fetch (no Rust). Gate green (tsc/lint/vitest 357/build). Also flipped B01/B02/B03+C01 to done post-merge. Next unblocked: C05 (roster+attention panes, needs C04) — or C02/C03 (rebrand/rebase, independent).
+
 - 2026-07-14 — meta-plan authored; Epics B + C expanded; loop armed.
 - 2026-07-14 — iteration 1: B01 osc-attention-emitter shipped as draft PR #177 (suite 2790/0, tsc clean; live-toast check owed). Bonus: fixed a real escape-injection hole in the existing TUI bell. Next: C01 repo bootstrap.
 - 2026-07-14 — iteration 2: C01 bootstrap DONE-except-cargo — private repo lmvdz/glance-desktop live (terax @ a2c8329, upstream remote, main pushed), lint/types/vitest(351)/build all green, UPSTREAM.md as glance-desktop#2. OWED (Lars): `sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libssl-dev libdbus-1-dev` then cargo re-check. Next: B02 or B03.
