@@ -174,6 +174,7 @@ import { harnessScorecardEnabled, scoreHarness } from "./harness-scorecard.ts";
 import { isArmed } from "./convergence-oracle.ts";
 import { lensAdvisoryBucket, scoreConfidence } from "./confidence.ts";
 import { redact } from "./redact.ts";
+import { truncateLabel } from "./text-util.ts";
 import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
 import { buildTrace, traceMaxSpans, traceSampleRatio, traceSpansEnabled, type TraceResponse } from "./spans.ts";
 import { traceExporterFromEnv, type TraceExportQueue } from "./trace-exporter.ts";
@@ -3411,7 +3412,7 @@ export class SquadManager extends EventEmitter {
 		rec.dto.lastActivity = Date.now();
 		this.emitAgent(rec);
 		this.log("warn", `catastrophe: ${id} — ${detail}`);
-		void this.recordAudit(LOCAL_ACTOR, "catastrophe", id, "error", truncate(detail, 120));
+		void this.recordAudit(LOCAL_ACTOR, "catastrophe", id, "error", truncateLabel(detail, 120));
 	}
 	/**
 	 * Thin, overridable wrapper around land-mode.ts's `resolveLandMode` — exists so tests can force
@@ -4636,7 +4637,7 @@ export class SquadManager extends EventEmitter {
 
 		await this.persist();
 		const failed = rec.dto.status === "error";
-		void this.recordAudit(actor, "create", rec.dto.id, failed ? "error" : "ok", failed ? rec.dto.error : truncate(opts.task ?? rec.dto.name, 80), source);
+		void this.recordAudit(actor, "create", rec.dto.id, failed ? "error" : "ok", failed ? rec.dto.error : truncateLabel(opts.task ?? rec.dto.name, 80), source);
 		return rec.dto;
 	}
 
@@ -4929,7 +4930,7 @@ export class SquadManager extends EventEmitter {
 	async commission(spec: CommissionSpec, opts: CommissionOptions = {}, actor: Actor = LOCAL_ACTOR, source?: string): Promise<CommissionResult> {
 		const dir = opts.dir ?? path.join(this.stateDir, "workers", spec.name);
 		await fs.mkdir(dir, { recursive: true });
-		this.log("info", `${actor.id} commissioning "${spec.name}" → ${truncate(spec.purpose, 80)}`);
+		this.log("info", `${actor.id} commissioning "${spec.name}" → ${truncateLabel(spec.purpose, 80)}`);
 		const architect = opts.architect ?? new OmpArchitect({ bin: this.bin });
 		// The author → validate → onboard process is a workflow graph now, not an imperative
 		// sequence: a failed gate loops back to re-author (bounded), feeding the failure forward.
@@ -4946,7 +4947,7 @@ export class SquadManager extends EventEmitter {
 			void this.recordAudit(actor, "commission", spec.name, "error", report ? "gate failed" : "no candidate", source);
 			return { ok: false, report: report ?? { ok: false, checks: [] }, dir };
 		}
-		void this.recordAudit(actor, "commission", spec.name, "ok", truncate(spec.purpose, 80), source);
+		void this.recordAudit(actor, "commission", spec.name, "ok", truncateLabel(spec.purpose, 80), source);
 		return { ok: true, report, member: executor.member, dir };
 	}
 
@@ -5181,7 +5182,7 @@ export class SquadManager extends EventEmitter {
 					await this.settleSpawnFailure(rec, err);
 					break;
 				}
-				this.log("info", `${actor.id} → ${rec.dto.name}: ${truncate(cmd.message, 80)}`);
+				this.log("info", `${actor.id} → ${rec.dto.name}: ${truncateLabel(cmd.message, 80)}`);
 				// A new instruction makes every decision the auto-loop already took about this unit stale.
 				// Its in-memory `staged`/`landed`/`halted` sets are keyed by ids that a steered agent's edits
 				// never change, so without this the work a steer produces is skipped forever — verified never,
@@ -5196,7 +5197,7 @@ export class SquadManager extends EventEmitter {
 				this.transition(rec, "working", "task-start");
 				this.emitAgent(rec);
 				await this.promptConnected(rec, cmd.message).catch((err) => this.fail(rec, err));
-				void this.recordAudit(actor, "prompt", cmd.id, "ok", truncate(cmd.message, 80), commandSource(cmd));
+				void this.recordAudit(actor, "prompt", cmd.id, "ok", truncateLabel(cmd.message, 80), commandSource(cmd));
 				break;
 			}
 			case "set-model": {
@@ -5264,8 +5265,8 @@ export class SquadManager extends EventEmitter {
 				// never a PendingRequest — mirrors squad_attention/the harness "notify" wiring below.
 				const event: AttentionEvent = { id: randomUUID(), summary: cmd.summary, detail: cmd.detail, source: "notify", createdAt: Date.now() };
 				rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
-				this.append(rec, "system", `🔔 attention (${actor.id}): ${truncate(cmd.summary, 200)}`);
-				void this.recordAudit(actor, "notify", cmd.id, "ok", truncate(cmd.summary, 120));
+				this.append(rec, "system", `🔔 attention (${actor.id}): ${truncateLabel(cmd.summary, 200)}`);
+				void this.recordAudit(actor, "notify", cmd.id, "ok", truncateLabel(cmd.summary, 120));
 				this.emitAgent(rec);
 				break;
 			}
@@ -5305,7 +5306,7 @@ export class SquadManager extends EventEmitter {
 		// never act on it; durable/reliable push needs an outbox, which is intentionally out of scope.
 		this.append(target, "system", `Advisory peer message:\n${fenceUntrusted(`peer message from ${actor.id}`, redact(trimmed))}`);
 		this.emitAgent(target);
-		void this.recordAudit(actor, "message", to, "ok", truncate(trimmed, 80));
+		void this.recordAudit(actor, "message", to, "ok", truncateLabel(trimmed, 80));
 	}
 
 	private answerPending(rec: AgentRecord, req: PendingRequest, value: string, actor: Actor): void {
@@ -5320,9 +5321,9 @@ export class SquadManager extends EventEmitter {
 		// other pending remains records exactly one input→working entry, not a phantom pair.
 		rec.streaming = true;
 		this.setPending(rec, rec.dto.pending.filter((p) => p.id !== req.id), "pending-answer");
-		this.append(rec, "system", `${actor.id} answered "${req.title}": ${truncate(value, 60)}`, { pending: { requestId: req.id, action: "answered" }, status: "ok" });
+		this.append(rec, "system", `${actor.id} answered "${req.title}": ${truncateLabel(value, 60)}`, { pending: { requestId: req.id, action: "answered" }, status: "ok" });
 		this.emitAgent(rec);
-		void this.recordAudit(actor, "answer", rec.dto.id, "ok", `${truncate(req.title, 48)} → ${truncate(value, 40)}`);
+		void this.recordAudit(actor, "answer", rec.dto.id, "ok", `${truncateLabel(req.title, 48)} → ${truncateLabel(value, 40)}`);
 	}
 
 	/**
@@ -6079,7 +6080,7 @@ export class SquadManager extends EventEmitter {
 		const intent = typeof frame.intent === "string" ? frame.intent : "";
 		const existing = rec.toolEntries.get(callId);
 		if (!existing) rec.run?.onTool(toolName);
-		rec.dto.activity = intent ? `${toolName}: ${truncate(intent, 60)}` : toolName;
+		rec.dto.activity = intent ? `${toolName}: ${truncateLabel(intent, 60)}` : toolName;
 		const tool = {
 			...(existing?.tool ?? { callId, name: toolName }),
 			callId,
@@ -7123,7 +7124,7 @@ export class SquadManager extends EventEmitter {
 		// Only regular comments fan out to Plane; plan-annotations are plan-doc-local review chatter
 		// anchored to a rendered block/line and arrive in Plane stripped of that context (noise), so suppress them.
 		if (input.kind !== "plan-annotation") for (const issue of await this.commentPlaneTargets(input.repo, input.subject)) void addPlaneIssueComment(input.repo, issue, input.body).catch((err) => this.log("warn", `plane comment sync failed: ${err instanceof Error ? err.message : String(err)}`));
-		void this.recordAudit(actor, input.kind === "plan-annotation" ? "plan-annotate" : "comment", input.subject, "ok", truncate(input.body, 80));
+		void this.recordAudit(actor, input.kind === "plan-annotation" ? "plan-annotate" : "comment", input.subject, "ok", truncateLabel(input.body, 80));
 		return comment;
 	}
 
@@ -7564,7 +7565,7 @@ export class SquadManager extends EventEmitter {
 			source: "tool",
 			kind: call.toolName,
 			title: `tool: ${call.toolName}`,
-			message: truncate(JSON.stringify(call.arguments ?? {}), 200),
+			message: truncateLabel(JSON.stringify(call.arguments ?? {}), 200),
 			createdAt: Date.now(),
 			// Tag pendings rebuilt from the agent-host's ring replay during the post-reattach settle window
 			// (concern 04's ghost-expiry rules key off this — never gates answerability, only staleness).
@@ -7594,11 +7595,11 @@ export class SquadManager extends EventEmitter {
 				? results.map((r) => `- [${r.type}] ${r.title}\n  ${r.snippet}${r.repo ? `\n  (${r.repo})` : ""}`).join("\n")
 				: "No matching context in the knowledge base.";
 			rec.agent.respondHostTool(call.id, body);
-			this.append(rec, "system", `🔎 ${KB_SEARCH_TOOL}("${truncate(query, 80)}") → ${results.length} result${results.length === 1 ? "" : "s"}`, {
+			this.append(rec, "system", `🔎 ${KB_SEARCH_TOOL}("${truncateLabel(query, 80)}") → ${results.length} result${results.length === 1 ? "" : "s"}`, {
 				status: "ok",
 				tool: { callId: call.id, name: KB_SEARCH_TOOL, args: call.arguments, argsText: safeJson(call.arguments), resultText: body },
 			});
-			void this.recordAudit(agentActor(rec.dto.id), "kb.search", rec.dto.id, "ok", `${results.length} hits for "${truncate(query, 60)}"`);
+			void this.recordAudit(agentActor(rec.dto.id), "kb.search", rec.dto.id, "ok", `${results.length} hits for "${truncateLabel(query, 60)}"`);
 		} catch (err) {
 			rec.agent.respondHostTool(call.id, err instanceof Error ? err.message : String(err), true);
 		}
@@ -7638,9 +7639,9 @@ export class SquadManager extends EventEmitter {
 		const confidence = typeof args.confidence === "number" && Number.isFinite(args.confidence) ? Math.max(0, Math.min(1, args.confidence)) : undefined;
 		const report: AgentReport = { id: randomUUID(), summary, proposal, confidence, createdAt: Date.now() };
 		rec.dto.reports = [...(rec.dto.reports ?? []), report];
-		this.append(rec, "system", `📝 report: ${truncate(summary, 200)}`, { status: "ok", tool: { callId: call.id, name: REPORT_TOOL, args: call.arguments, argsText: safeJson(call.arguments) } });
+		this.append(rec, "system", `📝 report: ${truncateLabel(summary, 200)}`, { status: "ok", tool: { callId: call.id, name: REPORT_TOOL, args: call.arguments, argsText: safeJson(call.arguments) } });
 		rec.agent.respondHostTool(call.id, "report recorded — continue working, a human will review it when they can");
-		void this.recordAudit(agentActor(rec.dto.id), "report.raised", rec.dto.id, "ok", truncate(summary, 120));
+		void this.recordAudit(agentActor(rec.dto.id), "report.raised", rec.dto.id, "ok", truncateLabel(summary, 120));
 		this.emitAgent(rec);
 	}
 
@@ -7686,8 +7687,8 @@ export class SquadManager extends EventEmitter {
 			this.learningMetrics.record("decision-captured", 1, { flag: "decision-capture", variant: learningFlags(rec.dto.id).decisionCapture });
 			rec.agent.respondHostTool(call.id, "decision recorded — future agents on this work will inherit it");
 			try {
-				this.append(rec, "system", `📝 decision recorded: ${truncate(text, 200)}`, { status: "ok", tool: { callId: call.id, name: RECORD_DECISION_TOOL, args: call.arguments, argsText: safeJson(call.arguments) } });
-				void this.recordAudit(agentActor(rec.dto.id), "decision.recorded", featureId, "ok", truncate(text, 120));
+				this.append(rec, "system", `📝 decision recorded: ${truncateLabel(text, 200)}`, { status: "ok", tool: { callId: call.id, name: RECORD_DECISION_TOOL, args: call.arguments, argsText: safeJson(call.arguments) } });
+				void this.recordAudit(agentActor(rec.dto.id), "decision.recorded", featureId, "ok", truncateLabel(text, 120));
 			} catch (postErr) {
 				this.log("warn", `record-decision post-step failed for ${rec.dto.name} (decision was saved): ${String(postErr)}`);
 			}
@@ -7717,9 +7718,9 @@ export class SquadManager extends EventEmitter {
 		const detail = typeof args.detail === "string" ? args.detail : undefined;
 		const event: AttentionEvent = { id: randomUUID(), summary, detail, source: "tool", createdAt: Date.now() };
 		rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
-		this.append(rec, "system", `🔔 attention: ${truncate(summary, 200)}`, { status: "ok", tool: { callId: call.id, name: ATTENTION_TOOL, args: call.arguments, argsText: safeJson(call.arguments) } });
+		this.append(rec, "system", `🔔 attention: ${truncateLabel(summary, 200)}`, { status: "ok", tool: { callId: call.id, name: ATTENTION_TOOL, args: call.arguments, argsText: safeJson(call.arguments) } });
 		rec.agent.respondHostTool(call.id, "attention recorded — continue working, a human will look when they can");
-		void this.recordAudit(agentActor(rec.dto.id), "attention.raised", rec.dto.id, "ok", truncate(summary, 120));
+		void this.recordAudit(agentActor(rec.dto.id), "attention.raised", rec.dto.id, "ok", truncateLabel(summary, 120));
 		this.emitAgent(rec);
 	}
 
@@ -8480,17 +8481,12 @@ function rewardRecordOrThrow(snap: FeedbackSnapshot, id: string): { item: Feedba
 	return { item, reward };
 }
 
-function truncate(s: string, n: number): string {
-	const flat = s.replace(/\s+/g, " ").trim();
-	return flat.length > n ? `${flat.slice(0, n - 1)}…` : flat;
-}
-
 function safeJson(value: unknown, max = 2000): string | undefined {
 	if (value === undefined) return undefined;
 	try {
-		return truncate(redact(JSON.stringify(value, null, 2)), max);
+		return truncateLabel(redact(JSON.stringify(value, null, 2)), max);
 	} catch {
-		return truncate(redact(String(value)), max);
+		return truncateLabel(redact(String(value)), max);
 	}
 }
 

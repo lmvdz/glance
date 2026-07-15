@@ -264,12 +264,6 @@ export async function listWorktrees(repo: string): Promise<{ worktree: string; b
 	return out;
 }
 
-/** Commits on `branch` not reachable from `base` (0 ⇒ fully merged/empty; -1 ⇒ couldn't determine). */
-export async function branchAhead(repo: string, branch: string, base: string): Promise<number> {
-	const r = await runGit(["rev-list", "--count", `${base}..${branch}`], repo);
-	return r.code === 0 ? Number(r.stdout) || 0 : -1;
-}
-
 /** Delete a branch only if it is fully merged — git's `-d` refuses an unmerged branch. Best-effort; true on delete. */
 export async function deleteBranchIfMerged(repo: string, branch: string): Promise<boolean> {
 	const root = await repoRoot(repo).catch(() => repo);

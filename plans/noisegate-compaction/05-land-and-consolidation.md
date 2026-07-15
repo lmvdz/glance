@@ -1,5 +1,5 @@
 # Land gate-output call sites + truncate consolidation
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
