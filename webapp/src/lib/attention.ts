@@ -57,3 +57,91 @@ export function shouldEmit(state: Record<string, number>, key: string, now: numb
   const last = state[key];
   return last === undefined || now - last >= FLOOR_MS;
 }
+
+// =================================================================================================
+// diff-viewed (concern 02): IntervenceView's per-file IntersectionObserver decision logic. Kept
+// pure and DOM-free here so it's unit-tested without a browser — the component only wires the
+// observer and calls these; DESIGN.md's "Seen semantics" row's three guards (50% intersection,
+// visible tab, 5-min floor) are ALL decided here, never in IntervenceView.tsx.
+// =================================================================================================
+
+/** Minimum IntersectionObserver ratio for a diff section to count as "seen" — a sliver at the
+ *  viewport's top/bottom edge is not "seen" (DESIGN.md: binary viewport entry, not dwell time). */
+export const DIFF_VIEWPORT_THRESHOLD = 0.5;
+
+/** Floor-state key for one (agentId,file) pair. NOT a content hash — the 4s working-poll re-fetches
+ *  the same file's diff text on an unchanged DOM node, and that must never look like a fresh key.
+ *  NUL-separated like the daemon's seen-map key (`${repo}\0${file}`): no path can contain `\0`, so
+ *  two distinct pairs can never collide into one key. */
+export function diffViewedKey(agentId: string, file: string): string {
+  return `${agentId}\0${file}`;
+}
+
+/**
+ * Whether an IntersectionObserver callback firing for one file section should emit `diff-viewed`.
+ * `false` whenever ANY of: the tab isn't the visible one (`document.visibilityState`), the section
+ * hasn't cleared the 50% intersection threshold, or the (agentId,file) 5-minute floor hasn't
+ * elapsed. Does not mutate `state` — same contract as `shouldEmit`: the caller only records the
+ * emission after actually calling `reportAttention`.
+ */
+export function shouldEmitDiffViewed(args: {
+  state: Record<string, number>;
+  agentId: string;
+  file: string;
+  intersectionRatio: number;
+  visibilityState: string;
+  now: number;
+}): boolean {
+  const { state, agentId, file, intersectionRatio, visibilityState, now } = args;
+  if (visibilityState !== 'visible') return false;
+  if (intersectionRatio < DIFF_VIEWPORT_THRESHOLD) return false;
+  return shouldEmit(state, diffViewedKey(agentId, file), now);
+}
+
+// =================================================================================================
+// pr-reviewed (concern 02): click-through to the PR emits one `pr-reviewed` event plus a
+// `diff-viewed`-equivalent per file in the currently loaded diff set (DESIGN.md's "pr-reviewed"
+// row). The per-file events still respect the same floor as the viewport observer — a file already
+// marked seen minutes ago by scrolling doesn't get double-counted just because the operator also
+// clicked through to the PR — so a click-through and a real scroll can never double-report the
+// same (agentId,file) pair inside one floor window.
+// =================================================================================================
+
+/**
+ * Builds the events a PR-link click-through should send, and which floor keys to mark once they're
+ * actually sent. Pure: takes the current floor `state` and returns data, never mutates or calls
+ * `reportAttention` itself — IntervenceView.tsx sends `events` and then stamps `markKeys` into its
+ * own floor-state ref, mirroring the `shouldEmit`/record-after-send contract everywhere else here.
+ */
+export function prReviewedEvents(args: {
+  state: Record<string, number>;
+  repo: string;
+  agentId: string;
+  prNumber?: number;
+  files: string[];
+  now: number;
+}): { events: AttentionReport[]; markKeys: string[] } {
+  const { state, repo, agentId, prNumber, files, now } = args;
+  const events: AttentionReport[] = [{ kind: 'pr-reviewed', repo, agentId, prNumber }];
+  const markKeys: string[] = [];
+  for (const file of files) {
+    const key = diffViewedKey(agentId, file);
+    if (shouldEmit(state, key, now)) {
+      events.push({ kind: 'diff-viewed', repo, agentId, file });
+      markKeys.push(key);
+    }
+  }
+  return { events, markKeys };
+}
+
+// =================================================================================================
+// answer-read (concern 02): CLI display paths call the daemon directly (src/index.ts); this webapp
+// helper exists only so concern 10's fabric answer rows have one call to make when they render — no
+// answer-row UI exists yet, so nothing calls this today (DESIGN.md's "answer-read / debrief-heard"
+// row: client-side explicit acks only, never a GET/poll hook).
+// =================================================================================================
+
+/** Report an answer as read from an explicit webapp display path (concern 10's future wiring point). */
+export function reportAnswerRead(repo: string, answerId: string): void {
+  reportAttention({ kind: 'answer-read', repo, answerId });
+}

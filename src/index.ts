@@ -187,6 +187,21 @@ function tokenHeader(): Record<string, string> {
 	}
 }
 
+/**
+ * `answer-read` (comprehension concern 02): a genuine CLI *display* path — `cmdAsk`'s interactive
+ * print and `--read <id>` — POSTs this the same way the webapp's `reportAttention` does. Never
+ * awaited by the caller and every rejection is swallowed here: a daemon hiccup or an old daemon
+ * with no `/api/attention` route must never turn a successful `ask`/`--read` into a failed command.
+ * Callers gate this themselves (never on `--json`/`--no-wait` — machine consumption isn't reading).
+ */
+function reportAnswerReadCli(flags: Record<string, string | boolean>, repo: string, answerId: string): void {
+	fetch(`${base(flags)}/api/attention`, {
+		method: "POST",
+		headers: { ...tokenHeader(), "content-type": "application/json" },
+		body: JSON.stringify({ kind: "answer-read", repo, answerId }),
+	}).catch(() => {});
+}
+
 /** Every URL the dashboard is reachable on — loopback plus each non-internal IPv4 when bound to all interfaces. */
 function reachableUrls(host: string, port: number, scheme: string): string[] {
 	if (host !== "0.0.0.0" && host !== "::") return [`${scheme}://${host}:${port}`];
@@ -959,7 +974,14 @@ async function cmdAsk(args: string[]): Promise<void> {
 		const res = await fetch(`${base(flags)}/api/answers/${encodeURIComponent(dto.id)}`, { headers: tokenHeader() }).catch(() => null);
 		const answer = res?.ok ? ((await res.json()) as { markdown?: string; answeredAt?: number; durationMs?: number }) : undefined;
 		if (answer?.answeredAt && answer.markdown) {
-			process.stdout.write(flags.json ? `${JSON.stringify(answer, null, 2)}\n` : `\n${answer.markdown}\n`);
+			if (flags.json) {
+				process.stdout.write(`${JSON.stringify(answer, null, 2)}\n`);
+			} else {
+				process.stdout.write(`\n${answer.markdown}\n`);
+				// A real display path (not --json, not --no-wait — that path never reaches here): the
+				// operator just read this answer.
+				reportAnswerReadCli(flags, repo, dto.id);
+			}
 			return;
 		}
 		const agents = await fetch(`${base(flags)}/api/agents`, { headers: tokenHeader() }).then((r) => (r.ok ? (r.json() as Promise<AgentDTO[]>) : [])).catch(() => []);
@@ -994,8 +1016,10 @@ async function cmdAnswers(args: string[]): Promise<void> {
 		return;
 	}
 	if (id) {
-		const a = body as { question: string; markdown: string; answeredAt?: number };
+		const a = body as { question: string; markdown: string; answeredAt?: number; repo?: string };
 		process.stdout.write(`${a.question}\n\n${a.answeredAt ? a.markdown : "(not answered yet)"}\n`);
+		// Displaying an unanswered placeholder isn't reading the answer; only an actual answeredAt+repo counts.
+		if (a.answeredAt && a.repo) reportAnswerReadCli(flags, a.repo, id);
 		return;
 	}
 	const list = body as Array<{ id: string; question: string; answeredAt?: number; repo: string }>;
