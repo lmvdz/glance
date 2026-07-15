@@ -60,7 +60,7 @@ export interface FabricDecisionFact {
 	source: FactSource;
 	featureTitle: string;
 	text: string;
-	decisionSource?: "plan" | "human" | "agent";
+	decisionSource?: "plan" | "human" | "agent" | "model-delta";
 	createdAt?: number;
 }
 
@@ -237,6 +237,22 @@ function repoAdmitter(repos: string[] | undefined): (repo: string | undefined) =
 	if (!repos?.length) return () => true; // unrestricted — the caller named no repos
 	const keys = new Set(repos.map(normalizeRepoPath));
 	return (repo) => repo !== undefined && keys.has(normalizeRepoPath(repo));
+}
+
+/**
+ * The exact repo set an actor may see when no explicit `?repo=` narrows it — the SAME fallback
+ * chain `buildFabricSnapshot` computes below for its own unrestricted `repos` (scoped agents' own
+ * repos, falling back to the actor's persisted features when nothing is currently running).
+ * Exported standalone for routes that need the fail-closed repo check WITHOUT building a full
+ * snapshot (comprehension concern 01: `POST /api/attention` validates its `repo` field against
+ * this before writing anything). Fails closed by construction: no scoped agents and no features ⇒
+ * an empty set ⇒ every candidate repo is rejected, never "everything visible" by omission.
+ */
+export function actorVisibleRepoSet(actor: Actor, agents: AgentDTO[], features: PersistedFeature[] = []): Set<string> {
+	const scope = scopeFor(actor, agents);
+	const scopedAgents = agents.filter((a) => scope.has(a.id));
+	const repos = scopedAgents.length ? scopedAgents.map((a) => a.repo) : features.map((f) => f.repo);
+	return new Set(repos.map(normalizeRepoPath));
 }
 
 export async function buildFabricSnapshot(deps: FabricDeps): Promise<FabricSnapshot> {

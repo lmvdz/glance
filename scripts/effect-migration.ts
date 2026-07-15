@@ -59,7 +59,9 @@ export const PATTERNS: Pattern[] = [
 		// `JSON.parse(...) as unknown` reads (baseline-tracker.json, baseline-pins.json) — the exact
 		// "parsing our own freshly-written data" carve-out this pattern's own description names,
 		// mirroring threshold-tuner.ts's identical already-baselined idiom byte-for-byte.
-		baseline: 54,
+		// 54→55 (comprehension concern 01): src/attention.ts's `loadSeenMap` reads its own
+		// `attention-seen.json` — same carve-out, same idiom, one more freshly-written state file.
+		baseline: 55,
 	},
 	{
 		id: "bool-env-compare",
