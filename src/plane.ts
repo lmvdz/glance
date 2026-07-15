@@ -17,11 +17,13 @@
  */
 
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 import { envInt } from "./config.ts";
 import type { IssueRef, PlaneTicket, TaskDetail } from "./types.ts";
 import { makeCache, throttledFetch } from "./plane-throttle.ts";
 import { decodeJsonWith, PlaneProjectMapSchema } from "./schema/external-json.ts";
 import { parseTier2 } from "./tier2.ts";
+import { dbMode } from "./db/index.ts";
 
 interface PlaneConfig {
 	apiKey: string;
@@ -391,6 +393,96 @@ export async function reopenPlaneIssue(issue: IssueRef): Promise<boolean> {
 /** Transition an issue to a started-group state (backlog → started when a spawn picks it up). Best-effort; true on success. */
 export async function startPlaneIssue(issue: IssueRef): Promise<boolean> {
 	return transitionTo(issue, "started");
+}
+
+/** Reasons a write primitive refused. `not-configured`/`no-project` mirror the read-side `null` convention;
+ *  `multi-org` is the DB-mode guard below; `conflict`/`unknown-state` are the fail-closed contracts the
+ *  promoter (concern 05) depends on; `request-failed` is any non-2xx from Plane. */
+export type PlaneWriteError = "not-configured" | "no-project" | "multi-org" | "conflict" | "unknown-state" | "request-failed";
+
+export type PlaneWriteResult = { ok: true } | { ok: false; error: PlaneWriteError };
+
+/** Both write primitives below no-op with a loud log in DB/multi-org mode until Plane config is
+ *  per-org (squad-manager.ts:1052-1056 documents the same hazard for the dispatcher; writers are
+ *  worse than reads — a single global Plane project would receive cross-tenant writes). */
+function multiOrgWriteGuard(fnName: string): PlaneWriteResult | undefined {
+	if (dbMode() !== "db") return undefined;
+	console.warn(`plane: refusing ${fnName} — DB/multi-org mode has no per-org Plane wiring yet (squad-manager.ts:1052-1056)`);
+	return { ok: false, error: "multi-org" };
+}
+
+/** Stable content hash for clobber-protection markers. Plane has no If-Match/ETag; callers read a
+ *  body, hash it with this, and pass the hash back to `updatePlaneIssueBody` as `expectHash`.
+ *  @substrate consumed by concern 05 promoter */
+export function hashPlaneBody(descriptionHtml: string): string {
+	return createHash("sha256").update(descriptionHtml).digest("hex");
+}
+
+/** Overwrite an issue's `description_html`. Mirrors `transitionTo`'s request shape (PATCH the issue).
+ *  Clobber protection is application-level (Plane has no ETag): pass `opts.expectHash` — the hash
+ *  (via `hashPlaneBody`) of the body the caller read before composing this write. If the live body's
+ *  hash no longer matches, the write is refused with `conflict` and NOTHING is sent — a re-fetch-then-
+ *  compare, not a blind overwrite, so two promoters racing the same ticket can't clobber each other.
+ *  @substrate consumed by concern 05 promoter */
+export async function updatePlaneIssueBody(
+	repo: string,
+	issueId: string,
+	descriptionHtml: string,
+	opts?: { expectHash?: string },
+): Promise<PlaneWriteResult> {
+	const guard = multiOrgWriteGuard("updatePlaneIssueBody");
+	if (guard) return guard;
+	const ctx = planeContext(repo);
+	if (!ctx) return { ok: false, error: "not-configured" };
+	const { headers, projectId, base } = ctx;
+	if (!projectId) return { ok: false, error: "no-project" };
+	const resolvedId = await resolveIssueId(base, headers, issueId);
+	if (!resolvedId) return { ok: false, error: "request-failed" };
+	if (opts?.expectHash) {
+		const res = await throttledFetch(`${base}/issues/${encodeURIComponent(resolvedId)}/`, { headers });
+		if (!res || !res.ok) return { ok: false, error: "request-failed" };
+		const raw = (await res.json().catch(() => null)) as { description_html?: string } | null;
+		const live = raw?.description_html ?? "";
+		if (hashPlaneBody(live) !== opts.expectHash) return { ok: false, error: "conflict" };
+	}
+	const res = await throttledFetch(`${base}/issues/${encodeURIComponent(resolvedId)}/`, {
+		method: "PATCH",
+		headers,
+		body: JSON.stringify({ description_html: descriptionHtml }),
+	});
+	if (!res || !res.ok) return { ok: false, error: "request-failed" };
+	issueDetailCache.clear();
+	return { ok: true };
+}
+
+/** Move an issue to the state EXACTLY named `stateName` — named-state-or-no-write. Unlike
+ *  `reopenPlaneIssue`'s name-then-group fallback (a deliberate best-effort posture for that seam),
+ *  this primitive is for state machines: a missing named state must never fall through to
+ *  "whatever sorts first in the group", which could silently auto-release an issue (e.g. into Todo).
+ *  No match ⇒ `unknown-state`, zero writes.
+ *  @substrate consumed by concern 05 promoter */
+export async function movePlaneIssueToState(repo: string, issueId: string, stateName: string): Promise<PlaneWriteResult> {
+	const guard = multiOrgWriteGuard("movePlaneIssueToState");
+	if (guard) return guard;
+	const ctx = planeContext(repo);
+	if (!ctx) return { ok: false, error: "not-configured" };
+	const { headers, projectId, base } = ctx;
+	if (!projectId) return { ok: false, error: "no-project" };
+	const resolvedId = await resolveIssueId(base, headers, issueId);
+	if (!resolvedId) return { ok: false, error: "request-failed" };
+	const states = await fetchStates(base, headers);
+	const target = states.find((s) => s.name === stateName);
+	if (!target) return { ok: false, error: "unknown-state" };
+	const res = await throttledFetch(`${base}/issues/${encodeURIComponent(resolvedId)}/`, {
+		method: "PATCH",
+		headers,
+		body: JSON.stringify({ state: target.id }),
+	});
+	if (!res || !res.ok) return { ok: false, error: "request-failed" };
+	issueListCache.clear();
+	allStatesCache.clear();
+	issueDetailCache.clear();
+	return { ok: true };
 }
 
 /** Create an issue in the Plane project mapped to `repo`, returning its ref. Optional `descriptionHtml`
