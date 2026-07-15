@@ -1,6 +1,6 @@
 # I04 — lease + presence overlay (who holds which file)
 
-STATUS: open
+STATUS: in-review (glance-desktop#17)
 PRIORITY: p2
 REPOS: glance-desktop
 COMPLEXITY: architectural
