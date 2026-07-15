@@ -436,7 +436,7 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
       getContextBrief: () => contextBriefRef.current,
       onFunctionCall: dispatcher.onFunctionCall,
       onCaption: (text, speaker, final) => {
-        dispatcher.onCaption(text, speaker);
+        dispatcher.onCaption(text, speaker, final);
         if (speaker === 'user') {
           // Review fix (audit finding): whisper transcribes only COMMITTED audio, so a 'user'
           // caption arriving while a NEW recording is in progress belongs to the PREVIOUS turn —
