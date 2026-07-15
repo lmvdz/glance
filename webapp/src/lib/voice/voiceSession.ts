@@ -80,6 +80,11 @@ export interface PendingFunctionCall {
 export type VoiceEvent =
   | { type: 'ptt-press' }
   | { type: 'ptt-release' }
+  /** End a recording WITHOUT committing it — the caller (callHud.ts's gesture machine) decided the
+   *  engagement was too short to contain speech (a slow click, a pointer drift, a double-click).
+   *  Discards the buffer instead of committing room tone + `response.create`, which would make the
+   *  model re-answer the previous context with the mic freshly muted under the operator. */
+  | { type: 'ptt-abort' }
   | { type: 'response-started' }
   | { type: 'function-call-ready'; call: PendingFunctionCall }
   | { type: 'response-done' }
@@ -144,6 +149,14 @@ export function nextVoiceState(state: VoiceState, event: VoiceEvent): ReducerRes
           // Only reachable when VoiceSession has just sent a queued injection's items +
           // response.create while idle (the only quiescent state injections/ack flush from).
           return { state: 'awaitingResponse', effects: [] };
+        case 'response-started':
+          // Resync: a response starting while this machine thinks nothing is happening means the
+          // machine lost track of one (a wedge-watchdog recovery raced a slow response.created, a
+          // dropped wire event) — adopt the truth the server just asserted rather than rendering
+          // "Muted" over live assistant audio. Unreachable in a healthy session (turn_detection
+          // is pinned null; every response.create this module sends moves the state off idle
+          // first).
+          return { state: 'speaking', effects: [] };
         default:
           return noop('idle');
       }
@@ -156,6 +169,10 @@ export function nextVoiceState(state: VoiceState, event: VoiceEvent): ReducerRes
           // response.create is emitted from a state transition rooted in userRecording, and it
           // only fires on the way OUT of userRecording — rule (b) holds by construction.
           return { state: 'awaitingResponse', effects: [COMMIT, RESPONSE_CREATE] };
+        case 'ptt-abort':
+          // An accidental engagement (see the event's doc comment): discard whatever landed in the
+          // input buffer and return to quiescent — no commit, no response.create, nothing spoken.
+          return { state: 'idle', effects: [CLEAR] };
         default:
           // response-started / function-call-ready / response-done / ack-sent arriving while the
           // user is actively recording: stay in userRecording, no wire effects. This is rule (b)'s
@@ -233,11 +250,25 @@ function extractResponseId(evt: RealtimeServerEvent): string | undefined {
   return typeof id === 'string' ? id : undefined;
 }
 
+/** Pulls `response.status` out of a `response.done` event's nested `response` object (concern 03) —
+ *  the wire's own verdict on how the response ended (`'completed'`, `'cancelled'`, `'failed'`,
+ *  `'incomplete'`). Loose/defensive like `extractResponseId`: an unexpected shape yields `undefined`
+ *  rather than throwing, which `CANCELLED_RESPONSE_STATUSES` below treats as NOT cancelled — a
+ *  malformed/absent status is not evidence the injection's own turn was cut short. */
+function extractResponseStatus(evt: RealtimeServerEvent): string | undefined {
+  const response = evt.response;
+  if (!response || typeof response !== 'object') return undefined;
+  const status = (response as { status?: unknown }).status;
+  return typeof status === 'string' ? status : undefined;
+}
+
 /** Provider error codes this module treats as benign, routine gestures rather than connection
  *  failures — both are the server's response to a no-op we send unconditionally by design:
  *  `response_cancel_not_active` (barge-in's `response.cancel` when nothing was actually in
- *  flight) and `input_audio_buffer_commit_empty` (an empty PTT tap's `input_audio_buffer.commit`
- *  with no audio behind it). `conversation_already_has_active_response` (CRITICAL-1
+ *  flight) and `input_audio_buffer_commit_empty` (an empty PTT release's `input_audio_buffer.commit`
+ *  with no audio behind it — benign as an ERROR, but `handleServerEvent` additionally withdraws
+ *  the paired `response.create` when it sees it, so the model never answers an empty turn by
+ *  re-answering the previous one). `conversation_already_has_active_response` (CRITICAL-1
  *  belt-and-braces) is the provider's rejection of a `response.create` sent while a response was
  *  still open — the deferred-send machinery below (`sendRaw`/`deferredResponseCreate`) is meant to
  *  make this unreachable in practice, but if it ever does fire, it must be absorbed rather than
@@ -247,6 +278,11 @@ const BENIGN_ERROR_CODES: ReadonlySet<string> = new Set([
   'input_audio_buffer_commit_empty',
   'conversation_already_has_active_response',
 ]);
+
+/** Concern 03: `response.done` statuses that resolve a queued injection's `onDone` as
+ *  `cancelled: true` rather than `false`. `'completed'` (and any unrecognized/absent status — see
+ *  `extractResponseStatus`) is the only path to `cancelled: false`. */
+const CANCELLED_RESPONSE_STATUSES: ReadonlySet<string> = new Set(['cancelled', 'failed', 'incomplete']);
 
 // =============================================================================
 // Injected dependencies
@@ -268,7 +304,11 @@ export interface DataChannelLike {
   onerror: ((event: unknown) => void) | null;
 }
 
-/** The subset of `RTCPeerConnection` this module needs. */
+/** The subset of `RTCPeerConnection` this module needs. `connectionState`/`onconnectionstatechange`
+ *  are optional (older fakes/tests need not model them) but load-bearing in production: a dead ICE
+ *  path does NOT reliably fire the data channel's `onclose` — live evidence 2026-07-15: the
+ *  connection died silently mid-call, the channel kept reporting `open`, sends went into the void,
+ *  and no close event ever came. `connectionState === 'failed'` is the browser's own verdict. */
 export interface PeerConnectionLike {
   addTrack(track: MediaStreamTrack, stream: MediaStream): unknown;
   createDataChannel(label: string): DataChannelLike;
@@ -278,6 +318,8 @@ export interface PeerConnectionLike {
   close(): void;
   localDescription: { sdp?: string; type: string } | null;
   ontrack: ((event: { streams: MediaStream[] }) => void) | null;
+  connectionState?: string;
+  onconnectionstatechange?: (() => void) | null;
 }
 
 /** Mirrors `../api.ts`'s `VoiceMintToken` — duplicated (not imported) so this module's own mint
@@ -329,7 +371,7 @@ export interface VoiceSessionErrorInfo {
    *  was exhausted. Kept as four distinct codes (rather than folding SDP failures into
    *  `mint-failed`) so the caller can tell "the daemon route is the problem" apart from "the
    *  provider itself rejected the connection". */
-  code: 'mic-denied' | 'mint-failed' | 'connect-failed' | 'reconnect-failed';
+  code: 'mic-denied' | 'mint-failed' | 'mint-rate-limited' | 'connect-failed' | 'reconnect-failed';
   message: string;
   /** Set on errors the caller should treat as "give up on voice for this session, fall back to the
    *  text composer" — the bounded-retry and mic-denied paths both set this; a single transient send
@@ -347,14 +389,15 @@ export interface ReconnectedInfo {
 
 export interface VoiceSessionOptions {
   onStateChange?: (state: VoiceState, previous: VoiceState) => void;
-  /** Live caption text — `response.output_audio_transcript.delta` (assistant) or
-   *  `conversation.item.input_audio_transcription.delta` (user) chunks, in wire order, tagged with
-   *  which side produced them. The user-transcription event only fires when the session has input
-   *  transcription enabled — mint (`src/voice-token.ts`) doesn't request it today, so in practice
-   *  every caption is currently `'assistant'`; the handler stays wired and tagged `'user'` so it
-   *  activates for free the day concern 07/05 turns on `input_audio_transcription` server-side.
-   *  Optional server behavior either way — callers should treat captions as a nice-to-have, never a
-   *  required signal. */
+  /** Live caption text — `response.output_audio_transcript.delta` (assistant) or the user-side
+   *  input transcription (delta chunks when the transcription model streams; the full utterance
+   *  from `...input_audio_transcription.completed` when it doesn't — whisper-1, the model mint
+   *  pins in `src/voice-token.ts`, never streams), in wire order, tagged with which side produced
+   *  them. NOTE: `'user'` captions arrive asynchronously — whisper routinely delivers the
+   *  operator's transcript in the MIDDLE of the assistant's streaming reply, so callers must
+   *  buffer per speaker, not per arrival order (see `VoiceCallContext`'s per-speaker buffers).
+   *  Optional server behavior either way — callers should treat captions as a nice-to-have, never
+   *  a required signal. */
   onCaption?: (text: string, speaker: 'assistant' | 'user') => void;
   onFunctionCall?: (call: PendingFunctionCall) => void;
   onError?: (error: VoiceSessionErrorInfo) => void;
@@ -365,6 +408,11 @@ export interface VoiceSessionOptions {
   /** Rolling summary of the conversation so far, read fresh at rotation time (not cached) — the
    *  caller (concern 07/08) owns how it's built. Absent/empty means no recap text is injected. */
   getRecap?: () => string;
+  /** Live operator context (active project, bound session/agent, what's on screen) — read fresh
+   *  and injected as a system item into EVERY fresh connection (connect, silent reconnect,
+   *  proactive rotation), so a rebuilt session is never context-blind. Return `''` for nothing.
+   *  Mid-call updates (the operator navigating) go through `updateSystemContext` instead. */
+  getContextBrief?: () => string;
   /** The bound console agentId, folded into the carry-over injection text alongside the recap so
    *  the new session's opening context still names which agent it's driving. */
   agentId?: string;
@@ -380,6 +428,26 @@ export interface VoiceSessionOptions {
  *  quiescence. */
 export type InjectionItem = unknown;
 
+/** Concern 03: `queueInjection`'s completion signal. `cancelled: false` fires ONLY when the
+ *  injection batch's OWN response (the one requested by ITS flush's `response.create`, correlated by
+ *  response id — never the outstanding counter) reaches `response.done` with status `'completed'`.
+ *  `cancelled: true` covers every other fate: barge-in (`response.cancel` -> status `'cancelled'`),
+ *  a `'failed'`/`'incomplete'` status, `disconnect()` with the batch still queued or in flight,
+ *  rotation/reconnect tearing down the connection the batch was sent on, and the wedge-watchdog
+ *  recovery declaring the connection dead while the batch was in flight. Debrief-cursor two-phase
+ *  commit (concern 04) is the reason this exists: commit the cursor only on `{cancelled: false}`. */
+export type InjectionCompletionInfo = { cancelled: boolean };
+export type InjectionOnDone = (info: InjectionCompletionInfo) => void;
+
+/** One queued `queueInjection` call, sitting in `injectionQueue` until the machine is quiescent
+ *  enough to flush it (see `flushInjectionQueue`). `onDone` rides alongside the items so it can be
+ *  handed off to whichever correlation slot actually claims the flush's `response.create` — see
+ *  `nextInjectionOnDone`, `pendingInjectionCallbackQueue`, and `responseInjectionOnDoneById`. */
+interface InjectionBatch {
+  items: InjectionItem[];
+  onDone: InjectionOnDone | undefined;
+}
+
 // =============================================================================
 // Internal error markers (establishConnection's failure taxonomy — see MINOR-11/MAJOR-5)
 // =============================================================================
@@ -387,7 +455,16 @@ export type InjectionItem = unknown;
 /** Thrown by `establishConnection` when `deps.mint()` itself fails — distinguishes a mint-side
  *  failure (daemon route: rate limit, flag off, auth) from anything that fails AFTER a successful
  *  mint (peer connection / SDP exchange), which callers report as `connect-failed` instead. */
-class VoiceMintError extends Error {}
+class VoiceMintError extends Error {
+  constructor(
+    message: string,
+    /** The daemon's HTTP status for the failed mint, when known — lets the caller tell an org
+     *  mint-cap refusal (429) apart from a generic mint failure. */
+    readonly status?: number,
+  ) {
+    super(message);
+  }
+}
 
 /** Thrown by `establishConnection` when a `disconnect()` (or a newer connect/rotate/reconnect
  *  attempt) invalidated this attempt's epoch while it was still in flight. Callers catch this and
@@ -399,12 +476,21 @@ class EpochStaleError extends Error {}
 // VoiceSession
 // =============================================================================
 
+/** One entry in the session's diagnostic ring buffer (`VoiceSession.getDebugLog`) — the flight
+ *  recorder for live wire-level triage. `t` is `deps.now()` (wall-clock ms in production). */
+export interface VoiceDebugEvent {
+  t: number;
+  kind: 'send' | 'recv' | 'state' | 'ptt' | 'note';
+  label: string;
+  detail?: string;
+}
+
 export class VoiceSession {
   private state: VoiceState = 'idle';
   private pc: PeerConnectionLike | undefined;
   private dataChannel: DataChannelLike | undefined;
   private micStream: MediaStream | undefined;
-  private readonly injectionQueue: InjectionItem[][] = [];
+  private readonly injectionQueue: InjectionBatch[] = [];
   private reMintPending = false;
   private reMintTimer: VoiceTimerHandle | undefined;
   /** True once `connect()` (or a rotation/reconnect) has a live connection. Guards
@@ -465,6 +551,38 @@ export class VoiceSession {
    *  provisional `currentTrigger` field above rather than losing the event entirely. */
   private responseTriggerById = new Map<string, 'user' | 'injection'>();
 
+  /** Concern 03: completion-callback FIFO, kept in EXACT lockstep with `pendingTriggerQueue` — every
+   *  push/pop/shift of one is paired with the other in the same statement, at the same call site
+   *  (`sendRaw`'s response.create branch pushes both; the `conversation_already_has_active_response`
+   *  handler pops both; `response.created` shifts both). Only an injection-flush-originated
+   *  `response.create` send carries a defined entry (see `nextInjectionOnDone`); every other trigger
+   *  source (a user's `ptt-release`, a tool-output ack) pushes `undefined` here, so the two queues
+   *  can never desync relative to each other even though only one of them is usually populated. */
+  private pendingInjectionCallbackQueue: Array<InjectionOnDone | undefined> = [];
+
+  /** Settled `response.id -> onDone` mapping — the injection-callback twin of `responseTriggerById`.
+   *  Populated by `response.created` when it shifts a DEFINED entry off `pendingInjectionCallbackQueue`
+   *  for a response that did get an id on the wire; resolved (then deleted) the moment that SAME
+   *  response's own `response.done` arrives (see the `response.done` case's status -> cancelled
+   *  mapping). Never touched by any OTHER response's completion — an injection batch's callback keys
+   *  off its own flush's response id, exactly as concern 03 asks, not off `outstandingResponses`. */
+  private responseInjectionOnDoneById = new Map<string, InjectionOnDone>();
+
+  /** Set immediately before the ONE `sendRaw({type:'response.create'})` call that represents an
+   *  injection flush's own response (`flushInjectionQueue`) or a re-sent deferred continuation of one
+   *  (the `response.done` handler's `deferredResponseCreate` branch) — consumed and reset to
+   *  `undefined` INSIDE `sendRaw` itself (both the "send now" and "drop, channel not open" branches),
+   *  so it can never bleed into an unrelated response.create send that happens to run afterward
+   *  (a `ptt-release`, a tool-output ack, or a later, different flush). */
+  private nextInjectionOnDone: InjectionOnDone | undefined;
+
+  /** Input-transcription items that produced at least one streaming `.delta` — their `.completed`
+   *  event must NOT re-emit the full transcript through `onCaption` (it would double the
+   *  utterance). whisper-1, the pinned model, streams nothing, so in practice every completed
+   *  event emits; this set exists for a future streaming transcription model. Cleared on
+   *  disconnect/reconnect with the rest of the per-connection tracking. */
+  private userTranscriptDeltaItems = new Set<string>();
+
   /** Best-effort target for the barge-in `conversation.item.truncate` (MINOR-9) — the most
    *  recently-seen assistant audio item's id/content-index, and the wall-clock time its first delta
    *  arrived. Reset whenever every outstanding response completes, so a stale item id never bleeds
@@ -489,13 +607,52 @@ export class VoiceSession {
    *  send was REQUESTED (an ack, always 'injection' in practice, but kept general). Sent for real
    *  the moment `handleServerEvent`'s `response.done` case brings `outstandingResponses` back to
    *  zero. Cleared (without ever sending) by a barge-in (`pttPress`) or a reset/disconnect — a
-   *  superseded turn must never have its deferred continuation fire into whatever comes next. */
-  private deferredResponseCreate: { trigger: 'user' | 'injection' } | undefined;
+   *  superseded turn must never have its deferred continuation fire into whatever comes next.
+   *  Concern 03: `onDone` rides along for the (rare, but real — see `discardInFlightInjections`'s
+   *  doc comment) case where an injection flush's OWN `response.create` is itself the one that gets
+   *  deferred (e.g. `ptt-abort` lands the machine on `idle` while a just-cancelled response's
+   *  `response.done` hasn't arrived yet, so `flushInjectionQueue` fires while `outstandingResponses`
+   *  is still > 0). Fired `cancelled: true` if this slot is ever cleared without being sent for
+   *  real; carried forward and re-attached (via `nextInjectionOnDone`) if it IS eventually sent. */
+  private deferredResponseCreate: { trigger: 'user' | 'injection'; onDone: InjectionOnDone | undefined } | undefined;
 
   /** LOW batch: the AbortController backing the current SDP POST's 15s timeout — aborted by
    *  `disconnect()` (hanging up mid-connect shouldn't leave a POST in flight) and superseded by the
    *  next `establishConnection` attempt's own controller. */
   private sdpAbortController: AbortController | undefined;
+
+  /** Diagnostic ring buffer (live-triage flight recorder, 2026-07-15) — every wire send/receive,
+   *  state transition, PTT call, and lifecycle note, capped at the most recent
+   *  `DEBUG_LOG_CAP` entries. Exposed read-only via `getDebugLog()`; `VoiceCallContext` hangs a
+   *  `window.__glanceVoiceDebug()` dump hook off it while a call is live. Local-only, never
+   *  transmitted — it records event TYPES and correlation ids, not caption/transcript text. */
+  private readonly debugLog: VoiceDebugEvent[] = [];
+  private static readonly DEBUG_LOG_CAP = 400;
+
+  /** Wedge watchdog (live bug 2026-07-15: the HUD sat on "Thinking…" forever): `awaitingResponse`
+   *  is the only state with no guaranteed outbound edge — if the `response.create` behind it was
+   *  silently dropped (`sendRaw` drops on a non-open channel rather than queueing) or the provider
+   *  never answers, NOTHING ever moves the machine again. `awaitingSince` stamps entry into the
+   *  state (refreshed by any sign of turn life — see `handleServerEvent`'s transcript-delta case);
+   *  a poll timer recovers the machine (resync counters + `reset`) once the state has sat
+   *  demonstrably dead: quickly when nothing is even in flight to answer it, conservatively
+   *  otherwise. */
+  private awaitingWatchdogTimer: VoiceTimerHandle | undefined;
+  private awaitingSince: number | undefined;
+  private static readonly AWAITING_WATCHDOG_POLL_MS = 5_000;
+  /** How long `awaitingResponse` may sit with ZERO server events (every received event refreshes
+   *  `awaitingSince` — see `handleServerEvent`'s top) before the connection is declared dead. A
+   *  live session acks every send within ~100ms and a generating response emits a steady event
+   *  stream, so 12s of true silence while a turn is pending is dead-connection evidence — recovery
+   *  resyncs the machine AND silently reconnects (live evidence 2026-07-15: an ICE death never
+   *  fires `dc.onclose`; the channel keeps claiming `open` while sends go into the void). */
+  private static readonly AWAITING_WEDGE_MS = 12_000;
+
+  /** System-context `conversation.item.create` payloads waiting for the data channel to actually
+   *  open — a fresh channel opens ASYNC after `establishConnection` returns, and `sendRaw` drops
+   *  (never queues) on a non-open channel, so the connect-time context brief must wait for
+   *  `dc.onopen` in production (tests' fake channels start open and send immediately). */
+  private pendingContextSends: Record<string, unknown>[] = [];
 
   constructor(
     private readonly deps: VoiceSessionDeps,
@@ -504,6 +661,17 @@ export class VoiceSession {
 
   getState(): VoiceState {
     return this.state;
+  }
+
+  /** The diagnostic ring buffer, oldest-first (see the `debugLog` field doc comment). Read-only:
+   *  callers dump/inspect it (e.g. `window.__glanceVoiceDebug()` in a live call), never mutate. */
+  getDebugLog(): readonly VoiceDebugEvent[] {
+    return this.debugLog;
+  }
+
+  private logDebug(kind: VoiceDebugEvent['kind'], label: string, detail?: string): void {
+    this.debugLog.push({ t: this.deps.now(), kind, label, ...(detail !== undefined ? { detail } : {}) });
+    if (this.debugLog.length > VoiceSession.DEBUG_LOG_CAP) this.debugLog.splice(0, this.debugLog.length - VoiceSession.DEBUG_LOG_CAP);
   }
 
   /** MEDIUM-4: whether this session has ever completed a connection (as opposed to still being on
@@ -564,7 +732,11 @@ export class VoiceSession {
         for (const track of this.micStream?.getTracks() ?? []) track.stop();
         this.micStream = undefined;
         this.opts.onError?.({
-          code: err instanceof VoiceMintError ? 'mint-failed' : 'connect-failed',
+          // A 429 from the mint route is the org's durable per-org mint cap (or the per-actor rate
+          // limiter) refusing — a known, expected, self-clearing state, NOT a generic failure. Give
+          // it its own code so the operator is told "you hit the limit, wait" instead of the vague
+          // "try again in a moment" that reads as a bug.
+          code: err instanceof VoiceMintError ? (err.status === 429 ? 'mint-rate-limited' : 'mint-failed') : 'connect-failed',
           message: err instanceof Error ? err.message : 'Failed to start the voice session.',
         });
         return;
@@ -581,11 +753,25 @@ export class VoiceSession {
   }
 
   disconnect(): void {
+    this.logDebug('note', 'disconnect');
     this.epoch++; // invalidate any in-flight connect/rotate/reconnect
     this.connected = false;
+    if (this.awaitingWatchdogTimer !== undefined) {
+      this.deps.clearTimer(this.awaitingWatchdogTimer);
+      this.awaitingWatchdogTimer = undefined;
+    }
+    this.awaitingSince = undefined;
     this.sdpAbortController?.abort(); // LOW batch: cancel a hanging SDP POST rather than let it run
     this.sdpAbortController = undefined;
-    this.deferredResponseCreate = undefined; // CRITICAL-1: nothing left to continue into
+    // Concern 03: resolve every injection completion callback that will never otherwise fire —
+    // anything already sent (deferred behind CRITICAL-1, awaiting response.created, or
+    // awaiting response.done) resolves right here as cancelled:true. `teardownConnection()` below
+    // calls the same method again but finds nothing left (idempotent — see its doc comment), so this
+    // is not a double-fire. Must run BEFORE `deferredResponseCreate` is otherwise discarded.
+    this.discardInFlightInjections();
+    // Batches that never even got as far as a response.create (still sitting in the queue) are a
+    // separate case — resolve them too, right before the queue itself is cleared.
+    for (const batch of this.injectionQueue) if (batch.onDone) this.safeInvokeOnDone(batch.onDone, true);
     // Clear the injection queue and the re-mint flag BEFORE dispatching 'reset': if a batch were
     // still queued, `dispatch`'s `onQuiescent()` (fired because reset lands on `idle`) would flush
     // it straight through the about-to-be-torn-down data channel and leave `getState()` reporting
@@ -603,6 +789,7 @@ export class VoiceSession {
     this.outstandingResponses = 0;
     this.pendingTriggerQueue = []; // MINOR-4: stale queue entries from the torn-down session
     this.responseTriggerById.clear();
+    this.userTranscriptDeltaItems.clear();
     this.activeAudioItemId = undefined;
     this.activeAudioContentIndex = undefined;
     this.activeAudioStartedAt = undefined;
@@ -616,11 +803,19 @@ export class VoiceSession {
 
   pttPress(): void {
     const responseActive = this.state === 'awaitingResponse' || this.state === 'speaking' || this.state === 'toolPending';
+    this.logDebug('ptt', 'press', responseActive ? 'barge-in' : undefined);
     if (responseActive) this.sendBargeInTruncate();
     // CRITICAL-1: a barge-in supersedes any ack continuation still waiting on the wrapping
     // response's response.done — that continuation must never fire into whatever the user is
     // about to say next (it would violate rule (b): response.create must never be emitted while
     // userRecording). Safe to clear unconditionally even when nothing was pending.
+    // Concern 03: if that dropped continuation was itself an injection flush's own response.create
+    // (deferred behind a still-active wrapping response — see the field's doc comment), its onDone
+    // fires cancelled:true here, since it will now never be sent at all. An already-SENT injection
+    // response (one that already got its response id) is NOT touched here — barge-in's own
+    // response.cancel resolves it normally through the response.done handler below, with a
+    // 'cancelled' status.
+    if (this.deferredResponseCreate?.onDone) this.safeInvokeOnDone(this.deferredResponseCreate.onDone, true);
     this.deferredResponseCreate = undefined;
     // Hot-mic privacy (MINOR-8): unmute for the duration of the hold.
     for (const track of this.micStream?.getAudioTracks() ?? []) track.enabled = true;
@@ -628,9 +823,22 @@ export class VoiceSession {
   }
 
   pttRelease(): void {
+    this.logDebug('ptt', 'release');
     this.currentTrigger = 'user'; // this turn's response.create (if any) is user-triggered (MAJOR-3)
     this.dispatch({ type: 'ptt-release' });
     // Hot-mic privacy (MINOR-8): mute again the instant the user lets go.
+    for (const track of this.micStream?.getAudioTracks() ?? []) track.enabled = false;
+  }
+
+  /** End the current recording WITHOUT sending it — the gesture layer (callHud.ts) decided the
+   *  engagement was too short to contain speech (empty-turn rule: a slow click, pointer drift off
+   *  the button, a double-click). Discards the buffer and re-mutes; the model is never asked to
+   *  respond, so it can't re-answer the previous context off an empty commit. A no-op (bar the
+   *  re-mute, which is idempotent) unless a recording is actually in progress. */
+  pttAbort(): void {
+    this.logDebug('ptt', 'abort');
+    this.dispatch({ type: 'ptt-abort' });
+    // Hot-mic privacy (MINOR-8): the engagement is over either way — mute.
     for (const track of this.micStream?.getAudioTracks() ?? []) track.enabled = false;
   }
 
@@ -664,13 +872,38 @@ export class VoiceSession {
   handleServerEvent(raw: unknown): void {
     if (!raw || typeof raw !== 'object' || typeof (raw as { type?: unknown }).type !== 'string') return;
     const evt = raw as RealtimeServerEvent;
+    // Wedge-watchdog liveness: ANY event arriving proves the connection is alive — the wedge
+    // timeout measures true silence, so a long wrapping narration (or a slow tool-arguments
+    // stream) behind a parked awaitingResponse never reads as dead.
+    if (this.awaitingSince !== undefined) this.awaitingSince = this.deps.now();
+    // Flight recorder: every event type this module acts on, plus errors (with their code).
+    // Transcript deltas are deliberately NOT logged per-delta (they'd flood the ring buffer) —
+    // they instead refresh the wedge watchdog's liveness stamp below.
+    if (evt.type !== 'response.output_audio_transcript.delta' && evt.type !== 'conversation.item.input_audio_transcription.delta') {
+      const errorCode =
+        evt.type === 'error' && evt.error && typeof evt.error === 'object' && 'code' in evt.error ? String((evt.error as { code?: unknown }).code) : undefined;
+      this.logDebug('recv', evt.type, errorCode ?? extractResponseId(evt));
+    }
     switch (evt.type) {
       case 'response.created': {
         // MINOR-4: claim this response's slot in the trigger queue — the trigger that was active
         // when its response.create was SENT, not whatever currentTrigger happens to hold now.
         const responseId = extractResponseId(evt);
         const trigger = this.pendingTriggerQueue.shift() ?? this.currentTrigger;
-        if (responseId) this.responseTriggerById.set(responseId, trigger);
+        // Concern 03: claim this response's slot in the injection-callback queue too — shifted in
+        // exact lockstep with pendingTriggerQueue above (see that field's doc comment), so `undefined`
+        // here just means this response.create wasn't an injection flush's own send.
+        const onDone = this.pendingInjectionCallbackQueue.shift();
+        if (responseId) {
+          this.responseTriggerById.set(responseId, trigger);
+          if (onDone) this.responseInjectionOnDoneById.set(responseId, onDone);
+        } else if (onDone) {
+          // No response id on the wire to key the eventual response.done correlation off of (the
+          // MINOR-4 residual case, concern-03's twin) — rather than let this callback dangle
+          // forever waiting for a response.done that can never be matched back to it, resolve it
+          // now as cancelled:true.
+          this.safeInvokeOnDone(onDone, true);
+        }
         this.dispatch({ type: 'response-started' });
         // CRITICAL-2: a fresh response is starting — resume local playback in case the PREVIOUS
         // turn ended in a barge-in (`stopPlayback()` paused the shared <audio> element and nothing
@@ -688,11 +921,27 @@ export class VoiceSession {
         if (this.activeAudioStartedAt === undefined) this.activeAudioStartedAt = this.deps.now();
         return;
       case 'conversation.item.input_audio_transcription.delta':
-        // Optional user-side transcription — surfaced through the same caption channel when
-        // present; some sessions won't have it enabled at all (DESIGN.md: "treat captions as
-        // optional"; see VoiceSessionOptions.onCaption for why this is currently always dormant).
+        // User-side transcription (mint pins `transcription: {model: 'whisper-1'}` — live since
+        // the 2026-07-13 pass) — surfaced through the same caption channel. whisper-1 doesn't
+        // stream, so in practice this fires rarely/never and the `completed` case below carries
+        // the utterance (DESIGN.md: "treat captions as optional").
         if (typeof evt.delta === 'string') this.opts.onCaption?.(evt.delta, 'user');
+        if (typeof evt.item_id === 'string') this.userTranscriptDeltaItems.add(evt.item_id);
         return;
+      case 'conversation.item.input_audio_transcription.completed': {
+        // whisper-1 — the transcription model the mint pins (src/voice-token.ts) — does not stream:
+        // in practice the operator's whole utterance arrives in THIS one event, with no preceding
+        // deltas. Surface it through the same caption channel so the user side of the conversation
+        // actually reaches the UI — but only when no delta for this item already did (a future
+        // streaming-capable transcription model would otherwise double-emit the utterance).
+        const itemId = typeof evt.item_id === 'string' ? evt.item_id : undefined;
+        const alreadyStreamed = itemId !== undefined && this.userTranscriptDeltaItems.has(itemId);
+        if (itemId !== undefined) this.userTranscriptDeltaItems.delete(itemId);
+        if (!alreadyStreamed && typeof evt.transcript === 'string' && evt.transcript.length > 0) {
+          this.opts.onCaption?.(evt.transcript, 'user');
+        }
+        return;
+      }
       case 'response.function_call_arguments.done': {
         // MINOR-4: correlate by this event's own response_id against the settled map — falls back
         // to the provisional currentTrigger only when response_id is absent (residual, see the
@@ -719,7 +968,20 @@ export class VoiceSession {
         // actually finished, so an unrelated wrapping response's completion can't be mistaken for a
         // synchronous ack's response completing.
         const responseId = extractResponseId(evt);
-        if (responseId) this.responseTriggerById.delete(responseId); // MINOR-4: this response is done
+        if (responseId) {
+          this.responseTriggerById.delete(responseId); // MINOR-4: this response is done
+          // Concern 03: THIS is the specific-response-id correlation the concern asks for — resolve
+          // the injection callback keyed to exactly this response, never the outstanding counter.
+          // A response with no queued callback (the overwhelmingly common case: not an injection
+          // flush at all) is a no-op map lookup.
+          const onDone = this.responseInjectionOnDoneById.get(responseId);
+          if (onDone) {
+            this.responseInjectionOnDoneById.delete(responseId);
+            const status = extractResponseStatus(evt);
+            const cancelled = status !== undefined && CANCELLED_RESPONSE_STATUSES.has(status);
+            this.safeInvokeOnDone(onDone, cancelled);
+          }
+        }
         if (this.outstandingResponses > 0) this.outstandingResponses--;
         if (this.outstandingResponses === 0) {
           // CRITICAL-1: the wrapping response (or whichever response was last outstanding) has now
@@ -735,9 +997,14 @@ export class VoiceSession {
           this.activeAudioContentIndex = undefined;
           this.activeAudioStartedAt = undefined;
           if (this.deferredResponseCreate) {
-            const { trigger } = this.deferredResponseCreate;
+            const { trigger, onDone } = this.deferredResponseCreate;
             this.deferredResponseCreate = undefined;
             this.currentTrigger = trigger;
+            // Concern 03: re-attach the deferred send's own callback (if it had one — see
+            // `deferredResponseCreate`'s doc comment) so `sendRaw` re-enters it into the normal
+            // pendingInjectionCallbackQueue/responseInjectionOnDoneById correlation, exactly as if
+            // it had sent immediately in the first place.
+            this.nextInjectionOnDone = onDone;
             this.sendRaw({ type: 'response.create' });
             return;
           }
@@ -751,6 +1018,23 @@ export class VoiceSession {
           error && typeof error === 'object' && 'code' in error && typeof (error as { code?: unknown }).code === 'string'
             ? (error as { code: string }).code
             : undefined;
+        if (code === 'input_audio_buffer_commit_empty') {
+          // Empty-turn backstop: the provider is telling us the commit a `pttRelease` just sent had
+          // no audio behind it — the paired `response.create` (sent, or still deferred behind a
+          // wrapping response) is about to make the model answer thin air, i.e. re-answer the
+          // PREVIOUS context. Heard live as "it immediately said the same thing again". Withdraw
+          // it: drop a still-deferred create outright, otherwise cancel the response the provider
+          // already opened for it (its own `response.done` unwinds the state machine as usual; a
+          // cancel that finds nothing active is the benign `response_cancel_not_active`). The
+          // gesture layer's min-turn abort makes this near-unreachable from the HUD — this guards
+          // every other caller and any commit that is genuinely empty despite a long engagement.
+          if (this.deferredResponseCreate) {
+            // Concern 03: the deferred create is being dropped outright — it will never be sent,
+            // so it will never get a response id to correlate a response.done against. Resolve now.
+            if (this.deferredResponseCreate.onDone) this.safeInvokeOnDone(this.deferredResponseCreate.onDone, true);
+            this.deferredResponseCreate = undefined;
+          } else this.sendRaw({ type: 'response.cancel' });
+        }
         if (code === 'conversation_already_has_active_response') {
           // CRITICAL-1 belt-and-braces: a response.create this module sent WAS rejected because a
           // response was already active (should be unreachable now that sendRaw defers instead of
@@ -760,6 +1044,11 @@ export class VoiceSession {
           // machine open forever.
           if (this.outstandingResponses > 0) this.outstandingResponses--;
           this.pendingTriggerQueue.pop();
+          // Concern 03: pop the injection-callback FIFO's matching entry too (lockstep with
+          // pendingTriggerQueue) — this response.create was rejected outright, so it will never get
+          // a response.created to claim it into responseInjectionOnDoneById.
+          const rejectedOnDone = this.pendingInjectionCallbackQueue.pop();
+          if (rejectedOnDone) this.safeInvokeOnDone(rejectedOnDone, true);
         }
         if (code !== undefined && BENIGN_ERROR_CODES.has(code)) return; // routine gesture, not a failure
         const message =
@@ -796,14 +1085,52 @@ export class VoiceSession {
     this.dispatch({ type: 'ack-sent' });
   }
 
+  /** Inject a system-context message into the live conversation WITHOUT asking for a response —
+   *  the model absorbs it silently and uses it on the next turn (unlike `queueInjection`, whose
+   *  trailing `response.create` makes the model speak). Used for mid-call context updates (the
+   *  operator navigating to a different screen). Queued until the data channel is actually open,
+   *  same as the connect-time brief. */
+  updateSystemContext(text: string): void {
+    if (!text.trim()) return;
+    this.sendSystemContext(text);
+  }
+
+  private sendSystemContext(text: string): void {
+    const payload = {
+      type: 'conversation.item.create',
+      item: { type: 'message', role: 'system', content: [{ type: 'input_text', text }] },
+    };
+    if (this.dataChannel?.readyState === 'open') {
+      this.sendRaw(payload);
+    } else {
+      // A fresh channel opens async — `sendRaw` would silently DROP this (it never queues).
+      // Parked until `dc.onopen` fires `flushPendingContextSends`.
+      this.pendingContextSends.push(payload);
+    }
+  }
+
+  private flushPendingContextSends(): void {
+    if (this.pendingContextSends.length === 0) return;
+    const sends = this.pendingContextSends;
+    this.pendingContextSends = [];
+    for (const payload of sends) this.sendRaw(payload);
+  }
+
   /** Queue a batch of `conversation.item.create` payloads (+ a trailing `response.create`) for the
    *  next quiescent moment. Flushes immediately if already idle; otherwise waits — including
    *  through `userRecording` (rule b) and through any active response — for the state machine to
    *  return to `idle` on its own. Only one batch is in flight at a time: a second `queueInjection`
    *  call while the first is still being answered waits for that response's own `response.done`
-   *  to land the session back on `idle` before draining further. */
-  queueInjection(items: InjectionItem[]): void {
-    this.injectionQueue.push(items);
+   *  to land the session back on `idle` before draining further.
+   *
+   *  `onDone` (concern 03) fires exactly once for this batch, with `{cancelled: false}` ONLY when
+   *  this batch's OWN response reaches `response.done` with status `'completed'` — every other fate
+   *  (barge-in, `disconnect()` with the batch still queued or in flight, a rotation/reconnect tearing
+   *  down the connection it was sent on, or the wedge watchdog declaring the connection dead while it
+   *  was in flight) resolves it `{cancelled: true}` instead. See `InjectionOnDone`'s doc comment for
+   *  the full contract. Optional — existing call sites that pass only `items` are unaffected. */
+  queueInjection(items: InjectionItem[], onDone?: InjectionOnDone): void {
+    this.injectionQueue.push({ items, onDone });
     if (this.state === 'idle') this.flushInjectionQueue();
   }
 
@@ -817,8 +1144,91 @@ export class VoiceSession {
     for (const effect of effects) this.applyEffect(effect);
     if (state !== previous) {
       this.state = state;
+      this.logDebug('state', `${previous} -> ${state}`, `on ${event.type}, outstanding=${this.outstandingResponses}`);
+      // Wedge watchdog: arm on entering awaitingResponse (the only state with no guaranteed
+      // outbound edge — see the field doc comment), disarm on leaving it.
+      if (state === 'awaitingResponse') {
+        this.awaitingSince = this.deps.now();
+        this.armAwaitingWatchdog();
+      } else if (previous === 'awaitingResponse') {
+        this.awaitingSince = undefined;
+        if (this.awaitingWatchdogTimer !== undefined) {
+          this.deps.clearTimer(this.awaitingWatchdogTimer);
+          this.awaitingWatchdogTimer = undefined;
+        }
+      }
       this.opts.onStateChange?.(state, previous);
       if (state === 'idle') this.onQuiescent();
+    }
+  }
+
+  private armAwaitingWatchdog(): void {
+    if (this.awaitingWatchdogTimer !== undefined) this.deps.clearTimer(this.awaitingWatchdogTimer);
+    this.awaitingWatchdogTimer = this.deps.setTimer(() => this.checkAwaitingWedge(), VoiceSession.AWAITING_WATCHDOG_POLL_MS);
+  }
+
+  /** See the `awaitingWatchdogTimer` field doc comment. Recovery is a resync, not a teardown: zero
+   *  the response bookkeeping (whatever we were counting is demonstrably not coming), drop any
+   *  deferred continuation, and `reset` to idle — the HUD goes back to "Muted — hold or tap to
+   *  talk" and the operator's next press works, instead of a call stuck on "Thinking…" forever. */
+  private checkAwaitingWedge(): void {
+    this.awaitingWatchdogTimer = undefined;
+    if (this.state !== 'awaitingResponse' || this.awaitingSince === undefined) return;
+    const elapsed = this.deps.now() - this.awaitingSince;
+    if (elapsed < VoiceSession.AWAITING_WEDGE_MS) {
+      this.armAwaitingWatchdog();
+      return;
+    }
+    this.logDebug('note', 'awaiting-wedge recovered', `elapsed=${elapsed}ms outstanding=${this.outstandingResponses} deferred=${!!this.deferredResponseCreate}`);
+    this.outstandingResponses = 0;
+    // Concern 03: nothing in flight on this connection is ever coming back — the wedge itself IS the
+    // dead-connection verdict. Resolves deferredResponseCreate.onDone + both correlation structures.
+    this.discardInFlightInjections();
+    this.pendingTriggerQueue = [];
+    this.dispatch({ type: 'reset' });
+    // The wedge is dead-connection evidence (see AWAITING_WEDGE_MS) — don't just reset the state
+    // machine over a corpse, rebuild the connection through the same bounded silent-reconnect
+    // path an unexpected channel close uses.
+    void this.handleUnexpectedDisconnect('awaiting-response wedge');
+  }
+
+  /** Concern 03: resolve every injection completion callback currently "in flight" — held behind
+   *  CRITICAL-1's deferred continuation (`deferredResponseCreate.onDone`), sent-but-not-yet-
+   *  response.created (`pendingInjectionCallbackQueue`), or response.created-but-not-yet-
+   *  response.done (`responseInjectionOnDoneById`) — as `cancelled: true`, then empties every
+   *  structure that held them. Idempotent by construction (each structure is read-then-cleared, so a
+   *  repeat call finds nothing left to fire twice): called from `disconnect()` (early, before the
+   *  queue itself is cleared), `teardownConnection()` (which every rotation/reconnect attempt calls
+   *  BEFORE building the new connection — the exact "rotation/reconnect teardown" case concern 03
+   *  asks for), the wedge watchdog's recovery (`checkAwaitingWedge`), and the terminal give-up path
+   *  (`giveUpOnVoice`) as a last-resort safety net. Deliberately does NOT touch `injectionQueue` —
+   *  batches that never even got as far as a `response.create` send are a separate case; only
+   *  `disconnect()` discards those too (a rotation/reconnect re-flushes them on the new connection,
+   *  same as before this concern existed). */
+  private discardInFlightInjections(): void {
+    if (this.deferredResponseCreate?.onDone) this.safeInvokeOnDone(this.deferredResponseCreate.onDone, true);
+    this.deferredResponseCreate = undefined;
+    if (this.pendingInjectionCallbackQueue.length > 0) {
+      const queued = this.pendingInjectionCallbackQueue;
+      this.pendingInjectionCallbackQueue = [];
+      for (const onDone of queued) if (onDone) this.safeInvokeOnDone(onDone, true);
+    }
+    if (this.responseInjectionOnDoneById.size > 0) {
+      const byId = this.responseInjectionOnDoneById;
+      this.responseInjectionOnDoneById = new Map();
+      for (const onDone of byId.values()) this.safeInvokeOnDone(onDone, true);
+    }
+  }
+
+  /** Concern 03: callbacks are caller-supplied and must never throw into this state machine — a
+   *  broken `onDone` would otherwise blow up whatever wire-event or teardown path happened to be
+   *  resolving it. Logged, not swallowed silently, so a misbehaving caller is still discoverable via
+   *  `getDebugLog()`. */
+  private safeInvokeOnDone(onDone: InjectionOnDone, cancelled: boolean): void {
+    try {
+      onDone({ cancelled });
+    } catch (err) {
+      this.logDebug('note', 'injection-onDone-threw', err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -831,16 +1241,38 @@ export class VoiceSession {
   }
 
   private sendRaw(payload: Record<string, unknown>): void {
-    if (!this.dataChannel || this.dataChannel.readyState !== 'open') return; // dropped, not queued/retried
+    if (!this.dataChannel || this.dataChannel.readyState !== 'open') {
+      // Dropped, not queued/retried — the single most diagnostic event in the log: a dropped
+      // response.create is exactly the wedge the awaitingResponse watchdog exists to recover.
+      this.logDebug('note', `send-dropped ${String(payload.type)}`, `channel=${this.dataChannel?.readyState ?? 'none'}`);
+      // Concern 03: a dropped response.create will never get a response.created/response.done to
+      // correlate against — resolve its callback (if any) as cancelled:true now rather than leak it.
+      if (payload.type === 'response.create') {
+        const onDone = this.nextInjectionOnDone;
+        this.nextInjectionOnDone = undefined;
+        if (onDone) this.safeInvokeOnDone(onDone, true);
+      }
+      return;
+    }
     if (payload.type === 'response.create') {
+      // Concern 03: consumed here regardless of which branch below runs, so it can never bleed into
+      // the NEXT response.create send (see the field's doc comment).
+      const onDone = this.nextInjectionOnDone;
+      this.nextInjectionOnDone = undefined;
       if (this.outstandingResponses > 0) {
+        this.logDebug('send', 'response.create (deferred)', `outstanding=${this.outstandingResponses}`);
         // CRITICAL-1: a response is still active (its response.done hasn't arrived) — sending
         // response.create now would hit the provider's `conversation_already_has_active_response`
         // rejection. Defer the actual send until `handleServerEvent`'s 'response.done' case brings
         // outstandingResponses back to zero (at most the wrapping turn's own remaining duration —
         // never the whole fleet, and never a re-issued prompt: nothing here re-asks the model
         // anything, it just delays ONE already-decided send).
-        this.deferredResponseCreate = { trigger: this.currentTrigger };
+        // Review finding: the slot is single-occupancy by design (CRITICAL-1), so a SECOND deferral
+        // landing before the first fired (an ack's create deferring while an injection flush's
+        // create already sits here) supersedes it — the displaced send will now never happen, so
+        // its callback must resolve cancelled:true HERE or it leaks unfired forever.
+        if (this.deferredResponseCreate?.onDone) this.safeInvokeOnDone(this.deferredResponseCreate.onDone, true);
+        this.deferredResponseCreate = { trigger: this.currentTrigger, onDone };
         return;
       }
       this.outstandingResponses++;
@@ -848,7 +1280,11 @@ export class VoiceSession {
       // `response.created`'s response.id, so a later currentTrigger flip (an ack sent while this
       // response is still open) can never retroactively relabel it.
       this.pendingTriggerQueue.push(this.currentTrigger);
+      // Concern 03: pushed in exact lockstep with pendingTriggerQueue above (see the field's doc
+      // comment) — `undefined` for every non-injection-flush send.
+      this.pendingInjectionCallbackQueue.push(onDone);
     }
+    this.logDebug('send', String(payload.type), payload.type === 'response.create' ? `outstanding=${this.outstandingResponses}` : undefined);
     this.dataChannel.send(JSON.stringify(payload));
   }
 
@@ -885,7 +1321,11 @@ export class VoiceSession {
     const batch = this.injectionQueue.shift();
     if (!batch) return;
     this.currentTrigger = 'injection'; // the response this flush requests is agent-triggered (MAJOR-3)
-    for (const item of batch) this.sendRaw({ type: 'conversation.item.create', item });
+    for (const item of batch.items) this.sendRaw({ type: 'conversation.item.create', item });
+    // Concern 03: this send IS the batch's own response.create — stamp it so sendRaw enters
+    // batch.onDone into the correlation queues (or fires it cancelled:true immediately if the
+    // channel turns out not to be open after all; see sendRaw's drop branch).
+    this.nextInjectionOnDone = batch.onDone;
     this.sendRaw({ type: 'response.create' });
     this.dispatch({ type: 'injection-flushed' });
   }
@@ -920,7 +1360,8 @@ export class VoiceSession {
     try {
       token = await this.deps.mint(); // `token.value` (the ek_ secret) never leaves this scope
     } catch (err) {
-      throw new VoiceMintError(err instanceof Error ? err.message : 'Failed to mint a voice token.');
+      const status = typeof (err as { status?: unknown })?.status === 'number' ? (err as { status: number }).status : undefined;
+      throw new VoiceMintError(err instanceof Error ? err.message : 'Failed to mint a voice token.', status);
     }
     if (myEpoch !== this.epoch) throw new EpochStaleError();
 
@@ -941,7 +1382,20 @@ export class VoiceSession {
         void this.handleUnexpectedDisconnect();
       };
       dc.onopen = () => {
+        this.flushPendingContextSends(); // context brief queued while the channel was still opening
         this.flushInjectionQueue(); // MAJOR-6's other flush trigger: production channels open async
+      };
+      // Silent-death detection (live evidence 2026-07-15): a dead ICE path never fired dc.onclose —
+      // the channel kept reporting `open` while every send vanished and no event ever arrived.
+      // `connectionState === 'failed'` is the browser's own verdict; route it into the same bounded
+      // silent-reconnect path a channel close uses. 'disconnected' can flap transiently — log only.
+      pc.onconnectionstatechange = () => {
+        if (pc.connectionState === 'failed') {
+          this.logDebug('note', 'peer-connection-failed');
+          void this.handleUnexpectedDisconnect('peer connection failed');
+        } else if (pc.connectionState === 'disconnected') {
+          this.logDebug('note', 'peer-connection-disconnected', 'transient or dying; acting only on failed/close');
+        }
       };
       pc.ontrack = (event) => {
         const [stream] = event.streams;
@@ -975,13 +1429,26 @@ export class VoiceSession {
       this.pc = pc;
       this.dataChannel = dc;
       this.outstandingResponses = 0;
+      // Concern 03 belt-and-braces: teardownConnection (called before every rotate/reconnect
+      // establish) already resolved in-flight injection callbacks, so this normally finds nothing —
+      // but a fresh connection must start with EMPTY correlation state on both twins (trigger queue
+      // AND callback queue) or the lockstep invariant breaks. Fires any stray as cancelled:true and
+      // clears deferredResponseCreate, mirroring the two lines below.
+      this.discardInFlightInjections();
       this.deferredResponseCreate = undefined; // CRITICAL-1: a fresh connection has nothing to continue
       this.pendingTriggerQueue = []; // MINOR-4: a fresh connection has no in-flight responses to correlate
       this.responseTriggerById.clear();
+      this.userTranscriptDeltaItems.clear();
       this.activeAudioItemId = undefined;
       this.activeAudioContentIndex = undefined;
       this.activeAudioStartedAt = undefined;
       this.dispatch({ type: 'reset' });
+      this.logDebug('note', 'connection-established');
+      // Context brief (live gap 2026-07-15: the voice model had no idea what project/screen the
+      // operator meant by "this repository") — injected into EVERY fresh connection (connect,
+      // silent reconnect, proactive rotation), read at wiring time so it's always current.
+      const brief = this.opts.getContextBrief?.() ?? '';
+      if (brief) this.sendSystemContext(brief);
       this.flushInjectionQueue(); // pick up anything queued during the connection gap (MAJOR-6)
       succeeded = true;
     } finally {
@@ -996,6 +1463,12 @@ export class VoiceSession {
   }
 
   private teardownConnection(): void {
+    // Concern 03: called at the START of every rotation/reconnect attempt (rotateSession,
+    // attemptReconnect) BEFORE the new connection is built, as well as from disconnect() — anything
+    // still in flight on the connection about to be torn down is never coming back on it. Idempotent
+    // (see discardInFlightInjections's doc comment): disconnect() already calls this itself first,
+    // so the repeat call here finds nothing left.
+    this.discardInFlightInjections();
     if (this.dataChannel) {
       this.dataChannel.onopen = null;
       this.dataChannel.onclose = null;
@@ -1009,6 +1482,7 @@ export class VoiceSession {
     }
     if (this.pc) {
       this.pc.ontrack = null;
+      this.pc.onconnectionstatechange = null;
       try {
         this.pc.close();
       } catch {
@@ -1017,6 +1491,9 @@ export class VoiceSession {
     }
     this.dataChannel = undefined;
     this.pc = undefined;
+    // Context queued for the torn-down channel dies with it — a fresh establishConnection queues a
+    // fresh, current brief of its own.
+    this.pendingContextSends = [];
   }
 
   private scheduleReMint(): void {
@@ -1100,8 +1577,9 @@ export class VoiceSession {
    *  not in a way any single incident's retry counter would ever catch. Past
    *  `MAX_CONSECUTIVE_INCIDENTS`, this stops attempting reconnects for that incident entirely and
    *  surfaces the instability instead of re-minting forever. */
-  private async handleUnexpectedDisconnect(): Promise<void> {
+  private async handleUnexpectedDisconnect(reason = 'data channel closed'): Promise<void> {
     if (!this.connected || !this.micStream) return;
+    this.logDebug('note', 'unexpected-disconnect', reason);
     this.connected = false;
 
     const now = this.deps.now();
@@ -1134,6 +1612,10 @@ export class VoiceSession {
    *  means the caller is falling back to text, so the mic shouldn't stay hot) and surface the
    *  bounded, final error. */
   private giveUpOnVoice(message: string): void {
+    // Concern 03: terminal — voice is being abandoned for this session (fallbackToText), so anything
+    // still theoretically in flight resolves now rather than dangling. Almost always a no-op in
+    // practice (the incident that led here already ran through teardownConnection at least once).
+    this.discardInFlightInjections();
     for (const track of this.micStream?.getTracks() ?? []) track.stop();
     this.micStream = undefined;
     this.opts.onError?.({ code: 'reconnect-failed', message, fallbackToText: true });

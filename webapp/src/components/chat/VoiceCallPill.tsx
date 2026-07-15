@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Mic, PhoneOff } from 'lucide-react';
+import { Mic, PhoneOff, X } from 'lucide-react';
 import {
   bindingBannerText,
   estimateCallCostUsd,
@@ -7,12 +7,14 @@ import {
   formatElapsed,
   nextPttUiState,
   shouldForceReleaseForWatchdog,
+  shouldShowPushNudge,
   voiceStateLabel,
-  type CaptionState,
+  PUSH_NUDGE_TEXT,
   type CallHudPhase,
   type PttGestureEvent,
   type PttUiMode,
 } from '../../lib/voice/callHud';
+import { enablePush, pushPermission } from '../../lib/push';
 import { useVoiceCall } from '../../context/VoiceCallContext';
 import { useTaskContext } from '../../context/TaskContext';
 
@@ -28,11 +30,14 @@ import { useTaskContext } from '../../context/TaskContext';
 export interface VoiceCallPillViewProps {
   bindingBanner: string;
   stateLabel: string;
-  captionSpeaker: 'assistant' | 'user' | null;
-  captionText: string;
   elapsedLabel: string;
   costLabel: string;
   reconnectNotice: string | null;
+  /** Push-enable nudge (voice-loop concern 05): `true` only while the decision helper
+   *  (`shouldShowPushNudge`) says so — `default` permission, not yet dismissed this call. */
+  showPushNudge: boolean;
+  onEnablePush: () => void;
+  onDismissPushNudge: () => void;
   pttEngaged: boolean;
   /** MAJOR-1: the chat panel is docked to the right edge of the screen, and the composer sits at
    *  ITS bottom — the same rectangle a bottom-right `fixed` pill would otherwise sit on top of.
@@ -53,11 +58,12 @@ export interface VoiceCallPillViewProps {
 export const VoiceCallPillView = ({
   bindingBanner,
   stateLabel,
-  captionSpeaker,
-  captionText,
   elapsedLabel,
   costLabel,
   reconnectNotice,
+  showPushNudge,
+  onEnablePush,
+  onDismissPushNudge,
   pttEngaged,
   panelOpen,
   onPttDown,
@@ -76,6 +82,35 @@ export const VoiceCallPillView = ({
         {reconnectNotice}
       </div>
     )}
+    {/* Push-enable nudge (voice-loop concern 05): styled like the reconnect banner above it — same
+        amber "heads up" treatment — but interactive (an inline Enable action + a per-call dismiss),
+        since unlike the reconnect notice this one asks for something rather than just reporting. */}
+    {showPushNudge && (
+      <div
+        className="flex items-center justify-between gap-2 rounded-lg bg-amber-50 px-2 py-1 text-[11px] font-medium text-amber-700 dark:bg-amber-900/20 dark:text-amber-400"
+        role="status"
+      >
+        <span className="truncate">{PUSH_NUDGE_TEXT}</span>
+        <div className="flex flex-shrink-0 items-center gap-1">
+          <button
+            type="button"
+            onClick={onEnablePush}
+            className="rounded px-1.5 py-0.5 font-semibold text-amber-800 underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-amber-300"
+          >
+            Enable
+          </button>
+          <button
+            type="button"
+            aria-label="Dismiss notification nudge"
+            title="Dismiss"
+            onClick={onDismissPushNudge}
+            className="flex h-4 w-4 flex-shrink-0 items-center justify-center rounded text-amber-500 hover:text-amber-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-amber-500 dark:hover:text-amber-300"
+          >
+            <X className="h-3 w-3" aria-hidden />
+          </button>
+        </div>
+      </div>
+    )}
     <div className="flex items-center justify-between gap-2">
       <span className="truncate text-[11px] font-medium text-gray-500 dark:text-gray-400" title={bindingBanner}>
         {bindingBanner}
@@ -91,13 +126,9 @@ export const VoiceCallPillView = ({
       </button>
     </div>
 
-    {captionText && (
-      <p className="line-clamp-2 text-xs text-gray-700 dark:text-gray-300">
-        <span className="font-medium text-gray-500 dark:text-gray-400">{captionSpeaker === 'user' ? 'You: ' : 'Agent: '}</span>
-        {captionText}
-      </p>
-    )}
-
+    {/* No caption line here — the spoken back-and-forth renders in the chat thread itself
+        (AssistantChat: durable turn Messages + a live streaming bubble); this pill is purely the
+        call CONTROLS (PTT, end, state, meter). */}
     <div className="flex items-center justify-between gap-3">
       <button
         type="button"
@@ -135,20 +166,48 @@ export const VoiceCallPill = () => {
   const { isChatOpen } = useTaskContext();
   const [pttMode, setPttMode] = useState<PttUiMode>('idle');
   const pressedAtRef = useRef(0);
+  // Push-enable nudge (voice-loop concern 05): permission is read once at mount (this pill is
+  // mounted once at provider level, see the header comment, and just renders null between calls)
+  // and refreshed on every call-start edge plus after `enablePush()` resolves. `pushNudgeDismissed`
+  // is per-call — reset on the SAME edge — so a dismiss on one call never suppresses the nudge on
+  // the next.
+  const [pushPerm, setPushPerm] = useState<'default' | 'granted' | 'denied' | 'unsupported'>(() => pushPermission());
+  const [pushNudgeDismissed, setPushNudgeDismissed] = useState(false);
+
+  useEffect(() => {
+    if (!call.isCallActive) return;
+    setPushPerm(pushPermission());
+    setPushNudgeDismissed(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally re-armed only on the isCallActive rising edge, not on every binding update (e.g. mid-call agentId rebinding)
+  }, [call.isCallActive]);
+
+  const handleEnablePush = () => {
+    // enablePush() itself requires a user gesture (browsers reject Notification.requestPermission
+    // otherwise) — this handler IS that gesture, wired straight to the button's onClick. Re-read
+    // permission from the source of truth after it resolves rather than trusting its return value
+    // directly, so this stays correct even if a future call site of pushPermission() diverges.
+    void enablePush().then(() => setPushPerm(pushPermission()));
+  };
+  const handleDismissPushNudge = () => setPushNudgeDismissed(true);
 
   const applyGesture = (event: PttGestureEvent, holdMs: number) => {
     const result = nextPttUiState(pttMode, event, holdMs);
     setPttMode(result.mode);
     if (result.action === 'press') call.pttPress();
     if (result.action === 'release') call.pttRelease();
+    if (result.action === 'abort') call.pttAbort(); // empty-turn rule (callHud.ts): discard, don't send
   };
 
   const handleDown = () => {
     // MINOR-6: no mic stream exists yet during 'connecting' — a press here would have nothing to
     // start recording, and would desync pttMode from the (still idle) VoiceSession state machine.
     if (call.phase === 'connecting') return;
+    // Measure the CURRENT engagement's length before restarting the clock — a 'down' landing on
+    // 'locked' is the engagement-ending second tap, and the gesture machine needs its true length
+    // to tell a double-click (abort) from a deliberate toggle-off (release).
+    const heldMs = Date.now() - pressedAtRef.current;
     pressedAtRef.current = Date.now();
-    applyGesture('down', 0);
+    applyGesture('down', heldMs);
   };
   const handleUp = () => applyGesture('up', Date.now() - pressedAtRef.current);
   const handleLeave = () => applyGesture('leave', Date.now() - pressedAtRef.current);
@@ -179,26 +238,37 @@ export const VoiceCallPill = () => {
   useEffect(() => {
     if (pttMode === 'idle') return;
     const id = setInterval(() => {
-      if (shouldForceReleaseForWatchdog(pttMode, Date.now() - pressedAtRef.current)) handleForceRelease();
+      // Review finding: the watchdog ABORTS (discards) rather than committing — see
+      // callHud.ts's 'watchdogExpire' doc comment (a forgotten lock must not transmit a minute of
+      // ambient room audio and provoke an unprompted reply).
+      if (shouldForceReleaseForWatchdog(pttMode, Date.now() - pressedAtRef.current)) applyGesture('watchdogExpire', Date.now() - pressedAtRef.current);
     }, PTT_WATCHDOG_POLL_MS);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally re-armed only on pttMode change
   }, [pttMode]);
 
+  // Review finding: the pill instance lives at provider level and merely renders null between
+  // calls — a call ended while tap-locked would otherwise leak pttMode 'locked' into the NEXT
+  // call (engaged-looking button over a muted mic; the first press consumed as a phantom
+  // release). Reset the gesture state whenever no call is active.
+  useEffect(() => {
+    if (!call.isCallActive) setPttMode('idle');
+  }, [call.isCallActive]);
+
   if (!call.isCallActive || !call.binding) return null;
 
   const phase: CallHudPhase = call.phase;
-  const caption: CaptionState | null = call.caption;
 
   return (
     <VoiceCallPillView
       bindingBanner={bindingBannerText(call.binding.sessionTitle)}
       stateLabel={voiceStateLabel(phase)}
-      captionSpeaker={caption?.speaker ?? null}
-      captionText={caption?.text ?? ''}
       elapsedLabel={formatElapsed(call.elapsedMs)}
       costLabel={formatCallCost(estimateCallCostUsd(call.elapsedMs))}
       reconnectNotice={call.reconnectNotice}
+      showPushNudge={shouldShowPushNudge(pushPerm, pushNudgeDismissed)}
+      onEnablePush={handleEnablePush}
+      onDismissPushNudge={handleDismissPushNudge}
       pttEngaged={pttMode !== 'idle'}
       panelOpen={isChatOpen}
       onPttDown={handleDown}

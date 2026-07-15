@@ -156,7 +156,7 @@ import { approveJoinRequest, denyJoinRequest, ensurePersonalWorkspace, listPendi
 import { addMemberByEmail, getOrgProfile, listOrgMembers, removeMember, renameOrg, setMemberRole } from "./org-admin.ts";
 import { dbMode as voiceDbBootMode, type DbHandle } from "./db/index.ts";
 import { openRouteDecision } from "./open-worktree.ts";
-import { escalationPayload, type PushPayload, type PushService } from "./push.ts";
+import { escalationPayload, type PushPayload, type PushService, voiceDonePayload } from "./push.ts";
 import type { Actor, AgentDTO, AgentStatus, AuditEntry, OperatorPresence, Role, RunReceipt } from "./types.ts";
 import type { TraceResponse } from "./spans.ts";
 import { type FederationSnapshot, federationView } from "./federation.ts";
@@ -1007,7 +1007,21 @@ export class SquadServer {
 	}
 
 	start(): string {
-		if (this.singleManager) for (const a of this.singleManager.list()) this.startupAgentIds.add(a.id);
+		if (this.singleManager) {
+			for (const a of this.singleManager.list()) this.startupAgentIds.add(a.id);
+			// Push-seed fix (plans/voice-loop concern 01 risk, also fixes the PRE-EXISTING input/error
+			// escalation lane): `pushSeeded` used to become true ONLY via a `roster` SquadEvent reaching
+			// maybePushAlert through broadcast() — and the ONLY caller that ever sends the `snapshot`
+			// command that produces one is the legacy (non-webapp) client. The React webapp never sends
+			// `snapshot`, so on a fresh boot the whole push lane sat dead — no escalation, no completion
+			// push — until a legacy client happened to connect. Seed directly from the manager's live
+			// roster here, at start(), file-mode only (`singleManager` is unset in DB-registry mode, where
+			// push never fires anyway — see broadcastTo's doc comment). The roster-event seeding inside
+			// maybePushAlert stays in place too: seeding twice with the same statuses is a harmless no-op,
+			// and it remains the live reseed path across a manager swap that doesn't restart the server.
+			for (const a of this.singleManager.list()) this.lastStatus.set(a.id, a.status);
+			this.pushSeeded = true;
+		}
 		this.uiVersion = computeUiVersion(readFileSync(webappEnabled() ? WEBAPP_INDEX : INDEX_HTML, "utf8"));
 
 		this.server = Bun.serve<SocketData>({
@@ -2599,10 +2613,40 @@ export class SquadServer {
 		const prev = this.lastStatus.get(a.id);
 		this.lastStatus.set(a.id, a.status);
 		const payload = escalationPayload(prev, a, this.pushSeeded);
+		if (payload) {
+			const now = Date.now();
+			if (now - (this.lastPush.get(a.id) ?? 0) >= 3000) {
+				this.lastPush.set(a.id, now);
+				void push.notify(payload);
+			}
+		}
+		this.maybePushVoiceDone(prev, a, push);
+	}
+
+	/** Voice-loop completion push (plans/voice-loop concern 01): a SEPARATE `done:` tag/debounce
+	 *  namespace from the escalation lane above, so a "finished" toast can never REPLACE (sw.js
+	 *  renotify) or debounce-eat an unactioned "needs you" alert for the same agent. File-mode only —
+	 *  explicit guard here rather than relying solely on `broadcast()` only being wired in the file-mode
+	 *  branch today (see `start()`), so a future `broadcastTo` push wiring can never silently ride this
+	 *  one global subscription list across orgs (`broadcastTo`'s own doc comment already asserts this;
+	 *  this is defense in depth at the new payload site itself). Disarms the manager's `voicePushArmed`
+	 *  latch only once the push actually sends — that's the "exactly one push per voice dispatch"
+	 *  invariant's other half. */
+	private maybePushVoiceDone(prev: AgentStatus | undefined, a: AgentDTO, push: PushService): void {
+		if (this.registry) return;
+		const payload = voiceDonePayload(prev, a, this.pushSeeded);
 		if (!payload) return;
+		const key = `done:${a.id}`;
 		const now = Date.now();
-		if (now - (this.lastPush.get(a.id) ?? 0) < 3000) return;
-		this.lastPush.set(a.id, now);
+		if (now - (this.lastPush.get(key) ?? 0) < 3000) return;
+		this.lastPush.set(key, now);
+		// Disarm SYNCHRONOUSLY, before the (seconds-long, per-subscription) network send — review
+		// finding: an async post-send disarm races a NEWER voice dispatch's arm on the same agent
+		// (applyCommand skips re-arming while the latch still reads true, then the late disarm
+		// consumes the latch that second dispatch was riding — its push is silently lost). The cost
+		// of sync-consume is that a totally-failed notify() doesn't retry on a later idle — accepted:
+		// the push is best-effort by design, the debrief cursor is the guarantee (DESIGN.md).
+		this.singleManager?.clearVoicePushArmed(a.id);
 		void push.notify(payload);
 	}
 

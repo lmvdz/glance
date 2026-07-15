@@ -30,6 +30,7 @@ import {
 } from './useVoiceDispatcher';
 import { ALREADY_DISPATCHED_DETAIL, decideToolCall, type DispatcherDecisionState } from '../lib/voice/tools';
 import type { VoiceSession, PendingFunctionCall } from '../lib/voice/voiceSession';
+import type { InjectionOnDone } from '../lib/voice/voiceSession';
 import type { AgentDTO, TranscriptEntry } from '../lib/dto';
 
 // =============================================================================
@@ -53,15 +54,21 @@ function makeRefs(overrides: Partial<DispatcherRefs> = {}): DispatcherRefs {
 function makeFakeSession() {
   const outputs: { callId: string; output: unknown }[] = [];
   const injections: unknown[][] = [];
+  // Concern 04: sweepPromptWatchers now passes an onDone alongside a completion narration's
+  // queueInjection call (the debrief lane's live-narration cursor-advance path) — captured
+  // per-batch so tests can invoke it directly to simulate the response actually completing (or
+  // being barged into/cancelled).
+  const onDones: (InjectionOnDone | undefined)[] = [];
   const session: Pick<VoiceSession, 'sendFunctionOutput' | 'queueInjection'> = {
     sendFunctionOutput: (callId: string, output: unknown) => {
       outputs.push({ callId, output });
     },
-    queueInjection: (items: unknown[]) => {
+    queueInjection: (items: unknown[], onDone?: InjectionOnDone) => {
       injections.push(items);
+      onDones.push(onDone);
     },
   };
-  return { session, outputs, injections };
+  return { session, outputs, injections, onDones };
 }
 
 function baseDeps(overrides: Partial<DispatchPromptAgentDeps> = {}): DispatchPromptAgentDeps {
@@ -299,6 +306,63 @@ describe('MAJOR-2(a): onSpokenSummary role discriminator', () => {
 });
 
 // =============================================================================
+// Concern 04: sweepPromptWatchers' completion narration carries an onDone that fires
+// onCompletionNarrated(entryTs) ONLY when the narration's own response completed uncancelled — the
+// debrief lane's live-narration cursor-advance path (the other is VoiceCallContext's call-start
+// debrief). A completion narrated then immediately barged into must NOT advance the cursor past
+// something the operator never actually heard.
+// =============================================================================
+
+describe('concern 04: sweepPromptWatchers onCompletionNarrated', () => {
+  test('fires with the completion entry\'s own ts when its narration response completes uncancelled', () => {
+    const refs = makeRefs({
+      boundAgentIdRef: { current: 'agent-1' },
+      watchersRef: { current: new Map([['agent-1', [{ kind: 'prompt', clientTurnId: 'turn-1', echoed: true, cursor: 0, label: 'the agent' }]]]) },
+    });
+    const { session, onDones } = makeFakeSession();
+    const narrated: number[] = [];
+    const transcripts = new Map<string, TranscriptEntry[]>([['agent-1', [{ id: 'e1', kind: 'assistant', text: 'fixed it', ts: 42, status: 'ok' }]]]);
+
+    sweepPromptWatchers(session, refs, { transcripts, agents: [], onCompletionNarrated: (ts) => narrated.push(ts) });
+
+    expect(onDones).toHaveLength(1);
+    expect(narrated).toEqual([]); // not yet — onDone hasn't fired
+    onDones[0]!({ cancelled: false }); // the narration's own response completed
+    expect(narrated).toEqual([42]);
+  });
+
+  test('does NOT fire when the narration was barged into / cancelled — onNarrationLost fires with the same ts instead (the unheard-floor signal)', () => {
+    const refs = makeRefs({
+      boundAgentIdRef: { current: 'agent-1' },
+      watchersRef: { current: new Map([['agent-1', [{ kind: 'prompt', clientTurnId: 'turn-1', echoed: true, cursor: 0, label: 'the agent' }]]]) },
+    });
+    const { session, onDones } = makeFakeSession();
+    const narrated: number[] = [];
+    const lost: number[] = [];
+    const transcripts = new Map<string, TranscriptEntry[]>([['agent-1', [{ id: 'e1', kind: 'assistant', text: 'fixed it', ts: 42, status: 'ok' }]]]);
+
+    sweepPromptWatchers(session, refs, { transcripts, agents: [], onCompletionNarrated: (ts) => narrated.push(ts), onNarrationLost: (ts) => lost.push(ts) });
+    onDones[0]!({ cancelled: true });
+
+    expect(narrated).toEqual([]);
+    expect(lost).toEqual([42]);
+  });
+
+  test('is optional — a caller that never supplies it does not throw when the narration completes', () => {
+    const refs = makeRefs({
+      boundAgentIdRef: { current: 'agent-1' },
+      watchersRef: { current: new Map([['agent-1', [{ kind: 'prompt', clientTurnId: 'turn-1', echoed: true, cursor: 0, label: 'the agent' }]]]) },
+    });
+    const { session, onDones } = makeFakeSession();
+    const transcripts = new Map<string, TranscriptEntry[]>([['agent-1', [{ id: 'e1', kind: 'assistant', text: 'fixed it', ts: 42, status: 'ok' }]]]);
+
+    sweepPromptWatchers(session, refs, { transcripts, agents: [] });
+
+    expect(() => onDones[0]!({ cancelled: false })).not.toThrow();
+  });
+});
+
+// =============================================================================
 // LOW batch: dispatchSpawnAgent must validate the /api/spawn response before dereferencing
 // `agent.id` — a 2xx with a missing/malformed `agent` field previously derefed `agent.id` AFTER
 // the `catch` block, so no `sendFunctionOutput` was ever sent and the session wedged in
@@ -329,6 +393,55 @@ describe('LOW batch: dispatchSpawnAgent validates the /api/spawn response', () =
     expect(outputs).toEqual([{ callId: 'call-1', output: { status: 'dispatched', detail: "spawned fresh-agent — tracking it, I'll let you know when it finishes" } }]);
     expect(refs.watchersRef.current.get('agent-9')).toEqual([{ kind: 'spawn', echoed: true, cursor: 0, label: 'fresh-agent' }]);
     expect(refs.spawnInFlightRef.current).toBe(false); // released, not wedged
+  });
+
+  // Concern 04: durable voice spawns — onAgentSpawned lets the caller (VoiceCallContext) persist a
+  // SpawnedUnitRecord onto the bound session's spawnedUnits, so a voice-dispatched spawn is visible
+  // to the NEXT call's debrief tracked-agent set exactly like a typed spawn already is. `prompt`
+  // rides along (not just {id, name}) since the caller's SpawnedUnitRecord.prompt is a REQUIRED
+  // field it must fill honestly, and this function already has the exact prompt in scope.
+  describe('concern 04: onAgentSpawned', () => {
+    test('fires with {id, name, prompt} after a successful spawn', async () => {
+      const refs = spawnRefs();
+      const { session } = makeFakeSession();
+      const agent: AgentDTO = { id: 'agent-9', name: 'fresh-agent' } as AgentDTO;
+      const spawned: Array<{ id: string; name: string; prompt: string }> = [];
+      const deps: DispatchSpawnAgentDeps = {
+        transcripts: new Map(),
+        onAgentSpawned: (a) => spawned.push(a),
+        apiJsonFn: (async () => ({ agent })) as unknown as DispatchSpawnAgentDeps['apiJsonFn'],
+      };
+
+      await dispatchSpawnAgent(session, 'call-1', 'build a widget', refs, deps);
+
+      expect(spawned).toEqual([{ id: 'agent-9', name: 'fresh-agent', prompt: 'build a widget' }]);
+    });
+
+    test('does NOT fire when the spawn fails', async () => {
+      const refs = spawnRefs();
+      const { session } = makeFakeSession();
+      const spawned: unknown[] = [];
+      const deps: DispatchSpawnAgentDeps = {
+        transcripts: new Map(),
+        onAgentSpawned: (a) => spawned.push(a),
+        apiJsonFn: (async () => {
+          throw new Error('network error');
+        }) as unknown as DispatchSpawnAgentDeps['apiJsonFn'],
+      };
+
+      await dispatchSpawnAgent(session, 'call-1', 'build a widget', refs, deps);
+
+      expect(spawned).toEqual([]);
+    });
+
+    test('is optional — a caller that never supplies it does not throw', async () => {
+      const refs = spawnRefs();
+      const { session } = makeFakeSession();
+      const agent: AgentDTO = { id: 'agent-9', name: 'fresh-agent' } as AgentDTO;
+      const deps: DispatchSpawnAgentDeps = { transcripts: new Map(), apiJsonFn: (async () => ({ agent })) as unknown as DispatchSpawnAgentDeps['apiJsonFn'] };
+
+      await expect(dispatchSpawnAgent(session, 'call-1', 'build a widget', refs, deps)).resolves.toBeUndefined();
+    });
   });
 
   test('a 2xx response with a MISSING agent field fails honestly instead of wedging toolPending forever', async () => {
