@@ -1,6 +1,10 @@
 # C08 — bell + deep links
 
-STATUS: open
+STATUS: in-review (glance-desktop#16, stacked on #15)
+
+## Reality notes (2026-07-15, glance-desktop#16)
+
+Native OS notification when a unit enters attention (input/error), even when the cockpit is backgrounded; click focuses the window + opens the unit detail. `attentionTransitions` PURE+tested (fire-once on entry, collapse-while-blocked via a module set, re-alert after recovery). `notifyAttention` uses the tauri notification plugin (mirrors terax's osNotify) with the unit id in `extra`; a once-registered `onAction` listener does the click→focus. Selection lifted out of RosterView into `fleetSelectionStore` so the click can focus from outside the tree. `tag` NOT on the plugin's Options (dropped; collapse set handles dedup). Stacked on C07 (#15). Gate: tsc/lint(103)/vitest 382/build green. OS delivery + click-focus not driven under WSLg — onAction desktop delivery varies by OS, so notification-firing is guaranteed and click is best-effort (noted). No gauntlet (local UI + OS notification).
 PRIORITY: p2
 REPOS: glance-desktop
 COMPLEXITY: mechanical
