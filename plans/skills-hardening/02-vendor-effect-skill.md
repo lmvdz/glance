@@ -1,5 +1,5 @@
 # Vendor the kitlangton effect skill, adapted and gate-proven
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
