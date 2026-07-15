@@ -152,7 +152,7 @@ export interface UseVoiceDispatcherResult {
   /** Pass directly as `VoiceSessionOptions.onCaption` (composed with the caller's own UI caption
    *  handler, if any — this hook only needs the `'user'` deltas, for `prompt_agent`'s spoken
    *  displayText). Stable identity, same as above. */
-  onCaption: (text: string, speaker: 'assistant' | 'user') => void;
+  onCaption: (text: string, speaker: 'assistant' | 'user', final?: boolean) => void;
   /** Hand the hook the constructed `VoiceSession` right after building it (and again if the
    *  caller ever tears down and rebuilds one, e.g. on `disconnect()`+reconnect at a NEW instance —
    *  not needed for `voiceSession.ts`'s own internal rotation, which keeps the same instance). */
@@ -254,9 +254,14 @@ export async function dispatchPromptAgent(
         { apiJson, subscribeConsole: deps.subscribeConsole, roster: deps.agents, currentProject: deps.currentProject, selectedModel: deps.selectedModel },
         deps.sessionId,
       );
-    } catch {
+    } catch (err) {
       refs.promptInFlightRef.current = false; // MAJOR-1: never dispatched — don't wedge the lock open
-      session.sendFunctionOutput(callId, failedOutput('could not start a console agent'));
+      // Live finding 2026-07-15: the daemon's create error names the ACTUAL problem ("the working
+      // directory does not exist — ~/sui/omp-graph") — swallowing it into a generic "could not
+      // start" left the operator with no idea anything was wrong for an entire afternoon. Carry
+      // the reason through (fenced/truncated: it can echo daemon paths, never instructions).
+      const reason = err instanceof Error && err.message ? ` — ${err.message.replace(/[\r\n\t]+/g, ' ').slice(0, 200)}` : '';
+      session.sendFunctionOutput(callId, failedOutput(`could not start a console agent${reason}`));
       return;
     }
     refs.boundAgentIdRef.current = targetId;
@@ -722,13 +727,17 @@ export function useVoiceDispatcher(opts: UseVoiceDispatcherOptions): UseVoiceDis
   };
   const getRecap = useRef(() => getRecapRef.current?.() ?? '').current;
 
-  const onCaptionRef = useRef<((text: string, speaker: 'assistant' | 'user') => void) | undefined>(undefined);
-  onCaptionRef.current = (text, speaker) => {
+  const onCaptionRef = useRef<((text: string, speaker: 'assistant' | 'user', final?: boolean) => void) | undefined>(undefined);
+  onCaptionRef.current = (text, speaker, final) => {
     // Only the 'user' side feeds prompt_agent's spoken displayText (see the module doc comment —
     // live since the mint pins whisper-1 input transcription; arrival timing is asynchronous).
-    if (speaker === 'user') userCaptionBufferRef.current += text;
+    // A FINAL user caption is one complete whisper utterance — REPLACE the buffer rather than
+    // append (live finding 2026-07-15: appending concatenated every utterance since the last
+    // dispatch, so a turn-1 "Hello." rode into turn-2's dispatched displayText as
+    // "Hello.Can you tell me about…"). Streaming deltas (non-final) still accumulate.
+    if (speaker === 'user') userCaptionBufferRef.current = final ? text : userCaptionBufferRef.current + text;
   };
-  const onCaption = useRef((text: string, speaker: 'assistant' | 'user') => onCaptionRef.current?.(text, speaker)).current;
+  const onCaption = useRef((text: string, speaker: 'assistant' | 'user', final?: boolean) => onCaptionRef.current?.(text, speaker, final)).current;
 
   const registerSession = useCallback((session: VoiceSession | null) => {
     sessionRef.current = session;

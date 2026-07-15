@@ -247,14 +247,19 @@ describe('isRosterLive', () => {
 // =============================================================================
 
 describe('isBoundAgentLive', () => {
+  test("an agent in status 'error' is dead-by-error — NOT live (harness cannot boot; dispatches would go to a corpse)", () => {
+    expect(isBoundAgentLive([{ id: 'a2', status: 'error' }], 'a2', false)).toBe(false);
+    expect(isBoundAgentLive([{ id: 'a2', status: 'error' }], 'a2', true)).toBe(true); // mint grace still wins
+  });
+
   test('non-empty roster containing the id -> live, regardless of mint grace', () => {
-    expect(isBoundAgentLive([{ id: 'a1' }, { id: 'a2' }], 'a2', false)).toBe(true);
-    expect(isBoundAgentLive([{ id: 'a1' }, { id: 'a2' }], 'a2', true)).toBe(true);
+    expect(isBoundAgentLive([{ id: 'a1', status: 'working' }, { id: 'a2', status: 'idle' }], 'a2', false)).toBe(true);
+    expect(isBoundAgentLive([{ id: 'a1', status: 'working' }, { id: 'a2', status: 'idle' }], 'a2', true)).toBe(true);
   });
 
   test('non-empty roster missing the id -> dead, unless within mint grace', () => {
-    expect(isBoundAgentLive([{ id: 'a1' }], 'a2', false)).toBe(false);
-    expect(isBoundAgentLive([{ id: 'a1' }], 'a2', true)).toBe(true);
+    expect(isBoundAgentLive([{ id: 'a1', status: 'idle' }], 'a2', false)).toBe(false);
+    expect(isBoundAgentLive([{ id: 'a1', status: 'idle' }], 'a2', true)).toBe(true);
   });
 
   test('EMPTY roster is never read as death — a transient WS-flap blip, not a signal', () => {

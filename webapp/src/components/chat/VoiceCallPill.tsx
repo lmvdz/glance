@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Mic, PhoneOff, X } from 'lucide-react';
+import { Bot, Mic, PhoneOff, X } from 'lucide-react';
 import {
   bindingBannerText,
   estimateCallCostUsd,
@@ -38,6 +38,11 @@ export interface VoiceCallPillViewProps {
   showPushNudge: boolean;
   onEnablePush: () => void;
   onDismissPushNudge: () => void;
+  /** Opens the bound console agent's console view (live turns/tool calls) — `null` until an agent
+   *  is actually bound (a call can start pre-bootstrap). Lars 2026-07-15: "I'd like to see the
+   *  console agent's chat/turning/history/tool calls" — the timeline already renders in the chat
+   *  panel and the console view; this is the jump to it from the call HUD. */
+  onViewAgent: (() => void) | null;
   pttEngaged: boolean;
   /** MAJOR-1: the chat panel is docked to the right edge of the screen, and the composer sits at
    *  ITS bottom — the same rectangle a bottom-right `fixed` pill would otherwise sit on top of.
@@ -64,6 +69,7 @@ export const VoiceCallPillView = ({
   showPushNudge,
   onEnablePush,
   onDismissPushNudge,
+  onViewAgent,
   pttEngaged,
   panelOpen,
   onPttDown,
@@ -115,6 +121,17 @@ export const VoiceCallPillView = ({
       <span className="truncate text-[11px] font-medium text-gray-500 dark:text-gray-400" title={bindingBanner}>
         {bindingBanner}
       </span>
+      {onViewAgent && (
+        <button
+          type="button"
+          aria-label="View console agent"
+          title="View the console agent's work (turns, tool calls)"
+          onClick={onViewAgent}
+          className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 dark:hover:bg-gray-800 dark:hover:text-gray-200 dark:focus-visible:ring-offset-gray-950"
+        >
+          <Bot className="h-4 w-4" aria-hidden />
+        </button>
+      )}
       <button
         type="button"
         aria-label="End voice call"
@@ -163,7 +180,7 @@ const PTT_WATCHDOG_POLL_MS = 5_000;
 
 export const VoiceCallPill = () => {
   const call = useVoiceCall();
-  const { isChatOpen } = useTaskContext();
+  const { isChatOpen, openConsole } = useTaskContext();
   const [pttMode, setPttMode] = useState<PttUiMode>('idle');
   const pressedAtRef = useRef(0);
   // Push-enable nudge (voice-loop concern 05): permission is read once at mount (this pill is
@@ -266,6 +283,7 @@ export const VoiceCallPill = () => {
       elapsedLabel={formatElapsed(call.elapsedMs)}
       costLabel={formatCallCost(estimateCallCostUsd(call.elapsedMs))}
       reconnectNotice={call.reconnectNotice}
+      onViewAgent={call.binding.agentId ? () => openConsole(call.binding?.agentId) : null}
       showPushNudge={shouldShowPushNudge(pushPerm, pushNudgeDismissed)}
       onEnablePush={handleEnablePush}
       onDismissPushNudge={handleDismissPushNudge}
