@@ -394,7 +394,9 @@ async function cmdUp(args: string[]): Promise<void> {
 	// Resolved BEFORE the server so `/api/doctor` can report the supervisor that actually runs, not the one
 	// the flag implies: it is also gated on `--no-supervise` and on file mode.
 	const superviseExternal = !dbHandle && envBool("OMP_SQUAD_AUTO_SUPERVISE", true) && flags["no-supervise"] !== true;
-	const server = new SquadServer(manager, { port, hostname: host, token, tls, push, roleTokens, auth, db: dbHandle ?? undefined, trustedOrigins, registry, runtimeSettings, policy, rootOrgId, superviseExternal });
+	// pushRoot: per-org push services in DB-registry mode live under the same per-org state dirs the
+	// ManagerRegistry uses (`<stateDir>/orgs/<orgId>`) — see server.ts's orgPush field.
+	const server = new SquadServer(manager, { port, hostname: host, token, tls, push, pushRoot: stateDir, roleTokens, auth, db: dbHandle ?? undefined, trustedOrigins, registry, runtimeSettings, policy, rootOrgId, superviseExternal });
 	const url = server.start();
 
 	// Persistent autonomy: surface raw omp sessions in presence, and (unless opted out) answer

@@ -50,7 +50,12 @@ import { usePageContext, type PageContext } from '../context/PageContext';
  * `message` (the model's own paraphrase) remains the fallback.
  */
 
-const ECHO_TIMEOUT_MS = 10_000;
+/** Live finding 2026-07-15 (DB mode): a cold bootstrap — mint the console agent, boot its omp
+ *  process, ACP handshake, THEN deliver the prompt and wait for the transcript echo — can honestly
+ *  take >10s, and the old 10s window fired a false "not sure that got delivered" warning on healthy
+ *  dispatches. 20s keeps the honest-failure lane (a genuinely lost send still gets confessed) while
+ *  covering a slow cold boot. */
+const ECHO_TIMEOUT_MS = 20_000;
 /** Mirrors `AssistantChat.tsx`'s `stopTimeoutRef` 8s debounce window for its own `handleStop`. */
 const INTERRUPT_DEBOUNCE_MS = 8_000;
 /** How long a just-minted agent id is trusted as "live" before the roster broadcast catches up.
