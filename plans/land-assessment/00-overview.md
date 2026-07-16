@@ -58,6 +58,7 @@ COMPLEXITY: architectural
 
 ## Decisions so far
 - [DESIGN.md](DESIGN.md) — syntactic analysis over checkouts+createProgram; topology promoted to Phase 1; attemptId minted once with durable counter; single-writer CRC store with strict-with-accounting reader; fingerprint captured post-commitWip under the land lock.
+- [DESIGN.md](DESIGN.md) — temporal-knowledge guardrail adopted (second review, BRIEF §11): observations persisted separately from findings, bitemporal fields, epistemic state categories (proposed ≠ accepted; rejected stays episodic), producer-not-engine ADR clause, litmus-test acceptance after accumulation.
 
 ## Notes
 - Headless run (research→plan pipeline off `glance_architecture_mandate.md`): EXPLORE/DESIGN/DECOMPOSE gates auto-approved per skill gate policy; adversarial round = sonnet designer + two opus red teams (fable 529-overloaded at spawn time) + fable arbitration inline.

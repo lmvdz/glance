@@ -17,6 +17,7 @@ The analyzer that owns the incident classes with real labeled positives (git-top
   - **transplanted lineage**: candidate commits whose patch-ids appear in main under different SHAs (cherry-pick/squash duplication) — same computation class as `land-pr.ts`'s `transplantedCommitsReason`, reimplemented pure (no daemon deps) for offline use.
   - **fork-point-behind + overlap**: fork point behind main AND both sides touched same paths since divergence (the `staleBranchReason` class, offline).
 - All joins by exact SHA/ref equality on `path.resolve`d repo paths. Output deterministically sorted. No LLM, no network.
+- Observations-first (BRIEF §11.2): the analyzer emits deterministic lineage `StructuralObservation`s (e.g. `branch FORKED_FROM <sha>`, `commit PATCH_ID_DUPLICATE_OF <sha>`, `merge UNREACHABLE_FROM main@<sha>`) and derives its findings from them with `derivedFromObservations` lineage.
 
 ## Cross-Repo Side Effects
 None — pure library, zero land-path integration in this phase.

@@ -22,6 +22,16 @@ An assessment **envelope** at the existing land boundary. Every land attempt —
 | Replay corpus | Three sources: merge-commit parents, `gh pr list` oids (verified available), and the main-proof/done-proof ledgers for fast-forward local lands | Two sources (draft) | FF local lands are invisible to both draft sources; the labeled composition-drift incidents include local lands |
 | Phase-3 experiment | Cost delta + human-rated sample of raw-diff-vs-structured disagreements; explicitly NOT decision-grade for validator integration without a criterion-level oracle | "Compare judge agreement" (draft) | Agreement between two input conditions has no ground truth; the honest claim is cost + a qualitative study |
 
+## Temporal-knowledge guardrail (second review, adopted — BRIEF §11)
+
+This subsystem is the **first temporal-state producer, not the Repository State Engine itself**. Contract requirements that keep it so:
+
+- Analyzers persist normalized **StructuralObservations** (subject, predicate, before/after, observedInCommit, deterministic authority, evidence) separately from derived findings; observations are the durable raw material, findings are re-derivable interpretations.
+- **Bitemporal fields** on everything durable: valid time (`validFromCommit`/`validUntilCommit`) distinct from observation time (`observedAt`/`supersededAt`), plus `producer {name, version}`. `createdAt` is never the temporal model.
+- **Attempted truth ≠ accepted truth**: records carry an epistemic state category (`observed | proposed | accepted | rejected`); assessments over C are *proposed*; only a `landed` terminal promotes toward accepted state; rejected attempts remain episodic history, never repository truth.
+- Non-goal: v1 builds no knowledge graph, but its data contracts must not prevent historical reconstruction, semantic-delta accumulation, or non-landing producers joining later.
+- Litmus (after several hundred assessments): the data must answer "interface of X at commit A / what changed A→B / which landing introduced this dependency / which rejected attempts touched the same concept / what did glance believe and what was superseded" — not merely "was this landing risky." BRIEF §11.5's ten danger signs are the standing drift checklist.
+
 ## Risks
 
 - **Structural-delta has ~0 real labeled positives** — its Phase-1 recall evidence is synthetic and partially circular. Mitigation: labeled as such in the report; wedge go/no-go keys on topology.

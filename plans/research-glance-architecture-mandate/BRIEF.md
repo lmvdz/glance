@@ -274,3 +274,37 @@ Phase 5: consider narrow enforcement, only after prospective dogfood evidence
 ```
 
 Reviewer's closing judgment, adopted as this brief's final state: the research is sufficient — no further broad architecture investigation; make the boundary correction, formalize the replay methodology, and send it to planning.
+
+---
+
+## 11. 2026-07-16 — Second review: temporal-knowledge guardrails (ADOPTED)
+
+Second independent review question: is the land-assessment wedge straying from the original temporal-knowledge vision? Verdict: **not straying — narrowing the entry point** — the assessment is the first *producer* of temporal knowledge, with one real risk: quietly becoming "a smarter merge gate" that discards its results. The following guardrails are adopted into the plan's data contracts so that cannot happen silently.
+
+### 11.1 ADR guardrail (appended to the §10.10 decision)
+
+> The Commit-Addressed Land Assessment is the first temporal-state producer, not the Repository State Engine itself. Each assessment module must preserve normalized observations, exact repository validity, observation time, authority, provenance, and extraction coverage in a form that can later be projected into repository, execution, planning, evidence, and episodic state. Accepted landings may update accepted repository state; rejected or invalidated attempts remain historical experience and must not be promoted to repository truth.
+
+Non-goal clarification:
+
+> V1 will not construct the complete repository knowledge graph, but its data contracts must not prevent historical reconstruction, accumulation of semantic deltas, or the addition of non-landing producers.
+
+### 11.2 Observations are the durable product; findings are derived
+
+Analyzers persist normalized `StructuralObservation` records (subject entity, predicate, before/after value, `observedInCommit`, deterministic authority, evidence) **separately from** findings. Observation = *what changed* (durable raw material for the future state model); finding = *what that might mean* (re-derivable, improvable without re-extraction); recommendation = *what to do* (v1: nothing — observe-only). A report that only carries findings/risk conclusions is danger-sign #1.
+
+### 11.3 Bitemporal semantics
+
+Two times, never conflated: **valid time** (`validFromCommit` / `validUntilCommit` — when the fact was true in the repository) and **observation time** (`observedAt`, `supersededAt` — when glance learned/recomputed it), plus `producer {name, version}`. This is what lets the system answer "what did we believe on date D about the state at commit X" — without it, the store is merely timestamped logs. (`createdAt`-only temporality is danger-sign #9.)
+
+### 11.4 Attempted truth vs accepted truth
+
+Four epistemic categories, carried explicitly: **observed** (facts about an existing commit), **proposed** (facts that would become true if C landed), **accepted** (facts incorporated after a landed terminal), **rejected/counterfactual** (facts about an evaluated candidate that never landed). Assessments over C are *proposed*; only a `landed` terminal promotes them toward accepted state; rejected attempts remain episodic history — valuable (repeated intent, architectural pressure) but never repository truth. This is the Repository-State-Graph vs Attempt/Episodic-Graph seam, kept as a field today rather than a graph store.
+
+### 11.5 Drift danger signs (standing checklist)
+
+(1) only transient warnings/scalar scores; (2) overwrites instead of append+supersede; (3) schema can't represent exact commit validity; (4) rejected attempts discarded; (5) observations mixed with inferred conclusions; (6) entity refs stay unresolvable strings; (7) nothing can reconstruct state at a historical commit; (8) never expands beyond the landing boundary; (9) "temporal" means only createdAt; (10) the only success metric is "fewer bad merges."
+
+### 11.6 Litmus test (architectural acceptance, after several hundred assessments)
+
+The accumulated data must be able to answer: the public interface of module X at commit A; what changed between A and B; which accepted landing introduced a dependency; which rejected attempts touched the same concept and on what evidence; when a module started accumulating responsibilities; which temporary pattern became recurring; what glance believed at the time and which beliefs were superseded. If it can only answer "was this landing risky / why was it blocked," the wedge has narrowed too far.
