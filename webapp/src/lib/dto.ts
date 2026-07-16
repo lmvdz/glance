@@ -480,6 +480,9 @@ export interface AgentDTO {
    *  floor caps `effectiveMode` to `assist` (propose-only). */
   confidence?: number;
   landReady?: boolean;
+  /** Console chat unit promoted into a working unit (daily-onramp 06). Mirrors the server DTO's
+   *  `promoted` — the promote affordance hides and unit chrome shows the moment this flips true. */
+  promoted?: boolean;
   /** PR-mode landing metadata, set at push (draft/open) and merge (merged) time. Absent in local mode. */
   prUrl?: string;
   prNumber?: number;

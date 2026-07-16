@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Sparkles, Plus, Paperclip, X, Trash2, Maximize2, Minimize2, Download, ArrowLeft, MessageSquare } from 'lucide-react';
 import { SettledMarkdown } from './chat/SettledMarkdown';
 import { ScrollToLatestPill } from './chat/ScrollToLatestPill';
-import { AgentMetaBar, AgentLandControls, AgentOpenWorktreeButton } from './chat/AgentMetaBar';
+import { AgentMetaBar, AgentLandControls, AgentOpenWorktreeButton, AgentPromoteButton } from './chat/AgentMetaBar';
 import { TodoPanel } from './chat/TodoPanel';
 import { DiffReviewPanel, type AgentFileDiff } from './chat/DiffReviewPanel';
 import { Composer, type ModelOption, type SuggestionChip } from './chat/Composer';
@@ -953,6 +953,7 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
       </div>
 
       <AgentMetaBar agent={selectedAgent} changedFiles={changedFiles}>
+        <AgentPromoteButton agent={selectedAgent} showToast={showToast} />
         <AgentOpenWorktreeButton agent={selectedAgent} showToast={showToast} />
         <AgentLandControls agent={selectedAgent} showToast={showToast} />
       </AgentMetaBar>
