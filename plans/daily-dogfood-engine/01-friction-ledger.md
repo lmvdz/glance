@@ -1,6 +1,6 @@
 # Friction ledger — `glance grr` + one-keystroke capture
 
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -28,3 +28,7 @@ None. This concern is entirely inside omp-squad (daemon + webapp + TUI); glance-
 - Unit: `tests/friction-log.test.ts` — append/recent/hydrateAll round-trip (reuse `JsonlLog`'s own torn-line-tolerance tests as the pattern, don't re-test `JsonlLog` itself); `POST /api/friction` then `GET /api/friction` returns the entry via a scratch-daemon HTTP round-trip.
 - CLI: `glance grr "test gripe" --repo .` against a scratch daemon (scratch-daemon skill), then `glance grr --list` shows it; confirm the no-daemon path prints the same style of error as `cmdAsk`.
 - Live: one manual pass per surface — webapp (agent-browser: click button, type, Enter, confirm the entry appears via `--list`), TUI (keypress, type, Enter, confirm same), timed with a stopwatch to confirm the <5s claim isn't aspirational.
+
+## Resolution
+
+Shipped in batch 2 (branch worktree-wf_55eef634-d22-5, merged 108dae3): FrictionLog on JsonlLog at stateDir/friction.jsonl, POST/GET /api/friction, SquadManager.recordFriction single write path, `glance grr` CLI verb, here-REPL /grr, TUI Ctrl-G + /grr, 6 unit tests + live-server round-trip. Gate: functional PASS (1 fix round), UX PASS. STATUS flip happened at wave-1 close-out (implementer omitted it).

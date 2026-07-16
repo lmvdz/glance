@@ -1,6 +1,6 @@
 # Weekly drain cadence + adoption SUCCESS/KILL criteria
 
-STATUS: in-review
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: research
