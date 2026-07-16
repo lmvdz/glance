@@ -1807,6 +1807,7 @@ export class SquadManager extends EventEmitter {
 			scopeSource: p.scopeSource,
 			workflow: p.workflow,
 			workflowState: p.workflowState,
+			promoted: p.promoted, // a promoted console chat stays visibly a unit across restarts
 			// Recomputed from the persisted marker (not carried as an independent flag) so a fresh boot's
 			// reattach reflects forkAvailable correctly even if it was never set in-memory before the restart.
 			forkAvailable: this.deriveForkAvailable(p.workflowState),
@@ -1930,6 +1931,7 @@ export class SquadManager extends EventEmitter {
 			scopeSource: p.scopeSource,
 			workflow: p.workflow,
 			workflowState: p.workflowState,
+			promoted: p.promoted, // a promoted console chat stays visibly a unit across restarts
 			forkAvailable: this.deriveForkAvailable(p.workflowState),
 		};
 		this.seedAuthority(dto, p.autonomyMode);
@@ -4187,6 +4189,9 @@ export class SquadManager extends EventEmitter {
 			// the marker on the idempotent path too means a re-promote after a crashed first call still
 			// makes the registration durable.
 			this.clearEphemeralMarker(rec.dto.repo);
+			// Keep the wire mirror honest on the retry path too (a pre-06 daemon's persisted promote, or a
+			// crashed first call, may have left the DTO unstamped even though the options flag is durable).
+			rec.dto.promoted = true;
 			if (opts.mode && opts.mode !== rec.dto.autonomyMode) {
 				rec.dto.autonomyMode = opts.mode;
 				o.autonomyMode = opts.mode;
@@ -4212,6 +4217,7 @@ export class SquadManager extends EventEmitter {
 		const prior = { append: o.appendSystemPrompt, mode: rec.dto.autonomyMode, oMode: o.autonomyMode };
 		o.appendSystemPrompt = stripConsolePrompt(o.appendSystemPrompt); // strip ONLY the console rule
 		o.promoted = true;
+		rec.dto.promoted = true; // wire mirror — the webapp's promote affordance keys off this
 		if (opts.mode && opts.mode !== rec.dto.autonomyMode) {
 			rec.dto.autonomyMode = opts.mode;
 			o.autonomyMode = opts.mode;
@@ -4222,6 +4228,7 @@ export class SquadManager extends EventEmitter {
 		} catch (err) {
 			o.appendSystemPrompt = prior.append;
 			o.promoted = undefined;
+			rec.dto.promoted = undefined;
 			rec.dto.autonomyMode = prior.mode;
 			o.autonomyMode = prior.oMode;
 			this.syncAuthority(rec.dto);

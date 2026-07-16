@@ -132,6 +132,43 @@ test("promote clears the ephemeral marker — 'keep it' makes the registration d
 	expect(mgr.projects().map((p) => p.repo)).toEqual([repo]);
 });
 
+test("promote stamps `promoted` on the wire DTO — fresh, idempotent retry, and the promote response all agree (daily-onramp 06)", async () => {
+	const stateDir = await tmpDir("here-promote-dto-");
+	const repo = await gitRepo("here-promote-dto-repo-");
+	const mgr = new SquadManager({ stateDir } as never);
+	seedConsoleAgent(mgr, "chat-1", repo);
+	expect(mgr.getAgent("chat-1")?.promoted).toBeUndefined(); // un-promoted console chat: no flag
+
+	const promoted = await mgr.promote("chat-1", { task: "build the thing" });
+	expect(promoted.ok).toBe(true);
+	expect(promoted.agent?.promoted).toBe(true); // the POST response the webapp re-renders from
+	expect(mgr.getAgent("chat-1")?.promoted).toBe(true); // the roster DTO every later emit carries
+
+	// Idempotent retry keeps the wire mirror true (and simulates a pre-06 persisted promote whose
+	// DTO was never stamped: options say promoted, DTO doesn't — the retry path must repair it).
+	const rec = (mgr as unknown as { agents: Map<string, { dto: AgentDTO }> }).agents.get("chat-1");
+	if (rec) rec.dto.promoted = undefined;
+	const again = await mgr.promote("chat-1", {});
+	expect(again.ok).toBe(true);
+	expect(again.agent?.promoted).toBe(true);
+	expect(mgr.getAgent("chat-1")?.promoted).toBe(true);
+});
+
+test("promote of a NON-console unit refuses with a reason — the webapp surfaces it verbatim", async () => {
+	const stateDir = await tmpDir("here-promote-refuse-");
+	const repo = await gitRepo("here-promote-refuse-repo-");
+	const mgr = new SquadManager({ stateDir } as never);
+	// A regular working unit: right kind, but not named "chat" and no console prompt.
+	const dto: AgentDTO = { id: "unit-1", name: "builder", status: "idle", kind: "omp-operator", repo, worktree: `${repo}/wt`, approvalMode: "write", pending: [], lastActivity: 1, messageCount: 0 };
+	const options: PersistedAgent = { id: "unit-1", name: "builder", repo, worktree: `${repo}/wt`, approvalMode: "write", kind: "omp-operator" };
+	(mgr as unknown as { agents: Map<string, unknown> }).agents.set("unit-1", { dto, agent: { stop: async () => {} }, options, transcript: [], assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map() });
+
+	const refused = await mgr.promote("unit-1", {});
+	expect(refused.ok).toBe(false);
+	if (!refused.ok) expect(refused.reason).toContain("not a promotable console chat unit");
+	expect(mgr.getAgent("unit-1")?.promoted).toBeUndefined(); // refusal never half-stamps the DTO
+});
+
 test("an explicit durable registration PROMOTES an ephemeral repo — 'add project' makes it stick past /exit", async () => {
 	const stateDir = await tmpDir("here-eph-promote-durable-");
 	const repo = await gitRepo("here-eph-promote-durable-repo-");
