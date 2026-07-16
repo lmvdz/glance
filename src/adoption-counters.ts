@@ -43,20 +43,31 @@ const TRANSITIONS_FILE = "transitions.jsonl";
 
 /** Casual-marking convention at count-time (arbitration §RT2-4a: read `name`/kind generically, no
  *  hard dependency on the on-ramp epic): today every casual lane — webapp console AND `glance
- *  here` — creates units named exactly "chat" (server.ts's POST /api/console handler). */
+ *  here` — creates units named exactly "chat" (server.ts's POST /api/console handler).
+ *
+ * @substrate exported for tests only — tests/adoption-counters.test.ts asserts this convention
+ * directly; every in-repo caller (`casualSessionsByDay`, `computeAdoptionCounters`) is a sibling
+ * function in this same file. */
 export function isCasualSessionName(name: string | undefined): boolean {
 	return name === "chat";
 }
 
 /** Id-shaped fallback for sources that carry no `name` (transitions.jsonl): `newAgentId("chat")`
  *  (spawn-identity.ts) yields `chat-<ts36>-<seq>-<hex>`, so the prefix is the same convention the
- *  receipt names encode — this catches a LIVE chat unit whose first run hasn't finalized a receipt yet. */
+ *  receipt names encode — this catches a LIVE chat unit whose first run hasn't finalized a receipt yet.
+ *
+ * @substrate exported for tests only — tests/adoption-counters.test.ts asserts this convention
+ * directly; its only in-repo caller is `promptsByDay`, in this same file. */
 export function isCasualAgentId(agentId: string | undefined): boolean {
 	return typeof agentId === "string" && agentId.startsWith("chat-");
 }
 
 /** UTC calendar day of an epoch-ms timestamp, `YYYY-MM-DD`. UTC on purpose: a fixed, DST-free
- *  bucketing that two machines (daemon, CLI probe) can never disagree on. */
+ *  bucketing that two machines (daemon, CLI probe) can never disagree on.
+ *
+ * @substrate exported for tests only — tests/adoption-counters.test.ts asserts this bucketing
+ * directly; every in-repo caller (`casualSessionsByDay`, `promptsByDay`, `pushTapsByDay`) is a
+ * sibling function in this same file. */
 export function utcDayOf(ts: number): string {
 	return new Date(ts).toISOString().slice(0, 10);
 }
@@ -70,6 +81,9 @@ const bump = (acc: Record<string, number>, day: string): void => {
  * one receipt PER TURN (acp-agent-driver emits agent_start/agent_end around each turn), so counting
  * receipts raw would re-derive prompts/day under the wrong name — dedupe by (agentId, day). A
  * session that spans two days counts on both: it was genuinely used on each.
+ *
+ * @substrate exported for tests only — tests/adoption-counters.test.ts asserts this rollup
+ * directly; its only in-repo caller is `computeAdoptionCounters`, in this same file.
  */
 export function casualSessionsByDay(receipts: RunReceipt[]): Record<string, number> {
 	const seen = new Set<string>();
@@ -91,6 +105,9 @@ export function casualSessionsByDay(receipts: RunReceipt[]): Record<string, numb
  * FROM `idle`|`input` is a turn start. `casualAgentIds` is the receipt-derived name→id set;
  * `isCasualAgentId` catches live chat units with no receipt yet. Denied entries never happened —
  * excluded.
+ *
+ * @substrate exported for tests only — tests/adoption-counters.test.ts asserts this rollup
+ * directly; its only in-repo caller is `computeAdoptionCounters`, in this same file.
  */
 export function promptsByDay(transitions: TransitionEntry[], casualAgentIds?: ReadonlySet<string>): Record<string, number> {
 	const out: Record<string, number> = {};
@@ -105,7 +122,10 @@ export function promptsByDay(transitions: TransitionEntry[], casualAgentIds?: Re
 }
 
 /** Push taps per UTC day. Every entry is one tap — the webapp's sessionStorage dedupe is the
- *  double-count guard, not this function. */
+ *  double-count guard, not this function.
+ *
+ * @substrate exported for tests only — tests/adoption-counters.test.ts asserts this rollup
+ * directly; its only in-repo caller is `computeAdoptionCounters`, in this same file. */
 export function pushTapsByDay(entries: PushTapEntry[]): Record<string, number> {
 	const out: Record<string, number> = {};
 	for (const e of entries) {
@@ -166,8 +186,10 @@ export function summarizeAdoption(c: AdoptionCounters, now: number = Date.now())
 }
 
 /** Torn-line-tolerant JSONL read that honors JsonlLog's `.1` rotation (rotated tail first, so the
- *  result stays roughly append-ordered). Missing files are the normal first-boot case. */
-async function readJsonl<T>(filePath: string): Promise<T[]> {
+ *  result stays roughly append-ordered). Missing files are the normal first-boot case. Each parsed
+ *  line is narrowed through `isValid` before being trusted as `T` — no blind cast off `JSON.parse`,
+ *  so a foreign/malformed line reads the same as a torn one (dropped, not silently mistyped). */
+async function readJsonl<T>(filePath: string, isValid: (v: unknown) => v is T): Promise<T[]> {
 	const out: T[] = [];
 	for (const p of [`${filePath}.1`, filePath]) {
 		let text: string;
@@ -178,14 +200,31 @@ async function readJsonl<T>(filePath: string): Promise<T[]> {
 		}
 		for (const line of text.split("\n")) {
 			if (!line.trim()) continue;
+			let parsed: unknown;
 			try {
-				out.push(JSON.parse(line) as T);
+				parsed = JSON.parse(line);
 			} catch {
-				// torn tail (crash mid-append) — drop the line, keep the rest
+				continue; // torn tail (crash mid-append) — drop the line, keep the rest
 			}
+			if (isValid(parsed)) out.push(parsed);
 		}
 	}
 	return out;
+}
+
+/** Structural narrow for a `transitions.jsonl` line — the fields `promptsByDay`/`dedupeTransitions`
+ *  actually read. Mirrors `isAdoptionCounters`'s own object+typeof style below. */
+function isTransitionEntryLike(v: unknown): v is TransitionEntry {
+	if (typeof v !== "object" || v === null) return false;
+	const o = v as Record<string, unknown>;
+	return typeof o.agentId === "string" && typeof o.from === "string" && typeof o.to === "string" && typeof o.at === "number";
+}
+
+/** Structural narrow for a `push-taps.jsonl` line — mirrors `isTransitionEntryLike` above. */
+function isPushTapEntryLike(v: unknown): v is PushTapEntry {
+	if (typeof v !== "object" || v === null) return false;
+	const o = v as Record<string, unknown>;
+	return typeof o.ts === "number" && typeof o.agentId === "string";
 }
 
 /**
@@ -201,8 +240,8 @@ export async function computeAdoptionCounters(
 ): Promise<AdoptionCounters> {
 	const [receipts, fileTransitions, fileTaps] = await Promise.all([
 		readAllReceipts(stateDir),
-		readJsonl<TransitionEntry>(path.join(stateDir, TRANSITIONS_FILE)),
-		readJsonl<PushTapEntry>(path.join(stateDir, PUSH_TAPS_FILE)),
+		readJsonl(path.join(stateDir, TRANSITIONS_FILE), isTransitionEntryLike),
+		readJsonl(path.join(stateDir, PUSH_TAPS_FILE), isPushTapEntryLike),
 	]);
 	const transitions = dedupeTransitions([...fileTransitions, ...(live?.transitions ?? [])]);
 	const tapSeen = new Set<string>();
