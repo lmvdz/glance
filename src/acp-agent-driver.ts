@@ -72,6 +72,18 @@ export interface AcpAgentDriverOptions {
 	 *  below). This is ACP's only spec-blessed context/capability channel; distinct from
 	 *  `contextInjection`, which is about the fabric primer / tool-grant prompt text, not real MCP tools. */
 	mcpServers?: McpServerSpec[];
+	/** Turn-liveness silence window (ms) for `session/prompt` ONLY — reset by every `session/update`
+	 *  notification for the session (see `sendTurn`/`handleNotification`). Defaults to 60s: the same
+	 *  magnitude as the old fixed request timeout this replaces, but now meaning "no activity for this
+	 *  long", not "hasn't returned yet" — a healthy turn that streams for minutes never trips it, only
+	 *  an adapter that goes quiet does. Tests inject a small value to exercise the reset/timeout logic
+	 *  without a real 60s+ wait; the default is what ships. */
+	turnSilenceMs?: number;
+	/** Hard backstop (ms) for a whole `session/prompt` turn, regardless of streamed activity — fires
+	 *  even if the adapter keeps emitting `session/update` forever. Defaults to 30 minutes, the same
+	 *  order of magnitude as the branch-turn cap in squad-manager.ts's `runAgentTask`
+	 *  (`setTimeout(() => finish("failed"), 30 * 60_000)`). Tests inject a small value. */
+	turnHardCapMs?: number;
 }
 
 type Pending = { resolve: (data: unknown) => void; reject: (err: Error) => void };
@@ -193,6 +205,10 @@ export class AcpAgentDriver extends EventEmitter implements AgentDriver {
 	 *  alongside `pid` so the NEXT boot can identity-check and reap an orphaned adapter chain a daemon
 	 *  kill left behind (restart re-attach, daily-onramp 04). */
 	private launched?: string[];
+	/** Set by `sendTurn` while a `session/prompt` call is in flight; `handleNotification` calls it on
+	 *  every `session/update` for the session to reset that turn's silence timer. undefined when no
+	 *  turn call is pending (nothing to bump). */
+	private turnLivenessBump?: () => void;
 
 	constructor(opts: AcpAgentDriverOptions) {
 		super();
@@ -212,6 +228,13 @@ export class AcpAgentDriver extends EventEmitter implements AgentDriver {
 	/** The argv this driver spawned — set by start(), undefined before it. */
 	get spawnedCommand(): string[] | undefined {
 		return this.launched;
+	}
+
+	private get turnSilenceMs(): number {
+		return this.opts.turnSilenceMs ?? 60_000;
+	}
+	private get turnHardCapMs(): number {
+		return this.opts.turnHardCapMs ?? 30 * 60_000;
 	}
 
 	async start(timeoutMs = 60_000): Promise<void> {
@@ -370,6 +393,13 @@ export class AcpAgentDriver extends EventEmitter implements AgentDriver {
 
 	private handleNotification(method: string, params: unknown): void {
 		if (method !== "session/update" || !isObj(params)) return;
+		// Any session/update for the in-flight turn's session proves the adapter is alive — reset the
+		// turn's silence timer (sendTurn) regardless of which update kind this is (chunk, tool_call,
+		// plan, usage — all count as liveness). Guard on sessionId when the notification carries one;
+		// a driver only ever tracks one session, so a missing sessionId still bumps (defensive, not
+		// spec-required).
+		const sid = asString(params.sessionId);
+		if (!sid || sid === this.sessionId) this.turnLivenessBump?.();
 		const update = params.update;
 		if (!isObj(update)) return;
 		switch (asString(update.sessionUpdate)) {
@@ -500,12 +530,69 @@ export class AcpAgentDriver extends EventEmitter implements AgentDriver {
 		});
 	}
 
+	/** `session/prompt` ONLY. Its response arrives at TURN END — for real coding work that's routinely
+	 *  well past 60s — so riding `send()`'s fixed request-scoped timeout rejects a perfectly healthy
+	 *  in-progress turn and marks the agent "error" while the adapter keeps working underneath (the bug
+	 *  this fixes; see plans/daily-onramp/07-acp-prompt-turn-timeout.md, live-proven with a `sleep 75`
+	 *  control that errored at exactly +60s).
+	 *
+	 *  Turn-scoped liveness instead of a fixed deadline: every `session/update` notification for this
+	 *  session (handleNotification) resets a silence timer via `turnLivenessBump`, so the turn stays
+	 *  alive exactly as long as the adapter keeps streaming, and only times out when it genuinely goes
+	 *  quiet (fail-closed — "absence of evidence is never evidence of settlement"). A hard cap fires
+	 *  regardless of activity so a turn that streams forever doesn't pin the slot unnoticed either.
+	 *  `initialize` / `session/new` / `session/set_mode` stay on plain `send()`'s fixed 60s default —
+	 *  those genuinely ARE request/response calls that should fail fast. */
+	private sendTurn<T = unknown>(method: string, params: unknown): Promise<T> {
+		if (!this.proc || this.exited) return Promise.reject(new Error("acp agent not running"));
+		const id = ++this.seq;
+		const key = String(id);
+		return new Promise<T>((resolve, reject) => {
+			let silenceTimer: ReturnType<typeof setTimeout>;
+			let hardCapTimer: ReturnType<typeof setTimeout>;
+			let armSilence: () => void;
+			const clearAll = () => {
+				clearTimeout(silenceTimer);
+				clearTimeout(hardCapTimer);
+				if (this.turnLivenessBump === armSilence) this.turnLivenessBump = undefined;
+			};
+			armSilence = () => {
+				clearTimeout(silenceTimer);
+				silenceTimer = setTimeout(() => {
+					clearAll();
+					this.pending.delete(key);
+					reject(new Error(`acp request ${method} timed out`));
+				}, this.turnSilenceMs);
+			};
+			hardCapTimer = setTimeout(() => {
+				clearAll();
+				this.pending.delete(key);
+				reject(new Error(`acp request ${method} timed out (turn hard cap)`));
+			}, this.turnHardCapMs);
+			armSilence();
+			this.turnLivenessBump = armSilence;
+			this.pending.set(key, {
+				resolve: (d) => {
+					clearAll();
+					resolve(d as T);
+				},
+				reject: (e) => {
+					clearAll();
+					reject(e);
+				},
+			});
+			this.write({ jsonrpc: "2.0", id, method, params });
+		});
+	}
+
 	async prompt(message: string): Promise<void> {
 		this.streaming = true;
 		this.emit("event", { type: "agent_start" });
 		try {
 			// Resolves with { stopReason } on turn end; session/cancel makes it resolve "cancelled".
-			await this.send("session/prompt", { sessionId: this.sessionId, prompt: this.promptBlocks(message) });
+			// Turn-scoped liveness (sendTurn), not the fixed 60s request default (send) — see sendTurn's
+			// doc comment and plan 07 for why session/prompt is the one call that needs this.
+			await this.sendTurn("session/prompt", { sessionId: this.sessionId, prompt: this.promptBlocks(message) });
 			this.emit("event", { type: "message_end", message: { role: "assistant", usage: this.lastUsage } });
 		} finally {
 			// agent_end always fires — end_turn, cancel, refusal, and error all terminate the turn.

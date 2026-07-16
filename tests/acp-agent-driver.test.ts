@@ -228,3 +228,159 @@ test("yolo + a non-compliant agent: fails closed to a human, and says so", async
 	const gate = frames.find((f) => f.method === "confirm");
 	expect(gate?.gateClass).toBe(true); // a human is asked — never the supervisor's model
 });
+
+/**
+ * plans/daily-onramp/07-acp-prompt-turn-timeout.md: `session/prompt`'s response only arrives at
+ * TURN END, so it must not ride `send()`'s fixed request-scoped timeout — a healthy turn that
+ * merely takes a while (live-proven: a `sleep 75` control errored at exactly +60s) would get
+ * rejected out from under a still-working adapter. `sendTurn` fixes this with turn-scoped
+ * liveness: every `session/update` notification for the session resets a silence timer instead of
+ * a single fixed deadline.
+ *
+ * These three tests exercise that logic at test-friendly speed via `turnSilenceMs`/`turnHardCapMs`
+ * — small injected windows, not the real 60s/30min production defaults — so the suite doesn't
+ * spend a minute-plus proving the same state machine. The mechanism under test is identical either
+ * way: a live default only changes which setTimeout duration fires the same code path.
+ */
+
+/** Streams session/update for longer than the silence window (but under the hard cap) before
+ * responding to session/prompt — the exact shape of the bug (a turn that legitimately runs past a
+ * single fixed timeout while continuing to do visible work). */
+const FAKE_ACP_STREAMS_PAST_SILENCE = String.raw`
+const send = (o) => process.stdout.write(JSON.stringify(o) + "\n");
+const update = (u) => send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "s1", update: u } });
+let buf = "";
+process.stdin.on("data", (ch) => {
+  buf += ch;
+  let nl;
+  while ((nl = buf.indexOf("\n")) >= 0) {
+    const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+    if (!line.trim()) continue;
+    let msg; try { msg = JSON.parse(line); } catch { continue; }
+    const { id, method } = msg;
+    switch (method) {
+      case "initialize":
+        send({ jsonrpc: "2.0", id, result: { protocolVersion: 1, agentCapabilities: {} } });
+        break;
+      case "session/new":
+        send({ jsonrpc: "2.0", id, result: { sessionId: "s1" } });
+        break;
+      case "session/prompt": {
+        // 8 updates, 50ms apart = 400ms total wall-clock before responding — well past a 150ms
+        // silence window, proving each update reset the clock rather than a single deadline expiring.
+        let n = 0;
+        const iv = setInterval(() => {
+          n++;
+          update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "." } });
+          if (n >= 8) {
+            clearInterval(iv);
+            send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
+          }
+        }, 50);
+        break;
+      }
+      default:
+        if (id !== undefined) send({ jsonrpc: "2.0", id, result: {} });
+    }
+  }
+});
+`;
+
+/** Never emits a session/update and never responds to session/prompt at all — a fully silent /
+ * dead adapter. The driver must still detect this and time out (fail-closed). */
+const FAKE_ACP_SILENT_PROMPT = String.raw`
+const send = (o) => process.stdout.write(JSON.stringify(o) + "\n");
+let buf = "";
+process.stdin.on("data", (ch) => {
+  buf += ch;
+  let nl;
+  while ((nl = buf.indexOf("\n")) >= 0) {
+    const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+    if (!line.trim()) continue;
+    let msg; try { msg = JSON.parse(line); } catch { continue; }
+    const { id, method } = msg;
+    switch (method) {
+      case "initialize":
+        send({ jsonrpc: "2.0", id, result: { protocolVersion: 1, agentCapabilities: {} } });
+        break;
+      case "session/new":
+        send({ jsonrpc: "2.0", id, result: { sessionId: "s1" } });
+        break;
+      case "session/prompt":
+        // Deliberately silent: no session/update, no response, ever.
+        break;
+      default:
+        if (id !== undefined) send({ jsonrpc: "2.0", id, result: {} });
+    }
+  }
+});
+`;
+
+/** Streams forever (never responds) — proves the hard-cap backstop fires even though liveness
+ * never lapses, so a runaway/misbehaving adapter can't pin the slot unnoticed forever either. */
+const FAKE_ACP_STREAMS_FOREVER = String.raw`
+const send = (o) => process.stdout.write(JSON.stringify(o) + "\n");
+const update = (u) => send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "s1", update: u } });
+let buf = "";
+process.stdin.on("data", (ch) => {
+  buf += ch;
+  let nl;
+  while ((nl = buf.indexOf("\n")) >= 0) {
+    const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+    if (!line.trim()) continue;
+    let msg; try { msg = JSON.parse(line); } catch { continue; }
+    const { id, method } = msg;
+    switch (method) {
+      case "initialize":
+        send({ jsonrpc: "2.0", id, result: { protocolVersion: 1, agentCapabilities: {} } });
+        break;
+      case "session/new":
+        send({ jsonrpc: "2.0", id, result: { sessionId: "s1" } });
+        break;
+      case "session/prompt":
+        setInterval(() => update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "." } }), 20);
+        // never responds
+        break;
+      default:
+        if (id !== undefined) send({ jsonrpc: "2.0", id, result: {} });
+    }
+  }
+});
+`;
+
+async function turnFakeDriver(script: string, turnOpts: { turnSilenceMs: number; turnHardCapMs: number }): Promise<AcpAgentDriver> {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "acp-"));
+	tmps.push(dir);
+	const file = path.join(dir, "fake-acp.ts");
+	await fs.writeFile(file, script);
+	const driver = new AcpAgentDriver({ id: "t", cwd: dir, command: ["bun", file], ...turnOpts });
+	drivers.push(driver);
+	return driver;
+}
+
+test("a turn that streams session/update past the silence window still resolves (turn-scoped liveness, not a fixed deadline)", async () => {
+	const driver = await turnFakeDriver(FAKE_ACP_STREAMS_PAST_SILENCE, { turnSilenceMs: 150, turnHardCapMs: 5_000 });
+	await driver.start(5_000);
+
+	// 400ms of streaming > the 150ms silence window: a fixed single-shot timeout would have rejected
+	// this turn already. It must not.
+	await expect(driver.prompt("hi")).resolves.toBeUndefined();
+	expect(driver.isReady).toBe(true);
+});
+
+test("a fully silent adapter still times out a session/prompt turn — fail-closed", async () => {
+	const driver = await turnFakeDriver(FAKE_ACP_SILENT_PROMPT, { turnSilenceMs: 100, turnHardCapMs: 10_000 });
+	await driver.start(5_000);
+
+	await expect(driver.prompt("hi")).rejects.toThrow(/acp request session\/prompt timed out/);
+});
+
+test("a turn that streams forever still trips the hard-cap backstop", async () => {
+	const driver = await turnFakeDriver(FAKE_ACP_STREAMS_FOREVER, { turnSilenceMs: 500, turnHardCapMs: 250 });
+	await driver.start(5_000);
+
+	// Liveness never lapses (updates every 20ms keep resetting the 500ms silence timer), so only the
+	// hard cap can end this — proving the backstop is independent of activity, not just a very long
+	// silence window.
+	await expect(driver.prompt("hi")).rejects.toThrow(/turn hard cap/);
+});
