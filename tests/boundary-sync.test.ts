@@ -22,6 +22,7 @@ import {
 	computeTurnPatch,
 	discardHeldNow,
 	fingerprintUntracked,
+	HeldLedgerAppendError,
 	HeldSyncStore,
 	syncTurnEnd,
 } from "../src/boundary-sync.ts";
@@ -317,6 +318,66 @@ describe("applyPatchToRealTree", () => {
 		expect(r.ok).toBe(true);
 		expect(await fs.readFile(path.join(repo, "a.txt"), "utf8")).toContain("agent line");
 	});
+
+	// ── C1: the residual window-3 race is now DETECTED, never silent ────────────────────────────────
+
+	test("C1: a disjoint operator write landing between the pre-write snapshot and the real `git apply` is DETECTED as a divergence, never silently accepted", async () => {
+		const repo = await initRepo();
+		// Widen a.txt so the turn's hunk (an append at the very end) carries only TAIL context — line 1
+		// stays free for the race to land OUTSIDE the hunk entirely (the module doc's "disjoint same-file
+		// edit interleaves with apply's in-place rewrite" shape — `git apply` has no lock a real editor
+		// write would also honor).
+		const wide = Array.from({ length: 10 }, (_, i) => `l${i + 1}`).join("\n") + "\n";
+		await fs.writeFile(path.join(repo, "a.txt"), wide);
+		await git(repo, "commit", "-aqm", "widen a.txt");
+		const wt = await addWorktree(repo);
+		const start = await captureWorktreeTree(wt);
+		await fs.appendFile(path.join(wt, "a.txt"), "agent line\n");
+		const end = await captureWorktreeTree(wt);
+		if (!start.ok || !end.ok) throw new Error("snapshot failed");
+		const patch = await computeTurnPatch(wt, start.tree, end.tree);
+		if (!patch.ok) throw new Error("patch failed");
+		const decided = await captureRealTreeState(repo);
+		if (!decided.ok) throw new Error("capture failed");
+
+		const divergenceRoot = await tmpDir("bsync-divergence-");
+		const raced = `RACED\n${wide.split("\n").slice(1).join("\n")}`;
+		const r = await applyPatchToRealTree(repo, patch.patch, decided.fingerprint, {
+			divergenceDir: divergenceRoot,
+			// Fires after the pre-write snapshot, before the real `git apply` — the exact residual window.
+			testHookAfterSnapshot: async () => {
+				await fs.writeFile(path.join(repo, "a.txt"), raced);
+			},
+		});
+		expect(r.ok).toBe(true); // the write itself happened — nothing to retry
+		if (!r.ok) return;
+		expect(r.divergence).toBeDefined();
+		expect(r.divergence?.paths).toEqual(["a.txt"]);
+		expect(r.divergence?.captureDir.startsWith(divergenceRoot)).toBe(true);
+		// The pre-write capture is retained on disk — the PRE-race content, never the racer's own write.
+		const retained = await fs.readFile(path.join(r.divergence!.captureDir, "a.txt"), "utf8");
+		expect(retained).toBe(wide);
+		// Nothing was auto-restored: the real tree keeps whatever `git apply` actually produced.
+		const finalContent = await fs.readFile(path.join(repo, "a.txt"), "utf8");
+		expect(finalContent).toContain("RACED");
+		expect(finalContent).toContain("agent line");
+	});
+
+	test("C1: no divergence on the happy path — zero extra disk writes, no false positive", async () => {
+		const repo = await initRepo();
+		const wt = await addWorktree(repo);
+		const start = await captureWorktreeTree(wt);
+		await fs.appendFile(path.join(wt, "a.txt"), "agent line\n");
+		const end = await captureWorktreeTree(wt);
+		if (!start.ok || !end.ok) throw new Error("snapshot failed");
+		const patch = await computeTurnPatch(wt, start.tree, end.tree);
+		if (!patch.ok) throw new Error("patch failed");
+		const decided = await captureRealTreeState(repo);
+		if (!decided.ok) throw new Error("capture failed");
+		const r = await applyPatchToRealTree(repo, patch.patch, decided.fingerprint);
+		expect(r.ok).toBe(true);
+		if (r.ok) expect(r.divergence).toBeUndefined();
+	});
 });
 
 // ── the turn-end decision ─────────────────────────────────────────────────────────────────────────
@@ -372,6 +433,26 @@ describe("syncTurnEnd", () => {
 		expect(out.kind).toBe("held");
 		if (out.kind === "held") expect(out.reason).toContain("changed during this turn");
 		expect(await fs.readFile(path.join(repo, "a.txt"), "utf8")).not.toContain("agent edit"); // not written
+	});
+
+	test("S1: HOLDS when an untracked file's readability flips mid-turn (content: mode ⇒ stat: mode) — mixed-mode fingerprints must never compare equal", async () => {
+		const repo = await initRepo();
+		const wt = await addWorktree(repo);
+		const secret = path.join(repo, "secret.txt");
+		await fs.writeFile(secret, "before\n");
+		const store = await newStore();
+		const start = await beginTurn(repo, wt);
+		expect(start.realFingerprint).toBeTruthy(); // captured while readable — "content:" mode
+		await fs.appendFile(path.join(wt, "a.txt"), "agent edit\n");
+		try {
+			await fs.chmod(secret, 0o000); // readability flips mid-turn — the mode TAG changes, not the bytes
+			const out = await syncTurnEnd({ realDir: repo, worktree: wt, start, store, agentId: "a1", turn: 1 });
+			expect(out.kind).toBe("held");
+			if (out.kind === "held") expect(out.reason).toContain("changed during this turn");
+			expect(await fs.readFile(path.join(repo, "a.txt"), "utf8")).not.toContain("agent edit"); // not written
+		} finally {
+			await fs.chmod(secret, 0o644).catch(() => {});
+		}
 	});
 
 	test("applies the turn's edits to the real checkout when it provably did not move", async () => {
@@ -591,6 +672,62 @@ describe("HeldSyncStore", () => {
 		expect(await s.listHeld("a1")).toHaveLength(1);
 		expect(await s.listHeld("a2")).toHaveLength(1);
 		expect(await s.listAllHeld()).toHaveLength(2);
+	});
+
+	// ── S6: a ledger-append failure must never cost the patch body itself ──────────────────────────
+
+	test("S6: ledger-append failure throws HeldLedgerAppendError but the patch body IS on disk (never uncapturable)", async () => {
+		const dir = await tmpDir("bsync-store-");
+		const s = new HeldSyncStore(dir);
+		// held.jsonl exists as a DIRECTORY before any hold ever runs — the patch write (a sibling
+		// `<id>.patch` file) succeeds; only the ledger line append (opening held.jsonl itself) fails.
+		await fs.mkdir(path.join(dir, "held.jsonl"));
+		let caught: unknown;
+		try {
+			await s.hold({ agentId: "a1", turn: 1, realDir: "/r", reason: "r", patch: "the patch body" });
+		} catch (e) {
+			caught = e;
+		}
+		expect(caught).toBeInstanceOf(HeldLedgerAppendError);
+		const err = caught as HeldLedgerAppendError;
+		expect(err.patchFile).toContain(dir);
+		expect(await fs.readFile(err.patchFile, "utf8")).toBe("the patch body"); // recoverable by hand
+		expect(err.message).toContain(err.patchFile); // the message itself names the file
+	});
+
+	// ── C2: reattach re-key (a hold's agentId moves onto a fresh session id) ────────────────────────
+
+	describe("rekey", () => {
+		test("re-keys a hold onto a new agent id without touching the patch body or its file", async () => {
+			const s = await newStore();
+			const held = await s.hold({ agentId: "chat-old", turn: 1, realDir: "/r", reason: "r", patch: "p1" });
+			await s.rekey(held.id, "chat-new");
+			expect(await s.listHeld("chat-old")).toHaveLength(0); // gone from the old id
+			const moved = await s.listHeld("chat-new");
+			expect(moved).toHaveLength(1);
+			expect(moved[0]!.id).toBe(held.id); // same identity
+			expect(moved[0]!.patchFile).toBe(held.patchFile); // same body, never rewritten
+			expect(await fs.readFile(held.patchFile, "utf8")).toBe("p1");
+		});
+
+		test("a rekey line for an already-resolved id is an inert replay artifact, never fabricates a hold", async () => {
+			const s = await newStore();
+			const held = await s.hold({ agentId: "chat-old", turn: 1, realDir: "/r", reason: "r", patch: "p1" });
+			await s.resolve(held.id, "applied");
+			await s.rekey(held.id, "chat-new");
+			expect(await s.listHeld("chat-new")).toHaveLength(0);
+			expect(await s.listAllHeld()).toHaveLength(0);
+		});
+
+		test("rekey survives a restart (fresh HeldSyncStore instance over the same dir replays it identically)", async () => {
+			const dir = await tmpDir("bsync-store-");
+			const s1 = new HeldSyncStore(dir);
+			const held = await s1.hold({ agentId: "chat-old", turn: 1, realDir: "/r", reason: "r", patch: "p1" });
+			await s1.rekey(held.id, "chat-new");
+			const s2 = new HeldSyncStore(dir); // simulates a daemon restart over the same state dir
+			expect(await s2.listHeld("chat-old")).toHaveLength(0);
+			expect((await s2.listHeld("chat-new"))[0]?.id).toBe(held.id);
+		});
 	});
 });
 

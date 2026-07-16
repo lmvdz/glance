@@ -40,7 +40,7 @@
  *      `git apply` runs AFTER it. `applyPatchToRealTree` therefore re-fingerprints once more after
  *      `git apply --check` passes, immediately before the write (`expectedFingerprint`), shrinking
  *      the exposure from "compare + temp-file + check + apply" to the final `git apply` spawn alone.
- *   3. RESIDUAL (not defendable from this side of the filesystem): an operator edit — e.g. an
+ *   3. RESIDUAL, but now DETECT-AND-RECOVER, not silent (C1 hardening): an operator edit — e.g. an
  *      editor save — landing anywhere between the START of the last re-fingerprint and the end of
  *      the `git apply` spawn. Note the re-fingerprint is itself FOUR sequential git spawns, not an
  *      atomic observation: an edit interleaving its sub-commands can assemble a stale-but-matching
@@ -48,12 +48,20 @@
  *      goes unseen), so the honest exposure is the whole recheck PLUS the apply — tens of
  *      milliseconds — not the apply spawn alone. git's context validation still aborts the whole
  *      patch when such an edit overlaps a hunk (→ hold); a DISJOINT same-file edit can interleave
- *      with apply's in-place rewrite of that file. Closing this fully needs an OS-level file lock
- *      the operator's editor also honors, which does not exist. Daemon-side writers ARE serialized:
- *      squad-manager keys the sync/apply promise chain by the REAL DIRECTORY (realpath + literal
- *      path), so two `here` sessions on one checkout can never fingerprint/apply concurrently (one
- *      daemon per state dir is the standing topology; multiple daemons on one checkout are out of
- *      scope).
+ *      with apply's in-place rewrite of that file, which `git apply` performs as a read-modify-write
+ *      with no OS-level lock the operator's editor also honors — that lock does not exist, so this
+ *      window cannot be CLOSED from this side of the filesystem. What `applyPatchToRealTree` does
+ *      instead: snapshot every patch-touched path's real-tree content immediately before the write,
+ *      then after a successful `git apply`, recompute what the patch alone should have produced (by
+ *      replaying it against that same snapshot in a scratch directory) and compare it to what is
+ *      actually on disk. A mismatch means something else wrote into one of those exact paths inside
+ *      the apply spawn itself — reported as a critical `ApplyResult.divergence` (paths + a durable
+ *      on-disk capture of the pre-write content for manual recovery), never silently accepted and
+ *      never auto-restored (the operator's own concurrent edit may be the one that should win).
+ *      Daemon-side writers ARE serialized: squad-manager keys the sync/apply promise chain by the
+ *      REAL DIRECTORY (realpath + literal path), so two `here` sessions on one checkout can never
+ *      fingerprint/apply concurrently (one daemon per state dir is the standing topology; multiple
+ *      daemons on one checkout are out of scope).
  */
 
 import { createHash, randomUUID } from "node:crypto";
@@ -82,7 +90,21 @@ export const MAX_SYNC_PATCH_BYTES = 64 * 1024 * 1024;
 export type CaptureResult = { ok: true; fingerprint: string } | { ok: false; reason: string };
 export type TreeResult = { ok: true; tree: string } | { ok: false; reason: string };
 export type PatchResult = { ok: true; patch: string } | { ok: false; reason: string };
-export type ApplyResult = { ok: true } | { ok: false; reason: string };
+/** A successful write can still carry a detected divergence (C1) — the git-write itself happened
+ *  (there is nothing to retry), but the post-apply check found that one or more patch-touched paths
+ *  don't hold what the patch alone should have produced. `ok: false` is reserved for "nothing was
+ *  written" (the fail-closed refusals above the write); a divergence is reported ALONGSIDE `ok: true`
+ *  because rolling back is not this module's call to make (module doc, window 3). */
+export type ApplyResult = { ok: true; divergence?: DivergenceReport } | { ok: false; reason: string };
+
+/** C1 post-apply divergence: the exact paths whose post-write content didn't match what the patch
+ *  alone should have produced, plus where the pre-write capture of those paths was retained on disk
+ *  for manual recovery (never auto-restored — the operator's own concurrent edit may be the one that
+ *  should win). */
+export interface DivergenceReport {
+	paths: string[];
+	captureDir: string;
+}
 
 const fail = (reason: string): { ok: false; reason: string } => ({ ok: false, reason });
 const gitErr = (what: string, r: { code: number; stderr: string }): string => `${what} failed (exit ${r.code}): ${r.stderr.trim().slice(0, 300) || "no stderr"}`;
@@ -107,6 +129,21 @@ const gitErr = (what: string, r: { code: number; stderr: string }): string => `$
  * the checkout, not merely "can't read this path's bytes" — the whole capture fails, and the
  * failure reason names the offending path so an operator-facing hold message is actionable instead
  * of a dead end.
+ *
+ * Mixed-mode compare (S1, blind review): each per-path line is tagged by its own prefix
+ * (`content:`/`symlink:`/`stat:`) — a path whose READABILITY changes between two captures (e.g. a
+ * permission flip, or a regular file replaced by an unreadable one) therefore switches prefixes and
+ * the two lines compare textually UNEQUAL by construction, which is folded into the whole-tree sha256
+ * `captureRealTreeState` produces, so `now.fingerprint !== start.realFingerprint` catches it exactly
+ * like any other divergence (see `tests/boundary-sync.test.ts`'s "readability flip" case). The
+ * genuinely accepted residual is narrower: a path that is `stat:`-mode in BOTH captures (readability
+ * never changed — permanently unreadable, or a fifo/socket/device) and whose CONTENT changes in place
+ * without moving its (mode, size, mtime) — an mtime-preserving in-place rewrite, or two edits that
+ * round-trip through the same size within one mtime tick. This is bounded, not open-ended: the only
+ * write this module ever performs against such a path is `git apply`, which refuses to write through
+ * a symlink and cannot target a fifo/socket/device at all (they are never patch-touchable paths), so
+ * the blind spot can never actually enable a silent clobber — at worst a content-swapped unreadable
+ * file's own divergence goes undetected, and that file was never going to be written to regardless.
  *
  * @substrate exported for tests only — tests/boundary-sync.test.ts asserts the lstat/readlink
  * fallback directly (including the fail-closed path for a path that no longer exists); its only
@@ -255,6 +292,134 @@ export async function computeTurnPatch(worktree: string, startTree: string, endT
 	return { ok: true, patch: diff.stdout };
 }
 
+/** Default durable home for C1 divergence captures when a caller doesn't have a more specific
+ *  (state-dir-scoped) place to put them — the direct-primitive test callers and any future caller
+ *  that skips the `divergenceDir` option. Production callers (`syncTurnEnd`, `applyHeldNow`) always
+ *  pass `HeldSyncStore`'s own durable dir, so captures live beside the held patches they relate to. */
+const DEFAULT_DIVERGENCE_ROOT = path.join(os.tmpdir(), "glance-bsync-divergence");
+
+/** The set of paths a unified diff (as produced by `git diff-tree -p`/`git diff`, default a/ b/
+ *  prefixes) could possibly have written — both sides of every `diff --git a/X b/Y` header (a
+ *  rename's old AND new path; an add/delete's one real side, the other is `/dev/null` and therefore
+ *  absent from this header form already). Used only to scope the C1 post-apply divergence check to
+ *  paths this patch could have touched — nothing else needs snapshotting or verifying. */
+export function patchTouchedPaths(patch: string): string[] {
+	const paths = new Set<string>();
+	for (const line of patch.split("\n")) {
+		const m = line.match(/^diff --git "?a\/(.+?)"? "?b\/(.+?)"?$/);
+		if (m) {
+			paths.add(m[1]!);
+			paths.add(m[2]!);
+		}
+	}
+	return [...paths];
+}
+
+/** A path's real-tree identity for the C1 pre/post comparison — deliberately the same three shapes
+ *  `fingerprintUntracked` already distinguishes (file/symlink/absent), plus "unreadable" for anything
+ *  else (permission denied, or a non-regular non-symlink path) so a capture failure never silently
+ *  reads as "equal to whatever came after". */
+type PathSnapshot = { kind: "file"; content: Buffer } | { kind: "symlink"; target: string } | { kind: "absent" } | { kind: "unreadable"; reason: string };
+
+async function snapshotPaths(dir: string, paths: string[]): Promise<Map<string, PathSnapshot>> {
+	const out = new Map<string, PathSnapshot>();
+	for (const p of paths) {
+		const abs = path.join(dir, p);
+		try {
+			const st = await fs.lstat(abs);
+			if (st.isSymbolicLink()) out.set(p, { kind: "symlink", target: await fs.readlink(abs) });
+			else if (st.isFile()) out.set(p, { kind: "file", content: await fs.readFile(abs) });
+			else out.set(p, { kind: "unreadable", reason: "not a regular file or symlink" });
+		} catch (e) {
+			if ((e as NodeJS.ErrnoException | null)?.code === "ENOENT") out.set(p, { kind: "absent" });
+			else out.set(p, { kind: "unreadable", reason: errText(e) });
+		}
+	}
+	return out;
+}
+
+/** Never true for a pair involving "unreadable" — an inconclusive capture must never compare equal
+ *  to anything (the same fail-closed rule `fingerprintUntracked`'s failures follow). */
+function snapshotsEqual(a: PathSnapshot | undefined, b: PathSnapshot | undefined): boolean {
+	if (!a || !b || a.kind !== b.kind) return false;
+	if (a.kind === "file" && b.kind === "file") return a.content.equals(b.content);
+	if (a.kind === "symlink" && b.kind === "symlink") return a.target === b.target;
+	return a.kind === "absent" && b.kind === "absent";
+}
+
+/** What the patch ALONE should have produced, computed by replaying it (via a second, throwaway
+ *  `git apply`) against the pre-write snapshot in an empty scratch directory — `git apply` works fine
+ *  outside of a git repository entirely (verified live), so this needs no `.git` and cannot be
+ *  affected by anything happening in the real checkout concurrently. Deterministic: same patch, same
+ *  starting bytes, same result, every time. */
+async function expectedPostApply(patch: string, pre: Map<string, PathSnapshot>): Promise<Map<string, PathSnapshot> | { failed: string }> {
+	let tmpDir: string;
+	try {
+		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "glance-bsync-expect-"));
+	} catch (e) {
+		return { failed: `scratch dir: ${errText(e)}` };
+	}
+	try {
+		for (const [p, snap] of pre) {
+			const abs = path.join(tmpDir, p);
+			await fs.mkdir(path.dirname(abs), { recursive: true });
+			if (snap.kind === "file") await fs.writeFile(abs, snap.content);
+			else if (snap.kind === "symlink") await fs.symlink(snap.target, abs).catch(() => {});
+			// "absent" (the patch creates it) and "unreadable" (can't seed it) are left missing —
+			// git apply either creates the file itself (absent) or the comparison degrades honestly
+			// (an "unreadable" pre-capture can never produce an "equal" verdict either side).
+		}
+		const patchFile = path.join(tmpDir, ".glance-expected.patch");
+		await fs.writeFile(patchFile, patch);
+		const applied = await hardenedGit(["apply", "--whitespace=nowarn", patchFile], { cwd: tmpDir });
+		if (applied.code !== 0) return { failed: gitErr("expected-output git apply", applied) };
+		return await snapshotPaths(tmpDir, [...pre.keys()]);
+	} finally {
+		await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+	}
+}
+
+/** Persist the pre-write capture for the paths a divergence was found in — retained on disk so a
+ *  human can recover by hand (naming this exact directory in the attention message); never used to
+ *  auto-restore. Best-effort per file: one unwritable entry doesn't cost the others. */
+async function retainDivergenceCapture(root: string, pre: Map<string, PathSnapshot>, affected: string[]): Promise<string> {
+	const dir = path.join(root, `divergence-${randomUUID()}`);
+	await fs.mkdir(dir, { recursive: true });
+	for (const p of affected) {
+		const snap = pre.get(p);
+		if (!snap) continue;
+		const safeName = p.replace(/[/\\]/g, "__");
+		try {
+			if (snap.kind === "file") await fs.writeFile(path.join(dir, safeName), snap.content);
+			else if (snap.kind === "symlink") await fs.writeFile(path.join(dir, `${safeName}.symlink-target`), snap.target);
+			else if (snap.kind === "absent") await fs.writeFile(path.join(dir, `${safeName}.did-not-exist-pre-write`), "");
+			else await fs.writeFile(path.join(dir, `${safeName}.unreadable`), snap.reason);
+		} catch {
+			// Best-effort retention — a failed write here must never mask the divergence report itself.
+		}
+	}
+	return dir;
+}
+
+/** The C1 detect half: given the pre-write snapshot of every patch-touched path and the patch itself,
+ *  read the SAME paths from the real tree (now, post-write) and compare each against what the patch
+ *  alone should have produced. Returns undefined when everything matches (the common case, zero extra
+ *  disk writes). A patch touching nothing (pure mode changes, empty diff) skips the check entirely —
+ *  nothing to verify. */
+async function detectPostApplyDivergence(realDir: string, patch: string, touched: string[], pre: Map<string, PathSnapshot>, divergenceRoot: string): Promise<DivergenceReport | undefined> {
+	if (touched.length === 0) return undefined;
+	const expected = await expectedPostApply(patch, pre);
+	if ("failed" in expected) {
+		// Couldn't even compute what "correct" looks like — that is itself something to surface rather
+		// than silently trust the write, naming every touched path since none could be verified.
+		return { paths: touched, captureDir: await retainDivergenceCapture(divergenceRoot, pre, touched) };
+	}
+	const actual = await snapshotPaths(realDir, touched);
+	const bad = touched.filter((p) => !snapshotsEqual(expected.get(p), actual.get(p)));
+	if (bad.length === 0) return undefined;
+	return { paths: bad, captureDir: await retainDivergenceCapture(divergenceRoot, pre, bad) };
+}
+
 /**
  * The single git-write against the real directory: `git apply --check` first (whole-patch dry run),
  * then the apply. `git apply` is itself atomic (it verifies every hunk before writing anything and
@@ -266,13 +431,32 @@ export async function computeTurnPatch(worktree: string, startTree: string, endT
  * tree is fingerprinted ONE more time and compared. This closes race window 2 in the module doc —
  * without it, an operator edit between the turn-end fingerprint and the apply would be written into
  * even though the precondition no longer holds. A mismatch (or a failed capture) fails the apply
- * with nothing written; only the final `git apply` spawn itself remains exposed (window 3).
+ * with nothing written; only the final `git apply` spawn itself remains exposed (window 3) — and
+ * that window is now DETECTED, not silent (C1): immediately before the write, every patch-touched
+ * path's real-tree content is snapshotted; after a successful `git apply`, that snapshot is replayed
+ * against the patch in a scratch dir to compute what should be there, and the real tree is compared
+ * against it. A mismatch comes back as `ApplyResult.divergence` — `ok` stays `true` (the write did
+ * happen; there is nothing to retry) but callers must surface it loudly and never auto-restore.
  *
  * @substrate exported for tests only — tests/boundary-sync.test.ts asserts this apply primitive
  * directly (including the race-window recheck); its only in-repo callers are `syncTurnEnd` and
  * `applyHeldNow`, both in this same file.
  */
-export async function applyPatchToRealTree(realDir: string, patch: string, expectedFingerprint?: string): Promise<ApplyResult> {
+export async function applyPatchToRealTree(
+	realDir: string,
+	patch: string,
+	expectedFingerprint?: string,
+	opts?: {
+		/** Durable dir a detected divergence's pre-write capture is retained under. Defaults to a
+		 *  shared tmp location — production callers always pass `HeldSyncStore.root`-derived path so
+		 *  a rare divergence lands beside the held patches it's related to. */
+		divergenceDir?: string;
+		/** Test-only seam (C1 regression test): fires after the pre-write snapshot is captured but
+		 *  before the real `git apply` write, so a test can mutate a patch-touched path in that exact
+		 *  window to simulate the residual race deterministically. */
+		testHookAfterSnapshot?: () => Promise<void>;
+	},
+): Promise<ApplyResult> {
 	if (patch.trim().length === 0) return { ok: true };
 	let tmpDir: string;
 	try {
@@ -290,9 +474,15 @@ export async function applyPatchToRealTree(realDir: string, patch: string, expec
 			if (!recheck.ok) return fail(`pre-apply re-fingerprint failed: ${recheck.reason}`);
 			if (recheck.fingerprint !== expectedFingerprint) return fail("your checkout changed between the safety check and the apply");
 		}
+		// C1: snapshot the real-tree side of every patch-touched path immediately before the write —
+		// the recheck above proves stability at CAPTURE time, not through the `git apply` spawn itself.
+		const touched = patchTouchedPaths(patch);
+		const preSnapshot = await snapshotPaths(realDir, touched);
+		if (opts?.testHookAfterSnapshot) await opts.testHookAfterSnapshot();
 		const applied = await hardenedGit(["apply", "--whitespace=nowarn", patchFile], { cwd: realDir });
 		if (applied.code !== 0) return fail(gitErr("git apply", applied));
-		return { ok: true };
+		const divergence = await detectPostApplyDivergence(realDir, patch, touched, preSnapshot, opts?.divergenceDir ?? DEFAULT_DIVERGENCE_ROOT);
+		return divergence ? { ok: true, divergence } : { ok: true };
 	} finally {
 		await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
 	}
@@ -337,8 +527,11 @@ export async function beginTurn(realDir: string, worktree: string, priorEndTree?
 
 export type SyncOutcome =
 	| { kind: "noop"; endTree?: string }
-	| { kind: "applied"; endTree: string; patchBytes: number }
-	| { kind: "held"; endTree?: string; reason: string; held?: HeldSync }
+	| { kind: "applied"; endTree: string; patchBytes: number; divergence?: DivergenceReport }
+	/** `held` is undefined (never a HeldSync) exactly when the ledger-append half of the hold itself
+	 *  failed but the patch body was still written to `patchFile` (S6) — recoverable by hand or by the
+	 *  next boot sweep once the ledger heals, never "nothing is held". */
+	| { kind: "held"; endTree?: string; reason: string; held?: HeldSync; patchFile?: string }
 	/** The turn's changes exist but could not even be captured as a patch — nothing to hold, the
 	 *  operator is pointed at the existing worktree diff view instead. Still a hold, never an apply. */
 	| { kind: "uncapturable"; reason: string };
@@ -367,31 +560,55 @@ export async function syncTurnEnd(args: {
 	if (!patch.ok) return { kind: "uncapturable", reason: `turn patch: ${patch.reason}` };
 	if (patch.patch.trim().length === 0) return { kind: "noop", endTree: end.tree };
 
+	// S6: once we're here, the patch is KNOWN GOOD — computed, non-empty, ready to hold. `hold` is the
+	// one place this function ever gives up on auto-applying; it must never come back empty-handed.
+	// `HeldSyncStore.hold` writes the patch body BEFORE the ledger line, and distinguishes the two
+	// failure modes with typed errors so this can react correctly to each (see the store's own doc).
 	const hold = async (reason: string): Promise<SyncOutcome> => {
-		const held = await store.hold({ agentId, turn, realDir, reason, patch: patch.patch });
-		return { kind: "held", endTree: end.tree, reason, held };
+		try {
+			const held = await store.hold({ agentId, turn, realDir, reason, patch: patch.patch });
+			return { kind: "held", endTree: end.tree, reason, held };
+		} catch (err) {
+			if (err instanceof HeldLedgerAppendError) {
+				// The patch body IS durably on disk — only the ledger bookkeeping failed. Never say
+				// "nothing is held" about a patch that demonstrably exists; name the file.
+				return { kind: "held", endTree: end.tree, reason: `${reason} — and recording the hold failed: ${err.message}`, patchFile: err.patchFile };
+			}
+			// The patch body itself couldn't be written — genuinely nothing durable exists. Same
+			// fail-closed direction as before (real tree untouched), with the real cause folded in.
+			return { kind: "uncapturable", reason: `couldn't hold this turn's patch: ${errText(err)}` };
+		}
 	};
 
-	// 2. Ordering: anything already held means this patch may depend on unapplied hunks — hold it
-	//    behind the backlog rather than auto-applying out of order.
-	const backlog = await store.listHeld(agentId);
-	if (backlog.length > 0) return hold(`${backlog.length} earlier turn(s) are already held — applying in order needs your go-ahead`);
+	try {
+		// 2. Ordering: anything already held means this patch may depend on unapplied hunks — hold it
+		//    behind the backlog rather than auto-applying out of order.
+		const backlog = await store.listHeld(agentId);
+		if (backlog.length > 0) return await hold(`${backlog.length} earlier turn(s) are already held — applying in order needs your go-ahead`);
 
-	// 3. The precondition. A capture failure at either end is the SAME code path as a genuine
-	//    divergence: hold + attention, never an apply.
-	if (!start.realFingerprint) return hold(`couldn't fingerprint your checkout at turn start: ${start.realFailure ?? "unknown"}`);
-	const now = await captureRealTreeState(realDir);
-	if (!now.ok) return hold(`couldn't re-fingerprint your checkout at turn end: ${now.reason}`);
-	if (now.fingerprint !== start.realFingerprint) return hold("your checkout changed during this turn");
+		// 3. The precondition. A capture failure at either end is the SAME code path as a genuine
+		//    divergence: hold + attention, never an apply.
+		if (!start.realFingerprint) return await hold(`couldn't fingerprint your checkout at turn start: ${start.realFailure ?? "unknown"}`);
+		const now = await captureRealTreeState(realDir);
+		if (!now.ok) return await hold(`couldn't re-fingerprint your checkout at turn end: ${now.reason}`);
+		if (now.fingerprint !== start.realFingerprint) return await hold("your checkout changed during this turn");
 
-	// 4. Unchanged and provably so — apply, with one last-instant re-fingerprint inside the apply
-	//    (after `--check`, before the write) so an operator edit in the fingerprint→apply window
-	//    fails the apply into a hold instead of being written into (module doc, race window 2).
-	//    A conflicting patch (e.g. the real tree carried uncommitted WIP in the same files since
-	//    before the session) still aborts atomically.
-	const applied = await applyPatchToRealTree(realDir, patch.patch, now.fingerprint);
-	if (!applied.ok) return hold(`the turn's patch did not apply cleanly: ${applied.reason}`);
-	return { kind: "applied", endTree: end.tree, patchBytes: patch.patch.length };
+		// 4. Unchanged and provably so — apply, with one last-instant re-fingerprint inside the apply
+		//    (after `--check`, before the write) so an operator edit in the fingerprint→apply window
+		//    fails the apply into a hold instead of being written into (module doc, race window 2).
+		//    A conflicting patch (e.g. the real tree carried uncommitted WIP in the same files since
+		//    before the session) still aborts atomically. `divergenceDir` lands beside this session's
+		//    held patches so a rare post-apply divergence (C1) is retained somewhere discoverable.
+		const applied = await applyPatchToRealTree(realDir, patch.patch, now.fingerprint, { divergenceDir: path.join(store.root, "divergence") });
+		if (!applied.ok) return await hold(`the turn's patch did not apply cleanly: ${applied.reason}`);
+		return { kind: "applied", endTree: end.tree, patchBytes: patch.patch.length, divergence: applied.divergence };
+	} catch (err) {
+		// Anything above threw instead of returning its own fail-closed result (e.g. `listHeld` hitting
+		// an unreadable ledger) — the fail-closed DIRECTION still holds (nothing was written to the real
+		// tree), but the patch itself must not evaporate with the exception: hold it explicitly (S6)
+		// rather than letting a bookkeeping hiccup cost the turn's actual edits.
+		return await hold(`sync bookkeeping failed: ${errText(err)}`);
+	}
 }
 
 // ── Held-patch store (durable, state dir) ────────────────────────────────────────────────────────
@@ -410,7 +627,14 @@ export interface HeldSync {
 	createdAt: number;
 }
 
-type LedgerLine = ({ kind: "held" } & HeldSync) | { kind: "resolved"; id: string; outcome: "applied" | "discarded"; at: number };
+type LedgerLine =
+	| ({ kind: "held" } & HeldSync)
+	| { kind: "resolved"; id: string; outcome: "applied" | "discarded"; at: number }
+	/** C2 reattach re-key: a hold's `agentId` changes onto a successor session WITHOUT touching the
+	 *  original "held" line or its patch body/file — the id (and therefore recoverability) stays
+	 *  identical, only which live agent the store lists it under changes. Append-only, same as every
+	 *  other ledger event. */
+	| { kind: "rekeyed"; id: string; newAgentId: string; at: number };
 
 /** Structural narrow for a parsed ledger line — no parse-and-cast (json-parse-as-cast ratchet;
  *  NB the ratchet is a pure line-regex with no comment skip, so don't quote the idiom here
@@ -421,6 +645,7 @@ type LedgerLine = ({ kind: "held" } & HeldSync) | { kind: "resolved"; id: string
 function isLedgerLine(v: unknown): v is LedgerLine {
 	if (typeof v !== "object" || v === null || !("kind" in v) || !("id" in v) || typeof v.id !== "string") return false;
 	if (v.kind === "resolved") return true;
+	if (v.kind === "rekeyed") return "newAgentId" in v && typeof v.newAgentId === "string";
 	if (v.kind !== "held") return false;
 	return (
 		"agentId" in v &&
@@ -430,6 +655,28 @@ function isLedgerLine(v: unknown): v is LedgerLine {
 		"realDir" in v &&
 		typeof v.realDir === "string"
 	);
+}
+
+/** S6: the patch body itself couldn't even be written — genuinely nothing durable exists anywhere. */
+export class HeldPatchWriteError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "HeldPatchWriteError";
+	}
+}
+
+/** S6: the patch body WAS written successfully (see `patchFile`) but appending the ledger line that
+ *  would track it failed — recoverable (by hand, pointed at `patchFile`; or by the next boot sweep
+ *  once the ledger heals), never "uncapturable". */
+export class HeldLedgerAppendError extends Error {
+	constructor(
+		message: string,
+		public readonly patchFile: string,
+		public readonly id: string,
+	) {
+		super(message);
+		this.name = "HeldLedgerAppendError";
+	}
 }
 
 /**
@@ -474,16 +721,38 @@ export class HeldSyncStore {
 		await fs.appendFile(this.ledger, `${prefix}${json}\n`);
 	}
 
+	/** Patch body FIRST, ledger line second — a ledger entry must never point at a missing body, and
+	 *  the two failure modes are distinguished (S6) so a caller can tell "nothing durable exists"
+	 *  (`HeldPatchWriteError`) from "the patch IS on disk, only its ledger tracking failed"
+	 *  (`HeldLedgerAppendError`, which names the exact file). */
 	async hold(e: { agentId: string; turn: number; realDir: string; reason: string; patch: string }): Promise<HeldSync> {
 		if (e.patch.length > MAX_SYNC_PATCH_BYTES) throw new Error(`held patch too large (${e.patch.length} bytes)`);
 		await fs.mkdir(this.dir, { recursive: true });
 		const id = randomUUID();
 		const patchFile = path.join(this.dir, `${id}.patch`);
-		// Patch body FIRST, ledger line second — a ledger entry must never point at a missing body.
-		await fs.writeFile(patchFile, e.patch);
+		try {
+			await fs.writeFile(patchFile, e.patch);
+		} catch (err) {
+			throw new HeldPatchWriteError(`couldn't write the held patch body: ${errText(err)}`);
+		}
 		const held: HeldSync = { id, agentId: e.agentId, turn: e.turn, realDir: e.realDir, reason: e.reason, patchFile, patchBytes: e.patch.length, createdAt: Date.now() };
-		await this.appendLine(JSON.stringify({ kind: "held", ...held } satisfies LedgerLine));
+		try {
+			await this.appendLine(JSON.stringify({ kind: "held", ...held } satisfies LedgerLine));
+		} catch (err) {
+			throw new HeldLedgerAppendError(`the patch is saved at ${patchFile} but recording it in the ledger failed: ${errText(err)}`, patchFile, id);
+		}
 		return held;
+	}
+
+	/** C2: re-key a held patch onto a NEW agent id — the recovery half of a `here` session's restart
+	 *  reattach. ACP sessions are non-resumable, so a reattach always mints a fresh agent id, and a
+	 *  hold keyed by the dead predecessor's id would otherwise be permanently unreachable (no live
+	 *  agent ever lists it again). Append-only, mirroring `resolve`: a "rekeyed" marker, applied by
+	 *  `listAllHeld`'s replay, which never mutates the original "held" line or its patch file — the id
+	 *  (and therefore the patch body) stays identical, only which agent it's listed under changes. */
+	async rekey(id: string, newAgentId: string): Promise<void> {
+		await fs.mkdir(this.dir, { recursive: true });
+		await this.appendLine(JSON.stringify({ kind: "rekeyed", id, newAgentId, at: Date.now() } satisfies LedgerLine));
 	}
 
 	/** All unresolved holds, oldest-first in append order (= application order). Throws when the
@@ -510,7 +779,13 @@ export class HeldSyncStore {
 			}
 			if (!isLedgerLine(parsed)) continue; // foreign/mangled line — never fold it into the backlog
 			if (parsed.kind === "held") held.set(parsed.id, parsed);
-			else held.delete(parsed.id);
+			else if (parsed.kind === "resolved") held.delete(parsed.id);
+			else {
+				// "rekeyed" — only meaningful for a hold that's still open; a rekey line for an already
+				// resolved/unknown id is a no-op replay artifact, never fabricates a hold from nothing.
+				const cur = held.get(parsed.id);
+				if (cur) held.set(parsed.id, { ...cur, agentId: parsed.newAgentId });
+			}
 		}
 		return [...held.values()];
 	}
@@ -533,6 +808,10 @@ export interface ApplyHeldResult {
 	applied: number;
 	remaining: number;
 	reason?: string;
+	/** C1: any patch in this replay whose post-apply content didn't match what it alone should have
+	 *  produced — the write still happened (nothing to retry), but each entry needs its own loud,
+	 *  never-auto-restored surfacing. Absent/empty when nothing diverged (the common case). */
+	divergences?: { turn: number; paths: string[]; captureDir: string }[];
 }
 
 /**
@@ -555,13 +834,15 @@ export async function applyHeldNow(store: HeldSyncStore, agentId: string, realDi
 	if (held.length === 0) return { ok: true, applied: 0, remaining: 0 };
 	let applied = 0;
 	let pin = cap.fingerprint;
+	const divergences: { turn: number; paths: string[]; captureDir: string }[] = [];
 	for (const h of held) {
 		const patch = await fs.readFile(h.patchFile, "utf8").catch(() => undefined);
 		if (patch === undefined) {
 			return { ok: false, applied, remaining: held.length - applied, reason: `held patch body is missing (${path.basename(h.patchFile)}) — inspect ${store.root}` };
 		}
-		const res = await applyPatchToRealTree(realDir, patch, pin);
+		const res = await applyPatchToRealTree(realDir, patch, pin, { divergenceDir: path.join(store.root, "divergence") });
 		if (!res.ok) return { ok: false, applied, remaining: held.length - applied, reason: `turn ${h.turn} is still divergent: ${res.reason}` };
+		if (res.divergence) divergences.push({ turn: h.turn, paths: res.divergence.paths, captureDir: res.divergence.captureDir });
 		// The write happened. From here every outcome must COUNT it — reporting "0 applied" after a
 		// successful `git apply` would tell the operator nothing changed when their checkout did.
 		applied++;
@@ -573,17 +854,18 @@ export async function applyHeldNow(store: HeldSyncStore, agentId: string, realDi
 				applied,
 				remaining: held.length - applied,
 				reason: `turn ${h.turn} WAS applied but recording that failed (${errText(e)}) — a re-apply will report it still divergent (crash semantics); inspect ${store.root}`,
+				divergences: divergences.length > 0 ? divergences : undefined,
 			};
 		}
 		// Re-pin for the next patch: each apply legitimately changes the tree, so the next write is
 		// gated on the state THIS apply produced — a third-party edit between patches breaks the pin.
 		if (applied < held.length) {
 			const next = await captureRealTreeState(realDir);
-			if (!next.ok) return { ok: false, applied, remaining: held.length - applied, reason: `couldn't re-verify your checkout after turn ${h.turn}: ${next.reason}` };
+			if (!next.ok) return { ok: false, applied, remaining: held.length - applied, reason: `couldn't re-verify your checkout after turn ${h.turn}: ${next.reason}`, divergences: divergences.length > 0 ? divergences : undefined };
 			pin = next.fingerprint;
 		}
 	}
-	return { ok: true, applied, remaining: 0 };
+	return { ok: true, applied, remaining: 0, divergences: divergences.length > 0 ? divergences : undefined };
 }
 
 export interface DiscardHeldResult {
