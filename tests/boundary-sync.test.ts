@@ -345,6 +345,58 @@ describe("patchTouchedPaths (defense in depth: unquoting + the header split ambi
 		const patch = ["diff --git a/gone.txt b/gone.txt", "deleted file mode 100644", "index 111..000", "--- a/gone.txt", "+++ /dev/null", "@@ -1 +0,0 @@", "-bye", ""].join("\n");
 		expect(patchTouchedPaths(patch)).toEqual(["gone.txt"]);
 	});
+
+	// ── N1-a (live re-review finding): a hunk BODY content line that starts with `-- ` or `++ `
+	// (e.g. a SQL/Lua `--` comment being removed, or coincidental `++` text being added) must never
+	// be misread as a `---`/`+++` path header — those only ever appear before the first `@@ ` hunk.
+	test("a hunk-body content line beginning '-- ' does not spoof a touched path", () => {
+		const patch = [
+			"diff --git a/query.sql b/query.sql",
+			"index 111..222 100644",
+			"--- a/query.sql",
+			"+++ b/query.sql",
+			"@@ -1,2 +1,1 @@",
+			"-- not a real path",
+			"-SELECT 1;",
+			"+SELECT 2;",
+			"",
+		].join("\n");
+		expect(patchTouchedPaths(patch)).toEqual(["query.sql"]);
+	});
+
+	test("a hunk-body content line beginning '++ ' does not spoof a touched path", () => {
+		const patch = [
+			"diff --git a/notes.txt b/notes.txt",
+			"index 111..222 100644",
+			"--- a/notes.txt",
+			"+++ b/notes.txt",
+			"@@ -1 +1,2 @@",
+			"-old",
+			"+new",
+			"++ injected/fake/path.txt",
+			"",
+		].join("\n");
+		expect(patchTouchedPaths(patch)).toEqual(["notes.txt"]);
+	});
+
+	test("a real rename followed by a hunk body containing spoofing lines still resolves to only the real paths", () => {
+		const patch = [
+			"diff --git a/old.sql b/new.sql",
+			"similarity index 90%",
+			"rename from old.sql",
+			"rename to new.sql",
+			"index 111..222 100644",
+			"--- a/old.sql",
+			"+++ b/new.sql",
+			"@@ -1,2 +1,2 @@",
+			"-- a totally fake header line",
+			"++ another fake one",
+			"-SELECT 1;",
+			"+SELECT 2;",
+			"",
+		].join("\n");
+		expect(patchTouchedPaths(patch).sort()).toEqual(["new.sql", "old.sql"]);
+	});
 });
 
 describe("applyPatchToRealTree", () => {

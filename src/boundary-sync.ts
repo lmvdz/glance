@@ -402,6 +402,17 @@ function splitDiffGitHeader(rest: string): [string, string] | undefined {
  * patch — `GIT binary patch` carries no `---`/`+++` text — or a bare mode-change), via
  * `splitDiffGitHeader`'s old==new-exploiting split.
  *
+ * N1-a: the per-block inner scan stops at the block's first `@@ ` hunk header (or `GIT binary
+ * patch`, which plays the same role for a binary block) — those `---`/`+++`/`rename` lines ALWAYS
+ * precede the first hunk in git's own diff grammar, so nothing legitimate is ever missed by
+ * stopping there. Without this bound, a hunk BODY content line whose text (after the single-char
+ * +/-/space diff-marker prefix is accounted for) reads e.g. `-- some/text` or `++ some/text` — a
+ * plain SQL/Lua `--` comment, or coincidental `++` — collapses to a full line starting `--- `/`+++
+ * ` and gets misread as a real path header, injecting attacker-controlled or coincidental content
+ * into the touched-path set and scoping the C1 post-apply divergence check to a path the patch
+ * never actually touched (a false CRITICAL divergence the next time the operator legitimately
+ * edits that path).
+ *
  * @substrate exported for tests only — tests/boundary-sync.test.ts + boundary-sync-wiring.test.ts
  * pin the quoted/spaced/UTF-8 path recovery directly; the C1 divergence scope depends on it. */
 export function patchTouchedPaths(patch: string): string[] {
@@ -411,7 +422,11 @@ export function patchTouchedPaths(patch: string): string[] {
 		const line = lines[i]!;
 		if (!line.startsWith("diff --git ")) continue;
 		let sawLine = false;
-		for (let j = i + 1; j < lines.length && !lines[j]!.startsWith("diff --git "); j++) {
+		for (
+			let j = i + 1;
+			j < lines.length && !lines[j]!.startsWith("diff --git ") && !lines[j]!.startsWith("@@ ") && lines[j]! !== "GIT binary patch";
+			j++
+		) {
 			const l = lines[j]!;
 			let m: RegExpMatchArray | null;
 			if ((m = l.match(/^--- (.+?)(?:\t.*)?$/))) {
