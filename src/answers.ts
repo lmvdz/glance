@@ -37,8 +37,10 @@
 import * as path from "node:path";
 import { Schema } from "effect";
 import { getStorageBackend } from "./dal/storage.ts";
+import { evidenceFilePath } from "./decision-evidence.ts";
 import { normalizeRepoPath } from "./project-registry.ts";
 import { decodeJsonWith } from "./schema/external-json.ts";
+import type { RunReceipt } from "./types.ts";
 
 export interface Answer {
 	/** Stable id — also the filename. Same value as the answering agent's id, so a transcript can always
@@ -121,6 +123,56 @@ export async function saveAnswer(stateDir: string, answer: Answer): Promise<bool
 	} catch {
 		return false;
 	}
+}
+
+// Conservative repo-relative path token pattern: `dir/dir/file.ext`-shaped, at least one `/` and a
+// real extension, tolerating an optional `:line`/`:start-end` suffix (the same evidence-anchor
+// shape `decision-evidence.ts` already strips).
+const PATH_TOKEN_RE = /\b(?:[\w.-]+\/)+[\w.-]+\.[A-Za-z0-9]+(?::\d+(?:-\d+)?)?\b/g;
+
+/**
+ * Conservative repo-relative path token extraction (comprehension lane concern 10, `possiblyStale`
+ * below) — see `PATH_TOKEN_RE` above for the exact shape matched. Prose like "the config is
+ * confusing" never counts as a reference on its own; extraction alone proves nothing either —
+ * `possiblyStale` further intersects every token here against the receipts' own file universe
+ * before trusting any of them.
+ * @substrate exported for tests only — `possiblyStale` (below, same file) is the one production
+ * caller; the extraction/suffix-stripping shape is asserted directly.
+ */
+export function extractPathTokens(markdown: string): Set<string> {
+	const out = new Set<string>();
+	for (const m of markdown.matchAll(PATH_TOKEN_RE)) {
+		const file = evidenceFilePath(m[0]).replace(/^\.\//, "").replace(/^\/+/, "");
+		if (file) out.add(file);
+	}
+	return out;
+}
+
+/**
+ * Whether `answer` may be stale: its own untrusted markdown cites a repo-relative file (extracted
+ * conservatively via `extractPathTokens`) that a receipt in the SAME repo has since touched, ended
+ * strictly AFTER the answer was given. `receipts` need not be pre-scoped by the caller — filtered
+ * internally by `normalizeRepoPath(repo)` equality, so a receipt from a different repo (even one
+ * that happens to touch a same-named file) never counts, the same repo-identity discipline every
+ * other repo-scoped read in this codebase applies (the fabric leak incident's bug class).
+ *
+ * Honest default (DESIGN.md ask→fabric row): an answer that extracts NO path-like token, or whose
+ * extracted tokens never appear in this repo's own receipts' `filesTouched` (a plausible-looking
+ * string is not proof a file exists), is NEVER marked stale. A confident false negative — prose-only
+ * advice with no cited file — beats a manufactured false positive built on a fabricated-looking path.
+ */
+export function possiblyStale(answer: Answer, receipts: RunReceipt[]): boolean {
+	if (!answer.answeredAt) return false; // no answer yet — nothing to compare against
+	const tokens = extractPathTokens(answer.markdown);
+	if (tokens.size === 0) return false;
+
+	const repoReceipts = receipts.filter((r) => normalizeRepoPath(r.repo) === normalizeRepoPath(answer.repo));
+	const fileUniverse = new Set(repoReceipts.flatMap((r) => r.filesTouched));
+	const referenced = new Set([...tokens].filter((t) => fileUniverse.has(t)));
+	if (referenced.size === 0) return false; // no extracted token is a file we've ever actually seen touched
+
+	const answeredAt = answer.answeredAt;
+	return repoReceipts.some((r) => (r.endedAt ?? r.startedAt) > answeredAt && r.filesTouched.some((f) => referenced.has(f)));
 }
 
 /**

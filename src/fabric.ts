@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import { scopeFor } from "./agent-scope.ts";
+import { type Answer, possiblyStale } from "./answers.ts";
 import { getStorageBackend } from "./dal/storage.ts";
 import { readDigest } from "./digest.ts";
 import { readFailureAnnotations } from "./failure-memory.ts";
@@ -113,6 +114,36 @@ export interface FabricEpisodeFact {
 	windowEnd: number;
 }
 
+/** Cap applied by `answerExcerpt` (below) to `FabricAnswerFact.answerExcerpt`. */
+const MAX_ANSWER_EXCERPT = 500;
+
+/** Truncate an answer's untrusted markdown to a short excerpt — mirrors `FabricEpisodeFact`'s
+ *  "excerpt is the ONLY content" rule (DESIGN.md concern 3): the full markdown is never quoted
+ *  whole into a search snippet or a cold-start primer. */
+function answerExcerpt(markdown: string): string {
+	const body = markdown.trim();
+	return body.length > MAX_ANSWER_EXCERPT ? `${body.slice(0, MAX_ANSWER_EXCERPT - 1)}…` : body;
+}
+
+/**
+ * A recorded `glance ask` answer (comprehension lane concern 10), projected into the fabric so a
+ * prior question is searchable via ⌘K/fabric and folded into the cold-start primer for free — the
+ * operator's own questions become part of the knowledge base instead of evaporating with the
+ * answering unit's worktree. `answerExcerpt` is capped (see `answerExcerpt` above): the full
+ * markdown is untrusted agent output and is never quoted whole. `possiblyStale` (`answers.ts`)
+ * flags an answer whose cited files have since changed — see that function's doc for the
+ * conservative extraction/intersection it applies.
+ */
+export interface FabricAnswerFact {
+	type: "answer";
+	source: FactSource;
+	id: string;
+	question: string;
+	answerExcerpt: string;
+	answeredAt: number;
+	possiblyStale: boolean;
+}
+
 export interface FabricSnapshot {
 	actor: string;
 	generatedAt: number;
@@ -126,6 +157,7 @@ export interface FabricSnapshot {
 	failures: FabricFailureFact[];
 	symptoms: FabricSymptomFact[];
 	episodes: FabricEpisodeFact[];
+	answers: FabricAnswerFact[];
 }
 
 interface ScoutSeenEntry {
@@ -149,6 +181,11 @@ export interface FabricDeps {
 	listIssues?: (repo: string) => Promise<IssueRef[] | null>;
 	/** Persisted features — their decisions become durable KB facts. */
 	features?: PersistedFeature[];
+	/** Every recorded `glance ask` answer this actor may read (comprehension concern 10) — the
+	 *  actor's FULL answer set, unfiltered by repo, exactly like `features` above; the `repoSet`
+	 *  guard in `buildFabricSnapshot` (verbatim from the decisions block) is the only scoping
+	 *  applied here, so an unrestricted caller and a single-repo caller both narrow correctly. */
+	answers?: Answer[];
 	now?: () => number;
 }
 
@@ -439,6 +476,29 @@ export async function buildFabricSnapshot(deps: FabricDeps): Promise<FabricSnaps
 		}
 	}
 
+	// Ask→fabric answers (comprehension concern 10): same single-guard shape as the decisions block
+	// above, verbatim — `deps.answers` is the actor's FULL answer set, unfiltered by repo (mirroring
+	// `deps.features`), filtered here by the SAME computed `repoSet` every other fact type uses.
+	// Unanswered questions (`answeredAt` absent — the unit hasn't finished) have nothing to project:
+	// "not answered yet" is not a fact for the fabric. `possiblyStale` is computed against the SAME
+	// actor-scoped `allReceipts` digests/hot-areas already read above — it internally re-filters to
+	// the answer's own repo, so passing the wider actor-scoped list here (rather than the
+	// `deps.repos`-filtered `receipts`) can never under-count a repo `repoSet` still admits.
+	const answers: FabricAnswerFact[] = [];
+	for (const a of deps.answers ?? []) {
+		if (!a.answeredAt) continue;
+		if (!repoSet.has(normalizeRepoPath(a.repo))) continue;
+		answers.push({
+			type: "answer",
+			source: { repo: a.repo, agentId: a.id },
+			id: a.id,
+			question: a.question,
+			answerExcerpt: answerExcerpt(a.markdown),
+			answeredAt: a.answeredAt,
+			possiblyStale: possiblyStale(a, allReceipts),
+		});
+	}
+
 	return {
 		actor: deps.actor.id,
 		generatedAt,
@@ -452,5 +512,6 @@ export async function buildFabricSnapshot(deps: FabricDeps): Promise<FabricSnaps
 		failures,
 		symptoms,
 		episodes,
+		answers,
 	};
 }

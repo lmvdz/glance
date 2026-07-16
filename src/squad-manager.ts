@@ -39,7 +39,7 @@ import { type Classify, detectVerify, detectVerifyStages, ompClassify, routeInta
 import type { WorkflowDefinition } from "./workflow-catalog.ts";
 import { Dispatcher } from "./dispatch.ts";
 import { openDispatchLedger } from "./dispatch-ledger.ts";
-import { type Answer, answerBrief, listAnswers, readAnswer, saveAnswer } from "./answers.ts";
+import { type Answer, answerBrief, listAnswers, possiblyStale, readAnswer, saveAnswer } from "./answers.ts";
 // Aliased: `types.ts` already exports an UNRELATED `AttentionEvent` (an agent's own notify signal,
 // used pervasively below via `AgentDTO.attentionEvents`) — importing this module's same-named type
 // bare would collide. `OperatorAttentionEvent` disambiguates at every use site in this file.
@@ -64,6 +64,7 @@ import {
 	type EpisodeGatherResult,
 	type EpisodeMeta,
 	type OmittedEntry as EpisodeOmittedEntry,
+	type StaleAnswerEntry,
 } from "./weekly-episode.ts";
 import { computeFog, topDebt, type FileFogEntry } from "./comprehension-fog.ts";
 import { PushService } from "./push.ts";
@@ -3482,6 +3483,9 @@ export class SquadManager extends EventEmitter {
 	 *    counted only, never quoted (weekly-episode.ts's Not-covered section).
 	 *  - `testExecutions`: honestly empty — same "no persisted command+outcome" gap `prBodyFor` already
 	 *    documents; never fabricated here either.
+	 *  - `staleAnswers` (comprehension concern 10): every recorded answer for this repo that
+	 *    `possiblyStale` (answers.ts) flags against the SAME receipts `fogTop` just computed from — a
+	 *    live snapshot like `fogTop`, not filtered to answers given inside the window.
 	 * Best-effort throughout: a symptom/fabric read failure degrades to that input's empty value
 	 * rather than failing the whole generation (mirrors `prBodyFor`).
 	 */
@@ -3503,12 +3507,27 @@ export class SquadManager extends EventEmitter {
 			symptoms = [];
 		}
 		let fogTop: FileFogEntry[] = [];
+		let staleAnswers: StaleAnswerEntry[] = [];
 		try {
 			const receipts = await this.allReceipts();
 			const seen = this.attentionSeen([repo]);
 			fogTop = topDebt(computeFog({ receipts, seen, repos: [repo], now: window.end }), 10);
+			// Comprehension concern 10: resurface this repo's currently-stale answers — a prior
+			// question whose cited files have since changed enough that the answer may no longer
+			// hold. Staleness is a live snapshot (like `fogTop` above), not a "became stale this week"
+			// event (unlike `deltas`/`symptoms`), so every answer for this repo is re-checked against
+			// the SAME receipts fogTop just used, not filtered to ones answered inside `window`. A
+			// failure here degrades ONLY this input (own try/catch) — it must never blank an already-
+			// computed `fogTop`, matching this function's "each input degrades independently" contract.
+			try {
+				const repoAnswers = await listAnswers(this.stateDir, { repo });
+				staleAnswers = repoAnswers.filter((a) => possiblyStale(a, receipts)).map((a) => ({ id: a.id, question: a.question }));
+			} catch {
+				staleAnswers = [];
+			}
 		} catch {
 			fogTop = [];
+			staleAnswers = [];
 		}
 		let digestIds: string[] = [];
 		try {
@@ -3524,7 +3543,7 @@ export class SquadManager extends EventEmitter {
 				reason: "plan/human/agent-sourced decisions aren't mental-model deltas",
 			});
 		}
-		return { deltas, symptoms, fogTop, testExecutions: [], digestIds, omitted };
+		return { deltas, symptoms, fogTop, testExecutions: [], digestIds, omitted, staleAnswers };
 	}
 
 	/**
@@ -7614,6 +7633,11 @@ export class SquadManager extends EventEmitter {
 			includeLeases: opts.includeLeases,
 			listIssues: (repo) => listPlaneIssues(repo),
 			features: [...this.featureStore.values()],
+			// Comprehension concern 10: the FULL answer set, unfiltered by repo — mirroring `features`
+			// above — so both a single-repo caller and an unrestricted one narrow correctly through
+			// `buildFabricSnapshot`'s own `repoSet` guard rather than a pre-filter here that can't see
+			// that function's fallback-computed repo list.
+			answers: await listAnswers(this.stateDir),
 		});
 	}
 

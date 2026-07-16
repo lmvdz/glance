@@ -17,7 +17,7 @@ import { fenceUntrusted, parseDigestReward, rewardWeight } from "./digest.ts";
 import type { FabricSnapshot } from "./fabric.ts";
 import { isOn, learningFlags } from "./metrics.ts";
 
-export type KbDocType = "agent" | "digest" | "hot-area" | "scout" | "lease" | "decision" | "failure" | "symptom" | "episode";
+export type KbDocType = "agent" | "digest" | "hot-area" | "scout" | "lease" | "decision" | "failure" | "symptom" | "episode" | "answer";
 
 /** A flattened, searchable unit of knowledge. */
 export interface KbDoc {
@@ -133,6 +133,14 @@ export function fabricDocuments(snapshot: FabricSnapshot): KbDoc[] {
 		docs.push({ type: "episode", id: `episode:${e.id}`, title: `Weekly episode · ${e.id}`, text: e.excerpt, repo: e.source.repo, ref: e.id, source: "weekly episode", ts: e.windowEnd });
 	}
 
+	// Recorded ask→fabric answers (comprehension concern 10): searchable via ⌘K/fabric and folded
+	// into the cold-start primer, alongside every other fact type — `text` is the capped excerpt
+	// ONLY (`FabricAnswerFact.answerExcerpt`), never the full untrusted markdown. `?? []`: same
+	// forward/backward-compat reasoning as `snapshot.symptoms`/`snapshot.episodes` above.
+	for (const a of snapshot.answers ?? []) {
+		docs.push({ type: "answer", id: `answer:${a.id}`, title: a.question, text: a.answerExcerpt, repo: a.source.repo, ref: a.id, source: "answer", ts: a.answeredAt });
+	}
+
 	return docs;
 }
 
@@ -239,6 +247,7 @@ const PRIMER_LABEL: Record<KbDocType, string> = {
 	failure: "Recurring failure",
 	symptom: "Known symptom",
 	episode: "Weekly episode",
+	answer: "Answered question",
 };
 
 /** Coarse "how long ago" label for a provenance timestamp. Undefined input ⇒ undefined output
