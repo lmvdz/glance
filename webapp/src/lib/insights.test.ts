@@ -491,7 +491,7 @@ describe('attentionItems', () => {
     expect(items[0].since).toBe(createdAt);
   });
 
-  test('a boundary-sync attention event carries the one-click Apply (not View) and its own summary as the title', () => {
+  test('a HELD boundary-sync attention event carries one-click Apply + Discard (not View) and its own summary as the title', () => {
     const createdAt = Date.now();
     const a = agent('a', 'idle', {
       lastActivity: Date.now(),
@@ -501,6 +501,7 @@ describe('attentionItems', () => {
           summary: 'sync held: your checkout changed during this turn',
           detail: "1 turn's changes are held for /home/op/repo — nothing touched your checkout.",
           source: 'boundary-sync',
+          sync: 'held',
           createdAt,
         },
       ],
@@ -509,12 +510,49 @@ describe('attentionItems', () => {
     expect(items).toHaveLength(1);
     expect(items[0].kind).toBe('attention');
     expect(items[0].severity).toBe('warn');
-    // The single action that resolves the row: server-side re-checked apply, never a bare View.
+    // The two actions that resolve the row: server-side re-checked apply, or drop the backlog.
     expect(items[0].action).toEqual({ label: 'Apply', kind: 'apply-sync' });
+    expect(items[0].secondaryAction).toEqual({ label: 'Discard', kind: 'discard-sync' });
     // The event's own copy IS the row copy — "a needs a look — sync held: …" would bury the verb.
     expect(items[0].title).toBe('sync held: your checkout changed during this turn');
     expect(items[0].detail).toContain('nothing touched your checkout');
     expect(items[0].since).toBe(createdAt);
+  });
+
+  test('a legacy boundary-sync event without the sync tag still gets Apply (server re-checks; never a silent downgrade)', () => {
+    const a = agent('a', 'idle', {
+      lastActivity: Date.now(),
+      attentionEvents: [
+        { id: 'e1', summary: 'sync held: your checkout changed during this turn', source: 'boundary-sync', createdAt: Date.now() },
+      ],
+    });
+    const items = attentionItems({ agents: [a] });
+    expect(items[0].action).toEqual({ label: 'Apply', kind: 'apply-sync' });
+    expect(items[0].secondaryAction).toEqual({ label: 'Discard', kind: 'discard-sync' });
+  });
+
+  test('an UNCAPTURABLE boundary-sync event gets View, never Apply/Discard — nothing is held to apply', () => {
+    const createdAt = Date.now();
+    const a = agent('a', 'idle', {
+      lastActivity: Date.now(),
+      attentionEvents: [
+        {
+          id: 'e1',
+          summary: "sync couldn't run: this turn's changes couldn't be captured",
+          detail: 'turn-end worktree snapshot failed — nothing is held and your checkout is untouched.',
+          source: 'boundary-sync',
+          sync: 'uncapturable',
+          createdAt,
+        },
+      ],
+    });
+    const items = attentionItems({ agents: [a] });
+    expect(items).toHaveLength(1);
+    // Apply on a row that holds nothing would return applied:0 and read as "already current" —
+    // false reassurance (the turn's edits are worktree-only). View is the honest affordance.
+    expect(items[0].action).toEqual({ label: 'View', kind: 'view' });
+    expect(items[0].secondaryAction).toBeUndefined();
+    expect(items[0].title).toBe("sync couldn't run: this turn's changes couldn't be captured");
   });
 
   test('a blocked agent with a report only emits the blocked item (priority order, not a double row)', () => {

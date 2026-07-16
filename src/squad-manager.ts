@@ -11,7 +11,7 @@ import { EventEmitter } from "node:events";
 import { envBool, envInt, envNumber } from "./config.ts";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import * as os from "node:os";
 import { resolveStateDir } from "./state-dir.ts";
 import * as path from "node:path";
@@ -88,7 +88,7 @@ import { buildContextPrimer, searchFabric, type KbDocType } from "./fabric-searc
 import { sweepPresence, who } from "./presence.ts";
 import { harnessEventDecision } from "./harness-hooks.ts";
 import { adoptBranchName, adoptBrief, isSafeUntrackedPath, parseNulList } from "./adopt.ts";
-import { applyHeldNow, beginTurn, type BoundaryTurnStart, HeldSyncStore, syncTurnEnd } from "./boundary-sync.ts";
+import { applyHeldNow, beginTurn, type BoundaryTurnStart, discardHeldNow, HeldSyncStore, syncTurnEnd } from "./boundary-sync.ts";
 import { chooseFallback } from "./supervisor.ts";
 import { availableActions, effectiveAutonomyMode, modeFromApproval, validateRequestedMode, type AutonomyMode, type VerificationState } from "./autonomy.ts";
 import type {
@@ -703,11 +703,10 @@ interface AgentRecord {
 	 *  record with failure reasons, which turn end fail-closes into a hold. */
 	boundarySyncStart?: BoundaryTurnStart;
 	/** End tree of the last completed turn — reused as the NEXT turn's start baseline so the
-	 *  turn-start capture can never race the agent's first edit (see boundary-sync.ts beginTurn). */
+	 *  turn-start capture can never race the agent's first edit (see boundary-sync.ts beginTurn).
+	 *  (Serialization of capture→sync→apply lives on the MANAGER, keyed by the real directory —
+	 *  `boundarySyncChains` — not per record: two `here` sessions can share one checkout.) */
 	boundarySyncEndTree?: string;
-	/** Per-agent serialization of turn-start capture → turn-end sync → explicit apply, so an apply
-	 *  can never interleave with a capture and fingerprints are never read mid-apply. */
-	boundarySyncChain?: Promise<void>;
 }
 
 export interface SquadManagerOptions {
@@ -860,6 +859,14 @@ export class SquadManager extends EventEmitter {
 	 *  turn patch could not be safely auto-applied to the operator's real checkout. Assigned in the
 	 *  constructor (needs stateDir). */
 	private readonly boundarySyncHeld: HeldSyncStore;
+	/** Boundary-sync serialization chains, keyed by realpath(realDir) — daemon-global, NOT per agent
+	 *  record: `realTreePath` is shared state (nothing stops two `here` sessions on one repo), and
+	 *  per-record chains let both pass their fingerprint checks and run `git apply` into the same
+	 *  checkout concurrently — same-file writes interleaving at machine speed, past git's context
+	 *  check (both check, then both write). Keying by the real directory makes every capture and
+	 *  apply targeting one checkout strictly sequential across sessions. Entries are removed when
+	 *  their chain drains (see queueBoundarySync), so the map never grows past live checkouts. */
+	private readonly boundarySyncChains = new Map<string, Promise<void>>();
 	/** Agentic-learning-loop baseline (concern 01) — the five metrics (first-try-green, fixups-to-green,
 	 *  escalation, land-failure-streak, primer-empty) the rest of the learning loop is A/B'd against.
 	 *  Assigned in the constructor (needs stateDir). Never gates behavior — read-only observability. */
@@ -4538,14 +4545,29 @@ export class SquadManager extends EventEmitter {
 	// per-agent serialization, and the attention surface. Fail-closed throughout: every branch
 	// that is not "fingerprints provably match" ends in hold + attention, never an apply.
 
-	/** Serialize this agent's boundary-sync work (turn-start capture → turn-end sync → explicit
-	 *  apply) so an apply can never interleave with a capture. The returned promise carries `fn`'s
-	 *  own failure to callers that await it; the stored chain swallows it (logged) so one failure
-	 *  never wedges the lane. */
-	private queueBoundarySync(rec: AgentRecord, fn: () => Promise<void>): Promise<void> {
-		const run = (rec.boundarySyncChain ?? Promise.resolve()).then(fn);
-		rec.boundarySyncChain = run.catch((err) => {
+	/** Serialize boundary-sync work (turn-start capture → turn-end sync → explicit apply/discard)
+	 *  PER REAL DIRECTORY, so an apply can never interleave with a capture — including across two
+	 *  `here` sessions that target the same checkout (see `boundarySyncChains`). The key is the
+	 *  realpath of the real directory (symlinked and literal paths to one checkout must share a
+	 *  chain); a vanished directory falls back to the resolved literal path — captures against it
+	 *  fail closed anyway. The returned promise carries `fn`'s own failure to callers that await it;
+	 *  the stored chain swallows it (logged) so one failure never wedges the lane. */
+	private queueBoundarySync(rec: AgentRecord, realDir: string, fn: () => Promise<void>): Promise<void> {
+		let key: string;
+		try {
+			key = realpathSync(realDir);
+		} catch {
+			key = path.resolve(realDir);
+		}
+		const run = (this.boundarySyncChains.get(key) ?? Promise.resolve()).then(fn);
+		const stored = run.catch((err) => {
 			this.log("warn", `boundary-sync (${rec.dto.name}): ${errText(err)}`);
+		});
+		this.boundarySyncChains.set(key, stored);
+		void stored.finally(() => {
+			// Drop the drained chain iff nothing queued behind it — keeps the map bounded by live
+			// checkouts without ever detaching a chain something else is already linked onto.
+			if (this.boundarySyncChains.get(key) === stored) this.boundarySyncChains.delete(key);
 		});
 		return run;
 	}
@@ -4570,7 +4592,7 @@ export class SquadManager extends EventEmitter {
 		const realDir = this.boundarySyncTarget(rec);
 		if (!realDir) return;
 		rec.boundarySyncTurn = (rec.boundarySyncTurn ?? 0) + 1;
-		void this.queueBoundarySync(rec, async () => {
+		void this.queueBoundarySync(rec, realDir, async () => {
 			rec.boundarySyncStart = await beginTurn(realDir, rec.options.worktree, rec.boundarySyncEndTree);
 		});
 	}
@@ -4580,7 +4602,7 @@ export class SquadManager extends EventEmitter {
 	private boundaryTurnEnd(rec: AgentRecord): void {
 		const realDir = this.boundarySyncTarget(rec);
 		if (!realDir) return;
-		void this.queueBoundarySync(rec, async () => {
+		void this.queueBoundarySync(rec, realDir, async () => {
 			const start = rec.boundarySyncStart;
 			// No live turn start in this process ⇔ a replayed/stale agent_end (reattach replay) — skip
 			// rather than fabricate a baseline. A daemon that died mid-turn simply never auto-applies
@@ -4606,20 +4628,24 @@ export class SquadManager extends EventEmitter {
 					const n = backlog.length;
 					this.raiseBoundarySyncAttention(
 						rec,
+						"held",
 						`sync held: ${outcome.reason}`,
 						`${n} turn${n === 1 ? "'s changes are" : "s' changes are"} held for ${realDir} — nothing touched your checkout. ` +
-							`Apply replays them in order after a fresh safety re-check. Held patches: ${this.boundarySyncHeld.root}`,
+							`Apply replays them in order after a fresh safety re-check; Discard drops them (the session worktree keeps every edit). ` +
+							`Held patches: ${this.boundarySyncHeld.root}`,
 					);
 					return;
 				}
 				case "uncapturable":
-					// The turn's delta itself couldn't be captured — nothing to hold OR apply. Same
-					// fail-closed direction (real tree untouched), surfaced so the operator knows edits
-					// exist only in the worktree (visible via the normal diff view).
+					// The turn's delta itself couldn't be captured — nothing to hold OR apply, so this
+					// row must never claim a patch is waiting (no "held", no Apply). Same fail-closed
+					// direction (real tree untouched), surfaced so the operator knows edits exist only
+					// in the worktree (visible via the normal diff view).
 					this.raiseBoundarySyncAttention(
 						rec,
-						"sync held: this turn's changes couldn't be captured",
-						`${outcome.reason} — your checkout is untouched; the session's edits live in its worktree (${rec.options.worktree}) and show in the diff view.`,
+						"uncapturable",
+						"sync couldn't run: this turn's changes couldn't be captured",
+						`${outcome.reason} — nothing is held and your checkout is untouched; this turn's edits live only in the session's worktree (${rec.options.worktree}) and show in the diff view.`,
 					);
 					return;
 			}
@@ -4627,17 +4653,22 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/** One boundary-sync attention row per agent, always the freshest state (a stack of stale
-	 *  "sync held" rows for the same session is noise, not signal). Non-blocking by design —
-	 *  AttentionEvent never flips agent status; the turn itself succeeded. */
-	private raiseBoundarySyncAttention(rec: AgentRecord, summary: string, detail: string): void {
+	 *  "sync held" rows for the same session is noise, not signal). `sync` distinguishes rows the
+	 *  webapp can resolve with Apply/Discard ("held" — durable patches are waiting) from rows that
+	 *  hold NOTHING ("uncapturable" — Apply there would be a lie; the webapp offers View). Non-
+	 *  blocking by design — AttentionEvent never flips agent status; the turn itself succeeded. */
+	private raiseBoundarySyncAttention(rec: AgentRecord, sync: "held" | "uncapturable", summary: string, detail: string): void {
 		const kept = (rec.dto.attentionEvents ?? []).filter((e) => e.source !== "boundary-sync");
-		rec.dto.attentionEvents = [...kept, { id: randomUUID(), summary, detail, source: "boundary-sync", createdAt: Date.now() }];
+		rec.dto.attentionEvents = [...kept, { id: randomUUID(), summary, detail, source: "boundary-sync", sync, createdAt: Date.now() }];
 		this.emitAgent(rec);
 	}
 
-	private clearBoundarySyncAttention(rec: AgentRecord): void {
+	/** `heldOnly` (the apply/discard resolution paths): only remove rows that were ABOUT held
+	 *  patches — resolving the backlog says nothing about an "uncapturable" warning, whose turn's
+	 *  edits are still worktree-only; clearing it would silently dismiss a true statement. */
+	private clearBoundarySyncAttention(rec: AgentRecord, opts?: { heldOnly?: boolean }): void {
 		const events = rec.dto.attentionEvents ?? [];
-		const kept = events.filter((e) => e.source !== "boundary-sync");
+		const kept = events.filter((e) => e.source !== "boundary-sync" || (opts?.heldOnly === true && e.sync === "uncapturable"));
 		if (kept.length === events.length) return;
 		rec.dto.attentionEvents = kept;
 		this.emitAgent(rec);
@@ -4658,18 +4689,57 @@ export class SquadManager extends EventEmitter {
 		if (!realDir) return { ok: false, applied: 0, remaining: 0, reason: "this unit has no boundary sync (not a here-class session)" };
 		let result: { ok: boolean; applied: number; remaining: number; reason?: string } = { ok: false, applied: 0, remaining: 0, reason: "apply did not run" };
 		try {
-			await this.queueBoundarySync(rec, async () => {
+			await this.queueBoundarySync(rec, realDir, async () => {
 				result = await applyHeldNow(this.boundarySyncHeld, id, realDir);
 			});
 		} catch (err) {
 			result = { ok: false, applied: result.applied, remaining: result.remaining, reason: errText(err) };
 		}
 		if (result.ok && result.remaining === 0) {
-			this.clearBoundarySyncAttention(rec);
+			// heldOnly: resolving the backlog must not dismiss an "uncapturable" row — that warning
+			// is about a turn whose edits are STILL worktree-only, and it holds nothing to apply.
+			this.clearBoundarySyncAttention(rec, { heldOnly: true });
 		} else if (result.reason) {
-			this.raiseBoundarySyncAttention(rec, `sync still held: ${result.reason}`, `${result.applied} applied, ${result.remaining} still held for ${realDir}. Held patches: ${this.boundarySyncHeld.root}`);
+			this.raiseBoundarySyncAttention(rec, "held", `sync still held: ${result.reason}`, `${result.applied} applied, ${result.remaining} still held for ${realDir}. Held patches: ${this.boundarySyncHeld.root}`);
 		}
 		void this.recordAudit(actor, "boundary-sync.apply", id, result.ok ? "ok" : "error", `${result.applied} applied, ${result.remaining} remaining${result.reason ? ` — ${result.reason}` : ""}`);
+		return result;
+	}
+
+	/**
+	 * Explicit discard affordance (POST /api/agents/:id/discard-held-sync) — the recovery path for a
+	 * backlog that can never apply cleanly (operator fixed the divergence by hand; crash between an
+	 * apply and its resolve marker makes replay fail `--check` forever). Without it a wedged oldest
+	 * patch auto-holds every later turn: auto-sync bricked for the session. Drops the pending write
+	 * only — the real tree is untouched and the session worktree keeps every edit. `patchId` narrows
+	 * the drop to one held patch; omitted, the agent's whole backlog is discarded.
+	 */
+	async discardHeldSync(id: string, patchId?: string, actor: Actor = LOCAL_ACTOR): Promise<{ ok: boolean; discarded: number; remaining: number; reason?: string }> {
+		const rec = this.agents.get(id);
+		if (!rec) return { ok: false, discarded: 0, remaining: 0, reason: "no such agent" };
+		const realDir = this.boundarySyncTarget(rec);
+		if (!realDir) return { ok: false, discarded: 0, remaining: 0, reason: "this unit has no boundary sync (not a here-class session)" };
+		let result: { ok: boolean; discarded: number; remaining: number; reason?: string } = { ok: false, discarded: 0, remaining: 0, reason: "discard did not run" };
+		try {
+			// Same per-checkout chain as capture/apply: a discard must never interleave with a
+			// half-finished replay of the very patches it is dropping.
+			await this.queueBoundarySync(rec, realDir, async () => {
+				result = await discardHeldNow(this.boundarySyncHeld, id, patchId);
+			});
+		} catch (err) {
+			result = { ok: false, discarded: result.discarded, remaining: result.remaining, reason: errText(err) };
+		}
+		if (result.ok && result.remaining === 0) {
+			this.clearBoundarySyncAttention(rec, { heldOnly: true });
+		} else if (result.remaining > 0) {
+			this.raiseBoundarySyncAttention(
+				rec,
+				"held",
+				`sync held: ${result.remaining} turn${result.remaining === 1 ? "" : "s"} still held`,
+				`${result.discarded} discarded, ${result.remaining} still held for ${realDir}. Apply replays them in order after a fresh safety re-check; Discard drops them. Held patches: ${this.boundarySyncHeld.root}`,
+			);
+		}
+		void this.recordAudit(actor, "boundary-sync.discard", id, result.ok ? "ok" : "error", `${result.discarded} discarded, ${result.remaining} remaining${result.reason ? ` — ${result.reason}` : ""}`);
 		return result;
 	}
 
@@ -4686,8 +4756,9 @@ export class SquadManager extends EventEmitter {
 			if (rec && rec.options.realTreePath) {
 				this.raiseBoundarySyncAttention(
 					rec,
+					"held",
 					`sync held: ${count} turn${count === 1 ? "" : "s"} from before the daemon restart`,
-					`Held for ${rec.options.realTreePath} — nothing touched your checkout. Apply replays them in order after a fresh safety re-check.`,
+					`Held for ${rec.options.realTreePath} — nothing touched your checkout. Apply replays them in order after a fresh safety re-check; Discard drops them (the session worktree keeps every edit).`,
 				);
 			} else {
 				this.log("warn", `boundary-sync: ${count} held patch(es) for agent ${agentId}, which no longer exists — bodies kept in ${this.boundarySyncHeld.root}`);

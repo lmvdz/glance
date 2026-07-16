@@ -167,7 +167,7 @@ const RosterAgentRow: React.FC<{
   diffCounts: { added: number; removed: number };
   mostUrgent?: boolean;
   onSelect: () => void;
-  onRowAction: (row: FleetAgentRow) => void;
+  onRowAction: (row: FleetAgentRow, action?: AttentionItem['action']) => void;
   onInlineAnswer: (agentId: string, requestId: string, value: string) => void;
   onIntervene: (agentId: string) => void;
 }> = ({ row, selected, diffCounts, mostUrgent = false, onSelect, onRowAction, onInlineAnswer, onIntervene }) => {
@@ -230,8 +230,14 @@ const RosterAgentRow: React.FC<{
        *  (Restart, Steer, Land, View, Raise-cap) keeps its chip; only the inline-options case
        *  had a genuine duplicate. */}
       {attn?.action && !showInlineOptions && (
-        <div className="mt-0.5 flex w-full justify-end">
-          <RowActionChip action={attn.action} onClick={() => onRowAction(row)} mostUrgent={mostUrgent} />
+        <div className="mt-0.5 flex w-full justify-end gap-1.5">
+          {/* Secondary first, primary last (rightmost = the default move). Today only boundary-sync
+           *  "held" rows carry one: Apply + Discard are genuinely different resolutions of the same
+           *  held backlog, so neither can be folded into the other. */}
+          {attn.secondaryAction && (
+            <RowActionChip action={attn.secondaryAction} onClick={() => onRowAction(row, attn.secondaryAction)} mostUrgent={false} />
+          )}
+          <RowActionChip action={attn.action} onClick={() => onRowAction(row, attn.action)} mostUrgent={mostUrgent} />
         </div>
       )}
     </div>
@@ -612,8 +618,8 @@ export const WorkspaceCockpit: React.FC = () => {
     else if (result === 'denied') showToast('Notification permission denied', 'error');
   }, [pushPerm, showToast]);
 
-  const onRowAction = useCallback((row: FleetAgentRow) => {
-    const action = row.attn?.action;
+  const onRowAction = useCallback((row: FleetAgentRow, actionOverride?: AttentionItem['action']) => {
+    const action = actionOverride ?? row.attn?.action;
     if (!action) { setSelectedId(row.agent.id); return; }
     switch (action.kind) {
       case 'restart':
@@ -633,10 +639,27 @@ export const WorkspaceCockpit: React.FC = () => {
           jsonInit('POST', {}),
         )
           .then((r) => {
-            if (r.ok) showToast(r.applied === 0 ? 'Nothing held — your checkout is already current' : `Applied ${r.applied} held turn${r.applied === 1 ? '' : 's'} to your checkout`, 'success');
+            // applied === 0 && ok only means the backlog was empty by the time the click landed
+            // (already applied/discarded elsewhere) — say that, never "your checkout is already
+            // current": earlier uncapturable turns may still live worktree-only.
+            if (r.ok) showToast(r.applied === 0 ? 'Nothing left to apply — those held turns were already resolved' : `Applied ${r.applied} held turn${r.applied === 1 ? '' : 's'} to your checkout`, 'success');
             else showToast(`Still held (${r.remaining} turn${r.remaining === 1 ? '' : 's'}): ${r.reason ?? 'your checkout is still divergent'}`, 'error');
           })
           .catch((e) => showToast(e instanceof Error ? e.message : 'Apply failed', 'error'));
+        break;
+      // The other resolution of a held backlog: drop the pending writes. Recovery path for patches
+      // that can never apply cleanly (operator fixed the divergence by hand) — safe to offer
+      // one-click because the real checkout is untouched and the session worktree keeps every edit.
+      case 'discard-sync':
+        void apiJson<{ ok: boolean; discarded: number; remaining: number; reason?: string }>(
+          `/api/agents/${encodeURIComponent(row.agent.id)}/discard-held-sync`,
+          jsonInit('POST', {}),
+        )
+          .then((r) => {
+            if (r.ok) showToast(r.discarded === 0 ? 'Nothing left to discard — those held turns were already resolved' : `Discarded ${r.discarded} held turn${r.discarded === 1 ? '' : 's'} — the session worktree still has those edits`, 'success');
+            else showToast(`Discard failed: ${r.reason ?? 'unknown'}`, 'error');
+          })
+          .catch((e) => showToast(e instanceof Error ? e.message : 'Discard failed', 'error'));
         break;
       // answer · steer · view · land: hand off to the detail pane (banner+Composer, or the
       // right rail for land) rather than acting from the row.

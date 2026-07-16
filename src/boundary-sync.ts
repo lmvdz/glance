@@ -28,12 +28,27 @@
  * fingerprint alone cannot express a start→end DELTA — only equality — which is why the worktree
  * side snapshots trees while the real-tree side only fingerprints.
  *
- * Race notes (documented, not defended beyond fail-closed): the real-tree fingerprint is captured
- * a few git-calls after turn start and re-captured at turn end — an operator edit inside either
- * capture window lands on the safe side (mismatch → hold). The turn-start WORKTREE baseline reuses
- * the previous turn's end tree when available (the worktree does not change between turns), so the
- * agent's first mid-capture edit cannot be silently excluded from the patch; only the very first
- * turn of a daemon's tenure captures live, under the model's own multi-second first-token floor.
+ * Race notes — three windows, two defended, one residual and named honestly:
+ *   1. Capture windows (turn start / turn end): the real-tree fingerprint is captured a few
+ *      git-calls after turn start and re-captured at turn end — an operator edit inside either
+ *      window lands on the safe side (mismatch → hold). The turn-start WORKTREE baseline reuses the
+ *      previous turn's end tree when available (the worktree does not change between turns), so the
+ *      agent's first mid-capture edit cannot be silently excluded from the patch; only the very
+ *      first turn of a daemon's tenure captures live, under the model's multi-second first-token
+ *      floor.
+ *   2. Fingerprint→apply window: the end fingerprint proves stability only at capture time, and
+ *      `git apply` runs AFTER it. `applyPatchToRealTree` therefore re-fingerprints once more after
+ *      `git apply --check` passes, immediately before the write (`expectedFingerprint`), shrinking
+ *      the exposure from "compare + temp-file + check + apply" to the final `git apply` spawn alone.
+ *   3. RESIDUAL (not defendable from this side of the filesystem): an operator edit — e.g. an
+ *      editor save — landing inside the final `git apply` spawn itself, or between the last
+ *      re-fingerprint and that spawn (milliseconds). git's context validation still aborts the
+ *      whole patch when the edit overlaps a hunk (→ hold); a DISJOINT same-file edit can interleave
+ *      with apply's in-place rewrite of that file. Closing this fully needs an OS-level file lock
+ *      the operator's editor also honors, which does not exist. Daemon-side writers ARE serialized:
+ *      squad-manager keys the sync/apply promise chain by the REAL DIRECTORY (realpath), so two
+ *      `here` sessions on one checkout can never fingerprint/apply concurrently (one daemon per
+ *      state dir is the standing topology; multiple daemons on one checkout are out of scope).
  */
 
 import { createHash, randomUUID } from "node:crypto";
@@ -146,8 +161,15 @@ export async function computeTurnPatch(worktree: string, startTree: string, endT
  * then the apply. `git apply` is itself atomic (it verifies every hunk before writing anything and
  * refuses repo-escaping paths), so a conflicting patch leaves the real tree byte-identical. It
  * writes working-tree files only — never the operator's index, never a ref.
+ *
+ * `expectedFingerprint` (the auto path passes it; the explicit operator-click path deliberately
+ * does not — see `applyHeldNow`): after `--check` passes and immediately before the write, the real
+ * tree is fingerprinted ONE more time and compared. This closes race window 2 in the module doc —
+ * without it, an operator edit between the turn-end fingerprint and the apply would be written into
+ * even though the precondition no longer holds. A mismatch (or a failed capture) fails the apply
+ * with nothing written; only the final `git apply` spawn itself remains exposed (window 3).
  */
-export async function applyPatchToRealTree(realDir: string, patch: string): Promise<ApplyResult> {
+export async function applyPatchToRealTree(realDir: string, patch: string, expectedFingerprint?: string): Promise<ApplyResult> {
 	if (patch.trim().length === 0) return { ok: true };
 	let tmpDir: string;
 	try {
@@ -160,6 +182,11 @@ export async function applyPatchToRealTree(realDir: string, patch: string): Prom
 		await fs.writeFile(patchFile, patch);
 		const check = await hardenedGit(["apply", "--check", "--whitespace=nowarn", patchFile], { cwd: realDir });
 		if (check.code !== 0) return fail(gitErr("git apply --check", check));
+		if (expectedFingerprint !== undefined) {
+			const recheck = await captureRealTreeState(realDir);
+			if (!recheck.ok) return fail(`pre-apply re-fingerprint failed: ${recheck.reason}`);
+			if (recheck.fingerprint !== expectedFingerprint) return fail("your checkout changed between the safety check and the apply");
+		}
 		const applied = await hardenedGit(["apply", "--whitespace=nowarn", patchFile], { cwd: realDir });
 		if (applied.code !== 0) return fail(gitErr("git apply", applied));
 		return { ok: true };
@@ -248,9 +275,12 @@ export async function syncTurnEnd(args: {
 	if (!now.ok) return hold(`couldn't re-fingerprint your checkout at turn end: ${now.reason}`);
 	if (now.fingerprint !== start.realFingerprint) return hold("your checkout changed during this turn");
 
-	// 4. Unchanged and provably so — apply. A conflicting patch (e.g. the real tree carried
-	//    uncommitted WIP in the same files since before the session) still aborts atomically.
-	const applied = await applyPatchToRealTree(realDir, patch.patch);
+	// 4. Unchanged and provably so — apply, with one last-instant re-fingerprint inside the apply
+	//    (after `--check`, before the write) so an operator edit in the fingerprint→apply window
+	//    fails the apply into a hold instead of being written into (module doc, race window 2).
+	//    A conflicting patch (e.g. the real tree carried uncommitted WIP in the same files since
+	//    before the session) still aborts atomically.
+	const applied = await applyPatchToRealTree(realDir, patch.patch, now.fingerprint);
 	if (!applied.ok) return hold(`the turn's patch did not apply cleanly: ${applied.reason}`);
 	return { kind: "applied", endTree: end.tree, patchBytes: patch.patch.length };
 }
@@ -367,4 +397,31 @@ export async function applyHeldNow(store: HeldSyncStore, agentId: string, realDi
 		applied++;
 	}
 	return { ok: true, applied, remaining: 0 };
+}
+
+export interface DiscardHeldResult {
+	ok: boolean;
+	discarded: number;
+	remaining: number;
+	reason?: string;
+}
+
+/**
+ * The explicit "drop it" affordance (POST /api/agents/:id/discard-held-sync) — the recovery path a
+ * held backlog otherwise lacks. A patch that can never apply cleanly (the operator already fixed
+ * the divergence by hand, or a crash between a successful apply and its `resolve` marker makes the
+ * replay's `--check` fail forever) would wedge the backlog, and the backlog-ordering rule then
+ * auto-holds EVERY later turn — auto-sync bricked for the session with no in-product way out.
+ * Discarding resolves the ledger entries as "discarded" and touches the real tree not at all; the
+ * session's worktree still contains every edit (diff view / promote), so nothing is lost — only the
+ * pending write to the operator's checkout is dropped. `patchId` discards one specific hold;
+ * omitted, the whole backlog for this agent goes.
+ */
+export async function discardHeldNow(store: HeldSyncStore, agentId: string, patchId?: string): Promise<DiscardHeldResult> {
+	const held = await store.listHeld(agentId);
+	if (held.length === 0) return { ok: true, discarded: 0, remaining: 0 };
+	const targets = patchId === undefined ? held : held.filter((h) => h.id === patchId);
+	if (targets.length === 0) return { ok: false, discarded: 0, remaining: held.length, reason: `no held patch ${patchId} for this session` };
+	for (const h of targets) await store.resolve(h.id, "discarded");
+	return { ok: true, discarded: targets.length, remaining: held.length - targets.length };
 }

@@ -28,12 +28,22 @@ class TestManager extends SquadManager {
 		// bracket access: the frame loop calls this private seam; tests reach it the same way answers.test.ts does
 		this["boundaryTurnEnd"](this.agents.get(id) as never);
 	}
-	/** Settle the agent's serialized boundary-sync chain (what the daemon awaits implicitly). */
-	async settle(id: string): Promise<void> {
-		await (this.agents.get(id) as { boundarySyncChain?: Promise<void> } | undefined)?.boundarySyncChain;
+	/** Settle every serialized boundary-sync chain (what the daemon awaits implicitly). Chains are
+	 *  keyed by real directory on the MANAGER (not per record) since the realDir-serialization fix,
+	 *  so draining them all is the test-side equivalent of the old per-agent await. */
+	async settle(_id?: string): Promise<void> {
+		const chains = this["boundarySyncChains"] as Map<string, Promise<void>>;
+		await Promise.all([...chains.values()]);
 	}
 	rec(id: string): { dto: AgentDTO; boundarySyncTurn?: number; boundarySyncEndTree?: string } {
 		return this.agents.get(id) as never;
+	}
+	/** Enqueue onto the agent's real-directory serialization chain (the private seam every
+	 *  capture/sync/apply/discard rides). */
+	enqueue(id: string, fn: () => Promise<void>): Promise<void> {
+		const rec = this.agents.get(id) as never;
+		const realDir = this["boundarySyncTarget"](rec) as string;
+		return this["queueBoundarySync"](rec, realDir, fn);
 	}
 	reattach(): Promise<void> {
 		// bracket access: the frame loop calls this private seam; tests reach it the same way answers.test.ts does
@@ -209,6 +219,104 @@ test("fail-closed at the wiring layer: an unfingerprint-able checkout holds + ra
 	const rows = syncRows(mgr.rec("chat-1").dto);
 	expect(rows).toHaveLength(1);
 	expect(rows[0].summary).toContain("sync held");
+});
+
+test("two here-sessions on ONE checkout share a serialization chain: work is strictly sequential across sessions", async () => {
+	const repo = await initRepo();
+	const wt1 = await addWorktree(repo);
+	const wt2 = await tmpDir("bsw-wt2-parent-").then(async (p) => {
+		const w = path.join(p, "wt");
+		await git(repo, "worktree", "add", "-q", "-b", "squad/bsw-test-2", w, "HEAD");
+		return w;
+	});
+	const mgr = await makeManager();
+	seed(mgr, "chat-1", { repo, worktree: wt1, realTreePath: repo });
+	seed(mgr, "chat-2", { repo, worktree: wt2, realTreePath: repo });
+
+	// Session 1's queued work stalls on a gate; session 2's must NOT start until it finishes —
+	// per-record chains would happily run them concurrently (the round-8 finding: both fingerprint,
+	// both `git apply` into the same checkout at machine speed).
+	const order: string[] = [];
+	let release!: () => void;
+	const gate = new Promise<void>((res) => { release = res; });
+	const p1 = mgr.enqueue("chat-1", async () => { order.push("s1-start"); await gate; order.push("s1-end"); });
+	const p2 = mgr.enqueue("chat-2", async () => { order.push("s2-start"); });
+	await Bun.sleep(20); // give a concurrent s2 every chance to start while s1 is parked
+	expect(order).toEqual(["s1-start"]);
+	release();
+	await Promise.all([p1, p2]);
+	expect(order).toEqual(["s1-start", "s1-end", "s2-start"]);
+
+	// Different checkouts stay independent: a third session on ANOTHER repo never queues behind this one.
+	const repo2 = await initRepo();
+	const wt3 = await addWorktree(repo2);
+	seed(mgr, "chat-3", { repo: repo2, worktree: wt3, realTreePath: repo2 });
+	let ran = false;
+	let release2!: () => void;
+	const gate2 = new Promise<void>((res) => { release2 = res; });
+	const pBlocked = mgr.enqueue("chat-1", async () => { await gate2; });
+	await mgr.enqueue("chat-3", async () => { ran = true; });
+	expect(ran).toBe(true); // did not wait for repo 1's parked chain
+	release2();
+	await pBlocked;
+});
+
+test("discard unwedges a held backlog: row clears, and the next stable turn auto-applies again", async () => {
+	const repo = await initRepo();
+	const wt = await addWorktree(repo);
+	const mgr = await makeManager();
+	seed(mgr, "chat-1", { repo, worktree: wt, realTreePath: repo });
+
+	// Turn 1 holds (operator moved the checkout), then the operator fixes a.txt BY HAND — the held
+	// patch can now never apply cleanly: the exact wedge that used to brick auto-sync forever.
+	mgr.turnStart("chat-1");
+	await mgr.settle();
+	await fs.appendFile(path.join(wt, "a.txt"), "turn1\n");
+	await fs.writeFile(path.join(repo, "operator.txt"), "concurrent\n");
+	mgr.turnEnd("chat-1");
+	await mgr.settle();
+	await fs.writeFile(path.join(repo, "a.txt"), "one\ntwo\nthree\nturn1 applied by hand\n");
+	expect((await mgr.applyHeldSync("chat-1")).ok).toBe(false); // wedged for real
+	expect(syncRows(mgr.rec("chat-1").dto)).toHaveLength(1);
+
+	const r = await mgr.discardHeldSync("chat-1");
+	expect(r).toEqual({ ok: true, discarded: 1, remaining: 0 });
+	expect(syncRows(mgr.rec("chat-1").dto)).toHaveLength(0); // row resolved
+	expect(await fs.readFile(path.join(repo, "a.txt"), "utf8")).toContain("applied by hand"); // tree untouched
+
+	// Auto-sync is un-bricked: the next stable turn applies without any click.
+	mgr.turnStart("chat-1");
+	await mgr.settle();
+	await fs.writeFile(path.join(wt, "c.txt"), "turn2\n");
+	mgr.turnEnd("chat-1");
+	await mgr.settle();
+	expect(await fs.readFile(path.join(repo, "c.txt"), "utf8")).toBe("turn2\n");
+});
+
+test("uncapturable turn: row is tagged (no 'held' claim), and resolving holds never dismisses it", async () => {
+	const repo = await initRepo();
+	const notAWorktree = await tmpDir("bsw-notwt-"); // worktree snapshot will fail — nothing to hold
+	const mgr = await makeManager();
+	seed(mgr, "chat-1", { repo, worktree: notAWorktree, realTreePath: repo });
+
+	mgr.turnStart("chat-1");
+	await mgr.settle();
+	await fs.writeFile(path.join(notAWorktree, "x.txt"), "edit\n");
+	mgr.turnEnd("chat-1");
+	await mgr.settle();
+
+	const rows = syncRows(mgr.rec("chat-1").dto);
+	expect(rows).toHaveLength(1);
+	expect(rows[0].sync).toBe("uncapturable");
+	expect(rows[0].summary).not.toContain("held"); // nothing IS held — the copy must not claim it
+	expect(rows[0].detail).toContain("nothing is held");
+
+	// An Apply reaching the server anyway (stale client) reports the empty backlog honestly and
+	// must NOT clear the warning: that turn's edits are still worktree-only.
+	expect(await mgr.applyHeldSync("chat-1")).toEqual({ ok: true, applied: 0, remaining: 0 });
+	expect(syncRows(mgr.rec("chat-1").dto)).toHaveLength(1);
+	expect(await mgr.discardHeldSync("chat-1")).toEqual({ ok: true, discarded: 0, remaining: 0 });
+	expect(syncRows(mgr.rec("chat-1").dto)).toHaveLength(1);
 });
 
 test("boot: reattachHeldSyncs re-raises the row for a restored session and only warns for a vanished agent", async () => {

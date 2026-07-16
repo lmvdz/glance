@@ -44,6 +44,7 @@ import {
 	ConsoleReleaseBodySchema,
 	decodeBody,
 	decodeBodyOrEmpty,
+	DiscardHeldSyncBodySchema,
 	FeatureAgentsLinkBodySchema,
 	FeatureAnswersBodySchema,
 	FeatureAutoBodySchema,
@@ -2515,6 +2516,19 @@ export class SquadServer {
 			const id = decodeURIComponent(msync[1]);
 			if (!manager.getAgent(id)) return new Response("no such agent", { status: 404 });
 			return Response.json(await manager.applyHeldSync(id, actor));
+		}
+		// Boundary sync, the other resolution: DISCARD this here-session's held turn patches instead
+		// of applying them — the recovery path when the backlog can never apply cleanly (operator
+		// already fixed the divergence by hand, or a crash lost an apply's resolve marker). Drops the
+		// pending write only; the real checkout is untouched and the session worktree keeps every
+		// edit. Optional body `patchId` narrows the drop to one held patch.
+		const mdiscard = url.pathname.match(/^\/api\/agents\/([^/]+)\/discard-held-sync$/);
+		if (mdiscard && req.method === "POST") {
+			const id = decodeURIComponent(mdiscard[1]);
+			if (!manager.getAgent(id)) return new Response("no such agent", { status: 404 });
+			const body = decodeBodyOrEmpty(DiscardHeldSyncBodySchema, await req.json().catch(() => null));
+			const patchId = typeof body.patchId === "string" && body.patchId.length > 0 ? body.patchId : undefined;
+			return Response.json(await manager.discardHeldSync(id, patchId, actor));
 		}
 		const mverify = url.pathname.match(/^\/api\/agents\/([^/]+)\/verify$/);
 		if (mverify && req.method === "POST") {

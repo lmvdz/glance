@@ -31,12 +31,16 @@ export interface AgentReport {
 /** Mirrors backend `AttentionEvent` (src/types.ts) — a harness-agnostic, non-blocking "look at this"
  *  signal (operator `notify`, an omp `squad_attention` tool call, a raw harness notify RPC, or a
  *  `glance here` turn patch HELD instead of auto-applied to the operator's real checkout —
- *  "boundary-sync", daily-onramp 03; those rows carry a one-click Apply). */
+ *  "boundary-sync", daily-onramp 03; "held" rows carry one-click Apply/Discard). */
 export interface AttentionEvent {
   id: string;
   summary: string;
   detail?: string;
   source: "notify" | "tool" | "harness" | "boundary-sync";
+  /** boundary-sync rows only: "held" = durable patch(es) waiting (Apply/Discard resolve it);
+   *  "uncapturable" = NOTHING is held (the turn's delta couldn't be captured) — offering Apply
+   *  there would be false reassurance, so those rows get View instead. */
+  sync?: "held" | "uncapturable";
   createdAt: number;
 }
 

@@ -20,6 +20,7 @@ import {
 	captureRealTreeState,
 	captureWorktreeTree,
 	computeTurnPatch,
+	discardHeldNow,
 	HeldSyncStore,
 	syncTurnEnd,
 } from "../src/boundary-sync.ts";
@@ -225,6 +226,44 @@ describe("applyPatchToRealTree", () => {
 		const r = await applyPatchToRealTree(repo, patch.patch);
 		expect(r.ok).toBe(false);
 		expect(await fileSnapshot(repo)).toEqual(before);
+	});
+
+	test("last-instant re-fingerprint: a DISJOINT operator edit after the decision fingerprint fails the apply (git's context check alone would let it through)", async () => {
+		const repo = await initRepo();
+		const wt = await addWorktree(repo);
+		const start = await captureWorktreeTree(wt);
+		await fs.appendFile(path.join(wt, "a.txt"), "agent line\n");
+		const end = await captureWorktreeTree(wt);
+		if (!start.ok || !end.ok) throw new Error("snapshot failed");
+		const patch = await computeTurnPatch(wt, start.tree, end.tree);
+		if (!patch.ok) throw new Error("patch failed");
+		// The fingerprint the auto path decided on…
+		const decided = await captureRealTreeState(repo);
+		if (!decided.ok) throw new Error("capture failed");
+		// …then the operator edits a DIFFERENT file: `git apply --check` still passes (disjoint), so
+		// only the expectedFingerprint recheck stands between the stale decision and the write.
+		await fs.appendFile(path.join(repo, "b.txt"), "operator raced in\n");
+		const before = await fileSnapshot(repo);
+		const r = await applyPatchToRealTree(repo, patch.patch, decided.fingerprint);
+		expect(r.ok).toBe(false);
+		if (!r.ok) expect(r.reason).toContain("changed between the safety check and the apply");
+		expect(await fileSnapshot(repo)).toEqual(before); // nothing written — the agent line stayed out too
+	});
+
+	test("last-instant re-fingerprint: a matching fingerprint still applies", async () => {
+		const repo = await initRepo();
+		const wt = await addWorktree(repo);
+		const start = await captureWorktreeTree(wt);
+		await fs.appendFile(path.join(wt, "a.txt"), "agent line\n");
+		const end = await captureWorktreeTree(wt);
+		if (!start.ok || !end.ok) throw new Error("snapshot failed");
+		const patch = await computeTurnPatch(wt, start.tree, end.tree);
+		if (!patch.ok) throw new Error("patch failed");
+		const decided = await captureRealTreeState(repo);
+		if (!decided.ok) throw new Error("capture failed");
+		const r = await applyPatchToRealTree(repo, patch.patch, decided.fingerprint);
+		expect(r.ok).toBe(true);
+		expect(await fs.readFile(path.join(repo, "a.txt"), "utf8")).toContain("agent line");
 	});
 });
 
@@ -483,5 +522,68 @@ describe("applyHeldNow", () => {
 		const repo = await initRepo();
 		const store = await newStore();
 		expect(await applyHeldNow(store, "a1", repo)).toEqual({ ok: true, applied: 0, remaining: 0 });
+	});
+});
+
+// ── explicit discard (the recovery path for a backlog that can never apply) ──────────────────────
+
+describe("discardHeldNow", () => {
+	test("unwedges a backlog whose first patch can never apply: discard it, then auto-sync works again", async () => {
+		const repo = await initRepo();
+		const wt = await addWorktree(repo);
+		const store = await newStore();
+		// Turn 1 held; the operator then fixes the divergence BY HAND (rewrites a.txt), so turn 1's
+		// patch will fail `--check` forever — the exact wedge the discard affordance exists for.
+		const s1 = await beginTurn(repo, wt);
+		await fs.appendFile(path.join(wt, "a.txt"), "turn1\n");
+		await fs.appendFile(path.join(repo, "b.txt"), "operator\n");
+		expect((await syncTurnEnd({ realDir: repo, worktree: wt, start: s1, store, agentId: "a1", turn: 1 })).kind).toBe("held");
+		await fs.writeFile(path.join(repo, "a.txt"), "operator applied the change by hand\n");
+		expect((await applyHeldNow(store, "a1", repo)).ok).toBe(false); // wedged for real
+		const before = await fileSnapshot(repo);
+		const r = await discardHeldNow(store, "a1");
+		expect(r).toEqual({ ok: true, discarded: 1, remaining: 0 });
+		expect(await fileSnapshot(repo)).toEqual(before); // discard never touches the real tree
+		expect(await store.listHeld("a1")).toHaveLength(0);
+		// With the backlog gone, the next stable turn auto-applies again (auto-sync un-bricked).
+		const s2 = await beginTurn(repo, wt);
+		await fs.writeFile(path.join(wt, "c.txt"), "turn2\n");
+		const o2 = await syncTurnEnd({ realDir: repo, worktree: wt, start: s2, store, agentId: "a1", turn: 2 });
+		expect(o2.kind).toBe("applied");
+		expect(await fs.readFile(path.join(repo, "c.txt"), "utf8")).toBe("turn2\n");
+	});
+
+	test("patchId discards exactly one held patch; the rest stay held in order", async () => {
+		const store = await newStore();
+		const h1 = await store.hold({ agentId: "a1", turn: 1, realDir: "/r", reason: "r", patch: "p1" });
+		await store.hold({ agentId: "a1", turn: 2, realDir: "/r", reason: "r", patch: "p2" });
+		const r = await discardHeldNow(store, "a1", h1.id);
+		expect(r).toEqual({ ok: true, discarded: 1, remaining: 1 });
+		const left = await store.listHeld("a1");
+		expect(left).toHaveLength(1);
+		expect(left[0].turn).toBe(2);
+	});
+
+	test("an unknown patchId discards nothing and says so", async () => {
+		const store = await newStore();
+		await store.hold({ agentId: "a1", turn: 1, realDir: "/r", reason: "r", patch: "p1" });
+		const r = await discardHeldNow(store, "a1", "not-a-real-id");
+		expect(r.ok).toBe(false);
+		expect(r.discarded).toBe(0);
+		expect(r.remaining).toBe(1);
+		expect(await store.listHeld("a1")).toHaveLength(1);
+	});
+
+	test("discard is per-agent: another session's holds are untouched", async () => {
+		const store = await newStore();
+		await store.hold({ agentId: "a1", turn: 1, realDir: "/r", reason: "r", patch: "p1" });
+		await store.hold({ agentId: "a2", turn: 1, realDir: "/r", reason: "r", patch: "p2" });
+		expect(await discardHeldNow(store, "a1")).toEqual({ ok: true, discarded: 1, remaining: 0 });
+		expect(await store.listHeld("a2")).toHaveLength(1);
+	});
+
+	test("no holds is a clean no-op", async () => {
+		const store = await newStore();
+		expect(await discardHeldNow(store, "a1")).toEqual({ ok: true, discarded: 0, remaining: 0 });
 	});
 });

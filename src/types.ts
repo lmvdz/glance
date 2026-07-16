@@ -119,6 +119,10 @@ export interface AttentionEvent {
 	 *  operator's real checkout (divergence or fingerprint-capture failure — daily-onramp 03); the
 	 *  webapp renders these with a one-click "Apply" that re-checks before touching anything. */
 	source: "notify" | "tool" | "harness" | "boundary-sync";
+	/** boundary-sync rows only: "held" = durable patch(es) are waiting (Apply/Discard resolve it);
+	 *  "uncapturable" = the turn's delta could not even be captured, so NOTHING is held — the webapp
+	 *  must offer View (the worktree diff), never Apply, and never claim a patch is waiting. */
+	sync?: "held" | "uncapturable";
 	createdAt: number;
 }
 
