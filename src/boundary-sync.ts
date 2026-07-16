@@ -287,7 +287,19 @@ export async function captureWorktreeTree(worktree: string): Promise<TreeResult>
  * directly; its only in-repo caller is `syncTurnEnd`, in this same file. */
 export async function computeTurnPatch(worktree: string, startTree: string, endTree: string): Promise<PatchResult> {
 	if (startTree === endTree) return { ok: true, patch: "" };
-	const diff = await hardenedGit(["diff-tree", "-r", "-p", "--binary", "--no-ext-diff", "--no-textconv", startTree, endTree], { cwd: worktree });
+	// N1: `-c core.quotepath=false` — a repo whose config leaves `core.quotepath` at its git DEFAULT
+	// (true) makes this diff C-quote any non-ASCII path into an escaped literal (`"a/na\303\257ve.txt"`)
+	// in BOTH the `diff --git` header and the `---`/`+++` lines. `git apply` accepts raw UTF-8 headers
+	// fine (verified live), so nothing downstream needs the quoting — but `patchTouchedPaths` reading
+	// the escaped literal as if it were the real filename made every C1 post-apply check lstat a path
+	// that doesn't exist ("absent"), which can never compare equal to the real post-write file, which
+	// raised a CRITICAL "may have been clobbered" divergence row on every legitimate turn touching a
+	// pre-existing accented/CJK-named file (live-proven: `error: naïve.txt: No such file or
+	// directory`). This is the patch-PRODUCING diff — the one call site whose output both `git apply`
+	// and `patchTouchedPaths` consume — so disabling quoting here is the root fix; `patchTouchedPaths`
+	// still carries an unquote fallback (defense in depth) for any header that arrives quoted anyway
+	// (a caller-supplied patch from a differently-configured git, or a future call site).
+	const diff = await hardenedGit(["-c", "core.quotepath=false", "diff-tree", "-r", "-p", "--binary", "--no-ext-diff", "--no-textconv", startTree, endTree], { cwd: worktree });
 	if (diff.code !== 0) return fail(gitErr("git diff-tree", diff));
 	return { ok: true, patch: diff.stdout };
 }
@@ -298,18 +310,129 @@ export async function computeTurnPatch(worktree: string, startTree: string, endT
  *  pass `HeldSyncStore`'s own durable dir, so captures live beside the held patches they relate to. */
 const DEFAULT_DIVERGENCE_ROOT = path.join(os.tmpdir(), "glance-bsync-divergence");
 
+/** Reverse git's C-style path quoting (`quote_path()` in git's own `quote.c`): a field that arrives
+ *  wrapped in double quotes is octal/backslash-escaped ASCII text (`"na\303\257ve.txt"`), never raw
+ *  bytes — safe to walk char-by-char. An unquoted field (the common case once `computeTurnPatch`
+ *  passes `-c core.quotepath=false`) passes through untouched. Defense in depth for `patchTouchedPaths`
+ *  (N1): a patch that arrives already C-quoted — a differently-configured git, or a future call site
+ *  that doesn't disable quotepath — must still resolve to the REAL on-disk path, never the escaped
+ *  literal (which `snapshotPaths`/`git apply` would treat as a distinct, nonexistent path). */
+function unquoteGitPath(field: string): string {
+	if (!(field.length >= 2 && field.startsWith('"') && field.endsWith('"'))) return field;
+	const inner = field.slice(1, -1);
+	const bytes: number[] = [];
+	const simple: Record<string, number> = { "\\": 0x5c, '"': 0x22, n: 0x0a, t: 0x09, a: 0x07, b: 0x08, f: 0x0c, r: 0x0d, v: 0x0b };
+	for (let i = 0; i < inner.length; i++) {
+		const c = inner[i]!;
+		if (c !== "\\") {
+			bytes.push(c.charCodeAt(0));
+			continue;
+		}
+		const next = inner[i + 1];
+		if (next === undefined) {
+			bytes.push(0x5c);
+			continue;
+		}
+		if (next >= "0" && next <= "7") {
+			const oct = inner.slice(i + 1, i + 4).match(/^[0-7]{1,3}/)![0]!;
+			bytes.push(Number.parseInt(oct, 8) & 0xff);
+			i += oct.length;
+			continue;
+		}
+		if (next in simple) {
+			bytes.push(simple[next]!);
+			i += 1;
+			continue;
+		}
+		// Unknown escape — keep both characters literally rather than guess at intent.
+		bytes.push(0x5c, next.charCodeAt(0));
+		i += 1;
+	}
+	return Buffer.from(bytes).toString("utf8");
+}
+
+/** One diff-header path field ("a/foo", "b/foo", a quoted variant, or "/dev/null"), with its
+ *  known-fixed `a/`/`b/` prefix stripped and any C-quoting reversed. `undefined` for `/dev/null`
+ *  (an add/delete's absent side — never a real touched path). */
+function unquoteDiffField(field: string, prefix: "a/" | "b/"): string | undefined {
+	if (field === "/dev/null") return undefined;
+	const unquoted = unquoteGitPath(field);
+	return unquoted.startsWith(prefix) ? unquoted.slice(prefix.length) : unquoted;
+}
+
+/** Best-effort split of a `diff --git a/X b/Y` header line (prefix "diff --git " already stripped)
+ *  when no unambiguous `---`/`+++`/`rename` line is available (N1's rarer case — see caller). This
+ *  module's own `computeTurnPatch` never requests rename detection (`-M`/`-C`), so X and Y are always
+ *  IDENTICAL for every header this module ever produces; a naive single-regex split is genuinely
+ *  ambiguous whenever the path itself contains the literal substring " b/" (e.g. `diff --git a/x b/y
+ *  b/x b/y` — reluctant matching finds the FIRST " b/" instead of the true boundary). Exploiting the
+ *  old==new invariant here: try every " b/" split point and take the one where both halves agree;
+ *  fall back to the first split (historical behavior) only if nothing agrees (a header from some
+ *  other caller that genuinely renamed). */
+function splitDiffGitHeader(rest: string): [string, string] | undefined {
+	if (rest.startsWith('"')) {
+		const m = rest.match(/^("(?:\\.|[^"\\])*")\s("(?:\\.|[^"\\])*")$/);
+		if (!m) return undefined;
+		return [unquoteDiffField(m[1]!, "a/") ?? "", unquoteDiffField(m[2]!, "b/") ?? ""];
+	}
+	if (!rest.startsWith("a/")) return undefined;
+	const body = rest.slice(2);
+	let idx = body.indexOf(" b/");
+	let fallback: [string, string] | undefined;
+	while (idx !== -1) {
+		const left = body.slice(0, idx);
+		const right = body.slice(idx + 3);
+		if (fallback === undefined) fallback = [left, right];
+		if (left === right) return [left, right];
+		idx = body.indexOf(" b/", idx + 1);
+	}
+	return fallback;
+}
+
 /** The set of paths a unified diff (as produced by `git diff-tree -p`/`git diff`, default a/ b/
  *  prefixes) could possibly have written — both sides of every `diff --git a/X b/Y` header (a
  *  rename's old AND new path; an add/delete's one real side, the other is `/dev/null` and therefore
  *  absent from this header form already). Used only to scope the C1 post-apply divergence check to
- *  paths this patch could have touched — nothing else needs snapshotting or verifying. */
+ *  paths this patch could have touched — nothing else needs snapshotting or verifying.
+ *
+ * N1: prefers the unambiguous per-line forms that follow each `diff --git` header (`--- a/X`,
+ * `+++ b/Y`, `rename from`/`rename to` — each names exactly one path with no twin-prefix split
+ * ambiguity) over the header line itself, and reverses C-quoting on whichever source is used. The
+ * header line alone is used only as a fallback for a block with none of those lines (a pure binary
+ * patch — `GIT binary patch` carries no `---`/`+++` text — or a bare mode-change), via
+ * `splitDiffGitHeader`'s old==new-exploiting split. */
 export function patchTouchedPaths(patch: string): string[] {
 	const paths = new Set<string>();
-	for (const line of patch.split("\n")) {
-		const m = line.match(/^diff --git "?a\/(.+?)"? "?b\/(.+?)"?$/);
-		if (m) {
-			paths.add(m[1]!);
-			paths.add(m[2]!);
+	const lines = patch.split("\n");
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i]!;
+		if (!line.startsWith("diff --git ")) continue;
+		let sawLine = false;
+		for (let j = i + 1; j < lines.length && !lines[j]!.startsWith("diff --git "); j++) {
+			const l = lines[j]!;
+			let m: RegExpMatchArray | null;
+			if ((m = l.match(/^--- (.+?)(?:\t.*)?$/))) {
+				const p = unquoteDiffField(m[1]!, "a/");
+				if (p !== undefined) paths.add(p);
+				sawLine = true;
+			} else if ((m = l.match(/^\+\+\+ (.+?)(?:\t.*)?$/))) {
+				const p = unquoteDiffField(m[1]!, "b/");
+				if (p !== undefined) paths.add(p);
+				sawLine = true;
+			} else if ((m = l.match(/^rename from (.+)$/))) {
+				paths.add(unquoteGitPath(m[1]!));
+				sawLine = true;
+			} else if ((m = l.match(/^rename to (.+)$/))) {
+				paths.add(unquoteGitPath(m[1]!));
+				sawLine = true;
+			}
+		}
+		if (!sawLine) {
+			const split = splitDiffGitHeader(line.slice("diff --git ".length));
+			if (split) {
+				paths.add(split[0]);
+				paths.add(split[1]);
+			}
 		}
 	}
 	return [...paths];

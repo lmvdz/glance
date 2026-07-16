@@ -24,6 +24,8 @@ import {
 	fingerprintUntracked,
 	HeldLedgerAppendError,
 	HeldSyncStore,
+	patchTouchedPaths,
+	pruneDivergenceCaptures,
 	syncTurnEnd,
 } from "../src/boundary-sync.ts";
 
@@ -260,6 +262,88 @@ describe("captureWorktreeTree / computeTurnPatch", () => {
 		const patch = await computeTurnPatch(wt, t.tree, t.tree);
 		expect(patch.ok).toBe(true);
 		if (patch.ok) expect(patch.patch).toBe("");
+	});
+
+	// ── N1 (live-verified): core.quotepath C-quoting a non-ASCII filename made patchTouchedPaths
+	// lstat the ESCAPED LITERAL instead of the real path, which read as "absent" and raised a false
+	// CRITICAL divergence on every legitimate turn touching a pre-existing accented/CJK-named file. ──
+
+	test("N1: a turn touching a pre-existing ACCENTED filename produces an UNQUOTED diff header (core.quotepath disabled on the patch-producing diff) and applies clean with no divergence", async () => {
+		const repo = await initRepo();
+		await fs.writeFile(path.join(repo, "naïve.txt"), "hello\n");
+		await git(repo, "add", "-A");
+		await git(repo, "commit", "-qm", "add accented file");
+		const wt = await addWorktree(repo);
+		const start = await captureWorktreeTree(wt);
+		await fs.writeFile(path.join(wt, "naïve.txt"), "world\n");
+		const end = await captureWorktreeTree(wt);
+		if (!start.ok || !end.ok) throw new Error("snapshot failed");
+		const patch = await computeTurnPatch(wt, start.tree, end.tree);
+		if (!patch.ok) throw new Error("patch failed");
+		// The header must carry the RAW UTF-8 path, not git's default C-quoted literal — this is the
+		// root fix (-c core.quotepath=false on the patch-producing diff); without it this assertion
+		// fails with `"a/na\303\257ve.txt"` instead.
+		expect(patch.patch).toContain("diff --git a/naïve.txt b/naïve.txt");
+		expect(patch.patch).not.toContain("\\303\\257");
+		expect(patchTouchedPaths(patch.patch)).toEqual(["naïve.txt"]);
+		const decided = await captureRealTreeState(repo);
+		if (!decided.ok) throw new Error("capture failed");
+		const r = await applyPatchToRealTree(repo, patch.patch, decided.fingerprint);
+		expect(r.ok).toBe(true);
+		if (r.ok) expect(r.divergence).toBeUndefined(); // the false-positive this finding is about
+		expect(await fs.readFile(path.join(repo, "naïve.txt"), "utf8")).toBe("world\n");
+	});
+});
+
+describe("patchTouchedPaths (defense in depth: unquoting + the header split ambiguity)", () => {
+	test("a plain unquoted modify/add/delete header resolves via the unambiguous ---/+++ lines", () => {
+		const patch = [
+			"diff --git a/foo.txt b/foo.txt",
+			"index 111..222 100644",
+			"--- a/foo.txt",
+			"+++ b/foo.txt",
+			"@@ -1 +1 @@",
+			"-old",
+			"+new",
+			"diff --git a/new.txt b/new.txt",
+			"new file mode 100644",
+			"index 000..333",
+			"--- /dev/null",
+			"+++ b/new.txt",
+			"@@ -0,0 +1 @@",
+			"+created",
+			"",
+		].join("\n");
+		expect(patchTouchedPaths(patch).sort()).toEqual(["foo.txt", "new.txt"]);
+	});
+
+	test("a C-quoted header (core.quotepath left ON somewhere upstream) still resolves to the real path", () => {
+		const patch = [
+			'diff --git "a/na\\303\\257ve.txt" "b/na\\303\\257ve.txt"',
+			"index 111..222 100644",
+			'--- "a/na\\303\\257ve.txt"',
+			'+++ "b/na\\303\\257ve.txt"',
+			"@@ -1 +1 @@",
+			"-hello",
+			"+world",
+			"",
+		].join("\n");
+		expect(patchTouchedPaths(patch)).toEqual(["naïve.txt"]);
+	});
+
+	test("a binary patch (no ---/+++ text lines) falls back to the header split — old==new invariant resolves even a path containing the literal substring ' b/'", () => {
+		const patch = ["diff --git a/weird b/x b/weird b/x", "index 111..222 100644", "GIT binary patch", "literal 4", "abcd", ""].join("\n");
+		expect(patchTouchedPaths(patch)).toEqual(["weird b/x"]);
+	});
+
+	test("a quoted header with no ---/+++ lines (binary + non-ASCII name) still unquotes via the header-split fallback", () => {
+		const patch = ['diff --git "a/na\\303\\257ve.bin" "b/na\\303\\257ve.bin"', "index 111..222 100644", "GIT binary patch", "literal 4", "abcd", ""].join("\n");
+		expect(patchTouchedPaths(patch)).toEqual(["naïve.bin"]);
+	});
+
+	test("/dev/null sides (pure add/delete) never register as a touched path", () => {
+		const patch = ["diff --git a/gone.txt b/gone.txt", "deleted file mode 100644", "index 111..000", "--- a/gone.txt", "+++ /dev/null", "@@ -1 +0,0 @@", "-bye", ""].join("\n");
+		expect(patchTouchedPaths(patch)).toEqual(["gone.txt"]);
 	});
 });
 
