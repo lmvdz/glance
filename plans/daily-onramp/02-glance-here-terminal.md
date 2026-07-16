@@ -1,10 +1,10 @@
 # `glance here` — terminal-attach thread on cwd
 
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
-TOUCHES: src/index.ts, src/tui.ts, src/project-registry.ts, src/squad-manager.ts, src/harness-registry.ts, src/server.ts, tests/here.test.ts (new)
+TOUCHES: src/index.ts, src/here.ts (new), src/cli-args.ts (new), src/squad-manager.ts, src/harness-registry.ts, src/server.ts, src/schema/http-body.ts, tests/here.test.ts (new), tests/harness-registry.test.ts
 
 ## Goal
 
@@ -41,4 +41,82 @@ none (glance-desktop is untouched by this concern; the cockpit's own chat panel 
 
 ## Resolution
 
-(filled in when this concern executes — parity-gap list and harness-verification record go here)
+Executed 2026-07-16 (feat/daily-driver-w1). Everything below was driven live against a scratch daemon
+(file mode, own state dir/port) with the operator's real claude login, from INSIDE an active Claude
+Code session — not inferred from green tests.
+
+**What shipped.**
+- `glance here` verb (src/index.ts dispatch → src/here.ts): inline readline REPL (deliberately NOT
+  the alt-screen pi-tui Editor from tui.ts — an on-ramp that hides scrollback loses to `claude` at
+  turn one; tui.ts is untouched). Streams replies via a `?since=` delta poll whose cursor only
+  advances past FINALIZED entries — the manager MUTATES streaming entries in place (seq fixed,
+  status running→ok), so a naive cursor prints half a message and drops the rest
+  (`TranscriptRenderer`, unit-tested). Pending permission requests surface inline and the next
+  submit answers them (TUI's confirm mapping). Shared CLI plumbing extracted to src/cli-args.ts
+  (index↔here import cycle otherwise).
+- Session creation: `POST /api/console` extended with `harness` + `ephemeral` (schema/http-body.ts);
+  ephemeral registration happens BEFORE create (registerProject's absolute-path/git-root/canonical
+  validation is the fail-closed gate), and a failed create rolls the registration back. Tier note in
+  server.ts: stays operator (unlike admin POST /api/projects) because projects() already unions
+  live-agent repos — no new authority.
+- Ephemeral registration: `SquadManager.ephemeralProjects` (in-memory Set, deliberately not
+  persisted) + `registerEphemeralProject` / `releaseEphemeralProject` / `isEphemeralProject`. Only a
+  repo the call actually ADDED becomes ephemeral — an operator-registered repo is never demoted by a
+  passing session. Released on: REPL exit (`POST /api/console/release`, idempotent), the daemon's own
+  removal path (last agent on the repo removed), and CLEARED by `promote()` (both fresh and
+  idempotent paths, after persist) — "promote makes it durable" is the one-liner the plan predicted.
+- Non-git cwd refused client-side (message points at `git init`) AND server-side (registerProject);
+  never `inPlace`. OMPSQ-40 untouched — live sessions ran in `<state>/worktrees/repo-squad-chat-*`.
+
+**Harness verification record (the verified flip).** `@zed-industries/claude-code-acp` **v0.16.2**,
+live ACP smoke 2026-07-16 (grok #147 bar): `initialize` → protocolVersion 1,
+loadSession:true, promptCapabilities {image, embeddedContext}, mcpCapabilities {http, sse},
+sessionCapabilities {fork, list, resume}; `session/new` → real sessionId + availableModels
+[default = Opus 4.6, sonnet, haiku] on the operator's cached login (no API key in env).
+`verified: true` flipped in src/harness-registry.ts with the record inlined.
+**Nested-session refusal reproduced live**: with `CLAUDECODE` in the adapter env, initialize still
+succeeds but `session/new` dies with `-32603 "Query closed before response received"` — exactly the
+silent first-contact failure predicted. No per-harness fix needed: `scrubbedSpawnEnv` (spawn-env.ts)
+already strips everything outside its keep-list from ACP spawns, CLAUDECODE included; pinned by a
+test in tests/here.test.ts. Proven live: the scratch daemon's `/proc/<pid>/environ` carried
+`CLAUDECODE=1` during the passing runs.
+
+**Parity acceptance test (live, worktree-backed session, per-axis):**
+- **CLAUDE.md: PASS** — agent answered the repo CLAUDE.md's magic word ("quokka-lantern") exactly.
+- **skills: PASS** — agent named the repo's `.claude/skills/tide-tables` skill.
+- **auto-memory: FAIL (documented gap)** — memory seeded under the REPO's path slug
+  (`~/.claude/projects/<repo-slug>/memory/MEMORY.md`) answered NONE. Mechanism pinned live: the same
+  question asked headlessly FROM the session's worktree with memory seeded under the WORKTREE's slug
+  answered correctly — auto-memory is keyed by the checkout path, and a worktree-backed session gets
+  a fresh path every time, so the project's accumulated memory never loads. Remediation sketch for a
+  follow-up concern: at claude-code console spawn, map the worktree's project dir onto the repo's
+  (symlink `~/.claude/projects/<worktree-slug>` → `<repo-slug>`) — deliberate follow-up, not a
+  five-minute fix: that dir also receives session logs, so the mapping decides where casual-session
+  history accrues and needs cleanup tied to worktree removal.
+
+**Live verification transcript (scratch-daemon rig):** typed prompt BEFORE session-ready → shown as
+queued → flushed on attach → real reply ("pong") streamed inline; second run answered all three
+parity questions; third run exercised the zero-setup path end-to-end: dead port → "start one in the
+background? [Y/n]" → daemon up **0.8s** → session ready **4.1s** → "pong2" → `/exit` outro with the
+webapp URL. After exit, `/api/projects` showed the repo `registered:false` (ephemeral released; the
+row remains only via the still-live idle chat unit — the registry's honest-union behavior, not a
+leak). Non-git cwd refusal verified live.
+
+**Prewarm (concern-01 recommendation honored).** Priority 1 implemented: create fires when the REPL
+opens and never blocks input; queued prompts flush on attach (observed live — the operator's typing
+fully hides setup). The concern-01 caveat to re-measure b2 on the claude harness: ready was ~5.3s
+cold / **3.9–4.1s warm** REPL-open→attach, i.e. claude-code's spawn→ready ≈ 2.7–2.9s vs omp's 1.4s
+(npx adapter + SDK boot). Priority 2 (one keep-warm console per project) deliberately NOT built:
+with the bigger claude b2 it would save more (~4s), but it pre-spends a real claude-code process per
+project on every daemon boot; revisit with dogfood evidence (B02 counters) if the warm 4s reads as
+friction in practice.
+
+**Known limits / follow-ups (named, not hidden):**
+- DB-registry mode: the bearer-token CLI actor has no org, so `POST /api/console` returns
+  "no active organization" (observed live when the scratch daemon accidentally booted DB-mode via the
+  repo's own `.env`). Property of every CLI verb against a DB-mode daemon (root-factory routing is the
+  existing escape hatch), not new here — but `glance here` is the first verb Lars will feel it on.
+- Webapp deep-link: the printed URL opens the dashboard (token flow) where the chat unit is live;
+  a per-session deep-link is concern 05's scope.
+- Exit keeps the console unit alive (the webapp-continuation promise; also what 04's reattach needs).
+  The daemon-side removal hook releases the ephemeral registration when that unit eventually goes.
