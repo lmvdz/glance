@@ -132,9 +132,3 @@ export async function classifyLane(task: string, repo: string, classify?: Classi
 	return heuristicLane(task);
 }
 
-/** The `lane [shadow]: <lane> source=<s> reason=<r>` log line, mirroring the `model-route [shadow]`
- *  precedent (src/squad-manager.ts) — one formatter so every call site logs identically. `apply` is
- *  false until a caller actually acts on the decision (nothing does yet in concern 01). */
-export function laneLogLine(decision: LaneDecision, apply: boolean): string {
-	return `lane${apply ? "" : " [shadow]"}: ${decision.lane} source=${decision.source} reason=${decision.reason}`;
-}

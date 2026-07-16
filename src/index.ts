@@ -51,6 +51,7 @@ import { concernNumFromFile, parsePlanConcerns, validatePlanConcerns } from "./f
 import { decompose, DECOMPOSE_TIMEOUT_MS, type VerifiedConcern } from "./planner.ts";
 import { writeConcernDrafts } from "./plan-writer.ts";
 import { ompClassify } from "./intake.ts";
+import { laneFromRouted } from "./lane.ts";
 import { RuntimeSettingsStore } from "./runtime-settings.ts";
 import { PolicyStore } from "./policy.ts";
 import { backendFromEnv, setStorageBackend } from "./dal/storage.ts";
@@ -458,6 +459,16 @@ async function cmdAdd(args: string[]): Promise<void> {
 	if (typeof flags.thinking === "string") options.thinking = flags.thinking as ThinkingLevel;
 	if (typeof flags.workflow === "string") options.workflow = flags.workflow;
 	if (typeof flags.verify === "string") options.verify = flags.verify;
+	// --lane hotfix|feature|chore: the CLI caller is the operator, so this is an operator-sourced
+	// lane (may move LANE_POLICY privilege axes). Invalid values are rejected loudly, never guessed.
+	if (typeof flags.lane === "string") {
+		const lane = laneFromRouted({ lane: flags.lane });
+		if (!lane) {
+			console.error(`unknown --lane "${flags.lane}" — expected hotfix | feature | chore`);
+			process.exit(1);
+		}
+		options.lane = lane;
+	}
 	if (typeof flags.sandbox === "string") options.sandbox = { image: flags.sandbox };
 	if (flags.acp === true || flags.runtime === "acp") options.runtime = "acp";
 	// Any registered harness by name (omp/pi/claude-code/codex/opencode/gemini/…). Supersedes --acp;

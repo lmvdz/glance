@@ -288,11 +288,16 @@ export function projectFromCostAggregate(
 	minSample: number,
 	now = Date.now(),
 ): CostAggregateProjection | undefined {
+	// A cell only ANSWERS when it can actually price a landed change: costPerLandedChange === null
+	// (enough attempts, zero landed — a fresh or all-failing lane) must fall through to the rollup /
+	// full-scan rungs, which may hold real landed data projecting over budget. Returning the null
+	// cell would short-circuit projectCost and silence the verdict for exactly the burn pattern
+	// (money spent, nothing landing) the gate exists to refuse (code-review, CONFIRMED).
 	if (lane) {
 		const laneCell = cellProjection(doc.cells[cellKey(model, tier, lane)], now);
-		if (laneCell && laneCell.sample >= minSample) return { ...laneCell, source: "lane" };
+		if (laneCell && laneCell.sample >= minSample && laneCell.costPerLandedChange !== null) return { ...laneCell, source: "lane" };
 	}
 	const rollupCell = cellProjection(doc.cells[cellKey(model, tier, LANE_AGNOSTIC)], now);
-	if (rollupCell && rollupCell.sample >= minSample) return { ...rollupCell, source: "rollup" };
+	if (rollupCell && rollupCell.sample >= minSample && rollupCell.costPerLandedChange !== null) return { ...rollupCell, source: "rollup" };
 	return undefined;
 }

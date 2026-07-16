@@ -29,7 +29,7 @@
 import { envInt } from "./config.ts";
 import { errText } from "./err-text.ts";
 import { LOCAL_ACTOR } from "./federation.ts";
-import { fetchIssueDetail, hashPlaneBody, listPlaneIssues, noAutoDispatchName, updatePlaneIssueBody } from "./plane.ts";
+import { fetchIssueBodyHtml, fetchIssueDetail, hashPlaneBody, listPlaneIssues, noAutoDispatchName, updatePlaneIssueBody } from "./plane.ts";
 import { parseTier2 } from "./tier2.ts";
 import type { Actor, AgentDTO, IssueRef, TaskDetail } from "./types.ts";
 import type { Answer } from "./answers.ts";
@@ -215,18 +215,34 @@ export async function promoteIssue(manager: PromoteManager, repo: string, issueI
 		};
 	}
 
-	// Re-read-before-write: a second promoter (or a human editing the ticket) could have promoted this
-	// same issue while the unit above was investigating. `updatePlaneIssueBody` has no true ETag to
-	// hash-guard against (Plane doesn't expose one on the read side this cheaply), so the guard here is
-	// re-checking the SAME idempotency signal fresh, immediately before the write.
+	// Re-read-before-write, hash-guarded (audit F5 / code-review [9]): read the RAW live body
+	// (`description_html` — the exact representation the PATCH replaces and `hashPlaneBody` compares),
+	// re-check the idempotency signal, then write with `expectHash` of exactly what we read. Two
+	// concurrent promoters can now both pass the alreadyPromoted check, but only the first PATCH
+	// lands — the second gets a typed `conflict`, never a silent clobber. A human's mid-run manual
+	// edit changes the hash and refuses the write the same way.
 	const fresh = await fetchIssueDetail(repo, ref.id);
 	if (fresh && alreadyPromoted(fresh)) {
 		return { ok: false, error: "already-promoted", message: `${ref.identifier ?? ref.id} was promoted by someone else while this ran — not overwriting.` };
 	}
+	const liveHtml = await fetchIssueBodyHtml(repo, ref.id);
+	if (liveHtml === undefined) {
+		return { ok: false, error: "write-failed", message: "could not read the live issue body to hash-guard the write — refusing to write blind." };
+	}
 
 	const marker = `<!-- promoted:${hashPlaneBody(draft).slice(0, 12)}:${new Date().toISOString().slice(0, 10)} -->`;
-	const write = await updatePlaneIssueBody(repo, ref.id, `${draft}\n${marker}`);
-	if (!write.ok) return { ok: false, error: "write-failed", message: `Plane write failed: ${write.error}` };
+	// The enrichment PREPENDS: the human's original description survives under its own heading at the
+	// TAIL, so dispatch-time truncation (OMP_SQUAD_SPEC_MAX_CHARS cuts the tail) can only ever cut the
+	// preserved original, never the validated Tier-2 sections (audit F5: promote must enrich, not
+	// destroy).
+	const original = liveHtml.trim() ? `\n<hr/>\n<h2>Original description</h2>\n${liveHtml}` : "";
+	const write = await updatePlaneIssueBody(repo, ref.id, `${draft}${original}\n${marker}`, { expectHash: hashPlaneBody(liveHtml) });
+	if (!write.ok) {
+		if (write.error === "conflict") {
+			return { ok: false, error: "already-promoted", message: `${ref.identifier ?? ref.id}'s body changed while this ran (another promoter or a human edit) — not overwriting.` };
+		}
+		return { ok: false, error: "write-failed", message: `Plane write failed: ${write.error}` };
+	}
 
 	return { ok: true, issue: ref.identifier ?? ref.id, message: `${ref.identifier ?? ref.id} promoted — stays in Backlog until a human drags it to Todo.` };
 }

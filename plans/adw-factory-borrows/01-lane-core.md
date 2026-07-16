@@ -1,5 +1,5 @@
 # Lane taxonomy, classifier, and clamped policy constants
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -24,3 +24,6 @@ None.
 - `bun test tests/lane.test.ts` — classifier fixtures for each lane + default; clamp table exhaustiveness (TypeScript exhaustive switch compiles).
 - Spawn a unit with task "revert the broken prod migration" on a scratch daemon → log shows `lane [shadow]: hotfix`.
 - Grep proof no new env-JSON config: `grep -rn "LANE_POLICY" src/ | grep -v lane.ts` only shows imports.
+
+## Resolution
+Shipped on branch worktree-research-adw-software-factory (PR #183), merged as e5caedd with integration/audit follow-ups on the same branch (see EXECUTION-LOG.md). src/lane.ts + intake ROUTER_PROMPT lane; review PASS; integration follow-ups: WorkLaneSource added (bc0d455), laneLogLine removed as dead post-audit. Policy-store override seam deliberately NOT built — see 00-overview Out of scope; operator lanes reach production via --lane / POST /api/spawn lane (audit F1 fix).

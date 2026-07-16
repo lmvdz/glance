@@ -165,8 +165,8 @@ import { type FederationSnapshot, federationView } from "./federation.ts";
 import { workflowSnapshot } from "./workflow-catalog.ts";
 import { validateRequestedMode } from "./autonomy.ts";
 import { resolveStateDir } from "./state-dir.ts";
-import { costGateMode } from "./cost-gate.ts";
-import { costAggregateNeedsRebuild } from "./cost-aggregate.ts";
+import { costGateAggregateReady, costGateMode } from "./cost-gate.ts";
+import { laneFromRouted } from "./lane.ts";
 import { featureFlagStates, type FeatureFlagKey, isFeatureFlagKey, type RuntimeSettingsStore } from "./runtime-settings.ts";
 import { parsePolicyDoc, type PolicyStore } from "./policy.ts";
 import { publicCapabilityCatalog, publicCapabilityManifest } from "./capabilities/catalog.ts";
@@ -843,7 +843,11 @@ export class SquadServer {
 			// posture as plane.ts's multi-org write guard.) Without these two fields the doctor's
 			// enforce-armed-but-inert check reads undefined and never fires against a live daemon.
 			costGateMode: costGateMode(),
-			costAggregateReady: !costAggregateNeedsRebuild(resolveStateDir()),
+			// costGateAggregateReady, NOT costAggregateNeedsRebuild: "the doc exists and parses" is true
+			// after the very first receipt write while every cell is still below OMP_SQUAD_COST_MIN_SAMPLE
+			// — enforce would be armed but silently inert, the exact false-green this fact feeds the
+			// doctor to catch. Readiness = some cell (either ledger) clears the sample floor.
+			costAggregateReady: await costGateAggregateReady(resolveStateDir()),
 		};
 	}
 
@@ -2314,6 +2318,11 @@ export class SquadServer {
 			// Observability-only provenance (e.g. "voice") threaded to recordAudit/audit.jsonl —
 			// contain-or-omit, same as every other `source` in audit.ts: never consulted for authz.
 			const source = Result.isSuccess(decoded) && typeof decoded.success.source === "string" ? decoded.success.source : undefined;
+			// Operator-sourced lane (adw-factory-borrows F1): the authenticated spawn caller is the
+			// operator, so this is the production path that makes `laneSource === "operator"` — and with
+			// it every LANE_POLICY privilege axis — actually reachable. Invalid values drop to undefined
+			// (classifier decides), never coerce.
+			const lane = Result.isSuccess(decoded) ? laneFromRouted(decoded.success) : undefined;
 			const tracked = manager.projects().map((p) => p.repo);
 			// research-sirvir/03 (dead-wire fix): feed the outcome-driven model shift from THIS request's
 			// resolved `manager` — never a bare `resolveStateDir()`, which in DB mode returns the global
@@ -2323,7 +2332,7 @@ export class SquadServer {
 			const scoreboard = envBool("OMP_SQUAD_MODEL_OUTCOMES", false) ? await manager.spawnScoreboard() : undefined;
 			const plan = await planSpawn(prompt, { cwd: process.cwd(), candidates: discoverRepos(process.cwd(), tracked), scoreboard });
 			try {
-				const dto = await manager.create({ ...plan, profileId, track: true }, actor, source);
+				const dto = await manager.create({ ...plan, profileId, lane, track: true }, actor, source);
 				return Response.json({ agent: dto, plan });
 			} catch (err) {
 				return new Response(err instanceof Error ? err.message : String(err), { status: 409 });

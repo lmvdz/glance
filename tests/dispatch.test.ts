@@ -533,3 +533,61 @@ test("state gate: an issue with no state field is unaffected (fail open — no g
 		delete process.env.OMP_SQUAD_DISPATCH_STATES;
 	}
 });
+
+test("state gate: config values are case-normalized — Plane-UI capitalization must not silently hold all work", async () => {
+	process.env.OMP_SQUAD_DISPATCH_STATES = "Unstarted,Started";
+	try {
+		const { deps, spawned } = harness({
+			listIssues: async () => [issue("A"), { ...issue("B"), state: "backlog" }],
+		});
+		expect(await new Dispatcher(deps).tick()).toBe(1);
+		expect(spawned).toEqual(["A"]); // "unstarted" matched despite the capitalized config; backlog held
+	} finally {
+		delete process.env.OMP_SQUAD_DISPATCH_STATES;
+	}
+});
+
+test("state gate: an unrecognized state value (degraded /states ⇒ raw UUID) fails CLOSED under a narrowed gate, open under the default", async () => {
+	const uuidIssue = { ...issue("A"), state: "0f9d2a34-raw-uuid" };
+	// Default set: fail open — no holding pen was asked for, a Plane hiccup must not hold everything.
+	{
+		const { deps, spawned } = harness({ listIssues: async () => [uuidIssue] });
+		expect(await new Dispatcher(deps).tick()).toBe(1);
+		expect(spawned).toEqual(["A"]);
+	}
+	// Narrowed set: fail closed — dispatching a raw Backlog ticket during a degradation permanently
+	// claims it in the add-only ledger, the exact loss the holding pen exists to prevent.
+	process.env.OMP_SQUAD_DISPATCH_STATES = "unstarted,started";
+	try {
+		const logs: string[] = [];
+		const { deps, spawned } = harness({ listIssues: async () => [uuidIssue], log: (m) => logs.push(m) });
+		expect(await new Dispatcher(deps).tick()).toBe(0);
+		expect(spawned).toEqual([]);
+		expect(logs.some((m) => m.includes("failing closed"))).toBe(true);
+	} finally {
+		delete process.env.OMP_SQUAD_DISPATCH_STATES;
+	}
+});
+
+test("a spawn that THROWS (e.g. an enforce-mode cost-gate deny) never stamps the persistent ledger — the issue stays recoverable", async () => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "dispatch-ledger-"));
+	const ledger = openDispatchLedger(dir);
+	const logs: string[] = [];
+	const { deps } = harness({
+		listIssues: async () => [issue("A")],
+		spawn: async () => {
+			throw new Error("cost-gate(enforce): over budget — would DENY");
+		},
+		log: (m) => logs.push(m),
+		ledger,
+	});
+	const dispatcher = new Dispatcher(deps);
+	expect(await dispatcher.tick()).toBe(0);
+	// The add-only, restart-safe ledger must NOT hold the failed spawn: stamping it would consume the
+	// issue forever (no removal API), even after the operator turns the gate off. The in-memory
+	// `dispatched` set still suppresses a per-tick retry storm within this boot.
+	expect(ledger.has("A")).toBe(false);
+	expect(await dispatcher.tick()).toBe(0); // in-memory claim holds for this boot
+	expect(logs.some((m) => m.includes("dispatch failed"))).toBe(true);
+	await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+});

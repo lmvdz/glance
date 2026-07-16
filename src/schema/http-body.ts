@@ -366,6 +366,10 @@ export const SpawnBodySchema = Schema.Struct({
 	prompt: Schema.String,
 	profileId: Schema.optional(Schema.Unknown),
 	source: Schema.optional(Schema.Unknown),
+	/** Operator-sourced work lane (adw-factory-borrows) — an authenticated API caller IS the operator,
+	 *  so a valid value here reaches `CreateAgentOptions.lane` and may move privilege axes. Validated
+	 *  against the `WorkLane` union at the handler; invalid values are dropped, never guessed. */
+	lane: Schema.optional(Schema.Unknown),
 });
 
 /** POST /api/console — no required field. */

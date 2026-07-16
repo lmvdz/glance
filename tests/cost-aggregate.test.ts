@@ -281,10 +281,19 @@ describe("lane fallback ladder (DESIGN.md: lane-keyed cell, else lane-agnostic r
 		expect(proj?.source).toBe("rollup");
 	});
 
-	test("zero landed on the answering cell ⇒ costPerLandedChange is null, not Infinity/NaN", () => {
+	test("zero landed on a cell ⇒ it does NOT answer (falls through), so a null price can never silence the verdict", () => {
+		// A cell with enough attempts but zero landed can't price a landed change; returning it would
+		// short-circuit projectCost and go silent for exactly the burn pattern (money spent, nothing
+		// landing) the gate exists to refuse (code-review, CONFIRMED). It must fall through to the
+		// rollup / full-scan rungs instead.
 		const d = doc({ "opus::heavy::hotfix": { attempts: 10, landed: 0, costUsdSum: 80, windowStart: Date.now() } });
-		const proj = projectFromCostAggregate(d, "opus", "heavy", "hotfix", 5);
-		expect(proj?.costPerLandedChange).toBeNull();
+		expect(projectFromCostAggregate(d, "opus", "heavy", "hotfix", 5)).toBeUndefined();
+		// With a landed rollup beside it, the ladder answers from the rollup:
+		const d2 = doc({
+			"opus::heavy::hotfix": { attempts: 10, landed: 0, costUsdSum: 80, windowStart: Date.now() },
+			"opus::heavy::*": { attempts: 10, landed: 4, costUsdSum: 80, windowStart: Date.now() },
+		});
+		expect(projectFromCostAggregate(d2, "opus", "heavy", "hotfix", 5)?.source).toBe("rollup");
 	});
 });
 

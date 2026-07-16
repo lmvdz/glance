@@ -1,5 +1,5 @@
 # Route validate.ts's spawns through the shipped gate container
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -21,3 +21,6 @@ None.
 ## Verify
 - `bun test tests/validate.test.ts` — existing suite green; new case asserting the spawn path goes through gate-runner when docker is available (inject a fake runner).
 - Live: run a commissioning validate on a scratch worker with docker up — gate logs show container execution for lint/typecheck; acceptance runs with its documented network posture. Kill docker → STRICT semantics match the rest of the gate system (degrade or refuse per existing contract, verified against `gateRunUnrunnable`).
+
+## Resolution
+Shipped on branch worktree-research-adw-software-factory (PR #183), merged as 7c8c675 with integration/audit follow-ups on the same branch (see EXECUTION-LOG.md). typecheck+acceptance spawns routed through execGatedCommand (closes OMPSQ-160; lint has no spawn — concern anchor was wrong); post-review hardening: argv-direct hostArgv fallback (login shell re-imported profile secrets, code-review [0]) and acceptance network honors an explicit operator OMP_SQUAD_GATE_SANDBOX_NETWORK (code-review [1]).

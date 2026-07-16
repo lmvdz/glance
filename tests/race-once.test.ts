@@ -8,7 +8,7 @@
 
 import { afterAll, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -122,7 +122,9 @@ test("catastrophe on an issue-carrying hotfix-lane unit races exactly one siblin
 	// becomes list()-visible (both happen inside the same `create()` call, but list-visibility fires
 	// earlier in `createWithId` than this method's own `await` on it resolves) — poll rather than race it.
 	const ledgerPath = path.join(stateDir, "race-ledger.json");
-	await waitFor(() => existsSync(ledgerPath));
+	// Claim-then-spawn: the ledger file exists (siblingAgentId "pending") BEFORE the sibling's
+	// create() resolves; wait for the post-create refinement, not mere existence.
+	await waitFor(() => existsSync(ledgerPath) && !readFileSync(ledgerPath, "utf8").includes('"pending"'));
 	const ledgerRaw = await fs.readFile(ledgerPath, "utf8");
 	const ledger = JSON.parse(ledgerRaw) as Record<string, { originalAgentId: string; siblingAgentId: string }>;
 	expect(ledger["iss-race-1"].originalAgentId).toBe(dto.id);
@@ -141,10 +143,11 @@ test("a second catastrophe (the sibling's own) escalates for real, naming both a
 	const rec = host.agents.get(dto.id)!;
 	rec.agent.emit("event", { type: "workflow_terminal", reason: 'node "n1" exceeded its visit cap (3)', checkpoint: checkpoint() });
 	await waitFor(() => mgr.list().some((a) => a.name === "wf-race"));
-	// Let the race fully commit (ledger written) before simulating the sibling's OWN later catastrophe —
-	// a real sibling can't fail before it's even finished spawning, so this mirrors the only order that
-	// can actually occur.
-	await waitFor(() => existsSync(path.join(stateDir, "race-ledger.json")));
+	// Let the race fully commit before simulating the sibling's OWN later catastrophe — a real sibling
+	// can't fail before it's even finished spawning, so this mirrors the only order that can actually
+	// occur. Claim-then-spawn stamps a "pending" placeholder BEFORE create() resolves, so wait for the
+	// post-create refinement (real sibling id), not mere file existence.
+	await waitFor(() => existsSync(path.join(stateDir, "race-ledger.json")) && !readFileSync(path.join(stateDir, "race-ledger.json"), "utf8").includes('"pending"'));
 
 	const siblingDto = mgr.list().find((a) => a.name === "wf-race")!;
 	const siblingRec = host.agents.get(siblingDto.id)!;

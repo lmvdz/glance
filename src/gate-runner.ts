@@ -214,8 +214,13 @@ function warnHostFallbackOnce(reason: string): void {
 	);
 }
 
-function hostPlan(command: string, env: Record<string, string>): GateExec {
-	return { argv: ["bash", "-lc", command], env, sandboxed: false };
+function hostPlan(command: string, env: Record<string, string>, hostArgv?: string[]): GateExec {
+	// `bash -lc` is a LOGIN shell: with HOME in env it sources /etc/profile + ~/.bash_profile, so
+	// profile-exported secrets re-enter a caller's deny-by-default env scrub exactly in the
+	// unsandboxed case it matters most. Callers that hold a real argv (validate.ts's commissioning
+	// gate) pass `hostArgv` to spawn direct, no shell — the container path is unaffected (its env is
+	// scrubbed and no operator profile exists in the image).
+	return { argv: hostArgv ?? ["bash", "-lc", command], env, sandboxed: false };
 }
 
 /**
@@ -302,6 +307,13 @@ export async function gateExec(
 		 * every other caller omits this and gets the gate-wide setting (default `none`).
 		 */
 		network?: string;
+		/**
+		 * Argv-direct host fallback: when the plan degrades to the HOST (docker unavailable or
+		 * explicitly disabled), spawn THIS argv instead of `bash -lc <command>` — a login shell
+		 * re-imports profile-exported secrets past a caller's own env scrub. Ignored on the
+		 * container path.
+		 */
+		hostArgv?: string[];
 	} = {},
 ): Promise<GateExec> {
 	const source = opts.source ?? process.env;
@@ -313,7 +325,7 @@ export async function gateExec(
 	// Explicit opt-out. STRICT overrides it: its whole point is to never silently run on the host.
 	if (disabled) {
 		if (strict) throw new GateSandboxUnavailableError("OMP_SQUAD_GATE_SANDBOX_STRICT=1 conflicts with the host opt-out — refusing to run the gate unsandboxed (fail-closed)");
-		return hostPlan(command, env);
+		return hostPlan(command, env, opts.hostArgv);
 	}
 
 	// Explicit image ⇒ always sandbox with it, as before (no probe — the operator asked for it).
@@ -336,7 +348,7 @@ export async function gateExec(
 	}
 	if (strict) throw new GateSandboxUnavailableError("OMP_SQUAD_GATE_SANDBOX_STRICT=1 but docker is unavailable — refusing to run the gate on the host (fail-closed)");
 	warnHostFallbackOnce("docker is unavailable");
-	return hostPlan(command, env);
+	return hostPlan(command, env, opts.hostArgv);
 }
 
 /**
@@ -348,9 +360,9 @@ export async function gateExec(
 export async function execGatedCommand(
 	command: string,
 	cwd: string,
-	opts: { mounts?: string[]; env?: Record<string, string>; network?: string } = {},
+	opts: { mounts?: string[]; env?: Record<string, string>; network?: string; hostArgv?: string[] } = {},
 ): Promise<{ code: number; stdout: string; stderr: string }> {
-	const plan = await gateExec(command, cwd, { mounts: opts.mounts, env: opts.env, network: opts.network });
+	const plan = await gateExec(command, cwd, { mounts: opts.mounts, env: opts.env, network: opts.network, hostArgv: opts.hostArgv });
 	const proc = Bun.spawn(plan.argv, { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", env: plan.env });
 	const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
 	return { code: await proc.exited, stdout, stderr };

@@ -1,5 +1,5 @@
 # Race-once at gate exhaustion (workflow catastrophe seam)
-STATUS: open
+STATUS: done
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -25,3 +25,6 @@ None.
 ## Verify
 - `bun test tests/race-once.test.ts` — catastrophe with race-eligible lane spawns exactly one sibling and suppresses escalation; second catastrophe escalates with both attempts; restart between catastrophe and sibling completion does not spawn a second sibling (ledger); non-race lane escalates immediately (existing behavior).
 - Live scratch-daemon: force a visit-cap catastrophe (impossible verify command) on a hotfix-lane unit with the flag on; observe park → sibling → (sibling fails) → single escalation naming both.
+
+## Resolution
+Shipped on branch worktree-research-adw-software-factory (PR #183), merged as 15911a7 with integration/audit follow-ups on the same branch (see EXECUTION-LOG.md). race-once at the workflow-catastrophe seam; spend clamp = human-sourced lanes only (90edadb); post-review: park failure now refuses to race (fail closed, code-review [6]) and the race ledger stamps claim-then-spawn with a pending->real refinement (code-review [7]).

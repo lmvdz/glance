@@ -1,5 +1,5 @@
 # Thread lane through issue → create → unit → receipts with clamped precedence
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -23,3 +23,6 @@ None. `AgentDTO.lane` is additive; webapp may render it later (not in this conce
 ## Verify
 - `bun test tests/lane-threading.test.ts` — precedence fixtures: opts beats label beats classifier beats default; clamp: labeled hotfix does not set apply-mode.
 - Scratch daemon: create a Plane issue labeled `lane:chore`, let the dispatcher spawn it, `GET /api/agents` shows `lane: "chore"`; receipt written on completion carries the lane.
+
+## Resolution
+Shipped on branch worktree-research-adw-software-factory (PR #183), merged as b176c7d with integration/audit follow-ups on the same branch (see EXECUTION-LOG.md). lane + laneSource end-to-end (label transport via dispatchSpec detail fetch); clamp re-scoped at integration (bc0d455): global model-route apply flag stays lane-independent, clamp binds to lane-derived router params; lane+source persist/restore verbatim across daemon restarts.

@@ -21,6 +21,8 @@ const PRIORITY_RANK: Record<string, number> = { urgent: 0, high: 1, medium: 2, l
 
 // Plane's five native state groups — the only values the state gate may act on.
 const PLANE_STATE_GROUPS = new Set(["backlog", "unstarted", "started", "completed", "cancelled"]);
+// The reader's own default — used to detect that an operator has explicitly NARROWED the gate.
+const DEFAULT_DISPATCH_STATES = ["backlog", "unstarted", "started"] as const;
 
 function norm(p: string): string {
 	const out: string[] = [];
@@ -291,8 +293,26 @@ export class Dispatcher {
 					// or the ledger, so it's re-checked every tick and dispatches the moment its state moves
 					// into the releasable set.
 					// Gate only on recognized Plane state GROUPS. When the /states fetch degrades,
-					// toIssueRef leaves a raw state UUID here — an unrecognized value must fail open
-					// (like a missing state), or a Plane hiccup silently holds every issue.
+					// toIssueRef leaves a raw state UUID here. Two postures, keyed on whether the operator
+					// explicitly narrowed the releasable set:
+					//   - DEFAULT set (backlog+unstarted+started = dispatch everything, today's behavior):
+					//     an unrecognized value fails OPEN, like a missing state — a Plane hiccup must not
+					//     hold every issue when no holding pen was asked for.
+					//   - NARROWED set (the operator opted into the holding pen): an unrecognized value
+					//     fails CLOSED with a loud once-per-issue log — dispatching a raw Backlog ticket
+					//     during a Plane degradation permanently claims it in the add-only ledger, the
+					//     unrecoverable loss the gate exists to prevent. Held issues recover next tick
+					//     once /states does.
+					const stateUnrecognized = issue.state !== undefined && !PLANE_STATE_GROUPS.has(issue.state);
+					const gateNarrowed = !DEFAULT_DISPATCH_STATES.every((g) => releasableStates.has(g));
+					if (stateUnrecognized && gateNarrowed) {
+						if (!this.stateGateLogged.has(issue.id)) {
+							this.stateGateLogged.add(issue.id);
+							this.deps.log(`hold ${issue.identifier ?? issue.id} — state "${issue.state}" unrecognized (degraded Plane /states?) and OMP_SQUAD_DISPATCH_STATES is narrowed: failing closed to protect the holding pen`);
+						}
+						noteSkip("unreleased-state", `open issue's state is unrecognized under a narrowed dispatch gate`);
+						continue;
+					}
 					if (issue.state !== undefined && PLANE_STATE_GROUPS.has(issue.state) && !releasableStates.has(issue.state)) {
 						if (!this.stateGateLogged.has(issue.id)) {
 							this.stateGateLogged.add(issue.id);
@@ -371,12 +391,18 @@ export class Dispatcher {
 						this.deps.scopeFinding?.(repo, `${why} for ${issueKey(issue)}: ${unmet.join(", ")}`);
 						this.deps.log(`scope warning ${issueKey(issue)} — ${why}: ${unmet.join(", ")}`);
 					}
+					// In-memory claim BEFORE the await (no double-spawn within this boot), but the PERSISTENT
+					// add-only ledger is stamped only after spawn RESOLVES: a spawn refused at create time
+					// (e.g. an enforce-mode cost-gate deny) must not permanently consume the issue — the
+					// ledger has no removal, so stamping first meant the ticket could never dispatch again,
+					// even after the operator turned the gate off (code-review, CONFIRMED). The in-memory
+					// `dispatched` set still suppresses per-tick retry storms until the next daemon restart.
 					this.dispatched.add(issue.id);
-					this.deps.ledger?.add(issue.id);
 					this.blockedLogged.delete(issue.id); // dispatching ⇒ no longer deferred
 					this.deps.log(`dispatch ${issue.identifier ?? issue.id} — ${issue.name}`);
 					try {
 						const dto = await this.deps.spawn(repo, issue);
+						this.deps.ledger?.add(issue.id);
 						spawned++;
 						budget--;
 						// Harness scorecard (concern 03, advisory-only): surface a context-poor unit right at

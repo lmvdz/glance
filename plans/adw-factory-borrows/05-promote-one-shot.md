@@ -1,5 +1,5 @@
 # `glance promote` — one-shot Tier-1/Tier-2 enrichment with human release
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -25,3 +25,6 @@ None.
 ## Verify
 - `bun test tests/promote.test.ts` — refusal on quarantined titles; idempotent second call; fail-closed on empty verification after truncation; no Plane write on validation failure (mock).
 - Live scratch-daemon pass: promote a real Backlog ticket end-to-end; confirm body enriched + marker present + state still Backlog; drag to Todo with `OMP_SQUAD_DISPATCH_STATES=unstarted,started` and watch it dispatch with the Tier-2 spec injected (check the unit's system prompt block).
+
+## Resolution
+Shipped on branch worktree-research-adw-software-factory (PR #183), merged as 373db2d with integration/audit follow-ups on the same branch (see EXECUTION-LOG.md). promoteIssue via the real ask() seam, truncation-aware fail-closed validation, quarantine refusal, CLI + POST /api/issues/:id/promote + webapp button; async route fix (30-min block vs 120s idleTimeout); post-audit: original body preserved under a tail heading + expectHash clobber guard wired (audit F5 / code-review [9]).

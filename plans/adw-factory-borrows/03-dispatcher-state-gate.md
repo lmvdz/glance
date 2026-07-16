@@ -1,5 +1,5 @@
 # Dispatcher state gate — make Backlog a real holding pen
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -21,3 +21,6 @@ None.
 ## Verify
 - `bun test tests/dispatch.test.ts` — new cases: backlog-state issue skipped when gate configured to `unstarted,started`; ledger never receives its id; same issue dispatches after state moves to Todo (unstarted).
 - Scratch daemon with `OMP_SQUAD_DISPATCH_STATES=unstarted,started`: file a Backlog ticket, observe skip log and no spawn across two ticks; drag to Todo, observe dispatch.
+
+## Resolution
+Shipped on branch worktree-research-adw-software-factory (PR #183), merged as c837c6a with integration/audit follow-ups on the same branch (see EXECUTION-LOG.md). state gate before all claim checks; acts only on the five Plane groups; config case-normalized, unrecognized state fails CLOSED under a narrowed gate / open under the default (audit F4 + code-review [8]); persistent ledger stamped only after spawn resolves (code-review [4]).

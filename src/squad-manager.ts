@@ -4373,36 +4373,6 @@ export class SquadManager extends EventEmitter {
 		// scoreboard's lane-mix row reads this back (see `factoryStatus()` below). Recorded regardless of
 		// `laneAppliesPrivilege`/source: the point is "what did the fleet classify", not "who may act on it".
 		this.learningMetrics.record("lane-classification", 1, { lane: resolvedLane, source: laneSource });
-		// Pre-execution cost projection (C-COST), per-lane ENFORCE (adw-factory-borrows concern 09): the
-		// lane's own `costAction` (LANE_POLICY, v1: only "chore" is "deny") decides how far this can go.
-		// `OMP_SQUAD_COST_GATE=enforce` + a "deny" verdict refuses the spawn outright, BEFORE any worktree
-		// or agent record exists — surfaced as both a create error (thrown below) and an attention-lane
-		// event; there is no live `AgentRecord` yet to attach to, so this reuses the SAME "unattached
-		// escalation" idiom `fileMembraneBreakerFinding` uses for exactly that case: the daemon-scoped
-		// "land" automation channel, tagged with `UNATTACHED_ESCALATION_MARKER`. An "ask" verdict does NOT
-		// hold the spawn (a not-yet-existing unit can't be staged the way a landConfirm-held green verify
-		// is — that needs a new resumable pending-create queue, out of this concern's scope); instead
-		// `costGateAsk` is stashed here and, once the agent record exists below, attached to the SAME
-		// "Needs you" attention lane a landConfirm-staged unit's one-tap Land uses (see
-		// `stageCostGateConfirm`) — the operator's one tap is the EXISTING Stop/Remove control. Any OTHER
-		// mode (`shadow`/`off`, or a lane whose own `costAction` is "shadow") stays the ORIGINAL
-		// fire-and-forget, non-blocking shadow check — a spawn is never delayed by a check nobody asked to
-		// enforce.
-		const costMode = costGateMode();
-		let costGateAsk: CostVerdict | undefined;
-		if (costMode === "enforce") {
-			const verdict = await shadowCostCheck(this.stateDir, opts.model, tierOf(opts.thinking), (line) => this.log("warn", line), resolvedLane, laneAppliesPrivilege);
-			if (verdict) this.learningMetrics.record("cost-gate-verdict", 1, { action: verdict.action, lane: resolvedLane, mode: costMode });
-			if (verdict?.action === "deny") {
-				this.automation.for("land", opts.repo)({ durationMs: 0, level: "warn", detail: `${UNATTACHED_ESCALATION_MARKER} — ${verdict.line}` });
-				throw new Error(verdict.line);
-			}
-			if (verdict?.action === "ask") costGateAsk = verdict;
-		} else {
-			void shadowCostCheck(this.stateDir, opts.model, tierOf(opts.thinking), (line) => this.log("warn", line), resolvedLane, laneAppliesPrivilege).then((verdict) => {
-				if (verdict) this.learningMetrics.record("cost-gate-verdict", 1, { action: verdict.action, lane: resolvedLane, mode: costMode });
-			});
-		}
 		// work → Plane: a freshly-spawned, issue-less task self-registers as a tracked Plane issue,
 		// so the fleet is observable from the backlog without a manual plan-to-plane step. No-ops when
 		// Plane is unconfigured; restore / fan-out / flue paths never set `track`.
@@ -4472,6 +4442,48 @@ export class SquadManager extends EventEmitter {
 				this.log("warn", `model-route decision failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
 			}
 		}
+		// Pre-execution cost projection (C-COST), per-lane ENFORCE (adw-factory-borrows concern 09),
+		// deliberately placed AFTER model routing: the gate must judge the model that will actually
+		// run — verdicting on the pre-route default admitted a chore spawn under the cheap family's
+		// history and then routed it onto a frontier model whose lane cell projected far over ceiling
+		// (code-review, CONFIRMED under-deny). The
+		// lane's own `costAction` (LANE_POLICY, v1: only "chore" is "deny") decides how far this can go.
+		// `OMP_SQUAD_COST_GATE=enforce` + a "deny" verdict refuses the spawn outright, BEFORE any worktree
+		// or agent record exists — surfaced as both a create error (thrown below) and an attention-lane
+		// event; there is no live `AgentRecord` yet to attach to, so this reuses the SAME "unattached
+		// escalation" idiom `fileMembraneBreakerFinding` uses for exactly that case: the daemon-scoped
+		// "land" automation channel, tagged with `UNATTACHED_ESCALATION_MARKER`. An "ask" verdict does NOT
+		// hold the spawn (a not-yet-existing unit can't be staged the way a landConfirm-held green verify
+		// is — that needs a new resumable pending-create queue, out of this concern's scope); instead
+		// `costGateAsk` is stashed here and, once the agent record exists below, attached to the SAME
+		// "Needs you" attention lane a landConfirm-staged unit's one-tap Land uses (see
+		// `stageCostGateConfirm`) — the operator's one tap is the EXISTING Stop/Remove control. Any OTHER
+		// mode (`shadow`/`off`, or a lane whose own `costAction` is "shadow") stays the ORIGINAL
+		// fire-and-forget, non-blocking shadow check — a spawn is never delayed by a check nobody asked to
+		// enforce.
+		const costMode = costGateMode();
+		let costGateAsk: CostVerdict | undefined;
+		// Restore/adopt/fork/race paths (the only setters of opts.laneSource) are exempt from enforce:
+		// a projection about historical (model,tier,lane) economics must never refuse to RE-create an
+		// already-admitted unit after a restart — that strands a live worktree's built-up context on a
+		// gate that judged nothing about it (code-review, CONFIRMED). New work only.
+		if (costMode === "enforce" && opts.laneSource === undefined) {
+			// tierOf(opts.thinking), NOT the "low"-defaulted `thinking` local: receipts stamp their tier
+			// from rec.options.thinking (the same undefaulted value), and a gate that queries a different
+			// tier key than the data was written with silently never matches a cell.
+			const verdict = await shadowCostCheck(this.stateDir, opts.model, tierOf(opts.thinking), (line) => this.log("warn", line), resolvedLane, laneAppliesPrivilege);
+			if (verdict) this.learningMetrics.record("cost-gate-verdict", 1, { action: verdict.action, lane: resolvedLane, mode: costMode });
+			if (verdict?.action === "deny") {
+				this.automation.for("land", opts.repo)({ durationMs: 0, level: "warn", detail: `${UNATTACHED_ESCALATION_MARKER} — ${verdict.line}` });
+				throw new Error(verdict.line);
+			}
+			if (verdict?.action === "ask") costGateAsk = verdict;
+		} else {
+			void shadowCostCheck(this.stateDir, opts.model, tierOf(opts.thinking), (line) => this.log("warn", line), resolvedLane, laneAppliesPrivilege).then((verdict) => {
+				if (verdict) this.learningMetrics.record("cost-gate-verdict", 1, { action: verdict.action, lane: resolvedLane, mode: costMode });
+			});
+		}
+
 		const kind = opts.flue ? "flue-service" : opts.workflow || opts.verify ? "workflow" : "omp-operator";
 
 		// Resolve the harness backing a plain-agent unit and gate on its capabilities BEFORE cutting a
@@ -6226,9 +6238,25 @@ export class SquadManager extends EventEmitter {
 		// original — racing both at once would double-land the same issue. Mirrors applyCommand's "kill"
 		// case (stop, then transition to the terminal `stopped` status) but without `killedByOperator` —
 		// this is a system park kept around for forensics, not an operator-directed kill.
-		await rec.agent.stop().catch((err) => this.log("warn", `race-once: stop() failed while parking ${rec.dto.id}: ${String(err)}`));
+		// FAIL CLOSED on a failed stop (code-review, CONFIRMED): a wedged harness process that survives
+		// stop() keeps committing on its branch — spawning the sibling anyway is exactly the concurrent
+		// double-land the park exists to prevent. No park ⇒ no race ⇒ normal human escalation.
+		try {
+			await rec.agent.stop();
+		} catch (err) {
+			this.log("warn", `race-once: stop() failed while parking ${rec.dto.id} — NOT racing (a live original + sibling could double-land); escalating instead: ${String(err)}`);
+			this.raceInFlight.delete(issue.id);
+			return false;
+		}
 		this.transition(rec, "stopped", "kill");
 		this.emitAgent(rec);
+
+		// [7] Stamp the once-per-issue-ever budget BEFORE the sibling exists (code-review, CONFIRMED):
+		// a crash in the window between a durably-created sibling and a post-create ledger write leaves
+		// a live sibling with a re-armed race budget — the sibling's own later catastrophe would race a
+		// THIRD attempt. Claim-then-spawn: if create() fails the budget is burned and we escalate — the
+		// fail-closed direction (one lost race opportunity, never a double-spend).
+		this.raceLedger.record({ issueId: issue.id, originalAgentId: rec.dto.id, originalDetail: reason, siblingAgentId: "pending", strategy: "pending", racedAt: Date.now() });
 
 		const strategy = pickAlternateStrategy(reason);
 		// deterministic planeIssueBranch collides with the original's own branch on the same issue — suffix it.
@@ -6268,6 +6296,7 @@ export class SquadManager extends EventEmitter {
 			// claimed() bookkeeping: the Dispatcher's claimed set is derived live from `this.agents` (both
 			// the parked original and this sibling carry the same `issue.id`), so the issue reads as claimed
 			// throughout — nothing else to stamp.
+			// Overwrite the pre-spawn "pending" stamp with the real sibling id/strategy (same issue key).
 			this.raceLedger.record({ issueId: issue.id, originalAgentId: rec.dto.id, originalDetail: reason, siblingAgentId: sibling.id, strategy: strategy.key, racedAt: Date.now() });
 			this.log("warn", `race-once: ${issue.identifier ?? issue.id} catastrophe'd (${reason}) — parked ${rec.dto.id}, racing sibling ${sibling.id} (strategy "${strategy.key}")`);
 			void this.recordAudit(LOCAL_ACTOR, "race-once", rec.dto.id, "ok", `sibling ${sibling.id} strategy=${strategy.key}`);

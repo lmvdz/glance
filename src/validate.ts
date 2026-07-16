@@ -13,7 +13,7 @@ import { execGatedCommand } from "./gate-runner.ts";
 import type { CommissionSpec, GateCheck, GateReport } from "./types.ts";
 
 /** execGatedCommand's own call shape — the seam validate.ts's gate checks spawn through. */
-type GateExecFn = (command: string, cwd: string, opts?: { mounts?: string[]; env?: Record<string, string>; network?: string }) => Promise<{ code: number; stdout: string; stderr: string }>;
+type GateExecFn = (command: string, cwd: string, opts?: { mounts?: string[]; env?: Record<string, string>; network?: string; hostArgv?: string[] }) => Promise<{ code: number; stdout: string; stderr: string }>;
 
 export interface GateOptions {
 	/** Fail the gate if the acceptance check is skipped (no flue toolchain). */
@@ -98,7 +98,10 @@ async function typecheckWorker(dir: string, exec: GateExecFn): Promise<GateCheck
 	// `env` override keeps baselineEnv() (narrower than gate-runner's own pass-through-minus-secrets)
 	// as belt-and-suspenders INSIDE the container; no network override, so it inherits the gate-wide
 	// `--network none` default (tsc needs no network).
-	const { code, stdout: out, stderr: err } = await exec(shellCommand([tscBin, "-p", "tsconfig.json", "--noEmit"]), dir, { env: baselineEnv() });
+	const tscArgv = [tscBin, "-p", "tsconfig.json", "--noEmit"];
+	// hostArgv: on the docker-less fallback, spawn argv-direct — `bash -lc` is a login shell that
+	// re-imports profile-exported secrets past baselineEnv()'s scrub (code-review, CONFIRMED).
+	const { code, stdout: out, stderr: err } = await exec(shellCommand(tscArgv), dir, { env: baselineEnv(), hostArgv: tscArgv });
 	return code === 0
 		? { name: "typecheck", status: "pass" }
 		: { name: "typecheck", status: "fail", detail: (out + err).trim().split("\n").slice(0, 8).join("\n") };
@@ -119,7 +122,11 @@ function shellCommand(argv: string[]): string {
  * lets an operator tighten (or further loosen) it without touching the gate-wide knob.
  */
 function acceptanceGateNetwork(source: Record<string, string | undefined> = process.env): string {
-	return source.OMP_SQUAD_ACCEPTANCE_GATE_NETWORK?.trim() || "bridge";
+	// Precedence (code-review, CONFIRMED): the acceptance-scoped knob wins; otherwise an operator's
+	// EXPLICIT gate-wide OMP_SQUAD_GATE_SANDBOX_NETWORK is honored (someone who hardened to "none"
+	// must not have one gate silently re-open egress for the least-trusted spawn in the system);
+	// only when neither is set does the acceptance default widen to "bridge".
+	return source.OMP_SQUAD_ACCEPTANCE_GATE_NETWORK?.trim() || source.OMP_SQUAD_GATE_SANDBOX_NETWORK?.trim() || "bridge";
 }
 
 /**
@@ -194,11 +201,9 @@ async function acceptanceWorker(dir: string, spec: CommissionSpec, exec: GateExe
 	// container — gate-runner's own env is a broader pass-through-minus-secrets, wrong for
 	// model-authored code. `network` widens ONLY this call past the gate-wide `--network none`
 	// default (see acceptanceGateNetwork) since `flue run` makes real model/network calls.
-	const { code, stdout: out, stderr: err } = await exec(
-		shellCommand([flueBin, "run", spec.name, "--target", target, "--payload", JSON.stringify(spec.accept.payload)]),
-		dir,
-		{ env: acceptanceEnv(spec), network: acceptanceGateNetwork() },
-	);
+	const flueArgv = [flueBin, "run", spec.name, "--target", target, "--payload", JSON.stringify(spec.accept.payload)];
+	// hostArgv: same login-shell secret-reimport hazard as typecheckWorker — argv-direct on host.
+	const { code, stdout: out, stderr: err } = await exec(shellCommand(flueArgv), dir, { env: acceptanceEnv(spec), network: acceptanceGateNetwork(), hostArgv: flueArgv });
 	if (code !== 0) {
 		return { check: { name: "acceptance", status: "fail", detail: `flue run exited ${code}: ${(err || out).trim().slice(0, 200)}` } };
 	}

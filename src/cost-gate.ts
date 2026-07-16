@@ -56,7 +56,7 @@ import {
 
 export type CostGateMode = "off" | "shadow" | "enforce";
 
-/** off (default) | shadow (log only) | enforce (reserved — treated as shadow in v1; hard block deferred). */
+/** off (default) | shadow (log only) | enforce (concern 09: "deny" refuses the spawn, "ask" stages a confirm). */
 export function costGateMode(): CostGateMode {
 	const m = process.env.OMP_SQUAD_COST_GATE;
 	return m === "shadow" || m === "enforce" ? m : "off";
@@ -71,6 +71,11 @@ export interface CostProjection {
 	landRate: number | null;
 	/** $ per landed change for this model's daemon runs; null when nothing has landed yet. */
 	costPerLandedChange: number | null;
+	/** Which ledger answered: the lane-keyed O(1) aggregate (concern 08) or the legacy lane-blind
+	 *  full-scan fallback. Enforce-mode "deny" requires "aggregate" — the legacy scan is all-time and
+	 *  lane-blind, so a hard refusal from it is exactly the wrong-deny-on-arrival hazard the aggregate
+	 *  was built to prevent (DESIGN.md). Absent (older callers/tests) reads as "legacy": can't deny. */
+	source?: "aggregate" | "legacy";
 }
 
 /**
@@ -99,7 +104,7 @@ export async function projectCost(stateDir: string, model: string | undefined, t
 		const doc = costAggregateNeedsRebuild(stateDir) ? await rebuildCostAggregate(stateDir) : readCostAggregateDoc(stateDir);
 		const fast = projectFromCostAggregate(doc, model, tier, lane, minSample);
 		if (fast) {
-			return { model: model ?? "unknown", tier, sample: fast.sample, landRate: fast.landRate ?? landRate, costPerLandedChange: fast.costPerLandedChange };
+			return { model: model ?? "unknown", tier, sample: fast.sample, landRate: fast.landRate ?? landRate, costPerLandedChange: fast.costPerLandedChange, source: "aggregate" };
 		}
 		// Fast path missed (aggregate present but too thin for either the lane-keyed or lane-agnostic
 		// cell) — fall back to the ORIGINAL full-scan computation, unchanged, so a thin aggregate never
@@ -114,7 +119,7 @@ export async function projectCost(stateDir: string, model: string | undefined, t
 	} catch {
 		/* projection is best-effort — a ledger read failure just leaves cost null (silent) */
 	}
-	return { model: model ?? "unknown", tier, sample, landRate, costPerLandedChange };
+	return { model: model ?? "unknown", tier, sample, landRate, costPerLandedChange, source: "legacy" };
 }
 
 export interface CostVerdict {
@@ -165,6 +170,11 @@ export function costGateVerdict(p: CostProjection, lane?: WorkLane, laneAppliesP
 		const featureAction = LANE_POLICY.feature.costAction;
 		if (ACTION_RANK[action] < ACTION_RANK[featureAction]) action = featureAction; // never looser than feature
 	}
+	// A hard refusal must come from the lane-keyed aggregate, not the all-time lane-blind legacy scan
+	// (or an unsourced projection): during the ramp window the legacy rung answers everything, and a
+	// chore denied against feature-dominated all-time history is the exact wrong-deny-on-arrival the
+	// aggregate exists to prevent. Downgrade to "ask" — visible, never a silent pass, never a block.
+	if (action === "deny" && p.source !== "aggregate") action = "ask";
 	const pct = p.landRate == null ? "?" : `${Math.round(p.landRate * 100)}%`;
 	const line = `cost-gate(${costGateMode()}): ${p.model}/${p.tier}${lane ? `/${lane}` : ""} projects $${p.costPerLandedChange.toFixed(2)}/landed-change (land-rate ${pct}, n=${p.sample}) — over budget $${budget.toFixed(2)}; would ${action.toUpperCase()}`;
 	return { action, line };

@@ -1,5 +1,5 @@
 # Lane-keyed O(1) cost aggregate
-STATUS: open
+STATUS: done
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -22,3 +22,6 @@ None.
 ## Verify
 - `bun test tests/cost-aggregate.test.ts` — receipt write updates the right cells; window expiry; rebuild from receipts equals incremental state (property test over a receipt sequence); lane fallback ladder.
 - Scratch daemon: run two units in different lanes, inspect the aggregate doc, confirm both keys present and the roll-up matches the scoreboard's `costPerLandedChange` for the same window.
+
+## Resolution
+Shipped on branch worktree-research-adw-software-factory (PR #183), merged as c7d8c3f with integration/audit follow-ups on the same branch (see EXECUTION-LOG.md). cost-aggregate.ts + receipts wire + fallback ladder; squad-manager wires (RunSeed.tier, recordCostLanded in land()) landed at integration (90edadb); post-review: zero-landed cells fall through instead of silencing the verdict (code-review [2]); rebuild landed overlay clamped to windowed attempts.

@@ -1,5 +1,5 @@
 # Plane write primitives: body update + fail-closed named-state move
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -19,3 +19,6 @@ None.
 ## Verify
 - `bun test tests/plane-writes.test.ts` against a mocked Plane fetch: body write refuses on hash mismatch; state move refuses on unknown name and writes nothing; multi-org guard no-ops.
 - Live (optional, operator Plane): `updatePlaneIssueBody` round-trip on a scratch ticket preserves the marker; `movePlaneIssueToState(..., "NoSuchState")` errors without a state change.
+
+## Resolution
+Shipped on branch worktree-research-adw-software-factory (PR #183), merged as f41d22c with integration/audit follow-ups on the same branch (see EXECUTION-LOG.md). updatePlaneIssueBody (expectHash) + movePlaneIssueToState (named-state-or-no-write) + multi-org guard via dbMode(); fetchIssueBodyHtml added post-audit so the hash guard is actually usable by the promoter.

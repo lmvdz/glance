@@ -10,7 +10,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-const proj = (over: Partial<CostProjection>): CostProjection => ({ model: "sonnet", tier: "mid", sample: 20, landRate: 0.5, costPerLandedChange: 3, ...over });
+// source "aggregate" by default: these unit tests exercise verdict logic for a projection the
+// lane-keyed aggregate answered. "deny" REQUIRES that — a legacy/unsourced projection downgrades to
+// "ask" (all-time, lane-blind history must never hard-refuse a spawn; see the dedicated test below).
+const proj = (over: Partial<CostProjection>): CostProjection => ({ model: "sonnet", tier: "mid", sample: 20, landRate: 0.5, costPerLandedChange: 3, source: "aggregate", ...over });
 
 afterEach(() => {
 	delete process.env.OMP_SQUAD_COST_GATE;
@@ -61,6 +64,15 @@ test("ASK when over budget, DENY when over 2x budget", () => {
 });
 
 // ── adw-factory-borrows concern 09: per-lane enforce ────────────────────────────────────────────
+
+test("deny DOWNGRADES to ask when the projection is legacy-sourced (all-time, lane-blind history must never hard-refuse)", () => {
+	process.env.OMP_SQUAD_COST_GATE = "enforce";
+	process.env.OMP_SQUAD_COST_MAX_PER_CHANGE = "2"; // global ceiling for the lane-less assertion below
+	const legacyChore = costGateVerdict(proj({ costPerLandedChange: 3, source: "legacy" }), "chore");
+	expect(legacyChore?.action).toBe("ask"); // chore's own row says deny; the source guard caps it
+	const unsourced = costGateVerdict(proj({ costPerLandedChange: 30, source: undefined }));
+	expect(unsourced?.action).toBe("ask"); // 10x over: the old 2x heuristic said deny; unsourced can't
+});
 
 test("chore lane DENIES over its own ceiling ($2), even at a dollar amount that would only ASK by the old 2x heuristic", () => {
 	process.env.OMP_SQUAD_COST_GATE = "enforce";

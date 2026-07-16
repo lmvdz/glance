@@ -65,7 +65,13 @@ export function openRaceLedger(stateDir: string): RaceLedger {
 			return all[issueId];
 		},
 		record(rec) {
-			if (all[rec.issueId]) return; // first-wins: once per issue, ever
+			// First-wins (once per issue, ever), with ONE legal refinement: the claim-then-spawn flow
+			// stamps a "pending" placeholder BEFORE the sibling exists (fail-closed crash-window guard)
+			// and refines it with the real sibling id/strategy after create() resolves — same original
+			// only, so no other caller can ever repurpose a stamped issue.
+			const existing = all[rec.issueId];
+			const refinesPending = existing?.siblingAgentId === "pending" && existing.originalAgentId === rec.originalAgentId;
+			if (existing && !refinesPending) return;
 			all[rec.issueId] = rec;
 			writeAll(stateDir, all);
 		},

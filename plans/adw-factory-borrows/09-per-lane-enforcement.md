@@ -1,5 +1,5 @@
 # Per-lane enforcement flips: cost-gate enforce + model-route apply
-STATUS: open
+STATUS: done
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -21,3 +21,6 @@ Webapp: the scoreboard row renders in the existing usage/attribution panel — s
 ## Verify
 - `bun test tests/cost-gate.test.ts tests/model-route.test.ts` — enforce deny refuses spawn for chore over ceiling with sufficient lane-keyed sample; falls silent below min-sample; hotfix never denies v1; apply-mode requires lane flag AND global.
 - Scratch daemon with `OMP_SQUAD_COST_GATE=enforce` + seeded aggregate: chore-lane spawn over ceiling refused with verdict line visible in UI attention; feature-lane spawn unaffected. Status surface shows the three shadow counters.
+
+## Resolution
+Shipped on branch worktree-research-adw-software-factory (PR #183), merged as a9973fd with integration/audit follow-ups on the same branch (see EXECUTION-LOG.md). real enforce (deny refuses spawn, ask stages attention confirm) + per-lane model-route apply (OR-widening, operator-sourced only) + shadow-exit scoreboard + doctor check; post-audit: deny requires an AGGREGATE-sourced projection (legacy downgrades to ask, code-review [3]/audit F3), gate judges the post-route model, restore/adopt paths exempt (code-review [5]), doctor wired to costGateAggregateReady (audit F2).

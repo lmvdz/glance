@@ -19,6 +19,7 @@ import type { AgentDriver } from "../src/agent-driver.ts";
 import { LANE_POLICY, type WorkLane } from "../src/lane.ts";
 import { recordModelOutcome, type ComplexityTier } from "../src/model-outcomes.ts";
 import { appendReceipt } from "../src/receipts.ts";
+import { recordCostLanded } from "../src/cost-aggregate.ts";
 import { SquadManager, UNATTACHED_ESCALATION_MARKER } from "../src/squad-manager.ts";
 import type { PersistedAgent, RpcSessionState } from "../src/types.ts";
 
@@ -101,6 +102,11 @@ async function seedOverCeilingCost(stateDir: string, model: string, tier: Comple
 	const perRun = totalCostUsd / landedCount;
 	for (let i = 0; i < landedCount; i++) {
 		recordModelOutcome(stateDir, model, tier, true);
+		// Landed counts must reach the lane-keyed aggregate too: enforce-mode "deny" only fires from an
+		// AGGREGATE-sourced projection (the lane-blind legacy full-scan downgrades to "ask" — see
+		// costGateVerdict), so the seed mirrors production's land() wire (recordCostLanded beside
+		// recordModelOutcome) and stamps `tier` on the receipt the way the run seed does.
+		recordCostLanded(stateDir, model, tier, undefined);
 		await appendReceipt(stateDir, {
 			agentId: `cost-seed-${model}-${tier}-${i}`,
 			name: `cost-seed-${i}`,
@@ -113,6 +119,7 @@ async function seedOverCeilingCost(stateDir: string, model: string, tier: Comple
 			toolTally: {},
 			filesTouched: [],
 			model,
+			tier,
 			costUsd: perRun,
 		});
 	}

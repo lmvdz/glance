@@ -440,6 +440,24 @@ export function hashPlaneBody(descriptionHtml: string): string {
  *  hash no longer matches, the write is refused with `conflict` and NOTHING is sent — a re-fetch-then-
  *  compare, not a blind overwrite, so two promoters racing the same ticket can't clobber each other.
  *  @substrate consumed by concern 05 promoter */
+/** Raw `description_html` of one issue — the exact representation `updatePlaneIssueBody` PATCHes and
+ *  `hashPlaneBody` compares. `TaskDetail.body` is `description_stripped` (a lossy render), so a caller
+ *  that wants to preserve or hash-guard the live body (the promoter) must read THIS, not the detail.
+ *  `undefined` on any failure — callers decide whether that blocks their write.
+ *  @substrate consumed by concern 05 promoter */
+export async function fetchIssueBodyHtml(repo: string, issueId: string): Promise<string | undefined> {
+	const ctx = planeContext(repo);
+	if (!ctx) return undefined;
+	const { headers, projectId, base } = ctx;
+	if (!projectId) return undefined;
+	const resolvedId = await resolveIssueId(base, headers, issueId);
+	if (!resolvedId) return undefined;
+	const res = await throttledFetch(`${base}/issues/${encodeURIComponent(resolvedId)}/`, { headers });
+	if (!res || !res.ok) return undefined;
+	const raw = (await res.json().catch(() => null)) as { description_html?: string } | null;
+	return raw?.description_html ?? "";
+}
+
 export async function updatePlaneIssueBody(
 	repo: string,
 	issueId: string,

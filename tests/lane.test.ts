@@ -4,7 +4,7 @@
  */
 
 import { expect, test } from "bun:test";
-import { classifyLane, laneFromRouted, laneLogLine, LANE_POLICY, WORK_LANES, type WorkLane } from "../src/lane.ts";
+import { classifyLane, laneFromRouted, LANE_POLICY, WORK_LANES, type WorkLane } from "../src/lane.ts";
 
 // ── heuristic classification (no classify fn) ──────────────────────────────────────────────────
 
@@ -81,12 +81,6 @@ test("laneFromRouted: reads a valid lane, rejects invalid/absent values", () => 
 });
 
 // ── shadow log line ──────────────────────────────────────────────────────────────────────────
-
-test("laneLogLine: shadow vs apply formatting mirrors the model-route [shadow] precedent", async () => {
-	const d = await classifyLane("revert the broken prod migration", "/repo");
-	expect(laneLogLine(d, false)).toBe(`lane [shadow]: hotfix source=heuristic reason=${d.reason}`);
-	expect(laneLogLine(d, true)).toBe(`lane: hotfix source=heuristic reason=${d.reason}`);
-});
 
 // ── LANE_POLICY exhaustiveness (clamp table) ────────────────────────────────────────────────────
 

@@ -130,7 +130,10 @@ export function envStringList(name: string, fallback: string[]): string[] {
  * default flip.
  */
 export function dispatchStates(): string[] {
-	return envStringList("OMP_SQUAD_DISPATCH_STATES", ["backlog", "unstarted", "started"])
+	// Lowercased: Plane state GROUPS are lowercase ("unstarted"), but Plane's UI capitalizes state
+	// names — an operator typing `Unstarted,Started` would otherwise silently hold 100% of open work
+	// (code-review, CONFIRMED).
+	return envStringList("OMP_SQUAD_DISPATCH_STATES", ["backlog", "unstarted", "started"]).map((s) => s.toLowerCase())
 }
 
 /** Test-only: reset the once-per-var warning guard. */
