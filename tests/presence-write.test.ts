@@ -110,6 +110,29 @@ test("authz: presence/lease reads are viewer, writes are operator", () => {
 	expect(restActionTier("DELETE", "/api/leases")).toBe("operator");
 });
 
+test("GET /api/presence without credentials is refused on a token-configured daemon — the adopt roster never leaks unauthenticated (daily-onramp 06)", async () => {
+	const { url } = await fixture();
+	const res = await fetch(`${url}/api/presence`); // no Authorization header at all
+	expect(res.status).toBeGreaterThanOrEqual(401);
+	expect(res.status).toBeLessThanOrEqual(403);
+});
+
+test("GET /api/presence reports the same entries `who()` does for the repo — the webapp adopt list reads the CLI's truth (daily-onramp 06)", async () => {
+	const { url, repo: raw } = await fixture();
+	const repo = await registerAndCanonical(url, raw);
+	// Claim through the harness-events route — the exact write path an ad-hoc `claude` session's
+	// hook uses, so the GET below reads a real harness presence row (id `harness-…`, source other).
+	const claimed = await fetch(`${url}/api/harness-events`, authed({ method: "POST", body: JSON.stringify({ harness: "claude", event: "prompt", sessionId: "sess-1", cwd: repo }) })).then((r) => r.json());
+	expect(typeof claimed.claimed).toBe("string");
+
+	const { who } = await import("../src/presence.ts");
+	const direct = await who(repo);
+	const viaApi = (await fetch(`${url}/api/presence?repo=${encodeURIComponent(repo)}`, authed()).then((r) => r.json())) as { id: string; agent: string; source: string }[];
+	expect(viaApi.map((e) => e.id).sort()).toEqual(direct.map((e) => e.id).sort());
+	const row = viaApi.find((e) => e.id === claimed.claimed);
+	expect(row).toMatchObject({ agent: "claude:sess-1", source: "other" });
+});
+
 test("POST /api/presence for a registered project round-trips through GET; DELETE removes it", async () => {
 	const { url, repo: raw } = await fixture();
 	const repo = await registerAndCanonical(url, raw);

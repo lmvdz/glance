@@ -45,7 +45,7 @@ import {
 import { useTaskContext } from '../context/TaskContext';
 import { PageContextScope } from '../context/PageContext';
 import { deriveFleetPageContext } from '../lib/pageContextDerive';
-import { AgentLandControls } from './chat/AgentMetaBar';
+import { AgentLandControls, AgentPromoteButton } from './chat/AgentMetaBar';
 import { validationBadge, confidenceBadge, prStateBadgeLabel, isValidatorHeld } from '../lib/agent-badges';
 import { canLand, answerCommand, interruptCommand, interruptibleAgents, restartCommand, setModelCommand } from '../lib/agent-control';
 import { apiJson, jsonInit } from '../lib/api';
@@ -56,7 +56,8 @@ import { TranscriptTimeline, agentIsRunning, transcriptIsRunning } from './chat/
 import { Composer, type ModelOption } from './chat/Composer';
 import { deriveSuggestionChips } from './AssistantChat';
 import { StatusChip, Kbd, MonoLabel, PanelSection, DiffStat } from './kit';
-import { toneClasses } from './ui';
+import { AdoptCard, toneClasses } from './ui';
+import { adoptableSessions, adoptSession, type AdoptableSession, type PresenceEntryDTO } from '../lib/adoptPromote';
 import {
   attentionItems,
   activeWork,
@@ -425,6 +426,10 @@ const LandRail: React.FC<{
                 </a>
               )}
               <div className="flex items-center gap-2">
+                {/* Promote parity for the cockpit (daily-onramp 06): a console/`here` chat selected
+                    here gets the same "make this a unit" the AssistantChat meta bar offers — the
+                    button self-gates (isPromotableChat) so it renders for nothing else. */}
+                <AgentPromoteButton agent={agent} showToast={showToast} />
                 <AgentLandControls agent={agent} showToast={showToast} />
               </div>
             </>
@@ -487,16 +492,22 @@ export const WorkspaceCockpit: React.FC = () => {
   const [gov, setGov] = useState<GovernancePayload | null>(null);
   const [usage, setUsage] = useState<UsagePayload | null>(null);
   const [serverItems, setServerItems] = useState<ServerActionItem[]>([]);
+  // Presence-detected ad-hoc CLI sessions (daily-onramp 06) — same poll, same cadence, no new WS
+  // event type. `/api/presence` answers `[]` in DB-registry mode (machine-wide state, risk #6) and
+  // on any error, so the adopt section simply never renders where it can't work.
+  const [presence, setPresence] = useState<PresenceEntryDTO[]>([]);
 
   const loadFleetHealth = useCallback(async () => {
-    const [g, u, ai] = await Promise.all([
+    const [g, u, ai, pres] = await Promise.all([
       apiJson<GovernancePayload>('/api/governance').catch(() => null),
       apiJson<UsagePayload>('/api/usage?limit=200').catch(() => null),
       apiJson<ActionItemsResponse>('/api/action-items').catch(() => ({ items: [], generatedAt: 0 })),
+      apiJson<PresenceEntryDTO[]>('/api/presence').catch(() => [] as PresenceEntryDTO[]),
     ]);
     setGov(g);
     setUsage(u);
     setServerItems(ai.items ?? []);
+    setPresence(pres);
   }, []);
 
   useEffect(() => {
@@ -521,6 +532,7 @@ export const WorkspaceCockpit: React.FC = () => {
   );
   const workItems = useMemo(() => activeWork(agents, features), [agents, features]);
   const roster: FleetRoster = useMemo(() => buildFleetRoster(agents, attn, workItems), [agents, attn, workItems]);
+  const adoptable = useMemo(() => adoptableSessions(presence), [presence]);
   const activityRollup = useMemo(() => fleetActivityRollup(audit), [audit]);
 
   const needsCount = roster.needs.length + roster.virtualNeeds.length;
@@ -704,6 +716,30 @@ export const WorkspaceCockpit: React.FC = () => {
     }
   }, [showToast, reload]);
 
+  // Adopt an ad-hoc CLI session into a gated unit (daily-onramp 06). On success the new unit
+  // arrives on the very next roster broadcast like any other; selecting it immediately makes the
+  // click land somewhere visible. A 409's server `reason` is shown VERBATIM — every refusal
+  // (stale claim, sibling checkout, already adopted at this HEAD) is a specific, actionable
+  // sentence the server already wrote; wrapping it in "Adopt failed" would only blur it.
+  const [adoptingId, setAdoptingId] = useState<string | null>(null);
+  const adoptAdhoc = useCallback(async (session: AdoptableSession) => {
+    setAdoptingId(session.claimId);
+    try {
+      const result = await adoptSession(session);
+      if (result.ok && result.agent) {
+        showToast(`Adopted ${session.label} — unit ${result.agent.name} carries its uncommitted work`, 'success');
+        setSelectedId(result.agent.id);
+        void reload();
+      } else {
+        showToast(result.reason ?? 'Adopt refused', 'error');
+      }
+    } catch (e) {
+      showToast(`Adopt failed: ${e instanceof Error ? e.message : String(e)}`, 'error');
+    } finally {
+      setAdoptingId(null);
+    }
+  }, [showToast, reload]);
+
   const handleSend = (text: string) => {
     if (!selectedAgent || !text.trim()) return;
     const pending = selectedAgent.pending[0];
@@ -880,6 +916,18 @@ export const WorkspaceCockpit: React.FC = () => {
               <GroupHeader title="Unstaffed plans" count={filteredUnstaffed.length} />
               {filteredUnstaffed.map((row) => (
                 <UnstaffedRow key={row.item.featureId} row={row} busy={staffingId === row.item.featureId} onStaff={staffPlan} onOpen={openUnstaffed} />
+              ))}
+            </>
+          )}
+
+          {/* Ad-hoc CLI sessions detected via presence (daily-onramp 06) — a raw `claude` running
+              outside glance gets an adopt affordance instead of vanishing from view. Hidden
+              entirely when there are none: detection cards, not a permanent empty panel. */}
+          {adoptable.length > 0 && (
+            <>
+              <GroupHeader title="Ad-hoc sessions" count={adoptable.length} />
+              {adoptable.map((session) => (
+                <AdoptCard key={session.claimId} session={session} busy={adoptingId === session.claimId} onAdopt={(s) => void adoptAdhoc(s)} />
               ))}
             </>
           )}

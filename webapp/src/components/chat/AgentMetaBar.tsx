@@ -2,6 +2,7 @@ import React from 'react';
 import { apiFetch, jsonInit } from '../../lib/api';
 import { canLand, landToast, verifyToast, type LandResultDTO, type ProofResultDTO, type ToastTone } from '../../lib/agent-control';
 import { confidenceBadge, landButtonLabel, validationBadge } from '../../lib/agent-badges';
+import { isPromotableChat, promoteChat } from '../../lib/adoptPromote';
 import type { AgentDTO } from '../../lib/dto';
 import { fmtDuration } from './ToolCallGroup';
 
@@ -25,6 +26,13 @@ export const AgentMetaBar = ({ agent, changedFiles, children }: { agent?: AgentD
   return (
     <div className="flex flex-shrink-0 items-center gap-2 border-b border-gray-200 bg-white px-4 py-1.5 text-[11px] text-gray-500 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-400" aria-label="Agent mode and git status">
       <span className="rounded-full border border-gray-200 px-1.5 py-0.5 uppercase text-gray-600 dark:border-gray-800 dark:text-gray-300" title={agent.blockedReason ? `Blocked: ${agent.blockedReason}` : `Requested ${agent.autonomyMode ?? 'assist'}; effective ${agent.effectiveMode ?? 'assist'}`}>{agent.effectiveMode ?? 'assist'}</span>
+      {/* Unit chrome for a promoted console chat (daily-onramp 06): same thread, same agent id —
+          only its standing changed, and this pill is the visible half of that flip. */}
+      {agent.promoted && (
+        <span className="rounded-full border border-emerald-300 bg-emerald-50 px-1.5 py-0.5 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300" title="Promoted from a console chat — this thread is now a working unit in the Fleet roster">
+          unit
+        </span>
+      )}
       <span className="rounded-full border border-gray-200 px-1.5 py-0.5 text-gray-600 dark:border-gray-800 dark:text-gray-300" title={agent.proof?.fingerprint ?? 'No proof fingerprint'}>proof: {agent.verificationState ?? 'unknown'}</span>
       {validation && <span className={`rounded-full px-1.5 py-0.5 ${validation.cls}`} title={validation.title}>{validation.label}</span>}
       {confidence && <span className={`rounded-full px-1.5 py-0.5 ${confidence.cls}`} title={confidence.title}>{confidence.label}</span>}
@@ -109,6 +117,46 @@ export const AgentLandControls = ({ agent, showToast }: { agent?: AgentDTO; show
         {busy === 'land' ? 'Landing…' : forceArmed ? 'Force land ⚠' : landButtonLabel(agent)}
       </button>
     </>
+  );
+};
+
+/**
+ * "Make this a unit" (daily-onramp 06) — the missing caller for `POST /api/agents/:id/promote`.
+ * Renders ONLY for a console/`here`-class chat that isn't promoted yet (`isPromotableChat`, the
+ * wire-visible mirror of the server's own gate) and disappears the moment the roster broadcast
+ * carries `promoted:true` back — the same thread re-renders with its unit pill, not a new agent.
+ * v1 sends a bare promote (no task): the server's idempotent re-steer makes prompt-later safe,
+ * and the next thing the operator types into this very Composer IS the work instruction.
+ * A 409's `reason` is shown verbatim (fail-closed honesty), never a generic error.
+ */
+export const AgentPromoteButton = ({ agent, showToast }: { agent?: AgentDTO; showToast: (message: string, type?: ToastTone) => void }) => {
+  const [busy, setBusy] = React.useState(false);
+  if (!isPromotableChat(agent)) return null;
+  const id = agent!.id;
+
+  const promote = async () => {
+    setBusy(true);
+    try {
+      const result = await promoteChat(id);
+      if (result.ok) showToast('This chat is now a working unit — same thread, now gated and visible in the Fleet roster.', 'success');
+      else showToast(result.reason ?? 'Promote refused', 'error');
+    } catch (error) {
+      showToast(`Promote failed: ${error instanceof Error ? error.message : String(error)}`, 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <button
+      type="button"
+      disabled={busy}
+      onClick={() => void promote()}
+      title="Promote this chat into a gated working unit — keeps this thread and its history"
+      className="flex min-h-6 items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 text-[11px] font-medium text-amber-700 transition-colors hover:bg-amber-100 focus-visible:ring-2 focus-visible:ring-amber-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-300 dark:hover:bg-amber-900/40"
+    >
+      {busy ? 'Promoting…' : 'Make this a unit'}
+    </button>
   );
 };
 

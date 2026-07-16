@@ -925,6 +925,11 @@ export interface AgentDTO {
 	 *  an agent directly (merge→gate→rollback) instead of an isolated worktree pre-verify. Cleared the
 	 *  moment it actually runs again (a turn starts). */
 	adopted?: boolean;
+	/** Console chat unit promoted into a working unit (E02 / daily-onramp 06) — the wire mirror of
+	 *  `PersistedAgent.promoted`, stamped in `promote()` and carried through the reattach DTO builds.
+	 *  Display bridge only (the webapp hides its "Make this a unit" affordance and shows unit chrome
+	 *  off this); the promote gate itself stays server-side on the persisted options. */
+	promoted?: boolean;
 	/** True only on the synthetic DTO `create()` returns when a spawn is parked at the WIP cap (OMP_SQUAD_QUEUE_ON_FULL). Never set on a roster agent. */
 	queued?: boolean;
 	/** Pre-dispatch harness scorecard (advisory shadow, `harness-scorecard.ts`) — a static score of this
