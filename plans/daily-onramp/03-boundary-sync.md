@@ -4,7 +4,7 @@ STATUS: open
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
-TOUCHES: src/boundary-sync.ts (new), src/squad-manager.ts, src/types.ts (AttentionEvent source union), src/server.ts, webapp/src/components/AttentionRow.tsx, webapp/src/lib/fleetRoster.ts, tests/boundary-sync.test.ts (new)
+TOUCHES: src/boundary-sync.ts (new), src/squad-manager.ts, src/types.ts (AttentionEvent source union), src/server.ts, webapp/src/components/ui/AttentionRow.tsx, webapp/src/lib/fleetRoster.ts, tests/boundary-sync.test.ts (new)
 BLOCKED_BY: 02
 
 ## Goal
@@ -13,7 +13,7 @@ A `glance here` turn's edits show up in the operator's REAL checkout — the dir
 
 ## Approach
 
-**Turn boundary hook.** `agent_end` (squad-manager.ts:6224, the same event `voicePushArmed` and checkpoint capture already key off) is "turn finished." A new `src/boundary-sync.ts` module exposes `captureRealTreeState(realDir)` and `applyTurnPatch(...)`, called from that case for `here`-class casual agents only (a new small marker on the agent record, e.g. `rec.options.realTreePath`, set at creation time in concern 02 to the operator's cwd — plain fleet units never carry it, so this never fires for them).
+**Turn boundary hook.** `agent_end` (squad-manager.ts:6225, the same event `voicePushArmed` and checkpoint capture already key off) is "turn finished." A new `src/boundary-sync.ts` module exposes `captureRealTreeState(realDir)` and `applyTurnPatch(...)`, called from that case for `here`-class casual agents only (a new small marker on the agent record, e.g. `rec.options.realTreePath`, set at creation time in concern 02 to the operator's cwd — plain fleet units never carry it, so this never fires for them).
 
 **Read-only tree-state fingerprint (fail-closed by construction).** Never mutate the real tree to fingerprint it — no `git add`, no `stash`, no index writes. Reuse exactly the read-only pattern `adopt()` already uses to snapshot a live tree without touching it (squad-manager.ts:4297-4310): `git rev-parse HEAD`, `git diff --no-ext-diff --no-textconv --binary HEAD` (tracked changes), and `git ls-files -z --others --exclude-standard` (untracked paths) run against the REAL directory. Hash the concatenation of all three (sha256) into one fingerprint. Any of the three git calls failing (non-zero exit, directory gone, not a repo anymore) makes fingerprint capture itself fail — which is a FAILURE, not an empty-string fingerprint; a failed capture can never compare equal to anything, so it can never authorize an apply. This is the concern's fail-closed core: hash-capture failure ⇒ no auto-apply, hold + attention, same code path as a genuine divergence.
 

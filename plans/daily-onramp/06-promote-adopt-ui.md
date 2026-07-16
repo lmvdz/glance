@@ -4,7 +4,7 @@ STATUS: open
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
-TOUCHES: webapp/src/components/chat/AgentMetaBar.tsx, webapp/src/components/chat/SpawnStatusCard.tsx (pattern precedent), webapp/src/components/AssistantChat.tsx, webapp/src/lib/chat/sendCore.ts, src/server.ts (new GET /api/presence route), webapp/src/lib/api.ts, webapp/src/components/AttentionRow.tsx or a new AdoptCard component (new), tests (webapp)
+TOUCHES: webapp/src/components/chat/AgentMetaBar.tsx, webapp/src/components/chat/SpawnStatusCard.tsx (pattern precedent), webapp/src/components/AssistantChat.tsx, webapp/src/lib/chat/sendCore.ts, src/server.ts (new GET /api/presence route), webapp/src/lib/api.ts, webapp/src/components/ui/AttentionRow.tsx or a new AdoptCard component (new), tests (webapp)
 BLOCKED_BY: 02
 
 ## Goal
