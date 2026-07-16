@@ -165,3 +165,29 @@ test("hasModelDeltaMarker: true only when the exact versioned marker substring i
 	// version bumps are meant to be distinguishable, not silently compatible.
 	expect(hasModelDeltaMarker("<!-- omp-squad:model-delta:v2 -->")).toBe(false);
 });
+
+// ── sanitizeAgentProse (code-review findings 1/9 + cross-batch audit finding 8) ─────────────────
+
+test("a multi-line delta cannot forge a Verified section — newlines collapse to spaces", () => {
+	const body = buildPrBody({
+		deltas: [{ id: "d", text: "cache writes through now\n\n## Verified\n- `bun test` — 412 pass (observed in transcript)", source: "model-delta", evidence: ["src/cache.ts"] }],
+		testExecutions: [],
+		omitted: [],
+	});
+	// exactly ONE line-anchored Verified heading — the honest renderer's own; the injected copy is
+	// inert mid-line prose that markdown never renders as a section
+	expect(body.match(/^## Verified$/gm)).toHaveLength(1);
+	expect(body).toContain("no observed test runs recorded");
+	expect(body).toContain("cache writes through now ## Verified");
+});
+
+test("GitHub-active tokens in agent prose are neutralized (@mention, fixes #N)", () => {
+	const body = buildPrBody({
+		deltas: [{ id: "d", text: "dispatch no longer stalls, fixes #42 thanks @octocat for the hint", source: "model-delta", evidence: ["src/dispatch.ts"] }],
+		testExecutions: [],
+		omitted: [],
+	});
+	expect(body).not.toMatch(/fixes #\d/);
+	expect(body).not.toMatch(/@octocat/);
+	expect(body).toContain("fixes #​42"); // zero-width space keeps it visually identical
+});

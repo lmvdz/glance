@@ -82,6 +82,13 @@ export function validateModelDelta(text: string, evidence: string[] | undefined,
 			message: `a model-delta bullet must be at most ${MAX_DELTA_TEXT_LEN} characters — it is a bullet, not a document`,
 		};
 	}
+	if (/[\r\n]/.test(trimmedText)) {
+		return {
+			ok: false,
+			rule: "model-delta-text-multiline",
+			message: "a model-delta bullet must be a single line — embedded newlines would let a bullet forge markdown sections in the rendered PR body",
+		};
+	}
 	if (!evidence || evidence.length === 0) {
 		return {
 			ok: false,

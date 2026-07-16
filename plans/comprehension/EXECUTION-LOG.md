@@ -243,3 +243,21 @@ over-report typed work done during THIS call as "while you were away". Fixed by 
 
 `webapp bun test`: 1358 pass / 0 fail (51 new). `bunx tsc --noEmit` clean. Root suite untouched (no
 daemon files touched this concern).
+
+## Audit round (Phase 5): /code-review high (workflow) + cross-batch fable audit + live smoke
+Live smoke (scratch daemon, port 17891): fail-closed foreign-repo POST 400; feature→visible→200;
+seen map persisted with \0 keys; honest cold-start fog; surprise store materialized; teardown clean.
+Cross-batch audit verdict SHIP; fixes applied: adopt-path body repair now empty-body-only (human
+bodies never replaced); GitHub-token neutralization; worktree-first whereToLook stat; episodes authz
+noted; docs honesty (flag default, goal-shrink wording) folded into the PR description instead of
+DESIGN edits.
+/code-review (high, workflow wy5nicl3h; verify stage partially killed by a session limit — all 10
+surfaced findings arrived CONFIRMED): fixed newline/markdown injection in delta+symptom prose (render-
+side sanitizeAgentProse in pr-body+episode AND record-side multiline rejection in both validators +
+whereToLook control-char floor); episodeExists now requires BOTH md+meta halves (crash between the
+two writes no longer wedges the week); gatherEpisodeInputs passes surpriseCounts (episode fog ==
+/api/fog); evidence anchors normalized at record time (raw "./x" no longer no-ops surprise/jump/fog
+joins); voice cursor commit restored to "only what was actually heard" (max of narrated completion ts
+and episode generatedAt — never Date.now(), which skipped barged-over completions forever); heatmap
+repo labels deepen per collision group (trailing-two-segment repo collisions keep unique node ids).
+Post-fix gates: root 3260/0 fail, webapp 1372/0, tsc clean both, dead-exports at baseline.

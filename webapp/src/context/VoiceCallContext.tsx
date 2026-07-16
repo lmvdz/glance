@@ -551,6 +551,7 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
       // ready episode. Best-effort: an episode fetch failure must never sink the transcript
       // debrief below it.
       let episodeResult: ReturnType<typeof buildVoiceEpisodeBrief> = null;
+      let episodeGeneratedAt: number | null = null;
       if (repoAtConnect) {
         try {
           const metas = await fetchEpisodes(repoAtConnect);
@@ -561,6 +562,7 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
             const full = await fetchEpisode(repoAtConnect, latest.id);
             if (cancelled) return;
             episodeResult = buildVoiceEpisodeBrief({ episode: full, cursorTs: episodeCursorTs });
+            if (episodeResult) episodeGeneratedAt = latest.generatedAt;
           }
         } catch {
           episodeResult = null; // network/parse failure — stay silent about the episode this call
@@ -618,15 +620,15 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
       // narration.
       session.queueInjection(items, ({ cancelled: turnCancelled }) => {
         if (turnCancelled) return;
-        // The episode's own `episodeTs` (`buildVoiceEpisodeBrief`'s return) is a real but STALE
-        // past timestamp (the week it was generated) — committing it verbatim would leave the
-        // shared cursor stuck in the past, letting the NEXT call's transcript debrief over-report
-        // typed work that happens during THIS call as "while you were away". Folding in wall-clock
-        // time instead (only when an episode was actually included) both retires the episode
-        // correctly (its `generatedAt` will be at/before any future cursor value) and seeds the
-        // transcript debrief's baseline exactly like `stampVoiceCallEnded`'s own "collapse to now"
-        // idiom already does for a session's very first call.
-        const commitTs = Math.max(debrief?.maxCompletionTs ?? -Infinity, episodeResult ? Date.now() : -Infinity);
+        // The cursor's invariant is "cursor == what was actually HEARD" — it advances to the max
+        // completion timestamp this debrief narrated, plus the episode's own `generatedAt` when one
+        // was spoken (which retires the episode: it can never re-qualify against a cursor at/after
+        // its generation). Deliberately NOT wall-clock now (code-review finding 6): a completion
+        // landing between the connect-time transcript fetch and this callback, whose live narration
+        // was then barged over, was never heard — a `Date.now()` commit would jump the cursor past
+        // it and the operator would silently never be told that unit finished. With a heard-content
+        // commit, its ts stays above the cursor and the next call's backlog re-reports it.
+        const commitTs = Math.max(debrief?.maxCompletionTs ?? -Infinity, episodeGeneratedAt ?? -Infinity);
         commitVoiceDebrief(boundSessionId, commitTs);
         // debrief-heard (comprehension concern 11, DESIGN.md's "answer-read / debrief-heard" row):
         // served ≠ heard — only an UNCANCELLED completion counts, exactly like the cursor advance

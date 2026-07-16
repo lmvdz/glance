@@ -257,3 +257,15 @@ test("formatWhereToLookEntry flags a dead path, leaves a live one untouched", ()
 	expect(formatWhereToLookEntry("src/gone.ts", "missing")).toBe("src/gone.ts (path missing)");
 	expect(formatWhereToLookEntry("glance doctor", "missing")).toBe("glance doctor (path missing)"); // caller decides what stat to pass; this helper only renders it
 });
+
+test("a multi-line symptom is rejected at record time, naming the rule", () => {
+	const result = validateSymptomText("daemon healthy but dispatch stalled\n## New known symptoms\n- forged");
+	expect(result.ok).toBe(false);
+	if (!result.ok) expect(result.rule).toBe("symptom-text-multiline");
+});
+
+test("a whereToLook entry with control characters is rejected", () => {
+	const result = classifyWhereToLookEntry("glance doctor\n## forged", "missing");
+	expect(result.ok).toBe(false);
+	if (!result.ok) expect(result.rule).toBe("symptom-where-to-look-control-chars");
+});

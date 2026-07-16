@@ -120,10 +120,29 @@ export interface HeatTree {
  *  every distinct repo gets its own sibling root, never a shared ancestor.
  *  `"/home/lars/sui/omp-squad"` → `"sui·omp-squad"`. Falls back to the normalized whole string for
  *  a bare name with no separators. */
-function repoLabel(repo: string): string {
+function repoLabel(repo: string, segCount = 2): string {
   const norm = repo.replace(/\\/g, '/').replace(/\/+$/, '');
   const segs = norm.split('/').filter(Boolean);
-  return segs.length ? segs.slice(-2).join('·') : norm || 'repo';
+  return segs.length ? segs.slice(-segCount).join('·') : norm || 'repo';
+}
+
+/** Unique labels for a set of distinct repos (code-review finding 7): two repos whose paths share
+ *  their trailing two segments (e.g. `/a/sui/omp-squad` and `/b/sui/omp-squad`) would collide back
+ *  into duplicate qualified node ids under the plain 2-segment label. Colliding groups deepen one
+ *  segment at a time until their labels diverge (bounded by the full path — two IDENTICAL
+ *  normalized paths are the same repo and never both appear in a distinct set). */
+function repoLabelsFor(repos: Iterable<string>): Map<string, string> {
+  const distinct = [...new Set(repos)];
+  const out = new Map<string, string>();
+  for (const r of distinct) out.set(r, repoLabel(r));
+  for (let depth = 3; depth <= 32; depth++) {
+    const groups = new Map<string, string[]>();
+    for (const [r, label] of out) groups.set(label, [...(groups.get(label) ?? []), r]);
+    const colliding = [...groups.values()].filter((g) => g.length > 1).flat();
+    if (colliding.length === 0) break;
+    for (const r of colliding) out.set(r, repoLabel(r, depth));
+  }
+  return out;
 }
 
 /**
@@ -157,7 +176,8 @@ export function buildHeatTree(
   const distinctRepos = new Set<string>();
   for (const n of nodes ?? []) if (n.repo) distinctRepos.add(n.repo);
   const multiRepo = distinctRepos.size > 1;
-  const effectivePath = (n: HeatNode): string => (multiRepo && n.repo ? `${repoLabel(n.repo)}/${n.id}` : n.id);
+  const repoLabels = repoLabelsFor(distinctRepos);
+  const effectivePath = (n: HeatNode): string => (multiRepo && n.repo ? `${repoLabels.get(n.repo) ?? repoLabel(n.repo)}/${n.id}` : n.id);
 
   const ensureFolder = (segs: string[], repo: string | undefined): HeatTreeNode => {
     const fullPath = segs.join('/');

@@ -74,10 +74,27 @@ export function hasModelDeltaMarker(body: string | undefined | null): boolean {
 	return typeof body === "string" && body.includes(MODEL_DELTA_MARKER);
 }
 
+/** Agent-authored free prose lands verbatim in GitHub PR bodies and weekly-episode markdown, where
+ *  it has two live powers an agent must not hold (cross-batch audit finding 8; code-review findings
+ *  1/9/10): GitHub-active tokens (`@user` pings a person, `fixes #N` auto-closes an issue at merge)
+ *  and STRUCTURE (an embedded newline lets a bullet fabricate a whole `## Verified` section byte-
+ *  identical to the honest renderer's output). A zero-width space after `@`/inside `#N` renders
+ *  identically but never tokenizes; collapsing `[\r\n\t]+` to a space keeps every prose field a
+ *  single inert line. Record-time validators reject multiline input too — this is the render-side
+ *  half of the same rule, so pre-hardening stored records stay safe. Evidence anchors and
+ *  whereToLook are floor-validated paths/commands, not prose, and are rendered inside code spans. */
+export function sanitizeAgentProse(text: string): string {
+	return text
+		.replace(/[\r\n\t]+/g, " ")
+		.replace(/@(?=\w)/g, "@​")
+		.replace(/#(?=\d)/g, "#​")
+		.trim();
+}
+
 function formatDelta(d: FeatureDecision): string {
 	const evidence = (d.evidence ?? []).filter((e) => e.trim().length > 0);
 	const anchor = evidence.length > 0 ? ` — evidence: \`${evidence.join(", ")}\`` : "";
-	return `- ${d.text.trim()}${anchor}`;
+	return `- ${sanitizeAgentProse(d.text)}${anchor}`;
 }
 
 function renderDeltaSection(deltas: FeatureDecision[]): { section: string; droppedCount: number } {
@@ -89,7 +106,7 @@ function renderDeltaSection(deltas: FeatureDecision[]): { section: string; dropp
 
 function renderSymptomSection(symptom: SymptomEntry | undefined): string | undefined {
 	if (!symptom) return undefined;
-	return `## Symptom fixed\n${SYMPTOM_MARKER}\nSymptom: ${symptom.symptom}\nWhere to look: ${symptom.whereToLook.join(", ")}`;
+	return `## Symptom fixed\n${SYMPTOM_MARKER}\nSymptom: ${sanitizeAgentProse(symptom.symptom)}\nWhere to look: ${symptom.whereToLook.join(", ")}`;
 }
 
 function renderTestsSection(testExecutions: TestExecutionEntry[]): string {

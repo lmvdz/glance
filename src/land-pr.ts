@@ -353,7 +353,10 @@ export async function ensurePr(input: EnsurePrInput): Promise<EnsurePrResult> {
 		if (input.body) {
 			try {
 				const view = await ghJson<{ body?: string }>(["pr", "view", String(openPr.number), "--repo", repoSlug, "--json", "body"], input.repo);
-				if (!hasModelDeltaMarker(view?.body)) {
+				// Cross-batch audit: repair ONLY a genuinely empty body. A non-empty body without the
+				// marker is human-authored (a hand-opened draft on a squad branch) — replacing it is
+				// data loss, and appending would mangle prose we don't own. Those PRs keep their bodies.
+				if (!hasModelDeltaMarker(view?.body) && !view?.body?.trim()) {
 					await gh(["pr", "edit", String(openPr.number), "--repo", repoSlug, "--body", input.body], input.repo);
 				}
 			} catch {

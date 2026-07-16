@@ -196,6 +196,13 @@ export function validateSymptomText(symptom: string): SymptomValidation {
 			message: `symptom must be at most ${MAX_SYMPTOM_LEN} characters — one operator-observable line, not a post-mortem`,
 		};
 	}
+	if (/[\r\n]/.test(symptom.trim())) {
+		return {
+			ok: false,
+			rule: "symptom-text-multiline",
+			message: "symptom must be a single line — embedded newlines would let a card forge markdown sections in the weekly episode",
+		};
+	}
 	return { ok: true };
 }
 
@@ -234,6 +241,13 @@ export function classifyWhereToLookEntry(entry: string, kind: WhereToLookStat): 
 			ok: false,
 			rule: "symptom-where-to-look-entry-too-long",
 			message: `whereToLook entries must be at most ${MAX_WHERE_TO_LOOK_ENTRY_LEN} characters (a path or a \`glance …\` command)`,
+		};
+	}
+	if (/[\r\n\t]/.test(trimmed)) {
+		return {
+			ok: false,
+			rule: "symptom-where-to-look-control-chars",
+			message: "whereToLook entries must not contain control characters (a path or a `glance …` command is one line)",
 		};
 	}
 	if (GLANCE_COMMAND_RE.test(trimmed)) return { ok: true };

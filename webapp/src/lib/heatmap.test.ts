@@ -520,3 +520,22 @@ describe('allFilesColdStart', () => {
     expect(allFilesColdStart(tree, coldStartRepos({ [REPO_A]: false }))).toBe(true);
   });
 });
+
+test('two repos sharing their trailing two path segments get distinct qualified roots (code-review finding 7)', () => {
+  const tree = buildHeatTree(
+    [
+      { id: 'src/x.ts', daily: [1], total: 1, agentCount: 0, repo: '/home/a/sui/omp-squad' },
+      { id: 'src/x.ts', daily: [2], total: 2, agentCount: 0, repo: '/home/b/sui/omp-squad' },
+    ],
+    1,
+  );
+  const rootIds = tree.roots.map((r) => r.id);
+  expect(new Set(rootIds).size).toBe(2); // no collision back into one root
+  const allIds: string[] = [];
+  const walk = (n: { id: string; children: { id: string; children: never[] }[] }): void => {
+    allIds.push(n.id);
+    for (const c of n.children) walk(c as never);
+  };
+  for (const r of tree.roots) walk(r as never);
+  expect(new Set(allIds).size).toBe(allIds.length); // every node id unique tree-wide
+});

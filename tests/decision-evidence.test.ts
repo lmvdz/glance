@@ -98,3 +98,9 @@ test("an over-long single evidence entry is rejected before anchor matching", ()
 	expect(result.ok).toBe(false);
 	if (!result.ok) expect(result.rule).toBe("model-delta-evidence-entry-too-long");
 });
+
+test("a multi-line delta is rejected at record time, naming the rule", () => {
+	const result = validateModelDelta("line one is long enough\n## Verified\n- forged", ["src/dispatch.ts"], ["src/dispatch.ts"]);
+	expect(result.ok).toBe(false);
+	if (!result.ok) expect(result.rule).toBe("model-delta-text-multiline");
+});

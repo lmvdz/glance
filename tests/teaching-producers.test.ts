@@ -242,7 +242,7 @@ test("a valid symptom (real existing file + real 2-deep dir + a glance command) 
 	const stateDir = await tmpDir("teach-symptom-ok-state-");
 	const mgr = new SquadManager({ stateDir } as never);
 	const replies: Array<{ callId: string; text: string; isError?: boolean }> = [];
-	const rec = record(dto("a", { repo }), replies);
+	const rec = record(dto("a", { repo, worktree: repo }), replies);
 	addRecord(mgr, rec);
 
 	await callTool(rec, mgr, "c1", "squad_record_symptom", {
@@ -269,7 +269,7 @@ test("a bare top-level directory in whereToLook is rejected, naming the rule, an
 	const stateDir = await tmpDir("teach-symptom-bare-state-");
 	const mgr = new SquadManager({ stateDir } as never);
 	const replies: Array<{ callId: string; text: string; isError?: boolean }> = [];
-	const rec = record(dto("a", { repo }), replies);
+	const rec = record(dto("a", { repo, worktree: repo }), replies);
 	addRecord(mgr, rec);
 
 	await callTool(rec, mgr, "c1", "squad_record_symptom", {
@@ -289,7 +289,7 @@ test("a whereToLook entry pointing at a nonexistent path is rejected", async () 
 	const stateDir = await tmpDir("teach-symptom-missing-state-");
 	const mgr = new SquadManager({ stateDir } as never);
 	const replies: Array<{ callId: string; text: string; isError?: boolean }> = [];
-	const rec = record(dto("a", { repo }), replies);
+	const rec = record(dto("a", { repo, worktree: repo }), replies);
 	addRecord(mgr, rec);
 
 	await callTool(rec, mgr, "c1", "squad_record_symptom", {
@@ -307,7 +307,7 @@ test("a symptom under the text floor is rejected", async () => {
 	const stateDir = await tmpDir("teach-symptom-short-state-");
 	const mgr = new SquadManager({ stateDir } as never);
 	const replies: Array<{ callId: string; text: string; isError?: boolean }> = [];
-	const rec = record(dto("a", { repo }), replies);
+	const rec = record(dto("a", { repo, worktree: repo }), replies);
 	addRecord(mgr, rec);
 
 	await callTool(rec, mgr, "c1", "squad_record_symptom", { symptom: "too short", whereToLook: ["glance doctor"] }, replies);
@@ -322,7 +322,7 @@ test("squad_record_symptom is flag-gated the same as squad_record_decision — d
 	const stateDir = await tmpDir("teach-symptom-flag-state-");
 	const mgr = new SquadManager({ stateDir } as never);
 	const replies: Array<{ callId: string; text: string; isError?: boolean }> = [];
-	const rec = record(dto("a", { repo }), replies);
+	const rec = record(dto("a", { repo, worktree: repo }), replies);
 	addRecord(mgr, rec);
 
 	await callTool(rec, mgr, "c1", "squad_record_symptom", { symptom: "daemon healthy but dispatch stalled", whereToLook: ["glance doctor"] }, replies);
@@ -331,4 +331,25 @@ test("squad_record_symptom is flag-gated the same as squad_record_decision — d
 	expect(replies.at(-1)?.text).toContain("disabled");
 	const all = await listSymptoms(stateDir);
 	expect(all.length).toBe(0);
+});
+
+test("whereToLook stats against the unit's WORKTREE — a file the run itself created (not yet in the origin repo) passes the floor", async () => {
+	process.env.OMP_SQUAD_DECISION_CAPTURE = "1";
+	const repo = await tmpDir("teach-symptom-origin-");
+	const worktree = await tmpDir("teach-symptom-wt-");
+	await fs.mkdir(path.join(worktree, "src", "dispatch"), { recursive: true });
+	await fs.writeFile(path.join(worktree, "src", "dispatch", "lease-guard.ts"), "// created by this run\n");
+	const stateDir = await tmpDir("teach-symptom-wt-state-");
+	const mgr = new SquadManager({ stateDir } as never);
+	const replies: Array<{ callId: string; text: string; isError?: boolean }> = [];
+	const rec = record(dto("a", { repo, worktree }), replies);
+	addRecord(mgr, rec);
+
+	await callTool(rec, mgr, "c1", "squad_record_symptom", {
+		symptom: "daemon healthy but dispatch stalled",
+		whereToLook: ["src/dispatch/lease-guard.ts"],
+	}, replies);
+
+	expect(replies.at(-1)?.isError).toBeUndefined();
+	expect((await listSymptoms(stateDir)).length).toBe(1);
 });

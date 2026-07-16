@@ -29,6 +29,7 @@ import type { FileFogEntry } from "./comprehension-fog.ts";
 import { getStorageBackend } from "./dal/storage.ts";
 import { evidenceFilePath } from "./decision-evidence.ts";
 import { errText } from "./err-text.ts";
+import { sanitizeAgentProse } from "./pr-body.ts";
 import { normalizeRepoPath } from "./project-registry.ts";
 import type { PushPayload } from "./push.ts";
 import type { TestExecutionEntry } from "./pr-body.ts";
@@ -193,7 +194,7 @@ function groupDeltasByArea(deltas: FeatureDecision[]): Map<string, FeatureDecisi
 function formatDeltaBullet(d: FeatureDecision): string {
 	const evidence = (d.evidence ?? []).filter((e) => e.trim().length > 0);
 	const anchor = evidence.length > 0 ? ` — evidence: \`${evidence.join(", ")}\`` : "";
-	return `- ${d.text.trim()}${anchor}`;
+	return `- ${sanitizeAgentProse(d.text)}${anchor}`;
 }
 
 // ── section rendering ───────────────────────────────────────────────────────────────────────────
@@ -207,7 +208,7 @@ function renderDeltaSection(deltas: FeatureDecision[]): string {
 
 function renderSymptomsSection(symptoms: SymptomEntry[]): string | undefined {
 	if (symptoms.length === 0) return undefined; // most weeks fix nothing worth a symptom card
-	const bullets = symptoms.map((s) => `- ${s.symptom} — where to look: ${s.whereToLook.join(", ")}`).join("\n");
+	const bullets = symptoms.map((s) => `- ${sanitizeAgentProse(s.symptom)} — where to look: ${s.whereToLook.join(", ")}`).join("\n");
 	return `## New known symptoms\n${bullets}`;
 }
 
@@ -336,7 +337,12 @@ function metaFile(stateDir: string, repo: string, isoWeek: string): string {
  *  @substrate exported for tests only — `EpisodeLoop.tick` (same file) is the one production caller;
  *  the idempotency decision (exists ⇒ skip) is asserted directly. */
 export function episodeExists(stateDir: string, repo: string, isoWeek: string): boolean {
-	return getStorageBackend().exists(mdFile(stateDir, repo, isoWeek));
+	// BOTH halves must exist (code-review finding 2): saveEpisode writes md then meta, and a crash
+	// between the two must read as "not generated" so the next tick retries (writeDurable is
+	// atomic per file, so rewriting both is safe) — gating on the md alone wedged that week
+	// forever as generated-but-unlistable (listEpisodes indexes the meta sidecar).
+	const b = getStorageBackend();
+	return b.exists(mdFile(stateDir, repo, isoWeek)) && b.exists(metaFile(stateDir, repo, isoWeek));
 }
 
 /** Durable write of both the markdown and its sidecar meta. Returns false (never throws) on any

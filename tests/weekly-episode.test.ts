@@ -422,3 +422,16 @@ test("EpisodeLoop.tick is reentrancy-safe: an overlapping call while one is in f
 	await Promise.all([first, second]);
 	expect(gatherCalls).toBe(1);
 });
+
+test("an orphaned markdown half (crash between md and meta writes) reads as NOT generated — the next tick retries", async () => {
+	const dir = await tmpDir();
+	const built = buildEpisode(baseInput());
+	expect(await saveEpisode(dir, "/repo", built)).toBe(true);
+	expect(episodeExists(dir, "/repo", built.id)).toBe(true);
+	// simulate the crash: meta sidecar gone, markdown orphaned
+	const { rm } = await import("node:fs/promises");
+	const meta = (await import("node:fs/promises")).readdir;
+	const repoDir = (await meta(dir + "/episodes"))[0];
+	await rm(`${dir}/episodes/${repoDir}/${built.id}.json`);
+	expect(episodeExists(dir, "/repo", built.id)).toBe(false);
+});

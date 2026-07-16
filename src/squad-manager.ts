@@ -3514,7 +3514,7 @@ export class SquadManager extends EventEmitter {
 		try {
 			const receipts = await this.allReceipts();
 			const seen = this.attentionSeen([repo]);
-			fogTop = topDebt(computeFog({ receipts, seen, repos: [repo], now: window.end }), 10);
+			fogTop = topDebt(computeFog({ receipts, seen, repos: [repo], now: window.end, surpriseCounts: this.attentionSurpriseCounts([repo]) }), 10);
 			// Comprehension concern 10: resurface this repo's currently-stale answers — a prior
 			// question whose cited files have since changed enough that the answer may no longer
 			// hold. Staleness is a live snapshot (like `fogTop` above), not a "became stale this week"
@@ -8328,7 +8328,11 @@ export class SquadManager extends EventEmitter {
 				source: isModelDelta ? "model-delta" : "agent",
 				createdAt: Date.now(),
 				sourceRef: { agentId: rec.dto.id, runId: rec.run?.snapshot().runId },
-				...(isModelDelta ? { evidence } : {}),
+				// Persist evidence NORMALIZED (code-review finding 4): validateModelDelta normalizes only
+				// for its comparison, but every downstream consumer (surprise-tap fog keys, evidence-link
+				// jump, PR-body anchors) keys on the STORED string — a raw "./src/x.ts" would silently
+				// no-op them all.
+				...(isModelDelta ? { evidence: (evidence ?? []).map((e) => e.trim().replace(/^\.\//, "").replace(/^\/+/, "")) } : {}),
 			};
 			// Atomic, adopt-aware append (resolves plan-derived features + can't clobber a concurrent capture).
 			const outcome = await this.recordAgentDecision(featureId, decision, rec.dto.repo);
@@ -8388,8 +8392,13 @@ export class SquadManager extends EventEmitter {
 				rec.agent.respondHostTool(call.id, `symptom rejected (${countCheck.rule}): ${countCheck.message}`, true);
 				return;
 			}
+			// Stat against the unit's own WORKTREE when it has one (cross-batch audit): a fixing unit's
+			// whereToLook pointer often names a file the fix itself just added, which exists in the
+			// worktree but not yet in the shared checkout — rejecting it at exactly the record-at-fix-time
+			// moment the tool targets would be a false floor.
+			const statRoot = rec.dto.worktree || rec.dto.repo;
 			for (const entry of whereToLook) {
-				const kind = await statWhereToLookEntry(rec.dto.repo, entry);
+				const kind = await statWhereToLookEntry(statRoot, entry);
 				const entryCheck = classifyWhereToLookEntry(entry, kind);
 				if (!entryCheck.ok) {
 					rec.agent.respondHostTool(call.id, `symptom rejected (${entryCheck.rule}): ${entryCheck.message}`, true);
