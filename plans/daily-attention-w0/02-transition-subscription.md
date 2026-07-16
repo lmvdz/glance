@@ -1,6 +1,6 @@
 # Transition-event subscription — retire the private lastStatus diff
 
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -29,3 +29,20 @@ none — omp-squad only. The `{type:"transition"}` SquadEvent already exists and
 - `tests/escalation.test.ts`: `escalationPayload`'s own pure-function tests are unchanged (the function's signature and logic are untouched by this concern) — confirm the file still passes as-is, proving this really is a caller-side refactor.
 - Live (scratch-daemon skill): restart the daemon with a live "needs input" agent in flight, confirm no spurious push fires on the restart itself, then drive that same agent through a genuine NEW escalation post-restart and confirm the push fires normally.
 - Full `bun test` (tsc + suite) green.
+
+## Resolution (2026-07-16)
+
+Implemented as specced, with one seam update the doc predates: by execution time `maybePushAlert` dispatched BOTH `escalationPayload` and `completionPayload` (C01's generalized completion push), so the whole dispatch was subscribed to the transition event — `entry.from` feeds both builders, `getAgent(entry.agentId)` supplies the DTO, and `maybePushCompletionDone` (sync-disarm discipline included) is unchanged apart from where `prev` comes from. `lastStatus` is deleted from both lanes; `entry.denied` is skipped outright (a denied attempt never changed dto.status); a missing `getAgent` result fails closed.
+
+Boot-safety decisions, made deliberate per the trap note above:
+- File mode: the `transition` branch is gated on `pushSeeded` alone, and the field's comment now states its real meaning ("boot hydration finished", set once at start()). In the production ordering the reattach transitions can't even reach the lane (reconnectLive awaits every attachExisting before the server exists; the subscription is made inside start(), after the flag flips) — the gate is the deliberate second layer.
+- Org lane: the lazy seed became an explicit boundary — the first event for an org (any type) marks hydration and NEVER alerts, replacing the old accidental self-suppression (the retired snapshot read the post-change roster, so the seeding event's diff always read prev === status; a transition event carries the real pre-change `from` and needed the boundary made explicit).
+
+Verified:
+- tests/push-server.test.ts: all prior cases re-driven through the transition lane (synthetic-event tests now use REAL resident agents so getAgent has a record); the two real-flow tests (promote category flip, duration gate) pass UNCHANGED — the genuine machinery emits the transition event itself. New: the MANDATORY boot-safety regression (full manager restart + a reattach-shaped `from!==to` transition delivered before the seed boundary → ZERO pushes; then a genuine post-boot escalation → exactly one push), a diff-the-two-lanes test (old-lane payloads computed directly from the same pure builders vs. what the server actually dispatches off the transition event — byte-identical across all four payload classes + a calm negative), and a denied-entry test.
+- tests/push-org.test.ts: rewritten to transition events + fake `getAgent`; the lazy-seed test now pins the org-lane boot-replay boundary explicitly (a `reason:"reattach"` `from!==to` first event never alerts).
+- tests/escalation.test.ts + tests/push.test.ts: pass UNTOUCHED — caller-side refactor confirmed.
+- `tsc --noEmit` green; targeted transition-seam suites (transition-history, agent-lifecycle, lifecycle-settle-gate, lifecycle-enforcement, completion-push-arm, restart-reattach) green.
+- LIVE (scratch daemon, isolated state/HOME per the skill): (1) a console agent's real starting→error transition paged the subscribed local push sink through the NEW lane (one encrypted aes128gcm POST); (2) SIGKILL + restart on the same state dir fired ZERO pushes across the whole boot; (3) a genuine new escalation post-restart paged normally (second sink POST). Note: the in-flight agent errored rather than sat in "input" (scratch HOME has no harness auth), so the live restart exercised the persisted-error/adopt boot path; the exact derive-mismatch reattach replay is pinned by the automated boot-safety regression instead.
+
+Deliberate residual (documented in the org-lane comment): during a DB-mode tenant's multi-agent spin-up, transitions recorded after the org's seed boundary follow the canonical entry (push when `from !== to` into input/error) rather than the old per-agent map's replay-order-dependent diff. The old lane could both page spuriously and stay silent accidentally in that window; the invariant preserved is "the event that materializes the state never alerts", now stated in code rather than emergent.
