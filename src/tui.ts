@@ -10,6 +10,7 @@
  */
 
 import { CURSOR_MARKER, Editor, type EditorTheme, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
+import { errText } from "./err-text.ts";
 import { writeOscNotify } from "./osc-notify.ts";
 import { escalationPayload } from "./push.ts";
 import type { SquadManager } from "./squad-manager.ts";
@@ -288,7 +289,10 @@ export function buildBoard(state: BoardState): string[] {
 }
 
 /** Split a `/verb rest of line` slash command — verb lowercased, arg's own casing preserved
- *  (a gripe is prose, not a keyword). Exported for unit tests. */
+ *  (a gripe is prose, not a keyword).
+ *
+ *  @substrate exported for tests only — tests/friction-log.test.ts asserts this parser directly;
+ *  its only in-repo caller is `SquadTui`'s submit handler, in this same file. */
 export function parseSlash(cmd: string): { verb: string; arg: string } {
 	const body = cmd.replace(/^\//, "").trim();
 	const space = body.search(/\s/);
@@ -563,7 +567,7 @@ export class SquadTui {
 			this.manager.recordFriction({ repo: sel?.repo ?? this.state.cwd, gripe, context: "tui", agentId: sel?.id });
 			this.showNotice(c("green", "✓ logged to the friction ledger"));
 		} catch (err) {
-			this.showNotice(c("red", `✗ not logged: ${err instanceof Error ? err.message : String(err)}`));
+			this.showNotice(c("red", `✗ not logged: ${errText(err)}`));
 		}
 	}
 
