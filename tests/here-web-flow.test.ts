@@ -63,6 +63,7 @@ test("openerCandidates: wslview ladder on WSL2, xdg-open alone on native linux, 
 	expect(openerCandidates(u, { platform: "linux", wsl: true })).toEqual([
 		["wslview", u],
 		["explorer.exe", u],
+		["/mnt/c/Windows/explorer.exe", u],
 		["xdg-open", u],
 	]);
 	expect(openerCandidates(u, { platform: "linux", wsl: false })).toEqual([["xdg-open", u]]);
@@ -106,7 +107,7 @@ test("every opener missing degrades to a printable note — the REPL never sees 
 		outcome = openInBrowser("http://x/?token=t#/agent/a", { platform: "linux", env: { WSL_DISTRO_NAME: "U" }, spawn });
 	}).not.toThrow();
 	expect(outcome?.opened).toBe(false);
-	expect(outcome?.note).toContain("wslview, explorer.exe, xdg-open");
+	expect(outcome?.note).toContain("wslview, explorer.exe, /mnt/c/Windows/explorer.exe, xdg-open");
 	expect(outcome?.note).toContain("webapp URL above");
 });
 

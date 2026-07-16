@@ -46,13 +46,23 @@ export function isWsl(env: Record<string, string | undefined> = process.env, pro
 
 /**
  * Ordered opener attempts for the platform — each is a full argv, tried until one spawns.
- * WSL2 gets a ladder (wslview → explorer.exe interop → xdg-open) because any single rung is
- * legitimately absent on real machines (this operator's box has no `wslu`).
+ * WSL2 gets a ladder (wslview → explorer.exe on PATH → explorer.exe at the canonical interop
+ * mount → xdg-open) because every single rung is legitimately absent on real machines: this
+ * operator's box has no `wslu`, and the Windows PATH injection (`appendWindowsPath`) doesn't
+ * reach every process context — measured live: absent inside a tmux-spawned REPL on the very
+ * box whose login shell had it. The absolute rung is what actually opened the browser there.
  */
 export function openerCandidates(url: string, opts: { platform: NodeJS.Platform; wsl: boolean }): string[][] {
 	if (opts.platform === "darwin") return [["open", url]];
 	if (opts.platform === "win32") return [["cmd", "/c", "start", "", url]];
-	if (opts.wsl) return [["wslview", url], ["explorer.exe", url], ["xdg-open", url]];
+	if (opts.wsl) {
+		return [
+			["wslview", url],
+			["explorer.exe", url],
+			["/mnt/c/Windows/explorer.exe", url],
+			["xdg-open", url],
+		];
+	}
 	return [["xdg-open", url]];
 }
 
