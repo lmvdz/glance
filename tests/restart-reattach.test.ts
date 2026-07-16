@@ -221,6 +221,35 @@ test("reattachDeadSession stitches the successor: visible system marker + prior-
 	expect(mgr.reattachDeadSession("nope", "chat-old")).toBeUndefined();
 });
 
+test("an operator prompt persists the transcript durably — a daemon KILL right after never loses the newest turn", async () => {
+	const stateDir = await tmpDir("reattach-durable-");
+	const mgr = new SquadManager({ stateDir } as never);
+	await mgr.start();
+	cleanups.push(() => mgr.stop());
+	// A live console-shaped record with a ready fake driver — applyCommand's prompt path runs whole.
+	const dto: AgentDTO = { id: "chat-live", name: "chat", status: "idle", kind: "omp-operator", repo: "/srv/r", worktree: "/srv/r/wt", approvalMode: "write", pending: [], lastActivity: 1, messageCount: 0 };
+	const options: PersistedAgent = { id: "chat-live", name: "chat", repo: "/srv/r", worktree: "/srv/r/wt", approvalMode: "write", kind: "omp-operator", harness: "claude-code" };
+	const agent = { isAlive: true, isReady: true, stop: async () => {}, prompt: async () => {}, pid: undefined };
+	(mgr as unknown as { agents: Map<string, unknown> }).agents.set("chat-live", { dto, agent, options, transcript: [], assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map() });
+
+	await mgr.applyCommand({ type: "prompt", id: "chat-live", message: "the words a kill must not eat", displayText: "typed text" });
+	// The write chain is deduped/queued — give it a beat, then read what a KILLED daemon would leave.
+	const deadline = Date.now() + 2000;
+	let persisted: { transcripts?: Record<string, TranscriptEntry[]> } = {};
+	while (Date.now() < deadline) {
+		try {
+			persisted = JSON.parse(await fs.readFile(path.join(stateDir, "state.json"), "utf8")) as typeof persisted;
+			if (persisted.transcripts?.["chat-live"]?.length) break;
+		} catch {
+			/* not written yet */
+		}
+		await new Promise((r) => setTimeout(r, 25));
+	}
+	const tr = persisted.transcripts?.["chat-live"] ?? [];
+	expect(tr.map((e) => e.text)).toContain("the words a kill must not eat");
+	expect(tr.find((e) => e.kind === "user")?.displayText).toBe("typed text"); // the fold's bare-text copy survives too
+});
+
 // ── 3. the client half: sessionFate + dead-detection + context fold ─────────────────────────────
 
 interface FakeCall {

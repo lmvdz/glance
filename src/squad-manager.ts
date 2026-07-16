@@ -5693,6 +5693,12 @@ export class SquadManager extends EventEmitter {
 				// agent actually received. `displayText` (when the client sent one) is the user's bare
 				// typed text; the UI renders that and falls back to `text` for older clients.
 				this.append(rec, "user", cmd.message, { clientTurnId: cmd.clientTurnId, displayText: cmd.displayText });
+				// Restart re-attach (daily-onramp 04): the just-typed prompt must survive a daemon KILL —
+				// it's the newest entry the honest re-attach's recovered context can carry, and nothing else
+				// persists transcripts until some unrelated write happens to fire (proven live: the first
+				// bounce test came back "no prior context was recoverable" because state.json predated the
+				// turn). Chain-deduped by the write queue; one write per operator prompt is bounded.
+				void this.persist();
 				// Completion-push arm (voice-loop): a voice-sourced prompt owes the operator exactly one
 				// "finished" push once this dispatch settles — armed here (persisted, restart-safe),
 				// disarmed by the push actually sending or by a voice-sourced interrupt (see the "interrupt"
@@ -6481,6 +6487,11 @@ export class SquadManager extends EventEmitter {
 					rec.workflowJustFinished = false; // consume — never leak into the next agent_end
 					rec.dto.voicePushArmed = isTerminal && rec.options.voicePushArmed === true;
 				}
+				// Restart re-attach (daily-onramp 04): a completed turn's transcript is the recovery payload
+				// for the honest re-attach — persist it at the turn boundary so a daemon KILL between turns
+				// never loses the conversation. Chain-deduped; one write per completed turn is bounded and
+				// far rarer than the existing per-dirty-subagent-transition writes.
+				void this.persist();
 				break;
 			}
 			case "workflow_done":
