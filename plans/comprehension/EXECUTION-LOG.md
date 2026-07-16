@@ -217,3 +217,29 @@ pre-existing per batch 1's note). `webapp bun test`: 1344 pass / 0 fail. Both `t
 Dead-exports ratchet: 215/215 (unchanged) — `possiblyStale` is live-referenced from `fabric.ts` and
 `squad-manager.ts`; `extractPathTokens` is the one new `@substrate`-exempt entry, after fixing its
 misplaced doc comment.
+
+## Concern 11 (voice episode delivery + debrief-heard)
+
+| Concern | Model | Result | Review |
+|---|---|---|---|
+| 11 voice episode delivery | sonnet (isolated worktree, post-#186) | SUCCESS | pending |
+
+Unblocked by PR #186 (voice-loop) merging to main 2026-07-15. `webapp/src/lib/voice/tools.ts` gained
+`buildVoiceEpisodeBrief`/`buildEpisodeSummaryText`/`countEpisodeSymptoms` (pure, tested — same
+fencing/no-tools/truncation conventions as `buildVoiceDebrief`); `webapp/src/lib/api.ts` gained
+`fetchEpisodes`/`fetchEpisode` (GET `/api/episodes[?repo=]` / `/api/episodes/:id?repo=`, both already
+live on main from concern 09). `VoiceCallContext.tsx`'s `runDebrief` prepends the episode's DATA-fenced
+summary to the transcript debrief's items in one combined `queueInjection`; `debrief-heard` fires from
+the same `{cancelled:false}` branch via `reportAttention`. No second cursor: the episode's `generatedAt`
+rides the SAME `voiceDebrief.cursorTs` the transcript debrief uses, defaulting an absent cursor to 0 so
+the episode is not gated behind the transcript debrief's stricter "must have debriefed before" rule
+(the episode is a standalone artifact, never typed work the operator was live for).
+
+Own finding (not in the concern's literal text): committing the episode's own `generatedAt` verbatim
+as the session cursor would leave it stuck in the past and let the NEXT call's transcript debrief
+over-report typed work done during THIS call as "while you were away". Fixed by folding wall-clock
+`now` into the commit whenever an episode was included, mirroring `stampVoiceCallEnded`'s existing
+"collapse to now" seed for a session's first-ever call.
+
+`webapp bun test`: 1358 pass / 0 fail (51 new). `bunx tsc --noEmit` clean. Root suite untouched (no
+daemon files touched this concern).

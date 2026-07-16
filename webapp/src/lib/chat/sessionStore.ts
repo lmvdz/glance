@@ -22,6 +22,14 @@
  * response completes uncancelled (concern 03's primitive) — a barge-in or early hang-up leaves the
  * cursor untouched and the next call simply re-debriefs the same backlog.
  *
+ * EPISODE-IN-DEBRIEF (comprehension concern 11): the weekly state-of-the-codebase brief
+ * (`src/weekly-episode.ts`'s `EpisodeMeta.generatedAt`) rides this SAME `voiceDebrief.cursorTs` —
+ * no second cursor field. `VoiceCallContext.tsx`'s connect-time effect compares an episode's
+ * `generatedAt` against this cursor exactly like a qualifying transcript entry's `ts`, and folds
+ * the episode into the same two-phase `queueInjection` commit as the transcript debrief below (see
+ * that file's own comment for why the COMMITTED value is wall-clock "now", not the episode's own
+ * stale `generatedAt`, whenever an episode was included).
+ *
  * KNOWN GAP (report, not hacked around): while `AssistantChat` is mounted and showing the bound
  * session, a voice-authored write lands here, `notifySessionStoreListeners()` fires, and
  * `AssistantChat`'s own subscriber (added in this pass) merges it into its local `sessions` state
@@ -58,7 +66,8 @@ export interface Session {
     /** Debrief lane ts-cursor (concern 04) — absent means "never debriefed" (first call, or every
      *  debrief so far skipped silently for lack of backlog). `cursorTs` only ever moves forward
      *  (see `advanceVoiceDebriefCursor`); `lastCallEndedAt` is stamped by `endCall()` on every call,
-     *  purely for observability + seeding a fresh cursor on this session's first-ever call end. */
+     *  purely for observability + seeding a fresh cursor on this session's first-ever call end.
+     *  Also gates the weekly episode brief (concern 11) — see this file's module doc comment. */
     voiceDebrief?: { cursorTs: number; lastCallEndedAt?: number };
   };
   spawnedUnits?: SpawnedUnitRecord[];

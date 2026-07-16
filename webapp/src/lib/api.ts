@@ -212,6 +212,47 @@ export function fetchFog(): Promise<FogPayload> {
   return apiJson<FogPayload>('/api/fog');
 }
 
+// -----------------------------------------------------------------------------------------------
+// Weekly episode (comprehension concern 09, voice delivery concern 11) — the state-of-the-codebase
+// brief. Mirrors `src/weekly-episode.ts`'s `EpisodeMeta` (list route) and `EpisodeMeta & {markdown}`
+// (single-episode route) exactly. The list route NEVER carries markdown (DESIGN.md: "full markdown
+// NEVER in the BM25 corpus" — the same discipline extends to this list wire shape); only the
+// single-episode fetch below returns it.
+// -----------------------------------------------------------------------------------------------
+
+export interface EpisodeMetaDTO {
+  version: number;
+  id: string;
+  repo: string;
+  isoWeek: string;
+  windowStart: number;
+  windowEnd: number;
+  generatedAt: number;
+  excerpt: string;
+  digestCount: number;
+  hasStaleAnswers: boolean;
+}
+
+export interface EpisodeDTO extends EpisodeMetaDTO {
+  markdown: string;
+}
+
+/** `GET /api/episodes?repo=` — every episode meta for one repo, newest week first (server-sorted,
+ *  `src/server.ts`'s route). `repo` is REQUIRED here (unlike the daemon route's own optional
+ *  `?repo=`, which falls back to every actor-visible repo) — the voice debrief lane always knows
+ *  which single repo it's calling about and has no use for a cross-repo merge. */
+export function fetchEpisodes(repo: string): Promise<EpisodeMetaDTO[]> {
+  return apiJson<{ episodes: EpisodeMetaDTO[] }>(`/api/episodes?repo=${encodeURIComponent(repo)}`).then((r) => r.episodes);
+}
+
+/** `GET /api/episodes/:id?repo=` — full markdown + meta for one episode. `repo` is required
+ *  server-side (an isoWeek `id` alone isn't globally unique, only unique per repo — see
+ *  `src/server.ts`'s route doc); throws (via `apiJson`) on a 404 (unknown id) or 400 (foreign/
+ *  missing repo). */
+export function fetchEpisode(repo: string, id: string): Promise<EpisodeDTO> {
+  return apiJson<EpisodeDTO>(`/api/episodes/${encodeURIComponent(id)}?repo=${encodeURIComponent(repo)}`);
+}
+
 /** Voice capability probe (`GET /api/voice/config`) — the one honest discovery channel for whether
  *  voice is enabled/configured (no webapp code consumes `/api/settings` flags; see DESIGN.md's
  *  "Flagging" row). A 404 means the feature flag is off — that's a normal, expected state (not an
