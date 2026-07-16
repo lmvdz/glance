@@ -40,20 +40,26 @@ export function escalationPayload(prev: AgentStatus | undefined, a: AgentDTO, se
 	return { title, body, url: `/#/agent/${a.id}`, tag: a.id };
 }
 
-/** Pure: does this status transition warrant a voice-loop COMPLETION push, and with what payload?
- *  Fires once per voice dispatch — squad-manager.ts's `voicePushArmed` latch arms on a voice-sourced
- *  prompt/spawn and disarms on push-sent or a voice-sourced interrupt; the DTO only ever carries
- *  `voicePushArmed: true` on the emitted event that is the dispatch's genuine TERMINAL signal (never
- *  an intermediate workflow-node idle — see squad-manager.ts's `onAgentEvent`), so this function needs
- *  no workflow-awareness of its own. The body carries NO transcript/summary content — lock screens are
- *  not viewer-tier; the spoken debrief (webapp, at the next call's start) is the content channel.
+/** Pure: does this status transition warrant a COMPLETION push, and with what payload?
+ *  Fires once per armed dispatch — squad-manager.ts's `completionPushArmed` latch arms on a prompt/
+ *  spawn (always for a voice source; by session category otherwise — see completion-push.ts) and
+ *  disarms on push-sent or an interrupt; the DTO only ever carries `completionPushArmed: true` on the
+ *  emitted event that is the dispatch's genuine TERMINAL signal (never an intermediate workflow-node
+ *  idle — see squad-manager.ts's `onAgentEvent`), so this function needs no workflow- or category-
+ *  awareness of its own: the per-category decision already happened at arm time. The body carries NO
+ *  transcript/summary content — lock screens are not viewer-tier; only the copy branches on WHY the
+ *  latch was armed (`completionPushKind`): a voice dispatch's push points back at the spoken-debrief
+ *  channel, a category arm gets the generic pick-it-up line.
  *  `tag`/debounce key use the `done:` namespace (never bare `a.id`, unlike `escalationPayload` above)
  *  so a "finished" toast can never REPLACE (sw.js renotify) or debounce-eat an unactioned "needs you"
  *  escalation for the same agent. */
-export function voiceDonePayload(prev: AgentStatus | undefined, a: AgentDTO, seeded: boolean): PushPayload | null {
+export function completionPayload(prev: AgentStatus | undefined, a: AgentDTO, seeded: boolean): PushPayload | null {
 	if (!seeded || prev === undefined || prev === a.status) return null;
-	if (a.status !== "idle" || a.voicePushArmed !== true) return null;
-	return { title: `✅ ${a.name} finished`, body: "Tap to open glance — call back for the spoken debrief.", url: `/#/agent/${a.id}`, tag: `done:${a.id}` };
+	if (a.status !== "idle" || a.completionPushArmed !== true) return null;
+	const body = a.completionPushKind === "voice"
+		? "Tap to open glance — call back for the spoken debrief."
+		: "Ready when you are — tap to pick up where you left off.";
+	return { title: `✅ ${a.name} finished`, body, url: `/#/agent/${a.id}`, tag: `done:${a.id}` };
 }
 
 /** Injectable transport (default = real fetch) so tests assert dispatch without a push service. */
