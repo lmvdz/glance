@@ -1,6 +1,6 @@
 # ACP `session/prompt` 60s timeout kills any long turn — turn-scoped liveness instead
 
-STATUS: done
+STATUS: reopened — live re-verify 2026-07-16 reproduced the exact `sleep 75` acceptance turn erroring at 60002ms, twice; see plans/daily-driver/00-meta.md Ledger. Root cause: the real claude-code-acp adapter sends no `session/update` between a tool call's start and its completion, so the silence-timer reset has nothing to fire on during a single long call with no incremental output — the shipped regression test only exercises a fake adapter that streams updates throughout, which doesn't match this.
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: mechanical
