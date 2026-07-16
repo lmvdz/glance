@@ -319,6 +319,82 @@ test("uncapturable turn: row is tagged (no 'held' claim), and resolving holds ne
 	expect(syncRows(mgr.rec("chat-1").dto)).toHaveLength(1);
 });
 
+test("uncapturable turn later COVERED by a spanning patch: the next stable turn syncs the missed edits and clears the warning", async () => {
+	const repo = await initRepo();
+	const wt = await addWorktree(repo);
+	const mgr = await makeManager();
+	seed(mgr, "chat-1", { repo, worktree: wt, realTreePath: repo });
+
+	// Turn 1: normal, applied — establishes the prior end tree the coverage logic keys off.
+	mgr.turnStart("chat-1");
+	await mgr.settle();
+	await fs.appendFile(path.join(wt, "a.txt"), "turn1\n");
+	mgr.turnEnd("chat-1");
+	await mgr.settle();
+	expect(await fs.readFile(path.join(repo, "a.txt"), "utf8")).toContain("turn1");
+
+	// Turn 2: the worktree becomes un-snapshottable at turn end (its .git link vanishes) —
+	// uncapturable, edits worktree-only, warning raised, endTree deliberately NOT advanced.
+	mgr.turnStart("chat-1");
+	await mgr.settle();
+	await fs.appendFile(path.join(wt, "a.txt"), "turn2\n");
+	await fs.rename(path.join(wt, ".git"), path.join(wt, ".git-hidden"));
+	mgr.turnEnd("chat-1");
+	await mgr.settle();
+	expect(await fs.readFile(path.join(repo, "a.txt"), "utf8")).not.toContain("turn2");
+	let rows = syncRows(mgr.rec("chat-1").dto);
+	expect(rows).toHaveLength(1);
+	expect(rows[0].sync).toBe("uncapturable");
+
+	// Turn 3: worktree healthy again, checkout stable. Because turn 2 never advanced the end tree,
+	// turn 3's patch spans BOTH turns — applying it delivers turn 2's edits, so the warning clears.
+	await fs.rename(path.join(wt, ".git-hidden"), path.join(wt, ".git"));
+	mgr.turnStart("chat-1");
+	await mgr.settle();
+	await fs.appendFile(path.join(wt, "a.txt"), "turn3\n");
+	mgr.turnEnd("chat-1");
+	await mgr.settle();
+	const a = await fs.readFile(path.join(repo, "a.txt"), "utf8");
+	expect(a).toContain("turn2"); // the "lost" turn arrived via the spanning patch
+	expect(a).toContain("turn3");
+	expect(syncRows(mgr.rec("chat-1").dto)).toHaveLength(0); // warning resolved, honestly
+});
+
+test("held and uncapturable rows COEXIST — one never erases the other's affordance", async () => {
+	const repo = await initRepo();
+	const wt = await addWorktree(repo);
+	const mgr = await makeManager();
+	seed(mgr, "chat-1", { repo, worktree: wt, realTreePath: repo });
+
+	// Turn 1 (first turn, live baseline): held via a concurrent operator edit.
+	mgr.turnStart("chat-1");
+	await mgr.settle();
+	await fs.appendFile(path.join(wt, "a.txt"), "turn1\n");
+	await fs.writeFile(path.join(repo, "operator.txt"), "concurrent\n");
+	mgr.turnEnd("chat-1");
+	await mgr.settle();
+	expect(syncRows(mgr.rec("chat-1").dto).map((e) => e.sync)).toEqual(["held"]);
+
+	// Turn 2: uncapturable (worktree un-snapshottable). The held row must survive — hiding it
+	// would hide the only Apply/Discard affordance for a REAL backlog.
+	mgr.turnStart("chat-1");
+	await mgr.settle();
+	await fs.rename(path.join(wt, ".git"), path.join(wt, ".git-hidden"));
+	mgr.turnEnd("chat-1");
+	await mgr.settle();
+	await fs.rename(path.join(wt, ".git-hidden"), path.join(wt, ".git"));
+	const kinds = syncRows(mgr.rec("chat-1").dto)
+		.map((e) => e.sync)
+		.sort();
+	expect(kinds).toEqual(["held", "uncapturable"]);
+
+	// Applying the backlog clears ONLY the held row; the uncapturable warning still stands (that
+	// turn's edits were never captured into any patch — turn 2 holds nothing).
+	const r = await mgr.applyHeldSync("chat-1");
+	expect(r.ok).toBe(true);
+	expect(syncRows(mgr.rec("chat-1").dto).map((e) => e.sync)).toEqual(["uncapturable"]);
+});
+
 test("boot: reattachHeldSyncs re-raises the row for a restored session and only warns for a vanished agent", async () => {
 	const repo = await initRepo();
 	const wt = await addWorktree(repo);

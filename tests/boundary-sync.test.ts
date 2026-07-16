@@ -457,6 +457,39 @@ describe("HeldSyncStore", () => {
 		expect(await s.listHeld("a1")).toHaveLength(1);
 	});
 
+	test("an append AFTER a torn tail starts on a fresh line — the new event is never welded onto the garbage", async () => {
+		const dir = await tmpDir("bsync-store-");
+		const s = new HeldSyncStore(dir);
+		await s.hold({ agentId: "a1", turn: 1, realDir: "/real", reason: "r", patch: "p1" });
+		// Crash mid-append: partial line, no trailing newline.
+		await fs.appendFile(path.join(dir, "held.jsonl"), '{"kind":"held","id":"torn');
+		// The NEXT hold must survive — naive appendFile would produce `…"torn{"kind":"held"…`,
+		// losing the new (valid) event along with the torn one and letting later turns leapfrog it.
+		const h2 = await s.hold({ agentId: "a1", turn: 2, realDir: "/real", reason: "r", patch: "p2" });
+		const held = await s.listHeld("a1");
+		expect(held).toHaveLength(2);
+		expect(held.map((h) => h.turn)).toEqual([1, 2]);
+		// And resolution lines get the same guard.
+		await fs.appendFile(path.join(dir, "held.jsonl"), '{"kind":"resolv');
+		await s.resolve(h2.id, "discarded");
+		expect((await s.listHeld("a1")).map((h) => h.turn)).toEqual([1]);
+	});
+
+	test("an unreadable ledger FAILS the read (never an empty backlog) — fail-closed, not fail-open", async () => {
+		const dir = await tmpDir("bsync-store-");
+		const s = new HeldSyncStore(dir);
+		// held.jsonl exists but cannot be read as a file (EISDIR — deterministic for any uid).
+		await fs.mkdir(path.join(dir, "held.jsonl"));
+		await expect(s.listAllHeld()).rejects.toThrow(/ledger unreadable/);
+		// An empty [] here would have let the next turn auto-apply ahead of an older held
+		// dependency and let Apply report ok/0 while clearing a row with real patches behind it.
+	});
+
+	test("no ledger at all IS an empty backlog (ENOENT is the one genuinely-empty error)", async () => {
+		const s = await newStore();
+		expect(await s.listAllHeld()).toEqual([]);
+	});
+
 	test("holds are per-agent", async () => {
 		const s = await newStore();
 		await s.hold({ agentId: "a1", turn: 1, realDir: "/r", reason: "r", patch: "p" });

@@ -41,14 +41,19 @@
  *      `git apply --check` passes, immediately before the write (`expectedFingerprint`), shrinking
  *      the exposure from "compare + temp-file + check + apply" to the final `git apply` spawn alone.
  *   3. RESIDUAL (not defendable from this side of the filesystem): an operator edit — e.g. an
- *      editor save — landing inside the final `git apply` spawn itself, or between the last
- *      re-fingerprint and that spawn (milliseconds). git's context validation still aborts the
- *      whole patch when the edit overlaps a hunk (→ hold); a DISJOINT same-file edit can interleave
+ *      editor save — landing anywhere between the START of the last re-fingerprint and the end of
+ *      the `git apply` spawn. Note the re-fingerprint is itself FOUR sequential git spawns, not an
+ *      atomic observation: an edit interleaving its sub-commands can assemble a stale-but-matching
+ *      fingerprint (e.g. a tracked-file save landing after `git diff` ran but before `ls-files`
+ *      goes unseen), so the honest exposure is the whole recheck PLUS the apply — tens of
+ *      milliseconds — not the apply spawn alone. git's context validation still aborts the whole
+ *      patch when such an edit overlaps a hunk (→ hold); a DISJOINT same-file edit can interleave
  *      with apply's in-place rewrite of that file. Closing this fully needs an OS-level file lock
  *      the operator's editor also honors, which does not exist. Daemon-side writers ARE serialized:
- *      squad-manager keys the sync/apply promise chain by the REAL DIRECTORY (realpath), so two
- *      `here` sessions on one checkout can never fingerprint/apply concurrently (one daemon per
- *      state dir is the standing topology; multiple daemons on one checkout are out of scope).
+ *      squad-manager keys the sync/apply promise chain by the REAL DIRECTORY (realpath + literal
+ *      path), so two `here` sessions on one checkout can never fingerprint/apply concurrently (one
+ *      daemon per state dir is the standing topology; multiple daemons on one checkout are out of
+ *      scope).
  */
 
 import { createHash, randomUUID } from "node:crypto";
@@ -210,8 +215,14 @@ export interface BoundaryTurnStart {
 
 /** Capture both turn-start baselines. Never throws; failures ride the returned record. When the
  *  previous turn's end tree is known, reuse it as this turn's start baseline — the worktree does
- *  not change between turns, and reusing it closes the capture-races-first-edit window. */
-export async function beginTurn(realDir: string, worktree: string, priorEndTree?: string): Promise<BoundaryTurnStart> {
+ *  not change between turns, and reusing it closes the capture-races-first-edit window.
+ *
+ *  `earlyTree`: a worktree snapshot the CALLER started at the actual turn boundary, before this
+ *  call was scheduled. beginTurn runs on the per-checkout serialization chain, which can be parked
+ *  behind another session's long replay — a live worktree capture taken only THEN would include
+ *  the agent's first edits in the baseline and silently EXCLUDE them from the turn patch (a lost
+ *  update, not a hold). Only consulted when there is no priorEndTree (a session's first turn). */
+export async function beginTurn(realDir: string, worktree: string, priorEndTree?: string, earlyTree?: Promise<TreeResult>): Promise<BoundaryTurnStart> {
 	const start: BoundaryTurnStart = {};
 	const real = await captureRealTreeState(realDir);
 	if (real.ok) start.realFingerprint = real.fingerprint;
@@ -219,7 +230,7 @@ export async function beginTurn(realDir: string, worktree: string, priorEndTree?
 	if (priorEndTree) {
 		start.startTree = priorEndTree;
 	} else {
-		const tree = await captureWorktreeTree(worktree);
+		const tree = await (earlyTree ?? captureWorktreeTree(worktree));
 		if (tree.ok) start.startTree = tree.tree;
 		else start.treeFailure = tree.reason;
 	}
@@ -321,6 +332,30 @@ export class HeldSyncStore {
 		return this.dir;
 	}
 
+	/** Append one ledger line, guaranteeing it STARTS on a fresh line: a crash mid-append can leave
+	 *  a torn tail with no trailing newline, and appending directly after it would weld the next
+	 *  (perfectly valid) event onto the garbage — losing the NEW event too, not just the torn one.
+	 *  Costs one open+stat+1-byte read per event; events are rare. */
+	private async appendLine(json: string): Promise<void> {
+		let prefix = "";
+		try {
+			const fh = await fs.open(this.ledger, "r");
+			try {
+				const { size } = await fh.stat();
+				if (size > 0) {
+					const tail = Buffer.alloc(1);
+					await fh.read(tail, 0, 1, size - 1);
+					if (tail[0] !== 0x0a) prefix = "\n";
+				}
+			} finally {
+				await fh.close();
+			}
+		} catch {
+			// No ledger yet, or unreadable — the append below surfaces any real failure itself.
+		}
+		await fs.appendFile(this.ledger, `${prefix}${json}\n`);
+	}
+
 	async hold(e: { agentId: string; turn: number; realDir: string; reason: string; patch: string }): Promise<HeldSync> {
 		if (e.patch.length > MAX_SYNC_PATCH_BYTES) throw new Error(`held patch too large (${e.patch.length} bytes)`);
 		await fs.mkdir(this.dir, { recursive: true });
@@ -329,13 +364,23 @@ export class HeldSyncStore {
 		// Patch body FIRST, ledger line second — a ledger entry must never point at a missing body.
 		await fs.writeFile(patchFile, e.patch);
 		const held: HeldSync = { id, agentId: e.agentId, turn: e.turn, realDir: e.realDir, reason: e.reason, patchFile, patchBytes: e.patch.length, createdAt: Date.now() };
-		await fs.appendFile(this.ledger, `${JSON.stringify({ kind: "held", ...held } satisfies LedgerLine)}\n`);
+		await this.appendLine(JSON.stringify({ kind: "held", ...held } satisfies LedgerLine));
 		return held;
 	}
 
-	/** All unresolved holds, oldest-first in append order (= application order). */
+	/** All unresolved holds, oldest-first in append order (= application order). Throws when the
+	 *  ledger EXISTS but cannot be read: an unreadable ledger is NOT an empty backlog — reading it
+	 *  as one would let the next turn auto-apply ahead of an older held dependency, and let an
+	 *  explicit Apply report ok/0 and clear a row that still has patches behind it (fail-open).
+	 *  Only ENOENT (no ledger was ever written) is genuinely empty. */
 	async listAllHeld(): Promise<HeldSync[]> {
-		const raw = await fs.readFile(this.ledger, "utf8").catch(() => "");
+		let raw: string;
+		try {
+			raw = await fs.readFile(this.ledger, "utf8");
+		} catch (e) {
+			if ((e as NodeJS.ErrnoException | null)?.code === "ENOENT") return [];
+			throw new Error(`held-sync ledger unreadable (${this.ledger}): ${e instanceof Error ? e.message : String(e)}`);
+		}
 		const held = new Map<string, HeldSync>();
 		for (const line of raw.split("\n")) {
 			if (!line.trim()) continue;
@@ -357,7 +402,7 @@ export class HeldSyncStore {
 
 	async resolve(id: string, outcome: "applied" | "discarded"): Promise<void> {
 		await fs.mkdir(this.dir, { recursive: true });
-		await fs.appendFile(this.ledger, `${JSON.stringify({ kind: "resolved", id, outcome, at: Date.now() } satisfies LedgerLine)}\n`);
+		await this.appendLine(JSON.stringify({ kind: "resolved", id, outcome, at: Date.now() } satisfies LedgerLine));
 		// Body cleanup is best-effort — the ledger line is the truth; an orphaned body is inert.
 		const body = path.join(this.dir, `${id}.patch`);
 		await fs.rm(body, { force: true }).catch(() => {});
@@ -377,8 +422,12 @@ export interface ApplyHeldResult {
  * written to, exactly like the auto path. The DIVERGENCE check differs by design: the turn-start
  * baseline is meaningless once the tree has already diverged (that's why the patch is held), and
  * the operator's click IS the authorization — so cleanliness is judged at patch level, per patch,
- * by `git apply --check`. Held patches replay strictly in append order; the first conflict stops
- * the run with everything after it still held ("still divergent"), nothing half-applied.
+ * by `git apply --check`. That authorization covers the tree AS IT STANDS at the click, not
+ * whatever it becomes mid-replay: each patch's write is PINNED to a fingerprint captured right
+ * before it (`expectedFingerprint`, same last-instant recheck as the auto path), so a checkout
+ * that moves under the replay — a branch switch, an editor save — stops the run instead of being
+ * written into. Held patches replay strictly in append order; the first conflict stops the run
+ * with everything after it still held ("still divergent"), nothing half-applied.
  */
 export async function applyHeldNow(store: HeldSyncStore, agentId: string, realDir: string): Promise<ApplyHeldResult> {
 	const cap = await captureRealTreeState(realDir);
@@ -386,15 +435,34 @@ export async function applyHeldNow(store: HeldSyncStore, agentId: string, realDi
 	const held = await store.listHeld(agentId);
 	if (held.length === 0) return { ok: true, applied: 0, remaining: 0 };
 	let applied = 0;
+	let pin = cap.fingerprint;
 	for (const h of held) {
 		const patch = await fs.readFile(h.patchFile, "utf8").catch(() => undefined);
 		if (patch === undefined) {
 			return { ok: false, applied, remaining: held.length - applied, reason: `held patch body is missing (${path.basename(h.patchFile)}) — inspect ${store.root}` };
 		}
-		const res = await applyPatchToRealTree(realDir, patch);
+		const res = await applyPatchToRealTree(realDir, patch, pin);
 		if (!res.ok) return { ok: false, applied, remaining: held.length - applied, reason: `turn ${h.turn} is still divergent: ${res.reason}` };
-		await store.resolve(h.id, "applied");
+		// The write happened. From here every outcome must COUNT it — reporting "0 applied" after a
+		// successful `git apply` would tell the operator nothing changed when their checkout did.
 		applied++;
+		try {
+			await store.resolve(h.id, "applied");
+		} catch (e) {
+			return {
+				ok: false,
+				applied,
+				remaining: held.length - applied,
+				reason: `turn ${h.turn} WAS applied but recording that failed (${e instanceof Error ? e.message : String(e)}) — a re-apply will report it still divergent (crash semantics); inspect ${store.root}`,
+			};
+		}
+		// Re-pin for the next patch: each apply legitimately changes the tree, so the next write is
+		// gated on the state THIS apply produced — a third-party edit between patches breaks the pin.
+		if (applied < held.length) {
+			const next = await captureRealTreeState(realDir);
+			if (!next.ok) return { ok: false, applied, remaining: held.length - applied, reason: `couldn't re-verify your checkout after turn ${h.turn}: ${next.reason}` };
+			pin = next.fingerprint;
+		}
 	}
 	return { ok: true, applied, remaining: 0 };
 }
@@ -422,6 +490,16 @@ export async function discardHeldNow(store: HeldSyncStore, agentId: string, patc
 	if (held.length === 0) return { ok: true, discarded: 0, remaining: 0 };
 	const targets = patchId === undefined ? held : held.filter((h) => h.id === patchId);
 	if (targets.length === 0) return { ok: false, discarded: 0, remaining: held.length, reason: `no held patch ${patchId} for this session` };
-	for (const h of targets) await store.resolve(h.id, "discarded");
-	return { ok: true, discarded: targets.length, remaining: held.length - targets.length };
+	let discarded = 0;
+	for (const h of targets) {
+		try {
+			await store.resolve(h.id, "discarded");
+		} catch (e) {
+			// Report the PARTIAL count honestly — a mid-loop failure must not read as "nothing
+			// happened" when earlier entries were already resolved.
+			return { ok: false, discarded, remaining: held.length - discarded, reason: `recording the discard failed (${e instanceof Error ? e.message : String(e)}) — inspect ${store.root}` };
+		}
+		discarded++;
+	}
+	return { ok: true, discarded, remaining: held.length - discarded };
 }

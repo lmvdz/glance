@@ -2403,8 +2403,12 @@ export class SquadServer {
 				// registration — `reg.ephemeral` can be false when the repo was already durable, but the
 				// request shape is what marks a terminal-attach session) syncs each finished turn's patch
 				// back into the operator's real checkout, fail-closed. Derived server-side from the
-				// canonical registered root — never a separate client-supplied path.
-				const dto = await manager.create({ repo, name: "chat", model, profileId, harness, autoRoute: false, appendSystemPrompt: CONSOLE_SYSTEM_PROMPT, realTreePath: body.ephemeral === true ? repo : undefined }, actor);
+				// canonical registered root — never a separate client-supplied path. NEVER in db mode:
+				// boundary sync is host actuation (the daemon writing into a host checkout on a tenant
+				// operator's behalf), the same class /open refuses above — a multi-tenant daemon must not
+				// let any tenant point turn-writes at a daemon-readable host directory. Degradation, not
+				// regression: the session still runs; its edits stay worktree-only (diff/promote path).
+				const dto = await manager.create({ repo, name: "chat", model, profileId, harness, autoRoute: false, appendSystemPrompt: CONSOLE_SYSTEM_PROMPT, realTreePath: body.ephemeral === true && !this.dbMode ? repo : undefined }, actor);
 				return Response.json({ agentId: dto.id, repo, ephemeral });
 			} catch (err) {
 				// A failed spawn must not leave a half-session behind: undo the registration this very
@@ -2526,8 +2530,27 @@ export class SquadServer {
 		if (mdiscard && req.method === "POST") {
 			const id = decodeURIComponent(mdiscard[1]);
 			if (!manager.getAgent(id)) return new Response("no such agent", { status: 404 });
-			const body = decodeBodyOrEmpty(DiscardHeldSyncBodySchema, await req.json().catch(() => null));
-			const patchId = typeof body.patchId === "string" && body.patchId.length > 0 ? body.patchId : undefined;
+			// STRICT body handling, deliberately unlike the decodeBodyOrEmpty endpoints: the absent-
+			// patchId default means "discard the WHOLE backlog", so malformed input must 400, never
+			// silently collapse to {} — a truncated `{"patchId":"x"` would otherwise escalate a
+			// one-patch discard into discard-everything and report success. An EMPTY body is the
+			// deliberate discard-all (what the attention row's Discard sends as `{}`).
+			const rawText = await req.text().catch(() => null);
+			if (rawText === null) return new Response("unreadable body", { status: 400 });
+			let patchId: string | undefined;
+			if (rawText.trim().length > 0) {
+				let parsed: unknown;
+				try {
+					parsed = JSON.parse(rawText);
+				} catch {
+					return new Response("malformed JSON body", { status: 400 });
+				}
+				const decoded = decodeBody(DiscardHeldSyncBodySchema, parsed);
+				if (Result.isFailure(decoded)) return new Response(decoded.failure.message, { status: 400 });
+				const pid = decoded.success.patchId;
+				if (pid !== undefined && (typeof pid !== "string" || pid.length === 0)) return new Response("patchId must be a non-empty string", { status: 400 });
+				patchId = pid as string | undefined;
+			}
 			return Response.json(await manager.discardHeldSync(id, patchId, actor));
 		}
 		const mverify = url.pathname.match(/^\/api\/agents\/([^/]+)\/verify$/);

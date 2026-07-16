@@ -82,8 +82,57 @@ replay with later patches still held. Found-and-fixed during testing: `Bun.spawn
 vanished cwd (ENOENT) instead of returning non-zero — a local spawn-safe wrapper folds that into
 the fail-closed result plumbing; without it the capture would have bypassed the hold path entirely.
 
+**Round 9 (2026-07-16) — review-gauntlet fixes on top of the above:**
+- Per-checkout serialization: the boundary-sync promise chain moved off the AgentRecord onto a
+  daemon-global map keyed by realpath(realDir) + the literal resolved path (both, when they
+  differ) — two `here` sessions on one repo could previously both pass their fingerprint checks
+  and run concurrent `git apply` into the same checkout.
+- Fingerprint→apply TOCTOU narrowed: `applyPatchToRealTree` re-fingerprints AFTER `git apply
+  --check` passes, immediately before the write; the module race-notes now name all three windows
+  honestly, including the residual one (the recheck itself is four sequential spawns, so the true
+  exposure is recheck+apply — tens of ms — and an editor save inside it is not defendable without
+  an OS lock the editor honors).
+- Discard path: `discardHeldNow` + `SquadManager.discardHeldSync` + POST
+  /api/agents/:id/discard-held-sync (optional strict-validated `patchId`; malformed JSON is a 400,
+  never a silent discard-all) + a Discard chip beside Apply — a backlog whose first patch can
+  never apply cleanly no longer bricks auto-sync with no in-product recovery.
+- Honest uncapturable rows: `AttentionEvent.sync: "held"|"uncapturable"`; uncapturable rows say
+  "sync couldn't run" (never "held"), get View (never Apply/Discard), coexist with held rows (one
+  row per kind, not per agent), survive apply/discard resolution, and clear only when a later
+  spanning patch provably delivered the missed edits (endTree not advancing on uncapturable turns
+  makes the next patch span them — or, on a first-turn live baseline, never, which is correct).
+- Fail-closed ledger: an unreadable held.jsonl now throws (only ENOENT means empty) instead of
+  reading as an empty backlog (which let turns auto-apply ahead of held dependencies and let Apply
+  clear rows with patches still behind them); appends are torn-tail-safe (a new event can never be
+  welded onto a crash-truncated line); replay results count writes that succeeded even when the
+  resolution marker fails to persist.
+- Explicit replay pinning: `applyHeldNow` pins each patch's write to a fingerprint captured right
+  before it — the click authorizes the tree AS IT STOOD, not whatever it becomes mid-replay.
+- Turn-start baseline: a session's FIRST worktree snapshot starts at the actual turn boundary
+  (off-chain) instead of after the serialization queue drains, so a baseline parked behind another
+  session's replay can no longer swallow the agent's first edits as "already there".
+- Multi-tenant containment: db-mode consoles never get `realTreePath` — boundary sync is host
+  actuation (daemon writing a host checkout on a tenant's behalf), the same class /open refuses;
+  file-mode single-operator behavior unchanged.
+- Tests: 127 across boundary-sync module + wiring + webapp insights (was 112), all against real
+  git repos; tsc clean both tsconfigs.
+
+**Cross-lineage gate (mandatory for this git-write path) — SATISFIED 2026-07-16:**
+- grok leg: adjudicated in the round-8 gauntlet; its confirmed findings became rounds 8–9's fix
+  list (per-checkout serialization, TOCTOU, discard path, uncapturable honesty — all fixed above).
+- codex leg: `codex exec -s read-only` (gpt-5.6-sol) ran 2026-07-16 against the full A03 diff +
+  live tree; 10 findings, each adjudicated against the code:
+  - CONFIRMED + FIXED: operator-reachable host-write in db mode (→ db-mode gate); non-atomic
+    recheck understated in race-notes (→ honest window 3); unpinned explicit replay (→ per-patch
+    pins); parked first-turn baseline losing edits (→ off-chain early snapshot); realpath-fallback
+    key aliasing (→ dual-key chains); fail-open unreadable ledger (→ throw, ENOENT-only empty);
+    torn-tail append welding (→ fresh-line guard); malformed discard body collapsing to
+    discard-all (→ strict 400s); applied-then-resolve-failed reported as "0 applied" (→ counted,
+    plus best-effort recount in the manager's catch); held/uncapturable rows erasing each other
+    (→ one row per kind + spanned-prior clearing).
+  - Codex confirmed invariant 2 holds (fingerprinting read-only; `git apply` the only real-tree
+    write; repo-escape checks retained via patch files).
+
 **Still owed before this ships (gate work, not implementer work):**
 - Live verify per ## Verify (scratch daemon + real `glance here` turn + concurrent real-tree edit +
-  webapp Apply click) — Standing requirement #1.
-- Cross-lineage review (codex AND grok) — mandatory for this git-write path; do not land on a
-  single reviewer's approval.
+  webapp Apply click, now plus a Discard click) — Standing requirement #1.

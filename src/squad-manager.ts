@@ -88,7 +88,7 @@ import { buildContextPrimer, searchFabric, type KbDocType } from "./fabric-searc
 import { sweepPresence, who } from "./presence.ts";
 import { harnessEventDecision } from "./harness-hooks.ts";
 import { adoptBranchName, adoptBrief, isSafeUntrackedPath, parseNulList } from "./adopt.ts";
-import { applyHeldNow, beginTurn, type BoundaryTurnStart, discardHeldNow, HeldSyncStore, syncTurnEnd } from "./boundary-sync.ts";
+import { applyHeldNow, beginTurn, type BoundaryTurnStart, captureWorktreeTree, discardHeldNow, HeldSyncStore, syncTurnEnd } from "./boundary-sync.ts";
 import { chooseFallback } from "./supervisor.ts";
 import { availableActions, effectiveAutonomyMode, modeFromApproval, validateRequestedMode, type AutonomyMode, type VerificationState } from "./autonomy.ts";
 import type {
@@ -4553,21 +4553,29 @@ export class SquadManager extends EventEmitter {
 	 *  fail closed anyway. The returned promise carries `fn`'s own failure to callers that await it;
 	 *  the stored chain swallows it (logged) so one failure never wedges the lane. */
 	private queueBoundarySync(rec: AgentRecord, realDir: string, fn: () => Promise<void>): Promise<void> {
-		let key: string;
+		// Chain under BOTH the realpath and the literal resolved path when they differ (and under
+		// the literal path alone when realpath fails, e.g. the directory is briefly gone — captures
+		// against it fail closed anyway). Linking both closes the alias gap: an op queued by literal
+		// path during a realpath outage still serializes with later realpath-keyed ops through the
+		// shared literal key, so one checkout never runs two chains.
+		const resolved = path.resolve(realDir);
+		let keys: string[];
 		try {
-			key = realpathSync(realDir);
+			const real = realpathSync(resolved);
+			keys = real === resolved ? [resolved] : [real, resolved];
 		} catch {
-			key = path.resolve(realDir);
+			keys = [resolved];
 		}
-		const run = (this.boundarySyncChains.get(key) ?? Promise.resolve()).then(fn);
+		const priors = keys.map((k) => this.boundarySyncChains.get(k)).filter((p): p is Promise<void> => p !== undefined);
+		const run = Promise.all(priors).then(fn);
 		const stored = run.catch((err) => {
 			this.log("warn", `boundary-sync (${rec.dto.name}): ${errText(err)}`);
 		});
-		this.boundarySyncChains.set(key, stored);
+		for (const key of keys) this.boundarySyncChains.set(key, stored);
 		void stored.finally(() => {
 			// Drop the drained chain iff nothing queued behind it — keeps the map bounded by live
 			// checkouts without ever detaching a chain something else is already linked onto.
-			if (this.boundarySyncChains.get(key) === stored) this.boundarySyncChains.delete(key);
+			for (const key of keys) if (this.boundarySyncChains.get(key) === stored) this.boundarySyncChains.delete(key);
 		});
 		return run;
 	}
@@ -4592,8 +4600,14 @@ export class SquadManager extends EventEmitter {
 		const realDir = this.boundarySyncTarget(rec);
 		if (!realDir) return;
 		rec.boundarySyncTurn = (rec.boundarySyncTurn ?? 0) + 1;
+		// First turn only (later turns reuse the prior end tree): start the WORKTREE snapshot NOW,
+		// off-chain — the queue below can be parked behind another session's replay on this same
+		// checkout, and a baseline captured only when the chain drains would already contain the
+		// agent's first edits, silently excluding them from the turn patch (a lost update, not a
+		// hold). The worktree is this session's own; only real-tree reads/writes need the chain.
+		const earlyTree = rec.boundarySyncEndTree === undefined ? captureWorktreeTree(rec.options.worktree).catch((err) => ({ ok: false as const, reason: errText(err) })) : undefined;
 		void this.queueBoundarySync(rec, realDir, async () => {
-			rec.boundarySyncStart = await beginTurn(realDir, rec.options.worktree, rec.boundarySyncEndTree);
+			rec.boundarySyncStart = await beginTurn(realDir, rec.options.worktree, rec.boundarySyncEndTree, earlyTree);
 		});
 	}
 
@@ -4609,6 +4623,13 @@ export class SquadManager extends EventEmitter {
 			// that turn (today's behavior: the real tree is untouched, the diff view still shows all).
 			if (!start) return;
 			rec.boundarySyncStart = undefined; // consume — one sync decision per live turn
+			// Does this turn's patch SPAN the prior end tree? When an uncapturable turn left endTree
+			// stale, the next turn's baseline is that same stale tree — its patch therefore CONTAINS
+			// the uncapturable turn's edits, so a later applied/noop/held outcome genuinely resolves
+			// the standing "worktree-only edits" warning. A first-turn live baseline (no prior end
+			// tree) does NOT: edits from an earlier uncapturable turn are inside the baseline and
+			// will never sync, so the warning must stand.
+			const spannedPrior = start.startTree !== undefined && rec.boundarySyncEndTree !== undefined && start.startTree === rec.boundarySyncEndTree;
 			const outcome = await syncTurnEnd({ realDir, worktree: rec.options.worktree, start, store: this.boundarySyncHeld, agentId: rec.dto.id, turn: rec.boundarySyncTurn ?? 0 }).catch((err) => {
 				// syncTurnEnd's branches all return, but its plumbing (the held-patch store) can still
 				// throw (disk full, patch over the size cap). Same fail-closed direction — the real tree
@@ -4619,13 +4640,23 @@ export class SquadManager extends EventEmitter {
 			if (outcome.kind !== "uncapturable" && outcome.endTree) rec.boundarySyncEndTree = outcome.endTree;
 			switch (outcome.kind) {
 				case "noop":
+					// spannedPrior + empty patch ⇒ the worktree equals the already-synced prior end
+					// tree — any earlier uncapturable turn's edits were nil/reverted; the warning is moot.
+					if (spannedPrior) this.clearBoundarySyncAttention(rec, "uncapturable");
 					return;
 				case "applied":
+					// A held row here is stale by construction (a non-empty backlog forces hold, never
+					// apply); the uncapturable row clears only when this patch actually spanned it.
+					this.clearBoundarySyncAttention(rec, spannedPrior ? undefined : "held");
 					this.log("info", `boundary-sync (${rec.dto.name}): turn ${rec.boundarySyncTurn} applied to ${realDir} (${outcome.patchBytes} patch bytes)`);
 					return;
 				case "held": {
-					const backlog = await this.boundarySyncHeld.listHeld(rec.dto.id);
-					const n = backlog.length;
+					// The held patch spans the prior end tree, so it CONTAINS any uncapturable turn's
+					// edits — Apply will deliver them; the standalone warning is superseded.
+					if (spannedPrior) this.clearBoundarySyncAttention(rec, "uncapturable");
+					// Count is display-only; ≥1 is certain (this turn's hold just landed), so a ledger
+					// read hiccup must not suppress the row itself.
+					const n = await this.boundarySyncHeld.listHeld(rec.dto.id).then((b) => b.length).catch(() => 1);
 					this.raiseBoundarySyncAttention(
 						rec,
 						"held",
@@ -4652,23 +4683,28 @@ export class SquadManager extends EventEmitter {
 		});
 	}
 
-	/** One boundary-sync attention row per agent, always the freshest state (a stack of stale
-	 *  "sync held" rows for the same session is noise, not signal). `sync` distinguishes rows the
-	 *  webapp can resolve with Apply/Discard ("held" — durable patches are waiting) from rows that
-	 *  hold NOTHING ("uncapturable" — Apply there would be a lie; the webapp offers View). Non-
-	 *  blocking by design — AttentionEvent never flips agent status; the turn itself succeeded. */
+	/** One boundary-sync attention row per agent PER KIND, always the freshest state (a stack of
+	 *  stale "sync held" rows for the same session is noise, not signal — but a "held" row and an
+	 *  "uncapturable" row state different truths and must never erase each other: an uncapturable
+	 *  turn after a held backlog would otherwise hide the only Apply/Discard affordance for real
+	 *  patches, and vice versa). `sync` distinguishes rows the webapp can resolve with Apply/Discard
+	 *  ("held" — durable patches are waiting) from rows that hold NOTHING ("uncapturable" — Apply
+	 *  there would be a lie; the webapp offers View). Non-blocking by design — AttentionEvent never
+	 *  flips agent status; the turn itself succeeded. */
 	private raiseBoundarySyncAttention(rec: AgentRecord, sync: "held" | "uncapturable", summary: string, detail: string): void {
-		const kept = (rec.dto.attentionEvents ?? []).filter((e) => e.source !== "boundary-sync");
+		const kept = (rec.dto.attentionEvents ?? []).filter((e) => e.source !== "boundary-sync" || (e.sync ?? "held") !== sync);
 		rec.dto.attentionEvents = [...kept, { id: randomUUID(), summary, detail, source: "boundary-sync", sync, createdAt: Date.now() }];
 		this.emitAgent(rec);
 	}
 
-	/** `heldOnly` (the apply/discard resolution paths): only remove rows that were ABOUT held
-	 *  patches — resolving the backlog says nothing about an "uncapturable" warning, whose turn's
-	 *  edits are still worktree-only; clearing it would silently dismiss a true statement. */
-	private clearBoundarySyncAttention(rec: AgentRecord, opts?: { heldOnly?: boolean }): void {
+	/** `only` narrows the clear to one row kind. The apply/discard resolution paths clear "held"
+	 *  only — resolving the backlog says nothing about an "uncapturable" warning, whose turn's
+	 *  edits are still worktree-only; clearing it would silently dismiss a true statement. The
+	 *  turn-end path clears "uncapturable" (only) once a spanning patch provably covered those
+	 *  edits (see boundaryTurnEnd's spannedPrior). */
+	private clearBoundarySyncAttention(rec: AgentRecord, only?: "held" | "uncapturable"): void {
 		const events = rec.dto.attentionEvents ?? [];
-		const kept = events.filter((e) => e.source !== "boundary-sync" || (opts?.heldOnly === true && e.sync === "uncapturable"));
+		const kept = events.filter((e) => e.source !== "boundary-sync" || (only !== undefined && (e.sync ?? "held") !== only));
 		if (kept.length === events.length) return;
 		rec.dto.attentionEvents = kept;
 		this.emitAgent(rec);
@@ -4693,12 +4729,16 @@ export class SquadManager extends EventEmitter {
 				result = await applyHeldNow(this.boundarySyncHeld, id, realDir);
 			});
 		} catch (err) {
-			result = { ok: false, applied: result.applied, remaining: result.remaining, reason: errText(err) };
+			// The chain rejected (e.g. the held ledger is unreadable — fail-closed, nothing applied
+			// beyond what `result` already recorded). `remaining` from the initializer would LIE
+			// ("Still held (0 turns)"), so recount best-effort before reporting.
+			const remaining = await this.boundarySyncHeld.listHeld(id).then((h) => h.length).catch(() => result.remaining);
+			result = { ok: false, applied: result.applied, remaining, reason: errText(err) };
 		}
 		if (result.ok && result.remaining === 0) {
-			// heldOnly: resolving the backlog must not dismiss an "uncapturable" row — that warning
+			// "held" only: resolving the backlog must not dismiss an "uncapturable" row — that warning
 			// is about a turn whose edits are STILL worktree-only, and it holds nothing to apply.
-			this.clearBoundarySyncAttention(rec, { heldOnly: true });
+			this.clearBoundarySyncAttention(rec, "held");
 		} else if (result.reason) {
 			this.raiseBoundarySyncAttention(rec, "held", `sync still held: ${result.reason}`, `${result.applied} applied, ${result.remaining} still held for ${realDir}. Held patches: ${this.boundarySyncHeld.root}`);
 		}
@@ -4727,10 +4767,13 @@ export class SquadManager extends EventEmitter {
 				result = await discardHeldNow(this.boundarySyncHeld, id, patchId);
 			});
 		} catch (err) {
-			result = { ok: false, discarded: result.discarded, remaining: result.remaining, reason: errText(err) };
+			// Same honesty rule as applyHeldSync's catch: never report the initializer's counts as
+			// if they were observed — recount best-effort.
+			const remaining = await this.boundarySyncHeld.listHeld(id).then((h) => h.length).catch(() => result.remaining);
+			result = { ok: false, discarded: result.discarded, remaining, reason: errText(err) };
 		}
 		if (result.ok && result.remaining === 0) {
-			this.clearBoundarySyncAttention(rec, { heldOnly: true });
+			this.clearBoundarySyncAttention(rec, "held");
 		} else if (result.remaining > 0) {
 			this.raiseBoundarySyncAttention(
 				rec,
@@ -4747,7 +4790,12 @@ export class SquadManager extends EventEmitter {
 	 *  held" row for every restored session that still has holds, and say (don't hide) when holds
 	 *  belong to agents that no longer exist. */
 	private async reattachHeldSyncs(): Promise<void> {
-		const all = await this.boundarySyncHeld.listAllHeld().catch(() => []);
+		const all = await this.boundarySyncHeld.listAllHeld().catch((err) => {
+			// Boot must not die on a sick ledger, but swallowing it silently would hide real held
+			// patches behind a missing attention row — say so, loudly.
+			this.log("warn", `boundary-sync: could not read the held ledger at boot (${errText(err)}) — held patches (if any) have NO attention rows this tenure; inspect ${this.boundarySyncHeld.root}`);
+			return [];
+		});
 		if (all.length === 0) return;
 		const byAgent = new Map<string, number>();
 		for (const h of all) byAgent.set(h.agentId, (byAgent.get(h.agentId) ?? 0) + 1);
