@@ -136,9 +136,9 @@ export function prReviewedEvents(args: {
 
 // =================================================================================================
 // answer-read (concern 02): CLI display paths call the daemon directly (src/index.ts); this webapp
-// helper exists only so concern 10's fabric answer rows have one call to make when they render — no
-// answer-row UI exists yet, so nothing calls this today (DESIGN.md's "answer-read / debrief-heard"
-// row: client-side explicit acks only, never a GET/poll hook).
+// helper is called by the ⌘K palette when an answer row is selected (CommandPalette.tsx, wired by
+// concern 10). DESIGN.md's "answer-read / debrief-heard" row: client-side explicit acks only, never
+// a GET/poll hook.
 // =================================================================================================
 
 /** Report an answer as read from an explicit webapp display path (concern 10's future wiring point). */
