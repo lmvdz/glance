@@ -623,6 +623,21 @@ export const WorkspaceCockpit: React.FC = () => {
       case 'raise-cap':
         showToast('WIP cap is set by OMP_SQUAD_WIP_CAP — raise it and restart the daemon to allow more concurrent agents.', 'info');
         break;
+      // Boundary sync (daily-onramp 03): one-click apply of a `glance here` session's HELD turn
+      // patches into the operator's real checkout. The server re-runs the fail-closed precondition
+      // with a FRESH capture before writing anything — "still divergent" is an expected answer, not
+      // a transport error, so it surfaces as its own toast rather than a thrown failure.
+      case 'apply-sync':
+        void apiJson<{ ok: boolean; applied: number; remaining: number; reason?: string }>(
+          `/api/agents/${encodeURIComponent(row.agent.id)}/apply-held-sync`,
+          jsonInit('POST', {}),
+        )
+          .then((r) => {
+            if (r.ok) showToast(r.applied === 0 ? 'Nothing held — your checkout is already current' : `Applied ${r.applied} held turn${r.applied === 1 ? '' : 's'} to your checkout`, 'success');
+            else showToast(`Still held (${r.remaining} turn${r.remaining === 1 ? '' : 's'}): ${r.reason ?? 'your checkout is still divergent'}`, 'error');
+          })
+          .catch((e) => showToast(e instanceof Error ? e.message : 'Apply failed', 'error'));
+        break;
       // answer · steer · view · land: hand off to the detail pane (banner+Composer, or the
       // right rail for land) rather than acting from the row.
       default:

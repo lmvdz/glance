@@ -29,12 +29,14 @@ export interface AgentReport {
 }
 
 /** Mirrors backend `AttentionEvent` (src/types.ts) — a harness-agnostic, non-blocking "look at this"
- *  signal (operator `notify`, an omp `squad_attention` tool call, or a raw harness notify RPC). */
+ *  signal (operator `notify`, an omp `squad_attention` tool call, a raw harness notify RPC, or a
+ *  `glance here` turn patch HELD instead of auto-applied to the operator's real checkout —
+ *  "boundary-sync", daily-onramp 03; those rows carry a one-click Apply). */
 export interface AttentionEvent {
   id: string;
   summary: string;
   detail?: string;
-  source: "notify" | "tool" | "harness";
+  source: "notify" | "tool" | "harness" | "boundary-sync";
   createdAt: number;
 }
 

@@ -424,7 +424,7 @@ function fmtIdle(ms: number): string {
 
 export type AttentionSeverity = 'critical' | 'warn' | 'ok';
 export type AttentionKind = 'blocked' | 'vetoed' | 'inconclusive' | 'land-ready' | 'error' | 'resource' | 'collision' | 'flapping' | 'stalled' | 'report' | 'attention';
-export type AttentionActionKind = 'answer' | 'land' | 'restart' | 'view' | 'raise-cap' | 'steer';
+export type AttentionActionKind = 'answer' | 'land' | 'restart' | 'view' | 'raise-cap' | 'steer' | 'apply-sync';
 
 /** Epic 5 (HITL safeguards, DESIGN.md D3): a working agent is considered drifting once it's gone
  *  this long without any activity — the only robustly-computable, always-present staleness signal
@@ -619,16 +619,21 @@ export function attentionItems(input: AttentionInput, opts?: { sort?: 'severity'
 
     // Harness-agnostic attention lane (v2 glance-notify: operator notify / squad_attention tool /
     // harness notify RPC) → view. Same non-blocking contract as reports: independent of `status`.
+    // Boundary-sync rows (daily-onramp 03: a `glance here` turn's patch was HELD instead of
+    // auto-applied because the real checkout moved or couldn't be fingerprinted) instead carry the
+    // one-click Apply that re-checks server-side before touching anything — "View" would bury the
+    // single action that resolves the row.
     for (const e of a.attentionEvents ?? []) {
+      const sync = e.source === 'boundary-sync';
       items.push({
         id: `attention:${a.id}:${e.id}`,
         severity: 'warn',
         kind: 'attention',
-        title: `${a.name} needs a look`,
-        detail: e.detail ? `${e.summary} — ${e.detail}` : e.summary,
+        title: sync ? e.summary : `${a.name} needs a look`,
+        detail: sync ? e.detail : e.detail ? `${e.summary} — ${e.detail}` : e.summary,
         agentId: a.id,
         since: e.createdAt,
-        action: { label: 'View', kind: 'view' },
+        action: sync ? { label: 'Apply', kind: 'apply-sync' } : { label: 'View', kind: 'view' },
       });
     }
   }

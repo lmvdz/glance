@@ -491,6 +491,32 @@ describe('attentionItems', () => {
     expect(items[0].since).toBe(createdAt);
   });
 
+  test('a boundary-sync attention event carries the one-click Apply (not View) and its own summary as the title', () => {
+    const createdAt = Date.now();
+    const a = agent('a', 'idle', {
+      lastActivity: Date.now(),
+      attentionEvents: [
+        {
+          id: 'e1',
+          summary: 'sync held: your checkout changed during this turn',
+          detail: "1 turn's changes are held for /home/op/repo — nothing touched your checkout.",
+          source: 'boundary-sync',
+          createdAt,
+        },
+      ],
+    });
+    const items = attentionItems({ agents: [a] });
+    expect(items).toHaveLength(1);
+    expect(items[0].kind).toBe('attention');
+    expect(items[0].severity).toBe('warn');
+    // The single action that resolves the row: server-side re-checked apply, never a bare View.
+    expect(items[0].action).toEqual({ label: 'Apply', kind: 'apply-sync' });
+    // The event's own copy IS the row copy — "a needs a look — sync held: …" would bury the verb.
+    expect(items[0].title).toBe('sync held: your checkout changed during this turn');
+    expect(items[0].detail).toContain('nothing touched your checkout');
+    expect(items[0].since).toBe(createdAt);
+  });
+
   test('a blocked agent with a report only emits the blocked item (priority order, not a double row)', () => {
     const items = attentionItems({
       agents: [agent('a', 'input', { reports: [{ id: 'r1', summary: 'unsure', createdAt: Date.now() }] })],
