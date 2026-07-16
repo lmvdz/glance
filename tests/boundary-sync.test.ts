@@ -464,6 +464,50 @@ describe("applyPatchToRealTree", () => {
 	});
 });
 
+describe("pruneDivergenceCaptures (minor: divergence-capture GC — no retention bound before this)", () => {
+	test("removes only the oldest capture dirs once over the cap, keeping the most recent `keep`", async () => {
+		const root = await tmpDir("bsync-divroot-");
+		const names: string[] = [];
+		for (let i = 0; i < 5; i++) {
+			const dir = path.join(root, `divergence-${i}`);
+			await fs.mkdir(dir);
+			await fs.writeFile(path.join(dir, "marker"), String(i));
+			names.push(dir);
+			// Force a strictly increasing mtime ordering (some filesystems have coarse mtime resolution).
+			const t = new Date(Date.now() + i * 1000);
+			await fs.utimes(dir, t, t);
+		}
+		const { removed } = await pruneDivergenceCaptures(root, 3);
+		expect(removed).toBe(2);
+		const left = (await fs.readdir(root)).sort();
+		expect(left).toEqual(["divergence-2", "divergence-3", "divergence-4"]);
+	});
+
+	test("a no-op when at or under the cap — nothing removed", async () => {
+		const root = await tmpDir("bsync-divroot-");
+		await fs.mkdir(path.join(root, "divergence-only"));
+		expect(await pruneDivergenceCaptures(root, 3)).toEqual({ removed: 0 });
+		expect(await fs.readdir(root)).toEqual(["divergence-only"]);
+	});
+
+	test("a nonexistent root prunes to a clean no-op", async () => {
+		const root = path.join(os.tmpdir(), `bsync-divroot-never-created-${randomBytes()}`);
+		expect(await pruneDivergenceCaptures(root, 3)).toEqual({ removed: 0 });
+	});
+
+	test("non-divergence entries under the same root are left alone", async () => {
+		const root = await tmpDir("bsync-divroot-");
+		await fs.mkdir(path.join(root, "divergence-a"));
+		await fs.writeFile(path.join(root, "not-a-capture.txt"), "x"); // e.g. a stray sibling file
+		expect(await pruneDivergenceCaptures(root, 0)).toEqual({ removed: 1 });
+		expect(await fs.readdir(root)).toEqual(["not-a-capture.txt"]);
+	});
+});
+
+function randomBytes(): string {
+	return Math.random().toString(36).slice(2);
+}
+
 // ── the turn-end decision ─────────────────────────────────────────────────────────────────────────
 
 describe("syncTurnEnd", () => {
@@ -777,6 +821,83 @@ describe("HeldSyncStore", () => {
 		expect(err.patchFile).toContain(dir);
 		expect(await fs.readFile(err.patchFile, "utf8")).toBe("the patch body"); // recoverable by hand
 		expect(err.message).toContain(err.patchFile); // the message itself names the file
+	});
+
+	// ── N3: boot sweep for a ledger-append failure that survived a restart (the claim "recoverable
+	// by the next boot sweep" — this module's own doc, and squad-manager's inline comment — is now
+	// actually implemented, not just asserted) ─────────────────────────────────────────────────────
+
+	describe("sweepOrphanedPatches", () => {
+		test("recovers a hold whose ledger-append failed, once the ledger heals, using the sidecar `hold()` wrote before the failed append", async () => {
+			const dir = await tmpDir("bsync-store-");
+			await fs.mkdir(path.join(dir, "held.jsonl")); // the ledger is sick before any hold ever runs
+			const s1 = new HeldSyncStore(dir);
+			let caught: unknown;
+			try {
+				await s1.hold({ agentId: "a1", turn: 3, realDir: "/repo", reason: "the checkout diverged", patch: "diff --git a/x b/x\nturn3" });
+			} catch (e) {
+				caught = e;
+			}
+			expect(caught).toBeInstanceOf(HeldLedgerAppendError);
+			const err = caught as HeldLedgerAppendError;
+			// Nothing durable points at this hold yet (the whole point of the failure mode) — the sick
+			// ledger even fails a plain READ (fail-closed, not an empty backlog; see `listAllHeld`'s doc).
+			await expect(s1.listAllHeld()).rejects.toThrow();
+
+			// The daemon "dies" here and restarts — the ledger's sickness clears in the meantime (a
+			// fresh HeldSyncStore instance over the same dir models the restart).
+			await fs.rm(path.join(dir, "held.jsonl"), { recursive: true, force: true });
+			const s2 = new HeldSyncStore(dir);
+			const swept = await s2.sweepOrphanedPatches();
+			expect(swept.unrecoverable).toEqual([]);
+			expect(swept.recovered).toHaveLength(1);
+			expect(swept.recovered[0]!.id).toBe(err.id);
+			expect(swept.recovered[0]!.agentId).toBe("a1");
+			expect(swept.recovered[0]!.realDir).toBe("/repo");
+			expect(swept.recovered[0]!.reason).toBe("the checkout diverged");
+
+			// It's now ordinarily visible — Apply/Discard, listHeld, everything downstream.
+			const held = await s2.listHeld("a1");
+			expect(held).toHaveLength(1);
+			expect(held[0]!.id).toBe(err.id);
+			expect(await fs.readFile(held[0]!.patchFile, "utf8")).toContain("turn3");
+
+			// Idempotent: a second sweep finds nothing left to recover (it's a normal ledger line now).
+			const swept2 = await s2.sweepOrphanedPatches();
+			expect(swept2).toEqual({ recovered: [], unrecoverable: [] });
+		});
+
+		test("reports a patch file with no sidecar as unrecoverable — never silently dropped, never fabricated into a hold", async () => {
+			const dir = await tmpDir("bsync-store-");
+			const s = new HeldSyncStore(dir);
+			// A raw `.patch` file with no sidecar and no ledger line at all (predates N3, or the sidecar
+			// write itself also failed) — this module's pre-N3 residual "named in the thrown error" case.
+			const orphanFile = path.join(dir, "deadbeef.patch");
+			await fs.mkdir(dir, { recursive: true });
+			await fs.writeFile(orphanFile, "diff --git a/x b/x\nmystery");
+			const swept = await s.sweepOrphanedPatches();
+			expect(swept.recovered).toEqual([]);
+			expect(swept.unrecoverable).toEqual([orphanFile]);
+			expect(await s.listAllHeld()).toEqual([]); // never fabricated into a hold
+		});
+
+		test("never re-holds an id that's already resolved, even if its patch body somehow still exists", async () => {
+			const s = await newStore();
+			const held = await s.hold({ agentId: "a1", turn: 1, realDir: "/r", reason: "r", patch: "p" });
+			await s.resolve(held.id, "applied");
+			// Simulate resolve's best-effort body cleanup having failed to remove the file.
+			await fs.writeFile(held.patchFile, "p");
+			const swept = await s.sweepOrphanedPatches();
+			expect(swept).toEqual({ recovered: [], unrecoverable: [] }); // resolved — not orphaned, not broken
+			expect(await s.listHeld("a1")).toHaveLength(0); // never resurrected
+		});
+
+		test("an empty/nonexistent store dir sweeps to a clean no-op", async () => {
+			const dir = await tmpDir("bsync-store-");
+			await fs.rm(dir, { recursive: true, force: true }); // never even created
+			const s = new HeldSyncStore(dir);
+			expect(await s.sweepOrphanedPatches()).toEqual({ recovered: [], unrecoverable: [] });
+		});
 	});
 
 	// ── C2: reattach re-key (a hold's agentId moves onto a fresh session id) ────────────────────────

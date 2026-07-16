@@ -529,28 +529,44 @@ test("S5: promote() clears realTreePath so the unit's next turn does not boundar
 	expect(syncRows(mgr.rec("chat-1").dto)).toHaveLength(0);
 });
 
-// ── S6: a ledger bookkeeping failure must never cost the turn's patch ───────────────────────────────
+// ── S6/N3: a ledger bookkeeping failure must never cost the turn's patch ────────────────────────────
 
-test("S6: ledger-append failure raises attention naming the saved patch file — never 'nothing is held'", async () => {
+test("S6: ledger-append failure raises attention naming the saved patch file — never 'nothing is held'; N3: the row is a non-Apply kind, and turn N's edits are NOT lost once the ledger heals", async () => {
 	const repo = await initRepo();
 	const wt = await addWorktree(repo);
 	const stateDir = await tmpDir("bsw-state-");
-	// Pre-occupy the held-sync ledger's path with a DIRECTORY before any turn ever runs — the patch
-	// body (a sibling `<id>.patch` file) still writes fine; only the ledger append can ever fail here.
-	await fs.mkdir(path.join(stateDir, "boundary-sync", "held.jsonl"), { recursive: true });
 	const mgr = new TestManager({ stateDir });
 	seed(mgr, "chat-1", { repo, worktree: wt, realTreePath: repo });
 
+	// Turn 1: normal, applied — establishes a real (defined) prior end tree; the spanning recovery
+	// this test exercises only kicks in once there's a genuine PRIOR turn to span from (module doc:
+	// a live first-turn baseline can never recover an earlier turn's edits, by design).
 	mgr.turnStart("chat-1");
 	await mgr.settle("chat-1");
 	await fs.appendFile(path.join(wt, "a.txt"), "turn1\n");
+	mgr.turnEnd("chat-1");
+	await mgr.settle("chat-1");
+	expect(await fs.readFile(path.join(repo, "a.txt"), "utf8")).toContain("turn1");
+	const endTreeAfterTurn1 = mgr.rec("chat-1").boundarySyncEndTree;
+	expect(endTreeAfterTurn1).toBeTruthy();
+
+	// Turn 2: the checkout also diverges mid-turn (forces a HOLD decision), and the ledger itself is
+	// sick — held.jsonl is a DIRECTORY, so the patch body (a sibling `<id>.patch` file) still writes
+	// fine, but the ledger line that would track the hold can never append (S6).
+	const ledgerPath = path.join(stateDir, "boundary-sync", "held.jsonl");
+	await fs.mkdir(ledgerPath, { recursive: true });
+	mgr.turnStart("chat-1");
+	await mgr.settle("chat-1");
+	await fs.appendFile(path.join(wt, "a.txt"), "turn2\n");
 	await fs.writeFile(path.join(repo, "operator.txt"), "concurrent\n"); // force a hold decision
 	mgr.turnEnd("chat-1");
 	await mgr.settle("chat-1");
 
-	const rows = syncRows(mgr.rec("chat-1").dto);
+	let rows = syncRows(mgr.rec("chat-1").dto);
 	expect(rows).toHaveLength(1);
-	expect(rows[0]!.sync).toBe("held");
+	// N3: NOT "held" — nothing is ledger-tracked yet, so the webapp's Apply/Discard affordance (gated
+	// on `sync`) must not be offered; this is a non-Apply row until the ledger heals.
+	expect(rows[0]!.sync).toBe("uncapturable");
 	expect(rows[0]!.summary).toContain("saved but not yet tracked");
 	// The attention detail NAMES an actual, existing patch file — never a dead end.
 	const m = rows[0]!.detail?.match(/safe at (\S+\.patch)/);
@@ -558,9 +574,30 @@ test("S6: ledger-append failure raises attention naming the saved patch file —
 	const patchFile = m![1]!;
 	const body = await fs.readFile(patchFile, "utf8");
 	expect(body).toContain("diff --git");
-	expect(body).toContain("turn1");
+	expect(body).toContain("turn2");
 	// Fail-closed direction still holds: the real tree was never touched.
-	expect(await fs.readFile(path.join(repo, "a.txt"), "utf8")).not.toContain("turn1");
+	expect(await fs.readFile(path.join(repo, "a.txt"), "utf8")).not.toContain("turn2");
+	// N3: endTree must NOT have advanced past turn 1 — advancing it here (the pre-N3 behavior) is what
+	// made this turn's edits invisible to backlog/Apply/boot-sweep AND unrecoverable by the next turn's
+	// spanning patch. Staying at turn 1's endTree is what lets turn 3 (below) carry turn 2 forward.
+	expect(mgr.rec("chat-1").boundarySyncEndTree).toBe(endTreeAfterTurn1);
+
+	// The ledger heals (the transient failure clears) before turn 3 — an ordinary next turn.
+	await fs.rm(ledgerPath, { recursive: true, force: true });
+	mgr.turnStart("chat-1");
+	await mgr.settle("chat-1");
+	await fs.appendFile(path.join(wt, "a.txt"), "turn3\n");
+	mgr.turnEnd("chat-1");
+	await mgr.settle("chat-1");
+
+	// N3: turn 2's edit was NOT permanently skipped — turn 3's spanning patch (computed from turn 1's
+	// still-stale endTree) carried it into the real tree alongside turn 3's own edit, and the row is
+	// gone (honestly resolved, not a stale claim).
+	const final = await fs.readFile(path.join(repo, "a.txt"), "utf8");
+	expect(final).toContain("turn1");
+	expect(final).toContain("turn2");
+	expect(final).toContain("turn3");
+	expect(syncRows(mgr.rec("chat-1").dto)).toHaveLength(0);
 });
 
 // ── M1: the turn number must be stamped INSIDE the per-checkout chain, not before it ────────────────
@@ -612,4 +649,148 @@ test("M1: a fast next-turn-start racing a still-queued end-sync closure must not
 	const turn1Hold = held.find((h) => h.reason.includes("already held"));
 	expect(turn1Hold).toBeDefined();
 	expect(turn1Hold?.turn).toBe(1); // never 2 — the race must not have won
+});
+
+// ── N1 (live-verified): core.quotepath false positives on every git-quoted filename ─────────────────
+
+test("N1: a turn touching a pre-existing ACCENTED filename applies clean with NO divergence row (regression: C-quoting made patchTouchedPaths lstat an escaped literal that never existed, reading as 'absent' and raising a false CRITICAL divergence on every such turn)", async () => {
+	const repo = await initRepo();
+	await fs.writeFile(path.join(repo, "naïve.txt"), "hello\n");
+	await git(repo, "add", "-A");
+	await git(repo, "commit", "-qm", "add accented file");
+	const wt = await addWorktree(repo);
+	const mgr = await makeManager();
+	seed(mgr, "chat-1", { repo, worktree: wt, realTreePath: repo });
+
+	mgr.turnStart("chat-1");
+	await mgr.settle("chat-1");
+	await fs.writeFile(path.join(wt, "naïve.txt"), "world\n");
+	mgr.turnEnd("chat-1");
+	await mgr.settle("chat-1");
+
+	expect(await fs.readFile(path.join(repo, "naïve.txt"), "utf8")).toBe("world\n");
+	expect(syncRows(mgr.rec("chat-1").dto)).toHaveLength(0); // no divergence, no hold — clean apply
+});
+
+// ── N2: a "divergence" row must persist until the operator explicitly acts on it ────────────────────
+
+test("N2: a divergence row raised at turn N survives a clean turn N+1's apply (regression: 'applied' used to blanket-clear EVERY boundary-sync row, including divergence, whenever spannedPrior was true — i.e. on every ordinary consecutive turn)", async () => {
+	const repo = await initRepo();
+	const wt = await addWorktree(repo);
+	const mgr = await makeManager();
+	seed(mgr, "chat-1", { repo, worktree: wt, realTreePath: repo });
+
+	// Turn 1: applies normally — establishes a real prior end tree, so turn 2 sees spannedPrior=true
+	// (the exact condition that used to trip the blanket clear).
+	mgr.turnStart("chat-1");
+	await mgr.settle("chat-1");
+	await fs.appendFile(path.join(wt, "a.txt"), "turn1\n");
+	mgr.turnEnd("chat-1");
+	await mgr.settle("chat-1");
+	expect(syncRows(mgr.rec("chat-1").dto)).toHaveLength(0);
+
+	// Simulate a C1 divergence notice raised for turn 1 — end-to-end reproduction of the actual race
+	// lives in tests/boundary-sync.test.ts; this test is about the WIRING's clearing rule specifically.
+	mgr.rec("chat-1").dto.attentionEvents = [
+		{
+			id: "div-1",
+			summary: "sync divergence detected: 1 path may have been clobbered",
+			detail: "A concurrent edit to a.txt may have interleaved with this turn's write.",
+			source: "boundary-sync",
+			sync: "divergence",
+			createdAt: Date.now(),
+		},
+	];
+	expect(syncRows(mgr.rec("chat-1").dto).map((e) => e.sync)).toEqual(["divergence"]);
+
+	// Turn 2: an ordinary clean turn, applies successfully.
+	mgr.turnStart("chat-1");
+	await mgr.settle("chat-1");
+	await fs.appendFile(path.join(wt, "a.txt"), "turn2\n");
+	mgr.turnEnd("chat-1");
+	await mgr.settle("chat-1");
+
+	expect(await fs.readFile(path.join(repo, "a.txt"), "utf8")).toContain("turn2");
+	// The divergence row must survive — only "held"/"uncapturable" clear on a clean apply.
+	const rows = syncRows(mgr.rec("chat-1").dto);
+	expect(rows).toHaveLength(1);
+	expect(rows[0]!.sync).toBe("divergence");
+	expect(rows[0]!.id).toBe("div-1");
+});
+
+test("N2: acknowledgeBoundarySyncDivergence clears ONLY the divergence row, never a standing held/uncapturable one", async () => {
+	const mgr = await makeManager();
+	seed(mgr, "chat-1", { repo: "/r", worktree: "/w", realTreePath: "/r" });
+	mgr.rec("chat-1").dto.attentionEvents = [
+		{ id: "d1", summary: "sync divergence detected", detail: "x", source: "boundary-sync", sync: "divergence", createdAt: Date.now() },
+		{ id: "h1", summary: "sync held", detail: "y", source: "boundary-sync", sync: "held", createdAt: Date.now() },
+	];
+	const result = await mgr.acknowledgeBoundarySyncDivergence("chat-1");
+	expect(result).toEqual({ ok: true });
+	const rows = syncRows(mgr.rec("chat-1").dto);
+	expect(rows.map((e) => e.sync)).toEqual(["held"]);
+});
+
+test("acknowledgeBoundarySyncDivergence is a clean no-op with nothing to acknowledge, and 404-shaped for an unknown agent", async () => {
+	const mgr = await makeManager();
+	seed(mgr, "chat-1", { repo: "/r", worktree: "/w" });
+	expect(await mgr.acknowledgeBoundarySyncDivergence("chat-1")).toEqual({ ok: true });
+	expect(await mgr.acknowledgeBoundarySyncDivergence("no-such-agent")).toEqual({ ok: false, reason: "no such agent" });
+});
+
+// ── N4: promote() must not strand a session's PRE-EXISTING holds ────────────────────────────────────
+
+test("N4: a session with a held sync survives promote() — the pre-existing hold is still Apply-able and lands in the correct real tree (regression: applyHeldSync/discardHeldSync gated on the now-cleared live realTreePath and errored 'no boundary sync' for every promoted unit's old holds)", async () => {
+	const { CONSOLE_SYSTEM_PROMPT } = await import("../src/console-prompt.ts");
+	const repo = await initRepo();
+	const wt = await addWorktree(repo);
+	const mgr = await makeManager();
+	seed(mgr, "chat-1", { repo, worktree: wt, realTreePath: repo, kind: "omp-operator", appendSystemPrompt: CONSOLE_SYSTEM_PROMPT });
+	mgr.rec("chat-1").dto.name = "chat"; // promote()'s identity check reads dto.name, which seed() pins to the agent id
+
+	// Turn 1: the checkout diverges mid-turn — a held sync lands BEFORE promote.
+	mgr.turnStart("chat-1");
+	await mgr.settle("chat-1");
+	await fs.appendFile(path.join(wt, "a.txt"), "held-before-promote\n");
+	await fs.writeFile(path.join(repo, "operator.txt"), "concurrent\n");
+	mgr.turnEnd("chat-1");
+	await mgr.settle("chat-1");
+	expect(syncRows(mgr.rec("chat-1").dto)).toHaveLength(1);
+	expect(await mgr.heldFor("chat-1")).toHaveLength(1);
+
+	// Promote — S5 clears realTreePath; the unit is now a fleet unit by contract.
+	const result = await mgr.promote("chat-1", {});
+	expect(result.ok).toBe(true);
+
+	// N4: the pre-existing hold must still be Apply-able — pre-fix, this errored "no boundary sync"
+	// because applyHeldSync gated on boundarySyncTarget(rec), which returns undefined post-promote.
+	const applied = await mgr.applyHeldSync("chat-1");
+	expect(applied).toMatchObject({ ok: true, applied: 1, remaining: 0 });
+	expect(await fs.readFile(path.join(repo, "a.txt"), "utf8")).toContain("held-before-promote");
+	expect(syncRows(mgr.rec("chat-1").dto)).toHaveLength(0);
+});
+
+test("N4: discardHeldSync also still resolves a promoted session's pre-existing holds", async () => {
+	const { CONSOLE_SYSTEM_PROMPT } = await import("../src/console-prompt.ts");
+	const repo = await initRepo();
+	const wt = await addWorktree(repo);
+	const mgr = await makeManager();
+	seed(mgr, "chat-1", { repo, worktree: wt, realTreePath: repo, kind: "omp-operator", appendSystemPrompt: CONSOLE_SYSTEM_PROMPT });
+	mgr.rec("chat-1").dto.name = "chat";
+
+	mgr.turnStart("chat-1");
+	await mgr.settle("chat-1");
+	await fs.appendFile(path.join(wt, "a.txt"), "held-before-promote\n");
+	await fs.writeFile(path.join(repo, "operator.txt"), "concurrent\n");
+	mgr.turnEnd("chat-1");
+	await mgr.settle("chat-1");
+	expect(await mgr.heldFor("chat-1")).toHaveLength(1);
+
+	const result = await mgr.promote("chat-1", {});
+	expect(result.ok).toBe(true);
+
+	const discarded = await mgr.discardHeldSync("chat-1");
+	expect(discarded).toMatchObject({ ok: true, discarded: 1, remaining: 0 });
+	expect(await fs.readFile(path.join(repo, "a.txt"), "utf8")).not.toContain("held-before-promote"); // untouched
+	expect(syncRows(mgr.rec("chat-1").dto)).toHaveLength(0);
 });

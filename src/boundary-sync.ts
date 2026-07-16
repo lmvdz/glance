@@ -524,6 +524,53 @@ async function retainDivergenceCapture(root: string, pre: Map<string, PathSnapsh
 	return dir;
 }
 
+/**
+ * Minor follow-up (divergence-capture GC): `retainDivergenceCapture` writes a full pre-write
+ * snapshot for every detected divergence and never removes any of them — divergences are rare, but
+ * a daemon with a long enough tenure and an unlucky repo could accumulate an unbounded number of
+ * these directories with nothing ever pruning them. Keeps at most `keep` most recent capture
+ * directories directly under `root` (a `HeldSyncStore`'s own `divergence` subdir in production — the
+ * same `divergenceDir` `syncTurnEnd`/`applyHeldNow` already pass), oldest by directory mtime first.
+ * Best-effort throughout: a single unremovable directory (permissions, a concurrent reader) must
+ * never stop the rest from being pruned, and a prune failure must never be mistaken for "nothing to
+ * prune" by a caller — the `removed` count is exact for whatever this call actually managed. Not on
+ * any hot path (detect/apply never call this) — wired as a boot-time sweep alongside
+ * `HeldSyncStore.sweepOrphanedPatches`.
+ */
+export async function pruneDivergenceCaptures(root: string, keep = 200): Promise<{ removed: number }> {
+	let entries: string[];
+	try {
+		entries = await fs.readdir(root);
+	} catch {
+		return { removed: 0 }; // no divergence dir yet (or it's gone) — nothing to prune
+	}
+	const dirs = entries.filter((e) => e.startsWith("divergence-"));
+	if (dirs.length <= keep) return { removed: 0 };
+	const withTimes = await Promise.all(
+		dirs.map(async (d) => {
+			const full = path.join(root, d);
+			try {
+				const st = await fs.stat(full);
+				return { full, mtimeMs: st.mtimeMs };
+			} catch {
+				return { full, mtimeMs: 0 }; // vanished/unreadable between readdir and stat — prune-eligible first
+			}
+		}),
+	);
+	withTimes.sort((a, b) => a.mtimeMs - b.mtimeMs); // oldest first
+	const toRemove = withTimes.slice(0, withTimes.length - keep);
+	let removed = 0;
+	for (const { full } of toRemove) {
+		try {
+			await fs.rm(full, { recursive: true, force: true });
+			removed++;
+		} catch {
+			// Best-effort — leave it for the next sweep rather than let one stuck directory block the rest.
+		}
+	}
+	return { removed };
+}
+
 /** The C1 detect half: given the pre-write snapshot of every patch-touched path and the patch itself,
  *  read the SAME paths from the real tree (now, post-write) and compare each against what the patch
  *  alone should have produced. Returns undefined when everything matches (the common case, zero extra
@@ -820,6 +867,11 @@ export class HeldSyncStore {
 		return this.dir;
 	}
 
+	/** N3: sidecar path for a hold's recovery metadata (see `hold()` and `sweepOrphanedPatches()`). */
+	private metaFile(id: string): string {
+		return path.join(this.dir, `${id}.meta.json`);
+	}
+
 	/** Append one ledger line, guaranteeing it STARTS on a fresh line: a crash mid-append can leave
 	 *  a torn tail with no trailing newline, and appending directly after it would weld the next
 	 *  (perfectly valid) event onto the garbage — losing the NEW event too, not just the torn one.
@@ -859,11 +911,21 @@ export class HeldSyncStore {
 			throw new HeldPatchWriteError(`couldn't write the held patch body: ${errText(err)}`);
 		}
 		const held: HeldSync = { id, agentId: e.agentId, turn: e.turn, realDir: e.realDir, reason: e.reason, patchFile, patchBytes: e.patch.length, createdAt: Date.now() };
+		// N3: a recovery sidecar, written best-effort BEFORE the ledger append attempt — the ledger line
+		// and this file are the only two places `held`'s full identity (agentId/turn/realDir/reason)
+		// ever exists, so if the append below fails, this is what lets `sweepOrphanedPatches()` recover
+		// the hold's identity on a later boot instead of merely naming an unrecoverable patch file. A
+		// failed sidecar write is never fatal here (best-effort): worst case, this exact hold falls back
+		// to the pre-existing "named in `HeldLedgerAppendError`" manual recovery, same as before N3.
+		await fs.writeFile(this.metaFile(id), JSON.stringify(held)).catch(() => {});
 		try {
 			await this.appendLine(JSON.stringify({ kind: "held", ...held } satisfies LedgerLine));
 		} catch (err) {
 			throw new HeldLedgerAppendError(`the patch is saved at ${patchFile} but recording it in the ledger failed: ${errText(err)}`, patchFile, id);
 		}
+		// The ledger line is now the source of truth — the sidecar is redundant (best-effort cleanup;
+		// a failed removal is inert, `sweepOrphanedPatches` skips any id already present in the ledger).
+		await fs.rm(this.metaFile(id), { force: true }).catch(() => {});
 		return held;
 	}
 
@@ -923,6 +985,91 @@ export class HeldSyncStore {
 		// Body cleanup is best-effort — the ledger line is the truth; an orphaned body is inert.
 		const body = path.join(this.dir, `${id}.patch`);
 		await fs.rm(body, { force: true }).catch(() => {});
+		// A sweep-recovered hold (N3) may still carry its sidecar (the sweep only removes it after a
+		// SUCCESSFUL re-append; a hold recovered on THIS boot but resolved before the next one would
+		// otherwise leave it behind forever) — same best-effort cleanup as the body.
+		await fs.rm(this.metaFile(id), { force: true }).catch(() => {});
+	}
+
+	/** Every id that has EVER appeared in the ledger — held, resolved, or rekeyed — regardless of
+	 *  current (open/closed) state. Used by `sweepOrphanedPatches` to tell "genuinely never tracked"
+	 *  (S6's failure mode) apart from "tracked and already resolved" (whose `.patch` file should
+	 *  already be gone via `resolve`'s cleanup, but a crash between the two makes that best-effort,
+	 *  not guaranteed — a stray body for an id that DOES appear here must never be re-held). */
+	private async allLedgerIds(): Promise<Set<string>> {
+		let raw: string;
+		try {
+			raw = await fs.readFile(this.ledger, "utf8");
+		} catch {
+			return new Set();
+		}
+		const ids = new Set<string>();
+		for (const line of raw.split("\n")) {
+			if (!line.trim()) continue;
+			let parsed: unknown;
+			try {
+				parsed = JSON.parse(line);
+			} catch {
+				continue;
+			}
+			if (isLedgerLine(parsed)) ids.add(parsed.id);
+		}
+		return ids;
+	}
+
+	/**
+	 * N3: boot-time recovery for a hold whose ledger append failed (`HeldLedgerAppendError`) and whose
+	 * daemon then died or restarted before anything re-tracked it — the ONE part of that failure mode
+	 * "the next boot sweep once the ledger heals" (this module's own doc, and squad-manager's inline
+	 * comment) had claimed but never actually implemented. Makes that claim true: every `<id>.patch`
+	 * body with no corresponding ledger line (open OR resolved — see `allLedgerIds`) is genuinely
+	 * orphaned; if its `<id>.meta.json` sidecar (written by `hold()` before the append that may have
+	 * failed) survived alongside it, this re-attempts exactly the append that failed, using the
+	 * sidecar's recorded identity — the hold becomes ordinarily visible (`listHeld`/`listAllHeld`,
+	 * Apply/Discard, `orphanedBoundarySyncs`) instead of invisible. A patch with no sidecar (the
+	 * sidecar write itself also failed, or predates N3) has no recoverable identity and is reported as
+	 * `unrecoverable` — the same "named exact file" recovery this module has always offered, just
+	 * surfaced from a sweep instead of only the original throw.
+	 */
+	async sweepOrphanedPatches(): Promise<{ recovered: HeldSync[]; unrecoverable: string[] }> {
+		let entries: string[];
+		try {
+			entries = await fs.readdir(this.dir);
+		} catch {
+			return { recovered: [], unrecoverable: [] }; // no state dir yet — nothing to sweep
+		}
+		const patchIds = entries.filter((f) => f.endsWith(".patch")).map((f) => f.slice(0, -".patch".length));
+		if (patchIds.length === 0) return { recovered: [], unrecoverable: [] };
+		const seen = await this.allLedgerIds();
+		const recovered: HeldSync[] = [];
+		const unrecoverable: string[] = [];
+		for (const id of patchIds) {
+			if (seen.has(id)) continue; // already tracked (open or resolved) — not orphaned
+			const patchFile = path.join(this.dir, `${id}.patch`);
+			let meta: HeldSync | undefined;
+			try {
+				const parsed: unknown = JSON.parse(await fs.readFile(this.metaFile(id), "utf8"));
+				if (parsed && typeof parsed === "object" && "agentId" in parsed && typeof (parsed as HeldSync).agentId === "string" && "realDir" in parsed && typeof (parsed as HeldSync).realDir === "string" && "patchFile" in parsed && typeof (parsed as HeldSync).patchFile === "string") {
+					meta = parsed as HeldSync;
+				}
+			} catch {
+				// No sidecar (or it's unreadable/mangled) — falls through to unrecoverable below.
+			}
+			if (!meta) {
+				unrecoverable.push(patchFile);
+				continue;
+			}
+			try {
+				await this.appendLine(JSON.stringify({ kind: "held", ...meta } satisfies LedgerLine));
+				recovered.push(meta);
+				await fs.rm(this.metaFile(id), { force: true }).catch(() => {});
+			} catch {
+				// Still sick (e.g. the ledger itself is still a directory) — leave the sidecar in place so
+				// the NEXT boot's sweep can retry; report it as unrecoverable THIS boot, not silently lost.
+				unrecoverable.push(patchFile);
+			}
+		}
+		return { recovered, unrecoverable };
 	}
 }
 

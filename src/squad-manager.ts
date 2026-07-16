@@ -92,7 +92,7 @@ import { buildContextPrimer, searchFabric, type KbDocType } from "./fabric-searc
 import { sweepPresence, who } from "./presence.ts";
 import { harnessEventDecision } from "./harness-hooks.ts";
 import { adoptBranchName, adoptBrief, isSafeUntrackedPath, parseNulList } from "./adopt.ts";
-import { applyHeldNow, beginTurn, type BoundaryTurnStart, captureWorktreeTree, discardHeldNow, type HeldSync, HeldSyncStore, syncTurnEnd } from "./boundary-sync.ts";
+import { applyHeldNow, beginTurn, type BoundaryTurnStart, captureWorktreeTree, discardHeldNow, type HeldSync, HeldSyncStore, pruneDivergenceCaptures, syncTurnEnd } from "./boundary-sync.ts";
 import { chooseFallback } from "./supervisor.ts";
 import { availableActions, effectiveAutonomyMode, modeFromApproval, validateRequestedMode, type AutonomyMode, type VerificationState } from "./autonomy.ts";
 import type {
@@ -4819,6 +4819,24 @@ export class SquadManager extends EventEmitter {
 		return realDir;
 	}
 
+	/** N4: the real-dir to use for the EXPLICIT Apply/Discard affordances specifically — unlike
+	 *  `boundarySyncTarget` (turn start/end wiring, which must stay live-session-only), these two
+	 *  affordances must keep working for a session's PRE-EXISTING holds even after `promote()` clears
+	 *  `options.realTreePath` (S5 — a promoted unit is a fleet unit by contract, so future turns
+	 *  correctly stop auto-syncing). The commit that shipped S5 claimed existing holds "remain
+	 *  Apply-able" because they carry their own `realDir` straight off the ledger — true of the
+	 *  ledger record, but `applyHeldSync`/`discardHeldSync` never actually READ it: they gated on
+	 *  `boundarySyncTarget(rec)`, which returns `undefined` post-promote regardless of what's held, so
+	 *  the claim was false in practice (every call errored "no boundary sync"). Falling back to the
+	 *  first held patch's own `realDir` when the live option is gone makes the claim true without
+	 *  touching the live-session wiring at all. */
+	private async boundarySyncResolveDir(rec: AgentRecord): Promise<string | undefined> {
+		const live = this.boundarySyncTarget(rec);
+		if (live) return live;
+		const held = await this.boundarySyncHeld.listHeld(rec.dto.id).catch(() => []);
+		return held[0]?.realDir;
+	}
+
 	/** agent_start/turn_start: capture the turn's baselines. Failures are recorded on the record
 	 *  (NOT defaulted) so turn end holds with the precise reason — a failed capture can never
 	 *  compare equal to anything. */
@@ -4870,7 +4888,17 @@ export class SquadManager extends EventEmitter {
 				// turns silently evaporate.
 				return { kind: "uncapturable", reason: `sync bookkeeping failed: ${errText(err)}` } as const;
 			});
-			if (outcome.kind !== "uncapturable" && outcome.endTree) rec.boundarySyncEndTree = outcome.endTree;
+			// N3: the S6 ledger-append-failed sub-case of "held" (patch body written, but the ledger line
+			// that would track it never landed) must NOT advance endTree — advancing it here was a
+			// RECOVERY REGRESSION vs. pre-C1 behavior: it made this turn's edits invisible to
+			// backlog/listHeld/Apply/boot-sweep (nothing durable points at them) AND, by moving the
+			// baseline forward, made it impossible for a LATER spanning patch to ever carry them again —
+			// silently and permanently skipping turn N even though pre-fix (`uncapturable`, endTree left
+			// stale) the very next turn's spanning patch would have recovered them. Leaving endTree stale
+			// here keeps this turn's edits inside the NEXT turn's baseline→worktree delta, exactly like a
+			// genuine `uncapturable` outcome already does.
+			const ledgerAppendFailed = outcome.kind === "held" && outcome.held === undefined && outcome.patchFile !== undefined;
+			if (outcome.kind !== "uncapturable" && !ledgerAppendFailed && outcome.endTree) rec.boundarySyncEndTree = outcome.endTree;
 			switch (outcome.kind) {
 				case "noop":
 					// spannedPrior + empty patch ⇒ the worktree equals the already-synced prior end
@@ -4878,9 +4906,17 @@ export class SquadManager extends EventEmitter {
 					if (spannedPrior) this.clearBoundarySyncAttention(rec, "uncapturable");
 					return;
 				case "applied":
-					// A held row here is stale by construction (a non-empty backlog forces hold, never
-					// apply); the uncapturable row clears only when this patch actually spanned it.
-					this.clearBoundarySyncAttention(rec, spannedPrior ? undefined : "held");
+					// N2: "held" clears unconditionally — an "applied" outcome only happens when
+					// `syncTurnEnd` verified the backlog was empty (step 2 of its precondition), so no held
+					// row can legitimately still be standing. "uncapturable" clears only when this patch
+					// actually spanned it. Passing `undefined` here used to blanket-clear EVERY
+					// boundary-sync row regardless of kind — including "divergence", whose whole point is to
+					// persist until the operator explicitly acts on it — so a critical divergence notice
+					// raised at turn N was silently swept by the very next clean turn N+1 (every ordinary
+					// consecutive turn has `spannedPrior` true). `clearBoundarySyncAttention`'s `only`
+					// parameter is now required — no call site can ever again reintroduce a blanket clear.
+					this.clearBoundarySyncAttention(rec, "held");
+					if (spannedPrior) this.clearBoundarySyncAttention(rec, "uncapturable");
 					this.log("info", `boundary-sync (${rec.dto.name}): turn ${rec.boundarySyncTurn} applied to ${realDir} (${outcome.patchBytes} patch bytes)`);
 					if (outcome.divergence) {
 						// C1: the write happened, but a concurrent edit to one of these exact paths may have
@@ -4899,12 +4935,18 @@ export class SquadManager extends EventEmitter {
 					// edits — Apply will deliver them; the standalone warning is superseded.
 					if (spannedPrior) this.clearBoundarySyncAttention(rec, "uncapturable");
 					if (outcome.held === undefined && outcome.patchFile) {
-						// S6: the patch body itself is safely on disk; only the ledger append that would
-						// normally track it failed. Recoverable by hand (the exact file named below) or by
-						// the next boot sweep once the ledger heals — never "nothing is held".
+						// S6/N3: the patch body itself is safely on disk; only the ledger append that would
+						// normally track it failed. `sync: "uncapturable"`, NOT "held" — the webapp's Apply
+						// affordance is gated on the sync kind (`insights.ts`), and offering Apply/Discard here
+						// would be a lie: there is no ledger-tracked hold to replay or drop yet, only a
+						// dangling patch file `endTree` deliberately did NOT advance for (see above), so the
+						// NEXT turn's spanning patch still carries these edits — recoverable that way, by hand
+						// (the exact file named below), or by the boot sweep (`sweepOrphanedPatches`, wired in
+						// `reattachHeldSyncs`) once the ledger heals — never "nothing is held", never a false
+						// Apply-able affordance either.
 						this.raiseBoundarySyncAttention(
 							rec,
-							"held",
+							"uncapturable",
 							"sync held: this turn's patch is saved but not yet tracked",
 							`${outcome.reason} — the patch itself is safe at ${outcome.patchFile}; it won't show up under Apply/Discard until tracking it succeeds. Inspect ${this.boundarySyncHeld.root} or retry the turn.`,
 						);
@@ -4955,17 +4997,44 @@ export class SquadManager extends EventEmitter {
 		this.emitAgent(rec);
 	}
 
-	/** `only` narrows the clear to one row kind. The apply/discard resolution paths clear "held"
-	 *  only — resolving the backlog says nothing about an "uncapturable" warning, whose turn's
-	 *  edits are still worktree-only; clearing it would silently dismiss a true statement. The
-	 *  turn-end path clears "uncapturable" (only) once a spanning patch provably covered those
-	 *  edits (see boundaryTurnEnd's spannedPrior). */
-	private clearBoundarySyncAttention(rec: AgentRecord, only?: "held" | "uncapturable" | "divergence"): void {
+	/** `only` narrows the clear to one row kind — REQUIRED (N2): a blanket clear (no `only`, drop every
+	 *  boundary-sync row regardless of kind) used to be reachable by passing `undefined`, and the one
+	 *  call site that did (`boundaryTurnEnd`'s "applied" case, `spannedPrior ? undefined : "held"`) swept
+	 *  a critical "divergence" row on the very next clean turn — every ordinary consecutive turn has
+	 *  `spannedPrior` true, so a divergence notice was silently gone by the time an operator could act on
+	 *  it. A "divergence" row must persist until the operator explicitly resolves it (see
+	 *  `acknowledgeBoundarySyncDivergence`) or discards its retained capture — it is NEVER an
+	 *  acceptable target for an implicit clear, so removing the ability to omit `only` at all is the
+	 *  fail-closed fix: no future call site can reintroduce the blanket-clear bug even by accident. The
+	 *  apply/discard resolution paths clear "held" only — resolving the backlog says nothing about an
+	 *  "uncapturable" warning, whose turn's edits are still worktree-only; clearing it would silently
+	 *  dismiss a true statement. The turn-end path clears "uncapturable" once a spanning patch provably
+	 *  covered those edits (see boundaryTurnEnd's spannedPrior). */
+	private clearBoundarySyncAttention(rec: AgentRecord, only: "held" | "uncapturable" | "divergence"): void {
 		const events = rec.dto.attentionEvents ?? [];
-		const kept = events.filter((e) => e.source !== "boundary-sync" || (only !== undefined && (e.sync ?? "held") !== only));
+		const kept = events.filter((e) => e.source !== "boundary-sync" || (e.sync ?? "held") !== only);
 		if (kept.length === events.length) return;
 		rec.dto.attentionEvents = kept;
 		this.emitAgent(rec);
+	}
+
+	/**
+	 * N2: the explicit "I've looked at this" affordance a "divergence" row otherwise has no way to
+	 * resolve — `clearBoundarySyncAttention` can never target it implicitly (see above), and unlike a
+	 * "held" row there is no ledger entry an Apply/Discard call resolves; the write already happened,
+	 * there is nothing left to apply or drop, only a notice and a retained pre-write capture the
+	 * operator has (or hasn't) reconciled by hand. Acknowledging clears ONLY the "divergence" kind —
+	 * exactly the row this exists for — never "held"/"uncapturable", so it can never be used to paper
+	 * over a real pending backlog.
+	 */
+	async acknowledgeBoundarySyncDivergence(id: string, actor: Actor = LOCAL_ACTOR): Promise<{ ok: boolean; reason?: string }> {
+		const rec = this.agents.get(id);
+		if (!rec) return { ok: false, reason: "no such agent" };
+		const had = (rec.dto.attentionEvents ?? []).some((e) => e.source === "boundary-sync" && e.sync === "divergence");
+		if (!had) return { ok: true };
+		this.clearBoundarySyncAttention(rec, "divergence");
+		void this.recordAudit(actor, "boundary-sync.ack-divergence", id, "ok", "operator acknowledged a boundary-sync divergence notice");
+		return { ok: true };
 	}
 
 	/**
@@ -4979,7 +5048,7 @@ export class SquadManager extends EventEmitter {
 	async applyHeldSync(id: string, actor: Actor = LOCAL_ACTOR): Promise<{ ok: boolean; applied: number; remaining: number; reason?: string; divergences?: { turn: number; paths: string[]; captureDir: string }[] }> {
 		const rec = this.agents.get(id);
 		if (!rec) return { ok: false, applied: 0, remaining: 0, reason: "no such agent" };
-		const realDir = this.boundarySyncTarget(rec);
+		const realDir = await this.boundarySyncResolveDir(rec);
 		if (!realDir) return { ok: false, applied: 0, remaining: 0, reason: "this unit has no boundary sync (not a here-class session)" };
 		let result: Awaited<ReturnType<typeof applyHeldNow>> = { ok: false, applied: 0, remaining: 0, reason: "apply did not run" };
 		try {
@@ -5027,7 +5096,7 @@ export class SquadManager extends EventEmitter {
 	async discardHeldSync(id: string, patchId?: string, actor: Actor = LOCAL_ACTOR): Promise<{ ok: boolean; discarded: number; remaining: number; reason?: string }> {
 		const rec = this.agents.get(id);
 		if (!rec) return { ok: false, discarded: 0, remaining: 0, reason: "no such agent" };
-		const realDir = this.boundarySyncTarget(rec);
+		const realDir = await this.boundarySyncResolveDir(rec);
 		if (!realDir) return { ok: false, discarded: 0, remaining: 0, reason: "this unit has no boundary sync (not a here-class session)" };
 		let result: { ok: boolean; discarded: number; remaining: number; reason?: string } = { ok: false, discarded: 0, remaining: 0, reason: "discard did not run" };
 		try {
@@ -5065,6 +5134,28 @@ export class SquadManager extends EventEmitter {
 	 *  in server.ts); the warn log is the immediate operational half — both name the exact patch
 	 *  files and the recovery path. */
 	private async reattachHeldSyncs(): Promise<void> {
+		// N3: recover any hold whose ledger-append failed and was never re-tracked before the daemon
+		// died/restarted (`HeldLedgerAppendError`'s `.patch` body survives, but with no ledger line —
+		// see `HeldSyncStore.sweepOrphanedPatches`'s doc for why this is the honest fix for the boot-
+		// sweep recovery this module has long CLAIMED but, before N3, never actually implemented). Runs
+		// before the ledger read below so a recovered hold shows up in `all` on this very boot.
+		const swept = await this.boundarySyncHeld.sweepOrphanedPatches().catch((err) => {
+			this.log("warn", `boundary-sync: boot sweep for ledgerless patch files failed (${errText(err)})`);
+			return { recovered: [], unrecoverable: [] };
+		});
+		if (swept.recovered.length > 0) {
+			this.log("info", `boundary-sync: boot sweep recovered ${swept.recovered.length} previously-untracked held patch(es) (a ledger-append failure survived a restart) — now visible under the normal held-sync affordances`);
+		}
+		if (swept.unrecoverable.length > 0) {
+			this.log("warn", `boundary-sync: boot sweep found ${swept.unrecoverable.length} orphaned patch file(s) with no recoverable metadata — inspect by hand: ${swept.unrecoverable.join(", ")}`);
+		}
+		// Minor follow-up: divergence-capture GC — C1's retained pre-write captures (retainDivergenceCapture)
+		// had no retention bound at all; bounded here at boot, same cadence as the patch-file sweep above.
+		const pruned = await pruneDivergenceCaptures(path.join(this.boundarySyncHeld.root, "divergence")).catch((err) => {
+			this.log("warn", `boundary-sync: divergence-capture prune failed (${errText(err)})`);
+			return { removed: 0 };
+		});
+		if (pruned.removed > 0) this.log("info", `boundary-sync: pruned ${pruned.removed} old divergence capture(s)`);
 		const all = await this.boundarySyncHeld.listAllHeld().catch((err) => {
 			// Boot must not die on a sick ledger, but swallowing it silently would hide real held
 			// patches behind a missing attention row — say so, loudly.
@@ -5080,12 +5171,17 @@ export class SquadManager extends EventEmitter {
 		}
 		for (const [agentId, held] of byAgent) {
 			const rec = this.agents.get(agentId);
-			if (rec && rec.options.realTreePath) {
+			if (rec) {
+				// N4-adjacent: gate on the record's LIVENESS only, never on `options.realTreePath` — a
+				// promoted session (S5) clears that field, but its pre-existing holds are still this
+				// session's own and must still surface here; `held[0]!.realDir` (the hold's own recorded
+				// checkout, straight off the ledger) is the honest source, not the live option.
+				const realDir = held[0]!.realDir;
 				this.raiseBoundarySyncAttention(
 					rec,
 					"held",
 					`sync held: ${held.length} turn${held.length === 1 ? "" : "s"} from before the daemon restart`,
-					`Held for ${rec.options.realTreePath} — nothing touched your checkout. Apply replays them in order after a fresh safety re-check; Discard drops them (the session worktree keeps every edit).`,
+					`Held for ${realDir} — nothing touched your checkout. Apply replays them in order after a fresh safety re-check; Discard drops them (the session worktree keeps every edit).`,
 				);
 			} else {
 				const realDir = held[0]!.realDir;

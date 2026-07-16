@@ -2645,6 +2645,17 @@ export class SquadServer {
 			}
 			return Response.json(await manager.discardHeldSync(id, patchId, actor));
 		}
+		// N2: acknowledge a boundary-sync "divergence" row — the write already happened (nothing to
+		// Apply/Discard, no ledger entry to resolve), so unlike the other two affordances this only
+		// ever clears the attention row itself. `clearBoundarySyncAttention`'s `only` param is required
+		// (no blanket clear exists anymore), so this is the row's ONE dismissal path other than a fresh
+		// turn's own "held"/"uncapturable" clears (which never touch "divergence" — see the manager).
+		const mack = url.pathname.match(/^\/api\/agents\/([^/]+)\/ack-boundary-sync-divergence$/);
+		if (mack && req.method === "POST") {
+			const id = decodeURIComponent(mack[1]);
+			if (!manager.getAgent(id)) return new Response("no such agent", { status: 404 });
+			return Response.json(await manager.acknowledgeBoundarySyncDivergence(id, actor));
+		}
 		// C2: held boundary-sync patches whose owning agent isn't in the roster at all — a `here`
 		// session that hasn't reattached this tenure. Repo-scoped, not id-scoped: the operator recovers
 		// these by running `glance here` again on the SAME checkout with a restart reattach (that
