@@ -1,0 +1,76 @@
+{"t":4619,"kind":"session","agentId":"chat-mrnkklbc-a-a039c198","scenario":"s4"}
+{"t":4621,"kind":"status","from":"(new)","to":"idle"}
+{"t":7124,"kind":"ready","status":"idle"}
+{"t":7124,"kind":"send","label":"A-long-generation","cmd":{"type":"prompt","id":"chat-mrnkklbc-a-a039c198","message":"Write a plain-prose story of about 600 words describing a day in the life of a lighthouse keeper on a remote island. No tools, no code blocks, no headings - just flowing prose, and do not stop early."}}
+{"t":7332,"kind":"status","from":"idle","to":"working"}
+{"t":7332,"kind":"entry","seq":41,"head":"Write a plain-prose story of about 600 words describing a day in the life of a lighthouse keeper on a remote island. No tools, no code blocks, no headings - jus"}
+{"t":10347,"kind":"entry","seq":42,"status":"running","head":"The"}
+{"t":10950,"kind":"entry-grow","seq":42,"status":"running","len":64,"tail":" morning always began the same way, with the low moan of wind"}
+{"t":11125,"kind":"send","label":"B-chat-send","cmd":{"type":"prompt","id":"chat-mrnkklbc-a-a039c198","message":"Chat message racing the steer: include the word DRAGONFRUIT in your reply.","clientTurnId":"turn:1784210019381:race","displayText":"Chat message racing the steer: include the word DRAGONFRUIT in your reply."}}
+{"t":11125,"kind":"send","label":"C-steer-same-tick","cmd":{"type":"prompt","id":"chat-mrnkklbc-a-a039c198","message":"Re `README.md`, this changed line:\n\n    # midturn drive target\n\nSTEER: this heading is wrong - acknowledge this steer by saying STEER-RECEIVED."}}
+{"t":11252,"kind":"entry","seq":43,"head":"Chat message racing the steer: include the word DRAGONFRUIT in your reply."}
+{"t":11252,"kind":"entry","seq":44,"head":"Re `README.md`, this changed line:\n\n    # midturn drive target\n\nSTEER: this heading is wrong - acknowledge this steer by saying STEER-RECEIVED."}
+{"t":11252,"kind":"entry","seq":45,"status":"running","head":"The morning always began the same way, with the low moan of wind pressing against the stone walls and the smell of salt finding its way through every crack and "}
+{"t":11855,"kind":"entry-grow","seq":45,"status":"running","len":217,"tail":"am in the old keeper's quarters. Thomas rose before the"}
+{"t":12157,"kind":"entry-grow","seq":45,"status":"running","len":301,"tail":" sun, as he had every day for the past eleven years, swinging his legs over the side"}
+{"t":12759,"kind":"entry-grow","seq":45,"status":"running","len":370,"tail":" of the narrow cot and feeling the cold of the floor through his wool"}
+{"t":13362,"kind":"entry-grow","seq":45,"status":"running","len":412,"tail":" socks. He did not need an alarm. His body"}
+{"t":13664,"kind":"entry-grow","seq":45,"status":"running","len":474,"tail":" had long since learned the rhythm of this place, tuned itself"}
+{"t":14266,"kind":"entry-grow","seq":45,"status":"running","len":569,"tail":" to the turning of the light above and the shifting of the tides below.\n\nHe dressed in the half"}
+{"t":14568,"kind":"entry-grow","seq":45,"status":"running","len":611,"tail":"-dark, pulling on the same heavy canvas tr"}
+{"t":15175,"kind":"entry-grow","seq":45,"status":"running","len":657,"tail":"ousers and knit sweater he wore most days, and"}
+{"t":15476,"kind":"entry-grow","seq":45,"status":"running","len":707,"tail":" crossed the small room to the stove. The fire had"}
+{"t":16079,"kind":"entry-grow","seq":45,"status":"running","len":750,"tail":" gone to embers overnight, but a few pieces"}
+{"t":16380,"kind":"entry-grow","seq":45,"status":"running","len":836,"tail":" of driftwood and a careful arrangement of kindling brought it back to life. He filled"}
+{"t":16983,"kind":"entry-grow","seq":45,"status":"running","len":910,"tail":" the kettle from the rain cistern and set it on the iron plate, then stood"}
+{"t":17586,"kind":"entry-grow","seq":45,"status":"running","len":980,"tail":" at the window while he waited for it to boil. The sea was a flat grey"}
+{"t":17887,"kind":"entry-grow","seq":45,"status":"running","len":1066,"tail":" sheet this morning, barely distinguishable from the sky. Somewhere out there, he knew"}
+{"t":18502,"kind":"entry-grow","seq":45,"status":"running","len":1140,"tail":", fishing boats were already working the banks, but he could not see them."}
+{"t":19133,"kind":"entry-grow","seq":45,"status":"running","len":1189,"tail":" On clear days he could sometimes count a dozen s"}
+{"t":19454,"kind":"entry-grow","seq":45,"status":"running","len":1238,"tail":"ails. Today there was only the grey.\n\nThe tea was"}
+{"t":19755,"kind":"entry-grow","seq":45,"status":"running","len":1287,"tail":" strong and bitter, the way he preferred it. He d"}
+{"t":20378,"kind":"entry-grow","seq":45,"status":"running","len":1351,"tail":"rank it standing, looking out at the rocks below the tower where"}
+{"t":20680,"kind":"entry-grow","seq":45,"status":"running","len":1422,"tail":" the waves spent themselves in lazy white curls. After breakfast, which"}
+{"t":21284,"kind":"entry-grow","seq":45,"status":"running","len":1499,"tail":" was porridge with a spoonful of honey from the last supply delivery, he clim"}
+{"t":21887,"kind":"entry-grow","seq":45,"status":"running","len":1589,"tail":"bed the spiral staircase to the lantern room. One hundred and twelve steps. He had counted"}
+{"t":22189,"kind":"entry-grow","seq":45,"status":"running","len":1671,"tail":" them once, years ago, and the number had stayed fixed in his mind ever since. The"}
+{"t":22792,"kind":"entry-grow","seq":45,"status":"running","len":1728,"tail":" Fresnel lens sat in its brass housing like some enormous"}
+{"t":23094,"kind":"entry-grow","seq":45,"status":"running","len":1787,"tail":" jewel, still turning slowly on its clockwork mechanism. He"}
+{"t":23698,"kind":"entry-grow","seq":45,"status":"running","len":1857,"tail":" checked the oil reservoir, trimmed the wick, and polished a few spots"}
+{"t":24000,"kind":"entry-grow","seq":45,"status":"running","len":1933,"tail":" on the glass where condensation had gathered overnight. The light would not"}
+{"t":24602,"kind":"entry-grow","seq":45,"status":"running","len":1989,"tail":" be needed again until dusk, but Thomas believed in read"}
+{"t":24902,"kind":"entry-grow","seq":45,"status":"running","len":2033,"tail":"iness. The sea did not wait for a keeper who"}
+{"t":25505,"kind":"entry-grow","seq":45,"status":"running","len":2110,"tail":" was behind schedule.\n\nThe rest of the morning he spent on maintenance. There"}
+{"t":26107,"kind":"entry-grow","seq":45,"status":"running","len":2202,"tail":" was always something that needed attention on an island this exposed to the elements. Today"}
+{"t":26410,"kind":"entry-grow","seq":45,"status":"running","len":2252,"tail":" it was the door to the storage shed, which had sw"}
+{"t":27014,"kind":"entry-grow","seq":45,"status":"running","len":2315,"tail":"ollen with moisture and refused to close properly. He planed it"}
+{"t":27315,"kind":"entry-grow","seq":45,"status":"running","len":2376,"tail":" down with a hand tool, working slowly and carefully, shaving"}
+{"t":27918,"kind":"entry-grow","seq":45,"status":"running","len":2445,"tail":" thin curls of wood onto the ground. A pair of oystercatchers watched"}
+{"t":28219,"kind":"entry-grow","seq":45,"status":"running","len":2608,"tail":" bright against the grey stone. He spoke to them occasionally, commenting on the weather or the stubbornness of the door"}
+{"t":28821,"kind":"entry-grow","seq":45,"status":"running","len":2707,"tail":", and they regarded him with the patient indifference of creatures who had heard it all before.\n\nIn"}
+{"t":29423,"kind":"entry-grow","seq":45,"status":"running","len":2797,"tail":" the afternoon he walked the perimeter of the island, as he did most days when the weather"}
+{"t":30026,"kind":"entry-grow","seq":45,"status":"running","len":2858,"tail":" allowed. It was not a long walk, perhaps forty minutes if he"}
+{"t":30328,"kind":"entry-grow","seq":45,"status":"running","len":2925,"tail":" took his time, but it served a purpose beyond exercise. He checked"}
+{"t":30629,"kind":"entry-grow","seq":45,"status":"running","len":3038,"tail":" the shoreline for debris, looked for signs of erosion around the foundation of the tower, and noted the behavior"}
+{"t":31232,"kind":"entry-grow","seq":45,"status":"running","len":3115,"tail":" of the birds that nested along the cliffs on the eastern side. He kept a log"}
+{"t":31533,"kind":"entry-grow","seq":45,"status":"running","len":3206,"tail":"book of these observations, filling its pages with small, precise handwriting that recorded"}
+{"t":32136,"kind":"entry-grow","seq":45,"status":"running","len":3290,"tail":" wind direction, wave height, bird counts, and the occasional visit from a seal.\n\nBy"}
+{"t":32437,"kind":"entry-grow","seq":45,"status":"running","len":3338,"tail":" late afternoon the sky had begun to darken, not"}
+{"t":33041,"kind":"entry-grow","seq":45,"status":"running","len":3387,"tail":" with night but with weather. A band of cloud was"}
+{"t":33644,"kind":"entry-grow","seq":45,"status":"running","len":3469,"tail":" building to the west, and Thomas could feel the barometric pressure dropping in a"}
+{"t":33945,"kind":"entry-grow","seq":45,"status":"running","len":3541,"tail":" way that was less scientific measurement than bodily intuition. He clim"}
+{"t":34549,"kind":"entry-grow","seq":45,"status":"running","len":3627,"tail":"bed the stairs again, lit the lamp, and watched the beam sweep out across the water in"}
+{"t":34850,"kind":"entry-grow","seq":45,"status":"running","len":3689,"tail":" its steady, patient arc. Somewhere beyond the horizon, a ship"}
+{"t":35454,"kind":"entry-grow","seq":45,"status":"running","len":3753,"tail":" would see that light and correct its course, and the keeper and"}
+{"t":35755,"kind":"entry-grow","seq":45,"status":"running","len":3813,"tail":" the sailor would never know each other, connected only by a"}
+{"t":36360,"kind":"entry-grow","seq":45,"status":"running","len":3886,"tail":" thread of brightness cutting through the dark. Thomas stood at the glass"}
+{"t":36962,"kind":"entry-grow","seq":45,"status":"running","len":3968,"tail":" and watched the sea gather itself for the coming storm, and he felt, as he always"}
+{"t":37263,"kind":"status","from":"working","to":"idle"}
+{"t":37264,"kind":"entry-grow","seq":45,"status":"ok","len":4030,"tail":" did at this hour, both entirely alone and entirely necessary."}
+{"t":40579,"kind":"entry","seq":46,"status":"running","head":"I"}
+{"t":41182,"kind":"entry-grow","seq":46,"status":"running","len":135,"tail":"at you mean by \"chat message racing the steer.\" Could you clarify what you're looking for? I'm happy to help, but I want"}
+{"t":41484,"kind":"entry-grow","seq":46,"status":"ok","len":187,"tail":" to make sure I understand the request.\n\nDRAGONFRUIT"}
+{"t":44500,"kind":"entry","seq":47,"status":"running","head":"STEER-RECEIVED\n\nLet"}
+{"t":44801,"kind":"entry-grow","seq":47,"status":"running","len":87,"tail":" me read the README.md to see the current state and fix the heading."}
+{"t":45405,"kind":"entry","seq":48,"status":"running","tool":"read","head":"▸ read: Read File"}
+{"t":46913,"kind":"entry","seq":49,"status":"running","tool":"read","head":"▸ read: Read File"}

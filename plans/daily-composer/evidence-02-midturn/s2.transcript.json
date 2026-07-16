@@ -1,0 +1,52 @@
+[
+  {
+    "id": "chat-mrnk1l3s-6-478de46c:19",
+    "seq": 19,
+    "kind": "user",
+    "text": "Use your shell tool to run exactly this command: sleep 40 && echo SLEEP_DONE . Wait for it to finish, then tell me its output verbatim.",
+    "ts": 1784209128445
+  },
+  {
+    "status": "running",
+    "tool": {
+      "callId": "execute:1784209133679",
+      "name": "execute",
+      "isError": false
+    },
+    "format": "command",
+    "id": "chat-mrnk1l3s-6-478de46c:20",
+    "seq": 20,
+    "kind": "tool",
+    "text": "▸ execute: Terminal",
+    "ts": 1784209133679
+  },
+  {
+    "status": "running",
+    "tool": {
+      "callId": "execute:1784209134002",
+      "name": "execute",
+      "isError": false
+    },
+    "format": "command",
+    "id": "chat-mrnk1l3s-6-478de46c:21",
+    "seq": 21,
+    "kind": "tool",
+    "text": "▸ execute: `sleep 40 && echo SLEEP_DONE`",
+    "ts": 1784209134003
+  },
+  {
+    "id": "chat-mrnk1l3s-6-478de46c:22",
+    "seq": 22,
+    "kind": "user",
+    "text": "While that command runs: also say the word MANGO in your next reply so I know you received this.",
+    "ts": 1784209143446
+  },
+  {
+    "status": "ok",
+    "id": "chat-mrnk1l3s-6-478de46c:23",
+    "seq": 23,
+    "kind": "assistant",
+    "text": "The output was:\n\n```\nSLEEP_DONE\n```\n\nMANGO",
+    "ts": 1784209176802
+  }
+]

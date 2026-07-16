@@ -1,0 +1,45 @@
+[
+  {
+    "id": "chat-mrnk525t-7-b97d4096:24",
+    "seq": 24,
+    "kind": "user",
+    "text": "Use your shell tool to run exactly this command: sleep 10 && echo SLEEP_DONE . Wait for it to finish, then tell me its output verbatim.",
+    "ts": 1784209290783
+  },
+  {
+    "status": "running",
+    "tool": {
+      "callId": "execute:1784209302647",
+      "name": "execute",
+      "isError": false
+    },
+    "format": "command",
+    "id": "chat-mrnk525t-7-b97d4096:25",
+    "seq": 25,
+    "kind": "tool",
+    "text": "▸ execute: Terminal",
+    "ts": 1784209302647
+  },
+  {
+    "status": "running",
+    "tool": {
+      "callId": "execute:1784209303080",
+      "name": "execute",
+      "isError": false
+    },
+    "format": "command",
+    "id": "chat-mrnk525t-7-b97d4096:26",
+    "seq": 26,
+    "kind": "tool",
+    "text": "▸ execute: `sleep 10 && echo SLEEP_DONE`",
+    "ts": 1784209303080
+  },
+  {
+    "status": "ok",
+    "id": "chat-mrnk525t-7-b97d4096:27",
+    "seq": 27,
+    "kind": "assistant",
+    "text": "The output was:\n\n```\nSLEEP_DONE\n```",
+    "ts": 1784209315738
+  }
+]

@@ -1,0 +1,66 @@
+{"agentId":"chat-mrnjbl1d-1-4e733769","from":"starting","to":"starting","reason":"spawn","at":1784207908444,"seq":"357fcd05-9cec-462f-b811-dc26cd700cdc"}
+{"agentId":"chat-mrnjbl1d-1-4e733769","from":"starting","to":"idle","reason":"connect-ok","at":1784207923737,"seq":"52700a34-d39d-4ced-bbe3-c966c0da66c9"}
+{"agentId":"chat-mrnjbl1d-1-4e733769","from":"idle","to":"working","reason":"task-start","at":1784207926279,"seq":"99abb9f4-d92d-4b2c-90c4-3efd988d5814"}
+{"agentId":"chat-mrnjbl1d-1-4e733769","from":"working","to":"working","reason":"task-start","at":1784207930278,"seq":"23be702a-d79c-4858-88b2-1b836b04199f"}
+{"agentId":"chat-mrnjbl1d-1-4e733769","from":"working","to":"idle","reason":"turn-progress","at":1784207941448,"seq":"b8a9b929-ff3b-42b3-a8f2-a3ea02f63213"}
+{"agentId":"chat-mrnjbl1d-1-4e733769","from":"idle","to":"error","reason":"fail","at":1784207941450,"cause":{"error":"Internal error: API Error: 400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Output blocked by content filtering policy\"},\"request_id\":\"req_011Cd5oX1fa8Euv1Jhfjt4u2\"}"},"seq":"07388c5c-b62d-463f-adc7-d6bc1401138a"}
+{"agentId":"chat-mrnjbl1d-1-4e733769","from":"error","to":"error","reason":"fail","at":1784207958248,"cause":{"error":"Internal error: API Error: 400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Output blocked by content filtering policy\"},\"request_id\":\"req_011Cd5oY9FkgmGsXcNBJd5br\"}"},"seq":"b6a4741a-4bce-4b52-954f-f6287c348f00"}
+{"agentId":"chat-mrnjbl1d-1-4e733769","from":"error","to":"stopped","reason":"exit-clean","at":1784208110623,"seq":"0adbbbca-de79-4f98-8b84-d2e576b44ca9"}
+{"agentId":"chat-mrnjjtiq-2-4d102636","from":"starting","to":"starting","reason":"spawn","at":1784208292669,"seq":"ded90bb2-aeeb-4ce1-bac5-738ee72c2f1b"}
+{"agentId":"chat-mrnjjtiq-2-4d102636","from":"starting","to":"idle","reason":"connect-ok","at":1784208297063,"seq":"00463850-2a23-4ea3-a189-1ec2e1b97355"}
+{"agentId":"chat-mrnjjtiq-2-4d102636","from":"idle","to":"working","reason":"task-start","at":1784208299592,"seq":"58aef69a-5d38-43c5-a767-46776f5b567b"}
+{"agentId":"chat-mrnjjtiq-2-4d102636","from":"working","to":"idle","reason":"turn-progress","at":1784208318148,"seq":"27a22fd1-9c8a-46aa-9061-282a4674d96b"}
+{"agentId":"chat-mrnjjtiq-2-4d102636","from":"idle","to":"error","reason":"fail","at":1784208318148,"cause":{"error":"Internal error: API Error: 400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Output blocked by content filtering policy\"},\"request_id\":\"req_011Cd5ozqqm2bMGA64Nefp3a\"}"},"seq":"f6dba85d-c8a1-494e-8b00-d30194fdb444"}
+{"agentId":"chat-mrnjjtiq-2-4d102636","from":"error","to":"stopped","reason":"exit-clean","at":1784208480070,"seq":"1fc7dee9-9cd3-4376-84d0-1787cd19d0ca"}
+{"agentId":"chat-mrnjoc19-3-99f4f162","from":"starting","to":"starting","reason":"spawn","at":1784208503287,"seq":"18890761-1adf-41fd-90a1-a2027751b454"}
+{"agentId":"chat-mrnjoc19-3-99f4f162","from":"starting","to":"idle","reason":"connect-ok","at":1784208507756,"seq":"66289191-cfe3-4ffd-9f59-738c7e8cdcce"}
+{"agentId":"chat-mrnjoc19-3-99f4f162","from":"idle","to":"working","reason":"task-start","at":1784208510281,"seq":"40da78ba-d8f4-4fad-81a1-97f64eb7b08c"}
+{"agentId":"chat-mrnjoc19-3-99f4f162","from":"working","to":"idle","reason":"turn-progress","at":1784208542523,"seq":"c8039550-9dfe-4825-9c03-699990567f1c"}
+{"agentId":"chat-mrnjoc19-3-99f4f162","from":"idle","to":"stopped","reason":"exit-clean","at":1784208549166,"seq":"3fa141e3-3328-44f5-9258-7d05ecb56697"}
+{"agentId":"chat-mrnjq6qp-4-e12c922a","from":"starting","to":"starting","reason":"spawn","at":1784208589739,"seq":"09e5cfcc-51e1-43d3-b33e-392c080b3240"}
+{"agentId":"chat-mrnjq6qp-4-e12c922a","from":"starting","to":"idle","reason":"connect-ok","at":1784208593854,"seq":"ee2453af-497c-4e53-afb7-dfe362fddddd"}
+{"agentId":"chat-mrnjq6qp-4-e12c922a","from":"idle","to":"working","reason":"task-start","at":1784208596380,"seq":"8f9571bf-2ff0-4425-ba78-9e59a88ec60a"}
+{"agentId":"chat-mrnjq6qp-4-e12c922a","from":"working","to":"working","reason":"task-start","at":1784208600380,"seq":"810c7cf7-c899-446b-b5cf-4bc45cd4d2fc"}
+{"agentId":"chat-mrnjq6qp-4-e12c922a","from":"working","to":"idle","reason":"turn-progress","at":1784208629001,"seq":"68a9bbec-d8f2-4cd6-943f-e28c47243eb3"}
+{"agentId":"chat-mrnjq6qp-4-e12c922a","from":"idle","to":"stopped","reason":"exit-clean","at":1784208640065,"seq":"079ede5a-afe7-4d0c-b0ef-b3162c58b677"}
+{"agentId":"chat-mrnjz9ay-5-b2b12234","from":"starting","to":"starting","reason":"spawn","at":1784209012968,"seq":"cd2ac033-4902-4e29-b7e1-21b29c91bade"}
+{"agentId":"chat-mrnjz9ay-5-b2b12234","from":"starting","to":"idle","reason":"connect-ok","at":1784209017883,"seq":"345ba820-a843-4fc2-82b7-3ea94539885f"}
+{"agentId":"chat-mrnjz9ay-5-b2b12234","from":"idle","to":"working","reason":"task-start","at":1784209020413,"seq":"f5f41aed-5dc6-414c-bd8e-2a92b9f59317"}
+{"agentId":"chat-mrnjz9ay-5-b2b12234","from":"working","to":"working","reason":"task-start","at":1784209024414,"seq":"35a66ca5-bead-4685-8b21-cfffc013430e"}
+{"agentId":"chat-mrnjz9ay-5-b2b12234","from":"working","to":"idle","reason":"turn-progress","at":1784209050707,"seq":"4f955add-156c-4ddf-a84b-71fe15f31972"}
+{"agentId":"chat-mrnjz9ay-5-b2b12234","from":"idle","to":"stopped","reason":"exit-clean","at":1784209062243,"seq":"5ae56f3f-ced1-4122-b101-9acb154da21a"}
+{"agentId":"chat-mrnk1l3s-6-478de46c","from":"starting","to":"starting","reason":"spawn","at":1784209121571,"seq":"f54237c4-d1f9-4bce-9189-c0f5c3a2503d"}
+{"agentId":"chat-mrnk1l3s-6-478de46c","from":"starting","to":"idle","reason":"connect-ok","at":1784209125917,"seq":"e0d50803-3358-4caa-8ad8-0cc858a52b88"}
+{"agentId":"chat-mrnk1l3s-6-478de46c","from":"idle","to":"working","reason":"task-start","at":1784209128445,"seq":"24f6de68-48c5-40a8-a34d-42bef7bd6278"}
+{"agentId":"chat-mrnk1l3s-6-478de46c","from":"working","to":"working","reason":"task-start","at":1784209143446,"seq":"d4e0f352-991d-4234-9c6e-ef0ff4fce5b5"}
+{"agentId":"chat-mrnk1l3s-6-478de46c","from":"working","to":"idle","reason":"turn-progress","at":1784209176803,"seq":"18cf4c97-8f70-43de-8b62-69b6d877f516"}
+{"agentId":"chat-mrnk1l3s-6-478de46c","from":"idle","to":"stopped","reason":"exit-clean","at":1784209183259,"seq":"44a8ac50-992f-46eb-a404-a5fa75f24335"}
+{"agentId":"chat-mrnk1l3s-6-478de46c","from":"stopped","to":"error","reason":"fail","at":1784209183259,"cause":{"error":"acp agent exited"},"seq":"d190b3bd-39a5-4765-b309-1e10d87af535"}
+{"agentId":"chat-mrnk525t-7-b97d4096","from":"starting","to":"starting","reason":"spawn","at":1784209283649,"seq":"7e62d575-9846-4ed2-98d8-62153297b9f8"}
+{"agentId":"chat-mrnk525t-7-b97d4096","from":"starting","to":"idle","reason":"connect-ok","at":1784209288259,"seq":"325d1287-7cfd-4721-a61f-ebdbfccb9584"}
+{"agentId":"chat-mrnk525t-7-b97d4096","from":"idle","to":"working","reason":"task-start","at":1784209290783,"seq":"a1c1ce34-5225-4a4d-ad10-6d41ad4d3d55"}
+{"agentId":"chat-mrnk525t-7-b97d4096","from":"working","to":"idle","reason":"turn-progress","at":1784209315740,"seq":"bcbb20d7-f745-41c0-a7cb-f9260469aca9"}
+{"agentId":"chat-mrnk525t-7-b97d4096","from":"idle","to":"stopped","reason":"exit-clean","at":1784209322381,"seq":"8fc9bf93-2273-40b9-8265-fc95caf242e5"}
+{"agentId":"chat-mrnk64kx-8-05432f49","from":"starting","to":"starting","reason":"spawn","at":1784209333435,"seq":"274aa745-1b64-43f6-a059-37d9f5e8bf17"}
+{"agentId":"chat-mrnk64kx-8-05432f49","from":"starting","to":"idle","reason":"connect-ok","at":1784209338106,"seq":"f6df65a0-99ef-439c-994c-f49e09a2b593"}
+{"agentId":"chat-mrnk64kx-8-05432f49","from":"idle","to":"working","reason":"task-start","at":1784209340639,"seq":"ab6f5943-a398-411c-9d35-a4644e6a2dcd"}
+{"agentId":"chat-mrnk64kx-8-05432f49","from":"working","to":"working","reason":"task-start","at":1784209343640,"seq":"a70a5ab6-7af2-4690-bcf5-7f1cc17d0aba"}
+{"agentId":"chat-mrnk64kx-8-05432f49","from":"working","to":"working","reason":"task-start","at":1784209344341,"seq":"c708ef41-76e8-4865-8469-16bd35e20942"}
+{"agentId":"chat-mrnk64kx-8-05432f49","from":"working","to":"working","reason":"task-start","at":1784209345041,"seq":"0a10abe0-1f4c-4481-891e-f76f93217b9a"}
+{"agentId":"chat-mrnk64kx-8-05432f49","from":"working","to":"idle","reason":"turn-progress","at":1784209373556,"seq":"8249cc12-53ce-48e1-8dcc-ef0553891ac3"}
+{"agentId":"chat-mrnk64kx-8-05432f49","from":"idle","to":"error","reason":"fail","at":1784209405044,"cause":{"error":"acp request session/prompt timed out"},"seq":"8ee50a3d-c59b-48cd-bea4-a05ae58616a5"}
+{"agentId":"chat-mrnk64kx-8-05432f49","from":"error","to":"stopped","reason":"exit-clean","at":1784209585659,"seq":"61440650-8489-4e42-8954-79f468b45bbd"}
+{"agentId":"chat-mrnkebxl-9-3b9b35d6","from":"starting","to":"starting","reason":"spawn","at":1784209716211,"seq":"4ca77776-8ac8-46e2-92c9-13160f5e9ac9"}
+{"agentId":"chat-mrnkebxl-9-3b9b35d6","from":"starting","to":"idle","reason":"connect-ok","at":1784209720267,"seq":"af7006b8-7ac5-4647-a267-586f8c968e85"}
+{"agentId":"chat-mrnkebxl-9-3b9b35d6","from":"idle","to":"working","reason":"task-start","at":1784209722792,"seq":"6481a5d2-de1d-42d9-8c6a-6b73b7ade1ac"}
+{"agentId":"chat-mrnkebxl-9-3b9b35d6","from":"working","to":"idle","reason":"turn-progress","at":1784209782794,"seq":"970ecb64-0287-46d7-887d-35ffbc13501c"}
+{"agentId":"chat-mrnkebxl-9-3b9b35d6","from":"idle","to":"error","reason":"fail","at":1784209782795,"cause":{"error":"acp request session/prompt timed out"},"seq":"b042737e-f570-4a13-aeec-e0e039124920"}
+{"agentId":"chat-mrnkebxl-9-3b9b35d6","from":"error","to":"stopped","reason":"exit-clean","at":1784209963341,"seq":"403f04d5-74a1-476a-8785-e8a4b2e719e6"}
+{"agentId":"chat-mrnkklbc-a-a039c198","from":"starting","to":"starting","reason":"spawn","at":1784210008305,"seq":"7f9037d3-820f-4f8b-9c4d-48d5b6b6c195"}
+{"agentId":"chat-mrnkklbc-a-a039c198","from":"starting","to":"idle","reason":"connect-ok","at":1784210012847,"seq":"4ecc93d8-ba14-4b04-b317-dfec493bde29"}
+{"agentId":"chat-mrnkklbc-a-a039c198","from":"idle","to":"working","reason":"task-start","at":1784210015381,"seq":"d5760644-6bed-4f3b-8266-c7f89682bbd0"}
+{"agentId":"chat-mrnkklbc-a-a039c198","from":"working","to":"working","reason":"task-start","at":1784210019382,"seq":"abf79310-1798-4dc1-bbce-d9e8567f9539"}
+{"agentId":"chat-mrnkklbc-a-a039c198","from":"working","to":"working","reason":"task-start","at":1784210019382,"seq":"cfcafef4-f485-443f-8a3c-4d3e3b76d450"}
+{"agentId":"chat-mrnkklbc-a-a039c198","from":"working","to":"idle","reason":"turn-progress","at":1784210045370,"seq":"b4c80cb2-a7b1-4df1-a970-9ac0b924e575"}
+{"agentId":"chat-mrnkklbc-a-a039c198","from":"idle","to":"stopped","reason":"exit-clean","at":1784210061576,"seq":"73162f06-676e-492b-b843-458e37f5be73"}
+{"agentId":"chat-mrnkklbc-a-a039c198","from":"stopped","to":"error","reason":"fail","at":1784210061577,"cause":{"error":"acp agent exited"},"seq":"271dee9f-847d-4cdd-8b7b-0206762c383d"}
