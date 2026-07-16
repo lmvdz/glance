@@ -189,6 +189,10 @@ export class AcpAgentDriver extends EventEmitter implements AgentDriver {
 	private todoPhases: TodoPhase[] = [];
 	/** Whether the opt-in context block has already been prepended (first turn only). */
 	private contextInjected = false;
+	/** The argv actually spawned (start() resolved it from opts/registry) — persisted by the manager
+	 *  alongside `pid` so the NEXT boot can identity-check and reap an orphaned adapter chain a daemon
+	 *  kill left behind (restart re-attach, daily-onramp 04). */
+	private launched?: string[];
 
 	constructor(opts: AcpAgentDriverOptions) {
 		super();
@@ -201,9 +205,18 @@ export class AcpAgentDriver extends EventEmitter implements AgentDriver {
 	get isAlive(): boolean {
 		return !!this.proc && !this.exited;
 	}
+	/** OS pid of the adapter child (e.g. the `npx` wrapper of claude-code-acp), while it runs. */
+	get pid(): number | undefined {
+		return this.proc?.pid;
+	}
+	/** The argv this driver spawned — set by start(), undefined before it. */
+	get spawnedCommand(): string[] | undefined {
+		return this.launched;
+	}
 
 	async start(timeoutMs = 60_000): Promise<void> {
 		const cmd = this.opts.command ?? buildAcpCommand(this.opts.model);
+		this.launched = cmd;
 		// Passing NO `env` option here inherited the daemon's FULL environment (Bun.spawn's default) —
 		// the easiest of the three spawn sites to miss, because the absence of an `env` key reads as
 		// "nothing leaks" when it actually means the opposite. Scrub explicitly (spawn-env.ts).

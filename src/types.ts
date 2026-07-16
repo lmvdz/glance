@@ -1026,6 +1026,16 @@ export interface PersistedAgent {
 	 *  Injected into the worktree's `.omp/mcp.json` (omp-rpc harnesses) or the ACP `session/new` call at
 	 *  spawn time; never re-derived on restore. */
 	mcp?: McpServerSpec[];
+	/** ACP harnesses only: OS pid of the adapter child this record spawned (the `npx` wrapper of
+	 *  claude-code-acp etc.), stamped after a successful driver start. A daemon KILL orphans that chain
+	 *  (it reparents to init and idles forever — its stdio transport died with the daemon, so no future
+	 *  boot can ever reuse it); the next boot's dead-session sweep reaps it by this pid AFTER verifying
+	 *  the live process still matches `acpCmd` (never a blind kill of a recycled pid). Restart
+	 *  re-attach, daily-onramp 04. */
+	acpPid?: number;
+	/** The argv `acpPid` was spawned with — the identity fingerprint the reap verifies against
+	 *  /proc/<pid>/cmdline before sending any signal. */
+	acpCmd?: string[];
 	/** flue-service only: worker invocation config. */
 	flue?: FlueMemberConfig;
 	/** workflow only: graph file backing this run. */

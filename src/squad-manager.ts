@@ -44,6 +44,7 @@ import { errText } from "./err-text.ts";
 import { isConsolePrompt, stripConsolePrompt } from "./console-prompt.ts";
 import { openRemovedLedger, type RemovedLedger } from "./removed-ledger.ts";
 import { buildDeadPlaceholder, composePriorContext, DEAD_PLACEHOLDER_TTL_MS, type DeadSessionPlaceholder, reattachMarker } from "./reattach-context.ts";
+import { reapAcpOrphanChain } from "./acp-orphan-reaper.ts";
 import { normalizeRepoPath, openProjectRegistry, readEphemeralProjects, writeEphemeralProjects, type ProjectRegistry } from "./project-registry.ts";
 import { Orchestrator } from "./orchestrator.ts";
 import { Observer, type Finding } from "./observer.ts";
@@ -2034,6 +2035,31 @@ export class SquadManager extends EventEmitter {
 		const ph = buildDeadPlaceholder(p, transcript);
 		this.deadPlaceholders.set(p.id, ph);
 		this.log("info", `dead placeholder recorded for ${p.name} (${p.id}) — ${ph.deadReason}`);
+		// The dead session's adapter chain may still be running: a daemon KILL orphans the direct ACP
+		// child (npx → claude-code-acp reparents to init and idles forever — its stdio transport died
+		// with the old daemon process, so REUSE is impossible by construction). Reap it by the pid
+		// persisted at spawn, identity-checked against /proc before any signal — a recycled pid or a
+		// sibling daemon's adapter is never touched (see acp-orphan-reaper.ts). Fire-and-forget: boot
+		// never blocks on it, and a skipped kill is logged, never silent.
+		if (p.acpPid !== undefined && p.acpCmd?.length) {
+			void reapAcpOrphanChain(p.acpPid, p.acpCmd, (line) => this.log("info", line))
+				.then((termed) => {
+					if (termed.length) this.log("info", `reaped orphaned ACP adapter chain of ${p.id}: pid(s) ${termed.join(", ")}`);
+				})
+				.catch((err) => this.log("warn", `acp orphan reap for ${p.id} failed: ${String(err)}`));
+		}
+	}
+
+	/** After a successful driver start: persist the ACP adapter child's pid + argv fingerprint on the
+	 *  record, so the NEXT boot's dead-session sweep can reap the orphaned chain a daemon kill leaves
+	 *  behind (recordDeadPlaceholder above). Duck-typed on `spawnedCommand` — only AcpAgentDriver
+	 *  exposes it, so omp/pi/sandbox/flue/workflow records are never stamped. */
+	private stampAcpAdapter(rec: AgentRecord): void {
+		const d = rec.agent as Partial<{ pid: number; spawnedCommand: string[] }>;
+		if (typeof d.pid !== "number" || !Array.isArray(d.spawnedCommand)) return;
+		rec.options.acpPid = d.pid;
+		rec.options.acpCmd = d.spawnedCommand;
+		void this.persist();
 	}
 
 	/** start() epilogue over the boot snapshot: any persisted agent that is (a) not back in the roster
@@ -5079,6 +5105,7 @@ export class SquadManager extends EventEmitter {
 		try {
 			await agent.start();
 			started = true;
+			this.stampAcpAdapter(rec);
 			this.transition(rec, "idle", "connect-ok");
 			if (agent.setSessionName) await agent.setSessionName(`squad:${name}`).catch(() => {});
 			this.emitAgent(rec);
@@ -5512,6 +5539,7 @@ export class SquadManager extends EventEmitter {
 		this.transition(rec, "starting", "connect-begin"); // explicit-class: legal from stopped/error
 		this.emitAgent(rec);
 		await rec.agent.start();
+		this.stampAcpAdapter(rec); // a re-start spawned a FRESH adapter child — the persisted pid must follow it
 		if (rec.agent.setSessionName) await rec.agent.setSessionName(`squad:${rec.dto.name}`).catch(() => {});
 		this.transition(rec, "idle", "connect-ok");
 		this.emitAgent(rec);
