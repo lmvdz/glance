@@ -1,6 +1,6 @@
 # ACP `session/prompt` 60s timeout kills any long turn — turn-scoped liveness instead
 
-STATUS: reopened — live re-verify 2026-07-16 reproduced the exact `sleep 75` acceptance turn erroring at 60002ms, twice; see plans/daily-driver/00-meta.md Ledger. Root cause: the real claude-code-acp adapter sends no `session/update` between a tool call's start and its completion, so the silence-timer reset has nothing to fire on during a single long call with no incremental output — the shipped regression test only exercises a fake adapter that streams updates throughout, which doesn't match this.
+STATUS: done — resolved 2026-07-16 by folding in 08 (outstanding-tool-call liveness); see Resolution below.
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -23,3 +23,57 @@ Live proof (control s0long, scratch daemon, claude-code-acp 0.16.2): a single he
 
 - Live: scratch daemon + real claude-code chat unit + a `sleep 75` tool turn (the exact s0long control from daily-composer/02's rig, `plans/daily-composer/evidence-02-midturn/drive.ts` scenario `s0long`) completes with the agent returning to idle and the reply entry finalized — no error transition in transitions.jsonl.
 - Fail-closed: silent-adapter test proves the driver still detects a dead adapter rather than waiting forever.
+
+## Resolution (2026-07-16)
+
+**What the first fix missed.** The originally shipped turn-scoped liveness (silence window reset by
+any `session/update`, 30-min hard cap) was correct in shape but validated against a fake ACP server
+that streamed an update every 50ms for the whole turn. The live re-verifier reproduced the exact
+`sleep 75` failure **twice** against the real `claude-code-acp` 0.16.2 adapter: it emits **exactly
+one** `session/update` (`tool_call`, status "running") at shell-call start, then nothing — no
+chunks, no progress, no keepalive — until the tool actually finishes. A single long *quiet* tool
+call has no incremental output for a "reset on any update" silence window to fire on, so the fixed
+60s window (now reached via one bump instead of zero) still tripped mid-tool, and the turn still
+errored with "acp request session/prompt timed out". This is exactly the follow-up finding captured
+in `08-quiet-tool-liveness.md` before the live re-verify even ran — 08 turned out to be the rest of
+07, not a separate narrower bug.
+
+**What this fix adds.** `src/acp-agent-driver.ts` now tracks outstanding ACP tool calls explicitly
+(`trackToolCall`, keyed by `toolCallId`, driven by the `tool_call` / `tool_call_update` notification
+stream) and treats "≥1 tool call outstanding" as liveness in its own right: the silence window is
+**suspended** for as long as any tool call is open, not merely reset, and resumes a fresh window the
+moment the last one closes (`turnToolCallChange`, wired alongside the existing `turnLivenessBump` in
+`sendTurn`). A fully silent turn with **no** outstanding tool call is untouched — the 60s window
+still applies exactly as before, fail-closed. The 30-minute hard cap is unconditional either way, and
+is the explicit backstop for a tool call that opens and never closes (adapter died mid-tool) — see
+the comment on `armSilence` in `sendTurn`.
+
+**Live evidence.** Scratch daemon (own state dir, port 28451, real `HOME` for claude-code-acp auth,
+all autonomy loops off), a chat unit created via `POST /api/console` exactly as `glance here` does
+(harness `claude-code`), driven over the same WS `{type:"prompt"}` surface the composer uses, with
+`sleep 75 && echo SLEEP_DONE` as the tool call:
+
+```
+[+12.3s] status {"from":"idle","to":"working"}
+[+17.2s] entry {"seq":3,"status":"running","tool":"execute","head":"▸ execute: `sleep 75 && echo SLEEP_DONE`"}
+[+95.1s] entry {"seq":4,"status":"running","head":"Output:\n\n```\nSLEEP_DONE\n```"}
+[+95.4s] status {"from":"working","to":"idle"}
+```
+
+78 seconds of total silence between the `tool_call` update at +17.2s and the next update at +95.1s —
+comfortably past the old 60s window — with no error transition. `transitions.jsonl` for that agent
+confirms the full lifecycle with no error hop:
+
+```
+{"from":"starting","to":"idle","reason":"connect-ok", ...}
+{"from":"idle","to":"working","reason":"task-start", ...}
+{"from":"working","to":"idle","reason":"turn-progress", ...}
+{"from":"idle","to":"stopped","reason":"exit-clean", ...}
+```
+
+The finalized transcript entry (seq 4, `status: "ok"`): `"Output:\n\n```\nSLEEP_DONE\n```"`.
+
+Regression tests replacing the flattering fake: `tests/acp-agent-driver.test.ts` now includes a fake
+adapter shaped exactly like the real one (one `tool_call`, then silence past the test-scaled window,
+then completion + response — must resolve) alongside the existing silent-adapter (fail-closed,
+unchanged) and streams-forever (hard-cap backstop) cases.
