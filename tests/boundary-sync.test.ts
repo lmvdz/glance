@@ -1,0 +1,487 @@
+/**
+ * Boundary sync (daily-onramp 03) — one-directional per-turn patch-apply into the operator's real
+ * checkout, exercised against REAL git repos (no mocked git): the module under test is a git-write
+ * path against the operator's checkout, so a green run here must mean real `git apply` semantics.
+ *
+ * The named fail-closed acceptance tests (00-meta.md's "four fail-open instances" note — a spec
+ * violation if missing) live in the "fail-closed acceptance" describe block: a fingerprint capture
+ * FAILURE at either end of a turn must hold + raise, never apply, and never touch the real tree.
+ */
+
+import { afterEach, describe, expect, test } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+
+import {
+	applyHeldNow,
+	applyPatchToRealTree,
+	beginTurn,
+	captureRealTreeState,
+	captureWorktreeTree,
+	computeTurnPatch,
+	HeldSyncStore,
+	syncTurnEnd,
+} from "../src/boundary-sync.ts";
+
+const tmps: string[] = [];
+afterEach(async () => {
+	for (const d of tmps.splice(0)) await fs.rm(d, { recursive: true, force: true }).catch(() => {});
+});
+
+async function tmpDir(prefix: string): Promise<string> {
+	const d = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+	tmps.push(d);
+	return d;
+}
+
+async function git(cwd: string, ...a: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+	const p = Bun.spawn(["git", ...a], { cwd, stdout: "pipe", stderr: "pipe" });
+	const [stdout, stderr, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+	if (code !== 0) throw new Error(`git ${a.join(" ")} failed (${code}): ${stderr}`);
+	return { code, stdout, stderr };
+}
+
+async function initRepo(): Promise<string> {
+	const repo = await tmpDir("bsync-real-");
+	await git(repo, "init", "-q", "-b", "main");
+	await git(repo, "config", "user.email", "t@t");
+	await git(repo, "config", "user.name", "t");
+	await git(repo, "config", "commit.gpgsign", "false");
+	await fs.writeFile(path.join(repo, "a.txt"), "one\ntwo\nthree\n");
+	await fs.writeFile(path.join(repo, "b.txt"), "b\n");
+	await git(repo, "add", "-A");
+	await git(repo, "commit", "-qm", "base");
+	return repo;
+}
+
+/** Mirror of the here-flow shape: the agent runs in a standard git worktree of the real repo. */
+async function addWorktree(repo: string): Promise<string> {
+	const parent = await tmpDir("bsync-wt-");
+	const worktree = path.join(parent, "wt");
+	await git(repo, "worktree", "add", "-q", "-b", "squad/bsync-test", worktree, "HEAD");
+	return worktree;
+}
+
+async function newStore(): Promise<HeldSyncStore> {
+	return new HeldSyncStore(await tmpDir("bsync-store-"));
+}
+
+/** A byte-level snapshot of a directory's FILES (paths + contents), .git excluded — for asserting
+ *  the real tree was not touched at all, stronger than "the fingerprint still matches". */
+async function fileSnapshot(dir: string): Promise<Map<string, string>> {
+	const out = new Map<string, string>();
+	const walk = async (rel: string): Promise<void> => {
+		for (const e of await fs.readdir(path.join(dir, rel), { withFileTypes: true })) {
+			if (e.name === ".git") continue;
+			const r = path.join(rel, e.name);
+			if (e.isDirectory()) await walk(r);
+			else out.set(r, await fs.readFile(path.join(dir, r), "utf8"));
+		}
+	};
+	await walk("");
+	return out;
+}
+
+// ── fingerprint (read-only, fail-closed by construction) ─────────────────────────────────────────
+
+describe("captureRealTreeState", () => {
+	test("deterministic for identical tree state", async () => {
+		const repo = await initRepo();
+		const a = await captureRealTreeState(repo);
+		const b = await captureRealTreeState(repo);
+		expect(a.ok).toBe(true);
+		expect(b.ok).toBe(true);
+		if (a.ok && b.ok) expect(a.fingerprint).toBe(b.fingerprint);
+	});
+
+	test("changes when tracked content changes, and again when it reverts (content-derived, not time-derived)", async () => {
+		const repo = await initRepo();
+		const before = await captureRealTreeState(repo);
+		await fs.appendFile(path.join(repo, "a.txt"), "four\n");
+		const after = await captureRealTreeState(repo);
+		expect(before.ok && after.ok).toBe(true);
+		if (before.ok && after.ok) expect(after.fingerprint).not.toBe(before.fingerprint);
+		await fs.writeFile(path.join(repo, "a.txt"), "one\ntwo\nthree\n");
+		const reverted = await captureRealTreeState(repo);
+		if (before.ok && reverted.ok) expect(reverted.fingerprint).toBe(before.fingerprint);
+	});
+
+	test("changes when an untracked file appears", async () => {
+		const repo = await initRepo();
+		const before = await captureRealTreeState(repo);
+		await fs.writeFile(path.join(repo, "new.txt"), "hi\n");
+		const after = await captureRealTreeState(repo);
+		expect(before.ok && after.ok).toBe(true);
+		if (before.ok && after.ok) expect(after.fingerprint).not.toBe(before.fingerprint);
+	});
+
+	test("changes when an untracked file's CONTENT changes (path list alone would miss this)", async () => {
+		const repo = await initRepo();
+		await fs.writeFile(path.join(repo, "new.txt"), "v1\n");
+		const before = await captureRealTreeState(repo);
+		await fs.writeFile(path.join(repo, "new.txt"), "v2\n");
+		const after = await captureRealTreeState(repo);
+		expect(before.ok && after.ok).toBe(true);
+		if (before.ok && after.ok) expect(after.fingerprint).not.toBe(before.fingerprint);
+	});
+
+	test("FAILS (never an empty fingerprint) on a non-repo directory", async () => {
+		const dir = await tmpDir("bsync-notrepo-");
+		const r = await captureRealTreeState(dir);
+		expect(r.ok).toBe(false);
+		if (!r.ok) expect(r.reason).toContain("rev-parse");
+	});
+
+	test("FAILS on a directory that no longer exists", async () => {
+		const dir = await tmpDir("bsync-gone-");
+		await fs.rm(dir, { recursive: true, force: true });
+		const r = await captureRealTreeState(dir);
+		expect(r.ok).toBe(false);
+	});
+
+	test("FAILS when an untracked path contains a newline (cannot be fed to hash-object safely)", async () => {
+		const repo = await initRepo();
+		await fs.writeFile(path.join(repo, "evil\nname.txt"), "x\n");
+		const r = await captureRealTreeState(repo);
+		expect(r.ok).toBe(false);
+		if (!r.ok) expect(r.reason).toContain("newline");
+	});
+
+	test("is read-only: capture does not disturb git status or the index", async () => {
+		const repo = await initRepo();
+		await fs.appendFile(path.join(repo, "a.txt"), "dirty\n");
+		await fs.writeFile(path.join(repo, "untracked.txt"), "u\n");
+		const statusBefore = (await git(repo, "status", "--porcelain")).stdout;
+		const r = await captureRealTreeState(repo);
+		expect(r.ok).toBe(true);
+		expect((await git(repo, "status", "--porcelain")).stdout).toBe(statusBefore);
+	});
+});
+
+// ── worktree tree snapshot + per-turn patch ───────────────────────────────────────────────────────
+
+describe("captureWorktreeTree / computeTurnPatch", () => {
+	test("stable for unchanged tree; changes with tracked and untracked edits; worktree index untouched", async () => {
+		const repo = await initRepo();
+		const wt = await addWorktree(repo);
+		const statusBefore = (await git(wt, "status", "--porcelain")).stdout;
+		const t1 = await captureWorktreeTree(wt);
+		const t2 = await captureWorktreeTree(wt);
+		expect(t1.ok && t2.ok).toBe(true);
+		if (t1.ok && t2.ok) expect(t1.tree).toBe(t2.tree);
+		await fs.writeFile(path.join(wt, "fresh.txt"), "untracked\n");
+		const t3 = await captureWorktreeTree(wt);
+		if (t1.ok && t3.ok) expect(t3.tree).not.toBe(t1.tree);
+		// The snapshot staged NOTHING in the worktree's real index (fresh.txt still shows untracked).
+		expect((await git(wt, "status", "--porcelain")).stdout).toBe(`${statusBefore}?? fresh.txt\n`);
+	});
+
+	test("turn patch is exactly the start→end delta, applies cleanly, and includes new files", async () => {
+		const repo = await initRepo();
+		const wt = await addWorktree(repo);
+		const start = await captureWorktreeTree(wt);
+		await fs.appendFile(path.join(wt, "a.txt"), "agent line\n");
+		await fs.writeFile(path.join(wt, "created.txt"), "brand new\n");
+		const end = await captureWorktreeTree(wt);
+		expect(start.ok && end.ok).toBe(true);
+		if (!start.ok || !end.ok) return;
+		const patch = await computeTurnPatch(wt, start.tree, end.tree);
+		expect(patch.ok).toBe(true);
+		if (!patch.ok) return;
+		expect(patch.patch).toContain("a.txt");
+		expect(patch.patch).toContain("created.txt");
+		const applied = await applyPatchToRealTree(repo, patch.patch);
+		expect(applied.ok).toBe(true);
+		expect(await fs.readFile(path.join(repo, "a.txt"), "utf8")).toContain("agent line");
+		expect(await fs.readFile(path.join(repo, "created.txt"), "utf8")).toBe("brand new\n");
+	});
+
+	test("identical trees produce an empty patch", async () => {
+		const repo = await initRepo();
+		const wt = await addWorktree(repo);
+		const t = await captureWorktreeTree(wt);
+		expect(t.ok).toBe(true);
+		if (!t.ok) return;
+		const patch = await computeTurnPatch(wt, t.tree, t.tree);
+		expect(patch.ok).toBe(true);
+		if (patch.ok) expect(patch.patch).toBe("");
+	});
+});
+
+describe("applyPatchToRealTree", () => {
+	test("a conflicting patch leaves the real tree byte-identical (check-first, atomic)", async () => {
+		const repo = await initRepo();
+		const wt = await addWorktree(repo);
+		const start = await captureWorktreeTree(wt);
+		await fs.writeFile(path.join(wt, "a.txt"), "one\ntwo\nthree\nagent\n");
+		const end = await captureWorktreeTree(wt);
+		if (!start.ok || !end.ok) throw new Error("snapshot failed");
+		const patch = await computeTurnPatch(wt, start.tree, end.tree);
+		if (!patch.ok) throw new Error("patch failed");
+		// Real tree diverges in the SAME file so the patch can no longer apply.
+		await fs.writeFile(path.join(repo, "a.txt"), "totally different\n");
+		const before = await fileSnapshot(repo);
+		const r = await applyPatchToRealTree(repo, patch.patch);
+		expect(r.ok).toBe(false);
+		expect(await fileSnapshot(repo)).toEqual(before);
+	});
+});
+
+// ── the turn-end decision ─────────────────────────────────────────────────────────────────────────
+
+describe("syncTurnEnd", () => {
+	test("noop when the turn changed nothing", async () => {
+		const repo = await initRepo();
+		const wt = await addWorktree(repo);
+		const store = await newStore();
+		const start = await beginTurn(repo, wt);
+		const out = await syncTurnEnd({ realDir: repo, worktree: wt, start, store, agentId: "a1", turn: 1 });
+		expect(out.kind).toBe("noop");
+		expect(await store.listHeld("a1")).toHaveLength(0);
+	});
+
+	test("applies the turn's edits to the real checkout when it provably did not move", async () => {
+		const repo = await initRepo();
+		const wt = await addWorktree(repo);
+		const store = await newStore();
+		const start = await beginTurn(repo, wt);
+		await fs.appendFile(path.join(wt, "a.txt"), "from the agent\n");
+		const out = await syncTurnEnd({ realDir: repo, worktree: wt, start, store, agentId: "a1", turn: 1 });
+		expect(out.kind).toBe("applied");
+		expect(await fs.readFile(path.join(repo, "a.txt"), "utf8")).toContain("from the agent");
+		expect(await store.listHeld("a1")).toHaveLength(0);
+	});
+
+	test("HOLDS (never applies, never conflicts) when the real tree moved mid-turn", async () => {
+		const repo = await initRepo();
+		const wt = await addWorktree(repo);
+		const store = await newStore();
+		const start = await beginTurn(repo, wt);
+		await fs.appendFile(path.join(wt, "a.txt"), "agent edit\n");
+		// The operator concurrently edits a DIFFERENT file — the patch would apply cleanly, which is
+		// exactly why this must hold on the fingerprint, not on git-apply conflict detection.
+		await fs.appendFile(path.join(repo, "b.txt"), "operator edit\n");
+		const before = await fileSnapshot(repo);
+		const out = await syncTurnEnd({ realDir: repo, worktree: wt, start, store, agentId: "a1", turn: 1 });
+		expect(out.kind).toBe("held");
+		if (out.kind === "held") expect(out.reason).toContain("changed during this turn");
+		expect(await fileSnapshot(repo)).toEqual(before); // real tree untouched
+		const held = await store.listHeld("a1");
+		expect(held).toHaveLength(1);
+		expect(await fs.readFile(held[0].patchFile, "utf8")).toContain("agent edit");
+	});
+
+	test("a held backlog blocks the NEXT turn's auto-apply even when the real tree is stable again", async () => {
+		const repo = await initRepo();
+		const wt = await addWorktree(repo);
+		const store = await newStore();
+		// Turn 1 holds (operator moved the tree mid-turn).
+		const s1 = await beginTurn(repo, wt);
+		await fs.appendFile(path.join(wt, "a.txt"), "turn1\n");
+		await fs.appendFile(path.join(repo, "b.txt"), "operator\n");
+		const o1 = await syncTurnEnd({ realDir: repo, worktree: wt, start: s1, store, agentId: "a1", turn: 1 });
+		expect(o1.kind).toBe("held");
+		// Turn 2: real tree is stable across the whole turn, but turn 2's hunks may depend on turn
+		// 1's — it must queue behind the backlog, not leapfrog it.
+		const s2 = await beginTurn(repo, wt, o1.kind === "held" ? o1.endTree : undefined);
+		await fs.appendFile(path.join(wt, "a.txt"), "turn2\n");
+		const before = await fileSnapshot(repo);
+		const o2 = await syncTurnEnd({ realDir: repo, worktree: wt, start: s2, store, agentId: "a1", turn: 2 });
+		expect(o2.kind).toBe("held");
+		if (o2.kind === "held") expect(o2.reason).toContain("held");
+		expect(await fileSnapshot(repo)).toEqual(before);
+		expect(await store.listHeld("a1")).toHaveLength(2);
+	});
+
+	test("holds when the patch itself cannot apply (pre-session divergence in the same file)", async () => {
+		const repo = await initRepo();
+		const wt = await addWorktree(repo);
+		// The real tree diverged in a.txt BEFORE the session's first turn — fingerprints match
+		// start→end (no mid-turn movement) but the patch conflicts; it must hold, not half-apply.
+		await fs.writeFile(path.join(repo, "a.txt"), "operator wip\n");
+		const store = await newStore();
+		const start = await beginTurn(repo, wt);
+		await fs.writeFile(path.join(wt, "a.txt"), "one\ntwo\nthree\nagent\n");
+		const before = await fileSnapshot(repo);
+		const out = await syncTurnEnd({ realDir: repo, worktree: wt, start, store, agentId: "a1", turn: 1 });
+		expect(out.kind).toBe("held");
+		if (out.kind === "held") expect(out.reason).toContain("did not apply cleanly");
+		expect(await fileSnapshot(repo)).toEqual(before);
+		expect(await store.listHeld("a1")).toHaveLength(1);
+	});
+});
+
+// ── fail-closed acceptance (00-meta.md: missing these = spec violation) ──────────────────────────
+
+describe("fail-closed acceptance: fingerprint capture failure can never authorize an apply", () => {
+	test("turn-START capture failure ⇒ hold + attention-shaped outcome, real tree untouched", async () => {
+		const repo = await initRepo();
+		const wt = await addWorktree(repo);
+		const store = await newStore();
+		// Force the turn-start fingerprint to fail: the "real dir" is not a git repo at capture time.
+		const notARepo = await tmpDir("bsync-notrepo-");
+		const start = await beginTurn(notARepo, wt);
+		expect(start.realFingerprint).toBeUndefined();
+		expect(start.realFailure).toBeTruthy();
+		await fs.appendFile(path.join(wt, "a.txt"), "agent edit\n");
+		// The real repo is fine at turn END — but the start baseline is a recorded FAILURE, which
+		// must compare equal to nothing.
+		const before = await fileSnapshot(repo);
+		const out = await syncTurnEnd({ realDir: repo, worktree: wt, start, store, agentId: "a1", turn: 1 });
+		expect(out.kind).toBe("held");
+		if (out.kind === "held") expect(out.reason).toContain("turn start");
+		expect(await fileSnapshot(repo)).toEqual(before);
+		expect(await store.listHeld("a1")).toHaveLength(1);
+	});
+
+	test("turn-END capture failure ⇒ hold, real tree untouched (repo breaks mid-turn)", async () => {
+		const repo = await initRepo();
+		const wt = await addWorktree(repo);
+		const store = await newStore();
+		// A separate plain directory plays the real tree so we can break it without breaking the
+		// worktree's own git plumbing (a worktree shares its repo's object DB).
+		const real = await tmpDir("bsync-real2-");
+		await git(real, "init", "-q", "-b", "main");
+		await git(real, "config", "user.email", "t@t");
+		await git(real, "config", "user.name", "t");
+		await fs.writeFile(path.join(real, "a.txt"), "one\ntwo\nthree\n");
+		await git(real, "add", "-A");
+		await git(real, "commit", "-qm", "base");
+		const start = await beginTurn(real, wt);
+		expect(start.realFingerprint).toBeTruthy();
+		await fs.appendFile(path.join(wt, "a.txt"), "agent edit\n");
+		// Mid-turn, the real checkout stops being a repo (e.g. deleted/moved) — re-fingerprint FAILS.
+		await fs.rename(path.join(real, ".git"), path.join(real, ".git-hidden"));
+		const before = await fileSnapshot(real);
+		const out = await syncTurnEnd({ realDir: real, worktree: wt, start, store, agentId: "a1", turn: 1 });
+		expect(out.kind).toBe("held");
+		if (out.kind === "held") expect(out.reason).toContain("turn end");
+		expect(await fileSnapshot(real)).toEqual(before);
+		expect(await store.listHeld("a1")).toHaveLength(1);
+	});
+
+	test("turn-start WORKTREE snapshot failure ⇒ uncapturable (surfaced, nothing applied)", async () => {
+		const repo = await initRepo();
+		const store = await newStore();
+		const notARepo = await tmpDir("bsync-badwt-");
+		const start = await beginTurn(repo, notARepo);
+		expect(start.startTree).toBeUndefined();
+		expect(start.treeFailure).toBeTruthy();
+		const before = await fileSnapshot(repo);
+		const out = await syncTurnEnd({ realDir: repo, worktree: notARepo, start, store, agentId: "a1", turn: 1 });
+		expect(out.kind).toBe("uncapturable");
+		expect(await fileSnapshot(repo)).toEqual(before);
+		expect(await store.listHeld("a1")).toHaveLength(0);
+	});
+
+	test("explicit apply with an unfingerprint-able checkout applies NOTHING", async () => {
+		const repo = await initRepo();
+		const wt = await addWorktree(repo);
+		const store = await newStore();
+		// Seed one legitimately held patch.
+		const start = await beginTurn(repo, wt);
+		await fs.appendFile(path.join(wt, "a.txt"), "agent edit\n");
+		await fs.appendFile(path.join(repo, "b.txt"), "operator edit\n");
+		const held = await syncTurnEnd({ realDir: repo, worktree: wt, start, store, agentId: "a1", turn: 1 });
+		expect(held.kind).toBe("held");
+		// The explicit-apply target cannot be fingerprinted → refuse before reading a single patch.
+		const notARepo = await tmpDir("bsync-notrepo2-");
+		const r = await applyHeldNow(store, "a1", notARepo);
+		expect(r.ok).toBe(false);
+		expect(r.applied).toBe(0);
+		expect(r.remaining).toBe(1);
+		expect(await store.listHeld("a1")).toHaveLength(1);
+	});
+});
+
+// ── held-patch store durability ───────────────────────────────────────────────────────────────────
+
+describe("HeldSyncStore", () => {
+	test("holds survive a new store instance (daemon restart) and resolve() clears them", async () => {
+		const dir = await tmpDir("bsync-store-");
+		const s1 = new HeldSyncStore(dir);
+		const h = await s1.hold({ agentId: "a1", turn: 1, realDir: "/real", reason: "r", patch: "diff --git a/x b/x\n" });
+		const s2 = new HeldSyncStore(dir);
+		expect(await s2.listHeld("a1")).toHaveLength(1);
+		expect(await fs.readFile(h.patchFile, "utf8")).toContain("diff --git");
+		await s2.resolve(h.id, "applied");
+		expect(await s2.listHeld("a1")).toHaveLength(0);
+		expect(await new HeldSyncStore(dir).listHeld("a1")).toHaveLength(0);
+	});
+
+	test("a torn tail line (crash mid-append) is ignored; complete lines still parse", async () => {
+		const dir = await tmpDir("bsync-store-");
+		const s = new HeldSyncStore(dir);
+		await s.hold({ agentId: "a1", turn: 1, realDir: "/real", reason: "r", patch: "p1" });
+		await fs.appendFile(path.join(dir, "held.jsonl"), '{"kind":"held","id":"torn');
+		expect(await s.listHeld("a1")).toHaveLength(1);
+	});
+
+	test("holds are per-agent", async () => {
+		const s = await newStore();
+		await s.hold({ agentId: "a1", turn: 1, realDir: "/r", reason: "r", patch: "p" });
+		await s.hold({ agentId: "a2", turn: 1, realDir: "/r", reason: "r", patch: "p" });
+		expect(await s.listHeld("a1")).toHaveLength(1);
+		expect(await s.listHeld("a2")).toHaveLength(1);
+		expect(await s.listAllHeld()).toHaveLength(2);
+	});
+});
+
+// ── explicit apply (the attention row's one click) ────────────────────────────────────────────────
+
+describe("applyHeldNow", () => {
+	test("replays held patches in order and clears them once the checkout is safe again", async () => {
+		const repo = await initRepo();
+		const wt = await addWorktree(repo);
+		const store = await newStore();
+		// Two held turns: turn 1 held on operator movement, turn 2 held on backlog.
+		const s1 = await beginTurn(repo, wt);
+		await fs.appendFile(path.join(wt, "a.txt"), "turn1\n");
+		await fs.appendFile(path.join(repo, "b.txt"), "operator\n");
+		const o1 = await syncTurnEnd({ realDir: repo, worktree: wt, start: s1, store, agentId: "a1", turn: 1 });
+		expect(o1.kind).toBe("held");
+		const s2 = await beginTurn(repo, wt, o1.kind === "held" ? o1.endTree : undefined);
+		await fs.appendFile(path.join(wt, "a.txt"), "turn2\n");
+		const o2 = await syncTurnEnd({ realDir: repo, worktree: wt, start: s2, store, agentId: "a1", turn: 2 });
+		expect(o2.kind).toBe("held");
+		// The operator clicks Apply.
+		const r = await applyHeldNow(store, "a1", repo);
+		expect(r).toEqual({ ok: true, applied: 2, remaining: 0 });
+		const a = await fs.readFile(path.join(repo, "a.txt"), "utf8");
+		expect(a).toContain("turn1");
+		expect(a).toContain("turn2");
+		expect(a.indexOf("turn1")).toBeLessThan(a.indexOf("turn2")); // strict order
+		expect(await store.listHeld("a1")).toHaveLength(0);
+	});
+
+	test("stops at the first still-divergent patch; later patches stay held; earlier applies stick", async () => {
+		const repo = await initRepo();
+		const wt = await addWorktree(repo);
+		const store = await newStore();
+		// Turn 1 edits a.txt (held via operator edit to b.txt); the operator then ALSO rewrites
+		// a.txt, so turn 1's patch can never apply — but a second held patch touching c.txt could.
+		const s1 = await beginTurn(repo, wt);
+		await fs.appendFile(path.join(wt, "a.txt"), "turn1\n");
+		await fs.appendFile(path.join(repo, "b.txt"), "operator\n");
+		expect((await syncTurnEnd({ realDir: repo, worktree: wt, start: s1, store, agentId: "a1", turn: 1 })).kind).toBe("held");
+		const s2 = await beginTurn(repo, wt);
+		await fs.writeFile(path.join(wt, "c.txt"), "turn2\n");
+		expect((await syncTurnEnd({ realDir: repo, worktree: wt, start: s2, store, agentId: "a1", turn: 2 })).kind).toBe("held");
+		await fs.writeFile(path.join(repo, "a.txt"), "operator rewrote this\n");
+		const r = await applyHeldNow(store, "a1", repo);
+		expect(r.ok).toBe(false);
+		expect(r.applied).toBe(0);
+		expect(r.remaining).toBe(2);
+		expect(r.reason).toContain("still divergent");
+		// Order is strict: the conflicting FIRST patch blocks everything after it — c.txt not written.
+		await expect(fs.access(path.join(repo, "c.txt"))).rejects.toThrow();
+		expect(await store.listHeld("a1")).toHaveLength(2);
+	});
+
+	test("no holds is a clean no-op", async () => {
+		const repo = await initRepo();
+		const store = await newStore();
+		expect(await applyHeldNow(store, "a1", repo)).toEqual({ ok: true, applied: 0, remaining: 0 });
+	});
+});
