@@ -1,6 +1,6 @@
 # Boundary sync — one-directional per-turn patch-apply to the real checkout
 
-STATUS: open
+STATUS: in-review
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -38,4 +38,52 @@ none
 
 ## Resolution
 
-(filled in when this concern executes)
+Implemented 2026-07-16 on the A03 lane of feat/daily-driver-w1 (branch worktree-wf_55eef634-d22-1;
+recovers and completes a session-limit-interrupted prior attempt — the salvaged module survived
+critical review largely intact and is credited in the commits).
+
+**What shipped.**
+- `src/boundary-sync.ts` (new): `captureRealTreeState` (sha256 over HEAD + `--binary` tracked diff +
+  untracked paths + untracked CONTENT hashes — path-only hashing would let a mid-turn edit to an
+  untracked file be clobbered by the apply's own writes), `captureWorktreeTree` (private temp
+  GIT_INDEX_FILE `read-tree → add -A → write-tree`; the worktree's real index and files are never
+  touched), `computeTurnPatch` (diff-tree start→end — deliberately NOT `worktreeDiffSinceFork`, per
+  the Approach), `applyPatchToRealTree` (`git apply --check` then `git apply`, the concern's single
+  real-tree git-write; new files ride the patch itself since the trees include untracked content),
+  `syncTurnEnd` (the one auditable decision point — every branch that is not fingerprints-match ends
+  in hold/uncapturable), durable `HeldSyncStore` (append-only JSONL + sibling patch bodies in
+  `<stateDir>/boundary-sync/`, torn-tail tolerant, per-agent, apply-in-order), and `applyHeldNow`
+  (fresh capture gate; first conflict stops the replay with everything after it still held).
+- Wiring (src/squad-manager.ts): `boundaryTurnStart` at `agent_start`/`turn_start`,
+  `boundaryTurnEnd` at `agent_end` (the voicePushArmed boundary, as specified); per-agent promise
+  chain serializes capture→sync→explicit-apply; ONE boundary-sync attention row per agent (freshest
+  state, never a stack); `reattachHeldSyncs` at boot re-raises rows for restored sessions (holds are
+  durable, attention rows are not) and warns loudly for vanished agents; `applyHeldSync` clears the
+  row on full success. The `here`-marker is `options.realTreePath` (types.ts, persisted; carried
+  through orphan-adopt), set server-side in POST /api/console from the canonical registered root —
+  never client-supplied separately; plain fleet units never carry it. A self-alias guard skips sync
+  if the target IS the agent's worktree (would re-apply onto itself → spurious holds).
+- `POST /api/agents/:id/apply-held-sync` (server.ts, operator tier like /land beside it): re-runs
+  the precondition with a FRESH capture; "still divergent" is a 200 + ok:false report.
+- Webapp: `AttentionEvent.source` widened with "boundary-sync" (dto.ts mirroring types.ts);
+  insights.ts maps those rows to a one-click `Apply` action (`apply-sync`) using the event's own
+  copy as the title; WorkspaceCockpit's onRowAction posts the apply and toasts applied/still-held
+  distinctly. Renders through the existing RosterAgentRow/RowActionChip path (AttentionRow.tsx is
+  generic over `item.action` and needed no change — TOUCHES anticipated the wrong render site).
+
+**Fail-closed acceptance (mandatory per 00-meta.md) — tests, all against REAL git repos, no mocks:**
+tests/boundary-sync.test.ts (27) + tests/boundary-sync-wiring.test.ts (6). Capture failure at turn
+START and at turn END each ⇒ hold + attention, real tree byte-identical (asserted via full file
+snapshot, not just fingerprint); non-repo/vanished/newline-path targets fail capture rather than
+producing an empty fingerprint; a mid-turn operator edit to a DIFFERENT file (patch would apply
+cleanly!) holds on the fingerprint; a held backlog blocks the next turn's auto-apply; explicit
+apply with an unfingerprint-able target applies nothing; conflicting first patch stops the ordered
+replay with later patches still held. Found-and-fixed during testing: `Bun.spawn` THROWS on a
+vanished cwd (ENOENT) instead of returning non-zero — a local spawn-safe wrapper folds that into
+the fail-closed result plumbing; without it the capture would have bypassed the hold path entirely.
+
+**Still owed before this ships (gate work, not implementer work):**
+- Live verify per ## Verify (scratch daemon + real `glance here` turn + concurrent real-tree edit +
+  webapp Apply click) — Standing requirement #1.
+- Cross-lineage review (codex AND grok) — mandatory for this git-write path; do not land on a
+  single reviewer's approval.
