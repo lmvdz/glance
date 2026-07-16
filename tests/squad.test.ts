@@ -126,6 +126,7 @@ function board(over: Partial<BoardState> = {}): BoardState {
 		cwd: "/home/me/project",
 		now: Date.now(),
 		frame: 0,
+		grr: false,
 		...over,
 	};
 }

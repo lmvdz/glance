@@ -4,6 +4,7 @@ import {
   applySuggestionChip,
   ComposerAttachmentChip,
   assembleSendText,
+  frictionCaptureBody,
   clampGrownHeight,
   COMPOSER_MAX_HEIGHT_PX,
   formatPasteSize,
@@ -168,4 +169,24 @@ test("ComposerAttachmentChip shows the preview and insert-inline escape hatch wh
   );
   expect(html).toContain("the full pasted content");
   expect(html).toContain("Insert inline");
+});
+
+// ---------------------------------------------------------------------------
+// Friction capture (plans/daily-dogfood-engine/01)
+// ---------------------------------------------------------------------------
+
+test("frictionCaptureBody trims the gripe and rides the active agent's repo/id", () => {
+  const body = frictionCaptureBody("  the spinner lies  ", { id: "chat-1", repo: "/home/me/proj" } as never);
+  expect(body).toEqual({ repo: "/home/me/proj", gripe: "the spinner lies", context: "webapp-composer", agentId: "chat-1" });
+});
+
+test("frictionCaptureBody still captures without an agent (repo '', no agentId) — never refuses the annoyed operator", () => {
+  const body = frictionCaptureBody("slow load");
+  expect(body).toEqual({ repo: "", gripe: "slow load", context: "webapp-composer" });
+  expect(body && "agentId" in body).toBe(false);
+});
+
+test("frictionCaptureBody returns null for an empty-after-trim gripe — nothing is ever POSTed", () => {
+  expect(frictionCaptureBody("   ")).toBeNull();
+  expect(frictionCaptureBody("")).toBeNull();
 });

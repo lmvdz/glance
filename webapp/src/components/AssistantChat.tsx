@@ -1008,6 +1008,7 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
         modelOptions={currentModelOptions}
         onModelChange={handleModelChange}
         agent={selectedAgent}
+        onToast={showToast}
         voiceCallEnabled={voiceCall.voiceEnabled}
         voiceCallActive={voiceCall.isCallActive}
         onStartVoiceCall={

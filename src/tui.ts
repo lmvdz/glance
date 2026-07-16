@@ -74,6 +74,13 @@ export interface BoardState {
 	now: number;
 	/** Spinner animation frame counter (advances while an agent is working). */
 	frame: number;
+	/** Friction-capture mode (plans/daily-dogfood-engine/01): the composer is a one-line gripe prompt —
+	 *  Enter logs to the friction ledger, Esc cancels and restores the stashed draft. Toggled by Ctrl-G
+	 *  (a printable key like `g` would steal the first keystroke of any draft that starts with it). */
+	grr: boolean;
+	/** Transient status line (e.g. "✓ logged to the friction ledger") shown in the hint row for a few
+	 *  seconds — the TUI's stand-in for a toast. */
+	notice?: string;
 }
 
 /** True on a validator verdict that must read as a HOLD, never a calm "ready to land" — a `veto`
@@ -240,9 +247,11 @@ export function buildBoard(state: BoardState): string[] {
 		if (!state.agents.length) lines.push(c("dim", "  No agents yet — type a task below and press Enter to spawn one."));
 		while (lines.length < height - 2) lines.push("");
 		const short = state.cwd.length > 40 ? `…${state.cwd.slice(-39)}` : state.cwd;
-		const navHint = `↑/↓ select · → open · Enter = new agent in ${short} · Ctrl-C quit`;
-		lines.push(pad(need ? `${c("red", `⛔ ${need} waiting · press a to answer`)} ${c("dim", navHint)}` : c("dim", navHint), width));
-		lines.push(composerLine("new", state.draft, width));
+		const navHint = `↑/↓ select · → open · Enter = new agent in ${short} · Ctrl-G gripe · Ctrl-C quit`;
+		if (state.grr) lines.push(pad(c("yellow", "grr — what just annoyed you? Enter logs it · Esc cancels"), width));
+		else if (state.notice) lines.push(pad(`${state.notice} ${c("dim", navHint)}`, width));
+		else lines.push(pad(need ? `${c("red", `⛔ ${need} waiting · press a to answer`)} ${c("dim", navHint)}` : c("dim", navHint), width));
+		lines.push(composerLine(state.grr ? "grr" : "new", state.draft, width));
 	} else {
 		const sel = agents.find((a) => a.id === state.selectedId);
 		if (!sel) {
@@ -266,14 +275,25 @@ export function buildBoard(state: BoardState): string[] {
 				const hint = p.kind === "confirm" ? "[y/n]" : p.kind === "select" ? `[${(p.options ?? []).join("/")}]` : "[type an answer]";
 				lines.push(pad(c("red", `⛔ ${p.title}${p.message ? ` — ${p.message}` : ""} ${c("dim", hint)}`), width));
 			}
-			lines.push(pad(c("dim", "← back · Enter send · /stop /restart /kill · Ctrl-C quit"), width));
-			lines.push(composerLine(sel.pending.length ? "answer" : "", state.draft, width));
+			if (state.grr) lines.push(pad(c("yellow", "grr — what just annoyed you? Enter logs it · Esc cancels"), width));
+			else if (state.notice) lines.push(pad(`${state.notice} ${c("dim", "← back · Ctrl-C quit")}`, width));
+			else lines.push(pad(c("dim", "← back · Enter send · /stop /restart /kill /grr · Ctrl-C quit"), width));
+			lines.push(composerLine(state.grr ? "grr" : sel.pending.length ? "answer" : "", state.draft, width));
 		}
 	}
 
 	if (lines.length > height) return lines.slice(0, height);
 	while (lines.length < height) lines.push("");
 	return lines;
+}
+
+/** Split a `/verb rest of line` slash command — verb lowercased, arg's own casing preserved
+ *  (a gripe is prose, not a keyword). Exported for unit tests. */
+export function parseSlash(cmd: string): { verb: string; arg: string } {
+	const body = cmd.replace(/^\//, "").trim();
+	const space = body.search(/\s/);
+	if (space === -1) return { verb: body.toLowerCase(), arg: "" };
+	return { verb: body.slice(0, space).toLowerCase(), arg: body.slice(space).trim() };
 }
 
 // ── Interactive shell ─────────────────────────────────────────────────────
@@ -325,6 +345,9 @@ export class SquadTui {
 	private readonly onKey: (data: Buffer) => void;
 	private onQuit?: () => void;
 	private spinTimer?: Timer;
+	/** Draft stashed while the composer is borrowed as the grr prompt — restored on submit/cancel. */
+	private grrStash = "";
+	private noticeTimer?: Timer;
 	private readonly prevStatus = new Map<string, AgentStatus>();
 	private readonly lastBell = new Map<string, number>();
 	private seeded = false;
@@ -344,6 +367,7 @@ export class SquadTui {
 			cwd,
 			now: Date.now(),
 			frame: 0,
+			grr: false,
 		};
 		for (const a of this.state.agents) this.transcripts.set(a.id, manager.getTranscript(a.id));
 		for (const a of this.state.agents) this.prevStatus.set(a.id, a.status);
@@ -393,6 +417,7 @@ export class SquadTui {
 		if (!this.running) return;
 		this.running = false;
 		clearTimeout(this.redrawTimer);
+		clearTimeout(this.noticeTimer);
 		if (this.spinTimer) { clearInterval(this.spinTimer); this.spinTimer = undefined; }
 		this.manager.off("event", this.onEvent);
 		if (process.stdin.isTTY) {
@@ -492,10 +517,74 @@ export class SquadTui {
 		this.openSelected();
 	}
 
+	// ── Friction capture (plans/daily-dogfood-engine/01) ──────────────────────
+	// Ctrl-G borrows the composer as a one-line gripe prompt; Enter records through the SAME
+	// manager write path POST /api/friction uses (recordFriction — the TUI lives in the daemon
+	// process, so looping back over HTTP would only add a token round trip to an in-process call),
+	// Esc cancels. The in-progress draft is stashed and restored either way — capturing a gripe
+	// must never eat the message the operator was mid-typing.
+
+	private toggleGrr(): void {
+		if (this.state.grr) {
+			this.cancelGrr();
+			return;
+		}
+		this.state.grr = true;
+		this.grrStash = this.editor.getText();
+		this.editor.setText("");
+		this.state.draft = "";
+	}
+
+	private cancelGrr(): void {
+		this.state.grr = false;
+		this.editor.setText(this.grrStash);
+		this.state.draft = this.grrStash;
+		this.grrStash = "";
+	}
+
+	private submitGrr(text: string): void {
+		this.state.grr = false;
+		const stash = this.grrStash;
+		this.grrStash = "";
+		this.editor.setText(stash);
+		this.state.draft = stash;
+		const gripe = text.trim();
+		if (!gripe) {
+			this.showNotice(c("dim", "· nothing logged — the gripe was empty"));
+			return;
+		}
+		const sel = this.state.view === "agent" ? this.selected() : undefined;
+		this.recordFriction(gripe, sel);
+	}
+
+	/** Shared by Ctrl-G submit and the /grr slash verb — one call site into the manager. */
+	private recordFriction(gripe: string, sel?: AgentDTO): void {
+		try {
+			this.manager.recordFriction({ repo: sel?.repo ?? this.state.cwd, gripe, context: "tui", agentId: sel?.id });
+			this.showNotice(c("green", "✓ logged to the friction ledger"));
+		} catch (err) {
+			this.showNotice(c("red", `✗ not logged: ${err instanceof Error ? err.message : String(err)}`));
+		}
+	}
+
+	private showNotice(text: string): void {
+		this.state.notice = text;
+		clearTimeout(this.noticeTimer);
+		this.noticeTimer = setTimeout(() => {
+			this.state.notice = undefined;
+			this.render();
+		}, 3000);
+	}
+
 	/** Editor `onSubmit` sink: route the composed text by view + pending state.
 	 *  The Editor has already trimmed the value and cleared itself by this point. */
 	private submit(text: string): void {
 		const t = text.trim();
+		if (this.state.grr) {
+			this.submitGrr(t);
+			this.scheduleRedraw();
+			return;
+		}
 		if (this.state.view === "list") {
 			if (t) {
 				this.editor.addToHistory(t);
@@ -549,7 +638,8 @@ export class SquadTui {
 	private handleKey(data: Buffer): void {
 		const s = data.toString();
 		if (s === "\x03") return this.quit(); // Ctrl-C
-		if (s === "\x1b") this.onEsc(); // bare Esc
+		if (s === "\x07") this.toggleGrr(); // Ctrl-G — friction capture, both views
+		else if (s === "\x1b") this.onEsc(); // bare Esc
 		else if (s === "\x1b[A") this.onUp();
 		else if (s === "\x1b[B") this.onDown();
 		else if (s === "\x1b[C") this.onRight();
@@ -580,20 +670,29 @@ export class SquadTui {
 	}
 
 	private onEsc(): void {
-		if (this.state.view === "agent") this.state.view = "list";
+		if (this.state.grr) this.cancelGrr();
+		else if (this.state.view === "agent") this.state.view = "list";
 		else this.quit();
 	}
 
 	private runSlash(sel: AgentDTO, cmd: string): void {
-		const verb = cmd.slice(1).trim().toLowerCase();
-		if (verb === "stop" || verb === "interrupt") this.manager.applyCommand({ type: "interrupt", id: sel.id });
-		else if (verb === "restart") this.manager.applyCommand({ type: "restart", id: sel.id });
-		else if (verb === "kill") this.manager.applyCommand({ type: "kill", id: sel.id });
-		else if (verb === "back") this.state.view = "list";
-		else if (verb === "rm") {
-			this.manager.applyCommand({ type: "remove", id: sel.id });
-			this.state.view = "list";
+		const parsed = parseSlash(cmd);
+		const verb = parsed.verb;
+		// The pre-existing verbs stay argument-less (exactly as before — "/stop something" never
+		// interrupted, and silently starting to would be a behavior change smuggled into this diff).
+		if (parsed.arg === "") {
+			if (verb === "stop" || verb === "interrupt") this.manager.applyCommand({ type: "interrupt", id: sel.id });
+			else if (verb === "restart") this.manager.applyCommand({ type: "restart", id: sel.id });
+			else if (verb === "kill") this.manager.applyCommand({ type: "kill", id: sel.id });
+			else if (verb === "back") this.state.view = "list";
+			else if (verb === "rm") {
+				this.manager.applyCommand({ type: "remove", id: sel.id });
+				this.state.view = "list";
+			} else if (verb === "grr") this.toggleGrr(); // bare /grr opens the Ctrl-G prompt
+			return;
 		}
+		// `/grr <text>` — the type-it-inline capture for whoever would rather not leave the text flow.
+		if (verb === "grr") this.recordFriction(parsed.arg, sel);
 	}
 
 	private scheduleRedraw(): void {
@@ -616,7 +715,7 @@ export class SquadTui {
 	private applyEditorChrome(): void {
 		const sel = this.selected();
 		const answering = this.state.view === "agent" && sel !== undefined && sel.pending.length > 0;
-		const label = this.state.view === "list" ? "new" : answering ? "answer" : "";
+		const label = this.state.grr ? "grr" : this.state.view === "list" ? "new" : answering ? "answer" : "";
 		this.editor.setPromptGutter(`${c("cyan", `${label}›`)} `);
 	}
 

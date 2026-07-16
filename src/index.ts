@@ -53,7 +53,7 @@ import { RuntimeSettingsStore } from "./runtime-settings.ts";
 import { PolicyStore } from "./policy.ts";
 import { backendFromEnv, setStorageBackend } from "./dal/storage.ts";
 import type { AutomationRollupRow } from "./automation-log.ts";
-import type { Actor, AgentDTO, ApprovalMode, AutomationEvent, ClientCommand, CommissionResult, CommissionSpec, CreateAgentOptions, ThinkingLevel, TranscriptEntry } from "./types.ts";
+import type { Actor, AgentDTO, ApprovalMode, AutomationEvent, ClientCommand, CommissionResult, CommissionSpec, CreateAgentOptions, FrictionEntry, ThinkingLevel, TranscriptEntry } from "./types.ts";
 import { base, DEFAULT_PORT, parseArgs, stateDirPath, tokenHeader } from "./cli-args.ts";
 import { cmdHere } from "./here.ts";
 
@@ -92,6 +92,7 @@ USAGE
   glance logs <id> [--limit N]                  Print an agent's recent transcript
   glance automation [--window 1h] [--loop L]    Show what the background loops are doing (and Scout's LLM cost)
   glance ask "<question>" [--repo R]            Ask; the deliverable is a written answer, not a branch
+  glance grr "<gripe>" [--list]                 Log a friction gripe to the dogfood ledger in <5s
   glance answers [<id>] [--repo R]              List answers, or print one
   glance open                                   Print the dashboard URL
   glance doctor [--json]                       Is the factory on, armed, and pointed at the right world?
@@ -874,6 +875,60 @@ async function cmdAutomation(args: string[]): Promise<void> {
 }
 
 /**
+ * `glance grr "<gripe>" [--repo <path>] [--context <s>]` / `glance grr --list [--repo <path>] [--json]`
+ *
+ * The friction ledger's five-second capture (plans/daily-dogfood-engine/01). Fire-and-forget by
+ * design: one POST, print "logged.", exit — anything slower than a few seconds would never get
+ * used mid-annoyance, and then the whole dogfood epic loses its raw material. No polling, no
+ * confirmation round trip beyond the 2xx.
+ */
+async function cmdGrr(args: string[]): Promise<void> {
+	const { positional, flags } = parseArgs(args);
+	const repo = typeof flags.repo === "string" ? path.resolve(flags.repo) : process.cwd();
+
+	if (flags.list) {
+		const q = new URLSearchParams();
+		if (typeof flags.repo === "string") q.set("repo", repo);
+		if (typeof flags.limit === "string") q.set("limit", flags.limit);
+		const res = await fetch(`${base(flags)}/api/friction?${q.toString()}`, { headers: tokenHeader() }).catch(() => null);
+		if (!res || !res.ok) {
+			process.stderr.write(res ? `${res.status} ${await res.text()}\n` : `No glance daemon on ${base(flags)}. Start one with: glance up\n`);
+			process.exit(1);
+		}
+		const { entries } = (await res.json()) as { entries: FrictionEntry[] };
+		if (flags.json) {
+			process.stdout.write(`${JSON.stringify(entries, null, 2)}\n`);
+			return;
+		}
+		if (!entries.length) {
+			process.stdout.write('no gripes yet. log one: glance grr "the thing that just annoyed you"\n');
+			return;
+		}
+		for (const e of entries) {
+			const where = [e.repo ? (e.repo.split("/").pop() ?? e.repo) : "—", e.context, e.agentId].filter(Boolean).join(" · ");
+			process.stdout.write(`  ${`${relAgo(e.ts)} ago`.padStart(8)}  ${where.padEnd(28)} ${e.gripe}\n`);
+		}
+		return;
+	}
+
+	const gripe = positional.join(" ").trim();
+	if (!gripe) {
+		process.stderr.write('usage: glance grr "<gripe>" [--repo <path>] [--context <s>]\n       glance grr --list [--repo <path>] [--json]\n');
+		process.exit(1);
+	}
+	const res = await fetch(`${base(flags)}/api/friction`, {
+		method: "POST",
+		headers: { ...tokenHeader(), "content-type": "application/json" },
+		body: JSON.stringify({ repo, context: typeof flags.context === "string" ? flags.context : "cli", gripe }),
+	}).catch(() => null);
+	if (!res || !res.ok) {
+		process.stderr.write(res ? `grr failed: ${res.status} ${await res.text()}\n` : `No glance daemon on ${base(flags)}. Start one with: glance up\n`);
+		process.exit(1);
+	}
+	process.stdout.write("logged.\n");
+}
+
+/**
  * `glance ask "<question>" [--repo <path>] [--json] [--no-wait]`
  *
  * R5: the second deliverable. A question in, a written answer out — no branch, no PR, nothing to merge.
@@ -1044,6 +1099,9 @@ async function main(): Promise<void> {
 		case "ask":
 			if (typeof parseArgs(rest).flags.read === "string") await cmdAnswers(rest);
 			else await cmdAsk(rest);
+			break;
+		case "grr":
+			await cmdGrr(rest);
 			break;
 		case "answers":
 			await cmdAnswers(rest);
