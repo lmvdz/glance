@@ -43,7 +43,7 @@ import { type Answer, answerBrief, listAnswers, readAnswer, saveAnswer } from ".
 // Aliased: `types.ts` already exports an UNRELATED `AttentionEvent` (an agent's own notify signal,
 // used pervasively below via `AgentDTO.attentionEvents`) — importing this module's same-named type
 // bare would collide. `OperatorAttentionEvent` disambiguates at every use site in this file.
-import { AttentionStore, type AttentionEvent as OperatorAttentionEvent, type AttentionRecordInput, type RecordResult, type SeenMap } from "./attention.ts";
+import { AttentionStore, type AttentionEvent as OperatorAttentionEvent, type AttentionRecordInput, type RecordResult, type SeenMap, type SurpriseCountMap } from "./attention.ts";
 import { errText } from "./err-text.ts";
 import { isConsolePrompt, stripConsolePrompt } from "./console-prompt.ts";
 import { openRemovedLedger, type RemovedLedger } from "./removed-ledger.ts";
@@ -7205,6 +7205,14 @@ export class SquadManager extends EventEmitter {
 	 *  `redactSeenMapForActor`. */
 	attentionSeen(repos?: string[]): SeenMap {
 		return this.attentionStore.seenMapFor(repos);
+	}
+
+	/** Concern-08 fog wiring: the durable per-(repo,file) surprise-tap COUNT map (NOT the raw feed —
+	 *  see `SurpriseCountMap`'s doc in attention.ts for why a compacted store exists at all), same
+	 *  `repos` filtering contract as `attentionSeen`. Carries no viewer identity, so unlike the two
+	 *  reads above it needs no redaction pass before `computeFog` consumes it. */
+	attentionSurpriseCounts(repos?: string[]): SurpriseCountMap {
+		return this.attentionStore.surpriseCountsFor(repos);
 	}
 
 	/**

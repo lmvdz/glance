@@ -8,7 +8,7 @@
  * (DOM-free, unit-tested per this webapp's convention); the component is just chrome.
  */
 
-import type { AgentDTO } from './dto';
+import type { AgentDTO, FeatureDecisionDTO } from './dto';
 import { isValidatorHeld, isVetoed } from './agent-badges';
 
 export type InterveneTone = 'critical' | 'warn' | 'info' | 'neutral' | 'success';
@@ -107,4 +107,60 @@ export function diffLineStats(diff: string | undefined): { added: number; remove
 
 function firstLine(s: string): string {
   return s.split('\n')[0].slice(0, 200);
+}
+
+// =================================================================================================
+// Delta bullets (comprehension concern 08): the bound feature's `source:"model-delta"` decisions
+// this UNIT itself recorded, rendered above the diff spine as the teaching moment. `FeatureDTO.decisions`
+// is already fetched app-wide (GET /api/features, TaskContext's `features`) and already carries
+// `evidence`/`sourceRef` on the wire (see dto.ts's `FeatureDecisionDTO` doc) — no new route needed.
+// =================================================================================================
+
+export const MAX_DELTA_BULLETS = 3;
+
+export interface DeltaBullet {
+  id: string;
+  text: string;
+  /** Evidence anchors this bullet was recorded with — always non-empty in practice (the backend's
+   *  record-time validator rejects anchorless model-delta decisions, DESIGN.md's "Delta quality
+   *  floor"), but this reads a stored/serialized value, so an empty array is handled, never assumed. */
+  evidence: string[];
+}
+
+/**
+ * This unit's own model-delta decisions from its bound feature, newest first, capped at
+ * `MAX_DELTA_BULLETS`. Filtered to `source === 'model-delta' && sourceRef.agentId === agentId` — a
+ * feature shared by two units must never render the OTHER unit's teaching under this diff (the same
+ * discipline `prBodyFor` applies server-side for the PR body projection). No feature bound, no
+ * agentId, or zero matching decisions all yield `[]` — the empty state renders nothing, no
+ * placeholder nagging (DESIGN.md's "Delta bullets above the diff" row).
+ */
+export function deltaBullets(decisions: FeatureDecisionDTO[] | undefined, agentId: string | undefined): DeltaBullet[] {
+  if (!decisions?.length || !agentId) return [];
+  return decisions
+    .filter((d) => d.source === 'model-delta' && d.sourceRef?.agentId === agentId)
+    .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
+    .slice(0, MAX_DELTA_BULLETS)
+    .map((d) => ({ id: d.id, text: d.text, evidence: d.evidence ?? [] }));
+}
+
+/** One evidence anchor parsed into its file (+ optional line range) — `"src/a.ts"` or
+ *  `"src/a.ts:10-20"` (a bare `"src/a.ts:10"` is a single line, `lineEnd === lineStart`). Anything
+ *  that doesn't end in a numeric suffix is treated as a bare file path — a colon-free path is by far
+ *  the common case, and a path that happens to contain a colon but no trailing digits still falls
+ *  back to "whole file" rather than mis-parsing. */
+export function parseEvidenceAnchor(anchor: string): { file: string; lineStart?: number; lineEnd?: number } {
+  const m = /^(.+):(\d+)(?:-(\d+))?$/.exec(anchor);
+  if (!m) return { file: anchor };
+  const lineStart = Number(m[2]);
+  return { file: m[1], lineStart, lineEnd: m[3] !== undefined ? Number(m[3]) : lineStart };
+}
+
+/** The surprise-tap chip's event target: the FIRST evidence anchor's file (DESIGN.md/concern-08:
+ *  `reportAttention({kind:'surprise', repo, file: <first evidence file>, agentId})`). `undefined`
+ *  for a bullet with no evidence — shouldn't happen (see `DeltaBullet.evidence`'s doc) but the caller
+ *  must not fabricate a file to report attention against. */
+export function firstEvidenceFile(evidence: string[]): string | undefined {
+  const first = evidence[0];
+  return first ? parseEvidenceAnchor(first).file : undefined;
 }

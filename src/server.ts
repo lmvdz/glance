@@ -1842,7 +1842,12 @@ export class SquadServer {
 			const now = Date.now();
 			const receipts = await manager.allReceipts();
 			const seen = manager.attentionSeen(repos);
-			const entries = computeFog({ receipts, seen, repos, now });
+			// Concern 08: the "surprised me" chip raises a file's effective change mass without
+			// inflating the raw `changesSinceSeen` count (attention.ts's durable, non-rotating
+			// `SurpriseCountMap` — never the raw JSONL feed, which rotates). Carries no viewer
+			// identity, so it needs no redaction pass unlike `seen` above.
+			const surpriseCounts = manager.attentionSurpriseCounts(repos);
+			const entries = computeFog({ receipts, seen, repos, now, surpriseCounts });
 			const historyByRepo: Record<string, boolean> = {};
 			for (const repo of repos) historyByRepo[repo] = repoHasHistory(seen, repo, now);
 			return Response.json({ entries, repoHasHistory: historyByRepo });

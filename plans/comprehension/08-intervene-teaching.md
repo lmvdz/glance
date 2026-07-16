@@ -1,5 +1,5 @@
 # Intervene teaching surface: delta bullets, surprise tap, deterministic reading order
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
