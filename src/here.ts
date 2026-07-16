@@ -28,6 +28,8 @@ import { openSync } from "node:fs";
 import * as path from "node:path";
 import * as readline from "node:readline";
 import { base, DEFAULT_PORT, parseArgs, readAccessToken, stateDirPath, tokenHeader } from "./cli-args.ts";
+import type { ParsedArgs } from "./cli-args.ts";
+import { hereWebUrl, openInBrowser } from "./here-web.ts";
 import type { AgentDTO, PendingRequest, TranscriptEntry } from "./types.ts";
 
 // ── ANSI (the inline subset of tui.ts's palette — no alt-screen, scrollback stays yours) ────────
@@ -438,9 +440,10 @@ const HERE_HELP = `${dim(`  /stop   interrupt the current turn
 const HERE_USAGE = `${bold(cyan("glance here"))} ${dim("· a casual chat thread attached to the current directory, in this terminal")}
 
 ${bold("Usage")}
-  glance here [--model <id>] [--harness <name>] [--port <n>]
+  glance here [prompt] [--web] [--model <id>] [--harness <name>] [--port <n>]
 
 ${bold("Options")}
+  --web             also open the session in your browser once it's up
   --model <id>      model to run the session on (harness default otherwise)
   --harness <name>  harness to ride (default: ${HERE_HARNESS} — your own claude login/config)
   --port <n>        daemon port to reach (default: ${DEFAULT_PORT})
@@ -457,11 +460,21 @@ registration durable, so it survives ${bold("/exit")}.
 `;
 
 /**
- * `glance here [--model M] [--harness H] [--port N]` — the terminal-attach REPL.
+ * `--web` is a bare boolean flag, but the shared parser treats any flag followed by a bare word
+ * as value-taking — `glance here --web "fix the test"` would silently EAT the prompt as the flag's
+ * value. Pull `--web` out before parsing so the prompt survives. Exported for the unit test.
+ */
+export function parseHereArgs(args: string[]): ParsedArgs & { web: boolean } {
+	const web = args.includes("--web");
+	return { web, ...parseArgs(args.filter((a) => a !== "--web")) };
+}
+
+/**
+ * `glance here [prompt] [--web] [--model M] [--harness H] [--port N]` — the terminal-attach REPL.
  * Session creation is fired immediately and never blocks the prompt (prewarm P1).
  */
 export async function cmdHere(args: string[]): Promise<void> {
-	const { flags, positional } = parseArgs(args);
+	const { web, flags, positional } = parseHereArgs(args);
 	if (flags.help || positional.includes("-h")) {
 		process.stdout.write(HERE_USAGE);
 		return;
@@ -493,10 +506,11 @@ export async function cmdHere(args: string[]): Promise<void> {
 		if (!(await bootDaemon(flags, client, (s) => process.stdout.write(s)))) process.exit(1);
 	}
 
+	// Deep-linked webapp URL for THIS session — printed the moment the agent id exists (the ready
+	// line below); until then it falls back to the bare authenticated base for the exit message.
 	const token = readAccessToken();
-	const url = token ? `${base(flags)}/?token=${token}` : base(flags);
+	let webUrl = token ? `${base(flags)}/?token=${token}` : base(flags);
 	process.stdout.write(`${bold(cyan("◆ glance here"))} ${dim("·")} ${bold(path.basename(repo))}\n`);
-	process.stdout.write(`${dim(`  webapp: ${url}`)}\n`);
 	process.stdout.write(`${dim("  starting a session on your claude login — type now, it sends the moment the session is up")}\n\n`);
 
 	const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: `${cyan("›")} `, historySize: 500 });
@@ -547,7 +561,13 @@ export async function cmdHere(args: string[]): Promise<void> {
 			info = created;
 			session.attach(created.agentId);
 			const t = ((Date.now() - startedAt) / 1000).toFixed(1);
-			printAbove(`${green("●")} ready ${dim(`(${t}s · isolated worktree · ${created.agentId})`)}${session.queuedCount === 0 ? "" : ""}`);
+			webUrl = hereWebUrl(base(flags), token, created.agentId);
+			printAbove(`${green("●")} ready ${dim(`(${t}s · isolated worktree · ${created.agentId})`)}`);
+			printAbove(dim(`  webapp: ${webUrl}`));
+			if (web) {
+				const outcome = openInBrowser(webUrl);
+				printAbove(dim(outcome.opened ? `  opening in your browser (${outcome.via})…` : `  ${outcome.note}`));
+			}
 		})
 		.catch((err) => {
 			printAbove(red(`✗ couldn't start the session: ${msg(err)}`));
@@ -594,7 +614,7 @@ export async function cmdHere(args: string[]): Promise<void> {
 		const finish = async (): Promise<void> => {
 			if (info?.ephemeral) await client.release(info.repo).catch(() => {});
 			if (info && code === 0) {
-				process.stdout.write(`\n${dim("left the terminal — the session stays live in the webapp:")}\n${dim(`  ${url}`)}\n`);
+				process.stdout.write(`\n${dim("left the terminal — the session stays live in the webapp:")}\n${dim(`  ${webUrl}`)}\n`);
 			}
 			process.exit(code);
 		};
