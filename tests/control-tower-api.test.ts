@@ -89,6 +89,87 @@ test("usage/heat/activity aggregate the PERSISTED receipt ledger, not just live-
 	expect(activity.total).toBe(2); // two files touched
 });
 
+test("/api/heat: same-named files across different repos never collapse into one heat array (comprehension concern 04)", async () => {
+	// Regression for a pre-existing bug: heatPayload's byFile map was keyed by the bare file path, so
+	// an unfiltered (no `?repo=`) read that spans more than one repo — a normal file-mode operator with
+	// two registered projects, or a bootstrap-admin's cross-org break-glass view — silently SUMMED two
+	// unrelated files' touch counts into one tree node just because they shared a path, e.g. "src/index.ts"
+	// in repo A and repo B. Fixed by keying `${normalizeRepoPath(repo)}\0${file}`, the same join
+	// convention comprehension-fog.ts's `fogKey` uses.
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "ct-api-state-"));
+	const repoA = path.join(os.tmpdir(), "collide-repo-a");
+	const repoB = path.join(os.tmpdir(), "collide-repo-b");
+	const now = Date.now();
+	await appendReceipt(stateDir, {
+		agentId: "a1",
+		name: "a1",
+		repo: repoA,
+		runId: "ra1",
+		startedAt: now - 1000,
+		endedAt: now,
+		status: "stopped",
+		toolCalls: 3,
+		toolTally: { edit: 3 },
+		filesTouched: ["src/index.ts"],
+		harness: "omp",
+	});
+	await appendReceipt(stateDir, {
+		agentId: "b1",
+		name: "b1",
+		repo: repoB,
+		runId: "rb1",
+		startedAt: now - 1000,
+		endedAt: now,
+		status: "stopped",
+		toolCalls: 5,
+		toolTally: { edit: 5 },
+		filesTouched: ["src/index.ts"],
+		harness: "omp",
+	});
+
+	const url = await serverOn(stateDir);
+	const heat = await fetch(`${url}/api/heat?days=3`).then((r) => r.json());
+
+	const nodes = heat.tree.filter((n: { id: string }) => n.id === "src/index.ts");
+	expect(nodes).toHaveLength(2); // NOT collapsed into a single node
+	const byRepo = new Map(nodes.map((n: { repo: string; heat: number[] }) => [n.repo, n.heat]));
+	const repoATotal = (byRepo.get(repoA) as number[]).reduce((a, b) => a + b, 0);
+	const repoBTotal = (byRepo.get(repoB) as number[]).reduce((a, b) => a + b, 0);
+	expect(repoATotal).toBe(1); // one receipt touched it once, not summed with repo B's
+	expect(repoBTotal).toBe(1);
+
+	const hotAreaRepos = heat.hotAreas.filter((h: { path: string }) => h.path === "src/index.ts").map((h: { repo: string }) => h.repo);
+	expect(hotAreaRepos.sort()).toEqual([repoA, repoB].sort());
+});
+
+test("/api/heat: repo filter matches an equivalent-but-differently-formed path (normalizeRepoPath equality)", async () => {
+	// Regression for a pre-existing bug: heatPayload's repo filter used raw `r.repo === repo`, so a
+	// receipt stored with a trailing slash never matched a `?repo=` query for the canonical (slash-
+	// stripped) form of the same repo — the exact bug class the fabric leak incident was fixed for,
+	// in this endpoint specifically.
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "ct-api-state-"));
+	const canonical = path.join(os.tmpdir(), "norm-repo");
+	const stored = `${canonical}/`; // trailing slash — same repo, different literal form
+	const now = Date.now();
+	await appendReceipt(stateDir, {
+		agentId: "n1",
+		name: "n1",
+		repo: stored,
+		runId: "rn1",
+		startedAt: now - 1000,
+		endedAt: now,
+		status: "stopped",
+		toolCalls: 1,
+		toolTally: { edit: 1 },
+		filesTouched: ["src/normalized.ts"],
+		harness: "omp",
+	});
+
+	const url = await serverOn(stateDir);
+	const heat = await fetch(`${url}/api/heat?days=3&repo=${encodeURIComponent(canonical)}`).then((r) => r.json());
+	expect(heat.tree.map((n: { id: string }) => n.id)).toContain("src/normalized.ts");
+});
+
 test("/api/automation exposes the background-loop activity shape and accepts its query params", async () => {
 	const url = await server();
 	const a = await fetch(`${url}/api/automation`).then((r) => r.json());

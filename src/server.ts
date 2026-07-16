@@ -3231,14 +3231,20 @@ async function usagePayload(managers: SquadManager[], url: URL): Promise<{
 
 async function heatPayload(managers: SquadManager[], url: URL): Promise<{
 	days: string[];
-	tree: { id: string; name: string; type: "file"; depth: number; heat: number[] }[];
-	hotAreas: { path: string; heat: number }[];
+	tree: { id: string; name: string; type: "file"; depth: number; heat: number[]; repo: string }[];
+	hotAreas: { path: string; heat: number; repo: string }[];
 	insights: string[];
 	source: string;
 	generatedAt: number;
 }> {
 	const count = boundedNumber(url.searchParams.get("days"), 8, 1, 31);
-	const repo = url.searchParams.get("repo") ?? undefined;
+	const repoParam = url.searchParams.get("repo") ?? undefined;
+	// Repo-normalize equality (comprehension concern 04, batch-3 review): the raw `r.repo === repo`
+	// compare missed a repo whose STORED receipts and the query's `?repo=` value are the same repo
+	// in an equivalent-but-differently-formed path (trailing slash, `~/`-form vs its expanded
+	// absolute form) — same bug class as the fabric leak incident, in the exact endpoint the
+	// concern-04 fog overlay extends. Same discipline every other repo-scoped GET in this file uses.
+	const repoNorm = repoParam ? normalizeRepoPath(repoParam) : undefined;
 	const end = new Date();
 	const days = Array.from({ length: count }, (_, i) => {
 		const d = new Date(end);
@@ -3248,26 +3254,40 @@ async function heatPayload(managers: SquadManager[], url: URL): Promise<{
 	const indexByDay = new Map(days.map((d, i) => [d, i]));
 	// Persisted ledger, not the live roster (see usagePayload) — otherwise reaped agents and post-restart
 	// history vanish and the panel falsely reads "No receipt-backed file writes in this window".
-	const receipts = (await allReceiptsAcross(managers)).filter((r) => !repo || r.repo === repo);
-	const byFile = new Map<string, number[]>();
+	const receipts = (await allReceiptsAcross(managers)).filter((r) => !repoNorm || normalizeRepoPath(r.repo) === repoNorm);
+	// Repo-keyed aggregation (comprehension concern 04, batch-3 review): bare `file` keys collapsed
+	// same-named files across different repos into ONE heat array whenever this response spans more
+	// than one repo — an unfiltered fleet-wide read (no `?repo=`), or a bootstrap-admin's cross-org
+	// break-glass view (see observability-bootstrap-admin.test.ts). Key by
+	// `${normalizeRepoPath(repo)}\0${file}`, the SAME join convention `comprehension-fog.ts`'s
+	// `fogKey` and `attention.ts`'s `seenKey` already use, so a same-named file in a different repo
+	// never shares a heat array with this one. `repo` (the RAW, unnormalized receipt repo — the same
+	// representation `computeFog`'s `FileFogEntry.repo` exposes) is carried on every tree/hotArea
+	// entry so the concern-04 fog overlay can join heat nodes back to `/api/fog` entries without
+	// re-deriving its own repo convention.
+	const byFile = new Map<string, { repo: string; file: string; heat: number[] }>();
 	for (const r of receipts) {
 		const day = new Date(r.endedAt ?? r.startedAt).toISOString().slice(0, 10);
 		const idx = indexByDay.get(day);
 		if (idx === undefined) continue;
 		for (const file of r.filesTouched) {
-			const heat = byFile.get(file) ?? Array(count).fill(0);
-			heat[idx] += 1;
-			byFile.set(file, heat);
+			const key = `${normalizeRepoPath(r.repo)}\0${file}`;
+			const entry = byFile.get(key) ?? { repo: r.repo, file, heat: Array(count).fill(0) };
+			entry.heat[idx] += 1;
+			byFile.set(key, entry);
 		}
 	}
-	const tree = [...byFile.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([id, heat]) => ({
-		id,
-		name: path.basename(id),
-		type: "file" as const,
-		depth: Math.max(0, id.split(/[\\/]/).length - 1),
-		heat,
-	}));
-	const hotAreas = tree.map((n) => ({ path: n.id, heat: n.heat.reduce((a, b) => a + b, 0) })).filter((n) => n.heat > 0).sort((a, b) => b.heat - a.heat).slice(0, 8);
+	const tree = [...byFile.values()]
+		.sort((a, b) => a.file.localeCompare(b.file) || a.repo.localeCompare(b.repo))
+		.map((entry) => ({
+			id: entry.file,
+			name: path.basename(entry.file),
+			type: "file" as const,
+			depth: Math.max(0, entry.file.split(/[\\/]/).length - 1),
+			heat: entry.heat,
+			repo: entry.repo,
+		}));
+	const hotAreas = tree.map((n) => ({ path: n.id, heat: n.heat.reduce((a, b) => a + b, 0), repo: n.repo })).filter((n) => n.heat > 0).sort((a, b) => b.heat - a.heat).slice(0, 8);
 	return {
 		days,
 		tree,
