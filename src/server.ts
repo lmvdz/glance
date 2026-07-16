@@ -2462,8 +2462,12 @@ export class SquadServer {
 				// let any tenant point turn-writes at a daemon-readable host directory. Degradation, not
 				// regression: the session still runs; its edits stay worktree-only (diff/promote path).
 				const dto = await manager.create({ repo, name: "chat", model, profileId, harness, autoRoute: false, appendSystemPrompt: CONSOLE_SYSTEM_PROMPT, realTreePath: body.ephemeral === true && !this.dbMode ? repo : undefined }, actor);
-				const reattach = reattachOf ? manager.reattachDeadSession(dto.id, reattachOf) : undefined;
-				return Response.json({ agentId: dto.id, repo, ephemeral, priorContext: reattach?.priorContext });			} catch (err) {
+				// Awaited (C2): reattachDeadSession also re-keys the predecessor's held boundary-syncs
+				// onto this new id when the realDir matches — the response should reflect that recovery
+				// immediately (the client's very next GET /api/agents/:id already sees it), not eventually.
+				const reattach = reattachOf ? await manager.reattachDeadSession(dto.id, reattachOf) : undefined;
+				return Response.json({ agentId: dto.id, repo, ephemeral, priorContext: reattach?.priorContext });
+			} catch (err) {
 				// A failed spawn must not leave a half-session behind: undo the registration this very
 				// request created (no-op when the repo was already durably registered).
 				if (ephemeral) manager.releaseEphemeralProject(repo);
@@ -2493,7 +2497,11 @@ export class SquadServer {
 			if (Result.isFailure(tapDecoded)) return new Response("agentId required", { status: 400 });
 			const sourceKey = `${actor.id}:${server.requestIP(req)?.address ?? "unknown"}`;
 			const tapResult = manager.recordPushTap(tapDecoded.success.agentId, sourceKey);
-			if (!tapResult.ok) return new Response(tapResult.reason ?? "rejected", { status: 400 });
+			if (!tapResult.ok) {
+				// S2: a rate-limited tap is NOT a malformed/unknown-id request — 429, not the generic 400
+				// the shape/existence guards return, so a client can tell "back off" from "this was wrong".
+				return new Response(tapResult.reason ?? "rejected", { status: tapResult.reason === "rate-limited" ? 429 : 400 });
+			}
 			return Response.json({ ok: true });
 		}
 		// Feature 2 D2 (CANVAS-AND-PAGE-CHAT.md): a pasted/dropped/captured/annotated chat image
@@ -2636,6 +2644,15 @@ export class SquadServer {
 				patchId = pid as string | undefined;
 			}
 			return Response.json(await manager.discardHeldSync(id, patchId, actor));
+		}
+		// C2: held boundary-sync patches whose owning agent isn't in the roster at all — a `here`
+		// session that hasn't reattached this tenure. Repo-scoped, not id-scoped: the operator recovers
+		// these by running `glance here` again on the SAME checkout with a restart reattach (that
+		// re-keys any hold whose realDir matches — see rekeyHeldSyncsOnReattach). Read-only, viewer-tier
+		// like the other GETs in this family; the patch file paths are already exposed at that tier via
+		// the ordinary held-sync attention detail text.
+		if (url.pathname === "/api/boundary-sync/orphaned" && req.method === "GET") {
+			return Response.json(await manager.orphanedBoundarySyncs());
 		}
 		const mverify = url.pathname.match(/^\/api\/agents\/([^/]+)\/verify$/);
 		if (mverify && req.method === "POST") {
@@ -2889,13 +2906,18 @@ export class SquadServer {
 
 	/** DB-registry twin of `maybePushAlert`: same payload rules (escalation + voice-done), same
 	 *  debounce discipline, same canonical `{type:"transition"}` event source, but keyed entirely to
-	 *  ONE org's own alert state, manager, and push service. Seeding stays lazy — the first event for
-	 *  the org (any type) marks that org's boot hydration and is consumed as the boundary, alerting
-	 *  never: that is the same "the event that materializes the state never alerts" invariant the
-	 *  retired per-org `lastStatus` snapshot used to provide by construction (the old seed read the
-	 *  post-change roster, so the seeding event's own diff always read prev === status). A transition
-	 *  event carries the real pre-change `from`, so the boundary consumption here is deliberate, not
-	 *  incidental (daily-attention-w0 concern 02, the same boot-flood trap as the file-mode lane). */
+	 *  ONE org's own alert state, manager, and push service. Seeding mirrors file mode's `pushSeeded`
+	 *  EXACTLY (S4, blind review): `ManagerRegistry.create` fires one synthetic `{type:"roster"}` event
+	 *  through `onEvent` right after a fresh org manager finishes hydrating — that explicit marker,
+	 *  and ONLY that marker, is the seed boundary. The old fallback ("no roster event yet? seed off
+	 *  whatever event happens to arrive first, as long as the org manager is reachable") was wrong: the
+	 *  very first live event for an org is often the reachability check itself succeeding on a REAL
+	 *  transition — an input/error/completion edge that had every right to alert — and that fallback
+	 *  silently consumed it as "the" boundary instead of evaluating it, losing exactly the escalation
+	 *  the operator needed. Any event arriving before the hydration marker (a manager's own boot-replay
+	 *  transitions, emitted synchronously inside `manager.start()` before `ManagerRegistry.create` can
+	 *  fire the marker) is still correctly swallowed by `!state.seeded` below — that boot-quiet
+	 *  invariant is unchanged, it just no longer doubles as an accidental seed. */
 	private maybePushAlertOrg(orgId: string, e: SquadEvent): void {
 		if (!this.registry || !this.opts.pushRoot) return;
 		let state = this.orgAlertState.get(orgId);
@@ -2907,12 +2929,7 @@ export class SquadServer {
 			state.seeded = true;
 			return;
 		}
-		if (!state.seeded) {
-			// Lazy seed boundary: hydration is done once the org's manager is reachable. The event that
-			// flips the flag is itself boot replay — swallow it (see the doc comment above).
-			if (this.orgManager(orgId)) state.seeded = true;
-			return;
-		}
+		if (!state.seeded) return; // pre-hydration boot replay — never alert on it
 		if (e.type !== "transition" || e.entry.denied) return;
 		const entry = e.entry;
 		const a = this.orgManager(orgId)?.getAgent(entry.agentId);

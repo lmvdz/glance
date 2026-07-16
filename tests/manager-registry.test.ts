@@ -157,3 +157,20 @@ test("get after evict returns a fresh instance", async () => {
 
 	await reg.stopAll();
 });
+
+test("create fires a synthetic {type:'roster'} event through onEvent right after hydration — the S4 hydration-seed boundary the per-org push lane (SquadServer.maybePushAlertOrg) relies on", async () => {
+	const deps: RegistryDeps = { root: tmpRoot, store: (orgId) => new FileStore(path.join(tmpRoot, "orgs", orgId)), operator };
+	const reg = new ManagerRegistry(deps);
+	const events: Array<{ orgId: string; e: SquadEvent }> = [];
+	reg.onEvent = (orgId, e) => events.push({ orgId, e });
+
+	await reg.get("orgHydrate");
+
+	// Exactly one roster-typed event, fired for the org that just hydrated, AFTER get() resolved (so
+	// the manager was fully started — any of its own boot-replay events, if it had persisted state,
+	// would already be in `events` ahead of this one, in call order).
+	const rosterEvents = events.filter((x) => x.orgId === "orgHydrate" && x.e.type === "roster");
+	expect(rosterEvents).toHaveLength(1);
+
+	await reg.stopAll();
+});

@@ -202,7 +202,7 @@ test("reattachDeadSession stitches the successor: visible system marker + prior-
 	cleanups.push(() => mgr.stop());
 
 	seedConsoleAgent(mgr, "chat-new", "/srv/r");
-	const out = mgr.reattachDeadSession("chat-new", "chat-old");
+	const out = await mgr.reattachDeadSession("chat-new", "chat-old");
 	expect(out).toBeDefined();
 	expect(out?.priorContext).toContain("user: remember the plan");
 	expect(out?.priorContext).toContain("assistant: noted");
@@ -213,12 +213,12 @@ test("reattachDeadSession stitches the successor: visible system marker + prior-
 
 	// Lapsed/never-existed predecessor ⇒ honest "no prior context", not a fabricated resume.
 	seedConsoleAgent(mgr, "chat-new2", "/srv/r");
-	const out2 = mgr.reattachDeadSession("chat-new2", "no-such-id");
+	const out2 = await mgr.reattachDeadSession("chat-new2", "no-such-id");
 	expect(out2?.priorContext).toBeUndefined();
 	expect(mgr.getTranscript("chat-new2").find((e) => e.kind === "system")?.text).toContain("no prior context could be recovered");
 
 	// Unknown successor id ⇒ undefined (the route then simply returns no priorContext).
-	expect(mgr.reattachDeadSession("nope", "chat-old")).toBeUndefined();
+	expect(await mgr.reattachDeadSession("nope", "chat-old")).toBeUndefined();
 });
 
 test("an operator prompt persists the transcript durably — a daemon KILL right after never loses the newest turn", async () => {

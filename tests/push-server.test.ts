@@ -714,11 +714,13 @@ test("POST /api/push-tap drops taps past the burst floor from one source, withou
 		const res = await fetch(`${url}/api/push-tap`, { method: "POST", body: JSON.stringify({ agentId: rec.dto.id }) });
 		expect(res.status).toBe(200);
 	}
-	// The 11th is rate-limited: the route must still answer 200 (a rate-limit hit is dropped quietly,
-	// never surfaced as a caller-visible error — the id may be perfectly genuine, just too frequent),
-	// but it must NOT be counted.
+	// The 11th is rate-limited: the id may be perfectly genuine, just too frequent from this source, so
+	// it is dropped quietly server-side (a warn log, not a caller-visible shape/existence error) — but
+	// the route must be honest that it did NOT count (S2, blind review: this used to answer 200/ok:true
+	// here, indistinguishable from a landed tap — a wrong instruction from an earlier pass). 429, not 200.
 	const eleventh = await fetch(`${url}/api/push-tap`, { method: "POST", body: JSON.stringify({ agentId: rec.dto.id }) });
-	expect(eleventh.status).toBe(200);
+	expect(eleventh.status).toBe(429);
+	expect(await eleventh.text()).toBe("rate-limited");
 
 	// Read the manager's own in-memory ring directly rather than `adoptionCounters()` — its (ts,
 	// agentId) merge-dedupe (file ∪ live source overlap) is a false positive here: 11 rapid-fire taps

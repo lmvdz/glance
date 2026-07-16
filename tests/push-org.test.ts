@@ -32,6 +32,13 @@ interface OrgPushHost {
 	orgPush: Map<string, Promise<PushService>>;
 }
 
+/** The explicit hydration-seed boundary (S4 fix): `ManagerRegistry.create` fires exactly this,
+ *  through `onEvent`, right after an org's manager finishes hydrating — mirrors file mode's own
+ *  `{type:"roster"}` seed exactly. Tests drive it directly since these fakes bypass the real registry. */
+function orgHydrated(): SquadEvent {
+	return { type: "roster", agents: [], version: "" };
+}
+
 /** A fake per-org manager with a mutable roster: tests mutate `agents[id]` to the post-transition
  *  DTO before emitting the corresponding transition event — the same dto-is-current-at-emit-time
  *  contract the real recordTransition() guarantees. */
@@ -67,7 +74,7 @@ test("org isolation: an armed completion in org A notifies ONLY org A's service 
 	host.orgPush.set("A", Promise.resolve(fakePush(sentA)));
 	host.orgPush.set("B", Promise.resolve(fakePush(sentB)));
 
-	host.maybePushAlertOrg("A", transitionEvent("a1", "idle", "working")); // lazy-seed boundary for A — never alerts
+	host.maybePushAlertOrg("A", orgHydrated()); // explicit hydration-seed boundary for A — never alerts
 	agentsA.a1 = agent("idle", { id: "a1", completionPushArmed: true, completionPushKind: "voice" });
 	host.maybePushAlertOrg("A", transitionEvent("a1", "working", "idle"));
 	await new Promise((r) => setTimeout(r, 10)); // notify rides pushForOrg's promise
@@ -88,7 +95,7 @@ test("escalations ride the per-org lane too (DB mode gets input/error pushes for
 	host.orgPush.set("A", Promise.resolve(fakePush(sentA)));
 	host.orgPush.set("B", Promise.resolve(fakePush(sentB)));
 
-	host.maybePushAlertOrg("A", transitionEvent("a1", "idle", "working")); // seed boundary
+	host.maybePushAlertOrg("A", orgHydrated()); // explicit hydration-seed boundary
 	agentsA.a1 = agent("input", { id: "a1", pending: [{ id: "p", title: "which db?", kind: "question" }] as AgentDTO["pending"] });
 	host.maybePushAlertOrg("A", transitionEvent("a1", "working", "input"));
 	await new Promise((r) => setTimeout(r, 10));
@@ -98,27 +105,51 @@ test("escalations ride the per-org lane too (DB mode gets input/error pushes for
 	expect(sentB).toHaveLength(0);
 });
 
-test("lazy seeding: the event that materializes an org's alert state never alerts, even a reattach transition with from !== to (boot-replay discipline)", async () => {
+test("boot-replay events arriving BEFORE the org's hydration marker never alert (a manager's own start() can emit transitions before ManagerRegistry.create fires the marker)", async () => {
 	const agentsA: Record<string, AgentDTO> = { a1: agent("input", { id: "a1" }) };
 	const { host } = await makeOrgServer({ A: fakeMgr(agentsA) });
 	const sentA: PushPayload[] = [];
 	host.orgPush.set("A", Promise.resolve(fakePush(sentA)));
 
-	// First-ever event arrives as a boot-replay reattach transition whose derived status DIFFERS from
-	// the persisted one (agent comes back ALREADY in input — e.g. tenant manager spun up mid-question).
-	// The old lastStatus snapshot suppressed this by accident (seed read the post-change roster); the
-	// boundary consumption must suppress it deliberately — no bulk alert on replay.
+	// A boot-replay reattach transition whose derived status DIFFERS from the persisted one (agent
+	// comes back ALREADY in input — e.g. tenant manager spun up mid-question), arriving pre-hydration.
+	// Pre-S4 this used to be the very thing that FLIPPED the seed flag (any event, as long as the org
+	// manager was reachable) — now it is unconditionally swallowed by `!state.seeded` instead, since
+	// only the explicit roster marker seeds.
 	host.maybePushAlertOrg("A", transitionEvent("a1", "working", "input", { reason: "reattach" }));
 	await new Promise((r) => setTimeout(r, 10));
 	expect(sentA).toHaveLength(0);
 
-	// A REAL later transition still fires.
-	agentsA.a1 = agent("working", { id: "a1" });
-	host.maybePushAlertOrg("A", transitionEvent("a1", "input", "working")); // calm — no alert
+	// The explicit hydration marker itself never alerts either.
+	host.maybePushAlertOrg("A", orgHydrated());
+	expect(sentA).toHaveLength(0);
+
+	// A REAL transition AFTER hydration still fires.
 	agentsA.a1 = agent("error", { id: "a1", error: "boom" });
 	host.maybePushAlertOrg("A", transitionEvent("a1", "working", "error", { reason: "fail" }));
 	await new Promise((r) => setTimeout(r, 10));
 	expect(sentA).toHaveLength(1);
+});
+
+test("S4 (blind review): the FIRST event after org hydration is a real input transition — it must fire, not be consumed as a second seed boundary", async () => {
+	const agentsA: Record<string, AgentDTO> = { a1: agent("working", { id: "a1" }) };
+	const { host } = await makeOrgServer({ A: fakeMgr(agentsA) });
+	const sentA: PushPayload[] = [];
+	host.orgPush.set("A", Promise.resolve(fakePush(sentA)));
+
+	// The explicit hydration marker — the ONLY thing that may seed.
+	host.maybePushAlertOrg("A", orgHydrated());
+	expect(sentA).toHaveLength(0);
+
+	// The very first event after hydration is a genuine escalation. The old fallback ("seed off
+	// whatever arrives first, as long as the org manager is reachable") would have swallowed exactly
+	// this as "the" boundary — losing it. It must fire.
+	agentsA.a1 = agent("input", { id: "a1", pending: [{ id: "p", title: "which db?", kind: "question" }] as AgentDTO["pending"] });
+	host.maybePushAlertOrg("A", transitionEvent("a1", "working", "input"));
+	await new Promise((r) => setTimeout(r, 10));
+
+	expect(sentA).toHaveLength(1);
+	expect(sentA[0]!.tag).toBe("a1");
 });
 
 test("no registry / no pushRoot -> the per-org lane is inert (file mode keeps the single global service)", async () => {

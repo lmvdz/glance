@@ -137,8 +137,12 @@ export interface AttentionEvent {
 	source: "notify" | "tool" | "harness" | "boundary-sync";
 	/** boundary-sync rows only: "held" = durable patch(es) are waiting (Apply/Discard resolve it);
 	 *  "uncapturable" = the turn's delta could not even be captured, so NOTHING is held — the webapp
-	 *  must offer View (the worktree diff), never Apply, and never claim a patch is waiting. */
-	sync?: "held" | "uncapturable";
+	 *  must offer View (the worktree diff), never Apply, and never claim a patch is waiting;
+	 *  "divergence" = a turn's patch WAS written, but a post-apply check (C1) found one or more
+	 *  patch-touched paths don't hold what the patch alone should have produced — a pre-write capture
+	 *  is retained on disk (named in `detail`) for manual recovery; the webapp must never offer Apply
+	 *  or Discard here (nothing is pending), only surface the row and the capture path. */
+	sync?: "held" | "uncapturable" | "divergence";
 	createdAt: number;
 }
 

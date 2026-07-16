@@ -128,6 +128,14 @@ export class ManagerRegistry {
 		manager.on("event", listener);
 		await manager.start();
 		this.managers.set(orgId, { manager, listener, lastUsed: Date.now() });
+		// S4 (blind review, daily-attention-w0 02): the explicit hydration-seed boundary the per-org
+		// push lane needs (SquadServer.maybePushAlertOrg) — mirrors file mode's own `{type:"roster"}`
+		// seed exactly. Fired ONCE, right here, after this org's manager has fully finished its own
+		// boot replay (any transition events `manager.start()` emitted synchronously above already
+		// reached `onEvent` first and are correctly swallowed there as pre-seed noise). Without this,
+		// the push lane had no reliable signal for "this org just hydrated" other than guessing off
+		// whatever event happened to arrive first — which could be, and was, a real escalation.
+		this.onEvent(orgId, { type: "roster", agents: manager.list(), version: "" });
 		return manager;
 	}
 
