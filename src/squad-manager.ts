@@ -43,6 +43,8 @@ import { type Answer, answerBrief, listAnswers, readAnswer, saveAnswer } from ".
 import { errText } from "./err-text.ts";
 import { isConsolePrompt, stripConsolePrompt } from "./console-prompt.ts";
 import { openRemovedLedger, type RemovedLedger } from "./removed-ledger.ts";
+import { buildDeadPlaceholder, composePriorContext, DEAD_PLACEHOLDER_TTL_MS, type DeadSessionPlaceholder, reattachMarker } from "./reattach-context.ts";
+import { reapAcpOrphanChain } from "./acp-orphan-reaper.ts";
 import { normalizeRepoPath, openProjectRegistry, readEphemeralProjects, writeEphemeralProjects, type ProjectRegistry } from "./project-registry.ts";
 import { Orchestrator } from "./orchestrator.ts";
 import { Observer, type Finding } from "./observer.ts";
@@ -768,6 +770,12 @@ export class SquadManager extends EventEmitter {
 	/** Resumable checkpointed records dropped by the adoption ceiling this boot — kept (not erased) so
 	 *  persistNow folds them back into the snapshot for a later restart to re-attempt (D1 loss fix). */
 	private deferred: PersistedAgent[] = [];
+	/** Dead-session honesty (daily-onramp 04): non-resumable sessions the boot paths skipped, keyed by
+	 *  their old id, so `GET /api/agents/:id` and the transcript route answer truthfully for a bounded
+	 *  window after a restart instead of a bare miss that looks identical to "id never existed".
+	 *  In-memory only — the window is bounded by TTL, this process's lifetime, and the first post-boot
+	 *  persist (which drops the dead record from state.json). */
+	private readonly deadPlaceholders = new Map<string, DeadSessionPlaceholder>();
 	/** Source runIds with a fork() call currently past the guards and not yet resolved — claimed
 	 *  synchronously before the first `await` in fork() (readCheckpoints) and released in a `finally`, so
 	 *  two concurrent fork() calls for the same source (double-click, webapp+TUI, a federated peer) can't
@@ -1014,6 +1022,9 @@ export class SquadManager extends EventEmitter {
 			if (!this.skipGlobalJanitors) await this.reapOrphans();
 			await this.adoptOrphanedAgents(snapshot);
 			this.reconcileForkLineage();
+			// Dead-session honesty (daily-onramp 04): every persisted non-resumable session the paths
+			// above (correctly) declined to bring back leaves a placeholder, never a silent vanish.
+			this.recordNonResumableSkips(snapshot);
 		}
 		// AFTER roster restore (needs the surviving agents to tell live `glance here` sessions from dead
 		// ones) and outside the snapshot guard: a fresh-state boot with leftover markers means every
@@ -1982,7 +1993,12 @@ export class SquadManager extends EventEmitter {
 	}
 
 	getTranscript(id: string): TranscriptEntry[] {
-		return this.agents.get(id)?.transcript ?? [];
+		const rec = this.agents.get(id);
+		if (rec) return rec.transcript;
+		// Dead-session honesty (daily-onramp 04): a session a restart killed still answers with its
+		// persisted transcript for the placeholder window — the honest re-attach reads its tail from
+		// here — instead of a bare [] that reads as "id never existed".
+		return this.deadPlaceholder(id)?.transcript ?? [];
 	}
 
 	/** Transcript delta (`seq > since`) — what a polling client (the cockpit conversation pane,
@@ -1993,6 +2009,90 @@ export class SquadManager extends EventEmitter {
 
 	getAgent(id: string): AgentDTO | undefined {
 		return this.agents.get(id)?.dto;
+	}
+
+	// ── Restart re-attach: dead-session placeholders (daily-onramp 04) ──────────────────────────────
+
+	/** The dead-session placeholder for `id`, while its bounded window still holds. Expiry is checked
+	 *  on read (cheap; no timer to leak) — a lapsed placeholder is deleted and reads as a clean miss,
+	 *  which the `here` REPL treats as the honest "did not survive, prior context unavailable" case. */
+	deadPlaceholder(id: string): DeadSessionPlaceholder | undefined {
+		const ph = this.deadPlaceholders.get(id);
+		if (!ph) return undefined;
+		if (Date.now() - ph.at > DEAD_PLACEHOLDER_TTL_MS) {
+			this.deadPlaceholders.delete(id);
+			return undefined;
+		}
+		return ph;
+	}
+
+	/** Record the honest terminal placeholder for a persisted agent a boot path skipped as
+	 *  non-resumable. Idempotent — the start() sweep and the `--restore` skip branch may both see the
+	 *  same record. buildDeadPlaceholder is total: a corrupt persisted transcript degrades to an empty
+	 *  tail with the failure named in deadReason (fail-closed honesty), never a throw out of boot. */
+	private recordDeadPlaceholder(p: PersistedAgent, transcript: unknown): void {
+		if (this.deadPlaceholders.has(p.id)) return;
+		const ph = buildDeadPlaceholder(p, transcript);
+		this.deadPlaceholders.set(p.id, ph);
+		this.log("info", `dead placeholder recorded for ${p.name} (${p.id}) — ${ph.deadReason}`);
+		// The dead session's adapter chain may still be running: a daemon KILL orphans the direct ACP
+		// child (npx → claude-code-acp reparents to init and idles forever — its stdio transport died
+		// with the old daemon process, so REUSE is impossible by construction). Reap it by the pid
+		// persisted at spawn, identity-checked against /proc before any signal — a recycled pid or a
+		// sibling daemon's adapter is never touched (see acp-orphan-reaper.ts). Fire-and-forget: boot
+		// never blocks on it, and a skipped kill is logged, never silent.
+		if (p.acpPid !== undefined && p.acpCmd?.length) {
+			void reapAcpOrphanChain(p.acpPid, p.acpCmd, (line) => this.log("info", line))
+				.then((termed) => {
+					if (termed.length) this.log("info", `reaped orphaned ACP adapter chain of ${p.id}: pid(s) ${termed.join(", ")}`);
+				})
+				.catch((err) => this.log("warn", `acp orphan reap for ${p.id} failed: ${String(err)}`));
+		}
+	}
+
+	/** After a successful driver start: persist the ACP adapter child's pid + argv fingerprint on the
+	 *  record, so the NEXT boot's dead-session sweep can reap the orphaned chain a daemon kill leaves
+	 *  behind (recordDeadPlaceholder above). Duck-typed on `spawnedCommand` — only AcpAgentDriver
+	 *  exposes it, so omp/pi/sandbox/flue/workflow records are never stamped. */
+	private stampAcpAdapter(rec: AgentRecord): void {
+		const d = rec.agent as Partial<{ pid: number; spawnedCommand: string[] }>;
+		if (typeof d.pid !== "number" || !Array.isArray(d.spawnedCommand)) return;
+		rec.options.acpPid = d.pid;
+		rec.options.acpCmd = d.spawnedCommand;
+		void this.persist();
+	}
+
+	/** start() epilogue over the boot snapshot: any persisted agent that is (a) not back in the roster
+	 *  (reconnectLive/adoptOrphanedAgents declined it), (b) not explicitly removed (a tombstone is a
+	 *  choice, not a death-by-restart), and (c) non-resumable — i.e. exactly the records the concern-07
+	 *  skips silently dropped — leaves a placeholder. Resumable records are untouched: the existing
+	 *  restore paths already own them, with zero changes from this concern. */
+	private recordNonResumableSkips(snapshot: StateSnapshot): void {
+		for (const p of snapshot.agents) {
+			if (this.agents.has(p.id)) continue;
+			if (this.removedLedger.has(p.id)) continue;
+			if (this.harnessResumable(p)) continue;
+			this.recordDeadPlaceholder(p, snapshot.transcripts[p.id]);
+		}
+	}
+
+	/** A fresh console session created as the successor of a dead (non-resumable) one — the `here`
+	 *  REPL's re-attach path, via POST /api/console { reattachOf }. Appends the unmissable restart
+	 *  marker to the NEW session's transcript (the CLI REPL and the webapp transcript view both render
+	 *  system entries), stitches lineage under the same "adopted" reason the cold-adopt path records,
+	 *  and returns the prior transcript tail composed as a prompt-ready context block. The context is
+	 *  RETURNED, never auto-sent — the client folds it into the operator's own first prompt (the
+	 *  decoratePrompt feed-forward precedent; no silent spend). */
+	reattachDeadSession(newId: string, priorId: string): { marker: string; priorContext?: string } | undefined {
+		const rec = this.agents.get(newId);
+		if (!rec) return undefined;
+		const ph = this.deadPlaceholder(priorId);
+		const priorContext = ph ? composePriorContext(ph.transcript) : undefined;
+		const marker = reattachMarker(priorId, ph?.harness ?? rec.options.harness ?? "unknown", priorContext !== undefined);
+		this.append(rec, "system", marker);
+		this.transition(rec, rec.dto.status, "adopted", { priorId });
+		this.emitAgent(rec);
+		return { marker, priorContext };
 	}
 
 	/** Merge order (base → override): repo catalog (`.glance/profiles.json`, sanitized — see
@@ -5005,6 +5105,7 @@ export class SquadManager extends EventEmitter {
 		try {
 			await agent.start();
 			started = true;
+			this.stampAcpAdapter(rec);
 			this.transition(rec, "idle", "connect-ok");
 			if (agent.setSessionName) await agent.setSessionName(`squad:${name}`).catch(() => {});
 			this.emitAgent(rec);
@@ -5438,6 +5539,7 @@ export class SquadManager extends EventEmitter {
 		this.transition(rec, "starting", "connect-begin"); // explicit-class: legal from stopped/error
 		this.emitAgent(rec);
 		await rec.agent.start();
+		this.stampAcpAdapter(rec); // a re-start spawned a FRESH adapter child — the persisted pid must follow it
 		if (rec.agent.setSessionName) await rec.agent.setSessionName(`squad:${rec.dto.name}`).catch(() => {});
 		this.transition(rec, "idle", "connect-ok");
 		this.emitAgent(rec);
@@ -5591,6 +5693,12 @@ export class SquadManager extends EventEmitter {
 				// agent actually received. `displayText` (when the client sent one) is the user's bare
 				// typed text; the UI renders that and falls back to `text` for older clients.
 				this.append(rec, "user", cmd.message, { clientTurnId: cmd.clientTurnId, displayText: cmd.displayText });
+				// Restart re-attach (daily-onramp 04): the just-typed prompt must survive a daemon KILL —
+				// it's the newest entry the honest re-attach's recovered context can carry, and nothing else
+				// persists transcripts until some unrelated write happens to fire (proven live: the first
+				// bounce test came back "no prior context was recoverable" because state.json predated the
+				// turn). Chain-deduped by the write queue; one write per operator prompt is bounded.
+				void this.persist();
 				// Completion-push arm (voice-loop): a voice-sourced prompt owes the operator exactly one
 				// "finished" push once this dispatch settles — armed here (persisted, restart-safe),
 				// disarmed by the push actually sending or by a voice-sourced interrupt (see the "interrupt"
@@ -6379,6 +6487,11 @@ export class SquadManager extends EventEmitter {
 					rec.workflowJustFinished = false; // consume — never leak into the next agent_end
 					rec.dto.voicePushArmed = isTerminal && rec.options.voicePushArmed === true;
 				}
+				// Restart re-attach (daily-onramp 04): a completed turn's transcript is the recovery payload
+				// for the honest re-attach — persist it at the turn boundary so a daemon KILL between turns
+				// never loses the conversation. Chain-deduped; one write per completed turn is bounded and
+				// far rarer than the existing per-dirty-subagent-transition writes.
+				void this.persist();
 				break;
 			}
 			case "workflow_done":
@@ -8853,6 +8966,8 @@ export class SquadManager extends EventEmitter {
 			// soundly; a fresh session would replace the dead one. Skip rather than respawn under the wrong state.
 			if (!this.harnessResumable(p)) {
 				this.log("info", `skipped restoring ${p.name} (${p.id}) — harness "${p.harness ?? p.runtime ?? "?"}" is not resumable across a restart`);
+				// Dead-session honesty (daily-onramp 04): the skip is correct, its silence was the bug.
+				this.recordDeadPlaceholder(p, snapshot.transcripts[p.id]);
 				continue;
 			}
 			await this.create({

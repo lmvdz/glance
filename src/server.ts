@@ -2397,9 +2397,14 @@ export class SquadServer {
 				repo = reg.repo;
 				ephemeral = reg.ephemeral;
 			}
+			// Restart re-attach (daily-onramp 04): the client names its dead predecessor; the manager
+			// appends the honest restart marker to the NEW session and hands back the recovered
+			// prior-context tail for the client to fold into the operator's first prompt.
+			const reattachOf = typeof body.reattachOf === "string" && body.reattachOf.trim() ? body.reattachOf.trim() : undefined;
 			try {
 				const dto = await manager.create({ repo, name: "chat", model, profileId, harness, autoRoute: false, appendSystemPrompt: CONSOLE_SYSTEM_PROMPT }, actor);
-				return Response.json({ agentId: dto.id, repo, ephemeral });
+				const reattach = reattachOf ? manager.reattachDeadSession(dto.id, reattachOf) : undefined;
+				return Response.json({ agentId: dto.id, repo, ephemeral, priorContext: reattach?.priorContext });
 			} catch (err) {
 				// A failed spawn must not leave a half-session behind: undo the registration this very
 				// request created (no-op when the repo was already durably registered).
@@ -2444,6 +2449,20 @@ export class SquadServer {
 			const bytes = await manager.getChatAttachment(decodeURIComponent(mattachment[1]));
 			if (!bytes) return new Response("not found", { status: 404 });
 			return new Response(new Uint8Array(bytes), { headers: { "content-type": "image/png", "cache-control": "private, max-age=31536000, immutable" } });
+		}
+		// Single-agent read that stays honest about restart death (daily-onramp 04): a live id answers
+		// with its DTO; a session a restart killed answers with its dead placeholder (`dead: true` +
+		// the reason) for a bounded window; only an id with no story left is a 404. Without this, a
+		// `glance here` client polling its agent across a daemon bounce could not tell "did not
+		// survive" from "never existed".
+		const magent = url.pathname.match(/^\/api\/agents\/([^/]+)$/);
+		if (magent && req.method === "GET") {
+			const id = decodeURIComponent(magent[1]);
+			const dto = manager.getAgent(id);
+			if (dto) return Response.json(dto);
+			const ph = manager.deadPlaceholder(id);
+			if (ph) return Response.json({ id: ph.id, name: ph.name, repo: ph.repo, harness: ph.harness, at: ph.at, dead: true, deadReason: ph.deadReason, transcriptEntries: ph.transcript.length });
+			return new Response("no such agent", { status: 404 });
 		}
 		const mt = url.pathname.match(/^\/api\/agents\/([^/]+)\/transcript$/);
 		if (mt) {
