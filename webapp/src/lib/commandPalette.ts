@@ -83,6 +83,7 @@ const TYPE_LABELS: Record<string, string> = {
   scout: 'Latent work',
   lease: 'Being edited',
   symptom: 'Known symptom',
+  episode: 'Weekly episode',
 };
 
 /** A row matches a query if the query is blank, or a case-insensitive substring of the label. */

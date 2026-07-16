@@ -1350,7 +1350,7 @@ export type SquadEvent =
 // others. "land" (research-sirvir/01-recording-unlock, part 2): a retryable/environmental land refusal
 // (e.g. a dirty main checkout) fires a warn-level event so it surfaces loudly instead of accumulating
 // silently in land-failures.json — no cadence/flag of its own.
-export type AutomationLoop = "scout" | "observer" | "opportunity" | "dispatch" | "scope" | "plan-sync" | "resident-planner" | "sentinel" | "orphan-audit" | "land";
+export type AutomationLoop = "scout" | "observer" | "opportunity" | "dispatch" | "scope" | "plan-sync" | "resident-planner" | "sentinel" | "orphan-audit" | "land" | "episode";
 
 /**
  * Structured reason an automation loop intentionally skipped a unit without doing work.

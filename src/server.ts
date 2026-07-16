@@ -89,6 +89,7 @@ import type { FabricSnapshot } from "./fabric.ts";
 import { redactAttentionForActor, redactSeenMapForActor } from "./attention.ts";
 import { computeFog, repoHasHistory } from "./comprehension-fog.ts";
 import type { SymptomSearchHit } from "./symptoms.ts";
+import type { EpisodeMeta } from "./weekly-episode.ts";
 import { normalizeRepoPath } from "./project-registry.ts";
 import { readAudit, type AuditQuery } from "./audit.ts";
 import type { AutomationEvent, AutomationLoop, AutomationQuery, AutomationRollupRow } from "./automation-log.ts";
@@ -1846,6 +1847,29 @@ export class SquadServer {
 			for (const repo of repos) historyByRepo[repo] = repoHasHistory(seen, repo, now);
 			return Response.json({ entries, repoHasHistory: historyByRepo });
 		}
+		// Weekly episode brief (comprehension concern 09): list metas for the caller's visible repos
+		// (never full markdown — that's the :id route below), same actor-derived repo scoping as
+		// /api/fog and /api/symptoms above (fail closed on a foreign ?repo=).
+		if (url.pathname === "/api/episodes" && req.method === "GET") {
+			const visible = manager.attentionVisibleRepos(actor);
+			const repoParam = url.searchParams.get("repo");
+			const repos = repoParam ? (visible.has(normalizeRepoPath(repoParam)) ? [repoParam] : []) : [...visible];
+			const all = (await Promise.all(repos.map((r) => manager.episodes(r)))).flat();
+			const episodes: EpisodeMeta[] = all.sort((a, b) => b.isoWeek.localeCompare(a.isoWeek));
+			return Response.json({ episodes });
+		}
+		// Full markdown for one episode. `repo` is REQUIRED here (unlike the list route's optional
+		// filter): an isoWeek id alone isn't globally unique, only unique per repo, so there is no
+		// "search every visible repo" fallback — a missing/foreign repo reads as "unknown repo" rather
+		// than silently picking one.
+		if (url.pathname.startsWith("/api/episodes/") && req.method === "GET") {
+			const id = decodeURIComponent(url.pathname.slice("/api/episodes/".length));
+			const visible = manager.attentionVisibleRepos(actor);
+			const repoParam = url.searchParams.get("repo");
+			if (!repoParam || !visible.has(normalizeRepoPath(repoParam))) return new Response("unknown repo", { status: 400 });
+			const episode = await manager.episode(repoParam, id);
+			return episode ? Response.json(episode) : new Response("no such episode", { status: 404 });
+		}
 		if (url.pathname === "/api/projects" && req.method === "GET") return Response.json(manager.projects());
 		// Add a repo to the workspace. Admin-tiered in authz.ts: this names a path the daemon will later
 		// create worktrees in and spawn agents against. The manager validates it is an ABSOLUTE path to a
@@ -3095,7 +3119,7 @@ async function allReceiptsAcross(managers: SquadManager[]): Promise<RunReceipt[]
  */
 async function fabricSnapshotAcross(managers: SquadManager[], actor: Actor, opts: { repos?: string[]; includeLeases?: boolean }): Promise<FabricSnapshot> {
 	const snapshots = await Promise.all(managers.map((m) => m.fabric(actor, opts)));
-	if (snapshots.length <= 1) return snapshots[0] ?? { actor: actor.id, generatedAt: Date.now(), scope: [], agents: [], digests: [], hotAreas: [], scout: [], leases: [], decisions: [], failures: [], symptoms: [] };
+	if (snapshots.length <= 1) return snapshots[0] ?? { actor: actor.id, generatedAt: Date.now(), scope: [], agents: [], digests: [], hotAreas: [], scout: [], leases: [], decisions: [], failures: [], symptoms: [], episodes: [] };
 	return {
 		actor: actor.id,
 		generatedAt: Math.max(...snapshots.map((s) => s.generatedAt)),
@@ -3111,6 +3135,7 @@ async function fabricSnapshotAcross(managers: SquadManager[], actor: Actor, opts
 		decisions: snapshots.flatMap((s) => s.decisions),
 		failures: snapshots.flatMap((s) => s.failures),
 		symptoms: snapshots.flatMap((s) => s.symptoms),
+		episodes: snapshots.flatMap((s) => s.episodes),
 	};
 }
 

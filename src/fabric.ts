@@ -8,6 +8,7 @@ import { normalizeRepoPath } from "./project-registry.ts";
 import { readReceipts } from "./receipts.ts";
 import { listSymptoms, type SymptomEntry } from "./symptoms.ts";
 import type { Actor, AgentDTO, IssueRef, PersistedFeature, RunReceipt } from "./types.ts";
+import { listEpisodes } from "./weekly-episode.ts";
 
 export interface FactSource {
 	agentId?: string;
@@ -97,6 +98,21 @@ export interface FabricSymptomFact {
 	landedAt: number;
 }
 
+/**
+ * A generated weekly episode (comprehension lane concern 09), projected into the fabric so its
+ * excerpt is searchable via ⌘K/fabric like every other fact type. `excerpt` is the ONLY content
+ * here — DESIGN.md concern 3: "full markdown NEVER in the BM25 corpus" — so a search hit points the
+ * reader at `GET /api/episodes/:id`, never inlines the whole brief into a retrieval snippet.
+ */
+export interface FabricEpisodeFact {
+	type: "episode";
+	source: FactSource;
+	id: string;
+	excerpt: string;
+	windowStart: number;
+	windowEnd: number;
+}
+
 export interface FabricSnapshot {
 	actor: string;
 	generatedAt: number;
@@ -109,6 +125,7 @@ export interface FabricSnapshot {
 	decisions: FabricDecisionFact[];
 	failures: FabricFailureFact[];
 	symptoms: FabricSymptomFact[];
+	episodes: FabricEpisodeFact[];
 }
 
 interface ScoutSeenEntry {
@@ -410,6 +427,18 @@ export async function buildFabricSnapshot(deps: FabricDeps): Promise<FabricSnaps
 		}
 	}
 
+	// Weekly episodes (comprehension concern 09): same belt-and-suspenders repo-set guard as
+	// symptoms/decisions above — `listEpisodes` already filters by its `repo` argument (a per-repo
+	// subtree on disk), but the `repoSet.has(...)` check is copied verbatim anyway, for the same
+	// leak-incident reason documented on `repoAdmitter` above.
+	const episodes: FabricEpisodeFact[] = [];
+	for (const repo of repos) {
+		for (const e of await listEpisodes(deps.stateDir, repo).catch(() => [])) {
+			if (!repoSet.has(normalizeRepoPath(e.repo))) continue;
+			episodes.push({ type: "episode", source: { repo: e.repo }, id: e.id, excerpt: e.excerpt, windowStart: e.windowStart, windowEnd: e.windowEnd });
+		}
+	}
+
 	return {
 		actor: deps.actor.id,
 		generatedAt,
@@ -422,5 +451,6 @@ export async function buildFabricSnapshot(deps: FabricDeps): Promise<FabricSnaps
 		decisions,
 		failures,
 		symptoms,
+		episodes,
 	};
 }
