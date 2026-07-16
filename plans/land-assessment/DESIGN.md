@@ -1,6 +1,8 @@
 # Design: Commit-Addressed Land Assessment (Phases 0–3)
 
-Provenance: research + adopted review in `plans/research-glance-architecture-mandate/BRIEF.md` (§10 = fixed constraints). Adversarial design round 2026-07-16: sonnet designer draft, two independent red-team critiques (correctness/concurrency lens; scope/evaluability lens), fable arbitration. Repo inspected at df4b89c.
+Provenance: research + adopted reviews in `plans/research-glance-architecture-mandate/BRIEF.md` (§10–§12 = decision history). Adversarial design round 2026-07-16: sonnet designer draft, two independent red-team critiques (correctness/concurrency lens; scope/evaluability lens), fable arbitration; third review adopted same day (schema-precision corrections).
+
+**Normative contracts live in [ADR.md](ADR.md) and [SCHEMA-V0.md](SCHEMA-V0.md)** — this file is design rationale; where it disagrees with those two, they win. Repo inspected at df4b89c.
 
 ## Approach
 

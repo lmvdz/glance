@@ -14,7 +14,7 @@ The durable append-only store: per-repo month-sharded JSONL that can never tear 
 - **Single-writer discipline**: one in-process async mutex per file path serializes ALL appends (hook writes, background completions, invalidations) — independent of `withRepoLandLock`, because background analyses complete outside it. Multi-KB events under concurrent O_APPEND tear (Node splits large buffers across write() syscalls); the mutex is the fix, and a doc comment records why.
 - **Per-line integrity**: each line is `<crc32>:<json>` (or an equivalent length-prefix scheme) so the reader can distinguish a torn line from valid data; the store stamps the per-file monotonic `seq` field at append time.
 - **Off-hot-path durability**: appends are queued and flushed asynchronously; fsync happens on the writer queue, NEVER on the land thread (WSL2 fsync-spike memory: a synchronous fsync on the land path would stall every land when the host degrades). A write failure emits high-severity telemetry (automation log) and the land proceeds — best-effort per BRIEF §10.7, but never silent.
-- Dedup rule from concern 01: an append whose `(assessmentId, resultHash)` already exists in the current shard is dropped (exact re-run no-op).
+- Dedup rule from concern 01: a snapshot append whose `(assessmentKey, outputHash)` already exists in the current shard is dropped (exact re-run no-op); same-key/different-hash is appended AND surfaces a loud nondeterminism diagnostic.
 - Write path uses `getStorageBackend().appendDurable` under the mutex for the actual I/O; corrupt-on-read semantics live in `store-reader.ts` (concern 06), keeping writer and reader disciplines separate and testable.
 
 ## Cross-Repo Side Effects

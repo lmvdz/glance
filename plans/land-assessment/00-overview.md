@@ -22,15 +22,20 @@ COMPLEXITY: architectural
 | [07 event store writer](07-event-store-writer.md) | Append-only, tear-proof, off-hot-path durable store | architectural | store.ts |
 | [08 observe-only land hook](08-observe-only-land-hook.md) | Phase 2: live wiring, every rejection recorded, zero decision influence | architectural | hook.ts, squad-manager.ts, land.ts, land-pr.ts |
 | [09 validator experiment](09-validator-input-experiment.md) | Phase 3: cost delta + human-rated disagreement study | research (hitl) | replay/validator-experiment.ts |
+| [10 projection contract tests](10-projection-contract-tests.md) | Executable litmus on a synthetic timeline; gates the live hook; second-producer contract check | architectural | projection.test.ts, replay/synthetic-timeline.ts |
+| [11 accepted-state anchor](11-accepted-state-anchor.md) | Manifest + checkpoints + lineage projector + continuity detection; R-extraction (C≠R) | architectural | manifest.ts, projection.ts, continuity.ts |
+
+Normative docs: [ADR.md](ADR.md) (current decision + phase gates) and [SCHEMA-V0.md](SCHEMA-V0.md) (record semantics). The research BRIEF is decision history, not a contract — where documents disagree, ADR/SCHEMA-V0 win.
 
 ## Order
 | Batch | Concerns | Why together |
 |---|---|---|
 | 1 | 01, 02 | Schema freeze + manifest archaeology; disjoint files; 02 needs only 01's class/ref shapes |
 | 2 | 03, 04, 07 | All depend only on 01; disjoint TOUCHES; pure libraries |
-| 3 | 05, 06 | Corpus feeds the CLI; 06 also needs 03/04 done |
-| 4 | 08 | Live wiring after everything it runs exists |
-| 5 | 09 | Needs the report machinery and (for fresh events) the hook |
+| 3 | 05, 06, 11 | Corpus feeds the CLI; 11 reuses 04's full-state extractor; disjoint TOUCHES |
+| 4 | 10 | Contract tests over schema + store + projector — the pre-integration gate |
+| 5 | 08 | Live wiring only after the contract tests pass |
+| 6 | 09 | Needs the report machinery and (for fresh events) the hook |
 
 ## Dependency graph
 | Concern | Blocked by | 30s check |
@@ -39,11 +44,13 @@ COMPLEXITY: architectural
 | 02 | 01 | schema.ts exports taxonomy-compatible finding/ref types (`grep claimedBy src/land-assessment/`) |
 | 03 | 01 | schema.ts + plugin contract exist (`ls src/land-assessment/schema.ts`) |
 | 04 | 01 | same |
-| 05 | 01, 02 | manifest loads (`bun test .../manifest.test.ts`) |
+| 05 | 01, 02 | manifest loads (`bun test .../manifest.test.ts` for taxonomy manifest) |
 | 06 | 03, 04, 05 | analyzers + corpus tests green (`bun test src/land-assessment/`) |
 | 07 | 01 | schema.ts exists |
-| 08 | 03, 04, 07 | store stress test green (`bun test .../store.test.ts`) |
+| 08 | 03, 04, 07, 10 | projection contract tests green (`bun test .../projection.test.ts`) |
 | 09 | 06, 08 | replay CLI runs (`bun src/index.ts land-assessment replay --help`) |
+| 10 | 01, 11 | projector exists (`ls src/land-assessment/projection.ts`) |
+| 11 | 01, 04 | `extractStateFacts` exported from the structural analyzer |
 
 ## Not yet specified
 - (none — later-phase items are in Out of scope with triggers)
@@ -59,6 +66,7 @@ COMPLEXITY: architectural
 ## Decisions so far
 - [DESIGN.md](DESIGN.md) — syntactic analysis over checkouts+createProgram; topology promoted to Phase 1; attemptId minted once with durable counter; single-writer CRC store with strict-with-accounting reader; fingerprint captured post-commitWip under the land lock.
 - [DESIGN.md](DESIGN.md) — temporal-knowledge guardrail adopted (second review, BRIEF §11): observations persisted separately from findings, bitemporal fields, epistemic state categories (proposed ≠ accepted; rejected stays episodic), producer-not-engine ADR clause, litmus-test acceptance after accumulation.
+- [ADR.md](ADR.md) + [SCHEMA-V0.md](SCHEMA-V0.md) — third review adopted (BRIEF §12): normative docs split from the historical BRIEF; event/snapshot identity split (attemptId/eventId/assessmentKey + outputHash); four orthogonal knowledge axes replace the stateCategory enum; exact-state addressing over the Git DAG (validity intervals are lineage projections, never primitives); C≠R accepted-state discipline; manifest+checkpoint+continuity anchor (concern 11); executable litmus contract tests gate the live hook (concern 10); second-producer (verification execution) phase gate before any enforcement input.
 
 ## Notes
 - Headless run (research→plan pipeline off `glance_architecture_mandate.md`): EXPLORE/DESIGN/DECOMPOSE gates auto-approved per skill gate policy; adversarial round = sonnet designer + two opus red teams (fable 529-overloaded at spawn time) + fable arbitration inline.

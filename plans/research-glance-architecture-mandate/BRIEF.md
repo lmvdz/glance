@@ -308,3 +308,20 @@ Four epistemic categories, carried explicitly: **observed** (facts about an exis
 ### 11.6 Litmus test (architectural acceptance, after several hundred assessments)
 
 The accumulated data must be able to answer: the public interface of module X at commit A; what changed between A and B; which accepted landing introduced a dependency; which rejected attempts touched the same concept and on what evidence; when a module started accumulating responsibilities; which temporary pattern became recurring; what glance believed at the time and which beliefs were superseded. If it can only answer "was this landing risky / why was it blocked," the wedge has narrowed too far.
+
+---
+
+## 12. 2026-07-16 — Third review: schema-precision corrections + document consolidation (ADOPTED)
+
+Third review verdict: architecturally aligned; approve the direction; do NOT generate code until six data-model corrections land and the normative contract is separated from this historical document. All adopted:
+
+1. **Event/snapshot identity split**: `LandAttemptEvent` (unique `eventId` per occurrence, `attemptId` per operation) is a different record from the content-addressed `LandAssessmentSnapshot` (`assessmentKey` = state+environment hash; `analysisRunId` per execution; `outputHash` — same key must reproduce same hash, mismatch = surfaced nondeterminism). One id cannot carry both lifecycle and content identity.
+2. **Four orthogonal knowledge axes** (`authority` / `support` / `stateRole` / `attemptDisposition`) replace §11.4's single stateCategory enum — a deterministic fact about a rejected candidate is one coherent record, not a category collision.
+3. **Git-DAG validity**: raw records are exact-state-addressed (`RepositoryStateRef {repo, commit, tree}`; `SnapshotFact` / `ChangeObservation {fromState, toState}`); `validFrom/UntilCommit` intervals are lineage-projector outputs at read time, never stored primitives (a fact can be true on main, false on a release branch, and reappear later).
+4. **C ≠ R**: accepted state comes from independently observing the landed result R (rebase/squash/resolution make R differ from C); candidate observations are never relabeled; the landed event carries the C→R transition edge.
+5. **Reconstruction anchor**: manifest + periodic checkpoints + lineage projector + on-demand extraction, with `ContinuityRecord` detection for transitions that never flowed through glance (external pushes flip continuity to `unknown` → reconcile-or-re-extract).
+6. **AnalysisEnvironmentFingerprint** (ts version, tsconfig/lockfile hashes, `mode: syntax-only|module-resolved|type-checked`) + multidimensional coverage (syntax/resolution/type — one scalar is forbidden).
+
+Plus two structural adoptions: **executable litmus contract tests** on a synthetic timeline (A: exports Foo … F: belief superseded) must pass BEFORE live land integration — plan concern 10, gating concern 08; and a **second-producer phase gate** — verification execution must write the same contracts without schema redesign before land assessments may feed any enforcement input (contract-checked in concern 10, gate recorded in ADR.md).
+
+**Document consolidation**: this BRIEF (including §§10–12) is now decision history only. The normative contract lives in `plans/land-assessment/ADR.md` (current decision, phase gates, non-goals — no superseded requirements) and `plans/land-assessment/SCHEMA-V0.md` (record semantics). Superseded-in-place here and NOT to be implemented from this file: the §1 "semantic land assessment" framing and its four-deliverable shape, §1's dashboard mention, the §10.1 combined LandAssessmentEvent schema, §10.2's assessmentId-as-single-identity, §11.3's validFrom/UntilCommit-as-fields, §11.4's single stateCategory enum. Reviewer's closing: further broad architecture review is more likely to create churn than insight — remaining risks are schema precision, now owned by SCHEMA-V0.md.
