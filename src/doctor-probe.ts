@@ -44,7 +44,7 @@ function isDoctorFacts(v: unknown): v is DoctorFactsResponse {
 const DEAD: DaemonFacts = { running: false };
 /** Nothing is armed when nothing is running. Reporting the CALLING shell's flags here would describe a
  *  daemon that does not exist. */
-const NO_AUTONOMY: AutonomyFacts = { autodispatch: false, autodrive: false, autoland: false, autosupervise: false, landConfirm: false, regressionGate: false };
+const NO_AUTONOMY: AutonomyFacts = { autodispatch: false, autodrive: false, autoland: false, autosupervise: false, landConfirm: false, regressionGate: false, costGateMode: "off", costAggregateReady: false };
 
 /** A wedged docker daemon or a git on a stalled network filesystem must not hang the diagnosis forever —
  *  the machine `doctor` is asked about is, by hypothesis, the broken one. (grok-4.5) */

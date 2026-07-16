@@ -20,6 +20,7 @@
  */
 
 import type { AutomationRollupRow } from "./automation-log.ts";
+import type { MetricEvent } from "./metrics.ts";
 
 /** Per-loop first-glance status. Ordered worst→best for the headline roll-up. */
 export type FactoryLoopStatus = "off" | "not-armed" | "idle" | "moving";
@@ -94,6 +95,67 @@ export interface FactoryStatus {
 	persistFailures: number;
 	/** The "fleet cannot land" banner (research-sirvir/01-recording-unlock, part 2) — see below. */
 	landBlocked: FactoryLandBlockStatus;
+	/** The per-lane shadow-exit scoreboard (adw-factory-borrows concern 09) — see below. */
+	shadowExits: ShadowExitScoreboard;
+}
+
+/**
+ * The shadow-exit scoreboard (adw-factory-borrows concern 09, red-team: "shadow-forever is the
+ * observed outcome — the model-outcomes ledger sat empty for a month"). One place the operator reads
+ * BEFORE flipping a lane from shadow to apply/enforce: lane classification counts, how often
+ * model-route's SHADOW decisions would have escalated to the frontier model, and how often the cost
+ * gate's SHADOW verdicts would have asked/denied. This concern's definition of done is this surface
+ * EXISTING, not any flip being made (module doc, `LANE_POLICY` all still ship shadow-first).
+ */
+export interface ShadowExitScoreboard {
+	/** Classified-lane counts within the window, keyed by `WorkLane`. */
+	laneCounts: Record<string, number>;
+	/** Total classified spawns within the window (sum of `laneCounts`). */
+	laneTotal: number;
+	/** Model-route decisions recorded in SHADOW mode (not applied) that WOULD have escalated to the
+	 *  frontier model, within the window. */
+	modelRouteShadowWouldEscalate: number;
+	/** Total model-route decisions recorded in shadow mode within the window (denominator for the
+	 *  ratio above). */
+	modelRouteShadowTotal: number;
+	/** Cost-gate verdicts (ask/deny) that fired OUTSIDE enforce mode within the window — i.e. would
+	 *  have asked/denied had the lane/gate been flipped to enforce. */
+	costGateShadowWouldAct: number;
+	/** Total cost-gate verdicts (any action) recorded outside enforce mode within the window
+	 *  (denominator for the ratio above). */
+	costGateShadowTotal: number;
+}
+
+/**
+ * Derive the shadow-exit scoreboard from the manager's raw learning-metric events (already windowed
+ * by the caller — same freshness window `factoryStatus()` feeds everything else here). Pure over its
+ * input, like `deriveLandBlockStatus`/`deriveLoopReport`.
+ *
+ * `routeEvents`/`costEvents` are filtered by tag HERE (not via `MetricRollupRow.byTag`, whose
+ * breakdown is per-tag-key independently and can't answer a JOINT "mode=shadow AND action=ask/deny"
+ * query) so the counters below are exact, not an approximation from two independent marginals.
+ */
+export function deriveShadowExitScoreboard(input: { laneEvents: MetricEvent[]; routeEvents: MetricEvent[]; costEvents: MetricEvent[] }): ShadowExitScoreboard {
+	const laneCounts: Record<string, number> = {};
+	for (const e of input.laneEvents) {
+		const lane = e.tags?.lane ?? "unknown";
+		laneCounts[lane] = (laneCounts[lane] ?? 0) + 1;
+	}
+
+	const shadowRouteEvents = input.routeEvents.filter((e) => e.tags?.mode === "shadow");
+	const modelRouteShadowWouldEscalate = shadowRouteEvents.filter((e) => e.value === 1).length;
+
+	const shadowCostEvents = input.costEvents.filter((e) => e.tags?.mode !== "enforce");
+	const costGateShadowWouldAct = shadowCostEvents.filter((e) => e.tags?.action === "ask" || e.tags?.action === "deny").length;
+
+	return {
+		laneCounts,
+		laneTotal: input.laneEvents.length,
+		modelRouteShadowWouldEscalate,
+		modelRouteShadowTotal: shadowRouteEvents.length,
+		costGateShadowWouldAct,
+		costGateShadowTotal: shadowCostEvents.length,
+	};
 }
 
 /**
@@ -161,6 +223,13 @@ export interface BuildFactoryStatusInput {
 	activeAgents: number;
 	/** Cumulative FileStore.save() failures this process (0 when the store doesn't track them / DB mode). */
 	persistFailures: number;
+	/** Raw `lane-classification` learning-metric events over the window (adw-factory-borrows concern
+	 *  09). Optional (defaults to empty) so callers/tests predating this scoreboard need no changes. */
+	laneEvents?: MetricEvent[];
+	/** Raw `model-route-decision` learning-metric events over the window. Optional, see above. */
+	routeEvents?: MetricEvent[];
+	/** Raw `cost-gate-verdict` learning-metric events over the window. Optional, see above. */
+	costEvents?: MetricEvent[];
 }
 
 /** Derive one loop's report from its spec + the live facts. Pure — the unit under test. */
@@ -244,5 +313,6 @@ export function buildFactoryStatus(input: BuildFactoryStatusInput): FactoryStatu
 		overall: deriveOverall(loops, input.activeAgents),
 		persistFailures: input.persistFailures,
 		landBlocked: deriveLandBlockStatus(input.rollup),
+		shadowExits: deriveShadowExitScoreboard({ laneEvents: input.laneEvents ?? [], routeEvents: input.routeEvents ?? [], costEvents: input.costEvents ?? [] }),
 	};
 }
