@@ -21,6 +21,7 @@ import {
 	captureWorktreeTree,
 	computeTurnPatch,
 	discardHeldNow,
+	fingerprintUntracked,
 	HeldSyncStore,
 	syncTurnEnd,
 } from "../src/boundary-sync.ts";
@@ -149,6 +150,46 @@ describe("captureRealTreeState", () => {
 		if (!r.ok) expect(r.reason).toContain("newline");
 	});
 
+	test("a dangling (broken-target) untracked symlink does NOT fail the capture, and is stable when unchanged (regression: git hash-object always follows symlinks and exits 128 on a missing referent, which used to brick every capture forever)", async () => {
+		const repo = await initRepo();
+		await fs.symlink("/no/such/target", path.join(repo, "dangling-link"));
+		const a = await captureRealTreeState(repo);
+		const b = await captureRealTreeState(repo);
+		expect(a.ok).toBe(true);
+		expect(b.ok).toBe(true);
+		if (a.ok && b.ok) expect(a.fingerprint).toBe(b.fingerprint);
+	});
+
+	test("changes when a dangling symlink's TARGET STRING changes, even though it stays unreadable both times", async () => {
+		const repo = await initRepo();
+		const link = path.join(repo, "dangling-link");
+		await fs.symlink("/no/such/target-v1", link);
+		const before = await captureRealTreeState(repo);
+		expect(before.ok).toBe(true);
+		await fs.rm(link);
+		await fs.symlink("/no/such/target-v2", link);
+		const after = await captureRealTreeState(repo);
+		expect(after.ok).toBe(true);
+		if (before.ok && after.ok) expect(after.fingerprint).not.toBe(before.fingerprint);
+	});
+
+	test("an untracked regular file that cannot be opened (permission denied) does NOT fail the capture, and is stable when unchanged", async () => {
+		if (process.getuid?.() === 0) return; // root reads through 0o000 — nothing to assert
+		const repo = await initRepo();
+		const locked = path.join(repo, "locked.txt");
+		await fs.writeFile(locked, "secret\n");
+		await fs.chmod(locked, 0o000);
+		try {
+			const a = await captureRealTreeState(repo);
+			const b = await captureRealTreeState(repo);
+			expect(a.ok).toBe(true);
+			expect(b.ok).toBe(true);
+			if (a.ok && b.ok) expect(a.fingerprint).toBe(b.fingerprint);
+		} finally {
+			await fs.chmod(locked, 0o644); // afterEach's rm needs to read the directory clean
+		}
+	});
+
 	test("is read-only: capture does not disturb git status or the index", async () => {
 		const repo = await initRepo();
 		await fs.appendFile(path.join(repo, "a.txt"), "dirty\n");
@@ -157,6 +198,17 @@ describe("captureRealTreeState", () => {
 		const r = await captureRealTreeState(repo);
 		expect(r.ok).toBe(true);
 		expect((await git(repo, "status", "--porcelain")).stdout).toBe(statusBefore);
+	});
+});
+
+describe("fingerprintUntracked (the per-path fallback the capture-bricking bug lived in)", () => {
+	test("a path lstat genuinely cannot resolve fails closed, naming the offending path (no dead-end 'couldn't fingerprint')", async () => {
+		const repo = await initRepo();
+		// "ghost.txt" is never created — ls-files would never report it, but this isolates the
+		// lstat-failure branch deterministically (no race needed): the path is unconditionally gone.
+		const r = await fingerprintUntracked(repo, ["ghost.txt"]);
+		expect(r.ok).toBe(false);
+		if (!r.ok) expect(r.reason).toContain("ghost.txt");
 	});
 });
 
@@ -278,6 +330,48 @@ describe("syncTurnEnd", () => {
 		const out = await syncTurnEnd({ realDir: repo, worktree: wt, start, store, agentId: "a1", turn: 1 });
 		expect(out.kind).toBe("noop");
 		expect(await store.listHeld("a1")).toHaveLength(0);
+	});
+
+	test("applies end to end even with an untouched dangling symlink sitting in the real checkout (regression: this used to brick auto-sync AND the Apply recovery path forever)", async () => {
+		const repo = await initRepo();
+		await fs.symlink("/no/such/target", path.join(repo, "dangling-link"));
+		const wt = await addWorktree(repo);
+		const store = await newStore();
+		const start = await beginTurn(repo, wt);
+		expect(start.realFingerprint).toBeTruthy(); // capture must succeed, not ride realFailure
+		await fs.appendFile(path.join(wt, "a.txt"), "from the agent\n");
+		const out = await syncTurnEnd({ realDir: repo, worktree: wt, start, store, agentId: "a1", turn: 1 });
+		expect(out.kind).toBe("applied");
+		expect(await fs.readFile(path.join(repo, "a.txt"), "utf8")).toContain("from the agent");
+		expect(await store.listHeld("a1")).toHaveLength(0);
+		// The recovery affordance is exercised too: Apply must still work when there IS a backlog,
+		// with the same broken symlink present throughout.
+		const store2 = await newStore();
+		const s1 = await beginTurn(repo, wt);
+		await fs.appendFile(path.join(wt, "a.txt"), "turn2\n");
+		await fs.appendFile(path.join(repo, "b.txt"), "operator\n"); // force a hold
+		const held = await syncTurnEnd({ realDir: repo, worktree: wt, start: s1, store: store2, agentId: "a1", turn: 2 });
+		expect(held.kind).toBe("held");
+		const applied = await applyHeldNow(store2, "a1", repo);
+		expect(applied).toEqual({ ok: true, applied: 1, remaining: 0 });
+		expect(await fs.readFile(path.join(repo, "a.txt"), "utf8")).toContain("turn2");
+	});
+
+	test("HOLDS when a dangling symlink's target string changes mid-turn (a real divergence, not a capture failure)", async () => {
+		const repo = await initRepo();
+		const link = path.join(repo, "dangling-link");
+		await fs.symlink("/no/such/target-v1", link);
+		const wt = await addWorktree(repo);
+		const store = await newStore();
+		const start = await beginTurn(repo, wt);
+		expect(start.realFingerprint).toBeTruthy();
+		await fs.appendFile(path.join(wt, "a.txt"), "agent edit\n");
+		await fs.rm(link);
+		await fs.symlink("/no/such/target-v2", link); // operator (or something) retargets it mid-turn
+		const out = await syncTurnEnd({ realDir: repo, worktree: wt, start, store, agentId: "a1", turn: 1 });
+		expect(out.kind).toBe("held");
+		if (out.kind === "held") expect(out.reason).toContain("changed during this turn");
+		expect(await fs.readFile(path.join(repo, "a.txt"), "utf8")).not.toContain("agent edit"); // not written
 	});
 
 	test("applies the turn's edits to the real checkout when it provably did not move", async () => {

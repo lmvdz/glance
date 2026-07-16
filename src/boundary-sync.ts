@@ -88,12 +88,105 @@ const fail = (reason: string): { ok: false; reason: string } => ({ ok: false, re
 const gitErr = (what: string, r: { code: number; stderr: string }): string => `${what} failed (exit ${r.code}): ${r.stderr.trim().slice(0, 300) || "no stderr"}`;
 
 /**
+ * Per-untracked-path identity for the real-tree fingerprint. Regular, readable files are
+ * content-hashed via `git hash-object` (unchanged from the original design — a mid-turn edit to an
+ * untracked file must move the fingerprint). Everything else is fingerprinted from `lstat`/
+ * `readlink` metadata alone, WITHOUT ever opening the path — this is the fix for a real bricking
+ * bug: `git hash-object` always FOLLOWS symlinks (opens the referent), so one dangling symlink, a
+ * permission-denied file, or a fifo/socket/device in the untracked set made every capture fail
+ * forever (exit 128), which wedged both auto-sync and the explicit Apply recovery path (both call
+ * this same function). A broken symlink's referent not existing is not "uncertainty" about the
+ * CHECKOUT — the symlink's own (mode, size, mtime, target-string) is fully knowable without
+ * touching the referent, and is stable across calls when nothing changed, so it can safely stand
+ * in for a content hash. Non-regular, non-symlink paths (fifo/socket/device) are fingerprinted the
+ * same way — deliberately never opened, since reading a fifo with no writer can hang forever.
+ *
+ * Fail-closed is preserved for the cases that are genuinely unknowable: if `lstat` itself fails
+ * (the path vanished or a parent directory stopped being searchable between `ls-files` and now) or
+ * `readlink` fails on something `lstat` just reported as a symlink, that is real uncertainty about
+ * the checkout, not merely "can't read this path's bytes" — the whole capture fails, and the
+ * failure reason names the offending path so an operator-facing hold message is actionable instead
+ * of a dead end.
+ *
+ * @substrate exported for tests only — tests/boundary-sync.test.ts asserts the lstat/readlink
+ * fallback directly (including the fail-closed path for a path that no longer exists); its only
+ * in-repo caller is `captureRealTreeState`, in this same file.
+ */
+export async function fingerprintUntracked(realDir: string, untracked: string[]): Promise<{ ok: true; digest: string } | { ok: false; reason: string }> {
+	if (untracked.length === 0) return { ok: true, digest: "" };
+
+	const lines = new Array<string | undefined>(untracked.length);
+	const regulars: { index: number; path: string; stat: Awaited<ReturnType<typeof fs.lstat>> }[] = [];
+
+	for (let i = 0; i < untracked.length; i++) {
+		const p = untracked[i]!;
+		const abs = path.join(realDir, p);
+		let st: Awaited<ReturnType<typeof fs.lstat>>;
+		try {
+			st = await fs.lstat(abs);
+		} catch (e) {
+			return fail(`couldn't establish identity for the untracked path "${p}": ${errText(e)}`);
+		}
+		if (st.isSymbolicLink()) {
+			let target: string;
+			try {
+				target = await fs.readlink(abs);
+			} catch (e) {
+				return fail(`couldn't read the untracked symlink "${p}"'s target: ${errText(e)}`);
+			}
+			// Identity, not content: a dangling target is fully expressible without ever opening it,
+			// and comparing stable-equal when unchanged is the whole point of this fix.
+			lines[i] = `symlink:${st.mode.toString(8)}:${st.size}:${st.mtimeMs}:${target}`;
+		} else if (st.isFile()) {
+			regulars.push({ index: i, path: p, stat: st });
+		} else {
+			// fifo/socket/device (or anything else `ls-files --others` can name) — never opened.
+			lines[i] = `stat:${st.mode.toString(8)}:${st.size}:${st.mtimeMs}`;
+		}
+	}
+
+	if (regulars.length > 0) {
+		// `hash-object --stdin-paths` reads newline-separated paths, so a path CONTAINING a newline
+		// can't be expressed — fail the capture (fail-closed) rather than hash the wrong file set.
+		const withNewline = regulars.find((r) => r.path.includes("\n"));
+		if (withNewline) return fail(`untracked path "${withNewline.path}" contains a newline — cannot fingerprint safely`);
+
+		// Fast path: one batched spawn for the common case (no unreadable regular files).
+		const batch = await hardenedGit(["hash-object", "--stdin-paths"], { cwd: realDir, stdin: `${regulars.map((r) => r.path).join("\n")}\n` });
+		if (batch.code === 0) {
+			const hashes = batch.stdout.split("\n").filter((l) => l.length > 0);
+			if (hashes.length !== regulars.length) return fail(`git hash-object (untracked content) returned ${hashes.length} hashes for ${regulars.length} paths`);
+			for (let j = 0; j < regulars.length; j++) lines[regulars[j]!.index] = `content:${hashes[j]}`;
+		} else {
+			// Batch mode aborts entirely at the FIRST unreadable path (verified live: it does not
+			// continue to hash the remaining paths, so its partial stdout can't be trusted to tell us
+			// which one failed) — fall back to one spawn per path, so a single permission-denied or
+			// raced-away file degrades only itself instead of failing the whole capture.
+			for (const r of regulars) {
+				const single = await hardenedGit(["hash-object", "--", r.path], { cwd: realDir });
+				if (single.code === 0) {
+					lines[r.index] = `content:${single.stdout.trim()}`;
+				} else {
+					// Unreadable content (permission denied, or it vanished after our lstat above) — fall
+					// back to the identity we already captured, exactly like the symlink/special case.
+					lines[r.index] = `stat:${r.stat.mode.toString(8)}:${r.stat.size}:${r.stat.mtimeMs}`;
+				}
+			}
+		}
+	}
+
+	return { ok: true, digest: lines.join("\n") };
+}
+
+/**
  * Read-only tree-state fingerprint of the REAL checkout (fail-closed by construction — see module
  * doc). sha256 over: HEAD sha + tracked diff vs HEAD (`--binary`, textconv/ext-diff neutralized) +
- * untracked path list + untracked CONTENT hashes. The content hashes go beyond the concern's
- * three-command sketch deliberately: path-only hashing would let a mid-turn edit to an untracked
- * file slip past the divergence check and be clobbered by the apply's own file writes.
- * Any sub-command failing fails the whole capture — never an empty or partial fingerprint.
+ * untracked path list + a per-path identity for each untracked entry (content hash for readable
+ * regular files, lstat/readlink identity for everything else — see `fingerprintUntracked`). The
+ * content hashes go beyond the concern's three-command sketch deliberately: path-only hashing would
+ * let a mid-turn edit to an untracked file slip past the divergence check and be clobbered by the
+ * apply's own file writes. Any sub-command failing fails the whole capture — never an empty or
+ * partial fingerprint.
  *
  * @substrate exported for tests only — tests/boundary-sync.test.ts asserts this fingerprint
  * primitive directly; every other in-repo caller (`beginTurn`, `syncTurnEnd`, `applyHeldNow`,
@@ -107,15 +200,8 @@ export async function captureRealTreeState(realDir: string): Promise<CaptureResu
 	const others = await hardenedGit(["ls-files", "-z", "--others", "--exclude-standard"], { cwd: realDir });
 	if (others.code !== 0) return fail(gitErr("git ls-files", others));
 	const untracked = parseNulList(others.stdout);
-	let untrackedHashes = "";
-	if (untracked.length > 0) {
-		// `hash-object --stdin-paths` reads newline-separated paths, so a path CONTAINING a newline
-		// can't be expressed — fail the capture (fail-closed) rather than hash the wrong file set.
-		if (untracked.some((p) => p.includes("\n"))) return fail("an untracked path contains a newline — cannot fingerprint safely");
-		const hashed = await hardenedGit(["hash-object", "--stdin-paths"], { cwd: realDir, stdin: `${untracked.join("\n")}\n` });
-		if (hashed.code !== 0) return fail(gitErr("git hash-object (untracked content)", hashed));
-		untrackedHashes = hashed.stdout;
-	}
+	const untrackedFp = await fingerprintUntracked(realDir, untracked);
+	if (!untrackedFp.ok) return fail(untrackedFp.reason);
 	const fingerprint = createHash("sha256")
 		.update(head.stdout)
 		.update("\0")
@@ -123,7 +209,7 @@ export async function captureRealTreeState(realDir: string): Promise<CaptureResu
 		.update("\0")
 		.update(others.stdout)
 		.update("\0")
-		.update(untrackedHashes)
+		.update(untrackedFp.digest)
 		.digest("hex");
 	return { ok: true, fingerprint };
 }
