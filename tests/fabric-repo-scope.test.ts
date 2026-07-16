@@ -21,6 +21,7 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { Answer } from "../src/answers.ts";
 import { writeDigest } from "../src/digest.ts";
 import { actorVisibleRepoSet, buildFabricSnapshot } from "../src/fabric.ts";
 import { appendReceipt } from "../src/receipts.ts";

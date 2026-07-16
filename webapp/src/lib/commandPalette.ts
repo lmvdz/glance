@@ -41,9 +41,15 @@ export interface PaletteActionRow extends PaletteRowBase {
 /** One ranked GET /api/fabric/search hit, shaped for the row list. */
 export interface PaletteFabricRow extends PaletteRowBase {
   kind: 'fabric';
+  /** Raw fact type (comprehension concern 10) — kept alongside `typeLabel` (its human rendering) so
+   *  selection can branch on it, e.g. an `'answer'` row emits `reportAnswerRead` on select. */
+  type: string;
   typeLabel: string;
   snippet: string;
   repo?: string;
+  /** Backend `KbDoc.ref` (comprehension concern 10) — for an `'answer'` row this is the answer id
+   *  `reportAnswerRead` needs; other row types carry their own ref but nothing here reads it yet. */
+  ref?: string;
 }
 
 export type PaletteRow = PaletteNavRow | PaletteActionRow | PaletteFabricRow;
@@ -75,6 +81,7 @@ export interface FabricSearchResult {
   snippet: string;
   score: number;
   repo?: string;
+  ref?: string;
 }
 
 const TYPE_LABELS: Record<string, string> = {
@@ -86,6 +93,7 @@ const TYPE_LABELS: Record<string, string> = {
   lease: 'Being edited',
   symptom: 'Known symptom',
   episode: 'Weekly episode',
+  answer: 'Answered question',
 };
 
 /** A row matches a query if the query is blank, or a case-insensitive substring of the label. */
@@ -108,9 +116,11 @@ export function fabricRows(results: readonly FabricSearchResult[] | null | undef
     kind: 'fabric',
     id: `fabric:${r.type}:${r.id}`,
     label: r.title,
+    type: r.type,
     typeLabel: TYPE_LABELS[r.type] ?? r.type,
     snippet: r.snippet,
     repo: r.repo,
+    ref: r.ref,
   }));
 }
 

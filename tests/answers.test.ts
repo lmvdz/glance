@@ -15,9 +15,9 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { answerBrief, listAnswers, readAnswer, saveAnswer } from "../src/answers.ts";
+import { answerBrief, extractPathTokens, listAnswers, possiblyStale, readAnswer, saveAnswer, type Answer } from "../src/answers.ts";
 import { isLandingUnit } from "../src/is-landing-unit.ts";
-import type { AgentDTO, PersistedAgent, TranscriptEntry } from "../src/types.ts";
+import type { AgentDTO, PersistedAgent, RunReceipt, TranscriptEntry } from "../src/types.ts";
 
 const { SquadManager } = await import("../src/squad-manager.ts");
 
@@ -108,6 +108,79 @@ test("an id cannot escape the answers directory", async () => {
 	// a real agent id survives untouched
 	expect(await saveAnswer(dir, { id: "ompsq-445-mre9s8ze-1-158946d8", question: "q", repo: "/r", markdown: "m", askedAt: 1 })).toBe(true);
 	expect((await readAnswer(dir, "ompsq-445-mre9s8ze-1-158946d8"))?.markdown).toBe("m");
+});
+
+// ── staleness (comprehension concern 10, ask→fabric) ───────────────────────────────────────────
+
+function answer(over: Partial<Answer> = {}): Answer {
+	return { id: "u1", question: "why is dispatch slow?", repo: "/srv/app", markdown: "", askedAt: 1, answeredAt: 500, ...over };
+}
+
+function receipt(over: Partial<RunReceipt> = {}): RunReceipt {
+	return { agentId: "a1", name: "a1", repo: "/srv/app", runId: "r1", startedAt: 100, endedAt: 200, status: "idle", toolCalls: 1, toolTally: {}, filesTouched: [], ...over };
+}
+
+test("extractPathTokens finds repo-relative path tokens and strips a :line/:start-end suffix", () => {
+	const md = "Because `src/dispatch.ts:42-58` runs serially, see also webapp/src/lib/heatmap.ts:9 and just prose here.";
+	expect(extractPathTokens(md)).toEqual(new Set(["src/dispatch.ts", "webapp/src/lib/heatmap.ts"]));
+});
+
+test("extractPathTokens finds nothing in prose with no path-like token", () => {
+	expect(extractPathTokens("The spawn loop runs one at a time because of a lock.").size).toBe(0);
+});
+
+test("possiblyStale: a referenced file touched after the answer was given is stale", () => {
+	const a = answer({ markdown: "See `src/dispatch.ts` for the retry loop.", answeredAt: 500 });
+	const receipts = [receipt({ repo: "/srv/app", filesTouched: ["src/dispatch.ts"], endedAt: 900 })];
+	expect(possiblyStale(a, receipts)).toBe(true);
+});
+
+/** The honest default: no path-like token extracted from the markdown at all ⇒ never stale, even
+ *  when receipts for this repo changed plenty since the answer was given. */
+test("possiblyStale: no references extracted is never stale", () => {
+	const a = answer({ markdown: "The spawn loop runs serially, one unit at a time.", answeredAt: 500 });
+	const receipts = [receipt({ repo: "/srv/app", filesTouched: ["src/dispatch.ts"], endedAt: 900 })];
+	expect(possiblyStale(a, receipts)).toBe(false);
+});
+
+/** A plausible-looking path is not proof a file exists — it must also appear in a real receipt's
+ *  `filesTouched` before it counts as a reference at all. */
+test("possiblyStale: a path-shaped token that never appears in any receipt is not trusted", () => {
+	const a = answer({ markdown: "See `src/made-up-file.ts` for details.", answeredAt: 500 });
+	const receipts = [receipt({ repo: "/srv/app", filesTouched: ["src/dispatch.ts"], endedAt: 900 })];
+	expect(possiblyStale(a, receipts)).toBe(false);
+});
+
+test("possiblyStale: foreign-repo receipts are ignored, even touching the same-named file after the answer", () => {
+	const a = answer({ repo: "/srv/app", markdown: "See `src/dispatch.ts` for the retry loop.", answeredAt: 500 });
+	const receipts = [receipt({ repo: "/srv/OTHER", filesTouched: ["src/dispatch.ts"], endedAt: 900 })];
+	expect(possiblyStale(a, receipts)).toBe(false);
+});
+
+test("possiblyStale: a receipt that ended before the answer was given does not make it stale", () => {
+	const a = answer({ markdown: "See `src/dispatch.ts`.", answeredAt: 500 });
+	const receipts = [receipt({ repo: "/srv/app", filesTouched: ["src/dispatch.ts"], endedAt: 400 })];
+	expect(possiblyStale(a, receipts)).toBe(false);
+});
+
+/** Normalized like every other repo-scoped read in this file (listAnswers' own repo filter, the
+ *  fabric leak incident's fix) — a trailing slash must not silently hide a real match. */
+test("possiblyStale: a trailing slash on either repo spelling still matches", () => {
+	const a = answer({ repo: "/srv/app/", markdown: "See `src/dispatch.ts`.", answeredAt: 500 });
+	const receipts = [receipt({ repo: "/srv/app", filesTouched: ["src/dispatch.ts"], endedAt: 900 })];
+	expect(possiblyStale(a, receipts)).toBe(true);
+});
+
+test("possiblyStale: an unanswered question is never stale", () => {
+	const a = answer({ markdown: "See `src/dispatch.ts`.", answeredAt: undefined });
+	const receipts = [receipt({ repo: "/srv/app", filesTouched: ["src/dispatch.ts"], endedAt: 900 })];
+	expect(possiblyStale(a, receipts)).toBe(false);
+});
+
+test("possiblyStale: falls back to startedAt when a receipt has no endedAt yet", () => {
+	const a = answer({ markdown: "See `src/dispatch.ts`.", answeredAt: 500 });
+	const receipts = [receipt({ repo: "/srv/app", filesTouched: ["src/dispatch.ts"], startedAt: 900, endedAt: undefined })];
+	expect(possiblyStale(a, receipts)).toBe(true);
 });
 
 // ── capture: the unit's final message IS the deliverable ────────────────────────────────────────

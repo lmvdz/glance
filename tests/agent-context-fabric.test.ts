@@ -5,6 +5,7 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { Answer } from "../src/answers.ts";
 import { RbacDenied } from "../src/auth.ts";
 import { agentActor, scopeFor } from "../src/agent-scope.ts";
 import { buildFabricSnapshot, type FabricScoutFact } from "../src/fabric.ts";
@@ -288,6 +289,71 @@ test("fabric decisions are repo-scoped even when the caller omits `repos` (no cr
 	expect(snapshot.scope.sort()).toEqual(["a"]); // agent scope is correct (the leak is not here)
 	expect(snapshot.decisions.map((d) => d.source.repo)).toEqual(["/repo-a"]);
 	expect(snapshot.decisions.some((d) => d.text.includes("OUT-OF-SCOPE"))).toBe(false);
+});
+
+/**
+ * Ask→fabric answers (comprehension concern 10): the SAME shape as the decisions test above —
+ * `deps.answers` is the actor's FULL unfiltered answer set (mirroring `deps.features`), and the
+ * `repoSet` guard inside `buildFabricSnapshot` (copied verbatim from the decisions block) is the
+ * only scoping applied. A repo-B answer must never surface through a repo-A-scoped snapshot.
+ */
+test("fabric answers are repo-scoped even when the caller omits `repos` (no cross-repo leak)", async () => {
+	const dir = await tmpDir("acf-answer-");
+	const agents = [dto("a", { repo: "/repo-a" }), dto("other", { repo: "/repo-other" })];
+	const answer = (id: string, repo: string, question: string): Answer => ({ id, repo, question, markdown: "the answer body", askedAt: 1, answeredAt: 500 });
+
+	const snapshot = await buildFabricSnapshot({
+		actor: agentActor("a"),
+		agents,
+		stateDir: dir,
+		// `repos` intentionally omitted — exactly how /api/fabric invokes it with no ?repo. The
+		// answer filter must fall back to the actor's scoped repos, not leak every repo's answers.
+		answers: [answer("q1", "/repo-a", "IN-SCOPE question"), answer("q2", "/repo-other", "OUT-OF-SCOPE question")],
+	});
+
+	expect(snapshot.scope.sort()).toEqual(["a"]);
+	expect(snapshot.answers.map((a) => a.source.repo)).toEqual(["/repo-a"]);
+	expect(snapshot.answers.some((a) => a.question.includes("OUT-OF-SCOPE"))).toBe(false);
+	expect(JSON.stringify(snapshot)).not.toContain("OUT-OF-SCOPE");
+});
+
+/** An answer with no `answeredAt` yet (the unit is still working) is not a fact for the fabric —
+ *  "not answered yet" projects nothing, the same honesty rule every other pending-state read applies. */
+test("an unanswered question is never projected into the fabric", async () => {
+	const dir = await tmpDir("acf-answer-pending-");
+	const agents = [dto("a", { repo: "/repo-a" })];
+	const pending: Answer = { id: "q1", repo: "/repo-a", question: "still working on it?", markdown: "", askedAt: 1 };
+
+	const snapshot = await buildFabricSnapshot({ actor: agentActor("a"), agents, stateDir: dir, answers: [pending] });
+
+	expect(snapshot.answers).toEqual([]);
+});
+
+/** Answers are untrusted agent markdown (DESIGN.md ask→fabric row) — the fabric fact caps the
+ *  excerpt rather than ever quoting a whole answer into a search snippet or a cold-start primer. */
+test("a long answer's fabric excerpt is capped at ~500 chars", async () => {
+	const dir = await tmpDir("acf-answer-cap-");
+	const agents = [dto("a", { repo: "/repo-a" })];
+	const longBody = "x".repeat(900);
+	const answer: Answer = { id: "q1", repo: "/repo-a", question: "q", markdown: longBody, askedAt: 1, answeredAt: 500 };
+
+	const snapshot = await buildFabricSnapshot({ actor: agentActor("a"), agents, stateDir: dir, answers: [answer] });
+
+	expect(snapshot.answers[0]?.answerExcerpt.length).toBeLessThanOrEqual(500);
+	expect(snapshot.answers[0]?.answerExcerpt.endsWith("…")).toBe(true);
+});
+
+/** `possiblyStale` (comprehension concern 10) is wired end-to-end through `buildFabricSnapshot`:
+ *  a receipt that touched the answer's cited file AFTER it was given flips the fact's flag. */
+test("a fabric answer fact's possiblyStale flag reflects a receipt that touched its cited file since", async () => {
+	const dir = await tmpDir("acf-answer-stale-");
+	const agents = [dto("a", { repo: "/repo-a" })];
+	const answer: Answer = { id: "q1", repo: "/repo-a", question: "why is dispatch slow?", markdown: "See `src/dispatch.ts` for the retry loop.", askedAt: 1, answeredAt: 500 };
+	await appendReceipt(dir, { agentId: "a", name: "a", repo: "/repo-a", runId: "r1", startedAt: 900, endedAt: 950, status: "idle", toolCalls: 1, toolTally: {}, filesTouched: ["src/dispatch.ts"] });
+
+	const snapshot = await buildFabricSnapshot({ actor: agentActor("a"), agents, stateDir: dir, repos: ["/repo-a"], answers: [answer] });
+
+	expect(snapshot.answers[0]?.possiblyStale).toBe(true);
 });
 
 test("(concern 05) fabric snapshot surfaces a recurring-failure annotation, repo-scoped", async () => {

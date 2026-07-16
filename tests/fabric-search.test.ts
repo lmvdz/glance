@@ -37,6 +37,10 @@ function snapshot(over: Partial<FabricSnapshot> = {}): FabricSnapshot {
 		symptoms: [
 			{ type: "symptom", source: { repo: "/r" }, id: "s1", symptom: "daemon healthy but dispatch stalled", whereToLook: ["src/dispatch.ts"], fixedBy: { agentId: "a1" }, landedAt: 500 },
 		],
+		episodes: [],
+		answers: [
+			{ type: "answer", source: { repo: "/r", agentId: "u1" }, id: "u1", question: "why is dispatch slow?", answerExcerpt: "Because the spawn loop is serial.", answeredAt: 500, possiblyStale: false },
+		],
 		...over,
 	};
 }
@@ -60,6 +64,7 @@ describe("fabricDocuments", () => {
 		expect(byType("lease")).toBe(1);
 		expect(byType("decision")).toBe(2);
 		expect(byType("symptom")).toBe(1);
+		expect(byType("answer")).toBe(1);
 	});
 
 	test("a symptom doc's text carries whereToLook too (concern 07: BM25 over symptom+whereToLook)", () => {
@@ -68,6 +73,22 @@ describe("fabricDocuments", () => {
 		expect(doc.title).toBe("daemon healthy but dispatch stalled");
 		expect(doc.text).toContain("src/dispatch.ts");
 		expect(doc.ref).toBe("src/dispatch.ts");
+	});
+
+	/** A recorded `glance ask` answer (comprehension concern 10): title is the question, text is the
+	 *  capped excerpt ONLY (never the full untrusted markdown), and `ref` is the answer id so a
+	 *  caller (the ⌘K palette) can act on it. */
+	test("an answer doc carries the question as title and the capped excerpt as text", () => {
+		const docs = fabricDocuments(snapshot());
+		const doc = docs.find((d) => d.type === "answer")!;
+		expect(doc.title).toBe("why is dispatch slow?");
+		expect(doc.text).toBe("Because the spawn loop is serial.");
+		expect(doc.ref).toBe("u1");
+	});
+
+	test("an absent snapshot.answers (older/forward-compat snapshot) yields no answer docs, not a crash", () => {
+		const docs = fabricDocuments(snapshot({ answers: undefined as unknown as FabricSnapshot["answers"] }));
+		expect(docs.some((d) => d.type === "answer")).toBe(false);
 	});
 });
 
@@ -114,6 +135,15 @@ describe("searchFabric", () => {
 		expect(results).toHaveLength(1);
 		expect(results[0]!.title).toBe("daemon healthy but dispatch stalled");
 		expect(results[0]!.ref).toBe("src/dispatch.ts");
+	});
+
+	/** A recorded ask→fabric answer (concern 10) is searchable via ⌘K/fabric, same as every other
+	 *  fact type — this is the query the ⌘K palette fires. */
+	test("a recorded answer is searchable via ⌘K/fabric (concern 10)", () => {
+		const results = searchFabric(snapshot(), "dispatch slow spawn serial", { type: "answer" });
+		expect(results).toHaveLength(1);
+		expect(results[0]!.title).toBe("why is dispatch slow?");
+		expect(results[0]!.ref).toBe("u1");
 	});
 });
 
@@ -165,6 +195,12 @@ describe("buildContextPrimer", () => {
 		const primer = buildContextPrimer(snapshot(), "dispatch stalled", { topK: 4 });
 		expect(primer).toContain("**Known symptom**");
 		expect(primer).toContain("dispatch stalled");
+	});
+
+	test("a recorded answer is folded into the cold-start primer as an Answered question (concern 10)", () => {
+		const primer = buildContextPrimer(snapshot(), "dispatch slow spawn serial", { topK: 4 });
+		expect(primer).toContain("**Answered question**");
+		expect(primer).toContain("why is dispatch slow?");
 	});
 
 	test("output is always fenced as untrusted internally — no unfenced path (concern 02)", () => {

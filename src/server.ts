@@ -3124,7 +3124,7 @@ async function allReceiptsAcross(managers: SquadManager[]): Promise<RunReceipt[]
  */
 async function fabricSnapshotAcross(managers: SquadManager[], actor: Actor, opts: { repos?: string[]; includeLeases?: boolean }): Promise<FabricSnapshot> {
 	const snapshots = await Promise.all(managers.map((m) => m.fabric(actor, opts)));
-	if (snapshots.length <= 1) return snapshots[0] ?? { actor: actor.id, generatedAt: Date.now(), scope: [], agents: [], digests: [], hotAreas: [], scout: [], leases: [], decisions: [], failures: [], symptoms: [], episodes: [] };
+	if (snapshots.length <= 1) return snapshots[0] ?? { actor: actor.id, generatedAt: Date.now(), scope: [], agents: [], digests: [], hotAreas: [], scout: [], leases: [], decisions: [], failures: [], symptoms: [], episodes: [], answers: [] };
 	return {
 		actor: actor.id,
 		generatedAt: Math.max(...snapshots.map((s) => s.generatedAt)),
@@ -3141,6 +3141,7 @@ async function fabricSnapshotAcross(managers: SquadManager[], actor: Actor, opts
 		failures: snapshots.flatMap((s) => s.failures),
 		symptoms: snapshots.flatMap((s) => s.symptoms),
 		episodes: snapshots.flatMap((s) => s.episodes),
+		answers: snapshots.flatMap((s) => s.answers),
 	};
 }
 

@@ -1,5 +1,5 @@
 # glance ask answers into fabric + stale-answer resurfacing
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical

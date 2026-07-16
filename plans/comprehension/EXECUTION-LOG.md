@@ -166,3 +166,54 @@ var is read somewhere" gate only recognized `envBool(...)`/`envInt(...)`/`envNum
 calls, not the new `envBoolAliased(primary, legacy, ...)` shape — widened to count both string
 arguments as reads, or the new alias helper would have made this gate FAIL by making the flag names
 LOOK unread even though they now genuinely are (a scanner-heuristic gap, not a real regression).
+
+## Concern 10 (ask→fabric + stale-answer resurfacing)
+
+| Concern | Model | Result | Review |
+|---|---|---|---|
+| 10 ask into fabric | sonnet (worktree) | SUCCESS | pending |
+
+`FabricAnswerFact` (`src/fabric.ts`): `{ question, answerExcerpt (500-char cap), answeredAt,
+possiblyStale }`, assembled from a new `answers?: Answer[]` on `FabricDeps` — the actor's FULL answer
+set, unfiltered by repo (mirroring `deps.features`, not `listSymptoms`/`listEpisodes`'s per-repo-call
+shape), scoped by the SAME `repoSet` guard copied verbatim from the decisions block. `KbDocType
+"answer"` + `fabricDocuments` flatten + `PRIMER_LABEL: "Answered question"` + webapp
+`commandPalette.ts` `TYPE_LABELS`. `fabricSnapshotAcross` (`src/server.ts`) needed the new field in
+both its single-manager fallback literal and its multi-manager merge — exactly the spot concern 09
+hit for `episodes`.
+
+Staleness (`src/answers.ts`): `possiblyStale(answer, receipts)` extracts conservative repo-relative
+path tokens from the answer's own untrusted markdown (`extractPathTokens`, `@substrate`-tagged —
+directly above `possiblyStale`, its one caller, not above the preceding `PATH_TOKEN_RE` const, which
+is where a first draft misplaced the doc comment and tripped the dead-exports ratchet), intersects
+them against the SAME-repo receipts' `filesTouched` universe (never trusting a plausible-looking
+string on its own), and flags stale only when a surviving reference has a receipt `endedAt` after the
+answer. No references extracted ⇒ never stale (honest default). Repo identity is internally
+re-normalized inside `possiblyStale` itself — a foreign-repo receipt touching a same-named file is
+ignored even if the caller hands it every visible receipt unscoped.
+
+Resurfacing (`src/squad-manager.ts`'s `gatherEpisodeInputs`, concern 09's `staleAnswers` input slot):
+populated as a live snapshot (like `fogTop`, not window-filtered like `deltas`/`symptoms`) — every
+answer for the repo re-checked against the same receipts `fogTop` just computed from. Its own
+try/catch nests inside `fogTop`'s so a `listAnswers`/`possiblyStale` failure degrades only
+`staleAnswers`, never blanking an already-computed `fogTop` (this function's documented
+"each input degrades independently" contract).
+
+Palette wiring: `PaletteFabricRow` gained `type`/`ref` fields (previously only `typeLabel` survived
+past `fabricRows`, discarding the raw type and backend `ref`); `CommandPalette.tsx`'s `runRow` fires
+`reportAnswerRead(row.repo, row.ref)` (concern 02's built-but-unwired helper) when an `'answer'` row
+is selected, before the existing `setView('omp-graph')` navigation.
+
+New tests: `tests/answers.test.ts` (extraction + 9 staleness cases: referenced-file-changed,
+no-references, unrecognized-token, foreign-repo-ignored, pre-answer receipt, trailing-slash repo,
+unanswered question, endedAt-fallback-to-startedAt), `tests/agent-context-fabric.test.ts` (repo
+scoping mirroring the decisions-block precedent, unanswered-question exclusion, excerpt cap,
+end-to-end `possiblyStale` wiring through `buildFabricSnapshot`), `tests/fabric-search.test.ts`
+(flatten + PRIMER_LABEL + forward-compat `?? []`), `webapp/src/lib/commandPalette.test.ts` (type/ref
+threading + Answered-question label).
+
+Root `bun test`: 3234 pass / 0 fail / 1 error (acp-agent-driver "unhandled error between tests",
+pre-existing per batch 1's note). `webapp bun test`: 1344 pass / 0 fail. Both `tsc --noEmit` clean.
+Dead-exports ratchet: 215/215 (unchanged) — `possiblyStale` is live-referenced from `fabric.ts` and
+`squad-manager.ts`; `extractPathTokens` is the one new `@substrate`-exempt entry, after fixing its
+misplaced doc comment.

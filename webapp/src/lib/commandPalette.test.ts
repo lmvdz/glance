@@ -36,6 +36,7 @@ describe('fabricRows', () => {
     { type: 'decision', id: 'd1', title: 'Use ember accent', snippet: 'decided in brand.md', score: 0.9 },
     { type: 'hot-area', id: 'h1', title: 'src/auth/token.ts', snippet: 'touched by 3 agents', score: 0.8, repo: 'glance' },
     { type: 'symptom', id: 's1', title: 'daemon healthy but dispatch stalled', snippet: 'src/dispatch.ts', score: 0.7 },
+    { type: 'answer', id: 'a1', title: 'why is dispatch slow?', snippet: 'the spawn loop is serial', score: 0.6, repo: 'glance', ref: 'u1' },
     { type: 'mystery-type', id: 'm1', title: 'unknown kind', snippet: '...', score: 0.1 },
   ];
 
@@ -44,17 +45,30 @@ describe('fabricRows', () => {
     expect(rows[0].typeLabel).toBe('Decision');
     expect(rows[1].typeLabel).toBe('Hot file');
     expect(rows[2].typeLabel).toBe('Known symptom'); // comprehension concern 07
-    expect(rows[3].typeLabel).toBe('mystery-type');
+    expect(rows[3].typeLabel).toBe('Answered question'); // comprehension concern 10
+    expect(rows[4].typeLabel).toBe('mystery-type');
   });
 
   test('namespaces ids as fabric:<type>:<id> so they can never collide with nav-row ids', () => {
-    expect(fabricRows(raw).map((r) => r.id)).toEqual(['fabric:decision:d1', 'fabric:hot-area:h1', 'fabric:symptom:s1', 'fabric:mystery-type:m1']);
+    expect(fabricRows(raw).map((r) => r.id)).toEqual([
+      'fabric:decision:d1', 'fabric:hot-area:h1', 'fabric:symptom:s1', 'fabric:answer:a1', 'fabric:mystery-type:m1',
+    ]);
   });
 
   test('carries repo through when present, undefined when absent', () => {
     const rows = fabricRows(raw);
     expect(rows[0].repo).toBeUndefined();
     expect(rows[1].repo).toBe('glance');
+  });
+
+  /** Comprehension concern 10: the raw `type` and backend `ref` (the answer id) survive onto the
+   *  row — CommandPalette.tsx's row-selection handler needs both to fire `reportAnswerRead`. */
+  test('carries the raw type and ref through so a selection handler can branch on fact type', () => {
+    const rows = fabricRows(raw);
+    expect(rows[3].type).toBe('answer');
+    expect(rows[3].ref).toBe('u1');
+    expect(rows[0].type).toBe('decision');
+    expect(rows[0].ref).toBeUndefined();
   });
 
   test('null/undefined results → empty array', () => {
