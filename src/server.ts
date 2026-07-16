@@ -41,6 +41,7 @@ import {
 	ChatAttachmentCreateBodySchema,
 	CommentsCreateBodySchema,
 	ConsoleBodySchema,
+	ConsoleReleaseBodySchema,
 	decodeBody,
 	decodeBodyOrEmpty,
 	FeatureAgentsLinkBodySchema,
@@ -2374,11 +2375,43 @@ export class SquadServer {
 		}
 		if (url.pathname === "/api/console" && req.method === "POST") {
 			const body = decodeBodyOrEmpty(ConsoleBodySchema, await req.json().catch(() => null));
-			const repo = typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
+			let repo = typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
 			const model = typeof body.model === "string" && body.model.trim() ? body.model.trim() : undefined;
 			const profileId = typeof body.profileId === "string" ? body.profileId : undefined;
-			const dto = await manager.create({ repo, name: "chat", model, profileId, autoRoute: false, appendSystemPrompt: CONSOLE_SYSTEM_PROMPT }, actor);
-			return Response.json({ agentId: dto.id });
+			// A named harness rides through to create(), which owns validation (unknown name → loud
+			// throw; unverified → the concern-08 honesty gate). `glance here` passes "claude-code".
+			const harness = typeof body.harness === "string" && body.harness.trim() ? body.harness.trim() : undefined;
+			// Ephemeral cwd registration (daily-onramp 02): register BEFORE create — registerProject's own
+			// validation (absolute path, real git repo, canonical root) is exactly the fail-closed gate a
+			// terminal-attach session needs, and its canonical root becomes the repo the unit spawns on.
+			// Tier note: durable POST /api/projects is admin, but this stays operator like the create it
+			// wraps — projects() already unions LIVE-AGENT repos, so an operator spawning here widens the
+			// graph allowlist identically with or without this transient registration; no new authority.
+			let ephemeral = false;
+			if (body.ephemeral === true) {
+				const reg = await manager.registerEphemeralProject(repo);
+				if (!reg.ok) return new Response(reg.reason, { status: 400 });
+				repo = reg.repo;
+				ephemeral = reg.ephemeral;
+			}
+			try {
+				const dto = await manager.create({ repo, name: "chat", model, profileId, harness, autoRoute: false, appendSystemPrompt: CONSOLE_SYSTEM_PROMPT }, actor);
+				return Response.json({ agentId: dto.id, repo, ephemeral });
+			} catch (err) {
+				// A failed spawn must not leave a half-session behind: undo the registration this very
+				// request created (no-op when the repo was already durably registered).
+				if (ephemeral) manager.releaseEphemeralProject(repo);
+				return new Response(errText(err), { status: 409 });
+			}
+		}
+		// `glance here` exit hook: restore pre-session registry state. Idempotent — releasing a repo that
+		// was never (or is no longer) session-scoped reports released:false rather than erroring, so a
+		// REPL can fire it unconditionally on the way out.
+		if (url.pathname === "/api/console/release" && req.method === "POST") {
+			const decoded = decodeBody(ConsoleReleaseBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response("repo required", { status: 400 });
+			const released = manager.releaseEphemeralProject(decoded.success.repo);
+			return Response.json(released, { status: released.ok ? 200 : 500 });
 		}
 		// Feature 2 D2 (CANVAS-AND-PAGE-CHAT.md): a pasted/dropped/captured/annotated chat image
 		// persists here as a chat ARTIFACT (org-scoped by `manager`, size/PNG-magic-validated in

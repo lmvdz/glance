@@ -2476,6 +2476,47 @@ export class SquadManager extends EventEmitter {
 		return { ok: true, repo: key, removed: outcome === "removed" };
 	}
 
+	/**
+	 * Repos registered only for the lifetime of a `glance here` session (daily-onramp 02). Deliberately
+	 * NOT persisted: ephemeral-by-definition must not survive a daemon restart (restart survival of the
+	 * SESSION is concern 04's; this set only tracks which registrations to undo on session end). Keys are
+	 * the canonical repo roots `registerProject` returns — the same key `projects()` groups by.
+	 */
+	private readonly ephemeralProjects = new Set<string>();
+
+	/** Test/observability read: is this repo's registration session-scoped right now? */
+	isEphemeralProject(repo: string): boolean {
+		return this.ephemeralProjects.has(normalizeRepoPath(repo ?? ""));
+	}
+
+	/**
+	 * Register a repo for the lifetime of a casual session: same validation and durable write as
+	 * `registerProject`, plus a marker so session end can undo it. Only a repo THIS call actually ADDED
+	 * becomes ephemeral — a repo the operator had already registered durably must never be silently
+	 * un-registered when a passing `glance here` session ends (`add()` is idempotent, so `added:false`
+	 * is exactly that case).
+	 */
+	async registerEphemeralProject(repo: string): Promise<{ ok: true; repo: string; added: boolean; ephemeral: boolean } | { ok: false; reason: string }> {
+		const result = await this.registerProject(repo);
+		if (!result.ok) return result;
+		if (result.added) this.ephemeralProjects.add(result.repo);
+		return { ...result, ephemeral: this.ephemeralProjects.has(result.repo) };
+	}
+
+	/**
+	 * Undo an ephemeral registration on ordinary session end (REPL exit, or the daemon's own removal
+	 * path — see `remove()`). No-op for repos that were never session-scoped, so callers can fire it
+	 * unconditionally. Deletes nothing on disk, per `unregisterProject`'s own contract.
+	 */
+	releaseEphemeralProject(repo: string): { ok: boolean; repo: string; released: boolean; reason?: string } {
+		const key = normalizeRepoPath(repo ?? "");
+		if (!this.ephemeralProjects.has(key)) return { ok: true, repo: key, released: false };
+		const dropped = this.unregisterProject(key);
+		if (!dropped.ok) return { ok: false, repo: key, released: false, reason: dropped.reason };
+		this.ephemeralProjects.delete(key);
+		return { ok: true, repo: key, released: true };
+	}
+
 	/** Feature view: persisted features + derived plan-dir/agent features with live land status, per repo. */
 	async features(repo?: string): Promise<FeatureDTO[]> {
 		const list = this.list();
@@ -4066,6 +4107,10 @@ export class SquadManager extends EventEmitter {
 		// Already promoted → idempotent re-steer (retry-safe): the state change is done; just apply any
 		// mode change and (re)deliver the task into the same session.
 		if (o.promoted) {
+			// Promotion is the "keep it" signal for a `glance here` session (daily-onramp 02) — clearing
+			// the marker on the idempotent path too means a re-promote after a crashed first call still
+			// makes the registration durable.
+			this.ephemeralProjects.delete(normalizeRepoPath(rec.dto.repo));
 			if (opts.mode && opts.mode !== rec.dto.autonomyMode) {
 				rec.dto.autonomyMode = opts.mode;
 				o.autonomyMode = opts.mode;
@@ -4106,6 +4151,10 @@ export class SquadManager extends EventEmitter {
 			this.syncAuthority(rec.dto);
 			return { ok: false, reason: `promote persist failed: ${errText(err)}` };
 		}
+		// Promote makes a `glance here` session's repo registration durable: with the ephemeral marker
+		// gone, session-end cleanup no longer fires (daily-onramp 02). AFTER the persist so a rolled-back
+		// promote leaves the marker (and the session's cleanup contract) intact.
+		this.ephemeralProjects.delete(normalizeRepoPath(rec.dto.repo));
 		this.emitAgent(rec);
 		void this.recordAudit(actor, "promote", id, "ok", `console→unit; mode ${prior.mode}→${rec.dto.autonomyMode}`);
 		await this.store.appendAudit({ actor: actor.id, action: "promote", target: id, detail: { priorMode: prior.mode, mode: rec.dto.autonomyMode, task: opts.task ? truncate(opts.task, 120) : undefined } }).catch(() => {});
@@ -5995,6 +6044,13 @@ export class SquadManager extends EventEmitter {
 			await deleteCheckpointLog(this.stateDir, rec.options.workflowState.runId).catch(() => {});
 		}
 		this.agents.delete(id);
+		// Daemon-side session end for a `glance here` registration (daily-onramp 02): when the LAST agent
+		// on an ephemerally-registered repo is removed, restore the pre-session registry state — the REPL's
+		// own exit hook is not the only path a casual session ends through.
+		const repoKey = normalizeRepoPath(rec.options.repo);
+		if (this.ephemeralProjects.has(repoKey) && ![...this.agents.values()].some((r) => normalizeRepoPath(r.options.repo) === repoKey)) {
+			this.releaseEphemeralProject(repoKey);
+		}
 		if (this.scoutCursor.delete(id)) writeScoutCursors(this.stateDir, this.scoutCursor);
 		this.emit("event", { type: "removed", id } satisfies SquadEvent);
 		await this.persist();
