@@ -154,6 +154,7 @@ import { reflect } from "./reflection.ts";
 import { failureAnnotation, recordFailureAnnotation } from "./failure-memory.ts";
 import { readModelOutcomes, recordModelOutcome, recordModelOutcomeBlocked, tierOf } from "./model-outcomes.ts";
 import { shadowCostCheck } from "./cost-gate.ts";
+import { recordCostLanded } from "./cost-aggregate.ts";
 import { buildScoreboard, type Scoreboard } from "./attribution-scoreboard.ts";
 import { recordConfidenceOutcome, setThresholdTunerRoot, tunedConfidenceFloor } from "./threshold-tuner.ts";
 import { JsonlLog } from "./jsonl-log.ts";
@@ -3092,6 +3093,9 @@ export class SquadManager extends EventEmitter {
 			// Never gates the land above; purely record-only, after the outcome is already known.
 			try {
 				recordModelOutcome(this.stateDir, effectiveModel, tierOf(rec.options.thinking), result.ok);
+				// Lane-keyed landed counter (concern 08's documented rollout wire): same record-only,
+				// never-gates posture as recordModelOutcome above.
+				if (result.ok) recordCostLanded(this.stateDir, effectiveModel, tierOf(rec.options.thinking), rec.dto.lane);
 				this.learningMetrics.record("model-outcome-recorded", 1, { flag: "model-outcomes", variant: learningFlags(dto.id).modelOutcomes });
 			} catch (err) {
 				this.log("warn", `model-outcomes record failed for ${dto.name} (non-fatal): ${errText(err)}`);
@@ -5963,8 +5967,10 @@ export class SquadManager extends EventEmitter {
 						// AgentRecord.efficiencyFlags / receipts.ts#confirmDeliveredFlags.
 						efficiencyFlags: rec.efficiencyFlags,
 						// Resolved work lane (adw-factory-borrows concern 02) — prerequisite for concern 08's
-						// lane-keyed cost aggregate.
+						// lane-keyed cost aggregate, which also needs the tier: without it every real
+						// receipt buckets under "unknown" and the O(1) fast path never fires.
 						lane: rec.dto.lane,
+						tier: tierOf(rec.options.thinking),
 					});
 				}
 				rec.run.start(rec.dto.model);
@@ -6144,6 +6150,11 @@ export class SquadManager extends EventEmitter {
 		if (this.raceLedger.get(issue.id)) return false; // budget already spent for this issue
 		const lane: WorkLane = rec.dto.lane ?? "feature";
 		if (LANE_POLICY[lane].race !== 1) return false; // operator-config lanes only (concern-02 clamp)
+		// A race sibling is SPEND, so the lane must come from a human decision: an operator opts.lane or
+		// a human-set Plane label (the sanctioned pre-assignment transport, DESIGN.md). A classifier hit
+		// on "urgent"/"outage" in task text — or the bare default — must never buy a second agent run.
+		const laneSource = rec.options.laneSource ?? "default";
+		if (laneSource !== "operator" && laneSource !== "label") return false;
 		// Claim the slot SYNCHRONOUSLY, before the first `await` below — closes the TOCTOU window between
 		// the `raceLedger.get` check above and the ledger actually being stamped (which only happens once
 		// the sibling's own worktree-cutting `create()` call resolves, several turns of the event loop
@@ -6186,7 +6197,14 @@ export class SquadManager extends EventEmitter {
 				executionRole: rec.options.executionRole,
 				model: rec.dto.model,
 				autoRoute: false,
-				approvalMode: "yolo",
+				// A genuine retry inherits the original's autonomy and scope wholesale: an ask-mode
+				// original must not get an unattended sibling, and the sibling keeps the issue's
+				// requires/owns/produces provisioning so scope gates see the same unit shape.
+				approvalMode: rec.dto.approvalMode,
+				requires: rec.options.requires,
+				owns: rec.options.owns,
+				produces: rec.options.produces,
+				scopeSource: rec.options.scopeSource,
 			});
 			// claimed() bookkeeping: the Dispatcher's claimed set is derived live from `this.agents` (both
 			// the parked original and this sibling carry the same `issue.id`), so the issue reads as claimed

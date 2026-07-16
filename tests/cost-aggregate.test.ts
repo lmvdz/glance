@@ -225,7 +225,10 @@ describe("rebuild overlays lane-agnostic `landed` from the existing model-outcom
 		];
 		const outcomes: ModelOutcomes = { "opus::heavy": { landed: 7, rejected: 3 } };
 		const doc = buildCostAggregateFromReceipts(receipts, outcomes);
-		expect(doc.cells["opus::heavy::*"].landed).toBe(7);
+		// The outcomes ledger is ALL-TIME but this doc's attempts are windowed: the overlay clamps
+		// landed to the window's attempts (2 here), else landRate > 1.0 undercounts
+		// costPerLandedChange — an under-deny skew once enforce reads these cells.
+		expect(doc.cells["opus::heavy::*"].landed).toBe(2);
 		// Lane-keyed cells are untouched by the overlay — only the roll-up gets it (no per-lane landed
 		// signal exists yet; see cost-aggregate.ts's rollout note).
 		expect(doc.cells["opus::heavy::feature"].landed).toBe(0);

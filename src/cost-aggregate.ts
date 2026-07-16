@@ -104,7 +104,7 @@ function readRaw(stateDir: string): { doc: CostAggregateDoc; valid: boolean } {
 		if (!b.exists(p)) return { doc: emptyDoc(), valid: false };
 		const raw = b.readTextSync(p);
 		if (raw === undefined) return { doc: emptyDoc(), valid: false };
-		const parsed = JSON.parse(raw) as unknown;
+		const parsed: unknown = JSON.parse(raw);
 		if (
 			!parsed ||
 			typeof parsed !== "object" ||
@@ -238,8 +238,11 @@ export function buildCostAggregateFromReceipts(receipts: RunReceipt[], outcomes:
 		// Only attach a landed count where there's cost data to divide it against — a (model,tier) the
 		// outcomes ledger knows about but no receipt in this window ever priced has no costUsdSum to
 		// pair it with, and `costPerLandedChange` would be undefined for it anyway (see
-		// `cellProjection`'s null guard below).
-		if (existing) doc.cells[rollupKey] = { ...existing, landed: counts.landed ?? 0 };
+		// `cellProjection`'s null guard below). The outcomes ledger is ALL-TIME while this doc's
+		// attempts are 30-day-windowed, so clamp landed to attempts: an unclamped overlay lets
+		// landRate exceed 1.0 and undercounts costPerLandedChange — an under-deny (fail-open) skew
+		// once enforce mode reads these cells.
+		if (existing) doc.cells[rollupKey] = { ...existing, landed: Math.min(counts.landed ?? 0, existing.attempts) };
 	}
 	doc.generatedAt = now;
 	return doc;

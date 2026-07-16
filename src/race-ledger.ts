@@ -42,7 +42,7 @@ function readAll(stateDir: string): Record<string, RaceRecord> {
 		if (!b.exists(file)) return {};
 		const raw0 = b.readTextSync(file);
 		if (raw0 === undefined) return {};
-		const raw = JSON.parse(raw0) as unknown;
+		const raw: unknown = JSON.parse(raw0);
 		if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
 		return raw as Record<string, RaceRecord>;
 	} catch {
