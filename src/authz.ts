@@ -110,7 +110,93 @@ export function restActionTier(method: string, pathname: string): Role {
 	// The push-tap beacon is a POST but stays viewer, like push registration above it: anyone who
 	// can open the app from a notification tap must be able to have that tap counted (it appends an
 	// observability line, gates nothing) — an operator floor would silently zero the push-taps/day
-	// adoption counter for viewer-tier devices (daily-dogfood-engine 02).
+	// adoption counter for viewer-tier devices (daily-dogfood-engine 02). This is a DELIBERATE choice,
+	// not an oversight: the tier alone is not the safety boundary here. Lowering the floor to viewer
+	// only holds because the write site is expected to pair it with the three guards below (shape,
+	// existence, rate) — a viewer token must never be able to grow push-taps.jsonl unbounded with
+	// fabricated agentId strings, because that file is the ENTIRE substrate GET /api/adoption reads
+	// for the daily-driver adoption-gate verdict (plans/daily-dogfood-engine/02, 03).
 	if (pathname === "/api/auth/check" || pathname === "/api/push-tap" || pathname.startsWith("/api/push/")) return "viewer";
 	return method === "GET" ? "viewer" : "operator";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Push-tap write guards (finding #6, wave-1 fixer D): three independent, pure/stateless bounds the
+// `/api/push-tap` write site (`SquadManager.recordPushTap`) is expected to apply BEFORE appending —
+// they live next to the tier map that lets this route in at viewer, since the tier decision above
+// is only safe in combination with them:
+//   1. shape    — `isValidPushTapAgentId` rejects anything that isn't a plausible agent id before
+//                 it's ever considered for disk.
+//   2. existence — `isKnownPushTapAgentId` takes the live roster (or removed-ledger) ids from the
+//                 caller (this module has no manager reference, and must not grow one just to
+//                 answer "is this id real" — that would turn a pure tier map into a stateful
+//                 dependency on SquadManager) and confirms the tapped id was ever real.
+//   3. rate     — `allowPushTap` is a small in-memory token bucket per source key (bearer token /
+//                 remote addr — the caller's choice), so even a genuine id can't be hammered into
+//                 thousands of lines/sec.
+// Without all three, a viewer-tier credential can inflate pushTapsByDay (src/adoption-counters.ts)
+// with fabricated taps, corrupting the number Lars's daily-driver adoption-gate verdict reads.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/** An agent id must never grow the push-tap ledger past what `SquadManager.recordPushTap`'s own
+ *  `.slice(0, 200)` clamp already assumes is reasonable, and must contain no control characters
+ *  (a JSONL line is one `JSON.stringify` away from disk either way, but a shape check here means
+ *  garbage is rejected before it's even worth writing). Real agent ids are derived from a
+ *  free-text `name` (see `newAgentId` in spawn-identity.ts), so the charset is intentionally
+ *  permissive — this is a sanity floor, not a slug validator. */
+const PUSH_TAP_AGENT_ID_MAX_LEN = 200;
+// biome-ignore lint/suspicious/noControlCharactersInRegex: the point of this regex IS to detect them
+const PUSH_TAP_CONTROL_CHAR_RE = /[\x00-\x1f\x7f]/;
+
+export function isValidPushTapAgentId(id: unknown): id is string {
+	if (typeof id !== "string") return false;
+	if (id.length === 0 || id.length > PUSH_TAP_AGENT_ID_MAX_LEN) return false;
+	return !PUSH_TAP_CONTROL_CHAR_RE.test(id);
+}
+
+/** Pure existence check — the caller supplies the live roster ids (or a removed-agent ledger) it
+ *  already holds; this module deliberately has no reference to `SquadManager` (see the class
+ *  comment above authz.ts: it is a dependency-free permission map, and must stay that way). */
+export function isKnownPushTapAgentId(agentId: string, knownIds: Iterable<string>): boolean {
+	for (const id of knownIds) {
+		if (id === agentId) return true;
+	}
+	return false;
+}
+
+/** Burst allowance and sustained rate for `allowPushTap` below: 10 taps immediately, refilling at
+ *  10/minute after — generous for a real human tapping real notifications, far below what a
+ *  scripted loop of forged agentIds could otherwise write. */
+const PUSH_TAP_BUCKET_CAPACITY = 10;
+const PUSH_TAP_BUCKET_REFILL_MS = 60_000 / PUSH_TAP_BUCKET_CAPACITY;
+
+interface PushTapBucket {
+	tokens: number;
+	last: number;
+}
+const pushTapBuckets = new Map<string, PushTapBucket>();
+
+/** Token-bucket rate check, one bucket per `sourceKey` (the write site's choice — a bearer token
+ *  and/or remote addr both work; combine them for a tighter bound). Returns `true` and consumes a
+ *  token iff a tap from this source is allowed right now. Pass `now` only from tests. */
+export function allowPushTap(sourceKey: string, now: number = Date.now()): boolean {
+	let bucket = pushTapBuckets.get(sourceKey);
+	if (!bucket) {
+		bucket = { tokens: PUSH_TAP_BUCKET_CAPACITY, last: now };
+		pushTapBuckets.set(sourceKey, bucket);
+	}
+	const elapsedMs = now - bucket.last;
+	if (elapsedMs > 0) {
+		bucket.tokens = Math.min(PUSH_TAP_BUCKET_CAPACITY, bucket.tokens + elapsedMs / PUSH_TAP_BUCKET_REFILL_MS);
+		bucket.last = now;
+	}
+	if (bucket.tokens < 1) return false;
+	bucket.tokens -= 1;
+	return true;
+}
+
+/** Test-only: drop all rate-limit state so bucket tests never leak between runs (and so a long
+ *  test-process lifetime never pins memory on stale source keys). Not called from product code. */
+export function _resetPushTapRateLimitsForTests(): void {
+	pushTapBuckets.clear();
 }

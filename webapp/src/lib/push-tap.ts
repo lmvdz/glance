@@ -8,11 +8,16 @@
  * "strip after use" precedent as `captureToken()`'s `?token=` handling in ./api.ts. A typed or
  * clicked URL never carries the marker, so it never counts.
  *
- * Dedupe: a sessionStorage flag keyed on the exact hash guards the StrictMode/HMR remount case;
- * the immediate strip guards everything else (once stripped, the marker can't re-fire). Two lanes
- * are covered: page boot (cold open via openWindow) and `hashchange` (the sw `navigate()`s an
- * ALREADY-OPEN window, which is a same-document hash change — no reload, so boot code alone would
- * miss exactly the focused-window tap).
+ * Dedupe: a sessionStorage flag keyed on the agent id guards the StrictMode/HMR remount case
+ * (two synchronous re-invocations of this same physical arrival before the strip below has had a
+ * chance to land); the immediate strip guards everything else (once stripped, the marker can't
+ * re-fire from the SAME arrival). The flag is cleared right after it's consulted — it must only
+ * ever suppress the double-fire of *this one* navigation, never a later, genuinely separate tap.
+ * A flag left set permanently would silently cap the count at one tap per agent per tab lifetime
+ * (a real bug this file shipped with once — see the "later real tap" test in push-tap.test.ts).
+ * Two lanes are covered: page boot (cold open via openWindow) and `hashchange` (the sw
+ * `navigate()`s an ALREADY-OPEN window, which is a same-document hash change — no reload, so boot
+ * code alone would miss exactly the focused-window tap).
  */
 
 import { apiFetch, jsonInit } from './api';
@@ -50,9 +55,12 @@ export function reportPushTapFromLocation(): void {
   try {
     const parsed = parsePushTapHash(location.hash);
     if (!parsed) return;
+    // Keyed on the agent id, not the raw hash: the flag's only job is to survive the
+    // synchronous double-invoke window for THIS arrival, so it must not persist a moment
+    // longer than that (see the class comment above).
+    const key = SEEN_PREFIX + parsed.agentId;
     let seen = false;
     try {
-      const key = SEEN_PREFIX + location.hash;
       seen = sessionStorage.getItem(key) === '1';
       if (!seen) sessionStorage.setItem(key, '1');
     } catch {
@@ -63,6 +71,14 @@ export function reportPushTapFromLocation(): void {
     }
     // Strip after use (replaceState fires no hashchange, so this can't re-enter itself).
     history.replaceState(null, '', location.pathname + location.search + parsed.strippedHash);
+    // Clear immediately — a LATER real tap on the same agent (hours later, still the same open
+    // tab) reconstructs this identical hash via a fresh hashchange and must count, not be
+    // silently dropped as a "repeat" of an arrival that finished long ago.
+    try {
+      sessionStorage.removeItem(key);
+    } catch {
+      // storage blocked — nothing was persisted to clear
+    }
   } catch {
     // beacons are best-effort, always
   }

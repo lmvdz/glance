@@ -660,6 +660,11 @@ function showAuth() {
   el.querySelector('[name="email"]').focus();
 }
 const agents = new Map();        // id -> AgentDTO
+// True once the daemon's first "roster" frame has landed (WS onopen sends it right away). Before
+// that, a deep-linked agent id genuinely might still be in flight; after it, an id absent from the
+// roster is either gone (removed) or was never real, so the placeholder copy must stop implying
+// "still waiting" — see renderBody's `view === "agent"` branch.
+let rosterLoaded = false;
 const transcripts = new Map();   // id -> TranscriptEntry[]
 const commandsByAgent = new Map();// id -> CommandInfo[] (slash commands + skills + extensions)
 const composerDraft = new Map();  // id -> in-progress composer text (survives re-renders)
@@ -794,7 +799,7 @@ function attachCompletion(input, getItems) {
 
 function handle(ev) {
   switch (ev.type) {
-    case "roster": agents.clear(); for (const a of ev.agents) agents.set(a.id, a); seedStatus(); checkUiVersion(ev.version); refreshShell(); break;
+    case "roster": agents.clear(); for (const a of ev.agents) agents.set(a.id, a); rosterLoaded = true; seedStatus(); checkUiVersion(ev.version); refreshShell(); break;
     case "agent": { const prev = prevStatus.get(ev.agent.id); agents.set(ev.agent.id, ev.agent); signalTransition(prev, ev.agent); prevStatus.set(ev.agent.id, ev.agent.status); refreshShell(); break; }
     case "commands": commandsByAgent.set(ev.id, ev.commands); break;
     case "features-changed": if (view === "board" || view === "feature") loadFeatures(); break;
@@ -888,6 +893,46 @@ function pushRoute() {
   if (location.hash !== h) history.pushState(null, "", h);
 }
 function safeDecode(s) { try { return decodeURIComponent(s); } catch { return s; } }
+
+// ── Push-tap beacon (mirrors webapp/src/lib/push-tap.ts semantics; daily-dogfood-engine 02) ────
+// src/push.ts appends `?push=1` to every push payload's deep link (`/#/agent/<id>?push=1`). The
+// generic `#/(agent|project)/(.+)` route below is greedy: left unhandled, it captures "id?push=1"
+// as the agent id itself, so a tapped notification could never match a real roster entry and
+// permanently rendered the "waiting for the daemon's roster" placeholder. This must run BEFORE
+// that generic match and strip the marker before the id is used for anything.
+const PUSH_TAP_SEEN_PREFIX = "ompsq_push_tap:";
+function parsePushTapHash(hash) {
+  const m = /^#\/agent\/([^?]+)\?(.+)$/.exec(hash);
+  if (!m) return null;
+  const params = new URLSearchParams(m[2]);
+  if (params.get("push") !== "1") return null;
+  params.delete("push");
+  const rest = params.toString();
+  let agentId;
+  try { agentId = decodeURIComponent(m[1]); } catch { return null; } // malformed encoding — not ours
+  if (!agentId) return null;
+  return { agentId, strippedHash: `#/agent/${m[1]}${rest ? `?${rest}` : ""}` };
+}
+// Beacon once (fire-and-forget) and strip the marker from the visible URL. The sessionStorage
+// dedupe flag is keyed on the agent id and cleared immediately after use — it exists only to guard
+// a same-tick double-invoke of this exact arrival, never to suppress a LATER, genuinely separate
+// tap on the same agent in this still-open tab (that undercount was finding #9's webapp-side bug;
+// this legacy port ships already fixed). Never throws — a broken beacon must not cost the route.
+function reportPushTapFromLocation(parsed) {
+  try {
+    const key = PUSH_TAP_SEEN_PREFIX + parsed.agentId;
+    let seen = false;
+    try {
+      seen = sessionStorage.getItem(key) === "1";
+      if (!seen) sessionStorage.setItem(key, "1");
+    } catch { /* storage blocked (private mode) — the strip below still bounds this to once */ }
+    if (!seen) fetch("/api/push-tap", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ agentId: parsed.agentId }) }).catch(() => {});
+    // Strip after use (replaceState fires no hashchange, so this can't re-enter itself).
+    history.replaceState(null, "", location.pathname + location.search + parsed.strippedHash);
+    try { sessionStorage.removeItem(key); } catch { /* nothing was persisted to clear */ }
+  } catch { /* beacons are best-effort, always */ }
+}
+
 function applyRoute() {
   if (location.hash === "#/board") { view = "board"; selFeature = null; renderAll(); loadFeatures(); return; }
   if (location.hash === "#/queue") { view = "queue"; selAgent = null; renderAll(); return; }
@@ -896,6 +941,8 @@ function applyRoute() {
   if (location.hash === "#/settings") { view = "settings"; selAgent = null; renderAll(); return; }
   const mf = location.hash.match(/^#\/feature\/(.+)$/);
   if (mf) { selFeature = safeDecode(mf[1]); view = "feature"; renderAll(); loadFeatures(); return; }
+  const pt = parsePushTapHash(location.hash);
+  if (pt) { reportPushTapFromLocation(pt); openAgent(pt.agentId); return; }
   const m = location.hash.match(/^#\/(agent|project)\/(.+)$/);
   if (m && m[1] === "agent") { openAgent(safeDecode(m[2])); return; }
   if (m && m[1] === "project") { selProject = safeDecode(m[2]); selAgent = null; view = "project"; renderAll(); return; }
@@ -985,6 +1032,15 @@ function renderBody() {
     if (a) {
       if (!selProject) { const pr = projects().find(x => x.repo === a.repo); if (pr) { selProject = pr.id; renderSidebar(); renderCrumb(); } }
       return renderAgent(body, a);
+    }
+    if (rosterLoaded) {
+      // The first roster has already landed WITHOUT this agent — it isn't "still coming", it's
+      // gone (removed) or was never real (stale/forged deep link). Saying "waiting for the
+      // daemon's roster" here would be a lie the operator can never resolve by waiting longer.
+      body.innerHTML = `<div class="nodetail">This session no longer exists.<button class="primary" id="agentGoneBack">Back to Overview</button></div>`;
+      const back = document.getElementById("agentGoneBack");
+      if (back) back.onclick = () => { selAgent = null; view = "project"; renderAll(); };
+      return;
     }
     body.innerHTML = `<div class="nodetail">Opening this session… (waiting for the daemon's roster)</div>`;
     return;
