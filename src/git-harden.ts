@@ -54,10 +54,15 @@ export interface HardenedGitResult {
 // here so the neutralizing `-c` flags + env can never be forgotten at a call site.
 // stdout is returned VERBATIM (porcelain whitespace-significant, diffs newline-significant);
 // callers trim only where safe.
-export async function hardenedGit(args: string[], opts?: { cwd?: string }): Promise<HardenedGitResult> {
+// `opts.env` overlays extras (e.g. a private GIT_INDEX_FILE for boundary-sync's temp-index tree
+// snapshot) ON TOP of the hardening env — GIT_HARDEN_ENV spreads last-but-one so an override can
+// never accidentally re-enable a prompt/pager, and callers cannot shadow the hardening keys.
+// `opts.stdin` feeds the child's stdin and closes it (e.g. `hash-object --stdin-paths`).
+export async function hardenedGit(args: string[], opts?: { cwd?: string; env?: Record<string, string>; stdin?: string }): Promise<HardenedGitResult> {
 	const proc = Bun.spawn(["git", ...GIT_HARDEN_ARGS, ...args], {
 		cwd: opts?.cwd,
-		env: { ...process.env, ...GIT_HARDEN_ENV },
+		env: { ...process.env, ...opts?.env, ...GIT_HARDEN_ENV },
+		stdin: opts?.stdin !== undefined ? new TextEncoder().encode(opts.stdin) : undefined,
 		stdout: "pipe",
 		stderr: "pipe",
 	});

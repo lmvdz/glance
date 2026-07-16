@@ -424,7 +424,7 @@ function fmtIdle(ms: number): string {
 
 export type AttentionSeverity = 'critical' | 'warn' | 'ok';
 export type AttentionKind = 'blocked' | 'vetoed' | 'inconclusive' | 'land-ready' | 'error' | 'resource' | 'collision' | 'flapping' | 'stalled' | 'report' | 'attention';
-export type AttentionActionKind = 'answer' | 'land' | 'restart' | 'view' | 'raise-cap' | 'steer';
+export type AttentionActionKind = 'answer' | 'land' | 'restart' | 'view' | 'raise-cap' | 'steer' | 'apply-sync' | 'discard-sync';
 
 /** Epic 5 (HITL safeguards, DESIGN.md D3): a working agent is considered drifting once it's gone
  *  this long without any activity — the only robustly-computable, always-present staleness signal
@@ -448,6 +448,9 @@ export interface AttentionItem {
   /** when the underlying thing started mattering (lastActivity / generatedAt), for an age label. */
   since?: number;
   action?: AttentionAction;
+  /** A second, lesser resolution rendered beside `action` — today only boundary-sync "held" rows
+   *  (Apply + Discard: two genuinely different outcomes for the same held backlog). */
+  secondaryAction?: AttentionAction;
 }
 
 export interface AttentionInput {
@@ -619,16 +622,26 @@ export function attentionItems(input: AttentionInput, opts?: { sort?: 'severity'
 
     // Harness-agnostic attention lane (v2 glance-notify: operator notify / squad_attention tool /
     // harness notify RPC) → view. Same non-blocking contract as reports: independent of `status`.
+    // Boundary-sync rows (daily-onramp 03) split on what the row actually HOLDS:
+    //   - "held" (durable patches are waiting): one-click Apply (re-checked server-side before
+    //     touching anything) plus Discard (drop the backlog; the worktree keeps every edit) —
+    //     "View" would bury the two actions that resolve the row.
+    //   - "uncapturable" (the turn's delta couldn't even be captured — NOTHING is held): View
+    //     only. Apply here would return applied:0 and read as "already current" — false
+    //     reassurance, since that turn's edits exist only in the session worktree.
     for (const e of a.attentionEvents ?? []) {
+      const sync = e.source === 'boundary-sync';
+      const held = sync && e.sync !== 'uncapturable';
       items.push({
         id: `attention:${a.id}:${e.id}`,
         severity: 'warn',
         kind: 'attention',
-        title: `${a.name} needs a look`,
-        detail: e.detail ? `${e.summary} — ${e.detail}` : e.summary,
+        title: sync ? e.summary : `${a.name} needs a look`,
+        detail: sync ? e.detail : e.detail ? `${e.summary} — ${e.detail}` : e.summary,
         agentId: a.id,
         since: e.createdAt,
-        action: { label: 'View', kind: 'view' },
+        action: held ? { label: 'Apply', kind: 'apply-sync' } : { label: 'View', kind: 'view' },
+        secondaryAction: held ? { label: 'Discard', kind: 'discard-sync' } : undefined,
       });
     }
   }

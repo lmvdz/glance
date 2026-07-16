@@ -430,6 +430,12 @@ export const AgentModeBodySchema = Schema.Struct({
 	reason: Schema.optional(Schema.Unknown),
 });
 
+/** POST /api/agents/:id/discard-held-sync — `patchId` optional (absent ⇒ discard the whole
+ *  backlog); independently `typeof`-narrowed in the handler per this module's convention. */
+export const DiscardHeldSyncBodySchema = Schema.Struct({
+	patchId: Schema.optional(Schema.Unknown),
+});
+
 /** POST /api/agents/:id/vision — no required field (`url` falls back to an env var). */
 export const AgentVisionBodySchema = Schema.Struct({
 	url: Schema.optional(Schema.Unknown),

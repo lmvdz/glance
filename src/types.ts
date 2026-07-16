@@ -130,8 +130,15 @@ export interface AttentionEvent {
 	detail?: string;
 	/** Where the flag originated: "notify" = operator/CLI/scriptable ingress (`glance notify`),
 	 *  "tool" = an omp agent's `squad_attention` host tool call, "harness" = a non-omp harness's
-	 *  RPC `notify` extension-UI method (previously inert — appended to the transcript only). */
-	source: "notify" | "tool" | "harness";
+	 *  RPC `notify` extension-UI method (previously inert — appended to the transcript only),
+	 *  "boundary-sync" = a `glance here` turn's patch was HELD instead of auto-applied to the
+	 *  operator's real checkout (divergence or fingerprint-capture failure — daily-onramp 03); the
+	 *  webapp renders these with a one-click "Apply" that re-checks before touching anything. */
+	source: "notify" | "tool" | "harness" | "boundary-sync";
+	/** boundary-sync rows only: "held" = durable patch(es) are waiting (Apply/Discard resolve it);
+	 *  "uncapturable" = the turn's delta could not even be captured, so NOTHING is held — the webapp
+	 *  must offer View (the worktree diff), never Apply, and never claim a patch is waiting. */
+	sync?: "held" | "uncapturable";
 	createdAt: number;
 }
 
@@ -1130,6 +1137,10 @@ export interface PersistedAgent {
 	 *  Persisted so the completion-push duration gate (see AgentDTO.completionArmedAt) still measures
 	 *  the turn correctly across a daemon restart mid-dispatch. Absent whenever the latch is unarmed. */
 	completionArmedAt?: number;
+	/** Boundary sync (daily-onramp 03): the operator's REAL checkout root for a `here`-class casual
+	 *  session — the turn-boundary sync marker (see CreateAgentOptions.realTreePath). Persisted so a
+	 *  restart-restored session keeps syncing and so boot can re-raise attention for held patches. */
+	realTreePath?: string;
 }
 
 /** Persisted feature envelope — additive `features[]` in `<stateDir>/state.json`. */
@@ -1268,6 +1279,13 @@ export interface CreateAgentOptions {
 	/** Rides with `completionPushArmed` through the same restore paths — carried forward (not reset to
 	 *  now) so a turn that spanned a restart still measures from its original arm for the duration gate. */
 	completionArmedAt?: number;
+	/** Boundary sync (daily-onramp 03): the operator's REAL checkout root, set only for `here`-class
+	 *  casual sessions at creation (the console route derives it server-side from the ephemeral
+	 *  registration — never client-supplied as a separate field). When present, every finished turn's
+	 *  patch is applied to this directory iff it provably hasn't moved since turn start; otherwise
+	 *  the patch is held + an attention item raised. Plain fleet units never carry it, so the
+	 *  turn-boundary hook never fires for them. */
+	realTreePath?: string;
 }
 
 /** Sandboxed execution: run the agent's omp inside a container. */
