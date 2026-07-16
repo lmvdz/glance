@@ -5,6 +5,7 @@ import {
   LAYER_LIB,
   LAYER_SERVER_MANAGER,
   LAYER_UI,
+  MAX_DIFF_SCAN_BYTES,
   orderDiffs,
   pathOrder,
   storyOrder,
@@ -147,6 +148,40 @@ describe('storyOrder: trivial and edge inputs', () => {
 
   test('a file with no diff text (undefined) is still ordered without throwing', () => {
     expect(() => storyOrder([{ file: 'a.ts' }, { file: 'b.ts', diff: 'const x = 1;' }])).not.toThrow();
+  });
+});
+
+describe('storyOrder: oversized diff text is excluded from symbol scanning (batch-3 review, 08 minor)', () => {
+  test('a file whose diff text exceeds MAX_DIFF_SCAN_BYTES keeps its input-order position within its layer', () => {
+    // Both files land in LAYER_LIB (bare top-level modules) via classifyLayer's default. Without
+    // the cap, `huge.ts` DEFINING `helperFn` and `user.ts` USING it would create a definer-before-
+    // user edge that reorders them; the cap means the huge file's defs/uses are never scanned, so
+    // there's no edge at all and the pair stays in original input order.
+    const hugeText = `export function helperFn() { return 1; }\n// padding\n${'x'.repeat(MAX_DIFF_SCAN_BYTES + 1)}`;
+    const huge = diff('src/huge.ts', hugeText);
+    const user = diff('src/user.ts', 'const x = helperFn();');
+    const ordered = storyOrder([user, huge]); // deliberately user-before-huge in the input
+    expect(ordered.map((d) => d.file)).toEqual(['src/user.ts', 'src/huge.ts']);
+  });
+
+  test('a file at or under the cap is still scanned normally (edge still applies)', () => {
+    const exactText = `export function helperFn() { return 1; }`.padEnd(MAX_DIFF_SCAN_BYTES, ' ');
+    expect(exactText.length).toBeLessThanOrEqual(MAX_DIFF_SCAN_BYTES);
+    const helper = diff('src/helper.ts', exactText);
+    const user = diff('src/user.ts', 'const x = helperFn();');
+    const ordered = storyOrder([user, helper]); // deliberately user-before-helper in the input
+    expect(ordered.map((d) => d.file)).toEqual(['src/helper.ts', 'src/user.ts']); // definer moved first
+  });
+
+  test('a huge synthetic diff set computes fast and preserves input order within its layer', () => {
+    const diffs = Array.from({ length: 200 }, (_, i) =>
+      diff(`src/file${i}.ts`, `// huge file ${i}\n${'y'.repeat(MAX_DIFF_SCAN_BYTES * 2)}`),
+    );
+    const start = performance.now();
+    const ordered = storyOrder(diffs);
+    const elapsedMs = performance.now() - start;
+    expect(ordered.map((d) => d.file)).toEqual(diffs.map((d) => d.file)); // untouched — no edges possible
+    expect(elapsedMs).toBeLessThan(1000); // generous bound; without the cap this scans 200×128KB of regex
   });
 });
 

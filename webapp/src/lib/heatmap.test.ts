@@ -379,6 +379,16 @@ describe('coldStartRepos', () => {
   test('empty record yields an empty set', () => {
     expect(coldStartRepos({}).size).toBe(0);
   });
+
+  /** Batch-3 review regression (concern 04 minor): `repoHasHistory`'s key and a tree node's/fog
+   *  entry's `repo` field name the same repo but can differ in trivial formatting (a trailing
+   *  slash) — `attachFog`'s join already normalizes both sides, so the cold-start membership check
+   *  must too, or a node whose `repo` came through un-normalized would silently draw the real fog
+   *  ramp where "no view history yet" belonged. */
+  test('a trailing-slash repoHasHistory key still normalizes to match the bare repo string', () => {
+    const set = coldStartRepos({ [`${REPO_A}/`]: false });
+    expect(set.has(REPO_A)).toBe(true); // membership check normalizes the candidate
+  });
 });
 
 // ────────────────────────────────── topFogDebt ──────────────────────────────────
@@ -413,6 +423,15 @@ describe('topFogDebt', () => {
     const entries = Array.from({ length: 15 }, (_, i) => fogEntry({ file: `f${i}.ts`, debt: i / 15 }));
     expect(topFogDebt(entries, {}, 10)).toHaveLength(10);
     expect(topFogDebt(entries, {})).toHaveLength(10); // default n=10
+  });
+
+  /** Batch-3 review regression (concern 04 minor): a cold-start repo whose `repoHasHistory` key
+   *  carries a trailing slash the entry's own `repo` field lacks (or vice versa) must still be
+   *  excluded — `attachFog` would join these as the same repo, so the shortlist must agree. */
+  test('excludes a cold-start repo even when its repoHasHistory key has a trailing slash the entry lacks', () => {
+    const entries = [fogEntry({ repo: REPO_A, file: 'a.ts', debt: 0.99 }), fogEntry({ repo: REPO_B, file: 'b.ts', debt: 0.1 })];
+    const top = topFogDebt(entries, { [`${REPO_A}/`]: false, [REPO_B]: true });
+    expect(top.map((e) => e.file)).toEqual(['b.ts']);
   });
 });
 
@@ -489,5 +508,15 @@ describe('allFilesColdStart', () => {
   test('false for a file with no repo field at all', () => {
     const tree = buildHeatTree(NODES, 4);
     expect(allFilesColdStart(tree, new Set())).toBe(false);
+  });
+
+  /** Batch-3 review regression (concern 04 minor): the `coldStart` set is normalized-key
+   *  (`coldStartRepos`'s doc), but a tree node's raw `repo` field (copied straight from the source
+   *  `/api/heat` node) can carry a trailing slash the set's key lacks or vice versa — the
+   *  membership check must normalize the node's `repo` before testing, or a genuinely cold-start
+   *  repo would read as "has real history" purely from formatting noise. */
+  test('a node whose raw repo has a trailing slash still matches a bare cold-start set entry', () => {
+    const tree = buildHeatTree([{ id: 'src/a.ts', heat: [1], repo: `${REPO_A}/` }], 1);
+    expect(allFilesColdStart(tree, coldStartRepos({ [REPO_A]: false }))).toBe(true);
   });
 });

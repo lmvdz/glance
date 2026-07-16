@@ -188,8 +188,11 @@ export function repoHasHistory(seenMap: SeenMap, repo: string, now: number): boo
  *  weekly episode all share.
  *  2026-07-15 (concern 09, weekly episode): left the `@substrate` bucket for a REAL caller —
  *  `squad-manager.ts`'s `gatherEpisodeInputs` now consumes this directly for the episode's
- *  comprehension-debt section. Concern 04 (fog overlay shortlist) is still pending; when it lands
- *  too, this is simply a second real caller, not a substrate concern anymore. */
+ *  comprehension-debt section. Concern 04 (fog overlay shortlist) has since shipped too — its
+ *  client-side ranking (`webapp/src/lib/heatmap.ts`'s `topFogDebt`) mirrors this exact ordering
+ *  against the `/api/fog` payload rather than calling this server-side function directly (the
+ *  overlay computes its own shortlist client-side), so both real callers this comment named now
+ *  exist; this is no longer a substrate-only export waiting on a first caller. */
 export function topDebt(entries: FileFogEntry[], n = 10): FileFogEntry[] {
 	return [...entries]
 		.sort(

@@ -1,5 +1,5 @@
 # Fog overlay UI: tri-state HeatTree overlay + top-10 shortlist + heatPayload fixes
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -25,3 +25,10 @@ None.
 
 ## Verify
 `cd webapp && bun test && bunx tsc --noEmit` green. Root `bun test` green (heatPayload regressions). Manual (scratch-daemon): seed receipts across 2 repos with same-named files → no collapse; fog toggle shows hatch/clear/ramp distinctly; empty state before any attention events.
+
+## Resolution
+Shipped: f06686b (merged 11ced09) — heatPayload repo-normalize + repo-keyed `byFile` fixes, `attachFog`/`coldStartRepos`/`topFogDebt`/tri-state rendering, top-10 shortlist headline, disclosure copy.
+
+Review verdict: FAIL → fixed by mount (batch-3 review). The shipped overlay had NO render site: GRAPH-FOLD.md retired the old "Context Heat Graph" page (`HeatPanel.tsx`, deleted) before this concern's fog toggle existed, and nothing in the post-fold app shell ever mounted `HeatTree` with fog mode reachable — an operator had no path to the tri-state comprehension-debt read this whole concern built. Fixed in the batch-3 fixer round: a new `fog` nav item (`webapp/src/components/FogView.tsx`, wired into `App.tsx`'s view switch, `WorkbenchPane.tsx`'s `NAV_ITEMS`, and the ⌘K palette's `NAV_ROWS`) mounts `HeatTree` with `initialFogMode` on. Deliberately NOT a resurrection of the retired `HeatPanel` — the old page's collision/flapping-agent callouts stay folded into Needs-you per GRAPH-FOLD §1; this view's only job is the fog read. The dead `heat` key's alias to `omp-graph` (GRAPH-FOLD.md §3) is UNCHANGED — `fog` is a new view, not a fold destination.
+
+Also fixed in the same round (04 minor): `coldStartRepos`/`topFogDebt`/`allFilesColdStart` (`webapp/src/lib/heatmap.ts`) and `HeatTree.tsx`'s `fogVisual` tested repo membership against RAW, un-normalized repo strings while `attachFog`'s own join already normalized both sides via `normalizeRepoKey` — a repo named with a trailing slash on one side of a join would pass `attachFog` but fail every cold-start check. All four now normalize on both sides; regression tests with a trailing-slash repo added in `heatmap.test.ts` and `HeatTree.test.tsx`.

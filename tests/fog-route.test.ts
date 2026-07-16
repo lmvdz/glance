@@ -71,14 +71,43 @@ test("GET /api/fog reflects a recorded surprise tap as a debt boost", async () =
 
 	// A surprise tap is ITSELF a genuine view (attention.ts's `SEEN_UPDATING_KINDS`), so it also
 	// resets `changesSinceSeen` to 0 via the seen-map merge — but the debt formula's separate
-	// surprise-boost term still raises debt on top of that reset, exactly per DESIGN.md: tapping
-	// "surprised me" does not fully forgive the file, because the operator's mental model of it is
-	// flagged as weak regardless of having just looked at it.
+	// surprise-boost term still raises debt on top of that reset: a `surprise` tap does not clear
+	// its OWN boost (only a later `diff-viewed`/`pr-reviewed` does — batch-3 review adjudication,
+	// see the next test), so the operator's mental model of this file still reads as flagged right
+	// after tapping it.
 	const after = await fetch(`${url}/api/fog`, authed()).then((r) => r.json());
 	const afterEntry = after.entries.find((e: { file: string }) => e.file === "a.ts");
 	expect(afterEntry.changesSinceSeen).toBe(0); // the tap itself counts as a view
 	expect(afterEntry.debt).toBeGreaterThan(plainDebt); // but the boost still raises debt above the pre-tap baseline
 	expect(afterEntry.debt).toBeGreaterThan(0);
+});
+
+test("GET /api/fog: a later diff-viewed clears the surprise boost; a fresh tap re-applies it (batch-3 review adjudication)", async () => {
+	const { state, url } = await fixture();
+	await appendReceipt(state, receipt({ repo: "/srv/app", filesTouched: ["a.ts"], endedAt: 100 }));
+
+	// tap → boost active
+	await fetch(`${url}/api/attention`, authed({ method: "POST", body: JSON.stringify({ kind: "surprise", repo: "/srv/app", file: "a.ts" }) }));
+	const afterTap = await fetch(`${url}/api/fog`, authed()).then((r) => r.json());
+	const tapEntry = afterTap.entries.find((e: { file: string }) => e.file === "a.ts");
+	expect(tapEntry.debt).toBeGreaterThan(0);
+
+	// later diff-viewed → boost gone (no new receipts, so changesSinceSeen is also 0 → debt 0)
+	const viewedRes = await fetch(`${url}/api/attention`, authed({ method: "POST", body: JSON.stringify({ kind: "diff-viewed", repo: "/srv/app", file: "a.ts" }) }));
+	expect(viewedRes.status).toBe(200);
+	const afterView = await fetch(`${url}/api/fog`, authed()).then((r) => r.json());
+	const viewedEntry = afterView.entries.find((e: { file: string }) => e.file === "a.ts");
+	expect(viewedEntry?.debt ?? 0).toBe(0);
+
+	// tap after that → boost active again. Distinct `agentId` from the first tap so this genuinely
+	// distinct action doesn't fall into AttentionStore's 30s idempotent-replay coalesce window
+	// (keyed on {kind,repo,file,agentId,viewerId}) purely because this test's real HTTP calls run
+	// back-to-back on the wall clock — the coalesce window is a real production feature (a
+	// double-click/duplicate-observer-callback guard), not something this test should fight.
+	await fetch(`${url}/api/attention`, authed({ method: "POST", body: JSON.stringify({ kind: "surprise", repo: "/srv/app", file: "a.ts", agentId: "agent-2" }) }));
+	const afterSecondTap = await fetch(`${url}/api/fog`, authed()).then((r) => r.json());
+	const secondTapEntry = afterSecondTap.entries.find((e: { file: string }) => e.file === "a.ts");
+	expect(secondTapEntry.debt).toBeGreaterThan(0);
 });
 
 test("GET /api/fog is unaffected by a surprise tap recorded against a DIFFERENT repo", async () => {

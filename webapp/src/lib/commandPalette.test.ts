@@ -2,10 +2,10 @@ import { expect, test, describe } from 'bun:test';
 import { staticRows, fabricRows, buildRows, moveSelection, NAV_ROWS, SEARCH_TASKS_ROW, type FabricSearchResult } from './commandPalette';
 
 describe('staticRows', () => {
-  test('blank query returns the 4 nav rows + Org + Search tasks, in order', () => {
+  test('blank query returns the nav rows + Org + Search tasks, in order', () => {
     const rows = staticRows('');
     expect(rows.map((r) => r.id)).toEqual([
-      'nav-fleet', 'nav-tasks', 'nav-graph', 'nav-capabilities', 'nav-org', 'action-search-tasks',
+      'nav-fleet', 'nav-tasks', 'nav-graph', 'nav-fog', 'nav-capabilities', 'nav-org', 'action-search-tasks',
     ]);
   });
 
@@ -22,8 +22,8 @@ describe('staticRows', () => {
     expect(staticRows('zzz-nomatch')).toEqual([]);
   });
 
-  test('NAV_ROWS covers exactly the 4-item shell + org, no dead views', () => {
-    expect(NAV_ROWS.map((r) => r.view)).toEqual(['fleet', 'tasks', 'omp-graph', 'capabilities', 'org']);
+  test('NAV_ROWS covers exactly the rail nav items + org, no dead views', () => {
+    expect(NAV_ROWS.map((r) => r.view)).toEqual(['fleet', 'tasks', 'omp-graph', 'fog', 'capabilities', 'org']);
   });
 
   test('SEARCH_TASKS_ROW is the search-tasks action', () => {

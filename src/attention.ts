@@ -21,7 +21,7 @@
  */
 
 import * as path from "node:path";
-import { envBool } from "./config.ts";
+import { envBoolAliased } from "./config.ts";
 import { getStorageBackend } from "./dal/storage.ts";
 import { errText } from "./err-text.ts";
 import { JsonlLog } from "./jsonl-log.ts";
@@ -198,10 +198,12 @@ export class AttentionStore {
 		this.surpriseCounts = loadSurpriseCounts(this.stateDir);
 	}
 
-	/** `GLANCE_ATTENTION=0` — the kill switch (DESIGN.md "Privacy posture" row). Read live (not
-	 *  cached at construction) so a runtime flag flip takes effect without a daemon restart. */
+	/** `GLANCE_ATTENTION=0` (legacy alias `OMP_SQUAD_ATTENTION`, batch-3 review: `.env.example`
+	 *  documented the alias but this used to read only the new name) — the kill switch (DESIGN.md
+	 *  "Privacy posture" row). Read live (not cached at construction) so a runtime flag flip takes
+	 *  effect without a daemon restart. */
 	disabled(): boolean {
-		return !envBool("GLANCE_ATTENTION", true);
+		return !envBoolAliased("GLANCE_ATTENTION", "OMP_SQUAD_ATTENTION", true);
 	}
 
 	/**
@@ -226,6 +228,13 @@ export class AttentionStore {
 		this.coalesceLast.set(coalesceKey, at);
 		this.raw.append(event);
 		if (SEEN_UPDATING_KINDS.has(event.kind) && event.file) this.mergeSeen(event.repo, event.file, event.viewerId, at);
+		// Batch-3 review adjudication: surprise is cleared by a later GENUINE view, not permanent.
+		// A `diff-viewed`/`pr-reviewed` event on this (repo,file) means the operator actually looked at
+		// it again — that resets the surprise-tap count to 0, so the boost (below) stops imposing a
+		// lifetime debt floor on a file the operator has since reviewed. `surprise` itself is EXCLUDED
+		// from this reset: the tap that just fired is what's being counted, not a signal that clears
+		// its own count.
+		if ((event.kind === "diff-viewed" || event.kind === "pr-reviewed") && event.file) this.resetSurprise(event.repo, event.file);
 		// Concern 08: a `surprise` tap ALSO increments its own durable per-(repo,file) count — the
 		// seen-map merge above already moved `lastSeenAt` forward (a surprise tap is itself a "looked at
 		// this" signal), but `computeFog`'s boost needs a COUNT, which the seen map's max-merge can't
@@ -251,6 +260,17 @@ export class AttentionStore {
 	private incrementSurprise(repo: string, file: string): void {
 		const key = seenKey(repo, file);
 		this.surpriseCounts[key] = (this.surpriseCounts[key] ?? 0) + 1;
+		this.scheduleWrite();
+	}
+
+	/** Batch-3 review adjudication: a genuine re-view (`diff-viewed`/`pr-reviewed`, never `surprise`
+	 *  itself) clears this (repo,file)'s surprise-tap count entirely — surprise flags divergence only
+	 *  until the operator actually re-views the file, not for the file's lifetime. A no-op (no dirty
+	 *  write scheduled) when the count is already absent/zero. */
+	private resetSurprise(repo: string, file: string): void {
+		const key = seenKey(repo, file);
+		if (!this.surpriseCounts[key]) return;
+		delete this.surpriseCounts[key];
 		this.scheduleWrite();
 	}
 

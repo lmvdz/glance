@@ -392,8 +392,16 @@ export function agentsByFileMap(runs: { agentId: string; filesTouched?: string[]
  *  slash, a backslash vs forward slash). Deliberately NOT a full port: tilde-expansion needs
  *  `os.homedir()` (server-only, meaningless in a browser), and this never resolves a real
  *  filesystem path — it only compares two strings the daemon already normalized before either
- *  reached the client. */
-function normalizeRepoKey(repo: string): string {
+ *  reached the client.
+ *
+ *  Exported (batch-3 review, concern 04 minor): `attachFog`'s join below always normalizes both
+ *  sides through this, but `coldStartRepos`/`topFogDebt`/`allFilesColdStart` and HeatTree.tsx's
+ *  `fogVisual` used to test membership against RAW repo strings — a `repoHasHistory` key and a
+ *  tree node's `repo` field naming the same repo with a trivial formatting difference (a trailing
+ *  slash) would join fine in `attachFog` but fail every cold-start membership check, silently
+ *  drawing that repo's real fog ramp where "no view history yet" was meant to render (or vice
+ *  versa). Every membership check below now normalizes on both sides. */
+export function normalizeRepoKey(repo: string): string {
   return repo.trim().replace(/\\/g, '/').replace(/\/+$/, '');
 }
 
@@ -450,9 +458,19 @@ export function attachFog(tree: HeatTree, fogEntries: FogEntryDTO[]): HeatTree {
  *  renderer uses this to swap that repo's overlay for the "no view history yet" empty state instead
  *  of hatching everything — never by hiding real per-file `fog` data (still attached; only the
  *  render decision changes). Repos absent from `repoHasHistory` (not in the actor-visible scope) are
- *  NOT treated as cold-start here — `Object.entries` only sees repos the endpoint actually reported. */
+ *  NOT treated as cold-start here — `Object.entries` only sees repos the endpoint actually reported.
+ *
+ *  Returned keys are `normalizeRepoKey`-normalized (batch-3 review, concern 04 minor) — every
+ *  caller MUST normalize whatever repo string it tests for membership (`.has(normalizeRepoKey(x))`),
+ *  never a raw tree-node/entry `.repo` directly, or a trivial formatting difference (trailing
+ *  slash, `\` vs `/`) silently defeats the membership check even though `attachFog`'s own join
+ *  already normalizes both sides. */
 export function coldStartRepos(repoHasHistory: Record<string, boolean>): Set<string> {
-  return new Set(Object.entries(repoHasHistory).filter(([, has]) => !has).map(([repo]) => repo));
+  return new Set(
+    Object.entries(repoHasHistory)
+      .filter(([, has]) => !has)
+      .map(([repo]) => normalizeRepoKey(repo)),
+  );
 }
 
 /**
@@ -466,7 +484,7 @@ export function coldStartRepos(repoHasHistory: Record<string, boolean>): Set<str
 export function topFogDebt(entries: FogEntryDTO[], repoHasHistory: Record<string, boolean>, n = 10): FogEntryDTO[] {
   const coldStart = coldStartRepos(repoHasHistory);
   return entries
-    .filter((e) => !coldStart.has(e.repo))
+    .filter((e) => !coldStart.has(normalizeRepoKey(e.repo)))
     .sort(
       (a, b) =>
         b.debt - a.debt ||
@@ -530,7 +548,7 @@ export function allFilesColdStart(tree: HeatTree, coldStart: Set<string>): boole
     for (const n of nodes) {
       if (n.type === 'file') {
         sawFile = true;
-        if (!n.repo || !coldStart.has(n.repo)) return false;
+        if (!n.repo || !coldStart.has(normalizeRepoKey(n.repo))) return false;
       } else if (!walk(n.children)) {
         return false;
       }

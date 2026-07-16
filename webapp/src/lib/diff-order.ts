@@ -88,6 +88,20 @@ const IDENTIFIER_RE = /[A-Za-z_$][A-Za-z0-9_$]*/g;
 const DEF_TYPE_RE = /\b(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?(?:async\s+)?(?:function\*?|class|interface|type|enum)\s+([A-Za-z_$][A-Za-z0-9_$]*)/g;
 const DEF_VAR_RE = /\b(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*[:=]/g;
 
+/**
+ * Batch-3 review (08 minor): `scanFiles` below token-scans every file's ENTIRE diff text with
+ * several regexes run to exhaustion (`matchAll`) — unbounded, so one pathological diff (a
+ * generated lockfile, a vendored bundle, a huge data file the agent happened to touch) turns an
+ * O(files) pass into an O(files × huge-text) one, on every Intervene render. `text.length` (UTF-16
+ * code units) is used as a cheap proxy for byte size rather than a real `TextEncoder` byte count —
+ * good enough for a size GATE, not a precise budget, and avoids allocating a second encoded buffer
+ * just to decide whether to skip. Above this cap, a file is EXCLUDED from symbol scanning only —
+ * `classifyLayer` (path-based) and layer bucketing still apply, so the file still appears in its
+ * layer at its original relative position (no def/use edges to reorder it, so ties fall back to
+ * input order, same as the existing cycle-fallback path).
+ */
+export const MAX_DIFF_SCAN_BYTES = 64 * 1024; // 64KB
+
 function tokenize(text: string): string[] {
   const out: string[] = [];
   for (const m of text.matchAll(IDENTIFIER_RE)) {
@@ -119,6 +133,10 @@ interface FileSymbols {
 function scanFiles(diffs: AgentFileDiff[]): FileSymbols[] {
   return diffs.map((d) => {
     const text = d.diff ?? '';
+    // Oversized diff text: skip the token scan entirely (defs/uses empty), never partially scan a
+    // prefix — a partial scan could invent a def/use edge from a symbol that's truncated mid-token,
+    // which is worse than no edge at all. The file still gets bucketed into its layer below.
+    if (text.length > MAX_DIFF_SCAN_BYTES) return { file: d.file, defs: new Set<string>(), uses: new Set<string>() };
     return { file: d.file, defs: definedSymbols(text), uses: new Set(tokenize(text)) };
   });
 }

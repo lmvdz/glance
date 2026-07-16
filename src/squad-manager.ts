@@ -8,7 +8,7 @@
  */
 
 import { EventEmitter } from "node:events";
-import { envBool, envInt, envNumber } from "./config.ts";
+import { envBool, envBoolAliased, envInt, envNumber } from "./config.ts";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -1325,7 +1325,10 @@ export class SquadManager extends EventEmitter {
 		// per repo `featureRepos()` knows about — NOT `planeRepos()`: comprehension (attention/fog/
 		// symptoms) is never gated on a configured Plane backlog elsewhere in this lane, so episodes
 		// aren't either.
-		if (envBool("OMP_SQUAD_EPISODE", true)) {
+		// `GLANCE_EPISODE` (legacy alias `OMP_SQUAD_EPISODE`, batch-3 review: `.env.example` documented
+		// `GLANCE_EPISODE` as primary with `OMP_SQUAD_EPISODE` as its legacy alias, but this used to
+		// read ONLY the old name — the documented primary name silently did nothing).
+		if (envBoolAliased("GLANCE_EPISODE", "OMP_SQUAD_EPISODE", true)) {
 			const episodeRepos = this.featureRepos();
 			for (const repo of episodeRepos) {
 				const loop = new EpisodeLoop({

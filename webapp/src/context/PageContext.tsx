@@ -45,7 +45,7 @@ export interface PageContextSelection {
  * fleet/tasks/graph/capabilities — a deliberate widening past the literal doc, not a typo.
  */
 export interface PageContext {
-  viewId: 'fleet' | 'tasks' | 'graph' | 'capabilities' | 'intervene' | 'review' | 'org';
+  viewId: 'fleet' | 'tasks' | 'graph' | 'fog' | 'capabilities' | 'intervene' | 'review' | 'org';
   title: string;
   entities: PageContextEntity[];
   selection?: PageContextSelection;

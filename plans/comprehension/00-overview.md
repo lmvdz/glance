@@ -47,6 +47,17 @@
 - LLM-composed episode narrative — deterministic projection first; revisit with usage evidence
 - GitHub-webhook pr-reviewed source; `git log --follow` rename tracking; per-org attention retention/purge UI — declared deferred in DESIGN.md
 - Raw attention events in fabric/BM25 — privacy + churn (DESIGN.md)
+- Batch-3 review named follow-ups (not fixed this round — flagged for a future concern):
+  - Episodes web view + routed deep link — the weekly-episode push notification deep-links to
+    `/#/episodes/<id>` (`src/weekly-episode.ts`), but no `AppView`/route renders it; it silently
+    matches the pre-existing `/#/agent/<id>` convention (same gap: `src/push.ts`'s agent-done push
+    also deep-links to a hash no route currently handles either).
+  - `/api/usage`'s `agentCount` bare-file keying can collide across repos when two repos share a
+    same-named file — the SAME bug class `heatPayload`'s repo-qualified fix (concern 04) already
+    fixed for the heat tree, flagged but not fixed here by concern 04's implementer.
+  - The fleet PR body's "Verified" section needs a real gate-command provenance producer — receipts
+    carry no command/outcome today, so `buildPrBody`'s `testExecutions` honestly renders "no
+    observed test runs recorded" rather than fabricating one (concern 06's Resolution note).
 
 ## Decisions so far
 - [DESIGN.md](DESIGN.md) — record-then-render inversion; compacted last-seen map; monotone debt; honest emission semantics (full red-team resolution table there)

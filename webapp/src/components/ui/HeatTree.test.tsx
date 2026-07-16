@@ -118,6 +118,20 @@ describe('HeatTree — fog mode (initialFogMode + preloaded fogData)', () => {
     expect(html).toContain('Comprehension fog is disabled for this daemon.');
   });
 
+  /** Batch-3 review regression (concern 04 minor): `repoHasHistory`'s key and the tree node's raw
+   *  `repo` (both ultimately from the SAME `/home/lars/sui/demo-repo`) differ only by a trailing
+   *  slash on the `repoHasHistory` side here — `attachFog`'s join treats them as the same repo, so
+   *  the cold-start empty state must render too, never the real ramp underneath a formatting quirk. */
+  test('cold-start repo whose repoHasHistory key has a trailing slash the tree node repo lacks still shows the empty state', () => {
+    const slashFog: FogPayload = { entries: MIXED_FOG.entries, repoHasHistory: { [`${REPO}/`]: false } };
+    const html = renderToStaticMarkup(
+      <HeatTree days={DAYS} tree={tree()} showPatterns={false} defaultExpanded={['src']} fogData={slashFog} initialFogMode />,
+    );
+    expect(html).toContain('No view history yet');
+    expect(html).not.toContain('repeating-linear-gradient');
+    expect(html).not.toContain('Comprehension debt — top');
+  });
+
   test('a file with no matching fog entry at all renders the neutral "no data" fill, not a fabricated zero', () => {
     const partialFog: FogPayload = {
       entries: [{ repo: REPO, file: 'src/a.ts', changesSinceSeen: 1, lastChangedAt: 1000, debt: 0.4, state: 'stale' }],

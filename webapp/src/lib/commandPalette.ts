@@ -48,12 +48,14 @@ export interface PaletteFabricRow extends PaletteRowBase {
 
 export type PaletteRow = PaletteNavRow | PaletteActionRow | PaletteFabricRow;
 
-/** The nav-jump command set — the 4-item shell + Org (reachable from the palette even though it's
- *  gear-only in the rail now, per GRAPH-FOLD.md §6e). Order mirrors the rail. */
+/** The nav-jump command set — the rail's nav items (Fleet · Tasks · Graph · Fog · Capabilities) +
+ *  Org (reachable from the palette even though it's gear-only in the rail now, per GRAPH-FOLD.md
+ *  §6e). Order mirrors the rail. */
 export const NAV_ROWS: readonly PaletteNavRow[] = [
   { kind: 'nav', id: 'nav-fleet', label: 'Fleet', view: 'fleet' },
   { kind: 'nav', id: 'nav-tasks', label: 'Tasks', view: 'tasks' },
   { kind: 'nav', id: 'nav-graph', label: 'Graph', view: 'omp-graph' },
+  { kind: 'nav', id: 'nav-fog', label: 'Fog', view: 'fog' },
   { kind: 'nav', id: 'nav-capabilities', label: 'Capabilities', view: 'capabilities' },
   { kind: 'nav', id: 'nav-org', label: 'Organization settings', view: 'org' },
 ];

@@ -4,7 +4,7 @@
  * ⌘K used to be a single-purpose binding: jump to the Tasks search box (PR #124). The fold
  * upgrades it into a real command palette, open from EVERY view:
  *
- *   · nav jump — the 4-item shell (Fleet · Tasks · Graph · Capabilities) + Org settings
+ *   · nav jump — the rail's nav items (Fleet · Tasks · Graph · Fog · Capabilities) + Org settings
  *   · "Search tasks…" — the old direct binding, demoted to a row (it still jump-focuses the
  *     Tasks search box; the hotkey itself now always opens this palette)
  *   · Fabric/Knowledge search — the dead Knowledge-base page's GET /api/fabric/search, debounced,
@@ -18,7 +18,7 @@
  * this component owns only the fetch, the keyboard wiring, and the chrome.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Boxes, Building2, CornerDownLeft, Inbox, Layers, Library, Search, Waypoints, type LucideIcon } from 'lucide-react';
+import { Boxes, Building2, CloudFog, CornerDownLeft, Inbox, Layers, Library, Search, Waypoints, type LucideIcon } from 'lucide-react';
 import { useTaskContext, type AppView } from '../context/TaskContext';
 import { apiJson } from '../lib/api';
 import { jumpToTaskSearch } from '../lib/jump';
@@ -31,6 +31,7 @@ const NAV_ICONS: Record<string, LucideIcon> = {
   'nav-fleet': Layers,
   'nav-tasks': Inbox,
   'nav-graph': Waypoints,
+  'nav-fog': CloudFog,
   'nav-capabilities': Boxes,
   'nav-org': Building2,
   'action-search-tasks': Search,

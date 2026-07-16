@@ -55,6 +55,39 @@ describe("record: kill switch", () => {
 			else process.env.GLANCE_ATTENTION = original;
 		}
 	});
+
+	// Batch-3 review: `.env.example` documented OMP_SQUAD_ATTENTION as a legacy alias for
+	// GLANCE_ATTENTION, but `disabled()` used to read ONLY the new name — the legacy alias silently
+	// did nothing. These exercise the real flag pair end-to-end through the real `disabled()` method
+	// (not just `envBoolAliased` in isolation, which config.test.ts already covers generically).
+	test("the legacy OMP_SQUAD_ATTENTION=0 alone (GLANCE_ATTENTION unset) still disables attention", () => {
+		const originalNew = process.env.GLANCE_ATTENTION;
+		const originalLegacy = process.env.OMP_SQUAD_ATTENTION;
+		delete process.env.GLANCE_ATTENTION;
+		process.env.OMP_SQUAD_ATTENTION = "0";
+		try {
+			const store = new AttentionStore({ stateDir: dir() });
+			expect(store.disabled()).toBe(true);
+			expect(store.record({ kind: "diff-viewed", repo: "/r", file: "a.ts" }, "actor")).toEqual({ ok: false, reason: "disabled" });
+		} finally {
+			if (originalNew === undefined) delete process.env.GLANCE_ATTENTION; else process.env.GLANCE_ATTENTION = originalNew;
+			if (originalLegacy === undefined) delete process.env.OMP_SQUAD_ATTENTION; else process.env.OMP_SQUAD_ATTENTION = originalLegacy;
+		}
+	});
+
+	test("GLANCE_ATTENTION=1 wins over a conflicting legacy OMP_SQUAD_ATTENTION=0 (primary always wins)", () => {
+		const originalNew = process.env.GLANCE_ATTENTION;
+		const originalLegacy = process.env.OMP_SQUAD_ATTENTION;
+		process.env.GLANCE_ATTENTION = "1";
+		process.env.OMP_SQUAD_ATTENTION = "0";
+		try {
+			const store = new AttentionStore({ stateDir: dir() });
+			expect(store.disabled()).toBe(false);
+		} finally {
+			if (originalNew === undefined) delete process.env.GLANCE_ATTENTION; else process.env.GLANCE_ATTENTION = originalNew;
+			if (originalLegacy === undefined) delete process.env.OMP_SQUAD_ATTENTION; else process.env.OMP_SQUAD_ATTENTION = originalLegacy;
+		}
+	});
 });
 
 describe("record: 30s coalesce", () => {
@@ -306,5 +339,80 @@ describe("surpriseCountsFor: concern-08 durable per-file surprise-tap count (com
 		store.record({ kind: "surprise", repo: "/r", file: "a.ts" }, "actor");
 		expect(store.lastSeen("/r", "a.ts")?.lastSeenAt).toBe(1_000);
 		expect(store.surpriseCountsFor()).toEqual({ "/r\0a.ts": 1 });
+	});
+});
+
+describe("surprise is cleared by a later genuine view (batch-3 review adjudication)", () => {
+	test("tap → boost active; a later diff-viewed → boost gone; a fresh tap → boost active again", () => {
+		let now = 1_000;
+		const store = new AttentionStore({ stateDir: dir(), now: () => now });
+
+		// tap → boost active
+		store.record({ kind: "surprise", repo: "/r", file: "a.ts" }, "actor");
+		expect(store.surpriseCountsFor()).toEqual({ "/r\0a.ts": 1 });
+
+		// later diff-viewed → boost gone
+		now += 60_000; // clear of the 30s coalesce window
+		store.record({ kind: "diff-viewed", repo: "/r", file: "a.ts" }, "actor");
+		expect(store.surpriseCountsFor()).toEqual({});
+
+		// tap after that → boost again
+		now += 60_000;
+		store.record({ kind: "surprise", repo: "/r", file: "a.ts" }, "actor");
+		expect(store.surpriseCountsFor()).toEqual({ "/r\0a.ts": 1 });
+	});
+
+	test("pr-reviewed also clears an existing surprise count, same as diff-viewed", () => {
+		let now = 1_000;
+		const store = new AttentionStore({ stateDir: dir(), now: () => now });
+		store.record({ kind: "surprise", repo: "/r", file: "a.ts" }, "actor");
+		expect(store.surpriseCountsFor()).toEqual({ "/r\0a.ts": 1 });
+
+		now += 60_000;
+		store.record({ kind: "pr-reviewed", repo: "/r", file: "a.ts" }, "actor");
+		expect(store.surpriseCountsFor()).toEqual({});
+	});
+
+	test("repeated taps accumulate a count > 1, and a single later view still clears it entirely (reset, not decrement)", () => {
+		let now = 1_000;
+		const store = new AttentionStore({ stateDir: dir(), now: () => now });
+		store.record({ kind: "surprise", repo: "/r", file: "a.ts" }, "actor");
+		now += 60_000;
+		store.record({ kind: "surprise", repo: "/r", file: "a.ts" }, "actor");
+		now += 60_000;
+		store.record({ kind: "surprise", repo: "/r", file: "a.ts" }, "actor");
+		expect(store.surpriseCountsFor()).toEqual({ "/r\0a.ts": 3 });
+
+		now += 60_000;
+		store.record({ kind: "diff-viewed", repo: "/r", file: "a.ts" }, "actor");
+		expect(store.surpriseCountsFor()).toEqual({});
+	});
+
+	test("a diff-viewed on a DIFFERENT file never clears another file's surprise count", () => {
+		let now = 1_000;
+		const store = new AttentionStore({ stateDir: dir(), now: () => now });
+		store.record({ kind: "surprise", repo: "/r", file: "a.ts" }, "actor");
+		now += 60_000;
+		store.record({ kind: "diff-viewed", repo: "/r", file: "b.ts" }, "actor");
+		expect(store.surpriseCountsFor()).toEqual({ "/r\0a.ts": 1 });
+	});
+
+	test("diff-viewed with no prior surprise count is a harmless no-op (no dirty write, nothing to clear)", () => {
+		const store = new AttentionStore({ stateDir: dir(), now: () => 1_000 });
+		expect(store.record({ kind: "diff-viewed", repo: "/r", file: "a.ts" }, "actor")).toEqual({ ok: true });
+		expect(store.surpriseCountsFor()).toEqual({});
+	});
+
+	test("the reset survives a restart via the durable surprise-count file", () => {
+		const d = dir();
+		let now = 1_000;
+		const store = new AttentionStore({ stateDir: d, now: () => now });
+		store.record({ kind: "surprise", repo: "/r", file: "a.ts" }, "actor");
+		now += 60_000;
+		store.record({ kind: "diff-viewed", repo: "/r", file: "a.ts" }, "actor");
+		store.stop(); // forces the debounced write out synchronously
+
+		const reloaded = new AttentionStore({ stateDir: d });
+		expect(reloaded.surpriseCountsFor()).toEqual({});
 	});
 });

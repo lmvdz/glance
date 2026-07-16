@@ -1,5 +1,5 @@
 # Weekly episode: state-of-the-codebase brief (durable artifact + fabric + push)
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -22,3 +22,8 @@ None.
 
 ## Verify
 `bun test` green: builder determinism (same inputs → identical markdown), explained-omission never absent, idempotency decision (exists → skip), ISO-week boundary math (year rollover), excerpt caps, fabric scoping. Manual (scratch-daemon): force a generation, GET the episode, receive the push, ⌘K finds the excerpt.
+
+## Resolution
+Shipped: b208d7c (merged 8a8e59d) — `buildEpisode`, hourly-tick/durable-ISO-week idempotency loop, fabric episode fact, `GET /api/episodes`, push ping deep-linking to `/#/episodes/<id>`.
+
+Review verdict: PASS, one dead-alias fix applied in the batch-3 fixer round. `.env.example` documented `GLANCE_EPISODE` as the primary flag name (`OMP_SQUAD_EPISODE` its legacy alias), but `squad-manager.ts`'s episode-loop gate read only the OLD name — the documented-as-primary `GLANCE_EPISODE` silently did nothing, the mirror image of `src/attention.ts`'s kill switch (which read only its NEW name and ignored its documented legacy alias). Fixed with one shared helper, `envBoolAliased(primary, legacy, fallback)` (`src/config.ts`), reading `primary` when set and falling back to `legacy` otherwise; both sites now route through it (`GLANCE_EPISODE`/`OMP_SQUAD_EPISODE` here, `GLANCE_ATTENTION`/`OMP_SQUAD_ATTENTION` in `src/attention.ts`). Tests for both flags via both names in `tests/config.test.ts` and `tests/attention.test.ts`.

@@ -32,6 +32,7 @@ import {
   nodeFogKey,
   ancestorFolderIds,
   allFilesColdStart,
+  normalizeRepoKey,
   type HeatTree as HeatTreeData,
   type HeatTreeNode,
 } from '../../lib/heatmap';
@@ -103,9 +104,14 @@ const SEEN_CURRENT_STYLE: React.CSSProperties = { backgroundColor: 'rgba(255,255
 const NO_FOG_DATA_STYLE: React.CSSProperties = { backgroundColor: 'rgba(255,255,255,0.02)' };
 
 /** Resolve one cell's fog-mode visual + tooltip. Pure presentation only — every INPUT here
- *  (`node.fog`, repo cold-start membership) was already decided by `heatmap.ts`'s pure helpers. */
+ *  (`node.fog`, repo cold-start membership) was already decided by `heatmap.ts`'s pure helpers.
+ *  `coldStart`'s keys are `normalizeRepoKey`-normalized (see `coldStartRepos`'s doc) — `node.repo`
+ *  is the raw, un-normalized string `buildHeatTree` copied from the source `/api/heat` node, so the
+ *  membership check below normalizes it too (batch-3 review, concern 04 minor: a repo named with a
+ *  trailing slash in one payload and without in the other used to silently fail this check even
+ *  though `attachFog`'s own join agreed they were the same repo). */
 function fogVisual(node: HeatTreeNode, coldStart: Set<string>): { style: React.CSSProperties; title: string } {
-  if (node.repo && coldStart.has(node.repo)) {
+  if (node.repo && coldStart.has(normalizeRepoKey(node.repo))) {
     return { style: NO_FOG_DATA_STYLE, title: 'no view history yet for this repo' };
   }
   if (!node.fog) {

@@ -125,6 +125,26 @@ export function deriveGraphPageContext({ days, viz, sel }: GraphPageContextInput
   };
 }
 
+// ── Fog (comprehension batch-3 review: FogView, the new nav item mounting HeatTree's fog mode) ──
+
+export interface FogPageContextInput {
+  days: 7 | 14 | 30;
+  fileCount: number;
+}
+
+/** FogView's own context: the days-of-history window and how many files are in the current tree —
+ *  everything else (which node is expanded/selected) is HeatTree's own local UI state, not
+ *  something worth naming to the assistant, mirroring `deriveGraphPageContext`'s scope call. */
+export function deriveFogPageContext({ days, fileCount }: FogPageContextInput): PageContext {
+  return {
+    viewId: 'fog',
+    title: 'Comprehension fog',
+    entities: [],
+    filters: { windowDays: days, fileCount },
+    route: '/fog',
+  };
+}
+
 function inspectSelId(sel: InspectSel): string {
   switch (sel.kind) {
     case 'commit': return sel.sha;
