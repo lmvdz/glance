@@ -6,7 +6,7 @@ COMPLEXITY: architectural
 TOUCHES: src/types.ts, src/agent-profiles.ts, src/squad-manager.ts, src/acp-agent-driver.ts, src/worktree.ts (or a new mcp-config writer), tests/
 
 ## Goal
-A profile can attach **MCP servers** so it has real, specialized capability — a "designer" profile loads design-oriented MCP servers, a "coder" profile loads code-analysis ones. This is what makes profiles genuinely different at a task class, beyond persona text. Works for BOTH harness families (omp-rpc via a config file, ACP via the session channel), and is secured against the repo-config RCE class.
+A profile can attach **operator-controlled MCP servers** so it has real, specialized capability — a "designer" profile loads design-oriented MCP servers, a "coder" profile loads code-analysis ones. The goal is to make profiles affect the actual tool surface available to each spawned agent, not just its prompt/persona: profile selection should deterministically resolve a per-unit MCP set, persist that resolved set for restart/replay, inject it into the chosen harness before the agent starts, and expose only safe server names back to operators for auditability. This is what makes profiles genuinely different at a task class, beyond persona text. Works for BOTH harness families (omp-rpc via a config file, ACP via the session channel), and is secured against the repo-config RCE class by allowing repo profiles to describe intent/persona while reserving executable MCP definitions for trusted operator/env configuration.
 
 ## Context (verified)
 - `CapabilitySkillSpec`/`CapabilityToolSpec` bindings are DEAD at spawn (parsed/stored/diffable, never consumed). Only profile/workflow/driver bindings are live. So "skills" as capability tags do nothing — don't build on them for v1.

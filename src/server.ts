@@ -163,7 +163,7 @@ import { approveJoinRequest, denyJoinRequest, ensurePersonalWorkspace, listPendi
 import { addMemberByEmail, getOrgProfile, listOrgMembers, removeMember, renameOrg, setMemberRole } from "./org-admin.ts";
 import { dbMode as voiceDbBootMode, type DbHandle } from "./db/index.ts";
 import { openRouteDecision } from "./open-worktree.ts";
-import { escalationPayload, type PushPayload, PushService, voiceDonePayload } from "./push.ts";
+import { completionPayload, escalationPayload, type PushPayload, PushService } from "./push.ts";
 import type { Actor, AgentDTO, AgentStatus, AuditEntry, OperatorPresence, Role, RunReceipt } from "./types.ts";
 import type { TraceResponse } from "./spans.ts";
 import { type FederationSnapshot, federationView } from "./federation.ts";
@@ -2778,33 +2778,33 @@ export class SquadServer {
 				void push.notify(payload);
 			}
 		}
-		this.maybePushVoiceDone(prev, a, push);
+		this.maybePushCompletionDone(prev, a, push);
 	}
 
-	/** Voice-loop completion push (plans/voice-loop concern 01): a SEPARATE `done:` tag/debounce
-	 *  namespace from the escalation lane above, so a "finished" toast can never REPLACE (sw.js
-	 *  renotify) or debounce-eat an unactioned "needs you" alert for the same agent. File-mode only —
-	 *  explicit guard here rather than relying solely on `broadcast()` only being wired in the file-mode
-	 *  branch today (see `start()`), so a future `broadcastTo` push wiring can never silently ride this
-	 *  one global subscription list across orgs (`broadcastTo`'s own doc comment already asserts this;
-	 *  this is defense in depth at the new payload site itself). Disarms the manager's `voicePushArmed`
-	 *  latch only once the push actually sends — that's the "exactly one push per voice dispatch"
-	 *  invariant's other half. */
-	private maybePushVoiceDone(prev: AgentStatus | undefined, a: AgentDTO, push: PushService): void {
+	/** Completion push (plans/voice-loop concern 01, generalized by daily-attention-w0 concern 01): a
+	 *  SEPARATE `done:` tag/debounce namespace from the escalation lane above, so a "finished" toast
+	 *  can never REPLACE (sw.js renotify) or debounce-eat an unactioned "needs you" alert for the same
+	 *  agent. File-mode only — explicit guard here rather than relying solely on `broadcast()` only
+	 *  being wired in the file-mode branch today (see `start()`), so a future `broadcastTo` push wiring
+	 *  can never silently ride this one global subscription list across orgs (`broadcastTo`'s own doc
+	 *  comment already asserts this; this is defense in depth at the new payload site itself). Disarms
+	 *  the manager's `completionPushArmed` latch only once the push actually sends — that's the
+	 *  "exactly one push per armed dispatch" invariant's other half. */
+	private maybePushCompletionDone(prev: AgentStatus | undefined, a: AgentDTO, push: PushService): void {
 		if (this.registry) return;
-		const payload = voiceDonePayload(prev, a, this.pushSeeded);
+		const payload = completionPayload(prev, a, this.pushSeeded);
 		if (!payload) return;
 		const key = `done:${a.id}`;
 		const now = Date.now();
 		if (now - (this.lastPush.get(key) ?? 0) < 3000) return;
 		this.lastPush.set(key, now);
 		// Disarm SYNCHRONOUSLY, before the (seconds-long, per-subscription) network send — review
-		// finding: an async post-send disarm races a NEWER voice dispatch's arm on the same agent
+		// finding: an async post-send disarm races a NEWER dispatch's arm on the same agent
 		// (applyCommand skips re-arming while the latch still reads true, then the late disarm
 		// consumes the latch that second dispatch was riding — its push is silently lost). The cost
 		// of sync-consume is that a totally-failed notify() doesn't retry on a later idle — accepted:
 		// the push is best-effort by design, the debrief cursor is the guarantee (DESIGN.md).
-		this.singleManager?.clearVoicePushArmed(a.id);
+		this.singleManager?.clearCompletionPushArmed(a.id);
 		void push.notify(payload);
 	}
 
@@ -2837,7 +2837,7 @@ export class SquadServer {
 		const prev = state.lastStatus.get(a.id);
 		state.lastStatus.set(a.id, a.status);
 		const escalation = escalationPayload(prev, a, state.seeded);
-		const done = voiceDonePayload(prev, a, state.seeded);
+		const done = completionPayload(prev, a, state.seeded);
 		if (!escalation && !done) return;
 		const now = Date.now();
 		if (escalation && now - (state.lastPush.get(a.id) ?? 0) >= 3000) {
@@ -2850,7 +2850,7 @@ export class SquadServer {
 				state.lastPush.set(key, now);
 				// Same sync-disarm-before-send discipline as the file-mode lane (audit finding: an async
 				// post-send disarm races a newer dispatch's re-arm).
-				this.orgManager(orgId)?.clearVoicePushArmed(a.id);
+				this.orgManager(orgId)?.clearCompletionPushArmed(a.id);
 				void this.pushForOrg(orgId).then((push) => void push.notify(done));
 			}
 		}

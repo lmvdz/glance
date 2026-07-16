@@ -928,13 +928,22 @@ export interface AgentDTO {
 	 *  from before this shipped (or from a restart, which doesn't recompute it) simply renders without one.
 	 *  Advisory only: nothing reads this field to gate, delay, or retry a spawn. */
 	harnessScorecard?: HarnessScorecard;
-	/** Mirrors `PersistedAgent.voicePushArmed`, but ONLY at the exact emitted event that is this agent's
-	 *  genuine terminal completion (see squad-manager.ts's `onAgentEvent` — a workflow's per-node
+	/** Mirrors `PersistedAgent.completionPushArmed`, but ONLY at the exact emitted event that is this
+	 *  agent's genuine terminal completion (see squad-manager.ts's `onAgentEvent` — a workflow's per-node
 	 *  `agent_end` idles are deliberately NOT terminal; only the one paired with `workflow_done` is).
 	 *  False/absent on every other emitted event even while the underlying latch is still armed, so the
 	 *  server-side push hook (`maybePushAlert`) can key a push off this field plus the working→idle edge
 	 *  without ever reaching into the manager or risking a push storm on a multi-node workflow. */
-	voicePushArmed?: boolean;
+	completionPushArmed?: boolean;
+	/** Why the latch is armed, exposed only alongside `completionPushArmed: true` (same terminal-event
+	 *  rule) — push.ts's `completionPayload` branches its copy on it (voice keeps the spoken-debrief
+	 *  callback line; a category arm gets the generic body). */
+	completionPushKind?: "voice" | "category";
+	/** Epoch-ms the latch was (re)armed, exposed only alongside `completionPushArmed: true` (same
+	 *  terminal-event rule). `completionPayload`'s duration gate reads it to suppress a category push
+	 *  whose turn ran under `OMP_SQUAD_PUSH_MIN_TURN_MS` — a live-watched short reply is not a
+	 *  reason-to-switch buzz. Voice arms are exempt (definitionally away-from-screen). */
+	completionArmedAt?: number;
 }
 
 /**
@@ -1105,12 +1114,22 @@ export interface PersistedAgent {
 	/** The question this unit was asked, when it is an answer unit (R5). Persisted so a daemon restart
 	 *  still knows the unit owes an answer. */
 	ask?: string;
-	/** Completion-push arm/disarm latch (voice-loop): set true when a voice-sourced dispatch (a
-	 *  `prompt`/`create` command whose `source` is "voice") is applied to this agent; cleared once the
-	 *  completion push actually sends, or by a voice-sourced `interrupt` (the operator cancelled — a
-	 *  "finished" push would be a lie). Persisted (not just in-memory) so the latch — and the ONE push
-	 *  it owes — survives a daemon restart mid-dispatch. See push.ts's `voiceDonePayload`. */
-	voicePushArmed?: boolean;
+	/** Completion-push arm/disarm latch: set when a dispatch owes the operator a "finished" push —
+	 *  ALWAYS for a voice-sourced dispatch (a `prompt`/`create` whose `source` is "voice"), and by
+	 *  session category otherwise (casual console chats default ON, fleet units default OFF — see
+	 *  completion-push.ts's `armCompletionPushKind`). Cleared once the completion push actually sends,
+	 *  or by ANY `interrupt` (the operator cancelled — a "finished" push would be a lie). Persisted
+	 *  (not just in-memory) so the latch — and the ONE push it owes — survives a daemon restart
+	 *  mid-dispatch. Pre-rename records persisted this as `voicePushArmed`; dal/store.ts migrates the
+	 *  legacy field forward at load. See push.ts's `completionPayload`. */
+	completionPushArmed?: boolean;
+	/** Why the latch is armed ("voice" | "category") — persisted with it so the push copy can branch
+	 *  after a restart. Absent whenever the latch is unarmed. */
+	completionPushKind?: "voice" | "category";
+	/** Epoch-ms this latch was last (re)armed — one per turn, refreshed on every arming prompt.
+	 *  Persisted so the completion-push duration gate (see AgentDTO.completionArmedAt) still measures
+	 *  the turn correctly across a daemon restart mid-dispatch. Absent whenever the latch is unarmed. */
+	completionArmedAt?: number;
 }
 
 /** Persisted feature envelope — additive `features[]` in `<stateDir>/state.json`. */
@@ -1237,12 +1256,18 @@ export interface CreateAgentOptions {
 	 *  final message is captured verbatim as a durable `Answer`. Implies `executionRole: "observer"`, which
 	 *  already means "never commits, never lands". */
 	ask?: string;
-	/** Carries a persisted voice-loop completion-push arm through the orphan-adopt boot path
-	 *  (adoptOrphanedAgents mints a FRESH id via `create()` rather than reusing the persisted record
+	/** Carries a persisted completion-push arm through the fresh-id restore paths (adoptOrphanedAgents
+	 *  and loadPersisted mint a FRESH id via `create()` rather than reusing the persisted record
 	 *  verbatim like the warm-reattach path does, so the latch needs an explicit carry — see
-	 *  squad-manager.ts's `createWithId`). Absent on a genuinely fresh create(); a fresh voice-sourced
-	 *  dispatch arms via the `source` param instead. */
-	voicePushArmed?: boolean;
+	 *  squad-manager.ts's `createWithId`). Absent on a genuinely fresh create(); a fresh dispatch arms
+	 *  via the `source` param / session category instead. */
+	completionPushArmed?: boolean;
+	/** Rides with `completionPushArmed` through the same restore paths (defaults to "voice" when the
+	 *  carried record predates the kind field). */
+	completionPushKind?: "voice" | "category";
+	/** Rides with `completionPushArmed` through the same restore paths — carried forward (not reset to
+	 *  now) so a turn that spanned a restart still measures from its original arm for the duration gate. */
+	completionArmedAt?: number;
 }
 
 /** Sandboxed execution: run the agent's omp inside a container. */
