@@ -10,7 +10,9 @@
  *  - an unreachable daemon or a non-shape response EXITS 1 — it never appends a fabricated
  *    all-zero row (absence of evidence is not evidence of absence);
  *  - a meta file without a `## Ledger` section exits 1 untouched — the script inserts exactly one
- *    line inside the section it verified exists, never "somewhere".
+ *    line inside the section it verified exists, never "somewhere" (via src/meta-ledger.ts's
+ *    insertLedgerRow, the shared single write path that also refuses verdict language — the
+ *    SUCCESS/KILL line is Lars's alone, plans/daily-dogfood-engine/03).
  *
  *   bun scripts/append-adoption-ledger.ts [--port <N>] [--meta <path/to/00-meta.md>] [--dry-run]
  */
@@ -19,6 +21,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
 import { isAdoptionCounters, summarizeAdoption } from "../src/adoption-counters.ts";
 import { base, parseArgs, tokenHeader } from "../src/cli-args.ts";
+import { insertLedgerRow } from "../src/meta-ledger.ts";
 
 const { flags } = parseArgs(process.argv.slice(2));
 const metaPath = typeof flags.meta === "string" ? path.resolve(flags.meta) : path.resolve("plans/daily-driver/00-meta.md");
@@ -53,15 +56,12 @@ try {
 } catch {
 	fail(`cannot read ${metaPath}`);
 }
-const headingMatch = /^## Ledger[ \t]*$/m.exec(text);
-if (!headingMatch) fail(`${metaPath} has no "## Ledger" section — refusing to append anywhere else`);
-const sectionStart = headingMatch.index + headingMatch[0].length;
-const nextHeading = text.slice(sectionStart).search(/^## /m);
-const sectionEnd = nextHeading === -1 ? text.length : sectionStart + nextHeading;
-// Trim trailing blank lines inside the section so the row lands right under the last entry.
-const body = text.slice(sectionStart, sectionEnd).replace(/\s+$/, "");
-const tail = text.slice(sectionEnd);
-const updated = `${text.slice(0, sectionStart)}${body}\n${row}\n${nextHeading === -1 ? "" : "\n"}${tail}`;
+let updated: string;
+try {
+	updated = insertLedgerRow(text, row);
+} catch (err) {
+	updated = fail(`${metaPath}: ${err instanceof Error ? err.message : String(err)}`);
+}
 
 if (flags["dry-run"]) {
 	console.log(row);
