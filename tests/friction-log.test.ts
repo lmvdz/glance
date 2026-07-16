@@ -13,8 +13,8 @@ import { restActionTier } from "../src/authz.ts";
 import { FrictionLog, frictionPath } from "../src/friction-log.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import { SquadServer } from "../src/server.ts";
-import { parseSlash } from "../src/tui.ts";
-import type { FrictionEntry } from "../src/types.ts";
+import { parseSlash, SquadTui } from "../src/tui.ts";
+import type { AgentDTO, FrictionEntry } from "../src/types.ts";
 
 const cleanups: Array<() => Promise<void> | void> = [];
 afterEach(async () => {
@@ -185,4 +185,78 @@ test("parseSlash: verb lowercased, arg keeps its own casing and internal spacing
 	expect(parseSlash("/GRR The Spinner LIES  badly")).toEqual({ verb: "grr", arg: "The Spinner LIES  badly" });
 	expect(parseSlash("/grr")).toEqual({ verb: "grr", arg: "" });
 	expect(parseSlash("/ grr text")).toEqual({ verb: "grr", arg: "text" });
+});
+
+// ---------------------------------------------------------------------------
+// TUI key routing while the composer is borrowed as the grr prompt
+// ---------------------------------------------------------------------------
+
+/** Ctrl-G clears the draft to "", which re-arms the list view's `a` → jump-to-blocked
+ *  shortcut. With a blocked agent on the board (common while dogfooding), a gripe
+ *  starting with 'a' must TYPE into the gripe — not lose its first keystroke, yank the
+ *  view to the blocked agent, and misattribute the mangled gripe to that agent's repo. */
+test("TUI grr mode: 'a' types into the gripe instead of jumping to a blocked agent", () => {
+	const blocked = {
+		id: "agent-blocked",
+		name: "unit",
+		status: "input",
+		kind: "task",
+		repo: "/blocked-repo",
+		lastActivity: Date.now(),
+		pending: [],
+	} as unknown as AgentDTO;
+
+	const commands: Array<Record<string, unknown>> = [];
+	const recorded: Array<Record<string, unknown>> = [];
+	const fakeManager = {
+		list: () => [blocked],
+		getTranscript: () => [],
+		applyCommand: (cmd: Record<string, unknown>) => void commands.push(cmd),
+		recordFriction: (input: Record<string, unknown>) => {
+			recorded.push(input);
+			return { ...input, id: "friction-1", ts: Date.now() };
+		},
+		on: () => {},
+		off: () => {},
+	} as unknown as ConstructorParameters<typeof SquadTui>[0];
+
+	const tui = new SquadTui(fakeManager, "/cwd");
+	// handleKey/state are private; the test drives the real key router.
+	const t = tui as unknown as {
+		handleKey(data: Buffer): void;
+		state: { grr: boolean; view: string; draft: string; selectedId?: string };
+		redrawTimer?: ReturnType<typeof setTimeout>;
+		noticeTimer?: ReturnType<typeof setTimeout>;
+	};
+	cleanups.push(() => {
+		clearTimeout(t.redrawTimer);
+		clearTimeout(t.noticeTimer);
+	});
+
+	// Control: with the composer free, `a` still jumps to the blocked agent.
+	t.handleKey(Buffer.from("a"));
+	expect(t.state.view).toBe("agent");
+	expect(commands).toEqual([{ type: "subscribe", id: "agent-blocked" }]);
+	t.handleKey(Buffer.from("\x1b")); // Esc → back to list
+	expect(t.state.view).toBe("list");
+
+	// Ctrl-G borrows the composer; the draft is now "" — the first-keystroke-steal setup.
+	t.handleKey(Buffer.from("\x07"));
+	expect(t.state.grr).toBe(true);
+	expect(t.state.draft).toBe("");
+
+	// A gripe starting with 'a' types, stays in grr mode, and never yanks the view.
+	for (const ch of "agent list flickers") t.handleKey(Buffer.from(ch));
+	expect(t.state.grr).toBe(true);
+	expect(t.state.view).toBe("list");
+	expect(t.state.draft).toBe("agent list flickers");
+	expect(commands.length).toBe(1); // no second subscribe — jumpToBlocked never fired
+
+	// Enter records the FULL gripe, attributed to the cwd (list view), not the blocked agent.
+	t.handleKey(Buffer.from("\r"));
+	expect(t.state.grr).toBe(false);
+	expect(recorded.length).toBe(1);
+	expect(recorded[0].gripe).toBe("agent list flickers");
+	expect(recorded[0].repo).toBe("/cwd");
+	expect(recorded[0].agentId).toBeUndefined();
 });

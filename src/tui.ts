@@ -644,7 +644,7 @@ export class SquadTui {
 		else if (s === "\x1b[B") this.onDown();
 		else if (s === "\x1b[C") this.onRight();
 		else if (s === "\x1b[D") this.onLeft();
-		else if (s === "a" && this.state.view === "list" && this.state.draft === "" && this.state.agents.some((a) => a.status === "input")) this.jumpToBlocked();
+		else if (s === "a" && !this.state.grr && this.state.view === "list" && this.state.draft === "" && this.state.agents.some((a) => a.status === "input")) this.jumpToBlocked();
 		else this.editor.handleInput(s);
 		this.scheduleRedraw();
 	}
