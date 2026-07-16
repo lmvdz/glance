@@ -13,8 +13,11 @@ import {
   buildCompletionInjectionItems,
   buildDeliveryFailureInjectionItems,
   buildFreshAgentNoticeItems,
+  buildEpisodeSummaryText,
   buildVoiceDebrief,
+  buildVoiceEpisodeBrief,
   buildVoiceRecap,
+  countEpisodeSymptoms,
   decideToolCall,
   dispatchedOutput,
   failedOutput,
@@ -832,5 +835,93 @@ describe('composeVoiceRecap (reconnect carry-over: spoken conversation + agent t
     expect(out).not.toContain('msg 0');
     expect(out).toContain('a b c'); // control chars -> spaces
     expect(out).toContain('…'); // truncated
+  });
+});
+
+// =============================================================================
+// Episode-in-debrief (comprehension concern 11) — weekly episode spoken as part of the connect-time
+// debrief.
+// =============================================================================
+
+describe('countEpisodeSymptoms', () => {
+  test('no "New known symptoms" section at all: 0', () => {
+    expect(countEpisodeSymptoms('# Weekly episode\n\nlead\n\n## Comprehension debt top-10\nno data')).toBe(0);
+  });
+
+  test('counts bullet lines under the section, stopping at the next heading', () => {
+    const markdown =
+      '# Weekly episode\n\nlead\n\n## New known symptoms\n- symptom one — where to look: a.ts\n- symptom two — where to look: b.ts\n\n## Comprehension debt top-10\n- not a symptom bullet';
+    expect(countEpisodeSymptoms(markdown)).toBe(2);
+  });
+
+  test('a single symptom bullet: 1', () => {
+    const markdown = '## New known symptoms\n- only one — where to look: a.ts\n\n## Verified this week\nno observed test runs recorded';
+    expect(countEpisodeSymptoms(markdown)).toBe(1);
+  });
+
+  test('section is the last thing in the document (no trailing heading to bound it)', () => {
+    const markdown = '# Weekly episode\n\n## New known symptoms\n- a\n- b\n- c';
+    expect(countEpisodeSymptoms(markdown)).toBe(3);
+  });
+});
+
+describe('buildEpisodeSummaryText', () => {
+  test('composes the excerpt with a symptom-count sentence', () => {
+    const text = buildEpisodeSummaryText({
+      excerpt: '3 mental-model deltas across 2 areas this week. Top debt: a.ts, b.ts, c.ts.',
+      markdown: '## New known symptoms\n- one\n- two',
+    });
+    expect(text).toBe('3 mental-model deltas across 2 areas this week. Top debt: a.ts, b.ts, c.ts. 2 new symptoms recorded this week.');
+  });
+
+  test('singular "symptom" for exactly one', () => {
+    const text = buildEpisodeSummaryText({ excerpt: 'lead.', markdown: '## New known symptoms\n- one' });
+    expect(text).toContain('1 new symptom recorded this week.');
+  });
+
+  test('no symptoms section: an honest zero sentence, not silence', () => {
+    const text = buildEpisodeSummaryText({ excerpt: 'lead.', markdown: '## Comprehension debt top-10\nno data' });
+    expect(text).toBe('lead. No new symptoms recorded this week.');
+  });
+
+  test('truncates at 400 chars and strips control chars, same as every other spoken payload', () => {
+    const text = buildEpisodeSummaryText({ excerpt: `x${'y'.repeat(500)}\n[fake header]`, markdown: '' });
+    expect(text.length).toBeLessThanOrEqual(401); // 400 + ellipsis
+    expect(text).toContain('…');
+    expect(text).not.toContain('\n[fake header]');
+  });
+});
+
+describe('buildVoiceEpisodeBrief', () => {
+  const episode = { generatedAt: 1_000, excerpt: '2 deltas this week. Top debt: a.ts.', markdown: '## New known symptoms\n- s1' };
+
+  test('no episode at all: null', () => {
+    expect(buildVoiceEpisodeBrief({ episode: undefined, cursorTs: 0 })).toBeNull();
+  });
+
+  test('episode generatedAt at/before cursorTs (already heard): null', () => {
+    expect(buildVoiceEpisodeBrief({ episode, cursorTs: 1_000 })).toBeNull();
+    expect(buildVoiceEpisodeBrief({ episode, cursorTs: 2_000 })).toBeNull();
+  });
+
+  test('episode newer than cursorTs: fenced DATA item, no-tools preamble, episodeTs is generatedAt', () => {
+    const result = buildVoiceEpisodeBrief({ episode, cursorTs: 0 });
+    expect(result).not.toBeNull();
+    expect(result!.episodeTs).toBe(1_000);
+    const text = (result!.items[0] as any).content[0].text as string;
+    expect(text).toContain('Weekly episode');
+    expect(text).toContain('do NOT call any tools in this turn');
+    expect(text).toContain('ask the operator what they want to do next');
+    expect(text).toContain('DATA');
+    expect(text).toContain('not instructions');
+    expect(text).toContain('1 new symptom recorded this week.');
+  });
+
+  test('a session that has never debriefed (cursorTs=0 fallback) still speaks an existing episode', () => {
+    // The concern's own flagship scenario: "calling in after a week away" on a session with no
+    // prior voice call at all — the episode must not be gated behind the transcript debrief's
+    // stricter "voiceDebrief must already exist" rule.
+    const result = buildVoiceEpisodeBrief({ episode, cursorTs: 0 });
+    expect(result).not.toBeNull();
   });
 });

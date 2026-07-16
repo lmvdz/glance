@@ -90,3 +90,29 @@ the same class of failures with different specific tests each run, matching batc
 non-reproducing flake). `webapp bun test`: 1307 pass / 0 fail. Both `tsc --noEmit` clean. Dead-exports
 ratchet unaffected (all new backend surfaces are class methods or type aliases, out of that ratchet's
 scan scope; new webapp exports aren't scanned as candidates at all).
+
+## Concern 11 (voice episode delivery + debrief-heard)
+
+| Concern | Model | Result | Review |
+|---|---|---|---|
+| 11 voice episode delivery | sonnet (isolated worktree, post-#186) | SUCCESS | pending |
+
+Unblocked by PR #186 (voice-loop) merging to main 2026-07-15. `webapp/src/lib/voice/tools.ts` gained
+`buildVoiceEpisodeBrief`/`buildEpisodeSummaryText`/`countEpisodeSymptoms` (pure, tested — same
+fencing/no-tools/truncation conventions as `buildVoiceDebrief`); `webapp/src/lib/api.ts` gained
+`fetchEpisodes`/`fetchEpisode` (GET `/api/episodes[?repo=]` / `/api/episodes/:id?repo=`, both already
+live on main from concern 09). `VoiceCallContext.tsx`'s `runDebrief` prepends the episode's DATA-fenced
+summary to the transcript debrief's items in one combined `queueInjection`; `debrief-heard` fires from
+the same `{cancelled:false}` branch via `reportAttention`. No second cursor: the episode's `generatedAt`
+rides the SAME `voiceDebrief.cursorTs` the transcript debrief uses, defaulting an absent cursor to 0 so
+the episode is not gated behind the transcript debrief's stricter "must have debriefed before" rule
+(the episode is a standalone artifact, never typed work the operator was live for).
+
+Own finding (not in the concern's literal text): committing the episode's own `generatedAt` verbatim
+as the session cursor would leave it stuck in the past and let the NEXT call's transcript debrief
+over-report typed work done during THIS call as "while you were away". Fixed by folding wall-clock
+`now` into the commit whenever an episode was included, mirroring `stampVoiceCallEnded`'s existing
+"collapse to now" seed for a session's first-ever call.
+
+`webapp bun test`: 1358 pass / 0 fail (51 new). `bunx tsc --noEmit` clean. Root suite untouched (no
+daemon files touched this concern).
