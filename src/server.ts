@@ -165,6 +165,8 @@ import { type FederationSnapshot, federationView } from "./federation.ts";
 import { workflowSnapshot } from "./workflow-catalog.ts";
 import { validateRequestedMode } from "./autonomy.ts";
 import { resolveStateDir } from "./state-dir.ts";
+import { costGateMode } from "./cost-gate.ts";
+import { costAggregateNeedsRebuild } from "./cost-aggregate.ts";
 import { featureFlagStates, type FeatureFlagKey, isFeatureFlagKey, type RuntimeSettingsStore } from "./runtime-settings.ts";
 import { parsePolicyDoc, type PolicyStore } from "./policy.ts";
 import { publicCapabilityCatalog, publicCapabilityManifest } from "./capabilities/catalog.ts";
@@ -835,6 +837,13 @@ export class SquadServer {
 			// Not a feature flag: read straight from the env the orchestrator reads.
 			landConfirm: envBool("OMP_SQUAD_LAND_CONFIRM", false),
 			regressionGate: on("OMP_SQUAD_REGRESSION_GATE"),
+			// Cost-gate posture (adw-factory-borrows concern 09): mode is env-global; aggregate readiness
+			// is per-stateDir — file mode's resolveStateDir() is exactly the dir SquadManager defaults to.
+			// (DB mode reports the global dir; per-org cost aggregates aren't wired there yet, same
+			// posture as plane.ts's multi-org write guard.) Without these two fields the doctor's
+			// enforce-armed-but-inert check reads undefined and never fires against a live daemon.
+			costGateMode: costGateMode(),
+			costAggregateReady: !costAggregateNeedsRebuild(resolveStateDir()),
 		};
 	}
 

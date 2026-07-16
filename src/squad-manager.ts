@@ -7365,9 +7365,13 @@ export class SquadManager extends EventEmitter {
 			// Shadow-exit surface (adw-factory-borrows concern 09): raw events, not rollup rows — the
 			// scoreboard needs a JOINT filter (e.g. mode=shadow AND action=ask/deny) a per-tag-key rollup
 			// breakdown can't answer. Same window every other row on this strip uses.
-			laneEvents: this.learningMetrics.recent({ name: "lane-classification", sinceMs: windowMs }, now),
-			routeEvents: this.learningMetrics.recent({ name: "model-route-decision", sinceMs: windowMs }, now),
-			costEvents: this.learningMetrics.recent({ name: "cost-gate-verdict", sinceMs: windowMs }, now),
+			// limit: 0 = unbounded — recent()'s default limit of 500 silently saturates the counters on a
+			// fleet with >500 spawns in the window, and a scoreboard that under-reports shadow denials is
+			// exactly the "evidence with no reader" failure this surface exists to close. Memory stays
+			// bounded by the metrics ring itself (RING_MAX).
+			laneEvents: this.learningMetrics.recent({ name: "lane-classification", sinceMs: windowMs, limit: 0 }, now),
+			routeEvents: this.learningMetrics.recent({ name: "model-route-decision", sinceMs: windowMs, limit: 0 }, now),
+			costEvents: this.learningMetrics.recent({ name: "cost-gate-verdict", sinceMs: windowMs, limit: 0 }, now),
 		});
 	}
 
