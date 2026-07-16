@@ -1,6 +1,6 @@
 # Casual completion push — generalize the voice-done latch by session category
 
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -33,3 +33,76 @@ none — omp-squad only. glance-desktop's cockpit reads OSC 777/9 off `escalatio
 - `tests/push-server.test.ts`: `maybePushCompletionDone` rename plus behavior-preservation (identical 3s debounce, identical sync-disarm-before-send ordering, no change to `pushSeeded` gating).
 - Live (scratch-daemon skill): open a console chat, send a prompt, let it idle — confirm a push fires with defaults; separately dispatch a normal tracked/dispatched unit, let it idle — confirm NO push fires with defaults; flip `OMP_SQUAD_PUSH_FLEET_DONE` via `POST /api/settings/feature-flags` and confirm the fleet unit's next completion now pushes.
 - Full `bun test` (tsc + suite) green.
+
+## Resolution
+
+Executed 2026-07-16 (branch worktree-wf_55eef634-d22-7 off feat/daily-driver-w1), completing a
+session-limited prior attempt's salvage (wip 72db271, audited line-by-line, reshaped into reviewed
+commits). Everything below the test line was driven live against a scratch daemon (own state dir,
+port 18791, loops off) with real omp agents and a local Web Push catcher standing in for the push
+service — encrypted RFC8291 deliveries observed on the wire, not inferred from green tests.
+
+**What shipped.** Exactly the Approach: `src/completion-push.ts` (sessionCategory classifier —
+verified against the shipped cmdHere unit shape: `POST /api/console` / `glance here` create
+`name:"chat"` + `CONSOLE_SYSTEM_PROMPT`, which classifies casual until promote() — plus
+`armCompletionPushKind`: voice always arms, otherwise the category flag decides); the two flags in
+runtime-settings (casual default ON, fleet default OFF) riding settings.json + `POST
+/api/settings/feature-flags`; the full latch rename (`completionPushArmed`/`completionPushKind`
+across types/manager/push/server, `clearCompletionPushArmed`, `maybePushCompletionDone`); debounce,
+send-ordering, terminal-exposure, and escalation lane untouched byte-for-byte.
+
+**Copy choice (the implementer call the Approach left open): option (a)** — one extra persisted bit
+`completionPushKind: "voice" | "category"` rides beside the boolean so the copy can branch honestly:
+voice keeps "Tap to open glance — call back for the spoken debrief."; a category arm gets "Ready
+when you are — tap to pick up where you left off." A kindless-armed DTO falls back to the generic
+body (never the voice line for a dispatch we can't prove was voice). Kind also enables the promote()
+boundary rule: an unconsumed CATEGORY latch is cleared at casual→fleet promotion (the just-promoted
+unit's next idle must not push under fleet-OFF defaults); a VOICE latch rides across untouched.
+
+**Beyond the letter of the plan (found necessary during the audit):** (1) legacy `voicePushArmed`
+records migrate forward at load in BOTH stores (dal/store.ts) so an armed latch and the one push it
+owes survive the upgrade, kind defaulting to "voice" — the only legacy arm source; (2) loadPersisted
+(--restore) gains the same latch carry adoptOrphanedAgents already had; (3) a re-arm takes the
+LATEST prompt's kind; (4) promote()'s failure-atomic rollback restores the prior latch.
+
+**Verify record.** tsc clean; 43 tests across the four push suites green (arm matrix incl. both
+fail-closed flag directions, promote flip end-to-end through the real server push lane with the
+debounce slot cleared so only the category decision can be the reason, restart round-trip, legacy
+migration, workflow node-boundary exposure); adjacent suites (here/console/store/settings/authz,
+99 tests) green. Live (scratch daemon): casual chat turn → idle fired exactly one aes128gcm
+VAPID-signed push with defaults; a plain tracked fleet unit → idle fired none; flipping
+`OMP_SQUAD_PUSH_FLEET_DONE` via `POST /api/settings/feature-flags` took effect WITHOUT a daemon
+restart (env-mirror live) and the same unit's next completion pushed. Full-suite run remains the
+review gate's job. Phone-in-hand tap-through of the new copy is worth one glance on the next real
+device session; the payload path is byte-identical to the voice push that already tap-verified.
+
+## Notes
+
+- The routed `/api/spawn` path turns a bare prompt into a verify WORKFLOW unit — its intermediate
+  idles never carried the latch (the `workflowJustFinished` pairing, unchanged), observed live
+  before switching to a plain tracked unit for the timed check.
+- 02-transition-subscription should now refactor the POST-rename `maybePushAlert` /
+  `maybePushAlertOrg` bodies (`completionPayload`, `clearCompletionPushArmed`) — the 30s check in
+  00-overview.md passes.
+
+## Duration gate (UX follow-up, 2026-07-16)
+
+The first cut armed and fired on EVERY turn — a casual chat's every idle edge pushed, so a
+push-subscribed phone would buzz per turn, even on a 5-second reply watched live. 00-overview.md
+promises a page "when a long turn finishes"; category pushes default ON, so ungated that reads as
+spam day one (and users disable it, defeating the epic). Fixed:
+- **`completionArmedAt`** (epoch-ms) rides beside the latch — stamped at each arm, refreshed on
+  every arming prompt so it measures THIS turn (a stale prior-turn stamp would inflate elapsed and
+  let a short turn buzz), carried through restore/adopt unchanged, cleared on interrupt/promote/
+  disarm, and exposed on the DTO under the same terminal-only rule as `completionPushArmed`.
+- **`completionPayload`'s gate:** a CATEGORY push only fires once `now - completionArmedAt >=`
+  `OMP_SQUAD_PUSH_MIN_TURN_MS` (default 20000; `0` disables). A VOICE push is exempt — an
+  away-from-screen call owes its ping however short. Fails OPEN when the arm time is unknown (a
+  latch that predates the field, riding a restart) — never swallow a genuinely-owed push over
+  missing timing data. A gated non-push leaves the latch armed (the push is deferred, not lost):
+  the next turn that runs long enough delivers it.
+- `OMP_SQUAD_PUSH_MIN_TURN_MS` is a raw millisecond count, NOT a feature flag (it has a numeric
+  value, not on/off), so it lives in `completion-push.ts`'s `completionMinTurnMs` reader (0 honored,
+  not eaten by `|| default`) + `.env.example`, not `runtime-settings.ts`. Debounce, send-ordering,
+  the escalation lane, and the category/arm logic are untouched. Covered by dedicated pure-gate
+  tests in push.test.ts and a server-layer short-vs-long test in push-server.test.ts.

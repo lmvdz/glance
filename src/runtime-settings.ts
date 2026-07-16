@@ -21,7 +21,9 @@ export type FeatureFlagKey =
 	| "OMP_SQUAD_LAND_RISK_GATE"
 	| "OMP_SQUAD_POLICY_RULES"
 	| "OMP_SQUAD_LOOP_ARMED"
-	| "OMP_SQUAD_MEMBRANE_PROFILES";
+	| "OMP_SQUAD_MEMBRANE_PROFILES"
+	| "OMP_SQUAD_PUSH_CASUAL_DONE"
+	| "OMP_SQUAD_PUSH_FLEET_DONE";
 
 export interface FeatureFlagDefinition {
 	key: FeatureFlagKey;
@@ -66,6 +68,8 @@ export const FEATURE_FLAGS: FeatureFlagDefinition[] = [
 	{ key: "OMP_SQUAD_POLICY_RULES", label: "Runtime policy rules", description: "Enforce operator-defined deny/ask rules on agent tool calls (in addition to the built-in guardrails).", defaultEnabled: false },
 	{ key: "OMP_SQUAD_LOOP_ARMED", label: "Convergence loop", description: "Arm the Stop-hook auto-continuation for a convergence run (armed per-process by the run entrypoint; never persisted to daemon env).", defaultEnabled: false, ephemeral: true },
 	{ key: "OMP_SQUAD_MEMBRANE_PROFILES", label: "Membrane profile disciplines", description: "Let implementer-unit profiles opt into prompt-only output disciplines (membrane:verdict-first / membrane:minimal-code) via capability tokens. Double gate #2 — a profile still has to name the token itself; the auto-disable breaker (runMembraneBreaker) can flip this off on a measured success drop.", defaultEnabled: false },
+	{ key: "OMP_SQUAD_PUSH_CASUAL_DONE", label: "Chat completion push", description: "Buzz your phone when a chat session (the console lane / glance here) finishes a turn — the reason to come back after stepping away. Approval/input alerts always fire regardless.", defaultEnabled: true },
+	{ key: "OMP_SQUAD_PUSH_FLEET_DONE", label: "Fleet completion push", description: "Buzz your phone every time a dispatched fleet unit finishes. Off by default — a tracked unit completing is routine, and a busy fleet would page you constantly. Approval/input alerts always fire regardless.", defaultEnabled: false },
 ];
 
 const FLAG_KEYS = new Set<string>(FEATURE_FLAGS.map((flag) => flag.key));

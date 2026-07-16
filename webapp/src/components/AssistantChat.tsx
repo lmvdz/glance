@@ -20,6 +20,7 @@ import { apiJson, jsonInit } from '../lib/api';
 import { answerCommand, interruptCommand, interruptibleAgents } from '../lib/agent-control';
 import { buildPromptCommand, ensureConsoleAgent } from '../lib/chat/sendCore';
 import { spawnProposalFor, type SpawnedUnitRecord, type SpawnProposal } from '../lib/spawnProposal';
+import { deleteDraft } from '../lib/chat/draftStore';
 import {
   loadPersistedSessions,
   mergeSessions,
@@ -550,7 +551,16 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
     if (!openedConsoleAgentId) return;
     const agent = agents.find((a) => a.id === openedConsoleAgentId);
     setSessions((prev) => {
-      if (prev.some((s) => s.id === openedConsoleAgentId)) return prev;
+      const existing = prev.find((s) => s.id === openedConsoleAgentId);
+      if (existing) {
+        // A deep-linked open (`#/agent/<id>`, TaskContext's agent-hash listener) can beat the
+        // roster fetch, so the session was created with the fallback title below. Retitle it the
+        // moment the agent lands — this effect re-runs on `agents`.
+        if (agent && existing.title === 'Agent console') {
+          return prev.map((s) => (s.id === openedConsoleAgentId ? { ...s, title: agent.name } : s));
+        }
+        return prev;
+      }
       const newSession: Session = {
         id: openedConsoleAgentId,
         title: agent?.name ?? 'Agent console',
@@ -666,11 +676,26 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
     }
   };
 
+  // Deleting a thread deletes its composer draft too — otherwise a future thread reusing the id
+  // (the recreated 'default' session) would resurrect a dead thread's half-typed text. For the
+  // ACTIVE thread the delete must run AFTER the mounted Composer has processed the switch away
+  // (its flush-on-switch/unmount would otherwise re-persist the draft right after we deleted it);
+  // child passive effects run before this parent effect, so deferring to here is deterministic.
+  const pendingDraftDeleteRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!pendingDraftDeleteRef.current) return;
+    deleteDraft(pendingDraftDeleteRef.current);
+    pendingDraftDeleteRef.current = null;
+  }, [activeSessionId]);
+
   const deleteSession = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     setSessions(prev => prev.filter(s => s.id !== id));
     if (activeSessionId === id) {
+      pendingDraftDeleteRef.current = id;
       setActiveSessionId(null);
+    } else {
+      deleteDraft(id);
     }
   };
 
@@ -1000,6 +1025,7 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
       <Composer
         tasks={tasks}
         suggestionChips={suggestionChips}
+        sessionId={activeSessionId ?? undefined}
         isLoading={isLoading}
         isStopShown={isStopShown}
         stopPending={stopPending}
@@ -1009,6 +1035,7 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
         modelOptions={currentModelOptions}
         onModelChange={handleModelChange}
         agent={selectedAgent}
+        onToast={showToast}
         voiceCallEnabled={voiceCall.voiceEnabled}
         voiceCallActive={voiceCall.isCallActive}
         onStartVoiceCall={

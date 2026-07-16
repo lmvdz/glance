@@ -58,6 +58,7 @@ import {
 	FeaturePatchBodySchema,
 	FederationCommandBodySchema,
 	FeedbackItemsEnvelopeSchema,
+	FrictionBodySchema,
 	JoinRequestDecideBodySchema,
 	OrgJoinPolicyBodySchema,
 	OrgMemberInviteBodySchema,
@@ -70,6 +71,7 @@ import {
 	PlanVoteCallBodySchema,
 	PlanVoteCastBodySchema,
 	PushSubscriptionBodySchema,
+	PushTapBodySchema,
 	SpawnBodySchema,
 	AskBodySchema,
 	HarnessEventBodySchema,
@@ -79,6 +81,7 @@ import {
 	TaskStartBodySchema,
 	VoiceTokenBodySchema,
 } from "./schema/http-body.ts";
+import { mergeAdoptionCounters } from "./adoption-counters.ts";
 import { worktreeDiffSinceFork, worktreeTree } from "./explore.ts";
 import { appendConcernDecision, listPlanDirs, parsePlanConcerns, parsePlanDocuments } from "./features.ts";
 import { isPlanDocPath, planDocDiffSince, planDocHeadRevision, readPlanDoc } from "./plan-doc.ts";
@@ -160,7 +163,7 @@ import { approveJoinRequest, denyJoinRequest, ensurePersonalWorkspace, listPendi
 import { addMemberByEmail, getOrgProfile, listOrgMembers, removeMember, renameOrg, setMemberRole } from "./org-admin.ts";
 import { dbMode as voiceDbBootMode, type DbHandle } from "./db/index.ts";
 import { openRouteDecision } from "./open-worktree.ts";
-import { escalationPayload, type PushPayload, PushService, voiceDonePayload } from "./push.ts";
+import { completionPayload, escalationPayload, type PushPayload, PushService } from "./push.ts";
 import type { Actor, AgentDTO, AgentStatus, AuditEntry, OperatorPresence, Role, RunReceipt } from "./types.ts";
 import type { TraceResponse } from "./spans.ts";
 import { type FederationSnapshot, federationView } from "./federation.ts";
@@ -958,6 +961,14 @@ export class SquadServer {
 			const windowMs = Number(url.searchParams.get("windowMs"));
 			return Response.json(learningLoopPayloadAcross(managers, Number.isFinite(windowMs) && windowMs > 0 ? windowMs : undefined));
 		}
+		if (url.pathname === "/api/adoption") {
+			// Dogfood adoption counters (plans/daily-dogfood-engine/02): casual sessions/prompts/push-taps
+			// per UTC day, computed per manager from its OWN durable stateDir data (receipts/,
+			// transitions.jsonl, push-taps.jsonl) and summed. Viewer-tier read (authz.ts GET default) —
+			// counters are not sensitive, and the whole point is a zero-ceremony glance. Scoped like every
+			// route here: a tenant session's `managers` is its own 1-manager array.
+			return Response.json(mergeAdoptionCounters(await Promise.all(managers.map((m) => m.adoptionCounters()))));
+		}
 		return undefined;
 	}
 
@@ -1733,6 +1744,35 @@ export class SquadServer {
 			}
 		}
 		if (url.pathname === "/api/projects" && req.method === "GET") return Response.json(manager.projects());
+		// Friction ledger (plans/daily-dogfood-engine/01): tenant-scoped like /api/projects (one ledger
+		// per manager stateDir, same as the transitionLog it's modeled on — cross-org roll-up is out of
+		// scope until DB mode needs it). Default authz tiers, no new authz.ts branch: POST ⇒ operator
+		// (the writer is the operator dogfooding their own daemon), GET ⇒ viewer.
+		if (url.pathname === "/api/friction" && req.method === "GET") {
+			const limitParam = Number(url.searchParams.get("limit"));
+			const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.floor(limitParam) : 100;
+			const repoFilter = url.searchParams.get("repo") ?? undefined;
+			const entries = manager.frictionRecent(repoFilter ? undefined : limit);
+			const filtered = repoFilter ? entries.filter((e) => e.repo === repoFilter).slice(-limit) : entries;
+			return Response.json({ entries: filtered.slice().reverse() }); // newest-first for display
+		}
+		if (url.pathname === "/api/friction" && req.method === "POST") {
+			const decoded = decodeBody(FrictionBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response("gripe required", { status: 400 });
+			const b = decoded.success;
+			try {
+				return Response.json(
+					manager.recordFriction({
+						gripe: b.gripe,
+						repo: typeof b.repo === "string" ? b.repo : "",
+						context: typeof b.context === "string" ? b.context : undefined,
+						agentId: typeof b.agentId === "string" ? b.agentId : undefined,
+					}),
+				);
+			} catch (err) {
+				return new Response(errText(err), { status: 400 }); // empty-after-trim gripe (fail-closed record())
+			}
+		}
 		// Add a repo to the workspace. Admin-tiered in authz.ts: this names a path the daemon will later
 		// create worktrees in and spawn agents against. The manager validates it is an ABSOLUTE path to a
 		// real git repo — a relative path is refused, never resolved against the daemon's cwd (which is an
@@ -2397,9 +2437,14 @@ export class SquadServer {
 				repo = reg.repo;
 				ephemeral = reg.ephemeral;
 			}
+			// Restart re-attach (daily-onramp 04): the client names its dead predecessor; the manager
+			// appends the honest restart marker to the NEW session and hands back the recovered
+			// prior-context tail for the client to fold into the operator's first prompt.
+			const reattachOf = typeof body.reattachOf === "string" && body.reattachOf.trim() ? body.reattachOf.trim() : undefined;
 			try {
 				const dto = await manager.create({ repo, name: "chat", model, profileId, harness, autoRoute: false, appendSystemPrompt: CONSOLE_SYSTEM_PROMPT }, actor);
-				return Response.json({ agentId: dto.id, repo, ephemeral });
+				const reattach = reattachOf ? manager.reattachDeadSession(dto.id, reattachOf) : undefined;
+				return Response.json({ agentId: dto.id, repo, ephemeral, priorContext: reattach?.priorContext });
 			} catch (err) {
 				// A failed spawn must not leave a half-session behind: undo the registration this very
 				// request created (no-op when the repo was already durably registered).
@@ -2415,6 +2460,16 @@ export class SquadServer {
 			if (Result.isFailure(decoded)) return new Response("repo required", { status: 400 });
 			const released = manager.releaseEphemeralProject(decoded.success.repo);
 			return Response.json(released, { status: released.ok ? 200 : 500 });
+		}
+		// Push-tap beacon (daily-dogfood-engine 02): the webapp fires this ONCE per notification-tap
+		// page open (`?push=1` marker on push payload URLs, sessionStorage-deduped client-side).
+		// Appends {ts, agentId} to this manager's push-taps.jsonl — observability only, gates nothing.
+		// Viewer-tier by design (authz.ts): a viewer device's tap is still a tap.
+		if (url.pathname === "/api/push-tap" && req.method === "POST") {
+			const tapDecoded = decodeBody(PushTapBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(tapDecoded)) return new Response("agentId required", { status: 400 });
+			manager.recordPushTap(tapDecoded.success.agentId);
+			return Response.json({ ok: true });
 		}
 		// Feature 2 D2 (CANVAS-AND-PAGE-CHAT.md): a pasted/dropped/captured/annotated chat image
 		// persists here as a chat ARTIFACT (org-scoped by `manager`, size/PNG-magic-validated in
@@ -2444,6 +2499,20 @@ export class SquadServer {
 			const bytes = await manager.getChatAttachment(decodeURIComponent(mattachment[1]));
 			if (!bytes) return new Response("not found", { status: 404 });
 			return new Response(new Uint8Array(bytes), { headers: { "content-type": "image/png", "cache-control": "private, max-age=31536000, immutable" } });
+		}
+		// Single-agent read that stays honest about restart death (daily-onramp 04): a live id answers
+		// with its DTO; a session a restart killed answers with its dead placeholder (`dead: true` +
+		// the reason) for a bounded window; only an id with no story left is a 404. Without this, a
+		// `glance here` client polling its agent across a daemon bounce could not tell "did not
+		// survive" from "never existed".
+		const magent = url.pathname.match(/^\/api\/agents\/([^/]+)$/);
+		if (magent && req.method === "GET") {
+			const id = decodeURIComponent(magent[1]);
+			const dto = manager.getAgent(id);
+			if (dto) return Response.json(dto);
+			const ph = manager.deadPlaceholder(id);
+			if (ph) return Response.json({ id: ph.id, name: ph.name, repo: ph.repo, harness: ph.harness, at: ph.at, dead: true, deadReason: ph.deadReason, transcriptEntries: ph.transcript.length });
+			return new Response("no such agent", { status: 404 });
 		}
 		const mt = url.pathname.match(/^\/api\/agents\/([^/]+)\/transcript$/);
 		if (mt) {
@@ -2709,33 +2778,33 @@ export class SquadServer {
 				void push.notify(payload);
 			}
 		}
-		this.maybePushVoiceDone(prev, a, push);
+		this.maybePushCompletionDone(prev, a, push);
 	}
 
-	/** Voice-loop completion push (plans/voice-loop concern 01): a SEPARATE `done:` tag/debounce
-	 *  namespace from the escalation lane above, so a "finished" toast can never REPLACE (sw.js
-	 *  renotify) or debounce-eat an unactioned "needs you" alert for the same agent. File-mode only —
-	 *  explicit guard here rather than relying solely on `broadcast()` only being wired in the file-mode
-	 *  branch today (see `start()`), so a future `broadcastTo` push wiring can never silently ride this
-	 *  one global subscription list across orgs (`broadcastTo`'s own doc comment already asserts this;
-	 *  this is defense in depth at the new payload site itself). Disarms the manager's `voicePushArmed`
-	 *  latch only once the push actually sends — that's the "exactly one push per voice dispatch"
-	 *  invariant's other half. */
-	private maybePushVoiceDone(prev: AgentStatus | undefined, a: AgentDTO, push: PushService): void {
+	/** Completion push (plans/voice-loop concern 01, generalized by daily-attention-w0 concern 01): a
+	 *  SEPARATE `done:` tag/debounce namespace from the escalation lane above, so a "finished" toast
+	 *  can never REPLACE (sw.js renotify) or debounce-eat an unactioned "needs you" alert for the same
+	 *  agent. File-mode only — explicit guard here rather than relying solely on `broadcast()` only
+	 *  being wired in the file-mode branch today (see `start()`), so a future `broadcastTo` push wiring
+	 *  can never silently ride this one global subscription list across orgs (`broadcastTo`'s own doc
+	 *  comment already asserts this; this is defense in depth at the new payload site itself). Disarms
+	 *  the manager's `completionPushArmed` latch only once the push actually sends — that's the
+	 *  "exactly one push per armed dispatch" invariant's other half. */
+	private maybePushCompletionDone(prev: AgentStatus | undefined, a: AgentDTO, push: PushService): void {
 		if (this.registry) return;
-		const payload = voiceDonePayload(prev, a, this.pushSeeded);
+		const payload = completionPayload(prev, a, this.pushSeeded);
 		if (!payload) return;
 		const key = `done:${a.id}`;
 		const now = Date.now();
 		if (now - (this.lastPush.get(key) ?? 0) < 3000) return;
 		this.lastPush.set(key, now);
 		// Disarm SYNCHRONOUSLY, before the (seconds-long, per-subscription) network send — review
-		// finding: an async post-send disarm races a NEWER voice dispatch's arm on the same agent
+		// finding: an async post-send disarm races a NEWER dispatch's arm on the same agent
 		// (applyCommand skips re-arming while the latch still reads true, then the late disarm
 		// consumes the latch that second dispatch was riding — its push is silently lost). The cost
 		// of sync-consume is that a totally-failed notify() doesn't retry on a later idle — accepted:
 		// the push is best-effort by design, the debrief cursor is the guarantee (DESIGN.md).
-		this.singleManager?.clearVoicePushArmed(a.id);
+		this.singleManager?.clearCompletionPushArmed(a.id);
 		void push.notify(payload);
 	}
 
@@ -2768,7 +2837,7 @@ export class SquadServer {
 		const prev = state.lastStatus.get(a.id);
 		state.lastStatus.set(a.id, a.status);
 		const escalation = escalationPayload(prev, a, state.seeded);
-		const done = voiceDonePayload(prev, a, state.seeded);
+		const done = completionPayload(prev, a, state.seeded);
 		if (!escalation && !done) return;
 		const now = Date.now();
 		if (escalation && now - (state.lastPush.get(a.id) ?? 0) >= 3000) {
@@ -2781,7 +2850,7 @@ export class SquadServer {
 				state.lastPush.set(key, now);
 				// Same sync-disarm-before-send discipline as the file-mode lane (audit finding: an async
 				// post-send disarm races a newer dispatch's re-arm).
-				this.orgManager(orgId)?.clearVoicePushArmed(a.id);
+				this.orgManager(orgId)?.clearCompletionPushArmed(a.id);
 				void this.pushForOrg(orgId).then((push) => void push.notify(done));
 			}
 		}

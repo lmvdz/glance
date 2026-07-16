@@ -41,8 +41,11 @@ import { Dispatcher } from "./dispatch.ts";
 import { openDispatchLedger } from "./dispatch-ledger.ts";
 import { type Answer, answerBrief, listAnswers, readAnswer, saveAnswer } from "./answers.ts";
 import { errText } from "./err-text.ts";
+import { armCompletionPushKind } from "./completion-push.ts";
 import { isConsolePrompt, stripConsolePrompt } from "./console-prompt.ts";
 import { openRemovedLedger, type RemovedLedger } from "./removed-ledger.ts";
+import { buildDeadPlaceholder, composePriorContext, DEAD_PLACEHOLDER_TTL_MS, type DeadSessionPlaceholder, reattachMarker } from "./reattach-context.ts";
+import { reapAcpOrphanChain } from "./acp-orphan-reaper.ts";
 import { normalizeRepoPath, openProjectRegistry, readEphemeralProjects, writeEphemeralProjects, type ProjectRegistry } from "./project-registry.ts";
 import { Orchestrator } from "./orchestrator.ts";
 import { Observer, type Finding } from "./observer.ts";
@@ -122,6 +125,7 @@ import type {
 	OperatorPresence,
 	PendingRequest,
 	PersistedAgent,
+	FrictionEntry,
 	ProjectDTO,
 	RpcExtensionUIRequest,
 	RpcSessionState,
@@ -157,7 +161,9 @@ import { readModelOutcomes, recordModelOutcome, recordModelOutcomeBlocked, tierO
 import { shadowCostCheck } from "./cost-gate.ts";
 import { buildScoreboard, type Scoreboard } from "./attribution-scoreboard.ts";
 import { recordConfidenceOutcome, setThresholdTunerRoot, tunedConfidenceFloor } from "./threshold-tuner.ts";
+import { FrictionLog, type FrictionCapture } from "./friction-log.ts";
 import { JsonlLog } from "./jsonl-log.ts";
+import { type AdoptionCounters, computeAdoptionCounters, PUSH_TAPS_FILE, type PushTapEntry } from "./adoption-counters.ts";
 import { buildFactoryStatus, FACTORY_FRESHNESS_FLOOR_MS, FACTORY_LOOPS, type FactoryStatus } from "./factory-status.ts";
 import { addPlanRevisionCandidate, appendCommentEvent, type ArtifactComment, type CommentQuery, type PlanAnnotationTarget, listComments as readComments, listPlanRevisionCandidates as readPlanRevisionCandidates, nextCommentId, transitionPlanRevisionCandidate } from "./comments.ts";
 import { castPlanVote as appendPlanVoteCast, closePlanVoteRound as appendPlanVoteClose, currentPlanVoteRound as readCurrentPlanVoteRound, listPlanVoteRounds as readPlanVoteRounds, type OpenPlanVoteInput, openPlanVoteRound, recordPlanVoteCommit, tallyPlanVoteRound } from "./plan-votes.ts";
@@ -684,12 +690,12 @@ interface AgentRecord {
 	 *  closeOrphanedPending seeds this from the (already-hydrated, so cheap) in-memory ring's entries for
 	 *  the prior agent id, so a fresh-id lineage stitch doesn't reset the flapping signal to zero. */
 	errorTransitionTimestamps?: number[];
-	/** Voice-loop completion push: set true when a `workflow_done` frame lands, consumed (and cleared) by
+	/** Completion push: set true when a `workflow_done` frame lands, consumed (and cleared) by
 	 *  the `agent_end` frame the workflow driver always pairs it with immediately after (execRun's
 	 *  cleanup — see workflow-driver.ts) — distinguishes the graph's real terminal completion from an
 	 *  intermediate per-run `agent_end` (a human-gate/checkpoint boundary mid-graph, which never carries a
 	 *  preceding `workflow_done`). In-memory only, never persisted — a fresh daemon boot has no in-flight
-	 *  frame pair to track. Read by `onAgentEvent`'s `agent_end` case to gate `dto.voicePushArmed`
+	 *  frame pair to track. Read by `onAgentEvent`'s `agent_end` case to gate `dto.completionPushArmed`
 	 *  exposure so a multi-node workflow never mistakes a mid-graph idle blip for its actual finish. */
 	workflowJustFinished?: boolean;
 }
@@ -768,6 +774,12 @@ export class SquadManager extends EventEmitter {
 	/** Resumable checkpointed records dropped by the adoption ceiling this boot — kept (not erased) so
 	 *  persistNow folds them back into the snapshot for a later restart to re-attempt (D1 loss fix). */
 	private deferred: PersistedAgent[] = [];
+	/** Dead-session honesty (daily-onramp 04): non-resumable sessions the boot paths skipped, keyed by
+	 *  their old id, so `GET /api/agents/:id` and the transcript route answer truthfully for a bounded
+	 *  window after a restart instead of a bare miss that looks identical to "id never existed".
+	 *  In-memory only — the window is bounded by TTL, this process's lifetime, and the first post-boot
+	 *  persist (which drops the dead record from state.json). */
+	private readonly deadPlaceholders = new Map<string, DeadSessionPlaceholder>();
 	/** Source runIds with a fork() call currently past the guards and not yet resolved — claimed
 	 *  synchronously before the first `await` in fork() (readCheckpoints) and released in a `finally`, so
 	 *  two concurrent fork() calls for the same source (double-click, webapp+TUI, a federated peer) can't
@@ -910,6 +922,14 @@ export class SquadManager extends EventEmitter {
 	 *  file best-effort. recordTransition/recordDenied append here; transitionHistory() reads it for
 	 *  GET /api/agents/:id/transitions. Constructed in the constructor (needs stateDir). */
 	private readonly transitionLog: JsonlLog<TransitionEntry>;
+	/** Friction ledger (`stateDir/friction.jsonl`, plans/daily-dogfood-engine/01) — same lifecycle as
+	 *  transitionLog. All writes go through recordFriction (the single write path shared by
+	 *  POST /api/friction and the in-process TUI). */
+	private readonly frictionLog: FrictionLog;
+	/** Push-tap beacons (stateDir/push-taps.jsonl) — one line per push-notification tap the webapp
+	 *  reports (POST /api/push-tap). Adoption-counter substrate (plans/daily-dogfood-engine/02);
+	 *  append-only observability, never gates behavior. Same JsonlLog infra as transitionLog. */
+	private readonly pushTapLog: JsonlLog<PushTapEntry>;
 	private readonly traceExporter?: TraceExportQueue;
 	/** Reward disbursement provider (Tremendous / Manual). Injectable for tests; default from env. */
 	private readonly paymentProvider: PaymentProvider;
@@ -940,6 +960,8 @@ export class SquadManager extends EventEmitter {
 		this.automation = new AutomationLog(this.stateDir, { onEvent: (event) => this.emit("event", { type: "automation", event } satisfies SquadEvent) });
 		this.learningMetrics = new LearningMetrics(this.stateDir, { log: (m) => this.log("warn", `learning-metrics: ${m}`) });
 		this.transitionLog = new JsonlLog<TransitionEntry>({ path: path.join(this.stateDir, "transitions.jsonl"), log: (m) => this.log("warn", `transitions.jsonl: ${m}`) });
+		this.frictionLog = new FrictionLog(this.stateDir, (m) => this.log("warn", `friction.jsonl: ${m}`));
+		this.pushTapLog = new JsonlLog<PushTapEntry>({ path: path.join(this.stateDir, PUSH_TAPS_FILE), log: (m) => this.log("warn", `${PUSH_TAPS_FILE}: ${m}`) });
 		this.bin = opts.bin;
 		this.autoLand = opts.autoLand ?? false;
 		this.worktreeBaseDir = opts.worktreeBase;
@@ -1014,6 +1036,9 @@ export class SquadManager extends EventEmitter {
 			if (!this.skipGlobalJanitors) await this.reapOrphans();
 			await this.adoptOrphanedAgents(snapshot);
 			this.reconcileForkLineage();
+			// Dead-session honesty (daily-onramp 04): every persisted non-resumable session the paths
+			// above (correctly) declined to bring back leaves a placeholder, never a silent vanish.
+			this.recordNonResumableSkips(snapshot);
 		}
 		// AFTER roster restore (needs the surviving agents to tell live `glance here` sessions from dead
 		// ones) and outside the snapshot guard: a fresh-state boot with leftover markers means every
@@ -1630,10 +1655,12 @@ export class SquadManager extends EventEmitter {
 				// Resume the graph from its checkpoint; without this the adopted workflow restarts from
 				// scratch — re-running completed stages and re-committing their work (OMPSQ-165).
 				workflowState: p.workflowState,
-				// Completion-push arm survives orphan-adoption too — a voice-dispatched agent that produced
-				// real work, went idle, and never got its push before the daemon restarted still owes it
+				// Completion-push arm survives orphan-adoption too — an armed agent that produced real
+				// work, went idle, and never got its push before the daemon restarted still owes it
 				// under its freshly-minted post-adopt id (see createWithId's own comment on this field).
-				voicePushArmed: p.voicePushArmed,
+				completionPushArmed: p.completionPushArmed,
+				completionPushKind: p.completionPushKind,
+				completionArmedAt: p.completionArmedAt,
 				sandbox: p.sandbox,
 				autoRoute: false,
 				bypassCap: true,
@@ -1984,7 +2011,12 @@ export class SquadManager extends EventEmitter {
 	}
 
 	getTranscript(id: string): TranscriptEntry[] {
-		return this.agents.get(id)?.transcript ?? [];
+		const rec = this.agents.get(id);
+		if (rec) return rec.transcript;
+		// Dead-session honesty (daily-onramp 04): a session a restart killed still answers with its
+		// persisted transcript for the placeholder window — the honest re-attach reads its tail from
+		// here — instead of a bare [] that reads as "id never existed".
+		return this.deadPlaceholder(id)?.transcript ?? [];
 	}
 
 	/** Transcript delta (`seq > since`) — what a polling client (the cockpit conversation pane,
@@ -1995,6 +2027,90 @@ export class SquadManager extends EventEmitter {
 
 	getAgent(id: string): AgentDTO | undefined {
 		return this.agents.get(id)?.dto;
+	}
+
+	// ── Restart re-attach: dead-session placeholders (daily-onramp 04) ──────────────────────────────
+
+	/** The dead-session placeholder for `id`, while its bounded window still holds. Expiry is checked
+	 *  on read (cheap; no timer to leak) — a lapsed placeholder is deleted and reads as a clean miss,
+	 *  which the `here` REPL treats as the honest "did not survive, prior context unavailable" case. */
+	deadPlaceholder(id: string): DeadSessionPlaceholder | undefined {
+		const ph = this.deadPlaceholders.get(id);
+		if (!ph) return undefined;
+		if (Date.now() - ph.at > DEAD_PLACEHOLDER_TTL_MS) {
+			this.deadPlaceholders.delete(id);
+			return undefined;
+		}
+		return ph;
+	}
+
+	/** Record the honest terminal placeholder for a persisted agent a boot path skipped as
+	 *  non-resumable. Idempotent — the start() sweep and the `--restore` skip branch may both see the
+	 *  same record. buildDeadPlaceholder is total: a corrupt persisted transcript degrades to an empty
+	 *  tail with the failure named in deadReason (fail-closed honesty), never a throw out of boot. */
+	private recordDeadPlaceholder(p: PersistedAgent, transcript: unknown): void {
+		if (this.deadPlaceholders.has(p.id)) return;
+		const ph = buildDeadPlaceholder(p, transcript);
+		this.deadPlaceholders.set(p.id, ph);
+		this.log("info", `dead placeholder recorded for ${p.name} (${p.id}) — ${ph.deadReason}`);
+		// The dead session's adapter chain may still be running: a daemon KILL orphans the direct ACP
+		// child (npx → claude-code-acp reparents to init and idles forever — its stdio transport died
+		// with the old daemon process, so REUSE is impossible by construction). Reap it by the pid
+		// persisted at spawn, identity-checked against /proc before any signal — a recycled pid or a
+		// sibling daemon's adapter is never touched (see acp-orphan-reaper.ts). Fire-and-forget: boot
+		// never blocks on it, and a skipped kill is logged, never silent.
+		if (p.acpPid !== undefined && p.acpCmd?.length) {
+			void reapAcpOrphanChain(p.acpPid, p.acpCmd, (line) => this.log("info", line))
+				.then((termed) => {
+					if (termed.length) this.log("info", `reaped orphaned ACP adapter chain of ${p.id}: pid(s) ${termed.join(", ")}`);
+				})
+				.catch((err) => this.log("warn", `acp orphan reap for ${p.id} failed: ${String(err)}`));
+		}
+	}
+
+	/** After a successful driver start: persist the ACP adapter child's pid + argv fingerprint on the
+	 *  record, so the NEXT boot's dead-session sweep can reap the orphaned chain a daemon kill leaves
+	 *  behind (recordDeadPlaceholder above). Duck-typed on `spawnedCommand` — only AcpAgentDriver
+	 *  exposes it, so omp/pi/sandbox/flue/workflow records are never stamped. */
+	private stampAcpAdapter(rec: AgentRecord): void {
+		const d = rec.agent as Partial<{ pid: number; spawnedCommand: string[] }>;
+		if (typeof d.pid !== "number" || !Array.isArray(d.spawnedCommand)) return;
+		rec.options.acpPid = d.pid;
+		rec.options.acpCmd = d.spawnedCommand;
+		void this.persist();
+	}
+
+	/** start() epilogue over the boot snapshot: any persisted agent that is (a) not back in the roster
+	 *  (reconnectLive/adoptOrphanedAgents declined it), (b) not explicitly removed (a tombstone is a
+	 *  choice, not a death-by-restart), and (c) non-resumable — i.e. exactly the records the concern-07
+	 *  skips silently dropped — leaves a placeholder. Resumable records are untouched: the existing
+	 *  restore paths already own them, with zero changes from this concern. */
+	private recordNonResumableSkips(snapshot: StateSnapshot): void {
+		for (const p of snapshot.agents) {
+			if (this.agents.has(p.id)) continue;
+			if (this.removedLedger.has(p.id)) continue;
+			if (this.harnessResumable(p)) continue;
+			this.recordDeadPlaceholder(p, snapshot.transcripts[p.id]);
+		}
+	}
+
+	/** A fresh console session created as the successor of a dead (non-resumable) one — the `here`
+	 *  REPL's re-attach path, via POST /api/console { reattachOf }. Appends the unmissable restart
+	 *  marker to the NEW session's transcript (the CLI REPL and the webapp transcript view both render
+	 *  system entries), stitches lineage under the same "adopted" reason the cold-adopt path records,
+	 *  and returns the prior transcript tail composed as a prompt-ready context block. The context is
+	 *  RETURNED, never auto-sent — the client folds it into the operator's own first prompt (the
+	 *  decoratePrompt feed-forward precedent; no silent spend). */
+	reattachDeadSession(newId: string, priorId: string): { marker: string; priorContext?: string } | undefined {
+		const rec = this.agents.get(newId);
+		if (!rec) return undefined;
+		const ph = this.deadPlaceholder(priorId);
+		const priorContext = ph ? composePriorContext(ph.transcript) : undefined;
+		const marker = reattachMarker(priorId, ph?.harness ?? rec.options.harness ?? "unknown", priorContext !== undefined);
+		this.append(rec, "system", marker);
+		this.transition(rec, rec.dto.status, "adopted", { priorId });
+		this.emitAgent(rec);
+		return { marker, priorContext };
 	}
 
 	/** Merge order (base → override): repo catalog (`.glance/profiles.json`, sanitized — see
@@ -2401,6 +2517,18 @@ export class SquadManager extends EventEmitter {
 	 * `registered` distinguishes "I asked for this repo" from "this repo happens to have work in it",
 	 * so the UI can offer to un-register the former without pretending it can hide the latter.
 	 */
+	/** Friction ledger write — THE single capture path (plans/daily-dogfood-engine/01): the
+	 *  `POST /api/friction` route and the in-process TUI both land here, so no surface grows its own
+	 *  ledger-write logic. Throws on an empty gripe (FrictionLog.record is fail-closed). */
+	recordFriction(capture: FrictionCapture): FrictionEntry {
+		return this.frictionLog.record(capture);
+	}
+
+	/** Friction ledger ring tail (newest-LAST — the API reverses for newest-first display). */
+	frictionRecent(limit?: number): FrictionEntry[] {
+		return this.frictionLog.recent(limit);
+	}
+
 	projects(): ProjectDTO[] {
 		const byRepo = new Map<string, ProjectDTO>();
 		const ensure = (repo: string): ProjectDTO => {
@@ -4214,10 +4342,22 @@ export class SquadManager extends EventEmitter {
 
 		// 1. State promotion — assign synchronously, persist once, FAILURE-ATOMIC: on a throwing persist
 		//    roll the record back and surface the error (emit/audit/steer only AFTER durability).
-		const prior = { append: o.appendSystemPrompt, mode: rec.dto.autonomyMode, oMode: o.autonomyMode };
+		const prior = { append: o.appendSystemPrompt, mode: rec.dto.autonomyMode, oMode: o.autonomyMode, pushArmed: o.completionPushArmed, pushKind: o.completionPushKind, pushArmedAt: o.completionArmedAt };
 		o.appendSystemPrompt = stripConsolePrompt(o.appendSystemPrompt); // strip ONLY the console rule
 		o.promoted = true;
 		rec.dto.promoted = true; // wire mirror — the webapp's promote affordance keys off this
+		// The session's category flips casual→fleet at this exact boundary (daily-attention-w0 01): an
+		// unconsumed CATEGORY completion latch must not ride across it — fleet completion is off by
+		// default, and the very next idle would otherwise push for a chat that just became a tracked
+		// unit. A VOICE-armed latch stays: voice dispatch arms unconditionally regardless of category.
+		if (o.completionPushKind === "category") {
+			o.completionPushArmed = false;
+			o.completionPushKind = undefined;
+			o.completionArmedAt = undefined;
+			rec.dto.completionPushArmed = false;
+			rec.dto.completionPushKind = undefined;
+			rec.dto.completionArmedAt = undefined;
+		}
 		if (opts.mode && opts.mode !== rec.dto.autonomyMode) {
 			rec.dto.autonomyMode = opts.mode;
 			o.autonomyMode = opts.mode;
@@ -4229,6 +4369,9 @@ export class SquadManager extends EventEmitter {
 			o.appendSystemPrompt = prior.append;
 			o.promoted = undefined;
 			rec.dto.promoted = undefined;
+			o.completionPushArmed = prior.pushArmed;
+			o.completionPushKind = prior.pushKind;
+			o.completionArmedAt = prior.pushArmedAt;
 			rec.dto.autonomyMode = prior.mode;
 			o.autonomyMode = prior.oMode;
 			this.syncAuthority(rec.dto);
@@ -4826,6 +4969,15 @@ export class SquadManager extends EventEmitter {
 			await writeMcpConfig(cwd, opts.mcp).catch((err) => this.log("warn", `mcp config write failed for "${name}": ${String(err)}`));
 		}
 
+		// Completion-push arm decision (completion-push.ts): a voice-sourced spawn ALWAYS arms (a voice
+		// dispatch owes the operator exactly one "finished" push — today's behavior, preserved verbatim,
+		// never gated by settings); otherwise the session's category decides — a casual console chat
+		// arms by default (OMP_SQUAD_PUSH_CASUAL_DONE), a fleet unit stays quiet by default
+		// (OMP_SQUAD_PUSH_FLEET_DONE). A latch carried through the fresh-id restore paths
+		// (`opts.completionPushArmed`) wins outright: an armed agent that restart-adopts under a new id
+		// must not silently lose the one push it owed (kind defaults to "voice" for records that predate
+		// the kind field).
+		const completionPushKind = opts.completionPushArmed === true ? (opts.completionPushKind ?? "voice") : armCompletionPushKind(opts, source);
 		const persisted: PersistedAgent = {
 			id,
 			name,
@@ -4868,16 +5020,16 @@ export class SquadManager extends EventEmitter {
 			// `opts.verifyMode` at the routing call site) — so this formula covers BOTH the routed and the
 			// explicit-verify-mode paths without re-deriving the router's decision here.
 			routing: { mode: opts.verifyMode ?? "none", tier: tierOf(thinking), thinking, routedAt: Date.now(), routedModel },
-			// Completion-push arm (voice-loop): a voice-sourced spawn (`/api/spawn` with `source:"voice"`)
-			// owes the operator exactly one "finished" push once this dispatch's TERMINAL signal lands (see
-			// onAgentEvent's "agent_end"/"workflow_done" handling — a workflow spawn arms here but only
-			// fires once the whole graph, not an intermediate node, is done). Persisted so the latch
-			// survives a daemon restart mid-dispatch. `opts.voicePushArmed` (not just `source`) also arms:
-			// the orphan-adopt boot path (adoptOrphanedAgents) mints a fresh id via THIS same createWithId
-			// rather than reusing the persisted record verbatim, so it carries the latch forward through
-			// `opts` — without this an armed agent that restart-adopts under a new id silently loses the
-			// one push it owed.
-			voicePushArmed: source === "voice" || opts.voicePushArmed === true ? true : undefined,
+			// Completion-push arm (see the `completionPushKind` decision above): fires only once this
+			// dispatch's TERMINAL signal lands (see onAgentEvent's "agent_end"/"workflow_done" handling —
+			// a workflow spawn arms here but only fires once the whole graph, not an intermediate node,
+			// is done). Persisted so the latch survives a daemon restart mid-dispatch.
+			completionPushArmed: completionPushKind !== undefined ? true : undefined,
+			completionPushKind,
+			// Turn-clock for the completion-push duration gate (push.ts). Carry a restore-adopted latch's
+			// ORIGINAL arm time forward (never reset to now) so a turn that spanned the restart still
+			// measures its true length; a genuinely fresh arm stamps now.
+			completionArmedAt: completionPushKind !== undefined ? (opts.completionArmedAt ?? Date.now()) : undefined,
 		};
 
 		// Delivery confirmation (concern 02 / DESIGN.md "Membrane measurement"): a requested efficiency
@@ -5012,6 +5164,7 @@ export class SquadManager extends EventEmitter {
 		try {
 			await agent.start();
 			started = true;
+			this.stampAcpAdapter(rec);
 			this.transition(rec, "idle", "connect-ok");
 			if (agent.setSessionName) await agent.setSessionName(`squad:${name}`).catch(() => {});
 			this.emitAgent(rec);
@@ -5445,6 +5598,7 @@ export class SquadManager extends EventEmitter {
 		this.transition(rec, "starting", "connect-begin"); // explicit-class: legal from stopped/error
 		this.emitAgent(rec);
 		await rec.agent.start();
+		this.stampAcpAdapter(rec); // a re-start spawned a FRESH adapter child — the persisted pid must follow it
 		if (rec.agent.setSessionName) await rec.agent.setSessionName(`squad:${rec.dto.name}`).catch(() => {});
 		this.transition(rec, "idle", "connect-ok");
 		this.emitAgent(rec);
@@ -5598,14 +5752,29 @@ export class SquadManager extends EventEmitter {
 				// agent actually received. `displayText` (when the client sent one) is the user's bare
 				// typed text; the UI renders that and falls back to `text` for older clients.
 				this.append(rec, "user", cmd.message, { clientTurnId: cmd.clientTurnId, displayText: cmd.displayText });
-				// Completion-push arm (voice-loop): a voice-sourced prompt owes the operator exactly one
-				// "finished" push once this dispatch settles — armed here (persisted, restart-safe),
-				// disarmed by the push actually sending or by a voice-sourced interrupt (see the "interrupt"
-				// case below and push.ts's `voiceDonePayload`). Re-arming an already-armed agent (a second
-				// voice prompt before the first one's push fired) is a harmless no-op write.
-				if (commandSource(cmd) === "voice" && rec.options.voicePushArmed !== true) {
-					rec.options.voicePushArmed = true;
-					void this.persist();
+				// Restart re-attach (daily-onramp 04): the just-typed prompt must survive a daemon KILL —
+				// it's the newest entry the honest re-attach's recovered context can carry, and nothing else
+				// persists transcripts until some unrelated write happens to fire (proven live: the first
+				// bounce test came back "no prior context was recoverable" because state.json predated the
+				// turn). Chain-deduped by the write queue; one write per operator prompt is bounded.
+				void this.persist();
+				// Completion-push arm (completion-push.ts): a voice-sourced prompt ALWAYS arms; a typed one
+				// arms by session category (casual console chats ON by default, fleet units OFF). Armed
+				// here (persisted, restart-safe), disarmed by the push actually sending or by ANY
+				// interrupt (see the "interrupt" case below and push.ts's `completionPayload`). On a
+				// re-arm the LATEST prompt's kind wins — the eventual completion answers the newest
+				// instruction, so its copy should match how that instruction arrived. `completionArmedAt`
+				// is refreshed on EVERY arming prompt (even an identical-kind re-arm): the duration gate
+				// in push.ts measures THIS turn, so a stale prior-turn stamp must never carry over — an
+				// old stamp would inflate the elapsed and let a short live-watched turn buzz.
+				{
+					const armKind = armCompletionPushKind(rec.options, commandSource(cmd));
+					if (armKind !== undefined) {
+						rec.options.completionPushArmed = true;
+						rec.options.completionPushKind = armKind;
+						rec.options.completionArmedAt = Date.now();
+						void this.persist();
+					}
 				}
 				rec.streaming = true;
 				this.transition(rec, "working", "task-start");
@@ -5653,14 +5822,18 @@ export class SquadManager extends EventEmitter {
 			}
 			case "interrupt":
 				await rec.agent.abort().catch(() => {});
-				// Completion-push disarm (voice-loop): the operator cancelled the work themselves — a
-				// "finished" push would be a lie. Deliberately source-blind: a TYPED stop of voice-dispatched
-				// work is still the operator killing it (the cancel's own agent_end would otherwise read as a
-				// terminal idle and fire the push). Clears both the persisted latch and its DTO projection so
-				// no stale `true` can ride a later unrelated idle transition.
-				if (rec.options.voicePushArmed === true) {
-					rec.options.voicePushArmed = false;
-					rec.dto.voicePushArmed = false;
+				// Completion-push disarm: the operator cancelled the work themselves — a "finished" push
+				// would be a lie. Deliberately source-blind: a TYPED stop of voice-dispatched work is
+				// still the operator killing it (the cancel's own agent_end would otherwise read as a
+				// terminal idle and fire the push). Clears both the persisted latch and its DTO projection
+				// so no stale `true` can ride a later unrelated idle transition.
+				if (rec.options.completionPushArmed === true) {
+					rec.options.completionPushArmed = false;
+					rec.options.completionPushKind = undefined;
+					rec.options.completionArmedAt = undefined;
+					rec.dto.completionPushArmed = false;
+					rec.dto.completionPushKind = undefined;
+					rec.dto.completionArmedAt = undefined;
 					void this.persist();
 				}
 				void this.recordAudit(actor, "interrupt", cmd.id, "ok", undefined, commandSource(cmd));
@@ -6373,19 +6546,28 @@ export class SquadManager extends EventEmitter {
 				rec.completedTurn = true; // a fully completed turn — see the field comment; feeds the exit classifier
 				this.expireReplayedPending(rec); // a completed live turn proves any still-open replayed pending is stale
 				void this.finalizeRun(rec);
-				// Completion-push exposure (voice-loop): a non-workflow agent's `agent_end` IS its terminal
-				// signal — every turn ends the one voice-armed dispatch it was armed for. A workflow-kind
-				// agent's `agent_end` is terminal ONLY when `workflow_done` just fired for this exact frame
-				// pair (`workflowJustFinished`, set in that case below) — an intermediate per-run `agent_end`
+				// Completion-push exposure: a non-workflow agent's `agent_end` IS its terminal signal —
+				// every turn ends the one armed dispatch it was armed for. A workflow-kind agent's
+				// `agent_end` is terminal ONLY when `workflow_done` just fired for this exact frame pair
+				// (`workflowJustFinished`, set in that case below) — an intermediate per-run `agent_end`
 				// (a human-gate/checkpoint boundary mid-graph) must never expose the latch, or a multi-node
-				// workflow would push — and self-disarm — on the first mid-graph idle, long before the graph
-				// is actually done. `dto.voicePushArmed` is deliberately re-derived on EVERY agent_end (not
-				// just when armed) so a stale `true` from a prior cycle can never leak onto an unrelated idle.
+				// workflow would push — and self-disarm — on the first mid-graph idle, long before the
+				// graph is actually done. `dto.completionPushArmed` is deliberately re-derived on EVERY
+				// agent_end (not just when armed) so a stale `true` from a prior cycle can never leak onto
+				// an unrelated idle.
 				{
 					const isTerminal = rec.options.kind !== "workflow" || rec.workflowJustFinished === true;
 					rec.workflowJustFinished = false; // consume — never leak into the next agent_end
-					rec.dto.voicePushArmed = isTerminal && rec.options.voicePushArmed === true;
+					const exposed = isTerminal && rec.options.completionPushArmed === true;
+					rec.dto.completionPushArmed = exposed;
+					rec.dto.completionPushKind = exposed ? rec.options.completionPushKind : undefined;
+					rec.dto.completionArmedAt = exposed ? rec.options.completionArmedAt : undefined;
 				}
+				// Restart re-attach (daily-onramp 04): a completed turn's transcript is the recovery payload
+				// for the honest re-attach — persist it at the turn boundary so a daemon KILL between turns
+				// never loses the conversation. Chain-deduped; one write per completed turn is bounded and
+				// far rarer than the existing per-dirty-subagent-transition writes.
+				void this.persist();
 				break;
 			}
 			case "workflow_done":
@@ -8325,6 +8507,21 @@ export class SquadManager extends EventEmitter {
 		return followLineage(id, merged);
 	}
 
+	/** Record one push-notification tap (POST /api/push-tap). Append-only observability for the
+	 *  adoption counters — never gates behavior, never throws (JsonlLog.append never does). The id
+	 *  is clamped: it comes from an any-authenticated beacon and is only ever counted, so an
+	 *  oversized value must not bloat the ledger. */
+	recordPushTap(agentId: string): void {
+		this.pushTapLog.append({ ts: Date.now(), agentId: agentId.slice(0, 200) });
+	}
+
+	/** Adoption counters (plans/daily-dogfood-engine/02) from this manager's own durable stateDir
+	 *  data, with the in-memory rings folded in so a just-recorded tap/transition is visible before
+	 *  its fire-and-forget spool lands (the GET /api/adoption read-your-write case). */
+	adoptionCounters(): Promise<AdoptionCounters> {
+		return computeAdoptionCounters(this.stateDir, { transitions: this.transitionLog.recent(), pushTaps: this.pushTapLog.recent() });
+	}
+
 	/** One tick so in-flight agent-host ring-replay frames (synchronous `.emit()` calls inside a
 	 *  driver's `start()`) land before the settle gate closes. A microtask alone is not enough — replay
 	 *  frames can be scheduled via setImmediate/setTimeout(0) inside the driver — so this parks behind
@@ -8638,14 +8835,18 @@ export class SquadManager extends EventEmitter {
 		return this.agents.get(id)?.commands;
 	}
 
-	/** Completion-push disarm (voice-loop): called by the server, after its background push actually
-	 *  sends, to consume the one-push-per-voice-dispatch latch. A no-op if the agent isn't resident (a
-	 *  raced remove/eviction between the push firing and this call landing) or already disarmed. */
-	clearVoicePushArmed(id: string): void {
+	/** Completion-push disarm: called by the server, after its background push actually sends, to
+	 *  consume the one-push-per-dispatch latch. A no-op if the agent isn't resident (a raced
+	 *  remove/eviction between the push firing and this call landing) or already disarmed. */
+	clearCompletionPushArmed(id: string): void {
 		const rec = this.agents.get(id);
-		if (!rec || rec.options.voicePushArmed !== true) return;
-		rec.options.voicePushArmed = false;
-		rec.dto.voicePushArmed = false;
+		if (!rec || rec.options.completionPushArmed !== true) return;
+		rec.options.completionPushArmed = false;
+		rec.options.completionPushKind = undefined;
+		rec.options.completionArmedAt = undefined;
+		rec.dto.completionPushArmed = false;
+		rec.dto.completionPushKind = undefined;
+		rec.dto.completionArmedAt = undefined;
 		void this.persist();
 	}
 
@@ -8860,6 +9061,8 @@ export class SquadManager extends EventEmitter {
 			// soundly; a fresh session would replace the dead one. Skip rather than respawn under the wrong state.
 			if (!this.harnessResumable(p)) {
 				this.log("info", `skipped restoring ${p.name} (${p.id}) — harness "${p.harness ?? p.runtime ?? "?"}" is not resumable across a restart`);
+				// Dead-session honesty (daily-onramp 04): the skip is correct, its silence was the bug.
+				this.recordDeadPlaceholder(p, snapshot.transcripts[p.id]);
 				continue;
 			}
 			await this.create({
@@ -8891,6 +9094,11 @@ export class SquadManager extends EventEmitter {
 				workflow: p.workflow?.path,
 				verify: p.workflow?.verify?.command,
 				workflowState: p.workflowState, // resume the graph from its checkpoint, never restart from scratch (OMPSQ-165)
+				// Same latch carry as adoptOrphanedAgents (both paths mint a fresh id from a PersistedAgent):
+				// an armed agent restored via --restore still owes its one completion push.
+				completionPushArmed: p.completionPushArmed,
+				completionPushKind: p.completionPushKind,
+				completionArmedAt: p.completionArmedAt,
 				sandbox: p.sandbox,
 				autoRoute: false,
 				bypassCap: true, // restore re-creates already-counted agents — never gated by the live cap

@@ -1,6 +1,6 @@
 # Restart re-attach — honest casual-session survival across a daemon restart
 
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -37,4 +37,80 @@ none
 
 ## Resolution
 
-(filled in when this concern executes)
+Executed 2026-07-16 (feat/daily-driver-w1 lineage). The whole loop was driven live against a scratch
+daemon (isolated state dir, port 7941) with the operator's real claude login in a tmux REPL — twice,
+because the first bounce failed exactly the way only a live run can reveal (below).
+
+**What shipped.**
+- `src/reattach-context.ts` (new, pure): `buildDeadPlaceholder` (total — a corrupt persisted
+  transcript degrades to an empty tail with the failure named in `deadReason`, never a throw out of a
+  boot sweep), `composePriorContext` (speech-only, tail-capped at 30 entries / 8k chars, most-recent
+  wins; `displayText` beats the audit copy), `reattachMarker`.
+- `squad-manager`: both non-resumable skip sites (the restore-path branch at `harnessResumable` and a
+  new `recordNonResumableSkips` start() epilogue over the boot snapshot) record a bounded-window
+  (24h TTL, expiry checked on read) in-memory placeholder; `getTranscript` answers from it;
+  `reattachDeadSession(newId, priorId)` stitches the successor — visible `system` marker appended
+  (CLI dims it, webapp's TranscriptTimeline renders system entries), `adopted` lineage transition,
+  prior-context tail RETURNED to the client, never auto-sent. Resumable records are untouched
+  (`harnessResumable(p)` stays the single source of truth; a future resumable harness rides the
+  existing restore path with zero changes here — tested).
+- `server`: new `GET /api/agents/:id` — live DTO, else `{dead:true, deadReason, transcriptEntries}`
+  from the placeholder, else honest 404. `POST /api/console` accepts `reattachOf` and returns
+  `priorContext`.
+- `here.ts` client: `sessionFate` three-way read (live / dead / missing); poll-side death detection
+  (placeholder answer, or a clean miss right after a connection loss — `noteDisconnect`); a plain
+  `rm` while the daemon stayed up KEEPS the pre-04 "removed on the daemon side" message (an rm is a
+  choice, not a death); `rebind` resets the delta cursor (the new daemon's seq counter restarts below
+  the old floor), re-queues typed lines, and folds the recovered context into the operator's OWN
+  first prompt (`decoratePrompt` feed-forward precedent) with `displayText` carrying the bare typed
+  text — webapp user bubbles show what was typed, the transcript keeps the audit copy. Fail-closed:
+  a failed re-attach prints the error and exits clean; a failed context-bearing send re-holds the
+  context for the next attempt.
+
+**Live-found defect the tests missed: transcripts were never durable.** First bounce came back
+"no prior context was recoverable" — `persistNow` writes transcripts, but NO transcript-affecting
+path ever called `persist()`, so state.json always predated the conversation (it happened to date
+from this concern's own adapter-pid stamp). A `kill -9` ate every turn since the last incidental
+write. Fix: chain-deduped `persist()` at the two turn seams (operator-prompt append, `agent_end`) —
+one write per prompt + one per completed turn, every agent kind benefits. Second bounce, full loop
+proven live: MANGO-77 turn → `kill -9` → relaunch → REPL banner "⟲ the daemon restarted and this
+session didn't survive it" → "re-attached (fresh session … · prior context rides your next message)"
+→ marker in the new transcript → asked "what was my secret codeword?" → **"MANGO-77"** → normal
+prompting from there. `/exit` released the ephemeral registration as before.
+
+**Standing-gap investigation (orphaned ACP adapter chains): REAP, never reuse — and it shipped.**
+Reuse is impossible by construction: the ACP transport is JSON-RPC over the dead daemon's own stdio
+pipes — no socket, no detached host, nothing to re-dial (`session/load` wouldn't help even where
+supported; the pipe itself died). A graceful stop already kills the child (`AcpAgentDriver.detach()`
+kills, unlike RpcAgent's detach); the orphans come from ungraceful death, where the `npx →
+claude-code-acp` chain reparents to init and idles forever — observed live (~10 such chains from
+pre-04 runs sat on the host before this concern ran). Shipped as `src/acp-orphan-reaper.ts` +
+persisted identity: the driver exposes `pid`/`spawnedCommand`, the manager stamps `acpPid`/`acpCmd`
+onto the persisted record after every successful start, and `recordDeadPlaceholder` fires a
+fire-and-forget reap that is fail-closed on the KILL side — the live /proc cmdline must still match
+the persisted argv's distinctive token (recycled pids and SIBLING DAEMONS' adapters are never
+touched — scratch daemons run in parallel routinely), uid must match, descendants die first,
+SIGTERM then a re-verified SIGKILL escalation, every refusal logged. Verified live twice: session
+adapter pid persisted → daemon `kill -9` → chain confirmed reparented to init → relaunch → chain
+gone. Pre-existing orphans (no persisted pid) are deliberately NOT swept — the reaper refuses to
+guess; they need one manual cull.
+
+**Tests** (`tests/restart-reattach.test.ts`, 18): placeholder honesty incl. the corrupt-transcript
+fail-closed path and the resumable/tombstoned exclusions over a real state.json boot; TTL lapse;
+stitching (marker + context returned, honest no-context variant); turn-boundary durability;
+sessionFate; poll death-detection ×3; rebind fold + cursor reset + failed-send context re-hold;
+planReap verification (descendants-first, gone/recycled/unverifiable refusals) plus a LIVE reap of a
+real process including the refusal path leaving a mismatched pid untouched, and the boot end-to-end
+sweep.
+
+**Known limits (recorded, not hidden).**
+- The recovered context is a folded transcript tail, not session state — tool results, files read,
+  and the model's working memory are gone; the marker says so ("continuing with your prior context",
+  never "resumed").
+- Placeholders are in-memory: a SECOND restart before re-attach loses the tail (the client then gets
+  the honest no-context variant — 404 after `sawDisconnect` still reads as death). Durable
+  placeholders weren't worth the write amplification for an hourly-restart window.
+- Mid-turn kills lose the in-flight assistant stream (persist fires at turn end); the operator's
+  prompt itself survives.
+- A REPL that was fully offline across the entire bounce (laptop lid) re-attaches on its next poll
+  tick — covered by the same sessionFate read; no push notification for it (epic C's lane).

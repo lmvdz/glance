@@ -455,6 +455,22 @@ test("a vanished agent is reported honestly, once", async () => {
 	expect(lines.filter((l) => l.includes("removed on the daemon side"))).toHaveLength(1);
 });
 
+test("HereClient.grr POSTs /api/friction with context 'here' and surfaces a daemon refusal as an error", async () => {
+	const calls: FakeCall[] = [];
+	let respond: () => Response = () => Response.json({ id: "x" });
+	const fakeFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+		calls.push({ path: new URL(String(input)).pathname, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+		return respond();
+	}) as typeof fetch;
+	const client = new HereClient("http://fake", () => ({}), fakeFetch);
+
+	await client.grr({ repo: "/srv/r", gripe: "the REPL flickers", agentId: "chat-1" });
+	expect(calls).toEqual([{ path: "/api/friction", body: { repo: "/srv/r", gripe: "the REPL flickers", agentId: "chat-1", context: "here" } }]);
+
+	respond = () => new Response("gripe required", { status: 400 });
+	await expect(client.grr({ repo: "/srv/r", gripe: "" })).rejects.toThrow(/gripe required/);
+});
+
 // ── the streaming renderer (mutate-in-place entries over a ?since= poll) ─────────────────────────
 
 const entry = (seq: number, kind: TranscriptEntry["kind"], text: string, status?: TranscriptEntry["status"], tool?: TranscriptEntry["tool"]): TranscriptEntry => ({ seq, kind, text, ts: 1, status, tool });

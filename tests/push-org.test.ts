@@ -38,8 +38,8 @@ async function makeOrgServer(fakeManagers: Record<string, Partial<SquadManager>>
 test("org isolation: an armed completion in org A notifies ONLY org A's service and disarms via org A's manager", async () => {
 	const disarmedA: string[] = [];
 	const { host } = await makeOrgServer({
-		A: { list: () => [agent("working", { id: "a1" })], clearVoicePushArmed: (id: string) => void disarmedA.push(id) },
-		B: { list: () => [agent("working", { id: "b1" })], clearVoicePushArmed: () => {} },
+		A: { list: () => [agent("working", { id: "a1" })], clearCompletionPushArmed: (id: string) => void disarmedA.push(id) },
+		B: { list: () => [agent("working", { id: "b1" })], clearCompletionPushArmed: () => {} },
 	});
 	const sentA: PushPayload[] = [];
 	const sentB: PushPayload[] = [];
@@ -47,7 +47,7 @@ test("org isolation: an armed completion in org A notifies ONLY org A's service 
 	host.orgPush.set("B", Promise.resolve(fakePush(sentB)));
 
 	host.maybePushAlertOrg("A", { type: "agent", agent: agent("working", { id: "a1" }) } as SquadEvent); // lazy-seeds A
-	host.maybePushAlertOrg("A", { type: "agent", agent: agent("idle", { id: "a1", voicePushArmed: true }) } as SquadEvent);
+	host.maybePushAlertOrg("A", { type: "agent", agent: agent("idle", { id: "a1", completionPushArmed: true, completionPushKind: "voice" }) } as SquadEvent);
 	await new Promise((r) => setTimeout(r, 10)); // notify rides pushForOrg's promise
 
 	expect(sentA).toHaveLength(1);
@@ -59,8 +59,8 @@ test("org isolation: an armed completion in org A notifies ONLY org A's service 
 
 test("escalations ride the per-org lane too (DB mode gets input/error pushes for the first time), still org-isolated", async () => {
 	const { host } = await makeOrgServer({
-		A: { list: () => [agent("working", { id: "a1" })], clearVoicePushArmed: () => {} },
-		B: { list: () => [agent("working", { id: "b1" })], clearVoicePushArmed: () => {} },
+		A: { list: () => [agent("working", { id: "a1" })], clearCompletionPushArmed: () => {} },
+		B: { list: () => [agent("working", { id: "b1" })], clearCompletionPushArmed: () => {} },
 	});
 	const sentA: PushPayload[] = [];
 	const sentB: PushPayload[] = [];
@@ -78,7 +78,7 @@ test("escalations ride the per-org lane too (DB mode gets input/error pushes for
 
 test("lazy seeding: the event that materializes an org's alert state never alerts (reconnect-replay discipline)", async () => {
 	const { host } = await makeOrgServer({
-		A: { list: () => [agent("input", { id: "a1" })], clearVoicePushArmed: () => {} },
+		A: { list: () => [agent("input", { id: "a1" })], clearCompletionPushArmed: () => {} },
 	});
 	const sentA: PushPayload[] = [];
 	host.orgPush.set("A", Promise.resolve(fakePush(sentA)));
@@ -100,7 +100,7 @@ test("no registry / no pushRoot -> the per-org lane is inert (file mode keeps th
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "push-org-inert-"));
 	const server = new SquadServer(undefined, { port: 0, pushRoot: dir }); // registry absent
 	const host = server as unknown as OrgPushHost;
-	host.maybePushAlertOrg("A", { type: "agent", agent: agent("idle", { id: "a1", voicePushArmed: true }) } as SquadEvent);
+	host.maybePushAlertOrg("A", { type: "agent", agent: agent("idle", { id: "a1", completionPushArmed: true, completionPushKind: "voice" }) } as SquadEvent);
 	expect(host.orgPush.size).toBe(0); // never even constructed a service
 });
 

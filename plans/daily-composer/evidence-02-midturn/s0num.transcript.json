@@ -1,0 +1,17 @@
+[
+  {
+    "id": "chat-mrnjjtiq-2-4d102636:6",
+    "seq": 6,
+    "kind": "user",
+    "text": "Write out the numbers 1 through 150 as words (one, two, three, ...), one per line, as plain text in your reply. No tools, no code blocks - just the plain list, every single number, do not stop early and do not summarize.",
+    "ts": 1784208299592
+  },
+  {
+    "status": "ok",
+    "id": "chat-mrnjjtiq-2-4d102636:7",
+    "seq": 7,
+    "kind": "assistant",
+    "text": "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\ntwelve\nthirteen\nfourteen\nfifteen\nsixteen\nseventeen\neighteen\nnineteen\ntwenty\ntwenty-one\ntwenty-two\ntwenty-three\ntwenty-four\ntwenty-five\ntwenty-six\ntwenty-seven\ntwenty-eight\ntwenty-nine\nthirty\nthirty-one\nthirty-two\nthirty-three\nthirty-four\nthirty-five\nthirty-six\nthirty-seven\nthirty-eight\nthirty-nine\nforty\nforty-one\nforty-two\nforty-three\nforty-four\nforty-five\nforty-six\nforty-seven\nforty-eight\nforty-nine\nfifty\nfifty-one\nfifty-two\nfifty-three\nfifty-four\nfifty-five\nfifty-six\nfifty-seven\nfifty-eight\nfifty-nine\nsixty\nsixty-one\nsixty-two\nsixty-three\nsixty-four\nsixty-five\nsixty-six\nsixty-seven\nsixty-eight\nsixty-nine\nseventy\nseventy-one\nseventy-two\nseventy-three\nseventy-four\nseventy-five\nseventy-six\nseventy-seven\nseventy-eight\nseventy-nine\neighty\neighty-one\neighty-two\neighty-three\neighty-four\neighty-five\neighty-six\neighty-seven\neighty-eight\neighty-nine\nninety\nninety-one\nninety-two\nninety-three\nninety-four\nninety-five\nninety-six\nninety-seven\nninety-eight\nninety-nine\none hundred\none hundred one\none hundred two\none hundred three\none hundred four\none hundred five\none hundred six\none hundred seven\none hundred eight\none hundred nine\none hundred ten\none hundred eleven\none hundred twelve\none hundred thirteen\none hundred fourteen\none hundred fifteen\none hundred sixteen\none hundred seventeen\none hundred eighteen\none hundred nineteen\none hundred twenty\none hundred twenty-one\none hundred twenty-two\none hundred twenty-three\none hundred twenty-four\none hundred twenty-five\none hundred twenty-six\none hundred twenty-seven\none hundred twenty-eight\none hundred",
+    "ts": 1784208318147
+  }
+]

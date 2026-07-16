@@ -30,6 +30,7 @@
  * itself information (you are not allowed to read this as "fine").
  */
 
+import { type AdoptionCounters, type AdoptionSummary, summarizeAdoption } from "./adoption-counters.ts";
 import { errText } from "./err-text.ts";
 
 export type DoctorStatus = "ok" | "warn" | "error" | "unknown";
@@ -133,6 +134,10 @@ export interface DoctorProbe {
 	harnessHooks(): Promise<Array<{ harness: string; ok: boolean; detail: string }>>;
 	/** Agents parked in a terminal-but-listed state: the zombies `glance rm` is for. */
 	zombieAgents(): Promise<number>;
+	/** Dogfood adoption counters (plans/daily-dogfood-engine/02) — casual sessions/prompts/push-taps
+	 *  per UTC day. Daemon-first (GET /api/adoption); with no daemon, the durable JSONL under the
+	 *  resolved state dir is read directly (rule 2 — a dead daemon's usage history still exists). */
+	adoption(): Promise<AdoptionCounters>;
 }
 
 /**
@@ -283,6 +288,17 @@ function repoChecks(repos: RepoFacts[]): DoctorCheck[] {
 	return checks;
 }
 
+/** Pure rendering of the adoption rollup — the numbers ARE the finding; the gate (daily-dogfood-
+ *  engine 03) judges them, the doctor just refuses to let them hide. Exported for tests. */
+export function adoptionCheck(s: AdoptionSummary): DoctorCheck {
+	return {
+		id: "adoption",
+		title: "Is glance getting daily use?",
+		status: "ok",
+		detail: `today ${s.sessions} casual session(s) · ${s.prompts} prompt(s) · ${s.pushTaps} push tap(s); last 7d ${s.sessions7} · ${s.prompts7} · ${s.pushTaps7}`,
+	};
+}
+
 /**
  * Assemble the report. Every check is independent and every probe is guarded, so one broken subsystem
  * cannot hide the diagnosis of the others — the failure mode of every health check ever written.
@@ -343,6 +359,11 @@ export async function runDoctor(probe: DoctorProbe): Promise<DoctorReport> {
 			const n = await probe.zombieAgents();
 			return [n === 0 ? { id: "zombies", title: "Any stuck units?", status: "ok" as const, detail: "none" } : { id: "zombies", title: "Any stuck units?", status: "warn" as const, detail: `${n} unit(s) parked in a terminal state`, remedy: "glance rm <name>" }];
 		}),
+		// Adoption counters (daily-dogfood-engine 02). Always `ok` when the read succeeds: zero usage
+		// is a finding for the adoption GATE (plans/daily-driver/00-meta.md), not a fault of this
+		// machine — the doctor's job here is to put the true numbers where Lars reads them, not to
+		// nag. A failed read still becomes an honest `unknown` via attempt(), never a fabricated zero.
+		attempt("adoption", "Is glance getting daily use?", async () => [adoptionCheck(summarizeAdoption(await probe.adoption()))]),
 	]);
 
 	const checks = groups.flat();

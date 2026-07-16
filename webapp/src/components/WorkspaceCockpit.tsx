@@ -928,6 +928,11 @@ export const WorkspaceCockpit: React.FC = () => {
             <Composer
               tasks={tasks}
               suggestionChips={suggestionChips}
+              // Cockpit composers write per-AGENT, not per-chat-session — namespace the draft
+              // scope so a cockpit draft can never collide with a chat thread's (chat session
+              // ids are 'default' or Date.now() strings). Same leak-fix + persistence as chat:
+              // switching agents mid-draft no longer carries the text across.
+              sessionId={`cockpit:${selectedAgent.id}`}
               isLoading={false}
               isStopShown={isStopShown}
               stopPending={stopPending}
@@ -937,6 +942,7 @@ export const WorkspaceCockpit: React.FC = () => {
               modelOptions={modelOptions}
               onModelChange={handleModelChange}
               agent={selectedAgent}
+              onToast={showToast}
               placeholder={pendingForSelected?.placeholder ?? (pendingForSelected ? 'Type your reply to unblock this agent…' : undefined)}
               focusKey={pendingForSelected?.id}
             />

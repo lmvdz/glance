@@ -1,0 +1,45 @@
+[
+  {
+    "id": "chat-mrnkebxl-9-3b9b35d6:37",
+    "seq": 37,
+    "kind": "user",
+    "text": "Use your shell tool to run exactly this command: sleep 75 && echo SLEEP_DONE . Wait for it to finish, then tell me its output verbatim.",
+    "ts": 1784209722792
+  },
+  {
+    "status": "running",
+    "tool": {
+      "callId": "execute:1784209729022",
+      "name": "execute",
+      "isError": false
+    },
+    "format": "command",
+    "id": "chat-mrnkebxl-9-3b9b35d6:38",
+    "seq": 38,
+    "kind": "tool",
+    "text": "▸ execute: Terminal",
+    "ts": 1784209729022
+  },
+  {
+    "status": "running",
+    "tool": {
+      "callId": "execute:1784209729387",
+      "name": "execute",
+      "isError": false
+    },
+    "format": "command",
+    "id": "chat-mrnkebxl-9-3b9b35d6:39",
+    "seq": 39,
+    "kind": "tool",
+    "text": "▸ execute: `sleep 75 && echo SLEEP_DONE`",
+    "ts": 1784209729387
+  },
+  {
+    "status": "running",
+    "id": "chat-mrnkebxl-9-3b9b35d6:40",
+    "seq": 40,
+    "kind": "assistant",
+    "text": "The output was:\n\n```\nSLEEP_DONE\n```",
+    "ts": 1784209809578
+  }
+]
