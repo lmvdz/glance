@@ -120,6 +120,23 @@ with the bigger claude b2 it would save more (~4s), but it pre-spends a real cla
 project on every daemon boot; revisit with dogfood evidence (B02 counters) if the warm 4s reads as
 friction in practice.
 
+**Independent live re-verification (2026-07-16, separate verifier, fresh scratch rig).** All five
+concern-verify steps re-driven from scratch (tmux pty, throwaway repo, isolated state dir/port 8137,
+file mode, real claude login, `CLAUDECODE=1` in the launching shell): cold zero-setup path (dead
+port → "[Y/n]" → `daemon up (0.5s)` → queued positional prompt → `ready (4.1s)` → real reply
+streamed inline); warm runs ready 4.36s/4.35s, REPL-start→reply-visible 8.3s/11.0s (above A01's
+6262ms omp-lane warm dispatch→first-token — consistent with the documented claude-adapter spawn
+overhead; note the measure is reply-visible, single-word replies render on finalize), follow-up
+turn in a live session 3.4s (model floor). Ephemeral round-trip observed: during session
+`projects.json`+`ephemeral-projects.json` both carried the repo and `/api/projects` said
+`registered:true`; after every `/exit` both files were `[]` and the row degraded to
+`registered:false` (live-agent union only). Worktree `<state>/worktrees/here-playground-squad-chat-*`
+existed per session. CLAUDECODE scrub proven again via `/proc`: daemon env carried `CLAUDECODE=1`,
+its npx→claude-code-acp child chain carried none. Deep-link `/?token=` returned 200 (SPA shell;
+agent id confirmed via `/api/agents` with the same token — the shell itself is static). One
+non-defect observation: the adapter PROCESS inherits the daemon's cwd (no `cwd` in the ACP
+Bun.spawn), while the ACP session cwd is correctly the worktree (squad-manager.ts:5136).
+
 **Known limits / follow-ups (named, not hidden):**
 - DB-registry mode: the bearer-token CLI actor has no org, so `POST /api/console` returns
   "no active organization" (observed live when the scratch daemon accidentally booted DB-mode via the
