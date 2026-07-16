@@ -376,8 +376,35 @@ registerHarness({ name: "gemini", protocol: "acp", bin: "gemini", acpCommand: ["
  *  06) are all real here. (resumable stays false at the omp-squad level: we don't drive session/load yet.) */
 registerHarness({ name: "opencode", protocol: "acp", bin: "opencode", acpCommand: ["opencode", "acp"], capabilities: ACP_CAPS, verified: true, note: "native first-party ACP; handshake live-verified" });
 
-/** claude-code — via the mature `claude-code-acp` adapter (built on Anthropic's official Agent SDK). */
-registerHarness({ name: "claude-code", protocol: "acp", bin: "npx", acpCommand: ["npx", "-y", "@zed-industries/claude-code-acp"], capabilities: ACP_CAPS, verified: false, note: "third-party ACP adapter over the official Claude Agent SDK; initialize handshake works but refuses to run nested inside another Claude Code session (unset CLAUDECODE)" });
+/**
+ * claude-code — via the mature `claude-code-acp` adapter (built on Anthropic's official Agent SDK).
+ * The harness `glance here` rides: the adapter's SDK reads the operator's own `claude` login from
+ * ~/.claude (HOME survives the spawn scrub — spawn-env.ts keep-list), so a casual session carries the
+ * same credentials/config as typing `claude` in a terminal.
+ *
+ * LIVE-VERIFIED 2026-07-16 against @zed-industries/claude-code-acp v0.16.2 (the grok PR #147 bar — a
+ * green fake-server test does not count): `initialize` returns protocolVersion 1 with
+ * `agentCapabilities:{loadSession:true, promptCapabilities:{image,embeddedContext},
+ * mcpCapabilities:{http,sse}, sessionCapabilities:{fork,list,resume}}`, and `session/new` returns a
+ * real sessionId plus availableModels [default (Opus 4.6), sonnet, haiku] on the operator's cached
+ * login — no API key in the env.
+ *
+ * Nested-session refusal, REPRODUCED live same day: with `CLAUDECODE` present in the adapter's env,
+ * `initialize` still succeeds but `session/new` dies with -32603 "Query closed before response
+ * received" — the silent first-contact failure for anyone launching the daemon from inside a Claude
+ * Code session. Not special-cased per-harness: `scrubbedSpawnEnv` (spawn-env.ts) already strips every
+ * var outside its keep-list from ACP spawns, CLAUDECODE included — tests/here.test.ts pins that so a
+ * keep-list edit can't silently regress it.
+ */
+registerHarness({
+	name: "claude-code",
+	protocol: "acp",
+	bin: "npx",
+	acpCommand: ["npx", "-y", "@zed-industries/claude-code-acp"],
+	capabilities: ACP_CAPS,
+	verified: true,
+	note: "third-party ACP adapter over the official Claude Agent SDK; initialize + session/new live-verified (v0.16.2, operator login); nested-session refusal covered by the spawn-env scrub (CLAUDECODE never reaches the child)",
+});
 
 /** codex — via the `codex-acp` adapter over `codex app-server`. Adapter is mid-migration between
  *  orgs; pin a version before relying on it. */
