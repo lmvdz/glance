@@ -139,6 +139,14 @@ export class HereClient {
 	async release(repo: string): Promise<void> {
 		await this.req("/api/console/release", { method: "POST", body: JSON.stringify({ repo }), timeoutMs: 3000 });
 	}
+
+	/** `/grr <text>` — capture a gripe to the friction ledger (plans/daily-dogfood-engine/01) without
+	 *  leaving the chat. Same `POST /api/friction` every other surface uses; short timeout because a
+	 *  capture that hangs the REPL would itself be a gripe. */
+	async grr(body: { repo: string; gripe: string; agentId?: string }): Promise<void> {
+		const res = await this.req("/api/friction", { method: "POST", body: JSON.stringify({ ...body, context: "here" }), timeoutMs: 3000 });
+		if (!res.ok) throw new Error((await res.text().catch(() => "")) || `the daemon refused it (${res.status})`);
+	}
 }
 
 // ── Transcript → terminal lines (pure-ish, unit-tested) ─────────────────────────────────────────
@@ -511,9 +519,10 @@ async function bootDaemon(flags: Record<string, string | boolean>, client: HereC
 	return false;
 }
 
-const HERE_HELP = `${dim(`  /stop   interrupt the current turn
-  /exit   leave — the session stays live in the webapp
-  /help   this list`)}
+const HERE_HELP = `${dim(`  /stop        interrupt the current turn
+  /grr <text>  log a gripe to the friction ledger (glance grr --list to read)
+  /exit        leave — the session stays live in the webapp
+  /help        this list`)}
 `;
 
 /** Verb-scoped `--help` — printed and exited before anything touches the daemon. */
@@ -530,9 +539,10 @@ ${bold("Options")}
   -h, --help        print this and exit
 
 ${bold("While chatting")}
-  /stop   interrupt the current turn        ${dim("(or Ctrl-C once mid-reply)")}
-  /exit   leave — the session stays live in the webapp   ${dim("(or Ctrl-C when idle)")}
-  /help   the in-chat command list
+  /stop        interrupt the current turn        ${dim("(or Ctrl-C once mid-reply)")}
+  /grr <text>  log a gripe to the friction ledger, without leaving the chat
+  /exit        leave — the session stays live in the webapp   ${dim("(or Ctrl-C when idle)")}
+  /help        the in-chat command list
 
 The current directory is registered as a project only for this session and released when you
 leave. To keep it, add it in the webapp project switcher (${bold("+ Add project…")}) — that makes the
@@ -752,6 +762,18 @@ export async function cmdHere(args: string[]): Promise<void> {
 		}
 		if (t === "/stop") {
 			session.interrupt();
+			rl.prompt();
+			return;
+		}
+		if (t === "/grr" || t.startsWith("/grr ")) {
+			const gripe = t.slice("/grr".length).trim();
+			if (!gripe) printAbove(dim("  usage: /grr <what just annoyed you>"));
+			else {
+				void client
+					.grr({ repo, gripe, agentId: info?.agentId })
+					.then(() => printAbove(dim("  ✓ logged to the friction ledger")))
+					.catch((err) => printAbove(red(`✗ not logged: ${msg(err)}`)));
+			}
 			rl.prompt();
 			return;
 		}

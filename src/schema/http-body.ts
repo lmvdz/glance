@@ -108,6 +108,17 @@ export const AskBodySchema = Schema.Struct({
 	harness: Schema.optional(Schema.String),
 });
 
+/** POST /api/friction — capture a dogfooding gripe (plans/daily-dogfood-engine/01). `gripe` is the
+ *  only required field (an empty-after-trim gripe stays a post-decode 400); `repo`/`context`/
+ *  `agentId` are optional situational fields, `typeof`-narrowed in the handler per this file's
+ *  light-touch convention. */
+export const FrictionBodySchema = Schema.Struct({
+	gripe: Schema.String,
+	repo: Schema.optional(Schema.Unknown),
+	context: Schema.optional(Schema.Unknown),
+	agentId: Schema.optional(Schema.Unknown),
+});
+
 export const JoinRequestDecideBodySchema = Schema.Struct({
 	id: Schema.String,
 	action: Schema.optional(Schema.Unknown),

@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Camera, ImagePlus, Loader2, Mic, Paperclip, Pencil, Sparkles, ArrowUp, Square, X } from 'lucide-react';
+import { Camera, Frown, ImagePlus, Loader2, Mic, Paperclip, Pencil, Sparkles, ArrowUp, Square, X } from 'lucide-react';
+import { apiFetch, jsonInit } from '../../lib/api';
 import { isImeComposing, useTriggerMenu, type TriggerSource } from '../../hooks/chat/useTriggerMenu';
 import { ComposerStats } from './AgentMetaBar';
 import { ImageAnnotator, type Annotation } from './ImageAnnotator';
@@ -150,6 +151,21 @@ export function assembleSendText(typedText: string, chips: PasteChip[]): string 
   if (chips.length === 0) return typedText;
   const fenced = chips.map((chip) => `\`\`\`\n${chip.content}\n\`\`\``).join('\n\n');
   return typedText ? `${typedText}\n\n${fenced}` : fenced;
+}
+
+/**
+ * Body for `POST /api/friction` from the composer's grr popover (plans/daily-dogfood-engine/01) —
+ * null when the gripe is empty after trim (nothing is sent). `repo`/`agentId` ride the active
+ * session's agent when there is one; a defensively-agent-less composer still captures with
+ * `repo: ''` rather than refusing (an annoyed operator must never be told "can't log that here").
+ */
+export function frictionCaptureBody(
+  gripe: string,
+  agent?: Pick<AgentDTO, 'id' | 'repo'>,
+): { repo: string; gripe: string; context: string; agentId?: string } | null {
+  const trimmed = gripe.trim();
+  if (!trimmed) return null;
+  return { repo: agent?.repo ?? '', gripe: trimmed, context: 'webapp-composer', ...(agent ? { agentId: agent.id } : {}) };
 }
 
 /** Fold one finalized speech segment into the draft — space-joined onto whatever's already there.
@@ -325,6 +341,7 @@ export const Composer = ({
   voiceCallEnabled = false,
   voiceCallActive = false,
   onStartVoiceCall,
+  onToast,
 }: {
   tasks: Task[];
   suggestionChips: SuggestionChip[];
@@ -360,6 +377,10 @@ export const Composer = ({
    *  active session to pin to (`AssistantChat`'s session-list screen never renders a `Composer`
    *  at all, so this is only ever absent defensively). */
   onStartVoiceCall?: () => void;
+  /** Toast sink for the grr popover's confirmation/failure (both mounts pass their
+   *  `useTaskContext().showToast` — a prop rather than a context read so this component stays
+   *  importable in the jsdom-less bun test suite, same pattern as `AgentLandControls`). */
+  onToast?: (message: string, type?: 'success' | 'error' | 'info') => void;
 }) => {
   // Draft persistence (daily-composer concern 01): the four sacred pieces of composer state —
   // input, prompt-recall history, paste-chips, image attachments — seed from this thread's
@@ -754,6 +775,52 @@ export const Composer = ({
     setExpandedChipId((prev) => (prev === id ? null : prev));
   };
 
+  // Friction capture (plans/daily-dogfood-engine/01): a ghost toolbar button opens a one-input
+  // popover; Enter POSTs immediately (one click + one Enter is the whole budget), Escape cancels
+  // with no request. Draft state survives while the popover is open — logging a gripe must never
+  // eat the message being composed.
+  const [grrOpen, setGrrOpen] = useState(false);
+  const [grrText, setGrrText] = useState('');
+  const [grrBusy, setGrrBusy] = useState(false);
+  const grrInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (grrOpen) grrInputRef.current?.focus();
+  }, [grrOpen]);
+
+  const closeGrr = () => {
+    setGrrOpen(false);
+    setGrrText('');
+  };
+
+  const submitGrr = async () => {
+    const body = frictionCaptureBody(grrText, agent);
+    if (!body || grrBusy) return;
+    setGrrBusy(true);
+    try {
+      const res = await apiFetch('/api/friction', jsonInit('POST', body));
+      if (!res.ok) throw new Error((await res.text().catch(() => '')) || `HTTP ${res.status}`);
+      closeGrr();
+      onToast?.('Logged to the friction ledger');
+    } catch (err) {
+      // The text stays in the input — a failed capture the operator has to retype is itself friction.
+      onToast?.(err instanceof Error && err.message ? `Not logged: ${err.message}` : 'Not logged — is the daemon reachable?', 'error');
+    } finally {
+      setGrrBusy(false);
+    }
+  };
+
+  const handleGrrKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      void submitGrr();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      closeGrr();
+    }
+  };
+
   const insertChipInline = (id: string) => {
     const chip = chips.find((c) => c.id === id);
     if (!chip) return;
@@ -923,6 +990,37 @@ export const Composer = ({
               <Mic className="h-4 w-4" aria-hidden />
             </button>
             <VoiceCallButton enabled={voiceCallEnabled} active={voiceCallActive} onStart={() => onStartVoiceCall?.()} />
+            <div className="relative">
+              <button
+                type="button"
+                aria-label="Log friction"
+                title="Log friction — capture what just annoyed you (goes to the dogfood ledger, glance grr --list)"
+                aria-expanded={grrOpen}
+                onClick={() => (grrOpen ? closeGrr() : setGrrOpen(true))}
+                className={`flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full transition-colors ${
+                  grrOpen ? 'bg-amber-100 text-amber-600 dark:bg-amber-500/20 dark:text-amber-400' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'
+                }`}
+              >
+                <Frown className="h-4 w-4" aria-hidden />
+              </button>
+              {grrOpen && (
+                <div className="absolute bottom-10 left-0 z-50 w-72 rounded-xl border border-gray-200 bg-white p-2 shadow-lg dark:border-gray-800 dark:bg-gray-900" role="dialog" aria-label="Log friction">
+                  <input
+                    ref={grrInputRef}
+                    value={grrText}
+                    onChange={(e) => setGrrText(e.target.value)}
+                    onKeyDown={handleGrrKeyDown}
+                    placeholder="What just annoyed you?"
+                    disabled={grrBusy}
+                    className="w-full rounded-lg bg-gray-50 px-2 py-1.5 text-[13px] text-gray-900 outline-none placeholder:text-gray-400 dark:bg-gray-950 dark:text-gray-200"
+                  />
+                  <div className="mt-1 flex items-center justify-between px-1 text-[10px] text-gray-400">
+                    <span>{grrBusy ? 'Logging…' : 'Enter logs it · Esc cancels'}</span>
+                    <Frown className="h-3 w-3 text-amber-500/70" aria-hidden />
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
           <ComposerSendButton
             isStopShown={isStopShown}

@@ -898,6 +898,7 @@ export const WorkspaceCockpit: React.FC = () => {
               modelOptions={modelOptions}
               onModelChange={handleModelChange}
               agent={selectedAgent}
+              onToast={showToast}
               placeholder={pendingForSelected?.placeholder ?? (pendingForSelected ? 'Type your reply to unblock this agent…' : undefined)}
               focusKey={pendingForSelected?.id}
             />

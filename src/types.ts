@@ -49,6 +49,22 @@ export interface TransitionEntry {
 	seq?: string;
 }
 
+/** One captured dogfooding gripe — the friction ledger's persisted shape (`stateDir/friction.jsonl`,
+ *  src/friction-log.ts; plans/daily-dogfood-engine/01). Written via `POST /api/friction` /
+ *  `SquadManager.recordFriction`, read back by `glance grr --list` and the weekly drain. */
+export interface FrictionEntry {
+	/** uuid — minted at record time (same restart-collision reasoning as TransitionEntry.seq). */
+	id: string;
+	ts: number;
+	/** The agent whose chat/session the gripe was captured from, when there was one. */
+	agentId?: string;
+	/** Repo the operator was in when annoyance struck ("" when genuinely unknown). */
+	repo: string;
+	/** Capture surface ("cli" / "tui" / "webapp-composer" / "here") or free-form situational context. */
+	context?: string;
+	gripe: string;
+}
+
 /**
  * Which runtime backs a managed agent.
  *  - "omp-operator": an `omp --mode rpc` child in a git worktree (interactive, steerable).
