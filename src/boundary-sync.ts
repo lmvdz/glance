@@ -400,7 +400,10 @@ function splitDiffGitHeader(rest: string): [string, string] | undefined {
  * ambiguity) over the header line itself, and reverses C-quoting on whichever source is used. The
  * header line alone is used only as a fallback for a block with none of those lines (a pure binary
  * patch — `GIT binary patch` carries no `---`/`+++` text — or a bare mode-change), via
- * `splitDiffGitHeader`'s old==new-exploiting split. */
+ * `splitDiffGitHeader`'s old==new-exploiting split.
+ *
+ * @substrate exported for tests only — tests/boundary-sync.test.ts + boundary-sync-wiring.test.ts
+ * pin the quoted/spaced/UTF-8 path recovery directly; the C1 divergence scope depends on it. */
 export function patchTouchedPaths(patch: string): string[] {
 	const paths = new Set<string>();
 	const lines = patch.split("\n");
