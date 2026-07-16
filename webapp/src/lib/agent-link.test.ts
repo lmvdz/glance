@@ -19,4 +19,19 @@ describe('parseAgentHash', () => {
     expect(parseAgentHash('#/review/task-1')).toBeUndefined();
     expect(parseAgentHash('#/agents/x')).toBeUndefined();
   });
+
+  test('strips a `?push=1` query-string suffix from the captured id — a parser invariant, not a '
+    + 'side effect of running after push-tap.ts\'s beacon strip', () => {
+    expect(parseAgentHash('#/agent/chat-1?push=1')).toBe('chat-1');
+  });
+
+  test('leaves an id with no query-string suffix untouched', () => {
+    expect(parseAgentHash('#/agent/chat-1')).toBe('chat-1');
+  });
+
+  test('strips any `?...` suffix, not just the push marker — the parser never returns an id '
+    + 'containing `?`', () => {
+    expect(parseAgentHash('#/agent/chat-1?view=diff')).toBe('chat-1');
+    expect(parseAgentHash('#/agent/chat-1?push=1&view=diff')).toBe('chat-1');
+  });
 });
