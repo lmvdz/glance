@@ -263,6 +263,11 @@ export class TranscriptRenderer {
 
 export type HereStatus = "connecting" | "ready" | "gone" | "error" | "dead";
 
+/** Consecutive CONFIRMED misses (roster miss + a definitive 404 from the single-agent probe, never
+ *  a probe error/timeout) required before a session is declared terminally 'gone' — a lone racy miss
+ *  (daemon momentarily slow/mid-swap) must not end a live session (review finding 2). */
+const CONFIRMED_MISS_STREAK = 2;
+
 /**
  * The client-side session: queues prompts until the daemon-side create resolves (prewarm P1 —
  * typing is never blocked on setup), routes submits to prompt vs pending-answer, and turns each
@@ -279,6 +284,12 @@ export class HereSession {
 	/** Set by the REPL when a poll failed to REACH the daemon (connection refused / mid-restart) —
 	 *  the signal that a later roster miss means "did not survive the restart", not "was removed". */
 	private sawDisconnect = false;
+	/** Consecutive CONFIRMED-missing roster ticks (a real 404 from sessionFate, not a probe error) —
+	 *  reset the instant the roster finds the agent again or the probe confirms "live". */
+	private confirmedMissStreak = 0;
+	/** Whether the subtle "connection wobble" notice has already been printed for the current run of
+	 *  probe failures — said once per outage, not every tick, and reset on the next definitive read. */
+	private probeWobbleShown = false;
 	/** Recovered prior-session context, folded into the FIRST prompt after a re-attach and then
 	 *  cleared — never auto-sent on its own (no silent spend). */
 	private pendingContext?: string;
@@ -307,6 +318,8 @@ export class HereSession {
 		this.lastAgent = undefined;
 		this.shownPending.clear();
 		this.sawDisconnect = false;
+		this.confirmedMissStreak = 0;
+		this.probeWobbleShown = false;
 		this.pendingContext = priorContext;
 		this.agentId = agentId;
 		this.status = "ready";
@@ -419,23 +432,47 @@ export class HereSession {
 		}
 		this.lastAgent = agent;
 		if (!agent) {
-			// Roster miss — ask the single-agent read what became of the id (daily-onramp 04). Three
+			// Roster miss — ask the single-agent read what became of the id (daily-onramp 04). Four
 			// honest outcomes: still live (a roster/read race — wait for the next tick), dead behind a
 			// restart (placeholder, or a clean miss right after a connection loss — the placeholder
-			// window may have lapsed), or genuinely removed while the daemon stayed up.
+			// window may have lapsed), genuinely removed (a CONFIRMED_MISS_STREAK of definitive 404s
+			// while the daemon stayed up), or the PROBE ITSELF failed (timeout/network error) — which
+			// proves nothing and must never be read as removal (review finding 2: a single transient
+			// probe failure used to permanently mark the session 'gone').
 			const fate = await this.client.sessionFate(agentId).catch(() => undefined);
-			if (fate === "live") return;
+			if (fate === "live") {
+				this.confirmedMissStreak = 0;
+				this.probeWobbleShown = false;
+				return;
+			}
+			if (fate === undefined) {
+				// Unknown, not proof of anything — retry next tick with the session still considered
+				// live. Say at most one subtle word about it per outage, never the noisy "gone" message.
+				if (!this.probeWobbleShown) {
+					this.print(dim("  · connection wobble, retrying"));
+					this.probeWobbleShown = true;
+				}
+				return;
+			}
+			this.probeWobbleShown = false;
 			const placeholder = typeof fate === "object" ? fate : undefined;
 			if ((placeholder !== undefined || this.sawDisconnect) && this.onDead) {
 				this.status = "dead";
 				this.agentId = undefined; // lines typed from here queue for the successor session
+				this.confirmedMissStreak = 0;
 				this.onDead(agentId, placeholder?.deadReason);
 				return;
 			}
+			// Confirmed non-live outcome with no onDead hook to recover through (or a plain confirmed
+			// miss) — require a streak before it's terminal, so one racy miss can't end a live session.
+			this.confirmedMissStreak++;
+			if (this.confirmedMissStreak < CONFIRMED_MISS_STREAK) return;
 			this.status = "gone";
 			this.print(red("✗ the session was removed on the daemon side — nothing more will arrive here"));
 			return;
 		}
+		this.confirmedMissStreak = 0;
+		this.probeWobbleShown = false;
 		this.sawDisconnect = false;
 		if (agent.status === "error") {
 			this.status = "error";

@@ -204,6 +204,56 @@ test("registerProject WITHOUT the promote flag never demotes a live session's ep
 	expect(mgr.projects()).toEqual([]);
 });
 
+// Review finding #3 (ephemeral release race): two `glance here` terminals on the same repo are
+// explicitly supported (boundarySyncChains) — the SECOND session must never be told it owns the
+// FIRST session's ephemeral marker, and even if a caller releases anyway (a failed-create rollback,
+// or a stale client), the still-live first session's registration must survive.
+
+test("a SECOND ephemeral registration on the same (still-live) repo reports ephemeral:false — it did not add the marker", async () => {
+	const stateDir = await tmpDir("here-eph-race-");
+	const repo = await gitRepo("here-eph-race-repo-");
+	const mgr = new SquadManager({ stateDir } as never);
+
+	const a = await mgr.registerEphemeralProject(repo); // session A: the real owner
+	expect(a.ok).toBe(true);
+	if (a.ok) {
+		expect(a.added).toBe(true);
+		expect(a.ephemeral).toBe(true);
+	}
+
+	const b = await mgr.registerEphemeralProject(repo); // session B: same repo, A's marker already exists
+	expect(b.ok).toBe(true);
+	if (b.ok) {
+		expect(b.added).toBe(false); // idempotent add — the repo was already registered (by A)
+		expect(b.ephemeral).toBe(false); // B must NOT inherit A's ownership of the release
+	}
+	expect(mgr.isEphemeralProject(repo)).toBe(true); // still marked ephemeral overall (A's marker)
+});
+
+test("a non-owning session's release (or a failed-create rollback) cannot evict another session's still-live ephemeral registration", async () => {
+	const stateDir = await tmpDir("here-eph-race-release-");
+	const repo = await gitRepo("here-eph-race-release-repo-");
+	const mgr = new SquadManager({ stateDir } as never);
+
+	await mgr.registerEphemeralProject(repo); // session A
+	await mgr.registerEphemeralProject(repo); // session B — added:false, ephemeral:false (see test above)
+	seedConsoleAgent(mgr, "chat-a", repo); // A's own live agent, still chatting on this repo
+
+	// Before the fix, B's own exit hook (or a failed-create rollback on the same repo) always saw
+	// `ephemeral:true` and called this unconditionally, un-registering A's repo and clearing A's marker
+	// out from under it. Now `releaseEphemeralProject` itself refuses to release while ANY live agent
+	// (A's) still references the repo — the same last-agent-on-repo guard `remove()` already applied.
+	const released = mgr.releaseEphemeralProject(repo);
+	expect(released).toMatchObject({ ok: true, released: false });
+	expect(mgr.isEphemeralProject(repo)).toBe(true); // A's registration survived
+	expect(mgr.projects().map((p) => p.repo)).toEqual([repo]);
+
+	// Only once A's own agent is actually gone does the release take effect.
+	await mgr.applyCommand({ type: "remove", id: "chat-a" });
+	expect(mgr.isEphemeralProject(repo)).toBe(false);
+	expect(mgr.projects()).toEqual([]);
+});
+
 test("removing the LAST agent on an ephemeral repo releases the registration (daemon-side session end)", async () => {
 	const stateDir = await tmpDir("here-eph-remove-");
 	const repo = await gitRepo("here-eph-remove-repo-");
@@ -301,6 +351,40 @@ test("POST /api/console ephemeral:true refuses a non-git repo with the reason; /
 	expect(await rel.json()).toMatchObject({ ok: true, released: true });
 	const again = await fetch(`${url}/api/console/release`, { method: "POST", body: JSON.stringify({ repo }) });
 	expect(await again.json()).toMatchObject({ ok: true, released: false });
+});
+
+test("a second POST /api/console on an already-live ephemeral repo whose create() fails cannot roll back the first session's registration (finding #3)", async () => {
+	const stateDir = await tmpDir("here-api-race-");
+	const repo = await gitRepo("here-api-race-repo-");
+	const mgr = new SquadManager({ stateDir } as never);
+	await mgr.start();
+	const srv = new SquadServer(mgr, { port: 0 });
+	const url = srv.start();
+	cleanups.push(async () => {
+		srv.stop();
+		await mgr.stop();
+	});
+
+	// Session A: a real console POST — ephemeral:true, and (like `glance here`) a live agent stays on
+	// the repo for as long as the session runs.
+	const a = await fetch(`${url}/api/console`, { method: "POST", body: JSON.stringify({ repo, ephemeral: true }) });
+	expect(a.status).toBe(200);
+	const aBody = (await a.json()) as { agentId: string; repo: string; ephemeral: boolean };
+	expect(aBody.ephemeral).toBe(true);
+	expect(mgr.isEphemeralProject(repo)).toBe(true);
+
+	// Session B: a second console POST on the SAME repo, but with a harness name create() rejects
+	// outright — the route's own failed-create rollback (server.ts, right after `manager.create` throws)
+	// fires. Before the fix, B's `ephemeral` local was always true whenever the repo read as ephemeral
+	// (Set-membership), so this rollback unconditionally un-registered A's still-live repo and cleared
+	// A's marker. Now B never even reports itself as the owner (`registerEphemeralProject`'s
+	// `ephemeral` is scoped to `added`), and `releaseEphemeralProject`'s own last-agent-on-repo guard
+	// would refuse the release anyway.
+	const b = await fetch(`${url}/api/console`, { method: "POST", body: JSON.stringify({ repo, ephemeral: true, harness: "does-not-exist" }) });
+	expect(b.status).toBe(409);
+
+	expect(mgr.isEphemeralProject(repo)).toBe(true); // A's registration survived B's failed create + rollback
+	expect(mgr.projects().map((p) => p.repo)).toEqual([repo]);
 });
 
 // ── 2. verb dispatch (the real CLI, spawned) ─────────────────────────────────────────────────────
@@ -439,7 +523,10 @@ test("a select answer only matches an offered option; a stray line is sent as a 
 	expect(lines.some((l) => l.includes('answered "main"'))).toBe(true);
 });
 
-test("a vanished agent is reported honestly, once", async () => {
+test("a genuinely vanished agent (a CONFIRMED 404 streak) is reported honestly, once", async () => {
+	// fakeDaemon's single-agent GET (/api/agents/:id, used by sessionFate) isn't specially handled —
+	// it falls to the shared 404, so every roster miss here is a definitive "missing", never a probe
+	// error. A lone miss must NOT be terminal (review finding 2); only a confirmed streak is.
 	const state: { transcript: TranscriptEntry[]; agent?: AgentDTO } = { transcript: [], agent: agentDto() };
 	const { client } = fakeDaemon(state);
 	const lines: string[] = [];
@@ -448,11 +535,86 @@ test("a vanished agent is reported honestly, once", async () => {
 	await session.poll();
 
 	state.agent = undefined; // reaped server-side
-	await session.poll();
+	await session.poll(); // first confirmed miss — not yet a streak, session stays live
+	expect(session.status).not.toBe("gone");
+	expect(lines.some((l) => l.includes("removed on the daemon side"))).toBe(false);
+
+	await session.poll(); // second consecutive confirmed miss — now terminal
 	expect(session.status).toBe("gone");
 	expect(lines.filter((l) => l.includes("removed on the daemon side"))).toHaveLength(1);
 	await session.poll(); // further polls are inert, no repeat
 	expect(lines.filter((l) => l.includes("removed on the daemon side"))).toHaveLength(1);
+});
+
+test("a transient sessionFate probe failure (timeout) does NOT end the session — it retries and resumes rendering next tick", async () => {
+	// Review finding 2: a roster fetch that succeeds but races a momentarily slow/mid-swap daemon —
+	// the follow-up single-agent GET times out. That must read as UNKNOWN, not proof of removal.
+	const state: { transcript: TranscriptEntry[]; agent?: AgentDTO } = { transcript: [], agent: agentDto() };
+	let probeShouldFail = false;
+	const calls: FakeCall[] = [];
+	const fakeFetch = (async (input: string | URL | Request) => {
+		const url = new URL(String(input));
+		calls.push({ path: url.pathname });
+		if (url.pathname.endsWith("/transcript")) return Response.json(state.transcript);
+		if (url.pathname === "/api/agents") return Response.json(state.agent ? [state.agent] : []);
+		if (url.pathname === "/api/agents/chat-1") {
+			if (probeShouldFail) throw new Error("timeout"); // AbortSignal.timeout-style failure
+			return new Response("not found", { status: 404 });
+		}
+		return new Response("not found", { status: 404 });
+	}) as typeof fetch;
+	const client = new HereClient("http://fake", () => ({}), fakeFetch);
+	const lines: string[] = [];
+	const session = new HereSession(client, (l) => lines.push(l));
+	session.attach("chat-1");
+	await session.poll(); // baseline: agent present
+
+	state.agent = undefined; // roster momentarily misses it
+	probeShouldFail = true; // ...and the direct probe times out this tick
+	await session.poll();
+	expect(session.status).not.toBe("gone");
+	expect(session.status).not.toBe("dead");
+	expect(lines.some((l) => l.includes("removed on the daemon side"))).toBe(false);
+	expect(lines.filter((l) => l.includes("connection wobble"))).toHaveLength(1); // said once, quietly
+
+	// The wobble repeats on a second failed tick, but still isn't printed twice, and still isn't terminal.
+	await session.poll();
+	expect(session.status).not.toBe("gone");
+	expect(lines.filter((l) => l.includes("connection wobble"))).toHaveLength(1);
+
+	// The daemon catches up: roster finds the agent again next tick, and replies keep rendering.
+	state.agent = agentDto();
+	probeShouldFail = false;
+	state.transcript = [{ seq: 1, kind: "assistant", text: "back online", ts: 1, status: "ok" }];
+	await session.poll();
+	expect(session.status).not.toBe("gone");
+	expect(session.status).not.toBe("dead");
+	expect(lines.some((l) => l.includes("back online"))).toBe(true); // the reply actually rendered
+});
+
+test("a genuine dead-placeholder response is still terminal immediately and routes to the reattach flow", async () => {
+	// The A04 dead:true shape is definitive evidence (a restart-killed session) — it must fire the
+	// reattach hook right away, with no streak to wait out, even after only ONE roster miss.
+	const state: { transcript: TranscriptEntry[]; agent?: AgentDTO } = { transcript: [], agent: agentDto() };
+	const fakeFetch = (async (input: string | URL | Request) => {
+		const url = new URL(String(input));
+		if (url.pathname.endsWith("/transcript")) return Response.json(state.transcript);
+		if (url.pathname === "/api/agents") return Response.json(state.agent ? [state.agent] : []);
+		if (url.pathname === "/api/agents/chat-1") return Response.json({ dead: true, deadReason: "the daemon restarted" });
+		return new Response("not found", { status: 404 });
+	}) as typeof fetch;
+	const client = new HereClient("http://fake", () => ({}), fakeFetch);
+	const lines: string[] = [];
+	const deadCalls: Array<{ deadId: string; deadReason?: string }> = [];
+	const session = new HereSession(client, (l) => lines.push(l), (deadId, deadReason) => deadCalls.push({ deadId, deadReason }));
+	session.attach("chat-1");
+	await session.poll();
+
+	state.agent = undefined; // reaped by the restart
+	await session.poll();
+	expect(deadCalls).toEqual([{ deadId: "chat-1", deadReason: "the daemon restarted" }]);
+	expect(session.status).toBe("dead");
+	expect(lines.some((l) => l.includes("removed on the daemon side"))).toBe(false); // reattach flow owns messaging, not the generic "gone" line
 });
 
 test("HereClient.grr POSTs /api/friction with context 'here' and surfaces a daemon refusal as an error", async () => {
