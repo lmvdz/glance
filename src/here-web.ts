@@ -30,7 +30,9 @@ export function hereWebUrl(baseUrl: string, token: string, agentId: string): str
 	return `${b}/${q}#/agent/${encodeURIComponent(agentId)}`;
 }
 
-/** WSL detection: `WSL_DISTRO_NAME` when the env survived, /proc/version's vendor tag otherwise. */
+/** WSL detection: `WSL_DISTRO_NAME` when the env survived, /proc/version's vendor tag otherwise.
+ * @substrate exported as the unit-test seam for WSL detection (tests/here-web-flow.test.ts) —
+ * the only production caller is openInBrowser below, and the ratchet doesn't count test refs. */
 export function isWsl(env: Record<string, string | undefined> = process.env, procVersion?: string): boolean {
 	if (env.WSL_DISTRO_NAME) return true;
 	let v = procVersion;
@@ -51,6 +53,8 @@ export function isWsl(env: Record<string, string | undefined> = process.env, pro
  * operator's box has no `wslu`, and the Windows PATH injection (`appendWindowsPath`) doesn't
  * reach every process context — measured live: absent inside a tmux-spawned REPL on the very
  * box whose login shell had it. The absolute rung is what actually opened the browser there.
+ * @substrate exported as the unit-test seam for the opener ladder (tests/here-web-flow.test.ts) —
+ * the only production caller is openInBrowser below, and the ratchet doesn't count test refs.
  */
 export function openerCandidates(url: string, opts: { platform: NodeJS.Platform; wsl: boolean }): string[][] {
 	if (opts.platform === "darwin") return [["open", url]];

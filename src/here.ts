@@ -462,7 +462,9 @@ registration durable, so it survives ${bold("/exit")}.
 /**
  * `--web` is a bare boolean flag, but the shared parser treats any flag followed by a bare word
  * as value-taking — `glance here --web "fix the test"` would silently EAT the prompt as the flag's
- * value. Pull `--web` out before parsing so the prompt survives. Exported for the unit test.
+ * value. Pull `--web` out before parsing so the prompt survives.
+ * @substrate exported as the unit-test seam for `--web` parsing (tests/here-web-flow.test.ts) —
+ * the only production caller is cmdHere below, and the ratchet doesn't count test refs.
  */
 export function parseHereArgs(args: string[]): ParsedArgs & { web: boolean } {
 	const web = args.includes("--web");
