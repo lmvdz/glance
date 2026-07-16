@@ -163,3 +163,114 @@ The honest sequencing: **the wedge is the fleet lane's next initiative, not wave
 ## 9. Handoff to /plan (when approved)
 
 Instruct `/plan`'s EXPLORE phase to treat these as a pre-mapped landscape to validate and extend, not rediscover: `src/land.ts:793-877` (staleBranchReason + semantic-merge ceiling comment), `src/land-pr.ts:717-722`, `src/proof.ts:26-149` (the fingerprint discipline to generalize), `src/done-proof.ts:101-143`, `src/land-ledger.ts`, `src/validator.ts` (structured-input opportunity), `src/types.ts:388-408` (FeatureCriterion/ValidationRecord), `src/omp-graph/provenance.ts` (string-join cautionary tale), state-dir conventions in `src/dal/storage.ts` (durable write primitives) and the corruption-throw discipline in `src/baseline-tracker.ts:20-56`. Build vs buy: build the extractor on the in-tree TS compiler; adopt no new dependency. Replay corpus: land ledgers + `gh pr list` history + the labeled incidents in auto-memory (composition-drift 2026-07-13, stacked-PR wrong-base, orphaned merged PRs).
+
+---
+
+## 10. 2026-07-16 — Independent review adjustments (ADOPTED)
+
+Lars routed this brief through an independent architecture reviewer. Verdict: **approve the direction; correct the boundary before `/plan`.** All adjustments below are adopted and supersede the corresponding parts of §1/§4/§8. Nothing above is rewritten — this section is the delta.
+
+### 10.1 The wedge is renamed and re-bounded
+
+**Old**: Semantic Land Assessment (the extractor *is* the wedge).
+**New**: **Commit-Addressed Land Assessment** — an assessment *envelope* at the land boundary, with a **TypeScript structural-delta analyzer** as its *first analysis module*, not its definition.
+
+Why: the labeled incident classes are heterogeneous — composition drift, stacked-PR wrong base, orphaned merged PRs, stale proof, behavioral incompatibility under clean merges. Those are variously git-topology, workflow-state, proof-freshness, and structural problems. Making `SemanticDelta` the whole wedge forces unrelated failure classes into an AST abstraction, or overclaims what the extractor detects. The envelope hosts pluggable analyses:
+
+```ts
+interface LandAssessmentEvent {
+  schemaVersion: number;
+  assessmentId: string;      // content-addressed, see 10.2
+  attemptId: string;
+  repositoryId: string;
+  stage: "attempt-started" | "pre-merge-assessed" | "assessment-invalidated"
+       | "post-resolution-assessed" | "post-merge-verified" | "rejected" | "landed";
+  state: { baseCommit: string; mainCommit: string; candidateCommit: string; candidateTree: string };
+  analyses: {
+    topology?: TopologyAssessment;              // stacked-base / orphan / lineage class
+    proofFreshness?: ProofFreshnessAssessment;  // wraps existing isFresh discipline
+    typescriptStructuralDelta?: TypeScriptStructuralDelta;  // the first NEW analyzer
+    criterionEvidence?: CriterionEvidenceAssessment;        // v0: refs only, see 10.5
+    regression?: RegressionAssessment;          // wraps existing gate outcome
+  };
+  extractionCoverage: ExtractionCoverage[];
+  findings: AssessmentFinding[];
+  evidence: EvidencePointer[];
+  taskRef?: string; featureRef?: string; planRef?: string;
+  agentRunRef?: string; horizonRef?: string;    // captured NOW, consumed later (10.8)
+  createdAt: string;
+}
+```
+
+The first analyzer's honest name: **structural concurrency and contract-risk assessment**. In-scope detections: exported symbol add/remove, exported signature change, import/export and module-dependency graph changes, inheritance/implementation changes, concurrent edits to the same qualified symbol, concurrent changes on adjacent sides of a dependency edge, public type/interface contract changes. Explicitly NOT claimed: behavioral equivalence, policy duplication, architectural intent, runtime compatibility, invariant-encoding equivalence, long-term fitness.
+
+### 10.2 Assessment invalidation is operational, not just a schema field
+
+`assessmentId = hash(repository + baseCommit + mainCommit + candidateCommit + candidateTree + extractorVersion + extractorConfiguration)`. Any input changing (rebase → C₁, main advancing, conflict resolution, PR sync, merge-commit construction) **invalidates** the prior assessment — a new `assessment-invalidated` + fresh assessment are appended; the original is never updated in place. This carries `proof.ts#isFresh`'s discipline through the whole landing lifecycle.
+
+### 10.3 Authority is per-finding, not per-record
+
+```ts
+interface AssessmentFinding {
+  id: string; kind: string;
+  statement: string;
+  authority: "deterministic" | "derived" | "inferred";
+  status: "supported" | "disputed" | "unknown";
+  confidence?: number;
+  coverage: CoverageDescriptor;
+  evidence: EvidencePointer[];
+  analyzer: { name: string; version: string };
+}
+```
+
+"Exported symbol Foo removed" = deterministic. "Concurrent change Bar probably depends on Foo" = derived. "This breaks the authorization flow" = inferred unless execution-proven. A deterministic extractor must not launder derived conclusions into deterministic ones.
+
+### 10.4 Benchmark methodology (tightened)
+
+Incident taxonomy FIRST: `git-topology | textual-conflict | structural-api | dependency | behavioral | acceptance-criterion | proof-freshness | workflow-state | operational`. Each analyzer is judged **only against the classes it claims** — a stacked-base miss is a topology-analyzer matter, never a structural-delta false negative. Four evaluation sources: (1) known incidents, manually classified; (2) apparently-benign historical lands, **sampled and manually reviewed** (not auto-assumed negative); (3) synthetic concurrent-change pairs generated from real code per incompatibility class; (4) temporal holdout (thresholds on older history, evaluation on newer). Metrics — never one aggregate score: extraction coverage, alert rate, precision at fixed operator-review budget, recall by incident class, false-positive rate by change class, runtime p50/p95, % findings with inspectable evidence.
+
+### 10.5 Acceptance criteria in v0: refs only
+
+`criteria: { declaredCriterionRefs: string[]; impactStatus: "not-evaluated" }`. No criterion-impact inference in the first slice — free-form criteria make that a different problem, and a weak LLM mapping would muddy the deterministic evaluation. (Resolves the §1-vs-§4 inconsistency in favor of §4's phase-2 placement.)
+
+### 10.6 No dashboard in the first slice
+
+v0 surface = append-only JSONL event store + offline replay CLI + human-readable Markdown/CLI report (e.g. `glance land-assessment replay --from ... --to ... --output ...`). Web projection only after replay shows useful signal — no UI sunk cost around an analyzer that may be rejected.
+
+### 10.7 Observe-only failure semantics (explicit)
+
+```text
+Assessment unavailable        → landing continues; loud failure; unavailable ≠ safe
+Assessment store write fails  → landing continues; high-severity telemetry
+Store corrupt during replay   → replay FAILS CLOSED; store never silently reset
+Later narrow enforcement      → only explicitly approved deterministic rule classes may block
+```
+
+(The store adopts `baseline-tracker.ts`'s corruption-throw discipline from day one.)
+
+### 10.8 Long-horizon honesty + join refs now
+
+This wedge does **not** yet stop an agent from choosing a locally cheap, architecturally damaging implementation — it builds the evidence substrate (accumulated structural deltas + task/plan/horizon joins) from which trajectory analysis can later be built. The v0 event therefore carries `taskRef/featureRef/planRef/agentRunRef/horizonRef` as references (no implementations), preventing another string-matching join problem later.
+
+### 10.9 Side-findings split out as immediate, separate work
+
+- **ACP context-delivery parity (P0, daily lane)**: do NOT flip the env default on source-reading alone; first add a parity test proving context was assembled → the selected harness received it → membrane instructions survived transport → no duplication → observable in the launched session. Separate issue, not buried in this plan.
+- **DoneProof main-reachability re-check**: small, separate Observer/correctness issue; does not wait for the wedge.
+
+### 10.10 Revised ADR decision (supersedes §8's Decision line)
+
+> Introduce a commit-addressed **Land Assessment envelope** at the existing landing boundary. Persist **append-only** evidence for every landing attempt, including rejected attempts. Implement a deterministic **TypeScript structural-delta analyzer** as the first assessment module. Validate its coverage, latency, and incident-class precision through **offline historical replay** before integrating it into the validator, dashboard, advisory surfaces, or enforcement path.
+
+### 10.11 Execution order (adopted)
+
+```text
+Immediate correctness work: ACP context parity test; DoneProof reachability issue
+Phase 0: incident taxonomy; labeled replay manifest; LandAssessmentEvent schema; analyzer claims/non-claims
+Phase 1: pure TS structural-delta library; offline B/M/C replay CLI; NO land-path integration; NO dashboard
+Phase 2: append-only assessment event store; observe-only land hook; recompute on candidate/main mutation; persist unavailable + rejected outcomes
+Phase 3: human-readable reports; measure operator usefulness; structured validator-input experiment
+Phase 4: advisory warnings for 1–2 high-precision deterministic rule classes
+Phase 5: consider narrow enforcement, only after prospective dogfood evidence
+```
+
+Reviewer's closing judgment, adopted as this brief's final state: the research is sufficient — no further broad architecture investigation; make the boundary correction, formalize the replay methodology, and send it to planning.
