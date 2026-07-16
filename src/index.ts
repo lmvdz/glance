@@ -2,6 +2,7 @@
 /**
  * glance CLI.
  *
+ *   glance here                                   chat on the current directory, in this terminal
  *   glance up [--port N] [--no-tui] [--restore]   start the daemon (server + TUI)
  *   glance add <repo> [--name --branch --model --approval --task]
  *   glance list
@@ -19,7 +20,6 @@
 import "./env-compat.ts";
 import * as os from "node:os";
 import * as path from "node:path";
-import { readFileSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { loadOrCreateToken } from "./auth.ts";
@@ -38,7 +38,6 @@ import { SquadTui } from "./tui.ts";
 import { startExternalSessionTracker } from "./sessions.ts";
 import { startSupervisor } from "./supervisor.ts";
 import { acquireStateLock, StateLockError } from "./state-lock.ts";
-import { resolveStateDir } from "./state-dir.ts";
 import { loadEnvFile } from "./plane-secrets.ts";
 import { planeRepos } from "./plane.ts";
 import { openDatabase } from "./db/index.ts";
@@ -55,8 +54,8 @@ import { PolicyStore } from "./policy.ts";
 import { backendFromEnv, setStorageBackend } from "./dal/storage.ts";
 import type { AutomationRollupRow } from "./automation-log.ts";
 import type { Actor, AgentDTO, ApprovalMode, AutomationEvent, ClientCommand, CommissionResult, CommissionSpec, CreateAgentOptions, ThinkingLevel, TranscriptEntry } from "./types.ts";
-
-const DEFAULT_PORT = Number(process.env.OMP_SQUAD_PORT ?? 7878);
+import { base, DEFAULT_PORT, parseArgs, stateDirPath, tokenHeader } from "./cli-args.ts";
+import { cmdHere } from "./here.ts";
 
 /** Global default binary override for the default harness (a custom omp/pi fork at a nonstandard path).
  *  Wires the `bin` field that existed on SquadManager/ManagerRegistry but was never populated in the
@@ -78,6 +77,7 @@ export function rootFactoryEnabled(repoCount: number = planeRepos().length): boo
 const HELP = `glance — manage a fleet of Oh My Pi agents across git worktrees
 
 USAGE
+  glance here [--model M]                       Chat with an agent on THIS directory, in this terminal
   glance up [--port N] [--no-tui] [--restore]   Start the daemon (web + TUI)
   glance add <repo> [flags]                     Spawn an agent in a new worktree
   glance list [--json]                          Show the roster
@@ -131,41 +131,7 @@ GLOBAL
   --no-supervise    Don't auto-answer agent prompts (default on; or OMP_SQUAD_AUTO_SUPERVISE=0)
 `;
 
-interface ParsedArgs {
-	positional: string[];
-	flags: Record<string, string | boolean>;
-}
-
-function parseArgs(args: string[]): ParsedArgs {
-	const positional: string[] = [];
-	const flags: Record<string, string | boolean> = {};
-	for (let i = 0; i < args.length; i++) {
-		const a = args[i];
-		if (a.startsWith("--")) {
-			const key = a.slice(2);
-			const next = args[i + 1];
-			if (next !== undefined && !next.startsWith("--")) {
-				flags[key] = next;
-				i++;
-			} else {
-				flags[key] = true;
-			}
-		} else {
-			positional.push(a);
-		}
-	}
-	return { positional, flags };
-}
-
-function base(flags: Record<string, string | boolean>): string {
-	const port = flags.port ? Number(flags.port) : DEFAULT_PORT;
-	return `http://127.0.0.1:${port}`;
-}
-function stateDirPath(): string {
-	// Canonical resolution lives in state-dir.ts (shared with ttl-registry, worktrees, sockets, proof):
-	// env override → ~/.glance if present → legacy ~/.omp/squad if present → ~/.glance for fresh installs.
-	return resolveStateDir();
-}
+// parseArgs / base / stateDirPath / tokenHeader now live in cli-args.ts (shared with `glance here`).
 
 /** Enumerate org ids that have persisted state (the `<stateDir>/orgs/<id>` dir names). Tolerates a missing dir. */
 async function listOrgIds(stateDir: string): Promise<string[]> {
@@ -174,16 +140,6 @@ async function listOrgIds(stateDir: string): Promise<string[]> {
 		return entries.filter((e) => e.isDirectory()).map((e) => e.name);
 	} catch {
 		return [];
-	}
-}
-
-/** Authorization header for CLI→daemon calls, read from the persisted token (empty if the daemon has none). */
-function tokenHeader(): Record<string, string> {
-	try {
-		const t = readFileSync(path.join(stateDirPath(), "access-token"), "utf8").trim();
-		return t ? { Authorization: `Bearer ${t}` } : {};
-	} catch {
-		return {};
 	}
 }
 
@@ -1025,6 +981,9 @@ async function main(): Promise<void> {
 		case undefined:
 		case "up":
 			await cmdUp(rest);
+			break;
+		case "here":
+			await cmdHere(rest);
 			break;
 		case "add":
 			await cmdAdd(rest);
