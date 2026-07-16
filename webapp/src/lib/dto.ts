@@ -39,8 +39,11 @@ export interface AttentionEvent {
   source: "notify" | "tool" | "harness" | "boundary-sync";
   /** boundary-sync rows only: "held" = durable patch(es) waiting (Apply/Discard resolve it);
    *  "uncapturable" = NOTHING is held (the turn's delta couldn't be captured) — offering Apply
-   *  there would be false reassurance, so those rows get View instead. */
-  sync?: "held" | "uncapturable";
+   *  there would be false reassurance, so those rows get View instead; "divergence" = the write
+   *  already happened but a post-apply check (C1) found the real checkout may have been clobbered
+   *  mid-write — nothing is pending (never Apply/Discard), only an Acknowledge that dismisses the
+   *  notice via POST /api/agents/:id/ack-boundary-sync-divergence. */
+  sync?: "held" | "uncapturable" | "divergence";
   createdAt: number;
 }
 

@@ -424,7 +424,7 @@ function fmtIdle(ms: number): string {
 
 export type AttentionSeverity = 'critical' | 'warn' | 'ok';
 export type AttentionKind = 'blocked' | 'vetoed' | 'inconclusive' | 'land-ready' | 'error' | 'resource' | 'collision' | 'flapping' | 'stalled' | 'report' | 'attention';
-export type AttentionActionKind = 'answer' | 'land' | 'restart' | 'view' | 'raise-cap' | 'steer' | 'apply-sync' | 'discard-sync';
+export type AttentionActionKind = 'answer' | 'land' | 'restart' | 'view' | 'raise-cap' | 'steer' | 'apply-sync' | 'discard-sync' | 'ack-divergence';
 
 /** Epic 5 (HITL safeguards, DESIGN.md D3): a working agent is considered drifting once it's gone
  *  this long without any activity — the only robustly-computable, always-present staleness signal
@@ -622,25 +622,37 @@ export function attentionItems(input: AttentionInput, opts?: { sort?: 'severity'
 
     // Harness-agnostic attention lane (v2 glance-notify: operator notify / squad_attention tool /
     // harness notify RPC) → view. Same non-blocking contract as reports: independent of `status`.
-    // Boundary-sync rows (daily-onramp 03) split on what the row actually HOLDS:
+    // Boundary-sync rows (daily-onramp 03) split THREE ways on what the row actually HOLDS — N2-UI
+    // (re-review): a "divergence" row must never be folded into "held"'s Apply/Discard grammar,
+    // since Discard on a session that ALSO has a real held backlog would drop those real patches
+    // while the operator reads the button as "dismiss this notice."
     //   - "held" (durable patches are waiting): one-click Apply (re-checked server-side before
     //     touching anything) plus Discard (drop the backlog; the worktree keeps every edit) —
-    //     "View" would bury the two actions that resolve the row.
+    //     "View" would bury the two actions that resolve the row. A legacy row with no `sync` tag
+    //     at all behaves as "held" too (pre-tag events; never a silent downgrade).
     //   - "uncapturable" (the turn's delta couldn't even be captured — NOTHING is held): View
     //     only. Apply here would return applied:0 and read as "already current" — false
     //     reassurance, since that turn's edits exist only in the session worktree.
+    //   - "divergence" (C1: the write already happened, but a post-apply check found the real
+    //     checkout may have been clobbered mid-write): its OWN kind, critical severity, and its
+    //     OWN action — Acknowledge, which only ever dismisses this notice (POST
+    //     .../ack-boundary-sync-divergence) and can never touch a held backlog. There is nothing
+    //     here to Apply or Discard: the server-crafted `detail` already names every affected path
+    //     and the on-disk pre-write capture location for manual recovery.
     for (const e of a.attentionEvents ?? []) {
       const sync = e.source === 'boundary-sync';
-      const held = sync && e.sync !== 'uncapturable';
+      const syncKind = sync ? (e.sync ?? 'held') : undefined;
+      const held = syncKind === 'held';
+      const divergence = syncKind === 'divergence';
       items.push({
         id: `attention:${a.id}:${e.id}`,
-        severity: 'warn',
+        severity: divergence ? 'critical' : 'warn',
         kind: 'attention',
         title: sync ? e.summary : `${a.name} needs a look`,
         detail: sync ? e.detail : e.detail ? `${e.summary} — ${e.detail}` : e.summary,
         agentId: a.id,
         since: e.createdAt,
-        action: held ? { label: 'Apply', kind: 'apply-sync' } : { label: 'View', kind: 'view' },
+        action: held ? { label: 'Apply', kind: 'apply-sync' } : divergence ? { label: 'Acknowledge', kind: 'ack-divergence' } : { label: 'View', kind: 'view' },
         secondaryAction: held ? { label: 'Discard', kind: 'discard-sync' } : undefined,
       });
     }

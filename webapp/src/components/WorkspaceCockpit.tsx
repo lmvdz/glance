@@ -673,6 +673,23 @@ export const WorkspaceCockpit: React.FC = () => {
           })
           .catch((e) => showToast(e instanceof Error ? e.message : 'Discard failed', 'error'));
         break;
+      // Boundary sync, N2-UI: dismiss a "divergence" row. Nothing is pending here (the write
+      // already happened) — this ONLY clears the notice server-side and can never touch a held
+      // backlog (see acknowledgeBoundarySyncDivergence, which narrows the clear to the
+      // "divergence" kind exclusively). Safe to fire from the row with no confirm step: the
+      // operator has already read the row's detail (paths + retained capture path) before
+      // clicking, and there is no data-loss risk in dismissing a notice about a write that's done.
+      case 'ack-divergence':
+        void apiJson<{ ok: boolean; reason?: string }>(
+          `/api/agents/${encodeURIComponent(row.agent.id)}/ack-boundary-sync-divergence`,
+          jsonInit('POST', {}),
+        )
+          .then((r) => {
+            if (r.ok) showToast('Divergence notice acknowledged', 'success');
+            else showToast(`Could not acknowledge: ${r.reason ?? 'unknown'}`, 'error');
+          })
+          .catch((e) => showToast(e instanceof Error ? e.message : 'Acknowledge failed', 'error'));
+        break;
       // answer · steer · view · land: hand off to the detail pane (banner+Composer, or the
       // right rail for land) rather than acting from the row.
       default:

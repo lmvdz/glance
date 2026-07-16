@@ -555,6 +555,69 @@ describe('attentionItems', () => {
     expect(items[0].title).toBe("sync couldn't run: this turn's changes couldn't be captured");
   });
 
+  // ── N2-UI (re-review, THE ship-blocker) ──────────────────────────────────────────────────────
+  // A DIVERGENCE row is its own kind: the write already happened, nothing is pending, so it must
+  // never carry Apply/Discard — Discard on a session that ALSO has a real held backlog would drop
+  // those real patches while the operator reads the button as "dismiss this notice."
+  test('a DIVERGENCE boundary-sync event gets a critical severity and Acknowledge, never Apply/Discard', () => {
+    const createdAt = Date.now();
+    const a = agent('a', 'idle', {
+      lastActivity: Date.now(),
+      attentionEvents: [
+        {
+          id: 'e1',
+          summary: 'sync divergence detected: 1 path may have been clobbered',
+          detail:
+            'A concurrent edit to notes.txt in /home/op/repo may have interleaved with this turn\'s write. Nothing was rolled back automatically. ' +
+            'The pre-write copy is retained at /state/boundary-sync/divergence-abc — compare it against your current file(s) by hand before deciding whether to restore from it.',
+          source: 'boundary-sync',
+          sync: 'divergence',
+          createdAt,
+        },
+      ],
+    });
+    const items = attentionItems({ agents: [a] });
+    expect(items).toHaveLength(1);
+    expect(items[0].severity).toBe('critical');
+    expect(items[0].action).toEqual({ label: 'Acknowledge', kind: 'ack-divergence' });
+    expect(items[0].secondaryAction).toBeUndefined();
+    expect(items[0].title).toBe('sync divergence detected: 1 path may have been clobbered');
+    expect(items[0].detail).toContain('pre-write copy is retained at /state/boundary-sync/divergence-abc');
+  });
+
+  test('a DIVERGENCE row and a HELD row on the SAME agent stay independent — resolving one never carries the other\'s action', () => {
+    const a = agent('a', 'idle', {
+      lastActivity: Date.now(),
+      attentionEvents: [
+        {
+          id: 'e1',
+          summary: 'sync divergence detected: 1 path may have been clobbered',
+          detail: 'pre-write copy retained at /state/boundary-sync/divergence-abc',
+          source: 'boundary-sync',
+          sync: 'divergence',
+          createdAt: Date.now(),
+        },
+        {
+          id: 'e2',
+          summary: 'sync held: your checkout changed during this turn',
+          detail: "1 turn's changes are held for /home/op/repo — nothing touched your checkout.",
+          source: 'boundary-sync',
+          sync: 'held',
+          createdAt: Date.now(),
+        },
+      ],
+    });
+    const items = attentionItems({ agents: [a] });
+    expect(items).toHaveLength(2);
+    const divergenceRow = items.find((i) => i.id === 'attention:a:e1')!;
+    const heldRow = items.find((i) => i.id === 'attention:a:e2')!;
+    expect(divergenceRow.action).toEqual({ label: 'Acknowledge', kind: 'ack-divergence' });
+    expect(divergenceRow.secondaryAction).toBeUndefined();
+    expect(divergenceRow.severity).toBe('critical');
+    expect(heldRow.action).toEqual({ label: 'Apply', kind: 'apply-sync' });
+    expect(heldRow.secondaryAction).toEqual({ label: 'Discard', kind: 'discard-sync' });
+  });
+
   test('a blocked agent with a report only emits the blocked item (priority order, not a double row)', () => {
     const items = attentionItems({
       agents: [agent('a', 'input', { reports: [{ id: 'r1', summary: 'unsure', createdAt: Date.now() }] })],
