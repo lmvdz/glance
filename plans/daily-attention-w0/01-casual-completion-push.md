@@ -84,3 +84,25 @@ device session; the payload path is byte-identical to the voice push that alread
 - 02-transition-subscription should now refactor the POST-rename `maybePushAlert` /
   `maybePushAlertOrg` bodies (`completionPayload`, `clearCompletionPushArmed`) — the 30s check in
   00-overview.md passes.
+
+## Duration gate (UX follow-up, 2026-07-16)
+
+The first cut armed and fired on EVERY turn — a casual chat's every idle edge pushed, so a
+push-subscribed phone would buzz per turn, even on a 5-second reply watched live. 00-overview.md
+promises a page "when a long turn finishes"; category pushes default ON, so ungated that reads as
+spam day one (and users disable it, defeating the epic). Fixed:
+- **`completionArmedAt`** (epoch-ms) rides beside the latch — stamped at each arm, refreshed on
+  every arming prompt so it measures THIS turn (a stale prior-turn stamp would inflate elapsed and
+  let a short turn buzz), carried through restore/adopt unchanged, cleared on interrupt/promote/
+  disarm, and exposed on the DTO under the same terminal-only rule as `completionPushArmed`.
+- **`completionPayload`'s gate:** a CATEGORY push only fires once `now - completionArmedAt >=`
+  `OMP_SQUAD_PUSH_MIN_TURN_MS` (default 20000; `0` disables). A VOICE push is exempt — an
+  away-from-screen call owes its ping however short. Fails OPEN when the arm time is unknown (a
+  latch that predates the field, riding a restart) — never swallow a genuinely-owed push over
+  missing timing data. A gated non-push leaves the latch armed (the push is deferred, not lost):
+  the next turn that runs long enough delivers it.
+- `OMP_SQUAD_PUSH_MIN_TURN_MS` is a raw millisecond count, NOT a feature flag (it has a numeric
+  value, not on/off), so it lives in `completion-push.ts`'s `completionMinTurnMs` reader (0 honored,
+  not eaten by `|| default`) + `.env.example`, not `runtime-settings.ts`. Debounce, send-ordering,
+  the escalation lane, and the category/arm logic are untouched. Covered by dedicated pure-gate
+  tests in push.test.ts and a server-layer short-vs-long test in push-server.test.ts.

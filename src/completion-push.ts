@@ -73,3 +73,29 @@ export function armCompletionPushKind(
 ): CompletionPushKind | undefined {
 	return shouldArmCompletionPush(sessionCategory(opts), source, completionPushEnabled("casual", env), completionPushEnabled("fleet", env));
 }
+
+/** Default duration floor (ms) below which a CATEGORY completion push is suppressed — a turn shorter
+ *  than this was almost certainly watched live, so a buzz would be noise, not a reason to switch. */
+export const DEFAULT_PUSH_MIN_TURN_MS = 20_000;
+
+/** How long a turn must run before a category completion push is worth firing. Env-tunable via
+ *  `OMP_SQUAD_PUSH_MIN_TURN_MS` (a raw millisecond count, NOT a feature flag — it has a numeric
+ *  value, not on/off). `0` disables the gate entirely (fire on every completion, the pre-gate
+ *  behavior). A missing, empty, negative, or non-numeric value falls back to the default —
+ *  explicitly, so a legitimate `0` is honored rather than eaten by a `Number(x) || default` idiom. */
+export function completionMinTurnMs(env: NodeJS.ProcessEnv = process.env): number {
+	const raw = env.OMP_SQUAD_PUSH_MIN_TURN_MS;
+	if (raw === undefined || raw.trim() === "") return DEFAULT_PUSH_MIN_TURN_MS;
+	const n = Number(raw);
+	return Number.isFinite(n) && n >= 0 ? n : DEFAULT_PUSH_MIN_TURN_MS;
+}
+
+/** Pure duration gate: may a category-armed completion push fire given when it armed and how long
+ *  turns must run? Voice arms never reach here — they are exempt at the call site. Fail-OPEN when the
+ *  arm timestamp is unknown (a latch armed before this field shipped, riding a restart): we would
+ *  rather deliver one un-timeable push than silently swallow the one push a dispatch owed. A
+ *  `minTurnMs` of 0 also fires unconditionally (gate disabled). */
+export function completionTurnLongEnough(armedAt: number | undefined, now: number, minTurnMs: number): boolean {
+	if (minTurnMs <= 0 || armedAt === undefined) return true;
+	return now - armedAt >= minTurnMs;
+}

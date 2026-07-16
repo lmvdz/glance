@@ -13,6 +13,7 @@
 
 import { createCipheriv, createHmac, randomBytes } from "node:crypto";
 import * as path from "node:path";
+import { completionMinTurnMs, completionTurnLongEnough } from "./completion-push.ts";
 import { getStorageBackend } from "./dal/storage.ts";
 import type { AgentDTO, AgentStatus } from "./types.ts";
 
@@ -52,10 +53,25 @@ export function escalationPayload(prev: AgentStatus | undefined, a: AgentDTO, se
  *  channel, a category arm gets the generic pick-it-up line.
  *  `tag`/debounce key use the `done:` namespace (never bare `a.id`, unlike `escalationPayload` above)
  *  so a "finished" toast can never REPLACE (sw.js renotify) or debounce-eat an unactioned "needs you"
- *  escalation for the same agent. */
-export function completionPayload(prev: AgentStatus | undefined, a: AgentDTO, seeded: boolean): PushPayload | null {
+ *  escalation for the same agent.
+ *  Duration gate (daily-attention-w0 01 UX): a CATEGORY arm only fires when the turn actually ran at
+ *  least `OMP_SQUAD_PUSH_MIN_TURN_MS` (default 20s) — a casual chat's 5-second reply, watched live, is
+ *  not a reason-to-switch buzz, and category pushes default ON, so ungated they would buzz per turn.
+ *  A VOICE arm is exempt: an away-from-screen call owes its "finished" ping no matter how short.
+ *  `opts` (now/minTurnMs) is injectable for tests; production reads the wall clock + env. */
+export function completionPayload(
+	prev: AgentStatus | undefined,
+	a: AgentDTO,
+	seeded: boolean,
+	opts?: { now?: number; minTurnMs?: number },
+): PushPayload | null {
 	if (!seeded || prev === undefined || prev === a.status) return null;
 	if (a.status !== "idle" || a.completionPushArmed !== true) return null;
+	if (a.completionPushKind !== "voice") {
+		const minTurnMs = opts?.minTurnMs ?? completionMinTurnMs();
+		const now = opts?.now ?? Date.now();
+		if (!completionTurnLongEnough(a.completionArmedAt, now, minTurnMs)) return null;
+	}
 	const body = a.completionPushKind === "voice"
 		? "Tap to open glance — call back for the spoken debrief."
 		: "Ready when you are — tap to pick up where you left off.";

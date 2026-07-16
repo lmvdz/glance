@@ -923,6 +923,11 @@ export interface AgentDTO {
 	 *  rule) — push.ts's `completionPayload` branches its copy on it (voice keeps the spoken-debrief
 	 *  callback line; a category arm gets the generic body). */
 	completionPushKind?: "voice" | "category";
+	/** Epoch-ms the latch was (re)armed, exposed only alongside `completionPushArmed: true` (same
+	 *  terminal-event rule). `completionPayload`'s duration gate reads it to suppress a category push
+	 *  whose turn ran under `OMP_SQUAD_PUSH_MIN_TURN_MS` — a live-watched short reply is not a
+	 *  reason-to-switch buzz. Voice arms are exempt (definitionally away-from-screen). */
+	completionArmedAt?: number;
 }
 
 /**
@@ -1095,6 +1100,10 @@ export interface PersistedAgent {
 	/** Why the latch is armed ("voice" | "category") — persisted with it so the push copy can branch
 	 *  after a restart. Absent whenever the latch is unarmed. */
 	completionPushKind?: "voice" | "category";
+	/** Epoch-ms this latch was last (re)armed — one per turn, refreshed on every arming prompt.
+	 *  Persisted so the completion-push duration gate (see AgentDTO.completionArmedAt) still measures
+	 *  the turn correctly across a daemon restart mid-dispatch. Absent whenever the latch is unarmed. */
+	completionArmedAt?: number;
 }
 
 /** Persisted feature envelope — additive `features[]` in `<stateDir>/state.json`. */
@@ -1230,6 +1239,9 @@ export interface CreateAgentOptions {
 	/** Rides with `completionPushArmed` through the same restore paths (defaults to "voice" when the
 	 *  carried record predates the kind field). */
 	completionPushKind?: "voice" | "category";
+	/** Rides with `completionPushArmed` through the same restore paths — carried forward (not reset to
+	 *  now) so a turn that spanned a restart still measures from its original arm for the duration gate. */
+	completionArmedAt?: number;
 }
 
 /** Sandboxed execution: run the agent's omp inside a container. */

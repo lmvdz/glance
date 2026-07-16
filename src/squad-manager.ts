@@ -1636,6 +1636,7 @@ export class SquadManager extends EventEmitter {
 				// under its freshly-minted post-adopt id (see createWithId's own comment on this field).
 				completionPushArmed: p.completionPushArmed,
 				completionPushKind: p.completionPushKind,
+				completionArmedAt: p.completionArmedAt,
 				sandbox: p.sandbox,
 				autoRoute: false,
 				bypassCap: true,
@@ -4211,7 +4212,7 @@ export class SquadManager extends EventEmitter {
 
 		// 1. State promotion — assign synchronously, persist once, FAILURE-ATOMIC: on a throwing persist
 		//    roll the record back and surface the error (emit/audit/steer only AFTER durability).
-		const prior = { append: o.appendSystemPrompt, mode: rec.dto.autonomyMode, oMode: o.autonomyMode, pushArmed: o.completionPushArmed, pushKind: o.completionPushKind };
+		const prior = { append: o.appendSystemPrompt, mode: rec.dto.autonomyMode, oMode: o.autonomyMode, pushArmed: o.completionPushArmed, pushKind: o.completionPushKind, pushArmedAt: o.completionArmedAt };
 		o.appendSystemPrompt = stripConsolePrompt(o.appendSystemPrompt); // strip ONLY the console rule
 		o.promoted = true;
 		// The session's category flips casual→fleet at this exact boundary (daily-attention-w0 01): an
@@ -4221,8 +4222,10 @@ export class SquadManager extends EventEmitter {
 		if (o.completionPushKind === "category") {
 			o.completionPushArmed = false;
 			o.completionPushKind = undefined;
+			o.completionArmedAt = undefined;
 			rec.dto.completionPushArmed = false;
 			rec.dto.completionPushKind = undefined;
+			rec.dto.completionArmedAt = undefined;
 		}
 		if (opts.mode && opts.mode !== rec.dto.autonomyMode) {
 			rec.dto.autonomyMode = opts.mode;
@@ -4236,6 +4239,7 @@ export class SquadManager extends EventEmitter {
 			o.promoted = undefined;
 			o.completionPushArmed = prior.pushArmed;
 			o.completionPushKind = prior.pushKind;
+			o.completionArmedAt = prior.pushArmedAt;
 			rec.dto.autonomyMode = prior.mode;
 			o.autonomyMode = prior.oMode;
 			this.syncAuthority(rec.dto);
@@ -4890,6 +4894,10 @@ export class SquadManager extends EventEmitter {
 			// is done). Persisted so the latch survives a daemon restart mid-dispatch.
 			completionPushArmed: completionPushKind !== undefined ? true : undefined,
 			completionPushKind,
+			// Turn-clock for the completion-push duration gate (push.ts). Carry a restore-adopted latch's
+			// ORIGINAL arm time forward (never reset to now) so a turn that spanned the restart still
+			// measures its true length; a genuinely fresh arm stamps now.
+			completionArmedAt: completionPushKind !== undefined ? (opts.completionArmedAt ?? Date.now()) : undefined,
 		};
 
 		// Delivery confirmation (concern 02 / DESIGN.md "Membrane measurement"): a requested efficiency
@@ -5615,13 +5623,16 @@ export class SquadManager extends EventEmitter {
 				// here (persisted, restart-safe), disarmed by the push actually sending or by ANY
 				// interrupt (see the "interrupt" case below and push.ts's `completionPayload`). On a
 				// re-arm the LATEST prompt's kind wins — the eventual completion answers the newest
-				// instruction, so its copy should match how that instruction arrived; an identical re-arm
-				// (same kind, still armed) skips the redundant persist.
+				// instruction, so its copy should match how that instruction arrived. `completionArmedAt`
+				// is refreshed on EVERY arming prompt (even an identical-kind re-arm): the duration gate
+				// in push.ts measures THIS turn, so a stale prior-turn stamp must never carry over — an
+				// old stamp would inflate the elapsed and let a short live-watched turn buzz.
 				{
 					const armKind = armCompletionPushKind(rec.options, commandSource(cmd));
-					if (armKind !== undefined && (rec.options.completionPushArmed !== true || rec.options.completionPushKind !== armKind)) {
+					if (armKind !== undefined) {
 						rec.options.completionPushArmed = true;
 						rec.options.completionPushKind = armKind;
+						rec.options.completionArmedAt = Date.now();
 						void this.persist();
 					}
 				}
@@ -5679,8 +5690,10 @@ export class SquadManager extends EventEmitter {
 				if (rec.options.completionPushArmed === true) {
 					rec.options.completionPushArmed = false;
 					rec.options.completionPushKind = undefined;
+					rec.options.completionArmedAt = undefined;
 					rec.dto.completionPushArmed = false;
 					rec.dto.completionPushKind = undefined;
+					rec.dto.completionArmedAt = undefined;
 					void this.persist();
 				}
 				void this.recordAudit(actor, "interrupt", cmd.id, "ok", undefined, commandSource(cmd));
@@ -6408,6 +6421,7 @@ export class SquadManager extends EventEmitter {
 					const exposed = isTerminal && rec.options.completionPushArmed === true;
 					rec.dto.completionPushArmed = exposed;
 					rec.dto.completionPushKind = exposed ? rec.options.completionPushKind : undefined;
+					rec.dto.completionArmedAt = exposed ? rec.options.completionArmedAt : undefined;
 				}
 				break;
 			}
@@ -8669,8 +8683,10 @@ export class SquadManager extends EventEmitter {
 		if (!rec || rec.options.completionPushArmed !== true) return;
 		rec.options.completionPushArmed = false;
 		rec.options.completionPushKind = undefined;
+		rec.options.completionArmedAt = undefined;
 		rec.dto.completionPushArmed = false;
 		rec.dto.completionPushKind = undefined;
+		rec.dto.completionArmedAt = undefined;
 		void this.persist();
 	}
 
@@ -8920,6 +8936,7 @@ export class SquadManager extends EventEmitter {
 				// an armed agent restored via --restore still owes its one completion push.
 				completionPushArmed: p.completionPushArmed,
 				completionPushKind: p.completionPushKind,
+				completionArmedAt: p.completionArmedAt,
 				sandbox: p.sandbox,
 				autoRoute: false,
 				bypassCap: true, // restore re-creates already-counted agents — never gated by the live cap
