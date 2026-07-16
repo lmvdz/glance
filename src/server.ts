@@ -558,19 +558,23 @@ export class SquadServer {
 	private readonly claimed = new Map<string, string>();
 	/** Agent ids present when the server booted = survivors the daemon reattached to (vs spawned later). */
 	private readonly startupAgentIds = new Set<string>();
-	/** agentId → last status seen, so a push fires only on the transition into a blocking state. */
-	private readonly lastStatus = new Map<string, AgentStatus>();
 	/** agentId → last push epoch ms, throttling repeat alerts. */
 	private readonly lastPush = new Map<string, number>();
-	/** seeded after the first roster so a reconnect replay never alerts in bulk. */
+	/** "Has this process finished its boot-time hydration?" — set once at start() (and by any roster
+	 *  event) and never derived from per-agent state. This is the SOLE boot guard on the push lane
+	 *  (daily-attention-w0 concern 02): the retired private `lastStatus` diff map used to suppress a
+	 *  boot-time push flood only accidentally (start() seeded it from the post-reattach roster, so the
+	 *  first event per agent always read prev === status). The canonical `{type:"transition"}` events
+	 *  we read now carry the REAL pre-reattach `from`, so that suppression must be deliberate: any
+	 *  transition arriving before this flag flips is boot replay, never a live alert. */
 	private pushSeeded = false;
 	/** DB-registry mode: per-org push services (lazy; `<pushRoot>/orgs/<orgId>`) and per-org alert
-	 *  tracking — the org-scoped twins of `push`/`lastStatus`/`lastPush`/`pushSeeded` above. Kept
+	 *  tracking — the org-scoped twins of `push`/`lastPush`/`pushSeeded` above. Kept
 	 *  strictly separate so a tenant's completion/escalation alerts ride ONLY that tenant's own
 	 *  subscription store (the global `push-subs.json` is file-mode-only; wiring it into the per-org
 	 *  fan-out would be a cross-org broadcast — voice-loop DESIGN.md's named prerequisite, done here). */
 	private readonly orgPush = new Map<string, Promise<PushService>>();
-	private readonly orgAlertState = new Map<string, { lastStatus: Map<string, AgentStatus>; lastPush: Map<string, number>; seeded: boolean }>();
+	private readonly orgAlertState = new Map<string, { lastPush: Map<string, number>; seeded: boolean }>();
 	/** Fingerprint of the served UI at boot; sent on every roster so stale tabs self-refresh after an upgrade. */
 	private uiVersion = "";
 	/** This host's operator identity (labels the local roster in the federation view). */
@@ -1042,12 +1046,17 @@ export class SquadServer {
 			// maybePushAlert through broadcast() — and the ONLY caller that ever sends the `snapshot`
 			// command that produces one is the legacy (non-webapp) client. The React webapp never sends
 			// `snapshot`, so on a fresh boot the whole push lane sat dead — no escalation, no completion
-			// push — until a legacy client happened to connect. Seed directly from the manager's live
-			// roster here, at start(), file-mode only (`singleManager` is unset in DB-registry mode, where
-			// push never fires anyway — see broadcastTo's doc comment). The roster-event seeding inside
-			// maybePushAlert stays in place too: seeding twice with the same statuses is a harmless no-op,
-			// and it remains the live reseed path across a manager swap that doesn't restart the server.
-			for (const a of this.singleManager.list()) this.lastStatus.set(a.id, a.status);
+			// push — until a legacy client happened to connect. Flip the flag here, at start(), file-mode
+			// only (`singleManager` is unset in DB-registry mode, where push never fires anyway — see
+			// broadcastTo's doc comment). The roster-event seeding inside maybePushAlert stays in place
+			// too: a repeat flip is a harmless no-op.
+			// Boot-flood safety (daily-attention-w0 concern 02): the manager's reattach transitions all
+			// fired inside `manager.start()` — awaited to completion before this server was even
+			// constructed (reconnectLive awaits every attachExisting) — so none of them reach
+			// maybePushAlert through the subscription made below. `pushSeeded` is the DELIBERATE second
+			// layer: any transition event that somehow arrives before this line (alternative wiring,
+			// tests) is boot replay and is dropped, preserving the quiet boot the old post-reattach
+			// `lastStatus` seed used to provide only by accident.
 			this.pushSeeded = true;
 		}
 		this.uiVersion = computeUiVersion(readFileSync(webappEnabled() ? WEBAPP_INDEX : INDEX_HTML, "utf8"));
@@ -2807,21 +2816,33 @@ export class SquadServer {
 		}
 	}
 
-	/** Fire a background push when an agent transitions into a state that needs a human. Mirrors the
-	 *  client's seed-then-notify guard so a reconnect/roster replay never alerts in bulk. */
+	/** Fire a background push when an agent transitions into a state that needs a human. Reads
+	 *  `from`/`to` straight off the canonical `{type:"transition"}` SquadEvent (transitions.jsonl's
+	 *  own guarded write path, squad-manager.ts's transition()/recordTransition()) instead of the
+	 *  retired private `lastStatus` diff over `{type:"agent"}` events — one source of truth for "what
+	 *  changed", zero drift (daily-attention-w0 concern 02). The DTO fields the payload builders need
+	 *  (name, pending, error, completionPushArmed…) come from the live manager record: transition
+	 *  events are emitted synchronously from inside recordTransition(), strictly AFTER `rec.dto` was
+	 *  brought fully up to date (status, error, pending, latch exposure all land before the
+	 *  transition() call at every emit site), so getAgent() here is exactly as consistent as the
+	 *  later `agent` event's own snapshot used to be.
+	 *  Boot guard: gated on `pushSeeded` ALONE (see the field comment) — a transition event carries
+	 *  the real pre-reattach `from`, so a boot-time reattach replay (`reason:"reattach"`, from !== to
+	 *  when derive() reclassified a crashed turn) would otherwise page the operator on every daemon
+	 *  restart. Denied entries never changed dto.status and are skipped outright. */
 	private maybePushAlert(e: SquadEvent): void {
 		const push = this.opts.push;
 		if (!push) return;
 		if (e.type === "roster") {
-			for (const a of e.agents) this.lastStatus.set(a.id, a.status);
 			this.pushSeeded = true;
 			return;
 		}
-		if (e.type !== "agent") return;
-		const a = e.agent;
-		const prev = this.lastStatus.get(a.id);
-		this.lastStatus.set(a.id, a.status);
-		const payload = escalationPayload(prev, a, this.pushSeeded);
+		if (e.type !== "transition" || e.entry.denied) return;
+		if (!this.pushSeeded) return; // boot replay, never a live alert — the preserved quiet boot
+		const entry = e.entry;
+		const a = this.singleManager?.getAgent(entry.agentId);
+		if (!a) return; // removed between emit and here (or no manager) — nothing to describe, fail closed
+		const payload = escalationPayload(entry.from, a, this.pushSeeded);
 		if (payload) {
 			const now = Date.now();
 			if (now - (this.lastPush.get(a.id) ?? 0) >= 3000) {
@@ -2829,7 +2850,7 @@ export class SquadServer {
 				void push.notify(payload);
 			}
 		}
-		this.maybePushCompletionDone(prev, a, push);
+		this.maybePushCompletionDone(entry.from, a, push);
 	}
 
 	/** Completion push (plans/voice-loop concern 01, generalized by daily-attention-w0 concern 01): a
@@ -2860,35 +2881,37 @@ export class SquadServer {
 	}
 
 	/** DB-registry twin of `maybePushAlert`: same payload rules (escalation + voice-done), same
-	 *  debounce discipline, but keyed entirely to ONE org's own alert state, manager, and push
-	 *  service. Seeding is lazy (first event for the org snapshots that org manager's roster) —
-	 *  identical suppression semantics to the file-mode seed: the transition that materializes the
-	 *  state never alerts, everything after does. */
+	 *  debounce discipline, same canonical `{type:"transition"}` event source, but keyed entirely to
+	 *  ONE org's own alert state, manager, and push service. Seeding stays lazy — the first event for
+	 *  the org (any type) marks that org's boot hydration and is consumed as the boundary, alerting
+	 *  never: that is the same "the event that materializes the state never alerts" invariant the
+	 *  retired per-org `lastStatus` snapshot used to provide by construction (the old seed read the
+	 *  post-change roster, so the seeding event's own diff always read prev === status). A transition
+	 *  event carries the real pre-change `from`, so the boundary consumption here is deliberate, not
+	 *  incidental (daily-attention-w0 concern 02, the same boot-flood trap as the file-mode lane). */
 	private maybePushAlertOrg(orgId: string, e: SquadEvent): void {
 		if (!this.registry || !this.opts.pushRoot) return;
 		let state = this.orgAlertState.get(orgId);
 		if (!state) {
-			state = { lastStatus: new Map(), lastPush: new Map(), seeded: false };
+			state = { lastPush: new Map(), seeded: false };
 			this.orgAlertState.set(orgId, state);
 		}
-		if (!state.seeded) {
-			const mgr = this.orgManager(orgId);
-			if (mgr) {
-				for (const a of mgr.list()) state.lastStatus.set(a.id, a.status);
-				state.seeded = true;
-			}
-		}
 		if (e.type === "roster") {
-			for (const a of e.agents) state.lastStatus.set(a.id, a.status);
 			state.seeded = true;
 			return;
 		}
-		if (e.type !== "agent") return;
-		const a = e.agent;
-		const prev = state.lastStatus.get(a.id);
-		state.lastStatus.set(a.id, a.status);
-		const escalation = escalationPayload(prev, a, state.seeded);
-		const done = completionPayload(prev, a, state.seeded);
+		if (!state.seeded) {
+			// Lazy seed boundary: hydration is done once the org's manager is reachable. The event that
+			// flips the flag is itself boot replay — swallow it (see the doc comment above).
+			if (this.orgManager(orgId)) state.seeded = true;
+			return;
+		}
+		if (e.type !== "transition" || e.entry.denied) return;
+		const entry = e.entry;
+		const a = this.orgManager(orgId)?.getAgent(entry.agentId);
+		if (!a) return; // removed between emit and here — fail closed, same as the file-mode lane
+		const escalation = escalationPayload(entry.from, a, state.seeded);
+		const done = completionPayload(entry.from, a, state.seeded);
 		if (!escalation && !done) return;
 		const now = Date.now();
 		if (escalation && now - (state.lastPush.get(a.id) ?? 0) >= 3000) {
