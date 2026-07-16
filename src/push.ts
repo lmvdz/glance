@@ -37,7 +37,11 @@ export function escalationPayload(prev: AgentStatus | undefined, a: AgentDTO, se
 	if (a.status !== "input" && a.status !== "error") return null;
 	const title = a.status === "input" ? `⛔ ${a.name} needs you` : `⚠ ${a.name} errored`;
 	const body = a.status === "input" ? a.pending[0]?.title ?? "waiting for input" : a.error ?? "agent error";
-	return { title, body, url: `/#/agent/${a.id}`, tag: a.id };
+	// `?push=1` marks an open that ARRIVED via a notification tap — the only thing distinguishing it
+	// from a typed/clicked URL, since both land on the same hash. The webapp beacons it once to
+	// POST /api/push-tap and strips the marker (push-taps/day adoption counter,
+	// plans/daily-dogfood-engine/02).
+	return { title, body, url: `/#/agent/${a.id}?push=1`, tag: a.id };
 }
 
 /** Pure: does this status transition warrant a voice-loop COMPLETION push, and with what payload?
@@ -53,7 +57,8 @@ export function escalationPayload(prev: AgentStatus | undefined, a: AgentDTO, se
 export function voiceDonePayload(prev: AgentStatus | undefined, a: AgentDTO, seeded: boolean): PushPayload | null {
 	if (!seeded || prev === undefined || prev === a.status) return null;
 	if (a.status !== "idle" || a.voicePushArmed !== true) return null;
-	return { title: `✅ ${a.name} finished`, body: "Tap to open glance — call back for the spoken debrief.", url: `/#/agent/${a.id}`, tag: `done:${a.id}` };
+	// Same `?push=1` tap marker as escalationPayload above — see the comment there.
+	return { title: `✅ ${a.name} finished`, body: "Tap to open glance — call back for the spoken debrief.", url: `/#/agent/${a.id}?push=1`, tag: `done:${a.id}` };
 }
 
 /** Injectable transport (default = real fetch) so tests assert dispatch without a push service. */

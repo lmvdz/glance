@@ -158,6 +158,7 @@ import { shadowCostCheck } from "./cost-gate.ts";
 import { buildScoreboard, type Scoreboard } from "./attribution-scoreboard.ts";
 import { recordConfidenceOutcome, setThresholdTunerRoot, tunedConfidenceFloor } from "./threshold-tuner.ts";
 import { JsonlLog } from "./jsonl-log.ts";
+import { type AdoptionCounters, computeAdoptionCounters, PUSH_TAPS_FILE, type PushTapEntry } from "./adoption-counters.ts";
 import { buildFactoryStatus, FACTORY_FRESHNESS_FLOOR_MS, FACTORY_LOOPS, type FactoryStatus } from "./factory-status.ts";
 import { addPlanRevisionCandidate, appendCommentEvent, type ArtifactComment, type CommentQuery, type PlanAnnotationTarget, listComments as readComments, listPlanRevisionCandidates as readPlanRevisionCandidates, nextCommentId, transitionPlanRevisionCandidate } from "./comments.ts";
 import { castPlanVote as appendPlanVoteCast, closePlanVoteRound as appendPlanVoteClose, currentPlanVoteRound as readCurrentPlanVoteRound, listPlanVoteRounds as readPlanVoteRounds, type OpenPlanVoteInput, openPlanVoteRound, recordPlanVoteCommit, tallyPlanVoteRound } from "./plan-votes.ts";
@@ -910,6 +911,10 @@ export class SquadManager extends EventEmitter {
 	 *  file best-effort. recordTransition/recordDenied append here; transitionHistory() reads it for
 	 *  GET /api/agents/:id/transitions. Constructed in the constructor (needs stateDir). */
 	private readonly transitionLog: JsonlLog<TransitionEntry>;
+	/** Push-tap beacons (stateDir/push-taps.jsonl) — one line per push-notification tap the webapp
+	 *  reports (POST /api/push-tap). Adoption-counter substrate (plans/daily-dogfood-engine/02);
+	 *  append-only observability, never gates behavior. Same JsonlLog infra as transitionLog. */
+	private readonly pushTapLog: JsonlLog<PushTapEntry>;
 	private readonly traceExporter?: TraceExportQueue;
 	/** Reward disbursement provider (Tremendous / Manual). Injectable for tests; default from env. */
 	private readonly paymentProvider: PaymentProvider;
@@ -940,6 +945,7 @@ export class SquadManager extends EventEmitter {
 		this.automation = new AutomationLog(this.stateDir, { onEvent: (event) => this.emit("event", { type: "automation", event } satisfies SquadEvent) });
 		this.learningMetrics = new LearningMetrics(this.stateDir, { log: (m) => this.log("warn", `learning-metrics: ${m}`) });
 		this.transitionLog = new JsonlLog<TransitionEntry>({ path: path.join(this.stateDir, "transitions.jsonl"), log: (m) => this.log("warn", `transitions.jsonl: ${m}`) });
+		this.pushTapLog = new JsonlLog<PushTapEntry>({ path: path.join(this.stateDir, PUSH_TAPS_FILE), log: (m) => this.log("warn", `${PUSH_TAPS_FILE}: ${m}`) });
 		this.bin = opts.bin;
 		this.autoLand = opts.autoLand ?? false;
 		this.worktreeBaseDir = opts.worktreeBase;
@@ -8316,6 +8322,21 @@ export class SquadManager extends EventEmitter {
 		const fromFile = await this.transitionLog.hydrateAll();
 		const merged = dedupeTransitions([...fromFile, ...this.transitionLog.recent()]);
 		return followLineage(id, merged);
+	}
+
+	/** Record one push-notification tap (POST /api/push-tap). Append-only observability for the
+	 *  adoption counters — never gates behavior, never throws (JsonlLog.append never does). The id
+	 *  is clamped: it comes from an any-authenticated beacon and is only ever counted, so an
+	 *  oversized value must not bloat the ledger. */
+	recordPushTap(agentId: string): void {
+		this.pushTapLog.append({ ts: Date.now(), agentId: agentId.slice(0, 200) });
+	}
+
+	/** Adoption counters (plans/daily-dogfood-engine/02) from this manager's own durable stateDir
+	 *  data, with the in-memory rings folded in so a just-recorded tap/transition is visible before
+	 *  its fire-and-forget spool lands (the GET /api/adoption read-your-write case). */
+	adoptionCounters(): Promise<AdoptionCounters> {
+		return computeAdoptionCounters(this.stateDir, { transitions: this.transitionLog.recent(), pushTaps: this.pushTapLog.recent() });
 	}
 
 	/** One tick so in-flight agent-host ring-replay frames (synchronous `.emit()` calls inside a
