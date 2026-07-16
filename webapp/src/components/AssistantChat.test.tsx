@@ -21,6 +21,7 @@ import { RunStatusHeader, TranscriptEntryView, TranscriptTimeline, runStatusLabe
 import { TodoPanel } from "./chat/TodoPanel";
 import { ScrollToLatestPill } from "./chat/ScrollToLatestPill";
 import type { AgentDTO, PendingRequest, TodoPhaseDTO, TranscriptEntry } from "../lib/dto";
+import { COMPOSER_DRAFTS_KEY } from "../lib/chat/draftStore";
 
 const originalWindow = (globalThis as any).window;
 
@@ -571,6 +572,45 @@ test("Composer's mic button is disabled with an honest tooltip when the browser 
   expect(micButton![0]).toMatch(/\sdisabled="/);
   expect(html).toContain("Voice input isn");
   expect(html).toContain("supported in this browser");
+});
+
+test("Composer seeds input/chips/history from the persisted per-thread draft, and a different thread's mount does NOT see it (daily-composer 01)", () => {
+  // renderToStaticMarkup runs the useState initializers (the loadDraft seed) but no effects, so
+  // this covers the restore-on-mount path; the in-place thread-switch effect and the
+  // beforeunload/visibilitychange flushes are covered live (concern 01 ## Verify).
+  const store = new Map<string, string>();
+  store.set(COMPOSER_DRAFTS_KEY, JSON.stringify([
+    {
+      version: 1,
+      sessionId: "thread-a",
+      input: "half a typed sentence",
+      promptHistory: ["sent earlier"],
+      chips: [{ id: "c1", label: "Pasted text · 0.1 KB", content: "a big paste" }],
+      images: [],
+      updatedAt: Date.now(),
+    },
+  ]));
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { localStorage: { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v); } } },
+  });
+  const htmlA = renderToStaticMarkup(<Composer {...composerBaseProps} sessionId="thread-a" />);
+  expect(htmlA).toContain("half a typed sentence");
+  expect(htmlA).toContain("Pasted text");
+  const htmlB = renderToStaticMarkup(<Composer {...composerBaseProps} sessionId="thread-b" />);
+  expect(htmlB).not.toContain("half a typed sentence");
+  expect(htmlB).not.toContain("Pasted text");
+});
+
+test("Composer with no sessionId (defensive mounts) renders empty and never touches the draft store", () => {
+  let reads = 0;
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { localStorage: { getItem: () => { reads += 1; return null; }, setItem: () => {} } },
+  });
+  const html = renderToStaticMarkup(<Composer {...composerBaseProps} />);
+  expect(html).toContain("<textarea");
+  expect(reads).toBe(0);
 });
 
 test("a running assistant entry with an unclosed table header holds it back until the separator arrives", () => {

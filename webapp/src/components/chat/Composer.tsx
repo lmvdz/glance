@@ -12,6 +12,7 @@ import {
   uploadChatAttachment,
 } from '../../lib/imageAttachment';
 import { isSpeechRecognitionSupported, startVoiceInput, type VoiceInputSession } from '../../lib/voice/speech';
+import { DRAFT_PERSIST_DEBOUNCE_MS, loadDraft, persistDraft, type DraftV1 } from '../../lib/chat/draftStore';
 import { VoiceCallButton } from './VoiceCallButton';
 import type { AgentDTO } from '../../lib/dto';
 import type { Task } from '../../types';
@@ -309,6 +310,7 @@ export const ComposerSendButton = ({
 export const Composer = ({
   tasks,
   suggestionChips,
+  sessionId,
   isLoading,
   isStopShown,
   stopPending,
@@ -326,6 +328,12 @@ export const Composer = ({
 }: {
   tasks: Task[];
   suggestionChips: SuggestionChip[];
+  /** The thread this composer is writing into (daily-composer concern 01). Drives BOTH per-thread
+   *  draft persistence (input/history/chips/images survive a tab kill via `draftStore`) and
+   *  per-thread in-memory scoping: when this prop changes, the composer flushes the outgoing
+   *  thread's draft and loads the incoming one's — the old unkeyed mount silently leaked the
+   *  draft across threads. Absent (defensive) = ephemeral composer, nothing persisted. */
+  sessionId?: string;
   isLoading: boolean;
   isStopShown: boolean;
   stopPending: boolean;
@@ -353,7 +361,13 @@ export const Composer = ({
    *  at all, so this is only ever absent defensively). */
   onStartVoiceCall?: () => void;
 }) => {
-  const [input, setInput] = useState('');
+  // Draft persistence (daily-composer concern 01): the four sacred pieces of composer state —
+  // input, prompt-recall history, paste-chips, image attachments — seed from this thread's
+  // persisted draft on mount and are written back below (debounced on change, flushed on
+  // beforeunload/hidden/unmount/send/thread-switch). `loadDraft` never throws: storage blocked or
+  // corrupt just means an empty composer, same as before persistence existed.
+  const [initialDraft] = useState<DraftV1 | null>(() => (sessionId ? loadDraft(sessionId) : null));
+  const [input, setInput] = useState(initialDraft?.input ?? '');
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -361,28 +375,147 @@ export const Composer = ({
     composerTextareaRef.current?.focus();
   }, [focusKey]);
 
-  // History recall (ArrowUp/ArrowDown) cycles this composer instance's own prior sends —
-  // scoped to this mount rather than reaching into the parent's session store, since Composer
-  // already owns every send that passes through `submit`. Not persisted across a full remount.
-  const [promptHistory, setPromptHistory] = useState<string[]>([]);
+  // History recall (ArrowUp/ArrowDown) cycles this thread's own prior sends — scoped per
+  // `sessionId` (persisted in the draft store), so recall history follows the thread across
+  // remounts and reloads instead of dying with the mount.
+  const [promptHistory, setPromptHistory] = useState<string[]>(initialDraft?.promptHistory ?? []);
   const [recallState, setRecallState] = useState<HistoryRecallState>(INITIAL_RECALL_STATE);
 
   // Paste-as-chip: a large paste is diverted into an attachment chip instead of flooding the
   // textarea; chip contents are folded back into the outgoing text on send (see `submit`).
-  const [chips, setChips] = useState<PasteChip[]>([]);
+  const [chips, setChips] = useState<PasteChip[]>(initialDraft?.chips ?? []);
   const [expandedChipId, setExpandedChipId] = useState<string | null>(null);
 
   // Images into the conversation (Feature 2 D2): paste/drop/capture attach a downscaled PNG here;
   // `annotatingId` opens the ImageAnnotator modal for that one attachment. `isSending` is separate
   // from the parent's `isLoading` (which reflects the AGENT's running state) — it covers the
   // window where `submit` is awaiting the per-image upload round trip, before `onSend` even fires.
-  const [images, setImages] = useState<ImageAttachment[]>([]);
+  const [images, setImages] = useState<ImageAttachment[]>(initialDraft?.images ?? []);
   const [annotatingId, setAnnotatingId] = useState<string | null>(null);
   const [isCapturing, setIsCapturing] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [attachError, setAttachError] = useState<string | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // ---------------------------------------------------------------------------
+  // Draft persistence wiring (daily-composer concern 01).
+  //
+  // `boundSessionIdRef` is the thread the CURRENT in-memory state belongs to — it lags the
+  // `sessionId` prop by exactly the one render where a thread switch is being processed, which is
+  // what lets the switch effect below flush thread A's draft under A's id before seeding thread
+  // B's state. `draftSnapshotRef` always mirrors the latest state (reassigned every render, plus
+  // synchronously at the two points where state and ref must not diverge even for a tick: the
+  // switch itself and clear-on-send), so flush paths never read a stale closure.
+  // ---------------------------------------------------------------------------
+  const boundSessionIdRef = useRef<string | undefined>(sessionId);
+  const draftSnapshotRef = useRef<{ sessionId: string | undefined; input: string; promptHistory: string[]; chips: PasteChip[]; images: ImageAttachment[] }>({
+    sessionId,
+    input,
+    promptHistory,
+    chips,
+    images,
+  });
+  draftSnapshotRef.current = { sessionId: boundSessionIdRef.current, input, promptHistory, chips, images };
+
+  // Reference-equality dirty check: state arrays/strings only change identity on a real change,
+  // so an unchanged draft costs zero writes on visibilitychange spam (tab-hide fires constantly;
+  // re-serializing multi-MB image data URLs each time would jank for nothing).
+  const lastFlushedDraftRef = useRef<typeof draftSnapshotRef.current | null>(null);
+  const flushDraftNow = () => {
+    const snapshot = draftSnapshotRef.current;
+    if (!snapshot.sessionId) return;
+    const last = lastFlushedDraftRef.current;
+    if (
+      last &&
+      last.sessionId === snapshot.sessionId &&
+      last.input === snapshot.input &&
+      last.promptHistory === snapshot.promptHistory &&
+      last.chips === snapshot.chips &&
+      last.images === snapshot.images
+    ) {
+      return;
+    }
+    lastFlushedDraftRef.current = snapshot;
+    persistDraft({
+      version: 1,
+      sessionId: snapshot.sessionId,
+      input: snapshot.input,
+      promptHistory: snapshot.promptHistory,
+      chips: snapshot.chips,
+      images: snapshot.images,
+      updatedAt: Date.now(),
+    });
+  };
+  const flushDraftRef = useRef(flushDraftNow);
+  flushDraftRef.current = flushDraftNow;
+
+  // Thread switch WITHOUT remount (the old unkeyed-mount leak): flush the outgoing thread's
+  // draft, then seed every draft-scoped piece of state from the incoming thread's persisted
+  // entry. Doing this in the component (rather than relying on the parent to `key` the mount)
+  // keeps focus/caret alive across switches and makes the no-leak guarantee self-contained.
+  useEffect(() => {
+    if (boundSessionIdRef.current === sessionId) return; // initial mount, or not a thread switch
+    flushDraftRef.current();
+    const next = sessionId ? loadDraft(sessionId) : null;
+    boundSessionIdRef.current = sessionId;
+    // One `seeded` object shared between the ref rebase, the clean-marker, and the setState calls —
+    // the dirty check above compares by identity, so the state and the "last flushed" record must
+    // hold the SAME array instances or the first tab-hide after a switch does a pointless rewrite.
+    const seeded = {
+      sessionId,
+      input: next?.input ?? '',
+      promptHistory: next?.promptHistory ?? [],
+      chips: next?.chips ?? [],
+      images: next?.images ?? [],
+    };
+    draftSnapshotRef.current = seeded;
+    // The freshly-loaded draft IS the store's copy — mark it clean so an immediate tab-hide
+    // doesn't rewrite it.
+    lastFlushedDraftRef.current = seeded;
+    setInput(seeded.input);
+    setPromptHistory(seeded.promptHistory);
+    setChips(seeded.chips);
+    setImages(seeded.images);
+    setRecallState(INITIAL_RECALL_STATE);
+    setExpandedChipId(null);
+    setAnnotatingId(null);
+    setAttachError(null);
+  }, [sessionId]);
+
+  // Debounced persist on every draft-relevant change (300ms, t3code's number). The effect
+  // cleanup IS the debounce: each change cancels the previous timer. Skipped on the very first
+  // run so merely mounting doesn't re-write an unchanged draft.
+  const draftPersistArmedRef = useRef(false);
+  useEffect(() => {
+    if (!draftPersistArmedRef.current) {
+      draftPersistArmedRef.current = true;
+      return;
+    }
+    if (!boundSessionIdRef.current) return;
+    const timer = setTimeout(() => flushDraftRef.current(), DRAFT_PERSIST_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [input, promptHistory, chips, images]);
+
+  // Unconditional flush on tab close/crash-adjacent signals and on unmount — this is what beats
+  // the debounce window when the tab is killed 100ms after the last keystroke. `beforeunload`
+  // covers close/refresh; `visibilitychange`→hidden covers backgrounding (and is the only signal
+  // some mobile browsers fire before killing a tab); the cleanup flush covers the panel
+  // unmounting with the draft still unsaved.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const flush = () => flushDraftRef.current();
+    const onVisibilityChange = () => {
+      if (document.hidden) flush();
+    };
+    window.addEventListener('beforeunload', flush);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      window.removeEventListener('beforeunload', flush);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      flush();
+    };
+  }, []);
 
   // Voice input (chained STT): browser Web Speech API transcribes into `input` — reviewed then
   // sent like any typed draft, never auto-sent. `speechSupported` gates the button itself rather
@@ -514,13 +647,24 @@ export const Composer = ({
       const uploaded = await Promise.all(images.map((img) => uploadChatAttachment(img.dataUrl)));
       const imageRefs = joinImagePromptRefs(uploaded.map((u) => u.path));
       const textToSend = [assembleSendText(typed, chips), imageRefs].filter(Boolean).join('\n\n');
+      const nextHistory = typed ? pushPromptHistory(promptHistory, typed) : promptHistory;
+      // The cleared arrays are shared between setState and the snapshot rebase below — the flush
+      // dirty check compares by identity, so they must be the same instances the next render sees.
+      const clearedChips: PasteChip[] = [];
+      const clearedImages: ImageAttachment[] = [];
       setInput('');
-      setChips([]);
+      setChips(clearedChips);
       setExpandedChipId(null);
-      setImages([]);
+      setImages(clearedImages);
       setAttachError(null);
-      if (typed) setPromptHistory((prev) => pushPromptHistory(prev, typed));
+      setPromptHistory(nextHistory);
       setRecallState(INITIAL_RECALL_STATE);
+      // Clear-on-send must also clear the PERSISTED draft — a stale draft reappearing after a
+      // successful send is data loss in reverse. Synchronous (not debounced), with the snapshot
+      // ref updated in the same tick so a beforeunload racing the re-render can't flush the
+      // pre-send draft back. History rides along: it's the one piece that grows on send.
+      draftSnapshotRef.current = { sessionId: boundSessionIdRef.current, input: '', promptHistory: nextHistory, chips: clearedChips, images: clearedImages };
+      flushDraftRef.current();
       onSend(textToSend);
     } catch {
       setAttachError('Could not attach one or more images — check your connection and try sending again.');

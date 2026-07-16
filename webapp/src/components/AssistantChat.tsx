@@ -20,6 +20,7 @@ import { apiJson, jsonInit } from '../lib/api';
 import { answerCommand, interruptCommand, interruptibleAgents } from '../lib/agent-control';
 import { buildPromptCommand, ensureConsoleAgent } from '../lib/chat/sendCore';
 import { spawnProposalFor, type SpawnedUnitRecord, type SpawnProposal } from '../lib/spawnProposal';
+import { deleteDraft } from '../lib/chat/draftStore';
 import {
   loadPersistedSessions,
   mergeSessions,
@@ -666,11 +667,26 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
     }
   };
 
+  // Deleting a thread deletes its composer draft too — otherwise a future thread reusing the id
+  // (the recreated 'default' session) would resurrect a dead thread's half-typed text. For the
+  // ACTIVE thread the delete must run AFTER the mounted Composer has processed the switch away
+  // (its flush-on-switch/unmount would otherwise re-persist the draft right after we deleted it);
+  // child passive effects run before this parent effect, so deferring to here is deterministic.
+  const pendingDraftDeleteRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!pendingDraftDeleteRef.current) return;
+    deleteDraft(pendingDraftDeleteRef.current);
+    pendingDraftDeleteRef.current = null;
+  }, [activeSessionId]);
+
   const deleteSession = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     setSessions(prev => prev.filter(s => s.id !== id));
     if (activeSessionId === id) {
+      pendingDraftDeleteRef.current = id;
       setActiveSessionId(null);
+    } else {
+      deleteDraft(id);
     }
   };
 
@@ -999,6 +1015,7 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
       <Composer
         tasks={tasks}
         suggestionChips={suggestionChips}
+        sessionId={activeSessionId ?? undefined}
         isLoading={isLoading}
         isStopShown={isStopShown}
         stopPending={stopPending}
