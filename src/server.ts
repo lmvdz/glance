@@ -2482,11 +2482,18 @@ export class SquadServer {
 		// Push-tap beacon (daily-dogfood-engine 02): the webapp fires this ONCE per notification-tap
 		// page open (`?push=1` marker on push payload URLs, sessionStorage-deduped client-side).
 		// Appends {ts, agentId} to this manager's push-taps.jsonl — observability only, gates nothing.
-		// Viewer-tier by design (authz.ts): a viewer device's tap is still a tap.
+		// Viewer-tier by design (authz.ts): a viewer device's tap is still a tap — which only holds
+		// because `recordPushTap` pairs it with the shape/existence/rate guards (finding #6). `sourceKey`
+		// combines the resolved actor identity with the remote address (authz.ts's own suggestion: "a
+		// bearer token and/or remote addr both work; combine them for a tighter bound") — file mode's
+		// `actor.id` alone (`web:viewer`) is shared by every viewer-tier caller, so the address is what
+		// actually separates distinct devices/scripts into their own rate-limit buckets.
 		if (url.pathname === "/api/push-tap" && req.method === "POST") {
 			const tapDecoded = decodeBody(PushTapBodySchema, await req.json().catch(() => null));
 			if (Result.isFailure(tapDecoded)) return new Response("agentId required", { status: 400 });
-			manager.recordPushTap(tapDecoded.success.agentId);
+			const sourceKey = `${actor.id}:${server.requestIP(req)?.address ?? "unknown"}`;
+			const tapResult = manager.recordPushTap(tapDecoded.success.agentId, sourceKey);
+			if (!tapResult.ok) return new Response(tapResult.reason ?? "rejected", { status: 400 });
 			return Response.json({ ok: true });
 		}
 		// Feature 2 D2 (CANVAS-AND-PAGE-CHAT.md): a pasted/dropped/captured/annotated chat image

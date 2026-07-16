@@ -41,7 +41,8 @@ import { Dispatcher } from "./dispatch.ts";
 import { openDispatchLedger } from "./dispatch-ledger.ts";
 import { type Answer, answerBrief, listAnswers, readAnswer, saveAnswer } from "./answers.ts";
 import { errText } from "./err-text.ts";
-import { armCompletionPushKind } from "./completion-push.ts";
+import { armCompletionPushKind, completionMinTurnMs, completionTurnLongEnough, type CompletionPushKind } from "./completion-push.ts";
+import { allowPushTap, isKnownPushTapAgentId, isValidPushTapAgentId } from "./authz.ts";
 import { isConsolePrompt, stripConsolePrompt } from "./console-prompt.ts";
 import { openRemovedLedger, type RemovedLedger } from "./removed-ledger.ts";
 import { buildDeadPlaceholder, composePriorContext, DEAD_PLACEHOLDER_TTL_MS, type DeadSessionPlaceholder, reattachMarker } from "./reattach-context.ts";
@@ -2721,6 +2722,18 @@ export class SquadManager extends EventEmitter {
 	 * becomes ephemeral — a repo the operator had already registered durably must never be silently
 	 * un-registered when a passing `glance here` session ends (`add()` is idempotent, so `added:false`
 	 * is exactly that case).
+	 *
+	 * `ephemeral` in the return is likewise scoped to `added`, NOT to whether the repo is currently
+	 * marked ephemeral (review finding #3, ephemeral release race): two `glance here` terminals on the
+	 * same repo are explicitly supported (boundarySyncChains), so a SECOND session's call here sees
+	 * `added:false` (the first session's marker already exists) — it must report `ephemeral:false` too,
+	 * even though `this.ephemeralProjects.has(repo)` reads true. Before this fix the second session was
+	 * told `ephemeral:true`, so its own ordinary exit (or a failed-create rollback) would call
+	 * `releaseEphemeralProject` believing it owned the registration, un-registering the FIRST session's
+	 * repo — and clearing its marker — while that session was still live and chatting. Only the session
+	 * that actually created the marker is now ever told it owns the release. `releaseEphemeralProject`
+	 * carries its own defense-in-depth guard for the case where a caller releases anyway (or a live
+	 * agent from ANY session still depends on the repo).
 	 */
 	async registerEphemeralProject(repo: string): Promise<{ ok: true; repo: string; added: boolean; ephemeral: boolean } | { ok: false; reason: string }> {
 		const result = await this.registerProject(repo);
@@ -2741,17 +2754,30 @@ export class SquadManager extends EventEmitter {
 				};
 			}
 		}
-		return { ...result, ephemeral: this.ephemeralProjects.has(result.repo) };
+		// `result.added`, not `this.ephemeralProjects.has(...)` — see the doc comment above.
+		return { ...result, ephemeral: result.added };
 	}
 
 	/**
 	 * Undo an ephemeral registration on ordinary session end (REPL exit, or the daemon's own removal
 	 * path — see `remove()`). No-op for repos that were never session-scoped, so callers can fire it
 	 * unconditionally. Deletes nothing on disk, per `unregisterProject`'s own contract.
+	 *
+	 * Guarded the same way `remove()`'s own daemon-side cleanup is (review finding #3): a repo stays
+	 * registered as long as ANY live agent still references it, regardless of which session's marker
+	 * this call is scoped to. `registerEphemeralProject` now only reports `ephemeral:true` to the
+	 * session that actually created the marker, which closes most of the race — but this guard is the
+	 * belt: it also protects the two callers that never had `remove()`'s own last-agent check
+	 * (server.ts's `/api/console/release` route, and the `/api/console` failed-create rollback), so
+	 * even a caller that mistakenly believes it owns the release can never un-register a repo out from
+	 * under another session's still-live agent.
 	 */
 	releaseEphemeralProject(repo: string): { ok: boolean; repo: string; released: boolean; reason?: string } {
 		const key = normalizeRepoPath(repo ?? "");
 		if (!this.ephemeralProjects.has(key)) return { ok: true, repo: key, released: false };
+		if ([...this.agents.values()].some((r) => normalizeRepoPath(r.options.repo) === key)) {
+			return { ok: true, repo: key, released: false };
+		}
 		const dropped = this.unregisterProject(key);
 		if (!dropped.ok) return { ok: false, repo: key, released: false, reason: dropped.reason };
 		this.clearEphemeralMarker(key);
@@ -4386,12 +4412,9 @@ export class SquadManager extends EventEmitter {
 		// default, and the very next idle would otherwise push for a chat that just became a tracked
 		// unit. A VOICE-armed latch stays: voice dispatch arms unconditionally regardless of category.
 		if (o.completionPushKind === "category") {
-			o.completionPushArmed = false;
-			o.completionPushKind = undefined;
-			o.completionArmedAt = undefined;
-			rec.dto.completionPushArmed = false;
-			rec.dto.completionPushKind = undefined;
-			rec.dto.completionArmedAt = undefined;
+			// persist:false — this clear folds into the single `await this.persist()` a few lines below;
+			// see `disarmCompletionPush`'s own doc comment (finding #10).
+			this.disarmCompletionPush(rec, { persist: false });
 		}
 		if (opts.mode && opts.mode !== rec.dto.autonomyMode) {
 			rec.dto.autonomyMode = opts.mode;
@@ -4404,9 +4427,11 @@ export class SquadManager extends EventEmitter {
 			o.appendSystemPrompt = prior.append;
 			o.promoted = undefined;
 			rec.dto.promoted = undefined;
-			o.completionPushArmed = prior.pushArmed;
-			o.completionPushKind = prior.pushKind;
-			o.completionArmedAt = prior.pushArmedAt;
+			// Restore BOTH the options latch and its dto mirror TOGETHER (finding #10: this used to
+			// restore only `o.*`, leaving `rec.dto.*` stuck at whatever the category-clear above had
+			// already forced it to — a live options/dto desync on the exact rollback path a failed
+			// persist takes).
+			this.setCompletionPushLatch(rec, { armed: prior.pushArmed === true, kind: prior.pushKind, armedAt: prior.pushArmedAt });
 			rec.dto.autonomyMode = prior.mode;
 			o.autonomyMode = prior.oMode;
 			this.syncAuthority(rec.dto);
@@ -6139,17 +6164,10 @@ export class SquadManager extends EventEmitter {
 				// Completion-push disarm: the operator cancelled the work themselves — a "finished" push
 				// would be a lie. Deliberately source-blind: a TYPED stop of voice-dispatched work is
 				// still the operator killing it (the cancel's own agent_end would otherwise read as a
-				// terminal idle and fire the push). Clears both the persisted latch and its DTO projection
-				// so no stale `true` can ride a later unrelated idle transition.
-				if (rec.options.completionPushArmed === true) {
-					rec.options.completionPushArmed = false;
-					rec.options.completionPushKind = undefined;
-					rec.options.completionArmedAt = undefined;
-					rec.dto.completionPushArmed = false;
-					rec.dto.completionPushKind = undefined;
-					rec.dto.completionArmedAt = undefined;
-					void this.persist();
-				}
+				// terminal idle and fire the push). `disarmCompletionPush` clears both the persisted
+				// latch and its DTO projection together so no stale `true` can ride a later unrelated
+				// idle transition (see its own doc comment — finding #10).
+				this.disarmCompletionPush(rec);
 				void this.recordAudit(actor, "interrupt", cmd.id, "ok", undefined, commandSource(cmd));
 				break;
 			case "kill":
@@ -6616,11 +6634,10 @@ export class SquadManager extends EventEmitter {
 		this.agents.delete(id);
 		// Daemon-side session end for a `glance here` registration (daily-onramp 02): when the LAST agent
 		// on an ephemerally-registered repo is removed, restore the pre-session registry state — the REPL's
-		// own exit hook is not the only path a casual session ends through.
-		const repoKey = normalizeRepoPath(rec.options.repo);
-		if (this.ephemeralProjects.has(repoKey) && ![...this.agents.values()].some((r) => normalizeRepoPath(r.options.repo) === repoKey)) {
-			this.releaseEphemeralProject(repoKey);
-		}
+		// own exit hook is not the only path a casual session ends through. `releaseEphemeralProject` now
+		// carries this exact "no live agent left on the repo" guard itself (finding #3), so it's safe to
+		// call unconditionally here — this agent is already gone from `this.agents` above.
+		this.releaseEphemeralProject(normalizeRepoPath(rec.options.repo));
 		if (this.scoutCursor.delete(id)) writeScoutCursors(this.stateDir, this.scoutCursor);
 		this.emit("event", { type: "removed", id } satisfies SquadEvent);
 		await this.persist();
@@ -6872,9 +6889,38 @@ export class SquadManager extends EventEmitter {
 				// graph is actually done. `dto.completionPushArmed` is deliberately re-derived on EVERY
 				// agent_end (not just when armed) so a stale `true` from a prior cycle can never leak onto
 				// an unrelated idle.
+				//
+				// The duration gate (push.ts's `completionPayload` / completion-push.ts's
+				// `completionTurnLongEnough`) is evaluated a SECOND time HERE, at the terminal signal
+				// itself, rather than only later at push-send in the server's `maybePushCompletionDone`
+				// (review finding #4, stale completion latch): if this dispatch is genuinely done AND the
+				// gate would suppress it, the latch is disarmed right now instead of merely left un-exposed
+				// on the DTO. Before this, a gate-suppressed short turn left `rec.options` with
+				// `completionPushArmed: true` and its now-stale `completionArmedAt` — nothing ever cleared
+				// them, because `maybePushCompletionDone` only calls `clearCompletionPushArmed` when a
+				// payload actually fires. Any LATER non-terminal idle transition on the same agent (a
+				// restart's `starting`→`idle` connect-ok, a pending-expiry re-derive) would then re-read
+				// that same old timestamp: `now - armedAt` is trivially past the floor by then, so the gate
+				// waves it through and a "✅ finished" fires for a turn that never happened.
+				//
+				// Chosen fix: clear-on-suppress, no deferral (the simpler of the two shapes considered —
+				// the alternative was keying the fire on the transition's `reason` being a genuine turn-end
+				// reason, which would need every future non-terminal transition site to keep gating on that
+				// classification correctly forever). A gate veto and an actual send both retire the
+				// one-push-per-dispatch obligation the exact same way here — there is nothing left to defer
+				// onto a future, unrelated idle. Voice arms are exempt from the gate itself (unchanged) and
+				// so are never disarmed by this check.
 				{
 					const isTerminal = rec.options.kind !== "workflow" || rec.workflowJustFinished === true;
 					rec.workflowJustFinished = false; // consume — never leak into the next agent_end
+					if (
+						isTerminal &&
+						rec.options.completionPushArmed === true &&
+						rec.options.completionPushKind !== "voice" &&
+						!completionTurnLongEnough(rec.options.completionArmedAt, Date.now(), completionMinTurnMs())
+					) {
+						this.disarmCompletionPush(rec, { persist: false }); // folded into this case's own persist() below
+					}
 					const exposed = isTerminal && rec.options.completionPushArmed === true;
 					rec.dto.completionPushArmed = exposed;
 					rec.dto.completionPushKind = exposed ? rec.options.completionPushKind : undefined;
@@ -8829,11 +8875,39 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/** Record one push-notification tap (POST /api/push-tap). Append-only observability for the
-	 *  adoption counters — never gates behavior, never throws (JsonlLog.append never does). The id
-	 *  is clamped: it comes from an any-authenticated beacon and is only ever counted, so an
-	 *  oversized value must not bloat the ledger. */
-	recordPushTap(agentId: string): void {
+	 *  adoption counters — never gates behavior in the sense that a rejected/dropped tap must never
+	 *  throw into the caller's route; it just doesn't get counted.
+	 *
+	 *  Three independent guards (review finding #6, authz.ts's viewer-tier tap route) run BEFORE the
+	 *  append — /api/push-tap is deliberately viewer-tier (anyone who can open the app from a
+	 *  notification tap must be able to have that tap counted), which only holds because this write
+	 *  site pairs it with these:
+	 *   1. shape — `isValidPushTapAgentId` rejects anything that isn't a plausible id (empty,
+	 *      oversized, control characters) before it's ever considered for disk.
+	 *   2. existence — `isKnownPushTapAgentId` over the live roster ids, OR the removed-agent ledger
+	 *      (a since-removed agent's id was real once — its tap still counts): a fabricated id that
+	 *      never named a real agent is rejected outright.
+	 *   3. rate — `allowPushTap`'s token bucket, keyed by `sourceKey` (the route's choice — bearer
+	 *      identity + remote address), so even a genuine id can't be hammered into thousands of
+	 *      lines/sec by one caller.
+	 *  Without all three, a viewer-tier credential could inflate `pushTapsByDay`
+	 *  (src/adoption-counters.ts) with fabricated taps — the exact number Lars's daily-driver
+	 *  adoption-gate verdict reads (plans/daily-dogfood-engine/02, 03).
+	 *  Shape/existence failures are reported back (the route surfaces a 400) — they can never have
+	 *  come from a real tap, so there is nothing to silently drop. A rate-limit hit is different: the
+	 *  id may be perfectly genuine, just too frequent from this source, so it is dropped quietly (warn
+	 *  log only) rather than surfaced as a caller-visible error. */
+	recordPushTap(agentId: string, sourceKey: string): { ok: boolean; reason?: string } {
+		if (!isValidPushTapAgentId(agentId)) return { ok: false, reason: "invalid agentId" };
+		if (!isKnownPushTapAgentId(agentId, this.agents.keys()) && !this.removedLedger.has(agentId)) {
+			return { ok: false, reason: "unknown agentId" };
+		}
+		if (!allowPushTap(sourceKey)) {
+			this.log("warn", `push-tap rate limit exceeded for source "${sourceKey}" — dropped`);
+			return { ok: true }; // best-effort counter — never surfaced as an error to the beacon
+		}
 		this.pushTapLog.append({ ts: Date.now(), agentId: agentId.slice(0, 200) });
+		return { ok: true };
 	}
 
 	/** Adoption counters (plans/daily-dogfood-engine/02) from this manager's own durable stateDir
@@ -9156,19 +9230,41 @@ export class SquadManager extends EventEmitter {
 		return this.agents.get(id)?.commands;
 	}
 
+	/** The ONE place that ever writes the completion-push latch's three fields — always to
+	 *  `rec.options` (the persisted source of truth) AND its `rec.dto` wire mirror TOGETHER, so the two
+	 *  can never drift apart (review finding #10, disarm triplication): before this, the identical
+	 *  6-field disarm was copy-pasted at the interrupt command, promote()'s casual→fleet category-clear,
+	 *  and this method — and promote()'s own rollback-restore catch restored only the `options` half,
+	 *  leaving the `dto` mirror stuck at whatever the fresh-promote branch had already forced it to on
+	 *  the failed-persist path. */
+	private setCompletionPushLatch(rec: AgentRecord, latch: { armed: boolean; kind: CompletionPushKind | undefined; armedAt: number | undefined }): void {
+		rec.options.completionPushArmed = latch.armed;
+		rec.options.completionPushKind = latch.kind;
+		rec.options.completionArmedAt = latch.armedAt;
+		rec.dto.completionPushArmed = latch.armed;
+		rec.dto.completionPushKind = latch.kind;
+		rec.dto.completionArmedAt = latch.armedAt;
+	}
+
+	/** Disarm the completion-push latch (both halves, via `setCompletionPushLatch`) — the common case:
+	 *  an operator/gate decision that the one push this dispatch owed will never fire. No-op (and skips
+	 *  the persist) when nothing is armed, so every call site can fire it unconditionally.
+	 *  `persist: false` for callers that fold this write into their OWN single `persist()` a few lines
+	 *  later (promote()'s fresh-promote path) — a second write here would be redundant, not wrong, but
+	 *  the option exists so nobody has to remember that. */
+	private disarmCompletionPush(rec: AgentRecord, opts: { persist?: boolean } = {}): void {
+		if (rec.options.completionPushArmed !== true) return;
+		this.setCompletionPushLatch(rec, { armed: false, kind: undefined, armedAt: undefined });
+		if (opts.persist !== false) void this.persist();
+	}
+
 	/** Completion-push disarm: called by the server, after its background push actually sends, to
 	 *  consume the one-push-per-dispatch latch. A no-op if the agent isn't resident (a raced
 	 *  remove/eviction between the push firing and this call landing) or already disarmed. */
 	clearCompletionPushArmed(id: string): void {
 		const rec = this.agents.get(id);
-		if (!rec || rec.options.completionPushArmed !== true) return;
-		rec.options.completionPushArmed = false;
-		rec.options.completionPushKind = undefined;
-		rec.options.completionArmedAt = undefined;
-		rec.dto.completionPushArmed = false;
-		rec.dto.completionPushKind = undefined;
-		rec.dto.completionArmedAt = undefined;
-		void this.persist();
+		if (!rec) return;
+		this.disarmCompletionPush(rec);
 	}
 
 	/** Proactively pull commands on (re)connect — omp's startup push may predate our wiring. */

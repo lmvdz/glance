@@ -17,6 +17,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentDriver } from "../src/agent-driver.ts";
+import { _resetPushTapRateLimitsForTests } from "../src/authz.ts";
 import { CONSOLE_SYSTEM_PROMPT } from "../src/console-prompt.ts";
 import { LOCAL_ACTOR } from "../src/federation.ts";
 import { completionPayload, escalationPayload, PushService, type PushPayload, type PushSend } from "../src/push.ts";
@@ -356,7 +357,7 @@ test("a casual chat pushes on completion by default; after promote() the next id
 	await waitFor(() => calls.length === 2);
 });
 
-test("duration gate (daily-attention-w0 01): a short casual turn does NOT push and keeps the latch armed; a long one fires and consumes it", async () => {
+test("duration gate (daily-attention-w0 01 + finding #4): a short casual turn does NOT push and DISARMS the latch (no deferral); a later Restart-like idle stays quiet; a subsequent long turn fires and consumes it", async () => {
 	const priorEnv = { casual: process.env.OMP_SQUAD_PUSH_CASUAL_DONE, minTurn: process.env.OMP_SQUAD_PUSH_MIN_TURN_MS };
 	delete process.env.OMP_SQUAD_PUSH_CASUAL_DONE; // casual default ON
 	process.env.OMP_SQUAD_PUSH_MIN_TURN_MS = "20000"; // 20s floor under test
@@ -400,12 +401,27 @@ test("duration gate (daily-attention-w0 01): a short casual turn does NOT push a
 	});
 
 	// Phase A — a SHORT turn (armedAt ≈ now, well under the 20s floor). The working→idle edge must be
-	// gated: no push, and the latch stays armed (the owed push is not consumed, just deferred).
+	// gated: no push. Finding #4 (stale completion latch): the gate-suppressed exposure now DISARMS the
+	// latch immediately (no deferral) — the old behavior left `completionPushArmed: true` with a stale
+	// `completionArmedAt` sitting in `rec.options`/`rec.dto`, which a LATER unrelated idle transition
+	// could ride to fire a spurious push (see the next assertion below).
 	await mgr.applyCommand({ type: "prompt", id: dto.id, message: "hi" }, LOCAL_ACTOR);
 	(rec.agent as unknown as EventEmitter).emit("event", { type: "agent_end" });
 	await new Promise((r) => setTimeout(r, 40)); // give an erroneous push a chance to fire
 	expect(calls).toHaveLength(0);
-	expect(rec.options.completionPushArmed).toBe(true); // still owed — not consumed by a gated non-push
+	expect(rec.options.completionPushArmed).toBe(false); // disarmed at exposure, not just deferred
+	expect(rec.dto.completionPushArmed).toBe(false); // dto mirror disarmed together, never desyncs
+
+	// Regression (finding #4): a LATER non-terminal idle transition on the SAME agent — e.g. an
+	// operator Restart's `starting`→`idle` connect-ok, or a pending-expiry re-derive — must never
+	// resurrect a "finished" push for the short turn above. Drive it through the exact canonical lane
+	// every synthetic-transition test in this file uses (a raw `{type:"transition"}` SquadEvent against
+	// the real, live record `mgr` just touched) — no field is hand-poked; this observes whatever state
+	// the real agent_end handler left behind.
+	rec.dto.status = "idle";
+	mgr.emit("event", transitionEvent(dto.id, "starting", "idle", { reason: "connect-ok" }));
+	await new Promise((r) => setTimeout(r, 40));
+	expect(calls).toHaveLength(0); // still nothing — the gate-suppressed turn left no latch to resurrect
 
 	// Phase B — a LONG turn. Re-prompt (fresh working→idle edge + re-arm), then back-date the arm past
 	// the floor to simulate a turn that actually ran long. Now the edge must push and consume the latch.
@@ -649,4 +665,66 @@ test("a denied transition entry never pushes — it did not change dto.status", 
 	mgr.emit("event", transitionEvent(rec.dto.id, "working", "input", { denied: true }));
 	await new Promise((r) => setTimeout(r, 15));
 	expect(captured).toHaveLength(0);
+});
+
+// ── POST /api/push-tap write guards (review finding #6) ─────────────────────
+// authz.ts keeps this route viewer-tier deliberately — safe only because the write site
+// (SquadManager.recordPushTap) pairs it with shape/existence/rate guards. authz.test.ts covers the
+// three pure helpers directly; these two exercise the actual wiring at the HTTP route.
+
+test("POST /api/push-tap rejects a fabricated agentId that never named a real agent", async () => {
+	_resetPushTapRateLimitsForTests();
+	const { mgr, rec, dirs } = await liveAgent("pushtap-unknown");
+	const server = new SquadServer(mgr, { port: 0 });
+	const url = server.start();
+	cleanups.push(async () => {
+		server.stop();
+		await mgr.stop();
+		for (const d of dirs) await fs.rm(d, { recursive: true, force: true });
+	});
+
+	// The REAL resident agent's id is accepted (sanity: the guard isn't rejecting everything).
+	const real = await fetch(`${url}/api/push-tap`, { method: "POST", body: JSON.stringify({ agentId: rec.dto.id }) });
+	expect(real.status).toBe(200);
+
+	// An id that never named any live or removed agent must be rejected, not silently counted —
+	// otherwise a viewer-tier credential could inflate pushTapsByDay with any string it likes.
+	const fake = await fetch(`${url}/api/push-tap`, { method: "POST", body: JSON.stringify({ agentId: "totally-made-up-agent-id" }) });
+	expect(fake.status).toBe(400);
+
+	const counters = await mgr.adoptionCounters();
+	const total = Object.values(counters.pushTapsByDay).reduce((a, b) => a + b, 0);
+	expect(total).toBe(1); // only the real tap landed
+});
+
+test("POST /api/push-tap drops taps past the burst floor from one source, without erroring the route", async () => {
+	_resetPushTapRateLimitsForTests();
+	const { mgr, rec, dirs } = await liveAgent("pushtap-burst");
+	const server = new SquadServer(mgr, { port: 0 });
+	const url = server.start();
+	cleanups.push(async () => {
+		server.stop();
+		await mgr.stop();
+		for (const d of dirs) await fs.rm(d, { recursive: true, force: true });
+	});
+
+	// The bucket holds 10 — the first 10 taps from this one source (same actor + loopback address)
+	// must all land.
+	for (let i = 0; i < 10; i++) {
+		const res = await fetch(`${url}/api/push-tap`, { method: "POST", body: JSON.stringify({ agentId: rec.dto.id }) });
+		expect(res.status).toBe(200);
+	}
+	// The 11th is rate-limited: the route must still answer 200 (a rate-limit hit is dropped quietly,
+	// never surfaced as a caller-visible error — the id may be perfectly genuine, just too frequent),
+	// but it must NOT be counted.
+	const eleventh = await fetch(`${url}/api/push-tap`, { method: "POST", body: JSON.stringify({ agentId: rec.dto.id }) });
+	expect(eleventh.status).toBe(200);
+
+	// Read the manager's own in-memory ring directly rather than `adoptionCounters()` — its (ts,
+	// agentId) merge-dedupe (file ∪ live source overlap) is a false positive here: 11 rapid-fire taps
+	// of the SAME agentId can land within the same millisecond, which is a legitimate ambiguity for
+	// that dedupe's actual job (file/live overlap) but would collapse several of OUR genuinely-distinct
+	// ring entries and make this assertion meaningless either way.
+	const ring = (mgr as unknown as { pushTapLog: { recent(): Array<{ ts: number; agentId: string }> } }).pushTapLog.recent();
+	expect(ring).toHaveLength(10); // the 11th was dropped, not appended
 });
