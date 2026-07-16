@@ -7,7 +7,7 @@ import { createDecipheriv } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { encryptPayload, hkdf, PushService, type PushSend, type PushSubscription, vapidAuthHeader, voiceDonePayload } from "../src/push.ts";
+import { completionPayload, encryptPayload, hkdf, PushService, type PushSend, type PushSubscription, vapidAuthHeader } from "../src/push.ts";
 import type { AgentDTO, AgentStatus } from "../src/types.ts";
 
 const cleanups: Array<() => Promise<void> | void> = [];
@@ -184,14 +184,14 @@ test("real HTTP dispatch reaches the endpoint with the right wire shape", async 
 	expect(received?.bytes).toBeGreaterThan(80);
 });
 
-// ── voiceDonePayload (plans/voice-loop concern 01) ──────────────────────────
+// ── completionPayload (plans/voice-loop concern 01, generalized by daily-attention-w0 01) ──
 
 function doneAgent(status: AgentStatus, over: Partial<AgentDTO> = {}): AgentDTO {
 	return { id: "a1", name: "alpha", status, kind: "omp-operator", repo: "/r", worktree: "/w", approvalMode: "yolo", pending: [], lastActivity: 0, messageCount: 0, ...over };
 }
 
-test("voiceDonePayload fires on a seeded, armed working→idle transition with a name-only body and the done: tag", () => {
-	const p = voiceDonePayload("working", doneAgent("idle", { voicePushArmed: true }), true);
+test("completionPayload fires on a seeded, armed working→idle transition with a name-only body and the done: tag", () => {
+	const p = completionPayload("working", doneAgent("idle", { completionPushArmed: true, completionPushKind: "voice" }), true);
 	expect(p).not.toBeNull();
 	expect(p?.title).toBe("✅ alpha finished");
 	// Pinned EXACTLY — no transcript/summary content ever rides the lock-screen body (DESIGN.md: "lock
@@ -204,25 +204,40 @@ test("voiceDonePayload fires on a seeded, armed working→idle transition with a
 	expect(p?.tag).toBe("done:a1");
 });
 
-test("voiceDonePayload is null when the agent is not voice-armed", () => {
-	expect(voiceDonePayload("working", doneAgent("idle"), true)).toBeNull();
-	expect(voiceDonePayload("working", doneAgent("idle", { voicePushArmed: false }), true)).toBeNull();
+test("completionPayload copy branches on WHY the latch armed: voice keeps the spoken-debrief callback, a category arm gets the generic body", () => {
+	const voice = completionPayload("working", doneAgent("idle", { completionPushArmed: true, completionPushKind: "voice" }), true);
+	expect(voice?.body).toBe("Tap to open glance — call back for the spoken debrief.");
+	const category = completionPayload("working", doneAgent("idle", { completionPushArmed: true, completionPushKind: "category" }), true);
+	expect(category?.body).toBe("Ready when you are — tap to pick up where you left off.");
+	// Both copies are content-free (no transcript/summary text) and share the same tag namespace.
+	expect(category?.body).not.toContain("alpha");
+	expect(category?.tag).toBe("done:a1");
+	expect(category?.title).toBe("✅ alpha finished");
+	// An armed DTO without a kind (a legacy in-flight event) falls back to the generic body — the
+	// voice-specific callback line must never fire for a dispatch we can't prove was voice.
+	const kindless = completionPayload("working", doneAgent("idle", { completionPushArmed: true }), true);
+	expect(kindless?.body).toBe("Ready when you are — tap to pick up where you left off.");
 });
 
-test("voiceDonePayload is null before the roster is seeded (never alerts in bulk on reconnect/replay)", () => {
-	expect(voiceDonePayload("working", doneAgent("idle", { voicePushArmed: true }), false)).toBeNull();
+test("completionPayload is null when the agent is not armed", () => {
+	expect(completionPayload("working", doneAgent("idle"), true)).toBeNull();
+	expect(completionPayload("working", doneAgent("idle", { completionPushArmed: false }), true)).toBeNull();
 });
 
-test("voiceDonePayload is null with no prior status (first-seen, not a transition)", () => {
-	expect(voiceDonePayload(undefined, doneAgent("idle", { voicePushArmed: true }), true)).toBeNull();
+test("completionPayload is null before the roster is seeded (never alerts in bulk on reconnect/replay)", () => {
+	expect(completionPayload("working", doneAgent("idle", { completionPushArmed: true }), false)).toBeNull();
 });
 
-test("voiceDonePayload is null on a same-state event (no transition)", () => {
-	expect(voiceDonePayload("idle", doneAgent("idle", { voicePushArmed: true }), true)).toBeNull();
+test("completionPayload is null with no prior status (first-seen, not a transition)", () => {
+	expect(completionPayload(undefined, doneAgent("idle", { completionPushArmed: true }), true)).toBeNull();
 });
 
-test("voiceDonePayload is null for any non-idle destination, even armed+seeded", () => {
+test("completionPayload is null on a same-state event (no transition)", () => {
+	expect(completionPayload("idle", doneAgent("idle", { completionPushArmed: true }), true)).toBeNull();
+});
+
+test("completionPayload is null for any non-idle destination, even armed+seeded", () => {
 	for (const status of ["working", "starting", "input", "error", "stopped"] as AgentStatus[]) {
-		expect(voiceDonePayload("working", doneAgent(status, { voicePushArmed: true }), true)).toBeNull();
+		expect(completionPayload("working", doneAgent(status, { completionPushArmed: true }), true)).toBeNull();
 	}
 });
