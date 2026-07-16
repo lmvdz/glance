@@ -209,6 +209,22 @@ export class AcpAgentDriver extends EventEmitter implements AgentDriver {
 	 *  every `session/update` for the session to reset that turn's silence timer. undefined when no
 	 *  turn call is pending (nothing to bump). */
 	private turnLivenessBump?: () => void;
+	/** Set by `sendTurn`; `handleNotification`/`trackToolCall` call it whenever the outstanding-tool-call
+	 *  count transitions between zero and nonzero (plan 08). `true` = a tool call just opened (suspend the
+	 *  silence window — a live tool doing quiet work, e.g. `sleep 300`, is itself proof the turn is alive);
+	 *  `false` = the last outstanding tool call just closed (resume a fresh silence window — normal
+	 *  turn-liveness applies again until the next update or the response). undefined when no turn is
+	 *  pending. */
+	private turnToolCallChange?: (outstanding: boolean) => void;
+	/** toolCallId → outstanding, tracked from the `tool_call` / `tool_call_update` stream (plan 08). A real
+	 *  adapter (claude-code-acp 0.16.2, live-observed) emits exactly one `tool_call` update ("running") at
+	 *  shell-call start and nothing else until the matching `tool_call_update` reports a terminal status —
+	 *  so "an outstanding tool call" has to be tracked explicitly; it is NOT implied by silence continuing. */
+	private readonly outstandingToolCalls = new Set<string>();
+	/** Terminal `tool_call`/`tool_call_update` statuses that close an outstanding tool call. Anything else
+	 *  (including a missing `status`, which a `tool_call` creation update may legitimately omit) is treated
+	 *  as still-open — conservative in the direction of NOT prematurely resuming the silence window. */
+	private static readonly TERMINAL_TOOL_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
 	constructor(opts: AcpAgentDriverOptions) {
 		super();
@@ -417,8 +433,16 @@ export class AcpAgentDriver extends EventEmitter implements AgentDriver {
 				const title = asString(update.title);
 				const kind = asString(update.kind);
 				this.emit("event", { type: "tool_execution_start", toolName: kind ?? title ?? "tool", intent: title });
+				this.trackToolCall(asString(update.toolCallId), asString(update.status));
 				return;
 			}
+			case "tool_call_update":
+				// Plan 08: the only signal that an outstanding tool call finished (or failed/was cancelled).
+				// A quiet multi-minute tool (a silent build, `sleep 300`, a network fetch with no progress
+				// output) emits NOTHING between the `tool_call` above and this update — that gap is the
+				// whole point: it is liveness, not silence, and must not trip the turn's silence window.
+				this.trackToolCall(asString(update.toolCallId), asString(update.status));
+				return;
 			case "plan":
 				this.todoPhases = parsePlan(update.entries);
 				return;
@@ -426,10 +450,27 @@ export class AcpAgentDriver extends EventEmitter implements AgentDriver {
 				this.lastUsage = parseUsage(update);
 				return;
 			default:
-				// ponytail: agent_thought_chunk / tool_call_update / current_mode_update streamed but
-				// unused by the manager; map them when the UI needs thoughts or live tool status.
+				// ponytail: agent_thought_chunk / current_mode_update streamed but unused by the manager;
+				// map them when the UI needs thoughts or live mode status.
 				return;
 		}
+	}
+
+	/** Update `outstandingToolCalls` from a `tool_call`/`tool_call_update` notification and, on a
+	 *  zero↔nonzero transition, tell the active turn (`turnToolCallChange`) so it can suspend or resume
+	 *  its silence window (plan 08). No `toolCallId` (a non-compliant adapter) is a no-op — we can't track
+	 *  what we can't key, and falling back to a bare counter risks a stray decrement making liveness look
+	 *  cleared when it isn't; the existing silence window / hard cap still cover that adapter. */
+	private trackToolCall(toolCallId: string | undefined, status: string | undefined): void {
+		if (!toolCallId) return;
+		const wasEmpty = this.outstandingToolCalls.size === 0;
+		if (status !== undefined && AcpAgentDriver.TERMINAL_TOOL_STATUSES.has(status)) {
+			this.outstandingToolCalls.delete(toolCallId);
+		} else {
+			this.outstandingToolCalls.add(toolCallId);
+		}
+		const isEmpty = this.outstandingToolCalls.size === 0;
+		if (wasEmpty !== isEmpty) this.turnToolCallChange?.(!isEmpty);
 	}
 
 	private handleRequest(id: string | number, method: string, params: unknown): void {
@@ -547,22 +588,45 @@ export class AcpAgentDriver extends EventEmitter implements AgentDriver {
 		if (!this.proc || this.exited) return Promise.reject(new Error("acp agent not running"));
 		const id = ++this.seq;
 		const key = String(id);
+		// Fresh per turn: a stray leftover id from a prior turn (e.g. a completion that raced the previous
+		// response) must not suspend THIS turn's silence window on a tool call that isn't actually ours.
+		this.outstandingToolCalls.clear();
 		return new Promise<T>((resolve, reject) => {
-			let silenceTimer: ReturnType<typeof setTimeout>;
+			let silenceTimer: ReturnType<typeof setTimeout> | undefined;
 			let hardCapTimer: ReturnType<typeof setTimeout>;
 			let armSilence: () => void;
+			let toolCallOutstanding = false;
+			const clearSilence = () => {
+				if (silenceTimer) clearTimeout(silenceTimer);
+				silenceTimer = undefined;
+			};
 			const clearAll = () => {
-				clearTimeout(silenceTimer);
+				clearSilence();
 				clearTimeout(hardCapTimer);
 				if (this.turnLivenessBump === armSilence) this.turnLivenessBump = undefined;
+				if (this.turnToolCallChange === onToolCallChange) this.turnToolCallChange = undefined;
 			};
 			armSilence = () => {
-				clearTimeout(silenceTimer);
+				// Plan 08: while a tool call is outstanding, quiet time is expected, not a dead adapter — the
+				// silence window is SUSPENDED, not merely reset. `onToolCallChange` re-arms it the moment the
+				// last outstanding tool call closes. A tool call that never closes (adapter died mid-tool)
+				// leaves the silence window suspended forever by design — the hard cap below is the backstop
+				// for exactly that case, unconditionally, regardless of tool-call state.
+				if (toolCallOutstanding) return;
+				clearSilence();
 				silenceTimer = setTimeout(() => {
 					clearAll();
 					this.pending.delete(key);
 					reject(new Error(`acp request ${method} timed out`));
 				}, this.turnSilenceMs);
+			};
+			const onToolCallChange = (outstanding: boolean) => {
+				toolCallOutstanding = outstanding;
+				if (outstanding) {
+					clearSilence(); // suspend: a tool call just opened
+				} else {
+					armSilence(); // resume a fresh window: the last outstanding tool call just closed
+				}
 			};
 			hardCapTimer = setTimeout(() => {
 				clearAll();
@@ -571,6 +635,7 @@ export class AcpAgentDriver extends EventEmitter implements AgentDriver {
 			}, this.turnHardCapMs);
 			armSilence();
 			this.turnLivenessBump = armSilence;
+			this.turnToolCallChange = onToolCallChange;
 			this.pending.set(key, {
 				resolve: (d) => {
 					clearAll();

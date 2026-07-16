@@ -384,3 +384,117 @@ test("a turn that streams forever still trips the hard-cap backstop", async () =
 	// silence window.
 	await expect(driver.prompt("hi")).rejects.toThrow(/turn hard cap/);
 });
+
+/**
+ * plans/daily-onramp/08-quiet-tool-liveness.md: the tests above prove the silence window resets on
+ * a STEADY stream of updates — exactly what the shipped 07 regression test exercised (a fake that
+ * streams `agent_message_chunk`s every 50ms) and exactly what the real `claude-code-acp` 0.16.2
+ * adapter does NOT do. Live re-verification (plans/daily-driver/00-meta.md Ledger, 2026-07-16)
+ * reproduced the original `sleep 75` failure TWICE against the real adapter: it emits exactly ONE
+ * `session/update` (`tool_call`, status "running") at shell-call start, then nothing at all until
+ * the tool finishes — a single long quiet call has no incremental output for the silence window to
+ * reset on, so 07's fix (silence resets on ANY update) never fires again after that one update and
+ * the turn still times out mid-tool.
+ *
+ * These two tests are the reality-shaped replacement: an OUTSTANDING tool call is liveness in its
+ * own right (`trackToolCall`/`turnToolCallChange` in acp-agent-driver.ts), suspending the silence
+ * window for as long as the tool is open, independent of whether anything streams during that time.
+ */
+
+/** Exactly the real adapter's shape: one `tool_call` ("in_progress"), then total silence for LONGER
+ * than the silence window, then the matching `tool_call_update` ("completed") + the prompt response
+ * arrive together. Pins the live failure: a fixed/steady-stream-only silence reset would already have
+ * rejected this turn; a tool-call-aware one must not. */
+const FAKE_ACP_QUIET_TOOL_CALL = String.raw`
+const send = (o) => process.stdout.write(JSON.stringify(o) + "\n");
+const update = (u) => send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "s1", update: u } });
+let buf = "";
+process.stdin.on("data", (ch) => {
+  buf += ch;
+  let nl;
+  while ((nl = buf.indexOf("\n")) >= 0) {
+    const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+    if (!line.trim()) continue;
+    let msg; try { msg = JSON.parse(line); } catch { continue; }
+    const { id, method } = msg;
+    switch (method) {
+      case "initialize":
+        send({ jsonrpc: "2.0", id, result: { protocolVersion: 1, agentCapabilities: {} } });
+        break;
+      case "session/new":
+        send({ jsonrpc: "2.0", id, result: { sessionId: "s1" } });
+        break;
+      case "session/prompt":
+        // Live-observed shape (claude-code-acp 0.16.2): ONE tool_call at shell-call start, then
+        // nothing — no chunks, no progress — until the tool actually finishes.
+        update({ sessionUpdate: "tool_call", toolCallId: "t1", title: "run shell command", kind: "execute", status: "in_progress" });
+        setTimeout(() => {
+          // 300ms of total silence > the test's 100ms silence window: a window that isn't suspended
+          // by the outstanding tool call would already have rejected this turn by now.
+          update({ sessionUpdate: "tool_call_update", toolCallId: "t1", status: "completed" });
+          send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
+        }, 300);
+        break;
+      default:
+        if (id !== undefined) send({ jsonrpc: "2.0", id, result: {} });
+    }
+  }
+});
+`;
+
+/** Same quiet `tool_call` open, but its completion never arrives and the adapter never responds —
+ * the "adapter died mid-tool" case plan 08 explicitly accepts as the hard cap's job. The silence
+ * window is suspended by design (an outstanding tool call IS liveness), so only the hard cap backstop
+ * can end this turn. */
+const FAKE_ACP_QUIET_TOOL_CALL_FOREVER = String.raw`
+const send = (o) => process.stdout.write(JSON.stringify(o) + "\n");
+const update = (u) => send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "s1", update: u } });
+let buf = "";
+process.stdin.on("data", (ch) => {
+  buf += ch;
+  let nl;
+  while ((nl = buf.indexOf("\n")) >= 0) {
+    const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+    if (!line.trim()) continue;
+    let msg; try { msg = JSON.parse(line); } catch { continue; }
+    const { id, method } = msg;
+    switch (method) {
+      case "initialize":
+        send({ jsonrpc: "2.0", id, result: { protocolVersion: 1, agentCapabilities: {} } });
+        break;
+      case "session/new":
+        send({ jsonrpc: "2.0", id, result: { sessionId: "s1" } });
+        break;
+      case "session/prompt":
+        update({ sessionUpdate: "tool_call", toolCallId: "t1", title: "run shell command", kind: "execute", status: "in_progress" });
+        // Deliberately: no completion update, no response, ever.
+        break;
+      default:
+        if (id !== undefined) send({ jsonrpc: "2.0", id, result: {} });
+    }
+  }
+});
+`;
+
+test("a quiet tool call (one update, then total silence past the window, then completion + response) resolves — the live sleep-75 failure, pinned", async () => {
+	const driver = await turnFakeDriver(FAKE_ACP_QUIET_TOOL_CALL, { turnSilenceMs: 100, turnHardCapMs: 5_000 });
+	await driver.start(5_000);
+
+	// 300ms of total silence after the single tool_call update > the 100ms silence window. Without
+	// tool-call-aware suspension this turn would already be rejected; it must resolve instead.
+	await expect(driver.prompt("hi")).resolves.toBeUndefined();
+	expect(driver.isReady).toBe(true);
+});
+
+// (b) fail-closed with no outstanding tool call is already covered above by "a fully silent adapter
+// still times out a session/prompt turn — fail-closed" (FAKE_ACP_SILENT_PROMPT) — unchanged by this
+// fix, since no tool_call ever opens there and the plain silence window still applies as before.
+
+test("a tool call that opens and never closes (adapter died mid-tool) is caught by the hard cap, not the silence window", async () => {
+	const driver = await turnFakeDriver(FAKE_ACP_QUIET_TOOL_CALL_FOREVER, { turnSilenceMs: 50, turnHardCapMs: 300 });
+	await driver.start(5_000);
+
+	// The silence window is suspended for as long as the tool call is outstanding (by design — see plan
+	// 08), so a tool call whose completion never arrives can only be caught by the unconditional hard cap.
+	await expect(driver.prompt("hi")).rejects.toThrow(/turn hard cap/);
+});
