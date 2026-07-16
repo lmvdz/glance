@@ -27,6 +27,7 @@ const VERDICT_CS = /\bSTOP\b/;
 
 /** Throws when `row` contains verdict language. Exported for direct testing; insertLedgerRow
  *  calls it unconditionally, so writers cannot opt out. */
+/** @substrate exported for tests only — tests/meta-ledger.test.ts pins the hitl verdict-language guard directly. */
 export function assertNoVerdictLanguage(row: string): void {
 	const hit = VERDICT_CI.exec(row) ?? VERDICT_CS.exec(row);
 	if (hit) {
@@ -42,6 +43,7 @@ export function assertNoVerdictLanguage(row: string): void {
  * byte-identical. Throws (never writes partial output) on: no `## Ledger` heading, a multi-line
  * or non-`- `-prefixed row, or verdict language in the row.
  */
+/** @substrate exported for tests only — tests/meta-ledger.test.ts pins idempotent row insertion directly. */
 export function insertLedgerRow(text: string, row: string): string {
 	if (row.includes("\n")) throw new Error("ledger row must be a single line");
 	if (!row.startsWith("- ")) throw new Error('ledger row must start with "- " (a Markdown list entry)');
