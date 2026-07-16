@@ -45,7 +45,7 @@ import {
 import { useTaskContext } from '../context/TaskContext';
 import { PageContextScope } from '../context/PageContext';
 import { deriveFleetPageContext } from '../lib/pageContextDerive';
-import { AgentLandControls } from './chat/AgentMetaBar';
+import { AgentLandControls, AgentPromoteButton } from './chat/AgentMetaBar';
 import { validationBadge, confidenceBadge, prStateBadgeLabel, isValidatorHeld } from '../lib/agent-badges';
 import { canLand, answerCommand, interruptCommand, interruptibleAgents, restartCommand, setModelCommand } from '../lib/agent-control';
 import { apiJson, jsonInit } from '../lib/api';
@@ -420,6 +420,10 @@ const LandRail: React.FC<{
                 </a>
               )}
               <div className="flex items-center gap-2">
+                {/* Promote parity for the cockpit (daily-onramp 06): a console/`here` chat selected
+                    here gets the same "make this a unit" the AssistantChat meta bar offers — the
+                    button self-gates (isPromotableChat) so it renders for nothing else. */}
+                <AgentPromoteButton agent={agent} showToast={showToast} />
                 <AgentLandControls agent={agent} showToast={showToast} />
               </div>
             </>
