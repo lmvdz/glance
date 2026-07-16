@@ -231,3 +231,80 @@ describe("stop()/flush()", () => {
 		expect(store.seenMapFor()).toEqual({});
 	});
 });
+
+describe("surpriseCountsFor: concern-08 durable per-file surprise-tap count (comprehension concern 08)", () => {
+	test("a surprise event increments the count for that (repo,file)", () => {
+		const store = new AttentionStore({ stateDir: dir(), now: () => 1_000 });
+		store.record({ kind: "surprise", repo: "/r", file: "a.ts" }, "actor");
+		expect(store.surpriseCountsFor()).toEqual({ "/r\0a.ts": 1 });
+	});
+
+	test("repeated surprise taps (past the 30s coalesce window) accumulate", () => {
+		let now = 1_000;
+		const store = new AttentionStore({ stateDir: dir(), now: () => now });
+		store.record({ kind: "surprise", repo: "/r", file: "a.ts" }, "actor");
+		now += 31_000; // clear of the 30s coalesce window
+		store.record({ kind: "surprise", repo: "/r", file: "a.ts" }, "actor");
+		now += 31_000;
+		store.record({ kind: "surprise", repo: "/r", file: "a.ts" }, "actor");
+		expect(store.surpriseCountsFor()).toEqual({ "/r\0a.ts": 3 });
+	});
+
+	test("a coalesced replay within 30s does NOT double-increment the count", () => {
+		let now = 1_000;
+		const store = new AttentionStore({ stateDir: dir(), now: () => now });
+		store.record({ kind: "surprise", repo: "/r", file: "a.ts", agentId: "u1" }, "actor");
+		now += 5_000; // well inside the 30s coalesce window
+		const result = store.record({ kind: "surprise", repo: "/r", file: "a.ts", agentId: "u1" }, "actor");
+		expect(result).toEqual({ ok: true, reason: "coalesced" });
+		expect(store.surpriseCountsFor()).toEqual({ "/r\0a.ts": 1 });
+	});
+
+	test("other event kinds never touch the surprise-count map", () => {
+		const store = new AttentionStore({ stateDir: dir(), now: () => 1_000 });
+		store.record({ kind: "diff-viewed", repo: "/r", file: "a.ts" }, "actor");
+		store.record({ kind: "pr-reviewed", repo: "/r", file: "a.ts" }, "actor");
+		expect(store.surpriseCountsFor()).toEqual({});
+	});
+
+	test("surpriseCountsFor scopes by repo, normalized, same fail-closed contract as seenMapFor", () => {
+		const store = new AttentionStore({ stateDir: dir(), now: () => 1_000 });
+		store.record({ kind: "surprise", repo: "/srv/app/", file: "a.ts" }, "actor"); // trailing slash
+		store.record({ kind: "surprise", repo: "/srv/other", file: "b.ts" }, "actor");
+
+		expect(store.surpriseCountsFor(["/srv/app"])).toEqual({ "/srv/app\0a.ts": 1 });
+		expect(Object.keys(store.surpriseCountsFor()).length).toBe(2); // unrestricted
+		expect(store.surpriseCountsFor([])).toEqual({}); // explicit empty ⇒ nothing, not unrestricted
+	});
+
+	test("the surprise count survives a restart via its own durable file — NOT the rotating raw feed", () => {
+		const d = dir();
+		const store = new AttentionStore({ stateDir: d, now: () => 42 });
+		store.record({ kind: "surprise", repo: "/r", file: "a.ts" }, "actor");
+		store.stop(); // forces the debounced write out synchronously
+
+		const reloaded = new AttentionStore({ stateDir: d });
+		expect(reloaded.surpriseCountsFor()).toEqual({ "/r\0a.ts": 1 });
+	});
+
+	test("a corrupt attention-surprise.json on boot loads as empty, never throws", () => {
+		const d = dir();
+		writeFileSync(path.join(d, "attention-surprise.json"), "{ not json");
+		const store = new AttentionStore({ stateDir: d });
+		expect(store.surpriseCountsFor()).toEqual({});
+	});
+
+	test("a non-numeric or negative stored count is dropped on load, never trusted verbatim", () => {
+		const d = dir();
+		writeFileSync(path.join(d, "attention-surprise.json"), JSON.stringify({ "/r\0a.ts": "not a number", "/r\0b.ts": -1, "/r\0c.ts": 3 }));
+		const store = new AttentionStore({ stateDir: d });
+		expect(store.surpriseCountsFor()).toEqual({ "/r\0c.ts": 3 });
+	});
+
+	test("a surprise event ALSO updates the seen map (it is itself a genuine 'looked at this' signal)", () => {
+		const store = new AttentionStore({ stateDir: dir(), now: () => 1_000 });
+		store.record({ kind: "surprise", repo: "/r", file: "a.ts" }, "actor");
+		expect(store.lastSeen("/r", "a.ts")?.lastSeenAt).toBe(1_000);
+		expect(store.surpriseCountsFor()).toEqual({ "/r\0a.ts": 1 });
+	});
+});

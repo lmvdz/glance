@@ -61,7 +61,9 @@ export const PATTERNS: Pattern[] = [
 		// mirroring threshold-tuner.ts's identical already-baselined idiom byte-for-byte.
 		// 54→55 (comprehension concern 01): src/attention.ts's `loadSeenMap` reads its own
 		// `attention-seen.json` — same carve-out, same idiom, one more freshly-written state file.
-		baseline: 55,
+		// 55->56 (comprehension concern 08): src/attention.ts's `loadSurpriseCounts` reads its own
+		// `attention-surprise.json` -- same file, same carve-out, one more freshly-written state map.
+		baseline: 56,
 	},
 	{
 		id: "bool-env-compare",

@@ -32,9 +32,13 @@ import {
   splitDiffLines,
   isCommentableLine,
   diffLineStats,
+  deltaBullets,
+  parseEvidenceAnchor,
+  firstEvidenceFile,
   type DiffLineKind,
 } from '../lib/intervene';
 import { reportAttention, prReviewedEvents, shouldEmitDiffViewed, diffViewedKey, DIFF_VIEWPORT_THRESHOLD } from '../lib/attention';
+import { orderDiffs, type DiffOrderMode } from '../lib/diff-order';
 import type { AgentDTO } from '../lib/dto';
 import type { AgentFileDiff } from './chat/DiffReviewPanel';
 import { GateWidget } from './chat/GateWidget';
@@ -49,16 +53,22 @@ const LINE_BG: Record<DiffLineKind, string> = {
   ctx: '',
 };
 
-/** One changed file: its diff rendered line-by-line, with a comment→steer affordance on real edits. */
+/** One changed file: its diff rendered line-by-line, with a comment→steer affordance on real edits.
+ *  `autoOpen` is set true for exactly one render when a delta bullet's evidence link jumps here
+ *  (comprehension concern 08) — a plain effect that expands the section once, never fighting a
+ *  manual collapse afterward (the effect only re-fires when `autoOpen` itself flips false→true). */
 const InterveneFileDiff: React.FC<{
   diff: AgentFileDiff;
   onComment: (file: string, lineText: string, comment: string) => void;
-}> = ({ diff, onComment }) => {
+  autoOpen?: boolean;
+}> = ({ diff, onComment, autoOpen }) => {
   const [open, setOpen] = useState(false);
   const [commentingLine, setCommentingLine] = useState<number | null>(null);
   const [commentText, setCommentText] = useState('');
   const lines = useMemo(() => splitDiffLines(diff.diff), [diff.diff]);
   const { added, removed } = useMemo(() => diffLineStats(diff.diff), [diff.diff]);
+
+  useEffect(() => { if (autoOpen) setOpen(true); }, [autoOpen]);
 
   const submit = (lineText: string) => {
     if (!commentText.trim()) return;
@@ -136,12 +146,41 @@ const InterveneFileDiff: React.FC<{
 };
 
 export const IntervenceView: React.FC = () => {
-  const { agents, interveneAgentId, setView, openConsole, sendConsoleCommand, subscribeConsole, showToast, connected } = useTaskContext();
+  const { agents, features, interveneAgentId, setView, openConsole, sendConsoleCommand, subscribeConsole, showToast, connected } = useTaskContext();
   const agent = useMemo<AgentDTO | undefined>(() => agents.find((a) => a.id === interveneAgentId), [agents, interveneAgentId]);
 
   const [diffs, setDiffs] = useState<AgentFileDiff[] | null>(null);
   const [steerText, setSteerText] = useState('');
   const steerRef = useRef<HTMLTextAreaElement | null>(null);
+
+  // Delta bullets (comprehension concern 08): this unit's own `source:"model-delta"` decisions from
+  // its bound feature — `features` is already fetched app-wide (TaskContext), so no new route is
+  // needed; `deltaBullets` (lib/intervene.ts) owns the filter/cap/sort logic, this is wiring only.
+  const boundFeature = useMemo(() => features.find((f) => f.id === agent?.featureId), [features, agent?.featureId]);
+  const bullets = useMemo(() => deltaBullets(boundFeature?.decisions, agent?.id), [boundFeature, agent?.id]);
+  const [surprisedIds, setSurprisedIds] = useState<Set<string>>(new Set());
+  const onSurprise = useCallback(
+    (bulletId: string, evidence: string[]) => {
+      if (!agent?.id || !agent.repo) return;
+      const file = firstEvidenceFile(evidence);
+      if (!file) return;
+      reportAttention({ kind: 'surprise', repo: agent.repo, file, agentId: agent.id });
+      setSurprisedIds((prev) => (prev.has(bulletId) ? prev : new Set(prev).add(bulletId)));
+    },
+    [agent?.id, agent?.repo],
+  );
+
+  // Story-order toggle (comprehension concern 08): default 'story' (definition-before-use + layer
+  // precedence, lib/diff-order.ts); 'path' is a plain lexical fallback. Pure reorder of `diffs` only
+  // — the underlying array/fetch is unaffected.
+  const [orderMode, setOrderMode] = useState<DiffOrderMode>('story');
+  const orderedDiffs = useMemo(() => (diffs ? orderDiffs(diffs, orderMode) : diffs), [diffs, orderMode]);
+
+  // Evidence-link jump target: which file an evidence anchor click should scroll to (and force open,
+  // via `InterveneFileDiff`'s `autoOpen`). `diffNodesRef` (declared below) already holds every
+  // rendered file's DOM node for the viewport observer, so the jump reuses it rather than a second
+  // ref map.
+  const [jumpFile, setJumpFile] = useState<string | null>(null);
 
   // Keep this agent's transcript live so the console (and anything reading transcripts) stays warm
   // for the operator who opens the full console from here.
@@ -179,6 +218,14 @@ export const IntervenceView: React.FC = () => {
   const attentionFloorRef = useRef<Record<string, number>>({});
   const observerRef = useRef<IntersectionObserver | null>(null);
   const diffNodesRef = useRef<Map<string, HTMLDivElement>>(new Map());
+
+  // Delta-bullet evidence link → scroll to (and force-open) that file's diff section. Reuses the
+  // observer's own `diffNodesRef` — no second DOM ref map for what is otherwise the same "one node
+  // per file" registry.
+  const jumpToFile = useCallback((file: string) => {
+    setJumpFile(file);
+    diffNodesRef.current.get(file)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, []);
 
   const handleIntersections = useCallback((entries: IntersectionObserverEntry[]) => {
     if (!agentId || !repo) return;
@@ -333,20 +380,62 @@ export const IntervenceView: React.FC = () => {
           <GateWidget key={req.id} request={req} onAnswer={(value) => answer(req.id, value)} />
         ))}
 
+        {/* Delta bullets (comprehension concern 08): this unit's own recorded mental-model deltas —
+            the teaching moment. Empty state renders nothing (no placeholder nagging). */}
+        {bullets.length > 0 && (
+          <div className="space-y-1.5">
+            <div className="text-[11px] font-semibold uppercase tracking-widest text-gray-400">What changed here</div>
+            {bullets.map((b) => (
+              <div key={b.id} className="rounded-lg border border-violet-200 bg-violet-50 px-3 py-2 text-xs text-violet-900 dark:border-violet-900/50 dark:bg-violet-950/20 dark:text-violet-100">
+                <div>{b.text}</div>
+                <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                  {b.evidence.map((anchor) => (
+                    <button
+                      key={anchor}
+                      onClick={() => jumpToFile(parseEvidenceAnchor(anchor).file)}
+                      className="rounded border border-violet-200 bg-white px-1.5 py-0.5 font-mono text-[10px] text-violet-700 underline decoration-dotted transition-colors hover:bg-violet-100 dark:border-violet-800 dark:bg-gray-950 dark:text-violet-300 dark:hover:bg-violet-900/40"
+                      title={`Scroll to ${parseEvidenceAnchor(anchor).file}`}
+                    >
+                      {anchor}
+                    </button>
+                  ))}
+                  <button
+                    onClick={() => onSurprise(b.id, b.evidence)}
+                    disabled={surprisedIds.has(b.id)}
+                    className="ml-auto flex-shrink-0 rounded-full border border-violet-300 px-2 py-0.5 text-[10px] font-semibold text-violet-700 transition-colors hover:bg-violet-100 disabled:cursor-default disabled:opacity-60 dark:border-violet-700 dark:text-violet-300 dark:hover:bg-violet-900/40"
+                    title="Flag that this diverged from your mental model — raises this file's comprehension debt"
+                  >
+                    {surprisedIds.has(b.id) ? 'Noted' : 'Surprised me'}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
         {/* The diff — the spine. What it changed, file by file, with line-level correction. */}
         <div>
           <div className="mb-1.5 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-widest text-gray-400">
             <span>Changes</span>
             <span className="text-gray-300 dark:text-gray-600">·</span>
             <span>{diffs == null ? 'loading…' : `${diffs.length} changed ${diffs.length === 1 ? 'file' : 'files'}`}</span>
+            {diffs != null && diffs.length > 1 && (
+              <button
+                onClick={() => setOrderMode((m) => (m === 'story' ? 'path' : 'story'))}
+                className="ml-auto flex-shrink-0 rounded-full border border-gray-200 px-2 py-0.5 text-[10px] font-medium normal-case tracking-normal text-gray-500 transition-colors hover:bg-gray-100 dark:border-gray-700 dark:text-gray-400 dark:hover:bg-gray-800"
+                title="Toggle between a definition-before-use reading order and plain path order"
+              >
+                {orderMode === 'story' ? 'Story order' : 'Path order'}
+              </button>
+            )}
           </div>
           {diffs != null && diffs.length === 0 && (
             <div className="rounded-md border border-dashed border-gray-200 px-3 py-4 text-center text-xs text-gray-400 dark:border-gray-800">No file changes yet.</div>
           )}
           <div className="space-y-2">
-            {diffs?.map((d) => (
+            {orderedDiffs?.map((d) => (
               <div key={d.file} ref={(el) => registerDiffNode(d.file, el)} data-attention-file={d.file}>
-                <InterveneFileDiff diff={d} onComment={commentSteer} />
+                <InterveneFileDiff diff={d} onComment={commentSteer} autoOpen={jumpFile === d.file} />
               </div>
             ))}
           </div>

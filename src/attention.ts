@@ -108,6 +108,38 @@ function loadSeenMap(stateDir: string): SeenMap {
 	}
 }
 
+/** Comprehension concern 08's compacted per-(repo,file) `surprise` TAP COUNT map — same durability
+ *  contract as the seen map above (`attention-surprise.json`, `getStorageBackend()`,
+ *  debounced-write-on-flush) and deliberately NOT derived from `recentEvents()`/the raw JSONL feed:
+ *  that feed rotates (module doc — "NEVER read for fog"), so a durable per-file COUNT needs its own
+ *  compacted store, exactly like `lastSeenAt` needed one instead of trusting the ring tail. Keyed by
+ *  the SAME `seenKey`/`fogKey` convention so `computeFog`'s `surpriseCounts` input joins directly. */
+export type SurpriseCountMap = Record<string, number>;
+
+function surprisePath(stateDir: string): string {
+	return path.join(stateDir, "attention-surprise.json");
+}
+
+/** Same corrupt/missing ⇒ empty contract as `loadSeenMap`. */
+function loadSurpriseCounts(stateDir: string): SurpriseCountMap {
+	try {
+		const b = getStorageBackend();
+		const p = surprisePath(stateDir);
+		if (!b.exists(p)) return {};
+		const raw0 = b.readTextSync(p);
+		if (raw0 === undefined) return {};
+		const raw = JSON.parse(raw0) as unknown;
+		if (!raw || typeof raw !== "object") return {};
+		const out: SurpriseCountMap = {};
+		for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+			if (typeof v === "number" && Number.isFinite(v) && v >= 0) out[k] = v;
+		}
+		return out;
+	} catch {
+		return {};
+	}
+}
+
 /** Minute-bucket token limiter — same shape as `server.ts`'s `minuteRateAllowed` (not imported from
  *  there to avoid a src/attention.ts → src/server.ts dependency; this module is constructed by
  *  `SquadManager`, well below `server.ts` in the dependency graph). */
@@ -145,6 +177,10 @@ export class AttentionStore {
 	private readonly rateLimitPerMin: number;
 	private readonly raw: JsonlLog<AttentionEvent>;
 	private seenMap: SeenMap;
+	/** Concern-08 surprise-tap counts — see `SurpriseCountMap`'s doc above. Written through the same
+	 *  debounced-flush path as `seenMap`; both are part of one `dirty` flag since every event that
+	 *  touches either always originates from the same `record()` call. */
+	private surpriseCounts: SurpriseCountMap;
 	private readonly rateBuckets = new Map<string, { minute: number; count: number }>();
 	/** Coalesce key → last-seen `at`, for the 30s idempotent-replay window. Unbounded but tiny in
 	 *  practice (one entry per distinct (kind,repo,file,agentId,viewerId) tuple ever reported). */
@@ -159,6 +195,7 @@ export class AttentionStore {
 		this.rateLimitPerMin = opts.rateLimitPerMin ?? DEFAULT_RATE_LIMIT_PER_MIN;
 		this.raw = new JsonlLog<AttentionEvent>({ path: path.join(this.stateDir, "operator-attention.jsonl"), log: (m) => this.log(`operator-attention.jsonl: ${m}`) });
 		this.seenMap = loadSeenMap(this.stateDir);
+		this.surpriseCounts = loadSurpriseCounts(this.stateDir);
 	}
 
 	/** `GLANCE_ATTENTION=0` — the kill switch (DESIGN.md "Privacy posture" row). Read live (not
@@ -189,6 +226,11 @@ export class AttentionStore {
 		this.coalesceLast.set(coalesceKey, at);
 		this.raw.append(event);
 		if (SEEN_UPDATING_KINDS.has(event.kind) && event.file) this.mergeSeen(event.repo, event.file, event.viewerId, at);
+		// Concern 08: a `surprise` tap ALSO increments its own durable per-(repo,file) count — the
+		// seen-map merge above already moved `lastSeenAt` forward (a surprise tap is itself a "looked at
+		// this" signal), but `computeFog`'s boost needs a COUNT, which the seen map's max-merge can't
+		// represent (a repeated view never regresses `lastSeenAt` to something incrementable).
+		if (event.kind === "surprise" && event.file) this.incrementSurprise(event.repo, event.file);
 		return { ok: true };
 	}
 
@@ -201,6 +243,14 @@ export class AttentionStore {
 		let byViewer = existing?.byViewer;
 		if (viewerId) byViewer = { ...byViewer, [viewerId]: Math.max(byViewer?.[viewerId] ?? 0, at) };
 		this.seenMap[key] = byViewer ? { lastSeenAt, byViewer } : { lastSeenAt };
+		this.scheduleWrite();
+	}
+
+	/** Increment the durable surprise-tap count for one (repo,file) pair. Same key convention as
+	 *  `mergeSeen` (`seenKey`) so `computeFog`'s `surpriseCounts` input joins against it directly. */
+	private incrementSurprise(repo: string, file: string): void {
+		const key = seenKey(repo, file);
+		this.surpriseCounts[key] = (this.surpriseCounts[key] ?? 0) + 1;
 		this.scheduleWrite();
 	}
 
@@ -226,6 +276,11 @@ export class AttentionStore {
 		} catch (err) {
 			// Best-effort: a disk failure must never break whatever caller triggered this flush.
 			this.log(`attention-seen.json write failed: ${errText(err)}`);
+		}
+		try {
+			getStorageBackend().writeDurableSync(surprisePath(this.stateDir), JSON.stringify(this.surpriseCounts));
+		} catch (err) {
+			this.log(`attention-surprise.json write failed: ${errText(err)}`);
 		}
 	}
 
@@ -253,6 +308,23 @@ export class AttentionStore {
 
 	lastSeen(repo: string, file: string): SeenEntry | undefined {
 		return this.seenMap[seenKey(repo, file)];
+	}
+
+	/** Concern-08 fog wiring: the durable surprise-count map, restricted to `repos` exactly like
+	 *  `seenMapFor` — `undefined` means unrestricted, an explicit `[]` means "nothing" (fail closed),
+	 *  never conflated (same tenant-scoping contract, same reasoning: a caller with a genuinely empty
+	 *  actor-visible repo set must never be handed another tenant's counts just because it asked for
+	 *  "no filter" by omission vs. asked for "empty" on purpose). */
+	surpriseCountsFor(repos?: string[]): SurpriseCountMap {
+		if (repos === undefined) return { ...this.surpriseCounts };
+		if (repos.length === 0) return {};
+		const keys = new Set(repos.map(normalizeRepoPath));
+		const out: SurpriseCountMap = {};
+		for (const [key, count] of Object.entries(this.surpriseCounts)) {
+			const repo = key.slice(0, key.indexOf("\0"));
+			if (keys.has(repo)) out[key] = count;
+		}
+		return out;
 	}
 
 	/** Raw feed's ring tail — bounded telemetry (module doc), NEVER the fog's read source. Newest
