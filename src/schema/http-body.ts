@@ -379,13 +379,16 @@ export const AdoptBodySchema = Schema.Struct({
 /** POST /api/console — no required field. `harness` selects a registered harness for the console
  *  unit (the `glance here` terminal client rides the operator's own claude login via "claude-code");
  *  `ephemeral: true` registers the repo as a project for the session's lifetime only (daily-onramp
- *  02) — Schema.Struct strips unknown keys, so both must be named here to reach the route at all. */
+ *  02); `reattachOf` names a dead predecessor session — the new unit gets the honest restart marker
+ *  and the response carries the recovered prior-context block (daily-onramp 04). Schema.Struct
+ *  strips unknown keys, so each must be named here to reach the route at all. */
 export const ConsoleBodySchema = Schema.Struct({
 	repo: Schema.optional(Schema.Unknown),
 	model: Schema.optional(Schema.Unknown),
 	profileId: Schema.optional(Schema.Unknown),
 	harness: Schema.optional(Schema.Unknown),
 	ephemeral: Schema.optional(Schema.Unknown),
+	reattachOf: Schema.optional(Schema.Unknown),
 });
 
 /** POST /api/console/release — the `glance here` exit hook: undo an ephemeral project registration

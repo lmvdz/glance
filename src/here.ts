@@ -49,7 +49,14 @@ export interface HereSessionInfo {
 	agentId: string;
 	repo: string;
 	ephemeral: boolean;
+	/** Recovered prior-session context (restart re-attach, daily-onramp 04) — present only when the
+	 *  create named a dead predecessor whose transcript tail was still recoverable. Folded into the
+	 *  operator's FIRST prompt, never auto-sent. */
+	priorContext?: string;
 }
+
+/** What became of a session id the roster no longer lists (daily-onramp 04). */
+export type SessionFate = "live" | "missing" | { dead: true; deadReason?: string };
 
 export class HereClient {
 	constructor(
@@ -76,10 +83,10 @@ export class HereClient {
 		}
 	}
 
-	async createSession(opts: { repo: string; harness?: string; model?: string }): Promise<HereSessionInfo> {
+	async createSession(opts: { repo: string; harness?: string; model?: string; reattachOf?: string }): Promise<HereSessionInfo> {
 		const res = await this.req("/api/console", {
 			method: "POST",
-			body: JSON.stringify({ repo: opts.repo, harness: opts.harness ?? HERE_HARNESS, model: opts.model, ephemeral: true }),
+			body: JSON.stringify({ repo: opts.repo, harness: opts.harness ?? HERE_HARNESS, model: opts.model, ephemeral: true, reattachOf: opts.reattachOf }),
 		});
 		if (!res.ok) throw new Error((await res.text().catch(() => "")) || `the daemon refused the session (${res.status})`);
 		return (await res.json()) as HereSessionInfo;
@@ -90,8 +97,10 @@ export class HereClient {
 		if (!res.ok) throw new Error((await res.text().catch(() => "")) || `command failed (${res.status})`);
 	}
 
-	prompt(id: string, message: string): Promise<void> {
-		return this.command({ type: "prompt", id, message });
+	/** `displayText` carries the user's bare typed text when `message` was context-augmented (the
+	 *  restart re-attach fold) — the transcript keeps the full audit copy, viewers show what was typed. */
+	prompt(id: string, message: string, displayText?: string): Promise<void> {
+		return this.command({ type: "prompt", id, message, displayText });
 	}
 
 	answer(id: string, requestId: string, value: string): Promise<void> {
@@ -113,6 +122,16 @@ export class HereClient {
 		if (!res.ok) throw new Error(`roster fetch failed (${res.status})`);
 		const agents = (await res.json()) as AgentDTO[];
 		return agents.find((a) => a.id === id);
+	}
+
+	/** The single-agent read (daily-onramp 04): tells a live id from a restart-killed one (the daemon
+	 *  answers with its dead placeholder) from one with no story left (clean 404 → "missing"). */
+	async sessionFate(id: string): Promise<SessionFate> {
+		const res = await this.req(`/api/agents/${encodeURIComponent(id)}`, { timeoutMs: 3000 });
+		if (res.status === 404) return "missing";
+		if (!res.ok) throw new Error(`agent fetch failed (${res.status})`);
+		const body = (await res.json()) as { dead?: boolean; deadReason?: string };
+		return body.dead === true ? { dead: true, deadReason: body.deadReason } : "live";
 	}
 
 	async release(repo: string): Promise<void> {
@@ -156,6 +175,14 @@ export class TranscriptRenderer {
 	get streaming(): boolean {
 		for (const s of this.live.values()) if (!s.done) return true;
 		return false;
+	}
+
+	/** Back to a fresh cursor — a re-attached successor session's seqs restart from the new daemon's
+	 *  counter, so the old floor would silently swallow its entries (daily-onramp 04). */
+	reset(): void {
+		this.live.clear();
+		this.floor = 0;
+		this.maxSeen = 0;
 	}
 
 	take(entries: TranscriptEntry[]): string[] {
@@ -223,7 +250,7 @@ export class TranscriptRenderer {
 
 // ── Session state machine (unit-tested; terminal-free) ──────────────────────────────────────────
 
-export type HereStatus = "connecting" | "ready" | "gone" | "error";
+export type HereStatus = "connecting" | "ready" | "gone" | "error" | "dead";
 
 /**
  * The client-side session: queues prompts until the daemon-side create resolves (prewarm P1 —
@@ -238,19 +265,49 @@ export class HereSession {
 	private shownPending = new Set<string>();
 	private sendInFlight = 0;
 	private emitted = 0;
+	/** Set by the REPL when a poll failed to REACH the daemon (connection refused / mid-restart) —
+	 *  the signal that a later roster miss means "did not survive the restart", not "was removed". */
+	private sawDisconnect = false;
+	/** Recovered prior-session context, folded into the FIRST prompt after a re-attach and then
+	 *  cleared — never auto-sent on its own (no silent spend). */
+	private pendingContext?: string;
 	status: HereStatus = "connecting";
 
 	constructor(
 		private readonly client: HereClient,
 		private readonly print: (line: string) => void,
+		/** Restart re-attach hook (daily-onramp 04): the session id did not survive a daemon restart.
+		 *  The REPL owns the recovery choreography (honest banner → fresh create with `reattachOf` →
+		 *  `rebind`). Absent ⇒ the pre-04 "removed on the daemon side" message for every roster miss. */
+		private readonly onDead?: (deadId: string, deadReason?: string) => void,
 	) {}
 
 	/** The daemon-side create resolved: flush everything typed while it was starting. */
 	attach(agentId: string): void {
+		this.rebind(agentId);
+	}
+
+	/** Point this session at a successor agent (restart re-attach): fresh transcript cursor (the new
+	 *  daemon's seq counter restarts, so the old floor would swallow every new entry), fresh pending
+	 *  view, and everything typed while dead/starting flushes — the first flushed prompt carries the
+	 *  recovered prior context. */
+	rebind(agentId: string, priorContext?: string): void {
+		this.renderer.reset();
+		this.lastAgent = undefined;
+		this.shownPending.clear();
+		this.sawDisconnect = false;
+		this.pendingContext = priorContext;
 		this.agentId = agentId;
 		this.status = "ready";
 		const queued = this.queued.splice(0);
 		for (const message of queued) this.send(message);
+	}
+
+	/** The REPL's poll tick failed to reach the daemon at all — remember it, so a subsequent roster
+	 *  miss reads as restart death rather than an operator-side remove. Cleared by rebind and by the
+	 *  next poll that finds the agent alive. */
+	noteDisconnect(): void {
+		this.sawDisconnect = true;
 	}
 
 	get attached(): boolean {
@@ -317,10 +374,18 @@ export class HereSession {
 
 	private send(message: string): void {
 		if (!this.agentId) return;
+		// Fold the recovered prior-session context into the FIRST prompt after a re-attach (the
+		// decoratePrompt feed-forward precedent); displayText keeps viewers showing what was typed.
+		const ctx = this.pendingContext;
+		this.pendingContext = undefined;
 		this.sendInFlight++;
 		void this.client
-			.prompt(this.agentId, message)
-			.catch((err) => this.print(red(`✗ message didn't reach the agent: ${msg(err)}`)))
+			.prompt(this.agentId, ctx ? `${ctx}\n\n${message}` : message, ctx ? message : undefined)
+			.catch((err) => {
+				// The context never reached the agent — hold it for the next attempt, not the void.
+				if (ctx && this.pendingContext === undefined) this.pendingContext = ctx;
+				this.print(red(`✗ message didn't reach the agent: ${msg(err)}`));
+			})
 			.finally(() => this.sendInFlight--);
 	}
 
@@ -331,10 +396,11 @@ export class HereSession {
 
 	/** One poll tick: print new transcript lines, surface pending requests, notice death. */
 	async poll(): Promise<void> {
-		if (!this.agentId || this.status === "gone") return;
+		if (!this.agentId || this.status === "gone" || this.status === "dead") return;
+		const agentId = this.agentId;
 		const [entries, agent] = await Promise.all([
-			this.client.transcriptSince(this.agentId, this.renderer.since),
-			this.client.agent(this.agentId),
+			this.client.transcriptSince(agentId, this.renderer.since),
+			this.client.agent(agentId),
 		]);
 		for (const line of this.renderer.take(entries)) {
 			this.print(line);
@@ -342,10 +408,24 @@ export class HereSession {
 		}
 		this.lastAgent = agent;
 		if (!agent) {
+			// Roster miss — ask the single-agent read what became of the id (daily-onramp 04). Three
+			// honest outcomes: still live (a roster/read race — wait for the next tick), dead behind a
+			// restart (placeholder, or a clean miss right after a connection loss — the placeholder
+			// window may have lapsed), or genuinely removed while the daemon stayed up.
+			const fate = await this.client.sessionFate(agentId).catch(() => undefined);
+			if (fate === "live") return;
+			const placeholder = typeof fate === "object" ? fate : undefined;
+			if ((placeholder !== undefined || this.sawDisconnect) && this.onDead) {
+				this.status = "dead";
+				this.agentId = undefined; // lines typed from here queue for the successor session
+				this.onDead(agentId, placeholder?.deadReason);
+				return;
+			}
 			this.status = "gone";
 			this.print(red("✗ the session was removed on the daemon side — nothing more will arrive here"));
 			return;
 		}
+		this.sawDisconnect = false;
 		if (agent.status === "error") {
 			this.status = "error";
 			this.print(red(`✗ the session hit an error: ${agent.blockedReason ?? agent.error ?? "unknown"}`));
@@ -526,7 +606,40 @@ export async function cmdHere(args: string[]): Promise<void> {
 		rl.prompt(true);
 	};
 
-	const session = new HereSession(client, printAbove);
+	const harnessFlag = typeof flags.harness === "string" ? flags.harness : undefined;
+	const modelFlag = typeof flags.model === "string" ? flags.model : undefined;
+	let closing = false;
+	let reattaching = false;
+
+	// Restart re-attach (daily-onramp 04): the session did not survive a daemon restart (claude-code
+	// is ACP — no detached host, correctly never cold-restored). Say so plainly, start a FRESH session
+	// through the exact same create path, and let the recovered prior context ride the operator's own
+	// next prompt. Never silent, never presented as a seamless resume it isn't.
+	const onDead = (deadId: string, deadReason?: string): void => {
+		if (reattaching || closing) return;
+		reattaching = true;
+		printAbove(yellow(`⟲ the daemon restarted and this session didn't survive it — ${deadReason ?? `harness "${harnessFlag ?? HERE_HARNESS}" can't resume across a restart`}`));
+		printAbove(dim("  starting a fresh session with your prior conversation carried in as context…"));
+		void client
+			.createSession({ repo, harness: harnessFlag, model: modelFlag, reattachOf: deadId })
+			.then((created) => {
+				info = created;
+				session.rebind(created.agentId, created.priorContext);
+				printAbove(`${green("●")} re-attached ${dim(`(fresh session ${created.agentId} · ${created.priorContext ? "prior context rides your next message" : "no prior context was recoverable"})`)}`);
+			})
+			.catch((err) => {
+				// Fail-closed: an honest error and a clean exit — never a silent hang on a dead id,
+				// never a fabricated "resumed" state.
+				printAbove(red(`✗ couldn't re-attach after the restart: ${msg(err)}`));
+				printAbove(dim("  nothing was sent — rerun glance here when the daemon is back"));
+				shutdown(1);
+			})
+			.finally(() => {
+				reattaching = false;
+			});
+	};
+
+	const session = new HereSession(client, printAbove, onDead);
 	const startedAt = Date.now();
 	let info: HereSessionInfo | undefined;
 
@@ -542,7 +655,7 @@ export async function cmdHere(args: string[]): Promise<void> {
 
 	// Prewarm P1: create in the background; the prompt below is already live.
 	const creating = client
-		.createSession({ repo, harness: typeof flags.harness === "string" ? flags.harness : undefined, model: typeof flags.model === "string" ? flags.model : undefined })
+		.createSession({ repo, harness: harnessFlag, model: modelFlag })
 		.then((created) => {
 			info = created;
 			session.attach(created.agentId);
@@ -556,7 +669,6 @@ export async function cmdHere(args: string[]): Promise<void> {
 		});
 
 	// Adaptive poll: fast while a turn is in flight, gentle when idle. One tick in flight at a time.
-	let closing = false;
 	let lostAt: number | undefined;
 	let prevBusy = false;
 	let turnBaseline = 0; // session.transcriptLines when the current turn began
@@ -569,6 +681,9 @@ export async function cmdHere(args: string[]): Promise<void> {
 				printAbove(`${green("●")} reconnected`);
 			}
 		} catch {
+			// Couldn't REACH the daemon (down / mid-restart) — mark it, so when it answers again a
+			// missing agent id reads as "did not survive the restart" and triggers the honest re-attach.
+			session.noteDisconnect();
 			if (lostAt === undefined) {
 				lostAt = Date.now();
 				printAbove(yellow("… lost the daemon — retrying quietly (Ctrl-C to leave)"));
