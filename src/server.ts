@@ -71,6 +71,7 @@ import {
 	PlanVoteCallBodySchema,
 	PlanVoteCastBodySchema,
 	PushSubscriptionBodySchema,
+	PushTapBodySchema,
 	SpawnBodySchema,
 	AskBodySchema,
 	HarnessEventBodySchema,
@@ -80,6 +81,7 @@ import {
 	TaskStartBodySchema,
 	VoiceTokenBodySchema,
 } from "./schema/http-body.ts";
+import { mergeAdoptionCounters } from "./adoption-counters.ts";
 import { worktreeDiffSinceFork, worktreeTree } from "./explore.ts";
 import { appendConcernDecision, listPlanDirs, parsePlanConcerns, parsePlanDocuments } from "./features.ts";
 import { isPlanDocPath, planDocDiffSince, planDocHeadRevision, readPlanDoc } from "./plan-doc.ts";
@@ -958,6 +960,14 @@ export class SquadServer {
 			// later concept in the loop can be A/B-compared against this. ?windowMs= sizes the rollup window.
 			const windowMs = Number(url.searchParams.get("windowMs"));
 			return Response.json(learningLoopPayloadAcross(managers, Number.isFinite(windowMs) && windowMs > 0 ? windowMs : undefined));
+		}
+		if (url.pathname === "/api/adoption") {
+			// Dogfood adoption counters (plans/daily-dogfood-engine/02): casual sessions/prompts/push-taps
+			// per UTC day, computed per manager from its OWN durable stateDir data (receipts/,
+			// transitions.jsonl, push-taps.jsonl) and summed. Viewer-tier read (authz.ts GET default) —
+			// counters are not sensitive, and the whole point is a zero-ceremony glance. Scoped like every
+			// route here: a tenant session's `managers` is its own 1-manager array.
+			return Response.json(mergeAdoptionCounters(await Promise.all(managers.map((m) => m.adoptionCounters()))));
 		}
 		return undefined;
 	}
@@ -2450,6 +2460,16 @@ export class SquadServer {
 			if (Result.isFailure(decoded)) return new Response("repo required", { status: 400 });
 			const released = manager.releaseEphemeralProject(decoded.success.repo);
 			return Response.json(released, { status: released.ok ? 200 : 500 });
+		}
+		// Push-tap beacon (daily-dogfood-engine 02): the webapp fires this ONCE per notification-tap
+		// page open (`?push=1` marker on push payload URLs, sessionStorage-deduped client-side).
+		// Appends {ts, agentId} to this manager's push-taps.jsonl — observability only, gates nothing.
+		// Viewer-tier by design (authz.ts): a viewer device's tap is still a tap.
+		if (url.pathname === "/api/push-tap" && req.method === "POST") {
+			const tapDecoded = decodeBody(PushTapBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(tapDecoded)) return new Response("agentId required", { status: 400 });
+			manager.recordPushTap(tapDecoded.success.agentId);
+			return Response.json({ ok: true });
 		}
 		// Feature 2 D2 (CANVAS-AND-PAGE-CHAT.md): a pasted/dropped/captured/annotated chat image
 		// persists here as a chat ARTIFACT (org-scoped by `manager`, size/PNG-magic-validated in

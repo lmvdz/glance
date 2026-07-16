@@ -107,6 +107,10 @@ export function restActionTier(method: string, pathname: string): Role {
 	// holding a file — fleet-ide-intervention I02) mutate shared machine-wide state, so operator.
 	// The route additionally scope-gates writes to a daemon-known workspace and refuses DB mode.
 	if (pathname === "/api/presence" || pathname === "/api/leases") return method === "GET" ? "viewer" : "operator";
-	if (pathname === "/api/auth/check" || pathname.startsWith("/api/push/")) return "viewer";
+	// The push-tap beacon is a POST but stays viewer, like push registration above it: anyone who
+	// can open the app from a notification tap must be able to have that tap counted (it appends an
+	// observability line, gates nothing) — an operator floor would silently zero the push-taps/day
+	// adoption counter for viewer-tier devices (daily-dogfood-engine 02).
+	if (pathname === "/api/auth/check" || pathname === "/api/push-tap" || pathname.startsWith("/api/push/")) return "viewer";
 	return method === "GET" ? "viewer" : "operator";
 }

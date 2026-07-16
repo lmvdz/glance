@@ -1,6 +1,6 @@
 # Adoption counters — casual sessions/prompts/push-taps per day
 
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -33,3 +33,57 @@ None directly — omp-squad only. Note for whoever eventually builds cockpit con
 - `glance doctor` (scratch-daemon skill): confirm the adoption section renders and reflects seeded data.
 - Live: `agent-browser` load the webapp with `#/agent/<id>?push=1` in the URL, confirm exactly one `POST /api/push-tap` fires (check via `GET /api/adoption` before/after) and the marker is stripped from the visible URL; reload the same URL without the marker and confirm no second tap is recorded.
 - `scripts/append-adoption-ledger.ts` run once against a scratch daemon, confirm it appends a well-formed row and does not corrupt the rest of `00-meta.md`.
+
+## Resolution
+
+Executed 2026-07-16 (feat/daily-driver-w1). Every Verify item below was driven live against a
+scratch daemon (file mode, own state dir, port 17944, loops off) plus a real browser — not
+inferred from green tests. Salvaged a prior session-limit-killed attempt and completed it: the
+salvage was near-complete and sound; the one defect found was a test hole it had opened
+(doctor's "report full of unknowns" invariant no longer held because the new `adoption` probe
+wasn't in the all-probes-boom list — fixed).
+
+**What shipped.**
+- `src/adoption-counters.ts`: pure by-day counters + `computeAdoptionCounters(stateDir, live?)`.
+  Casual = console-lane `chat` convention (name match + `chat-` id-prefix fallback for live units
+  with no receipt yet, per arbitration §RT2-4a — no on-ramp dependency). Sessions dedupe by
+  (agentId, UTC day) because ACP finalizes a receipt PER TURN — counting receipts raw would have
+  re-derived prompts/day under the wrong name. Prompts = non-denied transitions into `working`
+  from `idle`|`input`. Torn/foreign JSONL lines dropped (never NaN-bucketed); JsonlLog `.1`
+  rotation tails counted; live rings folded in with seq-uuid / (ts,agentId) dedupe so
+  GET /api/adoption reads its own just-recorded write.
+- Push-tap lane end to end: `?push=1` on both push payload URLs (`escalationPayload`,
+  `voiceDonePayload`; sw.js passes `data.url` through verbatim — verified in source) →
+  `webapp/src/lib/push-tap.ts` beacons once (sessionStorage dedupe keyed on the exact hash,
+  strip-after-use via replaceState, same precedent as `?token=`; covers BOTH the cold-open lane
+  and the sw `navigate()`-into-an-open-window hashchange lane) → `POST /api/push-tap`
+  (viewer-tier by design — an operator floor would silently zero the counter for viewer devices;
+  agentId clamped) → `push-taps.jsonl` via the same `JsonlLog` infra as transitions.
+- Surfaces: `GET /api/adoption` (viewer read, per-manager sum via `mergeAdoptionCounters`);
+  doctor section "Is glance getting daily use?" — daemon-first, durable-JSONL fallback when no
+  daemon answers; zeros are honest ok-with-zeros (a finding for the gate, not a machine fault),
+  a failed read is `unknown` via attempt(), never a fabricated zero. Weekly
+  `scripts/append-adoption-ledger.ts` appends ONE row inside `## Ledger`, fail-closed
+  (unreachable daemon / wrong shape / missing section ⇒ exit 1, file untouched).
+
+**Verify evidence (all executed).**
+- 74 daemon-side tests pass (adoption-counters/doctor/escalation/push) + 4 webapp push-tap
+  parser tests; tsc clean.
+- Scratch daemon: seeded receipts/transitions/push-taps across a UTC midnight boundary →
+  `GET /api/adoption` and `glance doctor` both reported the exact expected numbers
+  (sessions deduped per day, fleet unit excluded, yesterday's tap bucketed to yesterday).
+- Live browser (agent-browser): open `/?token=…#/agent/chat-seed1?push=1` → exactly ONE tap
+  recorded, marker AND token stripped from the visible URL; reload of the stripped URL → no
+  second tap; same-document `location.hash` change to a marked hash (the sw-navigate lane) →
+  one more tap, marker stripped again.
+- Ledger script: `--dry-run` prints without writing; real run against a copy of 00-meta.md
+  appended exactly one well-formed row at the end of `## Ledger` (diff = that one line); dead
+  daemon ⇒ exit 1 + file byte-identical; no-Ledger file ⇒ exit 1 untouched.
+- Doctor rule-2 fallback: daemon killed → adoption section still reports the durable history.
+
+**Known limits (deliberate, smallest-honest-version).**
+- A second push tap on the SAME agent in the same tab session is deduped by the exact-hash
+  sessionStorage flag (the concern's specified remount guard) — repeated same-agent taps within
+  one tab session undercount. Taps on different agents, new tabs, and new sessions all count.
+- Counters are approximate by design and never gate behavior; 03 (drain cadence) owns when the
+  ledger script runs.

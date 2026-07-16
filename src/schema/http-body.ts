@@ -409,6 +409,13 @@ export const ConsoleReleaseBodySchema = Schema.Struct({
 	repo: Schema.String,
 });
 
+/** POST /api/push-tap (daily-dogfood-engine 02) — the webapp's one-shot beacon that a page open
+ *  arrived via a push-notification tap (the `?push=1` marker on push payload URLs). `agentId`
+ *  required: a tap is always a tap ON some agent's notification. */
+export const PushTapBodySchema = Schema.Struct({
+	agentId: Schema.String,
+});
+
 /** POST /api/agents/:id/land — no required field. */
 export const AgentLandBodySchema = Schema.Struct({
 	force: Schema.optional(Schema.Unknown),

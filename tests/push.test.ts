@@ -198,7 +198,9 @@ test("voiceDonePayload fires on a seeded, armed working→idle transition with a
 	// screens are not viewer-tier"). Any agent-specific text here would be a privacy regression.
 	expect(p?.body).toBe("Tap to open glance — call back for the spoken debrief.");
 	expect(p?.body).not.toContain("alpha");
-	expect(p?.url).toBe("/#/agent/a1");
+	// `?push=1` = the tap marker the webapp beacons to POST /api/push-tap then strips
+	// (push-taps/day adoption counter, plans/daily-dogfood-engine/02).
+	expect(p?.url).toBe("/#/agent/a1?push=1");
 	// done: namespace — load-bearing so this can never replace, or share a debounce slot with, an
 	// unactioned "needs you" escalation (which tags bare `a.id`, see escalationPayload above).
 	expect(p?.tag).toBe("done:a1");
