@@ -1,6 +1,6 @@
 # Boundary sync — one-directional per-turn patch-apply to the real checkout
 
-STATUS: in-review
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -136,3 +136,20 @@ the fail-closed result plumbing; without it the capture would have bypassed the 
 **Still owed before this ships (gate work, not implementer work):**
 - Live verify per ## Verify (scratch daemon + real `glance here` turn + concurrent real-tree edit +
   webapp Apply click, now plus a Discard click) — Standing requirement #1.
+
+**Live verify — CLOSED 2026-07-16** (Integrated live verification (wave 1), plans/daily-driver/00-meta.md
+Ledger): flows 2–3 of the six-flow integrated pass both PASSED against a real scratch daemon + real
+`glance here` turns on a throwaway repo. Happy path (flow 2): two consecutive clean turns applied
+straight to the real checkout with the real tree provably untouched mid-turn, no attention row raised.
+Held path (flow 3): a concurrent operator edit mid-turn held the patch (`source:"boundary-sync"`,
+`sync:"held"`, real tree left with only the operator's own edit, Apply/Discard copy present in the
+attention payload exactly as designed); `POST /api/agents/:id/apply-held-sync` re-checked and landed the
+held patch cleanly once the fork point matched the real tree (`{"ok":true,"applied":1,"remaining":0}`,
+attention cleared after); `discard-held-sync` also exercised successfully on a genuinely-conflicting
+backlog. One live-only nuance surfaced and understood, not a defect: a fresh session's git worktree
+forks from the committed HEAD, not the real tree's uncommitted state — an operator who never commits
+between `here` sessions on the same repo can see a later session's patch fail `git apply --check`
+against the real tree's accumulated uncommitted lines. The fail-closed hold is exactly correct here
+(never a corrupt apply); it is a usability nuance for heavy multi-session uncommitted use, not a
+boundary-sync bug. Cross-lineage review was already satisfied per the Resolution above; this closes the
+one remaining live-verify gate.
