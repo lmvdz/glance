@@ -550,7 +550,16 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
     if (!openedConsoleAgentId) return;
     const agent = agents.find((a) => a.id === openedConsoleAgentId);
     setSessions((prev) => {
-      if (prev.some((s) => s.id === openedConsoleAgentId)) return prev;
+      const existing = prev.find((s) => s.id === openedConsoleAgentId);
+      if (existing) {
+        // A deep-linked open (`#/agent/<id>`, TaskContext's agent-hash listener) can beat the
+        // roster fetch, so the session was created with the fallback title below. Retitle it the
+        // moment the agent lands — this effect re-runs on `agents`.
+        if (agent && existing.title === 'Agent console') {
+          return prev.map((s) => (s.id === openedConsoleAgentId ? { ...s, title: agent.name } : s));
+        }
+        return prev;
+      }
       const newSession: Session = {
         id: openedConsoleAgentId,
         title: agent?.name ?? 'Agent console',

@@ -3,6 +3,7 @@ import { Task, Project, TaskComment } from '../types';
 import { jsonInit, apiJson } from '../lib/api';
 import { projectsByTeam, resolveCurrentProject, tasksForProject, tasksFromSquad } from '../lib/task-model';
 import { buildReviewHash, parseReviewHash } from '../lib/plan-doc-review';
+import { parseAgentHash } from '../lib/agent-link';
 import { useSquad } from '../hooks/useSquad';
 import { coerceView, VIEW_STORAGE_KEY } from '../lib/viewAlias';
 import type { TasksListMode } from '../lib/pageContextDerive';
@@ -314,6 +315,24 @@ export function TaskProvider({ children }: { children: ReactNode }) {
     applyHash();
     window.addEventListener('hashchange', applyHash);
     return () => window.removeEventListener('hashchange', applyHash);
+  }, []);
+
+  // `#/agent/<id>` — the deep link BOTH existing producers emit (push payloads, src/push.ts;
+  // the URL `glance here` prints, src/here-web.ts). One-way (URL → state) on load and on
+  // back/forward: it opens the agent's console chat, which tolerates the roster still being in
+  // flight (AssistantChat materializes the session once the agent arrives — its effect re-runs
+  // on `agents`). Deliberately NOT synced back: opening a console from inside the UI must not
+  // hijack the address bar, so openConsole never writes the hash. No project-follow either —
+  // the fleet is unscoped by design (agents carry their own repo; see the scoping comment on
+  // `tasks` above), so the chat opens regardless of which project the operator last selected.
+  useEffect(() => {
+    const applyAgentHash = () => {
+      const id = parseAgentHash(window.location.hash);
+      if (id) openConsole(id);
+    };
+    applyAgentHash();
+    window.addEventListener('hashchange', applyAgentHash);
+    return () => window.removeEventListener('hashchange', applyAgentHash);
   }, []);
 
   // The only mutator of `view` state — persists every navigation to localStorage so a reload
