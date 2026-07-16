@@ -58,9 +58,31 @@
   - The fleet PR body's "Verified" section needs a real gate-command provenance producer — receipts
     carry no command/outcome today, so `buildPrBody`'s `testExecutions` honestly renders "no
     observed test runs recorded" rather than fabricating one (concern 06's Resolution note).
+- Audit/code-review named follow-ups (accepted, not fixed this round):
+  - The actor-visible-repos + `?repo=` scoping block is hand-copied across 5 routes in server.ts
+    (attention ×2, fog, symptoms, episodes) — consolidate into one helper before a sixth copy drifts.
+  - `SymptomEntry.fixedBy.prNumber` is never populated (no projection step exists yet); the CLI
+    renders it conditionally so nothing lies, but the doc comment promises a step that isn't built.
+  - Episode `staleAnswers` section renders uncapped; cap if answer volume grows.
+  - Cumulative "living architecture doc" (LANDSCAPE lane 4) shipped as per-week delta sections +
+    durable per-feature decisions + fabric search, not a single accumulated doc.
+  - Per-completion spoken "architecture-story clause" (LANDSCAPE lane 2) is realized as PR-body
+    deltas + the weekly episode, not a per-completion voice line.
 
 ## Decisions so far
 - [DESIGN.md](DESIGN.md) — record-then-render inversion; compacted last-seen map; monotone debt; honest emission semantics (full red-team resolution table there)
+- [04](04-fog-overlay-ui.md) — fog mounts as a NEW `fog` nav view (FogView.tsx); GRAPH-FOLD's heat→omp-graph alias untouched
+- [08](08-intervene-teaching.md) — surprise counts clear on a later genuine view (adjudicated; never a lifetime debt floor)
+- [06](06-pr-body-projection.md) — model-delta records are IMMUTABLE through PATCH; adopt-path body repair only ever fills an EMPTY body
+- [09](09-weekly-episode.md) — episode repo set re-derived live each tick; episodeExists requires both md+meta halves
+- Teaching producers ship gated behind the existing `OMP_SQUAD_DECISION_CAPTURE` flag (default OFF) — flipping the default is Lars's call, flagged in the PR
+
+## Completion
+- 11/11 concerns done (4 batches + 2 fixer rounds + audit round). Gates at close: root 3262 tests /
+  0 fail (one pre-existing acp-agent-driver error), webapp 1372 / 0 fail, tsc clean both, dead-exports
+  ratchet at baseline. Reviews: 4 inline fable batch reviews, cross-batch fable audit (verdict SHIP),
+  /code-review high workflow (10 findings first pass + 4 new on the verify resume — all fixed), live
+  scratch-daemon smoke of every new route.
 
 ## Notes
 - Headless run (background job): EXPLORE/DESIGN/DECOMPOSE gates auto-approved per skill policy; user explicitly authorized execution ("make it a plan and execute").

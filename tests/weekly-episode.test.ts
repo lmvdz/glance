@@ -305,7 +305,7 @@ test("EpisodeLoop.tick generates once, pushes once, and reports a meaningful (fi
 	const pushed: Array<{ title: string; tag?: string }> = [];
 	const reports: AutomationReport[] = [];
 	const loop = new EpisodeLoop({
-		repo: "/repo",
+		repos: () => ["/repo"],
 		stateDir: dir,
 		gather: async () => {
 			gatherCalls++;
@@ -313,7 +313,7 @@ test("EpisodeLoop.tick generates once, pushes once, and reports a meaningful (fi
 		},
 		notifyPush: (p) => void pushed.push(p),
 		now: () => new Date("2026-07-15T12:00:00Z").getTime(),
-		record: (r) => reports.push(r),
+		recordFor: () => (r) => reports.push(r),
 	});
 
 	await loop.tick();
@@ -339,7 +339,7 @@ test("EpisodeLoop.tick skips generation once the target week's artifact exists, 
 	const pushed: unknown[] = [];
 	const reports: AutomationReport[] = [];
 	const loop = new EpisodeLoop({
-		repo: "/repo",
+		repos: () => ["/repo"],
 		stateDir: dir,
 		gather: async () => {
 			gatherCalls++;
@@ -347,7 +347,7 @@ test("EpisodeLoop.tick skips generation once the target week's artifact exists, 
 		},
 		notifyPush: (p) => void pushed.push(p),
 		now: clock,
-		record: (r) => reports.push(r),
+		recordFor: () => (r) => reports.push(r),
 	});
 
 	await loop.tick();
@@ -365,14 +365,14 @@ test("EpisodeLoop.tick reports level:warn (not ring-only) when gather fails, and
 	const pushed: unknown[] = [];
 	const reports: AutomationReport[] = [];
 	const loop = new EpisodeLoop({
-		repo: "/repo",
+		repos: () => ["/repo"],
 		stateDir: dir,
 		gather: async () => {
 			throw new Error("boom");
 		},
 		notifyPush: (p) => void pushed.push(p),
 		now: () => new Date("2026-07-15T12:00:00Z").getTime(),
-		record: (r) => reports.push(r),
+		recordFor: () => (r) => reports.push(r),
 	});
 
 	await loop.tick();
@@ -390,11 +390,11 @@ test("EpisodeLoop.tick reports level:warn when the save itself fails (stateDir u
 
 	const reports: AutomationReport[] = [];
 	const loop = new EpisodeLoop({
-		repo: "/repo",
+		repos: () => ["/repo"],
 		stateDir: notAFile,
 		gather: async () => gatherResult(),
 		now: () => new Date("2026-07-15T12:00:00Z").getTime(),
-		record: (r) => reports.push(r),
+		recordFor: () => (r) => reports.push(r),
 	});
 
 	await loop.tick();
@@ -408,7 +408,7 @@ test("EpisodeLoop.tick is reentrancy-safe: an overlapping call while one is in f
 	const dir = await tmpDir();
 	let gatherCalls = 0;
 	const loop = new EpisodeLoop({
-		repo: "/repo",
+		repos: () => ["/repo"],
 		stateDir: dir,
 		gather: async () => {
 			gatherCalls++;
@@ -434,4 +434,26 @@ test("an orphaned markdown half (crash between md and meta writes) reads as NOT 
 	const repoDir = (await meta(dir + "/episodes"))[0];
 	await rm(`${dir}/episodes/${repoDir}/${built.id}.json`);
 	expect(episodeExists(dir, "/repo", built.id)).toBe(false);
+});
+
+test("EpisodeLoop derives its repo set LIVE each tick — a repo added after construction gets its episode without a restart", async () => {
+	const dir = await tmpDir();
+	const reports: AutomationReport[] = [];
+	const liveRepos: string[] = ["/repo"];
+	const generated: string[] = [];
+	const loop = new EpisodeLoop({
+		repos: () => [...liveRepos],
+		stateDir: dir,
+		gather: async (repo) => {
+			generated.push(repo);
+			return gatherResult();
+		},
+		now: () => new Date("2026-07-15T12:00:00Z").getTime(),
+		recordFor: () => (r) => reports.push(r),
+	});
+	await loop.tick();
+	expect(generated).toEqual(["/repo"]);
+	liveRepos.push("/late-added"); // no restart, no re-construction
+	await loop.tick();
+	expect(generated).toContain("/late-added");
 });

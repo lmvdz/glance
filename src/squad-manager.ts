@@ -1330,12 +1330,14 @@ export class SquadManager extends EventEmitter {
 		// `GLANCE_EPISODE` as primary with `OMP_SQUAD_EPISODE` as its legacy alias, but this used to
 		// read ONLY the old name — the documented primary name silently did nothing).
 		if (envBoolAliased("GLANCE_EPISODE", "OMP_SQUAD_EPISODE", true)) {
-			const episodeRepos = this.featureRepos();
-			for (const repo of episodeRepos) {
+			{
+				// ONE loop over a LIVE repo provider (code-review resume finding 4): the repo set is
+				// re-derived every tick, so a project added after boot gets its weekly brief without a
+				// daemon restart — the old one-loop-per-boot-time-repo shape starved late adds forever.
 				const loop = new EpisodeLoop({
-					repo,
+					repos: () => this.featureRepos(),
 					stateDir: this.stateDir,
-					gather: (window) => this.gatherEpisodeInputs(repo, window),
+					gather: (repo, window) => this.gatherEpisodeInputs(repo, window),
 					// Fresh PushService per send, re-`init()`'d from disk every time (episode pushes fire at
 					// most weekly, so the cost is trivial): the alternative — one long-lived instance built
 					// once at start() — would cache `subs`/`vapid` from whatever existed at boot and never
@@ -1348,13 +1350,13 @@ export class SquadManager extends EventEmitter {
 						await push.init();
 						await push.notify(payload);
 					},
-					log: (m) => this.log("info", `episode[${repo}]: ${m}`),
-					record: this.automation.for("episode", repo),
+					log: (m) => this.log("info", `episode: ${m}`),
+					recordFor: (repo) => this.automation.for("episode", repo),
 				});
 				loop.start(EPISODE_TICK_MS);
 				this.episodeLoops.push(loop);
+				this.log("info", "episode on (weekly brief; repo set re-derived each tick)");
 			}
-			if (episodeRepos.length > 0) this.log("info", `episode on (weekly brief → ${episodeRepos.join(", ")})`);
 		}
 
 		// Resident planner (Epic 1) — the inverse of plan-sync: ingests plans/<name>/OBJECTIVE.md and

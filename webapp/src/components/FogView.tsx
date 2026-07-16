@@ -22,7 +22,7 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { CloudFog, RefreshCw } from 'lucide-react';
-import { apiJson } from '../lib/api';
+import { apiJson, fetchFog, type FogPayload } from '../lib/api';
 import { PageContextScope } from '../context/PageContext';
 import { deriveFogPageContext } from '../lib/pageContextDerive';
 import { buildHeatTree, initialExpanded } from '../lib/heatmap';
@@ -34,16 +34,24 @@ const RANGES = [7, 14, 30] as const;
 export const FogView: React.FC = () => {
   const [days, setDays] = useState<(typeof RANGES)[number]>(14);
   const [heat, setHeat] = useState<HeatPayload | null>(null);
+  const [fog, setFog] = useState<FogPayload | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState('');
 
   const load = useCallback(async () => {
     try {
-      const h = await apiJson<HeatPayload>(`/api/heat?days=${days}`);
-      setHeat(h);
-      setError('');
-    } catch {
-      setError('Could not reach the daemon for fog data.');
+      // Heat and fog refresh TOGETHER on every load (code-review resume finding 6): HeatTree's own
+      // self-fetch fires once and caches forever, so this view's 30s auto-reload and its Refresh
+      // button must own the fog fetch too or the debt/tri-state overlay goes permanently stale
+      // while mounted. Fog failing must not blank the heat tree — it degrades to the last payload.
+      const [h, f] = await Promise.allSettled([apiJson<HeatPayload>(`/api/heat?days=${days}`), fetchFog()]);
+      if (h.status === 'fulfilled') {
+        setHeat(h.value);
+        setError('');
+      } else {
+        setError('Could not reach the daemon for fog data.');
+      }
+      if (f.status === 'fulfilled') setFog(f.value);
     } finally {
       setLoaded(true);
     }
@@ -125,7 +133,7 @@ export const FogView: React.FC = () => {
         )}
 
         {loaded && !error && (
-          <HeatTree days={heat?.days ?? []} tree={tree} showPatterns={false} defaultExpanded={defaultExpanded} initialFogMode />
+          <HeatTree days={heat?.days ?? []} tree={tree} showPatterns={false} defaultExpanded={defaultExpanded} initialFogMode fogData={fog ?? undefined} />
         )}
       </PanelShell>
     </PageContextScope>

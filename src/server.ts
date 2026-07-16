@@ -300,6 +300,12 @@ export function featureDecisions(value: unknown, stored: FeatureDecision[] | und
 		const text = typeof rec.text === "string" ? rec.text.trim() : "";
 		if (!id || !text) return [];
 		const existing = byId.get(id);
+		// model-delta records are IMMUTABLE through PATCH (code-review resume finding 2): their text
+		// was validated against the recording run's evidence anchors, and accepting a client text edit
+		// while keeping source/evidence/sourceRef would present a rewritten claim as run-validated —
+		// the exact fabricated-verification pattern the lane exists to prevent. A client may still
+		// DELETE one by omitting it; editing any other source's text stays allowed.
+		if (existing?.source === "model-delta") return [existing];
 		if (existing) return [{ ...existing, text }];
 		return [{ id, text, source: rec.source === "plan" || rec.source === "human" || rec.source === "agent" ? rec.source : "human", createdAt: typeof rec.createdAt === "number" ? rec.createdAt : undefined }];
 	});
@@ -1838,7 +1844,7 @@ export class SquadServer {
 			if (manager.attentionDisabled()) return Response.json({ entries: [], repoHasHistory: {}, disabled: true });
 			const visible = manager.attentionVisibleRepos(actor);
 			const repoParam = url.searchParams.get("repo");
-			const repos = repoParam ? (visible.has(normalizeRepoPath(repoParam)) ? [repoParam] : []) : [...visible];
+			const repos = repoParam ? (visible.has(normalizeRepoPath(repoParam)) ? [normalizeRepoPath(repoParam)] : []) : [...visible];
 			const now = Date.now();
 			const receipts = await manager.allReceipts();
 			const seen = manager.attentionSeen(repos);
@@ -3303,7 +3309,7 @@ async function heatPayload(managers: SquadManager[], url: URL): Promise<{
 		if (idx === undefined) continue;
 		for (const file of r.filesTouched) {
 			const key = `${normalizeRepoPath(r.repo)}\0${file}`;
-			const entry = byFile.get(key) ?? { repo: r.repo, file, heat: Array(count).fill(0) };
+			const entry = byFile.get(key) ?? { repo: normalizeRepoPath(r.repo), file, heat: Array(count).fill(0) };
 			entry.heat[idx] += 1;
 			byFile.set(key, entry);
 		}

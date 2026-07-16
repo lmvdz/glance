@@ -141,7 +141,10 @@ export function computeFog(input: ComputeFogInput): FileFogEntry[] {
 		const debt = Math.min(1, Math.log2(1 + effectiveChanges) / DEBT_LOG_DIVISOR);
 		const state: FogState = lastSeenAt === undefined ? "never-seen" : lastSeenAt >= agg.lastChangedAt ? "seen-current" : "stale";
 		entries.push({
-			repo: agg.repo,
+			// Canonical (normalized, ~-expanded) form — repoHasHistory keys and heat nodes emit the same
+			// form server-side, so client membership checks never have to expand `~` themselves (code-
+			// review resume finding 5).
+			repo: normalizeRepoPath(agg.repo),
 			file: agg.file,
 			changesSinceSeen: agg.changesSinceSeen,
 			lastChangedAt: agg.lastChangedAt,

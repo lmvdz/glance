@@ -84,6 +84,10 @@ test("restActionTier: reads viewer, mutations operator, destructive admin, auth/
 	// Known-symptom cards (comprehension concern 07): reading the symptom index is viewer-tier, same
 	// as /api/fabric/search — the pull half of the doctor auto-match's push half.
 	expect(restActionTier("GET", "/api/symptoms")).toBe("viewer");
+	// Weekly episodes (comprehension concern 09): list + full-markdown reads are viewer-tier like
+	// every other comprehension read; actor-derived repo scoping happens in the route itself.
+	expect(restActionTier("GET", "/api/episodes")).toBe("viewer");
+	expect(restActionTier("GET", "/api/episodes/2026-W29")).toBe("viewer");
 });
 
 test("applyCommand: operator denied destructive ops (RbacDenied + audited); admin allowed", async () => {

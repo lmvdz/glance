@@ -38,12 +38,11 @@ test("round-tripping the full array preserves stored source/evidence/sourceRef o
 	expect(out?.[2]?.source).toBe("human");
 });
 
-test("client text edits to an existing entry are taken; everything else stays server-authoritative", () => {
-	const out = featureDecisions([{ id: "d1", text: "Edited wording.", source: "human" }], stored);
+test("client text edits to a NON-model-delta entry are taken; server fields stay authoritative", () => {
+	const out = featureDecisions([{ id: "d2", text: "Edited wording.", source: "agent" }], stored);
 	expect(out?.[0]?.text).toBe("Edited wording.");
-	expect(out?.[0]?.source).toBe("model-delta");
-	expect(out?.[0]?.evidence).toEqual(["src/dispatch.ts:40-80"]);
-	expect(out?.[0]?.sourceRef).toEqual({ agentId: "agent-1", runId: "run-1" });
+	expect(out?.[0]?.source).toBe("human"); // d2's STORED source survives, not the client's claim
+	expect(out?.[0]?.createdAt).toBe(2000);
 });
 
 test("omitting an entry deletes it — the merge must not resurrect removed decisions", () => {
@@ -73,4 +72,12 @@ test("non-array input and entries without id/text behave as before", () => {
 test("undefined stored decisions (derived feature) still sanitizes without throwing", () => {
 	const out = featureDecisions([{ id: "a", text: "A fresh decision on a derived feature.", source: "agent" }], undefined);
 	expect(out?.[0]?.source).toBe("agent");
+});
+
+test("a model-delta's TEXT cannot be edited through PATCH — the stored record survives verbatim (resume finding 2)", () => {
+	const out = featureDecisions([{ id: "d1", text: "Rewritten false claim wearing real anchors.", source: "human" }], stored);
+	expect(out?.[0]).toEqual(stored[0]); // text edit ignored; evidence/sourceRef/source all verbatim
+	// deletion by omission still works for model-deltas
+	const deleted = featureDecisions([{ id: "d2", text: "Ship file mode first.", source: "human" }], stored);
+	expect(deleted?.map((d) => d.id)).toEqual(["d2"]);
 });

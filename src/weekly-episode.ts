@@ -417,11 +417,14 @@ export async function listEpisodes(stateDir: string, repo: string): Promise<Epis
 export type EpisodeGatherResult = Omit<BuildEpisodeInput, "repo" | "isoWeek" | "now">;
 
 export interface EpisodeLoopDeps {
-	repo: string;
+	/** LIVE repo set, re-derived EVERY tick (code-review resume finding 4): a repo added to the
+	 *  workspace after daemon start must get its weekly brief without a restart — a boot-time
+	 *  snapshot silently starved late-added projects forever. */
+	repos: () => string[];
 	stateDir: string;
-	/** Resolve one target week's inputs. A rejection is treated as a contained tick failure (logged,
-	 *  reported `level:"warn"`), never an uncaught throw. */
-	gather: (window: { start: number; end: number }) => Promise<EpisodeGatherResult>;
+	/** Resolve one repo's target-week inputs. A rejection is treated as a contained tick failure
+	 *  (logged, reported `level:"warn"`), never an uncaught throw. */
+	gather: (repo: string, window: { start: number; end: number }) => Promise<EpisodeGatherResult>;
 	/** One push per generation (DESIGN.md "Push at motivation"; this concern's point 5) — the caller
 	 *  supplies the actual `PushService.notify` call so this module never owns a PushService instance
 	 *  or a subscription list itself (staleness-free by construction: nothing here caches subs).
@@ -437,7 +440,7 @@ export interface EpisodeLoopDeps {
 	 * lines/week/repo to `automation.jsonl` forever. A gather/save failure DOES set `level:"warn"` (a
 	 * real problem, not a heartbeat) so it persists despite `filed:0`.
 	 */
-	record?: AutomationRecorder;
+	recordFor?: (repo: string) => AutomationRecorder;
 }
 
 export class EpisodeLoop {
@@ -465,6 +468,15 @@ export class EpisodeLoop {
 	async tick(): Promise<void> {
 		if (this.running) return;
 		this.running = true;
+		try {
+			// LIVE repo derivation each sweep — never a boot-time snapshot (see EpisodeLoopDeps.repos).
+			for (const repo of this.deps.repos()) await this.tickRepo(repo);
+		} finally {
+			this.running = false;
+		}
+	}
+
+	private async tickRepo(repo: string): Promise<void> {
 		const log = this.deps.log ?? (() => {});
 		const clock = this.deps.now ?? Date.now;
 		const t0 = clock();
@@ -472,23 +484,23 @@ export class EpisodeLoop {
 		let targetWeek: string | undefined;
 		try {
 			targetWeek = previousCompleteIsoWeek(new Date(clock()));
-			if (episodeExists(this.deps.stateDir, this.deps.repo, targetWeek)) {
+			if (episodeExists(this.deps.stateDir, repo, targetWeek)) {
 				report = { durationMs: clock() - t0, found: 0, filed: 0 }; // ring-only: nothing new this tick
 				return;
 			}
 			// A missing artifact for the target week IS a found candidate, regardless of what happens next.
 			let gathered: EpisodeGatherResult;
 			try {
-				gathered = await this.deps.gather(isoWeekBounds(targetWeek));
+				gathered = await this.deps.gather(repo, isoWeekBounds(targetWeek));
 			} catch (e) {
-				log(`gather failed for ${this.deps.repo}/${targetWeek}: ${errText(e)}`);
+				log(`gather failed for ${repo}/${targetWeek}: ${errText(e)}`);
 				report = { durationMs: clock() - t0, found: 1, filed: 0, level: "warn", detail: `gather failed for ${targetWeek}` };
 				return;
 			}
-			const episode = buildEpisode({ repo: this.deps.repo, isoWeek: targetWeek, now: clock(), ...gathered });
-			const ok = await saveEpisode(this.deps.stateDir, this.deps.repo, episode);
+			const episode = buildEpisode({ repo, isoWeek: targetWeek, now: clock(), ...gathered });
+			const ok = await saveEpisode(this.deps.stateDir, repo, episode);
 			if (!ok) {
-				log(`save failed for ${this.deps.repo}/${targetWeek}`);
+				log(`save failed for ${repo}/${targetWeek}`);
 				report = { durationMs: clock() - t0, found: 1, filed: 0, level: "warn", detail: `save failed for ${targetWeek}` };
 				return;
 			}
@@ -501,18 +513,17 @@ export class EpisodeLoop {
 						url: `/#/episodes/${episode.id}`,
 						// Own namespace (never `done:`/bare agent id, per push.ts's voiceDonePayload doc) so a
 						// "brief ready" toast can never debounce-eat or be eaten by an unactioned "needs you".
-						tag: `episode:${episodeRepoHash(this.deps.repo)}:${episode.id}`,
+						tag: `episode:${episodeRepoHash(repo)}:${episode.id}`,
 					});
 				} catch (e) {
-					log(`push failed for ${this.deps.repo}/${targetWeek}: ${errText(e)}`);
+					log(`push failed for ${repo}/${targetWeek}: ${errText(e)}`);
 				}
 			}
 		} catch (e) {
-			log(`tick failed for ${this.deps.repo}: ${errText(e)}`);
+			log(`tick failed for ${repo}: ${errText(e)}`);
 			report = { durationMs: clock() - t0, found: 0, filed: 0, level: "warn", detail: `tick failed: ${errText(e)}` };
 		} finally {
-			this.running = false;
-			this.deps.record?.(report);
+			this.deps.recordFor?.(repo)(report);
 		}
 	}
 }

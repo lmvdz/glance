@@ -261,3 +261,14 @@ joins); voice cursor commit restored to "only what was actually heard" (max of n
 and episode generatedAt — never Date.now(), which skipped barged-over completions forever); heatmap
 repo labels deepen per collision group (trailing-two-segment repo collisions keep unique node ids).
 Post-fix gates: root 3260/0 fail, webapp 1372/0, tsc clean both, dead-exports at baseline.
+
+## Code-review verify resume (post session-limit reset)
+All 35 workflow agents completed. 4 NEW confirmed findings beyond the first pass, all fixed:
+model-delta records now IMMUTABLE through the featureDecisions PATCH merge (a client text edit was
+re-attaching server-authoritative evidence/sourceRef to unvalidated text — hole in the batch-1 fix
+itself); EpisodeLoop re-derives its repo set live each tick (boot-time snapshot starved late-added
+projects); fog entries + heat nodes + repoHasHistory keys all emit ONE canonical normalizeRepoPath
+form (a ~/-form receipt repo broke client cold-start gating); FogView owns the /api/fog fetch on its
+30s/Refresh cadence (HeatTree's self-fetch cached forever). /api/episodes tier assertions added.
+Kept cleanup findings (fog-key/sanitizeId/scoping-block dedup, symptom re-reads) recorded as
+overview follow-ups. Final gates: root 3262/0, webapp 1372/0, tsc clean, ratchet at baseline.
