@@ -58,6 +58,7 @@ import {
 	FeaturePatchBodySchema,
 	FederationCommandBodySchema,
 	FeedbackItemsEnvelopeSchema,
+	FrictionBodySchema,
 	JoinRequestDecideBodySchema,
 	OrgJoinPolicyBodySchema,
 	OrgMemberInviteBodySchema,
@@ -1733,6 +1734,35 @@ export class SquadServer {
 			}
 		}
 		if (url.pathname === "/api/projects" && req.method === "GET") return Response.json(manager.projects());
+		// Friction ledger (plans/daily-dogfood-engine/01): tenant-scoped like /api/projects (one ledger
+		// per manager stateDir, same as the transitionLog it's modeled on — cross-org roll-up is out of
+		// scope until DB mode needs it). Default authz tiers, no new authz.ts branch: POST ⇒ operator
+		// (the writer is the operator dogfooding their own daemon), GET ⇒ viewer.
+		if (url.pathname === "/api/friction" && req.method === "GET") {
+			const limitParam = Number(url.searchParams.get("limit"));
+			const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.floor(limitParam) : 100;
+			const repoFilter = url.searchParams.get("repo") ?? undefined;
+			const entries = manager.frictionRecent(repoFilter ? undefined : limit);
+			const filtered = repoFilter ? entries.filter((e) => e.repo === repoFilter).slice(-limit) : entries;
+			return Response.json({ entries: filtered.slice().reverse() }); // newest-first for display
+		}
+		if (url.pathname === "/api/friction" && req.method === "POST") {
+			const decoded = decodeBody(FrictionBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response("gripe required", { status: 400 });
+			const b = decoded.success;
+			try {
+				return Response.json(
+					manager.recordFriction({
+						gripe: b.gripe,
+						repo: typeof b.repo === "string" ? b.repo : "",
+						context: typeof b.context === "string" ? b.context : undefined,
+						agentId: typeof b.agentId === "string" ? b.agentId : undefined,
+					}),
+				);
+			} catch (err) {
+				return new Response(errText(err), { status: 400 }); // empty-after-trim gripe (fail-closed record())
+			}
+		}
 		// Add a repo to the workspace. Admin-tiered in authz.ts: this names a path the daemon will later
 		// create worktrees in and spawn agents against. The manager validates it is an ABSOLUTE path to a
 		// real git repo — a relative path is refused, never resolved against the daemon's cwd (which is an

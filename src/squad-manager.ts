@@ -122,6 +122,7 @@ import type {
 	OperatorPresence,
 	PendingRequest,
 	PersistedAgent,
+	FrictionEntry,
 	ProjectDTO,
 	RpcExtensionUIRequest,
 	RpcSessionState,
@@ -157,6 +158,7 @@ import { readModelOutcomes, recordModelOutcome, recordModelOutcomeBlocked, tierO
 import { shadowCostCheck } from "./cost-gate.ts";
 import { buildScoreboard, type Scoreboard } from "./attribution-scoreboard.ts";
 import { recordConfidenceOutcome, setThresholdTunerRoot, tunedConfidenceFloor } from "./threshold-tuner.ts";
+import { FrictionLog, type FrictionCapture } from "./friction-log.ts";
 import { JsonlLog } from "./jsonl-log.ts";
 import { buildFactoryStatus, FACTORY_FRESHNESS_FLOOR_MS, FACTORY_LOOPS, type FactoryStatus } from "./factory-status.ts";
 import { addPlanRevisionCandidate, appendCommentEvent, type ArtifactComment, type CommentQuery, type PlanAnnotationTarget, listComments as readComments, listPlanRevisionCandidates as readPlanRevisionCandidates, nextCommentId, transitionPlanRevisionCandidate } from "./comments.ts";
@@ -910,6 +912,10 @@ export class SquadManager extends EventEmitter {
 	 *  file best-effort. recordTransition/recordDenied append here; transitionHistory() reads it for
 	 *  GET /api/agents/:id/transitions. Constructed in the constructor (needs stateDir). */
 	private readonly transitionLog: JsonlLog<TransitionEntry>;
+	/** Friction ledger (`stateDir/friction.jsonl`, plans/daily-dogfood-engine/01) — same lifecycle as
+	 *  transitionLog. All writes go through recordFriction (the single write path shared by
+	 *  POST /api/friction and the in-process TUI). */
+	private readonly frictionLog: FrictionLog;
 	private readonly traceExporter?: TraceExportQueue;
 	/** Reward disbursement provider (Tremendous / Manual). Injectable for tests; default from env. */
 	private readonly paymentProvider: PaymentProvider;
@@ -940,6 +946,7 @@ export class SquadManager extends EventEmitter {
 		this.automation = new AutomationLog(this.stateDir, { onEvent: (event) => this.emit("event", { type: "automation", event } satisfies SquadEvent) });
 		this.learningMetrics = new LearningMetrics(this.stateDir, { log: (m) => this.log("warn", `learning-metrics: ${m}`) });
 		this.transitionLog = new JsonlLog<TransitionEntry>({ path: path.join(this.stateDir, "transitions.jsonl"), log: (m) => this.log("warn", `transitions.jsonl: ${m}`) });
+		this.frictionLog = new FrictionLog(this.stateDir, (m) => this.log("warn", `friction.jsonl: ${m}`));
 		this.bin = opts.bin;
 		this.autoLand = opts.autoLand ?? false;
 		this.worktreeBaseDir = opts.worktreeBase;
@@ -2399,6 +2406,18 @@ export class SquadManager extends EventEmitter {
 	 * `registered` distinguishes "I asked for this repo" from "this repo happens to have work in it",
 	 * so the UI can offer to un-register the former without pretending it can hide the latter.
 	 */
+	/** Friction ledger write — THE single capture path (plans/daily-dogfood-engine/01): the
+	 *  `POST /api/friction` route and the in-process TUI both land here, so no surface grows its own
+	 *  ledger-write logic. Throws on an empty gripe (FrictionLog.record is fail-closed). */
+	recordFriction(capture: FrictionCapture): FrictionEntry {
+		return this.frictionLog.record(capture);
+	}
+
+	/** Friction ledger ring tail (newest-LAST — the API reverses for newest-first display). */
+	frictionRecent(limit?: number): FrictionEntry[] {
+		return this.frictionLog.recent(limit);
+	}
+
 	projects(): ProjectDTO[] {
 		const byRepo = new Map<string, ProjectDTO>();
 		const ensure = (repo: string): ProjectDTO => {
