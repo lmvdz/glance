@@ -974,9 +974,23 @@ function renderBody() {
   if (view === "automation") return renderAutomation(body);
   if (view === "audit") return renderAudit(body);
   if (view === "feature") return renderFeature(body, features.get(selFeature));
+  if (view === "agent" && selAgent) {
+    // BEFORE the project guard: a deep-linked boot (`#/agent/<id>` — push payloads, `glance
+    // here`'s printed URL) routes here from ws.onopen, BEFORE the roster has delivered the
+    // agent — so selProject is still null and the old order silently fell through to Home and
+    // stayed there. Render the known agent regardless of project selection; while the roster is
+    // in flight, hold a placeholder — when it lands, refreshShell's patchAgentView finds no
+    // #ahead in the placeholder and re-enters renderBody with the agent now known.
+    const a = agents.get(selAgent);
+    if (a) {
+      if (!selProject) { const pr = projects().find(x => x.repo === a.repo); if (pr) { selProject = pr.id; renderSidebar(); renderCrumb(); } }
+      return renderAgent(body, a);
+    }
+    body.innerHTML = `<div class="nodetail">Opening this session… (waiting for the daemon's roster)</div>`;
+    return;
+  }
   const p = projects().find(x => x.id === selProject);
   if (!p) return renderHome(body);
-  if (view === "agent" && selAgent && agents.has(selAgent)) return renderAgent(body, agents.get(selAgent));
   renderProject(body, p);
 }
 

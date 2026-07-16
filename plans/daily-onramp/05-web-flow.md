@@ -1,6 +1,6 @@
 # Web flow — `glance here --web` / printed URL
 
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -40,4 +40,36 @@ none
 
 ## Resolution
 
-(filled in when this concern executes)
+Executed 2026-07-16 (salvage-resumed after a session-limit kill; the salvage's feat commit was
+sound and kept, its wip tail re-verified and recommitted properly).
+
+**Shipped.** `src/here-web.ts`: `hereWebUrl` (the single place the token-before-fragment ordering
+is built), `isWsl`, `openerCandidates`, `openInBrowser` (ladder walk, spawn-failure fall-through,
+exhaustion → printable note, never a throw). `src/here.ts`: `--web` flag via `parseHereArgs`
+(pulls the boolean out before the shared value-taking parser can eat the positional prompt), the
+ready line prints the session's own deep link, `/exit` reprints it. WSL2 ladder is
+`wslview → explorer.exe → /mnt/c/Windows/explorer.exe → xdg-open`: both relative rungs are
+legitimately absent on this operator's box (no wslu; `appendWindowsPath` doesn't reach a
+tmux-spawned REPL — measured), the absolute interop mount is the rung that actually opens the
+Windows-host browser.
+
+**Found and fixed while verifying live: the deep link routed NOWHERE.** `#/agent/<id>` — the
+shape push payloads have emitted since src/push.ts day one — had no route in the React webapp
+(only `#/review/` existed) and lost a boot race in the legacy UI (applyRoute at ws.onopen beats
+the roster; renderBody's project guard fell through to Home and stayed). Fixed in both:
+`webapp/src/lib/agent-link.ts` + a one-way URL→state listener in TaskContext (opens the agent's
+console chat; AssistantChat retitles once the roster lands), and a renderBody agent-branch
+reorder + roster-pending placeholder in `src/web/index.html`. This also un-broke push
+notification deep links.
+
+**Verify, executed live** (scratch daemon, port 7955, real claude session in a tmux pty):
+unit — 10 tests `tests/here-web-flow.test.ts` (URL ordering proven against the exact
+`URLSearchParams` capture the webapp performs, opener selection per platform/WSL-detection,
+exhausted ladder degrades to a note, `--web` never eats the prompt) + 3 tests
+`webapp/src/lib/agent-link.test.ts`; live — `glance here --web` printed
+`?token=…#/agent/chat-…`, spawned the absolute explorer.exe rung (browser opened on the Windows
+host), and a cold browser load of the printed URL landed authenticated ON THE SESSION in both
+UIs (legacy agent view with derived project crumb; React chat panel open, titled by the agent).
+
+Deferred one-time-token hardening findings above remain notes for the future hardening concern —
+nothing of them was built here.
