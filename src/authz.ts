@@ -196,7 +196,8 @@ export function allowPushTap(sourceKey: string, now: number = Date.now()): boole
 }
 
 /** Test-only: drop all rate-limit state so bucket tests never leak between runs (and so a long
- *  test-process lifetime never pins memory on stale source keys). Not called from product code. */
+ *  test-process lifetime never pins memory on stale source keys). Not called from product code.
+ *  @substrate exported for tests only — tests/authz.test.ts resets the bucket between cases. */
 export function _resetPushTapRateLimitsForTests(): void {
 	pushTapBuckets.clear();
 }

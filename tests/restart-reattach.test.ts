@@ -342,6 +342,10 @@ test("a roster miss with NO disconnect and no placeholder is the pre-04 'removed
 	const deaths: string[] = [];
 	const session = new HereSession(client, (l) => lines.push(l), (id) => deaths.push(id));
 	session.attach("chat-1");
+	// One confirmed 404 is no longer terminal (review finding 2: a transient wobble must not kill a
+	// live session) — the streak requires a SECOND consecutive definitive miss before 'gone'.
+	await session.poll();
+	expect(session.status).not.toBe("gone");
 	await session.poll();
 	expect(deaths).toEqual([]);
 	expect(session.status).toBe("gone");
