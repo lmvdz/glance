@@ -1,0 +1,129 @@
+{"t":4747,"kind":"session","agentId":"chat-mrnk64kx-8-05432f49","scenario":"s3"}
+{"t":4754,"kind":"status","from":"(new)","to":"idle"}
+{"t":7251,"kind":"ready","status":"idle"}
+{"t":7251,"kind":"send","label":"A-long-generation","cmd":{"type":"prompt","id":"chat-mrnk64kx-8-05432f49","message":"Write a plain-prose story of about 600 words describing a day in the life of a lighthouse keeper on a remote island. No tools, no code blocks, no headings - just flowing prose, and do not stop early."}}
+{"t":7467,"kind":"status","from":"idle","to":"working"}
+{"t":7467,"kind":"entry","seq":28,"head":"Write a plain-prose story of about 600 words describing a day in the life of a lighthouse keeper on a remote island. No tools, no code blocks, no headings - jus"}
+{"t":10252,"kind":"send","label":"B-rapid-1","cmd":{"type":"prompt","id":"chat-mrnk64kx-8-05432f49","message":"Second message: include the word APPLE in your final reply."}}
+{"t":10481,"kind":"entry","seq":29,"head":"Second message: include the word APPLE in your final reply."}
+{"t":10953,"kind":"send","label":"C-rapid-2","cmd":{"type":"prompt","id":"chat-mrnk64kx-8-05432f49","message":"Third message: include the word BANANA in your final reply."}}
+{"t":11084,"kind":"entry","seq":30,"head":"Third message: include the word BANANA in your final reply."}
+{"t":11654,"kind":"send","label":"D-rapid-3","cmd":{"type":"prompt","id":"chat-mrnk64kx-8-05432f49","message":"Fourth message: include the word CHERRY in your final reply."}}
+{"t":11687,"kind":"entry","seq":31,"head":"Fourth message: include the word CHERRY in your final reply."}
+{"t":13197,"kind":"entry","seq":32,"status":"running","head":"The"}
+{"t":13799,"kind":"entry-grow","seq":32,"status":"running","len":88,"tail":" morning always began the same way, with the sound of wind pressing against the stone"}
+{"t":14403,"kind":"entry-grow","seq":32,"status":"running","len":177,"tail":" walls of the cottage and the low, rhythmic pulse of waves breaking against the rocks far"}
+{"t":14705,"kind":"entry-grow","seq":32,"status":"running","len":244,"tail":" below. Alistair opened his eyes to a ceiling he had memorized down"}
+{"t":15309,"kind":"entry-grow","seq":32,"status":"running","len":281,"tail":" to its last crack and stain, then sw"}
+{"t":15612,"kind":"entry-grow","seq":32,"status":"running","len":366,"tail":"ung his legs over the side of the narrow cot and set his bare feet on the cold floor."}
+{"t":16216,"kind":"entry-grow","seq":32,"status":"running","len":432,"tail":" There was no alarm clock. His body had long since learned to wake"}
+{"t":16518,"kind":"entry-grow","seq":32,"status":"running","len":478,"tail":" with the thinning of darkness, that pale grey"}
+{"t":17120,"kind":"entry-grow","seq":32,"status":"running","len":522,"tail":" moment when the sky could not yet be called"}
+{"t":17724,"kind":"entry-grow","seq":32,"status":"running","len":585,"tail":" light but was no longer truly night.\n\nHe dressed in layers, as"}
+{"t":18026,"kind":"entry-grow","seq":32,"status":"running","len":651,"tail":" he did every day regardless of the season, because the island had"}
+{"t":18629,"kind":"entry-grow","seq":32,"status":"running","len":706,"tail":" a way of shifting its moods without warning. A morning"}
+{"t":18931,"kind":"entry-grow","seq":32,"status":"running","len":761,"tail":" that began calm and almost warm could turn sharp and b"}
+{"t":19535,"kind":"entry-grow","seq":32,"status":"running","len":817,"tail":"iting by midday, the wind swinging around from the south"}
+{"t":19837,"kind":"entry-grow","seq":32,"status":"running","len":884,"tail":" to rake across the exposed headland where the lighthouse stood. He"}
+{"t":20441,"kind":"entry-grow","seq":32,"status":"running","len":969,"tail":" pulled on wool socks, heavy trousers, a flannel shirt, and a cable-knit sweater that"}
+{"t":20743,"kind":"entry-grow","seq":32,"status":"running","len":1036,"tail":" his sister had sent him three years ago and that was now beginning"}
+{"t":21347,"kind":"entry-grow","seq":32,"status":"running","len":1128,"tail":" to unravel at the left cuff.\n\nThe first task was always the light. He climbed the spiral st"}
+{"t":21950,"kind":"entry-grow","seq":32,"status":"running","len":1211,"tail":"aircase, his hand trailing along the iron railing worn smooth by decades of keepers"}
+{"t":22251,"kind":"entry-grow","seq":32,"status":"running","len":1292,"tail":" before him, and entered the lantern room at the top of the tower. The great Fres"}
+{"t":22855,"kind":"entry-grow","seq":32,"status":"running","len":1348,"tail":"nel lens sat in its housing like some enormous glass ins"}
+{"t":23157,"kind":"entry-grow","seq":32,"status":"running","len":1395,"tail":"ect eye, still and quiet now that dawn had come"}
+{"t":23760,"kind":"entry-grow","seq":32,"status":"running","len":1472,"tail":" and the beam was no longer needed. He checked the mechanism, the clockwork g"}
+{"t":24364,"kind":"entry-grow","seq":32,"status":"running","len":1535,"tail":"ears that rotated the lens through the night, and noted the oil"}
+{"t":24666,"kind":"entry-grow","seq":32,"status":"running","len":1626,"tail":" level in his logbook. Everything was in order, as it almost always was, but the checking m"}
+{"t":25269,"kind":"entry-grow","seq":32,"status":"running","len":1691,"tail":"attered. The checking was the point.\n\nBreakfast was porridge made"}
+{"t":25572,"kind":"entry-grow","seq":32,"status":"running","len":1742,"tail":" on a small gas stove in the cottage kitchen, eaten"}
+{"t":26176,"kind":"entry-grow","seq":32,"status":"running","len":1802,"tail":" standing at the window that faced east across the water. On"}
+{"t":26478,"kind":"entry-grow","seq":32,"status":"running","len":1866,"tail":" clear days he could see the faint smudge of the mainland, a low"}
+{"t":27080,"kind":"entry-grow","seq":32,"status":"running","len":1922,"tail":" dark line that might have been cloud if he did not know"}
+{"t":27381,"kind":"entry-grow","seq":32,"status":"running","len":2000,"tail":" better. Today there was fog, thick and white, and the world ended about forty"}
+{"t":27983,"kind":"entry-grow","seq":32,"status":"running","len":2053,"tail":" meters from his door. He ate slowly, watching a pair"}
+{"t":28586,"kind":"entry-grow","seq":32,"status":"running","len":2144,"tail":" of gulls materialize from the mist and settle on the railing of the walkway outside before"}
+{"t":28887,"kind":"entry-grow","seq":32,"status":"running","len":2228,"tail":" vanishing again into the grey.\n\nThe middle of the day was given over to maintenance"}
+{"t":29490,"kind":"entry-grow","seq":32,"status":"running","len":2302,"tail":". There was always something that needed doing on an island where salt air"}
+{"t":29792,"kind":"entry-grow","seq":32,"status":"running","len":2363,"tail":" and storms conspired to corrode, loosen, and wear down every"}
+{"t":30395,"kind":"entry-grow","seq":32,"status":"running","len":2421,"tail":" surface. Today it was the door of the storage shed, which"}
+{"t":30697,"kind":"entry-grow","seq":32,"status":"running","len":2491,"tail":" had swollen with moisture and no longer closed properly. He planed it"}
+{"t":31301,"kind":"entry-grow","seq":32,"status":"running","len":2566,"tail":" down with careful, measured strokes, pausing now and then to test the fit,"}
+{"t":31903,"kind":"entry-grow","seq":32,"status":"running","len":2624,"tail":" shaving away thin curls of wood that the wind immediately"}
+{"t":32205,"kind":"entry-grow","seq":32,"status":"running","len":2694,"tail":" carried off. It was satisfying work, the kind that occupied the hands"}
+{"t":32809,"kind":"entry-grow","seq":32,"status":"running","len":2809,"tail":" and left the mind free to wander, and he found himself thinking about a book he had been reading the night before,"}
+{"t":33150,"kind":"entry-grow","seq":32,"status":"running","len":2863,"tail":" a history of maritime trade routes that made him feel"}
+{"t":33784,"kind":"entry-grow","seq":32,"status":"running","len":2947,"tail":" connected to the centuries of ships that had passed within sight of this tower.\n\nIn"}
+{"t":34118,"kind":"entry-grow","seq":32,"status":"running","len":3048,"tail":" the afternoon he walked the perimeter of the island, as he did every day, checking the shoreline for"}
+{"t":34724,"kind":"entry-grow","seq":32,"status":"running","len":3126,"tail":" debris or damage after the previous night's tide. The island was small enough"}
+{"t":35082,"kind":"entry-grow","seq":32,"status":"running","len":3183,"tail":" that the circuit took less than an hour, even at his unh"}
+{"t":35384,"kind":"entry-grow","seq":32,"status":"running","len":3243,"tail":"urried pace. He found a length of rope tangled in the rocks,"}
+{"t":35987,"kind":"entry-grow","seq":32,"status":"running","len":3327,"tail":" a few plastic bottles he collected in a canvas bag, and a piece of driftwood shaped"}
+{"t":36591,"kind":"entry-grow","seq":32,"status":"running","len":3381,"tail":" roughly like a heron, which he kept.\n\nAs evening came"}
+{"t":36895,"kind":"entry-grow","seq":32,"status":"running","len":3446,"tail":", he climbed the tower again and lit the lamp. The beam swung out"}
+{"t":37499,"kind":"entry-grow","seq":32,"status":"running","len":3538,"tail":" into the gathering darkness, sweeping across the water in its steady, patient arc. He stood"}
+{"t":37800,"kind":"entry-grow","seq":32,"status":"running","len":3620,"tail":" for a moment watching it cut through the dusk, knowing that somewhere out there a"}
+{"t":38402,"kind":"entry-grow","seq":32,"status":"running","len":3678,"tail":" sailor might glance toward the horizon and see that light"}
+{"t":39004,"kind":"entry-grow","seq":32,"status":"running","len":3718,"tail":" and feel, without thinking about it too"}
+{"t":39307,"kind":"entry-grow","seq":32,"status":"running","len":3790,"tail":" carefully, a small measure of reassurance. Then he descended the stairs"}
+{"t":39910,"kind":"entry-grow","seq":32,"status":"running","len":3842,"tail":" and began to prepare his supper, alone and entirely"}
+{"t":40213,"kind":"status","from":"working","to":"idle"}
+{"t":40213,"kind":"entry-grow","seq":32,"status":"ok","len":3907,"tail":" at peace with the silence that filled every corner of his world."}
+{"t":42928,"kind":"entry","seq":33,"status":"running","head":"The morning always began the same way,"}
+{"t":43532,"kind":"entry-grow","seq":33,"status":"running","len":323,"tail":"s eyes to a ceiling he had memorized down to its last crack and stain, then swung his legs over the side of the narrow c"}
+{"t":43834,"kind":"entry-grow","seq":33,"status":"running","len":602,"tail":"ent when the sky could not yet be called light but was no longer truly night.\n\nHe dressed in layers, as he did every day"}
+{"t":44438,"kind":"entry-grow","seq":33,"status":"running","len":906,"tail":" swinging around from the south to rake across the exposed headland where the lighthouse stood. He pulled on wool socks,"}
+{"t":44739,"kind":"entry-grow","seq":33,"status":"running","len":1160,"tail":"unravel at the left cuff.\n\nThe first task was always the light. He climbed the spiral staircase, his hand trailing along"}
+{"t":45343,"kind":"entry-grow","seq":33,"status":"running","len":1445,"tail":"some enormous glass insect eye, still and quiet now that dawn had come and the beam was no longer needed. He checked the"}
+{"t":45644,"kind":"entry-grow","seq":33,"status":"running","len":1719,"tail":"ays was, but the checking mattered. The checking was the point.\n\nBreakfast was porridge made on a small gas stove in the"}
+{"t":46248,"kind":"entry-grow","seq":33,"status":"running","len":2012,"tail":" been cloud if he did not know better. Today there was fog, thick and white, and the world ended about forty meters from"}
+{"t":47153,"kind":"entry-grow","seq":33,"status":"running","len":2584,"tail":"osed properly. He planed it down with careful, measured strokes, pausing now and then to test the fit, shaving away thin"}
+{"t":47756,"kind":"entry-grow","seq":33,"status":"running","len":2899,"tail":"been reading the night before, a history of maritime trade routes that made him feel connected to the centuries of ships"}
+{"t":48058,"kind":"entry-grow","seq":33,"status":"running","len":3194,"tail":"e previous night's tide. The island was small enough that the circuit took less than an hour, even at his unhurried pace"}
+{"t":48661,"kind":"entry-grow","seq":33,"status":"running","len":3376,"tail":"c bottles he collected in a canvas bag, and a piece of driftwood shaped roughly like a heron, which he kept. On the shel"}
+{"t":48964,"kind":"entry-grow","seq":33,"status":"running","len":3458,"tail":"tered side of the island, where a few stubborn trees clung to the thin soil, he pa"}
+{"t":49567,"kind":"entry-grow","seq":33,"status":"running","len":3521,"tail":"used beneath the old APPLE tree that some long-forgotten keeper"}
+{"t":50170,"kind":"entry-grow","seq":33,"status":"running","len":3600,"tail":" had planted decades ago. Its fruit was small and tart, barely worth eating raw"}
+{"t":50472,"kind":"entry-grow","seq":33,"status":"running","len":3652,"tail":", but he picked a few anyway, thinking he might stew"}
+{"t":51076,"kind":"entry-grow","seq":33,"status":"running","len":3788,"tail":" a bit of sugar from his dwindling stores.\n\nAs evening came, he climbed the tower again and lit the lamp. The beam swung"}
+{"t":51378,"kind":"entry-grow","seq":33,"status":"running","len":4106,"tail":" toward the horizon and see that light and feel, without thinking about it too carefully, a small measure of reassurance"}
+{"t":51680,"kind":"entry-grow","seq":33,"status":"ok","len":4253,"tail":"irs and began to prepare his supper, alone and entirely at peace with the silence that filled every corner of his world."}
+{"t":54999,"kind":"entry","seq":34,"status":"running","head":"The morning always began the same way,"}
+{"t":55301,"kind":"entry-grow","seq":34,"status":"running","len":323,"tail":"s eyes to a ceiling he had memorized down to its last crack and stain, then swung his legs over the side of the narrow c"}
+{"t":55904,"kind":"entry-grow","seq":34,"status":"running","len":602,"tail":"ent when the sky could not yet be called light but was no longer truly night.\n\nHe dressed in layers, as he did every day"}
+{"t":56205,"kind":"entry-grow","seq":34,"status":"running","len":906,"tail":" swinging around from the south to rake across the exposed headland where the lighthouse stood. He pulled on wool socks,"}
+{"t":56808,"kind":"entry-grow","seq":34,"status":"running","len":1160,"tail":"unravel at the left cuff.\n\nThe first task was always the light. He climbed the spiral staircase, his hand trailing along"}
+{"t":57410,"kind":"entry-grow","seq":34,"status":"running","len":1445,"tail":"some enormous glass insect eye, still and quiet now that dawn had come and the beam was no longer needed. He checked the"}
+{"t":57712,"kind":"entry-grow","seq":34,"status":"running","len":1719,"tail":"ays was, but the checking mattered. The checking was the point.\n\nBreakfast was porridge made on a small gas stove in the"}
+{"t":58316,"kind":"entry-grow","seq":34,"status":"running","len":1828,"tail":" cottage kitchen, eaten standing at the window that faced east across the water. Beside the bowl he set a bru"}
+{"t":58618,"kind":"entry-grow","seq":34,"status":"running","len":1888,"tail":"ised BANANA from the last supply delivery, peeling it slowly"}
+{"t":59222,"kind":"entry-grow","seq":34,"status":"running","len":1936,"tail":" and eating it in three bites before it could go"}
+{"t":59524,"kind":"entry-grow","seq":34,"status":"running","len":2101,"tail":" could see the faint smudge of the mainland, a low dark line that might have been cloud if he did not know better. Today"}
+{"t":60126,"kind":"entry-grow","seq":34,"status":"running","len":2381,"tail":"tle on the railing of the walkway outside before vanishing again into the grey.\n\nThe middle of the day was given over to"}
+{"t":60428,"kind":"entry-grow","seq":34,"status":"running","len":2688,"tail":"torage shed, which had swollen with moisture and no longer closed properly. He planed it down with careful, measured str"}
+{"t":61030,"kind":"entry-grow","seq":34,"status":"running","len":2974,"tail":"hands and left the mind free to wander, and he found himself thinking about a book he had been reading the night before,"}
+{"t":61635,"kind":"entry-grow","seq":34,"status":"running","len":3291,"tail":" did every day, checking the shoreline for debris or damage after the previous night's tide. The island was small enough"}
+{"t":61936,"kind":"entry-grow","seq":34,"status":"running","len":3554,"tail":"collected in a canvas bag, and a piece of driftwood shaped roughly like a heron, which he kept. On the sheltered side of"}
+{"t":62539,"kind":"entry-grow","seq":34,"status":"running","len":3833,"tail":"ts fruit was small and tart, barely worth eating raw, but he picked a few anyway, thinking he might stew them later with"}
+{"t":62841,"kind":"entry-grow","seq":34,"status":"running","len":4109,"tail":"eeping across the water in its steady, patient arc. He stood for a moment watching it cut through the dusk, knowing that"}
+{"t":63444,"kind":"entry-grow","seq":34,"status":"ok","len":4418,"tail":"irs and began to prepare his supper, alone and entirely at peace with the silence that filled every corner of his world."}
+{"t":66459,"kind":"entry","seq":35,"status":"running","head":"The morning always began the same way,"}
+{"t":67062,"kind":"entry-grow","seq":35,"status":"running","len":323,"tail":"s eyes to a ceiling he had memorized down to its last crack and stain, then swung his legs over the side of the narrow c"}
+{"t":67665,"kind":"entry-grow","seq":35,"status":"running","len":602,"tail":"ent when the sky could not yet be called light but was no longer truly night.\n\nHe dressed in layers, as he did every day"}
+{"t":67966,"kind":"entry-grow","seq":35,"status":"running","len":906,"tail":" swinging around from the south to rake across the exposed headland where the lighthouse stood. He pulled on wool socks,"}
+{"t":68569,"kind":"entry-grow","seq":35,"status":"running","len":1160,"tail":"unravel at the left cuff.\n\nThe first task was always the light. He climbed the spiral staircase, his hand trailing along"}
+{"t":69172,"kind":"entry-grow","seq":35,"status":"running","len":1445,"tail":"some enormous glass insect eye, still and quiet now that dawn had come and the beam was no longer needed. He checked the"}
+{"t":69474,"kind":"entry-grow","seq":35,"status":"running","len":1719,"tail":"ays was, but the checking mattered. The checking was the point.\n\nBreakfast was porridge made on a small gas stove in the"}
+{"t":70078,"kind":"entry-grow","seq":35,"status":"running","len":1987,"tail":"ry, peeling it slowly and eating it in three bites before it could go any further past its prime. On clear days he could"}
+{"t":70379,"kind":"entry-grow","seq":35,"status":"running","len":2257,"tail":" the world ended about forty meters from his door. He ate slowly, watching a pair of gulls materialize from the mist and"}
+{"t":71282,"kind":"entry-grow","seq":35,"status":"running","len":2840,"tail":"st the fit, shaving away thin curls of wood that the wind immediately carried off. It was satisfying work, the kind that"}
+{"t":71885,"kind":"status","from":"idle","to":"error","error":"acp request session/prompt timed out"}
+{"t":71885,"kind":"entry-grow","seq":35,"status":"ok","len":3157,"tail":"d to the centuries of ships that had passed within sight of this tower.\n\nIn the afternoon he walked the perimeter of the"}
+{"t":72187,"kind":"entry","seq":36,"status":"running","head":" island, as he did every day, checking the shoreline for debris or damage after the previous night's tide. The island was small enough that the circuit took les"}
+{"t":72488,"kind":"entry-grow","seq":36,"status":"running","len":558,"tail":"lung to the thin soil, he paused beneath the old apple tree that some long-forgotten keeper had planted decades ago. Its"}
+{"t":73392,"kind":"entry-grow","seq":36,"status":"running","len":733,"tail":" he picked a few anyway, thinking he might stew them later with a bit of sugar from his dwindling stores. Nearby stood a"}
+{"t":73994,"kind":"entry-grow","seq":36,"status":"running","len":814,"tail":" CHERRY tree, younger and more slender, its dark fruit not yet ripe but promising"}
+{"t":74296,"kind":"entry-grow","seq":36,"status":"running","len":901,"tail":" something worth returning for in a week or two.\n\nAs evening came, he climbed the tower"}
+{"t":74597,"kind":"entry-grow","seq":36,"status":"running","len":1209,"tail":"ng that somewhere out there a sailor might glance toward the horizon and see that light and feel, without thinking about"}
+{"t":74900,"kind":"entry-grow","seq":36,"status":"running","len":1405,"tail":"irs and began to prepare his supper, alone and entirely at peace with the silence that filled every corner of his world."}
+{"t":251982,"kind":"waitIdle-timeout","after":240000}

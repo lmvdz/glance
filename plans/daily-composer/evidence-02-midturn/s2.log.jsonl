@@ -1,0 +1,13 @@
+{"t":4389,"kind":"session","agentId":"chat-mrnk1l3s-6-478de46c","scenario":"s2"}
+{"t":4391,"kind":"status","from":"(new)","to":"idle"}
+{"t":6894,"kind":"ready","status":"idle"}
+{"t":6895,"kind":"send","label":"A-long-tool-call","cmd":{"type":"prompt","id":"chat-mrnk1l3s-6-478de46c","message":"Use your shell tool to run exactly this command: sleep 40 && echo SLEEP_DONE . Wait for it to finish, then tell me its output verbatim."}}
+{"t":7108,"kind":"status","from":"idle","to":"working"}
+{"t":7109,"kind":"entry","seq":19,"head":"Use your shell tool to run exactly this command: sleep 40 && echo SLEEP_DONE . Wait for it to finish, then tell me its output verbatim."}
+{"t":12235,"kind":"entry","seq":20,"status":"running","tool":"execute","head":"▸ execute: Terminal"}
+{"t":12538,"kind":"entry","seq":21,"status":"running","tool":"execute","head":"▸ execute: `sleep 40 && echo SLEEP_DONE`"}
+{"t":21895,"kind":"send","label":"B-mid-tool-send","cmd":{"type":"prompt","id":"chat-mrnk1l3s-6-478de46c","message":"While that command runs: also say the word MANGO in your next reply so I know you received this."}}
+{"t":22188,"kind":"entry","seq":22,"head":"While that command runs: also say the word MANGO in your next reply so I know you received this."}
+{"t":55061,"kind":"entry","seq":23,"status":"running","head":"The output"}
+{"t":55363,"kind":"status","from":"working","to":"idle"}
+{"t":55364,"kind":"entry-grow","seq":23,"status":"ok","len":42,"tail":" was:\n\n```\nSLEEP_DONE\n```\n\nMANGO"}
