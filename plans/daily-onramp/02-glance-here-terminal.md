@@ -59,12 +59,21 @@ Code session — not inferred from green tests.
   validation is the fail-closed gate), and a failed create rolls the registration back. Tier note in
   server.ts: stays operator (unlike admin POST /api/projects) because projects() already unions
   live-agent repos — no new authority.
-- Ephemeral registration: `SquadManager.ephemeralProjects` (in-memory Set, deliberately not
-  persisted) + `registerEphemeralProject` / `releaseEphemeralProject` / `isEphemeralProject`. Only a
-  repo the call actually ADDED becomes ephemeral — an operator-registered repo is never demoted by a
-  passing session. Released on: REPL exit (`POST /api/console/release`, idempotent), the daemon's own
-  removal path (last agent on the repo removed), and CLEARED by `promote()` (both fresh and
-  idempotent paths, after persist) — "promote makes it durable" is the one-liner the plan predicted.
+- Ephemeral registration: `SquadManager.ephemeralProjects` + `registerEphemeralProject` /
+  `releaseEphemeralProject` / `isEphemeralProject`. Only a repo the call actually ADDED becomes
+  ephemeral — an operator-registered repo is never demoted by a passing session. Released on: REPL
+  exit (`POST /api/console/release`, idempotent), the daemon's own removal path (last agent on the
+  repo removed), and CLEARED by `promote()` (both fresh and idempotent paths, after persist) —
+  "promote makes it durable" is the one-liner the plan predicted.
+- The marker is PERSISTED (`ephemeral-projects.json` sidecar next to `projects.json`), overriding
+  the plan's "in-memory Set" sketch: the registration the marker must undo is durable, so the
+  in-memory first cut leaked it to permanent on any daemon restart mid-session — release became a
+  no-op and the removal hook could never fire (blind-review finding, fail-open). Now:
+  register fails CLOSED if the marker can't be written (registration rolled back), and boot
+  reconciles reloaded markers against the restored roster — session survived the restart (04's
+  reattach) ⇒ marker kept for the ordinary end-of-session hooks; session died with the old daemon ⇒
+  registration reaped at boot; failed reap ⇒ marker kept and retried next boot. Restart trio pinned
+  in tests/here.test.ts.
 - Non-git cwd refused client-side (message points at `git init`) AND server-side (registerProject);
   never `inPlace`. OMPSQ-40 untouched — live sessions ran in `<state>/worktrees/repo-squad-chat-*`.
 

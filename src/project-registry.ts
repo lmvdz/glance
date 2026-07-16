@@ -50,13 +50,19 @@ export interface ProjectRegistry {
 const RegisteredReposSchema = Schema.Array(Schema.String);
 
 const FILE = "projects.json";
+/** Sidecar for `glance here` session-scoped registrations (daily-onramp 02). The registry write in
+ *  `projects.json` is DURABLE, so the "undo this on session end" marker must be durable too — an
+ *  in-memory-only marker meant a daemon restart mid-session silently promoted an ephemeral
+ *  registration to permanent (fail-open; blind-review finding). SquadManager reloads this at boot
+ *  and reaps flagged entries whose session did not survive the restart. */
+const EPHEMERAL_FILE = "ephemeral-projects.json";
 
-function readRepos(stateDir: string): Set<string> {
+function readRepoSet(stateDir: string, file: string): Set<string> {
 	try {
-		const file = path.join(stateDir, FILE);
+		const full = path.join(stateDir, file);
 		const b = getStorageBackend();
-		if (!b.exists(file)) return new Set();
-		const raw = b.readTextSync(file);
+		if (!b.exists(full)) return new Set();
+		const raw = b.readTextSync(full);
 		if (raw === undefined) return new Set();
 		const repos = decodeJsonWith(RegisteredReposSchema, raw);
 		return new Set((repos ?? []).filter((r) => r.length > 0));
@@ -65,15 +71,34 @@ function readRepos(stateDir: string): Set<string> {
 	}
 }
 
+function readRepos(stateDir: string): Set<string> {
+	return readRepoSet(stateDir, FILE);
+}
+
 /** True when the set is now durably on disk. A failed write must NOT be reported as a success: the
  *  operator would see "project added", and the next restart would disagree (cross-lineage review). */
-function writeRepos(stateDir: string, repos: Set<string>): boolean {
+function writeRepoSet(stateDir: string, file: string, repos: Set<string>): boolean {
 	try {
-		getStorageBackend().writeDurableSync(path.join(stateDir, FILE), JSON.stringify([...repos].sort()));
+		getStorageBackend().writeDurableSync(path.join(stateDir, file), JSON.stringify([...repos].sort()));
 		return true;
 	} catch {
 		return false;
 	}
+}
+
+function writeRepos(stateDir: string, repos: Set<string>): boolean {
+	return writeRepoSet(stateDir, FILE, repos);
+}
+
+/** The persisted ephemeral-registration markers (see EPHEMERAL_FILE). Never throws. */
+export function readEphemeralProjects(stateDir: string): Set<string> {
+	return readRepoSet(stateDir, EPHEMERAL_FILE);
+}
+
+/** True when the marker set is durably on disk. A failed write means the marker would NOT survive a
+ *  restart — the caller must treat that as a failed ephemeral registration, not shrug it off. */
+export function writeEphemeralProjects(stateDir: string, repos: Set<string>): boolean {
+	return writeRepoSet(stateDir, EPHEMERAL_FILE, repos);
 }
 
 /** Leading-`~` expansion (see `normalizeRepoPath`'s live-finding comment). Exported so the agent

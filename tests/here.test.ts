@@ -148,6 +148,60 @@ test("removing the LAST agent on an ephemeral repo releases the registration (da
 	expect(mgr.projects()).toEqual([]);
 });
 
+// The restart-leak trio: the registry write is DURABLE, so the undo marker must be durable too —
+// an in-memory-only marker meant a daemon restart mid-session silently promoted an ephemeral
+// registration to permanent (blind-review finding, fail-open).
+
+test("daemon restart mid-session does NOT leak an ephemeral registration to permanent — boot reaps it", async () => {
+	const stateDir = await tmpDir("here-eph-restart-");
+	const repo = await gitRepo("here-eph-restart-repo-");
+	const mgr1 = new SquadManager({ stateDir } as never);
+	await mgr1.registerEphemeralProject(repo);
+	expect(mgr1.projects().map((p) => p.repo)).toEqual([repo]);
+	// No release — the daemon "dies" mid-session (mgr1 is simply dropped, marker only on disk now).
+
+	const mgr2 = new SquadManager({ stateDir } as never);
+	cleanups.push(() => mgr2.stop());
+	expect(mgr2.isEphemeralProject(repo)).toBe(true); // the marker survived the restart
+	await mgr2.start(); // session did NOT survive ⇒ boot reconciliation reaps the registration
+	expect(mgr2.isEphemeralProject(repo)).toBe(false);
+	expect(mgr2.projects()).toEqual([]); // pre-session state restored — not silently permanent
+});
+
+test("a session that SURVIVES the restart keeps its marker — ordinary session end still restores the registry", async () => {
+	const stateDir = await tmpDir("here-eph-survive-");
+	const repo = await gitRepo("here-eph-survive-repo-");
+	const mgr1 = new SquadManager({ stateDir } as never);
+	await mgr1.registerEphemeralProject(repo);
+
+	const mgr2 = new SquadManager({ stateDir } as never);
+	cleanups.push(() => mgr2.stop());
+	seedConsoleAgent(mgr2, "chat-1", repo); // the restored session (concern 04's reattach shape)
+	await mgr2.start();
+	expect(mgr2.isEphemeralProject(repo)).toBe(true); // NOT reaped — its session is alive
+	expect(mgr2.projects().map((p) => p.repo)).toEqual([repo]);
+
+	await mgr2.applyCommand({ type: "remove", id: "chat-1" }); // ordinary session end, post-restart
+	expect(mgr2.isEphemeralProject(repo)).toBe(false);
+	expect(mgr2.projects()).toEqual([]);
+});
+
+test("promote's durability survives a restart — the cleared marker is persisted, not in-memory", async () => {
+	const stateDir = await tmpDir("here-eph-promote-durable-");
+	const repo = await gitRepo("here-eph-promote-durable-repo-");
+	const mgr1 = new SquadManager({ stateDir } as never);
+	await mgr1.registerEphemeralProject(repo);
+	seedConsoleAgent(mgr1, "chat-1", repo);
+	const promoted = await mgr1.promote("chat-1", { task: "keep it" });
+	expect(promoted.ok).toBe(true);
+
+	// A fresh manager on the same stateDir must see NO marker (else its boot reap would un-register
+	// a repo the operator explicitly kept). Constructor-loaded — no start() needed for the check.
+	const mgr2 = new SquadManager({ stateDir } as never);
+	expect(mgr2.isEphemeralProject(repo)).toBe(false);
+	expect(mgr2.projects().map((p) => p.repo)).toEqual([repo]); // promoted ⇒ survives restarts
+});
+
 // ── the HTTP seam (fail-closed create + release route), no agent spawned ────────────────────────
 
 test("POST /api/console ephemeral:true refuses a non-git repo with the reason; /api/console/release round-trips", async () => {

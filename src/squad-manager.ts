@@ -43,7 +43,7 @@ import { type Answer, answerBrief, listAnswers, readAnswer, saveAnswer } from ".
 import { errText } from "./err-text.ts";
 import { isConsolePrompt, stripConsolePrompt } from "./console-prompt.ts";
 import { openRemovedLedger, type RemovedLedger } from "./removed-ledger.ts";
-import { normalizeRepoPath, openProjectRegistry, type ProjectRegistry } from "./project-registry.ts";
+import { normalizeRepoPath, openProjectRegistry, readEphemeralProjects, writeEphemeralProjects, type ProjectRegistry } from "./project-registry.ts";
 import { Orchestrator } from "./orchestrator.ts";
 import { Observer, type Finding } from "./observer.ts";
 import { Scout, unscannedReasoning } from "./scout.ts";
@@ -933,6 +933,10 @@ export class SquadManager extends EventEmitter {
 		this.scoutCursor = readScoutCursors(this.stateDir);
 		this.removedLedger = openRemovedLedger(this.stateDir);
 		this.projectRegistry = openProjectRegistry(this.stateDir);
+		// Reload session-scoped registration markers so a mid-session daemon restart cannot promote an
+		// ephemeral `glance here` registration to permanent — start() reconciles them against the
+		// restored roster (reconcileEphemeralProjects).
+		this.ephemeralProjects = readEphemeralProjects(this.stateDir);
 		this.automation = new AutomationLog(this.stateDir, { onEvent: (event) => this.emit("event", { type: "automation", event } satisfies SquadEvent) });
 		this.learningMetrics = new LearningMetrics(this.stateDir, { log: (m) => this.log("warn", `learning-metrics: ${m}`) });
 		this.transitionLog = new JsonlLog<TransitionEntry>({ path: path.join(this.stateDir, "transitions.jsonl"), log: (m) => this.log("warn", `transitions.jsonl: ${m}`) });
@@ -1011,6 +1015,10 @@ export class SquadManager extends EventEmitter {
 			await this.adoptOrphanedAgents(snapshot);
 			this.reconcileForkLineage();
 		}
+		// AFTER roster restore (needs the surviving agents to tell live `glance here` sessions from dead
+		// ones) and outside the snapshot guard: a fresh-state boot with leftover markers means every
+		// flagged session is dead, which is exactly the case that must be reaped.
+		this.reconcileEphemeralProjects();
 		// DB mode: the registry runs pruneStaleSockets once over all orgs (a per-org manager must not).
 		if (!this.skipGlobalJanitors) await pruneStaleSockets().catch(() => []);
 		await this.bus.start();
@@ -2477,12 +2485,58 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
-	 * Repos registered only for the lifetime of a `glance here` session (daily-onramp 02). Deliberately
-	 * NOT persisted: ephemeral-by-definition must not survive a daemon restart (restart survival of the
-	 * SESSION is concern 04's; this set only tracks which registrations to undo on session end). Keys are
-	 * the canonical repo roots `registerProject` returns — the same key `projects()` groups by.
+	 * Repos registered only for the lifetime of a `glance here` session (daily-onramp 02). Persisted as
+	 * a sidecar (`ephemeral-projects.json`, loaded in the constructor) BECAUSE the registration it must
+	 * undo is durable: the first cut kept this set in-memory only, so a daemon restart mid-session lost
+	 * the marker while the `projects.json` row survived — every restart silently promoted a
+	 * session-scoped registration to a permanent, admin-gated one (fail-open; blind-review finding).
+	 * `start()` reconciles the reloaded markers against the restored roster: a session that survived the
+	 * restart (concern 04) keeps its marker for the ordinary end-of-session hooks; a session that died
+	 * with the old daemon is reaped at boot. Keys are the canonical repo roots `registerProject`
+	 * returns — the same key `projects()` groups by.
 	 */
-	private readonly ephemeralProjects = new Set<string>();
+	private readonly ephemeralProjects: Set<string>;
+
+	/** Drop a repo's session-scoped marker (promote / release) and persist the shrunken sidecar. A
+	 *  failed sidecar write here is self-healing: boot reconciliation drops markers whose repo is no
+	 *  longer registered, and re-releasing an already-durable repo is a no-op by design. */
+	private clearEphemeralMarker(repo: string): void {
+		if (this.ephemeralProjects.delete(normalizeRepoPath(repo))) {
+			writeEphemeralProjects(this.stateDir, this.ephemeralProjects);
+		}
+	}
+
+	/**
+	 * Boot reconciliation for the reloaded ephemeral markers — runs in start() AFTER the roster is
+	 * restored (reconnectLive/adoptOrphanedAgents), so it can tell surviving sessions from dead ones:
+	 *   - marker whose repo still has a live agent → the session outlived the restart (concern 04);
+	 *     keep the marker so the ordinary session-end hooks (release route, `remove()`) still undo it;
+	 *   - marker whose repo has NO live agent → the session died with the old daemon; un-register now.
+	 *     This is the restart leak the sidecar exists to close;
+	 *   - marker whose repo is no longer registered at all → stale (released after a failed sidecar
+	 *     write, or the operator removed the project); just drop it.
+	 * A failed un-register keeps its marker so the NEXT boot retries — never drop the undo obligation
+	 * on an error.
+	 */
+	private reconcileEphemeralProjects(): void {
+		if (this.ephemeralProjects.size === 0) return;
+		const liveRepos = new Set([...this.agents.values()].map((r) => normalizeRepoPath(r.options.repo)));
+		let dirty = false;
+		for (const repo of [...this.ephemeralProjects]) {
+			if (liveRepos.has(repo)) continue;
+			if (this.projectRegistry.has(repo)) {
+				const dropped = this.unregisterProject(repo);
+				if (!dropped.ok) {
+					this.log("warn", `could not reap ephemeral project ${repo} at boot (${dropped.reason}) — marker kept for the next attempt`);
+					continue;
+				}
+				this.log("info", `ephemeral project reaped at boot (its session did not survive the restart): ${repo}`);
+			}
+			this.ephemeralProjects.delete(repo);
+			dirty = true;
+		}
+		if (dirty) writeEphemeralProjects(this.stateDir, this.ephemeralProjects);
+	}
 
 	/** Test/observability read: is this repo's registration session-scoped right now? */
 	isEphemeralProject(repo: string): boolean {
@@ -2499,7 +2553,22 @@ export class SquadManager extends EventEmitter {
 	async registerEphemeralProject(repo: string): Promise<{ ok: true; repo: string; added: boolean; ephemeral: boolean } | { ok: false; reason: string }> {
 		const result = await this.registerProject(repo);
 		if (!result.ok) return result;
-		if (result.added) this.ephemeralProjects.add(result.repo);
+		if (result.added) {
+			this.ephemeralProjects.add(result.repo);
+			// The registration this marker must undo is already durable — a marker that exists only in
+			// memory would not survive a restart, silently promoting the session-scoped registration to
+			// permanent. Fail CLOSED: no durable marker ⇒ no ephemeral registration at all.
+			if (!writeEphemeralProjects(this.stateDir, this.ephemeralProjects)) {
+				this.ephemeralProjects.delete(result.repo);
+				const rollback = this.unregisterProject(result.repo);
+				return {
+					ok: false,
+					reason: rollback.ok
+						? `could not persist the ephemeral session marker for ${result.repo} — the registration was rolled back`
+						: `could not persist the ephemeral session marker for ${result.repo} AND the rollback failed (${rollback.reason}) — the repo is now durably registered; un-register it explicitly`,
+				};
+			}
+		}
 		return { ...result, ephemeral: this.ephemeralProjects.has(result.repo) };
 	}
 
@@ -2513,7 +2582,7 @@ export class SquadManager extends EventEmitter {
 		if (!this.ephemeralProjects.has(key)) return { ok: true, repo: key, released: false };
 		const dropped = this.unregisterProject(key);
 		if (!dropped.ok) return { ok: false, repo: key, released: false, reason: dropped.reason };
-		this.ephemeralProjects.delete(key);
+		this.clearEphemeralMarker(key);
 		return { ok: true, repo: key, released: true };
 	}
 
@@ -4110,7 +4179,7 @@ export class SquadManager extends EventEmitter {
 			// Promotion is the "keep it" signal for a `glance here` session (daily-onramp 02) — clearing
 			// the marker on the idempotent path too means a re-promote after a crashed first call still
 			// makes the registration durable.
-			this.ephemeralProjects.delete(normalizeRepoPath(rec.dto.repo));
+			this.clearEphemeralMarker(rec.dto.repo);
 			if (opts.mode && opts.mode !== rec.dto.autonomyMode) {
 				rec.dto.autonomyMode = opts.mode;
 				o.autonomyMode = opts.mode;
@@ -4154,7 +4223,7 @@ export class SquadManager extends EventEmitter {
 		// Promote makes a `glance here` session's repo registration durable: with the ephemeral marker
 		// gone, session-end cleanup no longer fires (daily-onramp 02). AFTER the persist so a rolled-back
 		// promote leaves the marker (and the session's cleanup contract) intact.
-		this.ephemeralProjects.delete(normalizeRepoPath(rec.dto.repo));
+		this.clearEphemeralMarker(rec.dto.repo);
 		this.emitAgent(rec);
 		void this.recordAudit(actor, "promote", id, "ok", `console→unit; mode ${prior.mode}→${rec.dto.autonomyMode}`);
 		await this.store.appendAudit({ actor: actor.id, action: "promote", target: id, detail: { priorMode: prior.mode, mode: rec.dto.autonomyMode, task: opts.task ? truncate(opts.task, 120) : undefined } }).catch(() => {});
