@@ -289,8 +289,9 @@ function repoChecks(repos: RepoFacts[]): DoctorCheck[] {
 }
 
 /** Pure rendering of the adoption rollup — the numbers ARE the finding; the gate (daily-dogfood-
- *  engine 03) judges them, the doctor just refuses to let them hide. Exported for tests. */
-export function adoptionCheck(s: AdoptionSummary): DoctorCheck {
+ *  engine 03) judges them, the doctor just refuses to let them hide. Module-private: `runDoctor`
+ *  is this file's only caller. */
+function adoptionCheck(s: AdoptionSummary): DoctorCheck {
 	return {
 		id: "adoption",
 		title: "Is glance getting daily use?",

@@ -36,6 +36,9 @@ export interface ProcEntry {
  * (`["npx","-y","@zed-industries/claude-code-acp"]` → the package; `["grok","agent","stdio"]` →
  * "stdio" is too generic, so a minimum length applies and the scan walks left until something
  * distinctive turns up). Undefined when nothing qualifies — the caller must then refuse to kill.
+ *
+ * @substrate exported for tests only — tests/restart-reattach.test.ts asserts this identity-token
+ * primitive directly; its only in-repo caller is `planReap`, in this same file.
  */
 export function distinctiveToken(cmd: string[]): string | undefined {
 	for (let i = cmd.length - 1; i >= 0; i--) {
@@ -55,6 +58,10 @@ export function distinctiveToken(cmd: string[]): string | undefined {
  *     adapter honors stdin EOF);
  *   - the pid's cmdline does not contain the token → refuse (recycled pid; killing it would hit an
  *     unrelated process).
+ *
+ * @substrate exported for tests only — tests/restart-reattach.test.ts asserts this pure decision
+ * function directly against a synthetic process table; its only in-repo caller is
+ * `reapAcpOrphanChain`, in this same file.
  */
 export function planReap(table: ProcEntry[], rootPid: number, persistedCmd: string[]): { kill: number[]; skip?: string } {
 	const token = distinctiveToken(persistedCmd);
@@ -78,7 +85,10 @@ export function planReap(table: ProcEntry[], rootPid: number, persistedCmd: stri
 }
 
 /** Snapshot /proc into ProcEntry rows; undefined where /proc doesn't exist (non-Linux) — the caller
- *  then no-ops the reap honestly instead of guessing. Races with exiting processes are skipped. */
+ *  then no-ops the reap honestly instead of guessing. Races with exiting processes are skipped.
+ *
+ *  @substrate exported for tests only — tests/restart-reattach.test.ts drives this live /proc read
+ *  directly; its only in-repo caller is `reapAcpOrphanChain`, in this same file. */
 export async function readProcTable(): Promise<ProcEntry[] | undefined> {
 	let names: string[];
 	try {

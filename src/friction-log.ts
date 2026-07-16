@@ -32,7 +32,11 @@ export interface FrictionCapture {
 	agentId?: string;
 }
 
-/** `<stateDir>/friction.jsonl` — mirrors automationPath()/receiptPath()'s state-dir convention. */
+/** `<stateDir>/friction.jsonl` — mirrors automationPath()/receiptPath()'s state-dir convention.
+ *
+ * @substrate exported for tests only — tests/friction-log.test.ts reads the file this path points
+ * at directly to assert on-disk content; its only in-repo caller is `FrictionLog`'s constructor,
+ * in this same file. */
 export function frictionPath(stateDir: string): string {
 	return path.join(stateDir, "friction.jsonl");
 }

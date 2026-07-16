@@ -94,6 +94,10 @@ const gitErr = (what: string, r: { code: number; stderr: string }): string => `$
  * three-command sketch deliberately: path-only hashing would let a mid-turn edit to an untracked
  * file slip past the divergence check and be clobbered by the apply's own file writes.
  * Any sub-command failing fails the whole capture — never an empty or partial fingerprint.
+ *
+ * @substrate exported for tests only — tests/boundary-sync.test.ts asserts this fingerprint
+ * primitive directly; every other in-repo caller (`beginTurn`, `syncTurnEnd`, `applyHeldNow`,
+ * `applyPatchToRealTree`) is a sibling function in this same file.
  */
 export async function captureRealTreeState(realDir: string): Promise<CaptureResult> {
 	const head = await hardenedGit(["rev-parse", "HEAD"], { cwd: realDir });
@@ -154,7 +158,10 @@ export async function captureWorktreeTree(worktree: string): Promise<TreeResult>
 	}
 }
 
-/** The turn's own delta: diff(startTree, endTree), binary-safe, driver-neutralized. */
+/** The turn's own delta: diff(startTree, endTree), binary-safe, driver-neutralized.
+ *
+ * @substrate exported for tests only — tests/boundary-sync.test.ts asserts this diff primitive
+ * directly; its only in-repo caller is `syncTurnEnd`, in this same file. */
 export async function computeTurnPatch(worktree: string, startTree: string, endTree: string): Promise<PatchResult> {
 	if (startTree === endTree) return { ok: true, patch: "" };
 	const diff = await hardenedGit(["diff-tree", "-r", "-p", "--binary", "--no-ext-diff", "--no-textconv", startTree, endTree], { cwd: worktree });
@@ -174,6 +181,10 @@ export async function computeTurnPatch(worktree: string, startTree: string, endT
  * without it, an operator edit between the turn-end fingerprint and the apply would be written into
  * even though the precondition no longer holds. A mismatch (or a failed capture) fails the apply
  * with nothing written; only the final `git apply` spawn itself remains exposed (window 3).
+ *
+ * @substrate exported for tests only — tests/boundary-sync.test.ts asserts this apply primitive
+ * directly (including the race-window recheck); its only in-repo callers are `syncTurnEnd` and
+ * `applyHeldNow`, both in this same file.
  */
 export async function applyPatchToRealTree(realDir: string, patch: string, expectedFingerprint?: string): Promise<ApplyResult> {
 	if (patch.trim().length === 0) return { ok: true };
