@@ -61,6 +61,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { parseNulList } from "./adopt.ts";
+import { errText } from "./err-text.ts";
 import { hardenedGit as rawHardenedGit } from "./git-harden.ts";
 
 /** hardenedGit, but spawn-safe: `Bun.spawn` THROWS synchronously when the cwd no longer exists
@@ -71,7 +72,7 @@ async function hardenedGit(...args: Parameters<typeof rawHardenedGit>): ReturnTy
 	try {
 		return await rawHardenedGit(...args);
 	} catch (e) {
-		return { code: -1, stdout: "", stderr: e instanceof Error ? e.message : String(e) };
+		return { code: -1, stdout: "", stderr: errText(e) };
 	}
 }
 
@@ -135,7 +136,7 @@ export async function captureWorktreeTree(worktree: string): Promise<TreeResult>
 	try {
 		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "glance-bsync-"));
 	} catch (e) {
-		return fail(`temp index dir: ${e instanceof Error ? e.message : String(e)}`);
+		return fail(`temp index dir: ${errText(e)}`);
 	}
 	try {
 		const env = { GIT_INDEX_FILE: path.join(tmpDir, "index") };
@@ -180,7 +181,7 @@ export async function applyPatchToRealTree(realDir: string, patch: string, expec
 	try {
 		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "glance-bsync-apply-"));
 	} catch (e) {
-		return fail(`temp patch dir: ${e instanceof Error ? e.message : String(e)}`);
+		return fail(`temp patch dir: ${errText(e)}`);
 	}
 	try {
 		const patchFile = path.join(tmpDir, "turn.patch");
@@ -314,6 +315,26 @@ export interface HeldSync {
 
 type LedgerLine = ({ kind: "held" } & HeldSync) | { kind: "resolved"; id: string; outcome: "applied" | "discarded"; at: number };
 
+/** Structural narrow for a parsed ledger line — no parse-and-cast (json-parse-as-cast ratchet;
+ *  NB the ratchet is a pure line-regex with no comment skip, so don't quote the idiom here
+ *  either). The ledger is our own freshly-written state (`appendLine` only ever writes
+ *  `satisfies LedgerLine` objects), so a discriminant + used-field check is the right depth: it
+ *  rejects a foreign or hand-mangled line instead of folding it into the backlog, without pulling
+ *  a Schema decode into a hot per-line loop. */
+function isLedgerLine(v: unknown): v is LedgerLine {
+	if (typeof v !== "object" || v === null || !("kind" in v) || !("id" in v) || typeof v.id !== "string") return false;
+	if (v.kind === "resolved") return true;
+	if (v.kind !== "held") return false;
+	return (
+		"agentId" in v &&
+		typeof v.agentId === "string" &&
+		"patchFile" in v &&
+		typeof v.patchFile === "string" &&
+		"realDir" in v &&
+		typeof v.realDir === "string"
+	);
+}
+
 /**
  * Durable held-patch ledger: an append-only JSONL (one small line per event) with patch bodies as
  * sibling files. Append-only means a crash mid-resolve loses at worst the RESOLUTION marker (the
@@ -379,17 +400,18 @@ export class HeldSyncStore {
 			raw = await fs.readFile(this.ledger, "utf8");
 		} catch (e) {
 			if ((e as NodeJS.ErrnoException | null)?.code === "ENOENT") return [];
-			throw new Error(`held-sync ledger unreadable (${this.ledger}): ${e instanceof Error ? e.message : String(e)}`);
+			throw new Error(`held-sync ledger unreadable (${this.ledger}): ${errText(e)}`);
 		}
 		const held = new Map<string, HeldSync>();
 		for (const line of raw.split("\n")) {
 			if (!line.trim()) continue;
-			let parsed: LedgerLine;
+			let parsed: unknown;
 			try {
-				parsed = JSON.parse(line) as LedgerLine;
+				parsed = JSON.parse(line);
 			} catch {
 				continue; // a torn tail line (crash mid-append) — ignore; complete lines are one-per-write
 			}
+			if (!isLedgerLine(parsed)) continue; // foreign/mangled line — never fold it into the backlog
 			if (parsed.kind === "held") held.set(parsed.id, parsed);
 			else held.delete(parsed.id);
 		}
@@ -453,7 +475,7 @@ export async function applyHeldNow(store: HeldSyncStore, agentId: string, realDi
 				ok: false,
 				applied,
 				remaining: held.length - applied,
-				reason: `turn ${h.turn} WAS applied but recording that failed (${e instanceof Error ? e.message : String(e)}) — a re-apply will report it still divergent (crash semantics); inspect ${store.root}`,
+				reason: `turn ${h.turn} WAS applied but recording that failed (${errText(e)}) — a re-apply will report it still divergent (crash semantics); inspect ${store.root}`,
 			};
 		}
 		// Re-pin for the next patch: each apply legitimately changes the tree, so the next write is
@@ -497,7 +519,7 @@ export async function discardHeldNow(store: HeldSyncStore, agentId: string, patc
 		} catch (e) {
 			// Report the PARTIAL count honestly — a mid-loop failure must not read as "nothing
 			// happened" when earlier entries were already resolved.
-			return { ok: false, discarded, remaining: held.length - discarded, reason: `recording the discard failed (${e instanceof Error ? e.message : String(e)}) — inspect ${store.root}` };
+			return { ok: false, discarded, remaining: held.length - discarded, reason: `recording the discard failed (${errText(e)}) — inspect ${store.root}` };
 		}
 		discarded++;
 	}

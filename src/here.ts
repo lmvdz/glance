@@ -28,6 +28,7 @@ import { openSync } from "node:fs";
 import * as path from "node:path";
 import * as readline from "node:readline";
 import { base, DEFAULT_PORT, parseArgs, readAccessToken, stateDirPath, tokenHeader } from "./cli-args.ts";
+import { errText } from "./err-text.ts";
 import type { AgentDTO, PendingRequest, TranscriptEntry } from "./types.ts";
 
 // ── ANSI (the inline subset of tui.ts's palette — no alt-screen, scrollback stays yours) ────────
@@ -361,7 +362,7 @@ export class HereSession {
 }
 
 function msg(err: unknown): string {
-	return err instanceof Error ? err.message : String(err);
+	return errText(err);
 }
 
 /** The one-line shape hint for a pending request — shared by the banner and the mis-route notice. */
