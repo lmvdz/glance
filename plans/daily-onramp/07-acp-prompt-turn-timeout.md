@@ -1,6 +1,6 @@
 # ACP `session/prompt` 60s timeout kills any long turn — turn-scoped liveness instead
 
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: mechanical

@@ -22,7 +22,14 @@ export OMP_SQUAD_AUTOSUPERVISE=0 OMP_SQUAD_AUTO_SUPERVISE=0 OMP_SQUAD_LAND_CONFI
 # (proven live 2026-07-08). Repoint HOME at an empty dir so no secrets file is readable:
 export HOME=$(mktemp -d /tmp/glance-scratch-home-XXXX)
 unset PLANE_API_KEY PLANE_API_TOKEN 2>/dev/null || true             # belt-and-suspenders on top
-nohup bun src/index.ts serve > "$OMP_SQUAD_STATE_DIR/daemon.log" 2>&1 &
+# FILE-MODE gotcha (proven live 2026-07-16): @oh-my-pi/pi-tui's import does its own dotenv-style
+# load WITH OVERRIDE from the daemon's CWD — it silently flips DATABASE_URL (and WorkOS creds)
+# back on from the repo's real .env even with an explicit empty export AND `bun --no-env-file`.
+# File mode only holds if the daemon's cwd has no .env: launch from an empty scratch cwd and
+# point at the repo by absolute path. Probe GET /api/auth/mode afterwards; expect {"mode":"file"}.
+export SCRATCH_CWD=$(mktemp -d /tmp/glance-scratch-cwd-XXXX)
+cd "$SCRATCH_CWD" && nohup bun /home/lars/sui/omp-squad/src/index.ts up --no-tui > "$OMP_SQUAD_STATE_DIR/daemon.log" 2>&1 &
+# (note: `serve` is not a verb — boot is `up --no-tui --port N`, confirmed 2026-07-16)
 ```
 
 - **Detach pattern**: separate `export` lines + plain `nohup … &`. NOT `run_in_background` (SIGTERMs the child when the tool returns), NOT compound `cd X && VAR=y nohup …` chains (first non-zero step silently kills the rest — a build timeout once left a merge unstaged this way).
