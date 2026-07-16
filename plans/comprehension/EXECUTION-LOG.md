@@ -53,3 +53,40 @@ Shared-file changelog for batch 3:
   carry no command/outcome; wiring real gate provenance is a named follow-up). PendingPr carries featureId.
 - Fabric now has symptom fact kind; PRIMER_LABEL + TYPE_LABELS updated; rankKbDocs extracted and shared.
 - Doctor: matchSymptom overlap-coefficient auto-match on failing checks + symptom-index summary row.
+
+## Concern 08 (intervene teaching)
+
+| Concern | Model | Result | Review |
+|---|---|---|---|
+| 08 intervene teaching | sonnet (worktree) | SUCCESS | pending |
+
+Delta bullets: `FeatureDTO.decisions` was already on the wire with `sourceRef` (server.ts serializes
+the real backend `FeatureDecision[]` directly) — only the webapp's hand-mirrored `FeatureDecisionDTO`
+type was missing the field, so no new route was added; `deltaBullets`/`parseEvidenceAnchor`/
+`firstEvidenceFile` (webapp/src/lib/intervene.ts) own the pure filter/cap/sort + anchor parsing.
+
+Surprise tap → fog: `src/attention.ts` gained a second compacted store, `attention-surprise.json`
+(`AttentionStore.surpriseCountsFor`/`incrementSurprise`), same debounced-flush idiom as the seen map —
+the raw JSONL feed rotates, so a durable per-file COUNT (not just a max-merged timestamp) needed its
+own file. `SquadManager.attentionSurpriseCounts(repos)` → `GET /api/fog` now passes it into
+`computeFog`'s existing `surpriseCounts` input. A surprise tap ALSO updates the seen map (it's a real
+"looked at this" signal), so `changesSinceSeen` resets to 0 on tap — but the boost term still raises
+debt above the pre-tap baseline, per DESIGN.md's "tapping surprised does not fully forgive the file."
+
+Story order: new `webapp/src/lib/diff-order.ts` (pure, Apache-2.0 attribution comment, adapted from
+ndrstnd's evidence-ordering shape per plans/research-ndrstnd/BRIEF.md pattern 3) — definition-before-use
+token scan (minus a keyword set) + layer precedence (config/schema → lib → server/manager → UI,
+classified from the file path), per-layer topological sort (Kahn's algorithm, ties broken by original
+input order), graceful fallback to input order on a same-layer cycle. "Story order / path order" toggle
+chip on the diff spine, defaulting to story order.
+
+`scripts/effect-migration.ts`'s `json-parse-as-cast` baseline moved 55→56 for `loadSurpriseCounts`
+reading its own `attention-surprise.json` — the same already-established "parsing our own
+freshly-written state file" carve-out as `loadSeenMap`'s existing entry.
+
+Root `bun test`: 3175 pass / 6 fail (all pre-existing environment-flaky spawn/worktree/rpc-agent
+timeouts, unrelated to this concern — confirmed by diffing against the pre-change commit, which showed
+the same class of failures with different specific tests each run, matching batch 1's documented
+non-reproducing flake). `webapp bun test`: 1307 pass / 0 fail. Both `tsc --noEmit` clean. Dead-exports
+ratchet unaffected (all new backend surfaces are class methods or type aliases, out of that ratchet's
+scan scope; new webapp exports aren't scanned as candidates at all).
