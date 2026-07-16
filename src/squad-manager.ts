@@ -9230,9 +9230,12 @@ export class SquadManager extends EventEmitter {
 		return this.agents.get(id)?.commands;
 	}
 
-	/** The ONE place that ever writes the completion-push latch's three fields — always to
-	 *  `rec.options` (the persisted source of truth) AND its `rec.dto` wire mirror TOGETHER, so the two
-	 *  can never drift apart (review finding #10, disarm triplication): before this, the identical
+	/** The one seam that writes the completion-push latch's three fields to `rec.options` (the
+	 *  persisted source of truth) AND its `rec.dto` wire mirror TOGETHER, so the two can never drift
+	 *  apart. NOT the only options-writer: the prompt-arm site and the createWithId spawn mapping
+	 *  still write `rec.options.*` directly and deliberately skip the dto mirror (agent_end re-derives
+	 *  it) — what this seam guarantees is that every DISARM and every rollback-restore moves both
+	 *  halves coherently (review finding #10, disarm triplication): before this, the identical
 	 *  6-field disarm was copy-pasted at the interrupt command, promote()'s casual→fleet category-clear,
 	 *  and this method — and promote()'s own rollback-restore catch restored only the `options` half,
 	 *  leaving the `dto` mirror stuck at whatever the fresh-promote branch had already forced it to on
