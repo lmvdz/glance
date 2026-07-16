@@ -1,6 +1,6 @@
 # Promote/adopt bridge UI
 
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -33,4 +33,38 @@ none (glance-desktop's cockpit has its own chat panel per the completed fleet-fi
 
 ## Resolution
 
-(filled in when this concern executes)
+Shipped on worktree-wf_55eef634-d22-4 (2026-07-16), completing a salvaged prior attempt that was
+critically re-reviewed line-by-line against server truth before being kept.
+
+- **Wire truth first** (commit 2e9ecdb): `AgentDTO.promoted` never existed on the wire — `promote()`
+  now stamps it on the fresh path (with rollback on the failure-atomic persist), on the idempotent
+  retry path (self-repairs a pre-06 persisted promote), and through both reattach DTO builds.
+  `GET /api/presence` already existed on the base branch; its truth is pinned by tests over real
+  HTTP (unauthenticated refusal on a token-configured daemon; exact `who()` rows for a harness-hook
+  claim).
+- **Promote affordance**: `AgentPromoteButton` in `AgentMetaBar` (AssistantChat meta bar) plus the
+  same self-gating button in the cockpit's Land rail. Renders only for `isPromotableChat` — the
+  wire-visible mirror of the server's own gate (`omp-operator` + name "chat" + not promoted + no
+  role/workflow/parent); the server stays authoritative, and a 409 `reason` is shown verbatim. A
+  promoted chat shows a "unit" pill in the meta bar — same thread, same id, flipped standing.
+- **Ephemeral durability**: `promote()` calls `clearEphemeralMarker(repo)` after the durable persist
+  (and on the idempotent retry path), so promoting a `glance here` chat makes its run-1 marker-file
+  registration permanent — one side effect, no new registry machinery.
+- **Adopt flow**: `adoptableSessions()` derives cards from presence rows fail-closed (only
+  `source:"other"` rows with the deterministic `harness-` claim-id prefix and a parseable
+  `<harness>:<sessionId>` label — cockpit human-presence and squad/omp rows are never offered a
+  guaranteed-409 button). `AdoptCard` (AttentionRow's visual grammar, amber = detected-not-blocking)
+  renders under an "Ad-hoc sessions" group in WorkspaceCockpit, polled on the existing fleet-health
+  cadence (`/api/presence` answers `[]` in DB-registry mode, so the section never renders where it
+  can't work). Adopt POSTs `{harness, sessionId, cwd}` (exactly `AdoptBodySchema`); success selects
+  the new unit, refusal surfaces the server `reason` verbatim.
+- **Tests**: webapp — promote-gate visibility, label parsing (first-colon split), presence→card
+  derivation, exact routes/bodies, verbatim-reason plumbing, non-JSON fold-to-honest-failure, meta-bar
+  pill states, AdoptCard rendering (78 pass across the four suites). Server — promote DTO stamping,
+  no half-stamp on refusal, ephemeral-marker clearing, presence-GET auth + row truth (here/presence
+  suites, 40 pass over real HTTP/SquadManager).
+- Sibling batch-2 work (completion-push latch clearing inside `promote()`) merged in and reconciled;
+  both sides' rollback paths preserved.
+- Remaining for the plan's live gate: the browser-driven pass (click promote in a real `here` chat →
+  same thread shows unit chrome; raw CLI session → adopt card → gated unit), per this plan's
+  independent live-verification convention.
