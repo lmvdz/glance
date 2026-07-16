@@ -11,9 +11,11 @@
  * (see hydrateAll below) — recent() never does file I/O.
  *
  * Rotation: when the file exceeds `maxBytes`, it is renamed to `<path>.1` (clobbering any
- * previous `.1`) and a fresh file started. This log is NOT a durable forensic record beyond
- * the rotation cap — receipts/transcripts are the long-horizon record; this is a bounded
- * recent-history + live-tail feed.
+ * previous `.1`) and a fresh file started. `hydrateAll()` reads `<path>.1` then `<path>`, so a
+ * "full history" caller sees across one rotation boundary — but this log is NOT a durable
+ * forensic record beyond THAT: a `.1` gets clobbered by the next rotation with no `.2`.
+ * Receipts/transcripts are the long-horizon record; this is a bounded recent-history + live-tail
+ * feed, one generation deep.
  */
 
 import { readFileSync } from "node:fs";
@@ -60,21 +62,28 @@ export class JsonlLog<T> {
 		return limit && limit > 0 ? this.ring.slice(-limit) : this.ring.slice();
 	}
 
-	/** Full persisted history from disk (torn-line-skipping) — for the explicit "full history" request only. */
+	/** Full persisted history from disk (torn-line-skipping) — for the explicit "full history" request
+	 *  only. Reads the rotated `<path>.1` tail BEFORE the live file (oldest-first), mirroring
+	 *  adoption-counters.ts's `readJsonl`: once a file crosses `maxBytes` the older half of the ledger
+	 *  lives in `.1`, and a caller documented as "the full-history path" that skipped it would silently
+	 *  drop everything written before the last rotation. Either or both files may be absent (no rotation
+	 *  yet, or fresh state dir) — that is the normal case, not an error. */
 	async hydrateAll(): Promise<T[]> {
-		let text: string;
-		try {
-			text = await fs.readFile(this.filePath, "utf8");
-		} catch {
-			return []; // missing file = normal first-boot case
-		}
 		const out: T[] = [];
-		for (const line of text.split("\n")) {
-			if (!line.trim()) continue;
+		for (const p of [`${this.filePath}.1`, this.filePath]) {
+			let text: string;
 			try {
-				out.push(JSON.parse(line) as T);
+				text = await fs.readFile(p, "utf8");
 			} catch {
-				/* skip torn line */
+				continue; // missing file = normal (no rotation yet, or fresh state dir)
+			}
+			for (const line of text.split("\n")) {
+				if (!line.trim()) continue;
+				try {
+					out.push(JSON.parse(line) as T);
+				} catch {
+					/* skip torn line */
+				}
 			}
 		}
 		return out;

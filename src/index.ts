@@ -20,7 +20,7 @@
 import "./env-compat.ts";
 import * as os from "node:os";
 import * as path from "node:path";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, realpath } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { loadOrCreateToken } from "./auth.ts";
 import { renderDoctor, runDoctor } from "./doctor.ts";
@@ -52,6 +52,7 @@ import { ompClassify } from "./intake.ts";
 import { RuntimeSettingsStore } from "./runtime-settings.ts";
 import { PolicyStore } from "./policy.ts";
 import { backendFromEnv, setStorageBackend } from "./dal/storage.ts";
+import { normalizeRepoPath } from "./project-registry.ts";
 import type { AutomationRollupRow } from "./automation-log.ts";
 import type { Actor, AgentDTO, ApprovalMode, AutomationEvent, ClientCommand, CommissionResult, CommissionSpec, CreateAgentOptions, FrictionEntry, ThinkingLevel, TranscriptEntry } from "./types.ts";
 import { base, DEFAULT_PORT, parseArgs, stateDirPath, tokenHeader } from "./cli-args.ts";
@@ -875,6 +876,33 @@ async function cmdAutomation(args: string[]): Promise<void> {
 }
 
 /**
+ * Canonicalize a repo argument to the same key `project-registry.ts` uses (`AgentDTO.repo` /
+ * `ProjectDTO.id`): resolve `input` to an absolute path, then — if it sits inside a git
+ * checkout — walk UP to the repo root via `git rev-parse --show-toplevel` rather than trusting
+ * the caller's cwd literally. Without this, a gripe logged from a subdirectory (e.g.
+ * `glance grr` run from `<repo>/webapp`) persists with `repo=<repo>/webapp`, and every
+ * repo-filtered read (`GET /api/friction?repo=`, the dogfood-drain skill) uses exact-string
+ * equality against the registered repo ROOT — so the entry is silently invisible to any
+ * repo-scoped list even though `glance grr --list` (unfiltered) still shows it.
+ *
+ * Falls back to the resolved input path when it isn't a git checkout (git missing, bare dir,
+ * `rev-parse` fails) — `normalizeRepoPath` still runs, so the fallback path collapses the same
+ * way a registered non-git "repo" would.
+ */
+export async function canonicalRepoRoot(input: string): Promise<string> {
+	const resolved = path.resolve(input);
+	try {
+		const proc = Bun.spawn(["git", "rev-parse", "--show-toplevel"], { cwd: resolved, stdout: "pipe", stderr: "ignore" });
+		const out = (await new Response(proc.stdout).text()).trim();
+		await proc.exited;
+		if (proc.exitCode === 0 && out) return normalizeRepoPath(await realpath(out).catch(() => out));
+	} catch {
+		/* git missing or spawn failed — fall through to the resolved path */
+	}
+	return normalizeRepoPath(resolved);
+}
+
+/**
  * `glance grr "<gripe>" [--repo <path>] [--context <s>]` / `glance grr --list [--repo <path>] [--json]`
  *
  * The friction ledger's five-second capture (plans/daily-dogfood-engine/01). Fire-and-forget by
@@ -884,7 +912,7 @@ async function cmdAutomation(args: string[]): Promise<void> {
  */
 async function cmdGrr(args: string[]): Promise<void> {
 	const { positional, flags } = parseArgs(args);
-	const repo = typeof flags.repo === "string" ? path.resolve(flags.repo) : process.cwd();
+	const repo = await canonicalRepoRoot(typeof flags.repo === "string" ? flags.repo : process.cwd());
 
 	if (flags.list) {
 		const q = new URLSearchParams();

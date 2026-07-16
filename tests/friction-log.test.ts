@@ -11,6 +11,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { restActionTier } from "../src/authz.ts";
 import { FrictionLog, frictionPath } from "../src/friction-log.ts";
+import { canonicalRepoRoot } from "../src/index.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import { SquadServer } from "../src/server.ts";
 import { parseSlash, SquadTui } from "../src/tui.ts";
@@ -158,6 +159,66 @@ test("REST POST /api/friction: 400 on a missing or empty-after-trim gripe — no
 
 	const got = await fetch(`${url}/api/friction`, { headers: authed(tokens.viewer) });
 	expect(((await got.json()) as { entries: FrictionEntry[] }).entries).toEqual([]);
+});
+
+// ---------------------------------------------------------------------------
+// canonicalRepoRoot — cmdGrr's repo-path canonicalization (Finding 8, wave-1 review)
+// ---------------------------------------------------------------------------
+
+async function makeGitRepo(prefix: string): Promise<string> {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+	cleanups.push(() => fs.rm(repo, { recursive: true, force: true }));
+	const git = async (args: string[]) => {
+		await Bun.spawn(["git", ...args], { cwd: repo, stdout: "ignore", stderr: "ignore" }).exited;
+	};
+	await git(["init", "-q"]);
+	return path.resolve(await fs.realpath(repo));
+}
+
+test("canonicalRepoRoot: a subdirectory of a git checkout resolves to the repo root, not the cwd literal", async () => {
+	const repo = await makeGitRepo("grr-repo-");
+	const sub = path.join(repo, "webapp", "src");
+	await fs.mkdir(sub, { recursive: true });
+
+	expect(await canonicalRepoRoot(repo)).toBe(repo); // already at the root
+	expect(await canonicalRepoRoot(sub)).toBe(repo); // subdirectory walks UP to the root
+});
+
+test("canonicalRepoRoot: a non-git directory falls back to its own (normalized) resolved path", async () => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "grr-nogit-"));
+	cleanups.push(() => fs.rm(dir, { recursive: true, force: true }));
+	const real = await fs.realpath(dir);
+
+	expect(await canonicalRepoRoot(dir)).toBe(real);
+	expect(await canonicalRepoRoot(`${dir}/`)).toBe(real); // trailing slash normalized away too
+});
+
+test("REST /api/friction: a gripe logged from a repo subdirectory (canonicalRepoRoot's job) is visible under a ?repo=<root> filter", async () => {
+	const repo = await makeGitRepo("grr-filter-repo-");
+	const sub = path.join(repo, "webapp");
+	await fs.mkdir(sub, { recursive: true });
+	const canonical = await canonicalRepoRoot(sub); // what cmdGrr now sends, instead of the literal `sub`
+
+	expect(canonical).toBe(repo); // sanity: it really did canonicalize, not just echo cwd
+	expect(canonical).not.toBe(sub);
+
+	const { url, tokens } = await liveServer();
+	await fetch(`${url}/api/friction`, {
+		method: "POST",
+		headers: authed(tokens.operator),
+		body: JSON.stringify({ repo: canonical, context: "cli", gripe: "tests flake again" }),
+	});
+
+	// The server's GET filter is exact-string equality against the repo ROOT — this is exactly
+	// what `glance grr --list --repo <root>` (or the dogfood-drain skill) issues.
+	const byRoot = await fetch(`${url}/api/friction?${new URLSearchParams({ repo }).toString()}`, { headers: authed(tokens.viewer) });
+	const { entries } = (await byRoot.json()) as { entries: FrictionEntry[] };
+	expect(entries.map((e) => e.gripe)).toEqual(["tests flake again"]);
+
+	// Regression guard: filtering by the literal (uncanonicalized) subdirectory must NOT match —
+	// proving the fix is in "cmdGrr sends the root", not in loosening the server's exact match.
+	const bySub = await fetch(`${url}/api/friction?${new URLSearchParams({ repo: sub }).toString()}`, { headers: authed(tokens.viewer) });
+	expect(((await bySub.json()) as { entries: FrictionEntry[] }).entries).toEqual([]);
 });
 
 test("SquadManager.recordFriction/frictionRecent: the in-process write path (TUI) lands in the same stateDir ledger", async () => {
