@@ -132,6 +132,41 @@ test("promote clears the ephemeral marker — 'keep it' makes the registration d
 	expect(mgr.projects().map((p) => p.repo)).toEqual([repo]);
 });
 
+test("an explicit durable registration PROMOTES an ephemeral repo — 'add project' makes it stick past /exit", async () => {
+	const stateDir = await tmpDir("here-eph-promote-durable-");
+	const repo = await gitRepo("here-eph-promote-durable-repo-");
+	const mgr = new SquadManager({ stateDir } as never);
+
+	await mgr.registerEphemeralProject(repo);
+	expect(mgr.isEphemeralProject(repo)).toBe(true);
+
+	// The webapp "add project" flow: POST /api/projects → registerProject with the promote flag. The
+	// idempotent add returns added:false, but the marker must be cleared so the session-scoped
+	// registration becomes durable.
+	const promoted = await mgr.registerProject(repo, { promoteEphemeral: true });
+	expect(promoted.ok).toBe(true);
+	if (promoted.ok) expect(promoted.added).toBe(false); // already registered — this is the promote case
+	expect(mgr.isEphemeralProject(repo)).toBe(false);
+
+	// …and the later session-end release is now a no-op: the row the operator asked to keep SURVIVES.
+	expect(mgr.releaseEphemeralProject(repo)).toMatchObject({ released: false });
+	expect(mgr.projects().map((p) => p.repo)).toEqual([repo]);
+});
+
+test("registerProject WITHOUT the promote flag never demotes a live session's ephemeral marker", async () => {
+	const stateDir = await tmpDir("here-eph-nopromote-");
+	const repo = await gitRepo("here-eph-nopromote-repo-");
+	const mgr = new SquadManager({ stateDir } as never);
+
+	await mgr.registerEphemeralProject(repo);
+	// A second `glance here` session on the same repo delegates through registerProject with no opts —
+	// it must NOT silently promote the still-live session's registration to permanent.
+	await mgr.registerProject(repo);
+	expect(mgr.isEphemeralProject(repo)).toBe(true);
+	expect(mgr.releaseEphemeralProject(repo)).toMatchObject({ released: true });
+	expect(mgr.projects()).toEqual([]);
+});
+
 test("removing the LAST agent on an ephemeral repo releases the registration (daemon-side session end)", async () => {
 	const stateDir = await tmpDir("here-eph-remove-");
 	const repo = await gitRepo("here-eph-remove-repo-");

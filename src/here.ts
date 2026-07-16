@@ -237,6 +237,7 @@ export class HereSession {
 	private lastAgent?: AgentDTO;
 	private shownPending = new Set<string>();
 	private sendInFlight = 0;
+	private emitted = 0;
 	status: HereStatus = "connecting";
 
 	constructor(
@@ -258,6 +259,15 @@ export class HereSession {
 
 	get queuedCount(): number {
 		return this.queued.length;
+	}
+
+	/**
+	 * Count of transcript lines (assistant text, tool/thinking markers) this session has printed —
+	 * NOT the operator's own input. The REPL watches this to clear its "working…" spinner the instant
+	 * the model's turn produces its first visible output, so the placeholder never overlaps real text.
+	 */
+	get transcriptLines(): number {
+		return this.emitted;
 	}
 
 	/** True while a reply could still arrive — drives the fast poll cadence. */
@@ -326,7 +336,10 @@ export class HereSession {
 			this.client.transcriptSince(this.agentId, this.renderer.since),
 			this.client.agent(this.agentId),
 		]);
-		for (const line of this.renderer.take(entries)) this.print(line);
+		for (const line of this.renderer.take(entries)) {
+			this.print(line);
+			this.emitted++;
+		}
 		this.lastAgent = agent;
 		if (!agent) {
 			this.status = "gone";
@@ -438,8 +451,9 @@ ${bold("While chatting")}
   /exit   leave — the session stays live in the webapp   ${dim("(or Ctrl-C when idle)")}
   /help   the in-chat command list
 
-The current directory is registered as a project only for the session's lifetime and released
-when you leave — promote it in the webapp to keep it.
+The current directory is registered as a project only for this session and released when you
+leave. To keep it, add it in the webapp project switcher (${bold("+ Add project…")}) — that makes the
+registration durable, so it survives ${bold("/exit")}.
 `;
 
 /**
@@ -491,9 +505,40 @@ export async function cmdHere(args: string[]): Promise<void> {
 		rl.prompt(true);
 	};
 
+	// A dim "working…" spinner that fills the dead gap between a submit and the model's first visible
+	// line — every peer chat CLI shows one, and without it the operator stares at a bare prompt through
+	// the 2.4s+ model floor each turn. It paints over the (empty) prompt line and is cleared the moment
+	// the turn produces transcript output (session.transcriptLines advances) or goes idle. It never
+	// clobbers a follow-up the operator is mid-typing (rl.line non-empty), so it's safe to run every tick.
+	const SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+	let spinFrame = 0;
+	let spinnerVisible = false;
+	const drawSpinner = (): void => {
+		if ((rl as unknown as { line?: string }).line) return; // composing a follow-up — leave their text
+		process.stdout.write(`\r${ESC}2K${dim(`${SPIN[spinFrame % SPIN.length]} working…`)}`);
+		spinFrame++;
+		spinnerVisible = true;
+	};
+	const clearSpinner = (): void => {
+		if (!spinnerVisible) return;
+		spinnerVisible = false;
+		process.stdout.write(`\r${ESC}2K`);
+		rl.prompt(true);
+	};
+
 	const session = new HereSession(client, printAbove);
 	const startedAt = Date.now();
 	let info: HereSessionInfo | undefined;
+
+	// `glance here "why is this test failing"` — positional args are the first prompt (the muscle memory
+	// of `claude "…"`), never silently dropped. Feed them through submit(): the session isn't attached
+	// yet, so it queues and flushes on attach (prewarm P1). Echo the line first — the operator never
+	// typed it at the prompt and the renderer skips user entries, so without this the words would vanish.
+	const firstPrompt = positional.join(" ").trim();
+	if (firstPrompt) {
+		process.stdout.write(`${cyan("›")} ${firstPrompt}\n`);
+		session.submit(firstPrompt);
+	}
 
 	// Prewarm P1: create in the background; the prompt below is already live.
 	const creating = client
@@ -513,6 +558,8 @@ export async function cmdHere(args: string[]): Promise<void> {
 	// Adaptive poll: fast while a turn is in flight, gentle when idle. One tick in flight at a time.
 	let closing = false;
 	let lostAt: number | undefined;
+	let prevBusy = false;
+	let turnBaseline = 0; // session.transcriptLines when the current turn began
 	const tick = async (): Promise<void> => {
 		if (closing) return;
 		try {
@@ -527,7 +574,14 @@ export async function cmdHere(args: string[]): Promise<void> {
 				printAbove(yellow("… lost the daemon — retrying quietly (Ctrl-C to leave)"));
 			}
 		}
-		if (!closing) pollTimer = setTimeout(() => void tick(), session.busy ? 250 : 1200);
+		// Working spinner: show it only in the dead gap — a turn is in flight, the daemon is reachable,
+		// and this turn hasn't printed anything yet. The first transcript line (or turn end) clears it.
+		const busy = session.busy;
+		if (busy && !prevBusy) turnBaseline = session.transcriptLines;
+		prevBusy = busy;
+		if (busy && lostAt === undefined && session.transcriptLines === turnBaseline) drawSpinner();
+		else clearSpinner();
+		if (!closing) pollTimer = setTimeout(() => void tick(), busy ? 250 : 1200);
 	};
 	let pollTimer: ReturnType<typeof setTimeout> = setTimeout(() => void tick(), 250);
 
@@ -535,6 +589,7 @@ export async function cmdHere(args: string[]): Promise<void> {
 		if (closing) return;
 		closing = true;
 		clearTimeout(pollTimer);
+		clearSpinner();
 		rl.close();
 		const finish = async (): Promise<void> => {
 			if (info?.ephemeral) await client.release(info.repo).catch(() => {});

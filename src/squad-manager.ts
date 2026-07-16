@@ -2432,7 +2432,7 @@ export class SquadManager extends EventEmitter {
 	 * operator launched it (this daemon runs from `~/lunarpup` while its code lives elsewhere), and
 	 * silently resolving against it is how you register the wrong tree.
 	 */
-	async registerProject(repo: string): Promise<{ ok: true; repo: string; added: boolean } | { ok: false; reason: string }> {
+	async registerProject(repo: string, opts: { promoteEphemeral?: boolean } = {}): Promise<{ ok: true; repo: string; added: boolean } | { ok: false; reason: string }> {
 		const raw = normalizeRepoPath(repo ?? "");
 		if (!raw) return { ok: false, reason: "repo is required" };
 		if (!path.isAbsolute(raw)) return { ok: false, reason: `repo must be an absolute path (got "${raw}")` };
@@ -2470,6 +2470,13 @@ export class SquadManager extends EventEmitter {
 		const outcome = this.projectRegistry.add(root);
 		if (outcome === "error") return { ok: false, reason: `could not persist the project registry — ${root} was NOT added` };
 		if (outcome === "added") this.log("info", `project registered: ${root}`);
+		// An explicit durable registration of a repo a live `glance here` session registered only for its
+		// lifetime is a PROMOTION ("keep it") — clear the session-scoped marker so end-of-session release
+		// no longer silently un-registers what the operator just asked to keep. Idempotent add ⇒ this is the
+		// exact case `add()` returns "exists" for. clearEphemeralMarker is a no-op when the repo was never
+		// ephemeral, so it's safe unconditionally on this explicit path. registerEphemeralProject's own
+		// delegated call passes no opts, so a fresh session registration never promotes itself.
+		if (opts.promoteEphemeral) this.clearEphemeralMarker(root);
 		this.emitFeaturesChanged();
 		return { ok: true, repo: root, added: outcome === "added" };
 	}

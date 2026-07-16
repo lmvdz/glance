@@ -1761,7 +1761,10 @@ export class SquadServer {
 		if (url.pathname === "/api/projects" && req.method === "POST") {
 			const decoded = decodeBody(ProjectRegisterBodySchema, await req.json().catch(() => null));
 			if (Result.isFailure(decoded)) return new Response("repo required", { status: 400 });
-			const registered = await manager.registerProject(decoded.success.repo);
+			// promoteEphemeral: an explicit "add project" for a repo a live `glance here` session registered
+			// only for its lifetime is the user asking to KEEP it — clear the session-scoped marker so /exit
+			// no longer un-registers it out from under them.
+			const registered = await manager.registerProject(decoded.success.repo, { promoteEphemeral: true });
 			if (!registered.ok) return new Response(registered.reason, { status: 400 });
 			return Response.json({ ok: true, repo: registered.repo, added: registered.added, projects: manager.projects() });
 		}
