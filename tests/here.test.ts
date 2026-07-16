@@ -245,6 +245,20 @@ test("`glance here` is dispatched from main() and refuses a non-TTY politely", a
 	expect(err).toContain("glance ask"); // points at the right tool instead of a dead end
 });
 
+test("`glance here --help` prints verb-scoped help and exits 0 without touching the daemon", async () => {
+	const proc = Bun.spawn(["bun", path.join(import.meta.dir, "..", "src", "index.ts"), "here", "--help"], {
+		stdin: "ignore", // no TTY, no daemon — help must print and leave, never fall through to a session
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+	expect(code).toBe(0);
+	expect(out).toContain("glance here");
+	expect(out).toContain("--harness");
+	expect(out).toContain("/stop");
+	expect(err).not.toContain("interactive"); // did NOT fall through to the non-TTY refusal
+});
+
 // ── 3. client-mode REPL logic ────────────────────────────────────────────────────────────────────
 
 interface FakeCall {
@@ -320,6 +334,37 @@ test("a pending permission request routes the next submit as an ANSWER, mapped l
 	await new Promise((r) => setTimeout(r, 10));
 	const answer = calls.filter((c) => c.path === "/api/command").map((c) => c.body as Record<string, unknown>);
 	expect(answer).toEqual([{ type: "answer", id: "chat-1", requestId: "req-1", value: "yes" }]);
+	expect(lines.some((l) => l.includes("approved") && l.includes("Run tests?"))).toBe(true); // told how the line was read
+});
+
+test("a non-matching line over a pending confirm is sent as a MESSAGE, never silently coerced to 'no'", async () => {
+	const pending = { id: "req-2", source: "ui" as const, kind: "confirm", title: "Run tests?", createdAt: 1 };
+	const { client, calls } = fakeDaemon({ transcript: [], agent: agentDto({ status: "input", pending: [pending] }) });
+	const lines: string[] = [];
+	const session = new HereSession(client, (l) => lines.push(l));
+	session.attach("chat-1");
+	await session.poll();
+
+	session.submit("wait, what does that command do?");
+	await new Promise((r) => setTimeout(r, 10));
+	const cmds = calls.filter((c) => c.path === "/api/command").map((c) => c.body as Record<string, unknown>);
+	// The follow-up went out as a prompt — the request was NOT answered "no", and the message was NOT dropped.
+	expect(cmds).toEqual([{ type: "prompt", id: "chat-1", message: "wait, what does that command do?" }]);
+	expect(lines.some((l) => l.includes("still needs you"))).toBe(true); // request kept visible
+});
+
+test("a select answer only matches an offered option; a stray line is sent as a message instead", async () => {
+	const pending = { id: "req-3", source: "ui" as const, kind: "select", title: "Which base?", options: ["main", "develop"], createdAt: 1 };
+	const { client, calls } = fakeDaemon({ transcript: [], agent: agentDto({ status: "input", pending: [pending] }) });
+	const lines: string[] = [];
+	const session = new HereSession(client, (l) => lines.push(l));
+	session.attach("chat-1");
+	await session.poll();
+
+	session.submit("MAIN"); // case-insensitive match on an offered option
+	await new Promise((r) => setTimeout(r, 10));
+	expect(calls.filter((c) => c.path === "/api/command").map((c) => c.body)).toEqual([{ type: "answer", id: "chat-1", requestId: "req-3", value: "main" }]);
+	expect(lines.some((l) => l.includes('answered "main"'))).toBe(true);
 });
 
 test("a vanished agent is reported honestly, once", async () => {

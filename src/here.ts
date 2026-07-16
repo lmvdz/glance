@@ -27,8 +27,8 @@ import * as fsp from "node:fs/promises";
 import { openSync } from "node:fs";
 import * as path from "node:path";
 import * as readline from "node:readline";
-import { base, parseArgs, readAccessToken, stateDirPath, tokenHeader } from "./cli-args.ts";
-import type { AgentDTO, TranscriptEntry } from "./types.ts";
+import { base, DEFAULT_PORT, parseArgs, readAccessToken, stateDirPath, tokenHeader } from "./cli-args.ts";
+import type { AgentDTO, PendingRequest, TranscriptEntry } from "./types.ts";
 
 // ── ANSI (the inline subset of tui.ts's palette — no alt-screen, scrollback stays yours) ────────
 const ESC = "\x1b[";
@@ -268,19 +268,33 @@ export class HereSession {
 		return st === "working" || st === "starting";
 	}
 
-	/** Route a composed line: pending answer first, else a prompt (queued until attached). */
+	/**
+	 * Route a composed line: a pending answer only when the line MATCHES the offered shape (y/n for a
+	 * confirm, one of the options for a select) — otherwise it's a follow-up, sent as a prompt with the
+	 * request left standing. Either way the operator sees exactly how the line was read, never a silent
+	 * deny-and-discard (a mistyped question used to become a "no" AND vanish).
+	 */
 	submit(text: string): void {
 		const t = text.trim();
 		if (!t) return;
 		const pending = this.lastAgent?.pending?.[0];
 		if (pending && this.agentId) {
-			const value = pending.kind === "confirm" ? (/^y/i.test(t) ? "yes" : "no") : t;
-			this.sendInFlight++;
-			void this.client
-				.answer(this.agentId, pending.id, value)
-				.catch((err) => this.print(red(`✗ answer didn't reach the agent: ${msg(err)}`)))
-				.finally(() => this.sendInFlight--);
-			this.shownPending.add(pending.id);
+			const decided = decideAnswer(pending, t);
+			if (decided) {
+				const agentId = this.agentId;
+				this.sendInFlight++;
+				void this.client
+					.answer(agentId, pending.id, decided.value)
+					.then(() => this.print(dim(`  → ${decided.ack}: ${pending.title}`)))
+					.catch((err) => this.print(red(`✗ answer didn't reach the agent: ${msg(err)}`)))
+					.finally(() => this.sendInFlight--);
+				this.shownPending.add(pending.id);
+				return;
+			}
+			// Not a recognizable answer — treat it as a new message and keep the request visible so the
+			// operator still knows it's waiting on them.
+			this.print(dim(`  · sent as a message — "${pending.title}" still needs you ${answerHint(pending)}`));
+			this.send(t);
 			return;
 		}
 		if (!this.agentId) {
@@ -328,14 +342,39 @@ export class HereSession {
 		for (const p of agent.pending ?? []) {
 			if (this.shownPending.has(p.id)) continue;
 			this.shownPending.add(p.id);
-			const hint = p.kind === "confirm" ? "[y/n]" : p.options?.length ? `[${p.options.join(" / ")}]` : "[type an answer]";
-			this.print(yellow(`⛔ needs you: ${p.title}${p.message ? ` — ${p.message}` : ""} ${dim(hint)}`));
+			this.print(yellow(`⛔ needs you: ${p.title}${p.message ? ` — ${p.message}` : ""} ${answerHint(p)}`));
 		}
 	}
 }
 
 function msg(err: unknown): string {
 	return err instanceof Error ? err.message : String(err);
+}
+
+/** The one-line shape hint for a pending request — shared by the banner and the mis-route notice. */
+function answerHint(p: PendingRequest): string {
+	if (p.kind === "confirm") return dim("[y/n]");
+	if (p.options?.length) return dim(`[${p.options.join(" / ")}]`);
+	return dim("[type an answer]");
+}
+
+/**
+ * Decide whether a typed line is a valid answer to `pending`, and how to acknowledge it. Returns
+ * `undefined` when the line doesn't match the offered shape — the caller then treats it as a prompt
+ * rather than silently coercing it (a confirm used to turn any non-`y` line into a "no").
+ */
+function decideAnswer(pending: PendingRequest, t: string): { value: string; ack: string } | undefined {
+	if (pending.kind === "confirm") {
+		if (/^(y|yes)$/i.test(t)) return { value: "yes", ack: "approved" };
+		if (/^(n|no)$/i.test(t)) return { value: "no", ack: "declined" };
+		return undefined;
+	}
+	if (pending.options?.length) {
+		const match = pending.options.find((o) => o.toLowerCase() === t.toLowerCase());
+		return match ? { value: match, ack: `answered "${match}"` } : undefined;
+	}
+	// A free-text request (input/editor/tool arg) — any non-empty line is a valid answer.
+	return { value: t, ack: "answered" };
 }
 
 // ── Terminal wiring ──────────────────────────────────────────────────────────────────────────────
@@ -382,12 +421,37 @@ const HERE_HELP = `${dim(`  /stop   interrupt the current turn
   /help   this list`)}
 `;
 
+/** Verb-scoped `--help` — printed and exited before anything touches the daemon. */
+const HERE_USAGE = `${bold(cyan("glance here"))} ${dim("· a casual chat thread attached to the current directory, in this terminal")}
+
+${bold("Usage")}
+  glance here [--model <id>] [--harness <name>] [--port <n>]
+
+${bold("Options")}
+  --model <id>      model to run the session on (harness default otherwise)
+  --harness <name>  harness to ride (default: ${HERE_HARNESS} — your own claude login/config)
+  --port <n>        daemon port to reach (default: ${DEFAULT_PORT})
+  -h, --help        print this and exit
+
+${bold("While chatting")}
+  /stop   interrupt the current turn        ${dim("(or Ctrl-C once mid-reply)")}
+  /exit   leave — the session stays live in the webapp   ${dim("(or Ctrl-C when idle)")}
+  /help   the in-chat command list
+
+The current directory is registered as a project only for the session's lifetime and released
+when you leave — promote it in the webapp to keep it.
+`;
+
 /**
  * `glance here [--model M] [--harness H] [--port N]` — the terminal-attach REPL.
  * Session creation is fired immediately and never blocks the prompt (prewarm P1).
  */
 export async function cmdHere(args: string[]): Promise<void> {
-	const { flags } = parseArgs(args);
+	const { flags, positional } = parseArgs(args);
+	if (flags.help || positional.includes("-h")) {
+		process.stdout.write(HERE_USAGE);
+		return;
+	}
 	if (!process.stdin.isTTY) {
 		process.stderr.write(`glance here opens an interactive chat, so it needs a terminal.\nFor a one-shot question use: glance ask "…"\n`);
 		process.exit(1);
@@ -482,7 +546,11 @@ export async function cmdHere(args: string[]): Promise<void> {
 		void finish();
 	};
 
+	// Ctrl-C is a per-turn interrupt first, an exit second — the reflex every peer CLI honors. Any
+	// typed line re-arms it, so each new turn gets its own "first Ctrl-C stops, second leaves".
+	let interruptArmed = false;
 	rl.on("line", (line) => {
+		interruptArmed = false;
 		const t = line.trim();
 		if (t === "/exit" || t === "/quit") return shutdown(0);
 		if (t === "/help") {
@@ -498,7 +566,15 @@ export async function cmdHere(args: string[]): Promise<void> {
 		session.submit(t);
 		rl.prompt();
 	});
-	rl.on("SIGINT", () => shutdown(0));
+	rl.on("SIGINT", () => {
+		if (session.busy && !interruptArmed) {
+			interruptArmed = true;
+			session.interrupt();
+			printAbove(dim("· stopped — Ctrl-C again to leave"));
+			return;
+		}
+		shutdown(0);
+	});
 	rl.on("close", () => shutdown(0));
 	rl.prompt();
 	await creating;
