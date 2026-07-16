@@ -13,16 +13,28 @@
  * NO behavior change to verdicts, only a new data shape underneath (same shadow posture; enforce
  * itself is a later concern's flip).
  *
+ * adw-factory-borrows concern 09 closes THAT deferral: `costGateVerdict` now takes an optional `lane`
+ * and, when given one, reads `LANE_POLICY[lane].costCeilingUsd`/`costAction` VERBATIM as the verdict's
+ * ceiling and action — the lane's own row is the single source of truth for how far a verdict may
+ * escalate (v1 rollout, DESIGN.md: only "chore" is "deny"; "hotfix"/"feature" stay "shadow", so they
+ * never surface as ask/deny even over 2x budget). A lane-LESS call keeps the ORIGINAL severity-only
+ * heuristic (over 2x budget ⇒ deny) for backward compatibility with any caller that hasn't threaded a
+ * lane through yet. `squad-manager.ts`'s `createWithId` is where this actually enforces: a "deny"
+ * verdict under `OMP_SQUAD_COST_GATE=enforce` refuses the spawn; an "ask" verdict stages the SAME
+ * "Needs you" attention lane a landConfirm-held unit uses; "shadow" (or the gate off/shadow globally)
+ * only ever logs — never blocks.
+ *
  * Two guards keep a noisy signal quiet: no verdict below `OMP_SQUAD_COST_MIN_SAMPLE` attempts (thin
- * history stays silent), and no verdict at all unless the operator set a ceiling `OMP_SQUAD_COST_MAX_
- * PER_CHANGE` (> 0). Default `OMP_SQUAD_COST_GATE=off` ⇒ nothing runs.
+ * history stays silent), and no verdict at all unless a ceiling is set — the lane's own
+ * `costCeilingUsd`, or the operator's global `OMP_SQUAD_COST_MAX_PER_CHANGE` (> 0) when the lane has
+ * none. Default `OMP_SQUAD_COST_GATE=off` ⇒ nothing runs.
  */
 
 import { buildScoreboard } from "./attribution-scoreboard.ts";
 import { envInt, envNumber } from "./config.ts";
 import { type ComplexityTier, modelFamily, modelOutcomes, readModelOutcomes } from "./model-outcomes.ts";
 import { readAllReceipts } from "./receipts.ts";
-import type { WorkLane } from "./lane.ts";
+import { LANE_POLICY, type WorkLane } from "./lane.ts";
 import {
 	buildCostAggregateFromReceipts,
 	costAggregateNeedsRebuild,
@@ -96,39 +108,52 @@ export async function projectCost(stateDir: string, model: string | undefined, t
 }
 
 export interface CostVerdict {
-	action: "ask" | "deny";
+	action: "shadow" | "ask" | "deny";
 	line: string;
 }
 
 /**
  * Pure decision from a projection + config. `undefined` (silent) when: no ceiling configured, thin
- * history (< min sample), or no cost data / under budget. Over 2× budget ⇒ "deny", else "ask". In v1
- * the caller only LOGS this line (shadow) — it never blocks.
+ * history (< min sample), or no cost data / under budget.
+ *
+ * With a `lane`, the ceiling and the action both come from `LANE_POLICY[lane]` VERBATIM — the lane's
+ * `costCeilingUsd` (falling back to the operator's global `OMP_SQUAD_COST_MAX_PER_CHANGE` when the
+ * lane sets none, e.g. hotfix/feature today) and its `costAction` ("shadow" | "ask" | "deny") AS THE
+ * VERDICT'S ACTION, not re-derived from the dollar amount — a lane whose row says "shadow" can never
+ * surface as ask/deny here no matter how far over budget it runs (v1 rollout, DESIGN.md: only
+ * "chore" is "deny"). Without a `lane` (a caller that hasn't threaded one), the ORIGINAL severity-only
+ * heuristic applies: over 2× budget ⇒ "deny", else "ask".
+ *
+ * In v1 the caller decides whether to act: `costGateMode() !== "enforce"` ⇒ log only, never block.
  */
-export function costGateVerdict(p: CostProjection): CostVerdict | undefined {
-	const budget = envNumber("OMP_SQUAD_COST_MAX_PER_CHANGE", 0); // 0 ⇒ operator set no ceiling ⇒ silent
+export function costGateVerdict(p: CostProjection, lane?: WorkLane): CostVerdict | undefined {
+	const policy = lane ? LANE_POLICY[lane] : undefined;
+	const budget = policy?.costCeilingUsd ?? envNumber("OMP_SQUAD_COST_MAX_PER_CHANGE", 0); // 0 ⇒ no ceiling ⇒ silent
 	if (budget <= 0) return undefined;
 	if (p.sample < envInt("OMP_SQUAD_COST_MIN_SAMPLE", 5)) return undefined;
 	if (p.costPerLandedChange == null || p.costPerLandedChange <= budget) return undefined;
-	const action: "ask" | "deny" = p.costPerLandedChange > budget * 2 ? "deny" : "ask";
+	const action: CostVerdict["action"] = policy ? policy.costAction : p.costPerLandedChange > budget * 2 ? "deny" : "ask";
 	const pct = p.landRate == null ? "?" : `${Math.round(p.landRate * 100)}%`;
-	const line = `cost-gate(${costGateMode()}): ${p.model}/${p.tier} projects $${p.costPerLandedChange.toFixed(2)}/landed-change (land-rate ${pct}, n=${p.sample}) — over budget $${budget.toFixed(2)}; would ${action.toUpperCase()}`;
+	const line = `cost-gate(${costGateMode()}): ${p.model}/${p.tier}${lane ? `/${lane}` : ""} projects $${p.costPerLandedChange.toFixed(2)}/landed-change (land-rate ${pct}, n=${p.sample}) — over budget $${budget.toFixed(2)}; would ${action.toUpperCase()}`;
 	return { action, line };
 }
 
-/** Shadow entry point for the caller: project + emit a warn line if the gate would fire. Fire-and-
- *  forget safe (never throws, never blocks); no-op unless the gate is on. `lane` is a trailing
- *  optional parameter (not inserted before `log`) so the EXISTING call site in `squad-manager.ts`
- *  (`shadowCostCheck(this.stateDir, opts.model, tierOf(opts.thinking), (line) => this.log("warn",
- *  line))`) keeps compiling unchanged — passing `resolvedLane` there is a follow-up wire outside this
- *  concern's declared scope (see cost-aggregate.ts's rollout note); omitting it here just means the
- *  projection falls back to the lane-agnostic cell, identical to today's behavior. */
-export async function shadowCostCheck(stateDir: string, model: string | undefined, tier: ComplexityTier, log: (line: string) => void, lane?: WorkLane): Promise<void> {
-	if (costGateMode() === "off") return;
+/** Cost-gate entry point (both shadow AND enforce): project + resolve a lane-aware verdict, logging
+ *  it whenever it fires (shadow visibility persists even under `enforce` — the operator still sees
+ *  the line the moment it would act). No-op (never logs, returns `undefined`) when the gate is off.
+ *  Never throws.
+ *
+ *  Safe to fire-and-forget (`void shadowCostCheck(...)`, optionally `.then(...)` to observe the
+ *  verdict) for shadow/off mode, since the return value is inert without an enforce decision at the
+ *  call site — but an ENFORCE-mode caller (`squad-manager.ts`'s `createWithId`) MUST `await` it: a
+ *  "deny" verdict is what refuses the spawn. */
+export async function shadowCostCheck(stateDir: string, model: string | undefined, tier: ComplexityTier, log: (line: string) => void, lane?: WorkLane): Promise<CostVerdict | undefined> {
+	if (costGateMode() === "off") return undefined;
 	try {
-		const verdict = costGateVerdict(await projectCost(stateDir, model, tier, lane));
+		const verdict = costGateVerdict(await projectCost(stateDir, model, tier, lane), lane);
 		if (verdict) log(verdict.line);
+		return verdict;
 	} catch {
-		/* shadow check must never affect a spawn */
+		return undefined; /* shadow check must never affect a spawn */
 	}
 }

@@ -55,3 +55,42 @@ test("ASK when over budget, DENY when over 2x budget", () => {
 	expect(deny?.action).toBe("deny");
 	expect(deny?.line).toContain("would DENY");
 });
+
+// ── adw-factory-borrows concern 09: per-lane enforce ────────────────────────────────────────────
+
+test("chore lane DENIES over its own ceiling ($2), even at a dollar amount that would only ASK by the old 2x heuristic", () => {
+	process.env.OMP_SQUAD_COST_GATE = "enforce";
+	// $3 is 1.5x the chore ceiling ($2) — under the OLD lane-less 2x-for-deny heuristic this would only
+	// ASK. The lane's own costAction ("deny" for chore, v1 rollout) is what actually decides here.
+	const verdict = costGateVerdict(proj({ costPerLandedChange: 3 }), "chore");
+	expect(verdict?.action).toBe("deny");
+	expect(verdict?.line).toContain("would DENY");
+	expect(verdict?.line).toContain("/chore ");
+});
+
+test("chore lane falls silent below the min sample even over its ceiling", () => {
+	process.env.OMP_SQUAD_COST_GATE = "enforce";
+	process.env.OMP_SQUAD_COST_MIN_SAMPLE = "10";
+	expect(costGateVerdict(proj({ sample: 3, costPerLandedChange: 50 }), "chore")).toBeUndefined();
+});
+
+test("hotfix lane never denies (or asks) in v1 — its costAction is shadow, no matter the dollar amount", () => {
+	process.env.OMP_SQUAD_COST_GATE = "enforce";
+	process.env.OMP_SQUAD_COST_MAX_PER_CHANGE = "1"; // hotfix has no lane ceiling override — falls back to global
+	const verdict = costGateVerdict(proj({ costPerLandedChange: 999 }), "hotfix");
+	expect(verdict?.action).toBe("shadow");
+	expect(verdict?.line).toContain("would SHADOW");
+});
+
+test("feature lane also stays shadow in v1 (only chore denies)", () => {
+	process.env.OMP_SQUAD_COST_GATE = "enforce";
+	process.env.OMP_SQUAD_COST_MAX_PER_CHANGE = "1";
+	const verdict = costGateVerdict(proj({ costPerLandedChange: 999 }), "feature");
+	expect(verdict?.action).toBe("shadow");
+});
+
+test("chore lane's own $2 ceiling fires even with no global OMP_SQUAD_COST_MAX_PER_CHANGE set", () => {
+	// No global ceiling configured at all — the lane's own costCeilingUsd must still gate.
+	const verdict = costGateVerdict(proj({ costPerLandedChange: 3 }), "chore");
+	expect(verdict?.action).toBe("deny");
+});

@@ -67,7 +67,11 @@ export const LANE_POLICY: Record<WorkLane, LanePolicy> = {
 	chore: {
 		modelRouteApply: false,
 		costCeilingUsd: 2, // low by construction: bumps/renames/typos/reformats should never cost real money
-		costAction: "shadow", // flips to "deny" in concern 09, once concern 08's lane-keyed aggregate exists to judge it fairly
+		costAction: "deny", // adw-factory-borrows concern 09: chore lane first (DESIGN.md's rollout) — the
+		// only lane whose over-ceiling verdict actually refuses the spawn in v1, now that concern 08's
+		// lane-keyed aggregate exists to judge it fairly. hotfix/feature deliberately stay "shadow"/no-op:
+		// spending more on a hotfix is sometimes correct, which is where this diverges from the source
+		// framework's static prescription (DESIGN.md).
 		race: 0,
 	},
 };

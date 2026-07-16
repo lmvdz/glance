@@ -153,7 +153,7 @@ import { isFirstTryGreen, isOn, learningFlags, LearningMetrics, type MetricRollu
 import { reflect } from "./reflection.ts";
 import { failureAnnotation, recordFailureAnnotation } from "./failure-memory.ts";
 import { readModelOutcomes, recordModelOutcome, recordModelOutcomeBlocked, tierOf } from "./model-outcomes.ts";
-import { shadowCostCheck } from "./cost-gate.ts";
+import { costGateMode, type CostVerdict, shadowCostCheck } from "./cost-gate.ts";
 import { recordCostLanded } from "./cost-aggregate.ts";
 import { buildScoreboard, type Scoreboard } from "./attribution-scoreboard.ts";
 import { recordConfidenceOutcome, setThresholdTunerRoot, tunedConfidenceFloor } from "./threshold-tuner.ts";
@@ -168,7 +168,7 @@ import { isLandingUnit, landingRosterOf } from "./is-landing-unit.ts";
 import { readTaskOutcomes, recordTaskOutcome, type TaskOutcomeRow } from "./task-outcomes.ts";
 import { buildTaskClassMatrix } from "./omp-graph/task-class-matrix.ts";
 import { DAY_MS } from "./omp-graph/schema.ts";
-import { routeModelForTaskClass } from "./model-route.ts";
+import { modelRouteMinEdgeFor, modelRouteShouldApply, routeModelForTaskClass } from "./model-route.ts";
 import { openOrchestratorState } from "./orchestrator-state.ts";
 import { authoredSpecBlock, buildDigest, type DigestReward, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
 import { readChatAttachment, reapStaleChatAttachments, type SavedChatAttachment, writeChatAttachment } from "./chat-attachment.ts";
@@ -3900,6 +3900,25 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
+	 * Cost-gate ASK (adw-factory-borrows concern 09): a lane whose `LANE_POLICY.costAction` is "ask"
+	 * under `OMP_SQUAD_COST_GATE=enforce` does NOT block the spawn (unlike "deny") — there is no
+	 * pending-create queue to hold a not-yet-existing unit for a human tap, and building one is out of
+	 * this concern's scope. Instead this attaches the verdict to the SAME "Needs you" attention lane a
+	 * landConfirm-staged unit's one-tap Land uses (`rec.dto.attentionEvents` + `emitAgent`) — the
+	 * operator's "one tap" here is the EXISTING Stop/Remove control on the now-running unit, not a
+	 * fresh approve button. Best-effort; never throws.
+	 */
+	private stageCostGateConfirm(rec: AgentRecord, verdict: CostVerdict): void {
+		try {
+			const event: AttentionEvent = { id: randomUUID(), summary: `cost-gate(enforce) ASK: ${rec.dto.name} — ${verdict.line}`, detail: verdict.line, source: "notify", createdAt: Date.now() };
+			rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
+			this.emitAgent(rec);
+		} catch (err) {
+			this.log("warn", `cost-gate attention-lane attach failed for ${rec.dto.name} (non-fatal): ${errText(err)}`);
+		}
+	}
+
+	/**
 	 * Route a membrane-breaker trip — a hard fleet-wide auto-disable of `OMP_SQUAD_MEMBRANE_PROFILES`
 	 * (eap-borrows concern 05) — to where a human actually looks. Also reused verbatim for the
 	 * baseline-tracker's staleness event (concern 01 DESIGN decision 4 follow-up — see the `onStaleness`
@@ -4349,10 +4368,33 @@ export class SquadManager extends EventEmitter {
 		const resolvedLane: WorkLane = opts.lane ?? opts.issue?.lane ?? classifierLane ?? "feature";
 		const laneAppliesPrivilege = laneSource === "operator";
 		this.log("info", `lane${laneAppliesPrivilege ? "" : " [shadow]"}: ${resolvedLane} source=${laneSource}`);
-		// Pre-execution cost projection (C-COST) — shadow-only: warns when this (model,tier) is projected
-		// to run over budget, BEFORE the spawn spends anything. Fire-and-forget so it never delays a spawn;
-		// no-op unless OMP_SQUAD_COST_GATE is on. Enforce (hard park) is deferred.
-		void shadowCostCheck(this.stateDir, opts.model, tierOf(opts.thinking), (line) => this.log("warn", line));
+		// Pre-execution cost projection (C-COST), per-lane ENFORCE (adw-factory-borrows concern 09): the
+		// lane's own `costAction` (LANE_POLICY, v1: only "chore" is "deny") decides how far this can go.
+		// `OMP_SQUAD_COST_GATE=enforce` + a "deny" verdict refuses the spawn outright, BEFORE any worktree
+		// or agent record exists — surfaced as both a create error (thrown below) and an attention-lane
+		// event; there is no live `AgentRecord` yet to attach to, so this reuses the SAME "unattached
+		// escalation" idiom `fileMembraneBreakerFinding` uses for exactly that case: the daemon-scoped
+		// "land" automation channel, tagged with `UNATTACHED_ESCALATION_MARKER`. An "ask" verdict does NOT
+		// hold the spawn (a not-yet-existing unit can't be staged the way a landConfirm-held green verify
+		// is — that needs a new resumable pending-create queue, out of this concern's scope); instead
+		// `costGateAsk` is stashed here and, once the agent record exists below, attached to the SAME
+		// "Needs you" attention lane a landConfirm-staged unit's one-tap Land uses (see
+		// `stageCostGateConfirm`) — the operator's one tap is the EXISTING Stop/Remove control. Any OTHER
+		// mode (`shadow`/`off`, or a lane whose own `costAction` is "shadow") stays the ORIGINAL
+		// fire-and-forget, non-blocking shadow check — a spawn is never delayed by a check nobody asked to
+		// enforce.
+		const costMode = costGateMode();
+		let costGateAsk: CostVerdict | undefined;
+		if (costMode === "enforce") {
+			const verdict = await shadowCostCheck(this.stateDir, opts.model, tierOf(opts.thinking), (line) => this.log("warn", line), resolvedLane);
+			if (verdict?.action === "deny") {
+				this.automation.for("land", opts.repo)({ durationMs: 0, level: "warn", detail: `${UNATTACHED_ESCALATION_MARKER} — ${verdict.line}` });
+				throw new Error(verdict.line);
+			}
+			if (verdict?.action === "ask") costGateAsk = verdict;
+		} else {
+			void shadowCostCheck(this.stateDir, opts.model, tierOf(opts.thinking), (line) => this.log("warn", line), resolvedLane);
+		}
 		// work → Plane: a freshly-spawned, issue-less task self-registers as a tracked Plane issue,
 		// so the fleet is observable from the backlog without a manual plan-to-plane step. No-ops when
 		// Plane is unconfigured; restore / fan-out / flue paths never set `track`.
@@ -4380,10 +4422,16 @@ export class SquadManager extends EventEmitter {
 		// skipped and dispatch is byte-for-byte unchanged. Never overrides an explicit `opts.model` (a
 		// profile or operator's choice), mirroring `shiftedModel`'s rule #1.
 		//
-		// SHADOW-FIRST: even with the gate on, `OMP_SQUAD_MODEL_ROUTE_SHADOW` defaults ON (anything but the
-		// literal "0") — the decision is logged (+ recorded as a `model-route-decision` learning metric) but
-		// NOT applied, so an operator can compare shadow decisions against the task-class panel before
-		// opting into `OMP_SQUAD_MODEL_ROUTE_SHADOW=0` (apply mode). Applying it also closes the C01 gap for
+		// SHADOW-FIRST, PER-LANE (adw-factory-borrows concern 09): the FLEET-WIDE `OMP_SQUAD_MODEL_ROUTE_
+		// SHADOW=0` escape hatch stays the baseline, unaffected by lane or lane source (lane-threading.
+		// test.ts's clamp tests lock this down: a label/classifier lane must never suppress the operator's
+		// global apply flag). On TOP of that baseline, an operator-sourced lane (`laneAppliesPrivilege`)
+		// may WIDEN past a global "shadow" default via its OWN `LANE_POLICY[lane].modelRouteApply` flag —
+		// a genuinely per-lane flip independent of the fleet-wide flag (v1 ships every lane's flag
+		// `false`, so inert until a later, evidence-gated operator action). `modelRouteShouldApply` below
+		// is the single combinator both axes go through. The decision is ALWAYS logged (+ recorded as a
+		// `model-route-decision` learning metric) so an operator can compare shadow decisions against the
+		// task-class panel before flipping a lane's flag. Applying it also closes the C01 gap for
 		// harnesses that never emit an effective model: a routed unit now carries an explicit `opts.model`.
 		let routedModel: string | undefined;
 		if (process.env.OMP_SQUAD_MODEL_OUTCOMES === "1" && opts.model === undefined) {
@@ -4391,20 +4439,20 @@ export class SquadManager extends EventEmitter {
 				const taskClass = { mode: opts.verifyMode ?? "none", tier: tierOf(thinking) };
 				const rows = await readTaskOutcomes(this.stateDir);
 				const matrix = buildTaskClassMatrix(rows, this.landingRosterRouting(), { start: Date.now() - 30 * DAY_MS, end: Date.now() });
-				const decision = routeModelForTaskClass(taskClass, matrix);
-				// Lane clamp (concern 02): this decision takes NO lane input today, so the lane source
-				// must not gate the operator's global apply flag (doing so would silently kill apply for
-				// every spawn without an explicit opts.lane — the dispatcher never sets one). The clamp
-				// binds where lane actually parameterizes the router (concern 09): lane-derived minEdge/
-				// frontier overrides may only be passed when `laneAppliesPrivilege` — a label/classifier
-				// lane is ticket text and must never buy the privilege axis.
-				const shadow = process.env.OMP_SQUAD_MODEL_ROUTE_SHADOW !== "0";
+				// Lane clamp (concern 02, bound HERE per the comment above): a label/classifier-sourced lane
+				// (`laneAppliesPrivilege` false) may never buy a lower minEdge floor OR widen apply past the
+				// global default — `modelRouteMinEdgeFor`/`modelRouteShouldApply` both fold that clamp in, so
+				// neither axis can move on ticket text alone.
+				const minEdge = modelRouteMinEdgeFor(resolvedLane, laneAppliesPrivilege);
+				const decision = routeModelForTaskClass(taskClass, matrix, undefined, { minEdge });
+				const apply = modelRouteShouldApply(resolvedLane, laneAppliesPrivilege);
 				this.learningMetrics.record("model-route-decision", decision.model ? 1 : 0, {
-					mode: shadow ? "shadow" : "apply",
+					mode: apply ? "apply" : "shadow",
 					taskClass: `${taskClass.mode}:${taskClass.tier}`,
+					lane: resolvedLane,
 				});
-				this.log("info", `model-route${shadow ? " [shadow]" : ""}: ${decision.reason}`);
-				if (!shadow && decision.model !== undefined) {
+				this.log("info", `model-route${apply ? "" : " [shadow]"}: ${decision.reason}`);
+				if (apply && decision.model !== undefined) {
 					opts = { ...opts, model: decision.model };
 					// Mark the model as ROUTER-chosen (vs operator/profile-declared): `unitProviderKey`'s
 					// invariant excludes routed models from the rate-limit provider key on both the gate and
@@ -4681,6 +4729,9 @@ export class SquadManager extends EventEmitter {
 		// entry.
 		this.transition(rec, dto.status, "spawn");
 		this.emitAgent(rec);
+		// Cost-gate ASK (enforce mode, concern 09 above): the verdict resolved before the worktree/record
+		// existed, now attached to the just-created unit's attention lane.
+		if (costGateAsk) this.stageCostGateConfirm(rec, costGateAsk);
 
 		// Cold resume of a parallel fork node: any live roster branch agent left over from before the
 		// restart (reattached separately by reconnectLive, or a stale record surviving in `this.agents`)

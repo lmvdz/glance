@@ -101,12 +101,20 @@ test("LANE_POLICY: exactly the 3 WorkLane rows, all fields well-formed", () => {
 	}
 });
 
-test("LANE_POLICY: every row ships shadow-first (no lane defaults to apply/deny/race-on)", () => {
+test("LANE_POLICY: every row ships shadow-first on model-route apply (no lane defaults to apply)", () => {
 	for (const lane of WORK_LANES) {
-		const policy = LANE_POLICY[lane];
-		expect(policy.modelRouteApply).toBe(false);
-		expect(policy.costAction).toBe("shadow");
+		expect(LANE_POLICY[lane].modelRouteApply).toBe(false);
 	}
+});
+
+// adw-factory-borrows concern 09 flips chore's costAction to "deny" (DESIGN.md's "chore lane first"
+// rollout, once concern 08's lane-keyed aggregate exists to judge it fairly) — hotfix/feature stay
+// shadow-first; this is the ONE named, evidence-gated exception the concern-01 module doc predicted
+// ("Every non-shadow row is a later concern's named, evidence-gated flip").
+test("LANE_POLICY: only chore's costAction has flipped past shadow — hotfix/feature stay shadow", () => {
+	expect(LANE_POLICY.chore.costAction).toBe("deny");
+	expect(LANE_POLICY.hotfix.costAction).toBe("shadow");
+	expect(LANE_POLICY.feature.costAction).toBe("shadow");
 });
 
 test("LANE_POLICY: chore carries a low hard cost ceiling; hotfix carries a lower model-route edge floor", () => {
