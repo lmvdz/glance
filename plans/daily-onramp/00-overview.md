@@ -16,6 +16,7 @@ Parent: plans/daily-driver/00-meta.md · Design: plans/daily-driver/DESIGN.md ·
 | 04 restart-reattach | casual sessions must survive the daemon restarts Lars does hourly, or the dogfood loop dies before it starts | mechanical | src/squad-manager.ts, src/index.ts (client REPL reconnect) |
 | 05 web-flow | `glance here --web` opens the webapp deep-link on the existing token mechanism; records deferred one-time-token hardening findings for later | mechanical | src/index.ts, webapp/src/lib/api.ts (read-only reference) |
 | 06 promote-adopt-ui | webapp affordances for the already-shipped server-side promote/adopt (zero callers today) | mechanical | webapp/src/components/chat/, webapp/src/components/AssistantChat.tsx, webapp/src/lib/ (new client calls) |
+| 07 acp-prompt-turn-timeout | p0 ship-blocker found live by daily-composer/02's drive: `AcpAgentDriver.send()`'s 60s default applies to `session/prompt` (resolves only at turn end), so ANY claude-code turn >60s marks the agent error while the turn completes underneath | mechanical | src/acp-agent-driver.ts, tests/acp-agent-driver.test.ts |
 
 ## Order / batches
 
@@ -35,6 +36,7 @@ Parent: plans/daily-driver/00-meta.md · Design: plans/daily-driver/DESIGN.md ·
 | 04 restart-reattach | 02 | same check as above — a `here` session must exist before its restart survival can be built |
 | 05 web-flow | 02 | same check as above — the printed-URL flow extends the `here` verb's output |
 | 06 promote-adopt-ui | 02 | same check as above — the promote/adopt affordance targets the console/casual session `here` creates |
+| 07 acp-prompt-turn-timeout | none (02 already shipped; this unblocks its daily use for long turns) | `grep -n "timeoutMs = 60_000" src/acp-agent-driver.ts` still matching on the `send` default means the defect is live |
 
 ## Not yet specified
 
