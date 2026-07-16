@@ -269,41 +269,50 @@ export const DO_NOT_BLOCK = [
 	"Do not widen scope to fix adjacent code you were not asked to touch — report it instead.",
 ].join("\n");
 
+/** Replace-or-append DO_NOT_BLOCK in a composed prompt. Append when the header is absent (a pre-04
+ *  persisted unit gets upgraded on adopt); when present, replace the whole paragraph from the header
+ *  to the next blank line with the CURRENT block — so a cold-adopted unit picks up rule edits instead
+ *  of freezing whatever list it was created with, and a restart still never grows a second copy. */
+export function upsertDoNotBlock(prompt: string | undefined): string {
+	if (!prompt || prompt.length === 0) return DO_NOT_BLOCK;
+	const idx = prompt.indexOf(DO_NOT_HEADER);
+	if (idx === -1) return `${prompt}\n\n${DO_NOT_BLOCK}`;
+	const blockEnd = prompt.indexOf("\n\n", idx);
+	const before = prompt.slice(0, idx);
+	const after = blockEnd === -1 ? "" : prompt.slice(blockEnd);
+	return `${before}${DO_NOT_BLOCK}${after}`;
+}
+
 /** Loose but code-shaped match for "this task/issue is about the `effect` library" — bare word "effect"
  *  is too noisy (it is common English), so this also accepts the shapes that only show up in code:
  *  an import specifier (`effect/...`, `from "effect"`) or a version pin (`effect@...`). Capital-E
  *  "Effect" (the module/type name) is the common case for prose task text. */
 const EFFECT_TASK_PATTERN = /\bEffect\b|\beffect\/|from ["']effect["']|\beffect@/;
 
-/** Resolved once at daemon start (module load), not per-spawn — `effectSkillPointerLine` below is
- *  called on every create(), and re-reading + re-parsing package.json that often is wasted work for a
- *  value that cannot change without a daemon restart. */
-function resolveEffectVersion(): string | undefined {
-	try {
-		const pkg = JSON.parse(fs.readFileSync(path.join(import.meta.dir, "..", "package.json"), "utf8")) as {
-			dependencies?: Record<string, string>;
-			devDependencies?: Record<string, string>;
-		};
-		return pkg.dependencies?.effect ?? pkg.devDependencies?.effect;
-	} catch {
-		return undefined;
-	}
-}
-const EFFECT_RESOLVED_VERSION = resolveEffectVersion();
-const EFFECT_SKILL_DIR = path.join(import.meta.dir, "..", ".claude", "skills", "effect");
+/** Marker for the pointer's presence in an already-composed prompt (idempotence on adopt): the exact
+ *  sentence prefix of both pointer variants below — keep the three in sync. */
+export const EFFECT_POINTER_MARKER = "Load .claude/skills/effect before writing Effect code";
 
 /**
  * A pointer line appended ONLY when (a) the unit's task/issue text looks Effect-shaped and (b) the
- * vendored `.claude/skills/effect` directory actually exists. (b) matters because this concern lands
- * BEFORE the concern that vendors the skill (skills-hardening concern 02) — without the gate, every
- * Effect-shaped unit would be pointed at a skill directory that doesn't exist yet. Checked fresh (not
- * cached) so the pointer starts firing the moment the skill lands, with no daemon restart required.
- *
- * `skillDir` defaults to this repo's real vendored path; callers never pass it — it's an injection seam
- * so tests can exercise the "directory exists" branch without mutating the real repo tree.
+ * UNIT'S TARGET REPO (`repoDir`, not the daemon's own install — the daemon may run from a global
+ * install or dispatch cross-repo, where a daemon-rooted check is wrong in both directions) carries a
+ * vendored `.claude/skills/effect` skill. The version claim is read from that skill's own
+ * `verified-against:` frontmatter — the gate-maintained truth for what the examples were last proven
+ * against — never from a package.json caret RANGE, which is not a pin and may diverge from what
+ * skills-verify actually compiled against. No stamp ⇒ the pointer still fires, minus the version claim.
+ * Checked fresh per spawn (an on-disk skill and its stamp can change without a daemon restart).
  */
-export function effectSkillPointerLine(text: string | undefined, skillDir: string = EFFECT_SKILL_DIR): string | undefined {
-	if (!EFFECT_RESOLVED_VERSION || !text || !EFFECT_TASK_PATTERN.test(text)) return undefined;
-	if (!fs.existsSync(skillDir)) return undefined;
-	return `This repo pins effect@${EFFECT_RESOLVED_VERSION}; load .claude/skills/effect before writing Effect code — its examples are compile-proven at that pin.`;
+export function effectSkillPointerLine(text: string | undefined, repoDir: string | undefined): string | undefined {
+	if (!repoDir || !text || !EFFECT_TASK_PATTERN.test(text)) return undefined;
+	const skillMd = path.join(repoDir, ".claude", "skills", "effect", "SKILL.md");
+	let content: string;
+	try {
+		content = fs.readFileSync(skillMd, "utf8");
+	} catch {
+		return undefined;
+	}
+	const stamp = /^verified-against:[ \t]*(\S+)[ \t\r]*$/m.exec(content)?.[1];
+	const base = `Load .claude/skills/effect before writing Effect code in this repo`;
+	return stamp ? `${base} — its examples are compile-proven against the installed ${stamp}.` : `${base}.`;
 }

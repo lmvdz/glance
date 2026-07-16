@@ -1,5 +1,5 @@
 # Evergreen Do-Not block in every dispatched unit's prompt
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -20,3 +20,6 @@ None.
 
 ## Verify
 Unit test: `create()` with no profileId (the dispatchSpawn shape, squad-manager.ts:4450-4455 documents the arguments) produces an appendSystemPrompt containing the Do-Not block; with a profile, block appears exactly once. Live: scratch-daemon spawn, inspect the composed prompt via the flight-recorder/session file for a dispatched unit.
+
+## Resolution
+Commits `74d31d8` + fixup `HEAD~` ("idempotent Do-Not injection on cold-adopt"). DO_NOT_BLOCK (10 lines, ~216 words) joined unconditionally in createWithId at src/squad-manager.ts:4460-4479, outside the `if (profile)` branch; doNotsDelivered mirrors primerDelivered with a `donots-undelivered` metric; effect pointer line double-gated (Effect-shaped task text AND .claude/skills/effect exists, checked fresh). Post-review fix: injection made idempotent via DO_NOT_HEADER marker after 03's full-suite run exposed unbounded re-append on cold-adopt (targeted tests had missed it); resume-digest-surface now encodes the contract (pre-04 persisted units upgraded exactly once; already-carrying prompts round-trip verbatim). Live-verified in a scratch daemon (probe unit, /bin/true harness): block present exactly once, pointer present with beta.98.

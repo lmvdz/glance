@@ -96,8 +96,8 @@ import { UserRepo } from "./user-repo.js"
 - **`no-verify reason="..."`** opts a ts block out of typechecking entirely. The reason is
   mandatory and non-empty — an empty or missing reason is itself a gate violation. Every
   `no-verify` is counted per skill and checked against a committed ceiling
-  (`NO_VERIFY_BASELINE` in `scripts/skills-verify.ts`, empty today because the current 8 skills
-  have zero ts blocks). Opting a NEW block out requires deliberately raising that skill's baseline
+  (`NO_VERIFY_BASELINE` in `scripts/skills-verify.ts` — the vendored `effect` skill carries 2, for
+  `@effect/vitest` examples this repo can't compile). Opting a NEW block out requires deliberately raising that skill's baseline
   in the same PR — the same ratchet discipline as `defect-ratchet.ts`'s `PATTERNS[].baseline`.
 - A **deliberately-wrong** example (showing what NOT to do) stays verified rather than opting out:
   mark the erroring line `// @ts-expect-error` inside an otherwise-normal `ts` block. The gate
@@ -106,7 +106,11 @@ import { UserRepo } from "./user-repo.js"
 - **Untagged fences** (` ``` ` with no language at all) are fine in a file with no ts blocks
   (this repo's `blind-review` and `make-it-work` skills both use bare fences for prose templates).
   An untagged fence in a file that ALSO has a ts block is a hard failure — tag it or opt it out
-  explicitly. This closes the "retag a broken example as plain text" dodge.
+  explicitly. `js`/`javascript` tags are verified the same as `ts` (a retag between code spellings
+  changes nothing), fences opened with 4+ backticks are parsed like any other, and an unterminated
+  fence is a hard failure (everything after it would silently leave the gate's view). Honest
+  limitation: retagging a code example as ` ```text ` DOES drop it out of typechecking — the gate
+  cannot know prose from code by content; that dodge is visible in review, not to the gate.
 
 ### Identifier-existence tier
 
@@ -140,10 +144,12 @@ bun run scripts/skills-verify.ts --stamp
 
 which rewrites every stale stamp to the resolved version — but only once the rest of the gate
 (typecheck, structure, identifiers) is already clean; it refuses to stamp over a genuinely broken
-skill. Hand-editing the version number in frontmatter does nothing: the gate re-derives the
-resolved version itself every run, so a hand-edit that happens to match is not what the gate is
-checking for — it's checking that a real verification pass produced that number. This means every
-`effect` version bump requires a `--stamp` re-run in the same PR that bumps it.
+skill, and it hard-errors (never silently no-ops) if a stamp line fails to rewrite. Precisely
+stated, the enforced invariant is: the stamp must EQUAL the currently-resolved version, and the
+gate re-proves every example against that resolved version on every run — so a hand-edit to the
+matching version is equivalent to stamping (the proof behind the number is the gate run itself,
+not the tool that wrote it). Every `effect` version bump requires a `--stamp` re-run (or the
+equivalent edit) in the same PR that bumps it.
 
 ### Advisory mode (`~/.claude/skills` and other external roots)
 

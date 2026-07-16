@@ -42,3 +42,8 @@
 ## Compile-fix count (signal about upstream quality)
 
 3 blocks needed a genuine logic/type fix beyond "add imports and define referenced-but-undefined identifiers" to compile at `effect@4.0.0-beta.98` (item 8 above: the unfinished `get` method body, the nonexistent `PersistenceError.make` static, and the `Events.Service` dotted reference to an undefined self-export). Everything else that needed touching was purely additive scaffolding (imports, minimal stand-in types) that upstream's excerpt format never carried in the first place.
+
+## Post-vendor adaptation (2026-07-15, review round)
+- SKILL.md's Source Rule no longer hardcodes a version literal in body prose — the maintained
+  truth is the `verified-against` frontmatter stamp (gate-enforced); prose said "beta.98" and
+  would have silently decayed on the next bump while `--stamp` rewrote only the frontmatter.

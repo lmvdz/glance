@@ -81,10 +81,16 @@ const FLAG_DEFAULT: Record<keyof LearningFlags, Variant> = {
 
 function resolveVariant(envVar: string, id: string, defaultVariant: Variant): Variant {
 	const raw = process.env[envVar];
-	if (raw === "1") return "on";
-	if (raw === "0") return "off"; // explicit off-switch, regardless of this flag's default
-	if (raw === "ab") return stableVariant(envVar, id);
-	return defaultVariant; // unset or any other value ⇒ this flag's default (FLAG_DEFAULT)
+	if (raw === undefined) return defaultVariant;
+	const v = raw.trim().toLowerCase();
+	// Recognize the common boolean spellings on BOTH sides, not just "0"/"1". This matters most for
+	// the one flag whose default is "on": before FLAG_DEFAULT existed, EVERY unrecognized value fell
+	// through to off — so an operator who disabled a flag with `=false`/`=off`/an empty value would
+	// otherwise be silently flipped ON by a default change. Explicit intent must survive a default flip.
+	if (v === "1" || v === "true" || v === "on" || v === "yes") return "on";
+	if (v === "0" || v === "false" || v === "off" || v === "no" || v === "") return "off";
+	if (v === "ab") return stableVariant(envVar, id);
+	return defaultVariant; // unrecognized value ⇒ this flag's default (FLAG_DEFAULT)
 }
 
 /** Resolve every learning-loop flag at once. `id` (agent or branch id) is only consulted for

@@ -49,6 +49,19 @@ describe("learningFlags", () => {
 		expect(isOn(learningFlags().failureMemory)).toBe(false);
 	});
 
+	test("legacy boolean spellings keep meaning what the operator meant across a default flip", () => {
+		// Before FLAG_DEFAULT existed, EVERY unrecognized value fell through to off — so `=false`/`=off`/
+		// empty were all honored disables. A default flip to on must not silently override that intent.
+		for (const off of ["false", "off", "no", "", " 0 ", "FALSE"]) {
+			process.env.OMP_SQUAD_FAILURE_MEMORY = off;
+			expect(learningFlags().failureMemory, `value ${JSON.stringify(off)} must disable`).toBe("off");
+		}
+		for (const on of ["true", "on", "yes", "1", "TRUE"]) {
+			process.env.OMP_SQUAD_REFLEXION = on;
+			expect(learningFlags().reflexion, `value ${JSON.stringify(on)} must enable`).toBe("on");
+		}
+	});
+
 	test('"ab" hashes the id into a stable variant — same id always resolves the same way', () => {
 		process.env.OMP_SQUAD_REWARD_BOOST = "ab";
 		const first = learningFlags("agent-a1").rewardBoost;

@@ -38,9 +38,15 @@ Truth gate for the agent-facing docs/skills layer + the delivery fixes the red t
 
 ## Decisions so far
 - [DESIGN.md](DESIGN.md) — in-process compiler API, identifier-existence tier, tool-stamped freshness, unconditional Do-Not join, vendor-at-our-pin with independent bump concern.
+- [01 skills-verify gate](01-skills-verify-gate.md) — shipped (`0f6028e`); five tiers, mutation-proven fail-closed; caught real upstream drift (`Schedule.tapInput` gone at beta.98) during 02.
+- [02 vendor effect skill](02-vendor-effect-skill.md) — shipped (`8bba2d1`); 24 ts blocks gate-verified at beta.98, 2 ratcheted no-verify (vitest-only examples), 3 genuine upstream compile defects fixed, stamped `verified-against: effect@4.0.0-beta.98`.
+- [03 effect bump](03-effect-bump-attempt.md) — shipped (`ca863d0`); beta.93→beta.98, zero src changes; its full-suite run exposed 04's cold-adopt re-append bug.
+- [04 Do-Not dispatch block](04-donot-dispatch-constant.md) — shipped (`74d31d8` + idempotence fixup); live-verified in a scratch daemon.
+- [05 failure-memory default on](05-failure-memory-default-on.md) — shipped (`462234b`); single FLAG_DEFAULT source of truth; live-verified: seeded annotation surfaced as "Do not repeat: …" in a real spawn's primer, `=0` suppresses it.
 
 ## Notes
 - auto-approved: headless (research→plan pipeline, 2026-07-15). EXPLORE/DESIGN/DECOMPOSE checkpoints recorded here and in DESIGN.md; EXECUTE not auto-started per gate policy.
 - Phase 0 WIP snapshot: proceeded over 13 plans with open concerns (41 open; oldest cohort dated 2026-07-15 in scanner output — mtime-based, not authorship). Debt logged, not hidden.
 - Adversarial design ran with 2 red teams; 5 critical findings, all resolved in DESIGN.md's concerns table. Notably two draft mechanisms were provably inert (dot-dir tsconfig globs; profile.memory for profile-less units) — caught before any code was written.
 - `/plan-to-plane` not yet run for this plan; run it when work should become trackable Plane issues (project OMPSQ).
+- EXECUTED 2026-07-15 (same session, user-authorized): 5/5 concerns done. Audit: full canonical suite 3047 pass / 0 fail (one non-reproducing cross-file teardown flake — `state.json save failed` ENOENT under tests/land-seam's temp dir, 0/8 isolated repros, both flag arms clean); `/code-review high`; blind review (grok, plans/ excluded from diff); live scratch-daemon pass for 04+05 (probe unit via `--bin /bin/true`: Do-Not block ×1, "Do not repeat: <seeded rootCause>" primer line, effect pointer at beta.98; `OMP_SQUAD_FAILURE_MEMORY=0` suppresses the failure line only). Incidental finding, not from this diff: the unverified-harness gate refused `claude-code` (works as designed).

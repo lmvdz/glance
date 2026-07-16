@@ -50,6 +50,7 @@ import { dirname, isAbsolute, join, relative } from "node:path";
 const REPO_ROOT = join(import.meta.dir, "..");
 const DEFAULT_ROOT = join(REPO_ROOT, ".claude/skills");
 const SYNTH_DIR = join(REPO_ROOT, ".skills-verify");
+let synthRunCounter = 0;
 
 // ---------------------------------------------------------------------------------------------
 // Committed manifest — the set of skill names this repo's gate is authoritative over. Compared by
@@ -71,18 +72,20 @@ export const COMMITTED_SKILL_NAMES: readonly string[] = [
 	"scratch-daemon",
 ].sort();
 
-// Size caps over ALL files in a skill dir (not just SKILL.md). Measured against reality by 02's
-// vendored `effect` skill (the largest corpus in the tree): SKILL.md tops out at ~7.6KB (48%
-// headroom under the SKILL.md cap), and the largest reference doc (SERVICES_LAYERS.md) is ~8.9KB.
-// The size lint walks every file in the skill dir, not just markdown — that includes the
-// committed `vendor.patch` (a pristine→edited unified diff, ~27KB, the actual largest file in any
-// skill dir today: a diff of ~30KB of adapted prose/code is naturally denser than any single
-// source file it's diffing). SKILL_FILE_MAX_BYTES raised from the original provisional 24KB to
-// 32KB to give that real file ~15% headroom rather than sitting right at the ceiling; SKILL.md's
-// cap is untouched since nothing in that class has come close to it (see DESIGN.md's "Size lint"
-// row, which sanctions setting these from vendor-time measurement).
+// Languages the typecheck tier claims: ts AND js spellings — retagging a broken `ts` example as
+// `js`/`javascript` must not drop it out of verification (valid JS is valid TS input here). A
+// `text` retag remains possible and is deliberately out of scope — documented in the README.
+export const CODE_LANGS: ReadonlySet<string> = new Set(["ts", "typescript", "js", "javascript"]);
+
+// Size caps over agent-LOADED files in a skill dir. The cap exists to bound what a skill invocation
+// costs in context — so provenance artifacts nobody loads into an agent (vendor.patch, PROVENANCE.md)
+// are excluded rather than used to justify a looser cap for everything (a regenerated vendor.patch
+// growing past a cap must also never soft-wedge a legitimate re-vendor). Measured reality (02's
+// vendored effect skill, the largest corpus): SKILL.md ~7.6KB, largest reference ~8.9KB — both far
+// under their caps.
 export const SKILL_MD_MAX_BYTES = 16 * 1024;
-export const SKILL_FILE_MAX_BYTES = 32 * 1024;
+export const SKILL_FILE_MAX_BYTES = 24 * 1024;
+export const SIZE_CAP_EXEMPT: ReadonlySet<string> = new Set(["vendor.patch", "PROVENANCE.md", "LICENSE"]);
 
 // Per-skill `no-verify reason="..."` ceiling — ratcheted like `defect-ratchet.ts`'s PATTERNS[].
 // A skill that starts opting blocks out of verification must raise its own entry here in the
@@ -286,6 +289,8 @@ interface FenceSpan {
 	line: number;
 	bodyStartLine: number;
 	body: string;
+	/** Opener never found its closer — everything to EOF was swallowed as body. Hard-failed by the caller. */
+	unterminated: boolean;
 }
 
 function parseInfoString(info: string): { lang: string; flags: Set<string>; attrs: Record<string, string> } {
@@ -309,70 +314,78 @@ function parseInfoString(info: string): { lang: string; flags: Set<string>; attr
 	return { lang, flags, attrs };
 }
 
-/** Parse top-level ``` fences out of a markdown doc. Only top-level (column-0) fences are
- *  recognized — this repo's skill docs never nest fences, and scoping to top-level dodges the
- *  "fence inside a fence" ambiguity entirely rather than guessing at nesting rules. */
+/** Parse top-level fences (3 OR MORE backticks — a ````-opened fence must not hide from the gate)
+ *  out of a markdown doc. Only top-level (column-0) fences are recognized — this repo's skill docs
+ *  never nest fences, and scoping to top-level dodges the "fence inside a fence" ambiguity entirely
+ *  rather than guessing at nesting rules. A fence closes only on a run of AT LEAST as many backticks
+ *  (CommonMark), so ```` blocks containing ``` examples parse correctly. An unterminated fence is
+ *  reported via `unterminated` — callers hard-fail it: everything after the opener silently leaves
+ *  the identifier tier's view otherwise, which is a truth hole, not a formatting nit. */
 function extractFences(text: string): FenceSpan[] {
 	const lines = text.split("\n");
 	const spans: FenceSpan[] = [];
 	let i = 0;
 	while (i < lines.length) {
-		const openMatch = /^```(.*)$/.exec(lines[i]);
+		const openMatch = /^(`{3,})(.*)$/.exec(lines[i]);
 		if (!openMatch) {
 			i++;
 			continue;
 		}
-		const { lang, flags, attrs } = parseInfoString(openMatch[1]);
+		const fenceLen = openMatch[1].length;
+		const { lang, flags, attrs } = parseInfoString(openMatch[2]);
 		const bodyStartLine = i + 2; // 1-indexed line of the first body line
 		const bodyLines: string[] = [];
 		let j = i + 1;
 		let closed = false;
 		for (; j < lines.length; j++) {
-			if (/^```\s*$/.test(lines[j])) {
+			const closeMatch = /^(`{3,})\s*$/.exec(lines[j]);
+			if (closeMatch && closeMatch[1].length >= fenceLen) {
 				closed = true;
 				break;
 			}
 			bodyLines.push(lines[j]);
 		}
-		spans.push({ lang, flags, attrs, line: i + 1, bodyStartLine, body: bodyLines.join("\n") });
-		i = closed ? j + 1 : lines.length; // unterminated fence: stop (extremely malformed doc)
+		spans.push({ lang, flags, attrs, line: i + 1, bodyStartLine, body: bodyLines.join("\n"), unterminated: !closed });
+		i = closed ? j + 1 : lines.length;
 	}
 	return spans;
 }
 
-/** Text with every fenced code block's body blanked out (newline-preserved, so line numbers in
- *  later regex scans over the result still line up with the original file). Used for markdown-link
- *  scanning, which should never fire on a code sample that happens to contain `(parens)`. */
-function withAllFencesBlanked(text: string, spans: FenceSpan[]): string {
+/** Blank fence bodies out of the text (newline-preserved, so line numbers in later regex scans
+ *  still line up with the original file), keeping only the languages in `keep`. One shared
+ *  implementation — two copy-paste variants of this loop once diverged on empty-body handling. */
+function blankFences(text: string, spans: FenceSpan[], keep?: ReadonlySet<string>): string {
 	const lines = text.split("\n");
 	for (const span of spans) {
-		for (let ln = span.bodyStartLine; ln < span.bodyStartLine + span.body.split("\n").length; ln++) {
-			if (span.body === "") continue; // zero-line body, nothing to blank
-			lines[ln - 1] = "";
-		}
-	}
-	return lines.join("\n");
-}
-
-/** Text scannable by the identifier-existence tier: prose outside any fence, PLUS the body of any
- *  ```bash fence (bash examples make real claims — env vars, paths, `bun run` — same as prose).
- *  Every other fence's body (ts, json, whatever) is blanked; that content is either typechecked
- *  separately or out of scope. */
-function scannableForIdentifiers(text: string, spans: FenceSpan[]): string {
-	const lines = text.split("\n");
-	for (const span of spans) {
-		if (span.lang === "bash" || span.lang === "sh") continue;
+		if (keep?.has(span.lang)) continue;
 		const bodyLineCount = span.body === "" ? 0 : span.body.split("\n").length;
 		for (let ln = span.bodyStartLine; ln < span.bodyStartLine + bodyLineCount; ln++) lines[ln - 1] = "";
 	}
 	return lines.join("\n");
 }
 
+/** Markdown-link scanning must never fire on a code sample that happens to contain `(parens)`. */
+function withAllFencesBlanked(text: string, spans: FenceSpan[]): string {
+	return blankFences(text, spans);
+}
+
+const IDENTIFIER_SCAN_KEEP = new Set(["bash", "sh"]);
+/** Text scannable by the identifier-existence tier: prose outside any fence, PLUS the body of any
+ *  ```bash fence (bash examples make real claims — env vars, paths, `bun run` — same as prose).
+ *  Every other fence's body (ts, json, whatever) is blanked; that content is either typechecked
+ *  separately or out of scope. */
+function scannableForIdentifiers(text: string, spans: FenceSpan[]): string {
+	return blankFences(text, spans, IDENTIFIER_SCAN_KEEP);
+}
+
 // ---------------------------------------------------------------------------------------------
 // Identifier-existence tier
 // ---------------------------------------------------------------------------------------------
 
-const ENV_TOKEN_RE = /^(?:OMP_SQUAD|GLANCE)_[A-Z0-9_]+$/;
+// Accepts BOTH the bare token and the assignment form docs actually write (`OMP_SQUAD_X=1`) — the
+// bare-only version made the env tier blind to the most common spelling, and a fake flag documented
+// as `OMP_SQUAD_FAKE=1` sailed through green. Group 1 is the variable name to existence-check.
+const ENV_TOKEN_RE = /^((?:OMP_SQUAD|GLANCE)_[A-Z0-9_]+)(?:=[^`\s]*)?$/;
 // No leading '/', '~', '$', '<' (slash-commands, home paths, shell vars, placeholders are excluded
 // structurally, not by allowlist); no glob/quote/brace/pipe chars; at least one '/'.
 const REPO_PATH_RE = /^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+\/?$/;
@@ -416,13 +429,15 @@ function checkIdentifiers(skill: DiscoveredSkill, docRelPath: string, docText: s
 	for (const m of scannable.matchAll(BACKTICK_RE)) {
 		const token = m[1];
 		const line = lineAt(scannable, m.index ?? 0);
-		if (ENV_TOKEN_RE.test(token)) {
-			if (!envTokenHasReadSite(token)) {
+		const envMatch = ENV_TOKEN_RE.exec(token);
+		if (envMatch) {
+			const envName = envMatch[1];
+			if (!envTokenHasReadSite(envName)) {
 				violations.push({
 					skill: skill.name,
 					file: docRelPath,
 					line,
-					message: `backticked env token \`${token}\` has no matching env-read site in src/**`,
+					message: `backticked env token \`${token}\` has no matching env-read site in src/** (checked ${envName})`,
 				});
 			}
 			continue;
@@ -495,6 +510,7 @@ function checkSizeCaps(skill: DiscoveredSkill): Violation[] {
 	const violations: Violation[] = [];
 	for (const abs of walkSkillFiles(skill.dir)) {
 		const rel = relative(skill.dir, abs);
+		if (SIZE_CAP_EXEMPT.has(rel)) continue; // provenance artifacts, never agent-loaded
 		const bytes = statSync(abs).size;
 		const cap = rel === "SKILL.md" ? SKILL_MD_MAX_BYTES : SKILL_FILE_MAX_BYTES;
 		if (bytes > cap) {
@@ -560,17 +576,19 @@ function synthesizeAndTypecheck(blocks: FenceBlock[], fenceViolations: Violation
 	// import each other by relative specifier.
 	const groups = new Map<string, FenceBlock[]>();
 	for (const b of blocks) {
-		const key = `${b.skill} ${b.docRelPath}`;
+		const key = `${b.skill}\u0000${b.docRelPath}`;
 		const arr = groups.get(key) ?? [];
 		arr.push(b);
 		groups.set(key, arr);
 	}
 
+	// Unique per run: pid + monotonic counter keeps parallel processes AND repeated in-process runs
+	// (the test file calls runSkillsVerify many times) from colliding in one tree.
+	const runDir = join(SYNTH_DIR, `run-${process.pid}-${synthRunCounter++}`);
 	const entries: SynthEntry[] = [];
-	const seenFilenames = new Map<string, FenceBlock>(); // per-group collision detection
 	for (const [key, groupBlocks] of groups) {
-		const [skill, docRelPath] = key.split(" ");
-		const groupDir = join(SYNTH_DIR, skill, docSlug(docRelPath));
+		const [skill, docRelPath] = key.split("\u0000");
+		const groupDir = join(runDir, skill, docSlug(docRelPath));
 		const localSeen = new Map<string, FenceBlock>();
 		for (const block of groupBlocks) {
 			let filename = block.attrs.file?.trim();
@@ -601,12 +619,14 @@ function synthesizeAndTypecheck(blocks: FenceBlock[], fenceViolations: Violation
 			localSeen.set(filename, block);
 			entries.push({ block, absPath: join(groupDir, filename) });
 		}
-		for (const [f, b] of localSeen) seenFilenames.set(`${skill}/${docRelPath}/${f}`, b);
 	}
 
 	if (entries.length === 0) return { verified: 0, errors: [] };
 
-	rmSync(SYNTH_DIR, { recursive: true, force: true });
+	// Per-run unique dir under .skills-verify/ (NOT a shared wipe-then-write dir): concurrent runs —
+	// a dev `bun test` racing a daemon gate in the same checkout — must never delete each other's
+	// synth tree between write and program construction, which would otherwise be a quiet vacuous
+	// green (missing-file diagnostics carry no `diag.file`; see the fail-closed checks below).
 	for (const e of entries) {
 		mkdirSync(dirname(e.absPath), { recursive: true });
 		writeFileSync(e.absPath, e.block.body);
@@ -621,32 +641,53 @@ function synthesizeAndTypecheck(blocks: FenceBlock[], fenceViolations: Violation
 	});
 	if (!parsed) throw new Error("skills-verify: ts.getParsedCommandLineOfConfigFile returned no result for the root tsconfig.json");
 
-	const rootNames = entries.map((e) => e.absPath);
-	const program = ts.createProgram({ rootNames, options: { ...parsed.options, noEmit: true } });
+	try {
+		const rootNames = entries.map((e) => e.absPath);
+		const program = ts.createProgram({ rootNames, options: { ...parsed.options, noEmit: true } });
 
-	// Fail-closed: a program that silently dropped or deduped a synthesized file would let a real
-	// type error go unreported. Never trust the diagnostics without this check first.
-	const actualRootNames = program.getRootFileNames();
-	if (actualRootNames.length !== entries.length) {
-		throw new Error(
-			`skills-verify: createProgram loaded ${actualRootNames.length} root files but ${entries.length} were synthesized — ` +
-				"the typecheck below would be a vacuous pass. This is a bug in skills-verify, not the skill docs.",
-		);
+		// Fail-closed, twice over. (1) The count guard alone is NOT enough: a root file missing on disk
+		// still occupies a rootName slot, its "File not found" diagnostic carries NO `diag.file`, and a
+		// naive no-file skip would turn a missing synth tree into a quiet vacuous green — so every
+		// synthesized entry must resolve to a real SourceFile in the program. (2) Any error diagnostic
+		// with no `.file` at all (config errors, missing files, resolution failures) is the GATE's
+		// failure, never something to skip.
+		const actualRootNames = program.getRootFileNames();
+		if (actualRootNames.length !== entries.length) {
+			throw new Error(
+				`skills-verify: createProgram loaded ${actualRootNames.length} root files but ${entries.length} were synthesized — ` +
+					"the typecheck below would be a vacuous pass. This is a bug in skills-verify, not the skill docs.",
+			);
+		}
+		for (const e of entries) {
+			if (!program.getSourceFile(e.absPath)) {
+				throw new Error(
+					`skills-verify: synthesized file ${relative(REPO_ROOT, e.absPath)} (block id=${e.block.attrs.id}) never entered the program — ` +
+						"refusing to report a typecheck that did not see it.",
+				);
+			}
+		}
+
+		const byPath = new Map(entries.map((e) => [e.absPath, e.block] as const));
+		const errors: TsErrorEntry[] = [];
+		for (const diag of ts.getPreEmitDiagnostics(program)) {
+			if (diag.category !== ts.DiagnosticCategory.Error) continue;
+			if (!diag.file) {
+				throw new Error(
+					`skills-verify: the typecheck produced a file-less error diagnostic (${ts.flattenDiagnosticMessageText(diag.messageText, "\n")}) — ` +
+						"this is an environment/gate failure, not a skill-doc verdict; refusing to continue.",
+				);
+			}
+			const block = byPath.get(diag.file.fileName);
+			if (!block) continue; // diagnostic in a lib/node_modules file the program pulled in transitively
+			const msg = ts.flattenDiagnosticMessageText(diag.messageText, "\n");
+			const line = diag.start !== undefined ? diag.file.getLineAndCharacterOfPosition(diag.start).line + 1 : undefined;
+			errors.push({ skill: block.skill, doc: block.docRelPath, blockId: block.attrs.id ?? "?", file: relative(REPO_ROOT, diag.file.fileName), message: msg, line });
+		}
+
+		return { verified: entries.length, errors };
+	} finally {
+		rmSync(runDir, { recursive: true, force: true });
 	}
-
-	const byPath = new Map(entries.map((e) => [e.absPath, e.block] as const));
-	const errors: TsErrorEntry[] = [];
-	for (const diag of ts.getPreEmitDiagnostics(program)) {
-		if (diag.category !== ts.DiagnosticCategory.Error) continue;
-		if (!diag.file) continue;
-		const block = byPath.get(diag.file.fileName);
-		if (!block) continue; // diagnostic in a lib/node_modules file the program pulled in transitively
-		const msg = ts.flattenDiagnosticMessageText(diag.messageText, "\n");
-		const line = diag.start !== undefined ? diag.file.getLineAndCharacterOfPosition(diag.start).line + 1 : undefined;
-		errors.push({ skill: block.skill, doc: block.docRelPath, blockId: block.attrs.id ?? "?", file: relative(REPO_ROOT, diag.file.fileName), message: msg, line });
-	}
-
-	return { verified: entries.length, errors };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -673,7 +714,16 @@ export function stampVerifiedAgainst(roots: string[] | undefined, resolvedEffect
 			const pkg = declared.slice(0, at);
 			const version = declared.slice(at + 1);
 			if (pkg !== "effect" || version === resolvedEffectVersion) continue;
-			const rewritten = content.replace(/^(verified-against:\s*)\S+$/m, `$1${pkg}@${resolvedEffectVersion}`);
+			// Tolerant of trailing spaces/CR (a `\S+$` anchor silently no-ops on those — and a stamp
+			// tool that reports success while leaving the stale stamp in place is a lying green).
+			// Verify the rewrite actually happened before recording it: a no-op is an error, not a success.
+			const rewritten = content.replace(/^(verified-against:[ \t]*)[^\r\n]*$/m, `$1${pkg}@${resolvedEffectVersion}`);
+			if (rewritten === content) {
+				throw new Error(
+					`skills-verify --stamp: failed to rewrite verified-against in ${relative(REPO_ROOT, skillMdPath)} ` +
+						`(stale: ${pkg}@${version}) — the frontmatter line didn't match the stamp pattern. Fix the line by hand.`,
+				);
+			}
 			writeFileSync(skillMdPath, rewritten);
 			changed.push({ skill: skill.name, pkg, from: version, to: resolvedEffectVersion });
 		}
@@ -760,10 +810,21 @@ export function runSkillsVerify(roots?: string[]): SkillsVerifyReport {
 		for (const doc of docs) {
 			const text = doc.rel === "SKILL.md" ? skillMdText : readFileSync(doc.abs, "utf8");
 			const spans = extractFences(text);
-			const hasTsBlock = spans.some((s) => s.lang === "ts" || s.lang === "typescript");
+			const hasTsBlock = spans.some((s) => CODE_LANGS.has(s.lang));
 
 			for (const span of spans) {
-				const isTs = span.lang === "ts" || span.lang === "typescript";
+				// A fence that never closed swallowed everything to EOF out of the identifier tier's
+				// view — that's a truth hole, so it hard-fails regardless of language.
+				if (span.unterminated) {
+					fenceViolations.push({
+						skill: skill.name,
+						file: doc.rel,
+						line: span.line,
+						message: "unterminated fence — everything after it is invisible to the gate; close it",
+					});
+					continue;
+				}
+				const isTs = CODE_LANGS.has(span.lang);
 				if (!isTs) {
 					if (span.lang === "" && hasTsBlock) {
 						fenceViolations.push({

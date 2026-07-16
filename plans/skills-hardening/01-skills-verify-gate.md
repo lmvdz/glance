@@ -1,5 +1,5 @@
 # skills-verify gate: prove skill docs the way we prove code
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -28,3 +28,6 @@ None. `--roots` flag allows advisory (non-gating) runs over `~/.claude/skills`; 
 
 ## Verify
 `bun test tests/skills-verify.test.ts` green on the current tree (8 skills, prose tier + structure only); mutation tests: break a frontmatter field, dangle a reference link, plant a fake `OMP_SQUAD_NOPE` token, plant a ts block with a type error → each turns the gate red with a message naming the skill/block; delete all skills → manifest set-equality fails (not a vacuous pass); `--stamp` on a stale stamp greens it only after the program actually ran (assert via report counts).
+
+## Resolution
+Commit `0f6028e` — scripts/skills-verify.ts (911 lines, five tiers: in-process typecheck via ts.createProgram with explicit rootNames, workflow-file parse, identifier existence, structure/size, verified-against freshness) + tests/skills-verify.test.ts (21 tests including permanent mutation fixtures). Gate green on the pre-vendor tree with 6 justified allowlist entries; all three planted-defect mutations (fake env token, ts type error, broken frontmatter) turned it red with messages naming skill/block. Live: the gate caught a real upstream API drift during 02 (`Schedule.tapInput` removed by beta.98). scripts/skills-verify.ts added to tsconfig include by name (mirrors dto-conformance.test-d.ts).

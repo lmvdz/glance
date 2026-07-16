@@ -61,7 +61,7 @@ import { RateLimitGate } from "./rate-limit.ts";
 import { addIssueIdsToFeatureModule, addIssuesToFeatureModule, addPlaneBlockedByRelation, addPlaneIssueComment, closePlaneIssue, createPlaneIssue, deletePlaneModule, ensureFeatureModule, featureTickets, fetchIssueDetail, listPlaneIssues, listPlaneIssuesAllStates, planeRepos, reopenPlaneIssue, startPlaneIssue } from "./plane.ts";
 import { syncPlanStatuses } from "./plan-sync.ts";
 import { agentsToAdopt, deferredResumable, hardAgentCeiling, newAgentId, planeIssueBranch, selectAdoptable, slugPart } from "./spawn-identity.ts";
-import { DO_NOT_BLOCK, DO_NOT_HEADER, effectSkillPointerLine, gateMembraneTokens, loadRepoProfiles, membraneDisciplinePrompt, membraneProfilesEnabled, modelOptionsFromRuntime, profileOptionsFromEnv, toolGrantsPrompt, type RuntimeModelOption } from "./agent-profiles.ts";
+import { EFFECT_POINTER_MARKER, effectSkillPointerLine, gateMembraneTokens, upsertDoNotBlock, loadRepoProfiles, membraneDisciplinePrompt, membraneProfilesEnabled, modelOptionsFromRuntime, profileOptionsFromEnv, toolGrantsPrompt, type RuntimeModelOption } from "./agent-profiles.ts";
 import { escapeHtml, planConcernTicketMatches, renderPlanConcernIssueHtml } from "./concern-tickets.ts";
 import { capabilityWorkflowToDot, loadCommissionWorkflow, resolveWorkflowPath, slugifyForFile } from "./workflow-source.ts";
 export { capabilityWorkflowToDot, resolveWorkflowPath };
@@ -4458,33 +4458,36 @@ export class SquadManager extends EventEmitter {
 		// Now: any spawn with a repo and something to search on gets the primer. Still best-effort, still
 		// fenced-untrusted by `buildContextPrimer`, still never blocks a spawn.
 		// `OMP_SQUAD_CONTEXT_PRIMER=0` disables it.
+		// Evergreen Do-Not block (skills-hardening concern 04): every spawn — profiled or not, dispatched
+		// or ad-hoc — carries the same short list of recorded recurring failure modes. Joined
+		// UNCONDITIONALLY, and deliberately BEFORE the primer join below: the idempotence markers scan
+		// `opts.appendSystemPrompt`, and after primeContext runs that string contains UNTRUSTED
+		// fabric-derived text — a primer snippet that merely mentions the header or the skill path would
+		// otherwise act as a suppression signal against a block the design says is unconditional. At this
+		// point the string holds only persisted/profile/operator text. Specifically NOT via
+		// `profile.memory` (line ~4439, which only runs `if (profile)`): a profile-less dispatched unit
+		// never reaches that branch, the exact delivery-gap class R3 (below) fixed for the primer. Static
+		// repo-authored text (DO_NOT_BLOCK), so unlike the primer/specBlock it needs no untrusted fence.
+		//
+		// IDEMPOTENT + REFRESHING: cold-adopt re-runs this composition over the PERSISTED
+		// appendSystemPrompt. `upsertDoNotBlock` appends when absent (pre-04 units get upgraded) and
+		// REPLACES the existing paragraph when present — so rule edits reach long-lived units on the next
+		// restart instead of freezing the list they were created with, and the block never duplicates.
+		// The Effect pointer is once-only (marker check): it points at the UNIT'S TARGET REPO's vendored
+		// skill (opts.repo, never the daemon's own install) — see `effectSkillPointerLine`.
+		const hasEffectPointer = opts.appendSystemPrompt?.includes(EFFECT_POINTER_MARKER) ?? false;
+		const effectPointer = hasEffectPointer ? undefined : effectSkillPointerLine([opts.task, opts.issue?.name, opts.issue?.description].filter((t): t is string => typeof t === "string").join("\n"), opts.repo);
+		opts = {
+			...opts,
+			appendSystemPrompt: [upsertDoNotBlock(opts.appendSystemPrompt), effectPointer].filter((text): text is string => typeof text === "string" && text.length > 0).join("\n\n"),
+		};
+		// True by construction now (upsert never skips), so the delivery check below (alongside
+		// `primerDelivered`) measures ONLY the harness-channel gap — composition can no longer be
+		// silently suppressed by content collisions.
+		const doNotsInjected = true;
 		const primed = await this.primeContext(opts, actor);
 		opts = primed.opts;
 		const primerBuilt = primed.hasPrimer;
-		// Evergreen Do-Not block (skills-hardening concern 04): every spawn — profiled or not, dispatched
-		// or ad-hoc — carries the same short list of recorded recurring failure modes. Joined here,
-		// UNCONDITIONALLY, alongside the primer above and the authored-spec block below — specifically NOT
-		// via `profile.memory` (line ~4439, which only runs `if (profile)`): a profile-less dispatched unit
-		// never reaches that branch, the exact delivery-gap class R3 (above) fixed for the primer. Static
-		// repo-authored text (DO_NOT_BLOCK), so unlike the primer/specBlock it needs no untrusted fence.
-		// The Effect pointer line rides the SAME join but is conditional — see `effectSkillPointerLine`
-		// (gated on the task/issue text looking Effect-shaped AND the vendored skill dir existing).
-		// `doNotsInjected` is hoisted (mirrors `primerBuilt` above) so the delivery check below (alongside
-		// `primerDelivered`) can tell whether this ACTUALLY reached the child, not just whether it was
-		// composed — the join is unconditional so this is always true, but delivery still depends on the
-		// harness having a system-prompt channel at all.
-		// IDEMPOTENT: cold-adopt re-runs this composition over the PERSISTED appendSystemPrompt (which
-		// already carries the block from the unit's original create) — without the marker check, every
-		// daemon restart would append another copy. A pre-04 persisted unit (no block yet) still gets
-		// upgraded on adopt, which is the desired behavior, not drift.
-		const hasDoNots = opts.appendSystemPrompt?.includes(DO_NOT_HEADER) ?? false;
-		const hasEffectPointer = opts.appendSystemPrompt?.includes(".claude/skills/effect") ?? false;
-		const effectPointer = hasEffectPointer ? undefined : effectSkillPointerLine([opts.task, opts.issue?.name, opts.issue?.description].filter((t): t is string => typeof t === "string").join("\n"));
-		opts = {
-			...opts,
-			appendSystemPrompt: [opts.appendSystemPrompt, hasDoNots ? undefined : DO_NOT_BLOCK, effectPointer].filter((text): text is string => typeof text === "string" && text.length > 0).join("\n\n") || undefined,
-		};
-		const doNotsInjected = true;
 		// Authored-spec injection (concern 01): a dispatched unit works toward its actual contract
 		// (acceptance criteria / verification / scope) instead of reconstructing intent from an 8-word
 		// title. The body is human/skills-MCP-writable, so fence it as UNTRUSTED data — never let issue

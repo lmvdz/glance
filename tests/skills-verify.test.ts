@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -278,17 +278,93 @@ test("skills-verify: a fake OMP_SQUAD_* token with no env-read site fails red", 
 	}
 });
 
-test("skills-verify: a real OMP_SQUAD_* token with a genuine env-read site passes", () => {
+test("skills-verify: a real OMP_SQUAD_* token with a genuine env-read site passes, in BOTH bare and assignment form", () => {
 	const root = makeScratchSkillsRoot();
 	const skillDir = join(root, "scratch-real-env");
 	mkdirSync(skillDir, { recursive: true });
 	writeFileSync(
 		join(skillDir, "SKILL.md"),
-		["---", "name: scratch-real-env", "description: fixture for a genuine env token", "---", "", "Set `OMP_SQUAD_AUTOSUPERVISE=0` to disable in-process auto-supervise.", ""].join("\n"),
+		["---", "name: scratch-real-env", "description: fixture for a genuine env token", "---", "", "Set `OMP_SQUAD_AUTOSUPERVISE=0` to disable in-process auto-supervise; `OMP_SQUAD_AUTOSUPERVISE` is the same knob bare.", ""].join("\n"),
 	);
 	try {
 		const r = runSkillsVerify([root]);
 		expect(r.identifierViolations.filter((v) => v.message.includes("OMP_SQUAD_AUTOSUPERVISE"))).toEqual([]);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("skills-verify: a fake env token in ASSIGNMENT form (`OMP_SQUAD_FAKE=1`) fails red — the spelling docs actually use", () => {
+	const root = makeScratchSkillsRoot();
+	const skillDir = join(root, "scratch-fake-env-assign");
+	mkdirSync(skillDir, { recursive: true });
+	writeFileSync(
+		join(skillDir, "SKILL.md"),
+		["---", "name: scratch-fake-env-assign", "description: fixture", "---", "", "Set `OMP_SQUAD_TOTALLY_FAKE=1` to enable nothing.", ""].join("\n"),
+	);
+	try {
+		const r = runSkillsVerify([root]);
+		expect(r.ok).toBe(false);
+		expect(r.identifierViolations.some((v) => v.message.includes("OMP_SQUAD_TOTALLY_FAKE"))).toBe(true);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("skills-verify: an unterminated fence hard-fails — everything after it would be invisible to the identifier tier", () => {
+	const root = makeScratchSkillsRoot();
+	const skillDir = join(root, "scratch-unterminated");
+	mkdirSync(skillDir, { recursive: true });
+	writeFileSync(
+		join(skillDir, "SKILL.md"),
+		["---", "name: scratch-unterminated", "description: fixture", "---", "", "```bash", "echo hi", "", "Set `OMP_SQUAD_HIDDEN_FAKE=1` — this line is swallowed by the open fence.", ""].join("\n"),
+	);
+	try {
+		const r = runSkillsVerify([root]);
+		expect(r.ok).toBe(false);
+		expect(r.fenceViolations.some((v) => v.message.includes("unterminated fence"))).toBe(true);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("skills-verify: 4-backtick fences are seen (a ````ts block is still a ts block), and js retags stay verified", () => {
+	const root = makeScratchSkillsRoot();
+	const skillDir = join(root, "scratch-fence-dodges");
+	mkdirSync(skillDir, { recursive: true });
+	writeFileSync(
+		join(skillDir, "SKILL.md"),
+		[
+			"---", "name: scratch-fence-dodges", "description: fixture", "---", "",
+			"````ts id=four-tick", 'const n: number = "not a number";', "````", "",
+			"```js id=js-retag", 'const m: number = "also not";', "```", "",
+		].join("\n"),
+	);
+	try {
+		const r = runSkillsVerify([root]);
+		expect(r.ok).toBe(false);
+		expect(r.tsBlocksVerified).toBe(2);
+		const ids = r.tsErrors.map((e) => e.blockId).sort();
+		expect(ids).toEqual(["four-tick", "js-retag"]);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("skills-verify --stamp path: a stale stamp with a trailing space is rewritten, never silently no-oped", () => {
+	const root = makeScratchSkillsRoot();
+	const skillDir = join(root, "scratch-stamp");
+	mkdirSync(skillDir, { recursive: true });
+	const skillMd = join(skillDir, "SKILL.md");
+	writeFileSync(skillMd, ["---", "name: scratch-stamp", "description: fixture", "verified-against: effect@0.0.0-stale \t", "---", "", "body", ""].join("\n"));
+	try {
+		const resolved = runSkillsVerify([root]).resolvedEffectVersion;
+		const changed = stampVerifiedAgainst([root], resolved);
+		expect(changed.length).toBe(1);
+		expect(changed[0]).toMatchObject({ skill: "scratch-stamp", from: "effect@0.0.0-stale".slice("effect@".length), to: resolved });
+		const after = readFileSync(skillMd, "utf8");
+		expect(after).toContain(`verified-against: effect@${resolved}`);
+		expect(after).not.toContain("0.0.0-stale");
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

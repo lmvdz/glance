@@ -17,7 +17,7 @@ Use current Effect v4 APIs and the production defaults in this skill. Establishe
 Check these before guessing:
 
 - the nearest `AGENTS.md` and any project-local Effect practices doc
-- the project-pinned `effect` package source and version — this repo pins `effect@4.0.0-beta.98` (see `package.json` / `bun.lock`); every fenced example in this skill's `references/*.md` is typechecked in-process against that exact pin by `scripts/skills-verify.ts`, not against a guessed or generic Effect API surface
+- the project-pinned `effect` package source and version — read the CURRENT pin from `package.json` / `bun.lock`, never from prose (prose decays; the maintained truth is this file's `verified-against` frontmatter stamp, which `scripts/skills-verify.ts` hard-fails when it drifts from the resolved install). Every fenced example in this skill's `references/*.md` is typechecked in-process against that resolved pin, not against a guessed or generic Effect API surface
 - current upstream Effect source when the installed package does not answer the question
 
 ## Branch Chooser
