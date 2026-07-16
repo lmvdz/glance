@@ -2398,7 +2398,12 @@ export class SquadServer {
 				ephemeral = reg.ephemeral;
 			}
 			try {
-				const dto = await manager.create({ repo, name: "chat", model, profileId, harness, autoRoute: false, appendSystemPrompt: CONSOLE_SYSTEM_PROMPT }, actor);
+				// realTreePath (daily-onramp 03): a `here`-class session (the client ASKED for ephemeral
+				// registration — `reg.ephemeral` can be false when the repo was already durable, but the
+				// request shape is what marks a terminal-attach session) syncs each finished turn's patch
+				// back into the operator's real checkout, fail-closed. Derived server-side from the
+				// canonical registered root — never a separate client-supplied path.
+				const dto = await manager.create({ repo, name: "chat", model, profileId, harness, autoRoute: false, appendSystemPrompt: CONSOLE_SYSTEM_PROMPT, realTreePath: body.ephemeral === true ? repo : undefined }, actor);
 				return Response.json({ agentId: dto.id, repo, ephemeral });
 			} catch (err) {
 				// A failed spawn must not leave a half-session behind: undo the registration this very
@@ -2500,6 +2505,16 @@ export class SquadServer {
 		if (mopen && req.method === "POST") {
 			const decision = openRouteDecision(manager.getAgent(decodeURIComponent(mopen[1])) ?? undefined, this.dbMode);
 			return Response.json(decision.body, { status: decision.status });
+		}
+		// Boundary sync (daily-onramp 03): explicitly apply this here-session's HELD turn patches to
+		// the operator's real checkout. Re-runs the fail-closed precondition with a fresh capture —
+		// "still divergent" is an expected report (200 + ok:false), not a transport error; only a
+		// missing agent is a 404. Same operator tier as /land and /verify beside it.
+		const msync = url.pathname.match(/^\/api\/agents\/([^/]+)\/apply-held-sync$/);
+		if (msync && req.method === "POST") {
+			const id = decodeURIComponent(msync[1]);
+			if (!manager.getAgent(id)) return new Response("no such agent", { status: 404 });
+			return Response.json(await manager.applyHeldSync(id, actor));
 		}
 		const mverify = url.pathname.match(/^\/api\/agents\/([^/]+)\/verify$/);
 		if (mverify && req.method === "POST") {

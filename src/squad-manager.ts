@@ -88,6 +88,7 @@ import { buildContextPrimer, searchFabric, type KbDocType } from "./fabric-searc
 import { sweepPresence, who } from "./presence.ts";
 import { harnessEventDecision } from "./harness-hooks.ts";
 import { adoptBranchName, adoptBrief, isSafeUntrackedPath, parseNulList } from "./adopt.ts";
+import { applyHeldNow, beginTurn, type BoundaryTurnStart, HeldSyncStore, syncTurnEnd } from "./boundary-sync.ts";
 import { chooseFallback } from "./supervisor.ts";
 import { availableActions, effectiveAutonomyMode, modeFromApproval, validateRequestedMode, type AutonomyMode, type VerificationState } from "./autonomy.ts";
 import type {
@@ -692,6 +693,21 @@ interface AgentRecord {
 	 *  frame pair to track. Read by `onAgentEvent`'s `agent_end` case to gate `dto.voicePushArmed`
 	 *  exposure so a multi-node workflow never mistakes a mid-graph idle blip for its actual finish. */
 	workflowJustFinished?: boolean;
+	/** Boundary sync (daily-onramp 03) — all four fields only ever populated when
+	 *  `options.realTreePath` is set (a `here`-class casual session; plain fleet units never sync).
+	 *  Per-process turn counter (resets on restart — held-patch identity is a UUID, never this). */
+	boundarySyncTurn?: number;
+	/** Turn-start baselines captured in THIS process. `undefined` at agent_end ⇔ no live turn start
+	 *  was seen here (a replayed/stale frame after reattach) — turn-end sync skips, it never
+	 *  fabricates a baseline. A capture FAILURE at turn start is not `undefined`: it's a populated
+	 *  record with failure reasons, which turn end fail-closes into a hold. */
+	boundarySyncStart?: BoundaryTurnStart;
+	/** End tree of the last completed turn — reused as the NEXT turn's start baseline so the
+	 *  turn-start capture can never race the agent's first edit (see boundary-sync.ts beginTurn). */
+	boundarySyncEndTree?: string;
+	/** Per-agent serialization of turn-start capture → turn-end sync → explicit apply, so an apply
+	 *  can never interleave with a capture and fingerprints are never read mid-apply. */
+	boundarySyncChain?: Promise<void>;
 }
 
 export interface SquadManagerOptions {
@@ -840,6 +856,10 @@ export class SquadManager extends EventEmitter {
 	 *  behind GET /api/automation. Live events also broadcast as a `type:"automation"` SquadEvent.
 	 *  Assigned in the constructor (needs stateDir, which the constructor body sets). */
 	private readonly automation: AutomationLog;
+	/** Boundary sync (daily-onramp 03): durable held-patch ledger for `here`-class sessions whose
+	 *  turn patch could not be safely auto-applied to the operator's real checkout. Assigned in the
+	 *  constructor (needs stateDir). */
+	private readonly boundarySyncHeld: HeldSyncStore;
 	/** Agentic-learning-loop baseline (concern 01) — the five metrics (first-try-green, fixups-to-green,
 	 *  escalation, land-failure-streak, primer-empty) the rest of the learning loop is A/B'd against.
 	 *  Assigned in the constructor (needs stateDir). Never gates behavior — read-only observability. */
@@ -933,6 +953,7 @@ export class SquadManager extends EventEmitter {
 		this.scoutCursor = readScoutCursors(this.stateDir);
 		this.removedLedger = openRemovedLedger(this.stateDir);
 		this.projectRegistry = openProjectRegistry(this.stateDir);
+		this.boundarySyncHeld = new HeldSyncStore(path.join(this.stateDir, "boundary-sync"));
 		// Reload session-scoped registration markers so a mid-session daemon restart cannot promote an
 		// ephemeral `glance here` registration to permanent — start() reconciles them against the
 		// restored roster (reconcileEphemeralProjects).
@@ -1019,6 +1040,9 @@ export class SquadManager extends EventEmitter {
 		// ones) and outside the snapshot guard: a fresh-state boot with leftover markers means every
 		// flagged session is dead, which is exactly the case that must be reaped.
 		this.reconcileEphemeralProjects();
+		// Held boundary-sync patches are durable; their attention rows are not — re-raise them for
+		// restored sessions (and log, never hide, holds whose agent no longer exists).
+		await this.reattachHeldSyncs();
 		// DB mode: the registry runs pruneStaleSockets once over all orgs (a per-org manager must not).
 		if (!this.skipGlobalJanitors) await pruneStaleSockets().catch(() => []);
 		await this.bus.start();
@@ -1634,6 +1658,10 @@ export class SquadManager extends EventEmitter {
 				// real work, went idle, and never got its push before the daemon restarted still owes it
 				// under its freshly-minted post-adopt id (see createWithId's own comment on this field).
 				voicePushArmed: p.voicePushArmed,
+				// Boundary sync survives orphan-adoption: future turns keep syncing to the operator's real
+				// checkout. Holds keyed by the OLD id become orphans (reattachHeldSyncs logs them loudly) —
+				// fail-closed, never silently re-keyed onto a fresh id whose worktree may have moved on.
+				realTreePath: p.realTreePath,
 				sandbox: p.sandbox,
 				autoRoute: false,
 				bypassCap: true,
@@ -4503,6 +4531,170 @@ export class SquadManager extends EventEmitter {
 		}
 	}
 
+	// ── Boundary sync (daily-onramp 03) ──────────────────────────────────────────────────────────
+	// One-directional per-turn patch-apply into the operator's real checkout, for `here`-class
+	// casual sessions only (`options.realTreePath` is the marker — plain fleet units never carry
+	// it). The decision core lives in boundary-sync.ts; this block is the turn-boundary wiring,
+	// per-agent serialization, and the attention surface. Fail-closed throughout: every branch
+	// that is not "fingerprints provably match" ends in hold + attention, never an apply.
+
+	/** Serialize this agent's boundary-sync work (turn-start capture → turn-end sync → explicit
+	 *  apply) so an apply can never interleave with a capture. The returned promise carries `fn`'s
+	 *  own failure to callers that await it; the stored chain swallows it (logged) so one failure
+	 *  never wedges the lane. */
+	private queueBoundarySync(rec: AgentRecord, fn: () => Promise<void>): Promise<void> {
+		const run = (rec.boundarySyncChain ?? Promise.resolve()).then(fn);
+		rec.boundarySyncChain = run.catch((err) => {
+			this.log("warn", `boundary-sync (${rec.dto.name}): ${errText(err)}`);
+		});
+		return run;
+	}
+
+	/** The sync target, iff this record is a `here`-class session AND the target is not the agent's
+	 *  own worktree. The self-apply guard is defensive (OMPSQ-40 means a here-session always gets a
+	 *  standard worktree today): if the two ever alias, "apply the turn's patch to the real tree"
+	 *  would re-apply changes onto the tree that already contains them — `git apply --check` would
+	 *  refuse and every turn would raise a spurious hold. Skipping is the honest no-op: the "real
+	 *  tree" already sees every edit directly. */
+	private boundarySyncTarget(rec: AgentRecord): string | undefined {
+		const realDir = rec.options.realTreePath;
+		if (!realDir) return undefined;
+		if (rec.options.worktree && path.resolve(realDir) === path.resolve(rec.options.worktree)) return undefined;
+		return realDir;
+	}
+
+	/** agent_start/turn_start: capture the turn's baselines. Failures are recorded on the record
+	 *  (NOT defaulted) so turn end holds with the precise reason — a failed capture can never
+	 *  compare equal to anything. */
+	private boundaryTurnStart(rec: AgentRecord): void {
+		const realDir = this.boundarySyncTarget(rec);
+		if (!realDir) return;
+		rec.boundarySyncTurn = (rec.boundarySyncTurn ?? 0) + 1;
+		void this.queueBoundarySync(rec, async () => {
+			rec.boundarySyncStart = await beginTurn(realDir, rec.options.worktree, rec.boundarySyncEndTree);
+		});
+	}
+
+	/** agent_end (squad-manager's turn-finished boundary): compute this turn's patch and apply it
+	 *  iff the real tree provably has not moved since turn start; otherwise hold + attention. */
+	private boundaryTurnEnd(rec: AgentRecord): void {
+		const realDir = this.boundarySyncTarget(rec);
+		if (!realDir) return;
+		void this.queueBoundarySync(rec, async () => {
+			const start = rec.boundarySyncStart;
+			// No live turn start in this process ⇔ a replayed/stale agent_end (reattach replay) — skip
+			// rather than fabricate a baseline. A daemon that died mid-turn simply never auto-applies
+			// that turn (today's behavior: the real tree is untouched, the diff view still shows all).
+			if (!start) return;
+			rec.boundarySyncStart = undefined; // consume — one sync decision per live turn
+			const outcome = await syncTurnEnd({ realDir, worktree: rec.options.worktree, start, store: this.boundarySyncHeld, agentId: rec.dto.id, turn: rec.boundarySyncTurn ?? 0 }).catch((err) => {
+				// syncTurnEnd's branches all return, but its plumbing (the held-patch store) can still
+				// throw (disk full, patch over the size cap). Same fail-closed direction — the real tree
+				// was never touched — but the failure must be VISIBLE, not a daemon-log-only whisper: the
+				// operator would otherwise believe syncing is live while turns silently evaporate.
+				return { kind: "uncapturable", reason: `sync bookkeeping failed: ${errText(err)}` } as const;
+			});
+			if (outcome.kind !== "uncapturable" && outcome.endTree) rec.boundarySyncEndTree = outcome.endTree;
+			switch (outcome.kind) {
+				case "noop":
+					return;
+				case "applied":
+					this.log("info", `boundary-sync (${rec.dto.name}): turn ${rec.boundarySyncTurn} applied to ${realDir} (${outcome.patchBytes} patch bytes)`);
+					return;
+				case "held": {
+					const backlog = await this.boundarySyncHeld.listHeld(rec.dto.id);
+					const n = backlog.length;
+					this.raiseBoundarySyncAttention(
+						rec,
+						`sync held: ${outcome.reason}`,
+						`${n} turn${n === 1 ? "'s changes are" : "s' changes are"} held for ${realDir} — nothing touched your checkout. ` +
+							`Apply replays them in order after a fresh safety re-check. Held patches: ${this.boundarySyncHeld.root}`,
+					);
+					return;
+				}
+				case "uncapturable":
+					// The turn's delta itself couldn't be captured — nothing to hold OR apply. Same
+					// fail-closed direction (real tree untouched), surfaced so the operator knows edits
+					// exist only in the worktree (visible via the normal diff view).
+					this.raiseBoundarySyncAttention(
+						rec,
+						"sync held: this turn's changes couldn't be captured",
+						`${outcome.reason} — your checkout is untouched; the session's edits live in its worktree (${rec.options.worktree}) and show in the diff view.`,
+					);
+					return;
+			}
+		});
+	}
+
+	/** One boundary-sync attention row per agent, always the freshest state (a stack of stale
+	 *  "sync held" rows for the same session is noise, not signal). Non-blocking by design —
+	 *  AttentionEvent never flips agent status; the turn itself succeeded. */
+	private raiseBoundarySyncAttention(rec: AgentRecord, summary: string, detail: string): void {
+		const kept = (rec.dto.attentionEvents ?? []).filter((e) => e.source !== "boundary-sync");
+		rec.dto.attentionEvents = [...kept, { id: randomUUID(), summary, detail, source: "boundary-sync", createdAt: Date.now() }];
+		this.emitAgent(rec);
+	}
+
+	private clearBoundarySyncAttention(rec: AgentRecord): void {
+		const events = rec.dto.attentionEvents ?? [];
+		const kept = events.filter((e) => e.source !== "boundary-sync");
+		if (kept.length === events.length) return;
+		rec.dto.attentionEvents = kept;
+		this.emitAgent(rec);
+	}
+
+	/**
+	 * Explicit apply affordance (POST /api/agents/:id/apply-held-sync). Re-runs the fail-closed
+	 * precondition with a FRESH capture (never the stale fingerprint the hold was raised with — the
+	 * real tree may have moved again since) and replays this agent's held patches in order; the
+	 * first conflict stops the run with everything after it still held. See boundary-sync.ts
+	 * `applyHeldNow` for why divergence is judged per patch here (the operator's click is the
+	 * authorization the auto path lacks).
+	 */
+	async applyHeldSync(id: string, actor: Actor = LOCAL_ACTOR): Promise<{ ok: boolean; applied: number; remaining: number; reason?: string }> {
+		const rec = this.agents.get(id);
+		if (!rec) return { ok: false, applied: 0, remaining: 0, reason: "no such agent" };
+		const realDir = this.boundarySyncTarget(rec);
+		if (!realDir) return { ok: false, applied: 0, remaining: 0, reason: "this unit has no boundary sync (not a here-class session)" };
+		let result: { ok: boolean; applied: number; remaining: number; reason?: string } = { ok: false, applied: 0, remaining: 0, reason: "apply did not run" };
+		try {
+			await this.queueBoundarySync(rec, async () => {
+				result = await applyHeldNow(this.boundarySyncHeld, id, realDir);
+			});
+		} catch (err) {
+			result = { ok: false, applied: result.applied, remaining: result.remaining, reason: errText(err) };
+		}
+		if (result.ok && result.remaining === 0) {
+			this.clearBoundarySyncAttention(rec);
+		} else if (result.reason) {
+			this.raiseBoundarySyncAttention(rec, `sync still held: ${result.reason}`, `${result.applied} applied, ${result.remaining} still held for ${realDir}. Held patches: ${this.boundarySyncHeld.root}`);
+		}
+		void this.recordAudit(actor, "boundary-sync.apply", id, result.ok ? "ok" : "error", `${result.applied} applied, ${result.remaining} remaining${result.reason ? ` — ${result.reason}` : ""}`);
+		return result;
+	}
+
+	/** Boot: attention events are in-memory only, held patches are durable — re-raise the "sync
+	 *  held" row for every restored session that still has holds, and say (don't hide) when holds
+	 *  belong to agents that no longer exist. */
+	private async reattachHeldSyncs(): Promise<void> {
+		const all = await this.boundarySyncHeld.listAllHeld().catch(() => []);
+		if (all.length === 0) return;
+		const byAgent = new Map<string, number>();
+		for (const h of all) byAgent.set(h.agentId, (byAgent.get(h.agentId) ?? 0) + 1);
+		for (const [agentId, count] of byAgent) {
+			const rec = this.agents.get(agentId);
+			if (rec && rec.options.realTreePath) {
+				this.raiseBoundarySyncAttention(
+					rec,
+					`sync held: ${count} turn${count === 1 ? "" : "s"} from before the daemon restart`,
+					`Held for ${rec.options.realTreePath} — nothing touched your checkout. Apply replays them in order after a fresh safety re-check.`,
+				);
+			} else {
+				this.log("warn", `boundary-sync: ${count} held patch(es) for agent ${agentId}, which no longer exists — bodies kept in ${this.boundarySyncHeld.root}`);
+			}
+		}
+	}
+
 	// ── Roster mutation ───────────────────────────────────────────────────────
 
 	async create(opts: CreateAgentOptions, actor: Actor = LOCAL_ACTOR, source?: string): Promise<AgentDTO> {
@@ -4871,6 +5063,9 @@ export class SquadManager extends EventEmitter {
 			// `opts` — without this an armed agent that restart-adopts under a new id silently loses the
 			// one push it owed.
 			voicePushArmed: source === "voice" || opts.voicePushArmed === true ? true : undefined,
+			// Boundary sync (daily-onramp 03): the `here`-class marker. Persisted so a restart-restored
+			// session keeps syncing and boot can re-raise attention for its held patches.
+			realTreePath: opts.realTreePath,
 		};
 
 		// Delivery confirmation (concern 02 / DESIGN.md "Membrane measurement"): a requested efficiency
@@ -6282,6 +6477,9 @@ export class SquadManager extends EventEmitter {
 				rec.thinkingEntry = undefined;
 				rec.thinkingBuf = "";
 				rec.dto.adopted = false; // OMPSQ-164: it ran ⇒ no longer a never-re-run adopted agent; resume normal verify→land
+				// Boundary sync (daily-onramp 03): capture the turn's baselines for `here`-class casual
+				// sessions (realTreePath marker). No-op for everything else — checked inside.
+				this.boundaryTurnStart(rec);
 				if (!rec.run) {
 					rec.run = new RunAccumulator({
 						agentId: rec.dto.id,
@@ -6379,6 +6577,10 @@ export class SquadManager extends EventEmitter {
 					rec.workflowJustFinished = false; // consume — never leak into the next agent_end
 					rec.dto.voicePushArmed = isTerminal && rec.options.voicePushArmed === true;
 				}
+				// Boundary sync (daily-onramp 03): `agent_end` IS "turn finished" — apply this turn's
+				// patch to the operator's real checkout iff it provably hasn't moved since turn start,
+				// else hold + attention. `here`-class sessions only (realTreePath marker, checked inside).
+				this.boundaryTurnEnd(rec);
 				break;
 			}
 			case "workflow_done":
