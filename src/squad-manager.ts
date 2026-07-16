@@ -57,6 +57,16 @@ import { gitDiffSinceBase } from "./convergence-run.ts";
 import { readScoutCursors, writeScoutCursors } from "./scout-cursor.ts";
 import { execGatedCommand } from "./gate-runner.ts";
 import { Opportunity } from "./opportunity.ts";
+import {
+	EpisodeLoop,
+	listEpisodes,
+	readEpisode,
+	type EpisodeGatherResult,
+	type EpisodeMeta,
+	type OmittedEntry as EpisodeOmittedEntry,
+} from "./weekly-episode.ts";
+import { computeFog, topDebt, type FileFogEntry } from "./comprehension-fog.ts";
+import { PushService } from "./push.ts";
 import { ResidentPlanner } from "./resident-planner.ts";
 import { DECOMPOSE_TIMEOUT_MS } from "./planner.ts";
 import { hardenedGit, hardenedGitSync } from "./git-harden.ts";
@@ -218,6 +228,10 @@ import {
 
 const MAX_TRANSCRIPT = 800;
 const POLL_MS = 2500;
+/** EpisodeLoop's tick cadence (comprehension concern 09) — hourly, so a daemon restart is never more
+ *  than an hour late catching up on a missed weekly generation. Durable idempotency (the target
+ *  week's artifact already existing) is what actually gates work, not this interval. */
+const EPISODE_TICK_MS = 3_600_000;
 /**
  * How long a built spawn scoreboard is served from cache (see `spawnScoreboard()`). Outcome data
  * only changes on lands, and the board feeds a routing TIE-BREAKER (never a gate/veto), so a
@@ -855,6 +869,10 @@ export class SquadManager extends EventEmitter {
 	private readonly scouts = new Map<string, Scout>();
 	/** Opportunity clusterers — one per configured Plane repo, fed by Scout facts + receipt hot areas. */
 	private readonly opportunities: Opportunity[] = [];
+	/** Weekly-episode loops (comprehension concern 09) — one per repo this daemon knows about
+	 *  (`featureRepos()`, NOT `planeRepos()`: comprehension isn't gated on a Plane backlog, matching
+	 *  attention/fog/symptoms elsewhere in this lane). Cleared in stop(). */
+	private readonly episodeLoops: EpisodeLoop[] = [];
 	/** Resident planners — one per configured Plane repo; gated OMP_SQUAD_RESIDENT_PLANNER (default OFF,
 	 *  opt-in unlike the loops above — an LLM-cost-bearing writer of source-tree files). */
 	private readonly residentPlanners: ResidentPlanner[] = [];
@@ -1301,6 +1319,40 @@ export class SquadManager extends EventEmitter {
 			this.log("info", `opportunity on (clustering scout patterns → ${observeRepos.join(", ")})`);
 		}
 
+		// Weekly episode (comprehension concern 09) — an HOURLY tick against a WEEKLY deliverable
+		// (DESIGN.md "Weekly episode trigger": a 7-day in-memory timer never survives a daemon restart,
+		// so durable idempotency over a real calendar week is the trigger, not the interval). One loop
+		// per repo `featureRepos()` knows about — NOT `planeRepos()`: comprehension (attention/fog/
+		// symptoms) is never gated on a configured Plane backlog elsewhere in this lane, so episodes
+		// aren't either.
+		if (envBool("OMP_SQUAD_EPISODE", true)) {
+			const episodeRepos = this.featureRepos();
+			for (const repo of episodeRepos) {
+				const loop = new EpisodeLoop({
+					repo,
+					stateDir: this.stateDir,
+					gather: (window) => this.gatherEpisodeInputs(repo, window),
+					// Fresh PushService per send, re-`init()`'d from disk every time (episode pushes fire at
+					// most weekly, so the cost is trivial): the alternative — one long-lived instance built
+					// once at start() — would cache `subs`/`vapid` from whatever existed at boot and never
+					// see a device that subscribes afterward, since `PushService.subscribe()` only updates
+					// the INSTANCE that received the call (index.ts's/server.ts's own service, a separate
+					// object). Re-reading from the same durable `push-subs.json`/`vapid.json` files this
+					// daemon already writes sidesteps that staleness entirely, with no new shared state.
+					notifyPush: async (payload) => {
+						const push = new PushService(this.stateDir);
+						await push.init();
+						await push.notify(payload);
+					},
+					log: (m) => this.log("info", `episode[${repo}]: ${m}`),
+					record: this.automation.for("episode", repo),
+				});
+				loop.start(EPISODE_TICK_MS);
+				this.episodeLoops.push(loop);
+			}
+			if (episodeRepos.length > 0) this.log("info", `episode on (weekly brief → ${episodeRepos.join(", ")})`);
+		}
+
 		// Resident planner (Epic 1) — the inverse of plan-sync: ingests plans/<name>/OBJECTIVE.md and
 		// maintains its concern-DAG against verified (DoneProof) state. Opt-IN ("=== 1", not "!== 0")
 		// unlike every loop above — it is an LLM-cost-bearing writer of source-tree files.
@@ -1499,6 +1551,7 @@ export class SquadManager extends EventEmitter {
 		clearTimeout(this.prReconcileStaggerTimer);
 		for (const s of this.scouts.values()) s.stop();
 		for (const o of this.opportunities) o.stop();
+		for (const l of this.episodeLoops) l.stop();
 		for (const p of this.residentPlanners) p.stop();
 		clearInterval(this.leaseGossipTimer);
 		// Flush the attention store's debounced last-seen-map write (comprehension concern 01) — same
@@ -3410,6 +3463,68 @@ export class SquadManager extends EventEmitter {
 			digestExcerpt = undefined;
 		}
 		return buildPrBody({ deltas, symptom, testExecutions: [], omitted: [], digestExcerpt });
+	}
+
+	/**
+	 * Turn `repo` + one target ISO week's `[start, end)` window into `EpisodeLoop`'s gather input —
+	 * the ONE place that assembles a weekly episode's raw material from live daemon state, so
+	 * `EpisodeLoop` itself (weekly-episode.ts) never touches `featureStore`/receipts/attention/fabric
+	 * directly. Mirrors `prBodyFor`'s data-source reasoning above, widened from "one unit's PR" to
+	 * "every model-delta this repo recorded in the window":
+	 *  - `deltas`: every `source:"model-delta"` decision across this repo's persisted features whose
+	 *    `createdAt` falls inside the window. Non-model-delta decisions in the same window are
+	 *    counted (never rendered) via `omitted` — they aren't mental-model atoms.
+	 *  - `symptoms`: symptom cards for this repo landed inside the window.
+	 *  - `fogTop`: the SAME `computeFog`/`topDebt` the `/api/fog` route and concern 04's overlay use —
+	 *    a live "debt right now" gauge, not a window-filtered historical snapshot (DESIGN.md's debt
+	 *    formula is deliberately `now`-independent; there is no per-week fog history to replay).
+	 *  - `digestIds`: every digest currently visible for this repo (fabric's own repo-scoped list) —
+	 *    counted only, never quoted (weekly-episode.ts's Not-covered section).
+	 *  - `testExecutions`: honestly empty — same "no persisted command+outcome" gap `prBodyFor` already
+	 *    documents; never fabricated here either.
+	 * Best-effort throughout: a symptom/fabric read failure degrades to that input's empty value
+	 * rather than failing the whole generation (mirrors `prBodyFor`).
+	 */
+	private async gatherEpisodeInputs(repo: string, window: { start: number; end: number }): Promise<EpisodeGatherResult> {
+		const deltas: FeatureDecision[] = [];
+		let nonDeltaCount = 0;
+		for (const pf of this.featureStore.values()) {
+			if (normalizeRepoPath(pf.repo) !== normalizeRepoPath(repo)) continue;
+			for (const d of pf.decisions ?? []) {
+				if (d.createdAt === undefined || d.createdAt < window.start || d.createdAt >= window.end) continue;
+				if (d.source === "model-delta") deltas.push(d);
+				else nonDeltaCount++;
+			}
+		}
+		let symptoms: SymptomEntry[] = [];
+		try {
+			symptoms = (await this.symptoms(repo)).filter((s) => s.landedAt >= window.start && s.landedAt < window.end);
+		} catch {
+			symptoms = [];
+		}
+		let fogTop: FileFogEntry[] = [];
+		try {
+			const receipts = await this.allReceipts();
+			const seen = this.attentionSeen([repo]);
+			fogTop = topDebt(computeFog({ receipts, seen, repos: [repo], now: window.end }), 10);
+		} catch {
+			fogTop = [];
+		}
+		let digestIds: string[] = [];
+		try {
+			const snapshot = await this.fabric(LOCAL_ACTOR, { repos: [repo], includeLeases: false });
+			digestIds = snapshot.digests.map((d) => d.source.agentId ?? d.source.runId).filter((id): id is string => Boolean(id));
+		} catch {
+			digestIds = [];
+		}
+		const omitted: EpisodeOmittedEntry[] = [];
+		if (nonDeltaCount > 0) {
+			omitted.push({
+				title: `${nonDeltaCount} non-model-delta decision${nonDeltaCount === 1 ? "" : "s"} recorded this week`,
+				reason: "plan/human/agent-sourced decisions aren't mental-model deltas",
+			});
+		}
+		return { deltas, symptoms, fogTop, testExecutions: [], digestIds, omitted };
 	}
 
 	/**
@@ -7027,6 +7142,18 @@ export class SquadManager extends EventEmitter {
 
 	symptom(id: string): Promise<SymptomEntry | undefined> {
 		return readSymptom(this.stateDir, id);
+	}
+
+	/** Weekly-episode metas for one repo, newest week first (concern 09's `GET /api/episodes?repo=`) —
+	 *  mirrors `symptoms()`/`answers()` above: a stable read-only entry point over durable state. */
+	episodes(repo: string): Promise<EpisodeMeta[]> {
+		return listEpisodes(this.stateDir, repo);
+	}
+
+	/** One episode's full record (meta + markdown), or `undefined` if it doesn't exist for this repo
+	 *  (concern 09's `GET /api/episodes/:id?repo=`). */
+	episode(repo: string, id: string): Promise<(EpisodeMeta & { markdown: string }) | undefined> {
+		return readEpisode(this.stateDir, repo, id);
 	}
 
 	/** The decisions currently stored on a persisted feature — the server's PATCH sanitizer merges

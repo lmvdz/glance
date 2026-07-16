@@ -186,8 +186,10 @@ export function repoHasHistory(seenMap: SeenMap, repo: string, now: number): boo
  *  `changesSinceSeen` descending, then lexically by (repo,file) for a fully deterministic order —
  *  same headline list this concern's `GET /api/fog` callers, concern 04's overlay, and concern 09's
  *  weekly episode all share.
- *  @substrate built-before-its-caller by design — concern 04 (fog overlay shortlist) and concern 09
- *  (weekly episode) consume it in later batches; until then only tests reference it. */
+ *  2026-07-15 (concern 09, weekly episode): left the `@substrate` bucket for a REAL caller —
+ *  `squad-manager.ts`'s `gatherEpisodeInputs` now consumes this directly for the episode's
+ *  comprehension-debt section. Concern 04 (fog overlay shortlist) is still pending; when it lands
+ *  too, this is simply a second real caller, not a substrate concern anymore. */
 export function topDebt(entries: FileFogEntry[], n = 10): FileFogEntry[] {
 	return [...entries]
 		.sort(

@@ -17,7 +17,7 @@ import { fenceUntrusted, parseDigestReward, rewardWeight } from "./digest.ts";
 import type { FabricSnapshot } from "./fabric.ts";
 import { isOn, learningFlags } from "./metrics.ts";
 
-export type KbDocType = "agent" | "digest" | "hot-area" | "scout" | "lease" | "decision" | "failure" | "symptom";
+export type KbDocType = "agent" | "digest" | "hot-area" | "scout" | "lease" | "decision" | "failure" | "symptom" | "episode";
 
 /** A flattened, searchable unit of knowledge. */
 export interface KbDoc {
@@ -125,6 +125,14 @@ export function fabricDocuments(snapshot: FabricSnapshot): KbDoc[] {
 		docs.push({ type: "symptom", id: `symptom:${s.id}`, title: s.symptom, text: `${s.symptom} ${s.whereToLook.join(" ")}`, repo: s.source.repo, ref: s.whereToLook[0], source: "symptom", ts: s.landedAt });
 	}
 
+	// Weekly episodes (comprehension concern 09): only the excerpt (first paragraph + top-3 debt
+	// files) is ever indexed — DESIGN.md's "full markdown NEVER in the BM25 corpus" — so a hit here
+	// points the reader at `GET /api/episodes/:id` for the real brief, never inlines it. `?? []`:
+	// same forward/backward-compat reasoning as `snapshot.symptoms` above.
+	for (const e of snapshot.episodes ?? []) {
+		docs.push({ type: "episode", id: `episode:${e.id}`, title: `Weekly episode · ${e.id}`, text: e.excerpt, repo: e.source.repo, ref: e.id, source: "weekly episode", ts: e.windowEnd });
+	}
+
 	return docs;
 }
 
@@ -230,6 +238,7 @@ const PRIMER_LABEL: Record<KbDocType, string> = {
 	lease: "Being edited",
 	failure: "Recurring failure",
 	symptom: "Known symptom",
+	episode: "Weekly episode",
 };
 
 /** Coarse "how long ago" label for a provenance timestamp. Undefined input ⇒ undefined output

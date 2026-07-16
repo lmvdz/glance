@@ -26,6 +26,7 @@ import { actorVisibleRepoSet, buildFabricSnapshot } from "../src/fabric.ts";
 import { appendReceipt } from "../src/receipts.ts";
 import { saveSymptom } from "../src/symptoms.ts";
 import type { Actor, AgentDTO, PersistedFeature } from "../src/types.ts";
+import { buildEpisode, saveEpisode } from "../src/weekly-episode.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -203,4 +204,63 @@ test("no repos named ⇒ symptoms are unrestricted too, like every other fact ty
 	await saveSymptom(dir, { id: "sym-b", symptom: "beta symptom", whereToLook: ["src/beta.ts"], repo: "/srv/beta", fixedBy: {}, landedAt: 500 });
 	const s = await snap(dir, agents);
 	expect(s.symptoms.map((x) => x.id).sort()).toEqual(["sym-a", "sym-b"]);
+});
+
+/**
+ * Weekly episodes (comprehension concern 09): the SAME leak-incident class again — a repo-A
+ * snapshot must never surface repo B's generated brief, structured field or serialized whole,
+ * even though the excerpt (never the full markdown) is the only thing that ever reaches fabric.
+ */
+test("a repo-B episode is never reachable through a repo-A snapshot", async () => {
+	const { dir, agents } = await twoRepos();
+	const a = buildEpisode({
+		repo: "/srv/alpha",
+		isoWeek: "2026-W10",
+		deltas: [],
+		symptoms: [],
+		fogTop: [{ repo: "/srv/alpha", file: "src/alpha.ts", changesSinceSeen: 3, lastChangedAt: 900, debt: 0.5, state: "stale" }],
+		testExecutions: [],
+		digestIds: [],
+		omitted: [],
+	});
+	const b = buildEpisode({
+		repo: "/srv/beta",
+		isoWeek: "2026-W10",
+		deltas: [],
+		symptoms: [],
+		fogTop: [{ repo: "/srv/beta", file: "src/secret.ts", changesSinceSeen: 3, lastChangedAt: 900, debt: 0.5, state: "stale" }],
+		testExecutions: [],
+		digestIds: [],
+		omitted: [],
+	});
+	await saveEpisode(dir, "/srv/alpha", a);
+	await saveEpisode(dir, "/srv/beta", b);
+
+	const snapA = await snap(dir, agents, ["/srv/alpha"]);
+	expect(snapA.episodes.map((e) => e.id)).toEqual(["2026-W10"]);
+	expect(snapA.episodes[0]?.excerpt).toContain("src/alpha.ts");
+	expect(JSON.stringify(snapA)).not.toContain("src/secret.ts");
+
+	const snapB = await snap(dir, agents, ["/srv/beta"]);
+	expect(snapB.episodes.map((e) => e.id)).toEqual(["2026-W10"]);
+	expect(snapB.episodes[0]?.excerpt).toContain("src/secret.ts");
+});
+
+test("no repos named ⇒ episodes are unrestricted too, like every other fact type", async () => {
+	const { dir, agents } = await twoRepos();
+	const mk = (repo: string, file: string) =>
+		buildEpisode({
+			repo,
+			isoWeek: "2026-W11",
+			deltas: [],
+			symptoms: [],
+			fogTop: [{ repo, file, changesSinceSeen: 1, lastChangedAt: 900, debt: 0.2, state: "never-seen" }],
+			testExecutions: [],
+			digestIds: [],
+			omitted: [],
+		});
+	await saveEpisode(dir, "/srv/alpha", mk("/srv/alpha", "src/alpha.ts"));
+	await saveEpisode(dir, "/srv/beta", mk("/srv/beta", "src/beta.ts"));
+	const s = await snap(dir, agents);
+	expect(s.episodes.map((e) => e.source.repo).sort()).toEqual(["/srv/alpha", "/srv/beta"]);
 });
