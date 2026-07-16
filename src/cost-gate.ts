@@ -24,6 +24,15 @@
  * "Needs you" attention lane a landConfirm-held unit uses; "shadow" (or the gate off/shadow globally)
  * only ever logs — never blocks.
  *
+ * `laneAppliesPrivilege` (mirroring `model-route.ts`'s `modelRouteMinEdgeFor`/`modelRouteShouldApply`
+ * clamp, review follow-up on this same concern): a label/classifier-sourced lane (`false`) may only
+ * move the cost axis STRICTER than `LANE_POLICY.feature`'s row, never looser — DESIGN.md's "label/
+ * classifier lanes may only move privilege axes in shadow or stricter". Today this is a coincidence
+ * (feature is the loosest row already), not a construction; the clamp makes it one, so a future lane
+ * row looser than feature's can never become purchasable by the word "urgent" in ticket text. An
+ * operator-sourced lane (`true`, the default — every EXISTING caller that hasn't threaded lane source
+ * is trusted, matching `costGateVerdict`'s pre-clamp signature) applies its row verbatim.
+ *
  * Two guards keep a noisy signal quiet: no verdict below `OMP_SQUAD_COST_MIN_SAMPLE` attempts (thin
  * history stays silent), and no verdict at all unless a ceiling is set — the lane's own
  * `costCeilingUsd`, or the operator's global `OMP_SQUAD_COST_MAX_PER_CHANGE` (> 0) when the lane has
@@ -32,6 +41,7 @@
 
 import { buildScoreboard } from "./attribution-scoreboard.ts";
 import { envInt, envNumber } from "./config.ts";
+import { errText } from "./err-text.ts";
 import { type ComplexityTier, modelFamily, modelOutcomes, readModelOutcomes } from "./model-outcomes.ts";
 import { readAllReceipts } from "./receipts.ts";
 import { LANE_POLICY, type WorkLane } from "./lane.ts";
@@ -112,6 +122,10 @@ export interface CostVerdict {
 	line: string;
 }
 
+/** Ordinal severity of a `CostVerdict.action`, loosest→strictest — the privilege clamp's comparison
+ *  axis (see `costGateVerdict`'s `laneAppliesPrivilege` doc above). */
+const ACTION_RANK: Record<CostVerdict["action"], number> = { shadow: 0, ask: 1, deny: 2 };
+
 /**
  * Pure decision from a projection + config. `undefined` (silent) when: no ceiling configured, thin
  * history (< min sample), or no cost data / under budget.
@@ -124,15 +138,33 @@ export interface CostVerdict {
  * "chore" is "deny"). Without a `lane` (a caller that hasn't threaded one), the ORIGINAL severity-only
  * heuristic applies: over 2× budget ⇒ "deny", else "ask".
  *
+ * `laneAppliesPrivilege` (default `true`, see module doc): when `false` (a label/classifier-sourced
+ * lane), the lane's row is clamped to never move LOOSER than `LANE_POLICY.feature`'s — a lane-defined
+ * ceiling above the operator's global `OMP_SQUAD_COST_MAX_PER_CHANGE` is capped to the global, and an
+ * action below feature's own (there is none today; feature already sits at the loosest "shadow") is
+ * raised to feature's. Moving STRICTER on ticket text alone (e.g. classifier-resolved "chore" ⇒
+ * "deny") is exactly what DESIGN.md allows and stays untouched.
+ *
  * In v1 the caller decides whether to act: `costGateMode() !== "enforce"` ⇒ log only, never block.
  */
-export function costGateVerdict(p: CostProjection, lane?: WorkLane): CostVerdict | undefined {
+export function costGateVerdict(p: CostProjection, lane?: WorkLane, laneAppliesPrivilege = true): CostVerdict | undefined {
 	const policy = lane ? LANE_POLICY[lane] : undefined;
-	const budget = policy?.costCeilingUsd ?? envNumber("OMP_SQUAD_COST_MAX_PER_CHANGE", 0); // 0 ⇒ no ceiling ⇒ silent
+	const globalBudget = envNumber("OMP_SQUAD_COST_MAX_PER_CHANGE", 0); // 0 ⇒ operator has no global ceiling
+	let budget = policy?.costCeilingUsd ?? globalBudget;
+	if (policy?.costCeilingUsd !== undefined && !laneAppliesPrivilege && globalBudget > 0) {
+		// Clamp: a non-privileged lane's own ceiling may only make the budget STRICTER than the global,
+		// never looser — a lane row with no override already falls back to `globalBudget` above, so this
+		// only ever narrows a lane-defined ceiling down, never widens one.
+		budget = Math.min(budget, globalBudget);
+	}
 	if (budget <= 0) return undefined;
 	if (p.sample < envInt("OMP_SQUAD_COST_MIN_SAMPLE", 5)) return undefined;
 	if (p.costPerLandedChange == null || p.costPerLandedChange <= budget) return undefined;
-	const action: CostVerdict["action"] = policy ? policy.costAction : p.costPerLandedChange > budget * 2 ? "deny" : "ask";
+	let action: CostVerdict["action"] = policy ? policy.costAction : p.costPerLandedChange > budget * 2 ? "deny" : "ask";
+	if (policy && !laneAppliesPrivilege) {
+		const featureAction = LANE_POLICY.feature.costAction;
+		if (ACTION_RANK[action] < ACTION_RANK[featureAction]) action = featureAction; // never looser than feature
+	}
 	const pct = p.landRate == null ? "?" : `${Math.round(p.landRate * 100)}%`;
 	const line = `cost-gate(${costGateMode()}): ${p.model}/${p.tier}${lane ? `/${lane}` : ""} projects $${p.costPerLandedChange.toFixed(2)}/landed-change (land-rate ${pct}, n=${p.sample}) — over budget $${budget.toFixed(2)}; would ${action.toUpperCase()}`;
 	return { action, line };
@@ -143,17 +175,51 @@ export function costGateVerdict(p: CostProjection, lane?: WorkLane): CostVerdict
  *  the line the moment it would act). No-op (never logs, returns `undefined`) when the gate is off.
  *  Never throws.
  *
+ *  `laneAppliesPrivilege` (default `true`) threads straight through to `costGateVerdict`'s clamp — see
+ *  its doc. Pass the caller's own privilege-clamp result (`squad-manager.ts`'s `laneAppliesPrivilege`)
+ *  when calling with a label/classifier-sourced lane.
+ *
  *  Safe to fire-and-forget (`void shadowCostCheck(...)`, optionally `.then(...)` to observe the
  *  verdict) for shadow/off mode, since the return value is inert without an enforce decision at the
  *  call site — but an ENFORCE-mode caller (`squad-manager.ts`'s `createWithId`) MUST `await` it: a
- *  "deny" verdict is what refuses the spawn. */
-export async function shadowCostCheck(stateDir: string, model: string | undefined, tier: ComplexityTier, log: (line: string) => void, lane?: WorkLane): Promise<CostVerdict | undefined> {
+ *  "deny" verdict is what refuses the spawn.
+ *
+ *  On a projection/read failure the catch below logs a `cost-gate: check failed` line (via the SAME
+ *  `log` callback verdicts use) before returning `undefined` — a corrupt/unreadable cost aggregate
+ *  under `OMP_SQUAD_COST_GATE=enforce` must never look identical to "the gate judged this fine": the
+ *  operator needs to be able to tell "no signal fired" apart from "the check itself couldn't run".
+ *  Still never throws and never blocks the spawn either way — "shadow check must never affect a
+ *  spawn" is preserved; only the SILENCE around a failure is fixed. */
+export async function shadowCostCheck(stateDir: string, model: string | undefined, tier: ComplexityTier, log: (line: string) => void, lane?: WorkLane, laneAppliesPrivilege = true): Promise<CostVerdict | undefined> {
 	if (costGateMode() === "off") return undefined;
 	try {
-		const verdict = costGateVerdict(await projectCost(stateDir, model, tier, lane), lane);
+		const verdict = costGateVerdict(await projectCost(stateDir, model, tier, lane), lane, laneAppliesPrivilege);
 		if (verdict) log(verdict.line);
 		return verdict;
+	} catch (err) {
+		log(`cost-gate(${costGateMode()}): check failed (non-fatal, spawn unaffected) — ${errText(err)}`);
+		return undefined;
+	}
+}
+
+/**
+ * Whether `OMP_SQUAD_COST_GATE=enforce` has ANY usable signal to verdict on — `glance doctor`'s
+ * config-posture check (adw-factory-borrows concern 09, red-team S1: "the fail-soft env-JSON hazard
+ * is gone by construction; the only env inputs here are the existing cost-gate vars — validate them
+ * loudly at boot"). `enforce` with no cell clearing `OMP_SQUAD_COST_MIN_SAMPLE` anywhere is armed but
+ * SILENTLY inert (every verdict comes back `undefined`) — indistinguishable from `off` at the
+ * operator's chair without this. True as soon as EITHER ledger (the O(1) cost aggregate, concern 08,
+ * or the legacy model-outcomes ledger `projectCost`'s full-scan fallback reads) has one cell past the
+ * sample floor. Never throws (mirrors every other probe in this module — a diagnostic must not die on
+ * the thing it is diagnosing). */
+export async function costGateAggregateReady(stateDir: string): Promise<boolean> {
+	try {
+		const minSample = envInt("OMP_SQUAD_COST_MIN_SAMPLE", 5);
+		const doc = costAggregateNeedsRebuild(stateDir) ? await rebuildCostAggregate(stateDir) : readCostAggregateDoc(stateDir);
+		if (Object.values(doc.cells).some((c) => c.attempts >= minSample)) return true;
+		const outcomes = readModelOutcomes(stateDir);
+		return Object.values(outcomes).some((c) => (c.landed ?? 0) + (c.rejected ?? 0) >= minSample);
 	} catch {
-		return undefined; /* shadow check must never affect a spawn */
+		return false;
 	}
 }

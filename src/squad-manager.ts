@@ -4368,6 +4368,11 @@ export class SquadManager extends EventEmitter {
 		const resolvedLane: WorkLane = opts.lane ?? opts.issue?.lane ?? classifierLane ?? "feature";
 		const laneAppliesPrivilege = laneSource === "operator";
 		this.log("info", `lane${laneAppliesPrivilege ? "" : " [shadow]"}: ${resolvedLane} source=${laneSource}`);
+		// Shadow-exit surface (adw-factory-borrows concern 09, red-team: "shadow-forever is the observed
+		// outcome"): every classified lane is counted here, unconditionally — the factory-status
+		// scoreboard's lane-mix row reads this back (see `factoryStatus()` below). Recorded regardless of
+		// `laneAppliesPrivilege`/source: the point is "what did the fleet classify", not "who may act on it".
+		this.learningMetrics.record("lane-classification", 1, { lane: resolvedLane, source: laneSource });
 		// Pre-execution cost projection (C-COST), per-lane ENFORCE (adw-factory-borrows concern 09): the
 		// lane's own `costAction` (LANE_POLICY, v1: only "chore" is "deny") decides how far this can go.
 		// `OMP_SQUAD_COST_GATE=enforce` + a "deny" verdict refuses the spawn outright, BEFORE any worktree
@@ -4386,14 +4391,17 @@ export class SquadManager extends EventEmitter {
 		const costMode = costGateMode();
 		let costGateAsk: CostVerdict | undefined;
 		if (costMode === "enforce") {
-			const verdict = await shadowCostCheck(this.stateDir, opts.model, tierOf(opts.thinking), (line) => this.log("warn", line), resolvedLane);
+			const verdict = await shadowCostCheck(this.stateDir, opts.model, tierOf(opts.thinking), (line) => this.log("warn", line), resolvedLane, laneAppliesPrivilege);
+			if (verdict) this.learningMetrics.record("cost-gate-verdict", 1, { action: verdict.action, lane: resolvedLane, mode: costMode });
 			if (verdict?.action === "deny") {
 				this.automation.for("land", opts.repo)({ durationMs: 0, level: "warn", detail: `${UNATTACHED_ESCALATION_MARKER} — ${verdict.line}` });
 				throw new Error(verdict.line);
 			}
 			if (verdict?.action === "ask") costGateAsk = verdict;
 		} else {
-			void shadowCostCheck(this.stateDir, opts.model, tierOf(opts.thinking), (line) => this.log("warn", line), resolvedLane);
+			void shadowCostCheck(this.stateDir, opts.model, tierOf(opts.thinking), (line) => this.log("warn", line), resolvedLane, laneAppliesPrivilege).then((verdict) => {
+				if (verdict) this.learningMetrics.record("cost-gate-verdict", 1, { action: verdict.action, lane: resolvedLane, mode: costMode });
+			});
 		}
 		// work → Plane: a freshly-spawned, issue-less task self-registers as a tracked Plane issue,
 		// so the fleet is observable from the backlog without a manual plan-to-plane step. No-ops when
@@ -7354,6 +7362,12 @@ export class SquadManager extends EventEmitter {
 			liveArmed,
 			activeAgents: occupyingAgents(this.list()),
 			persistFailures: this.store.saveFailures?.() ?? 0,
+			// Shadow-exit surface (adw-factory-borrows concern 09): raw events, not rollup rows — the
+			// scoreboard needs a JOINT filter (e.g. mode=shadow AND action=ask/deny) a per-tag-key rollup
+			// breakdown can't answer. Same window every other row on this strip uses.
+			laneEvents: this.learningMetrics.recent({ name: "lane-classification", sinceMs: windowMs }, now),
+			routeEvents: this.learningMetrics.recent({ name: "model-route-decision", sinceMs: windowMs }, now),
+			costEvents: this.learningMetrics.recent({ name: "cost-gate-verdict", sinceMs: windowMs }, now),
 		});
 	}
 

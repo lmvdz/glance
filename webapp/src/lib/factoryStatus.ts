@@ -32,6 +32,18 @@ export interface FactoryLandBlockStatus {
   at?: number;
 }
 
+/** Server-derived shadow-exit scoreboard (src/factory-status.ts ShadowExitScoreboard,
+ *  adw-factory-borrows concern 09) — lane-mix + shadow-would-have-fired counters, the one place to
+ *  read before flipping a lane from shadow to apply/enforce. */
+export interface ShadowExitScoreboard {
+  laneCounts: Record<string, number>;
+  laneTotal: number;
+  modelRouteShadowWouldEscalate: number;
+  modelRouteShadowTotal: number;
+  costGateShadowWouldAct: number;
+  costGateShadowTotal: number;
+}
+
 export interface FactoryStatus {
   generatedAt: number;
   activeAgents: number;
@@ -40,6 +52,13 @@ export interface FactoryStatus {
   overall: FactoryLoopStatus;
   /** Optional client-side: a daemon predating the land-blocked banner doesn't send it. */
   landBlocked?: FactoryLandBlockStatus;
+  /** Optional client-side: a daemon predating this scoreboard doesn't send it. */
+  shadowExits?: ShadowExitScoreboard;
+}
+
+/** "N/M" ratio label, or just "N" when there's no denominator worth showing yet. */
+export function ratioLabel(n: number, m: number): string {
+  return m > 0 ? `${n}/${m}` : `${n}`;
 }
 
 export interface StatusMeta {

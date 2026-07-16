@@ -152,6 +152,44 @@ test("a daemon with nothing armed is a viewer, and says so", async () => {
 	expect(find(report, "autonomy")?.detail).toContain("viewer");
 });
 
+// ── cost gate config posture (adw-factory-borrows concern 09, red-team S1) ─────────────────────
+//
+// `OMP_SQUAD_COST_GATE=enforce` armed with no usable cost signal is SILENTLY inert — every verdict
+// comes back undefined (thin sample or no ceiling anywhere), indistinguishable from the gate being
+// off entirely. Loud, not silent: this is `glance doctor`'s line for exactly that trap.
+
+test("no cost-gate check at all when the mode is unreported (older daemon) or off — nothing to warn about", async () => {
+	const unreported = await runDoctor(probe({ autonomy: async () => ARMED }));
+	expect(find(unreported, "cost-gate")).toBeUndefined();
+
+	const off = await runDoctor(probe({ autonomy: async () => ({ ...ARMED, costGateMode: "off", costAggregateReady: false }) }));
+	expect(find(off, "cost-gate")).toBeUndefined();
+
+	const shadow = await runDoctor(probe({ autonomy: async () => ({ ...ARMED, costGateMode: "shadow", costAggregateReady: false }) }));
+	expect(find(shadow, "cost-gate")).toBeUndefined();
+});
+
+test("enforce with a usable cost aggregate is OK", async () => {
+	const report = await runDoctor(probe({ autonomy: async () => ({ ...ARMED, costGateMode: "enforce", costAggregateReady: true }) }));
+	const check = find(report, "cost-gate");
+	expect(check?.status).toBe("ok");
+	expect(report.healthy).toBe(true);
+});
+
+test("enforce with NO usable cost signal is a loud WARN naming the exact trap — armed but silently inert", async () => {
+	const report = await runDoctor(probe({ autonomy: async () => ({ ...ARMED, costGateMode: "enforce", costAggregateReady: false }) }));
+	const check = find(report, "cost-gate");
+	expect(check?.status).toBe("warn");
+	expect(check?.detail).toContain("OMP_SQUAD_COST_GATE=enforce");
+	expect(check?.detail).toContain("too thin");
+	expect(check?.remedy).toContain("OMP_SQUAD_COST_MIN_SAMPLE");
+});
+
+test("enforce reported with costAggregateReady unspecified (older daemon) is treated as NOT ready — never a fabricated ok", async () => {
+	const report = await runDoctor(probe({ autonomy: async () => ({ ...ARMED, costGateMode: "enforce" }) }));
+	expect(find(report, "cost-gate")?.status).toBe("warn");
+});
+
 // ── the world the factory points at ─────────────────────────────────────────────────────────────
 
 /**
