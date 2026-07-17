@@ -52,6 +52,20 @@ The strategy is not features — it is starting the dogfood loop. t3code's polis
 
 The B02 counters (casual sessions/day, prompts/day, push taps/day) are appended to the ledger below weekly. Gate review after 2 weeks of A–D being live. This table is the plan's real success metric — epics shipping green while counters stay zero is the false-green pattern applied to product, and the kill criterion exists to catch exactly that.
 
+### Arming the weekly cadence (so it runs without Lars remembering)
+
+The drain is a self-firing weekly ritual, not a chore Lars has to recall. Arm it once with the repo's loop convention:
+
+```
+/loop 168h /dogfood-drain
+```
+
+That runs `.claude/skills/dogfood-drain` every 168h (one week). Each firing reads the friction ledger + counters, drafts the three-bucket triage **for Lars to approve in conversation**, and — via the two fail-closed append scripts — writes exactly two lines into the `## Ledger` below: the B02 counter snapshot (`scripts/append-adoption-ledger.ts`) and the triage status line (`scripts/append-drain-summary.ts`). The counter snapshot lands **every** run, so the gate always has fresh weekly evidence whether or not any gripe got fixed that week.
+
+`/loop` is the arming surface because it matches how every other recurring routine in this repo is fired (`crypto-research`, `fleet-ide-loop`, `make-it-work` are all `/loop <interval> /<skill>`); there is no separate cron/routine config file to wire — the single `.claude/settings.json` Stop hook belongs to the convergence loop, not to a general scheduler. If Lars wants the nudge to survive session restarts (truly unattended, months-long), the durable equivalent is a scheduled cloud routine via `/schedule` running `/dogfood-drain` weekly; same hitl contract, same two append scripts. Either way the drain only *drafts* — it never merges a fix and never writes the verdict.
+
+**The hitl boundary is absolute and mechanical.** Nothing in this cadence — not the loop, not either append script — can ever write the adoption-gate SUCCESS/KILL line. Both scripts route through `src/meta-ledger.ts`'s `insertLedgerRow`, which refuses any row containing verdict language and exits 1 with the file untouched. The verdict line at the two-week review is Lars's alone, in his own words. Automating the cadence automates the *evidence-gathering*, never the *judgment*.
+
 ## Not yet specified
 
 - (none — parked questions live in the two charters with written expansion triggers)
