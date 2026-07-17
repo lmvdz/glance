@@ -252,22 +252,21 @@ export function resolveEffectVersion(repoRoot: string = REPO_ROOT): { version: s
 	}
 	const lockText = readFileSync(lockPath, "utf8");
 	const lockMatch = /"effect":\s*\[\s*"effect@([^"]+)"/.exec(lockText);
-	// The lockfile is a secondary cross-check, not the source of truth here. If we can't read a
-	// version out of it, don't fail the unit — report skew against an unknown lock and carry on with
-	// the installed version (which is what tsc uses regardless).
-	const lockVersion = lockMatch?.[1] ?? null;
-	if (lockVersion !== null && nodeModulesVersion !== lockVersion) {
+	// A MISSING/unparseable `effect` pin in bun.lock is a genuine lockfile problem, not a
+	// shared-node_modules race (bun.lock is git-tracked and stable per-commit) — keep failing closed on
+	// it, loudly, exactly as before. ONLY the version DISAGREEMENT below is softened (grok review: don't
+	// let the skew-softening quietly swallow real lockfile breakage).
+	if (!lockMatch) {
+		throw new Error("skills-verify: node_modules absent/stale — could not read the `effect` version from bun.lock. Run `bun install`.");
+	}
+	const lockVersion = lockMatch[1];
+	if (nodeModulesVersion !== lockVersion) {
 		console.warn(
 			"skills-verify: effect version skew (non-fatal) — node_modules " +
 				`(${nodeModulesVersion}) disagrees with bun.lock (${lockVersion}). ` +
 				"Using the installed version (what tsc resolves); run `bun install` to converge the shared node_modules.",
 		);
 		return { version: nodeModulesVersion, skew: { nodeModules: nodeModulesVersion, lock: lockVersion } };
-	}
-	if (lockVersion === null) {
-		console.warn(
-			`skills-verify: could not read the \`effect\` version from bun.lock — using the installed node_modules version (${nodeModulesVersion}). Run \`bun install\` if this persists.`,
-		);
 	}
 	return { version: nodeModulesVersion, skew: null };
 }

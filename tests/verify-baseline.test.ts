@@ -1,8 +1,9 @@
 /**
  * Unit tests for `makeBaselineFailureProvider` (postmortem-gate-fixes): the per-unit verify
  * gate's base-diff provider. Everything here is FAKE (git + exec) so it never spawns a real
- * process or touches a real repo — the point is to prove the base-ref resolution, scratch
- * worktree lifecycle, memoization, and fail-closed error paths, independent of git/bun.
+ * process or touches a real repo — the point is to prove the base-ref resolution (origin-preferred,
+ * fail-closed), the dependency-change guard, the scratch worktree lifecycle, memoization, and the
+ * fail-closed error paths, independent of git/bun.
  */
 
 import { expect, test } from "bun:test";
@@ -14,21 +15,30 @@ interface Run {
 	stderr: string;
 }
 
+/**
+ * Fake git. Defaults resolve a clean base: origin/HEAD → origin/main, that ref exists, merge-base
+ * yields a base sha, and the unit changed no dependency manifests — so a plain `fakeGit({})` lets the
+ * base run proceed. Override any handler to exercise a specific path.
+ */
 function fakeGit(handlers: {
-	symbolicRef?: Run;
-	revParseVerify?: (branch: string) => Run;
-	mergeBase?: Run;
-	revParseHead?: Run;
+	symbolicRef?: Run; // git symbolic-ref refs/remotes/origin/HEAD
+	refExists?: (ref: string) => boolean; // git rev-parse --verify --quiet <ref>^{commit}
+	mergeBase?: Run; // git merge-base HEAD <target>
+	depDiff?: Run; // git diff --name-only <base> -- package.json bun.lock
 	worktreeAdd?: Run;
 	worktreeRemove?: Run;
 }) {
 	const calls: string[][] = [];
 	const git: BaselineProviderDeps["git"] = async (args) => {
 		calls.push(args);
-		if (args[0] === "symbolic-ref") return handlers.symbolicRef ?? { code: 1, stdout: "", stderr: "not a symbolic ref" };
-		if (args[0] === "rev-parse" && args[1] === "--verify") return handlers.revParseVerify?.(args[2]!) ?? { code: 1, stdout: "", stderr: "unknown revision" };
+		if (args[0] === "symbolic-ref") return handlers.symbolicRef ?? { code: 0, stdout: "refs/remotes/origin/main\n", stderr: "" };
+		if (args[0] === "rev-parse" && args[1] === "--verify") {
+			const ref = (args[3] ?? "").replace(/\^\{commit\}$/, "");
+			const exists = handlers.refExists ? handlers.refExists(ref) : true;
+			return exists ? { code: 0, stdout: `${ref}\n`, stderr: "" } : { code: 1, stdout: "", stderr: "" };
+		}
 		if (args[0] === "merge-base") return handlers.mergeBase ?? { code: 0, stdout: "deadbeef01234567\n", stderr: "" };
-		if (args[0] === "rev-parse" && args[1] === "HEAD") return handlers.revParseHead ?? { code: 0, stdout: "0000000000000000\n", stderr: "" };
+		if (args[0] === "diff") return handlers.depDiff ?? { code: 0, stdout: "", stderr: "" };
 		if (args[0] === "worktree" && args[1] === "add") return handlers.worktreeAdd ?? { code: 0, stdout: "", stderr: "" };
 		if (args[0] === "worktree" && args[1] === "remove") return handlers.worktreeRemove ?? { code: 0, stdout: "", stderr: "" };
 		return { code: 0, stdout: "", stderr: "" };
@@ -46,12 +56,12 @@ function baseDeps(overrides: Partial<BaselineProviderDeps> & { git: BaselineProv
 	};
 }
 
-test("resolves the base ref via merge-base against origin/HEAD's target, and creates + removes a detached scratch worktree", async () => {
+test("resolves the base ref via merge-base against origin/<default> (remote-tracking, not local), and creates + removes a detached scratch worktree", async () => {
 	const { git, calls } = fakeGit({
 		symbolicRef: { code: 0, stdout: "refs/remotes/origin/main\n", stderr: "" },
 		mergeBase: { code: 0, stdout: "abc123def456\n", stderr: "" },
 	});
-	const exec = async (_script: string, cwd: string) => ({ code: 0, stdout: "ok", stderr: "" });
+	const exec = async (_script: string, _cwd: string) => ({ code: 0, stdout: "ok", stderr: "" });
 	const provider = makeBaselineFailureProvider(baseDeps({ git, exec }));
 
 	const result = await provider("bun test");
@@ -60,38 +70,78 @@ test("resolves the base ref via merge-base against origin/HEAD's target, and cre
 	expect(result!.failures).toEqual([]);
 	expect(result!.unrunnable).toBeNull();
 
-	// merge-base was resolved against the ref stripped from origin/HEAD.
+	// merge-base was resolved against the REMOTE-tracking default (origin/main), never local `main` —
+	// diffing against a stale local default would wave a reintroduced-then-fixed failure through.
 	expect(calls).toContainEqual(["symbolic-ref", "refs/remotes/origin/HEAD"]);
-	expect(calls).toContainEqual(["merge-base", "HEAD", "main"]);
+	expect(calls).toContainEqual(["merge-base", "HEAD", "origin/main"]);
 	// Scratch worktree lifecycle: add --detach <tmp> <baseSha>, later remove --force <tmp>.
 	expect(calls).toContainEqual(["worktree", "add", "--detach", "/fake/scratch-dir", "abc123def456"]);
 	expect(calls).toContainEqual(["worktree", "remove", "--force", "/fake/scratch-dir"]);
 });
 
-test("falls back to main/master rev-parse --verify when origin/HEAD is not resolvable", async () => {
+test("falls back to a LOCAL default (main/master) only when no remote-tracking default exists", async () => {
 	const { git, calls } = fakeGit({
 		symbolicRef: { code: 1, stdout: "", stderr: "fatal: ref refs/remotes/origin/HEAD is not a symbolic ref" },
-		revParseVerify: (branch) => (branch === "main" ? { code: 0, stdout: "", stderr: "" } : { code: 1, stdout: "", stderr: "" }),
+		refExists: (ref) => ref === "main", // origin/main, origin/master absent; local main present
 		mergeBase: { code: 0, stdout: "cafef00d\n", stderr: "" },
 	});
 	const provider = makeBaselineFailureProvider(baseDeps({ git }));
 	const result = await provider("bun test");
 	expect(result!.baseRef).toBe("cafef00d");
+	expect(result!.unrunnable).toBeNull();
 	expect(calls).toContainEqual(["merge-base", "HEAD", "main"]);
 });
 
-test("falls back to HEAD when merge-base fails (e.g. no default branch resolvable at all)", async () => {
+test("FAIL CLOSED: no resolvable base target ⇒ unrunnable, never a HEAD fallback (which would fold committed unit edits into 'base')", async () => {
 	const { git } = fakeGit({
 		symbolicRef: { code: 1, stdout: "", stderr: "no ref" },
-		revParseVerify: () => ({ code: 1, stdout: "", stderr: "no such branch" }),
-		revParseHead: { code: 0, stdout: "feedface9999\n", stderr: "" },
+		refExists: () => false, // nothing resolves
 	});
-	const provider = makeBaselineFailureProvider(baseDeps({ git }));
+	let execCalled = false;
+	const exec = async () => {
+		execCalled = true;
+		return { code: 0, stdout: "ok", stderr: "" };
+	};
+	const provider = makeBaselineFailureProvider(baseDeps({ git, exec }));
 	const result = await provider("bun test");
-	expect(result!.baseRef).toBe("feedface9999");
+	expect(result!.unrunnable).toContain("could not resolve a base ref");
+	expect(result!.failures).toEqual([]);
+	expect(execCalled).toBe(false); // never runs a gate against an untrustworthy base
 });
 
-test("memoizes: calling the provider twice runs the base exec exactly once", async () => {
+test("FAIL CLOSED: merge-base failing (unrelated histories) ⇒ unrunnable, exec never runs", async () => {
+	const { git } = fakeGit({
+		symbolicRef: { code: 0, stdout: "refs/remotes/origin/main\n", stderr: "" },
+		mergeBase: { code: 1, stdout: "", stderr: "fatal: no merge base" },
+	});
+	let execCalled = false;
+	const exec = async () => {
+		execCalled = true;
+		return { code: 0, stdout: "", stderr: "" };
+	};
+	const provider = makeBaselineFailureProvider(baseDeps({ git, exec }));
+	const result = await provider("bun test");
+	expect(result!.unrunnable).toContain("could not resolve a base ref");
+	expect(execCalled).toBe(false);
+});
+
+test("FAIL CLOSED: unit changed dependencies (package.json/bun.lock) ⇒ unrunnable, never runs the base gate against the unit's own deps", async () => {
+	const { git } = fakeGit({
+		depDiff: { code: 0, stdout: "bun.lock\n", stderr: "" }, // the unit's tree differs from base in bun.lock
+	});
+	let execCalled = false;
+	const exec = async () => {
+		execCalled = true;
+		return { code: 0, stdout: "", stderr: "" };
+	};
+	const provider = makeBaselineFailureProvider(baseDeps({ git, exec }));
+	const result = await provider("bun test");
+	expect(result!.unrunnable).toContain("changed dependencies");
+	expect(result!.failures).toEqual([]);
+	expect(execCalled).toBe(false); // base run shares the unit's node_modules — would look pre-existing
+});
+
+test("memoizes PER SCRIPT: repeated calls with the same script run the base exec exactly once", async () => {
 	const { git } = fakeGit({});
 	let execCalls = 0;
 	const exec = async () => {
@@ -108,6 +158,19 @@ test("memoizes: calling the provider twice runs the base exec exactly once", asy
 	const c = await provider("bun test"); // a third, sequential call still hits the memo
 	expect(execCalls).toBe(1);
 	expect(c).toBe(a);
+});
+
+test("memoization is keyed on the script: a DIFFERENT command runs its own base run (no cross-gate reuse)", async () => {
+	const { git } = fakeGit({});
+	const seen: string[] = [];
+	const exec = async (script: string) => {
+		seen.push(script);
+		return { code: 0, stdout: "ok", stderr: "" };
+	};
+	const provider = makeBaselineFailureProvider(baseDeps({ git, exec }));
+	await provider("bun test");
+	await provider("bun run other-gate");
+	expect(seen).toEqual(["bun test", "bun run other-gate"]);
 });
 
 test("a failing base run returns the extracted failure identities", async () => {
@@ -129,9 +192,7 @@ test("a base run that never executed (exit 127, command not found) is classified
 	const provider = makeBaselineFailureProvider(baseDeps({ git, exec }));
 	const result = await provider("bun test");
 	expect(result!.unrunnable).toBeTruthy();
-	expect(result!.unrunnable).toContain("could not execute");
-	// Callers must gate on `unrunnable` FIRST, never trust `failures` alone once it's set — the field
-	// is still populated (matching the spec's "always extract" step) but is not a reliable signal here.
+	// Callers must gate on `unrunnable` FIRST, never trust `failures` alone once it's set.
 });
 
 test("a base run reporting zero tests executed is classified unrunnable", async () => {

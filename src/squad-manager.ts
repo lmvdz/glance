@@ -4043,7 +4043,12 @@ export class SquadManager extends EventEmitter {
 	 *  those, fork stays the only forward path. Matches the exact string minted in engine.ts's
 	 *  visit-cap terminalFail (`node "<n>" exceeded its visit cap (<k>)`). */
 	private isRecoverableTerminalReason(reason: string): boolean {
-		return /exceeded its visit cap/.test(reason);
+		// ONLY the verify-loop's own fix-up ladder nodes (verify/codefix/fixup/escalate — buildVerifyLoop)
+		// are safe to reset-and-re-run: re-running the verify gate is idempotent. A visit-cap exhaustion
+		// on any OTHER node — an authored, possibly side-effecting node (a `deploy` at maxVisits) — is NOT
+		// recoverable in place; resetting/resuming it could re-fire its side effect. So match the node NAME
+		// in engine.ts's exact reason string, not just the "visit cap" phrase (codex review).
+		return /^node "(verify|codefix|fixup|escalate)" exceeded its visit cap \(\d+\)$/.test(reason);
 	}
 
 	/** True when a terminal run can be CONTINUED in place — a recoverable, not-yet-superseded terminal
@@ -7094,36 +7099,49 @@ export class SquadManager extends EventEmitter {
 		}
 		if (!existsSync(rec.dto.worktree)) throw new Error("original worktree is gone — cannot continue in place (fork instead)");
 
-		// Reset the fix-up-tier visit budgets (each goalGate's retryTarget + its overflow closure, across
-		// every goalGate node) exactly like fork() — but on the LIVE run's own state, so the re-drive gets
-		// a fresh ladder without minting a new branch/run. Re-parse the graph the same way makeDriver/fork do.
-		const wf: Workflow | undefined = rec.options.workflow?.verify
-			? buildVerifyLoop(rec.options.workflow.verify)
-			: rec.options.workflow?.path
-				? parseWorkflow(await fs.readFile(resolveWorkflowPath(rec.options.workflow.path), "utf8"))
-				: undefined;
-		if (wf) {
-			const tiers = new Set<string>();
-			for (const node of wf.nodes.values()) {
-				if (!node.goalGate) continue;
-				for (let t: string | undefined = node.retryTarget; t; t = wf.nodes.get(t)?.overflow) tiers.add(t);
+		// Mutual exclusion with fork() and any concurrent continue on this run: claim the per-run
+		// lifecycle-transition slot SYNCHRONOUSLY, before the first `await` below, so two lifecycle
+		// mutations can't both clear the terminal marker (fork's own `forkInFlight` precedent — reusing
+		// the same set makes fork and continue exclude each other, closing the fork-races-continue window
+		// where both a fork child and this re-driven source end up live). Released in `finally`.
+		const runId = state.runId ?? rec.dto.id;
+		if (this.forkInFlight.has(runId)) throw new Error("a fork or continue of this run is already in flight");
+		this.forkInFlight.add(runId);
+		try {
+			// Reset the fix-up-tier visit budgets (each goalGate's retryTarget + its overflow closure,
+			// across every goalGate node) exactly like fork() — but on the LIVE run's own state, so the
+			// re-drive gets a fresh ladder without minting a new branch/run. Re-parse the graph the same
+			// way makeDriver/fork do.
+			const wf: Workflow | undefined = rec.options.workflow?.verify
+				? buildVerifyLoop(rec.options.workflow.verify)
+				: rec.options.workflow?.path
+					? parseWorkflow(await fs.readFile(resolveWorkflowPath(rec.options.workflow.path), "utf8"))
+					: undefined;
+			if (wf) {
+				const tiers = new Set<string>();
+				for (const node of wf.nodes.values()) {
+					if (!node.goalGate) continue;
+					for (let t: string | undefined = node.retryTarget; t; t = wf.nodes.get(t)?.overflow) tiers.add(t);
+				}
+				const visits = { ...state.visits };
+				for (const tier of tiers) visits[tier] = 0;
+				state.visits = visits;
 			}
-			const visits = { ...state.visits };
-			for (const tier of tiers) visits[tier] = 0;
-			state.visits = visits;
-		}
 
-		// Clear the terminal marker BEFORE restart() so its own terminal-refusal guard lets this re-drive
-		// through, and recompute the availability flags off the now-live (non-terminal) state.
-		state.terminal = undefined;
-		rec.options.workflowState = state;
-		rec.dto.workflowState = state;
-		rec.dto.forkAvailable = this.deriveForkAvailable(state);
-		rec.dto.continueAvailable = this.deriveContinueAvailable(state);
-		await this.persist();
-		this.append(rec, "system", "▶ continuing in place — retry budgets reset, re-running the verify gate on this worktree (uncommitted work preserved).");
-		void this.recordAudit(actor, "continue", id, "ok");
-		await this.restart(rec);
+			// Clear the terminal marker BEFORE restart() so its own terminal-refusal guard lets this
+			// re-drive through, and recompute the availability flags off the now-live (non-terminal) state.
+			state.terminal = undefined;
+			rec.options.workflowState = state;
+			rec.dto.workflowState = state;
+			rec.dto.forkAvailable = this.deriveForkAvailable(state);
+			rec.dto.continueAvailable = this.deriveContinueAvailable(state);
+			await this.persist();
+			this.append(rec, "system", "▶ continuing in place — retry budgets reset, re-running the verify gate on this worktree (uncommitted work preserved).");
+			void this.recordAudit(actor, "continue", id, "ok");
+			await this.restart(rec);
+		} finally {
+			this.forkInFlight.delete(runId);
+		}
 	}
 
 	/**

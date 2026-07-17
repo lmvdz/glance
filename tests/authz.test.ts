@@ -44,6 +44,10 @@ test("commandTier: viewer reads, operator drives, admin destroys", () => {
 	expect(commandTier({ type: "kill", id: "a" })).toBe("admin");
 	expect(commandTier({ type: "restart", id: "a" })).toBe("admin");
 	expect(commandTier({ type: "remove", id: "a" })).toBe("admin");
+	expect(commandTier({ type: "fork", id: "a" })).toBe("admin");
+	// continue re-animates a terminal run (clears the marker, resets budgets, restarts) — same
+	// destructive-lifecycle tier as restart/fork, never the operator default (review finding).
+	expect(commandTier({ type: "continue", id: "a" })).toBe("admin");
 });
 
 test("restActionTier: reads viewer, mutations operator, destructive admin, auth/push viewer", () => {

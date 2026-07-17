@@ -333,6 +333,18 @@ test("continueAvailable is set for a visit-cap terminal but NOT for a poison-cap
 	await waitFor(() => poisonRec.dto.status === "error");
 	expect(poisonRec.dto.forkAvailable).toBe(true);
 	expect(poisonRec.dto.continueAvailable).toBe(false); // structural — fork is the only path
+
+	// A visit-cap on a NON-verify-loop node (an authored, possibly side-effecting node) is NOT
+	// continue-able: re-running it in place could re-fire a side effect. Only the fix-up ladder
+	// (verify/codefix/fixup/escalate) is recoverable (codex review).
+	const deployDto = await mgr.create({ name: "wf-deploy", repo, approvalMode: "yolo", verify: "true" });
+	const deployRec = host.agents.get(deployDto.id)!;
+	deployRec.agent.emit("checkpoint", runState({ runId: "run-deploy", currentNode: "deploy" }));
+	await deployRec.checkpointAppending;
+	deployRec.agent.emit("event", { type: "workflow_terminal", reason: 'node "deploy" exceeded its visit cap (1)', checkpoint: checkpoint() });
+	await waitFor(() => deployRec.dto.status === "error");
+	expect(deployRec.dto.forkAvailable).toBe(true);
+	expect(deployRec.dto.continueAvailable).toBe(false); // authored side-effect node — fork only
 	await mgr.stop();
 });
 

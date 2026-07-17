@@ -42,6 +42,10 @@ export function commandTier(cmd: ClientCommand): Role {
 		// that mints a brand-new roster agent from a dead run's checkpoint — same destructive-lifecycle
 		// class as restart, not everyday driving.
 		case "fork":
+		// continue re-animates a TERMINAL run in place: it clears the terminal marker, resets retry
+		// budgets, and restarts the agent (more spend). Same destructive-lifecycle class as restart/fork
+		// — admin, never the operator default (which would let an operator re-drive a dead run).
+		case "continue":
 			return "admin";
 		// prompt / answer / interrupt / create / commission
 		default:
