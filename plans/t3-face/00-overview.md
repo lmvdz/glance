@@ -67,6 +67,7 @@ Rung map: R1 = batches 1–2 (coherent skin, whole app). R2 = batches 3–4 (spi
 
 ## Decisions so far
 
+- [01 skin-substrate](01-skin-substrate.md) + [02 theme-engine-status-tokens](02-theme-engine-status-tokens.md) — DONE, glance-desktop draft PR #29: full t3 skin as one additive file + `@theme` registration in globals; palette fidelity verified; 515/515 green; +88 bytes. Live visual acceptance owed to concern 13.
 - [04 transcript-cursor-integrity](04-transcript-cursor-integrity.md) — DONE, glance-desktop draft PR #28: `runningFloor` cursor fixes the live streaming-freeze; daemon seq-reseed bug filed OMPSQ-449; daemonTransport.ts identical exposure deferred (below).
 - **2026-07-17 (Lars)**: Charter H expansion APPROVED — this program is the committed cockpit consumer. Concern 06 executes daemon-side; cockpit/webapp/push all render one attention truth. Concern 06's `MODE: hitl` authorization is hereby satisfied.
 - **2026-07-17 (Lars)**: Start NOW, in parallel with daily-driver-w15 + land-assessment (disjoint repos/TOUCHES). The adoption-gate pause rule (Notes) still binds: a KILL verdict pauses this program at end-of-batch.

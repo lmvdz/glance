@@ -1,6 +1,6 @@
 # Skin substrate — the t3 token set, typography, and motion as the app default
 
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: glance-desktop
 COMPLEXITY: architectural
@@ -38,3 +38,7 @@ None.
 - Built CSS inspection: `.font-sans` emits DM Sans; `bg-warning`/`text-warning` generate real rules; `rounded-lg` still `var(--radius)`-driven.
 - Live (`pnpm tauri dev`): main window AND settings window render DM Sans + t3 palette in light and dark; switching to dracula repaints (engine inline styles win over t3face.css); switching back restores t3 (fallthrough). No first-paint gray flash.
 - Screenshot pair vs `/tmp/t3` reference values: background/card/border sampled colors match t3's within oklch rounding.
+
+## Resolution
+
+Shipped as glance-desktop draft PR #29 (branch `t3face/01-02-skin-substrate`, with concern 02). t3face.css ports the full skin; globals.css carries the `@theme` registration only. Gate green (515/515, lint/types/build); built-CSS assertions hold (DM Sans emitted, status utilities compile, radius chain intact, scrollbar override wins by order); palette fidelity cross-checked against `/tmp/t3/index.css` by the orchestrator (exact). +88 bytes gzip. Five deviations, all sound (`--alpha()`→oklch literal, `@utility`/`@variant`→plain classes, spec-required scrollbar un-hide, violet `--pending` per concern 07, standard skeleton sweep). Live visual acceptance deferred to concern 13 (needs spine + fleet re-key to be meaningful).

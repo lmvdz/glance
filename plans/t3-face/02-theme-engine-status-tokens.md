@@ -1,6 +1,6 @@
 # Theme engine carries the status token family
 
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: glance-desktop
 COMPLEXITY: mechanical
@@ -30,3 +30,7 @@ None.
 - `pnpm check-types && pnpm vitest run` green (theme module has existing tests — extend `validateTheme` tests: a theme carrying `warning` validates; a bogus key still rejects).
 - Live: activate a builtin theme → status-colored elements (post-concern-03) repaint or gracefully keep t3face values; deactivate → t3face values return.
 - `scripts/upstream-drift.sh` lists both new files.
+
+## Resolution
+
+Shipped as glance-desktop draft PR #29 (with concern 01). The 8 status keys added to `ThemeColors`/`COLOR_VAR`/`ALL_VARS`/`validateTheme` COLOR_KEYS; no `themes/*.ts` touched (fallthrough by design); new `validateTheme.test.ts` (5 tests) pins accept/reject. `applyTheme.ts` + `validateTheme.ts` added to `upstream-drift.sh` REG_POINTS and UPSTREAM.md diverged-set. Token names match concern 01 exactly.
