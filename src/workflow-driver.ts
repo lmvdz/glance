@@ -24,15 +24,18 @@ import { EventEmitter } from "node:events";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentDriver } from "./agent-driver.ts";
+import { envBool } from "./config.ts";
 import { errText } from "./err-text.ts";
+import { hardenedGit } from "./git-harden.ts";
 import { RpcAgent } from "./rpc-agent.ts";
 import type { ApprovalMode, RpcExtensionUIRequest, RpcSessionState, ThinkingLevel } from "./types.ts";
 import type { ReflectLlm } from "./reflection.ts";
 import { parseWorkflow } from "./workflow/dot.ts";
 import { WorkflowCancelled, WorkflowEngine } from "./workflow/engine.ts";
-import { type CommandResult, SingleAgentExecutor } from "./workflow/executor.ts";
+import { type CommandResult, defaultExecCommand, SingleAgentExecutor } from "./workflow/executor.ts";
 import { parseStylesheet, resolveNodeStyle } from "./workflow/stylesheet.ts";
 import type { EngineCheckpoint, NodeResult, RunContext, Workflow, WorkflowAutonomyMode, WorkflowGraphSnapshot, WorkflowJournalEvent, WorkflowNode, WorkflowProofState, WorkflowRunState } from "./workflow/types.ts";
+import { makeBaselineFailureProvider } from "./workflow/verify-baseline.ts";
 
 /** A branch agent to spawn into the roster (one parallel branch = one fleet agent). */
 export interface BranchSpec {
@@ -263,6 +266,16 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 		else throw new Error("WorkflowDriver needs either `workflow` or `workflowPath`");
 		const wfDir = this.opts.workflowPath ? path.dirname(this.opts.workflowPath) : this.opts.cwd;
 		const rules = parseStylesheet(this.wf.modelStylesheet ?? "");
+		// Base-diff (postmortem-gate-fixes): only built when the flag is on, so a disabled feature
+		// costs nothing (no worktree deps, no wiring) — `runCommand`'s own gate re-checks the same
+		// flag, but skipping construction here means an OFF run never even holds the provider closure.
+		const resolveBaselineFailures = envBool("OMP_SQUAD_VERIFY_BASE_DIFF", true)
+			? makeBaselineFailureProvider({
+					worktree: this.opts.cwd,
+					exec: this.opts.execCommand ?? defaultExecCommand,
+					git: (args, cwd) => hardenedGit(args, { cwd }),
+				})
+			: undefined;
 		this.executor = new SingleAgentExecutor({
 			cwd: this.opts.cwd,
 			acquireAgent: (node) => this.acquireInner(node),
@@ -276,6 +289,7 @@ export class WorkflowDriver extends EventEmitter implements AgentDriver {
 			decoratePrompt: this.opts.decoratePrompt,
 			cold: this.opts.cold,
 			reflection: this.opts.reflection ? { ...this.opts.reflection, runId: () => this.runId } : undefined,
+			resolveBaselineFailures,
 		});
 		const baseOnStage = this.executor.onStage.bind(this.executor);
 		this.executor.onStage = (ev) => {

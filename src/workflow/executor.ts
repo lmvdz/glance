@@ -14,13 +14,16 @@ import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentDriver } from "../agent-driver.ts";
+import { envBool } from "../config.ts";
 import { fenceUntrusted } from "../digest.ts";
 import { gateEnv } from "../gate-env.ts";
 import { GateSemaphore, sharedGateSemaphore } from "../gate-semaphore.ts";
+import { decideRegressionGate, extractGateFailures } from "../land.ts";
 import { isOn, learningFlags } from "../metrics.ts";
 import { identityNormalize, reduceOutput } from "../output-reduce.ts";
 import { appendReflection, hashOutput, latestReflection, reflect, renderReflectionNote, renderRefutationNote, type ReflectLlm } from "../reflection.ts";
 import type { NodeExecutor, NodeResult, RunContext, StageEvent, WorkflowNode } from "./types.ts";
+import type { BaselineResult } from "./verify-baseline.ts";
 
 export interface CommandResult {
 	code: number;
@@ -48,6 +51,16 @@ export interface SingleAgentExecutorOptions {
 	gate: (node: WorkflowNode, options: string[]) => Promise<string>;
 	/** Run a command node. Default: bash via Bun.spawn in `cwd`. */
 	execCommand?: (script: string, cwd: string) => Promise<CommandResult>;
+	/**
+	 * Base-diff (postmortem-gate-fixes): resolve the failing set of a `goalGate` command node's
+	 * script when run on the unit's BASE state (memoized — see `verify-baseline.ts`). When present
+	 * AND `OMP_SQUAD_VERIFY_BASE_DIFF` is not "0", `runCommand` diffs a failing goalGate run against
+	 * this baseline (`decideRegressionGate`, land.ts) so pre-existing red-baseline failures never
+	 * block a unit whose own diff introduced nothing new — mirroring the land-time regression gate
+	 * one level down. Absent ⇒ every non-zero exit on a goalGate node fails the node, exactly as
+	 * before this feature.
+	 */
+	resolveBaselineFailures?: (script: string) => Promise<BaselineResult | null>;
 	/**
 	 * Serializes command-node execution against every OTHER unit's command nodes in this process
 	 * (root + org managers alike — see gate-semaphore.ts). Default: the shared process-wide
@@ -143,6 +156,11 @@ const UNPROVISIONED_RE = /command not found|is not recognized as an internal or 
 function looksUnprovisioned(code: number, output: string, cwd: string): boolean {
 	if (existsSync(path.join(cwd, "node_modules"))) return false; // env fact: deps ARE present ⇒ never the tag
 	return code === 127 || UNPROVISIONED_RE.test(output);
+}
+
+/** On by default; set OMP_SQUAD_VERIFY_BASE_DIFF=0 to disable the per-unit verify-node base-diff. */
+function verifyBaseDiffEnabled(): boolean {
+	return envBool("OMP_SQUAD_VERIFY_BASE_DIFF", true);
 }
 /** Idle polls (~30s) with the inner loop reporting not-streaming, after it was seen active, before we treat a missing agent_end as turn-end. */
 const IDLE_TICKS = 6;
@@ -352,13 +370,51 @@ export class SingleAgentExecutor implements NodeExecutor {
 			// (e.g. "cannot find module") could otherwise fall inside a region reduceOutput cuts from a
 			// huge dump, and the regex/existsSync check is cheap against text already held in memory.
 			const { text: reduced } = await reduceOutput(combined, STEER_BODY_BUDGET, { command: script, agentId: this.opts.reflection?.agentId, source: "executor-steer" });
-			const shown = code !== 0 && looksUnprovisioned(code, combined, this.opts.cwd) ? `[environment not provisioned — dependencies missing, not a code failure]\n${reduced}` : reduced;
+			let shown = code !== 0 && looksUnprovisioned(code, combined, this.opts.cwd) ? `[environment not provisioned — dependencies missing, not a code failure]\n${reduced}` : reduced;
+			let outcome: "succeeded" | "failed" = code === 0 ? "succeeded" : "failed";
+			// Base-diff (postmortem-gate-fixes): only the verify goalGate node, only on a failing run, only
+			// when a baseline provider is wired AND the flag is on. codefix/other command nodes and a
+			// successful goalGate run are untouched — this can only turn a "failed" into "succeeded" (never
+			// the reverse) when the failing set is a subset of what already fails on base.
+			if (code !== 0 && node.goalGate === true && this.opts.resolveBaselineFailures && verifyBaseDiffEnabled()) {
+				const diffed = await this.applyBaseDiff(script, combined, reduced, shown);
+				outcome = diffed.outcome;
+				shown = diffed.shown;
+			}
 			this.opts.emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: `$ ${node.label ?? node.id} → exit ${code}\n${shown || "(no output)"}` } });
 			this.opts.emit({ type: "message_end" });
-			return { outcome: code === 0 ? "succeeded" : "failed", text: shown };
+			return { outcome, text: shown };
 		} finally {
 			release();
 		}
+	}
+
+	/**
+	 * Base-diff the verify goalGate node's failing set against the unit's base state
+	 * (`resolveBaselineFailures`, backed by `verify-baseline.ts`) so pre-existing red-baseline
+	 * failures — flaky tests, stale-shared-node_modules env failures — never block a unit whose OWN
+	 * diff is clean. Mirrors `applyRegressionGate`'s base-vs-merged comparison (`../land.ts`) one
+	 * level down, at the per-unit node instead of the post-merge full suite; same fail-closed
+	 * posture: an unestablished base NEVER reads as "everything tolerated".
+	 */
+	private async applyBaseDiff(script: string, combined: string, reduced: string, shownWithUnprovisionedTag: string): Promise<{ outcome: "succeeded" | "failed"; shown: string }> {
+		const currentFailures = extractGateFailures(combined);
+		const baseline = await this.opts.resolveBaselineFailures!(script);
+		if (baseline === null || baseline.unrunnable) {
+			const reason = baseline === null ? "no baseline result" : baseline.unrunnable;
+			return { outcome: "failed", shown: `[base-diff: could not establish a base run (${reason}) — blocking on the full failure set]\n${shownWithUnprovisionedTag}` };
+		}
+		const { allow, newRegressions } = decideRegressionGate(baseline.failures, currentFailures);
+		if (allow) {
+			return {
+				outcome: "succeeded",
+				shown: `[base-diff: gate passed — all ${currentFailures.length} failing test(s) already fail on the base (${baseline.baseRef.slice(0, 8)}); 0 introduced by this unit]`,
+			};
+		}
+		return {
+			outcome: "failed",
+			shown: `[base-diff: ${newRegressions.length} NEW failure(s) introduced by this unit — fix these:]\n${newRegressions.join("\n")}\n${reduced}`,
+		};
 	}
 
 	/** Factory legibility for a queued gate (default channel: console.error; injectable for tests). */
@@ -481,7 +537,7 @@ export function withLocalBinOnPath(script: string, cwd: string): string {
  * spawn-env's keep-list deliberately excludes). It runs unsandboxed on the daemon host like
  * those gates, so it gets the same env: `gateEnv()`, not full `process.env` inheritance.
  */
-async function defaultExecCommand(script: string, cwd: string): Promise<CommandResult> {
+export async function defaultExecCommand(script: string, cwd: string): Promise<CommandResult> {
 	const proc = Bun.spawn(["bash", "-lc", withLocalBinOnPath(script, cwd)], { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", env: gateEnv() });
 	const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
 	const code = await proc.exited;

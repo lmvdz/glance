@@ -308,3 +308,74 @@ test("remove(id, true) deletes the checkpoint-log JSONL for a terminal workflow'
 	await expect(fs.access(checkpointLogPath(stateDir, runId))).rejects.toThrow();
 	await mgr.stop();
 });
+
+// ── OMPSQ-448: continue a RECOVERABLE terminal run in place ─────────────────────────────────────────
+// A visit-cap-exhaustion terminal (the fix-up ladder ran out of budget) is recoverable in place; a
+// structural dead-end (poison cap, ran-off-the-end) is not. `continueAvailable` gates the webui button.
+test("continueAvailable is set for a visit-cap terminal but NOT for a poison-cap/structural terminal", async () => {
+	const { mgr, repo } = await makeMgr("continue-derive");
+	const host = mgr as unknown as InternalHost;
+
+	const capDto = await mgr.create({ name: "wf-cap", repo, approvalMode: "yolo", verify: "true" });
+	const capRec = host.agents.get(capDto.id)!;
+	capRec.agent.emit("checkpoint", runState({ runId: "run-cap", currentNode: "escalate" }));
+	await capRec.checkpointAppending;
+	capRec.agent.emit("event", { type: "workflow_terminal", reason: 'node "escalate" exceeded its visit cap (2)', checkpoint: checkpoint() });
+	await waitFor(() => capRec.dto.status === "error");
+	expect(capRec.dto.forkAvailable).toBe(true);
+	expect(capRec.dto.continueAvailable).toBe(true); // recoverable
+
+	const poisonDto = await mgr.create({ name: "wf-poison", repo, approvalMode: "yolo", verify: "true" });
+	const poisonRec = host.agents.get(poisonDto.id)!;
+	poisonRec.agent.emit("checkpoint", runState({ runId: "run-poison", currentNode: "n1" }));
+	await poisonRec.checkpointAppending;
+	poisonRec.agent.emit("event", { type: "workflow_terminal", reason: "resume poison cap: escalated to a human", checkpoint: checkpoint({ resumeAttempts: 3 }) });
+	await waitFor(() => poisonRec.dto.status === "error");
+	expect(poisonRec.dto.forkAvailable).toBe(true);
+	expect(poisonRec.dto.continueAvailable).toBe(false); // structural — fork is the only path
+	await mgr.stop();
+});
+
+test("continueRun clears the terminal marker, resets fix-up-tier visits to 0, and re-drives on the SAME worktree", async () => {
+	const { mgr, repo } = await makeMgr("continue-run");
+	const host = mgr as unknown as InternalHost;
+	const dto = await mgr.create({ name: "wf-cont", repo, approvalMode: "yolo", verify: "true" });
+	const rec = host.agents.get(dto.id)!;
+	const worktreeBefore = rec.dto.worktree;
+
+	// An exhausted fix-up ladder: verify ran 4×, the retry tiers are at their caps.
+	rec.agent.emit("checkpoint", runState({ runId: "run-cont", currentNode: "escalate", visits: { verify: 4, codefix: 1, fixup: 3, escalate: 2 } }));
+	await rec.checkpointAppending;
+	rec.agent.emit("event", { type: "workflow_terminal", reason: 'node "escalate" exceeded its visit cap (2)', checkpoint: checkpoint() });
+	await waitFor(() => rec.dto.status === "error");
+	expect(rec.options.workflowState?.terminal).toBeDefined();
+
+	await mgr.continueRun(dto.id);
+
+	const state = rec.options.workflowState!;
+	expect(state.terminal).toBeUndefined(); // marker cleared → prompt/restart no longer refused
+	expect(rec.dto.continueAvailable).toBe(false);
+	expect(rec.dto.forkAvailable).toBe(false);
+	// Fix-up tiers reset; the goalGate's own count (verify) is carried forward, like fork().
+	expect(state.visits.codefix).toBe(0);
+	expect(state.visits.fixup).toBe(0);
+	expect(state.visits.escalate).toBe(0);
+	expect(state.visits.verify).toBe(4);
+	expect(rec.dto.worktree).toBe(worktreeBefore); // in place — NOT a fresh fork branch
+	await mgr.stop();
+});
+
+test("continueRun refuses a non-recoverable (structural) terminal — fork stays the path, marker intact", async () => {
+	const { mgr, repo } = await makeMgr("continue-refuse");
+	const host = mgr as unknown as InternalHost;
+	const dto = await mgr.create({ name: "wf-refuse", repo, approvalMode: "yolo", verify: "true" });
+	const rec = host.agents.get(dto.id)!;
+	rec.agent.emit("checkpoint", runState({ runId: "run-refuse", currentNode: "n1" }));
+	await rec.checkpointAppending;
+	rec.agent.emit("event", { type: "workflow_terminal", reason: "ran off the end of the graph", checkpoint: checkpoint() });
+	await waitFor(() => rec.dto.status === "error");
+
+	await expect(mgr.continueRun(dto.id)).rejects.toThrow(/not recoverable in place/);
+	expect(rec.options.workflowState?.terminal).toBeDefined(); // untouched
+	await mgr.stop();
+});
