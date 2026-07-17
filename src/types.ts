@@ -918,6 +918,11 @@ export interface AgentDTO {
 	 *  the webapp's "Fork from step N" control; an old daemon that never sets this field hides the button
 	 *  instead of showing one that 404s. */
 	forkAvailable?: boolean;
+	/** Derived from `workflowState.terminal` when the terminal reason is a RECOVERABLE fix-up-ladder
+	 *  visit-cap exhaustion (present, not superseded) — gates the webapp's "Continue" control, which
+	 *  re-runs the verify gate in place on the SAME worktree (retry budgets reset) instead of forking a
+	 *  fresh branch off HEAD. An old daemon that never sets this hides the button rather than 404ing. */
+	continueAvailable?: boolean;
 	/** Requested authority persisted for this run; effectiveMode is capped by daemon policy and blockers. */
 	autonomyMode?: AutonomyMode;
 	/** Actual authority after approval/env caps and blockers. */
@@ -1554,6 +1559,7 @@ export type ClientCommand =
 	| { type: "kill"; id: string }
 	| { type: "restart"; id: string }
 	| { type: "fork"; id: string; seq?: number }
+	| { type: "continue"; id: string }
 	| { type: "remove"; id: string; deleteWorktree?: boolean }
 	| { type: "create"; options: CreateAgentOptions; source?: string }
 	| { type: "message"; to: string; text: string }

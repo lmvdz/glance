@@ -2029,6 +2029,7 @@ export class SquadManager extends EventEmitter {
 			// Recomputed from the persisted marker (not carried as an independent flag) so a fresh boot's
 			// reattach reflects forkAvailable correctly even if it was never set in-memory before the restart.
 			forkAvailable: this.deriveForkAvailable(p.workflowState),
+			continueAvailable: this.deriveContinueAvailable(p.workflowState),
 		};
 		this.seedAuthority(dto, p.autonomyMode);
 		const agent = this.makeDriver(p);
@@ -2152,6 +2153,7 @@ export class SquadManager extends EventEmitter {
 			workflowState: p.workflowState,
 			promoted: p.promoted, // a promoted console chat stays visibly a unit across restarts
 			forkAvailable: this.deriveForkAvailable(p.workflowState),
+			continueAvailable: this.deriveContinueAvailable(p.workflowState),
 		};
 		this.seedAuthority(dto, p.autonomyMode);
 		const agent = this.makeDriver(p); // constructed but never started — this record has no live connection
@@ -4033,6 +4035,28 @@ export class SquadManager extends EventEmitter {
 		return !!state?.terminal && !state.terminal.supersededBy;
 	}
 
+	/** A terminal marker is RECOVERABLE in place when it was a visit-cap exhaustion of the fix-up ladder
+	 *  (verify → codefix → fixup → escalate ran out of retry budget). Re-running with the retry tiers
+	 *  reset is exactly the right move AND preserves the unit's own worktree (including uncommitted
+	 *  edits) instead of forking a fresh branch off HEAD. Structural dead-ends — a poison/resume-cap
+	 *  crash loop, a dangling edge, running off the end of the graph — are NOT recoverable this way; for
+	 *  those, fork stays the only forward path. Matches the exact string minted in engine.ts's
+	 *  visit-cap terminalFail (`node "<n>" exceeded its visit cap (<k>)`). */
+	private isRecoverableTerminalReason(reason: string): boolean {
+		// ONLY the verify-loop's own fix-up ladder nodes (verify/codefix/fixup/escalate — buildVerifyLoop)
+		// are safe to reset-and-re-run: re-running the verify gate is idempotent. A visit-cap exhaustion
+		// on any OTHER node — an authored, possibly side-effecting node (a `deploy` at maxVisits) — is NOT
+		// recoverable in place; resetting/resuming it could re-fire its side effect. So match the node NAME
+		// in engine.ts's exact reason string, not just the "visit cap" phrase (codex review).
+		return /^node "(verify|codefix|fixup|escalate)" exceeded its visit cap \(\d+\)$/.test(reason);
+	}
+
+	/** True when a terminal run can be CONTINUED in place — a recoverable, not-yet-superseded terminal
+	 *  marker. The single source `dto.continueAvailable` derives from; parallels {@link deriveForkAvailable}. */
+	private deriveContinueAvailable(state: WorkflowRunState | undefined): boolean {
+		return !!state?.terminal && !state.terminal.supersededBy && this.isRecoverableTerminalReason(state.terminal.reason);
+	}
+
 	/** Self-heal the crash window between createInternal's persist of a new fork (which durably records
 	 *  `workflowState.forkedFrom`) and fork()'s OWN later persist of the source's `terminal.supersededBy`
 	 *  marker: a daemon death in that gap otherwise leaves the source stuck forever advertising
@@ -4051,6 +4075,7 @@ export class SquadManager extends EventEmitter {
 			if (!terminal || terminal.supersededBy) continue;
 			terminal.supersededBy = rec.dto.id;
 			source.dto.forkAvailable = false;
+			source.dto.continueAvailable = false;
 			source.dto.workflowState = source.options.workflowState;
 			this.emitAgent(source);
 		}
@@ -6062,6 +6087,7 @@ export class SquadManager extends EventEmitter {
 			workflow: persisted.workflow,
 			workflowState: persisted.workflowState,
 			forkAvailable: this.deriveForkAvailable(persisted.workflowState),
+			continueAvailable: this.deriveContinueAvailable(persisted.workflowState),
 			adopted: opts.adopted,
 		};
 		// Pre-dispatch harness scorecard (concern 03, advisory shadow — plans/research-learn-harness-
@@ -6851,6 +6877,19 @@ export class SquadManager extends EventEmitter {
 			case "fork":
 				await this.fork(cmd.id, { seq: cmd.seq }, actor);
 				break;
+			case "continue":
+				// Continue a recoverable terminal run in place. Surface a refusal into the transcript (same
+				// shape as the prompt/restart terminal guards) rather than throwing out of applyCommand,
+				// whose callers fire it with `void ...catch()` — a reject there is an unhandled rejection.
+				try {
+					await this.continueRun(cmd.id, actor);
+				} catch (err) {
+					const msg = err instanceof Error ? err.message : String(err);
+					this.log("warn", `continue refused for ${cmd.id}: ${msg}`);
+					this.append(rec, "system", `continue refused — ${msg}`);
+					void this.recordAudit(actor, "continue", cmd.id, "error", msg);
+				}
+				break;
 			case "notify": {
 				// Operator/scriptable ingress (`glance notify`, cmux-research concern 03): non-blocking,
 				// never a PendingRequest — mirrors squad_attention/the harness "notify" wiring below.
@@ -7037,6 +7076,75 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
+	 * continueRun(id): continue a RECOVERABLE terminal workflow IN PLACE, on its own worktree.
+	 *
+	 * OMPSQ-448 postmortem: a run that exhausted the escalate visit cap dead-ended with `fork` as the
+	 * only forward path — and fork mints a fresh branch off the worktree's committed HEAD, abandoning any
+	 * UNCOMMITTED implement work (the exact loss when a unit never committed before the gate loop stalled).
+	 * For a recoverable terminal (a fix-up-ladder visit-cap exhaustion — see isRecoverableTerminalReason),
+	 * the right move is simply to re-run: reset the retry-tier visit budgets exactly as fork() does, clear
+	 * the terminal marker, and re-drive the SAME run via restart() (which rebuilds the driver and resumes
+	 * the existing workflowState). The worktree — and its uncommitted edits — are preserved. Refused for a
+	 * running agent, a missing worktree, or a non-recoverable/superseded terminal (fork stays their path).
+	 */
+	async continueRun(id: string, actor: Actor = LOCAL_ACTOR): Promise<void> {
+		const rec = this.agents.get(id);
+		if (!rec) throw new Error("agent not found");
+		if (rec.dto.status === "working") throw new Error("cannot continue a running agent — stop or wait for it to finish");
+		const state = rec.options.kind === "workflow" ? rec.options.workflowState : undefined;
+		const terminal = state?.terminal;
+		if (!state || !terminal || terminal.supersededBy) throw new Error("this run has no active terminal marker to continue");
+		if (!this.isRecoverableTerminalReason(terminal.reason)) {
+			throw new Error(`this run's terminal state is not recoverable in place (${terminal.reason}) — fork from a checkpoint instead`);
+		}
+		if (!existsSync(rec.dto.worktree)) throw new Error("original worktree is gone — cannot continue in place (fork instead)");
+
+		// Mutual exclusion with fork() and any concurrent continue on this run: claim the per-run
+		// lifecycle-transition slot SYNCHRONOUSLY, before the first `await` below, so two lifecycle
+		// mutations can't both clear the terminal marker (fork's own `forkInFlight` precedent — reusing
+		// the same set makes fork and continue exclude each other, closing the fork-races-continue window
+		// where both a fork child and this re-driven source end up live). Released in `finally`.
+		const runId = state.runId ?? rec.dto.id;
+		if (this.forkInFlight.has(runId)) throw new Error("a fork or continue of this run is already in flight");
+		this.forkInFlight.add(runId);
+		try {
+			// Reset the fix-up-tier visit budgets (each goalGate's retryTarget + its overflow closure,
+			// across every goalGate node) exactly like fork() — but on the LIVE run's own state, so the
+			// re-drive gets a fresh ladder without minting a new branch/run. Re-parse the graph the same
+			// way makeDriver/fork do.
+			const wf: Workflow | undefined = rec.options.workflow?.verify
+				? buildVerifyLoop(rec.options.workflow.verify)
+				: rec.options.workflow?.path
+					? parseWorkflow(await fs.readFile(resolveWorkflowPath(rec.options.workflow.path), "utf8"))
+					: undefined;
+			if (wf) {
+				const tiers = new Set<string>();
+				for (const node of wf.nodes.values()) {
+					if (!node.goalGate) continue;
+					for (let t: string | undefined = node.retryTarget; t; t = wf.nodes.get(t)?.overflow) tiers.add(t);
+				}
+				const visits = { ...state.visits };
+				for (const tier of tiers) visits[tier] = 0;
+				state.visits = visits;
+			}
+
+			// Clear the terminal marker BEFORE restart() so its own terminal-refusal guard lets this
+			// re-drive through, and recompute the availability flags off the now-live (non-terminal) state.
+			state.terminal = undefined;
+			rec.options.workflowState = state;
+			rec.dto.workflowState = state;
+			rec.dto.forkAvailable = this.deriveForkAvailable(state);
+			rec.dto.continueAvailable = this.deriveContinueAvailable(state);
+			await this.persist();
+			this.append(rec, "system", "▶ continuing in place — retry budgets reset, re-running the verify gate on this worktree (uncommitted work preserved).");
+			void this.recordAudit(actor, "continue", id, "ok");
+			await this.restart(rec);
+		} finally {
+			this.forkInFlight.delete(runId);
+		}
+	}
+
+	/**
 	 * fork(id, {seq?}): mint a brand-new run from a terminal (escalate-exhausted) workflow's checkpoint
 	 * history — same code tip (`git rev-parse HEAD` in the original worktree, never `dto.branch`, which
 	 * is undefined for in-place/ad-hoc agents), fix-up-tier retry budgets reset, fresh runId/agent id.
@@ -7199,6 +7307,7 @@ export class SquadManager extends EventEmitter {
 			// claimant), forkAvailable cleared so the offer never re-fires for a run that's already been forked.
 			rec.options.workflowState!.terminal!.supersededBy = newId;
 			rec.dto.forkAvailable = false;
+			rec.dto.continueAvailable = false;
 			rec.dto.workflowState = rec.options.workflowState;
 			this.emitAgent(rec);
 			await this.persist();
@@ -7684,6 +7793,7 @@ export class SquadManager extends EventEmitter {
 		rec.options.workflowState = state;
 		rec.dto.workflowState = state;
 		rec.dto.forkAvailable = this.deriveForkAvailable(state);
+		rec.dto.continueAvailable = this.deriveContinueAvailable(state);
 		await this.raceOnceOrEscalate(rec, reason);
 		void this.persist();
 		// The run is dead — no further checkpoints will ever append for this runId (a fork, if any, mints

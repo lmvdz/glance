@@ -509,6 +509,11 @@ export interface AgentDTO {
    *  that never sets the field, which is exactly the gate the Fork button uses: an old daemon never
    *  shows it instead of showing it disabled or 404ing. */
   forkAvailable?: boolean;
+  /** Derived from the daemon's `workflowState.terminal` marker when the terminal reason is a
+   *  RECOVERABLE fix-up-ladder visit-cap exhaustion (present, not superseded) — gates the "Continue"
+   *  button, which re-runs the verify gate IN PLACE on the same worktree (retry budgets reset) rather
+   *  than forking a fresh branch off HEAD. Absent (not false) on an old daemon → the button hides. */
+  continueAvailable?: boolean;
   /** Live progress (currentNode/rollup/etc.) over `workflowGraph`'s static topology, plus the
    *  terminal/runId subset the Fork button's `forkAvailable` gate is documented against. */
   workflowState?: WorkflowRunStateDTO;
@@ -676,4 +681,7 @@ export type ClientCommand =
   | { type: "kill"; id: string }
   | { type: "restart"; id: string }
   | { type: "remove"; id: string; deleteWorktree?: boolean }
-  | { type: "fork"; id: string; seq?: number };
+  | { type: "fork"; id: string; seq?: number }
+  // OMPSQ-448: continue a recoverable terminal run in place (retry budgets reset, same worktree) —
+  // vs `fork`, which mints a fresh branch off HEAD. Gated in the UI on `AgentDTO.continueAvailable`.
+  | { type: "continue"; id: string };

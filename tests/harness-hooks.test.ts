@@ -243,7 +243,14 @@ describe("the generated shim escapes hostile values (run through /bin/sh)", () =
 			await fsp.mkdir(nastyDir, { recursive: true });
 			const proc = Bun.spawn(["/bin/sh", shim, "start"], { cwd: nastyDir, env: { CLAUDE_SESSION_ID: 'sess"injected' } });
 			await proc.exited;
-			await Bun.sleep(200); // the curl runs backgrounded (`&`)
+			// The shim POSTs via a DETACHED background curl (`&`), so `proc.exited` returns before the
+			// request is delivered. Poll for the body instead of a fixed `Bun.sleep` + immediate
+			// `server.stop`: under full-suite CPU/IO load the loopback POST can land well past any
+			// hard-coded delay, and tearing the listener down first drops the in-flight request — the
+			// flake this test hit (Received 0). The loop returns the instant the body arrives; the 5s
+			// cap only bounds a genuinely hung request.
+			const deadline = Date.now() + 5000;
+			while (bodies.length === 0 && Date.now() < deadline) await Bun.sleep(10);
 			server.stop(true);
 			expect(bodies.length).toBe(1);
 			const parsed = JSON.parse(bodies[0]); // MUST parse — escaping worked
