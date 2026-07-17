@@ -12,6 +12,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { errText } from "./err-text.ts";
+import { classifyLane, laneFromRouted, type WorkLane } from "./lane.ts";
 import type { ThinkingLevel } from "./types.ts";
 import { extractJsonObject, ompOneShot } from "./omp-call.ts";
 
@@ -25,6 +26,10 @@ export interface IntakeDecision {
 	mode?: "tdd";
 	/** Reasoning effort for the run. */
 	thinking?: ThinkingLevel;
+	/** Work lane classification (adw-factory-borrows concern 01), carried at zero extra LLM cost: the
+	 *  LLM path reads it off the SAME router response; the heuristic path runs `classifyLane`'s
+	 *  heuristic-only pass. Consumers/threading land in concern 02 — this field only carries the value. */
+	lane?: WorkLane;
 	/** Why this process was chosen — logged so the operator sees the OS's reasoning. */
 	reason: string;
 }
@@ -69,47 +74,55 @@ export async function routeIntake(task: string, repo: string, classify?: Classif
 }
 
 async function heuristicRoute(task: string, repo: string): Promise<IntakeDecision> {
-	if (FANOUT_SIGNAL.test(task)) return { workflow: FAN_OUT, reason: "several approaches requested → parallel fan-out" };
-	if (HIGH_RISK.test(task)) return { workflow: PLAN_IMPLEMENT, reason: "high-risk change → plan + human approval before implementing" };
+	const lane = (await classifyLane(task, repo)).lane;
+	if (FANOUT_SIGNAL.test(task)) return { workflow: FAN_OUT, lane, reason: "several approaches requested → parallel fan-out" };
+	if (HIGH_RISK.test(task)) return { workflow: PLAN_IMPLEMENT, lane, reason: "high-risk change → plan + human approval before implementing" };
 	const thinking: ThinkingLevel | undefined = HARD.test(task) ? "high" : TRIVIAL.test(task) ? "minimal" : undefined;
 	const verify = await detectVerify(repo);
 	if (verify) {
 		const mode = tddMode(task);
-		return { verify, thinking, mode, reason: `code change → auto-verify with \`${verify}\`${mode === "tdd" ? " (TDD: test first)" : ""}` };
+		return { verify, thinking, mode, lane, reason: `code change → auto-verify with \`${verify}\`${mode === "tdd" ? " (TDD: test first)" : ""}` };
 	}
-	return { thinking, reason: "no verification command detected → plain agent" };
+	return { thinking, lane, reason: "no verification command detected → plain agent" };
 }
 
 const ROUTER_PROMPT = `Route a software task to ONE process. Respond with ONLY a JSON object, no prose:
-{"process":"verify|plan|fanout|plain","effort":"minimal|low|high"}
+{"process":"verify|plan|fanout|plain","effort":"minimal|low|high","lane":"hotfix|feature|chore"}
 - verify: an ordinary code change (implement, then run tests/typecheck).
 - plan: a high-risk or destructive change (migration, deletion, deploy, breaking API) that needs human approval first.
 - fanout: explore several competing approaches in parallel.
 - plain: no code verification needed (docs, copy, trivial, non-code).
+- lane hotfix: an urgent production fix (revert, outage, regression, broken main).
+- lane chore: mechanical, no-risk maintenance (rename, typo, dependency bump, formatting).
+- lane feature: anything else (new capability, ordinary bug fix, refactor).
 Task: `;
 
 async function llmRoute(task: string, repo: string, classify: Classify): Promise<IntakeDecision | undefined> {
 	const parsed = extractDecision(await classify(ROUTER_PROMPT + task));
 	if (!parsed) return undefined;
 	const effort = parsed.effort === "high" || parsed.effort === "minimal" || parsed.effort === "low" ? parsed.effort : undefined;
-	if (parsed.process === "fanout") return { workflow: FAN_OUT, thinking: effort, reason: "LLM router → parallel fan-out" };
-	if (parsed.process === "plan") return { workflow: PLAN_IMPLEMENT, thinking: effort, reason: "LLM router → plan + human approval (high-risk)" };
+	// Same router response the process/effort fields came from — reading `lane` off it here is the
+	// "zero extra LLM cost" path the concern calls for; a fallback to heuristics only fires if THIS
+	// response omitted/malformed the lane field, never a second round-trip.
+	const lane = parsed.lane ?? (await classifyLane(task, repo)).lane;
+	if (parsed.process === "fanout") return { workflow: FAN_OUT, thinking: effort, lane, reason: "LLM router → parallel fan-out" };
+	if (parsed.process === "plan") return { workflow: PLAN_IMPLEMENT, thinking: effort, lane, reason: "LLM router → plan + human approval (high-risk)" };
 	if (parsed.process === "verify") {
 		const verify = await detectVerify(repo);
-		if (!verify) return { thinking: effort, reason: "LLM router → plain (no verify command)" };
+		if (!verify) return { thinking: effort, lane, reason: "LLM router → plain (no verify command)" };
 		const mode = tddMode(task);
-		return { verify, thinking: effort, mode, reason: `LLM router → auto-verify with \`${verify}\`${mode === "tdd" ? " (TDD: test first)" : ""}` };
+		return { verify, thinking: effort, mode, lane, reason: `LLM router → auto-verify with \`${verify}\`${mode === "tdd" ? " (TDD: test first)" : ""}` };
 	}
-	return { thinking: effort, reason: "LLM router → plain agent" };
+	return { thinking: effort, lane, reason: "LLM router → plain agent" };
 }
 
 /** Extract the last balanced JSON object from model output and read its routing fields. */
-function extractDecision(text: string): { process?: string; effort?: string } | undefined {
+function extractDecision(text: string): { process?: string; effort?: string; lane?: WorkLane } | undefined {
 	const rec = extractJsonObject(text);
 	if (!rec) return undefined;
 	const process = typeof rec.process === "string" ? rec.process : undefined;
 	const effort = typeof rec.effort === "string" ? rec.effort : undefined;
-	return { process, effort };
+	return { process, effort, lane: laneFromRouted(rec) };
 }
 
 /**

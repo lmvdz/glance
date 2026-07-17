@@ -13,6 +13,7 @@ import {
   landBlockedLine,
   loopReasonLine,
   fmtSince,
+  ratioLabel,
   type FactoryStatus,
   type FactoryLoopReport,
   type FactoryLoopStatus,
@@ -121,6 +122,17 @@ describe('landBlockedLine — the "fleet cannot land" banner text', () => {
   test('healthy landing (or an old daemon that omits the field) shows no banner', () => {
     expect(landBlockedLine(snap({ landBlocked: { blocked: false } }))).toBeUndefined();
     expect(landBlockedLine(snap())).toBeUndefined();
+  });
+});
+
+describe('ratioLabel — shadow-exit scoreboard counters (adw-factory-borrows concern 09)', () => {
+  test('a nonzero denominator renders "N/M"', () => {
+    expect(ratioLabel(3, 12)).toBe('3/12');
+    expect(ratioLabel(0, 5)).toBe('0/5');
+  });
+
+  test('a zero denominator (no shadow events recorded yet) renders just the numerator', () => {
+    expect(ratioLabel(0, 0)).toBe('0');
   });
 });
 

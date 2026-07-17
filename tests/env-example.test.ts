@@ -13,9 +13,10 @@ import { expect, test } from "bun:test";
 // Scanning approach — this is a set of regex heuristics over the literal TypeScript source, not a
 // real parser, chosen to match how this codebase ACTUALLY reads env vars:
 //   1. `process.env.NAME` / `process.env["NAME"]` — the direct form.
-//   2. `envBool("NAME", …)` / `envInt("NAME", …)` / `envNumber("NAME", …)` — the typed readers in
-//      src/config.ts. `envBoolAliased("PRIMARY", "LEGACY", …)` counts as a read of BOTH string
-//      arguments (batch-3 review: the primary/legacy-alias reader added for the dead-alias fix).
+//   2. `envBool("NAME", …)` / `envInt("NAME", …)` / `envNumber("NAME", …)` / `envStringList("NAME", …)`
+//      — the typed readers in src/config.ts. `envBoolAliased("PRIMARY", "LEGACY", …)` counts as a
+//      read of BOTH string arguments (batch-3 review: the primary/legacy-alias reader added for the
+//      dead-alias fix).
 //   3. `<param>.NAME` where `<param>` is a function parameter whose default value is literally
 //      `process.env` (this codebase's dependency-injection convention for testable env reads —
 //      e.g. `function f(env: NodeJS.ProcessEnv = process.env)` or
@@ -53,7 +54,7 @@ function readsInFile(file: string): Set<string> {
 
 	for (const m of body.matchAll(/process\.env\.([A-Z_][A-Z0-9_]*)/g)) names.add(m[1]);
 	for (const m of body.matchAll(/process\.env\[["']([A-Z_][A-Z0-9_]*)["']\]/g)) names.add(m[1]);
-	for (const m of body.matchAll(/env(?:Bool|Int|Number)\(\s*["']([A-Z_][A-Z0-9_]*)["']/g)) names.add(m[1]);
+	for (const m of body.matchAll(/env(?:Bool|Int|Number|StringList)\(\s*["']([A-Z_][A-Z0-9_]*)["']/g)) names.add(m[1]);
 	// envBoolAliased(primary, legacy, fallback) reads BOTH string literal args — the whole point of
 	// the helper is that either name can decide the flag (batch-3 review, comprehension concern 09).
 	for (const m of body.matchAll(/envBoolAliased\(\s*["']([A-Z_][A-Z0-9_]*)["']\s*,\s*["']([A-Z_][A-Z0-9_]*)["']/g)) {

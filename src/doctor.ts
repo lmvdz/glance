@@ -108,6 +108,14 @@ export interface AutonomyFacts {
 	autosupervise: boolean;
 	landConfirm: boolean;
 	regressionGate: boolean;
+	/** `OMP_SQUAD_COST_GATE` as the daemon sees it (adw-factory-borrows concern 09). `undefined` when
+	 *  the daemon didn't report it (older install) — treated as "off", same as every other flag here. */
+	costGateMode?: "off" | "shadow" | "enforce";
+	/** Whether the daemon has ANY usable cost signal to verdict on — false when the cost aggregate AND
+	 *  the model-outcomes ledger are both empty/too thin to clear `OMP_SQUAD_COST_MIN_SAMPLE` anywhere.
+	 *  `undefined` when unreported (older install) — treated as "unknown, don't claim ready" by the
+	 *  check below, never as "ready". */
+	costAggregateReady?: boolean;
 }
 
 export interface DoctorProbe {
@@ -261,6 +269,29 @@ function autonomyCheck(a: AutonomyFacts): DoctorCheck {
 	return { id: "autonomy", title: "Is autonomy armed, and safely?", status: "ok", detail: `${on.join(", ")} armed; gate ${a.regressionGate ? "on" : "off"}; land ${a.landConfirm ? "confirms" : "auto"}` };
 }
 
+/**
+ * Config posture (adw-factory-borrows concern 09, red-team S1): `OMP_SQUAD_COST_GATE=enforce` with no
+ * usable cost signal is armed but SILENTLY inert — every verdict comes back `undefined` (thin sample
+ * or no ceiling anywhere), so `enforce` never denies anything and looks IDENTICAL to `off` from the
+ * operator's chair. `undefined` (mode unreported, an older daemon) yields no check at all — silence,
+ * not a false "off" claim; `undefined` `costAggregateReady` under a reported `enforce` is treated as
+ * NOT ready (fail loud, never assume readiness the daemon didn't confirm). Absent when mode isn't
+ * "enforce" (nothing to warn about) — same "no check when nothing to say" shape `daemonChecks`'s
+ * `daemon.stale` uses when the two revs aren't comparable. */
+function costGateCheck(a: AutonomyFacts): DoctorCheck | undefined {
+	if (a.costGateMode !== "enforce") return undefined;
+	if (a.costAggregateReady) {
+		return { id: "cost-gate", title: "Is the cost gate armed with real signal?", status: "ok", detail: "OMP_SQUAD_COST_GATE=enforce with a usable cost aggregate" };
+	}
+	return {
+		id: "cost-gate",
+		title: "Is the cost gate armed with real signal?",
+		status: "warn",
+		detail: "OMP_SQUAD_COST_GATE=enforce, but the cost aggregate and model-outcomes ledger are both missing/too thin to verdict on (below OMP_SQUAD_COST_MIN_SAMPLE) — every lane silently stays unenforced",
+		remedy: "let the fleet land enough runs to clear OMP_SQUAD_COST_MIN_SAMPLE (or lower it) before relying on enforce",
+	};
+}
+
 function repoChecks(repos: RepoFacts[]): DoctorCheck[] {
 	if (repos.length === 0) {
 		return [{ id: "projects", title: "Which repos is glance working on?", status: "warn", detail: "no projects registered", remedy: "add one in the web UI (+ Add project…), or POST /api/projects" }];
@@ -346,7 +377,10 @@ export async function runDoctor(probe: DoctorProbe): Promise<DoctorReport> {
 			const a = await probe.autonomy();
 			// Silence is not "off". A daemon we cannot interrogate may well be autolanding right now.
 			if (!a) return [{ id: "autonomy", title: "Is autonomy armed, and safely?", status: "unknown" as const, detail: "the daemon did not answer — its flags cannot be read from here", remedy: "restart it so it can report, or read its launch environment" }];
-			return [autonomyCheck(a)];
+			const checks = [autonomyCheck(a)];
+			const costGate = costGateCheck(a);
+			if (costGate) checks.push(costGate);
+			return checks;
 		}),
 		attempt("state", "Can glance write its state?", async () => {
 			const s = await probe.stateDir();

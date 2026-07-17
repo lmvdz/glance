@@ -1,0 +1,676 @@
+diff -ruN a/effect/SKILL.md b/effect/SKILL.md
+--- a/effect/SKILL.md	2026-07-15 16:30:56.327460845 -0500
++++ b/effect/SKILL.md	2026-07-15 16:44:48.267282911 -0500
+@@ -4,6 +4,8 @@
+   Opinionated guide for building production TypeScript applications with Effect v4. Use when implementing Effect workflows, services, layers, schemas, configuration, schedules, caches, streams, HTTP clients, or tests.
+ license: MIT
+ compatibility: Requires Effect v4. Examples are reviewed against the version documented in this repository.
++vendored-from: kitlangton/skills@30dee8607214c893dd89f6eee65c669ef3dce8c9
++verified-against: effect@4.0.0-beta.98
+ ---
+ 
+ # Effect
+@@ -15,7 +17,7 @@
+ Check these before guessing:
+ 
+ - the nearest `AGENTS.md` and any project-local Effect practices doc
+-- the project-pinned `effect` package source and version
++- the project-pinned `effect` package source and version — this repo pins `effect@4.0.0-beta.98` (see `package.json` / `bun.lock`); every fenced example in this skill's `references/*.md` is typechecked in-process against that exact pin by `scripts/skills-verify.ts`, not against a guessed or generic Effect API surface
+ - current upstream Effect source when the installed package does not answer the question
+ 
+ ## Branch Chooser
+@@ -96,3 +98,4 @@
+ - Do not hide required application authority, credentials, persistence, transports, or external services behind `Context.Reference` defaults.
+ - Do not add arbitrary `Effect.sleep(...)` to tests when a deterministic synchronization primitive is available.
+ - Do not hand-roll Map/TTL/prune caches or in-flight dedupe when `effect/Cache` fits.
++- Do not read config with `Number(process.env.X) || default` — a legitimate `0` or other falsy-but-valid value silently becomes the default. See `references/CONFIG.md`'s Do Nots.
+diff -ruN a/effect/references/CACHING.md b/effect/references/CACHING.md
+--- a/effect/references/CACHING.md	2026-07-15 16:30:56.635461282 -0500
++++ b/effect/references/CACHING.md	2026-07-15 16:39:11.255351408 -0500
+@@ -18,12 +18,18 @@
+ 
+ ## Exit-Aware TTL (cache successes, skip degraded results)
+ 
+-```ts
++```ts id=exit-aware-ttl
+ import { Cache, Duration, Effect, Exit } from "effect"
+ 
++interface Resolved {
++  readonly where: string
++  readonly cacheable: boolean
++}
++declare const resolveUncached: (channelRef: string) => Effect.Effect<Resolved> // never-failing, returns { where, cacheable }
++
+ const makeResolver = Effect.gen(function* () {
+   const cache = yield* Cache.makeWith(
+-    (channelRef: string) => resolveUncached(channelRef), // never-failing, returns { where, cacheable }
++    (channelRef: string) => resolveUncached(channelRef),
+     {
+       capacity: 300,
+       timeToLive: (exit) =>
+@@ -41,15 +47,31 @@
+ 
+ A cache cannot fix a lookup that pays a scoped acquisition per call, such as SDK client construction or authentication. Acquire clients once via the owning layer (`Layer.build` inside a `Layer.unwrap(Effect.gen(...))` composition, or a service dependency) so the cached lookup is a plain call:
+ 
+-```ts
++```ts id=client-acquisition-layer-vs-lookup
++import { Context, Effect, Layer } from "effect"
++
++interface ApiClientOptions {
++  readonly baseUrl: string
++}
++interface ApiClientShape {
++  readonly getRecord: (id: string) => Effect.Effect<unknown>
++}
++class ApiClient extends Context.Service<ApiClient, ApiClientShape>()("Caching.ApiClient") {}
++declare const apiClientLayer: (options: ApiClientOptions) => Layer.Layer<ApiClient>
++declare const getRecord: (id: string) => Effect.Effect<unknown, unknown, ApiClient>
++declare const options: ApiClientOptions
++
+ // Bad: every cache miss acquires a fresh client
+-const lookup = (id: string) =>
++const lookupBad = (id: string) =>
+   getRecord(id).pipe(Effect.provide(apiClientLayer(options)))
+ 
+ // Good: client built once for the layer's lifetime; misses are one API call
+-// Layer.build requires Scope.Scope; acquire this inside the owning layer's scope.
+-const context = yield* Layer.build(apiClientLayer(options))
+-const lookup = (id: string) => Context.get(context, ApiClient).getRecord(id)
++const good = Effect.gen(function* () {
++  // Layer.build requires Scope.Scope; acquire this inside the owning layer's scope.
++  const context = yield* Layer.build(apiClientLayer(options))
++  const lookup = (id: string) => Context.get(context, ApiClient).getRecord(id)
++  return lookup
++})
+ ```
+ 
+ ## Request Batching (`Effect.request` + `RequestResolver`)
+@@ -74,3 +96,4 @@
+ - Do not build a cache inside the request handler or per call — hoist it to the owning layer.
+ - Do not adopt `RequestResolver` batching for per-item REST endpoints just because "batching" sounds faster.
+ - Do not put scoped client acquisition inside the cache lookup; acquire once in the layer.
++- Do not read a cache TTL or capacity from `Number(process.env.X) || default` — see `CONFIG.md`'s Do Nots; a genuinely-configured `0` (e.g. "cache nothing") silently becomes the default instead.
+diff -ruN a/effect/references/CONFIG.md b/effect/references/CONFIG.md
+--- a/effect/references/CONFIG.md	2026-07-15 16:30:56.964959929 -0500
++++ b/effect/references/CONFIG.md	2026-07-15 16:38:14.891361922 -0500
+@@ -4,14 +4,27 @@
+ 
+ Read runtime configuration through Effect `Config` recipes and provider layers, not direct `process.env` access inside application logic.
+ 
+-```ts
++```ts id=config-basics file=config-basics.ts
++import { Config, Context, Effect, Layer, Schema } from "effect"
++
++const AbsolutePath = Schema.String.pipe(Schema.brand("AbsolutePath"))
++
+ export const dataDirectoryConfig = Config.schema(
+   AbsolutePath,
+   "APP_DATA_DIR",
+ )
+ 
++interface ConfigurationShape {
++  readonly apiKey: unknown
++  readonly optionalModel: unknown
++  readonly enabled: boolean
++}
++export class Configuration extends Context.Service<Configuration, ConfigurationShape>()(
++  "Config.Configuration",
++) {}
++
+ export const layerFromEnvironment = Layer.effect(
+-  Configuration.Service,
++  Configuration,
+   Effect.gen(function* () {
+     const apiKey = yield* Config.redacted("API_KEY")
+     const optionalModel = yield* Config.option(Config.string("MODEL"))
+@@ -19,7 +32,7 @@
+       Config.withDefault(false),
+     )
+ 
+-    return Configuration.Service.of({ apiKey, optionalModel, enabled })
++    return Configuration.of({ apiKey, optionalModel, enabled })
+   }),
+ )
+ ```
+@@ -49,15 +62,27 @@
+ 
+ Library-style layers often expose both concrete `layer(options)` and config-backed `layerConfig(options: Config.Wrap<Options>)`.
+ 
+-```ts
++```ts id=layer-config-helper
++import { Config, Context, Effect, Layer } from "effect"
++
++interface ClientOptions {
++  readonly baseUrl: string
++}
++interface ClientShape {
++  readonly baseUrl: string
++}
++class Client extends Context.Service<Client, ClientShape>()("Config.Client") {}
++
++declare const makeClient: (options: ClientOptions) => Effect.Effect<ClientShape>
++
+ export const layerConfig = (
+   config: Config.Wrap<ClientOptions>,
+ ) =>
+   Layer.effect(
+-    Client.Service,
++    Client,
+     Config.unwrap(config).pipe(
+       Effect.flatMap(makeClient),
+-      Effect.map((client) => Client.Service.of(client)),
++      Effect.map((client) => Client.of(client)),
+     ),
+   )
+ ```
+@@ -65,3 +90,9 @@
+ Use this pattern when a service naturally supports runtime config while still allowing tests to pass concrete values.
+ 
+ Use `Layer.succeed(AppConfiguration.Service, testConfig)` when the app already wraps environment config in an application service and the test does not need to exercise Config decoding itself.
++
++## Do Nots
++
++- Do not use `as any`, non-null assertions, or unchecked casts to silence Effect typing problems.
++- Do not read runtime config with `Number(process.env.X) || default` — a legitimate, intentional `0` (or any other falsy-but-valid numeric value) silently becomes `default` instead, because `0 || default` evaluates to `default`. This class of bug hit 34 call sites in one migration in this repo before it was caught. Use an explicit `undefined`/`NaN` check (`const n = Number(process.env.X); const value = process.env.X === undefined || Number.isNaN(n) ? default : n;`) or, preferably, read it through `Config.number("X").pipe(Config.withDefault(default))` so the falsy-eating bug class cannot recur.
++- Do not bypass `Config`/`ConfigProvider` with direct `process.env` reads in application logic — it forgoes typed decoding, redaction, and the ability to swap providers in tests.
+diff -ruN a/effect/references/HTTP_CLIENTS.md b/effect/references/HTTP_CLIENTS.md
+--- a/effect/references/HTTP_CLIENTS.md	2026-07-15 16:30:57.271462193 -0500
++++ b/effect/references/HTTP_CLIENTS.md	2026-07-15 16:40:35.943333129 -0500
+@@ -64,7 +64,26 @@
+ 
+ If a temporary raw `fetch` boundary is unavoidable, keep it inside an adapter service and still use Effect boundary discipline.
+ 
+-```ts
++```ts id=raw-fetch-adapter
++import { Effect, Schema } from "effect"
++
++interface RequestInput {
++  readonly url: string
++  readonly headers?: Record<string, string>
++}
++
++class ProviderError extends Schema.TaggedErrorClass<ProviderError>()(
++  "Provider.ProviderError",
++  { operation: Schema.String, cause: Schema.Defect() },
++) {}
++
++class ProviderRejected extends Schema.TaggedErrorClass<ProviderRejected>()(
++  "Provider.ProviderRejected",
++  { operation: Schema.String, status: Schema.Number },
++) {}
++
++const ResponseSchema = Schema.Struct({ ok: Schema.Boolean })
++
+ const request = Effect.fn("Provider.request")(function* (input: RequestInput) {
+   const response = yield* Effect.tryPromise({
+     try: (signal) => fetch(input.url, { signal, headers: input.headers }),
+diff -ruN a/effect/references/SCHEDULING.md b/effect/references/SCHEDULING.md
+--- a/effect/references/SCHEDULING.md	2026-07-15 16:30:57.603462677 -0500
++++ b/effect/references/SCHEDULING.md	2026-07-15 16:44:06.523299604 -0500
+@@ -15,8 +15,7 @@
+ - Use `Schedule.exponential(...)` or `Schedule.fibonacci(...)` for backoff.
+ - Add `Schedule.jittered` to avoid synchronized retry storms.
+ - Use `Schedule.recurs(...)` for a counter schedule or `Schedule.upTo({ times })` to bound a delay schedule.
+-- Use `Schedule.tapInput(...)` to log retry inputs.
+-- Use `Schedule.tap(...)` when full schedule metadata matters.
++- Use `Schedule.tap(...)` to log retry metadata — its callback receives the full `{ input, output, duration, attempt, elapsed }` shape (there is no separate `tapInput` at this pin; pick the field you need off the metadata object).
+ - Use `Effect.retryOrElse(...)` when exhausted retries need a fallback/reporting effect.
+ - Retry only at the narrowest boundary with proven idempotency.
+ - Exhausted failures should remain visible unless the boundary has a truthful fallback.
+@@ -25,7 +24,11 @@
+ 
+ Prefer typed pass failures over cause recovery.
+ 
+-```ts
++```ts id=polling-worker
++import { Effect, Schedule } from "effect"
++
++declare const runPass: () => Effect.Effect<void, { readonly reason: string }>
++
+ const pass = runPass().pipe(
+   Effect.tapError((error) =>
+     Effect.logError("Worker.pass_failed", error),
+@@ -42,10 +45,12 @@
+ 
+ Use cause-level recovery only at supervision boundaries where the policy is truly "report non-interrupt failure and continue".
+ 
+-```ts
++```ts id=cause-level-supervision
++import { Cause, Effect } from "effect"
++
+ const logNonInterruptCauseAndContinue = (message: string) =>
+   Effect.catchCauseIf(
+-    (cause) => !Cause.hasInterrupts(cause),
++    (cause: Cause.Cause<unknown>) => !Cause.hasInterrupts(cause),
+     (cause) => Effect.logError(message, cause),
+   )
+ ```
+@@ -56,8 +61,16 @@
+ 
+ For batch workers, catch expected item-level typed failures around each item so one bad item does not stall the batch.
+ 
+-```ts
+-yield* Effect.forEach(
++```ts id=per-item-failure-isolation
++import { Effect } from "effect"
++
++interface Item {
++  readonly id: string
++}
++declare const items: ReadonlyArray<Item>
++declare const processItem: (item: Item) => Effect.Effect<void, { readonly reason: string }>
++
++const run = Effect.forEach(
+   items,
+   (item) =>
+     processItem(item).pipe(
+@@ -76,7 +89,17 @@
+ 
+ ## Reusable Retry Policy
+ 
+-```ts
++```ts id=reusable-retry-policy
++import { Effect, Schedule } from "effect"
++
++interface ProjectionError {
++  readonly operation: string
++}
++interface Target {
++  readonly id: string
++}
++declare const reconcile: (target: Target) => Effect.Effect<void, ProjectionError>
++
+ const projectionRetrySchedule: Schedule.Schedule<unknown, ProjectionError> =
+   Schedule.exponential("100 millis").pipe(
+     Schedule.jittered,
+@@ -87,9 +110,9 @@
+   reconcile(target).pipe(
+     Effect.retryOrElse(
+       projectionRetrySchedule.pipe(
+-        Schedule.tapInput((error) =>
++        Schedule.tap((metadata) =>
+           Effect.logWarning("Agent.Projection.reconcile.retrying").pipe(
+-            Effect.annotateLogs({ operation: error.operation }),
++            Effect.annotateLogs({ operation: metadata.input.operation }),
+           ),
+         ),
+       ),
+@@ -104,13 +127,18 @@
+ 
+ For provider errors that carry `retryAfterMs`, let the schedule use the larger of the backoff delay and the provider delay.
+ 
+-```ts
++```ts id=rate-limit-aware-retry
++import { Duration, Effect, Schedule } from "effect"
++
+ type RateLimited = {
+   readonly retryAfterMs?: number | undefined
+ }
+ 
++// Schedule.exponential's Input is `unknown` (it accepts any input) — narrowing it to the actual
++// provider-error shape up front is a safe, common idiom before composing on Input-aware
++// combinators like `modifyDelay` below.
+ const providerRetrySchedule: Schedule.Schedule<RateLimited, RateLimited> =
+-  Schedule.exponential("200 millis").pipe(
++  (Schedule.exponential("200 millis") as Schedule.Schedule<Duration.Duration, RateLimited>).pipe(
+     Schedule.jittered,
+     Schedule.upTo({ times: 5 }),
+     Schedule.passthrough,
+@@ -133,3 +161,7 @@
+ - Use `Effect.sleep(...)` inside production workflows only when sleeping itself is the domain behavior.
+ - Avoid manual sleep loops; use `Effect.repeat(...)` with `Schedule` for recurring work.
+ - In tests, use `TestClock` rather than real time. Read `TESTING.md`.
++
++## Do Nots
++
++- Do not read a retry count, backoff base, or poll interval with `Number(process.env.X) || default` — see `CONFIG.md`'s Do Nots; a deliberately-configured `0` (e.g. "no backoff") silently becomes the default.
+diff -ruN a/effect/references/SCHEMA.md b/effect/references/SCHEMA.md
+--- a/effect/references/SCHEMA.md	2026-07-15 16:30:57.963463201 -0500
++++ b/effect/references/SCHEMA.md	2026-07-15 16:34:57.827399992 -0500
+@@ -6,7 +6,12 @@
+ 
+ Default to `Schema.Struct(...)` plus a same-name `interface`.
+ 
+-```ts
++```ts id=user-schema file=user-schema.ts
++import { Schema } from "effect"
++
++export const UserId = Schema.String.pipe(Schema.brand("UserId"))
++export type UserId = typeof UserId.Type
++
+ export const User = Schema.Struct({
+   id: UserId,
+   name: Schema.NonEmptyString,
+@@ -30,7 +35,10 @@
+ 
+ Reuse fields directly when contracts are semantically related.
+ 
+-```ts
++```ts id=field-reuse file=field-reuse.ts
++import { Schema } from "effect"
++import { User } from "./user-schema.js"
++
+ export const CreateUserInput = Schema.Struct({
+   name: User.fields.name,
+   email: User.fields.email,
+@@ -67,13 +75,15 @@
+ 
+ ## Variants
+ 
+-```ts
++```ts id=tagged-enum-step
++import { Data } from "effect"
++
+ type Step = Data.TaggedEnum<{
+   Continue: { readonly cursor: number }
+   Finished: { readonly count: number }
+ }>
+ 
+-export const Step = Data.taggedEnum<Step>()
++const Step = Data.taggedEnum<Step>()
+ 
+ const next = Step.Continue({ cursor: 10 })
+ const label = Step.$match(next, {
+@@ -82,7 +92,12 @@
+ })
+ ```
+ 
+-```ts
++```ts id=tagged-union-event
++import { Schema } from "effect"
++
++const RunId = Schema.String.pipe(Schema.brand("RunId"))
++type RunId = typeof RunId.Type
++
+ export const Event = Schema.TaggedUnion({
+   Started: { runId: RunId },
+   Finished: { runId: RunId, result: Schema.Json },
+@@ -90,6 +105,7 @@
+ 
+ export type Event = typeof Event.Type
+ 
++declare const runId: RunId
+ const event = Event.cases.Started.make({ runId })
+ const label = Event.match(event, {
+   Started: ({ runId }) => `started ${runId}`,
+@@ -111,7 +127,9 @@
+ 
+ `Schema.TaggedErrorClass` is the explicit class exception for typed Effect errors.
+ 
+-```ts
++```ts id=persistence-error
++import { Schema } from "effect"
++
+ export class PersistenceError extends Schema.TaggedErrorClass<PersistenceError>()(
+   "UserRepo.PersistenceError",
+   {
+diff -ruN a/effect/references/SERVICES_LAYERS.md b/effect/references/SERVICES_LAYERS.md
+--- a/effect/references/SERVICES_LAYERS.md	2026-07-15 16:30:58.322741572 -0500
++++ b/effect/references/SERVICES_LAYERS.md	2026-07-15 16:37:53.043363865 -0500
+@@ -6,7 +6,17 @@
+ 
+ One opinionated application-module style uses file-local role names and one canonical ES module namespace projection. Follow the existing codebase's module style when it has one; this convention is not required by Effect.
+ 
+-```ts
++```ts id=user-repo-module file=user-repo.ts
++import { Context, Effect, Layer, Schema } from "effect"
++import { SqlClient } from "effect/unstable/sql"
++
++// Minimal stand-ins so this module-surface example compiles standalone; a real app defines these
++// with SCHEMA.md's pattern (a Schema.Struct + same-name interface).
++export type UserId = string
++export interface User {
++  readonly id: UserId
++}
++
+ export interface Interface {
+   readonly get: (id: UserId) => Effect.Effect<User, NotFound | PersistenceError>
+ }
+@@ -22,6 +32,7 @@
+ 
+     const get = Effect.fn("UserRepo.get")(function* (id: UserId) {
+       // ...
++      return yield* Effect.fail(new NotFound({ id }))
+     })
+ 
+     return Service.of({ get })
+@@ -30,7 +41,12 @@
+ 
+ export class NotFound extends Schema.TaggedErrorClass<NotFound>()(
+   "UserRepo.NotFound",
+-  { id: UserId },
++  { id: Schema.String },
++) {}
++
++export class PersistenceError extends Schema.TaggedErrorClass<PersistenceError>()(
++  "UserRepo.PersistenceError",
++  { operation: Schema.String, cause: Schema.Defect() },
+ ) {}
+ 
+ export * as UserRepo from "./user-repo.js"
+@@ -38,24 +54,19 @@
+ 
+ Consumers use the module namespace.
+ 
+-```ts
++```ts id=user-repo-consumer file=consumer.ts
++import { Effect } from "effect"
+ import { UserRepo } from "./user-repo.js"
+ 
+-const program = Effect.gen(function* () {
++export const program = Effect.gen(function* () {
+   const repo = yield* UserRepo.Service
+-  return yield* repo.get(id)
++  return yield* repo.get("some-id")
+ })
+ ```
+ 
+-The self-export is deliberate. It lets the file remain the module while giving every consumer the same domain-first name, without a TypeScript `namespace`, wrapper object, or repeated consumer-side aliases.
+-
+-```ts
+-// Sibling module: import the owning leaf directly.
+-import { UserRepo } from "./user-repo.js"
++The self-export is deliberate. It lets the file remain the module while giving every consumer the same domain-first name, without a TypeScript `namespace`, wrapper object, or repeated consumer-side aliases: `export * as UserRepo from "./user-repo.js"` at the bottom of `user-repo.ts` (shown above), so siblings write `import { UserRepo } from "./user-repo.js"` and folder/package barrels relay it with `export { UserRepo } from "./user-repo.js"`.
+ 
+-// Folder or package barrel: relay the identity established by the leaf.
+-export { UserRepo } from "./user-repo.js"
+-```
++> **Optional, not this repo's convention.** This self-export namespace style is upstream's opinionated default, but it produces the unusual `UserRepo.UserRepo === UserRepo` self-reference, and it is not how this codebase's own modules are organized today (`src/**` has zero `export * as` occurrences at vendor time). Treat it as an aside: reach for it only in a codebase that has already adopted it, and prefer plain named exports or a separate barrel otherwise.
+ 
+ Guidance:
+ 
+@@ -72,7 +83,17 @@
+ 
+ Choose the layer constructor that matches the thing produced.
+ 
+-```ts
++```ts id=layer-constructors
++import { Context, Effect, Layer } from "effect"
++
++interface Shape {
++  readonly ping: () => Effect.Effect<string>
++}
++class Service extends Context.Service<Service, Shape>()("LayerConstructors.Service") {}
++
++declare const impl: Shape
++declare const makeEffect: Effect.Effect<Shape>
++
+ Layer.succeed(Service, impl)       // already-built service
+ Layer.sync(Service, () => impl)    // lazy synchronous service
+ Layer.effect(Service, makeEffect)  // effectful service acquisition
+@@ -90,10 +111,19 @@
+ 
+ A layer that starts a stream, listener, worker, subscription, or forever loop must fork that work into the layer scope. Layer acquisition must complete.
+ 
+-```ts
++```ts id=long-lived-work
++import { Context, Effect, Layer, Stream } from "effect"
++
++interface EventsShape {
++  readonly stream: Stream.Stream<string>
++}
++class Events extends Context.Service<Events, EventsShape>()("LongLivedWork.Events") {}
++
++declare const handleEvent: (event: string) => Effect.Effect<void>
++
+ export const layer = Layer.effectDiscard(
+   Effect.gen(function* () {
+-    const events = yield* Events.Service
++    const events = yield* Events
+ 
+     yield* events.stream.pipe(
+       Stream.runForEach(handleEvent),
+@@ -122,7 +152,18 @@
+ 
+ Use extra `Effect.fn(...)` arguments for wrappers that apply to the whole function call. Each transform receives `(effect, ...originalArgs)`.
+ 
+-```ts
++```ts id=effect-fn-transforms
++import { Effect } from "effect"
++
++interface AttachmentRef {
++  readonly id: string
++}
++declare const api: { readonly read: (ref: AttachmentRef) => Effect.Effect<Uint8Array> }
++declare const attachmentError: (
++  operation: string,
++  meta: { readonly attachmentId: string },
++) => <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>
++
+ const readAttachment = Effect.fn("Attachment.read")(
+   function* (ref: AttachmentRef) {
+     return yield* api.read(ref)
+@@ -157,12 +198,29 @@
+ 
+ For boundary errors with operation labels, prefer a shared curried `mapError` helper over hand-writing wrappers in every module.
+ 
+-```ts
+-const persistenceError = operationError(PersistenceError.make)
++```ts id=operation-error-helper
++import { Effect, Schema } from "effect"
+ 
+-const row = yield* query.pipe(
+-  persistenceError("UserRepository.findById"),
+-)
++class PersistenceError extends Schema.TaggedErrorClass<PersistenceError>()(
++  "UserRepository.PersistenceError",
++  { operation: Schema.String, cause: Schema.Defect() },
++) {}
++
++const operationError = <E>(make: (input: { readonly operation: string; readonly cause: unknown }) => E) =>
++  (operation: string) =>
++    <A, R>(effect: Effect.Effect<A, unknown, R>): Effect.Effect<A, E, R> =>
++      effect.pipe(Effect.mapError((cause) => make({ operation, cause })))
++
++const persistenceError = operationError((input) => new PersistenceError(input))
++
++declare const query: Effect.Effect<{ readonly id: string }>
++
++const program = Effect.gen(function* () {
++  const row = yield* query.pipe(
++    persistenceError("UserRepository.findById"),
++  )
++  return row
++})
+ ```
+ 
+ Name the local helper after the error it produces, such as `persistenceError`, `projectionError`, or `processingError`. Use `Effect.fn(...)` and spans for observability in addition to payload labels, not instead of them.
+diff -ruN a/effect/references/STREAMS.md b/effect/references/STREAMS.md
+--- a/effect/references/STREAMS.md	2026-07-15 16:30:58.647463118 -0500
++++ b/effect/references/STREAMS.md	2026-07-15 16:40:04.615342149 -0500
+@@ -57,10 +57,24 @@
+ 
+ Own long-lived stream consumers in layers and fork them into the layer scope.
+ 
+-```ts
++```ts id=long-lived-consumer
++import { Context, Effect, Layer, Stream } from "effect"
++
++interface MessageEvent {
++  readonly type: "message"
++  readonly text: string
++}
++interface GatewayShape {
++  readonly events: Stream.Stream<MessageEvent>
++}
++class Gateway extends Context.Service<Gateway, GatewayShape>()("Streams.Gateway") {}
++
++declare const isMessageEvent: (event: MessageEvent) => boolean
++declare const handleEvent: (event: MessageEvent) => Effect.Effect<void>
++
+ export const layer = Layer.effectDiscard(
+   Effect.gen(function* () {
+-    const gateway = yield* Gateway.Service
++    const gateway = yield* Gateway
+ 
+     yield* gateway.events.pipe(
+       Stream.filter(isMessageEvent),
+@@ -88,7 +102,19 @@
+ 
+ Good service shape:
+ 
+-```ts
++```ts id=good-service-shape
++import type { Stream } from "effect"
++
++interface ProviderEvent {
++  readonly id: string
++}
++interface ProviderError {
++  readonly reason: string
++}
++interface ProviderStatus {
++  readonly connected: boolean
++}
++
+ export interface Interface {
+   readonly events: Stream.Stream<ProviderEvent, ProviderError>
+   readonly status: Stream.Stream<ProviderStatus>
+diff -ruN a/effect/references/TESTING.md b/effect/references/TESTING.md
+--- a/effect/references/TESTING.md	2026-07-15 16:30:59.007461537 -0500
++++ b/effect/references/TESTING.md	2026-07-15 16:41:01.611331272 -0500
+@@ -2,6 +2,8 @@
+ 
+ Use this when writing Effect tests, tests involving time, retry, schedules, concurrency, workers, services, fakes, or config.
+ 
++> **This repo's test runner is `bun:test`, not Vitest.** The `it.effect` / `it.live` helpers below come from `@effect/vitest`, which this repo does not depend on (checked at vendor time: no `@effect/vitest` in `package.json`). The two blocks that call `it.effect(...)` are left `no-verify` for that reason — they typecheck against a real dependency this repo doesn't install, not against a broken API. The pattern itself (test layers over global mutation, `TestClock` over real sleeps, `Deferred`/`Queue`/`Latch`/`Ref` synchronization) still applies verbatim inside a `bun:test` `test(...)` body via `Effect.runPromise(program.pipe(Effect.provide(layer)))`; only the `it.effect(name, () => ...)` wrapper itself is Vitest-specific.
++
+ ## Defaults
+ 
+ - Use `it.effect` by default.
+@@ -12,7 +14,7 @@
+ - Avoid arbitrary `Effect.sleep(...)` in tests; it usually makes tests slow and flaky.
+ - Assert typed failures, rollback, interruption, finalization, retry bounds, idempotency, concurrency laws, and malformed persistence where relevant.
+ 
+-```ts
++```ts no-verify reason="it.effect comes from @effect/vitest, which this repo does not depend on (bun:test is the test runner here) — see the note above the Defaults section"
+ it.effect("finds a user", () =>
+   Effect.gen(function* () {
+     const users = yield* UserRepo.Service
+@@ -30,7 +32,7 @@
+ - Use `Ref` for shared test observation state.
+ - Use explicit test hooks when the production boundary can expose a deterministic synchronization point.
+ 
+-```ts
++```ts no-verify reason="it.effect comes from @effect/vitest, which this repo does not depend on (bun:test is the test runner here) — see the note above the Defaults section"
+ it.effect("publishes exactly once", () =>
+   Effect.gen(function* () {
+     const published = yield* Queue.unbounded<Message>()
+@@ -57,7 +59,16 @@
+ 
+ Use `TestInterface extends Interface`, `TestService`, and `testLayer` for reusable/stateful fakes.
+ 
+-```ts
++```ts id=first-class-test-stub
++import { Context, Effect, Layer, Option, Ref } from "effect"
++
++interface Message {
++  readonly id: string
++}
++interface SendError {
++  readonly reason: string
++}
++
+ export interface Interface {
+   readonly send: (message: Message) => Effect.Effect<void, SendError>
+ }

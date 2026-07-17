@@ -37,6 +37,7 @@ import { getDoneProofByBranch, proofCoversTip } from "./done-proof.ts";
 import { errText } from "./err-text.ts";
 import type { LandLedger } from "./land-ledger.ts";
 import { aheadUnknown } from "./land-mode.ts";
+import { stripAnsi } from "./text-util.ts";
 import type { AgentDTO, AutomationSkipReason, IssueRef } from "./types.ts";
 
 export type Severity = "low" | "high" | "structural";
@@ -98,7 +99,8 @@ export interface ObserverDeps {
 	/** Recurring-failure memory (concern 05, downscoped): annotate a land-failure streak's root cause
 	 *  ONCE per fingerprint (the callee is responsible for its own idempotency — a fingerprint already
 	 *  annotated is a no-op) so a later cold-start on the same branch can warn the next agent. Absent
-	 *  ⇒ disabled (no annotation, matches OMP_SQUAD_FAILURE_MEMORY default off). */
+	 *  ⇒ disabled regardless of the flag (no wiring, not a flag read) — but when wired,
+	 *  `OMP_SQUAD_FAILURE_MEMORY` now defaults ON (skills-hardening concern 05; `=0` disables). */
 	annotateFailure?: (finding: Finding, branch: string) => Promise<void>;
 	/** Epic 3's compliance evaluator (src/compliance.ts) — real policy findings (forced lands,
 	 *  overridden validator vetoes, repeatedly-failing branches) fed into the SAME observe → file →
@@ -150,10 +152,10 @@ function landFailCap(): number {
 
 const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
-/** Strip terminal control sequences before text leaves logs/TTY and becomes a Plane title. */
-export function stripAnsi(value: string): string {
-	return value.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/\x1b[@-_][0-?]*[ -/]*[@-~]/g, "");
-}
+/** Strip terminal control sequences before text leaves logs/TTY and becomes a Plane title. Moved to
+ *  text-util.ts (noisegate-compaction concern 01) so output-reduce.ts can share it without pulling in
+ *  this module's Plane-filing dependencies; re-exported here so existing importers are unaffected. */
+export { stripAnsi };
 
 function cleanTitle(value: string): string {
 	return stripAnsi(value).replace(/\s+/g, " ").trim();

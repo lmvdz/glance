@@ -12,7 +12,18 @@ import { mkdtempSync, rmSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AutomationLog, type AutomationRollupRow } from "../src/automation-log.ts";
-import { buildFactoryStatus, deriveLandBlockStatus, deriveLoopReport, deriveOverall, FACTORY_FRESHNESS_FLOOR_MS, FACTORY_LOOPS, loopFlagEnabled, type BuildFactoryStatusInput } from "../src/factory-status.ts";
+import {
+	buildFactoryStatus,
+	deriveLandBlockStatus,
+	deriveLoopReport,
+	deriveOverall,
+	deriveShadowExitScoreboard,
+	FACTORY_FRESHNESS_FLOOR_MS,
+	FACTORY_LOOPS,
+	loopFlagEnabled,
+	type BuildFactoryStatusInput,
+} from "../src/factory-status.ts";
+import type { MetricEvent } from "../src/metrics.ts";
 
 const NOW = 1_700_000_000_000;
 
@@ -187,6 +198,64 @@ describe("buildFactoryStatus — the whole snapshot", () => {
 		);
 		expect(s.overall).toBe("off");
 		expect(s.loops.every((l) => l.status === "off")).toBe(true);
+	});
+});
+
+describe("deriveShadowExitScoreboard — the shadow-exit surface (adw-factory-borrows concern 09)", () => {
+	const ev = (name: MetricEvent["name"], value: number, tags?: Record<string, string>): MetricEvent => ({ id: 1, at: NOW, name, value, tags });
+
+	test("empty input ⇒ all-zero scoreboard, no lanes", () => {
+		const s = deriveShadowExitScoreboard({ laneEvents: [], routeEvents: [], costEvents: [] });
+		expect(s).toEqual({ laneCounts: {}, laneTotal: 0, modelRouteShadowWouldEscalate: 0, modelRouteShadowTotal: 0, costGateShadowWouldAct: 0, costGateShadowTotal: 0 });
+	});
+
+	test("lane counts tally by the `lane` tag, total is the sum", () => {
+		const laneEvents = [
+			ev("lane-classification", 1, { lane: "feature", source: "default" }),
+			ev("lane-classification", 1, { lane: "feature", source: "default" }),
+			ev("lane-classification", 1, { lane: "chore", source: "heuristic" }),
+		];
+		const s = deriveShadowExitScoreboard({ laneEvents, routeEvents: [], costEvents: [] });
+		expect(s.laneCounts).toEqual({ feature: 2, chore: 1 });
+		expect(s.laneTotal).toBe(3);
+	});
+
+	test("model-route shadow-would-escalate counts only mode=shadow rows where value===1 (a real shift)", () => {
+		const routeEvents = [
+			ev("model-route-decision", 1, { mode: "shadow", taskClass: "tdd:heavy", lane: "feature" }), // would-escalate
+			ev("model-route-decision", 0, { mode: "shadow", taskClass: "none:light", lane: "feature" }), // no-shift, still shadow
+			ev("model-route-decision", 1, { mode: "apply", taskClass: "tdd:heavy", lane: "hotfix" }), // applied for real, not shadow
+		];
+		const s = deriveShadowExitScoreboard({ laneEvents: [], routeEvents, costEvents: [] });
+		expect(s.modelRouteShadowTotal).toBe(2);
+		expect(s.modelRouteShadowWouldEscalate).toBe(1);
+	});
+
+	test("cost-gate shadow-would-ask/deny excludes enforce-mode rows (those are REAL, already-acted-on verdicts)", () => {
+		const costEvents = [
+			ev("cost-gate-verdict", 1, { action: "ask", lane: "feature", mode: "shadow" }), // would-ask
+			ev("cost-gate-verdict", 1, { action: "shadow", lane: "hotfix", mode: "shadow" }), // shadow action, not ask/deny
+			ev("cost-gate-verdict", 1, { action: "deny", lane: "chore", mode: "enforce" }), // REAL deny, excluded from shadow tally
+		];
+		const s = deriveShadowExitScoreboard({ laneEvents: [], routeEvents: [], costEvents });
+		expect(s.costGateShadowTotal).toBe(2); // the two non-enforce rows
+		expect(s.costGateShadowWouldAct).toBe(1); // only the "ask" one actually would have acted
+	});
+
+	test("buildFactoryStatus wires the scoreboard into the whole snapshot; absent events default to empty", () => {
+		const withEvents = buildFactoryStatus(
+			baseInput({
+				laneEvents: [ev("lane-classification", 1, { lane: "chore", source: "heuristic" })],
+				routeEvents: [ev("model-route-decision", 1, { mode: "shadow" })],
+				costEvents: [ev("cost-gate-verdict", 1, { action: "deny", mode: "shadow" })],
+			}),
+		);
+		expect(withEvents.shadowExits.laneCounts).toEqual({ chore: 1 });
+		expect(withEvents.shadowExits.modelRouteShadowWouldEscalate).toBe(1);
+		expect(withEvents.shadowExits.costGateShadowWouldAct).toBe(1);
+
+		const noEvents = buildFactoryStatus(baseInput());
+		expect(noEvents.shadowExits).toEqual({ laneCounts: {}, laneTotal: 0, modelRouteShadowWouldEscalate: 0, modelRouteShadowTotal: 0, costGateShadowWouldAct: 0, costGateShadowTotal: 0 });
 	});
 });
 

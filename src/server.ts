@@ -69,6 +69,7 @@ import {
 	PlanCandidateTransitionBodySchema,
 	PlanVoteCallBodySchema,
 	PlanVoteCastBodySchema,
+	PromoteBodySchema,
 	PushSubscriptionBodySchema,
 	SpawnBodySchema,
 	AskBodySchema,
@@ -104,6 +105,7 @@ import { readModelOutcomes } from "./model-outcomes.ts";
 import { readTaskOutcomes } from "./task-outcomes.ts";
 import { readAllReceipts } from "./receipts.ts";
 import { fetchIssueDetail, listPlaneIssues, planeConfig, planeRepos } from "./plane.ts";
+import { promoteIssue } from "./promote.ts";
 import { runVisionPass } from "./vision.ts";
 import { checkVisionUrl } from "./ssrf.ts";
 import { harnessEventDecision } from "./harness-hooks.ts";
@@ -172,6 +174,8 @@ import { type FederationSnapshot, federationView } from "./federation.ts";
 import { workflowSnapshot } from "./workflow-catalog.ts";
 import { validateRequestedMode } from "./autonomy.ts";
 import { resolveStateDir } from "./state-dir.ts";
+import { costGateAggregateReady, costGateMode } from "./cost-gate.ts";
+import { laneFromRouted } from "./lane.ts";
 import { featureFlagStates, type FeatureFlagKey, isFeatureFlagKey, type RuntimeSettingsStore } from "./runtime-settings.ts";
 import { parsePolicyDoc, type PolicyStore } from "./policy.ts";
 import { publicCapabilityCatalog, publicCapabilityManifest } from "./capabilities/catalog.ts";
@@ -882,6 +886,17 @@ export class SquadServer {
 			// Not a feature flag: read straight from the env the orchestrator reads.
 			landConfirm: envBool("OMP_SQUAD_LAND_CONFIRM", false),
 			regressionGate: on("OMP_SQUAD_REGRESSION_GATE"),
+			// Cost-gate posture (adw-factory-borrows concern 09): mode is env-global; aggregate readiness
+			// is per-stateDir — file mode's resolveStateDir() is exactly the dir SquadManager defaults to.
+			// (DB mode reports the global dir; per-org cost aggregates aren't wired there yet, same
+			// posture as plane.ts's multi-org write guard.) Without these two fields the doctor's
+			// enforce-armed-but-inert check reads undefined and never fires against a live daemon.
+			costGateMode: costGateMode(),
+			// costGateAggregateReady, NOT costAggregateNeedsRebuild: "the doc exists and parses" is true
+			// after the very first receipt write while every cell is still below OMP_SQUAD_COST_MIN_SAMPLE
+			// — enforce would be armed but silently inert, the exact false-green this fact feeds the
+			// doctor to catch. Readiness = some cell (either ledger) clears the sample floor.
+			costAggregateReady: await costGateAggregateReady(resolveStateDir()),
 		};
 	}
 
@@ -2500,6 +2515,11 @@ export class SquadServer {
 			// Observability-only provenance (e.g. "voice") threaded to recordAudit/audit.jsonl —
 			// contain-or-omit, same as every other `source` in audit.ts: never consulted for authz.
 			const source = Result.isSuccess(decoded) && typeof decoded.success.source === "string" ? decoded.success.source : undefined;
+			// Operator-sourced lane (adw-factory-borrows F1): the authenticated spawn caller is the
+			// operator, so this is the production path that makes `laneSource === "operator"` — and with
+			// it every LANE_POLICY privilege axis — actually reachable. Invalid values drop to undefined
+			// (classifier decides), never coerce.
+			const lane = Result.isSuccess(decoded) ? laneFromRouted(decoded.success) : undefined;
 			const tracked = manager.projects().map((p) => p.repo);
 			// research-sirvir/03 (dead-wire fix): feed the outcome-driven model shift from THIS request's
 			// resolved `manager` — never a bare `resolveStateDir()`, which in DB mode returns the global
@@ -2509,7 +2529,7 @@ export class SquadServer {
 			const scoreboard = envBool("OMP_SQUAD_MODEL_OUTCOMES", false) ? await manager.spawnScoreboard() : undefined;
 			const plan = await planSpawn(prompt, { cwd: process.cwd(), candidates: discoverRepos(process.cwd(), tracked), scoreboard });
 			try {
-				const dto = await manager.create({ ...plan, profileId, track: true }, actor, source);
+				const dto = await manager.create({ ...plan, profileId, lane, track: true }, actor, source);
 				return Response.json({ agent: dto, plan });
 			} catch (err) {
 				return new Response(err instanceof Error ? err.message : String(err), { status: 409 });
@@ -2690,6 +2710,25 @@ export class SquadServer {
 			const detail = await fetchIssueDetail(url.searchParams.get("repo") ?? process.cwd(), id);
 			if (detail === null) return new Response("plane not configured", { status: 501 });
 			return Response.json(detail);
+		}
+		// adw-factory-borrows concern 05: enrich a Backlog Plane issue with Tier-1/Tier-2 context via
+		// the manager's ask-mode seam, fail-closed validated. Blocks for the same wait window `glance
+		// ask` does (it IS an ask-mode unit under the hood) — the result body always carries `ok` +
+		// `message`, never a bare 4xx/5xx, so the caller always gets the specific refusal reason.
+		const mipromote = url.pathname.match(/^\/api\/issues\/([^/]+)\/promote$/);
+		if (mipromote && req.method === "POST") {
+			const id = decodeURIComponent(mipromote[1]);
+			if (!id) return new Response("issue id required", { status: 400 });
+			const body = decodeBodyOrEmpty(PromoteBodySchema, await req.json().catch(() => null));
+			const repo = typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
+			// A real promotion dispatches an ask-mode unit and waits up to GLANCE_ASK_TIMEOUT_MS (default
+			// 30 min) for its answer — routinely several minutes even in the fast case. That's well past
+			// Bun's 120s idleTimeout (see the comment at Bun.serve above, whose own point is that a
+			// handler stalled this long gets its socket dropped with "request timed out"). Disable the
+			// per-request idle timeout for this one route (0 = no timeout) so the connection survives the
+			// wait; every other route keeps the 120s default.
+			server.timeout(req, 0);
+			return Response.json(await promoteIssue(manager, repo, id, actor));
 		}
 		if (url.pathname === "/api/comments" && req.method === "GET") {
 			const subject = url.searchParams.get("subject") ?? "";

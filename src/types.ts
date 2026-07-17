@@ -15,6 +15,8 @@ import type { SubagentNode } from "./subagents.ts";
 import type { ModelLineage } from "./model-lineage.ts";
 import type { LensId } from "./lens-select.ts";
 import type { HarnessScorecard } from "./harness-scorecard.ts";
+import type { WorkLane, WorkLaneSource } from "./lane.ts";
+import type { ComplexityTier } from "./model-outcomes.ts";
 
 /** Derived, human-meaningful lifecycle state of one managed agent. */
 export type AgentStatus =
@@ -196,6 +198,12 @@ export interface IssueRef {
 	 *  best-effort from the issue detail; UNTRUSTED (human/skills-MCP-writable) — must be fenced as data,
 	 *  not instructions, before it reaches an agent prompt. Absent ⇒ title-only dispatch (no regression). */
 	description?: string;
+	/** Work lane resolved from a Plane `lane:hotfix|feature|chore` LABEL (never title text — titles are
+	 *  LLM-writable, a fail-open privilege key; labels are human-set). Set by `src/squad-manager.ts`'s
+	 *  `dispatchSpec` from the issue detail fetch. A lane sourced here is ticket text and, per the clamp
+	 *  rule (adw-factory-borrows concern 02, DESIGN.md), may only move policy axes in shadow or the
+	 *  stricter direction — never on its own escalate a privilege axis (model apply-mode, ceiling raise). */
+	lane?: WorkLane;
 }
 
 // ── Feedback Loop domain/wire types ─────────────────────────────────────────
@@ -860,6 +868,10 @@ export interface AgentDTO {
 	error?: string;
 	/** Work item this agent is advancing (e.g. a Plane issue). */
 	issue?: IssueRef;
+	/** Resolved work lane (adw-factory-borrows concern 02) — `opts.lane` (operator) > `issue.lane`
+	 *  (Plane label) > classifier (`routeIntake`) > `"feature"` default. Stamped once at create time,
+	 *  same precedence-clamp invariant as `IssueRef.lane`/`CreateAgentOptions.lane`. */
+	lane?: WorkLane;
 	/** Feature this agent belongs to (single source of truth for membership). */
 	featureId?: string;
 	/** Repo-relative path prefixes this agent will read. */
@@ -975,6 +987,16 @@ export interface RunReceipt {
 	 *  request time instead of confirmed-delivery time would measure a placebo, not a real behavior
 	 *  change. Absent ⇒ nothing requested, or nothing delivered. */
 	efficiencyFlags?: string[];
+	/** Work lane the unit resolved at create time (adw-factory-borrows concern 02) — prerequisite for
+	 *  concern 08's lane-keyed cost aggregate. Stamped from the seed at `RunAccumulator.snapshot()`. */
+	lane?: WorkLane;
+	/** Complexity tier this run was bucketed under (`model-outcomes.ts`'s `tierOf(thinking)`) —
+	 *  the other half of concern 08's `(model, tier, lane)` cost-aggregate key, alongside `lane` above.
+	 *  Absent until a spawn caller stamps `RunSeed.tier` (mirrors `lane`'s own rollout exactly — see
+	 *  `cost-aggregate.ts`'s module doc "rollout note"); a receipt with no `tier` buckets under the
+	 *  aggregate's literal "unknown" tier, which a real `ComplexityTier` query never matches, so this
+	 *  field's absence is inert rather than silently misclassifying. */
+	tier?: ComplexityTier;
 }
 
 /** Compact run summary carried on the DTO for the dashboard. */
@@ -1015,6 +1037,11 @@ export interface PersistedAgent {
 	promoted?: boolean;
 	thinking?: ThinkingLevel;
 	issue?: IssueRef;
+	/** Resolved work lane, persisted so a restart doesn't lose the precedence decision (concern 02). */
+	lane?: WorkLane;
+	/** The lane's resolved SOURCE, persisted with it: restore must not upgrade a classifier/label lane
+	 *  into an operator-sourced (privilege-bearing) one. */
+	laneSource?: WorkLaneSource;
 	featureId?: string;
 	/** Runtime class; defaults to "omp-operator" when absent (back-compat). */
 	kind?: AgentKind;
@@ -1202,6 +1229,16 @@ export interface CreateAgentOptions {
 	scopeSource?: ScopeSource;
 	/** Auto-create + attach a tracking Plane issue for this spawn (work→Plane). Set at human/dispatch spawn entry points; off for restore/fan-out. */
 	track?: boolean;
+	/** Operator/API-sourced work lane — the ONLY source (alongside a `policy.json` dispatch-seam
+	 *  override) allowed to move a privilege axis (model apply-mode, ceiling raise); wins over a Plane
+	 *  label (`opts.issue.lane`) or the classifier (`routeIntake`'s `decision.lane`) in the precedence
+	 *  clamp resolved in `createWithId` (adw-factory-borrows concern 02). */
+	lane?: WorkLane;
+	/** RESTORE-ONLY: the persisted lane source, passed by the daemon-restart resume paths so the
+	 *  original precedence decision survives verbatim. Never set this from user/API input — doing so
+	 *  would let a caller forge a non-operator source (harmless) or, worse, restore code forgetting it
+	 *  would upgrade classifier lanes to operator privilege. */
+	laneSource?: WorkLaneSource;
 	/** Skip the global live-agent WIP cap (restore / fan-out paths that recreate already-accounted-for agents). */
 	bypassCap?: boolean;
 	/** Re-created from a surviving worktree during restart adoption (OMPSQ-164). Marks the agent so the
@@ -1366,6 +1403,7 @@ export type AutomationSkipReason =
 	| "human-review" //    work exists but is gated on human review / do-not-auto-land
 	| "blocked" //         work exists but is blocked by open dependency issues
 	| "already-done" //    open issue's work is already recorded done in the repo (closed plan concern)
+	| "unreleased-state" // open issue's Plane state group isn't in the releasable dispatch set
 	| "dirty-main"; //     land loop only: main checkout has uncommitted tracked changes — land refused
 
 /**

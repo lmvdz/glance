@@ -103,6 +103,39 @@ export function envBool(name: string, fallback: boolean): boolean {
 	return fallback
 }
 
+/**
+ * Read a comma-separated list env var, trimming and dropping blank entries.
+ * Returns `fallback` (already trimmed/deduped by the caller if needed) when
+ * unset/blank. No warning path: any nonempty token is valid — there's no
+ * "not a valid list" shape to misconfigure into.
+ */
+export function envStringList(name: string, fallback: string[]): string[] {
+	const raw = process.env[name]
+	if (raw === undefined || raw.trim() === "") return fallback
+	const parsed = raw
+		.split(",")
+		.map((s) => s.trim())
+		.filter((s) => s.length > 0)
+	return parsed.length > 0 ? parsed : fallback
+}
+
+/**
+ * Releasable Plane state groups the Dispatcher will auto-dispatch from.
+ *
+ * Default `backlog,unstarted,started` is today's behavior (no change) — the
+ * Dispatcher has never checked `issue.state` before this concern, so flipping
+ * the default here would silently starve dispatch of raw Backlog tickets an
+ * operator relies on. The migration to `unstarted,started` (Backlog becomes a
+ * real holding pen for promotion) is an explicit operator step, not a code
+ * default flip.
+ */
+export function dispatchStates(): string[] {
+	// Lowercased: Plane state GROUPS are lowercase ("unstarted"), but Plane's UI capitalizes state
+	// names — an operator typing `Unstarted,Started` would otherwise silently hold 100% of open work
+	// (code-review, CONFIRMED).
+	return envStringList("OMP_SQUAD_DISPATCH_STATES", ["backlog", "unstarted", "started"]).map((s) => s.toLowerCase())
+}
+
 /** Test-only: reset the once-per-var warning guard. */
 export function __resetConfigWarnings(): void {
 	warned.clear()
@@ -126,6 +159,16 @@ export function envBoolAliased(primary: string, legacy: string, fallback: boolea
 	const primaryRaw = process.env[primary]
 	if (primaryRaw !== undefined && primaryRaw.trim() !== "") return envBool(primary, fallback)
 	return envBool(legacy, fallback)
+}
+
+/**
+ * Race-once at workflow catastrophe (adw-factory-borrows concern 07): default OFF. Flipping this on
+ * only ARMS the mechanism — an individual unit still only races when its resolved lane's
+ * `LANE_POLICY[lane].race === 1` (today: hotfix only, DESIGN.md). Two gates, not one, so enabling the
+ * feature globally never races a lane the constants table didn't already opt in.
+ */
+export function raceOnceEnabled(): boolean {
+	return envBool("OMP_SQUAD_RACE_ONCE", false)
 }
 
 /**

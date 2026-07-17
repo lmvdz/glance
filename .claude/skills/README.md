@@ -12,6 +12,7 @@ Distilled 2026-07-04 by mining all ~40 Claude Code session transcripts (~250MB J
 | `scratch-daemon` | Isolated throwaway daemon for live verification: boot/seed/drive/teardown + controlled pipeline dogfood + prove-preexisting | 6 sessions, ~10 spinups in one |
 | `execute-plan` | Adversarial design panel → review-gated batches → audit gauntlet → stacked PRs → crash recovery (scripts in `references/`) | 6 workflow executions, 13/13 concerns shipped clean |
 | `make-it-work` | (pre-existing) one lies→works fix per iteration, proven by running it | — |
+| `effect` | Vendored from [kitlangton/skills](https://github.com/kitlangton/skills) (MIT, SHA `30dee860`; see `effect/PROVENANCE.md`) — opinionated Effect v4 guide (services/layers, schema, config, scheduling, caching, streams, HTTP clients, testing), adapted to this repo's `effect@4.0.0-beta.98` pin and gate-proven: every fenced TS example compiles in-process against that exact version | first `skills-verify`-gated skill; router + 8 references |
 
 ## Proposed skills (worth writing when the shape next fires)
 
@@ -54,3 +55,112 @@ Distilled 2026-07-04 by mining all ~40 Claude Code session transcripts (~250MB J
 3. Status stores lie in every direction → `reality-audit`.
 4. Shared checkout + shared sockets as collision zones → `scratch-daemon`, untangle-wip.
 5. Tooling that lies (rtk mangling, swallowed pushes, truncated notifications) → boilerplate above + push-integrity hook.
+
+## skills-verify: a truth gate for this directory
+
+A skill doc is a claim about the codebase — "run `bun run check`", "`src/plane.ts` does X", "set
+`OMP_SQUAD_AUTOSUPERVISE=0`". Nothing checked those claims until `scripts/skills-verify.ts`, which
+runs automatically under `bun test tests/skills-verify.test.ts` (and therefore under `bun test`)
+and gates every skill directly under this one — the set of names committed in
+`COMMITTED_SKILL_NAMES` in that script. It fails closed: a broken link, a fenced TypeScript example
+that no longer typechecks, a `` `bun run` `` command that names no real script, or an env var this
+codebase never reads all turn the gate red, by design, the same way `defect-ratchet.ts` and
+`effect-migration.ts` gate the `src/` tree.
+
+This section documents the conventions the gate enforces. See
+`plans/skills-hardening/01-skills-verify-gate.md` and `plans/skills-hardening/DESIGN.md` for the
+full spec and the red-team reasoning behind each decision.
+
+### Fence info-string grammar
+
+A fenced code block's info string (the text right after the opening ` ``` `) can carry attributes:
+
+```
+```ts id=user-repo file=user-repo.ts
+```
+```ts id=main file=main.ts
+import { UserRepo } from "./user-repo.js"
+```
+```ts no-verify reason="illustrative pseudocode, not a real API"
+```
+
+- **`` ```ts `` / `` ```typescript ``** blocks are typechecked. They require an `id=` (used in
+  error messages and, absent `file=`, as the synthesized filename) unless the block is opted out
+  with `no-verify`.
+- **`file=<relative-path>`** is optional. Every ts block from the same doc that carries a `file=`
+  is written into ONE synthesized directory for that doc, so blocks can `import` each other by
+  relative specifier — write `./foo.js` in the example (bundler resolution maps the `.js`
+  specifier to the synthesized `.ts` source, matching how this repo's own `verbatimModuleSyntax`
+  + `moduleResolution: bundler` setup expects imports to look). Without `file=`, the block gets its
+  own file named `<id>.ts` in that same per-doc directory.
+- **`no-verify reason="..."`** opts a ts block out of typechecking entirely. The reason is
+  mandatory and non-empty — an empty or missing reason is itself a gate violation. Every
+  `no-verify` is counted per skill and checked against a committed ceiling
+  (`NO_VERIFY_BASELINE` in `scripts/skills-verify.ts` — the vendored `effect` skill carries 2, for
+  `@effect/vitest` examples this repo can't compile). Opting a NEW block out requires deliberately raising that skill's baseline
+  in the same PR — the same ratchet discipline as `defect-ratchet.ts`'s `PATTERNS[].baseline`.
+- A **deliberately-wrong** example (showing what NOT to do) stays verified rather than opting out:
+  mark the erroring line `// @ts-expect-error` inside an otherwise-normal `ts` block. The gate
+  fails if the expected error ever stops firing (TS2578), so the example can't silently drift into
+  actually being correct without anyone noticing.
+- **Untagged fences** (` ``` ` with no language at all) are fine in a file with no ts blocks
+  (this repo's `blind-review` and `make-it-work` skills both use bare fences for prose templates).
+  An untagged fence in a file that ALSO has a ts block is a hard failure — tag it or opt it out
+  explicitly. `js`/`javascript` tags are verified the same as `ts` (a retag between code spellings
+  changes nothing), fences opened with 4+ backticks are parsed like any other, and an unterminated
+  fence is a hard failure (everything after it would silently leave the gate's view). Honest
+  limitation: retagging a code example as ` ```text ` DOES drop it out of typechecking — the gate
+  cannot know prose from code by content; that dodge is visible in review, not to the gate.
+
+### Identifier-existence tier
+
+Every skill's prose (and the inside of ` ```bash ` fences — bash examples make real claims too) is
+scanned for three backticked patterns, whether or not the skill has any code blocks:
+
+- `` `OMP_SQUAD_*` `` / `` `GLANCE_*` `` tokens must have a real read site somewhere in `src/**`
+  (`process.env.X`, or `X` passed as a string literal to `envInt`/`envBool`).
+- Backticked repo-relative paths (contain `/`, don't start with `http(s)://`, `~`, `$`, or contain
+  a `<placeholder>` or `origin/`-style git ref) must exist on disk — checked relative to the
+  skill's own directory first, then the repo root.
+- `` `bun run <script>` `` must name a script in the root `package.json` or `webapp/package.json`.
+
+False positives (a git branch name that happens to look like a path, a build artifact that only
+exists after a build step) go in the committed `IDENTIFIER_ALLOWLIST` in `scripts/skills-verify.ts`
+— never a silent skip. The allowlist's SIZE is itself ratcheted
+(`IDENTIFIER_ALLOWLIST_BASELINE`), so growing it is a deliberate, reviewed act. Be conservative
+about what you flag in the first place: when a token pattern is genuinely ambiguous, prefer
+allowlisting it by name over widening the detection regex — a noisy gate gets deleted, not fixed.
+
+### `verified-against` stamps
+
+A skill's frontmatter can declare `verified-against: effect@4.0.0-beta.93`. The gate hard-fails
+when that version doesn't match the currently-resolved `effect` pin (read from
+`node_modules/effect/package.json`, cross-checked against `bun.lock`). The ONLY way to green a
+stale stamp is:
+
+```
+bun run scripts/skills-verify.ts --stamp
+```
+
+which rewrites every stale stamp to the resolved version — but only once the rest of the gate
+(typecheck, structure, identifiers) is already clean; it refuses to stamp over a genuinely broken
+skill, and it hard-errors (never silently no-ops) if a stamp line fails to rewrite. Precisely
+stated, the enforced invariant is: the stamp must EQUAL the currently-resolved version, and the
+gate re-proves every example against that resolved version on every run — so a hand-edit to the
+matching version is equivalent to stamping (the proof behind the number is the gate run itself,
+not the tool that wrote it). Every `effect` version bump requires a `--stamp` re-run (or the
+equivalent edit) in the same PR that bumps it.
+
+### Advisory mode (`~/.claude/skills` and other external roots)
+
+```
+bun scripts/skills-verify.ts --roots ~/.claude/skills
+```
+
+runs the same five tiers (typecheck, workflow-file syntax, identifiers, structure, freshness) over
+any directory — but ADVISORY only. The repo-manifest set-equality check and the `effect`-skill
+tripwire (both specific to this repo's own committed skill list) are skipped, and nothing in this
+repo's `bun test` suite scans anything but the default root (`.claude/skills`). The user-global
+skills pipeline at `~/.claude/skills` is real and higher-traffic than this repo's own skills, but it
+is explicitly OUT of this gate's authority — this command exists to let you point the same checks
+at it by hand, not to make it part of `omp-squad`'s CI surface.

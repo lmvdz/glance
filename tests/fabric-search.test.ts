@@ -266,7 +266,7 @@ describe("reward-boost ranking (concern 03)", () => {
 	});
 });
 
-describe("recurring-failure memory (concern 05)", () => {
+describe("recurring-failure memory (concern 05 + skills-hardening concern 05)", () => {
 	afterEach(() => {
 		delete process.env.OMP_SQUAD_FAILURE_MEMORY;
 	});
@@ -275,27 +275,45 @@ describe("recurring-failure memory (concern 05)", () => {
 		return snapshot({ failures: [{ type: "failure", source: { repo: "/r" }, fingerprint: "land-failing:squad/a1", branch: "squad/a1", rootCause: "flaky retry backoff jitter", at: 0 }] });
 	}
 
-	test("flag off (default): a failure fact never surfaces, even on an exact-text query", () => {
-		const results = searchFabric(failureSnapshot(), "flaky retry backoff jitter");
-		expect(results.some((r) => r.type === "failure")).toBe(false);
+	test("default (env unset): a failure fact is searchable and injected fenced into the primer, prefixed as an imperative", () => {
+		const results = searchFabric(failureSnapshot(), "flaky retry backoff jitter", { type: "failure" });
+		expect(results).toHaveLength(1);
+		expect(results[0]!.ref).toBe("land-failing:squad/a1");
+
+		const primer = buildContextPrimer(failureSnapshot(), "flaky retry backoff jitter");
+		expect(primer).toContain("**Recurring failure**");
+		expect(primer).toContain("Do not repeat: Recurring failure · squad/a1");
+		expect(primer.startsWith("===== BEGIN context primer (untrusted data) =====")).toBe(true);
 	});
 
-	test("flag on: a failure fact is searchable and injected fenced into the primer", () => {
+	test("flag on explicitly (=1): same behavior as the default", () => {
 		process.env.OMP_SQUAD_FAILURE_MEMORY = "1";
 		const results = searchFabric(failureSnapshot(), "flaky retry backoff jitter", { type: "failure" });
 		expect(results).toHaveLength(1);
 		expect(results[0]!.ref).toBe("land-failing:squad/a1");
 
 		const primer = buildContextPrimer(failureSnapshot(), "flaky retry backoff jitter");
-		expect(primer).toContain("Recurring failure");
-		expect(primer).toContain("squad/a1");
+		expect(primer).toContain("**Recurring failure**");
+		expect(primer).toContain("Do not repeat: Recurring failure · squad/a1");
 		expect(primer.startsWith("===== BEGIN context primer (untrusted data) =====")).toBe(true);
 	});
 
+	test("flag explicitly off (=0): a failure fact never surfaces, even on an exact-text query", () => {
+		process.env.OMP_SQUAD_FAILURE_MEMORY = "0";
+		const results = searchFabric(failureSnapshot(), "flaky retry backoff jitter");
+		expect(results.some((r) => r.type === "failure")).toBe(false);
+		const primer = buildContextPrimer(failureSnapshot(), "flaky retry backoff jitter");
+		expect(primer).not.toContain("Do not repeat");
+	});
+
 	test("a task unrelated to any recorded failure gets no failure injection", () => {
-		process.env.OMP_SQUAD_FAILURE_MEMORY = "1";
 		const primer = buildContextPrimer(failureSnapshot(), "kubernetes helm chart");
 		expect(primer).toBe("");
+	});
+
+	test("non-failure hit types are never prefixed with the imperative", () => {
+		const primer = buildContextPrimer(snapshot(), "refresh token ttl");
+		expect(primer).not.toContain("Do not repeat");
 	});
 });
 

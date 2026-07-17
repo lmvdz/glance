@@ -103,6 +103,9 @@ export function restActionTier(method: string, pathname: string): Role {
 	// access-token (operator-or-higher in practice), so it clears this bar; the scope gate still
 	// drops anything outside a registered project on top.
 	if (pathname === "/api/harness-events") return "operator";
+	// Promoting an issue (adw-factory-borrows concern 05) spawns an ask-mode unit and can write to
+	// Plane — everyday driving, same tier as /api/answers and create/commission, not administration.
+	if (/^\/api\/issues\/[^/]+\/promote$/.test(pathname)) return "operator";
 	// Presence/lease reads are viewer; WRITES (the cockpit registering the human as present /
 	// holding a file — fleet-ide-intervention I02) mutate shared machine-wide state, so operator.
 	// The route additionally scope-gates writes to a daemon-known workspace and refuses DB mode.

@@ -380,6 +380,10 @@ export const SpawnBodySchema = Schema.Struct({
 	prompt: Schema.String,
 	profileId: Schema.optional(Schema.Unknown),
 	source: Schema.optional(Schema.Unknown),
+	/** Operator-sourced work lane (adw-factory-borrows) — an authenticated API caller IS the operator,
+	 *  so a valid value here reaches `CreateAgentOptions.lane` and may move privilege axes. Validated
+	 *  against the `WorkLane` union at the handler; invalid values are dropped, never guessed. */
+	lane: Schema.optional(Schema.Unknown),
 });
 
 /** POST /api/agents/adopt (fleet-ide-escalation E03) — adopt an ad-hoc B03 harness session into a
@@ -458,6 +462,12 @@ export const OrgVoiceEnabledBodySchema = Schema.Struct({
 
 /** POST /api/tasks/:id/start — no required field (`repo` falls back to `process.cwd()`). */
 export const TaskStartBodySchema = Schema.Struct({
+	repo: Schema.optional(Schema.Unknown),
+});
+
+/** POST /api/issues/:id/promote (adw-factory-borrows concern 05) — no required field, same shape as
+ *  `TaskStartBodySchema` (`repo` falls back to `process.cwd()`). */
+export const PromoteBodySchema = Schema.Struct({
 	repo: Schema.optional(Schema.Unknown),
 });
 
