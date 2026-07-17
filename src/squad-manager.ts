@@ -46,6 +46,7 @@ import { type Answer, answerBrief, listAnswers, possiblyStale, readAnswer, saveA
 // used pervasively below via `AgentDTO.attentionEvents`) — importing this module's same-named type
 // bare would collide. `OperatorAttentionEvent` disambiguates at every use site in this file.
 import { AttentionStore, type AttentionEvent as OperatorAttentionEvent, type AttentionRecordInput, type RecordResult, type SeenMap, type SurpriseCountMap } from "./attention.ts";
+import { computeLadderPriority, type LadderPriority } from "./attention-ladder.ts";
 import { errText } from "./err-text.ts";
 import { armCompletionPushKind, completionMinTurnMs, completionTurnLongEnough, type CompletionPushKind } from "./completion-push.ts";
 import { allowPushTap, isKnownPushTapAgentId, isValidPushTapAgentId } from "./authz.ts";
@@ -1140,6 +1141,55 @@ export class SquadManager extends EventEmitter {
 		dto.availableActions = availableActions(effectiveMode, verificationState, blockedReason);
 	}
 
+	/** t3-face concern 06's needs-you ladder (attention-ladder.ts): recomputed on every broadcast/
+	 *  read, mirroring `syncAuthority`'s exact pattern right above — so it can never silently go
+	 *  stale after a restart (`list()`/`getAgent()` call it fresh on every read, not only at mutation
+	 *  sites; see attention-ladder.ts's module doc for the boot-recompute reasoning). Always passes
+	 *  `visitedAt: undefined` — the conservative "nobody has visited" default: a genuine per-viewer
+	 *  answer needs a real actor identity, which only server.ts's GET handlers have (`ladderPriorityFor`
+	 *  below). Mutating the SHARED `rec.dto` with a personalized value here would leak one viewer's
+	 *  seen-state into every other concurrently-polling viewer's read of the same unit. */
+	private syncLadder(dto: AgentDTO): void {
+		dto.ladderPriority = computeLadderPriority(dto, { completedAt: this.lastCompletedAt(dto.id) });
+	}
+
+	/** Epoch-ms this unit last transitioned INTO `idle` (attention-ladder.ts's `completedAt` input),
+	 *  read from the durable transition-log ring — survives a restart because `TransitionLog`'s ring
+	 *  (a `JsonlLog`) is rehydrated from transitions.jsonl at construction, unlike `dto.receipt`/
+	 *  `dto.lastActivity`, which are live/run-scoped and reset on restart. Bounded by the ring's cap
+	 *  (500 entries across EVERY agent) like every other `transitionLog.recent()` reader — an
+	 *  extremely busy fleet could in principle evict an idle agent's own last transition before this
+	 *  reads it; accepted, the same bound `transitionHistory`'s non-`full` path already lives with.
+	 *  `undefined` ⇒ this unit has never transitioned into idle (a fresh/never-run agent). */
+	private lastCompletedAt(agentId: string): number | undefined {
+		let at: number | undefined;
+		for (const t of this.transitionLog.recent()) {
+			if (t.agentId === agentId && t.to === "idle") at = at === undefined ? t.at : Math.max(at, t.at);
+		}
+		return at;
+	}
+
+	/** The REQUESTING viewer's personalized ladder priority for one unit — the only place a real
+	 *  per-viewer `visitedAt` is ever threaded into `computeLadderPriority` (server.ts's GET
+	 *  /api/agents(/:id) and GET /api/attention/ladder are the only callers). Never stored back onto
+	 *  the shared `dto` — see `syncLadder`'s doc above for why. `viewerId` is `session ? actor.id :
+	 *  undefined`, the same idiom every other attention route already uses (file mode: always
+	 *  undefined, the single-implicit-viewer collapse the charter locks). */
+	ladderPriorityFor(dto: AgentDTO, viewerId: string | undefined): LadderPriority {
+		return computeLadderPriority(dto, { completedAt: this.lastCompletedAt(dto.id), visitedAt: this.attentionStore.unitVisitedAt(dto.id, viewerId) });
+	}
+
+	/** Mark unit `agentId` visited by `viewerId` (or the file-mode implicit viewer, when
+	 *  `undefined`) — the needs-you ladder's mark-seen mutation (`POST /api/attention/ladder/seen`).
+	 *  `{ ok: false }` for an id that isn't (or is no longer) a live roster member — a foreign/stale
+	 *  agentId writes nothing, same fail-closed shape as the repo-visibility check the caller (route
+	 *  handler) already runs before this. */
+	markUnitVisited(agentId: string, viewerId: string | undefined): { ok: boolean } {
+		if (!this.agents.has(agentId)) return { ok: false };
+		this.attentionStore.markUnitVisited(agentId, viewerId);
+		return { ok: true };
+	}
+
 	private async refreshProofState(rec: AgentRecord): Promise<void> {
 		const proof = await proofFor(rec.dto.repo, rec.dto.worktree);
 		const fp = await proofFingerprint(rec.dto.repo, rec.dto.worktree, proof?.command);
@@ -2175,7 +2225,13 @@ export class SquadManager extends EventEmitter {
 	}
 
 	list(): AgentDTO[] {
-		return [...this.agents.values()].map((r) => r.dto);
+		return [...this.agents.values()].map((r) => {
+			// Boot-recompute (t3-face concern 06): recomputed fresh on EVERY read, not only at
+			// mutation/emit sites — a restart-restored roster answers correctly on its very first
+			// GET, before any agent has mutated (and re-broadcast) since boot. See syncLadder's doc.
+			this.syncLadder(r.dto);
+			return r.dto;
+		});
 	}
 
 	/**
@@ -2229,7 +2285,9 @@ export class SquadManager extends EventEmitter {
 	}
 
 	getAgent(id: string): AgentDTO | undefined {
-		return this.agents.get(id)?.dto;
+		const rec = this.agents.get(id);
+		if (rec) this.syncLadder(rec.dto); // same boot-recompute guarantee as list() above
+		return rec?.dto;
 	}
 
 	// ── Restart re-attach: dead-session placeholders (daily-onramp 04) ──────────────────────────────
@@ -10224,6 +10282,7 @@ export class SquadManager extends EventEmitter {
 
 	private emitAgent(rec: AgentRecord): void {
 		this.syncAuthority(rec.dto);
+		this.syncLadder(rec.dto);
 		this.emit("event", { type: "agent", agent: rec.dto } satisfies SquadEvent);
 		this.publishPresence();
 	}
