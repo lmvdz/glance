@@ -246,6 +246,86 @@ describe("redactSeenMapForActor", () => {
 	});
 });
 
+describe("markUnitVisited/unitVisitedAt: t3-face concern 06's per-unit last-visited map", () => {
+	test("file mode (no viewerId): every caller collapses onto the one lastSeenAt — the single-implicit-viewer rule", () => {
+		const store = new AttentionStore({ stateDir: dir(), now: () => 1_000 });
+		expect(store.unitVisitedAt("unit1", undefined)).toBeUndefined(); // absence ≠ seen
+		store.markUnitVisited("unit1", undefined);
+		expect(store.unitVisitedAt("unit1", undefined)).toBe(1_000);
+	});
+
+	/** The load-bearing acceptance test the concern's Verify section names: marking a unit seen by
+	 *  one viewer must not resolve as seen for a DIFFERENT viewer — that's the entire reason this
+	 *  map is per-viewer and daemon-side rather than a client-local store. */
+	test("mark seen by viewer A leaves it unseen for viewer B until B visits it too", () => {
+		const store = new AttentionStore({ stateDir: dir(), now: () => 5_000 });
+		store.markUnitVisited("unit1", "db:alice");
+		expect(store.unitVisitedAt("unit1", "db:alice")).toBe(5_000);
+		expect(store.unitVisitedAt("unit1", "db:bob")).toBeUndefined(); // still unseen for bob
+
+		store.markUnitVisited("unit1", "db:bob");
+		expect(store.unitVisitedAt("unit1", "db:bob")).toBe(5_000);
+		expect(store.unitVisitedAt("unit1", "db:alice")).toBe(5_000); // alice's own visit is untouched
+	});
+
+	test("two clients under the SAME viewer identity agree: a mark from one is visible to the other's next read", () => {
+		let now = 1_000;
+		const store = new AttentionStore({ stateDir: dir(), now: () => now });
+		// "cockpit" marks it seen
+		store.markUnitVisited("unit1", "db:alice");
+		now = 1_500;
+		// "a second poller" (same viewer) reads it independently — must see the SAME visited timestamp
+		expect(store.unitVisitedAt("unit1", "db:alice")).toBe(1_000);
+	});
+
+	test("max-merge, never backward — a stale replay must not move the stamp earlier", () => {
+		let now = 5_000;
+		const store = new AttentionStore({ stateDir: dir(), now: () => now });
+		store.markUnitVisited("unit1", "db:alice");
+		now = 1_000; // an out-of-order replay
+		store.markUnitVisited("unit1", "db:alice");
+		expect(store.unitVisitedAt("unit1", "db:alice")).toBe(5_000);
+	});
+
+	test("visits to different units never cross-contaminate", () => {
+		const store = new AttentionStore({ stateDir: dir(), now: () => 1_000 });
+		store.markUnitVisited("unit1", "db:alice");
+		expect(store.unitVisitedAt("unit2", "db:alice")).toBeUndefined();
+	});
+
+	test("survives a restart via its own durable unit-visited.json file", () => {
+		const d = dir();
+		const store = new AttentionStore({ stateDir: d, now: () => 42 });
+		store.markUnitVisited("unit1", "db:alice");
+		store.stop(); // forces the debounced write out synchronously
+
+		const reloaded = new AttentionStore({ stateDir: d });
+		expect(reloaded.unitVisitedAt("unit1", "db:alice")).toBe(42);
+		expect(reloaded.unitVisitedAt("unit1", undefined)).toBe(42); // lastSeenAt survives too
+	});
+
+	test("a corrupt unit-visited.json on boot loads as empty, never throws", () => {
+		const d = dir();
+		writeFileSync(path.join(d, "unit-visited.json"), "{ not json");
+		const store = new AttentionStore({ stateDir: d });
+		expect(store.unitVisitedAt("unit1", undefined)).toBeUndefined();
+	});
+
+	test("markUnitVisited is never gated by the GLANCE_ATTENTION kill switch — it is a core ladder function, not file-viewing telemetry", () => {
+		const original = process.env.GLANCE_ATTENTION;
+		process.env.GLANCE_ATTENTION = "0";
+		try {
+			const store = new AttentionStore({ stateDir: dir(), now: () => 1_000 });
+			expect(store.disabled()).toBe(true);
+			store.markUnitVisited("unit1", "db:alice");
+			expect(store.unitVisitedAt("unit1", "db:alice")).toBe(1_000);
+		} finally {
+			if (original === undefined) delete process.env.GLANCE_ATTENTION;
+			else process.env.GLANCE_ATTENTION = original;
+		}
+	});
+});
+
 describe("stop()/flush()", () => {
 	test("flush() persists the debounced seen-map write immediately, and a fresh store reloads it", () => {
 		const d = dir();
