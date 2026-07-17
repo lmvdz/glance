@@ -182,6 +182,16 @@ interface ContinuityRecord {
 
 `unknown` continuity triggers reconcile-or-re-extract; the temporal model never silently assumes completeness.
 
+## Projection-plane compatibility (Graphiti or any read model)
+
+These records are the canonical plane; any graph/context read model (Graphiti is the evaluated candidate — see ADR.md) is a downstream projection that must be **disposable and fully reconstructable** from them. The contracts here already guarantee what a projector needs — do not weaken any of these in implementation:
+
+- Every record carries a **Glance-assigned stable ID** (attemptId/eventId/assessmentKey/factId/observationId, content-addressed where defined) — a projector maps IDs 1:1; no downstream system ever discovers or resolves identity.
+- **Two ingestion disciplines** downstream: deterministic records project via direct node/edge writes (never through LLM extraction or automatic contradiction-resolution — an unlanded candidate's facts must never invalidate accepted main's facts); only interpretive sources (transcripts, papers, hypotheses) may use extraction paths, with results marked `authority: "inferred"`.
+- Repository validity projects as **RepositoryState entities + explicit transition edges** (B→M target-evolved, B→C candidate-evolved, C→R landed-as, R→lineage) — never by translating commit timestamps into a projection's `valid_at`-style linear fields. Time-typed fields carry observation/decision/attempt times only.
+- The four `KnowledgeSemantics` axes project as explicit attributes so query views (`current accepted | historical accepted | proposed | rejected/counterfactual | transitions | all-evidence`) are Glance-defined recipes, not per-agent filter improvisation.
+- Observations are n-ary (subject, predicate, before/after, producer, authority, evidence, state) — projections should reify them as nodes, not force them into binary edges.
+
 ## Second-producer contract requirement
 
 These shapes must accommodate a non-landing producer without redesign — the designated second producer is **verification execution** (test command, environment, exact commit/tree, observed result, covered entities, proof record, failure evidence). If adding execution observations requires reshaping these records, this schema failed as a state-engine substrate. This is a phase gate (see ADR.md), tested by contract, not aspiration.

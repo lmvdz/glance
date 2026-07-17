@@ -56,6 +56,7 @@ Normative docs: [ADR.md](ADR.md) (current decision + phase gates) and [SCHEMA-V0
 - (none — later-phase items are in Out of scope with triggers)
 
 ## Out of scope
+- Graphiti (temporal context projection) — evaluated and positioned (ADR.md Graphiti section; BRIEF §13): zero involvement in Phases 0–2; expands as a Phase-3 read-model spike only after the event/snapshot schemas are stable, then Phase-4 `squad_kb_search` backend behind the existing membrane. SCHEMA-V0's projection-compatibility section is the standing contract.
 - Advisory warnings / any enforcement (BRIEF §10.11 Phases 4–5) — expands only on the replay report's evidence, Lars's call.
 - Dashboard/web projection — only after replay shows useful signal (review §10.6).
 - Criterion-level oracle for the validator decision — becomes a new concern only if 09's disagreement study warrants it.
