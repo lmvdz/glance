@@ -1,6 +1,6 @@
 # Fleet token re-key — de-hardcode the 244 raw palette classes
 
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: glance-desktop
 COMPLEXITY: mechanical
@@ -37,3 +37,7 @@ None.
 - `pnpm lint && pnpm check-types && pnpm vitest run && pnpm build` green.
 - Screenshot-diff EVERY fleet surface (roster, intervene, overlay, adoptable) in BOTH light and dark against a pre-change capture — differences are intentional re-keys, reviewed by the taste lane, with no illegible text or invisible borders.
 - Live: global theme switch (t3face ↔ dracula) now repaints the fleet cockpit.
+
+## Resolution
+
+Shipped as glance-desktop draft PR #30 (branch `t3face/03-fleet-rekey`, STACKED on #29 / `t3face/01-02-skin-substrate` for the tokens). Grep gate clean (zero raw palette classes in src/modules/fleet); gates green (515/515, lint/types/build). Role-based re-key across RosterView/IntervenePane/FleetPane/ConversationView/WorkspaceOverlay/AdoptableSessions; status accents → semantic tokens; redundant dark: variants dropped. Three taste calls approved (idle/stopped opacity split; Send CTA → primary not success; two text de-emphasis buckets) — flagged for concern 13's live both-modes/WebKitGTK check.
