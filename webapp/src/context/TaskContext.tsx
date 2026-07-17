@@ -28,7 +28,7 @@ export interface ToastInfo {
  * verdict) — `fog` is a genuinely NEW view, not a resurrection of the retired Heat page; it has no
  * entry in `VIEW_ALIAS_MAP`.
  */
-export type AppView = 'fleet' | 'tasks' | 'omp-graph' | 'fog' | 'capabilities' | 'org' | 'intervene' | 'review';
+export type AppView = 'fleet' | 'tasks' | 'omp-graph' | 'fog' | 'daily' | 'capabilities' | 'org' | 'intervene' | 'review';
 export type TaskFilter = 'open' | 'active' | 'done' | 'all';
 
 /** Read the raw persisted view key (pre-coercion) — a plain function so both the `view` and

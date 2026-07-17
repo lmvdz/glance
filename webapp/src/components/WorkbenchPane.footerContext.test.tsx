@@ -31,6 +31,10 @@ test('capabilities reports trusted packs and catalog size, singular/plural-safe'
   expect(railFooterContext('capabilities', { ...zero, packCount: 4, catalogCount: 0 })).toBe('4 trusted packs · 0 in the catalog');
 });
 
+test('daily gets a fixed one-liner naming its two signals', () => {
+  expect(railFooterContext('daily', zero)).toBe('Adoption counters and the friction ledger');
+});
+
 test('org and intervene and review each get a short, non-empty line', () => {
   const routedInto: AppView[] = ['org', 'intervene', 'review'];
   for (const view of routedInto) {
