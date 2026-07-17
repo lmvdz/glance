@@ -134,6 +134,28 @@ The full-featured web UI is the React app in [`webapp/`](webapp/), served when i
 `GLANCE_WEBAPP=1` is set; [`src/web/index.html`](src/web/index.html) is the zero-build fallback
 dashboard. See the [web dashboard guide](docs-site/content/docs/guides/web-dashboard.mdx).
 
+## The daily driver
+
+Beyond dispatching a fleet, glance is built to be the thing you reach for instead of a bare
+`claude` terminal — this is a live dogfooding experiment, gated on real use, not a finished
+claim.
+
+```bash
+cd ~/code/myproject
+glance here                          # a chat thread on this directory, in this terminal
+```
+
+`glance here` attaches a casual chat to your current directory on your own claude-code
+login — no `glance add`, no task string, no harness to pick. Edits land in your **real**
+checkout via one-directional **boundary sync** (each turn's patch applies iff your tree
+hasn't moved since the turn started; otherwise it's held with Apply/Discard, never silently
+dropped or overwritten), a daemon restart re-attaches you honestly instead of hanging, a
+finished long-running turn can buzz your phone, and `/grr` logs friction without breaking
+your flow. A weekly drain turns that friction plus adoption counters (visible in the web
+dashboard's Graph view) into an honest two-week gate: sustained daily use decides what ships
+next, and the verdict is never automated. Full operator guide, including the honest residuals
+and known limits: [`docs/daily-driver.md`](docs/daily-driver.md).
+
 ## Autonomy — the factory loop
 
 With a [Plane](https://plane.so) workspace configured, the daemon closes the whole loop —
