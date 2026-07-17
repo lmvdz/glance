@@ -86,6 +86,29 @@ test("FrictionLog: persists to <stateDir>/friction.jsonl; a fresh instance hydra
 	expect((await reopened.hydrateAll()).map((e) => e.gripe)).toEqual(["first", "second"]); // full file read
 });
 
+test("FrictionLog: a malformed non-object line (null/scalar) is dropped like a torn line — never throws into a reader", async () => {
+	const dir = await tmpDir("friction-malformed-");
+	// A bare `null` is valid JSON but not a FrictionEntry; a naive read-side map would deref it and throw
+	// into EVERY reader — GET /api/friction (500) and, worse, the boot-time hasAutoFriction check, which
+	// runs off the fail-open capture path and would brick start(). Prove the choke point drops it.
+	await fs.writeFile(
+		frictionPath(dir),
+		`${[
+			JSON.stringify({ id: "a", ts: 1, repo: "/r", gripe: "real one", source: "auto" }),
+			"null",
+			"42",
+			"{not json",
+			JSON.stringify({ id: "b", ts: 2, repo: "/r", gripe: "legacy sourceless" }), // no source → human
+		].join("\n")}\n`,
+	);
+	const log = new FrictionLog(dir);
+	const rows = log.recent();
+	expect(rows.map((e) => e.gripe)).toEqual(["real one", "legacy sourceless"]); // garbage dropped, order kept
+	expect(rows[0].source).toBe("auto");
+	expect(rows[1].source).toBe("human"); // migration default still applied to a real sourceless row
+	expect((await log.hydrateAll()).map((e) => e.gripe)).toEqual(["real one", "legacy sourceless"]); // drain read equally robust
+});
+
 // ---------------------------------------------------------------------------
 // REST surface
 // ---------------------------------------------------------------------------

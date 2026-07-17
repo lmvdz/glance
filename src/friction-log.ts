@@ -76,20 +76,30 @@ export class FrictionLog {
 		return entry;
 	}
 
-	/** A missing `source` reads as `"human"` — the migration default for every friction.jsonl row
-	 *  written before this field existed, and for every ordinary human capture surface today (none of
-	 *  which sets it). Applied on every read path (never rewrites the file). */
-	private static withSourceDefault(e: FrictionEntry): FrictionEntry {
-		return e.source === undefined ? { ...e, source: "human" } : e;
+	/** Reader-side hygiene applied on every read path (never rewrites the file):
+	 *  - A missing `source` reads as `"human"` — the migration default for every friction.jsonl row
+	 *    written before this field existed, and for every ordinary human capture surface today.
+	 *  - A non-object row (a `null`/scalar/array line that `JSON.parse` admits as valid JSON but that is
+	 *    not a FrictionEntry) is dropped, exactly like `JsonlLog`'s torn-line skip. Without this, a single
+	 *    such line would make `withSourceDefault` dereference a non-object and throw into EVERY reader —
+	 *    including the boot-time `hasAutoFriction` check, which is off the fail-open capture path and would
+	 *    brick `start()`. Friction capture must never itself become friction. */
+	private static normalize(rows: FrictionEntry[]): FrictionEntry[] {
+		const out: FrictionEntry[] = [];
+		for (const e of rows) {
+			if (e === null || typeof e !== "object" || Array.isArray(e)) continue; // not a FrictionEntry — skip
+			out.push(e.source === undefined ? { ...e, source: "human" } : e);
+		}
+		return out;
 	}
 
 	/** Ring tail, newest-LAST (JsonlLog convention) — callers reverse for newest-first display. */
 	recent(limit?: number): FrictionEntry[] {
-		return this.log.recent(limit).map(FrictionLog.withSourceDefault);
+		return FrictionLog.normalize(this.log.recent(limit));
 	}
 
 	/** Full persisted history from disk — the weekly drain's read, not the API's. */
 	async hydrateAll(): Promise<FrictionEntry[]> {
-		return (await this.log.hydrateAll()).map(FrictionLog.withSourceDefault);
+		return FrictionLog.normalize(await this.log.hydrateAll());
 	}
 }

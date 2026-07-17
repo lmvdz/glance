@@ -2259,12 +2259,18 @@ export class SquadManager extends EventEmitter {
 		// Concern 02: session-loss friction, keyed on the placeholder's own stable id (unlike
 		// boundary-sync's holds, a `PersistedAgent.id` is a one-shot ephemeral chat id that never gets
 		// reused by a later live session — so ANY prior "auto:session-loss" row for this exact id proves
-		// this exact loss was already filed). `hasAutoFriction` reads FrictionLog's ring, which is
-		// rehydrated from the persisted file at construction — durable across the restart that would
-		// otherwise call this method again for the same still-persisted record before its first
-		// post-boot persist() drops it (this method itself runs once per boot per undropped record).
-		if (!this.hasAutoFriction("auto:session-loss", p.id)) {
-			this.captureAutoFriction(p.id, p.repo, "auto:session-loss", `session lost: ${p.name} (${p.id}) did not survive a daemon restart — ${ph.deadReason}`);
+		// this exact loss was already filed). Dedup reads FrictionLog's ring, rehydrated from the persisted
+		// file at construction, so it survives an ORDINARY restart. It is best-effort, not absolute:
+		// JsonlLog's file is explicitly best-effort (fire-and-forget spool), so a crash within the
+		// sub-second spool window — before this row lands AND before persist() drops the record — can
+		// re-file it on the next boot. A duplicate low-noise session-loss gripe is acceptable (the weekly
+		// drain dedups); what must never happen is this block throwing into start(), hence the guard.
+		try {
+			if (!this.hasAutoFriction("auto:session-loss", p.id)) {
+				this.captureAutoFriction(p.id, p.repo, "auto:session-loss", `session lost: ${p.name} (${p.id}) did not survive a daemon restart — ${ph.deadReason}`);
+			}
+		} catch (err) {
+			this.log("warn", `session-loss auto-friction check failed for ${p.id}: ${errText(err)}`);
 		}
 		// The dead session's adapter chain may still be running: a daemon KILL orphans the direct ACP
 		// child (npx → claude-code-acp reparents to init and idles forever — its stdio transport died
