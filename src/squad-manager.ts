@@ -1051,6 +1051,13 @@ export class SquadManager extends EventEmitter {
 	 *  transitionLog. All writes go through recordFriction (the single write path shared by
 	 *  POST /api/friction and the in-process TUI). */
 	private readonly frictionLog: FrictionLog;
+	/** Auto-friction dedupe/rate-limit (daily-driver-w15 concern 02): last-capture epoch-ms per
+	 *  `(subtype + scope)` key, so one recurring machine-detected condition (a session flapping error
+	 *  transitions, a checkout that keeps holding its syncs) records ONCE per window instead of
+	 *  flooding the ledger the weekly drain reads. In-memory only — the window is about collapsing a
+	 *  burst, not cross-restart identity (the ledger itself is durable); a fresh boot's clean slate is
+	 *  correct, not a bug. Bounded by the number of distinct live conditions, which is tiny. */
+	private readonly autoFrictionLastCapture = new Map<string, number>();
 	/** Push-tap beacons (stateDir/push-taps.jsonl) — one line per push-notification tap the webapp
 	 *  reports (POST /api/push-tap). Adoption-counter substrate (plans/daily-dogfood-engine/02);
 	 *  append-only observability, never gates behavior. Same JsonlLog infra as transitionLog. */
@@ -2256,6 +2263,21 @@ export class SquadManager extends EventEmitter {
 		const ph = buildDeadPlaceholder(p, transcript);
 		this.deadPlaceholders.set(p.id, ph);
 		this.log("info", `dead placeholder recorded for ${p.name} (${p.id}) — ${ph.deadReason}`);
+		// Concern 02 (auto-friction): a HERE-CLASS casual session (marked by the persisted
+		// `realTreePath`) that a restart killed is real friction — the operator's casual thread didn't
+		// survive and left only a dead placeholder. Auto-capture it so the drain sees it. Plain fleet
+		// units (no `realTreePath`) are non-resumable-by-design across a restart, not friction — never
+		// captured. `recordDeadPlaceholder` is idempotent (early-returns above if already recorded), so
+		// each lost session records exactly one line; scope is the dead id so distinct sessions don't
+		// collapse into one.
+		if (p.realTreePath) {
+			this.recordAutoFriction({
+				subtype: "here-session-lost",
+				repo: p.realTreePath,
+				agentId: p.id,
+				gripe: `here-session "${p.name}" was lost to a daemon restart — casual session did not survive (${ph.deadReason})`,
+			});
+		}
 		// The dead session's adapter chain may still be running: a daemon KILL orphans the direct ACP
 		// child (npx → claude-code-acp reparents to init and idles forever — its stdio transport died
 		// with the old daemon process, so REUSE is impossible by construction). Reap it by the pid
@@ -2773,6 +2795,51 @@ export class SquadManager extends EventEmitter {
 	/** Friction ledger ring tail (newest-LAST — the API reverses for newest-first display). */
 	frictionRecent(limit?: number): FrictionEntry[] {
 		return this.frictionLog.recent(limit);
+	}
+
+	/** Window a repeated auto-friction condition collapses within (daily-driver-w15 concern 02). */
+	private static readonly AUTO_FRICTION_DEDUPE_MS = 5 * 60_000;
+
+	/**
+	 * Machine-detected friction → the SAME ledger `glance grr` writes (daily-driver-w15 concern 02),
+	 * so the weekly drain sees what the DAEMON felt (a held boundary sync, a here-session error, a
+	 * here-session lost to a restart) alongside the human gripes. Routed through `recordFriction` —
+	 * the single ledger-write path — exactly like every human capture, stamped `source:"auto"` plus a
+	 * machine-readable `subtype` (carried in `context` as `auto:<subtype>`), so the drain buckets it
+	 * apart from human gripes without parsing prose.
+	 *
+	 * Low-noise by construction (mirrors automation-log's `isMeaningful` discipline — callers hook
+	 * ONLY real friction, never normal operation): deduped per `(subtype + scope)` within
+	 * {@link AUTO_FRICTION_DEDUPE_MS} so one recurring condition (a session flapping errors every
+	 * turn, a checkout that keeps holding) records once per window rather than flooding the ledger.
+	 * `scope` defaults to the agent id (or the repo when there's no agent) so distinct sessions /
+	 * checkouts dedupe independently.
+	 *
+	 * Never throws and never returns a rejected promise: auto-capture is a SIDE EFFECT of a real
+	 * operation (a turn that held, an error transition, a boot sweep) and must never take that
+	 * operation down with it. Returns the recorded entry, or `undefined` when the capture was
+	 * collapsed by the dedupe window or the gripe was empty.
+	 */
+	private recordAutoFriction(input: { subtype: string; repo: string; gripe: string; agentId?: string; scope?: string }): FrictionEntry | undefined {
+		try {
+			const gripe = input.gripe.trim();
+			if (!gripe) return undefined;
+			const key = `${input.subtype} ${input.scope ?? input.agentId ?? input.repo}`;
+			const now = Date.now();
+			const last = this.autoFrictionLastCapture.get(key);
+			if (last !== undefined && now - last < SquadManager.AUTO_FRICTION_DEDUPE_MS) return undefined;
+			this.autoFrictionLastCapture.set(key, now);
+			return this.recordFriction({
+				repo: input.repo,
+				gripe,
+				context: `auto:${input.subtype}`,
+				source: "auto",
+				...(input.agentId ? { agentId: input.agentId } : {}),
+			});
+		} catch (err) {
+			this.log("warn", `auto-friction (${input.subtype}) capture failed: ${errText(err)}`);
+			return undefined;
+		}
 	}
 
 	projects(): ProjectDTO[] {
@@ -5247,6 +5314,13 @@ export class SquadManager extends EventEmitter {
 					}
 					return;
 				case "held": {
+					// Concern 02 (auto-friction): a HELD sync is real friction — the operator's turn did
+					// NOT land in their checkout; it's waiting on their go-ahead (or, in the S6 sub-case
+					// below, stranded entirely). This is exactly what the dogfood drain wants to see the
+					// daemon feeling. Deduped per session so a checkout that holds every turn records once
+					// per window, not a flood. (A clean apply / noop never reaches this branch, so normal
+					// operation is never captured.)
+					this.recordAutoFriction({ subtype: "boundary-sync-held", repo: realDir, agentId: rec.dto.id, gripe: `boundary sync held — ${outcome.reason}` });
 					// The held patch spans the prior end tree, so it CONTAINS any uncapturable turn's
 					// edits — Apply will deliver them; the standalone warning is superseded.
 					if (spannedPrior) this.clearBoundarySyncAttention(rec, "uncapturable");
@@ -9830,6 +9904,22 @@ export class SquadManager extends EventEmitter {
 	private recordErrorTransition(rec: AgentRecord, entry: TransitionEntry): void {
 		if (entry.to !== "error" || (entry.reason !== "fail" && entry.reason !== "catastrophe" && entry.reason !== "exit-error")) return;
 		rec.errorTransitionTimestamps = [...(rec.errorTransitionTimestamps ?? []), entry.at];
+		// Concern 02 (auto-friction): an error transition on a HERE-CLASS casual session (marked by
+		// `options.realTreePath`) is friction the operator hit mid-conversation — an ACP turn that
+		// errored/timed out, or a gate that flaked on their session. Auto-capture it, deduped per
+		// session so a flapping session records once per window (this is also the "repeated gate
+		// flake" signal). Plain fleet units carry no `realTreePath`: their error transitions are
+		// ordinary factory operation the drain must never see as dogfood friction. `entry.cause` is
+		// already redacted (transition() redacts once, up front — see recordTransition).
+		const realDir = rec.options.realTreePath;
+		if (realDir) {
+			this.recordAutoFriction({
+				subtype: "here-session-error",
+				repo: realDir,
+				agentId: rec.dto.id,
+				gripe: `here-session error (${entry.reason})${entry.cause?.error ? `: ${entry.cause.error}` : ""}`,
+			});
+		}
 	}
 
 	/** Linear scan + trim over THIS agent's own (small, unbounded-by-other-agents) error-timestamp array

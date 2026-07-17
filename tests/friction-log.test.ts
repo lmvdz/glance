@@ -10,7 +10,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { restActionTier } from "../src/authz.ts";
-import { FrictionLog, frictionPath } from "../src/friction-log.ts";
+import { FrictionLog, frictionPath, frictionSource } from "../src/friction-log.ts";
 import { canonicalRepoRoot } from "../src/index.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import { SquadServer } from "../src/server.ts";
@@ -84,6 +84,35 @@ test("FrictionLog: persists to <stateDir>/friction.jsonl; a fresh instance hydra
 	const reopened = new FrictionLog(dir);
 	expect(reopened.recent().map((e) => e.gripe)).toEqual(["first", "second"]); // ring re-seeded from tail
 	expect((await reopened.hydrateAll()).map((e) => e.gripe)).toEqual(["first", "second"]); // full file read
+});
+
+test("FrictionLog: source 'auto' round-trips; a human capture omits the field; a legacy row (no field) defaults to 'human' (daily-driver-w15 concern 02)", async () => {
+	const dir = await tmpDir("friction-source-");
+	const log = new FrictionLog(dir);
+
+	// An auto-captured row persists source:"auto" + the machine subtype in context.
+	const auto = log.record({ repo: "/repo", gripe: "held sync", context: "auto:boundary-sync-held", source: "auto" });
+	expect(auto.source).toBe("auto");
+	expect(auto.context).toBe("auto:boundary-sync-held");
+	expect(frictionSource(auto)).toBe("auto");
+
+	// A human capture — explicit "human" OR absent — never persists the field (byte-identical to
+	// legacy rows), and reads back as "human".
+	const human = log.record({ repo: "/repo", gripe: "spinner lies", source: "human" });
+	expect("source" in human).toBe(false);
+	expect(frictionSource(human)).toBe("human");
+	const bare = log.record({ repo: "/repo", gripe: "no source at all" });
+	expect("source" in bare).toBe(false);
+	expect(frictionSource(bare)).toBe("human");
+
+	// Durable round-trip: a fresh instance hydrates the auto row's source straight off disk.
+	await waitForLines(frictionPath(dir), 3);
+	const all = await new FrictionLog(dir).hydrateAll();
+	expect(all.map(frictionSource)).toEqual(["auto", "human", "human"]);
+	expect(all.find((e) => e.gripe === "held sync")!.source).toBe("auto");
+
+	// A row written before the discriminator existed (no `source` field at all) defaults to human.
+	expect(frictionSource({ id: "x", ts: 1, repo: "/r", gripe: "old row" } as FrictionEntry)).toBe("human");
 });
 
 // ---------------------------------------------------------------------------

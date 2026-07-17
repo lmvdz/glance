@@ -62,8 +62,20 @@ export interface FrictionEntry {
 	agentId?: string;
 	/** Repo the operator was in when annoyance struck ("" when genuinely unknown). */
 	repo: string;
-	/** Capture surface ("cli" / "tui" / "webapp-composer" / "here") or free-form situational context. */
+	/** Capture surface ("cli" / "tui" / "webapp-composer" / "here") or free-form situational context.
+	 *  For an auto-captured (`source:"auto"`) row this ALSO carries the machine-readable subtype as
+	 *  `auto:<subtype>` (e.g. `auto:boundary-sync-held`) — the coarse bucket is `source`, the fine
+	 *  classification rides here (daily-driver-w15 concern 02). */
 	context?: string;
+	/** Provenance discriminator (daily-driver-w15 concern 02): "human" = a gripe the operator typed
+	 *  (`glance grr` / TUI Ctrl-G / composer / `here` /grr), "auto" = a friction event the daemon
+	 *  detected on its own and recorded via `SquadManager.recordAutoFriction` (a held boundary sync, a
+	 *  here-session error transition, a here-session lost to a restart). ABSENT on every row written
+	 *  before this field existed AND on every human capture — only `"auto"` is ever persisted, so human
+	 *  rows stay byte-identical to legacy ones and both default to human. Read it as `entry.source ??
+	 *  "human"` (see `frictionSource` in src/friction-log.ts); the weekly dogfood drain buckets on it so
+	 *  machine-felt friction and human gripes triage separately. */
+	source?: "human" | "auto";
 	gripe: string;
 }
 
