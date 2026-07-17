@@ -7,8 +7,44 @@ description: Weekly dogfood drain for the daily-driver program — read the fric
 
 Turns the friction ledger (B01, `glance grr`) and adoption counters (B02, `GET /api/adoption`)
 into fixes and an honest ledger trail, once a week. Concern: `plans/daily-dogfood-engine/03-drain-cadence-and-criteria.md`.
-Invocation is manual — or self-reminded via `/loop 168h /dogfood-drain` if Lars wants the nudge —
-but never daemon-automated: the meta-plan's Ledger is human-reviewed content.
+
+## Cadence — how this gets fired (armed once, then hands-free)
+
+So the weekly drain runs without Lars having to remember it, arm it once with the repo's loop
+convention:
+
+```
+/loop 168h /dogfood-drain
+```
+
+`/loop` re-invokes this skill every 168h (one week); it is the arming surface because it is how
+every other recurring routine in this repo is fired (`crypto-research`, `fleet-ide-loop`,
+`make-it-work` are all `/loop <interval> /<skill>`). There is no separate cron/routine config
+file to wire — the single `.claude/settings.json` Stop hook belongs to the convergence loop, not
+to a general scheduler, so co-opting it would be wrong. If Lars wants the nudge to survive
+session restarts (truly unattended, months-long), the durable equivalent is a scheduled **cloud
+routine** via `/schedule` running `/dogfood-drain` weekly — same steps, same hitl contract, same
+two fail-closed append scripts below.
+
+Each firing is hitl by construction: it *drafts* the three-bucket triage for Lars to approve in
+conversation and appends the week's evidence rows, but never merges a fix on its own and **never
+writes the gate verdict** (see the hard boundary below). Automating the cadence automates the
+evidence-gathering, not the judgment.
+
+The counter snapshot (step 4) lands on **every** firing — that is the non-negotiable part of the
+cadence: even a week with zero gripes still appends its B02 row, so the two-week gate always has
+an unbroken weekly trail to read. A guessed or skipped week is exactly the false-green the gate
+exists to catch.
+
+*Daily counter tick — deferred, on purpose.* A lighter `/loop 24h` tick that appends just the
+numbers was considered and left out: the B02 row already carries the rolling last-7d counts, so a
+daily row adds no gate signal it doesn't already have, and seven counter rows a week would bury
+the human-reviewed triage lines in the same `## Ledger`. If a between-drain trend is ever wanted,
+route it to a *separate* file rather than clutter the gate ledger — revisit only if the weekly
+granularity proves too coarse to make the call.
+
+Invocation is never daemon-automated: the meta-plan's Ledger is human-reviewed content, and the
+verdict on it is Lars's.
 
 ## The one hard boundary (MODE: hitl)
 
