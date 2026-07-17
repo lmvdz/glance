@@ -55,6 +55,21 @@ if not after wave 1, STOP and re-diagnose; contingent epics do not start."
   `ts` after the cutoff.
 - Drop entries whose ids are already listed in `plans/daily-dogfood-engine/accepted-friction.md`
   — they were accepted in a previous drain and must not be re-triaged every week.
+- **Split each entry into two buckets by provenance** (`source`, daily-driver-w15 concern 02):
+  - `source:"auto"` — **what the daemon felt.** A friction event the daemon detected and recorded on
+    its own; the machine-readable subtype rides in `context` as `auto:<subtype>` — today
+    `auto:boundary-sync-held` (an operator turn that didn't land in their checkout),
+    `auto:here-session-error` (an ACP turn that errored/timed out, or a gate that flaked, on a casual
+    `here` session), `auto:here-session-lost` (a casual session a restart killed). These are already
+    deduped at capture (one line per recurring condition per ~5-min window), so a cluster of them is a
+    real recurrence, not a single event logged twice.
+  - `source:"human"` (or the field absent — every row written before this field existed, and every
+    typed gripe, reads as "human") — **what Lars felt.** The gripes typed via `glance grr` / TUI
+    Ctrl-G / the composer / `here` /grr.
+  Present them as two separate lists in the draft (human gripes first — they're the ground truth the
+  experiment is measuring; auto second — corroborating machine signal). A single blended list hides
+  which friction the operator actually noticed versus which the daemon inferred, and the gate cares
+  about the former.
 - Counters: `glance doctor` (the "Is glance getting daily use?" section) or
   `GET /api/adoption`. Zeros are a finding for the gate, not a machine fault; a *failed read* is
   unknown, never a fabricated zero — if the daemon is down, say so, don't invent numbers.
@@ -78,7 +93,12 @@ how gripes evaporate, which is the failure mode this whole epic exists to preven
 ### 3. Flag repeat-pattern clusters, not just raw entries
 
 If the week's entries contain ≥3 gripes sharing a theme (e.g. three attention/push gripes),
-call the cluster out explicitly in the draft — a flat list buries exactly this signal. An
+call the cluster out explicitly in the draft — a flat list buries exactly this signal. The auto
+bucket's `auto:<subtype>` tags cluster mechanically: three `auto:boundary-sync-held` lines across the
+week means the checkout keeps refusing to auto-apply the operator's turns (a real recurring drag on
+`glance here`), and a run of `auto:here-session-error` / `auto:here-session-lost` is the daemon-side
+mirror of a session that keeps breaking under the operator. Cross-reference an auto cluster against
+the human bucket — the strongest signal is the daemon and the operator flagging the same theme. An
 attention/push cluster is specifically the expansion trigger for the needs-you-ladder charter
 (`plans/daily-driver/01-charter-needs-you-ladder.md`): name it as such so Lars can decide
 whether the charter unblocks. Clusters go in the `--clusters` note in step 5 (one line, no

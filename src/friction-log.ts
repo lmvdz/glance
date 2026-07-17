@@ -30,6 +30,18 @@ export interface FrictionCapture {
 	context?: string;
 	/** The agent whose chat/session the gripe was captured from, when there was one. */
 	agentId?: string;
+	/** Provenance (daily-driver-w15 concern 02). Omitted / "human" = a typed gripe (the default, and
+	 *  what every existing surface passes). "auto" = a daemon-detected friction event routed here by
+	 *  `SquadManager.recordAutoFriction`; only "auto" is persisted (human rows stay byte-identical to
+	 *  legacy ones). See `FrictionEntry.source`. */
+	source?: "human" | "auto";
+}
+
+/** Read a row's provenance with the backward-compatible default: a row written before `source`
+ *  existed — or any human capture (which never persists the field) — reads as "human". The single
+ *  place the `?? "human"` convention lives, so the drain / visibility panels bucket consistently. */
+export function frictionSource(entry: FrictionEntry): "human" | "auto" {
+	return entry.source ?? "human";
 }
 
 /** `<stateDir>/friction.jsonl` — mirrors automationPath()/receiptPath()'s state-dir convention.
@@ -61,6 +73,9 @@ export class FrictionLog {
 			gripe,
 			...(capture.context?.trim() ? { context: capture.context.trim() } : {}),
 			...(capture.agentId ? { agentId: capture.agentId } : {}),
+			// Only "auto" is persisted — a human capture (source "human" or absent) writes no field, so
+			// legacy rows and new human rows are byte-identical and both default to "human" on read.
+			...(capture.source === "auto" ? { source: "auto" as const } : {}),
 		};
 		this.log.append(entry);
 		return entry;
