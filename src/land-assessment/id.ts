@@ -174,8 +174,9 @@ export function computeAssessmentKey(state: { base: RepositoryStateRef; target: 
  *  `computeOutputHash` needs to sort its inputs before canonicalizing. `SnapshotFact`, `ChangeObservation`,
  *  and `AssessmentFinding` all satisfy this (via `factId`/`observationId`/`id` respectively) — deliberately
  *  NOT intersected with `Record<string, unknown>` so those concrete interfaces stay structurally assignable
- *  here without a cast at every call site. */
-type IdentifiedRecord = { factId?: string; observationId?: string; id?: string };
+ *  here without a cast at every call site. `observedAt` is declared explicitly (rather than left to fall
+ *  through as excess) so `stripObservedAt` below has a typed field to omit. */
+type IdentifiedRecord = { factId?: string; observationId?: string; id?: string; observedAt?: string };
 
 function stableIdOf(entry: IdentifiedRecord): string {
 	const id = entry.factId ?? entry.observationId ?? entry.id;
@@ -185,17 +186,32 @@ function stableIdOf(entry: IdentifiedRecord): string {
 	return id;
 }
 
+/** Analyzers stamp wall-clock `observedAt` onto every `SnapshotFact`/`ChangeObservation` (observation
+ *  TIME, per SCHEMA-V0.md — legitimately kept on the stored record). It must NOT enter the content hash
+ *  that defines `outputHash`, or two replays of the byte-identical assessment (same inputs, same
+ *  analyzer logic, run at two different wall-clock moments) would mint two different hashes for the
+ *  same `assessmentKey` — which `checkOutputHash` would then report as analyzer nondeterminism, a false
+ *  positive on every legitimate re-run. Shallow by design: `observedAt` is a top-level field on every
+ *  producer shape in this module (`SnapshotFact.observedAt`, `ChangeObservation.observedAt`); nothing
+ *  else in the canonicalized projection is time-derived. */
+function stripObservedAt(entry: IdentifiedRecord): IdentifiedRecord {
+	const { observedAt: _observedAt, ...rest } = entry;
+	return rest;
+}
+
 /**
- * `outputHash = hash(canonicalized observations + findings)`. INVARIANT under permutation of either
- * array: both are sorted by their own stable id before canonicalizing, so an analyzer that happens to
- * emit the same set in a different order (map iteration, parallel extraction, ...) still produces the
- * same hash — a genuine reordering must never look like nondeterminism.
+ * `outputHash = hash(canonicalized observations + findings)`, EXCLUDING each entry's `observedAt` (see
+ * `stripObservedAt`) — the hash is a function of assessed CONTENT, never of when the assessment ran.
+ * INVARIANT under permutation of either array: both are sorted by their own stable id before
+ * canonicalizing, so an analyzer that happens to emit the same set in a different order (map iteration,
+ * parallel extraction, ...) still produces the same hash — a genuine reordering must never look like
+ * nondeterminism.
  *
  * @substrate Phase-0 producer (concern 01) with no external caller yet -- land()/analyzers wire it up in concerns 03-11 (plans/land-assessment); a co-located test consumer is not a real reference (dead-exports.ts's own carve-out).
  */
 export function computeOutputHash(observations: ReadonlyArray<IdentifiedRecord>, findings: ReadonlyArray<IdentifiedRecord>): string {
-	const sortedObservations = [...observations].sort((a, b) => stableIdOf(a).localeCompare(stableIdOf(b)));
-	const sortedFindings = [...findings].sort((a, b) => stableIdOf(a).localeCompare(stableIdOf(b)));
+	const sortedObservations = [...observations].sort((a, b) => stableIdOf(a).localeCompare(stableIdOf(b))).map(stripObservedAt);
+	const sortedFindings = [...findings].sort((a, b) => stableIdOf(a).localeCompare(stableIdOf(b))).map(stripObservedAt);
 	return createHash("sha256").update(canonicalizeForHash({ observations: sortedObservations, findings: sortedFindings })).digest("hex");
 }
 

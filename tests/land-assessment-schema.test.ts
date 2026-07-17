@@ -361,6 +361,24 @@ describe("computeOutputHash — invariance under permutation, loud mismatch on n
 		expect(computeOutputHash(observations, findings)).not.toBe(changed);
 	});
 
+	// Two "replays" of the identical assessment stamp DIFFERENT wall-clock observedAt (a real re-run,
+	// hours or days apart) but must yield the SAME outputHash — observedAt is observation time, not
+	// content, and SCHEMA-V0.md's "same assessmentKey MUST yield same outputHash" is enforced at THIS
+	// level (computeOutputHash), not only by a test-side strip. A regression here would make every
+	// legitimate re-run of an unchanged assessment throw a false "analyzer nondeterminism" via
+	// checkOutputHash.
+	test("is invariant under observedAt alone changing (replay determinism, not just permutation)", () => {
+		const runOne = computeOutputHash(
+			observations.map((o) => ({ ...o, observedAt: "2026-07-17T00:00:00.000Z" })),
+			findings,
+		);
+		const runTwo = computeOutputHash(
+			observations.map((o) => ({ ...o, observedAt: "2026-08-02T09:41:17.503Z" })),
+			findings,
+		);
+		expect(runOne).toBe(runTwo);
+	});
+
 	// Verify: "loud-mismatch path on injected nondeterminism"
 	test("checkOutputHash returns 'new' when there is no prior record for this assessmentKey", () => {
 		expect(checkOutputHash("key-1", "hash-a")).toBe("new");
