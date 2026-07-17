@@ -51,6 +51,22 @@ export interface TransitionEntry {
 	seq?: string;
 }
 
+/** One captured dogfooding gripe — the friction ledger's persisted shape (`stateDir/friction.jsonl`,
+ *  src/friction-log.ts; plans/daily-dogfood-engine/01). Written via `POST /api/friction` /
+ *  `SquadManager.recordFriction`, read back by `glance grr --list` and the weekly drain. */
+export interface FrictionEntry {
+	/** uuid — minted at record time (same restart-collision reasoning as TransitionEntry.seq). */
+	id: string;
+	ts: number;
+	/** The agent whose chat/session the gripe was captured from, when there was one. */
+	agentId?: string;
+	/** Repo the operator was in when annoyance struck ("" when genuinely unknown). */
+	repo: string;
+	/** Capture surface ("cli" / "tui" / "webapp-composer" / "here") or free-form situational context. */
+	context?: string;
+	gripe: string;
+}
+
 /**
  * Which runtime backs a managed agent.
  *  - "omp-operator": an `omp --mode rpc` child in a git worktree (interactive, steerable).
@@ -116,8 +132,19 @@ export interface AttentionEvent {
 	detail?: string;
 	/** Where the flag originated: "notify" = operator/CLI/scriptable ingress (`glance notify`),
 	 *  "tool" = an omp agent's `squad_attention` host tool call, "harness" = a non-omp harness's
-	 *  RPC `notify` extension-UI method (previously inert — appended to the transcript only). */
-	source: "notify" | "tool" | "harness";
+	 *  RPC `notify` extension-UI method (previously inert — appended to the transcript only),
+	 *  "boundary-sync" = a `glance here` turn's patch was HELD instead of auto-applied to the
+	 *  operator's real checkout (divergence or fingerprint-capture failure — daily-onramp 03); the
+	 *  webapp renders these with a one-click "Apply" that re-checks before touching anything. */
+	source: "notify" | "tool" | "harness" | "boundary-sync";
+	/** boundary-sync rows only: "held" = durable patch(es) are waiting (Apply/Discard resolve it);
+	 *  "uncapturable" = the turn's delta could not even be captured, so NOTHING is held — the webapp
+	 *  must offer View (the worktree diff), never Apply, and never claim a patch is waiting;
+	 *  "divergence" = a turn's patch WAS written, but a post-apply check (C1) found one or more
+	 *  patch-touched paths don't hold what the patch alone should have produced — a pre-write capture
+	 *  is retained on disk (named in `detail`) for manual recovery; the webapp must never offer Apply
+	 *  or Discard here (nothing is pending), only surface the row and the capture path. */
+	sync?: "held" | "uncapturable" | "divergence";
 	createdAt: number;
 }
 
@@ -922,6 +949,11 @@ export interface AgentDTO {
 	 *  an agent directly (merge→gate→rollback) instead of an isolated worktree pre-verify. Cleared the
 	 *  moment it actually runs again (a turn starts). */
 	adopted?: boolean;
+	/** Console chat unit promoted into a working unit (E02 / daily-onramp 06) — the wire mirror of
+	 *  `PersistedAgent.promoted`, stamped in `promote()` and carried through the reattach DTO builds.
+	 *  Display bridge only (the webapp hides its "Make this a unit" affordance and shows unit chrome
+	 *  off this); the promote gate itself stays server-side on the persisted options. */
+	promoted?: boolean;
 	/** True only on the synthetic DTO `create()` returns when a spawn is parked at the WIP cap (OMP_SQUAD_QUEUE_ON_FULL). Never set on a roster agent. */
 	queued?: boolean;
 	/** Pre-dispatch harness scorecard (advisory shadow, `harness-scorecard.ts`) — a static score of this
@@ -932,13 +964,22 @@ export interface AgentDTO {
 	 *  from before this shipped (or from a restart, which doesn't recompute it) simply renders without one.
 	 *  Advisory only: nothing reads this field to gate, delay, or retry a spawn. */
 	harnessScorecard?: HarnessScorecard;
-	/** Mirrors `PersistedAgent.voicePushArmed`, but ONLY at the exact emitted event that is this agent's
-	 *  genuine terminal completion (see squad-manager.ts's `onAgentEvent` — a workflow's per-node
+	/** Mirrors `PersistedAgent.completionPushArmed`, but ONLY at the exact emitted event that is this
+	 *  agent's genuine terminal completion (see squad-manager.ts's `onAgentEvent` — a workflow's per-node
 	 *  `agent_end` idles are deliberately NOT terminal; only the one paired with `workflow_done` is).
 	 *  False/absent on every other emitted event even while the underlying latch is still armed, so the
 	 *  server-side push hook (`maybePushAlert`) can key a push off this field plus the working→idle edge
 	 *  without ever reaching into the manager or risking a push storm on a multi-node workflow. */
-	voicePushArmed?: boolean;
+	completionPushArmed?: boolean;
+	/** Why the latch is armed, exposed only alongside `completionPushArmed: true` (same terminal-event
+	 *  rule) — push.ts's `completionPayload` branches its copy on it (voice keeps the spoken-debrief
+	 *  callback line; a category arm gets the generic body). */
+	completionPushKind?: "voice" | "category";
+	/** Epoch-ms the latch was (re)armed, exposed only alongside `completionPushArmed: true` (same
+	 *  terminal-event rule). `completionPayload`'s duration gate reads it to suppress a category push
+	 *  whose turn ran under `OMP_SQUAD_PUSH_MIN_TURN_MS` — a live-watched short reply is not a
+	 *  reason-to-switch buzz. Voice arms are exempt (definitionally away-from-screen). */
+	completionArmedAt?: number;
 }
 
 /**
@@ -1061,6 +1102,16 @@ export interface PersistedAgent {
 	 *  Injected into the worktree's `.omp/mcp.json` (omp-rpc harnesses) or the ACP `session/new` call at
 	 *  spawn time; never re-derived on restore. */
 	mcp?: McpServerSpec[];
+	/** ACP harnesses only: OS pid of the adapter child this record spawned (the `npx` wrapper of
+	 *  claude-code-acp etc.), stamped after a successful driver start. A daemon KILL orphans that chain
+	 *  (it reparents to init and idles forever — its stdio transport died with the daemon, so no future
+	 *  boot can ever reuse it); the next boot's dead-session sweep reaps it by this pid AFTER verifying
+	 *  the live process still matches `acpCmd` (never a blind kill of a recycled pid). Restart
+	 *  re-attach, daily-onramp 04. */
+	acpPid?: number;
+	/** The argv `acpPid` was spawned with — the identity fingerprint the reap verifies against
+	 *  /proc/<pid>/cmdline before sending any signal. */
+	acpCmd?: string[];
 	/** flue-service only: worker invocation config. */
 	flue?: FlueMemberConfig;
 	/** workflow only: graph file backing this run. */
@@ -1114,12 +1165,26 @@ export interface PersistedAgent {
 	/** The question this unit was asked, when it is an answer unit (R5). Persisted so a daemon restart
 	 *  still knows the unit owes an answer. */
 	ask?: string;
-	/** Completion-push arm/disarm latch (voice-loop): set true when a voice-sourced dispatch (a
-	 *  `prompt`/`create` command whose `source` is "voice") is applied to this agent; cleared once the
-	 *  completion push actually sends, or by a voice-sourced `interrupt` (the operator cancelled — a
-	 *  "finished" push would be a lie). Persisted (not just in-memory) so the latch — and the ONE push
-	 *  it owes — survives a daemon restart mid-dispatch. See push.ts's `voiceDonePayload`. */
-	voicePushArmed?: boolean;
+	/** Completion-push arm/disarm latch: set when a dispatch owes the operator a "finished" push —
+	 *  ALWAYS for a voice-sourced dispatch (a `prompt`/`create` whose `source` is "voice"), and by
+	 *  session category otherwise (casual console chats default ON, fleet units default OFF — see
+	 *  completion-push.ts's `armCompletionPushKind`). Cleared once the completion push actually sends,
+	 *  or by ANY `interrupt` (the operator cancelled — a "finished" push would be a lie). Persisted
+	 *  (not just in-memory) so the latch — and the ONE push it owes — survives a daemon restart
+	 *  mid-dispatch. Pre-rename records persisted this as `voicePushArmed`; dal/store.ts migrates the
+	 *  legacy field forward at load. See push.ts's `completionPayload`. */
+	completionPushArmed?: boolean;
+	/** Why the latch is armed ("voice" | "category") — persisted with it so the push copy can branch
+	 *  after a restart. Absent whenever the latch is unarmed. */
+	completionPushKind?: "voice" | "category";
+	/** Epoch-ms this latch was last (re)armed — one per turn, refreshed on every arming prompt.
+	 *  Persisted so the completion-push duration gate (see AgentDTO.completionArmedAt) still measures
+	 *  the turn correctly across a daemon restart mid-dispatch. Absent whenever the latch is unarmed. */
+	completionArmedAt?: number;
+	/** Boundary sync (daily-onramp 03): the operator's REAL checkout root for a `here`-class casual
+	 *  session — the turn-boundary sync marker (see CreateAgentOptions.realTreePath). Persisted so a
+	 *  restart-restored session keeps syncing and so boot can re-raise attention for held patches. */
+	realTreePath?: string;
 }
 
 /** Persisted feature envelope — additive `features[]` in `<stateDir>/state.json`. */
@@ -1256,12 +1321,25 @@ export interface CreateAgentOptions {
 	 *  final message is captured verbatim as a durable `Answer`. Implies `executionRole: "observer"`, which
 	 *  already means "never commits, never lands". */
 	ask?: string;
-	/** Carries a persisted voice-loop completion-push arm through the orphan-adopt boot path
-	 *  (adoptOrphanedAgents mints a FRESH id via `create()` rather than reusing the persisted record
+	/** Carries a persisted completion-push arm through the fresh-id restore paths (adoptOrphanedAgents
+	 *  and loadPersisted mint a FRESH id via `create()` rather than reusing the persisted record
 	 *  verbatim like the warm-reattach path does, so the latch needs an explicit carry — see
-	 *  squad-manager.ts's `createWithId`). Absent on a genuinely fresh create(); a fresh voice-sourced
-	 *  dispatch arms via the `source` param instead. */
-	voicePushArmed?: boolean;
+	 *  squad-manager.ts's `createWithId`). Absent on a genuinely fresh create(); a fresh dispatch arms
+	 *  via the `source` param / session category instead. */
+	completionPushArmed?: boolean;
+	/** Rides with `completionPushArmed` through the same restore paths (defaults to "voice" when the
+	 *  carried record predates the kind field). */
+	completionPushKind?: "voice" | "category";
+	/** Rides with `completionPushArmed` through the same restore paths — carried forward (not reset to
+	 *  now) so a turn that spanned a restart still measures from its original arm for the duration gate. */
+	completionArmedAt?: number;
+	/** Boundary sync (daily-onramp 03): the operator's REAL checkout root, set only for `here`-class
+	 *  casual sessions at creation (the console route derives it server-side from the ephemeral
+	 *  registration — never client-supplied as a separate field). When present, every finished turn's
+	 *  patch is applied to this directory iff it provably hasn't moved since turn start; otherwise
+	 *  the patch is held + an attention item raised. Plain fleet units never carry it, so the
+	 *  turn-boundary hook never fires for them. */
+	realTreePath?: string;
 }
 
 /** Sandboxed execution: run the agent's omp inside a container. */

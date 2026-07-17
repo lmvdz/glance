@@ -42,8 +42,10 @@ import {
 	ChatAttachmentCreateBodySchema,
 	CommentsCreateBodySchema,
 	ConsoleBodySchema,
+	ConsoleReleaseBodySchema,
 	decodeBody,
 	decodeBodyOrEmpty,
+	DiscardHeldSyncBodySchema,
 	FeatureAgentsLinkBodySchema,
 	FeatureAnswersBodySchema,
 	FeatureAutoBodySchema,
@@ -58,6 +60,7 @@ import {
 	FeaturePatchBodySchema,
 	FederationCommandBodySchema,
 	FeedbackItemsEnvelopeSchema,
+	FrictionBodySchema,
 	JoinRequestDecideBodySchema,
 	OrgJoinPolicyBodySchema,
 	OrgMemberInviteBodySchema,
@@ -71,6 +74,7 @@ import {
 	PlanVoteCastBodySchema,
 	PromoteBodySchema,
 	PushSubscriptionBodySchema,
+	PushTapBodySchema,
 	SpawnBodySchema,
 	AskBodySchema,
 	HarnessEventBodySchema,
@@ -80,6 +84,7 @@ import {
 	TaskStartBodySchema,
 	VoiceTokenBodySchema,
 } from "./schema/http-body.ts";
+import { mergeAdoptionCounters } from "./adoption-counters.ts";
 import { worktreeDiffSinceFork, worktreeTree } from "./explore.ts";
 import { appendConcernDecision, listPlanDirs, parsePlanConcerns, parsePlanDocuments } from "./features.ts";
 import { isPlanDocPath, planDocDiffSince, planDocHeadRevision, readPlanDoc } from "./plan-doc.ts";
@@ -167,7 +172,7 @@ import { approveJoinRequest, denyJoinRequest, ensurePersonalWorkspace, listPendi
 import { addMemberByEmail, getOrgProfile, listOrgMembers, removeMember, renameOrg, setMemberRole } from "./org-admin.ts";
 import { dbMode as voiceDbBootMode, type DbHandle } from "./db/index.ts";
 import { openRouteDecision } from "./open-worktree.ts";
-import { escalationPayload, type PushPayload, PushService, voiceDonePayload } from "./push.ts";
+import { completionPayload, escalationPayload, type PushPayload, PushService } from "./push.ts";
 import type { Actor, AgentDTO, AgentStatus, AuditEntry, OperatorPresence, Role, RunReceipt } from "./types.ts";
 import type { TraceResponse } from "./spans.ts";
 import { type FederationSnapshot, federationView } from "./federation.ts";
@@ -587,19 +592,23 @@ export class SquadServer {
 	private readonly claimed = new Map<string, string>();
 	/** Agent ids present when the server booted = survivors the daemon reattached to (vs spawned later). */
 	private readonly startupAgentIds = new Set<string>();
-	/** agentId → last status seen, so a push fires only on the transition into a blocking state. */
-	private readonly lastStatus = new Map<string, AgentStatus>();
 	/** agentId → last push epoch ms, throttling repeat alerts. */
 	private readonly lastPush = new Map<string, number>();
-	/** seeded after the first roster so a reconnect replay never alerts in bulk. */
+	/** "Has this process finished its boot-time hydration?" — set once at start() (and by any roster
+	 *  event) and never derived from per-agent state. This is the SOLE boot guard on the push lane
+	 *  (daily-attention-w0 concern 02): the retired private `lastStatus` diff map used to suppress a
+	 *  boot-time push flood only accidentally (start() seeded it from the post-reattach roster, so the
+	 *  first event per agent always read prev === status). The canonical `{type:"transition"}` events
+	 *  we read now carry the REAL pre-reattach `from`, so that suppression must be deliberate: any
+	 *  transition arriving before this flag flips is boot replay, never a live alert. */
 	private pushSeeded = false;
 	/** DB-registry mode: per-org push services (lazy; `<pushRoot>/orgs/<orgId>`) and per-org alert
-	 *  tracking — the org-scoped twins of `push`/`lastStatus`/`lastPush`/`pushSeeded` above. Kept
+	 *  tracking — the org-scoped twins of `push`/`lastPush`/`pushSeeded` above. Kept
 	 *  strictly separate so a tenant's completion/escalation alerts ride ONLY that tenant's own
 	 *  subscription store (the global `push-subs.json` is file-mode-only; wiring it into the per-org
 	 *  fan-out would be a cross-org broadcast — voice-loop DESIGN.md's named prerequisite, done here). */
 	private readonly orgPush = new Map<string, Promise<PushService>>();
-	private readonly orgAlertState = new Map<string, { lastStatus: Map<string, AgentStatus>; lastPush: Map<string, number>; seeded: boolean }>();
+	private readonly orgAlertState = new Map<string, { lastPush: Map<string, number>; seeded: boolean }>();
 	/** Fingerprint of the served UI at boot; sent on every roster so stale tabs self-refresh after an upgrade. */
 	private uiVersion = "";
 	/** This host's operator identity (labels the local roster in the federation view). */
@@ -1006,6 +1015,14 @@ export class SquadServer {
 			const windowMs = Number(url.searchParams.get("windowMs"));
 			return Response.json(learningLoopPayloadAcross(managers, Number.isFinite(windowMs) && windowMs > 0 ? windowMs : undefined));
 		}
+		if (url.pathname === "/api/adoption") {
+			// Dogfood adoption counters (plans/daily-dogfood-engine/02): casual sessions/prompts/push-taps
+			// per UTC day, computed per manager from its OWN durable stateDir data (receipts/,
+			// transitions.jsonl, push-taps.jsonl) and summed. Viewer-tier read (authz.ts GET default) —
+			// counters are not sensitive, and the whole point is a zero-ceremony glance. Scoped like every
+			// route here: a tenant session's `managers` is its own 1-manager array.
+			return Response.json(mergeAdoptionCounters(await Promise.all(managers.map((m) => m.adoptionCounters()))));
+		}
 		return undefined;
 	}
 
@@ -1078,12 +1095,17 @@ export class SquadServer {
 			// maybePushAlert through broadcast() — and the ONLY caller that ever sends the `snapshot`
 			// command that produces one is the legacy (non-webapp) client. The React webapp never sends
 			// `snapshot`, so on a fresh boot the whole push lane sat dead — no escalation, no completion
-			// push — until a legacy client happened to connect. Seed directly from the manager's live
-			// roster here, at start(), file-mode only (`singleManager` is unset in DB-registry mode, where
-			// push never fires anyway — see broadcastTo's doc comment). The roster-event seeding inside
-			// maybePushAlert stays in place too: seeding twice with the same statuses is a harmless no-op,
-			// and it remains the live reseed path across a manager swap that doesn't restart the server.
-			for (const a of this.singleManager.list()) this.lastStatus.set(a.id, a.status);
+			// push — until a legacy client happened to connect. Flip the flag here, at start(), file-mode
+			// only (`singleManager` is unset in DB-registry mode, where push never fires anyway — see
+			// broadcastTo's doc comment). The roster-event seeding inside maybePushAlert stays in place
+			// too: a repeat flip is a harmless no-op.
+			// Boot-flood safety (daily-attention-w0 concern 02): the manager's reattach transitions all
+			// fired inside `manager.start()` — awaited to completion before this server was even
+			// constructed (reconnectLive awaits every attachExisting) — so none of them reach
+			// maybePushAlert through the subscription made below. `pushSeeded` is the DELIBERATE second
+			// layer: any transition event that somehow arrives before this line (alternative wiring,
+			// tests) is boot replay and is dropped, preserving the quiet boot the old post-reattach
+			// `lastStatus` seed used to provide only by accident.
 			this.pushSeeded = true;
 		}
 		this.uiVersion = computeUiVersion(readFileSync(webappEnabled() ? WEBAPP_INDEX : INDEX_HTML, "utf8"));
@@ -1897,6 +1919,35 @@ export class SquadServer {
 			return episode ? Response.json(episode) : new Response("no such episode", { status: 404 });
 		}
 		if (url.pathname === "/api/projects" && req.method === "GET") return Response.json(manager.projects());
+		// Friction ledger (plans/daily-dogfood-engine/01): tenant-scoped like /api/projects (one ledger
+		// per manager stateDir, same as the transitionLog it's modeled on — cross-org roll-up is out of
+		// scope until DB mode needs it). Default authz tiers, no new authz.ts branch: POST ⇒ operator
+		// (the writer is the operator dogfooding their own daemon), GET ⇒ viewer.
+		if (url.pathname === "/api/friction" && req.method === "GET") {
+			const limitParam = Number(url.searchParams.get("limit"));
+			const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.floor(limitParam) : 100;
+			const repoFilter = url.searchParams.get("repo") ?? undefined;
+			const entries = manager.frictionRecent(repoFilter ? undefined : limit);
+			const filtered = repoFilter ? entries.filter((e) => e.repo === repoFilter).slice(-limit) : entries;
+			return Response.json({ entries: filtered.slice().reverse() }); // newest-first for display
+		}
+		if (url.pathname === "/api/friction" && req.method === "POST") {
+			const decoded = decodeBody(FrictionBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response("gripe required", { status: 400 });
+			const b = decoded.success;
+			try {
+				return Response.json(
+					manager.recordFriction({
+						gripe: b.gripe,
+						repo: typeof b.repo === "string" ? b.repo : "",
+						context: typeof b.context === "string" ? b.context : undefined,
+						agentId: typeof b.agentId === "string" ? b.agentId : undefined,
+					}),
+				);
+			} catch (err) {
+				return new Response(errText(err), { status: 400 }); // empty-after-trim gripe (fail-closed record())
+			}
+		}
 		// Add a repo to the workspace. Admin-tiered in authz.ts: this names a path the daemon will later
 		// create worktrees in and spawn agents against. The manager validates it is an ABSOLUTE path to a
 		// real git repo — a relative path is refused, never resolved against the daemon's cwd (which is an
@@ -1925,7 +1976,10 @@ export class SquadServer {
 		if (url.pathname === "/api/projects" && req.method === "POST") {
 			const decoded = decodeBody(ProjectRegisterBodySchema, await req.json().catch(() => null));
 			if (Result.isFailure(decoded)) return new Response("repo required", { status: 400 });
-			const registered = await manager.registerProject(decoded.success.repo);
+			// promoteEphemeral: an explicit "add project" for a repo a live `glance here` session registered
+			// only for its lifetime is the user asking to KEEP it — clear the session-scoped marker so /exit
+			// no longer un-registers it out from under them.
+			const registered = await manager.registerProject(decoded.success.repo, { promoteEphemeral: true });
 			if (!registered.ok) return new Response(registered.reason, { status: 400 });
 			return Response.json({ ok: true, repo: registered.repo, added: registered.added, projects: manager.projects() });
 		}
@@ -2544,11 +2598,81 @@ export class SquadServer {
 		}
 		if (url.pathname === "/api/console" && req.method === "POST") {
 			const body = decodeBodyOrEmpty(ConsoleBodySchema, await req.json().catch(() => null));
-			const repo = typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
+			let repo = typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
 			const model = typeof body.model === "string" && body.model.trim() ? body.model.trim() : undefined;
 			const profileId = typeof body.profileId === "string" ? body.profileId : undefined;
-			const dto = await manager.create({ repo, name: "chat", model, profileId, autoRoute: false, appendSystemPrompt: CONSOLE_SYSTEM_PROMPT }, actor);
-			return Response.json({ agentId: dto.id });
+			// A named harness rides through to create(), which owns validation (unknown name → loud
+			// throw; unverified → the concern-08 honesty gate). `glance here` passes "claude-code".
+			const harness = typeof body.harness === "string" && body.harness.trim() ? body.harness.trim() : undefined;
+			// Ephemeral cwd registration (daily-onramp 02): register BEFORE create — registerProject's own
+			// validation (absolute path, real git repo, canonical root) is exactly the fail-closed gate a
+			// terminal-attach session needs, and its canonical root becomes the repo the unit spawns on.
+			// Tier note: durable POST /api/projects is admin, but this stays operator like the create it
+			// wraps — projects() already unions LIVE-AGENT repos, so an operator spawning here widens the
+			// graph allowlist identically with or without this transient registration; no new authority.
+			let ephemeral = false;
+			if (body.ephemeral === true) {
+				const reg = await manager.registerEphemeralProject(repo);
+				if (!reg.ok) return new Response(reg.reason, { status: 400 });
+				repo = reg.repo;
+				ephemeral = reg.ephemeral;
+			}
+			// Restart re-attach (daily-onramp 04): the client names its dead predecessor; the manager
+			// appends the honest restart marker to the NEW session and hands back the recovered
+			// prior-context tail for the client to fold into the operator's first prompt.
+			const reattachOf = typeof body.reattachOf === "string" && body.reattachOf.trim() ? body.reattachOf.trim() : undefined;
+			try {
+				// realTreePath (daily-onramp 03): a `here`-class session (the client ASKED for ephemeral
+				// registration — `reg.ephemeral` can be false when the repo was already durable, but the
+				// request shape is what marks a terminal-attach session) syncs each finished turn's patch
+				// back into the operator's real checkout, fail-closed. Derived server-side from the
+				// canonical registered root — never a separate client-supplied path. NEVER in db mode:
+				// boundary sync is host actuation (the daemon writing into a host checkout on a tenant
+				// operator's behalf), the same class /open refuses above — a multi-tenant daemon must not
+				// let any tenant point turn-writes at a daemon-readable host directory. Degradation, not
+				// regression: the session still runs; its edits stay worktree-only (diff/promote path).
+				const dto = await manager.create({ repo, name: "chat", model, profileId, harness, autoRoute: false, appendSystemPrompt: CONSOLE_SYSTEM_PROMPT, realTreePath: body.ephemeral === true && !this.dbMode ? repo : undefined }, actor);
+				// Awaited (C2): reattachDeadSession also re-keys the predecessor's held boundary-syncs
+				// onto this new id when the realDir matches — the response should reflect that recovery
+				// immediately (the client's very next GET /api/agents/:id already sees it), not eventually.
+				const reattach = reattachOf ? await manager.reattachDeadSession(dto.id, reattachOf) : undefined;
+				return Response.json({ agentId: dto.id, repo, ephemeral, priorContext: reattach?.priorContext });
+			} catch (err) {
+				// A failed spawn must not leave a half-session behind: undo the registration this very
+				// request created (no-op when the repo was already durably registered).
+				if (ephemeral) manager.releaseEphemeralProject(repo);
+				return new Response(errText(err), { status: 409 });
+			}
+		}
+		// `glance here` exit hook: restore pre-session registry state. Idempotent — releasing a repo that
+		// was never (or is no longer) session-scoped reports released:false rather than erroring, so a
+		// REPL can fire it unconditionally on the way out.
+		if (url.pathname === "/api/console/release" && req.method === "POST") {
+			const decoded = decodeBody(ConsoleReleaseBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response("repo required", { status: 400 });
+			const released = manager.releaseEphemeralProject(decoded.success.repo);
+			return Response.json(released, { status: released.ok ? 200 : 500 });
+		}
+		// Push-tap beacon (daily-dogfood-engine 02): the webapp fires this ONCE per notification-tap
+		// page open (`?push=1` marker on push payload URLs, sessionStorage-deduped client-side).
+		// Appends {ts, agentId} to this manager's push-taps.jsonl — observability only, gates nothing.
+		// Viewer-tier by design (authz.ts): a viewer device's tap is still a tap — which only holds
+		// because `recordPushTap` pairs it with the shape/existence/rate guards (finding #6). `sourceKey`
+		// combines the resolved actor identity with the remote address (authz.ts's own suggestion: "a
+		// bearer token and/or remote addr both work; combine them for a tighter bound") — file mode's
+		// `actor.id` alone (`web:viewer`) is shared by every viewer-tier caller, so the address is what
+		// actually separates distinct devices/scripts into their own rate-limit buckets.
+		if (url.pathname === "/api/push-tap" && req.method === "POST") {
+			const tapDecoded = decodeBody(PushTapBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(tapDecoded)) return new Response("agentId required", { status: 400 });
+			const sourceKey = `${actor.id}:${server.requestIP(req)?.address ?? "unknown"}`;
+			const tapResult = manager.recordPushTap(tapDecoded.success.agentId, sourceKey);
+			if (!tapResult.ok) {
+				// S2: a rate-limited tap is NOT a malformed/unknown-id request — 429, not the generic 400
+				// the shape/existence guards return, so a client can tell "back off" from "this was wrong".
+				return new Response(tapResult.reason ?? "rejected", { status: tapResult.reason === "rate-limited" ? 429 : 400 });
+			}
+			return Response.json({ ok: true });
 		}
 		// Feature 2 D2 (CANVAS-AND-PAGE-CHAT.md): a pasted/dropped/captured/annotated chat image
 		// persists here as a chat ARTIFACT (org-scoped by `manager`, size/PNG-magic-validated in
@@ -2578,6 +2702,20 @@ export class SquadServer {
 			const bytes = await manager.getChatAttachment(decodeURIComponent(mattachment[1]));
 			if (!bytes) return new Response("not found", { status: 404 });
 			return new Response(new Uint8Array(bytes), { headers: { "content-type": "image/png", "cache-control": "private, max-age=31536000, immutable" } });
+		}
+		// Single-agent read that stays honest about restart death (daily-onramp 04): a live id answers
+		// with its DTO; a session a restart killed answers with its dead placeholder (`dead: true` +
+		// the reason) for a bounded window; only an id with no story left is a 404. Without this, a
+		// `glance here` client polling its agent across a daemon bounce could not tell "did not
+		// survive" from "never existed".
+		const magent = url.pathname.match(/^\/api\/agents\/([^/]+)$/);
+		if (magent && req.method === "GET") {
+			const id = decodeURIComponent(magent[1]);
+			const dto = manager.getAgent(id);
+			if (dto) return Response.json(dto);
+			const ph = manager.deadPlaceholder(id);
+			if (ph) return Response.json({ id: ph.id, name: ph.name, repo: ph.repo, harness: ph.harness, at: ph.at, dead: true, deadReason: ph.deadReason, transcriptEntries: ph.transcript.length });
+			return new Response("no such agent", { status: 404 });
 		}
 		const mt = url.pathname.match(/^\/api\/agents\/([^/]+)\/transcript$/);
 		if (mt) {
@@ -2634,6 +2772,68 @@ export class SquadServer {
 		if (mopen && req.method === "POST") {
 			const decision = openRouteDecision(manager.getAgent(decodeURIComponent(mopen[1])) ?? undefined, this.dbMode);
 			return Response.json(decision.body, { status: decision.status });
+		}
+		// Boundary sync (daily-onramp 03): explicitly apply this here-session's HELD turn patches to
+		// the operator's real checkout. Re-runs the fail-closed precondition with a fresh capture —
+		// "still divergent" is an expected report (200 + ok:false), not a transport error; only a
+		// missing agent is a 404. Same operator tier as /land and /verify beside it.
+		const msync = url.pathname.match(/^\/api\/agents\/([^/]+)\/apply-held-sync$/);
+		if (msync && req.method === "POST") {
+			const id = decodeURIComponent(msync[1]);
+			if (!manager.getAgent(id)) return new Response("no such agent", { status: 404 });
+			return Response.json(await manager.applyHeldSync(id, actor));
+		}
+		// Boundary sync, the other resolution: DISCARD this here-session's held turn patches instead
+		// of applying them — the recovery path when the backlog can never apply cleanly (operator
+		// already fixed the divergence by hand, or a crash lost an apply's resolve marker). Drops the
+		// pending write only; the real checkout is untouched and the session worktree keeps every
+		// edit. Optional body `patchId` narrows the drop to one held patch.
+		const mdiscard = url.pathname.match(/^\/api\/agents\/([^/]+)\/discard-held-sync$/);
+		if (mdiscard && req.method === "POST") {
+			const id = decodeURIComponent(mdiscard[1]);
+			if (!manager.getAgent(id)) return new Response("no such agent", { status: 404 });
+			// STRICT body handling, deliberately unlike the decodeBodyOrEmpty endpoints: the absent-
+			// patchId default means "discard the WHOLE backlog", so malformed input must 400, never
+			// silently collapse to {} — a truncated `{"patchId":"x"` would otherwise escalate a
+			// one-patch discard into discard-everything and report success. An EMPTY body is the
+			// deliberate discard-all (what the attention row's Discard sends as `{}`).
+			const rawText = await req.text().catch(() => null);
+			if (rawText === null) return new Response("unreadable body", { status: 400 });
+			let patchId: string | undefined;
+			if (rawText.trim().length > 0) {
+				let parsed: unknown;
+				try {
+					parsed = JSON.parse(rawText);
+				} catch {
+					return new Response("malformed JSON body", { status: 400 });
+				}
+				const decoded = decodeBody(DiscardHeldSyncBodySchema, parsed);
+				if (Result.isFailure(decoded)) return new Response(decoded.failure.message, { status: 400 });
+				const pid = decoded.success.patchId;
+				if (pid !== undefined && (typeof pid !== "string" || pid.length === 0)) return new Response("patchId must be a non-empty string", { status: 400 });
+				patchId = pid as string | undefined;
+			}
+			return Response.json(await manager.discardHeldSync(id, patchId, actor));
+		}
+		// N2: acknowledge a boundary-sync "divergence" row — the write already happened (nothing to
+		// Apply/Discard, no ledger entry to resolve), so unlike the other two affordances this only
+		// ever clears the attention row itself. `clearBoundarySyncAttention`'s `only` param is required
+		// (no blanket clear exists anymore), so this is the row's ONE dismissal path other than a fresh
+		// turn's own "held"/"uncapturable" clears (which never touch "divergence" — see the manager).
+		const mack = url.pathname.match(/^\/api\/agents\/([^/]+)\/ack-boundary-sync-divergence$/);
+		if (mack && req.method === "POST") {
+			const id = decodeURIComponent(mack[1]);
+			if (!manager.getAgent(id)) return new Response("no such agent", { status: 404 });
+			return Response.json(await manager.acknowledgeBoundarySyncDivergence(id, actor));
+		}
+		// C2: held boundary-sync patches whose owning agent isn't in the roster at all — a `here`
+		// session that hasn't reattached this tenure. Repo-scoped, not id-scoped: the operator recovers
+		// these by running `glance here` again on the SAME checkout with a restart reattach (that
+		// re-keys any hold whose realDir matches — see rekeyHeldSyncsOnReattach). Read-only, viewer-tier
+		// like the other GETs in this family; the patch file paths are already exposed at that tier via
+		// the ordinary held-sync attention detail text.
+		if (url.pathname === "/api/boundary-sync/orphaned" && req.method === "GET") {
+			return Response.json(await manager.orphanedBoundarySyncs());
 		}
 		const mverify = url.pathname.match(/^\/api\/agents\/([^/]+)\/verify$/);
 		if (mverify && req.method === "POST") {
@@ -2840,21 +3040,33 @@ export class SquadServer {
 		}
 	}
 
-	/** Fire a background push when an agent transitions into a state that needs a human. Mirrors the
-	 *  client's seed-then-notify guard so a reconnect/roster replay never alerts in bulk. */
+	/** Fire a background push when an agent transitions into a state that needs a human. Reads
+	 *  `from`/`to` straight off the canonical `{type:"transition"}` SquadEvent (transitions.jsonl's
+	 *  own guarded write path, squad-manager.ts's transition()/recordTransition()) instead of the
+	 *  retired private `lastStatus` diff over `{type:"agent"}` events — one source of truth for "what
+	 *  changed", zero drift (daily-attention-w0 concern 02). The DTO fields the payload builders need
+	 *  (name, pending, error, completionPushArmed…) come from the live manager record: transition
+	 *  events are emitted synchronously from inside recordTransition(), strictly AFTER `rec.dto` was
+	 *  brought fully up to date (status, error, pending, latch exposure all land before the
+	 *  transition() call at every emit site), so getAgent() here is exactly as consistent as the
+	 *  later `agent` event's own snapshot used to be.
+	 *  Boot guard: gated on `pushSeeded` ALONE (see the field comment) — a transition event carries
+	 *  the real pre-reattach `from`, so a boot-time reattach replay (`reason:"reattach"`, from !== to
+	 *  when derive() reclassified a crashed turn) would otherwise page the operator on every daemon
+	 *  restart. Denied entries never changed dto.status and are skipped outright. */
 	private maybePushAlert(e: SquadEvent): void {
 		const push = this.opts.push;
 		if (!push) return;
 		if (e.type === "roster") {
-			for (const a of e.agents) this.lastStatus.set(a.id, a.status);
 			this.pushSeeded = true;
 			return;
 		}
-		if (e.type !== "agent") return;
-		const a = e.agent;
-		const prev = this.lastStatus.get(a.id);
-		this.lastStatus.set(a.id, a.status);
-		const payload = escalationPayload(prev, a, this.pushSeeded);
+		if (e.type !== "transition" || e.entry.denied) return;
+		if (!this.pushSeeded) return; // boot replay, never a live alert — the preserved quiet boot
+		const entry = e.entry;
+		const a = this.singleManager?.getAgent(entry.agentId);
+		if (!a) return; // removed between emit and here (or no manager) — nothing to describe, fail closed
+		const payload = escalationPayload(entry.from, a, this.pushSeeded);
 		if (payload) {
 			const now = Date.now();
 			if (now - (this.lastPush.get(a.id) ?? 0) >= 3000) {
@@ -2862,66 +3074,68 @@ export class SquadServer {
 				void push.notify(payload);
 			}
 		}
-		this.maybePushVoiceDone(prev, a, push);
+		this.maybePushCompletionDone(entry.from, a, push);
 	}
 
-	/** Voice-loop completion push (plans/voice-loop concern 01): a SEPARATE `done:` tag/debounce
-	 *  namespace from the escalation lane above, so a "finished" toast can never REPLACE (sw.js
-	 *  renotify) or debounce-eat an unactioned "needs you" alert for the same agent. File-mode only —
-	 *  explicit guard here rather than relying solely on `broadcast()` only being wired in the file-mode
-	 *  branch today (see `start()`), so a future `broadcastTo` push wiring can never silently ride this
-	 *  one global subscription list across orgs (`broadcastTo`'s own doc comment already asserts this;
-	 *  this is defense in depth at the new payload site itself). Disarms the manager's `voicePushArmed`
-	 *  latch only once the push actually sends — that's the "exactly one push per voice dispatch"
-	 *  invariant's other half. */
-	private maybePushVoiceDone(prev: AgentStatus | undefined, a: AgentDTO, push: PushService): void {
+	/** Completion push (plans/voice-loop concern 01, generalized by daily-attention-w0 concern 01): a
+	 *  SEPARATE `done:` tag/debounce namespace from the escalation lane above, so a "finished" toast
+	 *  can never REPLACE (sw.js renotify) or debounce-eat an unactioned "needs you" alert for the same
+	 *  agent. File-mode only — explicit guard here rather than relying solely on `broadcast()` only
+	 *  being wired in the file-mode branch today (see `start()`), so a future `broadcastTo` push wiring
+	 *  can never silently ride this one global subscription list across orgs (`broadcastTo`'s own doc
+	 *  comment already asserts this; this is defense in depth at the new payload site itself). Disarms
+	 *  the manager's `completionPushArmed` latch only once the push actually sends — that's the
+	 *  "exactly one push per armed dispatch" invariant's other half. */
+	private maybePushCompletionDone(prev: AgentStatus | undefined, a: AgentDTO, push: PushService): void {
 		if (this.registry) return;
-		const payload = voiceDonePayload(prev, a, this.pushSeeded);
+		const payload = completionPayload(prev, a, this.pushSeeded);
 		if (!payload) return;
 		const key = `done:${a.id}`;
 		const now = Date.now();
 		if (now - (this.lastPush.get(key) ?? 0) < 3000) return;
 		this.lastPush.set(key, now);
 		// Disarm SYNCHRONOUSLY, before the (seconds-long, per-subscription) network send — review
-		// finding: an async post-send disarm races a NEWER voice dispatch's arm on the same agent
+		// finding: an async post-send disarm races a NEWER dispatch's arm on the same agent
 		// (applyCommand skips re-arming while the latch still reads true, then the late disarm
 		// consumes the latch that second dispatch was riding — its push is silently lost). The cost
 		// of sync-consume is that a totally-failed notify() doesn't retry on a later idle — accepted:
 		// the push is best-effort by design, the debrief cursor is the guarantee (DESIGN.md).
-		this.singleManager?.clearVoicePushArmed(a.id);
+		this.singleManager?.clearCompletionPushArmed(a.id);
 		void push.notify(payload);
 	}
 
 	/** DB-registry twin of `maybePushAlert`: same payload rules (escalation + voice-done), same
-	 *  debounce discipline, but keyed entirely to ONE org's own alert state, manager, and push
-	 *  service. Seeding is lazy (first event for the org snapshots that org manager's roster) —
-	 *  identical suppression semantics to the file-mode seed: the transition that materializes the
-	 *  state never alerts, everything after does. */
+	 *  debounce discipline, same canonical `{type:"transition"}` event source, but keyed entirely to
+	 *  ONE org's own alert state, manager, and push service. Seeding mirrors file mode's `pushSeeded`
+	 *  EXACTLY (S4, blind review): `ManagerRegistry.create` fires one synthetic `{type:"roster"}` event
+	 *  through `onEvent` right after a fresh org manager finishes hydrating — that explicit marker,
+	 *  and ONLY that marker, is the seed boundary. The old fallback ("no roster event yet? seed off
+	 *  whatever event happens to arrive first, as long as the org manager is reachable") was wrong: the
+	 *  very first live event for an org is often the reachability check itself succeeding on a REAL
+	 *  transition — an input/error/completion edge that had every right to alert — and that fallback
+	 *  silently consumed it as "the" boundary instead of evaluating it, losing exactly the escalation
+	 *  the operator needed. Any event arriving before the hydration marker (a manager's own boot-replay
+	 *  transitions, emitted synchronously inside `manager.start()` before `ManagerRegistry.create` can
+	 *  fire the marker) is still correctly swallowed by `!state.seeded` below — that boot-quiet
+	 *  invariant is unchanged, it just no longer doubles as an accidental seed. */
 	private maybePushAlertOrg(orgId: string, e: SquadEvent): void {
 		if (!this.registry || !this.opts.pushRoot) return;
 		let state = this.orgAlertState.get(orgId);
 		if (!state) {
-			state = { lastStatus: new Map(), lastPush: new Map(), seeded: false };
+			state = { lastPush: new Map(), seeded: false };
 			this.orgAlertState.set(orgId, state);
 		}
-		if (!state.seeded) {
-			const mgr = this.orgManager(orgId);
-			if (mgr) {
-				for (const a of mgr.list()) state.lastStatus.set(a.id, a.status);
-				state.seeded = true;
-			}
-		}
 		if (e.type === "roster") {
-			for (const a of e.agents) state.lastStatus.set(a.id, a.status);
 			state.seeded = true;
 			return;
 		}
-		if (e.type !== "agent") return;
-		const a = e.agent;
-		const prev = state.lastStatus.get(a.id);
-		state.lastStatus.set(a.id, a.status);
-		const escalation = escalationPayload(prev, a, state.seeded);
-		const done = voiceDonePayload(prev, a, state.seeded);
+		if (!state.seeded) return; // pre-hydration boot replay — never alert on it
+		if (e.type !== "transition" || e.entry.denied) return;
+		const entry = e.entry;
+		const a = this.orgManager(orgId)?.getAgent(entry.agentId);
+		if (!a) return; // removed between emit and here — fail closed, same as the file-mode lane
+		const escalation = escalationPayload(entry.from, a, state.seeded);
+		const done = completionPayload(entry.from, a, state.seeded);
 		if (!escalation && !done) return;
 		const now = Date.now();
 		if (escalation && now - (state.lastPush.get(a.id) ?? 0) >= 3000) {
@@ -2934,7 +3148,7 @@ export class SquadServer {
 				state.lastPush.set(key, now);
 				// Same sync-disarm-before-send discipline as the file-mode lane (audit finding: an async
 				// post-send disarm races a newer dispatch's re-arm).
-				this.orgManager(orgId)?.clearVoicePushArmed(a.id);
+				this.orgManager(orgId)?.clearCompletionPushArmed(a.id);
 				void this.pushForOrg(orgId).then((push) => void push.notify(done));
 			}
 		}

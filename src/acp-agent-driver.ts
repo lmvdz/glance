@@ -72,6 +72,18 @@ export interface AcpAgentDriverOptions {
 	 *  below). This is ACP's only spec-blessed context/capability channel; distinct from
 	 *  `contextInjection`, which is about the fabric primer / tool-grant prompt text, not real MCP tools. */
 	mcpServers?: McpServerSpec[];
+	/** Turn-liveness silence window (ms) for `session/prompt` ONLY — reset by every `session/update`
+	 *  notification for the session (see `sendTurn`/`handleNotification`). Defaults to 60s: the same
+	 *  magnitude as the old fixed request timeout this replaces, but now meaning "no activity for this
+	 *  long", not "hasn't returned yet" — a healthy turn that streams for minutes never trips it, only
+	 *  an adapter that goes quiet does. Tests inject a small value to exercise the reset/timeout logic
+	 *  without a real 60s+ wait; the default is what ships. */
+	turnSilenceMs?: number;
+	/** Hard backstop (ms) for a whole `session/prompt` turn, regardless of streamed activity — fires
+	 *  even if the adapter keeps emitting `session/update` forever. Defaults to 30 minutes, the same
+	 *  order of magnitude as the branch-turn cap in squad-manager.ts's `runAgentTask`
+	 *  (`setTimeout(() => finish("failed"), 30 * 60_000)`). Tests inject a small value. */
+	turnHardCapMs?: number;
 }
 
 type Pending = { resolve: (data: unknown) => void; reject: (err: Error) => void };
@@ -189,6 +201,30 @@ export class AcpAgentDriver extends EventEmitter implements AgentDriver {
 	private todoPhases: TodoPhase[] = [];
 	/** Whether the opt-in context block has already been prepended (first turn only). */
 	private contextInjected = false;
+	/** The argv actually spawned (start() resolved it from opts/registry) — persisted by the manager
+	 *  alongside `pid` so the NEXT boot can identity-check and reap an orphaned adapter chain a daemon
+	 *  kill left behind (restart re-attach, daily-onramp 04). */
+	private launched?: string[];
+	/** Set by `sendTurn` while a `session/prompt` call is in flight; `handleNotification` calls it on
+	 *  every `session/update` for the session to reset that turn's silence timer. undefined when no
+	 *  turn call is pending (nothing to bump). */
+	private turnLivenessBump?: () => void;
+	/** Set by `sendTurn`; `handleNotification`/`trackToolCall` call it whenever the outstanding-tool-call
+	 *  count transitions between zero and nonzero (plan 08). `true` = a tool call just opened (suspend the
+	 *  silence window — a live tool doing quiet work, e.g. `sleep 300`, is itself proof the turn is alive);
+	 *  `false` = the last outstanding tool call just closed (resume a fresh silence window — normal
+	 *  turn-liveness applies again until the next update or the response). undefined when no turn is
+	 *  pending. */
+	private turnToolCallChange?: (outstanding: boolean) => void;
+	/** toolCallId → outstanding, tracked from the `tool_call` / `tool_call_update` stream (plan 08). A real
+	 *  adapter (claude-code-acp 0.16.2, live-observed) emits exactly one `tool_call` update ("running") at
+	 *  shell-call start and nothing else until the matching `tool_call_update` reports a terminal status —
+	 *  so "an outstanding tool call" has to be tracked explicitly; it is NOT implied by silence continuing. */
+	private readonly outstandingToolCalls = new Set<string>();
+	/** Terminal `tool_call`/`tool_call_update` statuses that close an outstanding tool call. Anything else
+	 *  (including a missing `status`, which a `tool_call` creation update may legitimately omit) is treated
+	 *  as still-open — conservative in the direction of NOT prematurely resuming the silence window. */
+	private static readonly TERMINAL_TOOL_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
 	constructor(opts: AcpAgentDriverOptions) {
 		super();
@@ -201,9 +237,25 @@ export class AcpAgentDriver extends EventEmitter implements AgentDriver {
 	get isAlive(): boolean {
 		return !!this.proc && !this.exited;
 	}
+	/** OS pid of the adapter child (e.g. the `npx` wrapper of claude-code-acp), while it runs. */
+	get pid(): number | undefined {
+		return this.proc?.pid;
+	}
+	/** The argv this driver spawned — set by start(), undefined before it. */
+	get spawnedCommand(): string[] | undefined {
+		return this.launched;
+	}
+
+	private get turnSilenceMs(): number {
+		return this.opts.turnSilenceMs ?? 60_000;
+	}
+	private get turnHardCapMs(): number {
+		return this.opts.turnHardCapMs ?? 30 * 60_000;
+	}
 
 	async start(timeoutMs = 60_000): Promise<void> {
 		const cmd = this.opts.command ?? buildAcpCommand(this.opts.model);
+		this.launched = cmd;
 		// Passing NO `env` option here inherited the daemon's FULL environment (Bun.spawn's default) —
 		// the easiest of the three spawn sites to miss, because the absence of an `env` key reads as
 		// "nothing leaks" when it actually means the opposite. Scrub explicitly (spawn-env.ts).
@@ -357,6 +409,13 @@ export class AcpAgentDriver extends EventEmitter implements AgentDriver {
 
 	private handleNotification(method: string, params: unknown): void {
 		if (method !== "session/update" || !isObj(params)) return;
+		// Any session/update for the in-flight turn's session proves the adapter is alive — reset the
+		// turn's silence timer (sendTurn) regardless of which update kind this is (chunk, tool_call,
+		// plan, usage — all count as liveness). Guard on sessionId when the notification carries one;
+		// a driver only ever tracks one session, so a missing sessionId still bumps (defensive, not
+		// spec-required).
+		const sid = asString(params.sessionId);
+		if (!sid || sid === this.sessionId) this.turnLivenessBump?.();
 		const update = params.update;
 		if (!isObj(update)) return;
 		switch (asString(update.sessionUpdate)) {
@@ -374,8 +433,16 @@ export class AcpAgentDriver extends EventEmitter implements AgentDriver {
 				const title = asString(update.title);
 				const kind = asString(update.kind);
 				this.emit("event", { type: "tool_execution_start", toolName: kind ?? title ?? "tool", intent: title });
+				this.trackToolCall(asString(update.toolCallId), asString(update.status));
 				return;
 			}
+			case "tool_call_update":
+				// Plan 08: the only signal that an outstanding tool call finished (or failed/was cancelled).
+				// A quiet multi-minute tool (a silent build, `sleep 300`, a network fetch with no progress
+				// output) emits NOTHING between the `tool_call` above and this update — that gap is the
+				// whole point: it is liveness, not silence, and must not trip the turn's silence window.
+				this.trackToolCall(asString(update.toolCallId), asString(update.status));
+				return;
 			case "plan":
 				this.todoPhases = parsePlan(update.entries);
 				return;
@@ -383,10 +450,27 @@ export class AcpAgentDriver extends EventEmitter implements AgentDriver {
 				this.lastUsage = parseUsage(update);
 				return;
 			default:
-				// ponytail: agent_thought_chunk / tool_call_update / current_mode_update streamed but
-				// unused by the manager; map them when the UI needs thoughts or live tool status.
+				// ponytail: agent_thought_chunk / current_mode_update streamed but unused by the manager;
+				// map them when the UI needs thoughts or live mode status.
 				return;
 		}
+	}
+
+	/** Update `outstandingToolCalls` from a `tool_call`/`tool_call_update` notification and, on a
+	 *  zero↔nonzero transition, tell the active turn (`turnToolCallChange`) so it can suspend or resume
+	 *  its silence window (plan 08). No `toolCallId` (a non-compliant adapter) is a no-op — we can't track
+	 *  what we can't key, and falling back to a bare counter risks a stray decrement making liveness look
+	 *  cleared when it isn't; the existing silence window / hard cap still cover that adapter. */
+	private trackToolCall(toolCallId: string | undefined, status: string | undefined): void {
+		if (!toolCallId) return;
+		const wasEmpty = this.outstandingToolCalls.size === 0;
+		if (status !== undefined && AcpAgentDriver.TERMINAL_TOOL_STATUSES.has(status)) {
+			this.outstandingToolCalls.delete(toolCallId);
+		} else {
+			this.outstandingToolCalls.add(toolCallId);
+		}
+		const isEmpty = this.outstandingToolCalls.size === 0;
+		if (wasEmpty !== isEmpty) this.turnToolCallChange?.(!isEmpty);
 	}
 
 	private handleRequest(id: string | number, method: string, params: unknown): void {
@@ -487,12 +571,93 @@ export class AcpAgentDriver extends EventEmitter implements AgentDriver {
 		});
 	}
 
+	/** `session/prompt` ONLY. Its response arrives at TURN END — for real coding work that's routinely
+	 *  well past 60s — so riding `send()`'s fixed request-scoped timeout rejects a perfectly healthy
+	 *  in-progress turn and marks the agent "error" while the adapter keeps working underneath (the bug
+	 *  this fixes; see plans/daily-onramp/07-acp-prompt-turn-timeout.md, live-proven with a `sleep 75`
+	 *  control that errored at exactly +60s).
+	 *
+	 *  Turn-scoped liveness instead of a fixed deadline: every `session/update` notification for this
+	 *  session (handleNotification) resets a silence timer via `turnLivenessBump`, so the turn stays
+	 *  alive exactly as long as the adapter keeps streaming, and only times out when it genuinely goes
+	 *  quiet (fail-closed — "absence of evidence is never evidence of settlement"). A hard cap fires
+	 *  regardless of activity so a turn that streams forever doesn't pin the slot unnoticed either.
+	 *  `initialize` / `session/new` / `session/set_mode` stay on plain `send()`'s fixed 60s default —
+	 *  those genuinely ARE request/response calls that should fail fast. */
+	private sendTurn<T = unknown>(method: string, params: unknown): Promise<T> {
+		if (!this.proc || this.exited) return Promise.reject(new Error("acp agent not running"));
+		const id = ++this.seq;
+		const key = String(id);
+		// Fresh per turn: a stray leftover id from a prior turn (e.g. a completion that raced the previous
+		// response) must not suspend THIS turn's silence window on a tool call that isn't actually ours.
+		this.outstandingToolCalls.clear();
+		return new Promise<T>((resolve, reject) => {
+			let silenceTimer: ReturnType<typeof setTimeout> | undefined;
+			let hardCapTimer: ReturnType<typeof setTimeout>;
+			let armSilence: () => void;
+			let toolCallOutstanding = false;
+			const clearSilence = () => {
+				if (silenceTimer) clearTimeout(silenceTimer);
+				silenceTimer = undefined;
+			};
+			const clearAll = () => {
+				clearSilence();
+				clearTimeout(hardCapTimer);
+				if (this.turnLivenessBump === armSilence) this.turnLivenessBump = undefined;
+				if (this.turnToolCallChange === onToolCallChange) this.turnToolCallChange = undefined;
+			};
+			armSilence = () => {
+				// Plan 08: while a tool call is outstanding, quiet time is expected, not a dead adapter — the
+				// silence window is SUSPENDED, not merely reset. `onToolCallChange` re-arms it the moment the
+				// last outstanding tool call closes. A tool call that never closes (adapter died mid-tool)
+				// leaves the silence window suspended forever by design — the hard cap below is the backstop
+				// for exactly that case, unconditionally, regardless of tool-call state.
+				if (toolCallOutstanding) return;
+				clearSilence();
+				silenceTimer = setTimeout(() => {
+					clearAll();
+					this.pending.delete(key);
+					reject(new Error(`acp request ${method} timed out`));
+				}, this.turnSilenceMs);
+			};
+			const onToolCallChange = (outstanding: boolean) => {
+				toolCallOutstanding = outstanding;
+				if (outstanding) {
+					clearSilence(); // suspend: a tool call just opened
+				} else {
+					armSilence(); // resume a fresh window: the last outstanding tool call just closed
+				}
+			};
+			hardCapTimer = setTimeout(() => {
+				clearAll();
+				this.pending.delete(key);
+				reject(new Error(`acp request ${method} timed out (turn hard cap)`));
+			}, this.turnHardCapMs);
+			armSilence();
+			this.turnLivenessBump = armSilence;
+			this.turnToolCallChange = onToolCallChange;
+			this.pending.set(key, {
+				resolve: (d) => {
+					clearAll();
+					resolve(d as T);
+				},
+				reject: (e) => {
+					clearAll();
+					reject(e);
+				},
+			});
+			this.write({ jsonrpc: "2.0", id, method, params });
+		});
+	}
+
 	async prompt(message: string): Promise<void> {
 		this.streaming = true;
 		this.emit("event", { type: "agent_start" });
 		try {
 			// Resolves with { stopReason } on turn end; session/cancel makes it resolve "cancelled".
-			await this.send("session/prompt", { sessionId: this.sessionId, prompt: this.promptBlocks(message) });
+			// Turn-scoped liveness (sendTurn), not the fixed 60s request default (send) — see sendTurn's
+			// doc comment and plan 07 for why session/prompt is the one call that needs this.
+			await this.sendTurn("session/prompt", { sessionId: this.sessionId, prompt: this.promptBlocks(message) });
 			this.emit("event", { type: "message_end", message: { role: "assistant", usage: this.lastUsage } });
 		} finally {
 			// agent_end always fires — end_turn, cancel, refusal, and error all terminate the turn.

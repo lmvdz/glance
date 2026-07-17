@@ -13,7 +13,14 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { RbacDenied } from "../src/auth.ts";
-import { commandTier, restActionTier } from "../src/authz.ts";
+import {
+	_resetPushTapRateLimitsForTests,
+	allowPushTap,
+	commandTier,
+	isKnownPushTapAgentId,
+	isValidPushTapAgentId,
+	restActionTier,
+} from "../src/authz.ts";
 import type { StateSnapshot, Store } from "../src/dal/store.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import { SquadServer } from "../src/server.ts";
@@ -207,4 +214,52 @@ test("REST settings flags: viewer reads, operator denied, admin persists", async
  */
 test("the doctor's facts are operator-only", () => {
 	expect(restActionTier("GET", "/api/doctor")).toBe("operator");
+});
+
+/**
+ * Push-tap write guards (finding #6, wave-1 fixer D): `/api/push-tap` stays viewer-tier
+ * deliberately (see the comment above `restActionTier`'s push-tap line), so the actual safety
+ * boundary is these three pure helpers the write site (`SquadManager.recordPushTap`) is expected
+ * to apply before ever appending to push-taps.jsonl — the substrate GET /api/adoption reads.
+ */
+test("isValidPushTapAgentId: rejects non-strings, empty, oversized, and control characters", () => {
+	expect(isValidPushTapAgentId("chat-abc-1-dead")).toBe(true);
+	expect(isValidPushTapAgentId("a1")).toBe(true);
+	// Real ids derive from a free-text agent name (spawn-identity.ts's newAgentId) — spaces and
+	// punctuation are legitimate, so the shape check must not be a slug validator.
+	expect(isValidPushTapAgentId("Work on OMPSQ-319: fix the thing-1a2b3c-x-deadbeef")).toBe(true);
+	expect(isValidPushTapAgentId(123)).toBe(false);
+	expect(isValidPushTapAgentId(null)).toBe(false);
+	expect(isValidPushTapAgentId(undefined)).toBe(false);
+	expect(isValidPushTapAgentId({})).toBe(false);
+	expect(isValidPushTapAgentId("")).toBe(false);
+	expect(isValidPushTapAgentId("a".repeat(201))).toBe(false); // over SquadManager's own 200-char clamp
+	expect(isValidPushTapAgentId("a".repeat(200))).toBe(true); // exactly at the clamp is fine
+	expect(isValidPushTapAgentId("a1\nSpoofedAuditLine")).toBe(false); // control char (newline)
+	expect(isValidPushTapAgentId("a1\x00null")).toBe(false); // embedded NUL
+});
+
+test("isKnownPushTapAgentId: only ids the caller's roster/removed-ledger actually names", () => {
+	const roster = ["a1", "a2", "chat-abc-1-dead"];
+	expect(isKnownPushTapAgentId("a1", roster)).toBe(true);
+	expect(isKnownPushTapAgentId("a3", roster)).toBe(false);
+	expect(isKnownPushTapAgentId("forged-agent-id", roster)).toBe(false);
+	expect(isKnownPushTapAgentId("a1", [])).toBe(false);
+});
+
+test("allowPushTap: bursts up to capacity, then throttles, then refills over time", () => {
+	_resetPushTapRateLimitsForTests();
+	const source = "viewer-token-abc";
+	const t0 = 1_000_000;
+	// First 10 taps (the burst capacity) all pass at the same instant.
+	for (let i = 0; i < 10; i++) {
+		expect(allowPushTap(source, t0)).toBe(true);
+	}
+	// The 11th, still at t0, is throttled — the bucket is empty.
+	expect(allowPushTap(source, t0)).toBe(false);
+	// A different source key has its own independent bucket — one noisy viewer can't starve another.
+	expect(allowPushTap("other-token", t0)).toBe(true);
+	// After a full minute (the sustained 10/min refill rate), a fresh tap is allowed again.
+	expect(allowPushTap(source, t0 + 60_000)).toBe(true);
+	_resetPushTapRateLimitsForTests();
 });

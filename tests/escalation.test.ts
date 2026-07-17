@@ -21,7 +21,9 @@ test("alerts on transition into input with the pending title + agent deep link",
 	const p = escalationPayload("working", agent("input", { pending: [pending] }), true);
 	expect(p?.title).toContain("needs you");
 	expect(p?.body).toBe("approve deploy?");
-	expect(p?.url).toBe("/#/agent/a1");
+	// `?push=1` = the tap marker the webapp beacons to POST /api/push-tap then strips
+	// (push-taps/day adoption counter, plans/daily-dogfood-engine/02).
+	expect(p?.url).toBe("/#/agent/a1?push=1");
 	expect(p?.tag).toBe("a1");
 });
 

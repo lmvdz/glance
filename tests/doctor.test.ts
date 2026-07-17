@@ -28,6 +28,7 @@ function probe(over: Partial<DoctorProbe> = {}): DoctorProbe {
 		webappBuilt: async () => true,
 		harnessHooks: async () => [{ harness: "claude-code", ok: true, detail: "all 4 hooks registered" }],
 		zombieAgents: async () => 0,
+		adoption: async () => ({ casualSessionsByDay: {}, promptsByDay: {}, pushTapsByDay: {} }),
 		symptoms: async () => [],
 		...over,
 	};
@@ -316,7 +317,7 @@ test("a report full of unknowns never prints the all-clear", async () => {
 	const boom = () => {
 		throw new Error("probe exploded");
 	};
-	const report = await runDoctor(probe({ daemon: boom, autonomy: boom, stateDir: boom, planeArmed: boom, gateImage: boom, projects: boom, webappBuilt: boom, zombieAgents: boom, harnessHooks: boom, symptoms: boom }));
+	const report = await runDoctor(probe({ daemon: boom, autonomy: boom, stateDir: boom, planeArmed: boom, gateImage: boom, projects: boom, webappBuilt: boom, zombieAgents: boom, harnessHooks: boom, adoption: boom, symptoms: boom }));
 
 	expect(report.checks.every((c) => c.status === "unknown")).toBe(true);
 	expect(report.healthy).toBe(true); // nothing is BLOCKING — the exit code stays 0
@@ -403,6 +404,34 @@ test("no docker under STRICT is an error, not a graceful fallback", async () => 
 test("the gate check names the image the gate will actually use", async () => {
 	const report = await runDoctor(probe({ gateImage: async () => ({ dockerUsable: true, imagePresent: false, image: "acme/custom-gate:3", strict: false }) }));
 	expect(find(report, "gate")?.detail).toContain("acme/custom-gate:3");
+});
+
+// ── adoption counters (plans/daily-dogfood-engine/02) ───────────────────────────────────────────
+
+/** The adoption section reports the numbers where Lars reads them; zero usage is a finding for the
+ *  adoption GATE, not a machine fault — so it is `ok` with honest zeros, never a nag and never hidden. */
+test("adoption counters render today's and the 7-day numbers, and zeros stay ok", async () => {
+	const day = new Date().toISOString().slice(0, 10);
+	const report = await runDoctor(probe({
+		adoption: async () => ({ casualSessionsByDay: { [day]: 2 }, promptsByDay: { [day]: 9 }, pushTapsByDay: {} }),
+	}));
+	const check = find(report, "adoption");
+	expect(check?.status).toBe("ok");
+	expect(check?.detail).toContain("2 casual session(s)");
+	expect(check?.detail).toContain("9 prompt(s)");
+	expect(check?.detail).toContain("0 push tap(s)");
+
+	const zeros = await runDoctor(probe());
+	expect(find(zeros, "adoption")?.status).toBe("ok");
+	expect(find(zeros, "adoption")?.detail).toContain("today 0 casual session(s)");
+});
+
+/** A failed counters read is an honest `unknown` via attempt() — never a fabricated zero row. */
+test("a failing adoption probe reads as unknown, not as zero usage", async () => {
+	const report = await runDoctor(probe({ adoption: async () => { throw new Error("state dir unreadable"); } }));
+	const check = find(report, "adoption");
+	expect(check?.status).toBe("unknown");
+	expect(check?.detail).toContain("state dir unreadable");
 });
 
 // ── doctor-failure auto-match (comprehension concern 07, DESIGN.md "push at motivation") ────────

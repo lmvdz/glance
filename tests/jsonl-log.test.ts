@@ -144,4 +144,60 @@ describe("JsonlLog.hydrate (constructor) + hydrateAll", () => {
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
+
+	// Finding 7 (wave-1 review): hydrateAll must read the rotated `<path>.1` tail — the caller-facing
+	// contract is "full persisted history", and once a rotation has happened that history spans two
+	// files. Losing `.1` silently drops everything written before the last rotation.
+	test("hydrateAll reads the rotated <path>.1 tail BEFORE the live file, oldest-first", async () => {
+		const dir = tmp();
+		const file = path.join(dir, "test.jsonl");
+		try {
+			// Same shape as the "renames the file to <path>.1" rotation test above: three 8-byte lines
+			// with maxBytes=10 ⇒ exactly one rotation (i:0,i:1 → .1; i:2 stays live).
+			const log = new JsonlLog<Entry>({ path: file, maxBytes: 10, log: () => {} });
+			log.append({ i: 0 });
+			await Bun.sleep(20);
+			log.append({ i: 1 });
+			await Bun.sleep(20);
+			log.append({ i: 2 });
+			await Bun.sleep(20);
+
+			expect(existsSync(`${file}.1`)).toBe(true); // rotation happened
+			const rotated = readFileSync(`${file}.1`, "utf8").trim().split("\n").map((l) => JSON.parse(l) as Entry);
+			const live = readFileSync(file, "utf8").trim().split("\n").map((l) => JSON.parse(l) as Entry);
+			expect(rotated).toEqual([{ i: 0 }, { i: 1 }]);
+			expect(live).toEqual([{ i: 2 }]);
+
+			const all = await log.hydrateAll();
+			expect(all).toEqual([...rotated, ...live]); // .1 first (oldest), then the live file
+			expect(all).toEqual([{ i: 0 }, { i: 1 }, { i: 2 }]); // nothing from before rotation was dropped
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("hydrateAll: a torn line in <path>.1 is skipped, the rest of both files still read", async () => {
+		const dir = tmp();
+		const file = path.join(dir, "test.jsonl");
+		try {
+			writeFileSync(`${file}.1`, '{"i":0}\nnot json\n{"i":1}\n');
+			writeFileSync(file, '{"i":2}\n');
+			const log = new JsonlLog<Entry>({ path: file, log: () => {} }); // no rotation needed for this test
+			expect(await log.hydrateAll()).toEqual([{ i: 0 }, { i: 1 }, { i: 2 }]);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("hydrateAll: missing .1 (no rotation yet) reads only the live file, same as before", async () => {
+		const dir = tmp();
+		const file = path.join(dir, "test.jsonl");
+		try {
+			writeFileSync(file, '{"i":0}\n{"i":1}\n');
+			const log = new JsonlLog<Entry>({ path: file, log: () => {} });
+			expect(await log.hydrateAll()).toEqual([{ i: 0 }, { i: 1 }]);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
 });

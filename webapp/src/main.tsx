@@ -2,6 +2,12 @@ import {StrictMode} from 'react';
 import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
 import './index.css';
+import {installPushTapBeacon} from './lib/push-tap';
+
+// Push-tap adoption beacon (daily-dogfood-engine 02): if this open arrived via a push-notification
+// tap (`#/agent/<id>?push=1`), report it once and strip the marker — before render, so the app
+// never sees the marker as route state. Fire-and-forget; never blocks or breaks boot.
+installPushTapBeacon();
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

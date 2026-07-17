@@ -30,6 +30,7 @@
  * itself information (you are not allowed to read this as "fine").
  */
 
+import { type AdoptionCounters, type AdoptionSummary, summarizeAdoption } from "./adoption-counters.ts";
 import { errText } from "./err-text.ts";
 import { tokenize } from "./fabric-search.ts";
 
@@ -142,6 +143,10 @@ export interface DoctorProbe {
 	harnessHooks(): Promise<Array<{ harness: string; ok: boolean; detail: string }>>;
 	/** Agents parked in a terminal-but-listed state: the zombies `glance rm` is for. */
 	zombieAgents(): Promise<number>;
+	/** Dogfood adoption counters (plans/daily-dogfood-engine/02) — casual sessions/prompts/push-taps
+	 *  per UTC day. Daemon-first (GET /api/adoption); with no daemon, the durable JSONL under the
+	 *  resolved state dir is read directly (rule 2 — a dead daemon's usage history still exists). */
+	adoption(): Promise<AdoptionCounters>;
 	/** The known-symptom index (comprehension concern 07) — a stripped `SymptomEntry` projection, just
 	 *  enough to match a failing check's title/detail and point at the summary row's count. Never
 	 *  throws; an unreachable index reads as empty, not as a probe crash. */
@@ -327,6 +332,18 @@ function repoChecks(repos: RepoFacts[]): DoctorCheck[] {
 	return checks;
 }
 
+/** Pure rendering of the adoption rollup — the numbers ARE the finding; the gate (daily-dogfood-
+ *  engine 03) judges them, the doctor just refuses to let them hide. Module-private: `runDoctor`
+ *  is this file's only caller. */
+function adoptionCheck(s: AdoptionSummary): DoctorCheck {
+	return {
+		id: "adoption",
+		title: "Is glance getting daily use?",
+		status: "ok",
+		detail: `today ${s.sessions} casual session(s) · ${s.prompts} prompt(s) · ${s.pushTaps} push tap(s); last 7d ${s.sessions7} · ${s.prompts7} · ${s.pushTaps7}`,
+	};
+}
+
 /**
  * The doctor-failure auto-match (DESIGN.md "push at motivation"): a failing check's `title + detail`
  * against the recorded symptom index, scored by token OVERLAP COEFFICIENT
@@ -429,6 +446,11 @@ export async function runDoctor(probe: DoctorProbe): Promise<DoctorReport> {
 			const n = await probe.zombieAgents();
 			return [n === 0 ? { id: "zombies", title: "Any stuck units?", status: "ok" as const, detail: "none" } : { id: "zombies", title: "Any stuck units?", status: "warn" as const, detail: `${n} unit(s) parked in a terminal state`, remedy: "glance rm <name>" }];
 		}),
+		// Adoption counters (daily-dogfood-engine 02). Always `ok` when the read succeeds: zero usage
+		// is a finding for the adoption GATE (plans/daily-driver/00-meta.md), not a fault of this
+		// machine — the doctor's job here is to put the true numbers where Lars reads them, not to
+		// nag. A failed read still becomes an honest `unknown` via attempt(), never a fabricated zero.
+		attempt("adoption", "Is glance getting daily use?", async () => [adoptionCheck(summarizeAdoption(await probe.adoption()))]),
 		// Informational only (RT2-16 "doctor-tier discovery") — this row NEVER warns or errors on its
 		// own; an empty index is a fact about a fresh install, not a fault. No `remedy` here: `remedy` is
 		// present iff status is not `"ok"` everywhere else in this report (`DoctorCheck`'s own doc

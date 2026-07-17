@@ -45,7 +45,7 @@ import {
 import { useTaskContext } from '../context/TaskContext';
 import { PageContextScope } from '../context/PageContext';
 import { deriveFleetPageContext } from '../lib/pageContextDerive';
-import { AgentLandControls } from './chat/AgentMetaBar';
+import { AgentLandControls, AgentPromoteButton } from './chat/AgentMetaBar';
 import { validationBadge, confidenceBadge, prStateBadgeLabel, isValidatorHeld } from '../lib/agent-badges';
 import { canLand, answerCommand, interruptCommand, interruptibleAgents, restartCommand, setModelCommand } from '../lib/agent-control';
 import { apiJson, jsonInit } from '../lib/api';
@@ -56,7 +56,8 @@ import { TranscriptTimeline, agentIsRunning, transcriptIsRunning } from './chat/
 import { Composer, type ModelOption } from './chat/Composer';
 import { deriveSuggestionChips } from './AssistantChat';
 import { StatusChip, Kbd, MonoLabel, PanelSection, DiffStat } from './kit';
-import { toneClasses } from './ui';
+import { AdoptCard, toneClasses } from './ui';
+import { adoptableSessions, adoptSession, type AdoptableSession, type PresenceEntryDTO } from '../lib/adoptPromote';
 import {
   attentionItems,
   activeWork,
@@ -167,7 +168,7 @@ const RosterAgentRow: React.FC<{
   diffCounts: { added: number; removed: number };
   mostUrgent?: boolean;
   onSelect: () => void;
-  onRowAction: (row: FleetAgentRow) => void;
+  onRowAction: (row: FleetAgentRow, action?: AttentionItem['action']) => void;
   onInlineAnswer: (agentId: string, requestId: string, value: string) => void;
   onIntervene: (agentId: string) => void;
 }> = ({ row, selected, diffCounts, mostUrgent = false, onSelect, onRowAction, onInlineAnswer, onIntervene }) => {
@@ -230,8 +231,14 @@ const RosterAgentRow: React.FC<{
        *  (Restart, Steer, Land, View, Raise-cap) keeps its chip; only the inline-options case
        *  had a genuine duplicate. */}
       {attn?.action && !showInlineOptions && (
-        <div className="mt-0.5 flex w-full justify-end">
-          <RowActionChip action={attn.action} onClick={() => onRowAction(row)} mostUrgent={mostUrgent} />
+        <div className="mt-0.5 flex w-full justify-end gap-1.5">
+          {/* Secondary first, primary last (rightmost = the default move). Today only boundary-sync
+           *  "held" rows carry one: Apply + Discard are genuinely different resolutions of the same
+           *  held backlog, so neither can be folded into the other. */}
+          {attn.secondaryAction && (
+            <RowActionChip action={attn.secondaryAction} onClick={() => onRowAction(row, attn.secondaryAction)} mostUrgent={false} />
+          )}
+          <RowActionChip action={attn.action} onClick={() => onRowAction(row, attn.action)} mostUrgent={mostUrgent} />
         </div>
       )}
     </div>
@@ -419,6 +426,10 @@ const LandRail: React.FC<{
                 </a>
               )}
               <div className="flex items-center gap-2">
+                {/* Promote parity for the cockpit (daily-onramp 06): a console/`here` chat selected
+                    here gets the same "make this a unit" the AssistantChat meta bar offers — the
+                    button self-gates (isPromotableChat) so it renders for nothing else. */}
+                <AgentPromoteButton agent={agent} showToast={showToast} />
                 <AgentLandControls agent={agent} showToast={showToast} />
               </div>
             </>
@@ -481,16 +492,22 @@ export const WorkspaceCockpit: React.FC = () => {
   const [gov, setGov] = useState<GovernancePayload | null>(null);
   const [usage, setUsage] = useState<UsagePayload | null>(null);
   const [serverItems, setServerItems] = useState<ServerActionItem[]>([]);
+  // Presence-detected ad-hoc CLI sessions (daily-onramp 06) — same poll, same cadence, no new WS
+  // event type. `/api/presence` answers `[]` in DB-registry mode (machine-wide state, risk #6) and
+  // on any error, so the adopt section simply never renders where it can't work.
+  const [presence, setPresence] = useState<PresenceEntryDTO[]>([]);
 
   const loadFleetHealth = useCallback(async () => {
-    const [g, u, ai] = await Promise.all([
+    const [g, u, ai, pres] = await Promise.all([
       apiJson<GovernancePayload>('/api/governance').catch(() => null),
       apiJson<UsagePayload>('/api/usage?limit=200').catch(() => null),
       apiJson<ActionItemsResponse>('/api/action-items').catch(() => ({ items: [], generatedAt: 0 })),
+      apiJson<PresenceEntryDTO[]>('/api/presence').catch(() => [] as PresenceEntryDTO[]),
     ]);
     setGov(g);
     setUsage(u);
     setServerItems(ai.items ?? []);
+    setPresence(pres);
   }, []);
 
   useEffect(() => {
@@ -515,6 +532,7 @@ export const WorkspaceCockpit: React.FC = () => {
   );
   const workItems = useMemo(() => activeWork(agents, features), [agents, features]);
   const roster: FleetRoster = useMemo(() => buildFleetRoster(agents, attn, workItems), [agents, attn, workItems]);
+  const adoptable = useMemo(() => adoptableSessions(presence), [presence]);
   const activityRollup = useMemo(() => fleetActivityRollup(audit), [audit]);
 
   const needsCount = roster.needs.length + roster.virtualNeeds.length;
@@ -612,8 +630,8 @@ export const WorkspaceCockpit: React.FC = () => {
     else if (result === 'denied') showToast('Notification permission denied', 'error');
   }, [pushPerm, showToast]);
 
-  const onRowAction = useCallback((row: FleetAgentRow) => {
-    const action = row.attn?.action;
+  const onRowAction = useCallback((row: FleetAgentRow, actionOverride?: AttentionItem['action']) => {
+    const action = actionOverride ?? row.attn?.action;
     if (!action) { setSelectedId(row.agent.id); return; }
     switch (action.kind) {
       case 'restart':
@@ -622,6 +640,55 @@ export const WorkspaceCockpit: React.FC = () => {
         break;
       case 'raise-cap':
         showToast('WIP cap is set by OMP_SQUAD_WIP_CAP — raise it and restart the daemon to allow more concurrent agents.', 'info');
+        break;
+      // Boundary sync (daily-onramp 03): one-click apply of a `glance here` session's HELD turn
+      // patches into the operator's real checkout. The server re-runs the fail-closed precondition
+      // with a FRESH capture before writing anything — "still divergent" is an expected answer, not
+      // a transport error, so it surfaces as its own toast rather than a thrown failure.
+      case 'apply-sync':
+        void apiJson<{ ok: boolean; applied: number; remaining: number; reason?: string }>(
+          `/api/agents/${encodeURIComponent(row.agent.id)}/apply-held-sync`,
+          jsonInit('POST', {}),
+        )
+          .then((r) => {
+            // applied === 0 && ok only means the backlog was empty by the time the click landed
+            // (already applied/discarded elsewhere) — say that, never "your checkout is already
+            // current": earlier uncapturable turns may still live worktree-only.
+            if (r.ok) showToast(r.applied === 0 ? 'Nothing left to apply — those held turns were already resolved' : `Applied ${r.applied} held turn${r.applied === 1 ? '' : 's'} to your checkout`, 'success');
+            else showToast(`Still held (${r.remaining} turn${r.remaining === 1 ? '' : 's'}): ${r.reason ?? 'your checkout is still divergent'}`, 'error');
+          })
+          .catch((e) => showToast(e instanceof Error ? e.message : 'Apply failed', 'error'));
+        break;
+      // The other resolution of a held backlog: drop the pending writes. Recovery path for patches
+      // that can never apply cleanly (operator fixed the divergence by hand) — safe to offer
+      // one-click because the real checkout is untouched and the session worktree keeps every edit.
+      case 'discard-sync':
+        void apiJson<{ ok: boolean; discarded: number; remaining: number; reason?: string }>(
+          `/api/agents/${encodeURIComponent(row.agent.id)}/discard-held-sync`,
+          jsonInit('POST', {}),
+        )
+          .then((r) => {
+            if (r.ok) showToast(r.discarded === 0 ? 'Nothing left to discard — those held turns were already resolved' : `Discarded ${r.discarded} held turn${r.discarded === 1 ? '' : 's'} — the session worktree still has those edits`, 'success');
+            else showToast(`Discard failed: ${r.reason ?? 'unknown'}`, 'error');
+          })
+          .catch((e) => showToast(e instanceof Error ? e.message : 'Discard failed', 'error'));
+        break;
+      // Boundary sync, N2-UI: dismiss a "divergence" row. Nothing is pending here (the write
+      // already happened) — this ONLY clears the notice server-side and can never touch a held
+      // backlog (see acknowledgeBoundarySyncDivergence, which narrows the clear to the
+      // "divergence" kind exclusively). Safe to fire from the row with no confirm step: the
+      // operator has already read the row's detail (paths + retained capture path) before
+      // clicking, and there is no data-loss risk in dismissing a notice about a write that's done.
+      case 'ack-divergence':
+        void apiJson<{ ok: boolean; reason?: string }>(
+          `/api/agents/${encodeURIComponent(row.agent.id)}/ack-boundary-sync-divergence`,
+          jsonInit('POST', {}),
+        )
+          .then((r) => {
+            if (r.ok) showToast('Divergence notice acknowledged', 'success');
+            else showToast(`Could not acknowledge: ${r.reason ?? 'unknown'}`, 'error');
+          })
+          .catch((e) => showToast(e instanceof Error ? e.message : 'Acknowledge failed', 'error'));
         break;
       // answer · steer · view · land: hand off to the detail pane (banner+Composer, or the
       // right rail for land) rather than acting from the row.
@@ -663,6 +730,30 @@ export const WorkspaceCockpit: React.FC = () => {
     } finally {
       setStaffingId(null);
       void reload();
+    }
+  }, [showToast, reload]);
+
+  // Adopt an ad-hoc CLI session into a gated unit (daily-onramp 06). On success the new unit
+  // arrives on the very next roster broadcast like any other; selecting it immediately makes the
+  // click land somewhere visible. A 409's server `reason` is shown VERBATIM — every refusal
+  // (stale claim, sibling checkout, already adopted at this HEAD) is a specific, actionable
+  // sentence the server already wrote; wrapping it in "Adopt failed" would only blur it.
+  const [adoptingId, setAdoptingId] = useState<string | null>(null);
+  const adoptAdhoc = useCallback(async (session: AdoptableSession) => {
+    setAdoptingId(session.claimId);
+    try {
+      const result = await adoptSession(session);
+      if (result.ok && result.agent) {
+        showToast(`Adopted ${session.label} — unit ${result.agent.name} carries its uncommitted work`, 'success');
+        setSelectedId(result.agent.id);
+        void reload();
+      } else {
+        showToast(result.reason ?? 'Adopt refused', 'error');
+      }
+    } catch (e) {
+      showToast(`Adopt failed: ${e instanceof Error ? e.message : String(e)}`, 'error');
+    } finally {
+      setAdoptingId(null);
     }
   }, [showToast, reload]);
 
@@ -845,6 +936,18 @@ export const WorkspaceCockpit: React.FC = () => {
               ))}
             </>
           )}
+
+          {/* Ad-hoc CLI sessions detected via presence (daily-onramp 06) — a raw `claude` running
+              outside glance gets an adopt affordance instead of vanishing from view. Hidden
+              entirely when there are none: detection cards, not a permanent empty panel. */}
+          {adoptable.length > 0 && (
+            <>
+              <GroupHeader title="Ad-hoc sessions" count={adoptable.length} />
+              {adoptable.map((session) => (
+                <AdoptCard key={session.claimId} session={session} busy={adoptingId === session.claimId} onAdopt={(s) => void adoptAdhoc(s)} />
+              ))}
+            </>
+          )}
         </div>
       </div>
 
@@ -884,6 +987,11 @@ export const WorkspaceCockpit: React.FC = () => {
             <Composer
               tasks={tasks}
               suggestionChips={suggestionChips}
+              // Cockpit composers write per-AGENT, not per-chat-session — namespace the draft
+              // scope so a cockpit draft can never collide with a chat thread's (chat session
+              // ids are 'default' or Date.now() strings). Same leak-fix + persistence as chat:
+              // switching agents mid-draft no longer carries the text across.
+              sessionId={`cockpit:${selectedAgent.id}`}
               isLoading={false}
               isStopShown={isStopShown}
               stopPending={stopPending}
@@ -893,6 +1001,7 @@ export const WorkspaceCockpit: React.FC = () => {
               modelOptions={modelOptions}
               onModelChange={handleModelChange}
               agent={selectedAgent}
+              onToast={showToast}
               placeholder={pendingForSelected?.placeholder ?? (pendingForSelected ? 'Type your reply to unblock this agent…' : undefined)}
               focusKey={pendingForSelected?.id}
             />

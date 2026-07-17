@@ -108,6 +108,17 @@ export const AskBodySchema = Schema.Struct({
 	harness: Schema.optional(Schema.String),
 });
 
+/** POST /api/friction — capture a dogfooding gripe (plans/daily-dogfood-engine/01). `gripe` is the
+ *  only required field (an empty-after-trim gripe stays a post-decode 400); `repo`/`context`/
+ *  `agentId` are optional situational fields, `typeof`-narrowed in the handler per this file's
+ *  light-touch convention. */
+export const FrictionBodySchema = Schema.Struct({
+	gripe: Schema.String,
+	repo: Schema.optional(Schema.Unknown),
+	context: Schema.optional(Schema.Unknown),
+	agentId: Schema.optional(Schema.Unknown),
+});
+
 /** POST /api/attention — record one operator-attention event (comprehension concern 01). `viewerId`
  *  and `at` are deliberately ABSENT: both are stamped server-side (the DB-mode session user id, and
  *  the store's own clock) and must never be accepted from the client. `repo` is validated post-decode
@@ -394,11 +405,33 @@ export const AdoptBodySchema = Schema.Struct({
 	cwd: Schema.String,
 });
 
-/** POST /api/console — no required field. */
+/** POST /api/console — no required field. `harness` selects a registered harness for the console
+ *  unit (the `glance here` terminal client rides the operator's own claude login via "claude-code");
+ *  `ephemeral: true` registers the repo as a project for the session's lifetime only (daily-onramp
+ *  02); `reattachOf` names a dead predecessor session — the new unit gets the honest restart marker
+ *  and the response carries the recovered prior-context block (daily-onramp 04). Schema.Struct
+ *  strips unknown keys, so each must be named here to reach the route at all. */
 export const ConsoleBodySchema = Schema.Struct({
 	repo: Schema.optional(Schema.Unknown),
 	model: Schema.optional(Schema.Unknown),
 	profileId: Schema.optional(Schema.Unknown),
+	harness: Schema.optional(Schema.Unknown),
+	ephemeral: Schema.optional(Schema.Unknown),
+	reattachOf: Schema.optional(Schema.Unknown),
+});
+
+/** POST /api/console/release — the `glance here` exit hook: undo an ephemeral project registration
+ *  (no-op when the repo was never session-scoped). `repo` required — releasing "whatever" is not a
+ *  thing. */
+export const ConsoleReleaseBodySchema = Schema.Struct({
+	repo: Schema.String,
+});
+
+/** POST /api/push-tap (daily-dogfood-engine 02) — the webapp's one-shot beacon that a page open
+ *  arrived via a push-notification tap (the `?push=1` marker on push payload URLs). `agentId`
+ *  required: a tap is always a tap ON some agent's notification. */
+export const PushTapBodySchema = Schema.Struct({
+	agentId: Schema.String,
 });
 
 /** POST /api/agents/:id/land — no required field. */
@@ -413,6 +446,12 @@ export const AgentLandBodySchema = Schema.Struct({
 export const AgentModeBodySchema = Schema.Struct({
 	mode: Schema.optional(Schema.Unknown),
 	reason: Schema.optional(Schema.Unknown),
+});
+
+/** POST /api/agents/:id/discard-held-sync — `patchId` optional (absent ⇒ discard the whole
+ *  backlog); independently `typeof`-narrowed in the handler per this module's convention. */
+export const DiscardHeldSyncBodySchema = Schema.Struct({
+	patchId: Schema.optional(Schema.Unknown),
 });
 
 /** POST /api/agents/:id/vision — no required field (`url` falls back to an env var). */

@@ -2,6 +2,7 @@
 /**
  * glance CLI.
  *
+ *   glance here                                   chat on the current directory, in this terminal
  *   glance up [--port N] [--no-tui] [--restore]   start the daemon (server + TUI)
  *   glance add <repo> [--name --branch --model --approval --task]
  *   glance list
@@ -21,8 +22,7 @@
 import "./env-compat.ts";
 import * as os from "node:os";
 import * as path from "node:path";
-import { readFileSync } from "node:fs";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, realpath } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { loadOrCreateToken } from "./auth.ts";
 import { renderDoctor, runDoctor } from "./doctor.ts";
@@ -40,7 +40,6 @@ import { SquadTui } from "./tui.ts";
 import { startExternalSessionTracker } from "./sessions.ts";
 import { startSupervisor } from "./supervisor.ts";
 import { acquireStateLock, StateLockError } from "./state-lock.ts";
-import { resolveStateDir } from "./state-dir.ts";
 import { loadEnvFile } from "./plane-secrets.ts";
 import { planeRepos } from "./plane.ts";
 import { openDatabase } from "./db/index.ts";
@@ -56,11 +55,12 @@ import { laneFromRouted } from "./lane.ts";
 import { RuntimeSettingsStore } from "./runtime-settings.ts";
 import { PolicyStore } from "./policy.ts";
 import { backendFromEnv, setStorageBackend } from "./dal/storage.ts";
+import { normalizeRepoPath } from "./project-registry.ts";
 import { formatWhereToLookEntry, groupSymptomHits, statWhereToLookEntry, type SymptomSearchHit } from "./symptoms.ts";
 import type { AutomationRollupRow } from "./automation-log.ts";
-import type { Actor, AgentDTO, ApprovalMode, AutomationEvent, ClientCommand, CommissionResult, CommissionSpec, CreateAgentOptions, ThinkingLevel, TranscriptEntry } from "./types.ts";
-
-const DEFAULT_PORT = Number(process.env.OMP_SQUAD_PORT ?? 7878);
+import type { Actor, AgentDTO, ApprovalMode, AutomationEvent, ClientCommand, CommissionResult, CommissionSpec, CreateAgentOptions, FrictionEntry, ThinkingLevel, TranscriptEntry } from "./types.ts";
+import { base, DEFAULT_PORT, parseArgs, stateDirPath, tokenHeader } from "./cli-args.ts";
+import { cmdHere } from "./here.ts";
 
 /** Global default binary override for the default harness (a custom omp/pi fork at a nonstandard path).
  *  Wires the `bin` field that existed on SquadManager/ManagerRegistry but was never populated in the
@@ -82,6 +82,7 @@ export function rootFactoryEnabled(repoCount: number = planeRepos().length): boo
 const HELP = `glance — manage a fleet of Oh My Pi agents across git worktrees
 
 USAGE
+  glance here [--model M]                       Chat with an agent on THIS directory, in this terminal
   glance up [--port N] [--no-tui] [--restore]   Start the daemon (web + TUI)
   glance add <repo> [flags]                     Spawn an agent in a new worktree
   glance list [--json]                          Show the roster
@@ -96,6 +97,7 @@ USAGE
   glance logs <id> [--limit N]                  Print an agent's recent transcript
   glance automation [--window 1h] [--loop L]    Show what the background loops are doing (and Scout's LLM cost)
   glance ask "<question>" [--repo R]            Ask; the deliverable is a written answer, not a branch
+  glance grr "<gripe>" [--list]                 Log a friction gripe to the dogfood ledger in <5s
   glance answers [<id>] [--repo R]              List answers, or print one
   glance promote <issue> [--repo R] [--json]    Enrich a Backlog Plane ticket with Tier-1/Tier-2 context
   glance open                                   Print the dashboard URL
@@ -137,41 +139,7 @@ GLOBAL
   --no-supervise    Don't auto-answer agent prompts (default on; or OMP_SQUAD_AUTO_SUPERVISE=0)
 `;
 
-interface ParsedArgs {
-	positional: string[];
-	flags: Record<string, string | boolean>;
-}
-
-function parseArgs(args: string[]): ParsedArgs {
-	const positional: string[] = [];
-	const flags: Record<string, string | boolean> = {};
-	for (let i = 0; i < args.length; i++) {
-		const a = args[i];
-		if (a.startsWith("--")) {
-			const key = a.slice(2);
-			const next = args[i + 1];
-			if (next !== undefined && !next.startsWith("--")) {
-				flags[key] = next;
-				i++;
-			} else {
-				flags[key] = true;
-			}
-		} else {
-			positional.push(a);
-		}
-	}
-	return { positional, flags };
-}
-
-function base(flags: Record<string, string | boolean>): string {
-	const port = flags.port ? Number(flags.port) : DEFAULT_PORT;
-	return `http://127.0.0.1:${port}`;
-}
-function stateDirPath(): string {
-	// Canonical resolution lives in state-dir.ts (shared with ttl-registry, worktrees, sockets, proof):
-	// env override → ~/.glance if present → legacy ~/.omp/squad if present → ~/.glance for fresh installs.
-	return resolveStateDir();
-}
+// parseArgs / base / stateDirPath / tokenHeader now live in cli-args.ts (shared with `glance here`).
 
 /** Enumerate org ids that have persisted state (the `<stateDir>/orgs/<id>` dir names). Tolerates a missing dir. */
 async function listOrgIds(stateDir: string): Promise<string[]> {
@@ -180,16 +148,6 @@ async function listOrgIds(stateDir: string): Promise<string[]> {
 		return entries.filter((e) => e.isDirectory()).map((e) => e.name);
 	} catch {
 		return [];
-	}
-}
-
-/** Authorization header for CLI→daemon calls, read from the persisted token (empty if the daemon has none). */
-function tokenHeader(): Record<string, string> {
-	try {
-		const t = readFileSync(path.join(stateDirPath(), "access-token"), "utf8").trim();
-		return t ? { Authorization: `Bearer ${t}` } : {};
-	} catch {
-		return {};
 	}
 }
 
@@ -949,6 +907,87 @@ async function cmdAutomation(args: string[]): Promise<void> {
 }
 
 /**
+ * Canonicalize a repo argument to the same key `project-registry.ts` uses (`AgentDTO.repo` /
+ * `ProjectDTO.id`): resolve `input` to an absolute path, then — if it sits inside a git
+ * checkout — walk UP to the repo root via `git rev-parse --show-toplevel` rather than trusting
+ * the caller's cwd literally. Without this, a gripe logged from a subdirectory (e.g.
+ * `glance grr` run from `<repo>/webapp`) persists with `repo=<repo>/webapp`, and every
+ * repo-filtered read (`GET /api/friction?repo=`, the dogfood-drain skill) uses exact-string
+ * equality against the registered repo ROOT — so the entry is silently invisible to any
+ * repo-scoped list even though `glance grr --list` (unfiltered) still shows it.
+ *
+ * Falls back to the resolved input path when it isn't a git checkout (git missing, bare dir,
+ * `rev-parse` fails) — `normalizeRepoPath` still runs, so the fallback path collapses the same
+ * way a registered non-git "repo" would.
+ */
+export async function canonicalRepoRoot(input: string): Promise<string> {
+	const resolved = path.resolve(input);
+	try {
+		const proc = Bun.spawn(["git", "rev-parse", "--show-toplevel"], { cwd: resolved, stdout: "pipe", stderr: "ignore" });
+		const out = (await new Response(proc.stdout).text()).trim();
+		await proc.exited;
+		if (proc.exitCode === 0 && out) return normalizeRepoPath(await realpath(out).catch(() => out));
+	} catch {
+		/* git missing or spawn failed — fall through to the resolved path */
+	}
+	return normalizeRepoPath(resolved);
+}
+
+/**
+ * `glance grr "<gripe>" [--repo <path>] [--context <s>]` / `glance grr --list [--repo <path>] [--json]`
+ *
+ * The friction ledger's five-second capture (plans/daily-dogfood-engine/01). Fire-and-forget by
+ * design: one POST, print "logged.", exit — anything slower than a few seconds would never get
+ * used mid-annoyance, and then the whole dogfood epic loses its raw material. No polling, no
+ * confirmation round trip beyond the 2xx.
+ */
+async function cmdGrr(args: string[]): Promise<void> {
+	const { positional, flags } = parseArgs(args);
+	const repo = await canonicalRepoRoot(typeof flags.repo === "string" ? flags.repo : process.cwd());
+
+	if (flags.list) {
+		const q = new URLSearchParams();
+		if (typeof flags.repo === "string") q.set("repo", repo);
+		if (typeof flags.limit === "string") q.set("limit", flags.limit);
+		const res = await fetch(`${base(flags)}/api/friction?${q.toString()}`, { headers: tokenHeader() }).catch(() => null);
+		if (!res || !res.ok) {
+			process.stderr.write(res ? `${res.status} ${await res.text()}\n` : `No glance daemon on ${base(flags)}. Start one with: glance up\n`);
+			process.exit(1);
+		}
+		const { entries } = (await res.json()) as { entries: FrictionEntry[] };
+		if (flags.json) {
+			process.stdout.write(`${JSON.stringify(entries, null, 2)}\n`);
+			return;
+		}
+		if (!entries.length) {
+			process.stdout.write('no gripes yet. log one: glance grr "the thing that just annoyed you"\n');
+			return;
+		}
+		for (const e of entries) {
+			const where = [e.repo ? (e.repo.split("/").pop() ?? e.repo) : "—", e.context, e.agentId].filter(Boolean).join(" · ");
+			process.stdout.write(`  ${`${relAgo(e.ts)} ago`.padStart(8)}  ${where.padEnd(28)} ${e.gripe}\n`);
+		}
+		return;
+	}
+
+	const gripe = positional.join(" ").trim();
+	if (!gripe) {
+		process.stderr.write('usage: glance grr "<gripe>" [--repo <path>] [--context <s>]\n       glance grr --list [--repo <path>] [--json]\n');
+		process.exit(1);
+	}
+	const res = await fetch(`${base(flags)}/api/friction`, {
+		method: "POST",
+		headers: { ...tokenHeader(), "content-type": "application/json" },
+		body: JSON.stringify({ repo, context: typeof flags.context === "string" ? flags.context : "cli", gripe }),
+	}).catch(() => null);
+	if (!res || !res.ok) {
+		process.stderr.write(res ? `grr failed: ${res.status} ${await res.text()}\n` : `No glance daemon on ${base(flags)}. Start one with: glance up\n`);
+		process.exit(1);
+	}
+	process.stdout.write("logged.\n");
+}
+
+/**
  * `glance ask "<question>" [--repo <path>] [--json] [--no-wait]`
  *
  * R5: the second deliverable. A question in, a written answer out — no branch, no PR, nothing to merge.
@@ -1186,6 +1225,9 @@ async function main(): Promise<void> {
 		case "up":
 			await cmdUp(rest);
 			break;
+		case "here":
+			await cmdHere(rest);
+			break;
 		case "add":
 			await cmdAdd(rest);
 			break;
@@ -1245,6 +1287,9 @@ async function main(): Promise<void> {
 		case "ask":
 			if (typeof parseArgs(rest).flags.read === "string") await cmdAnswers(rest);
 			else await cmdAsk(rest);
+			break;
+		case "grr":
+			await cmdGrr(rest);
 			break;
 		case "answers":
 			await cmdAnswers(rest);

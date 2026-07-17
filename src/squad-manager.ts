@@ -11,7 +11,7 @@ import { EventEmitter } from "node:events";
 import { envBool, envBoolAliased, envInt, envNumber, raceOnceEnabled } from "./config.ts";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import * as os from "node:os";
 import { resolveStateDir } from "./state-dir.ts";
 import * as path from "node:path";
@@ -47,9 +47,13 @@ import { type Answer, answerBrief, listAnswers, possiblyStale, readAnswer, saveA
 // bare would collide. `OperatorAttentionEvent` disambiguates at every use site in this file.
 import { AttentionStore, type AttentionEvent as OperatorAttentionEvent, type AttentionRecordInput, type RecordResult, type SeenMap, type SurpriseCountMap } from "./attention.ts";
 import { errText } from "./err-text.ts";
+import { armCompletionPushKind, completionMinTurnMs, completionTurnLongEnough, type CompletionPushKind } from "./completion-push.ts";
+import { allowPushTap, isKnownPushTapAgentId, isValidPushTapAgentId } from "./authz.ts";
 import { isConsolePrompt, stripConsolePrompt } from "./console-prompt.ts";
 import { openRemovedLedger, type RemovedLedger } from "./removed-ledger.ts";
-import { normalizeRepoPath, openProjectRegistry, type ProjectRegistry } from "./project-registry.ts";
+import { buildDeadPlaceholder, composePriorContext, DEAD_PLACEHOLDER_TTL_MS, type DeadSessionPlaceholder, reattachMarker } from "./reattach-context.ts";
+import { reapAcpOrphanChain } from "./acp-orphan-reaper.ts";
+import { normalizeRepoPath, openProjectRegistry, readEphemeralProjects, writeEphemeralProjects, type ProjectRegistry } from "./project-registry.ts";
 import { Orchestrator } from "./orchestrator.ts";
 import { Observer, type Finding } from "./observer.ts";
 import { Scout, unscannedReasoning } from "./scout.ts";
@@ -106,6 +110,7 @@ import { buildContextPrimer, searchFabric, type KbDocType } from "./fabric-searc
 import { sweepPresence, who } from "./presence.ts";
 import { harnessEventDecision } from "./harness-hooks.ts";
 import { adoptBranchName, adoptBrief, isSafeUntrackedPath, parseNulList } from "./adopt.ts";
+import { applyHeldNow, beginTurn, type BoundaryTurnStart, captureWorktreeTree, discardHeldNow, type HeldSync, HeldSyncStore, pruneDivergenceCaptures, syncTurnEnd } from "./boundary-sync.ts";
 import { chooseFallback } from "./supervisor.ts";
 import { availableActions, effectiveAutonomyMode, modeFromApproval, validateRequestedMode, type AutonomyMode, type VerificationState } from "./autonomy.ts";
 import type {
@@ -140,6 +145,7 @@ import type {
 	OperatorPresence,
 	PendingRequest,
 	PersistedAgent,
+	FrictionEntry,
 	ProjectDTO,
 	RpcExtensionUIRequest,
 	RpcSessionState,
@@ -179,7 +185,9 @@ import { costGateMode, type CostVerdict, shadowCostCheck } from "./cost-gate.ts"
 import { recordCostLanded } from "./cost-aggregate.ts";
 import { buildScoreboard, type Scoreboard } from "./attribution-scoreboard.ts";
 import { recordConfidenceOutcome, setThresholdTunerRoot, tunedConfidenceFloor } from "./threshold-tuner.ts";
+import { FrictionLog, type FrictionCapture } from "./friction-log.ts";
 import { JsonlLog } from "./jsonl-log.ts";
+import { type AdoptionCounters, computeAdoptionCounters, PUSH_TAPS_FILE, type PushTapEntry } from "./adoption-counters.ts";
 import { buildFactoryStatus, FACTORY_FRESHNESS_FLOOR_MS, FACTORY_LOOPS, type FactoryStatus } from "./factory-status.ts";
 import { addPlanRevisionCandidate, appendCommentEvent, type ArtifactComment, type CommentQuery, type PlanAnnotationTarget, listComments as readComments, listPlanRevisionCandidates as readPlanRevisionCandidates, nextCommentId, transitionPlanRevisionCandidate } from "./comments.ts";
 import { castPlanVote as appendPlanVoteCast, closePlanVoteRound as appendPlanVoteClose, currentPlanVoteRound as readCurrentPlanVoteRound, listPlanVoteRounds as readPlanVoteRounds, type OpenPlanVoteInput, openPlanVoteRound, recordPlanVoteCommit, tallyPlanVoteRound } from "./plan-votes.ts";
@@ -768,14 +776,28 @@ interface AgentRecord {
 	 *  closeOrphanedPending seeds this from the (already-hydrated, so cheap) in-memory ring's entries for
 	 *  the prior agent id, so a fresh-id lineage stitch doesn't reset the flapping signal to zero. */
 	errorTransitionTimestamps?: number[];
-	/** Voice-loop completion push: set true when a `workflow_done` frame lands, consumed (and cleared) by
+	/** Completion push: set true when a `workflow_done` frame lands, consumed (and cleared) by
 	 *  the `agent_end` frame the workflow driver always pairs it with immediately after (execRun's
 	 *  cleanup — see workflow-driver.ts) — distinguishes the graph's real terminal completion from an
 	 *  intermediate per-run `agent_end` (a human-gate/checkpoint boundary mid-graph, which never carries a
 	 *  preceding `workflow_done`). In-memory only, never persisted — a fresh daemon boot has no in-flight
-	 *  frame pair to track. Read by `onAgentEvent`'s `agent_end` case to gate `dto.voicePushArmed`
+	 *  frame pair to track. Read by `onAgentEvent`'s `agent_end` case to gate `dto.completionPushArmed`
 	 *  exposure so a multi-node workflow never mistakes a mid-graph idle blip for its actual finish. */
 	workflowJustFinished?: boolean;
+	/** Boundary sync (daily-onramp 03) — all four fields only ever populated when
+	 *  `options.realTreePath` is set (a `here`-class casual session; plain fleet units never sync).
+	 *  Per-process turn counter (resets on restart — held-patch identity is a UUID, never this). */
+	boundarySyncTurn?: number;
+	/** Turn-start baselines captured in THIS process. `undefined` at agent_end ⇔ no live turn start
+	 *  was seen here (a replayed/stale frame after reattach) — turn-end sync skips, it never
+	 *  fabricates a baseline. A capture FAILURE at turn start is not `undefined`: it's a populated
+	 *  record with failure reasons, which turn end fail-closes into a hold. */
+	boundarySyncStart?: BoundaryTurnStart;
+	/** End tree of the last completed turn — reused as the NEXT turn's start baseline so the
+	 *  turn-start capture can never race the agent's first edit (see boundary-sync.ts beginTurn).
+	 *  (Serialization of capture→sync→apply lives on the MANAGER, keyed by the real directory —
+	 *  `boundarySyncChains` — not per record: two `here` sessions can share one checkout.) */
+	boundarySyncEndTree?: string;
 }
 
 export interface SquadManagerOptions {
@@ -852,6 +874,12 @@ export class SquadManager extends EventEmitter {
 	/** Resumable checkpointed records dropped by the adoption ceiling this boot — kept (not erased) so
 	 *  persistNow folds them back into the snapshot for a later restart to re-attempt (D1 loss fix). */
 	private deferred: PersistedAgent[] = [];
+	/** Dead-session honesty (daily-onramp 04): non-resumable sessions the boot paths skipped, keyed by
+	 *  their old id, so `GET /api/agents/:id` and the transcript route answer truthfully for a bounded
+	 *  window after a restart instead of a bare miss that looks identical to "id never existed".
+	 *  In-memory only — the window is bounded by TTL, this process's lifetime, and the first post-boot
+	 *  persist (which drops the dead record from state.json). */
+	private readonly deadPlaceholders = new Map<string, DeadSessionPlaceholder>();
 	/** Source runIds with a fork() call currently past the guards and not yet resolved — claimed
 	 *  synchronously before the first `await` in fork() (readCheckpoints) and released in a `finally`, so
 	 *  two concurrent fork() calls for the same source (double-click, webapp+TUI, a federated peer) can't
@@ -937,6 +965,18 @@ export class SquadManager extends EventEmitter {
 	 *  behind GET /api/automation. Live events also broadcast as a `type:"automation"` SquadEvent.
 	 *  Assigned in the constructor (needs stateDir, which the constructor body sets). */
 	private readonly automation: AutomationLog;
+	/** Boundary sync (daily-onramp 03): durable held-patch ledger for `here`-class sessions whose
+	 *  turn patch could not be safely auto-applied to the operator's real checkout. Assigned in the
+	 *  constructor (needs stateDir). */
+	private readonly boundarySyncHeld: HeldSyncStore;
+	/** Boundary-sync serialization chains, keyed by realpath(realDir) — daemon-global, NOT per agent
+	 *  record: `realTreePath` is shared state (nothing stops two `here` sessions on one repo), and
+	 *  per-record chains let both pass their fingerprint checks and run `git apply` into the same
+	 *  checkout concurrently — same-file writes interleaving at machine speed, past git's context
+	 *  check (both check, then both write). Keying by the real directory makes every capture and
+	 *  apply targeting one checkout strictly sequential across sessions. Entries are removed when
+	 *  their chain drains (see queueBoundarySync), so the map never grows past live checkouts. */
+	private readonly boundarySyncChains = new Map<string, Promise<void>>();
 	/** Agentic-learning-loop baseline (concern 01) — the five metrics (first-try-green, fixups-to-green,
 	 *  escalation, land-failure-streak, primer-empty) the rest of the learning loop is A/B'd against.
 	 *  Assigned in the constructor (needs stateDir). Never gates behavior — read-only observability. */
@@ -1007,6 +1047,14 @@ export class SquadManager extends EventEmitter {
 	 *  file best-effort. recordTransition/recordDenied append here; transitionHistory() reads it for
 	 *  GET /api/agents/:id/transitions. Constructed in the constructor (needs stateDir). */
 	private readonly transitionLog: JsonlLog<TransitionEntry>;
+	/** Friction ledger (`stateDir/friction.jsonl`, plans/daily-dogfood-engine/01) — same lifecycle as
+	 *  transitionLog. All writes go through recordFriction (the single write path shared by
+	 *  POST /api/friction and the in-process TUI). */
+	private readonly frictionLog: FrictionLog;
+	/** Push-tap beacons (stateDir/push-taps.jsonl) — one line per push-notification tap the webapp
+	 *  reports (POST /api/push-tap). Adoption-counter substrate (plans/daily-dogfood-engine/02);
+	 *  append-only observability, never gates behavior. Same JsonlLog infra as transitionLog. */
+	private readonly pushTapLog: JsonlLog<PushTapEntry>;
 	/** Operator-attention substrate (comprehension concern 01) — raw JsonlLog feed + compacted
 	 *  last-seen map, constructed ONCE here (mirrors `transitionLog` above), never per-request. */
 	private readonly attentionStore: AttentionStore;
@@ -1034,10 +1082,17 @@ export class SquadManager extends EventEmitter {
 		this.scoutCursor = readScoutCursors(this.stateDir);
 		this.removedLedger = openRemovedLedger(this.stateDir);
 		this.projectRegistry = openProjectRegistry(this.stateDir);
+		this.boundarySyncHeld = new HeldSyncStore(path.join(this.stateDir, "boundary-sync"));
+		// Reload session-scoped registration markers so a mid-session daemon restart cannot promote an
+		// ephemeral `glance here` registration to permanent — start() reconciles them against the
+		// restored roster (reconcileEphemeralProjects).
+		this.ephemeralProjects = readEphemeralProjects(this.stateDir);
 		this.raceLedger = openRaceLedger(this.stateDir);
 		this.automation = new AutomationLog(this.stateDir, { onEvent: (event) => this.emit("event", { type: "automation", event } satisfies SquadEvent) });
 		this.learningMetrics = new LearningMetrics(this.stateDir, { log: (m) => this.log("warn", `learning-metrics: ${m}`) });
 		this.transitionLog = new JsonlLog<TransitionEntry>({ path: path.join(this.stateDir, "transitions.jsonl"), log: (m) => this.log("warn", `transitions.jsonl: ${m}`) });
+		this.frictionLog = new FrictionLog(this.stateDir, (m) => this.log("warn", `friction.jsonl: ${m}`));
+		this.pushTapLog = new JsonlLog<PushTapEntry>({ path: path.join(this.stateDir, PUSH_TAPS_FILE), log: (m) => this.log("warn", `${PUSH_TAPS_FILE}: ${m}`) });
 		this.attentionStore = new AttentionStore({ stateDir: this.stateDir, log: (m) => this.log("warn", `attention: ${m}`) });
 		this.bin = opts.bin;
 		this.autoLand = opts.autoLand ?? false;
@@ -1113,7 +1168,17 @@ export class SquadManager extends EventEmitter {
 			if (!this.skipGlobalJanitors) await this.reapOrphans();
 			await this.adoptOrphanedAgents(snapshot);
 			this.reconcileForkLineage();
+			// Dead-session honesty (daily-onramp 04): every persisted non-resumable session the paths
+			// above (correctly) declined to bring back leaves a placeholder, never a silent vanish.
+			this.recordNonResumableSkips(snapshot);
 		}
+		// AFTER roster restore (needs the surviving agents to tell live `glance here` sessions from dead
+		// ones) and outside the snapshot guard: a fresh-state boot with leftover markers means every
+		// flagged session is dead, which is exactly the case that must be reaped.
+		this.reconcileEphemeralProjects();
+		// Held boundary-sync patches are durable; their attention rows are not — re-raise them for
+		// restored sessions (and log, never hide, holds whose agent no longer exists).
+		await this.reattachHeldSyncs();
 		// DB mode: the registry runs pruneStaleSockets once over all orgs (a per-org manager must not).
 		if (!this.skipGlobalJanitors) await pruneStaleSockets().catch(() => []);
 		await this.bus.start();
@@ -1776,10 +1841,16 @@ export class SquadManager extends EventEmitter {
 				// Resume the graph from its checkpoint; without this the adopted workflow restarts from
 				// scratch — re-running completed stages and re-committing their work (OMPSQ-165).
 				workflowState: p.workflowState,
-				// Completion-push arm survives orphan-adoption too — a voice-dispatched agent that produced
-				// real work, went idle, and never got its push before the daemon restarted still owes it
+				// Completion-push arm survives orphan-adoption too — an armed agent that produced real
+				// work, went idle, and never got its push before the daemon restarted still owes it
 				// under its freshly-minted post-adopt id (see createWithId's own comment on this field).
-				voicePushArmed: p.voicePushArmed,
+				completionPushArmed: p.completionPushArmed,
+				completionPushKind: p.completionPushKind,
+				completionArmedAt: p.completionArmedAt,
+				// Boundary sync survives orphan-adoption: future turns keep syncing to the operator's real
+				// checkout. Holds keyed by the OLD id become orphans (reattachHeldSyncs logs them loudly) —
+				// fail-closed, never silently re-keyed onto a fresh id whose worktree may have moved on.
+				realTreePath: p.realTreePath,
 				sandbox: p.sandbox,
 				autoRoute: false,
 				bypassCap: true,
@@ -1954,6 +2025,7 @@ export class SquadManager extends EventEmitter {
 			scopeSource: p.scopeSource,
 			workflow: p.workflow,
 			workflowState: p.workflowState,
+			promoted: p.promoted, // a promoted console chat stays visibly a unit across restarts
 			// Recomputed from the persisted marker (not carried as an independent flag) so a fresh boot's
 			// reattach reflects forkAvailable correctly even if it was never set in-memory before the restart.
 			forkAvailable: this.deriveForkAvailable(p.workflowState),
@@ -2078,6 +2150,7 @@ export class SquadManager extends EventEmitter {
 			scopeSource: p.scopeSource,
 			workflow: p.workflow,
 			workflowState: p.workflowState,
+			promoted: p.promoted, // a promoted console chat stays visibly a unit across restarts
 			forkAvailable: this.deriveForkAvailable(p.workflowState),
 		};
 		this.seedAuthority(dto, p.autonomyMode);
@@ -2141,7 +2214,12 @@ export class SquadManager extends EventEmitter {
 	}
 
 	getTranscript(id: string): TranscriptEntry[] {
-		return this.agents.get(id)?.transcript ?? [];
+		const rec = this.agents.get(id);
+		if (rec) return rec.transcript;
+		// Dead-session honesty (daily-onramp 04): a session a restart killed still answers with its
+		// persisted transcript for the placeholder window — the honest re-attach reads its tail from
+		// here — instead of a bare [] that reads as "id never existed".
+		return this.deadPlaceholder(id)?.transcript ?? [];
 	}
 
 	/** Transcript delta (`seq > since`) — what a polling client (the cockpit conversation pane,
@@ -2152,6 +2230,133 @@ export class SquadManager extends EventEmitter {
 
 	getAgent(id: string): AgentDTO | undefined {
 		return this.agents.get(id)?.dto;
+	}
+
+	// ── Restart re-attach: dead-session placeholders (daily-onramp 04) ──────────────────────────────
+
+	/** The dead-session placeholder for `id`, while its bounded window still holds. Expiry is checked
+	 *  on read (cheap; no timer to leak) — a lapsed placeholder is deleted and reads as a clean miss,
+	 *  which the `here` REPL treats as the honest "did not survive, prior context unavailable" case. */
+	deadPlaceholder(id: string): DeadSessionPlaceholder | undefined {
+		const ph = this.deadPlaceholders.get(id);
+		if (!ph) return undefined;
+		if (Date.now() - ph.at > DEAD_PLACEHOLDER_TTL_MS) {
+			this.deadPlaceholders.delete(id);
+			return undefined;
+		}
+		return ph;
+	}
+
+	/** Record the honest terminal placeholder for a persisted agent a boot path skipped as
+	 *  non-resumable. Idempotent — the start() sweep and the `--restore` skip branch may both see the
+	 *  same record. buildDeadPlaceholder is total: a corrupt persisted transcript degrades to an empty
+	 *  tail with the failure named in deadReason (fail-closed honesty), never a throw out of boot. */
+	private recordDeadPlaceholder(p: PersistedAgent, transcript: unknown): void {
+		if (this.deadPlaceholders.has(p.id)) return;
+		const ph = buildDeadPlaceholder(p, transcript);
+		this.deadPlaceholders.set(p.id, ph);
+		this.log("info", `dead placeholder recorded for ${p.name} (${p.id}) — ${ph.deadReason}`);
+		// The dead session's adapter chain may still be running: a daemon KILL orphans the direct ACP
+		// child (npx → claude-code-acp reparents to init and idles forever — its stdio transport died
+		// with the old daemon process, so REUSE is impossible by construction). Reap it by the pid
+		// persisted at spawn, identity-checked against /proc before any signal — a recycled pid or a
+		// sibling daemon's adapter is never touched (see acp-orphan-reaper.ts). Fire-and-forget: boot
+		// never blocks on it, and a skipped kill is logged, never silent.
+		if (p.acpPid !== undefined && p.acpCmd?.length) {
+			void reapAcpOrphanChain(p.acpPid, p.acpCmd, (line) => this.log("info", line))
+				.then((termed) => {
+					if (termed.length) this.log("info", `reaped orphaned ACP adapter chain of ${p.id}: pid(s) ${termed.join(", ")}`);
+				})
+				.catch((err) => this.log("warn", `acp orphan reap for ${p.id} failed: ${String(err)}`));
+		}
+	}
+
+	/** After a successful driver start: persist the ACP adapter child's pid + argv fingerprint on the
+	 *  record, so the NEXT boot's dead-session sweep can reap the orphaned chain a daemon kill leaves
+	 *  behind (recordDeadPlaceholder above). Duck-typed on `spawnedCommand` — only AcpAgentDriver
+	 *  exposes it, so omp/pi/sandbox/flue/workflow records are never stamped. */
+	private stampAcpAdapter(rec: AgentRecord): void {
+		const d = rec.agent as Partial<{ pid: number; spawnedCommand: string[] }>;
+		if (typeof d.pid !== "number" || !Array.isArray(d.spawnedCommand)) return;
+		rec.options.acpPid = d.pid;
+		rec.options.acpCmd = d.spawnedCommand;
+		void this.persist();
+	}
+
+	/** start() epilogue over the boot snapshot: any persisted agent that is (a) not back in the roster
+	 *  (reconnectLive/adoptOrphanedAgents declined it), (b) not explicitly removed (a tombstone is a
+	 *  choice, not a death-by-restart), and (c) non-resumable — i.e. exactly the records the concern-07
+	 *  skips silently dropped — leaves a placeholder. Resumable records are untouched: the existing
+	 *  restore paths already own them, with zero changes from this concern. */
+	private recordNonResumableSkips(snapshot: StateSnapshot): void {
+		for (const p of snapshot.agents) {
+			if (this.agents.has(p.id)) continue;
+			if (this.removedLedger.has(p.id)) continue;
+			if (this.harnessResumable(p)) continue;
+			this.recordDeadPlaceholder(p, snapshot.transcripts[p.id]);
+		}
+	}
+
+	/** A fresh console session created as the successor of a dead (non-resumable) one — the `here`
+	 *  REPL's re-attach path, via POST /api/console { reattachOf }. Appends the unmissable restart
+	 *  marker to the NEW session's transcript (the CLI REPL and the webapp transcript view both render
+	 *  system entries), stitches lineage under the same "adopted" reason the cold-adopt path records,
+	 *  RE-KEYS the predecessor's held boundary-syncs onto this new id (C2 — see
+	 *  `rekeyHeldSyncsOnReattach`), and returns the prior transcript tail composed as a prompt-ready
+	 *  context block. The context is RETURNED, never auto-sent — the client folds it into the
+	 *  operator's own first prompt (the decoratePrompt feed-forward precedent; no silent spend). Async
+	 *  (awaits the re-key) so a caller reading the new agent's DTO right after this resolves already
+	 *  sees any recovered held-sync attention — "surfaced immediately", not eventually. */
+	async reattachDeadSession(newId: string, priorId: string): Promise<{ marker: string; priorContext?: string } | undefined> {
+		const rec = this.agents.get(newId);
+		if (!rec) return undefined;
+		const ph = this.deadPlaceholder(priorId);
+		const priorContext = ph ? composePriorContext(ph.transcript) : undefined;
+		const marker = reattachMarker(priorId, ph?.harness ?? rec.options.harness ?? "unknown", priorContext !== undefined);
+		this.append(rec, "system", marker);
+		this.transition(rec, rec.dto.status, "adopted", { priorId });
+		await this.rekeyHeldSyncsOnReattach(rec, priorId);
+		this.emitAgent(rec);
+		return { marker, priorContext };
+	}
+
+	/** C2: a predecessor's held boundary-syncs die with their agent id across a `here` restart — ACP
+	 *  sessions are non-resumable, so `POST /api/console { reattachOf }` always mints a NEW agent id,
+	 *  and a hold keyed by the dead predecessor's id would otherwise be permanently unreachable (no
+	 *  live agent ever lists it again; `reattachHeldSyncs` at boot can only warn about the orphan).
+	 *  Re-key iff BOTH hold: explicit lineage (the client NAMES its dead predecessor via `reattachOf`)
+	 *  AND the new session's own real checkout (`realDir`, derived server-side from the ephemeral
+	 *  registration — never client-supplied) matches the hold's recorded `realDir` exactly. Neither
+	 *  alone is safe — explicit lineage with no tree match would hand one checkout's holds to a
+	 *  session on a different one; a bare tree match with no named lineage would be guessing from
+	 *  nothing. Re-keyed holds are surfaced immediately as the new agent's own held-sync attention,
+	 *  exactly like a same-tenure hold — never left to a boot log line the operator has to go find. */
+	private async rekeyHeldSyncsOnReattach(rec: AgentRecord, priorId: string): Promise<void> {
+		const realDir = rec.options.realTreePath;
+		if (!realDir) return; // the new session isn't a here-class session — nothing to re-key onto
+		const priorHeld = await this.boundarySyncHeld.listHeld(priorId).catch((err) => {
+			this.log("warn", `boundary-sync: couldn't read held patches for reattach lineage ${priorId}→${rec.dto.id}: ${errText(err)}`);
+			return [];
+		});
+		const resolvedRealDir = path.resolve(realDir);
+		const matching = priorHeld.filter((h) => path.resolve(h.realDir) === resolvedRealDir);
+		if (matching.length === 0) return;
+		for (const h of matching) {
+			try {
+				await this.boundarySyncHeld.rekey(h.id, rec.dto.id);
+			} catch (err) {
+				this.log("warn", `boundary-sync: re-key of held patch ${h.id} (${priorId}→${rec.dto.id}) failed: ${errText(err)}`);
+			}
+		}
+		const n = await this.boundarySyncHeld.listHeld(rec.dto.id).then((b) => b.length).catch(() => matching.length);
+		if (n > 0) {
+			this.raiseBoundarySyncAttention(
+				rec,
+				"held",
+				`sync held: ${n} turn${n === 1 ? "'s changes are" : "s' changes are"} recovered from your previous session`,
+				`Held for ${realDir} — nothing touched your checkout. Apply replays them in order after a fresh safety re-check; Discard drops them (the session worktree keeps every edit). Held patches: ${this.boundarySyncHeld.root}`,
+			);
+		}
 	}
 
 	/** Merge order (base → override): repo catalog (`.glance/profiles.json`, sanitized — see
@@ -2558,6 +2763,18 @@ export class SquadManager extends EventEmitter {
 	 * `registered` distinguishes "I asked for this repo" from "this repo happens to have work in it",
 	 * so the UI can offer to un-register the former without pretending it can hide the latter.
 	 */
+	/** Friction ledger write — THE single capture path (plans/daily-dogfood-engine/01): the
+	 *  `POST /api/friction` route and the in-process TUI both land here, so no surface grows its own
+	 *  ledger-write logic. Throws on an empty gripe (FrictionLog.record is fail-closed). */
+	recordFriction(capture: FrictionCapture): FrictionEntry {
+		return this.frictionLog.record(capture);
+	}
+
+	/** Friction ledger ring tail (newest-LAST — the API reverses for newest-first display). */
+	frictionRecent(limit?: number): FrictionEntry[] {
+		return this.frictionLog.recent(limit);
+	}
+
 	projects(): ProjectDTO[] {
 		const byRepo = new Map<string, ProjectDTO>();
 		const ensure = (repo: string): ProjectDTO => {
@@ -2591,7 +2808,7 @@ export class SquadManager extends EventEmitter {
 	 * operator launched it (this daemon runs from `~/lunarpup` while its code lives elsewhere), and
 	 * silently resolving against it is how you register the wrong tree.
 	 */
-	async registerProject(repo: string): Promise<{ ok: true; repo: string; added: boolean } | { ok: false; reason: string }> {
+	async registerProject(repo: string, opts: { promoteEphemeral?: boolean } = {}): Promise<{ ok: true; repo: string; added: boolean } | { ok: false; reason: string }> {
 		const raw = normalizeRepoPath(repo ?? "");
 		if (!raw) return { ok: false, reason: "repo is required" };
 		if (!path.isAbsolute(raw)) return { ok: false, reason: `repo must be an absolute path (got "${raw}")` };
@@ -2629,6 +2846,13 @@ export class SquadManager extends EventEmitter {
 		const outcome = this.projectRegistry.add(root);
 		if (outcome === "error") return { ok: false, reason: `could not persist the project registry — ${root} was NOT added` };
 		if (outcome === "added") this.log("info", `project registered: ${root}`);
+		// An explicit durable registration of a repo a live `glance here` session registered only for its
+		// lifetime is a PROMOTION ("keep it") — clear the session-scoped marker so end-of-session release
+		// no longer silently un-registers what the operator just asked to keep. Idempotent add ⇒ this is the
+		// exact case `add()` returns "exists" for. clearEphemeralMarker is a no-op when the repo was never
+		// ephemeral, so it's safe unconditionally on this explicit path. registerEphemeralProject's own
+		// delegated call passes no opts, so a fresh session registration never promotes itself.
+		if (opts.promoteEphemeral) this.clearEphemeralMarker(root);
 		this.emitFeaturesChanged();
 		return { ok: true, repo: root, added: outcome === "added" };
 	}
@@ -2641,6 +2865,133 @@ export class SquadManager extends EventEmitter {
 		if (outcome === "removed") this.log("info", `project un-registered: ${key}`);
 		this.emitFeaturesChanged();
 		return { ok: true, repo: key, removed: outcome === "removed" };
+	}
+
+	/**
+	 * Repos registered only for the lifetime of a `glance here` session (daily-onramp 02). Persisted as
+	 * a sidecar (`ephemeral-projects.json`, loaded in the constructor) BECAUSE the registration it must
+	 * undo is durable: the first cut kept this set in-memory only, so a daemon restart mid-session lost
+	 * the marker while the `projects.json` row survived — every restart silently promoted a
+	 * session-scoped registration to a permanent, admin-gated one (fail-open; blind-review finding).
+	 * `start()` reconciles the reloaded markers against the restored roster: a session that survived the
+	 * restart (concern 04) keeps its marker for the ordinary end-of-session hooks; a session that died
+	 * with the old daemon is reaped at boot. Keys are the canonical repo roots `registerProject`
+	 * returns — the same key `projects()` groups by.
+	 */
+	private readonly ephemeralProjects: Set<string>;
+
+	/** Drop a repo's session-scoped marker (promote / release) and persist the shrunken sidecar. A
+	 *  failed sidecar write here is self-healing: boot reconciliation drops markers whose repo is no
+	 *  longer registered, and re-releasing an already-durable repo is a no-op by design. */
+	private clearEphemeralMarker(repo: string): void {
+		if (this.ephemeralProjects.delete(normalizeRepoPath(repo))) {
+			writeEphemeralProjects(this.stateDir, this.ephemeralProjects);
+		}
+	}
+
+	/**
+	 * Boot reconciliation for the reloaded ephemeral markers — runs in start() AFTER the roster is
+	 * restored (reconnectLive/adoptOrphanedAgents), so it can tell surviving sessions from dead ones:
+	 *   - marker whose repo still has a live agent → the session outlived the restart (concern 04);
+	 *     keep the marker so the ordinary session-end hooks (release route, `remove()`) still undo it;
+	 *   - marker whose repo has NO live agent → the session died with the old daemon; un-register now.
+	 *     This is the restart leak the sidecar exists to close;
+	 *   - marker whose repo is no longer registered at all → stale (released after a failed sidecar
+	 *     write, or the operator removed the project); just drop it.
+	 * A failed un-register keeps its marker so the NEXT boot retries — never drop the undo obligation
+	 * on an error.
+	 */
+	private reconcileEphemeralProjects(): void {
+		if (this.ephemeralProjects.size === 0) return;
+		const liveRepos = new Set([...this.agents.values()].map((r) => normalizeRepoPath(r.options.repo)));
+		let dirty = false;
+		for (const repo of [...this.ephemeralProjects]) {
+			if (liveRepos.has(repo)) continue;
+			if (this.projectRegistry.has(repo)) {
+				const dropped = this.unregisterProject(repo);
+				if (!dropped.ok) {
+					this.log("warn", `could not reap ephemeral project ${repo} at boot (${dropped.reason}) — marker kept for the next attempt`);
+					continue;
+				}
+				this.log("info", `ephemeral project reaped at boot (its session did not survive the restart): ${repo}`);
+			}
+			this.ephemeralProjects.delete(repo);
+			dirty = true;
+		}
+		if (dirty) writeEphemeralProjects(this.stateDir, this.ephemeralProjects);
+	}
+
+	/** Test/observability read: is this repo's registration session-scoped right now? */
+	isEphemeralProject(repo: string): boolean {
+		return this.ephemeralProjects.has(normalizeRepoPath(repo ?? ""));
+	}
+
+	/**
+	 * Register a repo for the lifetime of a casual session: same validation and durable write as
+	 * `registerProject`, plus a marker so session end can undo it. Only a repo THIS call actually ADDED
+	 * becomes ephemeral — a repo the operator had already registered durably must never be silently
+	 * un-registered when a passing `glance here` session ends (`add()` is idempotent, so `added:false`
+	 * is exactly that case).
+	 *
+	 * `ephemeral` in the return is likewise scoped to `added`, NOT to whether the repo is currently
+	 * marked ephemeral (review finding #3, ephemeral release race): two `glance here` terminals on the
+	 * same repo are explicitly supported (boundarySyncChains), so a SECOND session's call here sees
+	 * `added:false` (the first session's marker already exists) — it must report `ephemeral:false` too,
+	 * even though `this.ephemeralProjects.has(repo)` reads true. Before this fix the second session was
+	 * told `ephemeral:true`, so its own ordinary exit (or a failed-create rollback) would call
+	 * `releaseEphemeralProject` believing it owned the registration, un-registering the FIRST session's
+	 * repo — and clearing its marker — while that session was still live and chatting. Only the session
+	 * that actually created the marker is now ever told it owns the release. `releaseEphemeralProject`
+	 * carries its own defense-in-depth guard for the case where a caller releases anyway (or a live
+	 * agent from ANY session still depends on the repo).
+	 */
+	async registerEphemeralProject(repo: string): Promise<{ ok: true; repo: string; added: boolean; ephemeral: boolean } | { ok: false; reason: string }> {
+		const result = await this.registerProject(repo);
+		if (!result.ok) return result;
+		if (result.added) {
+			this.ephemeralProjects.add(result.repo);
+			// The registration this marker must undo is already durable — a marker that exists only in
+			// memory would not survive a restart, silently promoting the session-scoped registration to
+			// permanent. Fail CLOSED: no durable marker ⇒ no ephemeral registration at all.
+			if (!writeEphemeralProjects(this.stateDir, this.ephemeralProjects)) {
+				this.ephemeralProjects.delete(result.repo);
+				const rollback = this.unregisterProject(result.repo);
+				return {
+					ok: false,
+					reason: rollback.ok
+						? `could not persist the ephemeral session marker for ${result.repo} — the registration was rolled back`
+						: `could not persist the ephemeral session marker for ${result.repo} AND the rollback failed (${rollback.reason}) — the repo is now durably registered; un-register it explicitly`,
+				};
+			}
+		}
+		// `result.added`, not `this.ephemeralProjects.has(...)` — see the doc comment above.
+		return { ...result, ephemeral: result.added };
+	}
+
+	/**
+	 * Undo an ephemeral registration on ordinary session end (REPL exit, or the daemon's own removal
+	 * path — see `remove()`). No-op for repos that were never session-scoped, so callers can fire it
+	 * unconditionally. Deletes nothing on disk, per `unregisterProject`'s own contract.
+	 *
+	 * Guarded the same way `remove()`'s own daemon-side cleanup is (review finding #3): a repo stays
+	 * registered as long as ANY live agent still references it, regardless of which session's marker
+	 * this call is scoped to. `registerEphemeralProject` now only reports `ephemeral:true` to the
+	 * session that actually created the marker, which closes most of the race — but this guard is the
+	 * belt: it also protects the two callers that never had `remove()`'s own last-agent check
+	 * (server.ts's `/api/console/release` route, and the `/api/console` failed-create rollback), so
+	 * even a caller that mistakenly believes it owns the release can never un-register a repo out from
+	 * under another session's still-live agent.
+	 */
+	releaseEphemeralProject(repo: string): { ok: boolean; repo: string; released: boolean; reason?: string } {
+		const key = normalizeRepoPath(repo ?? "");
+		if (!this.ephemeralProjects.has(key)) return { ok: true, repo: key, released: false };
+		if ([...this.agents.values()].some((r) => normalizeRepoPath(r.options.repo) === key)) {
+			return { ok: true, repo: key, released: false };
+		}
+		const dropped = this.unregisterProject(key);
+		if (!dropped.ok) return { ok: false, repo: key, released: false, reason: dropped.reason };
+		this.clearEphemeralMarker(key);
+		return { ok: true, repo: key, released: true };
 	}
 
 	/** Feature view: persisted features + derived plan-dir/agent features with live land status, per repo. */
@@ -4382,6 +4733,13 @@ export class SquadManager extends EventEmitter {
 		// Already promoted → idempotent re-steer (retry-safe): the state change is done; just apply any
 		// mode change and (re)deliver the task into the same session.
 		if (o.promoted) {
+			// Promotion is the "keep it" signal for a `glance here` session (daily-onramp 02) — clearing
+			// the marker on the idempotent path too means a re-promote after a crashed first call still
+			// makes the registration durable.
+			this.clearEphemeralMarker(rec.dto.repo);
+			// Keep the wire mirror honest on the retry path too (a pre-06 daemon's persisted promote, or a
+			// crashed first call, may have left the DTO unstamped even though the options flag is durable).
+			rec.dto.promoted = true;
 			if (opts.mode && opts.mode !== rec.dto.autonomyMode) {
 				rec.dto.autonomyMode = opts.mode;
 				o.autonomyMode = opts.mode;
@@ -4404,9 +4762,26 @@ export class SquadManager extends EventEmitter {
 
 		// 1. State promotion — assign synchronously, persist once, FAILURE-ATOMIC: on a throwing persist
 		//    roll the record back and surface the error (emit/audit/steer only AFTER durability).
-		const prior = { append: o.appendSystemPrompt, mode: rec.dto.autonomyMode, oMode: o.autonomyMode };
+		const prior = { append: o.appendSystemPrompt, mode: rec.dto.autonomyMode, oMode: o.autonomyMode, pushArmed: o.completionPushArmed, pushKind: o.completionPushKind, pushArmedAt: o.completionArmedAt, realTreePath: o.realTreePath };
 		o.appendSystemPrompt = stripConsolePrompt(o.appendSystemPrompt); // strip ONLY the console rule
 		o.promoted = true;
+		rec.dto.promoted = true; // wire mirror — the webapp's promote affordance keys off this
+		// S5: a promoted unit is a fleet unit by contract ("plain fleet units never carry
+		// realTreePath" — boundarySyncTarget's own doc comment) — clear it so future turns stay
+		// worktree-scoped instead of continuing to auto-apply into the operator's real checkout after
+		// the session is no longer a casual `here` chat. EXISTING held syncs are untouched and remain
+		// Apply-able: they're historical records carrying their OWN `realDir`, read straight off the
+		// ledger — nothing here depends on the live option once a patch is already held.
+		o.realTreePath = undefined;
+		// The session's category flips casual→fleet at this exact boundary (daily-attention-w0 01): an
+		// unconsumed CATEGORY completion latch must not ride across it — fleet completion is off by
+		// default, and the very next idle would otherwise push for a chat that just became a tracked
+		// unit. A VOICE-armed latch stays: voice dispatch arms unconditionally regardless of category.
+		if (o.completionPushKind === "category") {
+			// persist:false — this clear folds into the single `await this.persist()` a few lines below;
+			// see `disarmCompletionPush`'s own doc comment (finding #10).
+			this.disarmCompletionPush(rec, { persist: false });
+		}
 		if (opts.mode && opts.mode !== rec.dto.autonomyMode) {
 			rec.dto.autonomyMode = opts.mode;
 			o.autonomyMode = opts.mode;
@@ -4417,11 +4792,22 @@ export class SquadManager extends EventEmitter {
 		} catch (err) {
 			o.appendSystemPrompt = prior.append;
 			o.promoted = undefined;
+			rec.dto.promoted = undefined;
+			o.realTreePath = prior.realTreePath; // roll the S5 clear back too — the promote never took
+			// Restore BOTH the options latch and its dto mirror TOGETHER (finding #10: this used to
+			// restore only `o.*`, leaving `rec.dto.*` stuck at whatever the category-clear above had
+			// already forced it to — a live options/dto desync on the exact rollback path a failed
+			// persist takes).
+			this.setCompletionPushLatch(rec, { armed: prior.pushArmed === true, kind: prior.pushKind, armedAt: prior.pushArmedAt });
 			rec.dto.autonomyMode = prior.mode;
 			o.autonomyMode = prior.oMode;
 			this.syncAuthority(rec.dto);
 			return { ok: false, reason: `promote persist failed: ${errText(err)}` };
 		}
+		// Promote makes a `glance here` session's repo registration durable: with the ephemeral marker
+		// gone, session-end cleanup no longer fires (daily-onramp 02). AFTER the persist so a rolled-back
+		// promote leaves the marker (and the session's cleanup contract) intact.
+		this.clearEphemeralMarker(rec.dto.repo);
 		this.emitAgent(rec);
 		void this.recordAudit(actor, "promote", id, "ok", `console→unit; mode ${prior.mode}→${rec.dto.autonomyMode}`);
 		await this.store.appendAudit({ actor: actor.id, action: "promote", target: id, detail: { priorMode: prior.mode, mode: rec.dto.autonomyMode, task: opts.task ? truncateLabel(opts.task, 120) : undefined } }).catch(() => {});
@@ -4692,6 +5078,462 @@ export class SquadManager extends EventEmitter {
 		} catch (err) {
 			return { ok: false, reason: `unit creation failed (worktree ${worktree} left for the reaper): ${errText(err)}` };
 		}
+	}
+
+	// ── Boundary sync (daily-onramp 03) ──────────────────────────────────────────────────────────
+	// One-directional per-turn patch-apply into the operator's real checkout, for `here`-class
+	// casual sessions only (`options.realTreePath` is the marker — plain fleet units never carry
+	// it). The decision core lives in boundary-sync.ts; this block is the turn-boundary wiring,
+	// per-agent serialization, and the attention surface. Fail-closed throughout: every branch
+	// that is not "fingerprints provably match" ends in hold + attention, never an apply.
+
+	/** Serialize boundary-sync work (turn-start capture → turn-end sync → explicit apply/discard)
+	 *  PER REAL DIRECTORY, so an apply can never interleave with a capture — including across two
+	 *  `here` sessions that target the same checkout (see `boundarySyncChains`). The key is the
+	 *  realpath of the real directory (symlinked and literal paths to one checkout must share a
+	 *  chain); a vanished directory falls back to the resolved literal path — captures against it
+	 *  fail closed anyway. The returned promise carries `fn`'s own failure to callers that await it;
+	 *  the stored chain swallows it (logged) so one failure never wedges the lane. */
+	private queueBoundarySync(rec: AgentRecord, realDir: string, fn: () => Promise<void>): Promise<void> {
+		// Chain under BOTH the realpath and the literal resolved path when they differ (and under
+		// the literal path alone when realpath fails, e.g. the directory is briefly gone — captures
+		// against it fail closed anyway). Linking both closes the alias gap: an op queued by literal
+		// path during a realpath outage still serializes with later realpath-keyed ops through the
+		// shared literal key, so one checkout never runs two chains.
+		const resolved = path.resolve(realDir);
+		let keys: string[];
+		try {
+			const real = realpathSync(resolved);
+			keys = real === resolved ? [resolved] : [real, resolved];
+		} catch {
+			keys = [resolved];
+		}
+		const priors = keys.map((k) => this.boundarySyncChains.get(k)).filter((p): p is Promise<void> => p !== undefined);
+		const run = Promise.all(priors).then(fn);
+		const stored = run.catch((err) => {
+			this.log("warn", `boundary-sync (${rec.dto.name}): ${errText(err)}`);
+		});
+		for (const key of keys) this.boundarySyncChains.set(key, stored);
+		void stored.finally(() => {
+			// Drop the drained chain iff nothing queued behind it — keeps the map bounded by live
+			// checkouts without ever detaching a chain something else is already linked onto.
+			for (const key of keys) if (this.boundarySyncChains.get(key) === stored) this.boundarySyncChains.delete(key);
+		});
+		return run;
+	}
+
+	/** The sync target, iff this record is a `here`-class session AND the target is not the agent's
+	 *  own worktree. The self-apply guard is defensive (OMPSQ-40 means a here-session always gets a
+	 *  standard worktree today): if the two ever alias, "apply the turn's patch to the real tree"
+	 *  would re-apply changes onto the tree that already contains them — `git apply --check` would
+	 *  refuse and every turn would raise a spurious hold. Skipping is the honest no-op: the "real
+	 *  tree" already sees every edit directly. */
+	private boundarySyncTarget(rec: AgentRecord): string | undefined {
+		const realDir = rec.options.realTreePath;
+		if (!realDir) return undefined;
+		if (rec.options.worktree && path.resolve(realDir) === path.resolve(rec.options.worktree)) return undefined;
+		return realDir;
+	}
+
+	/** N4: the real-dir to use for the EXPLICIT Apply/Discard affordances specifically — unlike
+	 *  `boundarySyncTarget` (turn start/end wiring, which must stay live-session-only), these two
+	 *  affordances must keep working for a session's PRE-EXISTING holds even after `promote()` clears
+	 *  `options.realTreePath` (S5 — a promoted unit is a fleet unit by contract, so future turns
+	 *  correctly stop auto-syncing). The commit that shipped S5 claimed existing holds "remain
+	 *  Apply-able" because they carry their own `realDir` straight off the ledger — true of the
+	 *  ledger record, but `applyHeldSync`/`discardHeldSync` never actually READ it: they gated on
+	 *  `boundarySyncTarget(rec)`, which returns `undefined` post-promote regardless of what's held, so
+	 *  the claim was false in practice (every call errored "no boundary sync"). Falling back to the
+	 *  first held patch's own `realDir` when the live option is gone makes the claim true without
+	 *  touching the live-session wiring at all. */
+	private async boundarySyncResolveDir(rec: AgentRecord): Promise<string | undefined> {
+		const live = this.boundarySyncTarget(rec);
+		if (live) return live;
+		const held = await this.boundarySyncHeld.listHeld(rec.dto.id).catch(() => []);
+		return held[0]?.realDir;
+	}
+
+	/** agent_start/turn_start: capture the turn's baselines. Failures are recorded on the record
+	 *  (NOT defaulted) so turn end holds with the precise reason — a failed capture can never
+	 *  compare equal to anything. */
+	private boundaryTurnStart(rec: AgentRecord): void {
+		const realDir = this.boundarySyncTarget(rec);
+		if (!realDir) return;
+		// First turn only (later turns reuse the prior end tree): start the WORKTREE snapshot NOW,
+		// off-chain — the queue below can be parked behind another session's replay on this same
+		// checkout, and a baseline captured only when the chain drains would already contain the
+		// agent's first edits, silently excluding them from the turn patch (a lost update, not a
+		// hold). The worktree is this session's own; only real-tree reads/writes need the chain.
+		const earlyTree = rec.boundarySyncEndTree === undefined ? captureWorktreeTree(rec.options.worktree).catch((err) => ({ ok: false as const, reason: errText(err) })) : undefined;
+		void this.queueBoundarySync(rec, realDir, async () => {
+			// M1: stamped INSIDE the per-checkout chain, not before it. A synchronous increment here
+			// (outside the chain) would race the NEXT turn's own start against THIS turn's still-queued
+			// end-sync closure — the chain serializes per REAL DIRECTORY, not per call, so a fast next
+			// turn's synchronous bump could land before a backlogged end-sync closure ever reads it,
+			// mislabeling turn N's held record as turn N+1's. Stamping inside the same FIFO chain both
+			// turns share pins the number to true execution order instead of wall-clock call order.
+			rec.boundarySyncTurn = (rec.boundarySyncTurn ?? 0) + 1;
+			rec.boundarySyncStart = await beginTurn(realDir, rec.options.worktree, rec.boundarySyncEndTree, earlyTree);
+		});
+	}
+
+	/** agent_end (squad-manager's turn-finished boundary): compute this turn's patch and apply it
+	 *  iff the real tree provably has not moved since turn start; otherwise hold + attention. */
+	private boundaryTurnEnd(rec: AgentRecord): void {
+		const realDir = this.boundarySyncTarget(rec);
+		if (!realDir) return;
+		void this.queueBoundarySync(rec, realDir, async () => {
+			const start = rec.boundarySyncStart;
+			// No live turn start in this process ⇔ a replayed/stale agent_end (reattach replay) — skip
+			// rather than fabricate a baseline. A daemon that died mid-turn simply never auto-applies
+			// that turn (today's behavior: the real tree is untouched, the diff view still shows all).
+			if (!start) return;
+			rec.boundarySyncStart = undefined; // consume — one sync decision per live turn
+			// Does this turn's patch SPAN the prior end tree? When an uncapturable turn left endTree
+			// stale, the next turn's baseline is that same stale tree — its patch therefore CONTAINS
+			// the uncapturable turn's edits, so a later applied/noop/held outcome genuinely resolves
+			// the standing "worktree-only edits" warning. A first-turn live baseline (no prior end
+			// tree) does NOT: edits from an earlier uncapturable turn are inside the baseline and
+			// will never sync, so the warning must stand.
+			const spannedPrior = start.startTree !== undefined && rec.boundarySyncEndTree !== undefined && start.startTree === rec.boundarySyncEndTree;
+			const outcome = await syncTurnEnd({ realDir, worktree: rec.options.worktree, start, store: this.boundarySyncHeld, agentId: rec.dto.id, turn: rec.boundarySyncTurn ?? 0 }).catch((err) => {
+				// syncTurnEnd already holds on any internal throw it can (S6) — this backstop only fires
+				// if something escapes even THAT (e.g. a throw before its own try block). Same fail-closed
+				// direction — the real tree was never touched — but the failure must be VISIBLE, not a
+				// daemon-log-only whisper: the operator would otherwise believe syncing is live while
+				// turns silently evaporate.
+				return { kind: "uncapturable", reason: `sync bookkeeping failed: ${errText(err)}` } as const;
+			});
+			// N3: the S6 ledger-append-failed sub-case of "held" (patch body written, but the ledger line
+			// that would track it never landed) must NOT advance endTree — advancing it here was a
+			// RECOVERY REGRESSION vs. pre-C1 behavior: it made this turn's edits invisible to
+			// backlog/listHeld/Apply/boot-sweep (nothing durable points at them) AND, by moving the
+			// baseline forward, made it impossible for a LATER spanning patch to ever carry them again —
+			// silently and permanently skipping turn N even though pre-fix (`uncapturable`, endTree left
+			// stale) the very next turn's spanning patch would have recovered them. Leaving endTree stale
+			// here keeps this turn's edits inside the NEXT turn's baseline→worktree delta, exactly like a
+			// genuine `uncapturable` outcome already does.
+			const ledgerAppendFailed = outcome.kind === "held" && outcome.held === undefined && outcome.patchFile !== undefined;
+			if (outcome.kind !== "uncapturable" && !ledgerAppendFailed && outcome.endTree) rec.boundarySyncEndTree = outcome.endTree;
+			switch (outcome.kind) {
+				case "noop":
+					// spannedPrior + empty patch ⇒ the worktree equals the already-synced prior end
+					// tree — any earlier uncapturable turn's edits were nil/reverted; the warning is moot.
+					if (spannedPrior) this.clearBoundarySyncAttention(rec, "uncapturable");
+					return;
+				case "applied":
+					// N2: "held" clears unconditionally — an "applied" outcome only happens when
+					// `syncTurnEnd` verified the backlog was empty (step 2 of its precondition), so no held
+					// row can legitimately still be standing. "uncapturable" clears only when this patch
+					// actually spanned it. Passing `undefined` here used to blanket-clear EVERY
+					// boundary-sync row regardless of kind — including "divergence", whose whole point is to
+					// persist until the operator explicitly acts on it — so a critical divergence notice
+					// raised at turn N was silently swept by the very next clean turn N+1 (every ordinary
+					// consecutive turn has `spannedPrior` true). `clearBoundarySyncAttention`'s `only`
+					// parameter is now required — no call site can ever again reintroduce a blanket clear.
+					this.clearBoundarySyncAttention(rec, "held");
+					if (spannedPrior) this.clearBoundarySyncAttention(rec, "uncapturable");
+					this.log("info", `boundary-sync (${rec.dto.name}): turn ${rec.boundarySyncTurn} applied to ${realDir} (${outcome.patchBytes} patch bytes)`);
+					if (outcome.divergence) {
+						// C1: the write happened, but a concurrent edit to one of these exact paths may have
+						// interleaved with it — critical, never auto-restored, always named.
+						this.raiseBoundarySyncAttention(
+							rec,
+							"divergence",
+							`sync divergence detected: ${outcome.divergence.paths.length} path${outcome.divergence.paths.length === 1 ? "" : "s"} may have been clobbered`,
+							`A concurrent edit to ${outcome.divergence.paths.join(", ")} in ${realDir} may have interleaved with this turn's write. Nothing was rolled back automatically. ` +
+								`The pre-write copy is retained at ${outcome.divergence.captureDir} — compare it against your current file(s) by hand before deciding whether to restore from it.`,
+						);
+					}
+					return;
+				case "held": {
+					// The held patch spans the prior end tree, so it CONTAINS any uncapturable turn's
+					// edits — Apply will deliver them; the standalone warning is superseded.
+					if (spannedPrior) this.clearBoundarySyncAttention(rec, "uncapturable");
+					if (outcome.held === undefined && outcome.patchFile) {
+						// S6/N3: the patch body itself is safely on disk; only the ledger append that would
+						// normally track it failed. `sync: "uncapturable"`, NOT "held" — the webapp's Apply
+						// affordance is gated on the sync kind (`insights.ts`), and offering Apply/Discard here
+						// would be a lie: there is no ledger-tracked hold to replay or drop yet, only a
+						// dangling patch file `endTree` deliberately did NOT advance for (see above), so the
+						// NEXT turn's spanning patch still carries these edits — recoverable that way, by hand
+						// (the exact file named below), or by the boot sweep (`sweepOrphanedPatches`, wired in
+						// `reattachHeldSyncs`) once the ledger heals — never "nothing is held", never a false
+						// Apply-able affordance either.
+						this.raiseBoundarySyncAttention(
+							rec,
+							"uncapturable",
+							"sync held: this turn's patch is saved but not yet tracked",
+							`${outcome.reason} — the patch itself is safe at ${outcome.patchFile}; it won't show up under Apply/Discard until tracking it succeeds. Inspect ${this.boundarySyncHeld.root} or retry the turn.`,
+						);
+						return;
+					}
+					// Count is display-only; ≥1 is certain (this turn's hold just landed), so a ledger
+					// read hiccup must not suppress the row itself.
+					const n = await this.boundarySyncHeld.listHeld(rec.dto.id).then((b) => b.length).catch(() => 1);
+					this.raiseBoundarySyncAttention(
+						rec,
+						"held",
+						`sync held: ${outcome.reason}`,
+						`${n} turn${n === 1 ? "'s changes are" : "s' changes are"} held for ${realDir} — nothing touched your checkout. ` +
+							`Apply replays them in order after a fresh safety re-check; Discard drops them (the session worktree keeps every edit). ` +
+							`Held patches: ${this.boundarySyncHeld.root}`,
+					);
+					return;
+				}
+				case "uncapturable":
+					// The turn's delta itself couldn't be captured — nothing to hold OR apply, so this
+					// row must never claim a patch is waiting (no "held", no Apply). Same fail-closed
+					// direction (real tree untouched), surfaced so the operator knows edits exist only
+					// in the worktree (visible via the normal diff view).
+					this.raiseBoundarySyncAttention(
+						rec,
+						"uncapturable",
+						"sync couldn't run: this turn's changes couldn't be captured",
+						`${outcome.reason} — nothing is held and your checkout is untouched; this turn's edits live only in the session's worktree (${rec.options.worktree}) and show in the diff view.`,
+					);
+					return;
+			}
+		});
+	}
+
+	/** One boundary-sync attention row per agent PER KIND, always the freshest state (a stack of
+	 *  stale "sync held" rows for the same session is noise, not signal — but a "held" row and an
+	 *  "uncapturable" row state different truths and must never erase each other: an uncapturable
+	 *  turn after a held backlog would otherwise hide the only Apply/Discard affordance for real
+	 *  patches, and vice versa). `sync` distinguishes rows the webapp can resolve with Apply/Discard
+	 *  ("held" — durable patches are waiting) from rows that hold NOTHING ("uncapturable" — Apply
+	 *  there would be a lie; the webapp offers View) from rows the write ALREADY happened for
+	 *  ("divergence" — C1: nothing pending, nothing to Apply/Discard, only a critical notice + a
+	 *  named recovery capture). Non-blocking by design — AttentionEvent never flips agent status; the
+	 *  turn itself succeeded (or, for "divergence", already wrote). */
+	private raiseBoundarySyncAttention(rec: AgentRecord, sync: "held" | "uncapturable" | "divergence", summary: string, detail: string): void {
+		const kept = (rec.dto.attentionEvents ?? []).filter((e) => e.source !== "boundary-sync" || (e.sync ?? "held") !== sync);
+		rec.dto.attentionEvents = [...kept, { id: randomUUID(), summary, detail, source: "boundary-sync", sync, createdAt: Date.now() }];
+		this.emitAgent(rec);
+	}
+
+	/** `only` narrows the clear to one row kind — REQUIRED (N2): a blanket clear (no `only`, drop every
+	 *  boundary-sync row regardless of kind) used to be reachable by passing `undefined`, and the one
+	 *  call site that did (`boundaryTurnEnd`'s "applied" case, `spannedPrior ? undefined : "held"`) swept
+	 *  a critical "divergence" row on the very next clean turn — every ordinary consecutive turn has
+	 *  `spannedPrior` true, so a divergence notice was silently gone by the time an operator could act on
+	 *  it. A "divergence" row must persist until the operator explicitly resolves it (see
+	 *  `acknowledgeBoundarySyncDivergence`) or discards its retained capture — it is NEVER an
+	 *  acceptable target for an implicit clear, so removing the ability to omit `only` at all is the
+	 *  fail-closed fix: no future call site can reintroduce the blanket-clear bug even by accident. The
+	 *  apply/discard resolution paths clear "held" only — resolving the backlog says nothing about an
+	 *  "uncapturable" warning, whose turn's edits are still worktree-only; clearing it would silently
+	 *  dismiss a true statement. The turn-end path clears "uncapturable" once a spanning patch provably
+	 *  covered those edits (see boundaryTurnEnd's spannedPrior). */
+	private clearBoundarySyncAttention(rec: AgentRecord, only: "held" | "uncapturable" | "divergence"): void {
+		const events = rec.dto.attentionEvents ?? [];
+		const kept = events.filter((e) => e.source !== "boundary-sync" || (e.sync ?? "held") !== only);
+		if (kept.length === events.length) return;
+		rec.dto.attentionEvents = kept;
+		this.emitAgent(rec);
+	}
+
+	/**
+	 * N2: the explicit "I've looked at this" affordance a "divergence" row otherwise has no way to
+	 * resolve — `clearBoundarySyncAttention` can never target it implicitly (see above), and unlike a
+	 * "held" row there is no ledger entry an Apply/Discard call resolves; the write already happened,
+	 * there is nothing left to apply or drop, only a notice and a retained pre-write capture the
+	 * operator has (or hasn't) reconciled by hand. Acknowledging clears ONLY the "divergence" kind —
+	 * exactly the row this exists for — never "held"/"uncapturable", so it can never be used to paper
+	 * over a real pending backlog.
+	 */
+	async acknowledgeBoundarySyncDivergence(id: string, actor: Actor = LOCAL_ACTOR): Promise<{ ok: boolean; reason?: string }> {
+		const rec = this.agents.get(id);
+		if (!rec) return { ok: false, reason: "no such agent" };
+		const had = (rec.dto.attentionEvents ?? []).some((e) => e.source === "boundary-sync" && e.sync === "divergence");
+		if (!had) return { ok: true };
+		this.clearBoundarySyncAttention(rec, "divergence");
+		void this.recordAudit(actor, "boundary-sync.ack-divergence", id, "ok", "operator acknowledged a boundary-sync divergence notice");
+		return { ok: true };
+	}
+
+	/**
+	 * Explicit apply affordance (POST /api/agents/:id/apply-held-sync). Re-runs the fail-closed
+	 * precondition with a FRESH capture (never the stale fingerprint the hold was raised with — the
+	 * real tree may have moved again since) and replays this agent's held patches in order; the
+	 * first conflict stops the run with everything after it still held. See boundary-sync.ts
+	 * `applyHeldNow` for why divergence is judged per patch here (the operator's click is the
+	 * authorization the auto path lacks).
+	 */
+	async applyHeldSync(id: string, actor: Actor = LOCAL_ACTOR): Promise<{ ok: boolean; applied: number; remaining: number; reason?: string; divergences?: { turn: number; paths: string[]; captureDir: string }[] }> {
+		const rec = this.agents.get(id);
+		if (!rec) return { ok: false, applied: 0, remaining: 0, reason: "no such agent" };
+		const realDir = await this.boundarySyncResolveDir(rec);
+		if (!realDir) return { ok: false, applied: 0, remaining: 0, reason: "this unit has no boundary sync (not a here-class session)" };
+		let result: Awaited<ReturnType<typeof applyHeldNow>> = { ok: false, applied: 0, remaining: 0, reason: "apply did not run" };
+		try {
+			await this.queueBoundarySync(rec, realDir, async () => {
+				result = await applyHeldNow(this.boundarySyncHeld, id, realDir);
+			});
+		} catch (err) {
+			// The chain rejected (e.g. the held ledger is unreadable — fail-closed, nothing applied
+			// beyond what `result` already recorded). `remaining` from the initializer would LIE
+			// ("Still held (0 turns)"), so recount best-effort before reporting.
+			const remaining = await this.boundarySyncHeld.listHeld(id).then((h) => h.length).catch(() => result.remaining);
+			result = { ok: false, applied: result.applied, remaining, reason: errText(err) };
+		}
+		if (result.ok && result.remaining === 0) {
+			// "held" only: resolving the backlog must not dismiss an "uncapturable" row — that warning
+			// is about a turn whose edits are STILL worktree-only, and it holds nothing to apply.
+			this.clearBoundarySyncAttention(rec, "held");
+		} else if (result.reason) {
+			this.raiseBoundarySyncAttention(rec, "held", `sync still held: ${result.reason}`, `${result.applied} applied, ${result.remaining} still held for ${realDir}. Held patches: ${this.boundarySyncHeld.root}`);
+		}
+		if (result.divergences && result.divergences.length > 0) {
+			// C1: at least one replayed patch wrote successfully but diverged from its expected result —
+			// critical, never auto-restored, one row naming every affected turn + capture location.
+			this.raiseBoundarySyncAttention(
+				rec,
+				"divergence",
+				`sync divergence detected across ${result.divergences.length} replayed turn${result.divergences.length === 1 ? "" : "s"}`,
+				result.divergences
+					.map((d) => `turn ${d.turn}: ${d.paths.join(", ")} (pre-write copy retained at ${d.captureDir})`)
+					.join("; ") + ` — nothing was rolled back automatically; compare each capture against the current file(s) by hand.`,
+			);
+		}
+		void this.recordAudit(actor, "boundary-sync.apply", id, result.ok ? "ok" : "error", `${result.applied} applied, ${result.remaining} remaining${result.reason ? ` — ${result.reason}` : ""}`);
+		return result;
+	}
+
+	/**
+	 * Explicit discard affordance (POST /api/agents/:id/discard-held-sync) — the recovery path for a
+	 * backlog that can never apply cleanly (operator fixed the divergence by hand; crash between an
+	 * apply and its resolve marker makes replay fail `--check` forever). Without it a wedged oldest
+	 * patch auto-holds every later turn: auto-sync bricked for the session. Drops the pending write
+	 * only — the real tree is untouched and the session worktree keeps every edit. `patchId` narrows
+	 * the drop to one held patch; omitted, the agent's whole backlog is discarded.
+	 */
+	async discardHeldSync(id: string, patchId?: string, actor: Actor = LOCAL_ACTOR): Promise<{ ok: boolean; discarded: number; remaining: number; reason?: string }> {
+		const rec = this.agents.get(id);
+		if (!rec) return { ok: false, discarded: 0, remaining: 0, reason: "no such agent" };
+		const realDir = await this.boundarySyncResolveDir(rec);
+		if (!realDir) return { ok: false, discarded: 0, remaining: 0, reason: "this unit has no boundary sync (not a here-class session)" };
+		let result: { ok: boolean; discarded: number; remaining: number; reason?: string } = { ok: false, discarded: 0, remaining: 0, reason: "discard did not run" };
+		try {
+			// Same per-checkout chain as capture/apply: a discard must never interleave with a
+			// half-finished replay of the very patches it is dropping.
+			await this.queueBoundarySync(rec, realDir, async () => {
+				result = await discardHeldNow(this.boundarySyncHeld, id, patchId);
+			});
+		} catch (err) {
+			// Same honesty rule as applyHeldSync's catch: never report the initializer's counts as
+			// if they were observed — recount best-effort.
+			const remaining = await this.boundarySyncHeld.listHeld(id).then((h) => h.length).catch(() => result.remaining);
+			result = { ok: false, discarded: result.discarded, remaining, reason: errText(err) };
+		}
+		if (result.ok && result.remaining === 0) {
+			this.clearBoundarySyncAttention(rec, "held");
+		} else if (result.remaining > 0) {
+			this.raiseBoundarySyncAttention(
+				rec,
+				"held",
+				`sync held: ${result.remaining} turn${result.remaining === 1 ? "" : "s"} still held`,
+				`${result.discarded} discarded, ${result.remaining} still held for ${realDir}. Apply replays them in order after a fresh safety re-check; Discard drops them. Held patches: ${this.boundarySyncHeld.root}`,
+			);
+		}
+		void this.recordAudit(actor, "boundary-sync.discard", id, result.ok ? "ok" : "error", `${result.discarded} discarded, ${result.remaining} remaining${result.reason ? ` — ${result.reason}` : ""}`);
+		return result;
+	}
+
+	/** Boot: attention events are in-memory only, held patches are durable — re-raise the "sync
+	 *  held" row for every restored session that still has holds, and (C2) raise a REPO-SCOPED,
+	 *  discoverable notice — never just a log line — for holds whose agent no longer exists at all:
+	 *  these are exactly the sessions a `here` restart-reattach (`rekeyHeldSyncsOnReattach`) will
+	 *  later re-key onto a fresh id, so "no live owner yet" is a recoverable, expected state, not a
+	 *  loss. `orphanedBoundarySyncs()` is the durable, queryable half (GET /api/boundary-sync/orphaned
+	 *  in server.ts); the warn log is the immediate operational half — both name the exact patch
+	 *  files and the recovery path. */
+	private async reattachHeldSyncs(): Promise<void> {
+		// N3: recover any hold whose ledger-append failed and was never re-tracked before the daemon
+		// died/restarted (`HeldLedgerAppendError`'s `.patch` body survives, but with no ledger line —
+		// see `HeldSyncStore.sweepOrphanedPatches`'s doc for why this is the honest fix for the boot-
+		// sweep recovery this module has long CLAIMED but, before N3, never actually implemented). Runs
+		// before the ledger read below so a recovered hold shows up in `all` on this very boot.
+		const swept = await this.boundarySyncHeld.sweepOrphanedPatches().catch((err) => {
+			this.log("warn", `boundary-sync: boot sweep for ledgerless patch files failed (${errText(err)})`);
+			return { recovered: [], unrecoverable: [] };
+		});
+		if (swept.recovered.length > 0) {
+			this.log("info", `boundary-sync: boot sweep recovered ${swept.recovered.length} previously-untracked held patch(es) (a ledger-append failure survived a restart) — now visible under the normal held-sync affordances`);
+		}
+		if (swept.unrecoverable.length > 0) {
+			this.log("warn", `boundary-sync: boot sweep found ${swept.unrecoverable.length} orphaned patch file(s) with no recoverable metadata — inspect by hand: ${swept.unrecoverable.join(", ")}`);
+		}
+		// Minor follow-up: divergence-capture GC — C1's retained pre-write captures (retainDivergenceCapture)
+		// had no retention bound at all; bounded here at boot, same cadence as the patch-file sweep above.
+		const pruned = await pruneDivergenceCaptures(path.join(this.boundarySyncHeld.root, "divergence")).catch((err) => {
+			this.log("warn", `boundary-sync: divergence-capture prune failed (${errText(err)})`);
+			return { removed: 0 };
+		});
+		if (pruned.removed > 0) this.log("info", `boundary-sync: pruned ${pruned.removed} old divergence capture(s)`);
+		const all = await this.boundarySyncHeld.listAllHeld().catch((err) => {
+			// Boot must not die on a sick ledger, but swallowing it silently would hide real held
+			// patches behind a missing attention row — say so, loudly.
+			this.log("warn", `boundary-sync: could not read the held ledger at boot (${errText(err)}) — held patches (if any) have NO attention rows this tenure; inspect ${this.boundarySyncHeld.root}`);
+			return [];
+		});
+		if (all.length === 0) return;
+		const byAgent = new Map<string, HeldSync[]>();
+		for (const h of all) {
+			const bucket = byAgent.get(h.agentId);
+			if (bucket) bucket.push(h);
+			else byAgent.set(h.agentId, [h]);
+		}
+		for (const [agentId, held] of byAgent) {
+			const rec = this.agents.get(agentId);
+			if (rec) {
+				// N4-adjacent: gate on the record's LIVENESS only, never on `options.realTreePath` — a
+				// promoted session (S5) clears that field, but its pre-existing holds are still this
+				// session's own and must still surface here; `held[0]!.realDir` (the hold's own recorded
+				// checkout, straight off the ledger) is the honest source, not the live option.
+				const realDir = held[0]!.realDir;
+				this.raiseBoundarySyncAttention(
+					rec,
+					"held",
+					`sync held: ${held.length} turn${held.length === 1 ? "" : "s"} from before the daemon restart`,
+					`Held for ${realDir} — nothing touched your checkout. Apply replays them in order after a fresh safety re-check; Discard drops them (the session worktree keeps every edit).`,
+				);
+			} else {
+				const realDir = held[0]!.realDir;
+				const files = held.map((h) => h.patchFile).join(", ");
+				this.log(
+					"warn",
+					`boundary-sync: ${held.length} held patch(es) for a session that no longer exists (agent ${agentId}, checkout ${realDir}) — nothing was lost. ` +
+						`Recover by running \`glance here\` again on that checkout with a restart reattach — reaching this repo re-keys them onto your new session automatically. ` +
+						`Patch files: ${files} (ledger: ${this.boundarySyncHeld.root}).`,
+				);
+			}
+		}
+	}
+
+	/** C2: held boundary-sync patches whose owning agent isn't (or isn't yet) in the roster — a `here`
+	 *  session that hasn't reattached this tenure. Repo-scoped (`realDir`), not id-scoped: the operator
+	 *  recovers these by launching `glance here` again on the SAME checkout with a restart reattach
+	 *  (server.ts `POST /api/console { reattachOf }` → `rekeyHeldSyncsOnReattach`), which re-keys any
+	 *  hold whose recorded `realDir` matches the new session's — the old agent id itself is otherwise
+	 *  meaningless to them. Read-only, computed fresh from the durable ledger every call (cheap: this
+	 *  is a rare-event list, never a hot path). */
+	async orphanedBoundarySyncs(): Promise<{ agentId: string; realDir: string; count: number; patchFiles: string[] }[]> {
+		const all = await this.boundarySyncHeld.listAllHeld().catch(() => []);
+		const byAgent = new Map<string, HeldSync[]>();
+		for (const h of all) {
+			if (this.agents.has(h.agentId)) continue; // has a live owner — not orphaned
+			const bucket = byAgent.get(h.agentId);
+			if (bucket) bucket.push(h);
+			else byAgent.set(h.agentId, [h]);
+		}
+		return [...byAgent.entries()].map(([agentId, held]) => ({
+			agentId,
+			realDir: held[0]!.realDir,
+			count: held.length,
+			patchFiles: held.map((h) => h.patchFile),
+		}));
 	}
 
 	// ── Roster mutation ───────────────────────────────────────────────────────
@@ -5110,6 +5952,15 @@ export class SquadManager extends EventEmitter {
 			await writeMcpConfig(cwd, opts.mcp).catch((err) => this.log("warn", `mcp config write failed for "${name}": ${String(err)}`));
 		}
 
+		// Completion-push arm decision (completion-push.ts): a voice-sourced spawn ALWAYS arms (a voice
+		// dispatch owes the operator exactly one "finished" push — today's behavior, preserved verbatim,
+		// never gated by settings); otherwise the session's category decides — a casual console chat
+		// arms by default (OMP_SQUAD_PUSH_CASUAL_DONE), a fleet unit stays quiet by default
+		// (OMP_SQUAD_PUSH_FLEET_DONE). A latch carried through the fresh-id restore paths
+		// (`opts.completionPushArmed`) wins outright: an armed agent that restart-adopts under a new id
+		// must not silently lose the one push it owed (kind defaults to "voice" for records that predate
+		// the kind field).
+		const completionPushKind = opts.completionPushArmed === true ? (opts.completionPushKind ?? "voice") : armCompletionPushKind(opts, source);
 		const persisted: PersistedAgent = {
 			id,
 			name,
@@ -5154,16 +6005,19 @@ export class SquadManager extends EventEmitter {
 			// `opts.verifyMode` at the routing call site) — so this formula covers BOTH the routed and the
 			// explicit-verify-mode paths without re-deriving the router's decision here.
 			routing: { mode: opts.verifyMode ?? "none", tier: tierOf(thinking), thinking, routedAt: Date.now(), routedModel },
-			// Completion-push arm (voice-loop): a voice-sourced spawn (`/api/spawn` with `source:"voice"`)
-			// owes the operator exactly one "finished" push once this dispatch's TERMINAL signal lands (see
-			// onAgentEvent's "agent_end"/"workflow_done" handling — a workflow spawn arms here but only
-			// fires once the whole graph, not an intermediate node, is done). Persisted so the latch
-			// survives a daemon restart mid-dispatch. `opts.voicePushArmed` (not just `source`) also arms:
-			// the orphan-adopt boot path (adoptOrphanedAgents) mints a fresh id via THIS same createWithId
-			// rather than reusing the persisted record verbatim, so it carries the latch forward through
-			// `opts` — without this an armed agent that restart-adopts under a new id silently loses the
-			// one push it owed.
-			voicePushArmed: source === "voice" || opts.voicePushArmed === true ? true : undefined,
+			// Completion-push arm (see the `completionPushKind` decision above): fires only once this
+			// dispatch's TERMINAL signal lands (see onAgentEvent's "agent_end"/"workflow_done" handling —
+			// a workflow spawn arms here but only fires once the whole graph, not an intermediate node,
+			// is done). Persisted so the latch survives a daemon restart mid-dispatch.
+			completionPushArmed: completionPushKind !== undefined ? true : undefined,
+			completionPushKind,
+			// Turn-clock for the completion-push duration gate (push.ts). Carry a restore-adopted latch's
+			// ORIGINAL arm time forward (never reset to now) so a turn that spanned the restart still
+			// measures its true length; a genuinely fresh arm stamps now.
+			completionArmedAt: completionPushKind !== undefined ? (opts.completionArmedAt ?? Date.now()) : undefined,
+			// Boundary sync (daily-onramp 03): the `here`-class marker. Persisted so a restart-restored
+			// session keeps syncing and boot can re-raise attention for its held patches.
+			realTreePath: opts.realTreePath,
 		};
 
 		// Delivery confirmation (concern 02 / DESIGN.md "Membrane measurement"): a requested efficiency
@@ -5311,6 +6165,7 @@ export class SquadManager extends EventEmitter {
 		try {
 			await agent.start();
 			started = true;
+			this.stampAcpAdapter(rec);
 			this.transition(rec, "idle", "connect-ok");
 			if (agent.setSessionName) await agent.setSessionName(`squad:${name}`).catch(() => {});
 			this.emitAgent(rec);
@@ -5744,6 +6599,7 @@ export class SquadManager extends EventEmitter {
 		this.transition(rec, "starting", "connect-begin"); // explicit-class: legal from stopped/error
 		this.emitAgent(rec);
 		await rec.agent.start();
+		this.stampAcpAdapter(rec); // a re-start spawned a FRESH adapter child — the persisted pid must follow it
 		if (rec.agent.setSessionName) await rec.agent.setSessionName(`squad:${rec.dto.name}`).catch(() => {});
 		this.transition(rec, "idle", "connect-ok");
 		this.emitAgent(rec);
@@ -5897,14 +6753,29 @@ export class SquadManager extends EventEmitter {
 				// agent actually received. `displayText` (when the client sent one) is the user's bare
 				// typed text; the UI renders that and falls back to `text` for older clients.
 				this.append(rec, "user", cmd.message, { clientTurnId: cmd.clientTurnId, displayText: cmd.displayText });
-				// Completion-push arm (voice-loop): a voice-sourced prompt owes the operator exactly one
-				// "finished" push once this dispatch settles — armed here (persisted, restart-safe),
-				// disarmed by the push actually sending or by a voice-sourced interrupt (see the "interrupt"
-				// case below and push.ts's `voiceDonePayload`). Re-arming an already-armed agent (a second
-				// voice prompt before the first one's push fired) is a harmless no-op write.
-				if (commandSource(cmd) === "voice" && rec.options.voicePushArmed !== true) {
-					rec.options.voicePushArmed = true;
-					void this.persist();
+				// Restart re-attach (daily-onramp 04): the just-typed prompt must survive a daemon KILL —
+				// it's the newest entry the honest re-attach's recovered context can carry, and nothing else
+				// persists transcripts until some unrelated write happens to fire (proven live: the first
+				// bounce test came back "no prior context was recoverable" because state.json predated the
+				// turn). Chain-deduped by the write queue; one write per operator prompt is bounded.
+				void this.persist();
+				// Completion-push arm (completion-push.ts): a voice-sourced prompt ALWAYS arms; a typed one
+				// arms by session category (casual console chats ON by default, fleet units OFF). Armed
+				// here (persisted, restart-safe), disarmed by the push actually sending or by ANY
+				// interrupt (see the "interrupt" case below and push.ts's `completionPayload`). On a
+				// re-arm the LATEST prompt's kind wins — the eventual completion answers the newest
+				// instruction, so its copy should match how that instruction arrived. `completionArmedAt`
+				// is refreshed on EVERY arming prompt (even an identical-kind re-arm): the duration gate
+				// in push.ts measures THIS turn, so a stale prior-turn stamp must never carry over — an
+				// old stamp would inflate the elapsed and let a short live-watched turn buzz.
+				{
+					const armKind = armCompletionPushKind(rec.options, commandSource(cmd));
+					if (armKind !== undefined) {
+						rec.options.completionPushArmed = true;
+						rec.options.completionPushKind = armKind;
+						rec.options.completionArmedAt = Date.now();
+						void this.persist();
+					}
 				}
 				rec.streaming = true;
 				this.transition(rec, "working", "task-start");
@@ -5952,16 +6823,13 @@ export class SquadManager extends EventEmitter {
 			}
 			case "interrupt":
 				await rec.agent.abort().catch(() => {});
-				// Completion-push disarm (voice-loop): the operator cancelled the work themselves — a
-				// "finished" push would be a lie. Deliberately source-blind: a TYPED stop of voice-dispatched
-				// work is still the operator killing it (the cancel's own agent_end would otherwise read as a
-				// terminal idle and fire the push). Clears both the persisted latch and its DTO projection so
-				// no stale `true` can ride a later unrelated idle transition.
-				if (rec.options.voicePushArmed === true) {
-					rec.options.voicePushArmed = false;
-					rec.dto.voicePushArmed = false;
-					void this.persist();
-				}
+				// Completion-push disarm: the operator cancelled the work themselves — a "finished" push
+				// would be a lie. Deliberately source-blind: a TYPED stop of voice-dispatched work is
+				// still the operator killing it (the cancel's own agent_end would otherwise read as a
+				// terminal idle and fire the push). `disarmCompletionPush` clears both the persisted
+				// latch and its DTO projection together so no stale `true` can ride a later unrelated
+				// idle transition (see its own doc comment — finding #10).
+				this.disarmCompletionPush(rec);
 				void this.recordAudit(actor, "interrupt", cmd.id, "ok", undefined, commandSource(cmd));
 				break;
 			case "kill":
@@ -6426,6 +7294,12 @@ export class SquadManager extends EventEmitter {
 			await deleteCheckpointLog(this.stateDir, rec.options.workflowState.runId).catch(() => {});
 		}
 		this.agents.delete(id);
+		// Daemon-side session end for a `glance here` registration (daily-onramp 02): when the LAST agent
+		// on an ephemerally-registered repo is removed, restore the pre-session registry state — the REPL's
+		// own exit hook is not the only path a casual session ends through. `releaseEphemeralProject` now
+		// carries this exact "no live agent left on the repo" guard itself (finding #3), so it's safe to
+		// call unconditionally here — this agent is already gone from `this.agents` above.
+		this.releaseEphemeralProject(normalizeRepoPath(rec.options.repo));
 		if (this.scoutCursor.delete(id)) writeScoutCursors(this.stateDir, this.scoutCursor);
 		this.emit("event", { type: "removed", id } satisfies SquadEvent);
 		await this.persist();
@@ -6581,6 +7455,9 @@ export class SquadManager extends EventEmitter {
 				rec.thinkingEntry = undefined;
 				rec.thinkingBuf = "";
 				rec.dto.adopted = false; // OMPSQ-164: it ran ⇒ no longer a never-re-run adopted agent; resume normal verify→land
+				// Boundary sync (daily-onramp 03): capture the turn's baselines for `here`-class casual
+				// sessions (realTreePath marker). No-op for everything else — checked inside.
+				this.boundaryTurnStart(rec);
 				if (!rec.run) {
 					rec.run = new RunAccumulator({
 						agentId: rec.dto.id,
@@ -6670,19 +7547,61 @@ export class SquadManager extends EventEmitter {
 				rec.completedTurn = true; // a fully completed turn — see the field comment; feeds the exit classifier
 				this.expireReplayedPending(rec); // a completed live turn proves any still-open replayed pending is stale
 				void this.finalizeRun(rec);
-				// Completion-push exposure (voice-loop): a non-workflow agent's `agent_end` IS its terminal
-				// signal — every turn ends the one voice-armed dispatch it was armed for. A workflow-kind
-				// agent's `agent_end` is terminal ONLY when `workflow_done` just fired for this exact frame
-				// pair (`workflowJustFinished`, set in that case below) — an intermediate per-run `agent_end`
+				// Completion-push exposure: a non-workflow agent's `agent_end` IS its terminal signal —
+				// every turn ends the one armed dispatch it was armed for. A workflow-kind agent's
+				// `agent_end` is terminal ONLY when `workflow_done` just fired for this exact frame pair
+				// (`workflowJustFinished`, set in that case below) — an intermediate per-run `agent_end`
 				// (a human-gate/checkpoint boundary mid-graph) must never expose the latch, or a multi-node
-				// workflow would push — and self-disarm — on the first mid-graph idle, long before the graph
-				// is actually done. `dto.voicePushArmed` is deliberately re-derived on EVERY agent_end (not
-				// just when armed) so a stale `true` from a prior cycle can never leak onto an unrelated idle.
+				// workflow would push — and self-disarm — on the first mid-graph idle, long before the
+				// graph is actually done. `dto.completionPushArmed` is deliberately re-derived on EVERY
+				// agent_end (not just when armed) so a stale `true` from a prior cycle can never leak onto
+				// an unrelated idle.
+				//
+				// The duration gate (push.ts's `completionPayload` / completion-push.ts's
+				// `completionTurnLongEnough`) is evaluated a SECOND time HERE, at the terminal signal
+				// itself, rather than only later at push-send in the server's `maybePushCompletionDone`
+				// (review finding #4, stale completion latch): if this dispatch is genuinely done AND the
+				// gate would suppress it, the latch is disarmed right now instead of merely left un-exposed
+				// on the DTO. Before this, a gate-suppressed short turn left `rec.options` with
+				// `completionPushArmed: true` and its now-stale `completionArmedAt` — nothing ever cleared
+				// them, because `maybePushCompletionDone` only calls `clearCompletionPushArmed` when a
+				// payload actually fires. Any LATER non-terminal idle transition on the same agent (a
+				// restart's `starting`→`idle` connect-ok, a pending-expiry re-derive) would then re-read
+				// that same old timestamp: `now - armedAt` is trivially past the floor by then, so the gate
+				// waves it through and a "✅ finished" fires for a turn that never happened.
+				//
+				// Chosen fix: clear-on-suppress, no deferral (the simpler of the two shapes considered —
+				// the alternative was keying the fire on the transition's `reason` being a genuine turn-end
+				// reason, which would need every future non-terminal transition site to keep gating on that
+				// classification correctly forever). A gate veto and an actual send both retire the
+				// one-push-per-dispatch obligation the exact same way here — there is nothing left to defer
+				// onto a future, unrelated idle. Voice arms are exempt from the gate itself (unchanged) and
+				// so are never disarmed by this check.
 				{
 					const isTerminal = rec.options.kind !== "workflow" || rec.workflowJustFinished === true;
 					rec.workflowJustFinished = false; // consume — never leak into the next agent_end
-					rec.dto.voicePushArmed = isTerminal && rec.options.voicePushArmed === true;
+					if (
+						isTerminal &&
+						rec.options.completionPushArmed === true &&
+						rec.options.completionPushKind !== "voice" &&
+						!completionTurnLongEnough(rec.options.completionArmedAt, Date.now(), completionMinTurnMs())
+					) {
+						this.disarmCompletionPush(rec, { persist: false }); // folded into this case's own persist() below
+					}
+					const exposed = isTerminal && rec.options.completionPushArmed === true;
+					rec.dto.completionPushArmed = exposed;
+					rec.dto.completionPushKind = exposed ? rec.options.completionPushKind : undefined;
+					rec.dto.completionArmedAt = exposed ? rec.options.completionArmedAt : undefined;
 				}
+				// Restart re-attach (daily-onramp 04): a completed turn's transcript is the recovery payload
+				// for the honest re-attach — persist it at the turn boundary so a daemon KILL between turns
+				// never loses the conversation. Chain-deduped; one write per completed turn is bounded and
+				// far rarer than the existing per-dirty-subagent-transition writes.
+				void this.persist();
+				// Boundary sync (daily-onramp 03): `agent_end` IS "turn finished" — apply this turn's
+				// patch to the operator's real checkout iff it provably hasn't moved since turn start,
+				// else hold + attention. `here`-class sessions only (realTreePath marker, checked inside).
+				this.boundaryTurnEnd(rec);
 				break;
 			}
 			case "workflow_done":
@@ -8954,6 +9873,53 @@ export class SquadManager extends EventEmitter {
 		return followLineage(id, merged);
 	}
 
+	/** Record one push-notification tap (POST /api/push-tap). Append-only observability for the
+	 *  adoption counters — never gates behavior in the sense that a rejected/dropped tap must never
+	 *  throw into the caller's route; it just doesn't get counted.
+	 *
+	 *  Three independent guards (review finding #6, authz.ts's viewer-tier tap route) run BEFORE the
+	 *  append — /api/push-tap is deliberately viewer-tier (anyone who can open the app from a
+	 *  notification tap must be able to have that tap counted), which only holds because this write
+	 *  site pairs it with these:
+	 *   1. shape — `isValidPushTapAgentId` rejects anything that isn't a plausible id (empty,
+	 *      oversized, control characters) before it's ever considered for disk.
+	 *   2. existence — `isKnownPushTapAgentId` over the live roster ids, OR the removed-agent ledger
+	 *      (a since-removed agent's id was real once — its tap still counts): a fabricated id that
+	 *      never named a real agent is rejected outright.
+	 *   3. rate — `allowPushTap`'s token bucket, keyed by `sourceKey` (the route's choice — bearer
+	 *      identity + remote address), so even a genuine id can't be hammered into thousands of
+	 *      lines/sec by one caller.
+	 *  Without all three, a viewer-tier credential could inflate `pushTapsByDay`
+	 *  (src/adoption-counters.ts) with fabricated taps — the exact number Lars's daily-driver
+	 *  adoption-gate verdict reads (plans/daily-dogfood-engine/02, 03).
+	 *  Shape/existence failures are reported back (the route surfaces a 400) — they can never have
+	 *  come from a real tap, so there is nothing to silently drop. A rate-limit hit is different: the
+	 *  id may be perfectly genuine, just too frequent from this source — but it must still be reported
+	 *  as NOT counted (S2, blind review: this used to return `ok:true` here — a wrong instruction from
+	 *  an earlier pass — which told the caller a tap landed when it was silently dropped, so a client
+	 *  retry loop would never know to back off, and the 429 signal the route already knows how to send
+	 *  never fired). `ok:false` + `reason:"rate-limited"` — the route maps this specific reason to 429
+	 *  (never the generic 400 the shape/existence failures above get); the warn log is unchanged. */
+	recordPushTap(agentId: string, sourceKey: string): { ok: boolean; reason?: string } {
+		if (!isValidPushTapAgentId(agentId)) return { ok: false, reason: "invalid agentId" };
+		if (!isKnownPushTapAgentId(agentId, this.agents.keys()) && !this.removedLedger.has(agentId)) {
+			return { ok: false, reason: "unknown agentId" };
+		}
+		if (!allowPushTap(sourceKey)) {
+			this.log("warn", `push-tap rate limit exceeded for source "${sourceKey}" — dropped`);
+			return { ok: false, reason: "rate-limited" };
+		}
+		this.pushTapLog.append({ ts: Date.now(), agentId: agentId.slice(0, 200) });
+		return { ok: true };
+	}
+
+	/** Adoption counters (plans/daily-dogfood-engine/02) from this manager's own durable stateDir
+	 *  data, with the in-memory rings folded in so a just-recorded tap/transition is visible before
+	 *  its fire-and-forget spool lands (the GET /api/adoption read-your-write case). */
+	adoptionCounters(): Promise<AdoptionCounters> {
+		return computeAdoptionCounters(this.stateDir, { transitions: this.transitionLog.recent(), pushTaps: this.pushTapLog.recent() });
+	}
+
 	/** One tick so in-flight agent-host ring-replay frames (synchronous `.emit()` calls inside a
 	 *  driver's `start()`) land before the settle gate closes. A microtask alone is not enough — replay
 	 *  frames can be scheduled via setImmediate/setTimeout(0) inside the driver — so this parks behind
@@ -9267,15 +10233,44 @@ export class SquadManager extends EventEmitter {
 		return this.agents.get(id)?.commands;
 	}
 
-	/** Completion-push disarm (voice-loop): called by the server, after its background push actually
-	 *  sends, to consume the one-push-per-voice-dispatch latch. A no-op if the agent isn't resident (a
-	 *  raced remove/eviction between the push firing and this call landing) or already disarmed. */
-	clearVoicePushArmed(id: string): void {
+	/** The one seam that writes the completion-push latch's three fields to `rec.options` (the
+	 *  persisted source of truth) AND its `rec.dto` wire mirror TOGETHER, so the two can never drift
+	 *  apart. NOT the only options-writer: the prompt-arm site and the createWithId spawn mapping
+	 *  still write `rec.options.*` directly and deliberately skip the dto mirror (agent_end re-derives
+	 *  it) — what this seam guarantees is that every DISARM and every rollback-restore moves both
+	 *  halves coherently (review finding #10, disarm triplication): before this, the identical
+	 *  6-field disarm was copy-pasted at the interrupt command, promote()'s casual→fleet category-clear,
+	 *  and this method — and promote()'s own rollback-restore catch restored only the `options` half,
+	 *  leaving the `dto` mirror stuck at whatever the fresh-promote branch had already forced it to on
+	 *  the failed-persist path. */
+	private setCompletionPushLatch(rec: AgentRecord, latch: { armed: boolean; kind: CompletionPushKind | undefined; armedAt: number | undefined }): void {
+		rec.options.completionPushArmed = latch.armed;
+		rec.options.completionPushKind = latch.kind;
+		rec.options.completionArmedAt = latch.armedAt;
+		rec.dto.completionPushArmed = latch.armed;
+		rec.dto.completionPushKind = latch.kind;
+		rec.dto.completionArmedAt = latch.armedAt;
+	}
+
+	/** Disarm the completion-push latch (both halves, via `setCompletionPushLatch`) — the common case:
+	 *  an operator/gate decision that the one push this dispatch owed will never fire. No-op (and skips
+	 *  the persist) when nothing is armed, so every call site can fire it unconditionally.
+	 *  `persist: false` for callers that fold this write into their OWN single `persist()` a few lines
+	 *  later (promote()'s fresh-promote path) — a second write here would be redundant, not wrong, but
+	 *  the option exists so nobody has to remember that. */
+	private disarmCompletionPush(rec: AgentRecord, opts: { persist?: boolean } = {}): void {
+		if (rec.options.completionPushArmed !== true) return;
+		this.setCompletionPushLatch(rec, { armed: false, kind: undefined, armedAt: undefined });
+		if (opts.persist !== false) void this.persist();
+	}
+
+	/** Completion-push disarm: called by the server, after its background push actually sends, to
+	 *  consume the one-push-per-dispatch latch. A no-op if the agent isn't resident (a raced
+	 *  remove/eviction between the push firing and this call landing) or already disarmed. */
+	clearCompletionPushArmed(id: string): void {
 		const rec = this.agents.get(id);
-		if (!rec || rec.options.voicePushArmed !== true) return;
-		rec.options.voicePushArmed = false;
-		rec.dto.voicePushArmed = false;
-		void this.persist();
+		if (!rec) return;
+		this.disarmCompletionPush(rec);
 	}
 
 	/** Proactively pull commands on (re)connect — omp's startup push may predate our wiring. */
@@ -9489,6 +10484,8 @@ export class SquadManager extends EventEmitter {
 			// soundly; a fresh session would replace the dead one. Skip rather than respawn under the wrong state.
 			if (!this.harnessResumable(p)) {
 				this.log("info", `skipped restoring ${p.name} (${p.id}) — harness "${p.harness ?? p.runtime ?? "?"}" is not resumable across a restart`);
+				// Dead-session honesty (daily-onramp 04): the skip is correct, its silence was the bug.
+				this.recordDeadPlaceholder(p, snapshot.transcripts[p.id]);
 				continue;
 			}
 			await this.create({
@@ -9524,6 +10521,11 @@ export class SquadManager extends EventEmitter {
 				workflow: p.workflow?.path,
 				verify: p.workflow?.verify?.command,
 				workflowState: p.workflowState, // resume the graph from its checkpoint, never restart from scratch (OMPSQ-165)
+				// Same latch carry as adoptOrphanedAgents (both paths mint a fresh id from a PersistedAgent):
+				// an armed agent restored via --restore still owes its one completion push.
+				completionPushArmed: p.completionPushArmed,
+				completionPushKind: p.completionPushKind,
+				completionArmedAt: p.completionArmedAt,
 				sandbox: p.sandbox,
 				autoRoute: false,
 				bypassCap: true, // restore re-creates already-counted agents — never gated by the live cap

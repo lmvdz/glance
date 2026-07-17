@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Camera, ImagePlus, Loader2, Mic, Paperclip, Pencil, Sparkles, ArrowUp, Square, X } from 'lucide-react';
+import { Camera, Frown, ImagePlus, Loader2, Mic, Paperclip, Pencil, Sparkles, ArrowUp, Square, X } from 'lucide-react';
+import { apiFetch, jsonInit } from '../../lib/api';
 import { isImeComposing, useTriggerMenu, type TriggerSource } from '../../hooks/chat/useTriggerMenu';
 import { ComposerStats } from './AgentMetaBar';
 import { ImageAnnotator, type Annotation } from './ImageAnnotator';
@@ -12,6 +13,7 @@ import {
   uploadChatAttachment,
 } from '../../lib/imageAttachment';
 import { isSpeechRecognitionSupported, startVoiceInput, type VoiceInputSession } from '../../lib/voice/speech';
+import { DRAFT_PERSIST_DEBOUNCE_MS, loadDraft, persistDraft, type DraftV1 } from '../../lib/chat/draftStore';
 import { VoiceCallButton } from './VoiceCallButton';
 import type { AgentDTO } from '../../lib/dto';
 import type { Task } from '../../types';
@@ -149,6 +151,21 @@ export function assembleSendText(typedText: string, chips: PasteChip[]): string 
   if (chips.length === 0) return typedText;
   const fenced = chips.map((chip) => `\`\`\`\n${chip.content}\n\`\`\``).join('\n\n');
   return typedText ? `${typedText}\n\n${fenced}` : fenced;
+}
+
+/**
+ * Body for `POST /api/friction` from the composer's grr popover (plans/daily-dogfood-engine/01) —
+ * null when the gripe is empty after trim (nothing is sent). `repo`/`agentId` ride the active
+ * session's agent when there is one; a defensively-agent-less composer still captures with
+ * `repo: ''` rather than refusing (an annoyed operator must never be told "can't log that here").
+ */
+export function frictionCaptureBody(
+  gripe: string,
+  agent?: Pick<AgentDTO, 'id' | 'repo'>,
+): { repo: string; gripe: string; context: string; agentId?: string } | null {
+  const trimmed = gripe.trim();
+  if (!trimmed) return null;
+  return { repo: agent?.repo ?? '', gripe: trimmed, context: 'webapp-composer', ...(agent ? { agentId: agent.id } : {}) };
 }
 
 /** Fold one finalized speech segment into the draft — space-joined onto whatever's already there.
@@ -309,6 +326,7 @@ export const ComposerSendButton = ({
 export const Composer = ({
   tasks,
   suggestionChips,
+  sessionId,
   isLoading,
   isStopShown,
   stopPending,
@@ -323,9 +341,16 @@ export const Composer = ({
   voiceCallEnabled = false,
   voiceCallActive = false,
   onStartVoiceCall,
+  onToast,
 }: {
   tasks: Task[];
   suggestionChips: SuggestionChip[];
+  /** The thread this composer is writing into (daily-composer concern 01). Drives BOTH per-thread
+   *  draft persistence (input/history/chips/images survive a tab kill via `draftStore`) and
+   *  per-thread in-memory scoping: when this prop changes, the composer flushes the outgoing
+   *  thread's draft and loads the incoming one's — the old unkeyed mount silently leaked the
+   *  draft across threads. Absent (defensive) = ephemeral composer, nothing persisted. */
+  sessionId?: string;
   isLoading: boolean;
   isStopShown: boolean;
   stopPending: boolean;
@@ -352,8 +377,18 @@ export const Composer = ({
    *  active session to pin to (`AssistantChat`'s session-list screen never renders a `Composer`
    *  at all, so this is only ever absent defensively). */
   onStartVoiceCall?: () => void;
+  /** Toast sink for the grr popover's confirmation/failure (both mounts pass their
+   *  `useTaskContext().showToast` — a prop rather than a context read so this component stays
+   *  importable in the jsdom-less bun test suite, same pattern as `AgentLandControls`). */
+  onToast?: (message: string, type?: 'success' | 'error' | 'info') => void;
 }) => {
-  const [input, setInput] = useState('');
+  // Draft persistence (daily-composer concern 01): the four sacred pieces of composer state —
+  // input, prompt-recall history, paste-chips, image attachments — seed from this thread's
+  // persisted draft on mount and are written back below (debounced on change, flushed on
+  // beforeunload/hidden/unmount/send/thread-switch). `loadDraft` never throws: storage blocked or
+  // corrupt just means an empty composer, same as before persistence existed.
+  const [initialDraft] = useState<DraftV1 | null>(() => (sessionId ? loadDraft(sessionId) : null));
+  const [input, setInput] = useState(initialDraft?.input ?? '');
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -361,28 +396,147 @@ export const Composer = ({
     composerTextareaRef.current?.focus();
   }, [focusKey]);
 
-  // History recall (ArrowUp/ArrowDown) cycles this composer instance's own prior sends —
-  // scoped to this mount rather than reaching into the parent's session store, since Composer
-  // already owns every send that passes through `submit`. Not persisted across a full remount.
-  const [promptHistory, setPromptHistory] = useState<string[]>([]);
+  // History recall (ArrowUp/ArrowDown) cycles this thread's own prior sends — scoped per
+  // `sessionId` (persisted in the draft store), so recall history follows the thread across
+  // remounts and reloads instead of dying with the mount.
+  const [promptHistory, setPromptHistory] = useState<string[]>(initialDraft?.promptHistory ?? []);
   const [recallState, setRecallState] = useState<HistoryRecallState>(INITIAL_RECALL_STATE);
 
   // Paste-as-chip: a large paste is diverted into an attachment chip instead of flooding the
   // textarea; chip contents are folded back into the outgoing text on send (see `submit`).
-  const [chips, setChips] = useState<PasteChip[]>([]);
+  const [chips, setChips] = useState<PasteChip[]>(initialDraft?.chips ?? []);
   const [expandedChipId, setExpandedChipId] = useState<string | null>(null);
 
   // Images into the conversation (Feature 2 D2): paste/drop/capture attach a downscaled PNG here;
   // `annotatingId` opens the ImageAnnotator modal for that one attachment. `isSending` is separate
   // from the parent's `isLoading` (which reflects the AGENT's running state) — it covers the
   // window where `submit` is awaiting the per-image upload round trip, before `onSend` even fires.
-  const [images, setImages] = useState<ImageAttachment[]>([]);
+  const [images, setImages] = useState<ImageAttachment[]>(initialDraft?.images ?? []);
   const [annotatingId, setAnnotatingId] = useState<string | null>(null);
   const [isCapturing, setIsCapturing] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [attachError, setAttachError] = useState<string | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // ---------------------------------------------------------------------------
+  // Draft persistence wiring (daily-composer concern 01).
+  //
+  // `boundSessionIdRef` is the thread the CURRENT in-memory state belongs to — it lags the
+  // `sessionId` prop by exactly the one render where a thread switch is being processed, which is
+  // what lets the switch effect below flush thread A's draft under A's id before seeding thread
+  // B's state. `draftSnapshotRef` always mirrors the latest state (reassigned every render, plus
+  // synchronously at the two points where state and ref must not diverge even for a tick: the
+  // switch itself and clear-on-send), so flush paths never read a stale closure.
+  // ---------------------------------------------------------------------------
+  const boundSessionIdRef = useRef<string | undefined>(sessionId);
+  const draftSnapshotRef = useRef<{ sessionId: string | undefined; input: string; promptHistory: string[]; chips: PasteChip[]; images: ImageAttachment[] }>({
+    sessionId,
+    input,
+    promptHistory,
+    chips,
+    images,
+  });
+  draftSnapshotRef.current = { sessionId: boundSessionIdRef.current, input, promptHistory, chips, images };
+
+  // Reference-equality dirty check: state arrays/strings only change identity on a real change,
+  // so an unchanged draft costs zero writes on visibilitychange spam (tab-hide fires constantly;
+  // re-serializing multi-MB image data URLs each time would jank for nothing).
+  const lastFlushedDraftRef = useRef<typeof draftSnapshotRef.current | null>(null);
+  const flushDraftNow = () => {
+    const snapshot = draftSnapshotRef.current;
+    if (!snapshot.sessionId) return;
+    const last = lastFlushedDraftRef.current;
+    if (
+      last &&
+      last.sessionId === snapshot.sessionId &&
+      last.input === snapshot.input &&
+      last.promptHistory === snapshot.promptHistory &&
+      last.chips === snapshot.chips &&
+      last.images === snapshot.images
+    ) {
+      return;
+    }
+    lastFlushedDraftRef.current = snapshot;
+    persistDraft({
+      version: 1,
+      sessionId: snapshot.sessionId,
+      input: snapshot.input,
+      promptHistory: snapshot.promptHistory,
+      chips: snapshot.chips,
+      images: snapshot.images,
+      updatedAt: Date.now(),
+    });
+  };
+  const flushDraftRef = useRef(flushDraftNow);
+  flushDraftRef.current = flushDraftNow;
+
+  // Thread switch WITHOUT remount (the old unkeyed-mount leak): flush the outgoing thread's
+  // draft, then seed every draft-scoped piece of state from the incoming thread's persisted
+  // entry. Doing this in the component (rather than relying on the parent to `key` the mount)
+  // keeps focus/caret alive across switches and makes the no-leak guarantee self-contained.
+  useEffect(() => {
+    if (boundSessionIdRef.current === sessionId) return; // initial mount, or not a thread switch
+    flushDraftRef.current();
+    const next = sessionId ? loadDraft(sessionId) : null;
+    boundSessionIdRef.current = sessionId;
+    // One `seeded` object shared between the ref rebase, the clean-marker, and the setState calls —
+    // the dirty check above compares by identity, so the state and the "last flushed" record must
+    // hold the SAME array instances or the first tab-hide after a switch does a pointless rewrite.
+    const seeded = {
+      sessionId,
+      input: next?.input ?? '',
+      promptHistory: next?.promptHistory ?? [],
+      chips: next?.chips ?? [],
+      images: next?.images ?? [],
+    };
+    draftSnapshotRef.current = seeded;
+    // The freshly-loaded draft IS the store's copy — mark it clean so an immediate tab-hide
+    // doesn't rewrite it.
+    lastFlushedDraftRef.current = seeded;
+    setInput(seeded.input);
+    setPromptHistory(seeded.promptHistory);
+    setChips(seeded.chips);
+    setImages(seeded.images);
+    setRecallState(INITIAL_RECALL_STATE);
+    setExpandedChipId(null);
+    setAnnotatingId(null);
+    setAttachError(null);
+  }, [sessionId]);
+
+  // Debounced persist on every draft-relevant change (300ms, t3code's number). The effect
+  // cleanup IS the debounce: each change cancels the previous timer. Skipped on the very first
+  // run so merely mounting doesn't re-write an unchanged draft.
+  const draftPersistArmedRef = useRef(false);
+  useEffect(() => {
+    if (!draftPersistArmedRef.current) {
+      draftPersistArmedRef.current = true;
+      return;
+    }
+    if (!boundSessionIdRef.current) return;
+    const timer = setTimeout(() => flushDraftRef.current(), DRAFT_PERSIST_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [input, promptHistory, chips, images]);
+
+  // Unconditional flush on tab close/crash-adjacent signals and on unmount — this is what beats
+  // the debounce window when the tab is killed 100ms after the last keystroke. `beforeunload`
+  // covers close/refresh; `visibilitychange`→hidden covers backgrounding (and is the only signal
+  // some mobile browsers fire before killing a tab); the cleanup flush covers the panel
+  // unmounting with the draft still unsaved.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const flush = () => flushDraftRef.current();
+    const onVisibilityChange = () => {
+      if (document.hidden) flush();
+    };
+    window.addEventListener('beforeunload', flush);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      window.removeEventListener('beforeunload', flush);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      flush();
+    };
+  }, []);
 
   // Voice input (chained STT): browser Web Speech API transcribes into `input` — reviewed then
   // sent like any typed draft, never auto-sent. `speechSupported` gates the button itself rather
@@ -514,13 +668,24 @@ export const Composer = ({
       const uploaded = await Promise.all(images.map((img) => uploadChatAttachment(img.dataUrl)));
       const imageRefs = joinImagePromptRefs(uploaded.map((u) => u.path));
       const textToSend = [assembleSendText(typed, chips), imageRefs].filter(Boolean).join('\n\n');
+      const nextHistory = typed ? pushPromptHistory(promptHistory, typed) : promptHistory;
+      // The cleared arrays are shared between setState and the snapshot rebase below — the flush
+      // dirty check compares by identity, so they must be the same instances the next render sees.
+      const clearedChips: PasteChip[] = [];
+      const clearedImages: ImageAttachment[] = [];
       setInput('');
-      setChips([]);
+      setChips(clearedChips);
       setExpandedChipId(null);
-      setImages([]);
+      setImages(clearedImages);
       setAttachError(null);
-      if (typed) setPromptHistory((prev) => pushPromptHistory(prev, typed));
+      setPromptHistory(nextHistory);
       setRecallState(INITIAL_RECALL_STATE);
+      // Clear-on-send must also clear the PERSISTED draft — a stale draft reappearing after a
+      // successful send is data loss in reverse. Synchronous (not debounced), with the snapshot
+      // ref updated in the same tick so a beforeunload racing the re-render can't flush the
+      // pre-send draft back. History rides along: it's the one piece that grows on send.
+      draftSnapshotRef.current = { sessionId: boundSessionIdRef.current, input: '', promptHistory: nextHistory, chips: clearedChips, images: clearedImages };
+      flushDraftRef.current();
       onSend(textToSend);
     } catch {
       setAttachError('Could not attach one or more images — check your connection and try sending again.');
@@ -608,6 +773,52 @@ export const Composer = ({
   const removeChip = (id: string) => {
     setChips((prev) => prev.filter((chip) => chip.id !== id));
     setExpandedChipId((prev) => (prev === id ? null : prev));
+  };
+
+  // Friction capture (plans/daily-dogfood-engine/01): a ghost toolbar button opens a one-input
+  // popover; Enter POSTs immediately (one click + one Enter is the whole budget), Escape cancels
+  // with no request. Draft state survives while the popover is open — logging a gripe must never
+  // eat the message being composed.
+  const [grrOpen, setGrrOpen] = useState(false);
+  const [grrText, setGrrText] = useState('');
+  const [grrBusy, setGrrBusy] = useState(false);
+  const grrInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (grrOpen) grrInputRef.current?.focus();
+  }, [grrOpen]);
+
+  const closeGrr = () => {
+    setGrrOpen(false);
+    setGrrText('');
+  };
+
+  const submitGrr = async () => {
+    const body = frictionCaptureBody(grrText, agent);
+    if (!body || grrBusy) return;
+    setGrrBusy(true);
+    try {
+      const res = await apiFetch('/api/friction', jsonInit('POST', body));
+      if (!res.ok) throw new Error((await res.text().catch(() => '')) || `HTTP ${res.status}`);
+      closeGrr();
+      onToast?.('Logged to the friction ledger');
+    } catch (err) {
+      // The text stays in the input — a failed capture the operator has to retype is itself friction.
+      onToast?.(err instanceof Error && err.message ? `Not logged: ${err.message}` : 'Not logged — is the daemon reachable?', 'error');
+    } finally {
+      setGrrBusy(false);
+    }
+  };
+
+  const handleGrrKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      void submitGrr();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      closeGrr();
+    }
   };
 
   const insertChipInline = (id: string) => {
@@ -779,6 +990,37 @@ export const Composer = ({
               <Mic className="h-4 w-4" aria-hidden />
             </button>
             <VoiceCallButton enabled={voiceCallEnabled} active={voiceCallActive} onStart={() => onStartVoiceCall?.()} />
+            <div className="relative">
+              <button
+                type="button"
+                aria-label="Log friction"
+                title="Log friction — capture what just annoyed you (goes to the dogfood ledger, glance grr --list)"
+                aria-expanded={grrOpen}
+                onClick={() => (grrOpen ? closeGrr() : setGrrOpen(true))}
+                className={`flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full transition-colors ${
+                  grrOpen ? 'bg-amber-100 text-amber-600 dark:bg-amber-500/20 dark:text-amber-400' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'
+                }`}
+              >
+                <Frown className="h-4 w-4" aria-hidden />
+              </button>
+              {grrOpen && (
+                <div className="absolute bottom-10 left-0 z-50 w-72 rounded-xl border border-gray-200 bg-white p-2 shadow-lg dark:border-gray-800 dark:bg-gray-900" role="dialog" aria-label="Log friction">
+                  <input
+                    ref={grrInputRef}
+                    value={grrText}
+                    onChange={(e) => setGrrText(e.target.value)}
+                    onKeyDown={handleGrrKeyDown}
+                    placeholder="What just annoyed you?"
+                    disabled={grrBusy}
+                    className="w-full rounded-lg bg-gray-50 px-2 py-1.5 text-[13px] text-gray-900 outline-none placeholder:text-gray-400 dark:bg-gray-950 dark:text-gray-200"
+                  />
+                  <div className="mt-1 flex items-center justify-between px-1 text-[10px] text-gray-400">
+                    <span>{grrBusy ? 'Logging…' : 'Enter logs it · Esc cancels'}</span>
+                    <Frown className="h-3 w-3 text-amber-500/70" aria-hidden />
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
           <ComposerSendButton
             isStopShown={isStopShown}

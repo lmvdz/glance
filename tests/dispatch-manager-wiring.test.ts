@@ -167,15 +167,56 @@ async function makeWiredManager(): Promise<{ mgr: SquadManager; issuesRef: { cur
 }
 
 test("no verified second provider lane: a cap on ANY provider still freezes the whole real-manager tick", async () => {
-	// The pre-grok world: hold grok unverified so the fleet has no vendor-pinned lane at all. The ladder
-	// deps are wired but inert, and the legacy no-arg top-of-tick check freezes everything on any cap.
+	// The pre-grok, pre-claude-code world: hold BOTH grok and claude-code unverified so the fleet has
+	// no vendor-pinned lane at all (b84904e flipped claude-code to verified:true off its own live ACP
+	// smoke, so grok alone no longer suffices to make this fixture single-lane — leaving it verified
+	// would make hasSecondVerifiedProviderLane() true through claude-code's `anthropic` pin, and this
+	// premise-pinning test would silently stop covering the world it claims to). The ladder deps are
+	// wired but inert, and the legacy no-arg top-of-tick check freezes everything on any cap.
+	await withHarnessOverride("grok", { verified: false }, async () => {
+		await withHarnessOverride("claude-code", { verified: false }, async () => {
+			const { mgr, stop } = await makeWiredManager();
+			const internals = mgr as unknown as ManagerInternals;
+			expect(internals.dispatcher).toBeDefined();
+
+			// A provider that would NEVER match this fleet's resolved (default-harness, no-model) provider.
+			internals.rateLimit.note("429 usage limit", 10 * 60_000, "openai");
+			const spawned = await internals.dispatcher!.tick();
+			expect(spawned).toBe(0);
+			await stop();
+		});
+	});
+}, 20_000);
+
+test("claude-code ALONE (grok held unverified) makes the lane REAL: a mismatched cap no longer freezes the default-harness tick", async () => {
+	// Isolates claude-code as the sole second-lane contributor — grok is EXPLICITLY held unverified via
+	// override, so if this still goes two-lane, it's b84904e's claude-code flip doing it, not grok's
+	// pre-existing one. claude-code is verified:true and pinned to `anthropic`, which differs from the
+	// default `omp` harness's `unknown` baseline, so hasSecondVerifiedProviderLane() is true through the
+	// REAL wired closure and dispatchProviderFor's per-unit gating goes live: an "openai" cap must not
+	// touch units that resolve to the default (anthropic) bucket. This is the freeze-isolation half.
 	await withHarnessOverride("grok", { verified: false }, async () => {
 		const { mgr, stop } = await makeWiredManager();
 		const internals = mgr as unknown as ManagerInternals;
-		expect(internals.dispatcher).toBeDefined();
 
-		// A provider that would NEVER match this fleet's resolved (default-harness, no-model) provider.
 		internals.rateLimit.note("429 usage limit", 10 * 60_000, "openai");
+		const spawned = await internals.dispatcher!.tick();
+		expect(spawned).toBe(2); // the "openai" cap lands on a bucket neither default-harness unit resolves to
+		await stop();
+	});
+}, 20_000);
+
+test("claude-code ALONE (grok held unverified) does NOT open a hole: a cap on the ACTUAL resolved provider still pauses the tick", async () => {
+	// The other half of the twin, same claude-code-only isolation: both fixture units are default-harness
+	// (unitProviderKey → "unknown" → folded to DEFAULT_PROVIDER "anthropic" by RateLimitGate — see
+	// unitProviderKey's own test above). Capping "anthropic" directly must still freeze them — a per-lane
+	// cap that only ever thaws and never re-freezes its own bucket would be the fail-open this ladder's
+	// differentiation exists to rule out, and it must hold with claude-code as the ONLY second lane too.
+	await withHarnessOverride("grok", { verified: false }, async () => {
+		const { mgr, stop } = await makeWiredManager();
+		const internals = mgr as unknown as ManagerInternals;
+
+		internals.rateLimit.note("429 usage limit", 10 * 60_000, "anthropic");
 		const spawned = await internals.dispatcher!.tick();
 		expect(spawned).toBe(0);
 		await stop();

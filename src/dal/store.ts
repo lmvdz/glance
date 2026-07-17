@@ -83,6 +83,21 @@ export interface Store {
 
 const EMPTY: StateSnapshot = { agents: [], transcripts: {}, features: [] };
 
+/** Back-compat (daily-attention-w0 concern 01): pre-rename records persisted the completion-push
+ *  latch as `voicePushArmed` (voice was its only arm source then). Map it forward once at load — in
+ *  BOTH store implementations — so an armed latch, and the one push it owes, survives the upgrade
+ *  instead of silently reading as unarmed under the new field name. Kind defaults to "voice": that
+ *  is the only way a legacy record could have been armed. Never overwrites a new-name field. */
+function migrateLegacyAgentFields(agents: PersistedAgent[]): PersistedAgent[] {
+	for (const a of agents as Array<PersistedAgent & { voicePushArmed?: boolean }>) {
+		if (a.completionPushArmed === undefined && a.voicePushArmed !== undefined) {
+			a.completionPushArmed = a.voicePushArmed;
+			if (a.voicePushArmed === true && a.completionPushKind === undefined) a.completionPushKind = "voice";
+		}
+	}
+	return agents;
+}
+
 /** Today's file-backed behavior: one `state.json` per stateDir, written temp+rename. */
 export class FileStore implements Store {
 	private readonly stateFile: string;
@@ -106,7 +121,7 @@ export class FileStore implements Store {
 			return { ...EMPTY };
 		}
 		const parsed = JSON.parse(raw) as Partial<StateSnapshot>;
-		const state: StateSnapshot = { agents: parsed.agents ?? [], transcripts: parsed.transcripts ?? {}, features: parsed.features ?? [] };
+		const state: StateSnapshot = { agents: migrateLegacyAgentFields(parsed.agents ?? []), transcripts: parsed.transcripts ?? {}, features: parsed.features ?? [] };
 		if (parsed.capabilities) state.capabilities = normalizeCapabilitySnapshot(parsed.capabilities);
 		if (existsSync(this.feedbackFile)) state.feedback = await this.loadFeedback();
 		return state;
@@ -222,7 +237,7 @@ export class DbStore implements Store {
 				else if (row.kind === "audit" && Array.isArray(data)) cap.audit = data as CapabilitySnapshot["audit"];
 			}
 			return {
-				agents: rosterRows.map((r) => JSON.parse(r.data) as PersistedAgent),
+				agents: migrateLegacyAgentFields(rosterRows.map((r) => JSON.parse(r.data) as PersistedAgent)),
 				features: featureRows.map((r) => JSON.parse(r.data) as PersistedFeature),
 				capabilities: normalizeCapabilitySnapshot(cap),
 			};

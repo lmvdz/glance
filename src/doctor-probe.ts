@@ -17,6 +17,7 @@
 import { existsSync } from "node:fs";
 import { access, constants } from "node:fs/promises";
 import * as path from "node:path";
+import { type AdoptionCounters, computeAdoptionCounters, isAdoptionCounters } from "./adoption-counters.ts";
 import { errText } from "./err-text.ts";
 import { harnessHooksInstalled } from "./harness-hooks.ts";
 import { hardenedGit } from "./git-harden.ts";
@@ -258,6 +259,23 @@ export function makeDoctorProbe(opts: ProbeOptions): DoctorProbe {
 		},
 		async zombieAgents() {
 			return (await facts())?.zombieAgents ?? 0;
+		},
+		async adoption(): Promise<AdoptionCounters> {
+			// Rule 1: ask the daemon what the daemon believes — GET /api/adoption aggregates over ITS
+			// state dir(s) (per-org in DB mode), which a local guess can't. Any non-shape answer (404
+			// from an older daemon, 401, an unrelated service) falls through to rule 2: the counters are
+			// durable JSONL, so with no (askable) daemon the resolved state dir is read directly —
+			// exactly the same resolution `stateDir()` above reports on.
+			try {
+				const res = await fetch(`${opts.base}/api/adoption`, { headers: opts.headers, signal: AbortSignal.timeout(opts.timeoutMs ?? 3_000) });
+				if (res.ok) {
+					const body: unknown = await res.json();
+					if (isAdoptionCounters(body)) return body;
+				}
+			} catch {
+				// dead/unreachable daemon — the local durable read below still answers honestly
+			}
+			return computeAdoptionCounters(resolveStateDir());
 		},
 		async symptoms() {
 			return (await facts())?.symptoms ?? [];
