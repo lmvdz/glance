@@ -16,6 +16,7 @@ import {
   ListChecks,
   CloudFog,
   Menu,
+  MessageSquareWarning,
   Mic,
   Plus,
   Search,
@@ -106,6 +107,8 @@ export function railFooterContext(
       return 'Fleet activity, cost, and lineage over time';
     case 'fog':
       return 'Comprehension debt — what nobody has looked at yet';
+    case 'friction':
+      return 'The dogfood gripe ledger — friction you and the daemon logged';
     case 'capabilities':
       return `${ctx.packCount} trusted pack${ctx.packCount === 1 ? '' : 's'} · ${ctx.catalogCount} in the catalog`;
     case 'org':
@@ -135,6 +138,7 @@ export const NAV_ITEMS: { view: AppView; label: string; icon: LucideIcon; title:
   { view: 'tasks', label: 'Tasks', icon: Inbox, title: 'Tasks' },
   { view: 'omp-graph', label: 'Graph', icon: Waypoints, title: 'Graph — the living temporal dashboard' },
   { view: 'fog', label: 'Fog', icon: CloudFog, title: 'Fog — comprehension debt: what nobody has looked at yet' },
+  { view: 'friction', label: 'Friction', icon: MessageSquareWarning, title: 'Friction — the dogfood gripe ledger: what annoyed you (and the daemon)' },
   { view: 'capabilities', label: 'Capabilities', icon: Boxes, title: 'Capabilities' },
 ];
 
@@ -418,6 +422,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
     : view === 'capabilities' ? `${capabilities.packs.length} packs`
     : view === 'omp-graph' ? 'Graph'
     : view === 'fog' ? 'Fog'
+    : view === 'friction' ? 'Friction'
     : view === 'org' ? 'Settings'
     : '';
 

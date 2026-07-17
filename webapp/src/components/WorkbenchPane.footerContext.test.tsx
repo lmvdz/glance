@@ -26,6 +26,11 @@ test('graph gets a fixed one-liner describing what lives there', () => {
   expect(railFooterContext('omp-graph', zero)).toBe('Fleet activity, cost, and lineage over time');
 });
 
+test('fog and friction each get a fixed, non-empty one-liner', () => {
+  expect(railFooterContext('fog', zero)).toBe('Comprehension debt — what nobody has looked at yet');
+  expect(railFooterContext('friction', zero)).toBe('The dogfood gripe ledger — friction you and the daemon logged');
+});
+
 test('capabilities reports trusted packs and catalog size, singular/plural-safe', () => {
   expect(railFooterContext('capabilities', { ...zero, packCount: 1, catalogCount: 5 })).toBe('1 trusted pack · 5 in the catalog');
   expect(railFooterContext('capabilities', { ...zero, packCount: 4, catalogCount: 0 })).toBe('4 trusted packs · 0 in the catalog');
