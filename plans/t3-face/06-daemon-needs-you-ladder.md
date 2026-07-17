@@ -13,7 +13,7 @@ The daemon computes one priority state + `lastVisitedAt`/seen semantics per unit
 
 ## Approach
 
-**This concern is MODE: hitl** — it expands a charter whose expansion default was explicitly reserved for Lars, and it touches the daemon attention model that daily-driver locked. It must not be auto-executed by a headless pipeline. Lars merging the t3-face plan PR (or an explicit go) is the authorization; absent that, the program renders existing client states via concern 07 and this concern stays open.
+**This concern is MODE: hitl** — it expands a charter whose expansion default was explicitly reserved for Lars, and it touches the daemon attention model that daily-driver locked. It must not be auto-executed by a headless pipeline. **AUTHORIZED 2026-07-17 by Lars** ("Expand it — cockpit is the consumer"); this program is charter H's committed cockpit consumer. Proceed when batch dependencies allow.
 
 When authorized:
 1. Read `plans/daily-driver/01-charter-needs-you-ladder.md` in full and honor its locked constraints (single server-computed state; lastVisited/viewer semantics; boot-recompute rules already adjudicated there). This concern implements that charter; it does not re-decide it.

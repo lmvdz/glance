@@ -66,7 +66,8 @@ Rung map: R1 = batches 1–2 (coherent skin, whole app). R2 = batches 3–4 (spi
 
 ## Decisions so far
 
-- (ledger appends here as concerns close)
+- **2026-07-17 (Lars)**: Charter H expansion APPROVED — this program is the committed cockpit consumer. Concern 06 executes daemon-side; cockpit/webapp/push all render one attention truth. Concern 06's `MODE: hitl` authorization is hereby satisfied.
+- **2026-07-17 (Lars)**: Start NOW, in parallel with daily-driver-w15 + land-assessment (disjoint repos/TOUCHES). The adoption-gate pause rule (Notes) still binds: a KILL verdict pauses this program at end-of-batch.
 
 ## Notes
 
