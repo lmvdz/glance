@@ -106,8 +106,8 @@ export function fabricDocuments(snapshot: FabricSnapshot): KbDoc[] {
 	}
 
 	// Recurring-failure memory (concern 05, OMP_SQUAD_FAILURE_MEMORY): warn the next agent it's about
-	// to retry a KNOWN-recurring failure. Flag off (default) ⇒ no failure docs surface even if some
-	// were annotated while the flag was previously on (consistent with reward-boost's off-means-off).
+	// to retry a KNOWN-recurring failure. Flag on by default (skills-hardening concern 05) ⇒ failure
+	// docs surface unless the operator explicitly sets the env var to "0" (off-means-off either way).
 	if (isOn(learningFlags().failureMemory)) {
 		for (const fl of snapshot.failures) {
 			docs.push({ type: "failure", id: `failure:${fl.fingerprint}`, title: `Recurring failure · ${fl.branch}`, text: `${fl.rootCause} ${fl.branch}`, repo: fl.source.repo, ref: fl.fingerprint, source: "recurring failure", ts: fl.at });
@@ -233,6 +233,10 @@ function agoLabel(ts: number | undefined, now: number): string | undefined {
  * (`(src: agent a1, 2h ago)`), and a hit scoring well below the top match for this query is
  * labelled `(weak match)` rather than dropped — a novel task with only weak leads must still get
  * a primer; a hard confidence floor would silently empty it exactly when orientation matters most.
+ *
+ * Rendering (skills-hardening concern 05): a `"failure"`-type hit's body is prefixed with
+ * "Do not repeat: " so the injected line reads as an imperative instruction, not a passive
+ * description — the label taxonomy (`PRIMER_LABEL`) is untouched, only the body text changes.
  */
 export function buildContextPrimer(snapshot: FabricSnapshot, query: string, opts: { topK?: number; now?: number } = {}): string {
 	const results = searchFabric(snapshot, query, { topK: opts.topK ?? 6 });
@@ -246,7 +250,8 @@ export function buildContextPrimer(snapshot: FabricSnapshot, query: string, opts
 		if (ago) provenance.push(ago);
 		if (topScore > 0 && r.score < topScore * 0.4) provenance.push("weak match");
 		const suffix = provenance.length ? ` (${provenance.join(", ")})` : "";
-		return `- **${PRIMER_LABEL[r.type]}** — ${trim(`${r.title}: ${r.snippet}`.replace(/\s+/g, " ").trim(), 200)}${suffix}`;
+		const imperative = r.type === "failure" ? "Do not repeat: " : "";
+		return `- **${PRIMER_LABEL[r.type]}** — ${imperative}${trim(`${r.title}: ${r.snippet}`.replace(/\s+/g, " ").trim(), 200)}${suffix}`;
 	});
 	const body = ["### Related context from prior work (read-only, may be stale):", ...lines].join("\n");
 	return fenceUntrusted("context primer", body);

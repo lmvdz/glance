@@ -11,3 +11,4 @@ access-token
 vapid.json
 push-subs.json
 dist
+.skills-verify/

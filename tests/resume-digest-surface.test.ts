@@ -12,6 +12,7 @@ import { EventEmitter } from "node:events";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { DO_NOT_BLOCK, DO_NOT_HEADER } from "../src/agent-profiles.ts";
 import { FileStore } from "../src/dal/store.ts";
 import { writeDigest } from "../src/digest.ts";
 import { SquadManager } from "../src/squad-manager.ts";
@@ -146,8 +147,44 @@ test("cold-adopt restores the original appendSystemPrompt onto the spawned drive
 	};
 	await mgr.start();
 
-	// No profile on this unit, so createWithId does not re-compose — the persisted value round-trips verbatim.
-	expect(seen).toContain("CAPABILITY-GRANT: read,edit");
+	// No profile on this unit, so createWithId does not re-compose profile text — the persisted value
+	// survives at the front. The evergreen Do-Not block (skills-hardening 04) IS appended on adopt
+	// (a pre-04 persisted unit gets upgraded), but idempotently: exactly one copy, guarded by
+	// DO_NOT_HEADER — see the second assertion set below for the already-carrying case.
+	const adopted = seen.find((s) => s?.startsWith("CAPABILITY-GRANT: read,edit"));
+	expect(adopted).toBeDefined();
+	expect(adopted!.split(DO_NOT_HEADER).length - 1).toBe(1);
+
+	await mgr.stop();
+});
+
+test("cold-adopt is idempotent for a prompt that already carries the Do-Not block", async () => {
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "resume-asp-state-"));
+	tmps.push(stateDir);
+	const worktree = await makeDirtyWorktree();
+
+	const already = `CAPABILITY-GRANT: read,edit\n\n${DO_NOT_BLOCK}`;
+	const persisted: PersistedAgent = {
+		id: "orphan-asp-2",
+		name: "orphan2",
+		repo: worktree,
+		worktree,
+		approvalMode: "yolo",
+		kind: "omp-operator",
+		appendSystemPrompt: already,
+	};
+	await new FileStore(stateDir).save({ agents: [persisted], transcripts: {}, features: [] });
+
+	const seen: Array<string | undefined> = [];
+	const mgr = new SquadManager({ stateDir, skipGlobalJanitors: true });
+	(mgr as unknown as DriverFactoryHost).makeDriver = (p: PersistedAgent) => {
+		seen.push(p.appendSystemPrompt);
+		return new NoopDriver();
+	};
+	await mgr.start();
+
+	// Already carries the block — round-trips VERBATIM, no second copy appended on restart.
+	expect(seen).toContain(already);
 
 	await mgr.stop();
 });

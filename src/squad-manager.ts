@@ -63,7 +63,7 @@ import { RateLimitGate } from "./rate-limit.ts";
 import { addIssueIdsToFeatureModule, addIssuesToFeatureModule, addPlaneBlockedByRelation, addPlaneIssueComment, closePlaneIssue, createPlaneIssue, deletePlaneModule, ensureFeatureModule, featureTickets, fetchIssueDetail, laneFromLabels, listPlaneIssues, listPlaneIssuesAllStates, planeRepos, reopenPlaneIssue, startPlaneIssue } from "./plane.ts";
 import { syncPlanStatuses } from "./plan-sync.ts";
 import { agentsToAdopt, deferredResumable, hardAgentCeiling, newAgentId, planeIssueBranch, selectAdoptable, slugPart } from "./spawn-identity.ts";
-import { gateMembraneTokens, loadRepoProfiles, membraneDisciplinePrompt, membraneProfilesEnabled, modelOptionsFromRuntime, profileOptionsFromEnv, toolGrantsPrompt, type RuntimeModelOption } from "./agent-profiles.ts";
+import { EFFECT_POINTER_MARKER, effectSkillPointerLine, gateMembraneTokens, upsertDoNotBlock, loadRepoProfiles, membraneDisciplinePrompt, membraneProfilesEnabled, modelOptionsFromRuntime, profileOptionsFromEnv, toolGrantsPrompt, type RuntimeModelOption } from "./agent-profiles.ts";
 import { escapeHtml, planConcernTicketMatches, renderPlanConcernIssueHtml } from "./concern-tickets.ts";
 import { capabilityWorkflowToDot, loadCommissionWorkflow, resolveWorkflowPath, slugifyForFile } from "./workflow-source.ts";
 export { capabilityWorkflowToDot, resolveWorkflowPath };
@@ -3346,7 +3346,8 @@ export class SquadManager extends EventEmitter {
 	 * streak's root cause ONCE per fingerprint, reusing concern 04's `reflect()` (no second LLM path).
 	 * Idempotency lives HERE (not in the caller's timing) — a fingerprint already annotated short-
 	 * circuits before ever calling `reflect()`, so a capped/retried observer tick can call this every
-	 * time without spending a second LLM call. Gated behind `OMP_SQUAD_FAILURE_MEMORY` (default off).
+	 * time without spending a second LLM call. Gated behind `OMP_SQUAD_FAILURE_MEMORY` (default on
+	 * as of skills-hardening concern 05; `=0` is the explicit off-switch).
 	 */
 	private async annotateRecurringFailure(repo: string, finding: Finding, branch: string): Promise<void> {
 		if (!isOn(learningFlags().failureMemory)) return;
@@ -4540,6 +4541,33 @@ export class SquadManager extends EventEmitter {
 		// Now: any spawn with a repo and something to search on gets the primer. Still best-effort, still
 		// fenced-untrusted by `buildContextPrimer`, still never blocks a spawn.
 		// `OMP_SQUAD_CONTEXT_PRIMER=0` disables it.
+		// Evergreen Do-Not block (skills-hardening concern 04): every spawn — profiled or not, dispatched
+		// or ad-hoc — carries the same short list of recorded recurring failure modes. Joined
+		// UNCONDITIONALLY, and deliberately BEFORE the primer join below: the idempotence markers scan
+		// `opts.appendSystemPrompt`, and after primeContext runs that string contains UNTRUSTED
+		// fabric-derived text — a primer snippet that merely mentions the header or the skill path would
+		// otherwise act as a suppression signal against a block the design says is unconditional. At this
+		// point the string holds only persisted/profile/operator text. Specifically NOT via
+		// `profile.memory` (line ~4439, which only runs `if (profile)`): a profile-less dispatched unit
+		// never reaches that branch, the exact delivery-gap class R3 (below) fixed for the primer. Static
+		// repo-authored text (DO_NOT_BLOCK), so unlike the primer/specBlock it needs no untrusted fence.
+		//
+		// IDEMPOTENT + REFRESHING: cold-adopt re-runs this composition over the PERSISTED
+		// appendSystemPrompt. `upsertDoNotBlock` appends when absent (pre-04 units get upgraded) and
+		// REPLACES the existing paragraph when present — so rule edits reach long-lived units on the next
+		// restart instead of freezing the list they were created with, and the block never duplicates.
+		// The Effect pointer is once-only (marker check): it points at the UNIT'S TARGET REPO's vendored
+		// skill (opts.repo, never the daemon's own install) — see `effectSkillPointerLine`.
+		const hasEffectPointer = opts.appendSystemPrompt?.includes(EFFECT_POINTER_MARKER) ?? false;
+		const effectPointer = hasEffectPointer ? undefined : effectSkillPointerLine([opts.task, opts.issue?.name, opts.issue?.description].filter((t): t is string => typeof t === "string").join("\n"), opts.repo);
+		opts = {
+			...opts,
+			appendSystemPrompt: [upsertDoNotBlock(opts.appendSystemPrompt), effectPointer].filter((text): text is string => typeof text === "string" && text.length > 0).join("\n\n"),
+		};
+		// True by construction now (upsert never skips), so the delivery check below (alongside
+		// `primerDelivered`) measures ONLY the harness-channel gap — composition can no longer be
+		// silently suppressed by content collisions.
+		const doNotsInjected = true;
 		const primed = await this.primeContext(opts, actor);
 		opts = primed.opts;
 		const primerBuilt = primed.hasPrimer;
@@ -4981,6 +5009,15 @@ export class SquadManager extends EventEmitter {
 			// Measured from OUTSIDE the branch it measures — the mistake `primer-empty` made.
 			this.learningMetrics.record("primer-undelivered", 1, { flag: "context-primer", variant: resolveHarnessName(opts) });
 			this.log("warn", `${opts.name ?? "unit"}: context primer built but harness "${resolveHarnessName(opts)}" has no system-prompt channel — running unscoped (set OMP_SQUAD_ACP_CONTEXT=prompt to inject it)`);
+		}
+		// Same delivery check for the Do-Not block: doNotsInjected is unconditionally true (the join above
+		// never skips it), so this measures ONLY the harness-channel gap, not a composition gap —
+		// deliberately NOT folded into hasInstructions below (a discipline block is not task orientation, so
+		// it must not inflate that dimension the way a delivered primer legitimately does).
+		const doNotsDelivered = doNotsInjected && contextDelivers;
+		if (doNotsInjected && !doNotsDelivered) {
+			this.learningMetrics.record("donots-undelivered", 1, { flag: "do-not-block", variant: resolveHarnessName(opts) });
+			this.log("warn", `${opts.name ?? "unit"}: Do-Not block composed but harness "${resolveHarnessName(opts)}" has no system-prompt channel — running without it (set OMP_SQUAD_ACP_CONTEXT=prompt to inject it)`);
 		}
 		if (harnessScorecardEnabled()) {
 			dto.harnessScorecard = scoreHarness({
