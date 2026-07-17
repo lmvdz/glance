@@ -8,7 +8,7 @@
  */
 
 import { EventEmitter } from "node:events";
-import { envBool, envInt, envNumber, raceOnceEnabled } from "./config.ts";
+import { envBool, envBoolAliased, envInt, envNumber, raceOnceEnabled } from "./config.ts";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -41,7 +41,11 @@ import type { WorkflowDefinition } from "./workflow-catalog.ts";
 import { Dispatcher } from "./dispatch.ts";
 import { openDispatchLedger } from "./dispatch-ledger.ts";
 import { openRaceLedger, type RaceLedger } from "./race-ledger.ts";
-import { type Answer, answerBrief, listAnswers, readAnswer, saveAnswer } from "./answers.ts";
+import { type Answer, answerBrief, listAnswers, possiblyStale, readAnswer, saveAnswer } from "./answers.ts";
+// Aliased: `types.ts` already exports an UNRELATED `AttentionEvent` (an agent's own notify signal,
+// used pervasively below via `AgentDTO.attentionEvents`) — importing this module's same-named type
+// bare would collide. `OperatorAttentionEvent` disambiguates at every use site in this file.
+import { AttentionStore, type AttentionEvent as OperatorAttentionEvent, type AttentionRecordInput, type RecordResult, type SeenMap, type SurpriseCountMap } from "./attention.ts";
 import { errText } from "./err-text.ts";
 import { isConsolePrompt, stripConsolePrompt } from "./console-prompt.ts";
 import { openRemovedLedger, type RemovedLedger } from "./removed-ledger.ts";
@@ -55,6 +59,17 @@ import { gitDiffSinceBase } from "./convergence-run.ts";
 import { readScoutCursors, writeScoutCursors } from "./scout-cursor.ts";
 import { execGatedCommand } from "./gate-runner.ts";
 import { Opportunity } from "./opportunity.ts";
+import {
+	EpisodeLoop,
+	listEpisodes,
+	readEpisode,
+	type EpisodeGatherResult,
+	type EpisodeMeta,
+	type OmittedEntry as EpisodeOmittedEntry,
+	type StaleAnswerEntry,
+} from "./weekly-episode.ts";
+import { computeFog, topDebt, type FileFogEntry } from "./comprehension-fog.ts";
+import { PushService } from "./push.ts";
 import { ResidentPlanner } from "./resident-planner.ts";
 import { DECOMPOSE_TIMEOUT_MS } from "./planner.ts";
 import { hardenedGit, hardenedGitSync } from "./git-harden.ts";
@@ -86,7 +101,7 @@ import { type Judge, validatorGate } from "./validator.ts";
 import { evaluateCompliance, type ComplianceFinding } from "./compliance.ts";
 import { reapDeadSessions, releaseSession, sweepLeases } from "./leases.ts";
 import { agentActor, scopeFor } from "./agent-scope.ts";
-import { buildFabricSnapshot, loadScoutFacts, type FabricSnapshot } from "./fabric.ts";
+import { actorVisibleRepoSet, buildFabricSnapshot, loadScoutFacts, type FabricSnapshot } from "./fabric.ts";
 import { buildContextPrimer, searchFabric, type KbDocType } from "./fabric-search.ts";
 import { sweepPresence, who } from "./presence.ts";
 import { harnessEventDecision } from "./harness-hooks.ts";
@@ -150,6 +165,9 @@ import { selectReapable, type WorktreeInfo } from "./worktree-reaper.ts";
 import { scrubbedSpawnEnv } from "./spawn-env.ts";
 import { changedFiles, filesTouchedSinceBase } from "./explore.ts";
 import { appendReceipt, confirmDeliveredFlags, EFFICIENCY_FLAG_PREFIX, readAllReceipts, readReceipts, RunAccumulator, splitCapabilityTokens } from "./receipts.ts";
+import { validateModelDelta } from "./decision-evidence.ts";
+import { classifyWhereToLookEntry, listSymptoms, readSymptom, saveSymptom, statWhereToLookEntry, symptomId, validateSymptomText, validateWhereToLookCount, type SymptomEntry } from "./symptoms.ts";
+import { buildPrBody } from "./pr-body.ts";
 import { membraneBreakerCadence } from "./membrane-breaker-cadence.ts";
 import { appendAudit, type AuditQuery, makeAuditEntry, readAudit } from "./audit.ts";
 import { AutomationLog, type AutomationQuery } from "./automation-log.ts";
@@ -174,7 +192,7 @@ import { buildTaskClassMatrix } from "./omp-graph/task-class-matrix.ts";
 import { DAY_MS } from "./omp-graph/schema.ts";
 import { modelRouteMinEdgeFor, modelRouteShouldApply, routeModelForTaskClass } from "./model-route.ts";
 import { openOrchestratorState } from "./orchestrator-state.ts";
-import { authoredSpecBlock, buildDigest, type DigestReward, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
+import { authoredSpecBlock, buildDigest, type DigestReward, digestSummaryExcerpt, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
 import { readChatAttachment, reapStaleChatAttachments, type SavedChatAttachment, writeChatAttachment } from "./chat-attachment.ts";
 import { harnessScorecardEnabled, scoreHarness } from "./harness-scorecard.ts";
 import { isArmed } from "./convergence-oracle.ts";
@@ -216,6 +234,10 @@ import {
 
 const MAX_TRANSCRIPT = 800;
 const POLL_MS = 2500;
+/** EpisodeLoop's tick cadence (comprehension concern 09) — hourly, so a daemon restart is never more
+ *  than an hour late catching up on a missed weekly generation. Durable idempotency (the target
+ *  week's artifact already existing) is what actually gates work, not this interval. */
+const EPISODE_TICK_MS = 3_600_000;
 /**
  * How long a built spawn scoreboard is served from cache (see `spawnScoreboard()`). Outcome data
  * only changes on lands, and the board feeds a routing TIE-BREAKER (never a gate/veto), so a
@@ -241,6 +263,12 @@ const REPORT_TOOL = "squad_report";
  *  when the OMP_SQUAD_DECISION_CAPTURE flag is on. Writes a source:"agent" decision to the agent's
  *  feature so future agents inherit it via the cold-start primer / squad_kb_search. */
 const RECORD_DECISION_TOOL = "squad_record_decision";
+/** Comprehension lane concern 05 ("teaching producers"): NON-blocking, same shape as
+ *  RECORD_DECISION_TOOL. Advertised/dispatched behind the SAME OMP_SQUAD_DECISION_CAPTURE flag (no new
+ *  flag invented — DESIGN.md's flag-discipline instruction) since both are teaching-content producers
+ *  that write into the same cold-start/kb-search pipeline. Writes a `SymptomEntry` when this run FIXED
+ *  a defect, phrased as the operator would observe it. */
+const RECORD_SYMPTOM_TOOL = "squad_record_symptom";
 /** cmux-research concern 03: NON-blocking, same shape as REPORT_TOOL — a bare "look here", not a gate. */
 const ATTENTION_TOOL = "squad_attention";
 
@@ -311,13 +339,40 @@ const SQUAD_HOST_TOOLS: HostToolDef[] = [
 const RECORD_DECISION_TOOL_DEF: HostToolDef = {
 	name: RECORD_DECISION_TOOL,
 	description:
-		"Record a consequential decision you made and WHY (an architecture choice, a tradeoff, an approach picked over an alternative) so future agents on this work inherit it instead of re-deciding it. Non-blocking — you keep working. Use SPARINGLY, only for genuinely load-bearing decisions, not routine steps.",
+		'Record a consequential decision you made and WHY (an architecture choice, a tradeoff, an approach picked over an alternative) so future agents on this work inherit it instead of re-deciding it. Non-blocking — you keep working. Use SPARINGLY, only for genuinely load-bearing decisions, not routine steps.\n\n' +
+		'ALSO, before you finish: if you changed how the system actually works (not just what code exists), set source:"model-delta" and record up to 3 such deltas — state what was true BEFORE and what is true NOW. Each model-delta entry REQUIRES `evidence`: one or more repo-relative files (or `file:start-end`) THIS RUN touched — an anchorless or made-up-file delta is rejected. Skip entirely when nothing architectural changed; an empty record is honest, slop is not.',
 	parameters: {
 		type: "object",
 		properties: {
-			text: { type: "string", description: "The decision and its rationale, in one or two sentences." },
+			text: { type: "string", description: "The decision and its rationale, in one or two sentences. For a model-delta, state what was true before and what is true now (min 20 chars)." },
+			source: { type: "string", enum: ["model-delta"], description: 'Optional. Set to "model-delta" to record a mental-model delta instead of a routine decision — requires `evidence`.' },
+			evidence: {
+				type: "array",
+				items: { type: "string" },
+				description: 'Required when source is "model-delta": repo-relative file paths (or `file:start-end`) this run touched, each proving the delta. Ignored for a routine decision.',
+			},
 		},
 		required: ["text"],
+	},
+};
+
+/** Advertised only when OMP_SQUAD_DECISION_CAPTURE is on, alongside RECORD_DECISION_TOOL_DEF — same
+ *  flag, no new one invented (DESIGN.md's flag-discipline instruction). */
+const RECORD_SYMPTOM_TOOL_DEF: HostToolDef = {
+	name: RECORD_SYMPTOM_TOOL,
+	description:
+		'Record a symptom card when THIS RUN FIXED a defect — phrased the way an OPERATOR would observe it (e.g. "daemon healthy but dispatch stalled"), never as the fix itself (not "added a null check in dispatch.ts"). Non-blocking. Use once per fix. `whereToLook` must be 1-5 entries, each either an existing repo-relative path (a specific file, or a directory at least two levels deep — a bare top-level directory like "src/" is rejected) or a literal `glance …` command.',
+	parameters: {
+		type: "object",
+		properties: {
+			symptom: { type: "string", description: "The defect as the operator would observe it, min 20 characters." },
+			whereToLook: {
+				type: "array",
+				items: { type: "string" },
+				description: '1-5 entries: an existing repo-relative path (file, or a directory at least two levels deep) or a `glance …` command. Bare "src/" is rejected.',
+			},
+		},
+		required: ["symptom", "whereToLook"],
 	},
 };
 
@@ -844,6 +899,10 @@ export class SquadManager extends EventEmitter {
 	private readonly scouts = new Map<string, Scout>();
 	/** Opportunity clusterers — one per configured Plane repo, fed by Scout facts + receipt hot areas. */
 	private readonly opportunities: Opportunity[] = [];
+	/** Weekly-episode loops (comprehension concern 09) — one per repo this daemon knows about
+	 *  (`featureRepos()`, NOT `planeRepos()`: comprehension isn't gated on a Plane backlog, matching
+	 *  attention/fog/symptoms elsewhere in this lane). Cleared in stop(). */
+	private readonly episodeLoops: EpisodeLoop[] = [];
 	/** Resident planners — one per configured Plane repo; gated OMP_SQUAD_RESIDENT_PLANNER (default OFF,
 	 *  opt-in unlike the loops above — an LLM-cost-bearing writer of source-tree files). */
 	private readonly residentPlanners: ResidentPlanner[] = [];
@@ -948,6 +1007,9 @@ export class SquadManager extends EventEmitter {
 	 *  file best-effort. recordTransition/recordDenied append here; transitionHistory() reads it for
 	 *  GET /api/agents/:id/transitions. Constructed in the constructor (needs stateDir). */
 	private readonly transitionLog: JsonlLog<TransitionEntry>;
+	/** Operator-attention substrate (comprehension concern 01) — raw JsonlLog feed + compacted
+	 *  last-seen map, constructed ONCE here (mirrors `transitionLog` above), never per-request. */
+	private readonly attentionStore: AttentionStore;
 	private readonly traceExporter?: TraceExportQueue;
 	/** Reward disbursement provider (Tremendous / Manual). Injectable for tests; default from env. */
 	private readonly paymentProvider: PaymentProvider;
@@ -976,6 +1038,7 @@ export class SquadManager extends EventEmitter {
 		this.automation = new AutomationLog(this.stateDir, { onEvent: (event) => this.emit("event", { type: "automation", event } satisfies SquadEvent) });
 		this.learningMetrics = new LearningMetrics(this.stateDir, { log: (m) => this.log("warn", `learning-metrics: ${m}`) });
 		this.transitionLog = new JsonlLog<TransitionEntry>({ path: path.join(this.stateDir, "transitions.jsonl"), log: (m) => this.log("warn", `transitions.jsonl: ${m}`) });
+		this.attentionStore = new AttentionStore({ stateDir: this.stateDir, log: (m) => this.log("warn", `attention: ${m}`) });
 		this.bin = opts.bin;
 		this.autoLand = opts.autoLand ?? false;
 		this.worktreeBaseDir = opts.worktreeBase;
@@ -1297,6 +1360,45 @@ export class SquadManager extends EventEmitter {
 			this.log("info", `opportunity on (clustering scout patterns → ${observeRepos.join(", ")})`);
 		}
 
+		// Weekly episode (comprehension concern 09) — an HOURLY tick against a WEEKLY deliverable
+		// (DESIGN.md "Weekly episode trigger": a 7-day in-memory timer never survives a daemon restart,
+		// so durable idempotency over a real calendar week is the trigger, not the interval). One loop
+		// per repo `featureRepos()` knows about — NOT `planeRepos()`: comprehension (attention/fog/
+		// symptoms) is never gated on a configured Plane backlog elsewhere in this lane, so episodes
+		// aren't either.
+		// `GLANCE_EPISODE` (legacy alias `OMP_SQUAD_EPISODE`, batch-3 review: `.env.example` documented
+		// `GLANCE_EPISODE` as primary with `OMP_SQUAD_EPISODE` as its legacy alias, but this used to
+		// read ONLY the old name — the documented primary name silently did nothing).
+		if (envBoolAliased("GLANCE_EPISODE", "OMP_SQUAD_EPISODE", true)) {
+			{
+				// ONE loop over a LIVE repo provider (code-review resume finding 4): the repo set is
+				// re-derived every tick, so a project added after boot gets its weekly brief without a
+				// daemon restart — the old one-loop-per-boot-time-repo shape starved late adds forever.
+				const loop = new EpisodeLoop({
+					repos: () => this.featureRepos(),
+					stateDir: this.stateDir,
+					gather: (repo, window) => this.gatherEpisodeInputs(repo, window),
+					// Fresh PushService per send, re-`init()`'d from disk every time (episode pushes fire at
+					// most weekly, so the cost is trivial): the alternative — one long-lived instance built
+					// once at start() — would cache `subs`/`vapid` from whatever existed at boot and never
+					// see a device that subscribes afterward, since `PushService.subscribe()` only updates
+					// the INSTANCE that received the call (index.ts's/server.ts's own service, a separate
+					// object). Re-reading from the same durable `push-subs.json`/`vapid.json` files this
+					// daemon already writes sidesteps that staleness entirely, with no new shared state.
+					notifyPush: async (payload) => {
+						const push = new PushService(this.stateDir);
+						await push.init();
+						await push.notify(payload);
+					},
+					log: (m) => this.log("info", `episode: ${m}`),
+					recordFor: (repo) => this.automation.for("episode", repo),
+				});
+				loop.start(EPISODE_TICK_MS);
+				this.episodeLoops.push(loop);
+				this.log("info", "episode on (weekly brief; repo set re-derived each tick)");
+			}
+		}
+
 		// Resident planner (Epic 1) — the inverse of plan-sync: ingests plans/<name>/OBJECTIVE.md and
 		// maintains its concern-DAG against verified (DoneProof) state. Opt-IN ("=== 1", not "!== 0")
 		// unlike every loop above — it is an LLM-cost-bearing writer of source-tree files.
@@ -1499,8 +1601,12 @@ export class SquadManager extends EventEmitter {
 		clearTimeout(this.prReconcileStaggerTimer);
 		for (const s of this.scouts.values()) s.stop();
 		for (const o of this.opportunities) o.stop();
+		for (const l of this.episodeLoops) l.stop();
 		for (const p of this.residentPlanners) p.stop();
 		clearInterval(this.leaseGossipTimer);
+		// Flush the attention store's debounced last-seen-map write (comprehension concern 01) — same
+		// "only a crash may lose it" contract as the pendingPersistTimers flush above.
+		this.attentionStore.stop();
 		await this.persist();
 		// Best-effort timeline marker (#lifecycle-truth finding 4 / DESIGN's "a best-effort daemon-stop
 		// entry in stop()") — a graceful shutdown DETACHES agents (below), it does not actually stop them,
@@ -3387,6 +3493,130 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
+	 * PR-body content resolver (comprehension lane concern 06) — the ONE place both `floatPrOnLandReady`
+	 * and `retryPushFloat` call to render a unit's PR body from what was actually recorded during the
+	 * run, so the two float call sites can never drift on what a body contains. Record-then-render:
+	 * this reads already-persisted state only, never parses anything back out of a PR body.
+	 *
+	 * Data sources:
+	 *  - `deltas`: the unit's feature's `source:"model-delta"` decisions (`storedFeatureDecisions`) —
+	 *    empty (not omitted) when the unit carries no `featureId`, which `buildPrBody` renders as the
+	 *    declared "no delta recorded" line rather than a silent gap.
+	 *  - `symptom`: the newest symptom card whose `fixedBy.agentId` matches this unit, scoped to the
+	 *    unit's own repo (`symptoms(repo)` already returns newest-first, so `.find` picks the latest).
+	 *  - `testExecutions`: honestly empty. `RunReceipt` (`receipts.ts`) records `toolTally` — COUNTS of
+	 *    tool names invoked (e.g. `{ Bash: 12 }`) — never the command text or its outcome, and no other
+	 *    persisted structure captures "this exact command ran and passed/failed". Inventing a command
+	 *    string from a tool-call count would be exactly the fabricated-verification pattern DESIGN.md's
+	 *    honesty rule exists to prevent, so this stays `[]` until a real command+outcome producer
+	 *    exists (a declared gap, not a silent one — `buildPrBody` renders "no observed test runs
+	 *    recorded" for an empty list, never a fabricated bullet).
+	 *  - `digestExcerpt`: the run's own digest's Summary section only (`digestSummaryExcerpt`) — never
+	 *    the digest's Goal/Where-we-left-off, which quote transcript text verbatim.
+	 * Best-effort throughout: any read failure here degrades to that input's empty/undefined value
+	 * rather than throwing — a PR body must never block a float.
+	 */
+	private async prBodyFor(rec: AgentRecord): Promise<string> {
+		const dto = rec.dto;
+		// sourceRef filter (batch-2 review): two units can share one feature — only THIS unit's recorded
+		// deltas belong in its PR body, or unit B's teaching renders under unit A's diff.
+		const deltas = (dto.featureId ? this.storedFeatureDecisions(dto.featureId) : undefined)?.filter((d) => d.source === "model-delta" && d.sourceRef?.agentId === dto.id) ?? [];
+		let symptom: SymptomEntry | undefined;
+		try {
+			symptom = (await this.symptoms(dto.repo)).find((s) => s.fixedBy.agentId === dto.id);
+		} catch {
+			symptom = undefined;
+		}
+		let digestExcerpt: string | undefined;
+		try {
+			digestExcerpt = digestSummaryExcerpt(await readDigest(this.stateDir, dto.id));
+		} catch {
+			digestExcerpt = undefined;
+		}
+		return buildPrBody({ deltas, symptom, testExecutions: [], omitted: [], digestExcerpt });
+	}
+
+	/**
+	 * Turn `repo` + one target ISO week's `[start, end)` window into `EpisodeLoop`'s gather input —
+	 * the ONE place that assembles a weekly episode's raw material from live daemon state, so
+	 * `EpisodeLoop` itself (weekly-episode.ts) never touches `featureStore`/receipts/attention/fabric
+	 * directly. Mirrors `prBodyFor`'s data-source reasoning above, widened from "one unit's PR" to
+	 * "every model-delta this repo recorded in the window":
+	 *  - `deltas`: every `source:"model-delta"` decision across this repo's persisted features whose
+	 *    `createdAt` falls inside the window. Non-model-delta decisions in the same window are
+	 *    counted (never rendered) via `omitted` — they aren't mental-model atoms.
+	 *  - `symptoms`: symptom cards for this repo landed inside the window.
+	 *  - `fogTop`: the SAME `computeFog`/`topDebt` the `/api/fog` route and concern 04's overlay use —
+	 *    a live "debt right now" gauge, not a window-filtered historical snapshot (DESIGN.md's debt
+	 *    formula is deliberately `now`-independent; there is no per-week fog history to replay).
+	 *  - `digestIds`: every digest currently visible for this repo (fabric's own repo-scoped list) —
+	 *    counted only, never quoted (weekly-episode.ts's Not-covered section).
+	 *  - `testExecutions`: honestly empty — same "no persisted command+outcome" gap `prBodyFor` already
+	 *    documents; never fabricated here either.
+	 *  - `staleAnswers` (comprehension concern 10): every recorded answer for this repo that
+	 *    `possiblyStale` (answers.ts) flags against the SAME receipts `fogTop` just computed from — a
+	 *    live snapshot like `fogTop`, not filtered to answers given inside the window.
+	 * Best-effort throughout: a symptom/fabric read failure degrades to that input's empty value
+	 * rather than failing the whole generation (mirrors `prBodyFor`).
+	 */
+	private async gatherEpisodeInputs(repo: string, window: { start: number; end: number }): Promise<EpisodeGatherResult> {
+		const deltas: FeatureDecision[] = [];
+		let nonDeltaCount = 0;
+		for (const pf of this.featureStore.values()) {
+			if (normalizeRepoPath(pf.repo) !== normalizeRepoPath(repo)) continue;
+			for (const d of pf.decisions ?? []) {
+				if (d.createdAt === undefined || d.createdAt < window.start || d.createdAt >= window.end) continue;
+				if (d.source === "model-delta") deltas.push(d);
+				else nonDeltaCount++;
+			}
+		}
+		let symptoms: SymptomEntry[] = [];
+		try {
+			symptoms = (await this.symptoms(repo)).filter((s) => s.landedAt >= window.start && s.landedAt < window.end);
+		} catch {
+			symptoms = [];
+		}
+		let fogTop: FileFogEntry[] = [];
+		let staleAnswers: StaleAnswerEntry[] = [];
+		try {
+			const receipts = await this.allReceipts();
+			const seen = this.attentionSeen([repo]);
+			fogTop = topDebt(computeFog({ receipts, seen, repos: [repo], now: window.end, surpriseCounts: this.attentionSurpriseCounts([repo]) }), 10);
+			// Comprehension concern 10: resurface this repo's currently-stale answers — a prior
+			// question whose cited files have since changed enough that the answer may no longer
+			// hold. Staleness is a live snapshot (like `fogTop` above), not a "became stale this week"
+			// event (unlike `deltas`/`symptoms`), so every answer for this repo is re-checked against
+			// the SAME receipts fogTop just used, not filtered to ones answered inside `window`. A
+			// failure here degrades ONLY this input (own try/catch) — it must never blank an already-
+			// computed `fogTop`, matching this function's "each input degrades independently" contract.
+			try {
+				const repoAnswers = await listAnswers(this.stateDir, { repo });
+				staleAnswers = repoAnswers.filter((a) => possiblyStale(a, receipts)).map((a) => ({ id: a.id, question: a.question }));
+			} catch {
+				staleAnswers = [];
+			}
+		} catch {
+			fogTop = [];
+			staleAnswers = [];
+		}
+		let digestIds: string[] = [];
+		try {
+			const snapshot = await this.fabric(LOCAL_ACTOR, { repos: [repo], includeLeases: false });
+			digestIds = snapshot.digests.map((d) => d.source.agentId ?? d.source.runId).filter((id): id is string => Boolean(id));
+		} catch {
+			digestIds = [];
+		}
+		const omitted: EpisodeOmittedEntry[] = [];
+		if (nonDeltaCount > 0) {
+			omitted.push({
+				title: `${nonDeltaCount} non-model-delta decision${nonDeltaCount === 1 ? "" : "s"} recorded this week`,
+				reason: "plan/human/agent-sourced decisions aren't mental-model deltas",
+			});
+		}
+		return { deltas, symptoms, fogTop, testExecutions: [], digestIds, omitted, staleAnswers };
+	}
+
+	/**
 	 * PR-mode landReady float (concern 06/DESIGN mode-dispatch ruling + the autoLand×PR matrix's
 	 * "landConfirm ON (default): landReady ⇒ push+draft" row): the moment an agent is flagged
 	 * ready-to-land — confirm-mode verified GREEN, or a staged auto-resolved conflict — PR mode should
@@ -3410,10 +3640,12 @@ export class SquadManager extends EventEmitter {
 					branch: dto.branch as string,
 					defaultBranch: mode.defaultBranch,
 					title: `squad(${dto.name}): land ${dto.branch}`,
+					body: await this.prBodyFor(rec),
 					issueId: dto.issue?.id,
 					issueIdentifier: dto.issue?.identifier,
 					issueProjectId: dto.issue?.projectId,
 					agentId: dto.id,
+					featureId: dto.featureId,
 					stateDir: this.stateDir,
 				});
 				if (ensure.ok && ensure.prNumber !== undefined && ensure.prUrl !== undefined) {
@@ -7093,10 +7325,12 @@ export class SquadManager extends EventEmitter {
 			branch: dto.branch,
 			defaultBranch: mode.defaultBranch,
 			title: `squad(${dto.name}): land ${dto.branch}`,
+			body: await this.prBodyFor(rec),
 			issueId: dto.issue?.id,
 			issueIdentifier: dto.issue?.identifier,
 			issueProjectId: dto.issue?.projectId,
 			agentId: dto.id,
+			featureId: dto.featureId,
 			stateDir: this.stateDir,
 		});
 		if (ensure.ok && ensure.prNumber !== undefined && ensure.prUrl !== undefined) {
@@ -7251,6 +7485,88 @@ export class SquadManager extends EventEmitter {
 
 	answer(id: string): Promise<Answer | undefined> {
 		return readAnswer(this.stateDir, id);
+	}
+
+	/** Symptom cards recorded by `squad_record_symptom`, newest first — the read surface for later
+	 *  projections (doctor's `remedy` match, `glance symptom`, fabric/⌘K search), mirroring `answers()`
+	 *  above. Nothing in concern 05's scope renders these; this is the stable entry point they'll call. */
+	symptoms(repo?: string): Promise<SymptomEntry[]> {
+		return listSymptoms(this.stateDir, { repo });
+	}
+
+	symptom(id: string): Promise<SymptomEntry | undefined> {
+		return readSymptom(this.stateDir, id);
+	}
+
+	/** Weekly-episode metas for one repo, newest week first (concern 09's `GET /api/episodes?repo=`) —
+	 *  mirrors `symptoms()`/`answers()` above: a stable read-only entry point over durable state. */
+	episodes(repo: string): Promise<EpisodeMeta[]> {
+		return listEpisodes(this.stateDir, repo);
+	}
+
+	/** One episode's full record (meta + markdown), or `undefined` if it doesn't exist for this repo
+	 *  (concern 09's `GET /api/episodes/:id?repo=`). */
+	episode(repo: string, id: string): Promise<(EpisodeMeta & { markdown: string }) | undefined> {
+		return readEpisode(this.stateDir, repo, id);
+	}
+
+	/** The decisions currently stored on a persisted feature — the server's PATCH sanitizer merges
+	 *  client edits against these so server-authoritative fields (source/evidence/sourceRef) survive
+	 *  the webapp's full-array round-trip. Derived (not-yet-adopted) features return undefined, which
+	 *  is correct: model-deltas only ever live on persisted features (recordAgentDecision adopts
+	 *  before writing). */
+	storedFeatureDecisions(id: string): FeatureDecision[] | undefined {
+		return this.featureStore.get(id)?.decisions;
+	}
+
+	// ── operator-attention substrate (comprehension concern 01) ──────────────────────────────────
+
+	/** The repo set `actor` may name in `POST /api/attention`'s `repo` field or an unfiltered GET —
+	 *  identical derivation to `fabric()`'s own unrestricted-repos fallback (fabric.ts's
+	 *  `actorVisibleRepoSet`), so the two can never disagree about what a given actor may see. Fails
+	 *  closed: no scoped agents and no persisted features ⇒ an empty set. */
+	attentionVisibleRepos(actor: Actor): Set<string> {
+		return actorVisibleRepoSet(actor, this.list(), [...this.featureStore.values()]);
+	}
+
+	/** Whether the kill switch (`GLANCE_ATTENTION=0`) is currently set — checked live, not cached. */
+	attentionDisabled(): boolean {
+		return this.attentionStore.disabled();
+	}
+
+	/** Record one attention event. `rateLimitKey` is the caller's per-actor rate-limit bucket
+	 *  (typically `actor.id`) — never persisted. Server routes are responsible for stamping
+	 *  `viewerId` from the session (never the client body) before calling this. */
+	recordAttention(event: AttentionRecordInput, rateLimitKey: string): RecordResult {
+		return this.attentionStore.record(event, rateLimitKey);
+	}
+
+	/** Raw feed, restricted to `repos` when given. `undefined` means unrestricted; an EXPLICIT empty
+	 *  array restricts to NOTHING (a caller whose actor-visible repo set is genuinely empty passes
+	 *  `[]` on purpose — see `AttentionStore.seenMapFor`'s matching doc for why that must fail closed,
+	 *  not fall open). Telemetry only, per attention.ts's module doc; callers still owe redaction via
+	 *  `redactAttentionForActor`. */
+	attentionEvents(repos?: string[]): OperatorAttentionEvent[] {
+		const events = this.attentionStore.recentEvents();
+		if (repos === undefined) return events;
+		if (repos.length === 0) return [];
+		const keys = new Set(repos.map(normalizeRepoPath));
+		return events.filter((e) => keys.has(normalizeRepoPath(e.repo)));
+	}
+
+	/** The compacted last-seen map, restricted to `repos` (`undefined` ⇒ unrestricted; `[]` ⇒
+	 *  nothing — see `attentionEvents` above) — fog's read path. Callers still owe redaction via
+	 *  `redactSeenMapForActor`. */
+	attentionSeen(repos?: string[]): SeenMap {
+		return this.attentionStore.seenMapFor(repos);
+	}
+
+	/** Concern-08 fog wiring: the durable per-(repo,file) surprise-tap COUNT map (NOT the raw feed —
+	 *  see `SurpriseCountMap`'s doc in attention.ts for why a compacted store exists at all), same
+	 *  `repos` filtering contract as `attentionSeen`. Carries no viewer identity, so unlike the two
+	 *  reads above it needs no redaction pass before `computeFog` consumes it. */
+	attentionSurpriseCounts(repos?: string[]): SurpriseCountMap {
+		return this.attentionStore.surpriseCountsFor(repos);
 	}
 
 	/**
@@ -7652,6 +7968,11 @@ export class SquadManager extends EventEmitter {
 			includeLeases: opts.includeLeases,
 			listIssues: (repo) => listPlaneIssues(repo),
 			features: [...this.featureStore.values()],
+			// Comprehension concern 10: the FULL answer set, unfiltered by repo — mirroring `features`
+			// above — so both a single-repo caller and an unrestricted one narrow correctly through
+			// `buildFabricSnapshot`'s own `repoSet` guard rather than a pre-filter here that can't see
+			// that function's fallback-computed repo list.
+			answers: await listAnswers(this.stateDir),
 		});
 	}
 
@@ -8161,9 +8482,10 @@ export class SquadManager extends EventEmitter {
 		// absent descriptor (workflow/flue kinds) keeps today's behavior — host tools advertised.
 		const caps = (rec.harness ?? this.harnessFor(rec.options))?.capabilities;
 		if (caps && !caps.hostTools) return;
-		// Decision capture is flag-gated (default off): advertise squad_record_decision only when on,
-		// so a fresh agent's tool list matches what onHostTool will actually dispatch.
-		const tools = isOn(learningFlags(rec.dto.id).decisionCapture) ? [...SQUAD_HOST_TOOLS, RECORD_DECISION_TOOL_DEF] : SQUAD_HOST_TOOLS;
+		// Decision capture is flag-gated (default off): advertise squad_record_decision (+ its
+		// squad_record_symptom sibling, same flag — concern 05) only when on, so a fresh agent's tool
+		// list matches what onHostTool will actually dispatch.
+		const tools = isOn(learningFlags(rec.dto.id).decisionCapture) ? [...SQUAD_HOST_TOOLS, RECORD_DECISION_TOOL_DEF, RECORD_SYMPTOM_TOOL_DEF] : SQUAD_HOST_TOOLS;
 		try {
 			rec.agent.setHostTools?.(tools);
 		} catch (err) {
@@ -8190,6 +8512,15 @@ export class SquadManager extends EventEmitter {
 			// hiding the tool while a carried-over / resumed / guessed call still writes decisions.
 			if (isOn(learningFlags(rec.dto.id).decisionCapture)) {
 				void this.handleRecordDecisionTool(rec, call);
+			} else {
+				rec.agent.respondHostTool(call.id, "decision capture is disabled", true);
+			}
+			return;
+		}
+		if (call.toolName === RECORD_SYMPTOM_TOOL) {
+			// Same flag as RECORD_DECISION_TOOL — see the comment there.
+			if (isOn(learningFlags(rec.dto.id).decisionCapture)) {
+				void this.handleRecordSymptomTool(rec, call);
 			} else {
 				rec.agent.respondHostTool(call.id, "decision capture is disabled", true);
 			}
@@ -8295,31 +8626,55 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
-	 * squad_record_decision (research-tencentdb-agent-memory): capture a consequential decision into the
-	 * agent's feature as a source:"agent" FeatureDecision, so it surfaces in the cold-start primer /
-	 * squad_kb_search for future agents. NON-blocking like handleReportTool — responds immediately,
-	 * never setPending. Best-effort: any failure is reported to the agent + warn-logged, never thrown.
-	 * Idempotent: a normalized-text match against the feature's existing decisions is a no-op.
+	 * squad_record_decision (research-tencentdb-agent-memory; model-delta extension: comprehension lane
+	 * concern 05 "teaching producers"): capture a consequential decision into the agent's feature as a
+	 * FeatureDecision, so it surfaces in the cold-start primer / squad_kb_search for future agents.
+	 * NON-blocking like handleReportTool — responds immediately, never setPending. Best-effort: any
+	 * failure is reported to the agent + warn-logged, never thrown. Idempotent: a normalized-text match
+	 * against the feature's existing decisions is a no-op.
+	 *
+	 * `source:"model-delta"` is the teaching-content path: it REQUIRES `evidence` naming a file this run
+	 * actually touched (`validateModelDelta`, decision-evidence.ts) — an anchorless or fabricated-anchor
+	 * delta is rejected with a tool error naming the violated rule, BEFORE anything is written. This is
+	 * the only mechanical anti-slop pressure on the lane (DESIGN.md "Delta quality floor").
 	 */
 	private async handleRecordDecisionTool(rec: AgentRecord, call: { id: string; arguments: unknown }): Promise<void> {
 		try {
 			const args = call.arguments && typeof call.arguments === "object" ? (call.arguments as Record<string, unknown>) : {};
 			const text = typeof args.text === "string" ? args.text.trim() : "";
 			if (!text) {
-				rec.agent.respondHostTool(call.id, `usage: ${RECORD_DECISION_TOOL}({ text: string })`, true);
+				rec.agent.respondHostTool(call.id, `usage: ${RECORD_DECISION_TOOL}({ text: string, source?: "model-delta", evidence?: string[] })`, true);
 				return;
 			}
+			const isModelDelta = args.source === "model-delta";
+			const evidence = Array.isArray(args.evidence) ? args.evidence.filter((e): e is string => typeof e === "string" && e.trim().length > 0) : undefined;
 			const featureId = rec.dto.featureId;
 			if (!featureId) {
 				rec.agent.respondHostTool(call.id, "no feature is attached to this agent, so the decision was not recorded", true);
 				return;
 			}
+			if (isModelDelta) {
+				// Live blast-radius since fork (committed AND working-tree) — the SAME computation
+				// finalizeRun uses for the persisted receipt's filesTouched, so mid-run validation and a
+				// completed receipt agree on what counts as "this run touched".
+				const filesTouched = await this.runFilesTouched(rec);
+				const check = validateModelDelta(text, evidence, filesTouched);
+				if (!check.ok) {
+					rec.agent.respondHostTool(call.id, `model-delta rejected (${check.rule}): ${check.message}`, true);
+					return;
+				}
+			}
 			const decision: FeatureDecision = {
 				id: randomUUID(),
 				text,
-				source: "agent",
+				source: isModelDelta ? "model-delta" : "agent",
 				createdAt: Date.now(),
 				sourceRef: { agentId: rec.dto.id, runId: rec.run?.snapshot().runId },
+				// Persist evidence NORMALIZED (code-review finding 4): validateModelDelta normalizes only
+				// for its comparison, but every downstream consumer (surprise-tap fog keys, evidence-link
+				// jump, PR-body anchors) keys on the STORED string — a raw "./src/x.ts" would silently
+				// no-op them all.
+				...(isModelDelta ? { evidence: (evidence ?? []).map((e) => e.trim().replace(/^\.\//, "").replace(/^\/+/, "")) } : {}),
 			};
 			// Atomic, adopt-aware append (resolves plan-derived features + can't clobber a concurrent capture).
 			const outcome = await this.recordAgentDecision(featureId, decision, rec.dto.repo);
@@ -8334,9 +8689,9 @@ export class SquadManager extends EventEmitter {
 			// Durably written. Respond success FIRST so a throw in the cosmetic post-steps below can never
 			// flip an already-persisted decision to a "failed" reply (which would make the agent retry).
 			this.learningMetrics.record("decision-captured", 1, { flag: "decision-capture", variant: learningFlags(rec.dto.id).decisionCapture });
-			rec.agent.respondHostTool(call.id, "decision recorded — future agents on this work will inherit it");
+			rec.agent.respondHostTool(call.id, isModelDelta ? "model-delta recorded — future agents on this work will inherit it" : "decision recorded — future agents on this work will inherit it");
 			try {
-				this.append(rec, "system", `📝 decision recorded: ${truncateLabel(text, 200)}`, { status: "ok", tool: { callId: call.id, name: RECORD_DECISION_TOOL, args: call.arguments, argsText: safeJson(call.arguments) } });
+				this.append(rec, "system", `📝 ${isModelDelta ? "model-delta" : "decision"} recorded: ${truncateLabel(text, 200)}`, { status: "ok", tool: { callId: call.id, name: RECORD_DECISION_TOOL, args: call.arguments, argsText: safeJson(call.arguments) } });
 				void this.recordAudit(agentActor(rec.dto.id), "decision.recorded", featureId, "ok", truncateLabel(text, 120));
 			} catch (postErr) {
 				this.log("warn", `record-decision post-step failed for ${rec.dto.name} (decision was saved): ${String(postErr)}`);
@@ -8348,6 +8703,79 @@ export class SquadManager extends EventEmitter {
 				/* respond best-effort */
 			}
 			this.log("warn", `record-decision failed for ${rec.dto.name}: ${String(err)}`);
+		}
+	}
+
+	/**
+	 * squad_record_symptom (comprehension lane concern 05 "teaching producers"): record a symptom card
+	 * when THIS RUN fixed a defect, phrased as the operator would observe it. Producer-first, like
+	 * `squad_record_decision` — non-blocking, responds immediately, never setPending. The mechanical
+	 * floor (`validateSymptomText`, `validateWhereToLookCount`, `classifyWhereToLookEntry` in
+	 * symptoms.ts) rejects a too-short symptom, a wrong-count `whereToLook`, or any entry that isn't
+	 * either an existing repo-relative path (not a bare top-level directory) or a `glance …` command —
+	 * with a tool error naming the violated rule, before anything is written.
+	 */
+	private async handleRecordSymptomTool(rec: AgentRecord, call: { id: string; arguments: unknown }): Promise<void> {
+		try {
+			const args = call.arguments && typeof call.arguments === "object" ? (call.arguments as Record<string, unknown>) : {};
+			const symptom = typeof args.symptom === "string" ? args.symptom.trim() : "";
+			const whereToLook = Array.isArray(args.whereToLook) ? args.whereToLook.filter((e): e is string => typeof e === "string") : [];
+			if (!symptom || whereToLook.length === 0) {
+				rec.agent.respondHostTool(call.id, `usage: ${RECORD_SYMPTOM_TOOL}({ symptom: string, whereToLook: string[] })`, true);
+				return;
+			}
+			const textCheck = validateSymptomText(symptom);
+			if (!textCheck.ok) {
+				rec.agent.respondHostTool(call.id, `symptom rejected (${textCheck.rule}): ${textCheck.message}`, true);
+				return;
+			}
+			const countCheck = validateWhereToLookCount(whereToLook);
+			if (!countCheck.ok) {
+				rec.agent.respondHostTool(call.id, `symptom rejected (${countCheck.rule}): ${countCheck.message}`, true);
+				return;
+			}
+			// Stat against the unit's own WORKTREE when it has one (cross-batch audit): a fixing unit's
+			// whereToLook pointer often names a file the fix itself just added, which exists in the
+			// worktree but not yet in the shared checkout — rejecting it at exactly the record-at-fix-time
+			// moment the tool targets would be a false floor.
+			const statRoot = rec.dto.worktree || rec.dto.repo;
+			for (const entry of whereToLook) {
+				const kind = await statWhereToLookEntry(statRoot, entry);
+				const entryCheck = classifyWhereToLookEntry(entry, kind);
+				if (!entryCheck.ok) {
+					rec.agent.respondHostTool(call.id, `symptom rejected (${entryCheck.rule}): ${entryCheck.message}`, true);
+					return;
+				}
+			}
+			const now = Date.now();
+			const entry: SymptomEntry = {
+				id: symptomId(symptom, rec.dto.id, new Date(now)),
+				symptom,
+				whereToLook,
+				repo: rec.dto.repo,
+				fixedBy: { agentId: rec.dto.id, runId: rec.run?.snapshot().runId },
+				landedAt: now,
+			};
+			const saved = await saveSymptom(this.stateDir, entry);
+			if (!saved) {
+				rec.agent.respondHostTool(call.id, "failed to record symptom — the daemon's disk write did not succeed", true);
+				return;
+			}
+			this.learningMetrics.record("symptom-captured", 1, { flag: "decision-capture", variant: learningFlags(rec.dto.id).decisionCapture });
+			rec.agent.respondHostTool(call.id, "symptom recorded");
+			try {
+				this.append(rec, "system", `📝 symptom recorded: ${truncateLabel(symptom, 200)}`, { status: "ok", tool: { callId: call.id, name: RECORD_SYMPTOM_TOOL, args: call.arguments, argsText: safeJson(call.arguments) } });
+				void this.recordAudit(agentActor(rec.dto.id), "symptom.recorded", entry.id, "ok", truncateLabel(symptom, 120));
+			} catch (postErr) {
+				this.log("warn", `record-symptom post-step failed for ${rec.dto.name} (symptom was saved): ${String(postErr)}`);
+			}
+		} catch (err) {
+			try {
+				rec.agent.respondHostTool(call.id, `failed to record symptom: ${String(err)}`, true);
+			} catch {
+				/* respond best-effort */
+			}
+			this.log("warn", `record-symptom failed for ${rec.dto.name}: ${String(err)}`);
 		}
 	}
 

@@ -14,6 +14,7 @@ import {
   RotateCcw,
   Layers,
   ListChecks,
+  CloudFog,
   Menu,
   Mic,
   Plus,
@@ -103,6 +104,8 @@ export function railFooterContext(
         : 'All clear — nothing needs you';
     case 'omp-graph':
       return 'Fleet activity, cost, and lineage over time';
+    case 'fog':
+      return 'Comprehension debt — what nobody has looked at yet';
     case 'capabilities':
       return `${ctx.packCount} trusted pack${ctx.packCount === 1 ? '' : 's'} · ${ctx.catalogCount} in the catalog`;
     case 'org':
@@ -118,16 +121,20 @@ export function railFooterContext(
 }
 
 /**
- * The four-item shell (GRAPH-FOLD.md §6e): Fleet · Tasks · Graph · Capabilities. The old
- * Attention/Plan/Observe/Network sections are gone — the three attention views dissolved into
- * Fleet (§6f), the five Observe pages folded into the Graph/header/inspector, Federation parked
- * in Org settings, and the Knowledge base became the ⌘K palette's fabric search. Four items need
- * no section headers; Org/settings moved to the gear at the bottom of the rail.
+ * The nav rail: Fleet · Tasks · Graph · Capabilities (GRAPH-FOLD.md §6e's four-item shell), plus
+ * Fog (comprehension batch-3 review — mounts HeatTree's fog overlay, which had no render site
+ * since GRAPH-FOLD retired the old Heat page; see FogView.tsx's own doc for why this is a new view,
+ * not a resurrection of the retired one). The old Attention/Plan/Observe/Network sections are gone
+ * — the three attention views dissolved into Fleet (§6f), the five Observe pages folded into the
+ * Graph/header/inspector, Federation parked in Org settings, and the Knowledge base became the ⌘K
+ * palette's fabric search. Five items need no section headers; Org/settings moved to the gear at
+ * the bottom of the rail.
  */
 export const NAV_ITEMS: { view: AppView; label: string; icon: LucideIcon; title: string }[] = [
   { view: 'fleet', label: 'Fleet', icon: Layers, title: 'Fleet — roster, transcript, land rail' },
   { view: 'tasks', label: 'Tasks', icon: Inbox, title: 'Tasks' },
   { view: 'omp-graph', label: 'Graph', icon: Waypoints, title: 'Graph — the living temporal dashboard' },
+  { view: 'fog', label: 'Fog', icon: CloudFog, title: 'Fog — comprehension debt: what nobody has looked at yet' },
   { view: 'capabilities', label: 'Capabilities', icon: Boxes, title: 'Capabilities' },
 ];
 
@@ -410,6 +417,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
     ? `${filteredTasks.length} tasks${selectedTask ? ` · ${taskRef(selectedTask) ?? selectedTask.title}` : ''}`
     : view === 'capabilities' ? `${capabilities.packs.length} packs`
     : view === 'omp-graph' ? 'Graph'
+    : view === 'fog' ? 'Fog'
     : view === 'org' ? 'Settings'
     : '';
 

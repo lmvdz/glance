@@ -4,7 +4,7 @@
  * ⌘K used to be a single-purpose binding: jump to the Tasks search box (PR #124). The fold
  * upgrades it into a real command palette, open from EVERY view:
  *
- *   · nav jump — the 4-item shell (Fleet · Tasks · Graph · Capabilities) + Org settings
+ *   · nav jump — the rail's nav items (Fleet · Tasks · Graph · Fog · Capabilities) + Org settings
  *   · "Search tasks…" — the old direct binding, demoted to a row (it still jump-focuses the
  *     Tasks search box; the hotkey itself now always opens this palette)
  *   · Fabric/Knowledge search — the dead Knowledge-base page's GET /api/fabric/search, debounced,
@@ -18,9 +18,10 @@
  * this component owns only the fetch, the keyboard wiring, and the chrome.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Boxes, Building2, CornerDownLeft, Inbox, Layers, Library, Search, Waypoints, type LucideIcon } from 'lucide-react';
+import { Boxes, Building2, CloudFog, CornerDownLeft, Inbox, Layers, Library, Search, Waypoints, type LucideIcon } from 'lucide-react';
 import { useTaskContext, type AppView } from '../context/TaskContext';
 import { apiJson } from '../lib/api';
+import { reportAnswerRead } from '../lib/attention';
 import { jumpToTaskSearch } from '../lib/jump';
 import { buildRows, moveSelection, type FabricSearchResult, type PaletteRow } from '../lib/commandPalette';
 import { Kbd } from './kit/Kbd';
@@ -31,6 +32,7 @@ const NAV_ICONS: Record<string, LucideIcon> = {
   'nav-fleet': Layers,
   'nav-tasks': Inbox,
   'nav-graph': Waypoints,
+  'nav-fog': CloudFog,
   'nav-capabilities': Boxes,
   'nav-org': Building2,
   'action-search-tasks': Search,
@@ -115,7 +117,15 @@ export const CommandPalette: React.FC = () => {
       }
       // Fabric rows are knowledge-base facts, not routes — the KB's home after the fold is the
       // Graph, so open it; the fact's title/snippet were already read in the palette itself.
-      if (row.kind === 'fabric') setView('omp-graph');
+      if (row.kind === 'fabric') {
+        // Comprehension concern 10: selecting an answer row IS the explicit "displayed to the
+        // operator" moment `reportAnswerRead` exists for (DESIGN.md's "client-side explicit acks
+        // only" rule) — a client-side ack fired once, here, not a GET/poll hook. `row.repo`/`row.ref`
+        // are always present for an answer fact (`FabricAnswerFact.source.repo`/`.id`); the guard is
+        // defensive, not expected to trip.
+        if (row.type === 'answer' && row.repo && row.ref) reportAnswerRead(row.repo, row.ref);
+        setView('omp-graph');
+      }
     },
     [closeCommandPalette, setView, view],
   );

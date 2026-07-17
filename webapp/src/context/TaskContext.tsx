@@ -15,15 +15,19 @@ export interface ToastInfo {
 }
 
 /**
- * The four-item shell (GRAPH-FOLD.md §6e) + the views reached BY ROUTING INTO them rather than
+ * The nav shell (GRAPH-FOLD.md §6e: Fleet · Tasks · Graph · Capabilities, joined by comprehension
+ * batch-3's `fog` — see its own doc below) + the views reached BY ROUTING INTO them rather than
  * from the top-level rail: `org` (the AccountMenu gear), `intervene` (a "Needs you" tap),
- * `review` (a design-review deep link). The eight retired keys (attention/active/cockpit/
- * automation/fleet-health/heat/activity-heatmap/scoreboard/topology/federation/knowledge) are
- * GONE from this union on purpose — any stale value (e.g. a pre-fold localStorage `view`) is
+ * `review` (a design-review deep link). The eight GRAPH-FOLD-retired keys (attention/active/
+ * cockpit/automation/fleet-health/heat/activity-heatmap/scoreboard/topology/federation/knowledge)
+ * are GONE from this union on purpose — any stale value (e.g. a pre-fold localStorage `view`) is
  * coerced through `lib/viewAlias.ts` BEFORE it ever becomes state, so nothing outside this file
- * can construct an AppView the render switch doesn't handle.
+ * can construct an AppView the render switch doesn't handle. NOTE: GRAPH-FOLD's own alias map
+ * still sends the dead `heat` key to `omp-graph` (unchanged, per the comprehension-fog review
+ * verdict) — `fog` is a genuinely NEW view, not a resurrection of the retired Heat page; it has no
+ * entry in `VIEW_ALIAS_MAP`.
  */
-export type AppView = 'fleet' | 'tasks' | 'omp-graph' | 'capabilities' | 'org' | 'intervene' | 'review';
+export type AppView = 'fleet' | 'tasks' | 'omp-graph' | 'fog' | 'capabilities' | 'org' | 'intervene' | 'review';
 export type TaskFilter = 'open' | 'active' | 'done' | 'all';
 
 /** Read the raw persisted view key (pre-coercion) — a plain function so both the `view` and

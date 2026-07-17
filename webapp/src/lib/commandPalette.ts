@@ -41,19 +41,27 @@ export interface PaletteActionRow extends PaletteRowBase {
 /** One ranked GET /api/fabric/search hit, shaped for the row list. */
 export interface PaletteFabricRow extends PaletteRowBase {
   kind: 'fabric';
+  /** Raw fact type (comprehension concern 10) — kept alongside `typeLabel` (its human rendering) so
+   *  selection can branch on it, e.g. an `'answer'` row emits `reportAnswerRead` on select. */
+  type: string;
   typeLabel: string;
   snippet: string;
   repo?: string;
+  /** Backend `KbDoc.ref` (comprehension concern 10) — for an `'answer'` row this is the answer id
+   *  `reportAnswerRead` needs; other row types carry their own ref but nothing here reads it yet. */
+  ref?: string;
 }
 
 export type PaletteRow = PaletteNavRow | PaletteActionRow | PaletteFabricRow;
 
-/** The nav-jump command set — the 4-item shell + Org (reachable from the palette even though it's
- *  gear-only in the rail now, per GRAPH-FOLD.md §6e). Order mirrors the rail. */
+/** The nav-jump command set — the rail's nav items (Fleet · Tasks · Graph · Fog · Capabilities) +
+ *  Org (reachable from the palette even though it's gear-only in the rail now, per GRAPH-FOLD.md
+ *  §6e). Order mirrors the rail. */
 export const NAV_ROWS: readonly PaletteNavRow[] = [
   { kind: 'nav', id: 'nav-fleet', label: 'Fleet', view: 'fleet' },
   { kind: 'nav', id: 'nav-tasks', label: 'Tasks', view: 'tasks' },
   { kind: 'nav', id: 'nav-graph', label: 'Graph', view: 'omp-graph' },
+  { kind: 'nav', id: 'nav-fog', label: 'Fog', view: 'fog' },
   { kind: 'nav', id: 'nav-capabilities', label: 'Capabilities', view: 'capabilities' },
   { kind: 'nav', id: 'nav-org', label: 'Organization settings', view: 'org' },
 ];
@@ -73,6 +81,7 @@ export interface FabricSearchResult {
   snippet: string;
   score: number;
   repo?: string;
+  ref?: string;
 }
 
 const TYPE_LABELS: Record<string, string> = {
@@ -82,6 +91,9 @@ const TYPE_LABELS: Record<string, string> = {
   agent: 'Agent',
   scout: 'Latent work',
   lease: 'Being edited',
+  symptom: 'Known symptom',
+  episode: 'Weekly episode',
+  answer: 'Answered question',
 };
 
 /** A row matches a query if the query is blank, or a case-insensitive substring of the label. */
@@ -104,9 +116,11 @@ export function fabricRows(results: readonly FabricSearchResult[] | null | undef
     kind: 'fabric',
     id: `fabric:${r.type}:${r.id}`,
     label: r.title,
+    type: r.type,
     typeLabel: TYPE_LABELS[r.type] ?? r.type,
     snippet: r.snippet,
     repo: r.repo,
+    ref: r.ref,
   }));
 }
 

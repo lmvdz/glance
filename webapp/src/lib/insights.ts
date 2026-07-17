@@ -78,13 +78,17 @@ export interface HeatNode {
   depth?: number;
   /** per-day touch counts, aligned to `days`. */
   heat: number[];
+  /** raw (unnormalized) repo path the file was touched in — same representation GET /api/fog's
+   *  entries expose, so the fog overlay (comprehension concern 04) can join heat nodes back to
+   *  fog entries without re-deriving its own repo convention. Absent on older/mocked payloads. */
+  repo?: string;
 }
 
 /** Shape of GET /api/heat (subset). */
 export interface HeatPayload {
   days: string[];
   tree: HeatNode[];
-  hotAreas?: { path: string; heat: number }[];
+  hotAreas?: { path: string; heat: number; repo?: string }[];
   insights?: string[];
 }
 

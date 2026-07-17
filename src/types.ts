@@ -467,12 +467,20 @@ export interface VerifiedState {
 export interface FeatureDecision {
 	id: string;
 	text: string;
-	source?: "plan" | "human" | "agent";
+	/** "model-delta" (comprehension lane, concern 05): a mental-model delta — what changed about how
+	 *  the system works, before vs after — recorded by the implementing unit mid-run via
+	 *  `squad_record_decision`. Requires `evidence` (validated at record time against the run's
+	 *  `filesTouched`); see `validateModelDelta` in decision-evidence.ts. */
+	source?: "plan" | "human" | "agent" | "model-delta";
 	createdAt?: number;
-	/** Provenance backlink for agent-CAPTURED decisions (source:"agent") — the run that recorded it.
-	 *  Populated only on the agent path; never fabricated for plan/human sources (mirrors the
-	 *  "never-faked timestamp" discipline in fabric-search.ts). */
+	/** Provenance backlink for agent-CAPTURED decisions (source:"agent"|"model-delta") — the run that
+	 *  recorded it. Populated only on the agent/model-delta path; never fabricated for plan/human
+	 *  sources (mirrors the "never-faked timestamp" discipline in fabric-search.ts). */
 	sourceRef?: { agentId?: string; runId?: string };
+	/** Evidence anchors for a `source:"model-delta"` decision: repo-relative `file` or `file:start-end`
+	 *  entries, each required to name a file the recording run actually touched (the anti-slop floor —
+	 *  DESIGN.md "Delta quality floor"). Absent for every other source. */
+	evidence?: string[];
 }
 
 export interface FeatureRelationship {
@@ -1379,7 +1387,7 @@ export type SquadEvent =
 // others. "land" (research-sirvir/01-recording-unlock, part 2): a retryable/environmental land refusal
 // (e.g. a dirty main checkout) fires a warn-level event so it surfaces loudly instead of accumulating
 // silently in land-failures.json — no cadence/flag of its own.
-export type AutomationLoop = "scout" | "observer" | "opportunity" | "dispatch" | "scope" | "plan-sync" | "resident-planner" | "sentinel" | "orphan-audit" | "land";
+export type AutomationLoop = "scout" | "observer" | "opportunity" | "dispatch" | "scope" | "plan-sync" | "resident-planner" | "sentinel" | "orphan-audit" | "land" | "episode";
 
 /**
  * Structured reason an automation loop intentionally skipped a unit without doing work.

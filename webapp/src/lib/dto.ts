@@ -133,8 +133,16 @@ export interface ValidationRecordDTO {
 export interface FeatureDecisionDTO {
   id: string;
   text: string;
-  source?: "plan" | "human" | "agent";
+  source?: "plan" | "human" | "agent" | "model-delta";
   createdAt?: number;
+  /** Evidence anchors for a `source:"model-delta"` decision (repo-relative `file` or `file:start-end`). */
+  evidence?: string[];
+  /** Provenance backlink for agent-captured decisions (mirrors backend `FeatureDecision.sourceRef`,
+   *  already on the wire — GET /api/features serializes the full backend object, this DTO just hadn't
+   *  declared the field yet). IntervenceView (comprehension concern 08) filters a unit's delta bullets
+   *  to `sourceRef?.agentId === thisAgent.id` — two units can share one feature, so a decision another
+   *  unit recorded must never render under this unit's diff. */
+  sourceRef?: { agentId?: string; runId?: string };
 }
 
 export interface FeatureRelationshipDTO {

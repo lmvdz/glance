@@ -129,6 +129,10 @@ export type MetricName =
 	| "model-outcome-blocked"
 	| "veto-reprompt"
 	| "decision-captured"
+	/** `squad_record_symptom` wrote a durable SymptomEntry (comprehension lane concern 05). Kept
+	 *  separate from "decision-captured" — same flag, different producer, and a blended count would
+	 *  hide whether the fleet is actually using both teaching-content tools. */
+	| "symptom-captured"
 	| "model-route-decision"
 	/** Lane classification landed on a spawn (adw-factory-borrows concern 09's shadow-exit surface) —
 	 *  tags `{lane, source}`. Value is always 1 (a count metric); the scoreboard sums by `lane`. */

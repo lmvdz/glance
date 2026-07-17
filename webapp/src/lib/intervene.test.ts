@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import type { AgentDTO } from './dto';
+import type { AgentDTO, FeatureDecisionDTO } from './dto';
 import {
   whyStopped,
   intervenePrimaryAction,
@@ -8,6 +8,10 @@ import {
   splitDiffLines,
   isCommentableLine,
   diffLineStats,
+  deltaBullets,
+  parseEvidenceAnchor,
+  firstEvidenceFile,
+  MAX_DELTA_BULLETS,
 } from './intervene';
 
 // Minimal agent stub — only the fields the pure derivations read.
@@ -170,5 +174,76 @@ describe('splitDiffLines / diffLineStats', () => {
     expect(isCommentableLine('ctx')).toBe(false);
     expect(isCommentableLine('hunk')).toBe(false);
     expect(isCommentableLine('meta')).toBe(false);
+  });
+});
+
+// =================================================================================================
+// deltaBullets / parseEvidenceAnchor / firstEvidenceFile (comprehension concern 08)
+// =================================================================================================
+
+function decision(over: Partial<FeatureDecisionDTO>): FeatureDecisionDTO {
+  return { id: 'd1', text: 'text', ...over };
+}
+
+describe('deltaBullets', () => {
+  it('returns [] when there are no decisions at all', () => {
+    expect(deltaBullets(undefined, 'agent-1')).toEqual([]);
+    expect(deltaBullets([], 'agent-1')).toEqual([]);
+  });
+
+  it('returns [] when agentId is absent (no bound unit to filter by)', () => {
+    const decisions = [decision({ source: 'model-delta', sourceRef: { agentId: 'agent-1' }, evidence: ['a.ts'] })];
+    expect(deltaBullets(decisions, undefined)).toEqual([]);
+  });
+
+  it('filters to source:"model-delta" AND sourceRef.agentId === agentId — other sources and other units are excluded', () => {
+    const decisions = [
+      decision({ id: 'plan-1', source: 'plan', text: 'a plan decision' }),
+      decision({ id: 'human-1', source: 'human', text: 'a human decision' }),
+      decision({ id: 'other-unit', source: 'model-delta', sourceRef: { agentId: 'agent-OTHER' }, evidence: ['x.ts'], text: 'not mine' }),
+      decision({ id: 'mine-1', source: 'model-delta', sourceRef: { agentId: 'agent-1' }, evidence: ['y.ts'], text: 'mine' }),
+    ];
+    const bullets = deltaBullets(decisions, 'agent-1');
+    expect(bullets).toHaveLength(1);
+    expect(bullets[0]).toEqual({ id: 'mine-1', text: 'mine', evidence: ['y.ts'] });
+  });
+
+  it('caps at MAX_DELTA_BULLETS, newest (createdAt) first', () => {
+    expect(MAX_DELTA_BULLETS).toBe(3);
+    const decisions = Array.from({ length: 5 }, (_, i) =>
+      decision({ id: `d${i}`, source: 'model-delta', sourceRef: { agentId: 'agent-1' }, evidence: [`f${i}.ts`], createdAt: i, text: `delta ${i}` }),
+    );
+    const bullets = deltaBullets(decisions, 'agent-1');
+    expect(bullets).toHaveLength(3);
+    expect(bullets.map((b) => b.id)).toEqual(['d4', 'd3', 'd2']); // newest first
+  });
+
+  it('defaults evidence to [] when absent, rather than throwing', () => {
+    const decisions = [decision({ id: 'no-ev', source: 'model-delta', sourceRef: { agentId: 'agent-1' } })];
+    expect(deltaBullets(decisions, 'agent-1')[0].evidence).toEqual([]);
+  });
+});
+
+describe('parseEvidenceAnchor', () => {
+  it('parses a bare file path with no line range', () => {
+    expect(parseEvidenceAnchor('src/a.ts')).toEqual({ file: 'src/a.ts' });
+  });
+
+  it('parses a single-line anchor (lineEnd === lineStart)', () => {
+    expect(parseEvidenceAnchor('src/a.ts:42')).toEqual({ file: 'src/a.ts', lineStart: 42, lineEnd: 42 });
+  });
+
+  it('parses a line-range anchor', () => {
+    expect(parseEvidenceAnchor('src/a.ts:10-20')).toEqual({ file: 'src/a.ts', lineStart: 10, lineEnd: 20 });
+  });
+});
+
+describe('firstEvidenceFile', () => {
+  it('returns the first evidence anchor\'s file, ignoring any line range', () => {
+    expect(firstEvidenceFile(['src/a.ts:10-20', 'src/b.ts'])).toBe('src/a.ts');
+  });
+
+  it('returns undefined for an empty evidence array', () => {
+    expect(firstEvidenceFile([])).toBeUndefined();
   });
 });

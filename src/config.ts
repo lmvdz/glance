@@ -142,6 +142,26 @@ export function __resetConfigWarnings(): void {
 }
 
 /**
+ * Read a "0"/"1" boolean env var with a legacy-name fallback (batch-3 review, comprehension
+ * concern 09 dead-alias fix). `.env.example` had long documented BOTH a current and a legacy name
+ * for a flag (`GLANCE_ATTENTION` / `OMP_SQUAD_ATTENTION`, `GLANCE_EPISODE` / `OMP_SQUAD_EPISODE`),
+ * but the two readers each only ever consulted ONE of the two literal names — the documented
+ * "legacy alias" silently did nothing, in both directions (attention.ts read only the new name and
+ * ignored the legacy one; squad-manager.ts's episode gate read only the OLD name, so the
+ * documented-as-primary `GLANCE_EPISODE` was the dead one).
+ *
+ * Precedence is strict, never a merge: `primary` decides whenever it's set (non-blank), full stop
+ * — `legacy` is consulted ONLY when `primary` is entirely absent/blank. A blank `primary` next to a
+ * set `legacy` falls through to `legacy`, exactly like `envBool` treats a blank value as "not
+ * configured" for a single name.
+ */
+export function envBoolAliased(primary: string, legacy: string, fallback: boolean): boolean {
+	const primaryRaw = process.env[primary]
+	if (primaryRaw !== undefined && primaryRaw.trim() !== "") return envBool(primary, fallback)
+	return envBool(legacy, fallback)
+}
+
+/**
  * Race-once at workflow catastrophe (adw-factory-borrows concern 07): default OFF. Flipping this on
  * only ARMS the mechanism — an individual unit still only races when its resolved lane's
  * `LANE_POLICY[lane].race === 1` (today: hotfix only, DESIGN.md). Two gates, not one, so enabling the

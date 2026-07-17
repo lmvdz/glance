@@ -464,6 +464,78 @@ test("prReconcileTick: a landReady agent with no ledger entry gets ensurePr retr
 	expect(createCallsAfterSecond).toBe(1);
 });
 
+// ── PR-body wiring (comprehension lane concern 06) ───────────────────────────────────────────────
+
+test("push-retry renders the unit's recorded model-delta + symptom into the created PR's body, and persists featureId onto the ledger", async () => {
+	const stateDir = await tmpDir("reconcile-push-body-state-");
+	const { repo } = await convergedRepo("reconcile-push-body-");
+	const wt = await branchWorktree(repo, "squad/a6", { "feature.txt": "new\n" });
+	const mgr = new TestManager({ stateDir });
+
+	const feature = mgr.createFeature({ title: "teach me", repo });
+	const outcome = await mgr.recordAgentDecision(
+		feature.id,
+		{
+			id: "d1",
+			text: "Dispatch used to serialize spawns; it now fans out concurrently.",
+			source: "model-delta",
+			evidence: ["src/dispatch.ts"],
+			createdAt: Date.now(),
+			// The tool path always stamps the recording run (concern 05); prBodyFor filters on it so a
+			// sibling unit's deltas can't render into this unit's PR (batch-2 review).
+			sourceRef: { agentId: "a6", runId: "run-a6" },
+		},
+		repo,
+	);
+	expect(outcome).toBe("recorded");
+
+	const { saveSymptom } = await import("../src/symptoms.ts");
+	const saved = await saveSymptom(stateDir, {
+		id: "sym-a6",
+		symptom: "daemon healthy but dispatch stalled",
+		whereToLook: ["src/dispatch.ts"],
+		repo,
+		fixedBy: { agentId: "a6", runId: "run-a6" },
+		landedAt: Date.now(),
+	});
+	expect(saved).toBe(true);
+
+	seedAgent(mgr, "a6", repo, wt, "squad/a6", { landReady: true });
+	mgr.agents.get("a6")!.dto.featureId = feature.id;
+
+	await mgr.tick();
+
+	const createCall = ghCalls.find((a) => a[0] === "pr" && a[1] === "create");
+	expect(createCall).toBeDefined();
+	const body = createCall![createCall!.indexOf("--body") + 1];
+	expect(body).toContain("<!-- omp-squad:model-delta:v1 -->");
+	expect(body).toContain("Dispatch used to serialize spawns; it now fans out concurrently.");
+	expect(body).toContain("evidence: `src/dispatch.ts`");
+	expect(body).toContain("<!-- omp-squad:symptom:v1 -->");
+	expect(body).toContain("Symptom: daemon healthy but dispatch stalled");
+	expect(body).toContain("Where to look: src/dispatch.ts");
+	expect(body).toContain("no observed test runs recorded"); // honest: receipts carry no command+outcome data
+
+	expect(getPendingPr(stateDir, "squad/a6")?.featureId).toBe(feature.id);
+});
+
+test("push-retry with no feature/symptom recorded still renders the declared 'no delta recorded' body (never blank, never blocked)", async () => {
+	const stateDir = await tmpDir("reconcile-push-nobody-state-");
+	const { repo } = await convergedRepo("reconcile-push-nobody-");
+	const wt = await branchWorktree(repo, "squad/a7", { "feature.txt": "new\n" });
+	const mgr = new TestManager({ stateDir });
+	seedAgent(mgr, "a7", repo, wt, "squad/a7", { landReady: true });
+
+	await mgr.tick();
+
+	const createCall = ghCalls.find((a) => a[0] === "pr" && a[1] === "create");
+	expect(createCall).toBeDefined();
+	const body = createCall![createCall!.indexOf("--body") + 1];
+	expect(body).toContain("no delta recorded");
+	expect(body).not.toContain("Symptom fixed");
+	expect(getPendingPr(stateDir, "squad/a7")?.featureId).toBeUndefined();
+});
+
 // ── ff-heal ─────────────────────────────────────────────────────────────────────────────────────
 
 test("prReconcileTick: ff-heals a repo strictly behind origin/<default> while checked out on it", async () => {

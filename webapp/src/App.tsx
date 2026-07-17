@@ -24,6 +24,7 @@ import { AssistantChat } from './components/AssistantChat';
 import { CapabilityPanel } from './components/CapabilityPanel';
 import { CommandPalette } from './components/CommandPalette';
 import { OmpGraphPanel } from './components/OmpGraphPanel';
+import { FogView } from './components/FogView';
 import { IntervenceView } from './components/IntervenceView';
 import { DesignReviewView } from './components/DesignReviewView';
 import { WorkspaceCockpit } from './components/WorkspaceCockpit';
@@ -77,20 +78,24 @@ const MainContent = () => {
   // the cwd project, so status==='file' never trips this; 'org' is the settings escape hatch.)
   if (status === 'authed' && !currentProject && view !== 'org') return <FirstRunSetup />;
 
-  {/* The four-item shell (GRAPH-FOLD.md §6e): Fleet · Tasks · Graph · Capabilities, plus the
-      routed-into views (org via the AccountMenu gear, intervene via a "Needs you" tap, review via
-      its deep-linkable hash). The eight dead keys aren't handled here because they can't ARRIVE
-      here: they're gone from the AppView union, and the one out-of-type-system source (the
-      localStorage-persisted view) is coerced through lib/viewAlias.ts's alias map before it ever
-      becomes state — automation/heat/… → omp-graph, fleet-health/attention/… → fleet,
-      federation → org, knowledge → omp-graph + the ⌘K palette auto-opening.
+  {/* The nav shell (GRAPH-FOLD.md §6e): Fleet · Tasks · Graph · Capabilities, joined by
+      comprehension batch-3's Fog, plus the routed-into views (org via the AccountMenu gear,
+      intervene via a "Needs you" tap, review via its deep-linkable hash). The eight GRAPH-FOLD-dead
+      keys aren't handled here because they can't ARRIVE here: they're gone from the AppView union,
+      and the one out-of-type-system source (the localStorage-persisted view) is coerced through
+      lib/viewAlias.ts's alias map before it ever becomes state — automation/heat/… → omp-graph,
+      fleet-health/attention/… → fleet, federation → org, knowledge → omp-graph + the ⌘K palette
+      auto-opening. `fog` is a genuinely new view (mounting HeatTree's fog mode, which had no
+      render site — see FogView.tsx's own doc), not a fold destination, so it has no alias entry.
 
-      PageContext (Feature 2 D1): fleet + graph publish their OWN context from inside
-      WorkspaceCockpit/OmpGraphPanel — the data a PageContext needs there (selected agent, roster
-      groups; graph window/mode/inspector) is local component state those two own, not anything
-      MainContent has. Tasks/capabilities/intervene/review/org all derive purely from TaskContext,
-      which MainContent already reads above, so they're wrapped right here. */}
+      PageContext (Feature 2 D1): fleet + graph + fog publish their OWN context from inside
+      WorkspaceCockpit/OmpGraphPanel/FogView — the data a PageContext needs there (selected agent,
+      roster groups; graph window/mode/inspector; fog's day window/file count) is local component
+      state those own, not anything MainContent has. Tasks/capabilities/intervene/review/org all
+      derive purely from TaskContext, which MainContent already reads above, so they're wrapped
+      right here. */}
   if (view === 'fleet') return <WorkspaceCockpit />;
+  if (view === 'fog') return <FogView />;
   if (view === 'intervene') {
     return (
       <PageContextScope value={intervenePageContext}>

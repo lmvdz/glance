@@ -116,6 +116,30 @@ export function buildDigest(input: DigestInput): string {
 	return `## 🎯 Goal\n${goalMd}\n\n## 🧭 Summary\n${summaryMd}\n\n## 📂 Files touched\n${filesMd}\n\n## ⏱ Where we left off\n${leftOff}\n${rewardMd}`;
 }
 
+const SUMMARY_HEADER = "## 🧭 Summary\n";
+const NOT_ENOUGH_PLACEHOLDER = "_(not enough captured to summarize)_";
+
+/**
+ * Pull just the Summary section back out of a digest markdown blob (comprehension lane concern 06,
+ * `squad-manager.ts`'s `prBodyFor`). This is the ONE section `buildDigest` derives via the extractive
+ * summarizer rather than quoting the transcript verbatim — Goal and Where-we-left-off above are direct
+ * transcript excerpts, which a PR body's optional Summary section must NEVER carry (the cross-repo
+ * side-effects note in plans/comprehension/06-pr-body-projection.md: "digestExcerpt must not include
+ * transcript text beyond the digest's existing extractive summary"). Returns "" (never throws) when
+ * the digest is empty, has no Summary section, or the summarizer had nothing to work with — an empty
+ * string is `buildPrBody`'s own signal to omit the Summary section entirely.
+ */
+export function digestSummaryExcerpt(digestMd: string): string {
+	if (!digestMd) return "";
+	const start = digestMd.indexOf(SUMMARY_HEADER);
+	if (start === -1) return "";
+	const from = start + SUMMARY_HEADER.length;
+	const nextHeader = digestMd.indexOf("\n## ", from);
+	const raw = nextHeader === -1 ? digestMd.slice(from) : digestMd.slice(from, nextHeader);
+	const trimmed = raw.trim();
+	return trimmed === NOT_ENOUGH_PLACEHOLDER ? "" : trimmed;
+}
+
 export function digestPath(stateDir: string, agentId: string): string {
 	return path.join(stateDir, "digests", `${agentId}.md`);
 }

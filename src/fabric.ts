@@ -1,12 +1,15 @@
 import * as path from "node:path";
 import { scopeFor } from "./agent-scope.ts";
+import { type Answer, possiblyStale } from "./answers.ts";
 import { getStorageBackend } from "./dal/storage.ts";
 import { readDigest } from "./digest.ts";
 import { readFailureAnnotations } from "./failure-memory.ts";
 import { leasesFor, type LeaseEntry } from "./leases.ts";
 import { normalizeRepoPath } from "./project-registry.ts";
 import { readReceipts } from "./receipts.ts";
+import { listSymptoms, type SymptomEntry } from "./symptoms.ts";
 import type { Actor, AgentDTO, IssueRef, PersistedFeature, RunReceipt } from "./types.ts";
+import { listEpisodes } from "./weekly-episode.ts";
 
 export interface FactSource {
 	agentId?: string;
@@ -60,7 +63,7 @@ export interface FabricDecisionFact {
 	source: FactSource;
 	featureTitle: string;
 	text: string;
-	decisionSource?: "plan" | "human" | "agent";
+	decisionSource?: "plan" | "human" | "agent" | "model-delta";
 	createdAt?: number;
 }
 
@@ -79,6 +82,68 @@ export interface FabricFailureFact {
 	at: number;
 }
 
+/**
+ * A recorded symptom card (comprehension lane concern 05's `squad_record_symptom`), projected into
+ * the fabric so it's searchable via `glance symptom`/⌘K and folded into the cold-start primer for
+ * free — a fresh unit inherits known failure modes without anyone re-teaching them. Repo-scoped like
+ * `FabricDecisionFact`/`FabricFailureFact` (a symptom outlives the worktree that recorded it, so
+ * there is no live `agentId` to scope through `scopeFor`).
+ */
+export interface FabricSymptomFact {
+	type: "symptom";
+	source: FactSource;
+	id: string;
+	symptom: string;
+	whereToLook: string[];
+	fixedBy: SymptomEntry["fixedBy"];
+	landedAt: number;
+}
+
+/**
+ * A generated weekly episode (comprehension lane concern 09), projected into the fabric so its
+ * excerpt is searchable via ⌘K/fabric like every other fact type. `excerpt` is the ONLY content
+ * here — DESIGN.md concern 3: "full markdown NEVER in the BM25 corpus" — so a search hit points the
+ * reader at `GET /api/episodes/:id`, never inlines the whole brief into a retrieval snippet.
+ */
+export interface FabricEpisodeFact {
+	type: "episode";
+	source: FactSource;
+	id: string;
+	excerpt: string;
+	windowStart: number;
+	windowEnd: number;
+}
+
+/** Cap applied by `answerExcerpt` (below) to `FabricAnswerFact.answerExcerpt`. */
+const MAX_ANSWER_EXCERPT = 500;
+
+/** Truncate an answer's untrusted markdown to a short excerpt — mirrors `FabricEpisodeFact`'s
+ *  "excerpt is the ONLY content" rule (DESIGN.md concern 3): the full markdown is never quoted
+ *  whole into a search snippet or a cold-start primer. */
+function answerExcerpt(markdown: string): string {
+	const body = markdown.trim();
+	return body.length > MAX_ANSWER_EXCERPT ? `${body.slice(0, MAX_ANSWER_EXCERPT - 1)}…` : body;
+}
+
+/**
+ * A recorded `glance ask` answer (comprehension lane concern 10), projected into the fabric so a
+ * prior question is searchable via ⌘K/fabric and folded into the cold-start primer for free — the
+ * operator's own questions become part of the knowledge base instead of evaporating with the
+ * answering unit's worktree. `answerExcerpt` is capped (see `answerExcerpt` above): the full
+ * markdown is untrusted agent output and is never quoted whole. `possiblyStale` (`answers.ts`)
+ * flags an answer whose cited files have since changed — see that function's doc for the
+ * conservative extraction/intersection it applies.
+ */
+export interface FabricAnswerFact {
+	type: "answer";
+	source: FactSource;
+	id: string;
+	question: string;
+	answerExcerpt: string;
+	answeredAt: number;
+	possiblyStale: boolean;
+}
+
 export interface FabricSnapshot {
 	actor: string;
 	generatedAt: number;
@@ -90,6 +155,9 @@ export interface FabricSnapshot {
 	leases: FabricLeaseFact[];
 	decisions: FabricDecisionFact[];
 	failures: FabricFailureFact[];
+	symptoms: FabricSymptomFact[];
+	episodes: FabricEpisodeFact[];
+	answers: FabricAnswerFact[];
 }
 
 interface ScoutSeenEntry {
@@ -113,6 +181,11 @@ export interface FabricDeps {
 	listIssues?: (repo: string) => Promise<IssueRef[] | null>;
 	/** Persisted features — their decisions become durable KB facts. */
 	features?: PersistedFeature[];
+	/** Every recorded `glance ask` answer this actor may read (comprehension concern 10) — the
+	 *  actor's FULL answer set, unfiltered by repo, exactly like `features` above; the `repoSet`
+	 *  guard in `buildFabricSnapshot` (verbatim from the decisions block) is the only scoping
+	 *  applied here, so an unrestricted caller and a single-repo caller both narrow correctly. */
+	answers?: Answer[];
 	now?: () => number;
 }
 
@@ -239,6 +312,22 @@ function repoAdmitter(repos: string[] | undefined): (repo: string | undefined) =
 	return (repo) => repo !== undefined && keys.has(normalizeRepoPath(repo));
 }
 
+/**
+ * The exact repo set an actor may see when no explicit `?repo=` narrows it — the SAME fallback
+ * chain `buildFabricSnapshot` computes below for its own unrestricted `repos` (scoped agents' own
+ * repos, falling back to the actor's persisted features when nothing is currently running).
+ * Exported standalone for routes that need the fail-closed repo check WITHOUT building a full
+ * snapshot (comprehension concern 01: `POST /api/attention` validates its `repo` field against
+ * this before writing anything). Fails closed by construction: no scoped agents and no features ⇒
+ * an empty set ⇒ every candidate repo is rejected, never "everything visible" by omission.
+ */
+export function actorVisibleRepoSet(actor: Actor, agents: AgentDTO[], features: PersistedFeature[] = []): Set<string> {
+	const scope = scopeFor(actor, agents);
+	const scopedAgents = agents.filter((a) => scope.has(a.id));
+	const repos = scopedAgents.length ? scopedAgents.map((a) => a.repo) : features.map((f) => f.repo);
+	return new Set(repos.map(normalizeRepoPath));
+}
+
 export async function buildFabricSnapshot(deps: FabricDeps): Promise<FabricSnapshot> {
 	const generatedAt = deps.now?.() ?? Date.now();
 	const scope = scopeFor(deps.actor, deps.agents);
@@ -361,6 +450,55 @@ export async function buildFabricSnapshot(deps: FabricDeps): Promise<FabricSnaps
 
 	const failures = loadFailureFacts(deps.stateDir, deps.repos);
 
+	// Symptom cards (comprehension concern 07): `listSymptoms` already filters by repo internally, so
+	// looping `repos` (the SAME computed set decisions/leases/scout use above) never asks it for a
+	// repo outside that set — but the `repoSet.has(normalizeRepoPath(...))` guard is copied VERBATIM
+	// from the decisions block above anyway. Belt-and-suspenders, on purpose: this file documents a
+	// leak incident (see `repoAdmitter`'s doc comment) where a per-call filter alone wasn't trusted to
+	// be the only line of defense for a fact type that gets pasted into a spawned unit's system prompt.
+	const symptoms: FabricSymptomFact[] = [];
+	for (const repo of repos) {
+		for (const s of await listSymptoms(deps.stateDir, { repo }).catch(() => [] as SymptomEntry[])) {
+			if (!repoSet.has(normalizeRepoPath(s.repo))) continue;
+			symptoms.push({ type: "symptom", source: { repo: s.repo }, id: s.id, symptom: s.symptom, whereToLook: s.whereToLook, fixedBy: s.fixedBy, landedAt: s.landedAt });
+		}
+	}
+
+	// Weekly episodes (comprehension concern 09): same belt-and-suspenders repo-set guard as
+	// symptoms/decisions above — `listEpisodes` already filters by its `repo` argument (a per-repo
+	// subtree on disk), but the `repoSet.has(...)` check is copied verbatim anyway, for the same
+	// leak-incident reason documented on `repoAdmitter` above.
+	const episodes: FabricEpisodeFact[] = [];
+	for (const repo of repos) {
+		for (const e of await listEpisodes(deps.stateDir, repo).catch(() => [])) {
+			if (!repoSet.has(normalizeRepoPath(e.repo))) continue;
+			episodes.push({ type: "episode", source: { repo: e.repo }, id: e.id, excerpt: e.excerpt, windowStart: e.windowStart, windowEnd: e.windowEnd });
+		}
+	}
+
+	// Ask→fabric answers (comprehension concern 10): same single-guard shape as the decisions block
+	// above, verbatim — `deps.answers` is the actor's FULL answer set, unfiltered by repo (mirroring
+	// `deps.features`), filtered here by the SAME computed `repoSet` every other fact type uses.
+	// Unanswered questions (`answeredAt` absent — the unit hasn't finished) have nothing to project:
+	// "not answered yet" is not a fact for the fabric. `possiblyStale` is computed against the SAME
+	// actor-scoped `allReceipts` digests/hot-areas already read above — it internally re-filters to
+	// the answer's own repo, so passing the wider actor-scoped list here (rather than the
+	// `deps.repos`-filtered `receipts`) can never under-count a repo `repoSet` still admits.
+	const answers: FabricAnswerFact[] = [];
+	for (const a of deps.answers ?? []) {
+		if (!a.answeredAt) continue;
+		if (!repoSet.has(normalizeRepoPath(a.repo))) continue;
+		answers.push({
+			type: "answer",
+			source: { repo: a.repo, agentId: a.id },
+			id: a.id,
+			question: a.question,
+			answerExcerpt: answerExcerpt(a.markdown),
+			answeredAt: a.answeredAt,
+			possiblyStale: possiblyStale(a, allReceipts),
+		});
+	}
+
 	return {
 		actor: deps.actor.id,
 		generatedAt,
@@ -372,5 +510,8 @@ export async function buildFabricSnapshot(deps: FabricDeps): Promise<FabricSnaps
 		leases,
 		decisions,
 		failures,
+		symptoms,
+		episodes,
+		answers,
 	};
 }

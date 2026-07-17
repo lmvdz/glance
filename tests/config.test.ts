@@ -1,10 +1,14 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test"
-import { __resetConfigWarnings, envBool, envInt, envNumber } from "../src/config"
+import { __resetConfigWarnings, envBool, envBoolAliased, envInt, envNumber } from "../src/config"
 
 const NAME = "OMP_SQUAD_TEST_CONFIG_KNOB"
+const PRIMARY = "GLANCE_TEST_CONFIG_KNOB"
+const LEGACY = "OMP_SQUAD_TEST_CONFIG_KNOB_LEGACY"
 
 afterEach(() => {
 	delete process.env[NAME]
+	delete process.env[PRIMARY]
+	delete process.env[LEGACY]
 	__resetConfigWarnings()
 })
 
@@ -176,5 +180,91 @@ describe("envBool", () => {
 		expect(envBool(NAME, false)).toBe(true)
 		process.env[NAME] = "0"
 		expect(envBool(NAME, false)).toBe(false)
+	})
+})
+
+// Batch-3 review: attention.ts read only GLANCE_ATTENTION (ignoring the documented legacy alias
+// OMP_SQUAD_ATTENTION) and squad-manager.ts's episode gate read only OMP_SQUAD_EPISODE (ignoring
+// the documented-as-primary GLANCE_EPISODE) — .env.example claimed both names worked everywhere,
+// but each site only ever consulted one literal name. envBoolAliased is the fix both sites route
+// through now; these tests exercise it directly with a generic primary/legacy pair (not the real
+// flag names, so a future rename of either real flag can't silently stop testing this contract).
+describe("envBoolAliased", () => {
+	it("primary set to '1' wins regardless of legacy", () => {
+		process.env[PRIMARY] = "1"
+		process.env[LEGACY] = "0"
+		expect(envBoolAliased(PRIMARY, LEGACY, true)).toBe(true)
+	})
+
+	it("primary set to '0' wins regardless of legacy", () => {
+		process.env[PRIMARY] = "0"
+		process.env[LEGACY] = "1"
+		expect(envBoolAliased(PRIMARY, LEGACY, true)).toBe(false)
+	})
+
+	it("primary unset falls back to legacy '1'", () => {
+		delete process.env[PRIMARY]
+		process.env[LEGACY] = "1"
+		expect(envBoolAliased(PRIMARY, LEGACY, false)).toBe(true)
+	})
+
+	it("primary unset falls back to legacy '0'", () => {
+		delete process.env[PRIMARY]
+		process.env[LEGACY] = "0"
+		expect(envBoolAliased(PRIMARY, LEGACY, true)).toBe(false)
+	})
+
+	it("primary blank/whitespace-only falls back to legacy, same as unset", () => {
+		process.env[PRIMARY] = "   "
+		process.env[LEGACY] = "1"
+		expect(envBoolAliased(PRIMARY, LEGACY, false)).toBe(true)
+	})
+
+	it("both unset returns the fallback", () => {
+		delete process.env[PRIMARY]
+		delete process.env[LEGACY]
+		expect(envBoolAliased(PRIMARY, LEGACY, true)).toBe(true)
+		expect(envBoolAliased(PRIMARY, LEGACY, false)).toBe(false)
+	})
+
+	it("both set — primary strictly wins, never merged/OR'd with legacy", () => {
+		process.env[PRIMARY] = "0"
+		process.env[LEGACY] = "1"
+		expect(envBoolAliased(PRIMARY, LEGACY, false)).toBe(false)
+	})
+
+	// The two real production call sites (src/attention.ts's kill switch, src/squad-manager.ts's
+	// weekly-episode gate) each pass a literal name pair — exercise both pairs by name directly so a
+	// typo in either call site (not just a defect in envBoolAliased itself) would fail a test.
+	it("the real GLANCE_ATTENTION/OMP_SQUAD_ATTENTION pair: legacy alone still disables", () => {
+		delete process.env.GLANCE_ATTENTION
+		process.env.OMP_SQUAD_ATTENTION = "0"
+		try {
+			expect(envBoolAliased("GLANCE_ATTENTION", "OMP_SQUAD_ATTENTION", true)).toBe(false)
+		} finally {
+			delete process.env.OMP_SQUAD_ATTENTION
+		}
+	})
+
+	it("the real GLANCE_EPISODE/OMP_SQUAD_EPISODE pair: the documented-primary name now actually works", () => {
+		process.env.GLANCE_EPISODE = "0"
+		delete process.env.OMP_SQUAD_EPISODE
+		try {
+			// Before the fix, squad-manager.ts read ONLY OMP_SQUAD_EPISODE — GLANCE_EPISODE="0" here
+			// would have silently been ignored and the loop would have started anyway (fallback: true).
+			expect(envBoolAliased("GLANCE_EPISODE", "OMP_SQUAD_EPISODE", true)).toBe(false)
+		} finally {
+			delete process.env.GLANCE_EPISODE
+		}
+	})
+
+	it("the real GLANCE_EPISODE/OMP_SQUAD_EPISODE pair: legacy alone still works when the new name is unset", () => {
+		delete process.env.GLANCE_EPISODE
+		process.env.OMP_SQUAD_EPISODE = "0"
+		try {
+			expect(envBoolAliased("GLANCE_EPISODE", "OMP_SQUAD_EPISODE", true)).toBe(false)
+		} finally {
+			delete process.env.OMP_SQUAD_EPISODE
+		}
 	})
 })

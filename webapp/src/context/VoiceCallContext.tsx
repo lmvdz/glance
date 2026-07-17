@@ -1,5 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
-import { fetchAgentTranscript, getVoiceConfig, mintVoiceToken } from '../lib/api';
+import { fetchAgentTranscript, fetchEpisode, fetchEpisodes, getVoiceConfig, mintVoiceToken } from '../lib/api';
 import createVoiceSession, { type VoiceSession, type VoiceSessionErrorInfo, type VoiceState } from '../lib/voice/voiceSession';
 import {
   errorToastMessage,
@@ -11,7 +11,7 @@ import {
   type CaptionState,
 } from '../lib/voice/callHud';
 import { useVoiceDispatcher } from '../hooks/useVoiceDispatcher';
-import { buildVoiceContextBrief, buildVoiceDebrief, composeVoiceRecap } from '../lib/voice/tools';
+import { buildVoiceContextBrief, buildVoiceDebrief, buildVoiceEpisodeBrief, composeVoiceRecap } from '../lib/voice/tools';
 import {
   appendSpokenSummary,
   appendSpokenUserMessage,
@@ -22,6 +22,7 @@ import {
   stampVoiceCallEnded,
   subscribeSessionStore,
 } from '../lib/chat/sessionStore';
+import { reportAttention } from '../lib/attention';
 import { useTaskContext } from './TaskContext';
 import { useAuth } from './AuthContext';
 import { usePageContext } from './PageContext';
@@ -533,55 +534,106 @@ export function VoiceCallProvider({ children }: { children: React.ReactNode }) {
     // roster (landed + cleaned up, evicted, removed) is not this lane's job — the daemon-side push
     // lane (DESIGN.md) is what tells the operator about that, independent of whether they ever
     // start another call on this session.
+    // The repo active when THIS call started — captured once, same discipline as
+    // `boundAgentIdAtConnect` above; a project switch mid-call is a different concern's problem and
+    // `runDebrief` only ever runs once, right after connect.
+    const repoAtConnect = currentProject?.id;
+
     const runDebrief = async () => {
       const sessions = loadPersistedSessionsOrNull() ?? [];
       const boundSession = sessions.find((s) => s.id === boundSessionId);
-      // Review fix: no cursor means this session has never completed a voice call — debriefing here
-      // would narrate up to 24h of possibly TYPED work the operator was present for ("while you
-      // were away" as the first-ever call's opening line is a lie). Stay silent; `endCall()` seeds
-      // the cursor, so the flagship flow (call 1 dispatches, hang up, work finishes, call 2
-      // debriefs it) works from the second call onward.
       const voiceDebrief = boundSession?.metadata?.voiceDebrief;
-      if (!voiceDebrief) return;
-      // Review fix (MINOR-6's roster doctrine): an EMPTY roster is a transient WS-flap/cold-load
-      // read, never evidence the tracked agents are gone — prune against it only when it has
-      // content. A pruned-in-error id would just 404 harmlessly below (allSettled), but an
-      // empty-roster prune would silently skip the whole debrief on exactly the push-tap →
-      // fresh-page-load → call-back flow this feature exists for.
-      const rosterIds = new Set(agentsRef.current.map((a) => a.id));
-      const inRoster = (id: string) => rosterIds.size === 0 || rosterIds.has(id);
-      const trackedIds = new Set<string>();
-      if (boundAgentIdAtConnect && inRoster(boundAgentIdAtConnect)) trackedIds.add(boundAgentIdAtConnect);
-      for (const unit of boundSession?.spawnedUnits ?? []) {
-        if (inRoster(unit.agentId)) trackedIds.add(unit.agentId);
+
+      // Episode-in-debrief (comprehension concern 11): the weekly state-of-the-codebase brief is a
+      // standalone artifact, never typed work the operator was live for — so unlike the transcript
+      // debrief below it is NOT gated on `voiceDebrief` already existing. An absent cursor reads as
+      // 0 ("never heard anything yet"), so the very first call on a session can still open with a
+      // ready episode. Best-effort: an episode fetch failure must never sink the transcript
+      // debrief below it.
+      let episodeResult: ReturnType<typeof buildVoiceEpisodeBrief> = null;
+      let episodeGeneratedAt: number | null = null;
+      if (repoAtConnect) {
+        try {
+          const metas = await fetchEpisodes(repoAtConnect);
+          if (cancelled) return;
+          const latest = metas[0];
+          const episodeCursorTs = voiceDebrief?.cursorTs ?? 0;
+          if (latest && latest.generatedAt > episodeCursorTs) {
+            const full = await fetchEpisode(repoAtConnect, latest.id);
+            if (cancelled) return;
+            episodeResult = buildVoiceEpisodeBrief({ episode: full, cursorTs: episodeCursorTs });
+            if (episodeResult) episodeGeneratedAt = latest.generatedAt;
+          }
+        } catch {
+          episodeResult = null; // network/parse failure — stay silent about the episode this call
+        }
       }
-      if (trackedIds.size === 0) return; // nothing tracked — silent, no fetch needed at all
 
-      // Promise.allSettled: a dead/evicted agent's 404 (or any other per-agent fetch failure) must
-      // not sink the whole debrief — the other tracked agents' transcripts still speak.
-      const fetched = await Promise.allSettled(
-        [...trackedIds].map(async (id) => ({ id, entries: await fetchAgentTranscript(id) })),
-      );
-      if (cancelled) return; // superseded (endCall/org-switch/unmount) while the fetch was in flight
+      // Transcript debrief ("while you were away"). Review fix: no cursor means this session has
+      // never completed a voice call — debriefing here would narrate up to 24h of possibly TYPED
+      // work the operator was present for ("while you were away" as the first-ever call's opening
+      // line is a lie). Stay silent; `endCall()` seeds the cursor (and so does a heard episode
+      // above — see this effect's queueInjection commit below), so the flagship flow (call 1
+      // dispatches, hang up, work finishes, call 2 debriefs it) works from the second call onward.
+      let debrief: ReturnType<typeof buildVoiceDebrief> = null;
+      if (voiceDebrief) {
+        // Review fix (MINOR-6's roster doctrine): an EMPTY roster is a transient WS-flap/cold-load
+        // read, never evidence the tracked agents are gone — prune against it only when it has
+        // content. A pruned-in-error id would just 404 harmlessly below (allSettled), but an
+        // empty-roster prune would silently skip the whole debrief on exactly the push-tap →
+        // fresh-page-load → call-back flow this feature exists for.
+        const rosterIds = new Set(agentsRef.current.map((a) => a.id));
+        const inRoster = (id: string) => rosterIds.size === 0 || rosterIds.has(id);
+        const trackedIds = new Set<string>();
+        if (boundAgentIdAtConnect && inRoster(boundAgentIdAtConnect)) trackedIds.add(boundAgentIdAtConnect);
+        for (const unit of boundSession?.spawnedUnits ?? []) {
+          if (inRoster(unit.agentId)) trackedIds.add(unit.agentId);
+        }
+        if (trackedIds.size > 0) {
+          // Promise.allSettled: a dead/evicted agent's 404 (or any other per-agent fetch failure)
+          // must not sink the whole debrief — the other tracked agents' transcripts still speak.
+          const fetched = await Promise.allSettled([...trackedIds].map(async (id) => ({ id, entries: await fetchAgentTranscript(id) })));
+          if (cancelled) return; // superseded (endCall/org-switch/unmount) while the fetch was in flight
 
-      const perAgent = fetched
-        .filter((r): r is PromiseFulfilledResult<{ id: string; entries: TranscriptEntry[] }> => r.status === 'fulfilled')
-        .map(({ value }) => ({
-          // agentsRef, not the effect closure's `agents`: the roster typically arrives AFTER this
-          // effect ran on a cold load — the stale closure made the debrief speak raw agent UUIDs.
-          label: agentsRef.current.find((a) => a.id === value.id)?.name ?? value.id,
-          entries: value.entries,
-        }));
-      const cursorTs = voiceDebrief.cursorTs;
-      const debrief = buildVoiceDebrief({ perAgent, cursorTs, nowTs: Date.now() });
-      if (!debrief) return; // no cursor + no backlog, or already fully caught up — stay silent
+          const perAgent = fetched
+            .filter((r): r is PromiseFulfilledResult<{ id: string; entries: TranscriptEntry[] }> => r.status === 'fulfilled')
+            .map(({ value }) => ({
+              // agentsRef, not the effect closure's `agents`: the roster typically arrives AFTER this
+              // effect ran on a cold load — the stale closure made the debrief speak raw agent UUIDs.
+              label: agentsRef.current.find((a) => a.id === value.id)?.name ?? value.id,
+              entries: value.entries,
+            }));
+          debrief = buildVoiceDebrief({ perAgent, cursorTs: voiceDebrief.cursorTs, nowTs: Date.now() });
+        }
+      }
+
+      if (!episodeResult && !debrief) return; // nothing to say at all — stay silent
+
+      // Episode summary FIRST (prepended), then the transcript backlog — DESIGN.md's own ordering
+      // for this concern.
+      const items = [...(episodeResult?.items ?? []), ...(debrief?.items ?? [])];
 
       // Two-phase commit (concern 03/04's primitive): the cursor only advances once THIS debrief's
       // own response completes uncancelled — a barge-in or an early hang-up leaves it untouched and
-      // the next call simply re-debriefs the same backlog. NEVER advance from effect cleanup (see
-      // below) — only from here, or from `onCompletionNarrated` above for a live narration.
-      session.queueInjection(debrief.items, ({ cancelled: turnCancelled }) => {
-        if (!turnCancelled) commitVoiceDebrief(boundSessionId, debrief.maxCompletionTs);
+      // the next call simply re-speaks BOTH the episode and the backlog. NEVER advance from effect
+      // cleanup (see below) — only from here, or from `onCompletionNarrated` above for a live
+      // narration.
+      session.queueInjection(items, ({ cancelled: turnCancelled }) => {
+        if (turnCancelled) return;
+        // The cursor's invariant is "cursor == what was actually HEARD" — it advances to the max
+        // completion timestamp this debrief narrated, plus the episode's own `generatedAt` when one
+        // was spoken (which retires the episode: it can never re-qualify against a cursor at/after
+        // its generation). Deliberately NOT wall-clock now (code-review finding 6): a completion
+        // landing between the connect-time transcript fetch and this callback, whose live narration
+        // was then barged over, was never heard — a `Date.now()` commit would jump the cursor past
+        // it and the operator would silently never be told that unit finished. With a heard-content
+        // commit, its ts stays above the cursor and the next call's backlog re-reports it.
+        const commitTs = Math.max(debrief?.maxCompletionTs ?? -Infinity, episodeGeneratedAt ?? -Infinity);
+        commitVoiceDebrief(boundSessionId, commitTs);
+        // debrief-heard (comprehension concern 11, DESIGN.md's "answer-read / debrief-heard" row):
+        // served ≠ heard — only an UNCANCELLED completion counts, exactly like the cursor advance
+        // above (same branch, same reasoning). A barge-in must never emit this.
+        if (repoAtConnect) reportAttention({ kind: 'debrief-heard', repo: repoAtConnect });
       });
     };
     void session.connect().then(() => {

@@ -31,6 +31,7 @@
  */
 
 import { errText } from "./err-text.ts";
+import { tokenize } from "./fabric-search.ts";
 
 export type DoctorStatus = "ok" | "warn" | "error" | "unknown";
 
@@ -141,6 +142,18 @@ export interface DoctorProbe {
 	harnessHooks(): Promise<Array<{ harness: string; ok: boolean; detail: string }>>;
 	/** Agents parked in a terminal-but-listed state: the zombies `glance rm` is for. */
 	zombieAgents(): Promise<number>;
+	/** The known-symptom index (comprehension concern 07) — a stripped `SymptomEntry` projection, just
+	 *  enough to match a failing check's title/detail and point at the summary row's count. Never
+	 *  throws; an unreachable index reads as empty, not as a probe crash. */
+	symptoms(): Promise<SymptomIndexEntry[]>;
+}
+
+/** The two fields `matchSymptom` and the summary row need off a recorded symptom card — deliberately
+ *  NOT `SymptomEntry` itself: `doctor.ts` stays decoupled from `symptoms.ts`'s storage shape, the
+ *  same seam every other `DoctorProbe` fact (RepoFacts, AutonomyFacts, …) already draws. */
+export interface SymptomIndexEntry {
+	symptom: string;
+	whereToLook: string[];
 }
 
 /**
@@ -315,10 +328,49 @@ function repoChecks(repos: RepoFacts[]): DoctorCheck[] {
 }
 
 /**
+ * The doctor-failure auto-match (DESIGN.md "push at motivation"): a failing check's `title + detail`
+ * against the recorded symptom index, scored by token OVERLAP COEFFICIENT
+ * (`|shared| / min(|query|, |symptom|)`) rather than BM25 — a corpus of one to a few dozen symptom
+ * cards makes BM25's idf term nearly meaningless, and a stable, corpus-size-independent threshold is
+ * exactly what "clears a modest bar" needs. Reuses `fabric-search.ts`'s `tokenize` (camelCase-aware,
+ * punctuation-stripping) rather than forking a second tokenizer. Pure: no I/O, so every branch is
+ * directly testable, and ties resolve to whichever symptom scores highest first in `symptoms`.
+ */
+export const SYMPTOM_MATCH_THRESHOLD = 0.3;
+
+export function matchSymptom(text: string, symptoms: SymptomIndexEntry[], threshold: number = SYMPTOM_MATCH_THRESHOLD): SymptomIndexEntry | undefined {
+	const queryTokens = new Set(tokenize(text));
+	if (queryTokens.size === 0) return undefined;
+	let best: SymptomIndexEntry | undefined;
+	let bestScore = 0;
+	for (const s of symptoms) {
+		const symptomTokens = new Set(tokenize(`${s.symptom} ${s.whereToLook.join(" ")}`));
+		if (symptomTokens.size === 0) continue;
+		let shared = 0;
+		for (const t of symptomTokens) if (queryTokens.has(t)) shared++;
+		const score = shared / Math.min(queryTokens.size, symptomTokens.size);
+		if (score > bestScore) {
+			bestScore = score;
+			best = s;
+		}
+	}
+	return bestScore >= threshold ? best : undefined;
+}
+
+/**
  * Assemble the report. Every check is independent and every probe is guarded, so one broken subsystem
  * cannot hide the diagnosis of the others — the failure mode of every health check ever written.
  */
 export async function runDoctor(probe: DoctorProbe): Promise<DoctorReport> {
+	// Fetched ONCE, shared by the summary row below AND the per-check auto-match — a probe that hits
+	// the daemon must not pay for that round trip twice just because two consumers want it. Deliberately
+	// NOT caught here: `attempt()` below is what converts a rejection into an honest "unknown" for the
+	// summary row, same as every other probe (module doc: "a probe that throws becomes an honest
+	// `unknown`, never a silent `ok`"). The auto-match use further down guards it separately. Wrapped in
+	// an async IIFE so a probe that throws SYNCHRONOUSLY (every other probe call happens inside an
+	// `async () => ...` closure already, which does this for free) becomes a rejected promise here too,
+	// instead of crashing `runDoctor` itself before `attempt` ever gets a chance to catch it.
+	const symptomsPromise: Promise<SymptomIndexEntry[]> = (async () => probe.symptoms())();
 	const groups = await Promise.all([
 		attempt("daemon", "Is the daemon up?", () => daemonChecks(probe)),
 		attempt("autonomy", "Is autonomy armed, and safely?", async () => {
@@ -377,9 +429,38 @@ export async function runDoctor(probe: DoctorProbe): Promise<DoctorReport> {
 			const n = await probe.zombieAgents();
 			return [n === 0 ? { id: "zombies", title: "Any stuck units?", status: "ok" as const, detail: "none" } : { id: "zombies", title: "Any stuck units?", status: "warn" as const, detail: `${n} unit(s) parked in a terminal state`, remedy: "glance rm <name>" }];
 		}),
+		// Informational only (RT2-16 "doctor-tier discovery") — this row NEVER warns or errors on its
+		// own; an empty index is a fact about a fresh install, not a fault. No `remedy` here: `remedy` is
+		// present iff status is not `"ok"` everywhere else in this report (`DoctorCheck`'s own doc
+		// comment), so the `glance symptom` nudge is folded into `detail` instead of breaking that
+		// invariant for the one row that's always ok.
+		attempt("symptom-index", "Is there a known-symptom index?", async () => {
+			const symptoms = await symptomsPromise;
+			const detail = symptoms.length
+				? `${symptoms.length} known symptom(s) recorded — search them: glance symptom <query>`
+				: "no symptoms recorded yet — glance symptom <query> once one exists";
+			return [{ id: "symptom-index", title: "Is there a known-symptom index?", status: "ok" as const, detail }];
+		}),
 	]);
 
 	const checks = groups.flat();
+
+	// The doctor-failure auto-match (DESIGN.md "push at motivation"): every NON-ok check's title+detail
+	// is matched against the symptom index, and a clearing top hit is appended to that check's remedy —
+	// the moment of maximum motivation gets the pointer, instead of a pull-only search surface nobody
+	// opens mid-incident. A throwing `symptoms()` probe (already reported as the "symptom-index" row's
+	// own "unknown" above) must not crash the REST of the diagnosis — it just disables auto-match.
+	const symptoms = await symptomsPromise.catch(() => [] as SymptomIndexEntry[]);
+	if (symptoms.length) {
+		for (const c of checks) {
+			if (c.status === "ok") continue;
+			const top = matchSymptom(`${c.title} ${c.detail}`, symptoms);
+			if (!top) continue;
+			const pointer = `known symptom: "${top.symptom}" → ${top.whereToLook[0]} (glance symptom for more)`;
+			c.remedy = c.remedy ? `${c.remedy}; ${pointer}` : pointer;
+		}
+	}
+
 	const worst = worstOf(checks);
 	return { checks, worst, healthy: !checks.some((c) => c.status === "error") };
 }
