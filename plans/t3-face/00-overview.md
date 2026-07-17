@@ -86,9 +86,10 @@ omp-squad (lmvdz/glance):
 
 Merge order when Lars is ready: glance-desktop #29 first (unblocks #30's retarget); #28, #199 independent. All draft; Lars merges.
 
-## Follow-ups to file in Plane (rate-limited 2026-07-17)
+## Filed follow-ups
 
-- Attention-store lifecycle hygiene (medium): broader manager-eviction/get lost-update race + unit-visit pruning + same-ms tie residual. Full repro in PR #199 body.
+- OMPSQ-449 — daemon transcriptSeq not reseeded after restart (surfaced by concern 04).
+- OMPSQ-450 — attention-store lifecycle hygiene: eviction/get lost-update race + unit-visit pruning + same-ms tie residual (concern 06 follow-up).
 
 ## Notes
 
