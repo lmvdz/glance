@@ -9,6 +9,7 @@
  *   glance rm <id> [--delete-worktree]
  *   glance ask "<question>" [--repo …]           answer a question; no branch, nothing to merge
  *   glance answers [<id>]                        list or read durable answers
+ *   glance promote <issue> [--repo …]            enrich a Backlog Plane ticket with Tier-1/Tier-2 context
  *   glance open
  *   glance doctor [--json]                        diagnose the factory: on? armed? pointed where?
  *
@@ -50,6 +51,7 @@ import { concernNumFromFile, parsePlanConcerns, validatePlanConcerns } from "./f
 import { decompose, DECOMPOSE_TIMEOUT_MS, type VerifiedConcern } from "./planner.ts";
 import { writeConcernDrafts } from "./plan-writer.ts";
 import { ompClassify } from "./intake.ts";
+import { laneFromRouted } from "./lane.ts";
 import { RuntimeSettingsStore } from "./runtime-settings.ts";
 import { PolicyStore } from "./policy.ts";
 import { backendFromEnv, setStorageBackend } from "./dal/storage.ts";
@@ -93,6 +95,7 @@ USAGE
   glance automation [--window 1h] [--loop L]    Show what the background loops are doing (and Scout's LLM cost)
   glance ask "<question>" [--repo R]            Ask; the deliverable is a written answer, not a branch
   glance answers [<id>] [--repo R]              List answers, or print one
+  glance promote <issue> [--repo R] [--json]    Enrich a Backlog Plane ticket with Tier-1/Tier-2 context
   glance open                                   Print the dashboard URL
   glance doctor [--json]                       Is the factory on, armed, and pointed at the right world?
   glance curate-plane [repo] [--file]             Group recurring Plane issues into unified fixes
@@ -458,6 +461,16 @@ async function cmdAdd(args: string[]): Promise<void> {
 	if (typeof flags.thinking === "string") options.thinking = flags.thinking as ThinkingLevel;
 	if (typeof flags.workflow === "string") options.workflow = flags.workflow;
 	if (typeof flags.verify === "string") options.verify = flags.verify;
+	// --lane hotfix|feature|chore: the CLI caller is the operator, so this is an operator-sourced
+	// lane (may move LANE_POLICY privilege axes). Invalid values are rejected loudly, never guessed.
+	if (typeof flags.lane === "string") {
+		const lane = laneFromRouted({ lane: flags.lane });
+		if (!lane) {
+			console.error(`unknown --lane "${flags.lane}" — expected hotfix | feature | chore`);
+			process.exit(1);
+		}
+		options.lane = lane;
+	}
 	if (typeof flags.sandbox === "string") options.sandbox = { image: flags.sandbox };
 	if (flags.acp === true || flags.runtime === "acp") options.runtime = "acp";
 	// Any registered harness by name (omp/pi/claude-code/codex/opencode/gemini/…). Supersedes --acp;
@@ -1007,6 +1020,69 @@ async function cmdAnswers(args: string[]): Promise<void> {
 }
 
 /**
+ * `glance promote <issue> [--repo <path>] [--json]`
+ *
+ * adw-factory-borrows concern 05: enrich a Backlog Plane ticket with Tier-1/Tier-2 context through
+ * the daemon's ask-mode seam, fail-closed validated against the same truncation `dispatchSpec`
+ * applies at dispatch time. Never moves the ticket's state — Backlog stays Backlog; dragging it to
+ * Todo in Plane is the release (concern 03's dispatcher state gate is what makes that drag mean
+ * something). Blocks for the same wait window `glance ask` does — the enrichment IS an ask-mode unit
+ * under the hood, so this can take several minutes on a non-trivial ticket.
+ */
+async function cmdPromote(args: string[]): Promise<void> {
+	const { positional, flags } = parseArgs(args);
+	const issue = positional[0];
+	if (!issue) {
+		process.stderr.write("usage: glance promote <issue-id-or-identifier> [--repo <path>] [--json]\n");
+		process.exit(1);
+	}
+	const repo = typeof flags.repo === "string" ? path.resolve(flags.repo) : process.cwd();
+	if (!flags.json) process.stderr.write(`promoting ${issue}… (waits for an ask-mode unit to investigate; can take several minutes)\n`);
+	const requestStarted = Date.now();
+	let res: Response | null = null;
+	try {
+		res = await fetch(`${base(flags)}/api/issues/${encodeURIComponent(issue)}/promote`, {
+			method: "POST",
+			headers: { ...tokenHeader(), "content-type": "application/json" },
+			body: JSON.stringify({ repo }),
+		});
+	} catch (err) {
+		// A refused connection fails near-instantly — that's genuinely "no daemon". A drop after the
+		// request was already minutes into waiting (ECONNRESET, or any other mid-flight socket error) means
+		// the daemon WAS there and the promotion may still be running server-side; reporting both as "no
+		// daemon" sent an operator chasing a dead lead while a live promotion kept going unseen and a
+		// confused retry could hit the idempotency guard.
+		const elapsedMs = Date.now() - requestStarted;
+		const code = typeof err === "object" && err !== null && "code" in err ? String((err as { code: unknown }).code) : undefined;
+		if (elapsedMs > 5_000) {
+			process.stderr.write(
+				`lost connection to the daemon ${Math.round(elapsedMs / 1000)}s into the promotion${code ? ` (${code})` : ""} — it may still be running server-side; check the Plane ticket for ${issue} or the daemon logs, then retry (an already-promoted ticket is refused, not re-enriched, so a retry is safe).\n`,
+			);
+		} else {
+			process.stderr.write(`No glance daemon on ${base(flags)}. Start one with: glance up\n`);
+		}
+		process.exit(1);
+	}
+	const result = (await res.json().catch(() => null)) as { ok: boolean; issue?: string; message: string; error?: string; draft?: string } | null;
+	if (!result) {
+		process.stderr.write(`promote failed: ${res.status} ${res.statusText}\n`);
+		process.exit(1);
+	}
+	if (flags.json) {
+		process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+		if (!result.ok) process.exit(1);
+		return;
+	}
+	if (result.ok) {
+		process.stdout.write(`${result.message}\n`);
+		return;
+	}
+	process.stderr.write(`${result.message}\n`);
+	if (result.draft) process.stderr.write(`\n--- draft (not written) ---\n${result.draft}\n`);
+	process.exit(1);
+}
+
+/**
  * `glance doctor` — R6's answer. Exit code IS the verdict, so CI and the operator's `&&` both work:
  * 0 = nothing blocking, 1 = the factory cannot do its job. A warning never fails the command; a warning
  * that failed the command would be turned off within a week.
@@ -1088,6 +1164,9 @@ async function main(): Promise<void> {
 			break;
 		case "answers":
 			await cmdAnswers(rest);
+			break;
+		case "promote":
+			await cmdPromote(rest);
 			break;
 		case "doctor":
 			await cmdDoctor(rest);

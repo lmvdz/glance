@@ -17,8 +17,18 @@
  *     policy (that needs epsilon-random exploration, deferred — see DESIGN.md's D1). Grading the
  *     router by cells it populated itself is circular until D1 lands; staying boost-only and
  *     sample-gated keeps that circularity from compounding into a policy that entrenches itself.
+ *
+ * adw-factory-borrows concern 09 (per-lane enforcement) repurposes `routeModelForTaskClass`'s
+ * `opts.minEdge`/`opts.frontier`/`opts.frontierModel` trio: they were documented above as override
+ * seams FOR TESTS ONLY — this concern re-documents them, on the record, as OPERATOR-POLICY seams too:
+ * `modelRouteMinEdgeFor` below reads a per-lane `LANE_POLICY[lane].modelRouteMinEdge` override and
+ * passes it through the exact same `opts.minEdge` parameter a test would use. The shared `MIN_EDGE`
+ * evidence floor still applies wherever no lane override exists (no lane threaded, or the lane's row
+ * carries no override, e.g. every lane but "hotfix" today) — a lane earns a lower bar explicitly, in
+ * `src/lane.ts`'s constants, never implicitly.
  */
 
+import { LANE_POLICY, type WorkLane } from "./lane.ts";
 import type { TaskClassMatrixDoc } from "./omp-graph/task-class-matrix.ts";
 import { MIN_EDGE } from "./smart-spawn.ts";
 
@@ -52,8 +62,9 @@ function noShift(reason: string): RouteDecision {
 /**
  * The pure routing decision (see module doc). `currentDefault` is the matrix family key the cheap
  * path resolves to — defaults to `ROUTE_CHEAP_FAMILY` ("sonnet", this codebase's actual cheap/default
- * model family); callers almost never need to override it. `opts.frontier`/`opts.minEdge` are
- * override seams for tests, not expected to vary in production.
+ * model family); callers almost never need to override it. `opts.frontier`/`opts.minEdge` are override
+ * seams for tests AND, since adw-factory-borrows concern 09, for per-lane operator policy (see the
+ * module doc and `modelRouteMinEdgeFor` below) — not expected to vary any other way.
  */
 export function routeModelForTaskClass(
 	taskClass: { mode: string; tier: string },
@@ -92,4 +103,39 @@ export function routeModelForTaskClass(
 		model: frontierModel,
 		reason: `route ${tcKey}: ${currentDefault} (${cheap.mergeRate.toFixed(2)}) -> ${frontier} (${rival.mergeRate.toFixed(2)}), edge ${edge.toFixed(2)}`,
 	};
+}
+
+/**
+ * Whether a model-route decision should be APPLIED (vs shadow-logged only) for `lane` — the per-lane
+ * enforcement flip (adw-factory-borrows concern 09).
+ *
+ * The FLEET-WIDE `OMP_SQUAD_MODEL_ROUTE_SHADOW=0` escape hatch, unchanged from concern 06, is the
+ * baseline: it applies regardless of lane, lane source, or any `LANE_POLICY` row (this is the exact
+ * contract `lane-threading.test.ts`'s clamp tests lock down — a label/classifier-sourced lane must
+ * NEVER suppress the operator's global apply flag; DESIGN.md: the clamp only moves privilege
+ * axes STRICTER for ticket-text lanes, never looser, so it can't touch this baseline at all).
+ *
+ * On top of that baseline, an OPERATOR-sourced lane (`appliesPrivilege` true — concern 02's clamp)
+ * may WIDEN past a global "shadow" default: if the global flag says shadow but the lane's OWN
+ * `LANE_POLICY[lane].modelRouteApply` is `true`, this lane still applies — a genuinely per-lane flip
+ * (e.g. flip JUST "hotfix" to apply) independent of the fleet-wide flag, which is what the Goal names
+ * ("model routing can flip from shadow to apply per lane"). v1 ships every lane's flag `false`, so
+ * this widening path is inert until an operator flips one (an evidence-gated, named exit, not this
+ * concern's job to flip). A label/classifier-sourced lane can NEVER widen this way — ticket text must
+ * never buy privilege on its own.
+ */
+export function modelRouteShouldApply(lane: WorkLane, appliesPrivilege: boolean, globalShadowFlag = process.env.OMP_SQUAD_MODEL_ROUTE_SHADOW): boolean {
+	if (globalShadowFlag === "0") return true; // fleet-wide apply — unaffected by lane or lane source
+	return appliesPrivilege && LANE_POLICY[lane].modelRouteApply; // per-lane widening, operator-only
+}
+
+/**
+ * The per-lane `minEdge` override to pass through `routeModelForTaskClass`'s `opts.minEdge` (the
+ * "operator-policy seam" the module doc names), or `undefined` to keep the shared `MIN_EDGE` floor —
+ * ONLY when `appliesPrivilege` (same clamp as `modelRouteShouldApply`: a label/classifier lane must
+ * never buy a lower evidence bar for itself either). A lane whose `LANE_POLICY` row sets no override
+ * (every lane but "hotfix" today) also falls through to `undefined`, i.e. the shared floor.
+ */
+export function modelRouteMinEdgeFor(lane: WorkLane, appliesPrivilege: boolean): number | undefined {
+	return appliesPrivilege ? LANE_POLICY[lane].modelRouteMinEdge : undefined;
 }

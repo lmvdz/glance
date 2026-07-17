@@ -103,7 +103,15 @@ export type MetricName =
 	| "model-outcome-blocked"
 	| "veto-reprompt"
 	| "decision-captured"
-	| "model-route-decision";
+	| "model-route-decision"
+	/** Lane classification landed on a spawn (adw-factory-borrows concern 09's shadow-exit surface) —
+	 *  tags `{lane, source}`. Value is always 1 (a count metric); the scoreboard sums by `lane`. */
+	| "lane-classification"
+	/** A cost-gate verdict fired (ask/deny/shadow), any mode — tags `{action, lane, mode}`. Value is
+	 *  always 1. `mode !== "enforce"` rows are the "shadow would-have-asked/denied" counterfactual the
+	 *  factory-status scoreboard reports; `mode === "enforce"` rows are the REAL (already-acted-on)
+	 *  verdicts. */
+	| "cost-gate-verdict";
 
 export interface MetricEvent {
 	/** Strictly-increasing id (epoch millis, bumped on collision) — stable sort + dedupe key. */

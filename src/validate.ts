@@ -9,23 +9,30 @@ import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { extractLastJsonObject } from "./flue-service-driver.ts";
+import { execGatedCommand } from "./gate-runner.ts";
 import type { CommissionSpec, GateCheck, GateReport } from "./types.ts";
+
+/** execGatedCommand's own call shape — the seam validate.ts's gate checks spawn through. */
+type GateExecFn = (command: string, cwd: string, opts?: { mounts?: string[]; env?: Record<string, string>; network?: string; hostArgv?: string[] }) => Promise<{ code: number; stdout: string; stderr: string }>;
 
 export interface GateOptions {
 	/** Fail the gate if the acceptance check is skipped (no flue toolchain). */
 	requireAcceptance?: boolean;
+	/** Test-only seam: inject a fake gate runner instead of the real execGatedCommand (docker/host exec). */
+	exec?: GateExecFn;
 }
 
 export async function validateWorker(dir: string, spec: CommissionSpec, opts: GateOptions = {}): Promise<GateReport> {
+	const exec = opts.exec ?? execGatedCommand;
 	const checks: GateCheck[] = [];
 
 	const lint = await lintWorker(dir, spec);
 	checks.push(lint);
 
-	const typecheck = await typecheckWorker(dir);
+	const typecheck = await typecheckWorker(dir, exec);
 	checks.push(typecheck);
 
-	const acceptance = await acceptanceWorker(dir, spec);
+	const acceptance = await acceptanceWorker(dir, spec, exec);
 	checks.push(acceptance.check);
 
 	const ponytail = await ponytailWorker(dir, spec);
@@ -78,18 +85,48 @@ async function lintWorker(dir: string, spec: CommissionSpec): Promise<GateCheck>
 	return fails.length ? { name: "lint", status: "fail", detail: fails.join("; ") } : { name: "lint", status: "pass" };
 }
 
-async function typecheckWorker(dir: string): Promise<GateCheck> {
+async function typecheckWorker(dir: string, exec: GateExecFn): Promise<GateCheck> {
 	const tscBin = path.join(dir, "node_modules", ".bin", "tsc");
 	if (!existsSync(tscBin)) return { name: "typecheck", status: "skip", detail: "typescript not installed in worker" };
 	// `tscBin` resolves the worker repo's OWN node_modules/.bin/tsc — repo-supplied code, same as
 	// acceptanceWorker below. `tsc --noEmit` needs no secret and no provider key, so ENV_BASELINE
 	// alone (no capability allowance) is the correct — and narrower — env for this check.
-	const proc = Bun.spawn([tscBin, "-p", "tsconfig.json", "--noEmit"], { cwd: dir, stdout: "pipe", stderr: "pipe", env: baselineEnv() });
-	const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-	const code = await proc.exited;
+	//
+	// Routed through the shipped gate-runner container (execGatedCommand, OMPSQ-160): this spawn runs
+	// repo-supplied code from a commissioned worker, unsandboxed on the daemon host, same as every
+	// verify/proof/land gate — it now gets the same hermetic docker default those already have. The
+	// `env` override keeps baselineEnv() (narrower than gate-runner's own pass-through-minus-secrets)
+	// as belt-and-suspenders INSIDE the container; no network override, so it inherits the gate-wide
+	// `--network none` default (tsc needs no network).
+	const tscArgv = [tscBin, "-p", "tsconfig.json", "--noEmit"];
+	// hostArgv: on the docker-less fallback, spawn argv-direct — `bash -lc` is a login shell that
+	// re-imports profile-exported secrets past baselineEnv()'s scrub (code-review, CONFIRMED).
+	const { code, stdout: out, stderr: err } = await exec(shellCommand(tscArgv), dir, { env: baselineEnv(), hostArgv: tscArgv });
 	return code === 0
 		? { name: "typecheck", status: "pass" }
 		: { name: "typecheck", status: "fail", detail: (out + err).trim().split("\n").slice(0, 8).join("\n") };
+}
+
+/** Bash-safe argv join for execGatedCommand, which plans a single shell command string (`bash -lc`). */
+function shellCommand(argv: string[]): string {
+	return argv.map((a) => Bun.$.escape(a)).join(" ");
+}
+
+/**
+ * Network posture for the containerized acceptance (`flue run`) spawn only — every other gate call
+ * (typecheck, and every verify/proof/land gate elsewhere) stays on the gate-wide
+ * `OMP_SQUAD_GATE_SANDBOX_NETWORK` default (`none`). Acceptance makes real model/network calls
+ * (validate.ts's `acceptanceEnv` ships CA-cert env vars for exactly this), and `--network none` would
+ * silently break every acceptance run the moment the sandbox went default-on. This is a scoped,
+ * documented widening for ONE gate, not a change to the shared default — `OMP_SQUAD_ACCEPTANCE_GATE_NETWORK`
+ * lets an operator tighten (or further loosen) it without touching the gate-wide knob.
+ */
+function acceptanceGateNetwork(source: Record<string, string | undefined> = process.env): string {
+	// Precedence (code-review, CONFIRMED): the acceptance-scoped knob wins; otherwise an operator's
+	// EXPLICIT gate-wide OMP_SQUAD_GATE_SANDBOX_NETWORK is honored (someone who hardened to "none"
+	// must not have one gate silently re-open egress for the least-trusted spawn in the system);
+	// only when neither is set does the acceptance default widen to "bridge".
+	return source.OMP_SQUAD_ACCEPTANCE_GATE_NETWORK?.trim() || source.OMP_SQUAD_GATE_SANDBOX_NETWORK?.trim() || "bridge";
 }
 
 /**
@@ -147,7 +184,7 @@ export function acceptanceEnv(spec: CommissionSpec, source: Record<string, strin
 	return env;
 }
 
-async function acceptanceWorker(dir: string, spec: CommissionSpec): Promise<{ check: GateCheck; result?: unknown }> {
+async function acceptanceWorker(dir: string, spec: CommissionSpec, exec: GateExecFn): Promise<{ check: GateCheck; result?: unknown }> {
 	if (!spec.accept) return { check: { name: "acceptance", status: "skip", detail: "no acceptance check in spec" } };
 	const flueBin = path.join(dir, "node_modules", ".bin", "flue");
 	if (!existsSync(flueBin)) return { check: { name: "acceptance", status: "skip", detail: "flue not installed in worker" } };
@@ -156,17 +193,17 @@ async function acceptanceWorker(dir: string, spec: CommissionSpec): Promise<{ ch
 	// The acceptance tier executes model-authored worker code UNSANDBOXED on the daemon host.
 	// It MUST NOT inherit the daemon's full env — acceptanceEnv() denies by default and passes
 	// only the capability-allowed vars, so the recorded allowlist actually gates secret access.
-	// ponytail: env is scrubbed but the process still shares the daemon's filesystem/network as
-	// the daemon user. Upgrade path: run this spawn under the existing --sandbox container seam
-	// (src/sandbox-agent-driver.ts) when full isolation is required.
-	const proc = Bun.spawn([flueBin, "run", spec.name, "--target", target, "--payload", JSON.stringify(spec.accept.payload)], {
-		cwd: dir,
-		stdout: "pipe",
-		stderr: "pipe",
-		env: acceptanceEnv(spec),
-	});
-	const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-	const code = await proc.exited;
+	//
+	// Routed through the shipped gate-runner container (execGatedCommand, OMPSQ-160): the same
+	// hermetic docker default every verify/proof/land gate already gets, closing the "shares the
+	// daemon's filesystem/network as the daemon user" gap this comment used to name. The `env`
+	// override keeps acceptanceEnv()'s deny-by-default scrub as belt-and-suspenders INSIDE the
+	// container — gate-runner's own env is a broader pass-through-minus-secrets, wrong for
+	// model-authored code. `network` widens ONLY this call past the gate-wide `--network none`
+	// default (see acceptanceGateNetwork) since `flue run` makes real model/network calls.
+	const flueArgv = [flueBin, "run", spec.name, "--target", target, "--payload", JSON.stringify(spec.accept.payload)];
+	// hostArgv: same login-shell secret-reimport hazard as typecheckWorker — argv-direct on host.
+	const { code, stdout: out, stderr: err } = await exec(shellCommand(flueArgv), dir, { env: acceptanceEnv(spec), network: acceptanceGateNetwork(), hostArgv: flueArgv });
 	if (code !== 0) {
 		return { check: { name: "acceptance", status: "fail", detail: `flue run exited ${code}: ${(err || out).trim().slice(0, 200)}` } };
 	}

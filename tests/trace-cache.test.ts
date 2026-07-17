@@ -117,7 +117,10 @@ test("distinct never-repeated finalized traces never grow one manager's cache pa
 	// FIFO: the very first inserted entries were evicted to make room for later ones.
 	expect(cache.has("feat:cache-cap-0")).toBe(false);
 	expect(cache.has(`feat:cache-cap-${n - 1}`)).toBe(true); // the most recent survives
-});
+	// 15s, not bun's 5s default: this test runs TRACE_CACHE_MAX+5 finalizations and sits right at
+	// the 5s edge under full-suite parallel load (observed ~5.01s flake on loaded runs, ~5.0s green
+	// in isolation) — the cap logic under test is timing-independent.
+}, 15_000);
 
 test("cross-tenant isolation: two managers caching the SAME trace id never see each other's response (finding 1)", async () => {
 	const { mgr: mgrA, dir: dirA } = await makeManager();

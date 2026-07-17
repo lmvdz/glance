@@ -26,8 +26,10 @@ import {
   landBlockedLine,
   loopReasonLine,
   fmtSince,
+  ratioLabel,
   type FactoryStatus,
   type FactoryLoopReport,
+  type ShadowExitScoreboard,
 } from '../lib/factoryStatus';
 import { computeCapacity, capacityFractionLabel, detectCollisions, attentionItems, type CapacitySummary, type GovernancePayload, type UsagePayload } from '../lib/insights';
 import { toneClasses } from './ui';
@@ -81,6 +83,43 @@ const LoopChip: React.FC<{ report: FactoryLoopReport }> = ({ report }) => {
           </span>
         )}
       </div>
+    </div>
+  );
+};
+
+// ─── shadow-exit scoreboard (adw-factory-borrows concern 09) ────────────────────────────────────
+//
+// "This concern's definition of done includes the surface existing, not the flips being made" (the
+// concern doc) — lane-mix + shadow-would-have-fired counters, one place to read BEFORE flipping a
+// lane from shadow to apply/enforce. Purely additive to the strip: absent (older daemon) renders
+// nothing, present renders one compact row under the loop chips.
+
+const ShadowExitRow: React.FC<{ s: ShadowExitScoreboard }> = ({ s }) => {
+  const lanes = Object.entries(s.laneCounts).sort(([, a], [, b]) => b - a);
+  if (s.laneTotal === 0 && s.modelRouteShadowTotal === 0 && s.costGateShadowTotal === 0) return null;
+  return (
+    <div
+      className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-gray-100 px-4 py-1.5 text-[10px] text-gray-500 dark:border-gray-900 dark:text-gray-400"
+      title="Shadow-exit scoreboard: what the fleet would do if a shadow-mode lane/decision were flipped to apply/enforce — read this before flipping one."
+    >
+      <span className="font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">Shadow exits</span>
+      {lanes.length > 0 && (
+        <span>
+          lanes:{' '}
+          {lanes.map(([lane, count], i) => (
+            <span key={lane}>
+              {i > 0 ? ', ' : ''}
+              {lane} {count}
+            </span>
+          ))}
+        </span>
+      )}
+      <span title="Model-route decisions made in SHADOW mode that would have escalated to the frontier model">
+        model-route would-escalate: {ratioLabel(s.modelRouteShadowWouldEscalate, s.modelRouteShadowTotal)}
+      </span>
+      <span title="Cost-gate verdicts fired OUTSIDE enforce mode that would have asked/denied">
+        cost-gate would-ask/deny: {ratioLabel(s.costGateShadowWouldAct, s.costGateShadowTotal)}
+      </span>
     </div>
   );
 };
@@ -294,6 +333,10 @@ export const FactoryStatusStrip: React.FC = () => {
           ))}
         </div>
       )}
+
+      {/* Shadow-exit scoreboard — always visible when present, independent of the expand toggle (a
+          one-line trust signal, not per-loop detail). */}
+      {data.shadowExits && <ShadowExitRow s={data.shadowExits} />}
     </div>
   );
 };
