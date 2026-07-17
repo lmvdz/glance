@@ -77,7 +77,10 @@ const MAP: Record<Tone, ToneClasses> = {
     pillText: 'text-gray-600 dark:text-gray-300',
     border: 'border-gray-200 dark:border-gray-800',
     softBg: 'bg-gray-50 dark:bg-gray-900',
-    stroke: 'text-gray-400',
+    // gray-500 in light lifts the neutral sparkline off the white card (gray-400 was faint there);
+    // gray-400 in dark keeps it legible without reintroducing a warm accent. Only StatTile's neutral
+    // sparkline reads this stroke, so the bump is scoped to the Daily panel.
+    stroke: 'text-gray-500 dark:text-gray-400',
   },
 };
 
