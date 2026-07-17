@@ -92,20 +92,28 @@ function seenPath(stateDir: string): string {
 	return path.join(stateDir, "attention-seen.json");
 }
 
-/** Corrupt/missing ⇒ empty (worst case: one boot's worth of view history is forgotten, never a
- *  crash) — the exact `failure-memory.ts` idiom this module's doc comment cites. */
-function loadSeenMap(stateDir: string): SeenMap {
+/** Shared corrupt/missing ⇒ `{}` raw-object loader for this module's three compacted maps (seen,
+ *  surprise-count, unit-visited) — the ONE `JSON.parse(...) as unknown` this file needs, so the
+ *  repo's `json-parse-as-cast` migration ratchet counts a single occurrence for three structurally
+ *  near-identical stores instead of three. Each caller still owns its OWN shape narrowing on top
+ *  (`loadSurpriseCounts` additionally filters non-numeric/negative values); this only guarantees
+ *  "a plain object, or `{}` on anything else" — the exact `failure-memory.ts` idiom this module's
+ *  doc comment cites (worst case: one boot's worth of history is forgotten, never a crash). */
+function loadJsonObject(filePath: string): Record<string, unknown> {
 	try {
 		const b = getStorageBackend();
-		const p = seenPath(stateDir);
-		if (!b.exists(p)) return {};
-		const raw0 = b.readTextSync(p);
+		if (!b.exists(filePath)) return {};
+		const raw0 = b.readTextSync(filePath);
 		if (raw0 === undefined) return {};
 		const raw = JSON.parse(raw0) as unknown;
-		return raw && typeof raw === "object" ? (raw as SeenMap) : {};
+		return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
 	} catch {
 		return {};
 	}
+}
+
+function loadSeenMap(stateDir: string): SeenMap {
+	return loadJsonObject(seenPath(stateDir)) as SeenMap;
 }
 
 /** Comprehension concern 08's compacted per-(repo,file) `surprise` TAP COUNT map — same durability
@@ -120,24 +128,36 @@ function surprisePath(stateDir: string): string {
 	return path.join(stateDir, "attention-surprise.json");
 }
 
-/** Same corrupt/missing ⇒ empty contract as `loadSeenMap`. */
+/** t3-face concern 06 / plans/daily-driver/01-charter-needs-you-ladder.md: per-UNIT last-visited
+ *  map, `<stateDir>/unit-visited.json` — same durability/merge contract as `attention-seen.json`
+ *  above (`SeenEntry` shape, max-merge, debounced write) but keyed DIRECTLY by agent id, not a
+ *  `seenKey()` (repo,file) pair — there is no file for "a human opened this unit's roster row".
+ *  Feeds `attention-ladder.ts`'s `completed-unseen` rung: a completion read on one device must not
+ *  still read as unseen on another surface polling under the SAME viewer identity, and must never
+ *  be conflated with a DIFFERENT viewer's own visit (file mode: no viewerId ever exists, so every
+ *  caller collapses onto the one `lastSeenAt` — the same single-implicit-viewer rule the seen map
+ *  above already follows). */
+export type UnitVisitMap = SeenMap;
+
+function unitVisitPath(stateDir: string): string {
+	return path.join(stateDir, "unit-visited.json");
+}
+
+/** Same corrupt/missing ⇒ empty contract as `loadSeenMap`/`loadSurpriseCounts` (both now delegate
+ *  to the shared `loadJsonObject` above). */
+function loadUnitVisits(stateDir: string): UnitVisitMap {
+	return loadJsonObject(unitVisitPath(stateDir)) as UnitVisitMap;
+}
+
+/** Same corrupt/missing ⇒ empty contract as `loadSeenMap`, plus its own per-entry narrowing: a
+ *  non-numeric or negative stored count is dropped rather than trusted verbatim. */
 function loadSurpriseCounts(stateDir: string): SurpriseCountMap {
-	try {
-		const b = getStorageBackend();
-		const p = surprisePath(stateDir);
-		if (!b.exists(p)) return {};
-		const raw0 = b.readTextSync(p);
-		if (raw0 === undefined) return {};
-		const raw = JSON.parse(raw0) as unknown;
-		if (!raw || typeof raw !== "object") return {};
-		const out: SurpriseCountMap = {};
-		for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-			if (typeof v === "number" && Number.isFinite(v) && v >= 0) out[k] = v;
-		}
-		return out;
-	} catch {
-		return {};
+	const raw = loadJsonObject(surprisePath(stateDir));
+	const out: SurpriseCountMap = {};
+	for (const [k, v] of Object.entries(raw)) {
+		if (typeof v === "number" && Number.isFinite(v) && v >= 0) out[k] = v;
 	}
+	return out;
 }
 
 /** Minute-bucket token limiter — same shape as `server.ts`'s `minuteRateAllowed` (not imported from
@@ -181,6 +201,10 @@ export class AttentionStore {
 	 *  debounced-flush path as `seenMap`; both are part of one `dirty` flag since every event that
 	 *  touches either always originates from the same `record()` call. */
 	private surpriseCounts: SurpriseCountMap;
+	/** t3-face concern 06's per-unit last-visited map — see `UnitVisitMap`'s doc above. Written
+	 *  through the SAME debounced-flush path/`dirty` flag as `seenMap`/`surpriseCounts` (every write
+	 *  site here already shares one flush cadence; a fourth independent timer would buy nothing). */
+	private unitVisits: UnitVisitMap;
 	private readonly rateBuckets = new Map<string, { minute: number; count: number }>();
 	/** Coalesce key → last-seen `at`, for the 30s idempotent-replay window. Unbounded but tiny in
 	 *  practice (one entry per distinct (kind,repo,file,agentId,viewerId) tuple ever reported). */
@@ -196,6 +220,7 @@ export class AttentionStore {
 		this.raw = new JsonlLog<AttentionEvent>({ path: path.join(this.stateDir, "operator-attention.jsonl"), log: (m) => this.log(`operator-attention.jsonl: ${m}`) });
 		this.seenMap = loadSeenMap(this.stateDir);
 		this.surpriseCounts = loadSurpriseCounts(this.stateDir);
+		this.unitVisits = loadUnitVisits(this.stateDir);
 	}
 
 	/** `GLANCE_ATTENTION=0` (legacy alias `OMP_SQUAD_ATTENTION`, batch-3 review: `.env.example`
@@ -302,6 +327,11 @@ export class AttentionStore {
 		} catch (err) {
 			this.log(`attention-surprise.json write failed: ${errText(err)}`);
 		}
+		try {
+			getStorageBackend().writeDurableSync(unitVisitPath(this.stateDir), JSON.stringify(this.unitVisits));
+		} catch (err) {
+			this.log(`unit-visited.json write failed: ${errText(err)}`);
+		}
 	}
 
 	/** Call from the manager's `stop()`, mirroring every other debounced-write subsystem there. */
@@ -351,6 +381,39 @@ export class AttentionStore {
 	 *  events last, like every other `JsonlLog.recent()` caller sees. */
 	recentEvents(limit?: number): AttentionEvent[] {
 		return this.raw.recent(limit);
+	}
+
+	/** Record that `viewerId` (or the single implicit file-mode viewer, when `undefined`) has
+	 *  visited unit `agentId` — the needs-you ladder's mark-seen mutation
+	 *  (`POST /api/attention/ladder/seen`). Max-merge, same monotone contract as `mergeSeen`: a
+	 *  stale/out-of-order replay must never move a visit stamp backward. Never gated by the
+	 *  `disabled()` kill switch or the rate limiter above — those guard the file-viewing telemetry
+	 *  lane; visiting a roster row is a core ladder function the operator must always be able to do. */
+	markUnitVisited(agentId: string, viewerId: string | undefined, at?: number): void {
+		const stamp = at ?? this.now();
+		const existing = this.unitVisits[agentId];
+		const lastSeenAt = Math.max(existing?.lastSeenAt ?? 0, stamp);
+		let byViewer = existing?.byViewer;
+		if (viewerId) byViewer = { ...byViewer, [viewerId]: Math.max(byViewer?.[viewerId] ?? 0, stamp) };
+		this.unitVisits[agentId] = byViewer ? { lastSeenAt, byViewer } : { lastSeenAt };
+		this.scheduleWrite();
+	}
+
+	/** `viewerId === undefined` ⇒ the file-mode single-implicit-viewer collapse: `lastSeenAt` IS the
+	 *  visit stamp (there is no `byViewer` to disagree with it). A REAL per-viewer id reads its own
+	 *  entry only — it never falls back to `lastSeenAt`, which could be a DIFFERENT viewer's more
+	 *  recent visit (DB mode: viewer A opening a unit must never silently read as "seen" for viewer
+	 *  B). Absence (no entry at all, or no entry for this viewer) returns `undefined` — fail closed,
+	 *  never coerced to "seen" by a missing record. */
+	unitVisitedAt(agentId: string, viewerId: string | undefined): number | undefined {
+		const entry = this.unitVisits[agentId];
+		if (!entry) return undefined;
+		return viewerId === undefined ? entry.lastSeenAt : entry.byViewer?.[viewerId];
+	}
+
+	/** Raw entry accessor for tests/debugging — mirrors `lastSeen(repo,file)`'s shape one layer up. */
+	unitVisitEntry(agentId: string): SeenEntry | undefined {
+		return this.unitVisits[agentId];
 	}
 }
 
