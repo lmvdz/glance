@@ -62,6 +62,7 @@ export const NAV_ROWS: readonly PaletteNavRow[] = [
   { kind: 'nav', id: 'nav-tasks', label: 'Tasks', view: 'tasks' },
   { kind: 'nav', id: 'nav-graph', label: 'Graph', view: 'omp-graph' },
   { kind: 'nav', id: 'nav-fog', label: 'Fog', view: 'fog' },
+  { kind: 'nav', id: 'nav-friction', label: 'Friction', view: 'friction' },
   { kind: 'nav', id: 'nav-capabilities', label: 'Capabilities', view: 'capabilities' },
   { kind: 'nav', id: 'nav-org', label: 'Organization settings', view: 'org' },
 ];

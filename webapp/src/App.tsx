@@ -25,6 +25,7 @@ import { CapabilityPanel } from './components/CapabilityPanel';
 import { CommandPalette } from './components/CommandPalette';
 import { OmpGraphPanel } from './components/OmpGraphPanel';
 import { FogView } from './components/FogView';
+import { FrictionInbox } from './components/FrictionInbox';
 import { IntervenceView } from './components/IntervenceView';
 import { DesignReviewView } from './components/DesignReviewView';
 import { WorkspaceCockpit } from './components/WorkspaceCockpit';
@@ -96,6 +97,7 @@ const MainContent = () => {
       right here. */}
   if (view === 'fleet') return <WorkspaceCockpit />;
   if (view === 'fog') return <FogView />;
+  if (view === 'friction') return <FrictionInbox />;
   if (view === 'intervene') {
     return (
       <PageContextScope value={intervenePageContext}>

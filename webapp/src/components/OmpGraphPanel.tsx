@@ -15,6 +15,7 @@ import { useTaskContext } from '../context/TaskContext';
 import { PageContextScope } from '../context/PageContext';
 import { deriveGraphPageContext } from '../lib/pageContextDerive';
 import { VerdictBadge } from './ui';
+import { AdoptionStrip } from './AdoptionPanel';
 import FleetPulseCanvas, { type DepthMetric, type DepthWeek } from '../omp-graph/FleetPulseCanvas';
 import Inspector from '../omp-graph/Inspector';
 import { buildPulseModel, hourBins } from '../omp-graph/pulse-model';
@@ -263,6 +264,11 @@ export const OmpGraphPanel: React.FC = () => {
           </button>
         )}
       </div>
+
+      {/* Adoption counters (daily-driver-w15 concern 04): the "real success metric" of the dogfood
+          experiment, made legible right where the fleet's temporal pulse already lives. Self-fetching
+          and self-stated (empty/error), so it never complicates the graph's own data plane. */}
+      <AdoptionStrip />
 
       <div className="flex min-h-0 flex-1">
         {error && !model && (
