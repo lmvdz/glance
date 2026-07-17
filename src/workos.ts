@@ -46,7 +46,8 @@ export function workosDiscoveryUrl(clientId: string): string {
 /** Decode a JWT's payload WITHOUT verifying its signature. Safe here: the token was just handed to us by
  *  WorkOS over TLS in the code→token exchange, and we only read non-authoritative profile claims from it
  *  (identity/session are still owned by better-auth). Returns null on any malformed input — including a
- *  payload segment that decodes to valid JSON but isn't an object (the old blind cast waved those through). */
+ *  payload segment that decodes to valid JSON but isn't an object (the old blind cast waved those through).
+ *  @substrate exported for tests only — schema-external-json.test.ts asserts the decode/reject matrix directly. */
 export function decodeJwtPayload(jwt: string | undefined | null): Record<string, unknown> | null {
 	if (!jwt) return null;
 	const parts = jwt.split(".");

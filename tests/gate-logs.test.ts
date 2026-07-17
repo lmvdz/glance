@@ -163,6 +163,42 @@ test("writeGateLog itself rejects (never called directly without a guard) on a f
 	await expect(writeGateLog("agent-5", "diff", "content")).rejects.toThrow();
 });
 
+// ── writeGateLog / budgetedExcerpt: persistence-boundary redaction (noisegate-compaction concern 02) ─
+
+test("offload content containing a secret-shaped value: the on-disk file is redacted, the excerpt text is unaffected", async () => {
+	const secret = `sk-${"a".repeat(20)}`;
+	const s = `${"line filler ".repeat(20)}\ncredential: ${secret}\n${"more filler ".repeat(20)}`;
+	const result = await budgetedExcerpt(s, 40, { kind: "log", agentId: "agent-secret" });
+	// The excerpt handed to the judge is built from the UNREDACTED input by design (persistence-
+	// boundary-only redaction — see DESIGN.md "Redaction") — it may or may not contain the secret
+	// depending on where head/tail land, but it is NOT itself redacted, and the pointer is still there.
+	expect(result.text).toMatch(/\[\d+ bytes omitted — full: .+\]$/);
+	expect(result.path).toBeDefined();
+	// The durably persisted file, however, IS redacted.
+	const onDisk = await new LocalStorageBackend().readText(result.path!);
+	expect(onDisk).not.toContain(secret);
+	expect(onDisk).toContain("[REDACTED]");
+});
+
+test("offload content with legit `authorization`-adjacent code: the on-disk file is byte-identical (hardened pattern doesn't fire)", async () => {
+	const line = "const authorization = req.headers.authorization;";
+	const s = `${line}\n${"filler line for budget padding ".repeat(20)}`;
+	const result = await budgetedExcerpt(s, 40, { kind: "log", agentId: "agent-legit" });
+	expect(result.path).toBeDefined();
+	const onDisk = await new LocalStorageBackend().readText(result.path!);
+	expect(onDisk).toBe(s); // redact(s) === s for this content — nothing should change on disk
+});
+
+test("writeGateLog persists redacted content but reports the ORIGINAL byte length", async () => {
+	const secret = `sk-${"b".repeat(20)}`;
+	const content = `before ${secret} after`;
+	const result = await writeGateLog("agent-bytes", "log", content);
+	expect(result.bytes).toBe(Buffer.byteLength(content, "utf8")); // original length, not the redacted (shorter) length
+	const onDisk = await new LocalStorageBackend().readText(result.path);
+	expect(onDisk).not.toContain(secret);
+	expect(onDisk!.length).toBeLessThan(content.length); // redaction actually shrank what hit disk
+});
+
 // ── writeGateLog: unique path per write ─────────────────────────────────────────────────────────
 
 test("writeGateLog gives every write its own unique path, even for the same agent+kind+content", async () => {

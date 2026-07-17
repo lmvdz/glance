@@ -16,6 +16,7 @@ import { afterAll, afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { setGateLogRoot } from "../src/gate-logs.ts";
 import { type ConflictResolver, landAgent, type ResolutionReviewer } from "../src/land.ts";
 
 const tmps: string[] = [];
@@ -403,4 +404,57 @@ test("flag on + autoresolve: conflict-resolved branch that introduces NEW_RED is
 	expect(res.detail).toContain("regression gate");
 	expect(reviewerCalled).toBe(false); // rolled back before reviewer got a chance
 	expect(await gitOut(repo, "rev-parse", "HEAD")).toBe(head0);
+});
+
+// ─── noisegate-compaction concern 05: signal-ranked reduction on the "unrunnable" detail ──────────
+//
+// applyRegressionGate's "could not run" detail (land.ts ~line 424) used to plain-`truncate()` the
+// full-suite output at 300 chars — a head-cut that silently drops the ONE diagnostic line (a
+// `command not found` executable-resolution failure) if it doesn't happen to fall in the first 300
+// characters of a noisy dump. Now it routes through `reduceOutput`, which ranks lines by a preserve
+// table (CRITICAL tier includes `command not found`) and fills the budget signal-first, so the
+// diagnostic line survives even when it's the LAST line of a dump many times over budget.
+test("noisegate-compaction: mergedUnrunnable detail (300-char budget) surfaces a 'command not found' line buried past the cutoff, with an omission marker proving reduction happened", async () => {
+	process.env.OMP_SQUAD_REGRESSION_GATE = "1";
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "rg-signal-"));
+	tmps.push(repo);
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "rg-signal-state-"));
+	tmps.push(stateDir);
+	setGateLogRoot(stateDir);
+	try {
+		await git(repo, "init", "-q", "-b", "main");
+		await git(repo, "config", "user.email", "t@t");
+		await git(repo, "config", "user.name", "t");
+		await git(repo, "config", "commit.gpgsign", "false");
+		await fs.writeFile(path.join(repo, "package.json"), JSON.stringify({ scripts: { check: "true", test: "sh gate.sh" } }));
+		await fs.writeFile(path.join(repo, "bun.lock"), "");
+		// The full-suite gate dies on a missing executable (non-127 shape — Bun-style "command not
+		// found" message), but only AFTER printing ~1KB of unrelated noise ahead of it — many times the
+		// 300-char budget this detail site enforces. A plain head-cut(300) would show only noise; the
+		// signal-ranked reducer must still surface the diagnostic line.
+		const noise = Array.from({ length: 25 }, (_, i) => `printf 'padding-line-${String(i).padStart(2, "0")}-filler-filler-filler\\n'`).join("\n");
+		await fs.writeFile(
+			path.join(repo, "gate.sh"),
+			["#!/bin/sh", noise, "printf 'sh: glance-nonexistent-tool-xyz: command not found\\n'", "exit 1"].join("\n"),
+		);
+		await fs.writeFile(path.join(repo, "base.txt"), "base\n");
+		await git(repo, "add", "-A");
+		await git(repo, "commit", "-qm", "base");
+		const head0 = await gitOut(repo, "rev-parse", "HEAD");
+		const wt = await branchWorktree(repo, "feat", { "feature.txt": "new\n" });
+
+		const res = await landAgent({ repo, worktree: wt, branch: "feat", message: "land feat", commitWip: false, verify: "true" });
+
+		expect(res.ok).toBe(false);
+		expect(res.merged).toBe(false);
+		expect(res.retryable).toBe(true); // environment failure, not the branch's fault
+		expect(res.detail).toContain("could not run");
+		// The signal survived the 300-char reduction — not just head-cut noise.
+		expect(res.detail).toContain("command not found");
+		// A marker/pointer proves an actual reduction (not a coincidental fit) took place.
+		expect(res.detail).toMatch(/\[\d+ (lines|bytes) omitted/);
+		expect(await gitOut(repo, "rev-parse", "HEAD")).toBe(head0); // main rolled back, nothing landed
+	} finally {
+		setGateLogRoot(path.join(os.tmpdir(), "gate-logs-unset"));
+	}
 });

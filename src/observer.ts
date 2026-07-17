@@ -37,6 +37,7 @@ import { getDoneProofByBranch, proofCoversTip } from "./done-proof.ts";
 import { errText } from "./err-text.ts";
 import type { LandLedger } from "./land-ledger.ts";
 import { aheadUnknown } from "./land-mode.ts";
+import { stripAnsi } from "./text-util.ts";
 import type { AgentDTO, AutomationSkipReason, IssueRef } from "./types.ts";
 
 export type Severity = "low" | "high" | "structural";
@@ -150,10 +151,10 @@ function landFailCap(): number {
 
 const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
-/** Strip terminal control sequences before text leaves logs/TTY and becomes a Plane title. */
-export function stripAnsi(value: string): string {
-	return value.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/\x1b[@-_][0-?]*[ -/]*[@-~]/g, "");
-}
+/** Strip terminal control sequences before text leaves logs/TTY and becomes a Plane title. Moved to
+ *  text-util.ts (noisegate-compaction concern 01) so output-reduce.ts can share it without pulling in
+ *  this module's Plane-filing dependencies; re-exported here so existing importers are unaffected. */
+export { stripAnsi };
 
 function cleanTitle(value: string): string {
 	return stripAnsi(value).replace(/\s+/g, " ").trim();

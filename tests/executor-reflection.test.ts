@@ -161,6 +161,94 @@ describe("reflexion — fixup node, flag on", () => {
 		}
 	});
 
+	// ── identity safety (noisegate-compaction concern 03, red-team RT2-1) ────────────────────────────
+	//
+	// A REAL oversized failing output now reaches `lastOutput` via runCommand's `reduceOutput`, which
+	// appends a `[N bytes omitted — full: <path>]` pointer carrying a FRESH ts+nonce on every single
+	// reduction — even when the underlying failure text is byte-identical. Before `identityNormalize`
+	// was wired into `hashOutput`'s input here, that alone defeated refutation on every oversized retry:
+	// the raw strings never matched, so the SAME reproduced failure looked like a brand-new one forever.
+
+	test("(concern 03) refutation still fires when only the offload POINTER NONCE differs between two oversized-failure visits", async () => {
+		process.env.OMP_SQUAD_REFLEXION = "1";
+		const dir = tmp();
+		try {
+			const agent = new RecordingDriver();
+			let llmCalls = 0;
+			const ex = new SingleAgentExecutor({
+				cwd: "/tmp/wt",
+				acquireAgent: async () => agent,
+				emit: () => {},
+				gate: async () => "",
+				reflection: {
+					stateDir: dir,
+					repo: "/repo",
+					agentId: "a1",
+					llm: async () => {
+						llmCalls++;
+						return { rootCause: "guess #1", whatToDoDifferently: "try X" };
+					},
+				},
+			});
+			const ctx = newCtx();
+			// Same underlying failure tail every time; only the offload pointer's ts+nonce differs, exactly
+			// as two REAL `reduceOutput` calls on identical input would produce.
+			const body = "SAME FAILURE TAIL: assertion failed at line 42\n".repeat(50);
+			const reducedA = `${body}\n[1234 bytes omitted — full: /tmp/state/gate-logs/a1/1700000000000-aaaaaaaa-executor-steer.log]`;
+			const reducedB = `${body}\n[1234 bytes omitted — full: /tmp/state/gate-logs/a1/1700000005000-bbbbbbbb-executor-steer.log]`;
+
+			await ex.runAgent(fixupNode(5), withOutput(ctx, reducedA)); // 1st visit: no reflection yet
+			await ex.runAgent(fixupNode(5), withOutput(ctx, reducedA)); // 2nd visit: reflects, stores guess #1
+			await ex.runAgent(fixupNode(5), withOutput(ctx, reducedB)); // 3rd visit: DIFFERENT raw string, same normalized content
+
+			expect(llmCalls).toBe(1); // no second guess — the nonce-only difference must not look like progress
+			expect(agent.messages[2]).toContain("did NOT fix this");
+			expect(agent.messages[2]).toContain("guess #1");
+			expect(agent.messages[2]).not.toContain("try X");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("(concern 03) a GENUINELY different oversized failure still gets a fresh reflection, not a false refutation", async () => {
+		process.env.OMP_SQUAD_REFLEXION = "1";
+		const dir = tmp();
+		try {
+			const agent = new RecordingDriver();
+			let llmCalls = 0;
+			const ex = new SingleAgentExecutor({
+				cwd: "/tmp/wt",
+				acquireAgent: async () => agent,
+				emit: () => {},
+				gate: async () => "",
+				reflection: {
+					stateDir: dir,
+					repo: "/repo",
+					agentId: "a1",
+					llm: async () => {
+						llmCalls++;
+						return { rootCause: `guess #${llmCalls}`, whatToDoDifferently: "try something" };
+					},
+				},
+			});
+			const ctx = newCtx();
+			const reducedA = `assertion failed: X != Y\n[500 bytes omitted — full: /tmp/state/gate-logs/a1/1700000000000-aaa-executor-steer.log]`;
+			// A DIFFERENT core failure, with its own (also pointer-shaped) offload line — identityNormalize
+			// must strip the pointer without collapsing genuinely distinct failures into "the same".
+			const reducedB = `assertion failed: totally unrelated message Z\n[500 bytes omitted — full: /tmp/state/gate-logs/a1/1700000009000-bbb-executor-steer.log]`;
+
+			await ex.runAgent(fixupNode(5), withOutput(ctx, reducedA)); // 1st visit
+			await ex.runAgent(fixupNode(5), withOutput(ctx, reducedA)); // 2nd visit: reflects (guess #1)
+			await ex.runAgent(fixupNode(5), withOutput(ctx, reducedB)); // 3rd visit: genuinely different failure
+
+			expect(llmCalls).toBe(2); // a real change in the failure ⇒ a NEW reflect() call, not a refutation
+			expect(agent.messages[2]).not.toContain("did NOT fix this");
+			expect(agent.messages[2]).toContain("guess #2");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	test("skips the LAST visit before the node's overflow tier (no point reflecting right before escalate)", async () => {
 		process.env.OMP_SQUAD_REFLEXION = "1";
 		const dir = tmp();

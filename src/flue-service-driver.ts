@@ -18,6 +18,7 @@ import * as path from "node:path";
 import type { Subprocess } from "bun";
 import type { AgentDriver } from "./agent-driver.ts";
 import { allProviderAuthEnv, scrubbedSpawnEnv } from "./spawn-env.ts";
+import { truncateLabel } from "./text-util.ts";
 import type { RpcSessionState } from "./types.ts";
 
 export interface FlueInvocation {
@@ -83,11 +84,11 @@ export class FlueServiceDriver extends EventEmitter implements AgentDriver {
 		const inv = this.buildInvocation(payload);
 		this.streaming = true;
 		this.emit("event", { type: "agent_start" });
-		this.emit("event", { type: "tool_execution_start", toolName: `flue:${this.workflow}`, intent: truncate(JSON.stringify(payload), 60) });
+		this.emit("event", { type: "tool_execution_start", toolName: `flue:${this.workflow}`, intent: truncateLabel(JSON.stringify(payload), 60) });
 		try {
 			const { stdout, stderr, code } = await this.exec(inv);
 			if (code !== 0) {
-				throw new Error(`flue run exited ${code}: ${truncate(stderr || stdout, 200)}`);
+				throw new Error(`flue run exited ${code}: ${truncateLabel(stderr || stdout, 200)}`);
 			}
 			const result = extractLastJsonObject(stdout);
 			this.lastResult = result;
@@ -235,7 +236,3 @@ function parseLeadingJson(s: string): unknown {
 	return undefined;
 }
 
-function truncate(s: string, n: number): string {
-	const flat = s.replace(/\s+/g, " ").trim();
-	return flat.length > n ? `${flat.slice(0, n - 1)}…` : flat;
-}

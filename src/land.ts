@@ -15,6 +15,7 @@ import { budgetedExcerpt } from "./gate-logs.ts";
 import { detectVerify, packageManifestError } from "./intake.ts";
 import { envBool } from "./config.ts";
 import { gateExec, gateRunUnrunnable, greenGateUnproven } from "./gate-runner.ts";
+import { reduceOutput } from "./output-reduce.ts";
 import { proofGate, recordProof } from "./proof.ts";
 import { landRiskGateEnabled, landRiskReason } from "./land-risk.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV, gitNoSignEnv } from "./git-harden.ts";
@@ -210,11 +211,6 @@ async function recordMainProof(repo: string, command: string, ok: boolean, detai
 	await recordProof({ repo, worktree: repo, command, ok, detail, sandboxed }).catch(() => {});
 }
 
-/** Cap a string to `n` chars so a gate's failure dump doesn't bloat the land detail. */
-function truncate(s: string, n: number): string {
-	return s.length <= n ? s : `${s.slice(0, n)}…`;
-}
-
 /**
  * Lossless offload half (eap-borrows concern 07, applying concern 03's `budgetedExcerpt`/
  * `writeGateLog` to the land path): the ACCEPTANCE gate's failure/red-baseline details used to plain-
@@ -396,6 +392,7 @@ export async function applyRegressionGate(p: {
 	message: string;
 	branch: string;
 	reMerge: () => Promise<GitRun>;
+	agentId?: string;
 }): Promise<LandResult | null> {
 	if (!regressionGateEnabled()) return null;
 	const fullSuite = await detectVerify(p.repo);
@@ -421,7 +418,7 @@ export async function applyRegressionGate(p: {
 			merged: false,
 			retryable: true,
 			message: p.message,
-			detail: `regression gate could not run (${mergedUnrunnable}): ${fullSuite}\n${truncate(mergedRun.output, 300)}`,
+			detail: `regression gate could not run (${mergedUnrunnable}): ${fullSuite}\n${(await reduceOutput(mergedRun.output, 300, { command: fullSuite, agentId: p.agentId, source: "land-detail" })).text}`,
 		};
 	}
 
@@ -438,7 +435,7 @@ export async function applyRegressionGate(p: {
 			merged: false,
 			retryable: true,
 			message: p.message,
-			detail: `regression gate could not run on BASE (${baseUnrunnable}): ${fullSuite}\n${truncate(baseRun.output, 300)}`,
+			detail: `regression gate could not run on BASE (${baseUnrunnable}): ${fullSuite}\n${(await reduceOutput(baseRun.output, 300, { command: fullSuite, agentId: p.agentId, source: "land-detail" })).text}`,
 		};
 	}
 	const baseFailures = baseRun.code !== 0 ? extractGateFailures(baseRun.output) : [];
@@ -452,7 +449,7 @@ export async function applyRegressionGate(p: {
 			committed: p.committed,
 			merged: false,
 			message: p.message,
-			detail: `regression gate (${fullSuite}) blocked ${p.branch}: ${newRegressions.length} new failure(s):\n  ${newRegressions.join("\n  ")}\n${truncate(mergedRun.output, 600)}`,
+			detail: `regression gate (${fullSuite}) blocked ${p.branch}: ${newRegressions.length} new failure(s):\n  ${newRegressions.join("\n  ")}\n${(await reduceOutput(mergedRun.output, 600, { command: fullSuite, agentId: p.agentId, source: "land-detail" })).text}`,
 		};
 	}
 
@@ -619,7 +616,7 @@ async function landAgentImpl(opts: LandOpts): Promise<LandResult> {
 	const verifyMerged = async (detail: string, reMerge: () => Promise<GitRun>): Promise<LandResult> => {
 		if (!gate) {
 			// No acceptance gate — still run the full-suite regression gate if armed.
-			const rg = await applyRegressionGate({ repo, head0, committed, message, branch: branch ?? "", reMerge });
+			const rg = await applyRegressionGate({ repo, head0, committed, message, branch: branch ?? "", reMerge, agentId: opts.agentId });
 			if (rg) return rg;
 			// Record the landed main even without a gate: an inspectable "landed, no acceptance gate ran" proof.
 			await recordMainProof(repo, "(no acceptance gate)", true, detail, false);
@@ -646,10 +643,10 @@ async function landAgentImpl(opts: LandOpts): Promise<LandResult> {
 				};
 			}
 			// Acceptance gate green — additionally run the full-suite regression gate if armed.
-			const rg = await applyRegressionGate({ repo, head0, committed, message, branch: branch ?? "", reMerge });
+			const rg = await applyRegressionGate({ repo, head0, committed, message, branch: branch ?? "", reMerge, agentId: opts.agentId });
 			if (rg) return rg;
 			// The merged main passed the gate — record it as a durable, inspectable post-merge proof.
-			await recordMainProof(repo, gate, true, `${detail}; verified (${gate})\n${truncate(v.output, 800)}`.trim(), v.sandboxed);
+			await recordMainProof(repo, gate, true, `${detail}; verified (${gate})\n${(await reduceOutput(v.output, 800, { command: gate, agentId: opts.agentId, source: "land-detail" })).text}`.trim(), v.sandboxed);
 			return { ok: true, committed, merged: true, message, detail: `${detail}; verified (${gate})` };
 		}
 		// Merged gate failed — distinguish "branch regressed a green base" from "base was already red".
@@ -758,6 +755,7 @@ async function landAgentImpl(opts: LandOpts): Promise<LandResult> {
 			confirmResolved: opts.confirmResolved ?? false,
 			resolver: opts.resolver ?? defaultResolver(),
 			reviewer: opts.reviewer ?? defaultReviewer(),
+			agentId: opts.agentId,
 		});
 	}
 	return { ok: false, committed, merged: false, message, detail: `merge failed: ${merge.stderr || merge.stdout}` };
@@ -882,8 +880,9 @@ async function attemptAutoResolve(a: {
 	repo: string; worktree: string; branch: string; head0: string; gate: string | undefined; message: string; committed: boolean;
 	confirmResolved: boolean;
 	resolver: ConflictResolver; reviewer: ResolutionReviewer;
+	agentId?: string;
 }): Promise<LandResult> {
-	const { repo, worktree, branch, head0, gate, message, committed, confirmResolved, resolver, reviewer } = a;
+	const { repo, worktree, branch, head0, gate, message, committed, confirmResolved, resolver, reviewer, agentId } = a;
 	const fail = (detail: string): LandResult => ({ ok: false, committed, merged: false, message, detail });
 
 	// (a) Rebase the branch onto main; (b) the resolver clears each conflicted step.
@@ -929,11 +928,11 @@ async function attemptAutoResolve(a: {
 	if (gate) {
 		const v = await runGate(gate, repo);
 		gateSandboxed = v.sandboxed;
-		if (v.code !== 0) return rollback(`auto-resolved ${branch} but verification failed (${gate}) — rolled main back:\n${truncate(v.output, 800)}`);
+		if (v.code !== 0) return rollback(`auto-resolved ${branch} but verification failed (${gate}) — rolled main back:\n${(await reduceOutput(v.output, 800, { command: gate, agentId, source: "land-detail" })).text}`);
 	}
 
 	// (c2) Full-suite regression gate — auto-resolved lands must not bypass it.
-	const rgr = await applyRegressionGate({ repo, head0, committed, message, branch, reMerge: () => git(["merge", "--ff-only", branch], repo) });
+	const rgr = await applyRegressionGate({ repo, head0, committed, message, branch, reMerge: () => git(["merge", "--ff-only", branch], repo), agentId });
 	if (rgr) return rgr;
 
 	// (d) Independent second opinion before keeping an LLM-merged result.

@@ -13,6 +13,7 @@
  * the run, it fails (this is what bounds fix-up loops).
  */
 
+import { identityNormalize } from "../output-reduce.ts";
 import type { BranchOutcome, EngineCheckpoint, NodeExecutor, NodeResult, Outcome, RunContext, RunResult, StageEvent, Workflow, WorkflowNode, WorkflowRunState } from "./types.ts";
 
 const DEFAULT_NODE_VISITS = 50;
@@ -354,9 +355,16 @@ export class WorkflowEngine {
 	 */
 	private noProgressRoute(node: WorkflowNode, ctx: RunContext, shared: Shared, next: string | undefined): string | undefined {
 		if (!node.goalGate || ctx.outcome !== "failed") return next;
-		// Normalize by trimming only — exact equality on the trimmed gate output is enough to catch
-		// a loop reproducing the identical error (e.g. the same tsc message run after run).
-		const current = (ctx.vars.lastOutput ?? "").trim();
+		// Normalize with identityNormalize (output-reduce.ts, noisegate-compaction concern 03) before
+		// the exact-equality check: a >budget failing output now travels through runCommand's
+		// reduceOutput, which appends an offload pointer carrying a FRESH ts+nonce on every single
+		// reduction, so a trim-only compare would see two DIFFERENT strings for the exact same
+		// reproduced error on every visit and this short-circuit would never fire (red-team RT2-1).
+		// identityNormalize strips that pointer line plus ANSI and bun's per-test `[N.NNms]` duration
+		// jitter, so two visits of the SAME failure compare equal while two GENUINELY different
+		// failures still compare different. Deliberate improvement for small (non-reduced) outputs too
+		// — the old trim-only comparator was already defeated by bun's own timing jitter on every visit.
+		const current = identityNormalize(ctx.vars.lastOutput ?? "").trim();
 		const previous = shared.goalOutputs[node.id];
 		shared.goalOutputs[node.id] = current;
 		if (previous === undefined || previous !== current) return next; // first visit, or progress made
