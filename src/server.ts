@@ -34,6 +34,7 @@ import {
 	AnnotationCreateBodySchema,
 	AnnotationSendBodySchema,
 	AssigneesBodySchema,
+	AttentionEventBodySchema,
 	CapabilityInstallBodySchema,
 	CapabilityInstallPatchBodySchema,
 	CapabilityInstallRunBodySchema,
@@ -71,6 +72,7 @@ import {
 	PlanCandidateTransitionBodySchema,
 	PlanVoteCallBodySchema,
 	PlanVoteCastBodySchema,
+	PromoteBodySchema,
 	PushSubscriptionBodySchema,
 	PushTapBodySchema,
 	SpawnBodySchema,
@@ -88,8 +90,13 @@ import { appendConcernDecision, listPlanDirs, parsePlanConcerns, parsePlanDocume
 import { isPlanDocPath, planDocDiffSince, planDocHeadRevision, readPlanDoc } from "./plan-doc.ts";
 import { planVoteGateOpen, tallyPlanVoteRound } from "./plan-votes.ts";
 import { hardenedGit } from "./git-harden.ts";
-import { searchFabric, type KbDocType } from "./fabric-search.ts";
+import { rankKbDocs, searchFabric, type KbDoc, type KbDocType } from "./fabric-search.ts";
 import type { FabricSnapshot } from "./fabric.ts";
+import { redactAttentionForActor, redactSeenMapForActor } from "./attention.ts";
+import { computeFog, repoHasHistory } from "./comprehension-fog.ts";
+import type { SymptomSearchHit } from "./symptoms.ts";
+import type { EpisodeMeta } from "./weekly-episode.ts";
+import { normalizeRepoPath } from "./project-registry.ts";
 import { readAudit, type AuditQuery } from "./audit.ts";
 import type { AutomationEvent, AutomationLoop, AutomationQuery, AutomationRollupRow } from "./automation-log.ts";
 import { learningFlags, type MetricName, type MetricRollupRow } from "./metrics.ts";
@@ -103,6 +110,7 @@ import { readModelOutcomes } from "./model-outcomes.ts";
 import { readTaskOutcomes } from "./task-outcomes.ts";
 import { readAllReceipts } from "./receipts.ts";
 import { fetchIssueDetail, listPlaneIssues, planeConfig, planeRepos } from "./plane.ts";
+import { promoteIssue } from "./promote.ts";
 import { runVisionPass } from "./vision.ts";
 import { checkVisionUrl } from "./ssrf.ts";
 import { harnessEventDecision } from "./harness-hooks.ts";
@@ -171,6 +179,8 @@ import { type FederationSnapshot, federationView } from "./federation.ts";
 import { workflowSnapshot } from "./workflow-catalog.ts";
 import { validateRequestedMode } from "./autonomy.ts";
 import { resolveStateDir } from "./state-dir.ts";
+import { costGateAggregateReady, costGateMode } from "./cost-gate.ts";
+import { laneFromRouted } from "./lane.ts";
 import { featureFlagStates, type FeatureFlagKey, isFeatureFlagKey, type RuntimeSettingsStore } from "./runtime-settings.ts";
 import { parsePolicyDoc, type PolicyStore } from "./policy.ts";
 import { publicCapabilityCatalog, publicCapabilityManifest } from "./capabilities/catalog.ts";
@@ -274,14 +284,38 @@ function featureCriteria(value: unknown): FeatureCriterion[] | undefined {
 	});
 }
 
-function featureDecisions(value: unknown): FeatureDecision[] | undefined {
+/**
+ * Sanitize a PATCH body's `decisions` array against the feature's STORED decisions. The incoming
+ * array defines membership and order (so deleting a decision still works), but for an entry whose
+ * id already exists on the feature, the server-authoritative fields — `source`, `evidence`,
+ * `sourceRef`, `createdAt` — are kept from the stored record and only the text is taken from the
+ * client. Without this merge, the webapp's routine "add one decision" round-trip (it PATCHes the
+ * FULL array back) coerced every stored `model-delta` decision to `source:"human"` and silently
+ * dropped its evidence anchors — destroying the teaching content the comprehension lane exists to
+ * produce. New entries (id not on the feature) are down-tiered exactly as before: a PATCH client
+ * can never mint `model-delta` records, because those are only minted through
+ * `squad_record_decision`'s evidence validation. (Model-deltas always live on persisted features —
+ * `recordAgentDecision` adopts before writing — so `stored` is never missing for them.)
+ * @substrate exported for tests only — the PATCH handler in this file is the one production caller;
+ * the merge semantics above are exactly what tests/feature-decisions-merge.test.ts pins.
+ */
+export function featureDecisions(value: unknown, stored: FeatureDecision[] | undefined): FeatureDecision[] | undefined {
 	if (!Array.isArray(value)) return undefined;
+	const byId = new Map((stored ?? []).map((d) => [d.id, d]));
 	return value.flatMap((item): FeatureDecision[] => {
 		if (!item || typeof item !== "object") return [];
 		const rec = item as Record<string, unknown>;
 		const id = typeof rec.id === "string" ? rec.id : undefined;
 		const text = typeof rec.text === "string" ? rec.text.trim() : "";
 		if (!id || !text) return [];
+		const existing = byId.get(id);
+		// model-delta records are IMMUTABLE through PATCH (code-review resume finding 2): their text
+		// was validated against the recording run's evidence anchors, and accepting a client text edit
+		// while keeping source/evidence/sourceRef would present a rewritten claim as run-validated —
+		// the exact fabricated-verification pattern the lane exists to prevent. A client may still
+		// DELETE one by omitting it; editing any other source's text stays allowed.
+		if (existing?.source === "model-delta") return [existing];
+		if (existing) return [{ ...existing, text }];
 		return [{ id, text, source: rec.source === "plan" || rec.source === "human" || rec.source === "agent" ? rec.source : "human", createdAt: typeof rec.createdAt === "number" ? rec.createdAt : undefined }];
 	});
 }
@@ -827,6 +861,10 @@ export class SquadServer {
 			gate: { image: process.env.OMP_SQUAD_GATE_SANDBOX?.trim() || process.env.OMP_SQUAD_GATE_SANDBOX_IMAGE?.trim() || DERIVED_SANDBOX_IMAGE, strict: envBool("OMP_SQUAD_GATE_SANDBOX_STRICT", false) },
 			projects: [...new Set(managers.flatMap((m) => m.projects().map((p) => p.repo)))],
 			zombieAgents: agents.filter((a) => a.status === "error").length,
+			// Known-symptom index (comprehension concern 07), fleet-wide across every manager — feeds both
+			// `glance doctor`'s summary row and the per-check auto-match. Stripped to the two fields
+			// `matchSymptom` needs; the daemon's stateDir stays the only place a full `SymptomEntry` lives.
+			symptoms: (await Promise.all(managers.map((m) => m.symptoms()))).flat().map((s) => ({ symptom: s.symptom, whereToLook: s.whereToLook })),
 		};
 	}
 
@@ -857,6 +895,17 @@ export class SquadServer {
 			// Not a feature flag: read straight from the env the orchestrator reads.
 			landConfirm: envBool("OMP_SQUAD_LAND_CONFIRM", false),
 			regressionGate: on("OMP_SQUAD_REGRESSION_GATE"),
+			// Cost-gate posture (adw-factory-borrows concern 09): mode is env-global; aggregate readiness
+			// is per-stateDir — file mode's resolveStateDir() is exactly the dir SquadManager defaults to.
+			// (DB mode reports the global dir; per-org cost aggregates aren't wired there yet, same
+			// posture as plane.ts's multi-org write guard.) Without these two fields the doctor's
+			// enforce-armed-but-inert check reads undefined and never fires against a live daemon.
+			costGateMode: costGateMode(),
+			// costGateAggregateReady, NOT costAggregateNeedsRebuild: "the doc exists and parses" is true
+			// after the very first receipt write while every cell is still below OMP_SQUAD_COST_MIN_SAMPLE
+			// — enforce would be armed but silently inert, the exact false-green this fact feeds the
+			// doctor to catch. Readiness = some cell (either ledger) clears the sample floor.
+			costAggregateReady: await costGateAggregateReady(resolveStateDir()),
 		};
 	}
 
@@ -1743,6 +1792,33 @@ export class SquadServer {
 			const answer = await manager.answer(decodeURIComponent(url.pathname.slice("/api/answers/".length)));
 			return answer ? Response.json(answer) : new Response("no such answer", { status: 404 });
 		}
+		// `glance symptom <query>` (comprehension concern 07): ranking stays server-side, reusing
+		// fabric-search's BM25 core (`rankKbDocs`) over symptom+whereToLook text rather than forking a
+		// second scorer — the same machinery `GET /api/fabric/search` drives off the flattened snapshot,
+		// applied here directly to `listSymptoms` so the CLI gets the FULL entry back (whereToLook array,
+		// fixedBy, landedAt) instead of a lossy KbDoc snippet. An empty/missing `q` returns no results
+		// (never the unranked full list) — this route ranks, it doesn't browse.
+		if (url.pathname === "/api/symptoms" && req.method === "GET") {
+			// Actor-derived repo scoping (batch-2 review): same discipline as /api/fog above — a `?repo=`
+			// outside the actor-visible set yields nothing, and no param means "everything visible",
+			// never "everything on the manager".
+			const visible = manager.attentionVisibleRepos(actor);
+			const repoParam = url.searchParams.get("repo");
+			const repos = repoParam ? (visible.has(normalizeRepoPath(repoParam)) ? [repoParam] : []) : [...visible];
+			const q = url.searchParams.get("q") ?? "";
+			const topK = boundedNumber(url.searchParams.get("topK"), 20, 1, 100);
+			if (!q.trim() || repos.length === 0) return Response.json({ query: q, results: [] as SymptomSearchHit[] });
+			const all = (await Promise.all(repos.map((r) => manager.symptoms(r)))).flat();
+			const docs: KbDoc[] = all.map((s) => ({ type: "symptom", id: s.id, title: s.symptom, text: `${s.symptom} ${s.whereToLook.join(" ")}`, repo: s.repo, ts: s.landedAt }));
+			const byId = new Map(all.map((s) => [s.id, s]));
+			const results: SymptomSearchHit[] = rankKbDocs(docs, q, { topK })
+				.map((r) => {
+					const entry = byId.get(r.id);
+					return entry ? { id: entry.id, symptom: entry.symptom, whereToLook: entry.whereToLook, repo: entry.repo, fixedBy: entry.fixedBy, landedAt: entry.landedAt, score: r.score } : undefined;
+				})
+				.filter((r): r is SymptomSearchHit => r !== undefined);
+			return Response.json({ query: q, results });
+		}
 		if (url.pathname === "/api/answers" && req.method === "POST") {
 			const decoded = decodeBody(AskBodySchema, await req.json().catch(() => null));
 			if (Result.isFailure(decoded)) return new Response("expected { repo, question }", { status: 400 });
@@ -1752,6 +1828,95 @@ export class SquadServer {
 			} catch (err) {
 				return new Response(errText(err), { status: 400 });
 			}
+		}
+		// Operator-attention substrate (comprehension concern 01): a durable, tenant-scoped record of
+		// what the human has actually looked at. `viewerId`/`at` are stamped HERE, server-side, from the
+		// same `session`-derived identity `featureAuthor` above uses — never accepted from the client
+		// body (a client-supplied viewerId would let any actor impersonate another's attention, and a
+		// client-supplied `at` would let a flood backdate the seen map). `isAdmin` for redaction is the
+		// SAME `role` this request already resolved above, not re-derived.
+		if (url.pathname === "/api/attention" && req.method === "POST") {
+			if (manager.attentionDisabled()) return Response.json({ ok: false, disabled: true });
+			const decoded = decodeBody(AttentionEventBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response("expected { kind, repo }", { status: 400 });
+			const body = decoded.success;
+			// Fail CLOSED: validated against the actor-visible repo set the same way buildFabricSnapshot
+			// derives it (fabric.ts's `actorVisibleRepoSet`) — an actor with no derivable repos (no live
+			// agents, no persisted features) rejects EVERY repo, never falls open to "unrestricted".
+			if (!manager.attentionVisibleRepos(actor).has(normalizeRepoPath(body.repo))) return new Response("unknown repo", { status: 400 });
+			const viewerId = session ? actor.id : undefined;
+			const result = manager.recordAttention({ kind: body.kind, repo: body.repo, file: body.file, agentId: body.agentId, answerId: body.answerId, prNumber: body.prNumber, viewerId }, actor.id);
+			if (!result.ok && result.reason === "rate-limited") return new Response("rate limited", { status: 429 });
+			return Response.json({ ok: result.ok });
+		}
+		if (url.pathname === "/api/attention" && req.method === "GET") {
+			if (manager.attentionDisabled()) return Response.json({ disabled: true });
+			const visible = manager.attentionVisibleRepos(actor);
+			const repoParam = url.searchParams.get("repo");
+			// A foreign/unresolvable `?repo=` reads as "nothing" rather than a 400 — GETs are lenient
+			// (module doc: only the POST fail-closes loudly), but never leak a repo outside the actor's
+			// own visible set just because the query string named one.
+			const repos = repoParam ? (visible.has(normalizeRepoPath(repoParam)) ? [repoParam] : []) : [...visible];
+			const events = manager.attentionEvents(repos);
+			const redacted = redactAttentionForActor(events, { viewerId: session ? actor.id : undefined, isAdmin: roleAtLeast(role, "admin") });
+			return Response.json({ events: redacted });
+		}
+		if (url.pathname === "/api/attention/seen" && req.method === "GET") {
+			if (manager.attentionDisabled()) return Response.json({ disabled: true });
+			const visible = manager.attentionVisibleRepos(actor);
+			const repoParam = url.searchParams.get("repo");
+			const repos = repoParam ? (visible.has(normalizeRepoPath(repoParam)) ? [repoParam] : []) : [...visible];
+			const seen = manager.attentionSeen(repos);
+			const redacted = redactSeenMapForActor(seen, { viewerId: session ? actor.id : undefined, isAdmin: roleAtLeast(role, "admin") });
+			return Response.json({ seen: redacted });
+		}
+		// Comprehension fog (concern 03): a monotone per-file comprehension-debt read, joined from every
+		// completed receipt against the attention substrate's seen map. Repos are derived from the actor
+		// exactly like the two attention GETs above — NEVER solely from `?repo=` — so a foreign repo named
+		// in the query string reads as "nothing" rather than leaking another tenant's debt. `computeFog`
+		// itself re-filters both inputs through this same repo list before joining (DESIGN.md's tenant-
+		// scoping row: a tested deliverable, not a single call site's discipline), so this route's own
+		// pre-filtering is belt-and-suspenders, not the only guard.
+		if (url.pathname === "/api/fog" && req.method === "GET") {
+			if (manager.attentionDisabled()) return Response.json({ entries: [], repoHasHistory: {}, disabled: true });
+			const visible = manager.attentionVisibleRepos(actor);
+			const repoParam = url.searchParams.get("repo");
+			const repos = repoParam ? (visible.has(normalizeRepoPath(repoParam)) ? [normalizeRepoPath(repoParam)] : []) : [...visible];
+			const now = Date.now();
+			const receipts = await manager.allReceipts();
+			const seen = manager.attentionSeen(repos);
+			// Concern 08: the "surprised me" chip raises a file's effective change mass without
+			// inflating the raw `changesSinceSeen` count (attention.ts's durable, non-rotating
+			// `SurpriseCountMap` — never the raw JSONL feed, which rotates). Carries no viewer
+			// identity, so it needs no redaction pass unlike `seen` above.
+			const surpriseCounts = manager.attentionSurpriseCounts(repos);
+			const entries = computeFog({ receipts, seen, repos, now, surpriseCounts });
+			const historyByRepo: Record<string, boolean> = {};
+			for (const repo of repos) historyByRepo[repo] = repoHasHistory(seen, repo, now);
+			return Response.json({ entries, repoHasHistory: historyByRepo });
+		}
+		// Weekly episode brief (comprehension concern 09): list metas for the caller's visible repos
+		// (never full markdown — that's the :id route below), same actor-derived repo scoping as
+		// /api/fog and /api/symptoms above (fail closed on a foreign ?repo=).
+		if (url.pathname === "/api/episodes" && req.method === "GET") {
+			const visible = manager.attentionVisibleRepos(actor);
+			const repoParam = url.searchParams.get("repo");
+			const repos = repoParam ? (visible.has(normalizeRepoPath(repoParam)) ? [repoParam] : []) : [...visible];
+			const all = (await Promise.all(repos.map((r) => manager.episodes(r)))).flat();
+			const episodes: EpisodeMeta[] = all.sort((a, b) => b.isoWeek.localeCompare(a.isoWeek));
+			return Response.json({ episodes });
+		}
+		// Full markdown for one episode. `repo` is REQUIRED here (unlike the list route's optional
+		// filter): an isoWeek id alone isn't globally unique, only unique per repo, so there is no
+		// "search every visible repo" fallback — a missing/foreign repo reads as "unknown repo" rather
+		// than silently picking one.
+		if (url.pathname.startsWith("/api/episodes/") && req.method === "GET") {
+			const id = decodeURIComponent(url.pathname.slice("/api/episodes/".length));
+			const visible = manager.attentionVisibleRepos(actor);
+			const repoParam = url.searchParams.get("repo");
+			if (!repoParam || !visible.has(normalizeRepoPath(repoParam))) return new Response("unknown repo", { status: 400 });
+			const episode = await manager.episode(repoParam, id);
+			return episode ? Response.json(episode) : new Response("no such episode", { status: 404 });
 		}
 		if (url.pathname === "/api/projects" && req.method === "GET") return Response.json(manager.projects());
 		// Friction ledger (plans/daily-dogfood-engine/01): tenant-scoped like /api/projects (one ledger
@@ -1930,7 +2095,7 @@ export class SquadServer {
 			if ("stageOverride" in body) patch.stageOverride = typeof body.stageOverride === "string" ? (body.stageOverride as FeatureStage) : null;
 			if ("category" in body) patch.category = typeof body.category === "string" ? (body.category as FeatureCategory) : null;
 			if ("acceptanceCriteria" in body) patch.acceptanceCriteria = featureCriteria(body.acceptanceCriteria);
-			if ("decisions" in body) patch.decisions = featureDecisions(body.decisions);
+			if ("decisions" in body) patch.decisions = featureDecisions(body.decisions, manager.storedFeatureDecisions(decodeURIComponent(mfpatch[1])));
 			if ("relationships" in body) patch.relationships = featureRelationships(body.relationships);
 			const pf = await manager.updateFeature(decodeURIComponent(mfpatch[1]), patch);
 			return pf ? Response.json(pf) : new Response("no such feature", { status: 404 });
@@ -2404,6 +2569,11 @@ export class SquadServer {
 			// Observability-only provenance (e.g. "voice") threaded to recordAudit/audit.jsonl —
 			// contain-or-omit, same as every other `source` in audit.ts: never consulted for authz.
 			const source = Result.isSuccess(decoded) && typeof decoded.success.source === "string" ? decoded.success.source : undefined;
+			// Operator-sourced lane (adw-factory-borrows F1): the authenticated spawn caller is the
+			// operator, so this is the production path that makes `laneSource === "operator"` — and with
+			// it every LANE_POLICY privilege axis — actually reachable. Invalid values drop to undefined
+			// (classifier decides), never coerce.
+			const lane = Result.isSuccess(decoded) ? laneFromRouted(decoded.success) : undefined;
 			const tracked = manager.projects().map((p) => p.repo);
 			// research-sirvir/03 (dead-wire fix): feed the outcome-driven model shift from THIS request's
 			// resolved `manager` — never a bare `resolveStateDir()`, which in DB mode returns the global
@@ -2413,7 +2583,7 @@ export class SquadServer {
 			const scoreboard = envBool("OMP_SQUAD_MODEL_OUTCOMES", false) ? await manager.spawnScoreboard() : undefined;
 			const plan = await planSpawn(prompt, { cwd: process.cwd(), candidates: discoverRepos(process.cwd(), tracked), scoreboard });
 			try {
-				const dto = await manager.create({ ...plan, profileId, track: true }, actor, source);
+				const dto = await manager.create({ ...plan, profileId, lane, track: true }, actor, source);
 				return Response.json({ agent: dto, plan });
 			} catch (err) {
 				return new Response(err instanceof Error ? err.message : String(err), { status: 409 });
@@ -2740,6 +2910,25 @@ export class SquadServer {
 			const detail = await fetchIssueDetail(url.searchParams.get("repo") ?? process.cwd(), id);
 			if (detail === null) return new Response("plane not configured", { status: 501 });
 			return Response.json(detail);
+		}
+		// adw-factory-borrows concern 05: enrich a Backlog Plane issue with Tier-1/Tier-2 context via
+		// the manager's ask-mode seam, fail-closed validated. Blocks for the same wait window `glance
+		// ask` does (it IS an ask-mode unit under the hood) — the result body always carries `ok` +
+		// `message`, never a bare 4xx/5xx, so the caller always gets the specific refusal reason.
+		const mipromote = url.pathname.match(/^\/api\/issues\/([^/]+)\/promote$/);
+		if (mipromote && req.method === "POST") {
+			const id = decodeURIComponent(mipromote[1]);
+			if (!id) return new Response("issue id required", { status: 400 });
+			const body = decodeBodyOrEmpty(PromoteBodySchema, await req.json().catch(() => null));
+			const repo = typeof body.repo === "string" && body.repo ? body.repo : process.cwd();
+			// A real promotion dispatches an ask-mode unit and waits up to GLANCE_ASK_TIMEOUT_MS (default
+			// 30 min) for its answer — routinely several minutes even in the fast case. That's well past
+			// Bun's 120s idleTimeout (see the comment at Bun.serve above, whose own point is that a
+			// handler stalled this long gets its socket dropped with "request timed out"). Disable the
+			// per-request idle timeout for this one route (0 = no timeout) so the connection survives the
+			// wait; every other route keeps the 120s default.
+			server.timeout(req, 0);
+			return Response.json(await promoteIssue(manager, repo, id, actor));
 		}
 		if (url.pathname === "/api/comments" && req.method === "GET") {
 			const subject = url.searchParams.get("subject") ?? "";
@@ -3194,7 +3383,7 @@ async function allReceiptsAcross(managers: SquadManager[]): Promise<RunReceipt[]
  */
 async function fabricSnapshotAcross(managers: SquadManager[], actor: Actor, opts: { repos?: string[]; includeLeases?: boolean }): Promise<FabricSnapshot> {
 	const snapshots = await Promise.all(managers.map((m) => m.fabric(actor, opts)));
-	if (snapshots.length <= 1) return snapshots[0] ?? { actor: actor.id, generatedAt: Date.now(), scope: [], agents: [], digests: [], hotAreas: [], scout: [], leases: [], decisions: [], failures: [] };
+	if (snapshots.length <= 1) return snapshots[0] ?? { actor: actor.id, generatedAt: Date.now(), scope: [], agents: [], digests: [], hotAreas: [], scout: [], leases: [], decisions: [], failures: [], symptoms: [], episodes: [], answers: [] };
 	return {
 		actor: actor.id,
 		generatedAt: Math.max(...snapshots.map((s) => s.generatedAt)),
@@ -3209,6 +3398,9 @@ async function fabricSnapshotAcross(managers: SquadManager[], actor: Actor, opts
 		leases: snapshots.flatMap((s) => s.leases),
 		decisions: snapshots.flatMap((s) => s.decisions),
 		failures: snapshots.flatMap((s) => s.failures),
+		symptoms: snapshots.flatMap((s) => s.symptoms),
+		episodes: snapshots.flatMap((s) => s.episodes),
+		answers: snapshots.flatMap((s) => s.answers),
 	};
 }
 
@@ -3329,14 +3521,20 @@ async function usagePayload(managers: SquadManager[], url: URL): Promise<{
 
 async function heatPayload(managers: SquadManager[], url: URL): Promise<{
 	days: string[];
-	tree: { id: string; name: string; type: "file"; depth: number; heat: number[] }[];
-	hotAreas: { path: string; heat: number }[];
+	tree: { id: string; name: string; type: "file"; depth: number; heat: number[]; repo: string }[];
+	hotAreas: { path: string; heat: number; repo: string }[];
 	insights: string[];
 	source: string;
 	generatedAt: number;
 }> {
 	const count = boundedNumber(url.searchParams.get("days"), 8, 1, 31);
-	const repo = url.searchParams.get("repo") ?? undefined;
+	const repoParam = url.searchParams.get("repo") ?? undefined;
+	// Repo-normalize equality (comprehension concern 04, batch-3 review): the raw `r.repo === repo`
+	// compare missed a repo whose STORED receipts and the query's `?repo=` value are the same repo
+	// in an equivalent-but-differently-formed path (trailing slash, `~/`-form vs its expanded
+	// absolute form) — same bug class as the fabric leak incident, in the exact endpoint the
+	// concern-04 fog overlay extends. Same discipline every other repo-scoped GET in this file uses.
+	const repoNorm = repoParam ? normalizeRepoPath(repoParam) : undefined;
 	const end = new Date();
 	const days = Array.from({ length: count }, (_, i) => {
 		const d = new Date(end);
@@ -3346,26 +3544,40 @@ async function heatPayload(managers: SquadManager[], url: URL): Promise<{
 	const indexByDay = new Map(days.map((d, i) => [d, i]));
 	// Persisted ledger, not the live roster (see usagePayload) — otherwise reaped agents and post-restart
 	// history vanish and the panel falsely reads "No receipt-backed file writes in this window".
-	const receipts = (await allReceiptsAcross(managers)).filter((r) => !repo || r.repo === repo);
-	const byFile = new Map<string, number[]>();
+	const receipts = (await allReceiptsAcross(managers)).filter((r) => !repoNorm || normalizeRepoPath(r.repo) === repoNorm);
+	// Repo-keyed aggregation (comprehension concern 04, batch-3 review): bare `file` keys collapsed
+	// same-named files across different repos into ONE heat array whenever this response spans more
+	// than one repo — an unfiltered fleet-wide read (no `?repo=`), or a bootstrap-admin's cross-org
+	// break-glass view (see observability-bootstrap-admin.test.ts). Key by
+	// `${normalizeRepoPath(repo)}\0${file}`, the SAME join convention `comprehension-fog.ts`'s
+	// `fogKey` and `attention.ts`'s `seenKey` already use, so a same-named file in a different repo
+	// never shares a heat array with this one. `repo` (the RAW, unnormalized receipt repo — the same
+	// representation `computeFog`'s `FileFogEntry.repo` exposes) is carried on every tree/hotArea
+	// entry so the concern-04 fog overlay can join heat nodes back to `/api/fog` entries without
+	// re-deriving its own repo convention.
+	const byFile = new Map<string, { repo: string; file: string; heat: number[] }>();
 	for (const r of receipts) {
 		const day = new Date(r.endedAt ?? r.startedAt).toISOString().slice(0, 10);
 		const idx = indexByDay.get(day);
 		if (idx === undefined) continue;
 		for (const file of r.filesTouched) {
-			const heat = byFile.get(file) ?? Array(count).fill(0);
-			heat[idx] += 1;
-			byFile.set(file, heat);
+			const key = `${normalizeRepoPath(r.repo)}\0${file}`;
+			const entry = byFile.get(key) ?? { repo: normalizeRepoPath(r.repo), file, heat: Array(count).fill(0) };
+			entry.heat[idx] += 1;
+			byFile.set(key, entry);
 		}
 	}
-	const tree = [...byFile.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([id, heat]) => ({
-		id,
-		name: path.basename(id),
-		type: "file" as const,
-		depth: Math.max(0, id.split(/[\\/]/).length - 1),
-		heat,
-	}));
-	const hotAreas = tree.map((n) => ({ path: n.id, heat: n.heat.reduce((a, b) => a + b, 0) })).filter((n) => n.heat > 0).sort((a, b) => b.heat - a.heat).slice(0, 8);
+	const tree = [...byFile.values()]
+		.sort((a, b) => a.file.localeCompare(b.file) || a.repo.localeCompare(b.repo))
+		.map((entry) => ({
+			id: entry.file,
+			name: path.basename(entry.file),
+			type: "file" as const,
+			depth: Math.max(0, entry.file.split(/[\\/]/).length - 1),
+			heat: entry.heat,
+			repo: entry.repo,
+		}));
+	const hotAreas = tree.map((n) => ({ path: n.id, heat: n.heat.reduce((a, b) => a + b, 0), repo: n.repo })).filter((n) => n.heat > 0).sort((a, b) => b.heat - a.heat).slice(0, 8);
 	return {
 		days,
 		tree,

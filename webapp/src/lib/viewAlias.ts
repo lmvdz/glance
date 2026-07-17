@@ -1,5 +1,5 @@
 /**
- * viewAlias.ts — the dead-route coercion for the four-item shell (GRAPH-FOLD.md §3/§6f).
+ * viewAlias.ts — the dead-route coercion for the post-GRAPH-FOLD shell (GRAPH-FOLD.md §3/§6f).
  *
  * The nav shrank 8→4 (Fleet · Tasks · Graph · Capabilities, + org/intervene/review as
  * routed-into-only views) and `AppView` no longer HAS the eight retired keys — so TypeScript
@@ -12,6 +12,11 @@
  * `coerceView` is the single funnel: every raw string that becomes `view` state (the localStorage
  * restore in TaskContext, and any future deep-link source) goes through here first, so `view` can
  * never hold anything but a real `AppView`.
+ *
+ * comprehension batch-3 review: `fog` was added to `AppView` as a genuinely NEW nav item (mounting
+ * `HeatTree`'s fog mode, which had no render site since the fold) — it is intentionally NOT a fold
+ * destination and has no entry in `VIEW_ALIAS_MAP`; the dead `heat` key keeps aliasing to
+ * `omp-graph` exactly as GRAPH-FOLD specified, unchanged by this addition.
  */
 
 import type { AppView } from '../context/TaskContext';
@@ -24,6 +29,7 @@ const VALID_VIEWS: ReadonlySet<AppView> = new Set<AppView>([
   'fleet',
   'tasks',
   'omp-graph',
+  'fog',
   'capabilities',
   'org',
   'intervene',

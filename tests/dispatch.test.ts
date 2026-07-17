@@ -451,3 +451,143 @@ test("stale-issue guard: absent (undefined) keeps the old behavior byte-for-byte
 	expect(await new Dispatcher(deps).tick()).toBe(3);
 	expect(spawned.sort()).toEqual(["A", "B", "C"]);
 });
+
+// Dispatcher state gate (concern 03): Backlog is a real holding pen once the
+// operator narrows OMP_SQUAD_DISPATCH_STATES away from its no-change default.
+test("state gate: a backlog-state issue is skipped when the gate is configured to unstarted,started", async () => {
+	process.env.OMP_SQUAD_DISPATCH_STATES = "unstarted,started";
+	try {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "dispatch-ledger-"));
+		const ledger = openDispatchLedger(dir);
+		const events: AutomationReport[] = [];
+		const logs: string[] = [];
+		const { deps, spawned } = harness({
+			listIssues: async () => [{ ...issue("A"), state: "backlog" }, issue("B"), issue("C")],
+			record: (r) => events.push(r),
+			log: (m) => logs.push(m),
+			ledger,
+		});
+		expect(await new Dispatcher(deps).tick()).toBe(2);
+		expect(spawned.sort()).toEqual(["B", "C"]); // A held by the state gate
+		expect(ledger.has("A")).toBe(false); // never claimed — the whole point of the gate
+		expect(logs.some((m) => m.includes("A") && m.includes("not in releasable set"))).toBe(true);
+		await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+	} finally {
+		delete process.env.OMP_SQUAD_DISPATCH_STATES;
+	}
+});
+
+test("state gate: the held issue's ledger entry is never written across multiple ticks", async () => {
+	process.env.OMP_SQUAD_DISPATCH_STATES = "unstarted,started";
+	try {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "dispatch-ledger-"));
+		const ledger = openDispatchLedger(dir);
+		const { deps } = harness({
+			listIssues: async () => [{ ...issue("A"), state: "backlog" }],
+			ledger,
+		});
+		const dispatcher = new Dispatcher(deps);
+		expect(await dispatcher.tick()).toBe(0);
+		expect(await dispatcher.tick()).toBe(0);
+		expect(ledger.has("A")).toBe(false);
+		await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+	} finally {
+		delete process.env.OMP_SQUAD_DISPATCH_STATES;
+	}
+});
+
+test("state gate: the same issue dispatches once its state moves to a releasable group", async () => {
+	process.env.OMP_SQUAD_DISPATCH_STATES = "unstarted,started";
+	try {
+		let state = "backlog";
+		const { deps, spawned } = harness({
+			listIssues: async () => [{ ...issue("A"), state }],
+		});
+		const dispatcher = new Dispatcher(deps);
+		expect(await dispatcher.tick()).toBe(0);
+		expect(spawned).toEqual([]);
+		state = "unstarted"; // drag to Todo in Plane
+		expect(await dispatcher.tick()).toBe(1);
+		expect(spawned).toEqual(["A"]);
+	} finally {
+		delete process.env.OMP_SQUAD_DISPATCH_STATES;
+	}
+});
+
+test("state gate: default (no env set) preserves today's behavior — backlog/unstarted/started all dispatch", async () => {
+	delete process.env.OMP_SQUAD_DISPATCH_STATES;
+	const { deps, spawned } = harness({
+		listIssues: async () => [{ ...issue("A"), state: "backlog" }, { ...issue("B"), state: "unstarted" }, { ...issue("C"), state: "started" }],
+	});
+	expect(await new Dispatcher(deps).tick()).toBe(3);
+	expect(spawned.sort()).toEqual(["A", "B", "C"]);
+});
+
+test("state gate: an issue with no state field is unaffected (fail open — no group to gate on)", async () => {
+	process.env.OMP_SQUAD_DISPATCH_STATES = "unstarted,started";
+	try {
+		const { deps, spawned } = harness({ listIssues: async () => [issue("A")] });
+		expect(await new Dispatcher(deps).tick()).toBe(1);
+		expect(spawned).toEqual(["A"]);
+	} finally {
+		delete process.env.OMP_SQUAD_DISPATCH_STATES;
+	}
+});
+
+test("state gate: config values are case-normalized — Plane-UI capitalization must not silently hold all work", async () => {
+	process.env.OMP_SQUAD_DISPATCH_STATES = "Unstarted,Started";
+	try {
+		const { deps, spawned } = harness({
+			listIssues: async () => [issue("A"), { ...issue("B"), state: "backlog" }],
+		});
+		expect(await new Dispatcher(deps).tick()).toBe(1);
+		expect(spawned).toEqual(["A"]); // "unstarted" matched despite the capitalized config; backlog held
+	} finally {
+		delete process.env.OMP_SQUAD_DISPATCH_STATES;
+	}
+});
+
+test("state gate: an unrecognized state value (degraded /states ⇒ raw UUID) fails CLOSED under a narrowed gate, open under the default", async () => {
+	const uuidIssue = { ...issue("A"), state: "0f9d2a34-raw-uuid" };
+	// Default set: fail open — no holding pen was asked for, a Plane hiccup must not hold everything.
+	{
+		const { deps, spawned } = harness({ listIssues: async () => [uuidIssue] });
+		expect(await new Dispatcher(deps).tick()).toBe(1);
+		expect(spawned).toEqual(["A"]);
+	}
+	// Narrowed set: fail closed — dispatching a raw Backlog ticket during a degradation permanently
+	// claims it in the add-only ledger, the exact loss the holding pen exists to prevent.
+	process.env.OMP_SQUAD_DISPATCH_STATES = "unstarted,started";
+	try {
+		const logs: string[] = [];
+		const { deps, spawned } = harness({ listIssues: async () => [uuidIssue], log: (m) => logs.push(m) });
+		expect(await new Dispatcher(deps).tick()).toBe(0);
+		expect(spawned).toEqual([]);
+		expect(logs.some((m) => m.includes("failing closed"))).toBe(true);
+	} finally {
+		delete process.env.OMP_SQUAD_DISPATCH_STATES;
+	}
+});
+
+test("a spawn that THROWS (e.g. an enforce-mode cost-gate deny) never stamps the persistent ledger — the issue stays recoverable", async () => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "dispatch-ledger-"));
+	const ledger = openDispatchLedger(dir);
+	const logs: string[] = [];
+	const { deps } = harness({
+		listIssues: async () => [issue("A")],
+		spawn: async () => {
+			throw new Error("cost-gate(enforce): over budget — would DENY");
+		},
+		log: (m) => logs.push(m),
+		ledger,
+	});
+	const dispatcher = new Dispatcher(deps);
+	expect(await dispatcher.tick()).toBe(0);
+	// The add-only, restart-safe ledger must NOT hold the failed spawn: stamping it would consume the
+	// issue forever (no removal API), even after the operator turns the gate off. The in-memory
+	// `dispatched` set still suppresses a per-tick retry storm within this boot.
+	expect(ledger.has("A")).toBe(false);
+	expect(await dispatcher.tick()).toBe(0); // in-memory claim holds for this boot
+	expect(logs.some((m) => m.includes("dispatch failed"))).toBe(true);
+	await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+});

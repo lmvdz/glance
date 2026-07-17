@@ -26,6 +26,10 @@
     // tests/ tree — kept out of "src" to live alongside the rest of the test suite, but this repo's
     // tests/ directory has never been part of the tsc program, so it's named explicitly rather than
     // widening "include" to "tests" (which would newly type-check ~100 untyped test files at once).
-    "tests/dto-conformance.test-d.ts"
+    "tests/dto-conformance.test-d.ts",
+    // scripts/ is otherwise outside the tsc program (bun runs scripts/*.ts directly, stripping
+    // types) — named explicitly, same reasoning as the entry above, so `bun run check` actually
+    // typechecks the skills-verify gate itself rather than trusting bun's untyped execution.
+    "scripts/skills-verify.ts"
   ]
 }

@@ -71,7 +71,8 @@ export interface ReapDecision {
 	deleteBranch: boolean;
 }
 
-/** Plane identifier embedded in a squad branch: "squad/ompsq-35-<suffix>" → "OMPSQ-35". `undefined` if none. */
+/** Plane identifier embedded in a squad branch: "squad/ompsq-35-<suffix>" → "OMPSQ-35". `undefined` if none.
+ *  @substrate exported for tests only — worktree-reaper.test.ts pins the branch→identifier grammar directly. */
 export function parseIssueIdentifier(branch: string): string | undefined {
 	const m = /^squad\/([a-z][a-z0-9]*-\d+)-/i.exec(branch);
 	return m ? m[1].toUpperCase() : undefined;

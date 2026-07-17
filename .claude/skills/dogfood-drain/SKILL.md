@@ -6,7 +6,7 @@ description: Weekly dogfood drain for the daily-driver program — read the fric
 # dogfood-drain — the weekly friction→fixes ritual
 
 Turns the friction ledger (B01, `glance grr`) and adoption counters (B02, `GET /api/adoption`)
-into fixes and an honest ledger trail, once a week. Concern: `plans/daily-dogfood-engine/03`.
+into fixes and an honest ledger trail, once a week. Concern: `plans/daily-dogfood-engine/03-drain-cadence-and-criteria.md`.
 Invocation is manual — or self-reminded via `/loop 168h /dogfood-drain` if Lars wants the nudge —
 but never daemon-automated: the meta-plan's Ledger is human-reviewed content.
 
@@ -32,7 +32,7 @@ friction trail against the criteria quoted below.
 > **Adoption gate.** After epics A–D ship: two weeks of real use, judged by the dogfood counters.
 > Kill criterion: if sustained daily casual use hasn't emerged, STOP — re-diagnose with the
 > friction ledger; epics E–G do not execute and charters H–I do not expand. (Gate sign-off is
-> Lars's, MODE: hitl — `plans/daily-dogfood-engine/03`.)
+> Lars's, MODE: hitl — `plans/daily-dogfood-engine/03-drain-cadence-and-criteria.md`.)
 
 > The B02 counters (casual sessions/day, prompts/day, push taps/day) are appended to the ledger
 > below weekly. Gate review after 2 weeks of A–D being live. This table is the plan's real

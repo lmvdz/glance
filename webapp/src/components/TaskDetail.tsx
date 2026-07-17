@@ -3,7 +3,7 @@ import { ChevronLeft, ChevronRight, Copy, X, Plus, Box, CheckCircle2, Search, Su
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { MarkdownComponents, PlanBlockContext } from './PlanBlocks';
-import { AgentSourceBadge } from './AgentSourceBadge';
+import { AgentSourceBadge, ModelDeltaBadge } from './AgentSourceBadge';
 import { TaskProperties } from './TaskProperties';
 import { AssigneesEditor } from './AssigneesEditor';
 import { ProofProvenancePanel } from './ProofProvenancePanel';
@@ -634,6 +634,10 @@ export const TaskDetail = () => {
   const [forkSelectedSeq, setForkSelectedSeq] = React.useState<number | null>(null);
   // Answer (pending input) state
   const [answerValues, setAnswerValues] = React.useState<Record<string, string>>({});
+  // Promote (adw-factory-borrows concern 05): which pipeline issue id is mid-promotion, if any — the
+  // request can take several minutes (it waits on an ask-mode unit), so this gates the button to one
+  // in-flight promotion at a time rather than letting a double-click fire two.
+  const [promotingIssueId, setPromotingIssueId] = React.useState<string | null>(null);
 
   React.useEffect(() => { setStopConfirm(false); setRemoveTarget(null); setModelPickerAgentId(null); setForkPickerAgentId(null); setForkCheckpoints([]); setForkSelectedSeq(null); setFlowFocus(false); setWorkflowFlowFocus(false); setTranscriptOpenIds(new Set()); setTranscriptDetailOpenIds(new Set()); }, [selectedTaskId]);
   // Esc leaves plan-flow focus mode.
@@ -1215,6 +1219,22 @@ export const TaskDetail = () => {
     }
   };
 
+  // Promote a Backlog Plane issue (adw-factory-borrows concern 05) — enriches it with Tier-1/Tier-2
+  // context via the daemon's ask-mode seam. Never moves the issue's state: Backlog stays Backlog
+  // until a human drags it to Todo in Plane, so this never needs to reload the pipeline's state field.
+  const handlePromote = async (issue: PipelineIssue) => {
+    if (!repo) return;
+    setPromotingIssueId(issue.id);
+    try {
+      const result = await apiJson<{ ok: boolean; message: string }>(`/api/issues/${encodeURIComponent(issue.id)}/promote`, jsonInit('POST', { repo }));
+      showToast(result.message, result.ok ? 'success' : 'error');
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not promote issue', 'error');
+    } finally {
+      setPromotingIssueId(null);
+    }
+  };
+
   const renderContextDetail = () => {
     if (!task || !expandedContext) return null;
     if (expandedContext === 'spec') {
@@ -1243,7 +1263,27 @@ export const TaskDetail = () => {
       );
     }
     if (expandedContext === 'criteria') {
-      return <div className="p-4 bg-gray-50 dark:bg-gray-950 border-t border-gray-100 dark:border-gray-800 text-sm text-gray-700 dark:text-gray-300 space-y-2">{task.acceptanceCriteria.length ? task.acceptanceCriteria.map(c => <div key={c.id}>• {c.text}</div>) : <div>{task.contextBundle.criteria}</div>}{pipeline?.issues.map(issue => <div key={issue.id}>↳ {issue.identifier ?? issue.id}: {issue.name}</div>)}</div>;
+      return (
+        <div className="p-4 bg-gray-50 dark:bg-gray-950 border-t border-gray-100 dark:border-gray-800 text-sm text-gray-700 dark:text-gray-300 space-y-2">
+          {task.acceptanceCriteria.length ? task.acceptanceCriteria.map(c => <div key={c.id}>• {c.text}</div>) : <div>{task.contextBundle.criteria}</div>}
+          {pipeline?.issues.map(issue => (
+            <div key={issue.id} className="flex items-center gap-2">
+              <span className="min-w-0 flex-1">↳ {issue.identifier ?? issue.id}: {issue.name}</span>
+              {issue.state === 'backlog' && (
+                <button
+                  type="button"
+                  disabled={promotingIssueId !== null}
+                  onClick={() => void handlePromote(issue)}
+                  title="Enrich this Backlog ticket with Tier-1/Tier-2 context (adw-factory-borrows 05)"
+                  className="inline-flex min-h-6 flex-shrink-0 items-center rounded-md border border-gray-200 px-1.5 py-0.5 text-[10px] font-medium text-gray-700 transition-colors hover:bg-gray-100 focus-visible:ring-2 focus-visible:ring-amber-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-900"
+                >
+                  {promotingIssueId === issue.id ? 'Promoting…' : 'Promote'}
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      );
     }
     if (expandedContext === 'prerequisites') {
       const prereqs = (pipeline?.concerns ?? []).flatMap((concern) => concern.prerequisites.map((text) => `${concern.file}: ${text}`));
@@ -1777,7 +1817,7 @@ export const TaskDetail = () => {
 
               <div className="mb-6">
                 <div className="flex items-center justify-between border-b border-gray-100 dark:border-gray-800 pb-2 mb-3"><div className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest">Decisions</div></div>
-                <div className="space-y-2 mb-3">{task.decisions.map(decision => <div key={decision.id} className="text-sm text-gray-700 dark:text-gray-300 border border-gray-200 dark:border-gray-800 rounded p-3"><div>{decision.text}</div>{decision.source === 'agent' && <AgentSourceBadge className="mt-1" />}</div>)}</div>
+                <div className="space-y-2 mb-3">{task.decisions.map(decision => <div key={decision.id} className="text-sm text-gray-700 dark:text-gray-300 border border-gray-200 dark:border-gray-800 rounded p-3"><div>{decision.text}</div>{decision.source === 'agent' && <AgentSourceBadge className="mt-1" />}{decision.source === 'model-delta' && (<><ModelDeltaBadge className="mt-1" />{!!decision.evidence?.length && <ul className="mt-1 list-disc pl-4 text-xs text-gray-500 dark:text-gray-400">{decision.evidence.map((e, i) => <li key={i} className="font-mono">{e}</li>)}</ul>}</>)}</div>)}</div>
                 <div className="flex gap-2"><input value={newDecisionText} onChange={(e) => setNewDecisionText(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && addDecision()} placeholder="Record a decision for future agents..." className="flex-1 text-sm bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded px-3 py-2" /><button onClick={addDecision} className="px-3 py-2 rounded bg-gray-900 text-white dark:bg-gray-100 dark:text-gray-900 text-xs"><Plus className="w-3 h-3 inline" /> Add</button></div>
               </div>
 

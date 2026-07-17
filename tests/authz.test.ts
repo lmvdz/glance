@@ -80,6 +80,21 @@ test("restActionTier: reads viewer, mutations operator, destructive admin, auth/
 	expect(restActionTier("PUT", "/api/org/voice-key")).toBe("admin");
 	expect(restActionTier("DELETE", "/api/org/voice-key")).toBe("admin");
 	expect(restActionTier("POST", "/api/org/voice/enabled")).toBe("admin");
+	// Operator-attention substrate (comprehension concern 01): recording one's own "I looked at this"
+	// is deliberately viewer-tier, not the coarse mutation=operator default — see authz.ts's comment.
+	expect(restActionTier("POST", "/api/attention")).toBe("viewer");
+	expect(restActionTier("GET", "/api/attention")).toBe("viewer");
+	expect(restActionTier("GET", "/api/attention/seen")).toBe("viewer");
+	// Comprehension fog (concern 03): a read-only per-file debt number, explicitly registered viewer
+	// tier like the attention reads it joins against.
+	expect(restActionTier("GET", "/api/fog")).toBe("viewer");
+	// Known-symptom cards (comprehension concern 07): reading the symptom index is viewer-tier, same
+	// as /api/fabric/search — the pull half of the doctor auto-match's push half.
+	expect(restActionTier("GET", "/api/symptoms")).toBe("viewer");
+	// Weekly episodes (comprehension concern 09): list + full-markdown reads are viewer-tier like
+	// every other comprehension read; actor-derived repo scoping happens in the route itself.
+	expect(restActionTier("GET", "/api/episodes")).toBe("viewer");
+	expect(restActionTier("GET", "/api/episodes/2026-W29")).toBe("viewer");
 });
 
 test("applyCommand: operator denied destructive ops (RbacDenied + audited); admin allowed", async () => {

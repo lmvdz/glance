@@ -13,8 +13,18 @@ import {
   rankHotAreas,
   trendRising,
   agentsByFileMap,
+  attachFog,
+  coldStartRepos,
+  topFogDebt,
+  fogLastSeenLabel,
+  fogEntryKey,
+  nodeFogKey,
+  ancestorFolderIds,
+  allFilesColdStart,
+  type HeatTreeNode,
 } from './heatmap';
 import type { HeatNode } from './insights';
+import type { FogEntryDTO } from './api';
 
 // ────────────────────────────────── magma ──────────────────────────────────
 
@@ -203,4 +213,329 @@ describe('agentsByFileMap', () => {
     expect(agentsByFileMap(null).size).toBe(0);
     expect(agentsByFileMap([{ agentId: 'a1' }]).size).toBe(0);
   });
+});
+
+// ────────────────────────── buildHeatTree: multi-repo disambiguation ──────────────────────────
+
+describe('buildHeatTree — multi-repo disambiguation (comprehension concern 04)', () => {
+  // Helper: recursively collect every folder id in a tree (so tests don't hand-roll expand sets).
+  function allFolderIds(nodes: HeatTreeNode[]): string[] {
+    const out: string[] = [];
+    for (const n of nodes) {
+      if (n.type === 'folder') {
+        out.push(n.id);
+        out.push(...allFolderIds(n.children));
+      }
+    }
+    return out;
+  }
+
+  test('same-named files across two repos do NOT collapse into one node', () => {
+    const nodes: HeatNode[] = [
+      { id: 'src/index.ts', heat: [1, 0], repo: '/home/lars/sui/repo-a' },
+      { id: 'src/index.ts', heat: [0, 5], repo: '/home/lars/sui/repo-b' },
+    ];
+    const tree = buildHeatTree(nodes, 2);
+    expect(tree.fileCount).toBe(2);
+    // Two distinct file nodes, each retaining its OWN heat — never summed together.
+    const flat = flattenTree(tree.roots, new Set(allFolderIds(tree.roots)));
+    const files = flat.filter((n) => n.type === 'file');
+    expect(files).toHaveLength(2);
+    const totals = files.map((f) => f.total).sort();
+    expect(totals).toEqual([1, 5]); // NOT [6, 6] or a single collapsed [6]
+  });
+
+  test('each repo gets its own SIBLING root — no shared synthetic ancestor folder', () => {
+    const nodes: HeatNode[] = [
+      { id: 'src/index.ts', heat: [1], repo: '/home/lars/sui/repo-a' },
+      { id: 'src/index.ts', heat: [5], repo: '/home/lars/sui/repo-b' },
+    ];
+    const tree = buildHeatTree(nodes, 1);
+    const ids = tree.roots.map((r) => r.id);
+    // Both repos share the "/home/lars/sui/" ancestor on disk, but the tree must NOT reflect that —
+    // each repo label is one atomic root-level segment (joined with `·`, not `/`).
+    expect(ids).toEqual(expect.arrayContaining(['sui·repo-a', 'sui·repo-b']));
+    const repoAFolder = tree.roots.find((r) => r.id === 'sui·repo-a')!;
+    expect(repoAFolder.children.map((c) => c.id)).toContain('sui·repo-a/src');
+    const repoBFolder = tree.roots.find((r) => r.id === 'sui·repo-b')!;
+    expect(repoBFolder.children.map((c) => c.id)).toContain('sui·repo-b/src');
+  });
+
+  test('single-repo trees are completely unaffected by the repo field (backward compatible)', () => {
+    const nodes: HeatNode[] = [
+      { id: 'src/a.ts', heat: [1], repo: '/only/one/repo' },
+      { id: 'src/b.ts', heat: [2], repo: '/only/one/repo' },
+    ];
+    const tree = buildHeatTree(nodes, 1);
+    const ids = tree.roots.map((r) => r.id);
+    expect(ids).toEqual(['src']); // no repo-label prefix — only one distinct repo present
+  });
+
+  test('rawPath survives repo-qualification for the fog join', () => {
+    const nodes: HeatNode[] = [
+      { id: 'src/index.ts', heat: [1], repo: '/home/lars/sui/repo-a' },
+      { id: 'src/index.ts', heat: [5], repo: '/home/lars/sui/repo-b' },
+    ];
+    const tree = buildHeatTree(nodes, 1);
+    const flat = flattenTree(tree.roots, new Set(allFolderIds(tree.roots)));
+    const files = flat.filter((n) => n.type === 'file');
+    expect(files).toHaveLength(2);
+    for (const f of files) expect(f.rawPath).toBe('src/index.ts'); // original bare path, never qualified
+  });
+
+  test('nodes with no repo field keep the pre-concern-04 unqualified shape', () => {
+    const tree = buildHeatTree(NODES, 4); // NODES fixture has no `.repo` at all
+    expect(tree.roots.map((r) => r.id)).toContain('src');
+  });
+});
+
+// ────────────────────────────────── attachFog ──────────────────────────────────
+
+const REPO_A = '/home/lars/sui/repo-a';
+const REPO_B = '/home/lars/sui/repo-b';
+
+function fogEntry(overrides: Partial<FogEntryDTO>): FogEntryDTO {
+  return {
+    repo: REPO_A,
+    file: 'src/index.ts',
+    changesSinceSeen: 1,
+    lastChangedAt: 1000,
+    debt: 0.3,
+    state: 'stale',
+    ...overrides,
+  };
+}
+
+describe('attachFog', () => {
+  test('attaches fog to a matching file node', () => {
+    const tree = buildHeatTree([{ id: 'src/index.ts', heat: [1], repo: REPO_A }], 1);
+    const decorated = attachFog(tree, [fogEntry({ debt: 0.5, state: 'never-seen' })]);
+    const node = decorated.roots.find((r) => r.id === 'src')!.children[0];
+    expect(node.fog).toEqual({ debt: 0.5, state: 'never-seen', lastSeenAt: undefined });
+  });
+
+  test('leaves fog undefined for a file with no matching entry (honest "no data")', () => {
+    const tree = buildHeatTree([{ id: 'src/index.ts', heat: [1], repo: REPO_A }], 1);
+    const decorated = attachFog(tree, []);
+    const node = decorated.roots.find((r) => r.id === 'src')!.children[0];
+    expect(node.fog).toBeUndefined();
+  });
+
+  test('joins each repo to its OWN fog entry in a multi-repo tree, never the other repo\'s', () => {
+    const tree = buildHeatTree(
+      [
+        { id: 'src/index.ts', heat: [1], repo: REPO_A },
+        { id: 'src/index.ts', heat: [1], repo: REPO_B },
+      ],
+      1,
+    );
+    const decorated = attachFog(tree, [
+      fogEntry({ repo: REPO_A, debt: 0.9, state: 'stale' }),
+      fogEntry({ repo: REPO_B, debt: 0.1, state: 'seen-current' }),
+    ]);
+    const repoARoot = decorated.roots.find((r) => r.id === 'sui·repo-a')!;
+    const repoBRoot = decorated.roots.find((r) => r.id === 'sui·repo-b')!;
+    const fileA = repoARoot.children[0].children[0]; // repo/src/index.ts
+    const fileB = repoBRoot.children[0].children[0];
+    expect(fileA.fog?.debt).toBe(0.9);
+    expect(fileA.fog?.state).toBe('stale');
+    expect(fileB.fog?.debt).toBe(0.1);
+    expect(fileB.fog?.state).toBe('seen-current');
+  });
+
+  test('folder fog is the MAX of children debt, not the sum', () => {
+    const tree = buildHeatTree(
+      [
+        { id: 'src/a.ts', heat: [1], repo: REPO_A },
+        { id: 'src/b.ts', heat: [1], repo: REPO_A },
+      ],
+      1,
+    );
+    const decorated = attachFog(tree, [
+      fogEntry({ file: 'src/a.ts', debt: 0.2, state: 'stale' }),
+      fogEntry({ file: 'src/b.ts', debt: 0.8, state: 'never-seen' }),
+    ]);
+    const folder = decorated.roots[0]; // "src"
+    expect(folder.fog?.debt).toBe(0.8); // max(0.2, 0.8), not 1.0 (sum)
+    expect(folder.fog?.state).toBe('never-seen'); // the whole descriptor of the max-debt child
+  });
+
+  test('a folder with no fog-bearing children stays undecorated', () => {
+    const tree = buildHeatTree([{ id: 'src/a.ts', heat: [1], repo: REPO_A }], 1);
+    const decorated = attachFog(tree, []); // no entries at all
+    expect(decorated.roots[0].fog).toBeUndefined();
+  });
+});
+
+// ────────────────────────────────── coldStartRepos ──────────────────────────────────
+
+describe('coldStartRepos', () => {
+  test('collects only repos explicitly flagged false', () => {
+    const set = coldStartRepos({ [REPO_A]: true, [REPO_B]: false });
+    expect(set.has(REPO_B)).toBe(true);
+    expect(set.has(REPO_A)).toBe(false);
+  });
+
+  test('empty record yields an empty set', () => {
+    expect(coldStartRepos({}).size).toBe(0);
+  });
+
+  /** Batch-3 review regression (concern 04 minor): `repoHasHistory`'s key and a tree node's/fog
+   *  entry's `repo` field name the same repo but can differ in trivial formatting (a trailing
+   *  slash) — `attachFog`'s join already normalizes both sides, so the cold-start membership check
+   *  must too, or a node whose `repo` came through un-normalized would silently draw the real fog
+   *  ramp where "no view history yet" belonged. */
+  test('a trailing-slash repoHasHistory key still normalizes to match the bare repo string', () => {
+    const set = coldStartRepos({ [`${REPO_A}/`]: false });
+    expect(set.has(REPO_A)).toBe(true); // membership check normalizes the candidate
+  });
+});
+
+// ────────────────────────────────── topFogDebt ──────────────────────────────────
+
+describe('topFogDebt', () => {
+  test('ranks by debt descending', () => {
+    const entries = [
+      fogEntry({ file: 'a.ts', debt: 0.2 }),
+      fogEntry({ file: 'b.ts', debt: 0.9 }),
+      fogEntry({ file: 'c.ts', debt: 0.5 }),
+    ];
+    const top = topFogDebt(entries, {});
+    expect(top.map((e) => e.file)).toEqual(['b.ts', 'c.ts', 'a.ts']);
+  });
+
+  test('ties on debt break by changesSinceSeen descending', () => {
+    const entries = [
+      fogEntry({ file: 'a.ts', debt: 0.5, changesSinceSeen: 2 }),
+      fogEntry({ file: 'b.ts', debt: 0.5, changesSinceSeen: 9 }),
+    ];
+    const top = topFogDebt(entries, {});
+    expect(top[0].file).toBe('b.ts');
+  });
+
+  test('excludes cold-start repos even when their debt is high', () => {
+    const entries = [fogEntry({ repo: REPO_A, file: 'a.ts', debt: 0.99 }), fogEntry({ repo: REPO_B, file: 'b.ts', debt: 0.1 })];
+    const top = topFogDebt(entries, { [REPO_A]: false, [REPO_B]: true });
+    expect(top.map((e) => e.file)).toEqual(['b.ts']);
+  });
+
+  test('slices to n', () => {
+    const entries = Array.from({ length: 15 }, (_, i) => fogEntry({ file: `f${i}.ts`, debt: i / 15 }));
+    expect(topFogDebt(entries, {}, 10)).toHaveLength(10);
+    expect(topFogDebt(entries, {})).toHaveLength(10); // default n=10
+  });
+
+  /** Batch-3 review regression (concern 04 minor): a cold-start repo whose `repoHasHistory` key
+   *  carries a trailing slash the entry's own `repo` field lacks (or vice versa) must still be
+   *  excluded — `attachFog` would join these as the same repo, so the shortlist must agree. */
+  test('excludes a cold-start repo even when its repoHasHistory key has a trailing slash the entry lacks', () => {
+    const entries = [fogEntry({ repo: REPO_A, file: 'a.ts', debt: 0.99 }), fogEntry({ repo: REPO_B, file: 'b.ts', debt: 0.1 })];
+    const top = topFogDebt(entries, { [`${REPO_A}/`]: false, [REPO_B]: true });
+    expect(top.map((e) => e.file)).toEqual(['b.ts']);
+  });
+});
+
+// ────────────────────────────────── fogLastSeenLabel ──────────────────────────────────
+
+describe('fogLastSeenLabel', () => {
+  const now = 1_000_000_000;
+  test('undefined lastSeenAt reads as "never"', () => {
+    expect(fogLastSeenLabel(undefined, now)).toBe('never');
+  });
+  test('under a minute reads as "just now"', () => {
+    expect(fogLastSeenLabel(now - 10_000, now)).toBe('just now');
+  });
+  test('minutes/hours/days format correctly', () => {
+    expect(fogLastSeenLabel(now - 5 * 60_000, now)).toBe('5m ago');
+    expect(fogLastSeenLabel(now - 3 * 60 * 60_000, now)).toBe('3h ago');
+    expect(fogLastSeenLabel(now - 2 * 24 * 60 * 60_000, now)).toBe('2d ago');
+  });
+});
+
+// ─────────────────────────── fogEntryKey / nodeFogKey round-trip ───────────────────────────
+
+describe('fogEntryKey / nodeFogKey', () => {
+  test('a tree node\'s key agrees with its source fog entry\'s key', () => {
+    const tree = buildHeatTree([{ id: 'src/index.ts', heat: [1], repo: REPO_A }], 1);
+    const node = tree.roots[0].children[0];
+    expect(nodeFogKey(node)).toBe(fogEntryKey(REPO_A, 'src/index.ts'));
+  });
+
+  test('undefined for a node with no repo', () => {
+    const tree = buildHeatTree(NODES, 4);
+    const node = tree.roots.find((r) => r.type === 'file')!;
+    expect(nodeFogKey(node)).toBeUndefined();
+  });
+});
+
+// ────────────────────────────────── ancestorFolderIds ──────────────────────────────────
+
+describe('ancestorFolderIds', () => {
+  test('returns every ancestor, root-most first, excluding the node itself', () => {
+    expect(ancestorFolderIds('src/engine/context.ts')).toEqual(['src', 'src/engine']);
+  });
+  test('empty for a top-level file', () => {
+    expect(ancestorFolderIds('README.md')).toEqual([]);
+  });
+  test('works for a repo-qualified multi-repo id', () => {
+    expect(ancestorFolderIds('sui·repo-a/src/index.ts')).toEqual(['sui·repo-a', 'sui·repo-a/src']);
+  });
+});
+
+// ────────────────────────────────── allFilesColdStart ──────────────────────────────────
+
+describe('allFilesColdStart', () => {
+  test('true when every file belongs to a cold-start repo', () => {
+    const tree = buildHeatTree([{ id: 'src/a.ts', heat: [1], repo: REPO_A }], 1);
+    expect(allFilesColdStart(tree, new Set([REPO_A]))).toBe(true);
+  });
+
+  test('false when at least one file is NOT cold-start', () => {
+    const tree = buildHeatTree(
+      [
+        { id: 'src/a.ts', heat: [1], repo: REPO_A },
+        { id: 'src/b.ts', heat: [1], repo: REPO_B },
+      ],
+      1,
+    );
+    expect(allFilesColdStart(tree, new Set([REPO_A]))).toBe(false); // repo B has real history
+  });
+
+  test('false for an empty tree (nothing to gate)', () => {
+    expect(allFilesColdStart(buildHeatTree([], 1), new Set([REPO_A]))).toBe(false);
+  });
+
+  test('false for a file with no repo field at all', () => {
+    const tree = buildHeatTree(NODES, 4);
+    expect(allFilesColdStart(tree, new Set())).toBe(false);
+  });
+
+  /** Batch-3 review regression (concern 04 minor): the `coldStart` set is normalized-key
+   *  (`coldStartRepos`'s doc), but a tree node's raw `repo` field (copied straight from the source
+   *  `/api/heat` node) can carry a trailing slash the set's key lacks or vice versa — the
+   *  membership check must normalize the node's `repo` before testing, or a genuinely cold-start
+   *  repo would read as "has real history" purely from formatting noise. */
+  test('a node whose raw repo has a trailing slash still matches a bare cold-start set entry', () => {
+    const tree = buildHeatTree([{ id: 'src/a.ts', heat: [1], repo: `${REPO_A}/` }], 1);
+    expect(allFilesColdStart(tree, coldStartRepos({ [REPO_A]: false }))).toBe(true);
+  });
+});
+
+test('two repos sharing their trailing two path segments get distinct qualified roots (code-review finding 7)', () => {
+  const tree = buildHeatTree(
+    [
+      { id: 'src/x.ts', daily: [1], total: 1, agentCount: 0, repo: '/home/a/sui/omp-squad' },
+      { id: 'src/x.ts', daily: [2], total: 2, agentCount: 0, repo: '/home/b/sui/omp-squad' },
+    ],
+    1,
+  );
+  const rootIds = tree.roots.map((r) => r.id);
+  expect(new Set(rootIds).size).toBe(2); // no collision back into one root
+  const allIds: string[] = [];
+  const walk = (n: { id: string; children: { id: string; children: never[] }[] }): void => {
+    allIds.push(n.id);
+    for (const c of n.children) walk(c as never);
+  };
+  for (const r of tree.roots) walk(r as never);
+  expect(new Set(allIds).size).toBe(allIds.length); // every node id unique tree-wide
 });

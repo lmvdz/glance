@@ -9,7 +9,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { RunReceipt, TranscriptEntry } from "../src/types.ts";
-import { authoredSpecBlock, buildDigest, type DigestReward, fenceUntrusted, formatRewardTag, parseDigestReward, readDigest, rewardWeight, writeDigest } from "../src/digest.ts";
+import { authoredSpecBlock, buildDigest, type DigestReward, digestSummaryExcerpt, fenceUntrusted, formatRewardTag, parseDigestReward, readDigest, rewardWeight, writeDigest } from "../src/digest.ts";
 
 const tmps: string[] = [];
 afterAll(async () => {
@@ -126,5 +126,41 @@ describe("rewardWeight (boost-only, never below baseline)", () => {
 			const w = rewardWeight(reward);
 			if (w !== undefined) expect(w).toBeGreaterThanOrEqual(1);
 		}
+	});
+});
+
+// ── digestSummaryExcerpt (comprehension lane concern 06: prBodyFor's digestExcerpt input) ────────
+
+describe("digestSummaryExcerpt", () => {
+	test("pulls exactly the Summary section's bullets, not Goal or Where-we-left-off", () => {
+		const md =
+			"## 🎯 Goal\nBuild a cold-start resume digest for agents.\n\n" +
+			"## 🧭 Summary\n- fixed the dispatch stall\n- added a regression test\n\n" +
+			"## 📂 Files touched\n- src/digest.ts\n\n" +
+			"## ⏱ Where we left off\nLeft off after wiring restart surfacing.\n";
+		expect(digestSummaryExcerpt(md)).toBe("- fixed the dispatch stall\n- added a regression test");
+		expect(digestSummaryExcerpt(md)).not.toContain("Build a cold-start resume digest");
+		expect(digestSummaryExcerpt(md)).not.toContain("Left off after wiring restart surfacing");
+	});
+
+	test("a real buildDigest output's excerpt is exactly the text between the Summary and Files-touched headers", () => {
+		const md = buildDigest({ transcript, receipts });
+		const expected = md.split("## 🧭 Summary\n")[1].split("\n\n## 📂 Files touched")[0];
+		expect(digestSummaryExcerpt(md)).toBe(expected);
+	});
+
+	test("the '(not enough captured to summarize)' placeholder reads as empty, not as real content", () => {
+		const md = "## 🎯 Goal\n_(not detected)_\n\n## 🧭 Summary\n_(not enough captured to summarize)_\n\n## 📂 Files touched\n_(none)_\n";
+		expect(digestSummaryExcerpt(md)).toBe("");
+	});
+
+	test("no Summary header, or an empty digest, ⇒ empty string, never throws", () => {
+		expect(digestSummaryExcerpt("")).toBe("");
+		expect(digestSummaryExcerpt("## 🎯 Goal\nsomething\n")).toBe("");
+	});
+
+	test("a Summary section at the very end of the digest (no trailing header) is still captured in full", () => {
+		const md = "## 🎯 Goal\nx\n\n## 🧭 Summary\n- last section, no header follows\n";
+		expect(digestSummaryExcerpt(md)).toBe("- last section, no header follows");
 	});
 });

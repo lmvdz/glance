@@ -80,7 +80,7 @@ Never guess at Effect patterns — check the guide first.
 
 `effect@4.0.0-beta` (the `effect-smol` line) consolidates what were separate `@effect/*` packages in v3 into the single `effect` package under `effect/unstable/*`. Import accordingly:
 
-- Core, incl. `Schema`: `import { Effect, Layer, Context, Schema } from "effect"` — `Schema` is a top-level export of `effect` in v4 (not `@effect/schema`, and not a separate subpath). Verified against the installed `effect@4.0.0-beta.93`.
+- Core, incl. `Schema`: `import { Effect, Layer, Context, Schema } from "effect"` — `Schema` is a top-level export of `effect` in v4 (not `@effect/schema`, and not a separate subpath). Verified against the installed effect v4 beta (see `package.json`/`bun.lock` for the current pin; the vendored `.claude/skills/effect` skill's `verified-against` stamp is gate-enforced against it).
 - Schema-based domain models: `effect/unstable/schema` exports `Model` and `VariantSchema` (built on top of core `Schema`).
 - CLI: `effect/unstable/cli` (not `@effect/cli`)
 - HTTP / platform: `effect/unstable/http`, `effect/unstable/httpapi` (not `@effect/platform`)

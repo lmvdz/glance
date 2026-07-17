@@ -1,5 +1,6 @@
-import { describe, expect, test } from "bun:test";
-import { ROUTE_CHEAP_FAMILY, ROUTE_FRONTIER_FAMILY, ROUTE_FRONTIER_MODEL, routeModelForTaskClass } from "../src/model-route.ts";
+import { afterEach, describe, expect, test } from "bun:test";
+import { LANE_POLICY } from "../src/lane.ts";
+import { modelRouteMinEdgeFor, modelRouteShouldApply, ROUTE_CHEAP_FAMILY, ROUTE_FRONTIER_FAMILY, ROUTE_FRONTIER_MODEL, routeModelForTaskClass } from "../src/model-route.ts";
 import { buildTaskClassMatrix, MIN_SAMPLES, type DenominatorUnit } from "../src/omp-graph/task-class-matrix.ts";
 import { MIN_EDGE } from "../src/smart-spawn.ts";
 import { HOUR_MS } from "../src/omp-graph/schema.ts";
@@ -151,5 +152,83 @@ describe("routeModelForTaskClass", () => {
 		expect(doc.champions["tdd:heavy"]).toBe(ROUTE_FRONTIER_FAMILY);
 		const decision = routeModelForTaskClass(taskClass, doc);
 		expect(decision.model).toBe(ROUTE_FRONTIER_MODEL);
+	});
+});
+
+// ── adw-factory-borrows concern 09: per-lane apply gating ───────────────────────────────────────
+
+describe("modelRouteShouldApply", () => {
+	afterEach(() => {
+		delete process.env.OMP_SQUAD_MODEL_ROUTE_SHADOW;
+	});
+
+	test("global apply ('0') always applies — unaffected by lane or lane source (the lane-threading.test.ts clamp contract)", () => {
+		expect(modelRouteShouldApply("feature", true, "0")).toBe(true);
+		expect(modelRouteShouldApply("hotfix", false, "0")).toBe(true); // label/classifier-sourced — still applies
+		expect(modelRouteShouldApply("chore", false, "0")).toBe(true);
+	});
+
+	test("global unset (or anything but literal '0') defaults to shadow", () => {
+		expect(modelRouteShouldApply("feature", true, undefined)).toBe(false);
+		expect(modelRouteShouldApply("feature", true, "1")).toBe(false);
+		expect(modelRouteShouldApply("feature", true, "nonsense")).toBe(false);
+	});
+
+	test("v1: no lane's own modelRouteApply flag is true yet, so nothing widens past a global shadow default", () => {
+		expect(modelRouteShouldApply("feature", true, undefined)).toBe(false);
+		expect(modelRouteShouldApply("hotfix", true, undefined)).toBe(false);
+		expect(modelRouteShouldApply("chore", true, undefined)).toBe(false);
+	});
+
+	test("an operator-sourced lane's OWN flag widens past a global shadow default once flipped", () => {
+		const original = LANE_POLICY.hotfix.modelRouteApply;
+		LANE_POLICY.hotfix.modelRouteApply = true;
+		try {
+			expect(modelRouteShouldApply("hotfix", true, undefined)).toBe(true); // operator + flag flipped ⇒ widens
+			expect(modelRouteShouldApply("hotfix", false, undefined)).toBe(false); // label/classifier ⇒ clamp blocks the widen
+		} finally {
+			LANE_POLICY.hotfix.modelRouteApply = original;
+		}
+	});
+
+	test("reads the real OMP_SQUAD_MODEL_ROUTE_SHADOW env when no override argument is passed", () => {
+		delete process.env.OMP_SQUAD_MODEL_ROUTE_SHADOW;
+		expect(modelRouteShouldApply("feature", true)).toBe(false); // unset ⇒ shadow, v1 flag is false
+		process.env.OMP_SQUAD_MODEL_ROUTE_SHADOW = "0";
+		expect(modelRouteShouldApply("feature", true)).toBe(true); // global apply ⇒ applies regardless of the lane flag
+	});
+});
+
+describe("modelRouteMinEdgeFor", () => {
+	test("an operator-sourced lane with an override (hotfix) gets its own lower minEdge", () => {
+		expect(modelRouteMinEdgeFor("hotfix", true)).toBe(0.08);
+	});
+
+	test("a label/classifier-sourced lane (appliesPrivilege=false) never gets the override, even for hotfix", () => {
+		expect(modelRouteMinEdgeFor("hotfix", false)).toBeUndefined();
+	});
+
+	test("a lane with no configured override (feature, chore) falls through to undefined — the shared MIN_EDGE floor applies", () => {
+		expect(modelRouteMinEdgeFor("feature", true)).toBeUndefined();
+		expect(modelRouteMinEdgeFor("chore", true)).toBeUndefined();
+	});
+
+	test("the resolved override actually changes routeModelForTaskClass's outcome vs the shared MIN_EDGE floor", () => {
+		// edge 0.10 clears hotfix's lowered floor (0.08) but NOT the shared MIN_EDGE (0.15).
+		const cheap = seedCell("claude-sonnet-5", 20, 9); // 0.45
+		const frontier = seedCell("claude-opus-4-8", 20, 11); // 0.55 — edge 0.10
+		const doc = buildTaskClassMatrix([...cheap.rows, ...frontier.rows], [...cheap.denom, ...frontier.denom], range);
+		const edge = doc.cells["tdd:heavy"][ROUTE_FRONTIER_FAMILY].mergeRate - doc.cells["tdd:heavy"][ROUTE_CHEAP_FAMILY].mergeRate;
+		expect(edge).toBeCloseTo(0.1, 5);
+		expect(edge).toBeLessThan(MIN_EDGE);
+
+		const atSharedFloor = routeModelForTaskClass(taskClass, doc, undefined, { minEdge: modelRouteMinEdgeFor("feature", true) });
+		expect(atSharedFloor.model).toBeUndefined(); // no lane override for feature ⇒ shared 0.15 floor ⇒ no shift
+
+		const atLaneFloor = routeModelForTaskClass(taskClass, doc, undefined, { minEdge: modelRouteMinEdgeFor("hotfix", true) });
+		expect(atLaneFloor.model).toBe(ROUTE_FRONTIER_MODEL); // hotfix's 0.08 floor ⇒ shifts
+
+		const clamped = routeModelForTaskClass(taskClass, doc, undefined, { minEdge: modelRouteMinEdgeFor("hotfix", false) });
+		expect(clamped.model).toBeUndefined(); // label/classifier-sourced hotfix ⇒ clamp strips the override ⇒ shared floor ⇒ no shift
 	});
 });

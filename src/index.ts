@@ -10,8 +10,10 @@
  *   glance rm <id> [--delete-worktree]
  *   glance ask "<question>" [--repo …]           answer a question; no branch, nothing to merge
  *   glance answers [<id>]                        list or read durable answers
+ *   glance promote <issue> [--repo …]            enrich a Backlog Plane ticket with Tier-1/Tier-2 context
  *   glance open
  *   glance doctor [--json]                        diagnose the factory: on? armed? pointed where?
+ *   glance symptom "<query>" [--repo …]           search recorded symptom cards
  *
  * `up` is the long-lived process that owns the agents. The other verbs are thin
  * HTTP clients that talk to a running daemon's REST surface.
@@ -49,10 +51,12 @@ import { concernNumFromFile, parsePlanConcerns, validatePlanConcerns } from "./f
 import { decompose, DECOMPOSE_TIMEOUT_MS, type VerifiedConcern } from "./planner.ts";
 import { writeConcernDrafts } from "./plan-writer.ts";
 import { ompClassify } from "./intake.ts";
+import { laneFromRouted } from "./lane.ts";
 import { RuntimeSettingsStore } from "./runtime-settings.ts";
 import { PolicyStore } from "./policy.ts";
 import { backendFromEnv, setStorageBackend } from "./dal/storage.ts";
 import { normalizeRepoPath } from "./project-registry.ts";
+import { formatWhereToLookEntry, groupSymptomHits, statWhereToLookEntry, type SymptomSearchHit } from "./symptoms.ts";
 import type { AutomationRollupRow } from "./automation-log.ts";
 import type { Actor, AgentDTO, ApprovalMode, AutomationEvent, ClientCommand, CommissionResult, CommissionSpec, CreateAgentOptions, FrictionEntry, ThinkingLevel, TranscriptEntry } from "./types.ts";
 import { base, DEFAULT_PORT, parseArgs, stateDirPath, tokenHeader } from "./cli-args.ts";
@@ -95,8 +99,10 @@ USAGE
   glance ask "<question>" [--repo R]            Ask; the deliverable is a written answer, not a branch
   glance grr "<gripe>" [--list]                 Log a friction gripe to the dogfood ledger in <5s
   glance answers [<id>] [--repo R]              List answers, or print one
+  glance promote <issue> [--repo R] [--json]    Enrich a Backlog Plane ticket with Tier-1/Tier-2 context
   glance open                                   Print the dashboard URL
   glance doctor [--json]                       Is the factory on, armed, and pointed at the right world?
+  glance symptom "<query>" [--repo R] [--json]  Search recorded symptom cards (glance doctor's known-symptom index)
   glance curate-plane [repo] [--file]             Group recurring Plane issues into unified fixes
   glance plan-validate <dir> [--json]           Check a plan dir's dep graph for cycles / dangling deps (offline)
   glance plan-decompose <dir> [--json]          One-shot: decompose <dir>/OBJECTIVE.md into a concern-DAG (needs \`omp\`)
@@ -143,6 +149,21 @@ async function listOrgIds(stateDir: string): Promise<string[]> {
 	} catch {
 		return [];
 	}
+}
+
+/**
+ * `answer-read` (comprehension concern 02): a genuine CLI *display* path — `cmdAsk`'s interactive
+ * print and `--read <id>` — POSTs this the same way the webapp's `reportAttention` does. Never
+ * awaited by the caller and every rejection is swallowed here: a daemon hiccup or an old daemon
+ * with no `/api/attention` route must never turn a successful `ask`/`--read` into a failed command.
+ * Callers gate this themselves (never on `--json`/`--no-wait` — machine consumption isn't reading).
+ */
+function reportAnswerReadCli(flags: Record<string, string | boolean>, repo: string, answerId: string): void {
+	fetch(`${base(flags)}/api/attention`, {
+		method: "POST",
+		headers: { ...tokenHeader(), "content-type": "application/json" },
+		body: JSON.stringify({ kind: "answer-read", repo, answerId }),
+	}).catch(() => {});
 }
 
 /** Every URL the dashboard is reachable on — loopback plus each non-internal IPv4 when bound to all interfaces. */
@@ -416,6 +437,16 @@ async function cmdAdd(args: string[]): Promise<void> {
 	if (typeof flags.thinking === "string") options.thinking = flags.thinking as ThinkingLevel;
 	if (typeof flags.workflow === "string") options.workflow = flags.workflow;
 	if (typeof flags.verify === "string") options.verify = flags.verify;
+	// --lane hotfix|feature|chore: the CLI caller is the operator, so this is an operator-sourced
+	// lane (may move LANE_POLICY privilege axes). Invalid values are rejected loudly, never guessed.
+	if (typeof flags.lane === "string") {
+		const lane = laneFromRouted({ lane: flags.lane });
+		if (!lane) {
+			console.error(`unknown --lane "${flags.lane}" — expected hotfix | feature | chore`);
+			process.exit(1);
+		}
+		options.lane = lane;
+	}
 	if (typeof flags.sandbox === "string") options.sandbox = { image: flags.sandbox };
 	if (flags.acp === true || flags.runtime === "acp") options.runtime = "acp";
 	// Any registered harness by name (omp/pi/claude-code/codex/opencode/gemini/…). Supersedes --acp;
@@ -998,7 +1029,14 @@ async function cmdAsk(args: string[]): Promise<void> {
 		const res = await fetch(`${base(flags)}/api/answers/${encodeURIComponent(dto.id)}`, { headers: tokenHeader() }).catch(() => null);
 		const answer = res?.ok ? ((await res.json()) as { markdown?: string; answeredAt?: number; durationMs?: number }) : undefined;
 		if (answer?.answeredAt && answer.markdown) {
-			process.stdout.write(flags.json ? `${JSON.stringify(answer, null, 2)}\n` : `\n${answer.markdown}\n`);
+			if (flags.json) {
+				process.stdout.write(`${JSON.stringify(answer, null, 2)}\n`);
+			} else {
+				process.stdout.write(`\n${answer.markdown}\n`);
+				// A real display path (not --json, not --no-wait — that path never reaches here): the
+				// operator just read this answer.
+				reportAnswerReadCli(flags, repo, dto.id);
+			}
 			return;
 		}
 		const agents = await fetch(`${base(flags)}/api/agents`, { headers: tokenHeader() }).then((r) => (r.ok ? (r.json() as Promise<AgentDTO[]>) : [])).catch(() => []);
@@ -1033,8 +1071,10 @@ async function cmdAnswers(args: string[]): Promise<void> {
 		return;
 	}
 	if (id) {
-		const a = body as { question: string; markdown: string; answeredAt?: number };
+		const a = body as { question: string; markdown: string; answeredAt?: number; repo?: string };
 		process.stdout.write(`${a.question}\n\n${a.answeredAt ? a.markdown : "(not answered yet)"}\n`);
+		// Displaying an unanswered placeholder isn't reading the answer; only an actual answeredAt+repo counts.
+		if (a.answeredAt && a.repo) reportAnswerReadCli(flags, a.repo, id);
 		return;
 	}
 	const list = body as Array<{ id: string; question: string; answeredAt?: number; repo: string }>;
@@ -1043,6 +1083,69 @@ async function cmdAnswers(args: string[]): Promise<void> {
 		return;
 	}
 	for (const a of list) process.stdout.write(`${a.answeredAt ? "✔" : "…"} ${a.id.padEnd(34)} ${a.question.slice(0, 60)}\n`);
+}
+
+/**
+ * `glance promote <issue> [--repo <path>] [--json]`
+ *
+ * adw-factory-borrows concern 05: enrich a Backlog Plane ticket with Tier-1/Tier-2 context through
+ * the daemon's ask-mode seam, fail-closed validated against the same truncation `dispatchSpec`
+ * applies at dispatch time. Never moves the ticket's state — Backlog stays Backlog; dragging it to
+ * Todo in Plane is the release (concern 03's dispatcher state gate is what makes that drag mean
+ * something). Blocks for the same wait window `glance ask` does — the enrichment IS an ask-mode unit
+ * under the hood, so this can take several minutes on a non-trivial ticket.
+ */
+async function cmdPromote(args: string[]): Promise<void> {
+	const { positional, flags } = parseArgs(args);
+	const issue = positional[0];
+	if (!issue) {
+		process.stderr.write("usage: glance promote <issue-id-or-identifier> [--repo <path>] [--json]\n");
+		process.exit(1);
+	}
+	const repo = typeof flags.repo === "string" ? path.resolve(flags.repo) : process.cwd();
+	if (!flags.json) process.stderr.write(`promoting ${issue}… (waits for an ask-mode unit to investigate; can take several minutes)\n`);
+	const requestStarted = Date.now();
+	let res: Response | null = null;
+	try {
+		res = await fetch(`${base(flags)}/api/issues/${encodeURIComponent(issue)}/promote`, {
+			method: "POST",
+			headers: { ...tokenHeader(), "content-type": "application/json" },
+			body: JSON.stringify({ repo }),
+		});
+	} catch (err) {
+		// A refused connection fails near-instantly — that's genuinely "no daemon". A drop after the
+		// request was already minutes into waiting (ECONNRESET, or any other mid-flight socket error) means
+		// the daemon WAS there and the promotion may still be running server-side; reporting both as "no
+		// daemon" sent an operator chasing a dead lead while a live promotion kept going unseen and a
+		// confused retry could hit the idempotency guard.
+		const elapsedMs = Date.now() - requestStarted;
+		const code = typeof err === "object" && err !== null && "code" in err ? String((err as { code: unknown }).code) : undefined;
+		if (elapsedMs > 5_000) {
+			process.stderr.write(
+				`lost connection to the daemon ${Math.round(elapsedMs / 1000)}s into the promotion${code ? ` (${code})` : ""} — it may still be running server-side; check the Plane ticket for ${issue} or the daemon logs, then retry (an already-promoted ticket is refused, not re-enriched, so a retry is safe).\n`,
+			);
+		} else {
+			process.stderr.write(`No glance daemon on ${base(flags)}. Start one with: glance up\n`);
+		}
+		process.exit(1);
+	}
+	const result = (await res.json().catch(() => null)) as { ok: boolean; issue?: string; message: string; error?: string; draft?: string } | null;
+	if (!result) {
+		process.stderr.write(`promote failed: ${res.status} ${res.statusText}\n`);
+		process.exit(1);
+	}
+	if (flags.json) {
+		process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+		if (!result.ok) process.exit(1);
+		return;
+	}
+	if (result.ok) {
+		process.stdout.write(`${result.message}\n`);
+		return;
+	}
+	process.stderr.write(`${result.message}\n`);
+	if (result.draft) process.stderr.write(`\n--- draft (not written) ---\n${result.draft}\n`);
+	process.exit(1);
 }
 
 /**
@@ -1056,6 +1159,63 @@ async function cmdDoctor(args: string[]): Promise<void> {
 	process.stdout.write(flags.json ? `${JSON.stringify(report, null, 2)}
 ` : renderDoctor(report));
 	if (!report.healthy) process.exit(1);
+}
+
+/** Coarse "how long ago" label for a symptom's `landedAt` — mirrors `fabric-search.ts`'s internal
+ *  `agoLabel`, kept local here since that one isn't exported (it's fenced-primer-specific). */
+function symptomAge(landedAt: number): string {
+	const mins = Math.round(Math.max(0, Date.now() - landedAt) / 60_000);
+	if (mins < 1) return "just now";
+	if (mins < 60) return `${mins}m ago`;
+	const hours = Math.round(mins / 60);
+	if (hours < 24) return `${hours}h ago`;
+	return `${Math.round(hours / 24)}d ago`;
+}
+
+/**
+ * `glance symptom "<query>" [--repo <path>] [--json]` — the pull-search half of DESIGN.md's "push at
+ * motivation" (`glance doctor`'s auto-match is the push half: it surfaces the same index unprompted
+ * inside a failing check's remedy). Ranking happens server-side (`GET /api/symptoms`, reusing
+ * fabric-search's BM25 core); this renders the ranked hits, folding recurrences of the same symptom
+ * text into one card (newest first) and flagging any `whereToLook` entry that no longer exists in
+ * THIS repo tree — a dead pointer surfaced mid-incident is worse than none.
+ */
+async function cmdSymptom(args: string[]): Promise<void> {
+	const { positional, flags } = parseArgs(args);
+	const query = positional.join(" ").trim();
+	if (!query) {
+		process.stderr.write('usage: glance symptom "<query>" [--repo <path>] [--json]\n');
+		process.exit(1);
+	}
+	const repo = typeof flags.repo === "string" ? path.resolve(flags.repo) : undefined;
+	const qs = new URLSearchParams({ q: query });
+	if (repo) qs.set("repo", repo);
+	const res = await fetch(`${base(flags)}/api/symptoms?${qs.toString()}`, { headers: tokenHeader() }).catch(() => null);
+	if (!res || !res.ok) {
+		process.stderr.write(res ? `symptom search failed: ${res.status} ${await res.text()}\n` : `No glance daemon on ${base(flags)}. Start one with: glance up\n`);
+		process.exit(1);
+	}
+	const body = (await res.json()) as { query: string; results: SymptomSearchHit[] };
+	if (flags.json) {
+		process.stdout.write(`${JSON.stringify(body, null, 2)}\n`);
+		return;
+	}
+	if (body.results.length === 0) {
+		process.stdout.write(`no matching symptom found for "${query}".\n`);
+		return;
+	}
+	const repoRoot = repo ?? process.cwd();
+	for (const group of groupSymptomHits(body.results)) {
+		process.stdout.write(`\n${group.symptom}\n`);
+		for (const hit of group.entries) {
+			const pr = hit.fixedBy.prNumber ? ` (PR #${hit.fixedBy.prNumber})` : "";
+			process.stdout.write(`  ${symptomAge(hit.landedAt)}${pr}\n`);
+			for (const w of hit.whereToLook) {
+				const stat = await statWhereToLookEntry(repoRoot, w);
+				process.stdout.write(`    - ${formatWhereToLookEntry(w, stat)}\n`);
+			}
+		}
+	}
 }
 
 async function main(): Promise<void> {
@@ -1134,8 +1294,14 @@ async function main(): Promise<void> {
 		case "answers":
 			await cmdAnswers(rest);
 			break;
+		case "promote":
+			await cmdPromote(rest);
+			break;
 		case "doctor":
 			await cmdDoctor(rest);
+			break;
+		case "symptom":
+			await cmdSymptom(rest);
 			break;
 		case "open": {
 			const { flags } = parseArgs(rest);

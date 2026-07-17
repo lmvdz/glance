@@ -24,7 +24,7 @@ import { hardenedGit } from "./git-harden.ts";
 import { planeConfig } from "./plane.ts";
 import { resolveStateDir } from "./state-dir.ts";
 import { DERIVED_SANDBOX_IMAGE } from "./gate-runner.ts";
-import type { AutonomyFacts, DaemonFacts, DoctorProbe, RepoFacts } from "./doctor.ts";
+import type { AutonomyFacts, DaemonFacts, DoctorProbe, RepoFacts, SymptomIndexEntry } from "./doctor.ts";
 
 interface DoctorFactsResponse {
 	daemon: DaemonFacts;
@@ -33,6 +33,9 @@ interface DoctorFactsResponse {
 	gate?: { image: string; strict: boolean };
 	projects: string[];
 	zombieAgents: number;
+	/** The known-symptom index (comprehension concern 07) — absent on an older daemon that predates
+	 *  this field, which reads as "no symptoms known" rather than a probe crash. */
+	symptoms?: SymptomIndexEntry[];
 }
 
 /** Structural check, not a full decode: the fields `doctor` actually reads. */
@@ -45,7 +48,7 @@ function isDoctorFacts(v: unknown): v is DoctorFactsResponse {
 const DEAD: DaemonFacts = { running: false };
 /** Nothing is armed when nothing is running. Reporting the CALLING shell's flags here would describe a
  *  daemon that does not exist. */
-const NO_AUTONOMY: AutonomyFacts = { autodispatch: false, autodrive: false, autoland: false, autosupervise: false, landConfirm: false, regressionGate: false };
+const NO_AUTONOMY: AutonomyFacts = { autodispatch: false, autodrive: false, autoland: false, autosupervise: false, landConfirm: false, regressionGate: false, costGateMode: "off", costAggregateReady: false };
 
 /** A wedged docker daemon or a git on a stalled network filesystem must not hang the diagnosis forever —
  *  the machine `doctor` is asked about is, by hypothesis, the broken one. (grok-4.5) */
@@ -273,6 +276,9 @@ export function makeDoctorProbe(opts: ProbeOptions): DoctorProbe {
 				// dead/unreachable daemon — the local durable read below still answers honestly
 			}
 			return computeAdoptionCounters(resolveStateDir());
+		},
+		async symptoms() {
+			return (await facts())?.symptoms ?? [];
 		},
 	};
 }

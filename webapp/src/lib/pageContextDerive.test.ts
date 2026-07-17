@@ -3,6 +3,7 @@ import {
   deriveFleetPageContext,
   deriveTasksPageContext,
   deriveGraphPageContext,
+  deriveFogPageContext,
   deriveCapabilitiesPageContext,
   deriveIntervenePageContext,
   deriveReviewPageContext,
@@ -211,6 +212,17 @@ describe('deriveReviewPageContext', () => {
     expect(ctx.title).toBe('Review — Plan doc review');
     expect(ctx.filters).toEqual({ docPath: 'plans/x/01-a.md' });
     expect(ctx.route).toBe('/review/t1?doc=plans/x/01-a.md');
+  });
+});
+
+describe('deriveFogPageContext', () => {
+  test('carries the days window and file count, no per-item selection concept', () => {
+    const ctx = deriveFogPageContext({ days: 14, fileCount: 42 });
+    expect(ctx.viewId).toBe('fog');
+    expect(ctx.title).toBe('Comprehension fog');
+    expect(ctx.entities).toEqual([]);
+    expect(ctx.filters).toEqual({ windowDays: 14, fileCount: 42 });
+    expect(ctx.route).toBe('/fog');
   });
 });
 

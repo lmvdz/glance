@@ -213,3 +213,52 @@ test("offload half: a red-baseline land's oversized gate output is durably persi
 		setGateLogRoot(path.join(os.tmpdir(), "gate-logs-unset"));
 	}
 });
+
+// noisegate-compaction concern 05: land.ts's GREEN-PATH proof detail (verifyMerged's `v.code === 0`
+// branch, land.ts ~line 649) now routes the acceptance gate's output through `reduceOutput` instead
+// of a plain `truncate()` — DESIGN.md flags this as "now offloads full suite output per land,
+// accepted (TTL-swept, forensically useful)" and requires proof that the resulting
+// `[N bytes omitted — full: <path>]` pointer survives `recordProof`'s OWN, separate 4000-char
+// `detail.slice(0, 4000)` cap (src/proof.ts) rather than getting silently amputated by a second,
+// uncoordinated truncation layered on top of the first.
+test("offload half (green path): a landed green gate's oversized output still carries its pointer through recordProof's 4000-char detail cap", async () => {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "land-base-green-offload-"));
+	tmps.push(repo);
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "land-base-green-offload-state-"));
+	tmps.push(stateDir);
+	setGateLogRoot(stateDir);
+	setProofRoot(stateDir);
+	try {
+		await git(repo, "init", "-q", "-b", "main");
+		await git(repo, "config", "user.email", "t@t");
+		await git(repo, "config", "user.name", "t");
+		await git(repo, "config", "commit.gpgsign", "false");
+		// A PASSING gate (exit 0) whose stdout is oversized (> 800 chars, the budget for this detail
+		// site) — no `command`/`test` word so greenGateUnproven() never second-guesses the pass, and no
+		// package.json so applyRegressionGate finds no full suite to run (isolates the acceptance path).
+		const noise = Array.from({ length: 30 }, (_, i) => `printf 'padding-line-${String(i).padStart(2, "0")}-filler-filler-filler\\n'`).join("\n");
+		await fs.writeFile(path.join(repo, "gate.sh"), ["#!/bin/sh", noise, "printf 'TAIL-MARKER-VISIBLE\\n'", "exit 0"].join("\n"));
+		await fs.writeFile(path.join(repo, "base.txt"), "base\n");
+		await git(repo, "add", "-A");
+		await git(repo, "commit", "-qm", "base");
+		const wt = await branchWorktree(repo, "feat", "feature.txt");
+
+		const res = await landAgent({ repo, worktree: wt, branch: "feat", message: "land feat", commitWip: false, verify: "sh gate.sh" });
+
+		expect(res.ok).toBe(true);
+		expect(res.merged).toBe(true);
+
+		const proof = await proofFor(repo, repo);
+		expect(proof?.ok).toBe(true);
+		// The proof's `detail` went through recordProof's OWN 4000-char cap on top of reduceOutput's
+		// 800-char one — well within it (prefix + <=800 body), so the pointer must still be intact.
+		expect(proof?.detail.length).toBeLessThanOrEqual(4000);
+		const pointerMatch = proof?.detail.match(/\[(\d+) bytes omitted — full: ([^\]]+)\]/);
+		expect(pointerMatch).toBeTruthy();
+		const fullContent = await fs.readFile(pointerMatch?.[2] ?? "", "utf8");
+		expect(fullContent.length).toBeGreaterThan(900);
+		expect(fullContent).toContain("TAIL-MARKER-VISIBLE");
+	} finally {
+		setGateLogRoot(path.join(os.tmpdir(), "gate-logs-unset"));
+	}
+});

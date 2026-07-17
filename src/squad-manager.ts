@@ -8,7 +8,7 @@
  */
 
 import { EventEmitter } from "node:events";
-import { envBool, envInt, envNumber } from "./config.ts";
+import { envBool, envBoolAliased, envInt, envNumber, raceOnceEnabled } from "./config.ts";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import { existsSync, realpathSync } from "node:fs";
@@ -36,10 +36,16 @@ import type { EngineCheckpoint, NodeResult, Workflow, WorkflowGraphSnapshot, Wor
 import { appendCheckpoint, type CheckpointLogEntry, deleteCheckpointLog, evictCheckpointChain, getLastSeq, readCheckpoints } from "./workflow/checkpoint-log.ts";
 import { buildObserveWorkflow, buildTddVerifyWorkflow, buildVerifyWorkflow } from "./workflow/verify-workflow.ts";
 import { type Classify, detectVerify, detectVerifyStages, ompClassify, routeIntake } from "./intake.ts";
+import { LANE_POLICY, type WorkLane, type WorkLaneSource } from "./lane.ts";
 import type { WorkflowDefinition } from "./workflow-catalog.ts";
 import { Dispatcher } from "./dispatch.ts";
 import { openDispatchLedger } from "./dispatch-ledger.ts";
-import { type Answer, answerBrief, listAnswers, readAnswer, saveAnswer } from "./answers.ts";
+import { openRaceLedger, type RaceLedger } from "./race-ledger.ts";
+import { type Answer, answerBrief, listAnswers, possiblyStale, readAnswer, saveAnswer } from "./answers.ts";
+// Aliased: `types.ts` already exports an UNRELATED `AttentionEvent` (an agent's own notify signal,
+// used pervasively below via `AgentDTO.attentionEvents`) — importing this module's same-named type
+// bare would collide. `OperatorAttentionEvent` disambiguates at every use site in this file.
+import { AttentionStore, type AttentionEvent as OperatorAttentionEvent, type AttentionRecordInput, type RecordResult, type SeenMap, type SurpriseCountMap } from "./attention.ts";
 import { errText } from "./err-text.ts";
 import { armCompletionPushKind, completionMinTurnMs, completionTurnLongEnough, type CompletionPushKind } from "./completion-push.ts";
 import { allowPushTap, isKnownPushTapAgentId, isValidPushTapAgentId } from "./authz.ts";
@@ -57,15 +63,26 @@ import { gitDiffSinceBase } from "./convergence-run.ts";
 import { readScoutCursors, writeScoutCursors } from "./scout-cursor.ts";
 import { execGatedCommand } from "./gate-runner.ts";
 import { Opportunity } from "./opportunity.ts";
+import {
+	EpisodeLoop,
+	listEpisodes,
+	readEpisode,
+	type EpisodeGatherResult,
+	type EpisodeMeta,
+	type OmittedEntry as EpisodeOmittedEntry,
+	type StaleAnswerEntry,
+} from "./weekly-episode.ts";
+import { computeFog, topDebt, type FileFogEntry } from "./comprehension-fog.ts";
+import { PushService } from "./push.ts";
 import { ResidentPlanner } from "./resident-planner.ts";
 import { DECOMPOSE_TIMEOUT_MS } from "./planner.ts";
 import { hardenedGit, hardenedGitSync } from "./git-harden.ts";
 import { Scheduler, liveAgents, occupyingAgents } from "./scheduler.ts";
 import { RateLimitGate } from "./rate-limit.ts";
-import { addIssueIdsToFeatureModule, addIssuesToFeatureModule, addPlaneBlockedByRelation, addPlaneIssueComment, closePlaneIssue, createPlaneIssue, deletePlaneModule, ensureFeatureModule, featureTickets, fetchIssueDetail, listPlaneIssues, listPlaneIssuesAllStates, planeRepos, reopenPlaneIssue, startPlaneIssue } from "./plane.ts";
+import { addIssueIdsToFeatureModule, addIssuesToFeatureModule, addPlaneBlockedByRelation, addPlaneIssueComment, closePlaneIssue, createPlaneIssue, deletePlaneModule, ensureFeatureModule, featureTickets, fetchIssueDetail, laneFromLabels, listPlaneIssues, listPlaneIssuesAllStates, planeRepos, reopenPlaneIssue, startPlaneIssue } from "./plane.ts";
 import { syncPlanStatuses } from "./plan-sync.ts";
 import { agentsToAdopt, deferredResumable, hardAgentCeiling, newAgentId, planeIssueBranch, selectAdoptable, slugPart } from "./spawn-identity.ts";
-import { gateMembraneTokens, loadRepoProfiles, membraneDisciplinePrompt, membraneProfilesEnabled, modelOptionsFromRuntime, profileOptionsFromEnv, toolGrantsPrompt, type RuntimeModelOption } from "./agent-profiles.ts";
+import { EFFECT_POINTER_MARKER, effectSkillPointerLine, gateMembraneTokens, upsertDoNotBlock, loadRepoProfiles, membraneDisciplinePrompt, membraneProfilesEnabled, modelOptionsFromRuntime, profileOptionsFromEnv, toolGrantsPrompt, type RuntimeModelOption } from "./agent-profiles.ts";
 import { escapeHtml, planConcernTicketMatches, renderPlanConcernIssueHtml } from "./concern-tickets.ts";
 import { capabilityWorkflowToDot, loadCommissionWorkflow, resolveWorkflowPath, slugifyForFile } from "./workflow-source.ts";
 export { capabilityWorkflowToDot, resolveWorkflowPath };
@@ -83,11 +100,12 @@ import { autoLandOnSuccess } from "./autoland.ts";
 import { ownershipConflict, requiresConflict, outOfScopeWrites, producesAllowlist } from "./ownership.ts";
 import { headCommit, isFresh, proofFingerprint, proofFor, proofGate, runProof, setProofRoot, sweepProofs } from "./proof.ts";
 import { setGateLogRoot, sweepGateLogs } from "./gate-logs.ts";
+import { setCompactionLogRoot } from "./output-reduce.ts";
 import { type Judge, validatorGate } from "./validator.ts";
 import { evaluateCompliance, type ComplianceFinding } from "./compliance.ts";
 import { reapDeadSessions, releaseSession, sweepLeases } from "./leases.ts";
 import { agentActor, scopeFor } from "./agent-scope.ts";
-import { buildFabricSnapshot, loadScoutFacts, type FabricSnapshot } from "./fabric.ts";
+import { actorVisibleRepoSet, buildFabricSnapshot, loadScoutFacts, type FabricSnapshot } from "./fabric.ts";
 import { buildContextPrimer, searchFabric, type KbDocType } from "./fabric-search.ts";
 import { sweepPresence, who } from "./presence.ts";
 import { harnessEventDecision } from "./harness-hooks.ts";
@@ -153,6 +171,9 @@ import { selectReapable, type WorktreeInfo } from "./worktree-reaper.ts";
 import { scrubbedSpawnEnv } from "./spawn-env.ts";
 import { changedFiles, filesTouchedSinceBase } from "./explore.ts";
 import { appendReceipt, confirmDeliveredFlags, EFFICIENCY_FLAG_PREFIX, readAllReceipts, readReceipts, RunAccumulator, splitCapabilityTokens } from "./receipts.ts";
+import { validateModelDelta } from "./decision-evidence.ts";
+import { classifyWhereToLookEntry, listSymptoms, readSymptom, saveSymptom, statWhereToLookEntry, symptomId, validateSymptomText, validateWhereToLookCount, type SymptomEntry } from "./symptoms.ts";
+import { buildPrBody } from "./pr-body.ts";
 import { membraneBreakerCadence } from "./membrane-breaker-cadence.ts";
 import { appendAudit, type AuditQuery, makeAuditEntry, readAudit } from "./audit.ts";
 import { AutomationLog, type AutomationQuery } from "./automation-log.ts";
@@ -160,7 +181,8 @@ import { isFirstTryGreen, isOn, learningFlags, LearningMetrics, type MetricRollu
 import { reflect } from "./reflection.ts";
 import { failureAnnotation, recordFailureAnnotation } from "./failure-memory.ts";
 import { readModelOutcomes, recordModelOutcome, recordModelOutcomeBlocked, tierOf } from "./model-outcomes.ts";
-import { shadowCostCheck } from "./cost-gate.ts";
+import { costGateMode, type CostVerdict, shadowCostCheck } from "./cost-gate.ts";
+import { recordCostLanded } from "./cost-aggregate.ts";
 import { buildScoreboard, type Scoreboard } from "./attribution-scoreboard.ts";
 import { recordConfidenceOutcome, setThresholdTunerRoot, tunedConfidenceFloor } from "./threshold-tuner.ts";
 import { FrictionLog, type FrictionCapture } from "./friction-log.ts";
@@ -176,14 +198,15 @@ import { isLandingUnit, landingRosterOf } from "./is-landing-unit.ts";
 import { readTaskOutcomes, recordTaskOutcome, type TaskOutcomeRow } from "./task-outcomes.ts";
 import { buildTaskClassMatrix } from "./omp-graph/task-class-matrix.ts";
 import { DAY_MS } from "./omp-graph/schema.ts";
-import { routeModelForTaskClass } from "./model-route.ts";
+import { modelRouteMinEdgeFor, modelRouteShouldApply, routeModelForTaskClass } from "./model-route.ts";
 import { openOrchestratorState } from "./orchestrator-state.ts";
-import { authoredSpecBlock, buildDigest, type DigestReward, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
+import { authoredSpecBlock, buildDigest, type DigestReward, digestSummaryExcerpt, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
 import { readChatAttachment, reapStaleChatAttachments, type SavedChatAttachment, writeChatAttachment } from "./chat-attachment.ts";
 import { harnessScorecardEnabled, scoreHarness } from "./harness-scorecard.ts";
 import { isArmed } from "./convergence-oracle.ts";
 import { lensAdvisoryBucket, scoreConfidence } from "./confidence.ts";
 import { redact } from "./redact.ts";
+import { truncateLabel } from "./text-util.ts";
 import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
 import { buildTrace, traceMaxSpans, traceSampleRatio, traceSpansEnabled, type TraceResponse } from "./spans.ts";
 import { traceExporterFromEnv, type TraceExportQueue } from "./trace-exporter.ts";
@@ -219,6 +242,10 @@ import {
 
 const MAX_TRANSCRIPT = 800;
 const POLL_MS = 2500;
+/** EpisodeLoop's tick cadence (comprehension concern 09) — hourly, so a daemon restart is never more
+ *  than an hour late catching up on a missed weekly generation. Durable idempotency (the target
+ *  week's artifact already existing) is what actually gates work, not this interval. */
+const EPISODE_TICK_MS = 3_600_000;
 /**
  * How long a built spawn scoreboard is served from cache (see `spawnScoreboard()`). Outcome data
  * only changes on lands, and the board feeds a routing TIE-BREAKER (never a gate/veto), so a
@@ -244,6 +271,12 @@ const REPORT_TOOL = "squad_report";
  *  when the OMP_SQUAD_DECISION_CAPTURE flag is on. Writes a source:"agent" decision to the agent's
  *  feature so future agents inherit it via the cold-start primer / squad_kb_search. */
 const RECORD_DECISION_TOOL = "squad_record_decision";
+/** Comprehension lane concern 05 ("teaching producers"): NON-blocking, same shape as
+ *  RECORD_DECISION_TOOL. Advertised/dispatched behind the SAME OMP_SQUAD_DECISION_CAPTURE flag (no new
+ *  flag invented — DESIGN.md's flag-discipline instruction) since both are teaching-content producers
+ *  that write into the same cold-start/kb-search pipeline. Writes a `SymptomEntry` when this run FIXED
+ *  a defect, phrased as the operator would observe it. */
+const RECORD_SYMPTOM_TOOL = "squad_record_symptom";
 /** cmux-research concern 03: NON-blocking, same shape as REPORT_TOOL — a bare "look here", not a gate. */
 const ATTENTION_TOOL = "squad_attention";
 
@@ -314,13 +347,40 @@ const SQUAD_HOST_TOOLS: HostToolDef[] = [
 const RECORD_DECISION_TOOL_DEF: HostToolDef = {
 	name: RECORD_DECISION_TOOL,
 	description:
-		"Record a consequential decision you made and WHY (an architecture choice, a tradeoff, an approach picked over an alternative) so future agents on this work inherit it instead of re-deciding it. Non-blocking — you keep working. Use SPARINGLY, only for genuinely load-bearing decisions, not routine steps.",
+		'Record a consequential decision you made and WHY (an architecture choice, a tradeoff, an approach picked over an alternative) so future agents on this work inherit it instead of re-deciding it. Non-blocking — you keep working. Use SPARINGLY, only for genuinely load-bearing decisions, not routine steps.\n\n' +
+		'ALSO, before you finish: if you changed how the system actually works (not just what code exists), set source:"model-delta" and record up to 3 such deltas — state what was true BEFORE and what is true NOW. Each model-delta entry REQUIRES `evidence`: one or more repo-relative files (or `file:start-end`) THIS RUN touched — an anchorless or made-up-file delta is rejected. Skip entirely when nothing architectural changed; an empty record is honest, slop is not.',
 	parameters: {
 		type: "object",
 		properties: {
-			text: { type: "string", description: "The decision and its rationale, in one or two sentences." },
+			text: { type: "string", description: "The decision and its rationale, in one or two sentences. For a model-delta, state what was true before and what is true now (min 20 chars)." },
+			source: { type: "string", enum: ["model-delta"], description: 'Optional. Set to "model-delta" to record a mental-model delta instead of a routine decision — requires `evidence`.' },
+			evidence: {
+				type: "array",
+				items: { type: "string" },
+				description: 'Required when source is "model-delta": repo-relative file paths (or `file:start-end`) this run touched, each proving the delta. Ignored for a routine decision.',
+			},
 		},
 		required: ["text"],
+	},
+};
+
+/** Advertised only when OMP_SQUAD_DECISION_CAPTURE is on, alongside RECORD_DECISION_TOOL_DEF — same
+ *  flag, no new one invented (DESIGN.md's flag-discipline instruction). */
+const RECORD_SYMPTOM_TOOL_DEF: HostToolDef = {
+	name: RECORD_SYMPTOM_TOOL,
+	description:
+		'Record a symptom card when THIS RUN FIXED a defect — phrased the way an OPERATOR would observe it (e.g. "daemon healthy but dispatch stalled"), never as the fix itself (not "added a null check in dispatch.ts"). Non-blocking. Use once per fix. `whereToLook` must be 1-5 entries, each either an existing repo-relative path (a specific file, or a directory at least two levels deep — a bare top-level directory like "src/" is rejected) or a literal `glance …` command.',
+	parameters: {
+		type: "object",
+		properties: {
+			symptom: { type: "string", description: "The defect as the operator would observe it, min 20 characters." },
+			whereToLook: {
+				type: "array",
+				items: { type: "string" },
+				description: '1-5 entries: an existing repo-relative path (file, or a directory at least two levels deep) or a `glance …` command. Bare "src/" is rejected.',
+			},
+		},
+		required: ["symptom", "whereToLook"],
 	},
 };
 
@@ -398,6 +458,30 @@ function landBlockedEscalateCap(): number {
  */
 function aheadUnknownEscalateCap(): number {
 	return envInt("OMP_SQUAD_AHEAD_UNKNOWN_ESCALATE_CAP", 3);
+}
+
+/** The three angles fan-out's own workflow (workflows/fan-out/workflow.fabro:12-14) forks a goal into —
+ *  reused verbatim as `tryRaceOnce`'s prompt variants so a race-once sibling gets a genuinely different
+ *  approach instruction instead of re-running the exact same prompt into the exact same failure mode. */
+const RACE_STRATEGIES = [
+	{ key: "simplicity", keyword: /simpl(e|est|icity|ify)/i, prompt: "Implement the goal, optimizing for the simplest, clearest solution." },
+	{ key: "performance", keyword: /perf(ormance)?|slow|timeout|latency/i, prompt: "Implement the goal, optimizing for runtime performance." },
+	{ key: "minimal deps", keyword: /depend(ency|encies)?|package|import/i, prompt: "Implement the goal using the fewest external dependencies." },
+] as const;
+
+/**
+ * Pick the race-once sibling's alternate-strategy prompt (DESIGN.md: "pick the strategy furthest from
+ * the original's failure mode, default 'simplicity'"). A workflow catastrophe's `reason` is almost
+ * always the generic engine message ("node \"X\" exceeded its visit cap (N)") with no strategy signal
+ * in it — the keyword match below only ever fires on the rare detail that happens to name one of the
+ * three axes, so "simplicity" (index 0) IS the honest default this function returns in the overwhelming
+ * majority of cases. Skips whichever strategy's own axis is named in the detail (that axis is plausibly
+ * what the original was already doing when it tripped the cap) rather than re-offering it.
+ */
+function pickAlternateStrategy(failureDetail: string): (typeof RACE_STRATEGIES)[number] {
+	const named = RACE_STRATEGIES.find((s) => s.keyword.test(failureDetail));
+	if (!named) return RACE_STRATEGIES[0]; // no signal at all — "simplicity" default
+	return RACE_STRATEGIES.find((s) => s.key !== named.key) ?? RACE_STRATEGIES[0];
 }
 
 /**
@@ -843,6 +927,10 @@ export class SquadManager extends EventEmitter {
 	private readonly scouts = new Map<string, Scout>();
 	/** Opportunity clusterers — one per configured Plane repo, fed by Scout facts + receipt hot areas. */
 	private readonly opportunities: Opportunity[] = [];
+	/** Weekly-episode loops (comprehension concern 09) — one per repo this daemon knows about
+	 *  (`featureRepos()`, NOT `planeRepos()`: comprehension isn't gated on a Plane backlog, matching
+	 *  attention/fog/symptoms elsewhere in this lane). Cleared in stop(). */
+	private readonly episodeLoops: EpisodeLoop[] = [];
 	/** Resident planners — one per configured Plane repo; gated OMP_SQUAD_RESIDENT_PLANNER (default OFF,
 	 *  opt-in unlike the loops above — an LLM-cost-bearing writer of source-tree files). */
 	private readonly residentPlanners: ResidentPlanner[] = [];
@@ -858,6 +946,15 @@ export class SquadManager extends EventEmitter {
 	private readonly removedLedger: RemovedLedger;
 	/** Durable repos-this-operator-works-in set; unioned into `projects()`. See project-registry.ts. */
 	private readonly projectRegistry: ProjectRegistry;
+	/** Restart-safe "raced this issue already, ever" ledger (adw-factory-borrows concern 07). Consulted
+	 *  and stamped by `tryRaceOnce` — see race-ledger.ts for why this must be persisted, not in-memory. */
+	private readonly raceLedger: RaceLedger;
+	/** Closes the TOCTOU window between `tryRaceOnce`'s ledger check and the ledger actually being
+	 *  stamped (which only happens once the sibling's own `create()` call — worktree cut, driver
+	 *  start — resolves): a second catastrophe for the SAME issue arriving inside that window would
+	 *  otherwise see no ledger entry yet and race a second sibling. Mirrors `fork()`'s own
+	 *  `forkInFlight` synchronous-claim precedent. */
+	private readonly raceInFlight = new Set<string>();
 	/** In-flight spawn-time dependency provisioning, keyed by agent id (cross-lineage review HIGH 1).
 	 *  createWithId KICKS provisioning here without awaiting it — the invariant is "the verify gate
 	 *  must not run before provisioning settles", NOT "the dispatch tick must wait", so the await
@@ -958,6 +1055,9 @@ export class SquadManager extends EventEmitter {
 	 *  reports (POST /api/push-tap). Adoption-counter substrate (plans/daily-dogfood-engine/02);
 	 *  append-only observability, never gates behavior. Same JsonlLog infra as transitionLog. */
 	private readonly pushTapLog: JsonlLog<PushTapEntry>;
+	/** Operator-attention substrate (comprehension concern 01) — raw JsonlLog feed + compacted
+	 *  last-seen map, constructed ONCE here (mirrors `transitionLog` above), never per-request. */
+	private readonly attentionStore: AttentionStore;
 	private readonly traceExporter?: TraceExportQueue;
 	/** Reward disbursement provider (Tremendous / Manual). Injectable for tests; default from env. */
 	private readonly paymentProvider: PaymentProvider;
@@ -978,6 +1078,7 @@ export class SquadManager extends EventEmitter {
 		setProofRoot(this.stateDir);
 		setThresholdTunerRoot(this.stateDir);
 		setGateLogRoot(this.stateDir);
+		setCompactionLogRoot(this.stateDir);
 		this.scoutCursor = readScoutCursors(this.stateDir);
 		this.removedLedger = openRemovedLedger(this.stateDir);
 		this.projectRegistry = openProjectRegistry(this.stateDir);
@@ -986,11 +1087,13 @@ export class SquadManager extends EventEmitter {
 		// ephemeral `glance here` registration to permanent — start() reconciles them against the
 		// restored roster (reconcileEphemeralProjects).
 		this.ephemeralProjects = readEphemeralProjects(this.stateDir);
+		this.raceLedger = openRaceLedger(this.stateDir);
 		this.automation = new AutomationLog(this.stateDir, { onEvent: (event) => this.emit("event", { type: "automation", event } satisfies SquadEvent) });
 		this.learningMetrics = new LearningMetrics(this.stateDir, { log: (m) => this.log("warn", `learning-metrics: ${m}`) });
 		this.transitionLog = new JsonlLog<TransitionEntry>({ path: path.join(this.stateDir, "transitions.jsonl"), log: (m) => this.log("warn", `transitions.jsonl: ${m}`) });
 		this.frictionLog = new FrictionLog(this.stateDir, (m) => this.log("warn", `friction.jsonl: ${m}`));
 		this.pushTapLog = new JsonlLog<PushTapEntry>({ path: path.join(this.stateDir, PUSH_TAPS_FILE), log: (m) => this.log("warn", `${PUSH_TAPS_FILE}: ${m}`) });
+		this.attentionStore = new AttentionStore({ stateDir: this.stateDir, log: (m) => this.log("warn", `attention: ${m}`) });
 		this.bin = opts.bin;
 		this.autoLand = opts.autoLand ?? false;
 		this.worktreeBaseDir = opts.worktreeBase;
@@ -1322,6 +1425,45 @@ export class SquadManager extends EventEmitter {
 			this.log("info", `opportunity on (clustering scout patterns → ${observeRepos.join(", ")})`);
 		}
 
+		// Weekly episode (comprehension concern 09) — an HOURLY tick against a WEEKLY deliverable
+		// (DESIGN.md "Weekly episode trigger": a 7-day in-memory timer never survives a daemon restart,
+		// so durable idempotency over a real calendar week is the trigger, not the interval). One loop
+		// per repo `featureRepos()` knows about — NOT `planeRepos()`: comprehension (attention/fog/
+		// symptoms) is never gated on a configured Plane backlog elsewhere in this lane, so episodes
+		// aren't either.
+		// `GLANCE_EPISODE` (legacy alias `OMP_SQUAD_EPISODE`, batch-3 review: `.env.example` documented
+		// `GLANCE_EPISODE` as primary with `OMP_SQUAD_EPISODE` as its legacy alias, but this used to
+		// read ONLY the old name — the documented primary name silently did nothing).
+		if (envBoolAliased("GLANCE_EPISODE", "OMP_SQUAD_EPISODE", true)) {
+			{
+				// ONE loop over a LIVE repo provider (code-review resume finding 4): the repo set is
+				// re-derived every tick, so a project added after boot gets its weekly brief without a
+				// daemon restart — the old one-loop-per-boot-time-repo shape starved late adds forever.
+				const loop = new EpisodeLoop({
+					repos: () => this.featureRepos(),
+					stateDir: this.stateDir,
+					gather: (repo, window) => this.gatherEpisodeInputs(repo, window),
+					// Fresh PushService per send, re-`init()`'d from disk every time (episode pushes fire at
+					// most weekly, so the cost is trivial): the alternative — one long-lived instance built
+					// once at start() — would cache `subs`/`vapid` from whatever existed at boot and never
+					// see a device that subscribes afterward, since `PushService.subscribe()` only updates
+					// the INSTANCE that received the call (index.ts's/server.ts's own service, a separate
+					// object). Re-reading from the same durable `push-subs.json`/`vapid.json` files this
+					// daemon already writes sidesteps that staleness entirely, with no new shared state.
+					notifyPush: async (payload) => {
+						const push = new PushService(this.stateDir);
+						await push.init();
+						await push.notify(payload);
+					},
+					log: (m) => this.log("info", `episode: ${m}`),
+					recordFor: (repo) => this.automation.for("episode", repo),
+				});
+				loop.start(EPISODE_TICK_MS);
+				this.episodeLoops.push(loop);
+				this.log("info", "episode on (weekly brief; repo set re-derived each tick)");
+			}
+		}
+
 		// Resident planner (Epic 1) — the inverse of plan-sync: ingests plans/<name>/OBJECTIVE.md and
 		// maintains its concern-DAG against verified (DoneProof) state. Opt-IN ("=== 1", not "!== 0")
 		// unlike every loop above — it is an LLM-cost-bearing writer of source-tree files.
@@ -1431,11 +1573,15 @@ export class SquadManager extends EventEmitter {
 		if (issue.description) return issue;
 		try {
 			const detail = await fetchIssueDetail(repo, issue.id);
+			// Lane from the Plane LABEL, resolved off the SAME detail fetch (concern 02) — never from
+			// title text (a fail-open privilege key, DESIGN.md). `undefined` when no `lane:*` label is
+			// present, letting the precedence clamp in `createWithId` fall through to the classifier.
+			const lane = laneFromLabels(detail?.labels);
 			const body = detail?.body?.trim();
-			if (!body) return issue;
+			if (!body) return lane ? { ...issue, lane } : issue;
 			const cap = envInt("OMP_SQUAD_SPEC_MAX_CHARS", 4000);
 			const spec = body.length > cap ? `${body.slice(0, cap)}\n…(spec truncated at ${cap} chars)` : body;
-			return { ...issue, description: spec };
+			return { ...issue, description: spec, ...(lane ? { lane } : {}) };
 		} catch {
 			return issue;
 		}
@@ -1520,8 +1666,12 @@ export class SquadManager extends EventEmitter {
 		clearTimeout(this.prReconcileStaggerTimer);
 		for (const s of this.scouts.values()) s.stop();
 		for (const o of this.opportunities) o.stop();
+		for (const l of this.episodeLoops) l.stop();
 		for (const p of this.residentPlanners) p.stop();
 		clearInterval(this.leaseGossipTimer);
+		// Flush the attention store's debounced last-seen-map write (comprehension concern 01) — same
+		// "only a crash may lose it" contract as the pendingPersistTimers flush above.
+		this.attentionStore.stop();
 		await this.persist();
 		// Best-effort timeline marker (#lifecycle-truth finding 4 / DESIGN's "a best-effort daemon-stop
 		// entry in stop()") — a graceful shutdown DETACHES agents (below), it does not actually stop them,
@@ -1672,6 +1822,10 @@ export class SquadManager extends EventEmitter {
 				// — cosmetic, idempotent content, no behavioral effect; non-profiled fleet units compose cleanly.
 				appendSystemPrompt: p.appendSystemPrompt,
 				issue: p.issue,
+				// Restore the resolved lane + its SOURCE verbatim (concern 02): without the source, a
+				// restart would re-resolve a persisted classifier lane as operator-sourced (privilege upgrade).
+				lane: p.lane,
+				laneSource: p.laneSource,
 				parentId: p.parentId,
 				...lineageFieldsFrom(p),
 				// Restore the harness lineage so a cold-adopted/restored pi or ACP unit keeps its harness
@@ -1859,6 +2013,7 @@ export class SquadManager extends EventEmitter {
 			lastActivity: Date.now(),
 			messageCount: 0,
 			issue: p.issue,
+			lane: p.lane,
 			kind: p.kind ?? "omp-operator",
 			executionRole: p.executionRole,
 			parentId: p.parentId,
@@ -1983,6 +2138,7 @@ export class SquadManager extends EventEmitter {
 			lastActivity: Date.now(),
 			messageCount: transcript.length,
 			issue: p.issue,
+			lane: p.lane,
 			kind: p.kind ?? "omp-operator",
 			executionRole: p.executionRole,
 			parentId: p.parentId,
@@ -2004,6 +2160,17 @@ export class SquadManager extends EventEmitter {
 		const rec: AgentRecord = { dto, agent, options: p, harness: this.harnessFor(p), transcript, assistantBuf: "", thinkingBuf: "", streaming: false, subs, toolEntries: new Map() };
 		this.agents.set(p.id, rec);
 		this.wire(rec); // no-op until/unless something ever starts `agent`, which this path never does
+		// Race-once (concern 07): if THIS run is the race ledger's `originalAgentId` for its issue, its
+		// catastrophe escalation was deliberately suppressed the first time (a sibling raced in its place)
+		// — a restart must not resurrect the suppressed CATASTROPHE either, or the "suppress the human
+		// escalation while the sibling runs" invariant only holds until the next reboot. Stay parked
+		// ("stopped", no error) instead of falling through to the ordinary reattach escalation below.
+		const raced = p.issue ? this.raceLedger.get(p.issue.id) : undefined;
+		if (raced && raced.originalAgentId === p.id) {
+			this.transition(rec, "stopped", "kill");
+			this.emitAgent(rec);
+			return;
+		}
 		this.markCatastrophe(p.id, p.workflowState!.terminal!.reason);
 	}
 
@@ -3401,6 +3568,9 @@ export class SquadManager extends EventEmitter {
 			// Never gates the land above; purely record-only, after the outcome is already known.
 			try {
 				recordModelOutcome(this.stateDir, effectiveModel, tierOf(rec.options.thinking), result.ok);
+				// Lane-keyed landed counter (concern 08's documented rollout wire): same record-only,
+				// never-gates posture as recordModelOutcome above.
+				if (result.ok) recordCostLanded(this.stateDir, effectiveModel, tierOf(rec.options.thinking), rec.dto.lane);
 				this.learningMetrics.record("model-outcome-recorded", 1, { flag: "model-outcomes", variant: learningFlags(dto.id).modelOutcomes });
 			} catch (err) {
 				this.log("warn", `model-outcomes record failed for ${dto.name} (non-fatal): ${errText(err)}`);
@@ -3633,7 +3803,8 @@ export class SquadManager extends EventEmitter {
 	 * streak's root cause ONCE per fingerprint, reusing concern 04's `reflect()` (no second LLM path).
 	 * Idempotency lives HERE (not in the caller's timing) — a fingerprint already annotated short-
 	 * circuits before ever calling `reflect()`, so a capped/retried observer tick can call this every
-	 * time without spending a second LLM call. Gated behind `OMP_SQUAD_FAILURE_MEMORY` (default off).
+	 * time without spending a second LLM call. Gated behind `OMP_SQUAD_FAILURE_MEMORY` (default on
+	 * as of skills-hardening concern 05; `=0` is the explicit off-switch).
 	 */
 	private async annotateRecurringFailure(repo: string, finding: Finding, branch: string): Promise<void> {
 		if (!isOn(learningFlags().failureMemory)) return;
@@ -3673,6 +3844,130 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
+	 * PR-body content resolver (comprehension lane concern 06) — the ONE place both `floatPrOnLandReady`
+	 * and `retryPushFloat` call to render a unit's PR body from what was actually recorded during the
+	 * run, so the two float call sites can never drift on what a body contains. Record-then-render:
+	 * this reads already-persisted state only, never parses anything back out of a PR body.
+	 *
+	 * Data sources:
+	 *  - `deltas`: the unit's feature's `source:"model-delta"` decisions (`storedFeatureDecisions`) —
+	 *    empty (not omitted) when the unit carries no `featureId`, which `buildPrBody` renders as the
+	 *    declared "no delta recorded" line rather than a silent gap.
+	 *  - `symptom`: the newest symptom card whose `fixedBy.agentId` matches this unit, scoped to the
+	 *    unit's own repo (`symptoms(repo)` already returns newest-first, so `.find` picks the latest).
+	 *  - `testExecutions`: honestly empty. `RunReceipt` (`receipts.ts`) records `toolTally` — COUNTS of
+	 *    tool names invoked (e.g. `{ Bash: 12 }`) — never the command text or its outcome, and no other
+	 *    persisted structure captures "this exact command ran and passed/failed". Inventing a command
+	 *    string from a tool-call count would be exactly the fabricated-verification pattern DESIGN.md's
+	 *    honesty rule exists to prevent, so this stays `[]` until a real command+outcome producer
+	 *    exists (a declared gap, not a silent one — `buildPrBody` renders "no observed test runs
+	 *    recorded" for an empty list, never a fabricated bullet).
+	 *  - `digestExcerpt`: the run's own digest's Summary section only (`digestSummaryExcerpt`) — never
+	 *    the digest's Goal/Where-we-left-off, which quote transcript text verbatim.
+	 * Best-effort throughout: any read failure here degrades to that input's empty/undefined value
+	 * rather than throwing — a PR body must never block a float.
+	 */
+	private async prBodyFor(rec: AgentRecord): Promise<string> {
+		const dto = rec.dto;
+		// sourceRef filter (batch-2 review): two units can share one feature — only THIS unit's recorded
+		// deltas belong in its PR body, or unit B's teaching renders under unit A's diff.
+		const deltas = (dto.featureId ? this.storedFeatureDecisions(dto.featureId) : undefined)?.filter((d) => d.source === "model-delta" && d.sourceRef?.agentId === dto.id) ?? [];
+		let symptom: SymptomEntry | undefined;
+		try {
+			symptom = (await this.symptoms(dto.repo)).find((s) => s.fixedBy.agentId === dto.id);
+		} catch {
+			symptom = undefined;
+		}
+		let digestExcerpt: string | undefined;
+		try {
+			digestExcerpt = digestSummaryExcerpt(await readDigest(this.stateDir, dto.id));
+		} catch {
+			digestExcerpt = undefined;
+		}
+		return buildPrBody({ deltas, symptom, testExecutions: [], omitted: [], digestExcerpt });
+	}
+
+	/**
+	 * Turn `repo` + one target ISO week's `[start, end)` window into `EpisodeLoop`'s gather input —
+	 * the ONE place that assembles a weekly episode's raw material from live daemon state, so
+	 * `EpisodeLoop` itself (weekly-episode.ts) never touches `featureStore`/receipts/attention/fabric
+	 * directly. Mirrors `prBodyFor`'s data-source reasoning above, widened from "one unit's PR" to
+	 * "every model-delta this repo recorded in the window":
+	 *  - `deltas`: every `source:"model-delta"` decision across this repo's persisted features whose
+	 *    `createdAt` falls inside the window. Non-model-delta decisions in the same window are
+	 *    counted (never rendered) via `omitted` — they aren't mental-model atoms.
+	 *  - `symptoms`: symptom cards for this repo landed inside the window.
+	 *  - `fogTop`: the SAME `computeFog`/`topDebt` the `/api/fog` route and concern 04's overlay use —
+	 *    a live "debt right now" gauge, not a window-filtered historical snapshot (DESIGN.md's debt
+	 *    formula is deliberately `now`-independent; there is no per-week fog history to replay).
+	 *  - `digestIds`: every digest currently visible for this repo (fabric's own repo-scoped list) —
+	 *    counted only, never quoted (weekly-episode.ts's Not-covered section).
+	 *  - `testExecutions`: honestly empty — same "no persisted command+outcome" gap `prBodyFor` already
+	 *    documents; never fabricated here either.
+	 *  - `staleAnswers` (comprehension concern 10): every recorded answer for this repo that
+	 *    `possiblyStale` (answers.ts) flags against the SAME receipts `fogTop` just computed from — a
+	 *    live snapshot like `fogTop`, not filtered to answers given inside the window.
+	 * Best-effort throughout: a symptom/fabric read failure degrades to that input's empty value
+	 * rather than failing the whole generation (mirrors `prBodyFor`).
+	 */
+	private async gatherEpisodeInputs(repo: string, window: { start: number; end: number }): Promise<EpisodeGatherResult> {
+		const deltas: FeatureDecision[] = [];
+		let nonDeltaCount = 0;
+		for (const pf of this.featureStore.values()) {
+			if (normalizeRepoPath(pf.repo) !== normalizeRepoPath(repo)) continue;
+			for (const d of pf.decisions ?? []) {
+				if (d.createdAt === undefined || d.createdAt < window.start || d.createdAt >= window.end) continue;
+				if (d.source === "model-delta") deltas.push(d);
+				else nonDeltaCount++;
+			}
+		}
+		let symptoms: SymptomEntry[] = [];
+		try {
+			symptoms = (await this.symptoms(repo)).filter((s) => s.landedAt >= window.start && s.landedAt < window.end);
+		} catch {
+			symptoms = [];
+		}
+		let fogTop: FileFogEntry[] = [];
+		let staleAnswers: StaleAnswerEntry[] = [];
+		try {
+			const receipts = await this.allReceipts();
+			const seen = this.attentionSeen([repo]);
+			fogTop = topDebt(computeFog({ receipts, seen, repos: [repo], now: window.end, surpriseCounts: this.attentionSurpriseCounts([repo]) }), 10);
+			// Comprehension concern 10: resurface this repo's currently-stale answers — a prior
+			// question whose cited files have since changed enough that the answer may no longer
+			// hold. Staleness is a live snapshot (like `fogTop` above), not a "became stale this week"
+			// event (unlike `deltas`/`symptoms`), so every answer for this repo is re-checked against
+			// the SAME receipts fogTop just used, not filtered to ones answered inside `window`. A
+			// failure here degrades ONLY this input (own try/catch) — it must never blank an already-
+			// computed `fogTop`, matching this function's "each input degrades independently" contract.
+			try {
+				const repoAnswers = await listAnswers(this.stateDir, { repo });
+				staleAnswers = repoAnswers.filter((a) => possiblyStale(a, receipts)).map((a) => ({ id: a.id, question: a.question }));
+			} catch {
+				staleAnswers = [];
+			}
+		} catch {
+			fogTop = [];
+			staleAnswers = [];
+		}
+		let digestIds: string[] = [];
+		try {
+			const snapshot = await this.fabric(LOCAL_ACTOR, { repos: [repo], includeLeases: false });
+			digestIds = snapshot.digests.map((d) => d.source.agentId ?? d.source.runId).filter((id): id is string => Boolean(id));
+		} catch {
+			digestIds = [];
+		}
+		const omitted: EpisodeOmittedEntry[] = [];
+		if (nonDeltaCount > 0) {
+			omitted.push({
+				title: `${nonDeltaCount} non-model-delta decision${nonDeltaCount === 1 ? "" : "s"} recorded this week`,
+				reason: "plan/human/agent-sourced decisions aren't mental-model deltas",
+			});
+		}
+		return { deltas, symptoms, fogTop, testExecutions: [], digestIds, omitted, staleAnswers };
+	}
+
+	/**
 	 * PR-mode landReady float (concern 06/DESIGN mode-dispatch ruling + the autoLand×PR matrix's
 	 * "landConfirm ON (default): landReady ⇒ push+draft" row): the moment an agent is flagged
 	 * ready-to-land — confirm-mode verified GREEN, or a staged auto-resolved conflict — PR mode should
@@ -3696,10 +3991,12 @@ export class SquadManager extends EventEmitter {
 					branch: dto.branch as string,
 					defaultBranch: mode.defaultBranch,
 					title: `squad(${dto.name}): land ${dto.branch}`,
+					body: await this.prBodyFor(rec),
 					issueId: dto.issue?.id,
 					issueIdentifier: dto.issue?.identifier,
 					issueProjectId: dto.issue?.projectId,
 					agentId: dto.id,
+					featureId: dto.featureId,
 					stateDir: this.stateDir,
 				});
 				if (ensure.ok && ensure.prNumber !== undefined && ensure.prUrl !== undefined) {
@@ -3775,7 +4072,7 @@ export class SquadManager extends EventEmitter {
 		rec.dto.lastActivity = Date.now();
 		this.emitAgent(rec);
 		this.log("warn", `catastrophe: ${id} — ${detail}`);
-		void this.recordAudit(LOCAL_ACTOR, "catastrophe", id, "error", truncate(detail, 120));
+		void this.recordAudit(LOCAL_ACTOR, "catastrophe", id, "error", truncateLabel(detail, 120));
 	}
 	/**
 	 * Thin, overridable wrapper around land-mode.ts's `resolveLandMode` — exists so tests can force
@@ -4205,6 +4502,25 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
+	 * Cost-gate ASK (adw-factory-borrows concern 09): a lane whose `LANE_POLICY.costAction` is "ask"
+	 * under `OMP_SQUAD_COST_GATE=enforce` does NOT block the spawn (unlike "deny") — there is no
+	 * pending-create queue to hold a not-yet-existing unit for a human tap, and building one is out of
+	 * this concern's scope. Instead this attaches the verdict to the SAME "Needs you" attention lane a
+	 * landConfirm-staged unit's one-tap Land uses (`rec.dto.attentionEvents` + `emitAgent`) — the
+	 * operator's "one tap" here is the EXISTING Stop/Remove control on the now-running unit, not a
+	 * fresh approve button. Best-effort; never throws.
+	 */
+	private stageCostGateConfirm(rec: AgentRecord, verdict: CostVerdict): void {
+		try {
+			const event: AttentionEvent = { id: randomUUID(), summary: `cost-gate(enforce) ASK: ${rec.dto.name} — ${verdict.line}`, detail: verdict.line, source: "notify", createdAt: Date.now() };
+			rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
+			this.emitAgent(rec);
+		} catch (err) {
+			this.log("warn", `cost-gate attention-lane attach failed for ${rec.dto.name} (non-fatal): ${errText(err)}`);
+		}
+	}
+
+	/**
 	 * Route a membrane-breaker trip — a hard fleet-wide auto-disable of `OMP_SQUAD_MEMBRANE_PROFILES`
 	 * (eap-borrows concern 05) — to where a human actually looks. Also reused verbatim for the
 	 * baseline-tracker's staleness event (concern 01 DESIGN decision 4 follow-up — see the `onStaleness`
@@ -4494,7 +4810,7 @@ export class SquadManager extends EventEmitter {
 		this.clearEphemeralMarker(rec.dto.repo);
 		this.emitAgent(rec);
 		void this.recordAudit(actor, "promote", id, "ok", `console→unit; mode ${prior.mode}→${rec.dto.autonomyMode}`);
-		await this.store.appendAudit({ actor: actor.id, action: "promote", target: id, detail: { priorMode: prior.mode, mode: rec.dto.autonomyMode, task: opts.task ? truncate(opts.task, 120) : undefined } }).catch(() => {});
+		await this.store.appendAudit({ actor: actor.id, action: "promote", target: id, detail: { priorMode: prior.mode, mode: rec.dto.autonomyMode, task: opts.task ? truncateLabel(opts.task, 120) : undefined } }).catch(() => {});
 
 		// 2. Behavioral promotion — steer the explicit task into the same live session.
 		this.steerPromoteTask(id, opts.task, actor);
@@ -5299,6 +5615,33 @@ export class SquadManager extends EventEmitter {
 		// Now: any spawn with a repo and something to search on gets the primer. Still best-effort, still
 		// fenced-untrusted by `buildContextPrimer`, still never blocks a spawn.
 		// `OMP_SQUAD_CONTEXT_PRIMER=0` disables it.
+		// Evergreen Do-Not block (skills-hardening concern 04): every spawn — profiled or not, dispatched
+		// or ad-hoc — carries the same short list of recorded recurring failure modes. Joined
+		// UNCONDITIONALLY, and deliberately BEFORE the primer join below: the idempotence markers scan
+		// `opts.appendSystemPrompt`, and after primeContext runs that string contains UNTRUSTED
+		// fabric-derived text — a primer snippet that merely mentions the header or the skill path would
+		// otherwise act as a suppression signal against a block the design says is unconditional. At this
+		// point the string holds only persisted/profile/operator text. Specifically NOT via
+		// `profile.memory` (line ~4439, which only runs `if (profile)`): a profile-less dispatched unit
+		// never reaches that branch, the exact delivery-gap class R3 (below) fixed for the primer. Static
+		// repo-authored text (DO_NOT_BLOCK), so unlike the primer/specBlock it needs no untrusted fence.
+		//
+		// IDEMPOTENT + REFRESHING: cold-adopt re-runs this composition over the PERSISTED
+		// appendSystemPrompt. `upsertDoNotBlock` appends when absent (pre-04 units get upgraded) and
+		// REPLACES the existing paragraph when present — so rule edits reach long-lived units on the next
+		// restart instead of freezing the list they were created with, and the block never duplicates.
+		// The Effect pointer is once-only (marker check): it points at the UNIT'S TARGET REPO's vendored
+		// skill (opts.repo, never the daemon's own install) — see `effectSkillPointerLine`.
+		const hasEffectPointer = opts.appendSystemPrompt?.includes(EFFECT_POINTER_MARKER) ?? false;
+		const effectPointer = hasEffectPointer ? undefined : effectSkillPointerLine([opts.task, opts.issue?.name, opts.issue?.description].filter((t): t is string => typeof t === "string").join("\n"), opts.repo);
+		opts = {
+			...opts,
+			appendSystemPrompt: [upsertDoNotBlock(opts.appendSystemPrompt), effectPointer].filter((text): text is string => typeof text === "string" && text.length > 0).join("\n\n"),
+		};
+		// True by construction now (upsert never skips), so the delivery check below (alongside
+		// `primerDelivered`) measures ONLY the harness-channel gap — composition can no longer be
+		// silently suppressed by content collisions.
+		const doNotsInjected = true;
 		const primed = await this.primeContext(opts, actor);
 		opts = primed.opts;
 		const primerBuilt = primed.hasPrimer;
@@ -5365,8 +5708,13 @@ export class SquadManager extends EventEmitter {
 			this.log("info", `cleared removal tombstone for ${id} — explicitly re-created`);
 		}
 		const branch = opts.branch ?? `squad/${id}`;
+		// Lane classification only happens on the SAME autoRoute path as process routing (documented
+		// coverage, red-team M3): an explicit workflow/verify/sandbox spawn never runs `routeIntake`, so
+		// its lane comes from `opts.lane`/the Plane label or the "feature" default only, below.
+		let classifierLane: WorkLane | undefined;
 		if (opts.task && opts.autoRoute !== false && !opts.workflow && !opts.verify && !opts.sandbox) {
 			const decision = await routeIntake(opts.task, opts.repo, this.llmClassify);
+			classifierLane = decision.lane;
 			opts = {
 				...opts,
 				workflow: decision.workflow,
@@ -5378,10 +5726,24 @@ export class SquadManager extends EventEmitter {
 			};
 			this.log("info", `routed "${name}": ${decision.reason}`);
 		}
-		// Pre-execution cost projection (C-COST) — shadow-only: warns when this (model,tier) is projected
-		// to run over budget, BEFORE the spawn spends anything. Fire-and-forget so it never delays a spawn;
-		// no-op unless OMP_SQUAD_COST_GATE is on. Enforce (hard park) is deferred.
-		void shadowCostCheck(this.stateDir, opts.model, tierOf(opts.thinking), (line) => this.log("warn", line));
+		// Lane precedence + clamp (adw-factory-borrows concern 02, DESIGN.md): operator `opts.lane` >
+		// Plane label (`opts.issue.lane`, resolved at dispatch time by `dispatchSpec`) > classifier
+		// (`routeIntake` above) > "feature" default. THE CLAMP: only an operator-sourced lane may move a
+		// privilege axis (model apply-mode, ceiling raise) — a label or classifier lane is ticket text
+		// and must never buy privilege on its own (mirrors `do-not-auto-land`'s fail-safe-only
+		// direction); it still logs and parameterizes shadow decisions. `laneAppliesPrivilege` gates
+		// exactly that below, at the model-route apply-mode decision.
+		// Restore paths pass the persisted source verbatim (opts.laneSource) so a daemon restart can
+		// never upgrade a classifier/label lane into an operator-sourced, privilege-bearing one.
+		const laneSource: WorkLaneSource = opts.laneSource ?? (opts.lane ? "operator" : opts.issue?.lane ? "label" : classifierLane ? "classifier" : "default");
+		const resolvedLane: WorkLane = opts.lane ?? opts.issue?.lane ?? classifierLane ?? "feature";
+		const laneAppliesPrivilege = laneSource === "operator";
+		this.log("info", `lane${laneAppliesPrivilege ? "" : " [shadow]"}: ${resolvedLane} source=${laneSource}`);
+		// Shadow-exit surface (adw-factory-borrows concern 09, red-team: "shadow-forever is the observed
+		// outcome"): every classified lane is counted here, unconditionally — the factory-status
+		// scoreboard's lane-mix row reads this back (see `factoryStatus()` below). Recorded regardless of
+		// `laneAppliesPrivilege`/source: the point is "what did the fleet classify", not "who may act on it".
+		this.learningMetrics.record("lane-classification", 1, { lane: resolvedLane, source: laneSource });
 		// work → Plane: a freshly-spawned, issue-less task self-registers as a tracked Plane issue,
 		// so the fleet is observable from the backlog without a manual plan-to-plane step. No-ops when
 		// Plane is unconfigured; restore / fan-out / flue paths never set `track`.
@@ -5409,10 +5771,16 @@ export class SquadManager extends EventEmitter {
 		// skipped and dispatch is byte-for-byte unchanged. Never overrides an explicit `opts.model` (a
 		// profile or operator's choice), mirroring `shiftedModel`'s rule #1.
 		//
-		// SHADOW-FIRST: even with the gate on, `OMP_SQUAD_MODEL_ROUTE_SHADOW` defaults ON (anything but the
-		// literal "0") — the decision is logged (+ recorded as a `model-route-decision` learning metric) but
-		// NOT applied, so an operator can compare shadow decisions against the task-class panel before
-		// opting into `OMP_SQUAD_MODEL_ROUTE_SHADOW=0` (apply mode). Applying it also closes the C01 gap for
+		// SHADOW-FIRST, PER-LANE (adw-factory-borrows concern 09): the FLEET-WIDE `OMP_SQUAD_MODEL_ROUTE_
+		// SHADOW=0` escape hatch stays the baseline, unaffected by lane or lane source (lane-threading.
+		// test.ts's clamp tests lock this down: a label/classifier lane must never suppress the operator's
+		// global apply flag). On TOP of that baseline, an operator-sourced lane (`laneAppliesPrivilege`)
+		// may WIDEN past a global "shadow" default via its OWN `LANE_POLICY[lane].modelRouteApply` flag —
+		// a genuinely per-lane flip independent of the fleet-wide flag (v1 ships every lane's flag
+		// `false`, so inert until a later, evidence-gated operator action). `modelRouteShouldApply` below
+		// is the single combinator both axes go through. The decision is ALWAYS logged (+ recorded as a
+		// `model-route-decision` learning metric) so an operator can compare shadow decisions against the
+		// task-class panel before flipping a lane's flag. Applying it also closes the C01 gap for
 		// harnesses that never emit an effective model: a routed unit now carries an explicit `opts.model`.
 		let routedModel: string | undefined;
 		if (process.env.OMP_SQUAD_MODEL_OUTCOMES === "1" && opts.model === undefined) {
@@ -5420,14 +5788,20 @@ export class SquadManager extends EventEmitter {
 				const taskClass = { mode: opts.verifyMode ?? "none", tier: tierOf(thinking) };
 				const rows = await readTaskOutcomes(this.stateDir);
 				const matrix = buildTaskClassMatrix(rows, this.landingRosterRouting(), { start: Date.now() - 30 * DAY_MS, end: Date.now() });
-				const decision = routeModelForTaskClass(taskClass, matrix);
-				const shadow = process.env.OMP_SQUAD_MODEL_ROUTE_SHADOW !== "0";
+				// Lane clamp (concern 02, bound HERE per the comment above): a label/classifier-sourced lane
+				// (`laneAppliesPrivilege` false) may never buy a lower minEdge floor OR widen apply past the
+				// global default — `modelRouteMinEdgeFor`/`modelRouteShouldApply` both fold that clamp in, so
+				// neither axis can move on ticket text alone.
+				const minEdge = modelRouteMinEdgeFor(resolvedLane, laneAppliesPrivilege);
+				const decision = routeModelForTaskClass(taskClass, matrix, undefined, { minEdge });
+				const apply = modelRouteShouldApply(resolvedLane, laneAppliesPrivilege);
 				this.learningMetrics.record("model-route-decision", decision.model ? 1 : 0, {
-					mode: shadow ? "shadow" : "apply",
+					mode: apply ? "apply" : "shadow",
 					taskClass: `${taskClass.mode}:${taskClass.tier}`,
+					lane: resolvedLane,
 				});
-				this.log("info", `model-route${shadow ? " [shadow]" : ""}: ${decision.reason}`);
-				if (!shadow && decision.model !== undefined) {
+				this.log("info", `model-route${apply ? "" : " [shadow]"}: ${decision.reason}`);
+				if (apply && decision.model !== undefined) {
 					opts = { ...opts, model: decision.model };
 					// Mark the model as ROUTER-chosen (vs operator/profile-declared): `unitProviderKey`'s
 					// invariant excludes routed models from the rate-limit provider key on both the gate and
@@ -5439,6 +5813,48 @@ export class SquadManager extends EventEmitter {
 				this.log("warn", `model-route decision failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
 			}
 		}
+		// Pre-execution cost projection (C-COST), per-lane ENFORCE (adw-factory-borrows concern 09),
+		// deliberately placed AFTER model routing: the gate must judge the model that will actually
+		// run — verdicting on the pre-route default admitted a chore spawn under the cheap family's
+		// history and then routed it onto a frontier model whose lane cell projected far over ceiling
+		// (code-review, CONFIRMED under-deny). The
+		// lane's own `costAction` (LANE_POLICY, v1: only "chore" is "deny") decides how far this can go.
+		// `OMP_SQUAD_COST_GATE=enforce` + a "deny" verdict refuses the spawn outright, BEFORE any worktree
+		// or agent record exists — surfaced as both a create error (thrown below) and an attention-lane
+		// event; there is no live `AgentRecord` yet to attach to, so this reuses the SAME "unattached
+		// escalation" idiom `fileMembraneBreakerFinding` uses for exactly that case: the daemon-scoped
+		// "land" automation channel, tagged with `UNATTACHED_ESCALATION_MARKER`. An "ask" verdict does NOT
+		// hold the spawn (a not-yet-existing unit can't be staged the way a landConfirm-held green verify
+		// is — that needs a new resumable pending-create queue, out of this concern's scope); instead
+		// `costGateAsk` is stashed here and, once the agent record exists below, attached to the SAME
+		// "Needs you" attention lane a landConfirm-staged unit's one-tap Land uses (see
+		// `stageCostGateConfirm`) — the operator's one tap is the EXISTING Stop/Remove control. Any OTHER
+		// mode (`shadow`/`off`, or a lane whose own `costAction` is "shadow") stays the ORIGINAL
+		// fire-and-forget, non-blocking shadow check — a spawn is never delayed by a check nobody asked to
+		// enforce.
+		const costMode = costGateMode();
+		let costGateAsk: CostVerdict | undefined;
+		// Restore/adopt/fork/race paths (the only setters of opts.laneSource) are exempt from enforce:
+		// a projection about historical (model,tier,lane) economics must never refuse to RE-create an
+		// already-admitted unit after a restart — that strands a live worktree's built-up context on a
+		// gate that judged nothing about it (code-review, CONFIRMED). New work only.
+		if (costMode === "enforce" && opts.laneSource === undefined) {
+			// tierOf(opts.thinking), NOT the "low"-defaulted `thinking` local: receipts stamp their tier
+			// from rec.options.thinking (the same undefaulted value), and a gate that queries a different
+			// tier key than the data was written with silently never matches a cell.
+			const verdict = await shadowCostCheck(this.stateDir, opts.model, tierOf(opts.thinking), (line) => this.log("warn", line), resolvedLane, laneAppliesPrivilege);
+			if (verdict) this.learningMetrics.record("cost-gate-verdict", 1, { action: verdict.action, lane: resolvedLane, mode: costMode });
+			if (verdict?.action === "deny") {
+				this.automation.for("land", opts.repo)({ durationMs: 0, level: "warn", detail: `${UNATTACHED_ESCALATION_MARKER} — ${verdict.line}` });
+				throw new Error(verdict.line);
+			}
+			if (verdict?.action === "ask") costGateAsk = verdict;
+		} else {
+			void shadowCostCheck(this.stateDir, opts.model, tierOf(opts.thinking), (line) => this.log("warn", line), resolvedLane, laneAppliesPrivilege).then((verdict) => {
+				if (verdict) this.learningMetrics.record("cost-gate-verdict", 1, { action: verdict.action, lane: resolvedLane, mode: costMode });
+			});
+		}
+
 		const kind = opts.flue ? "flue-service" : opts.workflow || opts.verify ? "workflow" : "omp-operator";
 
 		// Resolve the harness backing a plain-agent unit and gate on its capabilities BEFORE cutting a
@@ -5559,6 +5975,8 @@ export class SquadManager extends EventEmitter {
 			thinking,
 			appendSystemPrompt: opts.appendSystemPrompt,
 			issue: opts.issue,
+			lane: resolvedLane,
+			laneSource,
 			kind,
 			executionRole: opts.executionRole,
 			// Persisted, not just passed: `captureAnswer` reads `rec.options.ask` at `agent_end`, and a unit
@@ -5627,6 +6045,7 @@ export class SquadManager extends EventEmitter {
 			lastActivity: Date.now(),
 			messageCount: 0,
 			issue: opts.issue,
+			lane: resolvedLane,
 			kind,
 			harness: harnessDesc?.name,
 			harnessCaps: harnessDesc ? { toolApproval: harnessDesc.capabilities.toolApproval, resumable: harnessDesc.capabilities.resumable, hostTools: harnessDesc.capabilities.hostTools, contextInjection: harnessDesc.capabilities.contextInjection } : undefined,
@@ -5677,6 +6096,15 @@ export class SquadManager extends EventEmitter {
 			this.learningMetrics.record("primer-undelivered", 1, { flag: "context-primer", variant: resolveHarnessName(opts) });
 			this.log("warn", `${opts.name ?? "unit"}: context primer built but harness "${resolveHarnessName(opts)}" has no system-prompt channel — running unscoped (set OMP_SQUAD_ACP_CONTEXT=prompt to inject it)`);
 		}
+		// Same delivery check for the Do-Not block: doNotsInjected is unconditionally true (the join above
+		// never skips it), so this measures ONLY the harness-channel gap, not a composition gap —
+		// deliberately NOT folded into hasInstructions below (a discipline block is not task orientation, so
+		// it must not inflate that dimension the way a delivered primer legitimately does).
+		const doNotsDelivered = doNotsInjected && contextDelivers;
+		if (doNotsInjected && !doNotsDelivered) {
+			this.learningMetrics.record("donots-undelivered", 1, { flag: "do-not-block", variant: resolveHarnessName(opts) });
+			this.log("warn", `${opts.name ?? "unit"}: Do-Not block composed but harness "${resolveHarnessName(opts)}" has no system-prompt channel — running without it (set OMP_SQUAD_ACP_CONTEXT=prompt to inject it)`);
+		}
 		if (harnessScorecardEnabled()) {
 			dto.harnessScorecard = scoreHarness({
 				// The authored spec rides the SAME `appendSystemPrompt` channel as the primer, so an ACP unit
@@ -5723,6 +6151,9 @@ export class SquadManager extends EventEmitter {
 		// entry.
 		this.transition(rec, dto.status, "spawn");
 		this.emitAgent(rec);
+		// Cost-gate ASK (enforce mode, concern 09 above): the verdict resolved before the worktree/record
+		// existed, now attached to the just-created unit's attention lane.
+		if (costGateAsk) this.stageCostGateConfirm(rec, costGateAsk);
 
 		// Cold resume of a parallel fork node: any live roster branch agent left over from before the
 		// restart (reattached separately by reconnectLive, or a stale record surviving in `this.agents`)
@@ -5765,7 +6196,7 @@ export class SquadManager extends EventEmitter {
 
 		await this.persist();
 		const failed = rec.dto.status === "error";
-		void this.recordAudit(actor, "create", rec.dto.id, failed ? "error" : "ok", failed ? rec.dto.error : truncate(opts.task ?? rec.dto.name, 80), source);
+		void this.recordAudit(actor, "create", rec.dto.id, failed ? "error" : "ok", failed ? rec.dto.error : truncateLabel(opts.task ?? rec.dto.name, 80), source);
 		return rec.dto;
 	}
 
@@ -6058,7 +6489,7 @@ export class SquadManager extends EventEmitter {
 	async commission(spec: CommissionSpec, opts: CommissionOptions = {}, actor: Actor = LOCAL_ACTOR, source?: string): Promise<CommissionResult> {
 		const dir = opts.dir ?? path.join(this.stateDir, "workers", spec.name);
 		await fs.mkdir(dir, { recursive: true });
-		this.log("info", `${actor.id} commissioning "${spec.name}" → ${truncate(spec.purpose, 80)}`);
+		this.log("info", `${actor.id} commissioning "${spec.name}" → ${truncateLabel(spec.purpose, 80)}`);
 		const architect = opts.architect ?? new OmpArchitect({ bin: this.bin });
 		// The author → validate → onboard process is a workflow graph now, not an imperative
 		// sequence: a failed gate loops back to re-author (bounded), feeding the failure forward.
@@ -6075,7 +6506,7 @@ export class SquadManager extends EventEmitter {
 			void this.recordAudit(actor, "commission", spec.name, "error", report ? "gate failed" : "no candidate", source);
 			return { ok: false, report: report ?? { ok: false, checks: [] }, dir };
 		}
-		void this.recordAudit(actor, "commission", spec.name, "ok", truncate(spec.purpose, 80), source);
+		void this.recordAudit(actor, "commission", spec.name, "ok", truncateLabel(spec.purpose, 80), source);
 		return { ok: true, report, member: executor.member, dir };
 	}
 
@@ -6311,7 +6742,7 @@ export class SquadManager extends EventEmitter {
 					await this.settleSpawnFailure(rec, err);
 					break;
 				}
-				this.log("info", `${actor.id} → ${rec.dto.name}: ${truncate(cmd.message, 80)}`);
+				this.log("info", `${actor.id} → ${rec.dto.name}: ${truncateLabel(cmd.message, 80)}`);
 				// A new instruction makes every decision the auto-loop already took about this unit stale.
 				// Its in-memory `staged`/`landed`/`halted` sets are keyed by ids that a steered agent's edits
 				// never change, so without this the work a steer produces is skipped forever — verified never,
@@ -6350,7 +6781,7 @@ export class SquadManager extends EventEmitter {
 				this.transition(rec, "working", "task-start");
 				this.emitAgent(rec);
 				await this.promptConnected(rec, cmd.message).catch((err) => this.fail(rec, err));
-				void this.recordAudit(actor, "prompt", cmd.id, "ok", truncate(cmd.message, 80), commandSource(cmd));
+				void this.recordAudit(actor, "prompt", cmd.id, "ok", truncateLabel(cmd.message, 80), commandSource(cmd));
 				break;
 			}
 			case "set-model": {
@@ -6425,8 +6856,8 @@ export class SquadManager extends EventEmitter {
 				// never a PendingRequest — mirrors squad_attention/the harness "notify" wiring below.
 				const event: AttentionEvent = { id: randomUUID(), summary: cmd.summary, detail: cmd.detail, source: "notify", createdAt: Date.now() };
 				rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
-				this.append(rec, "system", `🔔 attention (${actor.id}): ${truncate(cmd.summary, 200)}`);
-				void this.recordAudit(actor, "notify", cmd.id, "ok", truncate(cmd.summary, 120));
+				this.append(rec, "system", `🔔 attention (${actor.id}): ${truncateLabel(cmd.summary, 200)}`);
+				void this.recordAudit(actor, "notify", cmd.id, "ok", truncateLabel(cmd.summary, 120));
 				this.emitAgent(rec);
 				break;
 			}
@@ -6466,7 +6897,7 @@ export class SquadManager extends EventEmitter {
 		// never act on it; durable/reliable push needs an outbox, which is intentionally out of scope.
 		this.append(target, "system", `Advisory peer message:\n${fenceUntrusted(`peer message from ${actor.id}`, redact(trimmed))}`);
 		this.emitAgent(target);
-		void this.recordAudit(actor, "message", to, "ok", truncate(trimmed, 80));
+		void this.recordAudit(actor, "message", to, "ok", truncateLabel(trimmed, 80));
 	}
 
 	private answerPending(rec: AgentRecord, req: PendingRequest, value: string, actor: Actor): void {
@@ -6481,9 +6912,9 @@ export class SquadManager extends EventEmitter {
 		// other pending remains records exactly one input→working entry, not a phantom pair.
 		rec.streaming = true;
 		this.setPending(rec, rec.dto.pending.filter((p) => p.id !== req.id), "pending-answer");
-		this.append(rec, "system", `${actor.id} answered "${req.title}": ${truncate(value, 60)}`, { pending: { requestId: req.id, action: "answered" }, status: "ok" });
+		this.append(rec, "system", `${actor.id} answered "${req.title}": ${truncateLabel(value, 60)}`, { pending: { requestId: req.id, action: "answered" }, status: "ok" });
 		this.emitAgent(rec);
-		void this.recordAudit(actor, "answer", rec.dto.id, "ok", `${truncate(req.title, 48)} → ${truncate(value, 40)}`);
+		void this.recordAudit(actor, "answer", rec.dto.id, "ok", `${truncateLabel(req.title, 48)} → ${truncateLabel(value, 40)}`);
 	}
 
 	/**
@@ -7050,6 +7481,11 @@ export class SquadManager extends EventEmitter {
 						// Confirmed-delivered efficiency flags (concern 02), fixed at spawn — see
 						// AgentRecord.efficiencyFlags / receipts.ts#confirmDeliveredFlags.
 						efficiencyFlags: rec.efficiencyFlags,
+						// Resolved work lane (adw-factory-borrows concern 02) — prerequisite for concern 08's
+						// lane-keyed cost aggregate, which also needs the tier: without it every real
+						// receipt buckets under "unknown" and the O(1) fast path never fires.
+						lane: rec.dto.lane,
+						tier: tierOf(rec.options.thinking),
 					});
 				}
 				rec.run.start(rec.dto.model);
@@ -7248,12 +7684,138 @@ export class SquadManager extends EventEmitter {
 		rec.options.workflowState = state;
 		rec.dto.workflowState = state;
 		rec.dto.forkAvailable = this.deriveForkAvailable(state);
-		this.markCatastrophe(rec.dto.id, reason);
+		await this.raceOnceOrEscalate(rec, reason);
 		void this.persist();
 		// The run is dead — no further checkpoints will ever append for this runId (a fork, if any, mints
 		// its own new runId). Evict the in-memory chain entry now; `readCheckpoints`/fork (concern 04) read
 		// the file directly and never touch this map, so eviction here is always safe.
 		evictCheckpointChain(runId);
+	}
+
+	/**
+	 * Race-once decision point for a workflow catastrophe (adw-factory-borrows concern 07, DESIGN.md).
+	 * `tryRaceOnce` returning true means the original is already parked and a fresh-context sibling is
+	 * already racing — the human summon for THIS catastrophe is suppressed. Every other outcome (flag
+	 * off, not issue-carrying, lane doesn't allow racing, this issue's race budget is already spent, or
+	 * the sibling itself failed to spawn) falls through to the ordinary `markCatastrophe` escalation —
+	 * enriched to name both attempts when the ledger already holds a race for this issue (the sibling's
+	 * OWN catastrophe, or a second catastrophe on the original after its sibling was already raced).
+	 */
+	private async raceOnceOrEscalate(rec: AgentRecord, reason: string): Promise<void> {
+		if (await this.tryRaceOnce(rec, reason)) return;
+		const raced = rec.dto.issue ? this.raceLedger.get(rec.dto.issue.id) : undefined;
+		const detail = raced
+			? `${reason} (race already spent for this issue: original ${raced.originalAgentId} — ${raced.originalDetail}; sibling ${raced.siblingAgentId} raced with strategy "${raced.strategy}" and also failed)`
+			: reason;
+		this.markCatastrophe(rec.dto.id, detail);
+	}
+
+	/**
+	 * Attempt the race-once sibling spawn. Returns true only once the sibling is durably ledgered — that
+	 * is the ONLY case `raceOnceOrEscalate` suppresses the human escalation for. Never races twice for the
+	 * same issue (the persisted `raceLedger` is checked first, same tiny-JSON-per-stateDir shape as
+	 * `dispatch-ledger.ts` — an in-memory-only guard would re-fire after a daemon restart between this
+	 * catastrophe and the sibling's own completion, red-team C3.3).
+	 */
+	private async tryRaceOnce(rec: AgentRecord, reason: string): Promise<boolean> {
+		if (!raceOnceEnabled()) return false;
+		const issue = rec.dto.issue;
+		if (!issue) return false; // race-once only ever applies to Plane-driven, issue-carrying work
+		if (this.raceLedger.get(issue.id)) return false; // budget already spent for this issue
+		const lane: WorkLane = rec.dto.lane ?? "feature";
+		if (LANE_POLICY[lane].race !== 1) return false; // operator-config lanes only (concern-02 clamp)
+		// A race sibling is SPEND, so the lane must come from a human decision: an operator opts.lane or
+		// a human-set Plane label (the sanctioned pre-assignment transport, DESIGN.md). A classifier hit
+		// on "urgent"/"outage" in task text — or the bare default — must never buy a second agent run.
+		const laneSource = rec.options.laneSource ?? "default";
+		if (laneSource !== "operator" && laneSource !== "label") return false;
+		// Claim the slot SYNCHRONOUSLY, before the first `await` below — closes the TOCTOU window between
+		// the `raceLedger.get` check above and the ledger actually being stamped (which only happens once
+		// the sibling's own worktree-cutting `create()` call resolves, several turns of the event loop
+		// later). Without this, a second catastrophe for the SAME issue arriving inside that window sees
+		// no ledger entry yet and races a second sibling (mirrors `fork()`'s own `forkInFlight` precedent).
+		if (this.raceInFlight.has(issue.id)) return false;
+		this.raceInFlight.add(issue.id);
+
+		// Park the original FIRST (DESIGN.md): the sibling must never run concurrently with a live
+		// original — racing both at once would double-land the same issue. Mirrors applyCommand's "kill"
+		// case (stop, then transition to the terminal `stopped` status) but without `killedByOperator` —
+		// this is a system park kept around for forensics, not an operator-directed kill.
+		// FAIL CLOSED on a failed stop (code-review, CONFIRMED): a wedged harness process that survives
+		// stop() keeps committing on its branch — spawning the sibling anyway is exactly the concurrent
+		// double-land the park exists to prevent. No park ⇒ no race ⇒ normal human escalation.
+		try {
+			await rec.agent.stop();
+		} catch (err) {
+			this.log("warn", `race-once: stop() failed while parking ${rec.dto.id} — NOT racing (a live original + sibling could double-land); escalating instead: ${String(err)}`);
+			this.raceInFlight.delete(issue.id);
+			return false;
+		}
+		this.transition(rec, "stopped", "kill");
+		this.emitAgent(rec);
+
+		// [7] Stamp the once-per-issue-ever budget BEFORE the sibling exists (code-review, CONFIRMED):
+		// a crash in the window between a durably-created sibling and a post-create ledger write leaves
+		// a live sibling with a re-armed race budget — the sibling's own later catastrophe would race a
+		// THIRD attempt. Claim-then-spawn: if create() fails the budget is burned and we escalate — the
+		// fail-closed direction (one lost race opportunity, never a double-spend).
+		this.raceLedger.record({ issueId: issue.id, originalAgentId: rec.dto.id, originalDetail: reason, siblingAgentId: "pending", strategy: "pending", racedAt: Date.now() });
+
+		const strategy = pickAlternateStrategy(reason);
+		// deterministic planeIssueBranch collides with the original's own branch on the same issue — suffix it.
+		const branch = `${planeIssueBranch(issue)}-race`;
+		try {
+			const sibling = await this.create({
+				repo: rec.dto.repo,
+				name: `${rec.dto.name}-race`,
+				branch,
+				task: [rec.options.task, strategy.prompt].filter((t): t is string => typeof t === "string" && t.length > 0).join("\n\n"),
+				issue,
+				// Inherit the original's exact resolved lane/source verbatim (mirrors fork()'s "one issue, one
+				// active claimant" precedent) — never re-derive from `opts.lane` alone, which would upgrade a
+				// label/classifier-sourced lane into an operator-privileged one (the concern-02 clamp).
+				lane: rec.dto.lane,
+				laneSource: rec.options.laneSource,
+				// Carry the original's EXACT process shape (workflow file or synthesized verify loop) instead
+				// of re-classifying the alternate-strategy task text from scratch — a race sibling is the same
+				// process retried with a different approach, not a fresh intake decision. Setting `verify`/
+				// `workflow` also short-circuits `routeIntake` (createWithId's own `!opts.workflow && !opts.verify`
+				// guard), so `autoRoute` below is inert either way; false documents that this is deliberate.
+				workflow: rec.options.workflow?.path,
+				verify: rec.options.workflow?.verify?.command,
+				verifyMode: rec.options.workflow?.verify?.mode,
+				executionRole: rec.options.executionRole,
+				model: rec.dto.model,
+				autoRoute: false,
+				// A genuine retry inherits the original's autonomy and scope wholesale: an ask-mode
+				// original must not get an unattended sibling, and the sibling keeps the issue's
+				// requires/owns/produces provisioning so scope gates see the same unit shape.
+				approvalMode: rec.dto.approvalMode,
+				requires: rec.options.requires,
+				owns: rec.options.owns,
+				produces: rec.options.produces,
+				scopeSource: rec.options.scopeSource,
+			});
+			// claimed() bookkeeping: the Dispatcher's claimed set is derived live from `this.agents` (both
+			// the parked original and this sibling carry the same `issue.id`), so the issue reads as claimed
+			// throughout — nothing else to stamp.
+			// Overwrite the pre-spawn "pending" stamp with the real sibling id/strategy (same issue key).
+			this.raceLedger.record({ issueId: issue.id, originalAgentId: rec.dto.id, originalDetail: reason, siblingAgentId: sibling.id, strategy: strategy.key, racedAt: Date.now() });
+			this.log("warn", `race-once: ${issue.identifier ?? issue.id} catastrophe'd (${reason}) — parked ${rec.dto.id}, racing sibling ${sibling.id} (strategy "${strategy.key}")`);
+			void this.recordAudit(LOCAL_ACTOR, "race-once", rec.dto.id, "ok", `sibling ${sibling.id} strategy=${strategy.key}`);
+			return true;
+		} catch (err) {
+			this.log("warn", `race-once: sibling spawn failed for ${issue.identifier ?? issue.id}: ${String(err)} — escalating the original instead`);
+			void this.recordAudit(LOCAL_ACTOR, "race-once", rec.dto.id, "error", String(err));
+			return false;
+		} finally {
+			// The persisted ledger (on success) is the long-term once-per-issue-ever guard; this in-memory
+			// claim only ever needed to hold for the single event-loop window between the check above and
+			// the ledger write. Always release it here so a genuinely LATER catastrophe on the same issue
+			// (e.g. this attempt failed to spawn and the operator wants another shot) is never permanently
+			// wedged by a stale in-memory flag.
+			this.raceInFlight.delete(issue.id);
+		}
 	}
 
 	private updateThinkingStream(rec: AgentRecord, delta: string): void {
@@ -7308,7 +7870,7 @@ export class SquadManager extends EventEmitter {
 		const intent = typeof frame.intent === "string" ? frame.intent : "";
 		const existing = rec.toolEntries.get(callId);
 		if (!existing) rec.run?.onTool(toolName);
-		rec.dto.activity = intent ? `${toolName}: ${truncate(intent, 60)}` : toolName;
+		rec.dto.activity = intent ? `${toolName}: ${truncateLabel(intent, 60)}` : toolName;
 		const tool = {
 			...(existing?.tool ?? { callId, name: toolName }),
 			callId,
@@ -7682,10 +8244,12 @@ export class SquadManager extends EventEmitter {
 			branch: dto.branch,
 			defaultBranch: mode.defaultBranch,
 			title: `squad(${dto.name}): land ${dto.branch}`,
+			body: await this.prBodyFor(rec),
 			issueId: dto.issue?.id,
 			issueIdentifier: dto.issue?.identifier,
 			issueProjectId: dto.issue?.projectId,
 			agentId: dto.id,
+			featureId: dto.featureId,
 			stateDir: this.stateDir,
 		});
 		if (ensure.ok && ensure.prNumber !== undefined && ensure.prUrl !== undefined) {
@@ -7840,6 +8404,88 @@ export class SquadManager extends EventEmitter {
 
 	answer(id: string): Promise<Answer | undefined> {
 		return readAnswer(this.stateDir, id);
+	}
+
+	/** Symptom cards recorded by `squad_record_symptom`, newest first — the read surface for later
+	 *  projections (doctor's `remedy` match, `glance symptom`, fabric/⌘K search), mirroring `answers()`
+	 *  above. Nothing in concern 05's scope renders these; this is the stable entry point they'll call. */
+	symptoms(repo?: string): Promise<SymptomEntry[]> {
+		return listSymptoms(this.stateDir, { repo });
+	}
+
+	symptom(id: string): Promise<SymptomEntry | undefined> {
+		return readSymptom(this.stateDir, id);
+	}
+
+	/** Weekly-episode metas for one repo, newest week first (concern 09's `GET /api/episodes?repo=`) —
+	 *  mirrors `symptoms()`/`answers()` above: a stable read-only entry point over durable state. */
+	episodes(repo: string): Promise<EpisodeMeta[]> {
+		return listEpisodes(this.stateDir, repo);
+	}
+
+	/** One episode's full record (meta + markdown), or `undefined` if it doesn't exist for this repo
+	 *  (concern 09's `GET /api/episodes/:id?repo=`). */
+	episode(repo: string, id: string): Promise<(EpisodeMeta & { markdown: string }) | undefined> {
+		return readEpisode(this.stateDir, repo, id);
+	}
+
+	/** The decisions currently stored on a persisted feature — the server's PATCH sanitizer merges
+	 *  client edits against these so server-authoritative fields (source/evidence/sourceRef) survive
+	 *  the webapp's full-array round-trip. Derived (not-yet-adopted) features return undefined, which
+	 *  is correct: model-deltas only ever live on persisted features (recordAgentDecision adopts
+	 *  before writing). */
+	storedFeatureDecisions(id: string): FeatureDecision[] | undefined {
+		return this.featureStore.get(id)?.decisions;
+	}
+
+	// ── operator-attention substrate (comprehension concern 01) ──────────────────────────────────
+
+	/** The repo set `actor` may name in `POST /api/attention`'s `repo` field or an unfiltered GET —
+	 *  identical derivation to `fabric()`'s own unrestricted-repos fallback (fabric.ts's
+	 *  `actorVisibleRepoSet`), so the two can never disagree about what a given actor may see. Fails
+	 *  closed: no scoped agents and no persisted features ⇒ an empty set. */
+	attentionVisibleRepos(actor: Actor): Set<string> {
+		return actorVisibleRepoSet(actor, this.list(), [...this.featureStore.values()]);
+	}
+
+	/** Whether the kill switch (`GLANCE_ATTENTION=0`) is currently set — checked live, not cached. */
+	attentionDisabled(): boolean {
+		return this.attentionStore.disabled();
+	}
+
+	/** Record one attention event. `rateLimitKey` is the caller's per-actor rate-limit bucket
+	 *  (typically `actor.id`) — never persisted. Server routes are responsible for stamping
+	 *  `viewerId` from the session (never the client body) before calling this. */
+	recordAttention(event: AttentionRecordInput, rateLimitKey: string): RecordResult {
+		return this.attentionStore.record(event, rateLimitKey);
+	}
+
+	/** Raw feed, restricted to `repos` when given. `undefined` means unrestricted; an EXPLICIT empty
+	 *  array restricts to NOTHING (a caller whose actor-visible repo set is genuinely empty passes
+	 *  `[]` on purpose — see `AttentionStore.seenMapFor`'s matching doc for why that must fail closed,
+	 *  not fall open). Telemetry only, per attention.ts's module doc; callers still owe redaction via
+	 *  `redactAttentionForActor`. */
+	attentionEvents(repos?: string[]): OperatorAttentionEvent[] {
+		const events = this.attentionStore.recentEvents();
+		if (repos === undefined) return events;
+		if (repos.length === 0) return [];
+		const keys = new Set(repos.map(normalizeRepoPath));
+		return events.filter((e) => keys.has(normalizeRepoPath(e.repo)));
+	}
+
+	/** The compacted last-seen map, restricted to `repos` (`undefined` ⇒ unrestricted; `[]` ⇒
+	 *  nothing — see `attentionEvents` above) — fog's read path. Callers still owe redaction via
+	 *  `redactSeenMapForActor`. */
+	attentionSeen(repos?: string[]): SeenMap {
+		return this.attentionStore.seenMapFor(repos);
+	}
+
+	/** Concern-08 fog wiring: the durable per-(repo,file) surprise-tap COUNT map (NOT the raw feed —
+	 *  see `SurpriseCountMap`'s doc in attention.ts for why a compacted store exists at all), same
+	 *  `repos` filtering contract as `attentionSeen`. Carries no viewer identity, so unlike the two
+	 *  reads above it needs no redaction pass before `computeFog` consumes it. */
+	attentionSurpriseCounts(repos?: string[]): SurpriseCountMap {
+		return this.attentionStore.surpriseCountsFor(repos);
 	}
 
 	/**
@@ -8241,6 +8887,11 @@ export class SquadManager extends EventEmitter {
 			includeLeases: opts.includeLeases,
 			listIssues: (repo) => listPlaneIssues(repo),
 			features: [...this.featureStore.values()],
+			// Comprehension concern 10: the FULL answer set, unfiltered by repo — mirroring `features`
+			// above — so both a single-repo caller and an unrestricted one narrow correctly through
+			// `buildFabricSnapshot`'s own `repoSet` guard rather than a pre-filter here that can't see
+			// that function's fallback-computed repo list.
+			answers: await listAnswers(this.stateDir),
 		});
 	}
 
@@ -8332,6 +8983,16 @@ export class SquadManager extends EventEmitter {
 			liveArmed,
 			activeAgents: occupyingAgents(this.list()),
 			persistFailures: this.store.saveFailures?.() ?? 0,
+			// Shadow-exit surface (adw-factory-borrows concern 09): raw events, not rollup rows — the
+			// scoreboard needs a JOINT filter (e.g. mode=shadow AND action=ask/deny) a per-tag-key rollup
+			// breakdown can't answer. Same window every other row on this strip uses.
+			// limit: 0 = unbounded — recent()'s default limit of 500 silently saturates the counters on a
+			// fleet with >500 spawns in the window, and a scoreboard that under-reports shadow denials is
+			// exactly the "evidence with no reader" failure this surface exists to close. Memory stays
+			// bounded by the metrics ring itself (RING_MAX).
+			laneEvents: this.learningMetrics.recent({ name: "lane-classification", sinceMs: windowMs, limit: 0 }, now),
+			routeEvents: this.learningMetrics.recent({ name: "model-route-decision", sinceMs: windowMs, limit: 0 }, now),
+			costEvents: this.learningMetrics.recent({ name: "cost-gate-verdict", sinceMs: windowMs, limit: 0 }, now),
 		});
 	}
 
@@ -8352,7 +9013,7 @@ export class SquadManager extends EventEmitter {
 		// Only regular comments fan out to Plane; plan-annotations are plan-doc-local review chatter
 		// anchored to a rendered block/line and arrive in Plane stripped of that context (noise), so suppress them.
 		if (input.kind !== "plan-annotation") for (const issue of await this.commentPlaneTargets(input.repo, input.subject)) void addPlaneIssueComment(input.repo, issue, input.body).catch((err) => this.log("warn", `plane comment sync failed: ${err instanceof Error ? err.message : String(err)}`));
-		void this.recordAudit(actor, input.kind === "plan-annotation" ? "plan-annotate" : "comment", input.subject, "ok", truncate(input.body, 80));
+		void this.recordAudit(actor, input.kind === "plan-annotation" ? "plan-annotate" : "comment", input.subject, "ok", truncateLabel(input.body, 80));
 		return comment;
 	}
 
@@ -8740,9 +9401,10 @@ export class SquadManager extends EventEmitter {
 		// absent descriptor (workflow/flue kinds) keeps today's behavior — host tools advertised.
 		const caps = (rec.harness ?? this.harnessFor(rec.options))?.capabilities;
 		if (caps && !caps.hostTools) return;
-		// Decision capture is flag-gated (default off): advertise squad_record_decision only when on,
-		// so a fresh agent's tool list matches what onHostTool will actually dispatch.
-		const tools = isOn(learningFlags(rec.dto.id).decisionCapture) ? [...SQUAD_HOST_TOOLS, RECORD_DECISION_TOOL_DEF] : SQUAD_HOST_TOOLS;
+		// Decision capture is flag-gated (default off): advertise squad_record_decision (+ its
+		// squad_record_symptom sibling, same flag — concern 05) only when on, so a fresh agent's tool
+		// list matches what onHostTool will actually dispatch.
+		const tools = isOn(learningFlags(rec.dto.id).decisionCapture) ? [...SQUAD_HOST_TOOLS, RECORD_DECISION_TOOL_DEF, RECORD_SYMPTOM_TOOL_DEF] : SQUAD_HOST_TOOLS;
 		try {
 			rec.agent.setHostTools?.(tools);
 		} catch (err) {
@@ -8774,6 +9436,15 @@ export class SquadManager extends EventEmitter {
 			}
 			return;
 		}
+		if (call.toolName === RECORD_SYMPTOM_TOOL) {
+			// Same flag as RECORD_DECISION_TOOL — see the comment there.
+			if (isOn(learningFlags(rec.dto.id).decisionCapture)) {
+				void this.handleRecordSymptomTool(rec, call);
+			} else {
+				rec.agent.respondHostTool(call.id, "decision capture is disabled", true);
+			}
+			return;
+		}
 		if (call.toolName === ATTENTION_TOOL) {
 			void this.handleAttentionTool(rec, call);
 			return;
@@ -8793,7 +9464,7 @@ export class SquadManager extends EventEmitter {
 			source: "tool",
 			kind: call.toolName,
 			title: `tool: ${call.toolName}`,
-			message: truncate(JSON.stringify(call.arguments ?? {}), 200),
+			message: truncateLabel(JSON.stringify(call.arguments ?? {}), 200),
 			createdAt: Date.now(),
 			// Tag pendings rebuilt from the agent-host's ring replay during the post-reattach settle window
 			// (concern 04's ghost-expiry rules key off this — never gates answerability, only staleness).
@@ -8823,11 +9494,11 @@ export class SquadManager extends EventEmitter {
 				? results.map((r) => `- [${r.type}] ${r.title}\n  ${r.snippet}${r.repo ? `\n  (${r.repo})` : ""}`).join("\n")
 				: "No matching context in the knowledge base.";
 			rec.agent.respondHostTool(call.id, body);
-			this.append(rec, "system", `🔎 ${KB_SEARCH_TOOL}("${truncate(query, 80)}") → ${results.length} result${results.length === 1 ? "" : "s"}`, {
+			this.append(rec, "system", `🔎 ${KB_SEARCH_TOOL}("${truncateLabel(query, 80)}") → ${results.length} result${results.length === 1 ? "" : "s"}`, {
 				status: "ok",
 				tool: { callId: call.id, name: KB_SEARCH_TOOL, args: call.arguments, argsText: safeJson(call.arguments), resultText: body },
 			});
-			void this.recordAudit(agentActor(rec.dto.id), "kb.search", rec.dto.id, "ok", `${results.length} hits for "${truncate(query, 60)}"`);
+			void this.recordAudit(agentActor(rec.dto.id), "kb.search", rec.dto.id, "ok", `${results.length} hits for "${truncateLabel(query, 60)}"`);
 		} catch (err) {
 			rec.agent.respondHostTool(call.id, err instanceof Error ? err.message : String(err), true);
 		}
@@ -8867,38 +9538,62 @@ export class SquadManager extends EventEmitter {
 		const confidence = typeof args.confidence === "number" && Number.isFinite(args.confidence) ? Math.max(0, Math.min(1, args.confidence)) : undefined;
 		const report: AgentReport = { id: randomUUID(), summary, proposal, confidence, createdAt: Date.now() };
 		rec.dto.reports = [...(rec.dto.reports ?? []), report];
-		this.append(rec, "system", `📝 report: ${truncate(summary, 200)}`, { status: "ok", tool: { callId: call.id, name: REPORT_TOOL, args: call.arguments, argsText: safeJson(call.arguments) } });
+		this.append(rec, "system", `📝 report: ${truncateLabel(summary, 200)}`, { status: "ok", tool: { callId: call.id, name: REPORT_TOOL, args: call.arguments, argsText: safeJson(call.arguments) } });
 		rec.agent.respondHostTool(call.id, "report recorded — continue working, a human will review it when they can");
-		void this.recordAudit(agentActor(rec.dto.id), "report.raised", rec.dto.id, "ok", truncate(summary, 120));
+		void this.recordAudit(agentActor(rec.dto.id), "report.raised", rec.dto.id, "ok", truncateLabel(summary, 120));
 		this.emitAgent(rec);
 	}
 
 	/**
-	 * squad_record_decision (research-tencentdb-agent-memory): capture a consequential decision into the
-	 * agent's feature as a source:"agent" FeatureDecision, so it surfaces in the cold-start primer /
-	 * squad_kb_search for future agents. NON-blocking like handleReportTool — responds immediately,
-	 * never setPending. Best-effort: any failure is reported to the agent + warn-logged, never thrown.
-	 * Idempotent: a normalized-text match against the feature's existing decisions is a no-op.
+	 * squad_record_decision (research-tencentdb-agent-memory; model-delta extension: comprehension lane
+	 * concern 05 "teaching producers"): capture a consequential decision into the agent's feature as a
+	 * FeatureDecision, so it surfaces in the cold-start primer / squad_kb_search for future agents.
+	 * NON-blocking like handleReportTool — responds immediately, never setPending. Best-effort: any
+	 * failure is reported to the agent + warn-logged, never thrown. Idempotent: a normalized-text match
+	 * against the feature's existing decisions is a no-op.
+	 *
+	 * `source:"model-delta"` is the teaching-content path: it REQUIRES `evidence` naming a file this run
+	 * actually touched (`validateModelDelta`, decision-evidence.ts) — an anchorless or fabricated-anchor
+	 * delta is rejected with a tool error naming the violated rule, BEFORE anything is written. This is
+	 * the only mechanical anti-slop pressure on the lane (DESIGN.md "Delta quality floor").
 	 */
 	private async handleRecordDecisionTool(rec: AgentRecord, call: { id: string; arguments: unknown }): Promise<void> {
 		try {
 			const args = call.arguments && typeof call.arguments === "object" ? (call.arguments as Record<string, unknown>) : {};
 			const text = typeof args.text === "string" ? args.text.trim() : "";
 			if (!text) {
-				rec.agent.respondHostTool(call.id, `usage: ${RECORD_DECISION_TOOL}({ text: string })`, true);
+				rec.agent.respondHostTool(call.id, `usage: ${RECORD_DECISION_TOOL}({ text: string, source?: "model-delta", evidence?: string[] })`, true);
 				return;
 			}
+			const isModelDelta = args.source === "model-delta";
+			const evidence = Array.isArray(args.evidence) ? args.evidence.filter((e): e is string => typeof e === "string" && e.trim().length > 0) : undefined;
 			const featureId = rec.dto.featureId;
 			if (!featureId) {
 				rec.agent.respondHostTool(call.id, "no feature is attached to this agent, so the decision was not recorded", true);
 				return;
 			}
+			if (isModelDelta) {
+				// Live blast-radius since fork (committed AND working-tree) — the SAME computation
+				// finalizeRun uses for the persisted receipt's filesTouched, so mid-run validation and a
+				// completed receipt agree on what counts as "this run touched".
+				const filesTouched = await this.runFilesTouched(rec);
+				const check = validateModelDelta(text, evidence, filesTouched);
+				if (!check.ok) {
+					rec.agent.respondHostTool(call.id, `model-delta rejected (${check.rule}): ${check.message}`, true);
+					return;
+				}
+			}
 			const decision: FeatureDecision = {
 				id: randomUUID(),
 				text,
-				source: "agent",
+				source: isModelDelta ? "model-delta" : "agent",
 				createdAt: Date.now(),
 				sourceRef: { agentId: rec.dto.id, runId: rec.run?.snapshot().runId },
+				// Persist evidence NORMALIZED (code-review finding 4): validateModelDelta normalizes only
+				// for its comparison, but every downstream consumer (surprise-tap fog keys, evidence-link
+				// jump, PR-body anchors) keys on the STORED string — a raw "./src/x.ts" would silently
+				// no-op them all.
+				...(isModelDelta ? { evidence: (evidence ?? []).map((e) => e.trim().replace(/^\.\//, "").replace(/^\/+/, "")) } : {}),
 			};
 			// Atomic, adopt-aware append (resolves plan-derived features + can't clobber a concurrent capture).
 			const outcome = await this.recordAgentDecision(featureId, decision, rec.dto.repo);
@@ -8913,10 +9608,10 @@ export class SquadManager extends EventEmitter {
 			// Durably written. Respond success FIRST so a throw in the cosmetic post-steps below can never
 			// flip an already-persisted decision to a "failed" reply (which would make the agent retry).
 			this.learningMetrics.record("decision-captured", 1, { flag: "decision-capture", variant: learningFlags(rec.dto.id).decisionCapture });
-			rec.agent.respondHostTool(call.id, "decision recorded — future agents on this work will inherit it");
+			rec.agent.respondHostTool(call.id, isModelDelta ? "model-delta recorded — future agents on this work will inherit it" : "decision recorded — future agents on this work will inherit it");
 			try {
-				this.append(rec, "system", `📝 decision recorded: ${truncate(text, 200)}`, { status: "ok", tool: { callId: call.id, name: RECORD_DECISION_TOOL, args: call.arguments, argsText: safeJson(call.arguments) } });
-				void this.recordAudit(agentActor(rec.dto.id), "decision.recorded", featureId, "ok", truncate(text, 120));
+				this.append(rec, "system", `📝 ${isModelDelta ? "model-delta" : "decision"} recorded: ${truncateLabel(text, 200)}`, { status: "ok", tool: { callId: call.id, name: RECORD_DECISION_TOOL, args: call.arguments, argsText: safeJson(call.arguments) } });
+				void this.recordAudit(agentActor(rec.dto.id), "decision.recorded", featureId, "ok", truncateLabel(text, 120));
 			} catch (postErr) {
 				this.log("warn", `record-decision post-step failed for ${rec.dto.name} (decision was saved): ${String(postErr)}`);
 			}
@@ -8927,6 +9622,79 @@ export class SquadManager extends EventEmitter {
 				/* respond best-effort */
 			}
 			this.log("warn", `record-decision failed for ${rec.dto.name}: ${String(err)}`);
+		}
+	}
+
+	/**
+	 * squad_record_symptom (comprehension lane concern 05 "teaching producers"): record a symptom card
+	 * when THIS RUN fixed a defect, phrased as the operator would observe it. Producer-first, like
+	 * `squad_record_decision` — non-blocking, responds immediately, never setPending. The mechanical
+	 * floor (`validateSymptomText`, `validateWhereToLookCount`, `classifyWhereToLookEntry` in
+	 * symptoms.ts) rejects a too-short symptom, a wrong-count `whereToLook`, or any entry that isn't
+	 * either an existing repo-relative path (not a bare top-level directory) or a `glance …` command —
+	 * with a tool error naming the violated rule, before anything is written.
+	 */
+	private async handleRecordSymptomTool(rec: AgentRecord, call: { id: string; arguments: unknown }): Promise<void> {
+		try {
+			const args = call.arguments && typeof call.arguments === "object" ? (call.arguments as Record<string, unknown>) : {};
+			const symptom = typeof args.symptom === "string" ? args.symptom.trim() : "";
+			const whereToLook = Array.isArray(args.whereToLook) ? args.whereToLook.filter((e): e is string => typeof e === "string") : [];
+			if (!symptom || whereToLook.length === 0) {
+				rec.agent.respondHostTool(call.id, `usage: ${RECORD_SYMPTOM_TOOL}({ symptom: string, whereToLook: string[] })`, true);
+				return;
+			}
+			const textCheck = validateSymptomText(symptom);
+			if (!textCheck.ok) {
+				rec.agent.respondHostTool(call.id, `symptom rejected (${textCheck.rule}): ${textCheck.message}`, true);
+				return;
+			}
+			const countCheck = validateWhereToLookCount(whereToLook);
+			if (!countCheck.ok) {
+				rec.agent.respondHostTool(call.id, `symptom rejected (${countCheck.rule}): ${countCheck.message}`, true);
+				return;
+			}
+			// Stat against the unit's own WORKTREE when it has one (cross-batch audit): a fixing unit's
+			// whereToLook pointer often names a file the fix itself just added, which exists in the
+			// worktree but not yet in the shared checkout — rejecting it at exactly the record-at-fix-time
+			// moment the tool targets would be a false floor.
+			const statRoot = rec.dto.worktree || rec.dto.repo;
+			for (const entry of whereToLook) {
+				const kind = await statWhereToLookEntry(statRoot, entry);
+				const entryCheck = classifyWhereToLookEntry(entry, kind);
+				if (!entryCheck.ok) {
+					rec.agent.respondHostTool(call.id, `symptom rejected (${entryCheck.rule}): ${entryCheck.message}`, true);
+					return;
+				}
+			}
+			const now = Date.now();
+			const entry: SymptomEntry = {
+				id: symptomId(symptom, rec.dto.id, new Date(now)),
+				symptom,
+				whereToLook,
+				repo: rec.dto.repo,
+				fixedBy: { agentId: rec.dto.id, runId: rec.run?.snapshot().runId },
+				landedAt: now,
+			};
+			const saved = await saveSymptom(this.stateDir, entry);
+			if (!saved) {
+				rec.agent.respondHostTool(call.id, "failed to record symptom — the daemon's disk write did not succeed", true);
+				return;
+			}
+			this.learningMetrics.record("symptom-captured", 1, { flag: "decision-capture", variant: learningFlags(rec.dto.id).decisionCapture });
+			rec.agent.respondHostTool(call.id, "symptom recorded");
+			try {
+				this.append(rec, "system", `📝 symptom recorded: ${truncateLabel(symptom, 200)}`, { status: "ok", tool: { callId: call.id, name: RECORD_SYMPTOM_TOOL, args: call.arguments, argsText: safeJson(call.arguments) } });
+				void this.recordAudit(agentActor(rec.dto.id), "symptom.recorded", entry.id, "ok", truncateLabel(symptom, 120));
+			} catch (postErr) {
+				this.log("warn", `record-symptom post-step failed for ${rec.dto.name} (symptom was saved): ${String(postErr)}`);
+			}
+		} catch (err) {
+			try {
+				rec.agent.respondHostTool(call.id, `failed to record symptom: ${String(err)}`, true);
+			} catch {
+				/* respond best-effort */
+			}
+			this.log("warn", `record-symptom failed for ${rec.dto.name}: ${String(err)}`);
 		}
 	}
 
@@ -8946,9 +9714,9 @@ export class SquadManager extends EventEmitter {
 		const detail = typeof args.detail === "string" ? args.detail : undefined;
 		const event: AttentionEvent = { id: randomUUID(), summary, detail, source: "tool", createdAt: Date.now() };
 		rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
-		this.append(rec, "system", `🔔 attention: ${truncate(summary, 200)}`, { status: "ok", tool: { callId: call.id, name: ATTENTION_TOOL, args: call.arguments, argsText: safeJson(call.arguments) } });
+		this.append(rec, "system", `🔔 attention: ${truncateLabel(summary, 200)}`, { status: "ok", tool: { callId: call.id, name: ATTENTION_TOOL, args: call.arguments, argsText: safeJson(call.arguments) } });
 		rec.agent.respondHostTool(call.id, "attention recorded — continue working, a human will look when they can");
-		void this.recordAudit(agentActor(rec.dto.id), "attention.raised", rec.dto.id, "ok", truncate(summary, 120));
+		void this.recordAudit(agentActor(rec.dto.id), "attention.raised", rec.dto.id, "ok", truncateLabel(summary, 120));
 		this.emitAgent(rec);
 	}
 
@@ -9736,6 +10504,10 @@ export class SquadManager extends EventEmitter {
 				// — cosmetic, idempotent content, no behavioral effect; non-profiled fleet units compose cleanly.
 				appendSystemPrompt: p.appendSystemPrompt,
 				issue: p.issue,
+				// Restore the resolved lane + its SOURCE verbatim (concern 02): without the source, a
+				// restart would re-resolve a persisted classifier lane as operator-sourced (privilege upgrade).
+				lane: p.lane,
+				laneSource: p.laneSource,
 				parentId: p.parentId,
 				...lineageFieldsFrom(p),
 				// Restore the harness lineage so a cold-adopted/restored pi or ACP unit keeps its harness
@@ -9803,17 +10575,12 @@ function rewardRecordOrThrow(snap: FeedbackSnapshot, id: string): { item: Feedba
 	return { item, reward };
 }
 
-function truncate(s: string, n: number): string {
-	const flat = s.replace(/\s+/g, " ").trim();
-	return flat.length > n ? `${flat.slice(0, n - 1)}…` : flat;
-}
-
 function safeJson(value: unknown, max = 2000): string | undefined {
 	if (value === undefined) return undefined;
 	try {
-		return truncate(redact(JSON.stringify(value, null, 2)), max);
+		return truncateLabel(redact(JSON.stringify(value, null, 2)), max);
 	} catch {
-		return truncate(redact(String(value)), max);
+		return truncateLabel(redact(String(value)), max);
 	}
 }
 

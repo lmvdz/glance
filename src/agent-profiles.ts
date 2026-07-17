@@ -240,3 +240,79 @@ export function membraneDisciplinePrompt(gatedTokens: string[] | undefined): str
 	const blocks = [...new Set(gatedTokens)].map((token) => MEMBRANE_BLOCKS[token]).filter((b): b is string => !!b);
 	return blocks.length ? blocks.join("\n\n") : undefined;
 }
+
+// ── Evergreen Do-Not block (skills-hardening concern 04) ────────────────────────────────────────────
+// Distilled from this repo's recorded recurring failure modes (memory lessons + failure-memory
+// annotations), phrased to name the rationalization where one is known (the negative-space-spec
+// pattern). UNLIKE the membrane blocks above, this is never profile-gated and never opt-in — it rides
+// squad-manager.ts's UNCONDITIONAL appendSystemPrompt join (createWithId, alongside the primer +
+// authored-spec joins), specifically NOT via `profile.memory` (only assembled `if (profile)` — a
+// profile-less dispatched unit never reaches that branch: the exact delivery-gap class R3 fixed for the
+// primer, since `dispatchSpawn` calls `create({repo, name, branch, task, issue})` with no profileId).
+// Static repo-authored text, so — unlike the primer/authored-spec blocks, which fence fabric/issue-
+// sourced content as untrusted — no fence is needed here.
+/** First line of DO_NOT_BLOCK — the idempotence marker squad-manager checks before appending, so a
+ *  cold-adopted unit whose PERSISTED appendSystemPrompt already carries the block (composed at its
+ *  original create) doesn't grow a second copy on every daemon restart. */
+export const DO_NOT_HEADER = "--- Do-Not: recurring failure modes ---";
+export const DO_NOT_BLOCK = [
+	DO_NOT_HEADER,
+	"Do not report the Vite/bundler chunk-size warning as a finding — it is known and benign in this repo.",
+	"Do not re-run a failing verify loop a third time hoping for a different outcome — after two failures, stop and report the blocker.",
+	'Do not treat a passing test suite as proof the gate ran — a gate that never executed also prints no failures; check for evidence the tests actually ran (e.g. "N pass").',
+	"Do not trust `git grep 'a|b'` without -E — bare alternation silently matches nothing.",
+	"Do not trust empty grep/search output from a wrapped shell — verify a null result with a second, differently-shaped query before concluding absence.",
+	"Do not use bare `git stash`/`git stash pop` — the stash stack is shared across worktrees and other sessions; make a WIP commit instead.",
+	"Do not conclude a feature is unwired from one call-site search — check exports, dynamic dispatch, and registration tables before claiming zero callers.",
+	"Do not delete or overwrite a file you did not create without reading it first.",
+	"Do not mark work done because the diff looks right — run the affected flow and observe it.",
+	"Do not widen scope to fix adjacent code you were not asked to touch — report it instead.",
+].join("\n");
+
+/** Replace-or-append DO_NOT_BLOCK in a composed prompt. Append when the header is absent (a pre-04
+ *  persisted unit gets upgraded on adopt); when present, replace the whole paragraph from the header
+ *  to the next blank line with the CURRENT block — so a cold-adopted unit picks up rule edits instead
+ *  of freezing whatever list it was created with, and a restart still never grows a second copy. */
+export function upsertDoNotBlock(prompt: string | undefined): string {
+	if (!prompt || prompt.length === 0) return DO_NOT_BLOCK;
+	const idx = prompt.indexOf(DO_NOT_HEADER);
+	if (idx === -1) return `${prompt}\n\n${DO_NOT_BLOCK}`;
+	const blockEnd = prompt.indexOf("\n\n", idx);
+	const before = prompt.slice(0, idx);
+	const after = blockEnd === -1 ? "" : prompt.slice(blockEnd);
+	return `${before}${DO_NOT_BLOCK}${after}`;
+}
+
+/** Loose but code-shaped match for "this task/issue is about the `effect` library" — bare word "effect"
+ *  is too noisy (it is common English), so this also accepts the shapes that only show up in code:
+ *  an import specifier (`effect/...`, `from "effect"`) or a version pin (`effect@...`). Capital-E
+ *  "Effect" (the module/type name) is the common case for prose task text. */
+const EFFECT_TASK_PATTERN = /\bEffect\b|\beffect\/|from ["']effect["']|\beffect@/;
+
+/** Marker for the pointer's presence in an already-composed prompt (idempotence on adopt): the exact
+ *  sentence prefix of both pointer variants below — keep the three in sync. */
+export const EFFECT_POINTER_MARKER = "Load .claude/skills/effect before writing Effect code";
+
+/**
+ * A pointer line appended ONLY when (a) the unit's task/issue text looks Effect-shaped and (b) the
+ * UNIT'S TARGET REPO (`repoDir`, not the daemon's own install — the daemon may run from a global
+ * install or dispatch cross-repo, where a daemon-rooted check is wrong in both directions) carries a
+ * vendored `.claude/skills/effect` skill. The version claim is read from that skill's own
+ * `verified-against:` frontmatter — the gate-maintained truth for what the examples were last proven
+ * against — never from a package.json caret RANGE, which is not a pin and may diverge from what
+ * skills-verify actually compiled against. No stamp ⇒ the pointer still fires, minus the version claim.
+ * Checked fresh per spawn (an on-disk skill and its stamp can change without a daemon restart).
+ */
+export function effectSkillPointerLine(text: string | undefined, repoDir: string | undefined): string | undefined {
+	if (!repoDir || !text || !EFFECT_TASK_PATTERN.test(text)) return undefined;
+	const skillMd = path.join(repoDir, ".claude", "skills", "effect", "SKILL.md");
+	let content: string;
+	try {
+		content = fs.readFileSync(skillMd, "utf8");
+	} catch {
+		return undefined;
+	}
+	const stamp = /^verified-against:[ \t]*(\S+)[ \t\r]*$/m.exec(content)?.[1];
+	const base = `Load .claude/skills/effect before writing Effect code in this repo`;
+	return stamp ? `${base} — its examples are compile-proven against the installed ${stamp}.` : `${base}.`;
+}

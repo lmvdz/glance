@@ -18,6 +18,7 @@ import { fenceUntrusted } from "../digest.ts";
 import { gateEnv } from "../gate-env.ts";
 import { GateSemaphore, sharedGateSemaphore } from "../gate-semaphore.ts";
 import { isOn, learningFlags } from "../metrics.ts";
+import { identityNormalize, reduceOutput } from "../output-reduce.ts";
 import { appendReflection, hashOutput, latestReflection, reflect, renderReflectionNote, renderRefutationNote, type ReflectLlm } from "../reflection.ts";
 import type { NodeExecutor, NodeResult, RunContext, StageEvent, WorkflowNode } from "./types.ts";
 
@@ -102,7 +103,22 @@ export interface SingleAgentExecutorOptions {
  */
 const GATE_FOLD_VAR = "__gateFold";
 
-const MAX_CONTEXT_OUTPUT = 4000;
+/**
+ * Signal-preserving budget for a command node's output (noisegate-compaction concern 03) — what
+ * `runCommand` feeds back to the next agent turn as steer text, via `reduceOutput` (output-reduce.ts,
+ * concern 01) instead of the old blind `slice(0, MAX_CONTEXT_OUTPUT)` head-cut, which happily dropped
+ * the ONE `error TS2304:` or `(fail)` summary line a fixup agent needed most whenever it landed past
+ * byte 4000.
+ *
+ * 3800, not the old MAX_CONTEXT_OUTPUT's 4000: `reduceOutput` budgets its returned text — body PLUS
+ * its `[N bytes omitted — full: <path>]` pointer line — to ≤ this value exactly (offload-first, exact
+ * pointer arithmetic; see output-reduce.ts), and `runCommand` below may still prepend the ~70-char
+ * "[environment not provisioned…]\n" prefix AFTER reduction. Worst case 3800 + ~70 = 3870, safely
+ * under checkpoint-log's `MAX_FIELD_BYTES` (4096, concern 04) so the checkpoint boundary never has to
+ * re-cut this string itself — a second cut there could shear off the trailing pointer line and
+ * silently amputate the offload trail concern 04 exists to preserve.
+ */
+const STEER_BODY_BUDGET = 3800;
 const IDLE_POLL_MS = 5_000;
 /**
  * Legibility only (no behavior change): a command node failing because its OWN environment was
@@ -195,7 +211,11 @@ export class SingleAgentExecutor implements NodeExecutor {
 		}
 		parts.push(body);
 		if (ctx.vars.lastOutput) {
-			parts.push(`--- Recent command output ---\n${ctx.vars.lastOutput}`);
+			// Fenced like the adjacent reflection note below (marker-forgery hardening,
+			// noisegate-compaction concern 03): command output is gate/unit-authored text, and an
+			// unfenced channel would let a forged `[N bytes omitted — full: /etc/passwd]`-shaped line
+			// misdirect the model into treating it as a real offload pointer or, worse, as instructions.
+			parts.push(fenceUntrusted("recent command output", ctx.vars.lastOutput));
 		}
 		if (!isolated) {
 			const reflection = await this.reflectionNote(node, ctx);
@@ -265,9 +285,19 @@ export class SingleAgentExecutor implements NodeExecutor {
 		if (attempt >= (node.maxVisits ?? DEFAULT_FIXUP_VISIT_CAP)) return undefined; // last try before overflow — no point reflecting (defensive: hand-authored nodes may set no maxVisits)
 		try {
 			const prior = await latestReflection(cfg.stateDir, cfg.repo, this.opts.cwd);
-			const outputHash = hashOutput(ctx.vars.lastOutput);
+			// identityNormalize (output-reduce.ts, concern 01) strips the offload pointer's unique
+			// ts+nonce and bun's per-test `[N.NNms]` duration jitter before hashing, so two visits
+			// reproducing the SAME underlying failure compare EQUAL even though runCommand's
+			// reduceOutput minted a fresh offload path this time — and bun's timing jitter, which
+			// already defeated the raw comparator even for SMALL outputs, no longer does either
+			// (red-team RT2-1). Feed the SAME normalized text into `reflect()` below so the
+			// outputHash IT stores (reflection.ts hashes `input.output`) is computed on the identical
+			// basis — a raw-vs-normalized mismatch there would silently break every future refutation
+			// check even after fixing the comparison here.
+			const normalizedOutput = identityNormalize(ctx.vars.lastOutput);
+			const outputHash = hashOutput(normalizedOutput);
 			if (prior && prior.outputHash === outputHash) return renderRefutationNote(prior); // unchanged failure ⇒ the last guess didn't fix it
-			const r = await reflect({ output: ctx.vars.lastOutput, prior: prior ? { rootCause: prior.rootCause, whatToDoDifferently: prior.whatToDoDifferently, outputHash: prior.outputHash } : undefined }, cfg.llm);
+			const r = await reflect({ output: normalizedOutput, prior: prior ? { rootCause: prior.rootCause, whatToDoDifferently: prior.whatToDoDifferently, outputHash: prior.outputHash } : undefined }, cfg.llm);
 			if (!r) return undefined;
 			await appendReflection(cfg.stateDir, cfg.repo, this.opts.cwd, { ...r, agentId: cfg.agentId, runId: cfg.runId?.(), repo: cfg.repo, at: Date.now() });
 			return renderReflectionNote(r);
@@ -318,8 +348,11 @@ export class SingleAgentExecutor implements NodeExecutor {
 		try {
 			const { code, stdout, stderr } = await run(script, this.opts.cwd);
 			const combined = [stdout, stderr].filter((s) => s.trim()).join("\n").trim();
-			const truncated = combined.length > MAX_CONTEXT_OUTPUT ? `${combined.slice(0, MAX_CONTEXT_OUTPUT)}\n…(truncated)` : combined;
-			const shown = code !== 0 && looksUnprovisioned(code, combined, this.opts.cwd) ? `[environment not provisioned — dependencies missing, not a code failure]\n${truncated}` : truncated;
+			// looksUnprovisioned classifies on the UNREDUCED `combined` — an unprovisioned signature
+			// (e.g. "cannot find module") could otherwise fall inside a region reduceOutput cuts from a
+			// huge dump, and the regex/existsSync check is cheap against text already held in memory.
+			const { text: reduced } = await reduceOutput(combined, STEER_BODY_BUDGET, { command: script, agentId: this.opts.reflection?.agentId, source: "executor-steer" });
+			const shown = code !== 0 && looksUnprovisioned(code, combined, this.opts.cwd) ? `[environment not provisioned — dependencies missing, not a code failure]\n${reduced}` : reduced;
 			this.opts.emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: `$ ${node.label ?? node.id} → exit ${code}\n${shown || "(no output)"}` } });
 			this.opts.emit({ type: "message_end" });
 			return { outcome: code === 0 ? "succeeded" : "failed", text: shown };

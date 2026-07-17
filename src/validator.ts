@@ -18,6 +18,7 @@ import { harnessLineage, type ModelLineage, modelLineage } from "./model-lineage
 import { decideTyped, extractJsonObject } from "./omp-call.ts";
 import type { Proof } from "./proof.ts";
 import { type LensId, selectLenses } from "./lens-select.ts";
+import { truncate } from "./text-util.ts";
 import type { FeatureCriterion, LensVerdict, ValidationRecord } from "./types.ts";
 
 /** Raw per-criterion verdict shape the judge is asked to emit (before coercion into `perCriterion`). */
@@ -38,10 +39,6 @@ export interface RawVerdict {
 export type Judge = (input: { criteria: FeatureCriterion[]; diff: string; proof?: Proof; agentId?: string }) => Promise<RawVerdict | undefined>;
 
 const RATIONALE_MAX = 600;
-
-function truncate(s: string, n: number): string {
-	return s.length <= n ? s : `${s.slice(0, n)}…`;
-}
 
 /** Independent of the executor's model default (sonnet) — see DESIGN §2. */
 function validatorModel(): string {

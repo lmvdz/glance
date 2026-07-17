@@ -103,7 +103,9 @@ export function writeEphemeralProjects(stateDir: string, repos: Set<string>): bo
 
 /** Leading-`~` expansion (see `normalizeRepoPath`'s live-finding comment). Exported so the agent
  *  spawn path (squad-manager) can apply the same defense to repo paths that reach it WITHOUT going
- *  through the registry (older persisted state, direct API callers). */
+ *  through the registry (older persisted state, direct API callers).
+ *  @substrate exported for tests + the spawn-path defense described above; the in-file
+ *  `normalizeRepoPath` is the current production caller. */
 export function expandHomePath(p2: string): string {
 	if (p2 === "~") return os.homedir();
 	if (p2.startsWith("~/")) return path.join(os.homedir(), p2.slice(2));
