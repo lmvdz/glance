@@ -35,6 +35,7 @@ import {
 	AnnotationSendBodySchema,
 	AssigneesBodySchema,
 	AttentionEventBodySchema,
+	UnitVisitBodySchema,
 	CapabilityInstallBodySchema,
 	CapabilityInstallPatchBodySchema,
 	CapabilityInstallRunBodySchema,
@@ -93,6 +94,7 @@ import { hardenedGit } from "./git-harden.ts";
 import { rankKbDocs, searchFabric, type KbDoc, type KbDocType } from "./fabric-search.ts";
 import type { FabricSnapshot } from "./fabric.ts";
 import { redactAttentionForActor, redactSeenMapForActor } from "./attention.ts";
+import { maxLadderPriority, type LadderPriority } from "./attention-ladder.ts";
 import { computeFog, repoHasHistory } from "./comprehension-fog.ts";
 import type { SymptomSearchHit } from "./symptoms.ts";
 import type { EpisodeMeta } from "./weekly-episode.ts";
@@ -1783,7 +1785,16 @@ export class SquadServer {
 		// submit + widget.js stay above — they need the server's rate limiter).
 		const feedbackResponse = await handleFeedbackRoutes(url, req, manager, actor);
 		if (feedbackResponse) return feedbackResponse;
-		if (url.pathname === "/api/agents") return Response.json(manager.list());
+		// The needs-you ladder's `completed-unseen`/`idle` boundary is per-VIEWER (t3-face concern 06):
+		// `manager.list()` already stamps a viewer-AGNOSTIC `ladderPriority` hint on the shared dto
+		// (`syncLadder`), but this response overlays the REQUESTING actor's own personalized value on a
+		// shallow copy — `ladderPriorityFor` never mutates the shared roster object (see
+		// attention-ladder.ts's module doc for why that would leak between concurrently-polling viewers).
+		// `viewerId` is `session ? actor.id : undefined`, the same idiom every other attention route uses.
+		if (url.pathname === "/api/agents" && req.method === "GET") {
+			const viewerId = session ? actor.id : undefined;
+			return Response.json(manager.list().map((dto) => ({ ...dto, ladderPriority: manager.ladderPriorityFor(dto, viewerId) })));
+		}
 		// R5: answers are a deliverable, not a transcript. They outlive the roster row that produced them,
 		// which is the single most common way a glance result used to evaporate — the agent reaped before
 		// anyone read what it found.
@@ -1869,6 +1880,36 @@ export class SquadServer {
 			const seen = manager.attentionSeen(repos);
 			const redacted = redactSeenMapForActor(seen, { viewerId: session ? actor.id : undefined, isAdmin: roleAtLeast(role, "admin") });
 			return Response.json({ seen: redacted });
+		}
+		// Needs-you ladder roll-up (t3-face concern 06, plans/daily-driver/01-charter-needs-you-ladder.md):
+		// the cockpit spine's group headers need a max-priority per project and per daemon, not just the
+		// per-unit rung already riding GET /api/agents. Personalized for the requesting viewer exactly like
+		// GET /api/agents above (same `ladderPriorityFor` call, same `viewerId` derivation) — a foreign/
+		// unresolvable identity never sees anyone else's `completed-unseen` state resolve differently.
+		if (url.pathname === "/api/attention/ladder" && req.method === "GET") {
+			const viewerId = session ? actor.id : undefined;
+			const units = manager.list().map((dto) => ({ id: dto.id, repo: dto.repo, priority: manager.ladderPriorityFor(dto, viewerId) }));
+			const byRepo = new Map<string, LadderPriority[]>();
+			for (const u of units) byRepo.set(u.repo, [...(byRepo.get(u.repo) ?? []), u.priority]);
+			const projects = [...byRepo.entries()].map(([repo, priorities]) => ({ repo, priority: maxLadderPriority(priorities) }));
+			const daemon = maxLadderPriority(units.map((u) => u.priority));
+			return Response.json({ units, projects, daemon });
+		}
+		// Needs-you ladder mark-seen (t3-face concern 06): the ONE mutation that advances a viewer's
+		// per-unit `lastVisitedAt`. `viewerId`/`at` are, like POST /api/attention above, ALWAYS
+		// server-stamped from the session — never accepted from the client body (a client-supplied
+		// viewerId would let any actor mark a unit seen on another viewer's behalf).
+		if (url.pathname === "/api/attention/ladder/seen" && req.method === "POST") {
+			const decoded = decodeBody(UnitVisitBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response("expected { agentId }", { status: 400 });
+			const dto = manager.getAgent(decoded.success.agentId);
+			// Fail CLOSED like POST /api/attention's own repo check: an agentId outside the actor's
+			// visible repo set (or that names no live agent at all) is rejected, never silently a no-op
+			// 200 that would let a caller probe for the existence of a foreign unit.
+			if (!dto || !manager.attentionVisibleRepos(actor).has(normalizeRepoPath(dto.repo))) return new Response("no such agent", { status: 404 });
+			const viewerId = session ? actor.id : undefined;
+			const result = manager.markUnitVisited(dto.id, viewerId);
+			return Response.json({ ok: result.ok });
 		}
 		// Comprehension fog (concern 03): a monotone per-file comprehension-debt read, joined from every
 		// completed receipt against the attention substrate's seen map. Repos are derived from the actor
@@ -2712,7 +2753,10 @@ export class SquadServer {
 		if (magent && req.method === "GET") {
 			const id = decodeURIComponent(magent[1]);
 			const dto = manager.getAgent(id);
-			if (dto) return Response.json(dto);
+			// Same per-viewer personalization as GET /api/agents above — never skip it on the single-agent
+			// read, or a client polling one unit's row would see a stale/wrong ladder rung relative to the
+			// list view.
+			if (dto) return Response.json({ ...dto, ladderPriority: manager.ladderPriorityFor(dto, session ? actor.id : undefined) });
 			const ph = manager.deadPlaceholder(id);
 			if (ph) return Response.json({ id: ph.id, name: ph.name, repo: ph.repo, harness: ph.harness, at: ph.at, dead: true, deadReason: ph.deadReason, transcriptEntries: ph.transcript.length });
 			return new Response("no such agent", { status: 404 });

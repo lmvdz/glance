@@ -133,6 +133,14 @@ export const AttentionEventBodySchema = Schema.Struct({
 	prNumber: Schema.optional(Schema.Number),
 });
 
+/** POST /api/attention/ladder/seen — mark one unit visited by the requesting viewer (t3-face
+ *  concern 06, plans/daily-driver/01-charter-needs-you-ladder.md). `viewerId`/`at` are, like
+ *  `AttentionEventBodySchema` above, ALWAYS server-stamped from the session — never accepted from
+ *  the client body. */
+export const UnitVisitBodySchema = Schema.Struct({
+	agentId: Schema.String.pipe(Schema.check(Schema.isMaxLength(128))),
+});
+
 export const JoinRequestDecideBodySchema = Schema.Struct({
 	id: Schema.String,
 	action: Schema.optional(Schema.Unknown),
