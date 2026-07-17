@@ -16,7 +16,7 @@ import { buildAdoptionView, type FrictionEntryWire } from '../lib/adoption-view'
 const NOW = Date.UTC(2026, 6, 17, 12, 0, 0);
 
 describe('AdoptionCounters', () => {
-  test('with activity: three labeled tiles, today values, and a "this week" sub — real 0-today data shows', () => {
+  test('with activity: three labeled tiles lead with the 7-day total, today demoted to the sub-line', () => {
     const view = buildAdoptionView(
       { casualSessionsByDay: { '2026-07-17': 3 }, promptsByDay: { '2026-07-17': 5 }, pushTapsByDay: { '2026-07-16': 2 } },
       NOW,
@@ -25,8 +25,13 @@ describe('AdoptionCounters', () => {
     expect(html).toContain('Casual sessions');
     expect(html).toContain('Prompts');
     expect(html).toContain('Push taps');
-    expect(html).toContain('3 this week'); // sessions
-    expect(html).toContain('2 this week'); // push taps: 0 today, 2 this week (honest, not fake-zero)
+    // The headline is the 7-day total (a bare "today" resets to 0 at UTC midnight and reads as a dead
+    // panel); today is the sub-line. Push taps: 2 this week despite 0 today — the honest 0 is demoted,
+    // never dressed as the dominant signal.
+    expect(html).toContain('text-2xl'); // counters are the loudest element in the block
+    expect(html).toContain('3 today'); // sessions: headline 3 this week, sub 3 today
+    expect(html).toContain('0 today'); // push taps: headline 2 this week, sub 0 today
+    expect(html).not.toContain('this week'); // retired the old sub copy; the section subtitle frames the window
     expect(html).not.toContain('No activity recorded yet');
   });
 

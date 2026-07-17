@@ -42,7 +42,7 @@ function repoBasename(repo: string): string {
  *  "no activity recorded" empty state -- never zeros dressed up as data. Pure in `view`. */
 export const AdoptionCounters: React.FC<{ view: AdoptionView }> = ({ view }) => (
   <section aria-label="Adoption counters">
-    <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.2em] text-amber-500">
+    <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.2em] text-amber-700 dark:text-amber-400">
       Adoption &middot; the loop&rsquo;s real success metric
     </div>
     {view.hasActivity ? (
@@ -51,8 +51,8 @@ export const AdoptionCounters: React.FC<{ view: AdoptionView }> = ({ view }) => 
           <StatTile
             key={s.key}
             label={s.label}
-            value={s.today.toLocaleString()}
-            sub={`${s.week.toLocaleString()} this week`}
+            value={s.week.toLocaleString()}
+            sub={`${s.today.toLocaleString()} today`}
             spark={s.spark}
           />
         ))}
@@ -95,7 +95,7 @@ export const FrictionRow: React.FC<{ entry: FrictionEntryWire; now?: number }> =
         <p className="text-sm text-gray-800 dark:text-gray-200">{entry.gripe}</p>
         <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-gray-500 dark:text-gray-400">
           <span
-            className={`rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider ${
+            className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${
               auto
                 ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'
                 : 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'
