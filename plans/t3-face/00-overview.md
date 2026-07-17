@@ -63,9 +63,11 @@ Rung map: R1 = batches 1–2 (coherent skin, whole app). R2 = batches 3–4 (spi
 - @legendapp/list timeline virtualization — polled cockpit transcripts don't need it yet; revisit at real scale
 - Editor CodeMirror-merge diff tabs — upstream-owned interactive edit surface, different job
 - Webapp/omp-squad UI reskin — this program is the cockpit; webapp visual parity is a future call
+- `daemonTransport.ts` running-floor port — the daemon-backed AI chat transport (E01) has the same in-session streaming-freeze exposure concern 04 fixed for the fleet; different consumer (single-turn quiet-poll), deferred to a small follow-up so it gets its own verification rather than riding 04's fleet-scoped PR
 
 ## Decisions so far
 
+- [04 transcript-cursor-integrity](04-transcript-cursor-integrity.md) — DONE, glance-desktop draft PR #28: `runningFloor` cursor fixes the live streaming-freeze; daemon seq-reseed bug filed OMPSQ-449; daemonTransport.ts identical exposure deferred (below).
 - **2026-07-17 (Lars)**: Charter H expansion APPROVED — this program is the committed cockpit consumer. Concern 06 executes daemon-side; cockpit/webapp/push all render one attention truth. Concern 06's `MODE: hitl` authorization is hereby satisfied.
 - **2026-07-17 (Lars)**: Start NOW, in parallel with daily-driver-w15 + land-assessment (disjoint repos/TOUCHES). The adoption-gate pause rule (Notes) still binds: a KILL verdict pauses this program at end-of-batch.
 

@@ -1,6 +1,6 @@
 # Transcript cursor integrity — streaming entries must finish rendering
 
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: glance-desktop, omp-squad (filed ticket only)
 COMPLEXITY: architectural
@@ -29,3 +29,7 @@ omp-squad: one filed Plane issue (seq re-seed after restart). No code changes in
 - Unit tests: a mocked poll sequence where a `tool` entry arrives `running` then mutates server-side — with the old cursor it stays frozen (regression demo), with the floor cursor it settles. System pending-gate entry does NOT pin the floor.
 - Live (scratch daemon + real unit): drive a tool-using turn; watch ConversationView — tool row transitions running→done and assistant text reaches its final form without reselecting the unit.
 - Plane issue exists and links back to this concern.
+
+## Resolution
+
+Shipped as glance-desktop draft PR #28 (branch `t3face/04-transcript-cursor`), awaiting Lars's merge. `runningFloor` cursor policy + widened wire types + identity-preserving merge; 9 new tests incl. the regression demo; full gate green (519/519, lint/types/build clean). Root cause verified against live daemon source (`squad-manager.ts` in-place `Object.assign` mutations + `transcript-delta.ts` strict `seq > since`). Daemon seq-reseed bug filed as **OMPSQ-449** (high). Follow-up flagged: `src/modules/ai/lib/daemonTransport.ts` (daemon-backed chat, E01) has the identical in-session freeze exposure — different consumer, deferred (see 00-overview Out of scope).
