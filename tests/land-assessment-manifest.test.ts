@@ -27,7 +27,7 @@ import {
 	type IncidentManifest,
 	type ManifestEntry,
 	type TaxonomyClass,
-} from "./incident-taxonomy.ts";
+} from "../src/land-assessment/replay/incident-taxonomy.ts";
 
 // ── Fixture builders ─────────────────────────────────────────────────────────────────────────────────
 

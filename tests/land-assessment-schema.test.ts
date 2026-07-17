@@ -17,7 +17,7 @@ import {
 	checkOutputHash,
 	computeRepositoryId,
 	mintAttemptId,
-} from "./id.ts";
+} from "../src/land-assessment/id.ts";
 import {
 	SCHEMA_VERSION,
 	validateAssessmentFinding,
@@ -38,7 +38,7 @@ import {
 	type ProducerRef,
 	type RepositoryStateRef,
 	type SnapshotFact,
-} from "./schema.ts";
+} from "../src/land-assessment/schema.ts";
 
 // ── Fixture builders ─────────────────────────────────────────────────────────────────────────────────
 
@@ -278,7 +278,7 @@ describe("no validity-interval fields", () => {
 	// Grep-proof for an actual FIELD DECLARATION (`name:` or `name?:`), not the cautionary prose in
 	// schema.ts's own module doc comment that names these fields as the thing NOT to add.
 	test("validFromCommit/validUntilCommit are never declared as fields in schema.ts — intervals are lineage projections, never stored primitives", () => {
-		const source = readFileSync(path.join(import.meta.dir, "schema.ts"), "utf8");
+		const source = readFileSync(path.join(import.meta.dir, "../src/land-assessment/schema.ts"), "utf8");
 		expect(source).not.toMatch(/\bvalidFromCommit\s*\??\s*:/);
 		expect(source).not.toMatch(/\bvalidUntilCommit\s*\??\s*:/);
 	});

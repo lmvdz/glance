@@ -47,7 +47,8 @@ function isRepositoryStateRef(v: unknown): v is RepositoryStateRef {
 /** THROWS when `v` is not a well-formed `RepositoryStateRef` — every observation/event below is
  *  addressed to an exact state; a ref missing repositoryId/commit/tree is not a legitimate state, it
  *  is a corrupt record (mirrors `baseline-tracker.ts`'s corrupt-vs-missing discipline: absent data is
- *  a different case, callers decide that before reaching in here). */
+ *  a different case, callers decide that before reaching in here).
+ *  @substrate Phase-0 producer (concern 01) with no external caller yet -- land()/analyzers/replay projection wire it up in concerns 03-11 (plans/land-assessment); a co-located test consumer is not a real reference (dead-exports.ts's own carve-out). */
 export function validateRepositoryStateRef(v: unknown, context: string): RepositoryStateRef {
 	if (!isRepositoryStateRef(v)) throw new Error(`land-assessment schema: ${context} is not a valid RepositoryStateRef: ${JSON.stringify(v)}`);
 	return v;
@@ -323,7 +324,8 @@ function isCriteriaBag(v: unknown): v is LandAttemptEvent["criteria"] {
 
 /** THROWS on any structurally invalid event — corrupt-but-present per `baseline-tracker.ts`'s
  *  discipline (a torn/malformed line is the STORE reader's concern to skip-and-count, concern 07/06;
- *  this function only says whether one already-parsed record is well-formed). */
+ *  this function only says whether one already-parsed record is well-formed).
+ *  @substrate Phase-0 producer (concern 01) with no external caller yet -- land()/analyzers/replay projection wire it up in concerns 03-11 (plans/land-assessment); a co-located test consumer is not a real reference (dead-exports.ts's own carve-out). */
 export function validateLandAttemptEvent(v: unknown): LandAttemptEvent {
 	if (!v || typeof v !== "object") throw new Error(`land-assessment schema: LandAttemptEvent is not an object: ${JSON.stringify(v)}`);
 	const e = v as Partial<LandAttemptEvent>;
@@ -373,7 +375,8 @@ function isStringArray(v: unknown): v is string[] {
 	return Array.isArray(v) && v.every((x) => typeof x === "string");
 }
 
-/** THROWS on any structurally invalid snapshot. */
+/** THROWS on any structurally invalid snapshot.
+ *  @substrate Phase-0 producer (concern 01) with no external caller yet -- land()/analyzers/replay projection wire it up in concerns 03-11 (plans/land-assessment); a co-located test consumer is not a real reference (dead-exports.ts's own carve-out). */
 export function validateLandAssessmentSnapshot(v: unknown): LandAssessmentSnapshot {
 	if (!v || typeof v !== "object") throw new Error(`land-assessment schema: LandAssessmentSnapshot is not an object: ${JSON.stringify(v)}`);
 	const s = v as Partial<LandAssessmentSnapshot>;
@@ -410,7 +413,8 @@ export interface SnapshotFact {
 }
 
 /** THROWS on any structurally invalid fact — including a fact addressed to no exact state, which is
- *  meaningless for a record whose entire identity model is exact-state addressing. */
+ *  meaningless for a record whose entire identity model is exact-state addressing.
+ *  @substrate Phase-0 producer (concern 01) with no external caller yet -- land()/analyzers/replay projection wire it up in concerns 03-11 (plans/land-assessment); a co-located test consumer is not a real reference (dead-exports.ts's own carve-out). */
 export function validateSnapshotFact(v: unknown): SnapshotFact {
 	if (!v || typeof v !== "object") throw new Error(`land-assessment schema: SnapshotFact is not an object: ${JSON.stringify(v)}`);
 	const f = v as Partial<SnapshotFact>;
@@ -443,7 +447,8 @@ export interface ChangeObservation {
 const CHANGE_OPERATIONS: ReadonlySet<ChangeObservation["operation"]> = new Set(["added", "removed", "modified", "renamed"]);
 
 /** THROWS on any structurally invalid observation — including one missing either exact-state ref
- *  ("changed between two states" is meaningless with only one, or no, state addressed). */
+ *  ("changed between two states" is meaningless with only one, or no, state addressed).
+ *  @substrate Phase-0 producer (concern 01) with no external caller yet -- land()/analyzers/replay projection wire it up in concerns 03-11 (plans/land-assessment); a co-located test consumer is not a real reference (dead-exports.ts's own carve-out). */
 export function validateChangeObservation(v: unknown): ChangeObservation {
 	if (!v || typeof v !== "object") throw new Error(`land-assessment schema: ChangeObservation is not an object: ${JSON.stringify(v)}`);
 	const c = v as Partial<ChangeObservation>;
@@ -483,7 +488,8 @@ export interface AssessmentFinding {
 }
 
 /** THROWS on any structurally invalid finding, INCLUDING the guardrail rule above:
- *  `derivedFromObservations` empty while `authority !== "inferred"`. */
+ *  `derivedFromObservations` empty while `authority !== "inferred"`.
+ *  @substrate Phase-0 producer (concern 01) with no external caller yet -- land()/analyzers/replay projection wire it up in concerns 03-11 (plans/land-assessment); a co-located test consumer is not a real reference (dead-exports.ts's own carve-out). */
 export function validateAssessmentFinding(v: unknown): AssessmentFinding {
 	if (!v || typeof v !== "object") throw new Error(`land-assessment schema: AssessmentFinding is not an object: ${JSON.stringify(v)}`);
 	const f = v as Partial<AssessmentFinding>;

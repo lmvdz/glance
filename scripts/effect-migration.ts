@@ -63,7 +63,12 @@ export const PATTERNS: Pattern[] = [
 		// `attention-seen.json` — same carve-out, same idiom, one more freshly-written state file.
 		// 55->56 (comprehension concern 08): src/attention.ts's `loadSurpriseCounts` reads its own
 		// `attention-surprise.json` -- same file, same carve-out, one more freshly-written state map.
-		baseline: 56,
+		// 56->58 (land-assessment concerns 01/02): src/land-assessment/id.ts's `readAttemptCounter`
+		// reads its own freshly-written `attempt-counter.json` state file, and
+		// src/land-assessment/replay/incident-taxonomy.ts's `loadIncidentManifest` parses
+		// `incident-manifest.json` immediately validated via `validateIncidentManifest` before any
+		// caller sees it -- same carve-outs this pattern's own description names, two more sites.
+		baseline: 58,
 	},
 	{
 		id: "bool-env-compare",

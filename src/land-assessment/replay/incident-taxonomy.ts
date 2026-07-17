@@ -35,12 +35,14 @@ export type TaxonomyClass = (typeof TAXONOMY_CLASSES)[number];
 
 const TAXONOMY_CLASS_SET: ReadonlySet<string> = new Set(TAXONOMY_CLASSES);
 
+/** @substrate Phase-0 producer (concern 02) with no external caller yet -- topology/replay-CLI wiring lands in concerns 03-11 (plans/land-assessment); a co-located test consumer is not a real reference (dead-exports.ts's own carve-out). */
 export function isTaxonomyClass(v: unknown): v is TaxonomyClass {
 	return typeof v === "string" && TAXONOMY_CLASS_SET.has(v);
 }
 
 /** THROWS when `v` is not one of the nine fixed classes above — a typo'd class name in a manifest
- *  entry must fail loudly, not silently pass through as an unclassified incident. */
+ *  entry must fail loudly, not silently pass through as an unclassified incident.
+ *  @substrate Phase-0 producer (concern 02) with no external caller yet -- topology/replay-CLI wiring lands in concerns 03-11 (plans/land-assessment); a co-located test consumer is not a real reference (dead-exports.ts's own carve-out). */
 export function validateTaxonomyClass(v: unknown, context: string): TaxonomyClass {
 	if (!isTaxonomyClass(v)) throw new Error(`incident-taxonomy: ${context} is not a valid taxonomy class: ${JSON.stringify(v)}`);
 	return v;
@@ -69,13 +71,15 @@ export const CLAIMED_BY: Readonly<Record<V0AnalyzerName, readonly TaxonomyClass[
 
 /** The five classes no v0 analyzer claims (`textual-conflict`, `behavioral`, `acceptance-criterion`,
  *  `proof-freshness`, `operational`) — computed from `CLAIMED_BY` rather than hand-listed a second time,
- *  so the two can never silently drift apart. */
+ *  so the two can never silently drift apart.
+ *  @substrate Phase-0 producer (concern 02) with no external caller yet -- topology/replay-CLI wiring lands in concerns 03-11 (plans/land-assessment); a co-located test consumer is not a real reference (dead-exports.ts's own carve-out). */
 export function unclaimedTaxonomyClasses(): TaxonomyClass[] {
 	const claimed = new Set<TaxonomyClass>(Object.values(CLAIMED_BY).flat());
 	return TAXONOMY_CLASSES.filter((c) => !claimed.has(c));
 }
 
-/** Which v0 analyzer (if any) claims `cls` — `undefined` for one of the five unclaimed classes. */
+/** Which v0 analyzer (if any) claims `cls` — `undefined` for one of the five unclaimed classes.
+ *  @substrate Phase-0 producer (concern 02) with no external caller yet -- topology/replay-CLI wiring lands in concerns 03-11 (plans/land-assessment); a co-located test consumer is not a real reference (dead-exports.ts's own carve-out). */
 export function claimedByAnalyzer(cls: TaxonomyClass): V0AnalyzerName | undefined {
 	for (const name of V0_ANALYZERS) {
 		if (CLAIMED_BY[name].includes(cls)) return name;
@@ -132,7 +136,8 @@ export interface ManifestEntry {
 }
 
 /** THROWS on any structurally invalid entry, including the `should-block-eventually` ⇒
- *  `detectionAtMainCommit` rule (rejected at load, not merely documented). */
+ *  `detectionAtMainCommit` rule (rejected at load, not merely documented).
+ *  @substrate Phase-0 producer (concern 02) with no external caller yet -- topology/replay-CLI wiring lands in concerns 03-11 (plans/land-assessment); a co-located test consumer is not a real reference (dead-exports.ts's own carve-out). */
 export function validateManifestEntry(v: unknown): ManifestEntry {
 	if (!v || typeof v !== "object") throw new Error(`incident-taxonomy: manifest entry is not an object: ${JSON.stringify(v)}`);
 	const e = v as Partial<ManifestEntry>;
@@ -164,6 +169,7 @@ export interface UnpinnableEntry {
 	narrative: string;
 }
 
+/** @substrate Phase-0 producer (concern 02) with no external caller yet -- topology/replay-CLI wiring lands in concerns 03-11 (plans/land-assessment); a co-located test consumer is not a real reference (dead-exports.ts's own carve-out). */
 export function validateUnpinnableEntry(v: unknown): UnpinnableEntry {
 	if (!v || typeof v !== "object") throw new Error(`incident-taxonomy: unpinnable entry is not an object: ${JSON.stringify(v)}`);
 	const e = v as Partial<UnpinnableEntry>;
@@ -221,7 +227,8 @@ export interface IncidentManifest {
 /** Counts real positives (`should-detect` + `should-block-eventually`) per taxonomy class across
  *  `entries` — `should-not-flag` negatives are deliberately excluded (they are not incidents an
  *  analyzer is expected to catch; counting them as "positives" would hide the honest n≈0 finding this
- *  concern exists to surface). */
+ *  concern exists to surface).
+ *  @substrate Phase-0 producer (concern 02) with no external caller yet -- topology/replay-CLI wiring lands in concerns 03-11 (plans/land-assessment); a co-located test consumer is not a real reference (dead-exports.ts's own carve-out). */
 export function computePositiveCounts(entries: readonly ManifestEntry[]): Record<TaxonomyClass, number> {
 	const counts = Object.fromEntries(TAXONOMY_CLASSES.map((c) => [c, 0])) as Record<TaxonomyClass, number>;
 	for (const entry of entries) {
@@ -232,7 +239,8 @@ export function computePositiveCounts(entries: readonly ManifestEntry[]): Record
 }
 
 /** THROWS on any structurally invalid manifest, INCLUDING a `positiveCounts` header that doesn't match
- *  what `computePositiveCounts` derives from `entries` — the header is asserted data, not decoration. */
+ *  what `computePositiveCounts` derives from `entries` — the header is asserted data, not decoration.
+ *  @substrate Phase-0 producer (concern 02) with no external caller yet -- topology/replay-CLI wiring lands in concerns 03-11 (plans/land-assessment); a co-located test consumer is not a real reference (dead-exports.ts's own carve-out). */
 export function validateIncidentManifest(v: unknown): IncidentManifest {
 	if (!v || typeof v !== "object") throw new Error(`incident-taxonomy: manifest is not an object: ${JSON.stringify(v)}`);
 	const m = v as Partial<IncidentManifest>;
@@ -261,7 +269,8 @@ export function validateIncidentManifest(v: unknown): IncidentManifest {
 
 /** Reads + validates `incident-manifest.json` (defaults to the sibling file in this directory).
  *  THROWS on any I/O error, parse error, or validation failure — a manifest this replay methodology
- *  depends on being silently half-loaded would be worse than it failing loudly. */
+ *  depends on being silently half-loaded would be worse than it failing loudly.
+ *  @substrate Phase-0 producer (concern 02) with no external caller yet -- topology/replay-CLI wiring lands in concerns 03-11 (plans/land-assessment); a co-located test consumer is not a real reference (dead-exports.ts's own carve-out). */
 export function loadIncidentManifest(filePath: string = path.join(import.meta.dir, "incident-manifest.json")): IncidentManifest {
 	const raw = readFileSync(filePath, "utf8");
 	const parsed = JSON.parse(raw) as unknown;

@@ -65,7 +65,8 @@ function sortKeysDeep(value: unknown): unknown {
 /** Deterministic hash of an arbitrary bag of config fields (tsconfig hash, lockfile hash, extractor
  *  version, mode, ...) into `AnalysisEnvironmentFingerprint.configurationHash` — analyzers (concerns
  *  03/04) call this rather than hand-rolling their own concatenation so every fingerprint's hash is
- *  computed the same way. */
+ *  computed the same way.
+ *  @substrate Phase-0 producer (concern 01) with no external caller yet -- land()/analyzers wire it up in concerns 03-11 (plans/land-assessment); a co-located test consumer is not a real reference (dead-exports.ts's own carve-out). */
 export function computeConfigurationHash(fields: Record<string, string | number | boolean | undefined>): string {
 	return createHash("sha256").update(canonicalizeForHash(fields)).digest("hex");
 }
@@ -123,7 +124,8 @@ function writeAttemptCounter(stateDir: string, counter: number): void {
  *  so every site that needs a `repositoryId` (attemptId minting, `RepositoryStateRef`, the land-lock
  *  key) derives it the same way. (Design note: the pre-fix land lock was NOT path-normalized — two
  *  differently-spelled paths to the same checkout could race. This assessment layer uses the
- *  normalized identity throughout.) */
+ *  normalized identity throughout.)
+ *  @substrate Phase-0 producer (concern 01) with no external caller yet -- land()/analyzers wire it up in concerns 03-11 (plans/land-assessment); a co-located test consumer is not a real reference (dead-exports.ts's own carve-out). */
 export function computeRepositoryId(repoPath: string): string {
 	return path.resolve(repoPath);
 }
@@ -137,6 +139,8 @@ export function computeRepositoryId(repoPath: string): string {
  * `attemptId = hash(resolvedRepo, branch, candidateCommit, durableCounter)` — the counter is read and
  * incremented atomically as part of this call, so two calls (even across a process restart) never
  * mint the same id for the same repo.
+ *
+ * @substrate Phase-0 producer (concern 01) with no external caller yet -- land()/analyzers wire it up in concerns 03-11 (plans/land-assessment); a co-located test consumer is not a real reference (dead-exports.ts's own carve-out).
  */
 export function mintAttemptId(stateDir: string, repoPath: string, branch: string, candidateCommit: string): string {
 	const counter = readAttemptCounter(stateDir) + 1;
@@ -149,7 +153,8 @@ export function mintAttemptId(stateDir: string, repoPath: string, branch: string
 
 /** `eventId = hash(attemptId, seq)`. `seq` is the CALLER's per-attempt monotonic counter (starts at 0
  *  or 1 per attempt, caller's choice, held in memory for the attempt's lifetime — it is not persisted
- *  by this module; only `attemptId`'s durable counter needs to survive a restart). */
+ *  by this module; only `attemptId`'s durable counter needs to survive a restart).
+ *  @substrate Phase-0 producer (concern 01) with no external caller yet -- land()/analyzers wire it up in concerns 03-11 (plans/land-assessment); a co-located test consumer is not a real reference (dead-exports.ts's own carve-out). */
 export function computeEventId(attemptId: string, seq: number): string {
 	return createHash("sha1").update(`${attemptId}\0${seq}`).digest("hex").slice(0, 20);
 }
@@ -159,7 +164,8 @@ export function computeEventId(attemptId: string, seq: number): string {
 /** `assessmentKey = hash(base + target + candidate stateRefs + environment fingerprint)`. Any input
  *  changing (rebase → new candidate, main advancing, conflict resolution, a config/dependency change
  *  reflected in `environment`) naturally mints a DIFFERENT key — there is no separate "invalidate"
- *  step to remember to call; the content address does it by construction. */
+ *  step to remember to call; the content address does it by construction.
+ *  @substrate Phase-0 producer (concern 01) with no external caller yet -- land()/analyzers wire it up in concerns 03-11 (plans/land-assessment); a co-located test consumer is not a real reference (dead-exports.ts's own carve-out). */
 export function computeAssessmentKey(state: { base: RepositoryStateRef; target: RepositoryStateRef; candidate: RepositoryStateRef }, environment: AnalysisEnvironmentFingerprint): string {
 	return createHash("sha256").update(canonicalizeForHash({ state, environment })).digest("hex");
 }
@@ -184,6 +190,8 @@ function stableIdOf(entry: IdentifiedRecord): string {
  * array: both are sorted by their own stable id before canonicalizing, so an analyzer that happens to
  * emit the same set in a different order (map iteration, parallel extraction, ...) still produces the
  * same hash — a genuine reordering must never look like nondeterminism.
+ *
+ * @substrate Phase-0 producer (concern 01) with no external caller yet -- land()/analyzers wire it up in concerns 03-11 (plans/land-assessment); a co-located test consumer is not a real reference (dead-exports.ts's own carve-out).
  */
 export function computeOutputHash(observations: ReadonlyArray<IdentifiedRecord>, findings: ReadonlyArray<IdentifiedRecord>): string {
 	const sortedObservations = [...observations].sort((a, b) => stableIdOf(a).localeCompare(stableIdOf(b)));
@@ -201,6 +209,8 @@ export type OutputHashOutcome = "new" | "duplicate";
  * hash does not: SCHEMA-V0.md is explicit that the same assessmentKey producing a different outputHash
  * exposes analyzer nondeterminism and "is surfaced loudly, never absorbed" — never silently kept as
  * "the latest wins".
+ *
+ * @substrate Phase-0 producer (concern 01) with no external caller yet -- land()/analyzers wire it up in concerns 03-11 (plans/land-assessment); a co-located test consumer is not a real reference (dead-exports.ts's own carve-out).
  */
 export function checkOutputHash(assessmentKey: string, newOutputHash: string, previous?: { outputHash: string }): OutputHashOutcome {
 	if (!previous) return "new";
