@@ -38,11 +38,14 @@ export const LADDER_RANK: readonly LadderPriority[] = ["error", "pending-approva
 export type LadderCandidate = Pick<AgentDTO, "status" | "pending" | "landReady" | "prState" | "validation">;
 
 export interface LadderSignals {
-	/** Epoch-ms this unit last transitioned INTO `idle` (a genuine turn-end), read from the durable
-	 *  transition log — deliberately NOT `dto.lastActivity` (which also moves on non-terminal
-	 *  activity, and is a live/run-scoped field with no restart-survival guarantee the way the
-	 *  persisted `transitions.jsonl` ring has). `undefined` ⇒ this unit has never completed a turn
-	 *  (a fresh/never-run agent) — there is no completion to be "unseen" about yet. */
+	/** Epoch-ms this unit last transitioned INTO `idle` FROM a genuine in-flight state (a real turn
+	 *  end) — deliberately NOT `dto.lastActivity` (which also moves on non-terminal activity, and is
+	 *  a live/run-scoped field with no restart-survival guarantee). Sourced from
+	 *  `AttentionStore.completedAt`'s own durable per-agent stamp (`SquadManager.lastCompletedAt`),
+	 *  not a scan of the shared `transitions.jsonl` ring — that ring is capped across EVERY agent in
+	 *  the fleet, so a busy fleet could evict the very completion this needs before it "ages out"
+	 *  (grok-4.5 cross-lineage review, t3-face concern 06). `undefined` ⇒ this unit has never
+	 *  completed a turn (a fresh/never-run agent) — there is no completion to be "unseen" about yet. */
 	completedAt?: number;
 	/** Epoch-ms the REQUESTING viewer last visited this unit, or `undefined` if never (the
 	 *  fail-closed default — see module doc: absence of a recorded visit is NEVER treated as
@@ -75,7 +78,22 @@ export interface LadderSignals {
  *   (`visitedAt === undefined || visitedAt < completedAt`) is `completed-unseen`; everything else —
  *   including a fresh unit with no completion yet, one already re-visited since, and a
  *   manually-`"stopped"` unit (the cascade names no dedicated rung for it; folding it into this
- *   terminal pair is the deliberate, documented choice here) — is `idle`.
+ *   terminal pair is the deliberate, documented choice here) — is `idle`. A tie
+ *   (`visitedAt === completedAt`) reads SEEN (`idle`) — pinned by
+ *   tests/attention-ladder.test.ts's "at or after" case. Codex/gpt-5.6 cross-lineage review
+ *   (t3-face concern 06) flagged this as a theoretical race (both stamps are wall-clock
+ *   milliseconds from independent event streams — a turn ending, an operator's mark-seen click —
+ *   so a genuine same-millisecond tie is possible, and the review's STRONGLY-preferred fix is a
+ *   monotonic per-agent generation/sequence number instead of millisecond comparison, which would
+ *   remove the ambiguity entirely). Deliberately NOT done here: it would flip this pinned test's
+ *   documented contract, and a full generation counter is a materially larger, riskier change than
+ *   this pass's confirmed defects warrant — the review's own stated fallback ("at minimum use a
+ *   persisted per-agent completion stamp... and note the residual same-ms window in a comment") is
+ *   what this cascade does. That fallback IS implemented: `SquadManager.lastCompletedAt`/
+ *   `AttentionStore.completedAt` now key `completedAt` off a durable per-agent stamp rather than a
+ *   scan of the shared, capped transition ring (see that method's doc) — closing the confirmed,
+ *   observed "ring-eviction demotion" bug. The residual same-millisecond tie-direction question
+ *   above remains exactly that: residual, narrow, and unresolved by design in this pass.
  */
 export function computeLadderPriority(dto: LadderCandidate, signals: LadderSignals = {}): LadderPriority {
 	if (dto.status === "error" || dto.validation?.verdict === "veto" || dto.prState === "closed") return "error";

@@ -154,6 +154,13 @@ test("an explicit validatorOverride with a reason class bypasses the veto and re
 	expect(overrides.length).toBe(1);
 	expect(overrides[0].branch).toBe(branch);
 	expect(overrides[0].reasonClass).toBe("criteria-wrong");
+	// t3-face concern 06 (grok-4.5 cross-lineage review): `runValidatorGate` stamped
+	// `dto.validation.verdict = "veto"` BEFORE this override bypass ran, and nothing since re-scores
+	// the diff — the needs-you ladder's `error` rung (attention-ladder.ts) reads that verdict with no
+	// time bound, so without the fix this unit would report `error` FOREVER after a land that just
+	// succeeded. Driven through the REAL land() override path, not a hand-cleared fixture.
+	expect(mgr.agents.get("a1")?.dto.validation).toBeUndefined();
+	expect(mgr.agents.get("a1")?.dto.ladderPriority).not.toBe("error");
 });
 
 test("OMP_SQUAD_VALIDATOR=0 disables the gate entirely — a would-veto judge never blocks the land", async () => {

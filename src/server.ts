@@ -666,6 +666,26 @@ export class SquadServer {
 		return !!this.auth;
 	}
 
+	/** The stable per-actor identity every attention/ladder personalization route keys `viewerId` off
+	 *  (t3-face concern 06, codex/gpt-5.6 cross-lineage review). FILE mode always collapses to
+	 *  `undefined` — the single-implicit-viewer contract `attention.ts`'s module doc locks in (no
+	 *  stable per-actor identity exists there, so there is nothing to key on).
+	 *
+	 *  DB mode previously kept `session ? actor.id : undefined` — which meant a loopback bootstrap-
+	 *  admin request (no session, DB mode) ALWAYS read as `undefined`, the SAME "aggregate lastSeenAt"
+	 *  collapse file mode uses on purpose. In DB mode that collapse is wrong: `undefined` reads
+	 *  `unitVisitedAt`'s `lastSeenAt` aggregate — the max over EVERY real viewer's visit — so a signed-
+	 *  in tenant's own visit silently read back as "the admin has seen this too", and the two GET
+	 *  surfaces (bootstrap's raw `GET /api/agents` early-return vs. the session path's personalized
+	 *  read) disagreed about the same unit's state for the same admin. Fixed by keying DB-mode
+	 *  `viewerId` off `actor.id` UNCONDITIONALLY — a real session gets its durable `db:<userId>`, and a
+	 *  DB-mode bootstrap admin (no session) gets the stable synthetic `web:<role>` `actorForRole`
+	 *  already mints — a distinct-but-CONSISTENT identity across every bootstrap request, so its own
+	 *  repeat visits are remembered instead of colliding with (or borrowing) a real tenant's. */
+	private attentionViewerId(actor: Actor): string | undefined {
+		return this.dbMode ? actor.id : undefined;
+	}
+
 	/** Paths a presence/lease WRITE (I02) may target: registered projects + live agents' repo/worktree.
 	 *  The scope authority for the cockpit's presence-write — a client can't mint presence elsewhere. */
 	private knownWorkspaces(manager: SquadManager): { projects: string[]; agentPaths: string[] } {
@@ -1600,7 +1620,22 @@ export class SquadServer {
 		// If a root factory also exists, include it rather than making a zero-agent root mask live tenant units.
 		const bootstrapAdmin = !!this.registry && session === null && role === "admin";
 		if (bootstrapAdmin && this.registry && req.method === "GET" && url.pathname === "/api/agents") {
-			return Response.json([...(this.singleManager?.list() ?? []), ...this.registry.liveAgents()]);
+			// Same personalization as the session path below (t3-face concern 06, codex/gpt-5.6
+			// cross-lineage review) — this used to short-circuit with the raw viewer-agnostic
+			// `dto.ladderPriority` hint (`syncLadder`'s shared-roster default), which disagreed with
+			// `GET /api/attention/ladder`'s `ladderPriorityFor`-personalized read for the SAME
+			// bootstrap-admin identity. `viewerId` mirrors `attentionViewerId` below (DB mode ⇒ the
+			// stable synthetic `web:<role>` id `actorForRole` mints) — `session`/`actor` aren't resolved
+			// yet at this point in the handler, so built inline from the same `role` already in scope.
+			// Personalizing per-manager (not a single shared manager) because the aggregated roster below
+			// spans every live org — `ladderPriorityFor`'s `completedAt`/`unitVisitedAt` reads are
+			// per-manager state, so a DTO must be scored by the SAME manager that produced it.
+			// `observabilityManagers(true, undefined)` is the SAME (singleManager ∪ every live org
+			// manager) set `GET /api/agents`'s roster below is built from — reused rather than
+			// re-derived, so the two can never silently diverge on which managers count as "live".
+			const bootstrapViewerId = this.dbMode ? actorForRole(role).id : undefined;
+			const roster = this.observabilityManagers(true, undefined).flatMap((m) => m.list().map((dto) => ({ ...dto, ladderPriority: m.ladderPriorityFor(dto, bootstrapViewerId) })));
+			return Response.json(roster);
 		}
 		const orgId = this.registry
 			? bootstrapAdmin && this.singleManager
@@ -1790,9 +1825,10 @@ export class SquadServer {
 		// (`syncLadder`), but this response overlays the REQUESTING actor's own personalized value on a
 		// shallow copy — `ladderPriorityFor` never mutates the shared roster object (see
 		// attention-ladder.ts's module doc for why that would leak between concurrently-polling viewers).
-		// `viewerId` is `session ? actor.id : undefined`, the same idiom every other attention route uses.
+		// `viewerId` is `this.attentionViewerId(actor)` — see its doc for why a DB-mode bootstrap admin
+		// (no session) still needs a stable id here, not `undefined`.
 		if (url.pathname === "/api/agents" && req.method === "GET") {
-			const viewerId = session ? actor.id : undefined;
+			const viewerId = this.attentionViewerId(actor);
 			return Response.json(manager.list().map((dto) => ({ ...dto, ladderPriority: manager.ladderPriorityFor(dto, viewerId) })));
 		}
 		// R5: answers are a deliverable, not a transcript. They outlive the roster row that produced them,
@@ -1855,7 +1891,7 @@ export class SquadServer {
 			// derives it (fabric.ts's `actorVisibleRepoSet`) — an actor with no derivable repos (no live
 			// agents, no persisted features) rejects EVERY repo, never falls open to "unrestricted".
 			if (!manager.attentionVisibleRepos(actor).has(normalizeRepoPath(body.repo))) return new Response("unknown repo", { status: 400 });
-			const viewerId = session ? actor.id : undefined;
+			const viewerId = this.attentionViewerId(actor);
 			const result = manager.recordAttention({ kind: body.kind, repo: body.repo, file: body.file, agentId: body.agentId, answerId: body.answerId, prNumber: body.prNumber, viewerId }, actor.id);
 			if (!result.ok && result.reason === "rate-limited") return new Response("rate limited", { status: 429 });
 			return Response.json({ ok: result.ok });
@@ -1869,7 +1905,7 @@ export class SquadServer {
 			// own visible set just because the query string named one.
 			const repos = repoParam ? (visible.has(normalizeRepoPath(repoParam)) ? [repoParam] : []) : [...visible];
 			const events = manager.attentionEvents(repos);
-			const redacted = redactAttentionForActor(events, { viewerId: session ? actor.id : undefined, isAdmin: roleAtLeast(role, "admin") });
+			const redacted = redactAttentionForActor(events, { viewerId: this.attentionViewerId(actor), isAdmin: roleAtLeast(role, "admin") });
 			return Response.json({ events: redacted });
 		}
 		if (url.pathname === "/api/attention/seen" && req.method === "GET") {
@@ -1878,7 +1914,7 @@ export class SquadServer {
 			const repoParam = url.searchParams.get("repo");
 			const repos = repoParam ? (visible.has(normalizeRepoPath(repoParam)) ? [repoParam] : []) : [...visible];
 			const seen = manager.attentionSeen(repos);
-			const redacted = redactSeenMapForActor(seen, { viewerId: session ? actor.id : undefined, isAdmin: roleAtLeast(role, "admin") });
+			const redacted = redactSeenMapForActor(seen, { viewerId: this.attentionViewerId(actor), isAdmin: roleAtLeast(role, "admin") });
 			return Response.json({ seen: redacted });
 		}
 		// Needs-you ladder roll-up (t3-face concern 06, plans/daily-driver/01-charter-needs-you-ladder.md):
@@ -1887,7 +1923,7 @@ export class SquadServer {
 		// GET /api/agents above (same `ladderPriorityFor` call, same `viewerId` derivation) — a foreign/
 		// unresolvable identity never sees anyone else's `completed-unseen` state resolve differently.
 		if (url.pathname === "/api/attention/ladder" && req.method === "GET") {
-			const viewerId = session ? actor.id : undefined;
+			const viewerId = this.attentionViewerId(actor);
 			const units = manager.list().map((dto) => ({ id: dto.id, repo: dto.repo, priority: manager.ladderPriorityFor(dto, viewerId) }));
 			const byRepo = new Map<string, LadderPriority[]>();
 			for (const u of units) byRepo.set(u.repo, [...(byRepo.get(u.repo) ?? []), u.priority]);
@@ -1907,7 +1943,7 @@ export class SquadServer {
 			// visible repo set (or that names no live agent at all) is rejected, never silently a no-op
 			// 200 that would let a caller probe for the existence of a foreign unit.
 			if (!dto || !manager.attentionVisibleRepos(actor).has(normalizeRepoPath(dto.repo))) return new Response("no such agent", { status: 404 });
-			const viewerId = session ? actor.id : undefined;
+			const viewerId = this.attentionViewerId(actor);
 			const result = manager.markUnitVisited(dto.id, viewerId);
 			return Response.json({ ok: result.ok });
 		}
@@ -2756,7 +2792,7 @@ export class SquadServer {
 			// Same per-viewer personalization as GET /api/agents above — never skip it on the single-agent
 			// read, or a client polling one unit's row would see a stale/wrong ladder rung relative to the
 			// list view.
-			if (dto) return Response.json({ ...dto, ladderPriority: manager.ladderPriorityFor(dto, session ? actor.id : undefined) });
+			if (dto) return Response.json({ ...dto, ladderPriority: manager.ladderPriorityFor(dto, this.attentionViewerId(actor)) });
 			const ph = manager.deadPlaceholder(id);
 			if (ph) return Response.json({ id: ph.id, name: ph.name, repo: ph.repo, harness: ph.harness, at: ph.at, dead: true, deadReason: ph.deadReason, transcriptEntries: ph.transcript.length });
 			return new Response("no such agent", { status: 404 });

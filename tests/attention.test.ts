@@ -324,6 +324,101 @@ describe("markUnitVisited/unitVisitedAt: t3-face concern 06's per-unit last-visi
 			else process.env.GLANCE_ATTENTION = original;
 		}
 	});
+
+	// t3-face concern 06 MINOR finding (grok-4.5/codex cross-lineage review): the prior loader cast
+	// the raw parsed object straight to `UnitVisitMap` with no shape narrowing at all. A malformed
+	// stored value (valid JSON syntax, wrong shape) is a DIFFERENT failure mode than the "corrupt
+	// JSON.parse" case above — it must be caught too, since a garbage `lastSeenAt` compares as
+	// `NaN < completedAt` ⇒ `false` ⇒ the cascade read it as SEEN (`idle`), not unseen. This is the
+	// exact fail-open codex confirmed against the live code before the fix.
+	test("a corrupt (non-numeric) unit-visited entry reads as unseen (fail closed), not seen", () => {
+		const d = dir();
+		writeFileSync(path.join(d, "unit-visited.json"), JSON.stringify({ unit1: { lastSeenAt: "nope" } }));
+		const store = new AttentionStore({ stateDir: d });
+		expect(store.unitVisitedAt("unit1", undefined)).toBeUndefined();
+		expect(store.unitVisitEntry("unit1")).toBeUndefined();
+	});
+
+	test("a corrupt per-viewer unit-visited stamp is dropped, but a valid sibling entry survives", () => {
+		const d = dir();
+		writeFileSync(path.join(d, "unit-visited.json"), JSON.stringify({ unit1: { lastSeenAt: 100, byViewer: { "db:alice": 100, "db:bob": "nope" } } }));
+		const store = new AttentionStore({ stateDir: d });
+		expect(store.unitVisitedAt("unit1", "db:alice")).toBe(100);
+		expect(store.unitVisitedAt("unit1", "db:bob")).toBeUndefined();
+	});
+
+	test("a top-level JSON ARRAY (not an object) loads as empty, never leaks numeric indices as unit ids", () => {
+		const d = dir();
+		writeFileSync(path.join(d, "unit-visited.json"), JSON.stringify([{ lastSeenAt: 100 }]));
+		const store = new AttentionStore({ stateDir: d });
+		expect(store.unitVisitedAt("0", undefined)).toBeUndefined();
+	});
+
+	test("a wildly-future stamp (past the clock-skew bound) is dropped as corrupt, not trusted as 'always after'", () => {
+		const d = dir();
+		writeFileSync(path.join(d, "unit-visited.json"), JSON.stringify({ unit1: { lastSeenAt: 99_999_999_999_999 } }));
+		const store = new AttentionStore({ stateDir: d });
+		expect(store.unitVisitedAt("unit1", undefined)).toBeUndefined();
+	});
+});
+
+describe("recordCompletion/completedAt: SquadManager's durable per-agent completion stamp (t3-face concern 06)", () => {
+	test("absent until recorded — never coerced into a completion out of nothing", () => {
+		const store = new AttentionStore({ stateDir: dir() });
+		expect(store.completedAt("unit1")).toBeUndefined();
+	});
+
+	test("records and reads back the stamp", () => {
+		const store = new AttentionStore({ stateDir: dir() });
+		store.recordCompletion("unit1", 1_000);
+		expect(store.completedAt("unit1")).toBe(1_000);
+	});
+
+	test("max-merge, never backward — an out-of-order re-record must not move the stamp earlier", () => {
+		const store = new AttentionStore({ stateDir: dir() });
+		store.recordCompletion("unit1", 5_000);
+		store.recordCompletion("unit1", 1_000);
+		expect(store.completedAt("unit1")).toBe(5_000);
+	});
+
+	test("survives a restart via its own durable unit-completed.json file — immune to the transitionLog ring's cap", () => {
+		const d = dir();
+		const store = new AttentionStore({ stateDir: d });
+		store.recordCompletion("unit1", 42);
+		store.stop(); // forces the debounced write out synchronously
+
+		const reloaded = new AttentionStore({ stateDir: d });
+		expect(reloaded.completedAt("unit1")).toBe(42);
+	});
+
+	test("a corrupt unit-completed.json entry is dropped, fail closed", () => {
+		const d = dir();
+		writeFileSync(path.join(d, "unit-completed.json"), JSON.stringify({ unit1: "nope" }));
+		const store = new AttentionStore({ stateDir: d });
+		expect(store.completedAt("unit1")).toBeUndefined();
+	});
+});
+
+describe("stop() closes the store (t3-face concern 06 addition D): no write scheduled after can resurrect a timer", () => {
+	test("a markUnitVisited call AFTER stop() never re-arms a write, and never corrupts the flushed file", () => {
+		const d = dir();
+		const store = new AttentionStore({ stateDir: d, now: () => 1_000 });
+		store.markUnitVisited("unit1", "db:alice");
+		store.stop(); // flushes, then closes
+
+		// Simulates the manager-eviction race: a request lands in the gap between stop() and this
+		// instance actually being discarded from the registry.
+		store.markUnitVisited("unit1", "db:bob");
+		// In-memory, the closed instance still reflects the late write (harmless — it's about to be
+		// discarded) — but nothing was scheduled to persist it.
+		expect(store.unitVisitedAt("unit1", "db:bob")).toBe(1_000);
+
+		// A fresh instance for the same stateDir (standing in for the replacement manager) must see
+		// exactly what was flushed at stop() — never a write the closed instance scheduled afterward.
+		const reloaded = new AttentionStore({ stateDir: d });
+		expect(reloaded.unitVisitedAt("unit1", "db:bob")).toBeUndefined();
+		expect(reloaded.unitVisitedAt("unit1", "db:alice")).toBe(1_000);
+	});
 });
 
 describe("stop()/flush()", () => {

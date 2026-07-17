@@ -1153,20 +1153,35 @@ export class SquadManager extends EventEmitter {
 		dto.ladderPriority = computeLadderPriority(dto, { completedAt: this.lastCompletedAt(dto.id) });
 	}
 
-	/** Epoch-ms this unit last transitioned INTO `idle` (attention-ladder.ts's `completedAt` input),
-	 *  read from the durable transition-log ring — survives a restart because `TransitionLog`'s ring
-	 *  (a `JsonlLog`) is rehydrated from transitions.jsonl at construction, unlike `dto.receipt`/
-	 *  `dto.lastActivity`, which are live/run-scoped and reset on restart. Bounded by the ring's cap
-	 *  (500 entries across EVERY agent) like every other `transitionLog.recent()` reader — an
-	 *  extremely busy fleet could in principle evict an idle agent's own last transition before this
-	 *  reads it; accepted, the same bound `transitionHistory`'s non-`full` path already lives with.
-	 *  `undefined` ⇒ this unit has never transitioned into idle (a fresh/never-run agent). */
+	/** Epoch-ms this unit last completed a genuine turn (attention-ladder.ts's `completedAt` input) —
+	 *  reads `AttentionStore.completedAt`'s own durable per-agent stamp (`unit-completed.json`),
+	 *  stamped by `recordTransition` (below) the moment a transition qualifies as a real completion
+	 *  (`isGenuineCompletion`). `undefined` ⇒ this unit has never completed a turn (a fresh/never-run
+	 *  agent).
+	 *
+	 *  Grok-4.5 cross-lineage review (t3-face concern 06) found the PRIOR implementation — a scan of
+	 *  `this.transitionLog.recent()` for `to === "idle"` — over-fired on three fronts: `connect-ok`
+	 *  fires `"idle"` on every spawn/restart connect (always FROM `"starting"`, never a completed
+	 *  turn), a same-state `idle → idle` bookkeeping entry (`adopted`, an orphan-close derive landing
+	 *  back on its own status) is not a NEW completion, and a `denied:true` entry never actually
+	 *  changed `dto.status` at all — so a unit that had only ever CONNECTED, or merely re-recorded its
+	 *  existing state, read `completed-unseen` as if it had genuinely finished work. That scan was
+	 *  also bounded by the ring's 500-entries-TOTAL-across-every-agent cap, so a busy fleet could evict
+	 *  a quiet agent's own last completion before it "aged out" — silently un-demoting a real
+	 *  `completed-unseen` unit back to `idle` (the "ring-eviction demotion" the same review named).
+	 *  Both are fixed at the SOURCE now: `recordTransition` stamps the durable map only when
+	 *  `isGenuineCompletion` holds, so this read is O(1) and immune to the ring's cap. */
 	private lastCompletedAt(agentId: string): number | undefined {
-		let at: number | undefined;
-		for (const t of this.transitionLog.recent()) {
-			if (t.agentId === agentId && t.to === "idle") at = at === undefined ? t.at : Math.max(at, t.at);
-		}
-		return at;
+		return this.attentionStore.completedAt(agentId);
+	}
+
+	/** The exact filter a transition needs to be a GENUINE turn completion — see `lastCompletedAt`'s
+	 *  doc above for the full reasoning. Only ever consulted from `recordTransition`, which by
+	 *  construction only ever sees APPLIED transitions (a denied attempt is recorded by
+	 *  `recordDenied`, a wholly separate call this method never sees) — so no explicit `denied` check
+	 *  is needed here. */
+	private isGenuineCompletion(entry: TransitionEntry): boolean {
+		return entry.to === "idle" && entry.from !== entry.to && (entry.from === "working" || entry.from === "input") && entry.reason !== "connect-ok";
 	}
 
 	/** The REQUESTING viewer's personalized ladder priority for one unit — the only place a real
@@ -3798,6 +3813,15 @@ export class SquadManager extends EventEmitter {
 		}
 		if (result.ok) {
 			rec.dto.landReady = false; // successful land attempt ⇒ clear the confirm-mode staged flag
+			// t3-face concern 06 (grok-4.5 cross-lineage review): `runValidatorGate` stamps `rec.dto.validation`
+			// with a "veto" verdict BEFORE the override-bypass check above ever runs — a successful
+			// override-land (validatorOverride + reasonClass) bypasses the veto's REFUSAL but nothing
+			// afterward re-scores the diff, so the DTO would otherwise keep reporting "veto" forever after
+			// a land that actually succeeded. The needs-you ladder's `error` rung (attention-ladder.ts)
+			// reads `validation?.verdict === "veto"` with no time bound, so that stale verdict would pin a
+			// resolved unit at `error` permanently. The land just proved the prior veto no longer describes
+			// reality — drop it, the same way `landReady` just above is dropped on success.
+			if (rec.dto.validation?.verdict === "veto") rec.dto.validation = undefined;
 			this.emitAgent(rec);
 			if (result.merged) {
 				// PR mode already wrote its own (richer, method/mergeCommit-aware) DoneProof inside
@@ -8282,6 +8306,19 @@ export class SquadManager extends EventEmitter {
 
 		if (view.state === "CLOSED" && entry.state !== "closed") {
 			updatePendingPr(this.stateDir, entry.branch, { state: "closed" });
+			// t3-face concern 06 (grok-4.5 cross-lineage review): this used to update ONLY the PendingPr
+			// ledger entry above, never the live agent's own `dto.prState` — the needs-you ladder's
+			// `error` rung (attention-ladder.ts) reads `dto.prState === "closed"`, so a human closing a
+			// PR without merging showed green `plan-ready`/`idle`, not the land-blocked `error` an
+			// operator needs to see. Mirrors the merged-out-of-band arm above: resolve the live record by
+			// branch and stamp+emit it — branch/landReady are DELIBERATELY left intact (the log line
+			// below, unchanged): a re-Land should still work and open a fresh PR, only `prState` itself
+			// needs to reflect that THIS PR is dead.
+			const rec = this.agentByBranch(entry.branch);
+			if (rec) {
+				rec.dto.prState = "closed";
+				this.emitAgent(rec);
+			}
 			this.log("warn", `pr-reconcile: PR #${entry.prNumber} for ${entry.branch} closed without merging — branch and landReady left intact; a re-Land will open a fresh PR`);
 		}
 	}
@@ -9855,6 +9892,11 @@ export class SquadManager extends EventEmitter {
 	private recordTransition(rec: AgentRecord, from: AgentStatus, to: AgentStatus, reason: TransitionReason, cause?: TransitionCause): void {
 		const entry: TransitionEntry = { agentId: rec.dto.id, from, to, reason, at: Date.now(), cause, seq: randomUUID() };
 		this.transitionLog.append(entry);
+		// t3-face concern 06 (grok-4.5 cross-lineage review): the needs-you ladder's durable completion
+		// stamp, written HERE — the one chokepoint every APPLIED transition passes through — rather than
+		// derived later by re-scanning this same ring (`lastCompletedAt`'s doc explains why that scan was
+		// wrong and why this is the fix).
+		if (this.isGenuineCompletion(entry)) this.attentionStore.recordCompletion(rec.dto.id, entry.at);
 		this.recordErrorTransition(rec, entry); // finding 9's per-agent (not fleet-shared-ring) error tally
 		this.pushTransitionEvent(rec, entry); // concern 03 wires DTO tail + rollup off this same call
 		this.emit("event", { type: "transition", entry } satisfies SquadEvent);
