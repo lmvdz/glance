@@ -67,20 +67,28 @@ Rung map: R1 = batches 1–2 (coherent skin, whole app). R2 = batches 3–4 (spi
 
 ## Decisions so far
 
+- [06 daemon-needs-you-ladder](06-daemon-needs-you-ladder.md) — DONE, omp-squad draft PR #199. One server-computed ladder (charter H executed); cross-lineage reviewed (grok+codex) — both found real synthetic-fixture-hidden defects, all fixed with real-wiring tests. **Batch 1 complete.** Deferred lifecycle-hygiene follow-up to file in Plane (rate-limited).
 - [03 fleet-token-rekey](03-fleet-token-rekey.md) — DONE, glance-desktop draft PR #30 (STACKED on #29). Fleet fully on-token; grep gate clean; three taste calls flagged for concern 13's live check.
 - [01 skin-substrate](01-skin-substrate.md) + [02 theme-engine-status-tokens](02-theme-engine-status-tokens.md) — DONE, glance-desktop draft PR #29: full t3 skin as one additive file + `@theme` registration in globals; palette fidelity verified; 515/515 green; +88 bytes. Live visual acceptance owed to concern 13.
 - [04 transcript-cursor-integrity](04-transcript-cursor-integrity.md) — DONE, glance-desktop draft PR #28: `runningFloor` cursor fixes the live streaming-freeze; daemon seq-reseed bug filed OMPSQ-449; daemonTransport.ts identical exposure deferred (below).
 - **2026-07-17 (Lars)**: Charter H expansion APPROVED — this program is the committed cockpit consumer. Concern 06 executes daemon-side; cockpit/webapp/push all render one attention truth. Concern 06's `MODE: hitl` authorization is hereby satisfied.
 - **2026-07-17 (Lars)**: Start NOW, in parallel with daily-driver-w15 + land-assessment (disjoint repos/TOUCHES). The adoption-gate pause rule (Notes) still binds: a KILL verdict pauses this program at end-of-batch.
 
-## PR stack (glance-desktop, lmvdz/glance-desktop)
+## PR stack
 
+glance-desktop (lmvdz/glance-desktop):
 - #28 `t3face/04-transcript-cursor` → main (independent)
 - #29 `t3face/01-02-skin-substrate` → main (foundation)
   - #30 `t3face/03-fleet-rekey` → #29 (stacked; retargets to main when #29 merges)
-- omp-squad: `t3face/06-daemon-ladder` (PR pending post-fix) → main; daemon bug OMPSQ-449
 
-Merge order when Lars is ready: #29 first (unblocks #30's retarget), #28 and 06 independent.
+omp-squad (lmvdz/glance):
+- #199 `t3face/06-daemon-ladder` → main (cross-lineage reviewed+fixed); daemon bug OMPSQ-449
+
+Merge order when Lars is ready: glance-desktop #29 first (unblocks #30's retarget); #28, #199 independent. All draft; Lars merges.
+
+## Follow-ups to file in Plane (rate-limited 2026-07-17)
+
+- Attention-store lifecycle hygiene (medium): broader manager-eviction/get lost-update race + unit-visit pruning + same-ms tie residual. Full repro in PR #199 body.
 
 ## Notes
 

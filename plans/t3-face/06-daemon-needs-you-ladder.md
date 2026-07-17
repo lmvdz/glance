@@ -1,6 +1,6 @@
 # Daemon needs-you ladder — one server-computed priority per unit
 
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -34,3 +34,11 @@ glance-desktop concern 07 consumes this endpoint. The webapp roster and push lan
 - Two clients (cockpit + a second poller) agree on seen-state after one marks a unit seen.
 - Existing daemon suite green; charter doc STATUS updated.
 - Cross-lineage review clean on the attention/API diff.
+
+## Resolution
+
+Shipped as omp-squad draft PR #199 (branch `t3face/06-daemon-ladder`). One server-computed LadderPriority per unit; fail-closed per-viewer seen-state; API (`GET /api/agents` overlay, `GET /api/attention/ladder` roll-ups, `POST /api/attention/ladder/seen`). Charter H execution ledger updated in-branch.
+
+Cross-lineage reviewed (grok-4.5 + codex/gpt-5.6 — both foreign lineages, trust path). They caught defects the original synthetic-fixture tests hid; all fixed on-branch: connect-ok/same-state/denied false completions (→ durable per-agent completion stamp), dead closed-PR error rung (reconcile now stamps prState), sticky veto (cleared on land), DB-mode bootstrap seen-collapse (viewerId off actor.id + stable web:<role>), fail-open visited loader (array/NaN hardening), eviction/write race narrow half (stop() closes store). New `attention-ladder-wiring.test.ts` drives the REAL manager; stash-verified all 14 assertions fail pre-fix. Full suite 3916/0-fail-attributable, tsc clean.
+
+Deferred follow-ups (in PR body; Plane filing pending rate-limit): broader manager-eviction/get lost-update race + unit-visit pruning (medium); same-millisecond visit/complete tie residual (monotonic generation counter is the larger robust fix). Daemon transcriptSeq reseed = OMPSQ-449.
