@@ -30,6 +30,12 @@ export interface FrictionCapture {
 	context?: string;
 	/** The agent whose chat/session the gripe was captured from, when there was one. */
 	agentId?: string;
+	/** Who's filing this gripe. Defaults to `"human"` — every existing capture surface (CLI, TUI,
+	 *  webapp composer, `here` /grr) omits this and gets the default. `"auto"` is for the daemon's OWN
+	 *  internal hook sites only (squad-manager.ts's boundary-sync/ACP-timeout/session-loss captures);
+	 *  `POST /api/friction`'s handler never reads a `source` off the client body, so this can never
+	 *  arrive as `"auto"` from outside. */
+	source?: "human" | "auto";
 }
 
 /** `<stateDir>/friction.jsonl` — mirrors automationPath()/receiptPath()'s state-dir convention.
@@ -61,18 +67,29 @@ export class FrictionLog {
 			gripe,
 			...(capture.context?.trim() ? { context: capture.context.trim() } : {}),
 			...(capture.agentId ? { agentId: capture.agentId } : {}),
+			// Only ever stamped for "auto" — a "human" (or absent) source is omitted from the written
+			// line entirely, same as every other optional field here; the read-side default (below)
+			// covers both this omission AND every pre-existing row that predates the field.
+			...(capture.source === "auto" ? { source: "auto" as const } : {}),
 		};
 		this.log.append(entry);
 		return entry;
 	}
 
+	/** A missing `source` reads as `"human"` — the migration default for every friction.jsonl row
+	 *  written before this field existed, and for every ordinary human capture surface today (none of
+	 *  which sets it). Applied on every read path (never rewrites the file). */
+	private static withSourceDefault(e: FrictionEntry): FrictionEntry {
+		return e.source === undefined ? { ...e, source: "human" } : e;
+	}
+
 	/** Ring tail, newest-LAST (JsonlLog convention) — callers reverse for newest-first display. */
 	recent(limit?: number): FrictionEntry[] {
-		return this.log.recent(limit);
+		return this.log.recent(limit).map(FrictionLog.withSourceDefault);
 	}
 
 	/** Full persisted history from disk — the weekly drain's read, not the API's. */
-	hydrateAll(): Promise<FrictionEntry[]> {
-		return this.log.hydrateAll();
+	async hydrateAll(): Promise<FrictionEntry[]> {
+		return (await this.log.hydrateAll()).map(FrictionLog.withSourceDefault);
 	}
 }

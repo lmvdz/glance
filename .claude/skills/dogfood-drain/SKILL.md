@@ -53,6 +53,16 @@ if not after wave 1, STOP and re-diagnose; contingent epics do not start."
   `<stateDir>/friction.jsonl` (plus its `.1` rotation sibling), stateDir per `src/state-dir.ts`
   resolution (env override → `~/.glance` → legacy `~/.omp/squad`). Keep entries with
   `ts` after the cutoff.
+- **Split by `source` before triaging** (plans/daily-driver-w15 concern 02): every entry is
+  `source:"human"` (typed by Lars/whoever's dogfooding — missing `source` on an old row reads the
+  same way, the field's read-side default) or `source:"auto"` (the daemon's own hook sites — held
+  boundary-syncs `context:"auto:boundary-sync-held"`, ACP prompt timeouts
+  `context:"auto:acp-timeout"`, session loss on restart `context:"auto:session-loss"`). Present
+  the two groups separately in the draft: auto rows corroborate or contradict what the human rows
+  say (e.g. a human gripe about "sync keeps getting stuck" backed by three auto
+  `boundary-sync-held` rows the same week is a stronger signal than either alone) but an auto row
+  is never itself counted as a human adoption/friction signal — it's the daemon reporting on
+  itself, not the operator reporting on the daemon.
 - Drop entries whose ids are already listed in `plans/daily-dogfood-engine/accepted-friction.md`
   — they were accepted in a previous drain and must not be re-triaged every week.
 - Counters: `glance doctor` (the "Is glance getting daily use?" section) or

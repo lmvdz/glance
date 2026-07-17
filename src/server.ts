@@ -1937,6 +1937,13 @@ export class SquadServer {
 			const b = decoded.success;
 			try {
 				return Response.json(
+					// Concern 02 (plans/daily-driver-w15): `source` is deliberately NEVER read off `b` here —
+					// `FrictionBodySchema` has no `source` field at all (an excess `source` key in the request
+					// body is stripped by `Schema.Struct` before `decoded.success` even exists), so a client
+					// cannot make this record "auto" no matter what it sends. `FrictionCapture.source` is left
+					// undefined, which `FrictionLog.record` treats as `"human"` — `"auto"` is stamped only by
+					// `SquadManager`'s own internal hook sites (boundary-sync/ACP-timeout/session-loss), which
+					// call `recordFriction` directly, never through this route.
 					manager.recordFriction({
 						gripe: b.gripe,
 						repo: typeof b.repo === "string" ? b.repo : "",
