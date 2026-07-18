@@ -127,7 +127,11 @@ export function bootstrapViewFromQuery(): void {
     // could force a sensitive first-paint screen. Now such values are stripped from the URL but
     // never written; only a live key or known alias seeds localStorage.
     if (isRecognizedView(raw)) {
-      const { view } = coerceView(raw);
+      // Trim before coercing: isRecognizedView() trims, so a whitespace-wrapped live key like
+      // " tasks " is accepted here — but coerceView()'s isAppView() check is exact and would miss
+      // the untrimmed value and fall back to 'fleet'. Pass the trimmed form so the recognized view
+      // is the one persisted.
+      const { view } = coerceView(raw.trim());
       localStorage.setItem(VIEW_STORAGE_KEY, view);
     }
     url.searchParams.delete('view');

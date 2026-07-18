@@ -117,6 +117,13 @@ describe("OMP_SQUAD_FRAME_ANCESTORS opt-in (D0 desktop-embed prerequisite)", () 
 		"http://user:pass@tauri.localhost",
 		// one junk token voids an otherwise-valid neighbor:
 		"tauri://localhost ftp://evil.com",
+		// tauri: is pinned to exactly tauri://localhost — any other custom-scheme host is rejected
+		// (webview-dependent interpretation; cross-lineage review):
+		"tauri://evil.com",
+		"tauri://0x7f000001",
+		"tauri://LocalHost",
+		"tauri://localhost:1420",
+		"tauri://localhost/",
 	])("rejected outright, falls back to default-deny: %s", (bad) => {
 		withEnv(bad, () => {
 			const h = securityHeaders();

@@ -150,6 +150,16 @@ describe('bootstrapViewFromQuery', () => {
     }
   });
 
+  test('a whitespace-wrapped live view persists the trimmed view, not the fleet fallback', () => {
+    const env = stubViewBrowserEnv('http://localhost/?view=%20tasks%20');
+    try {
+      bootstrapViewFromQuery();
+      expect(env.store.get(VIEW_STORAGE_KEY)).toBe('tasks');
+    } finally {
+      env.restore();
+    }
+  });
+
   test('a dead GRAPH-FOLD key still aliases through coerceView (e.g. heat -> omp-graph)', () => {
     const env = stubViewBrowserEnv('http://localhost/?view=heat');
     try {

@@ -489,16 +489,23 @@ function isPlausibleOrigin(token: string): boolean {
 		return false;
 	}
 	if (!ALLOWED_FRAME_ANCESTOR_SCHEMES.has(u.protocol)) return false;
+	// tauri: is a non-special (custom) scheme whose host is NOT canonicalized by the URL parser
+	// (case preserved, IPv4/hex forms left as-is) and whose interpretation is webview-dependent.
+	// The only legitimate custom-scheme parent is the desktop shell's `tauri://localhost`
+	// (macOS/Linux WebKit); pin it EXACTLY rather than accept arbitrary `tauri://<host>` — there's
+	// no current need for another, and both cross-lineage reviewers flagged the open host. Windows'
+	// `http://tauri.localhost` is an http origin and takes the normal path below.
+	if (u.protocol === "tauri:") return token === "tauri://localhost";
 	if (u.username !== "" || u.password !== "") return false;
 	if (u.search !== "" || u.hash !== "") return false;
 	if (u.pathname !== "" && u.pathname !== "/") return false;
 	if (!ORIGIN_HOSTNAME_RE.test(u.hostname)) return false;
+	if (u.hostname.length > 253) return false; // full FQDN length cap (the label regex bounds labels, not the whole name)
 	if (u.port !== "") {
 		const p = Number(u.port);
 		if (!Number.isInteger(p) || p < 1 || p > 65535) return false;
 	}
-	const canonical = u.protocol === "tauri:" ? `tauri://${u.host}` : u.origin;
-	return canonical === token;
+	return u.origin === token; // canonical round-trip: rejects trailing slash/dot, default-port redundancy, IPv4 games, uppercase
 }
 
 let frameAncestorsWarned = false;
