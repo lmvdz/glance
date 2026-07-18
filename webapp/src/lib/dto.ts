@@ -199,6 +199,78 @@ export interface DoneProofDTO {
   prUrl?: string;
 }
 
+// -----------------------------------------------------------------------------------------------
+// Plan vs reality (OMPSQ-448 comprehension) — mirrors `src/plan-reality.ts`'s `PlanRealityDTO`
+// exactly (field names verbatim; this is a HAND-MAINTAINED mirror, same discipline as
+// `ValidationRecordDTO` above). Backend endpoint: `GET /api/features/:id/reality?repo=<repo>` →
+// `{ reality: PlanRealityDTO }` (404 when the feature has no plan-reality data). One feature-level
+// proof (`PlanRealityProofDTO`) is reflected onto each done concern via `realityState` — there is
+// no per-concern proof artifact.
+// -----------------------------------------------------------------------------------------------
+
+/** Whether a "done" concern's completion is actually backed by a passing, still-reachable proof. */
+export type ConcernRealityState = "open" | "done-proven" | "done-stale" | "done-unproven";
+
+export interface PlanRealityConcernDTO {
+  file: string;
+  path: string;
+  title: string;
+  status: string;
+  priority?: string;
+  complexity?: string;
+  planeId?: string;
+  open: boolean;
+  touches: string[];
+  prerequisites: string[];
+  blocked: boolean;
+  planeState?: string;
+  realityState: ConcernRealityState;
+}
+
+export interface PlanRealityProofDTO {
+  present: boolean;
+  verified?: "green" | "red-baseline" | "unverified";
+  mode?: "local" | "pr";
+  commit?: string;
+  mergeCommit?: string;
+  baseRef?: string;
+  prNumber?: number;
+  prUrl?: string;
+  provenAt?: number;
+  reachable: boolean | null;
+  reachableDetail: string;
+}
+
+export interface PlanRealityRollupDTO {
+  totalConcerns: number;
+  done: number;
+  open: number;
+  blocked: number;
+  doneProven: number;
+  doneStale: number;
+  doneUnproven: number;
+  proofPresent: boolean;
+  proofReachable: boolean | null;
+  scopeDrift: {
+    plannedTouches: number;
+    actualChangedFiles: number | null;
+    plannedNotTouched: string[];
+    touchedNotPlanned: string[];
+  };
+}
+
+export interface PlanRealityDTO {
+  featureId: string;
+  title: string;
+  repo: string;
+  planDir?: string;
+  concerns: PlanRealityConcernDTO[];
+  proof: PlanRealityProofDTO;
+  rollup: PlanRealityRollupDTO;
+  actualChangedFiles: string[] | null;
+  generatedAt: number;
+}
+
 export interface PlanAnnotationTargetDTO {
   planPath: string;
   lineStart?: number;

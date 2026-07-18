@@ -94,6 +94,7 @@ import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, wit
 // under the same bare name would read as if that field and this function were the same thing.
 import { aheadOfBase as computeAheadOfBase, aheadUnknown, resolveLandMode } from "./land-mode.ts";
 import { getDoneProofByBranch, getDoneProofByIssue, hasProof, isAncestor, proofCoversTip, recordDoneProof, type DoneProof } from "./done-proof.ts";
+import { assemblePlanReality, type PlanRealityDTO } from "./plan-reality.ts";
 import { assertMerged, deletePendingPr, ensurePr, isFullyConfirmedPendingPr, landAgentPr, listPendingPrs, mergeMethod, type MergeMethod, type PendingPr, updatePendingPr } from "./land-pr.ts";
 import { ghJson } from "./gh.ts";
 import { repoIdentity } from "./repo-identity.ts";
@@ -9527,6 +9528,72 @@ export class SquadManager extends EventEmitter {
 			if (!wt.branch) continue;
 			const proof = getDoneProofByBranch(this.stateDir, wt.branch);
 			if (proof) return proof;
+		}
+		return undefined;
+	}
+
+	/**
+	 * Plan-vs-reality (OMPSQ-448): assemble what was PLANNED for a `plans/<name>` feature against what
+	 * actually got IMPLEMENTED, tied to the PROOF that verifies it. Reuses the existing concern parser,
+	 * the DoneProof ledger, and `isAncestor` for live stale-proof detection; the pure join lives in
+	 * plan-reality.ts. Returns undefined for an unknown feature.
+	 */
+	async planReality(featureId: string, repo?: string): Promise<PlanRealityDTO | undefined> {
+		const feature = (await this.features(repo)).find((f) => f.id === featureId);
+		if (!feature) return undefined;
+
+		const concerns = feature.planDir ? await parsePlanConcerns(feature.repo, feature.planDir).catch(() => []) : [];
+		const proof = await this.doneProofForFeature(featureId, repo);
+
+		let proofReachable: boolean | null = null;
+		let reachableDetail: string | undefined;
+		let actualChangedFiles: string[] | null = null;
+		if (proof) {
+			const commit = proof.mergeCommit ?? proof.commit;
+			const defaultBranch = await this.resolveDefaultBranchRef(feature.repo);
+			if (commit && defaultBranch) {
+				proofReachable = await isAncestor(commit, defaultBranch, feature.repo);
+				reachableDetail = proofReachable ? `on ${defaultBranch}` : `stale — no longer an ancestor of ${defaultBranch}`;
+				// The landing's REAL diff — actual changed files for the scope-drift comparison.
+				const base = proof.baseRef && proof.baseRef !== "HEAD" ? proof.baseRef : `${commit}~1`;
+				const diff = await hardenedGit(["diff", "--name-only", `${base}..${commit}`], { cwd: feature.repo }).catch(() => ({ code: 1, stdout: "", stderr: "" }) as { code: number; stdout: string; stderr: string });
+				if (diff.code === 0) actualChangedFiles = diff.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+			} else if (commit) {
+				reachableDetail = "reachability unknown — could not resolve the default branch";
+			}
+		}
+
+		// Live Plane state per concern (best-effort; absent when Plane is unconfigured/unreachable).
+		const planeStates: Record<string, string> = {};
+		try {
+			const { tickets } = await this.featurePlaneTickets(featureId);
+			for (const t of tickets ?? []) if (t.identifier && t.status) planeStates[t.identifier] = t.status;
+		} catch {
+			/* Plane is optional — a plan with no Plane links still assembles fine. */
+		}
+
+		return assemblePlanReality({
+			feature: { id: feature.id, title: feature.title, repo: feature.repo, planDir: feature.planDir },
+			concerns,
+			proof,
+			proofReachable,
+			reachableDetail,
+			actualChangedFiles,
+			planeStates,
+			now: Date.now(),
+		});
+	}
+
+	/** The default-branch ref to test reachability against — origin/HEAD's target, else origin/main, else main. */
+	private async resolveDefaultBranchRef(repo: string): Promise<string | undefined> {
+		const sym = await hardenedGit(["symbolic-ref", "refs/remotes/origin/HEAD"], { cwd: repo }).catch(() => ({ code: 1, stdout: "", stderr: "" }) as { code: number; stdout: string; stderr: string });
+		if (sym.code === 0) {
+			const remoteRef = sym.stdout.trim().replace(/^refs\/remotes\//, "");
+			if (remoteRef && remoteRef !== sym.stdout.trim()) return remoteRef;
+		}
+		for (const candidate of ["origin/main", "origin/master", "main", "master"]) {
+			const check = await hardenedGit(["rev-parse", "--verify", "--quiet", `${candidate}^{commit}`], { cwd: repo }).catch(() => ({ code: 1, stdout: "", stderr: "" }) as { code: number; stdout: string; stderr: string });
+			if (check.code === 0) return candidate;
 		}
 		return undefined;
 	}

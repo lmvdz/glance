@@ -37,3 +37,7 @@ test('org and intervene and review each get a short, non-empty line', () => {
     expect(railFooterContext(view, zero).length).toBeGreaterThan(0);
   }
 });
+
+test('plan-reality (OMPSQ-448) gets a fixed one-liner describing what lives there', () => {
+  expect(railFooterContext('plan-reality', zero)).toBe('What each plan claims, and whether it is proven');
+});
