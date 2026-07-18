@@ -1,6 +1,6 @@
 # Thread spine — the always-visible unit/session sidebar
 
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: glance-desktop
 COMPLEXITY: architectural
@@ -35,3 +35,9 @@ None (renders existing daemon endpoints).
 - Prewarmed unit switch < 100 ms to painted transcript (video capture, concern 13).
 - `scripts/upstream-drift.sh` shows only registration-line edits to the 3 seam files.
 - `pnpm lint && check-types && vitest run && build` green.
+
+## Resolution
+
+Shipped as glance-desktop draft PR #33 (branch `t3face/05-thread-spine`, off merged main). FleetLayout (sidebar + adjacent detail, siblings — list never unmounts on selection); ThreadSpine with project→daemon groups, roll-up crossfade headers, attention pills (v1 = existing client state from fleetRoster; 07 swaps to daemon ladder), prewarm-seeded transcript store. Absorbed+deleted RosterView + AdoptableSessions. **Zero seam-file edits** (FleetPane was the only RosterView call site) — no upstream conflict added. On-token (grep zero), 538 tests, lint/types/build green.
+
+**NOT MERGED** — taste centerpiece; live render (does it feel like t3code, <100ms prewarmed switch, WebKitGTK) is Lars's "yes THIS" gate + concern 13. Render locally: `cd` the worktree, `pnpm tauri dev` (WSLg window). Spec corrections found: attention source is fleetRoster (not fleetAttention); the 3 declared seam files weren't needed.
