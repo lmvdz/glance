@@ -1,5 +1,9 @@
 # AGENTS.md — Win Without Being Captured
 
+## Direction (read first)
+Product direction, the human contract, and the sequencing law live in [DIRECTION.md](DIRECTION.md).
+Read it before choosing priorities; when local signals conflict with it, DIRECTION.md wins.
+
 ## Doctrine
 Distilled from *The Art of War*, *The Prince*, *On War*, *The Book of Five Rings*, *The 33 Strategies of War*, *The 48 Laws of Power*, and *Mastery*:
 
