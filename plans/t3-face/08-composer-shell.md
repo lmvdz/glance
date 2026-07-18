@@ -1,6 +1,6 @@
 # Composer shell — t3 glass geometry + drafts that survive
 
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: glance-desktop
 COMPLEXITY: architectural
@@ -31,3 +31,7 @@ None.
 - Both composers render identical glass geometry in light/dark; send↔stop flip works; chips render in the tray.
 - AI composer voice/mentions/slash/attachments still function (no capability regression).
 - Taste-lane review; `pnpm lint && check-types && vitest run && build` green.
+
+## Resolution
+
+Shipped as glance-desktop draft PR #34 (off main; disjoint from #33 spine + #09 timeline). New `components/composer/ComposerShell.tsx` (glass geometry, chip tray, send↔stop) adopted by both the AI chat composer and the fleet steer composer; wires up the composer-glass CSS R1 shipped-but-unused. Law-5 fix: steer text → per-unit persisted `fleetSteerDraftStore`, survives IntervenePane unmount. Proven with a real RTL unmount→remount test + a regression-proof test of the old useState shape (added RTL/jsdom infra). No capability regression (voice/mentions/slash/attachments). 536 tests, lint/types/build green, on-token. Left ConversationView/other panes untouched → clean 3-way merge.
