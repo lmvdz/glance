@@ -16,6 +16,7 @@ import * as path from "node:path";
 import type { AgentDriver } from "../agent-driver.ts";
 import { envBool } from "../config.ts";
 import { fenceUntrusted } from "../digest.ts";
+import { errText } from "../err-text.ts";
 import { gateEnv } from "../gate-env.ts";
 import { GateSemaphore, sharedGateSemaphore } from "../gate-semaphore.ts";
 import { decideRegressionGate, extractGateFailures } from "../land.ts";
@@ -272,7 +273,7 @@ export class SingleAgentExecutor implements NodeExecutor {
 			const text = await this.awaitTurn(agent, message, timeoutMs);
 			return { outcome: "succeeded", text };
 		} catch (err) {
-			return { outcome: "failed", text: err instanceof Error ? err.message : String(err) };
+			return { outcome: "failed", text: errText(err) };
 		}
 	}
 
@@ -342,7 +343,7 @@ export class SingleAgentExecutor implements NodeExecutor {
 			const text = await this.awaitTurn(agent, undefined, timeoutMs);
 			return { outcome: "succeeded", text };
 		} catch (err) {
-			return { outcome: "failed", text: err instanceof Error ? err.message : String(err) };
+			return { outcome: "failed", text: errText(err) };
 		}
 	}
 

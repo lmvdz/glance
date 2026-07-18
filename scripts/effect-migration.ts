@@ -92,7 +92,10 @@ export const PATTERNS: Pattern[] = [
 		// (3 inline sites → 1 helper line) pending the tagged-error hierarchy — the ratchet only goes DOWN.
 		// 90→89: the set-model spawn-failure split (fix/spawnhost-unhandled-rejection) routes both of its
 		// detail strings through `errText` instead of the inline idiom — one net occurrence removed.
-		baseline: 89,
+		// 89→88: main had drifted RED to 94 — the per-unit verify base-diff feature's sites (executor.ts ×2,
+		// verify-baseline.ts ×4) landed as inline idioms without a bump. All 6 now route through `errText`,
+		// dropping the real count to 88 (the ratchet only goes DOWN; no tagged-error hierarchy exists yet).
+		baseline: 88,
 	},
 ];
 
