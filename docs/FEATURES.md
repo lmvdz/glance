@@ -97,6 +97,7 @@ and `curate-plane` do real local work.
 ### Diagnostics
 - **`glance doctor`** — Diagnose the factory: on, armed, pointed at the right world? Exit code = verdict. `--json`.
 - **`glance symptom "<query>"`** — Search the recorded symptom-card index, flagging dead `whereToLook` pointers. `--repo`, `--json`.
+- **`glance land-assessment replay [--json]`** — Offline replay: run the land-assessment analyzers (git-topology, TS structural-delta, workflow-state) against the labeled incident manifest and print an honest metrics report. Phase-1 shadow subsystem (`src/land-assessment/`) — reads a per-repo event store, touches **zero** live-land-path files.
 
 ### Automation / observability
 - **`glance automation` / `auto`** — What the daemon's background loops are doing + Scout LLM cost. Flags: `--window`, `--loop`, `--limit`, `--json`.
@@ -164,6 +165,7 @@ via `requiredRole`. DB-mode non-GET mutations are origin-checked. Unmatched → 
 - Graph: **GET `/api/graph`**, `/commit`, `/attribution`, `/scoreboard`, `/provenance`, `/task-class`.
 - Metrics: **GET `/api/usage`**, `/api/heat`, `/api/activity/heatmap`, `/api/action-items`, `/api/governance`, `/api/audit`, `/api/automation`, `/api/metrics/learning-loop`.
 - Knowledge: **GET `/api/trace/:id`**, `/api/digest/:id`, `/api/fog`, `/api/episodes[/:id]`, `/api/symptoms`, `/api/answers[/:id]` + **POST `/api/answers`**, `/api/opportunities`.
+- Comprehension: **GET `/api/features/:id/reality`** — plan-vs-reality: planned concerns × what landed × proof + reachability (viewer-tier read).
 
 ### Attention / adoption / friction
 - **GET/POST `/api/attention`** · **GET `/api/attention/seen`** · **GET `/api/adoption`** · **GET/POST `/api/friction`** · **POST `/api/push-tap`**.
@@ -243,6 +245,8 @@ the live UI under `GLANCE_WEBAPP=1`.) Live data rides the `/ws` WebSocket.
 - **Fleet cockpit (WorkspaceCockpit)** — roster grouped Needs-You · Land-Ready · Working · Idle/Done · Unstaffed-Plans, with inline answering, transcript+composer to steer any unit, land rail, capacity/activity header, push toggle.
 - **Fleet pulse graph (OmpGraphPanel)** — living temporal dashboard (commits/cost over 7/14/30-day + weekly windows), flat vs depth viz, drag-back history, collision detection, click-through inspector.
 - **Comprehension fog (FogView)** — folder/file heat tree surfacing comprehension debt (never-seen / seen-current / stale).
+- **Plan reality (PlanRealityView)** — per-plan "plan vs reality" comprehension: what each concern claims × what actually landed × proof + reachability (via `/api/features/:id/reality`); a plans index in the nav rail plus a strip inside TaskDetail.
+- **Daily driver (DailyPanel)** — a "Daily" dashboard of dogfood adoption counters (`/api/adoption`) and the friction ledger (`/api/friction`) with progress rings, so the daily-driver signal is legible in-app.
 - **Factory status strip** — always-visible fleet-liveness banner (moving / idle / not-armed / off) with heartbeat dots, land-blocker line, capacity chip.
 - **Capabilities panel** — browse capability packs, install/enable/disable/run tools, skills, workflows, with per-pack health.
 
@@ -314,7 +318,9 @@ one or more **glance daemons** over loopback HTTP (CSP forbids `ws://`, so it **
 
 ### Shipped vs. deferred
 - **Shipped:** all of §6 above (fleet tab, connection layer, multi-daemon roster, intervene/steer/take-over, leases overlay, adopt, worktree-as-Space, native notifications, daemon chat, promote-to-unit, settings Fleet section, inherited shell). Skeleton comments in `FleetPane`/`fleetClient` are stale — the roster + intervene stack are implemented.
-- **Deferred/limited:** remote/HTTPS daemon support is minimal (remote worktree-open disabled, token required); push (`ws://`) intentionally avoided in favor of polling; the deep-rename to "Glance" (Rust crate still `terax`, in-app "Ask Terax", `terax-spaces.json`) is deferred to "Epic M".
+- **t3-face transplant (shipped, gd #29/#31/#28/#33/#34/#35):** a coherent look-and-feel layer — t3 palette + DM Sans + motion/glass/scrollbars (skin substrate), a status-token family carried through the theme engine, the fleet panels (RosterView, IntervenePane, FleetPane, ConversationView, WorkspaceOverlay, AdoptableSessions) re-keyed to those tokens, plus a spine (layout), composer, and transcript timeline. This is craft/UX, not new fleet *capability* — the desktop still lacks the planning, observability, fabric-search, and friction-capture surfaces the web UI has (see the matrix).
+- **Deep-rename shipped (gd #25/#26, Epic M M03/M04):** Terax → Glance with zero-data-loss migrations, and a re-credentialed release/updater pipeline for the fork.
+- **Deferred/limited:** remote/HTTPS daemon support is minimal (remote worktree-open disabled, token required); push (`ws://`) intentionally avoided in favor of polling.
 - `ROADMAP.md` is upstream terax's roadmap, not this fork's plan.
 
 ---
