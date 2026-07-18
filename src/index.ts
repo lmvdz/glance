@@ -61,6 +61,7 @@ import type { AutomationRollupRow } from "./automation-log.ts";
 import type { Actor, AgentDTO, ApprovalMode, AutomationEvent, ClientCommand, CommissionResult, CommissionSpec, CreateAgentOptions, FrictionEntry, ThinkingLevel, TranscriptEntry } from "./types.ts";
 import { base, DEFAULT_PORT, parseArgs, stateDirPath, tokenHeader } from "./cli-args.ts";
 import { cmdHere } from "./here.ts";
+import { runLandAssessmentCli } from "./land-assessment/cli.ts";
 
 /** Global default binary override for the default harness (a custom omp/pi fork at a nonstandard path).
  *  Wires the `bin` field that existed on SquadManager/ManagerRegistry but was never populated in the
@@ -103,6 +104,7 @@ USAGE
   glance open                                   Print the dashboard URL
   glance doctor [--json]                       Is the factory on, armed, and pointed at the right world?
   glance symptom "<query>" [--repo R] [--json]  Search recorded symptom cards (glance doctor's known-symptom index)
+  glance land-assessment replay [--json]        Offline replay: analyzers vs. the labeled incident manifest
   glance curate-plane [repo] [--file]             Group recurring Plane issues into unified fixes
   glance plan-validate <dir> [--json]           Check a plan dir's dep graph for cycles / dangling deps (offline)
   glance plan-decompose <dir> [--json]          One-shot: decompose <dir>/OBJECTIVE.md into a concern-DAG (needs \`omp\`)
@@ -1299,6 +1301,9 @@ async function main(): Promise<void> {
 			break;
 		case "doctor":
 			await cmdDoctor(rest);
+			break;
+		case "land-assessment":
+			await runLandAssessmentCli(rest);
 			break;
 		case "symptom":
 			await cmdSymptom(rest);
