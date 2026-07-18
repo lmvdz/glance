@@ -10,9 +10,16 @@ work, test it against this page first.
 **Glance is oversight for an autonomous engineering fleet. You glance, and you know.**
 
 The product is three organs, deliberately separate:
-- **t3code's face** — its look, feel, **layout**, and interaction grammar (threads-first,
-  conversation-centric, composer as hub). Not "inspired by": the t3 experience.
-- **terax's body** — the Tauri desktop shell (terminal/editor/ADE) hosting that face.
+- **t3code's face AND shell** — its look, feel, **layout**, and interaction grammar. The app's
+  DEFAULT shell IS t3code's two-pane thread client: a projects→threads rail on the left, a
+  conversation + hub composer on the right. Threads-first, conversation-centric, composer as hub.
+  Not "inspired by", not "a reskin of an IDE": the t3 experience is the whole app.
+- **terax's body — the SUBSTRATE, not the chrome.** Terax gives us Tauri + a real editor/terminal/
+  PTY/filesystem. Those are capabilities we open ON DEMAND ("Open worktree" / take-over), NOT the
+  default frame. The file tree, editor tabs, and terminal must never be the home screen — that was
+  the 2026-07-18 miss (t3-face concerns 01–13 reskinned *within* terax's IDE frame; Lars: "doesn't
+  look or feel like t3code at all"). The fix (t3-shell phase) makes the thread client the root and
+  demotes the IDE to a mode.
 - **glance's brain** — the daemon: the fleet, the trust layer, landing, attention, comprehension.
 
 ## The human contract (Lars, 2026-07-18, standing law)
