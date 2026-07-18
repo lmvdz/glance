@@ -61,6 +61,8 @@ import type { AutomationRollupRow } from "./automation-log.ts";
 import type { Actor, AgentDTO, ApprovalMode, AutomationEvent, ClientCommand, CommissionResult, CommissionSpec, CreateAgentOptions, FrictionEntry, ThinkingLevel, TranscriptEntry } from "./types.ts";
 import { base, DEFAULT_PORT, parseArgs, stateDirPath, tokenHeader } from "./cli-args.ts";
 import { cmdHere } from "./here.ts";
+import type { FileDiff } from "./explore.ts";
+import type { FabricSearchResult, KbDocType } from "./fabric-search.ts";
 import { runLandAssessmentCli } from "./land-assessment/cli.ts";
 
 /** Global default binary override for the default harness (a custom omp/pi fork at a nonstandard path).
@@ -96,6 +98,8 @@ USAGE
   glance rm <id> [--delete-worktree]            Remove an agent
   glance who [repo]                             Who/what is working a repo (any omp agent)
   glance logs <id> [--limit N]                  Print an agent's recent transcript
+  glance diff <id> [--stat] [--json]            Colorized unified diff of an agent's changes since fork
+  glance search "<query>" [--limit N] [--type T] [--json]  Ranked BM25 search over the fleet knowledge base
   glance automation [--window 1h] [--loop L]    Show what the background loops are doing (and Scout's LLM cost)
   glance ask "<question>" [--repo R]            Ask; the deliverable is a written answer, not a branch
   glance grr "<gripe>" [--list]                 Log a friction gripe to the dogfood ledger in <5s
@@ -130,6 +134,15 @@ LIST FLAGS
 
 CURATE-PLANE FLAGS
   --file                    File one [curator] do-not-auto-land issue per cluster
+
+DIFF FLAGS
+  --stat            Per-file add/remove summary only, no diff bodies
+  --json             Emit the raw GET /api/agents/:id/diff payload
+
+SEARCH FLAGS
+  --limit <N>        Max results (default 10)
+  --type <t>         Filter to one type: agent | digest | hot-area | scout | lease | decision | failure | symptom | episode | answer
+  --json             Emit the raw GET /api/fabric/search payload
 
 GLOBAL
   --port <N>        Daemon port (default: ${DEFAULT_PORT}, or $OMP_SQUAD_PORT)
@@ -692,6 +705,135 @@ async function cmdLogs(args: string[]): Promise<void> {
 	}
 }
 
+// ── ANSI (CLI-only; distinct from tui.ts's `c()` so a one-shot verb never pulls in pi-tui) ────────
+const CLI_ESC = "\x1b[";
+const CLI_RESET = `${CLI_ESC}0m`;
+const CLI_CODES = { dim: "2", bold: "1", red: "91", green: "92", cyan: "96" } as const;
+function cliColor(name: keyof typeof CLI_CODES, s: string, enabled: boolean): string {
+	return enabled ? `${CLI_ESC}${CLI_CODES[name]}m${s}${CLI_RESET}` : s;
+}
+
+/** Colorize stdout only on a real TTY, honoring the NO_COLOR (https://no-color.org) and
+ *  FORCE_COLOR conventions — a piped `glance diff` must never leak escape codes into a file/pager. */
+function colorEnabled(): boolean {
+	if (process.env.NO_COLOR) return false;
+	if (process.env.FORCE_COLOR === "0") return false;
+	if (process.env.FORCE_COLOR) return true;
+	return Boolean(process.stdout.isTTY);
+}
+
+const DIFF_STATUS_LABEL: Record<string, string> = { A: "added", M: "modified", D: "deleted", R: "renamed", C: "copied", T: "type-changed", U: "unmerged" };
+/** `FileDiff.status` is a git porcelain code — `"M "` from a tracked diff's name-status, `"??"` for
+ *  an untracked file (see explore.ts's `worktreeDiffSinceFork`/`worktreeDiff`). Renders the human word. */
+function diffStatusLabel(status: string): string {
+	const code = status.trim();
+	if (code === "??" || code === "?") return "untracked";
+	return DIFF_STATUS_LABEL[code[0] ?? ""] ?? (code || "changed");
+}
+
+/** `+`/`-` line counts within one file's unified diff body, excluding the `+++`/`---` file headers. */
+function diffLineCounts(diff: string): { added: number; removed: number } {
+	let added = 0;
+	let removed = 0;
+	for (const line of diff.split("\n")) {
+		if (line.startsWith("+++") || line.startsWith("---")) continue;
+		if (line.startsWith("+")) added++;
+		else if (line.startsWith("-")) removed++;
+	}
+	return { added, removed };
+}
+
+/** `glance diff --stat` — per-file add/remove summary, no diff bodies. */
+export function renderDiffStat(files: FileDiff[]): string {
+	if (!files.length) return "no changes\n";
+	const nameW = Math.max(4, ...files.map((f) => f.file.length));
+	const statusW = Math.max(6, ...files.map((f) => diffStatusLabel(f.status).length));
+	const counts = files.map((f) => diffLineCounts(f.diff));
+	const lines = files.map((f, i) => `  ${f.file.padEnd(nameW)}  ${diffStatusLabel(f.status).padEnd(statusW)}  +${counts[i]!.added} -${counts[i]!.removed}`);
+	const totals = counts.reduce((acc, c) => ({ added: acc.added + c.added, removed: acc.removed + c.removed }), { added: 0, removed: 0 });
+	return `${lines.join("\n")}\n\n${files.length} file${files.length === 1 ? "" : "s"} changed, +${totals.added} -${totals.removed}\n`;
+}
+
+/** `glance diff` — the full colorized unified diff: dim file headers/hunk markers stay dim, `@@` hunk
+ *  headers cyan, `+` lines green, `-` lines red, context lines plain. `opts.color` defaults off so a
+ *  test (or a piped consumer) gets plain text without also stubbing `process.stdout.isTTY`. */
+export function renderDiff(files: FileDiff[], opts: { color?: boolean } = {}): string {
+	if (!files.length) return "no changes\n";
+	const color = opts.color ?? false;
+	const out: string[] = [];
+	for (const f of files) {
+		out.push(cliColor("bold", `${diffStatusLabel(f.status)}  ${f.file}`, color));
+		if (!f.diff.trim()) {
+			out.push(cliColor("dim", "  (no diff body — binary, or a pure rename/mode change)", color));
+			out.push("");
+			continue;
+		}
+		for (const line of f.diff.split("\n")) {
+			if (line.startsWith("+++") || line.startsWith("---")) out.push(cliColor("dim", line, color));
+			else if (line.startsWith("@@")) out.push(cliColor("cyan", line, color));
+			else if (line.startsWith("+")) out.push(cliColor("green", line, color));
+			else if (line.startsWith("-")) out.push(cliColor("red", line, color));
+			else out.push(line);
+		}
+		out.push("");
+	}
+	return `${out.join("\n").replace(/\n+$/, "")}\n`;
+}
+
+/**
+ * `glance diff <id|name|branch> [--stat] [--json]` — the terminal review surface: an agent's changed
+ * files as a colorized unified diff, without leaving the CLI. Backs off `GET /api/agents/:id/diff`
+ * (`worktreeDiffSinceFork` — committed AND uncommitted changes since the unit's fork point, the same
+ * source the webapp review panel drives). `<id>` resolves the same way `glance open` does: exact id,
+ * then exact name, then exact branch, then a unique id prefix — ambiguity is a miss, never a guess.
+ */
+async function cmdDiff(args: string[]): Promise<void> {
+	const { positional, flags } = parseArgs(args);
+	const key = positional[0];
+	if (!key) {
+		process.stderr.write("usage: glance diff <id|name|branch> [--stat] [--json]\n");
+		process.exit(1);
+		return;
+	}
+	let agents: AgentDTO[];
+	try {
+		const res = await fetch(`${base(flags)}/api/agents`, { headers: tokenHeader() });
+		if (!res.ok) {
+			process.stderr.write(`diff failed: ${res.status} ${await res.text()}\n`);
+			process.exit(1);
+		}
+		agents = (await res.json()) as AgentDTO[];
+	} catch {
+		process.stderr.write(`No squad daemon on ${base(flags)}. Start one with: glance up\n`);
+		process.exit(1);
+		return;
+	}
+	const unit = matchUnit(agents, key);
+	if (!unit) {
+		process.stderr.write(`no unit matching "${key}" (tried id, name, branch, unique id prefix)\n`);
+		process.exit(1);
+		return;
+	}
+	let files: FileDiff[];
+	try {
+		const res = await fetch(`${base(flags)}/api/agents/${encodeURIComponent(unit.id)}/diff`, { headers: tokenHeader() });
+		if (!res.ok) {
+			process.stderr.write(`diff failed: ${res.status} ${await res.text()}\n`);
+			process.exit(1);
+		}
+		files = (await res.json()) as FileDiff[];
+	} catch {
+		process.stderr.write(`No squad daemon on ${base(flags)}. Start one with: glance up\n`);
+		process.exit(1);
+		return;
+	}
+	if (flags.json) {
+		process.stdout.write(`${JSON.stringify(files, null, 2)}\n`);
+		return;
+	}
+	process.stdout.write(flags.stat ? renderDiffStat(files) : renderDiff(files, { color: colorEnabled() }));
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -1224,6 +1366,72 @@ async function cmdSymptom(args: string[]): Promise<void> {
 	}
 }
 
+/** The full `KbDocType` union (fabric-search.ts) — every `--type` filter `glance search` accepts. */
+const FABRIC_TYPES: ReadonlySet<KbDocType> = new Set(["agent", "digest", "hot-area", "scout", "lease", "decision", "failure", "symptom", "episode", "answer"]);
+
+/** `glance search "<query>" [--limit N] [--type T] [--json]` — ranked BM25 results, compact
+ *  one-block-per-hit: score, type, title, snippet, then a pointer line (ref/source/age) when any of
+ *  those are present. Mirrors `symptomAge`'s "Nm/Nh/Nd ago" scale for `ranAt`. */
+export function renderSearchResults(results: FabricSearchResult[], query: string): string {
+	if (!results.length) return `no matches for "${query}".\n`;
+	const typeW = Math.max(4, ...results.map((r) => r.type.length));
+	const blocks = results.map((r) => {
+		const score = r.score.toFixed(2).padStart(5);
+		const head = `  ${score}  ${r.type.padEnd(typeW)}  ${r.title}`;
+		const snippet = r.snippet ? `\n           ${r.snippet}` : "";
+		const pointer = [r.ref ? `ref: ${r.ref}` : "", r.source ? `src: ${r.source}` : "", r.ranAt ? symptomAge(r.ranAt) : ""].filter(Boolean).join("  ·  ");
+		const pointerLine = pointer ? `\n           (${pointer})` : "";
+		return `${head}${snippet}${pointerLine}`;
+	});
+	return `${blocks.join("\n\n")}\n`;
+}
+
+/**
+ * `glance search "<query>" [--limit N] [--type <t>] [--json]` — ranked BM25 search over the fleet
+ * knowledge base (`GET /api/fabric/search`, the same `searchFabric`/BM25 core `glance symptom` and
+ * the webapp's ⌘K palette drive), so an operator can pull prior decisions/hot files/scout findings/
+ * digests without leaving the terminal. `--limit` maps to the API's `topK` (server default 20; this
+ * CLI defaults to 10, a terminal-sized page). `--type` is validated client-side against the full
+ * `KbDocType` union so a typo fails loudly instead of silently returning zero results.
+ */
+async function cmdSearch(args: string[]): Promise<void> {
+	const { positional, flags } = parseArgs(args);
+	const query = positional.join(" ").trim();
+	if (!query) {
+		process.stderr.write('usage: glance search "<query>" [--limit N] [--type <t>] [--json]\n');
+		process.exit(1);
+		return;
+	}
+	const rawLimit = flags.limit ? Number(flags.limit) : 10;
+	const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.floor(rawLimit) : 10;
+	const type = typeof flags.type === "string" ? flags.type : undefined;
+	if (type && !FABRIC_TYPES.has(type as KbDocType)) {
+		process.stderr.write(`unknown --type "${type}" — expected one of ${[...FABRIC_TYPES].join(", ")}\n`);
+		process.exit(1);
+		return;
+	}
+	const qs = new URLSearchParams({ q: query, topK: String(limit) });
+	if (type) qs.set("type", type);
+	let body: { query: string; results: FabricSearchResult[]; counts: Record<string, number> };
+	try {
+		const res = await fetch(`${base(flags)}/api/fabric/search?${qs.toString()}`, { headers: tokenHeader() });
+		if (!res.ok) {
+			process.stderr.write(`search failed: ${res.status} ${await res.text()}\n`);
+			process.exit(1);
+		}
+		body = (await res.json()) as { query: string; results: FabricSearchResult[]; counts: Record<string, number> };
+	} catch {
+		process.stderr.write(`No squad daemon on ${base(flags)}. Start one with: glance up\n`);
+		process.exit(1);
+		return;
+	}
+	if (flags.json) {
+		process.stdout.write(`${JSON.stringify(body, null, 2)}\n`);
+		return;
+	}
+	process.stdout.write(renderSearchResults(body.results, query));
+}
+
 async function main(): Promise<void> {
 	const [cmd, ...rest] = process.argv.slice(2);
 	switch (cmd) {
@@ -1270,6 +1478,12 @@ async function main(): Promise<void> {
 			break;
 		case "logs":
 			await cmdLogs(rest);
+			break;
+		case "diff":
+			await cmdDiff(rest);
+			break;
+		case "search":
+			await cmdSearch(rest);
 			break;
 		case "automation":
 		case "auto":
