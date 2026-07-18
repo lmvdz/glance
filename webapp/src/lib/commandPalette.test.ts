@@ -5,7 +5,7 @@ describe('staticRows', () => {
   test('blank query returns the nav rows + Org + Search tasks, in order', () => {
     const rows = staticRows('');
     expect(rows.map((r) => r.id)).toEqual([
-      'nav-fleet', 'nav-tasks', 'nav-graph', 'nav-fog', 'nav-capabilities', 'nav-org', 'action-search-tasks',
+      'nav-fleet', 'nav-tasks', 'nav-graph', 'nav-fog', 'nav-plan-reality', 'nav-capabilities', 'nav-org', 'action-search-tasks',
     ]);
   });
 
@@ -23,7 +23,7 @@ describe('staticRows', () => {
   });
 
   test('NAV_ROWS covers exactly the rail nav items + org, no dead views', () => {
-    expect(NAV_ROWS.map((r) => r.view)).toEqual(['fleet', 'tasks', 'omp-graph', 'fog', 'capabilities', 'org']);
+    expect(NAV_ROWS.map((r) => r.view)).toEqual(['fleet', 'tasks', 'omp-graph', 'fog', 'plan-reality', 'capabilities', 'org']);
   });
 
   test('SEARCH_TASKS_ROW is the search-tasks action', () => {

@@ -2422,6 +2422,14 @@ export class SquadServer {
 			const doneProof = await manager.doneProofForFeature(decodeURIComponent(mfproof[1]), repo);
 			return Response.json({ doneProof: doneProof ?? null });
 		}
+		// Plan-vs-reality comprehension view (OMPSQ-448): planned concerns × what landed × proof +
+		// reachability. Read-only, viewer-tier by the same blanket GET default as the routes above.
+		const mfreality = url.pathname.match(/^\/api\/features\/([^/]+)\/reality$/);
+		if (mfreality && req.method === "GET") {
+			const repo = url.searchParams.get("repo") ?? process.cwd();
+			const reality = await manager.planReality(decodeURIComponent(mfreality[1]), repo);
+			return reality ? Response.json({ reality }) : new Response("no such feature", { status: 404 });
+		}
 		if (url.pathname === "/api/info") return Response.json({ cwd: process.cwd() });
 		const mcand = url.pathname.match(/^\/api\/features\/([^/]+)\/plan-candidates$/);
 		if (mcand && req.method === "GET") {

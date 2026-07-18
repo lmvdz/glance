@@ -21,6 +21,7 @@ import { PlanFlowDiagram } from './PlanFlowDiagram';
 import { WorkflowGraphOverlay } from './WorkflowGraphOverlay';
 import { TaskSessionsTable, sessionRowsFromAgents } from './TaskSessionsTable';
 import { TaskArtifactsRail } from './TaskArtifactsRail';
+import { PlanRealityStrip } from './PlanRealityView';
 import { Kbd } from './kit/Kbd';
 import type { GraphConcernInput } from '../lib/planGraph';
 import type { TaskComment, TaskDecision, TaskRelationship } from '../types';
@@ -1773,6 +1774,14 @@ export const TaskDetail = () => {
                     />
                   </div>
                 </details>
+              )}
+
+              {/* Plan vs reality (OMPSQ-448): a compact rollup strip when this feature has a plan
+                  directory — the two rings + proof verdict/reachability, linking into the
+                  standalone comprehension screen (nav rail's "Plan reality" item, or
+                  `#/plan-reality/:featureId`) for the full DAG + per-concern proof breakdown. */}
+              {task.planDir && featureId && repo && (
+                <div className="mb-6"><PlanRealityStrip featureId={featureId} repo={repo} /></div>
               )}
 
               {workflowGraphAgent?.workflowGraph && (

@@ -28,6 +28,7 @@ import { FogView } from './components/FogView';
 import { DailyPanel } from './components/DailyPanel';
 import { IntervenceView } from './components/IntervenceView';
 import { DesignReviewView } from './components/DesignReviewView';
+import { PlanRealityView } from './components/PlanRealityView';
 import { WorkspaceCockpit } from './components/WorkspaceCockpit';
 import { FactoryStatusStrip } from './components/FactoryStatusStrip';
 import { OrgSettings } from './components/OrgSettings';
@@ -124,6 +125,7 @@ const MainContent = () => {
     );
   }
   if (view === 'omp-graph') return <OmpGraphPanel />;
+  if (view === 'plan-reality') return <PlanRealityView />;
   if (view === 'org') {
     return (
       <PageContextScope value={orgPageContext}>
