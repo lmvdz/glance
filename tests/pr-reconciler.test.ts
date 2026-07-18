@@ -387,6 +387,14 @@ test("prReconcileTick: a PR closed without merging is marked closed, but branch/
 	expect(getPendingPr(stateDir, "squad/a2")?.state).toBe("closed");
 	expect(mgr.agents.get("a2")?.dto.landReady).toBe(true); // untouched — human decides, re-Land opens a fresh PR
 	expect(mgr.agents.get("a2")?.dto.branch).toBe("squad/a2"); // branch untouched
+	// t3-face concern 06 (grok-4.5 cross-lineage review): the LIVE agent's own `dto.prState` must
+	// reflect reality too, not just the PendingPr ledger entry above — attention-ladder.ts's cascade
+	// reads `dto.prState === "closed"` as an `error`-rung land-blocker, and before this fix nothing on
+	// this path ever touched the live dto (only `landReady:true` was set on the seed, which alone
+	// would render as the green `plan-ready` rung, not `error`). Driven through the REAL reconcile
+	// path (`mgr.tick()`), never a hand-set `prState` on the fixture.
+	expect(mgr.agents.get("a2")?.dto.prState).toBe("closed");
+	expect(mgr.agents.get("a2")?.dto.ladderPriority).toBe("error");
 });
 
 // ── Close-retry (crash-ordering idempotency) ───────────────────────────────────────────────────────

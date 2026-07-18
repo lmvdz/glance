@@ -17,6 +17,7 @@ import type { LensId } from "./lens-select.ts";
 import type { HarnessScorecard } from "./harness-scorecard.ts";
 import type { WorkLane, WorkLaneSource } from "./lane.ts";
 import type { ComplexityTier } from "./model-outcomes.ts";
+import type { LadderPriority } from "./attention-ladder.ts";
 
 /** Derived, human-meaningful lifecycle state of one managed agent. */
 export type AgentStatus =
@@ -985,6 +986,17 @@ export interface AgentDTO {
 	 *  whose turn ran under `OMP_SQUAD_PUSH_MIN_TURN_MS` — a live-watched short reply is not a
 	 *  reason-to-switch buzz. Voice arms are exempt (definitionally away-from-screen). */
 	completionArmedAt?: number;
+	/** The needs-you ladder's single computed priority state (t3-face concern 06,
+	 *  attention-ladder.ts's `computeLadderPriority`, plans/daily-driver/01-charter-needs-you-ladder.md).
+	 *  COMPUTED, NOT PERSISTED — like `harnessScorecard` above, absent from `PersistedAgent` so it is
+	 *  never written to state.json and can never drift stale across a restart: `SquadManager.list()`/
+	 *  `getAgent()`/`emitAgent` all recompute it fresh on every read (`syncLadder`), mirroring
+	 *  `syncAuthority`'s exact pattern. This field is the VIEWER-AGNOSTIC hint value (computed with no
+	 *  `visitedAt`, i.e. "as if nobody has visited yet" — fail-closed, never a false "idle"); a GET
+	 *  request personalizes the `completed-unseen`/`idle` boundary for the REQUESTING viewer on top of
+	 *  this via `SquadManager.ladderPriorityFor`, without ever mutating this shared field (see
+	 *  attention-ladder.ts's module doc for why per-viewer state can't live here). */
+	ladderPriority?: LadderPriority;
 }
 
 /**

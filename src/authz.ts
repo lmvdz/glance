@@ -130,6 +130,11 @@ export function restActionTier(method: string, pathname: string): Role {
 	// BOTH the write and the reads (privacy is enforced by `redactAttentionForActor`/
 	// `redactSeenMapForActor`, not by the RBAC tier — registered here anyway per DESIGN.md).
 	if (pathname === "/api/attention" || pathname === "/api/attention/seen") return "viewer";
+	// Needs-you ladder (t3-face concern 06): reading the roll-up and marking a unit visited are the
+	// SAME "record my own attention" shape as /api/attention above, not operational driving — a
+	// coarse mutation=operator default would strand every non-operator viewer's own seen-state, which
+	// defeats the point of a per-viewer signal (identical reasoning to the comment above).
+	if (pathname === "/api/attention/ladder" || pathname === "/api/attention/ladder/seen") return "viewer";
 	// Comprehension debt read (concern 03): a per-file "how far behind is the human" number, joined
 	// from receipts + the attention substrate above — same read-only, per-viewer-signal reasoning as
 	// /api/attention/seen, so the same explicit viewer tier rather than the coarse GET default.

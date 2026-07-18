@@ -246,6 +246,181 @@ describe("redactSeenMapForActor", () => {
 	});
 });
 
+describe("markUnitVisited/unitVisitedAt: t3-face concern 06's per-unit last-visited map", () => {
+	test("file mode (no viewerId): every caller collapses onto the one lastSeenAt — the single-implicit-viewer rule", () => {
+		const store = new AttentionStore({ stateDir: dir(), now: () => 1_000 });
+		expect(store.unitVisitedAt("unit1", undefined)).toBeUndefined(); // absence ≠ seen
+		store.markUnitVisited("unit1", undefined);
+		expect(store.unitVisitedAt("unit1", undefined)).toBe(1_000);
+	});
+
+	/** The load-bearing acceptance test the concern's Verify section names: marking a unit seen by
+	 *  one viewer must not resolve as seen for a DIFFERENT viewer — that's the entire reason this
+	 *  map is per-viewer and daemon-side rather than a client-local store. */
+	test("mark seen by viewer A leaves it unseen for viewer B until B visits it too", () => {
+		const store = new AttentionStore({ stateDir: dir(), now: () => 5_000 });
+		store.markUnitVisited("unit1", "db:alice");
+		expect(store.unitVisitedAt("unit1", "db:alice")).toBe(5_000);
+		expect(store.unitVisitedAt("unit1", "db:bob")).toBeUndefined(); // still unseen for bob
+
+		store.markUnitVisited("unit1", "db:bob");
+		expect(store.unitVisitedAt("unit1", "db:bob")).toBe(5_000);
+		expect(store.unitVisitedAt("unit1", "db:alice")).toBe(5_000); // alice's own visit is untouched
+	});
+
+	test("two clients under the SAME viewer identity agree: a mark from one is visible to the other's next read", () => {
+		let now = 1_000;
+		const store = new AttentionStore({ stateDir: dir(), now: () => now });
+		// "cockpit" marks it seen
+		store.markUnitVisited("unit1", "db:alice");
+		now = 1_500;
+		// "a second poller" (same viewer) reads it independently — must see the SAME visited timestamp
+		expect(store.unitVisitedAt("unit1", "db:alice")).toBe(1_000);
+	});
+
+	test("max-merge, never backward — a stale replay must not move the stamp earlier", () => {
+		let now = 5_000;
+		const store = new AttentionStore({ stateDir: dir(), now: () => now });
+		store.markUnitVisited("unit1", "db:alice");
+		now = 1_000; // an out-of-order replay
+		store.markUnitVisited("unit1", "db:alice");
+		expect(store.unitVisitedAt("unit1", "db:alice")).toBe(5_000);
+	});
+
+	test("visits to different units never cross-contaminate", () => {
+		const store = new AttentionStore({ stateDir: dir(), now: () => 1_000 });
+		store.markUnitVisited("unit1", "db:alice");
+		expect(store.unitVisitedAt("unit2", "db:alice")).toBeUndefined();
+	});
+
+	test("survives a restart via its own durable unit-visited.json file", () => {
+		const d = dir();
+		const store = new AttentionStore({ stateDir: d, now: () => 42 });
+		store.markUnitVisited("unit1", "db:alice");
+		store.stop(); // forces the debounced write out synchronously
+
+		const reloaded = new AttentionStore({ stateDir: d });
+		expect(reloaded.unitVisitedAt("unit1", "db:alice")).toBe(42);
+		expect(reloaded.unitVisitedAt("unit1", undefined)).toBe(42); // lastSeenAt survives too
+	});
+
+	test("a corrupt unit-visited.json on boot loads as empty, never throws", () => {
+		const d = dir();
+		writeFileSync(path.join(d, "unit-visited.json"), "{ not json");
+		const store = new AttentionStore({ stateDir: d });
+		expect(store.unitVisitedAt("unit1", undefined)).toBeUndefined();
+	});
+
+	test("markUnitVisited is never gated by the GLANCE_ATTENTION kill switch — it is a core ladder function, not file-viewing telemetry", () => {
+		const original = process.env.GLANCE_ATTENTION;
+		process.env.GLANCE_ATTENTION = "0";
+		try {
+			const store = new AttentionStore({ stateDir: dir(), now: () => 1_000 });
+			expect(store.disabled()).toBe(true);
+			store.markUnitVisited("unit1", "db:alice");
+			expect(store.unitVisitedAt("unit1", "db:alice")).toBe(1_000);
+		} finally {
+			if (original === undefined) delete process.env.GLANCE_ATTENTION;
+			else process.env.GLANCE_ATTENTION = original;
+		}
+	});
+
+	// t3-face concern 06 MINOR finding (grok-4.5/codex cross-lineage review): the prior loader cast
+	// the raw parsed object straight to `UnitVisitMap` with no shape narrowing at all. A malformed
+	// stored value (valid JSON syntax, wrong shape) is a DIFFERENT failure mode than the "corrupt
+	// JSON.parse" case above — it must be caught too, since a garbage `lastSeenAt` compares as
+	// `NaN < completedAt` ⇒ `false` ⇒ the cascade read it as SEEN (`idle`), not unseen. This is the
+	// exact fail-open codex confirmed against the live code before the fix.
+	test("a corrupt (non-numeric) unit-visited entry reads as unseen (fail closed), not seen", () => {
+		const d = dir();
+		writeFileSync(path.join(d, "unit-visited.json"), JSON.stringify({ unit1: { lastSeenAt: "nope" } }));
+		const store = new AttentionStore({ stateDir: d });
+		expect(store.unitVisitedAt("unit1", undefined)).toBeUndefined();
+		expect(store.unitVisitEntry("unit1")).toBeUndefined();
+	});
+
+	test("a corrupt per-viewer unit-visited stamp is dropped, but a valid sibling entry survives", () => {
+		const d = dir();
+		writeFileSync(path.join(d, "unit-visited.json"), JSON.stringify({ unit1: { lastSeenAt: 100, byViewer: { "db:alice": 100, "db:bob": "nope" } } }));
+		const store = new AttentionStore({ stateDir: d });
+		expect(store.unitVisitedAt("unit1", "db:alice")).toBe(100);
+		expect(store.unitVisitedAt("unit1", "db:bob")).toBeUndefined();
+	});
+
+	test("a top-level JSON ARRAY (not an object) loads as empty, never leaks numeric indices as unit ids", () => {
+		const d = dir();
+		writeFileSync(path.join(d, "unit-visited.json"), JSON.stringify([{ lastSeenAt: 100 }]));
+		const store = new AttentionStore({ stateDir: d });
+		expect(store.unitVisitedAt("0", undefined)).toBeUndefined();
+	});
+
+	test("a wildly-future stamp (past the clock-skew bound) is dropped as corrupt, not trusted as 'always after'", () => {
+		const d = dir();
+		writeFileSync(path.join(d, "unit-visited.json"), JSON.stringify({ unit1: { lastSeenAt: 99_999_999_999_999 } }));
+		const store = new AttentionStore({ stateDir: d });
+		expect(store.unitVisitedAt("unit1", undefined)).toBeUndefined();
+	});
+});
+
+describe("recordCompletion/completedAt: SquadManager's durable per-agent completion stamp (t3-face concern 06)", () => {
+	test("absent until recorded — never coerced into a completion out of nothing", () => {
+		const store = new AttentionStore({ stateDir: dir() });
+		expect(store.completedAt("unit1")).toBeUndefined();
+	});
+
+	test("records and reads back the stamp", () => {
+		const store = new AttentionStore({ stateDir: dir() });
+		store.recordCompletion("unit1", 1_000);
+		expect(store.completedAt("unit1")).toBe(1_000);
+	});
+
+	test("max-merge, never backward — an out-of-order re-record must not move the stamp earlier", () => {
+		const store = new AttentionStore({ stateDir: dir() });
+		store.recordCompletion("unit1", 5_000);
+		store.recordCompletion("unit1", 1_000);
+		expect(store.completedAt("unit1")).toBe(5_000);
+	});
+
+	test("survives a restart via its own durable unit-completed.json file — immune to the transitionLog ring's cap", () => {
+		const d = dir();
+		const store = new AttentionStore({ stateDir: d });
+		store.recordCompletion("unit1", 42);
+		store.stop(); // forces the debounced write out synchronously
+
+		const reloaded = new AttentionStore({ stateDir: d });
+		expect(reloaded.completedAt("unit1")).toBe(42);
+	});
+
+	test("a corrupt unit-completed.json entry is dropped, fail closed", () => {
+		const d = dir();
+		writeFileSync(path.join(d, "unit-completed.json"), JSON.stringify({ unit1: "nope" }));
+		const store = new AttentionStore({ stateDir: d });
+		expect(store.completedAt("unit1")).toBeUndefined();
+	});
+});
+
+describe("stop() closes the store (t3-face concern 06 addition D): no write scheduled after can resurrect a timer", () => {
+	test("a markUnitVisited call AFTER stop() never re-arms a write, and never corrupts the flushed file", () => {
+		const d = dir();
+		const store = new AttentionStore({ stateDir: d, now: () => 1_000 });
+		store.markUnitVisited("unit1", "db:alice");
+		store.stop(); // flushes, then closes
+
+		// Simulates the manager-eviction race: a request lands in the gap between stop() and this
+		// instance actually being discarded from the registry.
+		store.markUnitVisited("unit1", "db:bob");
+		// In-memory, the closed instance still reflects the late write (harmless — it's about to be
+		// discarded) — but nothing was scheduled to persist it.
+		expect(store.unitVisitedAt("unit1", "db:bob")).toBe(1_000);
+
+		// A fresh instance for the same stateDir (standing in for the replacement manager) must see
+		// exactly what was flushed at stop() — never a write the closed instance scheduled afterward.
+		const reloaded = new AttentionStore({ stateDir: d });
+		expect(reloaded.unitVisitedAt("unit1", "db:bob")).toBeUndefined();
+		expect(reloaded.unitVisitedAt("unit1", "db:alice")).toBe(1_000);
+	});
+});
+
 describe("stop()/flush()", () => {
 	test("flush() persists the debounced seen-map write immediately, and a fresh store reloads it", () => {
 		const d = dir();
