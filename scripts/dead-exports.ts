@@ -82,8 +82,27 @@ export interface DeadExport {
  *  outright rather than tagged `@substrate` since nothing plans to call it. The 216 the prior round
  *  reported was a false green: this deletion made `src/audit.ts`'s `nextAuditId` flip dead→live on
  *  the SAME diff via the raw scanner's comment/backtick fragility, offsetting the real orphan and
- *  holding the total steady — the true count was 217, not 216. Tightening for real this time. */
-export const BASELINE = 215;
+ *  holding the total steady — the true count was 217, not 216. Tightening for real this time.
+ *  2026-07-17 (land-assessment concerns 01/02, review fixes): 215→211 — the concern's own tests were
+ *  correctly relocated from `src/land-assessment/` to `tests/` (bunfig.toml scopes the runner to
+ *  `tests/`, and dead-exports' reference universe deliberately excludes `tests/**` — a symbol only a
+ *  test imports is "the exact same bug wearing a green suite"), which exposed 22 Phase-0
+ *  schema/identity/taxonomy exports (id.ts ×7, schema.ts ×6, replay/incident-taxonomy.ts ×9) as having
+ *  no non-test consumer yet. Each is genuinely built ahead of its caller — concerns 03-11 wire up
+ *  land()/analyzers/the replay CLI in later batches — so each got an honest `@substrate` tag rather
+ *  than sitting uncounted; net effect vs the prior 215 is -4 (22 new @substrate-exempt entries against
+ *  4 other exports that picked up a real reference elsewhere on this branch). Tightening for real.
+ *  2026-07-17 (land-assessment concerns 05/06/11, batch 3 review fixes): 211→210 — the batch shipped 15
+ *  new dead exports uncaught before merge (corpus.ts's three `reconstruct*` source functions,
+ *  synthesize.ts's `synthesizeMutation`, manifest.ts's two cadence helpers + two validators,
+ *  projection.ts's `factContentTriple`/`factContentSet`, continuity.ts's validator/persistence/check
+ *  /repair functions — five). Each is genuinely built ahead of its external caller (test-only today, or
+ *  a documented future land hook), so each got an honest `@substrate` tag rather than sitting
+ *  uncounted. Net effect vs the prior 211 is -1: the 15 new `@substrate`-exempt entries are offset by
+ *  `done-proof.ts#readDoneProofLedger` picking up a real cross-file reference from
+ *  `corpus.ts#reconstructFfLocalLandTriples` (same batch), which flips it dead→live. Tightening for
+ *  real. */
+export const BASELINE = 210;
 
 function scriptKindFor(rel: string): ts.ScriptKind {
 	return rel.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS;

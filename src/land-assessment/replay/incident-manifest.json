@@ -1,0 +1,188 @@
+{
+  "manifestVersion": 0,
+  "generatedAt": "2026-07-17T00:00:00.000Z",
+  "positiveCounts": {
+    "git-topology": 9,
+    "textual-conflict": 0,
+    "structural-api": 0,
+    "dependency": 0,
+    "behavioral": 0,
+    "acceptance-criterion": 0,
+    "proof-freshness": 0,
+    "workflow-state": 2,
+    "operational": 0
+  },
+  "benchmarkParameters": {
+    "negativeSampleTarget": 40,
+    "negativeSampleCollected": 2,
+    "reviewBudgetK": 5,
+    "reviewBudgetPerLands": 100,
+    "rationale": "negativeSampleTarget=40 manually-reviewed benign lands (BRIEF §10.4's second evaluation source: apparently-benign historical lands, sampled and manually reviewed, never auto-assumed negative) is a starting target for the Phase-1 replay CLI, not something this taxonomy-and-manifest concern collects in full — reaching it is offline-replay work over glance's real land history. Two exemplars (the #36/#41 clean re-lands) are seeded here so the shape exists before Phase 1 begins. reviewBudgetK=5 alerts per reviewBudgetPerLands=100 lands is DESIGN.md's initial precision@budget parameter — chosen as a round, conservative operator-attention budget (roughly one alert reviewed per 20 lands); tunable once replay produces a real alert-rate distribution to calibrate against."
+  },
+  "entries": [
+    {
+      "id": "2026-07-13-ratchet-train-drift",
+      "taxonomyClasses": ["git-topology", "workflow-state"],
+      "repo": "omp-squad",
+      "refs": {
+        "baseCommit": "6604d2a1bf70c319af759c1f2b57a2f3fe787b88",
+        "mainCommit": "04c0d5d4f1c89223260d306a7c55c77fd5b0d081",
+        "candidateCommit": "56b1bb83e626630c7a9234217a368429c07bbad8",
+        "prNumber": 160
+      },
+      "expectedOutcome": "should-detect",
+      "narrative": "PR #160 (defect-ratchet baselines: hand-written-retryable=14, dead-exports=219) branched from main tip 6604d2a (right after PR #157). By the time its squash-merge actually composed onto main (parent 04c0d5d, i.e. after siblings #165/#166/#167/#164/#161 had already landed in the same train), those five siblings had changed the files the ratchet baselines counted — #166 added a 15th correctly-polarized hand-written-retryable hit, #165's reaper rewrite orphaned two exports. Post-train main failed both of #160's OWN new gates. A topology analyzer given (base=6604d2a, main=04c0d5d, candidate=56b1bb8) should flag: candidate diverges from main by 5 unseen commits touching files the candidate's own gate baselines are a function of. Fixed by PR #170 (1a0169b4f0550121e98afa99bcf21b6ff96c938f).",
+      "source": "manual"
+    },
+    {
+      "id": "2026-07-13-ratchet-trio-drift",
+      "taxonomyClasses": ["git-topology", "workflow-state"],
+      "repo": "omp-squad",
+      "refs": {
+        "baseCommit": "1a0169b4f0550121e98afa99bcf21b6ff96c938f",
+        "mainCommit": "71df571549b442dc1181e3a258603c5bb7327ee6",
+        "candidateCommit": "c7f9f9b913f35d756527ade78d051561303be821",
+        "prNumber": 156
+      },
+      "expectedOutcome": "should-detect",
+      "narrative": "PR #155 and PR #156 both branched from the same post-#170 main tip (1a0169b) and squash-landed minutes apart (#155 first at 71df571, #156 second at c7f9f9b, whose parent IS 71df571 — main had already moved to include #155 by the time #156's squash composed, even though #156's own diff was authored against 1a0169b). PR #159 then landed on top of #156 alone (61fc8d9). The three-way composition left three exports (hkdf/uninstall/currentState) with zero callers, each individually green on its own pre-merge tree. A topology analyzer given (base=1a0169b, main=71df571, candidate=c7f9f9b) should flag the same sibling-lineage-drift shape as the #160 incident above. Fixed by PR #171 (c1261d7aa1b8029c0458c2f520fc6d62fc7198cd).",
+      "source": "manual"
+    },
+    {
+      "id": "2026-07-04-stacked-base-pr27",
+      "taxonomyClasses": ["git-topology"],
+      "repo": "omp-squad",
+      "refs": {
+        "baseCommit": "bd2cffda93a863614eb6c5da7505f1f10373dfea",
+        "candidateCommit": "cb8b5047cca9ea43afc09f15017e1d45ec33701d",
+        "prNumber": 27,
+        "branch": "docs/full-overhaul"
+      },
+      "expectedOutcome": "should-detect",
+      "narrative": "PR #27 (the ~/.glance state-dir migration) targeted base docs/full-overhaul instead of main. GitHub reported it MERGED, but cb8b5047 is not an ancestor of origin/main (verified: git merge-base --is-ancestor cb8b5047 origin/main exits non-zero) — the state-dir work never reached main until re-landed as PR #41 (5e22a4371d836eb17adb3018939f519b258dea74, confirmed ancestor). A topology analyzer should flag: candidate's declared base branch is not main and is itself not an ancestor of main at merge time.",
+      "source": "manual"
+    },
+    {
+      "id": "2026-07-04-stacked-base-pr34",
+      "taxonomyClasses": ["git-topology"],
+      "repo": "omp-squad",
+      "refs": {
+        "baseCommit": "c9b5d883fc754b656bbaaeb65c6ddae2f0051694",
+        "candidateCommit": "291dbd2bcf3882519a27917baf2d0a229157d929",
+        "prNumber": 34,
+        "branch": "feat/lifecycle-truth"
+      },
+      "expectedOutcome": "should-detect",
+      "narrative": "PR #34 (never-lose-work: fork-from-checkpoint, terminal markers, deterministic branch resume) merged into feat/lifecycle-truth, a sibling feature branch, not main. 291dbd2bcf3882519a27917baf2d0a229157d929 is not an ancestor of origin/main today (verified). Content later reached main via the PR #36 restack (dccf3830b8e818b2865eb94e79425f04dcd8744f, confirmed ancestor) under a different commit.",
+      "source": "manual"
+    },
+    {
+      "id": "2026-07-04-stacked-base-pr35",
+      "taxonomyClasses": ["git-topology"],
+      "repo": "omp-squad",
+      "refs": {
+        "baseCommit": "89325aec60ab9054d87fe41483eecb00b5d3916f",
+        "candidateCommit": "689ea36d0c511866a4cad3a9c4978e89c5334aa8",
+        "prNumber": 35,
+        "branch": "feat/never-lose-work"
+      },
+      "expectedOutcome": "should-detect",
+      "narrative": "PR #35 (inspectable-topology: unified lineage tree, workflow graph journal) based off feat/never-lose-work rather than main, merging alongside PR #34 in the same wrong-base pattern (both mergedAt within 11 seconds of each other — the tell for a bulk-merged stack). Unlike #27/#34, 689ea36d0c511866a4cad3a9c4978e89c5334aa8 IS an ancestor of origin/main today, because the feat/never-lose-work branch line it sits on was itself later restacked onto main by PR #36 — illustrating that GitHub's MERGED status and a mergedAt timestamp cluster are not sufficient signals; ancestry must be checked per-attempt at the state it actually happened, which a topology analyzer replaying this incident should have flagged at land time regardless of what happened to the branch afterward.",
+      "source": "manual"
+    },
+    {
+      "id": "2026-07-06-orphan-pr68-postmerge-commit",
+      "taxonomyClasses": ["git-topology"],
+      "repo": "omp-squad",
+      "refs": {
+        "mainCommit": "6cd1434100dd18290dd07177f81b46f5911733a2",
+        "candidateCommit": "57b4b75ca34c0b746512bbd21ff31a003820a7a3",
+        "prNumber": 68,
+        "branch": "feat/graph-pan-history"
+      },
+      "expectedOutcome": "should-detect",
+      "narrative": "16 minutes after PR #68 (Fleet Pulse drag-to-load history) merged (6cd1434), a bugfix commit (57b4b75, fixing an unbounded cumulative-$ climb in the very feature #68 shipped) was pushed to the now-merged head branch — invisible to the merge event, so the bug shipped live in main. 57b4b75 is still not an ancestor of origin/main (verified); re-landed separately as draft PR #77. A topology analyzer comparing the PR's headRefOid at merge time against the branch's LATEST commit (when still fetchable) should flag a post-merge-branch-commit gap.",
+      "source": "manual"
+    },
+    {
+      "id": "2026-07-06-orphan-pr69-postmerge-commit",
+      "taxonomyClasses": ["git-topology"],
+      "repo": "omp-squad",
+      "refs": {
+        "mainCommit": "e78da72fd6acc3ec8e8d897788569584ecf14dda",
+        "candidateCommit": "7923cc0f3d21d7c414c8f8fb8727b2c5de971c29",
+        "prNumber": 69,
+        "branch": "worktree-research-mastra-code"
+      },
+      "expectedOutcome": "should-detect",
+      "narrative": "PR #69's merge (e78da72) landed only BRIEF.md; the entire Mastra Observational-Memory cold-adopt/veto-reprompt implementation was pushed ~5 minutes after merge (7923cc0) and never reached main through that PR. 7923cc0 is still not an ancestor of origin/main (verified); re-landed as draft PR #78. Same class as #68 above — flagged the same way.",
+      "source": "manual"
+    },
+    {
+      "id": "2026-07-06-stacked-base-pr72",
+      "taxonomyClasses": ["git-topology"],
+      "repo": "omp-squad",
+      "refs": {
+        "baseCommit": "f6fd444697f8dd5c901b857077670ee43bbec9b7",
+        "candidateCommit": "4031c77dfd46f391157b33751eb8fea274877574",
+        "prNumber": 72,
+        "branch": "feat/codex-attribution"
+      },
+      "expectedOutcome": "should-detect",
+      "narrative": "PR #72 (pluggable harness-ingest framework + OpenRouter) merged into feat/codex-attribution 22 seconds after that branch's own parent PR #70 had already merged to main — 4031c77dfd46f391157b33751eb8fea274877574 never became an ancestor of origin/main (verified). Content re-landed via the pre-existing open PR #74 after resolving a conflict with main's model-scoreboard PR #73.",
+      "source": "manual"
+    },
+    {
+      "id": "2026-07-07-merge-carries-no-content-pr88",
+      "taxonomyClasses": ["git-topology"],
+      "repo": "omp-squad",
+      "refs": {
+        "baseCommit": "5d71ccaa7c03ff24f12dc8d7adac1c87c056e64f",
+        "candidateCommit": "7dff1b83d7cc817faa4baf2dedc2c348c07a7b51",
+        "prNumber": 88,
+        "branch": "effect-migration-ratchet"
+      },
+      "expectedOutcome": "should-detect",
+      "narrative": "PR #88's merge commit (7dff1b8) is not even an ancestor of origin/main (verified) — the cleanest variant of the merged-into-parent-branch artifact: no post-merge commit is needed, the merge event itself never composed onto main's lineage. The effect-migration no-backslide gate (scripts/effect-migration.ts + tests/effect-ratchet.test.ts) was absent from main until re-landed as PR #97, with baselines re-anchored because main had drifted upward in the interim (json +2, bool +6, error-idiom +6; number-env improved 38→4).",
+      "source": "manual"
+    },
+    {
+      "id": "2026-07-04-clean-relanding-pr36",
+      "taxonomyClasses": ["git-topology"],
+      "repo": "omp-squad",
+      "refs": {
+        "baseCommit": "43bd2268b24832357f7f83cda2d8835e98e9588c",
+        "mainCommit": "43bd2268b24832357f7f83cda2d8835e98e9588c",
+        "candidateCommit": "dccf3830b8e818b2865eb94e79425f04dcd8744f",
+        "prNumber": 36,
+        "branch": "main"
+      },
+      "expectedOutcome": "should-not-flag",
+      "narrative": "PR #36 (the restack that re-landed #34/#35's stranded content) based directly on main with base=main verified as an ancestor and the merge commit itself a confirmed ancestor of origin/main. A topology analyzer must NOT flag this candidate — negative exemplar for the stacked-base class immediately above.",
+      "source": "manual"
+    },
+    {
+      "id": "2026-07-04-clean-relanding-pr41",
+      "taxonomyClasses": ["git-topology"],
+      "repo": "omp-squad",
+      "refs": {
+        "baseCommit": "43bd2268b24832357f7f83cda2d8835e98e9588c",
+        "mainCommit": "43bd2268b24832357f7f83cda2d8835e98e9588c",
+        "candidateCommit": "5e22a4371d836eb17adb3018939f519b258dea74",
+        "prNumber": 41,
+        "branch": "main"
+      },
+      "expectedOutcome": "should-not-flag",
+      "narrative": "PR #41 (the re-land of #27's state-dir implementation) also based directly on main with base=main verified as an ancestor and the merge commit a confirmed ancestor of origin/main. Negative exemplar for the stacked-base-pr27 entry above.",
+      "source": "manual"
+    }
+  ],
+  "unpinnable": [
+    {
+      "id": "proof-freshness-no-historical-incident",
+      "taxonomyClasses": ["proof-freshness"],
+      "reason": "Archaeology target per this concern's Approach ('at least one stale-proof case') turned up no historical glance land that actually triggered a stale-DoneProof incident with a pinnable commit. `proof.ts#isFresh` / `proofCoversTip` only re-checks branch-tip ancestry, never re-verifies a DoneProof against a rewritten main — a real design gap (filed as OMPSQ-447, per plans/research-glance-architecture-mandate/BRIEF.md and the architecture-mandate memory) — but it is a risk that has not yet manifested as an occurred incident in this codebase's own land history, so there is no commit to pin. Listed here rather than silently omitted or padded with a synthetic stand-in.",
+      "narrative": "Honest finding, mirroring the structural-api n≈0 result this concern's Approach explicitly names as an acceptable outcome: proof-freshness n=0 real positives to date. If OMPSQ-447 is ever exploited live, that incident belongs here with a pinned commit, promoted out of this section."
+    }
+  ]
+}
