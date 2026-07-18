@@ -84,9 +84,20 @@ export interface ViewCoercion {
 export function coerceView(raw: string | null | undefined): ViewCoercion {
   if (isAppView(raw)) return { view: raw, openPalette: false };
   const trimmed = (raw ?? '').trim();
-  const aliased = VIEW_ALIAS_MAP[trimmed];
+  // hasOwnProperty, not bracket access alone: a bracket lookup on an inherited key like
+  // `toString`/`constructor` would return an Object.prototype function (truthy) and put it into
+  // `view` state — so only own keys of the alias map count.
+  const aliased = Object.prototype.hasOwnProperty.call(VIEW_ALIAS_MAP, trimmed) ? VIEW_ALIAS_MAP[trimmed] : undefined;
   if (aliased) return { view: aliased, openPalette: trimmed === 'knowledge' };
   return { view: 'fleet', openPalette: false };
+}
+
+/** True iff `raw` is a recognized view source — a live AppView key or a known dead-key alias
+ *  (own keys only). Garbage/empty/unrecognized values are NOT recognized, so the boot bootstrap
+ *  can strip them from the URL without overwriting the user's persisted nav. */
+function isRecognizedView(raw: string): boolean {
+  const trimmed = raw.trim();
+  return isAppView(trimmed) || Object.prototype.hasOwnProperty.call(VIEW_ALIAS_MAP, trimmed);
 }
 
 /**
@@ -111,8 +122,14 @@ export function bootstrapViewFromQuery(): void {
     const url = new URL(location.href);
     const raw = url.searchParams.get('view');
     if (raw === null) return; // no param: nothing to seed, nothing to strip
-    const { view } = coerceView(raw);
-    localStorage.setItem(VIEW_STORAGE_KEY, view);
+    // Persist ONLY a genuinely recognized view. An empty or garbage `?view=` used to coerce to
+    // `fleet` and overwrite the user's persisted nav — sticky across reloads, and a crafted link
+    // could force a sensitive first-paint screen. Now such values are stripped from the URL but
+    // never written; only a live key or known alias seeds localStorage.
+    if (isRecognizedView(raw)) {
+      const { view } = coerceView(raw);
+      localStorage.setItem(VIEW_STORAGE_KEY, view);
+    }
     url.searchParams.delete('view');
     history.replaceState(null, '', url.toString());
   } catch {

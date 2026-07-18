@@ -160,13 +160,26 @@ describe('bootstrapViewFromQuery', () => {
     }
   });
 
-  test('garbage lands on fleet rather than seeding a dead value', () => {
+  test('garbage is stripped but NEVER written — the persisted nav is not overwritten', () => {
     const env = stubViewBrowserEnv('http://localhost/?view=not-a-real-view');
     try {
       bootstrapViewFromQuery();
-      expect(env.store.get(VIEW_STORAGE_KEY)).toBe('fleet');
+      expect(env.store.has(VIEW_STORAGE_KEY)).toBe(false); // no sticky `fleet` overwrite
+      expect(env.getHref()).toBe('http://localhost/'); // param still stripped
     } finally {
       env.restore();
+    }
+  });
+
+  test('an inherited Object key (toString/constructor) is treated as garbage, never written', () => {
+    for (const evil of ['toString', 'constructor', 'hasOwnProperty', '__proto__']) {
+      const env = stubViewBrowserEnv(`http://localhost/?view=${evil}`);
+      try {
+        bootstrapViewFromQuery();
+        expect(env.store.has(VIEW_STORAGE_KEY)).toBe(false);
+      } finally {
+        env.restore();
+      }
     }
   });
 
@@ -192,11 +205,12 @@ describe('bootstrapViewFromQuery', () => {
     }
   });
 
-  test('an empty ?view= value falls back to fleet (coerceView treats blank as unset)', () => {
+  test('an empty ?view= value is stripped but NEVER written (no sticky fleet overwrite)', () => {
     const env = stubViewBrowserEnv('http://localhost/?view=');
     try {
       bootstrapViewFromQuery();
-      expect(env.store.get(VIEW_STORAGE_KEY)).toBe('fleet');
+      expect(env.store.has(VIEW_STORAGE_KEY)).toBe(false);
+      expect(env.getHref()).toBe('http://localhost/');
     } finally {
       env.restore();
     }
