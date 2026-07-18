@@ -1,6 +1,6 @@
 # Spine consumes the server ladder — delete the client ranking
 
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: glance-desktop
 COMPLEXITY: architectural
@@ -31,3 +31,10 @@ Exercises concern 06's endpoint; a mismatch surfaces the seen-state divergence b
 - Command palette shows unit rows with correct status clusters.
 - Pulse animation runs only on working/connecting tiers; no restart-flicker on poll (concern 04 identity preservation holds).
 - Taste-lane review on the pill/palette visuals.
+
+## Decision record (2026-07-18)
+
+DONE — glance-desktop PR #37 (stacked on #33, retargeted to main at merge), MERGED to main 2026-07-18.
+Client ranking deleted where it actually LIVED — `fleetRoster.ts` (`rankUnit`/`attentionUnits`/`attentionReason`/`isValidatorHeld`), not `fleetAttention.ts` as this doc named; concern 05 had already surfaced that location drift. New `fleetLadder.ts` holds only the daemon tier-order mirror + tier→token map + presentation helpers. 552/552 tests at PR time; 592/592 on the merged pristine gate.
+Deviation (sound): group roll-ups apply the daemon's own aggregation at cockpit granularity (`maxLadderPriority` over per-unit server tiers) instead of `GET /api/attention/ladder` — the daemon's roll-up keys by raw repo path on ONE daemon; the cockpit groups by project across MERGED daemons, so the endpoint's grouping cannot map. Invariant held: no client derives a per-unit tier.
+Taste calls parked for concern 13: terse pill labels (approve/input/working/ready/done/idle); awaiting-input vs working share the info token, separated only by the pulse; palette timestamp is unit age from `startedAt` (no last-activity field on the wire).
