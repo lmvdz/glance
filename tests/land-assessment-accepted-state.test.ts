@@ -237,6 +237,37 @@ describe("projectState: the anchor identity check", () => {
 		expect(factContentSet(projected.facts)).toEqual(factContentSet(direct.facts));
 	});
 
+	test("an UNTOUCHED file's IMPORTS edge is re-extracted when the sibling it resolves to is removed (identity holds)", async () => {
+		const repo = await gitRepo("anchor-project-import-stale-");
+		const baseCommit = await commitFiles(
+			repo,
+			{ "a.ts": "import { bar } from './b';\nexport function foo(): number { return bar(); }\n", "b.ts": "export function bar(): number { return 2; }\n" },
+			"base",
+		);
+		const baseState = await stateRefFor(repo, baseCommit);
+		const stateDir = await freshStateDir();
+		await writeManifest(stateDir, await extractManifest(baseState, PRODUCER));
+
+		// Setup sanity: at the checkpoint a.ts's import RESOLVED to b.ts, so removing b.ts makes the kept
+		// edge stale — the exact condition the projector must catch even though a.ts itself never changes.
+		const baseImport = (await extractStateFacts(baseState)).facts.find((f) => f.subject.path === "a.ts" && f.predicate === "IMPORTS");
+		expect(baseImport?.object).toEqual({ kind: "string", value: "b.ts" });
+
+		// b.ts is removed; a.ts is NOT touched — its `import './b'` now dangles (still parses, resolves to
+		// nothing). Before the fix the projector kept a.ts's checkpoint edge (object "b.ts"), disagreeing
+		// with a fresh extraction at target (which re-resolves to the raw unresolved spec).
+		await git(repo, "rm", "-q", "b.ts");
+		await git(repo, "commit", "-qm", "remove b.ts (a.ts's import now dangles)");
+		const targetState = await stateRefFor(repo, (await git(repo, "rev-parse", "HEAD")).stdout);
+
+		const projected = await projectState(stateDir, repo, baseState.repositoryId, targetState);
+		expect(projected.fallback).toBeUndefined(); // the incremental checkpoint+delta path actually ran
+		const direct = await extractStateFacts(targetState);
+		expect(factContentSet(projected.facts)).toEqual(factContentSet(direct.facts)); // the identity contract
+		// No projected edge still claims a.ts resolves to the deleted b.ts.
+		expect(projected.facts.some((f) => f.predicate === "IMPORTS" && f.object.kind === "string" && f.object.value === "b.ts")).toBe(false);
+	});
+
 	test("no checkpoint at all falls back to full extraction, and content still matches direct extraction", async () => {
 		const repo = await gitRepo("anchor-project-fallback-");
 		const commit = await commitFiles(repo, { "a.ts": "export function foo(): number { return 1; }\n" }, "base");

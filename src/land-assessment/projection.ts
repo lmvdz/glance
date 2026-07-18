@@ -111,6 +111,29 @@ export async function projectState(stateDir: string, repo: string, repositoryId:
 		changedPaths.add(entry.path);
 	}
 
+	// IMPORTS facts are the one predicate whose OBJECT is resolved against the WHOLE tree at the commit
+	// (typescript-structural-delta.ts: `object.value = resolvedPath ?? spec`), so an OTHERWISE-untouched
+	// file's kept import edge can go stale even though its own path never changed — its sibling did. Two
+	// cases, both making the kept fact disagree with a fresh extraction at `target`:
+	//   1. a RESOLVED edge (object is a tree path) whose target module was removed or renamed away — the
+	//      import no longer resolves there;
+	//   2. an UNRESOLVED edge (object kept the raw relative specifier, which starts with "." or "/") that a
+	//      newly added/renamed-in path could now satisfy.
+	// Re-extract those owner files so the projection equals direct extraction (the concern-11 identity
+	// contract). Every other predicate's object is a name or a hash (EXPORTS/EXTENDS/IMPLEMENTS/HAS_SIGNATURE),
+	// membership-independent, and stays safely kept.
+	const additionsPresent = entries.some((e) => e.operation === "added" || e.operation === "renamed");
+	for (const f of checkpoint.facts) {
+		if (f.predicate !== "IMPORTS" || f.object.kind !== "string") continue;
+		const owner = f.subject.path;
+		if (changedPaths.has(owner) || supersededOnlyPaths.has(owner)) continue; // already re-extracted, or dropped as superseded
+		const obj = f.object.value;
+		const isRawSpecifier = obj.startsWith(".") || obj.startsWith("/"); // unresolved edges keep the raw specifier
+		const resolvedTargetGone = !isRawSpecifier && supersededOnlyPaths.has(obj);
+		const mayNowResolve = isRawSpecifier && additionsPresent;
+		if (resolvedTargetGone || mayNowResolve) changedPaths.add(owner);
+	}
+
 	const keptFacts = checkpoint.facts.filter((f) => !supersededOnlyPaths.has(f.subject.path) && !changedPaths.has(f.subject.path));
 	const changedExtraction = await extractStateFacts(target, [...changedPaths]);
 	const facts = [...keptFacts, ...changedExtraction.facts].sort((a, b) => a.factId.localeCompare(b.factId));
