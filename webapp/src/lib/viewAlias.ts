@@ -88,3 +88,36 @@ export function coerceView(raw: string | null | undefined): ViewCoercion {
   if (aliased) return { view: aliased, openPalette: trimmed === 'knowledge' };
   return { view: 'fleet', openPalette: false };
 }
+
+/**
+ * `?view=<name>` boot bootstrap (D0, glance-desktop dashboard embedding prerequisite): the
+ * desktop shell embeds this SPA in a native webview and needs to pick the initial screen from
+ * OUTSIDE the page (it can't pre-seed localStorage across origins/profiles the way a same-origin
+ * script can) — a URL query param is the one channel it can always drive. Funnels through the
+ * SAME `coerceView` funnel every other view source uses (a dead GRAPH-FOLD key still aliases, a
+ * typo/garbage value still lands on `fleet` rather than a white screen), persists the COERCED
+ * value under `VIEW_STORAGE_KEY` — the same key TaskContext's lazy `useState` initializer reads
+ * on first render via `readStoredView()` — then strips the param from the visible URL. Mirrors
+ * `captureToken`'s `?token=` handling in ./api.ts: same "read once, persist, strip" shape, so a
+ * bookmarked or shared `?view=` link doesn't keep re-pinning the view on every subsequent load,
+ * and a reload after navigating elsewhere in-app doesn't snap back to the seeded value.
+ *
+ * MUST run before the first React render (call it from main.tsx, like `installPushTapBeacon`) so
+ * `readStoredView()` observes the seeded value on its very first read — this function itself
+ * never touches React state.
+ */
+export function bootstrapViewFromQuery(): void {
+  try {
+    const url = new URL(location.href);
+    const raw = url.searchParams.get('view');
+    if (raw === null) return; // no param: nothing to seed, nothing to strip
+    const { view } = coerceView(raw);
+    localStorage.setItem(VIEW_STORAGE_KEY, view);
+    url.searchParams.delete('view');
+    history.replaceState(null, '', url.toString());
+  } catch {
+    // ponytail: storage/location can be blocked (private mode, non-browser test harness, an
+    // embed edge case) — the app still boots, just without the seeded view; never let a boot
+    // bootstrap take the whole page down.
+  }
+}

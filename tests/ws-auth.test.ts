@@ -3,7 +3,7 @@
  * URL query) and F-3 (the security response-header set).
  */
 
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { requestToken } from "../src/auth.ts";
 import { securityHeaders } from "../src/server.ts";
 
@@ -25,6 +25,104 @@ test("securityHeaders sets the hardening set with an inline-safe, exfil-blocking
 	const csp = h["Content-Security-Policy"];
 	expect(csp).toContain("connect-src 'self'"); // compensating control: no cross-origin exfil
 	expect(csp).toContain("frame-ancestors 'none'");
+});
+
+// D0 (glance-desktop dashboard embedding prerequisite): OMP_SQUAD_FRAME_ANCESTORS opt-in.
+// Default-unset behavior must stay byte-identical to the pinned assertions above — this block
+// only adds NEW coverage for the opt-in path, it never loosens the default-off case.
+describe("OMP_SQUAD_FRAME_ANCESTORS opt-in (D0 desktop-embed prerequisite)", () => {
+	const KEY = "OMP_SQUAD_FRAME_ANCESTORS";
+
+	function withEnv(value: string | undefined, fn: () => void) {
+		const stash = process.env[KEY];
+		try {
+			if (value === undefined) delete process.env[KEY];
+			else process.env[KEY] = value;
+			fn();
+		} finally {
+			if (stash === undefined) delete process.env[KEY];
+			else process.env[KEY] = stash;
+		}
+	}
+
+	test("unset: headers are exactly the default-deny set (frame-ancestors 'none' + XFO DENY) — provably unchanged", () => {
+		withEnv(undefined, () => {
+			const h = securityHeaders();
+			expect(h["X-Frame-Options"]).toBe("DENY");
+			expect(h["Content-Security-Policy"]).toContain("frame-ancestors 'none'");
+			expect(h["Content-Security-Policy"]).not.toContain("frame-ancestors tauri:");
+		});
+	});
+
+	test("blank/whitespace-only: treated exactly like unset (default-deny, XFO present)", () => {
+		withEnv("   ", () => {
+			const h = securityHeaders();
+			expect(h["X-Frame-Options"]).toBe("DENY");
+			expect(h["Content-Security-Policy"]).toContain("frame-ancestors 'none'");
+		});
+	});
+
+	test("valid single origin: frame-ancestors names it, X-Frame-Options is OMITTED (not merely DENY)", () => {
+		withEnv("tauri://localhost", () => {
+			const h = securityHeaders();
+			expect(h["Content-Security-Policy"]).toContain("frame-ancestors tauri://localhost");
+			expect(h["Content-Security-Policy"]).not.toContain("frame-ancestors 'none'");
+			expect("X-Frame-Options" in h).toBe(false);
+		});
+	});
+
+	test("valid multi-origin allowlist (the desktop shell's two webview origins): both appear, space-separated, in order", () => {
+		withEnv("tauri://localhost http://tauri.localhost", () => {
+			const h = securityHeaders();
+			expect(h["Content-Security-Policy"]).toContain("frame-ancestors tauri://localhost http://tauri.localhost");
+			expect("X-Frame-Options" in h).toBe(false);
+		});
+	});
+
+	test("the exact CSP string, opted in: every other directive is untouched, only frame-ancestors changes", () => {
+		withEnv("tauri://localhost", () => {
+			const h = securityHeaders();
+			expect(h["Content-Security-Policy"]).toBe(
+				"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: http:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors tauri://localhost",
+			);
+			expect(h["X-Content-Type-Options"]).toBe("nosniff");
+			expect(h["Referrer-Policy"]).toBe("no-referrer");
+		});
+	});
+
+	test.each(["*", "http:", "https:", "null", "* tauri://localhost", "tauri://localhost *"])(
+		"rejected outright, falls back to default-deny: %s",
+		(bad) => {
+			withEnv(bad, () => {
+				const h = securityHeaders();
+				expect(h["X-Frame-Options"]).toBe("DENY");
+				expect(h["Content-Security-Policy"]).toContain("frame-ancestors 'none'");
+			});
+		},
+	);
+
+	test("garbage / unparseable tokens fail the WHOLE value closed, even alongside an otherwise-valid origin", () => {
+		withEnv("tauri://localhost not-an-origin", () => {
+			const h = securityHeaders();
+			expect(h["X-Frame-Options"]).toBe("DENY");
+			expect(h["Content-Security-Policy"]).toContain("frame-ancestors 'none'");
+			expect(h["Content-Security-Policy"]).not.toContain("tauri://localhost");
+		});
+	});
+
+	test("a path/query/fragment on an otherwise-valid origin is rejected (not a bare origin)", () => {
+		withEnv("tauri://localhost/some/path", () => {
+			const h = securityHeaders();
+			expect(h["Content-Security-Policy"]).toContain("frame-ancestors 'none'");
+		});
+	});
+
+	test("extra whitespace between origins is tolerated (split on runs of whitespace)", () => {
+		withEnv("tauri://localhost   http://tauri.localhost", () => {
+			const h = securityHeaders();
+			expect(h["Content-Security-Policy"]).toContain("frame-ancestors tauri://localhost http://tauri.localhost");
+		});
+	});
 });
 
 // webapp-voice-lane: connect-src names the keyed provider ONLY while the lane is armed — the SDP

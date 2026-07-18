@@ -454,6 +454,60 @@ export function computeUiVersion(html: string): string {
 // the exact transition rule without importing the server module; re-exported for existing callers.
 export { escalationPayload };
 
+// A syntactically plausible `scheme://host[:port]` origin — no path, no query, no trailing
+// slash, no wildcard. Deliberately conservative: this gates what can be handed straight into a
+// CSP directive, so anything merely "probably fine" is rejected rather than guessed at.
+const PLAUSIBLE_ORIGIN_RE = /^[a-z][a-z0-9+.-]*:\/\/[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?(?::[0-9]{1,5})?$/;
+
+/** True iff `token` is a single well-formed origin — never `*`, a bare scheme (`http:`), the
+ *  literal string `null`, or anything with a path/query/fragment. Used only by
+ *  `frameAncestorsOrigins` below; every caller of THAT function gets fail-closed behavior on any
+ *  single bad token, so this predicate itself doesn't need to be forgiving. */
+function isPlausibleOrigin(token: string): boolean {
+	if (token === "*" || token === "null") return false;
+	if (token.includes("*")) return false; // no wildcard anywhere in the token, not just as the whole value
+	return PLAUSIBLE_ORIGIN_RE.test(token);
+}
+
+let frameAncestorsWarned = false;
+
+/** OMP_SQUAD_FRAME_ANCESTORS (desktop-embed prerequisite, D0): a space-separated allowlist of
+ *  origins permitted to iframe this dashboard, e.g. `tauri://localhost http://tauri.localhost`
+ *  (the desktop shell's webview origins on macOS/Linux WebKit vs. Windows WebView2 — see
+ *  .env.example). UNSET (the default) is a no-op: `securityHeaders()` below keeps emitting
+ *  `frame-ancestors 'none'` + `X-Frame-Options: DENY`, byte-identical to before this var existed —
+ *  `tests/ws-auth.test.ts`'s pinned substrings depend on that.
+ *
+ *  Validation is fail-CLOSED, not fail-open: if the var is set but EVERY token isn't a clean,
+ *  parseable origin, the whole value is rejected (logged once) and the default-deny headers are
+ *  used, exactly as if the var were unset — never a partial allowlist of "the tokens that looked
+ *  okay", which would silently trust a caller's judgment call about which junk to drop. Rejected
+ *  outright: `*` (a wildcard would let ANY page frame the dashboard — the one thing this knob must
+ *  never be able to express), a bare scheme (`http:`/`https:`, meaningless as a frame-ancestors
+ *  source), the literal `null`, and empty tokens from stray whitespace.
+ *
+ *  Returns `null` when the var is unset/blank/entirely-invalid (⇒ emit the default-deny headers);
+ *  a non-empty array of validated origins when it's set and every token parses.
+ */
+function frameAncestorsOrigins(): string[] | null {
+	const raw = process.env.OMP_SQUAD_FRAME_ANCESTORS;
+	if (raw === undefined || raw.trim() === "") return null;
+	const tokens = raw.trim().split(/\s+/).filter((t) => t.length > 0);
+	if (tokens.length === 0) return null;
+	for (const t of tokens) {
+		if (!isPlausibleOrigin(t)) {
+			if (!frameAncestorsWarned) {
+				frameAncestorsWarned = true;
+				console.warn(
+					`[server] OMP_SQUAD_FRAME_ANCESTORS="${raw}" contains an invalid origin ("${t}") — falling back to the default-deny frame-ancestors 'none'. Every token must be a plain scheme://host[:port] origin; wildcards, bare schemes, and "null" are never accepted.`,
+				);
+			}
+			return null; // fail closed: ANY bad token voids the whole allowlist, not just that one entry
+		}
+	}
+	return tokens;
+}
+
 // ponytail: 'unsafe-inline' is forced by the single-file inline-script/style SPA;
 // connect-src 'self' is the compensating control (blocks token exfil to other origins).
 /** Security response headers stamped on every dashboard + API response (finding F-3).
@@ -469,18 +523,32 @@ export { escalationPayload };
  *  no voice button, a legibility cost accepted in exchange for not shipping the silent-dead-call
  *  class found live 2026-07-13 (a mint succeeds, then the browser's own SDP POST dies silently
  *  against a tight 'self'). Every other daemon keeps the tight exfil-blocking default. Read per-call
- *  so a flag flip doesn't need a restart to tighten back. */
+ *  so a flag flip doesn't need a restart to tighten back.
+ *
+ *  frame-ancestors (desktop-embed prerequisite, D0): default-deny (`'none'` + `X-Frame-Options:
+ *  DENY`) unless `OMP_SQUAD_FRAME_ANCESTORS` opts in a validated origin allowlist (see
+ *  `frameAncestorsOrigins` above), in which case `frame-ancestors` names those origins and
+ *  `X-Frame-Options` is OMITTED entirely — XFO's `DENY`/`SAMEORIGIN`/`ALLOW-FROM` vocabulary can't
+ *  express an arbitrary origin *list*, and every browser that still honors XFO also honors CSP
+ *  `frame-ancestors`, which takes precedence over XFO wherever both are present (CSP2 §
+ *  frame-ancestors; XFO is the legacy, strictly-weaker mechanism it superseded). Sending a stale
+ *  `X-Frame-Options: DENY` alongside a widened `frame-ancestors` would be actively misleading
+ *  (and in the one legacy-engine edge case that still prefers XFO, would silently defeat the
+ *  opt-in), so it's dropped rather than left in place. */
 export function securityHeaders(): Record<string, string> {
 	const flagOn = envBool("OMP_SQUAD_VOICE_ENABLED", false);
 	const voiceOrigins = flagOn ? (voiceDbBootMode() === "db" ? voiceProviderOrigins() : voiceConnectSrcOrigins()) : [];
 	const connectSrc = ["'self'", ...voiceOrigins].join(" ");
-	return {
+	const frameAncestors = frameAncestorsOrigins();
+	const frameAncestorsDirective = frameAncestors ? `frame-ancestors ${frameAncestors.join(" ")}` : "frame-ancestors 'none'";
+	const headers: Record<string, string> = {
 		"Content-Security-Policy":
-			`default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: http:; connect-src ${connectSrc}; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`,
+			`default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: http:; connect-src ${connectSrc}; object-src 'none'; base-uri 'none'; ${frameAncestorsDirective}`,
 		"X-Content-Type-Options": "nosniff",
-		"X-Frame-Options": "DENY",
 		"Referrer-Policy": "no-referrer",
 	};
+	if (!frameAncestors) headers["X-Frame-Options"] = "DENY";
+	return headers;
 }
 
 /** True if a socket peer address is loopback (IPv4, IPv6, or IPv4-mapped). */
