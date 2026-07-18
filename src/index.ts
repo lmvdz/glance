@@ -967,7 +967,11 @@ async function cmdGrr(args: string[]): Promise<void> {
 		}
 		for (const e of entries) {
 			const where = [e.repo ? (e.repo.split("/").pop() ?? e.repo) : "—", e.context, e.agentId].filter(Boolean).join(" · ");
-			process.stdout.write(`  ${`${relAgo(e.ts)} ago`.padStart(8)}  ${where.padEnd(28)} ${e.gripe}\n`);
+			// Concern 02 (plans/daily-driver-w15): mark daemon-auto-captured rows so a human skimming
+			// `--list` doesn't mistake them for something they typed — `--json` already carries the raw
+			// `source` field for a programmatic reader (the drain).
+			const marker = e.source === "auto" ? "auto " : "";
+			process.stdout.write(`  ${`${relAgo(e.ts)} ago`.padStart(8)}  ${marker}${where.padEnd(28)} ${e.gripe}\n`);
 		}
 		return;
 	}

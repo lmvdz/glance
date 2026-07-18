@@ -53,6 +53,16 @@ if not after wave 1, STOP and re-diagnose; contingent epics do not start."
   `<stateDir>/friction.jsonl` (plus its `.1` rotation sibling), stateDir per `src/state-dir.ts`
   resolution (env override → `~/.glance` → legacy `~/.omp/squad`). Keep entries with
   `ts` after the cutoff.
+- **Split by `source` before triaging** (plans/daily-driver-w15 concern 02): every entry is
+  `source:"human"` (typed by Lars/whoever's dogfooding — missing `source` on an old row reads the
+  same way, the field's read-side default) or `source:"auto"` (the daemon's own hook sites — held
+  boundary-syncs `context:"auto:boundary-sync-held"`, ACP prompt timeouts
+  `context:"auto:acp-timeout"`, session loss on restart `context:"auto:session-loss"`). Present
+  the two groups separately in the draft: auto rows corroborate or contradict what the human rows
+  say (e.g. a human gripe about "sync keeps getting stuck" backed by three auto
+  `boundary-sync-held` rows the same week is a stronger signal than either alone) but an auto row
+  is never itself counted as a human adoption/friction signal — it's the daemon reporting on
+  itself, not the operator reporting on the daemon.
 - Drop entries whose ids are already listed in `plans/daily-dogfood-engine/accepted-friction.md`
   — they were accepted in a previous drain and must not be re-triaged every week.
 - Counters: `glance doctor` (the "Is glance getting daily use?" section) or
@@ -110,6 +120,64 @@ week). Same fail-closed Ledger insertion; verdict language in `--clusters` is re
 `## Ledger` and nothing else. Grep the diff for verdict tokens (`SUCCESS`, `KILL`, `verdict`) to
 confirm the machinery held — verify, don't trust. Then commit the Ledger appends together with
 any approved accepted-friction lines and filed concern docs.
+
+## Scheduled operation (plans/daily-driver-w15 concern 03)
+
+The weekly drain does not run itself on a fresh machine — arming it is a one-time step, not
+something the daemon or this skill does automatically (the daemon has no wall-clock cron by
+design; the meta-plan's Ledger is human-reviewed content, not a target for daemon automation).
+
+**Why not Claude Code's own `CronCreate`:** it was tried first, per this concern's own recon. Its
+own tool contract states a job "lives only in this Claude session" and "is gone when Claude
+exits" — and even a session left open indefinitely hard-auto-expires the job after 7 days,
+firing once more then deleting itself. Neither property survives a *weekly, indefinite* cadence:
+the session that would hold the job always ends (this section was authored inside a one-shot
+implementer subagent whose session ends the moment its task returns — armed there, the "job id"
+would already be gone by the time anyone reads it), and even a long-lived interactive session's
+job self-deletes after exactly one firing. Reporting a job id under either condition is exactly
+the "fake a routine" failure mode this concern's Verify section forbids — so none was created.
+`CronList` was called instead to confirm the tool is reachable and empty (no session-scoped job
+exists), and no job was armed.
+
+**The durable mechanism — one OS-level cron line, armed once by hand:**
+
+```
+crontab -e
+# add (point at the real checkout; keep off the :00/:05/:30 marks so weekly runs across many
+# machines don't all land on the same instant):
+17 9 * * 5 cd /home/lars/sui/omp-squad && /home/lars/.local/bin/claude -p "/dogfood-drain" --allowedTools "Bash,Read,Edit,Write" >> ~/.glance/dogfood-drain.log 2>&1
+
+# disarm (either works):
+crontab -e                                   # delete the line above
+crontab -l | grep -v dogfood-drain | crontab -   # non-interactive
+```
+
+This runs `claude -p` (headless, non-interactive) against the real checkout once a week — the
+same skill invocation a human gets from typing `/dogfood-drain`, including drafting the triage
+and appending both Ledger rows via the fail-closed scripts in steps 4-5 above. It never writes
+the adoption-gate verdict: `assertNoVerdictLanguage` (`src/meta-ledger.ts`) refuses verdict
+language regardless of who or what is driving the append. If the daemon is down at fire time,
+both `append-adoption-ledger.ts` and `append-drain-summary.ts` exit 1 and leave `00-meta.md`
+untouched — a quiet week in `~/.glance/dogfood-drain.log` means the routine didn't fire or the
+daemon was down, never that adoption was a fabricated zero. Check the log, don't infer from
+silence.
+
+`/loop 168h /dogfood-drain` inside a long-lived interactive Claude Code session is the lighter
+fallback already named in the concern doc — it dies the moment that session closes, so treat the
+crontab line above as the one that survives a laptop reboot or a closed terminal.
+
+**Pause/resume:** `crontab -e`, comment out (`#`) or delete the line to pause, restore it to
+resume. There is no daemon-side toggle; arming and disarming are always this one crontab edit.
+As of this writing the crontab line above has **not** been installed on this machine — this
+section documents the exact one-liner, it does not arm it on Lars's behalf.
+
+**Wiring proof (live, not mocked):** run against a real scratch daemon (see `.claude/skills/
+scratch-daemon`), `bun scripts/append-adoption-ledger.ts --port <scratch-port>` against a copy of
+the real `00-meta.md` appended a real counter-snapshot row while the daemon was up, and the same
+invocation against the same daemon killed (verified by `ss -tlnp` showing the port free, not just
+a `kill` on the launcher pid — `nohup bun ... up &`'s `$!` can point at a launcher process
+distinct from the actual listening pid; confirm with `ss`/`lsof`, not process-exists alone)
+exited 1 with the file byte-for-byte untouched.
 
 ## The two-week gate review
 

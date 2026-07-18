@@ -134,6 +134,12 @@ The full-featured web UI is the React app in [`webapp/`](webapp/), served when i
 `GLANCE_WEBAPP=1` is set; [`src/web/index.html`](src/web/index.html) is the zero-build fallback
 dashboard. See the [web dashboard guide](docs-site/content/docs/guides/web-dashboard.mdx).
 
+Beyond the fleet, glance is also a **single-operator daily driver**: `glance here` attaches a
+claude chat to your current directory in the terminal, `glance grr` logs friction in five
+seconds, boundary sync lands each turn's edits in your real checkout without racing it, and the
+web dashboard's **Daily** panel surfaces the dogfood adoption counters and the friction ledger.
+→ [The daily driver](docs/daily-driver.md).
+
 ## Autonomy — the factory loop
 
 With a [Plane](https://plane.so) workspace configured, the daemon closes the whole loop —
@@ -252,6 +258,10 @@ bun run dev        # http://localhost:3000/docs
 
 Content is authored in `docs-site/content/docs/*`. Set `OPENROUTER_API_KEY` in
 `docs-site/.env.local` to enable the Ask-AI chat.
+
+A few task-oriented guides are hand-written alongside the code under [`docs/`](docs/) — the
+[daily-driver manual](docs/daily-driver.md), [self-drive](docs/self-drive.md), and
+[operations](docs/operations.md).
 
 ## Verify
 
