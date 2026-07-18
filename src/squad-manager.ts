@@ -2332,6 +2332,22 @@ export class SquadManager extends EventEmitter {
 		const ph = buildDeadPlaceholder(p, transcript);
 		this.deadPlaceholders.set(p.id, ph);
 		this.log("info", `dead placeholder recorded for ${p.name} (${p.id}) — ${ph.deadReason}`);
+		// Concern 02: session-loss friction, keyed on the placeholder's own stable id (unlike
+		// boundary-sync's holds, a `PersistedAgent.id` is a one-shot ephemeral chat id that never gets
+		// reused by a later live session — so ANY prior "auto:session-loss" row for this exact id proves
+		// this exact loss was already filed). Dedup reads FrictionLog's ring, rehydrated from the persisted
+		// file at construction, so it survives an ORDINARY restart. It is best-effort, not absolute:
+		// JsonlLog's file is explicitly best-effort (fire-and-forget spool), so a crash within the
+		// sub-second spool window — before this row lands AND before persist() drops the record — can
+		// re-file it on the next boot. A duplicate low-noise session-loss gripe is acceptable (the weekly
+		// drain dedups); what must never happen is this block throwing into start(), hence the guard.
+		try {
+			if (!this.hasAutoFriction("auto:session-loss", p.id)) {
+				this.captureAutoFriction(p.id, p.repo, "auto:session-loss", `session lost: ${p.name} (${p.id}) did not survive a daemon restart — ${ph.deadReason}`);
+			}
+		} catch (err) {
+			this.log("warn", `session-loss auto-friction check failed for ${p.id}: ${errText(err)}`);
+		}
 		// The dead session's adapter chain may still be running: a daemon KILL orphans the direct ACP
 		// child (npx → claude-code-acp reparents to init and idles forever — its stdio transport died
 		// with the old daemon process, so REUSE is impossible by construction). Reap it by the pid
@@ -2849,6 +2865,34 @@ export class SquadManager extends EventEmitter {
 	/** Friction ledger ring tail (newest-LAST — the API reverses for newest-first display). */
 	frictionRecent(limit?: number): FrictionEntry[] {
 		return this.frictionLog.recent(limit);
+	}
+
+	// ── Auto-friction capture (plans/daily-driver-w15 concern 02) ───────────────────────────────────
+	// The daemon files its own gripes for the three friction classes it already detects internally —
+	// held boundary-syncs, ACP prompt timeouts, session loss on restart — as low-noise, distinguishable
+	// FrictionEntry rows (source:"auto", context:"auto:<cause>") the weekly drain buckets separately
+	// from human gripes. Every call site below is a genuine ORIGIN event (a hold/divergence/timeout/
+	// dead-session was just discovered for the FIRST time), never a re-raise/replay of an already-known
+	// one — see each call site's own comment for why a restart or backlog re-raise can't reach here.
+
+	/** THE auto-capture funnel: fail-open (a friction-write failure is a warn log line, never thrown
+	 *  into the caller) — friction capture must never become friction itself. `agentId` is optional
+	 *  because a dead placeholder's "agent" no longer has a live roster entry, only its own stable id. */
+	private captureAutoFriction(agentId: string | undefined, repo: string, context: "auto:boundary-sync-held" | "auto:acp-timeout" | "auto:session-loss", gripe: string): void {
+		try {
+			this.recordFriction({ repo, gripe, context, agentId, source: "auto" });
+		} catch (err) {
+			this.log("warn", `auto-friction capture failed (${context}): ${errText(err)}`);
+		}
+	}
+
+	/** Durable, restart-surviving "have we already filed this exact one" check — FrictionLog's ring is
+	 *  rehydrated from the persisted file at construction, so this reflects prior tenures too, not just
+	 *  this process's memory. Used ONLY where the same stable id could plausibly recur across a restart
+	 *  before the underlying condition resolves (session-loss's placeholder id); boundary-sync/ACP-timeout
+	 *  call sites don't need it — see their own comments for why. */
+	private hasAutoFriction(context: "auto:boundary-sync-held" | "auto:acp-timeout" | "auto:session-loss", agentId: string): boolean {
+		return this.frictionLog.recent().some((e) => e.source === "auto" && e.context === context && e.agentId === agentId);
 	}
 
 	projects(): ProjectDTO[] {
@@ -5352,6 +5396,10 @@ export class SquadManager extends EventEmitter {
 							`A concurrent edit to ${outcome.divergence.paths.join(", ")} in ${realDir} may have interleaved with this turn's write. Nothing was rolled back automatically. ` +
 								`The pre-write copy is retained at ${outcome.divergence.captureDir} — compare it against your current file(s) by hand before deciding whether to restore from it.`,
 						);
+						// Concern 02: a genuinely NEW divergence, discovered exactly once at the moment this
+						// turn's own write happened — never re-raised (a restart never replays a live turn's
+						// agent_end; the `!start` guard above already returns before this switch on any replay).
+						this.captureAutoFriction(rec.dto.id, realDir, "auto:boundary-sync-held", `boundary sync divergence: a concurrent edit to ${outcome.divergence.paths.join(", ")} in ${realDir} may have interleaved with this turn's write (agent ${rec.dto.name})`);
 					}
 					return;
 				case "held": {
@@ -5387,6 +5435,14 @@ export class SquadManager extends EventEmitter {
 							`Apply replays them in order after a fresh safety re-check; Discard drops them (the session worktree keeps every edit). ` +
 							`Held patches: ${this.boundarySyncHeld.root}`,
 					);
+					// Concern 02: fires only here, at the moment `syncTurnEnd` durably created a BRAND NEW
+					// held patch (this branch requires `outcome.held !== undefined` — the ledger-append-failed
+					// sub-case returned above as "uncapturable" instead) — never at a re-raise of an
+					// already-known hold. `reattachHeldSyncs` (boot re-raise) and `rekeyHeldSyncsOnReattach`
+					// (restart-reattach re-key) both call `raiseBoundarySyncAttention` directly for EXISTING
+					// holds without ever routing through this turn-end origin path, so neither can double-count
+					// this — no time-window/id dedup needed, the call graph itself makes it exactly-once.
+					this.captureAutoFriction(rec.dto.id, realDir, "auto:boundary-sync-held", `boundary sync held: ${outcome.reason} (agent ${rec.dto.name}, ${realDir})`);
 					return;
 				}
 				case "uncapturable":
@@ -5504,6 +5560,9 @@ export class SquadManager extends EventEmitter {
 					.map((d) => `turn ${d.turn}: ${d.paths.join(", ")} (pre-write copy retained at ${d.captureDir})`)
 					.join("; ") + ` — nothing was rolled back automatically; compare each capture against the current file(s) by hand.`,
 			);
+			// Concern 02: a NEW divergence, discovered exactly once at THIS explicit replay (a resolved
+			// patch never re-enters the backlog, so a later Apply call can't rediscover the same one).
+			this.captureAutoFriction(rec.dto.id, realDir, "auto:boundary-sync-held", `boundary sync divergence detected across ${result.divergences.length} replayed turn${result.divergences.length === 1 ? "" : "s"} for ${realDir} (agent ${rec.dto.name})`);
 		}
 		void this.recordAudit(actor, "boundary-sync.apply", id, result.ok ? "ok" : "error", `${result.applied} applied, ${result.remaining} remaining${result.reason ? ` — ${result.reason}` : ""}`);
 		return result;
@@ -10107,6 +10166,19 @@ export class SquadManager extends EventEmitter {
 	private recordErrorTransition(rec: AgentRecord, entry: TransitionEntry): void {
 		if (entry.to !== "error" || (entry.reason !== "fail" && entry.reason !== "catastrophe" && entry.reason !== "exit-error")) return;
 		rec.errorTransitionTimestamps = [...(rec.errorTransitionTimestamps ?? []), entry.at];
+		// Concern 02: ACP prompt timeouts (plans/daily-onramp/07/08's silence-window + hard-cap rejects,
+		// acp-agent-driver.ts's sendTurn) surface here — the MANAGER's error-transition handling, not the
+		// driver (which stays transport-only) — matched on the driver's own fixed error-message shape.
+		// Every real "error" transition is a fresh, distinct turn failure (TransitionEntry.seq mints a
+		// new uuid per occurrence; there is no re-raise/replay path for a transition the way boundary-sync
+		// attention rows have), so no cross-call dedup is needed here — each match IS a new event. This
+		// is expected to be RARE (daily-onramp/08 already fixed the common no-liveness-signal case for
+		// compliant adapters); a spike here is exactly the residual-adapter case that plan tracks, not
+		// noise from this hook.
+		const errMsg = entry.cause?.error;
+		if (typeof errMsg === "string" && /^acp request .+ timed out\b/.test(errMsg)) {
+			this.captureAutoFriction(rec.dto.id, rec.dto.repo, "auto:acp-timeout", `ACP prompt timed out: ${errMsg} (agent ${rec.dto.name})`);
+		}
 	}
 
 	/** Linear scan + trim over THIS agent's own (small, unbounded-by-other-agents) error-timestamp array

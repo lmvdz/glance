@@ -63,9 +63,19 @@ export interface FrictionEntry {
 	agentId?: string;
 	/** Repo the operator was in when annoyance struck ("" when genuinely unknown). */
 	repo: string;
-	/** Capture surface ("cli" / "tui" / "webapp-composer" / "here") or free-form situational context. */
+	/** Capture surface ("cli" / "tui" / "webapp-composer" / "here") or free-form situational context.
+	 *  Auto-captured rows (plans/daily-driver-w15 concern 02) use a fixed `auto:*` convention —
+	 *  `auto:boundary-sync-held`, `auto:acp-timeout`, `auto:session-loss` — so the drain can bucket
+	 *  them without relying on `source` alone (belt and suspenders). */
 	context?: string;
 	gripe: string;
+	/** Who/what filed this gripe. Absent on any row written before this field existed — READERS (not
+	 *  the jsonl file) default a missing value to `"human"` (see `FrictionLog.recent`/`hydrateAll`); no
+	 *  rewrite of existing friction.jsonl rows. `"auto"` is stamped ONLY by the daemon's own internal
+	 *  hook sites (held boundary-syncs, ACP prompt timeouts, session loss on restart) — `POST
+	 *  /api/friction` never accepts it from a client (the request schema has no `source` field at
+	 *  all, and the handler never reads one off the decoded body). */
+	source?: "human" | "auto";
 }
 
 /**

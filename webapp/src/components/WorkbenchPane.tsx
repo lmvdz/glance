@@ -10,6 +10,7 @@ import {
   Circle,
   Download,
   Filter,
+  Gauge,
   GitCompare,
   Inbox,
   RotateCcw,
@@ -107,6 +108,8 @@ export function railFooterContext(
       return 'Fleet activity, cost, and lineage over time';
     case 'fog':
       return 'Comprehension debt — what nobody has looked at yet';
+    case 'daily':
+      return 'Adoption counters and the friction ledger';
     case 'capabilities':
       return `${ctx.packCount} trusted pack${ctx.packCount === 1 ? '' : 's'} · ${ctx.catalogCount} in the catalog`;
     case 'org':
@@ -141,6 +144,7 @@ export const NAV_ITEMS: { view: AppView; label: string; icon: LucideIcon; title:
   { view: 'tasks', label: 'Tasks', icon: Inbox, title: 'Tasks' },
   { view: 'omp-graph', label: 'Graph', icon: Waypoints, title: 'Graph — the living temporal dashboard' },
   { view: 'fog', label: 'Fog', icon: CloudFog, title: 'Fog — comprehension debt: what nobody has looked at yet' },
+  { view: 'daily', label: 'Daily', icon: Gauge, title: 'Daily driver — adoption counters and the friction ledger' },
   { view: 'plan-reality', label: 'Plan reality', icon: GitCompare, title: 'Plan vs reality — what each plan claims, and whether it is proven' },
   { view: 'capabilities', label: 'Capabilities', icon: Boxes, title: 'Capabilities' },
 ];
@@ -425,6 +429,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
     : view === 'capabilities' ? `${capabilities.packs.length} packs`
     : view === 'omp-graph' ? 'Graph'
     : view === 'fog' ? 'Fog'
+    : view === 'daily' ? 'Daily'
     : view === 'plan-reality' ? 'Plan reality'
     : view === 'org' ? 'Settings'
     : '';

@@ -132,6 +132,8 @@ test("here-class turn: stable checkout ⇒ the edit lands in the real tree, no a
 	expect(syncRows(mgr.rec("chat-1").dto)).toHaveLength(0);
 	expect(mgr.rec("chat-1").boundarySyncTurn).toBe(1);
 	expect(mgr.rec("chat-1").boundarySyncEndTree).toBeTruthy(); // reused as turn 2's baseline
+	// Concern 02: a clean apply is never friction — the auto-capture hook only fires on "held"/"divergence".
+	expect(mgr.frictionRecent()).toHaveLength(0);
 });
 
 test("here-class turn: mid-turn operator edit ⇒ held + ONE boundary-sync attention row; explicit apply clears it", async () => {
@@ -152,6 +154,11 @@ test("here-class turn: mid-turn operator edit ⇒ held + ONE boundary-sync atten
 	let rows = syncRows(mgr.rec("chat-1").dto);
 	expect(rows).toHaveLength(1);
 	expect(rows[0].summary).toContain("sync held");
+	// Concern 02: a brand-new held patch just landed — exactly one auto-captured friction entry.
+	let gripes = mgr.frictionRecent();
+	expect(gripes).toHaveLength(1);
+	expect(gripes[0]).toMatchObject({ source: "auto", context: "auto:boundary-sync-held", agentId: "chat-1" });
+	expect(gripes[0].gripe).toContain("boundary sync held");
 
 	// Turn 2: real tree is stable, but the backlog blocks auto-apply — row refreshed, still one.
 	mgr.turnStart("chat-1");
@@ -163,14 +170,21 @@ test("here-class turn: mid-turn operator edit ⇒ held + ONE boundary-sync atten
 	rows = syncRows(mgr.rec("chat-1").dto);
 	expect(rows).toHaveLength(1); // one row per agent, freshest state — never a stack
 	expect(rows[0].detail).toContain("2 turns");
+	// Turn 2 is ALSO a brand-new held patch (a distinct triggering event) — a second auto entry, not a
+	// dup of turn 1's (each held patch is its own real annoyance instance).
+	gripes = mgr.frictionRecent();
+	expect(gripes).toHaveLength(2);
+	expect(gripes.every((g) => g.source === "auto" && g.context === "auto:boundary-sync-held")).toBe(true);
 
-	// The operator clicks Apply: both turns replay in order, the row clears.
+	// The operator clicks Apply: both turns replay in order, the row clears. Apply/resolve never
+	// itself writes friction (it's a recovery action, not a new incident) — count stays at 2.
 	const r = await mgr.applyHeldSync("chat-1");
 	expect(r).toEqual({ ok: true, applied: 2, remaining: 0 });
 	const a = await fs.readFile(path.join(repo, "a.txt"), "utf8");
 	expect(a).toContain("turn1");
 	expect(a).toContain("turn2");
 	expect(syncRows(mgr.rec("chat-1").dto)).toHaveLength(0);
+	expect(mgr.frictionRecent()).toHaveLength(2);
 });
 
 test("plain fleet unit (no realTreePath): the hooks are inert no-ops", async () => {
@@ -418,14 +432,21 @@ test("boot: reattachHeldSyncs re-raises the row for a restored session and only 
 	// Daemon tenure 2, same state dir: the restored session gets its row back without any new turn.
 	const mgr2 = new TestManager({ stateDir });
 	seed(mgr2, "chat-1", { repo, worktree: wt, realTreePath: repo });
+	// Concern 02: reattachHeldSyncs re-raises the SAME already-captured hold — must add zero NEW
+	// friction entries (mgr2's own FrictionLog rehydrates from tenure 1's persisted file at
+	// construction, whatever that count is; what matters is reattach() doesn't grow it).
+	const beforeReattach = mgr2.frictionRecent().length;
 	await mgr2.reattach();
 	const rows = syncRows(mgr2.rec("chat-1").dto);
 	expect(rows).toHaveLength(1);
 	expect(rows[0].summary).toContain("before the daemon restart");
+	expect(mgr2.frictionRecent()).toHaveLength(beforeReattach);
 
 	// Tenure 3: the agent is gone — reattach must not throw, and must not invent rows elsewhere.
 	const mgr3 = new TestManager({ stateDir });
+	const beforeReattach3 = mgr3.frictionRecent().length;
 	await mgr3.reattach(); // logs a warning; holds stay durable on disk
+	expect(mgr3.frictionRecent()).toHaveLength(beforeReattach3);
 });
 
 // ── C2: reattach re-keys a predecessor's held syncs onto the new session's id ───────────────────────
