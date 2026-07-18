@@ -90,16 +90,56 @@ describe("OMP_SQUAD_FRAME_ANCESTORS opt-in (D0 desktop-embed prerequisite)", () 
 		});
 	});
 
-	test.each(["*", "http:", "https:", "null", "* tauri://localhost", "tauri://localhost *"])(
-		"rejected outright, falls back to default-deny: %s",
-		(bad) => {
-			withEnv(bad, () => {
-				const h = securityHeaders();
-				expect(h["X-Frame-Options"]).toBe("DENY");
-				expect(h["Content-Security-Policy"]).toContain("frame-ancestors 'none'");
-			});
-		},
-	);
+	test.each([
+		"*",
+		"http:",
+		"https:",
+		"null",
+		"* tauri://localhost",
+		"tauri://localhost *",
+		// non-web schemes must never become a frame-ancestors source (adversarial review):
+		"javascript://a",
+		"data://a",
+		"blob://null",
+		"file://localhost",
+		"ftp://evil.com",
+		"ws://localhost",
+		// bad host / port / IPv4-games that a syntax-only regex let through (adversarial review):
+		"https://evil.com:99999",
+		"https://evil.com:65536",
+		"http://evil..com",
+		"http://0x7f000001",
+		"http://2130706433",
+		// non-canonical forms must not round-trip: uppercase scheme, trailing slash/dot, userinfo:
+		"HTTP://tauri.localhost",
+		"http://tauri.localhost/",
+		"http://tauri.localhost.",
+		"http://user:pass@tauri.localhost",
+		// one junk token voids an otherwise-valid neighbor:
+		"tauri://localhost ftp://evil.com",
+	])("rejected outright, falls back to default-deny: %s", (bad) => {
+		withEnv(bad, () => {
+			const h = securityHeaders();
+			expect(h["X-Frame-Options"]).toBe("DENY");
+			expect(h["Content-Security-Policy"]).toContain("frame-ancestors 'none'");
+			expect(h["Content-Security-Policy"]).not.toContain("frame-ancestors tauri:");
+			expect(h["Content-Security-Policy"]).not.toContain("frame-ancestors http");
+		});
+	});
+
+	test("unset path is byte-identical to pre-D0: exact header keys AND insertion order", () => {
+		withEnv(undefined, () => {
+			const h = securityHeaders();
+			// The wire header order (X-Frame-Options BEFORE Referrer-Policy) is the pre-D0 order;
+			// a drift here is the "byte-identical when unset" regression the adversarial review found.
+			expect(Object.keys(h)).toEqual([
+				"Content-Security-Policy",
+				"X-Content-Type-Options",
+				"X-Frame-Options",
+				"Referrer-Policy",
+			]);
+		});
+	});
 
 	test("garbage / unparseable tokens fail the WHOLE value closed, even alongside an otherwise-valid origin", () => {
 		withEnv("tauri://localhost not-an-origin", () => {

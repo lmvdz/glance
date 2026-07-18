@@ -454,19 +454,51 @@ export function computeUiVersion(html: string): string {
 // the exact transition rule without importing the server module; re-exported for existing callers.
 export { escalationPayload };
 
-// A syntactically plausible `scheme://host[:port]` origin — no path, no query, no trailing
-// slash, no wildcard. Deliberately conservative: this gates what can be handed straight into a
-// CSP directive, so anything merely "probably fine" is rejected rather than guessed at.
-const PLAUSIBLE_ORIGIN_RE = /^[a-z][a-z0-9+.-]*:\/\/[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?(?::[0-9]{1,5})?$/;
+// Schemes a frame-ancestors origin may use. Deliberately tiny: the desktop shell's webviews speak
+// http/https (WebView2 / tauri.localhost) and the custom `tauri:` scheme (macOS/Linux WKWebView).
+// A frame-ancestors source is meaningless for javascript:/data:/blob:/file:/ftp:/ws: and letting
+// them through would put attacker-controllable pseudo-origins into the CSP, so they're rejected.
+const ALLOWED_FRAME_ANCESTOR_SCHEMES = new Set(["http:", "https:", "tauri:"]);
 
-/** True iff `token` is a single well-formed origin — never `*`, a bare scheme (`http:`), the
- *  literal string `null`, or anything with a path/query/fragment. Used only by
- *  `frameAncestorsOrigins` below; every caller of THAT function gets fail-closed behavior on any
- *  single bad token, so this predicate itself doesn't need to be forgiving. */
+// RFC-1123-style hostname: dot-separated labels, each 1–63 chars, no empty labels (rejects
+// `evil..com`), no leading/trailing hyphen. `new URL().origin` alone does NOT reject an empty DNS
+// label, so this is a required second check on top of the parse+round-trip below.
+const ORIGIN_HOSTNAME_RE = /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
+
+/** True iff `token` is a single well-formed, canonical origin — never `*`, a bare scheme
+ *  (`http:`), the literal `null`, a non-web scheme, or anything carrying credentials / a path /
+ *  query / fragment. A regex is not enough here (the value is concatenated straight into a CSP
+ *  directive), so the token is parsed with `new URL` and every part is checked:
+ *   - scheme ∈ {http, https, tauri} (rejects javascript:/data:/blob:/file:/ftp:/ws:…);
+ *   - no userinfo, no query, no fragment, no path beyond the implicit root;
+ *   - a real DNS-shaped hostname (rejects `evil..com`, which `.origin` round-trip does not);
+ *   - port, if any, in 1..65535;
+ *   - a CANONICAL round-trip: the token must equal its own normalized origin, which rejects
+ *     trailing slashes/dots, uppercase schemes, default-port redundancy, and IPv4 games like
+ *     `http://0x7f000001` (canonicalized to `http://127.0.0.1`, so it won't round-trip).
+ *  `tauri:` is a WHATWG *non-special* scheme, so its `.origin` is the opaque string "null" — the
+ *  canonical form is reconstructed as `tauri://<host>` instead of using `.origin`, or a valid
+ *  `tauri://localhost` (the very origin we need) would be wrongly rejected.
+ *  Every caller gets fail-closed behavior on any single bad token, so this predicate is strict. */
 function isPlausibleOrigin(token: string): boolean {
-	if (token === "*" || token === "null") return false;
-	if (token.includes("*")) return false; // no wildcard anywhere in the token, not just as the whole value
-	return PLAUSIBLE_ORIGIN_RE.test(token);
+	if (token === "*" || token === "null" || token.includes("*")) return false;
+	let u: URL;
+	try {
+		u = new URL(token);
+	} catch {
+		return false;
+	}
+	if (!ALLOWED_FRAME_ANCESTOR_SCHEMES.has(u.protocol)) return false;
+	if (u.username !== "" || u.password !== "") return false;
+	if (u.search !== "" || u.hash !== "") return false;
+	if (u.pathname !== "" && u.pathname !== "/") return false;
+	if (!ORIGIN_HOSTNAME_RE.test(u.hostname)) return false;
+	if (u.port !== "") {
+		const p = Number(u.port);
+		if (!Number.isInteger(p) || p < 1 || p > 65535) return false;
+	}
+	const canonical = u.protocol === "tauri:" ? `tauri://${u.host}` : u.origin;
+	return canonical === token;
 }
 
 let frameAncestorsWarned = false;
@@ -541,13 +573,16 @@ export function securityHeaders(): Record<string, string> {
 	const connectSrc = ["'self'", ...voiceOrigins].join(" ");
 	const frameAncestors = frameAncestorsOrigins();
 	const frameAncestorsDirective = frameAncestors ? `frame-ancestors ${frameAncestors.join(" ")}` : "frame-ancestors 'none'";
+	// Key insertion order is load-bearing for the UNSET path: it must stay byte-identical to
+	// pre-D0 (CSP → X-Content-Type-Options → X-Frame-Options → Referrer-Policy), so X-Frame-Options
+	// is inserted in its original slot — before Referrer-Policy — not appended at the end.
 	const headers: Record<string, string> = {
 		"Content-Security-Policy":
 			`default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: http:; connect-src ${connectSrc}; object-src 'none'; base-uri 'none'; ${frameAncestorsDirective}`,
 		"X-Content-Type-Options": "nosniff",
-		"Referrer-Policy": "no-referrer",
 	};
 	if (!frameAncestors) headers["X-Frame-Options"] = "DENY";
+	headers["Referrer-Policy"] = "no-referrer";
 	return headers;
 }
 
