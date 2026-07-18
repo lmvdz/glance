@@ -125,10 +125,15 @@ export async function projectState(stateDir: string, repo: string, repositoryId:
  *  two are asserting, stripped of that provenance, so a caller can compare "what does the projection
  *  believe is true" against "what does direct extraction say is true" without the provenance fields
  *  producing a false mismatch. */
+/** @substrate exported for tests only — `factContentSet` (below, same file) is the one production
+ *  caller; a co-located test consumer is not a real reference (dead-exports.ts's own carve-out). */
 export function factContentTriple(f: SnapshotFact): string {
 	return JSON.stringify({ subject: f.subject, predicate: f.predicate, object: f.object });
 }
 
+/** @substrate exported for tests only — the accepted-state-anchor identity check (this module's own
+ *  doc, above) is currently asserted directly from tests; a future `projectState` caller that wants to
+ *  compare its own result against a fresh extraction is expected to call this too. */
 export function factContentSet(facts: readonly SnapshotFact[]): Set<string> {
 	return new Set(facts.map(factContentTriple));
 }

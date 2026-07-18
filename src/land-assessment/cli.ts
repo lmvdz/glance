@@ -87,7 +87,7 @@ async function listTsFilesAtCommit(repo: string, commit: string, cap: number): P
 
 async function readMergedPrRows(filePath: string): Promise<MergedPrRow[]> {
 	const raw = await readFile(filePath, "utf8");
-	const parsed = JSON.parse(raw) as unknown;
+	const parsed: unknown = JSON.parse(raw);
 	if (!Array.isArray(parsed)) throw new Error(`land-assessment: --merged-prs-json ${filePath} must be a JSON array`);
 	return parsed as MergedPrRow[];
 }
@@ -97,6 +97,7 @@ async function readMergedPrRows(filePath: string): Promise<MergedPrRow[]> {
  *  concerns use, since `runLandAssessmentCli` below is a real, non-test caller. */
 export async function cmdReplay(args: string[]): Promise<CliResult> {
 	const { flags } = parseArgs(args);
+	if (flags.help || flags.h) return { code: 0, stdout: HELP };
 	const repoArg = typeof flags.repo === "string" ? flags.repo : process.cwd();
 	const repo = computeRepositoryId(repoArg);
 	const stateDir = typeof flags["state-dir"] === "string" ? flags["state-dir"] : stateDirPath();
@@ -126,6 +127,7 @@ export async function cmdReplay(args: string[]): Promise<CliResult> {
  *  `cmdReplay`'s own convention just above. */
 export async function cmdInspect(args: string[]): Promise<CliResult> {
 	const { positional, flags } = parseArgs(args);
+	if (flags.help || flags.h) return { code: 0, stdout: HELP };
 	const id = positional[0];
 	if (!id) return { code: 1, stdout: "" };
 	const repoArg = typeof flags.repo === "string" ? flags.repo : process.cwd();

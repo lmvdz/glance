@@ -277,6 +277,9 @@ function synthesizeAdjacentDependencyEdit(input: SynthesizeInput): SynthesizeRes
 
 // ── entry point ──────────────────────────────────────────────────────────────────────────────────────
 
+/** @substrate exported for tests only — `generateSyntheticCorpus` (below, same file) is the one
+ *  production caller; tests exercise each mutation kind (and its inapplicable-input gap path)
+ *  directly, including the determinism assertion (same seed -> same pair). */
 export function synthesizeMutation(input: SynthesizeInput): SynthesizeResult {
 	const parsed = parseSource(input.sourcePath, input.sourceContent);
 	if (!parsed.ok) return { ok: false, reason: parsed.reason };

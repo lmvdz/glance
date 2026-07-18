@@ -39,14 +39,20 @@ import { repoHash16 } from "./store.ts";
 export const DEFAULT_CHECKPOINT_CADENCE = 50;
 
 /** No prior checkpoint exists for this repo at all — "on first enablement per repo" (Approach). Pure:
- *  callers pass whatever `listManifestCommits` (below) already told them. */
+ *  callers pass whatever `listManifestCommits` (below) already told them.
+ *  @substrate Cadence primitive with no external caller yet -- a future land hook / periodic
+ *  checkpoint job (outside this concern's scope, per `dueForPeriodicCheckpoint`'s own doc below) wires
+ *  it up; a co-located test consumer is not a real reference (dead-exports.ts's own carve-out). */
 export function needsInitialCheckpoint(existingManifestCommits: readonly string[]): boolean {
 	return existingManifestCommits.length === 0;
 }
 
 /** "then every N accepted transitions" (Approach) — pure cadence arithmetic; the caller (a future land
  *  hook / periodic job, outside this concern's scope) is responsible for tracking
- *  `transitionsSinceLastCheckpoint` itself. */
+ *  `transitionsSinceLastCheckpoint` itself.
+ *  @substrate Cadence primitive with no external caller yet -- same future land hook as
+ *  `needsInitialCheckpoint` (above) wires it up; a co-located test consumer is not a real reference
+ *  (dead-exports.ts's own carve-out). */
 export function dueForPeriodicCheckpoint(transitionsSinceLastCheckpoint: number, cadence: number = DEFAULT_CHECKPOINT_CADENCE): boolean {
 	return transitionsSinceLastCheckpoint >= cadence;
 }
@@ -127,7 +133,9 @@ function isExtractionCoverageArrayLike(v: unknown): v is ExtractionCoverage[] {
 }
 
 /** THROWS on any structurally invalid `EntityRecord` — reused by `validateRepositoryManifest` for every
- *  entry in `entities`. */
+ *  entry in `entities`.
+ *  @substrate exported for tests only — `validateRepositoryManifest` (below, same file) is the one
+ *  production caller; tests exercise the corrupt-record throw path directly. */
 export function validateEntityRecord(v: unknown): EntityRecord {
 	if (!v || typeof v !== "object") throw new Error(`land-assessment manifest: EntityRecord is not an object: ${JSON.stringify(v)}`);
 	const e = v as Partial<EntityRecord>;
@@ -143,7 +151,9 @@ export function validateEntityRecord(v: unknown): EntityRecord {
 
 /** THROWS on any structurally invalid `RepositoryManifest` — the validate-on-read guard every durable
  *  record in this subsystem carries (`schema.ts`'s idiom). Reuses `schema.ts`'s exported
- *  `validateRepositoryStateRef`/`validateSnapshotFact` for the nested shapes it already owns. */
+ *  `validateRepositoryStateRef`/`validateSnapshotFact` for the nested shapes it already owns.
+ *  @substrate exported for tests only — `readManifest` (below, same file) is the one production
+ *  caller; tests exercise the corrupt-record throw path directly. */
 export function validateRepositoryManifest(v: unknown): RepositoryManifest {
 	if (!v || typeof v !== "object") throw new Error(`land-assessment manifest: RepositoryManifest is not an object: ${JSON.stringify(v)}`);
 	const m = v as Partial<RepositoryManifest>;

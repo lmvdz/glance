@@ -398,4 +398,25 @@ describe("cli.ts", () => {
 	test("runLandAssessmentCli with no subcommand prints help and does not throw", async () => {
 		await runLandAssessmentCli([]);
 	});
+
+	test("cmdReplay --help short-circuits to the help text without touching git/state", async () => {
+		// No --repo/--state-dir supplied and no fixture repo set up -- if this fell through to the real
+		// replay path it would throw resolving --main-ref against cwd. Reaching the assertion at all is
+		// part of the proof.
+		const { code, stdout } = await cmdReplay(["--help"]);
+		expect(code).toBe(0);
+		expect(stdout).toContain("glance land-assessment <subcommand>");
+		expect(stdout).toContain("--merged-prs-json");
+	});
+
+	test("cmdInspect --help short-circuits to the help text without touching the store", async () => {
+		const { code, stdout } = await cmdInspect(["--help"]);
+		expect(code).toBe(0);
+		expect(stdout).toContain("glance land-assessment <subcommand>");
+	});
+
+	test("runLandAssessmentCli dispatches replay --help / inspect --help through to the subcommand's own help", async () => {
+		await runLandAssessmentCli(["replay", "--help"]);
+		await runLandAssessmentCli(["inspect", "--help"]);
+	});
 });

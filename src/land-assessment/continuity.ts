@@ -39,7 +39,9 @@ function isNonEmptyString(v: unknown): v is string {
 // ── Validation (owned here — schema.ts's own doc: "shapes frozen here; owned by concern 11") ──────
 
 /** THROWS on any structurally invalid `ContinuityRecord` — the validate-on-read guard every durable
- *  record in this subsystem carries. */
+ *  record in this subsystem carries.
+ *  @substrate exported for tests only — `readContinuityRecord` (below, same file) is the one
+ *  production caller; tests exercise the corrupt-record throw path directly. */
 export function validateContinuityRecord(v: unknown): ContinuityRecord {
 	if (!v || typeof v !== "object") throw new Error(`land-assessment continuity: ContinuityRecord is not an object: ${JSON.stringify(v)}`);
 	const c = v as Partial<ContinuityRecord>;
@@ -59,12 +61,20 @@ function continuityFilePath(stateDir: string, repositoryId: string): string {
 	return path.join(stateDir, "land-assessment", repoHash16(repositoryId), "continuity.json");
 }
 
+/** @substrate Phase-0 persistence primitive with no external caller yet -- `repairContinuity` (below,
+ *  same file) is the only current caller; a future direct-write path (e.g. a periodic continuity probe
+ *  run outside `repairContinuity`) is expected to call it too, mirroring `manifest.ts#writeManifest`'s
+ *  role for `RepositoryManifest`. */
 export async function writeContinuityRecord(stateDir: string, record: ContinuityRecord): Promise<void> {
 	await getStorageBackend().writeDurable(continuityFilePath(stateDir, record.repositoryId), JSON.stringify(record));
 }
 
 /** `undefined` when no continuity record has ever been written for this repo — the legitimate
- *  never-checked case, not an error. THROWS (validate-on-read) on a corrupt/torn file. */
+ *  never-checked case, not an error. THROWS (validate-on-read) on a corrupt/torn file.
+ *  @substrate Phase-0 read primitive with no external caller yet -- a future land hook (this module's
+ *  own doc: the transition ledger, if built, belongs to a later concern's land hook) reads through this
+ *  before calling `checkContinuity`; a co-located test consumer is not a real reference
+ *  (dead-exports.ts's own carve-out). */
 export async function readContinuityRecord(stateDir: string, repositoryId: string): Promise<ContinuityRecord | undefined> {
 	const file = continuityFilePath(stateDir, repositoryId);
 	const text = await getStorageBackend().readText(file);
@@ -86,6 +96,10 @@ export async function readContinuityRecord(stateDir: string, repositoryId: strin
  * itself accounted for (e.g. every `resultCommit` this repo's land-assessment store has recorded) — used
  * to detect the "ancestor, but an unaccounted external transition landed in between" case; omitted, that
  * leg is skipped (never guessed at) and only the non-ancestor (rewrite) case is checked.
+ *
+ * @substrate Phase-0 producer with no external caller yet -- a future land hook (this module's own
+ * doc: the transition ledger, if built, belongs to a later concern's land hook) wires this up; a
+ * co-located test consumer is not a real reference (dead-exports.ts's own carve-out).
  */
 export async function checkContinuity(repo: string, lastIndexed: RepositoryStateRef, current: RepositoryStateRef, knownTransitions?: ReadonlySet<string>): Promise<ContinuityRecord> {
 	if (lastIndexed.repositoryId !== current.repositoryId) {
@@ -116,6 +130,10 @@ export async function checkContinuity(repo: string, lastIndexed: RepositoryState
  * must be an independently-observed ACCEPTED state (never an unlanded candidate) — the same discipline
  * `manifest.ts#extractManifest` states for its own `stateRef` parameter, which this function calls
  * directly.
+ *
+ * @substrate Phase-0 producer with no external caller yet -- same future land hook as
+ * `checkContinuity` (above) wires this up; a co-located test consumer is not a real reference
+ * (dead-exports.ts's own carve-out).
  */
 export async function repairContinuity(stateDir: string, repo: string, current: RepositoryStateRef, producer: ProducerRef): Promise<{ manifest: RepositoryManifest; continuity: ContinuityRecord }> {
 	void repo; // not needed for the repair itself (extractManifest reads via current.repositoryId), kept for signature symmetry with checkContinuity and future accounted-transition seeding

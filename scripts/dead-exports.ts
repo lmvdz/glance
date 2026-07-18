@@ -91,8 +91,18 @@ export interface DeadExport {
  *  no non-test consumer yet. Each is genuinely built ahead of its caller — concerns 03-11 wire up
  *  land()/analyzers/the replay CLI in later batches — so each got an honest `@substrate` tag rather
  *  than sitting uncounted; net effect vs the prior 215 is -4 (22 new @substrate-exempt entries against
- *  4 other exports that picked up a real reference elsewhere on this branch). Tightening for real. */
-export const BASELINE = 211;
+ *  4 other exports that picked up a real reference elsewhere on this branch). Tightening for real.
+ *  2026-07-17 (land-assessment concerns 05/06/11, batch 3 review fixes): 211→210 — the batch shipped 15
+ *  new dead exports uncaught before merge (corpus.ts's three `reconstruct*` source functions,
+ *  synthesize.ts's `synthesizeMutation`, manifest.ts's two cadence helpers + two validators,
+ *  projection.ts's `factContentTriple`/`factContentSet`, continuity.ts's validator/persistence/check
+ *  /repair functions — five). Each is genuinely built ahead of its external caller (test-only today, or
+ *  a documented future land hook), so each got an honest `@substrate` tag rather than sitting
+ *  uncounted. Net effect vs the prior 211 is -1: the 15 new `@substrate`-exempt entries are offset by
+ *  `done-proof.ts#readDoneProofLedger` picking up a real cross-file reference from
+ *  `corpus.ts#reconstructFfLocalLandTriples` (same batch), which flips it dead→live. Tightening for
+ *  real. */
+export const BASELINE = 210;
 
 function scriptKindFor(rel: string): ts.ScriptKind {
 	return rel.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS;

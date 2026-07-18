@@ -180,6 +180,9 @@ function extractBranchFromMergeSubject(subject: string): string | undefined {
  * Source 1: `git log --merges --first-parent <mainRef>` — one triple per merge commit, no network, no
  * ledger dependency for RECOVERY (the ledger only feeds the outcome-label join). An octopus merge
  * (>2 parents) has no single (M, C) pair to assign and is reported as a gap, never guessed at.
+ *
+ * @substrate exported for tests only — `buildReplayCorpus` (below, same file) is the one production
+ * caller; tests exercise each source individually to assert per-source coverage/gaps.
  */
 export async function reconstructMergeCommitTriples(repo: string, mainRef: string, stateDir: string): Promise<{ triples: ReplayTriple[]; coverage: CorpusCoverage }> {
 	const resolvedRepo = computeRepositoryId(repo);
@@ -247,6 +250,9 @@ export interface MergedPrRow {
  * local object store — this function never fetches. A row whose head/merge commit is not locally
  * resolvable degrades to a gap (the concern's explicit "replay degrades per-PR to a coverage gap
  * offline, never fabricates").
+ *
+ * @substrate exported for tests only — `buildReplayCorpus` (below, same file) is the one production
+ * caller; tests exercise each source individually to assert per-source coverage/gaps.
  */
 export async function reconstructPrMergeTriples(repo: string, rows: readonly MergedPrRow[], stateDir: string): Promise<{ triples: ReplayTriple[]; coverage: CorpusCoverage }> {
 	const resolvedRepo = computeRepositoryId(repo);
@@ -330,6 +336,9 @@ function findPreTransitionCommit(entries: readonly string[], target: string): { 
  * fast-forwarded, not folded into a `--no-ff` merge commit — those are excluded here, recovered
  * instead by `reconstructMergeCommitTriples`). B == M by the fast-forward invariant; M itself comes
  * from `mainRef`'s own reflog, degrading to a gap once expired/unavailable.
+ *
+ * @substrate exported for tests only — `buildReplayCorpus` (below, same file) is the one production
+ * caller; tests exercise each source individually to assert per-source coverage/gaps.
  */
 export async function reconstructFfLocalLandTriples(repo: string, mainRef: string, stateDir: string): Promise<{ triples: ReplayTriple[]; coverage: CorpusCoverage }> {
 	const resolvedRepo = computeRepositoryId(repo);
