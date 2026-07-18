@@ -713,16 +713,23 @@ export interface StateExtraction {
  * the delta path (`computeSideDelta`) by construction, per the concern's explicit requirement that the
  * delta and anchor paths never diverge. Reuses `stateRef.repositoryId` as the git `cwd` — it is ALREADY
  * `computeRepositoryId`-resolved by construction (`id.ts`'s own doc on `RepositoryStateRef`).
+ *
+ * `filesOverride` (concern 11's `projection.ts`): when given, restricts extraction to exactly those
+ * paths instead of every TS file in the tree — the lineage projector uses this to re-extract only the
+ * files a delta actually touched, inheriting everything else from the nearest checkpoint, without ever
+ * needing a second notion of "what does this file export". `lowerTree`/import resolution are still
+ * built from the FULL tree listing regardless of the override, so a restricted run and a full run
+ * produce byte-identical per-file output — the override only prunes which files are visited, it never
+ * changes how any visited file is extracted.
  */
-// @substrate Phase-1 producer (concern 04) with no external caller yet -- concern 11's manifest/checkpoint
-// anchor wires this up in a later batch (plans/land-assessment); a co-located test consumer is not a
-// real reference (dead-exports.ts's own carve-out).
-export async function extractStateFacts(stateRef: RepositoryStateRef): Promise<StateExtraction> {
+// @substrate Phase-1 producer (concern 04); concern 11's manifest/checkpoint anchor
+// (src/land-assessment/projection.ts) is the override parameter's caller.
+export async function extractStateFacts(stateRef: RepositoryStateRef, filesOverride?: readonly string[]): Promise<StateExtraction> {
 	const repo = stateRef.repositoryId;
 	const observedAt = nowIso();
 	const treeSet = await listTreePaths(repo, stateRef.commit);
 	const lowerTree = buildLowerTree(treeSet);
-	const tsFiles = [...treeSet].filter(isTsPath).sort();
+	const tsFiles = (filesOverride ?? [...treeSet]).filter(isTsPath).sort();
 
 	const facts: SnapshotFact[] = [];
 	const syntaxGaps: ExtractionCoverage["gaps"] = [];
