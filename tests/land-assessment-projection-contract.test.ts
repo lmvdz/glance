@@ -219,6 +219,12 @@ describe("litmus: Does E flip continuity to unknown until reconciled?", () => {
 		expect(after).toEqual(manifest);
 		// E's new consumer of Bar is now part of the accepted-state record.
 		expect(after!.entities.some((e) => e.locator.qualifiedName === "consumer.useBar")).toBe(true);
+		// …and the IMPORTS edge consumer.ts -> a.ts survives projection intact. This is the exact predicate
+		// the batch-3 projector fix hardened (an untouched file's import edge must not be silently dropped
+		// or mis-resolved when siblings change); without a query on the edge itself the suite would pass
+		// even if projection lost it.
+		const consumerImport = after!.facts.find((f) => f.subject.path === "consumer.ts" && f.predicate === "IMPORTS");
+		expect(consumerImport?.object).toEqual({ kind: "string", value: "a.ts" });
 	});
 });
 
