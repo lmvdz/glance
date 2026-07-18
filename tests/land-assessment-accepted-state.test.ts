@@ -268,6 +268,36 @@ describe("projectState: the anchor identity check", () => {
 		expect(projected.facts.some((f) => f.predicate === "IMPORTS" && f.object.kind === "string" && f.object.value === "b.ts")).toBe(false);
 	});
 
+	test("an UNTOUCHED file's resolved IMPORTS edge is re-extracted when an ADDED higher-priority sibling shadows it (identity holds)", async () => {
+		// Cross-lineage-review case: `./foo` resolved to foo.tsx at the checkpoint; the target ADDS foo.ts
+		// (higher resolution priority) without touching consumer.ts, so direct extraction now resolves to
+		// foo.ts. The first fix only re-checked UNRESOLVED edges and would have kept the stale foo.tsx edge.
+		const repo = await gitRepo("anchor-project-import-shadow-");
+		const baseCommit = await commitFiles(
+			repo,
+			{ "consumer.ts": "import { x } from './foo';\nexport const y = x;\n", "foo.tsx": "export const x = 1;\n" },
+			"base",
+		);
+		const baseState = await stateRefFor(repo, baseCommit);
+		const stateDir = await freshStateDir();
+		await writeManifest(stateDir, await extractManifest(baseState, PRODUCER));
+
+		// Setup sanity: the checkpoint edge resolved to foo.tsx.
+		const baseImport = (await extractStateFacts(baseState)).facts.find((f) => f.subject.path === "consumer.ts" && f.predicate === "IMPORTS");
+		expect(baseImport?.object).toEqual({ kind: "string", value: "foo.tsx" });
+
+		// Add foo.ts (shadows foo.tsx for `./foo`); consumer.ts is NOT touched.
+		const targetState = await stateRefFor(repo, await commitFiles(repo, { "foo.ts": "export const x = 2;\n" }, "add higher-priority foo.ts"));
+
+		const projected = await projectState(stateDir, repo, baseState.repositoryId, targetState);
+		expect(projected.fallback).toBeUndefined();
+		const direct = await extractStateFacts(targetState);
+		expect(factContentSet(projected.facts)).toEqual(factContentSet(direct.facts)); // identity holds despite the shadow
+		// consumer.ts's edge now resolves to foo.ts, not the stale foo.tsx.
+		const consumerImport = projected.facts.find((f) => f.subject.path === "consumer.ts" && f.predicate === "IMPORTS");
+		expect(consumerImport?.object).toEqual({ kind: "string", value: "foo.ts" });
+	});
+
 	test("no checkpoint at all falls back to full extraction, and content still matches direct extraction", async () => {
 		const repo = await gitRepo("anchor-project-fallback-");
 		const commit = await commitFiles(repo, { "a.ts": "export function foo(): number { return 1; }\n" }, "base");

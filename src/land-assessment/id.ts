@@ -210,9 +210,25 @@ function stripObservedAt(entry: IdentifiedRecord): IdentifiedRecord {
  * @substrate Phase-0 producer (concern 01) with no external caller yet -- land()/analyzers wire it up in concerns 03-11 (plans/land-assessment); a co-located test consumer is not a real reference (dead-exports.ts's own carve-out).
  */
 export function computeOutputHash(observations: ReadonlyArray<IdentifiedRecord>, findings: ReadonlyArray<IdentifiedRecord>): string {
-	const sortedObservations = [...observations].sort((a, b) => stableIdOf(a).localeCompare(stableIdOf(b))).map(stripObservedAt);
-	const sortedFindings = [...findings].sort((a, b) => stableIdOf(a).localeCompare(stableIdOf(b))).map(stripObservedAt);
+	const sortedObservations = [...observations].sort(byStableIdThenContent).map(stripObservedAt);
+	const sortedFindings = [...findings].sort(byStableIdThenContent).map(stripObservedAt);
 	return createHash("sha256").update(canonicalizeForHash({ observations: sortedObservations, findings: sortedFindings })).digest("hex");
+}
+
+/** Total order for the outputHash sort. Two fixes over a bare `stableId.localeCompare`, both found by the
+ *  cross-lineage review: (1) code-point comparison (`<`/`>`), not `localeCompare` — the latter follows the
+ *  runtime's ICU locale, so two environments could order Unicode ids differently and compute different
+ *  hashes for identical content. (2) a content tie-break: uniqueness of stable ids is NOT validated here,
+ *  so two records sharing an id would otherwise keep INPUT order and let a permutation change the hash
+ *  (false nondeterminism). Ties break on canonical content, giving a deterministic order regardless of
+ *  input order; genuinely identical records order identically. */
+function byStableIdThenContent(a: IdentifiedRecord, b: IdentifiedRecord): number {
+	const ia = stableIdOf(a);
+	const ib = stableIdOf(b);
+	if (ia !== ib) return ia < ib ? -1 : 1;
+	const ca = canonicalizeForHash(a);
+	const cb = canonicalizeForHash(b);
+	return ca === cb ? 0 : ca < cb ? -1 : 1;
 }
 
 export type OutputHashOutcome = "new" | "duplicate";
