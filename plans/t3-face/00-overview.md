@@ -74,17 +74,17 @@ Rung map: R1 = batches 1–2 (coherent skin, whole app). R2 = batches 3–4 (spi
 - **2026-07-17 (Lars)**: Charter H expansion APPROVED — this program is the committed cockpit consumer. Concern 06 executes daemon-side; cockpit/webapp/push all render one attention truth. Concern 06's `MODE: hitl` authorization is hereby satisfied.
 - **2026-07-17 (Lars)**: Start NOW, in parallel with daily-driver-w15 + land-assessment (disjoint repos/TOUCHES). The adoption-gate pause rule (Notes) still binds: a KILL verdict pauses this program at end-of-batch.
 
-## PR stack
+## PR stack — R1 MERGED to main 2026-07-18
 
 glance-desktop (lmvdz/glance-desktop):
-- #28 `t3face/04-transcript-cursor` → main (independent)
-- #29 `t3face/01-02-skin-substrate` → main (foundation)
-  - #30 `t3face/03-fleet-rekey` → #29 (stacked; retargets to main when #29 merges)
+- #28 `t3face/04-transcript-cursor` → main ✅ MERGED
+- #29 `t3face/01-02-skin-substrate` → main ✅ MERGED
+- #31 `t3face/03-fleet-rekey` → main ✅ MERGED (was #30; GitHub closed #30 when #29's base branch was deleted — rebased onto main + reopened as #31)
 
 omp-squad (lmvdz/glance):
-- #199 `t3face/06-daemon-ladder` → main (cross-lineage reviewed+fixed); daemon bug OMPSQ-449
+- #199 `t3face/06-daemon-ladder` → main ✅ MERGED (cross-lineage reviewed+fixed); daemon bug OMPSQ-449
 
-Merge order when Lars is ready: glance-desktop #29 first (unblocks #30's retarget); #28, #199 independent. All draft; Lars merges.
+LESSON: `--delete-branch` on a stacked PR's base auto-CLOSES the child PR (can't reopen/retarget a closed PR w/ deleted base) — rebase child onto main + open a fresh PR. Merge base-first with `--merge` (not squash) to keep a stack's ancestry clean.
 
 ## Filed follow-ups
 
