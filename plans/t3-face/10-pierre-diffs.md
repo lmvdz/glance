@@ -1,6 +1,6 @@
 # Pierre diffs — one t3-grade diff renderer, behind a size spike
 
-STATUS: open
+STATUS: done
 PRIORITY: p2
 REPOS: glance-desktop
 COMPLEXITY: architectural
@@ -31,3 +31,13 @@ None (unified-diff strings already served).
 - Live: a real unit diff renders in split and unified; large diff lazy-loads without blocking the timeline; parse-failure input falls back to raw text; line-select creates a review comment in the composer tray.
 - WebKitGTK: diff surface renders correctly on Linux (concern 13 matrix).
 - `pnpm lint && check-types && vitest run && build` green; size gate green (or bumped with recorded OK).
+
+## Decision record (2026-07-18) — spike run, pierre REJECTED, escape hatch built
+
+Spike numbers (measured, per Approach step 1): baseline main = **1457.25 KB gzip / 1500 KB budget** (~42.75 KB headroom). Naive `@pierre/diffs`+shiki behind a lazy import = **3.44 MB gzip (+~1.9 MB)** — shiki's string-keyed `bundledLanguages` lookup defeats Rollup tree-shaking, retaining ~150 grammar chunks regardless of requested langs (a single hardcoded .ts diff still shipped Cobol and Wolfram), plus a 225 KB-gzip oniguruma wasm chunk via a dead ternary branch. Wasm-stubbed "shiki diet" via resolve.alias = **3.21 MB, still +~1.7 MB**; a real diet requires forking `@pierre/diffs`'s `shared_highlighter.js` onto shiki's fine-grained bundle API — out of scope. **Decision: escape hatch (b).**
+
+Built as glance-desktop PR #38 (stacked on #34, retargeted to main at merge), MERGED 2026-07-18: shared `src/modules/fleet/diffs/` renderer (parseUnifiedDiff + lineDiff + toSplitRows, DiffFile, DiffViewToggle), token theme-bridge in t3face.css, fleet IntervenePane + AI PlanDiffReview consolidated onto it (three diff UIs → two), line-selection feeds concern 08's persisted `useSteerDraftStore`, raw-text fallback never throws. No new dependency.
+
+**Size budget: Lars-approved bump 1500 → 1512 KB** ("i give u permission", 2026-07-18, covering the presented merge queue incl. this bump; isolated `build(size):` commit on #38). Base #34 sat at 1498.9/1500; the feature costs +2.4 KB; fitting without the bump meant gutting split-view + line-selection. Merged pristine gate: 1.50/1.51 MB green.
+
+Deferred to concern 13: WebKitGTK live render smoke; keyboard a11y for line selection (mouse-first, arrow-nav deferred, rationale in code). Taste calls parked: split-view alignment on unbalanced hunks; prefix/suffix lineDiff renders a trailing append as tail-replace (exact for plan-apply's localized edits); hand-rolled CSS segmented toggle vs shadcn ToggleGroup (saved ~1.9 KB).

@@ -74,6 +74,19 @@ Rung map: R1 = batches 1–2 (coherent skin, whole app). R2 = batches 3–4 (spi
 - **2026-07-17 (Lars)**: Charter H expansion APPROVED — this program is the committed cockpit consumer. Concern 06 executes daemon-side; cockpit/webapp/push all render one attention truth. Concern 06's `MODE: hitl` authorization is hereby satisfied.
 - **2026-07-17 (Lars)**: Start NOW, in parallel with daily-driver-w15 + land-assessment (disjoint repos/TOUCHES). The adoption-gate pause rule (Notes) still binds: a KILL verdict pauses this program at end-of-batch.
 
+## PR stack — R1 + R2-foundation MERGED to main 2026-07-18
+
+R2 foundation (glance-desktop), merged base-first with `--merge`, children retargeted to main before merging (never merge a stacked child at its parent-branch base):
+- #33 `t3face/05-thread-spine` ✅ MERGED
+- #34 `t3face/08-composer` ✅ MERGED
+- #35 `t3face/09-timeline` ✅ MERGED
+- #37 `t3face/07-spine-server-ladder` (was stacked on #33) ✅ MERGED
+- #38 `t3face/10-diff-restyle` (was stacked on #34; carries the Lars-approved 1500→1512 KB size bump) ✅ MERGED
+
+Pristine composition gate on merged main (fresh worktree): types clean · lint 0 errors · **592/592 tests** · build OK · size 1.50/1.51 MB green.
+
+Remaining: 11 chrome-polish (in flight on settled main) → 13 acceptance-audit (Lars's spine/timeline/composer reaction is the gate). 12 r3-glance-surfaces DEFERRED by Lars's 2026-07-18 sequencing call (foundation loved first); parked: gd #36 (grr/fabric palette primitives — rebase over merged main before merging, `commands.ts` conflict expected).
+
 ## PR stack — R1 MERGED to main 2026-07-18
 
 glance-desktop (lmvdz/glance-desktop):
