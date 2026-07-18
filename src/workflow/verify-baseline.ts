@@ -23,6 +23,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { errText } from "../err-text.ts";
 import { gateRunUnrunnable } from "../gate-runner.ts";
 import { extractGateFailures } from "../land.ts";
 
@@ -164,7 +165,7 @@ export function makeBaselineFailureProvider(deps: BaselineProviderDeps): (script
 				const nodeModules = await findNodeModulesUpTree(worktree);
 				if (nodeModules) {
 					await fs.symlink(nodeModules, path.join(tmpDir, "node_modules")).catch((err) => {
-						log?.(`[base-diff] could not symlink node_modules into base worktree: ${err instanceof Error ? err.message : String(err)}`);
+						log?.(`[base-diff] could not symlink node_modules into base worktree: ${errText(err)}`);
 					});
 				}
 				const run = await exec(script, tmpDir);
@@ -173,14 +174,14 @@ export function makeBaselineFailureProvider(deps: BaselineProviderDeps): (script
 				const failures = run.code !== 0 ? extractGateFailures(output) : [];
 				return { failures, unrunnable, baseRef };
 			} finally {
-				const rm = await git(["worktree", "remove", "--force", tmpDir], worktree).catch((err) => ({ code: -1, stdout: "", stderr: err instanceof Error ? err.message : String(err) }));
+				const rm = await git(["worktree", "remove", "--force", tmpDir], worktree).catch((err) => ({ code: -1, stdout: "", stderr: errText(err) }));
 				if (rm.code !== 0) log?.(`[base-diff] git worktree remove failed for ${tmpDir}: ${rm.stderr}`);
 				await fs.rm(tmpDir, { recursive: true, force: true }).catch((err) => {
-					log?.(`[base-diff] could not remove scratch dir ${tmpDir}: ${err instanceof Error ? err.message : String(err)}`);
+					log?.(`[base-diff] could not remove scratch dir ${tmpDir}: ${errText(err)}`);
 				});
 			}
 		} catch (err) {
-			return { failures: [], unrunnable: `base run threw: ${err instanceof Error ? err.message : String(err)}`, baseRef };
+			return { failures: [], unrunnable: `base run threw: ${errText(err)}`, baseRef };
 		}
 	}
 
