@@ -205,9 +205,14 @@ function safeRecord(record: AutomationRecorder | undefined, report: Parameters<A
 
 export type AppendEventOutcome = "written" | "write-failed";
 
-/** Append one `LandAttemptEvent` to its shard. Never throws — an underlying write failure surfaces
- *  via `record` (high severity) and resolves `"write-failed"`; the caller (concern 08's land hook)
- *  proceeds with the land regardless (best-effort append, per the module doc).
+/** Append one `LandAttemptEvent` to its shard. An underlying I/O WRITE failure surfaces via `record`
+ *  (high severity) and resolves `"write-failed"` — the caller (concern 08's land hook) proceeds with the
+ *  land regardless (best-effort append). NOTE (cross-lineage review): the shard-key derivation
+ *  (`monthKeyOf` on `observedAt`) runs BEFORE the try boundary, so a malformed/non-ISO timestamp — a
+ *  programming error, not an I/O failure — still throws synchronously. Before concern 08 wires this onto
+ *  the live land path, that derivation must move inside the catch (return `"write-failed"`) so a bad
+ *  record can never throw into a land; today's only callers (offline replay + tests) pass validated
+ *  timestamps, so it is bounded to a loud test-time failure.
  *  @substrate No production caller within this concern (07) -- concern 08's observe-only land hook
  *  wires this in; a co-located test consumer is not a real reference (dead-exports.ts's own carve-out). */
 export async function appendLandAttemptEvent(stateDir: string, event: LandAttemptEvent, record?: AutomationRecorder): Promise<AppendEventOutcome> {

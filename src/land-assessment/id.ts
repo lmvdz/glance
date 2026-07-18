@@ -136,9 +136,15 @@ export function computeRepositoryId(repoPath: string): string {
  * durable identity (concern 08's wiring). `autoLandWorkflow` must NOT call this; it threads the id
  * `land()` already minted.
  *
- * `attemptId = hash(resolvedRepo, branch, candidateCommit, durableCounter)` — the counter is read and
- * incremented atomically as part of this call, so two calls (even across a process restart) never
- * mint the same id for the same repo.
+ * `attemptId = hash(resolvedRepo, branch, candidateCommit, durableCounter)`. The counter is a
+ * read-increment-rename on one file. Uniqueness holds WITHIN a single writer process (the read/increment
+ * runs to completion on one Node event loop before the next call) and ACROSS SEQUENTIAL restarts (the
+ * counter is persisted; a corrupt counter throws, never silently resets). It does NOT hold across
+ * CONCURRENT processes sharing one stateDir — two writers can both read N and both mint N+1 (cross-lineage
+ * review). The subsystem's integrity assumption is single-daemon checkout ownership (see ADR.md), so this
+ * is bounded today; concern 08's live writer, if it can ever run multi-process, must add a file lock /
+ * compare-and-swap here first. (Durability caveat, same source: the rename is not fsync'd, and the counter
+ * shape check does not reject values ≥ Number.MAX_SAFE_INTEGER — both are concern-08 hardening items.)
  *
  * @substrate Phase-0 producer (concern 01) with no external caller yet -- land()/analyzers wire it up in concerns 03-11 (plans/land-assessment); a co-located test consumer is not a real reference (dead-exports.ts's own carve-out).
  */
