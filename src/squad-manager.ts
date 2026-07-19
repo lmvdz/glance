@@ -3449,7 +3449,7 @@ export class SquadManager extends EventEmitter {
 	 */
 	async land(id: string, message?: string, opts: { auto?: boolean; force?: boolean; actor?: Actor; reason?: string; validatorOverride?: { reasonClass: string } } = {}): Promise<LandResult> {
 		const rec = this.agents.get(id);
-		const attemptId = rec ? await this.landAssessment?.beginAttempt(rec.dto.repo, rec.dto.branch) : undefined;
+		const attemptId = rec ? await this.beginLandAssessmentSafe(rec.dto.repo, rec.dto.branch) : undefined;
 		let result: LandResult;
 		try {
 			result = await this.landInner(id, message, opts);
@@ -3459,6 +3459,23 @@ export class SquadManager extends EventEmitter {
 		}
 		if (rec) this.recordLandAssessmentTerminal(attemptId, rec.dto, result);
 		return result;
+	}
+
+	/** Bound the ONE awaited observe-only step so it can never hang OR abort a land (cross-lineage review):
+	 *  `beginAttempt` is internally try/caught and shouldn't reject, but a truly broken hook (e.g. a throwing
+	 *  log listener in its own catch) or a wedged `git rev-parse` on the hot path must not touch the land.
+	 *  Race a 2s budget and swallow any rejection → on timeout/failure this land simply carries no attemptId
+	 *  (assessment skipped for it); the land proceeds completely unaffected. */
+	private async beginLandAssessmentSafe(repo: string, branch: string | undefined): Promise<string | undefined> {
+		if (!this.landAssessment) return undefined;
+		try {
+			return await Promise.race([
+				this.landAssessment.beginAttempt(repo, branch),
+				new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 2000)),
+			]);
+		} catch {
+			return undefined;
+		}
 	}
 
 	/** Observe-only terminal for a completed land: `landed` (+ the C→R result) on a real merge, else a
