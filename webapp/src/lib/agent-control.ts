@@ -61,6 +61,16 @@ export function forkCommand(agentId: string, seq?: number): ClientCommand {
   return { type: 'fork', id: agentId, seq };
 }
 
+/**
+ * Continue a RECOVERABLE terminal workflow run IN PLACE (OMPSQ-448 postmortem). Mirrors the daemon's
+ * `SquadManager.continueRun(id)`: resets the fix-up-tier visit budgets and re-runs the verify gate on
+ * the run's OWN worktree — preserving uncommitted work — rather than forking a fresh branch off HEAD.
+ * Gated in the UI on `AgentDTO.continueAvailable` (only a visit-cap-exhaustion terminal is recoverable).
+ */
+export function continueCommand(agentId: string): ClientCommand {
+  return { type: 'continue', id: agentId };
+}
+
 /** One entry from GET /api/agents/:id/checkpoints (mirrors the daemon's CheckpointLogEntry — never `vars`). */
 export interface CheckpointEntryDTO {
   seq: number;

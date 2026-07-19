@@ -46,6 +46,7 @@ import { type Answer, answerBrief, listAnswers, possiblyStale, readAnswer, saveA
 // used pervasively below via `AgentDTO.attentionEvents`) — importing this module's same-named type
 // bare would collide. `OperatorAttentionEvent` disambiguates at every use site in this file.
 import { AttentionStore, type AttentionEvent as OperatorAttentionEvent, type AttentionRecordInput, type RecordResult, type SeenMap, type SurpriseCountMap } from "./attention.ts";
+import { computeLadderPriority, type LadderPriority } from "./attention-ladder.ts";
 import { errText } from "./err-text.ts";
 import { armCompletionPushKind, completionMinTurnMs, completionTurnLongEnough, type CompletionPushKind } from "./completion-push.ts";
 import { allowPushTap, isKnownPushTapAgentId, isValidPushTapAgentId } from "./authz.ts";
@@ -94,6 +95,7 @@ import { LandAssessmentHook } from "./land-assessment/hook.ts";
 // under the same bare name would read as if that field and this function were the same thing.
 import { aheadOfBase as computeAheadOfBase, aheadUnknown, resolveLandMode } from "./land-mode.ts";
 import { getDoneProofByBranch, getDoneProofByIssue, hasProof, isAncestor, proofCoversTip, recordDoneProof, type DoneProof } from "./done-proof.ts";
+import { assemblePlanReality, type PlanRealityDTO } from "./plan-reality.ts";
 import { assertMerged, deletePendingPr, ensurePr, isFullyConfirmedPendingPr, landAgentPr, listPendingPrs, mergeMethod, type MergeMethod, type PendingPr, updatePendingPr } from "./land-pr.ts";
 import { ghJson } from "./gh.ts";
 import { repoIdentity } from "./repo-identity.ts";
@@ -1145,6 +1147,70 @@ export class SquadManager extends EventEmitter {
 		dto.availableActions = availableActions(effectiveMode, verificationState, blockedReason);
 	}
 
+	/** t3-face concern 06's needs-you ladder (attention-ladder.ts): recomputed on every broadcast/
+	 *  read, mirroring `syncAuthority`'s exact pattern right above — so it can never silently go
+	 *  stale after a restart (`list()`/`getAgent()` call it fresh on every read, not only at mutation
+	 *  sites; see attention-ladder.ts's module doc for the boot-recompute reasoning). Always passes
+	 *  `visitedAt: undefined` — the conservative "nobody has visited" default: a genuine per-viewer
+	 *  answer needs a real actor identity, which only server.ts's GET handlers have (`ladderPriorityFor`
+	 *  below). Mutating the SHARED `rec.dto` with a personalized value here would leak one viewer's
+	 *  seen-state into every other concurrently-polling viewer's read of the same unit. */
+	private syncLadder(dto: AgentDTO): void {
+		dto.ladderPriority = computeLadderPriority(dto, { completedAt: this.lastCompletedAt(dto.id) });
+	}
+
+	/** Epoch-ms this unit last completed a genuine turn (attention-ladder.ts's `completedAt` input) —
+	 *  reads `AttentionStore.completedAt`'s own durable per-agent stamp (`unit-completed.json`),
+	 *  stamped by `recordTransition` (below) the moment a transition qualifies as a real completion
+	 *  (`isGenuineCompletion`). `undefined` ⇒ this unit has never completed a turn (a fresh/never-run
+	 *  agent).
+	 *
+	 *  Grok-4.5 cross-lineage review (t3-face concern 06) found the PRIOR implementation — a scan of
+	 *  `this.transitionLog.recent()` for `to === "idle"` — over-fired on three fronts: `connect-ok`
+	 *  fires `"idle"` on every spawn/restart connect (always FROM `"starting"`, never a completed
+	 *  turn), a same-state `idle → idle` bookkeeping entry (`adopted`, an orphan-close derive landing
+	 *  back on its own status) is not a NEW completion, and a `denied:true` entry never actually
+	 *  changed `dto.status` at all — so a unit that had only ever CONNECTED, or merely re-recorded its
+	 *  existing state, read `completed-unseen` as if it had genuinely finished work. That scan was
+	 *  also bounded by the ring's 500-entries-TOTAL-across-every-agent cap, so a busy fleet could evict
+	 *  a quiet agent's own last completion before it "aged out" — silently un-demoting a real
+	 *  `completed-unseen` unit back to `idle` (the "ring-eviction demotion" the same review named).
+	 *  Both are fixed at the SOURCE now: `recordTransition` stamps the durable map only when
+	 *  `isGenuineCompletion` holds, so this read is O(1) and immune to the ring's cap. */
+	private lastCompletedAt(agentId: string): number | undefined {
+		return this.attentionStore.completedAt(agentId);
+	}
+
+	/** The exact filter a transition needs to be a GENUINE turn completion — see `lastCompletedAt`'s
+	 *  doc above for the full reasoning. Only ever consulted from `recordTransition`, which by
+	 *  construction only ever sees APPLIED transitions (a denied attempt is recorded by
+	 *  `recordDenied`, a wholly separate call this method never sees) — so no explicit `denied` check
+	 *  is needed here. */
+	private isGenuineCompletion(entry: TransitionEntry): boolean {
+		return entry.to === "idle" && entry.from !== entry.to && (entry.from === "working" || entry.from === "input") && entry.reason !== "connect-ok";
+	}
+
+	/** The REQUESTING viewer's personalized ladder priority for one unit — the only place a real
+	 *  per-viewer `visitedAt` is ever threaded into `computeLadderPriority` (server.ts's GET
+	 *  /api/agents(/:id) and GET /api/attention/ladder are the only callers). Never stored back onto
+	 *  the shared `dto` — see `syncLadder`'s doc above for why. `viewerId` is `session ? actor.id :
+	 *  undefined`, the same idiom every other attention route already uses (file mode: always
+	 *  undefined, the single-implicit-viewer collapse the charter locks). */
+	ladderPriorityFor(dto: AgentDTO, viewerId: string | undefined): LadderPriority {
+		return computeLadderPriority(dto, { completedAt: this.lastCompletedAt(dto.id), visitedAt: this.attentionStore.unitVisitedAt(dto.id, viewerId) });
+	}
+
+	/** Mark unit `agentId` visited by `viewerId` (or the file-mode implicit viewer, when
+	 *  `undefined`) — the needs-you ladder's mark-seen mutation (`POST /api/attention/ladder/seen`).
+	 *  `{ ok: false }` for an id that isn't (or is no longer) a live roster member — a foreign/stale
+	 *  agentId writes nothing, same fail-closed shape as the repo-visibility check the caller (route
+	 *  handler) already runs before this. */
+	markUnitVisited(agentId: string, viewerId: string | undefined): { ok: boolean } {
+		if (!this.agents.has(agentId)) return { ok: false };
+		this.attentionStore.markUnitVisited(agentId, viewerId);
+		return { ok: true };
+	}
+
 	private async refreshProofState(rec: AgentRecord): Promise<void> {
 		const proof = await proofFor(rec.dto.repo, rec.dto.worktree);
 		const fp = await proofFingerprint(rec.dto.repo, rec.dto.worktree, proof?.command);
@@ -2034,6 +2100,7 @@ export class SquadManager extends EventEmitter {
 			// Recomputed from the persisted marker (not carried as an independent flag) so a fresh boot's
 			// reattach reflects forkAvailable correctly even if it was never set in-memory before the restart.
 			forkAvailable: this.deriveForkAvailable(p.workflowState),
+			continueAvailable: this.deriveContinueAvailable(p.workflowState),
 		};
 		this.seedAuthority(dto, p.autonomyMode);
 		const agent = this.makeDriver(p);
@@ -2157,6 +2224,7 @@ export class SquadManager extends EventEmitter {
 			workflowState: p.workflowState,
 			promoted: p.promoted, // a promoted console chat stays visibly a unit across restarts
 			forkAvailable: this.deriveForkAvailable(p.workflowState),
+			continueAvailable: this.deriveContinueAvailable(p.workflowState),
 		};
 		this.seedAuthority(dto, p.autonomyMode);
 		const agent = this.makeDriver(p); // constructed but never started — this record has no live connection
@@ -2180,7 +2248,13 @@ export class SquadManager extends EventEmitter {
 	}
 
 	list(): AgentDTO[] {
-		return [...this.agents.values()].map((r) => r.dto);
+		return [...this.agents.values()].map((r) => {
+			// Boot-recompute (t3-face concern 06): recomputed fresh on EVERY read, not only at
+			// mutation/emit sites — a restart-restored roster answers correctly on its very first
+			// GET, before any agent has mutated (and re-broadcast) since boot. See syncLadder's doc.
+			this.syncLadder(r.dto);
+			return r.dto;
+		});
 	}
 
 	/**
@@ -2234,7 +2308,9 @@ export class SquadManager extends EventEmitter {
 	}
 
 	getAgent(id: string): AgentDTO | undefined {
-		return this.agents.get(id)?.dto;
+		const rec = this.agents.get(id);
+		if (rec) this.syncLadder(rec.dto); // same boot-recompute guarantee as list() above
+		return rec?.dto;
 	}
 
 	// ── Restart re-attach: dead-session placeholders (daily-onramp 04) ──────────────────────────────
@@ -2261,6 +2337,22 @@ export class SquadManager extends EventEmitter {
 		const ph = buildDeadPlaceholder(p, transcript);
 		this.deadPlaceholders.set(p.id, ph);
 		this.log("info", `dead placeholder recorded for ${p.name} (${p.id}) — ${ph.deadReason}`);
+		// Concern 02: session-loss friction, keyed on the placeholder's own stable id (unlike
+		// boundary-sync's holds, a `PersistedAgent.id` is a one-shot ephemeral chat id that never gets
+		// reused by a later live session — so ANY prior "auto:session-loss" row for this exact id proves
+		// this exact loss was already filed). Dedup reads FrictionLog's ring, rehydrated from the persisted
+		// file at construction, so it survives an ORDINARY restart. It is best-effort, not absolute:
+		// JsonlLog's file is explicitly best-effort (fire-and-forget spool), so a crash within the
+		// sub-second spool window — before this row lands AND before persist() drops the record — can
+		// re-file it on the next boot. A duplicate low-noise session-loss gripe is acceptable (the weekly
+		// drain dedups); what must never happen is this block throwing into start(), hence the guard.
+		try {
+			if (!this.hasAutoFriction("auto:session-loss", p.id)) {
+				this.captureAutoFriction(p.id, p.repo, "auto:session-loss", `session lost: ${p.name} (${p.id}) did not survive a daemon restart — ${ph.deadReason}`);
+			}
+		} catch (err) {
+			this.log("warn", `session-loss auto-friction check failed for ${p.id}: ${errText(err)}`);
+		}
 		// The dead session's adapter chain may still be running: a daemon KILL orphans the direct ACP
 		// child (npx → claude-code-acp reparents to init and idles forever — its stdio transport died
 		// with the old daemon process, so REUSE is impossible by construction). Reap it by the pid
@@ -2778,6 +2870,34 @@ export class SquadManager extends EventEmitter {
 	/** Friction ledger ring tail (newest-LAST — the API reverses for newest-first display). */
 	frictionRecent(limit?: number): FrictionEntry[] {
 		return this.frictionLog.recent(limit);
+	}
+
+	// ── Auto-friction capture (plans/daily-driver-w15 concern 02) ───────────────────────────────────
+	// The daemon files its own gripes for the three friction classes it already detects internally —
+	// held boundary-syncs, ACP prompt timeouts, session loss on restart — as low-noise, distinguishable
+	// FrictionEntry rows (source:"auto", context:"auto:<cause>") the weekly drain buckets separately
+	// from human gripes. Every call site below is a genuine ORIGIN event (a hold/divergence/timeout/
+	// dead-session was just discovered for the FIRST time), never a re-raise/replay of an already-known
+	// one — see each call site's own comment for why a restart or backlog re-raise can't reach here.
+
+	/** THE auto-capture funnel: fail-open (a friction-write failure is a warn log line, never thrown
+	 *  into the caller) — friction capture must never become friction itself. `agentId` is optional
+	 *  because a dead placeholder's "agent" no longer has a live roster entry, only its own stable id. */
+	private captureAutoFriction(agentId: string | undefined, repo: string, context: "auto:boundary-sync-held" | "auto:acp-timeout" | "auto:session-loss", gripe: string): void {
+		try {
+			this.recordFriction({ repo, gripe, context, agentId, source: "auto" });
+		} catch (err) {
+			this.log("warn", `auto-friction capture failed (${context}): ${errText(err)}`);
+		}
+	}
+
+	/** Durable, restart-surviving "have we already filed this exact one" check — FrictionLog's ring is
+	 *  rehydrated from the persisted file at construction, so this reflects prior tenures too, not just
+	 *  this process's memory. Used ONLY where the same stable id could plausibly recur across a restart
+	 *  before the underlying condition resolves (session-loss's placeholder id); boundary-sync/ACP-timeout
+	 *  call sites don't need it — see their own comments for why. */
+	private hasAutoFriction(context: "auto:boundary-sync-held" | "auto:acp-timeout" | "auto:session-loss", agentId: string): boolean {
+		return this.frictionLog.recent().some((e) => e.source === "auto" && e.context === context && e.agentId === agentId);
 	}
 
 	projects(): ProjectDTO[] {
@@ -3805,6 +3925,15 @@ export class SquadManager extends EventEmitter {
 		}
 		if (result.ok) {
 			rec.dto.landReady = false; // successful land attempt ⇒ clear the confirm-mode staged flag
+			// t3-face concern 06 (grok-4.5 cross-lineage review): `runValidatorGate` stamps `rec.dto.validation`
+			// with a "veto" verdict BEFORE the override-bypass check above ever runs — a successful
+			// override-land (validatorOverride + reasonClass) bypasses the veto's REFUSAL but nothing
+			// afterward re-scores the diff, so the DTO would otherwise keep reporting "veto" forever after
+			// a land that actually succeeded. The needs-you ladder's `error` rung (attention-ladder.ts)
+			// reads `validation?.verdict === "veto"` with no time bound, so that stale verdict would pin a
+			// resolved unit at `error` permanently. The land just proved the prior veto no longer describes
+			// reality — drop it, the same way `landReady` just above is dropped on success.
+			if (rec.dto.validation?.verdict === "veto") rec.dto.validation = undefined;
 			this.emitAgent(rec);
 			if (result.merged) {
 				// PR mode already wrote its own (richer, method/mergeCommit-aware) DoneProof inside
@@ -4098,6 +4227,28 @@ export class SquadManager extends EventEmitter {
 		return !!state?.terminal && !state.terminal.supersededBy;
 	}
 
+	/** A terminal marker is RECOVERABLE in place when it was a visit-cap exhaustion of the fix-up ladder
+	 *  (verify → codefix → fixup → escalate ran out of retry budget). Re-running with the retry tiers
+	 *  reset is exactly the right move AND preserves the unit's own worktree (including uncommitted
+	 *  edits) instead of forking a fresh branch off HEAD. Structural dead-ends — a poison/resume-cap
+	 *  crash loop, a dangling edge, running off the end of the graph — are NOT recoverable this way; for
+	 *  those, fork stays the only forward path. Matches the exact string minted in engine.ts's
+	 *  visit-cap terminalFail (`node "<n>" exceeded its visit cap (<k>)`). */
+	private isRecoverableTerminalReason(reason: string): boolean {
+		// ONLY the verify-loop's own fix-up ladder nodes (verify/codefix/fixup/escalate — buildVerifyLoop)
+		// are safe to reset-and-re-run: re-running the verify gate is idempotent. A visit-cap exhaustion
+		// on any OTHER node — an authored, possibly side-effecting node (a `deploy` at maxVisits) — is NOT
+		// recoverable in place; resetting/resuming it could re-fire its side effect. So match the node NAME
+		// in engine.ts's exact reason string, not just the "visit cap" phrase (codex review).
+		return /^node "(verify|codefix|fixup|escalate)" exceeded its visit cap \(\d+\)$/.test(reason);
+	}
+
+	/** True when a terminal run can be CONTINUED in place — a recoverable, not-yet-superseded terminal
+	 *  marker. The single source `dto.continueAvailable` derives from; parallels {@link deriveForkAvailable}. */
+	private deriveContinueAvailable(state: WorkflowRunState | undefined): boolean {
+		return !!state?.terminal && !state.terminal.supersededBy && this.isRecoverableTerminalReason(state.terminal.reason);
+	}
+
 	/** Self-heal the crash window between createInternal's persist of a new fork (which durably records
 	 *  `workflowState.forkedFrom`) and fork()'s OWN later persist of the source's `terminal.supersededBy`
 	 *  marker: a daemon death in that gap otherwise leaves the source stuck forever advertising
@@ -4116,6 +4267,7 @@ export class SquadManager extends EventEmitter {
 			if (!terminal || terminal.supersededBy) continue;
 			terminal.supersededBy = rec.dto.id;
 			source.dto.forkAvailable = false;
+			source.dto.continueAvailable = false;
 			source.dto.workflowState = source.options.workflowState;
 			this.emitAgent(source);
 		}
@@ -5309,6 +5461,10 @@ export class SquadManager extends EventEmitter {
 							`A concurrent edit to ${outcome.divergence.paths.join(", ")} in ${realDir} may have interleaved with this turn's write. Nothing was rolled back automatically. ` +
 								`The pre-write copy is retained at ${outcome.divergence.captureDir} — compare it against your current file(s) by hand before deciding whether to restore from it.`,
 						);
+						// Concern 02: a genuinely NEW divergence, discovered exactly once at the moment this
+						// turn's own write happened — never re-raised (a restart never replays a live turn's
+						// agent_end; the `!start` guard above already returns before this switch on any replay).
+						this.captureAutoFriction(rec.dto.id, realDir, "auto:boundary-sync-held", `boundary sync divergence: a concurrent edit to ${outcome.divergence.paths.join(", ")} in ${realDir} may have interleaved with this turn's write (agent ${rec.dto.name})`);
 					}
 					return;
 				case "held": {
@@ -5344,6 +5500,14 @@ export class SquadManager extends EventEmitter {
 							`Apply replays them in order after a fresh safety re-check; Discard drops them (the session worktree keeps every edit). ` +
 							`Held patches: ${this.boundarySyncHeld.root}`,
 					);
+					// Concern 02: fires only here, at the moment `syncTurnEnd` durably created a BRAND NEW
+					// held patch (this branch requires `outcome.held !== undefined` — the ledger-append-failed
+					// sub-case returned above as "uncapturable" instead) — never at a re-raise of an
+					// already-known hold. `reattachHeldSyncs` (boot re-raise) and `rekeyHeldSyncsOnReattach`
+					// (restart-reattach re-key) both call `raiseBoundarySyncAttention` directly for EXISTING
+					// holds without ever routing through this turn-end origin path, so neither can double-count
+					// this — no time-window/id dedup needed, the call graph itself makes it exactly-once.
+					this.captureAutoFriction(rec.dto.id, realDir, "auto:boundary-sync-held", `boundary sync held: ${outcome.reason} (agent ${rec.dto.name}, ${realDir})`);
 					return;
 				}
 				case "uncapturable":
@@ -5461,6 +5625,9 @@ export class SquadManager extends EventEmitter {
 					.map((d) => `turn ${d.turn}: ${d.paths.join(", ")} (pre-write copy retained at ${d.captureDir})`)
 					.join("; ") + ` — nothing was rolled back automatically; compare each capture against the current file(s) by hand.`,
 			);
+			// Concern 02: a NEW divergence, discovered exactly once at THIS explicit replay (a resolved
+			// patch never re-enters the backlog, so a later Apply call can't rediscover the same one).
+			this.captureAutoFriction(rec.dto.id, realDir, "auto:boundary-sync-held", `boundary sync divergence detected across ${result.divergences.length} replayed turn${result.divergences.length === 1 ? "" : "s"} for ${realDir} (agent ${rec.dto.name})`);
 		}
 		void this.recordAudit(actor, "boundary-sync.apply", id, result.ok ? "ok" : "error", `${result.applied} applied, ${result.remaining} remaining${result.reason ? ` — ${result.reason}` : ""}`);
 		return result;
@@ -6127,6 +6294,7 @@ export class SquadManager extends EventEmitter {
 			workflow: persisted.workflow,
 			workflowState: persisted.workflowState,
 			forkAvailable: this.deriveForkAvailable(persisted.workflowState),
+			continueAvailable: this.deriveContinueAvailable(persisted.workflowState),
 			adopted: opts.adopted,
 		};
 		// Pre-dispatch harness scorecard (concern 03, advisory shadow — plans/research-learn-harness-
@@ -6916,6 +7084,19 @@ export class SquadManager extends EventEmitter {
 			case "fork":
 				await this.fork(cmd.id, { seq: cmd.seq }, actor);
 				break;
+			case "continue":
+				// Continue a recoverable terminal run in place. Surface a refusal into the transcript (same
+				// shape as the prompt/restart terminal guards) rather than throwing out of applyCommand,
+				// whose callers fire it with `void ...catch()` — a reject there is an unhandled rejection.
+				try {
+					await this.continueRun(cmd.id, actor);
+				} catch (err) {
+					const msg = err instanceof Error ? err.message : String(err);
+					this.log("warn", `continue refused for ${cmd.id}: ${msg}`);
+					this.append(rec, "system", `continue refused — ${msg}`);
+					void this.recordAudit(actor, "continue", cmd.id, "error", msg);
+				}
+				break;
 			case "notify": {
 				// Operator/scriptable ingress (`glance notify`, cmux-research concern 03): non-blocking,
 				// never a PendingRequest — mirrors squad_attention/the harness "notify" wiring below.
@@ -7102,6 +7283,75 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
+	 * continueRun(id): continue a RECOVERABLE terminal workflow IN PLACE, on its own worktree.
+	 *
+	 * OMPSQ-448 postmortem: a run that exhausted the escalate visit cap dead-ended with `fork` as the
+	 * only forward path — and fork mints a fresh branch off the worktree's committed HEAD, abandoning any
+	 * UNCOMMITTED implement work (the exact loss when a unit never committed before the gate loop stalled).
+	 * For a recoverable terminal (a fix-up-ladder visit-cap exhaustion — see isRecoverableTerminalReason),
+	 * the right move is simply to re-run: reset the retry-tier visit budgets exactly as fork() does, clear
+	 * the terminal marker, and re-drive the SAME run via restart() (which rebuilds the driver and resumes
+	 * the existing workflowState). The worktree — and its uncommitted edits — are preserved. Refused for a
+	 * running agent, a missing worktree, or a non-recoverable/superseded terminal (fork stays their path).
+	 */
+	async continueRun(id: string, actor: Actor = LOCAL_ACTOR): Promise<void> {
+		const rec = this.agents.get(id);
+		if (!rec) throw new Error("agent not found");
+		if (rec.dto.status === "working") throw new Error("cannot continue a running agent — stop or wait for it to finish");
+		const state = rec.options.kind === "workflow" ? rec.options.workflowState : undefined;
+		const terminal = state?.terminal;
+		if (!state || !terminal || terminal.supersededBy) throw new Error("this run has no active terminal marker to continue");
+		if (!this.isRecoverableTerminalReason(terminal.reason)) {
+			throw new Error(`this run's terminal state is not recoverable in place (${terminal.reason}) — fork from a checkpoint instead`);
+		}
+		if (!existsSync(rec.dto.worktree)) throw new Error("original worktree is gone — cannot continue in place (fork instead)");
+
+		// Mutual exclusion with fork() and any concurrent continue on this run: claim the per-run
+		// lifecycle-transition slot SYNCHRONOUSLY, before the first `await` below, so two lifecycle
+		// mutations can't both clear the terminal marker (fork's own `forkInFlight` precedent — reusing
+		// the same set makes fork and continue exclude each other, closing the fork-races-continue window
+		// where both a fork child and this re-driven source end up live). Released in `finally`.
+		const runId = state.runId ?? rec.dto.id;
+		if (this.forkInFlight.has(runId)) throw new Error("a fork or continue of this run is already in flight");
+		this.forkInFlight.add(runId);
+		try {
+			// Reset the fix-up-tier visit budgets (each goalGate's retryTarget + its overflow closure,
+			// across every goalGate node) exactly like fork() — but on the LIVE run's own state, so the
+			// re-drive gets a fresh ladder without minting a new branch/run. Re-parse the graph the same
+			// way makeDriver/fork do.
+			const wf: Workflow | undefined = rec.options.workflow?.verify
+				? buildVerifyLoop(rec.options.workflow.verify)
+				: rec.options.workflow?.path
+					? parseWorkflow(await fs.readFile(resolveWorkflowPath(rec.options.workflow.path), "utf8"))
+					: undefined;
+			if (wf) {
+				const tiers = new Set<string>();
+				for (const node of wf.nodes.values()) {
+					if (!node.goalGate) continue;
+					for (let t: string | undefined = node.retryTarget; t; t = wf.nodes.get(t)?.overflow) tiers.add(t);
+				}
+				const visits = { ...state.visits };
+				for (const tier of tiers) visits[tier] = 0;
+				state.visits = visits;
+			}
+
+			// Clear the terminal marker BEFORE restart() so its own terminal-refusal guard lets this
+			// re-drive through, and recompute the availability flags off the now-live (non-terminal) state.
+			state.terminal = undefined;
+			rec.options.workflowState = state;
+			rec.dto.workflowState = state;
+			rec.dto.forkAvailable = this.deriveForkAvailable(state);
+			rec.dto.continueAvailable = this.deriveContinueAvailable(state);
+			await this.persist();
+			this.append(rec, "system", "▶ continuing in place — retry budgets reset, re-running the verify gate on this worktree (uncommitted work preserved).");
+			void this.recordAudit(actor, "continue", id, "ok");
+			await this.restart(rec);
+		} finally {
+			this.forkInFlight.delete(runId);
+		}
+	}
+
+	/**
 	 * fork(id, {seq?}): mint a brand-new run from a terminal (escalate-exhausted) workflow's checkpoint
 	 * history — same code tip (`git rev-parse HEAD` in the original worktree, never `dto.branch`, which
 	 * is undefined for in-place/ad-hoc agents), fix-up-tier retry budgets reset, fresh runId/agent id.
@@ -7264,6 +7514,7 @@ export class SquadManager extends EventEmitter {
 			// claimant), forkAvailable cleared so the offer never re-fires for a run that's already been forked.
 			rec.options.workflowState!.terminal!.supersededBy = newId;
 			rec.dto.forkAvailable = false;
+			rec.dto.continueAvailable = false;
 			rec.dto.workflowState = rec.options.workflowState;
 			this.emitAgent(rec);
 			await this.persist();
@@ -7749,6 +8000,7 @@ export class SquadManager extends EventEmitter {
 		rec.options.workflowState = state;
 		rec.dto.workflowState = state;
 		rec.dto.forkAvailable = this.deriveForkAvailable(state);
+		rec.dto.continueAvailable = this.deriveContinueAvailable(state);
 		await this.raceOnceOrEscalate(rec, reason);
 		void this.persist();
 		// The run is dead — no further checkpoints will ever append for this runId (a fork, if any, mints
@@ -8289,6 +8541,19 @@ export class SquadManager extends EventEmitter {
 
 		if (view.state === "CLOSED" && entry.state !== "closed") {
 			updatePendingPr(this.stateDir, entry.branch, { state: "closed" });
+			// t3-face concern 06 (grok-4.5 cross-lineage review): this used to update ONLY the PendingPr
+			// ledger entry above, never the live agent's own `dto.prState` — the needs-you ladder's
+			// `error` rung (attention-ladder.ts) reads `dto.prState === "closed"`, so a human closing a
+			// PR without merging showed green `plan-ready`/`idle`, not the land-blocked `error` an
+			// operator needs to see. Mirrors the merged-out-of-band arm above: resolve the live record by
+			// branch and stamp+emit it — branch/landReady are DELIBERATELY left intact (the log line
+			// below, unchanged): a re-Land should still work and open a fresh PR, only `prState` itself
+			// needs to reflect that THIS PR is dead.
+			const rec = this.agentByBranch(entry.branch);
+			if (rec) {
+				rec.dto.prState = "closed";
+				this.emitAgent(rec);
+			}
 			this.log("warn", `pr-reconcile: PR #${entry.prNumber} for ${entry.branch} closed without merging — branch and landReady left intact; a re-Land will open a fresh PR`);
 		}
 	}
@@ -9391,6 +9656,72 @@ export class SquadManager extends EventEmitter {
 		return undefined;
 	}
 
+	/**
+	 * Plan-vs-reality (OMPSQ-448): assemble what was PLANNED for a `plans/<name>` feature against what
+	 * actually got IMPLEMENTED, tied to the PROOF that verifies it. Reuses the existing concern parser,
+	 * the DoneProof ledger, and `isAncestor` for live stale-proof detection; the pure join lives in
+	 * plan-reality.ts. Returns undefined for an unknown feature.
+	 */
+	async planReality(featureId: string, repo?: string): Promise<PlanRealityDTO | undefined> {
+		const feature = (await this.features(repo)).find((f) => f.id === featureId);
+		if (!feature) return undefined;
+
+		const concerns = feature.planDir ? await parsePlanConcerns(feature.repo, feature.planDir).catch(() => []) : [];
+		const proof = await this.doneProofForFeature(featureId, repo);
+
+		let proofReachable: boolean | null = null;
+		let reachableDetail: string | undefined;
+		let actualChangedFiles: string[] | null = null;
+		if (proof) {
+			const commit = proof.mergeCommit ?? proof.commit;
+			const defaultBranch = await this.resolveDefaultBranchRef(feature.repo);
+			if (commit && defaultBranch) {
+				proofReachable = await isAncestor(commit, defaultBranch, feature.repo);
+				reachableDetail = proofReachable ? `on ${defaultBranch}` : `stale — no longer an ancestor of ${defaultBranch}`;
+				// The landing's REAL diff — actual changed files for the scope-drift comparison.
+				const base = proof.baseRef && proof.baseRef !== "HEAD" ? proof.baseRef : `${commit}~1`;
+				const diff = await hardenedGit(["diff", "--name-only", `${base}..${commit}`], { cwd: feature.repo }).catch(() => ({ code: 1, stdout: "", stderr: "" }) as { code: number; stdout: string; stderr: string });
+				if (diff.code === 0) actualChangedFiles = diff.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+			} else if (commit) {
+				reachableDetail = "reachability unknown — could not resolve the default branch";
+			}
+		}
+
+		// Live Plane state per concern (best-effort; absent when Plane is unconfigured/unreachable).
+		const planeStates: Record<string, string> = {};
+		try {
+			const { tickets } = await this.featurePlaneTickets(featureId);
+			for (const t of tickets ?? []) if (t.identifier && t.status) planeStates[t.identifier] = t.status;
+		} catch {
+			/* Plane is optional — a plan with no Plane links still assembles fine. */
+		}
+
+		return assemblePlanReality({
+			feature: { id: feature.id, title: feature.title, repo: feature.repo, planDir: feature.planDir },
+			concerns,
+			proof,
+			proofReachable,
+			reachableDetail,
+			actualChangedFiles,
+			planeStates,
+			now: Date.now(),
+		});
+	}
+
+	/** The default-branch ref to test reachability against — origin/HEAD's target, else origin/main, else main. */
+	private async resolveDefaultBranchRef(repo: string): Promise<string | undefined> {
+		const sym = await hardenedGit(["symbolic-ref", "refs/remotes/origin/HEAD"], { cwd: repo }).catch(() => ({ code: 1, stdout: "", stderr: "" }) as { code: number; stdout: string; stderr: string });
+		if (sym.code === 0) {
+			const remoteRef = sym.stdout.trim().replace(/^refs\/remotes\//, "");
+			if (remoteRef && remoteRef !== sym.stdout.trim()) return remoteRef;
+		}
+		for (const candidate of ["origin/main", "origin/master", "main", "master"]) {
+			const check = await hardenedGit(["rev-parse", "--verify", "--quiet", `${candidate}^{commit}`], { cwd: repo }).catch(() => ({ code: 1, stdout: "", stderr: "" }) as { code: number; stdout: string; stderr: string });
+			if (check.code === 0) return candidate;
+		}
+		return undefined;
+	}
+
 	/** Saved cold-start resume digest for an agent ("" if none yet). */
 	async getDigest(id: string): Promise<string> {
 		return readDigest(this.stateDir, id);
@@ -9862,6 +10193,11 @@ export class SquadManager extends EventEmitter {
 	private recordTransition(rec: AgentRecord, from: AgentStatus, to: AgentStatus, reason: TransitionReason, cause?: TransitionCause): void {
 		const entry: TransitionEntry = { agentId: rec.dto.id, from, to, reason, at: Date.now(), cause, seq: randomUUID() };
 		this.transitionLog.append(entry);
+		// t3-face concern 06 (grok-4.5 cross-lineage review): the needs-you ladder's durable completion
+		// stamp, written HERE — the one chokepoint every APPLIED transition passes through — rather than
+		// derived later by re-scanning this same ring (`lastCompletedAt`'s doc explains why that scan was
+		// wrong and why this is the fix).
+		if (this.isGenuineCompletion(entry)) this.attentionStore.recordCompletion(rec.dto.id, entry.at);
 		this.recordErrorTransition(rec, entry); // finding 9's per-agent (not fleet-shared-ring) error tally
 		this.pushTransitionEvent(rec, entry); // concern 03 wires DTO tail + rollup off this same call
 		this.emit("event", { type: "transition", entry } satisfies SquadEvent);
@@ -9895,6 +10231,19 @@ export class SquadManager extends EventEmitter {
 	private recordErrorTransition(rec: AgentRecord, entry: TransitionEntry): void {
 		if (entry.to !== "error" || (entry.reason !== "fail" && entry.reason !== "catastrophe" && entry.reason !== "exit-error")) return;
 		rec.errorTransitionTimestamps = [...(rec.errorTransitionTimestamps ?? []), entry.at];
+		// Concern 02: ACP prompt timeouts (plans/daily-onramp/07/08's silence-window + hard-cap rejects,
+		// acp-agent-driver.ts's sendTurn) surface here — the MANAGER's error-transition handling, not the
+		// driver (which stays transport-only) — matched on the driver's own fixed error-message shape.
+		// Every real "error" transition is a fresh, distinct turn failure (TransitionEntry.seq mints a
+		// new uuid per occurrence; there is no re-raise/replay path for a transition the way boundary-sync
+		// attention rows have), so no cross-call dedup is needed here — each match IS a new event. This
+		// is expected to be RARE (daily-onramp/08 already fixed the common no-liveness-signal case for
+		// compliant adapters); a spike here is exactly the residual-adapter case that plan tracks, not
+		// noise from this hook.
+		const errMsg = entry.cause?.error;
+		if (typeof errMsg === "string" && /^acp request .+ timed out\b/.test(errMsg)) {
+			this.captureAutoFriction(rec.dto.id, rec.dto.repo, "auto:acp-timeout", `ACP prompt timed out: ${errMsg} (agent ${rec.dto.name})`);
+		}
 	}
 
 	/** Linear scan + trim over THIS agent's own (small, unbounded-by-other-agents) error-timestamp array
@@ -10289,6 +10638,7 @@ export class SquadManager extends EventEmitter {
 
 	private emitAgent(rec: AgentRecord): void {
 		this.syncAuthority(rec.dto);
+		this.syncLadder(rec.dto);
 		this.emit("event", { type: "agent", agent: rec.dto } satisfies SquadEvent);
 		this.publishPresence();
 	}

@@ -54,6 +54,9 @@ export const ClientCommandSchema = Schema.Union([
 	Schema.Struct({ type: Schema.Literal("kill"), id: Schema.String }),
 	Schema.Struct({ type: Schema.Literal("restart"), id: Schema.String }),
 	Schema.Struct({ type: Schema.Literal("fork"), id: Schema.String, seq: Schema.optional(Schema.Number) }),
+	// OMPSQ-448 postmortem: continue a RECOVERABLE terminal run (fix-up-ladder visit-cap exhaustion)
+	// in place on its own worktree, retry budgets reset — vs `fork`, which mints a fresh branch off HEAD.
+	Schema.Struct({ type: Schema.Literal("continue"), id: Schema.String }),
 	Schema.Struct({ type: Schema.Literal("remove"), id: Schema.String, deleteWorktree: Schema.optional(Schema.Boolean) }),
 	// Phase-2: `options` (CreateAgentOptions) is deep-modeled in ./create-agent-options.ts.
 	Schema.Struct({ type: Schema.Literal("create"), options: CreateAgentOptionsSchema, source: Schema.optional(Schema.String) }),

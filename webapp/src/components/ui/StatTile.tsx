@@ -25,12 +25,12 @@ export const StatTile: React.FC<StatTileProps> = ({ label, value, sub, spark, to
       <div className="text-[10px] font-semibold uppercase tracking-widest text-gray-400">{label}</div>
       <div className="flex items-end justify-between gap-2">
         <div className="min-w-0">
-          <div className={`text-lg font-semibold leading-tight ${tone === 'neutral' ? 'text-gray-900 dark:text-gray-100' : t.text}`}>{value}</div>
+          <div className={`text-2xl font-semibold leading-tight tabular-nums ${tone === 'neutral' ? 'text-gray-900 dark:text-gray-100' : t.text}`}>{value}</div>
           {sub != null && <div className="mt-0.5 text-[11px] text-gray-500 dark:text-gray-400">{sub}</div>}
         </div>
         {spark && spark.length > 0 && (
           <div className="flex-shrink-0 pb-0.5">
-            <Sparkline values={spark} tone={tone === 'neutral' ? 'info' : tone} label={`${label} trend`} />
+            <Sparkline values={spark} tone={tone === 'neutral' ? 'neutral' : tone} label={`${label} trend`} />
           </div>
         )}
       </div>

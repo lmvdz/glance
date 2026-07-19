@@ -163,6 +163,9 @@ export interface SkillsVerifyReport {
 	gating: boolean;
 	roots: string[];
 	resolvedEffectVersion: string;
+	/** Non-null when node_modules and bun.lock disagree on the `effect` version — surfaced but
+	 *  NON-FATAL (a shared-node_modules race, not a defect the unit can fix). See resolveEffectVersion. */
+	effectVersionSkew: EffectVersionSkew | null;
 	skillsScanned: string[];
 	manifestDrift: { missing: string[]; unexpected: string[] };
 	frontmatterViolations: Violation[];
@@ -190,20 +193,51 @@ export interface SkillsVerifyReport {
 // Resolved-version guard
 // ---------------------------------------------------------------------------------------------
 
-/** Read the ACTUALLY resolved `effect` version from both node_modules and the lockfile, and
- *  hard-fail (throw) if either is missing or they disagree — a fresh worktree has a lockfile but
- *  no node_modules, and a stale node_modules can silently disagree with a bumped lockfile. Both
- *  are checked because either alone is trust-the-wrong-boundary: the type-checker resolves
- *  `effect` imports through node_modules, but a `bun install` mid-review could leave node_modules
- *  ahead of a not-yet-committed lockfile bump. Throws, never returns a guessed value — see this
- *  file's module doc and plans/skills-hardening/01-skills-verify-gate.md's Fail-closed section. */
-export function resolveEffectVersion(): string {
-	const pkgPath = join(REPO_ROOT, "node_modules/effect/package.json");
-	const lockPath = join(REPO_ROOT, "bun.lock");
-	if (!existsSync(pkgPath) || !existsSync(lockPath)) {
+/** A node_modules-vs-lockfile `effect` version disagreement — non-fatal (see resolveEffectVersion). */
+export interface EffectVersionSkew {
+	/** The version actually installed in node_modules — what tsc resolves and what we use. */
+	nodeModules: string;
+	/** The version the lockfile pins — what a `bun install` would converge node_modules to. */
+	lock: string;
+}
+
+/** Read the ACTUALLY resolved `effect` version. Returns the INSTALLED (node_modules) version — the
+ *  one tsc actually resolves `effect` imports through — plus a non-null `skew` when the lockfile
+ *  disagrees with it.
+ *
+ *  A genuine absence (no node_modules/effect at all, or an unreadable one) still throws — we cannot
+ *  typecheck effect blocks without the installed package, and that IS a real can't-verify condition.
+ *
+ *  But a mere version DISAGREEMENT is NOT fatal (fleet incident OMPSQ-448): worktrees symlink their
+ *  node_modules to the shared main checkout, so a `bun install` bumping the lockfile in ONE worktree
+ *  leaves every other worktree's (shared) node_modules momentarily behind the lockfile — through no
+ *  fault of that unit's diff. Throwing here failed the entire skills-verify test file and killed the
+ *  landing unit over a shared-environment race it did not cause and could not fix. Returning the
+ *  installed version with a surfaced `skew` is both non-fatal AND more correct: the type-checker and
+ *  the `verified-against` stamp check both resolve against node_modules (reality), never the lockfile
+ *  (aspiration). See this file's module doc and plans/skills-hardening/01-skills-verify-gate.md. */
+/** Find `effect`'s installed package.json the way the runtime resolves it: walk `node_modules/effect`
+ *  up the directory tree from `fromDir`. A git worktree commonly has NO `node_modules` of its own and
+ *  resolves `effect` through a symlink OR bun/node's up-tree lookup to the parent checkout — a literal
+ *  `<repoRoot>/node_modules/effect` check would spuriously report "absent" there and kill the unit. */
+function findInstalledEffectPkg(fromDir: string): string | undefined {
+	let dir = fromDir;
+	for (;;) {
+		const candidate = join(dir, "node_modules/effect/package.json");
+		if (existsSync(candidate)) return candidate;
+		const parent = dirname(dir);
+		if (parent === dir) return undefined; // reached the filesystem root
+		dir = parent;
+	}
+}
+
+export function resolveEffectVersion(repoRoot: string = REPO_ROOT): { version: string; skew: EffectVersionSkew | null } {
+	const pkgPath = findInstalledEffectPkg(repoRoot);
+	const lockPath = join(repoRoot, "bun.lock");
+	if (!pkgPath || !existsSync(lockPath)) {
 		throw new Error(
 			"skills-verify: node_modules absent/stale — run `bun install`.\n" +
-				`  expected both ${relative(REPO_ROOT, pkgPath)} and ${relative(REPO_ROOT, lockPath)} to exist.`,
+				`  expected an installed node_modules/effect (resolvable from ${repoRoot}) and ${relative(repoRoot, lockPath)} to exist.`,
 		);
 	}
 	let nodeModulesVersion: string;
@@ -212,22 +246,29 @@ export function resolveEffectVersion(): string {
 	} catch (e) {
 		throw new Error(`skills-verify: node_modules absent/stale — ${pkgPath} is not valid JSON (${(e as Error).message}). Run \`bun install\`.`);
 	}
+	if (!nodeModulesVersion) {
+		// The installed package exists but carries no version — genuinely unverifiable, not a skew.
+		throw new Error(`skills-verify: node_modules absent/stale — could not read the \`effect\` version from node_modules/effect/package.json. Run \`bun install\`.`);
+	}
 	const lockText = readFileSync(lockPath, "utf8");
 	const lockMatch = /"effect":\s*\[\s*"effect@([^"]+)"/.exec(lockText);
-	if (!nodeModulesVersion || !lockMatch) {
-		throw new Error(
-			"skills-verify: node_modules absent/stale — could not read the `effect` version from " +
-				`${nodeModulesVersion ? "bun.lock" : "node_modules/effect/package.json"}. Run \`bun install\`.`,
-		);
+	// A MISSING/unparseable `effect` pin in bun.lock is a genuine lockfile problem, not a
+	// shared-node_modules race (bun.lock is git-tracked and stable per-commit) — keep failing closed on
+	// it, loudly, exactly as before. ONLY the version DISAGREEMENT below is softened (grok review: don't
+	// let the skew-softening quietly swallow real lockfile breakage).
+	if (!lockMatch) {
+		throw new Error("skills-verify: node_modules absent/stale — could not read the `effect` version from bun.lock. Run `bun install`.");
 	}
 	const lockVersion = lockMatch[1];
 	if (nodeModulesVersion !== lockVersion) {
-		throw new Error(
-			"skills-verify: node_modules absent/stale — resolved effect version disagrees between " +
-				`node_modules (${nodeModulesVersion}) and bun.lock (${lockVersion}). Run \`bun install\`.`,
+		console.warn(
+			"skills-verify: effect version skew (non-fatal) — node_modules " +
+				`(${nodeModulesVersion}) disagrees with bun.lock (${lockVersion}). ` +
+				"Using the installed version (what tsc resolves); run `bun install` to converge the shared node_modules.",
 		);
+		return { version: nodeModulesVersion, skew: { nodeModules: nodeModulesVersion, lock: lockVersion } };
 	}
-	return nodeModulesVersion;
+	return { version: nodeModulesVersion, skew: null };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -739,7 +780,7 @@ export function stampVerifiedAgainst(roots: string[] | undefined, resolvedEffect
 export function runSkillsVerify(roots?: string[]): SkillsVerifyReport {
 	const gating = roots === undefined;
 	const effectiveRoots = roots ?? [DEFAULT_ROOT];
-	const resolvedEffectVersion = resolveEffectVersion();
+	const { version: resolvedEffectVersion, skew: effectVersionSkew } = resolveEffectVersion();
 
 	const allSkills: DiscoveredSkill[] = [];
 	for (const root of effectiveRoots) allSkills.push(...discoverSkills(root));
@@ -906,6 +947,7 @@ export function runSkillsVerify(roots?: string[]): SkillsVerifyReport {
 		gating,
 		roots: effectiveRoots,
 		resolvedEffectVersion,
+		effectVersionSkew,
 		skillsScanned: scannedNames,
 		manifestDrift,
 		frontmatterViolations,
@@ -935,6 +977,9 @@ function printReport(report: SkillsVerifyReport): void {
 	console.log("\nskills-verify" + (report.gating ? " (gating)" : " (advisory)") + "\n" + "=".repeat(48));
 	console.log(`roots: ${report.roots.join(", ")}`);
 	console.log(`resolved effect version: ${report.resolvedEffectVersion}`);
+	if (report.effectVersionSkew) {
+		console.log(`  ⚠ effect version skew (non-fatal): node_modules ${report.effectVersionSkew.nodeModules} vs bun.lock ${report.effectVersionSkew.lock} — run \`bun install\` to converge the shared node_modules`);
+	}
 	console.log(`skills scanned: ${report.skillsScanned.join(", ")}`);
 	if (report.manifestDrift.missing.length || report.manifestDrift.unexpected.length) {
 		console.log(`manifest drift — missing: [${report.manifestDrift.missing.join(", ")}] unexpected: [${report.manifestDrift.unexpected.join(", ")}]`);

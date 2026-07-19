@@ -92,20 +92,80 @@ function seenPath(stateDir: string): string {
 	return path.join(stateDir, "attention-seen.json");
 }
 
-/** Corrupt/missing ⇒ empty (worst case: one boot's worth of view history is forgotten, never a
- *  crash) — the exact `failure-memory.ts` idiom this module's doc comment cites. */
-function loadSeenMap(stateDir: string): SeenMap {
+/** Shared corrupt/missing ⇒ `{}` raw-object loader for this module's four compacted maps (seen,
+ *  surprise-count, unit-visited, unit-completed) — the ONE `JSON.parse(...) as unknown` this file
+ *  needs, so the repo's `json-parse-as-cast` migration ratchet counts a single occurrence for four
+ *  structurally near-identical stores instead of four. Each caller still owns its OWN shape
+ *  narrowing on top (`loadSurpriseCounts`/`loadUnitVisits`/`loadCompletions` filter to their own
+ *  value shape via `isValidTimestamp`/`narrowSeenMap` below); this only guarantees "a plain,
+ *  non-array object, or `{}` on anything else" — the exact `failure-memory.ts` idiom this module's
+ *  doc comment cites (worst case: one boot's worth of history is forgotten, never a crash).
+ *
+ *  `Array.isArray` is checked explicitly — `typeof [] === "object"` in JS, so a corrupt top-level
+ *  JSON array (e.g. a truncated/half-written file, or a caller that wrote the wrong shape) would
+ *  otherwise pass the bare `typeof` check and be trusted as a `Record<string, unknown>`, silently
+ *  exposing its numeric indices as string keys. Codex/gpt-5.6 cross-lineage review (t3-face concern
+ *  06): materialized with `Object.create(null)` rather than `{}` — a plain object literal's bracket
+ *  assignment on a literal `"__proto__"` key still invokes `Object.prototype`'s `__proto__` setter
+ *  (JSON.parse's OWN result is safe on this point, but this function's callers copy keys across via
+ *  `[key] =` assignment below, which is not), so a corrupt file carrying that key as literal text
+ *  must not be able to mutate this process's shared object prototype. */
+function loadJsonObject(filePath: string): Record<string, unknown> {
 	try {
 		const b = getStorageBackend();
-		const p = seenPath(stateDir);
-		if (!b.exists(p)) return {};
-		const raw0 = b.readTextSync(p);
+		if (!b.exists(filePath)) return {};
+		const raw0 = b.readTextSync(filePath);
 		if (raw0 === undefined) return {};
 		const raw = JSON.parse(raw0) as unknown;
-		return raw && typeof raw === "object" ? (raw as SeenMap) : {};
+		if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+		const out: Record<string, unknown> = Object.create(null);
+		for (const [k, v] of Object.entries(raw as Record<string, unknown>)) out[k] = v;
+		return out;
 	} catch {
 		return {};
 	}
+}
+
+/** One day of generous clock skew — bounds a timestamp read back from disk against the CURRENT
+ *  clock, so a corrupt `9999999999999999`-style value (still `typeof === "number"` and finite) can
+ *  never poison a `visitedAt < completedAt`-style comparison by reading as "the distant future,
+ *  always after everything." Codex/gpt-5.6 cross-lineage review (t3-face concern 06). */
+const MAX_CLOCK_SKEW_MS = 24 * 60 * 60 * 1000;
+
+/** Shared numeric-timestamp narrowing for every compacted map this module loads from disk — mirrors
+ *  `loadSurpriseCounts`' existing finite/non-negative filter, tightened to a SAFE integer (rejects a
+ *  float or a value that lost precision past `Number.MAX_SAFE_INTEGER`) within `MAX_CLOCK_SKEW_MS`
+ *  of now. A corrupt/missing value (a string, `NaN`, an array, a wildly-future stamp) is dropped —
+ *  fail closed, exactly like `unitVisitedAt`'s own "absence is never seen" contract one layer up. */
+function isValidTimestamp(v: unknown): v is number {
+	return typeof v === "number" && Number.isFinite(v) && Number.isSafeInteger(v) && v >= 0 && v <= Date.now() + MAX_CLOCK_SKEW_MS;
+}
+
+/** Shape-narrow a raw parsed object into a `SeenMap`/`UnitVisitMap` (same `SeenEntry` shape both
+ *  stores use) — a corrupt `"lastSeenAt":"nope"` or non-numeric `byViewer` stamp is DROPPED, not
+ *  trusted verbatim (grok-4.5/codex cross-lineage review, t3-face concern 06: the prior blind cast
+ *  meant a malformed entry's `undefined`-shaped `lastSeenAt` still compared as `NaN < completedAt`
+ *  ⇒ `false` ⇒ read as SEEN — the exact fail-OPEN this narrowing closes). Any row that fails
+ *  narrowing is skipped entirely rather than partially trusted. */
+function narrowSeenMap(raw: Record<string, unknown>): SeenMap {
+	const out: SeenMap = Object.create(null);
+	for (const [key, val] of Object.entries(raw)) {
+		if (!val || typeof val !== "object" || Array.isArray(val)) continue;
+		const entry = val as Record<string, unknown>;
+		if (!isValidTimestamp(entry.lastSeenAt)) continue;
+		let byViewer: Record<string, number> | undefined;
+		if (entry.byViewer && typeof entry.byViewer === "object" && !Array.isArray(entry.byViewer)) {
+			const bv: Record<string, number> = Object.create(null);
+			for (const [viewerId, at] of Object.entries(entry.byViewer as Record<string, unknown>)) if (isValidTimestamp(at)) bv[viewerId] = at;
+			if (Object.keys(bv).length) byViewer = bv;
+		}
+		out[key] = byViewer ? { lastSeenAt: entry.lastSeenAt, byViewer } : { lastSeenAt: entry.lastSeenAt };
+	}
+	return out;
+}
+
+function loadSeenMap(stateDir: string): SeenMap {
+	return narrowSeenMap(loadJsonObject(seenPath(stateDir)));
 }
 
 /** Comprehension concern 08's compacted per-(repo,file) `surprise` TAP COUNT map — same durability
@@ -120,24 +180,65 @@ function surprisePath(stateDir: string): string {
 	return path.join(stateDir, "attention-surprise.json");
 }
 
-/** Same corrupt/missing ⇒ empty contract as `loadSeenMap`. */
+/** t3-face concern 06 / plans/daily-driver/01-charter-needs-you-ladder.md: per-UNIT last-visited
+ *  map, `<stateDir>/unit-visited.json` — same durability/merge contract as `attention-seen.json`
+ *  above (`SeenEntry` shape, max-merge, debounced write) but keyed DIRECTLY by agent id, not a
+ *  `seenKey()` (repo,file) pair — there is no file for "a human opened this unit's roster row".
+ *  Feeds `attention-ladder.ts`'s `completed-unseen` rung: a completion read on one device must not
+ *  still read as unseen on another surface polling under the SAME viewer identity, and must never
+ *  be conflated with a DIFFERENT viewer's own visit (file mode: no viewerId ever exists, so every
+ *  caller collapses onto the one `lastSeenAt` — the same single-implicit-viewer rule the seen map
+ *  above already follows). */
+export type UnitVisitMap = SeenMap;
+
+function unitVisitPath(stateDir: string): string {
+	return path.join(stateDir, "unit-visited.json");
+}
+
+/** Same corrupt/missing ⇒ empty contract as `loadSeenMap`, PLUS the same `narrowSeenMap` shape
+ *  narrowing (t3-face concern 06's MINOR finding, grok-4.5/codex cross-lineage review: this used to
+ *  cast the raw parsed object straight to `UnitVisitMap` with no narrowing at all — a corrupt
+ *  `"lastSeenAt":"nope"` entry produced a non-`undefined` garbage `unitVisitedAt()` read, which
+ *  `NaN < completedAt`'s always-`false` comparison then resolved as SEEN, not unseen — a fail-OPEN
+ *  on exactly the field this store's whole contract is "absence is never seen"). */
+function loadUnitVisits(stateDir: string): UnitVisitMap {
+	return narrowSeenMap(loadJsonObject(unitVisitPath(stateDir)));
+}
+
+/** Same corrupt/missing ⇒ empty contract as `loadSeenMap`, plus its own per-entry narrowing via the
+ *  shared `isValidTimestamp` (finite, non-negative, safe-integer, bounded-clock-skew) — tightened
+ *  from a bare `Number.isFinite` check (codex/gpt-5.6 cross-lineage review, t3-face concern 06). */
 function loadSurpriseCounts(stateDir: string): SurpriseCountMap {
-	try {
-		const b = getStorageBackend();
-		const p = surprisePath(stateDir);
-		if (!b.exists(p)) return {};
-		const raw0 = b.readTextSync(p);
-		if (raw0 === undefined) return {};
-		const raw = JSON.parse(raw0) as unknown;
-		if (!raw || typeof raw !== "object") return {};
-		const out: SurpriseCountMap = {};
-		for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-			if (typeof v === "number" && Number.isFinite(v) && v >= 0) out[k] = v;
-		}
-		return out;
-	} catch {
-		return {};
-	}
+	const raw = loadJsonObject(surprisePath(stateDir));
+	const out: SurpriseCountMap = Object.create(null);
+	for (const [k, v] of Object.entries(raw)) if (isValidTimestamp(v)) out[k] = v;
+	return out;
+}
+
+/** SquadManager's CRITICAL fix (grok-4.5 cross-lineage review, t3-face concern 06): a per-agent,
+ *  OWN durable completion stamp — `<stateDir>/unit-completed.json` — replacing a scan of
+ *  `transitionLog`'s shared 500-entry-TOTAL ring (`SquadManager.lastCompletedAt`'s prior
+ *  implementation). That ring is capped across EVERY agent in the fleet, so a busy fleet could evict
+ *  the very completion transition this reads well before this unit's own turn-completion "ages
+ *  out" — silently un-demoting a real `completed-unseen` unit back to `idle` the moment the ring
+ *  happened to roll past it (the "ring-eviction demotion" the review named). This map has no such
+ *  cap: one entry per agent, monotone (never regresses), exactly the `unit-visited.json` idiom one
+ *  file over. Stamped by `SquadManager.recordTransition` — the ONE chokepoint every APPLIED (never
+ *  denied) transition passes through — the moment a transition qualifies as a genuine turn
+ *  completion (see `SquadManager.isGenuineCompletion`'s doc for the exact filter: `to==="idle"`,
+ *  `from` a real in-flight state, never a bare connect). */
+export type CompletionMap = Record<string, number>;
+
+function completionPath(stateDir: string): string {
+	return path.join(stateDir, "unit-completed.json");
+}
+
+/** Same corrupt/missing ⇒ empty contract, narrowed via the shared `isValidTimestamp`. */
+function loadCompletions(stateDir: string): CompletionMap {
+	const raw = loadJsonObject(completionPath(stateDir));
+	const out: CompletionMap = Object.create(null);
+	for (const [k, v] of Object.entries(raw)) if (isValidTimestamp(v)) out[k] = v;
+	return out;
 }
 
 /** Minute-bucket token limiter — same shape as `server.ts`'s `minuteRateAllowed` (not imported from
@@ -181,12 +282,22 @@ export class AttentionStore {
 	 *  debounced-flush path as `seenMap`; both are part of one `dirty` flag since every event that
 	 *  touches either always originates from the same `record()` call. */
 	private surpriseCounts: SurpriseCountMap;
+	/** t3-face concern 06's per-unit last-visited map — see `UnitVisitMap`'s doc above. Written
+	 *  through the SAME debounced-flush path/`dirty` flag as `seenMap`/`surpriseCounts` (every write
+	 *  site here already shares one flush cadence; a fourth independent timer would buy nothing). */
+	private unitVisits: UnitVisitMap;
+	/** SquadManager's durable per-agent completion stamp (`CompletionMap`'s doc above) — same
+	 *  debounced-flush path/`dirty` flag as every other compacted map here. */
+	private completions: CompletionMap;
 	private readonly rateBuckets = new Map<string, { minute: number; count: number }>();
 	/** Coalesce key → last-seen `at`, for the 30s idempotent-replay window. Unbounded but tiny in
 	 *  practice (one entry per distinct (kind,repo,file,agentId,viewerId) tuple ever reported). */
 	private readonly coalesceLast = new Map<string, number>();
 	private writeTimer: ReturnType<typeof setTimeout> | undefined;
 	private dirty = false;
+	/** True once `stop()`'s final flush has run (codex/gpt-5.6 cross-lineage review, t3-face concern
+	 *  06 addition D) — see `stop()`'s doc for the manager-eviction race this narrowly closes. */
+	private closed = false;
 
 	constructor(opts: AttentionStoreOptions) {
 		this.stateDir = opts.stateDir;
@@ -196,6 +307,8 @@ export class AttentionStore {
 		this.raw = new JsonlLog<AttentionEvent>({ path: path.join(this.stateDir, "operator-attention.jsonl"), log: (m) => this.log(`operator-attention.jsonl: ${m}`) });
 		this.seenMap = loadSeenMap(this.stateDir);
 		this.surpriseCounts = loadSurpriseCounts(this.stateDir);
+		this.unitVisits = loadUnitVisits(this.stateDir);
+		this.completions = loadCompletions(this.stateDir);
 	}
 
 	/** `GLANCE_ATTENTION=0` (legacy alias `OMP_SQUAD_ATTENTION`, batch-3 review: `.env.example`
@@ -275,6 +388,17 @@ export class AttentionStore {
 	}
 
 	private scheduleWrite(): void {
+		// Codex/gpt-5.6 cross-lineage review (t3-face concern 06, addition D): once `stop()` has run its
+		// final flush, no caller may re-arm a NEW debounced timer. Without this, a mark-seen (or any
+		// other write) that lands in the async gap between a manager-registry eviction's `stop()` and its
+		// own removal from the registry would schedule a fresh 2s timer that fires AFTER a replacement
+		// manager for the same org has already loaded this store's file from disk — last-flush-wins,
+		// silently discarding the interim write with no error anywhere. The in-memory mutation that
+		// triggered this call still applied (harmless — this instance is being discarded), it simply never
+		// reaches disk from here again. The broader race (serializing registry `get()` against `evictIdle()`
+		// per org so this call is refused outright, not merely made inert) is a manager-registry.ts concern,
+		// out of scope for this store.
+		if (this.closed) return;
 		this.dirty = true;
 		if (this.writeTimer) return;
 		this.writeTimer = setTimeout(() => this.flush(), WRITE_COALESCE_MS);
@@ -302,11 +426,25 @@ export class AttentionStore {
 		} catch (err) {
 			this.log(`attention-surprise.json write failed: ${errText(err)}`);
 		}
+		try {
+			getStorageBackend().writeDurableSync(unitVisitPath(this.stateDir), JSON.stringify(this.unitVisits));
+		} catch (err) {
+			this.log(`unit-visited.json write failed: ${errText(err)}`);
+		}
+		try {
+			getStorageBackend().writeDurableSync(completionPath(this.stateDir), JSON.stringify(this.completions));
+		} catch (err) {
+			this.log(`unit-completed.json write failed: ${errText(err)}`);
+		}
 	}
 
-	/** Call from the manager's `stop()`, mirroring every other debounced-write subsystem there. */
+	/** Call from the manager's `stop()`, mirroring every other debounced-write subsystem there. Flushes
+	 *  first (byte-identical to the historical behavior — a graceful shutdown never loses the ≤2s
+	 *  window), THEN marks the store closed so nothing scheduled afterward can re-arm a write timer
+	 *  (`scheduleWrite`'s doc — codex/gpt-5.6 cross-lineage review, t3-face concern 06 addition D). */
 	stop(): void {
 		this.flush();
+		this.closed = true;
 	}
 
 	/** The map read fresh, restricted to `repos` when given (each side normalized, like every other
@@ -351,6 +489,58 @@ export class AttentionStore {
 	 *  events last, like every other `JsonlLog.recent()` caller sees. */
 	recentEvents(limit?: number): AttentionEvent[] {
 		return this.raw.recent(limit);
+	}
+
+	/** Record that `viewerId` (or the single implicit file-mode viewer, when `undefined`) has
+	 *  visited unit `agentId` — the needs-you ladder's mark-seen mutation
+	 *  (`POST /api/attention/ladder/seen`). Max-merge, same monotone contract as `mergeSeen`: a
+	 *  stale/out-of-order replay must never move a visit stamp backward. Never gated by the
+	 *  `disabled()` kill switch or the rate limiter above — those guard the file-viewing telemetry
+	 *  lane; visiting a roster row is a core ladder function the operator must always be able to do. */
+	markUnitVisited(agentId: string, viewerId: string | undefined, at?: number): void {
+		const stamp = at ?? this.now();
+		const existing = this.unitVisits[agentId];
+		const lastSeenAt = Math.max(existing?.lastSeenAt ?? 0, stamp);
+		let byViewer = existing?.byViewer;
+		if (viewerId) byViewer = { ...byViewer, [viewerId]: Math.max(byViewer?.[viewerId] ?? 0, stamp) };
+		this.unitVisits[agentId] = byViewer ? { lastSeenAt, byViewer } : { lastSeenAt };
+		this.scheduleWrite();
+	}
+
+	/** `viewerId === undefined` ⇒ the file-mode single-implicit-viewer collapse: `lastSeenAt` IS the
+	 *  visit stamp (there is no `byViewer` to disagree with it). A REAL per-viewer id reads its own
+	 *  entry only — it never falls back to `lastSeenAt`, which could be a DIFFERENT viewer's more
+	 *  recent visit (DB mode: viewer A opening a unit must never silently read as "seen" for viewer
+	 *  B). Absence (no entry at all, or no entry for this viewer) returns `undefined` — fail closed,
+	 *  never coerced to "seen" by a missing record. */
+	unitVisitedAt(agentId: string, viewerId: string | undefined): number | undefined {
+		const entry = this.unitVisits[agentId];
+		if (!entry) return undefined;
+		return viewerId === undefined ? entry.lastSeenAt : entry.byViewer?.[viewerId];
+	}
+
+	/** Raw entry accessor for tests/debugging — mirrors `lastSeen(repo,file)`'s shape one layer up. */
+	unitVisitEntry(agentId: string): SeenEntry | undefined {
+		return this.unitVisits[agentId];
+	}
+
+	/** SquadManager's CRITICAL fix (`CompletionMap`'s doc above): stamp `agentId`'s durable
+	 *  last-completion time. Max-merge, same monotone contract as `markUnitVisited` — a stale/
+	 *  out-of-order re-record (e.g. a lineage-stitched replay) must never move the stamp backward.
+	 *  Called ONLY from `SquadManager.recordTransition`, once per APPLIED transition that qualifies as
+	 *  a genuine turn completion. */
+	recordCompletion(agentId: string, at: number): void {
+		const existing = this.completions[agentId];
+		if (existing !== undefined && existing >= at) return;
+		this.completions[agentId] = at;
+		this.scheduleWrite();
+	}
+
+	/** This unit's durable last-completion stamp, or `undefined` if it has never completed a turn.
+	 *  O(1) — replaces a former `transitionLog.recent()` linear scan run on every `emitAgent`
+	 *  broadcast, which ALSO had the ring-eviction gap this map exists to close. */
+	completedAt(agentId: string): number | undefined {
+		return this.completions[agentId];
 	}
 }
 

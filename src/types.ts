@@ -17,6 +17,7 @@ import type { LensId } from "./lens-select.ts";
 import type { HarnessScorecard } from "./harness-scorecard.ts";
 import type { WorkLane, WorkLaneSource } from "./lane.ts";
 import type { ComplexityTier } from "./model-outcomes.ts";
+import type { LadderPriority } from "./attention-ladder.ts";
 
 /** Derived, human-meaningful lifecycle state of one managed agent. */
 export type AgentStatus =
@@ -62,9 +63,19 @@ export interface FrictionEntry {
 	agentId?: string;
 	/** Repo the operator was in when annoyance struck ("" when genuinely unknown). */
 	repo: string;
-	/** Capture surface ("cli" / "tui" / "webapp-composer" / "here") or free-form situational context. */
+	/** Capture surface ("cli" / "tui" / "webapp-composer" / "here") or free-form situational context.
+	 *  Auto-captured rows (plans/daily-driver-w15 concern 02) use a fixed `auto:*` convention —
+	 *  `auto:boundary-sync-held`, `auto:acp-timeout`, `auto:session-loss` — so the drain can bucket
+	 *  them without relying on `source` alone (belt and suspenders). */
 	context?: string;
 	gripe: string;
+	/** Who/what filed this gripe. Absent on any row written before this field existed — READERS (not
+	 *  the jsonl file) default a missing value to `"human"` (see `FrictionLog.recent`/`hydrateAll`); no
+	 *  rewrite of existing friction.jsonl rows. `"auto"` is stamped ONLY by the daemon's own internal
+	 *  hook sites (held boundary-syncs, ACP prompt timeouts, session loss on restart) — `POST
+	 *  /api/friction` never accepts it from a client (the request schema has no `source` field at
+	 *  all, and the handler never reads one off the decoded body). */
+	source?: "human" | "auto";
 }
 
 /**
@@ -918,6 +929,11 @@ export interface AgentDTO {
 	 *  the webapp's "Fork from step N" control; an old daemon that never sets this field hides the button
 	 *  instead of showing one that 404s. */
 	forkAvailable?: boolean;
+	/** Derived from `workflowState.terminal` when the terminal reason is a RECOVERABLE fix-up-ladder
+	 *  visit-cap exhaustion (present, not superseded) — gates the webapp's "Continue" control, which
+	 *  re-runs the verify gate in place on the SAME worktree (retry budgets reset) instead of forking a
+	 *  fresh branch off HEAD. An old daemon that never sets this hides the button rather than 404ing. */
+	continueAvailable?: boolean;
 	/** Requested authority persisted for this run; effectiveMode is capped by daemon policy and blockers. */
 	autonomyMode?: AutonomyMode;
 	/** Actual authority after approval/env caps and blockers. */
@@ -980,6 +996,17 @@ export interface AgentDTO {
 	 *  whose turn ran under `OMP_SQUAD_PUSH_MIN_TURN_MS` — a live-watched short reply is not a
 	 *  reason-to-switch buzz. Voice arms are exempt (definitionally away-from-screen). */
 	completionArmedAt?: number;
+	/** The needs-you ladder's single computed priority state (t3-face concern 06,
+	 *  attention-ladder.ts's `computeLadderPriority`, plans/daily-driver/01-charter-needs-you-ladder.md).
+	 *  COMPUTED, NOT PERSISTED — like `harnessScorecard` above, absent from `PersistedAgent` so it is
+	 *  never written to state.json and can never drift stale across a restart: `SquadManager.list()`/
+	 *  `getAgent()`/`emitAgent` all recompute it fresh on every read (`syncLadder`), mirroring
+	 *  `syncAuthority`'s exact pattern. This field is the VIEWER-AGNOSTIC hint value (computed with no
+	 *  `visitedAt`, i.e. "as if nobody has visited yet" — fail-closed, never a false "idle"); a GET
+	 *  request personalizes the `completed-unseen`/`idle` boundary for the REQUESTING viewer on top of
+	 *  this via `SquadManager.ladderPriorityFor`, without ever mutating this shared field (see
+	 *  attention-ladder.ts's module doc for why per-viewer state can't live here). */
+	ladderPriority?: LadderPriority;
 }
 
 /**
@@ -1554,6 +1581,7 @@ export type ClientCommand =
 	| { type: "kill"; id: string }
 	| { type: "restart"; id: string }
 	| { type: "fork"; id: string; seq?: number }
+	| { type: "continue"; id: string }
 	| { type: "remove"; id: string; deleteWorktree?: boolean }
 	| { type: "create"; options: CreateAgentOptions; source?: string }
 	| { type: "message"; to: string; text: string }

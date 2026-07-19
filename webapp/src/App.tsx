@@ -25,8 +25,10 @@ import { CapabilityPanel } from './components/CapabilityPanel';
 import { CommandPalette } from './components/CommandPalette';
 import { OmpGraphPanel } from './components/OmpGraphPanel';
 import { FogView } from './components/FogView';
+import { DailyPanel } from './components/DailyPanel';
 import { IntervenceView } from './components/IntervenceView';
 import { DesignReviewView } from './components/DesignReviewView';
+import { PlanRealityView } from './components/PlanRealityView';
 import { WorkspaceCockpit } from './components/WorkspaceCockpit';
 import { FactoryStatusStrip } from './components/FactoryStatusStrip';
 import { OrgSettings } from './components/OrgSettings';
@@ -96,6 +98,11 @@ const MainContent = () => {
       right here. */}
   if (view === 'fleet') return <WorkspaceCockpit />;
   if (view === 'fog') return <FogView />;
+  // Daily driver: the dogfood loop's two signals (adoption counters + friction ledger). Self-fetches
+  // both endpoints; no PageContextScope (a read-only signals view has nothing view-local to publish,
+  // so the live PageContext retracts to null on entry, same as the first paint — the assistant
+  // degrades gracefully, never crashes).
+  if (view === 'daily') return <DailyPanel />;
   if (view === 'intervene') {
     return (
       <PageContextScope value={intervenePageContext}>
@@ -118,6 +125,7 @@ const MainContent = () => {
     );
   }
   if (view === 'omp-graph') return <OmpGraphPanel />;
+  if (view === 'plan-reality') return <PlanRealityView />;
   if (view === 'org') {
     return (
       <PageContextScope value={orgPageContext}>

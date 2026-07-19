@@ -7,6 +7,7 @@ import {
 	IDENTIFIER_ALLOWLIST,
 	IDENTIFIER_ALLOWLIST_BASELINE,
 	NO_VERIFY_BASELINE,
+	resolveEffectVersion,
 	runSkillsVerify,
 	stampVerifiedAgainst,
 } from "../scripts/skills-verify.ts";
@@ -430,4 +431,54 @@ test("skills-verify: node_modules/bun.lock version guard resolves without throwi
 	// resolveEffectVersion() is exercised implicitly by every runSkillsVerify() call above; this
 	// test just pins the observable shape so a future refactor can't silently drop the guard.
 	expect(report.resolvedEffectVersion.length).toBeGreaterThan(0);
+	// On this (converged) repo there is no skew — the softening path must not fabricate one.
+	expect(report.effectVersionSkew).toBeNull();
+});
+
+/** Build a throwaway repoRoot with a fabricated `node_modules/effect/package.json` + `bun.lock`. */
+function fakeRepoRoot(nodeModulesVersion: string | null, lockVersion: string | null): string {
+	const root = join(tmpdir(), `sv-effect-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+	if (nodeModulesVersion !== null) {
+		mkdirSync(join(root, "node_modules/effect"), { recursive: true });
+		writeFileSync(join(root, "node_modules/effect/package.json"), JSON.stringify({ name: "effect", version: nodeModulesVersion }));
+	} else {
+		mkdirSync(root, { recursive: true });
+	}
+	// bun.lock — the regex only needs `"effect": [ "effect@<ver>"`. Omit the whole line when null.
+	const lockBody = lockVersion !== null ? `  "packages": {\n    "effect": ["effect@${lockVersion}", "", {}],\n  }\n` : `  "packages": {}\n`;
+	writeFileSync(join(root, "bun.lock"), `{\n${lockBody}}\n`);
+	return root;
+}
+
+test("resolveEffectVersion: a node_modules↔bun.lock SKEW is non-fatal — returns the INSTALLED version + surfaced skew (OMPSQ-448)", () => {
+	// The exact shape that killed OMPSQ-448: a shared node_modules behind a bumped lockfile. This must
+	// NOT throw — it returns the installed (node_modules) version, which is what tsc actually resolves.
+	const root = fakeRepoRoot("4.0.0-beta.93", "4.0.0-beta.98");
+	try {
+		const { version, skew } = resolveEffectVersion(root);
+		expect(version).toBe("4.0.0-beta.93");
+		expect(skew).toEqual({ nodeModules: "4.0.0-beta.93", lock: "4.0.0-beta.98" });
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("resolveEffectVersion: agreement ⇒ no skew", () => {
+	const root = fakeRepoRoot("4.0.0-beta.98", "4.0.0-beta.98");
+	try {
+		const { version, skew } = resolveEffectVersion(root);
+		expect(version).toBe("4.0.0-beta.98");
+		expect(skew).toBeNull();
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("resolveEffectVersion: a genuinely ABSENT node_modules/effect still throws (real can't-verify, not a skew)", () => {
+	const root = fakeRepoRoot(null, "4.0.0-beta.98");
+	try {
+		expect(() => resolveEffectVersion(root)).toThrow(/node_modules absent\/stale/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
 });

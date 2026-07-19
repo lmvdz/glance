@@ -87,7 +87,7 @@ async function convergedRepo(prefix: string): Promise<string> {
 test("probe 1: no origin configured ⇒ local, reason names the unparseable identity", async () => {
 	const repo = await gitRepo("lm-noorigin-");
 	await commit(repo, "a.txt", "a\n", "base");
-	const resolved = await resolveLandMode(repo);
+	const resolved = await resolveLandMode(repo, { landMode: "auto" });
 	expect(resolved.mode).toBe("local");
 	expect(resolved.reason).toContain("no parseable owner/repo from origin");
 });
@@ -99,7 +99,7 @@ test("probe 2: gh reports no default branch ⇒ local", async () => {
 	await commit(repo, "a.txt", "a\n", "base");
 	await git(repo, "remote", "add", "origin", "git@github.com:acme/repo-xyz.git");
 	ghResponse = undefined; // gh repo view failed / no defaultBranchRef
-	const resolved = await resolveLandMode(repo);
+	const resolved = await resolveLandMode(repo, { landMode: "auto" });
 	expect(resolved.mode).toBe("local");
 	expect(resolved.reason).toContain("gh repo view acme/repo-xyz failed or has no default branch");
 });
@@ -110,7 +110,7 @@ test("probe 3: push --dry-run fails (unreachable origin) ⇒ local", async () =>
 	const repo = await gitRepo("lm-nopush-");
 	await commit(repo, "a.txt", "a\n", "base");
 	await git(repo, "remote", "add", "origin", path.join(os.tmpdir(), "lm-does-not-exist-xyz"));
-	const resolved = await resolveLandMode(repo);
+	const resolved = await resolveLandMode(repo, { landMode: "auto" });
 	expect(resolved.mode).toBe("local");
 	expect(resolved.reason).toContain("git push --dry-run origin HEAD:refs/heads/squad/push-probe failed");
 });
@@ -133,7 +133,7 @@ test("probe 3 regression: local behind origin (normal PR-mode state) still resol
 	await commit(clone, "b.txt", "b\n", "merged on github, not yet pulled locally");
 	await git(clone, "push", "-q", "origin", "main");
 
-	const resolved = await resolveLandMode(repo);
+	const resolved = await resolveLandMode(repo, { landMode: "auto" });
 	expect(resolved.mode).toBe("pr");
 	expect(resolved.defaultBranch).toBe("main");
 });
@@ -152,7 +152,7 @@ test("probe 3 regression: local behind origin (normal PR-mode state) still resol
 test("probe 4: a non-default checkout no longer forces local — the fleet lands as PRs while the operator works", async () => {
 	const repo = await convergedRepo("lm-branchmismatch-");
 	await git(repo, "checkout", "-qb", "feature");
-	const resolved = await resolveLandMode(repo);
+	const resolved = await resolveLandMode(repo, { landMode: "auto" });
 	expect(resolved.mode).toBe("pr");
 	expect(resolved.defaultBranch).toBe("main");
 	// The operator's branch is still reported — legibility, not a gate.
@@ -163,7 +163,7 @@ test("probe 4: a dirty working tree is irrelevant to the resolved mode (nothing 
 	const repo = await convergedRepo("lm-dirty-");
 	await git(repo, "checkout", "-qb", "feature");
 	await fs.writeFile(path.join(repo, "a.txt"), "locally modified, uncommitted\n");
-	const resolved = await resolveLandMode(repo);
+	const resolved = await resolveLandMode(repo, { landMode: "auto" });
 	expect(resolved.mode).toBe("pr");
 });
 
@@ -172,7 +172,7 @@ test("probe 4: a dirty working tree is irrelevant to the resolved mode (nothing 
 test("probe 5: local default has an unpushed commit ahead of origin ⇒ local, diverged", async () => {
 	const repo = await convergedRepo("lm-diverged-");
 	await commit(repo, "b.txt", "b\n", "unpushed"); // local main now ahead; origin/main lacks this commit
-	const resolved = await resolveLandMode(repo);
+	const resolved = await resolveLandMode(repo, { landMode: "auto" });
 	expect(resolved.mode).toBe("local");
 	expect(resolved.reason).toContain("is NOT an ancestor of origin/main — diverged");
 });
@@ -184,7 +184,7 @@ test("probe 5: a DIVERGED local default still forces local even from a non-defau
 	const repo = await convergedRepo("lm-diverged-offbranch-");
 	await commit(repo, "b.txt", "b\n", "unpushed on main");
 	await git(repo, "checkout", "-qb", "feature"); // HEAD moves; refs/heads/main is still ahead of origin
-	const resolved = await resolveLandMode(repo);
+	const resolved = await resolveLandMode(repo, { landMode: "auto" });
 	expect(resolved.mode).toBe("local");
 	expect(resolved.reason).toContain("local main is NOT an ancestor of origin/main");
 });
@@ -195,7 +195,7 @@ test("probe 5: a converged local default + non-default checkout ⇒ pr", async (
 	const repo = await convergedRepo("lm-converged-offbranch-");
 	await git(repo, "checkout", "-qb", "feature");
 	await commit(repo, "b.txt", "b\n", "work on the feature branch only");
-	const resolved = await resolveLandMode(repo);
+	const resolved = await resolveLandMode(repo, { landMode: "auto" });
 	expect(resolved.mode).toBe("pr");
 });
 
@@ -210,7 +210,7 @@ test("probe 5: no local <default> ref at all (cloned straight onto a branch) ⇒
 	await git(clone, "checkout", "-qb", "work");
 	await git(clone, "branch", "-D", "main"); // no refs/heads/main remains
 
-	const resolved = await resolveLandMode(clone);
+	const resolved = await resolveLandMode(clone, { landMode: "auto" });
 	expect(resolved.mode).toBe("pr");
 	expect(resolved.defaultBranch).toBe("main");
 });
@@ -219,7 +219,7 @@ test("probe 5: no local <default> ref at all (cloned straight onto a branch) ⇒
 
 test("all 5 probes passing ⇒ pr mode with the resolved default branch", async () => {
 	const repo = await convergedRepo("lm-allpass-");
-	const resolved = await resolveLandMode(repo);
+	const resolved = await resolveLandMode(repo, { landMode: "auto" });
 	expect(resolved.mode).toBe("pr");
 	expect(resolved.defaultBranch).toBe("main");
 	expect(resolved.reason).toContain("all 5 probes passed");
@@ -233,8 +233,9 @@ test("OMP_SQUAD_PR_BASE overrides gh's reported default branch", async () => {
 	await git(repo, "remote", "add", "origin", origin);
 	await git(repo, "push", "-q", "origin", "trunk");
 	ghResponse = { defaultBranchRef: { name: "wrong-branch" } }; // gh says one thing...
-	process.env.OMP_SQUAD_PR_BASE = "trunk"; // ...operator override says another, and wins
-	const resolved = await resolveLandMode(repo);
+	// ...operator override says another, and wins. Passed explicitly (not via process.env) so a
+	// sibling file mutating OMP_SQUAD_PR_BASE across an await can't bleed a different base in here.
+	const resolved = await resolveLandMode(repo, { landMode: "auto", prBase: "trunk" });
 	expect(resolved.mode).toBe("pr");
 	expect(resolved.defaultBranch).toBe("trunk");
 });
@@ -247,31 +248,37 @@ test("OMP_SQUAD_LAND_MODE=local bypasses the probe entirely", async () => {
 	expect(resolved).toEqual({ mode: "local", reason: "OMP_SQUAD_LAND_MODE=local" });
 });
 
-test("OMP_SQUAD_LAND_MODE=pr bypasses the convergence probe, but still best-effort resolves a default branch via gh", async () => {
+test("an explicit landMode override wins over process.env — the concurrency-safe input path", async () => {
+	// Ambient env says one thing; the explicit override says another and MUST win. This is the seam
+	// that immunizes callers from the cross-file env leak: the value comes from the argument, never
+	// the process-global (so a sibling test mutating OMP_SQUAD_LAND_MODE mid-await cannot bleed in).
 	process.env.OMP_SQUAD_LAND_MODE = "pr";
+	const resolved = await resolveLandMode("/nonexistent/never/probed", { landMode: "local" });
+	expect(resolved).toEqual({ mode: "local", reason: "OMP_SQUAD_LAND_MODE=local" });
+});
+
+test("OMP_SQUAD_LAND_MODE=pr bypasses the convergence probe, but still best-effort resolves a default branch via gh", async () => {
 	const repo = await gitRepo("lm-forced-gh-");
 	await commit(repo, "a.txt", "a\n", "base");
 	await git(repo, "remote", "add", "origin", "git@github.com:acme/repo-xyz.git");
 	ghResponse = { defaultBranchRef: { name: "main" } };
-	const resolved = await resolveLandMode(repo);
+	const resolved = await resolveLandMode(repo, { landMode: "pr" });
 	expect(resolved.mode).toBe("pr");
 	expect(resolved.defaultBranch).toBe("main");
 	expect(resolved.reason).toContain("forced");
 });
 
 test("OMP_SQUAD_LAND_MODE=pr forced: gh fails but origin/HEAD symref resolves the default branch", async () => {
-	process.env.OMP_SQUAD_LAND_MODE = "pr";
 	const repo = await convergedRepo("lm-forced-symref-");
 	await git(repo, "remote", "set-head", "origin", "main"); // records refs/remotes/origin/HEAD locally
 	ghResponse = undefined; // gh unreachable/unconfigured
-	const resolved = await resolveLandMode(repo);
+	const resolved = await resolveLandMode(repo, { landMode: "pr" });
 	expect(resolved.mode).toBe("pr");
 	expect(resolved.defaultBranch).toBe("main");
 });
 
 test("OMP_SQUAD_LAND_MODE=pr forced with truly nothing resolvable (no origin at all) ⇒ pr mode with NO default branch, never silently local", async () => {
-	process.env.OMP_SQUAD_LAND_MODE = "pr";
-	const resolved = await resolveLandMode("/nonexistent/never/probed");
+	const resolved = await resolveLandMode("/nonexistent/never/probed", { landMode: "pr" });
 	expect(resolved.mode).toBe("pr");
 	expect(resolved.defaultBranch).toBeUndefined();
 	expect(resolved.reason).toContain("no default branch could be resolved");
@@ -283,18 +290,18 @@ test("TTL cache: a resolution is reused within the window, re-probed after it ex
 	process.env.OMP_SQUAD_LAND_MODE_TTL_MS = "50";
 	const repo = await convergedRepo("lm-ttl-");
 
-	const first = await resolveLandMode(repo);
+	const first = await resolveLandMode(repo, { landMode: "auto" });
 	expect(first.mode).toBe("pr"); // all probes pass initially
 
 	// Break probe 5 (unpushed commit) WITHOUT letting the TTL window elapse — cache must win.
 	await commit(repo, "b.txt", "b\n", "unpushed-during-ttl");
-	const stillCached = await resolveLandMode(repo);
+	const stillCached = await resolveLandMode(repo, { landMode: "auto" });
 	expect(stillCached.mode).toBe("pr");
 	expect(stillCached).toEqual(first);
 
 	// Past the TTL window ⇒ re-probes and now sees the diverged state.
 	await Bun.sleep(80);
-	const reprobed = await resolveLandMode(repo);
+	const reprobed = await resolveLandMode(repo, { landMode: "auto" });
 	expect(reprobed.mode).toBe("local");
 	expect(reprobed.reason).toContain("diverged");
 });
@@ -302,7 +309,6 @@ test("TTL cache: a resolution is reused within the window, re-probed after it ex
 // ── aheadOfBase ──────────────────────────────────────────────────────────────────────────────────
 
 test("aheadOfBase in local mode matches the old HEAD..branch behavior exactly", async () => {
-	process.env.OMP_SQUAD_LAND_MODE = "local"; // bypass the probe; no origin needed
 	const repo = await gitRepo("aob-local-");
 	await commit(repo, "a.txt", "a\n", "base");
 	await git(repo, "branch", "feat");
@@ -312,8 +318,8 @@ test("aheadOfBase in local mode matches the old HEAD..branch behavior exactly", 
 	await commit(repo, "c.txt", "c\n", "two");
 	await git(repo, "checkout", "-q", "main");
 
-	expect(await aheadOfBase({ repo, branch: "feat" })).toBe(2);
-	expect(await aheadOfBase({ repo, branch: "main" })).toBe(0);
+	expect(await aheadOfBase({ repo, branch: "feat", overrides: { landMode: "local" } })).toBe(2);
+	expect(await aheadOfBase({ repo, branch: "main", overrides: { landMode: "local" } })).toBe(0);
 });
 
 test("aheadOfBase in pr mode counts against origin/<default>..branch, not local HEAD", async () => {
@@ -328,7 +334,7 @@ test("aheadOfBase in pr mode counts against origin/<default>..branch, not local 
 	// proving the primitive is origin-aware, not just "whatever HEAD happens to be right now".
 	await commit(repo, "local-only.txt", "x\n", "local main advances without pushing");
 
-	const ahead = await aheadOfBase({ repo, branch: "squad/feat" });
+	const ahead = await aheadOfBase({ repo, branch: "squad/feat", overrides: { landMode: "auto" } });
 	expect(ahead).toBe(1); // one commit ahead of origin/main, regardless of local main's unrelated advance
 });
 
@@ -341,5 +347,5 @@ test("aheadOfBase returns 0 once a pr-mode branch is fully merged into origin/<d
 	await git(repo, "merge", "-q", "--no-ff", "-m", "merge squad/done", "squad/done");
 	await git(repo, "push", "-q", "origin", "main"); // origin/main now contains squad/done's commit
 
-	expect(await aheadOfBase({ repo, branch: "squad/done" })).toBe(0);
+	expect(await aheadOfBase({ repo, branch: "squad/done", overrides: { landMode: "auto" } })).toBe(0);
 });

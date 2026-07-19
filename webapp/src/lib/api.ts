@@ -1,4 +1,4 @@
-import type { TranscriptEntry } from "./dto";
+import type { PlanRealityDTO, TranscriptEntry } from "./dto";
 
 const TOKEN_KEY = "ompsq_token";
 
@@ -251,6 +251,22 @@ export function fetchEpisodes(repo: string): Promise<EpisodeMetaDTO[]> {
  *  missing repo). */
 export function fetchEpisode(repo: string, id: string): Promise<EpisodeDTO> {
   return apiJson<EpisodeDTO>(`/api/episodes/${encodeURIComponent(id)}?repo=${encodeURIComponent(repo)}`);
+}
+
+// -----------------------------------------------------------------------------------------------
+// Plan vs reality (OMPSQ-448 comprehension) — `GET /api/features/:id/reality?repo=<repo>` wraps
+// its payload in `{ reality: PlanRealityDTO }`; this unwraps it so callers deal in the DTO
+// directly. 404 (no plan-reality data for this feature) is a normal, expected state — mapped to
+// `null` rather than thrown, mirroring `getVoiceConfig`'s discipline; any other non-2xx still
+// throws (via `apiJson`) so a genuine failure isn't silently swallowed as "no data".
+// -----------------------------------------------------------------------------------------------
+
+export async function fetchPlanReality(featureId: string, repo: string): Promise<PlanRealityDTO | null> {
+  const response = await apiFetch(`/api/features/${encodeURIComponent(featureId)}/reality?repo=${encodeURIComponent(repo)}`);
+  if (response.status === 404) return null;
+  if (!response.ok) throw new ApiError(await response.text(), response.status);
+  const body = (await response.json()) as { reality: PlanRealityDTO };
+  return body.reality;
 }
 
 /** Voice capability probe (`GET /api/voice/config`) — the one honest discovery channel for whether

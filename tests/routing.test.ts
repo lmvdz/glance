@@ -6,6 +6,7 @@ import { FileStore } from "../src/dal/store.ts";
 import { ManagerRegistry } from "../src/manager-registry.ts";
 import { SquadServer, type AuthInstance } from "../src/server.ts";
 import type { Actor, AgentDTO, SquadEvent } from "../src/types.ts";
+import type { LadderPriority } from "../src/attention-ladder.ts";
 
 const cleanups: Array<() => Promise<void> | void> = [];
 
@@ -21,6 +22,9 @@ interface FakeManager {
 	list(): AgentDTO[];
 	off(event: "event", listener: (e: SquadEvent) => void): void;
 	stop(): Promise<void>;
+	// t3-face concern 06: GET /api/agents personalizes ladderPriority per viewer via this method
+	// (server.ts) — a real SquadManager always has it; this duck-typed fixture needs the same shape.
+	ladderPriorityFor(dto: AgentDTO, viewerId: string | undefined): LadderPriority;
 }
 
 interface FakeEntry {
@@ -53,6 +57,7 @@ function fakeManager(agents: AgentDTO[]): FakeManager {
 		list: () => agents,
 		off: () => {},
 		stop: async () => {},
+		ladderPriorityFor: (dto) => dto.ladderPriority ?? "idle",
 	};
 }
 

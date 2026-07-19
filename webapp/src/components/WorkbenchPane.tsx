@@ -10,6 +10,8 @@ import {
   Circle,
   Download,
   Filter,
+  Gauge,
+  GitCompare,
   Inbox,
   RotateCcw,
   Layers,
@@ -106,6 +108,8 @@ export function railFooterContext(
       return 'Fleet activity, cost, and lineage over time';
     case 'fog':
       return 'Comprehension debt — what nobody has looked at yet';
+    case 'daily':
+      return 'Adoption counters and the friction ledger';
     case 'capabilities':
       return `${ctx.packCount} trusted pack${ctx.packCount === 1 ? '' : 's'} · ${ctx.catalogCount} in the catalog`;
     case 'org':
@@ -114,6 +118,8 @@ export function railFooterContext(
       return 'Stepping into one agent';
     case 'review':
       return 'Design review';
+    case 'plan-reality':
+      return 'What each plan claims, and whether it is proven';
     case 'tasks':
     default:
       return '';
@@ -127,14 +133,19 @@ export function railFooterContext(
  * not a resurrection of the retired one). The old Attention/Plan/Observe/Network sections are gone
  * — the three attention views dissolved into Fleet (§6f), the five Observe pages folded into the
  * Graph/header/inspector, Federation parked in Org settings, and the Knowledge base became the ⌘K
- * palette's fabric search. Five items need no section headers; Org/settings moved to the gear at
+ * palette's fabric search. Six items need no section headers; Org/settings moved to the gear at
  * the bottom of the rail.
+ *
+ * `plan-reality` (OMPSQ-448 comprehension) joins the rail alongside Fog: a plans index + per-plan
+ * "plan vs reality" comprehension page (PlanRealityView.tsx), also reachable via a TaskDetail strip.
  */
 export const NAV_ITEMS: { view: AppView; label: string; icon: LucideIcon; title: string }[] = [
   { view: 'fleet', label: 'Fleet', icon: Layers, title: 'Fleet — roster, transcript, land rail' },
   { view: 'tasks', label: 'Tasks', icon: Inbox, title: 'Tasks' },
   { view: 'omp-graph', label: 'Graph', icon: Waypoints, title: 'Graph — the living temporal dashboard' },
   { view: 'fog', label: 'Fog', icon: CloudFog, title: 'Fog — comprehension debt: what nobody has looked at yet' },
+  { view: 'daily', label: 'Daily', icon: Gauge, title: 'Daily driver — adoption counters and the friction ledger' },
+  { view: 'plan-reality', label: 'Plan reality', icon: GitCompare, title: 'Plan vs reality — what each plan claims, and whether it is proven' },
   { view: 'capabilities', label: 'Capabilities', icon: Boxes, title: 'Capabilities' },
 ];
 
@@ -418,6 +429,8 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
     : view === 'capabilities' ? `${capabilities.packs.length} packs`
     : view === 'omp-graph' ? 'Graph'
     : view === 'fog' ? 'Fog'
+    : view === 'daily' ? 'Daily'
+    : view === 'plan-reality' ? 'Plan reality'
     : view === 'org' ? 'Settings'
     : '';
 

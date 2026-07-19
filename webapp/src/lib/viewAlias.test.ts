@@ -3,7 +3,7 @@ import { coerceView, isAppView, VIEW_ALIAS_MAP, VIEW_STORAGE_KEY } from './viewA
 
 describe('isAppView', () => {
   test('true for every current AppView key', () => {
-    for (const v of ['fleet', 'tasks', 'omp-graph', 'fog', 'capabilities', 'org', 'intervene', 'review']) {
+    for (const v of ['fleet', 'tasks', 'omp-graph', 'fog', 'daily', 'capabilities', 'org', 'intervene', 'review', 'plan-reality']) {
       expect(isAppView(v)).toBe(true);
     }
   });
@@ -23,7 +23,7 @@ describe('isAppView', () => {
 });
 
 describe('coerceView — live keys pass through unchanged', () => {
-  for (const v of ['fleet', 'tasks', 'omp-graph', 'fog', 'capabilities', 'org', 'intervene', 'review'] as const) {
+  for (const v of ['fleet', 'tasks', 'omp-graph', 'fog', 'daily', 'capabilities', 'org', 'intervene', 'review', 'plan-reality'] as const) {
     test(`"${v}" passes through with no palette auto-open`, () => {
       expect(coerceView(v)).toEqual({ view: v, openPalette: false });
     });

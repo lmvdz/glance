@@ -10,7 +10,7 @@ import { ProofProvenancePanel } from './ProofProvenancePanel';
 import { useTaskContext } from '../context/TaskContext';
 import { useTheme } from '../context/ThemeContext';
 import { apiJson, jsonInit } from '../lib/api';
-import { stoppableAgents, stopCommand, interruptibleAgents, interruptCommand, restartableAgents, restartCommand, removeCommand, setModelCommand, answerCommand, KNOWN_MODELS, fetchCheckpoints, resolveForkTarget, isForkCheckpointResponseCurrent, type CheckpointEntryDTO } from '../lib/agent-control';
+import { stoppableAgents, stopCommand, interruptibleAgents, interruptCommand, restartableAgents, restartCommand, removeCommand, setModelCommand, answerCommand, KNOWN_MODELS, fetchCheckpoints, resolveForkTarget, isForkCheckpointResponseCurrent, continueCommand, type CheckpointEntryDTO } from '../lib/agent-control';
 import { taskRef, issueIdentifier } from '../lib/task-model';
 import { summarizeTask } from '../lib/taskStatus';
 import { traceIdForAgent } from '../lib/trace';
@@ -21,6 +21,7 @@ import { PlanFlowDiagram } from './PlanFlowDiagram';
 import { WorkflowGraphOverlay } from './WorkflowGraphOverlay';
 import { TaskSessionsTable, sessionRowsFromAgents } from './TaskSessionsTable';
 import { TaskArtifactsRail } from './TaskArtifactsRail';
+import { PlanRealityStrip } from './PlanRealityView';
 import { Kbd } from './kit/Kbd';
 import type { GraphConcernInput } from '../lib/planGraph';
 import type { TaskComment, TaskDecision, TaskRelationship } from '../types';
@@ -205,6 +206,31 @@ export function ForkButton({
       className={`min-h-8 rounded-md px-2.5 text-xs font-medium flex items-center gap-1.5 transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${isOpen ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300' : 'text-amber-700 hover:bg-amber-50 dark:text-amber-400 dark:hover:bg-amber-900/30'}`}
     >
       ⑂ Fork
+    </button>
+  );
+}
+
+/** "Continue" trigger beside Fork — gated on the persisted `continueAvailable` DTO field (only a
+ *  RECOVERABLE visit-cap-exhaustion terminal sets it). Unlike Fork, this re-runs the verify gate IN
+ *  PLACE on the run's own worktree with retry budgets reset, so uncommitted work is preserved. An old
+ *  daemon that never sets the field simply never shows this. Renders nothing for any other agent. */
+export function ContinueButton({
+  agent,
+  onClick,
+}: {
+  agent: Pick<AgentDTO, 'name' | 'continueAvailable'>;
+  onClick: () => void;
+}) {
+  if (!agent.continueAvailable) return null;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={`Continue ${agent.name} in place — reset retry budgets and re-run the verify gate on this worktree`}
+      aria-label="Continue agent"
+      className="min-h-8 rounded-md px-2.5 text-xs font-medium flex items-center gap-1.5 transition-colors focus-visible:ring-2 focus-visible:ring-sky-500 text-sky-700 hover:bg-sky-50 dark:text-sky-400 dark:hover:bg-sky-900/30"
+    >
+      ▶ Continue
     </button>
   );
 }
@@ -585,6 +611,9 @@ export const TaskDetail = () => {
   // daemon that never sets the field simply never populates this list, so the button stays hidden
   // instead of 404ing or rendering disabled.
   const forkTargets = React.useMemo(() => activeAgents.filter((agent) => agent.forkAvailable), [activeAgents]);
+  // Agents whose terminal state is RECOVERABLE in place (persisted `continueAvailable`) — same
+  // old-daemon-hides-it discipline as forkTargets.
+  const continueTargets = React.useMemo(() => activeAgents.filter((agent) => agent.continueAvailable), [activeAgents]);
   // The workflow agent (if any) whose static topology the graph overlay renders — gated on
   // `workflowGraph` being present (journaled once per run, concern 03), not just `kind === 'workflow'`,
   // so an old daemon or a run whose journal hasn't landed yet simply hides the overlay. When a task
@@ -806,6 +835,10 @@ export const TaskDetail = () => {
     setForkPickerAgentId(null);
     setForkCheckpoints([]);
     setForkSelectedSeq(null);
+  };
+  const handleContinue = (agentId: string, agentName: string) => {
+    sendConsoleCommand(continueCommand(agentId));
+    showToast(`Continuing ${agentName} in place…`, 'info');
   };
   const handleAnswer = (agentId: string, requestId: string) => {
     const value = answerValues[requestId]?.trim();
@@ -1451,6 +1484,12 @@ export const TaskDetail = () => {
             onClick={() => handleOpenForkPicker(forkTargets[0].id)}
           />
         )}
+        {continueTargets.length > 0 && (
+          <ContinueButton
+            agent={continueTargets[0]}
+            onClick={() => handleContinue(continueTargets[0].id, continueTargets[0].name)}
+          />
+        )}
         {/* Remove confirm dialog */}
         {removeTarget && (
           <div className="flex items-center gap-2 rounded-md border border-red-200 bg-red-50 px-2 py-1 dark:border-red-900 dark:bg-red-950/30">
@@ -1737,6 +1776,14 @@ export const TaskDetail = () => {
                 </details>
               )}
 
+              {/* Plan vs reality (OMPSQ-448): a compact rollup strip when this feature has a plan
+                  directory — the two rings + proof verdict/reachability, linking into the
+                  standalone comprehension screen (nav rail's "Plan reality" item, or
+                  `#/plan-reality/:featureId`) for the full DAG + per-concern proof breakdown. */}
+              {task.planDir && featureId && repo && (
+                <div className="mb-6"><PlanRealityStrip featureId={featureId} repo={repo} /></div>
+              )}
+
               {workflowGraphAgent?.workflowGraph && (
                 <details open className="group mb-6 rounded-lg border border-gray-200 dark:border-gray-800">
                   <summary className="flex cursor-pointer select-none items-center gap-2 px-3 py-2.5 text-[11px] font-semibold uppercase tracking-widest text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-500 list-none">
@@ -1871,6 +1918,11 @@ export const TaskDetail = () => {
                               {agent.forkAvailable && (
                                 <button type="button" onClick={() => handleOpenForkPicker(agent.id)} title={`Fork ${agent.name} from a checkpoint`} className={`min-h-7 rounded px-2 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${forkPickerAgentId === agent.id ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300' : 'text-amber-700 hover:bg-amber-50 dark:text-amber-400 dark:hover:bg-amber-900/30'}`}>
                                   ⑂ Fork
+                                </button>
+                              )}
+                              {agent.continueAvailable && (
+                                <button type="button" onClick={() => handleContinue(agent.id, agent.name)} title={`Continue ${agent.name} in place — reset retry budgets and re-run the verify gate on this worktree`} className="min-h-7 rounded px-2 text-[11px] font-medium text-sky-700 hover:bg-sky-50 dark:text-sky-400 dark:hover:bg-sky-900/30 transition-colors focus-visible:ring-2 focus-visible:ring-sky-500">
+                                  ▶ Continue
                                 </button>
                               )}
                               <button type="button" onClick={() => { setModelPickerAgentId(modelPickerAgentId === agent.id ? null : agent.id); setModelPickerValue(agent.model ?? ''); }} title="Set model" className={`min-h-7 rounded px-2 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${modelPickerAgentId === agent.id ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`}>

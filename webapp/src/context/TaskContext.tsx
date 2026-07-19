@@ -3,6 +3,7 @@ import { Task, Project, TaskComment } from '../types';
 import { jsonInit, apiJson } from '../lib/api';
 import { projectsByTeam, resolveCurrentProject, tasksForProject, tasksFromSquad } from '../lib/task-model';
 import { buildReviewHash, parseReviewHash } from '../lib/plan-doc-review';
+import { buildPlanRealityHash, parsePlanRealityHash } from '../lib/plan-reality-route';
 import { parseAgentHash } from '../lib/agent-link';
 import { useSquad } from '../hooks/useSquad';
 import { coerceView, VIEW_STORAGE_KEY } from '../lib/viewAlias';
@@ -19,7 +20,10 @@ export interface ToastInfo {
  * The nav shell (GRAPH-FOLD.md §6e: Fleet · Tasks · Graph · Capabilities, joined by comprehension
  * batch-3's `fog` — see its own doc below) + the views reached BY ROUTING INTO them rather than
  * from the top-level rail: `org` (the AccountMenu gear), `intervene` (a "Needs you" tap),
- * `review` (a design-review deep link). The eight GRAPH-FOLD-retired keys (attention/active/
+ * `review` (a design-review deep link). `plan-reality` (OMPSQ-448 comprehension) is the newest
+ * routed-into view — a plans index + per-plan "plan vs reality" comprehension page, deep-linkable
+ * via `#/plan-reality[/:featureId]` (see `lib/plan-reality-route.ts`), reached both from its own
+ * nav-rail entry and from a TaskDetail strip. The eight GRAPH-FOLD-retired keys (attention/active/
  * cockpit/automation/fleet-health/heat/activity-heatmap/scoreboard/topology/federation/knowledge)
  * are GONE from this union on purpose — any stale value (e.g. a pre-fold localStorage `view`) is
  * coerced through `lib/viewAlias.ts` BEFORE it ever becomes state, so nothing outside this file
@@ -28,7 +32,7 @@ export interface ToastInfo {
  * verdict) — `fog` is a genuinely NEW view, not a resurrection of the retired Heat page; it has no
  * entry in `VIEW_ALIAS_MAP`.
  */
-export type AppView = 'fleet' | 'tasks' | 'omp-graph' | 'fog' | 'capabilities' | 'org' | 'intervene' | 'review';
+export type AppView = 'fleet' | 'tasks' | 'omp-graph' | 'fog' | 'daily' | 'capabilities' | 'org' | 'intervene' | 'review' | 'plan-reality';
 export type TaskFilter = 'open' | 'active' | 'done' | 'all';
 
 /** Read the raw persisted view key (pre-coercion) — a plain function so both the `view` and
@@ -129,6 +133,10 @@ interface TaskContextType {
   reviewTaskId: string | null;
   /** The specific plan-doc path being reviewed, when the caller named one (else the feature's first doc). */
   reviewDocPath: string | undefined;
+  /** The feature the standalone plan-reality screen is focused on (set by openPlanReality). `null`
+   *  ⇒ the plans index. Mirrors the deep-linkable `#/plan-reality[/:featureId]` hash, same pattern
+   *  as `reviewTaskId`/openReview. */
+  planRealityFeatureId: string | null;
   reload: () => Promise<void>;
   setView: (view: AppView) => void;
   setTaskFilter: (filter: TaskFilter) => void;
@@ -144,6 +152,11 @@ interface TaskContextType {
   openReview: (taskId: string, docPath?: string) => void;
   /** Leave the Design Review screen back to Tasks (keeps the task selected, so TaskDetail resumes). */
   closeReview: () => void;
+  /** Route to the standalone plan-reality screen. Omit `featureId` for the plans index; pass one
+   *  to open that plan's comprehension page directly (the TaskDetail strip's click target). */
+  openPlanReality: (featureId?: string) => void;
+  /** Leave the plan-reality screen back to Tasks. */
+  closePlanReality: () => void;
   /** Switch the workspace to another project. Persisted; scopes `tasks`, chat and spawn — never the Fleet. */
   selectProject: (id: string) => void;
   /** Register a repo as a project (POST /api/projects). Absolute path to a git repo; the daemon validates. */
@@ -243,6 +256,7 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   const [interveneAgentId, setInterveneAgentId] = useState<string | null>(null);
   const [reviewTaskId, setReviewTaskId] = useState<string | null>(null);
   const [reviewDocPath, setReviewDocPath] = useState<string | undefined>(undefined);
+  const [planRealityFeatureId, setPlanRealityFeatureId] = useState<string | null>(null);
   const [audit, setAudit] = useState<AuditEntry[]>([]);
 
   useEffect(() => {
@@ -303,6 +317,20 @@ export function TaskProvider({ children }: { children: ReactNode }) {
     if (window.location.hash.startsWith('#/review/')) history.replaceState(null, '', window.location.pathname + window.location.search);
   };
 
+  // Plan-reality (OMPSQ-448) mirrors the review screen's own hash-route discipline exactly:
+  // no react-router in this SPA, so `#/plan-reality[/:featureId]` is the deep-linkable state,
+  // synced both ways (openPlanReality/closePlanReality write it; the listener below restores it).
+  const openPlanReality = (featureId?: string) => {
+    setPlanRealityFeatureId(featureId ?? null);
+    setView('plan-reality');
+    window.location.hash = buildPlanRealityHash({ featureId });
+  };
+
+  const closePlanReality = () => {
+    setView('tasks');
+    if (window.location.hash.startsWith('#/plan-reality')) history.replaceState(null, '', window.location.pathname + window.location.search);
+  };
+
   useEffect(() => {
     const applyHash = () => {
       const parsed = parseReviewHash(window.location.hash);
@@ -315,6 +343,18 @@ export function TaskProvider({ children }: { children: ReactNode }) {
       setReviewTaskId(parsed.taskId);
       setReviewDocPath(parsed.docPath);
       setView('review');
+    };
+    applyHash();
+    window.addEventListener('hashchange', applyHash);
+    return () => window.removeEventListener('hashchange', applyHash);
+  }, []);
+
+  useEffect(() => {
+    const applyHash = () => {
+      const parsed = parsePlanRealityHash(window.location.hash);
+      if (!parsed) return;
+      setPlanRealityFeatureId(parsed.featureId ?? null);
+      setView('plan-reality');
     };
     applyHash();
     window.addEventListener('hashchange', applyHash);
@@ -557,7 +597,7 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <TaskContext.Provider value={{ tasks, allTasks: scopedTasks, agents: squad.agents, features: squad.features, audit, projects, currentProject, projectDtos: squad.projects, selectProject, addProject, removeProject, capabilities: squad.capabilities, publicCatalog: squad.publicCatalog, connected: squad.connected, transcripts: squad.transcripts, commentEvents: squad.commentEvents, resolvedCommentEvents: squad.resolvedCommentEvents, selectedTaskId, toasts, view, taskFilter, tasksListMode, taskCategoryFilter, isChatOpen, isCommandPaletteOpen, openCommandPalette, closeCommandPalette, toggleCommandPalette, openedConsoleAgentId, interveneAgentId, reviewTaskId, reviewDocPath, reload: squad.reload, setView, setTaskFilter, setTasksListMode, setTaskCategoryFilter, setIsChatOpen, openConsole, openIntervene, openReview, closeReview, selectTask, addTask, deleteTask, restoreFeature, hardDeleteFeature, loadArchivedFeatures, toggleTaskComplete, updateTask, setTaskCategory, showToast, sendConsoleCommand: squad.send, subscribeConsole: squad.subscribe, installCapability, importCatalogCapability, setCapabilityEnabled, runCapability, addTaskComment, loadTaskComments }}>
+    <TaskContext.Provider value={{ tasks, allTasks: scopedTasks, agents: squad.agents, features: squad.features, audit, projects, currentProject, projectDtos: squad.projects, selectProject, addProject, removeProject, capabilities: squad.capabilities, publicCatalog: squad.publicCatalog, connected: squad.connected, transcripts: squad.transcripts, commentEvents: squad.commentEvents, resolvedCommentEvents: squad.resolvedCommentEvents, selectedTaskId, toasts, view, taskFilter, tasksListMode, taskCategoryFilter, isChatOpen, isCommandPaletteOpen, openCommandPalette, closeCommandPalette, toggleCommandPalette, openedConsoleAgentId, interveneAgentId, reviewTaskId, reviewDocPath, planRealityFeatureId, reload: squad.reload, setView, setTaskFilter, setTasksListMode, setTaskCategoryFilter, setIsChatOpen, openConsole, openIntervene, openReview, closeReview, openPlanReality, closePlanReality, selectTask, addTask, deleteTask, restoreFeature, hardDeleteFeature, loadArchivedFeatures, toggleTaskComplete, updateTask, setTaskCategory, showToast, sendConsoleCommand: squad.send, subscribeConsole: squad.subscribe, installCapability, importCatalogCapability, setCapabilityEnabled, runCapability, addTaskComment, loadTaskComments }}>
       {children}
     </TaskContext.Provider>
   );

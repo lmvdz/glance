@@ -199,6 +199,78 @@ export interface DoneProofDTO {
   prUrl?: string;
 }
 
+// -----------------------------------------------------------------------------------------------
+// Plan vs reality (OMPSQ-448 comprehension) — mirrors `src/plan-reality.ts`'s `PlanRealityDTO`
+// exactly (field names verbatim; this is a HAND-MAINTAINED mirror, same discipline as
+// `ValidationRecordDTO` above). Backend endpoint: `GET /api/features/:id/reality?repo=<repo>` →
+// `{ reality: PlanRealityDTO }` (404 when the feature has no plan-reality data). One feature-level
+// proof (`PlanRealityProofDTO`) is reflected onto each done concern via `realityState` — there is
+// no per-concern proof artifact.
+// -----------------------------------------------------------------------------------------------
+
+/** Whether a "done" concern's completion is actually backed by a passing, still-reachable proof. */
+export type ConcernRealityState = "open" | "done-proven" | "done-stale" | "done-unproven";
+
+export interface PlanRealityConcernDTO {
+  file: string;
+  path: string;
+  title: string;
+  status: string;
+  priority?: string;
+  complexity?: string;
+  planeId?: string;
+  open: boolean;
+  touches: string[];
+  prerequisites: string[];
+  blocked: boolean;
+  planeState?: string;
+  realityState: ConcernRealityState;
+}
+
+export interface PlanRealityProofDTO {
+  present: boolean;
+  verified?: "green" | "red-baseline" | "unverified";
+  mode?: "local" | "pr";
+  commit?: string;
+  mergeCommit?: string;
+  baseRef?: string;
+  prNumber?: number;
+  prUrl?: string;
+  provenAt?: number;
+  reachable: boolean | null;
+  reachableDetail: string;
+}
+
+export interface PlanRealityRollupDTO {
+  totalConcerns: number;
+  done: number;
+  open: number;
+  blocked: number;
+  doneProven: number;
+  doneStale: number;
+  doneUnproven: number;
+  proofPresent: boolean;
+  proofReachable: boolean | null;
+  scopeDrift: {
+    plannedTouches: number;
+    actualChangedFiles: number | null;
+    plannedNotTouched: string[];
+    touchedNotPlanned: string[];
+  };
+}
+
+export interface PlanRealityDTO {
+  featureId: string;
+  title: string;
+  repo: string;
+  planDir?: string;
+  concerns: PlanRealityConcernDTO[];
+  proof: PlanRealityProofDTO;
+  rollup: PlanRealityRollupDTO;
+  actualChangedFiles: string[] | null;
+  generatedAt: number;
+}
+
 export interface PlanAnnotationTargetDTO {
   planPath: string;
   lineStart?: number;
@@ -509,6 +581,11 @@ export interface AgentDTO {
    *  that never sets the field, which is exactly the gate the Fork button uses: an old daemon never
    *  shows it instead of showing it disabled or 404ing. */
   forkAvailable?: boolean;
+  /** Derived from the daemon's `workflowState.terminal` marker when the terminal reason is a
+   *  RECOVERABLE fix-up-ladder visit-cap exhaustion (present, not superseded) — gates the "Continue"
+   *  button, which re-runs the verify gate IN PLACE on the same worktree (retry budgets reset) rather
+   *  than forking a fresh branch off HEAD. Absent (not false) on an old daemon → the button hides. */
+  continueAvailable?: boolean;
   /** Live progress (currentNode/rollup/etc.) over `workflowGraph`'s static topology, plus the
    *  terminal/runId subset the Fork button's `forkAvailable` gate is documented against. */
   workflowState?: WorkflowRunStateDTO;
@@ -676,4 +753,7 @@ export type ClientCommand =
   | { type: "kill"; id: string }
   | { type: "restart"; id: string }
   | { type: "remove"; id: string; deleteWorktree?: boolean }
-  | { type: "fork"; id: string; seq?: number };
+  | { type: "fork"; id: string; seq?: number }
+  // OMPSQ-448: continue a recoverable terminal run in place (retry budgets reset, same worktree) —
+  // vs `fork`, which mints a fresh branch off HEAD. Gated in the UI on `AgentDTO.continueAvailable`.
+  | { type: "continue"; id: string };

@@ -31,9 +31,17 @@ test('capabilities reports trusted packs and catalog size, singular/plural-safe'
   expect(railFooterContext('capabilities', { ...zero, packCount: 4, catalogCount: 0 })).toBe('4 trusted packs · 0 in the catalog');
 });
 
+test('daily gets a fixed one-liner naming its two signals', () => {
+  expect(railFooterContext('daily', zero)).toBe('Adoption counters and the friction ledger');
+});
+
 test('org and intervene and review each get a short, non-empty line', () => {
   const routedInto: AppView[] = ['org', 'intervene', 'review'];
   for (const view of routedInto) {
     expect(railFooterContext(view, zero).length).toBeGreaterThan(0);
   }
+});
+
+test('plan-reality (OMPSQ-448) gets a fixed one-liner describing what lives there', () => {
+  expect(railFooterContext('plan-reality', zero)).toBe('What each plan claims, and whether it is proven');
 });

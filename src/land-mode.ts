@@ -36,11 +36,32 @@ function ttlMs(): number {
 
 const cache = new Map<string, { resolved: ResolvedLandMode; at: number }>();
 
+/**
+ * Explicit inputs that bypass the process-global env vars `resolveLandMode` otherwise reads.
+ *
+ * These exist because `OMP_SQUAD_LAND_MODE` / `OMP_SQUAD_PR_BASE` are read off `process.env` — a
+ * single mutable global shared across every test in Bun's one-process runner. A test (or any caller)
+ * that sets one of those envs and then does awaited work HOLDS the global live across the await, so a
+ * concurrently-running sibling file that reads the ambient value mid-await sees the wrong mode — the
+ * exact cross-file leak that made `land-mode.test.ts`'s pr-expecting probes flaky under the full
+ * suite (a sibling's `OMP_SQUAD_LAND_MODE=local` bled in). Passing the mode explicitly here severs
+ * that channel entirely: the value comes from the argument, never the global. Production callers pass
+ * nothing and behave exactly as before (env is still the source of truth).
+ */
+export interface LandModeOverrides {
+	/** Explicit land mode — takes precedence over `process.env.OMP_SQUAD_LAND_MODE`. */
+	landMode?: LandMode;
+	/** Explicit PR base branch — takes precedence over `process.env.OMP_SQUAD_PR_BASE`. */
+	prBase?: string;
+}
+
 /** Resolve `repo`'s landing mode. `OMP_SQUAD_LAND_MODE=local`/`=pr` bypass the probe entirely
  *  (pr forced without probing means no known default branch — `aheadOfBase` falls back to local
- *  arithmetic in that case, same as if the probe hadn't run). Cached per-repo for `ttlMs()`. */
-export async function resolveLandMode(repo: string): Promise<ResolvedLandMode> {
-	const configured = (process.env.OMP_SQUAD_LAND_MODE ?? "auto") as LandMode;
+ *  arithmetic in that case, same as if the probe hadn't run). Cached per-repo for `ttlMs()`.
+ *  `overrides` lets a caller supply the mode/PR-base explicitly instead of via `process.env` — see
+ *  {@link LandModeOverrides} for why (concurrency-safe, env-leak-immune). */
+export async function resolveLandMode(repo: string, overrides?: LandModeOverrides): Promise<ResolvedLandMode> {
+	const configured = (overrides?.landMode ?? process.env.OMP_SQUAD_LAND_MODE ?? "auto") as LandMode;
 	if (configured === "local") return { mode: "local", reason: "OMP_SQUAD_LAND_MODE=local" };
 	if (configured === "pr") {
 		// Forcing pr mode still needs a defaultBranch — without one, landBranch/floatPrOnLandReady/
@@ -48,7 +69,7 @@ export async function resolveLandMode(repo: string): Promise<ResolvedLandMode> {
 		// mode, so an unresolved default used to make EVERY one of them silently fall through to local
 		// behavior despite the operator explicitly forcing PR mode. The 5-point convergence probe is
 		// skipped (that's what "forced" means), but the branch NAME itself is still resolved best-effort.
-		const defaultBranch = await resolveDefaultBranchBestEffort(repo);
+		const defaultBranch = await resolveDefaultBranchBestEffort(repo, overrides?.prBase);
 		return defaultBranch
 			? { mode: "pr", defaultBranch, reason: `OMP_SQUAD_LAND_MODE=pr (forced, convergence probes skipped); default branch resolved: ${defaultBranch}` }
 			: { mode: "pr", reason: "OMP_SQUAD_LAND_MODE=pr (forced) but no default branch could be resolved (gh repo view, origin/HEAD symref, and git ls-remote all failed) — the caller must refuse to land rather than silently falling back to local" };
@@ -57,7 +78,7 @@ export async function resolveLandMode(repo: string): Promise<ResolvedLandMode> {
 	const cached = cache.get(repo);
 	if (cached && Date.now() - cached.at < ttlMs()) return cached.resolved;
 
-	const resolved = await probe(repo);
+	const resolved = await probe(repo, overrides?.prBase);
 	cache.set(repo, { resolved, at: Date.now() });
 	return resolved;
 }
@@ -72,9 +93,9 @@ const PUSH_PROBE_REF = "refs/heads/squad/push-probe";
  * most-authoritative first; `OMP_SQUAD_PR_BASE` overrides all of them, same as the probed path.
  * Never throws — an unexpected failure in any step just falls through to the next.
  */
-async function resolveDefaultBranchBestEffort(repo: string): Promise<string | undefined> {
+async function resolveDefaultBranchBestEffort(repo: string, prBase?: string): Promise<string | undefined> {
 	try {
-		const override = process.env.OMP_SQUAD_PR_BASE;
+		const override = prBase ?? process.env.OMP_SQUAD_PR_BASE;
 		if (override) return override;
 
 		// 1. gh repo view <slug> --json defaultBranchRef — the same authoritative source the probed
@@ -108,7 +129,7 @@ async function resolveDefaultBranchBestEffort(repo: string): Promise<string | un
 	}
 }
 
-async function probe(repo: string): Promise<ResolvedLandMode> {
+async function probe(repo: string, prBase?: string): Promise<ResolvedLandMode> {
 	// 1. owner/repo slug from origin — repoIdentity()/normalizeGitUrl() (src/repo-identity.ts) return
 	//    "<host>/<owner>/<repo>" and do NOT collapse a host alias (e.g. git@github.com-personal:owner/repo.git
 	//    normalizes to "github.com-personal/owner/repo", not "github.com/owner/repo") — this is exactly why
@@ -121,7 +142,7 @@ async function probe(repo: string): Promise<ResolvedLandMode> {
 	// 2. gh repo view <slug> --json defaultBranchRef
 	const view = await ghJson<{ defaultBranchRef: { name: string } }>(["repo", "view", slug, "--json", "defaultBranchRef"], repo);
 	if (!view?.defaultBranchRef?.name) return { mode: "local", reason: `gh repo view ${slug} failed or has no default branch` };
-	const defaultBranch = process.env.OMP_SQUAD_PR_BASE || view.defaultBranchRef.name;
+	const defaultBranch = (prBase ?? process.env.OMP_SQUAD_PR_BASE) || view.defaultBranchRef.name;
 
 	// 3. Write-capability probe — catches per-repo transport/auth failures (gh auth ≠ push works)
 	//    WITHOUT non-fast-forward semantics. Probing `git push --dry-run origin <default>` directly
@@ -216,9 +237,9 @@ async function throttledFetch(repo: string, defaultBranch: string): Promise<void
  *  each direction of "unknown" should mean: assume-work-exists for anything gating a land/resume
  *  decision, not-merged for anything gating a destructive/cleanup decision (the worktree reaper).
  */
-export async function aheadOfBase(opts: { repo: string; branch: string; cwd?: string }): Promise<number> {
+export async function aheadOfBase(opts: { repo: string; branch: string; cwd?: string; overrides?: LandModeOverrides }): Promise<number> {
 	const cwd = opts.cwd ?? opts.repo;
-	const mode = await resolveLandMode(opts.repo);
+	const mode = await resolveLandMode(opts.repo, opts.overrides);
 	if (mode.mode === "pr" && mode.defaultBranch) {
 		await throttledFetch(opts.repo, mode.defaultBranch);
 		const r = await hardenedGit(["rev-list", "--count", `origin/${mode.defaultBranch}..${opts.branch}`], { cwd });
