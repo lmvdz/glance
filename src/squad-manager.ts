@@ -89,6 +89,7 @@ export { capabilityWorkflowToDot, resolveWorkflowPath };
 import { archivePlanDir, buildFeatures, concernDocStatus, concernNumFromFile, deletePlanDir, featureLandStatus, isClosedConcernStatus, listPlanDirs, parsePlanConcerns, parsePlanDependencyGraph, planDocRefs, planeModuleUrlIn, restorePlanDir, updatePlanConcern, type LandMember, landOrder, type PlanConcern } from "./features.ts";
 import { canTransition, dedupeTransitions, deriveStatus, followLineage, type DerivedReason, type TransitionReason } from "./agent-lifecycle.ts";
 import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, withRepoLandLock } from "./land.ts";
+import { LandAssessmentHook } from "./land-assessment/hook.ts";
 // Aliased: WorktreeInfo (worktree-reaper.ts) already has an `aheadOfBase` FIELD of its own — importing
 // under the same bare name would read as if that field and this function were the same thing.
 import { aheadOfBase as computeAheadOfBase, aheadUnknown, resolveLandMode } from "./land-mode.ts";
@@ -871,6 +872,9 @@ export class SquadManager extends EventEmitter {
 	 *  AFTER the first closed the round, sees it's no longer "voting", and does not re-fire). */
 	private readonly voteLocks = new Map<string, Promise<unknown>>();
 	private readonly stateDir: string;
+	/** Observe-only land assessment (concern 08). Undefined unless OMP_SQUAD_LAND_ASSESSMENT=1 — a fresh
+	 *  live-path wire ships opt-in so it changes zero production land behavior until explicitly enabled. */
+	private readonly landAssessment?: LandAssessmentHook;
 	/** Resumable checkpointed records dropped by the adoption ceiling this boot — kept (not erased) so
 	 *  persistNow folds them back into the snapshot for a later restart to re-attempt (D1 loss fix). */
 	private deferred: PersistedAgent[] = [];
@@ -1079,6 +1083,7 @@ export class SquadManager extends EventEmitter {
 		setThresholdTunerRoot(this.stateDir);
 		setGateLogRoot(this.stateDir);
 		setCompactionLogRoot(this.stateDir);
+		if (process.env.OMP_SQUAD_LAND_ASSESSMENT === "1") this.landAssessment = new LandAssessmentHook(this.stateDir, (level, msg) => this.log(level, msg));
 		this.scoutCursor = readScoutCursors(this.stateDir);
 		this.removedLedger = openRemovedLedger(this.stateDir);
 		this.projectRegistry = openProjectRegistry(this.stateDir);
@@ -3436,13 +3441,56 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
-	 * Single-agent land path: commit + merge ONE agent's branch, then close its tracking issue on
-	 * success. The web Land button / server `/api/agents/:id/land` land via the same land.ts primitive
-	 * and already call `closeLandedIssue`; this method owns BOTH steps in the manager so close-on-land
-	 * is guaranteed for the single-agent path too — not only the multi-branch `landFeature`. Close is
-	 * idempotent (`closedIssues`) and best-effort. Busy-aware `commitWip` mirrors the feature path.
+	 * Observe-only land assessment (concern 08) wraps the real single-agent land path: mint an `attemptId`
+	 * ONCE, run the UNCHANGED `landInner` decision logic, then RECORD the outcome — never influencing it.
+	 * Every hook call is fire-and-forget and internally guarded, so the assessment can never throw into,
+	 * delay (beyond `beginAttempt`'s sub-second SHA reads), or alter a land. `autoLandWorkflow` calls this
+	 * wrapper, so a single attempt id is threaded and it never mints its own (no double `attempt-started`).
 	 */
 	async land(id: string, message?: string, opts: { auto?: boolean; force?: boolean; actor?: Actor; reason?: string; validatorOverride?: { reasonClass: string } } = {}): Promise<LandResult> {
+		const rec = this.agents.get(id);
+		const attemptId = rec ? await this.landAssessment?.beginAttempt(rec.dto.repo, rec.dto.branch) : undefined;
+		let result: LandResult;
+		try {
+			result = await this.landInner(id, message, opts);
+		} catch (err) {
+			if (rec) void this.landAssessment?.recordRejection(attemptId, rec.dto.repo, "land-threw", errText(err));
+			throw err; // preserve behavior exactly: a throw from landInner still propagates unchanged
+		}
+		if (rec) this.recordLandAssessmentTerminal(attemptId, rec.dto, result);
+		return result;
+	}
+
+	/** Observe-only terminal for a completed land: `landed` (+ the C→R result) on a real merge, else a
+	 *  `rejected` with a reason code classified from the result. A staged/held/retryable outcome is a
+	 *  deferral, not a terminal, so nothing is recorded. Fire-and-forget; never throws into `land()`. */
+	private recordLandAssessmentTerminal(attemptId: string | undefined, dto: AgentDTO, result: LandResult): void {
+		if (!attemptId || !this.landAssessment) return;
+		if (result.ok && result.merged) {
+			void this.landAssessment.recordLanded(attemptId, dto.repo);
+			return;
+		}
+		if (result.staged || result.retryable) return; // a one-tap hold or a dirty-main retry is not a terminal
+		const code = /observer never lands/.test(result.message)
+			? "observer-refusal"
+			: /force land blocked/.test(result.message)
+				? "force-without-reason"
+				: /auto-land parked/.test(result.message)
+					? "fail-cap-parked"
+					: /land blocked/.test(result.message)
+						? "proof-or-gate"
+						: "land-rejected";
+		void this.landAssessment.recordRejection(attemptId, dto.repo, code, result.detail ?? result.message);
+	}
+
+	/**
+	 * Single-agent land path — the DECISION LOGIC (`land()` above wraps this observe-only, unchanged):
+	 * commit + merge ONE agent's branch, then close its tracking issue on success. The web Land button /
+	 * server `/api/agents/:id/land` land via the same land.ts primitive and already call `closeLandedIssue`;
+	 * this method owns BOTH steps in the manager so close-on-land is guaranteed for the single-agent path
+	 * too — not only the multi-branch `landFeature`. Close is idempotent (`closedIssues`) and best-effort.
+	 */
+	private async landInner(id: string, message?: string, opts: { auto?: boolean; force?: boolean; actor?: Actor; reason?: string; validatorOverride?: { reasonClass: string } } = {}): Promise<LandResult> {
 		const rec = this.agents.get(id);
 		if (!rec) return { ok: false, committed: false, merged: false, message: "no such agent", detail: "no such agent" };
 		const dto = rec.dto;
