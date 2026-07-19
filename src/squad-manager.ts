@@ -42,7 +42,7 @@ import { Dispatcher } from "./dispatch.ts";
 import { openDispatchLedger } from "./dispatch-ledger.ts";
 import { openRaceLedger, type RaceLedger } from "./race-ledger.ts";
 import { type Answer, answerBrief, listAnswers, possiblyStale, readAnswer, saveAnswer } from "./answers.ts";
-import { type AfterActionInput, type AfterActionReport, composeAfterAction, listAfterActions, readAfterAction, saveAfterAction, selectTerminalReaps, type TerminalReapCandidate } from "./after-action.ts";
+import { AFTER_ACTION_MARKER, type AfterActionInput, type AfterActionReport, composeAfterAction, listAfterActions, readAfterAction, saveAfterAction, selectTerminalReaps, type TerminalReapCandidate } from "./after-action.ts";
 // Aliased: `types.ts` already exports an UNRELATED `AttentionEvent` (an agent's own notify signal,
 // used pervasively below via `AgentDTO.attentionEvents`) — importing this module's same-named type
 // bare would collide. `OperatorAttentionEvent` disambiguates at every use site in this file.
@@ -4239,28 +4239,40 @@ export class SquadManager extends EventEmitter {
 	 */
 	private async writeAfterActionReport(rec: AgentRecord, detail: string): Promise<void> {
 		try {
-			if (await readAfterAction(this.stateDir, rec.dto.id)) return;
-			const ev = await this.afterActionEvidence(rec);
-			const ws = rec.options.workflowState;
-			const input: AfterActionInput = {
-				id: rec.dto.id,
-				name: rec.dto.name,
-				repo: rec.dto.repo,
-				branch: rec.dto.branch,
-				issueIdentifier: rec.dto.issue?.identifier,
-				issueUrl: rec.dto.issue?.url,
-				goal: ws?.goal,
-				terminalReason: detail,
-				terminalAt: ws?.terminal?.at ?? Date.now(),
-				trajectory: ws?.rollup?.map((r) => r.label) ?? [],
-				visits: ws?.visits,
-				gateTail: ws?.vars?.lastText ?? ws?.vars?.lastOutput,
-				commitsAhead: ev.commitsAhead,
-				dirtyFiles: ev.dirtyFiles,
-				now: Date.now(),
-			};
-			if (await saveAfterAction(this.stateDir, composeAfterAction(input))) {
+			let report = await readAfterAction(this.stateDir, rec.dto.id);
+			if (!report) {
+				const ev = await this.afterActionEvidence(rec);
+				const ws = rec.options.workflowState;
+				const input: AfterActionInput = {
+					id: rec.dto.id,
+					name: rec.dto.name,
+					repo: rec.dto.repo,
+					branch: rec.dto.branch,
+					issueIdentifier: rec.dto.issue?.identifier,
+					issueUrl: rec.dto.issue?.url,
+					goal: ws?.goal,
+					terminalReason: detail,
+					terminalAt: ws?.terminal?.at ?? Date.now(),
+					trajectory: ws?.rollup?.map((r) => r.label) ?? [],
+					visits: ws?.visits,
+					gateTail: ws?.vars?.lastText ?? ws?.vars?.lastOutput,
+					commitsAhead: ev.commitsAhead,
+					dirtyFiles: ev.dirtyFiles,
+					now: Date.now(),
+				};
+				report = composeAfterAction(input);
+				if (!(await saveAfterAction(this.stateDir, report))) return;
 				this.log("info", `after-action report written for ${rec.dto.name} — glance aar ${rec.dto.id}`);
+			}
+			// The post-mortem also lives IN the unit's chat history, so the operator reads it where they
+			// already are (the thread), not behind a separate verb. Outside the report-creation branch on
+			// purpose: the thread copy can be missing while the report exists — a pre-feature corpse whose
+			// report was just backfilled, or an append that raced a shutdown — and reattachTerminal re-runs
+			// markCatastrophe on every boot, so this is the self-heal that puts it back. The marker guard
+			// keeps it single: a restored transcript that already carries the report is left untouched.
+			if (!rec.transcript.some((e) => e.kind === "system" && e.text.startsWith(AFTER_ACTION_MARKER))) {
+				this.append(rec, "system", `${AFTER_ACTION_MARKER}\n\n${report.markdown}`);
+				void this.persist();
 			}
 		} catch {
 			/* best-effort — the catastrophe path must survive a failed report */

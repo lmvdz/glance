@@ -248,9 +248,14 @@ test("a terminal-marked workflow's transcript survives a restart (reattachTermin
 
 	const after = mgr2.list().find((a) => a.name === "wf-transcript");
 	expect(after?.status).toBe("error"); // sanity: still the terminal-reattach path
-	const transcript = mgr2.getTranscript(dto.id);
-	expect(transcript.map((t) => t.text)).toEqual(["do the thing", "working on it"]);
-	expect(after?.messageCount).toBe(2);
+	// Prior history threads through UNCHANGED, and the after-action post-mortem rides the thread too —
+	// appended asynchronously at the terminal transition (or self-healed at reattach), marker-guarded
+	// to exactly one copy regardless of which side of the restart it landed on.
+	await waitFor(() => mgr2.getTranscript(dto.id).length === 3);
+	const texts = mgr2.getTranscript(dto.id).map((t) => t.text);
+	expect(texts.slice(0, 2)).toEqual(["do the thing", "working on it"]);
+	expect(texts[2]?.startsWith("📋 After-action report")).toBe(true);
+	expect(mgr2.list().find((a) => a.name === "wf-transcript")?.messageCount).toBe(3);
 	await mgr2.stop();
 });
 

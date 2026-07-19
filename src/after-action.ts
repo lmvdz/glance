@@ -73,6 +73,10 @@ const AfterActionSchema = Schema.Struct({
 
 const DIR = "after-action";
 
+/** First line of the transcript entry that carries a report into the unit's chat history — the
+ *  re-append-on-boot guard in squad-manager keys on it (reattachTerminal drops prior transcripts). */
+export const AFTER_ACTION_MARKER = "📋 After-action report";
+
 /** Same traversal guard as answers.ts: only the characters agent ids actually use survive. */
 function sanitizeId(id: string): string {
 	return id.replace(/[^a-zA-Z0-9._-]/g, "_");
