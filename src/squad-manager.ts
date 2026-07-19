@@ -42,6 +42,7 @@ import { Dispatcher } from "./dispatch.ts";
 import { openDispatchLedger } from "./dispatch-ledger.ts";
 import { openRaceLedger, type RaceLedger } from "./race-ledger.ts";
 import { type Answer, answerBrief, listAnswers, possiblyStale, readAnswer, saveAnswer } from "./answers.ts";
+import { type AfterActionInput, type AfterActionReport, composeAfterAction, listAfterActions, readAfterAction, saveAfterAction, selectTerminalReaps, type TerminalReapCandidate } from "./after-action.ts";
 // Aliased: `types.ts` already exports an UNRELATED `AttentionEvent` (an agent's own notify signal,
 // used pervasively below via `AgentDTO.attentionEvents`) — importing this module's same-named type
 // bare would collide. `OperatorAttentionEvent` disambiguates at every use site in this file.
@@ -4225,6 +4226,56 @@ export class SquadManager extends EventEmitter {
 		this.emitAgent(rec);
 		this.log("warn", `catastrophe: ${id} — ${detail}`);
 		void this.recordAudit(LOCAL_ACTOR, "catastrophe", id, "error", truncateLabel(detail, 120));
+		void this.writeAfterActionReport(rec, detail);
+	}
+
+	/**
+	 * Durable post-mortem for a unit that just went (or was reattached as) terminal — see
+	 * after-action.ts for why this artifact exists. Idempotent: `reattachTerminal` re-derives the
+	 * sticky error through `markCatastrophe` on EVERY boot, so without the existing-report check each
+	 * restart would re-stamp `createdAt` and re-gather evidence for a corpse that already has its
+	 * report (and pre-feature corpses get their report backfilled by exactly that boot path).
+	 * Best-effort by contract: reporting must never break the catastrophe escalation it rides on.
+	 */
+	private async writeAfterActionReport(rec: AgentRecord, detail: string): Promise<void> {
+		try {
+			if (await readAfterAction(this.stateDir, rec.dto.id)) return;
+			const ev = await this.afterActionEvidence(rec);
+			const ws = rec.options.workflowState;
+			const input: AfterActionInput = {
+				id: rec.dto.id,
+				name: rec.dto.name,
+				repo: rec.dto.repo,
+				branch: rec.dto.branch,
+				issueIdentifier: rec.dto.issue?.identifier,
+				issueUrl: rec.dto.issue?.url,
+				goal: ws?.goal,
+				terminalReason: detail,
+				terminalAt: ws?.terminal?.at ?? Date.now(),
+				trajectory: ws?.rollup?.map((r) => r.label) ?? [],
+				visits: ws?.visits,
+				gateTail: ws?.vars?.lastText ?? ws?.vars?.lastOutput,
+				commitsAhead: ev.commitsAhead,
+				dirtyFiles: ev.dirtyFiles,
+				now: Date.now(),
+			};
+			if (await saveAfterAction(this.stateDir, composeAfterAction(input))) {
+				this.log("info", `after-action report written for ${rec.dto.name} — glance aar ${rec.dto.id}`);
+			}
+		} catch {
+			/* best-effort — the catastrophe path must survive a failed report */
+		}
+	}
+
+	/** What the dead unit left behind — the two counts the reap policy and the report's fault call
+	 *  hinge on. -1 = unknown, which every consumer treats as "might hold work" (fail-closed). */
+	private async afterActionEvidence(rec: AgentRecord): Promise<{ commitsAhead: number; dirtyFiles: number }> {
+		if (!rec.dto.repo || rec.dto.repo.startsWith("(")) return { commitsAhead: 0, dirtyFiles: 0 };
+		const commitsAhead = rec.dto.branch ? await this.computeAheadOfBaseFor({ repo: rec.dto.repo, branch: rec.dto.branch, cwd: rec.dto.worktree }).catch(() => -1) : -1;
+		const dirtyFiles = await worktreeStatus(rec.dto.worktree)
+			.then((s) => s.dirtyFiles.length)
+			.catch(() => -1);
+		return { commitsAhead, dirtyFiles };
 	}
 	/**
 	 * Thin, overridable wrapper around land-mode.ts's `resolveLandMode` — exists so tests can force
@@ -8671,6 +8722,15 @@ export class SquadManager extends EventEmitter {
 		return readAnswer(this.stateDir, id);
 	}
 
+	/** After-action reports for terminal units, newest death first — they outlive the reaped roster row. */
+	afterActions(): Promise<AfterActionReport[]> {
+		return listAfterActions(this.stateDir);
+	}
+
+	afterAction(id: string): Promise<AfterActionReport | undefined> {
+		return readAfterAction(this.stateDir, id);
+	}
+
 	/** Symptom cards recorded by `squad_record_symptom`, newest first — the read surface for later
 	 *  projections (doctor's `remedy` match, `glance symptom`, fabric/⌘K search), mirroring `answers()`
 	 *  above. Nothing in concern 05's scope renders these; this is the stable entry point they'll call. */
@@ -10364,6 +10424,7 @@ export class SquadManager extends EventEmitter {
 			}
 			void this.reapDeadWorktrees();
 			void this.reapStaleChatAttachmentsTick();
+			void this.reapTerminalAgents();
 		}
 		void this.sampleHealth().then((h) => {
 			const key = h.warnings.join("|");
@@ -10487,6 +10548,43 @@ export class SquadManager extends EventEmitter {
 			} catch {
 				/* best-effort cleanup */
 			}
+		}
+	}
+
+	/** Prune terminal workflow corpses from the ROSTER — the counterpart of `reapDeadWorktrees`, which
+	 *  frees disk but leaves the roster row for `reconnectLive` to reattach on every boot, forever
+	 *  (the ompsq-416..447 incident: five CATASTROPHE units resurrected across three days of restarts,
+	 *  each restart re-flagging "5 units need you"). A corpse is reaped only once its after-action
+	 *  report is durably on disk (written here for pre-feature corpses; see `writeAfterActionReport`)
+	 *  and it verifiably left nothing behind — the pure policy in `selectTerminalReaps` fails closed
+	 *  on every unknown. `remove()` writes the removed-ledger tombstone, so a reaped corpse never
+	 *  resurrects; its report outlives it (`glance aar <id>`). Scoped to workflow-terminal units:
+	 *  a plain crashed agent may be operator-restartable and is not this incident's shape. Opt out
+	 *  with OMP_SQUAD_TERMINAL_REAP_MS=0; the default grace keeps the corpse visible for a working
+	 *  day before it's pruned. */
+	protected async reapTerminalAgents(): Promise<void> {
+		const graceMs = envInt("OMP_SQUAD_TERMINAL_REAP_MS", 21_600_000);
+		if (graceMs <= 0) return;
+		const terminal = [...this.agents.values()].filter((r) => r.dto.status === "error" && r.options.workflowState?.terminal);
+		if (terminal.length === 0) return;
+		const candidates: TerminalReapCandidate[] = [];
+		for (const rec of terminal) {
+			await this.writeAfterActionReport(rec, rec.dto.error ?? rec.options.workflowState?.terminal?.reason ?? "terminal");
+			const ev = await this.afterActionEvidence(rec);
+			candidates.push({
+				id: rec.dto.id,
+				terminalAt: rec.options.workflowState?.terminal?.at ?? 0,
+				commitsAhead: ev.commitsAhead,
+				dirtyFiles: ev.dirtyFiles,
+				hasReport: !!(await readAfterAction(this.stateDir, rec.dto.id)),
+			});
+		}
+		const { reap } = selectTerminalReaps({ candidates, now: Date.now(), graceMs });
+		for (const id of reap) {
+			const name = this.agents.get(id)?.dto.name ?? id;
+			await this.remove(id, false);
+			this.log("info", `auto-reaped terminal unit ${name} — nothing left behind; post-mortem survives: glance aar ${id}`);
+			void this.recordAudit(LOCAL_ACTOR, "terminal-reap", id, "ok", "after-action report retained");
 		}
 	}
 

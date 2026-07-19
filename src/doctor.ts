@@ -444,7 +444,7 @@ export async function runDoctor(probe: DoctorProbe): Promise<DoctorReport> {
 		}),
 		attempt("zombies", "Any stuck units?", async () => {
 			const n = await probe.zombieAgents();
-			return [n === 0 ? { id: "zombies", title: "Any stuck units?", status: "ok" as const, detail: "none" } : { id: "zombies", title: "Any stuck units?", status: "warn" as const, detail: `${n} unit(s) parked in a terminal state`, remedy: "glance rm <name>" }];
+			return [n === 0 ? { id: "zombies", title: "Any stuck units?", status: "ok" as const, detail: "none" } : { id: "zombies", title: "Any stuck units?", status: "warn" as const, detail: `${n} unit(s) parked in a terminal state`, remedy: "glance aar <name> for the post-mortem; valueless corpses auto-reap after the grace window, glance rm <name> to force" }];
 		}),
 		// Adoption counters (daily-dogfood-engine 02). Always `ok` when the read succeeds: zero usage
 		// is a finding for the adoption GATE (plans/daily-driver/00-meta.md), not a fault of this

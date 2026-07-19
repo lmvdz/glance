@@ -10,6 +10,7 @@
  *   glance rm <id> [--delete-worktree]
  *   glance ask "<question>" [--repo …]           answer a question; no branch, nothing to merge
  *   glance answers [<id>]                        list or read durable answers
+ *   glance aar [<id>]                            list or read after-action reports for terminal units
  *   glance promote <issue> [--repo …]            enrich a Backlog Plane ticket with Tier-1/Tier-2 context
  *   glance open
  *   glance doctor [--json]                        diagnose the factory: on? armed? pointed where?
@@ -104,6 +105,7 @@ USAGE
   glance ask "<question>" [--repo R]            Ask; the deliverable is a written answer, not a branch
   glance grr "<gripe>" [--list]                 Log a friction gripe to the dogfood ledger in <5s
   glance answers [<id>] [--repo R]              List answers, or print one
+  glance aar [<id>] [--json]                    After-action reports for terminal units: list, or print one post-mortem
   glance promote <issue> [--repo R] [--json]    Enrich a Backlog Plane ticket with Tier-1/Tier-2 context
   glance open                                   Print the dashboard URL
   glance doctor [--json]                       Is the factory on, armed, and pointed at the right world?
@@ -654,6 +656,40 @@ async function cmdNotify(args: string[]): Promise<void> {
 	const detail = typeof flags.detail === "string" ? flags.detail : undefined;
 	const res = await postCommand(flags, { type: "notify", id, summary, detail });
 	process.stdout.write(res.ok ? "sent\n" : `failed: ${await res.text()}\n`);
+}
+
+/**
+ * `glance aar [<id>] [--json]` — after-action reports (after-action.ts): the durable post-mortem a
+ * terminal unit leaves behind. No id lists every report, newest death first; an id prints that
+ * unit's markdown. Reports outlive the roster row (auto-reap prunes valueless corpses), so this is
+ * the surface that answers "what were those five red units, and do I care?" after they're gone.
+ */
+async function cmdAar(args: string[]): Promise<void> {
+	const { positional, flags } = parseArgs(args);
+	const id = positional[0];
+	const url = id ? `${base(flags)}/api/after-action/${encodeURIComponent(id)}` : `${base(flags)}/api/after-action`;
+	const res = await fetch(url, { headers: tokenHeader() }).catch(() => null);
+	if (!res || !res.ok) {
+		process.stderr.write(res ? `${res.status} ${await res.text()}\n` : `No glance daemon on ${base(flags)}\n`);
+		process.exit(1);
+	}
+	const body = await res.json();
+	if (flags.json) {
+		process.stdout.write(`${JSON.stringify(body, null, 2)}\n`);
+		return;
+	}
+	if (id) {
+		process.stdout.write(`${(body as { markdown: string }).markdown}\n`);
+		return;
+	}
+	const list = body as Array<{ id: string; name: string; classification: string; terminalAt: number; terminalReason: string }>;
+	if (list.length === 0) {
+		process.stdout.write("no after-action reports — no unit has died with a post-mortem yet\n");
+		return;
+	}
+	for (const r of list) {
+		process.stdout.write(`${new Date(r.terminalAt).toISOString().slice(0, 16)} ${r.classification.padEnd(14)} ${r.name.padEnd(12)} ${r.terminalReason.slice(0, 70)}\n`);
+	}
 }
 
 async function cmdRm(args: string[]): Promise<void> {
@@ -1513,6 +1549,9 @@ async function main(): Promise<void> {
 			break;
 		case "answers":
 			await cmdAnswers(rest);
+			break;
+		case "aar":
+			await cmdAar(rest);
 			break;
 		case "promote":
 			await cmdPromote(rest);
