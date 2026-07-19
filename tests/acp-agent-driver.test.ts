@@ -218,7 +218,12 @@ test("yolo + a non-compliant agent: fails closed to a human, and says so", async
 	const frames: Array<{ method?: string; notifyType?: string; message?: string; gateClass?: boolean }> = [];
 	driver.on("ui", (f) => frames.push(f));
 	await driver.start(30_000);
-	void driver.prompt("hi"); // never resolves: the gate waits for a human, by design
+	// Never resolves: the gate waits for a human, by design. The `.catch` is not dead code — afterAll's
+	// stop() kills the child, which rejects this still-pending turn ("acp agent exited"); a bare `void`
+	// here left that rejection handler-less, and ONE discarded promise failed the whole suite with an
+	// "Unhandled error between tests" (exit 1) — the gate-breaker that killed every fresh unit's verify
+	// after the dead-exports ratchet was fixed.
+	driver.prompt("hi").catch(() => {});
 
 	await Bun.sleep(400);
 	const notify = frames.find((f) => f.method === "notify");
