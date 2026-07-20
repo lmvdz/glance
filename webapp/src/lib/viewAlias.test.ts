@@ -87,8 +87,14 @@ function stubViewBrowserEnv(href: string) {
     localStorage: (globalThis as { localStorage?: unknown }).localStorage,
     history: (globalThis as { history?: unknown }).history,
   };
+  // `writable: true` on every definition here is load-bearing: defineProperty with a `value`
+  // defaults writable to FALSE, and a non-writable globalThis.localStorage outlives this file —
+  // the next test that plain-assigns `globalThis.localStorage = ...` (OrgSettings.test.tsx) dies
+  // with "Attempted to assign to readonly property", but only in full-suite order. Same guard on
+  // location/history, which are one plain assignment away from the identical trap.
   Object.defineProperty(globalThis, 'location', {
     configurable: true,
+    writable: true,
     value: {
       get href() {
         return state.href;
@@ -97,6 +103,7 @@ function stubViewBrowserEnv(href: string) {
   });
   Object.defineProperty(globalThis, 'localStorage', {
     configurable: true,
+    writable: true,
     value: {
       getItem: (k: string) => (store.has(k) ? (store.get(k) as string) : null),
       setItem: (k: string, v: string) => {
@@ -109,6 +116,7 @@ function stubViewBrowserEnv(href: string) {
   });
   Object.defineProperty(globalThis, 'history', {
     configurable: true,
+    writable: true,
     value: {
       replaceState: (_s: unknown, _t: string, url: string) => {
         state.href = url;
@@ -119,9 +127,9 @@ function stubViewBrowserEnv(href: string) {
     store,
     getHref: () => state.href,
     restore: () => {
-      Object.defineProperty(globalThis, 'location', { configurable: true, value: restore.location });
-      Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: restore.localStorage });
-      Object.defineProperty(globalThis, 'history', { configurable: true, value: restore.history });
+      Object.defineProperty(globalThis, 'location', { configurable: true, writable: true, value: restore.location });
+      Object.defineProperty(globalThis, 'localStorage', { configurable: true, writable: true, value: restore.localStorage });
+      Object.defineProperty(globalThis, 'history', { configurable: true, writable: true, value: restore.history });
     },
   };
 }
