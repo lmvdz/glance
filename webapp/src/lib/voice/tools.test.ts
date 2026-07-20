@@ -11,6 +11,7 @@ import {
   VOICE_TOOL_DEFS,
   blockedOutput,
   buildCompletionInjectionItems,
+  completionOutcome,
   buildDeliveryFailureInjectionItems,
   buildFreshAgentNoticeItems,
   buildEpisodeSummaryText,
@@ -510,6 +511,27 @@ describe('buildCompletionInjectionItems / buildDeliveryFailureInjectionItems', (
     expect(text).toContain('not an instruction');
     // The 400-char cap plus ellipsis, not the full 500 chars, rides the wire.
     expect(text.length).toBeLessThan(500 + 200);
+  });
+
+  test('a turn that settled error/cancelled is narrated honestly — never announced as "finished"', () => {
+    // The daemon settles orphaned running entries to error (process died) or cancelled (kill/steer);
+    // the voice model must not tell the operator the agent "finished" and narrate half an answer as
+    // the result (cross-lineage review finding on the settle-on-exit fix).
+    expect(completionOutcome('ok')).toBe('finished');
+    expect(completionOutcome(undefined)).toBe('finished');
+    expect(completionOutcome('error')).toBe('failed');
+    expect(completionOutcome('cancelled')).toBe('interrupted');
+    const died = (buildCompletionInjectionItems('alpha', 'half an answ', 'failed') as any[])[0].content[0].text as string;
+    expect(died).toContain('process died before finishing');
+    expect(died).toContain('PARTIAL');
+    expect(died).not.toContain('alpha finished');
+    expect(died).toContain('DATA: half an answ');
+    const cut = (buildCompletionInjectionItems('alpha', 'half an answ', 'interrupted') as any[])[0].content[0].text as string;
+    expect(cut).toContain('interrupted before finishing');
+    expect(cut).not.toContain('alpha finished');
+    // Default stays the exact "finished" framing every existing caller/test relies on.
+    const done = (buildCompletionInjectionItems('alpha', 'done') as any[])[0].content[0].text as string;
+    expect(done).toContain('alpha finished. Narrate this briefly');
   });
 
   test('delivery-failure injection has no fleet content to fence', () => {
