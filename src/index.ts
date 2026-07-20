@@ -44,7 +44,7 @@ import { acquireStateLock, StateLockError } from "./state-lock.ts";
 import { loadEnvFile } from "./plane-secrets.ts";
 import { planeRepos } from "./plane.ts";
 import { openDatabase } from "./db/index.ts";
-import { DbStore } from "./dal/store.ts";
+import { DbStore, FileStore } from "./dal/store.ts";
 import type { OrgContext } from "./dal/context.ts";
 import { DEV_INSECURE_SECRET, makeAuth } from "./db/auth.ts";
 import { curatePlaneIssues, renderClusterReport } from "./plane-curator.ts";
@@ -336,6 +336,19 @@ async function cmdUp(args: string[]): Promise<void> {
 			autoLand,
 			bin: glanceBin(),
 			listOrgIds: () => listOrgIds(stateDir),
+			// Protect the root factory's agents from the machine-global orphan-host reap (2026-07-20
+			// incident: every console chat's host was SIGTERM'd within a maintenance tick). Union of
+			// the LIVE root roster (closure over `manager`, assigned below after this constructor) and
+			// the PERSISTED root FileStore roster — the persisted half is the boot-safety seed, so a
+			// surviving host is protected even before (or without) the root factory standing up.
+			rootRosterIds: async () => {
+				const live = manager ? manager.list().map((a) => a.id) : [];
+				const persisted = await new FileStore(stateDir)
+					.load()
+					.then((s) => s.agents.map((a) => a.id))
+					.catch(() => [] as string[]);
+				return [...live, ...persisted];
+			},
 		});
 		registry.start();
 		// Root/operator factory (opt-in). The tenant registry above serves per-org webapp sessions, but
@@ -350,7 +363,11 @@ async function cmdUp(args: string[]): Promise<void> {
 		// PLANE_PROJECT_MAP). Federation stays inert (NullFederationBus): the WS supervisor + cross-host
 		// lease sync are file-mode-only for auth reasons (below), and the root factory is operator-local.
 		if (rootFactoryEnabled()) {
-			manager = new SquadManager({ bus: new NullFederationBus(), operator, stateDir, autoLand, bin: glanceBin() });
+			// skipGlobalJanitors: the registry above owns the machine-global reaps (protected by the
+			// union INCLUDING this manager via rootRosterIds). Without it this manager's own poll
+			// janitor ran reapOrphanHosts with only ITS roster protected — the mirror-image kill,
+			// SIGTERMing every tenant org's live hosts every ~30s.
+			manager = new SquadManager({ bus: new NullFederationBus(), operator, stateDir, autoLand, bin: glanceBin(), skipGlobalJanitors: true });
 			await manager.start();
 			process.stderr.write(`root factory: on — operator autonomous factory active for ${planeRepos().join(", ")}\n`);
 		} else if (envBool("OMP_SQUAD_ROOT_FACTORY", false)) {

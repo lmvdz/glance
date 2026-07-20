@@ -42,6 +42,13 @@ export interface RegistryDeps {
 	/** Enumerate every org that has persisted state, for the boot-safe reap-protected union.
 	 *  Absent ⇒ no cross-org seed (tests / no DB). */
 	listOrgIds?: () => Promise<string[]>;
+	/** Agent ids owned OUTSIDE the registry that the machine-global reap must also protect — the
+	 *  root factory's roster (live + persisted FileStore at the state-dir root). Live incident
+	 *  2026-07-20: without this, reapGlobal judged every root-factory console chat's host an orphan
+	 *  (probe → `__sq:shutdown` → SIGTERM) within a maintenance tick of spawning — "agent exited
+	 *  (code 143)" on every thread, silently, because the registry only unioned org managers and
+	 *  DB org stores. Called fresh each pass, same as the per-org persisted-roster rescan. */
+	rootRosterIds?: () => Promise<Iterable<string>> | Iterable<string>;
 	/** Maintenance cadence (evict + janitor) in ms. Default 60s. */
 	maintenanceMs?: number;
 	/** Idle TTL before an agent-less manager is evicted. Default 10min (OMP_SQUAD_ORG_IDLE_MS). */
@@ -187,6 +194,9 @@ export class ManagerRegistry {
 				for (const a of (await this.deps.store(orgId).load()).agents) ids.add(a.id);
 			}
 		}
+		// The root factory lives OUTSIDE the registry (index.ts builds it alongside, on the root
+		// FileStore) — its roster must be in the union or reapGlobal kills its hosts as orphans.
+		if (this.deps.rootRosterIds) for (const id of await this.deps.rootRosterIds()) ids.add(id);
 		return ids;
 	}
 
@@ -195,7 +205,10 @@ export class ManagerRegistry {
 	 * sockets + sweep the global lease/presence/proof registries once (a per-org manager must not).
 	 */
 	private async reapGlobal(): Promise<void> {
-		await reapOrphanHosts(await this.protectedIds()).catch(() => []);
+		// Stderr (→ daemon.log), not a swallowed result: this reap SIGTERMs live processes, and the
+		// 2026-07-20 incident stayed invisible for hours precisely because every kill here was silent.
+		const reaped = await reapOrphanHosts(await this.protectedIds()).catch(() => [] as string[]);
+		if (reaped.length) process.stderr.write(`[registry] reaped ${reaped.length} orphan agent host(s): ${reaped.join(", ")}\n`);
 		await pruneStaleSockets().catch(() => []);
 		// reapDeadSessions is the repo-agnostic pid-liveness lease backstop (leases.ts) — per-org
 		// managers run with skipGlobalJanitors, so THIS is the only place a hard kill / crash / orphan
