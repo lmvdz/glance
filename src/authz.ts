@@ -71,6 +71,9 @@ export function restActionTier(method: string, pathname: string): Role {
 	// Reading an answer is a read. ASKING spends model tokens and spawns a unit against a repo, which is
 	// everyday driving, not administration — the same tier as creating an agent. (R5)
 	if (pathname === "/api/answers" || pathname.startsWith("/api/answers/")) return method === "GET" ? "viewer" : "operator";
+	// After-action reports are read-only post-mortems (GET is the only method served) — same read
+	// tier as answers; the redacted gate tail is agent output, not operational posture.
+	if (pathname === "/api/after-action" || pathname.startsWith("/api/after-action/")) return "viewer";
 	// The doctor's facts include autonomy flags and the daemon's cwd — operational posture, not secrets,
 	// but not viewer-fodder either: knowing autoland is armed with the gate off is an attacker's shopping
 	// list. Operator: the person who could have flipped those flags anyway.

@@ -157,6 +157,7 @@ const ALLOWLIST = new Set<string>([
 	"tests/architect-harness-env.test.ts", // multiple `sk-...` provider-key fixtures proving env passthrough to a spawned harness
 	"tests/spawn-env.test.ts", // multiple `sk-...` provider-key fixtures proving spawn-env scrubbing/injection
 	"tests/transition-history.test.ts", // `sk-abcdefghijklmnopqrstuvwxyz012345` — a secret-shaped fixture for history-redaction coverage
+	"tests/after-action.test.ts", // `sk-ant-...` + `API_KEY=` fixtures proving the gate-tail is redacted before it reaches a report
 ]);
 
 function collectTsFiles(dir: string, out: string[]): void {

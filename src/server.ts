@@ -1839,6 +1839,13 @@ export class SquadServer {
 			const answer = await manager.answer(decodeURIComponent(url.pathname.slice("/api/answers/".length)));
 			return answer ? Response.json(answer) : new Response("no such answer", { status: 404 });
 		}
+		// After-action reports mirror answers: durable post-mortems that outlive the (auto-reaped)
+		// roster row of the terminal unit that earned them — see after-action.ts.
+		if (url.pathname === "/api/after-action" && req.method === "GET") return Response.json(await manager.afterActions());
+		if (url.pathname.startsWith("/api/after-action/") && req.method === "GET") {
+			const report = await manager.afterAction(decodeURIComponent(url.pathname.slice("/api/after-action/".length)));
+			return report ? Response.json(report) : new Response("no such after-action report", { status: 404 });
+		}
 		// `glance symptom <query>` (comprehension concern 07): ranking stays server-side, reusing
 		// fabric-search's BM25 core (`rankKbDocs`) over symptom+whereToLook text rather than forking a
 		// second scorer — the same machinery `GET /api/fabric/search` drives off the flattened snapshot,
