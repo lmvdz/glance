@@ -84,7 +84,61 @@ export interface ViewCoercion {
 export function coerceView(raw: string | null | undefined): ViewCoercion {
   if (isAppView(raw)) return { view: raw, openPalette: false };
   const trimmed = (raw ?? '').trim();
-  const aliased = VIEW_ALIAS_MAP[trimmed];
+  // hasOwnProperty, not bracket access alone: a bracket lookup on an inherited key like
+  // `toString`/`constructor` would return an Object.prototype function (truthy) and put it into
+  // `view` state — so only own keys of the alias map count.
+  const aliased = Object.prototype.hasOwnProperty.call(VIEW_ALIAS_MAP, trimmed) ? VIEW_ALIAS_MAP[trimmed] : undefined;
   if (aliased) return { view: aliased, openPalette: trimmed === 'knowledge' };
   return { view: 'fleet', openPalette: false };
+}
+
+/** True iff `raw` is a recognized view source — a live AppView key or a known dead-key alias
+ *  (own keys only). Garbage/empty/unrecognized values are NOT recognized, so the boot bootstrap
+ *  can strip them from the URL without overwriting the user's persisted nav. */
+function isRecognizedView(raw: string): boolean {
+  const trimmed = raw.trim();
+  return isAppView(trimmed) || Object.prototype.hasOwnProperty.call(VIEW_ALIAS_MAP, trimmed);
+}
+
+/**
+ * `?view=<name>` boot bootstrap (D0, glance-desktop dashboard embedding prerequisite): the
+ * desktop shell embeds this SPA in a native webview and needs to pick the initial screen from
+ * OUTSIDE the page (it can't pre-seed localStorage across origins/profiles the way a same-origin
+ * script can) — a URL query param is the one channel it can always drive. Funnels through the
+ * SAME `coerceView` funnel every other view source uses (a dead GRAPH-FOLD key still aliases, a
+ * typo/garbage value still lands on `fleet` rather than a white screen), persists the COERCED
+ * value under `VIEW_STORAGE_KEY` — the same key TaskContext's lazy `useState` initializer reads
+ * on first render via `readStoredView()` — then strips the param from the visible URL. Mirrors
+ * `captureToken`'s `?token=` handling in ./api.ts: same "read once, persist, strip" shape, so a
+ * bookmarked or shared `?view=` link doesn't keep re-pinning the view on every subsequent load,
+ * and a reload after navigating elsewhere in-app doesn't snap back to the seeded value.
+ *
+ * MUST run before the first React render (call it from main.tsx, like `installPushTapBeacon`) so
+ * `readStoredView()` observes the seeded value on its very first read — this function itself
+ * never touches React state.
+ */
+export function bootstrapViewFromQuery(): void {
+  try {
+    const url = new URL(location.href);
+    const raw = url.searchParams.get('view');
+    if (raw === null) return; // no param: nothing to seed, nothing to strip
+    // Persist ONLY a genuinely recognized view. An empty or garbage `?view=` used to coerce to
+    // `fleet` and overwrite the user's persisted nav — sticky across reloads, and a crafted link
+    // could force a sensitive first-paint screen. Now such values are stripped from the URL but
+    // never written; only a live key or known alias seeds localStorage.
+    if (isRecognizedView(raw)) {
+      // Trim before coercing: isRecognizedView() trims, so a whitespace-wrapped live key like
+      // " tasks " is accepted here — but coerceView()'s isAppView() check is exact and would miss
+      // the untrimmed value and fall back to 'fleet'. Pass the trimmed form so the recognized view
+      // is the one persisted.
+      const { view } = coerceView(raw.trim());
+      localStorage.setItem(VIEW_STORAGE_KEY, view);
+    }
+    url.searchParams.delete('view');
+    history.replaceState(null, '', url.toString());
+  } catch {
+    // ponytail: storage/location can be blocked (private mode, non-browser test harness, an
+    // embed edge case) — the app still boots, just without the seeded view; never let a boot
+    // bootstrap take the whole page down.
+  }
 }

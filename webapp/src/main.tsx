@@ -3,6 +3,14 @@ import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
 import './index.css';
 import {installPushTapBeacon} from './lib/push-tap';
+import {bootstrapViewFromQuery} from './lib/viewAlias';
+
+// D0 (glance-desktop dashboard embedding prerequisite): a `?view=<name>` URL param, if present,
+// seeds the TaskContext view before the app ever renders — the desktop shell's iframe/webview
+// picks the embedded screen this way, since it can't reach across origins into localStorage.
+// Must run BEFORE createRoot().render below so TaskContext's lazy useState initializer sees the
+// seeded localStorage value on its first read.
+bootstrapViewFromQuery();
 
 // Push-tap adoption beacon (daily-dogfood-engine 02): if this open arrived via a push-notification
 // tap (`#/agent/<id>?push=1`), report it once and strip the marker — before render, so the app
