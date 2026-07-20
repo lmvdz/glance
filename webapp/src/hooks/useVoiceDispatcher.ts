@@ -7,6 +7,7 @@ import {
   buildDeliveryFailureInjectionItems,
   buildFreshAgentNoticeItems,
   buildVoiceRecap,
+  completionOutcome,
   decideToolCall,
   dispatchedOutput,
   failedOutput,
@@ -472,7 +473,7 @@ export function sweepPromptWatchers(session: Pick<VoiceSession, 'queueInjection'
       // counts as "heard" exactly like one spoken from the away-summary, so onCompletionNarrated
       // only fires once THIS narration's own response actually completed uncancelled (a barge-in
       // mid-narration must not advance the cursor past something the operator never actually heard).
-      session.queueInjection(buildCompletionInjectionItems(label, completion.text), ({ cancelled }) => {
+      session.queueInjection(buildCompletionInjectionItems(label, completion.text, completionOutcome(completion.status)), ({ cancelled }) => {
         if (!cancelled) deps.onCompletionNarrated?.(completionTs);
         else deps.onNarrationLost?.(completionTs);
       });

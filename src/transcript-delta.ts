@@ -6,7 +6,13 @@
 import type { TranscriptEntry } from "./types.ts";
 
 /** Entries strictly newer than `since` by monotonic `seq`. Legacy entries without a `seq` count as
- *  0, so any `since >= 0` excludes them — a delta poll only grows the tail; a full fetch keeps them. */
+ *  0, so any `since >= 0` excludes them — a delta poll only grows the tail; a full fetch keeps them.
+ *
+ *  Cursor contract: entries settle IN PLACE without a seq bump (streaming updates and
+ *  `settleRunningEntries` both mutate the existing row), so a poller must NOT advance its cursor to
+ *  the max seq observed — it must pin it below the lowest seq it holds that is still
+ *  `status:"running"` (the running-floor idiom in here.ts and the cockpit's transcript store), so
+ *  in-place settles are re-fetched. WS subscribers get every in-place change re-emitted instead. */
 export function transcriptSince(entries: TranscriptEntry[], since: number): TranscriptEntry[] {
 	return entries.filter((e) => (e.seq ?? 0) > since);
 }
