@@ -341,12 +341,12 @@ async function cmdUp(args: string[]): Promise<void> {
 			// the LIVE root roster (closure over `manager`, assigned below after this constructor) and
 			// the PERSISTED root FileStore roster — the persisted half is the boot-safety seed, so a
 			// surviving host is protected even before (or without) the root factory standing up.
+			// Deliberately NO catch on the store read: a corrupt/unreadable root state.json must reject
+			// so protectedIds() rejects and the registry SKIPS that reap pass (fail closed) — degrading
+			// to an empty root half would reap every surviving root host, the exact incident class.
 			rootRosterIds: async () => {
 				const live = manager ? manager.list().map((a) => a.id) : [];
-				const persisted = await new FileStore(stateDir)
-					.load()
-					.then((s) => s.agents.map((a) => a.id))
-					.catch(() => [] as string[]);
+				const persisted = (await new FileStore(stateDir).load()).agents.map((a) => a.id);
 				return [...live, ...persisted];
 			},
 		});

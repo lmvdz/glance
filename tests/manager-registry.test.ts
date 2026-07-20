@@ -151,6 +151,21 @@ test("protectedIds includes the root factory's roster (rootRosterIds) — the 20
 	expect([...ids].sort()).toEqual(["a1", "chat-root-1", "chat-root-2"]);
 });
 
+test("a rejecting rootRosterIds rejects protectedIds — the registry fails CLOSED and skips the reap pass", async () => {
+	// Degrading a failed root-roster read to [] would reap every surviving root host (the empty-union
+	// mass-SIGTERM the protectedIds doc comment warns about) — the rejection must propagate instead.
+	const deps: RegistryDeps = {
+		root: "/tmp/reg-noop",
+		store: () => new FileStore("/tmp/reg-noop"),
+		operator,
+		rootRosterIds: async () => {
+			throw new Error("corrupt state.json");
+		},
+	};
+	const reg = new ManagerRegistry(deps);
+	expect(reg.protectedIds()).rejects.toThrow("corrupt state.json");
+});
+
 test("rootRosterIds accepts a plain (non-promise) iterable and an empty roster", async () => {
 	const deps: RegistryDeps = { root: "/tmp/reg-noop", store: () => new FileStore("/tmp/reg-noop"), operator, rootRosterIds: () => ["r1"] };
 	const reg = new ManagerRegistry(deps);

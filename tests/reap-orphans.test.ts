@@ -70,3 +70,20 @@ test("reapOrphanHosts: empty/missing dir is a no-op (never throws)", async () =>
 	const missing = path.join(os.tmpdir(), `reap-missing-${Date.now()}`);
 	expect(await reapOrphanHosts(new Set(["x"]), missing)).toEqual([]);
 });
+
+test("graceMs spares a freshly-spawned socket (snapshot TOCTOU guard) while still reaping old orphans", async () => {
+	// The registry computes its protected union BEFORE sweeping — for org-store loads that can take
+	// seconds — so a host spawned inside that window has a socket on disk but no id in the stale set.
+	// The grace makes youth, not the stale union, the deciding fact for such a socket.
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "reap-grace-"));
+	const youngSock = fakeHost(dir, "young-chat"); // spawned "just now" — inside the grace
+	const oldSock = fakeHost(dir, "old-orphan");
+	const past = new Date(Date.now() - 10 * 60_000);
+	await fs.utimes(oldSock, past, past); // aged well past any grace — a genuine leftover
+
+	const reaped = await reapOrphanHosts(new Set(), dir, { graceMs: 120_000 });
+
+	expect(reaped).toEqual(["old-orphan"]);
+	expect(await hostAlive(youngSock)).toBe(true); // young host untouched despite not being in the set
+	await fs.rm(dir, { recursive: true, force: true });
+});
