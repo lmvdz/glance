@@ -56,3 +56,8 @@ ChangedFilesCard, hub composer controls + cost ring.
 Designed 2026-07-18 by a fable Plan pass over App.tsx, WorkspaceSurface, useTabs, the fleet module
 (spine/timeline/diffs/composer), the ai module, worktreeOpener, fleetClient/roster. Reuses R2
 components re-parented. Companion HTML review digest published for Lars.
+
+## Ledger
+
+- 2026-07-18: H0+H2 MERGED (gd #46/#45); milestone shipped, then bugfix round (gd #47: shell bleed z-order, duplicated messages via clientTurnId, vitest worktree exclude).
+- 2026-07-20: gd #47 MERGED. r3 research round (omp PR #215, plans/research-t3code round 3) mapped t3code's chat construction; its client-side borrows executed as gd PR #49 (draft): H3 card, H2 v2 tool fidelity, three-mode scroll anchoring + row structural sharing, H4 partial (mode chip + context ring + hero), thread-start recovery hardening. Cross-lineage gauntlet (grok+codex) ran pre-PR: 13 findings, 8 fixed, foundations confirmed. Size budget 1512→1518 KB rides the PR as its own commit — merging is Lars's OK. Awaiting Lars's live look (checkout feat/r3-chat-fidelity).
