@@ -1,6 +1,6 @@
 # "Changed files" card as a first-class turn
 
-STATUS: in-review — implemented in gd PR #49 (r3 pass: fileTree+DiffStatLabel+ChangedFilesCard, per-unit persisted collapse); awaiting Lars's live verify. Deliberate delta from spec: no per-turn timestamp (whole-worktree diff can't honestly claim turn attribution — H7)
+STATUS: done — gd PR #49 MERGED 2026-07-20 (Lars's merge call). Deliberate delta from spec: no per-turn timestamp (whole-worktree diff can't honestly claim turn attribution — H7)
 PARENT: hub-shell
 
 ChangedFilesCard: header 'Changed files (N) · +x/−y' (aggregate from parseDiff hunks), nested file tree, per-file diffstat, Collapse all / View diff (expands existing DiffFile inline, split/unified preserved). Renders IN the conversation flow after the latest settled turn with a subtle timestamp; replaces IntervenePane's buried Changes collapsible. Keep quote-lines→composer steer draft. Data: client.diff(unit.id) (whole-worktree; per-turn attribution = H7 gap). TOUCHES: new diffs/ChangedFilesCard.tsx + fileTree.ts(+tests), diffs/parseDiff.ts (expose counts), IntervenePane.tsx, ConversationView.tsx. SIZE M. Reuses DiffFile/DiffViewToggle/parseUnifiedDiff. VERIFY: parse/tree tests; scratch daemon multi-file unit. Taste-critical (the card is the centerpiece of the reference).
