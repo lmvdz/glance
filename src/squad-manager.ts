@@ -214,7 +214,7 @@ import { truncateLabel } from "./text-util.ts";
 import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
 import { buildTrace, traceMaxSpans, traceSampleRatio, traceSpansEnabled, type TraceResponse } from "./spans.ts";
 import { traceExporterFromEnv, type TraceExportQueue } from "./trace-exporter.ts";
-import { transcriptSince } from "./transcript-delta.ts";
+import { settleRunningEntries, transcriptSince } from "./transcript-delta.ts";
 import { ManualProvider, type PaymentProvider, paymentProviderFromEnv } from "./payments/index.ts";
 import {
 	acceptFeedbackSubmission,
@@ -2070,6 +2070,12 @@ export class SquadManager extends EventEmitter {
 
 	/** Rebuild an AgentRecord for a persisted agent and attach to its live host. */
 	private async attachExisting(p: PersistedAgent, transcript: TranscriptEntry[] = []): Promise<void> {
+		// A persisted `running` entry can never settle again: the live refs that would flip it
+		// (assistantEntry/thinkingEntry/toolEntries) are rebuilt empty below, so even a genuinely
+		// still-streaming host's replayed frames append FRESH entries rather than updating the old
+		// one. Settle the stale claims to "cancelled" now — the honest floor — instead of letting them
+		// tick "Working" in the chat pane forever.
+		settleRunningEntries(transcript, "cancelled");
 		const dto: AgentDTO = {
 			id: p.id,
 			name: p.name,
@@ -2182,6 +2188,10 @@ export class SquadManager extends EventEmitter {
 	 * escalated — so a fresh boot reconstructs the same operator-visible signal from the marker alone.
 	 */
 	private reattachTerminal(p: PersistedAgent, transcript: TranscriptEntry[] = []): void {
+		// Same rationale as subs.closeNonTerminal() below, for transcript entries: this record never
+		// gets a live driver again, so a persisted `running` entry would claim "Working" forever with
+		// no run left alive to ever settle it. Terminal record ⇒ terminal entries.
+		settleRunningEntries(transcript, "cancelled");
 		const subs = new SubagentTracker();
 		// Topology review finding 3: this is the fourth boot path that reseeds persisted subagents
 		// (create()'s restore reseed, restart(), and loadPersisted's --restore already closeNonTerminal
@@ -7775,6 +7785,13 @@ export class SquadManager extends EventEmitter {
 				);
 				this.emitAgent(rec);
 			}
+			// The process is dead: no stream delta, tool_execution_end, or pending answer can ever settle
+			// its still-`running` transcript entries now — left alone they'd claim "Working" in the chat
+			// pane forever while the roster says "agent exited". Crash exits settle to "error" (matching
+			// the unit tier just stamped above); clean teardown and the already-stopped guard path (our
+			// own kill/restart) settle any stragglers to "cancelled". Runs outside the status guard on
+			// purpose: a self-initiated kill dead-ends the entry refs exactly the same way.
+			this.settleRunningTranscript(rec, rec.dto.status === "error" ? "error" : "cancelled");
 			void this.finalizeRun(rec);
 		});
 	}
@@ -8272,6 +8289,23 @@ export class SquadManager extends EventEmitter {
 		Object.assign(existing, { text: redact(text), status, tool });
 		this.emit("event", { type: "transcript", id: rec.dto.id, entry: existing } satisfies SquadEvent);
 		if (status !== "running") rec.toolEntries.delete(callId);
+	}
+
+	/** Settle every still-`running` transcript entry for a dead agent process and drop the live
+	 *  stream/tool refs so nothing resurrects them. Each settled entry is re-emitted on the live
+	 *  channel (the same in-place-mutate + re-emit idiom as finishAssistantStream) and the settle is
+	 *  persisted, so neither a WS subscriber nor a `?since=` poller nor a restarted daemon is left
+	 *  watching a phantom "Working" row. */
+	private settleRunningTranscript(rec: AgentRecord, status: "error" | "cancelled"): void {
+		const settled = settleRunningEntries(rec.transcript, status);
+		rec.assistantBuf = "";
+		rec.assistantEntry = undefined;
+		rec.thinkingBuf = "";
+		rec.thinkingEntry = undefined;
+		rec.toolEntries.clear();
+		if (settled.length === 0) return;
+		for (const entry of settled) this.emit("event", { type: "transcript", id: rec.dto.id, entry } satisfies SquadEvent);
+		void this.persist(); // chain-deduped; without it a crash-then-daemon-restart reloads the entries as "running" again
 	}
 
 	/**
@@ -10573,7 +10607,7 @@ export class SquadManager extends EventEmitter {
 	 *  and never touches a live agent's worktree or one created within the spawn grace. Opt out with
 	 *  OMP_SQUAD_WORKTREE_REAP=0; tune the freshness window with OMP_SQUAD_WORKTREE_GRACE_MS. */
 	protected async reapDeadWorktrees(): Promise<void> {
-		if (process.env.OMP_SQUAD_WORKTREE_REAP === "0") return;
+		if (!envBool("OMP_SQUAD_WORKTREE_REAP", true)) return;
 		const graceMs = envInt("OMP_SQUAD_WORKTREE_GRACE_MS", 120_000);
 		const owned = new Set([...this.agents.values()].map((r) => r.options.worktree).filter((w): w is string => !!w));
 		const repos = new Set<string>([...planeRepos(), ...[...this.agents.values()].map((r) => r.options.repo)]);

@@ -22,6 +22,7 @@
  *     never presented as a seamless resume it isn't (the a192134 dead-agent-honesty lineage).
  */
 
+import { settleRunningEntries } from "./transcript-delta.ts";
 import type { PersistedAgent, TranscriptEntry } from "./types.ts";
 
 /** Minimal terminal record of a session a restart killed — answers "what happened to this id?". */
@@ -64,6 +65,10 @@ export function buildDeadPlaceholder(p: PersistedAgent, transcript: unknown, now
 	} else {
 		transcriptNote = " Its persisted transcript was unreadable, so the prior conversation could not be recovered.";
 	}
+	// The session is dead by definition here — a `running` entry in the recovered tail can never
+	// settle and would read as a live "Working" claim in every placeholder consumer. Terminal record
+	// ⇒ terminal entries (mirrors reattachTerminal's settle).
+	settleRunningEntries(entries, "cancelled", now);
 	return {
 		id: p.id,
 		name: p.name,
