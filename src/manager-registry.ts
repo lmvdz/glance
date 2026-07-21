@@ -20,6 +20,7 @@
 import * as path from "node:path";
 import { envInt } from "./config.ts";
 import { pruneStaleSockets, reapOrphanHosts } from "./agent-host.ts";
+import { sweepGateLogs } from "./gate-logs.ts";
 import type { Store } from "./dal/store.ts";
 import { NullFederationBus } from "./federation.ts";
 import { reapDeadSessions, sweepLeases } from "./leases.ts";
@@ -42,6 +43,13 @@ export interface RegistryDeps {
 	/** Enumerate every org that has persisted state, for the boot-safe reap-protected union.
 	 *  Absent ⇒ no cross-org seed (tests / no DB). */
 	listOrgIds?: () => Promise<string[]>;
+	/** Agent ids owned OUTSIDE the registry that the machine-global reap must also protect — the
+	 *  root factory's roster (live + persisted FileStore at the state-dir root). Live incident
+	 *  2026-07-20: without this, reapGlobal judged every root-factory console chat's host an orphan
+	 *  (probe → `__sq:shutdown` → SIGTERM) within a maintenance tick of spawning — "agent exited
+	 *  (code 143)" on every thread, silently, because the registry only unioned org managers and
+	 *  DB org stores. Called fresh each pass, same as the per-org persisted-roster rescan. */
+	rootRosterIds?: () => Promise<Iterable<string>> | Iterable<string>;
 	/** Maintenance cadence (evict + janitor) in ms. Default 60s. */
 	maintenanceMs?: number;
 	/** Idle TTL before an agent-less manager is evicted. Default 10min (OMP_SQUAD_ORG_IDLE_MS). */
@@ -187,6 +195,9 @@ export class ManagerRegistry {
 				for (const a of (await this.deps.store(orgId).load()).agents) ids.add(a.id);
 			}
 		}
+		// The root factory lives OUTSIDE the registry (index.ts builds it alongside, on the root
+		// FileStore) — its roster must be in the union or reapGlobal kills its hosts as orphans.
+		if (this.deps.rootRosterIds) for (const id of await this.deps.rootRosterIds()) ids.add(id);
 		return ids;
 	}
 
@@ -195,11 +206,21 @@ export class ManagerRegistry {
 	 * sockets + sweep the global lease/presence/proof registries once (a per-org manager must not).
 	 */
 	private async reapGlobal(): Promise<void> {
-		await reapOrphanHosts(await this.protectedIds()).catch(() => []);
+		// FAIL CLOSED on a broken union: if protectedIds() rejects (org enumeration/store load/root
+		// roster read failed), let it propagate to maintain()'s catch and SKIP this pass entirely —
+		// reaping against a partial union is the mass-SIGTERM failure the doc comment above warns
+		// about. Stderr (→ daemon.log), not a swallowed result, for what IS reaped: the 2026-07-20
+		// incident stayed invisible for hours precisely because every kill here was silent. The 2-min
+		// socket grace covers the snapshot window — a host spawned while the union was being computed
+		// is never judged by the stale set (cross-lineage review, TOCTOU).
+		const reaped = await reapOrphanHosts(await this.protectedIds(), undefined, { graceMs: 120_000 }).catch(() => [] as string[]);
+		if (reaped.length) process.stderr.write(`[registry] reaped ${reaped.length} orphan agent host(s): ${reaped.join(", ")}\n`);
 		await pruneStaleSockets().catch(() => []);
 		// reapDeadSessions is the repo-agnostic pid-liveness lease backstop (leases.ts) — per-org
 		// managers run with skipGlobalJanitors, so THIS is the only place a hard kill / crash / orphan
-		// reap's leases get cleaned in DB/org mode (the per-org manager's own sweepRegistries never runs).
-		await Promise.all([sweepLeases(), reapDeadSessions(), sweepPresence(), sweepProofs()]).catch(() => []);
+		// reap's leases get cleaned in DB/org mode (the per-org manager's own sweepRegistries never
+		// runs). sweepGateLogs included for the same reason: with the root factory also on
+		// skipGlobalJanitors, this pass is the last remaining caller of the gate-log TTL sweep.
+		await Promise.all([sweepLeases(), reapDeadSessions(), sweepPresence(), sweepProofs(), sweepGateLogs()]).catch(() => []);
 	}
 }

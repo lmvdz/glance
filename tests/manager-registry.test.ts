@@ -132,6 +132,70 @@ test("protectedIds is boot-seeded from persisted rosters before any manager star
 	expect(ids.size).toBeGreaterThan(0); // non-empty before any lazy start — the boot-safety invariant
 });
 
+test("protectedIds includes the root factory's roster (rootRosterIds) — the 2026-07-20 console-chat kill", async () => {
+	// Live incident: the root factory (index.ts builds it OUTSIDE the registry, on the root
+	// FileStore) was absent from the union, so reapGlobal judged every console chat's host an
+	// orphan and shut it down (`__sq:shutdown` → SIGTERM → "agent exited (code 143)") within a
+	// maintenance tick of spawning. The union must carry the root roster alongside org managers.
+	const deps: RegistryDeps = {
+		root: "/tmp/reg-noop",
+		store: () => new FileStore("/tmp/reg-noop"),
+		operator,
+		rootRosterIds: async () => ["chat-root-1", "chat-root-2"],
+	};
+	const reg = new ManagerRegistry(deps);
+	seed(reg, "orgA", makeFakeManager([{ id: "a1", status: "idle" }]).manager, Date.now());
+
+	const ids = await reg.protectedIds();
+
+	expect([...ids].sort()).toEqual(["a1", "chat-root-1", "chat-root-2"]);
+});
+
+test("a rejecting rootRosterIds rejects protectedIds — the registry fails CLOSED and skips the reap pass", async () => {
+	// Degrading a failed root-roster read to [] would reap every surviving root host (the empty-union
+	// mass-SIGTERM the protectedIds doc comment warns about) — the rejection must propagate instead.
+	const deps: RegistryDeps = {
+		root: "/tmp/reg-noop",
+		store: () => new FileStore("/tmp/reg-noop"),
+		operator,
+		rootRosterIds: async () => {
+			throw new Error("corrupt state.json");
+		},
+	};
+	const reg = new ManagerRegistry(deps);
+	expect(reg.protectedIds()).rejects.toThrow("corrupt state.json");
+});
+
+test("rootRosterIds accepts a plain (non-promise) iterable and an empty roster", async () => {
+	const deps: RegistryDeps = { root: "/tmp/reg-noop", store: () => new FileStore("/tmp/reg-noop"), operator, rootRosterIds: () => ["r1"] };
+	const reg = new ManagerRegistry(deps);
+	expect([...(await reg.protectedIds())]).toEqual(["r1"]);
+
+	const empty = new ManagerRegistry({ root: "/tmp/reg-noop", store: () => new FileStore("/tmp/reg-noop"), operator, rootRosterIds: () => [] });
+	expect((await empty.protectedIds()).size).toBe(0);
+});
+
+test("rootRosterIds wired to a real FileStore protects the PERSISTED root roster before any manager starts (boot-safety half)", async () => {
+	// The index.ts wiring reads the root FileStore each pass so a surviving host is protected even
+	// before (or without) the root factory standing up — mirror of the per-org persisted-roster seed.
+	const rootDir = await fsp.mkdtemp(path.join(os.tmpdir(), "reg-rootstore-"));
+	try {
+		const rootStore = new FileStore(rootDir);
+		await rootStore.save({ agents: [{ id: "chat-persisted-1", name: "chat", repo: "/r", worktree: "/w" }] as StateSnapshot["agents"], transcripts: {}, features: [] });
+		const deps: RegistryDeps = {
+			root: rootDir,
+			store: () => new FileStore(rootDir),
+			operator,
+			rootRosterIds: async () => (await new FileStore(rootDir).load()).agents.map((a) => a.id),
+		};
+		const reg = new ManagerRegistry(deps);
+
+		expect([...(await reg.protectedIds())]).toEqual(["chat-persisted-1"]);
+	} finally {
+		await fsp.rm(rootDir, { recursive: true, force: true }).catch(() => {});
+	}
+});
+
 const tmpRoot = path.join(os.tmpdir(), `reg-lifecycle-${process.pid}-${Math.random().toString(36).slice(2, 8)}`);
 afterAll(async () => {
 	await fsp.rm(tmpRoot, { recursive: true, force: true }).catch(() => {});

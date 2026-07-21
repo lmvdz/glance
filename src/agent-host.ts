@@ -120,13 +120,14 @@ export async function shutdownHost(socket: string): Promise<void> {
  * `<id>-wf`; it is kept iff its owner `<id>` is live.
  * ponytail: graceful shutdown over the existing protocol — no SIGKILL / pid bookkeeping.
  */
-export async function reapOrphanHosts(liveIds: Set<string>, dir = squadSocketDir()): Promise<string[]> {
+export async function reapOrphanHosts(liveIds: Set<string>, dir = squadSocketDir(), opts?: { graceMs?: number }): Promise<string[]> {
 	let entries: string[];
 	try {
 		entries = await fsp.readdir(dir);
 	} catch {
 		return [];
 	}
+	const graceMs = opts?.graceMs ?? 0;
 	const reaped: string[] = [];
 	await Promise.all(
 		entries.map(async (entry) => {
@@ -135,6 +136,18 @@ export async function reapOrphanHosts(liveIds: Set<string>, dir = squadSocketDir
 			const owner = id.endsWith("-wf") ? id.slice(0, -"-wf".length) : id;
 			if (liveIds.has(owner)) return;
 			const p = path.join(dir, entry);
+			// Snapshot TOCTOU guard (cross-lineage review): `liveIds` is computed BEFORE this sweep —
+			// for the registry that includes per-org store loads that can take seconds — so a host
+			// spawned in that window has a socket here but no id in the (stale) set. A young socket is
+			// never an orphan worth killing NOW: skip it and let the next pass, with a fresh union,
+			// judge it. Callers with an atomic snapshot (the in-manager reap) pass no grace.
+			if (graceMs > 0) {
+				const age = await fsp
+					.stat(p)
+					.then((s) => Date.now() - s.mtimeMs)
+					.catch(() => Number.POSITIVE_INFINITY);
+				if (age < graceMs) return;
+			}
 			if (await hostAlive(p)) {
 				await shutdownHost(p);
 				reaped.push(id);
