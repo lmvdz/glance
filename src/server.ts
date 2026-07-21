@@ -96,7 +96,7 @@ import type { FabricSnapshot } from "./fabric.ts";
 import { redactAttentionForActor, redactSeenMapForActor } from "./attention.ts";
 import { maxLadderPriority, type LadderPriority } from "./attention-ladder.ts";
 import { computeFog, repoHasHistory } from "./comprehension-fog.ts";
-import type { SymptomSearchHit } from "./symptoms.ts";
+import type { SymptomEntry, SymptomSearchHit } from "./symptoms.ts";
 import type { EpisodeMeta } from "./weekly-episode.ts";
 import { normalizeRepoPath } from "./project-registry.ts";
 import { readAudit, type AuditQuery } from "./audit.ts";
@@ -1961,7 +1961,10 @@ export class SquadServer {
 		// second scorer — the same machinery `GET /api/fabric/search` drives off the flattened snapshot,
 		// applied here directly to `listSymptoms` so the CLI gets the FULL entry back (whereToLook array,
 		// fixedBy, landedAt) instead of a lossy KbDoc snippet. An empty/missing `q` returns no results
-		// (never the unranked full list) — this route ranks, it doesn't browse.
+		// (never the unranked full list) — ranking never degrades to an unranked dump. Browsing is a
+		// SEPARATE, explicit contract: `?browse=1` (no `q`) returns the newest entries by `landedAt`
+		// under the same actor-visible repo scoping, so the webapp can show recurring failure modes
+		// without the operator having to already know what to search for (Fog view's symptom list).
 		if (url.pathname === "/api/symptoms" && req.method === "GET") {
 			// Actor-derived repo scoping (batch-2 review): same discipline as /api/fog above — a `?repo=`
 			// outside the actor-visible set yields nothing, and no param means "everything visible",
@@ -1971,6 +1974,11 @@ export class SquadServer {
 			const repos = repoParam ? (visible.has(normalizeRepoPath(repoParam)) ? [repoParam] : []) : [...visible];
 			const q = url.searchParams.get("q") ?? "";
 			const topK = boundedNumber(url.searchParams.get("topK"), 20, 1, 100);
+			if (url.searchParams.get("browse") === "1" && !q.trim()) {
+				if (repos.length === 0) return Response.json({ symptoms: [] as SymptomEntry[] });
+				const all = (await Promise.all(repos.map((r) => manager.symptoms(r)))).flat();
+				return Response.json({ symptoms: all.sort((a, b) => b.landedAt - a.landedAt).slice(0, topK) });
+			}
 			if (!q.trim() || repos.length === 0) return Response.json({ query: q, results: [] as SymptomSearchHit[] });
 			const all = (await Promise.all(repos.map((r) => manager.symptoms(r)))).flat();
 			const docs: KbDoc[] = all.map((s) => ({ type: "symptom", id: s.id, title: s.symptom, text: `${s.symptom} ${s.whereToLook.join(" ")}`, repo: s.repo, ts: s.landedAt }));

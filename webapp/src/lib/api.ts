@@ -269,6 +269,29 @@ export async function fetchPlanReality(featureId: string, repo: string): Promise
   return body.reality;
 }
 
+// -----------------------------------------------------------------------------------------------
+// Loop meters + narrative surfaces (previously generated-but-invisible; see lib/loop-meters.ts for
+// the wire shapes and coercers — these fetchers return `unknown` on purpose so the coercers stay
+// the single trust boundary).
+// -----------------------------------------------------------------------------------------------
+
+/** `GET /api/metrics/learning-loop` — flag resolution + per-metric rollups (src/metrics.ts). */
+export function fetchLearningLoop(): Promise<unknown> {
+  return apiJson<unknown>('/api/metrics/learning-loop');
+}
+
+/** `GET /api/after-action` — every durable post-mortem the daemon has written (src/after-action.ts).
+ *  Reports outlive their auto-reaped roster rows; filter client-side with `reportsForAgents`. */
+export function fetchAfterActions(): Promise<unknown> {
+  return apiJson<unknown>('/api/after-action');
+}
+
+/** `GET /api/symptoms?browse=1` — newest recurring failure modes across the actor-visible repos
+ *  (src/symptoms.ts). Distinct contract from the rank-only `?q=` search the ⌘K palette uses. */
+export function browseSymptoms(topK = 20): Promise<unknown> {
+  return apiJson<unknown>(`/api/symptoms?browse=1&topK=${topK}`);
+}
+
 /** Voice capability probe (`GET /api/voice/config`) — the one honest discovery channel for whether
  *  voice is enabled/configured (no webapp code consumes `/api/settings` flags; see DESIGN.md's
  *  "Flagging" row). A 404 means the feature flag is off — that's a normal, expected state (not an

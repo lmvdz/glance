@@ -1,5 +1,5 @@
 # buildTaskClassMatrix + honest observability surface
-STATUS: closed
+STATUS: closed — 2026-07-21: the reland of orphan-merged PR #71 (85aa218) silently DROPPED TaskClassMatrixPanel.tsx, leaving the backend + /api/graph/task-class live with zero renderers; panel restored from history and mounted in the Daily view (collapsed scoreboard section) by the surface-invisible-observability PR.
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
