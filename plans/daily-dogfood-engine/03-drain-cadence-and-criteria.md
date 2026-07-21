@@ -1,6 +1,6 @@
 # Weekly drain cadence + adoption SUCCESS/KILL criteria
 
-STATUS: done
+STATUS: in-review — flipped back 2026-07-21: this file's own Resolution keeps it in-review until Lars's first gate sign-off, which the daily-driver ledger does not record
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: research

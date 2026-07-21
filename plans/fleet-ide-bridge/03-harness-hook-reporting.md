@@ -1,6 +1,6 @@
 # Harness hook self-reporting — close the attribution gap
 
-STATUS: in-review (PR #179)
+STATUS: done — PR #179 merged, branch patch-equivalent to main; verified on main, 2026-07-21 reality audit
 
 ## Reality delta (2026-07-14, PR #179)
 

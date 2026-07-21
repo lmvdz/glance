@@ -1,6 +1,6 @@
 # OSC attention emitter — terminal-native attention lane
 
-STATUS: in-review (PR #177)
+STATUS: done — PR #177 merged (f825a3f), branch patch-equivalent to main; verified on main, 2026-07-21 reality audit
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical

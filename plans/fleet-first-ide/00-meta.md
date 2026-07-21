@@ -1,6 +1,6 @@
 # Fleet-first IDE — meta-plan
 
-STATUS: in-progress
+STATUS: done — all 5 epics merged (bridge PRs #177–#179 + glance-desktop #9–#26); program closed out 2026-07-15, verified on main, 2026-07-21 reality audit
 PRIORITY: p0
 REPOS: omp-squad, glance-desktop (to be created)
 COMPLEXITY: architectural

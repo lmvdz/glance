@@ -1,6 +1,6 @@
 # 01 — Operator docs: the daily-driver manual
 
-STATUS: open
+STATUS: done — merged in PR #198 (5803a1a); verified on main, 2026-07-21 reality audit
 PRIORITY: p1
 COMPLEXITY: mechanical
 TOUCHES: README.md, docs/daily-driver.md (new)

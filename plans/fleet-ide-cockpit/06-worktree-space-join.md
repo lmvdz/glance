@@ -1,6 +1,6 @@
 # C06 — worktree↔Space join
 
-STATUS: open
+STATUS: done — merged in glance-desktop (99c6eb7…e2918ca); verified on main, 2026-07-21 reality audit
 PRIORITY: p1
 REPOS: glance-desktop
 COMPLEXITY: architectural

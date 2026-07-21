@@ -1,6 +1,6 @@
 # 02 — Auto-friction capture: the daemon files its own gripes
 
-STATUS: open
+STATUS: done — merged in PR #198 (5803a1a); verified on main, 2026-07-21 reality audit
 PRIORITY: p1
 COMPLEXITY: architectural
 TOUCHES: src/types.ts, src/friction-log.ts, src/squad-manager.ts, .claude/skills/dogfood-drain/SKILL.md, tests
