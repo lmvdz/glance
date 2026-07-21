@@ -1086,7 +1086,7 @@ export class SquadManager extends EventEmitter {
 		setThresholdTunerRoot(this.stateDir);
 		setGateLogRoot(this.stateDir);
 		setCompactionLogRoot(this.stateDir);
-		if (process.env.OMP_SQUAD_LAND_ASSESSMENT === "1") this.landAssessment = new LandAssessmentHook(this.stateDir, (level, msg) => this.log(level, msg));
+		if (envBool("OMP_SQUAD_LAND_ASSESSMENT", false)) this.landAssessment = new LandAssessmentHook(this.stateDir, (level, msg) => this.log(level, msg));
 		this.scoutCursor = readScoutCursors(this.stateDir);
 		this.removedLedger = openRemovedLedger(this.stateDir);
 		this.projectRegistry = openProjectRegistry(this.stateDir);
