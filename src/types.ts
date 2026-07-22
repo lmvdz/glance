@@ -1468,6 +1468,8 @@ export interface CommandInfo {
 
 // ── Manager → surface events ────────────────────────────────────────────────
 
+export type CommandAckReason = "missing-target" | "denied" | "duplicate" | "spawn-failed";
+
 export type SquadEvent =
 	| { type: "roster"; agents: AgentDTO[]; version: string }
 	| { type: "agent"; agent: AgentDTO }
@@ -1480,7 +1482,9 @@ export type SquadEvent =
 	| { type: "comment-resolved"; id: string; resolvedAt: number }
 	| { type: "audit"; entry: AuditEntry }
 	| { type: "automation"; event: AutomationEvent }
-	| { type: "transition"; entry: TransitionEntry };
+	| { type: "transition"; entry: TransitionEntry }
+	| { type: "command-ack"; clientTurnId: string; ok: true }
+	| { type: "command-ack"; clientTurnId: string; ok: false; reason: CommandAckReason };
 
 /** The daemon's periodic background loops — the ones that run without an operator and were, until the
  *  automation log, invisible. Scout reads agent reasoning; Sentinel (plans/sentinel-drift-probe, v0

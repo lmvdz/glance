@@ -1068,6 +1068,8 @@ export class SquadManager extends EventEmitter {
 	private readonly traceExporter?: TraceExportQueue;
 	/** Reward disbursement provider (Tremendous / Manual). Injectable for tests; default from env. */
 	private readonly paymentProvider: PaymentProvider;
+	/** Short-lived idempotency window for client-stamped prompt commands; request-answer prompts are exempted below. */
+	private readonly commandAckDedupe = new Map<string, number>();
 	private idSeq = 0;
 	private transcriptSeq = 0;
 	/** Last observed `plans/` signature for repos the feature board scans. */
@@ -6941,6 +6943,28 @@ export class SquadManager extends EventEmitter {
 		}
 	}
 
+	private commandAckClientTurnId(cmd: ClientCommand): string | undefined {
+		return cmd.type === "prompt" ? cmd.clientTurnId : undefined;
+	}
+
+	private emitCommandAck(clientTurnId: string | undefined, ack: { ok: true } | { ok: false; reason: "missing-target" | "denied" | "duplicate" | "spawn-failed" }): void {
+		if (!clientTurnId) return;
+		this.emit("event", { type: "command-ack", clientTurnId, ...ack } satisfies SquadEvent);
+	}
+
+	private isDuplicateCommand(cmd: ClientCommand, rec?: AgentRecord): boolean {
+		const clientTurnId = this.commandAckClientTurnId(cmd);
+		if (!clientTurnId) return false;
+		if (cmd.type === "prompt" && rec?.dto.pending.some((request) => request.id === clientTurnId)) return false;
+		const now = Date.now();
+		const windowMs = 30_000;
+		for (const [key, seenAt] of this.commandAckDedupe) if (now - seenAt > windowMs) this.commandAckDedupe.delete(key);
+		const key = `${cmd.type}:${clientTurnId}`;
+		if (this.commandAckDedupe.has(key)) return true;
+		this.commandAckDedupe.set(key, now);
+		return false;
+	}
+
 	async applyCommand(cmd: ClientCommand, actor: Actor = LOCAL_ACTOR): Promise<void> {
 		// Agent-origin actors are not in the viewer/operator/admin ladder. They get exactly one
 		// capability: bounded advisory messages to their C1 scope.
@@ -6950,6 +6974,7 @@ export class SquadManager extends EventEmitter {
 				this.log("warn", `agent-scope: ${actor.id} denied "${cmd.type}"${target ? ` → ${target}` : ""}`);
 				void this.store.appendAudit({ actor: actor.id, action: `denied:${cmd.type}`, target, detail: { need: "agent:message", have: "agent" } }).catch(() => {});
 				void this.recordAudit(actor, `denied:${cmd.type}`, target ?? null, "error", "agent message-only allowlist");
+				this.emitCommandAck(this.commandAckClientTurnId(cmd), { ok: false, reason: "denied" });
 				throw new RbacDenied("operator", "viewer", cmd.type);
 			}
 			await this.store.appendAudit({ actor: actor.id, action: cmd.type, target: cmd.to }).catch((err) => this.log("warn", `audit write failed for \"${cmd.type}\": ${err instanceof Error ? err.message : String(err)}`));
@@ -6966,6 +6991,7 @@ export class SquadManager extends EventEmitter {
 			void this.store
 				.appendAudit({ actor: actor.id, action: `denied:${cmd.type}`, target: commandTarget(cmd), detail: { need, have } })
 				.catch(() => {});
+			this.emitCommandAck(this.commandAckClientTurnId(cmd), { ok: false, reason: "denied" });
 			throw new RbacDenied(need, have, cmd.type);
 		}
 		// Security trail: record every accepted mutation (reads — snapshot/subscribe — are need=viewer
@@ -7017,7 +7043,14 @@ export class SquadManager extends EventEmitter {
 		}
 
 		const rec = this.agents.get(cmd.id);
-		if (!rec) return;
+		if (!rec) {
+			this.emitCommandAck(this.commandAckClientTurnId(cmd), { ok: false, reason: "missing-target" });
+			return;
+		}
+		if (this.isDuplicateCommand(cmd, rec)) {
+			this.emitCommandAck(this.commandAckClientTurnId(cmd), { ok: false, reason: "duplicate" });
+			return;
+		}
 
 		switch (cmd.type) {
 			case "prompt": {
@@ -7046,6 +7079,7 @@ export class SquadManager extends EventEmitter {
 					await this.ensureConnected(rec);
 				} catch (err) {
 					await this.settleSpawnFailure(rec, err);
+					this.emitCommandAck(cmd.clientTurnId, { ok: false, reason: "spawn-failed" });
 					break;
 				}
 				this.log("info", `${actor.id} → ${rec.dto.name}: ${truncateLabel(cmd.message, 80)}`);
@@ -7086,7 +7120,13 @@ export class SquadManager extends EventEmitter {
 				rec.streaming = true;
 				this.transition(rec, "working", "task-start");
 				this.emitAgent(rec);
-				await this.promptConnected(rec, cmd.message).catch((err) => this.fail(rec, err));
+				try {
+					await this.promptConnected(rec, cmd.message);
+					this.emitCommandAck(cmd.clientTurnId, { ok: true });
+				} catch (err) {
+					this.fail(rec, err);
+					this.emitCommandAck(cmd.clientTurnId, { ok: false, reason: "spawn-failed" });
+				}
 				void this.recordAudit(actor, "prompt", cmd.id, "ok", truncateLabel(cmd.message, 80), commandSource(cmd));
 				break;
 			}
