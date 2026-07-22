@@ -727,6 +727,10 @@ export interface AuditEntry {
   detail?: string;
 }
 
+export type CommandAckDTO =
+  | { type: "command-ack"; clientTurnId: string; ok: true }
+  | { type: "command-ack"; clientTurnId: string; ok: false; reason: "missing-target" | "denied" | "duplicate" | "spawn-failed" };
+
 export type SquadEvent =
   | { type: "roster"; agents: AgentDTO[]; version: string }
   | { type: "agent"; agent: AgentDTO }
@@ -737,7 +741,8 @@ export type SquadEvent =
   | { type: "transcript"; id: string; entry: TranscriptEntry }
   | { type: "commands"; id: string; commands: CommandInfo[] }
   | { type: "log"; level: "info" | "warn" | "error"; text: string }
-  | { type: "transition"; entry: TransitionEntry };
+  | { type: "transition"; entry: TransitionEntry }
+  | CommandAckDTO;
 
 export type ClientCommand =
   | { type: "snapshot" }
