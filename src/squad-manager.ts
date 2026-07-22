@@ -5919,7 +5919,7 @@ export class SquadManager extends EventEmitter {
 		return this.createWithId(opts, opts.explicitId, actor);
 	}
 
-	private async recentlyLandedEntries(repo: string): Promise<RecentlyLandedEntry[]> {
+	private async recentlyLandedEntries(repo: string, includeAssessmentStore: boolean): Promise<RecentlyLandedEntry[]> {
 		const byAgent = new Map<string, RecentlyLandedEntry>();
 		for (const entry of this.transitionLog.recent(200).reverse()) {
 			if (entry.reason !== "landed") continue;
@@ -5936,6 +5936,7 @@ export class SquadManager extends EventEmitter {
 				at: entry.at,
 			});
 		}
+		if (!includeAssessmentStore) return [...byAgent.values()].sort((a, b) => b.at - a.at);
 		const assessed = await readRecentLandAttemptEvents(this.stateDir, repoIdentity(repo), 50).catch(() => []);
 		for (const event of assessed) {
 			const agentId = event.refs.agentRunRef;
@@ -5959,7 +5960,7 @@ export class SquadManager extends EventEmitter {
 	}
 
 	private async recentlyLandedPrompt(repo: string, requires?: readonly string[], since?: number): Promise<string | undefined> {
-		const lands = await this.recentlyLandedEntries(repo);
+		const lands = await this.recentlyLandedEntries(repo, (requires?.length ?? 0) > 0);
 		return buildRecentlyLandedBlock({ lands, requires, since });
 	}
 
