@@ -1,5 +1,8 @@
 # Buzz borrows — hive-mind patterns, natively
 
+> **Disposition 2026-07-22**: concerns 01/02/04/05 are superseded-into [plans/the-room](../the-room/00-overview.md) (as its concerns 04/06/03/10 respectively — reshaped by the-room's adversarial round). Concerns 03 (friction distillation), 06 (agent grants), 07 (orch health report) remain live here.
+
+
 Source: `plans/research-buzz/BRIEF.md`; design rationale in `DESIGN.md` (adversarial round reshaped 2 of 7 concepts).
 
 ## Outcome

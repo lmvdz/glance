@@ -9,18 +9,30 @@ work, test it against this page first.
 
 **Glance is oversight for an autonomous engineering fleet. You glance, and you know.**
 
-The product is three organs, deliberately separate:
-- **t3code's face AND shell** — its look, feel, **layout**, and interaction grammar. The app's
-  DEFAULT shell IS t3code's two-pane thread client: a projects→threads rail on the left, a
-  conversation + hub composer on the right. Threads-first, conversation-centric, composer as hub.
-  Not "inspired by", not "a reskin of an IDE": the t3 experience is the whole app.
-- **terax's body — the SUBSTRATE, not the chrome.** Terax gives us Tauri + a real editor/terminal/
-  PTY/filesystem. Those are capabilities we open ON DEMAND ("Open worktree" / take-over), NOT the
-  default frame. The file tree, editor tabs, and terminal must never be the home screen — that was
-  the 2026-07-18 miss (t3-face concerns 01–13 reskinned *within* terax's IDE frame; Lars: "doesn't
-  look or feel like t3code at all"). The fix (t3-shell phase) makes the thread client the root and
-  demotes the IDE to a mode.
-- **glance's brain** — the daemon: the fleet, the trust layer, landing, attention, comprehension.
+The product is two layers (amended 2026-07-22 — Lars's grand design, ratified at the-room design
+gate; full rationale in plans/the-room/DESIGN.md):
+
+- **Layer 1 is the room** — a buzz-shaped collaborative chat workspace: org-scoped channels where
+  humans and agents are peers, browser-delivered, multiplayer by default (DB mode; file mode is
+  the same room single-operator). It is the home screen. Users spin up and steer agents from the
+  composer and never have to leave it.
+- **Layer 2 is depth, entered from chat, never the home screen.** glance's depth: plan/workflow
+  DAG, design revision, fleet economics. t3code's depth: the programmer's view — active/waiting
+  agents, transcripts, diffs, steer. Every layer-2 *event* projects a card into the room; the
+  room's rail (channels + active work) is a legitimate standing entrance — cards are the
+  narrative way in, the rail is the standing way in.
+- **Layer 2 never happens silently.** Any action in a depth surface emits a card back into the
+  room. The room is the complete live projection of system state; history is durable in DB mode
+  (channel rows), best-effort in single-operator file mode.
+- **Cards are proofs, not agent self-reports** — gate verdicts, land assessments, done-proofs
+  from the trust layer; event-bearing cards are manager-authored only and unforgeable by
+  clients. This is the product's differentiation. The daemon brain is not rebuilt.
+- **t3code is repositioned, not deprecated**: its thread grammar and card craft are absorbed into
+  layer 1's rendering conventions; "t3code" names the programmer lens. The terax law generalizes:
+  every expert surface — plan editor, economics view, programmer view — is a mode in one shell,
+  opened on demand, never the default frame. **glance-desktop is superseded** (unused,
+  non-working); its visual work is harvested via plans/the-room/CRAFT-HARVEST.md; plans/hub-shell
+  is closed with a pointer to plans/the-room.
 
 ## The human contract (Lars, 2026-07-18, standing law)
 
@@ -35,13 +47,14 @@ defect in the system — build the loop that removes the verb, never route the m
 A "Needs you" lane with more than a couple of items, or anything aging past hours, is a bug
 report against the attention system (see plans/attention-autonomy), not a chore.
 
-## Sequencing law (2026-07-18)
+## Sequencing law (2026-07-18, foundation re-targeted 2026-07-22)
 
-The desktop foundation — t3code's look/feel/layout/ability, to a state Lars *loves* — comes
-**before** layering glance features onto it. Foundation concerns ship first; glance surfaces
-(dashboards, factory panels, comprehension views) integrate only after the foundation gate
-(plans/t3-face concern 13: Lars's own reaction) passes. "Deep in tools for the AI, minimal
-management surface for the human" governs both sides.
+Foundation-loved-first stands. The foundation is now **the room**: plans/the-room waves 0–3, gated
+by the love gate (plans/the-room/23-love-gate.md — Lars's reaction to the whole room experience:
+cold-boot first frame, rail, timeline, composer verbs, doors). No new-surface feature work beyond
+the-room's waves until that gate passes. **Room leads; the daily-driver program converges into
+it** (needs-you cards ride the push latch; `glance here` terminal threads appear in the room's
+rail) — ratified at the design gate, 2026-07-22.
 
 ## Decision tests (apply in order)
 
@@ -49,11 +62,17 @@ management surface for the human" governs both sides.
 2. Does it contradict the sequencing law (features before a loved foundation)? → defer it.
 3. Does it make the system more self-managing, more legible at a glance, or more trustworthy
    (proofs, gates, honest state)? → aligned.
-4. Is a priority being derived from a local artifact (matrix, backlog, coverage gap) without
+4. Would it live outside the two-layer shape (a standalone surface that neither projects cards
+   into the room nor opens from it)? → wrong shape; redesign.
+5. Is a priority being derived from a local artifact (matrix, backlog, coverage gap) without
    re-anchoring on this page? → stop and re-anchor.
 
 ## Provenance
 
 Written 2026-07-18 after Lars had to restate the direction four times in one day. Sources: his
 verbatim statements (t3-face charter 2026-07-17; foundation-first sequencing, "where are the
-threads", and the no-ops philosophy, all 2026-07-18). Change this file only with Lars's review.
+threads", and the no-ops philosophy, all 2026-07-18). Amended 2026-07-22 with the two-layer
+grand design (buzz workspace = layer 1; glance + t3code = layer 2), from his statements in the
+the-room design session and the three gate rulings recorded in plans/the-room/DESIGN.md (room
+leads daily-driver; rail is a standing entrance; DB-only multiplayer). Change this file only
+with Lars's review.

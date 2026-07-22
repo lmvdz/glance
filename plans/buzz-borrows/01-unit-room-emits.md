@@ -1,5 +1,5 @@
 # Unit-as-room: land/gate/merge verdicts appear in the unit transcript
-STATUS: open
+STATUS: cancelled
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -26,3 +26,6 @@ None. webapp change is the dto type mirror only — any PR under this concern to
 - Kill the agent process mid-land (PR #216 scenario): land-side entries still appear, none falsified to error by settle.
 - A unit named with fence-delimiter garbage renders neutralized in the summary line.
 - Existing transcript tests + `bun test` green (node_modules/.bin on PATH per test-path gotcha).
+
+## Resolution
+Superseded-into plans/the-room 2026-07-22 (see the-room 00-overview + DESIGN.md; this concern's reviewed content was carried/reshaped there).
