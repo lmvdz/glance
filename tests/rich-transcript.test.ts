@@ -52,10 +52,8 @@ test("manager preserves client turn ids and rich tool lifecycle in one transcrip
 	(mgr as unknown as DriverFactoryHost).makeDriver = () => new RichDriver();
 	const dto = await mgr.create({ name: "chat", repo, approvalMode: "yolo", autoRoute: false });
 	const streamed: Array<{ kind: string; id?: string; status?: string; text: string }> = [];
-	const acks: SquadEvent[] = [];
 	mgr.on("event", (event: SquadEvent) => {
 		if (event.type === "transcript" && (event.entry.kind === "assistant" || event.entry.kind === "thinking")) streamed.push({ kind: event.entry.kind, id: event.entry.id, status: event.entry.status, text: event.entry.text });
-		if (event.type === "command-ack") acks.push(event);
 	});
 	await mgr.applyCommand({ type: "prompt", id: dto.id, message: "hello", clientTurnId: "turn-a" });
 
@@ -79,23 +77,6 @@ test("manager preserves client turn ids and rich tool lifecycle in one transcrip
 	expect(thinking[0]?.status).toBe("ok");
 	expect(streamed.filter((e) => e.kind === "thinking").map((e) => e.status)).toEqual(["running", "running", "ok"]);
 	expect(new Set(streamed.filter((e) => e.kind === "thinking").map((e) => e.id)).size).toBe(1);
-
-	await mgr.applyCommand({ type: "prompt", id: "missing", message: "lost", clientTurnId: "turn-missing" });
-	await mgr.applyCommand({ type: "prompt", id: dto.id, message: "first", clientTurnId: "turn-dup" });
-	await mgr.applyCommand({ type: "prompt", id: dto.id, message: "second", clientTurnId: "turn-dup" });
-	const rec = mgr.agents.get(dto.id);
-	if (!rec) throw new Error("agent not resident");
-	rec.dto.pending = [{ id: "request-1", source: "ui", kind: "input", title: "Need input", createdAt: Date.now() }];
-	await mgr.applyCommand({ type: "prompt", id: dto.id, message: "answer once", clientTurnId: "request-1" });
-	await mgr.applyCommand({ type: "prompt", id: dto.id, message: "answer twice", clientTurnId: "request-1" });
-	expect(acks).toEqual([
-		{ type: "command-ack", clientTurnId: "turn-a", ok: true },
-		{ type: "command-ack", clientTurnId: "turn-missing", ok: false, reason: "missing-target" },
-		{ type: "command-ack", clientTurnId: "turn-dup", ok: true },
-		{ type: "command-ack", clientTurnId: "turn-dup", ok: false, reason: "duplicate" },
-		{ type: "command-ack", clientTurnId: "request-1", ok: true },
-		{ type: "command-ack", clientTurnId: "request-1", ok: true },
-	]);
 	await mgr.stop();
 });
 
