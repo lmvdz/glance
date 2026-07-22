@@ -41,6 +41,7 @@ import {
 	CapabilityInstallRunBodySchema,
 	CapabilitySourceBodySchema,
 	ChatAttachmentCreateBodySchema,
+	ChannelPostBodySchema,
 	CommentsCreateBodySchema,
 	ConsoleBodySchema,
 	ConsoleReleaseBodySchema,
@@ -3182,6 +3183,25 @@ export class SquadServer {
 			}, 300);
 			return Response.json({ ok: true, pull, git: after, restarting: true });
 		}
+		const channelEntryMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/entries$/);
+		if (channelEntryMatch && req.method === "GET") {
+			const channelId = decodeURIComponent(channelEntryMatch[1]!);
+			const sinceRaw = url.searchParams.get("since");
+			const since = sinceRaw === null ? 0 : Number(sinceRaw);
+			if (!Number.isFinite(since) || since < 0) return new Response("bad since", { status: 400 });
+			return Response.json({ entries: await manager.channelEntries(channelId, since) });
+		}
+		if (channelEntryMatch && req.method === "POST") {
+			const decoded = decodeBody(ChannelPostBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response(`bad channel post: ${decoded.failure.message}`, { status: 400 });
+			const channelId = decodeURIComponent(channelEntryMatch[1]!);
+			const entry = await manager.appendChannelPost(channelId, actor, decoded.success);
+			return Response.json({ entry });
+		}
+		if (url.pathname === "/api/channels" && req.method === "GET") {
+			return Response.json({ channels: await manager.listChannels() });
+		}
+
 		if (url.pathname === "/api/command" && req.method === "POST") {
 			let body: unknown;
 			try {
