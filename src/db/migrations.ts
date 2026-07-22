@@ -23,6 +23,8 @@ const APP_TABLES = [
 	"roster_index",
 	"features",
 	"audit",
+	"channels",
+	"channel_entries",
 	"usage",
 	"federation_peers",
 	"capability_records",
@@ -31,8 +33,8 @@ const APP_TABLES = [
 	"feedback_validation_responses",
 	"feedback_rewards",
 ] as const;
-const BASE_APP_TABLES = APP_TABLES.slice(0, 6);
-const FEEDBACK_TABLES = APP_TABLES.slice(6);
+const BASE_APP_TABLES = APP_TABLES.slice(0, 8);
+const FEEDBACK_TABLES = APP_TABLES.slice(8);
 
 const createAppTables: Migration = {
 	async up(db: Kysely<any>) {
@@ -82,6 +84,30 @@ const createAppTables: Migration = {
 			.addColumn("at", "bigint", (c) => c.notNull())
 			.execute();
 		await db.schema.createIndex("audit_org_at").on("audit").columns(["org_id", "at"]).execute();
+
+		await db.schema
+			.createTable("channels")
+			.addColumn("org_id", "text", (c) => c.notNull().references("organization.id").onDelete("cascade"))
+			.addColumn("id", "text", (c) => c.notNull())
+			.addColumn("name", "text", (c) => c.notNull())
+			.addColumn("kind", "text", (c) => c.notNull())
+			.addColumn("created_at", "bigint", (c) => c.notNull())
+			.addPrimaryKeyConstraint("channels_pk", ["org_id", "id"])
+			.execute();
+
+		await db.schema
+			.createTable("channel_entries")
+			.addColumn("org_id", "text", (c) => c.notNull().references("organization.id").onDelete("cascade"))
+			.addColumn("channel_id", "text", (c) => c.notNull())
+			.addColumn("id", "text", (c) => c.notNull())
+			.addColumn("seq", "bigint", (c) => c.notNull())
+			.addColumn("author_actor", "text", (c) => c.notNull())
+			.addColumn("reply_to_id", "text")
+			.addColumn("ts", "bigint", (c) => c.notNull())
+			.addColumn("data", "text", (c) => c.notNull())
+			.addPrimaryKeyConstraint("channel_entries_pk", ["org_id", "channel_id", "seq"])
+			.execute();
+		await db.schema.createIndex("channel_entries_org_channel_seq").on("channel_entries").columns(["org_id", "channel_id", "seq"]).execute();
 
 		await db.schema
 			.createTable("usage")

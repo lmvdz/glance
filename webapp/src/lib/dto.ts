@@ -632,6 +632,23 @@ export interface TranscriptEntry {
   pending?: TranscriptPending;
 }
 
+export interface Channel {
+  id: string;
+  name: string;
+  createdAt: number;
+  kind: "default" | "user";
+}
+
+export interface ChannelEntry extends TranscriptEntry {
+  id: string;
+  seq: number;
+  channelId: string;
+  authorActor: string;
+  replyToId?: string;
+  event?: { kind: string; payload: unknown };
+}
+
+
 export interface CommandInfo {
   name: string;
   description?: string;
@@ -737,7 +754,8 @@ export type SquadEvent =
   | { type: "transcript"; id: string; entry: TranscriptEntry }
   | { type: "commands"; id: string; commands: CommandInfo[] }
   | { type: "log"; level: "info" | "warn" | "error"; text: string }
-  | { type: "transition"; entry: TransitionEntry };
+  | { type: "transition"; entry: TransitionEntry }
+  | { type: "channel-entry"; channelId: string; entry: ChannelEntry };
 
 export type ClientCommand =
   | { type: "snapshot" }

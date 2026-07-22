@@ -13,6 +13,7 @@ import type { AgentAction, AutonomyMode, VerificationState } from "./autonomy.ts
 import type { TransitionReason } from "./agent-lifecycle.ts";
 import type { SubagentNode } from "./subagents.ts";
 import type { ModelLineage } from "./model-lineage.ts";
+import type { ChannelEntry } from "./channels.ts";
 import type { LensId } from "./lens-select.ts";
 import type { HarnessScorecard } from "./harness-scorecard.ts";
 import type { WorkLane, WorkLaneSource } from "./lane.ts";
@@ -1468,6 +1469,12 @@ export interface CommandInfo {
 
 // ── Manager → surface events ────────────────────────────────────────────────
 
+export interface ChannelEntryEvent {
+	type: "channel-entry";
+	channelId: string;
+	entry: ChannelEntry;
+}
+
 export type SquadEvent =
 	| { type: "roster"; agents: AgentDTO[]; version: string }
 	| { type: "agent"; agent: AgentDTO }
@@ -1480,7 +1487,8 @@ export type SquadEvent =
 	| { type: "comment-resolved"; id: string; resolvedAt: number }
 	| { type: "audit"; entry: AuditEntry }
 	| { type: "automation"; event: AutomationEvent }
-	| { type: "transition"; entry: TransitionEntry };
+	| { type: "transition"; entry: TransitionEntry }
+	| ChannelEntryEvent;
 
 /** The daemon's periodic background loops — the ones that run without an operator and were, until the
  *  automation log, invisible. Scout reads agent reasoning; Sentinel (plans/sentinel-drift-probe, v0
