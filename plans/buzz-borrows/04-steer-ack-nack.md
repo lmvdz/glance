@@ -1,5 +1,5 @@
 # Steer ack/nack — no silently dropped commands
-STATUS: open
+STATUS: cancelled
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -22,3 +22,6 @@ None.
 - WS client sends prompt to a nonexistent id → receives `command-ack {ok:false, reason:"missing-target"}` (test via scratch daemon or existing WS test harness).
 - Duplicate rapid submission with same clientTurnId → second gets `duplicate`.
 - Legitimate steer → ack after driver accepts; existing optimistic-turn reconciliation unbroken (Composer tests still green).
+
+## Resolution
+Superseded-into plans/the-room 2026-07-22 (see the-room 00-overview + DESIGN.md; this concern's reviewed content was carried/reshaped there).

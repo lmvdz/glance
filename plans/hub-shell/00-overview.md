@@ -1,5 +1,8 @@
 # hub-shell — t3code's two-pane thread client as the DEFAULT shell
 
+> **SUPERSEDED 2026-07-22 by [plans/the-room](../the-room/00-overview.md)** — thesis absorbed as HubShell-in-webapp (the-room concern 07); glance-desktop retired. All H-concerns cancelled with pointers.
+
+
 STATUS: open
 PRIORITY: p0
 REPOS: glance-desktop (primary); omp-squad daemon (H7 companion fields)

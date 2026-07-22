@@ -1,5 +1,5 @@
 # @mention-as-steer in the chat composer — spec-first, t3-face lane
-STATUS: open
+STATUS: cancelled
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: research
@@ -23,3 +23,6 @@ None.
 ## Verify
 - Spec reviewed and approved within the t3-face lane before any wiring PR.
 - After wiring: mention → target steered (transcript shows the prompt), ack renders; mention of removed unit → visible failure state, no silent drop; task-mention behavior unregressed (Composer tests).
+
+## Resolution
+Superseded-into plans/the-room 2026-07-22 (see the-room 00-overview + DESIGN.md; this concern's reviewed content was carried/reshaped there).

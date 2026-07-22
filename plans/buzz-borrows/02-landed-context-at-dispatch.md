@@ -1,5 +1,5 @@
 # Landed-context block at dispatch/steer — siblings learn results when they exist
-STATUS: open
+STATUS: cancelled
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -26,3 +26,6 @@ None. UI-invisible.
 - Land-assessment flag off — block still appears from the transitions fallback.
 - Unit named with fence-escape garbage appears neutralized.
 - Prompt-size check: block bounded (assert a cap in tests).
+
+## Resolution
+Superseded-into plans/the-room 2026-07-22 (see the-room 00-overview + DESIGN.md; this concern's reviewed content was carried/reshaped there).
