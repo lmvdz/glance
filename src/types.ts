@@ -1468,7 +1468,7 @@ export interface CommandInfo {
 
 // ── Manager → surface events ────────────────────────────────────────────────
 
-export type CommandAckReason = "missing-target" | "denied" | "duplicate" | "spawn-failed";
+type CommandAckReason = "missing-target" | "denied" | "duplicate" | "spawn-failed";
 
 export type SquadEvent =
 	| { type: "roster"; agents: AgentDTO[]; version: string }
