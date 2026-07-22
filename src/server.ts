@@ -16,7 +16,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { Server, ServerWebSocket } from "bun";
 import { Result } from "effect";
-import type { ArtifactCommentDTO, ClientCommand, CreateAgentOptions, FeatureCategory, FeatureCriterion, FeatureDecision, FeatureDTO, FeatureRelationship, FeatureStage, IssueRef, PlanAnnotationTarget, PlanRevisionCandidateState, SquadEvent } from "./types.ts";
+import type { ArtifactCommentDTO, ClientCommand, CreateAgentOptions, FeatureCategory, FeatureCriterion, FeatureDecision, FeatureDTO, FeatureRelationship, FeatureStage, IssueRef, PlanAnnotationTarget, PlanRevisionCandidateState, PresenceSnapshot, SquadEvent } from "./types.ts";
 import { ChatAttachmentDimensionError, ChatAttachmentQuotaExceededError } from "./chat-attachment.ts";
 import { envBool, envInt, rootFactoryEnabledWith } from "./config.ts";
 import { invalidFileAssignees, invalidOrgAssignees, isVoteAssignee } from "./feature-assignees.ts";
@@ -371,6 +371,10 @@ interface SocketData {
 	role: Role;
 	/** Org whose fleet this socket sees (DB-registry mode); undefined in file mode / no active org. */
 	orgId?: string;
+	/** Authenticated better-auth user stamped at WS upgrade in DB-registry mode. */
+	userId?: string;
+	/** Human display label stamped with `userId`; used for command attribution + presence. */
+	displayName?: string;
 	/** True iff this socket authenticated via the on-box loopback break-glass bearer token (no
 	 *  session) in DB-registry mode — the SAME identity `bootstrapAdmin` names on the HTTP path.
 	 *  Lets `resolveCommandManager` route a mutating command to the agent's actual owning manager
@@ -694,6 +698,8 @@ export class SquadServer {
 	private readonly clients = new Set<ServerWebSocket<SocketData>>();
 	/** DB-registry mode WS clients bucketed by org so events fan out per tenant (risk #3). */
 	private readonly clientsByOrg = new Map<string, Set<ServerWebSocket<SocketData>>>();
+	/** DB-registry human presence: orgId → userId → sockets + latest display label. Multiple tabs count as one present human. */
+	private readonly presenceByOrg = new Map<string, Map<string, { displayName: string; sockets: Set<ServerWebSocket<SocketData>> }>>();
 	private server?: Server<SocketData>;
 	private readonly opts: SquadServerOptions;
 	private sockSeq = 0;
@@ -806,9 +812,9 @@ export class SquadServer {
 	}
 
 	/** Bridge identity → RBAC tier: active-org role owner|admin ⇒ admin; member ⇒ operator;
-	 *  authed but with NO active org (or the lookup fails) ⇒ viewer (read-only, never operator).
+	 *  authed but with NO active org ⇒ viewer; active-org membership lookup failure ⇒ null (deny).
 	 *  Only called in DB mode. */
-	private async bridgeRole(req: Request, activeOrgId: string | null | undefined): Promise<Role> {
+	private async bridgeRole(req: Request, activeOrgId: string | null | undefined): Promise<Role | null> {
 		if (!this.auth || !activeOrgId) return "viewer";
 		try {
 			// Bind the role lookup to the SAME org id every caller uses for the resource it's about to
@@ -823,7 +829,7 @@ export class SquadServer {
 			const { role } = await this.auth.api.getActiveMemberRole({ headers: req.headers, query: { organizationId: activeOrgId } });
 			return role === "owner" || role === "admin" ? "admin" : "operator";
 		} catch {
-			return "viewer";
+			return null;
 		}
 	}
 
@@ -1160,7 +1166,24 @@ export class SquadServer {
 
 	/** Actor for an inbound WS command — the socket's tier plus, in DB-registry mode, its stamped org. */
 	private actorForSocket(ws: ServerWebSocket<SocketData>): Actor {
-		return this.registry ? { id: `web:${ws.data.role}`, origin: "local", role: ws.data.role, orgId: ws.data.orgId } : actorForRole(ws.data.role);
+		if (!this.registry) return { ...this.operator, role: ws.data.role };
+		if (ws.data.userId) {
+			return { id: `db:${ws.data.userId}`, displayName: ws.data.displayName, origin: "local", role: ws.data.role, orgId: ws.data.orgId };
+		}
+		return { ...actorForRole(ws.data.role), orgId: ws.data.orgId };
+	}
+
+	private presenceForOrg(orgId: string | undefined): PresenceSnapshot {
+		if (!this.registry) return { users: [{ id: this.operator.id, displayName: this.operator.displayName ?? this.operator.id, socketCount: this.clients.size }] };
+		if (!orgId) return { users: [] };
+		const users = [...(this.presenceByOrg.get(orgId) ?? new Map()).entries()]
+			.map(([id, presence]) => ({ id: `db:${id}`, displayName: presence.displayName, socketCount: presence.sockets.size }))
+			.sort((a, b) => a.displayName.localeCompare(b.displayName) || a.id.localeCompare(b.id));
+		return { orgId, users };
+	}
+
+	private emitPresence(orgId: string | undefined): void {
+		if (this.registry && orgId) this.broadcastTo(orgId, { type: "presence", presence: this.presenceForOrg(orgId) });
 	}
 
 	/** Register an opening socket in its bucket and return the fleet to seed its roster from. */
@@ -1176,6 +1199,21 @@ export class SquadServer {
 			this.clientsByOrg.set(key, bucket);
 		}
 		bucket.add(ws);
+		if (ws.data.userId && ws.data.orgId) {
+			let users = this.presenceByOrg.get(key);
+			if (!users) {
+				users = new Map();
+				this.presenceByOrg.set(key, users);
+			}
+			let presence = users.get(ws.data.userId);
+			if (!presence) {
+				presence = { displayName: ws.data.displayName ?? ws.data.userId, sockets: new Set() };
+				users.set(ws.data.userId, presence);
+			}
+			presence.displayName = ws.data.displayName ?? presence.displayName;
+			presence.sockets.add(ws);
+			this.emitPresence(ws.data.orgId);
+		}
 		// Root-org sockets bucket under their org key (so root-manager events fan out to them) but seed
 		// their roster from the root factory, not a lazy tenant manager.
 		return this.fleetForOrg(ws.data.orgId);
@@ -1192,6 +1230,14 @@ export class SquadServer {
 		if (bucket) {
 			bucket.delete(ws);
 			if (bucket.size === 0) this.clientsByOrg.delete(key);
+		}
+		if (ws.data.userId && ws.data.orgId) {
+			const users = this.presenceByOrg.get(key);
+			const presence = users?.get(ws.data.userId);
+			presence?.sockets.delete(ws);
+			if (presence?.sockets.size === 0) users?.delete(ws.data.userId);
+			if (users?.size === 0) this.presenceByOrg.delete(key);
+			this.emitPresence(ws.data.orgId);
 		}
 	}
 
@@ -1349,6 +1395,8 @@ export class SquadServer {
 			if (this.dbMode && !this.originAllowed(req)) return new Response("forbidden origin", { status: 403 });
 			let role: Role | null;
 			let orgId: string | undefined;
+			let userId: string | undefined;
+			let displayName: string | undefined;
 			let bootstrapAdmin = false;
 			if (this.auth) {
 				// DB mode: loopback admin token bootstraps; otherwise the session cookie rides the upgrade headers.
@@ -1364,6 +1412,8 @@ export class SquadServer {
 					if (session) {
 						role = await this.bridgeRole(req, session.session.activeOrganizationId);
 						orgId = session.session.activeOrganizationId ?? undefined;
+						userId = session.user.id;
+						displayName = session.user.name;
 					} else {
 						role = null;
 					}
@@ -1373,8 +1423,8 @@ export class SquadServer {
 			}
 			if (role === null) return new Response("unauthorized", { status: 401 });
 			const upgraded = this.auth
-				? server.upgrade(req, { data: { id: ++this.sockSeq, role, orgId, bootstrapAdmin } })
-				: server.upgrade(req, { data: { id: ++this.sockSeq, role, orgId, bootstrapAdmin }, headers: { "Sec-WebSocket-Protocol": "ompsq-token" } });
+				? server.upgrade(req, { data: { id: ++this.sockSeq, role, orgId, userId, displayName, bootstrapAdmin } })
+				: server.upgrade(req, { data: { id: ++this.sockSeq, role, orgId, userId, displayName, bootstrapAdmin }, headers: { "Sec-WebSocket-Protocol": "ompsq-token" } });
 			if (upgraded) return undefined;
 			return new Response("websocket upgrade failed", { status: 426 });
 		}
@@ -1471,7 +1521,9 @@ export class SquadServer {
 			} else {
 				session = await this.auth.api.getSession({ headers: req.headers });
 				if (session === null) return new Response("unauthorized", { status: 401 });
-				role = await this.bridgeRole(req, session.session.activeOrganizationId);
+				const bridged = await this.bridgeRole(req, session.session.activeOrganizationId);
+				if (bridged === null) return new Response("unauthorized", { status: 401 });
+				role = bridged;
 			}
 		} else {
 			const resolved = resolveRole(req, this.authPolicy);
@@ -1758,6 +1810,7 @@ export class SquadServer {
 				: bootstrapAdmin
 					? { ...actorForRole(role), orgId }
 					: actorForRole(role);
+		if (url.pathname === "/api/room/presence" && req.method === "GET") return Response.json(this.presenceForOrg(orgId));
 		const manager = await this.managerFor(actor);
 		// Voice token mint + capability probe (webapp-voice-lane/05, DESIGN.md "Token mint" row).
 		// Deliberately placed BEFORE the `!manager` gate below: minting is independent of any specific

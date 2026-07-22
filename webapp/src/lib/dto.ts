@@ -727,6 +727,17 @@ export interface AuditEntry {
   detail?: string;
 }
 
+export interface PresenceUser {
+  id: string;
+  displayName: string;
+  socketCount: number;
+}
+
+export interface PresenceSnapshot {
+  orgId?: string;
+  users: PresenceUser[];
+}
+
 export type SquadEvent =
   | { type: "roster"; agents: AgentDTO[]; version: string }
   | { type: "agent"; agent: AgentDTO }
@@ -737,7 +748,8 @@ export type SquadEvent =
   | { type: "transcript"; id: string; entry: TranscriptEntry }
   | { type: "commands"; id: string; commands: CommandInfo[] }
   | { type: "log"; level: "info" | "warn" | "error"; text: string }
-  | { type: "transition"; entry: TransitionEntry };
+  | { type: "transition"; entry: TransitionEntry }
+  | { type: "presence"; presence: PresenceSnapshot };
 
 export type ClientCommand =
   | { type: "snapshot" }
