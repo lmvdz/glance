@@ -60,6 +60,8 @@ interface Entry {
 	manager: SquadManager;
 	listener: (e: SquadEvent) => void;
 	lastUsed: number;
+	/** Set while eviction is flushing this manager; get() must wait and return a successor, never this closing instance. */
+	closing?: Promise<void>;
 }
 
 export class ManagerRegistry {
@@ -104,19 +106,25 @@ export class ManagerRegistry {
 
 	/** Lazily create (+start +attach listener) or return the manager for `orgId`. Idempotent under concurrency. */
 	async get(orgId: string): Promise<SquadManager> {
-		const existing = this.managers.get(orgId);
-		if (existing) {
-			existing.lastUsed = Date.now();
-			return existing.manager;
-		}
-		const inFlight = this.creating.get(orgId);
-		if (inFlight) return inFlight;
-		const create = this.create(orgId);
-		this.creating.set(orgId, create);
-		try {
-			return await create;
-		} finally {
-			this.creating.delete(orgId);
+		for (;;) {
+			const existing = this.managers.get(orgId);
+			if (existing) {
+				if (existing.closing) {
+					await existing.closing;
+					continue;
+				}
+				existing.lastUsed = Date.now();
+				return existing.manager;
+			}
+			const inFlight = this.creating.get(orgId);
+			if (inFlight) return inFlight;
+			const create = this.create(orgId);
+			this.creating.set(orgId, create);
+			try {
+				return await create;
+			} finally {
+				this.creating.delete(orgId);
+			}
 		}
 	}
 
@@ -151,14 +159,17 @@ export class ManagerRegistry {
 	async evictIdle(now: number): Promise<number> {
 		let n = 0;
 		for (const [orgId, entry] of [...this.managers]) {
-			if (now - entry.lastUsed <= this.idleMs) continue;
+			if (entry.closing || now - entry.lastUsed <= this.idleMs) continue;
 			// Never evict a manager with an in-flight agent (working/starting/input) — only fully-quiet fleets.
 			const busy = entry.manager.list().some((a) => a.status === "working" || a.status === "starting" || a.status === "input");
 			if (busy) continue;
 			entry.manager.off("event", entry.listener);
-			await entry.manager.stop(); // detaches (does not kill) hosts + persists; a later get() re-adopts
-			this.managers.delete(orgId);
-			n++;
+			entry.closing = entry.manager.stop(); // detaches (does not kill) hosts + persists; a later get() re-adopts
+			await entry.closing;
+			if (this.managers.get(orgId) === entry) {
+				this.managers.delete(orgId);
+				n++;
+			}
 		}
 		return n;
 	}

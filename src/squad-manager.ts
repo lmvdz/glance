@@ -11225,6 +11225,7 @@ export class SquadManager extends EventEmitter {
 		// (a deferred run that has since been adopted is now in the live roster).
 		const liveIds = new Set(live.map((a) => a.id));
 		const agents = this.deferred.length ? [...live, ...this.deferred.filter((d) => !liveIds.has(d.id))] : live;
+		this.attentionStore.pruneUnits(new Set(agents.map((a) => a.id)));
 		const transcripts: Record<string, TranscriptEntry[]> = {};
 		for (const r of this.agents.values()) if (r.transcript.length) transcripts[r.dto.id] = r.transcript;
 		const features = [...this.featureStore.values()];
