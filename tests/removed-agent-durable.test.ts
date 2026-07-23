@@ -78,6 +78,11 @@ interface DriverFactoryHost {
 	makeDriver: (p: PersistedAgent) => AgentDriver;
 }
 
+function useNoopDriver(mgr: SquadManager): void {
+	const host = mgr as unknown as DriverFactoryHost;
+	host.makeDriver = () => new NoopDriver();
+}
+
 function terminalWorkflowRecord(id: string, repo: string, worktree: string): PersistedAgent {
 	return {
 		id,
@@ -187,6 +192,7 @@ test("rm by NAME on a live, resident agent resolves to the real id, stops it, an
 	tmps.push(stateDir, worktreeBase);
 
 	const mgr = new SquadManager({ stateDir, worktreeBase });
+	useNoopDriver(mgr);
 	await mgr.start();
 	const dto = await mgr.create({ name: "chat", repo, approvalMode: "yolo" });
 	expect(dto.id).not.toBe(dto.name); // sanity: newAgentId always suffixes, id and name diverge
@@ -214,6 +220,7 @@ test("rm by a name that matches MULTIPLE live agents refuses to guess — tombst
 	tmps.push(stateDir, worktreeBase);
 
 	const mgr = new SquadManager({ stateDir, worktreeBase });
+	useNoopDriver(mgr);
 	await mgr.start();
 	const a = await mgr.create({ name: "dup", repo, approvalMode: "yolo" });
 	const b = await mgr.create({ name: "dup", repo, approvalMode: "yolo" });
@@ -237,6 +244,7 @@ test("rm on a live, resident agent still removes it from the roster (no regressi
 	tmps.push(stateDir, worktreeBase);
 
 	const mgr = new SquadManager({ stateDir, worktreeBase });
+	useNoopDriver(mgr);
 	await mgr.start();
 	const dto = await mgr.create({ name: "chat", repo, approvalMode: "yolo" });
 	await mgr.applyCommand({ type: "remove", id: dto.id, deleteWorktree: false });
@@ -252,6 +260,7 @@ test("a fresh dispatch for the SAME issue after an rm gets a new, non-determinis
 	tmps.push(stateDir, worktreeBase);
 
 	const mgr = new SquadManager({ stateDir, worktreeBase });
+	useNoopDriver(mgr);
 	await mgr.start();
 	const first = await mgr.create({ name: "worker", repo, approvalMode: "yolo" });
 	await mgr.applyCommand({ type: "remove", id: first.id, deleteWorktree: false });

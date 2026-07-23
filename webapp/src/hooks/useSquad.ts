@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AgentDTO, ArtifactCommentDTO, CapabilitySnapshotDTO, ClientCommand, CommandInfo, FeatureDTO, ProjectDTO, PublicCapabilityCatalogDTO, SquadEvent, TranscriptEntry } from "../lib/dto";
+import type { AgentDTO, ArtifactCommentDTO, CapabilitySnapshotDTO, ClientCommand, CommandAckDTO, CommandInfo, FeatureDTO, ProjectDTO, PublicCapabilityCatalogDTO, SquadEvent, TranscriptEntry } from "../lib/dto";
 import { apiJson } from "../lib/api";
 import { connectSquad, type SquadSocket } from "../lib/ws";
 
@@ -51,6 +51,7 @@ export interface SquadState {
   transcripts: Map<string, TranscriptEntry[]>;
   commands: Map<string, CommandInfo[]>;
   commentEvents: ArtifactCommentDTO[];
+  commandAcks: CommandAckDTO[];
   resolvedCommentEvents: Map<string, number>;
   connected: boolean;
   reload: () => Promise<void>;
@@ -111,6 +112,7 @@ export function useSquad(): SquadState {
   const [capabilities, setCapabilities] = useState<CapabilitySnapshotDTO>(EMPTY_CAPABILITIES);
   const [commentEvents, setCommentEvents] = useState<ArtifactCommentDTO[]>([]);
   const [resolvedCommentEvents, setResolvedCommentEvents] = useState<Map<string, number>>(() => new Map());
+  const [commandAcks, setCommandAcks] = useState<CommandAckDTO[]>([]);
   const [connected, setConnected] = useState(false);
   const socketRef = useRef<SquadSocket | null>(null);
   const subscribedRef = useRef<Set<string>>(new Set());
@@ -195,6 +197,9 @@ export function useSquad(): SquadState {
               return next;
             });
             break;
+          case "command-ack":
+            setCommandAcks((previous) => [...previous.slice(-199), event]);
+            break;
           default:
             break;
         }
@@ -216,5 +221,5 @@ export function useSquad(): SquadState {
     subscribedRef.current.delete(id);
   }, []);
 
-  return { agents: [...agents.values()], features, projects, capabilities, publicCatalog, transcripts, commands, commentEvents, resolvedCommentEvents, connected, reload, send, subscribe, unsubscribe };
+  return { agents: [...agents.values()], features, projects, capabilities, publicCatalog, transcripts, commands, commentEvents, resolvedCommentEvents, commandAcks, connected, reload, send, subscribe, unsubscribe };
 }

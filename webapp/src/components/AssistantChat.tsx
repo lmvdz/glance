@@ -421,7 +421,7 @@ export const ChatMessagesViewport = ({
 };
 
 export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
-  const { agents, features, audit, tasks, selectedTaskId, currentProject, transcripts, sendConsoleCommand, subscribeConsole, openedConsoleAgentId, openConsole, showToast } = useTaskContext();
+  const { agents, features, audit, tasks, selectedTaskId, currentProject, transcripts, commandAcks, sendConsoleCommand, subscribeConsole, openedConsoleAgentId, openConsole, showToast } = useTaskContext();
   // Feature 2 D1/D2: whichever view the operator is actually looking at right now — published by
   // that view's <PageContextScope> (see App.tsx/WorkspaceCockpit.tsx/OmpGraphPanel.tsx). Replaces
   // the old selectedTask-only assembly below with the live page, not just a maybe-selected task.
@@ -519,6 +519,22 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
       return next;
     });
   }, [transcriptEntries]);
+
+  useEffect(() => {
+    if (!commandAcks.length || !activeSessionId) return;
+    const pendingTurnIds = new Set(pendingSends.map((entry) => entry.clientTurnId).filter((id): id is string => !!id));
+    for (const ack of commandAcks) {
+      if (!pendingTurnIds.has(ack.clientTurnId)) continue;
+      const timeout = pendingSendTimeouts.current.get(ack.clientTurnId);
+      clearTimeout(timeout);
+      pendingSendTimeouts.current.delete(ack.clientTurnId);
+      setPendingSends((prev) => prev.filter((entry) => entry.clientTurnId !== ack.clientTurnId));
+      if (!ack.ok) {
+        updateSessionMessages(activeSessionId, (prev) => prev.map((m) => (m.clientTurnId === ack.clientTurnId ? { ...m, undelivered: true } : m)));
+        showToast(`Command not delivered: ${ack.reason}`, 'error');
+      }
+    }
+  }, [activeSessionId, commandAcks, pendingSends, showToast]);
 
   useEffect(() => () => {
     for (const timeout of pendingSendTimeouts.current.values()) clearTimeout(timeout);

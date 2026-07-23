@@ -130,12 +130,12 @@ export function answerCommand(agentId: string, requestId: string, value: string)
 
 /**
  * Redirect a live, working agent mid-flight (Epic 5 steering lane, DESIGN.md D3) — a FRESH steering
- * turn, not an answer to a pending request. Deliberately carries no `clientTurnId`: unlike
- * `answerCommand`, there's no pending request this resolves, just a new user turn injected into the
- * agent's ongoing work.
+ * turn, not an answer to a pending request. It deliberately mints a fresh `clientTurnId` so the
+ * daemon can ack/nack the injected turn; `answerCommand` is the special case that reuses a pending
+ * request id because it resolves an existing gate.
  */
 export function steerCommand(agentId: string, message: string): ClientCommand {
-  return { type: 'prompt', id: agentId, message };
+  return { type: 'prompt', id: agentId, message, clientTurnId: `steer:${Date.now()}:${Math.random().toString(36).slice(2)}` };
 }
 
 /** Known model shorthand names — matches what the daemon's set-model handler accepts. */

@@ -32,6 +32,8 @@ export const GIT_HARDEN_ENV: Record<string, string> = {
 	PAGER: "cat",
 };
 
+const GIT_BIN = Bun.which("git", { PATH: process.env.PATH ?? "" }) ?? "git";
+
 export function gitNoSignEnv(base: Record<string, string | undefined> = process.env): Record<string, string> {
 	const raw = base.GIT_CONFIG_COUNT;
 	const start = raw && /^\d+$/.test(raw) ? Number(raw) : 0;
@@ -59,7 +61,7 @@ export interface HardenedGitResult {
 // never accidentally re-enable a prompt/pager, and callers cannot shadow the hardening keys.
 // `opts.stdin` feeds the child's stdin and closes it (e.g. `hash-object --stdin-paths`).
 export async function hardenedGit(args: string[], opts?: { cwd?: string; env?: Record<string, string>; stdin?: string }): Promise<HardenedGitResult> {
-	const proc = Bun.spawn(["git", ...GIT_HARDEN_ARGS, ...args], {
+	const proc = Bun.spawn([GIT_BIN, ...GIT_HARDEN_ARGS, ...args], {
 		cwd: opts?.cwd,
 		env: { ...process.env, ...opts?.env, ...GIT_HARDEN_ENV },
 		stdin: opts?.stdin !== undefined ? new TextEncoder().encode(opts.stdin) : undefined,
@@ -75,7 +77,7 @@ export async function hardenedGit(args: string[], opts?: { cwd?: string; env?: R
 }
 
 export function hardenedGitSync(args: string[], opts?: { cwd?: string }): HardenedGitResult {
-	const r = Bun.spawnSync(["git", ...GIT_HARDEN_ARGS, ...args], {
+	const r = Bun.spawnSync([GIT_BIN, ...GIT_HARDEN_ARGS, ...args], {
 		cwd: opts?.cwd,
 		env: { ...process.env, ...GIT_HARDEN_ENV },
 		stdout: "pipe",
