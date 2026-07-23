@@ -210,6 +210,12 @@ import { harnessScorecardEnabled, scoreHarness } from "./harness-scorecard.ts";
 import { isArmed } from "./convergence-oracle.ts";
 import { lensAdvisoryBucket, scoreConfidence } from "./confidence.ts";
 import { redact } from "./redact.ts";
+import {
+	TRANSCRIPT_EVENT_GATE_VERDICT,
+	TRANSCRIPT_EVENT_LAND_ASSESSMENT,
+	TRANSCRIPT_EVENT_LAND_ATTEMPT,
+	TRANSCRIPT_EVENT_LAND_MERGE,
+} from "./transcript-event-kinds.ts";
 import { truncateLabel } from "./text-util.ts";
 import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
 import { ChannelStore, DEFAULT_CHANNEL_ID, type ChannelEntry, type ClientChannelPost } from "./channels.ts";
@@ -3566,6 +3572,7 @@ export class SquadManager extends EventEmitter {
 						provenAt: Date.now(),
 					});
 				}
+				this.emitUnitTranscriptEvent(w.agentId, TRANSCRIPT_EVENT_LAND_MERGE, `land merge finalized · ${this.safeEventLabel(w.branch ?? "changes")} · ${res.mode ?? "local"}`, { stage: "finalized", repo: pf.repo, branch: w.branch, agentId: w.agentId, featureId: id, issueId: rec?.dto.issue?.id, issueIdentifier: rec?.dto.issue?.identifier, mode: res.mode ?? "local", prUrl: res.prUrl, prNumber: res.prNumber, prState: res.prState, detail: res.detail });
 				void this.closeLandedIssue(rec?.dto.issue, { branch: w.branch, repo: pf.repo }); // real merge ⇒ close its tracking issue (idempotent)
 			}
 		}
@@ -3585,14 +3592,17 @@ export class SquadManager extends EventEmitter {
 	async land(id: string, message?: string, opts: { auto?: boolean; force?: boolean; actor?: Actor; reason?: string; validatorOverride?: { reasonClass: string } } = {}): Promise<LandResult> {
 		const rec = this.agents.get(id);
 		const attemptId = rec ? await this.beginLandAssessmentSafe(rec.dto.repo, rec.dto.branch) : undefined;
+		if (rec) this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_LAND_ATTEMPT, `land attempt started · ${this.safeEventLabel(rec.dto.name)} · ${this.safeEventLabel(rec.dto.branch ?? "changes")}`, { stage: "started", attemptId, repo: rec.dto.repo, branch: rec.dto.branch, agentId: rec.dto.id });
 		let result: LandResult;
 		try {
 			result = await this.landInner(id, message, opts);
 		} catch (err) {
+			if (rec) this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_LAND_ATTEMPT, `land attempt threw · ${this.safeEventLabel(rec.dto.name)} · ${this.safeEventLabel(errText(err))}`, { stage: "threw", attemptId, repo: rec.dto.repo, branch: rec.dto.branch, agentId: rec.dto.id, error: errText(err) });
 			if (rec) void this.landAssessment?.recordRejection(attemptId, rec.dto.repo, "land-threw", errText(err));
 			throw err; // preserve behavior exactly: a throw from landInner still propagates unchanged
 		}
 		if (rec) this.recordLandAssessmentTerminal(attemptId, rec.dto, result);
+		if (rec) this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_LAND_ATTEMPT, `land attempt finished · ${this.safeEventLabel(rec.dto.name)} · ${result.ok ? "ok" : "blocked"}${result.merged ? " · merged" : ""}`, { stage: "finished", attemptId, repo: rec.dto.repo, branch: rec.dto.branch, agentId: rec.dto.id, ok: result.ok, merged: result.merged, staged: result.staged, retryable: result.retryable, message: result.message, detail: result.detail });
 		return result;
 	}
 
@@ -3619,6 +3629,7 @@ export class SquadManager extends EventEmitter {
 	private recordLandAssessmentTerminal(attemptId: string | undefined, dto: AgentDTO, result: LandResult): void {
 		if (!attemptId || !this.landAssessment) return;
 		if (result.ok && result.merged) {
+			this.emitUnitTranscriptEvent(dto.id, TRANSCRIPT_EVENT_LAND_ASSESSMENT, `land assessment · landed · ${this.safeEventLabel(dto.name)} · ${this.safeEventLabel(dto.branch ?? "changes")}`, { stage: "landed", attemptId, repo: dto.repo, branch: dto.branch, agentId: dto.id });
 			void this.landAssessment.recordLanded(attemptId, dto.repo);
 			return;
 		}
@@ -3632,6 +3643,7 @@ export class SquadManager extends EventEmitter {
 					: /land blocked/.test(result.message)
 						? "proof-or-gate"
 						: "land-rejected";
+		this.emitUnitTranscriptEvent(dto.id, TRANSCRIPT_EVENT_LAND_ASSESSMENT, `land assessment · rejected · ${this.safeEventLabel(dto.name)} · ${code}`, { stage: "rejected", attemptId, repo: dto.repo, branch: dto.branch, agentId: dto.id, code, detail: result.detail ?? result.message });
 		void this.landAssessment.recordRejection(attemptId, dto.repo, code, result.detail ?? result.message);
 	}
 
@@ -3973,6 +3985,7 @@ export class SquadManager extends EventEmitter {
 						provenAt: Date.now(),
 					});
 				}
+				this.emitUnitTranscriptEvent(id, TRANSCRIPT_EVENT_LAND_MERGE, `land merge finalized · ${this.safeEventLabel(dto.branch ?? "changes")} · ${result.mode ?? "local"}`, { stage: "finalized", repo: dto.repo, branch: dto.branch, agentId: id, featureId: dto.featureId, issueId: dto.issue?.id, issueIdentifier: dto.issue?.identifier, mode: result.mode ?? "local", prUrl: result.prUrl, prNumber: result.prNumber, prState: result.prState, detail: result.detail ?? result.message });
 				await this.closeLandedIssue(dto.issue, { branch: dto.branch, repo: dto.repo }); // real merge ⇒ close its tracking issue (idempotent, best-effort)
 			} else this.log("info", `not closing ${dto.issue?.identifier ?? dto.issue?.id ?? id}: land made no merge`);
 		}
@@ -4434,6 +4447,7 @@ export class SquadManager extends EventEmitter {
 		if (rec) {
 			rec.dto.validation = record;
 			this.emitAgent(rec);
+			this.emitValidationVerdictEvent(rec, record);
 		}
 		// Shadow catch-log (plans/perspective-diversified-review/ concern 06): make the advisory panel's
 		// output MEASURABLE — the dataset that answers "does a focused out-of-criteria lens catch what the
@@ -10815,7 +10829,6 @@ export class SquadManager extends EventEmitter {
 		return entry;
 	}
 
-
 	async listChannels() {
 		return this.channelStore.listChannels();
 	}
@@ -10828,6 +10841,42 @@ export class SquadManager extends EventEmitter {
 		const entry = await this.channelStore.appendClient(channelId, actor, input);
 		this.emit("event", { type: "channel-entry", channelId, entry } satisfies SquadEvent);
 		return entry;
+	}
+
+	private safeEventLabel(value: unknown): string {
+		const flat = redact(String(value ?? ""))
+			.replace(/={5,}/g, (run) => "═".repeat(run.length))
+			.replace(/[\u0000-\u001f\u007f]+/g, " ")
+			.trim();
+		return flat.length > 80 ? `${flat.slice(0, 80)}…` : flat || "unknown";
+	}
+
+	private eventText(text: string): string {
+		return text.length > 200 ? `${text.slice(0, 199)}…` : text;
+	}
+
+	private emitUnitTranscriptEvent(id: string | undefined, kind: string, text: string, payload: unknown): void {
+		if (!id) return;
+		const rec = this.agents.get(id);
+		if (!rec || !Array.isArray(rec.transcript)) return;
+		this.append(rec, "system", this.eventText(text), { status: "ok", format: "stage", event: { kind, payload } });
+	}
+
+	private emitValidationVerdictEvent(rec: AgentRecord, record: ValidationRecord): void {
+		this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_GATE_VERDICT, `gate verdict · ${record.verdict} · agreement ${record.agreement.toFixed(2)} · confidence ${record.confidence.toFixed(2)}`, {
+			verdict: record.verdict,
+			agreement: record.agreement,
+			confidence: record.confidence,
+			rationale: record.rationale,
+			model: record.model,
+			authorLineage: record.authorLineage,
+			reviewerLineage: record.reviewerLineage,
+			sameLineage: record.sameLineage,
+			lensAdvisory: record.lensAdvisory,
+			lensVerify: record.lensVerify,
+			gateLogPaths: record.gateLogPaths,
+			ranAt: record.ranAt,
+		});
 	}
 
 	private emitAgent(rec: AgentRecord): void {

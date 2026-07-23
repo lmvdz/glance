@@ -184,6 +184,18 @@ export interface TranscriptPending {
 
 export type TranscriptFormat = "markdown" | "command" | "stage" | "plain";
 
+export interface TranscriptEvent {
+	/**
+	 * Open event taxonomy for manager-authored proof facts.
+	 * HAZARD: this is NOT `TranscriptEntry.kind`; entry.kind is the closed render/source axis
+	 * ("user" | "assistant" | "thinking" | "tool" | "system"), while event.kind is an open,
+	 * feature-owned fact taxonomy ("gate-verdict", "land-attempt", ...).
+	 */
+	kind: string;
+	payload: unknown;
+}
+
+
 export interface TranscriptEntry {
 	/** Stable append id. Older persisted transcripts may not have one. */
 	id?: string;
@@ -205,6 +217,12 @@ export interface TranscriptEntry {
 	tool?: TranscriptTool;
 	format?: TranscriptFormat;
 	pending?: TranscriptPending;
+	/**
+	 * Optional typed proof event attached to this transcript line.
+	 * HAZARD: `TranscriptEntry.kind` and `event.kind` are different axes: entry.kind stays
+	 * the closed transcript/source axis; event.kind is an open manager-authored fact taxonomy.
+	 */
+	event?: TranscriptEvent;
 }
 
 /** A work item (e.g. a Plane issue) an agent is advancing. */

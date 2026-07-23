@@ -608,6 +608,17 @@ export interface TranscriptTool {
 
 export type TranscriptFormat = "markdown" | "command" | "stage" | "plain";
 
+export interface TranscriptEvent {
+  /**
+   * Open event taxonomy for manager-authored proof facts.
+   * HAZARD: this is NOT `TranscriptEntry.kind`; entry.kind is the closed render/source axis,
+   * while event.kind is an open, feature-owned fact taxonomy.
+   */
+  kind: string;
+  payload: unknown;
+}
+
+
 export interface TranscriptPending {
   requestId: string;
   action: "created" | "answered" | "cancelled";
@@ -630,6 +641,11 @@ export interface TranscriptEntry {
   tool?: TranscriptTool;
   format?: TranscriptFormat;
   pending?: TranscriptPending;
+  /**
+   * Optional typed proof event. HAZARD: `TranscriptEntry.kind` and `event.kind` are
+   * different axes: closed transcript/source axis vs open manager-authored fact taxonomy.
+   */
+  event?: TranscriptEvent;
 }
 
 export interface Channel {
