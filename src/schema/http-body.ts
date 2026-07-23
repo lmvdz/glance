@@ -405,6 +405,14 @@ export const SpawnBodySchema = Schema.Struct({
 	lane: Schema.optional(Schema.Unknown),
 });
 
+
+/** POST /api/channels/:id/entries — client-authored human messages are text-only.
+ * `Schema.Struct` strips forged `event` before the channel append chokepoint. */
+export const ChannelPostBodySchema = Schema.Struct({
+	text: Schema.String,
+	replyToId: Schema.optional(Schema.String),
+});
+
 /** POST /api/agents/adopt (fleet-ide-escalation E03) — adopt an ad-hoc B03 harness session into a
  *  unit; the three fields identify the live presence row + its cwd (all validated server-side). */
 export const AdoptBodySchema = Schema.Struct({

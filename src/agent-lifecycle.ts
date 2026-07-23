@@ -20,6 +20,9 @@ export type DerivedReason = "turn-progress" | "pending-add" | "pending-answer" |
 export type ExplicitReason =
 	| "spawn" | "connect-begin" | "connect-ok" | "restart" | "kill" | "abort"
 	| "exit-clean" | "exit-error" | "fail" | "catastrophe" | "task-start" | "branch-start" | "reattach" | "adopted"
+	// Same-state, event-class marker: a branch actually landed. Carries branch/sha/produces in cause
+	// for dispatch-time "Recently landed" context after the producer is already stopped.
+	| "landed"
 	// Review finding 10: a same-state marker recorded once by fork() right after createInternal, carrying
 	// `cause.priorId` = the source run's id — same idiom as "adopted" (closeOrphanedPending) — so
 	// followLineage's crash-spanning timeline stitch also covers fork→source lineage, which fork's own

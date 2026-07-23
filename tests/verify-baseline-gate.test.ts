@@ -5,6 +5,9 @@
  * itself couldn't be trusted (fail-closed).
  */
 
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import type { BaselineResult } from "../src/workflow/verify-baseline.ts";
 import { SingleAgentExecutor } from "../src/workflow/executor.ts";
@@ -26,15 +29,31 @@ const ctx = (): RunContext => ({ goal: "g", vars: {} });
 function exec(opts: {
 	execCommand: (script: string, cwd: string) => Promise<{ code: number; stdout: string; stderr: string }>;
 	resolveBaselineFailures?: (script: string) => Promise<BaselineResult | null>;
+	listChangedFilesSinceBase?: (baseRef: string) => Promise<string[]>;
+	hasRecordedFlakeForFile?: (file: string) => boolean;
+	isolationTimeoutMs?: number;
+	log?: (message: string) => void;
+	cwd?: string;
 }): SingleAgentExecutor {
 	return new SingleAgentExecutor({
-		cwd: ".",
+		cwd: opts.cwd ?? ".",
 		acquireAgent: () => Promise.reject(new Error("not used")),
 		emit: () => {},
 		gate: () => Promise.resolve(""),
 		execCommand: opts.execCommand,
 		resolveBaselineFailures: opts.resolveBaselineFailures,
+		listChangedFilesSinceBase: opts.listChangedFilesSinceBase,
+		hasRecordedFlakeForFile: opts.hasRecordedFlakeForFile,
+		isolationTimeoutMs: opts.isolationTimeoutMs,
+		log: opts.log,
 	});
+}
+
+async function git(cwd: string, ...args: string[]): Promise<void> {
+	const proc = Bun.spawn(["git", ...args], { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+	const stderr = await new Response(proc.stderr).text();
+	const code = await proc.exited;
+	if (code !== 0) throw new Error(stderr || `git ${args.join(" ")} failed`);
 }
 
 test("failing set is a SUBSET of the base's failing set -> node outcome flips to succeeded", async () => {
@@ -68,7 +87,7 @@ test("a NEW failure not present on base -> outcome stays failed, and the new fai
 		unrunnable: null,
 		baseRef: "abcdef0123456789",
 	});
-	const e = exec({ execCommand, resolveBaselineFailures });
+	const e = exec({ execCommand, resolveBaselineFailures, listChangedFilesSinceBase: async () => ["tests/newbug.test.ts"] });
 	const res = await e.runCommand(goalGateNode, ctx());
 	expect(res.outcome).toBe("failed");
 	expect(res.text).toContain("1 NEW failure");
@@ -76,6 +95,240 @@ test("a NEW failure not present on base -> outcome stays failed, and the new fai
 	// The new-failure header comes FIRST, ahead of the full reduced dump (which still includes the
 	// pre-existing base failure too) — the fixup agent sees the signal before the noise.
 	expect(res.text.indexOf("1 NEW failure")).toBeLessThan(res.text.indexOf("0 pass"));
+});
+
+test("NEW failure from untouched test file is excluded when the file passes in isolation", async () => {
+	const calls: string[] = [];
+	const execCommand = async (script: string) => {
+		calls.push(script);
+		if (script === "bun test") {
+			return {
+				code: 1,
+				stdout: "tests/restart-reattach.test.ts:\n0 pass\n1 fail\n(fail) flakes under load\n",
+				stderr: "",
+			};
+		}
+		return { code: 0, stdout: "tests/restart-reattach.test.ts:\n1 pass\nRan 1 tests across 1 files", stderr: "" };
+	};
+	const logs: string[] = [];
+	const e = exec({
+		execCommand,
+		resolveBaselineFailures: async () => ({ failures: [], unrunnable: null, baseRef: "abcdef0123456789" }),
+		listChangedFilesSinceBase: async () => ["src/workflow/executor.ts"],
+		hasRecordedFlakeForFile: (file) => file === "tests/restart-reattach.test.ts",
+		log: (message) => logs.push(message),
+	});
+
+	const res = await e.runCommand(goalGateNode, ctx());
+
+	expect(res.outcome).toBe("succeeded");
+	expect(calls).toEqual(["bun test", "bun test 'tests/restart-reattach.test.ts'"]);
+	expect(res.text).toContain("1 flake excluded: tests/restart-reattach.test.ts");
+	expect(res.text).toContain("0 introduced by this unit");
+	expect(logs.join("\n")).toContain("environment-flake excluded: tests/restart-reattach.test.ts");
+});
+
+test("compound verify script isolates the bun-test segment instead of appending file to the last command", async () => {
+	const compoundNode: WorkflowNode = {
+		...goalGateNode,
+		script: "bun test && ! grep -rn '^<<<<<<<' src/ webapp/src/",
+	};
+	const calls: string[] = [];
+	const execCommand = async (script: string) => {
+		calls.push(script);
+		if (script === compoundNode.script) {
+			return {
+				code: 1,
+				stdout: "tests/restart-reattach.test.ts:\n0 pass\n1 fail\n(fail) flakes under load\n",
+				stderr: "",
+			};
+		}
+		return { code: 0, stdout: "tests/restart-reattach.test.ts:\n1 pass\nRan 1 tests across 1 files", stderr: "" };
+	};
+	const e = exec({
+		execCommand,
+		resolveBaselineFailures: async () => ({ failures: [], unrunnable: null, baseRef: "abcdef0123456789" }),
+		listChangedFilesSinceBase: async () => ["src/workflow/executor.ts"],
+		hasRecordedFlakeForFile: (file) => file === "tests/restart-reattach.test.ts",
+	});
+
+	const res = await e.runCommand(compoundNode, ctx());
+
+	expect(res.outcome).toBe("succeeded");
+	expect(calls).toEqual(["bun test && ! grep -rn '^<<<<<<<' src/ webapp/src/", "bun test 'tests/restart-reattach.test.ts' && ! grep -rn '^<<<<<<<' src/ webapp/src/"]);
+});
+
+test("NEW failure stays attributed when isolated retries keep failing", async () => {
+	const calls: string[] = [];
+	const execCommand = async (script: string) => {
+		calls.push(script);
+		if (script === "bun test") return { code: 1, stdout: "tests/land-mode.test.ts:\n(fail) real regression\n", stderr: "" };
+		return { code: 1, stdout: "tests/land-mode.test.ts:\n(fail) real regression\nRan 1 tests across 1 files\n", stderr: "" };
+	};
+	const e = exec({
+		execCommand,
+		resolveBaselineFailures: async () => ({ failures: [], unrunnable: null, baseRef: "abcdef0123456789" }),
+		listChangedFilesSinceBase: async () => ["src/workflow/executor.ts"],
+		hasRecordedFlakeForFile: (file) => file === "tests/land-mode.test.ts",
+	});
+
+	const res = await e.runCommand(goalGateNode, ctx());
+
+	expect(res.outcome).toBe("failed");
+	expect(calls).toEqual(["bun test", "bun test 'tests/land-mode.test.ts'", "bun test 'tests/land-mode.test.ts'", "bun test 'tests/land-mode.test.ts'"]);
+	expect(res.text).toContain("1 NEW failure");
+	expect(res.text).toContain("real regression");
+	expect(res.text).not.toContain("flake excluded");
+});
+
+test("NEW failure in a unit-touched test file is never excluded without isolation reruns", async () => {
+	const calls: string[] = [];
+	const execCommand = async (script: string) => {
+		calls.push(script);
+		return { code: 1, stdout: "(fail) tests/agent-host-stderr-drain.test.ts > changed by unit\n", stderr: "" };
+	};
+	const e = exec({
+		execCommand,
+		resolveBaselineFailures: async () => ({ failures: [], unrunnable: null, baseRef: "abcdef0123456789" }),
+		listChangedFilesSinceBase: async () => ["tests/agent-host-stderr-drain.test.ts"],
+	});
+
+	const res = await e.runCommand(goalGateNode, ctx());
+
+	expect(res.outcome).toBe("failed");
+	expect(calls).toEqual(["bun test"]);
+	expect(res.text).toContain("1 NEW failure");
+	expect(res.text).toContain("tests/agent-host-stderr-drain.test.ts > changed by unit");
+	expect(res.text).not.toContain("flake excluded");
+});
+
+test("untouched file with no recorded flake history is still attributed", async () => {
+	const calls: string[] = [];
+	const execCommand = async (script: string) => {
+		calls.push(script);
+		if (script === "bun test") return { code: 1, stdout: "tests/new-race.test.ts:\n(fail) solo-pass is still suspect\n", stderr: "" };
+		return { code: 0, stdout: "tests/new-race.test.ts:\n1 pass\nRan 1 tests across 1 files\n", stderr: "" };
+	};
+	const e = exec({
+		execCommand,
+		resolveBaselineFailures: async () => ({ failures: [], unrunnable: null, baseRef: "abcdef0123456789" }),
+		listChangedFilesSinceBase: async () => ["src/workflow/executor.ts"],
+		hasRecordedFlakeForFile: () => false,
+	});
+	const res = await e.runCommand(goalGateNode, ctx());
+	expect(res.outcome).toBe("failed");
+	expect(calls).toEqual(["bun test"]);
+	expect(res.text).toContain("solo-pass is still suspect");
+});
+
+test("multi-file whole-output failure identity is not excludable", async () => {
+	const calls: string[] = [];
+	const execCommand = async (script: string) => {
+		calls.push(script);
+		return script === "bun test"
+			? { code: 1, stdout: "TypeError: whole output dump mentions tests/restart-reattach.test.ts\n", stderr: "" }
+			: { code: 0, stdout: "tests/restart-reattach.test.ts:\n1 pass\nRan 1 tests across 1 files\n", stderr: "" };
+	};
+	const e = exec({
+		execCommand,
+		resolveBaselineFailures: async () => ({ failures: [], unrunnable: null, baseRef: "abcdef0123456789" }),
+		listChangedFilesSinceBase: async () => ["src/workflow/executor.ts"],
+		hasRecordedFlakeForFile: () => true,
+	});
+	const res = await e.runCommand(goalGateNode, ctx());
+	expect(res.outcome).toBe("failed");
+	expect(calls).toEqual(["bun test"]);
+	expect(res.text).not.toContain("flake excluded");
+});
+
+test("spoofed path in test title does not pick the file for exclusion", async () => {
+	const calls: string[] = [];
+	const execCommand = async (script: string) => {
+		calls.push(script);
+		return script === "bun test"
+			? { code: 1, stdout: "tests/source-race.test.ts:\n(fail) title names tests/restart-reattach.test.ts > fake\n", stderr: "" }
+			: { code: 0, stdout: "tests/source-race.test.ts:\n1 pass\nRan 1 tests across 1 files\n", stderr: "" };
+	};
+	const e = exec({
+		execCommand,
+		resolveBaselineFailures: async () => ({ failures: [], unrunnable: null, baseRef: "abcdef0123456789" }),
+		listChangedFilesSinceBase: async () => ["tests/source-race.test.ts"],
+		hasRecordedFlakeForFile: (file) => file === "tests/restart-reattach.test.ts",
+	});
+	const res = await e.runCommand(goalGateNode, ctx());
+	expect(res.outcome).toBe("failed");
+	expect(calls).toEqual(["bun test"]);
+	expect(res.text).not.toContain("flake excluded");
+});
+
+test("zero-tests-ran isolation does not exclude", async () => {
+	const calls: string[] = [];
+	const execCommand = async (script: string) => {
+		calls.push(script);
+		return script === "bun test"
+			? { code: 1, stdout: "tests/restart-reattach.test.ts:\n(fail) filtered away\n", stderr: "" }
+			: { code: 0, stdout: "Ran 0 tests across 0 files\n", stderr: "" };
+	};
+	const e = exec({
+		execCommand,
+		resolveBaselineFailures: async () => ({ failures: [], unrunnable: null, baseRef: "abcdef0123456789" }),
+		listChangedFilesSinceBase: async () => ["src/workflow/executor.ts"],
+		hasRecordedFlakeForFile: () => true,
+	});
+	const res = await e.runCommand(goalGateNode, ctx());
+	expect(res.outcome).toBe("failed");
+	expect(calls.length).toBe(4);
+	expect(res.text).not.toContain("flake excluded");
+});
+
+test("piped or quoted-and scripts fall back to bun test ./file", async () => {
+	const node: WorkflowNode = { ...goalGateNode, script: "echo 'a && b' && bun test | cat" };
+	const calls: string[] = [];
+	const execCommand = async (script: string) => {
+		calls.push(script);
+		return script === node.script
+			? { code: 1, stdout: "tests/restart-reattach.test.ts:\n(fail) flakes under load\n", stderr: "" }
+			: { code: 0, stdout: "tests/restart-reattach.test.ts:\n1 pass\nRan 1 tests across 1 files\n", stderr: "" };
+	};
+	const e = exec({
+		execCommand,
+		resolveBaselineFailures: async () => ({ failures: [], unrunnable: null, baseRef: "abcdef0123456789" }),
+		listChangedFilesSinceBase: async () => ["src/workflow/executor.ts"],
+		hasRecordedFlakeForFile: () => true,
+	});
+	const res = await e.runCommand(node, ctx());
+	expect(res.outcome).toBe("succeeded");
+	expect(calls).toEqual(["echo 'a && b' && bun test | cat", "bun test './tests/restart-reattach.test.ts'"]);
+});
+
+test("dirty tree test edits are included in touched detection", async () => {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "verify-dirty-touched-"));
+	await git(repo, "init", "-q");
+	await git(repo, "config", "user.email", "test@example.com");
+	await git(repo, "config", "user.name", "Test");
+	await fs.mkdir(path.join(repo, "tests"), { recursive: true });
+	await fs.writeFile(path.join(repo, "tests/dirty.test.ts"), "base\n");
+	await git(repo, "add", "-A");
+	await git(repo, "commit", "-qm", "base");
+	const baseRef = "HEAD";
+	await fs.writeFile(path.join(repo, "tests/dirty.test.ts"), "dirty\n");
+	const calls: string[] = [];
+	const execCommand = async (script: string) => {
+		calls.push(script);
+		return script === "bun test"
+			? { code: 1, stdout: "tests/dirty.test.ts:\n(fail) dirty edit\n", stderr: "" }
+			: { code: 0, stdout: "tests/dirty.test.ts:\n1 pass\nRan 1 tests across 1 files\n", stderr: "" };
+	};
+	const e = exec({
+		cwd: repo,
+		execCommand,
+		resolveBaselineFailures: async () => ({ failures: [], unrunnable: null, baseRef }),
+		hasRecordedFlakeForFile: () => true,
+	});
+	const res = await e.runCommand(goalGateNode, ctx());
+	expect(res.outcome).toBe("failed");
+	expect(calls).toEqual(["bun test"]);
+	await fs.rm(repo, { recursive: true, force: true });
 });
 
 test("unrunnable base -> fails CLOSED (outcome failed, never treated as everything-tolerated)", async () => {

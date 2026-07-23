@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { canLand, fetchCheckpoints, forkCommand, isForkCheckpointResponseCurrent, landToast, resolveForkTarget, stopCommand, stoppableAgents, verifyToast, type CheckpointEntryDTO } from "./agent-control";
+import { answerCommand, canLand, fetchCheckpoints, forkCommand, isForkCheckpointResponseCurrent, landToast, resolveForkTarget, steerCommand, stopCommand, stoppableAgents, verifyToast, type CheckpointEntryDTO } from "./agent-control";
 import type { AgentDTO } from "./dto";
 
 const agent = (id: string, status: AgentDTO["status"]): AgentDTO =>
@@ -24,6 +24,16 @@ test("stoppableAgents is empty when every agent is terminal (button hides)", () 
 
 test("stopCommand builds a kill command for the given agent id (keeps it restartable)", () => {
   expect(stopCommand("probe-123")).toEqual({ type: "kill", id: "probe-123" });
+});
+
+test("answerCommand reuses the pending request id, while steerCommand mints a fresh turn id", () => {
+  expect(answerCommand("a1", "request-1", "yes")).toEqual({ type: "prompt", id: "a1", message: "yes", clientTurnId: "request-1" });
+  const first = steerCommand("a1", "redirect");
+  const second = steerCommand("a1", "redirect");
+  expect(first).toMatchObject({ type: "prompt", id: "a1", message: "redirect" });
+  expect(first.clientTurnId).toMatch(/^steer:/);
+  expect(second.clientTurnId).toMatch(/^steer:/);
+  expect(second.clientTurnId).not.toBe(first.clientTurnId);
 });
 
 test("canLand: branch + own worktree lands (ad-hoc agents included); in-place or branchless does not", () => {

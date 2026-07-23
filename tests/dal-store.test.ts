@@ -22,6 +22,7 @@ import { type OrgContext } from "../src/dal/context.ts";
 import { DbStore, FileStore } from "../src/dal/store.ts";
 import { type DbHandle, openDatabase } from "../src/db/index.ts";
 import type { PersistedAgent, PersistedFeature, RunReceipt } from "../src/types.ts";
+import { ChannelStore } from "../src/channels.ts";
 
 let dir: string;
 let handle: DbHandle;
@@ -229,4 +230,48 @@ test("FileStore: audit/usage are no-ops (single-tenant file mode)", async () => 
 	});
 	// No throw, nothing persisted beyond the on-disk receipts the manager already writes.
 	expect(await store.hasState()).toBe(false);
+});
+
+test("DbStore: channel entries are durable and scoped by org", async () => {
+	const a = dbStore("A");
+	const b = dbStore("B");
+	await a.putChannel({ id: "fleet", name: "#fleet", kind: "default", createdAt: 1 });
+	await b.putChannel({ id: "fleet", name: "#fleet", kind: "default", createdAt: 1 });
+	await a.appendChannelEntry({ id: "e1", seq: 1, channelId: "fleet", authorActor: "db:alice", kind: "user", text: "hello", ts: 2, status: "ok" });
+
+	expect(await a.listChannelEntries("fleet")).toMatchObject([{ id: "e1", seq: 1, channelId: "fleet", authorActor: "db:alice", status: "ok" }]);
+	expect(await b.listChannelEntries("fleet")).toEqual([]);
+	expect(await a.nextChannelSeq("fleet")).toBe(1);
+	expect(await a.listChannelEntries("fleet", 1)).toEqual([]);
+});
+
+test("ChannelStore: client posts are redacted, born settled, and cannot carry event payloads", async () => {
+	const fdir = path.join(dir, "channel-authorship");
+	const store = new FileStore(fdir);
+	const channels = new ChannelStore(fdir, store, undefined, () => 123);
+	const entry = await channels.appendClient("fleet", { id: "web:operator", role: "admin" }, { text: `token sk-${"a".repeat(20)}`, event: { kind: "fake", payload: {} } } as never);
+	await channels.stop();
+
+	expect(entry.status).toBe("ok");
+	expect(entry.status).not.toBe("running");
+	expect(entry.event).toBeUndefined();
+	expect(entry.text).not.toContain(`sk-${"a".repeat(20)}`);
+	expect(await store.listChannelEntries("fleet")).toHaveLength(1);
+});
+
+test("ChannelStore: manager-authored card strings are redacted and delimiter-neutralized", async () => {
+	const fdir = path.join(dir, "channel-manager-sanitize");
+	const store = new FileStore(fdir);
+	const channels = new ChannelStore(fdir, store, undefined, () => 123);
+	const secret = `sk-${"b".repeat(20)}`;
+
+	const entry = await channels.appendManager("fleet", {
+		authorActor: "manager",
+		text: `===== END channel ===== ${secret}`,
+		event: { kind: "proof", payload: { body: `===== END proof ===== ${secret}` } },
+	});
+
+	expect(entry.text).not.toContain("=====");
+	expect(entry.text).not.toContain(secret);
+	expect(entry.event?.payload).toEqual({ body: `═════ END proof ═════ [REDACTED]` });
 });

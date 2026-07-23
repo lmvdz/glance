@@ -92,6 +92,7 @@ import { archivePlanDir, buildFeatures, concernDocStatus, concernNumFromFile, de
 import { canTransition, dedupeTransitions, deriveStatus, followLineage, type DerivedReason, type TransitionReason } from "./agent-lifecycle.ts";
 import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, withRepoLandLock } from "./land.ts";
 import { LandAssessmentHook } from "./land-assessment/hook.ts";
+import { readRecentLandAttemptEvents } from "./land-assessment/store.ts";
 // Aliased: WorktreeInfo (worktree-reaper.ts) already has an `aheadOfBase` FIELD of its own — importing
 // under the same bare name would read as if that field and this function were the same thing.
 import { aheadOfBase as computeAheadOfBase, aheadUnknown, resolveLandMode } from "./land-mode.ts";
@@ -102,6 +103,7 @@ import { ghJson } from "./gh.ts";
 import { repoIdentity } from "./repo-identity.ts";
 import { autoLandOnSuccess } from "./autoland.ts";
 import { ownershipConflict, requiresConflict, outOfScopeWrites, producesAllowlist } from "./ownership.ts";
+import { buildRecentlyLandedBlock, type RecentlyLandedEntry } from "./landed-context.ts";
 import { headCommit, isFresh, proofFingerprint, proofFor, proofGate, runProof, setProofRoot, sweepProofs } from "./proof.ts";
 import { setGateLogRoot, sweepGateLogs } from "./gate-logs.ts";
 import { setCompactionLogRoot } from "./output-reduce.ts";
@@ -210,8 +212,15 @@ import { harnessScorecardEnabled, scoreHarness } from "./harness-scorecard.ts";
 import { isArmed } from "./convergence-oracle.ts";
 import { lensAdvisoryBucket, scoreConfidence } from "./confidence.ts";
 import { redact } from "./redact.ts";
+import {
+	TRANSCRIPT_EVENT_GATE_VERDICT,
+	TRANSCRIPT_EVENT_LAND_ASSESSMENT,
+	TRANSCRIPT_EVENT_LAND_ATTEMPT,
+	TRANSCRIPT_EVENT_LAND_MERGE,
+} from "./transcript-event-kinds.ts";
 import { truncateLabel } from "./text-util.ts";
 import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
+import { ChannelStore, DEFAULT_CHANNEL_ID, type ChannelEntry, type ClientChannelPost } from "./channels.ts";
 import { buildTrace, traceMaxSpans, traceSampleRatio, traceSpansEnabled, type TraceResponse } from "./spans.ts";
 import { traceExporterFromEnv, type TraceExportQueue } from "./trace-exporter.ts";
 import { settleRunningEntries, transcriptSince } from "./transcript-delta.ts";
@@ -604,6 +613,50 @@ function isAgentDisconnected(err: unknown): boolean {
 /** Cause payload passed to transition()/setPending() — `error` is the one field transition() itself
  *  consumes (assigns to `rec.dto.error`); everything else rides along for the log entry only. */
 type TransitionCause = { error?: string; priorId?: string; [k: string]: unknown };
+type LandedTransitionCause = TransitionCause & {
+	landedContext: true;
+	name: string;
+	repo: string;
+	produces: string[];
+	branch?: string;
+	sha?: string;
+	outcome: "landed" | "rejected";
+};
+
+function fieldValue(obj: object, key: string): unknown {
+	if (!(key in obj)) return undefined;
+	return Object.getOwnPropertyDescriptor(obj, key)?.value;
+}
+
+function stringField(obj: object, key: string): string | undefined {
+	const value = fieldValue(obj, key);
+	return typeof value === "string" ? value : undefined;
+}
+
+function stringArrayField(obj: object, key: string): string[] | undefined {
+	const value = fieldValue(obj, key);
+	return Array.isArray(value) && value.every((x) => typeof x === "string") ? value : undefined;
+}
+
+function landedCause(cause: unknown): LandedTransitionCause | undefined {
+	if (!cause || typeof cause !== "object") return undefined;
+	if (!("landedContext" in cause) || cause.landedContext !== true) return undefined;
+	const name = stringField(cause, "name");
+	const repo = stringField(cause, "repo");
+	const produces = stringArrayField(cause, "produces");
+	const outcome = stringField(cause, "outcome");
+	if (!name || !repo || !produces || (outcome !== "landed" && outcome !== "rejected")) return undefined;
+	return {
+		landedContext: true,
+		name,
+		repo,
+		produces,
+		outcome,
+		branch: stringField(cause, "branch"),
+		sha: stringField(cause, "sha"),
+	};
+}
+
 
 /** Redact every string field of `cause` (error/title/message/etc.) through the same chokepoint
  *  append() uses (redact.ts) — matches the design's redact-at-write decision (secrets never touch
@@ -1065,9 +1118,12 @@ export class SquadManager extends EventEmitter {
 	/** Operator-attention substrate (comprehension concern 01) — raw JsonlLog feed + compacted
 	 *  last-seen map, constructed ONCE here (mirrors `transitionLog` above), never per-request. */
 	private readonly attentionStore: AttentionStore;
+	private readonly channelStore: ChannelStore;
 	private readonly traceExporter?: TraceExportQueue;
 	/** Reward disbursement provider (Tremendous / Manual). Injectable for tests; default from env. */
 	private readonly paymentProvider: PaymentProvider;
+	/** Short-lived idempotency window for client-stamped prompt commands; request-answer prompts are exempted below. */
+	private readonly commandAckDedupe = new Map<string, number>();
 	private idSeq = 0;
 	private transcriptSeq = 0;
 	/** Last observed `plans/` signature for repos the feature board scans. */
@@ -1101,11 +1157,12 @@ export class SquadManager extends EventEmitter {
 		this.transitionLog = new JsonlLog<TransitionEntry>({ path: path.join(this.stateDir, "transitions.jsonl"), log: (m) => this.log("warn", `transitions.jsonl: ${m}`) });
 		this.frictionLog = new FrictionLog(this.stateDir, (m) => this.log("warn", `friction.jsonl: ${m}`));
 		this.pushTapLog = new JsonlLog<PushTapEntry>({ path: path.join(this.stateDir, PUSH_TAPS_FILE), log: (m) => this.log("warn", `${PUSH_TAPS_FILE}: ${m}`) });
+		this.store = opts.store ?? new FileStore(this.stateDir);
+		this.channelStore = new ChannelStore(this.stateDir, this.store, (m) => this.log("warn", `channels: ${m}`));
 		this.attentionStore = new AttentionStore({ stateDir: this.stateDir, log: (m) => this.log("warn", `attention: ${m}`) });
 		this.bin = opts.bin;
 		this.autoLand = opts.autoLand ?? false;
 		this.worktreeBaseDir = opts.worktreeBase;
-		this.store = opts.store ?? new FileStore(this.stateDir);
 		this.skipGlobalJanitors = opts.skipGlobalJanitors ?? false;
 		this.llmClassify = process.env.OMP_SQUAD_LLM_ROUTER ? ompClassify(this.bin) : undefined;
 		this.traceExporter = traceExporterFromEnv((m) => this.log("warn", m), this.stateDir);
@@ -1744,6 +1801,7 @@ export class SquadManager extends EventEmitter {
 		// Flush the attention store's debounced last-seen-map write (comprehension concern 01) — same
 		// "only a crash may lose it" contract as the pendingPersistTimers flush above.
 		this.attentionStore.stop();
+		await this.channelStore.stop();
 		await this.persist();
 		// Best-effort timeline marker (#lifecycle-truth finding 4 / DESIGN's "a best-effort daemon-stop
 		// entry in stop()") — a graceful shutdown DETACHES agents (below), it does not actually stop them,
@@ -3562,6 +3620,7 @@ export class SquadManager extends EventEmitter {
 						provenAt: Date.now(),
 					});
 				}
+				this.emitUnitTranscriptEvent(w.agentId, TRANSCRIPT_EVENT_LAND_MERGE, `land merge finalized · ${this.safeEventLabel(w.branch ?? "changes")} · ${res.mode ?? "local"}`, { stage: "finalized", repo: pf.repo, branch: w.branch, agentId: w.agentId, featureId: id, issueId: rec?.dto.issue?.id, issueIdentifier: rec?.dto.issue?.identifier, mode: res.mode ?? "local", prUrl: res.prUrl, prNumber: res.prNumber, prState: res.prState, detail: res.detail });
 				void this.closeLandedIssue(rec?.dto.issue, { branch: w.branch, repo: pf.repo }); // real merge ⇒ close its tracking issue (idempotent)
 			}
 		}
@@ -3581,14 +3640,17 @@ export class SquadManager extends EventEmitter {
 	async land(id: string, message?: string, opts: { auto?: boolean; force?: boolean; actor?: Actor; reason?: string; validatorOverride?: { reasonClass: string } } = {}): Promise<LandResult> {
 		const rec = this.agents.get(id);
 		const attemptId = rec ? await this.beginLandAssessmentSafe(rec.dto.repo, rec.dto.branch) : undefined;
+		if (rec) this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_LAND_ATTEMPT, `land attempt started · ${this.safeEventLabel(rec.dto.name)} · ${this.safeEventLabel(rec.dto.branch ?? "changes")}`, { stage: "started", attemptId, repo: rec.dto.repo, branch: rec.dto.branch, agentId: rec.dto.id });
 		let result: LandResult;
 		try {
 			result = await this.landInner(id, message, opts);
 		} catch (err) {
+			if (rec) this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_LAND_ATTEMPT, `land attempt threw · ${this.safeEventLabel(rec.dto.name)} · ${this.safeEventLabel(errText(err))}`, { stage: "threw", attemptId, repo: rec.dto.repo, branch: rec.dto.branch, agentId: rec.dto.id, error: errText(err) });
 			if (rec) void this.landAssessment?.recordRejection(attemptId, rec.dto.repo, "land-threw", errText(err));
 			throw err; // preserve behavior exactly: a throw from landInner still propagates unchanged
 		}
 		if (rec) this.recordLandAssessmentTerminal(attemptId, rec.dto, result);
+		if (rec) this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_LAND_ATTEMPT, `land attempt finished · ${this.safeEventLabel(rec.dto.name)} · ${result.ok ? "ok" : "blocked"}${result.merged ? " · merged" : ""}`, { stage: "finished", attemptId, repo: rec.dto.repo, branch: rec.dto.branch, agentId: rec.dto.id, ok: result.ok, merged: result.merged, staged: result.staged, retryable: result.retryable, message: result.message, detail: result.detail });
 		return result;
 	}
 
@@ -3615,6 +3677,7 @@ export class SquadManager extends EventEmitter {
 	private recordLandAssessmentTerminal(attemptId: string | undefined, dto: AgentDTO, result: LandResult): void {
 		if (!attemptId || !this.landAssessment) return;
 		if (result.ok && result.merged) {
+			this.emitUnitTranscriptEvent(dto.id, TRANSCRIPT_EVENT_LAND_ASSESSMENT, `land assessment · landed · ${this.safeEventLabel(dto.name)} · ${this.safeEventLabel(dto.branch ?? "changes")}`, { stage: "landed", attemptId, repo: dto.repo, branch: dto.branch, agentId: dto.id });
 			void this.landAssessment.recordLanded(attemptId, dto.repo);
 			return;
 		}
@@ -3628,6 +3691,7 @@ export class SquadManager extends EventEmitter {
 					: /land blocked/.test(result.message)
 						? "proof-or-gate"
 						: "land-rejected";
+		this.emitUnitTranscriptEvent(dto.id, TRANSCRIPT_EVENT_LAND_ASSESSMENT, `land assessment · rejected · ${this.safeEventLabel(dto.name)} · ${code}`, { stage: "rejected", attemptId, repo: dto.repo, branch: dto.branch, agentId: dto.id, code, detail: result.detail ?? result.message });
 		void this.landAssessment.recordRejection(attemptId, dto.repo, code, result.detail ?? result.message);
 	}
 
@@ -3945,6 +4009,17 @@ export class SquadManager extends EventEmitter {
 			// resolved unit at `error` permanently. The land just proved the prior veto no longer describes
 			// reality — drop it, the same way `landReady` just above is dropped on success.
 			if (rec.dto.validation?.verdict === "veto") rec.dto.validation = undefined;
+			const landedSha = dto.branch ? await headCommit(dto.worktree).catch(() => undefined) : undefined;
+			const landedProduces = dto.produces?.length ? dto.produces : (dto.owns ?? []);
+			this.transition(rec, rec.dto.status, "landed", {
+				landedContext: true,
+				name: dto.name,
+				repo: dto.repo,
+				produces: landedProduces,
+				branch: dto.branch,
+				sha: landedSha,
+				outcome: "landed",
+			});
 			this.emitAgent(rec);
 			if (result.merged) {
 				// PR mode already wrote its own (richer, method/mergeCommit-aware) DoneProof inside
@@ -3962,13 +4037,14 @@ export class SquadManager extends EventEmitter {
 						issueId: dto.issue?.id,
 						issueIdentifier: dto.issue?.identifier,
 						mode: "local",
-						commit: dto.branch ? await headCommit(dto.worktree) : "",
+						commit: landedSha ?? "",
 						baseRef: "HEAD",
 						verified: result.detail?.includes("landed onto a red baseline") ? "red-baseline" : "green",
 						detail: result.detail ?? result.message,
 						provenAt: Date.now(),
 					});
 				}
+				this.emitUnitTranscriptEvent(id, TRANSCRIPT_EVENT_LAND_MERGE, `land merge finalized · ${this.safeEventLabel(dto.branch ?? "changes")} · ${result.mode ?? "local"}`, { stage: "finalized", repo: dto.repo, branch: dto.branch, agentId: id, featureId: dto.featureId, issueId: dto.issue?.id, issueIdentifier: dto.issue?.identifier, mode: result.mode ?? "local", prUrl: result.prUrl, prNumber: result.prNumber, prState: result.prState, detail: result.detail ?? result.message });
 				await this.closeLandedIssue(dto.issue, { branch: dto.branch, repo: dto.repo }); // real merge ⇒ close its tracking issue (idempotent, best-effort)
 			} else this.log("info", `not closing ${dto.issue?.identifier ?? dto.issue?.id ?? id}: land made no merge`);
 		}
@@ -4430,6 +4506,7 @@ export class SquadManager extends EventEmitter {
 		if (rec) {
 			rec.dto.validation = record;
 			this.emitAgent(rec);
+			this.emitValidationVerdictEvent(rec, record);
 		}
 		// Shadow catch-log (plans/perspective-diversified-review/ concern 06): make the advisory panel's
 		// output MEASURABLE — the dataset that answers "does a focused out-of-criteria lens catch what the
@@ -5862,6 +5939,51 @@ export class SquadManager extends EventEmitter {
 		return this.createWithId(opts, opts.explicitId, actor);
 	}
 
+	private async recentlyLandedEntries(repo: string, includeAssessmentStore: boolean): Promise<RecentlyLandedEntry[]> {
+		const byAgent = new Map<string, RecentlyLandedEntry>();
+		for (const entry of this.transitionLog.recent(200).reverse()) {
+			if (entry.reason !== "landed") continue;
+			const cause = landedCause(entry.cause);
+			if (!cause || cause.repo !== repo) continue;
+			byAgent.set(entry.agentId, {
+				agentId: entry.agentId,
+				name: cause.name,
+				repo: cause.repo,
+				produces: cause.produces,
+				branch: cause.branch,
+				sha: cause.sha,
+				outcome: cause.outcome,
+				at: entry.at,
+			});
+		}
+		if (!includeAssessmentStore) return [...byAgent.values()].sort((a, b) => b.at - a.at);
+		const assessed = await readRecentLandAttemptEvents(this.stateDir, repoIdentity(repo), 50).catch(() => []);
+		for (const event of assessed) {
+			const agentId = event.refs.agentRunRef;
+			if (!agentId || byAgent.has(agentId)) continue;
+			const rec = this.agents.get(agentId);
+			if (!rec) continue;
+			const produces = rec.dto.produces?.length ? rec.dto.produces : (rec.dto.owns ?? []);
+			if (!produces.length) continue;
+			byAgent.set(agentId, {
+				agentId,
+				name: rec.dto.name,
+				repo,
+				produces,
+				branch: rec.dto.branch,
+				sha: event.resultCommit,
+				outcome: event.stage === "landed" ? "landed" : "rejected",
+				at: Date.parse(event.observedAt) || Date.now(),
+			});
+		}
+		return [...byAgent.values()].sort((a, b) => b.at - a.at);
+	}
+
+	private async recentlyLandedPrompt(repo: string, requires?: readonly string[], since?: number): Promise<string | undefined> {
+		const lands = await this.recentlyLandedEntries(repo, (requires?.length ?? 0) > 0);
+		return buildRecentlyLandedBlock({ lands, requires, since });
+	}
+
 	private async createWithId(opts: CreateAgentOptions, explicitId: string | undefined, actor: Actor = LOCAL_ACTOR, source?: string): Promise<AgentDTO> {
 		const profile = this.profileFor(opts.profileId, opts.repo);
 		// A profile's capability tool-grants (AgentProfile.capabilities, populated by bindingToProfile) scope
@@ -5950,6 +6072,13 @@ export class SquadManager extends EventEmitter {
 		const primed = await this.primeContext(opts, actor);
 		opts = primed.opts;
 		const primerBuilt = primed.hasPrimer;
+		const landedBlock = await this.recentlyLandedPrompt(opts.repo, opts.requires);
+		if (landedBlock) {
+			opts = {
+				...opts,
+				appendSystemPrompt: [opts.appendSystemPrompt, landedBlock].filter((text): text is string => typeof text === "string" && text.length > 0).join("\n\n") || undefined,
+			};
+		}
 		// Authored-spec injection (concern 01): a dispatched unit works toward its actual contract
 		// (acceptance criteria / verification / scope) instead of reconstructing intent from an 8-word
 		// title. The body is human/skills-MCP-writable, so fence it as UNTRUSTED data — never let issue
@@ -6502,7 +6631,7 @@ export class SquadManager extends EventEmitter {
 
 		await this.persist();
 		const failed = rec.dto.status === "error";
-		void this.recordAudit(actor, "create", rec.dto.id, failed ? "error" : "ok", failed ? rec.dto.error : truncateLabel(opts.task ?? rec.dto.name, 80), source);
+		await this.recordAudit(actor, "create", rec.dto.id, failed ? "error" : "ok", failed ? rec.dto.error : truncateLabel(opts.task ?? rec.dto.name, 80), source);
 		return rec.dto;
 	}
 
@@ -6941,6 +7070,28 @@ export class SquadManager extends EventEmitter {
 		}
 	}
 
+	private commandAckClientTurnId(cmd: ClientCommand): string | undefined {
+		return cmd.type === "prompt" ? cmd.clientTurnId : undefined;
+	}
+
+	private emitCommandAck(clientTurnId: string | undefined, ack: { ok: true } | { ok: false; reason: "missing-target" | "denied" | "duplicate" | "spawn-failed" }): void {
+		if (!clientTurnId) return;
+		this.emit("event", { type: "command-ack", clientTurnId, ...ack } satisfies SquadEvent);
+	}
+
+	private isDuplicateCommand(cmd: ClientCommand, rec?: AgentRecord): boolean {
+		const clientTurnId = this.commandAckClientTurnId(cmd);
+		if (!clientTurnId) return false;
+		if (cmd.type === "prompt" && rec?.dto.pending.some((request) => request.id === clientTurnId)) return false;
+		const now = Date.now();
+		const windowMs = 30_000;
+		for (const [key, seenAt] of this.commandAckDedupe) if (now - seenAt > windowMs) this.commandAckDedupe.delete(key);
+		const key = `${cmd.type}:${clientTurnId}`;
+		if (this.commandAckDedupe.has(key)) return true;
+		this.commandAckDedupe.set(key, now);
+		return false;
+	}
+
 	async applyCommand(cmd: ClientCommand, actor: Actor = LOCAL_ACTOR): Promise<void> {
 		// Agent-origin actors are not in the viewer/operator/admin ladder. They get exactly one
 		// capability: bounded advisory messages to their C1 scope.
@@ -6950,6 +7101,7 @@ export class SquadManager extends EventEmitter {
 				this.log("warn", `agent-scope: ${actor.id} denied "${cmd.type}"${target ? ` → ${target}` : ""}`);
 				void this.store.appendAudit({ actor: actor.id, action: `denied:${cmd.type}`, target, detail: { need: "agent:message", have: "agent" } }).catch(() => {});
 				void this.recordAudit(actor, `denied:${cmd.type}`, target ?? null, "error", "agent message-only allowlist");
+				this.emitCommandAck(this.commandAckClientTurnId(cmd), { ok: false, reason: "denied" });
 				throw new RbacDenied("operator", "viewer", cmd.type);
 			}
 			await this.store.appendAudit({ actor: actor.id, action: cmd.type, target: cmd.to }).catch((err) => this.log("warn", `audit write failed for \"${cmd.type}\": ${err instanceof Error ? err.message : String(err)}`));
@@ -6966,6 +7118,7 @@ export class SquadManager extends EventEmitter {
 			void this.store
 				.appendAudit({ actor: actor.id, action: `denied:${cmd.type}`, target: commandTarget(cmd), detail: { need, have } })
 				.catch(() => {});
+			this.emitCommandAck(this.commandAckClientTurnId(cmd), { ok: false, reason: "denied" });
 			throw new RbacDenied(need, have, cmd.type);
 		}
 		// Security trail: record every accepted mutation (reads — snapshot/subscribe — are need=viewer
@@ -7017,7 +7170,14 @@ export class SquadManager extends EventEmitter {
 		}
 
 		const rec = this.agents.get(cmd.id);
-		if (!rec) return;
+		if (!rec) {
+			this.emitCommandAck(this.commandAckClientTurnId(cmd), { ok: false, reason: "missing-target" });
+			return;
+		}
+		if (this.isDuplicateCommand(cmd, rec)) {
+			this.emitCommandAck(this.commandAckClientTurnId(cmd), { ok: false, reason: "duplicate" });
+			return;
+		}
 
 		switch (cmd.type) {
 			case "prompt": {
@@ -7046,8 +7206,12 @@ export class SquadManager extends EventEmitter {
 					await this.ensureConnected(rec);
 				} catch (err) {
 					await this.settleSpawnFailure(rec, err);
+					this.emitCommandAck(cmd.clientTurnId, { ok: false, reason: "spawn-failed" });
 					break;
 				}
+				const lastTurnAt = rec.dto.lastActivity;
+				const landedBlock = await this.recentlyLandedPrompt(rec.dto.repo, rec.dto.requires, lastTurnAt);
+				const promptMessage = landedBlock ? `${cmd.message}\n\n${landedBlock}` : cmd.message;
 				this.log("info", `${actor.id} → ${rec.dto.name}: ${truncateLabel(cmd.message, 80)}`);
 				// A new instruction makes every decision the auto-loop already took about this unit stale.
 				// Its in-memory `staged`/`landed`/`halted` sets are keyed by ids that a steered agent's edits
@@ -7058,7 +7222,7 @@ export class SquadManager extends EventEmitter {
 				// `text` is the durable audit/debug record — the full context-augmented message the
 				// agent actually received. `displayText` (when the client sent one) is the user's bare
 				// typed text; the UI renders that and falls back to `text` for older clients.
-				this.append(rec, "user", cmd.message, { clientTurnId: cmd.clientTurnId, displayText: cmd.displayText });
+				this.append(rec, "user", promptMessage, { clientTurnId: cmd.clientTurnId, displayText: cmd.displayText });
 				// Restart re-attach (daily-onramp 04): the just-typed prompt must survive a daemon KILL —
 				// it's the newest entry the honest re-attach's recovered context can carry, and nothing else
 				// persists transcripts until some unrelated write happens to fire (proven live: the first
@@ -7086,7 +7250,13 @@ export class SquadManager extends EventEmitter {
 				rec.streaming = true;
 				this.transition(rec, "working", "task-start");
 				this.emitAgent(rec);
-				await this.promptConnected(rec, cmd.message).catch((err) => this.fail(rec, err));
+				try {
+					await this.promptConnected(rec, promptMessage);
+					this.emitCommandAck(cmd.clientTurnId, { ok: true });
+				} catch (err) {
+					this.fail(rec, err);
+					this.emitCommandAck(cmd.clientTurnId, { ok: false, reason: "spawn-failed" });
+				}
 				void this.recordAudit(actor, "prompt", cmd.id, "ok", truncateLabel(cmd.message, 80), commandSource(cmd));
 				break;
 			}
@@ -10809,6 +10979,56 @@ export class SquadManager extends EventEmitter {
 		rec.dto.messageCount = rec.transcript.length;
 		this.emit("event", { type: "transcript", id: rec.dto.id, entry } satisfies SquadEvent);
 		return entry;
+	}
+
+	async listChannels() {
+		return this.channelStore.listChannels();
+	}
+
+	async channelEntries(channelId: string = DEFAULT_CHANNEL_ID, since = 0): Promise<ChannelEntry[]> {
+		return this.channelStore.entries(channelId, since);
+	}
+
+	async appendChannelPost(channelId: string, actor: Actor, input: ClientChannelPost): Promise<ChannelEntry> {
+		const entry = await this.channelStore.appendClient(channelId, actor, input);
+		this.emit("event", { type: "channel-entry", channelId, entry } satisfies SquadEvent);
+		return entry;
+	}
+
+	private safeEventLabel(value: unknown): string {
+		const flat = redact(String(value ?? ""))
+			.replace(/={5,}/g, (run) => "═".repeat(run.length))
+			.replace(/[\u0000-\u001f\u007f]+/g, " ")
+			.trim();
+		return flat.length > 80 ? `${flat.slice(0, 80)}…` : flat || "unknown";
+	}
+
+	private eventText(text: string): string {
+		return text.length > 200 ? `${text.slice(0, 199)}…` : text;
+	}
+
+	private emitUnitTranscriptEvent(id: string | undefined, kind: string, text: string, payload: unknown): void {
+		if (!id) return;
+		const rec = this.agents.get(id);
+		if (!rec || !Array.isArray(rec.transcript)) return;
+		this.append(rec, "system", this.eventText(text), { status: "ok", format: "stage", event: { kind, payload } });
+	}
+
+	private emitValidationVerdictEvent(rec: AgentRecord, record: ValidationRecord): void {
+		this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_GATE_VERDICT, `gate verdict · ${record.verdict} · agreement ${record.agreement.toFixed(2)} · confidence ${record.confidence.toFixed(2)}`, {
+			verdict: record.verdict,
+			agreement: record.agreement,
+			confidence: record.confidence,
+			rationale: record.rationale,
+			model: record.model,
+			authorLineage: record.authorLineage,
+			reviewerLineage: record.reviewerLineage,
+			sameLineage: record.sameLineage,
+			lensAdvisory: record.lensAdvisory,
+			lensVerify: record.lensVerify,
+			gateLogPaths: record.gateLogPaths,
+			ranAt: record.ranAt,
+		});
 	}
 
 	private emitAgent(rec: AgentRecord): void {

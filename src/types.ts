@@ -13,6 +13,7 @@ import type { AgentAction, AutonomyMode, VerificationState } from "./autonomy.ts
 import type { TransitionReason } from "./agent-lifecycle.ts";
 import type { SubagentNode } from "./subagents.ts";
 import type { ModelLineage } from "./model-lineage.ts";
+import type { ChannelEntry } from "./channels.ts";
 import type { LensId } from "./lens-select.ts";
 import type { HarnessScorecard } from "./harness-scorecard.ts";
 import type { WorkLane, WorkLaneSource } from "./lane.ts";
@@ -183,6 +184,18 @@ export interface TranscriptPending {
 
 export type TranscriptFormat = "markdown" | "command" | "stage" | "plain";
 
+export interface TranscriptEvent {
+	/**
+	 * Open event taxonomy for manager-authored proof facts.
+	 * HAZARD: this is NOT `TranscriptEntry.kind`; entry.kind is the closed render/source axis
+	 * ("user" | "assistant" | "thinking" | "tool" | "system"), while event.kind is an open,
+	 * feature-owned fact taxonomy ("gate-verdict", "land-attempt", ...).
+	 */
+	kind: string;
+	payload: unknown;
+}
+
+
 export interface TranscriptEntry {
 	/** Stable append id. Older persisted transcripts may not have one. */
 	id?: string;
@@ -204,6 +217,12 @@ export interface TranscriptEntry {
 	tool?: TranscriptTool;
 	format?: TranscriptFormat;
 	pending?: TranscriptPending;
+	/**
+	 * Optional typed proof event attached to this transcript line.
+	 * HAZARD: `TranscriptEntry.kind` and `event.kind` are different axes: entry.kind stays
+	 * the closed transcript/source axis; event.kind is an open manager-authored fact taxonomy.
+	 */
+	event?: TranscriptEvent;
 }
 
 /** A work item (e.g. a Plane issue) an agent is advancing. */
@@ -1468,6 +1487,14 @@ export interface CommandInfo {
 
 // ── Manager → surface events ────────────────────────────────────────────────
 
+export interface ChannelEntryEvent {
+	type: "channel-entry";
+	channelId: string;
+	entry: ChannelEntry;
+}
+
+type CommandAckReason = "missing-target" | "denied" | "duplicate" | "spawn-failed";
+
 export type SquadEvent =
 	| { type: "roster"; agents: AgentDTO[]; version: string }
 	| { type: "agent"; agent: AgentDTO }
@@ -1480,7 +1507,10 @@ export type SquadEvent =
 	| { type: "comment-resolved"; id: string; resolvedAt: number }
 	| { type: "audit"; entry: AuditEntry }
 	| { type: "automation"; event: AutomationEvent }
-	| { type: "transition"; entry: TransitionEntry };
+	| { type: "transition"; entry: TransitionEntry }
+	| ChannelEntryEvent
+	| { type: "command-ack"; clientTurnId: string; ok: true }
+	| { type: "command-ack"; clientTurnId: string; ok: false; reason: CommandAckReason };
 
 /** The daemon's periodic background loops — the ones that run without an operator and were, until the
  *  automation log, invisible. Scout reads agent reasoning; Sentinel (plans/sentinel-drift-probe, v0

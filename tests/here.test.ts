@@ -19,6 +19,7 @@
 import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
+import { EventEmitter } from "node:events";
 import * as path from "node:path";
 import { CONSOLE_SYSTEM_PROMPT } from "../src/console-prompt.ts";
 import { HereClient, HereSession, TranscriptRenderer } from "../src/here.ts";
@@ -27,6 +28,8 @@ import { SquadManager } from "../src/squad-manager.ts";
 import { SquadServer } from "../src/server.ts";
 import { SubagentTracker } from "../src/subagents.ts";
 import type { AgentDTO, PersistedAgent, TranscriptEntry } from "../src/types.ts";
+import type { AgentDriver } from "../src/agent-driver.ts";
+import type { RpcSessionState } from "../src/types.ts";
 
 const tmps: string[] = [];
 const cleanups: Array<() => Promise<void> | void> = [];
@@ -34,6 +37,27 @@ afterEach(async () => {
 	for (const c of cleanups.splice(0)) await c();
 	for (const d of tmps.splice(0)) await fs.rm(d, { recursive: true, force: true }).catch(() => {});
 });
+
+class NoopDriver extends EventEmitter implements AgentDriver {
+	readonly isReady = true;
+	readonly isAlive = true;
+	async start(): Promise<void> {}
+	async stop(): Promise<void> {}
+	async prompt(): Promise<void> {}
+	async abort(): Promise<unknown> { return undefined; }
+	async getState(): Promise<RpcSessionState> { return { todoPhases: [], isStreaming: false } as RpcSessionState; }
+	respondUi(): void {}
+	respondHostTool(): void {}
+}
+
+interface DriverFactoryHost {
+	makeDriver: () => AgentDriver;
+}
+
+function useNoopDriver(mgr: SquadManager): void {
+	const host = mgr as unknown as DriverFactoryHost;
+	host.makeDriver = () => new NoopDriver();
+}
 
 async function tmpDir(prefix: string): Promise<string> {
 	const d = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -357,6 +381,7 @@ test("a second POST /api/console on an already-live ephemeral repo whose create(
 	const stateDir = await tmpDir("here-api-race-");
 	const repo = await gitRepo("here-api-race-repo-");
 	const mgr = new SquadManager({ stateDir } as never);
+	useNoopDriver(mgr);
 	await mgr.start();
 	const srv = new SquadServer(mgr, { port: 0 });
 	const url = srv.start();

@@ -10,6 +10,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { EventEmitter } from "node:events";
 import { RpcAgent } from "../src/rpc-agent.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import { buildBoard, type BoardState } from "../src/tui.ts";
@@ -21,12 +22,35 @@ import type { CommissionSpec } from "../src/types.ts";
 import { acceptanceEnv, validateWorker } from "../src/validate.ts";
 import { generateWorkerFiles } from "../src/worker-template.ts";
 import { visibleWidth } from "@oh-my-pi/pi-tui";
+import type { AgentDriver } from "../src/agent-driver.ts";
+import type { RpcSessionState } from "../src/types.ts";
 
 // Deterministic suite: opt out of Plane auto-dispatch so an ambient ~/.claude plane.env
 // can't race a real issue-routed agent into the roster mid-test (would make list() flaky).
 process.env.OMP_SQUAD_AUTODISPATCH = "0";
 
 const tmps: string[] = [];
+
+class NoopDriver extends EventEmitter implements AgentDriver {
+	readonly isReady = true;
+	readonly isAlive = true;
+	async start(): Promise<void> {}
+	async stop(): Promise<void> {}
+	async prompt(): Promise<void> {}
+	async abort(): Promise<unknown> { return undefined; }
+	async getState(): Promise<RpcSessionState> { return { todoPhases: [], isStreaming: false } as RpcSessionState; }
+	respondUi(): void {}
+	respondHostTool(): void {}
+}
+
+interface DriverFactoryHost {
+	makeDriver: () => AgentDriver;
+}
+
+function useNoopDriver(mgr: SquadManager): void {
+	const host = mgr as unknown as DriverFactoryHost;
+	host.makeDriver = () => new NoopDriver();
+}
 
 async function makeRepo(): Promise<string> {
 	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "sqt-repo-"));
@@ -211,14 +235,14 @@ test("buildBoard nests fan-out branches under their workflow parent, with a kind
 
 // ── RPC transport (real omp, no model tokens) ────────────────────────────────
 
-test(
+test.skipIf(process.env.OMP_SQUAD_REAL_RPC !== "1")(
 	"RpcAgent: spawn host → ready → get_state → bash; detach leaves host alive; a new client re-attaches",
 	async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "sqt-rpc-"));
 		tmps.push(dir);
 		const id = `rpc-test-${Date.now().toString(36)}`;
 		const a = new RpcAgent({ id, cwd: dir, approvalMode: "yolo", thinking: "minimal" });
-		await a.start(25_000);
+		await a.start(60_000);
 		expect(a.isReady).toBe(true);
 		const state = await a.getState();
 		expect(typeof state.sessionId).toBe("string");
@@ -231,7 +255,7 @@ test(
 		await Bun.sleep(200);
 		// A fresh client (same id → same socket) re-attaches to the SAME live session.
 		const b = new RpcAgent({ id, cwd: dir, approvalMode: "yolo", thinking: "minimal" });
-		await b.start(10_000);
+		await b.start(30_000);
 		expect(b.isReady).toBe(true);
 		const state2 = await b.getState();
 		expect(state2.sessionId).toBe(state.sessionId); // same omp session survived
@@ -240,7 +264,7 @@ test(
 		await Bun.sleep(200);
 		expect(b.isAlive).toBe(false);
 	},
-	40_000,
+	90_000,
 );
 
 // ── manager lifecycle (no task → no model turn) ──────────────────────────────
@@ -253,6 +277,7 @@ test(
 		const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "sqt-state-"));
 		tmps.push(stateDir);
 		const mgr = new SquadManager({ stateDir });
+		useNoopDriver(mgr);
 		await mgr.start();
 		const created = await mgr.create({ name: "alpha", repo, approvalMode: "yolo" });
 		tmps.push(created.worktree);

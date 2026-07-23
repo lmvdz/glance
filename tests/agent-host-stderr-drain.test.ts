@@ -11,7 +11,7 @@ import { expect, test } from "bun:test";
 
 test("draining stderr (runAgentHost pattern) lets a chatty child exit", async () => {
 	// ~256KB to stderr — well past the ~64KB pipe buffer, so an undrained pipe would stall the child.
-	const child = "for (let i = 0; i < 4000; i++) process.stderr.write('x'.repeat(64) + '\\n'); process.exit(0);";
+	const child = "const { writeSync } = require('node:fs'); for (let i = 0; i < 4000; i++) writeSync(2, 'x'.repeat(64) + '\\n');";
 	const proc = Bun.spawn(["bun", "-e", child], { stdout: "ignore", stderr: "pipe" });
 
 	let bytes = 0;

@@ -17,6 +17,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { runProof } from "../src/proof.ts";
 import { SquadManager } from "../src/squad-manager.ts";
+import {
+	TRANSCRIPT_EVENT_GATE_VERDICT,
+	TRANSCRIPT_EVENT_LAND_ATTEMPT,
+	TRANSCRIPT_EVENT_LAND_MERGE,
+} from "../src/transcript-event-kinds.ts";
 import { SubagentTracker } from "../src/subagents.ts";
 import type { AgentDTO, PersistedAgent, PersistedFeature } from "../src/types.ts";
 import { validatorGate, type Judge } from "../src/validator.ts";
@@ -195,6 +200,16 @@ test("a passing judge lands normally and stamps agent.validation", async () => {
 	expect(result.merged).toBe(true);
 	expect(mgr.agents.get("a1")?.dto.validation?.verdict).toBe("pass");
 	expect(mgr.agents.get("a1")?.dto.validation?.agreement).toBe(1);
+	const events = mgr.getTranscript("a1").filter((e) => e.event);
+	expect(events.map((e) => e.event?.kind)).toContain(TRANSCRIPT_EVENT_GATE_VERDICT);
+	expect(events.map((e) => e.event?.kind)).toContain(TRANSCRIPT_EVENT_LAND_ATTEMPT);
+	expect(events.map((e) => e.event?.kind)).toContain(TRANSCRIPT_EVENT_LAND_MERGE);
+	const verdict = events.find((e) => e.event?.kind === TRANSCRIPT_EVENT_GATE_VERDICT);
+	expect(verdict?.status).toBe("ok");
+	expect(verdict?.event?.payload).toMatchObject({ verdict: "pass", agreement: 1, confidence: 0 });
+	const merge = events.find((e) => e.event?.kind === TRANSCRIPT_EVENT_LAND_MERGE);
+	expect(merge?.status).toBe("ok");
+	expect(merge?.event?.payload).toMatchObject({ stage: "finalized", agentId: "a1", branch });
 });
 
 test("a feature with no declared criteria ⇒ skipped, land proceeds (never invents criteria)", async () => {

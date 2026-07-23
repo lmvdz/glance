@@ -608,6 +608,17 @@ export interface TranscriptTool {
 
 export type TranscriptFormat = "markdown" | "command" | "stage" | "plain";
 
+export interface TranscriptEvent {
+  /**
+   * Open event taxonomy for manager-authored proof facts.
+   * HAZARD: this is NOT `TranscriptEntry.kind`; entry.kind is the closed render/source axis,
+   * while event.kind is an open, feature-owned fact taxonomy.
+   */
+  kind: string;
+  payload: unknown;
+}
+
+
 export interface TranscriptPending {
   requestId: string;
   action: "created" | "answered" | "cancelled";
@@ -630,7 +641,29 @@ export interface TranscriptEntry {
   tool?: TranscriptTool;
   format?: TranscriptFormat;
   pending?: TranscriptPending;
+  /**
+   * Optional typed proof event. HAZARD: `TranscriptEntry.kind` and `event.kind` are
+   * different axes: closed transcript/source axis vs open manager-authored fact taxonomy.
+   */
+  event?: TranscriptEvent;
 }
+
+export interface Channel {
+  id: string;
+  name: string;
+  createdAt: number;
+  kind: "default" | "user";
+}
+
+export interface ChannelEntry extends TranscriptEntry {
+  id: string;
+  seq: number;
+  channelId: string;
+  authorActor: string;
+  replyToId?: string;
+  event?: { kind: string; payload: unknown };
+}
+
 
 export interface CommandInfo {
   name: string;
@@ -727,6 +760,10 @@ export interface AuditEntry {
   detail?: string;
 }
 
+export type CommandAckDTO =
+  | { type: "command-ack"; clientTurnId: string; ok: true }
+  | { type: "command-ack"; clientTurnId: string; ok: false; reason: "missing-target" | "denied" | "duplicate" | "spawn-failed" };
+
 export type SquadEvent =
   | { type: "roster"; agents: AgentDTO[]; version: string }
   | { type: "agent"; agent: AgentDTO }
@@ -737,7 +774,9 @@ export type SquadEvent =
   | { type: "transcript"; id: string; entry: TranscriptEntry }
   | { type: "commands"; id: string; commands: CommandInfo[] }
   | { type: "log"; level: "info" | "warn" | "error"; text: string }
-  | { type: "transition"; entry: TransitionEntry };
+  | { type: "transition"; entry: TransitionEntry }
+  | { type: "channel-entry"; channelId: string; entry: ChannelEntry }
+  | CommandAckDTO;
 
 export type ClientCommand =
   | { type: "snapshot" }
