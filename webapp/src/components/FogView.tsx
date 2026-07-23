@@ -28,6 +28,7 @@ import { deriveFogPageContext } from '../lib/pageContextDerive';
 import { buildHeatTree, initialExpanded } from '../lib/heatmap';
 import type { HeatPayload } from '../lib/insights';
 import { PanelShell, HeatTree } from './ui';
+import { SymptomsCard } from './SymptomsCard';
 
 const RANGES = [7, 14, 30] as const;
 
@@ -135,6 +136,14 @@ export const FogView: React.FC = () => {
         {loaded && !error && (
           <HeatTree days={heat?.days ?? []} tree={tree} showPatterns={false} defaultExpanded={defaultExpanded} initialFogMode fogData={fog ?? undefined} />
         )}
+
+        {/* Recurring failure modes (comprehension concern 07) — fed live by units, previously
+            reachable only via ⌘K search (which requires knowing what to search for). Browsable
+            here because fog and symptoms answer the same operator question: what is going wrong
+            that nobody has looked at? */}
+        <div className="mt-4">
+          <SymptomsCard />
+        </div>
       </PanelShell>
     </PageContextScope>
   );

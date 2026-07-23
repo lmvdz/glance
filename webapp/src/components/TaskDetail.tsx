@@ -22,6 +22,7 @@ import { WorkflowGraphOverlay } from './WorkflowGraphOverlay';
 import { TaskSessionsTable, sessionRowsFromAgents } from './TaskSessionsTable';
 import { TaskArtifactsRail } from './TaskArtifactsRail';
 import { PlanRealityStrip } from './PlanRealityView';
+import { AfterActionSection } from './AfterActionCard';
 import { Kbd } from './kit/Kbd';
 import type { GraphConcernInput } from '../lib/planGraph';
 import type { TaskComment, TaskDecision, TaskRelationship } from '../types';
@@ -598,6 +599,13 @@ export const TaskDetail = () => {
   // Typed-session pipeline (reference A) over the same activeAgents the detailed per-agent panel
   // below already renders — one source of truth, two presentations (map vs. cockpit).
   const sessionRows = React.useMemo(() => sessionRowsFromAgents(activeAgents), [activeAgents]);
+  // After-action matching set: live roster ids UNION the pipeline's historical ids — a terminal
+  // unit's roster row is auto-reaped, so activeAgents alone would miss exactly the units that
+  // have post-mortems.
+  const afterActionAgentIds = React.useMemo(
+    () => [...new Set([...activeAgents.map((a) => a.id), ...(pipeline?.agentIds ?? [])])],
+    [activeAgents, pipeline?.agentIds],
+  );
   const openSession = React.useCallback((agentId: string) => {
     const el = document.getElementById(`agent-${agentId}`);
     el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -1813,6 +1821,11 @@ export const TaskDetail = () => {
               </div>
 
               <div className="mb-7"><ProofProvenancePanel task={task} /></div>
+
+              {/* Post-mortems for this task's terminal units (src/after-action.ts). Durable — they
+                  outlive auto-reaped roster rows, so the union with pipeline.agentIds catches units
+                  the live roster has already forgotten. Renders nothing when no report matches. */}
+              <AfterActionSection agentIds={afterActionAgentIds} />
 
               {!overviewDoc && (
                 <div className="mb-10">
