@@ -1,6 +1,6 @@
 # Epic M — Multi-daemon, identity, release
 
-STATUS: blocked
+STATUS: done — epic merged (see 00-meta close-out); verified on main, 2026-07-21 reality audit
 PRIORITY: p3
 REPOS: glance-desktop
 COMPLEXITY: architectural

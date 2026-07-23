@@ -1,6 +1,6 @@
 # 04 — Visibility panels: the loop's two invisible signals get a face
 
-STATUS: open
+STATUS: done — merged in PR #198 (5803a1a); verified on main, 2026-07-21 reality audit
 PRIORITY: p1
 COMPLEXITY: architectural
 TOUCHES: webapp/src/context/TaskContext.tsx, webapp/src/App.tsx, webapp/src/components/WorkbenchPane.tsx, webapp/src/components/ (new DailyPanel), tests

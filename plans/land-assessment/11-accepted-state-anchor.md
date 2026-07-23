@@ -1,5 +1,5 @@
 # Accepted-state anchor: manifest, checkpoints, continuity, lineage projector
-STATUS: open
+STATUS: done — merged via PRs #201/#212 (concern 08: 0bf3389, src/land-assessment/hook.ts); verified on main, 2026-07-21 reality audit
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural

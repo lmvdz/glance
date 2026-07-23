@@ -92,3 +92,40 @@ test("a ?repo= outside the actor-visible set yields nothing — fail closed, nev
 	const body = (await res.json()) as { results: SymptomSearchHit[] };
 	expect(body.results).toEqual([]);
 });
+
+// ── ?browse=1 — the SEPARATE browse contract (webapp SymptomsCard) ──────────────────────────────
+// Ranking still never degrades to an unranked dump (the test above holds); browsing is opted into
+// explicitly and returns newest-first full entries under the same actor-visible scoping.
+
+test("GET /api/symptoms?browse=1 returns newest-first full entries, viewer-tier, honoring topK", async () => {
+	const { url, state } = await fixture();
+	await saveSymptom(state, { id: "s1", symptom: "daemon healthy but dispatch stalled", whereToLook: ["src/dispatch.ts"], repo: "/srv/app", fixedBy: { prNumber: 42 }, landedAt: 1000 });
+	await saveSymptom(state, { id: "s2", symptom: "verify green but land never fires", whereToLook: ["src/land.ts"], repo: "/srv/app", fixedBy: {}, landedAt: 3000 });
+	await saveSymptom(state, { id: "s3", symptom: "gate container exits without a trace", whereToLook: ["src/gate.ts"], repo: "/srv/app", fixedBy: {}, landedAt: 2000 });
+
+	const res = await fetch(`${url}/api/symptoms?browse=1&topK=2`, authed());
+	expect(res.status).toBe(200);
+	const body = (await res.json()) as { symptoms: Array<{ id: string; whereToLook: string[]; landedAt: number }> };
+	expect(body.symptoms.map((s) => s.id)).toEqual(["s2", "s3"]); // newest-first, s1 cut by topK=2
+	expect(body.symptoms[0]!.whereToLook).toEqual(["src/land.ts"]); // full entry, not a snippet
+});
+
+test("browse=1 with a q still ranks — browse is only the explicit no-query contract", async () => {
+	const { url, state } = await fixture();
+	await saveSymptom(state, { id: "s1", symptom: "daemon healthy but dispatch stalled", whereToLook: ["src/dispatch.ts"], repo: "/srv/app", fixedBy: {}, landedAt: 1000 });
+	await saveSymptom(state, { id: "s2", symptom: "verify green but land never fires", whereToLook: ["src/land.ts"], repo: "/srv/app", fixedBy: {}, landedAt: 2000 });
+
+	const res = await fetch(`${url}/api/symptoms?browse=1&q=${encodeURIComponent("dispatch stalled")}`, authed());
+	const body = (await res.json()) as { results?: SymptomSearchHit[]; symptoms?: unknown };
+	expect(body.symptoms).toBeUndefined();
+	expect(body.results!.map((r) => r.id)).toEqual(["s1"]);
+});
+
+test("browse=1 fail-closes on a foreign ?repo= exactly like ranking does", async () => {
+	const { url, state } = await fixture(["/srv/app"]);
+	await saveSymptom(state, { id: "s1", symptom: "gamma's dispatch stalls under load", whereToLook: ["src/gamma.ts"], repo: "/srv/gamma", fixedBy: {}, landedAt: 1000 });
+
+	const res = await fetch(`${url}/api/symptoms?browse=1&repo=${encodeURIComponent("/srv/gamma")}`, authed());
+	const body = (await res.json()) as { symptoms: unknown[] };
+	expect(body.symptoms).toEqual([]);
+});

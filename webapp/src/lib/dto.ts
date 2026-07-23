@@ -744,6 +744,40 @@ export interface CapabilitySnapshotDTO {
   installs: CapabilityInstallDTO[];
 }
 
+export interface PlanBriefConcernDTO {
+  file: string;
+  path: string;
+  title: string;
+  status: string;
+  open: boolean;
+  priority?: string;
+  complexity?: string;
+  phase: number;
+  blockedBy: string[];
+  acceptanceCount: number;
+  touches: string[];
+}
+
+export interface PlanBriefDecisionDTO {
+  text: string;
+  source: "design" | "concern" | "overview";
+}
+
+export interface PlanBriefDTO {
+  planDir: string;
+  name: string;
+  title: string;
+  outcome: string;
+  status: { total: number; open: number; done: number; blocked: number; byStatus: Record<string, number> };
+  concerns: PlanBriefConcernDTO[];
+  timeline: Array<{ phase: number; title: string; gate: string; concernFiles: string[] }>;
+  outOfScope: string[];
+  decisions: PlanBriefDecisionDTO[];
+  touches: string[];
+  dependencyIssues: string[];
+  updatedAt: number;
+}
+
 /** One operator-/loop-initiated fleet mutation from the append-only audit log (GET /api/audit). */
 export interface AuditEntry {
   /** strictly-increasing id (epoch millis, bumped on collision) — stable sort + dedupe key. */

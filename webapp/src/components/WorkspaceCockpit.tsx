@@ -303,7 +303,7 @@ const UnstaffedRow: React.FC<{ row: FleetUnstaffedRow; busy: boolean; onStaff: (
  *  left-border + tint so it visibly reads as "special" inside the rail rather than looking
  *  identical to LAND READY/WORKING's plain gray headers — it's the one group that never collapses
  *  and is pinned above everything else, so its header should say so at a glance. */
-const GroupHeader: React.FC<{ title: string; count: number; collapsed?: boolean; onToggle?: () => void; tone?: 'default' | 'ember' }> = ({ title, count, collapsed, onToggle, tone = 'default' }) => {
+const GroupHeader: React.FC<{ title: string; count: number; collapsed?: boolean; onToggle?: () => void; tone?: 'default' | 'ember'; right?: React.ReactNode }> = ({ title, count, collapsed, onToggle, tone = 'default', right }) => {
   const body = (
     <>
       <MonoLabel>{title}</MonoLabel>
@@ -314,7 +314,12 @@ const GroupHeader: React.FC<{ title: string; count: number; collapsed?: boolean;
     ? 'border-l-2 border-l-[color:var(--wf-accent)] bg-[color:var(--wf-accent-soft)]'
     : 'bg-gray-50/60 dark:bg-ink-surface/40';
   if (!onToggle) {
-    return <div className={`flex items-center gap-2 border-y border-gray-100 px-3 py-1 dark:border-ink-border ${toneCls}`}>{body}</div>;
+    return (
+      <div className={`flex items-center gap-2 border-y border-gray-100 px-3 py-1 dark:border-ink-border ${toneCls}`}>
+        {body}
+        {right && <span className="ml-auto">{right}</span>}
+      </div>
+    );
   }
   return (
     <button
@@ -484,6 +489,11 @@ export const WorkspaceCockpit: React.FC = () => {
   const [idleExpanded, setIdleExpanded] = useState(false);
   const [workingExpanded, setWorkingExpanded] = useState(false);
   const [filter, setFilter] = useState('');
+  // Needs-you ranking (research-cmux concern 02): severity is the default; "blocked-longest"
+  // surfaces the row that has been waiting on the operator the longest. The library half
+  // (insights.ts attentionItems) shipped with tests but this toggle never did — every caller
+  // hardcoded severity, leaving the alternate ranking unreachable.
+  const [attnSort, setAttnSort] = useState<'severity' | 'blocked-longest'>('severity');
   const [staffingId, setStaffingId] = useState<string | null>(null);
   const [pushPerm, setPushPerm] = useState<NotificationPermission | 'unsupported'>(() => pushPermission());
 
@@ -527,8 +537,8 @@ export const WorkspaceCockpit: React.FC = () => {
   const capacity = useMemo(() => computeCapacity(gov), [gov]);
   const collisions = useMemo(() => detectCollisions(usage?.runs, agents), [usage?.runs, agents]);
   const attn = useMemo(
-    () => attentionItems({ actionItems: serverItems, agents, capacity, collisions }, { sort: 'severity' }),
-    [serverItems, agents, capacity, collisions],
+    () => attentionItems({ actionItems: serverItems, agents, capacity, collisions }, { sort: attnSort }),
+    [serverItems, agents, capacity, collisions, attnSort],
   );
   const workItems = useMemo(() => activeWork(agents, features), [agents, features]);
   const roster: FleetRoster = useMemo(() => buildFleetRoster(agents, attn, workItems), [agents, attn, workItems]);
@@ -833,7 +843,24 @@ export const WorkspaceCockpit: React.FC = () => {
         {/* NEEDS YOU — pinned, never collapses. Own scroll cap so a pathological number of
             blocked agents can't swallow the whole rail; everything else scrolls below it. */}
         <div className="flex-shrink-0 border-b border-gray-200 dark:border-ink-border">
-          <GroupHeader title="Needs you" count={needsCount} tone="ember" />
+          <GroupHeader
+            title="Needs you"
+            count={needsCount}
+            tone="ember"
+            right={
+              needsCount > 1 ? (
+                <button
+                  type="button"
+                  onClick={() => setAttnSort((s) => (s === 'severity' ? 'blocked-longest' : 'severity'))}
+                  className="rounded px-1.5 py-0.5 text-[10px] font-medium text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-gray-400 dark:hover:bg-ink-surface/70 dark:hover:text-gray-200"
+                  title={attnSort === 'severity' ? 'Rank by how long each row has been waiting on you' : 'Rank by severity'}
+                  aria-label={`Sort needs-you rows by ${attnSort === 'severity' ? 'blocked longest' : 'severity'}`}
+                >
+                  {attnSort === 'severity' ? 'severity' : 'waiting longest'}
+                </button>
+              ) : undefined
+            }
+          />
           {needsCount === 0 ? (
             <div className="flex items-center gap-2 px-3 py-3 text-[11px] text-emerald-600 dark:text-emerald-400">
               {calmLine(filteredWorking.length, capacity.roomFor)}

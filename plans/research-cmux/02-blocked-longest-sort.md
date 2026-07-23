@@ -1,5 +1,5 @@
 # blocked-longest sort on the attention panel
-STATUS: closed
+STATUS: closed — 2026-07-21: the library half (insights.ts) shipped with tests, but every render site hardcoded `{ sort: 'severity' }`, so the operator toggle this concern exists for was unreachable (AttentionPanel itself was later deleted by nav-consolidation). Toggle delivered on the cockpit's "Needs you" header by the surface-invisible-observability PR.
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical

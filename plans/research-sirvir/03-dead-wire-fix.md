@@ -1,6 +1,6 @@
 # Dead-wire fix — reconnect the interactive spawn router (DB-safe)
 
-STATUS: in-review (PR feat/sirvir-04-03-cost-and-wire — wired + regression-tested, see notes)
+STATUS: done — feat/sirvir-04-03-cost-and-wire merged (PR #111), wired + regression-tested; verified on main, 2026-07-21 reality audit
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical

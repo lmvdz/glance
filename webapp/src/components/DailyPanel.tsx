@@ -14,8 +14,12 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Gauge, RefreshCw, Zap, MessageSquareText, Inbox } from 'lucide-react';
-import { apiJson } from '../lib/api';
+import { ChevronRight, Gauge, RefreshCw, Table2, Zap, MessageSquareText, Inbox } from 'lucide-react';
+import { apiJson, fetchLearningLoop, type EpisodeMetaDTO } from '../lib/api';
+import { coerceLearningLoop, type LearningLoopWire } from '../lib/loop-meters';
+import { EpisodesCard } from './EpisodesCard';
+import { LoopMetersCard } from './LoopMetersCard';
+import { TaskClassMatrixPanel } from './TaskClassMatrixPanel';
 import {
   buildAdoptionView,
   coerceAdoptionCounters,
@@ -176,15 +180,24 @@ function subtitleFor(view: AdoptionView | null): string {
 export const DailyPanel: React.FC = () => {
   const [counters, setCounters] = useState<AdoptionCountersWire | null>(null);
   const [friction, setFriction] = useState<FrictionEntryWire[] | null>(null);
+  const [loop, setLoop] = useState<LearningLoopWire | null>(null);
+  const [episodes, setEpisodes] = useState<EpisodeMetaDTO[] | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState('');
   const [frictionError, setFrictionError] = useState('');
+  const [loopError, setLoopError] = useState('');
+  const [episodesError, setEpisodesError] = useState('');
+  const [matrixOpen, setMatrixOpen] = useState(false);
 
   const load = useCallback(async () => {
-    // Both signals refresh together; one dead endpoint must never blank the other (FogView idiom).
-    const [a, f] = await Promise.allSettled([
+    // All signals refresh together; one dead endpoint must never blank the others (FogView idiom).
+    // /api/episodes without ?repo= is the server's every-actor-visible-repo merge, server-sorted
+    // newest week first.
+    const [a, f, l, e] = await Promise.allSettled([
       apiJson<unknown>('/api/adoption'),
       apiJson<unknown>('/api/friction?limit=50'),
+      fetchLearningLoop(),
+      apiJson<{ episodes: EpisodeMetaDTO[] }>('/api/episodes'),
     ]);
     if (a.status === 'fulfilled') {
       setCounters(coerceAdoptionCounters(a.value));
@@ -197,6 +210,18 @@ export const DailyPanel: React.FC = () => {
       setFrictionError('');
     } else {
       setFrictionError('Could not reach the daemon for the friction ledger.');
+    }
+    if (l.status === 'fulfilled') {
+      setLoop(coerceLearningLoop(l.value));
+      setLoopError('');
+    } else {
+      setLoopError('Could not reach the daemon for learning-loop meters.');
+    }
+    if (e.status === 'fulfilled') {
+      setEpisodes(Array.isArray(e.value.episodes) ? e.value.episodes : []);
+      setEpisodesError('');
+    } else {
+      setEpisodesError('Could not reach the daemon for weekly episodes.');
     }
     setLoaded(true);
   }, []);
@@ -250,7 +275,22 @@ export const DailyPanel: React.FC = () => {
             </div>
           )}
           {view && <AdoptionCounters view={view} />}
+          <LoopMetersCard loop={loop} loaded={loaded} error={loopError || undefined} />
           <FrictionLedger entries={friction ?? []} loaded={loaded} error={frictionError || undefined} />
+          <EpisodesCard episodes={episodes ?? []} loaded={loaded} error={episodesError || undefined} />
+          {/* Task-class × model scoreboard — restored from the PR #71 reland that dropped it; its
+              backend + /api/graph/task-class kept running with zero renderers. Collapsed by default
+              (it's a power-user matrix, and Daily stays scannable) and gated on `matrixOpen` so the
+              panel's self-fetch + 10s poll only run once expanded — a <details>' children stay
+              mounted in React whether or not the disclosure is open. */}
+          <details className="group" onToggle={(e) => setMatrixOpen((e.currentTarget as HTMLDetailsElement).open)}>
+            <summary className="flex cursor-pointer select-none items-center gap-2 rounded-lg border border-gray-200 px-4 py-2.5 text-[11px] font-semibold uppercase tracking-widest text-gray-400 hover:text-gray-600 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-500 dark:border-gray-800 dark:hover:text-gray-200 list-none">
+              <ChevronRight className="h-3.5 w-3.5 transition-transform group-open:rotate-90" aria-hidden="true" />
+              <Table2 className="h-3.5 w-3.5" aria-hidden="true" />
+              <span className="mr-auto">Task-class &times; model scoreboard</span>
+            </summary>
+            <div className="mt-3">{matrixOpen && <TaskClassMatrixPanel />}</div>
+          </details>
         </>
       )}
     </PanelShell>

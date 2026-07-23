@@ -1,5 +1,5 @@
 # Confidence integration — advisory lens verdict into the auto-land hold lever
-STATUS: in-review
+STATUS: done — re-landed via PR #110 (c112a4f), lens code + tests on main; verified on main, 2026-07-21 reality audit
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical

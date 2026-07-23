@@ -1,6 +1,6 @@
 # Model-identity key coherence — record must equal read
 
-STATUS: in-review
+STATUS: done — merged (sirvir PR series #105/#108); verified on main, 2026-07-21 reality audit
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural

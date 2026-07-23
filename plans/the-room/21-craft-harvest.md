@@ -1,5 +1,5 @@
 # Craft harvest — t3-face's shipped visual work becomes the room's design language
-STATUS: open
+STATUS: done
 PRIORITY: p2
 REPOS: omp-squad, glance-desktop (read-only)
 COMPLEXITY: research
@@ -29,3 +29,6 @@ None (read-only over glance-desktop).
 ## Verify
 - CRAFT-HARVEST.md exists, is cited by at least concerns 07/08 at their implementation time, and
   the PR #215 recommendation is recorded.
+
+## Resolution
+Landed 2026-07-23 (PR #225): plans/the-room/CRAFT-HARVEST.md adoption list; PR #215 recommendation resolved (merged).

@@ -1,5 +1,5 @@
 # Pre-dispatch harness scorecard (advisory shadow)
-STATUS: in-review
+STATUS: done — merged in PR #115 (b395b89), src/harness-scorecard.ts live on main; verified on main, 2026-07-21 reality audit
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: architectural

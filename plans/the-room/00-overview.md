@@ -87,6 +87,7 @@ directive; ordering, not deferral, carries the discipline.
 - Porting old webapp panels into the shell wholesale — delete-not-port; surfaces earn doors
 
 ## Decisions so far
+- Wave 0 landed 2026-07-23 as one merge train (PR #225) after the catastrophe recovery — 6/24 concerns done (01/03/04/06/21/24); 02 resuming with cross-lineage gate; 05 dispatched; see memory omp-squad-wave0-catastrophe-layers for the 6-layer post-mortem
 
 - [DESIGN.md](DESIGN.md) — arbitrated final: HubShell root, durability split, WS identity, manager-only proof cards, needs-you flagship door + historical gate-verdict mode, guarded mention grammar, projection routing, kind-with-reader landing order
 - Design gate (Lars, 2026-07-22) — room leads daily-driver; rail-entrance softening ratified; DB-only multiplayer ratified

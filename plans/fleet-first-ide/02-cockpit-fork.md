@@ -1,6 +1,6 @@
 # Epic C — Cockpit fork + native fleet module
 
-STATUS: open
+STATUS: done — epic merged (see 00-meta close-out); verified on main, 2026-07-21 reality audit
 PRIORITY: p1
 REPOS: glance-desktop (created by C01), omp-squad (daemon API additions where needed)
 COMPLEXITY: architectural
