@@ -129,18 +129,6 @@ async function resolveDefaultBranchBestEffort(repo: string, prBase?: string): Pr
 	}
 }
 
-async function defaultBranchFromOrigin(repo: string): Promise<string | undefined> {
-	const symref = await hardenedGit(["ls-remote", "--symref", "origin", "HEAD"], { cwd: repo });
-	const symrefMatch = symref.code === 0 ? /^ref:\s+refs\/heads\/(\S+)\s+HEAD/m.exec(symref.stdout) : null;
-	if (symrefMatch?.[1]) return symrefMatch[1];
-	const heads = await hardenedGit(["ls-remote", "--heads", "origin"], { cwd: repo });
-	if (heads.code !== 0) return undefined;
-	const branches = heads.stdout
-		.split("\n")
-		.map((line) => line.trim().match(/\srefs\/heads\/(.+)$/)?.[1])
-		.filter((branch): branch is string => Boolean(branch));
-	return branches.find((branch) => branch === "main") ?? branches.find((branch) => branch === "master") ?? branches[0];
-}
 
 async function probe(repo: string, prBase?: string): Promise<ResolvedLandMode> {
 	// 1. owner/repo slug from origin — repoIdentity()/normalizeGitUrl() (src/repo-identity.ts) return
@@ -152,11 +140,11 @@ async function probe(repo: string, prBase?: string): Promise<ResolvedLandMode> {
 	if (parts.length < 3) return { mode: "local", reason: `no parseable owner/repo from origin (${identity})` };
 	const slug = parts.slice(-2).join("/"); // "owner/repo"
 
-	// 2. Resolve the default branch. gh is authoritative for hosted repos, but Bun's process-wide
-	// module mocks can replace `ghJson` under the full suite after this module was imported. If gh
-	// yields nothing, fall back to the remote's own refs; a missing fallback still fails closed here.
+	// 2. Resolve the default branch. gh is authoritative for hosted repos; `OMP_SQUAD_PR_BASE` remains
+	//    the explicit no-network override. If gh yields nothing in auto mode, fail closed instead of
+	//    probing a hosted SSH origin directly — that can hang tests and is weaker than the gh answer.
 	const view = await ghJson<{ defaultBranchRef: { name: string } }>(["repo", "view", slug, "--json", "defaultBranchRef"], repo);
-	const defaultBranch = (prBase ?? process.env.OMP_SQUAD_PR_BASE) || view?.defaultBranchRef?.name || (await defaultBranchFromOrigin(repo));
+	const defaultBranch = (prBase ?? process.env.OMP_SQUAD_PR_BASE) || view?.defaultBranchRef?.name;
 	if (!defaultBranch) return { mode: "local", reason: `gh repo view ${slug} failed or has no default branch` };
 
 	// 3. Write-capability probe — catches per-repo transport/auth failures (gh auth ≠ push works)

@@ -201,19 +201,30 @@ test.serial("probe 5: a converged local default + non-default checkout ⇒ pr", 
 });
 
 test.serial("probe 5: no local <default> ref at all (cloned straight onto a branch) ⇒ pr, nothing to strand", async () => {
-	const seed = await convergedRepo("lm-nolocaldefault-");
-	const originUrl = (await git(seed, "remote", "get-url", "origin")).stdout;
-	const clonesRoot = await tmpDir("lm-nolocaldefault-clones-");
-	const clone = path.join(clonesRoot, "clone");
-	await git(clonesRoot, "clone", "-q", originUrl, clone);
-	await git(clone, "config", "user.email", "t@t");
-	await git(clone, "config", "user.name", "t");
-	await git(clone, "checkout", "-qb", "work");
-	await git(clone, "branch", "-D", "main"); // no refs/heads/main remains
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "lm-nolocaldefault-private-"));
+	try {
+		const seed = path.join(root, "seed");
+		const origin = path.join(root, "origin.git");
+		const clone = path.join(root, "clone");
+		await git(root, "init", "-q", "--bare", origin);
+		await git(root, "init", "-q", "-b", "main", seed);
+		await git(seed, "config", "user.email", "t@t");
+		await git(seed, "config", "user.name", "t");
+		await commit(seed, "a.txt", "a\n", "base");
+		await git(seed, "remote", "add", "origin", origin);
+		await git(seed, "push", "-q", "origin", "main");
+		await git(root, "clone", "-q", origin, clone);
+		await git(clone, "config", "user.email", "t@t");
+		await git(clone, "config", "user.name", "t");
+		await git(clone, "checkout", "-qb", "work");
+		await git(clone, "branch", "-D", "main"); // no refs/heads/main remains
 
-	const resolved = await resolveLandMode(clone, { landMode: "auto", prBase: "main" });
-	expect(resolved.mode).toBe("pr");
-	expect(resolved.defaultBranch).toBe("main");
+		const resolved = await resolveLandMode(clone, { landMode: "auto", prBase: "main" });
+		expect(resolved.mode).toBe("pr");
+		expect(resolved.defaultBranch).toBe("main");
+	} finally {
+		await fs.rm(root, { recursive: true, force: true }).catch(() => {});
+	}
 });
 
 // ── all 5 pass ───────────────────────────────────────────────────────────────────────────────────
