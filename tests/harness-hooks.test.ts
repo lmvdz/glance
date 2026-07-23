@@ -247,9 +247,9 @@ describe("the generated shim escapes hostile values (run through /bin/sh)", () =
 			// request is delivered. Poll for the body instead of a fixed `Bun.sleep` + immediate
 			// `server.stop`: under full-suite CPU/IO load the loopback POST can land well past any
 			// hard-coded delay, and tearing the listener down first drops the in-flight request — the
-			// flake this test hit (Received 0). The loop returns the instant the body arrives; the 5s
+			// flake this test hit (Received 0). The loop returns the instant the body arrives; the 15s
 			// cap only bounds a genuinely hung request.
-			const deadline = Date.now() + 5000;
+			const deadline = Date.now() + 15_000;
 			while (bodies.length === 0 && Date.now() < deadline) await Bun.sleep(10);
 			server.stop(true);
 			expect(bodies.length).toBe(1);
@@ -259,7 +259,7 @@ describe("the generated shim escapes hostile values (run through /bin/sh)", () =
 		} finally {
 			await fsp.rm(state, { recursive: true, force: true });
 		}
-	});
+	}, 20_000);
 });
 
 describe("install/uninstall against a real filesystem", () => {

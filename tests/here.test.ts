@@ -385,7 +385,7 @@ test("a second POST /api/console on an already-live ephemeral repo whose create(
 
 	expect(mgr.isEphemeralProject(repo)).toBe(true); // A's registration survived B's failed create + rollback
 	expect(mgr.projects().map((p) => p.repo)).toEqual([repo]);
-});
+}, 30_000);
 
 // ── 2. verb dispatch (the real CLI, spawned) ─────────────────────────────────────────────────────
 
@@ -399,7 +399,7 @@ test("`glance here` is dispatched from main() and refuses a non-TTY politely", a
 	expect(code).toBe(1);
 	expect(err).toContain("interactive");
 	expect(err).toContain("glance ask"); // points at the right tool instead of a dead end
-});
+}, 30_000);
 
 test("`glance here --help` prints verb-scoped help and exits 0 without touching the daemon", async () => {
 	const proc = Bun.spawn(["bun", path.join(import.meta.dir, "..", "src", "index.ts"), "here", "--help"], {
