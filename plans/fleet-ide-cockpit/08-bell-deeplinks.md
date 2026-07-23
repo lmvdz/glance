@@ -1,6 +1,6 @@
 # C08 — bell + deep links
 
-STATUS: open
+STATUS: done — merged in glance-desktop (99c6eb7…e2918ca); verified on main, 2026-07-21 reality audit
 PRIORITY: p2
 REPOS: glance-desktop
 COMPLEXITY: mechanical

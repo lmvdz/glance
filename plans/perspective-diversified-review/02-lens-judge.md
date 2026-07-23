@@ -1,5 +1,5 @@
 # Lens judge machinery — one out-of-criteria lens on the existing judge path
-STATUS: in-review
+STATUS: done — re-landed via PR #110 (c112a4f), lens code + tests on main; verified on main, 2026-07-21 reality audit
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural

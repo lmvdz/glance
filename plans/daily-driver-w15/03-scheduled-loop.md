@@ -1,6 +1,6 @@
 # 03 — Scheduled loop: the drain fires without Lars remembering
 
-STATUS: open
+STATUS: done — merged in PR #198 (5803a1a); verified on main, 2026-07-21 reality audit
 PRIORITY: p1
 COMPLEXITY: mechanical
 TOUCHES: .claude/skills/dogfood-drain/SKILL.md, plans/daily-driver/00-meta.md, a local scheduled routine (no daemon code)

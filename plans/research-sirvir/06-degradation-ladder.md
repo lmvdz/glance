@@ -1,6 +1,6 @@
 # Graceful degradation ladder — provider-scoped, per-unit, fail-safe (GOAL 2)
 
-STATUS: in-review
+STATUS: done — merged (PR #114); verified on main, 2026-07-21 reality audit
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: architectural

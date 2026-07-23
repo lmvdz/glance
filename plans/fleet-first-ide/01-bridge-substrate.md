@@ -1,6 +1,6 @@
 # Epic B — Bridge substrate (glance-side, no fork required)
 
-STATUS: open
+STATUS: done — epic merged (see 00-meta close-out); verified on main, 2026-07-21 reality audit
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural

@@ -1,6 +1,6 @@
 # glance open — fleet→worktree jump
 
-STATUS: in-review (PR #178)
+STATUS: done — PR #178 merged, branch patch-equivalent to main; verified on main, 2026-07-21 reality audit
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical

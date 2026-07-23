@@ -1,6 +1,6 @@
 # Cost-weighted selection — bounded, null-safe, tie-breaker not veto
 
-STATUS: in-review (PR feat/sirvir-04-03-cost-and-wire — bounded two-stage shift shipped, see notes)
+STATUS: done — feat/sirvir-04-03-cost-and-wire merged (PR #111), bounded two-stage shift shipped; verified on main, 2026-07-21 reality audit
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural

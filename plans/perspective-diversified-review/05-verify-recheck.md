@@ -1,5 +1,5 @@
 # VERIFY re-check — one narrow second look at a high-severity objection
-STATUS: in-review
+STATUS: done — re-landed via PR #110 (c112a4f), lens code + tests on main; verified on main, 2026-07-21 reality audit
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: architectural
