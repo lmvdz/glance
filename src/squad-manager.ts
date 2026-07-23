@@ -6504,7 +6504,7 @@ export class SquadManager extends EventEmitter {
 
 		await this.persist();
 		const failed = rec.dto.status === "error";
-		void this.recordAudit(actor, "create", rec.dto.id, failed ? "error" : "ok", failed ? rec.dto.error : truncateLabel(opts.task ?? rec.dto.name, 80), source);
+		await this.recordAudit(actor, "create", rec.dto.id, failed ? "error" : "ok", failed ? rec.dto.error : truncateLabel(opts.task ?? rec.dto.name, 80), source);
 		return rec.dto;
 	}
 

@@ -200,7 +200,7 @@ test("probe 5: a converged local default + non-default checkout ⇒ pr", async (
 	expect(resolved.mode).toBe("pr");
 });
 
-test("probe 5: no local <default> ref at all (cloned straight onto a branch) ⇒ pr, nothing to strand", async () => {
+test.serial("probe 5: no local <default> ref at all (cloned straight onto a branch) ⇒ pr, nothing to strand", async () => {
 	const seed = await convergedRepo("lm-nolocaldefault-");
 	const originUrl = (await git(seed, "remote", "get-url", "origin")).stdout;
 	const clonesRoot = await tmpDir("lm-nolocaldefault-clones-");
@@ -211,7 +211,7 @@ test("probe 5: no local <default> ref at all (cloned straight onto a branch) ⇒
 	await git(clone, "checkout", "-qb", "work");
 	await git(clone, "branch", "-D", "main"); // no refs/heads/main remains
 
-	const resolved = await resolveLandMode(clone, { landMode: "auto" });
+	const resolved = await resolveLandMode(clone, { landMode: "auto", prBase: "main" });
 	expect(resolved.mode).toBe("pr");
 	expect(resolved.defaultBranch).toBe("main");
 });
