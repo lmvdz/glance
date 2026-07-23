@@ -1174,7 +1174,7 @@ export class SquadServer {
 	}
 
 	private presenceForOrg(orgId: string | undefined): PresenceSnapshot {
-		if (!this.registry) return { users: [{ id: this.operator.id, displayName: this.operator.displayName ?? this.operator.id, socketCount: this.clients.size }] };
+		if (!this.registry) return { users: this.clients.size === 0 ? [] : [{ id: this.operator.id, displayName: this.operator.displayName ?? this.operator.id, socketCount: this.clients.size }] };
 		if (!orgId) return { users: [] };
 		const users = [...(this.presenceByOrg.get(orgId) ?? new Map()).entries()]
 			.map(([id, presence]) => ({ id: `db:${id}`, displayName: presence.displayName, socketCount: presence.sockets.size }))

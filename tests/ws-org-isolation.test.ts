@@ -322,6 +322,8 @@ test("file-mode WS commands and presence use the single shared operator identity
 	const presence = await fetch(`${url}/api/room/presence`).then((res) => res.json());
 	expect(presence).toEqual({ users: [{ id: "test-op", displayName: "test-op", socketCount: 1 }] });
 	await closeAndWait(ws.ws);
+	const empty = await fetch(`${url}/api/room/presence`).then((res) => res.json());
+	expect(empty).toEqual({ users: [] });
 });
 
 test("DB-registry WebSocket denies missing sessions and failed active-org membership lookups", async () => {
