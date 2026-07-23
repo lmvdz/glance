@@ -615,6 +615,11 @@ export interface TranscriptEvent {
    * while event.kind is an open, feature-owned fact taxonomy.
    */
   kind: string;
+  /**
+   * Attesting authority, stamped daemon-side at the emit chokepoint — never client
+   * input. Absent on pre-provenance entries; reads as "manager" (the only issuer today).
+   */
+  issuer?: string;
   payload: unknown;
 }
 
@@ -661,7 +666,7 @@ export interface ChannelEntry extends TranscriptEntry {
   channelId: string;
   authorActor: string;
   replyToId?: string;
-  event?: { kind: string; payload: unknown };
+  event?: { kind: string; issuer?: string; payload: unknown };
 }
 
 

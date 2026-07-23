@@ -17,7 +17,9 @@ presence, and membership all sit on this substrate (A-C2).
    at src/server.ts:1354). Stamp userId + displayName into SocketData in DB mode.
 2. actorForSocket returns `{id: "db:"+userId, displayName, origin:"local", role, orgId}` matching
    the HTTP-path actor shape (src/server.ts:1755-1760) so audit/RBAC attribution is consistent
-   across transports.
+   across transports. `origin` is load-bearing even though it only ever holds "local" today —
+   it is the reserved namespace for foreign attestors (federation provenance amendment,
+   DESIGN.md 2026-07-23); do not simplify it away in review.
 3. Presence: per-user socket sets per org (a user with 3 tabs is one present human); expose
    `GET /api/presence` + a presence SquadEvent arm (or fold into channel events); per-org fan-out.
 4. File mode: single shared "operator" identity, stated in code comment and docs — multiplayer

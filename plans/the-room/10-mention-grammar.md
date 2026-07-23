@@ -25,7 +25,10 @@ concurrency stance: last-write-wins, both steers visible in-channel.
    response (or the webapp renders confirm before send when DTO status is working — pick
    daemon-side so multi-tab is covered); confirm card mirrors SpawnConfirmSheet.
 4. Spawn-from-mention: non-resident mention → spawn-proposal card in the channel (prompt-only
-   /api/spawn + channelId from concern 05); confirm → spawn; SpawnStatusCard tracks.
+   /api/spawn + channelId from concern 05); confirm → spawn; SpawnStatusCard tracks. Reserved
+   extension point (name only, no shape — federation provenance amendment, DESIGN.md
+   2026-07-23): a federated `@vendor-capability` mention enters here as a non-resident target
+   whose spawn is a contract; don't design the resolver so residency is the only axis.
 5. Channel echo: accepted steer appends a manager-authored entry to the channel naming actor,
    target, and the steer text (redacted/neutralized).
 6. Reply routing: agent replies render in the target unit's room; the channel gets the echo +

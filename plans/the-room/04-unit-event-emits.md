@@ -42,3 +42,9 @@ None (dto mirror only).
 
 ## Resolution
 Landed 2026-07-23 (PR #225): TranscriptEntry.event substrate + land-lifecycle + ValidationRecord verdict emits. Supersedes buzz-borrows 01.
+
+Amended 2026-07-23 (federation provenance, DESIGN.md amendment): the envelope gained
+`issuer`, stamped as `EVENT_ISSUER_MANAGER` at emitUnitTranscriptEvent /
+ChannelStore.appendManager, never from input. Pre-amendment persisted entries lack it and
+read as "manager". The authorship invariant is now "issuer verified at the chokepoint",
+of which "manager-authored only" is the current single-writer special case.

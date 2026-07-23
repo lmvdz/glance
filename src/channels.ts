@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Store } from "./dal/store.ts";
 import { neutralizeDelimiters } from "./digest.ts";
 import { redact } from "./redact.ts";
+import { EVENT_ISSUER_MANAGER } from "./transcript-event-kinds.ts";
 import type { Actor, TranscriptEntry } from "./types.ts";
 
 export const DEFAULT_CHANNEL_ID = "fleet";
@@ -22,8 +23,12 @@ export interface ChannelEntry extends TranscriptEntry {
 	channelId: string;
 	authorActor: string;
 	replyToId?: string;
-	/** Manager-authored card payload. Client appends must never set this. */
-	event?: { kind: string; payload: unknown };
+	/**
+	 * Manager-authored card payload. Client appends must never set this; `issuer` is
+	 * stamped by appendManager from the verified writer, never from input. Optional only
+	 * because rows persisted before provenance landed lack it (those read as "manager").
+	 */
+	event?: { kind: string; issuer?: string; payload: unknown };
 }
 
 export interface ClientChannelPost {
@@ -115,7 +120,7 @@ export class ChannelStore {
 			ts: this.now(),
 			status: "ok",
 			format: input.format ?? "markdown",
-			...(input.event ? { event: { kind: input.event.kind, payload: sanitizeManagerValue(input.event.payload) } } : {}),
+			...(input.event ? { event: { kind: input.event.kind, issuer: EVENT_ISSUER_MANAGER, payload: sanitizeManagerValue(input.event.payload) } } : {}),
 		};
 		await this.store.appendChannelEntry(entry);
 		this.hotTail.push(entry);
