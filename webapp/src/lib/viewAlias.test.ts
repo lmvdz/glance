@@ -3,7 +3,7 @@ import { bootstrapViewFromQuery, coerceView, isAppView, VIEW_ALIAS_MAP, VIEW_STO
 
 describe('isAppView', () => {
   test('true for every current AppView key', () => {
-    for (const v of ['fleet', 'tasks', 'omp-graph', 'fog', 'daily', 'capabilities', 'org', 'intervene', 'review', 'plan-reality']) {
+    for (const v of ['fleet', 'tasks', 'omp-graph', 'fog', 'daily', 'capabilities', 'org', 'intervene', 'review', 'plan-reality', 'plan-brief']) {
       expect(isAppView(v)).toBe(true);
     }
   });

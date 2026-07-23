@@ -4,6 +4,7 @@ import { jsonInit, apiJson } from '../lib/api';
 import { projectsByTeam, resolveCurrentProject, tasksForProject, tasksFromSquad } from '../lib/task-model';
 import { buildReviewHash, parseReviewHash } from '../lib/plan-doc-review';
 import { buildPlanRealityHash, parsePlanRealityHash } from '../lib/plan-reality-route';
+import { buildPlanBriefHash, parsePlanBriefHash } from '../lib/plan-brief-route';
 import { parseAgentHash } from '../lib/agent-link';
 import { useSquad } from '../hooks/useSquad';
 import { coerceView, VIEW_STORAGE_KEY } from '../lib/viewAlias';
@@ -32,7 +33,7 @@ export interface ToastInfo {
  * verdict) — `fog` is a genuinely NEW view, not a resurrection of the retired Heat page; it has no
  * entry in `VIEW_ALIAS_MAP`.
  */
-export type AppView = 'fleet' | 'tasks' | 'omp-graph' | 'fog' | 'daily' | 'capabilities' | 'org' | 'intervene' | 'review' | 'plan-reality';
+export type AppView = 'fleet' | 'tasks' | 'omp-graph' | 'fog' | 'daily' | 'capabilities' | 'org' | 'intervene' | 'review' | 'plan-reality' | 'plan-brief';
 export type TaskFilter = 'open' | 'active' | 'done' | 'all';
 
 /** Read the raw persisted view key (pre-coercion) — a plain function so both the `view` and
@@ -138,6 +139,8 @@ interface TaskContextType {
    *  ⇒ the plans index. Mirrors the deep-linkable `#/plan-reality[/:featureId]` hash, same pattern
    *  as `reviewTaskId`/openReview. */
   planRealityFeatureId: string | null;
+  /** The plans/<name> directory rendered as a styled brief. null ⇒ brief index. */
+  planBriefName: string | null;
   reload: () => Promise<void>;
   setView: (view: AppView) => void;
   setTaskFilter: (filter: TaskFilter) => void;
@@ -158,6 +161,10 @@ interface TaskContextType {
   openPlanReality: (featureId?: string) => void;
   /** Leave the plan-reality screen back to Tasks. */
   closePlanReality: () => void;
+  /** Route to a styled deterministic plan explainer. Omit name for the briefs index. */
+  openPlanBrief: (name?: string) => void;
+  /** Leave the plan-brief screen back to Tasks. */
+  closePlanBrief: () => void;
   /** Switch the workspace to another project. Persisted; scopes `tasks`, chat and spawn — never the Fleet. */
   selectProject: (id: string) => void;
   /** Register a repo as a project (POST /api/projects). Absolute path to a git repo; the daemon validates. */
@@ -258,6 +265,7 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   const [reviewTaskId, setReviewTaskId] = useState<string | null>(null);
   const [reviewDocPath, setReviewDocPath] = useState<string | undefined>(undefined);
   const [planRealityFeatureId, setPlanRealityFeatureId] = useState<string | null>(null);
+  const [planBriefName, setPlanBriefName] = useState<string | null>(null);
   const [audit, setAudit] = useState<AuditEntry[]>([]);
 
   useEffect(() => {
@@ -332,6 +340,18 @@ export function TaskProvider({ children }: { children: ReactNode }) {
     if (window.location.hash.startsWith('#/plan-reality')) history.replaceState(null, '', window.location.pathname + window.location.search);
   };
 
+  const openPlanBrief = (name?: string) => {
+    setPlanBriefName(name ?? null);
+    setView('plan-brief');
+    window.location.hash = name ? buildPlanBriefHash({ name }) : '#/plans';
+  };
+
+  const closePlanBrief = () => {
+    setView('tasks');
+    if (window.location.hash.startsWith('#/plans')) history.replaceState(null, '', window.location.pathname + window.location.search);
+  };
+
+
   useEffect(() => {
     const applyHash = () => {
       const parsed = parseReviewHash(window.location.hash);
@@ -356,6 +376,23 @@ export function TaskProvider({ children }: { children: ReactNode }) {
       if (!parsed) return;
       setPlanRealityFeatureId(parsed.featureId ?? null);
       setView('plan-reality');
+    };
+    applyHash();
+    window.addEventListener('hashchange', applyHash);
+    return () => window.removeEventListener('hashchange', applyHash);
+  }, []);
+
+  useEffect(() => {
+    const applyHash = () => {
+      if (window.location.hash === '#/plans') {
+        setPlanBriefName(null);
+        setView('plan-brief');
+        return;
+      }
+      const parsed = parsePlanBriefHash(window.location.hash);
+      if (!parsed) return;
+      setPlanBriefName(parsed.name);
+      setView('plan-brief');
     };
     applyHash();
     window.addEventListener('hashchange', applyHash);
@@ -598,7 +635,7 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <TaskContext.Provider value={{ tasks, allTasks: scopedTasks, agents: squad.agents, features: squad.features, audit, projects, currentProject, projectDtos: squad.projects, selectProject, addProject, removeProject, capabilities: squad.capabilities, publicCatalog: squad.publicCatalog, connected: squad.connected, transcripts: squad.transcripts, commentEvents: squad.commentEvents, resolvedCommentEvents: squad.resolvedCommentEvents, commandAcks: squad.commandAcks, selectedTaskId, toasts, view, taskFilter, tasksListMode, taskCategoryFilter, isChatOpen, isCommandPaletteOpen, openCommandPalette, closeCommandPalette, toggleCommandPalette, openedConsoleAgentId, interveneAgentId, reviewTaskId, reviewDocPath, planRealityFeatureId, reload: squad.reload, setView, setTaskFilter, setTasksListMode, setTaskCategoryFilter, setIsChatOpen, openConsole, openIntervene, openReview, closeReview, openPlanReality, closePlanReality, selectTask, addTask, deleteTask, restoreFeature, hardDeleteFeature, loadArchivedFeatures, toggleTaskComplete, updateTask, setTaskCategory, showToast, sendConsoleCommand: squad.send, subscribeConsole: squad.subscribe, installCapability, importCatalogCapability, setCapabilityEnabled, runCapability, addTaskComment, loadTaskComments }}>
+    <TaskContext.Provider value={{ tasks, allTasks: scopedTasks, agents: squad.agents, features: squad.features, audit, projects, currentProject, projectDtos: squad.projects, selectProject, addProject, removeProject, capabilities: squad.capabilities, publicCatalog: squad.publicCatalog, connected: squad.connected, transcripts: squad.transcripts, commentEvents: squad.commentEvents, resolvedCommentEvents: squad.resolvedCommentEvents, commandAcks: squad.commandAcks, selectedTaskId, toasts, view, taskFilter, tasksListMode, taskCategoryFilter, isChatOpen, isCommandPaletteOpen, openCommandPalette, closeCommandPalette, toggleCommandPalette, openedConsoleAgentId, interveneAgentId, reviewTaskId, reviewDocPath, planRealityFeatureId, planBriefName, reload: squad.reload, setView, setTaskFilter, setTasksListMode, setTaskCategoryFilter, setIsChatOpen, openConsole, openIntervene, openReview, closeReview, openPlanReality, closePlanReality, openPlanBrief, closePlanBrief, selectTask, addTask, deleteTask, restoreFeature, hardDeleteFeature, loadArchivedFeatures, toggleTaskComplete, updateTask, setTaskCategory, showToast, sendConsoleCommand: squad.send, subscribeConsole: squad.subscribe, installCapability, importCatalogCapability, setCapabilityEnabled, runCapability, addTaskComment, loadTaskComments }}>
       {children}
     </TaskContext.Provider>
   );

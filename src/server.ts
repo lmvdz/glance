@@ -90,6 +90,7 @@ import { mergeAdoptionCounters } from "./adoption-counters.ts";
 import { worktreeDiffSinceFork, worktreeTree } from "./explore.ts";
 import { appendConcernDecision, listPlanDirs, parsePlanConcerns, parsePlanDocuments } from "./features.ts";
 import { isPlanDocPath, planDocDiffSince, planDocHeadRevision, readPlanDoc } from "./plan-doc.ts";
+import { assemblePlanBrief } from "./plan-brief.ts";
 import { planVoteGateOpen, tallyPlanVoteRound } from "./plan-votes.ts";
 import { hardenedGit } from "./git-harden.ts";
 import { rankKbDocs, searchFabric, type KbDoc, type KbDocType } from "./fabric-search.ts";
@@ -2555,6 +2556,12 @@ export class SquadServer {
 			const repo = url.searchParams.get("repo") ?? process.cwd();
 			const reality = await manager.planReality(decodeURIComponent(mfreality[1]), repo);
 			return reality ? Response.json({ reality }) : new Response("no such feature", { status: 404 });
+		}
+		const mfPlanBrief = url.pathname.match(/^\/api\/plans\/([^/]+)\/brief$/);
+		if (mfPlanBrief && req.method === "GET") {
+			const repo = url.searchParams.get("repo") ?? process.cwd();
+			const brief = await assemblePlanBrief(repo, decodeURIComponent(mfPlanBrief[1]));
+			return brief ? Response.json({ brief }) : new Response("no such plan", { status: 404 });
 		}
 		if (url.pathname === "/api/info") return Response.json({ cwd: process.cwd() });
 		const mcand = url.pathname.match(/^\/api\/features\/([^/]+)\/plan-candidates$/);

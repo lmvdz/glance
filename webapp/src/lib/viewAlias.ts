@@ -36,6 +36,7 @@ const VALID_VIEWS: ReadonlySet<AppView> = new Set<AppView>([
   'intervene',
   'review',
   'plan-reality',
+  'plan-brief',
 ]);
 
 /**

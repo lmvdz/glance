@@ -45,3 +45,7 @@ test('org and intervene and review each get a short, non-empty line', () => {
 test('plan-reality (OMPSQ-448) gets a fixed one-liner describing what lives there', () => {
   expect(railFooterContext('plan-reality', zero)).toBe('What each plan claims, and whether it is proven');
 });
+
+test('plan-brief gets a fixed one-liner describing the generated artifacts', () => {
+  expect(railFooterContext('plan-brief', zero)).toBe('Styled plan explainer artifacts for humans');
+});
