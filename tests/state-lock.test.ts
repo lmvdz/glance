@@ -33,8 +33,8 @@ test("acquire writes a lock file and release removes it", async () => {
 
 test("a live owner blocks a second acquire", async () => {
 	const dir = await tmpdir();
-	// pid 1 (init) is always alive; signal-0 from a non-root test yields EPERM → treated as live.
-	writeFileSync(path.join(dir, "daemon.lock"), JSON.stringify({ pid: 1, host: os.hostname(), startedAt: 0 }));
+	// The parent process is live and signalable in both host and rootless docker runs.
+	writeFileSync(path.join(dir, "daemon.lock"), JSON.stringify({ pid: process.ppid, host: os.hostname(), startedAt: 0 }));
 	await expect(acquireStateLock(dir, { handoffMs: 150 })).rejects.toBeInstanceOf(StateLockError);
 });
 test("a stale lock (dead pid) is reclaimed", async () => {
