@@ -6,7 +6,7 @@ import * as path from "node:path";
 import type { AgentDriver } from "../src/agent-driver.ts";
 import { FileStore } from "../src/dal/store.ts";
 import { SquadManager } from "../src/squad-manager.ts";
-import type { PendingRequest, PersistedAgent, RpcSessionState, SquadEvent } from "../src/types.ts";
+import type { AgentDTO, PendingRequest, PersistedAgent, RpcSessionState, SquadEvent, TranscriptEntry } from "../src/types.ts";
 
 process.env.OMP_SQUAD_AUTODISPATCH = "0";
 
@@ -46,6 +46,8 @@ interface DriverFactoryHost { makeDriver: (p: PersistedAgent) => AgentDriver; }
 type CommandAckEvent = Extract<SquadEvent, { type: "command-ack" }>;
 
 interface InternalHost { agents: Map<string, { dto: { pending: PendingRequest[] }; agent: AgentDriver }>; }
+interface AppendHost { append: (rec: { dto: Pick<AgentDTO, "id" | "messageCount">; transcript: TranscriptEntry[] }, kind: TranscriptEntry["kind"], text: string) => TranscriptEntry; }
+
 
 function commandAcks(mgr: SquadManager): CommandAckEvent[] {
 	const events: CommandAckEvent[] = [];
@@ -224,6 +226,33 @@ test("prompt without displayText leaves it unset and the transcript text is the 
 	expect(userEntries).toHaveLength(1);
 	expect(userEntries[0]?.text).toBe("hello legacy");
 	expect(userEntries[0]?.displayText).toBeUndefined();
+	await mgr.stop();
+});
+
+test("restart reseeds transcript seq above persisted high-water mark", async () => {
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "rich-transcript-state-"));
+	tmps.push(stateDir);
+	const store = new FileStore(stateDir);
+	await store.save({
+		agents: [],
+		features: [],
+		transcripts: {
+			old: [
+				{ seq: 7, kind: "user", text: "old low", ts: 1 },
+				{ seq: 5000, kind: "assistant", text: "old high", ts: 2 },
+			],
+			other: [{ seq: 4999, kind: "tool", text: "other", ts: 3 }],
+		},
+	});
+	const mgr = new SquadManager({ stateDir, skipGlobalJanitors: true });
+	await mgr.start();
+	const rec = { dto: { id: "fresh", messageCount: 0 }, transcript: [] as TranscriptEntry[] };
+
+	const entry = (mgr as unknown as AppendHost).append(rec, "assistant", "after restart");
+
+	expect(entry.seq).toBe(5001);
+	expect(entry.id).toBe("fresh:5001");
+	expect(rec.transcript).toEqual([entry]);
 	await mgr.stop();
 });
 

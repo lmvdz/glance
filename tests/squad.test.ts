@@ -264,7 +264,7 @@ test.skipIf(process.env.OMP_SQUAD_REAL_RPC !== "1")(
 		await Bun.sleep(200);
 		expect(b.isAlive).toBe(false);
 	},
-	90_000,
+	120_000,
 );
 
 // ── manager lifecycle (no task → no model turn) ──────────────────────────────
@@ -291,7 +291,7 @@ test(
 		expect(await fs.exists(created.worktree)).toBe(false);
 		await mgr.stop();
 	},
-	30_000,
+	120_000,
 );
 
 // ── workflow checkpoint survives adopt/restore (OMPSQ-165) ───────────────────

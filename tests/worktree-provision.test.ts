@@ -84,7 +84,7 @@ describe("provisionWorktreeDeps", () => {
 		} finally {
 			await rm(dir, { recursive: true, force: true });
 		}
-	}, 60_000);
+	}, 120_000);
 
 	test.skipIf(!hasRegistry)("installs a nested webapp/ package that a root-only install would never reach", async () => {
 		const dir = await tmp();

@@ -507,6 +507,27 @@ export class AttentionStore {
 		this.scheduleWrite();
 	}
 
+	/** Drop durable visit/completion hints for units no longer in the persisted roster. Seen-state is
+	 *  intentionally a hint, so pruning on the same snapshot boundary as state persistence keeps the
+	 *  compacted maps bounded without adding a second lifecycle hook to every removal path. */
+	pruneUnits(agentIds: Set<string>): void {
+		let changed = false;
+		for (const id of Object.keys(this.unitVisits)) {
+			if (agentIds.has(id)) continue;
+			delete this.unitVisits[id];
+			changed = true;
+		}
+		for (const id of Object.keys(this.completions)) {
+			if (agentIds.has(id)) continue;
+			delete this.completions[id];
+			changed = true;
+		}
+		if (changed && !this.closed) {
+			this.dirty = true;
+			this.flush();
+		}
+	}
+
 	/** `viewerId === undefined` ⇒ the file-mode single-implicit-viewer collapse: `lastSeenAt` IS the
 	 *  visit stamp (there is no `byViewer` to disagree with it). A REAL per-viewer id reads its own
 	 *  entry only — it never falls back to `lastSeenAt`, which could be a DIFFERENT viewer's more

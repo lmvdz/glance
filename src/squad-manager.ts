@@ -217,12 +217,14 @@ import {
 	TRANSCRIPT_EVENT_LAND_ASSESSMENT,
 	TRANSCRIPT_EVENT_LAND_ATTEMPT,
 	TRANSCRIPT_EVENT_LAND_MERGE,
+	TRANSCRIPT_EVENT_NEEDS_YOU,
 } from "./transcript-event-kinds.ts";
 import { truncateLabel } from "./text-util.ts";
 import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
 import { ChannelStore, DEFAULT_CHANNEL_ID, type ChannelEntry, type ClientChannelPost } from "./channels.ts";
 import { buildTrace, traceMaxSpans, traceSampleRatio, traceSpansEnabled, type TraceResponse } from "./spans.ts";
 import { traceExporterFromEnv, type TraceExportQueue } from "./trace-exporter.ts";
+
 import { settleRunningEntries, transcriptSince } from "./transcript-delta.ts";
 import { ManualProvider, type PaymentProvider, paymentProviderFromEnv } from "./payments/index.ts";
 import {
@@ -252,6 +254,12 @@ import {
 	type CapabilityInstallPatch,
 	type CapabilitySnapshot,
 } from "./capabilities/index.ts";
+
+const DEFAULT_FLEET_CARD_KINDS: Record<string, true> = {
+	[TRANSCRIPT_EVENT_NEEDS_YOU]: true,
+	[TRANSCRIPT_EVENT_GATE_VERDICT]: true,
+	[TRANSCRIPT_EVENT_LAND_MERGE]: true,
+};
 
 const MAX_TRANSCRIPT = 800;
 const POLL_MS = 2500;
@@ -1126,6 +1134,15 @@ export class SquadManager extends EventEmitter {
 	private readonly commandAckDedupe = new Map<string, number>();
 	private idSeq = 0;
 	private transcriptSeq = 0;
+	private reseedTranscriptSeq(snapshot: StateSnapshot): void {
+		let maxSeq = this.transcriptSeq;
+		for (const transcript of Object.values(snapshot.transcripts)) {
+			for (const entry of transcript) {
+				if (typeof entry.seq === "number" && Number.isFinite(entry.seq)) maxSeq = Math.max(maxSeq, entry.seq);
+			}
+		}
+		this.transcriptSeq = maxSeq;
+	}
 	/** Last observed `plans/` signature for repos the feature board scans. */
 	private planFeatureSignature = "";
 	private readonly mainGateCache = new Map<string, { fp: string; result: { ok: boolean; firstFailure?: string; skipped?: boolean; unrunnable?: boolean }; tick: number }>();
@@ -1293,6 +1310,7 @@ export class SquadManager extends EventEmitter {
 		// a concurrent daemon (or test). reconnectLive (use live) → reapOrphans → adopt worktree context.
 		const snapshot = (await this.store.hasState()) ? await this.store.load() : undefined;
 		if (snapshot) {
+			this.reseedTranscriptSeq(snapshot);
 			await this.reconnectLive(snapshot);
 			if (!this.skipGlobalJanitors) await this.reapOrphans();
 			await this.adoptOrphanedAgents(snapshot);
@@ -2145,6 +2163,7 @@ export class SquadManager extends EventEmitter {
 			model: p.model,
 			profileId: p.profileId,
 			approvalMode: p.approvalMode,
+			channelId: p.channelId,
 			pending: [],
 			lastActivity: Date.now(),
 			messageCount: 0,
@@ -2275,6 +2294,7 @@ export class SquadManager extends EventEmitter {
 			model: p.model,
 			profileId: p.profileId,
 			approvalMode: p.approvalMode,
+			channelId: p.channelId,
 			pending: [],
 			lastActivity: Date.now(),
 			messageCount: transcript.length,
@@ -4597,6 +4617,7 @@ export class SquadManager extends EventEmitter {
 			owns: opts.owns,
 			requires: opts.requires,
 			produces: opts.produces ?? opts.owns,
+			channelId: opts.channelId,
 			scopeSource: opts.scopeSource,
 		};
 	}
@@ -6408,6 +6429,7 @@ export class SquadManager extends EventEmitter {
 			task: opts.task,
 			thinking,
 			appendSystemPrompt: opts.appendSystemPrompt,
+			channelId: opts.channelId,
 			issue: opts.issue,
 			lane: resolvedLane,
 			laneSource,
@@ -6475,6 +6497,7 @@ export class SquadManager extends EventEmitter {
 			model: opts.model,
 			profileId,
 			approvalMode,
+			channelId: opts.channelId,
 			pending: [],
 			lastActivity: Date.now(),
 			messageCount: 0,
@@ -6961,7 +6984,7 @@ export class SquadManager extends EventEmitter {
 		const model = typeof spec.model === "string" ? spec.model : undefined;
 		const verified = report.checks.some((c) => c.name === "acceptance" && c.status === "pass");
 		const flue: FlueMemberConfig = { dir, workflow: spec.name, target };
-		const persisted: PersistedAgent = { id, name: spec.name, repo: "(flue-service)", worktree: dir, approvalMode: "yolo", model, kind: "flue-service", flue };
+		const persisted: PersistedAgent = { id, name: spec.name, repo: "(flue-service)", worktree: dir, approvalMode: "yolo", model, kind: "flue-service", flue, channelId: DEFAULT_CHANNEL_ID };
 		const dto: AgentDTO = {
 			id,
 			name: spec.name,
@@ -6972,6 +6995,7 @@ export class SquadManager extends EventEmitter {
 			worktree: dir,
 			approvalMode: "yolo",
 			model,
+			channelId: DEFAULT_CHANNEL_ID,
 			pending: [],
 			lastActivity: Date.now(),
 			messageCount: 0,
@@ -7017,6 +7041,7 @@ export class SquadManager extends EventEmitter {
 			approvalMode: p.approvalMode,
 			model: p.model,
 			profileId: p.profileId,
+			channelId: p.channelId,
 			pending: [],
 			lastActivity: Date.now(),
 			messageCount: 0,
@@ -10484,7 +10509,9 @@ export class SquadManager extends EventEmitter {
 	 *  ride straight into state (and the emitted `agent` event) verbatim, which is the one gap append()'s
 	 *  redaction chokepoint doesn't already cover (#lifecycle-truth concern 02). */
 	private setPending(rec: AgentRecord, next: PendingRequest[], reason: DerivedReason, cause?: TransitionCause, opts?: { callerOwnsStatus?: boolean }): void {
-		rec.dto.pending = next.map((p) => ({ ...p, title: redact(p.title), message: p.message === undefined ? undefined : redact(p.message) }));
+		const redacted = next.map((p) => ({ ...p, title: redact(p.title), message: p.message === undefined ? undefined : redact(p.message) }));
+		this.emitNeedsYouProjection(rec, redacted);
+		rec.dto.pending = redacted;
 		// Debounced persist trigger (concern 04) — scheduled regardless of the callerOwnsStatus branch
 		// below, since `pending` already changed above either way. Suppressed during the replay settle
 		// window: a ghost pending rebuilt by ring replay must never resurrect a stale question on disk.
@@ -11011,7 +11038,115 @@ export class SquadManager extends EventEmitter {
 		if (!id) return;
 		const rec = this.agents.get(id);
 		if (!rec || !Array.isArray(rec.transcript)) return;
-		this.append(rec, "system", this.eventText(text), { status: "ok", format: "stage", event: { kind, payload } });
+		const entry = this.append(rec, "system", this.eventText(text), { status: "ok", format: "stage", event: { kind, payload } });
+		void this.projectUnitTranscriptEvent(rec, entry);
+	}
+
+	private projectedChannelId(rec: AgentRecord, eventKind: string): string | undefined {
+		const origin = rec.options.channelId ?? rec.dto.channelId;
+		if (origin) return origin;
+		return DEFAULT_FLEET_CARD_KINDS[eventKind] ? DEFAULT_CHANNEL_ID : undefined;
+	}
+
+	private projectionDoorSurface(kind: string): string {
+		switch (kind) {
+			case TRANSCRIPT_EVENT_NEEDS_YOU:
+				return "intervence";
+			case TRANSCRIPT_EVENT_GATE_VERDICT:
+				return "gate-verdict";
+			case TRANSCRIPT_EVENT_LAND_MERGE:
+				return "land-merge";
+			case TRANSCRIPT_EVENT_LAND_ATTEMPT:
+			case TRANSCRIPT_EVENT_LAND_ASSESSMENT:
+				return "land";
+			default:
+				return "unit";
+		}
+	}
+
+	private projectionRefs(rec: AgentRecord, entry: TranscriptEntry): Record<string, unknown> {
+		const payload = entry.event?.payload;
+		const objectPayload = payload && typeof payload === "object" && !Array.isArray(payload) ? payload as Record<string, unknown> : {};
+		const refs: Record<string, unknown> = { unitId: rec.dto.id };
+		if (entry.id) refs.entryId = entry.id;
+		for (const [from, to] of [["featureId", "planId"], ["attemptId", "landId"], ["issueId", "issueId"], ["issueIdentifier", "issueIdentifier"]] as const) {
+			const value = objectPayload[from];
+			if (typeof value === "string" && value) refs[to] = value;
+		}
+		return refs;
+	}
+
+	private projectionFace(rec: AgentRecord, entry: TranscriptEntry): Record<string, unknown> {
+		const payload = entry.event?.payload;
+		const objectPayload = payload && typeof payload === "object" && !Array.isArray(payload) ? payload as Record<string, unknown> : {};
+		return {
+			unitId: rec.dto.id,
+			unitName: rec.dto.name,
+			status: rec.dto.status,
+			repo: rec.dto.repo,
+			branch: rec.dto.branch,
+			issue: rec.dto.issue ? { id: rec.dto.issue.id, identifier: rec.dto.issue.identifier, name: rec.dto.issue.name } : undefined,
+			eventKind: entry.event?.kind,
+			title: entry.text,
+			stage: typeof objectPayload.stage === "string" ? objectPayload.stage : undefined,
+			verdict: typeof objectPayload.verdict === "string" ? objectPayload.verdict : undefined,
+			ok: typeof objectPayload.ok === "boolean" ? objectPayload.ok : undefined,
+			merged: typeof objectPayload.merged === "boolean" ? objectPayload.merged : undefined,
+			pendingId: typeof objectPayload.pendingId === "string" ? objectPayload.pendingId : undefined,
+			pendingStatus: typeof objectPayload.status === "string" ? objectPayload.status : undefined,
+		};
+	}
+
+	private async projectUnitTranscriptEvent(rec: AgentRecord, entry: TranscriptEntry): Promise<void> {
+		const event = entry.event;
+		if (!event?.kind) return;
+		const channelId = this.projectedChannelId(rec, event.kind);
+		if (!channelId) return;
+		try {
+			const card = await this.channelStore.appendManager(channelId, {
+				authorActor: "manager",
+				kind: "system",
+				format: "stage",
+				text: entry.text,
+				event: {
+					kind: event.kind,
+					payload: {
+						refs: this.projectionRefs(rec, entry),
+						doorSurface: this.projectionDoorSurface(event.kind),
+						face: this.projectionFace(rec, entry),
+					},
+				},
+			});
+			this.emit("event", { type: "channel-entry", channelId, entry: card } satisfies SquadEvent);
+		} catch (err) {
+			this.log("warn", `projection ${rec.dto.id}/${event.kind} → ${channelId} failed: ${errText(err)}`);
+		}
+	}
+
+	private emitNeedsYouProjection(rec: AgentRecord, next: PendingRequest[]): void {
+		const previous = new Map(rec.dto.pending.map((request) => [request.id, request]));
+		const upcoming = new Map(next.map((request) => [request.id, request]));
+		for (const request of next) {
+			if (previous.has(request.id)) continue;
+			this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_NEEDS_YOU, `needs you · ${this.safeEventLabel(request.title)}`, {
+				status: "pending",
+				pendingId: request.id,
+				gateClass: request.gateClass,
+				title: request.title,
+				message: request.message,
+				agentId: rec.dto.id,
+			});
+		}
+		for (const request of previous.values()) {
+			if (upcoming.has(request.id)) continue;
+			this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_NEEDS_YOU, `needs you resolved · ${this.safeEventLabel(request.title)}`, {
+				status: "resolved",
+				pendingId: request.id,
+				gateClass: request.gateClass,
+				title: request.title,
+				agentId: rec.dto.id,
+			});
+		}
 	}
 
 	private emitValidationVerdictEvent(rec: AgentRecord, record: ValidationRecord): void {
@@ -11225,6 +11360,7 @@ export class SquadManager extends EventEmitter {
 		// (a deferred run that has since been adopted is now in the live roster).
 		const liveIds = new Set(live.map((a) => a.id));
 		const agents = this.deferred.length ? [...live, ...this.deferred.filter((d) => !liveIds.has(d.id))] : live;
+		this.attentionStore.pruneUnits(new Set(agents.map((a) => a.id)));
 		const transcripts: Record<string, TranscriptEntry[]> = {};
 		for (const r of this.agents.values()) if (r.transcript.length) transcripts[r.dto.id] = r.transcript;
 		const features = [...this.featureStore.values()];
@@ -11234,6 +11370,7 @@ export class SquadManager extends EventEmitter {
 	/** Re-spawn agents persisted from a previous run. Returns how many were restored. */
 	async loadPersisted(): Promise<number> {
 		const snapshot = await this.store.load();
+		this.reseedTranscriptSeq(snapshot);
 		this.capabilityStore = normalizeCapabilitySnapshot(snapshot.capabilities);
 		for (const f of snapshot.features) this.featureStore.set(f.id, f);
 		const list = snapshot.agents;
@@ -11336,6 +11473,7 @@ export class SquadManager extends EventEmitter {
 				completionPushArmed: p.completionPushArmed,
 				completionPushKind: p.completionPushKind,
 				completionArmedAt: p.completionArmedAt,
+				channelId: p.channelId,
 				sandbox: p.sandbox,
 				autoRoute: false,
 				bypassCap: true, // restore re-creates already-counted agents — never gated by the live cap

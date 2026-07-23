@@ -798,6 +798,17 @@ export type CommandAckDTO =
   | { type: "command-ack"; clientTurnId: string; ok: true }
   | { type: "command-ack"; clientTurnId: string; ok: false; reason: "missing-target" | "denied" | "duplicate" | "spawn-failed" };
 
+export interface PresenceUser {
+  id: string;
+  displayName: string;
+  socketCount: number;
+}
+
+export interface PresenceSnapshot {
+  orgId?: string;
+  users: PresenceUser[];
+}
+
 export type SquadEvent =
   | { type: "roster"; agents: AgentDTO[]; version: string }
   | { type: "agent"; agent: AgentDTO }
@@ -810,7 +821,8 @@ export type SquadEvent =
   | { type: "log"; level: "info" | "warn" | "error"; text: string }
   | { type: "transition"; entry: TransitionEntry }
   | { type: "channel-entry"; channelId: string; entry: ChannelEntry }
-  | CommandAckDTO;
+  | CommandAckDTO
+  | { type: "presence"; presence: PresenceSnapshot };
 
 export type ClientCommand =
   | { type: "snapshot" }
