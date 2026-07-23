@@ -22,6 +22,7 @@ import {
   Plus,
   Search,
   Settings,
+  Sparkles,
   Tag,
   Trash2,
   Waypoints,
@@ -120,6 +121,8 @@ export function railFooterContext(
       return 'Design review';
     case 'plan-reality':
       return 'What each plan claims, and whether it is proven';
+    case 'plan-brief':
+      return 'Styled plan explainer artifacts for humans';
     case 'tasks':
     default:
       return '';
@@ -146,6 +149,7 @@ export const NAV_ITEMS: { view: AppView; label: string; icon: LucideIcon; title:
   { view: 'fog', label: 'Fog', icon: CloudFog, title: 'Fog — comprehension debt: what nobody has looked at yet' },
   { view: 'daily', label: 'Daily', icon: Gauge, title: 'Daily driver — adoption counters and the friction ledger' },
   { view: 'plan-reality', label: 'Plan reality', icon: GitCompare, title: 'Plan vs reality — what each plan claims, and whether it is proven' },
+  { view: 'plan-brief', label: 'Plan briefs', icon: Sparkles, title: 'Plan briefs — styled explainers generated from plans/<name>' },
   { view: 'capabilities', label: 'Capabilities', icon: Boxes, title: 'Capabilities' },
 ];
 

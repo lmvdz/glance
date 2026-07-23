@@ -1,4 +1,4 @@
-import type { PlanRealityDTO, TranscriptEntry } from "./dto";
+import type { PlanBriefDTO, PlanRealityDTO, TranscriptEntry } from "./dto";
 
 const TOKEN_KEY = "ompsq_token";
 
@@ -302,4 +302,10 @@ export async function getVoiceConfig(): Promise<VoiceConfigResponse> {
   if (response.status === 404) return { enabled: false };
   if (!response.ok) throw new Error(await response.text());
   return response.json() as Promise<VoiceConfigResponse>;
+}
+
+
+export function fetchPlanBrief(name: string, repo?: string): Promise<PlanBriefDTO> {
+  const qs = repo ? `?repo=${encodeURIComponent(repo)}` : '';
+  return apiJson<{ brief: PlanBriefDTO }>(`/api/plans/${encodeURIComponent(name)}/brief${qs}`).then((r) => r.brief);
 }
