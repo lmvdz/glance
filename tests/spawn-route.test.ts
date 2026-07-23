@@ -221,6 +221,18 @@ test("POST /api/spawn with a non-string source drops it (typeof-narrowed, matche
 	expect("source" in (createEntry as object)).toBe(false);
 });
 
+test("POST /api/spawn carries channelId into the created agent DTO", async () => {
+	const { url } = await startFixture();
+	const res = await fetch(`${url}/api/spawn`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ prompt: "fix the thing in the room", channelId: "ops" }),
+	});
+	expect(res.status).toBe(200);
+	const body = (await res.json()) as { agent: { channelId?: string } };
+	expect(body.agent.channelId).toBe("ops");
+});
+
 // ── spawnScoreboard TTL + single-flight cache (PR #114 cross-lineage review) ────────────────────
 // `readAllReceipts` is an O(lifetime-receipts) walk+parse; with OMP_SQUAD_MODEL_OUTCOMES=1 every
 // POST /api/spawn hits `spawnScoreboard()`. These prove one scan is SHARED, not raced or repeated.
