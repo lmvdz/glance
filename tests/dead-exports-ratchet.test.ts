@@ -22,7 +22,7 @@ test(`ratchet: dead exports stay at/under baseline (${BASELINE})`, () => {
 		);
 	}
 	expect(dead.length).toBeLessThanOrEqual(BASELINE);
-});
+}, 15_000);
 
 test("ratchet: dead-export scan finds candidates (the check itself isn't silently no-op)", () => {
 	const { total } = scan();

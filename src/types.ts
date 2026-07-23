@@ -1501,6 +1501,17 @@ export interface ChannelEntryEvent {
 
 type CommandAckReason = "missing-target" | "denied" | "duplicate" | "spawn-failed";
 
+export interface PresenceUser {
+	id: string;
+	displayName: string;
+	socketCount: number;
+}
+
+export interface PresenceSnapshot {
+	orgId?: string;
+	users: PresenceUser[];
+}
+
 export type SquadEvent =
 	| { type: "roster"; agents: AgentDTO[]; version: string }
 	| { type: "agent"; agent: AgentDTO }
@@ -1516,7 +1527,8 @@ export type SquadEvent =
 	| { type: "transition"; entry: TransitionEntry }
 	| ChannelEntryEvent
 	| { type: "command-ack"; clientTurnId: string; ok: true }
-	| { type: "command-ack"; clientTurnId: string; ok: false; reason: CommandAckReason };
+	| { type: "command-ack"; clientTurnId: string; ok: false; reason: CommandAckReason }
+	| { type: "presence"; presence: PresenceSnapshot };
 
 /** The daemon's periodic background loops — the ones that run without an operator and were, until the
  *  automation log, invisible. Scout reads agent reasoning; Sentinel (plans/sentinel-drift-probe, v0
