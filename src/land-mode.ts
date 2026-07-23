@@ -139,10 +139,14 @@ async function probe(repo: string, prBase?: string): Promise<ResolvedLandMode> {
 	if (parts.length < 3) return { mode: "local", reason: `no parseable owner/repo from origin (${identity})` };
 	const slug = parts.slice(-2).join("/"); // "owner/repo"
 
-	// 2. gh repo view <slug> --json defaultBranchRef
-	const view = await ghJson<{ defaultBranchRef: { name: string } }>(["repo", "view", slug, "--json", "defaultBranchRef"], repo);
-	if (!view?.defaultBranchRef?.name) return { mode: "local", reason: `gh repo view ${slug} failed or has no default branch` };
-	const defaultBranch = (prBase ?? process.env.OMP_SQUAD_PR_BASE) || view.defaultBranchRef.name;
+	// 2. Resolve the default branch. An explicit base is already the authoritative answer; otherwise
+	//    ask gh for the repository default.
+	let defaultBranch = prBase ?? process.env.OMP_SQUAD_PR_BASE;
+	if (!defaultBranch) {
+		const view = await ghJson<{ defaultBranchRef: { name: string } }>(["repo", "view", slug, "--json", "defaultBranchRef"], repo);
+		if (!view?.defaultBranchRef?.name) return { mode: "local", reason: `gh repo view ${slug} failed or has no default branch` };
+		defaultBranch = view.defaultBranchRef.name;
+	}
 
 	// 3. Write-capability probe — catches per-repo transport/auth failures (gh auth ≠ push works)
 	//    WITHOUT non-fast-forward semantics. Probing `git push --dry-run origin <default>` directly
