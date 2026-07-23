@@ -1,6 +1,6 @@
 # Acceptance audit — falsifiable "feels like t3code"
 
-STATUS: open
+STATUS: cancelled
 PRIORITY: p1
 REPOS: glance-desktop
 COMPLEXITY: research
@@ -36,3 +36,9 @@ None.
 
 - Report exists with: video captures of analog surfaces vs live t3code; grep-gate output (zero); per-surface state coverage table; blind-provenance results; switch-latency measurement; WebKitGTK render notes + kill-switch decision.
 - Any failure loops back to the owning concern as a new finding (Phase 5c).
+
+## Resolution
+Parked 2026-07-22 — glance-desktop is superseded (unused, non-working; Lars directive,
+the-room design gate). 13's acceptance protocol lives on re-targeted at the webapp room as
+plans/the-room/23-love-gate.md; the reskin's visual work is harvested into
+plans/the-room/CRAFT-HARVEST.md (concern 21). See plans/the-room/24-supersessions-amendment.md.
