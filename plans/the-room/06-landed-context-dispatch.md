@@ -1,5 +1,5 @@
 # Landed-context at dispatch — siblings learn producer results (buzz-borrows 02, carried over)
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -29,3 +29,6 @@ None. UI-invisible.
 Per buzz-borrows 02: land A (produces src/foo/), dispatch B (requires src/foo/) → B's opening
 prompt contains the fenced block naming A's land/branch/sha; no-requires dispatch → ≤5-line digest
 or nothing; flag-off fallback works; fence-garbage neutralized; prompt-size cap asserted in tests.
+
+## Resolution
+Landed 2026-07-23 (PR #225): dispatch-time recently-landed prompt blocks with fenced/capped composition. Carries buzz-borrows 02.

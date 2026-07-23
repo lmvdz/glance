@@ -1,5 +1,5 @@
 # Command ack/nack — no silently dropped steers (supersedes buzz-borrows 04)
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -33,3 +33,6 @@ None.
 - WS prompt to nonexistent id → command-ack {ok:false, reason:"missing-target"}.
 - Duplicate rapid same-clientTurnId → second nacks duplicate. Legit steer → ack after driver accept.
 - Answer path (clientTurnId = requestId) unbroken; Composer tests green.
+
+## Resolution
+Landed 2026-07-23 (PR #225): command-ack event arm, silent-drop fix, clientTurnId minting reversal, webapp reconcile. Supersedes buzz-borrows 04.
