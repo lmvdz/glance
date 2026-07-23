@@ -1,5 +1,5 @@
 # Supersessions + DIRECTION.md amendment — make the pivot official
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -34,3 +34,6 @@ its disposition is recorded on this side).
 - DIRECTION.md diff approved by Lars and merged; /wip scan shows hub-shell + t3-face 12/13 no
   longer open; buzz-borrows branch landed with the disposition note; no plan claims a future the
   design has superseded.
+
+## Resolution
+Done 2026-07-22 via PR #222 (merge ac9c30c): DIRECTION.md amendment applied as ratified; hub-shell H0-H7 cancelled; t3-face 11/12/13 parked; buzz-borrows disposition recorded. Lars approved and merged.

@@ -1,5 +1,5 @@
 # Channel store — durable org-scoped channels with a durability split
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -43,3 +43,6 @@ None. webapp dto mirror only in this concern; rendering is 07/08.
   event-bearing entry can exist.
 - No channel entry ever has status "running" (test). `?since=` returns exactly-once tail.
 - bun test green (node_modules/.bin on PATH).
+
+## Resolution
+Landed 2026-07-23 in the wave-0 train (PR #225, merge 440f4f9): src/channels.ts + endpoints + authorship-rule/born-settled tests.

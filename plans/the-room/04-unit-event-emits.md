@@ -1,5 +1,5 @@
 # Unit event emits — typed proof events in the unit transcript (supersedes buzz-borrows 01)
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -39,3 +39,6 @@ None (dto mirror only).
   status, exactly-once via ?since= delta poll.
 - Kill agent mid-land (PR #216 scenario): land-side entries still appear, none falsified.
 - Fence-garbage unit name renders neutralized. bun test green.
+
+## Resolution
+Landed 2026-07-23 (PR #225): TranscriptEntry.event substrate + land-lifecycle + ValidationRecord verdict emits. Supersedes buzz-borrows 01.
