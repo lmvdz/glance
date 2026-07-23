@@ -11,12 +11,13 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
-// One shared, mutable mock — reassigned per test instead of re-registering mock.module (which only
-// needs to happen once, before the module under test is (dynamically) imported).
-let ghResponse: { defaultBranchRef?: { name: string } } | undefined = { defaultBranchRef: { name: "main" } };
+// Per-repo mock state, not one shared "next gh result" switch: Bun module mocks are process-wide,
+// and the full suite can run test files in the same process. A global failure flag can bleed across
+// awaited git setup in a sibling test; keying the failure by cwd keeps each tmp repo isolated.
+const ghFailRepos = new Set<string>();
 mock.module("../src/gh.ts", () => ({
 	gh: async () => ({ code: 0, stdout: "", stderr: "" }),
-	ghJson: async () => ghResponse,
+	ghJson: async (_args: string[], cwd: string) => ghFailRepos.has(cwd) ? undefined : { defaultBranchRef: { name: "main" } },
 	ghAvailable: async () => true,
 }));
 
@@ -30,7 +31,7 @@ afterEach(() => {
 		if (saved[k] === undefined) delete process.env[k];
 		else process.env[k] = saved[k];
 	}
-	ghResponse = { defaultBranchRef: { name: "main" } };
+	ghFailRepos.clear();
 });
 
 const tmps: string[] = [];
@@ -98,7 +99,7 @@ test("probe 2: gh reports no default branch ⇒ local", async () => {
 	const repo = await gitRepo("lm-nodefault-");
 	await commit(repo, "a.txt", "a\n", "base");
 	await git(repo, "remote", "add", "origin", "git@github.com:acme/repo-xyz.git");
-	ghResponse = undefined; // gh repo view failed / no defaultBranchRef
+	ghFailRepos.add(repo); // gh repo view failed / no defaultBranchRef
 	const resolved = await resolveLandMode(repo, { landMode: "auto" });
 	expect(resolved.mode).toBe("local");
 	expect(resolved.reason).toContain("gh repo view acme/repo-xyz failed or has no default branch");
@@ -232,8 +233,7 @@ test("OMP_SQUAD_PR_BASE overrides gh's reported default branch", async () => {
 	const origin = await bareRepo("lm-prbase-origin-");
 	await git(repo, "remote", "add", "origin", origin);
 	await git(repo, "push", "-q", "origin", "trunk");
-	ghResponse = { defaultBranchRef: { name: "wrong-branch" } }; // gh says one thing...
-	// ...operator override says another, and wins. Passed explicitly (not via process.env) so a
+	// Operator override wins over the mocked gh default branch. Passed explicitly (not via process.env) so a
 	// sibling file mutating OMP_SQUAD_PR_BASE across an await can't bleed a different base in here.
 	const resolved = await resolveLandMode(repo, { landMode: "auto", prBase: "trunk" });
 	expect(resolved.mode).toBe("pr");
@@ -261,7 +261,6 @@ test("OMP_SQUAD_LAND_MODE=pr bypasses the convergence probe, but still best-effo
 	const repo = await gitRepo("lm-forced-gh-");
 	await commit(repo, "a.txt", "a\n", "base");
 	await git(repo, "remote", "add", "origin", "git@github.com:acme/repo-xyz.git");
-	ghResponse = { defaultBranchRef: { name: "main" } };
 	const resolved = await resolveLandMode(repo, { landMode: "pr" });
 	expect(resolved.mode).toBe("pr");
 	expect(resolved.defaultBranch).toBe("main");
@@ -271,7 +270,7 @@ test("OMP_SQUAD_LAND_MODE=pr bypasses the convergence probe, but still best-effo
 test("OMP_SQUAD_LAND_MODE=pr forced: gh fails but origin/HEAD symref resolves the default branch", async () => {
 	const repo = await convergedRepo("lm-forced-symref-");
 	await git(repo, "remote", "set-head", "origin", "main"); // records refs/remotes/origin/HEAD locally
-	ghResponse = undefined; // gh unreachable/unconfigured
+	ghFailRepos.add(repo); // gh unreachable/unconfigured
 	const resolved = await resolveLandMode(repo, { landMode: "pr" });
 	expect(resolved.mode).toBe("pr");
 	expect(resolved.defaultBranch).toBe("main");
