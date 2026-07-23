@@ -303,6 +303,25 @@ test("DB-registry WebSocket identity stamps session user into commands and per-u
 	expect(empty).toEqual({ orgId: "orgA", users: [] });
 });
 
+test("auth-backed single-manager WS identity still stamps session user into commands and presence", async () => {
+	const command = Promise.withResolvers<Actor>();
+	const agentA = agent("agent-a");
+	const manager = fakeManager([agentA], {}, undefined, (_cmd, actor) => command.resolve(actor));
+	const server = new SquadServer(manager as never, { port: 0, auth: authStub(), operator });
+	const url = server.start();
+	cleanups.push(() => server.stop());
+
+	const ws = await connect(`${url.replace("http", "ws")}/ws`, "orgA");
+	await ws.waitFor((event) => event.type === "presence" && event.presence.users.some((user) => user.id === "db:user-orgA"));
+	ws.ws.send(JSON.stringify({ type: "prompt", id: agentA.id, message: "hello" }));
+	expect(await command.promise).toEqual({ id: "db:user-orgA", displayName: "User orgA", origin: "local", role: "operator", orgId: "orgA" });
+	const presence = await fetch(`${url}/api/room/presence`, { headers: { cookie: "session=orgA" } }).then((res) => res.json());
+	expect(presence).toEqual({ orgId: "orgA", users: [{ id: "db:user-orgA", displayName: "User orgA", socketCount: 1 }] });
+	await closeAndWait(ws.ws);
+	const empty = await fetch(`${url}/api/room/presence`, { headers: { cookie: "session=orgA" } }).then((res) => res.json());
+	expect(empty).toEqual({ orgId: "orgA", users: [] });
+});
+
 test("file-mode WS commands and presence use the single shared operator identity", async () => {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "ws-file-presence-"));
 	const command = Promise.withResolvers<Actor>();

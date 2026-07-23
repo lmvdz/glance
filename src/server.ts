@@ -1164,17 +1164,17 @@ export class SquadServer {
 		return undefined;
 	}
 
-	/** Actor for an inbound WS command — the socket's tier plus, in DB-registry mode, its stamped org. */
+	/** Actor for an inbound WS command — stamped session identity wins in every auth-backed topology. */
 	private actorForSocket(ws: ServerWebSocket<SocketData>): Actor {
-		if (!this.registry) return { ...this.operator, role: ws.data.role };
 		if (ws.data.userId) {
 			return { id: `db:${ws.data.userId}`, displayName: ws.data.displayName, origin: "local", role: ws.data.role, orgId: ws.data.orgId };
 		}
+		if (!this.registry) return { ...this.operator, role: ws.data.role };
 		return { ...actorForRole(ws.data.role), orgId: ws.data.orgId };
 	}
 
 	private presenceForOrg(orgId: string | undefined): PresenceSnapshot {
-		if (!this.registry) return { users: this.clients.size === 0 ? [] : [{ id: this.operator.id, displayName: this.operator.displayName ?? this.operator.id, socketCount: this.clients.size }] };
+		if (!this.auth && !this.registry) return { users: this.clients.size === 0 ? [] : [{ id: this.operator.id, displayName: this.operator.displayName ?? this.operator.id, socketCount: this.clients.size }] };
 		if (!orgId) return { users: [] };
 		const users = [...(this.presenceByOrg.get(orgId) ?? new Map()).entries()]
 			.map(([id, presence]) => ({ id: `db:${id}`, displayName: presence.displayName, socketCount: presence.sockets.size }))
@@ -1183,13 +1183,19 @@ export class SquadServer {
 	}
 
 	private emitPresence(orgId: string | undefined): void {
-		if (this.registry && orgId) this.broadcastTo(orgId, { type: "presence", presence: this.presenceForOrg(orgId) });
+		const event = { type: "presence", presence: this.presenceForOrg(orgId) } satisfies SquadEvent;
+		if (this.registry && orgId) this.broadcastTo(orgId, event);
+		else if (this.auth) {
+			const bucket = orgId ? this.clientsByOrg.get(orgId) : undefined;
+			for (const ws of bucket ?? []) ws.send(JSON.stringify(event));
+		}
 	}
 
 	/** Register an opening socket in its bucket and return the fleet to seed its roster from. */
 	private async registerSocket(ws: ServerWebSocket<SocketData>): Promise<SquadManager | undefined> {
+		this.clients.add(ws);
 		if (!this.registry) {
-			this.clients.add(ws);
+			if (ws.data.userId && ws.data.orgId) this.registerSocketPresence(ws);
 			return this.singleManager;
 		}
 		const key = ws.data.orgId ?? "";
@@ -1199,21 +1205,7 @@ export class SquadServer {
 			this.clientsByOrg.set(key, bucket);
 		}
 		bucket.add(ws);
-		if (ws.data.userId && ws.data.orgId) {
-			let users = this.presenceByOrg.get(key);
-			if (!users) {
-				users = new Map();
-				this.presenceByOrg.set(key, users);
-			}
-			let presence = users.get(ws.data.userId);
-			if (!presence) {
-				presence = { displayName: ws.data.displayName ?? ws.data.userId, sockets: new Set() };
-				users.set(ws.data.userId, presence);
-			}
-			presence.displayName = ws.data.displayName ?? presence.displayName;
-			presence.sockets.add(ws);
-			this.emitPresence(ws.data.orgId);
-		}
+		if (ws.data.userId && ws.data.orgId) this.registerSocketPresence(ws);
 		// Root-org sockets bucket under their org key (so root-manager events fan out to them) but seed
 		// their roster from the root factory, not a lazy tenant manager.
 		return this.fleetForOrg(ws.data.orgId);
@@ -1221,8 +1213,9 @@ export class SquadServer {
 
 	/** Drop a closing socket from its bucket (and prune the bucket when empty). */
 	private unregisterSocket(ws: ServerWebSocket<SocketData>): void {
+		this.clients.delete(ws);
 		if (!this.registry) {
-			this.clients.delete(ws);
+			if (ws.data.userId && ws.data.orgId) this.unregisterSocketPresence(ws);
 			return;
 		}
 		const key = ws.data.orgId ?? "";
@@ -1231,14 +1224,45 @@ export class SquadServer {
 			bucket.delete(ws);
 			if (bucket.size === 0) this.clientsByOrg.delete(key);
 		}
-		if (ws.data.userId && ws.data.orgId) {
-			const users = this.presenceByOrg.get(key);
-			const presence = users?.get(ws.data.userId);
-			presence?.sockets.delete(ws);
-			if (presence?.sockets.size === 0) users?.delete(ws.data.userId);
-			if (users?.size === 0) this.presenceByOrg.delete(key);
-			this.emitPresence(ws.data.orgId);
+		if (ws.data.userId && ws.data.orgId) this.unregisterSocketPresence(ws);
+	}
+
+	private registerSocketPresence(ws: ServerWebSocket<SocketData>): void {
+		if (!ws.data.userId || !ws.data.orgId) return;
+		const key = ws.data.orgId;
+		let bucket = this.clientsByOrg.get(key);
+		if (!bucket) {
+			bucket = new Set();
+			this.clientsByOrg.set(key, bucket);
 		}
+		bucket.add(ws);
+		let users = this.presenceByOrg.get(key);
+		if (!users) {
+			users = new Map();
+			this.presenceByOrg.set(key, users);
+		}
+		let presence = users.get(ws.data.userId);
+		if (!presence) {
+			presence = { displayName: ws.data.displayName ?? ws.data.userId, sockets: new Set() };
+			users.set(ws.data.userId, presence);
+		}
+		presence.displayName = ws.data.displayName ?? presence.displayName;
+		presence.sockets.add(ws);
+		this.emitPresence(ws.data.orgId);
+	}
+
+	private unregisterSocketPresence(ws: ServerWebSocket<SocketData>): void {
+		if (!ws.data.userId || !ws.data.orgId) return;
+		const key = ws.data.orgId;
+		const users = this.presenceByOrg.get(key);
+		const presence = users?.get(ws.data.userId);
+		presence?.sockets.delete(ws);
+		if (presence?.sockets.size === 0) users?.delete(ws.data.userId);
+		if (users?.size === 0) this.presenceByOrg.delete(key);
+		const bucket = this.clientsByOrg.get(key);
+		bucket?.delete(ws);
+		if (bucket?.size === 0) this.clientsByOrg.delete(key);
+		this.emitPresence(ws.data.orgId);
 	}
 
 	/** DB-registry response for an actor with no active org: reads are empty, mutations denied. */
@@ -1799,11 +1823,11 @@ export class SquadServer {
 			const roster = this.observabilityManagers(true, undefined).flatMap((m) => m.list().map((dto) => ({ ...dto, ladderPriority: m.ladderPriorityFor(dto, bootstrapViewerId) })));
 			return Response.json(roster);
 		}
-		const orgId = this.registry
-			? bootstrapAdmin && this.singleManager
+		const orgId = session
+			? (session.session.activeOrganizationId ?? undefined)
+			: this.registry && bootstrapAdmin && this.singleManager
 				? ROOT_FACTORY_ORG
-				: (session?.session.activeOrganizationId ?? undefined)
-			: undefined;
+				: undefined;
 		const actor: Actor =
 			this.registry && session
 				? { id: `db:${session.user.id}`, displayName: session.user.name, origin: "local", role, orgId }
