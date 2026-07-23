@@ -228,7 +228,7 @@ test("rm by a name that matches MULTIPLE live agents refuses to guess — tombst
 	expect(mgr.getAgent(a.id)).toBeDefined();
 	expect(mgr.getAgent(b.id)).toBeDefined();
 	await mgr.stop();
-}, 60_000); // live omp spawns — full-suite parallel load can starve host startup/removal beyond 30s
+}, 120_000); // live omp spawns — full-suite parallel load can starve host startup/removal beyond 60s
 
 test("rm on a live, resident agent still removes it from the roster (no regression on the ordinary path)", async () => {
 	const repo = await makeRepo();
@@ -261,7 +261,7 @@ test("a fresh dispatch for the SAME issue after an rm gets a new, non-determinis
 	expect(second.id).not.toBe(first.id);
 	expect(mgr.getAgent(second.id)).toBeDefined();
 	await mgr.stop();
-}, 60_000); // live omp spawns — full-suite parallel load can starve host startup/removal beyond 30s
+}, 120_000); // live omp spawns — full-suite parallel load can starve host startup/removal beyond 60s
 
 test("an authorized re-creation under a tombstoned id CLEARS the tombstone, and the resurrected run survives the next restart (HIGH 2)", async () => {
 	const repo = await makeRepo();

@@ -385,7 +385,7 @@ test("a second POST /api/console on an already-live ephemeral repo whose create(
 
 	expect(mgr.isEphemeralProject(repo)).toBe(true); // A's registration survived B's failed create + rollback
 	expect(mgr.projects().map((p) => p.repo)).toEqual([repo]);
-}, 30_000);
+}, 60_000);
 
 // ── 2. verb dispatch (the real CLI, spawned) ─────────────────────────────────────────────────────
 

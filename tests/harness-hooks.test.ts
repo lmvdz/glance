@@ -228,11 +228,11 @@ describe("the generated shim escapes hostile values (run through /bin/sh)", () =
 		const state = await fsp.mkdtemp(path.join(os.tmpdir(), "hh-esc-"));
 		try {
 			// Serve the shim's POST at a local socket and capture the body it sends.
-			const bodies: string[] = [];
+			const body = Promise.withResolvers<string>();
 			const server = Bun.serve({
 				port: 0,
 				async fetch(req) {
-					bodies.push(await req.text());
+					body.resolve(await req.text());
 					return new Response("ok");
 				},
 			});
@@ -244,22 +244,16 @@ describe("the generated shim escapes hostile values (run through /bin/sh)", () =
 			const proc = Bun.spawn(["/bin/sh", shim, "start"], { cwd: nastyDir, env: { CLAUDE_SESSION_ID: 'sess"injected' } });
 			await proc.exited;
 			// The shim POSTs via a DETACHED background curl (`&`), so `proc.exited` returns before the
-			// request is delivered. Poll for the body instead of a fixed `Bun.sleep` + immediate
-			// `server.stop`: under full-suite CPU/IO load the loopback POST can land well past any
-			// hard-coded delay, and tearing the listener down first drops the in-flight request — the
-			// flake this test hit (Received 0). The loop returns the instant the body arrives; the 15s
-			// cap only bounds a genuinely hung request.
-			const deadline = Date.now() + 15_000;
-			while (bodies.length === 0 && Date.now() < deadline) await Bun.sleep(10);
+			// request is delivered. Await the loopback request itself; the test timeout bounds a genuinely
+			// hung curl without racing `server.stop` against the detached process.
+			const parsed = JSON.parse(await body.promise); // MUST parse — escaping worked
 			server.stop(true);
-			expect(bodies.length).toBe(1);
-			const parsed = JSON.parse(bodies[0]); // MUST parse — escaping worked
 			expect(parsed.cwd).toContain('we"ird');
 			expect(parsed.sessionId).toBe('sess"injected');
 		} finally {
 			await fsp.rm(state, { recursive: true, force: true });
 		}
-	}, 20_000);
+	}, 60_000);
 });
 
 describe("install/uninstall against a real filesystem", () => {

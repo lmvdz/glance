@@ -84,7 +84,7 @@ async function convergedRepo(prefix: string): Promise<string> {
 
 // ── probe 1: no parseable owner/repo ────────────────────────────────────────────────────────────
 
-test("probe 1: no origin configured ⇒ local, reason names the unparseable identity", async () => {
+test.serial("probe 1: no origin configured ⇒ local, reason names the unparseable identity", async () => {
 	const repo = await gitRepo("lm-noorigin-");
 	await commit(repo, "a.txt", "a\n", "base");
 	const resolved = await resolveLandMode(repo, { landMode: "auto" });
@@ -94,7 +94,7 @@ test("probe 1: no origin configured ⇒ local, reason names the unparseable iden
 
 // ── probe 2: gh repo view fails / no default branch ─────────────────────────────────────────────
 
-test("probe 2: gh reports no default branch ⇒ local", async () => {
+test.serial("probe 2: gh reports no default branch ⇒ local", async () => {
 	const repo = await gitRepo("lm-nodefault-");
 	await commit(repo, "a.txt", "a\n", "base");
 	await git(repo, "remote", "add", "origin", "git@github.com:acme/repo-xyz.git");
@@ -106,7 +106,7 @@ test("probe 2: gh reports no default branch ⇒ local", async () => {
 
 // ── probe 3: git push --dry-run fails ───────────────────────────────────────────────────────────
 
-test("probe 3: push --dry-run fails (unreachable origin) ⇒ local", async () => {
+test.serial("probe 3: push --dry-run fails (unreachable origin) ⇒ local", async () => {
 	const repo = await gitRepo("lm-nopush-");
 	await commit(repo, "a.txt", "a\n", "base");
 	await git(repo, "remote", "add", "origin", path.join(os.tmpdir(), "lm-does-not-exist-xyz"));
@@ -117,7 +117,7 @@ test("probe 3: push --dry-run fails (unreachable origin) ⇒ local", async () =>
 
 // ── regression: BEHIND origin is the NORMAL PR-mode state, not a push failure ───────────────────
 
-test("probe 3 regression: local behind origin (normal PR-mode state) still resolves pr, not local", async () => {
+test.serial("probe 3 regression: local behind origin (normal PR-mode state) still resolves pr, not local", async () => {
 	const repo = await convergedRepo("lm-behind-");
 	// Advance ORIGIN without the local checkout ever seeing it — simulates a PR merged on GitHub while
 	// this checkout hasn't been ff-healed yet. A naive `git push --dry-run origin main` from `repo`
@@ -149,7 +149,7 @@ test("probe 3 regression: local behind origin (normal PR-mode state) still resol
  * A PR-mode unit never touches the shared checkout, so the operator's branch cannot make landing
  * unsafe — it is precisely the reason to prefer PR mode.
  */
-test("probe 4: a non-default checkout no longer forces local — the fleet lands as PRs while the operator works", async () => {
+test.serial("probe 4: a non-default checkout no longer forces local — the fleet lands as PRs while the operator works", async () => {
 	const repo = await convergedRepo("lm-branchmismatch-");
 	await git(repo, "checkout", "-qb", "feature");
 	const resolved = await resolveLandMode(repo, { landMode: "auto" });
@@ -159,7 +159,7 @@ test("probe 4: a non-default checkout no longer forces local — the fleet lands
 	expect(resolved.reason).toContain("operator on feature");
 });
 
-test("probe 4: a dirty working tree is irrelevant to the resolved mode (nothing merges into it)", async () => {
+test.serial("probe 4: a dirty working tree is irrelevant to the resolved mode (nothing merges into it)", async () => {
 	const repo = await convergedRepo("lm-dirty-");
 	await git(repo, "checkout", "-qb", "feature");
 	await fs.writeFile(path.join(repo, "a.txt"), "locally modified, uncommitted\n");
@@ -169,7 +169,7 @@ test("probe 4: a dirty working tree is irrelevant to the resolved mode (nothing 
 
 // ── probe 5: the LOCAL DEFAULT BRANCH diverged from origin ──────────────────────────────────────
 
-test("probe 5: local default has an unpushed commit ahead of origin ⇒ local, diverged", async () => {
+test.serial("probe 5: local default has an unpushed commit ahead of origin ⇒ local, diverged", async () => {
 	const repo = await convergedRepo("lm-diverged-");
 	await commit(repo, "b.txt", "b\n", "unpushed"); // local main now ahead; origin/main lacks this commit
 	const resolved = await resolveLandMode(repo, { landMode: "auto" });
@@ -180,7 +180,7 @@ test("probe 5: local default has an unpushed commit ahead of origin ⇒ local, d
 /** Probe 5 must read `refs/heads/<default>`, not HEAD: the divergence guard has to keep protecting an
  *  unpushed local `main` even when the operator is standing somewhere else. (Reading HEAD here would
  *  report the feature branch's divergence instead — always true — and re-force local mode.) */
-test("probe 5: a DIVERGED local default still forces local even from a non-default checkout", async () => {
+test.serial("probe 5: a DIVERGED local default still forces local even from a non-default checkout", async () => {
 	const repo = await convergedRepo("lm-diverged-offbranch-");
 	await commit(repo, "b.txt", "b\n", "unpushed on main");
 	await git(repo, "checkout", "-qb", "feature"); // HEAD moves; refs/heads/main is still ahead of origin
@@ -191,7 +191,7 @@ test("probe 5: a DIVERGED local default still forces local even from a non-defau
 
 /** Converse: a CONVERGED local default with the operator parked on a feature branch is the exact
  *  shape of this repo during normal use. It must resolve pr — that is the whole point of the fix. */
-test("probe 5: a converged local default + non-default checkout ⇒ pr", async () => {
+test.serial("probe 5: a converged local default + non-default checkout ⇒ pr", async () => {
 	const repo = await convergedRepo("lm-converged-offbranch-");
 	await git(repo, "checkout", "-qb", "feature");
 	await commit(repo, "b.txt", "b\n", "work on the feature branch only");
@@ -199,7 +199,7 @@ test("probe 5: a converged local default + non-default checkout ⇒ pr", async (
 	expect(resolved.mode).toBe("pr");
 });
 
-test("probe 5: no local <default> ref at all (cloned straight onto a branch) ⇒ pr, nothing to strand", async () => {
+test.serial("probe 5: no local <default> ref at all (cloned straight onto a branch) ⇒ pr, nothing to strand", async () => {
 	const seed = await convergedRepo("lm-nolocaldefault-");
 	const originUrl = (await git(seed, "remote", "get-url", "origin")).stdout;
 	const clonesRoot = await tmpDir("lm-nolocaldefault-clones-");
@@ -217,7 +217,7 @@ test("probe 5: no local <default> ref at all (cloned straight onto a branch) ⇒
 
 // ── all 5 pass ───────────────────────────────────────────────────────────────────────────────────
 
-test("all 5 probes passing ⇒ pr mode with the resolved default branch", async () => {
+test.serial("all 5 probes passing ⇒ pr mode with the resolved default branch", async () => {
 	const repo = await convergedRepo("lm-allpass-");
 	const resolved = await resolveLandMode(repo, { landMode: "auto" });
 	expect(resolved.mode).toBe("pr");
@@ -225,7 +225,7 @@ test("all 5 probes passing ⇒ pr mode with the resolved default branch", async 
 	expect(resolved.reason).toContain("all 5 probes passed");
 });
 
-test("OMP_SQUAD_PR_BASE overrides gh's reported default branch", async () => {
+test.serial("OMP_SQUAD_PR_BASE overrides gh's reported default branch", async () => {
 	const repo = await gitRepo("lm-prbase-");
 	await commit(repo, "a.txt", "a\n", "base");
 	await git(repo, "branch", "-m", "trunk"); // rename so "trunk" is the actual local/remote branch
@@ -242,13 +242,13 @@ test("OMP_SQUAD_PR_BASE overrides gh's reported default branch", async () => {
 
 // ── OMP_SQUAD_LAND_MODE bypass ──────────────────────────────────────────────────────────────────
 
-test("OMP_SQUAD_LAND_MODE=local bypasses the probe entirely", async () => {
+test.serial("OMP_SQUAD_LAND_MODE=local bypasses the probe entirely", async () => {
 	process.env.OMP_SQUAD_LAND_MODE = "local";
 	const resolved = await resolveLandMode("/nonexistent/never/probed");
 	expect(resolved).toEqual({ mode: "local", reason: "OMP_SQUAD_LAND_MODE=local" });
 });
 
-test("an explicit landMode override wins over process.env — the concurrency-safe input path", async () => {
+test.serial("an explicit landMode override wins over process.env — the concurrency-safe input path", async () => {
 	// Ambient env says one thing; the explicit override says another and MUST win. This is the seam
 	// that immunizes callers from the cross-file env leak: the value comes from the argument, never
 	// the process-global (so a sibling test mutating OMP_SQUAD_LAND_MODE mid-await cannot bleed in).
@@ -257,7 +257,7 @@ test("an explicit landMode override wins over process.env — the concurrency-sa
 	expect(resolved).toEqual({ mode: "local", reason: "OMP_SQUAD_LAND_MODE=local" });
 });
 
-test("OMP_SQUAD_LAND_MODE=pr bypasses the convergence probe, but still best-effort resolves a default branch via gh", async () => {
+test.serial("OMP_SQUAD_LAND_MODE=pr bypasses the convergence probe, but still best-effort resolves a default branch via gh", async () => {
 	const repo = await gitRepo("lm-forced-gh-");
 	await commit(repo, "a.txt", "a\n", "base");
 	await git(repo, "remote", "add", "origin", "git@github.com:acme/repo-xyz.git");
@@ -268,7 +268,7 @@ test("OMP_SQUAD_LAND_MODE=pr bypasses the convergence probe, but still best-effo
 	expect(resolved.reason).toContain("forced");
 });
 
-test("OMP_SQUAD_LAND_MODE=pr forced: gh fails but origin/HEAD symref resolves the default branch", async () => {
+test.serial("OMP_SQUAD_LAND_MODE=pr forced: gh fails but origin/HEAD symref resolves the default branch", async () => {
 	const repo = await convergedRepo("lm-forced-symref-");
 	await git(repo, "remote", "set-head", "origin", "main"); // records refs/remotes/origin/HEAD locally
 	ghResponse = undefined; // gh unreachable/unconfigured
@@ -277,7 +277,7 @@ test("OMP_SQUAD_LAND_MODE=pr forced: gh fails but origin/HEAD symref resolves th
 	expect(resolved.defaultBranch).toBe("main");
 });
 
-test("OMP_SQUAD_LAND_MODE=pr forced with truly nothing resolvable (no origin at all) ⇒ pr mode with NO default branch, never silently local", async () => {
+test.serial("OMP_SQUAD_LAND_MODE=pr forced with truly nothing resolvable (no origin at all) ⇒ pr mode with NO default branch, never silently local", async () => {
 	const resolved = await resolveLandMode("/nonexistent/never/probed", { landMode: "pr" });
 	expect(resolved.mode).toBe("pr");
 	expect(resolved.defaultBranch).toBeUndefined();
@@ -286,7 +286,7 @@ test("OMP_SQUAD_LAND_MODE=pr forced with truly nothing resolvable (no origin at 
 
 // ── TTL cache ────────────────────────────────────────────────────────────────────────────────────
 
-test("TTL cache: a resolution is reused within the window, re-probed after it expires", async () => {
+test.serial("TTL cache: a resolution is reused within the window, re-probed after it expires", async () => {
 	process.env.OMP_SQUAD_LAND_MODE_TTL_MS = "50";
 	const repo = await convergedRepo("lm-ttl-");
 
@@ -308,7 +308,7 @@ test("TTL cache: a resolution is reused within the window, re-probed after it ex
 
 // ── aheadOfBase ──────────────────────────────────────────────────────────────────────────────────
 
-test("aheadOfBase in local mode matches the old HEAD..branch behavior exactly", async () => {
+test.serial("aheadOfBase in local mode matches the old HEAD..branch behavior exactly", async () => {
 	const repo = await gitRepo("aob-local-");
 	await commit(repo, "a.txt", "a\n", "base");
 	await git(repo, "branch", "feat");
@@ -322,7 +322,7 @@ test("aheadOfBase in local mode matches the old HEAD..branch behavior exactly", 
 	expect(await aheadOfBase({ repo, branch: "main", overrides: { landMode: "local" } })).toBe(0);
 });
 
-test("aheadOfBase in pr mode counts against origin/<default>..branch, not local HEAD", async () => {
+test.serial("aheadOfBase in pr mode counts against origin/<default>..branch, not local HEAD", async () => {
 	const repo = await convergedRepo("aob-pr-");
 	// A branch pushed to a worktree-like local branch, still unmerged into origin/main.
 	await git(repo, "branch", "squad/feat");
@@ -338,7 +338,7 @@ test("aheadOfBase in pr mode counts against origin/<default>..branch, not local 
 	expect(ahead).toBe(1); // one commit ahead of origin/main, regardless of local main's unrelated advance
 });
 
-test("aheadOfBase returns 0 once a pr-mode branch is fully merged into origin/<default>", async () => {
+test.serial("aheadOfBase returns 0 once a pr-mode branch is fully merged into origin/<default>", async () => {
 	const repo = await convergedRepo("aob-pr-merged-");
 	await git(repo, "branch", "squad/done");
 	await git(repo, "checkout", "-q", "squad/done");

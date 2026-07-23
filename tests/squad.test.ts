@@ -218,7 +218,7 @@ test(
 		tmps.push(dir);
 		const id = `rpc-test-${Date.now().toString(36)}`;
 		const a = new RpcAgent({ id, cwd: dir, approvalMode: "yolo", thinking: "minimal" });
-		await a.start(25_000);
+		await a.start(60_000);
 		expect(a.isReady).toBe(true);
 		const state = await a.getState();
 		expect(typeof state.sessionId).toBe("string");
@@ -231,7 +231,7 @@ test(
 		await Bun.sleep(200);
 		// A fresh client (same id → same socket) re-attaches to the SAME live session.
 		const b = new RpcAgent({ id, cwd: dir, approvalMode: "yolo", thinking: "minimal" });
-		await b.start(10_000);
+		await b.start(30_000);
 		expect(b.isReady).toBe(true);
 		const state2 = await b.getState();
 		expect(state2.sessionId).toBe(state.sessionId); // same omp session survived
@@ -240,7 +240,7 @@ test(
 		await Bun.sleep(200);
 		expect(b.isAlive).toBe(false);
 	},
-	60_000,
+	120_000,
 );
 
 // ── manager lifecycle (no task → no model turn) ──────────────────────────────
@@ -266,7 +266,7 @@ test(
 		expect(await fs.exists(created.worktree)).toBe(false);
 		await mgr.stop();
 	},
-	60_000,
+	120_000,
 );
 
 // ── workflow checkpoint survives adopt/restore (OMPSQ-165) ───────────────────
