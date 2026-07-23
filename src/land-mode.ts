@@ -62,6 +62,7 @@ export interface LandModeOverrides {
  *  {@link LandModeOverrides} for why (concurrency-safe, env-leak-immune). */
 export async function resolveLandMode(repo: string, overrides?: LandModeOverrides): Promise<ResolvedLandMode> {
 	const configured = (overrides?.landMode ?? process.env.OMP_SQUAD_LAND_MODE ?? "auto") as LandMode;
+	const prBase = overrides ? overrides.prBase : process.env.OMP_SQUAD_PR_BASE;
 	if (configured === "local") return { mode: "local", reason: "OMP_SQUAD_LAND_MODE=local" };
 	if (configured === "pr") {
 		// Forcing pr mode still needs a defaultBranch — without one, landBranch/floatPrOnLandReady/
@@ -69,7 +70,7 @@ export async function resolveLandMode(repo: string, overrides?: LandModeOverride
 		// mode, so an unresolved default used to make EVERY one of them silently fall through to local
 		// behavior despite the operator explicitly forcing PR mode. The 5-point convergence probe is
 		// skipped (that's what "forced" means), but the branch NAME itself is still resolved best-effort.
-		const defaultBranch = await resolveDefaultBranchBestEffort(repo, overrides?.prBase);
+		const defaultBranch = await resolveDefaultBranchBestEffort(repo, prBase);
 		return defaultBranch
 			? { mode: "pr", defaultBranch, reason: `OMP_SQUAD_LAND_MODE=pr (forced, convergence probes skipped); default branch resolved: ${defaultBranch}` }
 			: { mode: "pr", reason: "OMP_SQUAD_LAND_MODE=pr (forced) but no default branch could be resolved (gh repo view, origin/HEAD symref, and git ls-remote all failed) — the caller must refuse to land rather than silently falling back to local" };
@@ -78,7 +79,7 @@ export async function resolveLandMode(repo: string, overrides?: LandModeOverride
 	const cached = cache.get(repo);
 	if (cached && Date.now() - cached.at < ttlMs()) return cached.resolved;
 
-	const resolved = await probe(repo, overrides?.prBase);
+	const resolved = await probe(repo, prBase);
 	cache.set(repo, { resolved, at: Date.now() });
 	return resolved;
 }
@@ -95,8 +96,7 @@ const PUSH_PROBE_REF = "refs/heads/squad/push-probe";
  */
 async function resolveDefaultBranchBestEffort(repo: string, prBase?: string): Promise<string | undefined> {
 	try {
-		const override = prBase ?? process.env.OMP_SQUAD_PR_BASE;
-		if (override) return override;
+		if (prBase) return prBase;
 
 		// 1. gh repo view <slug> --json defaultBranchRef — the same authoritative source the probed
 		//    path uses; slug-addressed so a host-aliased origin still resolves.
@@ -142,7 +142,7 @@ async function probe(repo: string, prBase?: string): Promise<ResolvedLandMode> {
 	// 2. gh repo view <slug> --json defaultBranchRef
 	const view = await ghJson<{ defaultBranchRef: { name: string } }>(["repo", "view", slug, "--json", "defaultBranchRef"], repo);
 	if (!view?.defaultBranchRef?.name) return { mode: "local", reason: `gh repo view ${slug} failed or has no default branch` };
-	const defaultBranch = (prBase ?? process.env.OMP_SQUAD_PR_BASE) || view.defaultBranchRef.name;
+	const defaultBranch = prBase || view.defaultBranchRef.name;
 
 	// 3. Write-capability probe — catches per-repo transport/auth failures (gh auth ≠ push works)
 	//    WITHOUT non-fast-forward semantics. Probing `git push --dry-run origin <default>` directly
