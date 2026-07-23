@@ -6,7 +6,7 @@ import * as path from "node:path";
 import type { AgentDriver } from "../src/agent-driver.ts";
 import { FileStore } from "../src/dal/store.ts";
 import { SquadManager } from "../src/squad-manager.ts";
-import type { PersistedAgent, RpcSessionState, SquadEvent } from "../src/types.ts";
+import type { PendingRequest, PersistedAgent, RpcSessionState, SquadEvent } from "../src/types.ts";
 
 process.env.OMP_SQUAD_AUTODISPATCH = "0";
 
@@ -42,6 +42,97 @@ class RichDriver extends EventEmitter implements AgentDriver {
 }
 
 interface DriverFactoryHost { makeDriver: (p: PersistedAgent) => AgentDriver; }
+
+type CommandAckEvent = Extract<SquadEvent, { type: "command-ack" }>;
+
+interface InternalHost { agents: Map<string, { dto: { pending: PendingRequest[] }; agent: AgentDriver }>; }
+
+function commandAcks(mgr: SquadManager): CommandAckEvent[] {
+	const events: CommandAckEvent[] = [];
+	mgr.on("event", (event: SquadEvent) => {
+		if (event.type === "command-ack") events.push(event);
+	});
+	return events;
+}
+
+async function createChat(driver: AgentDriver): Promise<{ mgr: SquadManager; dto: { id: string }; acks: CommandAckEvent[] }> {
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "rich-transcript-repo-"));
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "rich-transcript-state-"));
+	tmps.push(repo, stateDir);
+	const mgr = new SquadManager({ stateDir });
+	await mgr.start();
+	(mgr as unknown as DriverFactoryHost).makeDriver = () => driver;
+	const dto = await mgr.create({ name: "chat", repo, approvalMode: "yolo", autoRoute: false });
+	return { mgr, dto, acks: commandAcks(mgr) };
+}
+
+class BlockingDriver extends RichDriver {
+	readonly promptStarted = Promise.withResolvers<string>();
+	readonly promptAccepted = Promise.withResolvers<void>();
+
+	override async prompt(message: string): Promise<void> {
+		this.promptStarted.resolve(message);
+		return this.promptAccepted.promise;
+	}
+}
+
+test("missing target prompt emits command-ack ok:false reason missing-target", async () => {
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "rich-transcript-state-"));
+	tmps.push(stateDir);
+	const mgr = new SquadManager({ stateDir });
+	await mgr.start();
+	const acks = commandAcks(mgr);
+
+	await mgr.applyCommand({ type: "prompt", id: "missing-agent", message: "hello", clientTurnId: "missing-turn" });
+
+	expect(acks).toEqual([{ type: "command-ack", clientTurnId: "missing-turn", ok: false, reason: "missing-target" }]);
+	await mgr.stop();
+});
+
+test("duplicate prompt clientTurnId emits duplicate on the second prompt", async () => {
+	const { mgr, dto, acks } = await createChat(new RichDriver());
+
+	await mgr.applyCommand({ type: "prompt", id: dto.id, message: "first", clientTurnId: "dup-turn" });
+	await mgr.applyCommand({ type: "prompt", id: dto.id, message: "second", clientTurnId: "dup-turn" });
+
+	expect(acks).toEqual([
+		{ type: "command-ack", clientTurnId: "dup-turn", ok: true },
+		{ type: "command-ack", clientTurnId: "dup-turn", ok: false, reason: "duplicate" },
+	]);
+	await mgr.stop();
+});
+
+test("answer-style prompt with a pending request id is accepted instead of duplicate-nacked", async () => {
+	const driver = new RichDriver();
+	const { mgr, dto, acks } = await createChat(driver);
+
+	await mgr.applyCommand({ type: "prompt", id: dto.id, message: "first", clientTurnId: "request-1" });
+	const rec = (mgr as unknown as InternalHost).agents.get(dto.id);
+	expect(rec).toBeDefined();
+	rec!.dto.pending.push({ id: "request-1", source: "ui", kind: "confirm", title: "Proceed?", createdAt: Date.now() });
+	await mgr.applyCommand({ type: "prompt", id: dto.id, message: "yes", clientTurnId: "request-1" });
+
+	expect(acks).toEqual([
+		{ type: "command-ack", clientTurnId: "request-1", ok: true },
+		{ type: "command-ack", clientTurnId: "request-1", ok: true },
+	]);
+	await mgr.stop();
+});
+
+test("successful prompt emits command-ack ok:true only after the driver accepts the prompt", async () => {
+	const driver = new BlockingDriver();
+	const { mgr, dto, acks } = await createChat(driver);
+
+	const applied = mgr.applyCommand({ type: "prompt", id: dto.id, message: "hold", clientTurnId: "accepted-turn" });
+	expect(await driver.promptStarted.promise).toBe("hold");
+	expect(acks).toEqual([]);
+
+	driver.promptAccepted.resolve();
+	await applied;
+
+	expect(acks).toEqual([{ type: "command-ack", clientTurnId: "accepted-turn", ok: true }]);
+	await mgr.stop();
+});
 
 test("manager preserves client turn ids and rich tool lifecycle in one transcript entry", async () => {
 	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "rich-transcript-repo-"));
