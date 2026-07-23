@@ -1188,7 +1188,7 @@ export class SquadServer {
 		else if (this.auth) {
 			const bucket = orgId ? this.clientsByOrg.get(orgId) : undefined;
 			for (const ws of bucket ?? []) ws.send(JSON.stringify(event));
-		}
+		} else this.broadcast(event);
 	}
 
 	/** Register an opening socket in its bucket and return the fleet to seed its roster from. */
@@ -1196,6 +1196,7 @@ export class SquadServer {
 		this.clients.add(ws);
 		if (!this.registry) {
 			if (ws.data.userId && ws.data.orgId) this.registerSocketPresence(ws);
+			else this.emitPresence(undefined);
 			return this.singleManager;
 		}
 		const key = ws.data.orgId ?? "";
@@ -1216,6 +1217,7 @@ export class SquadServer {
 		this.clients.delete(ws);
 		if (!this.registry) {
 			if (ws.data.userId && ws.data.orgId) this.unregisterSocketPresence(ws);
+			else this.emitPresence(undefined);
 			return;
 		}
 		const key = ws.data.orgId ?? "";
@@ -1828,12 +1830,11 @@ export class SquadServer {
 			: this.registry && bootstrapAdmin && this.singleManager
 				? ROOT_FACTORY_ORG
 				: undefined;
-		const actor: Actor =
-			this.registry && session
-				? { id: `db:${session.user.id}`, displayName: session.user.name, origin: "local", role, orgId }
-				: bootstrapAdmin
-					? { ...actorForRole(role), orgId }
-					: actorForRole(role);
+		const actor: Actor = session
+			? { id: `db:${session.user.id}`, displayName: session.user.name, origin: "local", role, orgId }
+			: bootstrapAdmin
+				? { ...actorForRole(role), orgId }
+				: actorForRole(role);
 		if (url.pathname === "/api/room/presence" && req.method === "GET") return Response.json(this.presenceForOrg(orgId));
 		const manager = await this.managerFor(actor);
 		// Voice token mint + capability probe (webapp-voice-lane/05, DESIGN.md "Token mint" row).
