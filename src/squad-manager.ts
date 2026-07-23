@@ -92,6 +92,7 @@ import { archivePlanDir, buildFeatures, concernDocStatus, concernNumFromFile, de
 import { canTransition, dedupeTransitions, deriveStatus, followLineage, type DerivedReason, type TransitionReason } from "./agent-lifecycle.ts";
 import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, withRepoLandLock } from "./land.ts";
 import { LandAssessmentHook } from "./land-assessment/hook.ts";
+import { readRecentLandAttemptEvents } from "./land-assessment/store.ts";
 // Aliased: WorktreeInfo (worktree-reaper.ts) already has an `aheadOfBase` FIELD of its own — importing
 // under the same bare name would read as if that field and this function were the same thing.
 import { aheadOfBase as computeAheadOfBase, aheadUnknown, resolveLandMode } from "./land-mode.ts";
@@ -102,6 +103,7 @@ import { ghJson } from "./gh.ts";
 import { repoIdentity } from "./repo-identity.ts";
 import { autoLandOnSuccess } from "./autoland.ts";
 import { ownershipConflict, requiresConflict, outOfScopeWrites, producesAllowlist } from "./ownership.ts";
+import { buildRecentlyLandedBlock, type RecentlyLandedEntry } from "./landed-context.ts";
 import { headCommit, isFresh, proofFingerprint, proofFor, proofGate, runProof, setProofRoot, sweepProofs } from "./proof.ts";
 import { setGateLogRoot, sweepGateLogs } from "./gate-logs.ts";
 import { setCompactionLogRoot } from "./output-reduce.ts";
@@ -611,6 +613,50 @@ function isAgentDisconnected(err: unknown): boolean {
 /** Cause payload passed to transition()/setPending() — `error` is the one field transition() itself
  *  consumes (assigns to `rec.dto.error`); everything else rides along for the log entry only. */
 type TransitionCause = { error?: string; priorId?: string; [k: string]: unknown };
+type LandedTransitionCause = TransitionCause & {
+	landedContext: true;
+	name: string;
+	repo: string;
+	produces: string[];
+	branch?: string;
+	sha?: string;
+	outcome: "landed" | "rejected";
+};
+
+function fieldValue(obj: object, key: string): unknown {
+	if (!(key in obj)) return undefined;
+	return Object.getOwnPropertyDescriptor(obj, key)?.value;
+}
+
+function stringField(obj: object, key: string): string | undefined {
+	const value = fieldValue(obj, key);
+	return typeof value === "string" ? value : undefined;
+}
+
+function stringArrayField(obj: object, key: string): string[] | undefined {
+	const value = fieldValue(obj, key);
+	return Array.isArray(value) && value.every((x) => typeof x === "string") ? value : undefined;
+}
+
+function landedCause(cause: unknown): LandedTransitionCause | undefined {
+	if (!cause || typeof cause !== "object") return undefined;
+	if (!("landedContext" in cause) || cause.landedContext !== true) return undefined;
+	const name = stringField(cause, "name");
+	const repo = stringField(cause, "repo");
+	const produces = stringArrayField(cause, "produces");
+	const outcome = stringField(cause, "outcome");
+	if (!name || !repo || !produces || (outcome !== "landed" && outcome !== "rejected")) return undefined;
+	return {
+		landedContext: true,
+		name,
+		repo,
+		produces,
+		outcome,
+		branch: stringField(cause, "branch"),
+		sha: stringField(cause, "sha"),
+	};
+}
+
 
 /** Redact every string field of `cause` (error/title/message/etc.) through the same chokepoint
  *  append() uses (redact.ts) — matches the design's redact-at-write decision (secrets never touch
@@ -3961,6 +4007,17 @@ export class SquadManager extends EventEmitter {
 			// resolved unit at `error` permanently. The land just proved the prior veto no longer describes
 			// reality — drop it, the same way `landReady` just above is dropped on success.
 			if (rec.dto.validation?.verdict === "veto") rec.dto.validation = undefined;
+			const landedSha = dto.branch ? await headCommit(dto.worktree).catch(() => undefined) : undefined;
+			const landedProduces = dto.produces?.length ? dto.produces : (dto.owns ?? []);
+			this.transition(rec, rec.dto.status, "landed", {
+				landedContext: true,
+				name: dto.name,
+				repo: dto.repo,
+				produces: landedProduces,
+				branch: dto.branch,
+				sha: landedSha,
+				outcome: "landed",
+			});
 			this.emitAgent(rec);
 			if (result.merged) {
 				// PR mode already wrote its own (richer, method/mergeCommit-aware) DoneProof inside
@@ -3978,7 +4035,7 @@ export class SquadManager extends EventEmitter {
 						issueId: dto.issue?.id,
 						issueIdentifier: dto.issue?.identifier,
 						mode: "local",
-						commit: dto.branch ? await headCommit(dto.worktree) : "",
+						commit: landedSha ?? "",
 						baseRef: "HEAD",
 						verified: result.detail?.includes("landed onto a red baseline") ? "red-baseline" : "green",
 						detail: result.detail ?? result.message,
@@ -5880,6 +5937,51 @@ export class SquadManager extends EventEmitter {
 		return this.createWithId(opts, opts.explicitId, actor);
 	}
 
+	private async recentlyLandedEntries(repo: string, includeAssessmentStore: boolean): Promise<RecentlyLandedEntry[]> {
+		const byAgent = new Map<string, RecentlyLandedEntry>();
+		for (const entry of this.transitionLog.recent(200).reverse()) {
+			if (entry.reason !== "landed") continue;
+			const cause = landedCause(entry.cause);
+			if (!cause || cause.repo !== repo) continue;
+			byAgent.set(entry.agentId, {
+				agentId: entry.agentId,
+				name: cause.name,
+				repo: cause.repo,
+				produces: cause.produces,
+				branch: cause.branch,
+				sha: cause.sha,
+				outcome: cause.outcome,
+				at: entry.at,
+			});
+		}
+		if (!includeAssessmentStore) return [...byAgent.values()].sort((a, b) => b.at - a.at);
+		const assessed = await readRecentLandAttemptEvents(this.stateDir, repoIdentity(repo), 50).catch(() => []);
+		for (const event of assessed) {
+			const agentId = event.refs.agentRunRef;
+			if (!agentId || byAgent.has(agentId)) continue;
+			const rec = this.agents.get(agentId);
+			if (!rec) continue;
+			const produces = rec.dto.produces?.length ? rec.dto.produces : (rec.dto.owns ?? []);
+			if (!produces.length) continue;
+			byAgent.set(agentId, {
+				agentId,
+				name: rec.dto.name,
+				repo,
+				produces,
+				branch: rec.dto.branch,
+				sha: event.resultCommit,
+				outcome: event.stage === "landed" ? "landed" : "rejected",
+				at: Date.parse(event.observedAt) || Date.now(),
+			});
+		}
+		return [...byAgent.values()].sort((a, b) => b.at - a.at);
+	}
+
+	private async recentlyLandedPrompt(repo: string, requires?: readonly string[], since?: number): Promise<string | undefined> {
+		const lands = await this.recentlyLandedEntries(repo, (requires?.length ?? 0) > 0);
+		return buildRecentlyLandedBlock({ lands, requires, since });
+	}
+
 	private async createWithId(opts: CreateAgentOptions, explicitId: string | undefined, actor: Actor = LOCAL_ACTOR, source?: string): Promise<AgentDTO> {
 		const profile = this.profileFor(opts.profileId, opts.repo);
 		// A profile's capability tool-grants (AgentProfile.capabilities, populated by bindingToProfile) scope
@@ -5968,6 +6070,13 @@ export class SquadManager extends EventEmitter {
 		const primed = await this.primeContext(opts, actor);
 		opts = primed.opts;
 		const primerBuilt = primed.hasPrimer;
+		const landedBlock = await this.recentlyLandedPrompt(opts.repo, opts.requires);
+		if (landedBlock) {
+			opts = {
+				...opts,
+				appendSystemPrompt: [opts.appendSystemPrompt, landedBlock].filter((text): text is string => typeof text === "string" && text.length > 0).join("\n\n") || undefined,
+			};
+		}
 		// Authored-spec injection (concern 01): a dispatched unit works toward its actual contract
 		// (acceptance criteria / verification / scope) instead of reconstructing intent from an 8-word
 		// title. The body is human/skills-MCP-writable, so fence it as UNTRUSTED data — never let issue
@@ -7066,6 +7175,9 @@ export class SquadManager extends EventEmitter {
 					await this.settleSpawnFailure(rec, err);
 					break;
 				}
+				const lastTurnAt = rec.dto.lastActivity;
+				const landedBlock = await this.recentlyLandedPrompt(rec.dto.repo, rec.dto.requires, lastTurnAt);
+				const promptMessage = landedBlock ? `${cmd.message}\n\n${landedBlock}` : cmd.message;
 				this.log("info", `${actor.id} → ${rec.dto.name}: ${truncateLabel(cmd.message, 80)}`);
 				// A new instruction makes every decision the auto-loop already took about this unit stale.
 				// Its in-memory `staged`/`landed`/`halted` sets are keyed by ids that a steered agent's edits
@@ -7076,7 +7188,7 @@ export class SquadManager extends EventEmitter {
 				// `text` is the durable audit/debug record — the full context-augmented message the
 				// agent actually received. `displayText` (when the client sent one) is the user's bare
 				// typed text; the UI renders that and falls back to `text` for older clients.
-				this.append(rec, "user", cmd.message, { clientTurnId: cmd.clientTurnId, displayText: cmd.displayText });
+				this.append(rec, "user", promptMessage, { clientTurnId: cmd.clientTurnId, displayText: cmd.displayText });
 				// Restart re-attach (daily-onramp 04): the just-typed prompt must survive a daemon KILL —
 				// it's the newest entry the honest re-attach's recovered context can carry, and nothing else
 				// persists transcripts until some unrelated write happens to fire (proven live: the first
@@ -7104,7 +7216,7 @@ export class SquadManager extends EventEmitter {
 				rec.streaming = true;
 				this.transition(rec, "working", "task-start");
 				this.emitAgent(rec);
-				await this.promptConnected(rec, cmd.message).catch((err) => this.fail(rec, err));
+				await this.promptConnected(rec, promptMessage).catch((err) => this.fail(rec, err));
 				void this.recordAudit(actor, "prompt", cmd.id, "ok", truncateLabel(cmd.message, 80), commandSource(cmd));
 				break;
 			}

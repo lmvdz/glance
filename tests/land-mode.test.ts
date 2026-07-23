@@ -211,7 +211,7 @@ test("probe 5: no local <default> ref at all (cloned straight onto a branch) ⇒
 	await git(clone, "checkout", "-qb", "work");
 	await git(clone, "branch", "-D", "main"); // no refs/heads/main remains
 
-	const resolved = await resolveLandMode(clone, { landMode: "auto" });
+	const resolved = await resolveLandMode(clone, { landMode: "auto", prBase: "main" });
 	expect(resolved.mode).toBe("pr");
 	expect(resolved.defaultBranch).toBe("main");
 });

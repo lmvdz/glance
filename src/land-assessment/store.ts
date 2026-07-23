@@ -39,6 +39,7 @@
  */
 
 import { createHash } from "node:crypto";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { crc32 } from "node:zlib";
 import type { AutomationRecorder } from "../automation-log.ts";
@@ -286,6 +287,24 @@ export async function appendLandAssessmentSnapshot(stateDir: string, snapshot: L
 		}
 		return "written";
 	});
+}
+
+export async function readRecentLandAttemptEvents(stateDir: string, repositoryId: string, limit = 50): Promise<LandAttemptEvent[]> {
+	const dir = shardDir(stateDir, repositoryId);
+	const files = await fs.readdir(dir).catch(() => []);
+	const shards = files.filter((f) => /^events-\d{4}-\d{2}\.jsonl$/.test(f)).sort().reverse();
+	const out: LandAttemptEvent[] = [];
+	for (const shard of shards) {
+		const body = await fs.readFile(path.join(dir, shard), "utf8").catch(() => "");
+		for (const line of body.trimEnd().split("\n").reverse()) {
+			if (!line) continue;
+			const parsed = parseStoredLine(line);
+			if (parsed?.kind !== "attempt-event") continue;
+			if (parsed.record.stage === "landed" || parsed.record.stage === "rejected") out.push(parsed.record);
+			if (out.length >= limit) return out;
+		}
+	}
+	return out;
 }
 
 /** Test-only escape hatch: forget this process's in-memory shard state (queue/seq/dedup) so a test can
