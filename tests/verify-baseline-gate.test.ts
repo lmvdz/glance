@@ -112,6 +112,35 @@ test("NEW failure from untouched test file is excluded when the file passes in i
 	expect(logs.join("\n")).toContain("environment-flake excluded: tests/restart-reattach.test.ts");
 });
 
+test("compound verify script isolates the bun-test segment instead of appending file to the last command", async () => {
+	const compoundNode: WorkflowNode = {
+		...goalGateNode,
+		script: "bun test && ! grep -rn '^<<<<<<<' src/ webapp/src/",
+	};
+	const calls: string[] = [];
+	const execCommand = async (script: string) => {
+		calls.push(script);
+		if (script === compoundNode.script) {
+			return {
+				code: 1,
+				stdout: "0 pass\n1 fail\n(fail) tests/restart-reattach.test.ts > flakes under load\n",
+				stderr: "",
+			};
+		}
+		return { code: 0, stdout: "1 pass", stderr: "" };
+	};
+	const e = exec({
+		execCommand,
+		resolveBaselineFailures: async () => ({ failures: [], unrunnable: null, baseRef: "abcdef0123456789" }),
+		listChangedFilesSinceBase: async () => ["src/workflow/executor.ts"],
+	});
+
+	const res = await e.runCommand(compoundNode, ctx());
+
+	expect(res.outcome).toBe("succeeded");
+	expect(calls).toEqual(["bun test && ! grep -rn '^<<<<<<<' src/ webapp/src/", "bun test 'tests/restart-reattach.test.ts' && ! grep -rn '^<<<<<<<' src/ webapp/src/"]);
+});
+
 test("NEW failure stays attributed when isolated retries keep failing", async () => {
 	const calls: string[] = [];
 	const execCommand = async (script: string) => {

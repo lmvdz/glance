@@ -468,7 +468,7 @@ export class SingleAgentExecutor implements NodeExecutor {
 
 	private async passesInIsolation(script: string, file: string): Promise<boolean> {
 		const run = this.opts.execCommand ?? defaultExecCommand;
-		const isolationScript = `${script.trim()} ${shellQuote(file)}`;
+		const isolationScript = isolateBunTestSegment(script, file);
 		for (let attempt = 0; attempt < 3; attempt++) {
 			const { code } = await run(isolationScript, this.opts.cwd);
 			if (code === 0) return true;
@@ -579,6 +579,18 @@ function normalizeRepoPath(file: string): string {
 
 function shellQuote(value: string): string {
 	return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function isolateBunTestSegment(script: string, file: string): string {
+	const quotedFile = shellQuote(file);
+	const parts = script.trim().split(/(\s*&&\s*)/);
+	for (let i = 0; i < parts.length; i += 2) {
+		if (/\bbun\s+test\b/.test(parts[i])) {
+			parts[i] = `${parts[i].trim()} ${quotedFile}`;
+			return parts.join("");
+		}
+	}
+	return `bun test ${quotedFile}`;
 }
 
 function renderFlakeNote(files: string[]): string {
