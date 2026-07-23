@@ -1134,6 +1134,15 @@ export class SquadManager extends EventEmitter {
 	private readonly commandAckDedupe = new Map<string, number>();
 	private idSeq = 0;
 	private transcriptSeq = 0;
+	private reseedTranscriptSeq(snapshot: StateSnapshot): void {
+		let maxSeq = this.transcriptSeq;
+		for (const transcript of Object.values(snapshot.transcripts)) {
+			for (const entry of transcript) {
+				if (typeof entry.seq === "number" && Number.isFinite(entry.seq)) maxSeq = Math.max(maxSeq, entry.seq);
+			}
+		}
+		this.transcriptSeq = maxSeq;
+	}
 	/** Last observed `plans/` signature for repos the feature board scans. */
 	private planFeatureSignature = "";
 	private readonly mainGateCache = new Map<string, { fp: string; result: { ok: boolean; firstFailure?: string; skipped?: boolean; unrunnable?: boolean }; tick: number }>();
@@ -1301,6 +1310,7 @@ export class SquadManager extends EventEmitter {
 		// a concurrent daemon (or test). reconnectLive (use live) → reapOrphans → adopt worktree context.
 		const snapshot = (await this.store.hasState()) ? await this.store.load() : undefined;
 		if (snapshot) {
+			this.reseedTranscriptSeq(snapshot);
 			await this.reconnectLive(snapshot);
 			if (!this.skipGlobalJanitors) await this.reapOrphans();
 			await this.adoptOrphanedAgents(snapshot);
@@ -11359,6 +11369,7 @@ export class SquadManager extends EventEmitter {
 	/** Re-spawn agents persisted from a previous run. Returns how many were restored. */
 	async loadPersisted(): Promise<number> {
 		const snapshot = await this.store.load();
+		this.reseedTranscriptSeq(snapshot);
 		this.capabilityStore = normalizeCapabilitySnapshot(snapshot.capabilities);
 		for (const f of snapshot.features) this.featureStore.set(f.id, f);
 		const list = snapshot.agents;
