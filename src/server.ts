@@ -2784,6 +2784,7 @@ export class SquadServer {
 			// it every LANE_POLICY privilege axis — actually reachable. Invalid values drop to undefined
 			// (classifier decides), never coerce.
 			const lane = Result.isSuccess(decoded) ? laneFromRouted(decoded.success) : undefined;
+			const channelId = Result.isSuccess(decoded) && typeof decoded.success.channelId === "string" ? decoded.success.channelId : undefined;
 			const tracked = manager.projects().map((p) => p.repo);
 			// research-sirvir/03 (dead-wire fix): feed the outcome-driven model shift from THIS request's
 			// resolved `manager` — never a bare `resolveStateDir()`, which in DB mode returns the global
@@ -2793,7 +2794,7 @@ export class SquadServer {
 			const scoreboard = envBool("OMP_SQUAD_MODEL_OUTCOMES", false) ? await manager.spawnScoreboard() : undefined;
 			const plan = await planSpawn(prompt, { cwd: process.cwd(), candidates: discoverRepos(process.cwd(), tracked), scoreboard });
 			try {
-				const dto = await manager.create({ ...plan, profileId, lane, track: true }, actor, source);
+				const dto = await manager.create({ ...plan, profileId, lane, channelId, track: true }, actor, source);
 				return Response.json({ agent: dto, plan });
 			} catch (err) {
 				return new Response(err instanceof Error ? err.message : String(err), { status: 409 });

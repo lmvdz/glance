@@ -403,6 +403,8 @@ export const SpawnBodySchema = Schema.Struct({
 	 *  so a valid value here reaches `CreateAgentOptions.lane` and may move privilege axes. Validated
 	 *  against the `WorkLane` union at the handler; invalid values are dropped, never guessed. */
 	lane: Schema.optional(Schema.Unknown),
+	/** Originating room channel for projected proof cards. Optional; non-string values are dropped in the route. */
+	channelId: Schema.optional(Schema.Unknown),
 });
 
 

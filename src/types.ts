@@ -866,6 +866,8 @@ export interface AgentDTO {
 	repoId?: string;
 	/** Absolute path of this agent's git worktree (its cwd). */
 	worktree: string;
+	/** Originating room channel for this unit. Absent means unbound automation/CLI/factory work projects filtered cards to #fleet. */
+	channelId?: string;
 	branch?: string;
 	model?: string;
 	profileId?: string;
@@ -1110,6 +1112,8 @@ export interface PersistedAgent {
 	repo: string;
 	worktree: string;
 	branch?: string;
+	/** Originating room channel for this unit. Absent means unbound automation/CLI/factory work projects filtered cards to #fleet. */
+	channelId?: string;
 	model?: string;
 	profileId?: string;
 	approvalMode: ApprovalMode;
@@ -1286,6 +1290,8 @@ export interface CreateAgentOptions {
 	branch?: string;
 	/** Reuse an existing path as the cwd instead of cutting a worktree. */
 	existingPath?: string;
+	/** Originating room channel for projected proof cards. Omitted by CLI/TUI/factory/automation spawns. */
+	channelId?: string;
 	model?: string;
 	profileId?: string;
 	approvalMode?: ApprovalMode;
