@@ -12,9 +12,9 @@
  * Runs once, before any test module is imported (so module-level env snapshots capture the
  * cleared state). ponytail: a name-prefix sweep — the only three prefixes this repo reads.
  */
-import { mkdtempSync } from "node:fs";
+import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 for (const k of Object.keys(process.env)) {
 	// OMP_SQUAD_REQUIRE_DOCKER_TESTS survives the sweep: it addresses the TEST RUN itself (force the
@@ -41,6 +41,34 @@ process.env.OMP_SQUAD_GATE_SANDBOX = "host";
 // today's implicit behavior — is untouched. Deliberately invalid: an accidental real API call
 // fails instead of spending.
 process.env.ANTHROPIC_API_KEY ??= "glance-test-dummy-key-not-real";
+
+if (!Bun.which("omp")) {
+	const fakeOmp = join(mkdtempSync(join(tmpdir(), "glance-test-omp-")), "omp");
+	writeFileSync(
+		fakeOmp,
+		`#!/usr/bin/env bun
+process.stdout.write(JSON.stringify({ type: "ready" }) + "\\n");
+let buf = "";
+process.stdin.on("data", (chunk) => {
+  buf += chunk.toString();
+  for (;;) {
+    const i = buf.indexOf("\\n");
+    if (i < 0) break;
+    const line = buf.slice(0, i).trim();
+    buf = buf.slice(i + 1);
+    if (!line) continue;
+    let msg;
+    try { msg = JSON.parse(line); } catch { continue; }
+    if (msg.type === "get_state") process.stdout.write(JSON.stringify({ type: "response", id: msg.id, success: true, command: "get_state", data: { sessionId: "fake-omp-test", isStreaming: false, isCompacting: false, steeringMode: "all", followUpMode: "all", interruptMode: "immediate", autoCompactionEnabled: false, messageCount: 0, queuedMessageCount: 0, todoPhases: [] } }) + "\\n");
+    else if (msg.type === "bash") process.stdout.write(JSON.stringify({ type: "response", id: msg.id, success: true, command: "bash", data: { exitCode: 0, output: "squad-test-OK\\n" } }) + "\\n");
+    else process.stdout.write(JSON.stringify({ type: "response", id: msg.id, success: true, command: msg.type, data: {} }) + "\\n");
+  }
+});
+`,
+	);
+	chmodSync(fakeOmp, 0o755);
+	process.env.PATH = `${dirname(fakeOmp)}:${process.env.PATH ?? ""}`;
+}
 
 // Point the fleet state dir at a throwaway. presence/leases (ttl-registry) and any daemon a test spins up
 // now live here instead of the operator's real state dir (~/.glance / legacy ~/.omp/squad) — the source

@@ -1,6 +1,6 @@
 # R3 glance surfaces — the 10x layer in t3's vocabulary
 
-STATUS: open
+STATUS: cancelled
 PRIORITY: p2
 REPOS: glance-desktop
 COMPLEXITY: architectural
@@ -32,3 +32,9 @@ None.
 - Lease overlay renders as a glass card with real presence data.
 - Blind provenance test (concern 13): a reviewer shown cropped gate-chip / lease-card components alongside t3 components can't reliably tell which app is which (same design system).
 - Taste-lane review; gates green.
+
+## Resolution
+Parked 2026-07-22 — glance-desktop is superseded (unused, non-working; Lars directive,
+the-room design gate). 13's acceptance protocol lives on re-targeted at the webapp room as
+plans/the-room/23-love-gate.md; the reskin's visual work is harvested into
+plans/the-room/CRAFT-HARVEST.md (concern 21). See plans/the-room/24-supersessions-amendment.md.

@@ -1,6 +1,6 @@
 # Chrome polish — the feel carriers a screenshot can't see
 
-STATUS: open
+STATUS: cancelled
 PRIORITY: p2
 REPOS: glance-desktop
 COMPLEXITY: mechanical
@@ -31,3 +31,9 @@ None.
 - Hover a unit row → actions reveal with the crossfade; group header chevron↔dot swaps.
 - Copy review by the taste lane against t3's voice.
 - `pnpm lint && check-types && vitest run && build` green.
+
+## Resolution
+Parked 2026-07-22 — glance-desktop is superseded (unused, non-working; Lars directive,
+the-room design gate). 13's acceptance protocol lives on re-targeted at the webapp room as
+plans/the-room/23-love-gate.md; the reskin's visual work is harvested into
+plans/the-room/CRAFT-HARVEST.md (concern 21). See plans/the-room/24-supersessions-amendment.md.

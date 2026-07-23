@@ -79,6 +79,7 @@ async function convergedRepo(prefix: string): Promise<string> {
 	const origin = await bareRepo(`${prefix}origin-`);
 	await git(repo, "remote", "add", "origin", origin);
 	await git(repo, "push", "-q", "origin", "main");
+	await git(origin, "symbolic-ref", "HEAD", "refs/heads/main");
 	return repo;
 }
 
