@@ -193,16 +193,17 @@ async function probe(repo: string, prBase?: string): Promise<ResolvedLandMode> {
 	//    re-forced local mode independently of probe 4). A repo with no local `<default>` ref at all
 	//    (cloned straight onto a branch) has nothing to strand → pr.
 	//
-	//    The fetch must SUCCEED. `hardenedGit` reports failure through a nonzero `code` and never
-	//    rejects, so the old `.catch(() => undefined)` was decorative: a failed fetch fell straight
-	//    through to an ancestor test against a STALE `origin/<default>`, which trivially passes and
-	//    resolves pr. The daemon would then gate a scratch merge against the stale base while GitHub
-	//    merges the PR into the real (newer) one — a combination nothing ever tested. Probes 2 and 3
-	//    already proved gh and push work, so a fetch failure here is genuinely anomalous: fail closed.
-	const fetched = await hardenedGit(["fetch", "origin", defaultBranch], { cwd: repo }).catch(() => ({ code: 1, stdout: "", stderr: "fetch threw" }));
-	if (fetched.code !== 0) return { mode: "local", reason: `could not fetch origin/${defaultBranch} (${fetched.stderr.trim() || `exit ${fetched.code}`}) — refusing to resolve pr mode against a stale base` };
+	//    When the local default ref exists, the fetch must SUCCEED before the ancestor check.
+	//    `hardenedGit` reports failure through a nonzero `code` and never rejects, so the old
+	//    `.catch(() => undefined)` was decorative: a failed fetch fell straight through to an ancestor
+	//    test against a STALE `origin/<default>`, which trivially passes and resolves pr. A repo with
+	//    no local default ref skips this fetch gate because there is no local default commit to strand.
+	//    Probes 2 and 3 already proved gh and push work, so a fetch failure here is genuinely anomalous:
+	//    fail closed only for the branch-stranding case this probe exists to guard.
 	const localDefault = await hardenedGit(["rev-parse", "--verify", `refs/heads/${defaultBranch}`], { cwd: repo });
 	if (localDefault.code === 0) {
+		const fetched = await hardenedGit(["fetch", "origin", defaultBranch], { cwd: repo }).catch(() => ({ code: 1, stdout: "", stderr: "fetch threw" }));
+		if (fetched.code !== 0) return { mode: "local", reason: `could not fetch origin/${defaultBranch} (${fetched.stderr.trim() || `exit ${fetched.code}`}) — refusing to resolve pr mode against a stale base` };
 		const ancestor = await isAncestor(localDefault.stdout.trim(), `origin/${defaultBranch}`, repo);
 		if (!ancestor) return { mode: "local", reason: `local ${defaultBranch} is NOT an ancestor of origin/${defaultBranch} — diverged, forcing local mode until reconciled (see the operator runbook logged at boot for this repo)` };
 	}
