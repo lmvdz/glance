@@ -70,6 +70,28 @@ export interface AuditTable {
 	at: number;
 }
 
+/** Org-scoped collaborative channels. */
+export interface ChannelsTable {
+	org_id: string;
+	id: string;
+	name: string;
+	kind: string;
+	created_at: number;
+}
+
+/** Durable channel entries. `data` carries the TranscriptEntry-compatible envelope. */
+export interface ChannelEntriesTable {
+	org_id: string;
+	channel_id: string;
+	id: string;
+	seq: number;
+	author_actor: string;
+	reply_to_id: string | null;
+	ts: number;
+	data: string;
+}
+
+
 /** Per-org run usage ledger (cost/tokens/tool-calls per completed run). */
 export interface UsageTable {
 	org_id: string;
@@ -180,6 +202,8 @@ export interface AppDatabase {
 	roster_index: RosterIndexTable;
 	features: FeaturesTable;
 	audit: AuditTable;
+	channels: ChannelsTable;
+	channel_entries: ChannelEntriesTable;
 	usage: UsageTable;
 	federation_peers: FederationPeersTable;
 	capability_records: CapabilityRecordsTable;
@@ -194,6 +218,8 @@ export type RosterRow = Selectable<RosterIndexTable>;
 export type FeatureRow = Selectable<FeaturesTable>;
 export type AuditRow = Selectable<AuditTable>;
 export type UsageRow = Selectable<UsageTable>;
+export type ChannelRow = Selectable<ChannelsTable>;
+export type ChannelEntryRow = Selectable<ChannelEntriesTable>;
 export type FederationPeerRow = Selectable<FederationPeersTable>;
 export type CapabilityRecordRow = Selectable<CapabilityRecordsTable>;
 export type FeedbackCampaignRow = Selectable<FeedbackCampaignsTable>;

@@ -185,9 +185,13 @@ test("DB-registry WebSocket events stay inside the socket's session org", async 
 	registry.onEvent("orgB", { type: "transcript", id: "agent-b", entry: { kind: "system", text: "org-b-event", ts: 3 } });
 	await orgB.waitFor((event) => event.type === "transcript" && event.id === "agent-b" && event.entry.text === "org-b-event");
 
+	registry.onEvent("orgB", { type: "channel-entry", channelId: "fleet", entry: { id: "ch-b-1", seq: 1, channelId: "fleet", authorActor: "db:bob", kind: "user", text: "org-b-channel", ts: 4, status: "ok" } });
+	await orgB.waitFor((event) => event.type === "channel-entry" && event.entry.text === "org-b-channel");
+
 	await closeAndWait(orgA.ws);
 	expect(hasAgent(orgA.messages, "agent-b")).toBe(false);
 	expect(orgA.messages.some((event) => event.type === "transcript" && event.id === "agent-b")).toBe(false);
+	expect(orgA.messages.some((event) => event.type === "channel-entry" && event.entry.text === "org-b-channel")).toBe(false);
 
 	orgB.ws.send(JSON.stringify({ type: "subscribe", id: agentA.id }));
 	expect(await orgBSubscribe.promise).toBe("agent-a");

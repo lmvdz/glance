@@ -19,6 +19,7 @@ import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { sql } from "kysely";
+import type { Channel, ChannelEntry } from "../channels.ts";
 import type { PersistedAgent, PersistedFeature, RunReceipt, TranscriptEntry } from "../types.ts";
 import { normalizeCapabilitySnapshot, type CapabilitySnapshot } from "../capabilities/index.ts";
 import { emptyFeedbackSnapshot, type FeedbackSnapshot } from "../feedback.ts";
@@ -29,6 +30,35 @@ import { getStorageBackend } from "./storage.ts";
 function isPlainObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+
+function readChannel(value: unknown): Channel | undefined {
+	if (!isPlainObject(value)) return undefined;
+	const kind = value.kind;
+	return typeof value.id === "string" && typeof value.name === "string" && typeof value.createdAt === "number" && (kind === "default" || kind === "user")
+		? { id: value.id, name: value.name, createdAt: value.createdAt, kind }
+		: undefined;
+}
+
+function readChannelEntry(value: unknown): ChannelEntry | undefined {
+	if (!isPlainObject(value)) return undefined;
+	const kind = value.kind;
+	const status = value.status;
+	if (!(typeof value.id === "string" && typeof value.seq === "number" && typeof value.channelId === "string" && typeof value.authorActor === "string" && typeof value.text === "string" && typeof value.ts === "number" && (kind === "user" || kind === "assistant" || kind === "thinking" || kind === "tool" || kind === "system") && (status === undefined || status === "ok" || status === "error" || status === "cancelled"))) return undefined;
+	return {
+		id: value.id,
+		seq: value.seq,
+		channelId: value.channelId,
+		authorActor: value.authorActor,
+		replyToId: typeof value.replyToId === "string" ? value.replyToId : undefined,
+		kind,
+		text: value.text,
+		ts: value.ts,
+		status,
+		format: value.format === "markdown" || value.format === "command" || value.format === "stage" || value.format === "plain" ? value.format : undefined,
+		event: isPlainObject(value.event) && typeof value.event.kind === "string" ? { kind: value.event.kind, payload: value.event.payload } : undefined,
+	};
+}
+
 
 /**
  * Atomically + durably write `data` to `file` through the active StorageBackend (default: local disk,
@@ -75,6 +105,13 @@ export interface Store {
 	appendAudit(entry: AuditEntry): Promise<void>;
 	/** Append/replace one run usage row (no-op for file mode — receipts already on disk). */
 	appendUsage(receipt: RunReceipt): Promise<void>;
+	/** Durable org-scoped channel primitives. File mode stores JSON/JSONL; DB mode stores rows. */
+	listChannels(): Promise<Channel[]>;
+	getChannel(id: string): Promise<Channel | undefined>;
+	putChannel(channel: Channel): Promise<void>;
+	listChannelEntries(channelId: string, since?: number): Promise<ChannelEntry[]>;
+	appendChannelEntry(entry: ChannelEntry): Promise<void>;
+	nextChannelSeq(channelId: string): Promise<number>;
 	/** Cumulative save() failures this process, when the store tracks them (FileStore only — DbStore's
 	 *  per-write failures throw rather than swallow, so there's nothing to count). Surfaced through
 	 *  factory-status since the topology guarantee now rests on this write actually landing. */
@@ -171,6 +208,48 @@ export class FileStore implements Store {
 	// Single-tenant file mode: audit/usage live in the on-disk receipts; the DB ledger is DB-mode only.
 	async appendAudit(): Promise<void> {}
 	async appendUsage(): Promise<void> {}
+
+	async listChannels(): Promise<Channel[]> {
+		const raw = await getStorageBackend().readText(path.join(this.stateDir, "channels.json"));
+		if (!raw) return [];
+		try {
+			const decoded = JSON.parse(raw);
+			return Array.isArray(decoded) ? decoded.map(readChannel).filter((c): c is Channel => c !== undefined) : [];
+		} catch {
+			return [];
+		}
+	}
+
+	async getChannel(id: string): Promise<Channel | undefined> {
+		return (await this.listChannels()).find((c) => c.id === id);
+	}
+
+	async putChannel(channel: Channel): Promise<void> {
+		const channels = [...(await this.listChannels()).filter((c) => c.id !== channel.id), channel].sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+		await getStorageBackend().writeDurable(path.join(this.stateDir, "channels.json"), JSON.stringify(channels, null, 2));
+	}
+
+	async listChannelEntries(channelId: string, since = 0): Promise<ChannelEntry[]> {
+		const raw = await getStorageBackend().readText(path.join(this.stateDir, "channels.jsonl"));
+		if (!raw) return [];
+		const entries: ChannelEntry[] = [];
+		for (const line of raw.split("\n")) {
+			if (!line.trim()) continue;
+			try {
+				const entry = readChannelEntry(JSON.parse(line));
+				if (entry?.channelId === channelId && entry.seq > since) entries.push(entry);
+			} catch {}
+		}
+		return entries.sort((a, b) => a.seq - b.seq);
+	}
+
+	async appendChannelEntry(entry: ChannelEntry): Promise<void> {
+		await getStorageBackend().appendDurable(path.join(this.stateDir, "channels.jsonl"), `${JSON.stringify(entry)}\n`);
+	}
+
+	async nextChannelSeq(channelId: string): Promise<number> {
+		return (await this.listChannelEntries(channelId, 0)).reduce((max, entry) => Math.max(max, entry.seq), 0);
+	}
 }
 
 // A per-process random salt, drawn once at module load, folded into every id this process mints.
@@ -411,6 +490,37 @@ export class DbStore implements Store {
 				})
 				.execute();
 		});
+	}
+
+	async listChannels(): Promise<Channel[]> {
+		return withOrg(this.ctx, this.orgId, (trx) => trx.selectFrom("channels").select(["id", "name", "created_at", "kind"]).where("org_id", "=", this.orgId).orderBy("created_at").execute())
+			.then((rows) => rows.map((r) => ({ id: r.id, name: r.name, createdAt: Number(r.created_at), kind: r.kind as Channel["kind"] })));
+	}
+
+	async getChannel(id: string): Promise<Channel | undefined> {
+		const row = await withOrg(this.ctx, this.orgId, (trx) => trx.selectFrom("channels").select(["id", "name", "created_at", "kind"]).where("org_id", "=", this.orgId).where("id", "=", id).executeTakeFirst());
+		return row ? { id: row.id, name: row.name, createdAt: Number(row.created_at), kind: row.kind as Channel["kind"] } : undefined;
+	}
+
+	async putChannel(channel: Channel): Promise<void> {
+		await withOrg(this.ctx, this.orgId, async (trx) => {
+			await trx.deleteFrom("channels").where("org_id", "=", this.orgId).where("id", "=", channel.id).execute();
+			await trx.insertInto("channels").values({ org_id: this.orgId, id: channel.id, name: channel.name, kind: channel.kind, created_at: channel.createdAt }).execute();
+		});
+	}
+
+	async listChannelEntries(channelId: string, since = 0): Promise<ChannelEntry[]> {
+		const rows = await withOrg(this.ctx, this.orgId, (trx) => trx.selectFrom("channel_entries").select(["data"]).where("org_id", "=", this.orgId).where("channel_id", "=", channelId).where("seq", ">", since).orderBy("seq").execute());
+		return rows.map((r) => readChannelEntry(JSON.parse(r.data))).filter((entry): entry is ChannelEntry => entry !== undefined);
+	}
+
+	async appendChannelEntry(entry: ChannelEntry): Promise<void> {
+		await withOrg(this.ctx, this.orgId, (trx) => trx.insertInto("channel_entries").values({ org_id: this.orgId, channel_id: entry.channelId, id: entry.id, seq: entry.seq, author_actor: entry.authorActor, reply_to_id: entry.replyToId ?? null, ts: entry.ts, data: JSON.stringify(entry) }).execute());
+	}
+
+	async nextChannelSeq(channelId: string): Promise<number> {
+		const row = await withOrg(this.ctx, this.orgId, (trx) => trx.selectFrom("channel_entries").select(({ fn }) => fn.max("seq").as("seq")).where("org_id", "=", this.orgId).where("channel_id", "=", channelId).executeTakeFirst());
+		return Number(row?.seq ?? 0);
 	}
 
 	private async loadTranscripts(): Promise<Record<string, TranscriptEntry[]>> {

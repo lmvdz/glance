@@ -212,6 +212,7 @@ import { lensAdvisoryBucket, scoreConfidence } from "./confidence.ts";
 import { redact } from "./redact.ts";
 import { truncateLabel } from "./text-util.ts";
 import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
+import { ChannelStore, DEFAULT_CHANNEL_ID, type ChannelEntry, type ClientChannelPost } from "./channels.ts";
 import { buildTrace, traceMaxSpans, traceSampleRatio, traceSpansEnabled, type TraceResponse } from "./spans.ts";
 import { traceExporterFromEnv, type TraceExportQueue } from "./trace-exporter.ts";
 import { settleRunningEntries, transcriptSince } from "./transcript-delta.ts";
@@ -1065,6 +1066,7 @@ export class SquadManager extends EventEmitter {
 	/** Operator-attention substrate (comprehension concern 01) — raw JsonlLog feed + compacted
 	 *  last-seen map, constructed ONCE here (mirrors `transitionLog` above), never per-request. */
 	private readonly attentionStore: AttentionStore;
+	private readonly channelStore: ChannelStore;
 	private readonly traceExporter?: TraceExportQueue;
 	/** Reward disbursement provider (Tremendous / Manual). Injectable for tests; default from env. */
 	private readonly paymentProvider: PaymentProvider;
@@ -1101,11 +1103,12 @@ export class SquadManager extends EventEmitter {
 		this.transitionLog = new JsonlLog<TransitionEntry>({ path: path.join(this.stateDir, "transitions.jsonl"), log: (m) => this.log("warn", `transitions.jsonl: ${m}`) });
 		this.frictionLog = new FrictionLog(this.stateDir, (m) => this.log("warn", `friction.jsonl: ${m}`));
 		this.pushTapLog = new JsonlLog<PushTapEntry>({ path: path.join(this.stateDir, PUSH_TAPS_FILE), log: (m) => this.log("warn", `${PUSH_TAPS_FILE}: ${m}`) });
+		this.store = opts.store ?? new FileStore(this.stateDir);
+		this.channelStore = new ChannelStore(this.stateDir, this.store, (m) => this.log("warn", `channels: ${m}`));
 		this.attentionStore = new AttentionStore({ stateDir: this.stateDir, log: (m) => this.log("warn", `attention: ${m}`) });
 		this.bin = opts.bin;
 		this.autoLand = opts.autoLand ?? false;
 		this.worktreeBaseDir = opts.worktreeBase;
-		this.store = opts.store ?? new FileStore(this.stateDir);
 		this.skipGlobalJanitors = opts.skipGlobalJanitors ?? false;
 		this.llmClassify = process.env.OMP_SQUAD_LLM_ROUTER ? ompClassify(this.bin) : undefined;
 		this.traceExporter = traceExporterFromEnv((m) => this.log("warn", m), this.stateDir);
@@ -1744,6 +1747,7 @@ export class SquadManager extends EventEmitter {
 		// Flush the attention store's debounced last-seen-map write (comprehension concern 01) — same
 		// "only a crash may lose it" contract as the pendingPersistTimers flush above.
 		this.attentionStore.stop();
+		await this.channelStore.stop();
 		await this.persist();
 		// Best-effort timeline marker (#lifecycle-truth finding 4 / DESIGN's "a best-effort daemon-stop
 		// entry in stop()") — a graceful shutdown DETACHES agents (below), it does not actually stop them,
@@ -10808,6 +10812,21 @@ export class SquadManager extends EventEmitter {
 		if (rec.transcript.length > MAX_TRANSCRIPT) rec.transcript.shift();
 		rec.dto.messageCount = rec.transcript.length;
 		this.emit("event", { type: "transcript", id: rec.dto.id, entry } satisfies SquadEvent);
+		return entry;
+	}
+
+
+	async listChannels() {
+		return this.channelStore.listChannels();
+	}
+
+	async channelEntries(channelId: string = DEFAULT_CHANNEL_ID, since = 0): Promise<ChannelEntry[]> {
+		return this.channelStore.entries(channelId, since);
+	}
+
+	async appendChannelPost(channelId: string, actor: Actor, input: ClientChannelPost): Promise<ChannelEntry> {
+		const entry = await this.channelStore.appendClient(channelId, actor, input);
+		this.emit("event", { type: "channel-entry", channelId, entry } satisfies SquadEvent);
 		return entry;
 	}
 
