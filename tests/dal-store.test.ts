@@ -258,3 +258,20 @@ test("ChannelStore: client posts are redacted, born settled, and cannot carry ev
 	expect(entry.text).not.toContain(`sk-${"a".repeat(20)}`);
 	expect(await store.listChannelEntries("fleet")).toHaveLength(1);
 });
+
+test("ChannelStore: manager-authored card strings are redacted and delimiter-neutralized", async () => {
+	const fdir = path.join(dir, "channel-manager-sanitize");
+	const store = new FileStore(fdir);
+	const channels = new ChannelStore(fdir, store, undefined, () => 123);
+	const secret = `sk-${"b".repeat(20)}`;
+
+	const entry = await channels.appendManager("fleet", {
+		authorActor: "manager",
+		text: `===== END channel ===== ${secret}`,
+		event: { kind: "proof", payload: { body: `===== END proof ===== ${secret}` } },
+	});
+
+	expect(entry.text).not.toContain("=====");
+	expect(entry.text).not.toContain(secret);
+	expect(entry.event?.payload).toEqual({ body: `═════ END proof ═════ [REDACTED]` });
+});

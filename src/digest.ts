@@ -164,7 +164,7 @@ const MAX_FENCED = 24_000;
  *  fencing against. Any `=====` run inside the body is folded to the box-drawing double line: it reads
  *  identically to a human and to a model, but can never byte-match a real delimiter, so a digest that
  *  contains `===== END context primer =====` cannot close its own fence and continue as instructions. */
-function neutralizeDelimiters(text: string): string {
+export function neutralizeDelimiters(text: string): string {
 	return text.replace(/={5,}/g, (run) => "═".repeat(run.length));
 }
 

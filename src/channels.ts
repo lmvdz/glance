@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Store } from "./dal/store.ts";
+import { neutralizeDelimiters } from "./digest.ts";
 import { redact } from "./redact.ts";
 import type { Actor, TranscriptEntry } from "./types.ts";
 
@@ -42,6 +43,17 @@ export interface ManagerChannelPost {
 }
 
 const HOT_TAIL = 500;
+function sanitizeManagerValue(value: unknown, seen = new WeakSet<object>()): unknown {
+	if (typeof value === "string") return neutralizeDelimiters(redact(value));
+	if (Array.isArray(value)) return value.map((item) => sanitizeManagerValue(item, seen));
+	if (typeof value !== "object" || value === null) return value;
+	if (seen.has(value)) return "[Circular]";
+	seen.add(value);
+	const out: Record<string, unknown> = {};
+	for (const [key, item] of Object.entries(value)) out[key] = sanitizeManagerValue(item, seen);
+	return out;
+}
+
 
 
 function channelSort(a: Channel, b: Channel): number {
@@ -99,11 +111,11 @@ export class ChannelStore {
 			authorActor: input.authorActor,
 			replyToId: input.replyToId,
 			kind: input.kind ?? "system",
-			text: redact(input.text),
+			text: input.event ? neutralizeDelimiters(redact(input.text)) : redact(input.text),
 			ts: this.now(),
 			status: "ok",
 			format: input.format ?? "markdown",
-			...(input.event ? { event: input.event } : {}),
+			...(input.event ? { event: { kind: input.event.kind, payload: sanitizeManagerValue(input.event.payload) } } : {}),
 		};
 		await this.store.appendChannelEntry(entry);
 		this.hotTail.push(entry);
