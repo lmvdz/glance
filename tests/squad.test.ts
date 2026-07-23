@@ -240,7 +240,7 @@ test(
 		await Bun.sleep(200);
 		expect(b.isAlive).toBe(false);
 	},
-	60_000,
+	40_000,
 );
 
 // ── manager lifecycle (no task → no model turn) ──────────────────────────────
@@ -266,7 +266,7 @@ test(
 		expect(await fs.exists(created.worktree)).toBe(false);
 		await mgr.stop();
 	},
-	60_000,
+	30_000,
 );
 
 // ── workflow checkpoint survives adopt/restore (OMPSQ-165) ───────────────────
