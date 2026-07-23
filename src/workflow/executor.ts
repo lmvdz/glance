@@ -23,6 +23,7 @@ import { decideRegressionGate, extractGateFailures } from "../land.ts";
 import { isOn, learningFlags } from "../metrics.ts";
 import { identityNormalize, reduceOutput } from "../output-reduce.ts";
 import { appendReflection, hashOutput, latestReflection, reflect, renderReflectionNote, renderRefutationNote, type ReflectLlm } from "../reflection.ts";
+import { readFailureAnnotations } from "../failure-memory.ts";
 import type { NodeExecutor, NodeResult, RunContext, StageEvent, WorkflowNode } from "./types.ts";
 import type { BaselineResult } from "./verify-baseline.ts";
 
@@ -66,6 +67,10 @@ export interface SingleAgentExecutorOptions {
 	listChangedFilesSinceBase?: (baseRef: string) => Promise<string[]>;
 	/** Executor diagnostics (tests inject; production defaults to stderr where useful). */
 	log?: (message: string) => void;
+	/** Corroborate that a file has recurring failure history outside this unit. Default: failure-memory annotations. */
+	hasRecordedFlakeForFile?: (file: string) => boolean;
+	/** Isolation retry timeout. Default: 120s. */
+	isolationTimeoutMs?: number;
 	/**
 	 * Serializes command-node execution against every OTHER unit's command nodes in this process
 	 * (root + org managers alike — see gate-semaphore.ts). Default: the shared process-wide
@@ -417,7 +422,7 @@ export class SingleAgentExecutor implements NodeExecutor {
 			};
 		}
 
-		const { attributed, flakes } = await this.excludeUntouchedEnvironmentFlakes(script, baseline.baseRef, newRegressions);
+		const { attributed, flakes } = await this.excludeUntouchedEnvironmentFlakes(script, baseline.baseRef, newRegressions, combined);
 		if (attributed.length === 0) {
 			const flakeNote = renderFlakeNote(flakes);
 			return {
@@ -432,7 +437,7 @@ export class SingleAgentExecutor implements NodeExecutor {
 		};
 	}
 
-	private async excludeUntouchedEnvironmentFlakes(script: string, baseRef: string, newRegressions: string[]): Promise<{ attributed: string[]; flakes: string[] }> {
+	private async excludeUntouchedEnvironmentFlakes(script: string, baseRef: string, newRegressions: string[], output: string): Promise<{ attributed: string[]; flakes: string[] }> {
 		let touched: Set<string>;
 		try {
 			const changed = this.opts.listChangedFilesSinceBase ? await this.opts.listChangedFilesSinceBase(baseRef) : await defaultListChangedFilesSinceBase(baseRef, this.opts.cwd);
@@ -442,17 +447,24 @@ export class SingleAgentExecutor implements NodeExecutor {
 			return { attributed: newRegressions, flakes: [] };
 		}
 
+		const failureFiles = bunFailureFilesByIdentity(output);
 		const attributed: string[] = [];
 		const flakes = new Set<string>();
 		const isolatedPassesByFile = new Map<string, boolean>();
+		let checkedFiles = 0;
 		for (const failure of newRegressions) {
-			const file = extractTestFileFromFailure(failure);
-			if (!file || touched.has(file)) {
+			const file = failureFiles.get(failure);
+			if (!file || touched.has(file) || !this.hasRecordedFlakeForFile(file)) {
 				attributed.push(failure);
 				continue;
 			}
 			let isolatedPasses = isolatedPassesByFile.get(file);
 			if (isolatedPasses === undefined) {
+				if (checkedFiles >= 3) {
+					attributed.push(failure);
+					continue;
+				}
+				checkedFiles++;
 				isolatedPasses = await this.passesInIsolation(script, file);
 				isolatedPassesByFile.set(file, isolatedPasses);
 			}
@@ -466,12 +478,25 @@ export class SingleAgentExecutor implements NodeExecutor {
 		return { attributed, flakes: [...flakes] };
 	}
 
+	private hasRecordedFlakeForFile(file: string): boolean {
+		if (this.opts.hasRecordedFlakeForFile) return this.opts.hasRecordedFlakeForFile(file);
+		const stateDir = this.opts.reflection?.stateDir;
+		if (!stateDir) return false;
+		const repo = path.resolve(this.opts.cwd);
+		return Object.values(readFailureAnnotations(stateDir)).some((a) => {
+			if (a.repo && path.resolve(a.repo) !== repo) return false;
+			const haystack = `${a.fingerprint}\n${a.rootCause}`;
+			return haystack.includes(file);
+		});
+	}
+
 	private async passesInIsolation(script: string, file: string): Promise<boolean> {
 		const run = this.opts.execCommand ?? defaultExecCommand;
 		const isolationScript = isolateBunTestSegment(script, file);
 		for (let attempt = 0; attempt < 3; attempt++) {
-			const { code } = await run(isolationScript, this.opts.cwd);
-			if (code === 0) return true;
+			const { code, stdout, stderr } = await withTimeout(run(isolationScript, this.opts.cwd), this.opts.isolationTimeoutMs ?? 120_000);
+			const output = [stdout, stderr].filter((s) => s.trim()).join("\n");
+			if (code === 0 && isolationOutputProvesTargetRan(output, file)) return true;
 		}
 		return false;
 	}
@@ -568,9 +593,21 @@ export class SingleAgentExecutor implements NodeExecutor {
 	}
 }
 
-function extractTestFileFromFailure(failure: string): string | null {
-	const match = failure.match(/\b((?:\.\/)?(?:tests|src)\/[^>\s:]+\.test\.[cm]?[tj]sx?)\b/);
-	return match ? normalizeRepoPath(match[1]) : null;
+function bunFailureFilesByIdentity(output: string): Map<string, string> {
+	const result = new Map<string, string>();
+	let currentFile: string | null = null;
+	for (const raw of output.split(/\r?\n/)) {
+		const line = raw.trim();
+		const heading = line.match(/^((?:\.\/)?(?:tests|src)\/[^:\s]+\.test\.[cm]?[tj]sx?):$/);
+		if (heading) currentFile = normalizeRepoPath(heading[1]);
+		const fail = line.match(/^\(fail\)\s*(.+)$/);
+		if (!fail || !currentFile) continue;
+		const identity = fail[1]?.trim();
+		if (!identity) continue;
+		if (result.has(identity) && result.get(identity) !== currentFile) result.delete(identity);
+		else result.set(identity, currentFile);
+	}
+	return result;
 }
 
 function normalizeRepoPath(file: string): string {
@@ -583,6 +620,7 @@ function shellQuote(value: string): string {
 
 function isolateBunTestSegment(script: string, file: string): string {
 	const quotedFile = shellQuote(file);
+	if (/[|]/.test(script) || /(['"])[\s\S]*&&[\s\S]*\1/.test(script)) return `bun test ${shellQuote(`./${file}`)}`;
 	const parts = script.trim().split(/(\s*&&\s*)/);
 	for (let i = 0; i < parts.length; i += 2) {
 		if (/\bbun\s+test\b/.test(parts[i])) {
@@ -590,7 +628,12 @@ function isolateBunTestSegment(script: string, file: string): string {
 			return parts.join("");
 		}
 	}
-	return `bun test ${quotedFile}`;
+	return `bun test ${shellQuote(`./${file}`)}`;
+}
+
+function isolationOutputProvesTargetRan(output: string, file: string): boolean {
+	const escaped = file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	return new RegExp(`\\bRan [1-9]\\d* tests across [1-9]\\d* files\\b`).test(output) && new RegExp(`(?:^|\\s)\\.?/?${escaped}(?::|\\s|$)`, "m").test(output);
 }
 
 function renderFlakeNote(files: string[]): string {
@@ -598,14 +641,33 @@ function renderFlakeNote(files: string[]): string {
 }
 
 async function defaultListChangedFilesSinceBase(baseRef: string, cwd: string): Promise<string[]> {
-	const proc = Bun.spawn(["git", "diff", "--name-only", `${baseRef}...HEAD`], { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+	const diff = await gitLines(["diff", "--name-only", baseRef], cwd);
+	const status = await gitLines(["status", "--porcelain", "--untracked-files=all"], cwd);
+	const files = new Set(diff);
+	for (const line of status) {
+		const file = line.startsWith("?? ") ? line.slice(3) : line.slice(3).replace(/.* -> /, "");
+		if (file.trim()) files.add(file.trim());
+	}
+	return [...files];
+}
+
+async function gitLines(args: string[], cwd: string): Promise<string[]> {
+	const proc = Bun.spawn(["git", ...args], { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
 	const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
 	const code = await proc.exited;
-	if (code !== 0) throw new Error((stderr || stdout).trim() || `git diff exited ${code}`);
+	if (code !== 0) throw new Error((stderr || stdout).trim() || `git ${args.join(" ")} exited ${code}`);
 	return stdout
 		.split(/\r?\n/)
 		.map((line) => line.trim())
 		.filter(Boolean);
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+	const timeout = new Promise<never>((_, reject) => {
+		const timer = setTimeout(() => reject(new Error(`isolation timed out after ${ms}ms`)), ms);
+		promise.finally(() => clearTimeout(timer));
+	});
+	return Promise.race([promise, timeout]);
 }
 
 const defaultIdleScheduler: IdleScheduler = (check, intervalMs) => {
