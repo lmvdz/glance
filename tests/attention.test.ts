@@ -397,6 +397,24 @@ describe("recordCompletion/completedAt: SquadManager's durable per-agent complet
 		const store = new AttentionStore({ stateDir: d });
 		expect(store.completedAt("unit1")).toBeUndefined();
 	});
+
+	test("pruneUnits drops visits and completions for units absent from the persisted roster", () => {
+		const d = dir();
+		const store = new AttentionStore({ stateDir: d, now: () => 1_000 });
+		store.markUnitVisited("keep", "db:alice");
+		store.markUnitVisited("gone", "db:alice");
+		store.recordCompletion("keep", 2_000);
+		store.recordCompletion("gone", 2_000);
+
+		store.pruneUnits(new Set(["keep"]));
+		store.stop();
+
+		const reloaded = new AttentionStore({ stateDir: d });
+		expect(reloaded.unitVisitedAt("keep", "db:alice")).toBe(1_000);
+		expect(reloaded.completedAt("keep")).toBe(2_000);
+		expect(reloaded.unitVisitedAt("gone", "db:alice")).toBeUndefined();
+		expect(reloaded.completedAt("gone")).toBeUndefined();
+	});
 });
 
 describe("stop() closes the store (t3-face concern 06 addition D): no write scheduled after can resurrect a timer", () => {

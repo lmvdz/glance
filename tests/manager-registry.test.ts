@@ -69,6 +69,44 @@ test("evictIdle stops + drops an idle, agent-less manager", async () => {
 	expect(reg.peek("orgA")).toBeUndefined();
 });
 
+test("get waits for an in-progress eviction and returns a fresh manager, never the closing instance", async () => {
+	const root = await fsp.mkdtemp(path.join(os.tmpdir(), "reg-evict-get-"));
+	let releaseStop!: () => void;
+	const stopGate = new Promise<void>((resolve) => {
+		releaseStop = resolve;
+	});
+	const closing = {
+		manager: {
+			list: () => [],
+			stop: async () => {
+				await stopGate;
+			},
+			off: () => {},
+		},
+		stopped: () => false,
+	};
+	const reg = new ManagerRegistry({ root, store: (orgId) => new FileStore(path.join(root, "orgs", orgId)), operator });
+	seed(reg, "orgRace", closing.manager, 0);
+	const evicting = reg.evictIdle(10_000_000);
+	const getting = reg.get("orgRace");
+	let resolved = false;
+	void getting.then(() => {
+		resolved = true;
+	});
+
+	await Promise.resolve();
+	expect(resolved).toBe(false);
+
+	releaseStop();
+	expect(await evicting).toBe(1);
+	const fresh = await getting;
+	expect(fresh).not.toBe(closing.manager);
+	expect(reg.peek("orgRace")).toBe(fresh);
+
+	await reg.stopAll();
+	await fsp.rm(root, { recursive: true, force: true }).catch(() => {});
+});
+
 test("evictIdle skips a manager with a live (working) agent", async () => {
 	const deps: RegistryDeps = { root: "/tmp/reg-noop", store: () => new FileStore("/tmp/reg-noop"), operator };
 	const reg = new ManagerRegistry(deps);
