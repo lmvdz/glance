@@ -420,7 +420,7 @@ test("planReap: verified chain kills descendants first; gone/recycled/unverifiab
 
 test("live reap: a real orphan matching its persisted argv is SIGTERMed; a mismatched fingerprint is refused", async () => {
 	// The "orphan": a process whose /proc cmdline contains its persisted argv's distinctive token.
-	const orphan = Bun.spawn(["bash", "-c", "sleep 300"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+	const orphan = Bun.spawn(["bash", "-c", "exec -a acp-reap-token sleep 300", "acp-reap-token"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 	cleanups.push(() => {
 		try {
 			orphan.kill();
@@ -440,14 +440,14 @@ test("live reap: a real orphan matching its persisted argv is SIGTERMed; a misma
 	expect(orphan.exitCode).toBeNull(); // still alive — the refusal was real
 
 	// Matching fingerprint ⇒ SIGTERM lands and the chain dies.
-	const termed = await reapAcpOrphanChain(orphan.pid, ["bash", "-c", "sleep 300"], () => {}, 50);
+	const termed = await reapAcpOrphanChain(orphan.pid, ["bash", "-c", "exec -a acp-reap-token sleep 300", "acp-reap-token"], () => {}, 50);
 	expect(termed).toContain(orphan.pid);
 	await orphan.exited;
 	expect(orphan.exitCode === null || orphan.exitCode !== 0 || orphan.signalCode !== null).toBe(true);
 });
 
 test("boot end-to-end: the dead-session sweep reaps a persisted adapter pid whose identity still matches", async () => {
-	const orphan = Bun.spawn(["bash", "-c", "sleep 300"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+	const orphan = Bun.spawn(["bash", "-c", "exec -a acp-reap-token sleep 300", "acp-reap-token"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 	cleanups.push(() => {
 		try {
 			orphan.kill();
@@ -457,7 +457,7 @@ test("boot end-to-end: the dead-session sweep reaps a persisted adapter pid whos
 	});
 	const stateDir = await tmpDir("reattach-reap-");
 	const snapshot = {
-		agents: [persisted({ id: "chat-orphaned", harness: "claude-code", acpPid: orphan.pid, acpCmd: ["bash", "-c", "sleep 300"] })],
+		agents: [persisted({ id: "chat-orphaned", harness: "claude-code", acpPid: orphan.pid, acpCmd: ["bash", "-c", "exec -a acp-reap-token sleep 300", "acp-reap-token"] })],
 		transcripts: {},
 		features: [],
 	};
