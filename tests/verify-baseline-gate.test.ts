@@ -26,6 +26,8 @@ const ctx = (): RunContext => ({ goal: "g", vars: {} });
 function exec(opts: {
 	execCommand: (script: string, cwd: string) => Promise<{ code: number; stdout: string; stderr: string }>;
 	resolveBaselineFailures?: (script: string) => Promise<BaselineResult | null>;
+	listChangedFilesSinceBase?: (baseRef: string) => Promise<string[]>;
+	log?: (message: string) => void;
 }): SingleAgentExecutor {
 	return new SingleAgentExecutor({
 		cwd: ".",
@@ -34,6 +36,8 @@ function exec(opts: {
 		gate: () => Promise.resolve(""),
 		execCommand: opts.execCommand,
 		resolveBaselineFailures: opts.resolveBaselineFailures,
+		listChangedFilesSinceBase: opts.listChangedFilesSinceBase,
+		log: opts.log,
 	});
 }
 
@@ -68,7 +72,7 @@ test("a NEW failure not present on base -> outcome stays failed, and the new fai
 		unrunnable: null,
 		baseRef: "abcdef0123456789",
 	});
-	const e = exec({ execCommand, resolveBaselineFailures });
+	const e = exec({ execCommand, resolveBaselineFailures, listChangedFilesSinceBase: async () => ["tests/newbug.test.ts"] });
 	const res = await e.runCommand(goalGateNode, ctx());
 	expect(res.outcome).toBe("failed");
 	expect(res.text).toContain("1 NEW failure");
@@ -76,6 +80,79 @@ test("a NEW failure not present on base -> outcome stays failed, and the new fai
 	// The new-failure header comes FIRST, ahead of the full reduced dump (which still includes the
 	// pre-existing base failure too) — the fixup agent sees the signal before the noise.
 	expect(res.text.indexOf("1 NEW failure")).toBeLessThan(res.text.indexOf("0 pass"));
+});
+
+test("NEW failure from untouched test file is excluded when the file passes in isolation", async () => {
+	const calls: string[] = [];
+	const execCommand = async (script: string) => {
+		calls.push(script);
+		if (script === "bun test") {
+			return {
+				code: 1,
+				stdout: "0 pass\n1 fail\n(fail) tests/restart-reattach.test.ts > flakes under load\n",
+				stderr: "",
+			};
+		}
+		return { code: 0, stdout: "1 pass", stderr: "" };
+	};
+	const logs: string[] = [];
+	const e = exec({
+		execCommand,
+		resolveBaselineFailures: async () => ({ failures: [], unrunnable: null, baseRef: "abcdef0123456789" }),
+		listChangedFilesSinceBase: async () => ["src/workflow/executor.ts"],
+		log: (message) => logs.push(message),
+	});
+
+	const res = await e.runCommand(goalGateNode, ctx());
+
+	expect(res.outcome).toBe("succeeded");
+	expect(calls).toEqual(["bun test", "bun test 'tests/restart-reattach.test.ts'"]);
+	expect(res.text).toContain("1 flake excluded: tests/restart-reattach.test.ts");
+	expect(res.text).toContain("0 introduced by this unit");
+	expect(logs.join("\n")).toContain("environment-flake excluded: tests/restart-reattach.test.ts");
+});
+
+test("NEW failure stays attributed when isolated retries keep failing", async () => {
+	const calls: string[] = [];
+	const execCommand = async (script: string) => {
+		calls.push(script);
+		if (script === "bun test") return { code: 1, stdout: "(fail) tests/land-mode.test.ts > real regression\n", stderr: "" };
+		return { code: 1, stdout: "(fail) tests/land-mode.test.ts > real regression\n", stderr: "" };
+	};
+	const e = exec({
+		execCommand,
+		resolveBaselineFailures: async () => ({ failures: [], unrunnable: null, baseRef: "abcdef0123456789" }),
+		listChangedFilesSinceBase: async () => ["src/workflow/executor.ts"],
+	});
+
+	const res = await e.runCommand(goalGateNode, ctx());
+
+	expect(res.outcome).toBe("failed");
+	expect(calls).toEqual(["bun test", "bun test 'tests/land-mode.test.ts'", "bun test 'tests/land-mode.test.ts'", "bun test 'tests/land-mode.test.ts'"]);
+	expect(res.text).toContain("1 NEW failure");
+	expect(res.text).toContain("tests/land-mode.test.ts > real regression");
+	expect(res.text).not.toContain("flake excluded");
+});
+
+test("NEW failure in a unit-touched test file is never excluded without isolation reruns", async () => {
+	const calls: string[] = [];
+	const execCommand = async (script: string) => {
+		calls.push(script);
+		return { code: 1, stdout: "(fail) tests/agent-host-stderr-drain.test.ts > changed by unit\n", stderr: "" };
+	};
+	const e = exec({
+		execCommand,
+		resolveBaselineFailures: async () => ({ failures: [], unrunnable: null, baseRef: "abcdef0123456789" }),
+		listChangedFilesSinceBase: async () => ["tests/agent-host-stderr-drain.test.ts"],
+	});
+
+	const res = await e.runCommand(goalGateNode, ctx());
+
+	expect(res.outcome).toBe("failed");
+	expect(calls).toEqual(["bun test"]);
+	expect(res.text).toContain("1 NEW failure");
+	expect(res.text).toContain("tests/agent-host-stderr-drain.test.ts > changed by unit");
+	expect(res.text).not.toContain("flake excluded");
 });
 
 test("unrunnable base -> fails CLOSED (outcome failed, never treated as everything-tolerated)", async () => {

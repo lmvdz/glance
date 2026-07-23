@@ -62,6 +62,10 @@ export interface SingleAgentExecutorOptions {
 	 * before this feature.
 	 */
 	resolveBaselineFailures?: (script: string) => Promise<BaselineResult | null>;
+	/** List files changed by this unit relative to the verified base ref. Default: `git diff --name-only <baseRef>...HEAD`. */
+	listChangedFilesSinceBase?: (baseRef: string) => Promise<string[]>;
+	/** Executor diagnostics (tests inject; production defaults to stderr where useful). */
+	log?: (message: string) => void;
 	/**
 	 * Serializes command-node execution against every OTHER unit's command nodes in this process
 	 * (root + org managers alike — see gate-semaphore.ts). Default: the shared process-wide
@@ -412,10 +416,69 @@ export class SingleAgentExecutor implements NodeExecutor {
 				shown: `[base-diff: gate passed — all ${currentFailures.length} failing test(s) already fail on the base (${baseline.baseRef.slice(0, 8)}); 0 introduced by this unit]`,
 			};
 		}
+
+		const { attributed, flakes } = await this.excludeUntouchedEnvironmentFlakes(script, baseline.baseRef, newRegressions);
+		if (attributed.length === 0) {
+			const flakeNote = renderFlakeNote(flakes);
+			return {
+				outcome: "succeeded",
+				shown: `[base-diff: gate passed — ${flakeNote}; 0 introduced by this unit]`,
+			};
+		}
+		const flakePrefix = flakes.length > 0 ? `${renderFlakeNote(flakes)}\n` : "";
 		return {
 			outcome: "failed",
-			shown: `[base-diff: ${newRegressions.length} NEW failure(s) introduced by this unit — fix these:]\n${newRegressions.join("\n")}\n${reduced}`,
+			shown: `[base-diff: ${attributed.length} NEW failure(s) introduced by this unit — fix these:]\n${flakePrefix}${attributed.join("\n")}\n${reduced}`,
 		};
+	}
+
+	private async excludeUntouchedEnvironmentFlakes(script: string, baseRef: string, newRegressions: string[]): Promise<{ attributed: string[]; flakes: string[] }> {
+		let touched: Set<string>;
+		try {
+			const changed = this.opts.listChangedFilesSinceBase ? await this.opts.listChangedFilesSinceBase(baseRef) : await defaultListChangedFilesSinceBase(baseRef, this.opts.cwd);
+			touched = new Set(changed.map(normalizeRepoPath));
+		} catch (err) {
+			this.logBaseDiff(`[base-diff] could not list unit-changed files for flake attribution: ${errText(err)}`);
+			return { attributed: newRegressions, flakes: [] };
+		}
+
+		const attributed: string[] = [];
+		const flakes = new Set<string>();
+		const isolatedPassesByFile = new Map<string, boolean>();
+		for (const failure of newRegressions) {
+			const file = extractTestFileFromFailure(failure);
+			if (!file || touched.has(file)) {
+				attributed.push(failure);
+				continue;
+			}
+			let isolatedPasses = isolatedPassesByFile.get(file);
+			if (isolatedPasses === undefined) {
+				isolatedPasses = await this.passesInIsolation(script, file);
+				isolatedPassesByFile.set(file, isolatedPasses);
+			}
+			if (isolatedPasses) {
+				flakes.add(file);
+				this.logBaseDiff(`[base-diff] environment-flake excluded: ${file}`);
+			} else {
+				attributed.push(failure);
+			}
+		}
+		return { attributed, flakes: [...flakes] };
+	}
+
+	private async passesInIsolation(script: string, file: string): Promise<boolean> {
+		const run = this.opts.execCommand ?? defaultExecCommand;
+		const isolationScript = `${script.trim()} ${shellQuote(file)}`;
+		for (let attempt = 0; attempt < 3; attempt++) {
+			const { code } = await run(isolationScript, this.opts.cwd);
+			if (code === 0) return true;
+		}
+		return false;
+	}
+
+	private logBaseDiff(message: string): void {
+		if (this.opts.log) this.opts.log(message);
+		else console.error(message);
 	}
 
 	/** Factory legibility for a queued gate (default channel: console.error; injectable for tests). */
@@ -503,6 +566,34 @@ export class SingleAgentExecutor implements NodeExecutor {
 		}
 		return promise;
 	}
+}
+
+function extractTestFileFromFailure(failure: string): string | null {
+	const match = failure.match(/\b((?:\.\/)?(?:tests|src)\/[^>\s:]+\.test\.[cm]?[tj]sx?)\b/);
+	return match ? normalizeRepoPath(match[1]) : null;
+}
+
+function normalizeRepoPath(file: string): string {
+	return file.replace(/\\/g, "/").replace(/^\.\//, "");
+}
+
+function shellQuote(value: string): string {
+	return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function renderFlakeNote(files: string[]): string {
+	return `${files.length} flake${files.length === 1 ? "" : "s"} excluded: ${files.join(", ")}`;
+}
+
+async function defaultListChangedFilesSinceBase(baseRef: string, cwd: string): Promise<string[]> {
+	const proc = Bun.spawn(["git", "diff", "--name-only", `${baseRef}...HEAD`], { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+	const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+	const code = await proc.exited;
+	if (code !== 0) throw new Error((stderr || stdout).trim() || `git diff exited ${code}`);
+	return stdout
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.filter(Boolean);
 }
 
 const defaultIdleScheduler: IdleScheduler = (check, intervalMs) => {
