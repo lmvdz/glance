@@ -1,8 +1,9 @@
 import type { ChannelEntry } from './dto';
+import { landCardView, type LandCardKind } from '../components/hub/LandCards';
 import { entryAuthorLabel } from './hub';
 
 export type ChannelCardTone = 'neutral' | 'info' | 'warning' | 'success' | 'destructive';
-export type ChannelCardKind = 'message' | 'needs-you' | 'gate-verdict' | 'land-merge' | 'mention-steer' | 'mention-confirm-required' | 'mention-steer-failed' | 'spawn-proposal' | 'unknown-event';
+export type ChannelCardKind = 'message' | 'needs-you' | 'gate-verdict' | LandCardKind | 'mention-steer' | 'mention-confirm-required' | 'mention-steer-failed' | 'spawn-proposal' | 'unknown-event';
 
 export interface PointerCardFace {
   title: string;
@@ -25,6 +26,8 @@ export interface ChannelCardView {
   body: string;
   detail?: string;
   pinned: Array<{ label: string; value: string }>;
+  href?: string;
+  land?: { kind: LandCardKind; branch?: string; sha?: string; target?: string; risk?: string; recommendation?: string; outcome?: string; prNumber?: string; prUrl?: string; doneProofVerified?: string };
   replyContext?: { id: string; channelId: string; authorLabel: string; body: string };
   repliedBy?: number;
   actionHref?: string;
@@ -50,7 +53,7 @@ export function buildChannelThreadViews(entries: ChannelEntry[]): ChannelCardVie
   });
 }
 
-const POINTER_EVENT_KINDS: Record<string, true> = { 'needs-you': true, 'gate-verdict': true, 'land-merge': true, 'mention-steer': true, 'mention-confirm-required': true, 'mention-steer-failed': true, 'spawn-proposal': true };
+const POINTER_EVENT_KINDS: Record<string, true> = { 'needs-you': true, 'gate-verdict': true, 'land-attempt': true, 'land-assessment': true, 'land-merge': true, 'mention-steer': true, 'mention-confirm-required': true, 'mention-steer-failed': true, 'spawn-proposal': true };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -119,6 +122,9 @@ export function dispatchChannelCard(entry: ChannelEntry): ChannelCardView {
   if (!POINTER_EVENT_KINDS[eventKind]) {
     return { id: entry.id, entry, kind: 'unknown-event', tone: 'neutral', authorLabel: entryAuthorLabel(entry), title: labelFromKey(eventKind), eyebrow: 'Event', body: entry.text || 'This room event is from a newer daemon. Update the client to see the full card.', pinned: [] };
   }
+  const authorLabel = entryAuthorLabel(entry);
+  const landCard = landCardView(entry, entry.event?.payload, authorLabel);
+  if (landCard) return landCard;
   const face = faceFromPayload(entry.event?.payload);
   const title = face?.title || labelFromKey(eventKind);
   const body = face?.body || entry.text || 'Card update';

@@ -1,5 +1,5 @@
 # Land lifecycle cards — attempt / assessment / merge in the room
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
