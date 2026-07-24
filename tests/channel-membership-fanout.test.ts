@@ -2,6 +2,8 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { composeAfterAction, saveAfterAction } from "../src/after-action.ts";
+import { saveAnswer } from "../src/answers.ts";
 import { FileStore } from "../src/dal/store.ts";
 import { ChannelStore, type ChannelEntry } from "../src/channels.ts";
 import { SubagentTracker } from "../src/subagents.ts";
@@ -100,6 +102,10 @@ interface RouteStubHost {
 	verifyAgentWork(id: string): Promise<boolean>;
 	transitionMode(id: string): Promise<AgentDTO | undefined>;
 	promote(id: string): Promise<unknown>;
+}
+
+interface DeadPlaceholderHost {
+	deadPlaceholders: Map<string, unknown>;
 }
 
 function stubDangerousAgentRouteMethods(mgr: SquadManager, agent: AgentDTO): void {
@@ -455,4 +461,104 @@ test("a failed membership recheck drops the event instead of using its stale mem
 	const entry = await mgr.appendChannelPost("ops", actor("alice"), { text: "private" });
 	await host.deliverEvent(undefined, { type: "channel-entry", channelId: "ops", entry });
 	expect(frames).toEqual([]);
+});
+
+test("a public-channel dead placeholder retains its documented dead response", async () => {
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "public-dead-placeholder-"));
+	const mgr = new SquadManager({ stateDir });
+	await mgr.start();
+	await mgr.createChannel(actor("alice"), { id: "public", name: "#public", visibility: "org-public" });
+	const server = new SquadServer(mgr, { port: 0, token: "public-dead-placeholder-token" });
+	const url = server.start();
+	cleanups.push(async () => {
+		server.stop();
+		await mgr.stop();
+		await fs.rm(stateDir, { recursive: true, force: true });
+	});
+	const placeholderHost = mgr as unknown as DeadPlaceholderHost;
+	placeholderHost.deadPlaceholders.set("dead-public", {
+		id: "dead-public",
+		name: "dead public",
+		repo: "/repo",
+		harness: "claude-code",
+		at: Date.now(),
+		deadReason: "daemon restarted",
+		channelId: "public",
+		transcript: [],
+	});
+
+	const response = await fetch(`${url}/api/agents/dead-public`, { headers: { authorization: "Bearer public-dead-placeholder-token" } });
+	expect(response.status).toBe(200);
+	expect(await response.json()).toMatchObject({ id: "dead-public", dead: true, deadReason: "daemon restarted" });
+});
+
+test("non-members cannot read private action items, answers, or after-actions after reaping", async () => {
+	const { mgr, url, headers, agent } = await startedPrivateAgentServer("private-artifact-membership-");
+	agent.status = "input";
+	agent.pending = [{ id: "approval", source: "ui", kind: "confirm", title: "private approval", createdAt: 1 }];
+	await saveAnswer(mgr.stateDir, { id: agent.id, question: "private question", repo: agent.repo, markdown: "private answer", askedAt: 1 });
+	await saveAfterAction(
+		mgr.stateDir,
+		composeAfterAction({
+			id: agent.id,
+			name: agent.name,
+			repo: agent.repo,
+			terminalReason: "private failure",
+			channelId: "ops",
+			terminalAt: 1,
+			trajectory: [],
+			commitsAhead: 0,
+			dirtyFiles: 0,
+			now: 1,
+		}),
+	);
+	mgr.agents.delete(agent.id);
+
+	const responses = await Promise.all([
+		fetch(`${url}/api/action-items`, { headers }),
+		fetch(`${url}/api/answers`, { headers }),
+		fetch(`${url}/api/answers/${agent.id}`, { headers }),
+		fetch(`${url}/api/after-action`, { headers }),
+		fetch(`${url}/api/after-action/${agent.id}`, { headers }),
+	]);
+	expect(responses.map((response) => response.status)).toEqual([200, 200, 404, 200, 404]);
+	expect(await responses[0]!.json()).toMatchObject({ items: [] });
+	expect(await responses[1]!.json()).toEqual([]);
+	expect(await responses[3]!.json()).toEqual([]);
+});
+
+test("search continues past a private-heavy native-search page", async () => {
+	class PrivateHeavySearchStore extends FileStore {
+		override async searchChannelEntries(_q: string, _limit = 50, offset = 0) {
+			if (offset === 0) {
+				return Array.from({ length: 500 }, (_, i) => ({
+					entry: { id: `private-${i}`, seq: i + 1, channelId: "private", authorActor: "db:alice", kind: "user" as const, text: `needle private ${i}`, ts: i, status: "ok" as const },
+					snippet: `needle private ${i}`,
+				}));
+			}
+			return [{ entry: { id: "public-needle", seq: 1, channelId: "public", authorActor: "db:alice", kind: "user" as const, text: "needle public", ts: 501, status: "ok" as const }, snippet: "needle public" }];
+		}
+	}
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "channel-search-overfetch-"));
+	cleanups.push(() => fs.rm(dir, { recursive: true, force: true }));
+	const channels = new ChannelStore(dir, new PrivateHeavySearchStore(dir), undefined, () => 1);
+	await channels.createChannel(actor("alice"), { id: "private", name: "#private", visibility: "private" });
+	await channels.createChannel(actor("alice"), { id: "public", name: "#public", visibility: "org-public" });
+
+	expect((await channels.search("needle", 1, actor("carol"))).map((result) => result.entry.text)).toEqual(["needle public"]);
+});
+
+test("creator access remains available when the private membership write fails after channel persistence", async () => {
+	class MembershipFailingStore extends FileStore {
+		override async putChannelMembership(): Promise<void> {
+			throw new Error("membership disk failure");
+		}
+	}
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "channel-create-membership-failure-"));
+	cleanups.push(() => fs.rm(dir, { recursive: true, force: true }));
+	const channels = new ChannelStore(dir, new MembershipFailingStore(dir), undefined, () => 1);
+
+	await expect(channels.createChannel(actor("alice"), { id: "ops", name: "#ops", visibility: "private" })).rejects.toThrow("membership disk failure");
+	expect(await channels.canReadChannel("ops", actor("alice"))).toBe(true);
+	expect(await channels.canReadChannel("ops", actor("carol"))).toBe(false);
 });
