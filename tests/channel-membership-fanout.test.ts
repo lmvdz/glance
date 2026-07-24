@@ -573,3 +573,23 @@ test("creator access remains available when the private membership write fails a
 	expect(await channels.canReadChannel("ops", actor("alice"))).toBe(true);
 	expect(await channels.canReadChannel("ops", actor("carol"))).toBe(false);
 });
+
+test("org-public channel events still fan out without membership rows", async () => {
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "public-channel-fanout-"));
+	const mgr = new SquadManager({ stateDir });
+	await mgr.start();
+	const server = new SquadServer(mgr, { port: 0 });
+	cleanups.push(async () => {
+		server.stop();
+		await mgr.stop();
+		await fs.rm(stateDir, { recursive: true, force: true });
+	});
+	await mgr.createChannel(actor("alice"), { id: "public", name: "#public", visibility: "org-public" });
+	const entry = await mgr.appendChannelPost("public", actor("alice"), { text: "visible to the org" });
+	const frames: string[] = [];
+	const host = server as unknown as DeliverHost;
+	host.clients.add({ data: { userId: "carol", orgId: "org-a", role: "admin", displayName: "carol" }, send: (frame: string) => frames.push(frame) });
+
+	await host.deliverEvent(undefined, { type: "channel-entry", channelId: "public", entry });
+	expect(frames.map((frame) => JSON.parse(frame))).toEqual([{ type: "channel-entry", channelId: "public", entry }]);
+});
