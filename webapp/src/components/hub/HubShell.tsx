@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Hash, Loader2, Users } from 'lucide-react';
+import { Hash, Loader2, Search, Users, X } from 'lucide-react';
 import { Composer, type ModelOption } from '../chat/Composer';
 import { ChannelRail } from './ChannelRail';
 import { ChannelTimeline } from './ChannelTimeline';
@@ -8,7 +8,7 @@ import { buildPromptCommand, channelAgentSessionId, channelDraftSessionId, ensur
 import { resolveMentionRoute } from '../../lib/mentionGrammar';
 import type { AgentDTO, Channel, ChannelEntry, CommandAckDTO, PresenceSnapshot } from '../../lib/dto';
 import { latestSeq, presenceCount, reduceChannelEntries } from '../../lib/hub';
-import { DEFAULT_CHANNEL_ID, type HubRoute } from '../../lib/router';
+import { DEFAULT_CHANNEL_ID, hubHref, type HubRoute } from '../../lib/router';
 import { useTaskContext } from '../../context/TaskContext';
 
 const EMPTY_PRESENCE: PresenceSnapshot = { users: [] };
@@ -27,6 +27,16 @@ const managerCardEntry = (channelId: string, text: string, kind: string, payload
   format: 'markdown',
   event: { kind, issuer: 'manager', payload },
 });
+
+interface ChannelSearchResult {
+  entry: ChannelEntry;
+  snippet: string;
+}
+
+function resultTitle(entry: ChannelEntry): string {
+  const actor = entry.authorActor.replace(/^web:/, '').replace(/^db:/, '');
+  return `${actor || 'message'} · #${entry.seq}`;
+}
 
 function ChannelHeader({ channel, presence, selectedAgent }: { channel: Channel; presence: PresenceSnapshot; selectedAgent?: AgentDTO }) {
   const count = presenceCount(presence);
@@ -84,7 +94,15 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
   const lastSeqRef = useRef(0);
   const pendingMentionTurns = useRef(new Map<string, { channelId: string; target: string }>());
   const [anchorEntryId, setAnchorEntryId] = useState<string | undefined>();
+  const [replyTarget, setReplyTarget] = useState<ChannelEntry | undefined>();
+  const [replyFocusKey, setReplyFocusKey] = useState(0);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<ChannelSearchResult[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState('');
+  const lastSeqRef = useRef(0);
   const activeChannelId = route.kind === 'hub' ? route.channelId : DEFAULT_CHANNEL_ID;
+  const routedEntryId = route.kind === 'hub' ? route.entryId : undefined;
   const selectedAgent = useMemo(() => agents.find((agent) => agent.id === selectedAgentId), [agents, selectedAgentId]);
   const selectedTask = useMemo(() => tasks.find((task) => task.id === selectedTaskId), [tasks, selectedTaskId]);
   const channel = channels.find((item) => item.id === activeChannelId) ?? { ...DEFAULT_CHANNEL, id: activeChannelId, name: activeChannelId };
@@ -186,14 +204,53 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
     } as any);
   };
 
+  useEffect(() => {
+    setReplyTarget(undefined);
+    setAnchorEntryId(routedEntryId);
+  }, [activeChannelId, routedEntryId]);
+
+  useEffect(() => {
+    const query = searchQuery.trim();
+    if (!query) {
+      setSearchResults([]);
+      setSearchError('');
+      setSearchLoading(false);
+      return;
+    }
+    let alive = true;
+    setSearchLoading(true);
+    const timer = setTimeout(() => {
+      void apiJson<{ results?: ChannelSearchResult[] }>(`/api/channels/search?q=${encodeURIComponent(query)}`)
+        .then((payload) => {
+          if (!alive) return;
+          setSearchResults(payload.results ?? []);
+          setSearchError('');
+        })
+        .catch((err) => {
+          if (!alive) return;
+          setSearchResults([]);
+          setSearchError(err instanceof Error ? err.message : 'Search failed');
+        })
+        .finally(() => {
+          if (alive) setSearchLoading(false);
+        });
+    }, 180);
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+  }, [searchQuery]);
+
+
   const handleSend = async (text: string) => {
     if (!text.trim() || sending || route.kind !== 'hub') return;
     setSending(true);
     try {
-      const result = await postChannelMessage({ apiJson }, activeChannelId, text);
+      const result = await postChannelMessage({ apiJson }, activeChannelId, text, replyTarget?.id);
       setEntries((prev) => reduceChannelEntries(prev, [result.entry], activeChannelId));
       lastSeqRef.current = Math.max(lastSeqRef.current, result.entry.seq);
       setAnchorEntryId(result.entry.id);
+      setReplyTarget(undefined);
       const routeResult = resolveMentionRoute(text, agents);
       if (routeResult.kind === 'steer' && routeResult.target) {
         const target = agents.find((item) => item.id === routeResult.target?.id);
@@ -222,9 +279,63 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
         {route.kind === 'workbench' ? renderWorkbench(route) : (
           <>
             <ChannelHeader channel={channel} presence={presence} selectedAgent={selectedAgent} />
-            <ChannelTimeline entries={entries} loading={loading} error={error} anchorEntryId={anchorEntryId} />
+            <div className="border-b border-zinc-800 bg-[#0a0a0b] px-4 py-2">
+              <label className="relative block">
+                <span className="sr-only">Search channel history</span>
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" aria-hidden />
+                <input
+                  value={searchQuery}
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  placeholder="Search room history"
+                  className="h-9 w-full rounded-full border border-zinc-800 bg-zinc-950 pl-9 pr-9 text-sm text-zinc-100 placeholder:text-zinc-600 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950"
+                />
+                {searchQuery ? (
+                  <button
+                    type="button"
+                    aria-label="Clear search"
+                    onClick={() => setSearchQuery('')}
+                    className="absolute right-1 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950"
+                  >
+                    <X className="h-4 w-4" aria-hidden />
+                  </button>
+                ) : null}
+              </label>
+              {searchQuery.trim() ? (
+                <div className="mt-2 max-h-48 overflow-y-auto rounded-xl border border-zinc-800 bg-zinc-950 shadow-xl">
+                  {searchLoading ? <div className="px-3 py-2 text-xs text-zinc-500">Searching…</div> : searchError ? <div className="px-3 py-2 text-xs text-red-300" role="alert">{searchError}</div> : searchResults.length === 0 ? <div className="px-3 py-2 text-xs text-zinc-500">No matches in durable history.</div> : (
+                    <ol className="divide-y divide-zinc-800">
+                      {searchResults.map((result) => (
+                        <li key={result.entry.id}>
+                          <a href={hubHref(result.entry.channelId, result.entry.id)} onClick={() => setAnchorEntryId(result.entry.id)} className="block px-3 py-2 text-left hover:bg-zinc-900 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-inset">
+                            <span className="block text-[11px] font-medium text-zinc-300">{resultTitle(result.entry)}</span>
+                            <span className="mt-0.5 block line-clamp-2 text-xs text-zinc-500">{result.snippet}</span>
+                          </a>
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+                </div>
+              ) : null}
+            </div>
+            <ChannelTimeline entries={entries} loading={loading} error={error} anchorEntryId={anchorEntryId} onReply={(entry) => { setReplyTarget(entry); setReplyFocusKey((key) => key + 1); }} />
             <div className="border-t border-zinc-800 bg-[#0a0a0b]">
               {sending ? <div className="flex h-6 items-center gap-2 px-4 text-[11px] text-zinc-500"><Loader2 className="h-3 w-3 animate-spin" aria-hidden /> Posting…</div> : null}
+              {replyTarget ? (
+                <div className="flex items-center justify-between gap-3 border-b border-zinc-800 px-4 py-2 text-xs text-zinc-400">
+                  <div className="min-w-0">
+                    <span className="font-medium text-zinc-300">Replying to #{replyTarget.seq}</span>
+                    <span className="ml-2 line-clamp-1">{replyTarget.displayText ?? replyTarget.text}</span>
+                  </div>
+                  <button
+                    type="button"
+                    aria-label="Cancel reply"
+                    onClick={() => setReplyTarget(undefined)}
+                    className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950"
+                  >
+                    <X className="h-4 w-4" aria-hidden />
+                  </button>
+                </div>
+              ) : null}
               <Composer
                 tasks={tasks}
                 suggestionChips={[]}
@@ -240,6 +351,7 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
                 agent={selectedAgent}
                 agents={agents}
                 placeholder={selectedAgent ? `Message #${channel.name} and address ${selectedAgent.name || selectedAgent.id}` : `Message #${channel.name}`}
+                focusKey={replyFocusKey}
                 onToast={showToast}
               />
             </div>

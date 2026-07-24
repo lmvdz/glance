@@ -79,11 +79,11 @@ export function channelAgentSessionId(channelId: string, agentId: string): strin
 
 /** Room messages use the channel-entry route, not the agent prompt route. The body is
  * deliberately only `{text}` so forged card/event fields die at the server schema boundary. */
-export function postChannelMessage(deps: ChannelPostDeps, channelId: string, text: string): Promise<ChannelPostResult> {
+export function postChannelMessage(deps: ChannelPostDeps, channelId: string, text: string, replyToId?: string): Promise<ChannelPostResult> {
   const trimmed = text.trim();
   if (!channelId) throw new Error('channelId required');
   if (!trimmed) throw new Error('message required');
-  return deps.apiJson<ChannelPostResult>(`/api/channels/${encodeURIComponent(channelId)}/entries`, jsonInit('POST', { text: trimmed }));
+  return deps.apiJson<ChannelPostResult>(`/api/channels/${encodeURIComponent(channelId)}/entries`, jsonInit('POST', replyToId ? { text: trimmed, replyToId } : { text: trimmed }));
 }
 
 /** One in-flight `/api/console` mint promise per session — the single-flight cache. Module-level

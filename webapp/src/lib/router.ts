@@ -1,5 +1,5 @@
 export type HubRoute =
-  | { kind: 'hub'; channelId: string }
+  | { kind: 'hub'; channelId: string; entryId?: string }
   | { kind: 'workbench'; view: WorkbenchRouteView; id?: string };
 
 export type WorkbenchRouteView =
@@ -32,8 +32,8 @@ export function parseHubHash(hash: string): HubRoute {
   const path = trimHash(hash);
   if (!path || path === DEFAULT_CHANNEL_ID) return { kind: 'hub', channelId: DEFAULT_CHANNEL_ID };
 
-  const [head, rawId] = path.split('/');
-  if (head === 'channel') return { kind: 'hub', channelId: decode(rawId) || DEFAULT_CHANNEL_ID };
+  const [head, rawId, sub, rawSubId] = path.split('/');
+  if (head === 'channel') return { kind: 'hub', channelId: decode(rawId) || DEFAULT_CHANNEL_ID, ...(sub === 'entry' && decode(rawSubId) ? { entryId: decode(rawSubId) } : {}) };
   if (head === 'intervene') return { kind: 'workbench', view: 'intervene', id: decode(rawId) };
   if (head === 'agent') return { kind: 'workbench', view: 'intervene', id: decode(rawId) };
   if (head === 'review') return { kind: 'workbench', view: 'review', id: decode(rawId) };
@@ -46,7 +46,8 @@ export function parseHubHash(hash: string): HubRoute {
   return { kind: 'hub', channelId: DEFAULT_CHANNEL_ID };
 }
 
-export function hubHref(channelId = DEFAULT_CHANNEL_ID): string {
+export function hubHref(channelId = DEFAULT_CHANNEL_ID, entryId?: string): string {
+  if (entryId) return `#/channel/${encodeURIComponent(channelId)}/entry/${encodeURIComponent(entryId)}`;
   return channelId === DEFAULT_CHANNEL_ID ? `#${DEFAULT_CHANNEL_ID}` : `#/channel/${encodeURIComponent(channelId)}`;
 }
 

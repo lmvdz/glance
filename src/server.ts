@@ -3279,6 +3279,13 @@ export class SquadServer {
 			}, 300);
 			return Response.json({ ok: true, pull, git: after, restarting: true });
 		}
+		if (url.pathname === "/api/channels/search" && req.method === "GET") {
+			const q = url.searchParams.get("q") ?? "";
+			const query = q.trim();
+			if (!query) return Response.json({ results: [] });
+			return Response.json({ results: await manager.searchChannelEntries(query) });
+		}
+
 		const channelEntryMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/entries$/);
 		if (channelEntryMatch && req.method === "GET") {
 			const channelId = decodeURIComponent(channelEntryMatch[1]!);

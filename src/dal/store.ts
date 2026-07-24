@@ -27,6 +27,12 @@ import { decryptSecret, encryptSecret, last4 as secretLast4 } from "../secrets.t
 import { type OrgContext, withOrg } from "./context.ts";
 import { getStorageBackend } from "./storage.ts";
 
+export interface ChannelSearchResult {
+	entry: ChannelEntry;
+	snippet: string;
+}
+
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -67,6 +73,19 @@ function readChannelEntry(value: unknown): ChannelEntry | undefined {
 				: undefined,
 	};
 }
+
+function searchSnippet(text: string, hitAt: number, length: number): string {
+	const start = Math.max(0, hitAt - 48);
+	const end = Math.min(text.length, hitAt + length + 96);
+	const prefix = start > 0 ? "…" : "";
+	const suffix = end < text.length ? "…" : "";
+	return `${prefix}${text.slice(start, end).replace(/\s+/g, " ").trim()}${suffix}`;
+}
+
+function escapeLike(value: string): string {
+	return value.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+}
+
 
 
 /**
@@ -119,6 +138,7 @@ export interface Store {
 	getChannel(id: string): Promise<Channel | undefined>;
 	putChannel(channel: Channel): Promise<void>;
 	listChannelEntries(channelId: string, since?: number): Promise<ChannelEntry[]>;
+	searchChannelEntries?(q: string, limit?: number): Promise<ChannelSearchResult[]>;
 	appendChannelEntry(entry: ChannelEntry): Promise<void>;
 	nextChannelSeq(channelId: string): Promise<number>;
 	/** Cumulative save() failures this process, when the store tracks them (FileStore only — DbStore's
@@ -251,6 +271,27 @@ export class FileStore implements Store {
 		}
 		return entries.sort((a, b) => a.seq - b.seq);
 	}
+
+	async searchChannelEntries(q: string, limit = 50): Promise<ChannelSearchResult[]> {
+		const needle = q.trim().toLowerCase();
+		if (!needle) return [];
+		const raw = await getStorageBackend().readText(path.join(this.stateDir, "channels.jsonl"));
+		if (!raw) return [];
+		const results: ChannelSearchResult[] = [];
+		for (const line of raw.split("\n")) {
+			if (!line.trim()) continue;
+			try {
+				const entry = readChannelEntry(JSON.parse(line));
+				if (!entry) continue;
+				const text = entry.displayText ?? entry.text;
+				const hitAt = text.toLowerCase().indexOf(needle);
+				if (hitAt === -1) continue;
+				results.push({ entry, snippet: searchSnippet(text, hitAt, q.trim().length) });
+			} catch {}
+		}
+		return results.sort((a, b) => b.entry.ts - a.entry.ts || b.entry.seq - a.entry.seq).slice(0, limit);
+	}
+
 
 	async appendChannelEntry(entry: ChannelEntry): Promise<void> {
 		await getStorageBackend().appendDurable(path.join(this.stateDir, "channels.jsonl"), `${JSON.stringify(entry)}\n`);
@@ -522,6 +563,31 @@ export class DbStore implements Store {
 		const rows = await withOrg(this.ctx, this.orgId, (trx) => trx.selectFrom("channel_entries").select(["data"]).where("org_id", "=", this.orgId).where("channel_id", "=", channelId).where("seq", ">", since).orderBy("seq").execute());
 		return rows.map((r) => readChannelEntry(JSON.parse(r.data))).filter((entry): entry is ChannelEntry => entry !== undefined);
 	}
+
+	async searchChannelEntries(q: string, limit = 50): Promise<ChannelSearchResult[]> {
+		const needle = q.trim();
+		if (!needle) return [];
+		const pattern = `%${escapeLike(needle)}%`;
+		const rows = await withOrg(this.ctx, this.orgId, (trx) =>
+			trx
+				.selectFrom("channel_entries")
+				.select(["data"])
+				.where("org_id", "=", this.orgId)
+				.where(sql`json_extract(data, '$.text')`, "like", pattern)
+				.orderBy("ts", "desc")
+				.limit(limit)
+				.execute(),
+		);
+		return rows
+			.map((r) => readChannelEntry(JSON.parse(r.data)))
+			.filter((entry): entry is ChannelEntry => entry !== undefined)
+			.map((entry) => {
+				const text = entry.displayText ?? entry.text;
+				const hitAt = text.toLowerCase().indexOf(needle.toLowerCase());
+				return { entry, snippet: searchSnippet(text, hitAt < 0 ? 0 : hitAt, needle.length) };
+			});
+	}
+
 
 	async appendChannelEntry(entry: ChannelEntry): Promise<void> {
 		await withOrg(this.ctx, this.orgId, (trx) => trx.insertInto("channel_entries").values({ org_id: this.orgId, channel_id: entry.channelId, id: entry.id, seq: entry.seq, author_actor: entry.authorActor, reply_to_id: entry.replyToId ?? null, ts: entry.ts, data: JSON.stringify(entry) }).execute());
