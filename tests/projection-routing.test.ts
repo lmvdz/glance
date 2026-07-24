@@ -8,7 +8,7 @@ import type { ChannelEntry } from "../src/channels.ts";
 import { DEFAULT_CHANNEL_ID } from "../src/channels.ts";
 import { LOCAL_ACTOR } from "../src/federation.ts";
 import { SquadManager } from "../src/squad-manager.ts";
-import { TRANSCRIPT_EVENT_GATE_VERDICT, TRANSCRIPT_EVENT_LAND_ASSESSMENT } from "../src/transcript-event-kinds.ts";
+import { TRANSCRIPT_EVENT_GATE_VERDICT, TRANSCRIPT_EVENT_LAND_ASSESSMENT, TRANSCRIPT_EVENT_PLAN_CARD } from "../src/transcript-event-kinds.ts";
 import type { AgentDTO, ClientCommand, PersistedAgent, RpcExtensionUIRequest, RpcSessionState } from "../src/types.ts";
 
 const tmps: string[] = [];
@@ -47,7 +47,7 @@ interface InternalHost {
 	emitUnitTranscriptEvent(id: string | undefined, kind: string, text: string, payload: unknown): void;
 }
 
-function isEventPayload(value: unknown): value is { refs: { unitId: string; entryId?: string }; doorSurface: string; face: { unitId: string; unitName: string; pendingStatus?: string; pendingId?: string; eventKind?: string } } {
+function isEventPayload(value: unknown): value is { refs: { unitId: string; entryId?: string; planId?: string; planPath?: string; candidateId?: string }; doorSurface: string; face: { unitId: string; unitName: string; pendingStatus?: string; pendingId?: string; eventKind?: string; title?: string; concernCount?: number; pinned?: Record<string, unknown> } } {
 	return Boolean(value && typeof value === "object" && "refs" in value && "doorSurface" in value && "face" in value);
 }
 
@@ -195,6 +195,32 @@ test("pending request and room card are one needs-you substrate and both resolve
 	const resolved = await resolvedCard;
 	expect(mgr.getAgent(dto.id)?.pending).toEqual([]);
 	expect(isEventPayload(resolved.event?.payload)).toBe(true);
+	await mgr.stop();
+});
+
+test("plan revision candidates project plan cards with DAG door refs", async () => {
+	const { mgr, host, repo } = await makeMgr("projection-plan-card");
+	await createChannel(host, "ops");
+	await fs.mkdir(path.join(repo, "plans", "the-room"), { recursive: true });
+	await fs.writeFile(path.join(repo, "plans", "the-room", "01-a.md"), "# A\nSTATUS: open\n");
+	await fs.writeFile(path.join(repo, "plans", "the-room", "02-b.md"), "# B\nSTATUS: open\n");
+	const feature = mgr.createFeature({ title: "The room", repo, planDir: "plans/the-room" });
+	const dto = await mgr.create({ name: "planner", repo, approvalMode: "yolo", channelId: "ops", autoRoute: false, featureId: feature.id });
+	const projected = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === TRANSCRIPT_EVENT_PLAN_CARD);
+
+	const candidate = await mgr.addPlanRevisionCandidate({ repo, featureId: feature.id, planPath: "plans/the-room/01-a.md", producerAgentId: dto.id, summary: "split the door concern" });
+	const card = await projected;
+
+	expect(card.text).toContain("plan revision ready");
+	expect(isEventPayload(card.event?.payload)).toBe(true);
+	if (!isEventPayload(card.event?.payload)) throw new Error("bad plan-card payload");
+	expect(card.event.payload.doorSurface).toBe("plan");
+	expect(card.event.payload.refs.planId).toBe(feature.id);
+	expect(card.event.payload.refs.planPath).toBe("plans/the-room/01-a.md");
+	expect(card.event.payload.refs.candidateId).toBe(candidate.id);
+	expect(card.event.payload.face.title).toBe("the-room");
+	expect(card.event.payload.face.concernCount).toBe(2);
+	expect(card.event.payload.face.pinned).toMatchObject({ concerns: 2, revision: "split the door concern" });
 	await mgr.stop();
 });
 

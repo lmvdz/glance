@@ -219,6 +219,7 @@ import {
 	TRANSCRIPT_EVENT_LAND_ATTEMPT,
 	TRANSCRIPT_EVENT_LAND_MERGE,
 	TRANSCRIPT_EVENT_NEEDS_YOU,
+	TRANSCRIPT_EVENT_PLAN_CARD,
 } from "./transcript-event-kinds.ts";
 import { truncateLabel } from "./text-util.ts";
 import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
@@ -260,6 +261,7 @@ const DEFAULT_FLEET_CARD_KINDS: Record<string, true> = {
 	[TRANSCRIPT_EVENT_NEEDS_YOU]: true,
 	[TRANSCRIPT_EVENT_GATE_VERDICT]: true,
 	[TRANSCRIPT_EVENT_LAND_MERGE]: true,
+	[TRANSCRIPT_EVENT_PLAN_CARD]: true,
 };
 
 const MAX_TRANSCRIPT = 800;
@@ -9723,11 +9725,39 @@ export class SquadManager extends EventEmitter {
 		this.emit("event", { type: "comment-resolved", id, resolvedAt: at } satisfies SquadEvent);
 		void this.recordAudit(actor, "comment-resolve", id, "ok");
 	}
+	private async emitPlanCard(candidate: PlanRevisionCandidate, label = "plan revision ready"): Promise<void> {
+		const feature = (await this.features(candidate.repo)).find((item) => item.id === candidate.featureId);
+		const agentId = candidate.producerAgentId ?? feature?.agentIds[0];
+		if (!agentId) return;
+		const planName = feature?.planDir?.split(/[\\/]/).filter(Boolean).pop() ?? candidate.planPath.split(/[\\/]/).filter(Boolean).slice(-2, -1)[0] ?? feature?.title ?? candidate.featureId;
+		const concernCount = feature?.planDir ? (await parsePlanConcerns(candidate.repo, feature.planDir).catch(() => [])).length : undefined;
+		this.emitUnitTranscriptEvent(agentId, TRANSCRIPT_EVENT_PLAN_CARD, `${label} · ${this.safeEventLabel(planName)} · ${this.safeEventLabel(candidate.summary)}`, {
+			status: candidate.state,
+			featureId: candidate.featureId,
+			planPath: candidate.planPath,
+			planName,
+			concernCount,
+			summary: candidate.summary,
+			candidateId: candidate.id,
+			producerAgentId: candidate.producerAgentId,
+			face: {
+				title: planName,
+				eyebrow: "Plan ready",
+				body: candidate.summary,
+				detail: candidate.planPath,
+				status: candidate.state,
+				tone: "info",
+				pinned: { concerns: concernCount, revision: candidate.summary },
+			},
+		});
+	}
+
 
 	/** Unresolved comments on a subject — consumed by the Slice-2 RPI feed-forward. */
 	async addPlanRevisionCandidate(input: Omit<PlanRevisionCandidate, "id" | "state" | "createdAt" | "updatedAt"> & { id?: string; state?: PlanRevisionCandidateState; createdAt?: number; updatedAt?: number }, actor: Actor | string = LOCAL_ACTOR): Promise<PlanRevisionCandidate> {
 		const candidate = await addPlanRevisionCandidate(this.stateDir, input);
 		this.emitFeaturesChanged();
+		void this.emitPlanCard(candidate);
 		void this.recordAudit(actor, "plan-candidate-add", candidate.featureId, "ok", candidate.summary);
 		return candidate;
 	}
@@ -11092,6 +11122,8 @@ export class SquadManager extends EventEmitter {
 				return "gate-verdict";
 			case TRANSCRIPT_EVENT_LAND_MERGE:
 				return "land-merge";
+			case TRANSCRIPT_EVENT_PLAN_CARD:
+				return "plan";
 			case TRANSCRIPT_EVENT_LAND_ATTEMPT:
 			case TRANSCRIPT_EVENT_LAND_ASSESSMENT:
 				return "land";
@@ -11100,12 +11132,16 @@ export class SquadManager extends EventEmitter {
 		}
 	}
 
-	private projectionRefs(rec: AgentRecord, entry: TranscriptEntry): Record<string, unknown> {
+	private projectionPayload(entry: TranscriptEntry): Record<string, unknown> {
 		const payload = entry.event?.payload;
-		const objectPayload = payload && typeof payload === "object" && !Array.isArray(payload) ? payload as Record<string, unknown> : {};
+		return payload && typeof payload === "object" && !Array.isArray(payload) ? payload as Record<string, unknown> : {};
+	}
+
+	private projectionRefs(rec: AgentRecord, entry: TranscriptEntry): Record<string, unknown> {
+		const objectPayload = this.projectionPayload(entry);
 		const refs: Record<string, unknown> = { unitId: rec.dto.id };
 		if (entry.id) refs.entryId = entry.id;
-		for (const [from, to] of [["featureId", "planId"], ["attemptId", "landId"], ["issueId", "issueId"], ["issueIdentifier", "issueIdentifier"]] as const) {
+		for (const [from, to] of [["featureId", "planId"], ["planPath", "planPath"], ["candidateId", "candidateId"], ["attemptId", "landId"], ["issueId", "issueId"], ["issueIdentifier", "issueIdentifier"]] as const) {
 			const value = objectPayload[from];
 			if (typeof value === "string" && value) refs[to] = value;
 		}
@@ -11113,23 +11149,26 @@ export class SquadManager extends EventEmitter {
 	}
 
 	private projectionFace(rec: AgentRecord, entry: TranscriptEntry): Record<string, unknown> {
-		const payload = entry.event?.payload;
-		const objectPayload = payload && typeof payload === "object" && !Array.isArray(payload) ? payload as Record<string, unknown> : {};
+		const objectPayload = this.projectionPayload(entry);
+		const customFace = objectPayload.face && typeof objectPayload.face === "object" && !Array.isArray(objectPayload.face) ? objectPayload.face as Record<string, unknown> : {};
 		return {
+			...customFace,
 			unitId: rec.dto.id,
 			unitName: rec.dto.name,
-			status: rec.dto.status,
+			status: typeof customFace.status === "string" ? customFace.status : rec.dto.status,
 			repo: rec.dto.repo,
 			branch: rec.dto.branch,
 			issue: rec.dto.issue ? { id: rec.dto.issue.id, identifier: rec.dto.issue.identifier, name: rec.dto.issue.name } : undefined,
 			eventKind: entry.event?.kind,
-			title: entry.text,
+			title: typeof customFace.title === "string" ? customFace.title : entry.text,
 			stage: typeof objectPayload.stage === "string" ? objectPayload.stage : undefined,
 			verdict: typeof objectPayload.verdict === "string" ? objectPayload.verdict : undefined,
 			ok: typeof objectPayload.ok === "boolean" ? objectPayload.ok : undefined,
 			merged: typeof objectPayload.merged === "boolean" ? objectPayload.merged : undefined,
 			pendingId: typeof objectPayload.pendingId === "string" ? objectPayload.pendingId : undefined,
 			pendingStatus: typeof objectPayload.status === "string" ? objectPayload.status : undefined,
+			planName: typeof objectPayload.planName === "string" ? objectPayload.planName : undefined,
+			concernCount: typeof objectPayload.concernCount === "number" ? objectPayload.concernCount : undefined,
 		};
 	}
 
