@@ -35,6 +35,22 @@ describe('channel timeline dispatch', () => {
   });
 });
 
+describe('channel attribution cards', () => {
+  test('every dispatch shape carries the stamped author label', () => {
+    const cards = [
+      dispatchChannelCard(entry({ id: 'message', seq: 1, kind: 'user', authorActor: 'db:u1', authorDisplayName: 'Lars Operator', authorOrigin: 'local' })),
+      dispatchChannelCard(entry({ id: 'unknown', seq: 2, authorActor: 'manager', authorDisplayName: 'Room Manager', event: { kind: 'future-proof', payload: {} } })),
+      dispatchChannelCard(entry({ id: 'pointer', seq: 3, authorActor: 'agent:planner', authorDisplayName: 'Planner Bot', authorOrigin: 'agent', event: { kind: 'needs-you', payload: { face: { title: 'Review gate' } } } })),
+    ];
+
+    expect(cards.map((card) => [card.kind, card.authorLabel, card.title])).toEqual([
+      ['message', 'Lars Operator · human', 'Lars Operator · human'],
+      ['unknown-event', 'Room Manager · system', 'Future Proof'],
+      ['needs-you', 'Planner Bot · agent', 'Review gate'],
+    ]);
+  });
+});
+
 describe('channel entry reduction', () => {
   test('merges reconnect resync batches without gaps or dupes', () => {
     const current = [entry({ id: 'a', seq: 1 }), entry({ id: 'b', seq: 2 })];

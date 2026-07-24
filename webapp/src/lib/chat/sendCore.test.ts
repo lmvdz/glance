@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { buildPromptCommand, ensureConsoleAgent, type SendCoreDeps } from './sendCore';
+import { buildPromptCommand, channelAgentSessionId, channelDraftSessionId, ensureConsoleAgent, postChannelMessage, type SendCoreDeps } from './sendCore';
 import type { AgentDTO } from '../dto';
 import type { Task } from '../../types';
 
@@ -22,6 +22,31 @@ function makeDeps(overrides: Partial<SendCoreDeps> = {}): { deps: SendCoreDeps; 
   };
   return { deps, calls };
 }
+
+test('postChannelMessage posts only trimmed text to the channel-entry route', async () => {
+  const calls: Array<[string, RequestInit | undefined]> = [];
+  const result = await postChannelMessage({
+    apiJson: async (path, init) => {
+      calls.push([path, init]);
+      return { entry: { id: 'entry-1', seq: 1, channelId: 'fleet', authorActor: 'db:u1', kind: 'user', text: 'hello', ts: 1 } };
+    },
+  }, 'team room', '  hello  ');
+
+  expect(result.entry.id).toBe('entry-1');
+  expect(calls).toHaveLength(1);
+  expect(calls[0]?.[0]).toBe('/api/channels/team%20room/entries');
+  expect(calls[0]?.[1]?.method).toBe('POST');
+  expect(calls[0]?.[1]?.headers).toEqual({ 'Content-Type': 'application/json' });
+  expect(JSON.parse(String(calls[0]?.[1]?.body))).toEqual({ text: 'hello' });
+});
+
+test('channel draft and addressed-agent session ids are keyed by channel id', () => {
+  expect(channelDraftSessionId('fleet')).toBe('hub:fleet');
+  expect(channelDraftSessionId('support')).toBe('hub:support');
+  expect(channelAgentSessionId('fleet', 'agent-a')).toBe('hub:fleet:agent-a');
+  expect(() => channelDraftSessionId('')).toThrow('channelId required');
+  expect(() => channelAgentSessionId('fleet', '')).toThrow('agentId required');
+});
 
 // ---------------------------------------------------------------------------
 // ensureConsoleAgent — single-flight mint

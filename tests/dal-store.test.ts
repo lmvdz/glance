@@ -245,18 +245,65 @@ test("DbStore: channel entries are durable and scoped by org", async () => {
 	expect(await a.listChannelEntries("fleet", 1)).toEqual([]);
 });
 
+test("DbStore: channel search is org-scoped and searches only redacted stored text", async () => {
+	const a = dbStore("A");
+	const b = dbStore("B");
+	await a.putChannel({ id: "search", name: "#search", kind: "user", createdAt: 1 });
+	await b.putChannel({ id: "search", name: "#search", kind: "user", createdAt: 1 });
+	await a.appendChannelEntry({ id: "a1", seq: 1, channelId: "search", authorActor: "db:alice", kind: "user", text: "incident memory [REDACTED]", ts: 10, status: "ok" });
+	await b.appendChannelEntry({ id: "b1", seq: 1, channelId: "search", authorActor: "db:bob", kind: "user", text: "incident memory foreign", ts: 11, status: "ok" });
+
+	const fromA = await a.searchChannelEntries("incident memory");
+	expect(fromA.map((result) => result.entry.id)).toEqual(["a1"]);
+	expect(await b.searchChannelEntries("[REDACTED]")).toEqual([]);
+	expect(await a.searchChannelEntries("sk-raw-secret")).toEqual([]);
+});
+
+test("FileStore: channel search scans durable JSONL rows honestly", async () => {
+	const fdir = path.join(dir, "channel-file-search");
+	const store = new FileStore(fdir);
+	await store.putChannel({ id: "fleet", name: "#fleet", kind: "default", createdAt: 1 });
+	await store.appendChannelEntry({ id: "old", seq: 1, channelId: "fleet", authorActor: "web:operator", kind: "user", text: "week old incident memory", ts: 1, status: "ok" });
+	await store.appendChannelEntry({ id: "other", seq: 2, channelId: "ops", authorActor: "web:operator", kind: "user", text: "incident memory in ops", ts: 2, status: "ok" });
+
+	expect((await store.searchChannelEntries("incident memory")).map((result) => result.entry.id)).toEqual(["other", "old"]);
+});
+
 test("ChannelStore: client posts are redacted, born settled, and cannot carry event payloads", async () => {
 	const fdir = path.join(dir, "channel-authorship");
 	const store = new FileStore(fdir);
 	const channels = new ChannelStore(fdir, store, undefined, () => 123);
-	const entry = await channels.appendClient("fleet", { id: "web:operator", role: "admin" }, { text: `token sk-${"a".repeat(20)}`, event: { kind: "fake", payload: {} } } as never);
+	const secret = `sk-${"a".repeat(20)}`;
+	const entry = await channels.appendClient("fleet", { id: "web:operator", displayName: "Lars Operator", origin: "local", role: "admin" }, {
+		text: `token ${secret}`,
+		replyToId: "prev-entry",
+		authorDisplayName: "Mallory",
+		authorOrigin: "agent",
+		event: { kind: "fake", payload: { body: secret } },
+	} as never);
 	await channels.stop();
+	const persisted = await store.listChannelEntries("fleet");
 
-	expect(entry.status).toBe("ok");
-	expect(entry.status).not.toBe("running");
+	expect(entry).toMatchObject({
+		status: "ok",
+		kind: "user",
+		format: "markdown",
+		authorActor: "web:operator",
+		authorDisplayName: "Lars Operator",
+		authorOrigin: "local",
+		replyToId: "prev-entry",
+		text: "token [REDACTED]",
+	});
 	expect(entry.event).toBeUndefined();
-	expect(entry.text).not.toContain(`sk-${"a".repeat(20)}`);
-	expect(await store.listChannelEntries("fleet")).toHaveLength(1);
+	expect(persisted).toHaveLength(1);
+	expect(persisted[0]).toMatchObject({
+		id: entry.id,
+		authorActor: "web:operator",
+		authorDisplayName: "Lars Operator",
+		authorOrigin: "local",
+		text: "token [REDACTED]",
+	});
+	expect(persisted[0]?.event).toBeUndefined();
 });
 
 test("ChannelStore: manager-authored card strings are redacted and delimiter-neutralized", async () => {

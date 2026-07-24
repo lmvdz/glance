@@ -56,7 +56,9 @@ export function latestSeq(entries: ChannelEntry[]): number {
 }
 
 export function entryAuthorLabel(entry: ChannelEntry): string {
-  if (entry.authorActor.startsWith('user:') || entry.kind === 'user') return 'You';
-  if (entry.authorActor.startsWith('manager')) return 'glance';
-  return entry.authorActor.replace(/^web:/, '').replace(/^db:/, '');
+  const name = entry.authorDisplayName?.trim() || entry.authorActor.replace(/^web:/, '').replace(/^db:/, '').replace(/^user:/, '').replace(/^agent:/, '');
+  if (entry.authorOrigin === 'agent' || entry.authorActor.startsWith('agent:')) return `${name} · agent`;
+  if (entry.kind === 'user' || entry.authorOrigin === 'local' || entry.authorOrigin === 'remote' || entry.authorActor.startsWith('user:') || entry.authorActor.startsWith('db:') || entry.authorActor.startsWith('web:')) return `${name} · human`;
+  if (entry.authorActor.startsWith('manager')) return `${entry.authorDisplayName?.trim() || 'glance'} · system`;
+  return `${name} · system`;
 }

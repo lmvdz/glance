@@ -665,6 +665,8 @@ export interface ChannelEntry extends TranscriptEntry {
   seq: number;
   channelId: string;
   authorActor: string;
+  authorDisplayName?: string;
+  authorOrigin?: "local" | "remote" | "agent";
   replyToId?: string;
   event?: { kind: string; issuer?: string; payload: unknown };
 }
@@ -835,7 +837,7 @@ export type ClientCommand =
   // `source` (intended values "composer" | "voice", kept as an open string) is observability-only
   // provenance for the audit trail (root ClientCommand/schema, concern 03) — never consulted here
   // for authz/tier decisions, which stay server-side regardless of this tag.
-  | { type: "prompt"; id: string; message: string; clientTurnId?: string; displayText?: string; source?: string }
+  | { type: "prompt"; id: string; message: string; clientTurnId?: string; displayText?: string; source?: string; channelId?: string; mention?: { targetLabel?: string } }
   | { type: "set-model"; id: string; model: string }
   // `source` mirrors "prompt"'s own field (MEDIUM-5: audit source tagging) — observability-only
   // provenance, never consulted here for authz/tier decisions.
