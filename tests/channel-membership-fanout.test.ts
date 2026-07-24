@@ -50,7 +50,7 @@ function seedAgent(mgr: SquadManager, dto: AgentDTO, transcript: TranscriptEntry
 	};
 	const record = {
 		dto,
-		agent: { detach: () => {} },
+		agent: { detach: () => {}, stop: async () => {}, prompt: async () => {}, isReady: true, isAlive: true },
 		options,
 		transcript,
 		assistantBuf: "",
@@ -280,15 +280,26 @@ test("command-ack reaches subscribed sockets while a private channel exists", as
 	});
 
 	await mgr.createChannel(actor("alice"), { id: "ops", name: "#ops", visibility: "private" });
+	seedAgent(mgr, agentDto("private-ack-unit", "ops"));
 	const frames: Record<string, string[]> = { alice: [], carol: [] };
 	const fakeSocket = (userId: string): DeliverSocket => ({ data: { userId, orgId: "org-a", role: "admin", displayName: userId }, send: (frame: string) => frames[userId]!.push(frame) });
 	const host = server as unknown as DeliverHost;
 	host.clients.add(fakeSocket("alice"));
 	host.clients.add(fakeSocket("carol"));
+	const { promise: ack, resolve: resolveAck } = Promise.withResolvers<SquadEvent>();
+	const onEvent = (event: SquadEvent) => {
+		if (event.type !== "command-ack") return;
+		mgr.off("event", onEvent);
+		resolveAck(event);
+	};
+	mgr.on("event", onEvent);
 
-	await host.deliverEvent(undefined, { type: "command-ack", clientTurnId: "turn-1", ok: true });
-	expect(frames.alice.map((frame) => JSON.parse(frame))).toEqual([{ type: "command-ack", clientTurnId: "turn-1", ok: true }]);
-	expect(frames.carol.map((frame) => JSON.parse(frame))).toEqual([{ type: "command-ack", clientTurnId: "turn-1", ok: true }]);
+	await mgr.applyCommand({ type: "prompt", id: "private-ack-unit", message: "private command", channelId: "ops", clientTurnId: "turn-1" } as never, actor("alice"));
+	const commandAck = await ack;
+	expect(commandAck).toMatchObject({ type: "command-ack", clientTurnId: "turn-1" });
+	await host.deliverEvent(undefined, commandAck);
+	expect(frames.alice.map((frame) => JSON.parse(frame))).toEqual([commandAck]);
+	expect(frames.carol.map((frame) => JSON.parse(frame))).toEqual([commandAck]);
 });
 
 test("creator-only membership management rejects non-creators and non-member self-add", async () => {
