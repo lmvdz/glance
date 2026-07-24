@@ -1,7 +1,7 @@
 import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertCircle, CheckCircle2, CircleDot, FileText, Flame, GitMerge, Hash, Reply, ShieldAlert } from 'lucide-react';
+import { AlertCircle, CheckCircle2, ChevronRight, CircleDot, FileText, Flame, GitMerge, Hash, Reply, Rocket, ShieldAlert } from 'lucide-react';
 import type { ChannelEntry } from '../../lib/dto';
-import { buildChannelThreadViews, doorLabel, type ChannelCardTone, type ChannelCardView } from '../../lib/channelTimeline';
+import { buildChannelThreadViews, doorLabel, groupLifecycleRuns, type ChannelCardTone, type ChannelCardView } from '../../lib/channelTimeline';
 import { entryTimeLabel } from '../../lib/hub';
 import { hubHref } from '../../lib/router';
 import { channelScrollAfterRowsChange, channelScrollAfterUserScroll, initialChannelScrollState, type ChannelScrollState } from '../../lib/channelScroll';
@@ -28,6 +28,11 @@ const iconClass: Record<ChannelCardView['kind'], typeof ShieldAlert> = {
   'mention-steer-failed': AlertCircle,
   'spawn-proposal': CircleDot,
   'plan-card': FileText,
+  'unit-spawned': Rocket,
+  'unit-turn-finished': CheckCircle2,
+  'unit-failed': AlertCircle,
+  'pr-opened': GitMerge,
+  'verification-ran': CheckCircle2,
   'unknown-event': CircleDot,
 };
 
@@ -137,11 +142,29 @@ const ChannelTimelineRow = memo(function ChannelTimelineRow({ view, onReply }: {
   );
 });
 
+function LifecycleRun({ views, onReply }: { views: ChannelCardView[]; onReply?: (entry: ChannelEntry) => void }) {
+  if (views.length === 1) return <ChannelTimelineRow view={views[0]!} onReply={onReply} />;
+  const unit = views[0]!.pinned.find((item) => item.label === 'Unit')?.value ?? views[0]!.authorLabel;
+  return (
+    <li data-entry-id={views[0]!.id}>
+      <details open className="group rounded-2xl border border-zinc-800 bg-[#0c0c0e]">
+        <summary className="flex min-h-10 cursor-pointer list-none items-center gap-2 px-3 py-2 text-xs font-semibold text-zinc-200 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-500">
+          <ChevronRight className="h-4 w-4 transition-transform group-open:rotate-90" aria-hidden />
+          <span className="truncate">{unit}</span>
+          <span className="ml-auto text-[10px] font-medium uppercase tracking-[0.14em] text-zinc-500">{views.length} lifecycle updates</span>
+        </summary>
+        <ol className="space-y-3 border-t border-zinc-800 p-3">{views.map((view) => <ChannelTimelineRow key={view.id} view={view} onReply={onReply} />)}</ol>
+      </details>
+    </li>
+  );
+}
+
 export function ChannelTimeline({ entries, loading, error, anchorEntryId, onReply }: { entries: ChannelEntry[]; loading: boolean; error: string; anchorEntryId?: string; onReply?: (entry: ChannelEntry) => void }) {
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const scrollStateRef = useRef<ChannelScrollState>(initialChannelScrollState());
   const [stableRows, setStableRows] = useState<ChannelCardView[]>([]);
   const views = useMemo(() => buildChannelThreadViews(entries), [entries]);
+  const runs = useMemo(() => groupLifecycleRuns(stableRows), [stableRows]);
 
   useEffect(() => {
     setStableRows((previous) => {
@@ -177,7 +200,7 @@ export function ChannelTimeline({ entries, loading, error, anchorEntryId, onRepl
 
   return (
     <div ref={scrollerRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto bg-[#09090a]" data-scroll-mode={scrollStateRef.current.mode}>
-      {loading ? <LoadingTimeline /> : error ? <div className="m-4 flex items-center gap-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200" role="alert"><AlertCircle className="h-4 w-4" aria-hidden /> {error}</div> : stableRows.length === 0 ? <EmptyTimeline /> : <ol className="mx-auto w-full max-w-4xl space-y-3 p-4 pb-10">{stableRows.map((view) => <ChannelTimelineRow key={view.id} view={view} onReply={onReply} />)}</ol>}
+      {loading ? <LoadingTimeline /> : error ? <div className="m-4 flex items-center gap-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200" role="alert"><AlertCircle className="h-4 w-4" aria-hidden /> {error}</div> : stableRows.length === 0 ? <EmptyTimeline /> : <ol className="mx-auto w-full max-w-4xl space-y-3 p-4 pb-10">{runs.map((run) => <LifecycleRun key={run[0]!.id} views={run} onReply={onReply} />)}</ol>}
     </div>
   );
 }

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { channelCardActionHref, dispatchChannelCard, doorLabel, latestChannelSeq, reduceChannelEntryWindow } from './channelTimeline';
+import { channelCardActionHref, dispatchChannelCard, doorLabel, groupLifecycleRuns, latestChannelSeq, reduceChannelEntryWindow } from './channelTimeline';
 import type { ChannelEntry } from './dto';
 
 const entry = (overrides: Partial<ChannelEntry> & Pick<ChannelEntry, 'id' | 'seq'>): ChannelEntry => ({
@@ -132,6 +132,32 @@ describe('channel timeline dispatch', () => {
     expect(card.pinned).toEqual([{ label: 'Outcome', value: 'Merged' }, { label: 'PR', value: '#91' }, { label: 'Proof', value: 'Green' }, { label: 'Branch', value: 'room-16-landcards' }]);
     expect(card.href).toBe('#/proof/room-16');
     expect(card.land).toMatchObject({ outcome: 'Merged', prNumber: '91', prUrl: 'https://github.example/pr/91', doneProofVerified: 'Green' });
+  });
+});
+
+describe('unit lifecycle cards', () => {
+  const kinds = ['unit-spawned', 'unit-turn-finished', 'unit-failed', 'pr-opened', 'verification-ran'] as const;
+
+  test('every lifecycle kind renders its reader and malformed payload stays neutral', () => {
+    for (const [index, kind] of kinds.entries()) {
+      const rendered = dispatchChannelCard(entry({ id: `lifecycle-${kind}`, seq: index + 1, event: { kind, payload: { refs: { unitId: 'room-27' }, face: { title: `${kind} title`, tone: kind === 'unit-failed' ? 'destructive' : 'info' } } } }));
+      const malformed = dispatchChannelCard(entry({ id: `malformed-${kind}`, seq: index + 11, event: { kind, payload: null } }));
+      expect(rendered.kind).toBe(kind);
+      expect(rendered.title).toBe(`${kind} title`);
+      expect(malformed.kind).toBe(kind);
+      expect(malformed.tone).toBe('neutral');
+      expect(malformed.title).toBe(kind.replace(/-/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase()));
+    }
+  });
+
+  test('folds only consecutive lifecycle cards from the same unit', () => {
+    const views = [
+      dispatchChannelCard(entry({ id: 'a1', seq: 1, event: { kind: 'unit-spawned', payload: { refs: { unitId: 'a' }, face: { title: 'A spawned' } } } })),
+      dispatchChannelCard(entry({ id: 'a2', seq: 2, event: { kind: 'verification-ran', payload: { refs: { unitId: 'a' }, face: { title: 'A verified' } } } })),
+      dispatchChannelCard(entry({ id: 'b1', seq: 3, event: { kind: 'unit-spawned', payload: { refs: { unitId: 'b' }, face: { title: 'B spawned' } } } })),
+      dispatchChannelCard(entry({ id: 'a3', seq: 4, event: { kind: 'pr-opened', payload: { refs: { unitId: 'a' }, face: { title: 'A PR' } } } })),
+    ];
+    expect(groupLifecycleRuns(views).map((run) => run.map((view) => view.id))).toEqual([['a1', 'a2'], ['b1'], ['a3']]);
   });
 });
 

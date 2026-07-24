@@ -1,6 +1,6 @@
 # Unit lifecycle cards — the room needs the facts a human actually watches for
 
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
