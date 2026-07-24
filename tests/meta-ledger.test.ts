@@ -191,6 +191,7 @@ describe("scripts/append-adoption-ledger.ts (through the shared machinery)", () 
 		casualSessionsByDay: { "2026-07-16": 2 },
 		promptsByDay: { "2026-07-16": 7 },
 		pushTapsByDay: {},
+		roomInteractionsByDay: {},
 	};
 
 	test("valid daemon shape → exactly one counters row appended", async () => {

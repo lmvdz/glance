@@ -3,7 +3,7 @@
  * computed honestly: UTC-day bucketing two machines can't disagree on, session-vs-prompt
  * granularity that doesn't double-count ACP's receipt-per-turn shape, and torn/foreign JSONL lines
  * dropped instead of NaN-bucketed. The by-day functions are pure; `computeAdoptionCounters` is
- * exercised against a real scratch state dir with all three seeded sources.
+ * exercised against a real scratch state dir with the durable sources seeded.
  */
 
 import { expect, test } from "bun:test";
@@ -20,10 +20,12 @@ import {
 	mergeAdoptionCounters,
 	promptsByDay,
 	pushTapsByDay,
+	roomInteractionsByDay,
 	summarizeAdoption,
 	utcDayOf,
 } from "../src/adoption-counters.ts";
 import type { RunReceipt, TransitionEntry } from "../src/types.ts";
+import type { ChannelEntry } from "../src/channels.ts";
 
 const D1_LATE = Date.UTC(2026, 6, 15, 23, 59, 59, 999); // 2026-07-15, last ms
 const D2_EARLY = Date.UTC(2026, 6, 16, 0, 0, 0, 1); // 2026-07-16, first ms
@@ -48,6 +50,10 @@ function receipt(over: Partial<RunReceipt> = {}): RunReceipt {
 
 function transition(over: Partial<TransitionEntry> = {}): TransitionEntry {
 	return { agentId: "chat-abc-1-dead", from: "idle", to: "working", reason: "turn-progress", at: D2_NOON, seq: crypto.randomUUID(), ...over };
+}
+
+function channelEntry(over: Partial<ChannelEntry> = {}): ChannelEntry {
+	return { id: crypto.randomUUID(), seq: 1, channelId: "fleet", authorActor: "web:lars", kind: "user", text: "ship it", ts: D2_NOON, status: "ok", ...over };
 }
 
 // ── the casual-marking convention ────────────────────────────────────────────────────────────────
@@ -138,17 +144,30 @@ test("every tap entry is one tap; invalid timestamps are dropped, never NaN-buck
 	expect(pushTapsByDay(taps)).toEqual({ "2026-07-15": 1, "2026-07-16": 1 });
 });
 
+// ── room interactions/day ────────────────────────────────────────────────────────────────────────
+
+test("room interactions count human posts and needs-you cards from the existing channel substrate", () => {
+	const entries = [
+		channelEntry(),
+		channelEntry({ kind: "system", event: { kind: "needs-you", payload: {} }, ts: D2_NOON + 1 }),
+		channelEntry({ kind: "system", event: { kind: "gate-verdict", payload: {} }, ts: D2_NOON + 2 }),
+		channelEntry({ ts: Number.NaN }),
+	];
+	expect(roomInteractionsByDay(entries)).toEqual({ "2026-07-16": 2 });
+});
+
 // ── merge + summary ──────────────────────────────────────────────────────────────────────────────
 
 test("mergeAdoptionCounters sums per day across managers", () => {
-	const a: AdoptionCounters = { casualSessionsByDay: { "2026-07-16": 1 }, promptsByDay: { "2026-07-16": 3 }, pushTapsByDay: {} };
-	const b: AdoptionCounters = { casualSessionsByDay: { "2026-07-16": 2, "2026-07-15": 1 }, promptsByDay: {}, pushTapsByDay: { "2026-07-16": 1 } };
+	const a: AdoptionCounters = { casualSessionsByDay: { "2026-07-16": 1 }, promptsByDay: { "2026-07-16": 3 }, pushTapsByDay: {}, roomInteractionsByDay: { "2026-07-16": 1 } };
+	const b: AdoptionCounters = { casualSessionsByDay: { "2026-07-16": 2, "2026-07-15": 1 }, promptsByDay: {}, pushTapsByDay: { "2026-07-16": 1 }, roomInteractionsByDay: { "2026-07-15": 2 } };
 	expect(mergeAdoptionCounters([a, b])).toEqual({
 		casualSessionsByDay: { "2026-07-16": 3, "2026-07-15": 1 },
 		promptsByDay: { "2026-07-16": 3 },
 		pushTapsByDay: { "2026-07-16": 1 },
+		roomInteractionsByDay: { "2026-07-16": 1, "2026-07-15": 2 },
 	});
-	expect(mergeAdoptionCounters([])).toEqual({ casualSessionsByDay: {}, promptsByDay: {}, pushTapsByDay: {} });
+	expect(mergeAdoptionCounters([])).toEqual({ casualSessionsByDay: {}, promptsByDay: {}, pushTapsByDay: {}, roomInteractionsByDay: {} });
 });
 
 test("summarizeAdoption reads today + a trailing 7-UTC-day window (day 7 is out)", () => {
@@ -158,6 +177,7 @@ test("summarizeAdoption reads today + a trailing 7-UTC-day window (day 7 is out)
 		casualSessionsByDay: Object.fromEntries(days.map((d) => [d, 1])), // 8 days seeded, 7 in window
 		promptsByDay: { [days[0]]: 4, [days[6]]: 2, [days[7]]: 100 }, // day 7 must NOT count
 		pushTapsByDay: { [days[1]]: 1 },
+		roomInteractionsByDay: { [days[0]]: 2, [days[6]]: 3, [days[7]]: 100 },
 	};
 	const s = summarizeAdoption(counters, now);
 	expect(s.day).toBe("2026-07-16");
@@ -167,12 +187,14 @@ test("summarizeAdoption reads today + a trailing 7-UTC-day window (day 7 is out)
 	expect(s.prompts7).toBe(6);
 	expect(s.pushTaps).toBe(0);
 	expect(s.pushTaps7).toBe(1);
+	expect(s.roomInteractions).toBe(2);
+	expect(s.roomInteractions7).toBe(5);
 });
 
 // ── the trust-boundary shape guard ───────────────────────────────────────────────────────────────
 
 test("isAdoptionCounters accepts the real shape and rejects impostors", () => {
-	expect(isAdoptionCounters({ casualSessionsByDay: {}, promptsByDay: { "2026-07-16": 1 }, pushTapsByDay: {} })).toBe(true);
+	expect(isAdoptionCounters({ casualSessionsByDay: {}, promptsByDay: { "2026-07-16": 1 }, pushTapsByDay: {}, roomInteractionsByDay: {} })).toBe(true);
 	expect(isAdoptionCounters(null)).toBe(false);
 	expect(isAdoptionCounters([])).toBe(false); // noFleet answers []
 	expect(isAdoptionCounters({ casualSessionsByDay: {}, promptsByDay: {} })).toBe(false); // missing field
@@ -199,11 +221,12 @@ test("computeAdoptionCounters loads all three durable sources and counts them", 
 		casualSessionsByDay: { "2026-07-16": 1 },
 		promptsByDay: { "2026-07-16": 2 },
 		pushTapsByDay: { "2026-07-16": 1 },
+		roomInteractionsByDay: {},
 	});
 });
 
 test("an empty state dir answers honest zeros, not a throw", async () => {
-	expect(await computeAdoptionCounters(scratchStateDir())).toEqual({ casualSessionsByDay: {}, promptsByDay: {}, pushTapsByDay: {} });
+	expect(await computeAdoptionCounters(scratchStateDir())).toEqual({ casualSessionsByDay: {}, promptsByDay: {}, pushTapsByDay: {}, roomInteractionsByDay: {} });
 });
 
 test("live rings fold in without double-counting what already spooled to disk", async () => {
@@ -221,6 +244,7 @@ test("live rings fold in without double-counting what already spooled to disk", 
 	});
 	expect(counters.promptsByDay).toEqual({ "2026-07-16": 2 });
 	expect(counters.pushTapsByDay).toEqual({ "2026-07-16": 2 });
+	expect(counters.roomInteractionsByDay).toEqual({});
 });
 
 test("a rotated .1 tail still counts (JsonlLog rotation must not amputate history)", async () => {

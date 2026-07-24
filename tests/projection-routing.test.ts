@@ -189,6 +189,10 @@ test("pending request and room card are one needs-you substrate and both resolve
 	if (!isEventPayload(opened.event?.payload)) throw new Error("bad open payload");
 	expect(opened.event.payload.face.pendingStatus).toBe("pending");
 	expect(opened.event.payload.face.pendingId).toBe("req-1");
+	const openedDay = new Date(opened.ts).toISOString().slice(0, 10);
+	expect((await mgr.adoptionCounters()).roomInteractionsByDay[openedDay]).toBe(1);
+	await mgr.appendChannelPost("ops", LOCAL_ACTOR, { text: "room steering" });
+	expect((await mgr.adoptionCounters()).roomInteractionsByDay[openedDay]).toBe(2);
 
 	const resolvedCard = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === "needs-you" && isEventPayload(entry.event.payload) && entry.event.payload.face.pendingStatus === "resolved");
 	await mgr.applyCommand({ type: "answer", id: dto.id, requestId: "req-1", value: "yes" }, LOCAL_ACTOR);

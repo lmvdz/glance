@@ -16,15 +16,16 @@ import { buildAdoptionView, type FrictionEntryWire } from '../lib/adoption-view'
 const NOW = Date.UTC(2026, 6, 17, 12, 0, 0);
 
 describe('AdoptionCounters', () => {
-  test('with activity: three labeled tiles lead with the 7-day total, today demoted to the sub-line', () => {
+  test('with activity: four labeled tiles lead with the 7-day total, today demoted to the sub-line', () => {
     const view = buildAdoptionView(
-      { casualSessionsByDay: { '2026-07-17': 3 }, promptsByDay: { '2026-07-17': 5 }, pushTapsByDay: { '2026-07-16': 2 } },
+      { casualSessionsByDay: { '2026-07-17': 3 }, promptsByDay: { '2026-07-17': 5 }, pushTapsByDay: { '2026-07-16': 2 }, roomInteractionsByDay: { '2026-07-17': 4 } },
       NOW,
     );
     const html = renderToStaticMarkup(<AdoptionCounters view={view} />);
     expect(html).toContain('Casual sessions');
     expect(html).toContain('Prompts');
     expect(html).toContain('Push taps');
+    expect(html).toContain('Room interactions');
     // The headline is the 7-day total (a bare "today" resets to 0 at UTC midnight and reads as a dead
     // panel); today is the sub-line. Push taps: 2 this week despite 0 today — the honest 0 is demoted,
     // never dressed as the dominant signal.

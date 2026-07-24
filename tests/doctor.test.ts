@@ -28,7 +28,7 @@ function probe(over: Partial<DoctorProbe> = {}): DoctorProbe {
 		webappBuilt: async () => true,
 		harnessHooks: async () => [{ harness: "claude-code", ok: true, detail: "all 4 hooks registered" }],
 		zombieAgents: async () => 0,
-		adoption: async () => ({ casualSessionsByDay: {}, promptsByDay: {}, pushTapsByDay: {} }),
+		adoption: async () => ({ casualSessionsByDay: {}, promptsByDay: {}, pushTapsByDay: {}, roomInteractionsByDay: {} }),
 		symptoms: async () => [],
 		...over,
 	};
@@ -413,7 +413,7 @@ test("the gate check names the image the gate will actually use", async () => {
 test("adoption counters render today's and the 7-day numbers, and zeros stay ok", async () => {
 	const day = new Date().toISOString().slice(0, 10);
 	const report = await runDoctor(probe({
-		adoption: async () => ({ casualSessionsByDay: { [day]: 2 }, promptsByDay: { [day]: 9 }, pushTapsByDay: {} }),
+		adoption: async () => ({ casualSessionsByDay: { [day]: 2 }, promptsByDay: { [day]: 9 }, pushTapsByDay: {}, roomInteractionsByDay: { [day]: 1 } }),
 	}));
 	const check = find(report, "adoption");
 	expect(check?.status).toBe("ok");

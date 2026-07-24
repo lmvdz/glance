@@ -10695,9 +10695,12 @@ export class SquadManager extends EventEmitter {
 
 	/** Adoption counters (plans/daily-dogfood-engine/02) from this manager's own durable stateDir
 	 *  data, with the in-memory rings folded in so a just-recorded tap/transition is visible before
-	 *  its fire-and-forget spool lands (the GET /api/adoption read-your-write case). */
-	adoptionCounters(): Promise<AdoptionCounters> {
-		return computeAdoptionCounters(this.stateDir, { transitions: this.transitionLog.recent(), pushTaps: this.pushTapLog.recent() });
+	 *  its fire-and-forget spool lands (the GET /api/adoption read-your-write case). Room interactions
+	 *  come from the existing channel substrate; no parallel counter store. */
+	async adoptionCounters(): Promise<AdoptionCounters> {
+		const channels = await this.channelStore.listChannels();
+		const channelEntries = (await Promise.all(channels.map((channel) => this.channelStore.entries(channel.id, 0)))).flat();
+		return computeAdoptionCounters(this.stateDir, { transitions: this.transitionLog.recent(), pushTaps: this.pushTapLog.recent(), channelEntries });
 	}
 
 	/** One tick so in-flight agent-host ring-replay frames (synchronous `.emit()` calls inside a
