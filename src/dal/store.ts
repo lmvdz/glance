@@ -154,7 +154,7 @@ export interface Store {
 	putChannel(channel: Channel): Promise<void>;
 	listChannelEntries(channelId: string, since?: number): Promise<ChannelEntry[]>;
 	searchChannelEntries?(q: string, limit?: number, offset?: number): Promise<ChannelSearchResult[]>;
-	appendChannelEntry(entry: ChannelEntry): Promise<void>;
+	appendChannelEntry(entry: Omit<ChannelEntry, "seq">): Promise<ChannelEntry>;
 	nextChannelSeq(channelId: string): Promise<number>;
 	listChannelMemberships(channelId: string): Promise<ChannelMembership[]>;
 	putChannelMembership(row: ChannelMembership): Promise<void>;
@@ -190,6 +190,7 @@ export class FileStore implements Store {
 	private saveFailureCount = 0;
 	private lastSaveWarnAt = 0;
 	private static readonly channelWriteLocks = new Map<string, Promise<void>>();
+	private static readonly channelEntryWriteLocks = new Map<string, Promise<void>>();
 	constructor(private readonly stateDir: string) {
 		this.stateFile = path.join(stateDir, "state.json");
 		this.feedbackFile = path.join(stateDir, "feedback.json");
@@ -330,8 +331,21 @@ export class FileStore implements Store {
 	}
 
 
-	async appendChannelEntry(entry: ChannelEntry): Promise<void> {
-		await getStorageBackend().appendDurable(path.join(this.stateDir, "channels.jsonl"), `${JSON.stringify(entry)}\n`);
+	async appendChannelEntry(entry: Omit<ChannelEntry, "seq">): Promise<ChannelEntry> {
+		const file = path.join(this.stateDir, "channels.jsonl");
+		const prior = FileStore.channelEntryWriteLocks.get(file)?.catch(() => {}) ?? Promise.resolve();
+		let release!: () => void;
+		const next = prior.then(() => new Promise<void>((resolve) => { release = resolve; }));
+		FileStore.channelEntryWriteLocks.set(file, next);
+		await prior;
+		try {
+			const persisted = { ...entry, seq: (await this.nextChannelSeq(entry.channelId)) + 1 };
+			await getStorageBackend().appendDurable(file, `${JSON.stringify(persisted)}\n`);
+			return persisted;
+		} finally {
+			release();
+			if (FileStore.channelEntryWriteLocks.get(file) === next) FileStore.channelEntryWriteLocks.delete(file);
+		}
 	}
 
 	async nextChannelSeq(channelId: string): Promise<number> {
@@ -666,8 +680,19 @@ export class DbStore implements Store {
 	}
 
 
-	async appendChannelEntry(entry: ChannelEntry): Promise<void> {
-		await withOrg(this.ctx, this.orgId, (trx) => trx.insertInto("channel_entries").values({ org_id: this.orgId, channel_id: entry.channelId, id: entry.id, seq: entry.seq, author_actor: entry.authorActor, reply_to_id: entry.replyToId ?? null, ts: entry.ts, data: JSON.stringify(entry) }).execute());
+	async appendChannelEntry(entry: Omit<ChannelEntry, "seq">): Promise<ChannelEntry> {
+		for (let attempt = 0; ; attempt++) {
+			try {
+				return await withOrg(this.ctx, this.orgId, async (trx) => {
+					const row = await trx.selectFrom("channel_entries").select(({ fn }) => fn.max("seq").as("seq")).where("org_id", "=", this.orgId).where("channel_id", "=", entry.channelId).executeTakeFirst();
+					const persisted = { ...entry, seq: Number(row?.seq ?? 0) + 1 };
+					await trx.insertInto("channel_entries").values({ org_id: this.orgId, channel_id: persisted.channelId, id: persisted.id, seq: persisted.seq, author_actor: persisted.authorActor, reply_to_id: persisted.replyToId ?? null, ts: persisted.ts, data: JSON.stringify(persisted) }).execute();
+					return persisted;
+				});
+			} catch (err) {
+				if (attempt >= 2 || !(err instanceof Error && /unique constraint|duplicate key/i.test(err.message))) throw err;
+			}
+		}
 	}
 
 	async nextChannelSeq(channelId: string): Promise<number> {

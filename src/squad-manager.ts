@@ -1121,6 +1121,8 @@ export class SquadManager extends EventEmitter {
 	private readonly unverifiedProofEscalated = new Set<string>();
 	/** Per-agent count of auto-supervised answers spent this run (OMP_SQUAD_AUTOSUPERVISE attempt budget). */
 	private readonly superviseBudget = new Map<string, number>();
+	/** Manager card projections that exhausted ChannelStore's bounded append retry. */
+	private projectionFailures = 0;
 	/** Per-agent count of advisory peer messages spent this run (OMP_SQUAD_PEERMSG_BUDGET). */
 	private readonly peerMessageBudget = new Map<string, number>();
 	/** Agent ids the daemon reattached to (surviving hosts) this run. */
@@ -9909,6 +9911,7 @@ export class SquadManager extends EventEmitter {
 			liveArmed,
 			activeAgents: occupyingAgents(this.list()),
 			persistFailures: this.store.saveFailures?.() ?? 0,
+			projectionFailures: this.projectionFailures,
 			// Shadow-exit surface (adw-factory-borrows concern 09): raw events, not rollup rows — the
 			// scoreboard needs a JOINT filter (e.g. mode=shadow AND action=ask/deny) a per-tag-key rollup
 			// breakdown can't answer. Same window every other row on this strip uses.
@@ -11628,7 +11631,8 @@ export class SquadManager extends EventEmitter {
 			});
 			this.emit("event", { type: "channel-entry", channelId, entry: card } satisfies SquadEvent);
 		} catch (err) {
-			this.log("warn", `projection ${rec.dto.id}/${event.kind} → ${channelId} failed: ${errText(err)}`);
+			this.projectionFailures++;
+			this.log("warn", `projection ${rec.dto.id}/${event.kind} → ${channelId} failed (${this.projectionFailures} total): ${errText(err)}`);
 		}
 	}
 
