@@ -3484,11 +3484,7 @@ export class SquadServer {
 
 	private async deliverEvent(orgId: string | undefined, e: SquadEvent): Promise<void> {
 		const manager = orgId ? this.orgManager(orgId) : this.singleManager;
-		if (!orgId) {
-			if (e.type === "roster" && manager) void this.sendRosterSnapshot(undefined, manager);
-			else if (e.type !== "removed" && e.type !== "log" && e.type !== "command-ack") this.broadcastAll(e);
-			return;
-		}
+		if (!orgId && e.type !== "roster" && e.type !== "removed" && e.type !== "log" && e.type !== "command-ack") this.maybePushAlert(e);
 		if (e.type === "channel-entry") {
 			if (!manager) return;
 			const members = typeof manager.channelMemberUserIds === "function" ? await manager.channelMemberUserIds(e.channelId) : undefined;
