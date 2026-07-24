@@ -11489,6 +11489,26 @@ export class SquadManager extends EventEmitter {
 		return text.length > 200 ? `${text.slice(0, 199)}…` : text;
 	}
 
+	/**
+	 * The error CLASS for a failure card — a label a human can scan, never the first word of a
+	 * sentence.
+	 *
+	 * The previous rule took `/^[A-Za-z_$][\w$]*(?:Error)?/` off the raw message, which is right for a
+	 * thrown `TypeError: ...` and useless for the human-readable strings this daemon actually produces:
+	 * "agent doc-greet-… not ready within 4945ms" rendered as a card whose whole body read **"agent"**.
+	 * Found by booting the room and looking at it, not by a test.
+	 *
+	 * So: take the leading token only when it genuinely looks like an error class (`FooError`, or a
+	 * `Foo:`-prefixed throw). Otherwise the transition's own `reason` is the honest class, and the
+	 * message rides in `detail` where the door can show it in full.
+	 */
+	private failureClass(entry: TransitionEntry): string {
+		const raw = typeof entry.cause?.error === "string" ? entry.cause.error.trim() : "";
+		if (!raw) return entry.reason;
+		const leading = /^([A-Za-z_$][\w$]*)(Error\b|:)/.exec(raw);
+		return leading ? (leading[2] === ":" ? leading[1]! : `${leading[1]}${leading[2]}`) : entry.reason;
+	}
+
 	/** Project a card to the unit's room channel WITHOUT writing a row into the unit's transcript.
 	 *  The synthetic entry carries no `id`, so `projectionRefs` correctly omits `entryId` — there is no
 	 *  transcript row to link back to, and claiming one would be a dead reference in the card's door. */
@@ -11730,11 +11750,19 @@ export class SquadManager extends EventEmitter {
 			tone = "success";
 			payload.summary = [...rec.transcript].reverse().find((item) => item.kind === "assistant")?.text;
 		} else if (entry.to === "error") {
+			// ONE card per failure, not one per error transition. A failing unit re-enters `error`
+			// repeatedly (retry, reattach, a supervisor re-marking it), and every one of those is the SAME
+			// failure. Booting the room found a single spawn timeout producing five identical "Unit
+			// failed" cards — the firehose shape concern 26 had to be filed to clean up, reappearing
+			// inside the concern meant to prevent it. The volume test missed it because it drives an
+			// ordinary happy-path cycle, where a unit enters `error` at most once.
+			if (entry.from === "error") return;
 			kind = TRANSCRIPT_EVENT_UNIT_FAILED;
 			title = `Unit failed · ${this.safeEventLabel(rec.dto.name)}`;
 			eyebrow = "Needs review";
 			tone = "destructive";
-			payload.errorClass = typeof entry.cause?.error === "string" ? (/^[A-Za-z_$][\w$]*(?:Error)?/.exec(entry.cause.error.trim())?.[0] ?? entry.reason) : entry.reason;
+			payload.errorClass = this.failureClass(entry);
+			payload.detail = typeof entry.cause?.error === "string" ? truncateLabel(entry.cause.error.trim(), 200) : undefined;
 		} else if (entry.reason === "pr-open") {
 			kind = TRANSCRIPT_EVENT_PR_OPENED;
 			title = `PR opened · ${this.safeEventLabel(rec.dto.name)}`;

@@ -442,6 +442,53 @@ test("ordinary unit lifecycle projects a bounded five-card cycle from transition
 	expect(cards).toHaveLength(5);
 });
 
+test("a unit that keeps re-entering error projects ONE failure card, not one per transition", async () => {
+	// Found by booting the room, not by a test: a single spawn timeout produced FIVE identical
+	// "Unit failed" cards, because a failing unit re-enters `error` on every retry/reattach and each
+	// one projected. That is the firehose shape concern 26 had to be filed to clean up, reappearing
+	// inside the concern meant to prevent it. The happy-path volume test above cannot see it — there,
+	// a unit enters `error` at most once.
+	const { mgr, agent } = await startedPrivateAgentServer("lifecycle-repeat-error-");
+	const record = (mgr.agents as Map<string, unknown>).get(agent.id);
+	if (!record) throw new Error("seed agent missing");
+	const host = mgr as unknown as TransitionHost;
+
+	const cards: ChannelEntry[] = [];
+	const collect = (event: SquadEvent) => {
+		if (event.type === "channel-entry" && event.entry.event?.kind === TRANSCRIPT_EVENT_UNIT_FAILED) cards.push(event.entry);
+	};
+	mgr.on("event", collect);
+
+	const first = waitForChannelEntry(mgr, "ops", (item) => item.event?.kind === TRANSCRIPT_EVENT_UNIT_FAILED);
+	host.transition(record, "error", "fail", { error: "agent unit-private not ready within 4945ms" });
+	await first;
+	// Four more error→error transitions: the same failure, re-marked.
+	for (let i = 0; i < 4; i++) host.transition(record, "error", "fail", { error: "agent unit-private not ready within 4945ms" });
+	await Bun.sleep(150);
+	mgr.off("event", collect);
+
+	expect(cards).toHaveLength(1);
+
+	// And the class must be a label a human can scan. The old rule took the leading token off the raw
+	// message, so this exact string rendered a card whose entire body read "agent".
+	const payload = (cards[0]!.event!.payload ?? {}) as { face?: { body?: string }; errorClass?: string };
+	const face = payload.face ?? {};
+	expect(face.body).not.toBe("agent");
+	expect(face.body).toBe("fail");
+});
+
+test("a thrown error still yields its real class, not the transition reason", async () => {
+	const { mgr, agent } = await startedPrivateAgentServer("lifecycle-thrown-error-");
+	const record = (mgr.agents as Map<string, unknown>).get(agent.id);
+	if (!record) throw new Error("seed agent missing");
+	const host = mgr as unknown as TransitionHost;
+	const projected = waitForChannelEntry(mgr, "ops", (item) => item.event?.kind === TRANSCRIPT_EVENT_UNIT_FAILED);
+	host.transition(record, "error", "fail", { error: "TypeError: m.visibleAgents is not a function" });
+	const card = await projected;
+	const face = ((card.event!.payload ?? {}) as { face?: { body?: string } }).face ?? {};
+	expect(face.body).toBe("TypeError");
+});
+
 test("WS subscribe after membership revocation replays no transcript frames", async () => {
 	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "ws-revoked-subscribe-"));
 	const mgr = new SquadManager({ stateDir });
