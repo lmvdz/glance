@@ -17,6 +17,10 @@ const iconClass: Record<ChannelCardView['kind'], typeof ShieldAlert> = {
   'needs-you': ShieldAlert,
   'gate-verdict': CheckCircle2,
   'land-merge': GitMerge,
+  'mention-steer': CircleDot,
+  'mention-confirm-required': ShieldAlert,
+  'mention-steer-failed': AlertCircle,
+  'spawn-proposal': CircleDot,
   'unknown-event': CircleDot,
 };
 

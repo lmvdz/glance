@@ -1,7 +1,7 @@
 import type { ChannelEntry } from './dto';
 
 export type ChannelCardTone = 'neutral' | 'info' | 'warning' | 'success' | 'destructive';
-export type ChannelCardKind = 'message' | 'needs-you' | 'gate-verdict' | 'land-merge' | 'unknown-event';
+export type ChannelCardKind = 'message' | 'needs-you' | 'gate-verdict' | 'land-merge' | 'mention-steer' | 'mention-confirm-required' | 'mention-steer-failed' | 'spawn-proposal' | 'unknown-event';
 
 export interface PointerCardFace {
   title: string;
@@ -26,7 +26,7 @@ export interface ChannelCardView {
   pinned: Array<{ label: string; value: string }>;
 }
 
-const POINTER_EVENT_KINDS: Record<string, true> = { 'needs-you': true, 'gate-verdict': true, 'land-merge': true };
+const POINTER_EVENT_KINDS: Record<string, true> = { 'needs-you': true, 'gate-verdict': true, 'land-merge': true, 'mention-steer': true, 'mention-confirm-required': true, 'mention-steer-failed': true, 'spawn-proposal': true };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -56,6 +56,9 @@ function toneFor(kind: string, face?: PointerCardFace): ChannelCardTone {
   if (kind === 'needs-you') return 'warning';
   if (kind === 'gate-verdict') return face?.status === 'pass' || face?.status === 'approved' ? 'success' : face?.status === 'fail' || face?.status === 'veto' ? 'destructive' : 'info';
   if (kind === 'land-merge') return face?.status === 'merged' || face?.status === 'landed' ? 'success' : 'info';
+  if (kind === 'mention-confirm-required') return 'warning';
+  if (kind === 'mention-steer-failed') return 'destructive';
+  if (kind === 'spawn-proposal' || kind === 'mention-steer') return 'info';
   return 'neutral';
 }
 

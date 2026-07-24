@@ -157,7 +157,9 @@ export interface TriggerSource<T> {
   search: (query: string) => T[];
   getId: (item: T) => string;
   getLabel: (item: T) => string;
+  getReplacement?: (item: T) => string;
 }
+
 
 export interface UseTriggerMenuResult<T> {
   isOpen: boolean;
@@ -249,7 +251,7 @@ export function useTriggerMenu<T>(
     const el = textareaRef.current;
     if (!el || state.start === null || !activeSource) return;
     const caret = el.selectionStart ?? state.start + state.query.length + 1;
-    const nextValue = insertCompletion(el, state.start, caret, activeSource.getLabel(item));
+    const nextValue = insertCompletion(el, state.start, caret, (activeSource.getReplacement ?? activeSource.getLabel)(item));
     setState(CLOSED_MENU_STATE);
     onInserted?.(nextValue);
   }, [state.start, state.query, activeSource, textareaRef, onInserted]);

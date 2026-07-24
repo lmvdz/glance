@@ -16,6 +16,7 @@ import { isSpeechRecognitionSupported, startVoiceInput, type VoiceInputSession }
 import { DRAFT_PERSIST_DEBOUNCE_MS, loadDraft, persistDraft, type DraftV1 } from '../../lib/chat/draftStore';
 import { VoiceCallButton } from './VoiceCallButton';
 import type { AgentDTO } from '../../lib/dto';
+import { buildMentionSections, flattenMentionSections, mentionLabel, serializeMention, type MentionTarget } from '../../lib/mentionGrammar';
 import type { Task } from '../../types';
 
 // Declared state-relocation (concern 09 — monolith split, DESIGN.md "Monolith
@@ -336,6 +337,7 @@ export const Composer = ({
   modelOptions,
   onModelChange,
   agent,
+  agents = [],
   placeholder,
   focusKey,
   voiceCallEnabled = false,
@@ -360,6 +362,7 @@ export const Composer = ({
   modelOptions: ModelOption[];
   onModelChange: (model: string) => void;
   agent?: AgentDTO;
+  agents?: AgentDTO[];
   /** Override the textarea's placeholder — e.g. a blocked agent's pending-request placeholder, so
    *  the composer visibly becomes the answer box for it (Fleet view §6b's "Composer prefilled for
    *  free text": the request's own context primes the field's label rather than literal guessed
@@ -625,14 +628,15 @@ export const Composer = ({
   // `@`-mention combobox — caret-anchored via the composer textarea's real selection, not a
   // split(' ') heuristic. Task filtering stays synchronous over `tasks`; the `triggers` array
   // is extensible so a future `/` command menu slots in beside it.
-  const mentionTriggers = useMemo<TriggerSource<Task>[]>(() => [
+  const mentionTriggers = useMemo<TriggerSource<MentionTarget>[]>(() => [
     {
       trigger: '@',
-      search: (query) => tasks.filter((t) => t.title.toLowerCase().includes(query.toLowerCase())),
-      getId: (t) => t.id,
-      getLabel: (t) => t.title,
+      search: (query) => flattenMentionSections(buildMentionSections(agents, tasks, query)),
+      getId: (item) => `${item.kind}:${item.id}`,
+      getLabel: mentionLabel,
+      getReplacement: serializeMention,
     },
-  ], [tasks]);
+  ], [agents, tasks]);
   const mentionMenu = useTriggerMenu(composerTextareaRef, mentionTriggers, setInput);
 
   // Auto-grow: track content height up to the 8-line cap, then scroll. Runs on every `input`
@@ -866,25 +870,33 @@ export const Composer = ({
           <div
             id={mentionMenu.listboxId}
             role="listbox"
-            aria-label="Mention a task"
+            aria-label="Mention an agent or issue"
             className="absolute bottom-full left-0 mb-2 w-full max-h-48 overflow-y-auto bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl shadow-lg z-50"
           >
             <div className="p-2 text-xs font-medium text-gray-500 border-b border-gray-200 dark:border-gray-800">
-              Mention a task
+              Mention an agent or issue
             </div>
             {/* `mentionMenu.isOpen` is only true when there's at least one match — a
                 zero-match session renders nothing (see useTriggerMenu's `visiblyOpen`)
                 rather than showing a "No matching tasks" popup that hijacks the keyboard. */}
-            {mentionMenu.items.map((task, index) => (
-              <button
-                key={task.id}
-                type="button"
-                {...mentionMenu.getOptionProps(index)}
-                className={`w-full text-left px-3 py-2 text-sm transition-colors flex items-center gap-2 ${index === mentionMenu.activeIndex ? 'bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100' : 'text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800'}`}
-              >
-                <span className="w-2 h-2 rounded-full" style={{ backgroundColor: task.status === 'done' ? '#10b981' : '#3b82f6' }}></span>
-                {task.title}
-              </button>
+            {buildMentionSections(agents, tasks, mentionMenu.query).map((section) => section.items.length > 0 && (
+              <div key={section.id} data-mention-section={section.id}>
+                <div className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-gray-400">{section.label}</div>
+                {section.items.map((item) => {
+                  const index = mentionMenu.items.findIndex((candidate) => candidate.kind === item.kind && candidate.id === item.id);
+                  return (
+                    <button
+                      key={`${item.kind}:${item.id}`}
+                      type="button"
+                      {...mentionMenu.getOptionProps(index)}
+                      className={`w-full text-left px-3 py-2 text-sm transition-colors flex items-center gap-2 ${index === mentionMenu.activeIndex ? 'bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100' : 'text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800'}`}
+                    >
+                      <span className="w-2 h-2 rounded-full" style={{ backgroundColor: item.kind === 'agent' ? (item.status === 'working' ? '#f59e0b' : item.status === 'input' || item.status === 'idle' ? '#10b981' : '#64748b') : '#3b82f6' }}></span>
+                      <span className="truncate">{mentionLabel(item)}</span>
+                    </button>
+                  );
+                })}
+              </div>
             ))}
           </div>
         )}
