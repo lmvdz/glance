@@ -1,6 +1,7 @@
 import React from 'react';
 import { CheckCircle2, ExternalLink, ShieldAlert } from 'lucide-react';
 import { apiJson } from '../../lib/api';
+import { entryTimeLabel } from '../../lib/hub';
 import { gateVerdictHref, workbenchHref } from '../../lib/router';
 import type { ChannelCardTone, ChannelCardView } from '../../lib/channelTimeline';
 import type { ValidationRecordDTO } from '../../lib/dto';
@@ -76,7 +77,7 @@ export function GateVerdictCard({ view }: { view: ChannelCardView }) {
 
   return (
     <li data-entry-id={view.id} className="group flex justify-start">
-      <article className={`w-full max-w-2xl rounded-2xl border px-3 py-3 text-sm shadow-sm transition-[border-color,background-color,transform] duration-200 hover:-translate-y-0.5 ${toneClass[view.tone]}`}>
+      <article className={`w-full rounded-2xl border px-3 py-3 text-sm shadow-sm transition-[border-color,background-color,transform] duration-200 hover:-translate-y-0.5 ${toneClass[view.tone]}`}>
         <div className="flex items-start gap-3">
           <div className="mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full border border-current/20 bg-black/20">
             {verdict === 'veto' ? <ShieldAlert className="h-4 w-4" aria-hidden /> : <CheckCircle2 className="h-4 w-4" aria-hidden />}
@@ -86,7 +87,7 @@ export function GateVerdictCard({ view }: { view: ChannelCardView }) {
               {view.eyebrow ? <span className="text-[10px] font-medium uppercase tracking-[0.14em] opacity-60">{view.eyebrow}</span> : null}
               <span className="rounded-full bg-current/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.12em] opacity-80">gate verdict</span>
               <span className="text-[10px] uppercase tracking-[0.14em] opacity-55">{view.authorLabel}</span>
-              <span className="text-[10px] tabular-nums opacity-50">#{view.entry.seq}</span>
+              <time dateTime={new Date(view.entry.ts).toISOString()} className="text-[10px] tabular-nums opacity-50">{entryTimeLabel(view.entry.ts)}</time>
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-2">
               <h3 className="text-sm font-semibold tracking-tight">{view.title}</h3>

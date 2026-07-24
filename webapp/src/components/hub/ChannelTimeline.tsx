@@ -1,7 +1,8 @@
 import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertCircle, CheckCircle2, CircleDot, FileText, Flame, GitMerge, Hash, Reply, ShieldAlert } from 'lucide-react';
 import type { ChannelEntry } from '../../lib/dto';
-import { buildChannelThreadViews, type ChannelCardTone, type ChannelCardView } from '../../lib/channelTimeline';
+import { buildChannelThreadViews, doorLabel, type ChannelCardTone, type ChannelCardView } from '../../lib/channelTimeline';
+import { entryTimeLabel } from '../../lib/hub';
 import { hubHref } from '../../lib/router';
 import { channelScrollAfterRowsChange, channelScrollAfterUserScroll, initialChannelScrollState, type ChannelScrollState } from '../../lib/channelScroll';
 import { GateVerdictCard } from './GateVerdictCard';
@@ -63,7 +64,7 @@ const ChannelTimelineRow = memo(function ChannelTimelineRow({ view, onReply }: {
         <article className={`max-w-[80%] rounded-2xl border px-3 py-2 text-sm leading-6 transition-colors duration-200 ${user ? 'border-zinc-700 bg-zinc-800 text-zinc-100 hover:bg-zinc-750' : toneClass.neutral}`}>
           <div className="mb-1 flex items-center gap-2 text-[10px] uppercase tracking-[0.14em] text-zinc-500 opacity-80 transition-opacity duration-200 group-hover:opacity-100">
             <span>{view.authorLabel}</span>
-            <span className="tabular-nums">#{view.entry.seq}</span>
+            <time dateTime={new Date(view.entry.ts).toISOString()} className="tabular-nums">{entryTimeLabel(view.entry.ts)}</time>
           </div>
           {view.replyContext ? (
             <a href={hubHref(view.replyContext.channelId, view.replyContext.id)} className="mb-2 block rounded-xl border border-zinc-700/70 bg-black/20 px-2 py-1.5 text-xs text-zinc-400 hover:text-zinc-200 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900">
@@ -90,38 +91,9 @@ const ChannelTimelineRow = memo(function ChannelTimelineRow({ view, onReply }: {
     );
   }
   if (view.kind === 'gate-verdict') return <GateVerdictCard view={view} />;
-  const cardClassName = `block w-full max-w-2xl rounded-2xl border px-3 py-3 text-left text-sm shadow-sm transition-[border-color,background-color,transform] duration-200 hover:-translate-y-0.5 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 ${toneClass[view.tone]}`;
-  const cardContent = (
-    <div className="flex items-start gap-3">
-      <div className="mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full border border-current/20 bg-black/20">
-        <Icon className="h-4 w-4" aria-hidden />
-      </div>
-      <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-center gap-2">
-          {view.eyebrow ? <span className="text-[10px] font-medium uppercase tracking-[0.14em] opacity-60">{view.eyebrow}</span> : null}
-          <span className="rounded-full bg-current/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.12em] opacity-80">{view.kind}</span>
-          <span className="text-[10px] uppercase tracking-[0.14em] opacity-55">{view.authorLabel}</span>
-          <span className="text-[10px] tabular-nums opacity-50">#{view.entry.seq}</span>
-        </div>
-        <h3 className="mt-1 text-sm font-semibold tracking-tight">{view.title}</h3>
-        <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-6 opacity-85">{view.body}</p>
-        {view.pinned.length ? (
-          <dl className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
-            {view.pinned.map((item) => (
-              <div key={item.label} className="rounded-lg border border-current/10 bg-black/10 px-2 py-1.5">
-                <dt className="text-[10px] uppercase tracking-[0.12em] opacity-50">{item.label}</dt>
-                <dd className="mt-0.5 truncate text-xs font-medium">{item.value}</dd>
-              </div>
-            ))}
-          </dl>
-        ) : null}
-        {view.detail ? <p className="mt-2 text-xs leading-5 opacity-60">{view.detail}</p> : null}
-      </div>
-    </div>
-  );
   return (
     <li data-entry-id={view.id} className="group flex justify-start">
-      <article className={`w-full max-w-2xl rounded-2xl border px-3 py-3 text-sm shadow-sm transition-[border-color,background-color,transform] duration-200 hover:-translate-y-0.5 ${toneClass[view.tone]}`}>
+      <article className={`w-full rounded-2xl border px-3 py-3 text-sm shadow-sm transition-[border-color,background-color,transform] duration-200 hover:-translate-y-0.5 ${toneClass[view.tone]}`}>
         <div className="flex items-start gap-3">
           <div className="mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full border border-current/20 bg-black/20">
             <Icon className="h-4 w-4" aria-hidden />
@@ -131,14 +103,14 @@ const ChannelTimelineRow = memo(function ChannelTimelineRow({ view, onReply }: {
               {view.eyebrow ? <span className="text-[10px] font-medium uppercase tracking-[0.14em] opacity-60">{view.eyebrow}</span> : null}
               <span className="rounded-full bg-current/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.12em] opacity-80">{view.kind}</span>
               <span className="text-[10px] uppercase tracking-[0.14em] opacity-55">{view.authorLabel}</span>
-              <span className="text-[10px] tabular-nums opacity-50">#{view.entry.seq}</span>
+              <time dateTime={new Date(view.entry.ts).toISOString()} className="text-[10px] tabular-nums opacity-50">{entryTimeLabel(view.entry.ts)}</time>
             </div>
             {(view.actionHref ?? view.href) ? (
               <a href={view.actionHref ?? view.href} className="mt-1 block text-sm font-semibold tracking-tight underline-offset-4 hover:underline focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900">{view.title}</a>
             ) : (
               <h3 className="mt-1 text-sm font-semibold tracking-tight">{view.title}</h3>
             )}
-            <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-6 opacity-85">{view.body}</p>
+            {view.body ? <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-6 opacity-85">{view.body}</p> : null}
             {view.pinned.length ? (
               <dl className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
                 {view.pinned.map((item) => (
@@ -155,7 +127,7 @@ const ChannelTimelineRow = memo(function ChannelTimelineRow({ view, onReply }: {
                 href={view.href}
                 className="mt-3 inline-flex min-h-10 items-center justify-center rounded-full border border-current/15 bg-current/10 px-3 text-xs font-semibold transition-[background-color,border-color] hover:bg-current/15 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900"
               >
-                Open plan DAG
+                {doorLabel(view.kind)}
               </a>
             ) : null}
           </div>
@@ -205,7 +177,7 @@ export function ChannelTimeline({ entries, loading, error, anchorEntryId, onRepl
 
   return (
     <div ref={scrollerRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto bg-[#09090a]" data-scroll-mode={scrollStateRef.current.mode}>
-      {loading ? <LoadingTimeline /> : error ? <div className="m-4 flex items-center gap-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200" role="alert"><AlertCircle className="h-4 w-4" aria-hidden /> {error}</div> : stableRows.length === 0 ? <EmptyTimeline /> : <ol className="space-y-3 p-4 pb-10">{stableRows.map((view) => <ChannelTimelineRow key={view.id} view={view} onReply={onReply} />)}</ol>}
+      {loading ? <LoadingTimeline /> : error ? <div className="m-4 flex items-center gap-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200" role="alert"><AlertCircle className="h-4 w-4" aria-hidden /> {error}</div> : stableRows.length === 0 ? <EmptyTimeline /> : <ol className="mx-auto w-full max-w-4xl space-y-3 p-4 pb-10">{stableRows.map((view) => <ChannelTimelineRow key={view.id} view={view} onReply={onReply} />)}</ol>}
     </div>
   );
 }

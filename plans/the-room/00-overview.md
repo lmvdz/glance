@@ -40,6 +40,9 @@ directive; ordering, not deferral, carries the discipline.
 | [22 daily-driver-convergence](22-daily-driver-convergence.md) | glance-here threads in rail; needs-you cards ride push latch (B-F8) | mechanical | webapp rail, src/server.ts push path |
 | [23 love-gate](23-love-gate.md) | Lars's acceptance run on the whole room (t3-face-13 protocol re-targeted) | research | scratch-daemon + agent-browser rig |
 | [24 supersessions-amendment](24-supersessions-amendment.md) | DIRECTION.md amendment; close hub-shell/t3-face-13; buzz-borrows disposition | mechanical | DIRECTION.md, plans/hub-shell, plans/t3-face, plans/buzz-borrows |
+| [25 channel-seq-atomicity](25-channel-seq-atomicity.md) | DEFECT in 01: seq is read-then-written with no lock — 19% of live #fleet rows collide; DB mode drops the write outright | mechanical | src/channels.ts, src/dal/store.ts, tests |
+| [26 room-signal-and-craft](26-room-signal-and-craft.md) | DEFECT in 12/08: #fleet was 544 cards, 100% tool-approval noise; card craft unseen; the room was behind an off-by-default flag | architectural | src/squad-manager.ts, src/server.ts, webapp hub + lib, tests |
+| [27 unit-lifecycle-cards](27-unit-lifecycle-cards.md) | The other half of 26: signal kinds fire on cold paths, so the room is silent while the fleet works | architectural | kinds, squad-manager emit sites, webapp cards |
 
 ## Order
 
@@ -52,7 +55,9 @@ directive; ordering, not deferral, carries the discipline.
 | 3 | 12, 13, 14, 15, 16, then 17 | Doors, kind+reader units; 17 needs the first door |
 | 4 | 18, 19 | Multiplayer hardening; 18 is one landing unit with leak tests |
 | parallel | 20, 21, 24 | Anytime; 22 after 05+07 |
-| gate | 23 | After waves 1–3 land and org-public path works |
+| defect | 25 | Fixes a landed concern (01); sequence after 18 lands — both touch src/channels.ts |
+| defect | 26 then 27 | 26 removes the noise and cuts the room over to default-on; 27 supplies the signal it exposed as missing |
+| gate | 23 | After waves 1–3 land and org-public path works — and NOT before 26+27: the gate would otherwise open onto a firehose or an empty room |
 
 ## Dependency graph
 
@@ -87,6 +92,13 @@ directive; ordering, not deferral, carries the discipline.
 - Porting old webapp panels into the shell wholesale — delete-not-port; surfaces earn doors
 
 ## Decisions so far
+- Due-diligence review 2026-07-24 (Opus, on Lars's ask): design round holds up; three defects filed
+  against landed work — concern 25 (seq allocator, verified against live #fleet data and a real
+  DbStore), concern 26 (the room's contents: 544 noise cards, unseen card craft, off-by-default
+  serve flag — found by BOOTING the room, which nothing in waves 1–3 had done), and the org-wide
+  `ChannelStore.search` signature that concern 18's leak tests will have to change rather than
+  filter. 08's STATUS corrected (landed in #239, write-back missed it). Standing lesson recorded:
+  every wave of this program should end with someone opening the room and looking at it.
 - Wave 0 landed 2026-07-23 as one merge train (PR #225) after the catastrophe recovery — 6/24 concerns done (01/03/04/06/21/24); 02 resuming with cross-lineage gate; 05 dispatched; see memory omp-squad-wave0-catastrophe-layers for the 6-layer post-mortem
 
 - [DESIGN.md](DESIGN.md) — arbitrated final: HubShell root, durability split, WS identity, manager-only proof cards, needs-you flagship door + historical gate-verdict mode, guarded mention grammar, projection routing, kind-with-reader landing order

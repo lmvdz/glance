@@ -55,6 +55,22 @@ export function latestSeq(entries: ChannelEntry[]): number {
   return entries.reduce((max, entry) => Math.max(max, entry.seq), 0);
 }
 
+const TIME = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', hour12: false });
+const DATE_TIME = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
+
+/**
+ * Wall-clock label for a room entry. A chat surface without times is not a chat surface — you cannot
+ * tell a card from ten seconds ago from one from last Tuesday. Same-day entries print the clock only;
+ * older ones carry the date, so the common case stays short.
+ */
+export function entryTimeLabel(ts: number, now: number = Date.now()): string {
+  if (!Number.isFinite(ts) || ts <= 0) return '';
+  const then = new Date(ts);
+  const today = new Date(now);
+  const sameDay = then.getFullYear() === today.getFullYear() && then.getMonth() === today.getMonth() && then.getDate() === today.getDate();
+  return sameDay ? TIME.format(then) : DATE_TIME.format(then);
+}
+
 export function entryAuthorLabel(entry: ChannelEntry): string {
   const name = entry.authorDisplayName?.trim() || entry.authorActor.replace(/^web:/, '').replace(/^db:/, '').replace(/^user:/, '').replace(/^agent:/, '');
   if (entry.authorOrigin === 'agent' || entry.authorActor.startsWith('agent:')) return `${name} · agent`;
