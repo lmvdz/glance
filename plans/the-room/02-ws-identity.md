@@ -1,5 +1,5 @@
 # WS identity — resolve the human at socket upgrade
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -32,3 +32,6 @@ None.
   displayNames correct; presence shows two humans; closing all tabs of one drops exactly that one.
 - File mode: identity is the operator; presence shows one; nothing crashes without a session.
 - Existing WS auth/subprotocol handshake (["ompsq-token", auth], webapp/src/lib/ws.ts:29) unbroken.
+
+## Resolution
+Landed 2026-07-23 in train wave0b (PR #231): session-at-WS-upgrade identity, db:<userId> actors, per-user socket-set presence, file-mode operator identity. Cross-lineage reviewed (codex finding fixed, grok clean) + orchestrator auth review.
