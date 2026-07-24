@@ -477,6 +477,40 @@ test("a unit that keeps re-entering error projects ONE failure card, not one per
 	expect(face.body).toBe("fail");
 });
 
+test("a completion with nothing to report projects no card", async () => {
+	// Also found by booting the room: `doc-slug` passed through `idle` before it had produced any
+	// assistant output, emitting "Turn finished" with an empty body — and then emitted it AGAIN with
+	// the real summary once it had done the work. Two cards for one turn, the first announcing that
+	// something finished when nothing had. The summary IS this card, so no summary means no card.
+	const { mgr, agent } = await startedPrivateAgentServer("lifecycle-empty-turn-");
+	const record = (mgr.agents as Map<string, unknown>).get(agent.id);
+	if (!record) throw new Error("seed agent missing");
+	const host = mgr as unknown as TransitionHost;
+	const seeded = record as { transcript: TranscriptEntry[] };
+	seeded.transcript.length = 0; // nothing said yet
+
+	const cards: ChannelEntry[] = [];
+	const collect = (event: SquadEvent) => {
+		if (event.type === "channel-entry" && event.entry.event?.kind === TRANSCRIPT_EVENT_UNIT_TURN_FINISHED) cards.push(event.entry);
+	};
+	mgr.on("event", collect);
+	host.transition(record, "working", "task-start");
+	host.transition(record, "idle", "exit-clean");
+	await Bun.sleep(150);
+	expect(cards).toHaveLength(0);
+
+	// Now it has actually produced something — the card lands, once.
+	seeded.transcript.push({ id: "s1", seq: 1, kind: "assistant", text: "Added the JSDoc comment and committed it.", ts: 1 });
+	const projected = waitForChannelEntry(mgr, "ops", (item) => item.event?.kind === TRANSCRIPT_EVENT_UNIT_TURN_FINISHED);
+	host.transition(record, "working", "task-start");
+	host.transition(record, "idle", "exit-clean");
+	await projected;
+	await Bun.sleep(100);
+	mgr.off("event", collect);
+	expect(cards).toHaveLength(1);
+	expect(((cards[0]!.event!.payload as { face?: { body?: string } }).face ?? {}).body).toBe("Added the JSDoc comment and committed it.");
+});
+
 test("a thrown error still yields its real class, not the transition reason", async () => {
 	const { mgr, agent } = await startedPrivateAgentServer("lifecycle-thrown-error-");
 	const record = (mgr.agents as Map<string, unknown>).get(agent.id);

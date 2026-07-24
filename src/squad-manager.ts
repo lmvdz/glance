@@ -11744,11 +11744,22 @@ export class SquadManager extends EventEmitter {
 			eyebrow = "Fleet activity";
 			payload.task = rec.options.task;
 		} else if (this.isGenuineCompletion(entry)) {
+			// A turn that produced nothing has nothing to report. `isGenuineCompletion` answers "was this a
+			// real completion transition", which is not the same question as "is there anything to tell a
+			// human". A unit can pass through `idle` before it has said anything — booting the room caught
+			// `doc-slug` emitting "Turn finished" with an empty body, then emitting it AGAIN with the real
+			// summary once it had actually done the work. Two cards, one turn, and the first one was a
+			// card that said a thing had finished when nothing had.
+			//
+			// The summary IS the card here, so its absence is the worthiness test (concern 26's rule: a
+			// kind whose rate is not bounded by something real does not ship).
+			const summary = [...rec.transcript].reverse().find((item) => item.kind === "assistant")?.text?.trim();
+			if (!summary) return;
 			kind = TRANSCRIPT_EVENT_UNIT_TURN_FINISHED;
 			title = `Turn finished · ${this.safeEventLabel(rec.dto.name)}`;
 			eyebrow = "Unit idle";
 			tone = "success";
-			payload.summary = [...rec.transcript].reverse().find((item) => item.kind === "assistant")?.text;
+			payload.summary = summary;
 		} else if (entry.to === "error") {
 			// ONE card per failure, not one per error transition. A failing unit re-enters `error`
 			// repeatedly (retry, reattach, a supervisor re-marking it), and every one of those is the SAME
