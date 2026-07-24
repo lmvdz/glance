@@ -10,6 +10,7 @@ export function connectSquad(options: {
   onEvent: (event: SquadEvent) => void;
   onOpen?: () => void;
   onClose?: () => void;
+  channelSince?: () => number;
 }): SquadSocket {
   captureToken();
   let socket: WebSocket | null = null;
@@ -26,7 +27,9 @@ export function connectSquad(options: {
   const open = () => {
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const auth = token();
-    socket = auth ? new WebSocket(`${proto}://${location.host}/ws`, ["ompsq-token", auth]) : new WebSocket(`${proto}://${location.host}/ws`);
+    const since = reconnects > 0 ? Math.max(0, Math.floor(options.channelSince?.() ?? 0)) : 0;
+    const path = since > 0 ? `/ws?since=${encodeURIComponent(String(since))}` : '/ws';
+    socket = auth ? new WebSocket(`${proto}://${location.host}${path}`, ["ompsq-token", auth]) : new WebSocket(`${proto}://${location.host}${path}`);
     socket.onopen = () => {
       reconnects = 0;
       options.onOpen?.();

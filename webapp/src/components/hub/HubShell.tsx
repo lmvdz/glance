@@ -1,11 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertCircle, Hash, Loader2, Users } from 'lucide-react';
+import { Hash, Loader2, Users } from 'lucide-react';
 import { Composer, type ModelOption } from '../chat/Composer';
+import { ChannelTimeline } from './ChannelTimeline';
 import { ChannelRail } from './ChannelRail';
 import { apiJson, jsonInit } from '../../lib/api';
 import { buildPromptCommand, ensureConsoleAgent } from '../../lib/chat/sendCore';
 import type { AgentDTO, Channel, ChannelEntry, PresenceSnapshot } from '../../lib/dto';
-import { entryAuthorLabel, latestSeq, presenceCount, reduceChannelEntries } from '../../lib/hub';
+import { latestSeq, presenceCount, reduceChannelEntries } from '../../lib/hub';
 import { DEFAULT_CHANNEL_ID, type HubRoute } from '../../lib/router';
 import { useTaskContext } from '../../context/TaskContext';
 
@@ -41,56 +42,6 @@ function ChannelHeader({ channel, presence, selectedAgent }: { channel: Channel;
   );
 }
 
-function ChannelTimeline({ entries, loading, error }: { entries: ChannelEntry[]; loading: boolean; error: string }) {
-  if (loading) {
-    return (
-      <div className="space-y-3 p-4" aria-label="Loading channel">
-        {Array.from({ length: 7 }).map((_, i) => <div key={i} className="h-14 rounded-xl border border-zinc-800 bg-zinc-900/60" />)}
-      </div>
-    );
-  }
-  if (error) {
-    return (
-      <div className="m-4 flex items-center gap-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200" role="alert">
-        <AlertCircle className="h-4 w-4" aria-hidden /> {error}
-      </div>
-    );
-  }
-  if (entries.length === 0) {
-    return (
-      <div className="flex h-full items-center justify-center p-8 text-center">
-        <div className="relative">
-          <div className="absolute inset-0 -rotate-3 rounded-2xl border border-zinc-800 bg-zinc-950" aria-hidden />
-          <div className="absolute inset-0 rotate-3 rounded-2xl border border-zinc-800 bg-zinc-950" aria-hidden />
-          <div className="relative max-w-sm rounded-2xl border border-zinc-800 bg-[#0c0c0e] p-6">
-            <Hash className="mx-auto mb-3 h-6 w-6 text-amber-300" aria-hidden />
-            <h2 className="text-sm font-semibold text-zinc-100">No entries yet.</h2>
-            <p className="mt-1 text-xs leading-5 text-zinc-500">Fleet cards and operator messages will land here as the room wakes up.</p>
-          </div>
-        </div>
-      </div>
-    );
-  }
-  return (
-    <ol className="space-y-3 p-4">
-      {entries.map((entry) => {
-        const user = entry.kind === 'user';
-        return (
-          <li key={entry.id} className={`flex ${user ? 'justify-end' : 'justify-start'}`}>
-            <article className={`max-w-[80%] rounded-2xl border px-3 py-2 text-sm leading-6 ${user ? 'border-zinc-700 bg-zinc-800 text-zinc-100' : 'border-zinc-800 bg-[#0c0c0e] text-zinc-200'}`}>
-              <div className="mb-1 flex items-center gap-2 text-[10px] uppercase tracking-[0.14em] text-zinc-500">
-                <span>{entryAuthorLabel(entry)}</span>
-                <span className="tabular-nums">#{entry.seq}</span>
-                {entry.event?.kind ? <span className="rounded-full bg-amber-400/10 px-1.5 py-0.5 text-amber-200">{entry.event.kind}</span> : null}
-              </div>
-              <p className="whitespace-pre-wrap break-words">{entry.text || 'Card update'}</p>
-            </article>
-          </li>
-        );
-      })}
-    </ol>
-  );
-}
 
 export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWorkbench: (route: Extract<HubRoute, { kind: 'workbench' }>) => React.ReactNode }) {
   const { tasks, agents, features, audit, currentProject, selectedTaskId, channelEntries: liveChannelEntries, presence: livePresence, subscribeConsole, sendConsoleCommand, showToast } = useTaskContext();
@@ -199,7 +150,7 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
           <>
             <ChannelHeader channel={channel} presence={presence} selectedAgent={selectedAgent} />
             <div className="min-h-0 flex-1 overflow-y-auto bg-[#09090a]">
-              <ChannelTimeline entries={entries} loading={loading} error={error} />
+              <ChannelTimeline channelId={activeChannelId} entries={entries} loading={loading} error={error} />
             </div>
             <div className="border-t border-zinc-800 bg-[#0a0a0b]">
               {sending ? <div className="flex h-6 items-center gap-2 px-4 text-[11px] text-zinc-500"><Loader2 className="h-3 w-3 animate-spin" aria-hidden /> Posting…</div> : null}

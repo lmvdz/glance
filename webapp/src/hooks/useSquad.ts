@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentDTO, ArtifactCommentDTO, CapabilitySnapshotDTO, ChannelEntry, ClientCommand, CommandAckDTO, CommandInfo, FeatureDTO, PresenceSnapshot, ProjectDTO, PublicCapabilityCatalogDTO, SquadEvent, TranscriptEntry } from "../lib/dto";
 import { apiJson } from "../lib/api";
 import { connectSquad, type SquadSocket } from "../lib/ws";
+import { latestSeq, mergeChannelEntry } from "../lib/hub";
 
 const TRANSCRIPT_CAP = 800;
 
@@ -120,6 +121,7 @@ export function useSquad(): SquadState {
   const [connected, setConnected] = useState(false);
   const socketRef = useRef<SquadSocket | null>(null);
   const subscribedRef = useRef<Set<string>>(new Set());
+  const latestChannelSeqRef = useRef(0);
 
   const reload = useCallback(async () => {
     const [nextProjects, nextFeatures, nextAgents, nextCapabilities, nextCatalog] = await Promise.all([
@@ -205,7 +207,11 @@ export function useSquad(): SquadState {
             setCommandAcks((previous) => [...previous.slice(-199), event]);
             break;
           case "channel-entry":
-            setChannelEntries((previous) => previous.some((entry) => entry.id === event.entry.id) ? previous : [...previous.slice(-499), event.entry]);
+            setChannelEntries((previous) => {
+              const next = mergeChannelEntry(previous, event.entry).slice(-500);
+              latestChannelSeqRef.current = Math.max(latestChannelSeqRef.current, latestSeq(next));
+              return next;
+            });
             break;
           case "presence":
             setPresence(event.presence);
@@ -214,6 +220,7 @@ export function useSquad(): SquadState {
             break;
         }
       },
+      channelSince: () => latestChannelSeqRef.current,
     });
     socketRef.current = socket;
     return () => {

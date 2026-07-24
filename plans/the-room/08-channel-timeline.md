@@ -1,5 +1,5 @@
 # Channel timeline — typed cards bound to channel entries
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
