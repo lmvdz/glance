@@ -197,7 +197,7 @@ test("needs-you room card and status lane produce exactly one push for one pendi
 	mgr.emit("event", transitionEvent(rec.dto.id, "working", "input"));
 	mgr.emit("event", needsYouChannelEvent(rec.dto.id, "p"));
 
-	expect(calls).toHaveLength(1);
+	await waitFor(() => calls.length === 1);
 });
 
 test("seeding + calm transitions do not push", async () => {
@@ -301,7 +301,8 @@ test("an escalation and a completion push for the SAME agent within 3s of each o
 	await push.init();
 	const kp = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
 	const p256dh = Buffer.from(new Uint8Array(await crypto.subtle.exportKey("raw", kp.publicKey))).toString("base64url");
-	await push.subscribe({ endpoint: "https://push.example.com/d", keys: { p256dh, auth: "AAAAAAAAAAAAAAAAAAAAAA" } });
+	const auth = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64url");
+	await push.subscribe({ endpoint: "https://push.example.com/d", keys: { p256dh, auth } });
 
 	const { mgr, rec, dirs } = await liveAgent("pushboth");
 	const server = new SquadServer(mgr, { port: 0, push });
@@ -318,13 +319,14 @@ test("an escalation and a completion push for the SAME agent within 3s of each o
 	rec.dto.status = "input";
 	rec.dto.pending = [{ id: "p", source: "ui", kind: "select", title: "approve?", createdAt: 0 }];
 	mgr.emit("event", transitionEvent(rec.dto.id, "working", "input"));
+	await waitFor(() => calls.length === 1);
 	rec.dto.status = "idle";
 	rec.dto.pending = [];
 	rec.dto.completionPushArmed = true;
 	rec.dto.completionPushKind = "voice";
 	mgr.emit("event", transitionEvent(rec.dto.id, "input", "idle", { reason: "pending-answer" }));
 
-	await second; // resolves once BOTH sends have happened — no polling
+	await waitFor(() => calls.length === 2);
 	expect(calls).toHaveLength(2);
 });
 

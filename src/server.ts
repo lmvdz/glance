@@ -1180,7 +1180,7 @@ export class SquadServer {
 			// transitions.jsonl, push-taps.jsonl) and summed. Viewer-tier read (authz.ts GET default) —
 			// counters are not sensitive, and the whole point is a zero-ceremony glance. Scoped like every
 			// route here: a tenant session's `managers` is its own 1-manager array.
-			return Response.json(mergeAdoptionCounters(await Promise.all(managers.map((m) => m.adoptionCounters()))));
+			return Response.json(mergeAdoptionCounters(await Promise.all(managers.map((m) => m.adoptionCounters(actor)))));
 		}
 		return undefined;
 	}
@@ -1821,7 +1821,8 @@ export class SquadServer {
 			if (this.registry && this.opts.pushRoot) {
 				const orgId = session?.session.activeOrganizationId;
 				if (!orgId) return new Response("no active org", { status: 400 });
-				await (await this.pushForOrg(orgId)).subscribe({ endpoint: sub.endpoint, keys: { p256dh: sub.keys.p256dh, auth: sub.keys.auth } });
+				if (!session?.user.id) return new Response("signed-in user required", { status: 400 });
+				await (await this.pushForOrg(orgId)).subscribe({ endpoint: sub.endpoint, keys: { p256dh: sub.keys.p256dh, auth: sub.keys.auth }, userId: session.user.id });
 				return Response.json({ ok: true });
 			}
 			if (!this.opts.push) return new Response("push unavailable", { status: 501 });
@@ -3076,6 +3077,10 @@ export class SquadServer {
 			if (!bytes) return new Response("not found", { status: 404 });
 			return new Response(new Uint8Array(bytes), { headers: { "content-type": "image/png", "cache-control": "private, max-age=31536000, immutable" } });
 		}
+		const guardAgent = async (id: string): Promise<Response | undefined> => {
+			if (!(await manager.canReadAgent(id, actor))) return new Response("forbidden", { status: 403 });
+			return undefined;
+		};
 		// Single-agent read that stays honest about restart death (daily-onramp 04): a live id answers
 		// with its DTO; a session a restart killed answers with its dead placeholder (`dead: true` +
 		// the reason) for a bounded window; only an id with no story left is a 404. Without this, a
@@ -3084,6 +3089,8 @@ export class SquadServer {
 		const magent = url.pathname.match(/^\/api\/agents\/([^/]+)$/);
 		if (magent && req.method === "GET") {
 			const id = decodeURIComponent(magent[1]);
+			const denied = await guardAgent(id);
+			if (denied) return denied;
 			const dto = manager.getAgent(id);
 			// Same per-viewer personalization as GET /api/agents above — never skip it on the single-agent
 			// read, or a client polling one unit's row would see a stale/wrong ladder rung relative to the
@@ -3099,7 +3106,8 @@ export class SquadServer {
 		const mt = url.pathname.match(/^\/api\/agents\/([^/]+)\/transcript$/);
 		if (mt) {
 			const id = decodeURIComponent(mt[1]);
-			if (!(await manager.canReadAgent(id, actor))) return new Response("forbidden", { status: 403 });
+			const denied = await guardAgent(id);
+			if (denied) return denied;
 			// `?since=<seq>` returns only the delta (entries with seq > since) so a polling client
 			// (the cockpit conversation pane) never refetches the whole transcript. A missing or
 			// non-integer `since` falls back to the full transcript — never a 400/500.
@@ -3110,20 +3118,23 @@ export class SquadServer {
 		const mtrans = url.pathname.match(/^\/api\/agents\/([^/]+)\/transitions$/);
 		if (mtrans) {
 			const id = decodeURIComponent(mtrans[1]);
-			if (!(await manager.canReadAgent(id, actor))) return new Response("forbidden", { status: 403 });
+			const denied = await guardAgent(id);
+			if (denied) return denied;
 			const full = url.searchParams.get("full") === "1";
 			return Response.json(await manager.transitionHistory(id, { full }));
 		}
 		const msub = url.pathname.match(/^\/api\/agents\/([^/]+)\/subagents$/);
 		if (msub) {
 			const id = decodeURIComponent(msub[1]);
-			if (!(await manager.canReadAgent(id, actor))) return new Response("forbidden", { status: 403 });
+			const denied = await guardAgent(id);
+			if (denied) return denied;
 			return Response.json(manager.subagents(id));
 		}
 		const mrec = url.pathname.match(/^\/api\/agents\/([^/]+)\/receipts$/);
 		if (mrec) {
 			const id = decodeURIComponent(mrec[1]);
-			if (!(await manager.canReadAgent(id, actor))) return new Response("forbidden", { status: 403 });
+			const denied = await guardAgent(id);
+			if (denied) return denied;
 			return Response.json(await manager.receipts(id));
 		}
 		// Read-only checkpoint history for the fork-step picker; never includes `vars` (see
@@ -3131,19 +3142,22 @@ export class SquadServer {
 		const mchk = url.pathname.match(/^\/api\/agents\/([^/]+)\/checkpoints$/);
 		if (mchk) {
 			const id = decodeURIComponent(mchk[1]);
-			if (!(await manager.canReadAgent(id, actor))) return new Response("forbidden", { status: 403 });
+			const denied = await guardAgent(id);
+			if (denied) return denied;
 			return Response.json(await manager.checkpoints(id));
 		}
 		const mcmd = url.pathname.match(/^\/api\/agents\/([^/]+)\/commands$/);
 		if (mcmd) {
 			const id = decodeURIComponent(mcmd[1]);
-			if (!(await manager.canReadAgent(id, actor))) return new Response("forbidden", { status: 403 });
+			const denied = await guardAgent(id);
+			if (denied) return denied;
 			return Response.json(manager.commandsFor(id) ?? []);
 		}
 		const mdiff = url.pathname.match(/^\/api\/agents\/([^/]+)\/(diff|tree)$/);
 		if (mdiff) {
 			const id = decodeURIComponent(mdiff[1]);
-			if (!(await manager.canReadAgent(id, actor))) return new Response("forbidden", { status: 403 });
+			const denied = await guardAgent(id);
+			if (denied) return denied;
 			const dto = manager.getAgent(id);
 			if (!dto) return new Response("no such agent", { status: 404 });
 			return Response.json(mdiff[2] === "diff" ? await worktreeDiffSinceFork(dto.worktree) : await worktreeTree(dto.worktree));
@@ -3151,6 +3165,8 @@ export class SquadServer {
 		const mland = url.pathname.match(/^\/api\/agents\/([^/]+)\/land$/);
 		if (mland && req.method === "POST") {
 			const id = decodeURIComponent(mland[1]);
+			const denied = await guardAgent(id);
+			if (denied) return denied;
 			const dto = manager.getAgent(id);
 			if (!dto) return new Response("no such agent", { status: 404 });
 			let message = `squad(${dto.name}): ${dto.issue?.name ?? "agent changes"}`;
@@ -3170,7 +3186,10 @@ export class SquadServer {
 		// remote webapp can still offer copy-path.
 		const mopen = url.pathname.match(/^\/api\/agents\/([^/]+)\/open$/);
 		if (mopen && req.method === "POST") {
-			const decision = openRouteDecision(manager.getAgent(decodeURIComponent(mopen[1])) ?? undefined, this.dbMode);
+			const id = decodeURIComponent(mopen[1]);
+			const denied = await guardAgent(id);
+			if (denied) return denied;
+			const decision = openRouteDecision(manager.getAgent(id) ?? undefined, this.dbMode);
 			return Response.json(decision.body, { status: decision.status });
 		}
 		// Boundary sync (daily-onramp 03): explicitly apply this here-session's HELD turn patches to
@@ -3180,6 +3199,8 @@ export class SquadServer {
 		const msync = url.pathname.match(/^\/api\/agents\/([^/]+)\/apply-held-sync$/);
 		if (msync && req.method === "POST") {
 			const id = decodeURIComponent(msync[1]);
+			const denied = await guardAgent(id);
+			if (denied) return denied;
 			if (!manager.getAgent(id)) return new Response("no such agent", { status: 404 });
 			return Response.json(await manager.applyHeldSync(id, actor));
 		}
@@ -3191,6 +3212,8 @@ export class SquadServer {
 		const mdiscard = url.pathname.match(/^\/api\/agents\/([^/]+)\/discard-held-sync$/);
 		if (mdiscard && req.method === "POST") {
 			const id = decodeURIComponent(mdiscard[1]);
+			const denied = await guardAgent(id);
+			if (denied) return denied;
 			if (!manager.getAgent(id)) return new Response("no such agent", { status: 404 });
 			// STRICT body handling, deliberately unlike the decodeBodyOrEmpty endpoints: the absent-
 			// patchId default means "discard the WHOLE backlog", so malformed input must 400, never
@@ -3223,6 +3246,8 @@ export class SquadServer {
 		const mack = url.pathname.match(/^\/api\/agents\/([^/]+)\/ack-boundary-sync-divergence$/);
 		if (mack && req.method === "POST") {
 			const id = decodeURIComponent(mack[1]);
+			const denied = await guardAgent(id);
+			if (denied) return denied;
 			if (!manager.getAgent(id)) return new Response("no such agent", { status: 404 });
 			return Response.json(await manager.acknowledgeBoundarySyncDivergence(id, actor));
 		}
@@ -3238,6 +3263,8 @@ export class SquadServer {
 		const mverify = url.pathname.match(/^\/api\/agents\/([^/]+)\/verify$/);
 		if (mverify && req.method === "POST") {
 			const id = decodeURIComponent(mverify[1]);
+			const denied = await guardAgent(id);
+			if (denied) return denied;
 			const dto = manager.getAgent(id);
 			if (!dto) return new Response("no such agent", { status: 404 });
 			try {
@@ -3253,7 +3280,10 @@ export class SquadServer {
 			const mode = validateRequestedMode(body.mode);
 			if (!mode) return new Response("invalid mode", { status: 400 });
 			const reason = typeof body.reason === "string" ? body.reason : undefined;
-			const dto = await manager.transitionMode(decodeURIComponent(mmode[1]), mode, actor, reason);
+			const id = decodeURIComponent(mmode[1]);
+			const denied = await guardAgent(id);
+			if (denied) return denied;
+			const dto = await manager.transitionMode(id, mode, actor, reason);
 			if (!dto) return new Response("no such agent", { status: 404 });
 			return Response.json(dto);
 		}
@@ -3263,13 +3293,19 @@ export class SquadServer {
 			const task = typeof body.task === "string" ? body.task : undefined;
 			const mode = body.mode != null ? validateRequestedMode(body.mode) : undefined;
 			if (body.mode != null && !mode) return new Response("invalid mode", { status: 400 });
-			const result = await manager.promote(decodeURIComponent(mpromote[1]), { task, mode: mode ?? undefined }, actor);
+			const id = decodeURIComponent(mpromote[1]);
+			const denied = await guardAgent(id);
+			if (denied) return denied;
+			const result = await manager.promote(id, { task, mode: mode ?? undefined }, actor);
 			const status = result.ok ? 200 : result.reason === "no such agent" ? 404 : 409;
 			return Response.json(result, { status });
 		}
 		const mvision = url.pathname.match(/^\/api\/agents\/([^/]+)\/vision$/);
 		if (mvision && req.method === "POST") {
-			const dto = manager.getAgent(decodeURIComponent(mvision[1]));
+			const id = decodeURIComponent(mvision[1]);
+			const denied = await guardAgent(id);
+			if (denied) return denied;
+			const dto = manager.getAgent(id);
 			if (!dto) return new Response("no such agent", { status: 404 });
 			const body = decodeBodyOrEmpty(AgentVisionBodySchema, await req.json().catch(() => null));
 			const target = typeof body.url === "string" && body.url.trim() ? body.url.trim() : process.env.OMP_SQUAD_APP_URL;
@@ -3484,14 +3520,12 @@ export class SquadServer {
 
 	private async deliverEvent(orgId: string | undefined, e: SquadEvent): Promise<void> {
 		const manager = orgId ? this.orgManager(orgId) : this.singleManager;
-		if (!orgId && e.type !== "roster" && e.type !== "removed" && e.type !== "log" && e.type !== "command-ack") this.maybePushAlert(e);
 		if (e.type === "channel-entry") {
 			if (!manager) return;
-			const members = typeof manager.channelMemberUserIds === "function" ? await manager.channelMemberUserIds(e.channelId) : undefined;
+			const members = await manager.channelMemberUserIds(e.channelId);
 			if (members) {
-				if (orgId) this.maybePushAlertOrg(orgId, e);
-				else this.maybePushAlert(e);
-				this.sendChannelEventToMembers(orgId, e, members);
+				await this.sendChannelEventToMembers(orgId, manager, e, members);
+				this.maybePushAlertForMembers(orgId, e, members);
 			}
 			else if (orgId) this.broadcastTo(orgId, e);
 			else this.broadcastAll(e);
@@ -3502,12 +3536,25 @@ export class SquadServer {
 			await this.sendRosterSnapshot(orgId, manager);
 			return;
 		}
-		if (e.type === "removed" || e.type === "log" || e.type === "command-ack") return;
+		if (e.type === "log" || e.type === "command-ack") {
+			if (orgId) this.broadcastTo(orgId, e);
+			else this.broadcastAll(e);
+			return;
+		}
+		if (e.type === "removed") {
+			const members = manager ? await manager.channelMemberUserIdsForAgent(e.id) : undefined;
+			if (members && manager) {
+				await this.sendChannelEventToMembers(orgId, manager, e, members);
+				this.maybePushAlertForMembers(orgId, e, members);
+			}
+			else if (orgId) this.broadcastTo(orgId, e);
+			else this.broadcastAll(e);
+			return;
+		}
 		const members = manager ? await this.eventMemberUserIds(manager, e) : undefined;
-		if (members) {
-			if (orgId) this.maybePushAlertOrg(orgId, e);
-			else this.maybePushAlert(e);
-			this.sendChannelEventToMembers(orgId, e, members);
+		if (manager && members) {
+			await this.sendChannelEventToMembers(orgId, manager, e, members);
+			this.maybePushAlertForMembers(orgId, e, members);
 			return;
 		}
 		if (orgId) this.broadcastTo(orgId, e);
@@ -3532,18 +3579,26 @@ export class SquadServer {
 		if (e.type === "agent") return manager.channelMemberUserIdsForAgent(e.agent.id);
 		if (e.type === "transcript" || e.type === "commands") return manager.channelMemberUserIdsForAgent(e.id);
 		if (e.type === "transition") return manager.channelMemberUserIdsForAgent(e.entry.agentId);
-		if (e.type === "audit" && e.entry.target) return (await manager.channelMemberUserIdsForAgent(e.entry.target)) ?? [];
+		if (e.type === "audit" && e.entry.target) {
+			try {
+				return await manager.channelMemberUserIdsForAgent(e.entry.target);
+			} catch (err) {
+				console.warn(`[fanout] failed to resolve audit target membership for ${e.entry.target}: ${err instanceof Error ? err.message : String(err)}`);
+				return [];
+			}
+		}
 		if (e.type === "automation" && e.event.agent) return manager.channelMemberUserIdsForAgent(e.event.agent);
 		return undefined;
 	}
 
-	private sendChannelEventToMembers(orgId: string | undefined, e: SquadEvent, userIds: string[]): void {
-		const allowed = new Set(userIds);
+	private async sendChannelEventToMembers(orgId: string | undefined, manager: SquadManager, e: SquadEvent, userIds: string[]): Promise<void> {
 		const sockets = orgId ? (this.clientsByOrg.get(orgId) ?? new Set<ServerWebSocket<SocketData>>()) : this.clients;
 		if (sockets.size === 0) return;
 		const s = JSON.stringify(e);
 		for (const ws of sockets) {
-			if (!ws.data.userId || !allowed.has(ws.data.userId)) continue;
+			if (!ws.data.userId) continue;
+			const currentMembers = e.type === "channel-entry" ? ((await manager.channelMemberUserIds(e.channelId)) ?? userIds) : ((await this.eventMemberUserIds(manager, e)) ?? userIds);
+			if (!currentMembers.includes(ws.data.userId)) continue;
 			try {
 				ws.send(s);
 			} catch {
@@ -3584,6 +3639,11 @@ export class SquadServer {
 		}
 	}
 
+	private maybePushAlertForMembers(orgId: string | undefined, e: SquadEvent, userIds: readonly string[]): void {
+		if (orgId) this.maybePushAlertOrg(orgId, e, userIds);
+		else this.maybePushAlert(e, userIds);
+	}
+
 	/** Fire a background push when an agent transitions into a state that needs a human. Reads
 	 *  `from`/`to` straight off the canonical `{type:"transition"}` SquadEvent (transitions.jsonl's
 	 *  own guarded write path, squad-manager.ts's transition()/recordTransition()) instead of the
@@ -3598,7 +3658,7 @@ export class SquadServer {
 	 *  the real pre-reattach `from`, so a boot-time reattach replay (`reason:"reattach"`, from !== to
 	 *  when derive() reclassified a crashed turn) would otherwise page the operator on every daemon
 	 *  restart. Denied entries never changed dto.status and are skipped outright. */
-	private maybePushAlert(e: SquadEvent): void {
+	private maybePushAlert(e: SquadEvent, userIds?: readonly string[]): void {
 		const push = this.opts.push;
 		if (!push) return;
 		if (e.type === "roster") {
@@ -3617,7 +3677,7 @@ export class SquadServer {
 			if (payload && key && now - (this.lastPush.get(key) ?? 0) >= 3000 && now - (this.lastPush.get(a.id) ?? 0) >= 3000) {
 				this.lastPush.set(key, now);
 				this.lastPush.set(a.id, now);
-				void push.notify(payload);
+				void push.notify(payload, userIds);
 			}
 			return;
 		}
@@ -3678,7 +3738,7 @@ export class SquadServer {
 	 *  transitions, emitted synchronously inside `manager.start()` before `ManagerRegistry.create` can
 	 *  fire the marker) is still correctly swallowed by `!state.seeded` below — that boot-quiet
 	 *  invariant is unchanged, it just no longer doubles as an accidental seed. */
-	private maybePushAlertOrg(orgId: string, e: SquadEvent): void {
+	private maybePushAlertOrg(orgId: string, e: SquadEvent, userIds?: readonly string[]): void {
 		if (!this.registry || !this.opts.pushRoot) return;
 		let state = this.orgAlertState.get(orgId);
 		if (!state) {
@@ -3700,7 +3760,7 @@ export class SquadServer {
 			if (payload && key && now - (state.lastPush.get(key) ?? 0) >= 3000 && now - (state.lastPush.get(a.id) ?? 0) >= 3000) {
 				state.lastPush.set(key, now);
 				state.lastPush.set(a.id, now);
-				void this.pushForOrg(orgId).then((push) => void push.notify(payload));
+				void this.pushForOrg(orgId).then((push) => void push.notify(payload, userIds));
 			}
 			return;
 		}

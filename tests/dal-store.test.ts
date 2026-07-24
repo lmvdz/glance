@@ -13,14 +13,17 @@
  * `organization` rows (the FK target for roster/features/audit/usage).
  */
 
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
+import { sql } from "kysely";
 import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type OrgContext } from "../src/dal/context.ts";
 import { DbStore, FileStore } from "../src/dal/store.ts";
-import { type DbHandle, openDatabase } from "../src/db/index.ts";
+import { LocalStorageBackend, setStorageBackend, type WriteOpts } from "../src/dal/storage.ts";
+import { type DbHandle, openDatabase, openDb } from "../src/db/index.ts";
+import { appMigrations } from "../src/db/migrations.ts";
 import type { PersistedAgent, PersistedFeature, RunReceipt } from "../src/types.ts";
 import { ChannelStore } from "../src/channels.ts";
 
@@ -52,6 +55,10 @@ afterAll(async () => {
 	else process.env.DATABASE_URL = prevUrl;
 });
 
+afterEach(() => {
+	setStorageBackend(new LocalStorageBackend());
+});
+
 function agent(id: string, over: Partial<PersistedAgent> = {}): PersistedAgent {
 	return { id, name: id, repo: "/repo", worktree: `/wt/${id}`, approvalMode: "write", ...over };
 }
@@ -60,6 +67,27 @@ function feature(id: string, over: Partial<PersistedFeature> = {}): PersistedFea
 }
 const orgDir = (org: string) => path.join(dir, `org-${org}`);
 const dbStore = (org: string) => new DbStore(ctx, org, orgDir(org));
+
+class ChannelCreateRaceBackend extends LocalStorageBackend {
+	private readonly privateWrite = Promise.withResolvers<void>();
+
+	override async readText(file: string): Promise<string | undefined> {
+		if (path.basename(file) === "channels.json") await Promise.resolve();
+		return super.readText(file);
+	}
+
+	override async writeDurable(file: string, data: string, opts?: WriteOpts): Promise<void> {
+		if (path.basename(file) !== "channels.json") {
+			await super.writeDurable(file, data, opts);
+			return;
+		}
+		const channels = JSON.parse(data) as Array<{ id?: string; visibility?: string }>;
+		const raceChannel = channels.find((channel) => channel.id === "race");
+		if (raceChannel?.visibility === "org-public") await this.privateWrite.promise;
+		await super.writeDurable(file, data, opts);
+		if (raceChannel?.visibility === "private") this.privateWrite.resolve();
+	}
+}
 
 test("DbStore: org A's roster is invisible to org B (explicit org_id predicate)", async () => {
 	const a1 = agent("a1", { branch: "squad/a1", model: "opus", kind: "omp-operator", featureId: "f1" });
@@ -298,6 +326,41 @@ test("ChannelStore: read cursors are per user and per channel, and FileStore rel
 		Object.fromEntries((await reloaded.listChannels(asActor(id))).map((channel) => [channel.id, { lastReadSeq: channel.lastReadSeq, unreadCount: channel.unreadCount }]));
 	expect(await reloadedUnread("alice")).toMatchObject({ fleet: { lastReadSeq: 1, unreadCount: 1 }, ops: { lastReadSeq: 1, unreadCount: 0 } });
 	expect(await reloadedUnread("bob")).toMatchObject({ fleet: { lastReadSeq: 2, unreadCount: 0 }, ops: { lastReadSeq: 0, unreadCount: 1 } });
+});
+test("FileStore: concurrent public create cannot downgrade the private winner for the same channel id", async () => {
+	const fdir = path.join(dir, "channel-file-create-race");
+	setStorageBackend(new ChannelCreateRaceBackend());
+	const store = new FileStore(fdir);
+	const privateChannel = { id: "race", name: "#race-private", kind: "user" as const, createdAt: 1, visibility: "private" as const, creatorUserId: "alice" };
+	const publicChannel = { id: "race", name: "#race-public", kind: "user" as const, createdAt: 2, visibility: "org-public" as const };
+
+	const [privateResult] = await Promise.allSettled([store.putChannel(privateChannel), store.putChannel(publicChannel)]);
+	expect(privateResult?.status).toBe("fulfilled");
+
+	expect(await store.listChannels()).toEqual([privateChannel]);
+	expect(await store.getChannel("race")).toEqual(privateChannel);
+});
+
+test("DbStore: legacy channel rows gain org-public visibility during the membership migration", async () => {
+	const legacyDir = await fs.mkdtemp(path.join(dir, "legacy-channel-db-"));
+	const legacy = openDb(`sqlite:${path.join(legacyDir, "app.sqlite")}`);
+	try {
+		await sql`create table "organization" ("id" text primary key, "name" text, "slug" text, "createdAt" text)`.execute(legacy.db);
+		const migrations = appMigrations("sqlite");
+		await migrations["0001_app_tables"].up(legacy.db as never);
+		await legacy.db.insertInto("organization").values({ id: "legacy", name: "Legacy Org", slug: "legacy", createdAt: new Date().toISOString() }).execute();
+		await sql`insert into channels (org_id, id, name, kind, created_at) values ('legacy', 'fleet', '#fleet', 'user', 42)`.execute(legacy.db);
+
+		await migrations["0009_channel_memberships"].up(legacy.db as never);
+
+		const store = new DbStore({ db: legacy.db, type: legacy.type }, "legacy", path.join(legacyDir, "org-legacy"));
+		const channel = { id: "fleet", name: "#fleet", kind: "user" as const, createdAt: 42, visibility: "org-public" as const, creatorUserId: undefined };
+		expect(await store.listChannels()).toEqual([channel]);
+		expect(await store.getChannel("fleet")).toEqual(channel);
+	} finally {
+		await legacy.close();
+		await fs.rm(legacyDir, { recursive: true, force: true });
+	}
 });
 
 test("ChannelStore: client posts are redacted, born settled, and cannot carry event payloads", async () => {

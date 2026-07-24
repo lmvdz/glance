@@ -189,6 +189,7 @@ export class FileStore implements Store {
 	private readonly feedbackFile: string;
 	private saveFailureCount = 0;
 	private lastSaveWarnAt = 0;
+	private static readonly channelWriteLocks = new Map<string, Promise<void>>();
 	constructor(private readonly stateDir: string) {
 		this.stateFile = path.join(stateDir, "state.json");
 		this.feedbackFile = path.join(stateDir, "feedback.json");
@@ -273,8 +274,25 @@ export class FileStore implements Store {
 	}
 
 	async putChannel(channel: Channel): Promise<void> {
-		const channels = [...(await this.listChannels()).filter((c) => c.id !== channel.id), channel].sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
-		await getStorageBackend().writeDurable(path.join(this.stateDir, "channels.json"), JSON.stringify(channels, null, 2));
+		const file = path.join(this.stateDir, "channels.json");
+		const prior = FileStore.channelWriteLocks.get(file) ?? Promise.resolve();
+		let release!: () => void;
+		const next = prior.then(() => new Promise<void>((resolve) => { release = resolve; }));
+		FileStore.channelWriteLocks.set(file, next);
+		await prior;
+		try {
+			const existing = await this.listChannels();
+			const current = existing.find((c) => c.id === channel.id);
+			if (current) {
+				if (current.visibility !== channel.visibility || current.creatorUserId !== channel.creatorUserId || current.name !== channel.name) throw new Error("channel already exists");
+				return;
+			}
+			const channels = [...existing, channel].sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+			await getStorageBackend().writeDurable(file, JSON.stringify(channels, null, 2));
+		} finally {
+			release();
+			if (FileStore.channelWriteLocks.get(file) === next) FileStore.channelWriteLocks.delete(file);
+		}
 	}
 
 	async listChannelEntries(channelId: string, since = 0): Promise<ChannelEntry[]> {
