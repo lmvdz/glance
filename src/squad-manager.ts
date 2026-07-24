@@ -3641,7 +3641,7 @@ export class SquadManager extends EventEmitter {
 						provenAt: Date.now(),
 					});
 				}
-				this.emitUnitTranscriptEvent(w.agentId, TRANSCRIPT_EVENT_LAND_MERGE, `land merge finalized · ${this.safeEventLabel(w.branch ?? "changes")} · ${res.mode ?? "local"}`, { stage: "finalized", repo: pf.repo, branch: w.branch, agentId: w.agentId, featureId: id, issueId: rec?.dto.issue?.id, issueIdentifier: rec?.dto.issue?.identifier, mode: res.mode ?? "local", prUrl: res.prUrl, prNumber: res.prNumber, prState: res.prState, detail: res.detail });
+				this.emitUnitTranscriptEvent(w.agentId, TRANSCRIPT_EVENT_LAND_MERGE, `land merge finalized · ${this.safeEventLabel(w.branch ?? "changes")} · ${res.mode ?? "local"}`, { stage: "finalized", repo: pf.repo, branch: w.branch, agentId: w.agentId, featureId: id, issueId: rec?.dto.issue?.id, issueIdentifier: rec?.dto.issue?.identifier, mode: res.mode ?? "local", prUrl: res.prUrl, prNumber: res.prNumber, prState: res.prState, outcome: res.prState ?? "merged", doneProofVerified: res.detail?.includes("landed onto a red baseline") ? "red-baseline" : "green", detail: res.detail });
 				void this.closeLandedIssue(rec?.dto.issue, { branch: w.branch, repo: pf.repo }); // real merge ⇒ close its tracking issue (idempotent)
 			}
 		}
@@ -4065,7 +4065,7 @@ export class SquadManager extends EventEmitter {
 						provenAt: Date.now(),
 					});
 				}
-				this.emitUnitTranscriptEvent(id, TRANSCRIPT_EVENT_LAND_MERGE, `land merge finalized · ${this.safeEventLabel(dto.branch ?? "changes")} · ${result.mode ?? "local"}`, { stage: "finalized", repo: dto.repo, branch: dto.branch, agentId: id, featureId: dto.featureId, issueId: dto.issue?.id, issueIdentifier: dto.issue?.identifier, mode: result.mode ?? "local", prUrl: result.prUrl, prNumber: result.prNumber, prState: result.prState, detail: result.detail ?? result.message });
+				this.emitUnitTranscriptEvent(id, TRANSCRIPT_EVENT_LAND_MERGE, `land merge finalized · ${this.safeEventLabel(dto.branch ?? "changes")} · ${result.mode ?? "local"}`, { stage: "finalized", repo: dto.repo, branch: dto.branch, agentId: id, featureId: dto.featureId, issueId: dto.issue?.id, issueIdentifier: dto.issue?.identifier, mode: result.mode ?? "local", prUrl: result.prUrl, prNumber: result.prNumber, prState: result.prState, outcome: result.prState ?? "merged", doneProofVerified: result.detail?.includes("landed onto a red baseline") ? "red-baseline" : "green", detail: result.detail ?? result.message });
 				await this.closeLandedIssue(dto.issue, { branch: dto.branch, repo: dto.repo }); // real merge ⇒ close its tracking issue (idempotent, best-effort)
 			} else this.log("info", `not closing ${dto.issue?.identifier ?? dto.issue?.id ?? id}: land made no merge`);
 		}
@@ -11125,6 +11125,16 @@ export class SquadManager extends EventEmitter {
 			eventKind: entry.event?.kind,
 			title: entry.text,
 			stage: typeof objectPayload.stage === "string" ? objectPayload.stage : undefined,
+			sha: typeof objectPayload.sha === "string" ? objectPayload.sha : typeof objectPayload.resultCommit === "string" ? objectPayload.resultCommit : rec.dto.proof?.commit,
+			target: typeof objectPayload.target === "string" ? objectPayload.target : typeof objectPayload.baseRef === "string" ? objectPayload.baseRef : "HEAD",
+			risk: typeof objectPayload.risk === "string" ? objectPayload.risk : typeof objectPayload.riskTier === "string" ? objectPayload.riskTier : typeof objectPayload.code === "string" ? objectPayload.code : undefined,
+			recommendation: typeof objectPayload.recommendation === "string" ? objectPayload.recommendation : typeof objectPayload.recommendedAction === "string" ? objectPayload.recommendedAction : undefined,
+			detail: typeof objectPayload.detail === "string" ? objectPayload.detail : typeof objectPayload.message === "string" ? objectPayload.message : undefined,
+			outcome: typeof objectPayload.outcome === "string" ? objectPayload.outcome : typeof objectPayload.prState === "string" ? objectPayload.prState : undefined,
+			mode: typeof objectPayload.mode === "string" ? objectPayload.mode : undefined,
+			prUrl: typeof objectPayload.prUrl === "string" ? objectPayload.prUrl : undefined,
+			prNumber: typeof objectPayload.prNumber === "number" || typeof objectPayload.prNumber === "string" ? objectPayload.prNumber : undefined,
+			doneProofVerified: typeof objectPayload.doneProofVerified === "string" ? objectPayload.doneProofVerified : undefined,
 			verdict: typeof objectPayload.verdict === "string" ? objectPayload.verdict : undefined,
 			ok: typeof objectPayload.ok === "boolean" ? objectPayload.ok : undefined,
 			merged: typeof objectPayload.merged === "boolean" ? objectPayload.merged : undefined,
