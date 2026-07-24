@@ -287,6 +287,25 @@ test("DbStore: channel search is org-scoped and searches only redacted stored te
 	expect(await a.searchChannelEntries("sk-raw-secret")).toEqual([]);
 });
 
+test("DbStore: private membership gates reads, supplies fan-out recipients, and honors revocation", async () => {
+	const store = dbStore("A");
+	const channels = new ChannelStore(orgDir("A"), store, undefined, () => 1);
+	const alice = { id: "db:alice", displayName: "alice", origin: "local" as const, role: "admin" as const, orgId: "A" };
+	const bob = { id: "db:bob", displayName: "bob", origin: "local" as const, role: "admin" as const, orgId: "A" };
+	const carol = { id: "db:carol", displayName: "carol", origin: "local" as const, role: "admin" as const, orgId: "A" };
+	await channels.createChannel(alice, { id: "db-private", name: "#db-private", visibility: "private" });
+	await channels.appendClient("db-private", alice, { text: "db members only" });
+	await channels.setMember("db-private", alice, { userId: "bob" }, true);
+
+	expect((await channels.entries("db-private", 0, bob)).map((entry) => entry.text)).toEqual(["db members only"]);
+	expect(await channels.memberUserIds("db-private")).toEqual(["alice", "bob"]);
+	await expect(channels.entries("db-private", 0, carol)).rejects.toThrow("channel forbidden");
+
+	await channels.setMember("db-private", alice, { userId: "bob" }, false);
+	expect(await channels.memberUserIds("db-private")).toEqual(["alice"]);
+	await expect(channels.entries("db-private", 0, bob)).rejects.toThrow("channel forbidden");
+});
+
 test("FileStore: channel search scans durable JSONL rows honestly", async () => {
 	const fdir = path.join(dir, "channel-file-search");
 	const store = new FileStore(fdir);

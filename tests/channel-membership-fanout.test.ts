@@ -2,6 +2,8 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { composeAfterAction, saveAfterAction } from "../src/after-action.ts";
+import { saveAnswer } from "../src/answers.ts";
 import { FileStore } from "../src/dal/store.ts";
 import { ChannelStore, type ChannelEntry } from "../src/channels.ts";
 import { SubagentTracker } from "../src/subagents.ts";
@@ -48,7 +50,7 @@ function seedAgent(mgr: SquadManager, dto: AgentDTO, transcript: TranscriptEntry
 	};
 	const record = {
 		dto,
-		agent: { detach: () => {} },
+		agent: { detach: () => {}, stop: async () => {}, prompt: async () => {}, isReady: true, isAlive: true },
 		options,
 		transcript,
 		assistantBuf: "",
@@ -100,6 +102,10 @@ interface RouteStubHost {
 	verifyAgentWork(id: string): Promise<boolean>;
 	transitionMode(id: string): Promise<AgentDTO | undefined>;
 	promote(id: string): Promise<unknown>;
+}
+
+interface DeadPlaceholderHost {
+	deadPlaceholders: Map<string, unknown>;
 }
 
 function stubDangerousAgentRouteMethods(mgr: SquadManager, agent: AgentDTO): void {
@@ -280,21 +286,18 @@ test("revocation during private fan-out stops later member frames", async () => 
 	await mgr.createChannel(actor("alice"), { id: "ops", name: "#ops", visibility: "private" });
 	await mgr.addChannelMember("ops", actor("alice"), { userId: "bob" });
 	const entry = await mgr.appendChannelPost("ops", actor("alice"), { text: "members only" });
-	let revoked = false;
+	let lookups = 0;
 	const originalMemberUserIds = mgr.channelMemberUserIds.bind(mgr);
 	mgr.channelMemberUserIds = async (channelId: string) => {
 		if (channelId !== "ops") return originalMemberUserIds(channelId);
-		return revoked ? ["alice"] : ["alice", "bob"];
+		return ++lookups === 1 ? ["alice", "bob"] : ["alice"];
 	};
 	const event: SquadEvent = { type: "channel-entry", channelId: "ops", entry };
 	const frames: Record<string, string[]> = { alice: [], bob: [] };
 	const host = server as unknown as DeliverHost;
 	host.clients.add({
 		data: { userId: "alice", orgId: "org-a", role: "admin", displayName: "alice" },
-		send: (frame: string) => {
-			frames.alice.push(frame);
-			revoked = true;
-		},
+		send: (frame: string) => frames.alice.push(frame),
 	});
 	host.clients.add({ data: { userId: "bob", orgId: "org-a", role: "admin", displayName: "bob" }, send: (frame: string) => frames.bob.push(frame) });
 	await host.deliverEvent(undefined, event);
@@ -314,15 +317,26 @@ test("command-ack reaches subscribed sockets while a private channel exists", as
 	});
 
 	await mgr.createChannel(actor("alice"), { id: "ops", name: "#ops", visibility: "private" });
+	seedAgent(mgr, agentDto("private-ack-unit", "ops"));
 	const frames: Record<string, string[]> = { alice: [], carol: [] };
 	const fakeSocket = (userId: string): DeliverSocket => ({ data: { userId, orgId: "org-a", role: "admin", displayName: userId }, send: (frame: string) => frames[userId]!.push(frame) });
 	const host = server as unknown as DeliverHost;
 	host.clients.add(fakeSocket("alice"));
 	host.clients.add(fakeSocket("carol"));
+	const { promise: ack, resolve: resolveAck } = Promise.withResolvers<SquadEvent>();
+	const onEvent = (event: SquadEvent) => {
+		if (event.type !== "command-ack") return;
+		mgr.off("event", onEvent);
+		resolveAck(event);
+	};
+	mgr.on("event", onEvent);
 
-	await host.deliverEvent(undefined, { type: "command-ack", clientTurnId: "turn-1", ok: true });
-	expect(frames.alice.map((frame) => JSON.parse(frame))).toEqual([{ type: "command-ack", clientTurnId: "turn-1", ok: true }]);
-	expect(frames.carol.map((frame) => JSON.parse(frame))).toEqual([{ type: "command-ack", clientTurnId: "turn-1", ok: true }]);
+	await mgr.applyCommand({ type: "prompt", id: "private-ack-unit", message: "private command", channelId: "ops", clientTurnId: "turn-1" } as never, actor("alice"));
+	const commandAck = await ack;
+	expect(commandAck).toMatchObject({ type: "command-ack", clientTurnId: "turn-1" });
+	await host.deliverEvent(undefined, commandAck);
+	expect(frames.alice.map((frame) => JSON.parse(frame))).toEqual([commandAck]);
+	expect(frames.carol.map((frame) => JSON.parse(frame))).toEqual([commandAck]);
 });
 
 test("creator-only membership management rejects non-creators and non-member self-add", async () => {
@@ -442,4 +456,177 @@ test("HTTP private channel reads 403 and search is empty for non-member callers"
 	const search = await fetch(`${url}/api/channels/search?q=hidden%20launch`, { headers });
 	expect(search.status).toBe(200);
 	expect(await search.json()).toEqual({ results: [] });
+});
+
+test("private agent events, removals, bound logs, and missing channels never fan out to non-members", async () => {
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "channel-event-scope-"));
+	const mgr = new SquadManager({ stateDir });
+	await mgr.start();
+	const server = new SquadServer(mgr, { port: 0 });
+	cleanups.push(async () => {
+		server.stop();
+		await mgr.stop();
+		await fs.rm(stateDir, { recursive: true, force: true });
+	});
+	await mgr.createChannel(actor("alice"), { id: "ops", name: "#ops", visibility: "private" });
+	const unit = agentDto("private-unit", "ops");
+	seedAgent(mgr, unit);
+	const frames: Record<string, string[]> = { alice: [], carol: [] };
+	const host = server as unknown as DeliverHost;
+	for (const userId of ["alice", "carol"]) host.clients.add({ data: { userId, orgId: "org-a", role: "admin", displayName: userId }, send: (frame: string) => frames[userId]!.push(frame) });
+
+	for (const event of [
+		{ type: "agent", agent: unit },
+		{ type: "transcript", id: unit.id, entry: { id: "t", seq: 1, kind: "assistant", text: "private", ts: 1 } },
+		{ type: "commands", id: unit.id, commands: [] },
+		{ type: "transition", entry: { agentId: unit.id, from: "working", to: "input", reason: "private", at: 1, seq: "1" } },
+		{ type: "removed", id: unit.id, channelId: "ops" },
+		{ type: "log", level: "error", text: "private failure", agentId: unit.id },
+	] satisfies SquadEvent[]) await host.deliverEvent(undefined, event);
+
+	seedAgent(mgr, agentDto("missing-unit", "missing"));
+	await host.deliverEvent(undefined, { type: "agent", agent: agentDto("missing-unit", "missing") });
+	expect(frames.alice).toHaveLength(6);
+	expect(frames.carol).toEqual([]);
+});
+
+test("a failed membership recheck drops the event instead of using its stale member list", async () => {
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "channel-recheck-failure-"));
+	const mgr = new SquadManager({ stateDir });
+	await mgr.start();
+	const server = new SquadServer(mgr, { port: 0 });
+	cleanups.push(async () => {
+		server.stop();
+		await mgr.stop();
+		await fs.rm(stateDir, { recursive: true, force: true });
+	});
+	await mgr.createChannel(actor("alice"), { id: "ops", name: "#ops", visibility: "private" });
+	let calls = 0;
+	mgr.channelMemberUserIds = async () => (++calls === 1 ? ["alice"] : []);
+	const frames: string[] = [];
+	const host = server as unknown as DeliverHost;
+	host.clients.add({ data: { userId: "alice", orgId: "org-a", role: "admin", displayName: "alice" }, send: (frame: string) => frames.push(frame) });
+	const entry = await mgr.appendChannelPost("ops", actor("alice"), { text: "private" });
+	await host.deliverEvent(undefined, { type: "channel-entry", channelId: "ops", entry });
+	expect(frames).toEqual([]);
+});
+
+test("a public-channel dead placeholder retains its documented dead response", async () => {
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "public-dead-placeholder-"));
+	const mgr = new SquadManager({ stateDir });
+	await mgr.start();
+	await mgr.createChannel(actor("alice"), { id: "public", name: "#public", visibility: "org-public" });
+	const server = new SquadServer(mgr, { port: 0, token: "public-dead-placeholder-token" });
+	const url = server.start();
+	cleanups.push(async () => {
+		server.stop();
+		await mgr.stop();
+		await fs.rm(stateDir, { recursive: true, force: true });
+	});
+	const placeholderHost = mgr as unknown as DeadPlaceholderHost;
+	placeholderHost.deadPlaceholders.set("dead-public", {
+		id: "dead-public",
+		name: "dead public",
+		repo: "/repo",
+		harness: "claude-code",
+		at: Date.now(),
+		deadReason: "daemon restarted",
+		channelId: "public",
+		transcript: [],
+	});
+
+	const response = await fetch(`${url}/api/agents/dead-public`, { headers: { authorization: "Bearer public-dead-placeholder-token" } });
+	expect(response.status).toBe(200);
+	expect(await response.json()).toMatchObject({ id: "dead-public", dead: true, deadReason: "daemon restarted" });
+});
+
+test("non-members cannot read private action items, answers, or after-actions after reaping", async () => {
+	const { mgr, url, headers, agent } = await startedPrivateAgentServer("private-artifact-membership-");
+	agent.status = "input";
+	agent.pending = [{ id: "approval", source: "ui", kind: "confirm", title: "private approval", createdAt: 1 }];
+	await saveAnswer(mgr.stateDir, { id: agent.id, question: "private question", repo: agent.repo, markdown: "private answer", askedAt: 1 });
+	await saveAfterAction(
+		mgr.stateDir,
+		composeAfterAction({
+			id: agent.id,
+			name: agent.name,
+			repo: agent.repo,
+			terminalReason: "private failure",
+			channelId: "ops",
+			terminalAt: 1,
+			trajectory: [],
+			commitsAhead: 0,
+			dirtyFiles: 0,
+			now: 1,
+		}),
+	);
+	mgr.agents.delete(agent.id);
+
+	const responses = await Promise.all([
+		fetch(`${url}/api/action-items`, { headers }),
+		fetch(`${url}/api/answers`, { headers }),
+		fetch(`${url}/api/answers/${agent.id}`, { headers }),
+		fetch(`${url}/api/after-action`, { headers }),
+		fetch(`${url}/api/after-action/${agent.id}`, { headers }),
+	]);
+	expect(responses.map((response) => response.status)).toEqual([200, 200, 404, 200, 404]);
+	expect(await responses[0]!.json()).toMatchObject({ items: [] });
+	expect(await responses[1]!.json()).toEqual([]);
+	expect(await responses[3]!.json()).toEqual([]);
+});
+
+test("search continues past a private-heavy native-search page", async () => {
+	class PrivateHeavySearchStore extends FileStore {
+		override async searchChannelEntries(_q: string, _limit = 50, offset = 0) {
+			if (offset === 0) {
+				return Array.from({ length: 500 }, (_, i) => ({
+					entry: { id: `private-${i}`, seq: i + 1, channelId: "private", authorActor: "db:alice", kind: "user" as const, text: `needle private ${i}`, ts: i, status: "ok" as const },
+					snippet: `needle private ${i}`,
+				}));
+			}
+			return [{ entry: { id: "public-needle", seq: 1, channelId: "public", authorActor: "db:alice", kind: "user" as const, text: "needle public", ts: 501, status: "ok" as const }, snippet: "needle public" }];
+		}
+	}
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "channel-search-overfetch-"));
+	cleanups.push(() => fs.rm(dir, { recursive: true, force: true }));
+	const channels = new ChannelStore(dir, new PrivateHeavySearchStore(dir), undefined, () => 1);
+	await channels.createChannel(actor("alice"), { id: "private", name: "#private", visibility: "private" });
+	await channels.createChannel(actor("alice"), { id: "public", name: "#public", visibility: "org-public" });
+
+	expect((await channels.search("needle", 1, actor("carol"))).map((result) => result.entry.text)).toEqual(["needle public"]);
+});
+
+test("creator access remains available when the private membership write fails after channel persistence", async () => {
+	class MembershipFailingStore extends FileStore {
+		override async putChannelMembership(): Promise<void> {
+			throw new Error("membership disk failure");
+		}
+	}
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "channel-create-membership-failure-"));
+	cleanups.push(() => fs.rm(dir, { recursive: true, force: true }));
+	const channels = new ChannelStore(dir, new MembershipFailingStore(dir), undefined, () => 1);
+
+	await expect(channels.createChannel(actor("alice"), { id: "ops", name: "#ops", visibility: "private" })).rejects.toThrow("membership disk failure");
+	expect(await channels.canReadChannel("ops", actor("alice"))).toBe(true);
+	expect(await channels.canReadChannel("ops", actor("carol"))).toBe(false);
+});
+
+test("org-public channel events still fan out without membership rows", async () => {
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "public-channel-fanout-"));
+	const mgr = new SquadManager({ stateDir });
+	await mgr.start();
+	const server = new SquadServer(mgr, { port: 0 });
+	cleanups.push(async () => {
+		server.stop();
+		await mgr.stop();
+		await fs.rm(stateDir, { recursive: true, force: true });
+	});
+	await mgr.createChannel(actor("alice"), { id: "public", name: "#public", visibility: "org-public" });
+	const entry = await mgr.appendChannelPost("public", actor("alice"), { text: "visible to the org" });
+	const frames: string[] = [];
+	const host = server as unknown as DeliverHost;
+	host.clients.add({ data: { userId: "carol", orgId: "org-a", role: "admin", displayName: "carol" }, send: (frame: string) => frames.push(frame) });
+
+	await host.deliverEvent(undefined, { type: "channel-entry", channelId: "public", entry });
+	expect(frames.map((frame) => JSON.parse(frame))).toEqual([{ type: "channel-entry", channelId: "public", entry }]);
 });

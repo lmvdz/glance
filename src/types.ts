@@ -1531,9 +1531,9 @@ export interface TypingEvent {
 export type SquadEvent =
 	| { type: "roster"; agents: AgentDTO[]; version: string }
 	| { type: "agent"; agent: AgentDTO }
-	| { type: "removed"; id: string }
+	| { type: "removed"; id: string; channelId?: string }
 	| { type: "transcript"; id: string; entry: TranscriptEntry }
-	| { type: "log"; level: "info" | "warn" | "error"; text: string }
+	| { type: "log"; level: "info" | "warn" | "error"; text: string; agentId?: string }
 	| { type: "commands"; id: string; commands: CommandInfo[] }
 	| { type: "features-changed" }
 	| { type: "comment"; comment: ArtifactCommentDTO }

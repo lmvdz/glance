@@ -153,7 +153,7 @@ export interface Store {
 	getChannel(id: string): Promise<Channel | undefined>;
 	putChannel(channel: Channel): Promise<void>;
 	listChannelEntries(channelId: string, since?: number): Promise<ChannelEntry[]>;
-	searchChannelEntries?(q: string, limit?: number): Promise<ChannelSearchResult[]>;
+	searchChannelEntries?(q: string, limit?: number, offset?: number): Promise<ChannelSearchResult[]>;
 	appendChannelEntry(entry: ChannelEntry): Promise<void>;
 	nextChannelSeq(channelId: string): Promise<number>;
 	listChannelMemberships(channelId: string): Promise<ChannelMembership[]>;
@@ -309,7 +309,7 @@ export class FileStore implements Store {
 		return entries.sort((a, b) => a.seq - b.seq);
 	}
 
-	async searchChannelEntries(q: string, limit = 50): Promise<ChannelSearchResult[]> {
+	async searchChannelEntries(q: string, limit = 50, offset = 0): Promise<ChannelSearchResult[]> {
 		const needle = q.trim().toLowerCase();
 		if (!needle) return [];
 		const raw = await getStorageBackend().readText(path.join(this.stateDir, "channels.jsonl"));
@@ -326,7 +326,7 @@ export class FileStore implements Store {
 				results.push({ entry, snippet: searchSnippet(text, hitAt, q.trim().length) });
 			} catch {}
 		}
-		return results.sort((a, b) => b.entry.ts - a.entry.ts || b.entry.seq - a.entry.seq).slice(0, limit);
+		return results.sort((a, b) => b.entry.ts - a.entry.ts || b.entry.seq - a.entry.seq).slice(offset, offset + limit);
 	}
 
 
@@ -640,7 +640,7 @@ export class DbStore implements Store {
 		return rows.map((r) => readChannelEntry(JSON.parse(r.data))).filter((entry): entry is ChannelEntry => entry !== undefined);
 	}
 
-	async searchChannelEntries(q: string, limit = 50): Promise<ChannelSearchResult[]> {
+	async searchChannelEntries(q: string, limit = 50, offset = 0): Promise<ChannelSearchResult[]> {
 		const needle = q.trim();
 		if (!needle) return [];
 		const pattern = `%${escapeLike(needle)}%`;
@@ -652,6 +652,7 @@ export class DbStore implements Store {
 				.where(sql`json_extract(data, '$.text')`, "like", pattern)
 				.orderBy("ts", "desc")
 				.limit(limit)
+				.offset(offset)
 				.execute(),
 		);
 		return rows
