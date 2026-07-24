@@ -349,7 +349,7 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
                 onModelChange={setSelectedModel}
                 agent={selectedAgent}
                 agents={agents}
-                placeholder={selectedAgent ? `Message #${channel.name} and address ${selectedAgent.name || selectedAgent.id}` : `Message #${channel.name}`}
+                placeholder={selectedAgent ? `Message ${channel.name} and address ${selectedAgent.name || selectedAgent.id}` : `Message ${channel.name}`}
                 focusKey={replyFocusKey}
                 onToast={showToast}
               />

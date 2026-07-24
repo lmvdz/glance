@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { entryAuthorLabel, groupActiveWork, latestSeq, presenceCount, reduceChannelEntries } from './hub';
+import { entryAuthorLabel, entryTimeLabel, groupActiveWork, latestSeq, presenceCount, reduceChannelEntries } from './hub';
 import { renderToStaticMarkup } from 'react-dom/server';
 import React from 'react';
 import { ChannelRail } from '../components/hub/ChannelRail';
@@ -98,5 +98,22 @@ describe('Hub reductions', () => {
     ];
 
     expect(cases.map(({ name, entry }) => [name, entryAuthorLabel(entry)])).toEqual(cases.map(({ name, label }) => [name, label]));
+  });
+});
+
+describe('entry time labels', () => {
+  const now = new Date('2026-07-24T15:30:00Z').getTime();
+
+  test('same-day entries print the clock; older entries carry the date', () => {
+    const sameDay = entryTimeLabel(new Date('2026-07-24T09:05:00Z').getTime(), now);
+    const older = entryTimeLabel(new Date('2026-07-21T09:05:00Z').getTime(), now);
+    expect(sameDay).toMatch(/^\d{2}:\d{2}$/);
+    expect(older).not.toMatch(/^\d{2}:\d{2}$/);
+    expect(older.length).toBeGreaterThan(sameDay.length);
+  });
+
+  test('a missing or nonsense timestamp renders nothing rather than "Invalid Date"', () => {
+    expect(entryTimeLabel(0, now)).toBe('');
+    expect(entryTimeLabel(Number.NaN, now)).toBe('');
   });
 });
