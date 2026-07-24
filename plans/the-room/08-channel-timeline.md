@@ -1,5 +1,5 @@
 # Channel timeline — typed cards bound to channel entries
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -32,3 +32,14 @@ None.
   types in order; WS drop/reconnect shows no gaps or dupes (seq resync test).
 - Unknown event.kind renders as neutral text card, no crash.
 - DOM-free tests for the reduction + card-dispatch logic.
+
+## Resolution
+Landed 2026-07-24 in the wave-1b train (PR #239, merge 7c8eaa9): ChannelTimeline.tsx +
+channelTimeline.ts card dispatch + channelScroll anchoring + DOM-free tests (17 webapp tests
+green on main). STATUS was missed by the write-back in f916f8d (which covered 09/10/11 and the
+wave-3 concerns) and corrected 2026-07-24 during a plan due-diligence review.
+
+CAVEAT on the second Verify line: "WS drop/reconnect shows no gaps or dupes (seq resync test)"
+is NOT met — not by this concern's code, but by the non-atomic seq allocator underneath it
+(concern 25). The reduction and the `?since=` call are correct; the seqs they resync on are not
+unique. 25 closes it.
