@@ -3467,7 +3467,8 @@ export class SquadServer {
 			const owner = this.resolveCommandManager(cmd, bootstrapAdmin, manager);
 			if (!owner) return new Response("agent not found", { status: 404 });
 			const targetId = commandAgentTarget(cmd);
-			if (targetId && owner.getAgent(targetId) && typeof owner.canReadAgent === "function" && !(await owner.canReadAgent(targetId, actor))) return new Response("forbidden", { status: 403 });
+			const liveTarget = typeof owner.getAgent === "function" ? owner.getAgent(targetId ?? "") : undefined;
+			if (targetId && liveTarget && typeof owner.canReadAgent === "function" && !(await owner.canReadAgent(targetId, actor))) return new Response("forbidden", { status: 403 });
 			// kill/restart/remove are admin-tier (commandTier); applyCommand is the single authority.
 			// Surface its denial as 403 here (the WS handler swallows the same throw) — not a 2nd authz site.
 			try {
@@ -3483,10 +3484,19 @@ export class SquadServer {
 
 	private async deliverEvent(orgId: string | undefined, e: SquadEvent): Promise<void> {
 		const manager = orgId ? this.orgManager(orgId) : this.singleManager;
+		if (!orgId) {
+			if (e.type === "roster" && manager) void this.sendRosterSnapshot(undefined, manager);
+			else if (e.type !== "removed" && e.type !== "log" && e.type !== "command-ack") this.broadcastAll(e);
+			return;
+		}
 		if (e.type === "channel-entry") {
 			if (!manager) return;
 			const members = typeof manager.channelMemberUserIds === "function" ? await manager.channelMemberUserIds(e.channelId) : undefined;
-			if (members) this.sendChannelEventToMembers(orgId, e, members);
+			if (members) {
+				if (orgId) this.maybePushAlertOrg(orgId, e);
+				else this.maybePushAlert(e);
+				this.sendChannelEventToMembers(orgId, e, members);
+			}
 			else if (orgId) this.broadcastTo(orgId, e);
 			else this.broadcastAll(e);
 			return;
@@ -3499,6 +3509,8 @@ export class SquadServer {
 		if (e.type === "removed" || e.type === "log" || e.type === "command-ack") return;
 		const members = manager ? await this.eventMemberUserIds(manager, e) : undefined;
 		if (members) {
+			if (orgId) this.maybePushAlertOrg(orgId, e);
+			else this.maybePushAlert(e);
 			this.sendChannelEventToMembers(orgId, e, members);
 			return;
 		}
