@@ -1878,7 +1878,7 @@ export class SquadServer {
 			const bootstrapActor = actorForRole(role);
 			const roster = [];
 			for (const m of this.observabilityManagers(true, undefined)) {
-				for (const dto of await m.visibleAgents(bootstrapActor)) roster.push({ ...dto, ladderPriority: m.ladderPriorityFor(dto, bootstrapViewerId) });
+				for (const dto of (typeof m.visibleAgents === "function" ? await m.visibleAgents(bootstrapActor) : m.list())) roster.push({ ...dto, ladderPriority: m.ladderPriorityFor(dto, bootstrapViewerId) });
 			}
 			return Response.json(roster);
 		}
@@ -2074,7 +2074,8 @@ export class SquadServer {
 		// (no session) still needs a stable id here, not `undefined`.
 		if (url.pathname === "/api/agents" && req.method === "GET") {
 			const viewerId = this.attentionViewerId(actor);
-			return Response.json((await manager.visibleAgents(actor)).map((dto) => ({ ...dto, ladderPriority: manager.ladderPriorityFor(dto, viewerId) })));
+			const agents = typeof manager.visibleAgents === "function" ? await manager.visibleAgents(actor) : manager.list();
+			return Response.json(agents.map((dto) => ({ ...dto, ladderPriority: manager.ladderPriorityFor(dto, viewerId) })));
 		}
 		// R5: answers are a deliverable, not a transcript. They outlive the roster row that produced them,
 		// which is the single most common way a glance result used to evaporate — the agent reaped before
@@ -2184,7 +2185,8 @@ export class SquadServer {
 		// unresolvable identity never sees anyone else's `completed-unseen` state resolve differently.
 		if (url.pathname === "/api/attention/ladder" && req.method === "GET") {
 			const viewerId = this.attentionViewerId(actor);
-			const units = (await manager.visibleAgents(actor)).map((dto) => ({ id: dto.id, repo: dto.repo, priority: manager.ladderPriorityFor(dto, viewerId) }));
+			const agents = typeof manager.visibleAgents === "function" ? await manager.visibleAgents(actor) : manager.list();
+			const units = agents.map((dto) => ({ id: dto.id, repo: dto.repo, priority: manager.ladderPriorityFor(dto, viewerId) }));
 			const byRepo = new Map<string, LadderPriority[]>();
 			for (const u of units) byRepo.set(u.repo, [...(byRepo.get(u.repo) ?? []), u.priority]);
 			const projects = [...byRepo.entries()].map(([repo, priorities]) => ({ repo, priority: maxLadderPriority(priorities) }));
@@ -2336,7 +2338,7 @@ export class SquadServer {
 			if (!dropped.ok) return new Response(dropped.reason, { status: 500 }); // registry write failed; nothing changed
 			return Response.json({ ok: true, repo: dropped.repo, removed: dropped.removed, projects: manager.projects() });
 		}
-		if (url.pathname === "/api/workflows") return Response.json(workflowSnapshot(await manager.visibleAgents(actor), manager.capabilityWorkflowDefinitions()));
+		if (url.pathname === "/api/workflows") return Response.json(workflowSnapshot(typeof manager.visibleAgents === "function" ? await manager.visibleAgents(actor) : manager.list(), manager.capabilityWorkflowDefinitions()));
 		if (url.pathname === "/api/models") return Response.json({ models: mergeModelOptions(modelOptionsFromEnv(), await manager.modelOptions()) });
 		if (url.pathname === "/api/profiles") return Response.json({ profiles: manager.profiles() });
 		if (url.pathname === "/api/capabilities") return Response.json(manager.capabilities());
@@ -3465,7 +3467,7 @@ export class SquadServer {
 			const owner = this.resolveCommandManager(cmd, bootstrapAdmin, manager);
 			if (!owner) return new Response("agent not found", { status: 404 });
 			const targetId = commandAgentTarget(cmd);
-			if (targetId && typeof owner.canReadAgent === "function" && !(await owner.canReadAgent(targetId, actor))) return new Response("forbidden", { status: 403 });
+			if (targetId && owner.getAgent(targetId) && typeof owner.canReadAgent === "function" && !(await owner.canReadAgent(targetId, actor))) return new Response("forbidden", { status: 403 });
 			// kill/restart/remove are admin-tier (commandTier); applyCommand is the single authority.
 			// Surface its denial as 403 here (the WS handler swallows the same throw) — not a 2nd authz site.
 			try {
