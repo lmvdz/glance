@@ -60,3 +60,37 @@ None.
 Filed 2026-07-24 from the same live boot that produced concern 26. Deliberately NOT widened into 26:
 that concern removes noise and is safe to land immediately; this one adds emitters and needs its own
 review of what a card costs in attention.
+
+## Resolution
+Landed 2026-07-24 in the wave-5 train, after concern 26 removed the noise that made the silence
+visible.
+
+Five kinds, each shipped with its reader in the same unit per the standing rule: `unit-spawned`,
+`unit-turn-finished`, `unit-failed`, `pr-opened`, `verification-ran`. Emission is a single
+`emitLifecycleProjection` driven off `TransitionEntry` — the daemon's existing state-transition
+record — rather than call sites scattered through `squad-manager.ts`, so there is one substrate to
+reason about. The timeline fold for consecutive same-unit cards landed with it, not after. Volume is
+pinned by an assertion (a bounded five-card cycle per ordinary unit lifecycle), so a future emitter
+cannot quietly turn one of these into the next firehose — which is the failure concern 26 had to be
+filed to clean up.
+
+**One defect found by the container gate and fixed before landing.** The first implementation routed
+all five kinds through `emitUnitTranscriptEvent`, which appends a system row to the unit's own
+transcript *and then* projects to the channel. That is right for proof cards — a gate verdict or land
+merge is a record the unit earned and belongs in its thread — and wrong for lifecycle, which is
+fleet-level narration *about* the unit. It put a system row in every unit's conversation pane for
+every spawn/turn/failure/PR/verification, inflated `messageCount` (a user-visible counter), and made
+"turn finished" circular, since the card's summary is read back out of the transcript it had just
+written to. Lifecycle now projects through a synthetic entry that is never appended; it carries no
+`id`, so `projectionRefs` omits `entryId` rather than claiming a transcript row that does not exist.
+
+What caught it was `tests/workflow-terminal-marker.test.ts` asserting the restarted transcript is
+*exactly* the seeded history plus one after-action. Worth remembering the next time an exact-contents
+assertion looks brittle enough to loosen.
+
+### Verify status
+The volume bound and the reader/fold/malformed-payload tests are covered. The spec's first Verify
+line — a scratch daemon running four units through spawn → work → verify → PR, with the room
+narrating it well enough to answer "what happened while I was away?" from the timeline alone — is
+**not** yet run; it belongs to the concern 23 love-gate rig, which is where the spec says this should
+be exercised.
