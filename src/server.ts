@@ -3590,7 +3590,7 @@ export class SquadServer {
 			try {
 				return await manager.channelMemberUserIdsForAgent(e.entry.target);
 			} catch (err) {
-				console.warn(`[fanout] failed to resolve audit target membership for ${e.entry.target}: ${err instanceof Error ? err.message : String(err)}`);
+				console.warn(`[fanout] failed to resolve audit target membership for ${e.entry.target}: ${errText(err)}`);
 				return [];
 			}
 		}

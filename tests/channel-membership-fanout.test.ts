@@ -544,7 +544,11 @@ test("non-members cannot read private action items, answers, or after-actions af
 	const { mgr, url, headers, agent } = await startedPrivateAgentServer("private-artifact-membership-");
 	agent.status = "input";
 	agent.pending = [{ id: "approval", source: "ui", kind: "confirm", title: "private approval", createdAt: 1 }];
-	await saveAnswer(mgr.stateDir, { id: agent.id, question: "private question", repo: agent.repo, markdown: "private answer", askedAt: 1 });
+	// `channelId` is what keeps the artifact authorizable once the roster row is gone — the same
+	// binding the after-action arm below carries. Before answers retained it, the only thing denying a
+	// non-member was `canReadAgent` returning false for an id it no longer knew, which is absence read
+	// as denial: protected while the agent lived, open the moment it was reaped.
+	await saveAnswer(mgr.stateDir, { id: agent.id, question: "private question", repo: agent.repo, markdown: "private answer", askedAt: 1, channelId: "ops" });
 	await saveAfterAction(
 		mgr.stateDir,
 		composeAfterAction({
@@ -573,6 +577,19 @@ test("non-members cannot read private action items, answers, or after-actions af
 	expect(await responses[0]!.json()).toMatchObject({ items: [] });
 	expect(await responses[1]!.json()).toEqual([]);
 	expect(await responses[3]!.json()).toEqual([]);
+});
+
+test("an answer with no retained channel binding is org-public, deliberately", async () => {
+	// The migration stance, pinned rather than left incidental: an answer written before answers
+	// carried a `channelId` predates private channels entirely, so there is no private channel it
+	// could be leaking from, and it reads as org-public. Every answer this build writes for a
+	// channel-bound unit records the binding, so `undefined` only ever means "pre-migration".
+	// If that ever stops being true, this test is the one that should be revisited first.
+	const { mgr, url, headers } = await startedPrivateAgentServer("legacy-answer-membership-");
+	await saveAnswer(mgr.stateDir, { id: "legacy-unit", question: "legacy question", repo: "/repo", markdown: "legacy answer", askedAt: 1 });
+
+	const response = await fetch(`${url}/api/answers/legacy-unit`, { headers });
+	expect(response.status).toBe(200);
 });
 
 test("search continues past a private-heavy native-search page", async () => {

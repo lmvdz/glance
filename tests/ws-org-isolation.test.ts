@@ -26,6 +26,17 @@ type SessionKey = "orgA" | "orgA2" | "orgB";
 
 interface FakeManager {
 	list(): AgentDTO[];
+	// Membership-aware reads (concern 18). The fixtures here bind no agent to a channel, so every
+	// agent is org-public and both answers are unconditional — but the fake must IMPLEMENT them.
+	// The server calls these on every socket open; a fake that omits them used to be "fixed" by a
+	// `typeof m.visibleAgents === "function"` guard in the server, which silently degrades to
+	// "broadcast to everyone" in production. Fix the double, never the enforcement.
+	visibleAgents(actor: Actor): Promise<AgentDTO[]>;
+	canReadAgent(id: string, actor: Actor): Promise<boolean>;
+	// `undefined` is the org-public answer the fan-out dispatcher expects (a member ARRAY would mean
+	// "private, deliver only to these users" — including `[]`, which means "deliver to nobody").
+	channelMemberUserIds(channelId: string): Promise<string[] | undefined>;
+	channelMemberUserIdsForAgent(id: string): Promise<string[] | undefined>;
 	commandsFor(id: string): CommandInfo[];
 	getTranscript(id: string): TranscriptEntry[];
 	applyCommand(cmd: ClientCommand, actor: Actor): Promise<void>;
@@ -68,6 +79,10 @@ function agent(id: string): AgentDTO {
 function fakeManager(agents: AgentDTO[], transcripts: Record<string, TranscriptEntry[]>, onSubscribe?: (id: string) => void, onCommand?: (cmd: ClientCommand, actor: Actor) => void): FakeManager {
 	return {
 		list: () => agents,
+		visibleAgents: async () => agents,
+		canReadAgent: async () => true,
+		channelMemberUserIds: async () => undefined,
+		channelMemberUserIdsForAgent: async () => undefined,
 		commandsFor: () => [],
 		getTranscript: (id) => {
 			onSubscribe?.(id);

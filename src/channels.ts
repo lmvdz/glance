@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Store } from "./dal/store.ts";
 import { neutralizeDelimiters } from "./digest.ts";
+import { errText } from "./err-text.ts";
 import { redact } from "./redact.ts";
 import { EVENT_ISSUER_MANAGER } from "./transcript-event-kinds.ts";
 import type { Actor, TranscriptEntry } from "./types.ts";
@@ -240,7 +241,7 @@ export class ChannelStore {
 			if (channel.visibility !== "private") return undefined;
 			return (await this.store.listChannelMemberships(channelId)).filter((row) => row.active).map((row) => row.userId);
 		} catch (err) {
-			this._log(`channel ${channelId} membership lookup failed: ${err instanceof Error ? err.message : String(err)}`);
+			this._log(`channel ${channelId} membership lookup failed: ${errText(err)}`);
 			return [];
 		}
 	}

@@ -9266,7 +9266,7 @@ export class SquadManager extends EventEmitter {
 			},
 			actor,
 		);
-		await saveAnswer(this.stateDir, { id: dto.id, question, repo: opts.repo, markdown: "", askedAt: Date.now(), model: dto.model, harness: dto.harness });
+		await saveAnswer(this.stateDir, { id: dto.id, question, repo: opts.repo, markdown: "", askedAt: Date.now(), model: dto.model, harness: dto.harness, channelId: dto.channelId ?? null });
 		return dto;
 	}
 
@@ -9283,13 +9283,26 @@ export class SquadManager extends EventEmitter {
 	async visibleAnswers(actor: Actor, repo?: string): Promise<Answer[]> {
 		const answers = await listAnswers(this.stateDir, { repo });
 		const visible: Answer[] = [];
-		for (const answer of answers) if (await this.canReadAgent(answer.id, actor)) visible.push(answer);
+		for (const answer of answers) if (await this.canReadAnswer(answer, actor)) visible.push(answer);
 		return visible;
 	}
 
 	async visibleAnswer(id: string, actor: Actor): Promise<Answer | undefined> {
 		const answer = await readAnswer(this.stateDir, id);
-		return answer && (await this.canReadAgent(id, actor)) ? answer : undefined;
+		return answer && (await this.canReadAnswer(answer, actor)) ? answer : undefined;
+	}
+
+	/** Authorize an answer against the binding the ARTIFACT retains, not against the agent record —
+	 *  `Answer.id` is the agent's id, but an answer outlives the roster row, so `canReadAgent` stops
+	 *  being an authorization answer the moment the unit is reaped (it becomes "unknown id", which the
+	 *  agent routes must read as "let the route 404", not as a denial). A legacy answer with no
+	 *  `channelId` predates private channels and is org-public; a live agent still gets the live check,
+	 *  so a channel re-binding takes effect immediately rather than being frozen at write time. */
+	private async canReadAnswer(answer: Answer, actor: Actor): Promise<boolean> {
+		const live = this.agents.get(answer.id)?.dto.channelId;
+		const channelId = live ?? answer.channelId;
+		if (channelId === undefined || channelId === null) return true;
+		return this.channelStore.canReadChannel(channelId, actor);
 	}
 
 	/** After-action reports for terminal units, newest death first — they outlive the reaped roster row. */
@@ -9428,6 +9441,8 @@ export class SquadManager extends EventEmitter {
 				durationMs: answeredAt - askedAt,
 				model: rec.dto.model,
 				harness: rec.dto.harness,
+				// Retained so the artifact stays authorizable after the roster row is reaped (concern 18).
+				channelId: rec.dto.channelId ?? null,
 			});
 			if (!ok) this.log("warn", `${rec.dto.name}: answer could not be persisted (disk write failed)`);
 			else this.log("info", `${rec.dto.name}: answer saved (${final.text.trim().length} chars) — glance answers ${rec.dto.id}`);
@@ -11422,7 +11437,15 @@ export class SquadManager extends EventEmitter {
 			return !channelId || this.channelStore.canReadChannel(channelId, actor);
 		}
 		const placeholder = this.deadPlaceholder(agentId);
-		return !!placeholder && (!placeholder.channelId || await this.channelStore.canReadChannel(placeholder.channelId, actor));
+		if (placeholder) return !placeholder.channelId || (await this.channelStore.canReadChannel(placeholder.channelId, actor));
+		// Unknown id — neither live nor a dead placeholder. This predicate answers "may the actor READ
+		// this agent", and an id that names no agent has nothing to read and nothing to leak; the route
+		// owns the not-found answer. Returning false here would turn every 404 into a 403 (authz.test's
+		// "admin clears the gate, the handler then 404s" is exactly that contract) and would deny the
+		// documented dead-session reads. Absence of a record is not a membership denial — the same rule
+		// that keeps `memberUserIds` from treating a missing channel as public, applied in the other
+		// direction.
+		return true;
 	}
 	async visibleAgents(actor: Actor): Promise<AgentDTO[]> {
 		const out: AgentDTO[] = [];
