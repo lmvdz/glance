@@ -28,6 +28,7 @@ describe('Hub hash router', () => {
     expect(gateVerdictHref('ops/night', 'entry:42')).toBe('#/gate-verdict/ops%2Fnight/entry%3A42');
     expect(parseHubHash('#/gate-verdict/ops%2Fnight/entry%3A42')).toEqual({ kind: 'workbench', view: 'gate-verdict', id: 'ops/night\u0000entry:42' });
     expect(workbenchHref('gate-verdict', 'ops/night\u0000entry:42')).toBe('#/gate-verdict/ops%2Fnight/entry%3A42');
+  });
 
   test('task route opens a specific TaskDetail DAG surface', () => {
     expect(parseHubHash('#/workbench/task/feat%201')).toEqual({ kind: 'workbench', view: 'task', id: 'feat 1' });

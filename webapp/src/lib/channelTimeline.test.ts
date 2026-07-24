@@ -55,6 +55,7 @@ describe('channel timeline dispatch', () => {
     expect(resolved.id).toBe('resolved-card');
     expect(resolved.title).toBe('Resolved · Approve deploy');
     expect(resolved.tone).toBe('success');
+  });
 
   test('plan cards route to the TaskDetail plan DAG', () => {
     const card = dispatchChannelCard(entry({
@@ -66,6 +67,7 @@ describe('channel timeline dispatch', () => {
     expect(card.title).toBe('the room');
     expect(card.href).toBe('#/workbench/task/feat%201');
     expect(card.pinned).toEqual([{ label: 'Concerns', value: '14' }]);
+  });
 
   test('token-burn snapshots open the fleet economics door', () => {
     const card = dispatchChannelCard(entry({
