@@ -1,5 +1,5 @@
 # Projection routing — unit events become channel cards, deterministically
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -36,3 +36,6 @@ None (rendering is 08/12+).
 - #fleet receives only filtered kinds (a land-attempt storm doesn't flood it).
 - Pending request: card in channel + item in attention lane; answering resolves both.
 - Two-org test: projections never cross orgs.
+
+## Resolution
+Landed 2026-07-23 (PR #231): channelId-at-spawn, #fleet default with kind filter, manager-authored pointer-cards, needs-you one-substrate with the attention lane. Two-org isolation tested.

@@ -1,5 +1,5 @@
 # HubShell root — the room owns the viewport (SERIALIZED)
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -39,3 +39,6 @@ None.
   via routes and render unchanged.
 - `bun run build` green (tsc --noEmit); existing component tests green.
 - agent-browser screenshot of cold-boot frame attached to the PR for the checkpoint.
+
+## Resolution
+Landed 2026-07-23 in train wave1a (PR #234): HubShell root route owning the viewport, hash router, workbench demoted to door routes, cold boot in #fleet. First-frame checkpoint screenshot at plans/the-room/wave1-first-frame.png; operator checkpoint passed informally (proceed signal via merge).
