@@ -108,3 +108,28 @@ describe("ingestCodex — end to end + idempotency + resumed-file delta", () => 
 		expect(r.ingested).toBe(0);
 	});
 });
+
+test("a file whose mtime lands in the same millisecond as the call is ready, not 'still live'", async () => {
+	// Regression pin for a ~22%-per-run flake: fs mtimeMs is a sub-millisecond float, Date.now() is
+	// truncated, so a just-written file can report an mtime AHEAD of `now`. The idle check then went
+	// negative and skipped a ready file.
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "codex-mtime-"));
+	const repo = path.join(root, "repo");
+	const sessions = path.join(root, "codex", "sessions", "2026", "06", "26");
+	await fs.mkdir(sessions, { recursive: true });
+	await fs.mkdir(repo, { recursive: true });
+	const file = path.join(sessions, `rollout-2026-06-26T10-46-05-${SID}.jsonl`);
+	await fs.writeFile(file, rollout(repo).join("\n"));
+	const mtimeMs = (await fs.stat(file)).mtimeMs;
+
+	// `now` one whole millisecond BEHIND the float mtime — exactly what Date.now() truncation produces.
+	const result = await ingestCodex({
+		stateDir: path.join(root, "state"),
+		repo,
+		codexSessionsDir: path.join(root, "codex", "sessions"),
+		idleMs: 0,
+		now: Math.floor(mtimeMs),
+	});
+	expect(result.ingested).toBe(1);
+	await fs.rm(root, { recursive: true, force: true });
+});
