@@ -8,7 +8,7 @@ import type { ChannelEntry } from "../src/channels.ts";
 import { DEFAULT_CHANNEL_ID } from "../src/channels.ts";
 import { LOCAL_ACTOR } from "../src/federation.ts";
 import { SquadManager } from "../src/squad-manager.ts";
-import { TRANSCRIPT_EVENT_GATE_VERDICT, TRANSCRIPT_EVENT_LAND_ASSESSMENT, TRANSCRIPT_EVENT_PLAN_CARD } from "../src/transcript-event-kinds.ts";
+import { TRANSCRIPT_EVENT_DESIGN_REVISED, TRANSCRIPT_EVENT_GATE_VERDICT, TRANSCRIPT_EVENT_LAND_ASSESSMENT, TRANSCRIPT_EVENT_PLAN_CARD, TRANSCRIPT_EVENT_RETURN_EMIT } from "../src/transcript-event-kinds.ts";
 import type { AgentDTO, ClientCommand, PersistedAgent, RpcExtensionUIRequest, RpcSessionState } from "../src/types.ts";
 
 const tmps: string[] = [];
@@ -132,6 +132,39 @@ test("mention steer echo is authored from resolved target, not client echo prove
 		actor: LOCAL_ACTOR.id,
 		target: dto.id,
 	});
+	expect((await mgr.channelEntries("ops")).filter((candidate) => candidate.event?.kind === "mention-steer" || candidate.event?.kind === TRANSCRIPT_EVENT_RETURN_EMIT)).toHaveLength(1);
+	await mgr.stop();
+});
+
+test("Intervence steer and CLI steer return-emit into the routed room", async () => {
+	const { mgr, host, repo } = await makeMgr("projection-return-emit");
+	await createChannel(host, "ops");
+	await createChannel(host, "cli-room");
+	const routed = await mgr.create({ name: "routed-agent", repo, approvalMode: "yolo", channelId: "ops", autoRoute: false });
+	const cli = await mgr.create({ name: "cli-agent", repo, approvalMode: "yolo", channelId: "cli-room", autoRoute: false });
+	const fromIntervence = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === TRANSCRIPT_EVENT_RETURN_EMIT && entry.text.includes("Intervence says go"));
+	const fromCli = waitForChannelEntry(mgr, "cli-room", (entry) => entry.event?.kind === TRANSCRIPT_EVENT_RETURN_EMIT && entry.text.includes("CLI says go"));
+
+	await mgr.applyCommand({ type: "prompt", id: routed.id, message: "raw Intervence context", displayText: "Intervence says go", channelId: "ops" }, LOCAL_ACTOR);
+	await mgr.applyCommand({ type: "prompt", id: cli.id, message: "CLI says go" }, LOCAL_ACTOR);
+	const webCard = await fromIntervence;
+	const cliCard = await fromCli;
+
+	expect(webCard.event?.payload).toMatchObject({ actor: LOCAL_ACTOR.id, action: "prompt", target: routed.id });
+	expect(cliCard.event?.payload).toMatchObject({ actor: LOCAL_ACTOR.id, action: "prompt", target: cli.id });
+	expect(webCard.text).toBe(`${LOCAL_ACTOR.id} steered routed-agent: Intervence says go`);
+	expect(cliCard.channelId).toBe("cli-room");
+	await mgr.stop();
+});
+
+test("automation-sourced prompt does not return-emit", async () => {
+	const { mgr, host, repo } = await makeMgr("projection-return-emit-auto");
+	await createChannel(host, "ops");
+	const dto = await mgr.create({ name: "auto-agent", repo, approvalMode: "yolo", channelId: "ops", autoRoute: false });
+
+	await mgr.applyCommand({ type: "prompt", id: dto.id, message: "heartbeat", source: "auto" }, LOCAL_ACTOR);
+
+	expect((await mgr.channelEntries("ops")).filter((entry) => entry.event?.kind === TRANSCRIPT_EVENT_RETURN_EMIT)).toHaveLength(0);
 	await mgr.stop();
 });
 
@@ -234,6 +267,30 @@ test("plan revision candidates project plan cards with DAG door refs", async () 
 	expect(card.event.payload.face.title).toBe("the-room");
 	expect(card.event.payload.face.concernCount).toBe(2);
 	expect(card.event.payload.face.pinned).toMatchObject({ concerns: 2, revision: "split the door concern" });
+	await mgr.stop();
+});
+
+test("plan-surface save emits design-revised room card", async () => {
+	const { mgr, host, repo } = await makeMgr("projection-design-revised");
+	await createChannel(host, "ops");
+	await fs.mkdir(path.join(repo, "plans", "the-room"), { recursive: true });
+	await fs.writeFile(path.join(repo, "plans", "the-room", "01-a.md"), "# A\nSTATUS: open\n");
+	const feature = mgr.createFeature({ title: "The room", repo, planDir: "plans/the-room" });
+	await mgr.create({ name: "planner", repo, approvalMode: "yolo", channelId: "ops", autoRoute: false, featureId: feature.id });
+	const projected = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === TRANSCRIPT_EVENT_DESIGN_REVISED);
+
+	const concern = await mgr.updateConcern(feature.id, { repo, file: "01-a.md", status: "done", blockedBy: [] }, LOCAL_ACTOR);
+	const card = await projected;
+
+	expect(concern?.status).toBe("done");
+	expect(card.text).toContain("design revised");
+	expect(card.event?.payload).toMatchObject({
+		actor: LOCAL_ACTOR.id,
+		featureId: feature.id,
+		planPath: "01-a.md",
+		doorSurface: "plan",
+		face: { title: "Design revised", detail: "01-a.md" },
+	});
 	await mgr.stop();
 });
 
