@@ -24,10 +24,12 @@ import { CommandPalette } from './components/CommandPalette';
 import { OmpGraphPanel } from './components/OmpGraphPanel';
 import { FogView } from './components/FogView';
 import { DailyPanel } from './components/DailyPanel';
+import { FleetEconomicsView } from './components/FleetEconomicsView';
 import { IntervenceView } from './components/IntervenceView';
 import { DesignReviewView } from './components/DesignReviewView';
 import { PlanRealityView } from './components/PlanRealityView';
 import { PlanBriefView } from './components/PlanBriefView';
+import { GateVerdictProofView } from './components/GateVerdictProofView';
 import { WorkspaceCockpit } from './components/WorkspaceCockpit';
 import { OrgSettings } from './components/OrgSettings';
 import { FileSignIn } from './components/FileSignIn';
@@ -54,12 +56,15 @@ const useHubRoute = () => {
 };
 
 const WorkbenchRoute = ({ route }: { route: Extract<HubRoute, { kind: 'workbench' }> }) => {
-  const { selectedTaskId, currentProject, tasks, taskFilter, tasksListMode, agents, openIntervene, reviewTaskId, reviewDocPath, capabilities, publicCatalog } = useTaskContext();
+  const { selectedTaskId, selectTask, currentProject, tasks, taskFilter, tasksListMode, agents, openIntervene, reviewTaskId, reviewDocPath, capabilities, publicCatalog } = useTaskContext();
   const { status } = useAuth();
 
   React.useEffect(() => {
     if (route.view === 'intervene' && route.id) openIntervene(route.id);
   }, [route.view, route.id]);
+  React.useEffect(() => {
+    if (route.view === 'task' && route.id) selectTask(route.id);
+  }, [route.view, route.id, selectTask]);
   const interveneAgent = React.useMemo(() => agents.find((a) => a.id === route.id), [agents, route.id]);
   const reviewTask = React.useMemo(() => tasks.find((t) => t.id === reviewTaskId || t.sourceId === reviewTaskId), [tasks, reviewTaskId]);
   const tasksPageContext = React.useMemo(
@@ -84,6 +89,7 @@ const WorkbenchRoute = ({ route }: { route: Extract<HubRoute, { kind: 'workbench
   if (route.view === 'fleet') return <WorkspaceCockpit />;
   if (route.view === 'fog') return <FogView />;
   if (route.view === 'daily') return <DailyPanel />;
+  if (route.view === 'economics') return <FleetEconomicsView />;
   if (route.view === 'intervene') {
     return (
       <PageContextScope value={intervenePageContext}>
@@ -108,6 +114,7 @@ const WorkbenchRoute = ({ route }: { route: Extract<HubRoute, { kind: 'workbench
   if (route.view === 'graph') return <OmpGraphPanel />;
   if (route.view === 'plan-reality') return <PlanRealityView />;
   if (route.view === 'plans') return <PlanBriefView />;
+  if (route.view === 'gate-verdict') return <GateVerdictProofView routeId={route.id} />;
   if (route.view === 'org') {
     return (
       <PageContextScope value={orgPageContext}>

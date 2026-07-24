@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { buildChannelThreadViews, previewChannelBody } from "../webapp/src/lib/channelTimeline.ts";
-import { hubHref, parseHubHash } from "../webapp/src/lib/router.ts";
+import { gateVerdictHref, hubHref, parseHubHash } from "../webapp/src/lib/router.ts";
 import type { ChannelEntry } from "../webapp/src/lib/dto.ts";
 
 const entry = (patch: Partial<ChannelEntry> & Pick<ChannelEntry, "id" | "seq" | "text">): ChannelEntry => ({
@@ -29,6 +29,12 @@ test("channel entry deep links round-trip through the hash router", () => {
 	const href = hubHref("ops/incidents", "entry:42");
 	expect(href).toBe("#/channel/ops%2Fincidents/entry/entry%3A42");
 	expect(parseHubHash(href)).toEqual({ kind: "hub", channelId: "ops/incidents", entryId: "entry:42" });
+});
+
+test("gate verdict deep links round-trip channel and entry ids through the hash router", () => {
+	const href = gateVerdictHref("ops/incidents", "entry:42");
+	expect(href).toBe("#/gate-verdict/ops%2Fincidents/entry%3A42");
+	expect(parseHubHash(href)).toEqual({ kind: "workbench", view: "gate-verdict", id: "ops/incidents\u0000entry:42" });
 });
 
 test("previewChannelBody compacts multi-line snippets", () => {

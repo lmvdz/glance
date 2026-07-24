@@ -1,5 +1,5 @@
 # Gate-verdict door — GateVerdictCard + historical proof mode
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -33,3 +33,6 @@ None.
 - Land a unit in scratch daemon, let it be removed → verdict card still renders; click → post-
   mortem with verdict + done-proof + sha; resident unit → live view. Door-open latency measured
   and recorded on the PR (design risk gate).
+
+## Resolution
+Landed in train wave3: GateVerdictCard, gateVerdictProof endpoint (read-only over existing stores), resident/post-mortem modes, tested against landed-and-removed units.

@@ -1,9 +1,10 @@
 import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertCircle, CheckCircle2, CircleDot, GitMerge, Hash, Reply, ShieldAlert } from 'lucide-react';
+import { AlertCircle, CheckCircle2, CircleDot, FileText, Flame, GitMerge, Hash, Reply, ShieldAlert } from 'lucide-react';
 import type { ChannelEntry } from '../../lib/dto';
 import { buildChannelThreadViews, type ChannelCardTone, type ChannelCardView } from '../../lib/channelTimeline';
 import { hubHref } from '../../lib/router';
 import { channelScrollAfterRowsChange, channelScrollAfterUserScroll, initialChannelScrollState, type ChannelScrollState } from '../../lib/channelScroll';
+import { GateVerdictCard } from './GateVerdictCard';
 
 const toneClass: Record<ChannelCardTone, string> = {
   neutral: 'border-zinc-800 bg-[#0c0c0e] text-zinc-200',
@@ -17,11 +18,15 @@ const iconClass: Record<ChannelCardView['kind'], typeof ShieldAlert> = {
   message: CircleDot,
   'needs-you': ShieldAlert,
   'gate-verdict': CheckCircle2,
+  'land-attempt': GitMerge,
+  'land-assessment': ShieldAlert,
   'land-merge': GitMerge,
+  'token-burn-snapshot': Flame,
   'mention-steer': CircleDot,
   'mention-confirm-required': ShieldAlert,
   'mention-steer-failed': AlertCircle,
   'spawn-proposal': CircleDot,
+  'plan-card': FileText,
   'unknown-event': CircleDot,
 };
 
@@ -84,6 +89,36 @@ const ChannelTimelineRow = memo(function ChannelTimelineRow({ view, onReply }: {
       </li>
     );
   }
+  if (view.kind === 'gate-verdict') return <GateVerdictCard view={view} />;
+  const cardClassName = `block w-full max-w-2xl rounded-2xl border px-3 py-3 text-left text-sm shadow-sm transition-[border-color,background-color,transform] duration-200 hover:-translate-y-0.5 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 ${toneClass[view.tone]}`;
+  const cardContent = (
+    <div className="flex items-start gap-3">
+      <div className="mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full border border-current/20 bg-black/20">
+        <Icon className="h-4 w-4" aria-hidden />
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-2">
+          {view.eyebrow ? <span className="text-[10px] font-medium uppercase tracking-[0.14em] opacity-60">{view.eyebrow}</span> : null}
+          <span className="rounded-full bg-current/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.12em] opacity-80">{view.kind}</span>
+          <span className="text-[10px] uppercase tracking-[0.14em] opacity-55">{view.authorLabel}</span>
+          <span className="text-[10px] tabular-nums opacity-50">#{view.entry.seq}</span>
+        </div>
+        <h3 className="mt-1 text-sm font-semibold tracking-tight">{view.title}</h3>
+        <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-6 opacity-85">{view.body}</p>
+        {view.pinned.length ? (
+          <dl className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+            {view.pinned.map((item) => (
+              <div key={item.label} className="rounded-lg border border-current/10 bg-black/10 px-2 py-1.5">
+                <dt className="text-[10px] uppercase tracking-[0.12em] opacity-50">{item.label}</dt>
+                <dd className="mt-0.5 truncate text-xs font-medium">{item.value}</dd>
+              </div>
+            ))}
+          </dl>
+        ) : null}
+        {view.detail ? <p className="mt-2 text-xs leading-5 opacity-60">{view.detail}</p> : null}
+      </div>
+    </div>
+  );
   return (
     <li data-entry-id={view.id} className="group flex justify-start">
       <article className={`w-full max-w-2xl rounded-2xl border px-3 py-3 text-sm shadow-sm transition-[border-color,background-color,transform] duration-200 hover:-translate-y-0.5 ${toneClass[view.tone]}`}>
@@ -98,7 +133,11 @@ const ChannelTimelineRow = memo(function ChannelTimelineRow({ view, onReply }: {
               <span className="text-[10px] uppercase tracking-[0.14em] opacity-55">{view.authorLabel}</span>
               <span className="text-[10px] tabular-nums opacity-50">#{view.entry.seq}</span>
             </div>
-            <h3 className="mt-1 text-sm font-semibold tracking-tight">{view.title}</h3>
+            {(view.actionHref ?? view.href) ? (
+              <a href={view.actionHref ?? view.href} className="mt-1 block text-sm font-semibold tracking-tight underline-offset-4 hover:underline focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900">{view.title}</a>
+            ) : (
+              <h3 className="mt-1 text-sm font-semibold tracking-tight">{view.title}</h3>
+            )}
             <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-6 opacity-85">{view.body}</p>
             {view.pinned.length ? (
               <dl className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
@@ -111,6 +150,14 @@ const ChannelTimelineRow = memo(function ChannelTimelineRow({ view, onReply }: {
               </dl>
             ) : null}
             {view.detail ? <p className="mt-2 text-xs leading-5 opacity-60">{view.detail}</p> : null}
+            {view.href ? (
+              <a
+                href={view.href}
+                className="mt-3 inline-flex min-h-10 items-center justify-center rounded-full border border-current/15 bg-current/10 px-3 text-xs font-semibold transition-[background-color,border-color] hover:bg-current/15 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900"
+              >
+                Open plan DAG
+              </a>
+            ) : null}
           </div>
         </div>
       </article>

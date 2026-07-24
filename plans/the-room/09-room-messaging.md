@@ -1,5 +1,5 @@
 # Room messaging — humans talk, presence shows
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -28,3 +28,6 @@ None.
 - Two browsers, two DB users: A posts, B sees it live with A's name; presence shows both; B's
   history after reload is complete (durable rows).
 - Composer drafts survive reload per channel. Existing sendCore/Composer tests green.
+
+## Resolution
+Landed 2026-07-24 in train wave2 (PR #243): channel-post send path, draft persistence, attribution, presence polish.

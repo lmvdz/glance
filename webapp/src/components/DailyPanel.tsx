@@ -50,7 +50,7 @@ export const AdoptionCounters: React.FC<{ view: AdoptionView }> = ({ view }) => 
       Adoption &middot; the loop&rsquo;s real success metric
     </div>
     {view.hasActivity ? (
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
         {view.series.map((s) => (
           <StatTile
             key={s.key}
@@ -172,9 +172,9 @@ export const FrictionLedger: React.FC<{
 /** Verdict sentence under the title -- honest about the empty case, never a fake-zero flex. */
 function subtitleFor(view: AdoptionView | null): string {
   if (!view) return "Loading the dogfood loop's signals";
-  if (!view.hasActivity) return 'No casual sessions, prompts, or push taps in the last 7 days';
-  const [sessions, prompts, taps] = view.series;
-  return `${sessions.week} sessions · ${prompts.week} prompts · ${taps.week} push taps in the last 7 days`;
+  if (!view.hasActivity) return 'No casual sessions, prompts, push taps, or room interactions in the last 7 days';
+  const [sessions, prompts, taps, room] = view.series;
+  return `${sessions.week} sessions · ${prompts.week} prompts · ${taps.week} push taps · ${room.week} room interactions in the last 7 days`;
 }
 
 export const DailyPanel: React.FC = () => {
@@ -260,8 +260,8 @@ export const DailyPanel: React.FC = () => {
     >
       {!loaded && !view ? (
         <div className="space-y-4">
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3" aria-label="Loading adoption counters">
-            {[1, 2, 3].map((n) => (
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-label="Loading adoption counters">
+            {[1, 2, 3, 4].map((n) => (
               <div key={n} className="h-20 animate-pulse rounded-lg bg-gray-100 dark:bg-gray-800" />
             ))}
           </div>

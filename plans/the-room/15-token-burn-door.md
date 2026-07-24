@@ -1,5 +1,5 @@
 # Token-burn door — fleet economics from the room
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -27,3 +27,6 @@ None.
 ## Verify
 - Unit completes in scratch daemon → burn card with real receipt numbers; door shows the unit in
   a fleet table; numbers match `GET` roster receipt fields exactly (no drift).
+
+## Resolution
+Landed in train wave3: token-burn-snapshot kind+reader, TokenBurnCard, fleet-economics route over existing receipt data.

@@ -17,6 +17,7 @@ export interface AdoptionCountersWire {
   casualSessionsByDay: Record<string, number>;
   promptsByDay: Record<string, number>;
   pushTapsByDay: Record<string, number>;
+  roomInteractionsByDay?: Record<string, number>;
 }
 
 /** Mirrors src/types.ts's `FrictionEntry`. `source` is absent on any row written before the field
@@ -43,7 +44,7 @@ export function utcDayOf(ts: number): string {
 /** One counter's render model: today's value, the trailing-7-day sum (today inclusive), and the
  *  7-point series oldest->newest (`spark[6]` is today) for the inline sparkline. */
 export interface CounterSeries {
-  key: 'sessions' | 'prompts' | 'pushTaps';
+  key: 'sessions' | 'prompts' | 'pushTaps' | 'roomInteractions';
   label: string;
   today: number;
   week: number;
@@ -59,8 +60,9 @@ export interface AdoptionView {
   hasActivity: boolean;
 }
 
-/** True iff `v` is a structurally-valid counters payload (three record fields, numeric values) --
- *  mirrors src/adoption-counters.ts's `isAdoptionCounters`, applied at the daemon trust boundary. */
+/** True iff `v` is a structurally-valid counters payload (three legacy record fields plus optional
+ *  room interactions, all numeric) -- mirrors src/adoption-counters.ts's `isAdoptionCounters`,
+ *  applied at the daemon trust boundary. */
 export function isAdoptionCountersWire(v: unknown): v is AdoptionCountersWire {
   if (typeof v !== 'object' || v === null) return false;
   const o = v as Record<string, unknown>;
@@ -73,17 +75,19 @@ export function isAdoptionCountersWire(v: unknown): v is AdoptionCountersWire {
 /** Coerce an untyped `/api/adoption` body to a safe counters shape -- a malformed/old-daemon payload
  *  becomes all-empty (-> honest "no activity") instead of throwing inside the panel. */
 export function coerceAdoptionCounters(v: unknown): AdoptionCountersWire {
-  return isAdoptionCountersWire(v) ? v : { casualSessionsByDay: {}, promptsByDay: {}, pushTapsByDay: {} };
+  if (!isAdoptionCountersWire(v)) return { casualSessionsByDay: {}, promptsByDay: {}, pushTapsByDay: {}, roomInteractionsByDay: {} };
+  return { ...v, roomInteractionsByDay: v.roomInteractionsByDay ?? {} };
 }
 
 const COUNTER_DEFS: ReadonlyArray<{ key: CounterSeries['key']; label: string; pick: (c: AdoptionCountersWire) => Record<string, number> }> = [
   { key: 'sessions', label: 'Casual sessions', pick: (c) => c.casualSessionsByDay },
   { key: 'prompts', label: 'Prompts', pick: (c) => c.promptsByDay },
   { key: 'pushTaps', label: 'Push taps', pick: (c) => c.pushTapsByDay },
+  { key: 'roomInteractions', label: 'Room interactions', pick: (c) => c.roomInteractionsByDay ?? {} },
 ];
 
 /**
- * Build the three counter series over the trailing 7 UTC days (today inclusive). `now` is injectable
+ * Build the four counter series over the trailing 7 UTC days (today inclusive). `now` is injectable
  * so the window is deterministic in tests. Missing days read as 0 (the maps are sparse). Pure.
  */
 export function buildAdoptionView(counters: AdoptionCountersWire, now: number = Date.now()): AdoptionView {

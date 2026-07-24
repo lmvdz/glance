@@ -93,6 +93,8 @@ import { canTransition, dedupeTransitions, deriveStatus, followLineage, type Der
 import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, withRepoLandLock } from "./land.ts";
 import { LandAssessmentHook } from "./land-assessment/hook.ts";
 import { readRecentLandAttemptEvents } from "./land-assessment/store.ts";
+import { reconstructRepositoryStore, type ReconstructedAttempt } from "./land-assessment/store-reader.ts";
+import { computeRepositoryId } from "./land-assessment/id.ts";
 // Aliased: WorktreeInfo (worktree-reaper.ts) already has an `aheadOfBase` FIELD of its own — importing
 // under the same bare name would read as if that field and this function were the same thing.
 import { aheadOfBase as computeAheadOfBase, aheadUnknown, resolveLandMode } from "./land-mode.ts";
@@ -219,7 +221,9 @@ import {
 	TRANSCRIPT_EVENT_LAND_ATTEMPT,
 	TRANSCRIPT_EVENT_LAND_MERGE,
 	TRANSCRIPT_EVENT_NEEDS_YOU,
+	TRANSCRIPT_EVENT_PLAN_CARD,
 } from "./transcript-event-kinds.ts";
+import { TRANSCRIPT_EVENT_TOKEN_BURN_SNAPSHOT, fleetTokenBurnPayload, tokenBurnFace, unitTokenBurnPayload } from "./token-burn.ts";
 import { truncateLabel } from "./text-util.ts";
 import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
 import { ChannelStore, DEFAULT_CHANNEL_ID, type ChannelEntry, type ClientChannelPost } from "./channels.ts";
@@ -260,6 +264,7 @@ const DEFAULT_FLEET_CARD_KINDS: Record<string, true> = {
 	[TRANSCRIPT_EVENT_NEEDS_YOU]: true,
 	[TRANSCRIPT_EVENT_GATE_VERDICT]: true,
 	[TRANSCRIPT_EVENT_LAND_MERGE]: true,
+	[TRANSCRIPT_EVENT_PLAN_CARD]: true,
 };
 
 const MAX_TRANSCRIPT = 800;
@@ -914,6 +919,20 @@ export interface CommissionOptions {
 	requireAcceptance?: boolean;
 	/** Worker dir override. Default: <stateDir>/workers/<name>. */
 	dir?: string;
+}
+
+function recordObject(value: unknown): Record<string, unknown> | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	return value as Record<string, unknown>;
+}
+
+function validationRecord(value: unknown): ValidationRecord | undefined {
+	const rec = recordObject(value);
+	if (!rec) return undefined;
+	if (rec.verdict !== "pass" && rec.verdict !== "veto" && rec.verdict !== "abstain" && rec.verdict !== "skipped" && rec.verdict !== "inconclusive") return undefined;
+	if (typeof rec.agreement !== "number" || typeof rec.confidence !== "number" || typeof rec.rationale !== "string" || typeof rec.ranAt !== "number") return undefined;
+	if (!Array.isArray(rec.perCriterion)) return undefined;
+	return rec as unknown as ValidationRecord;
 }
 
 export class SquadManager extends EventEmitter {
@@ -3641,7 +3660,7 @@ export class SquadManager extends EventEmitter {
 						provenAt: Date.now(),
 					});
 				}
-				this.emitUnitTranscriptEvent(w.agentId, TRANSCRIPT_EVENT_LAND_MERGE, `land merge finalized · ${this.safeEventLabel(w.branch ?? "changes")} · ${res.mode ?? "local"}`, { stage: "finalized", repo: pf.repo, branch: w.branch, agentId: w.agentId, featureId: id, issueId: rec?.dto.issue?.id, issueIdentifier: rec?.dto.issue?.identifier, mode: res.mode ?? "local", prUrl: res.prUrl, prNumber: res.prNumber, prState: res.prState, detail: res.detail });
+				this.emitUnitTranscriptEvent(w.agentId, TRANSCRIPT_EVENT_LAND_MERGE, `land merge finalized · ${this.safeEventLabel(w.branch ?? "changes")} · ${res.mode ?? "local"}`, { stage: "finalized", repo: pf.repo, branch: w.branch, agentId: w.agentId, featureId: id, issueId: rec?.dto.issue?.id, issueIdentifier: rec?.dto.issue?.identifier, mode: res.mode ?? "local", prUrl: res.prUrl, prNumber: res.prNumber, prState: res.prState, outcome: res.prState ?? "merged", doneProofVerified: res.detail?.includes("landed onto a red baseline") ? "red-baseline" : "green", detail: res.detail });
 				void this.closeLandedIssue(rec?.dto.issue, { branch: w.branch, repo: pf.repo }); // real merge ⇒ close its tracking issue (idempotent)
 			}
 		}
@@ -4065,7 +4084,7 @@ export class SquadManager extends EventEmitter {
 						provenAt: Date.now(),
 					});
 				}
-				this.emitUnitTranscriptEvent(id, TRANSCRIPT_EVENT_LAND_MERGE, `land merge finalized · ${this.safeEventLabel(dto.branch ?? "changes")} · ${result.mode ?? "local"}`, { stage: "finalized", repo: dto.repo, branch: dto.branch, agentId: id, featureId: dto.featureId, issueId: dto.issue?.id, issueIdentifier: dto.issue?.identifier, mode: result.mode ?? "local", prUrl: result.prUrl, prNumber: result.prNumber, prState: result.prState, detail: result.detail ?? result.message });
+				this.emitUnitTranscriptEvent(id, TRANSCRIPT_EVENT_LAND_MERGE, `land merge finalized · ${this.safeEventLabel(dto.branch ?? "changes")} · ${result.mode ?? "local"}`, { stage: "finalized", repo: dto.repo, branch: dto.branch, agentId: id, featureId: dto.featureId, issueId: dto.issue?.id, issueIdentifier: dto.issue?.identifier, mode: result.mode ?? "local", prUrl: result.prUrl, prNumber: result.prNumber, prState: result.prState, outcome: result.prState ?? "merged", doneProofVerified: result.detail?.includes("landed onto a red baseline") ? "red-baseline" : "green", detail: result.detail ?? result.message });
 				await this.closeLandedIssue(dto.issue, { branch: dto.branch, repo: dto.repo }); // real merge ⇒ close its tracking issue (idempotent, best-effort)
 			} else this.log("info", `not closing ${dto.issue?.identifier ?? dto.issue?.id ?? id}: land made no merge`);
 		}
@@ -6296,10 +6315,12 @@ export class SquadManager extends EventEmitter {
 		// gate that judged nothing about it (code-review, CONFIRMED). New work only.
 		if (costMode === "enforce" && opts.laneSource === undefined) {
 			// tierOf(opts.thinking), NOT the "low"-defaulted `thinking` local: receipts stamp their tier
-			// from rec.options.thinking (the same undefaulted value), and a gate that queries a different
-			// tier key than the data was written with silently never matches a cell.
+			// from rec.options.thinking; querying a different tier silently misses the cost cell.
 			const verdict = await shadowCostCheck(this.stateDir, opts.model, tierOf(opts.thinking), (line) => this.log("warn", line), resolvedLane, laneAppliesPrivilege);
-			if (verdict) this.learningMetrics.record("cost-gate-verdict", 1, { action: verdict.action, lane: resolvedLane, mode: costMode });
+			if (verdict) {
+				this.learningMetrics.record("cost-gate-verdict", 1, { action: verdict.action, lane: resolvedLane, mode: costMode });
+				await this.emitFleetTokenBurnRollup(verdict);
+			}
 			if (verdict?.action === "deny") {
 				this.automation.for("land", opts.repo)({ durationMs: 0, level: "warn", detail: `${UNATTACHED_ESCALATION_MARKER} — ${verdict.line}` });
 				throw new Error(verdict.line);
@@ -6307,7 +6328,10 @@ export class SquadManager extends EventEmitter {
 			if (verdict?.action === "ask") costGateAsk = verdict;
 		} else {
 			void shadowCostCheck(this.stateDir, opts.model, tierOf(opts.thinking), (line) => this.log("warn", line), resolvedLane, laneAppliesPrivilege).then((verdict) => {
-				if (verdict) this.learningMetrics.record("cost-gate-verdict", 1, { action: verdict.action, lane: resolvedLane, mode: costMode });
+				if (verdict) {
+					this.learningMetrics.record("cost-gate-verdict", 1, { action: verdict.action, lane: resolvedLane, mode: costMode });
+					void this.emitFleetTokenBurnRollup(verdict);
+				}
 			});
 		}
 
@@ -9312,6 +9336,7 @@ export class SquadManager extends EventEmitter {
 		const conf = scoreConfidence({ verificationState: rec.dto.verificationState ?? "unknown", filesTouched: receipt.filesTouched.length, validator, sameLineage: rec.dto.validation?.sameLineage, lensAdvisory: lensAdvisoryBucket(rec.dto.validation) });
 		receipt.confidence = conf;
 		await appendReceipt(this.stateDir, receipt); // full receipt on disk (both modes)
+		this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_TOKEN_BURN_SNAPSHOT, `token burn · ${this.safeEventLabel(receipt.name)} · ${receipt.tokens?.total ?? 0} tokens · $${(receipt.costUsd ?? 0).toFixed(4)}`, unitTokenBurnPayload(receipt));
 		if (receipt.spans?.length) this.traceExporter?.enqueue(receipt.spans, { service: "omp-squad", repo: receipt.repo, operator: this.operator.id, org: this.operator.orgId });
 		// Queryable per-org cost/token ledger (DB mode); FileStore is a no-op since the receipt is on disk.
 		await this.store.appendUsage(receipt).catch((err) => this.log("warn", `usage write failed for ${rec.dto.name}: ${err instanceof Error ? err.message : String(err)}`));
@@ -9723,11 +9748,39 @@ export class SquadManager extends EventEmitter {
 		this.emit("event", { type: "comment-resolved", id, resolvedAt: at } satisfies SquadEvent);
 		void this.recordAudit(actor, "comment-resolve", id, "ok");
 	}
+	private async emitPlanCard(candidate: PlanRevisionCandidate, label = "plan revision ready"): Promise<void> {
+		const feature = (await this.features(candidate.repo)).find((item) => item.id === candidate.featureId);
+		const agentId = candidate.producerAgentId ?? feature?.agentIds[0];
+		if (!agentId) return;
+		const planName = feature?.planDir?.split(/[\\/]/).filter(Boolean).pop() ?? candidate.planPath.split(/[\\/]/).filter(Boolean).slice(-2, -1)[0] ?? feature?.title ?? candidate.featureId;
+		const concernCount = feature?.planDir ? (await parsePlanConcerns(candidate.repo, feature.planDir).catch(() => [])).length : undefined;
+		this.emitUnitTranscriptEvent(agentId, TRANSCRIPT_EVENT_PLAN_CARD, `${label} · ${this.safeEventLabel(planName)} · ${this.safeEventLabel(candidate.summary)}`, {
+			status: candidate.state,
+			featureId: candidate.featureId,
+			planPath: candidate.planPath,
+			planName,
+			concernCount,
+			summary: candidate.summary,
+			candidateId: candidate.id,
+			producerAgentId: candidate.producerAgentId,
+			face: {
+				title: planName,
+				eyebrow: "Plan ready",
+				body: candidate.summary,
+				detail: candidate.planPath,
+				status: candidate.state,
+				tone: "info",
+				pinned: { concerns: concernCount, revision: candidate.summary },
+			},
+		});
+	}
+
 
 	/** Unresolved comments on a subject — consumed by the Slice-2 RPI feed-forward. */
 	async addPlanRevisionCandidate(input: Omit<PlanRevisionCandidate, "id" | "state" | "createdAt" | "updatedAt"> & { id?: string; state?: PlanRevisionCandidateState; createdAt?: number; updatedAt?: number }, actor: Actor | string = LOCAL_ACTOR): Promise<PlanRevisionCandidate> {
 		const candidate = await addPlanRevisionCandidate(this.stateDir, input);
 		this.emitFeaturesChanged();
+		void this.emitPlanCard(candidate);
 		void this.recordAudit(actor, "plan-candidate-add", candidate.featureId, "ok", candidate.summary);
 		return candidate;
 	}
@@ -9998,6 +10051,92 @@ export class SquadManager extends EventEmitter {
 				}
 			}
 		});
+	}
+
+	async gateVerdictProof(channelId: string, entryId: string): Promise<{
+		mode: "resident" | "post-mortem";
+		unitId?: string;
+		unitName?: string;
+		repo?: string;
+		branch?: string;
+		featureId?: string;
+		issueIdentifier?: string;
+		validation?: ValidationRecord;
+		doneProof?: DoneProof;
+		landAttempt?: {
+			attemptId: string;
+			terminal: ReconstructedAttempt["terminal"];
+			resultCommit?: string;
+			resultTree?: string;
+			observedAt?: string;
+		};
+		malformedLandRecords: number;
+	}> {
+		const entry = (await this.channelEntries(channelId, 0)).find((e) => e.id === entryId);
+		if (!entry || entry.event?.kind !== TRANSCRIPT_EVENT_GATE_VERDICT) throw new Error("no such gate verdict");
+		const payload = recordObject(entry.event.payload) ?? {};
+		const refs = recordObject(payload.refs) ?? {};
+		const face = recordObject(payload.face) ?? {};
+		const unitId = typeof refs.unitId === "string" ? refs.unitId : typeof face.unitId === "string" ? face.unitId : undefined;
+		const resident = unitId ? this.agents.get(unitId) : undefined;
+		if (resident) {
+			return {
+				mode: "resident",
+				unitId,
+				unitName: resident.dto.name,
+				repo: resident.dto.repo,
+				branch: resident.dto.branch,
+				featureId: resident.dto.featureId,
+				issueIdentifier: resident.dto.issue?.identifier,
+				validation: resident.dto.validation,
+				malformedLandRecords: 0,
+			};
+		}
+
+		const validation = validationRecord(face.validation);
+		const repo = typeof face.repo === "string" ? face.repo : undefined;
+		const branch = typeof face.branch === "string" ? face.branch : undefined;
+		const featureId = typeof refs.planId === "string" ? refs.planId : undefined;
+		const issueIdentifier = typeof refs.issueIdentifier === "string" ? refs.issueIdentifier : undefined;
+		const doneProof = (issueIdentifier ? getDoneProofByIssue(this.stateDir, issueIdentifier) : undefined) ?? (branch ? getDoneProofByBranch(this.stateDir, branch) : undefined);
+		let landAttempt: {
+			attemptId: string;
+			terminal: ReconstructedAttempt["terminal"];
+			resultCommit?: string;
+			resultTree?: string;
+			observedAt?: string;
+		} | undefined;
+		let malformedLandRecords = 0;
+		if (repo) {
+			try {
+				const store = await reconstructRepositoryStore(this.stateDir, computeRepositoryId(repo));
+				malformedLandRecords = store.malformed.length;
+				const candidates = store.attempts.filter((attempt) => attempt.events.some((event) =>
+					(unitId && event.refs.agentRunRef === unitId) ||
+					(featureId && event.refs.featureRef === featureId) ||
+					(doneProof?.commit && event.resultCommit === doneProof.commit) ||
+					(doneProof?.mergeCommit && event.resultCommit === doneProof.mergeCommit)
+				));
+				const attempt = candidates[candidates.length - 1];
+				const terminalEvent = attempt?.events.findLast((event) => event.stage === "post-merge-verified" || event.stage === "landed" || event.stage === "rejected" || event.stage === "incomplete");
+				if (attempt) landAttempt = { attemptId: attempt.attemptId, terminal: attempt.terminal, resultCommit: terminalEvent?.resultCommit, resultTree: terminalEvent?.resultTree, observedAt: terminalEvent?.observedAt };
+			} catch {
+				malformedLandRecords = 0;
+			}
+		}
+		return {
+			mode: "post-mortem",
+			unitId,
+			unitName: typeof face.unitName === "string" ? face.unitName : undefined,
+			repo,
+			branch,
+			featureId,
+			issueIdentifier,
+			validation,
+			doneProof,
+			landAttempt,
+			malformedLandRecords,
+		};
 	}
 
 	/** Best-effort done-proof lookup for a feature — feeds the task-pipeline artifacts rail (Wave 4
@@ -10695,9 +10834,12 @@ export class SquadManager extends EventEmitter {
 
 	/** Adoption counters (plans/daily-dogfood-engine/02) from this manager's own durable stateDir
 	 *  data, with the in-memory rings folded in so a just-recorded tap/transition is visible before
-	 *  its fire-and-forget spool lands (the GET /api/adoption read-your-write case). */
-	adoptionCounters(): Promise<AdoptionCounters> {
-		return computeAdoptionCounters(this.stateDir, { transitions: this.transitionLog.recent(), pushTaps: this.pushTapLog.recent() });
+	 *  its fire-and-forget spool lands (the GET /api/adoption read-your-write case). Room interactions
+	 *  come from the existing channel substrate; no parallel counter store. */
+	async adoptionCounters(): Promise<AdoptionCounters> {
+		const channels = await this.channelStore.listChannels();
+		const channelEntries = (await Promise.all(channels.map((channel) => this.channelStore.entries(channel.id, 0)))).flat();
+		return computeAdoptionCounters(this.stateDir, { transitions: this.transitionLog.recent(), pushTaps: this.pushTapLog.recent(), channelEntries });
 	}
 
 	/** One tick so in-flight agent-host ring-replay frames (synchronous `.emit()` calls inside a
@@ -11092,6 +11234,8 @@ export class SquadManager extends EventEmitter {
 				return "gate-verdict";
 			case TRANSCRIPT_EVENT_LAND_MERGE:
 				return "land-merge";
+			case TRANSCRIPT_EVENT_PLAN_CARD:
+				return "plan";
 			case TRANSCRIPT_EVENT_LAND_ATTEMPT:
 			case TRANSCRIPT_EVENT_LAND_ASSESSMENT:
 				return "land";
@@ -11100,37 +11244,106 @@ export class SquadManager extends EventEmitter {
 		}
 	}
 
-	private projectionRefs(rec: AgentRecord, entry: TranscriptEntry): Record<string, unknown> {
+	private projectionPayload(entry: TranscriptEntry): Record<string, unknown> {
 		const payload = entry.event?.payload;
-		const objectPayload = payload && typeof payload === "object" && !Array.isArray(payload) ? payload as Record<string, unknown> : {};
+		return payload && typeof payload === "object" && !Array.isArray(payload) ? payload as Record<string, unknown> : {};
+	}
+
+	private projectionRefs(rec: AgentRecord, entry: TranscriptEntry): Record<string, unknown> {
+		const objectPayload = this.projectionPayload(entry);
 		const refs: Record<string, unknown> = { unitId: rec.dto.id };
 		if (entry.id) refs.entryId = entry.id;
-		for (const [from, to] of [["featureId", "planId"], ["attemptId", "landId"], ["issueId", "issueId"], ["issueIdentifier", "issueIdentifier"]] as const) {
+		for (const [from, to] of [["featureId", "planId"], ["planPath", "planPath"], ["candidateId", "candidateId"], ["attemptId", "landId"], ["issueId", "issueId"], ["issueIdentifier", "issueIdentifier"]] as const) {
 			const value = objectPayload[from];
 			if (typeof value === "string" && value) refs[to] = value;
 		}
 		return refs;
 	}
 
-	private projectionFace(rec: AgentRecord, entry: TranscriptEntry): Record<string, unknown> {
-		const payload = entry.event?.payload;
-		const objectPayload = payload && typeof payload === "object" && !Array.isArray(payload) ? payload as Record<string, unknown> : {};
+	private needsYouFace(rec: AgentRecord, payload: Record<string, unknown>, entry: TranscriptEntry): Record<string, unknown> {
+		const pendingStatus = typeof payload.status === "string" ? payload.status : undefined;
+		const title = typeof payload.title === "string" && payload.title ? payload.title : "operator input";
+		const message = typeof payload.message === "string" && payload.message ? payload.message : undefined;
+		const createdAt = typeof payload.createdAt === "number" && Number.isFinite(payload.createdAt) ? payload.createdAt : entry.ts;
+		const ageMs = Math.max(0, entry.ts - createdAt);
+		const age = ageMs < 60_000 ? "just now" : `${Math.floor(ageMs / 60_000)}m`;
+		const resolved = pendingStatus === "resolved";
 		return {
 			unitId: rec.dto.id,
 			unitName: rec.dto.name,
-			status: rec.dto.status,
+			eventKind: entry.event?.kind,
+			pendingId: typeof payload.pendingId === "string" ? payload.pendingId : undefined,
+			pendingStatus,
+			title: resolved ? `Resolved · ${title}` : `Needs you · ${title}`,
+			eyebrow: resolved ? "Resolved" : "Needs you",
+			body: message ?? title,
+			detail: resolved ? "Follow-up resolution card. Original pending card remains unchanged." : "Click to step into the agent.",
+			tone: resolved ? "success" : "warning",
+			pinned: {
+				"why stopped": title,
+				agent: rec.dto.name || rec.dto.id,
+				age,
+			},
+		};
+	}
+
+	private projectionFace(rec: AgentRecord, entry: TranscriptEntry): Record<string, unknown> {
+		const objectPayload = this.projectionPayload(entry);
+		const customFace = objectPayload.face && typeof objectPayload.face === "object" && !Array.isArray(objectPayload.face) ? objectPayload.face as Record<string, unknown> : {};
+		if (entry.event?.kind === TRANSCRIPT_EVENT_NEEDS_YOU) return this.needsYouFace(rec, objectPayload, entry);
+		if (entry.event?.kind === TRANSCRIPT_EVENT_TOKEN_BURN_SNAPSHOT) return tokenBurnFace(objectPayload as never);
+		return {
+			...customFace,
+			unitId: rec.dto.id,
+			unitName: rec.dto.name,
+			status: typeof customFace.status === "string" ? customFace.status : rec.dto.status,
 			repo: rec.dto.repo,
 			branch: rec.dto.branch,
 			issue: rec.dto.issue ? { id: rec.dto.issue.id, identifier: rec.dto.issue.identifier, name: rec.dto.issue.name } : undefined,
 			eventKind: entry.event?.kind,
-			title: entry.text,
+			title: typeof customFace.title === "string" ? customFace.title : entry.text,
 			stage: typeof objectPayload.stage === "string" ? objectPayload.stage : undefined,
+			sha: typeof objectPayload.sha === "string" ? objectPayload.sha : typeof objectPayload.resultCommit === "string" ? objectPayload.resultCommit : rec.dto.proof?.commit,
+			target: typeof objectPayload.target === "string" ? objectPayload.target : typeof objectPayload.baseRef === "string" ? objectPayload.baseRef : "HEAD",
+			risk: typeof objectPayload.risk === "string" ? objectPayload.risk : typeof objectPayload.riskTier === "string" ? objectPayload.riskTier : typeof objectPayload.code === "string" ? objectPayload.code : undefined,
+			recommendation: typeof objectPayload.recommendation === "string" ? objectPayload.recommendation : typeof objectPayload.recommendedAction === "string" ? objectPayload.recommendedAction : undefined,
+			detail: typeof objectPayload.detail === "string" ? objectPayload.detail : typeof objectPayload.message === "string" ? objectPayload.message : undefined,
+			outcome: typeof objectPayload.outcome === "string" ? objectPayload.outcome : typeof objectPayload.prState === "string" ? objectPayload.prState : undefined,
+			mode: typeof objectPayload.mode === "string" ? objectPayload.mode : undefined,
+			prUrl: typeof objectPayload.prUrl === "string" ? objectPayload.prUrl : undefined,
+			prNumber: typeof objectPayload.prNumber === "number" || typeof objectPayload.prNumber === "string" ? objectPayload.prNumber : undefined,
+			doneProofVerified: typeof objectPayload.doneProofVerified === "string" ? objectPayload.doneProofVerified : undefined,
 			verdict: typeof objectPayload.verdict === "string" ? objectPayload.verdict : undefined,
 			ok: typeof objectPayload.ok === "boolean" ? objectPayload.ok : undefined,
 			merged: typeof objectPayload.merged === "boolean" ? objectPayload.merged : undefined,
 			pendingId: typeof objectPayload.pendingId === "string" ? objectPayload.pendingId : undefined,
 			pendingStatus: typeof objectPayload.status === "string" ? objectPayload.status : undefined,
+			validation: entry.event?.kind === TRANSCRIPT_EVENT_GATE_VERDICT ? objectPayload : undefined,
+			agreement: typeof objectPayload.agreement === "number" ? objectPayload.agreement : undefined,
+			confidence: typeof objectPayload.confidence === "number" ? objectPayload.confidence : undefined,
+			perCriterion: Array.isArray(objectPayload.perCriterion) ? objectPayload.perCriterion : undefined,
+			planName: typeof objectPayload.planName === "string" ? objectPayload.planName : undefined,
+			concernCount: typeof objectPayload.concernCount === "number" ? objectPayload.concernCount : undefined,
 		};
+	}
+
+	private async emitFleetTokenBurnRollup(verdict: CostVerdict): Promise<void> {
+		try {
+			const payload = fleetTokenBurnPayload(await readAllReceipts(this.stateDir), verdict);
+			const card = await this.channelStore.appendManager(DEFAULT_CHANNEL_ID, {
+				authorActor: "manager",
+				kind: "system",
+				format: "stage",
+				text: `fleet token burn · ${payload.totals.tokens} tokens · $${payload.totals.costUsd.toFixed(4)}`,
+				event: {
+					kind: TRANSCRIPT_EVENT_TOKEN_BURN_SNAPSHOT,
+					payload: { refs: { reason: payload.reason }, doorSurface: "fleet-economics", face: tokenBurnFace(payload), ...payload },
+				},
+			});
+			this.emit("event", { type: "channel-entry", channelId: DEFAULT_CHANNEL_ID, entry: card } satisfies SquadEvent);
+		} catch (err) {
+			this.log("warn", `fleet token-burn rollup failed: ${errText(err)}`);
+		}
 	}
 
 	private async projectUnitTranscriptEvent(rec: AgentRecord, entry: TranscriptEntry): Promise<void> {
@@ -11170,6 +11383,7 @@ export class SquadManager extends EventEmitter {
 				gateClass: request.gateClass,
 				title: request.title,
 				message: request.message,
+				createdAt: request.createdAt,
 				agentId: rec.dto.id,
 			});
 		}
@@ -11180,6 +11394,7 @@ export class SquadManager extends EventEmitter {
 				pendingId: request.id,
 				gateClass: request.gateClass,
 				title: request.title,
+				createdAt: request.createdAt,
 				agentId: rec.dto.id,
 			});
 		}
@@ -11191,6 +11406,7 @@ export class SquadManager extends EventEmitter {
 			agreement: record.agreement,
 			confidence: record.confidence,
 			rationale: record.rationale,
+			perCriterion: record.perCriterion,
 			model: record.model,
 			authorLineage: record.authorLineage,
 			reviewerLineage: record.reviewerLineage,

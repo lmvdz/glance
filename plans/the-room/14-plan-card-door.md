@@ -1,5 +1,5 @@
 # Plan-card door — plans arrive in the room, open the DAG
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -26,3 +26,6 @@ None.
 ## Verify
 - A /plan-produced or fleet-produced plan revision projects a card; click → DAG view of that
   plan; editing the plan there emits a design-revised card back into the channel (with 17).
+
+## Resolution
+Landed in train wave3: plan-card kind+reader, TaskDetail DAG door.

@@ -1,5 +1,5 @@
 # Land lifecycle cards — attempt / assessment / merge in the room
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -28,3 +28,6 @@ None.
 ## Verify
 - Scratch-daemon land: originating channel shows attempt→assessment→merge in order; #fleet shows
   merge only; PR-mode land carries the PR link; faces render from pinned data with no fetch.
+
+## Resolution
+Landed in train wave3: attempt/assessment/merge card faces; merge card doors into the proof surface.

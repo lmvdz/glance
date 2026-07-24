@@ -310,6 +310,7 @@ export function TaskProvider({ children }: { children: ReactNode }) {
     squad.subscribe(agentId);
     setInterveneAgentId(agentId);
     setView('intervene');
+    window.location.hash = `#/intervene/${encodeURIComponent(agentId)}`;
   };
 
   // Design Review has no react-router (this SPA doesn't use one anywhere), but the reference
@@ -502,7 +503,7 @@ export function TaskProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  const selectTask = (id: string | null) => setSelectedTaskId(id);
+  const selectTask = useCallback((id: string | null) => setSelectedTaskId(id), []);
 
   const addTask = (partialTask: Partial<Task>) => {
     const title = partialTask.title?.trim() || 'New Task';

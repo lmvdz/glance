@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import { entryAuthorLabel, groupActiveWork, latestSeq, presenceCount, reduceChannelEntries } from './hub';
+import { renderToStaticMarkup } from 'react-dom/server';
+import React from 'react';
+import { ChannelRail } from '../components/hub/ChannelRail';
 import type { AgentDTO, ChannelEntry } from './dto';
 
 const entry = (overrides: Partial<ChannelEntry> & Pick<ChannelEntry, 'id' | 'seq'>): ChannelEntry => ({
@@ -11,7 +14,7 @@ const entry = (overrides: Partial<ChannelEntry> & Pick<ChannelEntry, 'id' | 'seq
   ...overrides,
 });
 
-const agent = (id: string, status: string): AgentDTO => ({
+const agent = (id: string, status: string, over: Partial<AgentDTO> = {}): AgentDTO => ({
   id,
   name: id,
   status,
@@ -20,7 +23,7 @@ const agent = (id: string, status: string): AgentDTO => ({
   branch: '',
   createdAt: 0,
   updatedAt: 0,
-  messageCount: 0,
+  ...over,
 } as AgentDTO);
 
 describe('Hub reductions', () => {
@@ -38,6 +41,22 @@ describe('Hub reductions', () => {
       ['idle', ['sleep']],
       ['done', ['landed']],
     ]);
+  });
+
+  test('room rail active work shows console/casual unit channel routing with #fleet fallback', () => {
+    const html = renderToStaticMarkup(
+      React.createElement(ChannelRail, {
+        channels: [{ id: 'fleet', name: '#fleet', kind: 'default', createdAt: 1 }, { id: 'ops', name: 'ops', kind: 'user', createdAt: 2 }],
+        activeChannelId: 'fleet',
+        agents: [agent('chat-1', 'input', { name: 'chat', channelId: 'ops' }), agent('chat-2', 'working', { name: 'chat' })],
+        selectedAgentId: undefined,
+        onSelectAgent: () => {},
+        workbenchActive: false,
+      }),
+    );
+    expect(html).toContain('Active work');
+    expect(html).toContain('#ops');
+    expect(html).toContain('#fleet');
   });
 
   test('presence count counts humans, not sockets', () => {
