@@ -31,6 +31,7 @@ export interface ChannelCardView {
   replyContext?: { id: string; channelId: string; authorLabel: string; body: string };
   repliedBy?: number;
   actionHref?: string;
+  href?: string;
 }
 
 export function previewChannelBody(text: string, limit = 120): string {
