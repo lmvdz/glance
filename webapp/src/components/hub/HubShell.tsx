@@ -100,7 +100,6 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
   const [searchResults, setSearchResults] = useState<ChannelSearchResult[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState('');
-  const lastSeqRef = useRef(0);
   const activeChannelId = route.kind === 'hub' ? route.channelId : DEFAULT_CHANNEL_ID;
   const routedEntryId = route.kind === 'hub' ? route.entryId : undefined;
   const selectedAgent = useMemo(() => agents.find((agent) => agent.id === selectedAgentId), [agents, selectedAgentId]);
