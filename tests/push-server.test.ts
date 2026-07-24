@@ -23,6 +23,8 @@ import { LOCAL_ACTOR } from "../src/federation.ts";
 import { completionPayload, escalationPayload, PushService, type PushPayload, type PushSend } from "../src/push.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import { SquadServer } from "../src/server.ts";
+import { TRANSCRIPT_EVENT_NEEDS_YOU } from "../src/transcript-event-kinds.ts";
+import type { ChannelEntry } from "../src/channels.ts";
 import type { AgentDTO, AgentStatus, PersistedAgent, RpcSessionState, SquadEvent, TransitionEntry } from "../src/types.ts";
 
 const cleanups: Array<() => Promise<void> | void> = [];
@@ -37,6 +39,28 @@ function agent(status: AgentStatus, over: Partial<AgentDTO> = {}): AgentDTO {
 /** The canonical push-lane input now: a recorded transition, exactly as recordTransition emits it. */
 function transitionEvent(agentId: string, from: AgentStatus, to: AgentStatus, over: Partial<TransitionEntry> = {}): SquadEvent {
 	return { type: "transition", entry: { agentId, from, to, reason: "pending-add", at: Date.now(), seq: crypto.randomUUID(), ...over } };
+}
+
+function needsYouChannelEvent(agentId: string, pendingId: string): SquadEvent {
+	const entry: ChannelEntry = {
+		id: crypto.randomUUID(),
+		seq: 1,
+		channelId: "fleet",
+		authorActor: "manager",
+		kind: "system",
+		text: "needs you · approve?",
+		ts: Date.now(),
+		status: "ok",
+		event: {
+			kind: TRANSCRIPT_EVENT_NEEDS_YOU,
+			payload: {
+				refs: { unitId: agentId },
+				doorSurface: "intervence",
+				face: { unitId: agentId, pendingId, pendingStatus: "pending", title: "needs you · approve?" },
+			},
+		},
+	};
+	return { type: "channel-entry", channelId: "fleet", entry };
 }
 
 /** Never spawns a real process — for tests that need a REAL resident agent (so `getAgent` /
@@ -146,6 +170,34 @@ test("a transition into input drives a real encrypted push through the server", 
 	expect(calls[0].endpoint).toBe("https://push.example.com/device");
 	expect(calls[0].enc).toBe("aes128gcm");
 	expect(calls[0].len).toBeGreaterThan(80);
+});
+
+test("needs-you room card and status lane produce exactly one push for one pending request", async () => {
+	const calls: PushPayload[] = [];
+	// SquadServer only needs PushService.notify here; this focused latch test avoids encrypted WebPush
+	// timing so "no double fire" is synchronous and deterministic.
+	const push = {
+		notify: async (payload: PushPayload) => {
+			calls.push(payload);
+		},
+	} as PushService;
+
+	const { mgr, rec, dirs } = await liveAgent("pushneeds");
+	const server = new SquadServer(mgr, { port: 0, push });
+	server.start();
+	cleanups.push(async () => {
+		server.stop();
+		await mgr.stop();
+		await Promise.resolve();
+		for (const d of dirs) await fs.rm(d, { recursive: true, force: true });
+	});
+
+	rec.dto.status = "input";
+	rec.dto.pending = [{ id: "p", source: "ui", kind: "select", title: "approve?", createdAt: 0 }];
+	mgr.emit("event", transitionEvent(rec.dto.id, "working", "input"));
+	mgr.emit("event", needsYouChannelEvent(rec.dto.id, "p"));
+
+	expect(calls).toHaveLength(1);
 });
 
 test("seeding + calm transitions do not push", async () => {

@@ -45,6 +45,13 @@ export function escalationPayload(prev: AgentStatus | undefined, a: AgentDTO, se
 	return { title, body, url: `/#/agent/${a.id}?push=1`, tag: a.id };
 }
 
+/** Needs-you room cards ride the same web-push substrate as status escalations, but key per pending
+ *  request so the room projection and status lane cannot double-fire one human ask. */
+export function needsYouPayload(a: AgentDTO, pendingId: string | undefined, title: string | undefined, seeded: boolean): PushPayload | null {
+	if (!seeded || !pendingId) return null;
+	return { title: `⛔ ${a.name} needs you`, body: title || a.pending.find((p) => p.id === pendingId)?.title || "waiting for input", url: `/#/agent/${a.id}?push=1`, tag: `needs-you:${a.id}:${pendingId}` };
+}
+
 /** Pure: does this status transition warrant a COMPLETION push, and with what payload?
  *  Fires once per armed dispatch — squad-manager.ts's `completionPushArmed` latch arms on a prompt/
  *  spawn (always for a voice source; by session category otherwise — see completion-push.ts) and

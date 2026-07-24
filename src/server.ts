@@ -176,7 +176,8 @@ import { approveJoinRequest, denyJoinRequest, ensurePersonalWorkspace, listPendi
 import { addMemberByEmail, getOrgProfile, listOrgMembers, removeMember, renameOrg, setMemberRole } from "./org-admin.ts";
 import { dbMode as voiceDbBootMode, type DbHandle } from "./db/index.ts";
 import { openRouteDecision } from "./open-worktree.ts";
-import { completionPayload, escalationPayload, type PushPayload, PushService } from "./push.ts";
+import { completionPayload, escalationPayload, needsYouPayload, type PushPayload, PushService } from "./push.ts";
+import { TRANSCRIPT_EVENT_NEEDS_YOU } from "./transcript-event-kinds.ts";
 import type { Actor, AgentDTO, AgentStatus, AuditEntry, OperatorPresence, Role, RunReceipt } from "./types.ts";
 import type { TraceResponse } from "./spans.ts";
 import { type FederationSnapshot, federationView } from "./federation.ts";
@@ -459,6 +460,20 @@ export function computeUiVersion(html: string): string {
 // escalationPayload moved to push.ts (fleet-ide-bridge B01) so the TUI's OSC lane can share
 // the exact transition rule without importing the server module; re-exported for existing callers.
 export { escalationPayload };
+
+function needsYouCardFields(e: SquadEvent): { agentId: string; pendingId: string; title?: string } | undefined {
+	if (e.type !== "channel-entry" || e.entry.event?.kind !== TRANSCRIPT_EVENT_NEEDS_YOU) return undefined;
+	const payload = e.entry.event.payload;
+	if (!payload || typeof payload !== "object" || !("refs" in payload) || !("face" in payload)) return undefined;
+	const refs = payload.refs;
+	const face = payload.face;
+	if (!refs || typeof refs !== "object" || !face || typeof face !== "object") return undefined;
+	if (!("unitId" in refs) || typeof refs.unitId !== "string") return undefined;
+	if (!("pendingId" in face) || typeof face.pendingId !== "string") return undefined;
+	if ("pendingStatus" in face && face.pendingStatus !== "pending") return undefined;
+	const title = "title" in face && typeof face.title === "string" ? face.title : undefined;
+	return { agentId: refs.unitId, pendingId: face.pendingId, title };
+}
 
 // Schemes a frame-ancestors origin may use. Deliberately tiny: the desktop shell's webviews speak
 // http/https (WebView2 / tauri.localhost) and the custom `tauri:` scheme (macOS/Linux WKWebView).
@@ -3396,6 +3411,22 @@ export class SquadServer {
 			this.pushSeeded = true;
 			return;
 		}
+		if (e.type === "channel-entry") {
+			if (!this.pushSeeded) return;
+			const fields = needsYouCardFields(e);
+			if (!fields) return;
+			const a = this.singleManager?.getAgent(fields.agentId);
+			if (!a) return;
+			const payload = needsYouPayload(a, fields.pendingId, fields.title, this.pushSeeded);
+			const key = payload?.tag;
+			const now = Date.now();
+			if (payload && key && now - (this.lastPush.get(key) ?? 0) >= 3000 && now - (this.lastPush.get(a.id) ?? 0) >= 3000) {
+				this.lastPush.set(key, now);
+				this.lastPush.set(a.id, now);
+				void push.notify(payload);
+			}
+			return;
+		}
 		if (e.type !== "transition" || e.entry.denied) return;
 		if (!this.pushSeeded) return; // boot replay, never a live alert — the preserved quiet boot
 		const entry = e.entry;
@@ -3462,6 +3493,21 @@ export class SquadServer {
 		}
 		if (e.type === "roster") {
 			state.seeded = true;
+			return;
+		}
+		if (e.type === "channel-entry") {
+			const fields = needsYouCardFields(e);
+			if (!fields) return;
+			const a = this.orgManager(orgId)?.getAgent(fields.agentId);
+			if (!a) return;
+			const payload = needsYouPayload(a, fields.pendingId, fields.title, state.seeded);
+			const key = payload?.tag;
+			const now = Date.now();
+			if (payload && key && now - (state.lastPush.get(key) ?? 0) >= 3000 && now - (state.lastPush.get(a.id) ?? 0) >= 3000) {
+				state.lastPush.set(key, now);
+				state.lastPush.set(a.id, now);
+				void this.pushForOrg(orgId).then((push) => void push.notify(payload));
+			}
 			return;
 		}
 		if (!state.seeded) return; // pre-hydration boot replay — never alert on it
