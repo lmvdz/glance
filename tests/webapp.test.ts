@@ -56,13 +56,27 @@ test("webapp builds a content-hashed bundle", async () => {
 	expect(html).toMatch(/\/assets\/[^"']+-[A-Za-z0-9_-]+\.js/);
 }, 200_000);
 
-test("serve seam is OFF by default (flag unset)", () => {
+// CUT OVER 2026-07-24 (plans/the-room/26): the room is the ratified home screen, so the seam is ON
+// with the flag unset and the dist built. The dist half of the guard is what keeps that safe, and is
+// pinned separately below — an install that never built the SPA still serves the legacy dashboard.
+test("serve seam is ON by default once the SPA is built (flag unset)", () => {
 	const prev = process.env.OMP_SQUAD_WEBAPP;
 	delete process.env.OMP_SQUAD_WEBAPP;
 	try {
-		expect(webappEnabled()).toBe(false);
+		expect(webappEnabled()).toBe(existsSync(path.join(WEBAPP, "dist", "index.html")));
 	} finally {
 		if (prev !== undefined) process.env.OMP_SQUAD_WEBAPP = prev;
+	}
+});
+
+test("an explicit 0 still opts back out to the legacy dashboard", () => {
+	const prev = process.env.OMP_SQUAD_WEBAPP;
+	process.env.OMP_SQUAD_WEBAPP = "0";
+	try {
+		expect(webappEnabled()).toBe(false);
+	} finally {
+		if (prev === undefined) delete process.env.OMP_SQUAD_WEBAPP;
+		else process.env.OMP_SQUAD_WEBAPP = prev;
 	}
 });
 

@@ -218,13 +218,23 @@ function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T
 export { CONSOLE_SYSTEM_PROMPT };
 
 /**
- * Inert opt-in serve seam for the Vite SPA rewrite. DEFAULT OFF: requires BOTH the explicit
- * `OMP_SQUAD_WEBAPP=1` flag AND an existing built `webapp/dist/index.html`. Until cutover the live
- * `src/web/index.html` is served unchanged. Exported for the build/serve gate test.
+ * Serve seam for the Vite SPA. **CUT OVER 2026-07-24 — now DEFAULT ON** (plans/the-room/26).
+ *
+ * It shipped default-off as an "inert opt-in seam … until cutover", and then the-room was built on
+ * top of it for five waves without anyone flipping it. The consequence, caught only by booting the
+ * daemon and looking: a glance daemon with no explicit flag served the legacy `src/web/index.html`
+ * dashboard, so the room — which DIRECTION.md ratifies as *the home screen* — was invisible by
+ * default. A ratified home screen behind an off-by-default flag is not a home screen.
+ *
+ * The dist check is unchanged and is what keeps the flip safe: an install with no built
+ * `webapp/dist/index.html` serves exactly what it served before. Operators who want the legacy UI
+ * set `GLANCE_WEBAPP=0` (or `OMP_SQUAD_WEBAPP=0`).
+ *
+ * Exported for the build/serve gate test.
  * ponytail: env-flag + dist-exists check, not a config object — one toggle, no machinery.
  */
 export function webappEnabled(): boolean {
-	return envBool("OMP_SQUAD_WEBAPP", false) && existsSync(WEBAPP_INDEX);
+	return envBool("OMP_SQUAD_WEBAPP", true) && existsSync(WEBAPP_INDEX);
 }
 
 export function feedbackEnabled(): boolean {
