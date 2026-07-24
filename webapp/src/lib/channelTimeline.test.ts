@@ -26,6 +26,18 @@ describe('channel timeline dispatch', () => {
     expect(card.pinned).toEqual([{ label: 'Agent', value: 'room-08' }, { label: 'Verdict', value: 'held' }]);
   });
 
+  test('plan cards route to the TaskDetail plan DAG', () => {
+    const card = dispatchChannelCard(entry({
+      id: 'p1',
+      seq: 2,
+      event: { kind: 'plan-card', payload: { doorSurface: 'plan', refs: { planId: 'feat 1' }, face: { title: 'the room', body: '14 concerns ready', pinned: { concerns: 14 } } } },
+    }));
+    expect(card.kind).toBe('plan-card');
+    expect(card.title).toBe('the room');
+    expect(card.href).toBe('#/workbench/task/feat%201');
+    expect(card.pinned).toEqual([{ label: 'Concerns', value: '14' }]);
+  });
+
   test('unknown event kinds become neutral fallback cards', () => {
     const card = dispatchChannelCard(entry({ id: 'future', seq: 2, event: { kind: 'future-proof', payload: { face: { title: 'Ignored' } } } }));
     expect(card.kind).toBe('unknown-event');

@@ -39,9 +39,10 @@ export function parseHubHash(hash: string): HubRoute {
   if (head === 'review') return { kind: 'workbench', view: 'review', id: decode(rawId) };
   if (head === 'plan-reality') return { kind: 'workbench', view: 'plan-reality', id: decode(rawId) };
   if (head === 'plans') return { kind: 'workbench', view: 'plans', id: decode(rawId) };
+  if (head === 'task') return { kind: 'workbench', view: 'task', id: decode(rawId) };
   if (head === 'workbench') {
     const view = normalizeWorkbenchView(rawId);
-    return { kind: 'workbench', view: view ?? 'fleet' };
+    return { kind: 'workbench', view: view ?? 'fleet', ...(view === 'task' && decode(sub) ? { id: decode(sub) } : {}) };
   }
   return { kind: 'hub', channelId: DEFAULT_CHANNEL_ID };
 }
@@ -56,6 +57,7 @@ export function workbenchHref(view: WorkbenchRouteView, id?: string): string {
   if (view === 'review') return `#/review/${encodeURIComponent(id ?? '')}`;
   if (view === 'plan-reality') return id ? `#/plan-reality/${encodeURIComponent(id)}` : '#/plan-reality';
   if (view === 'plans') return id ? `#/plans/${encodeURIComponent(id)}` : '#/plans';
+  if (view === 'task') return id ? `#/workbench/task/${encodeURIComponent(id)}` : '#/workbench/task';
   return `#/workbench/${view}`;
 }
 

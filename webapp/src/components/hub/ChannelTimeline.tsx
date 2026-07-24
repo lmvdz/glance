@@ -1,5 +1,5 @@
 import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertCircle, CheckCircle2, CircleDot, GitMerge, Hash, Reply, ShieldAlert } from 'lucide-react';
+import { AlertCircle, CheckCircle2, CircleDot, FileText, GitMerge, Hash, Reply, ShieldAlert } from 'lucide-react';
 import type { ChannelEntry } from '../../lib/dto';
 import { buildChannelThreadViews, type ChannelCardTone, type ChannelCardView } from '../../lib/channelTimeline';
 import { hubHref } from '../../lib/router';
@@ -22,6 +22,7 @@ const iconClass: Record<ChannelCardView['kind'], typeof ShieldAlert> = {
   'mention-confirm-required': ShieldAlert,
   'mention-steer-failed': AlertCircle,
   'spawn-proposal': CircleDot,
+  'plan-card': FileText,
   'unknown-event': CircleDot,
 };
 
@@ -111,6 +112,14 @@ const ChannelTimelineRow = memo(function ChannelTimelineRow({ view, onReply }: {
               </dl>
             ) : null}
             {view.detail ? <p className="mt-2 text-xs leading-5 opacity-60">{view.detail}</p> : null}
+            {view.href ? (
+              <a
+                href={view.href}
+                className="mt-3 inline-flex min-h-10 items-center justify-center rounded-full border border-current/15 bg-current/10 px-3 text-xs font-semibold transition-[background-color,border-color] hover:bg-current/15 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900"
+              >
+                Open plan DAG
+              </a>
+            ) : null}
           </div>
         </div>
       </article>

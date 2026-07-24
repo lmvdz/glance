@@ -23,4 +23,9 @@ describe('Hub hash router', () => {
     expect(parseHubHash('#/intervene/agent%201')).toEqual({ kind: 'workbench', view: 'intervene', id: 'agent 1' });
     expect(workbenchHref('intervene', 'agent 1')).toBe('#/intervene/agent%201');
   });
+
+  test('task route opens a specific TaskDetail DAG surface', () => {
+    expect(parseHubHash('#/workbench/task/feat%201')).toEqual({ kind: 'workbench', view: 'task', id: 'feat 1' });
+    expect(workbenchHref('task', 'feat 1')).toBe('#/workbench/task/feat%201');
+  });
 });
