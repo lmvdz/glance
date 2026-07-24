@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { channelCardActionHref, dispatchChannelCard, latestChannelSeq, reduceChannelEntryWindow } from './channelTimeline';
+import { channelCardActionHref, dispatchChannelCard, doorLabel, latestChannelSeq, reduceChannelEntryWindow } from './channelTimeline';
 import type { ChannelEntry } from './dto';
 
 const entry = (overrides: Partial<ChannelEntry> & Pick<ChannelEntry, 'id' | 'seq'>): ChannelEntry => ({
@@ -158,5 +158,51 @@ describe('channel entry reduction', () => {
     const next = reduceChannelEntryWindow(current, resync, 'fleet');
     expect(next.map((item) => `${item.seq}:${item.id}:${item.text}`)).toEqual(['1:a:fallback text', '2:b:updated', '3:c:fallback text']);
     expect(latestChannelSeq(next)).toBe(3);
+  });
+});
+
+describe('card body de-duplication', () => {
+  test('a body that only repeats the title is dropped, not printed twice', () => {
+    // The live #fleet channel rendered every needs-you card as the same sentence twice: the face
+    // title and `entry.text` are built from the same pending title.
+    const card = dispatchChannelCard(entry({
+      id: 'dup',
+      seq: 1,
+      text: 'needs you · Allow tool: bash Command: bun run check…',
+      event: { kind: 'needs-you', payload: { face: { title: 'Needs you · Allow tool: bash Command: bun run check' } } },
+    }));
+    expect(card.title).toBe('Needs you · Allow tool: bash Command: bun run check');
+    expect(card.body).toBe('');
+  });
+
+  test('a body that adds information survives', () => {
+    const card = dispatchChannelCard(entry({
+      id: 'keep',
+      seq: 2,
+      event: { kind: 'needs-you', payload: { face: { title: 'Needs you · deploy approval', body: 'Target: production, 3 services' } } },
+    }));
+    expect(card.body).toBe('Target: production, 3 services');
+  });
+
+  test('pinned fields that restate the title are dropped too', () => {
+    const card = dispatchChannelCard(entry({
+      id: 'pin',
+      seq: 3,
+      event: { kind: 'needs-you', payload: { face: { title: 'Needs you · run the gate', pinned: { 'why stopped': 'run the gate', agent: 'room-18' } } } },
+    }));
+    expect(card.pinned.map((item) => item.label)).toEqual(['Agent']);
+  });
+});
+
+describe('door labels', () => {
+  test('each kind names where its door actually goes', () => {
+    expect([doorLabel('plan-card'), doorLabel('token-burn-snapshot'), doorLabel('needs-you'), doorLabel('what-is-this')])
+      .toEqual(['Open plan DAG', 'Open fleet economics', 'Step into the agent', 'Open']);
+  });
+
+  test('a token-burn card never offers to open a plan DAG', () => {
+    const card = dispatchChannelCard(entry({ id: 'tb', seq: 4, event: { kind: 'token-burn-snapshot', payload: { face: { title: 'Fleet burn' } } } }));
+    expect(card.href).toBe('#/workbench/economics');
+    expect(doorLabel(card.kind)).toBe('Open fleet economics');
   });
 });
