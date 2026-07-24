@@ -48,7 +48,7 @@ export const ClientCommandSchema = Schema.Union([
 		// so without this the tag would be silently dropped at decode and the audit would stay blind.
 		source: Schema.optional(Schema.String),
 		channelId: Schema.optional(Schema.String),
-		mention: Schema.optional(Schema.Struct({ targetLabel: Schema.optional(Schema.String), echoText: Schema.optional(Schema.String) })),
+		mention: Schema.optional(Schema.Struct({ targetLabel: Schema.optional(Schema.String) })),
 	}),
 	Schema.Struct({ type: Schema.Literal("set-model"), id: Schema.String, model: Schema.String }),
 	Schema.Struct({ type: Schema.Literal("answer"), id: Schema.String, requestId: Schema.String, value: Schema.String }),

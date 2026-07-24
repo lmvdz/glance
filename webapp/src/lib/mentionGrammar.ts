@@ -91,8 +91,3 @@ function routeForAgent(target: MentionTarget, text: string, mentionText: string)
   if (target.status === 'working' || target.status === 'starting') return { kind: 'confirm', target, text, mentionText };
   return { kind: 'steer', target, text, mentionText };
 }
-
-export function mentionEchoText(actor: string, targetLabel: string, text: string, previousClientTurnId?: string): string {
-  const suffix = previousClientTurnId ? ` Later steer supersedes ${previousClientTurnId}; last write wins.` : ' Last write wins; all steers remain visible.';
-  return `${actor} steered @${targetLabel}: ${text}${suffix}`;
-}

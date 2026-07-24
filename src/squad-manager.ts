@@ -7118,10 +7118,13 @@ export class SquadManager extends EventEmitter {
 		return false;
 	}
 
-	private async appendMentionSteerEcho(channelId: string | undefined, actor: Actor, cmd: Extract<ClientCommand, { type: "prompt" }>): Promise<void> {
+	private async appendMentionSteerEcho(channelId: string | undefined, actor: Actor, cmd: Extract<ClientCommand, { type: "prompt" }>, rec: AgentRecord): Promise<void> {
 		if (!channelId || cmd.source !== "mention") return;
-		const targetLabel = cmd.mention?.targetLabel?.trim() || cmd.id;
-		const text = cmd.mention?.echoText?.trim() || `${actor.id} steered @${targetLabel}: ${cmd.displayText ?? cmd.message}`;
+		const actualName = rec.dto.name?.trim();
+		const actualId = rec.dto.id;
+		const requestedLabel = cmd.mention?.targetLabel?.trim();
+		const targetLabel = requestedLabel && (requestedLabel === actualName || requestedLabel === actualId) ? requestedLabel : (actualName || actualId);
+		const text = `${actor.id} steered @${targetLabel}: ${cmd.displayText ?? cmd.message}`;
 		const entry = await this.channelStore.appendManager(channelId, {
 			authorActor: "manager",
 			text,
@@ -7276,7 +7279,7 @@ export class SquadManager extends EventEmitter {
 				// agent actually received. `displayText` (when the client sent one) is the user's bare
 				// typed text; the UI renders that and falls back to `text` for older clients.
 				this.append(rec, "user", promptMessage, { clientTurnId: cmd.clientTurnId, displayText: cmd.displayText });
-				await this.appendMentionSteerEcho(cmd.channelId, actor, cmd);
+				await this.appendMentionSteerEcho(cmd.channelId, actor, cmd, rec);
 				// Restart re-attach (daily-onramp 04): the just-typed prompt must survive a daemon KILL —
 				// it's the newest entry the honest re-attach's recovered context can carry, and nothing else
 				// persists transcripts until some unrelated write happens to fire (proven live: the first

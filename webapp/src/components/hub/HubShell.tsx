@@ -5,7 +5,7 @@ import { ChannelRail } from './ChannelRail';
 import { ChannelTimeline } from './ChannelTimeline';
 import { apiJson, jsonInit } from '../../lib/api';
 import { buildPromptCommand, ensureConsoleAgent } from '../../lib/chat/sendCore';
-import { resolveMentionRoute, mentionEchoText } from '../../lib/mentionGrammar';
+import { resolveMentionRoute } from '../../lib/mentionGrammar';
 import type { AgentDTO, Channel, ChannelEntry, CommandAckDTO, PresenceSnapshot } from '../../lib/dto';
 import { latestSeq, presenceCount, reduceChannelEntries } from '../../lib/hub';
 import { DEFAULT_CHANNEL_ID, type HubRoute } from '../../lib/router';
@@ -71,7 +71,6 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
   const [sending, setSending] = useState(false);
   const lastSeqRef = useRef(0);
   const pendingMentionTurns = useRef(new Map<string, { channelId: string; target: string }>());
-  const lastMentionTurnByAgent = useRef(new Map<string, string>());
   const [anchorEntryId, setAnchorEntryId] = useState<string | undefined>();
   const activeChannelId = route.kind === 'hub' ? route.channelId : DEFAULT_CHANNEL_ID;
   const selectedAgent = useMemo(() => agents.find((agent) => agent.id === selectedAgentId), [agents, selectedAgentId]);
@@ -162,8 +161,6 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
 
   const dispatchMentionSteer = (target: AgentDTO, steerText: string) => {
     const clientTurnId = `mention:${Date.now()}:${Math.random().toString(36).slice(2)}`;
-    const previous = lastMentionTurnByAgent.current.get(target.id);
-    lastMentionTurnByAgent.current.set(target.id, clientTurnId);
     pendingMentionTurns.current.set(clientTurnId, { channelId: activeChannelId, target: target.name || target.id });
     sendConsoleCommand({
       type: 'prompt',
@@ -173,7 +170,7 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
       clientTurnId,
       source: 'mention',
       channelId: activeChannelId,
-      mention: { targetLabel: target.name || target.id, echoText: mentionEchoText('operator', target.name || target.id, steerText, previous) },
+      mention: { targetLabel: target.name || target.id },
     } as any);
   };
 

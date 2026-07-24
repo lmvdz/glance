@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { AgentDTO } from "./dto";
-import { buildMentionSections, mentionEchoText, resolveMentionRoute, serializeMention, type MentionTarget } from "./mentionGrammar";
+import { buildMentionSections, resolveMentionRoute, serializeMention, type MentionTarget } from "./mentionGrammar";
 import type { Task } from "../types";
 
 const agent = (id: string, name: string, status: AgentDTO["status"]): AgentDTO => ({ id, name, status } as AgentDTO);
@@ -34,8 +34,4 @@ test("resolveMentionRoute: working agents require confirmation instead of raw mi
 test("resolveMentionRoute: non-resident and reserved capability mentions route to spawn proposal", () => {
   expect(resolveMentionRoute("@vendor-capability build the adapter", [])).toMatchObject({ kind: "spawn", text: "build the adapter", target: { kind: "capability", id: "vendor-capability" } });
   expect(resolveMentionRoute("[@Ghost](omp://agent/missing) investigate", [])).toMatchObject({ kind: "spawn", text: "investigate", target: { kind: "agent", id: "missing" } });
-});
-
-test("mentionEchoText: later echo references earlier turn for last-write-wins visibility", () => {
-  expect(mentionEchoText("operator", "Builder", "second steer", "mention:old")).toContain("supersedes mention:old");
 });
