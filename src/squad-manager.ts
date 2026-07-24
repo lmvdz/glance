@@ -630,7 +630,7 @@ export function gateClassOf(req: { id: string; title?: string; gateClass?: boole
  * timer and per-pending scheduling; it is filed as follow-up in plans/the-room/26 rather than
  * smuggled in here.
  */
-export function isRoomWorthyPending(req: { id: string; title?: string; gateClass?: boolean }): boolean {
+function isRoomWorthyPending(req: { id: string; title?: string; gateClass?: boolean }): boolean {
 	return gateClassOf(req);
 }
 
