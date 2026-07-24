@@ -33,6 +33,50 @@ describe('channel timeline dispatch', () => {
     expect(card.title).toBe('Future Proof');
     expect(card.body).toBe('fallback text');
   });
+
+  test('land attempt cards render branch sha and target from the pinned face', () => {
+    const card = dispatchChannelCard(entry({
+      id: 'land-a',
+      seq: 3,
+      text: 'land attempt started',
+      event: { kind: 'land-attempt', payload: { refs: { unitId: 'room-16', landId: 'attempt-1' }, face: { unitName: 'Room 16', branch: 'room-16-landcards', sha: 'abcdef1234567890', target: 'HEAD', stage: 'started' } } },
+    }));
+    expect(card.kind).toBe('land-attempt');
+    expect(card.title).toBe('Land attempt started');
+    expect(card.body).toContain('Room 16 is landing room-16-landcards into HEAD');
+    expect(card.pinned).toEqual([{ label: 'Branch', value: 'room-16-landcards' }, { label: 'SHA', value: 'abcdef1234' }, { label: 'Target', value: 'HEAD' }, { label: 'Attempt', value: 'attempt-1' }]);
+    expect(card.land).toMatchObject({ branch: 'room-16-landcards', sha: 'abcdef1234', target: 'HEAD' });
+  });
+
+  test('land assessment cards render risk and recommendation as the face proof', () => {
+    const card = dispatchChannelCard(entry({
+      id: 'land-b',
+      seq: 4,
+      text: 'land assessment rejected',
+      event: { kind: 'land-assessment', payload: { refs: { unitId: 'room-16', landId: 'attempt-1' }, face: { unitName: 'Room 16', branch: 'room-16-landcards', risk: 'high', recommendation: 'Hold until branch is rebased.', detail: 'stale branch overlaps main', stage: 'rejected' } } },
+    }));
+    expect(card.kind).toBe('land-assessment');
+    expect(card.title).toBe('Land assessment · High');
+    expect(card.body).toBe('Hold until branch is rebased.');
+    expect(card.detail).toBe('stale branch overlaps main');
+    expect(card.pinned).toEqual([{ label: 'Risk', value: 'High' }, { label: 'Recommendation', value: 'Hold until branch is rebased.' }, { label: 'Branch', value: 'room-16-landcards' }, { label: 'Attempt', value: 'attempt-1' }]);
+    expect(card.href).toBeUndefined();
+  });
+
+  test('land merge cards render PR mode and route to the proof surface', () => {
+    const card = dispatchChannelCard(entry({
+      id: 'land-c',
+      seq: 5,
+      text: 'land merge finalized',
+      event: { kind: 'land-merge', payload: { refs: { unitId: 'room-16' }, face: { unitName: 'Room 16', branch: 'room-16-landcards', outcome: 'merged', prNumber: 91, prUrl: 'https://github.example/pr/91', doneProofVerified: 'green', detail: 'PR merged, scratch gate green' } } },
+    }));
+    expect(card.kind).toBe('land-merge');
+    expect(card.title).toBe('Land merge · Merged');
+    expect(card.body).toContain('via PR #91');
+    expect(card.pinned).toEqual([{ label: 'Outcome', value: 'Merged' }, { label: 'PR', value: '#91' }, { label: 'Proof', value: 'Green' }, { label: 'Branch', value: 'room-16-landcards' }]);
+    expect(card.href).toBe('#/proof/room-16');
+    expect(card.land).toMatchObject({ outcome: 'Merged', prNumber: '91', prUrl: 'https://github.example/pr/91', doneProofVerified: 'Green' });
+  });
 });
 
 describe('channel attribution cards', () => {

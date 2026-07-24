@@ -17,6 +17,8 @@ const iconClass: Record<ChannelCardView['kind'], typeof ShieldAlert> = {
   message: CircleDot,
   'needs-you': ShieldAlert,
   'gate-verdict': CheckCircle2,
+  'land-attempt': GitMerge,
+  'land-assessment': ShieldAlert,
   'land-merge': GitMerge,
   'mention-steer': CircleDot,
   'mention-confirm-required': ShieldAlert,
@@ -98,7 +100,11 @@ const ChannelTimelineRow = memo(function ChannelTimelineRow({ view, onReply }: {
               <span className="text-[10px] uppercase tracking-[0.14em] opacity-55">{view.authorLabel}</span>
               <span className="text-[10px] tabular-nums opacity-50">#{view.entry.seq}</span>
             </div>
-            <h3 className="mt-1 text-sm font-semibold tracking-tight">{view.title}</h3>
+            {view.href ? (
+              <a href={view.href} className="mt-1 block text-sm font-semibold tracking-tight underline-offset-4 hover:underline focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900">{view.title}</a>
+            ) : (
+              <h3 className="mt-1 text-sm font-semibold tracking-tight">{view.title}</h3>
+            )}
             <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-6 opacity-85">{view.body}</p>
             {view.pinned.length ? (
               <dl className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
