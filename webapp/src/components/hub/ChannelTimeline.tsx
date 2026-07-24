@@ -71,6 +71,7 @@ const ChannelTimelineRow = memo(function ChannelTimelineRow({ view }: { view: Ch
             <div className="flex flex-wrap items-center gap-2">
               {view.eyebrow ? <span className="text-[10px] font-medium uppercase tracking-[0.14em] opacity-60">{view.eyebrow}</span> : null}
               <span className="rounded-full bg-current/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.12em] opacity-80">{view.kind}</span>
+              <span className="text-[10px] uppercase tracking-[0.14em] opacity-55">{view.authorLabel}</span>
               <span className="text-[10px] tabular-nums opacity-50">#{view.entry.seq}</span>
             </div>
             <h3 className="mt-1 text-sm font-semibold tracking-tight">{view.title}</h3>

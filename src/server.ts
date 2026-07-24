@@ -1175,6 +1175,8 @@ export class SquadServer {
 		return { ...actorForRole(ws.data.role), orgId: ws.data.orgId };
 	}
 
+	// File mode has exactly one operator identity. Multiple tabs are socket sets for that operator,
+	// not separate humans; DB mode is the only topology with per-user presence.
 	private presenceForOrg(orgId: string | undefined): PresenceSnapshot {
 		if (!this.auth && !this.registry) return { users: this.clients.size === 0 ? [] : [{ id: this.operator.id, displayName: this.operator.displayName ?? this.operator.id, socketCount: this.clients.size }] };
 		if (!orgId) return { users: [] };

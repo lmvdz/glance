@@ -49,6 +49,8 @@ function readChannelEntry(value: unknown): ChannelEntry | undefined {
 		seq: value.seq,
 		channelId: value.channelId,
 		authorActor: value.authorActor,
+		authorDisplayName: typeof value.authorDisplayName === "string" ? value.authorDisplayName : undefined,
+		authorOrigin: value.authorOrigin === "local" || value.authorOrigin === "remote" || value.authorOrigin === "agent" ? value.authorOrigin : undefined,
 		replyToId: typeof value.replyToId === "string" ? value.replyToId : undefined,
 		kind,
 		text: value.text,

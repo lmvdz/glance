@@ -44,8 +44,40 @@ describe('Hub reductions', () => {
     expect(presenceCount({ users: [{ id: 'u1', displayName: 'Lars', socketCount: 5 }] })).toBe(1);
   });
 
-  test('author labels keep human messages distinct from manager cards', () => {
-    expect(entryAuthorLabel(entry({ id: 'u', seq: 1, authorActor: 'user:lars', kind: 'user' }))).toBe('You');
-    expect(entryAuthorLabel(entry({ id: 'm', seq: 1, authorActor: 'manager' }))).toBe('glance');
+  test('author labels use stamped display names and classify every room entry by origin', () => {
+    const cases: Array<{ name: string; entry: ChannelEntry; label: string }> = [
+      {
+        name: 'local human',
+        entry: entry({ id: 'local', seq: 1, kind: 'user', authorActor: 'db:u1', authorDisplayName: 'Lars Operator', authorOrigin: 'local' }),
+        label: 'Lars Operator · human',
+      },
+      {
+        name: 'remote human',
+        entry: entry({ id: 'remote', seq: 2, kind: 'user', authorActor: 'web:peer', authorOrigin: 'remote' }),
+        label: 'peer · human',
+      },
+      {
+        name: 'agent',
+        entry: entry({ id: 'agent', seq: 3, authorActor: 'agent:planner', authorDisplayName: 'Planner Bot', authorOrigin: 'agent' }),
+        label: 'Planner Bot · agent',
+      },
+      {
+        name: 'manager system with a display name',
+        entry: entry({ id: 'manager-named', seq: 4, kind: 'system', authorActor: 'manager', authorDisplayName: 'Room Manager' }),
+        label: 'Room Manager · system',
+      },
+      {
+        name: 'manager system fallback',
+        entry: entry({ id: 'manager', seq: 5, kind: 'system', authorActor: 'manager' }),
+        label: 'glance · system',
+      },
+      {
+        name: 'other system',
+        entry: entry({ id: 'system', seq: 6, kind: 'system', authorActor: 'daemon:watch', authorDisplayName: 'Watchdog' }),
+        label: 'Watchdog · system',
+      },
+    ];
+
+    expect(cases.map(({ name, entry }) => [name, entryAuthorLabel(entry)])).toEqual(cases.map(({ name, label }) => [name, label]));
   });
 });

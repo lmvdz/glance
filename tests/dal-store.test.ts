@@ -245,18 +245,41 @@ test("DbStore: channel entries are durable and scoped by org", async () => {
 	expect(await a.listChannelEntries("fleet", 1)).toEqual([]);
 });
 
-test("ChannelStore: client posts are redacted, born settled, and cannot carry event payloads", async () => {
+test("ChannelStore: client posts stamp the verified actor, redact text, and cannot persist forged event payloads", async () => {
 	const fdir = path.join(dir, "channel-authorship");
 	const store = new FileStore(fdir);
 	const channels = new ChannelStore(fdir, store, undefined, () => 123);
-	const entry = await channels.appendClient("fleet", { id: "web:operator", role: "admin" }, { text: `token sk-${"a".repeat(20)}`, event: { kind: "fake", payload: {} } } as never);
+	const secret = `sk-${"a".repeat(20)}`;
+	const entry = await channels.appendClient("fleet", { id: "web:operator", displayName: "Lars Operator", origin: "local", role: "admin" }, {
+		text: `token ${secret}`,
+		replyToId: "prev-entry",
+		authorDisplayName: "Mallory",
+		authorOrigin: "agent",
+		event: { kind: "fake", payload: { body: secret } },
+	} as never);
 	await channels.stop();
+	const persisted = await store.listChannelEntries("fleet");
 
-	expect(entry.status).toBe("ok");
-	expect(entry.status).not.toBe("running");
+	expect(entry).toMatchObject({
+		status: "ok",
+		kind: "user",
+		format: "markdown",
+		authorActor: "web:operator",
+		authorDisplayName: "Lars Operator",
+		authorOrigin: "local",
+		replyToId: "prev-entry",
+		text: "token [REDACTED]",
+	});
 	expect(entry.event).toBeUndefined();
-	expect(entry.text).not.toContain(`sk-${"a".repeat(20)}`);
-	expect(await store.listChannelEntries("fleet")).toHaveLength(1);
+	expect(persisted).toHaveLength(1);
+	expect(persisted[0]).toMatchObject({
+		id: entry.id,
+		authorActor: "web:operator",
+		authorDisplayName: "Lars Operator",
+		authorOrigin: "local",
+		text: "token [REDACTED]",
+	});
+	expect(persisted[0]?.event).toBeUndefined();
 });
 
 test("ChannelStore: manager-authored card strings are redacted and delimiter-neutralized", async () => {

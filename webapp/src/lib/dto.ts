@@ -665,6 +665,8 @@ export interface ChannelEntry extends TranscriptEntry {
   seq: number;
   channelId: string;
   authorActor: string;
+  authorDisplayName?: string;
+  authorOrigin?: "local" | "remote" | "agent";
   replyToId?: string;
   event?: { kind: string; issuer?: string; payload: unknown };
 }

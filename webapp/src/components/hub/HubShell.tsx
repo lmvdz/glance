@@ -3,8 +3,8 @@ import { Hash, Loader2, Users } from 'lucide-react';
 import { Composer, type ModelOption } from '../chat/Composer';
 import { ChannelRail } from './ChannelRail';
 import { ChannelTimeline } from './ChannelTimeline';
-import { apiJson, jsonInit } from '../../lib/api';
-import { buildPromptCommand, ensureConsoleAgent } from '../../lib/chat/sendCore';
+import { apiJson } from '../../lib/api';
+import { buildPromptCommand, channelAgentSessionId, channelDraftSessionId, ensureConsoleAgent, postChannelMessage } from '../../lib/chat/sendCore';
 import type { AgentDTO, Channel, ChannelEntry, PresenceSnapshot } from '../../lib/dto';
 import { latestSeq, presenceCount, reduceChannelEntries } from '../../lib/hub';
 import { DEFAULT_CHANNEL_ID, type HubRoute } from '../../lib/router';
@@ -16,8 +16,11 @@ const DEFAULT_MODELS: ModelOption[] = [{ value: '', label: 'Default model' }];
 
 function ChannelHeader({ channel, presence, selectedAgent }: { channel: Channel; presence: PresenceSnapshot; selectedAgent?: AgentDTO }) {
   const count = presenceCount(presence);
+  const visible = presence.users.slice(0, 5);
+  const overflow = Math.max(0, presence.users.length - visible.length);
+  const label = count === 1 ? '1 human present' : `${count} humans present`;
   return (
-    <header className="flex h-10 flex-shrink-0 items-center justify-between border-b border-zinc-800 bg-[#0c0c0e] px-4 text-zinc-100">
+    <header className="flex min-h-12 flex-shrink-0 items-center justify-between gap-4 border-b border-zinc-800 bg-[#0c0c0e] px-4 py-2 text-zinc-100">
       <div className="flex min-w-0 items-center gap-2">
         <Hash className="h-4 w-4 text-amber-300" aria-hidden />
         <div className="min-w-0">
@@ -25,15 +28,24 @@ function ChannelHeader({ channel, presence, selectedAgent }: { channel: Channel;
           <p className="truncate text-[11px] text-zinc-500">{selectedAgent ? `Addressing ${selectedAgent.name || selectedAgent.id}` : 'Fleet channel'}</p>
         </div>
       </div>
-      <div className="flex items-center gap-3">
+      <div className="flex min-w-0 items-center gap-3" aria-label={label}>
+        <div className="hidden min-w-0 items-center justify-end gap-1.5 sm:flex">
+          {visible.map((user) => (
+            <span key={user.id} className="max-w-32 truncate rounded-full border border-zinc-800 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-300" title={`${user.displayName} · ${user.socketCount} socket${user.socketCount === 1 ? '' : 's'}`}>
+              {user.displayName}
+              <span className="ml-1 text-zinc-500">×{user.socketCount}</span>
+            </span>
+          ))}
+          {overflow > 0 ? <span className="rounded-full border border-zinc-800 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-500">+{overflow}</span> : null}
+        </div>
         <div className="flex -space-x-1" aria-hidden>
-          {presence.users.slice(0, 4).map((user) => (
-            <div key={user.id} className="flex h-6 w-6 items-center justify-center rounded-full border border-zinc-950 bg-zinc-800 text-[10px] font-semibold text-zinc-200" title={user.displayName}>
+          {visible.map((user) => (
+            <div key={user.id} className="flex h-7 w-7 items-center justify-center rounded-full border border-zinc-950 bg-zinc-800 text-[10px] font-semibold text-zinc-200" title={`${user.displayName} · ${user.socketCount} socket${user.socketCount === 1 ? '' : 's'}`}>
               {(user.displayName || user.id).slice(0, 1).toUpperCase()}
             </div>
           ))}
         </div>
-        <div className="flex items-center gap-1.5 text-xs text-zinc-400" aria-label={`${count} present`}>
+        <div className="flex items-center gap-1.5 text-xs text-zinc-400">
           <Users className="h-3.5 w-3.5" aria-hidden />
           <span className="tabular-nums">{count}</span>
         </div>
@@ -134,12 +146,12 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
     if (!text.trim() || sending || route.kind !== 'hub') return;
     setSending(true);
     try {
-      const result = await apiJson<{ entry: ChannelEntry }>(`/api/channels/${encodeURIComponent(activeChannelId)}/entries`, jsonInit('POST', { text }));
+      const result = await postChannelMessage({ apiJson }, activeChannelId, text);
       setEntries((prev) => reduceChannelEntries(prev, [result.entry], activeChannelId));
       lastSeqRef.current = Math.max(lastSeqRef.current, result.entry.seq);
       setAnchorEntryId(result.entry.id);
       if (selectedAgent) {
-        const sessionId = `hub:${activeChannelId}:${selectedAgent.id}`;
+        const sessionId = channelAgentSessionId(activeChannelId, selectedAgent.id);
         const clientTurnId = `hub-turn:${Date.now()}:${Math.random().toString(36).slice(2)}`;
         const agentId = await ensureConsoleAgent({ apiJson, subscribeConsole, roster: agents, currentProject, selectedModel }, sessionId, selectedAgent.id);
         sendConsoleCommand(buildPromptCommand({ agentId, agents, features, audit, selectedTask, pageContext: null }, text, { clientTurnId, source: 'composer' }));
@@ -164,7 +176,7 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
               <Composer
                 tasks={tasks}
                 suggestionChips={[]}
-                sessionId={`hub:${activeChannelId}`}
+                sessionId={channelDraftSessionId(activeChannelId)}
                 isLoading={sending}
                 isStopShown={false}
                 stopPending={false}

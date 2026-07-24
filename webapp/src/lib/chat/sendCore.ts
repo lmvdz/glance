@@ -21,7 +21,7 @@ import { jsonInit } from '../api';
 import { activeWork, activeWorkDigest } from '../insights';
 import { fleetActivityDigest, fleetActivityLines, fleetActivityRollup } from '../fleetActivity';
 import { serializePageContextForPrompt } from '../pageContextDerive';
-import type { AgentDTO, AuditEntry, ClientCommand, FeatureDTO } from '../dto';
+import type { AgentDTO, AuditEntry, ChannelEntry, ClientCommand, FeatureDTO } from '../dto';
 import type { PageContext } from '../../context/PageContext';
 import type { Task } from '../../types';
 
@@ -56,6 +56,34 @@ export interface SendCoreDeps {
   roster: AgentDTO[];
   currentProject: { id?: string } | null | undefined;
   selectedModel: string;
+}
+
+export interface ChannelPostDeps {
+  apiJson: <T>(path: string, init?: RequestInit) => Promise<T>;
+}
+
+export interface ChannelPostResult {
+  entry: ChannelEntry;
+}
+
+export function channelDraftSessionId(channelId: string): string {
+  if (!channelId) throw new Error('channelId required');
+  return `hub:${channelId}`;
+}
+
+export function channelAgentSessionId(channelId: string, agentId: string): string {
+  if (!channelId) throw new Error('channelId required');
+  if (!agentId) throw new Error('agentId required');
+  return `hub:${channelId}:${agentId}`;
+}
+
+/** Room messages use the channel-entry route, not the agent prompt route. The body is
+ * deliberately only `{text}` so forged card/event fields die at the server schema boundary. */
+export function postChannelMessage(deps: ChannelPostDeps, channelId: string, text: string): Promise<ChannelPostResult> {
+  const trimmed = text.trim();
+  if (!channelId) throw new Error('channelId required');
+  if (!trimmed) throw new Error('message required');
+  return deps.apiJson<ChannelPostResult>(`/api/channels/${encodeURIComponent(channelId)}/entries`, jsonInit('POST', { text: trimmed }));
 }
 
 /** One in-flight `/api/console` mint promise per session — the single-flight cache. Module-level

@@ -1,4 +1,5 @@
 import type { ChannelEntry } from './dto';
+import { entryAuthorLabel } from './hub';
 
 export type ChannelCardTone = 'neutral' | 'info' | 'warning' | 'success' | 'destructive';
 export type ChannelCardKind = 'message' | 'needs-you' | 'gate-verdict' | 'land-merge' | 'unknown-event';
@@ -63,25 +64,20 @@ function labelFromKey(key: string): string {
   return key.replace(/[-_]+/g, ' ').replace(/\b\w/g, (ch) => ch.toUpperCase());
 }
 
-function authorLabel(entry: ChannelEntry): string {
-  if (entry.authorActor.startsWith('user:') || entry.kind === 'user') return 'You';
-  if (entry.authorActor.startsWith('manager')) return 'glance';
-  return entry.authorActor.replace(/^web:/, '').replace(/^db:/, '');
-}
 
 export function dispatchChannelCard(entry: ChannelEntry): ChannelCardView {
   const eventKind = entry.event?.kind;
   if (!eventKind) {
-    return { id: entry.id, entry, kind: 'message', tone: entry.kind === 'user' ? 'info' : 'neutral', authorLabel: authorLabel(entry), title: authorLabel(entry), body: entry.displayText || entry.text, pinned: [] };
+    return { id: entry.id, entry, kind: 'message', tone: entry.kind === 'user' ? 'info' : 'neutral', authorLabel: entryAuthorLabel(entry), title: entryAuthorLabel(entry), body: entry.displayText || entry.text, pinned: [] };
   }
   if (!POINTER_EVENT_KINDS[eventKind]) {
-    return { id: entry.id, entry, kind: 'unknown-event', tone: 'neutral', authorLabel: authorLabel(entry), title: labelFromKey(eventKind), eyebrow: 'Event', body: entry.text || 'This room event is from a newer daemon. Update the client to see the full card.', pinned: [] };
+    return { id: entry.id, entry, kind: 'unknown-event', tone: 'neutral', authorLabel: entryAuthorLabel(entry), title: labelFromKey(eventKind), eyebrow: 'Event', body: entry.text || 'This room event is from a newer daemon. Update the client to see the full card.', pinned: [] };
   }
   const face = faceFromPayload(entry.event?.payload);
   const title = face?.title || labelFromKey(eventKind);
   const body = face?.body || entry.text || 'Card update';
   const pinned = Object.entries(face?.pinned ?? {}).flatMap(([label, value]) => value == null || value === '' ? [] : [{ label: labelFromKey(label), value: String(value) }]);
-  return { id: entry.id, entry, kind: eventKind as ChannelCardKind, tone: toneFor(eventKind, face), authorLabel: authorLabel(entry), title, eyebrow: face?.eyebrow, body, detail: face?.detail, pinned };
+  return { id: entry.id, entry, kind: eventKind as ChannelCardKind, tone: toneFor(eventKind, face), authorLabel: entryAuthorLabel(entry), title, eyebrow: face?.eyebrow, body, detail: face?.detail, pinned };
 }
 
 export function reduceChannelEntryWindow(entries: ChannelEntry[], incoming: ChannelEntry[], channelId: string, cap = 500): ChannelEntry[] {
