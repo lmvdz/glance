@@ -192,6 +192,13 @@ export interface TranscriptEvent {
 	 * feature-owned fact taxonomy ("gate-verdict", "land-attempt", ...).
 	 */
 	kind: string;
+	/**
+	 * Attesting authority for this fact. Stamped by the emitting chokepoint
+	 * (emitUnitTranscriptEvent / ChannelStore.appendManager), never accepted from
+	 * client or caller input. Entries persisted before provenance landed lack it and
+	 * read as "manager" (EVENT_ISSUER_MANAGER — the only issuer today).
+	 */
+	issuer?: string;
 	payload: unknown;
 }
 

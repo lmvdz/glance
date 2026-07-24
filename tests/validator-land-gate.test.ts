@@ -201,6 +201,7 @@ test("a passing judge lands normally and stamps agent.validation", async () => {
 	expect(mgr.agents.get("a1")?.dto.validation?.verdict).toBe("pass");
 	expect(mgr.agents.get("a1")?.dto.validation?.agreement).toBe(1);
 	const events = mgr.getTranscript("a1").filter((e) => e.event);
+	expect(events.every((e) => e.event?.issuer === "manager")).toBe(true);
 	expect(events.map((e) => e.event?.kind)).toContain(TRANSCRIPT_EVENT_GATE_VERDICT);
 	expect(events.map((e) => e.event?.kind)).toContain(TRANSCRIPT_EVENT_LAND_ATTEMPT);
 	expect(events.map((e) => e.event?.kind)).toContain(TRANSCRIPT_EVENT_LAND_MERGE);

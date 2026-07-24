@@ -213,6 +213,7 @@ import { isArmed } from "./convergence-oracle.ts";
 import { lensAdvisoryBucket, scoreConfidence } from "./confidence.ts";
 import { redact } from "./redact.ts";
 import {
+	EVENT_ISSUER_MANAGER,
 	TRANSCRIPT_EVENT_GATE_VERDICT,
 	TRANSCRIPT_EVENT_LAND_ASSESSMENT,
 	TRANSCRIPT_EVENT_LAND_ATTEMPT,
@@ -11038,7 +11039,7 @@ export class SquadManager extends EventEmitter {
 		if (!id) return;
 		const rec = this.agents.get(id);
 		if (!rec || !Array.isArray(rec.transcript)) return;
-		const entry = this.append(rec, "system", this.eventText(text), { status: "ok", format: "stage", event: { kind, payload } });
+		const entry = this.append(rec, "system", this.eventText(text), { status: "ok", format: "stage", event: { kind, issuer: EVENT_ISSUER_MANAGER, payload } });
 		void this.projectUnitTranscriptEvent(rec, entry);
 	}
 

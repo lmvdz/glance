@@ -55,7 +55,14 @@ function readChannelEntry(value: unknown): ChannelEntry | undefined {
 		ts: value.ts,
 		status,
 		format: value.format === "markdown" || value.format === "command" || value.format === "stage" || value.format === "plain" ? value.format : undefined,
-		event: isPlainObject(value.event) && typeof value.event.kind === "string" ? { kind: value.event.kind, payload: value.event.payload } : undefined,
+		event:
+			isPlainObject(value.event) && typeof value.event.kind === "string"
+				? {
+						kind: value.event.kind,
+						...(typeof value.event.issuer === "string" ? { issuer: value.event.issuer } : {}),
+						payload: value.event.payload,
+					}
+				: undefined,
 	};
 }
 

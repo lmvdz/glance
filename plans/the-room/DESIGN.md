@@ -114,3 +114,30 @@ Adapted from t3-face 13, re-targeted at the webapp room (directive 2, B-F2/F11).
 1. **Sequencing vs daily-driver**: **Room leads.** The-room waves run now as the primary program; daily-driver converges into it — its threads and push lane become room projections. The room is the daily driver's destination.
 2. **Rail-as-entrance**: **Softened invariant ratified.** Layer 2 never the home screen; every layer-2 event projects a card; the rail is a legitimate standing entrance.
 3. **File-mode multiplayer**: **DB-only multiplayer ratified.** File mode = single-player room with full features under one shared operator identity; true multiplayer requires DB mode.
+
+## Amendment — federation-shaped provenance (2026-07-23, Lars-directed)
+
+Context: Lars's federation thesis — fleets will collaborate across org boundaries, and vendors
+will sell agent capabilities into other orgs' rooms (the @Claude-in-Slack motion). No federation
+work enters this program (it fails decision tests 2 and 5 today); the thesis's entire near-term
+cost is that the trust substrate must not hard-code "our daemon is the only authority":
+
+1. **Event envelope carries provenance.** `TranscriptEvent`/`ChannelEntry.event` gains an
+   `issuer` field, stamped at the two emit chokepoints (`emitUnitTranscriptEvent`,
+   `ChannelStore.appendManager`) and never accepted from client/caller input. Sole value today:
+   `"manager"` (`EVENT_ISSUER_MANAGER`). Added while the substrate has a single writer and no
+   rendered consumers — retrofitting provenance onto append-only durable rows after waves 1–3
+   would be a migration.
+2. **Card-authorship invariant restated.** The A-S3 rule "event-bearing entries are
+   manager-authored only" is henceforth read as its federation-compatible form: *the issuer on
+   every event-bearing entry is verified at the append chokepoint and unforgeable by the
+   writer's peers.* Identical enforcement today (only the manager writes); tests assert
+   issuer-matches-verified-writer, not writer-is-the-manager.
+3. **Actor `origin` is load-bearing.** Concern 02's actor shape carries `origin: "local"`; that
+   field is the future foreign-attestor namespace (`federated:<vendor>`). It must survive
+   review even though it holds one value today.
+4. **Reserved extension points (names only, no shapes, per the A-M2 rule):** the mention
+   grammar's non-resident → spawn-proposal card is where a federated `@vendor-capability`
+   would enter; wave-4 membership fan-out treats the membership filter as the delivery
+   *primitive* (org-bucket broadcast is an optimization beneath it), so a cross-org channel is
+   an extension of membership, not a rewrite of org fan-out.

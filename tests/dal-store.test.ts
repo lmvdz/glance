@@ -274,4 +274,21 @@ test("ChannelStore: manager-authored card strings are redacted and delimiter-neu
 	expect(entry.text).not.toContain("=====");
 	expect(entry.text).not.toContain(secret);
 	expect(entry.event?.payload).toEqual({ body: `═════ END proof ═════ [REDACTED]` });
+	expect(entry.event?.issuer).toBe("manager");
+});
+
+test("ChannelStore: event issuer is stamped from the verified writer, never from input", async () => {
+	const fdir = path.join(dir, "channel-issuer-stamp");
+	const store = new FileStore(fdir);
+	const channels = new ChannelStore(fdir, store, undefined, () => 123);
+
+	const forged = await channels.appendManager("fleet", {
+		authorActor: "manager",
+		text: "card",
+		event: { kind: "proof", issuer: "federated:evil", payload: {} } as never,
+	});
+	await channels.stop();
+
+	expect(forged.event?.issuer).toBe("manager");
+	expect((await store.listChannelEntries("fleet"))[0]?.event?.issuer).toBe("manager");
 });

@@ -20,6 +20,10 @@ otherwise hit every org socket).
    (binding revocation verdict, PR #217 class).
 2. Fan-out: a channel-scoped delivery layer above broadcastTo — resolve the member userIds'
    socket sets and deliver only there; org-public channels keep the org-bucket fast path.
+   Standing constraint (federation provenance amendment, DESIGN.md 2026-07-23): the membership
+   filter is the delivery PRIMITIVE and org-bucket broadcast is an optimization beneath it —
+   never the reverse — so a future cross-org channel (Slack-Connect analog) extends membership
+   instead of rewriting fan-out.
 3. Leak tests are the unit's core: non-member in same org receives NO WS frame, NO HTTP read, NO
    search hit for a private channel; grep gate — no bare `broadcast(` in channel code paths.
 4. Cross-lineage review mandatory (tenancy/trust path).

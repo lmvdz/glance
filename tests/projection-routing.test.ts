@@ -109,6 +109,7 @@ test("origin channel receives full lifecycle pointer-cards with pinned refs and 
 	const card = await projected;
 
 	expect(card.authorActor).toBe("manager");
+	expect(card.event?.issuer).toBe("manager");
 	expect(card.channelId).toBe("room-a");
 	expect(card.text).toBe("land assessment · rejected");
 	expect(card.text).not.toContain("sk-");
