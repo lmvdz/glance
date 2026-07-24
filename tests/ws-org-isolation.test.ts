@@ -9,6 +9,7 @@ import type { Actor, AgentDTO, ClientCommand, CommandInfo, SquadEvent, Transcrip
 
 const cleanups: Array<() => Promise<void> | void> = [];
 const sockets: WebSocket[] = [];
+const fetchNative = globalThis.fetch.bind(globalThis);
 
 afterEach(async () => {
 	for (const ws of sockets.splice(0)) {
@@ -287,7 +288,7 @@ test("DB-registry WebSocket identity stamps session user into commands and per-u
 	expect(await command.promise).toEqual({ id: "db:user-orgA", displayName: "User orgA", origin: "local", role: "operator", orgId: "orgA" });
 	expect(roleLookups).toContain("orgA");
 
-	const presence = await fetch(`${url}/api/room/presence`, { headers: { cookie: "session=orgA" } }).then((res) => res.json());
+	const presence = await fetchNative(`${url}/api/room/presence`, { headers: { cookie: "session=orgA" } }).then((res) => res.json());
 	expect(presence).toEqual({
 		orgId: "orgA",
 		users: [
@@ -300,10 +301,10 @@ test("DB-registry WebSocket identity stamps session user into commands and per-u
 	await tab2.waitFor((event) => event.type === "presence" && event.presence.users.some((user) => user.id === "db:user-orgA" && user.socketCount === 1));
 	await closeAndWait(tab2.ws);
 	await otherUser.waitFor((event) => event.type === "presence" && !event.presence.users.some((user) => user.id === "db:user-orgA") && event.presence.users.some((user) => user.id === "db:user-orgA2" && user.socketCount === 1));
-	const otherOnly = await fetch(`${url}/api/room/presence`, { headers: { cookie: "session=orgA2" } }).then((res) => res.json());
+	const otherOnly = await fetchNative(`${url}/api/room/presence`, { headers: { cookie: "session=orgA2" } }).then((res) => res.json());
 	expect(otherOnly).toEqual({ orgId: "orgA", users: [{ id: "db:user-orgA2", displayName: "User orgA2", socketCount: 1 }] });
 	await closeAndWait(otherUser.ws);
-	const empty = await fetch(`${url}/api/room/presence`, { headers: { cookie: "session=orgA" } }).then((res) => res.json());
+	const empty = await fetchNative(`${url}/api/room/presence`, { headers: { cookie: "session=orgA" } }).then((res) => res.json());
 	expect(empty).toEqual({ orgId: "orgA", users: [] });
 });
 
@@ -323,13 +324,13 @@ test("auth-backed single-manager WS identity still stamps session user into comm
 	await ws.waitFor((event) => event.type === "presence" && event.presence.users.some((user) => user.id === "db:user-orgA"));
 	ws.ws.send(JSON.stringify({ type: "prompt", id: agentA.id, message: "hello" }));
 	expect(await wsActor.promise).toEqual({ id: "db:user-orgA", displayName: "User orgA", origin: "local", role: "operator", orgId: "orgA" });
-	const rest = await fetch(`${url}/api/command`, { method: "POST", headers: { cookie: "session=orgA" }, body: JSON.stringify({ type: "prompt", id: agentA.id, message: "from rest" }) });
+	const rest = await fetchNative(`${url}/api/command`, { method: "POST", headers: { cookie: "session=orgA" }, body: JSON.stringify({ type: "prompt", id: agentA.id, message: "from rest" }) });
 	expect(rest.status).toBe(200);
 	expect(actors[1]).toEqual({ id: "db:user-orgA", displayName: "User orgA", origin: "local", role: "operator", orgId: "orgA" });
-	const presence = await fetch(`${url}/api/room/presence`, { headers: { cookie: "session=orgA" } }).then((res) => res.json());
+	const presence = await fetchNative(`${url}/api/room/presence`, { headers: { cookie: "session=orgA" } }).then((res) => res.json());
 	expect(presence).toEqual({ orgId: "orgA", users: [{ id: "db:user-orgA", displayName: "User orgA", socketCount: 1 }] });
 	await closeAndWait(ws.ws);
-	const empty = await fetch(`${url}/api/room/presence`, { headers: { cookie: "session=orgA" } }).then((res) => res.json());
+	const empty = await fetchNative(`${url}/api/room/presence`, { headers: { cookie: "session=orgA" } }).then((res) => res.json());
 	expect(empty).toEqual({ orgId: "orgA", users: [] });
 });
 
@@ -349,10 +350,10 @@ test("file-mode WS commands and presence use the single shared operator identity
 	await ws.waitFor((event) => event.type === "presence" && event.presence.users.some((user) => user.id === "test-op" && user.socketCount === 1));
 	ws.ws.send(JSON.stringify({ type: "prompt", id: agentA.id, message: "hello" }));
 	expect(await command.promise).toEqual({ id: "test-op", origin: "local", role: "admin" });
-	const presence = await fetch(`${url}/api/room/presence`).then((res) => res.json());
+	const presence = await fetchNative(`${url}/api/room/presence`).then((res) => res.json());
 	expect(presence).toEqual({ users: [{ id: "test-op", displayName: "test-op", socketCount: 1 }] });
 	await closeAndWait(ws.ws);
-	const empty = await fetch(`${url}/api/room/presence`).then((res) => res.json());
+	const empty = await fetchNative(`${url}/api/room/presence`).then((res) => res.json());
 	expect(empty).toEqual({ users: [] });
 });
 
