@@ -8,7 +8,7 @@ import type { ChannelEntry } from "../src/channels.ts";
 import { DEFAULT_CHANNEL_ID } from "../src/channels.ts";
 import { LOCAL_ACTOR } from "../src/federation.ts";
 import { SquadManager } from "../src/squad-manager.ts";
-import { TRANSCRIPT_EVENT_DESIGN_REVISED, TRANSCRIPT_EVENT_GATE_VERDICT, TRANSCRIPT_EVENT_LAND_ASSESSMENT, TRANSCRIPT_EVENT_PLAN_CARD, TRANSCRIPT_EVENT_RETURN_EMIT } from "../src/transcript-event-kinds.ts";
+import { TRANSCRIPT_EVENT_DESIGN_REVISED, TRANSCRIPT_EVENT_GATE_VERDICT, TRANSCRIPT_EVENT_LAND_ASSESSMENT, TRANSCRIPT_EVENT_PLAN_CARD, TRANSCRIPT_EVENT_RETURN_EMIT, TRANSCRIPT_EVENT_UNIT_SPAWNED } from "../src/transcript-event-kinds.ts";
 import type { AgentDTO, ClientCommand, PersistedAgent, RpcExtensionUIRequest, RpcSessionState } from "../src/types.ts";
 
 const tmps: string[] = [];
@@ -228,7 +228,7 @@ test("unbound units project only fleet-default card kinds", async () => {
 	const dto = await mgr.create({ name: "unit-b", repo, approvalMode: "yolo", autoRoute: false });
 
 	host.emitUnitTranscriptEvent(dto.id, TRANSCRIPT_EVENT_LAND_ASSESSMENT, "land assessment · rejected", { stage: "rejected" });
-	expect(await mgr.channelEntries(DEFAULT_CHANNEL_ID)).toHaveLength(0);
+	expect((await mgr.channelEntries(DEFAULT_CHANNEL_ID)).map((entry) => entry.event?.kind)).toEqual([TRANSCRIPT_EVENT_UNIT_SPAWNED]);
 
 	const projected = waitForChannelEntry(mgr, DEFAULT_CHANNEL_ID, (entry) => entry.event?.kind === TRANSCRIPT_EVENT_GATE_VERDICT);
 	host.emitUnitTranscriptEvent(dto.id, TRANSCRIPT_EVENT_GATE_VERDICT, "gate verdict · pass", { verdict: "pass" });
@@ -337,7 +337,7 @@ test("projection is scoped to the manager org store", async () => {
 
 	a.host.emitUnitTranscriptEvent(dto.id, TRANSCRIPT_EVENT_GATE_VERDICT, "gate verdict · pass", { verdict: "pass" });
 	await projected;
-	expect(await a.mgr.channelEntries("ops")).toHaveLength(1);
+	expect((await a.mgr.channelEntries("ops")).map((entry) => entry.event?.kind)).toEqual([TRANSCRIPT_EVENT_UNIT_SPAWNED, TRANSCRIPT_EVENT_GATE_VERDICT]);
 	expect(await b.mgr.channelEntries("ops")).toHaveLength(0);
 	await a.mgr.stop();
 	await b.mgr.stop();
@@ -357,10 +357,10 @@ test("routine tool approvals never become room cards — only gate-class pending
 	// Raise it, then resolve it. The lane and rail read AgentDTO.pending directly and are untouched by
 	// this change; what must not happen is a permanent card — on either edge of the lifecycle.
 	host.onUi(rec, { method: "confirm", id: "acpui_7", title: "Allow tool: bash", message: "Command: bun run check" } as RpcExtensionUIRequest);
-	expect(await mgr.channelEntries("ops")).toHaveLength(0);
+	expect((await mgr.channelEntries("ops")).map((entry) => entry.event?.kind)).toEqual([TRANSCRIPT_EVENT_UNIT_SPAWNED]);
 	await mgr.applyCommand({ type: "answer", id: dto.id, requestId: "acpui_7", value: "yes" }, LOCAL_ACTOR);
 	expect(mgr.getAgent(dto.id)?.pending).toEqual([]);
-	expect(await mgr.channelEntries("ops")).toHaveLength(0);
+	expect((await mgr.channelEntries("ops")).map((entry) => entry.event?.kind)).toEqual([TRANSCRIPT_EVENT_UNIT_SPAWNED]);
 
 	// A gate-class request — the kind no supervisor may auto-answer — still earns its card.
 	const gateCard = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === "needs-you");
