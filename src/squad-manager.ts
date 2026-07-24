@@ -10060,7 +10060,7 @@ export class SquadManager extends EventEmitter {
 		});
 	}
 
-	async gateVerdictProof(channelId: string, entryId: string, actor?: Actor): Promise<{
+	async gateVerdictProof(channelId: string, entryId: string, actor: Actor): Promise<{
 		mode: "resident" | "post-mortem";
 		unitId?: string;
 		unitName?: string;
@@ -10843,9 +10843,9 @@ export class SquadManager extends EventEmitter {
 	 *  data, with the in-memory rings folded in so a just-recorded tap/transition is visible before
 	 *  its fire-and-forget spool lands (the GET /api/adoption read-your-write case). Room interactions
 	 *  come from the existing channel substrate; no parallel counter store. */
-	async adoptionCounters(): Promise<AdoptionCounters> {
-		const channels = await this.channelStore.listChannels();
-		const channelEntries = (await Promise.all(channels.map((channel) => this.channelStore.entries(channel.id, 0)))).flat();
+	async adoptionCounters(actor: Actor = LOCAL_ACTOR): Promise<AdoptionCounters> {
+		const channels = await this.channelStore.listChannels(actor);
+		const channelEntries = (await Promise.all(channels.map((channel) => this.channelStore.entries(channel.id, 0, actor)))).flat();
 		return computeAdoptionCounters(this.stateDir, { transitions: this.transitionLog.recent(), pushTaps: this.pushTapLog.recent(), channelEntries });
 	}
 
@@ -11189,15 +11189,15 @@ export class SquadManager extends EventEmitter {
 		return entry;
 	}
 
-	async listChannels(actor?: Actor) {
+	async listChannels(actor: Actor) {
 		return this.channelStore.listChannels(actor);
 	}
 
-	async channelEntries(channelId: string = DEFAULT_CHANNEL_ID, since = 0, actor?: Actor): Promise<ChannelEntry[]> {
+	async channelEntries(channelId: string = DEFAULT_CHANNEL_ID, since = 0, actor: Actor): Promise<ChannelEntry[]> {
 		return this.channelStore.entries(channelId, since, actor);
 	}
 
-	async searchChannelEntries(q: string, limit = 50, actor?: Actor) {
+	async searchChannelEntries(q: string, limit = 50, actor: Actor) {
 		return this.channelStore.search(q, limit, actor);
 	}
 

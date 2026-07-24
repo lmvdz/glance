@@ -129,10 +129,9 @@ export class ChannelStore {
 		await this.defaultReady;
 	}
 
-	async listChannels(actor?: Actor): Promise<Channel[]> {
+	async listChannels(actor: Actor): Promise<Channel[]> {
 		await this.ensureDefaultChannel();
 		const channels = (await this.store.listChannels()).sort(channelSort);
-		if (!actor) return channels;
 		const allowed: Channel[] = [];
 		for (const channel of channels) {
 			if (await this.canReadChannel(channel.id, actor)) allowed.push(channel);
@@ -140,21 +139,21 @@ export class ChannelStore {
 		return allowed;
 	}
 
-	async entries(channelId = DEFAULT_CHANNEL_ID, since = 0, actor?: Actor): Promise<ChannelEntry[]> {
+	async entries(channelId = DEFAULT_CHANNEL_ID, since = 0, actor: Actor): Promise<ChannelEntry[]> {
 		await this.ensureDefaultChannel();
-		if (actor && !(await this.canReadChannel(channelId, actor))) throw new Error("channel forbidden");
+		if (!(await this.canReadChannel(channelId, actor))) throw new Error("channel forbidden");
 		return (await this.store.listChannelEntries(channelId, since)).sort(entrySort);
 	}
 
-	async search(q: string, limit = 50, actor?: Actor): Promise<ChannelSearchResult[]> {
+	async search(q: string, limit = 50, actor: Actor): Promise<ChannelSearchResult[]> {
 		await this.ensureDefaultChannel();
-		const allowed = actor ? new Set((await this.listChannels(actor)).map((channel) => channel.id)) : undefined;
+		const allowed = new Set((await this.listChannels(actor)).map((channel) => channel.id));
 		const nativeSearch = this.store.searchChannelEntries?.bind(this.store);
-		if (nativeSearch) return (await nativeSearch(q, actor ? Math.max(limit * 10, 500) : limit)).filter((result) => !allowed || allowed.has(result.entry.channelId)).slice(0, limit);
+		if (nativeSearch) return (await nativeSearch(q, Math.max(limit * 10, 500))).filter((result) => allowed.has(result.entry.channelId)).slice(0, limit);
 		const needle = q.trim().toLowerCase();
 		if (!needle) return [];
-		const results = (await this.entries(DEFAULT_CHANNEL_ID, 0))
-			.filter((entry) => (!allowed || allowed.has(entry.channelId)) && entry.text.toLowerCase().includes(needle))
+		const results = (await Promise.all([...allowed].map((channelId) => this.entries(channelId, 0, actor)))).flat()
+			.filter((entry) => entry.text.toLowerCase().includes(needle))
 			.map((entry) => ({ entry, snippet: entry.text }))
 			.sort((a, b) => b.entry.ts - a.entry.ts || b.entry.seq - a.entry.seq);
 		return results.slice(0, limit);
