@@ -44,6 +44,7 @@ import {
 	ChannelCreateBodySchema,
 	ChannelMemberBodySchema,
 	ChannelPostBodySchema,
+	ChannelReadBodySchema,
 	CommentsCreateBodySchema,
 	ConsoleBodySchema,
 	ConsoleReleaseBodySchema,
@@ -725,6 +726,7 @@ export class SquadServer {
 	private readonly onEvent: (e: SquadEvent) => void;
 	private presenceTimer?: Timer;
 	private presenceDebounce?: Timer;
+	private readonly typingDebounce = new Map<string, number>();
 	/** agentId → repo it's claimed under, so we can release the claim on removal. */
 	private readonly claimed = new Map<string, string>();
 	/** Agent ids present when the server booted = survivors the daemon reattached to (vs spawned later). */
@@ -1212,6 +1214,23 @@ export class SquadServer {
 		} else this.broadcastAll(event);
 	}
 
+	private async emitTyping(source: ServerWebSocket<SocketData>, manager: SquadManager, channelId: string, active: boolean): Promise<void> {
+		const actor = this.actorForSocket(source);
+		if (!(await manager.canReadChannel(channelId, actor))) return;
+		const key = `${source.data.id}:${channelId}`;
+		const now = Date.now();
+		const last = this.typingDebounce.get(key) ?? 0;
+		if (active && now - last < 900) return;
+		if (active) this.typingDebounce.set(key, now);
+		else this.typingDebounce.delete(key);
+		const event = { type: "typing", channelId, userId: actor.id, displayName: actor.displayName ?? actor.id, active, at: now } satisfies SquadEvent;
+		const bucket = this.registry ? this.clientsByOrg.get(actor.orgId ?? "") : this.clients;
+		for (const ws of bucket ?? []) {
+			if (ws === source) continue;
+			if (await manager.canReadChannel(channelId, this.actorForSocket(ws))) ws.send(JSON.stringify(event));
+		}
+	}
+
 	/** Register an opening socket in its bucket and return the fleet to seed its roster from. */
 	private async registerSocket(ws: ServerWebSocket<SocketData>): Promise<SquadManager | undefined> {
 		this.clients.add(ws);
@@ -1385,6 +1404,10 @@ export class SquadServer {
 					// no-op for it — `m` is always `defaultManager`, exactly as before.
 					const m = this.resolveCommandManager(cmd, !!ws.data.bootstrapAdmin, defaultManager);
 					if (!m) return; // bootstrap-admin named a target live in no manager — honest no-op (WS has no per-command response channel to report 404 on)
+					if (cmd.type === "typing") {
+						await this.emitTyping(ws, m, cmd.channelId, cmd.active);
+						return;
+					}
 					// Transcript replay is unicast to the requesting socket.
 					if (cmd.type === "snapshot") {
 						const agents = await m.visibleAgents(actor);
@@ -3363,6 +3386,21 @@ export class SquadServer {
 				throw err;
 			}
 		}
+		const channelReadMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/read$/);
+		if (channelReadMatch && req.method === "POST") {
+			const decoded = decodeBody(ChannelReadBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response(`bad channel read: ${decoded.failure.message}`, { status: 400 });
+			const channelId = decodeURIComponent(channelReadMatch[1]!);
+			try {
+				const cursor = await manager.markChannelRead(channelId, actor, decoded.success.lastReadSeq);
+				return Response.json({ cursor });
+			} catch (err) {
+				if (err instanceof Error && err.message === "channel forbidden") return new Response("forbidden", { status: 403 });
+				if (err instanceof Error && err.message === "read cursor requires user identity") return new Response("read cursor requires user identity", { status: 400 });
+				throw err;
+			}
+		}
+
 		if (channelEntryMatch && req.method === "POST") {
 			const decoded = decodeBody(ChannelPostBodySchema, await req.json().catch(() => null));
 			if (Result.isFailure(decoded)) return new Response(`bad channel post: ${decoded.failure.message}`, { status: 400 });

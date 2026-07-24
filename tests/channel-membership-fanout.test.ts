@@ -68,6 +68,44 @@ test("private channel fan-out sends zero wire frames to same-org non-members", a
 	expect(frames.carol).toEqual([]);
 });
 
+test("typing events are wire-only, debounced per channel, and never persisted as channel entries", async () => {
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "channel-typing-"));
+	const mgr = new SquadManager({ stateDir });
+	await mgr.start();
+	const server = new SquadServer(mgr, { port: 0 });
+	cleanups.push(async () => {
+		server.stop();
+		await mgr.stop();
+		await fs.rm(stateDir, { recursive: true, force: true });
+	});
+
+	await mgr.createChannel(actor("alice"), { id: "ops", name: "#ops", visibility: "org-public" });
+	await mgr.applyCommand({ type: "typing", channelId: "fleet", active: true });
+
+	const frames: string[] = [];
+	const source = { data: { id: 1, userId: "alice", orgId: "org-a", role: "admin", displayName: "Alice" }, send: () => {} };
+	const peer = { data: { id: 2, userId: "bob", orgId: "org-a", role: "admin", displayName: "Bob" }, send: (frame: string) => frames.push(frame) };
+	const host = server as unknown as {
+		clients: Set<{ data: SocketData; send(frame: string): void }>;
+		emitTyping(source: { data: SocketData; send(frame: string): void }, manager: SquadManager, channelId: string, active: boolean): Promise<void>;
+	};
+	host.clients.add(source);
+	host.clients.add(peer);
+
+	await host.emitTyping(source, mgr, "fleet", true);
+	await host.emitTyping(source, mgr, "fleet", true);
+	await host.emitTyping(source, mgr, "ops", true);
+	await host.emitTyping(source, mgr, "fleet", false);
+
+	expect(frames.map((frame) => JSON.parse(frame))).toEqual([
+		{ type: "typing", channelId: "fleet", userId: "db:alice", displayName: "Alice", active: true, at: expect.any(Number) },
+		{ type: "typing", channelId: "ops", userId: "db:alice", displayName: "Alice", active: true, at: expect.any(Number) },
+		{ type: "typing", channelId: "fleet", userId: "db:alice", displayName: "Alice", active: false, at: expect.any(Number) },
+	]);
+	expect(await mgr.channelEntries("fleet")).toEqual([]);
+	expect(await mgr.channelEntries("ops")).toEqual([]);
+});
+
 
 test("HTTP private channel reads 403 and search is empty for non-member callers", async () => {
 	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "channel-http-leak-"));

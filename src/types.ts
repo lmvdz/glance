@@ -1519,6 +1519,15 @@ export interface PresenceSnapshot {
 	users: PresenceUser[];
 }
 
+export interface TypingEvent {
+	type: "typing";
+	channelId: string;
+	userId: string;
+	displayName: string;
+	active: boolean;
+	at: number;
+}
+
 export type SquadEvent =
 	| { type: "roster"; agents: AgentDTO[]; version: string }
 	| { type: "agent"; agent: AgentDTO }
@@ -1535,7 +1544,8 @@ export type SquadEvent =
 	| ChannelEntryEvent
 	| { type: "command-ack"; clientTurnId: string; ok: true }
 	| { type: "command-ack"; clientTurnId: string; ok: false; reason: CommandAckReason }
-	| { type: "presence"; presence: PresenceSnapshot };
+	| { type: "presence"; presence: PresenceSnapshot }
+	| TypingEvent;
 
 /** The daemon's periodic background loops — the ones that run without an operator and were, until the
  *  automation log, invisible. Scout reads agent reasoning; Sentinel (plans/sentinel-drift-probe, v0
@@ -1637,6 +1647,7 @@ export type ClientCommand =
 	| { type: "restart"; id: string }
 	| { type: "fork"; id: string; seq?: number }
 	| { type: "continue"; id: string }
+	| { type: "typing"; channelId: string; active: boolean }
 	| { type: "remove"; id: string; deleteWorktree?: boolean }
 	| { type: "create"; options: CreateAgentOptions; source?: string }
 	| { type: "message"; to: string; text: string }

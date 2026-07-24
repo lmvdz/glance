@@ -50,6 +50,7 @@ export const ClientCommandSchema = Schema.Union([
 		channelId: Schema.optional(Schema.String),
 		mention: Schema.optional(Schema.Struct({ targetLabel: Schema.optional(Schema.String) })),
 	}),
+	Schema.Struct({ type: Schema.Literal("typing"), channelId: Schema.String, active: Schema.Boolean }),
 	Schema.Struct({ type: Schema.Literal("set-model"), id: Schema.String, model: Schema.String }),
 	Schema.Struct({ type: Schema.Literal("answer"), id: Schema.String, requestId: Schema.String, value: Schema.String }),
 	Schema.Struct({ type: Schema.Literal("interrupt"), id: Schema.String, source: Schema.optional(Schema.String) }),

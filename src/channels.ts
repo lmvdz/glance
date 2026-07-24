@@ -68,6 +68,18 @@ export interface ChannelMembership {
 	updatedAt: number;
 }
 
+export interface ChannelReadCursor {
+	channelId: string;
+	userId: string;
+	lastReadSeq: number;
+	updatedAt: number;
+}
+
+export interface ChannelWithUnread extends Channel {
+	unreadCount?: number;
+	lastReadSeq?: number;
+}
+
 export interface CreateChannelInput {
 	id?: string;
 	name: string;
@@ -98,7 +110,7 @@ function normalizeChannelId(name: string): string {
 }
 
 function actorUserId(actor: Actor): string | undefined {
-	return actor.id.startsWith("db:") ? actor.id.slice(3) : undefined;
+	return actor.id.startsWith("db:") ? actor.id.slice(3) : actor.id === "operator" || actor.id.startsWith("web:") ? actor.id : undefined;
 }
 
 function channelSort(a: Channel, b: Channel): number {
@@ -129,13 +141,21 @@ export class ChannelStore {
 		await this.defaultReady;
 	}
 
-	async listChannels(actor?: Actor): Promise<Channel[]> {
+	async listChannels(actor?: Actor): Promise<ChannelWithUnread[]> {
 		await this.ensureDefaultChannel();
 		const channels = (await this.store.listChannels()).sort(channelSort);
 		if (!actor) return channels;
-		const allowed: Channel[] = [];
+		const allowed: ChannelWithUnread[] = [];
+		const userId = actorUserId(actor);
 		for (const channel of channels) {
-			if (await this.canReadChannel(channel.id, actor)) allowed.push(channel);
+			if (!(await this.canReadChannel(channel.id, actor))) continue;
+			if (!userId) {
+				allowed.push(channel);
+				continue;
+			}
+			const [lastSeq, cursor] = await Promise.all([this.store.nextChannelSeq(channel.id), this.store.getChannelReadCursor(channel.id, userId)]);
+			const lastReadSeq = cursor?.lastReadSeq ?? 0;
+			allowed.push({ ...channel, lastReadSeq, unreadCount: Math.max(0, lastSeq - lastReadSeq) });
 		}
 		return allowed;
 	}
@@ -210,6 +230,17 @@ export class ChannelStore {
 		const userId = actorUserId(actor);
 		if (!userId) return false;
 		return (await this.store.listChannelMemberships(channelId)).some((row) => row.userId === userId && row.active);
+	}
+
+	async markRead(channelId: string, actor: Actor, lastReadSeq: number): Promise<ChannelReadCursor> {
+		await this.ensureDefaultChannel();
+		if (!(await this.canReadChannel(channelId, actor))) throw new Error("channel forbidden");
+		const userId = actorUserId(actor);
+		if (!userId) throw new Error("read cursor requires user identity");
+		const maxSeq = await this.store.nextChannelSeq(channelId);
+		const cursor = { channelId, userId, lastReadSeq: Math.max(0, Math.min(Math.trunc(lastReadSeq), maxSeq)), updatedAt: this.now() };
+		await this.store.putChannelReadCursor(cursor);
+		return cursor;
 	}
 
 	async appendManager(channelId: string, input: ManagerChannelPost): Promise<ChannelEntry> {

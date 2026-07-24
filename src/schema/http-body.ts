@@ -415,6 +415,10 @@ export const ChannelPostBodySchema = Schema.Struct({
 	replyToId: Schema.optional(Schema.String),
 });
 
+export const ChannelReadBodySchema = Schema.Struct({
+	lastReadSeq: Schema.Number,
+});
+
 export const ChannelCreateBodySchema = Schema.Struct({
 	name: Schema.String,
 	id: Schema.optional(Schema.String),

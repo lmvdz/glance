@@ -32,6 +32,8 @@ const APP_TABLES = [
 	"feedback_items",
 	"feedback_validation_responses",
 	"feedback_rewards",
+	"channel_memberships",
+	"channel_read_cursors",
 ] as const;
 const BASE_APP_TABLES = ["roster_index", "features", "audit", "channels", "channel_entries", "usage", "federation_peers", "capability_records"] as const;
 const FEEDBACK_TABLES = ["feedback_campaigns", "feedback_items", "feedback_validation_responses", "feedback_rewards"] as const;
@@ -303,6 +305,24 @@ const channelMemberships: Migration = {
 	},
 };
 
+const channelReadCursors: Migration = {
+	async up(db: Kysely<any>) {
+		await db.schema
+			.createTable("channel_read_cursors")
+			.addColumn("org_id", "text", (c) => c.notNull().references("organization.id").onDelete("cascade"))
+			.addColumn("channel_id", "text", (c) => c.notNull())
+			.addColumn("user_id", "text", (c) => c.notNull())
+			.addColumn("last_read_seq", "bigint", (c) => c.notNull())
+			.addColumn("updated_at", "bigint", (c) => c.notNull())
+			.addPrimaryKeyConstraint("channel_read_cursors_pk", ["org_id", "channel_id", "user_id"])
+			.execute();
+		await db.schema.createIndex("channel_read_cursors_org_channel").on("channel_read_cursors").columns(["org_id", "channel_id"]).execute();
+	},
+	async down(db: Kysely<any>) {
+		await db.schema.dropTable("channel_read_cursors").execute();
+	},
+};
+
 const createJoinRequests: Migration = {
 	async up(db: Kysely<any>) {
 		await db.schema
@@ -339,6 +359,8 @@ export function appMigrations(type: DbKind): Record<string, Migration> {
 		"0008_org_secret_rls": rlsMigration(type, ["org_secret"]),
 		"0009_channel_memberships": channelMemberships,
 		"0010_channel_memberships_rls": rlsMigration(type, ["channel_memberships"]),
+		"0011_channel_read_cursors": channelReadCursors,
+		"0012_channel_read_cursors_rls": rlsMigration(type, ["channel_read_cursors"]),
 	};
 }
 
