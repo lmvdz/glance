@@ -574,7 +574,16 @@ test("non-members cannot read private action items, answers, or after-actions af
 		fetch(`${url}/api/after-action/${agent.id}`, { headers }),
 	]);
 	expect(responses.map((response) => response.status)).toEqual([200, 200, 404, 200, 404]);
-	expect(await responses[0]!.json()).toMatchObject({ items: [] });
+	// Assert the PRIVATE unit contributes nothing — not that the list is empty. `/api/action-items`
+	// also carries fleet-derived items (a health warning fires under memory pressure, which the full
+	// containerized suite reliably produces and a targeted run never does). Asserting emptiness made
+	// this test pass or fail on how loaded the machine was, while testing nothing about membership.
+	const actionItems = (await responses[0]!.json()) as { items: unknown[] };
+	const leaked = actionItems.items.filter((item) => {
+		const text = JSON.stringify(item);
+		return text.includes(agent.id) || text.includes(agent.name) || text.includes("private approval");
+	});
+	expect(leaked).toEqual([]);
 	expect(await responses[1]!.json()).toEqual([]);
 	expect(await responses[3]!.json()).toEqual([]);
 });

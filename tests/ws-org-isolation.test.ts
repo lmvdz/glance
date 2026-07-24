@@ -220,6 +220,29 @@ function closeAndWait(ws: WebSocket): Promise<void> {
 	return closed.promise;
 }
 
+/**
+ * Read `/api/room/presence` until it settles on the expected user list.
+ *
+ * `closeAndWait` resolves when the CLIENT observes the close frame, which is strictly earlier than
+ * the server running its `close` handler and dropping the socket from its presence map. Asserting
+ * the next line therefore raced the server, and the race was real on main long before this branch:
+ * `tests/ws-org-isolation.test.ts` failed ~2 runs in 5 in isolation on pristine main. It reads as a
+ * membership/presence bug and is neither — it is the assertion arriving first.
+ *
+ * Polling rather than sleeping keeps it fast in the common case (the settle is usually immediate)
+ * and keeps the failure honest: if presence genuinely never drains, this still fails, just after a
+ * bounded wait instead of on a coin flip.
+ */
+async function presenceSettles(fetchNative: typeof fetch, url: string, init: RequestInit, expected: unknown): Promise<unknown> {
+	let last: unknown;
+	for (let attempt = 0; attempt < 50; attempt++) {
+		last = await fetchNative(`${url}/api/room/presence`, init).then((res) => res.json());
+		if (JSON.stringify(last) === JSON.stringify(expected)) return last;
+		await Bun.sleep(20);
+	}
+	return last;
+}
+
 function hasAgent(events: SquadEvent[], id: string): boolean {
 	return events.some((event) => {
 		if (event.type === "agent") return event.agent.id === id;
@@ -319,7 +342,7 @@ test("DB-registry WebSocket identity stamps session user into commands and per-u
 	const otherOnly = await fetchNative(`${url}/api/room/presence`, { headers: { cookie: "session=orgA2" } }).then((res) => res.json());
 	expect(otherOnly).toEqual({ orgId: "orgA", users: [{ id: "db:user-orgA2", displayName: "User orgA2", socketCount: 1 }] });
 	await closeAndWait(otherUser.ws);
-	const empty = await fetchNative(`${url}/api/room/presence`, { headers: { cookie: "session=orgA" } }).then((res) => res.json());
+	const empty = await presenceSettles(fetchNative, url, { headers: { cookie: "session=orgA" } }, { orgId: "orgA", users: [] });
 	expect(empty).toEqual({ orgId: "orgA", users: [] });
 });
 
@@ -345,7 +368,7 @@ test("auth-backed single-manager WS identity still stamps session user into comm
 	const presence = await fetchNative(`${url}/api/room/presence`, { headers: { cookie: "session=orgA" } }).then((res) => res.json());
 	expect(presence).toEqual({ orgId: "orgA", users: [{ id: "db:user-orgA", displayName: "User orgA", socketCount: 1 }] });
 	await closeAndWait(ws.ws);
-	const empty = await fetchNative(`${url}/api/room/presence`, { headers: { cookie: "session=orgA" } }).then((res) => res.json());
+	const empty = await presenceSettles(fetchNative, url, { headers: { cookie: "session=orgA" } }, { orgId: "orgA", users: [] });
 	expect(empty).toEqual({ orgId: "orgA", users: [] });
 });
 
@@ -368,7 +391,7 @@ test("file-mode WS commands and presence use the single shared operator identity
 	const presence = await fetchNative(`${url}/api/room/presence`).then((res) => res.json());
 	expect(presence).toEqual({ users: [{ id: "test-op", displayName: "test-op", socketCount: 1 }] });
 	await closeAndWait(ws.ws);
-	const empty = await fetchNative(`${url}/api/room/presence`).then((res) => res.json());
+	const empty = await presenceSettles(fetchNative, url, {}, { users: [] });
 	expect(empty).toEqual({ users: [] });
 });
 
