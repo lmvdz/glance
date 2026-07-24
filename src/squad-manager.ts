@@ -93,6 +93,8 @@ import { canTransition, dedupeTransitions, deriveStatus, followLineage, type Der
 import { dirtyLandTargetWarnings, landAgent, type LandOpts, type LandResult, withRepoLandLock } from "./land.ts";
 import { LandAssessmentHook } from "./land-assessment/hook.ts";
 import { readRecentLandAttemptEvents } from "./land-assessment/store.ts";
+import { reconstructRepositoryStore, type ReconstructedAttempt } from "./land-assessment/store-reader.ts";
+import { computeRepositoryId } from "./land-assessment/id.ts";
 // Aliased: WorktreeInfo (worktree-reaper.ts) already has an `aheadOfBase` FIELD of its own — importing
 // under the same bare name would read as if that field and this function were the same thing.
 import { aheadOfBase as computeAheadOfBase, aheadUnknown, resolveLandMode } from "./land-mode.ts";
@@ -914,6 +916,20 @@ export interface CommissionOptions {
 	requireAcceptance?: boolean;
 	/** Worker dir override. Default: <stateDir>/workers/<name>. */
 	dir?: string;
+}
+
+function recordObject(value: unknown): Record<string, unknown> | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	return value as Record<string, unknown>;
+}
+
+function validationRecord(value: unknown): ValidationRecord | undefined {
+	const rec = recordObject(value);
+	if (!rec) return undefined;
+	if (rec.verdict !== "pass" && rec.verdict !== "veto" && rec.verdict !== "abstain" && rec.verdict !== "skipped" && rec.verdict !== "inconclusive") return undefined;
+	if (typeof rec.agreement !== "number" || typeof rec.confidence !== "number" || typeof rec.rationale !== "string" || typeof rec.ranAt !== "number") return undefined;
+	if (!Array.isArray(rec.perCriterion)) return undefined;
+	return rec as unknown as ValidationRecord;
 }
 
 export class SquadManager extends EventEmitter {
@@ -10000,6 +10016,92 @@ export class SquadManager extends EventEmitter {
 		});
 	}
 
+	async gateVerdictProof(channelId: string, entryId: string): Promise<{
+		mode: "resident" | "post-mortem";
+		unitId?: string;
+		unitName?: string;
+		repo?: string;
+		branch?: string;
+		featureId?: string;
+		issueIdentifier?: string;
+		validation?: ValidationRecord;
+		doneProof?: DoneProof;
+		landAttempt?: {
+			attemptId: string;
+			terminal: ReconstructedAttempt["terminal"];
+			resultCommit?: string;
+			resultTree?: string;
+			observedAt?: string;
+		};
+		malformedLandRecords: number;
+	}> {
+		const entry = (await this.channelEntries(channelId, 0)).find((e) => e.id === entryId);
+		if (!entry || entry.event?.kind !== TRANSCRIPT_EVENT_GATE_VERDICT) throw new Error("no such gate verdict");
+		const payload = recordObject(entry.event.payload) ?? {};
+		const refs = recordObject(payload.refs) ?? {};
+		const face = recordObject(payload.face) ?? {};
+		const unitId = typeof refs.unitId === "string" ? refs.unitId : typeof face.unitId === "string" ? face.unitId : undefined;
+		const resident = unitId ? this.agents.get(unitId) : undefined;
+		if (resident) {
+			return {
+				mode: "resident",
+				unitId,
+				unitName: resident.dto.name,
+				repo: resident.dto.repo,
+				branch: resident.dto.branch,
+				featureId: resident.dto.featureId,
+				issueIdentifier: resident.dto.issue?.identifier,
+				validation: resident.dto.validation,
+				malformedLandRecords: 0,
+			};
+		}
+
+		const validation = validationRecord(face.validation);
+		const repo = typeof face.repo === "string" ? face.repo : undefined;
+		const branch = typeof face.branch === "string" ? face.branch : undefined;
+		const featureId = typeof refs.planId === "string" ? refs.planId : undefined;
+		const issueIdentifier = typeof refs.issueIdentifier === "string" ? refs.issueIdentifier : undefined;
+		const doneProof = (issueIdentifier ? getDoneProofByIssue(this.stateDir, issueIdentifier) : undefined) ?? (branch ? getDoneProofByBranch(this.stateDir, branch) : undefined);
+		let landAttempt: {
+			attemptId: string;
+			terminal: ReconstructedAttempt["terminal"];
+			resultCommit?: string;
+			resultTree?: string;
+			observedAt?: string;
+		} | undefined;
+		let malformedLandRecords = 0;
+		if (repo) {
+			try {
+				const store = await reconstructRepositoryStore(this.stateDir, computeRepositoryId(repo));
+				malformedLandRecords = store.malformed.length;
+				const candidates = store.attempts.filter((attempt) => attempt.events.some((event) =>
+					(unitId && event.refs.agentRunRef === unitId) ||
+					(featureId && event.refs.featureRef === featureId) ||
+					(doneProof?.commit && event.resultCommit === doneProof.commit) ||
+					(doneProof?.mergeCommit && event.resultCommit === doneProof.mergeCommit)
+				));
+				const attempt = candidates[candidates.length - 1];
+				const terminalEvent = attempt?.events.findLast((event) => event.stage === "post-merge-verified" || event.stage === "landed" || event.stage === "rejected" || event.stage === "incomplete");
+				if (attempt) landAttempt = { attemptId: attempt.attemptId, terminal: attempt.terminal, resultCommit: terminalEvent?.resultCommit, resultTree: terminalEvent?.resultTree, observedAt: terminalEvent?.observedAt };
+			} catch {
+				malformedLandRecords = 0;
+			}
+		}
+		return {
+			mode: "post-mortem",
+			unitId,
+			unitName: typeof face.unitName === "string" ? face.unitName : undefined,
+			repo,
+			branch,
+			featureId,
+			issueIdentifier,
+			validation,
+			doneProof,
+			landAttempt,
+			malformedLandRecords,
+		};
+	}
+
 	/** Best-effort done-proof lookup for a feature — feeds the task-pipeline artifacts rail (Wave 4
 	 *  X2's "cheaply derivable" done-proof surfacing). Tries each linked Plane issue identifier first
 	 *  (the most specific key a proof can be filed under), then each worktree's branch. Read-only and
@@ -11101,8 +11203,7 @@ export class SquadManager extends EventEmitter {
 	}
 
 	private projectionRefs(rec: AgentRecord, entry: TranscriptEntry): Record<string, unknown> {
-		const payload = entry.event?.payload;
-		const objectPayload = payload && typeof payload === "object" && !Array.isArray(payload) ? payload as Record<string, unknown> : {};
+		const objectPayload = recordObject(entry.event?.payload) ?? {};
 		const refs: Record<string, unknown> = { unitId: rec.dto.id };
 		if (entry.id) refs.entryId = entry.id;
 		for (const [from, to] of [["featureId", "planId"], ["attemptId", "landId"], ["issueId", "issueId"], ["issueIdentifier", "issueIdentifier"]] as const) {
@@ -11113,8 +11214,7 @@ export class SquadManager extends EventEmitter {
 	}
 
 	private projectionFace(rec: AgentRecord, entry: TranscriptEntry): Record<string, unknown> {
-		const payload = entry.event?.payload;
-		const objectPayload = payload && typeof payload === "object" && !Array.isArray(payload) ? payload as Record<string, unknown> : {};
+		const objectPayload = recordObject(entry.event?.payload) ?? {};
 		return {
 			unitId: rec.dto.id,
 			unitName: rec.dto.name,
@@ -11130,6 +11230,10 @@ export class SquadManager extends EventEmitter {
 			merged: typeof objectPayload.merged === "boolean" ? objectPayload.merged : undefined,
 			pendingId: typeof objectPayload.pendingId === "string" ? objectPayload.pendingId : undefined,
 			pendingStatus: typeof objectPayload.status === "string" ? objectPayload.status : undefined,
+			validation: entry.event?.kind === TRANSCRIPT_EVENT_GATE_VERDICT ? objectPayload : undefined,
+			agreement: typeof objectPayload.agreement === "number" ? objectPayload.agreement : undefined,
+			confidence: typeof objectPayload.confidence === "number" ? objectPayload.confidence : undefined,
+			perCriterion: Array.isArray(objectPayload.perCriterion) ? objectPayload.perCriterion : undefined,
 		};
 	}
 
@@ -11191,6 +11295,7 @@ export class SquadManager extends EventEmitter {
 			agreement: record.agreement,
 			confidence: record.confidence,
 			rationale: record.rationale,
+			perCriterion: record.perCriterion,
 			model: record.model,
 			authorLineage: record.authorLineage,
 			reviewerLineage: record.reviewerLineage,
