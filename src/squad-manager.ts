@@ -11489,6 +11489,14 @@ export class SquadManager extends EventEmitter {
 		return text.length > 200 ? `${text.slice(0, 199)}…` : text;
 	}
 
+	/** Project a card to the unit's room channel WITHOUT writing a row into the unit's transcript.
+	 *  The synthetic entry carries no `id`, so `projectionRefs` correctly omits `entryId` — there is no
+	 *  transcript row to link back to, and claiming one would be a dead reference in the card's door. */
+	private projectLifecycleCard(rec: AgentRecord, kind: string, text: string, payload: unknown): void {
+		const synthetic: TranscriptEntry = { kind: "system", text: this.eventText(text), ts: Date.now(), status: "ok", format: "stage", event: { kind, issuer: EVENT_ISSUER_MANAGER, payload } } as TranscriptEntry;
+		void this.projectUnitTranscriptEvent(rec, synthetic);
+	}
+
 	private emitUnitTranscriptEvent(id: string | undefined, kind: string, text: string, payload: unknown): void {
 		if (!id) return;
 		const rec = this.agents.get(id);
@@ -11743,7 +11751,17 @@ export class SquadManager extends EventEmitter {
 			payload.detail = entry.cause?.detail;
 		}
 		if (!kind || !title) return;
-		this.emitUnitTranscriptEvent(rec.dto.id, kind, title, {
+		// Lifecycle cards are ROOM narration, not conversation. They go straight to the channel WITHOUT
+		// an `append` into the unit's own transcript — unlike the proof cards (gate-verdict, land-merge,
+		// needs-you), which are records the unit itself earned and belong in its thread.
+		//
+		// Routing these through `emitUnitTranscriptEvent` (which appends first, then projects) put a
+		// system row in every unit's conversation pane for every spawn/turn/failure/PR/verification and
+		// inflated `messageCount` accordingly — a user-visible counter. It also made "turn finished"
+		// circular: the card's own summary is read back out of the transcript it had just written to.
+		// `workflow-terminal-marker`'s "transcript survives a restart" test caught it by asserting the
+		// thread is EXACTLY the seeded history plus one after-action.
+		this.projectLifecycleCard(rec, kind, title, {
 			...payload,
 			face: {
 				title,
