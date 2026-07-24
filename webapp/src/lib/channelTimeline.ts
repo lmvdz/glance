@@ -27,10 +27,8 @@ export interface ChannelCardView {
   body: string;
   detail?: string;
   pinned: Array<{ label: string; value: string }>;
-  href?: string;
   land?: { kind: LandCardKind; branch?: string; sha?: string; target?: string; risk?: string; recommendation?: string; outcome?: string; prNumber?: string; prUrl?: string; doneProofVerified?: string };
   replyContext?: { id: string; channelId: string; authorLabel: string; body: string };
-  href?: string;
   repliedBy?: number;
   actionHref?: string;
 }
