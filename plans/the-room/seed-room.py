@@ -36,9 +36,10 @@ row(31, "gate verdict · pass · agreement 0.92 · confidence 0.88", event=("gat
                  title="Gate verdict · pass", status="pass", tone="success",
                  validation={"verdict": "pass", "agreement": 0.92, "confidence": 0.88, "ranAt": t0 + 31 * 60000,
                              "rationale": "Leak tests cover non-member WS, HTTP and search paths.",
-                             "perCriterion": [{"criterion": "tests cover the claim", "verdict": "pass"},
-                                              {"criterion": "no bare broadcast( in channel paths", "verdict": "pass"},
-                                              {"criterion": "revocation is positive-evidence", "verdict": "pass"}]},
+                             # Real ValidationRecord shape (src/types.ts): {id, satisfied, note?}.
+                             "perCriterion": [{"id": "tests cover the claim", "satisfied": True, "note": "3 leak tests"},
+                                              {"id": "no bare broadcast( in channel paths", "satisfied": True},
+                                              {"id": "revocation is positive-evidence", "satisfied": True, "note": "front-door removal row"}]},
                  pinned={"agreement": "0.92", "confidence": "0.88", "agent": "room-18-membership"})}))
 row(44, "needs you · GATE: land membership to main?", event=("needs-you", {
     "refs": {"unitId": U}, "doorSurface": "intervence",
