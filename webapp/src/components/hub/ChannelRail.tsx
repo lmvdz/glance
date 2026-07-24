@@ -28,8 +28,8 @@ export function ChannelRail({
 }) {
   const groups = groupActiveWork(agents);
   return (
-    <aside className="flex h-full w-72 flex-shrink-0 flex-col border-r border-zinc-800/80 bg-[#0a0a0b] text-zinc-200" aria-label="Room rail">
-      <div className="flex h-10 items-center gap-2 border-b border-zinc-800/80 px-3">
+    <aside className="flex h-full w-72 flex-shrink-0 flex-col border-r border-zinc-800/80 bg-[#0a0a0b] text-zinc-200 shadow-[inset_-1px_0_0_rgba(255,255,255,0.03)]" aria-label="Room rail">
+      <div className="surface-subheader flex h-10 items-center gap-2 border-b border-zinc-800/80 bg-[#0c0c0e] px-3">
         <Radio className="h-4 w-4 text-amber-300" aria-hidden />
         <div className="min-w-0">
           <div className="truncate text-xs font-semibold tracking-tight text-zinc-100">glance room</div>
@@ -50,7 +50,7 @@ export function ChannelRail({
                 <a
                   key={channel.id}
                   href={hubHref(channel.id)}
-                  className={`group flex h-7 items-center gap-2 rounded-md px-2 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0a0a0b] ${active ? 'bg-amber-400/15 text-amber-100' : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100'}`}
+                  className={`group flex h-7 items-center gap-2 rounded-md px-2 text-xs transition-[background-color,color,transform] duration-200 hover:translate-x-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0a0a0b] ${active ? 'bg-amber-400/15 text-amber-100' : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100'}`}
                 >
                   <Hash className="h-3.5 w-3.5 flex-shrink-0" aria-hidden />
                   <span className="truncate">{channel.name}</span>
@@ -82,7 +82,7 @@ export function ChannelRail({
                         key={agent.id}
                         type="button"
                         onClick={() => onSelectAgent(agent.id)}
-                        className={`flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0a0a0b] ${selected ? 'bg-sky-400/15 text-sky-100' : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100'}`}
+                        className={`group flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-xs transition-[background-color,color,transform] duration-200 hover:translate-x-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0a0a0b] ${selected ? 'bg-sky-400/15 text-sky-100' : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100'}`}
                       >
                         <span className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${statusDotClass[group.key]}`} aria-hidden />
                         <span className="truncate">{agent.name || agent.id}</span>
@@ -99,15 +99,16 @@ export function ChannelRail({
           <div className="mb-1 flex h-6 items-center gap-2 px-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-zinc-500">
             <Layers className="h-3 w-3" aria-hidden /> Workbench doors
           </div>
-          <div className="grid grid-cols-2 gap-1">
+          <div className="space-y-0.5">
             {[
-              ['Fleet', workbenchHref('fleet')],
-              ['Tasks', workbenchHref('tasks')],
-              ['Graph', workbenchHref('graph')],
-              ['Capabilities', workbenchHref('capabilities')],
-            ].map(([label, href]) => (
-              <a key={label} href={href} className="flex h-10 items-center justify-center rounded-md border border-zinc-800 bg-zinc-950 text-[11px] font-medium text-zinc-400 transition-colors hover:border-zinc-700 hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0a0a0b]">
-                {label}
+              ['Fleet', workbenchHref('fleet'), 'Factory pulse'],
+              ['Tasks', workbenchHref('tasks'), 'Plan work'],
+              ['Graph', workbenchHref('graph'), 'System map'],
+              ['Capabilities', workbenchHref('capabilities'), 'Tool registry'],
+            ].map(([label, href, detail]) => (
+              <a key={label} href={href} className="group flex h-7 items-center gap-2 rounded-md px-2 text-xs text-zinc-400 transition-[background-color,color,transform] duration-200 hover:translate-x-0.5 hover:bg-zinc-900 hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0a0a0b]">
+                <span className="truncate">{label}</span>
+                <span className="ml-auto max-w-24 truncate text-[10px] text-zinc-600 opacity-0 transition-opacity duration-200 group-hover:opacity-100 group-focus-visible:opacity-100">{detail}</span>
               </a>
             ))}
           </div>

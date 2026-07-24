@@ -40,8 +40,8 @@ describe('Hub reductions', () => {
     ]);
   });
 
-  test('presence count sums sockets with at least one visible avatar per user', () => {
-    expect(presenceCount({ users: [{ id: 'u1', displayName: 'Lars', socketCount: 2 }, { id: 'u2', displayName: 'A', socketCount: 0 }] })).toBe(3);
+  test('presence count counts humans, not sockets', () => {
+    expect(presenceCount({ users: [{ id: 'u1', displayName: 'Lars', socketCount: 5 }] })).toBe(1);
   });
 
   test('author labels keep human messages distinct from manager cards', () => {

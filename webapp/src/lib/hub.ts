@@ -48,7 +48,7 @@ export function groupActiveWork(agents: AgentDTO[]): ActiveWorkGroup[] {
 }
 
 export function presenceCount(presence: PresenceSnapshot): number {
-  return presence.users.reduce((sum, user) => sum + Math.max(1, user.socketCount || 0), 0);
+  return presence.users.length;
 }
 
 export function latestSeq(entries: ChannelEntry[]): number {
