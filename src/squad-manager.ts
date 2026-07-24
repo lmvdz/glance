@@ -11241,7 +11241,7 @@ export class SquadManager extends EventEmitter {
 
 	async canReadAgent(agentId: string, actor: Actor): Promise<boolean> {
 		const rec = this.agents.get(agentId);
-		if (!rec) return false;
+		if (!rec) return this.deadPlaceholder(agentId) !== undefined;
 		const channelId = rec.dto.channelId;
 		return !channelId || this.channelStore.canReadChannel(channelId, actor);
 	}

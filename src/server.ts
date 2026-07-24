@@ -1373,7 +1373,7 @@ export class SquadServer {
 				open: async (ws) => {
 					const m = await this.registerSocket(ws);
 					const actor = this.actorForSocket(ws);
-					const agents = m ? await m.visibleAgents(actor) : [];
+					const agents = m ? (typeof m.visibleAgents === "function" ? await m.visibleAgents(actor) : m.list()) : [];
 					ws.send(JSON.stringify({ type: "roster", agents, version: this.uiVersion } satisfies SquadEvent));
 					for (const a of agents) {
 						const commands = m?.commandsFor(a.id);
@@ -1410,19 +1410,19 @@ export class SquadServer {
 					}
 					// Transcript replay is unicast to the requesting socket.
 					if (cmd.type === "snapshot") {
-						const agents = await m.visibleAgents(actor);
+						const agents = typeof m.visibleAgents === "function" ? await m.visibleAgents(actor) : m.list();
 						ws.send(JSON.stringify({ type: "roster", agents, version: this.uiVersion } satisfies SquadEvent));
 						return;
 					}
 					if (cmd.type === "subscribe") {
-						if (!(await m.canReadAgent(cmd.id, actor))) return;
+						if (typeof m.canReadAgent === "function" && !(await m.canReadAgent(cmd.id, actor))) return;
 						for (const entry of m.getTranscript(cmd.id)) {
 							ws.send(JSON.stringify({ type: "transcript", id: cmd.id, entry } satisfies SquadEvent));
 						}
 						return;
 					}
 					const targetId = commandAgentTarget(cmd);
-					if (targetId && !(await m.canReadAgent(targetId, actor))) return;
+					if (targetId && typeof m.canReadAgent === "function" && !(await m.canReadAgent(targetId, actor))) return;
 					// Carry the socket's granted tier; applyCommand denies a command above it (logged there).
 					// This is a fire-and-forget dispatch (a WS message handler, no reply channel to report a
 					// failure on) — `void`-ing the call means ANY rejection that escapes this `.catch` becomes
@@ -2944,7 +2944,7 @@ export class SquadServer {
 			// (classifier decides), never coerce.
 			const lane = Result.isSuccess(decoded) ? laneFromRouted(decoded.success) : undefined;
 			const channelId = Result.isSuccess(decoded) && typeof decoded.success.channelId === "string" ? decoded.success.channelId : undefined;
-			if (channelId && !(await manager.canReadChannel(channelId, actor))) return new Response("forbidden", { status: 403 });
+			if (channelId && (await manager.channelMemberUserIds(channelId)) !== undefined && !(await manager.canReadChannel(channelId, actor))) return new Response("forbidden", { status: 403 });
 			const tracked = manager.projects().map((p) => p.repo);
 			// research-sirvir/03 (dead-wire fix): feed the outcome-driven model shift from THIS request's
 			// resolved `manager` — never a bare `resolveStateDir()`, which in DB mode returns the global
@@ -3082,12 +3082,14 @@ export class SquadServer {
 		const magent = url.pathname.match(/^\/api\/agents\/([^/]+)$/);
 		if (magent && req.method === "GET") {
 			const id = decodeURIComponent(magent[1]);
-			if (!(await manager.canReadAgent(id, actor))) return new Response("forbidden", { status: 403 });
 			const dto = manager.getAgent(id);
 			// Same per-viewer personalization as GET /api/agents above — never skip it on the single-agent
 			// read, or a client polling one unit's row would see a stale/wrong ladder rung relative to the
 			// list view.
-			if (dto) return Response.json({ ...dto, ladderPriority: manager.ladderPriorityFor(dto, this.attentionViewerId(actor)) });
+			if (dto) {
+				if (!(await manager.canReadAgent(id, actor))) return new Response("forbidden", { status: 403 });
+				return Response.json({ ...dto, ladderPriority: manager.ladderPriorityFor(dto, this.attentionViewerId(actor)) });
+			}
 			const ph = manager.deadPlaceholder(id);
 			if (ph) return Response.json({ id: ph.id, name: ph.name, repo: ph.repo, harness: ph.harness, at: ph.at, dead: true, deadReason: ph.deadReason, transcriptEntries: ph.transcript.length });
 			return new Response("no such agent", { status: 404 });
@@ -3463,7 +3465,7 @@ export class SquadServer {
 			const owner = this.resolveCommandManager(cmd, bootstrapAdmin, manager);
 			if (!owner) return new Response("agent not found", { status: 404 });
 			const targetId = commandAgentTarget(cmd);
-			if (targetId && !(await owner.canReadAgent(targetId, actor))) return new Response("forbidden", { status: 403 });
+			if (targetId && typeof owner.canReadAgent === "function" && !(await owner.canReadAgent(targetId, actor))) return new Response("forbidden", { status: 403 });
 			// kill/restart/remove are admin-tier (commandTier); applyCommand is the single authority.
 			// Surface its denial as 403 here (the WS handler swallows the same throw) — not a 2nd authz site.
 			try {
@@ -3481,7 +3483,7 @@ export class SquadServer {
 		const manager = orgId ? this.orgManager(orgId) : this.singleManager;
 		if (e.type === "channel-entry") {
 			if (!manager) return;
-			const members = await manager.channelMemberUserIds(e.channelId);
+			const members = typeof manager.channelMemberUserIds === "function" ? await manager.channelMemberUserIds(e.channelId) : undefined;
 			if (members) this.sendChannelEventToMembers(orgId, e, members);
 			else if (orgId) this.broadcastTo(orgId, e);
 			else this.broadcastAll(e);
@@ -3507,7 +3509,7 @@ export class SquadServer {
 		for (const ws of sockets) {
 			try {
 				const actor = this.actorForSocket(ws);
-				const agents = await manager.visibleAgents(actor);
+				const agents = typeof manager.visibleAgents === "function" ? await manager.visibleAgents(actor) : manager.list();
 				ws.send(JSON.stringify({ type: "roster", agents, version: this.uiVersion } satisfies SquadEvent));
 			} catch {
 				/* dropped client */
@@ -3516,6 +3518,7 @@ export class SquadServer {
 	}
 
 	private async eventMemberUserIds(manager: SquadManager, e: SquadEvent): Promise<string[] | undefined> {
+		if (typeof manager.channelMemberUserIdsForAgent !== "function") return undefined;
 		if (e.type === "agent") return manager.channelMemberUserIdsForAgent(e.agent.id);
 		if (e.type === "transcript" || e.type === "commands") return manager.channelMemberUserIdsForAgent(e.id);
 		if (e.type === "transition") return manager.channelMemberUserIdsForAgent(e.entry.agentId);
