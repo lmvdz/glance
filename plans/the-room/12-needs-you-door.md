@@ -34,3 +34,6 @@ None.
 - Scratch daemon: force a pending (permission ask) → card appears in channel + attention lane;
   click → IntervenceView on that agent; answer → resolution card appears; reload on the route
   works; removed-agent click → honest fallback, not blank.
+
+## Resolution
+Landed in train wave3: needs-you card → IntervenceView route, resolution follow-up cards, dead-target honest fallback.

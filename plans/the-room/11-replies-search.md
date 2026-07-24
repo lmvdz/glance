@@ -1,5 +1,5 @@
 # Replies + channel search
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -26,3 +26,6 @@ None.
 ## Verify
 - Reply renders chained; search for a week-old message returns it and the link opens the channel
   at that entry (or its nearest loaded page). Cross-org search leak test: zero foreign rows.
+
+## Resolution
+Landed 2026-07-24 (PR #243): flat replies via replyToId, org-scoped search over redacted rows, router deep-links.

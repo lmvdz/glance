@@ -1,5 +1,5 @@
 # Mention grammar — @agent steers and spawns from chat, safely (supersedes buzz-borrows 05)
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -44,3 +44,6 @@ None.
 - Mention nonexistent name → spawn-proposal card → confirm → unit spawns bound to the channel.
 - Two humans steer the same agent concurrently → both echoes visible, last-write-wins, no silent
   drop. Task-mention behavior unregressed (Composer tests).
+
+## Resolution
+Landed 2026-07-24 (PR #243): @mention grammar — sectioned picker, steer w/ ack, working-agent confirm, spawn-proposal, manager-issued channel echo (client echoText removed in review). Supersedes buzz-borrows 05.

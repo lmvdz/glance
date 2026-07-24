@@ -1,5 +1,5 @@
 # Daily-driver convergence — the room serves the terminal-first driver
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -29,3 +29,6 @@ None.
 ## Verify
 - `glance here` session appears in the rail live; a pending request raises exactly ONE push (no
   double-fire from lane + room); adoption counters tick from room interactions.
+
+## Resolution
+Landed in train wave3: glance-here units in the rail, needs-you push single-fire via shared tag keys, room interactions in adoption counters.
