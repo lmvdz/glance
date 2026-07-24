@@ -78,8 +78,8 @@ function faceFromPayload(payload: unknown): PointerCardFace | undefined {
 function hrefFromPayload(payload: unknown): string | undefined {
   if (!isRecord(payload)) return undefined;
   if (typeof payload.href === 'string') return payload.href;
-  if (payload.doorSurface !== 'plan' || !isRecord(payload.refs) || typeof payload.refs.planId !== 'string') return undefined;
-  return `#/workbench/task/${encodeURIComponent(payload.refs.planId)}`;
+  if (payload.doorSurface === 'plan' && isRecord(payload.refs) && typeof payload.refs.planId === 'string') return `#/workbench/task/${encodeURIComponent(payload.refs.planId)}`;
+  return undefined;
 }
 
 function isTone(value: unknown): value is ChannelCardTone {
@@ -138,7 +138,8 @@ export function dispatchChannelCard(entry: ChannelEntry): ChannelCardView {
   const title = face?.title || labelFromKey(eventKind);
   const body = face?.body || entry.text || 'Card update';
   const pinned = Object.entries(face?.pinned ?? {}).flatMap(([label, value]) => value == null || value === '' ? [] : [{ label: labelFromKey(label), value: String(value) }]);
-  return { id: entry.id, entry, kind: eventKind as ChannelCardKind, tone: toneFor(eventKind, face), authorLabel: entryAuthorLabel(entry), title, eyebrow: face?.eyebrow, body, detail: face?.detail, pinned, actionHref: channelCardActionHref(entry), href: face?.href ?? hrefFromPayload(entry.event?.payload) };
+  const doorHrefResolved = eventKind === 'token-burn-snapshot' ? '#/workbench/economics' : (face?.href ?? hrefFromPayload(entry.event?.payload));
+  return { id: entry.id, entry, kind: eventKind as ChannelCardKind, tone: toneFor(eventKind, face), authorLabel: entryAuthorLabel(entry), title, eyebrow: face?.eyebrow, body, detail: face?.detail, pinned, actionHref: channelCardActionHref(entry), href: doorHrefResolved };
 }
 
 export function reduceChannelEntryWindow(entries: ChannelEntry[], incoming: ChannelEntry[], channelId: string, cap = 500): ChannelEntry[] {
