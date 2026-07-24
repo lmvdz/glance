@@ -10,11 +10,11 @@ import { makeCache, throttledFetch } from "../src/plane-throttle.ts";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-const realFetch = globalThis.fetch;
 const savedInterval = process.env.OMP_SQUAD_PLANE_MIN_INTERVAL_MS;
 const savedBackoff = process.env.OMP_SQUAD_PLANE_BACKOFF_BASE_MS;
+const servers: Array<{ stop(closeActiveConnections?: boolean): void }> = [];
 afterEach(() => {
-	globalThis.fetch = realFetch;
+	for (const server of servers.splice(0)) server.stop(true);
 	if (savedInterval === undefined) delete process.env.OMP_SQUAD_PLANE_MIN_INTERVAL_MS;
 	else process.env.OMP_SQUAD_PLANE_MIN_INTERVAL_MS = savedInterval;
 	if (savedBackoff === undefined) delete process.env.OMP_SQUAD_PLANE_BACKOFF_BASE_MS;
@@ -63,34 +63,38 @@ test("makeCache: clear() drops the cache", async () => {
 
 // ── throttledFetch ───────────────────────────────────────────────────────────
 
-function fakeRes(status: number, retryAfter?: string): Response {
-	return { status, ok: status >= 200 && status < 300, headers: { get: (h: string) => (h.toLowerCase() === "retry-after" ? (retryAfter ?? null) : null) } } as unknown as Response;
+function serveStatuses(statuses: number[]): { url: string; calls: () => number } {
+	let calls = 0;
+	const server = Bun.serve({
+		port: 0,
+		fetch: () => new Response("", { status: statuses[Math.min(calls++, statuses.length - 1)] }),
+	});
+	servers.push(server);
+	return { url: `http://127.0.0.1:${server.port}/plane`, calls: () => calls };
 }
 
 test("throttledFetch retries a 429 then returns the eventual success", async () => {
 	process.env.OMP_SQUAD_PLANE_MIN_INTERVAL_MS = "5";
 	process.env.OMP_SQUAD_PLANE_BACKOFF_BASE_MS = "5"; // keep the 429 retry fast (real default is 500ms)
-	let calls = 0;
-	globalThis.fetch = (async () => {
-		calls++;
-		return calls === 1 ? fakeRes(429) : fakeRes(200);
-	}) as typeof fetch;
-	const res = await throttledFetch("https://x/y");
-	expect(calls).toBe(2);
+	const { url, calls } = serveStatuses([429, 200]);
+	const res = await throttledFetch(url);
+	expect(calls()).toBe(2);
 	expect(res?.status).toBe(200);
 });
 
 test("throttledFetch returns null on a network error (never throws)", async () => {
 	process.env.OMP_SQUAD_PLANE_MIN_INTERVAL_MS = "5";
-	globalThis.fetch = (async () => { throw new Error("ECONNRESET"); }) as typeof fetch;
-	expect(await throttledFetch("https://x/y")).toBeNull();
+	process.env.OMP_SQUAD_PLANE_BACKOFF_BASE_MS = "5";
+	const probe = Bun.serve({ port: 0, fetch: () => new Response("closed") });
+	const url = `http://127.0.0.1:${probe.port}/closed`;
+	probe.stop(true);
+	expect(await throttledFetch(url)).toBeNull();
 });
 
 test("throttledFetch passes a non-429 response straight through", async () => {
 	process.env.OMP_SQUAD_PLANE_MIN_INTERVAL_MS = "5";
-	let calls = 0;
-	globalThis.fetch = (async () => { calls++; return fakeRes(404); }) as typeof fetch;
-	const res = await throttledFetch("https://x/y");
-	expect(calls).toBe(1);
+	const { url, calls } = serveStatuses([404]);
+	const res = await throttledFetch(url);
+	expect(calls()).toBe(1);
 	expect(res?.status).toBe(404);
 });
