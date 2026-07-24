@@ -220,6 +220,7 @@ import {
 	TRANSCRIPT_EVENT_LAND_MERGE,
 	TRANSCRIPT_EVENT_NEEDS_YOU,
 } from "./transcript-event-kinds.ts";
+import { TRANSCRIPT_EVENT_TOKEN_BURN_SNAPSHOT, fleetTokenBurnPayload, tokenBurnFace, unitTokenBurnPayload } from "./token-burn.ts";
 import { truncateLabel } from "./text-util.ts";
 import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
 import { ChannelStore, DEFAULT_CHANNEL_ID, type ChannelEntry, type ClientChannelPost } from "./channels.ts";
@@ -6296,10 +6297,12 @@ export class SquadManager extends EventEmitter {
 		// gate that judged nothing about it (code-review, CONFIRMED). New work only.
 		if (costMode === "enforce" && opts.laneSource === undefined) {
 			// tierOf(opts.thinking), NOT the "low"-defaulted `thinking` local: receipts stamp their tier
-			// from rec.options.thinking (the same undefaulted value), and a gate that queries a different
-			// tier key than the data was written with silently never matches a cell.
+			// from rec.options.thinking; querying a different tier silently misses the cost cell.
 			const verdict = await shadowCostCheck(this.stateDir, opts.model, tierOf(opts.thinking), (line) => this.log("warn", line), resolvedLane, laneAppliesPrivilege);
-			if (verdict) this.learningMetrics.record("cost-gate-verdict", 1, { action: verdict.action, lane: resolvedLane, mode: costMode });
+			if (verdict) {
+				this.learningMetrics.record("cost-gate-verdict", 1, { action: verdict.action, lane: resolvedLane, mode: costMode });
+				await this.emitFleetTokenBurnRollup(verdict);
+			}
 			if (verdict?.action === "deny") {
 				this.automation.for("land", opts.repo)({ durationMs: 0, level: "warn", detail: `${UNATTACHED_ESCALATION_MARKER} — ${verdict.line}` });
 				throw new Error(verdict.line);
@@ -6307,7 +6310,10 @@ export class SquadManager extends EventEmitter {
 			if (verdict?.action === "ask") costGateAsk = verdict;
 		} else {
 			void shadowCostCheck(this.stateDir, opts.model, tierOf(opts.thinking), (line) => this.log("warn", line), resolvedLane, laneAppliesPrivilege).then((verdict) => {
-				if (verdict) this.learningMetrics.record("cost-gate-verdict", 1, { action: verdict.action, lane: resolvedLane, mode: costMode });
+				if (verdict) {
+					this.learningMetrics.record("cost-gate-verdict", 1, { action: verdict.action, lane: resolvedLane, mode: costMode });
+					void this.emitFleetTokenBurnRollup(verdict);
+				}
 			});
 		}
 
@@ -9312,6 +9318,7 @@ export class SquadManager extends EventEmitter {
 		const conf = scoreConfidence({ verificationState: rec.dto.verificationState ?? "unknown", filesTouched: receipt.filesTouched.length, validator, sameLineage: rec.dto.validation?.sameLineage, lensAdvisory: lensAdvisoryBucket(rec.dto.validation) });
 		receipt.confidence = conf;
 		await appendReceipt(this.stateDir, receipt); // full receipt on disk (both modes)
+		this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_TOKEN_BURN_SNAPSHOT, `token burn · ${this.safeEventLabel(receipt.name)} · ${receipt.tokens?.total ?? 0} tokens · $${(receipt.costUsd ?? 0).toFixed(4)}`, unitTokenBurnPayload(receipt));
 		if (receipt.spans?.length) this.traceExporter?.enqueue(receipt.spans, { service: "omp-squad", repo: receipt.repo, operator: this.operator.id, org: this.operator.orgId });
 		// Queryable per-org cost/token ledger (DB mode); FileStore is a no-op since the receipt is on disk.
 		await this.store.appendUsage(receipt).catch((err) => this.log("warn", `usage write failed for ${rec.dto.name}: ${err instanceof Error ? err.message : String(err)}`));
@@ -11115,6 +11122,7 @@ export class SquadManager extends EventEmitter {
 	private projectionFace(rec: AgentRecord, entry: TranscriptEntry): Record<string, unknown> {
 		const payload = entry.event?.payload;
 		const objectPayload = payload && typeof payload === "object" && !Array.isArray(payload) ? payload as Record<string, unknown> : {};
+		if (entry.event?.kind === TRANSCRIPT_EVENT_TOKEN_BURN_SNAPSHOT) return tokenBurnFace(objectPayload as never);
 		return {
 			unitId: rec.dto.id,
 			unitName: rec.dto.name,
@@ -11131,6 +11139,25 @@ export class SquadManager extends EventEmitter {
 			pendingId: typeof objectPayload.pendingId === "string" ? objectPayload.pendingId : undefined,
 			pendingStatus: typeof objectPayload.status === "string" ? objectPayload.status : undefined,
 		};
+	}
+
+	private async emitFleetTokenBurnRollup(verdict: CostVerdict): Promise<void> {
+		try {
+			const payload = fleetTokenBurnPayload(await readAllReceipts(this.stateDir), verdict);
+			const card = await this.channelStore.appendManager(DEFAULT_CHANNEL_ID, {
+				authorActor: "manager",
+				kind: "system",
+				format: "stage",
+				text: `fleet token burn · ${payload.totals.tokens} tokens · $${payload.totals.costUsd.toFixed(4)}`,
+				event: {
+					kind: TRANSCRIPT_EVENT_TOKEN_BURN_SNAPSHOT,
+					payload: { refs: { reason: payload.reason }, doorSurface: "fleet-economics", face: tokenBurnFace(payload), ...payload },
+				},
+			});
+			this.emit("event", { type: "channel-entry", channelId: DEFAULT_CHANNEL_ID, entry: card } satisfies SquadEvent);
+		} catch (err) {
+			this.log("warn", `fleet token-burn rollup failed: ${errText(err)}`);
+		}
 	}
 
 	private async projectUnitTranscriptEvent(rec: AgentRecord, entry: TranscriptEntry): Promise<void> {

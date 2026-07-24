@@ -1,7 +1,7 @@
 // Typed transcript event kinds currently emitted by the daemon.
 // Landing-order rule: do not add a constant until the same change ships a reader/test for it.
-// Reserved names for later room-card readers: spawn-proposal, plan-card,
-// token-burn-snapshot, design-revised.
+// Reserved names for later room-card readers: spawn-proposal, design-revised.
+// token-burn-snapshot ships with its reader; keep the constant adjacent to the taxonomy.
 // Event issuer namespace: the attesting authority stamped on every event envelope by the
 // emitting chokepoint (never taken from client/caller input). "manager" is the only issuer
 // today; foreign attestors (federated fleets, vendor capabilities) get namespaced values
@@ -13,3 +13,5 @@ export const TRANSCRIPT_EVENT_LAND_ASSESSMENT = "land-assessment";
 export const TRANSCRIPT_EVENT_LAND_MERGE = "land-merge";
 export const TRANSCRIPT_EVENT_GATE_VERDICT = "gate-verdict";
 export const TRANSCRIPT_EVENT_NEEDS_YOU = "needs-you";
+
+export const TRANSCRIPT_EVENT_TOKEN_BURN_SNAPSHOT = "token-burn-snapshot";
