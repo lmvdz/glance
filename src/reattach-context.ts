@@ -32,6 +32,8 @@ export interface DeadSessionPlaceholder {
 	repo: string;
 	worktree: string;
 	harness?: string;
+	/** Explicitly preserved channel binding; absent only on legacy placeholders. */
+	channelId?: string;
 	/** Why the session is dead, in operator-readable prose (surfaced verbatim by the REPL). */
 	deadReason: string;
 	/** When the placeholder was recorded (boot time) — starts the bounded answer window. */
@@ -74,6 +76,7 @@ export function buildDeadPlaceholder(p: PersistedAgent, transcript: unknown, now
 		name: p.name,
 		repo: p.repo,
 		worktree: p.worktree,
+		channelId: p.channelId,
 		harness,
 		at: now,
 		transcript: entries,

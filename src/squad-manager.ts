@@ -228,7 +228,7 @@ import {
 import { TRANSCRIPT_EVENT_TOKEN_BURN_SNAPSHOT, fleetTokenBurnPayload, tokenBurnFace, unitTokenBurnPayload } from "./token-burn.ts";
 import { truncateLabel } from "./text-util.ts";
 import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
-import { ChannelStore, DEFAULT_CHANNEL_ID, type ChannelEntry, type ClientChannelPost } from "./channels.ts";
+import { ChannelStore, DEFAULT_CHANNEL_ID, type ChannelEntry, type ClientChannelPost, type Channel, type CreateChannelInput, type ChannelMemberInput } from "./channels.ts";
 import { buildTrace, traceMaxSpans, traceSampleRatio, traceSpansEnabled, type TraceResponse } from "./spans.ts";
 import { traceExporterFromEnv, type TraceExportQueue } from "./trace-exporter.ts";
 
@@ -2023,6 +2023,7 @@ export class SquadManager extends EventEmitter {
 				// checkout. Holds keyed by the OLD id become orphans (reattachHeldSyncs logs them loudly) —
 				// fail-closed, never silently re-keyed onto a fresh id whose worktree may have moved on.
 				realTreePath: p.realTreePath,
+				channelId: p.channelId,
 				sandbox: p.sandbox,
 				autoRoute: false,
 				bypassCap: true,
@@ -4493,6 +4494,7 @@ export class SquadManager extends EventEmitter {
 					issueIdentifier: rec.dto.issue?.identifier,
 					issueUrl: rec.dto.issue?.url,
 					goal: ws?.goal,
+					channelId: rec.dto.channelId ?? null,
 					terminalReason: detail,
 					terminalAt: ws?.terminal?.at ?? Date.now(),
 					trajectory: ws?.rollup?.map((r) => r.label) ?? [],
@@ -6954,7 +6956,7 @@ export class SquadManager extends EventEmitter {
 		// ahead of this re-spawn: prior partial work may already sit in the reused worktree — say so in the
 		// re-prompt.
 		const task = id && this.reconciledStops.delete(id) ? `${spec.task}\n\n(Resuming after a restart — prior partial work may already exist in this worktree; continue from where it left off.)` : spec.task;
-		const dto = await this.createInternal({ repo, name: spec.name, model: spec.model, approvalMode: spec.approvalMode, parentId, autoRoute: false, bypassCap: true, explicitId: id ?? newAgentId(spec.name), parentNodeId: spec.parentNodeId, branchIndex: spec.branchIndex }, LOCAL_ACTOR);
+		const dto = await this.createInternal({ repo, name: spec.name, model: spec.model, approvalMode: spec.approvalMode, parentId, channelId: this.agents.get(parentId)?.dto.channelId, autoRoute: false, bypassCap: true, explicitId: id ?? newAgentId(spec.name), parentNodeId: spec.parentNodeId, branchIndex: spec.branchIndex }, LOCAL_ACTOR);
 		const rec = this.agents.get(dto.id);
 		if (!rec) return { outcome: "failed", notAttempted: true, text: "branch agent not created" };
 		// Persisted (not sent as create()'s own auto-prompt — runAgentTask below owns the actual send and
@@ -7195,6 +7197,7 @@ export class SquadManager extends EventEmitter {
 
 	private async appendMentionSteerEcho(channelId: string | undefined, actor: Actor, cmd: Extract<ClientCommand, { type: "prompt" }>, rec: AgentRecord): Promise<void> {
 		if (!channelId || cmd.source !== "mention") return;
+		if (!(await this.channelStore.canReadChannel(channelId, actor))) return;
 		const actualName = rec.dto.name?.trim();
 		const actualId = rec.dto.id;
 		const requestedLabel = cmd.mention?.targetLabel?.trim();
@@ -7366,6 +7369,10 @@ export class SquadManager extends EventEmitter {
 			this.emitCommandAck(this.commandAckClientTurnId(cmd), { ok: false, reason: "duplicate" });
 			return;
 		}
+		if (cmd.type === "prompt" && cmd.channelId && rec.dto.channelId !== cmd.channelId && (await this.channelMemberUserIds(cmd.channelId)) !== undefined) {
+			this.emitCommandAck(cmd.clientTurnId, { ok: false, reason: "denied" });
+			throw new RbacDenied("operator", "viewer", cmd.type);
+		}
 
 		switch (cmd.type) {
 			case "prompt": {
@@ -7400,7 +7407,6 @@ export class SquadManager extends EventEmitter {
 				const lastTurnAt = rec.dto.lastActivity;
 				const landedBlock = await this.recentlyLandedPrompt(rec.dto.repo, rec.dto.requires, lastTurnAt);
 				const promptMessage = landedBlock ? `${cmd.message}\n\n${landedBlock}` : cmd.message;
-				this.log("info", `${actor.id} → ${rec.dto.name}: ${truncateLabel(cmd.message, 80)}`);
 				// A new instruction makes every decision the auto-loop already took about this unit stale.
 				// Its in-memory `staged`/`landed`/`halted` sets are keyed by ids that a steered agent's edits
 				// never change, so without this the work a steer produces is skipped forever — verified never,
@@ -7915,6 +7921,7 @@ export class SquadManager extends EventEmitter {
 						// double-claim.
 						featureId: rec.options.featureId,
 						issue: rec.options.issue,
+						channelId: rec.dto.channelId,
 						bypassCap: true,
 						cold: true,
 						explicitId: newId,
@@ -8057,6 +8064,7 @@ export class SquadManager extends EventEmitter {
 		if (deleteWorktree && rec.options.kind === "workflow" && rec.options.workflowState?.runId) {
 			await deleteCheckpointLog(this.stateDir, rec.options.workflowState.runId).catch(() => {});
 		}
+		const channelId = rec.dto.channelId;
 		this.agents.delete(id);
 		// Daemon-side session end for a `glance here` registration (daily-onramp 02): when the LAST agent
 		// on an ephemerally-registered repo is removed, restore the pre-session registry state — the REPL's
@@ -8065,7 +8073,7 @@ export class SquadManager extends EventEmitter {
 		// call unconditionally here — this agent is already gone from `this.agents` above.
 		this.releaseEphemeralProject(normalizeRepoPath(rec.options.repo));
 		if (this.scoutCursor.delete(id)) writeScoutCursors(this.stateDir, this.scoutCursor);
-		this.emit("event", { type: "removed", id } satisfies SquadEvent);
+		this.emit("event", { type: "removed", id, channelId } satisfies SquadEvent);
 		await this.persist();
 		return true;
 	}
@@ -8587,6 +8595,7 @@ export class SquadManager extends EventEmitter {
 				owns: rec.options.owns,
 				produces: rec.options.produces,
 				scopeSource: rec.options.scopeSource,
+				channelId: rec.dto.channelId,
 			});
 			// claimed() bookkeeping: the Dispatcher's claimed set is derived live from `this.agents` (both
 			// the parked original and this sibling carry the same `issue.id`), so the issue reads as claimed
@@ -9228,6 +9237,19 @@ export class SquadManager extends EventEmitter {
 		return readAnswer(this.stateDir, id);
 	}
 
+	/** Answers are artifacts of their agent. Reaped/legacy artifacts lack an authorization binding, so fail closed. */
+	async visibleAnswers(actor: Actor, repo?: string): Promise<Answer[]> {
+		const answers = await listAnswers(this.stateDir, { repo });
+		const visible: Answer[] = [];
+		for (const answer of answers) if (await this.canReadAgent(answer.id, actor)) visible.push(answer);
+		return visible;
+	}
+
+	async visibleAnswer(id: string, actor: Actor): Promise<Answer | undefined> {
+		const answer = await readAnswer(this.stateDir, id);
+		return answer && (await this.canReadAgent(id, actor)) ? answer : undefined;
+	}
+
 	/** After-action reports for terminal units, newest death first — they outlive the reaped roster row. */
 	afterActions(): Promise<AfterActionReport[]> {
 		return listAfterActions(this.stateDir);
@@ -9235,6 +9257,21 @@ export class SquadManager extends EventEmitter {
 
 	afterAction(id: string): Promise<AfterActionReport | undefined> {
 		return readAfterAction(this.stateDir, id);
+	}
+
+	/** After-action reports retain their channel binding after the roster record is reaped. */
+	async visibleAfterActions(actor: Actor): Promise<AfterActionReport[]> {
+		const reports = await listAfterActions(this.stateDir);
+		const visible: AfterActionReport[] = [];
+		for (const report of reports) {
+			if (report.channelId === null || (typeof report.channelId === "string" && await this.channelStore.canReadChannel(report.channelId, actor))) visible.push(report);
+		}
+		return visible;
+	}
+
+	async visibleAfterAction(id: string, actor: Actor): Promise<AfterActionReport | undefined> {
+		const report = await readAfterAction(this.stateDir, id);
+		return report && (report.channelId === null || (typeof report.channelId === "string" && await this.channelStore.canReadChannel(report.channelId, actor))) ? report : undefined;
 	}
 
 	/** Symptom cards recorded by `squad_record_symptom`, newest first — the read surface for later
@@ -9713,7 +9750,7 @@ export class SquadManager extends EventEmitter {
 	async fabric(actor: Actor = LOCAL_ACTOR, opts: { repos?: string[]; includeLeases?: boolean } = {}): Promise<FabricSnapshot> {
 		return buildFabricSnapshot({
 			actor,
-			agents: this.list(),
+			agents: await this.visibleAgents(actor),
 			stateDir: this.stateDir,
 			repos: opts.repos,
 			includeLeases: opts.includeLeases,
@@ -10166,7 +10203,7 @@ export class SquadManager extends EventEmitter {
 		});
 	}
 
-	async gateVerdictProof(channelId: string, entryId: string): Promise<{
+	async gateVerdictProof(channelId: string, entryId: string, actor: Actor): Promise<{
 		mode: "resident" | "post-mortem";
 		unitId?: string;
 		unitName?: string;
@@ -10185,7 +10222,7 @@ export class SquadManager extends EventEmitter {
 		};
 		malformedLandRecords: number;
 	}> {
-		const entry = (await this.channelEntries(channelId, 0)).find((e) => e.id === entryId);
+		const entry = (await this.channelEntries(channelId, 0, actor)).find((e) => e.id === entryId);
 		if (!entry || entry.event?.kind !== TRANSCRIPT_EVENT_GATE_VERDICT) throw new Error("no such gate verdict");
 		const payload = recordObject(entry.event.payload) ?? {};
 		const refs = recordObject(payload.refs) ?? {};
@@ -10949,9 +10986,9 @@ export class SquadManager extends EventEmitter {
 	 *  data, with the in-memory rings folded in so a just-recorded tap/transition is visible before
 	 *  its fire-and-forget spool lands (the GET /api/adoption read-your-write case). Room interactions
 	 *  come from the existing channel substrate; no parallel counter store. */
-	async adoptionCounters(): Promise<AdoptionCounters> {
-		const channels = await this.channelStore.listChannels();
-		const channelEntries = (await Promise.all(channels.map((channel) => this.channelStore.entries(channel.id, 0)))).flat();
+	async adoptionCounters(actor: Actor = LOCAL_ACTOR): Promise<AdoptionCounters> {
+		const channels = await this.channelStore.listChannels(actor);
+		const channelEntries = (await Promise.all(channels.map((channel) => this.channelStore.entries(channel.id, 0, actor)))).flat();
 		return computeAdoptionCounters(this.stateDir, { transitions: this.transitionLog.recent(), pushTaps: this.pushTapLog.recent(), channelEntries });
 	}
 
@@ -11295,16 +11332,56 @@ export class SquadManager extends EventEmitter {
 		return entry;
 	}
 
-	async listChannels() {
-		return this.channelStore.listChannels();
+	async listChannels(actor: Actor) {
+		return this.channelStore.listChannels(actor);
 	}
 
-	async channelEntries(channelId: string = DEFAULT_CHANNEL_ID, since = 0): Promise<ChannelEntry[]> {
-		return this.channelStore.entries(channelId, since);
+	async channelEntries(channelId: string = DEFAULT_CHANNEL_ID, since = 0, actor: Actor): Promise<ChannelEntry[]> {
+		return this.channelStore.entries(channelId, since, actor);
 	}
 
-	async searchChannelEntries(q: string, limit = 50) {
-		return this.channelStore.search(q, limit);
+	async searchChannelEntries(q: string, limit = 50, actor: Actor) {
+		return this.channelStore.search(q, limit, actor);
+	}
+
+	async createChannel(actor: Actor, input: CreateChannelInput): Promise<Channel> {
+		return this.channelStore.createChannel(actor, input);
+	}
+
+	async addChannelMember(channelId: string, actor: Actor, input: ChannelMemberInput) {
+		return this.channelStore.setMember(channelId, actor, input, true);
+	}
+
+	async removeChannelMember(channelId: string, actor: Actor, input: ChannelMemberInput) {
+		return this.channelStore.setMember(channelId, actor, input, false);
+	}
+
+	async channelMemberUserIds(channelId: string): Promise<string[] | undefined> {
+		return this.channelStore.memberUserIds(channelId);
+	}
+
+	async channelMemberUserIdsForAgent(agentId: string): Promise<string[] | undefined> {
+		const channelId = this.agents.get(agentId)?.dto.channelId;
+		return channelId ? this.channelStore.memberUserIds(channelId) : undefined;
+	}
+
+	async canReadChannel(channelId: string, actor: Actor): Promise<boolean> {
+		return this.channelStore.canReadChannel(channelId, actor);
+	}
+
+	async canReadAgent(agentId: string, actor: Actor): Promise<boolean> {
+		const rec = this.agents.get(agentId);
+		if (rec) {
+			const channelId = rec.dto.channelId;
+			return !channelId || this.channelStore.canReadChannel(channelId, actor);
+		}
+		const placeholder = this.deadPlaceholder(agentId);
+		return !!placeholder && (!placeholder.channelId || await this.channelStore.canReadChannel(placeholder.channelId, actor));
+	}
+	async visibleAgents(actor: Actor): Promise<AgentDTO[]> {
+		const out: AgentDTO[] = [];
+		for (const dto of this.list()) if (!dto.channelId || (await this.channelStore.canReadChannel(dto.channelId, actor))) out.push(dto);
+		return out;
 	}
 
 	async appendChannelPost(channelId: string, actor: Actor, input: ClientChannelPost): Promise<ChannelEntry> {

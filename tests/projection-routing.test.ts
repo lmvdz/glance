@@ -36,7 +36,7 @@ interface AgentRecordLike {
 }
 
 interface StoreLike {
-	putChannel(channel: { id: string; name: string; createdAt: number; kind: "default" | "user" }): Promise<void>;
+	putChannel(channel: { id: string; name: string; createdAt: number; kind: "default" | "user"; visibility: "org-public" }): Promise<void>;
 }
 
 interface InternalHost {
@@ -80,7 +80,7 @@ async function makeMgr(prefix: string): Promise<{ mgr: SquadManager; host: Inter
 }
 
 async function createChannel(host: InternalHost, id: string): Promise<void> {
-	await host.store.putChannel({ id, name: `#${id}`, createdAt: Date.now(), kind: "user" });
+	await host.store.putChannel({ id, name: `#${id}`, createdAt: Date.now(), kind: "user", visibility: "org-public" });
 }
 
 function waitForChannelEntry(mgr: SquadManager, channelId: string, predicate: (entry: ChannelEntry) => boolean): Promise<ChannelEntry> {

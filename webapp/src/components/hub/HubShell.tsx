@@ -12,7 +12,7 @@ import { DEFAULT_CHANNEL_ID, hubHref, type HubRoute } from '../../lib/router';
 import { useTaskContext } from '../../context/TaskContext';
 
 const EMPTY_PRESENCE: PresenceSnapshot = { users: [] };
-const DEFAULT_CHANNEL: Channel = { id: DEFAULT_CHANNEL_ID, name: DEFAULT_CHANNEL_ID, kind: 'default', createdAt: 0 };
+const DEFAULT_CHANNEL: Channel = { id: DEFAULT_CHANNEL_ID, name: DEFAULT_CHANNEL_ID, kind: 'default', createdAt: 0, visibility: 'org-public' };
 const DEFAULT_MODELS: ModelOption[] = [{ value: '', label: 'Default model' }];
 
 const managerCardEntry = (channelId: string, text: string, kind: string, payload: unknown): ChannelEntry => ({

@@ -660,6 +660,8 @@ export interface Channel {
   name: string;
   createdAt: number;
   kind: "default" | "user";
+  visibility: "org-public" | "private";
+  creatorUserId?: string;
 }
 
 export interface ChannelEntry extends TranscriptEntry {

@@ -172,6 +172,62 @@ test("a transition into input drives a real encrypted push through the server", 
 	expect(calls[0].len).toBeGreaterThan(80);
 });
 
+test("private channel transitions push only to member-bound subscriptions", async () => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "private-push-scope-"));
+	const endpoints: string[] = [];
+	const push = new PushService(dir, {
+		send: async (endpoint) => {
+			endpoints.push(endpoint);
+			return { status: 201 };
+		},
+	});
+	await push.init();
+	for (const [userId, endpoint] of [["alice", "https://push.example.com/alice"], ["carol", "https://push.example.com/carol"]] as const) {
+		const keyPair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+		const p256dh = Buffer.from(new Uint8Array(await crypto.subtle.exportKey("raw", keyPair.publicKey))).toString("base64url");
+		const auth = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64url");
+		await push.subscribe({ endpoint, userId, keys: { p256dh, auth } });
+	}
+	const { mgr, rec, dirs } = await liveAgent("private-push-scope");
+	const server = new SquadServer(mgr, { port: 0, push });
+	server.start();
+	cleanups.push(async () => {
+		server.stop();
+		await mgr.stop();
+		await fs.rm(dir, { recursive: true, force: true });
+		for (const d of dirs) await fs.rm(d, { recursive: true, force: true });
+	});
+	const alice = { id: "db:alice", displayName: "alice", origin: "local" as const, role: "admin" as const, orgId: "org-a" };
+	await mgr.createChannel(alice, { id: "ops", name: "#ops", visibility: "private" });
+	rec.dto.channelId = "ops";
+	rec.dto.status = "input";
+	rec.dto.pending = [{ id: "p", source: "ui", kind: "select", title: "private approval", createdAt: 0 }];
+
+	mgr.emit("event", transitionEvent(rec.dto.id, "working", "input"));
+	await waitFor(() => endpoints.length === 1);
+	expect(endpoints).toEqual(["https://push.example.com/alice"]);
+});
+
+test("member-scoped pushes ignore legacy subscriptions without a bound user", async () => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "private-push-unbound-"));
+	const endpoints: string[] = [];
+	const push = new PushService(dir, {
+		send: async (endpoint) => {
+			endpoints.push(endpoint);
+			return { status: 201 };
+		},
+	});
+	await push.init();
+	const keyPair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+	const p256dh = Buffer.from(new Uint8Array(await crypto.subtle.exportKey("raw", keyPair.publicKey))).toString("base64url");
+	const auth = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64url");
+	await push.subscribe({ endpoint: "https://push.example.com/unbound", keys: { p256dh, auth } });
+	cleanups.push(() => fs.rm(dir, { recursive: true, force: true }));
+
+	expect(await push.notify({ title: "private approval", body: "members only", tag: "agent:x1" }, ["alice"])).toBe(0);
+	expect(endpoints).toEqual([]);
+});
+
 test("needs-you room card and status lane produce exactly one push for one pending request", async () => {
 	const calls: PushPayload[] = [];
 	// SquadServer only needs PushService.notify here; this focused latch test avoids encrypted WebPush
@@ -197,7 +253,7 @@ test("needs-you room card and status lane produce exactly one push for one pendi
 	mgr.emit("event", transitionEvent(rec.dto.id, "working", "input"));
 	mgr.emit("event", needsYouChannelEvent(rec.dto.id, "p"));
 
-	expect(calls).toHaveLength(1);
+	await waitFor(() => calls.length === 1);
 });
 
 test("seeding + calm transitions do not push", async () => {
@@ -301,7 +357,8 @@ test("an escalation and a completion push for the SAME agent within 3s of each o
 	await push.init();
 	const kp = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
 	const p256dh = Buffer.from(new Uint8Array(await crypto.subtle.exportKey("raw", kp.publicKey))).toString("base64url");
-	await push.subscribe({ endpoint: "https://push.example.com/d", keys: { p256dh, auth: "AAAAAAAAAAAAAAAAAAAAAA" } });
+	const auth = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64url");
+	await push.subscribe({ endpoint: "https://push.example.com/d", keys: { p256dh, auth } });
 
 	const { mgr, rec, dirs } = await liveAgent("pushboth");
 	const server = new SquadServer(mgr, { port: 0, push });
@@ -318,13 +375,14 @@ test("an escalation and a completion push for the SAME agent within 3s of each o
 	rec.dto.status = "input";
 	rec.dto.pending = [{ id: "p", source: "ui", kind: "select", title: "approve?", createdAt: 0 }];
 	mgr.emit("event", transitionEvent(rec.dto.id, "working", "input"));
+	await waitFor(() => calls.length === 1);
 	rec.dto.status = "idle";
 	rec.dto.pending = [];
 	rec.dto.completionPushArmed = true;
 	rec.dto.completionPushKind = "voice";
 	mgr.emit("event", transitionEvent(rec.dto.id, "input", "idle", { reason: "pending-answer" }));
 
-	await second; // resolves once BOTH sends have happened — no polling
+	await waitFor(() => calls.length === 2);
 	expect(calls).toHaveLength(2);
 });
 
