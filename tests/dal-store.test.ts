@@ -245,8 +245,6 @@ test("DbStore: channel entries are durable and scoped by org", async () => {
 	expect(await a.listChannelEntries("fleet", 1)).toEqual([]);
 });
 
-test("ChannelStore: client posts stamp the verified actor, redact text, and cannot persist forged event payloads", async () => {
-
 test("DbStore: channel search is org-scoped and searches only redacted stored text", async () => {
 	const a = dbStore("A");
 	const b = dbStore("B");
