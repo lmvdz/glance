@@ -125,6 +125,7 @@ function entrySort(a: ChannelEntry, b: ChannelEntry): number {
 export class ChannelStore {
 	private readonly hotTail: ChannelEntry[] = [];
 	private defaultReady?: Promise<void>;
+	private readonly appendLocks = new Map<string, Promise<void>>();
 
 	constructor(
 		_stateDir: string,
@@ -274,10 +275,8 @@ export class ChannelStore {
 		await this.ensureDefaultChannel();
 		const channel = await this.store.getChannel(channelId);
 		if (!channel) throw new Error("channel not found");
-		const seq = (await this.store.nextChannelSeq(channelId)) + 1;
-		const entry: ChannelEntry = {
+		const entry: Omit<ChannelEntry, "seq"> = {
 			id: randomUUID(),
-			seq,
 			channelId,
 			authorActor: input.authorActor,
 			authorDisplayName: input.authorDisplayName,
@@ -290,10 +289,21 @@ export class ChannelStore {
 			format: input.format ?? "markdown",
 			...(input.event ? { event: { kind: input.event.kind, issuer: EVENT_ISSUER_MANAGER, payload: sanitizeManagerValue(input.event.payload) } } : {}),
 		};
-		await this.store.appendChannelEntry(entry);
-		this.hotTail.push(entry);
+		const prior = this.appendLocks.get(channelId)?.catch(() => {}) ?? Promise.resolve();
+		let release!: () => void;
+		const next = prior.then(() => new Promise<void>((resolve) => { release = resolve; }));
+		this.appendLocks.set(channelId, next);
+		await prior;
+		let persisted: ChannelEntry;
+		try {
+			persisted = await this.store.appendChannelEntry(entry);
+		} finally {
+			release();
+			if (this.appendLocks.get(channelId) === next) this.appendLocks.delete(channelId);
+		}
+		this.hotTail.push(persisted);
 		if (this.hotTail.length > HOT_TAIL) this.hotTail.shift();
-		return entry;
+		return persisted;
 	}
 
 	async stop(): Promise<void> {}

@@ -1,6 +1,6 @@
 # Channel seq atomicity — the cursor's monotonic seq is allocated non-atomically
 
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -84,3 +84,28 @@ REDTEAM-A and REDTEAM-B reviewed the *design*, and the design never mentions wri
 in the design's coverage, not in either red team's execution against it. Concern 18 (membership
 fan-out) touches src/channels.ts and is in flight; sequence this after it lands or coordinate,
 to avoid a same-file collision.
+
+## Resolution
+Landed 2026-07-24 in the wave-5 train, sequenced after concern 18 as the notes required (both touch
+`src/channels.ts`).
+
+The allocation moved to the store seam rather than being wrapped in a lock and left where it was:
+`appendChannelEntry` now takes an entry **without** a seq and returns the persisted row. `DbStore`
+allocates inside the same `withOrg` transaction as the insert, with a bounded retry on
+unique-constraint failure (cross-process replicas can still collide); `FileStore` allocates under a
+per-file lock. Above both, `ChannelStore` holds a per-`channelId` promise chain, so
+allocate-and-insert is one critical section for every single-process case — which is all of file
+mode and all of today's DB mode.
+
+Approach item 3 landed too: a projection that still fails after retries is now a **counter** in
+`factory-status`, not a `log("warn")`. A dropped card is a number someone can see rather than
+something inferred from daemon logs.
+
+Backfill was out of scope by design and remains so — the 101 existing colliding rows in the live
+`#fleet` stay as they are. The cursor tolerates duplicate history because `since` is a `>` filter.
+
+### Verify status
+Covered: N concurrent `appendManager` calls yield distinct contiguous seqs on **both** FileStore and
+DbStore (the DbStore arm is the regression guard for the primary-key violation that was silently
+dropping cards), concurrent human post + manager projection both persist with neither 500ing, and
+the reconnect tail returns exactly the new entries.

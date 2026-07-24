@@ -265,7 +265,7 @@ test("DbStore: channel entries are durable and scoped by org", async () => {
 	const b = dbStore("B");
 	await a.putChannel({ id: "fleet", name: "#fleet", kind: "default", createdAt: 1, visibility: "org-public" });
 	await b.putChannel({ id: "fleet", name: "#fleet", kind: "default", createdAt: 1, visibility: "org-public" });
-	await a.appendChannelEntry({ id: "e1", seq: 1, channelId: "fleet", authorActor: "db:alice", kind: "user", text: "hello", ts: 2, status: "ok" });
+	await a.appendChannelEntry({ id: "e1", channelId: "fleet", authorActor: "db:alice", kind: "user", text: "hello", ts: 2, status: "ok" });
 
 	expect(await a.listChannelEntries("fleet")).toMatchObject([{ id: "e1", seq: 1, channelId: "fleet", authorActor: "db:alice", status: "ok" }]);
 	expect(await b.listChannelEntries("fleet")).toEqual([]);
@@ -273,13 +273,51 @@ test("DbStore: channel entries are durable and scoped by org", async () => {
 	expect(await a.listChannelEntries("fleet", 1)).toEqual([]);
 });
 
+test("ChannelStore: concurrent manager appends allocate a contiguous reconnect tail in FileStore and DbStore", async () => {
+	const actor = { id: "web:operator", displayName: "Operator", origin: "local" as const, role: "admin" as const };
+	const fdir = path.join(dir, "channel-file-seq-atomicity");
+	const stores = [
+		{ name: "FileStore", stateDir: fdir, store: new FileStore(fdir) },
+		{ name: "DbStore", stateDir: orgDir("A"), store: dbStore("A") },
+	];
+
+	for (const { name, stateDir, store } of stores) {
+		const channels = new ChannelStore(stateDir, store);
+		const baseline = await channels.appendManager("fleet", { authorActor: "manager", text: `${name} baseline` });
+		const appended = await Promise.all(Array.from({ length: 5 }, (_, n) => channels.appendManager("fleet", { authorActor: "manager", text: `${name} card ${n}` })));
+		const seqs = appended.map((entry) => entry.seq).sort((a, b) => a - b);
+		expect(seqs).toEqual([baseline.seq + 1, baseline.seq + 2, baseline.seq + 3, baseline.seq + 4, baseline.seq + 5]);
+		const tail = await channels.entries("fleet", baseline.seq, actor);
+		expect(tail.map((entry) => entry.seq)).toEqual(seqs);
+	}
+});
+
+test("ChannelStore: concurrent human and manager appends persist in FileStore and DbStore", async () => {
+	const actor = { id: "web:operator", displayName: "Operator", origin: "local" as const, role: "admin" as const };
+	const fdir = path.join(dir, "channel-file-human-manager-atomicity");
+	const stores = [
+		{ stateDir: fdir, store: new FileStore(fdir) },
+		{ stateDir: orgDir("A"), store: dbStore("A") },
+	];
+
+	for (const { stateDir, store } of stores) {
+		const channels = new ChannelStore(stateDir, store);
+		const [human, manager] = await Promise.all([
+			channels.appendClient("fleet", actor, { text: "human message" }),
+			channels.appendManager("fleet", { authorActor: "manager", text: "manager card" }),
+		]);
+		expect(new Set([human.seq, manager.seq]).size).toBe(2);
+		expect((await channels.entries("fleet", 0, actor)).filter((entry) => entry.id === human.id || entry.id === manager.id).map((entry) => entry.id).sort()).toEqual([human.id, manager.id].sort());
+	}
+});
+
 test("DbStore: channel search is org-scoped and searches only redacted stored text", async () => {
 	const a = dbStore("A");
 	const b = dbStore("B");
 	await a.putChannel({ id: "search", name: "#search", kind: "user", createdAt: 1, visibility: "org-public" });
 	await b.putChannel({ id: "search", name: "#search", kind: "user", createdAt: 1, visibility: "org-public" });
-	await a.appendChannelEntry({ id: "a1", seq: 1, channelId: "search", authorActor: "db:alice", kind: "user", text: "incident memory [REDACTED]", ts: 10, status: "ok" });
-	await b.appendChannelEntry({ id: "b1", seq: 1, channelId: "search", authorActor: "db:bob", kind: "user", text: "incident memory foreign", ts: 11, status: "ok" });
+	await a.appendChannelEntry({ id: "a1", channelId: "search", authorActor: "db:alice", kind: "user", text: "incident memory [REDACTED]", ts: 10, status: "ok" });
+	await b.appendChannelEntry({ id: "b1", channelId: "search", authorActor: "db:bob", kind: "user", text: "incident memory foreign", ts: 11, status: "ok" });
 
 	const fromA = await a.searchChannelEntries("incident memory");
 	expect(fromA.map((result) => result.entry.id)).toEqual(["a1"]);
@@ -310,8 +348,8 @@ test("FileStore: channel search scans durable JSONL rows honestly", async () => 
 	const fdir = path.join(dir, "channel-file-search");
 	const store = new FileStore(fdir);
 	await store.putChannel({ id: "fleet", name: "#fleet", kind: "default", createdAt: 1, visibility: "org-public" });
-	await store.appendChannelEntry({ id: "old", seq: 1, channelId: "fleet", authorActor: "web:operator", kind: "user", text: "week old incident memory", ts: 1, status: "ok" });
-	await store.appendChannelEntry({ id: "other", seq: 2, channelId: "ops", authorActor: "web:operator", kind: "user", text: "incident memory in ops", ts: 2, status: "ok" });
+	await store.appendChannelEntry({ id: "old", channelId: "fleet", authorActor: "web:operator", kind: "user", text: "week old incident memory", ts: 1, status: "ok" });
+	await store.appendChannelEntry({ id: "other", channelId: "ops", authorActor: "web:operator", kind: "user", text: "incident memory in ops", ts: 2, status: "ok" });
 
 	expect((await store.searchChannelEntries("incident memory")).map((result) => result.entry.id)).toEqual(["other", "old"]);
 });

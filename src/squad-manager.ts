@@ -223,7 +223,12 @@ import {
 	TRANSCRIPT_EVENT_LAND_MERGE,
 	TRANSCRIPT_EVENT_NEEDS_YOU,
 	TRANSCRIPT_EVENT_PLAN_CARD,
+	TRANSCRIPT_EVENT_PR_OPENED,
 	TRANSCRIPT_EVENT_RETURN_EMIT,
+	TRANSCRIPT_EVENT_UNIT_FAILED,
+	TRANSCRIPT_EVENT_UNIT_SPAWNED,
+	TRANSCRIPT_EVENT_UNIT_TURN_FINISHED,
+	TRANSCRIPT_EVENT_VERIFICATION_RAN,
 } from "./transcript-event-kinds.ts";
 import { TRANSCRIPT_EVENT_TOKEN_BURN_SNAPSHOT, fleetTokenBurnPayload, tokenBurnFace, unitTokenBurnPayload } from "./token-burn.ts";
 import { truncateLabel } from "./text-util.ts";
@@ -269,6 +274,11 @@ const DEFAULT_FLEET_CARD_KINDS: Record<string, true> = {
 	[TRANSCRIPT_EVENT_PLAN_CARD]: true,
 	[TRANSCRIPT_EVENT_RETURN_EMIT]: true,
 	[TRANSCRIPT_EVENT_DESIGN_REVISED]: true,
+	[TRANSCRIPT_EVENT_UNIT_SPAWNED]: true,
+	[TRANSCRIPT_EVENT_UNIT_TURN_FINISHED]: true,
+	[TRANSCRIPT_EVENT_UNIT_FAILED]: true,
+	[TRANSCRIPT_EVENT_PR_OPENED]: true,
+	[TRANSCRIPT_EVENT_VERIFICATION_RAN]: true,
 };
 
 const MAX_TRANSCRIPT = 800;
@@ -1121,6 +1131,8 @@ export class SquadManager extends EventEmitter {
 	private readonly unverifiedProofEscalated = new Set<string>();
 	/** Per-agent count of auto-supervised answers spent this run (OMP_SQUAD_AUTOSUPERVISE attempt budget). */
 	private readonly superviseBudget = new Map<string, number>();
+	/** Manager card projections that exhausted ChannelStore's bounded append retry. */
+	private projectionFailures = 0;
 	/** Per-agent count of advisory peer messages spent this run (OMP_SQUAD_PEERMSG_BUDGET). */
 	private readonly peerMessageBudget = new Map<string, number>();
 	/** Agent ids the daemon reattached to (surviving hosts) this run. */
@@ -3915,6 +3927,7 @@ export class SquadManager extends EventEmitter {
 			rec.dto.prUrl = result.prUrl;
 			rec.dto.prNumber = result.prNumber;
 			rec.dto.prState = result.prState;
+			this.transition(rec, rec.dto.status, "pr-open", { prUrl: result.prUrl, prNumber: result.prNumber });
 			this.emitAgent(rec);
 		}
 		// Staged (OMPSQ-138): the conflict was auto-resolved but held for a one-tap Land. Not a failure
@@ -4410,6 +4423,7 @@ export class SquadManager extends EventEmitter {
 					rec.dto.prUrl = ensure.prUrl;
 					rec.dto.prNumber = ensure.prNumber;
 					rec.dto.prState = ensure.prState ?? "draft";
+					this.transition(rec, rec.dto.status, "pr-open", { prUrl: ensure.prUrl, prNumber: ensure.prNumber });
 					this.emitAgent(rec);
 				} else {
 					this.log("warn", `land-confirm: PR float failed for ${dto.name} (${dto.branch}): ${ensure.detail ?? "unknown"}`);
@@ -5172,6 +5186,7 @@ export class SquadManager extends EventEmitter {
 		if (!command) return false;
 		const proof = await runProof({ repo: rec.dto.repo, worktree: rec.dto.worktree, command, stages });
 		await this.refreshProofState(rec);
+		this.transition(rec, rec.dto.status, "verification", { ok: proof.ok, detail: proof.detail, command, artifacts: proof.artifacts.length });
 		this.emitAgent(rec);
 		void this.recordAudit(actor, "verify", id, proof.ok ? "ok" : "error", proof.detail);
 		return proof.ok;
@@ -9129,6 +9144,7 @@ export class SquadManager extends EventEmitter {
 			rec.dto.prUrl = ensure.prUrl;
 			rec.dto.prNumber = ensure.prNumber;
 			rec.dto.prState = ensure.prState ?? "draft";
+			this.transition(rec, rec.dto.status, "pr-open", { prUrl: ensure.prUrl, prNumber: ensure.prNumber });
 			this.emitAgent(rec);
 		} else {
 			this.log("warn", `pr-reconcile: push retry failed for ${dto.name} (${dto.branch}): ${ensure.detail ?? "unknown"}`);
@@ -9909,6 +9925,7 @@ export class SquadManager extends EventEmitter {
 			liveArmed,
 			activeAgents: occupyingAgents(this.list()),
 			persistFailures: this.store.saveFailures?.() ?? 0,
+			projectionFailures: this.projectionFailures,
 			// Shadow-exit surface (adw-factory-borrows concern 09): raw events, not rollup rows — the
 			// scoreboard needs a JOINT filter (e.g. mode=shadow AND action=ask/deny) a per-tag-key rollup
 			// breakdown can't answer. Same window every other row on this strip uses.
@@ -10913,6 +10930,7 @@ export class SquadManager extends EventEmitter {
 		this.recordErrorTransition(rec, entry); // finding 9's per-agent (not fleet-shared-ring) error tally
 		this.pushTransitionEvent(rec, entry); // concern 03 wires DTO tail + rollup off this same call
 		this.emit("event", { type: "transition", entry } satisfies SquadEvent);
+		this.emitLifecycleProjection(rec, entry);
 	}
 
 	/** Append a denied-transition attempt to the same ring, flagged so it is never confused with an
@@ -11471,6 +11489,14 @@ export class SquadManager extends EventEmitter {
 		return text.length > 200 ? `${text.slice(0, 199)}…` : text;
 	}
 
+	/** Project a card to the unit's room channel WITHOUT writing a row into the unit's transcript.
+	 *  The synthetic entry carries no `id`, so `projectionRefs` correctly omits `entryId` — there is no
+	 *  transcript row to link back to, and claiming one would be a dead reference in the card's door. */
+	private projectLifecycleCard(rec: AgentRecord, kind: string, text: string, payload: unknown): void {
+		const synthetic: TranscriptEntry = { kind: "system", text: this.eventText(text), ts: Date.now(), status: "ok", format: "stage", event: { kind, issuer: EVENT_ISSUER_MANAGER, payload } } as TranscriptEntry;
+		void this.projectUnitTranscriptEvent(rec, synthetic);
+	}
+
 	private emitUnitTranscriptEvent(id: string | undefined, kind: string, text: string, payload: unknown): void {
 		if (!id) return;
 		const rec = this.agents.get(id);
@@ -11628,7 +11654,8 @@ export class SquadManager extends EventEmitter {
 			});
 			this.emit("event", { type: "channel-entry", channelId, entry: card } satisfies SquadEvent);
 		} catch (err) {
-			this.log("warn", `projection ${rec.dto.id}/${event.kind} → ${channelId} failed: ${errText(err)}`);
+			this.projectionFailures++;
+			this.log("warn", `projection ${rec.dto.id}/${event.kind} → ${channelId} failed (${this.projectionFailures} total): ${errText(err)}`);
 		}
 	}
 
@@ -11679,6 +11706,75 @@ export class SquadManager extends EventEmitter {
 			lensVerify: record.lensVerify,
 			gateLogPaths: record.gateLogPaths,
 			ranAt: record.ranAt,
+		});
+	}
+
+	/** Project the small, state-machine-bounded set of ordinary fleet facts from the transition
+	 * ledger. No lifecycle caller writes room cards directly: a new fact must first become a durable
+	 * transition, which keeps the timeline auditable and prevents prompt-volume regressions. */
+	private emitLifecycleProjection(rec: AgentRecord, entry: TransitionEntry): void {
+		let kind: string | undefined;
+		let title: string | undefined;
+		let eyebrow: string | undefined;
+		let tone: "neutral" | "info" | "warning" | "success" | "destructive" = "info";
+		const payload: Record<string, unknown> = { transition: { from: entry.from, to: entry.to, reason: entry.reason, at: entry.at } };
+		if (entry.reason === "spawn") {
+			kind = TRANSCRIPT_EVENT_UNIT_SPAWNED;
+			title = `Unit spawned · ${this.safeEventLabel(rec.dto.name)}`;
+			eyebrow = "Fleet activity";
+			payload.task = rec.options.task;
+		} else if (this.isGenuineCompletion(entry)) {
+			kind = TRANSCRIPT_EVENT_UNIT_TURN_FINISHED;
+			title = `Turn finished · ${this.safeEventLabel(rec.dto.name)}`;
+			eyebrow = "Unit idle";
+			tone = "success";
+			payload.summary = [...rec.transcript].reverse().find((item) => item.kind === "assistant")?.text;
+		} else if (entry.to === "error") {
+			kind = TRANSCRIPT_EVENT_UNIT_FAILED;
+			title = `Unit failed · ${this.safeEventLabel(rec.dto.name)}`;
+			eyebrow = "Needs review";
+			tone = "destructive";
+			payload.errorClass = typeof entry.cause?.error === "string" ? (/^[A-Za-z_$][\w$]*(?:Error)?/.exec(entry.cause.error.trim())?.[0] ?? entry.reason) : entry.reason;
+		} else if (entry.reason === "pr-open") {
+			kind = TRANSCRIPT_EVENT_PR_OPENED;
+			title = `PR opened · ${this.safeEventLabel(rec.dto.name)}`;
+			eyebrow = "Ready for review";
+			tone = "success";
+			payload.prUrl = rec.dto.prUrl;
+			payload.prNumber = rec.dto.prNumber;
+		} else if (entry.reason === "verification") {
+			kind = TRANSCRIPT_EVENT_VERIFICATION_RAN;
+			title = `Verification ${entry.cause?.ok === true ? "passed" : "failed"} · ${this.safeEventLabel(rec.dto.name)}`;
+			eyebrow = "Verification";
+			tone = entry.cause?.ok === true ? "success" : "destructive";
+			payload.ok = entry.cause?.ok === true;
+			payload.detail = entry.cause?.detail;
+		}
+		if (!kind || !title) return;
+		// Lifecycle cards are ROOM narration, not conversation. They go straight to the channel WITHOUT
+		// an `append` into the unit's own transcript — unlike the proof cards (gate-verdict, land-merge,
+		// needs-you), which are records the unit itself earned and belong in its thread.
+		//
+		// Routing these through `emitUnitTranscriptEvent` (which appends first, then projects) put a
+		// system row in every unit's conversation pane for every spawn/turn/failure/PR/verification and
+		// inflated `messageCount` accordingly — a user-visible counter. It also made "turn finished"
+		// circular: the card's own summary is read back out of the transcript it had just written to.
+		// `workflow-terminal-marker`'s "transcript survives a restart" test caught it by asserting the
+		// thread is EXACTLY the seeded history plus one after-action.
+		this.projectLifecycleCard(rec, kind, title, {
+			...payload,
+			face: {
+				title,
+				eyebrow,
+				body: typeof payload.summary === "string" ? payload.summary : typeof payload.errorClass === "string" ? payload.errorClass : undefined,
+				tone,
+				pinned: {
+					unit: rec.dto.name,
+					repo: rec.dto.repo,
+					branch: rec.dto.branch,
+					pr: rec.dto.prNumber,
+				},
+			},
 		});
 	}
 

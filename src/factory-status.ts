@@ -93,6 +93,8 @@ export interface FactoryStatus {
 	/** Cumulative FileStore.save() failures this process (0 in DB mode / a healthy run). The topology
 	 *  guarantee (inspectable-topology) rests on this write landing, so a nonzero count is actionable. */
 	persistFailures: number;
+	/** Manager card projections that exhausted their append retries this process. Nonzero means proof cards were dropped. */
+	projectionFailures: number;
 	/** The "fleet cannot land" banner (research-sirvir/01-recording-unlock, part 2) — see below. */
 	landBlocked: FactoryLandBlockStatus;
 	/** The per-lane shadow-exit scoreboard (adw-factory-borrows concern 09) — see below. */
@@ -223,6 +225,8 @@ export interface BuildFactoryStatusInput {
 	activeAgents: number;
 	/** Cumulative FileStore.save() failures this process (0 when the store doesn't track them / DB mode). */
 	persistFailures: number;
+	/** Manager card projections that exhausted their append retries this process. */
+	projectionFailures: number;
 	/** Raw `lane-classification` learning-metric events over the window (adw-factory-borrows concern
 	 *  09). Optional (defaults to empty) so callers/tests predating this scoreboard need no changes. */
 	laneEvents?: MetricEvent[];
@@ -312,6 +316,7 @@ export function buildFactoryStatus(input: BuildFactoryStatusInput): FactoryStatu
 		loops,
 		overall: deriveOverall(loops, input.activeAgents),
 		persistFailures: input.persistFailures,
+		projectionFailures: input.projectionFailures,
 		landBlocked: deriveLandBlockStatus(input.rollup),
 		shadowExits: deriveShadowExitScoreboard({ laneEvents: input.laneEvents ?? [], routeEvents: input.routeEvents ?? [], costEvents: input.costEvents ?? [] }),
 	};

@@ -8,7 +8,7 @@ import { FileStore } from "../src/dal/store.ts";
 import { ChannelStore, type ChannelEntry } from "../src/channels.ts";
 import { SubagentTracker } from "../src/subagents.ts";
 import { SquadManager } from "../src/squad-manager.ts";
-import { TRANSCRIPT_EVENT_GATE_VERDICT } from "../src/transcript-event-kinds.ts";
+import { TRANSCRIPT_EVENT_GATE_VERDICT, TRANSCRIPT_EVENT_PR_OPENED, TRANSCRIPT_EVENT_UNIT_FAILED, TRANSCRIPT_EVENT_UNIT_SPAWNED, TRANSCRIPT_EVENT_UNIT_TURN_FINISHED, TRANSCRIPT_EVENT_VERIFICATION_RAN } from "../src/transcript-event-kinds.ts";
 import { SquadServer, type AuthInstance, type SocketData } from "../src/server.ts";
 import type { Actor, AgentDTO, PersistedAgent, SquadEvent, TranscriptEntry } from "../src/types.ts";
 
@@ -92,6 +92,10 @@ interface DeliverHost {
 
 interface TranscriptEventHost {
 	emitUnitTranscriptEvent(id: string | undefined, kind: string, text: string, payload: unknown): void;
+}
+
+interface TransitionHost {
+	transition(record: unknown, status: AgentDTO["status"], reason: string, cause?: Record<string, unknown>): void;
 }
 
 interface RouteStubHost {
@@ -403,6 +407,39 @@ test("gate-verdict-proof returns 403 for private channel non-members", async () 
 
 	const response = await fetch(`${url}/api/channels/ops/entries/${encodeURIComponent(card.id)}/gate-verdict-proof`, { headers });
 	expect(response.status).toBe(403);
+});
+
+test("ordinary unit lifecycle projects a bounded five-card cycle from transition records", async () => {
+	const { mgr, agent } = await startedPrivateAgentServer("lifecycle-projection-");
+	const record = (mgr.agents as Map<string, unknown>).get(agent.id);
+	if (!record) throw new Error("seed agent missing");
+	const host = mgr as unknown as TransitionHost;
+	const emit = async (reason: string, status: AgentDTO["status"], kind: string, cause?: Record<string, unknown>) => {
+		const projected = waitForChannelEntry(mgr, "ops", (item) => item.event?.kind === kind);
+		host.transition(record, status, reason, cause);
+		return projected;
+	};
+
+	const cards = [await emit("spawn", "idle", TRANSCRIPT_EVENT_UNIT_SPAWNED)];
+	host.transition(record, "working", "task-start");
+	// Test-only structural assertion: seedAgent creates this internal manager record.
+	const seededRecord = record as { transcript: TranscriptEntry[] };
+	seededRecord.transcript.push({ id: "summary", seq: 2, kind: "assistant", text: "Implemented the lifecycle reader.", ts: 2 });
+	cards.push(await emit("exit-clean", "idle", TRANSCRIPT_EVENT_UNIT_TURN_FINISHED));
+	cards.push(await emit("verification", "idle", TRANSCRIPT_EVENT_VERIFICATION_RAN, { ok: true, detail: "12 pass" }));
+	agent.prNumber = 27;
+	agent.prUrl = "https://example.test/pr/27";
+	cards.push(await emit("pr-open", "idle", TRANSCRIPT_EVENT_PR_OPENED));
+	cards.push(await emit("fail", "error", TRANSCRIPT_EVENT_UNIT_FAILED, { error: "Error: gate failed\nstack" }));
+
+	expect(cards.map((card) => card.event?.kind)).toEqual([
+		TRANSCRIPT_EVENT_UNIT_SPAWNED,
+		TRANSCRIPT_EVENT_UNIT_TURN_FINISHED,
+		TRANSCRIPT_EVENT_VERIFICATION_RAN,
+		TRANSCRIPT_EVENT_PR_OPENED,
+		TRANSCRIPT_EVENT_UNIT_FAILED,
+	]);
+	expect(cards).toHaveLength(5);
 });
 
 test("WS subscribe after membership revocation replays no transcript frames", async () => {
