@@ -116,7 +116,7 @@ export class ChannelStore {
 	constructor(
 		_stateDir: string,
 		private readonly store: Store,
-		_log: (msg: string) => void = () => {},
+		private readonly _log: (msg: string) => void = () => {},
 		private readonly now: () => number = Date.now,
 	) {}
 
@@ -139,6 +139,8 @@ export class ChannelStore {
 		return allowed;
 	}
 
+	/** Authorization and entry retrieval are separate storage operations. Delivery rechecks immediately
+	 * before fan-out; HTTP reads remain a bounded TOCTOU window until Store exposes a read snapshot. */
 	async entries(channelId = DEFAULT_CHANNEL_ID, since = 0, actor: Actor): Promise<ChannelEntry[]> {
 		await this.ensureDefaultChannel();
 		if (!(await this.canReadChannel(channelId, actor))) throw new Error("channel forbidden");
@@ -149,7 +151,16 @@ export class ChannelStore {
 		await this.ensureDefaultChannel();
 		const allowed = new Set((await this.listChannels(actor)).map((channel) => channel.id));
 		const nativeSearch = this.store.searchChannelEntries?.bind(this.store);
-		if (nativeSearch) return (await nativeSearch(q, Math.max(limit * 10, 500))).filter((result) => allowed.has(result.entry.channelId)).slice(0, limit);
+		if (nativeSearch) {
+			const batch = Math.max(limit * 10, 500);
+			const results: ChannelSearchResult[] = [];
+			for (let offset = 0; results.length < limit; offset += batch) {
+				const page = await nativeSearch(q, batch, offset);
+				results.push(...page.filter((result) => allowed.has(result.entry.channelId)));
+				if (page.length < batch) break;
+			}
+			return results.slice(0, limit);
+		}
 		const needle = q.trim().toLowerCase();
 		if (!needle) return [];
 		const results = (await Promise.all([...allowed].map((channelId) => this.entries(channelId, 0, actor)))).flat()
@@ -195,12 +206,24 @@ export class ChannelStore {
 		return row;
 	}
 
+	/**
+	 * `undefined` is reserved for an existing org-public channel. Empty means the channel was absent
+	 * or its backing read failed and is deliberately fail-closed at delivery call sites.
+	 */
 	async memberUserIds(channelId: string): Promise<string[] | undefined> {
-		const channel = await this.store.getChannel(channelId);
-		if (!channel || channel.visibility !== "private") return undefined;
-		return (await this.store.listChannelMemberships(channelId)).filter((row) => row.active).map((row) => row.userId);
+		try {
+			const channel = await this.store.getChannel(channelId);
+			if (!channel) {
+				this._log(`channel ${channelId} missing during membership lookup`);
+				return [];
+			}
+			if (channel.visibility !== "private") return undefined;
+			return (await this.store.listChannelMemberships(channelId)).filter((row) => row.active).map((row) => row.userId);
+		} catch (err) {
+			this._log(`channel ${channelId} membership lookup failed: ${err instanceof Error ? err.message : String(err)}`);
+			return [];
+		}
 	}
-
 
 	async canReadChannel(channelId: string, actor: Actor): Promise<boolean> {
 		const channel = await this.store.getChannel(channelId);
@@ -208,7 +231,11 @@ export class ChannelStore {
 		if (channel.visibility !== "private") return true;
 		const userId = actorUserId(actor);
 		if (!userId) return false;
-		return (await this.store.listChannelMemberships(channelId)).some((row) => row.userId === userId && row.active);
+		const rows = await this.store.listChannelMemberships(channelId);
+		// A membership append can fail after the durable channel row exists. Creator access covers
+		// only that state; an explicit membership revocation remains authoritative.
+		if (rows.length === 0 && channel.creatorUserId === userId) return true;
+		return rows.some((row) => row.userId === userId && row.active);
 	}
 
 	async appendManager(channelId: string, input: ManagerChannelPost): Promise<ChannelEntry> {

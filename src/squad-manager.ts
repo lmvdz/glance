@@ -4443,6 +4443,7 @@ export class SquadManager extends EventEmitter {
 					issueIdentifier: rec.dto.issue?.identifier,
 					issueUrl: rec.dto.issue?.url,
 					goal: ws?.goal,
+					channelId: rec.dto.channelId ?? null,
 					terminalReason: detail,
 					terminalAt: ws?.terminal?.at ?? Date.now(),
 					trajectory: ws?.rollup?.map((r) => r.label) ?? [],
@@ -7950,6 +7951,7 @@ export class SquadManager extends EventEmitter {
 		if (deleteWorktree && rec.options.kind === "workflow" && rec.options.workflowState?.runId) {
 			await deleteCheckpointLog(this.stateDir, rec.options.workflowState.runId).catch(() => {});
 		}
+		const channelId = rec.dto.channelId;
 		this.agents.delete(id);
 		// Daemon-side session end for a `glance here` registration (daily-onramp 02): when the LAST agent
 		// on an ephemerally-registered repo is removed, restore the pre-session registry state — the REPL's
@@ -7958,7 +7960,7 @@ export class SquadManager extends EventEmitter {
 		// call unconditionally here — this agent is already gone from `this.agents` above.
 		this.releaseEphemeralProject(normalizeRepoPath(rec.options.repo));
 		if (this.scoutCursor.delete(id)) writeScoutCursors(this.stateDir, this.scoutCursor);
-		this.emit("event", { type: "removed", id } satisfies SquadEvent);
+		this.emit("event", { type: "removed", id, channelId } satisfies SquadEvent);
 		await this.persist();
 		return true;
 	}
@@ -9122,6 +9124,19 @@ export class SquadManager extends EventEmitter {
 		return readAnswer(this.stateDir, id);
 	}
 
+	/** Answers are artifacts of their agent. Reaped/legacy artifacts lack an authorization binding, so fail closed. */
+	async visibleAnswers(actor: Actor, repo?: string): Promise<Answer[]> {
+		const answers = await listAnswers(this.stateDir, { repo });
+		const visible: Answer[] = [];
+		for (const answer of answers) if (await this.canReadAgent(answer.id, actor)) visible.push(answer);
+		return visible;
+	}
+
+	async visibleAnswer(id: string, actor: Actor): Promise<Answer | undefined> {
+		const answer = await readAnswer(this.stateDir, id);
+		return answer && (await this.canReadAgent(id, actor)) ? answer : undefined;
+	}
+
 	/** After-action reports for terminal units, newest death first — they outlive the reaped roster row. */
 	afterActions(): Promise<AfterActionReport[]> {
 		return listAfterActions(this.stateDir);
@@ -9129,6 +9144,21 @@ export class SquadManager extends EventEmitter {
 
 	afterAction(id: string): Promise<AfterActionReport | undefined> {
 		return readAfterAction(this.stateDir, id);
+	}
+
+	/** After-action reports retain their channel binding after the roster record is reaped. */
+	async visibleAfterActions(actor: Actor): Promise<AfterActionReport[]> {
+		const reports = await listAfterActions(this.stateDir);
+		const visible: AfterActionReport[] = [];
+		for (const report of reports) {
+			if (report.channelId === null || (typeof report.channelId === "string" && await this.channelStore.canReadChannel(report.channelId, actor))) visible.push(report);
+		}
+		return visible;
+	}
+
+	async visibleAfterAction(id: string, actor: Actor): Promise<AfterActionReport | undefined> {
+		const report = await readAfterAction(this.stateDir, id);
+		return report && (report.channelId === null || (typeof report.channelId === "string" && await this.channelStore.canReadChannel(report.channelId, actor))) ? report : undefined;
 	}
 
 	/** Symptom cards recorded by `squad_record_symptom`, newest first — the read surface for later
@@ -11228,11 +11258,13 @@ export class SquadManager extends EventEmitter {
 
 	async canReadAgent(agentId: string, actor: Actor): Promise<boolean> {
 		const rec = this.agents.get(agentId);
-		if (!rec) return false;
-		const channelId = rec.dto.channelId;
-		return !channelId || this.channelStore.canReadChannel(channelId, actor);
+		if (rec) {
+			const channelId = rec.dto.channelId;
+			return !channelId || this.channelStore.canReadChannel(channelId, actor);
+		}
+		const placeholder = this.deadPlaceholder(agentId);
+		return !!placeholder && (!placeholder.channelId || await this.channelStore.canReadChannel(placeholder.channelId, actor));
 	}
-
 	async visibleAgents(actor: Actor): Promise<AgentDTO[]> {
 		const out: AgentDTO[] = [];
 		for (const dto of this.list()) if (!dto.channelId || (await this.channelStore.canReadChannel(dto.channelId, actor))) out.push(dto);

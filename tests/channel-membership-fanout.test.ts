@@ -243,21 +243,18 @@ test("revocation during private fan-out stops later member frames", async () => 
 	await mgr.createChannel(actor("alice"), { id: "ops", name: "#ops", visibility: "private" });
 	await mgr.addChannelMember("ops", actor("alice"), { userId: "bob" });
 	const entry = await mgr.appendChannelPost("ops", actor("alice"), { text: "members only" });
-	let revoked = false;
+	let lookups = 0;
 	const originalMemberUserIds = mgr.channelMemberUserIds.bind(mgr);
 	mgr.channelMemberUserIds = async (channelId: string) => {
 		if (channelId !== "ops") return originalMemberUserIds(channelId);
-		return revoked ? ["alice"] : ["alice", "bob"];
+		return ++lookups === 1 ? ["alice", "bob"] : ["alice"];
 	};
 	const event: SquadEvent = { type: "channel-entry", channelId: "ops", entry };
 	const frames: Record<string, string[]> = { alice: [], bob: [] };
 	const host = server as unknown as DeliverHost;
 	host.clients.add({
 		data: { userId: "alice", orgId: "org-a", role: "admin", displayName: "alice" },
-		send: (frame: string) => {
-			frames.alice.push(frame);
-			revoked = true;
-		},
+		send: (frame: string) => frames.alice.push(frame),
 	});
 	host.clients.add({ data: { userId: "bob", orgId: "org-a", role: "admin", displayName: "bob" }, send: (frame: string) => frames.bob.push(frame) });
 	await host.deliverEvent(undefined, event);
@@ -405,4 +402,57 @@ test("HTTP private channel reads 403 and search is empty for non-member callers"
 	const search = await fetch(`${url}/api/channels/search?q=hidden%20launch`, { headers });
 	expect(search.status).toBe(200);
 	expect(await search.json()).toEqual({ results: [] });
+});
+
+test("private agent events, removals, bound logs, and missing channels never fan out to non-members", async () => {
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "channel-event-scope-"));
+	const mgr = new SquadManager({ stateDir });
+	await mgr.start();
+	const server = new SquadServer(mgr, { port: 0 });
+	cleanups.push(async () => {
+		server.stop();
+		await mgr.stop();
+		await fs.rm(stateDir, { recursive: true, force: true });
+	});
+	await mgr.createChannel(actor("alice"), { id: "ops", name: "#ops", visibility: "private" });
+	const unit = agentDto("private-unit", "ops");
+	seedAgent(mgr, unit);
+	const frames: Record<string, string[]> = { alice: [], carol: [] };
+	const host = server as unknown as DeliverHost;
+	for (const userId of ["alice", "carol"]) host.clients.add({ data: { userId, orgId: "org-a", role: "admin", displayName: userId }, send: (frame: string) => frames[userId]!.push(frame) });
+
+	for (const event of [
+		{ type: "agent", agent: unit },
+		{ type: "transcript", id: unit.id, entry: { id: "t", seq: 1, kind: "assistant", text: "private", ts: 1 } },
+		{ type: "commands", id: unit.id, commands: [] },
+		{ type: "transition", entry: { agentId: unit.id, from: "working", to: "input", reason: "private", at: 1, seq: "1" } },
+		{ type: "removed", id: unit.id, channelId: "ops" },
+		{ type: "log", level: "error", text: "private failure", agentId: unit.id },
+	] satisfies SquadEvent[]) await host.deliverEvent(undefined, event);
+
+	seedAgent(mgr, agentDto("missing-unit", "missing"));
+	await host.deliverEvent(undefined, { type: "agent", agent: agentDto("missing-unit", "missing") });
+	expect(frames.alice).toHaveLength(6);
+	expect(frames.carol).toEqual([]);
+});
+
+test("a failed membership recheck drops the event instead of using its stale member list", async () => {
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "channel-recheck-failure-"));
+	const mgr = new SquadManager({ stateDir });
+	await mgr.start();
+	const server = new SquadServer(mgr, { port: 0 });
+	cleanups.push(async () => {
+		server.stop();
+		await mgr.stop();
+		await fs.rm(stateDir, { recursive: true, force: true });
+	});
+	await mgr.createChannel(actor("alice"), { id: "ops", name: "#ops", visibility: "private" });
+	let calls = 0;
+	mgr.channelMemberUserIds = async () => (++calls === 1 ? ["alice"] : []);
+	const frames: string[] = [];
+	const host = server as unknown as DeliverHost;
+	host.clients.add({ data: { userId: "alice", orgId: "org-a", role: "admin", displayName: "alice" }, send: (frame: string) => frames.push(frame) });
+	const entry = await mgr.appendChannelPost("ops", actor("alice"), { text: "private" });
+	await host.deliverEvent(undefined, { type: "channel-entry", channelId: "ops", entry });
+	expect(frames).toEqual([]);
 });
