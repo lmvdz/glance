@@ -11112,9 +11112,37 @@ export class SquadManager extends EventEmitter {
 		return refs;
 	}
 
+	private needsYouFace(rec: AgentRecord, payload: Record<string, unknown>, entry: TranscriptEntry): Record<string, unknown> {
+		const pendingStatus = typeof payload.status === "string" ? payload.status : undefined;
+		const title = typeof payload.title === "string" && payload.title ? payload.title : "operator input";
+		const message = typeof payload.message === "string" && payload.message ? payload.message : undefined;
+		const createdAt = typeof payload.createdAt === "number" && Number.isFinite(payload.createdAt) ? payload.createdAt : entry.ts;
+		const ageMs = Math.max(0, entry.ts - createdAt);
+		const age = ageMs < 60_000 ? "just now" : `${Math.floor(ageMs / 60_000)}m`;
+		const resolved = pendingStatus === "resolved";
+		return {
+			unitId: rec.dto.id,
+			unitName: rec.dto.name,
+			eventKind: entry.event?.kind,
+			pendingId: typeof payload.pendingId === "string" ? payload.pendingId : undefined,
+			pendingStatus,
+			title: resolved ? `Resolved · ${title}` : `Needs you · ${title}`,
+			eyebrow: resolved ? "Resolved" : "Needs you",
+			body: message ?? title,
+			detail: resolved ? "Follow-up resolution card. Original pending card remains unchanged." : "Click to step into the agent.",
+			tone: resolved ? "success" : "warning",
+			pinned: {
+				"why stopped": title,
+				agent: rec.dto.name || rec.dto.id,
+				age,
+			},
+		};
+	}
+
 	private projectionFace(rec: AgentRecord, entry: TranscriptEntry): Record<string, unknown> {
 		const payload = entry.event?.payload;
 		const objectPayload = payload && typeof payload === "object" && !Array.isArray(payload) ? payload as Record<string, unknown> : {};
+		if (entry.event?.kind === TRANSCRIPT_EVENT_NEEDS_YOU) return this.needsYouFace(rec, objectPayload, entry);
 		return {
 			unitId: rec.dto.id,
 			unitName: rec.dto.name,
@@ -11170,6 +11198,7 @@ export class SquadManager extends EventEmitter {
 				gateClass: request.gateClass,
 				title: request.title,
 				message: request.message,
+				createdAt: request.createdAt,
 				agentId: rec.dto.id,
 			});
 		}
@@ -11180,6 +11209,7 @@ export class SquadManager extends EventEmitter {
 				pendingId: request.id,
 				gateClass: request.gateClass,
 				title: request.title,
+				createdAt: request.createdAt,
 				agentId: rec.dto.id,
 			});
 		}

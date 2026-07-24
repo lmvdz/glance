@@ -47,7 +47,7 @@ interface InternalHost {
 	emitUnitTranscriptEvent(id: string | undefined, kind: string, text: string, payload: unknown): void;
 }
 
-function isEventPayload(value: unknown): value is { refs: { unitId: string; entryId?: string }; doorSurface: string; face: { unitId: string; unitName: string; pendingStatus?: string; pendingId?: string; eventKind?: string } } {
+function isEventPayload(value: unknown): value is { refs: { unitId: string; entryId?: string }; doorSurface: string; face: { unitId: string; unitName: string; title?: string; body?: string; detail?: string; tone?: string; pendingStatus?: string; pendingId?: string; eventKind?: string; pinned?: Record<string, unknown> } } {
 	return Boolean(value && typeof value === "object" && "refs" in value && "doorSurface" in value && "face" in value);
 }
 
@@ -189,12 +189,21 @@ test("pending request and room card are one needs-you substrate and both resolve
 	if (!isEventPayload(opened.event?.payload)) throw new Error("bad open payload");
 	expect(opened.event.payload.face.pendingStatus).toBe("pending");
 	expect(opened.event.payload.face.pendingId).toBe("req-1");
+	expect(opened.event.payload.face.title).toBe("Needs you · Approve deploy");
+	expect(opened.event.payload.face.body).toBe("ship it?");
+	expect(opened.event.payload.face.tone).toBe("warning");
+	expect(opened.event.payload.face.pinned).toEqual({ "why stopped": "Approve deploy", agent: "unit-c", age: "just now" });
 
 	const resolvedCard = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === "needs-you" && isEventPayload(entry.event.payload) && entry.event.payload.face.pendingStatus === "resolved");
 	await mgr.applyCommand({ type: "answer", id: dto.id, requestId: "req-1", value: "yes" }, LOCAL_ACTOR);
 	const resolved = await resolvedCard;
 	expect(mgr.getAgent(dto.id)?.pending).toEqual([]);
 	expect(isEventPayload(resolved.event?.payload)).toBe(true);
+	if (!isEventPayload(resolved.event?.payload)) throw new Error("bad resolved payload");
+	expect(resolved.id).not.toBe(opened.id);
+	expect(resolved.event.payload.face.title).toBe("Resolved · Approve deploy");
+	expect(resolved.event.payload.face.tone).toBe("success");
+	expect(resolved.event.payload.face.detail).toContain("Original pending card remains unchanged");
 	await mgr.stop();
 });
 
