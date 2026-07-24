@@ -11,11 +11,19 @@ const cleanups: Array<() => Promise<void> | void> = [];
 const sockets: WebSocket[] = [];
 
 afterEach(async () => {
-	for (const ws of sockets.splice(0)) {
-		try {
-			ws.close();
-		} catch {}
-	}
+	await Promise.allSettled(
+		sockets.splice(0).map(async (ws) => {
+			if (ws.readyState === WebSocket.CLOSED) return;
+			const closed = Promise.withResolvers<void>();
+			ws.onclose = () => closed.resolve();
+			try {
+				ws.close();
+			} catch {
+				closed.resolve();
+			}
+			await closed.promise;
+		}),
+	);
 	for (const cleanup of cleanups.splice(0)) await cleanup();
 });
 

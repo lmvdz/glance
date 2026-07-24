@@ -228,7 +228,7 @@ export async function ingestCodex(opts: { stateDir: string; repo: string; codexS
 		}
 		const cur = cursor[full];
 		if (cur && cur.size === stat.size) continue; // unchanged
-		if (now - stat.mtimeMs < idleMs) continue; // still live — wait for idle
+		if (idleMs > 0 && now - stat.mtimeMs < idleMs) continue; // still live — wait for idle unless explicitly disabled
 		let text: string;
 		try {
 			text = await fs.readFile(full, "utf8");
