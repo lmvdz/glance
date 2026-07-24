@@ -25,6 +25,13 @@ interface FakeManager {
 	// t3-face concern 06: GET /api/agents personalizes ladderPriority per viewer via this method
 	// (server.ts) — a real SquadManager always has it; this duck-typed fixture needs the same shape.
 	ladderPriorityFor(dto: AgentDTO, viewerId: string | undefined): LadderPriority;
+	// the-room concern 18: GET /api/agents (and the loopback bearer roster) now build from
+	// `visibleAgents`, which filters by channel membership. Same reasoning as `ladderPriorityFor`
+	// above — a real SquadManager always has it, so this duck-typed fixture must too. These fixtures
+	// bind no agent to a channel, so every agent is visible. Note the alternative — guarding the call
+	// site with `typeof manager.visibleAgents === "function"` — would make a manager that lacks the
+	// method fall back to the UNFILTERED list in production, i.e. broadcast to everyone.
+	visibleAgents(actor: Actor): Promise<AgentDTO[]>;
 }
 
 interface FakeEntry {
@@ -55,6 +62,7 @@ function agent(id: string): AgentDTO {
 function fakeManager(agents: AgentDTO[]): FakeManager {
 	return {
 		list: () => agents,
+		visibleAgents: async () => agents,
 		off: () => {},
 		stop: async () => {},
 		ladderPriorityFor: (dto) => dto.ladderPriority ?? "idle",

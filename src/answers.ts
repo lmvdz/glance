@@ -57,6 +57,14 @@ export interface Answer {
 	harness?: string;
 	/** Wall-clock the unit took, when known. */
 	durationMs?: number;
+	/** Channel the answering unit was bound to, retained so authorization survives the unit (concern
+	 *  18). An answer outlives the roster row that earned it, and `id` — being the agent id — stops
+	 *  resolving once that row is reaped. Without this, the only thing denying a non-member was
+	 *  `canReadAgent` returning false for an id it no longer knew, i.e. absence read as denial: the
+	 *  artifact looked protected exactly as long as the agent existed, and silently opened the moment
+	 *  it was reaped. `null` means org-public. Absent (legacy record) is treated as org-public too —
+	 *  every answer written before this field existed predates private channels. */
+	channelId?: string | null;
 }
 
 const AnswerSchema = Schema.Struct({
@@ -69,6 +77,7 @@ const AnswerSchema = Schema.Struct({
 	model: Schema.optional(Schema.String),
 	harness: Schema.optional(Schema.String),
 	durationMs: Schema.optional(Schema.Number),
+	channelId: Schema.optional(Schema.NullOr(Schema.String)),
 });
 
 const DIR = "answers";

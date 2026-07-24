@@ -344,6 +344,7 @@ export const Composer = ({
   voiceCallActive = false,
   onStartVoiceCall,
   onToast,
+  onInputActivity,
 }: {
   tasks: Task[];
   suggestionChips: SuggestionChip[];
@@ -358,6 +359,7 @@ export const Composer = ({
   stopPending: boolean;
   onStop: () => void;
   onSend: (text: string) => void;
+  onInputActivity?: (text: string) => void;
   selectedModel: string;
   modelOptions: ModelOption[];
   onModelChange: (model: string) => void;
@@ -939,7 +941,10 @@ export const Composer = ({
         <textarea
           ref={composerTextareaRef}
           value={input}
-          onChange={(e) => setInput(e.target.value)}
+          onChange={(e) => {
+            setInput(e.target.value);
+            onInputActivity?.(e.target.value);
+          }}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
           placeholder={placeholder ?? 'Type @ to link a task...'}

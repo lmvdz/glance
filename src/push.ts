@@ -20,6 +20,7 @@ import type { AgentDTO, AgentStatus } from "./types.ts";
 export interface PushSubscription {
 	endpoint: string;
 	keys: { p256dh: string; auth: string };
+	userId?: string;
 }
 
 export interface PushPayload {
@@ -231,12 +232,14 @@ export class PushService {
 	/** Encrypt + dispatch `payload` to every subscription. Prunes endpoints the push service has
 	 *  dropped (404/410) and subscriptions whose keys can no longer be encrypted to (a permanent
 	 *  failure — bad/garbage p256dh|auth — would otherwise be retried forever). Returns count accepted. */
-	async notify(payload: PushPayload): Promise<number> {
+	async notify(payload: PushPayload, userIds?: readonly string[]): Promise<number> {
 		if (!this.vapid || this.subs.length === 0) return 0;
+		const allowed = userIds ? new Set(userIds) : undefined;
 		const body = Buffer.from(JSON.stringify(payload));
 		const dead: string[] = [];
 		let sent = 0;
 		for (const sub of this.subs) {
+			if (allowed && (!sub.userId || !allowed.has(sub.userId))) continue;
 			// Phase 1: encrypt + sign. Deterministic over the subscription's keys, so a throw here is
 			// permanent (malformed/corrupt keys) — prune, don't retry.
 			let encrypted: Buffer;

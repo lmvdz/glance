@@ -51,7 +51,7 @@ export interface RuntimeSettingsSnapshot {
 }
 
 export const FEATURE_FLAGS: FeatureFlagDefinition[] = [
-	{ key: "OMP_SQUAD_WEBAPP", label: "Vite web UI", description: "Serve the React command center when the built assets exist.", defaultEnabled: false, restartRequired: true },
+	{ key: "OMP_SQUAD_WEBAPP", label: "The room (web UI)", description: "Serve the room — the product's home screen — when the built assets exist. Off falls back to the legacy dashboard.", defaultEnabled: true, restartRequired: true },
 	{ key: "OMP_SQUAD_FEEDBACK", label: "Feedback intake", description: "Expose the public feedback widget/intake endpoints.", defaultEnabled: false },
 	{ key: "OMP_SQUAD_AUTODISPATCH", label: "Auto-dispatch", description: "Poll Plane and spawn routed agents for new unblocked issues.", defaultEnabled: true, restartRequired: true },
 	{ key: "OMP_SQUAD_AUTOCLOSE", label: "Auto-close issues", description: "Close tracking issues after their branches land.", defaultEnabled: true, restartRequired: true },

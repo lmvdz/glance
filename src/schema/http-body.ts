@@ -415,6 +415,20 @@ export const ChannelPostBodySchema = Schema.Struct({
 	replyToId: Schema.optional(Schema.String),
 });
 
+export const ChannelReadBodySchema = Schema.Struct({
+	lastReadSeq: Schema.Number,
+});
+
+export const ChannelCreateBodySchema = Schema.Struct({
+	name: Schema.String,
+	id: Schema.optional(Schema.String),
+	visibility: Schema.optional(Schema.Literals(["org-public", "private"])),
+});
+
+export const ChannelMemberBodySchema = Schema.Struct({
+	userId: Schema.String,
+});
+
 /** POST /api/agents/adopt (fleet-ide-escalation E03) — adopt an ad-hoc B03 harness session into a
  *  unit; the three fields identify the live presence row + its cwd (all validated server-side). */
 export const AdoptBodySchema = Schema.Struct({

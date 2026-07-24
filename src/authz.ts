@@ -34,6 +34,7 @@ export function commandTier(cmd: ClientCommand): Role {
 	switch (cmd.type) {
 		case "snapshot":
 		case "subscribe":
+		case "typing":
 			return "viewer";
 		case "kill":
 		case "restart":

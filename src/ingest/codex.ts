@@ -228,7 +228,14 @@ export async function ingestCodex(opts: { stateDir: string; repo: string; codexS
 		}
 		const cur = cursor[full];
 		if (cur && cur.size === stat.size) continue; // unchanged
-		if (now - stat.mtimeMs < idleMs) continue; // still live — wait for idle
+		// Still live — wait for idle. `mtimeMs` is a float carrying sub-millisecond precision while
+		// `Date.now()` is truncated to whole milliseconds, so a file written in the SAME millisecond as
+		// this call reports an mtime slightly AHEAD of `now` — measured at 66 of 300 writes on this
+		// host. `now - mtimeMs` then goes negative and skips a file that was actually ready, which at
+		// `idleMs: 0` is a ~22%-per-run flake (tests/codex-ingest.test.ts's resumed-file delta
+		// assertion: fails in full-suite order, passes in isolation). Flooring discards precision that
+		// is pure noise against a ten-minute idle window.
+		if (now - Math.floor(stat.mtimeMs) < idleMs) continue;
 		let text: string;
 		try {
 			text = await fs.readFile(full, "utf8");

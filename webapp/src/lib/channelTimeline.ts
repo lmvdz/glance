@@ -102,6 +102,31 @@ function labelFromKey(key: string): string {
   return key.replace(/[-_]+/g, ' ').replace(/\b\w/g, (ch) => ch.toUpperCase());
 }
 
+function normalizeForCompare(value: string): string {
+  // Titles are built from the same source string as the body, then decorated ("Needs you · X",
+  // "needs you · X…") and truncated with an ellipsis. Compare the informational core, not the chrome.
+  return value.replace(/[…]/g, '').replace(/^[^·]*·\s*/, '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+/** True when `value` tells the reader nothing the title has not already said. */
+export function repeatsTitle(value: string | undefined, title: string): boolean {
+  if (!value) return true;
+  const a = normalizeForCompare(value);
+  const b = normalizeForCompare(title);
+  if (!a) return true;
+  return a === b || b.startsWith(a) || a.startsWith(b);
+}
+
+/**
+ * The body a card should actually print. `face.body || entry.text` (the old rule) rendered every
+ * needs-you card twice, because `entry.text` is the sentence the title was built from.
+ */
+export function cardBody(faceBody: string | undefined, entryText: string | undefined, title: string): string {
+  if (faceBody && !repeatsTitle(faceBody, title)) return faceBody;
+  if (entryText && !repeatsTitle(entryText, title)) return entryText;
+  return '';
+}
+
 
 function stringFromPath(value: unknown, path: readonly string[]): string | undefined {
   let cursor: unknown = value;
@@ -136,10 +161,27 @@ export function dispatchChannelCard(entry: ChannelEntry): ChannelCardView {
   if (landCard) return landCard;
   const face = faceFromPayload(entry.event?.payload);
   const title = face?.title || labelFromKey(eventKind);
-  const body = face?.body || entry.text || 'Card update';
-  const pinned = Object.entries(face?.pinned ?? {}).flatMap(([label, value]) => value == null || value === '' ? [] : [{ label: labelFromKey(label), value: String(value) }]);
+  const body = cardBody(face?.body, entry.text, title);
+  const pinned = Object.entries(face?.pinned ?? {}).flatMap(([label, value]) => value == null || value === '' || repeatsTitle(String(value), title) ? [] : [{ label: labelFromKey(label), value: String(value) }]);
   const doorHrefResolved = eventKind === 'token-burn-snapshot' ? '#/workbench/economics' : (face?.href ?? hrefFromPayload(entry.event?.payload));
   return { id: entry.id, entry, kind: eventKind as ChannelCardKind, tone: toneFor(eventKind, face), authorLabel: entryAuthorLabel(entry), title, eyebrow: face?.eyebrow, body, detail: face?.detail, pinned, actionHref: channelCardActionHref(entry), href: doorHrefResolved };
+}
+
+const DOOR_LABELS: Record<string, string> = {
+  'plan-card': 'Open plan DAG',
+  'token-burn-snapshot': 'Open fleet economics',
+  'needs-you': 'Step into the agent',
+  'gate-verdict': 'Open the proof',
+  'land-attempt': 'Open the land record',
+  'land-assessment': 'Open the land record',
+  'land-merge': 'Open the land record',
+  'spawn-proposal': 'Open the proposal',
+};
+
+/** Label for a card's door button. Was hardcoded to "Open plan DAG" for every kind — a token-burn
+ *  card offering to open a plan DAG is a lie about where the click goes. */
+export function doorLabel(kind: string): string {
+  return DOOR_LABELS[kind] ?? 'Open';
 }
 
 export function reduceChannelEntryWindow(entries: ChannelEntry[], incoming: ChannelEntry[], channelId: string, cap = 500): ChannelEntry[] {

@@ -39,6 +39,8 @@ export interface AfterActionReport {
 	branch?: string;
 	issueIdentifier?: string;
 	issueUrl?: string;
+	/** `null` is an explicitly public report; absent on legacy records is untrusted and unreadable. */
+	channelId: string | null;
 	goal?: string;
 	terminalReason: string;
 	/** ms epoch the run went terminal (workflowState.terminal.at). */
@@ -61,6 +63,7 @@ const AfterActionSchema = Schema.Struct({
 	branch: Schema.optional(Schema.String),
 	issueIdentifier: Schema.optional(Schema.String),
 	issueUrl: Schema.optional(Schema.String),
+	channelId: Schema.optional(Schema.NullOr(Schema.String)),
 	goal: Schema.optional(Schema.String),
 	terminalReason: Schema.String,
 	terminalAt: Schema.Number,
@@ -96,6 +99,7 @@ export interface AfterActionInput {
 	issueUrl?: string;
 	goal?: string;
 	terminalReason: string;
+	channelId: string | null;
 	terminalAt: number;
 	/** Stage labels in execution order (workflowState.rollup). */
 	trajectory: string[];
@@ -130,6 +134,7 @@ export function composeAfterAction(input: AfterActionInput): AfterActionReport {
 		branch: input.branch,
 		issueIdentifier: input.issueIdentifier,
 		issueUrl: input.issueUrl,
+		channelId: input.channelId ?? null,
 		goal: input.goal,
 		terminalReason: input.terminalReason,
 		terminalAt: input.terminalAt,

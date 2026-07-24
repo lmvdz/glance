@@ -228,7 +228,7 @@ import {
 import { TRANSCRIPT_EVENT_TOKEN_BURN_SNAPSHOT, fleetTokenBurnPayload, tokenBurnFace, unitTokenBurnPayload } from "./token-burn.ts";
 import { truncateLabel } from "./text-util.ts";
 import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
-import { ChannelStore, DEFAULT_CHANNEL_ID, type ChannelEntry, type ClientChannelPost } from "./channels.ts";
+import { ChannelStore, DEFAULT_CHANNEL_ID, type ChannelEntry, type ClientChannelPost, type Channel, type CreateChannelInput, type ChannelMemberInput } from "./channels.ts";
 import { buildTrace, traceMaxSpans, traceSampleRatio, traceSpansEnabled, type TraceResponse } from "./spans.ts";
 import { traceExporterFromEnv, type TraceExportQueue } from "./trace-exporter.ts";
 
@@ -603,6 +603,39 @@ export { loadRepoProfiles, modelOptionsFromRuntime, profileOptionsFromEnv, toolG
  */
 export function gateClassOf(req: { id: string; title?: string; gateClass?: boolean }): boolean {
 	return req.gateClass === true || req.id.startsWith("gate_") || (typeof req.title === "string" && req.title.startsWith("GATE:"));
+}
+
+/**
+ * Does this pending request deserve a CARD IN THE ROOM?
+ *
+ * Not the same question as `gateClassOf` answers for the *lane*, even though it currently shares its
+ * predicate — they are two different surfaces with two different jobs, and conflating them is what
+ * produced the defect this rule fixes:
+ *
+ *   - The **attention lane / rail** is "act now". It is DTO-driven (`AgentDTO.pending`), it empties
+ *     when the request is answered, and it is the right home for every blocking prompt including
+ *     routine tool approvals — a unit stuck on `Allow tool: bash` genuinely needs someone.
+ *   - The **room** is "what happened". Its entries are append-only and permanent. A card is a claim
+ *     that a fact was worth keeping.
+ *
+ * Projecting every pending into the room put 544 `Allow tool: bash Command: …` cards (plus their
+ * paired `resolved` twins) into #fleet over twelve hours of one fleet run — 100% of the channel's
+ * content, zero proofs — which is the exact firehose DIRECTION.md's near-empty needs-you law
+ * forbids, and which would have failed the love gate (concern 23) on sight.
+ *
+ * So: only gate-class requests — the ones no supervisor may auto-answer, where a human decision is
+ * definitionally required — become room cards. Non-gate prompts remain fully visible in the lane and
+ * the rail; they simply stop writing permanent history.
+ *
+ * KNOWN GAP, deliberate: with BOTH supervisors off, a non-gate prompt can block a unit with no card
+ * in the room. That unit is still in the rail's ACTIVE WORK group and still in the lane, so nothing
+ * is hidden — the room just stays quiet. The stronger rule (project a non-gate pending that survives
+ * a grace period, i.e. "the machine did not handle it, so it is a human's problem after all") needs a
+ * timer and per-pending scheduling; it is filed as follow-up in plans/the-room/26 rather than
+ * smuggled in here.
+ */
+function isRoomWorthyPending(req: { id: string; title?: string; gateClass?: boolean }): boolean {
+	return gateClassOf(req);
 }
 
 const BLOCKING_UI_METHODS: Record<string, true> = {
@@ -1156,6 +1189,7 @@ export class SquadManager extends EventEmitter {
 	private readonly paymentProvider: PaymentProvider;
 	/** Short-lived idempotency window for client-stamped prompt commands; request-answer prompts are exempted below. */
 	private readonly commandAckDedupe = new Map<string, number>();
+	private readonly recentSteers = new Map<string, { actor: string; targetLabel: string; at: number }>();
 	private idSeq = 0;
 	private transcriptSeq = 0;
 	private reseedTranscriptSeq(snapshot: StateSnapshot): void {
@@ -2023,6 +2057,7 @@ export class SquadManager extends EventEmitter {
 				// checkout. Holds keyed by the OLD id become orphans (reattachHeldSyncs logs them loudly) —
 				// fail-closed, never silently re-keyed onto a fresh id whose worktree may have moved on.
 				realTreePath: p.realTreePath,
+				channelId: p.channelId,
 				sandbox: p.sandbox,
 				autoRoute: false,
 				bypassCap: true,
@@ -4493,6 +4528,7 @@ export class SquadManager extends EventEmitter {
 					issueIdentifier: rec.dto.issue?.identifier,
 					issueUrl: rec.dto.issue?.url,
 					goal: ws?.goal,
+					channelId: rec.dto.channelId ?? null,
 					terminalReason: detail,
 					terminalAt: ws?.terminal?.at ?? Date.now(),
 					trajectory: ws?.rollup?.map((r) => r.label) ?? [],
@@ -6954,7 +6990,7 @@ export class SquadManager extends EventEmitter {
 		// ahead of this re-spawn: prior partial work may already sit in the reused worktree — say so in the
 		// re-prompt.
 		const task = id && this.reconciledStops.delete(id) ? `${spec.task}\n\n(Resuming after a restart — prior partial work may already exist in this worktree; continue from where it left off.)` : spec.task;
-		const dto = await this.createInternal({ repo, name: spec.name, model: spec.model, approvalMode: spec.approvalMode, parentId, autoRoute: false, bypassCap: true, explicitId: id ?? newAgentId(spec.name), parentNodeId: spec.parentNodeId, branchIndex: spec.branchIndex }, LOCAL_ACTOR);
+		const dto = await this.createInternal({ repo, name: spec.name, model: spec.model, approvalMode: spec.approvalMode, parentId, channelId: this.agents.get(parentId)?.dto.channelId, autoRoute: false, bypassCap: true, explicitId: id ?? newAgentId(spec.name), parentNodeId: spec.parentNodeId, branchIndex: spec.branchIndex }, LOCAL_ACTOR);
 		const rec = this.agents.get(dto.id);
 		if (!rec) return { outcome: "failed", notAttempted: true, text: "branch agent not created" };
 		// Persisted (not sent as create()'s own auto-prompt — runAgentTask below owns the actual send and
@@ -7195,11 +7231,18 @@ export class SquadManager extends EventEmitter {
 
 	private async appendMentionSteerEcho(channelId: string | undefined, actor: Actor, cmd: Extract<ClientCommand, { type: "prompt" }>, rec: AgentRecord): Promise<void> {
 		if (!channelId || cmd.source !== "mention") return;
+		if (!(await this.channelStore.canReadChannel(channelId, actor))) return;
 		const actualName = rec.dto.name?.trim();
 		const actualId = rec.dto.id;
 		const requestedLabel = cmd.mention?.targetLabel?.trim();
 		const targetLabel = requestedLabel && (requestedLabel === actualName || requestedLabel === actualId) ? requestedLabel : (actualName || actualId);
-		const text = `${actor.id} steered @${targetLabel}: ${cmd.displayText ?? cmd.message}`;
+		const now = Date.now();
+		const previous = this.recentSteers.get(rec.dto.id);
+		if (!previous || now - previous.at > 15_000) this.recentSteers.delete(rec.dto.id);
+		const follows = previous && now - previous.at <= 15_000 && previous.actor !== actor.id ? previous : undefined;
+		const prefix = follows ? `${actor.id} steered @${targetLabel} (follows ${follows.actor}\'s steer):` : `${actor.id} steered @${targetLabel}:`;
+		const text = `${prefix} ${cmd.displayText ?? cmd.message}`;
+		this.recentSteers.set(rec.dto.id, { actor: actor.id, targetLabel, at: now });
 		const entry = await this.channelStore.appendManager(channelId, {
 			authorActor: "manager",
 			text,
@@ -7212,10 +7255,11 @@ export class SquadManager extends EventEmitter {
 						title: "Mention steer accepted",
 						body: text,
 						tone: "info",
-						pinned: { actor: actor.id, target: targetLabel, clientTurnId: cmd.clientTurnId },
+						pinned: { actor: actor.id, target: targetLabel, clientTurnId: cmd.clientTurnId, ...(follows ? { follows: follows.actor } : {}) },
 					},
 					actor: actor.id,
 					target: cmd.id,
+					follows: follows?.actor,
 					clientTurnId: cmd.clientTurnId,
 				},
 			},
@@ -7341,6 +7385,7 @@ export class SquadManager extends EventEmitter {
 			await this.deliverPeerMessage(actor, cmd.to, cmd.text);
 			return;
 		}
+		if (cmd.type === "typing") return;
 		if (cmd.type === "set-mode") {
 			await this.transitionMode(cmd.id, cmd.mode, actor, cmd.reason);
 			return;
@@ -7365,6 +7410,10 @@ export class SquadManager extends EventEmitter {
 		if (this.isDuplicateCommand(cmd, rec)) {
 			this.emitCommandAck(this.commandAckClientTurnId(cmd), { ok: false, reason: "duplicate" });
 			return;
+		}
+		if (cmd.type === "prompt" && cmd.channelId && rec.dto.channelId !== cmd.channelId && (await this.channelMemberUserIds(cmd.channelId)) !== undefined) {
+			this.emitCommandAck(cmd.clientTurnId, { ok: false, reason: "denied" });
+			throw new RbacDenied("operator", "viewer", cmd.type);
 		}
 
 		switch (cmd.type) {
@@ -7400,7 +7449,6 @@ export class SquadManager extends EventEmitter {
 				const lastTurnAt = rec.dto.lastActivity;
 				const landedBlock = await this.recentlyLandedPrompt(rec.dto.repo, rec.dto.requires, lastTurnAt);
 				const promptMessage = landedBlock ? `${cmd.message}\n\n${landedBlock}` : cmd.message;
-				this.log("info", `${actor.id} → ${rec.dto.name}: ${truncateLabel(cmd.message, 80)}`);
 				// A new instruction makes every decision the auto-loop already took about this unit stale.
 				// Its in-memory `staged`/`landed`/`halted` sets are keyed by ids that a steered agent's edits
 				// never change, so without this the work a steer produces is skipped forever — verified never,
@@ -7915,6 +7963,7 @@ export class SquadManager extends EventEmitter {
 						// double-claim.
 						featureId: rec.options.featureId,
 						issue: rec.options.issue,
+						channelId: rec.dto.channelId,
 						bypassCap: true,
 						cold: true,
 						explicitId: newId,
@@ -8057,6 +8106,7 @@ export class SquadManager extends EventEmitter {
 		if (deleteWorktree && rec.options.kind === "workflow" && rec.options.workflowState?.runId) {
 			await deleteCheckpointLog(this.stateDir, rec.options.workflowState.runId).catch(() => {});
 		}
+		const channelId = rec.dto.channelId;
 		this.agents.delete(id);
 		// Daemon-side session end for a `glance here` registration (daily-onramp 02): when the LAST agent
 		// on an ephemerally-registered repo is removed, restore the pre-session registry state — the REPL's
@@ -8065,7 +8115,7 @@ export class SquadManager extends EventEmitter {
 		// call unconditionally here — this agent is already gone from `this.agents` above.
 		this.releaseEphemeralProject(normalizeRepoPath(rec.options.repo));
 		if (this.scoutCursor.delete(id)) writeScoutCursors(this.stateDir, this.scoutCursor);
-		this.emit("event", { type: "removed", id } satisfies SquadEvent);
+		this.emit("event", { type: "removed", id, channelId } satisfies SquadEvent);
 		await this.persist();
 		return true;
 	}
@@ -8587,6 +8637,7 @@ export class SquadManager extends EventEmitter {
 				owns: rec.options.owns,
 				produces: rec.options.produces,
 				scopeSource: rec.options.scopeSource,
+				channelId: rec.dto.channelId,
 			});
 			// claimed() bookkeeping: the Dispatcher's claimed set is derived live from `this.agents` (both
 			// the parked original and this sibling carry the same `issue.id`), so the issue reads as claimed
@@ -9215,7 +9266,7 @@ export class SquadManager extends EventEmitter {
 			},
 			actor,
 		);
-		await saveAnswer(this.stateDir, { id: dto.id, question, repo: opts.repo, markdown: "", askedAt: Date.now(), model: dto.model, harness: dto.harness });
+		await saveAnswer(this.stateDir, { id: dto.id, question, repo: opts.repo, markdown: "", askedAt: Date.now(), model: dto.model, harness: dto.harness, channelId: dto.channelId ?? null });
 		return dto;
 	}
 
@@ -9228,6 +9279,32 @@ export class SquadManager extends EventEmitter {
 		return readAnswer(this.stateDir, id);
 	}
 
+	/** Answers are artifacts of their agent. Reaped/legacy artifacts lack an authorization binding, so fail closed. */
+	async visibleAnswers(actor: Actor, repo?: string): Promise<Answer[]> {
+		const answers = await listAnswers(this.stateDir, { repo });
+		const visible: Answer[] = [];
+		for (const answer of answers) if (await this.canReadAnswer(answer, actor)) visible.push(answer);
+		return visible;
+	}
+
+	async visibleAnswer(id: string, actor: Actor): Promise<Answer | undefined> {
+		const answer = await readAnswer(this.stateDir, id);
+		return answer && (await this.canReadAnswer(answer, actor)) ? answer : undefined;
+	}
+
+	/** Authorize an answer against the binding the ARTIFACT retains, not against the agent record —
+	 *  `Answer.id` is the agent's id, but an answer outlives the roster row, so `canReadAgent` stops
+	 *  being an authorization answer the moment the unit is reaped (it becomes "unknown id", which the
+	 *  agent routes must read as "let the route 404", not as a denial). A legacy answer with no
+	 *  `channelId` predates private channels and is org-public; a live agent still gets the live check,
+	 *  so a channel re-binding takes effect immediately rather than being frozen at write time. */
+	private async canReadAnswer(answer: Answer, actor: Actor): Promise<boolean> {
+		const live = this.agents.get(answer.id)?.dto.channelId;
+		const channelId = live ?? answer.channelId;
+		if (channelId === undefined || channelId === null) return true;
+		return this.channelStore.canReadChannel(channelId, actor);
+	}
+
 	/** After-action reports for terminal units, newest death first — they outlive the reaped roster row. */
 	afterActions(): Promise<AfterActionReport[]> {
 		return listAfterActions(this.stateDir);
@@ -9235,6 +9312,21 @@ export class SquadManager extends EventEmitter {
 
 	afterAction(id: string): Promise<AfterActionReport | undefined> {
 		return readAfterAction(this.stateDir, id);
+	}
+
+	/** After-action reports retain their channel binding after the roster record is reaped. */
+	async visibleAfterActions(actor: Actor): Promise<AfterActionReport[]> {
+		const reports = await listAfterActions(this.stateDir);
+		const visible: AfterActionReport[] = [];
+		for (const report of reports) {
+			if (report.channelId === null || (typeof report.channelId === "string" && await this.channelStore.canReadChannel(report.channelId, actor))) visible.push(report);
+		}
+		return visible;
+	}
+
+	async visibleAfterAction(id: string, actor: Actor): Promise<AfterActionReport | undefined> {
+		const report = await readAfterAction(this.stateDir, id);
+		return report && (report.channelId === null || (typeof report.channelId === "string" && await this.channelStore.canReadChannel(report.channelId, actor))) ? report : undefined;
 	}
 
 	/** Symptom cards recorded by `squad_record_symptom`, newest first — the read surface for later
@@ -9349,6 +9441,8 @@ export class SquadManager extends EventEmitter {
 				durationMs: answeredAt - askedAt,
 				model: rec.dto.model,
 				harness: rec.dto.harness,
+				// Retained so the artifact stays authorizable after the roster row is reaped (concern 18).
+				channelId: rec.dto.channelId ?? null,
 			});
 			if (!ok) this.log("warn", `${rec.dto.name}: answer could not be persisted (disk write failed)`);
 			else this.log("info", `${rec.dto.name}: answer saved (${final.text.trim().length} chars) — glance answers ${rec.dto.id}`);
@@ -9713,7 +9807,7 @@ export class SquadManager extends EventEmitter {
 	async fabric(actor: Actor = LOCAL_ACTOR, opts: { repos?: string[]; includeLeases?: boolean } = {}): Promise<FabricSnapshot> {
 		return buildFabricSnapshot({
 			actor,
-			agents: this.list(),
+			agents: await this.visibleAgents(actor),
 			stateDir: this.stateDir,
 			repos: opts.repos,
 			includeLeases: opts.includeLeases,
@@ -10166,7 +10260,7 @@ export class SquadManager extends EventEmitter {
 		});
 	}
 
-	async gateVerdictProof(channelId: string, entryId: string): Promise<{
+	async gateVerdictProof(channelId: string, entryId: string, actor: Actor): Promise<{
 		mode: "resident" | "post-mortem";
 		unitId?: string;
 		unitName?: string;
@@ -10185,7 +10279,7 @@ export class SquadManager extends EventEmitter {
 		};
 		malformedLandRecords: number;
 	}> {
-		const entry = (await this.channelEntries(channelId, 0)).find((e) => e.id === entryId);
+		const entry = (await this.channelEntries(channelId, 0, actor)).find((e) => e.id === entryId);
 		if (!entry || entry.event?.kind !== TRANSCRIPT_EVENT_GATE_VERDICT) throw new Error("no such gate verdict");
 		const payload = recordObject(entry.event.payload) ?? {};
 		const refs = recordObject(payload.refs) ?? {};
@@ -10949,9 +11043,9 @@ export class SquadManager extends EventEmitter {
 	 *  data, with the in-memory rings folded in so a just-recorded tap/transition is visible before
 	 *  its fire-and-forget spool lands (the GET /api/adoption read-your-write case). Room interactions
 	 *  come from the existing channel substrate; no parallel counter store. */
-	async adoptionCounters(): Promise<AdoptionCounters> {
-		const channels = await this.channelStore.listChannels();
-		const channelEntries = (await Promise.all(channels.map((channel) => this.channelStore.entries(channel.id, 0)))).flat();
+	async adoptionCounters(actor: Actor = LOCAL_ACTOR): Promise<AdoptionCounters> {
+		const channels = await this.channelStore.listChannels(actor);
+		const channelEntries = (await Promise.all(channels.map((channel) => this.channelStore.entries(channel.id, 0, actor)))).flat();
 		return computeAdoptionCounters(this.stateDir, { transitions: this.transitionLog.recent(), pushTaps: this.pushTapLog.recent(), channelEntries });
 	}
 
@@ -11295,16 +11389,68 @@ export class SquadManager extends EventEmitter {
 		return entry;
 	}
 
-	async listChannels() {
-		return this.channelStore.listChannels();
+	async listChannels(actor: Actor) {
+		return this.channelStore.listChannels(actor);
 	}
 
-	async channelEntries(channelId: string = DEFAULT_CHANNEL_ID, since = 0): Promise<ChannelEntry[]> {
-		return this.channelStore.entries(channelId, since);
+	async channelEntries(channelId: string = DEFAULT_CHANNEL_ID, since = 0, actor: Actor): Promise<ChannelEntry[]> {
+		return this.channelStore.entries(channelId, since, actor);
 	}
 
-	async searchChannelEntries(q: string, limit = 50) {
-		return this.channelStore.search(q, limit);
+	async searchChannelEntries(q: string, limit = 50, actor: Actor) {
+		return this.channelStore.search(q, limit, actor);
+	}
+
+	async markChannelRead(channelId: string, actor: Actor, lastReadSeq: number) {
+		return this.channelStore.markRead(channelId, actor, lastReadSeq);
+	}
+
+	async createChannel(actor: Actor, input: CreateChannelInput): Promise<Channel> {
+		return this.channelStore.createChannel(actor, input);
+	}
+
+	async addChannelMember(channelId: string, actor: Actor, input: ChannelMemberInput) {
+		return this.channelStore.setMember(channelId, actor, input, true);
+	}
+
+	async removeChannelMember(channelId: string, actor: Actor, input: ChannelMemberInput) {
+		return this.channelStore.setMember(channelId, actor, input, false);
+	}
+
+	async channelMemberUserIds(channelId: string): Promise<string[] | undefined> {
+		return this.channelStore.memberUserIds(channelId);
+	}
+
+	async channelMemberUserIdsForAgent(agentId: string): Promise<string[] | undefined> {
+		const channelId = this.agents.get(agentId)?.dto.channelId;
+		return channelId ? this.channelStore.memberUserIds(channelId) : undefined;
+	}
+
+	async canReadChannel(channelId: string, actor: Actor): Promise<boolean> {
+		return this.channelStore.canReadChannel(channelId, actor);
+	}
+
+	async canReadAgent(agentId: string, actor: Actor): Promise<boolean> {
+		const rec = this.agents.get(agentId);
+		if (rec) {
+			const channelId = rec.dto.channelId;
+			return !channelId || this.channelStore.canReadChannel(channelId, actor);
+		}
+		const placeholder = this.deadPlaceholder(agentId);
+		if (placeholder) return !placeholder.channelId || (await this.channelStore.canReadChannel(placeholder.channelId, actor));
+		// Unknown id — neither live nor a dead placeholder. This predicate answers "may the actor READ
+		// this agent", and an id that names no agent has nothing to read and nothing to leak; the route
+		// owns the not-found answer. Returning false here would turn every 404 into a 403 (authz.test's
+		// "admin clears the gate, the handler then 404s" is exactly that contract) and would deny the
+		// documented dead-session reads. Absence of a record is not a membership denial — the same rule
+		// that keeps `memberUserIds` from treating a missing channel as public, applied in the other
+		// direction.
+		return true;
+	}
+	async visibleAgents(actor: Actor): Promise<AgentDTO[]> {
+		const out: AgentDTO[] = [];
+		for (const dto of this.list()) if (!dto.channelId || (await this.channelStore.canReadChannel(dto.channelId, actor))) out.push(dto);
+		return out;
 	}
 
 	async appendChannelPost(channelId: string, actor: Actor, input: ClientChannelPost): Promise<ChannelEntry> {
@@ -11389,11 +11535,12 @@ export class SquadManager extends EventEmitter {
 			pendingStatus,
 			title: resolved ? `Resolved · ${title}` : `Needs you · ${title}`,
 			eyebrow: resolved ? "Resolved" : "Needs you",
-			body: message ?? title,
+			// A card that says the same sentence three times (title, body, "why stopped") reads as
+			// broken, and for approval-shaped pendings `message` IS the title. Say it once.
+			body: message && message.trim() !== title.trim() ? message : undefined,
 			detail: resolved ? "Follow-up resolution card. Original pending card remains unchanged." : "Click to step into the agent.",
 			tone: resolved ? "success" : "warning",
 			pinned: {
-				"why stopped": title,
 				agent: rec.dto.name || rec.dto.id,
 				age,
 			},
@@ -11490,10 +11637,11 @@ export class SquadManager extends EventEmitter {
 		const upcoming = new Map(next.map((request) => [request.id, request]));
 		for (const request of next) {
 			if (previous.has(request.id)) continue;
+			if (!isRoomWorthyPending(request)) continue;
 			this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_NEEDS_YOU, `needs you · ${this.safeEventLabel(request.title)}`, {
 				status: "pending",
 				pendingId: request.id,
-				gateClass: request.gateClass,
+				gateClass: gateClassOf(request),
 				title: request.title,
 				message: request.message,
 				createdAt: request.createdAt,
@@ -11502,10 +11650,13 @@ export class SquadManager extends EventEmitter {
 		}
 		for (const request of previous.values()) {
 			if (upcoming.has(request.id)) continue;
+			// Symmetric with the emit above: a pending that never became a card must never emit a
+			// resolution card, or the room fills with orphan "resolved" faces for facts it never showed.
+			if (!isRoomWorthyPending(request)) continue;
 			this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_NEEDS_YOU, `needs you resolved · ${this.safeEventLabel(request.title)}`, {
 				status: "resolved",
 				pendingId: request.id,
-				gateClass: request.gateClass,
+				gateClass: gateClassOf(request),
 				title: request.title,
 				createdAt: request.createdAt,
 				agentId: rec.dto.id,

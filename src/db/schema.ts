@@ -77,6 +77,18 @@ export interface ChannelsTable {
 	name: string;
 	kind: string;
 	created_at: number;
+	visibility: string;
+	creator_user_id: string | null;
+}
+
+/** Positive-evidence channel membership rows. Inactive rows are removals, never deletions. */
+export interface ChannelMembershipsTable {
+	org_id: string;
+	channel_id: string;
+	user_id: string;
+	active: number;
+	updated_by: string;
+	updated_at: number;
 }
 
 /** Durable channel entries. `data` carries the TranscriptEntry-compatible envelope. */
@@ -91,6 +103,14 @@ export interface ChannelEntriesTable {
 	data: string;
 }
 
+/** Per-user per-channel read cursor. No receipts are exposed to other users. */
+export interface ChannelReadCursorsTable {
+	org_id: string;
+	channel_id: string;
+	user_id: string;
+	last_read_seq: number;
+	updated_at: number;
+}
 
 /** Per-org run usage ledger (cost/tokens/tool-calls per completed run). */
 export interface UsageTable {
@@ -204,6 +224,8 @@ export interface AppDatabase {
 	audit: AuditTable;
 	channels: ChannelsTable;
 	channel_entries: ChannelEntriesTable;
+	channel_memberships: ChannelMembershipsTable;
+	channel_read_cursors: ChannelReadCursorsTable;
 	usage: UsageTable;
 	federation_peers: FederationPeersTable;
 	capability_records: CapabilityRecordsTable;
@@ -220,6 +242,8 @@ export type AuditRow = Selectable<AuditTable>;
 export type UsageRow = Selectable<UsageTable>;
 export type ChannelRow = Selectable<ChannelsTable>;
 export type ChannelEntryRow = Selectable<ChannelEntriesTable>;
+export type ChannelMembershipRow = Selectable<ChannelMembershipsTable>;
+export type ChannelReadCursorRow = Selectable<ChannelReadCursorsTable>;
 export type FederationPeerRow = Selectable<FederationPeersTable>;
 export type CapabilityRecordRow = Selectable<CapabilityRecordsTable>;
 export type FeedbackCampaignRow = Selectable<FeedbackCampaignsTable>;

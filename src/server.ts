@@ -41,7 +41,10 @@ import {
 	CapabilityInstallRunBodySchema,
 	CapabilitySourceBodySchema,
 	ChatAttachmentCreateBodySchema,
+	ChannelCreateBodySchema,
+	ChannelMemberBodySchema,
 	ChannelPostBodySchema,
+	ChannelReadBodySchema,
 	CommentsCreateBodySchema,
 	ConsoleBodySchema,
 	ConsoleReleaseBodySchema,
@@ -218,13 +221,23 @@ function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T
 export { CONSOLE_SYSTEM_PROMPT };
 
 /**
- * Inert opt-in serve seam for the Vite SPA rewrite. DEFAULT OFF: requires BOTH the explicit
- * `OMP_SQUAD_WEBAPP=1` flag AND an existing built `webapp/dist/index.html`. Until cutover the live
- * `src/web/index.html` is served unchanged. Exported for the build/serve gate test.
+ * Serve seam for the Vite SPA. **CUT OVER 2026-07-24 — now DEFAULT ON** (plans/the-room/26).
+ *
+ * It shipped default-off as an "inert opt-in seam … until cutover", and then the-room was built on
+ * top of it for five waves without anyone flipping it. The consequence, caught only by booting the
+ * daemon and looking: a glance daemon with no explicit flag served the legacy `src/web/index.html`
+ * dashboard, so the room — which DIRECTION.md ratifies as *the home screen* — was invisible by
+ * default. A ratified home screen behind an off-by-default flag is not a home screen.
+ *
+ * The dist check is unchanged and is what keeps the flip safe: an install with no built
+ * `webapp/dist/index.html` serves exactly what it served before. Operators who want the legacy UI
+ * set `GLANCE_WEBAPP=0` (or `OMP_SQUAD_WEBAPP=0`).
+ *
+ * Exported for the build/serve gate test.
  * ponytail: env-flag + dist-exists check, not a config object — one toggle, no machinery.
  */
 export function webappEnabled(): boolean {
-	return envBool("OMP_SQUAD_WEBAPP", false) && existsSync(WEBAPP_INDEX);
+	return envBool("OMP_SQUAD_WEBAPP", true) && existsSync(WEBAPP_INDEX);
 }
 
 export function feedbackEnabled(): boolean {
@@ -723,6 +736,7 @@ export class SquadServer {
 	private readonly onEvent: (e: SquadEvent) => void;
 	private presenceTimer?: Timer;
 	private presenceDebounce?: Timer;
+	private readonly typingDebounce = new Map<string, number>();
 	/** agentId → repo it's claimed under, so we can release the claim on removal. */
 	private readonly claimed = new Map<string, string>();
 	/** Agent ids present when the server booted = survivors the daemon reattached to (vs spawned later). */
@@ -778,7 +792,7 @@ export class SquadServer {
 		this.registry = opts.registry;
 		this.rootOrgId = opts.rootOrgId;
 		this.opts = opts;
-		this.onEvent = (e: SquadEvent) => this.broadcast(e);
+		this.onEvent = (e: SquadEvent) => void this.deliverEvent(undefined, e);
 		// Mirror index.ts's daemon resolution so self's operator id matches what the daemon gossips.
 		this.operator = opts.operator ?? { id: process.env.OMP_SQUAD_OPERATOR || os.userInfo().username || "local", origin: "local" };
 		this.coordinator = opts.coordinator ?? process.env.OMP_SQUAD_COORDINATOR ?? null;
@@ -1105,7 +1119,7 @@ export class SquadServer {
 		// outcome log this reads) has no `repo` field — a unit's routing decision isn't a per-repo concept
 		// — so there is nothing for that allowlist to scope. Fleet-wide, like /api/usage and /api/heat.
 		if (url.pathname === "/api/graph/task-class") return Response.json(await taskClassPayload(managers, url));
-		if (url.pathname === "/api/action-items") return Response.json(await actionItemsPayload(managers, url));
+		if (url.pathname === "/api/action-items") return Response.json(await actionItemsPayload(managers, url, actor));
 		if (url.pathname === "/api/governance") return Response.json(await governancePayload(managers, role, this.dbMode, !!this.registry));
 		if (url.pathname === "/api/leases") {
 			const repo = url.searchParams.get("repo");
@@ -1176,7 +1190,7 @@ export class SquadServer {
 			// transitions.jsonl, push-taps.jsonl) and summed. Viewer-tier read (authz.ts GET default) —
 			// counters are not sensitive, and the whole point is a zero-ceremony glance. Scoped like every
 			// route here: a tenant session's `managers` is its own 1-manager array.
-			return Response.json(mergeAdoptionCounters(await Promise.all(managers.map((m) => m.adoptionCounters()))));
+			return Response.json(mergeAdoptionCounters(await Promise.all(managers.map((m) => m.adoptionCounters(actor)))));
 		}
 		return undefined;
 	}
@@ -1207,7 +1221,24 @@ export class SquadServer {
 		else if (this.auth) {
 			const bucket = orgId ? this.clientsByOrg.get(orgId) : undefined;
 			for (const ws of bucket ?? []) ws.send(JSON.stringify(event));
-		} else this.broadcast(event);
+		} else this.broadcastAll(event);
+	}
+
+	private async emitTyping(source: ServerWebSocket<SocketData>, manager: SquadManager, channelId: string, active: boolean): Promise<void> {
+		const actor = this.actorForSocket(source);
+		if (!(await manager.canReadChannel(channelId, actor))) return;
+		const key = `${source.data.id}:${channelId}`;
+		const now = Date.now();
+		const last = this.typingDebounce.get(key) ?? 0;
+		if (active && now - last < 900) return;
+		if (active) this.typingDebounce.set(key, now);
+		else this.typingDebounce.delete(key);
+		const event = { type: "typing", channelId, userId: actor.id, displayName: actor.displayName ?? actor.id, active, at: now } satisfies SquadEvent;
+		const bucket = this.registry ? this.clientsByOrg.get(actor.orgId ?? "") : this.clients;
+		for (const ws of bucket ?? []) {
+			if (ws === source) continue;
+			if (await manager.canReadChannel(channelId, this.actorForSocket(ws))) ws.send(JSON.stringify(event));
+		}
 	}
 
 	/** Register an opening socket in its bucket and return the fleet to seed its roster from. */
@@ -1315,7 +1346,7 @@ export class SquadServer {
 			for (const a of this.singleManager.list()) this.startupAgentIds.add(a.id);
 			// Push-seed fix (plans/voice-loop concern 01 risk, also fixes the PRE-EXISTING input/error
 			// escalation lane): `pushSeeded` used to become true ONLY via a `roster` SquadEvent reaching
-			// maybePushAlert through broadcast() — and the ONLY caller that ever sends the `snapshot`
+			// maybePushAlert through broadcastAll() — and the ONLY caller that ever sends the `snapshot`
 			// command that produces one is the legacy (non-webapp) client. The React webapp never sends
 			// `snapshot`, so on a fresh boot the whole push lane sat dead — no escalation, no completion
 			// push — until a legacy client happened to connect. Flip the flag here, at start(), file-mode
@@ -1351,7 +1382,8 @@ export class SquadServer {
 				idleTimeout: 255,
 				open: async (ws) => {
 					const m = await this.registerSocket(ws);
-					const agents = m?.list() ?? [];
+					const actor = this.actorForSocket(ws);
+					const agents = m ? await m.visibleAgents(actor) : [];
 					ws.send(JSON.stringify({ type: "roster", agents, version: this.uiVersion } satisfies SquadEvent));
 					for (const a of agents) {
 						const commands = m?.commandsFor(a.id);
@@ -1382,13 +1414,25 @@ export class SquadServer {
 					// no-op for it — `m` is always `defaultManager`, exactly as before.
 					const m = this.resolveCommandManager(cmd, !!ws.data.bootstrapAdmin, defaultManager);
 					if (!m) return; // bootstrap-admin named a target live in no manager — honest no-op (WS has no per-command response channel to report 404 on)
+					if (cmd.type === "typing") {
+						await this.emitTyping(ws, m, cmd.channelId, cmd.active);
+						return;
+					}
 					// Transcript replay is unicast to the requesting socket.
+					if (cmd.type === "snapshot") {
+						const agents = await m.visibleAgents(actor);
+						ws.send(JSON.stringify({ type: "roster", agents, version: this.uiVersion } satisfies SquadEvent));
+						return;
+					}
 					if (cmd.type === "subscribe") {
+						if (!(await m.canReadAgent(cmd.id, actor))) return;
 						for (const entry of m.getTranscript(cmd.id)) {
 							ws.send(JSON.stringify({ type: "transcript", id: cmd.id, entry } satisfies SquadEvent));
 						}
 						return;
 					}
+					const targetId = commandAgentTarget(cmd);
+					if (targetId && !(await m.canReadAgent(targetId, actor))) return;
 					// Carry the socket's granted tier; applyCommand denies a command above it (logged there).
 					// This is a fire-and-forget dispatch (a WS message handler, no reply channel to report a
 					// failure on) — `void`-ing the call means ANY rejection that escapes this `.catch` becomes
@@ -1410,14 +1454,14 @@ export class SquadServer {
 
 		if (this.registry) {
 			// DB-registry mode: per-org fan-out via the registry's event sink. No global presence/federation (risk #6).
-			this.registry.onEvent = (orgId, e) => this.broadcastTo(orgId, e);
+			this.registry.onEvent = (orgId, e) => void this.deliverEvent(orgId, e);
 			// Root factory (opt-in): fan its events out to the operator's own socket buckets, reusing the exact
 			// per-org WS path. Both the on-box loopback admin (bucketed under the ROOT_FACTORY_ORG sentinel) and
 			// a browser operator signed into OMP_SQUAD_ROOT_ORG watch the factory move over the same transport.
 			if (this.singleManager) {
 				const rootBuckets = [ROOT_FACTORY_ORG, ...(this.rootOrgId ? [this.rootOrgId] : [])];
 				this.singleManager.on("event", (e) => {
-					for (const b of rootBuckets) this.broadcastTo(b, e);
+					for (const b of rootBuckets) void this.deliverEvent(b, e);
 				});
 			}
 		} else {
@@ -1787,7 +1831,8 @@ export class SquadServer {
 			if (this.registry && this.opts.pushRoot) {
 				const orgId = session?.session.activeOrganizationId;
 				if (!orgId) return new Response("no active org", { status: 400 });
-				await (await this.pushForOrg(orgId)).subscribe({ endpoint: sub.endpoint, keys: { p256dh: sub.keys.p256dh, auth: sub.keys.auth } });
+				if (!session?.user.id) return new Response("signed-in user required", { status: 400 });
+				await (await this.pushForOrg(orgId)).subscribe({ endpoint: sub.endpoint, keys: { p256dh: sub.keys.p256dh, auth: sub.keys.auth }, userId: session.user.id });
 				return Response.json({ ok: true });
 			}
 			if (!this.opts.push) return new Response("push unavailable", { status: 501 });
@@ -1841,7 +1886,11 @@ export class SquadServer {
 			// manager) set `GET /api/agents`'s roster below is built from — reused rather than
 			// re-derived, so the two can never silently diverge on which managers count as "live".
 			const bootstrapViewerId = this.dbMode ? actorForRole(role).id : undefined;
-			const roster = this.observabilityManagers(true, undefined).flatMap((m) => m.list().map((dto) => ({ ...dto, ladderPriority: m.ladderPriorityFor(dto, bootstrapViewerId) })));
+			const bootstrapActor = actorForRole(role);
+			const roster = [];
+			for (const m of this.observabilityManagers(true, undefined)) {
+				for (const dto of await m.visibleAgents(bootstrapActor)) roster.push({ ...dto, ladderPriority: m.ladderPriorityFor(dto, bootstrapViewerId) });
+			}
 			return Response.json(roster);
 		}
 		const orgId = session
@@ -2036,21 +2085,22 @@ export class SquadServer {
 		// (no session) still needs a stable id here, not `undefined`.
 		if (url.pathname === "/api/agents" && req.method === "GET") {
 			const viewerId = this.attentionViewerId(actor);
-			return Response.json(manager.list().map((dto) => ({ ...dto, ladderPriority: manager.ladderPriorityFor(dto, viewerId) })));
+			const agents = await manager.visibleAgents(actor);
+			return Response.json(agents.map((dto) => ({ ...dto, ladderPriority: manager.ladderPriorityFor(dto, viewerId) })));
 		}
 		// R5: answers are a deliverable, not a transcript. They outlive the roster row that produced them,
 		// which is the single most common way a glance result used to evaporate — the agent reaped before
 		// anyone read what it found.
-		if (url.pathname === "/api/answers" && req.method === "GET") return Response.json(await manager.answers(url.searchParams.get("repo") ?? undefined));
+		if (url.pathname === "/api/answers" && req.method === "GET") return Response.json(await manager.visibleAnswers(actor, url.searchParams.get("repo") ?? undefined));
 		if (url.pathname.startsWith("/api/answers/") && req.method === "GET") {
-			const answer = await manager.answer(decodeURIComponent(url.pathname.slice("/api/answers/".length)));
+			const answer = await manager.visibleAnswer(decodeURIComponent(url.pathname.slice("/api/answers/".length)), actor);
 			return answer ? Response.json(answer) : new Response("no such answer", { status: 404 });
 		}
 		// After-action reports mirror answers: durable post-mortems that outlive the (auto-reaped)
 		// roster row of the terminal unit that earned them — see after-action.ts.
-		if (url.pathname === "/api/after-action" && req.method === "GET") return Response.json(await manager.afterActions());
+		if (url.pathname === "/api/after-action" && req.method === "GET") return Response.json(await manager.visibleAfterActions(actor));
 		if (url.pathname.startsWith("/api/after-action/") && req.method === "GET") {
-			const report = await manager.afterAction(decodeURIComponent(url.pathname.slice("/api/after-action/".length)));
+			const report = await manager.visibleAfterAction(decodeURIComponent(url.pathname.slice("/api/after-action/".length)), actor);
 			return report ? Response.json(report) : new Response("no such after-action report", { status: 404 });
 		}
 		// `glance symptom <query>` (comprehension concern 07): ranking stays server-side, reusing
@@ -2146,7 +2196,8 @@ export class SquadServer {
 		// unresolvable identity never sees anyone else's `completed-unseen` state resolve differently.
 		if (url.pathname === "/api/attention/ladder" && req.method === "GET") {
 			const viewerId = this.attentionViewerId(actor);
-			const units = manager.list().map((dto) => ({ id: dto.id, repo: dto.repo, priority: manager.ladderPriorityFor(dto, viewerId) }));
+			const agents = await manager.visibleAgents(actor);
+			const units = agents.map((dto) => ({ id: dto.id, repo: dto.repo, priority: manager.ladderPriorityFor(dto, viewerId) }));
 			const byRepo = new Map<string, LadderPriority[]>();
 			for (const u of units) byRepo.set(u.repo, [...(byRepo.get(u.repo) ?? []), u.priority]);
 			const projects = [...byRepo.entries()].map(([repo, priorities]) => ({ repo, priority: maxLadderPriority(priorities) }));
@@ -2298,7 +2349,7 @@ export class SquadServer {
 			if (!dropped.ok) return new Response(dropped.reason, { status: 500 }); // registry write failed; nothing changed
 			return Response.json({ ok: true, repo: dropped.repo, removed: dropped.removed, projects: manager.projects() });
 		}
-		if (url.pathname === "/api/workflows") return Response.json(workflowSnapshot(manager.list(), manager.capabilityWorkflowDefinitions()));
+		if (url.pathname === "/api/workflows") return Response.json(workflowSnapshot(await manager.visibleAgents(actor), manager.capabilityWorkflowDefinitions()));
 		if (url.pathname === "/api/models") return Response.json({ models: mergeModelOptions(modelOptionsFromEnv(), await manager.modelOptions()) });
 		if (url.pathname === "/api/profiles") return Response.json({ profiles: manager.profiles() });
 		if (url.pathname === "/api/capabilities") return Response.json(manager.capabilities());
@@ -2648,9 +2699,10 @@ export class SquadServer {
 		const mfgateProof = url.pathname.match(/^\/api\/channels\/([^/]+)\/entries\/([^/]+)\/gate-verdict-proof$/);
 		if (mfgateProof && req.method === "GET") {
 			try {
-				const proof = await manager.gateVerdictProof(decodeURIComponent(mfgateProof[1]), decodeURIComponent(mfgateProof[2]));
+				const proof = await manager.gateVerdictProof(decodeURIComponent(mfgateProof[1]), decodeURIComponent(mfgateProof[2]), actor);
 				return Response.json({ proof });
-			} catch {
+			} catch (err) {
+				if (err instanceof Error && err.message === "channel forbidden") return new Response("forbidden", { status: 403 });
 				return new Response("no such gate verdict", { status: 404 });
 			}
 		}
@@ -2905,6 +2957,7 @@ export class SquadServer {
 			// (classifier decides), never coerce.
 			const lane = Result.isSuccess(decoded) ? laneFromRouted(decoded.success) : undefined;
 			const channelId = Result.isSuccess(decoded) && typeof decoded.success.channelId === "string" ? decoded.success.channelId : undefined;
+			if (channelId && (await manager.channelMemberUserIds(channelId)) !== undefined && !(await manager.canReadChannel(channelId, actor))) return new Response("forbidden", { status: 403 });
 			const tracked = manager.projects().map((p) => p.repo);
 			// research-sirvir/03 (dead-wire fix): feed the outcome-driven model shift from THIS request's
 			// resolved `manager` — never a bare `resolveStateDir()`, which in DB mode returns the global
@@ -3034,6 +3087,10 @@ export class SquadServer {
 			if (!bytes) return new Response("not found", { status: 404 });
 			return new Response(new Uint8Array(bytes), { headers: { "content-type": "image/png", "cache-control": "private, max-age=31536000, immutable" } });
 		}
+		const guardAgent = async (id: string): Promise<Response | undefined> => {
+			if (!(await manager.canReadAgent(id, actor))) return new Response("forbidden", { status: 403 });
+			return undefined;
+		};
 		// Single-agent read that stays honest about restart death (daily-onramp 04): a live id answers
 		// with its DTO; a session a restart killed answers with its dead placeholder (`dead: true` +
 		// the reason) for a bounded window; only an id with no story left is a 404. Without this, a
@@ -3042,11 +3099,16 @@ export class SquadServer {
 		const magent = url.pathname.match(/^\/api\/agents\/([^/]+)$/);
 		if (magent && req.method === "GET") {
 			const id = decodeURIComponent(magent[1]);
+			const denied = await guardAgent(id);
+			if (denied) return denied;
 			const dto = manager.getAgent(id);
 			// Same per-viewer personalization as GET /api/agents above — never skip it on the single-agent
 			// read, or a client polling one unit's row would see a stale/wrong ladder rung relative to the
 			// list view.
-			if (dto) return Response.json({ ...dto, ladderPriority: manager.ladderPriorityFor(dto, this.attentionViewerId(actor)) });
+			if (dto) {
+				if (!(await manager.canReadAgent(id, actor))) return new Response("forbidden", { status: 403 });
+				return Response.json({ ...dto, ladderPriority: manager.ladderPriorityFor(dto, this.attentionViewerId(actor)) });
+			}
 			const ph = manager.deadPlaceholder(id);
 			if (ph) return Response.json({ id: ph.id, name: ph.name, repo: ph.repo, harness: ph.harness, at: ph.at, dead: true, deadReason: ph.deadReason, transcriptEntries: ph.transcript.length });
 			return new Response("no such agent", { status: 404 });
@@ -3054,6 +3116,8 @@ export class SquadServer {
 		const mt = url.pathname.match(/^\/api\/agents\/([^/]+)\/transcript$/);
 		if (mt) {
 			const id = decodeURIComponent(mt[1]);
+			const denied = await guardAgent(id);
+			if (denied) return denied;
 			// `?since=<seq>` returns only the delta (entries with seq > since) so a polling client
 			// (the cockpit conversation pane) never refetches the whole transcript. A missing or
 			// non-integer `since` falls back to the full transcript — never a 400/500.
@@ -3063,28 +3127,56 @@ export class SquadServer {
 		}
 		const mtrans = url.pathname.match(/^\/api\/agents\/([^/]+)\/transitions$/);
 		if (mtrans) {
+			const id = decodeURIComponent(mtrans[1]);
+			const denied = await guardAgent(id);
+			if (denied) return denied;
 			const full = url.searchParams.get("full") === "1";
-			return Response.json(await manager.transitionHistory(decodeURIComponent(mtrans[1]), { full }));
+			return Response.json(await manager.transitionHistory(id, { full }));
 		}
 		const msub = url.pathname.match(/^\/api\/agents\/([^/]+)\/subagents$/);
-		if (msub) return Response.json(manager.subagents(decodeURIComponent(msub[1])));
+		if (msub) {
+			const id = decodeURIComponent(msub[1]);
+			const denied = await guardAgent(id);
+			if (denied) return denied;
+			return Response.json(manager.subagents(id));
+		}
 		const mrec = url.pathname.match(/^\/api\/agents\/([^/]+)\/receipts$/);
-		if (mrec) return Response.json(await manager.receipts(decodeURIComponent(mrec[1])));
+		if (mrec) {
+			const id = decodeURIComponent(mrec[1]);
+			const denied = await guardAgent(id);
+			if (denied) return denied;
+			return Response.json(await manager.receipts(id));
+		}
 		// Read-only checkpoint history for the fork-step picker; never includes `vars` (see
 		// SquadManager.checkpoints's doc comment).
 		const mchk = url.pathname.match(/^\/api\/agents\/([^/]+)\/checkpoints$/);
-		if (mchk) return Response.json(await manager.checkpoints(decodeURIComponent(mchk[1])));
+		if (mchk) {
+			const id = decodeURIComponent(mchk[1]);
+			const denied = await guardAgent(id);
+			if (denied) return denied;
+			return Response.json(await manager.checkpoints(id));
+		}
 		const mcmd = url.pathname.match(/^\/api\/agents\/([^/]+)\/commands$/);
-		if (mcmd) return Response.json(manager.commandsFor(decodeURIComponent(mcmd[1])) ?? []);
+		if (mcmd) {
+			const id = decodeURIComponent(mcmd[1]);
+			const denied = await guardAgent(id);
+			if (denied) return denied;
+			return Response.json(manager.commandsFor(id) ?? []);
+		}
 		const mdiff = url.pathname.match(/^\/api\/agents\/([^/]+)\/(diff|tree)$/);
 		if (mdiff) {
-			const dto = manager.getAgent(decodeURIComponent(mdiff[1]));
+			const id = decodeURIComponent(mdiff[1]);
+			const denied = await guardAgent(id);
+			if (denied) return denied;
+			const dto = manager.getAgent(id);
 			if (!dto) return new Response("no such agent", { status: 404 });
 			return Response.json(mdiff[2] === "diff" ? await worktreeDiffSinceFork(dto.worktree) : await worktreeTree(dto.worktree));
 		}
 		const mland = url.pathname.match(/^\/api\/agents\/([^/]+)\/land$/);
 		if (mland && req.method === "POST") {
 			const id = decodeURIComponent(mland[1]);
+			const denied = await guardAgent(id);
+			if (denied) return denied;
 			const dto = manager.getAgent(id);
 			if (!dto) return new Response("no such agent", { status: 404 });
 			let message = `squad(${dto.name}): ${dto.issue?.name ?? "agent changes"}`;
@@ -3104,7 +3196,10 @@ export class SquadServer {
 		// remote webapp can still offer copy-path.
 		const mopen = url.pathname.match(/^\/api\/agents\/([^/]+)\/open$/);
 		if (mopen && req.method === "POST") {
-			const decision = openRouteDecision(manager.getAgent(decodeURIComponent(mopen[1])) ?? undefined, this.dbMode);
+			const id = decodeURIComponent(mopen[1]);
+			const denied = await guardAgent(id);
+			if (denied) return denied;
+			const decision = openRouteDecision(manager.getAgent(id) ?? undefined, this.dbMode);
 			return Response.json(decision.body, { status: decision.status });
 		}
 		// Boundary sync (daily-onramp 03): explicitly apply this here-session's HELD turn patches to
@@ -3114,6 +3209,8 @@ export class SquadServer {
 		const msync = url.pathname.match(/^\/api\/agents\/([^/]+)\/apply-held-sync$/);
 		if (msync && req.method === "POST") {
 			const id = decodeURIComponent(msync[1]);
+			const denied = await guardAgent(id);
+			if (denied) return denied;
 			if (!manager.getAgent(id)) return new Response("no such agent", { status: 404 });
 			return Response.json(await manager.applyHeldSync(id, actor));
 		}
@@ -3125,6 +3222,8 @@ export class SquadServer {
 		const mdiscard = url.pathname.match(/^\/api\/agents\/([^/]+)\/discard-held-sync$/);
 		if (mdiscard && req.method === "POST") {
 			const id = decodeURIComponent(mdiscard[1]);
+			const denied = await guardAgent(id);
+			if (denied) return denied;
 			if (!manager.getAgent(id)) return new Response("no such agent", { status: 404 });
 			// STRICT body handling, deliberately unlike the decodeBodyOrEmpty endpoints: the absent-
 			// patchId default means "discard the WHOLE backlog", so malformed input must 400, never
@@ -3157,6 +3256,8 @@ export class SquadServer {
 		const mack = url.pathname.match(/^\/api\/agents\/([^/]+)\/ack-boundary-sync-divergence$/);
 		if (mack && req.method === "POST") {
 			const id = decodeURIComponent(mack[1]);
+			const denied = await guardAgent(id);
+			if (denied) return denied;
 			if (!manager.getAgent(id)) return new Response("no such agent", { status: 404 });
 			return Response.json(await manager.acknowledgeBoundarySyncDivergence(id, actor));
 		}
@@ -3172,6 +3273,8 @@ export class SquadServer {
 		const mverify = url.pathname.match(/^\/api\/agents\/([^/]+)\/verify$/);
 		if (mverify && req.method === "POST") {
 			const id = decodeURIComponent(mverify[1]);
+			const denied = await guardAgent(id);
+			if (denied) return denied;
 			const dto = manager.getAgent(id);
 			if (!dto) return new Response("no such agent", { status: 404 });
 			try {
@@ -3187,7 +3290,10 @@ export class SquadServer {
 			const mode = validateRequestedMode(body.mode);
 			if (!mode) return new Response("invalid mode", { status: 400 });
 			const reason = typeof body.reason === "string" ? body.reason : undefined;
-			const dto = await manager.transitionMode(decodeURIComponent(mmode[1]), mode, actor, reason);
+			const id = decodeURIComponent(mmode[1]);
+			const denied = await guardAgent(id);
+			if (denied) return denied;
+			const dto = await manager.transitionMode(id, mode, actor, reason);
 			if (!dto) return new Response("no such agent", { status: 404 });
 			return Response.json(dto);
 		}
@@ -3197,13 +3303,19 @@ export class SquadServer {
 			const task = typeof body.task === "string" ? body.task : undefined;
 			const mode = body.mode != null ? validateRequestedMode(body.mode) : undefined;
 			if (body.mode != null && !mode) return new Response("invalid mode", { status: 400 });
-			const result = await manager.promote(decodeURIComponent(mpromote[1]), { task, mode: mode ?? undefined }, actor);
+			const id = decodeURIComponent(mpromote[1]);
+			const denied = await guardAgent(id);
+			if (denied) return denied;
+			const result = await manager.promote(id, { task, mode: mode ?? undefined }, actor);
 			const status = result.ok ? 200 : result.reason === "no such agent" ? 404 : 409;
 			return Response.json(result, { status });
 		}
 		const mvision = url.pathname.match(/^\/api\/agents\/([^/]+)\/vision$/);
 		if (mvision && req.method === "POST") {
-			const dto = manager.getAgent(decodeURIComponent(mvision[1]));
+			const id = decodeURIComponent(mvision[1]);
+			const denied = await guardAgent(id);
+			if (denied) return denied;
+			const dto = manager.getAgent(id);
 			if (!dto) return new Response("no such agent", { status: 404 });
 			const body = decodeBodyOrEmpty(AgentVisionBodySchema, await req.json().catch(() => null));
 			const target = typeof body.url === "string" && body.url.trim() ? body.url.trim() : process.env.OMP_SQUAD_APP_URL;
@@ -3308,7 +3420,7 @@ export class SquadServer {
 			const q = url.searchParams.get("q") ?? "";
 			const query = q.trim();
 			if (!query) return Response.json({ results: [] });
-			return Response.json({ results: await manager.searchChannelEntries(query) });
+			return Response.json({ results: await manager.searchChannelEntries(query, 50, actor) });
 		}
 
 		const channelEntryMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/entries$/);
@@ -3317,17 +3429,62 @@ export class SquadServer {
 			const sinceRaw = url.searchParams.get("since");
 			const since = sinceRaw === null ? 0 : Number(sinceRaw);
 			if (!Number.isFinite(since) || since < 0) return new Response("bad since", { status: 400 });
-			return Response.json({ entries: await manager.channelEntries(channelId, since) });
+			try {
+				return Response.json({ entries: await manager.channelEntries(channelId, since, actor) });
+			} catch (err) {
+				if (err instanceof Error && err.message === "channel forbidden") return new Response("forbidden", { status: 403 });
+				throw err;
+			}
 		}
+		const channelReadMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/read$/);
+		if (channelReadMatch && req.method === "POST") {
+			const decoded = decodeBody(ChannelReadBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response(`bad channel read: ${decoded.failure.message}`, { status: 400 });
+			const channelId = decodeURIComponent(channelReadMatch[1]!);
+			try {
+				const cursor = await manager.markChannelRead(channelId, actor, decoded.success.lastReadSeq);
+				return Response.json({ cursor });
+			} catch (err) {
+				if (err instanceof Error && err.message === "channel forbidden") return new Response("forbidden", { status: 403 });
+				if (err instanceof Error && err.message === "read cursor requires user identity") return new Response("read cursor requires user identity", { status: 400 });
+				throw err;
+			}
+		}
+
 		if (channelEntryMatch && req.method === "POST") {
 			const decoded = decodeBody(ChannelPostBodySchema, await req.json().catch(() => null));
 			if (Result.isFailure(decoded)) return new Response(`bad channel post: ${decoded.failure.message}`, { status: 400 });
 			const channelId = decodeURIComponent(channelEntryMatch[1]!);
-			const entry = await manager.appendChannelPost(channelId, actor, decoded.success);
-			return Response.json({ entry });
+			try {
+				const entry = await manager.appendChannelPost(channelId, actor, decoded.success);
+				return Response.json({ entry });
+			} catch (err) {
+				if (err instanceof Error && err.message === "channel forbidden") return new Response("forbidden", { status: 403 });
+				throw err;
+			}
 		}
 		if (url.pathname === "/api/channels" && req.method === "GET") {
-			return Response.json({ channels: await manager.listChannels() });
+			return Response.json({ channels: await manager.listChannels(actor) });
+		}
+		if (url.pathname === "/api/channels" && req.method === "POST") {
+			const decoded = decodeBody(ChannelCreateBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response(`bad channel create: ${decoded.failure.message}`, { status: 400 });
+			const channel = await manager.createChannel(actor, decoded.success);
+			return Response.json({ channel });
+		}
+		const channelMemberMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/members\/([^/]+)$/);
+		if (channelMemberMatch && (req.method === "PUT" || req.method === "DELETE")) {
+			const channelId = decodeURIComponent(channelMemberMatch[1]!);
+			const userId = decodeURIComponent(channelMemberMatch[2]!);
+			const decoded = decodeBody(ChannelMemberBodySchema, { userId });
+			if (Result.isFailure(decoded)) return new Response(`bad channel member: ${decoded.failure.message}`, { status: 400 });
+			try {
+				const membership = req.method === "PUT" ? await manager.addChannelMember(channelId, actor, decoded.success) : await manager.removeChannelMember(channelId, actor, decoded.success);
+				return Response.json({ membership });
+			} catch (err) {
+				if (err instanceof Error && err.message === "channel forbidden") return new Response("forbidden", { status: 403 });
+				throw err;
+			}
 		}
 
 		if (url.pathname === "/api/command" && req.method === "POST") {
@@ -3355,6 +3512,9 @@ export class SquadServer {
 			// caller — tenant sessions stay exactly as confined as before.
 			const owner = this.resolveCommandManager(cmd, bootstrapAdmin, manager);
 			if (!owner) return new Response("agent not found", { status: 404 });
+			const targetId = commandAgentTarget(cmd);
+			const liveTarget = typeof owner.getAgent === "function" ? owner.getAgent(targetId ?? "") : undefined;
+			if (targetId && liveTarget && !(await owner.canReadAgent(targetId, actor))) return new Response("forbidden", { status: 403 });
 			// kill/restart/remove are admin-tier (commandTier); applyCommand is the single authority.
 			// Surface its denial as 403 here (the WS handler swallows the same throw) — not a 2nd authz site.
 			try {
@@ -3368,7 +3528,98 @@ export class SquadServer {
 		return new Response("not found", { status: 404 });
 	}
 
-	private broadcast(e: SquadEvent): void {
+	private async deliverEvent(orgId: string | undefined, e: SquadEvent): Promise<void> {
+		const manager = orgId ? this.orgManager(orgId) : this.singleManager;
+		if (e.type === "channel-entry") {
+			if (!manager) return;
+			const members = await manager.channelMemberUserIds(e.channelId);
+			if (members !== undefined) {
+				const currentMembers = await this.sendChannelEventToMembers(orgId, manager, e, members);
+				if (currentMembers.length) this.maybePushAlertForMembers(orgId, e, currentMembers);
+			} else if (orgId) this.broadcastTo(orgId, e);
+			else this.broadcastAll(e);
+			return;
+		}
+
+		if (e.type === "roster" && manager) {
+			await this.sendRosterSnapshot(orgId, manager);
+			return;
+		}
+		// Command acknowledgements contain only a turn id and outcome; logs that identify an agent
+		// inherit that agent's delivery scope instead.
+		if (e.type === "command-ack") {
+			if (orgId) this.broadcastTo(orgId, e);
+			else this.broadcastAll(e);
+			return;
+		}
+		if (e.type === "log" && !e.agentId) {
+			if (orgId) this.broadcastTo(orgId, e);
+			else this.broadcastAll(e);
+			return;
+		}
+		const members = manager ? await this.eventMemberUserIds(manager, e) : undefined;
+		if (manager && members !== undefined) {
+			const currentMembers = await this.sendChannelEventToMembers(orgId, manager, e, members);
+			if (currentMembers.length) this.maybePushAlertForMembers(orgId, e, currentMembers);
+			return;
+		}
+		if (orgId) this.broadcastTo(orgId, e);
+		else this.broadcastAll(e);
+	}
+
+	private async sendRosterSnapshot(orgId: string | undefined, manager: SquadManager): Promise<void> {
+		const sockets = orgId ? (this.clientsByOrg.get(orgId) ?? new Set<ServerWebSocket<SocketData>>()) : this.clients;
+		for (const ws of sockets) {
+			try {
+				const actor = this.actorForSocket(ws);
+				const agents = await manager.visibleAgents(actor);
+				ws.send(JSON.stringify({ type: "roster", agents, version: this.uiVersion } satisfies SquadEvent));
+			} catch {
+				/* dropped client */
+			}
+		}
+	}
+
+	private async eventMemberUserIds(manager: SquadManager, e: SquadEvent): Promise<string[] | undefined> {
+		if (e.type === "agent") return manager.channelMemberUserIdsForAgent(e.agent.id);
+		if (e.type === "removed") return e.channelId ? manager.channelMemberUserIds(e.channelId) : undefined;
+		if (e.type === "log" && e.agentId) return manager.channelMemberUserIdsForAgent(e.agentId);
+		if (e.type === "transcript" || e.type === "commands") return manager.channelMemberUserIdsForAgent(e.id);
+		if (e.type === "transition") return manager.channelMemberUserIdsForAgent(e.entry.agentId);
+		if (e.type === "audit" && e.entry.target) {
+			try {
+				return await manager.channelMemberUserIdsForAgent(e.entry.target);
+			} catch (err) {
+				console.warn(`[fanout] failed to resolve audit target membership for ${e.entry.target}: ${errText(err)}`);
+				return [];
+			}
+		}
+		if (e.type === "automation" && e.event.agent) return manager.channelMemberUserIdsForAgent(e.event.agent);
+		return undefined;
+	}
+
+	/** Re-resolve ONCE after the initial filter decision. A missing/failed answer is fail-closed;
+	 * never reuse the stale member list captured before a concurrent revocation. */
+	private async sendChannelEventToMembers(orgId: string | undefined, manager: SquadManager, e: SquadEvent, _userIds: readonly string[]): Promise<string[]> {
+		const currentMembers = e.type === "channel-entry"
+			? await manager.channelMemberUserIds(e.channelId)
+			: await this.eventMemberUserIds(manager, e);
+		if (!currentMembers?.length) return [];
+		const sockets = orgId ? (this.clientsByOrg.get(orgId) ?? new Set<ServerWebSocket<SocketData>>()) : this.clients;
+		if (sockets.size === 0) return currentMembers;
+		const s = JSON.stringify(e);
+		for (const ws of sockets) {
+			if (!ws.data.userId || !currentMembers.includes(ws.data.userId)) continue;
+			try {
+				ws.send(s);
+			} catch {
+				/* dropped client */
+			}
+		}
+		return currentMembers;
+	}
+
+	private broadcastAll(e: SquadEvent): void {
 		// Stamp the live UI version onto roster snapshots (manager-emitted ones leave it blank).
 		const s = JSON.stringify(e.type === "roster" ? { ...e, version: this.uiVersion } : e);
 		for (const ws of this.clients) {
@@ -3400,6 +3651,11 @@ export class SquadServer {
 		}
 	}
 
+	private maybePushAlertForMembers(orgId: string | undefined, e: SquadEvent, userIds: readonly string[]): void {
+		if (orgId) this.maybePushAlertOrg(orgId, e, userIds);
+		else this.maybePushAlert(e, userIds);
+	}
+
 	/** Fire a background push when an agent transitions into a state that needs a human. Reads
 	 *  `from`/`to` straight off the canonical `{type:"transition"}` SquadEvent (transitions.jsonl's
 	 *  own guarded write path, squad-manager.ts's transition()/recordTransition()) instead of the
@@ -3414,7 +3670,7 @@ export class SquadServer {
 	 *  the real pre-reattach `from`, so a boot-time reattach replay (`reason:"reattach"`, from !== to
 	 *  when derive() reclassified a crashed turn) would otherwise page the operator on every daemon
 	 *  restart. Denied entries never changed dto.status and are skipped outright. */
-	private maybePushAlert(e: SquadEvent): void {
+	private maybePushAlert(e: SquadEvent, userIds?: readonly string[]): void {
 		const push = this.opts.push;
 		if (!push) return;
 		if (e.type === "roster") {
@@ -3433,7 +3689,7 @@ export class SquadServer {
 			if (payload && key && now - (this.lastPush.get(key) ?? 0) >= 3000 && now - (this.lastPush.get(a.id) ?? 0) >= 3000) {
 				this.lastPush.set(key, now);
 				this.lastPush.set(a.id, now);
-				void push.notify(payload);
+				void push.notify(payload, userIds);
 			}
 			return;
 		}
@@ -3447,22 +3703,22 @@ export class SquadServer {
 			const now = Date.now();
 			if (now - (this.lastPush.get(a.id) ?? 0) >= 3000) {
 				this.lastPush.set(a.id, now);
-				void push.notify(payload);
+				void push.notify(payload, userIds);
 			}
 		}
-		this.maybePushCompletionDone(entry.from, a, push);
+		this.maybePushCompletionDone(entry.from, a, push, userIds);
 	}
 
 	/** Completion push (plans/voice-loop concern 01, generalized by daily-attention-w0 concern 01): a
 	 *  SEPARATE `done:` tag/debounce namespace from the escalation lane above, so a "finished" toast
 	 *  can never REPLACE (sw.js renotify) or debounce-eat an unactioned "needs you" alert for the same
-	 *  agent. File-mode only — explicit guard here rather than relying solely on `broadcast()` only
+	 *  agent. File-mode only — explicit guard here rather than relying solely on `broadcastAll()` only
 	 *  being wired in the file-mode branch today (see `start()`), so a future `broadcastTo` push wiring
 	 *  can never silently ride this one global subscription list across orgs (`broadcastTo`'s own doc
 	 *  comment already asserts this; this is defense in depth at the new payload site itself). Disarms
 	 *  the manager's `completionPushArmed` latch only once the push actually sends — that's the
 	 *  "exactly one push per armed dispatch" invariant's other half. */
-	private maybePushCompletionDone(prev: AgentStatus | undefined, a: AgentDTO, push: PushService): void {
+	private maybePushCompletionDone(prev: AgentStatus | undefined, a: AgentDTO, push: PushService, userIds?: readonly string[]): void {
 		if (this.registry) return;
 		const payload = completionPayload(prev, a, this.pushSeeded);
 		if (!payload) return;
@@ -3470,14 +3726,9 @@ export class SquadServer {
 		const now = Date.now();
 		if (now - (this.lastPush.get(key) ?? 0) < 3000) return;
 		this.lastPush.set(key, now);
-		// Disarm SYNCHRONOUSLY, before the (seconds-long, per-subscription) network send — review
-		// finding: an async post-send disarm races a NEWER dispatch's arm on the same agent
-		// (applyCommand skips re-arming while the latch still reads true, then the late disarm
-		// consumes the latch that second dispatch was riding — its push is silently lost). The cost
-		// of sync-consume is that a totally-failed notify() doesn't retry on a later idle — accepted:
-		// the push is best-effort by design, the debrief cursor is the guarantee (DESIGN.md).
+		// Disarm SYNCHRONOUSLY, before the (seconds-long, per-subscription) network send.
 		this.singleManager?.clearCompletionPushArmed(a.id);
-		void push.notify(payload);
+		void push.notify(payload, userIds);
 	}
 
 	/** DB-registry twin of `maybePushAlert`: same payload rules (escalation + voice-done), same
@@ -3494,7 +3745,7 @@ export class SquadServer {
 	 *  transitions, emitted synchronously inside `manager.start()` before `ManagerRegistry.create` can
 	 *  fire the marker) is still correctly swallowed by `!state.seeded` below — that boot-quiet
 	 *  invariant is unchanged, it just no longer doubles as an accidental seed. */
-	private maybePushAlertOrg(orgId: string, e: SquadEvent): void {
+	private maybePushAlertOrg(orgId: string, e: SquadEvent, userIds?: readonly string[]): void {
 		if (!this.registry || !this.opts.pushRoot) return;
 		let state = this.orgAlertState.get(orgId);
 		if (!state) {
@@ -3516,7 +3767,7 @@ export class SquadServer {
 			if (payload && key && now - (state.lastPush.get(key) ?? 0) >= 3000 && now - (state.lastPush.get(a.id) ?? 0) >= 3000) {
 				state.lastPush.set(key, now);
 				state.lastPush.set(a.id, now);
-				void this.pushForOrg(orgId).then((push) => void push.notify(payload));
+				void this.pushForOrg(orgId).then((push) => void push.notify(payload, userIds));
 			}
 			return;
 		}
@@ -3531,16 +3782,15 @@ export class SquadServer {
 		const now = Date.now();
 		if (escalation && now - (state.lastPush.get(a.id) ?? 0) >= 3000) {
 			state.lastPush.set(a.id, now);
-			void this.pushForOrg(orgId).then((push) => void push.notify(escalation));
+			void this.pushForOrg(orgId).then((push) => void push.notify(escalation, userIds));
 		}
 		if (done) {
 			const key = `done:${a.id}`;
 			if (now - (state.lastPush.get(key) ?? 0) >= 3000) {
 				state.lastPush.set(key, now);
-				// Same sync-disarm-before-send discipline as the file-mode lane (audit finding: an async
-				// post-send disarm races a newer dispatch's re-arm).
+				// Same sync-disarm-before-send discipline as the file-mode lane.
 				this.orgManager(orgId)?.clearCompletionPushArmed(a.id);
-				void this.pushForOrg(orgId).then((push) => void push.notify(done));
+				void this.pushForOrg(orgId).then((push) => void push.notify(done, userIds));
 			}
 		}
 	}
@@ -4283,9 +4533,9 @@ async function governancePayload(managers: SquadManager[], role: Role, dbMode: b
 		compliance: { findings: (await Promise.all(managers.map((m) => m.complianceFindings()))).flat(), evaluatedAt: Date.now() },
 	};
 }
-async function actionItemsPayload(managers: SquadManager[], url: URL): Promise<{ items: ActionItem[]; generatedAt: number }> {
+async function actionItemsPayload(managers: SquadManager[], url: URL, actor: Actor): Promise<{ items: ActionItem[]; generatedAt: number }> {
 	const repo = url.searchParams.get("repo") ?? undefined;
-	const agents = managers.flatMap((m) => m.list()).filter((a) => !repo || a.repo === repo);
+	const agents = (await Promise.all(managers.map((m) => m.visibleAgents(actor)))).flat().filter((a) => !repo || a.repo === repo);
 	const health = await aggregateHealth(managers);
 	const items: ActionItem[] = [];
 	for (const a of agents) {

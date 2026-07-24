@@ -223,6 +223,17 @@ test("POST /api/spawn with a non-string source drops it (typeof-narrowed, matche
 
 test("POST /api/spawn carries channelId into the created agent DTO", async () => {
 	const { url } = await startFixture();
+	// The channel must EXIST to be spawned into. Concern 18 gates the spawn body's `channelId` on
+	// `canReadChannel`, which fails closed on a missing row — deliberately, because an agent bound to
+	// a channelId with no channel behind it is the state that made the WS fan-out treat it as
+	// org-public (absent membership answer read as "public") while every HTTP read denied it.
+	// Rejecting the binding at create time is what makes that state unreachable.
+	const created = await fetch(`${url}/api/channels`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ id: "ops", name: "#ops" }),
+	});
+	expect(created.status).toBe(200);
 	const res = await fetch(`${url}/api/spawn`, {
 		method: "POST",
 		headers: { "content-type": "application/json" },
@@ -231,6 +242,16 @@ test("POST /api/spawn carries channelId into the created agent DTO", async () =>
 	expect(res.status).toBe(200);
 	const body = (await res.json()) as { agent: { channelId?: string } };
 	expect(body.agent.channelId).toBe("ops");
+});
+
+test("POST /api/spawn refuses a channelId with no channel behind it", async () => {
+	const { url } = await startFixture();
+	const res = await fetch(`${url}/api/spawn`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ prompt: "fix the thing", channelId: "no-such-channel" }),
+	});
+	expect(res.status).toBe(403);
 });
 
 // ── spawnScoreboard TTL + single-flight cache (PR #114 cross-lineage review) ────────────────────

@@ -32,9 +32,11 @@ const APP_TABLES = [
 	"feedback_items",
 	"feedback_validation_responses",
 	"feedback_rewards",
+	"channel_memberships",
+	"channel_read_cursors",
 ] as const;
-const BASE_APP_TABLES = APP_TABLES.slice(0, 8);
-const FEEDBACK_TABLES = APP_TABLES.slice(8);
+const BASE_APP_TABLES = ["roster_index", "features", "audit", "channels", "channel_entries", "usage", "federation_peers", "capability_records"] as const;
+const FEEDBACK_TABLES = ["feedback_campaigns", "feedback_items", "feedback_validation_responses", "feedback_rewards"] as const;
 
 const createAppTables: Migration = {
 	async up(db: Kysely<any>) {
@@ -108,6 +110,7 @@ const createAppTables: Migration = {
 			.addPrimaryKeyConstraint("channel_entries_pk", ["org_id", "channel_id", "seq"])
 			.execute();
 		await db.schema.createIndex("channel_entries_org_channel_seq").on("channel_entries").columns(["org_id", "channel_id", "seq"]).execute();
+
 
 		await db.schema
 			.createTable("usage")
@@ -278,6 +281,48 @@ const usageTraceId: Migration = {
 // Self-serve org join requests (domain-match onboarding, "require approval" policy). Deliberately NOT an
 // RLS/FK app table: it's written during onboarding OUTSIDE the org-scoped DAL context (the requester isn't
 // a member yet), like the better-auth-owned org/member tables. Admin reads scope by org_id explicitly.
+
+const channelMemberships: Migration = {
+	async up(db: Kysely<any>) {
+		await db.schema.alterTable("channels").addColumn("visibility", "text", (c) => c.notNull().defaultTo("org-public")).execute();
+		await db.schema.alterTable("channels").addColumn("creator_user_id", "text").execute();
+		await db.schema
+			.createTable("channel_memberships")
+			.addColumn("org_id", "text", (c) => c.notNull().references("organization.id").onDelete("cascade"))
+			.addColumn("channel_id", "text", (c) => c.notNull())
+			.addColumn("user_id", "text", (c) => c.notNull())
+			.addColumn("active", "integer", (c) => c.notNull())
+			.addColumn("updated_by", "text", (c) => c.notNull())
+			.addColumn("updated_at", "bigint", (c) => c.notNull())
+			.addPrimaryKeyConstraint("channel_memberships_pk", ["org_id", "channel_id", "user_id"])
+			.execute();
+		await db.schema.createIndex("channel_memberships_org_channel_active").on("channel_memberships").columns(["org_id", "channel_id", "active"]).execute();
+	},
+	async down(db: Kysely<any>) {
+		await db.schema.dropTable("channel_memberships").execute();
+		await db.schema.alterTable("channels").dropColumn("creator_user_id").execute();
+		await db.schema.alterTable("channels").dropColumn("visibility").execute();
+	},
+};
+
+const channelReadCursors: Migration = {
+	async up(db: Kysely<any>) {
+		await db.schema
+			.createTable("channel_read_cursors")
+			.addColumn("org_id", "text", (c) => c.notNull().references("organization.id").onDelete("cascade"))
+			.addColumn("channel_id", "text", (c) => c.notNull())
+			.addColumn("user_id", "text", (c) => c.notNull())
+			.addColumn("last_read_seq", "bigint", (c) => c.notNull())
+			.addColumn("updated_at", "bigint", (c) => c.notNull())
+			.addPrimaryKeyConstraint("channel_read_cursors_pk", ["org_id", "channel_id", "user_id"])
+			.execute();
+		await db.schema.createIndex("channel_read_cursors_org_channel").on("channel_read_cursors").columns(["org_id", "channel_id"]).execute();
+	},
+	async down(db: Kysely<any>) {
+		await db.schema.dropTable("channel_read_cursors").execute();
+	},
+};
+
 const createJoinRequests: Migration = {
 	async up(db: Kysely<any>) {
 		await db.schema
@@ -312,6 +357,10 @@ export function appMigrations(type: DbKind): Record<string, Migration> {
 		"0006_join_requests": createJoinRequests,
 		"0007_org_secret": createOrgSecretTable,
 		"0008_org_secret_rls": rlsMigration(type, ["org_secret"]),
+		"0009_channel_memberships": channelMemberships,
+		"0010_channel_memberships_rls": rlsMigration(type, ["channel_memberships"]),
+		"0011_channel_read_cursors": channelReadCursors,
+		"0012_channel_read_cursors_rls": rlsMigration(type, ["channel_read_cursors"]),
 	};
 }
 

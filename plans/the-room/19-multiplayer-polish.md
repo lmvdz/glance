@@ -1,5 +1,5 @@
 # Multiplayer polish — typing, read cursors, concurrent-steer visibility, live smoke
-STATUS: open
+STATUS: done
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: mechanical

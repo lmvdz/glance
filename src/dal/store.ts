@@ -19,7 +19,7 @@ import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { sql } from "kysely";
-import type { Channel, ChannelEntry } from "../channels.ts";
+import type { Channel, ChannelEntry, ChannelMembership, ChannelReadCursor } from "../channels.ts";
 import type { PersistedAgent, PersistedFeature, RunReceipt, TranscriptEntry } from "../types.ts";
 import { normalizeCapabilitySnapshot, type CapabilitySnapshot } from "../capabilities/index.ts";
 import { emptyFeedbackSnapshot, type FeedbackSnapshot } from "../feedback.ts";
@@ -40,8 +40,23 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 function readChannel(value: unknown): Channel | undefined {
 	if (!isPlainObject(value)) return undefined;
 	const kind = value.kind;
+	const visibility = value.visibility === "private" ? "private" : "org-public";
 	return typeof value.id === "string" && typeof value.name === "string" && typeof value.createdAt === "number" && (kind === "default" || kind === "user")
-		? { id: value.id, name: value.name, createdAt: value.createdAt, kind }
+		? { id: value.id, name: value.name, createdAt: value.createdAt, kind, visibility, creatorUserId: typeof value.creatorUserId === "string" ? value.creatorUserId : undefined }
+		: undefined;
+}
+
+function readChannelMembership(value: unknown): ChannelMembership | undefined {
+	if (!isPlainObject(value)) return undefined;
+	return typeof value.channelId === "string" && typeof value.userId === "string" && typeof value.active === "boolean" && typeof value.updatedBy === "string" && typeof value.updatedAt === "number"
+		? { channelId: value.channelId, userId: value.userId, active: value.active, updatedBy: value.updatedBy, updatedAt: value.updatedAt }
+		: undefined;
+}
+
+function readChannelReadCursor(value: unknown): ChannelReadCursor | undefined {
+	if (!isPlainObject(value)) return undefined;
+	return typeof value.channelId === "string" && typeof value.userId === "string" && typeof value.lastReadSeq === "number" && typeof value.updatedAt === "number"
+		? { channelId: value.channelId, userId: value.userId, lastReadSeq: value.lastReadSeq, updatedAt: value.updatedAt }
 		: undefined;
 }
 
@@ -138,9 +153,13 @@ export interface Store {
 	getChannel(id: string): Promise<Channel | undefined>;
 	putChannel(channel: Channel): Promise<void>;
 	listChannelEntries(channelId: string, since?: number): Promise<ChannelEntry[]>;
-	searchChannelEntries?(q: string, limit?: number): Promise<ChannelSearchResult[]>;
+	searchChannelEntries?(q: string, limit?: number, offset?: number): Promise<ChannelSearchResult[]>;
 	appendChannelEntry(entry: ChannelEntry): Promise<void>;
 	nextChannelSeq(channelId: string): Promise<number>;
+	listChannelMemberships(channelId: string): Promise<ChannelMembership[]>;
+	putChannelMembership(row: ChannelMembership): Promise<void>;
+	getChannelReadCursor(channelId: string, userId: string): Promise<ChannelReadCursor | undefined>;
+	putChannelReadCursor(row: ChannelReadCursor): Promise<void>;
 	/** Cumulative save() failures this process, when the store tracks them (FileStore only — DbStore's
 	 *  per-write failures throw rather than swallow, so there's nothing to count). Surfaced through
 	 *  factory-status since the topology guarantee now rests on this write actually landing. */
@@ -170,6 +189,7 @@ export class FileStore implements Store {
 	private readonly feedbackFile: string;
 	private saveFailureCount = 0;
 	private lastSaveWarnAt = 0;
+	private static readonly channelWriteLocks = new Map<string, Promise<void>>();
 	constructor(private readonly stateDir: string) {
 		this.stateFile = path.join(stateDir, "state.json");
 		this.feedbackFile = path.join(stateDir, "feedback.json");
@@ -254,8 +274,25 @@ export class FileStore implements Store {
 	}
 
 	async putChannel(channel: Channel): Promise<void> {
-		const channels = [...(await this.listChannels()).filter((c) => c.id !== channel.id), channel].sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
-		await getStorageBackend().writeDurable(path.join(this.stateDir, "channels.json"), JSON.stringify(channels, null, 2));
+		const file = path.join(this.stateDir, "channels.json");
+		const prior = FileStore.channelWriteLocks.get(file) ?? Promise.resolve();
+		let release!: () => void;
+		const next = prior.then(() => new Promise<void>((resolve) => { release = resolve; }));
+		FileStore.channelWriteLocks.set(file, next);
+		await prior;
+		try {
+			const existing = await this.listChannels();
+			const current = existing.find((c) => c.id === channel.id);
+			if (current) {
+				if (current.visibility !== channel.visibility || current.creatorUserId !== channel.creatorUserId || current.name !== channel.name) throw new Error("channel already exists");
+				return;
+			}
+			const channels = [...existing, channel].sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+			await getStorageBackend().writeDurable(file, JSON.stringify(channels, null, 2));
+		} finally {
+			release();
+			if (FileStore.channelWriteLocks.get(file) === next) FileStore.channelWriteLocks.delete(file);
+		}
 	}
 
 	async listChannelEntries(channelId: string, since = 0): Promise<ChannelEntry[]> {
@@ -272,7 +309,7 @@ export class FileStore implements Store {
 		return entries.sort((a, b) => a.seq - b.seq);
 	}
 
-	async searchChannelEntries(q: string, limit = 50): Promise<ChannelSearchResult[]> {
+	async searchChannelEntries(q: string, limit = 50, offset = 0): Promise<ChannelSearchResult[]> {
 		const needle = q.trim().toLowerCase();
 		if (!needle) return [];
 		const raw = await getStorageBackend().readText(path.join(this.stateDir, "channels.jsonl"));
@@ -289,7 +326,7 @@ export class FileStore implements Store {
 				results.push({ entry, snippet: searchSnippet(text, hitAt, q.trim().length) });
 			} catch {}
 		}
-		return results.sort((a, b) => b.entry.ts - a.entry.ts || b.entry.seq - a.entry.seq).slice(0, limit);
+		return results.sort((a, b) => b.entry.ts - a.entry.ts || b.entry.seq - a.entry.seq).slice(offset, offset + limit);
 	}
 
 
@@ -299,6 +336,42 @@ export class FileStore implements Store {
 
 	async nextChannelSeq(channelId: string): Promise<number> {
 		return (await this.listChannelEntries(channelId, 0)).reduce((max, entry) => Math.max(max, entry.seq), 0);
+	}
+
+	async listChannelMemberships(channelId: string): Promise<ChannelMembership[]> {
+		const raw = await getStorageBackend().readText(path.join(this.stateDir, "channel-memberships.jsonl"));
+		if (!raw) return [];
+		const latest = new Map<string, ChannelMembership>();
+		for (const line of raw.split("\n")) {
+			if (!line.trim()) continue;
+			try {
+				const row = readChannelMembership(JSON.parse(line));
+				if (row?.channelId === channelId) latest.set(row.userId, row);
+			} catch {}
+		}
+		return [...latest.values()].sort((a, b) => a.userId.localeCompare(b.userId));
+	}
+
+	async putChannelMembership(row: ChannelMembership): Promise<void> {
+		await getStorageBackend().appendDurable(path.join(this.stateDir, "channel-memberships.jsonl"), `${JSON.stringify(row)}\n`);
+	}
+
+	async getChannelReadCursor(channelId: string, userId: string): Promise<ChannelReadCursor | undefined> {
+		const raw = await getStorageBackend().readText(path.join(this.stateDir, "channel-read-cursors.jsonl"));
+		if (!raw) return undefined;
+		let latest: ChannelReadCursor | undefined;
+		for (const line of raw.split("\n")) {
+			if (!line.trim()) continue;
+			try {
+				const row = readChannelReadCursor(JSON.parse(line));
+				if (row?.channelId === channelId && row.userId === userId) latest = row;
+			} catch {}
+		}
+		return latest;
+	}
+
+	async putChannelReadCursor(row: ChannelReadCursor): Promise<void> {
+		await getStorageBackend().appendDurable(path.join(this.stateDir, "channel-read-cursors.jsonl"), `${JSON.stringify(row)}\n`);
 	}
 }
 
@@ -543,20 +616,23 @@ export class DbStore implements Store {
 	}
 
 	async listChannels(): Promise<Channel[]> {
-		return withOrg(this.ctx, this.orgId, (trx) => trx.selectFrom("channels").select(["id", "name", "created_at", "kind"]).where("org_id", "=", this.orgId).orderBy("created_at").execute())
-			.then((rows) => rows.map((r) => ({ id: r.id, name: r.name, createdAt: Number(r.created_at), kind: r.kind as Channel["kind"] })));
+		return withOrg(this.ctx, this.orgId, (trx) => trx.selectFrom("channels").select(["id", "name", "created_at", "kind", "visibility", "creator_user_id"]).where("org_id", "=", this.orgId).orderBy("created_at").execute())
+			.then((rows) => rows.map((r) => ({ id: r.id, name: r.name, createdAt: Number(r.created_at), kind: r.kind as Channel["kind"], visibility: r.visibility as Channel["visibility"], creatorUserId: r.creator_user_id ?? undefined })));
 	}
 
 	async getChannel(id: string): Promise<Channel | undefined> {
-		const row = await withOrg(this.ctx, this.orgId, (trx) => trx.selectFrom("channels").select(["id", "name", "created_at", "kind"]).where("org_id", "=", this.orgId).where("id", "=", id).executeTakeFirst());
-		return row ? { id: row.id, name: row.name, createdAt: Number(row.created_at), kind: row.kind as Channel["kind"] } : undefined;
+		const row = await withOrg(this.ctx, this.orgId, (trx) => trx.selectFrom("channels").select(["id", "name", "created_at", "kind", "visibility", "creator_user_id"]).where("org_id", "=", this.orgId).where("id", "=", id).executeTakeFirst());
+		return row ? { id: row.id, name: row.name, createdAt: Number(row.created_at), kind: row.kind as Channel["kind"], visibility: row.visibility as Channel["visibility"], creatorUserId: row.creator_user_id ?? undefined } : undefined;
 	}
 
 	async putChannel(channel: Channel): Promise<void> {
-		await withOrg(this.ctx, this.orgId, async (trx) => {
-			await trx.deleteFrom("channels").where("org_id", "=", this.orgId).where("id", "=", channel.id).execute();
-			await trx.insertInto("channels").values({ org_id: this.orgId, id: channel.id, name: channel.name, kind: channel.kind, created_at: channel.createdAt }).execute();
-		});
+		await withOrg(this.ctx, this.orgId, (trx) =>
+			trx
+				.insertInto("channels")
+				.values({ org_id: this.orgId, id: channel.id, name: channel.name, kind: channel.kind, created_at: channel.createdAt, visibility: channel.visibility, creator_user_id: channel.creatorUserId ?? null })
+				.onConflict((oc) => oc.columns(["org_id", "id"]).doNothing())
+				.execute(),
+		);
 	}
 
 	async listChannelEntries(channelId: string, since = 0): Promise<ChannelEntry[]> {
@@ -564,7 +640,7 @@ export class DbStore implements Store {
 		return rows.map((r) => readChannelEntry(JSON.parse(r.data))).filter((entry): entry is ChannelEntry => entry !== undefined);
 	}
 
-	async searchChannelEntries(q: string, limit = 50): Promise<ChannelSearchResult[]> {
+	async searchChannelEntries(q: string, limit = 50, offset = 0): Promise<ChannelSearchResult[]> {
 		const needle = q.trim();
 		if (!needle) return [];
 		const pattern = `%${escapeLike(needle)}%`;
@@ -576,6 +652,7 @@ export class DbStore implements Store {
 				.where(sql`json_extract(data, '$.text')`, "like", pattern)
 				.orderBy("ts", "desc")
 				.limit(limit)
+				.offset(offset)
 				.execute(),
 		);
 		return rows
@@ -596,6 +673,30 @@ export class DbStore implements Store {
 	async nextChannelSeq(channelId: string): Promise<number> {
 		const row = await withOrg(this.ctx, this.orgId, (trx) => trx.selectFrom("channel_entries").select(({ fn }) => fn.max("seq").as("seq")).where("org_id", "=", this.orgId).where("channel_id", "=", channelId).executeTakeFirst());
 		return Number(row?.seq ?? 0);
+	}
+
+	async listChannelMemberships(channelId: string): Promise<ChannelMembership[]> {
+		return withOrg(this.ctx, this.orgId, async (trx) => {
+			const rows = await trx.selectFrom("channel_memberships").select(["channel_id", "user_id", "active", "updated_by", "updated_at"]).where("org_id", "=", this.orgId).where("channel_id", "=", channelId).orderBy("user_id").execute();
+			return rows.map((row) => ({ channelId: row.channel_id, userId: row.user_id, active: !!row.active, updatedBy: row.updated_by, updatedAt: Number(row.updated_at) }));
+		});
+	}
+
+	async putChannelMembership(row: ChannelMembership): Promise<void> {
+		await withOrg(this.ctx, this.orgId, (trx) =>
+			trx.insertInto("channel_memberships").values({ org_id: this.orgId, channel_id: row.channelId, user_id: row.userId, active: row.active ? 1 : 0, updated_by: row.updatedBy, updated_at: row.updatedAt }).onConflict((oc) => oc.columns(["org_id", "channel_id", "user_id"]).doUpdateSet({ active: row.active ? 1 : 0, updated_by: row.updatedBy, updated_at: row.updatedAt })).execute(),
+		);
+	}
+
+	async getChannelReadCursor(channelId: string, userId: string): Promise<ChannelReadCursor | undefined> {
+		const row = await withOrg(this.ctx, this.orgId, (trx) => trx.selectFrom("channel_read_cursors").select(["channel_id", "user_id", "last_read_seq", "updated_at"]).where("org_id", "=", this.orgId).where("channel_id", "=", channelId).where("user_id", "=", userId).executeTakeFirst());
+		return row ? { channelId: row.channel_id, userId: row.user_id, lastReadSeq: Number(row.last_read_seq), updatedAt: Number(row.updated_at) } : undefined;
+	}
+
+	async putChannelReadCursor(row: ChannelReadCursor): Promise<void> {
+		await withOrg(this.ctx, this.orgId, (trx) =>
+			trx.insertInto("channel_read_cursors").values({ org_id: this.orgId, channel_id: row.channelId, user_id: row.userId, last_read_seq: row.lastReadSeq, updated_at: row.updatedAt }).onConflict((oc) => oc.columns(["org_id", "channel_id", "user_id"]).doUpdateSet({ last_read_seq: row.lastReadSeq, updated_at: row.updatedAt })).execute(),
+		);
 	}
 
 	private async loadTranscripts(): Promise<Record<string, TranscriptEntry[]>> {

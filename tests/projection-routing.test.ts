@@ -36,7 +36,7 @@ interface AgentRecordLike {
 }
 
 interface StoreLike {
-	putChannel(channel: { id: string; name: string; createdAt: number; kind: "default" | "user" }): Promise<void>;
+	putChannel(channel: { id: string; name: string; createdAt: number; kind: "default" | "user"; visibility: "org-public" }): Promise<void>;
 }
 
 interface InternalHost {
@@ -80,7 +80,7 @@ async function makeMgr(prefix: string): Promise<{ mgr: SquadManager; host: Inter
 }
 
 async function createChannel(host: InternalHost, id: string): Promise<void> {
-	await host.store.putChannel({ id, name: `#${id}`, createdAt: Date.now(), kind: "user" });
+	await host.store.putChannel({ id, name: `#${id}`, createdAt: Date.now(), kind: "user", visibility: "org-public" });
 }
 
 function waitForChannelEntry(mgr: SquadManager, channelId: string, predicate: (entry: ChannelEntry) => boolean): Promise<ChannelEntry> {
@@ -168,6 +168,37 @@ test("automation-sourced prompt does not return-emit", async () => {
 	await mgr.stop();
 });
 
+test("second mention steer in the turn window echoes which actor it follows", async () => {
+	const { mgr, host, repo } = await makeMgr("projection-mention-follows");
+	await createChannel(host, "ops");
+	const dto = await mgr.create({ name: "resident-agent", repo, approvalMode: "yolo", channelId: "ops", autoRoute: false });
+	const alice = { id: "db:alice", displayName: "Alice", origin: "local" as const, role: "admin" as const };
+	const bob = { id: "db:bob", displayName: "Bob", origin: "local" as const, role: "admin" as const };
+
+	const firstEcho = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === "mention-steer");
+	await mgr.applyCommand({ type: "prompt", id: dto.id, message: "triage logs", channelId: "ops", source: "mention", clientTurnId: "alice-turn" } as ClientCommand, alice);
+	const first = await firstEcho;
+	expect(first.text).toBe("db:alice steered @resident-agent: triage logs");
+	expect(first.event?.payload).toMatchObject({ follows: undefined, face: { pinned: { actor: "db:alice", target: "resident-agent", clientTurnId: "alice-turn" } } });
+
+	const secondEcho = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === "mention-steer" && entry.text.includes("follows db:alice's steer"));
+	await mgr.applyCommand({ type: "prompt", id: dto.id, message: "escalate impact", channelId: "ops", source: "mention", clientTurnId: "bob-turn" } as ClientCommand, bob);
+	const second = await secondEcho;
+
+	expect(second.text).toBe("db:bob steered @resident-agent (follows db:alice's steer): escalate impact");
+	expect(second.event?.payload).toMatchObject({
+		actor: "db:bob",
+		target: dto.id,
+		follows: "db:alice",
+		clientTurnId: "bob-turn",
+		face: {
+			body: "db:bob steered @resident-agent (follows db:alice's steer): escalate impact",
+			pinned: { actor: "db:bob", target: "resident-agent", clientTurnId: "bob-turn", follows: "db:alice" },
+		},
+	});
+	await mgr.stop();
+});
+
 test("origin channel receives full lifecycle pointer-cards with pinned refs and face", async () => {
 	const { mgr, host, repo } = await makeMgr("projection-origin");
 	await createChannel(host, "room-a");
@@ -215,24 +246,26 @@ test("pending request and room card are one needs-you substrate and both resolve
 	if (!rec) throw new Error("missing record");
 
 	const pendingCard = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === "needs-you");
-	host.onUi(rec, { method: "confirm", id: "req-1", title: "Approve deploy", message: "ship it?" } as RpcExtensionUIRequest);
+	// `gate_`-prefixed id = gate-class = a decision no supervisor may auto-answer. Only these earn a
+	// permanent room card; see isRoomWorthyPending and the coverage below.
+	host.onUi(rec, { method: "confirm", id: "gate_req-1", title: "Approve deploy", message: "ship it?" } as RpcExtensionUIRequest);
 	const opened = await pendingCard;
-	expect(mgr.getAgent(dto.id)?.pending.map((request) => request.id)).toEqual(["req-1"]);
+	expect(mgr.getAgent(dto.id)?.pending.map((request) => request.id)).toEqual(["gate_req-1"]);
 	expect(isEventPayload(opened.event?.payload)).toBe(true);
 	if (!isEventPayload(opened.event?.payload)) throw new Error("bad open payload");
 	expect(opened.event.payload.face.pendingStatus).toBe("pending");
-	expect(opened.event.payload.face.pendingId).toBe("req-1");
+	expect(opened.event.payload.face.pendingId).toBe("gate_req-1");
 	expect(opened.event.payload.face.title).toBe("Needs you · Approve deploy");
 	expect(opened.event.payload.face.body).toBe("ship it?");
 	expect(opened.event.payload.face.tone).toBe("warning");
-	expect(opened.event.payload.face.pinned).toEqual({ "why stopped": "Approve deploy", agent: "unit-c", age: "just now" });
+	expect(opened.event.payload.face.pinned).toEqual({ agent: "unit-c", age: "just now" });
 	const openedDay = new Date(opened.ts).toISOString().slice(0, 10);
 	expect((await mgr.adoptionCounters()).roomInteractionsByDay[openedDay]).toBe(1);
 	await mgr.appendChannelPost("ops", LOCAL_ACTOR, { text: "room steering" });
 	expect((await mgr.adoptionCounters()).roomInteractionsByDay[openedDay]).toBe(2);
 
 	const resolvedCard = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === "needs-you" && isEventPayload(entry.event.payload) && entry.event.payload.face.pendingStatus === "resolved");
-	await mgr.applyCommand({ type: "answer", id: dto.id, requestId: "req-1", value: "yes" }, LOCAL_ACTOR);
+	await mgr.applyCommand({ type: "answer", id: dto.id, requestId: "gate_req-1", value: "yes" }, LOCAL_ACTOR);
 	const resolved = await resolvedCard;
 	expect(mgr.getAgent(dto.id)?.pending).toEqual([]);
 	expect(isEventPayload(resolved.event?.payload)).toBe(true);
@@ -308,4 +341,33 @@ test("projection is scoped to the manager org store", async () => {
 	expect(await b.mgr.channelEntries("ops")).toHaveLength(0);
 	await a.mgr.stop();
 	await b.mgr.stop();
+});
+
+test("routine tool approvals never become room cards — only gate-class pendings do", async () => {
+	// The defect this pins: over twelve hours of one real fleet run, #fleet accumulated 544 cards and
+	// every single one was an `Allow tool: bash Command: …` permission prompt (plus its paired
+	// "resolved" twin). 100% of the room's content was noise, zero proofs — the firehose DIRECTION.md's
+	// near-empty needs-you law forbids. The lane still shows these; the room no longer records them.
+	const { mgr, host, repo } = await makeMgr("projection-worthiness");
+	await createChannel(host, "ops");
+	const dto = await mgr.create({ name: "unit-noise", repo, approvalMode: "write", channelId: "ops", autoRoute: false });
+	const rec = host.agents.get(dto.id);
+	if (!rec) throw new Error("missing record");
+
+	// Raise it, then resolve it. The lane and rail read AgentDTO.pending directly and are untouched by
+	// this change; what must not happen is a permanent card — on either edge of the lifecycle.
+	host.onUi(rec, { method: "confirm", id: "acpui_7", title: "Allow tool: bash", message: "Command: bun run check" } as RpcExtensionUIRequest);
+	expect(await mgr.channelEntries("ops")).toHaveLength(0);
+	await mgr.applyCommand({ type: "answer", id: dto.id, requestId: "acpui_7", value: "yes" }, LOCAL_ACTOR);
+	expect(mgr.getAgent(dto.id)?.pending).toEqual([]);
+	expect(await mgr.channelEntries("ops")).toHaveLength(0);
+
+	// A gate-class request — the kind no supervisor may auto-answer — still earns its card.
+	const gateCard = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === "needs-you");
+	host.onUi(rec, { method: "confirm", id: "acpui_8", title: "GATE: ship to production?", message: "3 services" } as RpcExtensionUIRequest);
+	const card = await gateCard;
+	expect(isEventPayload(card.event?.payload)).toBe(true);
+	if (!isEventPayload(card.event?.payload)) throw new Error("bad payload");
+	expect(card.event.payload.face.title).toBe("Needs you · GATE: ship to production?");
+	await mgr.stop();
 });
