@@ -20,17 +20,18 @@ import {
 const NOW = Date.UTC(2026, 6, 17, 12, 0, 0); // 2026-07-17T12:00:00Z — window is 07-11..07-17
 
 describe('buildAdoptionView', () => {
-  test('three series in a fixed order, today + trailing-week sum + a 7-point oldest->newest spark', () => {
+  test('four series in a fixed order, today + trailing-week sum + a 7-point oldest->newest spark', () => {
     const counters: AdoptionCountersWire = {
       casualSessionsByDay: { '2026-07-17': 3, '2026-07-15': 1 },
       promptsByDay: { '2026-07-17': 5 },
       pushTapsByDay: { '2026-07-16': 2 }, // 0 today, 2 this week — real data, NOT a fake zero
+      roomInteractionsByDay: { '2026-07-17': 4 },
     };
     const v = buildAdoptionView(counters, NOW);
     expect(v.day).toBe('2026-07-17');
-    expect(v.series.map((s) => s.key)).toEqual(['sessions', 'prompts', 'pushTaps']);
-    expect(v.series.map((s) => s.label)).toEqual(['Casual sessions', 'Prompts', 'Push taps']);
-    const [sessions, prompts, taps] = v.series;
+    expect(v.series.map((s) => s.key)).toEqual(['sessions', 'prompts', 'pushTaps', 'roomInteractions']);
+    expect(v.series.map((s) => s.label)).toEqual(['Casual sessions', 'Prompts', 'Push taps', 'Room interactions']);
+    const [sessions, prompts, taps, room] = v.series;
     expect(sessions.today).toBe(3);
     expect(sessions.week).toBe(4); // 3 + 1
     expect(sessions.spark).toEqual([0, 0, 0, 0, 1, 0, 3]); // 07-11..07-17
@@ -39,6 +40,8 @@ describe('buildAdoptionView', () => {
     expect(taps.today).toBe(0);
     expect(taps.week).toBe(2);
     expect(taps.spark.length).toBe(7);
+    expect(room.today).toBe(4);
+    expect(room.week).toBe(4);
     expect(v.hasActivity).toBe(true);
   });
 
@@ -73,9 +76,11 @@ describe('isAdoptionCountersWire / coerceAdoptionCounters', () => {
     expect(isAdoptionCountersWire({ casualSessionsByDay: { d: 'x' }, promptsByDay: {}, pushTapsByDay: {} })).toBe(false);
   });
   test('coerce turns a malformed/old payload into all-empty (never throws downstream)', () => {
-    expect(coerceAdoptionCounters('nope')).toEqual({ casualSessionsByDay: {}, promptsByDay: {}, pushTapsByDay: {} });
-    const good = { casualSessionsByDay: { '2026-07-17': 2 }, promptsByDay: {}, pushTapsByDay: {} };
-    expect(coerceAdoptionCounters(good)).toBe(good);
+    expect(coerceAdoptionCounters('nope')).toEqual({ casualSessionsByDay: {}, promptsByDay: {}, pushTapsByDay: {}, roomInteractionsByDay: {} });
+    const legacy = { casualSessionsByDay: { '2026-07-17': 2 }, promptsByDay: {}, pushTapsByDay: {} };
+    expect(coerceAdoptionCounters(legacy)).toEqual({ ...legacy, roomInteractionsByDay: {} });
+    const good = { ...legacy, roomInteractionsByDay: { '2026-07-17': 1 } };
+    expect(coerceAdoptionCounters(good)).toEqual(good);
   });
 });
 

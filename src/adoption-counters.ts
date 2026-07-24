@@ -7,7 +7,8 @@
  *    (POST /api/console and `glance here` both create `name: "chat"`, ids `chat-*`).
  *  - prompts: `transitions.jsonl` (lifecycle-truth's CLOSED substrate) — a transition INTO
  *    `working` FROM `idle`|`input` is a turn start, i.e. a prompt. RunReceipt cannot count these:
- *    it is whole-run granularity (one agent_start..agent_end window per accumulator).
+ *  - room interactions: `channels.jsonl` / DB `channel_entries` — user-authored channel posts
+ *    and manager-authored needs-you cards prove the room surface is participating in the same loop.
  *  - push taps: `push-taps.jsonl` — appended by POST /api/push-tap, which the webapp fires once
  *    when a page open arrived via a push-notification tap (the `?push=1` marker src/push.ts adds).
  *
@@ -22,6 +23,7 @@ import * as path from "node:path";
 import { dedupeTransitions } from "./agent-lifecycle.ts";
 import { readAllReceipts } from "./receipts.ts";
 import type { RunReceipt, TransitionEntry } from "./types.ts";
+import type { ChannelEntry } from "./channels.ts";
 
 /** One push-notification tap, appended to `push-taps.jsonl` (same `JsonlLog<T>` infra as
  *  `transitions.jsonl` — see squad-manager.ts's `pushTapLog`). */
@@ -36,6 +38,7 @@ export interface AdoptionCounters {
 	casualSessionsByDay: Record<string, number>;
 	promptsByDay: Record<string, number>;
 	pushTapsByDay: Record<string, number>;
+	roomInteractionsByDay: Record<string, number>;
 }
 
 export const PUSH_TAPS_FILE = "push-taps.jsonl";
@@ -66,8 +69,8 @@ export function isCasualAgentId(agentId: string | undefined): boolean {
  *  bucketing that two machines (daemon, CLI probe) can never disagree on.
  *
  * @substrate exported for tests only — tests/adoption-counters.test.ts asserts this bucketing
- * directly; every in-repo caller (`casualSessionsByDay`, `promptsByDay`, `pushTapsByDay`) is a
- * sibling function in this same file. */
+ * directly; every in-repo caller (`casualSessionsByDay`, `promptsByDay`, `pushTapsByDay`,
+ * `roomInteractionsByDay`) is a sibling function in this same file. */
 export function utcDayOf(ts: number): string {
 	return new Date(ts).toISOString().slice(0, 10);
 }
@@ -135,11 +138,27 @@ export function pushTapsByDay(entries: PushTapEntry[]): Record<string, number> {
 	return out;
 }
 
+/** Room interactions per UTC day. Counts durable room-surface activity, not passive page loads:
+ *  human-authored channel posts plus manager-authored needs-you cards. Those two events are the
+ *  room equivalents of "prompted" and "noticed attention", and both already live in the channel
+ *  substrate, so this adds no counter store. */
+export function roomInteractionsByDay(entries: ChannelEntry[]): Record<string, number> {
+	const out: Record<string, number> = {};
+	for (const e of entries) {
+		const isHumanPost = e.kind === "user";
+		const isNeedsYouCard = e.kind === "system" && e.event?.kind === "needs-you";
+		if (!isHumanPost && !isNeedsYouCard) continue;
+		if (typeof e.ts !== "number" || !Number.isFinite(e.ts) || e.ts <= 0) continue;
+		bump(out, utcDayOf(e.ts));
+	}
+	return out;
+}
+
 /** Sum per-day counts across managers (DB mode has one stateDir per org manager). */
 export function mergeAdoptionCounters(list: AdoptionCounters[]): AdoptionCounters {
-	const merged: AdoptionCounters = { casualSessionsByDay: {}, promptsByDay: {}, pushTapsByDay: {} };
+	const merged: AdoptionCounters = { casualSessionsByDay: {}, promptsByDay: {}, pushTapsByDay: {}, roomInteractionsByDay: {} };
 	for (const c of list) {
-		for (const key of ["casualSessionsByDay", "promptsByDay", "pushTapsByDay"] as const) {
+		for (const key of ["casualSessionsByDay", "promptsByDay", "pushTapsByDay", "roomInteractionsByDay"] as const) {
 			for (const [day, n] of Object.entries(c[key])) merged[key][day] = (merged[key][day] ?? 0) + n;
 		}
 	}
@@ -147,7 +166,7 @@ export function mergeAdoptionCounters(list: AdoptionCounters[]): AdoptionCounter
 }
 
 /** Structural check for a counters payload that crossed a trust boundary (the doctor probe reading
- *  GET /api/adoption from a daemon of unknown vintage) — three record fields, numeric values. */
+ *  GET /api/adoption from a daemon of unknown vintage) — record fields with numeric values. */
 export function isAdoptionCounters(v: unknown): v is AdoptionCounters {
 	if (typeof v !== "object" || v === null) return false;
 	const o = v as Record<string, unknown>;
@@ -167,6 +186,8 @@ export interface AdoptionSummary {
 	sessions7: number;
 	prompts7: number;
 	pushTaps7: number;
+	roomInteractions: number;
+	roomInteractions7: number;
 }
 
 export function summarizeAdoption(c: AdoptionCounters, now: number = Date.now()): AdoptionSummary {
@@ -179,9 +200,11 @@ export function summarizeAdoption(c: AdoptionCounters, now: number = Date.now())
 		sessions: c.casualSessionsByDay[today] ?? 0,
 		prompts: c.promptsByDay[today] ?? 0,
 		pushTaps: c.pushTapsByDay[today] ?? 0,
+		roomInteractions: c.roomInteractionsByDay?.[today] ?? 0,
 		sessions7: sum(c.casualSessionsByDay),
 		prompts7: sum(c.promptsByDay),
 		pushTaps7: sum(c.pushTapsByDay),
+		roomInteractions7: sum(c.roomInteractionsByDay ?? {}),
 	};
 }
 
@@ -236,7 +259,7 @@ function isPushTapEntryLike(v: unknown): v is PushTapEntry {
  */
 export async function computeAdoptionCounters(
 	stateDir: string,
-	live?: { transitions?: TransitionEntry[]; pushTaps?: PushTapEntry[] },
+	live?: { transitions?: TransitionEntry[]; pushTaps?: PushTapEntry[]; channelEntries?: ChannelEntry[] },
 ): Promise<AdoptionCounters> {
 	const [receipts, fileTransitions, fileTaps] = await Promise.all([
 		readAllReceipts(stateDir),
@@ -255,9 +278,11 @@ export async function computeAdoptionCounters(
 	}
 	const casualIds = new Set<string>();
 	for (const r of receipts) if (isCasualSessionName(r.name)) casualIds.add(r.agentId);
+	const channelEntries = live?.channelEntries ?? [];
 	return {
 		casualSessionsByDay: casualSessionsByDay(receipts),
 		promptsByDay: promptsByDay(transitions, casualIds),
 		pushTapsByDay: pushTapsByDay(taps),
+		roomInteractionsByDay: roomInteractionsByDay(channelEntries),
 	};
 }

@@ -527,6 +527,8 @@ export interface AgentDTO {
   workflow?: { path?: string; verify?: { command: string } };
   repo: string;
   worktree: string;
+  /** Originating room channel for this unit. Absent routes active-work cards to #fleet. */
+  channelId?: string;
   branch?: string;
   model?: string;
   startedAt?: number;

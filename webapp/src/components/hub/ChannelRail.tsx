@@ -27,6 +27,7 @@ export function ChannelRail({
   workbenchActive: boolean;
 }) {
   const groups = groupActiveWork(agents);
+  const channelNames = new Map(channels.map((channel) => [channel.id, channel.name.startsWith('#') ? channel.name : `#${channel.name}`]));
   return (
     <aside className="flex h-full w-72 flex-shrink-0 flex-col border-r border-zinc-800/80 bg-[#0a0a0b] text-zinc-200 shadow-[inset_-1px_0_0_rgba(255,255,255,0.03)]" aria-label="Room rail">
       <div className="surface-subheader flex h-10 items-center gap-2 border-b border-zinc-800/80 bg-[#0c0c0e] px-3">
@@ -85,7 +86,8 @@ export function ChannelRail({
                         className={`group flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-xs transition-[background-color,color,transform] duration-200 hover:translate-x-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0a0a0b] ${selected ? 'bg-sky-400/15 text-sky-100' : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100'}`}
                       >
                         <span className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${statusDotClass[group.key]}`} aria-hidden />
-                        <span className="truncate">{agent.name || agent.id}</span>
+                        <span className="min-w-0 flex-1 truncate">{agent.name || agent.id}</span>
+                        <span className="max-w-20 flex-shrink-0 truncate text-[10px] text-zinc-600">{channelNames.get(agent.channelId ?? 'fleet') ?? '#fleet'}</span>
                       </button>
                     );
                   })}
