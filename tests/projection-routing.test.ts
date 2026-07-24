@@ -168,6 +168,37 @@ test("automation-sourced prompt does not return-emit", async () => {
 	await mgr.stop();
 });
 
+test("second mention steer in the turn window echoes which actor it follows", async () => {
+	const { mgr, host, repo } = await makeMgr("projection-mention-follows");
+	await createChannel(host, "ops");
+	const dto = await mgr.create({ name: "resident-agent", repo, approvalMode: "yolo", channelId: "ops", autoRoute: false });
+	const alice = { id: "db:alice", displayName: "Alice", origin: "local" as const, role: "admin" as const };
+	const bob = { id: "db:bob", displayName: "Bob", origin: "local" as const, role: "admin" as const };
+
+	const firstEcho = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === "mention-steer");
+	await mgr.applyCommand({ type: "prompt", id: dto.id, message: "triage logs", channelId: "ops", source: "mention", clientTurnId: "alice-turn" } as ClientCommand, alice);
+	const first = await firstEcho;
+	expect(first.text).toBe("db:alice steered @resident-agent: triage logs");
+	expect(first.event?.payload).toMatchObject({ follows: undefined, face: { pinned: { actor: "db:alice", target: "resident-agent", clientTurnId: "alice-turn" } } });
+
+	const secondEcho = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === "mention-steer" && entry.text.includes("follows db:alice's steer"));
+	await mgr.applyCommand({ type: "prompt", id: dto.id, message: "escalate impact", channelId: "ops", source: "mention", clientTurnId: "bob-turn" } as ClientCommand, bob);
+	const second = await secondEcho;
+
+	expect(second.text).toBe("db:bob steered @resident-agent (follows db:alice's steer): escalate impact");
+	expect(second.event?.payload).toMatchObject({
+		actor: "db:bob",
+		target: dto.id,
+		follows: "db:alice",
+		clientTurnId: "bob-turn",
+		face: {
+			body: "db:bob steered @resident-agent (follows db:alice's steer): escalate impact",
+			pinned: { actor: "db:bob", target: "resident-agent", clientTurnId: "bob-turn", follows: "db:alice" },
+		},
+	});
+	await mgr.stop();
+});
+
 test("origin channel receives full lifecycle pointer-cards with pinned refs and face", async () => {
 	const { mgr, host, repo } = await makeMgr("projection-origin");
 	await createChannel(host, "room-a");

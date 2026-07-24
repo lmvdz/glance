@@ -19,7 +19,7 @@ import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { sql } from "kysely";
-import type { Channel, ChannelEntry, ChannelMembership } from "../channels.ts";
+import type { Channel, ChannelEntry, ChannelMembership, ChannelReadCursor } from "../channels.ts";
 import type { PersistedAgent, PersistedFeature, RunReceipt, TranscriptEntry } from "../types.ts";
 import { normalizeCapabilitySnapshot, type CapabilitySnapshot } from "../capabilities/index.ts";
 import { emptyFeedbackSnapshot, type FeedbackSnapshot } from "../feedback.ts";
@@ -50,6 +50,13 @@ function readChannelMembership(value: unknown): ChannelMembership | undefined {
 	if (!isPlainObject(value)) return undefined;
 	return typeof value.channelId === "string" && typeof value.userId === "string" && typeof value.active === "boolean" && typeof value.updatedBy === "string" && typeof value.updatedAt === "number"
 		? { channelId: value.channelId, userId: value.userId, active: value.active, updatedBy: value.updatedBy, updatedAt: value.updatedAt }
+		: undefined;
+}
+
+function readChannelReadCursor(value: unknown): ChannelReadCursor | undefined {
+	if (!isPlainObject(value)) return undefined;
+	return typeof value.channelId === "string" && typeof value.userId === "string" && typeof value.lastReadSeq === "number" && typeof value.updatedAt === "number"
+		? { channelId: value.channelId, userId: value.userId, lastReadSeq: value.lastReadSeq, updatedAt: value.updatedAt }
 		: undefined;
 }
 
@@ -151,6 +158,8 @@ export interface Store {
 	nextChannelSeq(channelId: string): Promise<number>;
 	listChannelMemberships(channelId: string): Promise<ChannelMembership[]>;
 	putChannelMembership(row: ChannelMembership): Promise<void>;
+	getChannelReadCursor(channelId: string, userId: string): Promise<ChannelReadCursor | undefined>;
+	putChannelReadCursor(row: ChannelReadCursor): Promise<void>;
 	/** Cumulative save() failures this process, when the store tracks them (FileStore only — DbStore's
 	 *  per-write failures throw rather than swallow, so there's nothing to count). Surfaced through
 	 *  factory-status since the topology guarantee now rests on this write actually landing. */
@@ -345,6 +354,24 @@ export class FileStore implements Store {
 
 	async putChannelMembership(row: ChannelMembership): Promise<void> {
 		await getStorageBackend().appendDurable(path.join(this.stateDir, "channel-memberships.jsonl"), `${JSON.stringify(row)}\n`);
+	}
+
+	async getChannelReadCursor(channelId: string, userId: string): Promise<ChannelReadCursor | undefined> {
+		const raw = await getStorageBackend().readText(path.join(this.stateDir, "channel-read-cursors.jsonl"));
+		if (!raw) return undefined;
+		let latest: ChannelReadCursor | undefined;
+		for (const line of raw.split("\n")) {
+			if (!line.trim()) continue;
+			try {
+				const row = readChannelReadCursor(JSON.parse(line));
+				if (row?.channelId === channelId && row.userId === userId) latest = row;
+			} catch {}
+		}
+		return latest;
+	}
+
+	async putChannelReadCursor(row: ChannelReadCursor): Promise<void> {
+		await getStorageBackend().appendDurable(path.join(this.stateDir, "channel-read-cursors.jsonl"), `${JSON.stringify(row)}\n`);
 	}
 }
 
@@ -658,6 +685,17 @@ export class DbStore implements Store {
 	async putChannelMembership(row: ChannelMembership): Promise<void> {
 		await withOrg(this.ctx, this.orgId, (trx) =>
 			trx.insertInto("channel_memberships").values({ org_id: this.orgId, channel_id: row.channelId, user_id: row.userId, active: row.active ? 1 : 0, updated_by: row.updatedBy, updated_at: row.updatedAt }).onConflict((oc) => oc.columns(["org_id", "channel_id", "user_id"]).doUpdateSet({ active: row.active ? 1 : 0, updated_by: row.updatedBy, updated_at: row.updatedAt })).execute(),
+		);
+	}
+
+	async getChannelReadCursor(channelId: string, userId: string): Promise<ChannelReadCursor | undefined> {
+		const row = await withOrg(this.ctx, this.orgId, (trx) => trx.selectFrom("channel_read_cursors").select(["channel_id", "user_id", "last_read_seq", "updated_at"]).where("org_id", "=", this.orgId).where("channel_id", "=", channelId).where("user_id", "=", userId).executeTakeFirst());
+		return row ? { channelId: row.channel_id, userId: row.user_id, lastReadSeq: Number(row.last_read_seq), updatedAt: Number(row.updated_at) } : undefined;
+	}
+
+	async putChannelReadCursor(row: ChannelReadCursor): Promise<void> {
+		await withOrg(this.ctx, this.orgId, (trx) =>
+			trx.insertInto("channel_read_cursors").values({ org_id: this.orgId, channel_id: row.channelId, user_id: row.userId, last_read_seq: row.lastReadSeq, updated_at: row.updatedAt }).onConflict((oc) => oc.columns(["org_id", "channel_id", "user_id"]).doUpdateSet({ last_read_seq: row.lastReadSeq, updated_at: row.updatedAt })).execute(),
 		);
 	}
 

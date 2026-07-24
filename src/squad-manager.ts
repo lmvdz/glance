@@ -1156,6 +1156,7 @@ export class SquadManager extends EventEmitter {
 	private readonly paymentProvider: PaymentProvider;
 	/** Short-lived idempotency window for client-stamped prompt commands; request-answer prompts are exempted below. */
 	private readonly commandAckDedupe = new Map<string, number>();
+	private readonly recentSteers = new Map<string, { actor: string; targetLabel: string; at: number }>();
 	private idSeq = 0;
 	private transcriptSeq = 0;
 	private reseedTranscriptSeq(snapshot: StateSnapshot): void {
@@ -7202,7 +7203,13 @@ export class SquadManager extends EventEmitter {
 		const actualId = rec.dto.id;
 		const requestedLabel = cmd.mention?.targetLabel?.trim();
 		const targetLabel = requestedLabel && (requestedLabel === actualName || requestedLabel === actualId) ? requestedLabel : (actualName || actualId);
-		const text = `${actor.id} steered @${targetLabel}: ${cmd.displayText ?? cmd.message}`;
+		const now = Date.now();
+		const previous = this.recentSteers.get(rec.dto.id);
+		if (!previous || now - previous.at > 15_000) this.recentSteers.delete(rec.dto.id);
+		const follows = previous && now - previous.at <= 15_000 && previous.actor !== actor.id ? previous : undefined;
+		const prefix = follows ? `${actor.id} steered @${targetLabel} (follows ${follows.actor}\'s steer):` : `${actor.id} steered @${targetLabel}:`;
+		const text = `${prefix} ${cmd.displayText ?? cmd.message}`;
+		this.recentSteers.set(rec.dto.id, { actor: actor.id, targetLabel, at: now });
 		const entry = await this.channelStore.appendManager(channelId, {
 			authorActor: "manager",
 			text,
@@ -7215,10 +7222,11 @@ export class SquadManager extends EventEmitter {
 						title: "Mention steer accepted",
 						body: text,
 						tone: "info",
-						pinned: { actor: actor.id, target: targetLabel, clientTurnId: cmd.clientTurnId },
+						pinned: { actor: actor.id, target: targetLabel, clientTurnId: cmd.clientTurnId, ...(follows ? { follows: follows.actor } : {}) },
 					},
 					actor: actor.id,
 					target: cmd.id,
+					follows: follows?.actor,
 					clientTurnId: cmd.clientTurnId,
 				},
 			},
@@ -7344,6 +7352,7 @@ export class SquadManager extends EventEmitter {
 			await this.deliverPeerMessage(actor, cmd.to, cmd.text);
 			return;
 		}
+		if (cmd.type === "typing") return;
 		if (cmd.type === "set-mode") {
 			await this.transitionMode(cmd.id, cmd.mode, actor, cmd.reason);
 			return;
@@ -11342,6 +11351,10 @@ export class SquadManager extends EventEmitter {
 
 	async searchChannelEntries(q: string, limit = 50, actor: Actor) {
 		return this.channelStore.search(q, limit, actor);
+	}
+
+	async markChannelRead(channelId: string, actor: Actor, lastReadSeq: number) {
+		return this.channelStore.markRead(channelId, actor, lastReadSeq);
 	}
 
 	async createChannel(actor: Actor, input: CreateChannelInput): Promise<Channel> {

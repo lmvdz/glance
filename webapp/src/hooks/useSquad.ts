@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AgentDTO, ArtifactCommentDTO, CapabilitySnapshotDTO, ChannelEntry, ClientCommand, CommandAckDTO, CommandInfo, FeatureDTO, PresenceSnapshot, ProjectDTO, PublicCapabilityCatalogDTO, SquadEvent, TranscriptEntry } from "../lib/dto";
+import type { AgentDTO, ArtifactCommentDTO, CapabilitySnapshotDTO, ChannelEntry, ClientCommand, CommandAckDTO, CommandInfo, FeatureDTO, PresenceSnapshot, ProjectDTO, PublicCapabilityCatalogDTO, SquadEvent, TranscriptEntry, TypingEvent } from "../lib/dto";
 import { apiJson } from "../lib/api";
 import { connectSquad, type SquadSocket } from "../lib/ws";
 
@@ -55,6 +55,7 @@ export interface SquadState {
   resolvedCommentEvents: Map<string, number>;
   channelEntries: ChannelEntry[];
   presence: PresenceSnapshot;
+  typing: TypingEvent[];
   connected: boolean;
   reload: () => Promise<void>;
   send: (command: ClientCommand) => void;
@@ -117,6 +118,7 @@ export function useSquad(): SquadState {
   const [commandAcks, setCommandAcks] = useState<CommandAckDTO[]>([]);
   const [channelEntries, setChannelEntries] = useState<ChannelEntry[]>([]);
   const [presence, setPresence] = useState<PresenceSnapshot>({ users: [] });
+  const [typing, setTyping] = useState<TypingEvent[]>([]);
   const [connected, setConnected] = useState(false);
   const socketRef = useRef<SquadSocket | null>(null);
   const subscribedRef = useRef<Set<string>>(new Set());
@@ -210,6 +212,12 @@ export function useSquad(): SquadState {
           case "presence":
             setPresence(event.presence);
             break;
+          case "typing":
+            setTyping((previous) => {
+              const next = previous.filter((item) => !(item.channelId === event.channelId && item.userId === event.userId));
+              return event.active ? [...next, event] : next;
+            });
+            break;
           default:
             break;
         }
@@ -231,5 +239,5 @@ export function useSquad(): SquadState {
     subscribedRef.current.delete(id);
   }, []);
 
-  return { agents: [...agents.values()], features, projects, capabilities, publicCatalog, transcripts, commands, commentEvents, resolvedCommentEvents, commandAcks, channelEntries, presence, connected, reload, send, subscribe, unsubscribe };
+  return { agents: [...agents.values()], features, projects, capabilities, publicCatalog, transcripts, commands, commentEvents, resolvedCommentEvents, commandAcks, channelEntries, presence, typing, connected, reload, send, subscribe, unsubscribe };
 }

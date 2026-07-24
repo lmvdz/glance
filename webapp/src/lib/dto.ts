@@ -662,6 +662,8 @@ export interface Channel {
   kind: "default" | "user";
   visibility: "org-public" | "private";
   creatorUserId?: string;
+  unreadCount?: number;
+  lastReadSeq?: number;
 }
 
 export interface ChannelEntry extends TranscriptEntry {
@@ -820,6 +822,8 @@ export interface PresenceSnapshot {
   users: PresenceUser[];
 }
 
+export interface TypingEvent { type: "typing"; channelId: string; userId: string; displayName: string; active: boolean; at: number }
+
 export type SquadEvent =
   | { type: "roster"; agents: AgentDTO[]; version: string }
   | { type: "agent"; agent: AgentDTO }
@@ -833,7 +837,8 @@ export type SquadEvent =
   | { type: "transition"; entry: TransitionEntry }
   | { type: "channel-entry"; channelId: string; entry: ChannelEntry }
   | CommandAckDTO
-  | { type: "presence"; presence: PresenceSnapshot };
+  | { type: "presence"; presence: PresenceSnapshot }
+  | TypingEvent;
 
 export type ClientCommand =
   | { type: "snapshot" }
@@ -852,4 +857,5 @@ export type ClientCommand =
   | { type: "fork"; id: string; seq?: number }
   // OMPSQ-448: continue a recoverable terminal run in place (retry budgets reset, same worktree) —
   // vs `fork`, which mints a fresh branch off HEAD. Gated in the UI on `AgentDTO.continueAvailable`.
-  | { type: "continue"; id: string };
+  | { type: "continue"; id: string }
+  | { type: "typing"; channelId: string; active: boolean };

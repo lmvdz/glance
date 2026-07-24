@@ -316,6 +316,36 @@ test("FileStore: channel search scans durable JSONL rows honestly", async () => 
 	expect((await store.searchChannelEntries("incident memory")).map((result) => result.entry.id)).toEqual(["other", "old"]);
 });
 
+test("ChannelStore: read cursors are per user and per channel, and FileStore reload keeps unread math", async () => {
+	const fdir = path.join(dir, "channel-read-cursors");
+	const store = new FileStore(fdir);
+	let tick = 100;
+	const channels = new ChannelStore(fdir, store, undefined, () => tick++);
+	const asActor = (id: string) => ({ id: `db:${id}`, displayName: id, origin: "local" as const });
+	const unread = async (id: string, view = channels) =>
+		Object.fromEntries((await view.listChannels(asActor(id))).map((channel) => [channel.id, { lastReadSeq: channel.lastReadSeq, unreadCount: channel.unreadCount }]));
+
+	await channels.createChannel(asActor("alice"), { id: "ops", name: "#ops", visibility: "org-public" });
+	await channels.appendClient("fleet", asActor("alice"), { text: "fleet one" });
+	await channels.appendClient("fleet", asActor("alice"), { text: "fleet two" });
+	await channels.appendClient("ops", asActor("alice"), { text: "ops one" });
+
+	expect(await unread("alice")).toMatchObject({ fleet: { lastReadSeq: 0, unreadCount: 2 }, ops: { lastReadSeq: 0, unreadCount: 1 } });
+	expect(await unread("bob")).toMatchObject({ fleet: { lastReadSeq: 0, unreadCount: 2 }, ops: { lastReadSeq: 0, unreadCount: 1 } });
+
+	expect(await channels.markRead("fleet", asActor("alice"), 1)).toMatchObject({ channelId: "fleet", userId: "alice", lastReadSeq: 1 });
+	expect(await channels.markRead("ops", asActor("alice"), 99)).toMatchObject({ channelId: "ops", userId: "alice", lastReadSeq: 1 });
+	expect(await channels.markRead("fleet", asActor("bob"), 2)).toMatchObject({ channelId: "fleet", userId: "bob", lastReadSeq: 2 });
+
+	expect(await unread("alice")).toMatchObject({ fleet: { lastReadSeq: 1, unreadCount: 1 }, ops: { lastReadSeq: 1, unreadCount: 0 } });
+	expect(await unread("bob")).toMatchObject({ fleet: { lastReadSeq: 2, unreadCount: 0 }, ops: { lastReadSeq: 0, unreadCount: 1 } });
+
+	const reloaded = new ChannelStore(fdir, new FileStore(fdir), undefined, () => tick++);
+	const reloadedUnread = async (id: string) =>
+		Object.fromEntries((await reloaded.listChannels(asActor(id))).map((channel) => [channel.id, { lastReadSeq: channel.lastReadSeq, unreadCount: channel.unreadCount }]));
+	expect(await reloadedUnread("alice")).toMatchObject({ fleet: { lastReadSeq: 1, unreadCount: 1 }, ops: { lastReadSeq: 1, unreadCount: 0 } });
+	expect(await reloadedUnread("bob")).toMatchObject({ fleet: { lastReadSeq: 2, unreadCount: 0 }, ops: { lastReadSeq: 0, unreadCount: 1 } });
+});
 test("FileStore: concurrent public create cannot downgrade the private winner for the same channel id", async () => {
 	const fdir = path.join(dir, "channel-file-create-race");
 	setStorageBackend(new ChannelCreateRaceBackend());

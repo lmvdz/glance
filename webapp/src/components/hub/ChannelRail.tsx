@@ -54,7 +54,8 @@ export function ChannelRail({
                   className={`group flex h-7 items-center gap-2 rounded-md px-2 text-xs transition-[background-color,color,transform] duration-200 hover:translate-x-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0a0a0b] ${active ? 'bg-amber-400/15 text-amber-100' : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100'}`}
                 >
                   <Hash className="h-3.5 w-3.5 flex-shrink-0" aria-hidden />
-                  <span className="truncate">{channel.name}</span>
+                  <span className="min-w-0 flex-1 truncate">{channel.name}</span>
+                  {channel.unreadCount ? <span className="rounded-full bg-amber-400 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-zinc-950" aria-label={`${channel.unreadCount} unread in ${channel.name}`}>{channel.unreadCount > 99 ? '99+' : channel.unreadCount}</span> : null}
                 </a>
               );
             })}

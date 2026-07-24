@@ -44,6 +44,7 @@ import {
 	ChannelCreateBodySchema,
 	ChannelMemberBodySchema,
 	ChannelPostBodySchema,
+	ChannelReadBodySchema,
 	CommentsCreateBodySchema,
 	ConsoleBodySchema,
 	ConsoleReleaseBodySchema,
@@ -725,6 +726,7 @@ export class SquadServer {
 	private readonly onEvent: (e: SquadEvent) => void;
 	private presenceTimer?: Timer;
 	private presenceDebounce?: Timer;
+	private readonly typingDebounce = new Map<string, number>();
 	/** agentId → repo it's claimed under, so we can release the claim on removal. */
 	private readonly claimed = new Map<string, string>();
 	/** Agent ids present when the server booted = survivors the daemon reattached to (vs spawned later). */
@@ -1212,6 +1214,23 @@ export class SquadServer {
 		} else this.broadcastAll(event);
 	}
 
+	private async emitTyping(source: ServerWebSocket<SocketData>, manager: SquadManager, channelId: string, active: boolean): Promise<void> {
+		const actor = this.actorForSocket(source);
+		if (!(await manager.canReadChannel(channelId, actor))) return;
+		const key = `${source.data.id}:${channelId}`;
+		const now = Date.now();
+		const last = this.typingDebounce.get(key) ?? 0;
+		if (active && now - last < 900) return;
+		if (active) this.typingDebounce.set(key, now);
+		else this.typingDebounce.delete(key);
+		const event = { type: "typing", channelId, userId: actor.id, displayName: actor.displayName ?? actor.id, active, at: now } satisfies SquadEvent;
+		const bucket = this.registry ? this.clientsByOrg.get(actor.orgId ?? "") : this.clients;
+		for (const ws of bucket ?? []) {
+			if (ws === source) continue;
+			if (await manager.canReadChannel(channelId, this.actorForSocket(ws))) ws.send(JSON.stringify(event));
+		}
+	}
+
 	/** Register an opening socket in its bucket and return the fleet to seed its roster from. */
 	private async registerSocket(ws: ServerWebSocket<SocketData>): Promise<SquadManager | undefined> {
 		this.clients.add(ws);
@@ -1385,6 +1404,10 @@ export class SquadServer {
 					// no-op for it — `m` is always `defaultManager`, exactly as before.
 					const m = this.resolveCommandManager(cmd, !!ws.data.bootstrapAdmin, defaultManager);
 					if (!m) return; // bootstrap-admin named a target live in no manager — honest no-op (WS has no per-command response channel to report 404 on)
+					if (cmd.type === "typing") {
+						await this.emitTyping(ws, m, cmd.channelId, cmd.active);
+						return;
+					}
 					// Transcript replay is unicast to the requesting socket.
 					if (cmd.type === "snapshot") {
 						const agents = await m.visibleAgents(actor);
@@ -2052,7 +2075,8 @@ export class SquadServer {
 		// (no session) still needs a stable id here, not `undefined`.
 		if (url.pathname === "/api/agents" && req.method === "GET") {
 			const viewerId = this.attentionViewerId(actor);
-			return Response.json((await manager.visibleAgents(actor)).map((dto) => ({ ...dto, ladderPriority: manager.ladderPriorityFor(dto, viewerId) })));
+			const agents = await manager.visibleAgents(actor);
+			return Response.json(agents.map((dto) => ({ ...dto, ladderPriority: manager.ladderPriorityFor(dto, viewerId) })));
 		}
 		// R5: answers are a deliverable, not a transcript. They outlive the roster row that produced them,
 		// which is the single most common way a glance result used to evaporate — the agent reaped before
@@ -2162,7 +2186,8 @@ export class SquadServer {
 		// unresolvable identity never sees anyone else's `completed-unseen` state resolve differently.
 		if (url.pathname === "/api/attention/ladder" && req.method === "GET") {
 			const viewerId = this.attentionViewerId(actor);
-			const units = (await manager.visibleAgents(actor)).map((dto) => ({ id: dto.id, repo: dto.repo, priority: manager.ladderPriorityFor(dto, viewerId) }));
+			const agents = await manager.visibleAgents(actor);
+			const units = agents.map((dto) => ({ id: dto.id, repo: dto.repo, priority: manager.ladderPriorityFor(dto, viewerId) }));
 			const byRepo = new Map<string, LadderPriority[]>();
 			for (const u of units) byRepo.set(u.repo, [...(byRepo.get(u.repo) ?? []), u.priority]);
 			const projects = [...byRepo.entries()].map(([repo, priorities]) => ({ repo, priority: maxLadderPriority(priorities) }));
@@ -2922,7 +2947,7 @@ export class SquadServer {
 			// (classifier decides), never coerce.
 			const lane = Result.isSuccess(decoded) ? laneFromRouted(decoded.success) : undefined;
 			const channelId = Result.isSuccess(decoded) && typeof decoded.success.channelId === "string" ? decoded.success.channelId : undefined;
-			if (channelId && !(await manager.canReadChannel(channelId, actor))) return new Response("forbidden", { status: 403 });
+			if (channelId && (await manager.channelMemberUserIds(channelId)) !== undefined && !(await manager.canReadChannel(channelId, actor))) return new Response("forbidden", { status: 403 });
 			const tracked = manager.projects().map((p) => p.repo);
 			// research-sirvir/03 (dead-wire fix): feed the outcome-driven model shift from THIS request's
 			// resolved `manager` — never a bare `resolveStateDir()`, which in DB mode returns the global
@@ -3070,7 +3095,10 @@ export class SquadServer {
 			// Same per-viewer personalization as GET /api/agents above — never skip it on the single-agent
 			// read, or a client polling one unit's row would see a stale/wrong ladder rung relative to the
 			// list view.
-			if (dto) return Response.json({ ...dto, ladderPriority: manager.ladderPriorityFor(dto, this.attentionViewerId(actor)) });
+			if (dto) {
+				if (!(await manager.canReadAgent(id, actor))) return new Response("forbidden", { status: 403 });
+				return Response.json({ ...dto, ladderPriority: manager.ladderPriorityFor(dto, this.attentionViewerId(actor)) });
+			}
 			const ph = manager.deadPlaceholder(id);
 			if (ph) return Response.json({ id: ph.id, name: ph.name, repo: ph.repo, harness: ph.harness, at: ph.at, dead: true, deadReason: ph.deadReason, transcriptEntries: ph.transcript.length });
 			return new Response("no such agent", { status: 404 });
@@ -3398,6 +3426,21 @@ export class SquadServer {
 				throw err;
 			}
 		}
+		const channelReadMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/read$/);
+		if (channelReadMatch && req.method === "POST") {
+			const decoded = decodeBody(ChannelReadBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response(`bad channel read: ${decoded.failure.message}`, { status: 400 });
+			const channelId = decodeURIComponent(channelReadMatch[1]!);
+			try {
+				const cursor = await manager.markChannelRead(channelId, actor, decoded.success.lastReadSeq);
+				return Response.json({ cursor });
+			} catch (err) {
+				if (err instanceof Error && err.message === "channel forbidden") return new Response("forbidden", { status: 403 });
+				if (err instanceof Error && err.message === "read cursor requires user identity") return new Response("read cursor requires user identity", { status: 400 });
+				throw err;
+			}
+		}
+
 		if (channelEntryMatch && req.method === "POST") {
 			const decoded = decodeBody(ChannelPostBodySchema, await req.json().catch(() => null));
 			if (Result.isFailure(decoded)) return new Response(`bad channel post: ${decoded.failure.message}`, { status: 400 });
@@ -3460,7 +3503,8 @@ export class SquadServer {
 			const owner = this.resolveCommandManager(cmd, bootstrapAdmin, manager);
 			if (!owner) return new Response("agent not found", { status: 404 });
 			const targetId = commandAgentTarget(cmd);
-			if (targetId && !(await owner.canReadAgent(targetId, actor))) return new Response("forbidden", { status: 403 });
+			const liveTarget = typeof owner.getAgent === "function" ? owner.getAgent(targetId ?? "") : undefined;
+			if (targetId && liveTarget && !(await owner.canReadAgent(targetId, actor))) return new Response("forbidden", { status: 403 });
 			// kill/restart/remove are admin-tier (commandTier); applyCommand is the single authority.
 			// Surface its denial as 403 here (the WS handler swallows the same throw) — not a 2nd authz site.
 			try {
