@@ -47,6 +47,8 @@ function fakeMgr(agents: Record<string, AgentDTO>, onDisarm?: (id: string) => vo
 		list: () => Object.values(agents),
 		getAgent: (id: string) => agents[id],
 		clearCompletionPushArmed: (id: string) => onDisarm?.(id),
+		channelMemberUserIds: async () => undefined,
+		channelMemberUserIdsForAgent: async () => undefined,
 	};
 }
 

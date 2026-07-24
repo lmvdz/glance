@@ -1373,7 +1373,7 @@ export class SquadServer {
 				open: async (ws) => {
 					const m = await this.registerSocket(ws);
 					const actor = this.actorForSocket(ws);
-					const agents = m ? (typeof m.visibleAgents === "function" ? await m.visibleAgents(actor) : m.list()) : [];
+					const agents = m ? await m.visibleAgents(actor) : [];
 					ws.send(JSON.stringify({ type: "roster", agents, version: this.uiVersion } satisfies SquadEvent));
 					for (const a of agents) {
 						const commands = m?.commandsFor(a.id);
@@ -1410,19 +1410,19 @@ export class SquadServer {
 					}
 					// Transcript replay is unicast to the requesting socket.
 					if (cmd.type === "snapshot") {
-						const agents = typeof m.visibleAgents === "function" ? await m.visibleAgents(actor) : m.list();
+						const agents = await m.visibleAgents(actor);
 						ws.send(JSON.stringify({ type: "roster", agents, version: this.uiVersion } satisfies SquadEvent));
 						return;
 					}
 					if (cmd.type === "subscribe") {
-						if (typeof m.canReadAgent === "function" && !(await m.canReadAgent(cmd.id, actor))) return;
+						if (!(await m.canReadAgent(cmd.id, actor))) return;
 						for (const entry of m.getTranscript(cmd.id)) {
 							ws.send(JSON.stringify({ type: "transcript", id: cmd.id, entry } satisfies SquadEvent));
 						}
 						return;
 					}
 					const targetId = commandAgentTarget(cmd);
-					if (targetId && typeof m.canReadAgent === "function" && !(await m.canReadAgent(targetId, actor))) return;
+					if (targetId && !(await m.canReadAgent(targetId, actor))) return;
 					// Carry the socket's granted tier; applyCommand denies a command above it (logged there).
 					// This is a fire-and-forget dispatch (a WS message handler, no reply channel to report a
 					// failure on) — `void`-ing the call means ANY rejection that escapes this `.catch` becomes
@@ -1879,7 +1879,7 @@ export class SquadServer {
 			const bootstrapActor = actorForRole(role);
 			const roster = [];
 			for (const m of this.observabilityManagers(true, undefined)) {
-				for (const dto of (typeof m.visibleAgents === "function" ? await m.visibleAgents(bootstrapActor) : m.list())) roster.push({ ...dto, ladderPriority: m.ladderPriorityFor(dto, bootstrapViewerId) });
+				for (const dto of await m.visibleAgents(bootstrapActor)) roster.push({ ...dto, ladderPriority: m.ladderPriorityFor(dto, bootstrapViewerId) });
 			}
 			return Response.json(roster);
 		}
@@ -2075,7 +2075,7 @@ export class SquadServer {
 		// (no session) still needs a stable id here, not `undefined`.
 		if (url.pathname === "/api/agents" && req.method === "GET") {
 			const viewerId = this.attentionViewerId(actor);
-			const agents = typeof manager.visibleAgents === "function" ? await manager.visibleAgents(actor) : manager.list();
+			const agents = await manager.visibleAgents(actor);
 			return Response.json(agents.map((dto) => ({ ...dto, ladderPriority: manager.ladderPriorityFor(dto, viewerId) })));
 		}
 		// R5: answers are a deliverable, not a transcript. They outlive the roster row that produced them,
@@ -2186,7 +2186,7 @@ export class SquadServer {
 		// unresolvable identity never sees anyone else's `completed-unseen` state resolve differently.
 		if (url.pathname === "/api/attention/ladder" && req.method === "GET") {
 			const viewerId = this.attentionViewerId(actor);
-			const agents = typeof manager.visibleAgents === "function" ? await manager.visibleAgents(actor) : manager.list();
+			const agents = await manager.visibleAgents(actor);
 			const units = agents.map((dto) => ({ id: dto.id, repo: dto.repo, priority: manager.ladderPriorityFor(dto, viewerId) }));
 			const byRepo = new Map<string, LadderPriority[]>();
 			for (const u of units) byRepo.set(u.repo, [...(byRepo.get(u.repo) ?? []), u.priority]);
@@ -2339,7 +2339,7 @@ export class SquadServer {
 			if (!dropped.ok) return new Response(dropped.reason, { status: 500 }); // registry write failed; nothing changed
 			return Response.json({ ok: true, repo: dropped.repo, removed: dropped.removed, projects: manager.projects() });
 		}
-		if (url.pathname === "/api/workflows") return Response.json(workflowSnapshot(typeof manager.visibleAgents === "function" ? await manager.visibleAgents(actor) : manager.list(), manager.capabilityWorkflowDefinitions()));
+		if (url.pathname === "/api/workflows") return Response.json(workflowSnapshot(await manager.visibleAgents(actor), manager.capabilityWorkflowDefinitions()));
 		if (url.pathname === "/api/models") return Response.json({ models: mergeModelOptions(modelOptionsFromEnv(), await manager.modelOptions()) });
 		if (url.pathname === "/api/profiles") return Response.json({ profiles: manager.profiles() });
 		if (url.pathname === "/api/capabilities") return Response.json(manager.capabilities());
@@ -3504,7 +3504,7 @@ export class SquadServer {
 			if (!owner) return new Response("agent not found", { status: 404 });
 			const targetId = commandAgentTarget(cmd);
 			const liveTarget = typeof owner.getAgent === "function" ? owner.getAgent(targetId ?? "") : undefined;
-			if (targetId && liveTarget && typeof owner.canReadAgent === "function" && !(await owner.canReadAgent(targetId, actor))) return new Response("forbidden", { status: 403 });
+			if (targetId && liveTarget && !(await owner.canReadAgent(targetId, actor))) return new Response("forbidden", { status: 403 });
 			// kill/restart/remove are admin-tier (commandTier); applyCommand is the single authority.
 			// Surface its denial as 403 here (the WS handler swallows the same throw) — not a 2nd authz site.
 			try {
@@ -3566,7 +3566,7 @@ export class SquadServer {
 		for (const ws of sockets) {
 			try {
 				const actor = this.actorForSocket(ws);
-				const agents = typeof manager.visibleAgents === "function" ? await manager.visibleAgents(actor) : manager.list();
+				const agents = await manager.visibleAgents(actor);
 				ws.send(JSON.stringify({ type: "roster", agents, version: this.uiVersion } satisfies SquadEvent));
 			} catch {
 				/* dropped client */
@@ -3575,7 +3575,6 @@ export class SquadServer {
 	}
 
 	private async eventMemberUserIds(manager: SquadManager, e: SquadEvent): Promise<string[] | undefined> {
-		if (typeof manager.channelMemberUserIdsForAgent !== "function") return undefined;
 		if (e.type === "agent") return manager.channelMemberUserIdsForAgent(e.agent.id);
 		if (e.type === "transcript" || e.type === "commands") return manager.channelMemberUserIdsForAgent(e.id);
 		if (e.type === "transition") return manager.channelMemberUserIdsForAgent(e.entry.agentId);
