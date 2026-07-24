@@ -47,6 +47,12 @@ export interface ManagerChannelPost {
 	format?: ChannelEntry["format"];
 }
 
+export interface ChannelSearchResult {
+	entry: ChannelEntry;
+	snippet: string;
+}
+
+
 const HOT_TAIL = 500;
 function sanitizeManagerValue(value: unknown, seen = new WeakSet<object>()): unknown {
 	if (typeof value === "string") return neutralizeDelimiters(redact(value));
@@ -98,6 +104,20 @@ export class ChannelStore {
 		await this.ensureDefaultChannel();
 		return (await this.store.listChannelEntries(channelId, since)).sort(entrySort);
 	}
+
+	async search(q: string, limit = 50): Promise<ChannelSearchResult[]> {
+		await this.ensureDefaultChannel();
+		const nativeSearch = this.store.searchChannelEntries?.bind(this.store);
+		if (nativeSearch) return nativeSearch(q, limit);
+		const needle = q.trim().toLowerCase();
+		if (!needle) return [];
+		const results = (await this.entries(DEFAULT_CHANNEL_ID, 0))
+			.filter((entry) => entry.text.toLowerCase().includes(needle))
+			.map((entry) => ({ entry, snippet: entry.text }))
+			.sort((a, b) => b.entry.ts - a.entry.ts || b.entry.seq - a.entry.seq);
+		return results.slice(0, limit);
+	}
+
 
 	async appendClient(channelId: string, actor: Actor, input: ClientChannelPost): Promise<ChannelEntry> {
 		const { text, replyToId } = input;

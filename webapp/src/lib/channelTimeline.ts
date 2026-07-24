@@ -24,6 +24,28 @@ export interface ChannelCardView {
   body: string;
   detail?: string;
   pinned: Array<{ label: string; value: string }>;
+  replyContext?: { id: string; channelId: string; authorLabel: string; body: string };
+  repliedBy?: number;
+}
+
+export function previewChannelBody(text: string, limit = 120): string {
+  const compact = text.replace(/\s+/g, ' ').trim();
+  return compact.length > limit ? `${compact.slice(0, Math.max(0, limit - 1))}…` : compact;
+}
+
+export function buildChannelThreadViews(entries: ChannelEntry[]): ChannelCardView[] {
+  const baseViews = entries.map(dispatchChannelCard);
+  const byId = new Map(baseViews.map((view) => [view.id, view]));
+  const replyCounts = new Map<string, number>();
+  for (const entry of entries) {
+    if (entry.replyToId) replyCounts.set(entry.replyToId, (replyCounts.get(entry.replyToId) ?? 0) + 1);
+  }
+  return baseViews.map((view) => {
+    const parent = view.entry.replyToId ? byId.get(view.entry.replyToId) : undefined;
+    const replyContext = parent ? { id: parent.id, channelId: parent.entry.channelId, authorLabel: parent.authorLabel, body: previewChannelBody(parent.body, 96) } : undefined;
+    const repliedBy = replyCounts.get(view.id);
+    return replyContext || repliedBy ? { ...view, replyContext, repliedBy } : view;
+  });
 }
 
 const POINTER_EVENT_KINDS: Record<string, true> = { 'needs-you': true, 'gate-verdict': true, 'land-merge': true };

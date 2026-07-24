@@ -11017,6 +11017,10 @@ export class SquadManager extends EventEmitter {
 		return this.channelStore.entries(channelId, since);
 	}
 
+	async searchChannelEntries(q: string, limit = 50) {
+		return this.channelStore.search(q, limit);
+	}
+
 	async appendChannelPost(channelId: string, actor: Actor, input: ClientChannelPost): Promise<ChannelEntry> {
 		const entry = await this.channelStore.appendClient(channelId, actor, input);
 		this.emit("event", { type: "channel-entry", channelId, entry } satisfies SquadEvent);
