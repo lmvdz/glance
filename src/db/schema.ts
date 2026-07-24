@@ -77,6 +77,18 @@ export interface ChannelsTable {
 	name: string;
 	kind: string;
 	created_at: number;
+	visibility: string;
+	creator_user_id: string | null;
+}
+
+/** Positive-evidence channel membership rows. Inactive rows are removals, never deletions. */
+export interface ChannelMembershipsTable {
+	org_id: string;
+	channel_id: string;
+	user_id: string;
+	active: number;
+	updated_by: string;
+	updated_at: number;
 }
 
 /** Durable channel entries. `data` carries the TranscriptEntry-compatible envelope. */
@@ -204,6 +216,7 @@ export interface AppDatabase {
 	audit: AuditTable;
 	channels: ChannelsTable;
 	channel_entries: ChannelEntriesTable;
+	channel_memberships: ChannelMembershipsTable;
 	usage: UsageTable;
 	federation_peers: FederationPeersTable;
 	capability_records: CapabilityRecordsTable;
@@ -220,6 +233,7 @@ export type AuditRow = Selectable<AuditTable>;
 export type UsageRow = Selectable<UsageTable>;
 export type ChannelRow = Selectable<ChannelsTable>;
 export type ChannelEntryRow = Selectable<ChannelEntriesTable>;
+export type ChannelMembershipRow = Selectable<ChannelMembershipsTable>;
 export type FederationPeerRow = Selectable<FederationPeersTable>;
 export type CapabilityRecordRow = Selectable<CapabilityRecordsTable>;
 export type FeedbackCampaignRow = Selectable<FeedbackCampaignsTable>;

@@ -41,6 +41,8 @@ import {
 	CapabilityInstallRunBodySchema,
 	CapabilitySourceBodySchema,
 	ChatAttachmentCreateBodySchema,
+	ChannelCreateBodySchema,
+	ChannelMemberBodySchema,
 	ChannelPostBodySchema,
 	CommentsCreateBodySchema,
 	ConsoleBodySchema,
@@ -778,7 +780,7 @@ export class SquadServer {
 		this.registry = opts.registry;
 		this.rootOrgId = opts.rootOrgId;
 		this.opts = opts;
-		this.onEvent = (e: SquadEvent) => this.broadcast(e);
+		this.onEvent = (e: SquadEvent) => void this.deliverEvent(undefined, e);
 		// Mirror index.ts's daemon resolution so self's operator id matches what the daemon gossips.
 		this.operator = opts.operator ?? { id: process.env.OMP_SQUAD_OPERATOR || os.userInfo().username || "local", origin: "local" };
 		this.coordinator = opts.coordinator ?? process.env.OMP_SQUAD_COORDINATOR ?? null;
@@ -1207,7 +1209,7 @@ export class SquadServer {
 		else if (this.auth) {
 			const bucket = orgId ? this.clientsByOrg.get(orgId) : undefined;
 			for (const ws of bucket ?? []) ws.send(JSON.stringify(event));
-		} else this.broadcast(event);
+		} else this.broadcastAll(event);
 	}
 
 	/** Register an opening socket in its bucket and return the fleet to seed its roster from. */
@@ -1315,7 +1317,7 @@ export class SquadServer {
 			for (const a of this.singleManager.list()) this.startupAgentIds.add(a.id);
 			// Push-seed fix (plans/voice-loop concern 01 risk, also fixes the PRE-EXISTING input/error
 			// escalation lane): `pushSeeded` used to become true ONLY via a `roster` SquadEvent reaching
-			// maybePushAlert through broadcast() — and the ONLY caller that ever sends the `snapshot`
+			// maybePushAlert through broadcastAll() — and the ONLY caller that ever sends the `snapshot`
 			// command that produces one is the legacy (non-webapp) client. The React webapp never sends
 			// `snapshot`, so on a fresh boot the whole push lane sat dead — no escalation, no completion
 			// push — until a legacy client happened to connect. Flip the flag here, at start(), file-mode
@@ -1351,7 +1353,8 @@ export class SquadServer {
 				idleTimeout: 255,
 				open: async (ws) => {
 					const m = await this.registerSocket(ws);
-					const agents = m?.list() ?? [];
+					const actor = this.actorForSocket(ws);
+					const agents = m ? await m.visibleAgents(actor) : [];
 					ws.send(JSON.stringify({ type: "roster", agents, version: this.uiVersion } satisfies SquadEvent));
 					for (const a of agents) {
 						const commands = m?.commandsFor(a.id);
@@ -1383,12 +1386,20 @@ export class SquadServer {
 					const m = this.resolveCommandManager(cmd, !!ws.data.bootstrapAdmin, defaultManager);
 					if (!m) return; // bootstrap-admin named a target live in no manager — honest no-op (WS has no per-command response channel to report 404 on)
 					// Transcript replay is unicast to the requesting socket.
+					if (cmd.type === "snapshot") {
+						const agents = await m.visibleAgents(actor);
+						ws.send(JSON.stringify({ type: "roster", agents, version: this.uiVersion } satisfies SquadEvent));
+						return;
+					}
 					if (cmd.type === "subscribe") {
+						if (!(await m.canReadAgent(cmd.id, actor))) return;
 						for (const entry of m.getTranscript(cmd.id)) {
 							ws.send(JSON.stringify({ type: "transcript", id: cmd.id, entry } satisfies SquadEvent));
 						}
 						return;
 					}
+					const targetId = commandAgentTarget(cmd);
+					if (targetId && !(await m.canReadAgent(targetId, actor))) return;
 					// Carry the socket's granted tier; applyCommand denies a command above it (logged there).
 					// This is a fire-and-forget dispatch (a WS message handler, no reply channel to report a
 					// failure on) — `void`-ing the call means ANY rejection that escapes this `.catch` becomes
@@ -1410,14 +1421,14 @@ export class SquadServer {
 
 		if (this.registry) {
 			// DB-registry mode: per-org fan-out via the registry's event sink. No global presence/federation (risk #6).
-			this.registry.onEvent = (orgId, e) => this.broadcastTo(orgId, e);
+			this.registry.onEvent = (orgId, e) => void this.deliverEvent(orgId, e);
 			// Root factory (opt-in): fan its events out to the operator's own socket buckets, reusing the exact
 			// per-org WS path. Both the on-box loopback admin (bucketed under the ROOT_FACTORY_ORG sentinel) and
 			// a browser operator signed into OMP_SQUAD_ROOT_ORG watch the factory move over the same transport.
 			if (this.singleManager) {
 				const rootBuckets = [ROOT_FACTORY_ORG, ...(this.rootOrgId ? [this.rootOrgId] : [])];
 				this.singleManager.on("event", (e) => {
-					for (const b of rootBuckets) this.broadcastTo(b, e);
+					for (const b of rootBuckets) void this.deliverEvent(b, e);
 				});
 			}
 		} else {
@@ -1841,7 +1852,11 @@ export class SquadServer {
 			// manager) set `GET /api/agents`'s roster below is built from — reused rather than
 			// re-derived, so the two can never silently diverge on which managers count as "live".
 			const bootstrapViewerId = this.dbMode ? actorForRole(role).id : undefined;
-			const roster = this.observabilityManagers(true, undefined).flatMap((m) => m.list().map((dto) => ({ ...dto, ladderPriority: m.ladderPriorityFor(dto, bootstrapViewerId) })));
+			const bootstrapActor = actorForRole(role);
+			const roster = [];
+			for (const m of this.observabilityManagers(true, undefined)) {
+				for (const dto of await m.visibleAgents(bootstrapActor)) roster.push({ ...dto, ladderPriority: m.ladderPriorityFor(dto, bootstrapViewerId) });
+			}
 			return Response.json(roster);
 		}
 		const orgId = session
@@ -2036,7 +2051,7 @@ export class SquadServer {
 		// (no session) still needs a stable id here, not `undefined`.
 		if (url.pathname === "/api/agents" && req.method === "GET") {
 			const viewerId = this.attentionViewerId(actor);
-			return Response.json(manager.list().map((dto) => ({ ...dto, ladderPriority: manager.ladderPriorityFor(dto, viewerId) })));
+			return Response.json((await manager.visibleAgents(actor)).map((dto) => ({ ...dto, ladderPriority: manager.ladderPriorityFor(dto, viewerId) })));
 		}
 		// R5: answers are a deliverable, not a transcript. They outlive the roster row that produced them,
 		// which is the single most common way a glance result used to evaporate — the agent reaped before
@@ -2146,7 +2161,7 @@ export class SquadServer {
 		// unresolvable identity never sees anyone else's `completed-unseen` state resolve differently.
 		if (url.pathname === "/api/attention/ladder" && req.method === "GET") {
 			const viewerId = this.attentionViewerId(actor);
-			const units = manager.list().map((dto) => ({ id: dto.id, repo: dto.repo, priority: manager.ladderPriorityFor(dto, viewerId) }));
+			const units = (await manager.visibleAgents(actor)).map((dto) => ({ id: dto.id, repo: dto.repo, priority: manager.ladderPriorityFor(dto, viewerId) }));
 			const byRepo = new Map<string, LadderPriority[]>();
 			for (const u of units) byRepo.set(u.repo, [...(byRepo.get(u.repo) ?? []), u.priority]);
 			const projects = [...byRepo.entries()].map(([repo, priorities]) => ({ repo, priority: maxLadderPriority(priorities) }));
@@ -2298,7 +2313,7 @@ export class SquadServer {
 			if (!dropped.ok) return new Response(dropped.reason, { status: 500 }); // registry write failed; nothing changed
 			return Response.json({ ok: true, repo: dropped.repo, removed: dropped.removed, projects: manager.projects() });
 		}
-		if (url.pathname === "/api/workflows") return Response.json(workflowSnapshot(manager.list(), manager.capabilityWorkflowDefinitions()));
+		if (url.pathname === "/api/workflows") return Response.json(workflowSnapshot(await manager.visibleAgents(actor), manager.capabilityWorkflowDefinitions()));
 		if (url.pathname === "/api/models") return Response.json({ models: mergeModelOptions(modelOptionsFromEnv(), await manager.modelOptions()) });
 		if (url.pathname === "/api/profiles") return Response.json({ profiles: manager.profiles() });
 		if (url.pathname === "/api/capabilities") return Response.json(manager.capabilities());
@@ -2648,9 +2663,10 @@ export class SquadServer {
 		const mfgateProof = url.pathname.match(/^\/api\/channels\/([^/]+)\/entries\/([^/]+)\/gate-verdict-proof$/);
 		if (mfgateProof && req.method === "GET") {
 			try {
-				const proof = await manager.gateVerdictProof(decodeURIComponent(mfgateProof[1]), decodeURIComponent(mfgateProof[2]));
+				const proof = await manager.gateVerdictProof(decodeURIComponent(mfgateProof[1]), decodeURIComponent(mfgateProof[2]), actor);
 				return Response.json({ proof });
-			} catch {
+			} catch (err) {
+				if (err instanceof Error && err.message === "channel forbidden") return new Response("forbidden", { status: 403 });
 				return new Response("no such gate verdict", { status: 404 });
 			}
 		}
@@ -2905,6 +2921,7 @@ export class SquadServer {
 			// (classifier decides), never coerce.
 			const lane = Result.isSuccess(decoded) ? laneFromRouted(decoded.success) : undefined;
 			const channelId = Result.isSuccess(decoded) && typeof decoded.success.channelId === "string" ? decoded.success.channelId : undefined;
+			if (channelId && !(await manager.canReadChannel(channelId, actor))) return new Response("forbidden", { status: 403 });
 			const tracked = manager.projects().map((p) => p.repo);
 			// research-sirvir/03 (dead-wire fix): feed the outcome-driven model shift from THIS request's
 			// resolved `manager` — never a bare `resolveStateDir()`, which in DB mode returns the global
@@ -3042,6 +3059,7 @@ export class SquadServer {
 		const magent = url.pathname.match(/^\/api\/agents\/([^/]+)$/);
 		if (magent && req.method === "GET") {
 			const id = decodeURIComponent(magent[1]);
+			if (!(await manager.canReadAgent(id, actor))) return new Response("forbidden", { status: 403 });
 			const dto = manager.getAgent(id);
 			// Same per-viewer personalization as GET /api/agents above — never skip it on the single-agent
 			// read, or a client polling one unit's row would see a stale/wrong ladder rung relative to the
@@ -3054,6 +3072,7 @@ export class SquadServer {
 		const mt = url.pathname.match(/^\/api\/agents\/([^/]+)\/transcript$/);
 		if (mt) {
 			const id = decodeURIComponent(mt[1]);
+			if (!(await manager.canReadAgent(id, actor))) return new Response("forbidden", { status: 403 });
 			// `?since=<seq>` returns only the delta (entries with seq > since) so a polling client
 			// (the cockpit conversation pane) never refetches the whole transcript. A missing or
 			// non-integer `since` falls back to the full transcript — never a 400/500.
@@ -3063,22 +3082,42 @@ export class SquadServer {
 		}
 		const mtrans = url.pathname.match(/^\/api\/agents\/([^/]+)\/transitions$/);
 		if (mtrans) {
+			const id = decodeURIComponent(mtrans[1]);
+			if (!(await manager.canReadAgent(id, actor))) return new Response("forbidden", { status: 403 });
 			const full = url.searchParams.get("full") === "1";
-			return Response.json(await manager.transitionHistory(decodeURIComponent(mtrans[1]), { full }));
+			return Response.json(await manager.transitionHistory(id, { full }));
 		}
 		const msub = url.pathname.match(/^\/api\/agents\/([^/]+)\/subagents$/);
-		if (msub) return Response.json(manager.subagents(decodeURIComponent(msub[1])));
+		if (msub) {
+			const id = decodeURIComponent(msub[1]);
+			if (!(await manager.canReadAgent(id, actor))) return new Response("forbidden", { status: 403 });
+			return Response.json(manager.subagents(id));
+		}
 		const mrec = url.pathname.match(/^\/api\/agents\/([^/]+)\/receipts$/);
-		if (mrec) return Response.json(await manager.receipts(decodeURIComponent(mrec[1])));
+		if (mrec) {
+			const id = decodeURIComponent(mrec[1]);
+			if (!(await manager.canReadAgent(id, actor))) return new Response("forbidden", { status: 403 });
+			return Response.json(await manager.receipts(id));
+		}
 		// Read-only checkpoint history for the fork-step picker; never includes `vars` (see
 		// SquadManager.checkpoints's doc comment).
 		const mchk = url.pathname.match(/^\/api\/agents\/([^/]+)\/checkpoints$/);
-		if (mchk) return Response.json(await manager.checkpoints(decodeURIComponent(mchk[1])));
+		if (mchk) {
+			const id = decodeURIComponent(mchk[1]);
+			if (!(await manager.canReadAgent(id, actor))) return new Response("forbidden", { status: 403 });
+			return Response.json(await manager.checkpoints(id));
+		}
 		const mcmd = url.pathname.match(/^\/api\/agents\/([^/]+)\/commands$/);
-		if (mcmd) return Response.json(manager.commandsFor(decodeURIComponent(mcmd[1])) ?? []);
+		if (mcmd) {
+			const id = decodeURIComponent(mcmd[1]);
+			if (!(await manager.canReadAgent(id, actor))) return new Response("forbidden", { status: 403 });
+			return Response.json(manager.commandsFor(id) ?? []);
+		}
 		const mdiff = url.pathname.match(/^\/api\/agents\/([^/]+)\/(diff|tree)$/);
 		if (mdiff) {
-			const dto = manager.getAgent(decodeURIComponent(mdiff[1]));
+			const id = decodeURIComponent(mdiff[1]);
+			if (!(await manager.canReadAgent(id, actor))) return new Response("forbidden", { status: 403 });
+			const dto = manager.getAgent(id);
 			if (!dto) return new Response("no such agent", { status: 404 });
 			return Response.json(mdiff[2] === "diff" ? await worktreeDiffSinceFork(dto.worktree) : await worktreeTree(dto.worktree));
 		}
@@ -3308,7 +3347,7 @@ export class SquadServer {
 			const q = url.searchParams.get("q") ?? "";
 			const query = q.trim();
 			if (!query) return Response.json({ results: [] });
-			return Response.json({ results: await manager.searchChannelEntries(query) });
+			return Response.json({ results: await manager.searchChannelEntries(query, 50, actor) });
 		}
 
 		const channelEntryMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/entries$/);
@@ -3317,17 +3356,47 @@ export class SquadServer {
 			const sinceRaw = url.searchParams.get("since");
 			const since = sinceRaw === null ? 0 : Number(sinceRaw);
 			if (!Number.isFinite(since) || since < 0) return new Response("bad since", { status: 400 });
-			return Response.json({ entries: await manager.channelEntries(channelId, since) });
+			try {
+				return Response.json({ entries: await manager.channelEntries(channelId, since, actor) });
+			} catch (err) {
+				if (err instanceof Error && err.message === "channel forbidden") return new Response("forbidden", { status: 403 });
+				throw err;
+			}
 		}
 		if (channelEntryMatch && req.method === "POST") {
 			const decoded = decodeBody(ChannelPostBodySchema, await req.json().catch(() => null));
 			if (Result.isFailure(decoded)) return new Response(`bad channel post: ${decoded.failure.message}`, { status: 400 });
 			const channelId = decodeURIComponent(channelEntryMatch[1]!);
-			const entry = await manager.appendChannelPost(channelId, actor, decoded.success);
-			return Response.json({ entry });
+			try {
+				const entry = await manager.appendChannelPost(channelId, actor, decoded.success);
+				return Response.json({ entry });
+			} catch (err) {
+				if (err instanceof Error && err.message === "channel forbidden") return new Response("forbidden", { status: 403 });
+				throw err;
+			}
 		}
 		if (url.pathname === "/api/channels" && req.method === "GET") {
-			return Response.json({ channels: await manager.listChannels() });
+			return Response.json({ channels: await manager.listChannels(actor) });
+		}
+		if (url.pathname === "/api/channels" && req.method === "POST") {
+			const decoded = decodeBody(ChannelCreateBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response(`bad channel create: ${decoded.failure.message}`, { status: 400 });
+			const channel = await manager.createChannel(actor, decoded.success);
+			return Response.json({ channel });
+		}
+		const channelMemberMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/members\/([^/]+)$/);
+		if (channelMemberMatch && (req.method === "PUT" || req.method === "DELETE")) {
+			const channelId = decodeURIComponent(channelMemberMatch[1]!);
+			const userId = decodeURIComponent(channelMemberMatch[2]!);
+			const decoded = decodeBody(ChannelMemberBodySchema, { userId });
+			if (Result.isFailure(decoded)) return new Response(`bad channel member: ${decoded.failure.message}`, { status: 400 });
+			try {
+				const membership = req.method === "PUT" ? await manager.addChannelMember(channelId, actor, decoded.success) : await manager.removeChannelMember(channelId, actor, decoded.success);
+				return Response.json({ membership });
+			} catch (err) {
+				if (err instanceof Error && err.message === "channel forbidden") return new Response("forbidden", { status: 403 });
+				throw err;
+			}
 		}
 
 		if (url.pathname === "/api/command" && req.method === "POST") {
@@ -3355,6 +3424,8 @@ export class SquadServer {
 			// caller — tenant sessions stay exactly as confined as before.
 			const owner = this.resolveCommandManager(cmd, bootstrapAdmin, manager);
 			if (!owner) return new Response("agent not found", { status: 404 });
+			const targetId = commandAgentTarget(cmd);
+			if (targetId && !(await owner.canReadAgent(targetId, actor))) return new Response("forbidden", { status: 403 });
 			// kill/restart/remove are admin-tier (commandTier); applyCommand is the single authority.
 			// Surface its denial as 403 here (the WS handler swallows the same throw) — not a 2nd authz site.
 			try {
@@ -3368,7 +3439,69 @@ export class SquadServer {
 		return new Response("not found", { status: 404 });
 	}
 
-	private broadcast(e: SquadEvent): void {
+	private async deliverEvent(orgId: string | undefined, e: SquadEvent): Promise<void> {
+		const manager = orgId ? this.orgManager(orgId) : this.singleManager;
+		if (e.type === "channel-entry") {
+			if (!manager) return;
+			const members = await manager.channelMemberUserIds(e.channelId);
+			if (members) this.sendChannelEventToMembers(orgId, e, members);
+			else if (orgId) this.broadcastTo(orgId, e);
+			else this.broadcastAll(e);
+			return;
+		}
+
+		if (e.type === "roster" && manager) {
+			await this.sendRosterSnapshot(orgId, manager);
+			return;
+		}
+		if (e.type === "removed" || e.type === "log" || e.type === "command-ack") return;
+		const members = manager ? await this.eventMemberUserIds(manager, e) : undefined;
+		if (members) {
+			this.sendChannelEventToMembers(orgId, e, members);
+			return;
+		}
+		if (orgId) this.broadcastTo(orgId, e);
+		else this.broadcastAll(e);
+	}
+
+	private async sendRosterSnapshot(orgId: string | undefined, manager: SquadManager): Promise<void> {
+		const sockets = orgId ? (this.clientsByOrg.get(orgId) ?? new Set<ServerWebSocket<SocketData>>()) : this.clients;
+		for (const ws of sockets) {
+			try {
+				const actor = this.actorForSocket(ws);
+				const agents = await manager.visibleAgents(actor);
+				ws.send(JSON.stringify({ type: "roster", agents, version: this.uiVersion } satisfies SquadEvent));
+			} catch {
+				/* dropped client */
+			}
+		}
+	}
+
+	private async eventMemberUserIds(manager: SquadManager, e: SquadEvent): Promise<string[] | undefined> {
+		if (e.type === "agent") return manager.channelMemberUserIdsForAgent(e.agent.id);
+		if (e.type === "transcript" || e.type === "commands") return manager.channelMemberUserIdsForAgent(e.id);
+		if (e.type === "transition") return manager.channelMemberUserIdsForAgent(e.entry.agentId);
+		if (e.type === "audit" && e.entry.target) return (await manager.channelMemberUserIdsForAgent(e.entry.target)) ?? [];
+		if (e.type === "automation" && e.event.agent) return manager.channelMemberUserIdsForAgent(e.event.agent);
+		return undefined;
+	}
+
+	private sendChannelEventToMembers(orgId: string | undefined, e: SquadEvent, userIds: string[]): void {
+		const allowed = new Set(userIds);
+		const sockets = orgId ? (this.clientsByOrg.get(orgId) ?? new Set<ServerWebSocket<SocketData>>()) : this.clients;
+		if (sockets.size === 0) return;
+		const s = JSON.stringify(e);
+		for (const ws of sockets) {
+			if (!ws.data.userId || !allowed.has(ws.data.userId)) continue;
+			try {
+				ws.send(s);
+			} catch {
+				/* dropped client */
+			}
+		}
+	}
+
+	private broadcastAll(e: SquadEvent): void {
 		// Stamp the live UI version onto roster snapshots (manager-emitted ones leave it blank).
 		const s = JSON.stringify(e.type === "roster" ? { ...e, version: this.uiVersion } : e);
 		for (const ws of this.clients) {
@@ -3456,7 +3589,7 @@ export class SquadServer {
 	/** Completion push (plans/voice-loop concern 01, generalized by daily-attention-w0 concern 01): a
 	 *  SEPARATE `done:` tag/debounce namespace from the escalation lane above, so a "finished" toast
 	 *  can never REPLACE (sw.js renotify) or debounce-eat an unactioned "needs you" alert for the same
-	 *  agent. File-mode only — explicit guard here rather than relying solely on `broadcast()` only
+	 *  agent. File-mode only — explicit guard here rather than relying solely on `broadcastAll()` only
 	 *  being wired in the file-mode branch today (see `start()`), so a future `broadcastTo` push wiring
 	 *  can never silently ride this one global subscription list across orgs (`broadcastTo`'s own doc
 	 *  comment already asserts this; this is defense in depth at the new payload site itself). Disarms
