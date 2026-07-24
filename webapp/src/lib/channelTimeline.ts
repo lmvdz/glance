@@ -27,6 +27,7 @@ export interface ChannelCardView {
   pinned: Array<{ label: string; value: string }>;
   replyContext?: { id: string; channelId: string; authorLabel: string; body: string };
   repliedBy?: number;
+  actionHref?: string;
 }
 
 export function previewChannelBody(text: string, limit = 120): string {
@@ -90,6 +91,26 @@ function labelFromKey(key: string): string {
 }
 
 
+function stringFromPath(value: unknown, path: readonly string[]): string | undefined {
+  let cursor: unknown = value;
+  for (const key of path) {
+    if (!isRecord(cursor)) return undefined;
+    cursor = cursor[key];
+  }
+  return typeof cursor === 'string' && cursor ? cursor : undefined;
+}
+
+export function channelCardActionHref(entry: ChannelEntry): string | undefined {
+  if (entry.event?.kind !== 'needs-you') return undefined;
+  const payload = entry.event.payload;
+  const agentId =
+    stringFromPath(payload, ['refs', 'unitId']) ??
+    stringFromPath(payload, ['face', 'unitId']) ??
+    stringFromPath(payload, ['agentId']);
+  return agentId ? `#/intervene/${encodeURIComponent(agentId)}` : undefined;
+}
+
+
 export function dispatchChannelCard(entry: ChannelEntry): ChannelCardView {
   const eventKind = entry.event?.kind;
   if (!eventKind) {
@@ -102,7 +123,7 @@ export function dispatchChannelCard(entry: ChannelEntry): ChannelCardView {
   const title = face?.title || labelFromKey(eventKind);
   const body = face?.body || entry.text || 'Card update';
   const pinned = Object.entries(face?.pinned ?? {}).flatMap(([label, value]) => value == null || value === '' ? [] : [{ label: labelFromKey(label), value: String(value) }]);
-  return { id: entry.id, entry, kind: eventKind as ChannelCardKind, tone: toneFor(eventKind, face), authorLabel: entryAuthorLabel(entry), title, eyebrow: face?.eyebrow, body, detail: face?.detail, pinned };
+  return { id: entry.id, entry, kind: eventKind as ChannelCardKind, tone: toneFor(eventKind, face), authorLabel: entryAuthorLabel(entry), title, eyebrow: face?.eyebrow, body, detail: face?.detail, pinned, actionHref: channelCardActionHref(entry) };
 }
 
 export function reduceChannelEntryWindow(entries: ChannelEntry[], incoming: ChannelEntry[], channelId: string, cap = 500): ChannelEntry[] {

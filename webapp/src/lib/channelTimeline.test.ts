@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { dispatchChannelCard, latestChannelSeq, reduceChannelEntryWindow } from './channelTimeline';
+import { channelCardActionHref, dispatchChannelCard, latestChannelSeq, reduceChannelEntryWindow } from './channelTimeline';
 import type { ChannelEntry } from './dto';
 
 const entry = (overrides: Partial<ChannelEntry> & Pick<ChannelEntry, 'id' | 'seq'>): ChannelEntry => ({
@@ -24,6 +24,37 @@ describe('channel timeline dispatch', () => {
     expect(card.title).toBe('Review gate');
     expect(card.body).toBe('Approve the run');
     expect(card.pinned).toEqual([{ label: 'Agent', value: 'room-08' }, { label: 'Verdict', value: 'held' }]);
+  });
+
+  test('needs-you cards link to the intervene hash route from projected refs', () => {
+    const card = dispatchChannelCard(entry({
+      id: 'n-route',
+      seq: 2,
+      event: { kind: 'needs-you', payload: { refs: { unitId: 'agent one' }, face: { title: 'Needs you', pinned: { agent: 'agent one', age: '2m', 'why stopped': 'Approve gate' } } } },
+    }));
+    expect(card.actionHref).toBe('#/intervene/agent%20one');
+    expect(channelCardActionHref(card.entry)).toBe('#/intervene/agent%20one');
+  });
+
+  test('needs-you resolution is a separate success card, not a mutation of the original card', () => {
+    const pending = dispatchChannelCard(entry({
+      id: 'pending-card',
+      seq: 3,
+      text: 'needs you · Approve deploy',
+      event: { kind: 'needs-you', payload: { refs: { unitId: 'ada' }, face: { title: 'Needs you · Approve deploy', body: 'Approve deploy', tone: 'warning', pinned: { 'why stopped': 'Approve deploy', agent: 'Ada', age: '4m' } } } },
+    }));
+    const resolved = dispatchChannelCard(entry({
+      id: 'resolved-card',
+      seq: 4,
+      text: 'needs you resolved · Approve deploy',
+      event: { kind: 'needs-you', payload: { refs: { unitId: 'ada' }, face: { title: 'Resolved · Approve deploy', body: 'Approve deploy', tone: 'success', status: 'resolved', pinned: { 'why stopped': 'Approve deploy', agent: 'Ada', age: '4m' } } } },
+    }));
+    expect(pending.id).toBe('pending-card');
+    expect(pending.title).toBe('Needs you · Approve deploy');
+    expect(pending.tone).toBe('warning');
+    expect(resolved.id).toBe('resolved-card');
+    expect(resolved.title).toBe('Resolved · Approve deploy');
+    expect(resolved.tone).toBe('success');
   });
 
   test('unknown event kinds become neutral fallback cards', () => {

@@ -145,6 +145,27 @@ const InterveneFileDiff: React.FC<{
   );
 };
 
+export function InterveneMissingAgentFallback({ agentId, onBack }: { agentId: string | null; onBack: () => void }) {
+  const title = agentId ? 'Resolved / agent gone' : 'No agent selected';
+  const detail = agentId
+    ? `The needs-you card pointed at ${agentId}, but that agent is no longer in the live roster. The request was likely answered or the unit was removed.`
+    : 'Open a needs-you card or fleet row to step into an agent.';
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center text-gray-500 dark:text-gray-400">
+      <Inbox className="h-8 w-8" aria-hidden />
+      <div className="text-sm font-semibold text-gray-700 dark:text-gray-200">{title}</div>
+      <p className="max-w-md text-xs leading-5">{detail}</p>
+      <button
+        type="button"
+        onClick={onBack}
+        className="min-h-10 rounded-md border border-gray-200 px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-800 dark:focus-visible:ring-offset-gray-950"
+      >
+        Go to Fleet
+      </button>
+    </div>
+  );
+}
+
 export const IntervenceView: React.FC = () => {
   const { agents, features, interveneAgentId, setView, openConsole, sendConsoleCommand, subscribeConsole, showToast, connected } = useTaskContext();
   const agent = useMemo<AgentDTO | undefined>(() => agents.find((a) => a.id === interveneAgentId), [agents, interveneAgentId]);
@@ -310,15 +331,7 @@ export const IntervenceView: React.FC = () => {
   }, [agentId, sendConsoleCommand, showToast]);
 
   if (!agent) {
-    return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center text-gray-500 dark:text-gray-400">
-        <Inbox className="h-8 w-8" aria-hidden />
-        <div className="text-sm">No agent selected to step into.</div>
-        <button onClick={() => setView('fleet')} className="rounded-md border border-gray-200 px-3 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-800">
-          Go to Fleet
-        </button>
-      </div>
-    );
+    return <InterveneMissingAgentFallback agentId={interveneAgentId} onBack={() => setView('fleet')} />;
   }
 
   const why = whyStopped(agent);

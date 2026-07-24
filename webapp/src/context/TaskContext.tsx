@@ -310,6 +310,7 @@ export function TaskProvider({ children }: { children: ReactNode }) {
     squad.subscribe(agentId);
     setInterveneAgentId(agentId);
     setView('intervene');
+    window.location.hash = `#/intervene/${encodeURIComponent(agentId)}`;
   };
 
   // Design Review has no react-router (this SPA doesn't use one anywhere), but the reference

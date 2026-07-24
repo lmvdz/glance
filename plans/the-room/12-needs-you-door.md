@@ -1,5 +1,5 @@
 # Needs-you door — the flagship card→door proof (live-by-construction)
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
