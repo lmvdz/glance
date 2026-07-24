@@ -2629,6 +2629,16 @@ export class SquadServer {
 			const doneProof = await manager.doneProofForFeature(decodeURIComponent(mfproof[1]), repo);
 			return Response.json({ doneProof: doneProof ?? null });
 		}
+		// Gate-verdict door: reads the pinned manager-authored card plus existing proof stores only.
+		const mfgateProof = url.pathname.match(/^\/api\/channels\/([^/]+)\/entries\/([^/]+)\/gate-verdict-proof$/);
+		if (mfgateProof && req.method === "GET") {
+			try {
+				const proof = await manager.gateVerdictProof(decodeURIComponent(mfgateProof[1]), decodeURIComponent(mfgateProof[2]));
+				return Response.json({ proof });
+			} catch {
+				return new Response("no such gate verdict", { status: 404 });
+			}
+		}
 		// Plan-vs-reality comprehension view (OMPSQ-448): planned concerns × what landed × proof +
 		// reachability. Read-only, viewer-tier by the same blanket GET default as the routes above.
 		const mfreality = url.pathname.match(/^\/api\/features\/([^/]+)\/reality$/);

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { hubHref, parseHubHash, shouldColdBootFleet, workbenchHref } from './router';
+import { gateVerdictHref, hubHref, parseHubHash, shouldColdBootFleet, workbenchHref } from './router';
 
 describe('Hub hash router', () => {
   test('cold boot defaults to fleet channel', () => {
@@ -22,5 +22,11 @@ describe('Hub hash router', () => {
   test('intervene route is deep-linkable', () => {
     expect(parseHubHash('#/intervene/agent%201')).toEqual({ kind: 'workbench', view: 'intervene', id: 'agent 1' });
     expect(workbenchHref('intervene', 'agent 1')).toBe('#/intervene/agent%201');
+  });
+
+  test('gate verdict proof route keeps channel and entry ids', () => {
+    expect(gateVerdictHref('ops/night', 'entry:42')).toBe('#/gate-verdict/ops%2Fnight/entry%3A42');
+    expect(parseHubHash('#/gate-verdict/ops%2Fnight/entry%3A42')).toEqual({ kind: 'workbench', view: 'gate-verdict', id: 'ops/night\u0000entry:42' });
+    expect(workbenchHref('gate-verdict', 'ops/night\u0000entry:42')).toBe('#/gate-verdict/ops%2Fnight/entry%3A42');
   });
 });

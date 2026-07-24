@@ -4,6 +4,7 @@ import type { ChannelEntry } from '../../lib/dto';
 import { buildChannelThreadViews, type ChannelCardTone, type ChannelCardView } from '../../lib/channelTimeline';
 import { hubHref } from '../../lib/router';
 import { channelScrollAfterRowsChange, channelScrollAfterUserScroll, initialChannelScrollState, type ChannelScrollState } from '../../lib/channelScroll';
+import { GateVerdictCard } from './GateVerdictCard';
 
 const toneClass: Record<ChannelCardTone, string> = {
   neutral: 'border-zinc-800 bg-[#0c0c0e] text-zinc-200',
@@ -86,6 +87,7 @@ const ChannelTimelineRow = memo(function ChannelTimelineRow({ view, onReply }: {
       </li>
     );
   }
+  if (view.kind === 'gate-verdict') return <GateVerdictCard view={view} />;
   const cardClassName = `block w-full max-w-2xl rounded-2xl border px-3 py-3 text-left text-sm shadow-sm transition-[border-color,background-color,transform] duration-200 hover:-translate-y-0.5 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 ${toneClass[view.tone]}`;
   const cardContent = (
     <div className="flex items-start gap-3">

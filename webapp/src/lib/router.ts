@@ -14,7 +14,8 @@ export type WorkbenchRouteView =
   | 'intervene'
   | 'review'
   | 'plan-reality'
-  | 'plans';
+  | 'plans'
+  | 'gate-verdict';
 
 export const DEFAULT_CHANNEL_ID = 'fleet';
 
@@ -39,6 +40,11 @@ export function parseHubHash(hash: string): HubRoute {
   if (head === 'review') return { kind: 'workbench', view: 'review', id: decode(rawId) };
   if (head === 'plan-reality') return { kind: 'workbench', view: 'plan-reality', id: decode(rawId) };
   if (head === 'plans') return { kind: 'workbench', view: 'plans', id: decode(rawId) };
+  if (head === 'gate-verdict') {
+    const channelId = decode(rawId);
+    const entryId = decode(sub);
+    return { kind: 'workbench', view: 'gate-verdict', id: channelId && entryId ? `${channelId}\u0000${entryId}` : undefined };
+  }
   if (head === 'workbench') {
     const view = normalizeWorkbenchView(rawId);
     return { kind: 'workbench', view: view ?? 'fleet' };
@@ -50,12 +56,20 @@ export function hubHref(channelId = DEFAULT_CHANNEL_ID, entryId?: string): strin
   if (entryId) return `#/channel/${encodeURIComponent(channelId)}/entry/${encodeURIComponent(entryId)}`;
   return channelId === DEFAULT_CHANNEL_ID ? `#${DEFAULT_CHANNEL_ID}` : `#/channel/${encodeURIComponent(channelId)}`;
 }
+export function gateVerdictHref(channelId: string, entryId: string): string {
+  return `#/gate-verdict/${encodeURIComponent(channelId)}/${encodeURIComponent(entryId)}`;
+}
+
 
 export function workbenchHref(view: WorkbenchRouteView, id?: string): string {
   if (view === 'intervene') return `#/intervene/${encodeURIComponent(id ?? '')}`;
   if (view === 'review') return `#/review/${encodeURIComponent(id ?? '')}`;
   if (view === 'plan-reality') return id ? `#/plan-reality/${encodeURIComponent(id)}` : '#/plan-reality';
   if (view === 'plans') return id ? `#/plans/${encodeURIComponent(id)}` : '#/plans';
+  if (view === 'gate-verdict' && id) {
+    const [channelId, entryId] = id.includes('\u0000') ? id.split('\u0000') : id.split('/');
+    return channelId && entryId ? gateVerdictHref(channelId, entryId) : '#/gate-verdict';
+  }
   return `#/workbench/${view}`;
 }
 
@@ -73,6 +87,7 @@ export function normalizeWorkbenchView(value: string | undefined): WorkbenchRout
     case 'review':
     case 'plan-reality':
     case 'plans':
+    case 'gate-verdict':
       return value;
     case 'omp-graph':
       return 'graph';
