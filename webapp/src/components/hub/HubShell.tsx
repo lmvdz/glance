@@ -3,9 +3,10 @@ import { Hash, Loader2, Users } from 'lucide-react';
 import { Composer, type ModelOption } from '../chat/Composer';
 import { ChannelRail } from './ChannelRail';
 import { ChannelTimeline } from './ChannelTimeline';
-import { apiJson } from '../../lib/api';
+import { apiJson, jsonInit } from '../../lib/api';
 import { buildPromptCommand, channelAgentSessionId, channelDraftSessionId, ensureConsoleAgent, postChannelMessage } from '../../lib/chat/sendCore';
-import type { AgentDTO, Channel, ChannelEntry, PresenceSnapshot } from '../../lib/dto';
+import { resolveMentionRoute } from '../../lib/mentionGrammar';
+import type { AgentDTO, Channel, ChannelEntry, CommandAckDTO, PresenceSnapshot } from '../../lib/dto';
 import { latestSeq, presenceCount, reduceChannelEntries } from '../../lib/hub';
 import { DEFAULT_CHANNEL_ID, type HubRoute } from '../../lib/router';
 import { useTaskContext } from '../../context/TaskContext';
@@ -13,6 +14,19 @@ import { useTaskContext } from '../../context/TaskContext';
 const EMPTY_PRESENCE: PresenceSnapshot = { users: [] };
 const DEFAULT_CHANNEL: Channel = { id: DEFAULT_CHANNEL_ID, name: DEFAULT_CHANNEL_ID, kind: 'default', createdAt: 0 };
 const DEFAULT_MODELS: ModelOption[] = [{ value: '', label: 'Default model' }];
+
+const managerCardEntry = (channelId: string, text: string, kind: string, payload: unknown): ChannelEntry => ({
+  id: `local-card:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+  seq: Number.MAX_SAFE_INTEGER,
+  channelId,
+  authorActor: 'manager',
+  kind: 'system',
+  text,
+  ts: Date.now(),
+  status: 'ok',
+  format: 'markdown',
+  event: { kind, issuer: 'manager', payload },
+});
 
 function ChannelHeader({ channel, presence, selectedAgent }: { channel: Channel; presence: PresenceSnapshot; selectedAgent?: AgentDTO }) {
   const count = presenceCount(presence);
@@ -57,7 +71,7 @@ function ChannelHeader({ channel, presence, selectedAgent }: { channel: Channel;
 
 
 export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWorkbench: (route: Extract<HubRoute, { kind: 'workbench' }>) => React.ReactNode }) {
-  const { tasks, agents, features, audit, currentProject, selectedTaskId, channelEntries: liveChannelEntries, presence: livePresence, connected, subscribeConsole, sendConsoleCommand, showToast } = useTaskContext();
+  const { tasks, agents, features, audit, currentProject, selectedTaskId, channelEntries: liveChannelEntries, presence: livePresence, connected, subscribeConsole, sendConsoleCommand, showToast, commandAcks } = useTaskContext();
   const [channels, setChannels] = useState<Channel[]>([DEFAULT_CHANNEL]);
   const [entries, setEntries] = useState<ChannelEntry[]>([]);
   const [presence, setPresence] = useState<PresenceSnapshot>(EMPTY_PRESENCE);
@@ -68,6 +82,7 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
   const [modelOptions, setModelOptions] = useState<ModelOption[]>(DEFAULT_MODELS);
   const [sending, setSending] = useState(false);
   const lastSeqRef = useRef(0);
+  const pendingMentionTurns = useRef(new Map<string, { channelId: string; target: string }>());
   const [anchorEntryId, setAnchorEntryId] = useState<string | undefined>();
   const activeChannelId = route.kind === 'hub' ? route.channelId : DEFAULT_CHANNEL_ID;
   const selectedAgent = useMemo(() => agents.find((agent) => agent.id === selectedAgentId), [agents, selectedAgentId]);
@@ -142,6 +157,35 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
     void resyncSince(lastSeqRef.current).catch(() => undefined);
   }, [connected, loading, resyncSince]);
 
+  useEffect(() => {
+    if (!commandAcks.length) return;
+    for (const ack of commandAcks) {
+      const pending = pendingMentionTurns.current.get(ack.clientTurnId);
+      if (!pending) continue;
+      if (ack.ok) {
+        pendingMentionTurns.current.delete(ack.clientTurnId);
+      } else {
+        pendingMentionTurns.current.delete(ack.clientTurnId);
+        setEntries((prev) => reduceChannelEntries(prev, [managerCardEntry(pending.channelId, `Mention steer failed for ${pending.target}: ${ack.reason}`, 'mention-steer-failed', { face: { title: 'Mention steer failed', body: ack.reason, tone: 'destructive', pinned: { target: pending.target } }, ack })], activeChannelId));
+      }
+    }
+  }, [activeChannelId, commandAcks]);
+
+  const dispatchMentionSteer = (target: AgentDTO, steerText: string) => {
+    const clientTurnId = `mention:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+    pendingMentionTurns.current.set(clientTurnId, { channelId: activeChannelId, target: target.name || target.id });
+    sendConsoleCommand({
+      type: 'prompt',
+      id: target.id,
+      message: steerText,
+      displayText: steerText,
+      clientTurnId,
+      source: 'mention',
+      channelId: activeChannelId,
+      mention: { targetLabel: target.name || target.id },
+    } as any);
+  };
+
   const handleSend = async (text: string) => {
     if (!text.trim() || sending || route.kind !== 'hub') return;
     setSending(true);
@@ -150,7 +194,15 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
       setEntries((prev) => reduceChannelEntries(prev, [result.entry], activeChannelId));
       lastSeqRef.current = Math.max(lastSeqRef.current, result.entry.seq);
       setAnchorEntryId(result.entry.id);
-      if (selectedAgent) {
+      const routeResult = resolveMentionRoute(text, agents);
+      if (routeResult.kind === 'steer' && routeResult.target) {
+        const target = agents.find((item) => item.id === routeResult.target?.id);
+        if (target) dispatchMentionSteer(target, routeResult.text || text);
+      } else if (routeResult.kind === 'confirm' && routeResult.target) {
+        setEntries((prev) => reduceChannelEntries(prev, [managerCardEntry(activeChannelId, `Confirm before steering working agent @${routeResult.target?.label}.`, 'mention-confirm-required', { face: { title: 'Confirm steer', body: routeResult.text, detail: 'Target is already working; queue or confirm before delivery.', tone: 'warning', pinned: { target: routeResult.target?.label } }, target: routeResult.target, text: routeResult.text })], activeChannelId));
+      } else if (routeResult.kind === 'spawn' && routeResult.target) {
+        setEntries((prev) => reduceChannelEntries(prev, [managerCardEntry(activeChannelId, `Spawn proposal for @${routeResult.target?.label}.`, 'spawn-proposal', { face: { title: 'Spawn proposed', body: routeResult.text, detail: 'Non-resident mention enters the existing /api/spawn flow with this channel attached.', tone: 'info', pinned: { target: routeResult.target?.label, channel: activeChannelId } }, target: routeResult.target, text: routeResult.text, channelId: activeChannelId })], activeChannelId));
+      } else if (selectedAgent) {
         const sessionId = channelAgentSessionId(activeChannelId, selectedAgent.id);
         const clientTurnId = `hub-turn:${Date.now()}:${Math.random().toString(36).slice(2)}`;
         const agentId = await ensureConsoleAgent({ apiJson, subscribeConsole, roster: agents, currentProject, selectedModel }, sessionId, selectedAgent.id);
@@ -186,6 +238,7 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
                 modelOptions={modelOptions}
                 onModelChange={setSelectedModel}
                 agent={selectedAgent}
+                agents={agents}
                 placeholder={selectedAgent ? `Message #${channel.name} and address ${selectedAgent.name || selectedAgent.id}` : `Message #${channel.name}`}
                 onToast={showToast}
               />

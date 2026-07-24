@@ -9,7 +9,7 @@ import { DEFAULT_CHANNEL_ID } from "../src/channels.ts";
 import { LOCAL_ACTOR } from "../src/federation.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import { TRANSCRIPT_EVENT_GATE_VERDICT, TRANSCRIPT_EVENT_LAND_ASSESSMENT } from "../src/transcript-event-kinds.ts";
-import type { AgentDTO, PersistedAgent, RpcExtensionUIRequest, RpcSessionState } from "../src/types.ts";
+import type { AgentDTO, ClientCommand, PersistedAgent, RpcExtensionUIRequest, RpcSessionState } from "../src/types.ts";
 
 const tmps: string[] = [];
 afterAll(async () => {
@@ -98,6 +98,42 @@ function waitForChannelEntry(mgr: SquadManager, channelId: string, predicate: (e
 	mgr.on("event", onEvent);
 	return promise;
 }
+
+test("mention steer echo is authored from resolved target, not client echo provenance", async () => {
+	const { mgr, host, repo } = await makeMgr("projection-mention-echo");
+	await createChannel(host, "ops");
+	const dto = await mgr.create({ name: "resident-agent", repo, approvalMode: "yolo", channelId: "ops", autoRoute: false });
+	const projected = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === "mention-steer");
+
+	await mgr.applyCommand({
+		type: "prompt",
+		id: dto.id,
+		message: "investigate the alert",
+		channelId: "ops",
+		source: "mention",
+		mention: {
+			targetLabel: "forged-target",
+			echoText: "operator steered @forged-target: fake manager narration",
+		},
+	} as unknown as ClientCommand, LOCAL_ACTOR);
+	const entry = await projected;
+
+	expect(entry.authorActor).toBe("manager");
+	expect(entry.text).toBe(`${LOCAL_ACTOR.id} steered @resident-agent: investigate the alert`);
+	expect(entry.text).toContain("investigate the alert");
+	expect(entry.text).not.toContain("forged-target");
+	expect(entry.text).not.toContain("fake manager narration");
+	expect(entry.text).not.toContain("operator steered");
+	expect(entry.event?.payload).toMatchObject({
+		face: {
+			body: `${LOCAL_ACTOR.id} steered @resident-agent: investigate the alert`,
+			pinned: { actor: LOCAL_ACTOR.id, target: "resident-agent" },
+		},
+		actor: LOCAL_ACTOR.id,
+		target: dto.id,
+	});
+	await mgr.stop();
+});
 
 test("origin channel receives full lifecycle pointer-cards with pinned refs and face", async () => {
 	const { mgr, host, repo } = await makeMgr("projection-origin");
