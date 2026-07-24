@@ -20,6 +20,7 @@ export type DerivedReason = "turn-progress" | "pending-add" | "pending-answer" |
 export type ExplicitReason =
 	| "spawn" | "connect-begin" | "connect-ok" | "restart" | "kill" | "abort"
 	| "exit-clean" | "exit-error" | "fail" | "catastrophe" | "task-start" | "branch-start" | "reattach" | "adopted"
+	| "verification" | "pr-open"
 	// Same-state, event-class marker: a branch actually landed. Carries branch/sha/produces in cause
 	// for dispatch-time "Recently landed" context after the producer is already stopped.
 	| "landed"

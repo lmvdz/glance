@@ -3,7 +3,7 @@ import { landCardView, type LandCardKind } from '../components/hub/LandCards';
 import { entryAuthorLabel } from './hub';
 
 export type ChannelCardTone = 'neutral' | 'info' | 'warning' | 'success' | 'destructive';
-export type ChannelCardKind = 'message' | 'needs-you' | 'gate-verdict' | LandCardKind | 'mention-steer' | 'mention-confirm-required' | 'mention-steer-failed' | 'spawn-proposal' | 'plan-card' | 'token-burn-snapshot' | 'unknown-event';
+export type ChannelCardKind = 'message' | 'needs-you' | 'gate-verdict' | LandCardKind | 'mention-steer' | 'mention-confirm-required' | 'mention-steer-failed' | 'spawn-proposal' | 'plan-card' | 'token-burn-snapshot' | 'unit-spawned' | 'unit-turn-finished' | 'unit-failed' | 'pr-opened' | 'verification-ran' | 'unknown-event';
 
 export interface PointerCardFace {
   title: string;
@@ -54,7 +54,7 @@ export function buildChannelThreadViews(entries: ChannelEntry[]): ChannelCardVie
   });
 }
 
-const POINTER_EVENT_KINDS: Record<string, true> = { 'needs-you': true, 'gate-verdict': true, 'land-attempt': true, 'land-assessment': true, 'land-merge': true, 'mention-steer': true, 'mention-confirm-required': true, 'mention-steer-failed': true, 'spawn-proposal': true, 'token-burn-snapshot': true, 'plan-card': true };
+const POINTER_EVENT_KINDS: Record<string, true> = { 'needs-you': true, 'gate-verdict': true, 'land-attempt': true, 'land-assessment': true, 'land-merge': true, 'mention-steer': true, 'mention-confirm-required': true, 'mention-steer-failed': true, 'spawn-proposal': true, 'token-burn-snapshot': true, 'plan-card': true, 'unit-spawned': true, 'unit-turn-finished': true, 'unit-failed': true, 'pr-opened': true, 'verification-ran': true };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -96,6 +96,26 @@ function toneFor(kind: string, face?: PointerCardFace): ChannelCardTone {
   if (kind === 'mention-steer-failed') return 'destructive';
   if (kind === 'spawn-proposal' || kind === 'mention-steer' || kind === 'plan-card') return 'info';
   return 'neutral';
+}
+
+const LIFECYCLE_CARD_KINDS: Record<string, true> = { 'unit-spawned': true, 'unit-turn-finished': true, 'unit-failed': true, 'pr-opened': true, 'verification-ran': true };
+
+function lifecycleUnitId(view: ChannelCardView): string | undefined {
+  const payload = view.entry.event?.payload;
+  return stringFromPath(payload, ['refs', 'unitId']) ?? stringFromPath(payload, ['face', 'unitId']);
+}
+
+/** Consecutive lifecycle facts for one unit form one disclosure run. An intervening unit or
+ * non-lifecycle event always breaks the run, preserving chronology rather than merely grouping by id. */
+export function groupLifecycleRuns(views: ChannelCardView[]): ChannelCardView[][] {
+  const groups: ChannelCardView[][] = [];
+  for (const view of views) {
+    const previous = groups.at(-1);
+    const sameUnit = previous?.[0] && lifecycleUnitId(previous[0]) === lifecycleUnitId(view);
+    if (LIFECYCLE_CARD_KINDS[view.kind] && sameUnit && LIFECYCLE_CARD_KINDS[previous[0].kind]) previous.push(view);
+    else groups.push([view]);
+  }
+  return groups;
 }
 
 function labelFromKey(key: string): string {
