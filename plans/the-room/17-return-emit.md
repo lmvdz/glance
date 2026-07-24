@@ -1,5 +1,5 @@
 # Return-emit — layer 2 never happens silently, both directions tested
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -29,3 +29,10 @@ None.
 - Steer from IntervenceView → channel shows the echo card naming actor + target; kill from
   cockpit route → card; CLI steer against the daemon → card (proves the chokepoint placement);
   automation heartbeat commands do NOT flood the channel.
+
+## Resolution
+Landed 2026-07-24 as PR #247 (merge `1b96343`), merged ahead of the rest of wave 4 because it was
+independently green and touched none of the membership work. Touched `src/squad-manager.ts`,
+`src/transcript-event-kinds.ts` and `tests/projection-routing.test.ts` — the echo emission sits at
+the command chokepoint rather than at each call site, which is what makes the CLI-steer case in
+Verify pass for free rather than needing its own hook.
