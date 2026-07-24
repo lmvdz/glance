@@ -1,5 +1,5 @@
 import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertCircle, CheckCircle2, CircleDot, FileText, GitMerge, Hash, Reply, ShieldAlert } from 'lucide-react';
+import { AlertCircle, CheckCircle2, CircleDot, FileText, Flame, GitMerge, Hash, Reply, ShieldAlert } from 'lucide-react';
 import type { ChannelEntry } from '../../lib/dto';
 import { buildChannelThreadViews, type ChannelCardTone, type ChannelCardView } from '../../lib/channelTimeline';
 import { hubHref } from '../../lib/router';
@@ -21,6 +21,7 @@ const iconClass: Record<ChannelCardView['kind'], typeof ShieldAlert> = {
   'land-attempt': GitMerge,
   'land-assessment': ShieldAlert,
   'land-merge': GitMerge,
+  'token-burn-snapshot': Flame,
   'mention-steer': CircleDot,
   'mention-confirm-required': ShieldAlert,
   'mention-steer-failed': AlertCircle,

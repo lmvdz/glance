@@ -66,6 +66,18 @@ describe('channel timeline dispatch', () => {
     expect(card.title).toBe('the room');
     expect(card.href).toBe('#/workbench/task/feat%201');
     expect(card.pinned).toEqual([{ label: 'Concerns', value: '14' }]);
+
+  test('token-burn snapshots open the fleet economics door', () => {
+    const card = dispatchChannelCard(entry({
+      id: 'burn',
+      seq: 4,
+      event: { kind: 'token-burn-snapshot', payload: { face: { title: 'Token burn · Verifier', body: '1234 tokens · $0.9876', tone: 'info' } } },
+    }));
+
+    expect(card.kind).toBe('token-burn-snapshot');
+    expect(card.title).toBe('Token burn · Verifier');
+    expect(card.body).toBe('1234 tokens · $0.9876');
+    expect(card.href).toBe('#/workbench/economics');
   });
 
   test('unknown event kinds become neutral fallback cards', () => {

@@ -24,6 +24,7 @@ import { CommandPalette } from './components/CommandPalette';
 import { OmpGraphPanel } from './components/OmpGraphPanel';
 import { FogView } from './components/FogView';
 import { DailyPanel } from './components/DailyPanel';
+import { FleetEconomicsView } from './components/FleetEconomicsView';
 import { IntervenceView } from './components/IntervenceView';
 import { DesignReviewView } from './components/DesignReviewView';
 import { PlanRealityView } from './components/PlanRealityView';
@@ -88,6 +89,7 @@ const WorkbenchRoute = ({ route }: { route: Extract<HubRoute, { kind: 'workbench
   if (route.view === 'fleet') return <WorkspaceCockpit />;
   if (route.view === 'fog') return <FogView />;
   if (route.view === 'daily') return <DailyPanel />;
+  if (route.view === 'economics') return <FleetEconomicsView />;
   if (route.view === 'intervene') {
     return (
       <PageContextScope value={intervenePageContext}>

@@ -3,7 +3,7 @@ import { landCardView, type LandCardKind } from '../components/hub/LandCards';
 import { entryAuthorLabel } from './hub';
 
 export type ChannelCardTone = 'neutral' | 'info' | 'warning' | 'success' | 'destructive';
-export type ChannelCardKind = 'message' | 'needs-you' | 'gate-verdict' | LandCardKind | 'mention-steer' | 'mention-confirm-required' | 'mention-steer-failed' | 'spawn-proposal' | 'plan-card' | 'unknown-event';
+export type ChannelCardKind = 'message' | 'needs-you' | 'gate-verdict' | LandCardKind | 'mention-steer' | 'mention-confirm-required' | 'mention-steer-failed' | 'spawn-proposal' | 'plan-card' | 'token-burn-snapshot' | 'unknown-event';
 
 export interface PointerCardFace {
   title: string;
@@ -55,7 +55,7 @@ export function buildChannelThreadViews(entries: ChannelEntry[]): ChannelCardVie
   });
 }
 
-const POINTER_EVENT_KINDS: Record<string, true> = { 'needs-you': true, 'gate-verdict': true, 'land-attempt': true, 'land-assessment': true, 'land-merge': true, 'mention-steer': true, 'mention-confirm-required': true, 'mention-steer-failed': true, 'spawn-proposal': true, 'plan-card': true };
+const POINTER_EVENT_KINDS: Record<string, true> = { 'needs-you': true, 'gate-verdict': true, 'land-attempt': true, 'land-assessment': true, 'land-merge': true, 'mention-steer': true, 'mention-confirm-required': true, 'mention-steer-failed': true, 'spawn-proposal': true, 'token-burn-snapshot': true, 'plan-card': true };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -92,6 +92,7 @@ function toneFor(kind: string, face?: PointerCardFace): ChannelCardTone {
   if (kind === 'needs-you') return 'warning';
   if (kind === 'gate-verdict') return face?.status === 'pass' || face?.status === 'approved' ? 'success' : face?.status === 'fail' || face?.status === 'veto' ? 'destructive' : 'info';
   if (kind === 'land-merge') return face?.status === 'merged' || face?.status === 'landed' ? 'success' : 'info';
+  if (kind === 'token-burn-snapshot') return face?.status === 'deny' ? 'destructive' : face?.status === 'ask' ? 'warning' : 'info';
   if (kind === 'mention-confirm-required') return 'warning';
   if (kind === 'mention-steer-failed') return 'destructive';
   if (kind === 'spawn-proposal' || kind === 'mention-steer' || kind === 'plan-card') return 'info';
