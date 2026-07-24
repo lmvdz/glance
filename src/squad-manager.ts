@@ -601,6 +601,39 @@ export function gateClassOf(req: { id: string; title?: string; gateClass?: boole
 	return req.gateClass === true || req.id.startsWith("gate_") || (typeof req.title === "string" && req.title.startsWith("GATE:"));
 }
 
+/**
+ * Does this pending request deserve a CARD IN THE ROOM?
+ *
+ * Not the same question as `gateClassOf` answers for the *lane*, even though it currently shares its
+ * predicate — they are two different surfaces with two different jobs, and conflating them is what
+ * produced the defect this rule fixes:
+ *
+ *   - The **attention lane / rail** is "act now". It is DTO-driven (`AgentDTO.pending`), it empties
+ *     when the request is answered, and it is the right home for every blocking prompt including
+ *     routine tool approvals — a unit stuck on `Allow tool: bash` genuinely needs someone.
+ *   - The **room** is "what happened". Its entries are append-only and permanent. A card is a claim
+ *     that a fact was worth keeping.
+ *
+ * Projecting every pending into the room put 544 `Allow tool: bash Command: …` cards (plus their
+ * paired `resolved` twins) into #fleet over twelve hours of one fleet run — 100% of the channel's
+ * content, zero proofs — which is the exact firehose DIRECTION.md's near-empty needs-you law
+ * forbids, and which would have failed the love gate (concern 23) on sight.
+ *
+ * So: only gate-class requests — the ones no supervisor may auto-answer, where a human decision is
+ * definitionally required — become room cards. Non-gate prompts remain fully visible in the lane and
+ * the rail; they simply stop writing permanent history.
+ *
+ * KNOWN GAP, deliberate: with BOTH supervisors off, a non-gate prompt can block a unit with no card
+ * in the room. That unit is still in the rail's ACTIVE WORK group and still in the lane, so nothing
+ * is hidden — the room just stays quiet. The stronger rule (project a non-gate pending that survives
+ * a grace period, i.e. "the machine did not handle it, so it is a human's problem after all") needs a
+ * timer and per-pending scheduling; it is filed as follow-up in plans/the-room/26 rather than
+ * smuggled in here.
+ */
+export function isRoomWorthyPending(req: { id: string; title?: string; gateClass?: boolean }): boolean {
+	return gateClassOf(req);
+}
+
 const BLOCKING_UI_METHODS: Record<string, true> = {
 	confirm: true,
 	input: true,
@@ -11276,11 +11309,12 @@ export class SquadManager extends EventEmitter {
 			pendingStatus,
 			title: resolved ? `Resolved · ${title}` : `Needs you · ${title}`,
 			eyebrow: resolved ? "Resolved" : "Needs you",
-			body: message ?? title,
+			// A card that says the same sentence three times (title, body, "why stopped") reads as
+			// broken, and for approval-shaped pendings `message` IS the title. Say it once.
+			body: message && message.trim() !== title.trim() ? message : undefined,
 			detail: resolved ? "Follow-up resolution card. Original pending card remains unchanged." : "Click to step into the agent.",
 			tone: resolved ? "success" : "warning",
 			pinned: {
-				"why stopped": title,
 				agent: rec.dto.name || rec.dto.id,
 				age,
 			},
@@ -11377,10 +11411,11 @@ export class SquadManager extends EventEmitter {
 		const upcoming = new Map(next.map((request) => [request.id, request]));
 		for (const request of next) {
 			if (previous.has(request.id)) continue;
+			if (!isRoomWorthyPending(request)) continue;
 			this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_NEEDS_YOU, `needs you · ${this.safeEventLabel(request.title)}`, {
 				status: "pending",
 				pendingId: request.id,
-				gateClass: request.gateClass,
+				gateClass: gateClassOf(request),
 				title: request.title,
 				message: request.message,
 				createdAt: request.createdAt,
@@ -11389,10 +11424,13 @@ export class SquadManager extends EventEmitter {
 		}
 		for (const request of previous.values()) {
 			if (upcoming.has(request.id)) continue;
+			// Symmetric with the emit above: a pending that never became a card must never emit a
+			// resolution card, or the room fills with orphan "resolved" faces for facts it never showed.
+			if (!isRoomWorthyPending(request)) continue;
 			this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_NEEDS_YOU, `needs you resolved · ${this.safeEventLabel(request.title)}`, {
 				status: "resolved",
 				pendingId: request.id,
-				gateClass: request.gateClass,
+				gateClass: gateClassOf(request),
 				title: request.title,
 				createdAt: request.createdAt,
 				agentId: rec.dto.id,
