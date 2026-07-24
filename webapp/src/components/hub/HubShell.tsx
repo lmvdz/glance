@@ -12,7 +12,7 @@ import { DEFAULT_CHANNEL_ID, hubHref, type HubRoute } from '../../lib/router';
 import { useTaskContext } from '../../context/TaskContext';
 
 const EMPTY_PRESENCE: PresenceSnapshot = { users: [] };
-const DEFAULT_CHANNEL: Channel = { id: DEFAULT_CHANNEL_ID, name: DEFAULT_CHANNEL_ID, kind: 'default', createdAt: 0, visibility: 'org-public' };
+const DEFAULT_CHANNEL: Channel = { id: DEFAULT_CHANNEL_ID, name: DEFAULT_CHANNEL_ID, kind: 'default', createdAt: 0, visibility: 'org-public', unreadCount: 0, lastReadSeq: 0 };
 const DEFAULT_MODELS: ModelOption[] = [{ value: '', label: 'Default model' }];
 
 const managerCardEntry = (channelId: string, text: string, kind: string, payload: unknown): ChannelEntry => ({
@@ -81,7 +81,7 @@ function ChannelHeader({ channel, presence, selectedAgent }: { channel: Channel;
 
 
 export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWorkbench: (route: Extract<HubRoute, { kind: 'workbench' }>) => React.ReactNode }) {
-  const { tasks, agents, features, audit, currentProject, selectedTaskId, channelEntries: liveChannelEntries, presence: livePresence, connected, subscribeConsole, sendConsoleCommand, showToast, commandAcks } = useTaskContext();
+  const { tasks, agents, features, audit, currentProject, selectedTaskId, channelEntries: liveChannelEntries, presence: livePresence, typing, connected, subscribeConsole, sendConsoleCommand, showToast, commandAcks } = useTaskContext();
   const [channels, setChannels] = useState<Channel[]>([DEFAULT_CHANNEL]);
   const [entries, setEntries] = useState<ChannelEntry[]>([]);
   const [presence, setPresence] = useState<PresenceSnapshot>(EMPTY_PRESENCE);
@@ -92,6 +92,8 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
   const [modelOptions, setModelOptions] = useState<ModelOption[]>(DEFAULT_MODELS);
   const [sending, setSending] = useState(false);
   const lastSeqRef = useRef(0);
+  const typingStopTimer = useRef<number | undefined>(undefined);
+  const unreadEventIds = useRef(new Set<string>());
   const pendingMentionTurns = useRef(new Map<string, { channelId: string; target: string }>());
   const [anchorEntryId, setAnchorEntryId] = useState<string | undefined>();
   const [replyTarget, setReplyTarget] = useState<ChannelEntry | undefined>();
@@ -105,6 +107,8 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
   const selectedAgent = useMemo(() => agents.find((agent) => agent.id === selectedAgentId), [agents, selectedAgentId]);
   const selectedTask = useMemo(() => tasks.find((task) => task.id === selectedTaskId), [tasks, selectedTaskId]);
   const channel = channels.find((item) => item.id === activeChannelId) ?? { ...DEFAULT_CHANNEL, id: activeChannelId, name: activeChannelId };
+  const activeTyping = typing.filter((item) => item.channelId === activeChannelId && item.active);
+  const typingLabel = activeTyping.length === 0 ? '' : activeTyping.length === 1 ? `${activeTyping[0].displayName} is typing…` : `${activeTyping.map((item) => item.displayName).slice(0, 2).join(', ')} are typing…`;
 
   useEffect(() => {
     if (typeof window !== 'undefined' && (!window.location.hash || window.location.hash === '#/')) window.location.hash = '#fleet';
@@ -121,12 +125,28 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
     setChannels(payload.channels?.length ? payload.channels : [DEFAULT_CHANNEL]);
   }, []);
 
+  const markRead = useCallback((seq: number) => {
+    if (!Number.isFinite(seq) || seq <= 0) return;
+    void apiJson(`/api/channels/${encodeURIComponent(activeChannelId)}/read`, jsonInit('POST', { lastReadSeq: seq })).then(() => {
+      setChannels((prev) => prev.map((item) => item.id === activeChannelId ? { ...item, lastReadSeq: Math.max(item.lastReadSeq ?? 0, seq), unreadCount: 0 } : item));
+    }).catch(() => undefined);
+  }, [activeChannelId]);
+
   useEffect(() => {
+    const inactive = liveChannelEntries.filter((entry) => entry.channelId !== activeChannelId && !unreadEventIds.current.has(entry.id));
+    if (inactive.length) {
+      for (const entry of inactive) unreadEventIds.current.add(entry.id);
+      setChannels((prev) => prev.map((channel) => {
+        const count = inactive.filter((entry) => entry.channelId === channel.id && entry.seq > (channel.lastReadSeq ?? 0)).length;
+        return count ? { ...channel, unreadCount: (channel.unreadCount ?? 0) + count } : channel;
+      }));
+    }
     const incoming = liveChannelEntries.filter((entry) => entry.channelId === activeChannelId && entry.seq > lastSeqRef.current);
     if (!incoming.length) return;
     setEntries((prev) => reduceChannelEntries(prev, incoming, activeChannelId));
     lastSeqRef.current = Math.max(lastSeqRef.current, latestSeq(incoming));
-  }, [activeChannelId, liveChannelEntries]);
+    markRead(lastSeqRef.current);
+  }, [activeChannelId, liveChannelEntries, markRead]);
 
   useEffect(() => {
     if (livePresence.users.length > 0) setPresence(livePresence);
@@ -138,7 +158,8 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
     if (!incoming.length) return;
     setEntries((prev) => reduceChannelEntries(prev, incoming, activeChannelId));
     lastSeqRef.current = Math.max(lastSeqRef.current, latestSeq(incoming));
-  }, [activeChannelId]);
+    markRead(lastSeqRef.current);
+  }, [activeChannelId, markRead]);
 
   useEffect(() => {
     let alive = true;
@@ -151,6 +172,7 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
         if (!alive) return;
         setEntries(reduceChannelEntries([], channelPayload.entries ?? [], activeChannelId));
         lastSeqRef.current = latestSeq(channelPayload.entries ?? []);
+        markRead(lastSeqRef.current);
         setPresence(presencePayload);
         setError('');
       } catch (err) {
@@ -167,7 +189,7 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
       void apiJson<PresenceSnapshot>('/api/room/presence').then(setPresence).catch(() => undefined);
     }, 5000);
     return () => { alive = false; clearInterval(interval); };
-  }, [activeChannelId, loadChannels, resyncSince]);
+  }, [activeChannelId, loadChannels, resyncSince, markRead]);
 
   useEffect(() => {
     if (!connected || loading) return;
@@ -241,10 +263,27 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
   }, [searchQuery]);
 
 
+  const handleTypingActivity = useCallback((text: string) => {
+    if (route.kind !== 'hub') return;
+    const active = text.trim().length > 0;
+    sendConsoleCommand({ type: 'typing', channelId: activeChannelId, active } as any);
+    if (typingStopTimer.current) window.clearTimeout(typingStopTimer.current);
+    if (active) {
+      typingStopTimer.current = window.setTimeout(() => {
+        sendConsoleCommand({ type: 'typing', channelId: activeChannelId, active: false } as any);
+      }, 1800);
+    }
+  }, [activeChannelId, route.kind, sendConsoleCommand]);
+
+  useEffect(() => () => {
+    if (typingStopTimer.current) window.clearTimeout(typingStopTimer.current);
+  }, []);
+
   const handleSend = async (text: string) => {
     if (!text.trim() || sending || route.kind !== 'hub') return;
     setSending(true);
     try {
+      sendConsoleCommand({ type: 'typing', channelId: activeChannelId, active: false } as any);
       const result = await postChannelMessage({ apiJson }, activeChannelId, text, replyTarget?.id);
       setEntries((prev) => reduceChannelEntries(prev, [result.entry], activeChannelId));
       lastSeqRef.current = Math.max(lastSeqRef.current, result.entry.seq);
@@ -318,6 +357,7 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
             </div>
             <ChannelTimeline entries={entries} loading={loading} error={error} anchorEntryId={anchorEntryId} onReply={(entry) => { setReplyTarget(entry); setReplyFocusKey((key) => key + 1); }} />
             <div className="border-t border-zinc-800 bg-[#0a0a0b]">
+              {typingLabel ? <div className="flex h-6 items-center gap-2 px-4 text-[11px] text-zinc-500">{typingLabel}</div> : null}
               {sending ? <div className="flex h-6 items-center gap-2 px-4 text-[11px] text-zinc-500"><Loader2 className="h-3 w-3 animate-spin" aria-hidden /> Posting…</div> : null}
               {replyTarget ? (
                 <div className="flex items-center justify-between gap-3 border-b border-zinc-800 px-4 py-2 text-xs text-zinc-400">
@@ -344,6 +384,7 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
                 stopPending={false}
                 onStop={() => undefined}
                 onSend={(value) => void handleSend(value)}
+                onInputActivity={handleTypingActivity}
                 selectedModel={selectedModel}
                 modelOptions={modelOptions}
                 onModelChange={setSelectedModel}
