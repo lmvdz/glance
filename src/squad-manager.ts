@@ -216,12 +216,14 @@ import { lensAdvisoryBucket, scoreConfidence } from "./confidence.ts";
 import { redact } from "./redact.ts";
 import {
 	EVENT_ISSUER_MANAGER,
+	TRANSCRIPT_EVENT_DESIGN_REVISED,
 	TRANSCRIPT_EVENT_GATE_VERDICT,
 	TRANSCRIPT_EVENT_LAND_ASSESSMENT,
 	TRANSCRIPT_EVENT_LAND_ATTEMPT,
 	TRANSCRIPT_EVENT_LAND_MERGE,
 	TRANSCRIPT_EVENT_NEEDS_YOU,
 	TRANSCRIPT_EVENT_PLAN_CARD,
+	TRANSCRIPT_EVENT_RETURN_EMIT,
 } from "./transcript-event-kinds.ts";
 import { TRANSCRIPT_EVENT_TOKEN_BURN_SNAPSHOT, fleetTokenBurnPayload, tokenBurnFace, unitTokenBurnPayload } from "./token-burn.ts";
 import { truncateLabel } from "./text-util.ts";
@@ -265,6 +267,8 @@ const DEFAULT_FLEET_CARD_KINDS: Record<string, true> = {
 	[TRANSCRIPT_EVENT_GATE_VERDICT]: true,
 	[TRANSCRIPT_EVENT_LAND_MERGE]: true,
 	[TRANSCRIPT_EVENT_PLAN_CARD]: true,
+	[TRANSCRIPT_EVENT_RETURN_EMIT]: true,
+	[TRANSCRIPT_EVENT_DESIGN_REVISED]: true,
 };
 
 const MAX_TRANSCRIPT = 800;
@@ -3365,9 +3369,56 @@ export class SquadManager extends EventEmitter {
 		const concern = await updatePlanConcern(f.repo, f.planDir, opts.file, { status: opts.status, blockedBy: opts.blockedBy });
 		if (concern) {
 			this.emitFeaturesChanged();
+			void this.emitDesignRevisedCard(f, concern, opts, actor);
 			if (opts.status != null) void this.recordAudit(actor, "concern.status", opts.file, "ok", `-> ${opts.status} (operator/webapp edit, no land proof required)`);
 		}
 		return concern;
+	}
+
+	private async emitDesignRevisedCard(feature: FeatureDTO, concern: PlanConcern, opts: { file: string; status?: string; blockedBy?: number[] }, actor: Actor): Promise<void> {
+		const rec = feature.agentIds.map((id) => this.agents.get(id)).find(Boolean);
+		const channelId = rec?.options.channelId ?? rec?.dto.channelId ?? DEFAULT_CHANNEL_ID;
+		const changed = [
+			opts.status !== undefined ? `status → ${opts.status}` : undefined,
+			opts.blockedBy !== undefined ? `blockers → ${opts.blockedBy.length ? opts.blockedBy.map((n) => `#${n}`).join(", ") : "none"}` : undefined,
+		].filter(Boolean).join("; ");
+		const planName = feature.planDir?.split(/[\\/]/).filter(Boolean).pop() ?? feature.title;
+		const text = `design revised · ${this.safeEventLabel(planName)} · ${this.safeEventLabel(concern.title)} · ${changed}`;
+		try {
+			const entry = await this.channelStore.appendManager(channelId, {
+				authorActor: "manager",
+				text,
+				kind: "system",
+				format: "stage",
+				event: {
+					kind: TRANSCRIPT_EVENT_DESIGN_REVISED,
+					payload: {
+						refs: { planId: feature.id, planPath: opts.file, unitId: rec?.dto.id },
+						doorSurface: "plan",
+						face: {
+							unitId: rec?.dto.id,
+							unitName: rec?.dto.name,
+							eventKind: TRANSCRIPT_EVENT_DESIGN_REVISED,
+							title: "Design revised",
+							eyebrow: "Plan saved",
+							body: `${concern.title}: ${changed}`,
+							detail: opts.file,
+							tone: "info",
+							planName,
+							pinned: { actor: actor.id, concern: concern.file, status: concern.status },
+						},
+						actor: actor.id,
+						featureId: feature.id,
+						planPath: opts.file,
+						planName,
+						changed,
+					},
+				},
+			});
+			this.emit("event", { type: "channel-entry", channelId, entry } satisfies SquadEvent);
+		} catch (err) {
+			this.log("warn", `design-revised ${feature.id}/${opts.file} → ${channelId} failed: ${errText(err)}`);
+		}
 	}
 
 	/** Persisted, archived features (the "garbage bin") — the soft-deleted set the board hides. */
@@ -7172,6 +7223,63 @@ export class SquadManager extends EventEmitter {
 		this.emit("event", { type: "channel-entry", channelId, entry } satisfies SquadEvent);
 	}
 
+	private commandReturnText(cmd: ClientCommand, actor: Actor, rec: AgentRecord): string | undefined {
+		switch (cmd.type) {
+			case "prompt":
+				if (cmd.source === "mention" || cmd.source === "auto") return undefined;
+				return `${actor.id} steered ${rec.dto.name || rec.dto.id}: ${cmd.displayText ?? cmd.message}`;
+			case "kill":
+				return `${actor.id} killed ${rec.dto.name || rec.dto.id}`;
+			case "restart":
+				return `${actor.id} restarted ${rec.dto.name || rec.dto.id}`;
+			case "fork":
+				return `${actor.id} forked ${rec.dto.name || rec.dto.id}`;
+			case "set-model":
+				return `${actor.id} set ${rec.dto.name || rec.dto.id} model to ${cmd.model.trim()}`;
+			default:
+				return undefined;
+		}
+	}
+
+	private async appendCommandReturnEmit(cmd: ClientCommand, actor: Actor, rec: AgentRecord): Promise<void> {
+		const text = this.commandReturnText(cmd, actor, rec);
+		if (!text) return;
+		const channelId = cmd.type === "prompt" && cmd.channelId ? cmd.channelId : (rec.options.channelId ?? rec.dto.channelId ?? DEFAULT_CHANNEL_ID);
+		const targetLabel = rec.dto.name || rec.dto.id;
+		try {
+			const entry = await this.channelStore.appendManager(channelId, {
+				authorActor: "manager",
+				text,
+				kind: "system",
+				format: "stage",
+				event: {
+					kind: TRANSCRIPT_EVENT_RETURN_EMIT,
+					payload: {
+						refs: { unitId: rec.dto.id },
+						doorSurface: "intervence",
+						face: {
+							unitId: rec.dto.id,
+							unitName: rec.dto.name,
+							eventKind: TRANSCRIPT_EVENT_RETURN_EMIT,
+							title: "Control accepted",
+							eyebrow: "Room echo",
+							body: text,
+							tone: "info",
+							pinned: { actor: actor.id, action: cmd.type, target: targetLabel },
+						},
+						actor: actor.id,
+						action: cmd.type,
+						target: rec.dto.id,
+						source: commandSource(cmd),
+					},
+				},
+			});
+			this.emit("event", { type: "channel-entry", channelId, entry } satisfies SquadEvent);
+		} catch (err) {
+			this.log("warn", `return-emit ${cmd.type}/${rec.dto.id} → ${channelId} failed: ${errText(err)}`);
+		}
+	}
+
 	async applyCommand(cmd: ClientCommand, actor: Actor = LOCAL_ACTOR): Promise<void> {
 		// Agent-origin actors are not in the viewer/operator/admin ladder. They get exactly one
 		// capability: bounded advisory messages to their C1 scope.
@@ -7339,6 +7447,7 @@ export class SquadManager extends EventEmitter {
 					this.emitCommandAck(cmd.clientTurnId, { ok: false, reason: "spawn-failed" });
 				}
 				void this.recordAudit(actor, "prompt", cmd.id, "ok", truncateLabel(cmd.message, 80), commandSource(cmd));
+				await this.appendCommandReturnEmit(cmd, actor, rec);
 				break;
 			}
 			case "set-model": {
@@ -7365,6 +7474,7 @@ export class SquadManager extends EventEmitter {
 					this.append(rec, "system", `model set to ${model}`);
 					this.emitAgent(rec);
 					void this.recordAudit(actor, "set-model", cmd.id, "ok", model);
+					await this.appendCommandReturnEmit(cmd, actor, rec);
 				} catch (err) {
 					const detail = errText(err);
 					this.append(rec, "system", `model change failed: ${detail}`);
@@ -7406,13 +7516,16 @@ export class SquadManager extends EventEmitter {
 				this.settleRunningTranscript(rec, "cancelled");
 				this.emitAgent(rec);
 				void this.recordAudit(actor, "kill", cmd.id);
+				await this.appendCommandReturnEmit(cmd, actor, rec);
 				break;
 			case "restart":
 				await this.restart(rec);
 				void this.recordAudit(actor, "restart", cmd.id);
+				await this.appendCommandReturnEmit(cmd, actor, rec);
 				break;
 			case "fork":
 				await this.fork(cmd.id, { seq: cmd.seq }, actor);
+				await this.appendCommandReturnEmit(cmd, actor, rec);
 				break;
 			case "continue":
 				// Continue a recoverable terminal run in place. Surface a refusal into the transcript (same
