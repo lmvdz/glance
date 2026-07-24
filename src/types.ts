@@ -1629,7 +1629,7 @@ export type ClientCommand =
 	// it rides along to the audit trail so a voice-originated command is distinguishable from a typed
 	// one in audit.jsonl, and must never influence authz/tier decisions (see authz.ts). Threaded on the
 	// mutating variants only.
-	| { type: "prompt"; id: string; message: string; clientTurnId?: string; displayText?: string; source?: string }
+	| { type: "prompt"; id: string; message: string; clientTurnId?: string; displayText?: string; source?: string; channelId?: string; mention?: { targetLabel?: string; echoText?: string } }
 	| { type: "set-model"; id: string; model: string }
 	| { type: "answer"; id: string; requestId: string; value: string }
 	| { type: "interrupt"; id: string; source?: string }
