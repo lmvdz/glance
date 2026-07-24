@@ -55,6 +55,17 @@ describe('channel timeline dispatch', () => {
     expect(resolved.id).toBe('resolved-card');
     expect(resolved.title).toBe('Resolved · Approve deploy');
     expect(resolved.tone).toBe('success');
+
+  test('plan cards route to the TaskDetail plan DAG', () => {
+    const card = dispatchChannelCard(entry({
+      id: 'p1',
+      seq: 2,
+      event: { kind: 'plan-card', payload: { doorSurface: 'plan', refs: { planId: 'feat 1' }, face: { title: 'the room', body: '14 concerns ready', pinned: { concerns: 14 } } } },
+    }));
+    expect(card.kind).toBe('plan-card');
+    expect(card.title).toBe('the room');
+    expect(card.href).toBe('#/workbench/task/feat%201');
+    expect(card.pinned).toEqual([{ label: 'Concerns', value: '14' }]);
   });
 
   test('unknown event kinds become neutral fallback cards', () => {

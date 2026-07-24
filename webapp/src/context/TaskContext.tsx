@@ -503,7 +503,7 @@ export function TaskProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  const selectTask = (id: string | null) => setSelectedTaskId(id);
+  const selectTask = useCallback((id: string | null) => setSelectedTaskId(id), []);
 
   const addTask = (partialTask: Partial<Task>) => {
     const title = partialTask.title?.trim() || 'New Task';

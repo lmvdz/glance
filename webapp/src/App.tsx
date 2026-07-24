@@ -55,12 +55,15 @@ const useHubRoute = () => {
 };
 
 const WorkbenchRoute = ({ route }: { route: Extract<HubRoute, { kind: 'workbench' }> }) => {
-  const { selectedTaskId, currentProject, tasks, taskFilter, tasksListMode, agents, openIntervene, reviewTaskId, reviewDocPath, capabilities, publicCatalog } = useTaskContext();
+  const { selectedTaskId, selectTask, currentProject, tasks, taskFilter, tasksListMode, agents, openIntervene, reviewTaskId, reviewDocPath, capabilities, publicCatalog } = useTaskContext();
   const { status } = useAuth();
 
   React.useEffect(() => {
     if (route.view === 'intervene' && route.id) openIntervene(route.id);
   }, [route.view, route.id]);
+  React.useEffect(() => {
+    if (route.view === 'task' && route.id) selectTask(route.id);
+  }, [route.view, route.id, selectTask]);
   const interveneAgent = React.useMemo(() => agents.find((a) => a.id === route.id), [agents, route.id]);
   const reviewTask = React.useMemo(() => tasks.find((t) => t.id === reviewTaskId || t.sourceId === reviewTaskId), [tasks, reviewTaskId]);
   const tasksPageContext = React.useMemo(

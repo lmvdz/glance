@@ -45,9 +45,10 @@ export function parseHubHash(hash: string): HubRoute {
     const entryId = decode(sub);
     return { kind: 'workbench', view: 'gate-verdict', id: channelId && entryId ? `${channelId}\u0000${entryId}` : undefined };
   }
+  if (head === 'task') return { kind: 'workbench', view: 'task', id: decode(rawId) };
   if (head === 'workbench') {
     const view = normalizeWorkbenchView(rawId);
-    return { kind: 'workbench', view: view ?? 'fleet' };
+    return { kind: 'workbench', view: view ?? 'fleet', ...(view === 'task' && decode(sub) ? { id: decode(sub) } : {}) };
   }
   return { kind: 'hub', channelId: DEFAULT_CHANNEL_ID };
 }
@@ -70,6 +71,7 @@ export function workbenchHref(view: WorkbenchRouteView, id?: string): string {
     const [channelId, entryId] = id.includes('\u0000') ? id.split('\u0000') : id.split('/');
     return channelId && entryId ? gateVerdictHref(channelId, entryId) : '#/gate-verdict';
   }
+  if (view === 'task') return id ? `#/workbench/task/${encodeURIComponent(id)}` : '#/workbench/task';
   return `#/workbench/${view}`;
 }
 

@@ -3,7 +3,7 @@ import { landCardView, type LandCardKind } from '../components/hub/LandCards';
 import { entryAuthorLabel } from './hub';
 
 export type ChannelCardTone = 'neutral' | 'info' | 'warning' | 'success' | 'destructive';
-export type ChannelCardKind = 'message' | 'needs-you' | 'gate-verdict' | LandCardKind | 'mention-steer' | 'mention-confirm-required' | 'mention-steer-failed' | 'spawn-proposal' | 'unknown-event';
+export type ChannelCardKind = 'message' | 'needs-you' | 'gate-verdict' | LandCardKind | 'mention-steer' | 'mention-confirm-required' | 'mention-steer-failed' | 'spawn-proposal' | 'plan-card' | 'unknown-event';
 
 export interface PointerCardFace {
   title: string;
@@ -13,6 +13,7 @@ export interface PointerCardFace {
   status?: string;
   tone?: ChannelCardTone;
   pinned?: Record<string, string | number | boolean | null | undefined>;
+  href?: string;
 }
 
 export interface ChannelCardView {
@@ -29,6 +30,7 @@ export interface ChannelCardView {
   href?: string;
   land?: { kind: LandCardKind; branch?: string; sha?: string; target?: string; risk?: string; recommendation?: string; outcome?: string; prNumber?: string; prUrl?: string; doneProofVerified?: string };
   replyContext?: { id: string; channelId: string; authorLabel: string; body: string };
+  href?: string;
   repliedBy?: number;
   actionHref?: string;
 }
@@ -53,7 +55,7 @@ export function buildChannelThreadViews(entries: ChannelEntry[]): ChannelCardVie
   });
 }
 
-const POINTER_EVENT_KINDS: Record<string, true> = { 'needs-you': true, 'gate-verdict': true, 'land-attempt': true, 'land-assessment': true, 'land-merge': true, 'mention-steer': true, 'mention-confirm-required': true, 'mention-steer-failed': true, 'spawn-proposal': true };
+const POINTER_EVENT_KINDS: Record<string, true> = { 'needs-you': true, 'gate-verdict': true, 'land-attempt': true, 'land-assessment': true, 'land-merge': true, 'mention-steer': true, 'mention-confirm-required': true, 'mention-steer-failed': true, 'spawn-proposal': true, 'plan-card': true };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -74,6 +76,13 @@ function faceFromPayload(payload: unknown): PointerCardFace | undefined {
   };
 }
 
+function hrefFromPayload(payload: unknown): string | undefined {
+  if (!isRecord(payload)) return undefined;
+  if (typeof payload.href === 'string') return payload.href;
+  if (payload.doorSurface !== 'plan' || !isRecord(payload.refs) || typeof payload.refs.planId !== 'string') return undefined;
+  return `#/workbench/task/${encodeURIComponent(payload.refs.planId)}`;
+}
+
 function isTone(value: unknown): value is ChannelCardTone {
   return value === 'neutral' || value === 'info' || value === 'warning' || value === 'success' || value === 'destructive';
 }
@@ -85,7 +94,7 @@ function toneFor(kind: string, face?: PointerCardFace): ChannelCardTone {
   if (kind === 'land-merge') return face?.status === 'merged' || face?.status === 'landed' ? 'success' : 'info';
   if (kind === 'mention-confirm-required') return 'warning';
   if (kind === 'mention-steer-failed') return 'destructive';
-  if (kind === 'spawn-proposal' || kind === 'mention-steer') return 'info';
+  if (kind === 'spawn-proposal' || kind === 'mention-steer' || kind === 'plan-card') return 'info';
   return 'neutral';
 }
 
@@ -129,7 +138,7 @@ export function dispatchChannelCard(entry: ChannelEntry): ChannelCardView {
   const title = face?.title || labelFromKey(eventKind);
   const body = face?.body || entry.text || 'Card update';
   const pinned = Object.entries(face?.pinned ?? {}).flatMap(([label, value]) => value == null || value === '' ? [] : [{ label: labelFromKey(label), value: String(value) }]);
-  return { id: entry.id, entry, kind: eventKind as ChannelCardKind, tone: toneFor(eventKind, face), authorLabel: entryAuthorLabel(entry), title, eyebrow: face?.eyebrow, body, detail: face?.detail, pinned, actionHref: channelCardActionHref(entry) };
+  return { id: entry.id, entry, kind: eventKind as ChannelCardKind, tone: toneFor(eventKind, face), authorLabel: entryAuthorLabel(entry), title, eyebrow: face?.eyebrow, body, detail: face?.detail, pinned, actionHref: channelCardActionHref(entry), href: face?.href ?? hrefFromPayload(entry.event?.payload) };
 }
 
 export function reduceChannelEntryWindow(entries: ChannelEntry[], incoming: ChannelEntry[], channelId: string, cap = 500): ChannelEntry[] {
