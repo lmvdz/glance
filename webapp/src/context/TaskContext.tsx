@@ -9,7 +9,7 @@ import { parseAgentHash } from '../lib/agent-link';
 import { useSquad } from '../hooks/useSquad';
 import { coerceView, VIEW_STORAGE_KEY } from '../lib/viewAlias';
 import type { TasksListMode } from '../lib/pageContextDerive';
-import type { AgentDTO, ArtifactCommentDTO, AuditEntry, CapabilitySnapshotDTO, ClientCommand, CommandAckDTO, FeatureDTO, ProjectDTO, PublicCapabilityCatalogDTO, TranscriptEntry } from '../lib/dto';
+import type { AgentDTO, ArtifactCommentDTO, AuditEntry, CapabilitySnapshotDTO, ChannelEntry, ClientCommand, CommandAckDTO, FeatureDTO, PresenceSnapshot, ProjectDTO, PublicCapabilityCatalogDTO, TranscriptEntry } from '../lib/dto';
 
 export interface ToastInfo {
   id: string;
@@ -95,6 +95,8 @@ interface TaskContextType {
   commentEvents: ArtifactCommentDTO[];
   resolvedCommentEvents: Map<string, number>;
   commandAcks: CommandAckDTO[];
+  channelEntries: ChannelEntry[];
+  presence: PresenceSnapshot;
   connected: boolean;
   agents: AgentDTO[];
   /** Raw live feature/plan list — the other half of the active-work join (agents being the first). */
@@ -635,7 +637,7 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <TaskContext.Provider value={{ tasks, allTasks: scopedTasks, agents: squad.agents, features: squad.features, audit, projects, currentProject, projectDtos: squad.projects, selectProject, addProject, removeProject, capabilities: squad.capabilities, publicCatalog: squad.publicCatalog, connected: squad.connected, transcripts: squad.transcripts, commentEvents: squad.commentEvents, resolvedCommentEvents: squad.resolvedCommentEvents, commandAcks: squad.commandAcks, selectedTaskId, toasts, view, taskFilter, tasksListMode, taskCategoryFilter, isChatOpen, isCommandPaletteOpen, openCommandPalette, closeCommandPalette, toggleCommandPalette, openedConsoleAgentId, interveneAgentId, reviewTaskId, reviewDocPath, planRealityFeatureId, planBriefName, reload: squad.reload, setView, setTaskFilter, setTasksListMode, setTaskCategoryFilter, setIsChatOpen, openConsole, openIntervene, openReview, closeReview, openPlanReality, closePlanReality, openPlanBrief, closePlanBrief, selectTask, addTask, deleteTask, restoreFeature, hardDeleteFeature, loadArchivedFeatures, toggleTaskComplete, updateTask, setTaskCategory, showToast, sendConsoleCommand: squad.send, subscribeConsole: squad.subscribe, installCapability, importCatalogCapability, setCapabilityEnabled, runCapability, addTaskComment, loadTaskComments }}>
+    <TaskContext.Provider value={{ tasks, allTasks: scopedTasks, agents: squad.agents, features: squad.features, audit, projects, currentProject, projectDtos: squad.projects, selectProject, addProject, removeProject, capabilities: squad.capabilities, publicCatalog: squad.publicCatalog, connected: squad.connected, transcripts: squad.transcripts, commentEvents: squad.commentEvents, resolvedCommentEvents: squad.resolvedCommentEvents, commandAcks: squad.commandAcks, channelEntries: squad.channelEntries, presence: squad.presence, selectedTaskId, toasts, view, taskFilter, tasksListMode, taskCategoryFilter, isChatOpen, isCommandPaletteOpen, openCommandPalette, closeCommandPalette, toggleCommandPalette, openedConsoleAgentId, interveneAgentId, reviewTaskId, reviewDocPath, planRealityFeatureId, planBriefName, reload: squad.reload, setView, setTaskFilter, setTasksListMode, setTaskCategoryFilter, setIsChatOpen, openConsole, openIntervene, openReview, closeReview, openPlanReality, closePlanReality, openPlanBrief, closePlanBrief, selectTask, addTask, deleteTask, restoreFeature, hardDeleteFeature, loadArchivedFeatures, toggleTaskComplete, updateTask, setTaskCategory, showToast, sendConsoleCommand: squad.send, subscribeConsole: squad.subscribe, installCapability, importCatalogCapability, setCapabilityEnabled, runCapability, addTaskComment, loadTaskComments }}>
       {children}
     </TaskContext.Provider>
   );
