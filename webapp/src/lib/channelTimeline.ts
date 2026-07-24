@@ -2,7 +2,7 @@ import type { ChannelEntry } from './dto';
 import { entryAuthorLabel } from './hub';
 
 export type ChannelCardTone = 'neutral' | 'info' | 'warning' | 'success' | 'destructive';
-export type ChannelCardKind = 'message' | 'needs-you' | 'gate-verdict' | 'land-merge' | 'mention-steer' | 'mention-confirm-required' | 'mention-steer-failed' | 'spawn-proposal' | 'unknown-event';
+export type ChannelCardKind = 'message' | 'needs-you' | 'gate-verdict' | 'land-merge' | 'token-burn-snapshot' | 'mention-steer' | 'mention-confirm-required' | 'mention-steer-failed' | 'spawn-proposal' | 'unknown-event';
 
 export interface PointerCardFace {
   title: string;
@@ -25,6 +25,7 @@ export interface ChannelCardView {
   body: string;
   detail?: string;
   pinned: Array<{ label: string; value: string }>;
+  doorHref?: string;
   replyContext?: { id: string; channelId: string; authorLabel: string; body: string };
   repliedBy?: number;
 }
@@ -49,7 +50,7 @@ export function buildChannelThreadViews(entries: ChannelEntry[]): ChannelCardVie
   });
 }
 
-const POINTER_EVENT_KINDS: Record<string, true> = { 'needs-you': true, 'gate-verdict': true, 'land-merge': true, 'mention-steer': true, 'mention-confirm-required': true, 'mention-steer-failed': true, 'spawn-proposal': true };
+const POINTER_EVENT_KINDS: Record<string, true> = { 'needs-you': true, 'gate-verdict': true, 'land-merge': true, 'token-burn-snapshot': true, 'mention-steer': true, 'mention-confirm-required': true, 'mention-steer-failed': true, 'spawn-proposal': true };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -79,6 +80,7 @@ function toneFor(kind: string, face?: PointerCardFace): ChannelCardTone {
   if (kind === 'needs-you') return 'warning';
   if (kind === 'gate-verdict') return face?.status === 'pass' || face?.status === 'approved' ? 'success' : face?.status === 'fail' || face?.status === 'veto' ? 'destructive' : 'info';
   if (kind === 'land-merge') return face?.status === 'merged' || face?.status === 'landed' ? 'success' : 'info';
+  if (kind === 'token-burn-snapshot') return face?.status === 'deny' ? 'destructive' : face?.status === 'ask' ? 'warning' : 'info';
   if (kind === 'mention-confirm-required') return 'warning';
   if (kind === 'mention-steer-failed') return 'destructive';
   if (kind === 'spawn-proposal' || kind === 'mention-steer') return 'info';
@@ -102,7 +104,7 @@ export function dispatchChannelCard(entry: ChannelEntry): ChannelCardView {
   const title = face?.title || labelFromKey(eventKind);
   const body = face?.body || entry.text || 'Card update';
   const pinned = Object.entries(face?.pinned ?? {}).flatMap(([label, value]) => value == null || value === '' ? [] : [{ label: labelFromKey(label), value: String(value) }]);
-  return { id: entry.id, entry, kind: eventKind as ChannelCardKind, tone: toneFor(eventKind, face), authorLabel: entryAuthorLabel(entry), title, eyebrow: face?.eyebrow, body, detail: face?.detail, pinned };
+  return { id: entry.id, entry, kind: eventKind as ChannelCardKind, tone: toneFor(eventKind, face), authorLabel: entryAuthorLabel(entry), title, eyebrow: face?.eyebrow, body, detail: face?.detail, pinned, doorHref: eventKind === 'token-burn-snapshot' ? '#/workbench/economics' : undefined };
 }
 
 export function reduceChannelEntryWindow(entries: ChannelEntry[], incoming: ChannelEntry[], channelId: string, cap = 500): ChannelEntry[] {

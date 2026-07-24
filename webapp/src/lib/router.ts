@@ -9,6 +9,7 @@ export type WorkbenchRouteView =
   | 'graph'
   | 'fog'
   | 'daily'
+  | 'economics'
   | 'capabilities'
   | 'org'
   | 'intervene'
@@ -67,6 +68,7 @@ export function normalizeWorkbenchView(value: string | undefined): WorkbenchRout
     case 'graph':
     case 'fog':
     case 'daily':
+    case 'economics':
     case 'capabilities':
     case 'org':
     case 'intervene':
