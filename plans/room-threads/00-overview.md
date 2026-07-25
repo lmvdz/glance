@@ -2,6 +2,8 @@
 
 Visual review: https://claude.ai/code/artifact/0cc5bc55-b43e-410b-b751-e5ce7824c8a9
 Design brief: [DESIGN.md](DESIGN.md)
+**Reference implementation: [`reference/quiet-inbox.html`](reference/quiet-inbox.html)** — four
+screens, runnable. Build 03 against this, not against prose.
 
 ## Outcome
 
@@ -23,6 +25,8 @@ by remembering when it happened.
 | [06 node summaries](06-node-summaries.md) | Summaries are the interface between nodes; regenerate, never append | architectural | nodes, after-action |
 | [07 navigation model](07-navigation-model.md) | Select ≠ enter; DAG not tree | research | webapp hub, router, nodes |
 | [08 composer quality](08-composer-quality.md) | Image previews and the rest of the obvious chat affordances | mechanical | webapp composer, timeline |
+| [09 rail earns its place](09-rail-earns-its-place.md) | Doors answer a repeated question or leave the rail; empty states teach | mechanical | webapp rail, capability panel |
+| [10 the voice](10-voice.md) | Every string explains rather than labels — the copy carries the design | architectural | squad-manager emit sites, webapp hub |
 
 ## Order
 
@@ -32,7 +36,8 @@ by remembering when it happened.
 | 2 | 02, 06, 07 | All depend only on 01 and touch different files. 07 is design work that should run while 02/06 build. |
 | 3 | 03, 04 | The shell needs 01+02; ranking needs the node scores 04 defines against a real tree. |
 | 4 | 05 | Wants real nodes with real goals to test against. |
-| parallel | 08 | Independent of all of it. Can land any time. |
+| parallel | 08, 09 | Independent of the object model. Can land any time. |
+| with 02/03 | 10 | The voice has to land WITH the emitters it governs — retrofitting copy does not work, because meaning is thrown away at the emit site. |
 
 ## Dependency graph
 
@@ -45,6 +50,8 @@ by remembering when it happened.
 | 06 | 01 | nodes persist and can be re-read after restart |
 | 07 | 01 | a node can be given two parents without the store rejecting it |
 | 08 | — | none |
+| 09 | — | none |
+| 10 | — | none, but sequence with 02 and 03 |
 
 ## Not yet specified
 
