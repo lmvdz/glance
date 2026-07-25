@@ -26,7 +26,7 @@ export interface ChannelCardView {
   eyebrow?: string;
   body: string;
   detail?: string;
-  pinned: Array<{ label: string; value: string }>;
+  pinned: Array<{ label: string; value: string; full?: string }>;
   land?: { kind: LandCardKind; branch?: string; sha?: string; target?: string; risk?: string; recommendation?: string; outcome?: string; prNumber?: string; prUrl?: string; doneProofVerified?: string };
   replyContext?: { id: string; channelId: string; authorLabel: string; body: string };
   repliedBy?: number;
@@ -182,9 +182,41 @@ export function dispatchChannelCard(entry: ChannelEntry): ChannelCardView {
   const face = faceFromPayload(entry.event?.payload);
   const title = face?.title || labelFromKey(eventKind);
   const body = cardBody(face?.body, entry.text, title);
-  const pinned = Object.entries(face?.pinned ?? {}).flatMap(([label, value]) => value == null || value === '' || repeatsTitle(String(value), title) ? [] : [{ label: labelFromKey(label), value: String(value) }]);
+  const pinned = Object.entries(face?.pinned ?? {}).flatMap(([label, value]) => value == null || value === '' || repeatsTitle(String(value), title) ? [] : [pinnedChip(labelFromKey(label), String(value))]);
   const doorHrefResolved = eventKind === 'token-burn-snapshot' ? '#/workbench/economics' : (face?.href ?? hrefFromPayload(entry.event?.payload));
   return { id: entry.id, entry, kind: eventKind as ChannelCardKind, tone: toneFor(eventKind, face), authorLabel: entryAuthorLabel(entry), title, eyebrow: face?.eyebrow, body, detail: face?.detail, pinned, actionHref: channelCardActionHref(entry), href: doorHrefResolved };
+}
+
+/**
+ * A pinned chip shows IDENTITY at a glance and keeps the ADDRESS on demand.
+ *
+ * These chips were rendering `/home/lars/.claude/jobs/c87e3b4e/tmp/love…` under a REPO label and
+ * `squad/doc-greet-mrzklccg-3-26b99e03` under BRANCH — an absolute path truncated past the point of
+ * carrying information, and a slug whose only human part is buried between a prefix and a hash. The
+ * question the chip answers is "which repo / which branch", and the answer to that is a name.
+ *
+ * `full` is preserved so the exact value stays one hover (or one selection) away — shortening must
+ * never mean losing.
+ */
+export function pinnedChip(label: string, value: string): { label: string; value: string; full?: string } {
+  const short = shortenPinnedValue(label, value);
+  return short === value ? { label, value } : { label, value: short, full: value };
+}
+
+function shortenPinnedValue(label: string, value: string): string {
+  const key = label.toLowerCase();
+  if (key === 'repo' || key === 'worktree' || key === 'path') {
+    const parts = value.split('/').filter(Boolean);
+    return parts.length > 1 ? parts[parts.length - 1]! : value;
+  }
+  if (key === 'branch') {
+    // `squad/<name>-<spawnid>-<n>-<sha>` → `<name>`. Only strips a suffix that matches the fleet's
+    // own generated shape, so a hand-named branch is left exactly as the human wrote it.
+    const withoutPrefix = value.replace(/^squad\//, '');
+    const trimmed = withoutPrefix.replace(/-[a-z0-9]{6,}-\d+-[0-9a-f]{6,}$/i, '');
+    return trimmed || withoutPrefix;
+  }
+  return value;
 }
 
 const DOOR_LABELS: Record<string, string> = {
