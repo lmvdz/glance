@@ -200,14 +200,29 @@ export class ChannelStore {
 		return this.appendManager(channelId, { text, replyToId, authorActor: actor.id, authorDisplayName: actor.displayName, authorOrigin: actor.origin, kind: "user", format: "markdown" });
 	}
 
-	/** Resolve a node's conversation without inventing a second visibility model. */
-	async channelForNode(nodeId: string, create = false): Promise<Channel | undefined> {
+	/** Resolve a node's conversation without inventing a second visibility model.
+	 * When a unit came from a private room, its lazy node channel inherits that room's
+	 * visibility and memberships rather than creating a second authorization scheme. */
+	async channelForNode(nodeId: string, create = false, inheritedFromChannelId?: string): Promise<Channel | undefined> {
 		const node = await this.store.getNode(nodeId);
 		if (!node) return undefined;
 		if (node.channelId) return this.store.getChannel(node.channelId);
 		if (!create) return undefined;
+		const source = inheritedFromChannelId ? await this.store.getChannel(inheritedFromChannelId) : undefined;
 		const channelId = `node:${node.id}`;
-		await this.store.putChannel({ id: channelId, name: `#${node.title}`, createdAt: this.now(), kind: "user", visibility: "org-public" });
+		await this.store.putChannel({
+			id: channelId,
+			name: `#${node.title}`,
+			createdAt: this.now(),
+			kind: "user",
+			visibility: source?.visibility ?? "org-public",
+			creatorUserId: source?.creatorUserId,
+		});
+		if (source?.visibility === "private") {
+			await Promise.all((await this.store.listChannelMemberships(source.id)).map((membership) =>
+				this.store.putChannelMembership({ ...membership, channelId, updatedAt: this.now() }),
+			));
+		}
 		const bound = await this.store.bindNodeChannel(node.id, channelId);
 		if (!bound?.channelId) return undefined;
 		return this.store.getChannel(bound.channelId);
@@ -225,8 +240,8 @@ export class ChannelStore {
 		return this.appendClient(channel.id, actor, input);
 	}
 
-	async appendNodeManager(nodeId: string, input: ManagerChannelPost): Promise<ChannelEntry> {
-		const channel = await this.channelForNode(nodeId, true);
+	async appendNodeManager(nodeId: string, input: ManagerChannelPost, inheritedFromChannelId?: string): Promise<ChannelEntry> {
+		const channel = await this.channelForNode(nodeId, true, inheritedFromChannelId);
 		if (!channel) throw new Error("node not found");
 		return this.appendManager(channel.id, input);
 	}

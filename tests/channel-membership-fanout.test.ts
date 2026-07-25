@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { composeAfterAction, saveAfterAction } from "../src/after-action.ts";
 import { saveAnswer } from "../src/answers.ts";
 import { FileStore } from "../src/dal/store.ts";
-import { ChannelStore, type ChannelEntry } from "../src/channels.ts";
+import { ChannelStore, DEFAULT_CHANNEL_ID, type ChannelEntry } from "../src/channels.ts";
 import { SubagentTracker } from "../src/subagents.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import { TRANSCRIPT_EVENT_GATE_VERDICT, TRANSCRIPT_EVENT_PR_OPENED, TRANSCRIPT_EVENT_UNIT_FAILED, TRANSCRIPT_EVENT_UNIT_SPAWNED, TRANSCRIPT_EVENT_UNIT_TURN_FINISHED, TRANSCRIPT_EVENT_VERIFICATION_RAN } from "../src/transcript-event-kinds.ts";
@@ -399,13 +399,13 @@ test("non-members get 403 for every per-agent HTTP route", async () => {
 test("gate-verdict-proof returns 403 for private channel non-members", async () => {
 	const { mgr, url, headers, agent } = await startedPrivateAgentServer("gate-proof-membership-");
 	const host = mgr as unknown as TranscriptEventHost;
-	const projected = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === TRANSCRIPT_EVENT_GATE_VERDICT);
+	const projected = waitForChannelEntry(mgr, DEFAULT_CHANNEL_ID, (entry) => entry.event?.kind === TRANSCRIPT_EVENT_GATE_VERDICT);
 
 	host.emitUnitTranscriptEvent(agent.id, TRANSCRIPT_EVENT_GATE_VERDICT, "gate verdict · pass", { verdict: "pass" });
 	const card = await projected;
 	if (!card.id) throw new Error("projected gate verdict entry missing id");
 
-	const response = await fetch(`${url}/api/channels/ops/entries/${encodeURIComponent(card.id)}/gate-verdict-proof`, { headers });
+	const response = await fetch(`${url}/api/channels/${DEFAULT_CHANNEL_ID}/entries/${encodeURIComponent(card.id)}/gate-verdict-proof`, { headers });
 	expect(response.status).toBe(403);
 });
 
@@ -415,7 +415,8 @@ test("ordinary unit lifecycle projects a bounded five-card cycle from transition
 	if (!record) throw new Error("seed agent missing");
 	const host = mgr as unknown as TransitionHost;
 	const emit = async (reason: string, status: AgentDTO["status"], kind: string, cause?: Record<string, unknown>) => {
-		const projected = waitForChannelEntry(mgr, "ops", (item) => item.event?.kind === kind);
+		const channelId = kind === TRANSCRIPT_EVENT_UNIT_FAILED ? DEFAULT_CHANNEL_ID : `node:${agent.id}`;
+		const projected = waitForChannelEntry(mgr, channelId, (item) => item.event?.kind === kind);
 		host.transition(record, status, reason, cause);
 		return projected;
 	};
@@ -459,7 +460,7 @@ test("a unit that keeps re-entering error projects ONE failure card, not one per
 	};
 	mgr.on("event", collect);
 
-	const first = waitForChannelEntry(mgr, "ops", (item) => item.event?.kind === TRANSCRIPT_EVENT_UNIT_FAILED);
+	const first = waitForChannelEntry(mgr, DEFAULT_CHANNEL_ID, (item) => item.event?.kind === TRANSCRIPT_EVENT_UNIT_FAILED);
 	host.transition(record, "error", "fail", { error: "agent unit-private not ready within 4945ms" });
 	await first;
 	// Four more error→error transitions: the same failure, re-marked.
@@ -501,7 +502,7 @@ test("a completion with nothing to report projects no card", async () => {
 
 	// Now it has actually produced something — the card lands, once.
 	seeded.transcript.push({ id: "s1", seq: 1, kind: "assistant", text: "Added the JSDoc comment and committed it.", ts: 1 });
-	const projected = waitForChannelEntry(mgr, "ops", (item) => item.event?.kind === TRANSCRIPT_EVENT_UNIT_TURN_FINISHED);
+	const projected = waitForChannelEntry(mgr, `node:${agent.id}`, (item) => item.event?.kind === TRANSCRIPT_EVENT_UNIT_TURN_FINISHED);
 	host.transition(record, "working", "task-start");
 	host.transition(record, "idle", "exit-clean");
 	await projected;
@@ -516,7 +517,7 @@ test("a thrown error still yields its real class, not the transition reason", as
 	const record = (mgr.agents as Map<string, unknown>).get(agent.id);
 	if (!record) throw new Error("seed agent missing");
 	const host = mgr as unknown as TransitionHost;
-	const projected = waitForChannelEntry(mgr, "ops", (item) => item.event?.kind === TRANSCRIPT_EVENT_UNIT_FAILED);
+	const projected = waitForChannelEntry(mgr, DEFAULT_CHANNEL_ID, (item) => item.event?.kind === TRANSCRIPT_EVENT_UNIT_FAILED);
 	host.transition(record, "error", "fail", { error: "TypeError: m.visibleAgents is not a function" });
 	const card = await projected;
 	const face = ((card.event!.payload ?? {}) as { face?: { body?: string } }).face ?? {};
