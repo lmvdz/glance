@@ -1,11 +1,20 @@
 # Cards land at the node they describe
-STATUS: done
+STATUS: open
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
 TOUCHES: src/squad-manager.ts (projectedChannelId → projectedNodeId), src/server.ts, tests
 BLOCKED_BY: 01
 MODE: afk
+
+## Landed so far
+
+Node addressing works: routine lifecycle telemetry lands at the unit's node channel, escalation classes
+surface in the unit's own room, and a node channel inherits the visibility and memberships of the room
+its unit came from rather than inventing a second authorization scheme.
+
+Still open, and why this concern is not done: the proof-card contracts below. A projected card is not yet
+unforgeable-by-provenance, and event classes do not yet declare what they project.
 
 ## AMENDED 2026-07-25 (RECONCILE finding 3)
 
