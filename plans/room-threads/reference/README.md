@@ -9,6 +9,7 @@ between its states. Screenshots of every state sit alongside in `shots-*/`.
 | `02-surfaces.html` | what sits beneath it | 19 — answering, opened runs, standing in a unit, handover, mentions, search, starting work, handover of stalled work |
 | `03-machinery.html` | what sits beneath those | 12 — reading an instruction back, widening autonomy, collisions, agent records, the archive, unanswered questions |
 | `04-beyond.html` | when nobody is at the screen | 12 — the phone, stall detection, the undelegatable category, rules firing, unwinding, cost |
+| `06-other-side.html` | the agents' view and the product's own failure | 10 — what an agent sees, agents negotiating, disconnection, restart, **the product wrong about itself**, leaving |
 | `07-shell.html` | the frame, once the product has a voice | 7 — at rest, in flight watched, **from across the room**, permission mid-speech, talking→typing, several sessions, **sound/motion/silence** |
 | `05-first-week.html` | cold start and other people | 12 — day one, two humans, the human as bottleneck, trust changing, a new agent, disagreement |
 
@@ -38,6 +39,19 @@ unfinished work — that is concern 10, and it is p0 and architectural rather th
 strings are minted at the emit sites and by the time a card reaches the timeline the meaning has
 already been thrown away.
 
+
+## Round six — the product wrong about itself
+
+`06-other-side.html` → **5a** is the one to read. The product discovers it was wrong about itself for
+eleven hours, and the root cause is this repository's own recurring defect stated as a product
+failure: *"An agent's last message before it dies looks exactly like an agent's last message before
+it finishes. We had been treating 'nothing more from Ash' as 'Ash is done' — for eleven hours nothing
+checked the one thing that would have settled it, which is the table itself."*
+
+Its fix is the epistemics model the shell round later gives a spoken form: three claim states where
+the ordinary one is unmarked — **checked** (we asked the thing itself), **on an agent's word**,
+**cannot be verified right now** (with what would settle it and when it will retry). "Only the last
+two are ever marked," so honesty never becomes a screen full of caveats.
 
 ## The shell round — two findings that change implementation
 
