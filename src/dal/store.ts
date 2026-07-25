@@ -18,11 +18,10 @@ import { randomInt } from "node:crypto";
 import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { Result, Schema } from "effect";
 import { sql } from "kysely";
 import type { Channel, ChannelEntry, ChannelMembership, ChannelReadCursor } from "../channels.ts";
 import type { Node } from "../nodes.ts";
-import type { NodeRecord } from "../node-records.ts";
+import { readNodeRecord, type NodeRecord } from "../node-records.ts";
 import type { PersistedAgent, PersistedFeature, RunReceipt, TranscriptEntry } from "../types.ts";
 import { normalizeCapabilitySnapshot, type CapabilitySnapshot } from "../capabilities/index.ts";
 import { emptyFeedbackSnapshot, type FeedbackSnapshot } from "../feedback.ts";
@@ -39,14 +38,6 @@ export interface ChannelSearchResult {
 function isPlainObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-
-const nodeRecordEnvelopeSchema = Schema.Struct({
-	id: Schema.String,
-	nodeId: Schema.String,
-	createdAt: Schema.Number,
-	kind: Schema.Literals(["rule", "delegation-boundary", "instruction-readback", "objection", "plan-motion", "evidence", "human-authority", "handover", "retention"]),
-});
-const decodeNodeRecordEnvelope = Schema.decodeUnknownResult(nodeRecordEnvelopeSchema);
 
 function readChannel(value: unknown): Channel | undefined {
 	if (!isPlainObject(value)) return undefined;
@@ -74,38 +65,6 @@ function readNode(value: unknown): Node | undefined {
 		settledAt: typeof value.settledAt === "number" ? value.settledAt : undefined,
 		channelId: typeof value.channelId === "string" ? value.channelId : undefined,
 	};
-}
-
-function readRuleInvocation(value: unknown): { at: number; outcome: "settled" | "not-applicable" | "blocked"; nodeId: string } | undefined {
-	return isPlainObject(value) && typeof value.at === "number" && typeof value.nodeId === "string" && (value.outcome === "settled" || value.outcome === "not-applicable" || value.outcome === "blocked") ? { at: value.at, outcome: value.outcome, nodeId: value.nodeId } : undefined;
-}
-
-function readNodeRecord(value: unknown): NodeRecord | undefined {
-	const decoded = decodeNodeRecordEnvelope(value);
-	if (Result.isFailure(decoded) || !isPlainObject(value)) return undefined;
-	const base = decoded.success;
-	switch (base.kind) {
-		case "rule":
-			if (!(typeof value.sentence === "string" && typeof value.authorId === "string" && (value.scope === "node" || value.scope === "plan" || value.scope === "org") && (value.status === "active" || value.status === "withdrawn" || value.status === "replaced") && Array.isArray(value.invocations))) return undefined;
-			const invocations = value.invocations.map(readRuleInvocation);
-			return invocations.every((invocation): invocation is NonNullable<typeof invocation> => invocation !== undefined) ? { ...base, kind: "rule", sentence: value.sentence, authorId: value.authorId, scope: value.scope, status: value.status, invocations } : undefined;
-		case "delegation-boundary":
-			return ["credentials", "spend", "deletion", "publishing", "legal"].includes(String(value.class)) ? { ...base, kind: "delegation-boundary", class: value.class as "credentials" | "spend" | "deletion" | "publishing" | "legal" } : undefined;
-		case "instruction-readback":
-			return typeof value.instruction === "string" && typeof value.authorId === "string" && typeof value.agentId === "string" && Array.isArray(value.reversible) && Array.isArray(value.irreversible) && (value.irreversibleStatus === "pending" || value.irreversibleStatus === "approved" || value.irreversibleStatus === "rejected") ? { ...base, kind: "instruction-readback", instruction: value.instruction, authorId: value.authorId, agentId: value.agentId, reversible: value.reversible.filter((item): item is string => typeof item === "string"), irreversible: value.irreversible.filter((item): item is string => typeof item === "string"), irreversibleStatus: value.irreversibleStatus } : undefined;
-		case "objection":
-			return typeof value.instructionId === "string" && typeof value.agentId === "string" && typeof value.prediction === "string" && (value.status === "raised" || value.status === "overruled" || value.status === "accepted" || value.status === "outcome-recorded") ? { ...base, kind: "objection", instructionId: value.instructionId, agentId: value.agentId, prediction: value.prediction, status: value.status, outcome: typeof value.outcome === "string" ? value.outcome : undefined } : undefined;
-		case "plan-motion":
-			return typeof value.lastMeaningfulMovementAt === "number" && typeof value.parked === "boolean" && typeof value.intentionalStill === "boolean" && typeof value.eligibleSuccessorCount === "number" ? { ...base, kind: "plan-motion", lastMeaningfulMovementAt: value.lastMeaningfulMovementAt, parked: value.parked, intentionalStill: value.intentionalStill, blockedCause: typeof value.blockedCause === "string" ? value.blockedCause : undefined, eligibleSuccessorCount: value.eligibleSuccessorCount } : undefined;
-		case "evidence":
-			return typeof value.claim === "string" && (value.verification === "checked" || value.verification === "agent-word" || value.verification === "unverifiable") ? { ...base, kind: "evidence", claim: value.claim, verification: value.verification, checkedAt: typeof value.checkedAt === "number" ? value.checkedAt : undefined, staleAt: typeof value.staleAt === "number" ? value.staleAt : undefined } : undefined;
-		case "human-authority":
-			return typeof value.humanId === "string" && (value.role === "accountable" || value.role === "instruction-author") ? { ...base, kind: "human-authority", humanId: value.humanId, role: value.role } : undefined;
-		case "handover":
-			return typeof value.fromActorId === "string" && typeof value.toActorId === "string" && Array.isArray(value.carried) && Array.isArray(value.staleEvidenceIds) ? { ...base, kind: "handover", fromActorId: value.fromActorId, toActorId: value.toActorId, carried: value.carried.filter((item): item is string => typeof item === "string"), staleEvidenceIds: value.staleEvidenceIds.filter((item): item is string => typeof item === "string") } : undefined;
-		case "retention":
-			return typeof value.authorizedBy === "string" && typeof value.compactedAt === "number" && Array.isArray(value.cut) ? { ...base, kind: "retention", authorizedBy: value.authorizedBy, compactedAt: value.compactedAt, cut: value.cut.filter((item): item is string => typeof item === "string") } : undefined;
-	}
 }
 
 function readChannelMembership(value: unknown): ChannelMembership | undefined {
