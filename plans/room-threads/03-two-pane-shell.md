@@ -13,6 +13,21 @@ conversation is always about what you are looking at — and is found by navigat
 than by remembering when it happened.
 
 ## Approach
+
+**Build against [`reference/quiet-inbox.html`](reference/quiet-inbox.html)** — the direction is
+settled, four screens exist, and it is runnable HTML rather than a picture. Read DESIGN.md's "The
+design, established" section first: the six patterns there are requirements, not suggestions, and
+the copy rules are the hardest part to retrofit later.
+
+Specifically from the reference, do not re-derive these:
+- the alarm band is a full-width sentence that explains, not a labelled counter
+- unbroken-autonomy elapsed time and the month's best run sit beside the count
+- every decision control carries a consequence line, and every decision offers a free-text option
+- the tree shows a per-node one-line status ("holding — cannot start until 3.2 is decided",
+  "queued — nobody has picked it up") and closes with the blast radius
+- folded event runs end in a verdict ("nothing unusual")
+- the quiet screen is a HANDOVER ("what got done while you didn't look"), not an empty state
+
 1. State pane lists the current node's children grouped by state: needs-you (near-empty and visibly
    so), in flight, settled (collapsed — done work leaves the working surface).
 2. Chat pane shows that node's channel, with inherited context (the parent's goal and constraints)

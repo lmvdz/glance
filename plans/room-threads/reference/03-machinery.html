@@ -1,0 +1,1228 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+html,body{margin:0;padding:0;background:#070708;}
+*{box-sizing:border-box;}
+a{color:#F0A35A;text-decoration:none;}
+a:hover{color:#F7C08A;}
+::selection{background:#3A2E20;}
+</style>
+</helmet>
+
+<div style="min-height:100vh;background:#070708;display:flex;flex-direction:column;align-items:center;gap:12px;padding:18px;font-family:system-ui,-apple-system,'Helvetica Neue',sans-serif">
+
+<div style="width:1600px;display:flex;flex-direction:column;gap:8px">
+  <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+    <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;letter-spacing:.14em;color:#5A5A61;margin-right:6px">SURFACE</div>
+    <button onClick="{{ go1a }}" style="{{ t1a }}">1a read back</button>
+    <button onClick="{{ go1b }}" style="{{ t1b }}">1b misread</button>
+    <button onClick="{{ go2a }}" style="{{ t2a }}">2a widen</button>
+    <button onClick="{{ go2b }}" style="{{ t2b }}">2b take it back</button>
+    <button onClick="{{ go3a }}" style="{{ t3a }}">3a collision</button>
+    <button onClick="{{ go3b }}" style="{{ t3b }}">3b settled alone</button>
+    <button onClick="{{ go4a }}" style="{{ t4a }}">4a long record</button>
+    <button onClick="{{ go4b }}" style="{{ t4b }}">4b too little</button>
+    <button onClick="{{ go5a }}" style="{{ t5a }}">5a three weeks back</button>
+    <button onClick="{{ go5b }}" style="{{ t5b }}">5b compacted</button>
+    <button onClick="{{ go6a }}" style="{{ t6a }}">6a nobody answered</button>
+    <button onClick="{{ go6b }}" style="{{ t6b }}">6b the new rule</button>
+  </div>
+  <div style="font-size:12.5px;color:#6A6A72;min-height:17px">{{ caption }}</div>
+</div>
+
+<div style="width:1600px;height:1000px;background:#0A0A0B;border:1px solid #1F1F22;display:flex;flex-direction:column;overflow:hidden;color:#E8E8EA">
+
+  <div style="height:44px;flex:none;border-bottom:1px solid #1F1F22;display:flex;align-items:center;padding:0 16px;gap:14px">
+    <div style="display:flex;align-items:baseline;gap:9px">
+      <div style="font-size:14px;font-weight:600;letter-spacing:-.01em">glance</div>
+      <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#6A6A72">billing-service</div>
+    </div>
+    <div style="width:1px;height:16px;background:#1F1F22"></div>
+    <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#8A8A91">{{ fleetLine }}</div>
+    <div style="flex:1"></div>
+    <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#5A5A61">{{ clock }}</div>
+  </div>
+
+  <div style="flex:1;display:flex;min-height:0">
+
+    <div style="width:238px;flex:none;border-right:1px solid #1F1F22;display:flex;flex-direction:column;min-height:0">
+      <div style="padding:14px 14px 8px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.16em;color:#5A5A61">PLANS · 5</div>
+      <div>
+        <div style="display:flex;align-items:center;gap:9px;padding:8px 14px;border-left:2px solid #F0A35A;background:#121214">
+          <div style="width:5px;height:5px;border-radius:50%;background:#5B8DEF;flex:none"></div>
+          <div style="flex:1;font-size:13px;font-weight:600">payments-retry</div>
+          <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#8A8A91">14</div>
+        </div>
+        <sc-for list="{{ plans }}" as="p" hint-placeholder-count="4">
+          <div style="display:flex;align-items:center;gap:9px;padding:8px 14px;border-left:2px solid transparent;cursor:pointer" style-hover="background:#0F0F11">
+            <div style="width:5px;height:5px;border-radius:50%;flex:none;background:{{ p.dot }}"></div>
+            <div style="flex:1;font-size:13px;color:#C9C9CF">{{ p.name }}</div>
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#6A6A72">{{ p.n }}</div>
+          </div>
+        </sc-for>
+      </div>
+      <div style="margin-top:18px;padding:0 14px 8px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.16em;color:#5A5A61">AGENTS · 12 AWAKE</div>
+      <div style="overflow:hidden">
+        <sc-for list="{{ roster }}" as="a" hint-placeholder-count="8">
+          <div style="display:flex;align-items:center;gap:9px;padding:5.5px 14px;cursor:pointer" style-hover="background:#0F0F11">
+            <div style="width:5px;height:5px;border-radius:50%;flex:none;background:{{ a.dot }}"></div>
+            <div style="flex:none;width:44px;font-size:12.5px;color:#C9C9CF">{{ a.name }}</div>
+            <div style="flex:1;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ a.role }}</div>
+          </div>
+        </sc-for>
+      </div>
+      <div style="flex:1"></div>
+      <div style="padding:12px 14px;border-top:1px solid #1F1F22;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52;line-height:1.7">
+        <div>{{ railFootA }}</div>
+        <div>{{ railFootB }}</div>
+      </div>
+    </div>
+
+    <!-- ══════════ 1a · THE AGENT READS THE INSTRUCTION BACK ══════════ -->
+    <div style="{{ s1a }}">
+      <div style="flex:1;display:flex;flex-direction:column;min-height:0;border-right:1px solid #1F1F22">
+        <div style="flex:1;padding:16px 24px 0;overflow:hidden">
+          <div style="display:flex;gap:12px">
+            <div style="width:26px;height:26px;flex:none;border:1px solid #3A3323;border-radius:3px;background:#15120E;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#D8C39E">M</div>
+            <div style="max-width:620px">
+              <div style="display:flex;align-items:baseline;gap:8px"><div style="font-size:13px;font-weight:600">Mara</div><div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">you · 14:09 · to Wren, about 3.2</div></div>
+              <div style="margin-top:5px;font-size:14px;line-height:1.55;color:#9A9AA2;text-wrap:pretty">Per endpoint is right, but make the thirty-second window configurable — ops will want to tune it. Don't bother re-running the load test for this.</div>
+            </div>
+          </div>
+
+          <div style="display:flex;gap:12px;margin-top:16px">
+            <div style="width:26px;height:26px;flex:none;border:1px solid #33333A;border-radius:3px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#C9C9CF">W</div>
+            <div style="flex:1;max-width:800px">
+              <div style="display:flex;align-items:baseline;gap:8px"><div style="font-size:13px;font-weight:600">Wren</div><div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">implementer · 14:09 · already working on three of these four</div></div>
+              <div style="margin-top:5px;font-size:14px;line-height:1.55;color:#DEDEE2;text-wrap:pretty">Here is what I took from that. I have started the three things I can undo in a line, and I have not touched the one I cannot.</div>
+
+              <div style="margin-top:12px;border:1px solid #26262B;border-radius:4px;background:#0B0B0C;overflow:hidden">
+                <sc-for list="{{ reading }}" as="r" hint-placeholder-count="4">
+                  <div style="display:flex;gap:12px;padding:11px 13px;border-bottom:1px solid #17171A;background:{{ r.bg }}">
+                    <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ r.dot }}"></div>
+                    <div style="flex:1;min-width:0">
+                      <div style="font-size:13.5px;color:#DEDEE2;line-height:1.5;text-wrap:pretty">{{ r.took }}</div>
+                      <div style="margin-top:4px;font-size:11.5px;color:#6A6A72;line-height:1.45">{{ r.from }}</div>
+                    </div>
+                    <div style="flex:none;width:190px">
+                      <div style="font-size:12px;color:{{ r.stateFg }};line-height:1.4">{{ r.state }}</div>
+                      <div style="margin-top:3px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">{{ r.undo }}</div>
+                    </div>
+                  </div>
+                </sc-for>
+                <div style="padding:11px 13px;display:flex;align-items:center;gap:12px">
+                  <div style="flex:1;font-size:12.5px;color:#9A9AA2;line-height:1.45;text-wrap:pretty">I did not ask you first about the three, because each is one line to undo and you had already told me what you wanted. The fourth changes the shape of a public setting, so it waits.</div>
+                  <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52;text-align:right;line-height:1.7">
+                    <div>rule: act when reversible</div>
+                    <div>set by you · 11 June</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div style="flex:none;padding:12px 24px 14px;border-top:1px solid #1F1F22">
+          <div style="border:1px solid #26262B;border-radius:3px;background:#0C0C0D;padding:10px 12px;display:flex;align-items:center;gap:10px">
+            <div style="flex:1;font-size:13px;color:#4A4A52">Correct any line of her reading in words — she stops what she is doing and re-reads…</div>
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#3E3E45">to wren · 3.2</div>
+          </div>
+        </div>
+      </div>
+
+      <div style="width:440px;flex:none;display:flex;flex-direction:column;min-height:0">
+        <div style="padding:14px 18px 6px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">THE ONE SHE WILL NOT DO ALONE</div>
+        <div style="padding:6px 14px 0">
+          <div style="padding:12px 13px;border:1px solid #241A17;border-left:2px solid #D9A03C;background:#100D0C;border-radius:3px">
+            <div style="font-size:13.5px;color:#F2F2F4;line-height:1.5;text-wrap:pretty">Naming the setting. Once it is in the service config with a name, ops will use that name and it cannot be changed quietly.</div>
+            <div style="margin-top:9px;font-size:12.5px;color:#9A9AA2;line-height:1.5;text-wrap:pretty">She proposes <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11.5px;color:#C9C9CF">retry.refusal_window_seconds</span> and will use it in about a minute unless you say otherwise.</div>
+            <div style="margin-top:12px;border:1px solid #F0A35A;border-radius:3px;background:#0A0A0B;padding:9px 11px;font-size:12.5px;color:#4A4A52">Name it something else, or say to stop asking about names…</div>
+            <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">Your words win over her proposal. Saying "stop asking about names" becomes a rule you can see and take back.</div>
+            <div style="margin-top:10px;display:flex;gap:10px">
+              <button style="flex:1;background:transparent;color:#C9C9CF;border:1px solid #33333A;border-radius:3px;padding:8px 12px;font-size:12.5px;font-family:inherit;cursor:pointer" style-hover="border-color:#4A4A52;color:#E8E8EA">Her name is fine</button>
+              <button style="flex:1;background:transparent;color:#C9C9CF;border:1px solid #33333A;border-radius:3px;padding:8px 12px;font-size:12.5px;font-family:inherit;cursor:pointer" style-hover="border-color:#4A4A52;color:#E8E8EA">Wait for me</button>
+            </div>
+          </div>
+        </div>
+        <div style="margin-top:16px;padding:0 18px 6px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHEN AN AGENT ACTS ON YOUR WORDS ALONE</div>
+        <div style="padding:6px 18px 0;display:flex;flex-direction:column;gap:9px">
+          <sc-for list="{{ conditions }}" as="c" hint-placeholder-count="3">
+            <div style="display:flex;gap:9px">
+              <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ c.dot }}"></div>
+              <div style="flex:1;font-size:12.5px;color:#C9C9CF;line-height:1.5;text-wrap:pretty">{{ c.text }}</div>
+            </div>
+          </sc-for>
+        </div>
+        <div style="flex:1"></div>
+        <div style="padding:12px 18px;border-top:1px solid #1F1F22;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52;line-height:1.8">
+          <div>readings corrected this month&nbsp;&nbsp;<span style="color:#6A6A72">2 of 61</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ 1b · SHE GOT IT WRONG, AND IS CORRECTED ══════════ -->
+    <div style="{{ s1b }}">
+      <div style="flex:1;display:flex;flex-direction:column;min-height:0;border-right:1px solid #1F1F22">
+        <div style="flex:1;padding:16px 24px 0;overflow:hidden">
+          <div style="display:flex;gap:12px">
+            <div style="width:26px;height:26px;flex:none;border:1px solid #33333A;border-radius:3px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#C9C9CF">W</div>
+            <div style="max-width:640px">
+              <div style="display:flex;align-items:baseline;gap:8px"><div style="font-size:13px;font-weight:600">Wren</div><div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">implementer · 14:09</div></div>
+              <div style="margin-top:5px;font-size:14px;line-height:1.55;color:#9A9AA2;text-wrap:pretty">…and I read "don't bother re-running the load test" as: skip load testing for this unit entirely.</div>
+            </div>
+          </div>
+
+          <div style="display:flex;gap:12px;margin-top:16px">
+            <div style="width:26px;height:26px;flex:none;border:1px solid #3A3323;border-radius:3px;background:#15120E;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#D8C39E">M</div>
+            <div style="max-width:640px">
+              <div style="display:flex;align-items:baseline;gap:8px"><div style="font-size:13px;font-weight:600">Mara</div><div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">you · 14:14 · correcting line three</div></div>
+              <div style="margin-top:5px;font-size:14px;line-height:1.55;color:#DEDEE2;text-wrap:pretty">No — I meant don't re-run the one from yesterday. The unit still needs its own load test before it goes near main.</div>
+            </div>
+          </div>
+
+          <div style="margin-top:14px;margin-left:38px;max-width:800px;border:1px solid #26262B;border-radius:4px;background:#0B0B0C">
+            <div style="padding:11px 13px;border-bottom:1px solid #1F1F22;display:flex;align-items:center;gap:12px">
+              <div style="width:5px;height:5px;border-radius:50%;background:#D9A03C;flex:none"></div>
+              <div style="flex:1;font-size:13px;font-weight:600">One line of her reading was wrong. Here is exactly what it cost.</div>
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#6A6A72">wrong for 5m 12s</div>
+            </div>
+            <sc-for list="{{ misreadCost }}" as="c" hint-placeholder-count="3">
+              <div style="display:flex;gap:12px;padding:10px 13px;border-bottom:1px solid #17171A">
+                <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ c.dot }}"></div>
+                <div style="flex:1;font-size:13px;color:#DEDEE2;line-height:1.5;text-wrap:pretty">{{ c.text }}</div>
+                <div style="flex:none;width:170px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:{{ c.metaFg }};text-align:right">{{ c.meta }}</div>
+              </div>
+            </sc-for>
+            <div style="padding:12px 13px;display:flex;align-items:flex-start;gap:12px">
+              <div style="flex:none;width:220px">
+                <button style="width:100%;background:#F0A35A;color:#140D06;border:none;border-radius:3px;padding:9px 14px;font-size:13px;font-weight:600;font-family:inherit;cursor:pointer">Put the load test back</button>
+                <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">She undoes the skip, writes the unit's own load test, and 3.2 lands about twenty minutes later than it would have.</div>
+              </div>
+              <div style="flex:none;width:220px">
+                <button style="width:100%;background:transparent;color:#C9C9CF;border:1px solid #33333A;border-radius:3px;padding:8px 14px;font-size:12.5px;font-family:inherit;cursor:pointer" style-hover="border-color:#4A4A52;color:#E8E8EA">Undo everything since 14:09</button>
+                <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">Also throws away the configurable window, which she read correctly. Nine minutes of good work lost.</div>
+              </div>
+              <div style="flex:1">
+                <div style="border:1px solid #26262B;border-radius:3px;background:#0A0A0B;padding:9px 11px;font-size:12.5px;color:#4A4A52">Or say precisely which load test you meant…</div>
+                <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">She replaces line three of her reading and keeps the rest. This is the usual answer.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div style="flex:none;padding:12px 24px 14px;border-top:1px solid #1F1F22">
+          <div style="border:1px solid #26262B;border-radius:3px;background:#0C0C0D;padding:10px 12px;display:flex;align-items:center;gap:10px">
+            <div style="flex:1;font-size:13px;color:#4A4A52">Say more if she still has it wrong…</div>
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#3E3E45">to wren · 3.2</div>
+          </div>
+        </div>
+      </div>
+
+      <div style="width:440px;flex:none;display:flex;flex-direction:column;min-height:0">
+        <div style="padding:14px 18px 6px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHY THIS WAS CHEAP</div>
+        <div style="padding:6px 18px 0;font-size:13px;color:#C9C9CF;line-height:1.55;text-wrap:pretty">She acted on three reversible lines and held the irreversible one, so the wrong reading cost five minutes and no code on main. That is the whole reason she is allowed to act on your words at all.</div>
+        <div style="margin-top:18px;padding:0 18px 6px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHAT SHE LEARNS FROM IT</div>
+        <div style="padding:6px 14px 0">
+          <div style="padding:12px 13px;border:1px solid #1F1F22;background:#0B0B0C;border-radius:3px">
+            <div style="font-size:13px;color:#DEDEE2;line-height:1.5;text-wrap:pretty">"Don't re-run X" means that run, not that kind of test. She will read it that way from now on and say so when she does.</div>
+            <div style="margin-top:9px;display:flex;align-items:center;gap:10px">
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52;flex:1">recorded against her reading, not against her name</div>
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#6A6A72">reversible</div>
+            </div>
+          </div>
+        </div>
+        <div style="margin-top:16px;padding:0 18px 6px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHAT WAS NOT AFFECTED</div>
+        <div style="padding:6px 18px 0;display:flex;flex-direction:column;gap:9px">
+          <sc-for list="{{ misreadSafe }}" as="u" hint-placeholder-count="3">
+            <div style="display:flex;gap:9px">
+              <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ u.dot }}"></div>
+              <div style="flex:1;font-size:12.5px;color:#C9C9CF;line-height:1.5;text-wrap:pretty">{{ u.text }}</div>
+            </div>
+          </sc-for>
+        </div>
+        <div style="flex:1"></div>
+        <div style="padding:12px 18px;border-top:1px solid #1F1F22;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52;line-height:1.8">
+          <div>her readings&nbsp;&nbsp;<span style="color:#6A6A72">61 this month · 2 corrected · both cheap</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ 2a · WIDENING WHAT THEY MAY DECIDE ALONE ══════════ -->
+    <div style="{{ s2a }}">
+      <div style="flex:1;display:flex;flex-direction:column;min-height:0">
+        <div style="flex:none;padding:14px 26px 12px;border-bottom:1px solid #1F1F22;display:flex;align-items:flex-start;gap:16px">
+          <div style="flex:1">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.16em;color:#5A5A61">A PATTERN IN WHAT YOU HAVE ALREADY DECIDED · NOT A SETTING</div>
+            <div style="margin-top:9px;font-size:17.5px;line-height:1.4;color:#F2F2F4;text-wrap:pretty">Four times this month you were asked whether to take the reversible option, and four times you said yes. Should the fleet stop asking?</div>
+            <div style="margin-top:7px;font-size:13px;color:#9A9AA2;line-height:1.5;text-wrap:pretty;max-width:840px">This is what those four interruptions actually were. Confirm the pattern or reject it — you are not filling in a form, and nothing here is hypothetical.</div>
+          </div>
+          <div style="flex:none;text-align:right;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61;line-height:1.8">
+            <div>interruptions this month&nbsp;&nbsp;<span style="color:#8A8A91">17</span></div>
+            <div>this rule would have removed&nbsp;&nbsp;<span style="color:#8A8A91">4</span></div>
+          </div>
+        </div>
+
+        <div style="flex:1;display:flex;min-height:0">
+          <div style="flex:1;padding:14px 26px 0;border-right:1px solid #1F1F22;min-width:0">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">THE FOUR THAT WOULD NOT HAVE REACHED YOU</div>
+            <div style="margin-top:10px;display:flex;flex-direction:column;gap:8px">
+              <sc-for list="{{ evidence }}" as="e" hint-placeholder-count="4">
+                <div style="display:flex;gap:11px;padding:10px 11px;border:1px solid #1F1F22;background:#0B0B0C;border-radius:3px">
+                  <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ e.dot }}"></div>
+                  <div style="flex:1;min-width:0">
+                    <div style="font-size:13px;color:#DEDEE2;line-height:1.5;text-wrap:pretty">{{ e.q }}</div>
+                    <div style="margin-top:4px;font-size:12px;color:#8A8A91;line-height:1.45;text-wrap:pretty">{{ e.you }}</div>
+                    <div style="margin-top:4px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">{{ e.meta }}</div>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+
+            <div style="margin-top:16px;padding:11px 12px;border:1px solid #241A17;border-left:2px solid #B4553A;background:#100D0C">
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#C2704A">AND THE ONE THAT WOULD STILL HAVE REACHED YOU</div>
+              <div style="margin-top:8px;font-size:13px;color:#DEDEE2;line-height:1.5;text-wrap:pretty">Juno asking for a credential on Saturday. Nothing about that is reversible, so this rule would not have touched it — and you would still have lost the weekend to it.</div>
+              <div style="margin-top:6px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">3 of your 17 interruptions were credentials · a different rule would be needed, and we are not proposing one yet</div>
+            </div>
+          </div>
+
+          <div style="width:520px;flex:none;padding:14px 22px 0;display:flex;flex-direction:column;min-height:0">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHAT THE FLEET MAY SETTLE TODAY</div>
+            <div style="margin-top:10px;display:flex;flex-direction:column">
+              <sc-for list="{{ boundaries }}" as="b" hint-placeholder-count="5">
+                <div style="display:flex;gap:11px;padding:10px 0;border-top:1px solid #17171A">
+                  <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ b.dot }}"></div>
+                  <div style="flex:1">
+                    <div style="font-size:12.5px;color:#DEDEE2;line-height:1.45;text-wrap:pretty">{{ b.text }}</div>
+                    <div style="margin-top:3px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:{{ b.metaFg }}">{{ b.meta }}</div>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+            <div style="margin-top:14px;font-size:12px;color:#6A6A72;line-height:1.5;text-wrap:pretty">Five rules, each one a sentence, each one taken back in one action. This is the fleet's autonomy as a state you can read — there is no settings page behind it.</div>
+
+            <div style="flex:1"></div>
+            <div style="padding:13px 0 14px;border-top:1px solid #1F1F22;display:flex;align-items:flex-start;gap:12px">
+              <div style="flex:none;width:230px">
+                <button style="width:100%;background:#F0A35A;color:#140D06;border:none;border-radius:3px;padding:9px 14px;font-size:13px;font-weight:600;font-family:inherit;cursor:pointer">Stop asking me this</button>
+                <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">Agents take the reversible option and say they did. On this month's evidence that is four fewer stops and nothing you would have decided differently.</div>
+              </div>
+              <div style="flex:1">
+                <div style="border:1px solid #26262B;border-radius:3px;background:#0A0A0B;padding:9px 11px;font-size:12.5px;color:#4A4A52">Or narrow it in words — "only inside a plan, never on main"…</div>
+                <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">The rule is stored as your sentence and quoted wherever it takes effect.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ 2b · TAKING A RULE BACK ══════════ -->
+    <div style="{{ s2b }}">
+      <div style="flex:1;display:flex;flex-direction:column;min-height:0">
+        <div style="flex:none;padding:14px 26px 12px;border-bottom:1px solid #1F1F22;display:flex;align-items:flex-start;gap:16px">
+          <div style="flex:1">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.16em;color:#5A5A61">TAKING BACK A RULE YOU GAVE ON 11 JUNE</div>
+            <div style="margin-top:9px;font-size:17.5px;line-height:1.4;color:#F2F2F4;text-wrap:pretty">"Take the reversible option and tell me you did." It settled eleven things in six weeks. One of them you would have decided differently.</div>
+            <div style="margin-top:7px;font-size:13px;color:#9A9AA2;line-height:1.5;text-wrap:pretty;max-width:840px">Here is what it saved and what it cost, so this is a judgement and not a preference. Taking it back does not undo anything it already did.</div>
+          </div>
+          <div style="flex:none;text-align:right;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61;line-height:1.8">
+            <div>in force&nbsp;&nbsp;<span style="color:#8A8A91">44 days</span></div>
+            <div>invoked&nbsp;&nbsp;<span style="color:#8A8A91">11 times</span></div>
+          </div>
+        </div>
+
+        <div style="flex:1;display:flex;min-height:0">
+          <div style="flex:1;padding:14px 26px 0;border-right:1px solid #1F1F22;min-width:0">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHAT IT SAVED</div>
+            <div style="margin-top:10px;display:flex;flex-direction:column;gap:8px">
+              <sc-for list="{{ ruleSaved }}" as="r" hint-placeholder-count="3">
+                <div style="display:flex;gap:11px;padding:10px 11px;border:1px solid #1F1F22;background:#0B0B0C;border-radius:3px">
+                  <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ r.dot }}"></div>
+                  <div style="flex:1">
+                    <div style="font-size:13px;color:#DEDEE2;line-height:1.5;text-wrap:pretty">{{ r.text }}</div>
+                    <div style="margin-top:4px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">{{ r.meta }}</div>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+
+            <div style="margin-top:16px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#C2704A">WHAT IT COST · THE ONE YOU WOULD HAVE DECIDED DIFFERENTLY</div>
+            <div style="margin-top:10px;padding:12px 13px;border:1px solid #2A1A15;border-left:2px solid #B4553A;background:#100C0B">
+              <div style="font-size:14px;color:#F2F2F4;line-height:1.5;text-wrap:pretty">On Saturday morning Ash assigned 41 unowned rows to the system account rather than dropping them, because that was the reversible option and you were not here.</div>
+              <div style="margin-top:8px;font-size:12.5px;color:#9A9AA2;line-height:1.5;text-wrap:pretty">You would have dropped them. Undoing it took you one command on Monday and left a day of rows attributed to a machine account in the meantime.</div>
+              <div style="margin-top:8px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">Saturday 12:40 · 5.1 row-migration · you corrected it Monday 08:51</div>
+            </div>
+          </div>
+
+          <div style="width:520px;flex:none;padding:14px 22px 0;display:flex;flex-direction:column;min-height:0">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHAT CHANGES IF YOU TAKE IT BACK</div>
+            <div style="margin-top:10px;display:flex;flex-direction:column;gap:9px">
+              <sc-for list="{{ ruleBack }}" as="r" hint-placeholder-count="4">
+                <div style="display:flex;gap:9px">
+                  <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ r.dot }}"></div>
+                  <div style="flex:1;font-size:12.5px;color:#C9C9CF;line-height:1.5;text-wrap:pretty">{{ r.text }}</div>
+                </div>
+              </sc-for>
+            </div>
+
+            <div style="margin-top:18px;padding:12px 13px;border:1px solid #1F1F22;background:#0B0B0C;border-radius:3px">
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">A NARROWER VERSION, IF THE PROBLEM IS ONLY WEEKENDS</div>
+              <div style="margin-top:8px;font-size:13px;color:#DEDEE2;line-height:1.5;text-wrap:pretty">Keep the rule on weekdays, when you answer inside four minutes on average, and suspend it when nobody has been here for two hours.</div>
+              <div style="margin-top:6px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">would have kept 10 of the 11 · would have stopped the Saturday one</div>
+            </div>
+
+            <div style="flex:1"></div>
+            <div style="padding:13px 0 14px;border-top:1px solid #1F1F22;display:flex;align-items:flex-start;gap:12px">
+              <div style="flex:none;width:200px">
+                <button style="width:100%;background:#F0A35A;color:#140D06;border:none;border-radius:3px;padding:9px 14px;font-size:13px;font-weight:600;font-family:inherit;cursor:pointer">Keep it, weekdays only</button>
+                <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">The narrower version above. Agents say which version they used, every time.</div>
+              </div>
+              <div style="flex:none;width:150px">
+                <button style="width:100%;background:transparent;color:#C9C9CF;border:1px solid #33333A;border-radius:3px;padding:8px 12px;font-size:12.5px;font-family:inherit;cursor:pointer" style-hover="border-color:#4A4A52;color:#E8E8EA">Take it back</button>
+                <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">About eleven more stops in the next six weeks, on this evidence.</div>
+              </div>
+              <div style="flex:1">
+                <button style="width:100%;background:transparent;color:#C9C9CF;border:1px solid #33333A;border-radius:3px;padding:8px 12px;font-size:12.5px;font-family:inherit;cursor:pointer" style-hover="border-color:#4A4A52;color:#E8E8EA">Leave it as it is</button>
+                <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">Nothing changes, and this page records that you looked and were content.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ 3a · TWO AGENTS WANT THE SAME THING ══════════ -->
+    <div style="{{ s3a }}">
+      <div style="flex:1;display:flex;flex-direction:column;min-height:0">
+        <div style="flex:none;padding:14px 26px 12px;border-bottom:1px solid #1F1F22;border-left:2px solid #D9A03C;background:#110F0D;display:flex;align-items:flex-start;gap:16px">
+          <div style="flex:1">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.16em;color:#D9A03C">TWO PLANS WANT THE SAME TWO FILES · THE FLEET COULD NOT SETTLE IT</div>
+            <div style="margin-top:9px;font-size:17.5px;line-height:1.4;color:#F2F2F4;text-wrap:pretty">Ash is mid-migration in the invoice reader. Bex needs the same two files to finish the month-end guard.</div>
+            <div style="margin-top:7px;font-size:13px;color:#9A9AA2;line-height:1.5;text-wrap:pretty;max-width:860px">Neither is wrong and both are already started, which is why this reached you. You should not have to open either plan.</div>
+          </div>
+          <div style="flex:none;text-align:right;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61;line-height:1.8">
+            <div>waiting on you 6m</div>
+            <div>45 units unaffected</div>
+          </div>
+        </div>
+
+        <div style="flex:1;display:flex;min-height:0">
+          <div style="flex:1;padding:14px 26px 0;border-right:1px solid #1F1F22;min-width:0">
+            <div style="display:flex;gap:12px">
+              <sc-for list="{{ claims }}" as="c" hint-placeholder-count="2">
+                <div style="flex:1;padding:12px 13px;border:1px solid #1F1F22;background:#0B0B0C;border-radius:3px">
+                  <div style="display:flex;align-items:baseline;gap:9px">
+                    <div style="width:5px;height:5px;border-radius:50%;background:{{ c.dot }}"></div>
+                    <div style="font-size:13.5px;font-weight:600">{{ c.who }}</div>
+                    <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">{{ c.addr }}</div>
+                  </div>
+                  <div style="margin-top:7px;font-size:13px;color:#DEDEE2;line-height:1.5;text-wrap:pretty">{{ c.wants }}</div>
+                  <div style="margin-top:7px;font-size:12.5px;color:#9A9AA2;line-height:1.5;text-wrap:pretty">{{ c.state }}</div>
+                  <div style="margin-top:8px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52;line-height:1.7">{{ c.meta }}</div>
+                </div>
+              </sc-for>
+            </div>
+
+            <div style="margin-top:14px;padding:11px 12px;border:1px solid #1F1F22;background:#0B0B0C;border-radius:3px">
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">THE OVERLAP, WITHOUT OPENING EITHER PLAN</div>
+              <div style="margin-top:9px;display:flex;flex-direction:column;gap:7px">
+                <sc-for list="{{ overlap }}" as="o" hint-placeholder-count="3">
+                  <div style="display:flex;align-items:center;gap:10px">
+                    <div style="width:5px;height:5px;border-radius:50%;flex:none;background:{{ o.dot }}"></div>
+                    <div style="flex:1;font-size:12.5px;color:#C9C9CF">{{ o.text }}</div>
+                    <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">{{ o.meta }}</div>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+
+            <div style="margin-top:14px;padding:11px 12px;border:1px solid #1F1F22;border-left:2px solid #26262B;background:#0B0B0C">
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHAT THEY THINK SHOULD HAPPEN</div>
+              <div style="margin-top:8px;font-size:13px;color:#DEDEE2;line-height:1.5;text-wrap:pretty">Both of them say Bex should go first — Ash because his backfill can pause cleanly, Bex because the guard protects the very thing Ash is changing.</div>
+              <div style="margin-top:6px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">ash · 15:31 &nbsp;·&nbsp; bex · 15:32 &nbsp;·&nbsp; they agreed before asking you, and still could not act</div>
+            </div>
+          </div>
+
+          <div style="width:520px;flex:none;padding:14px 22px 0;display:flex;flex-direction:column;min-height:0">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHAT EACH RESOLUTION COSTS</div>
+            <div style="margin-top:10px;display:flex;flex-direction:column;gap:9px">
+              <sc-for list="{{ resolutions }}" as="r" hint-placeholder-count="4">
+                <div style="padding:11px 12px;border:1px solid {{ r.border }};background:#0B0B0C;border-radius:3px;cursor:pointer" style-hover="border-color:#33333A">
+                  <div style="display:flex;align-items:baseline;gap:10px">
+                    <div style="font-size:13px;font-weight:600;color:{{ r.fg }}">{{ r.name }}</div>
+                    <div style="flex:1"></div>
+                    <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:{{ r.costFg }}">{{ r.cost }}</div>
+                  </div>
+                  <div style="margin-top:5px;font-size:12.5px;color:#9A9AA2;line-height:1.5;text-wrap:pretty">{{ r.text }}</div>
+                </div>
+              </sc-for>
+            </div>
+
+            <div style="flex:1"></div>
+            <div style="padding:13px 0 14px;border-top:1px solid #1F1F22;display:flex;align-items:flex-start;gap:12px">
+              <div style="flex:none;width:210px">
+                <button style="width:100%;background:#F0A35A;color:#140D06;border:none;border-radius:3px;padding:9px 14px;font-size:13px;font-weight:600;font-family:inherit;cursor:pointer">Let Bex go first</button>
+                <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">What both of them asked for. Ash pauses forty minutes; nothing is thrown away.</div>
+              </div>
+              <div style="flex:1">
+                <div style="border:1px solid #26262B;border-radius:3px;background:#0A0A0B;padding:9px 11px;font-size:12.5px;color:#4A4A52">Or say how to split it — "Bex takes the reader, Ash keeps the summary"…</div>
+                <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">Both continue on different files. Tam re-shapes two units to match your words.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ 3b · A COLLISION THE FLEET SETTLED ALONE ══════════ -->
+    <div style="{{ s3b }}">
+      <div style="flex:1;display:flex;flex-direction:column;min-height:0;border-right:1px solid #1F1F22">
+        <div style="flex:1;padding:16px 24px 0;overflow:hidden">
+          <div style="display:flex;align-items:center;gap:10px;padding:7px 10px;border:1px solid #17171A;background:#0C0C0D;border-radius:3px">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#4A4A52">15:02–15:29</div>
+            <div style="width:5px;height:5px;border-radius:50%;background:#3E5C8A;flex:none"></div>
+            <div style="flex:1;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#6A6A72">44 events&nbsp; ·&nbsp; one collision, settled without you</div>
+          </div>
+
+          <div style="display:flex;gap:12px;margin-top:18px">
+            <div style="width:26px;height:26px;flex:none;border:1px solid #33333A;border-radius:3px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#C9C9CF">T</div>
+            <div style="flex:1;max-width:780px">
+              <div style="display:flex;align-items:baseline;gap:8px"><div style="font-size:13px;font-weight:600">Tam</div><div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">planner · 15:29 · reporting, not asking</div></div>
+              <div style="margin-top:5px;font-size:14px;line-height:1.55;color:#DEDEE2;text-wrap:pretty">Rune and Vale both needed the search index writer. I gave it to Vale and moved Rune onto his second unit, because Vale was eleven minutes from finishing and Rune had not started.</div>
+
+              <div style="margin-top:12px;border:1px solid #1F1F22;border-radius:4px;background:#0B0B0C;overflow:hidden">
+                <div style="padding:10px 13px;border-bottom:1px solid #17171A;display:flex;align-items:center;gap:12px">
+                  <div style="width:5px;height:5px;border-radius:50%;background:#4FA97D;flex:none"></div>
+                  <div style="flex:1;font-size:12.5px;color:#C9C9CF">Settled under your rule: whoever is closest to finishing keeps the file, unless the other is on main.</div>
+                  <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">your words · 2 July</div>
+                </div>
+                <sc-for list="{{ settled }}" as="r" hint-placeholder-count="3">
+                  <div style="display:flex;gap:12px;padding:10px 13px;border-bottom:1px solid #17171A">
+                    <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ r.dot }}"></div>
+                    <div style="flex:1;font-size:12.5px;color:#DEDEE2;line-height:1.5;text-wrap:pretty">{{ r.text }}</div>
+                    <div style="flex:none;width:150px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52;text-align:right">{{ r.meta }}</div>
+                  </div>
+                </sc-for>
+                <div style="padding:11px 13px;display:flex;align-items:flex-start;gap:12px">
+                  <div style="flex:none;width:200px">
+                    <button style="width:100%;background:transparent;color:#C9C9CF;border:1px solid #33333A;border-radius:3px;padding:8px 12px;font-size:12.5px;font-family:inherit;cursor:pointer" style-hover="border-color:#4A4A52;color:#E8E8EA">Swap them back</button>
+                    <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">Vale stops eleven minutes from done. Rune restarts. About twenty minutes lost in total.</div>
+                  </div>
+                  <div style="flex:1">
+                    <div style="border:1px solid #26262B;border-radius:3px;background:#0A0A0B;padding:9px 11px;font-size:12.5px;color:#4A4A52">Or say what should have happened, so the rule reads better next time…</div>
+                    <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">Your sentence replaces the rule and Tam quotes the new one when he next uses it.</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div style="display:flex;align-items:center;gap:12px;margin-top:18px">
+            <div style="height:1px;flex:1;background:#17171A"></div>
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">this is a report · nothing here is waiting on you</div>
+            <div style="height:1px;flex:1;background:#17171A"></div>
+          </div>
+        </div>
+
+        <div style="flex:none;padding:12px 24px 14px;border-top:1px solid #1F1F22">
+          <div style="border:1px solid #26262B;border-radius:3px;background:#0C0C0D;padding:10px 12px;display:flex;align-items:center;gap:10px">
+            <div style="flex:1;font-size:13px;color:#4A4A52">Say anything to the room…</div>
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#3E3E45">⌘K</div>
+          </div>
+        </div>
+      </div>
+
+      <div style="width:440px;flex:none;display:flex;flex-direction:column;min-height:0">
+        <div style="padding:14px 18px 6px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">COLLISIONS THIS WEEK</div>
+        <div style="padding:6px 18px 0;display:flex;flex-direction:column">
+          <sc-for list="{{ collisionLedger }}" as="c" hint-placeholder-count="4">
+            <div style="display:flex;gap:11px;padding:9px 0;border-top:1px solid #17171A">
+              <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ c.dot }}"></div>
+              <div style="flex:1">
+                <div style="font-size:12.5px;color:#C9C9CF;line-height:1.45;text-wrap:pretty">{{ c.text }}</div>
+                <div style="margin-top:3px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">{{ c.meta }}</div>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+        <div style="margin-top:16px;padding:0 18px;font-size:12.5px;color:#9A9AA2;line-height:1.55;text-wrap:pretty">Nine collisions this week, one of which needed you. Before the rule on 2 July, all nine would have.</div>
+        <div style="flex:1"></div>
+        <div style="padding:12px 18px;border-top:1px solid #1F1F22;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52;line-height:1.8">
+          <div>overturned by you&nbsp;&nbsp;<span style="color:#6A6A72">1 of 8 · in April</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ 4a · AN AGENT WITH A LONG RECORD ══════════ -->
+    <div style="{{ s4a }}">
+      <div style="flex:1;display:flex;flex-direction:column;min-height:0">
+        <div style="flex:none;padding:14px 26px 12px;border-bottom:1px solid #1F1F22;display:flex;align-items:flex-start;gap:16px">
+          <div style="flex:1">
+            <div style="display:flex;align-items:baseline;gap:12px">
+              <div style="font-size:19px;font-weight:600;letter-spacing:-.01em">Pike</div>
+              <div style="width:5px;height:5px;border-radius:50%;background:#5B8DEF"></div>
+              <div style="font-size:13px;color:#9A9AA2">verifier · re-running Wren's checks in 3.2</div>
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">since 4 April · 214 units</div>
+            </div>
+            <div style="margin-top:9px;font-size:15.5px;line-height:1.45;color:#F2F2F4;text-wrap:pretty;max-width:900px">Pike is slow and careful. He asks for help less than anyone and has been wrong to stay quiet twice — both times about a race, both times found later by someone else.</div>
+          </div>
+          <div style="flex:none;text-align:right;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61;line-height:1.8">
+            <div>this is not a score</div>
+            <div>agents are never ranked against each other</div>
+          </div>
+        </div>
+
+        <div style="flex:1;display:flex;min-height:0">
+          <div style="flex:1;padding:14px 26px 0;border-right:1px solid #1F1F22;min-width:0">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">THE TWO NUMBERS THAT MATTER, AND WHAT THEY ARE WORTH</div>
+            <div style="margin-top:10px;display:flex;flex-direction:column;gap:9px">
+              <sc-for list="{{ record }}" as="r" hint-placeholder-count="4">
+                <div style="padding:11px 12px;border:1px solid #1F1F22;background:#0B0B0C;border-radius:3px">
+                  <div style="display:flex;align-items:baseline;gap:11px">
+                    <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:15px;color:{{ r.numFg }};width:56px;flex:none">{{ r.num }}</div>
+                    <div style="flex:1;font-size:13px;color:#DEDEE2;line-height:1.45;text-wrap:pretty">{{ r.label }}</div>
+                    <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:{{ r.confFg }};flex:none">{{ r.conf }}</div>
+                  </div>
+                  <div style="margin-top:6px;font-size:12px;color:#8A8A91;line-height:1.5;text-wrap:pretty;padding-left:67px">{{ r.note }}</div>
+                </div>
+              </sc-for>
+            </div>
+
+            <div style="margin-top:16px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">THE TWO TIMES HE SHOULD HAVE SPOKEN AND DID NOT</div>
+            <div style="margin-top:10px;display:flex;flex-direction:column;gap:8px">
+              <sc-for list="{{ silences }}" as="s" hint-placeholder-count="2">
+                <div style="display:flex;gap:11px;padding:10px 11px;border:1px solid #241A17;background:#0D0B0B;border-radius:3px">
+                  <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:#B4553A"></div>
+                  <div style="flex:1">
+                    <div style="font-size:12.5px;color:#DEDEE2;line-height:1.5;text-wrap:pretty">{{ s.text }}</div>
+                    <div style="margin-top:4px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">{{ s.meta }}</div>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+
+          <div style="width:520px;flex:none;padding:14px 22px 0;display:flex;flex-direction:column;min-height:0">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">SLOW IS NOT THE SAME AS UNRELIABLE</div>
+            <div style="margin-top:10px;display:flex;flex-direction:column;gap:9px">
+              <sc-for list="{{ slowVsBad }}" as="s" hint-placeholder-count="3">
+                <div style="display:flex;gap:9px">
+                  <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ s.dot }}"></div>
+                  <div style="flex:1;font-size:12.5px;color:#C9C9CF;line-height:1.5;text-wrap:pretty">{{ s.text }}</div>
+                </div>
+              </sc-for>
+            </div>
+
+            <div style="margin-top:18px;padding:12px 13px;border:1px solid #1F1F22;border-left:2px solid #F0A35A;background:#0B0B0C">
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHEN YOU HAVE STALLED WORK TO HAND OVER</div>
+              <div style="margin-top:8px;font-size:13.5px;color:#F2F2F4;line-height:1.5;text-wrap:pretty">Good for work where being wrong is expensive: verification, anything near main, anything another agent abandoned mid-way.</div>
+              <div style="margin-top:7px;font-size:12.5px;color:#9A9AA2;line-height:1.5;text-wrap:pretty">Poor for work that must land today, and poor for races — twice now he has decided a race was flakiness and moved on.</div>
+              <div style="margin-top:10px;border:1px solid #26262B;border-radius:3px;background:#0A0A0B;padding:9px 11px;font-size:12.5px;color:#4A4A52">Or say what you are handing over and let the fleet suggest who…</div>
+            </div>
+
+            <div style="flex:1"></div>
+            <div style="padding:12px 0 14px;border-top:1px solid #1F1F22;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52;line-height:1.8">
+              <div>every number here links to the units it came from</div>
+              <div>nothing is inferred from anything you cannot open</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ 4b · TOO LITTLE HISTORY TO JUDGE ══════════ -->
+    <div style="{{ s4b }}">
+      <div style="flex:1;display:flex;flex-direction:column;min-height:0">
+        <div style="flex:none;padding:14px 26px 12px;border-bottom:1px solid #1F1F22;display:flex;align-items:flex-start;gap:16px">
+          <div style="flex:1">
+            <div style="display:flex;align-items:baseline;gap:12px">
+              <div style="font-size:19px;font-weight:600;letter-spacing:-.01em">Orin</div>
+              <div style="width:5px;height:5px;border-radius:50%;background:#4A4A52"></div>
+              <div style="font-size:13px;color:#9A9AA2">verifier · idle since yesterday</div>
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">since Monday · 6 units</div>
+            </div>
+            <div style="margin-top:9px;font-size:15.5px;line-height:1.45;color:#F2F2F4;text-wrap:pretty;max-width:900px">Six units is not enough to tell you anything about Orin. Everything below is either a fact with no pattern behind it, or what his role does by default.</div>
+          </div>
+          <div style="flex:none;text-align:right;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61;line-height:1.8">
+            <div>no judgement offered</div>
+            <div>a wrong reputation is worse than none</div>
+          </div>
+        </div>
+
+        <div style="flex:1;display:flex;min-height:0">
+          <div style="flex:1;padding:14px 26px 0;border-right:1px solid #1F1F22;min-width:0">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHAT HE HAS ACTUALLY DONE — ALL OF IT</div>
+            <div style="margin-top:10px;display:flex;flex-direction:column;gap:8px">
+              <sc-for list="{{ thinRecord }}" as="r" hint-placeholder-count="4">
+                <div style="display:flex;gap:11px;padding:10px 11px;border:1px solid #1F1F22;background:#0B0B0C;border-radius:3px">
+                  <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ r.dot }}"></div>
+                  <div style="flex:1">
+                    <div style="font-size:12.5px;color:#DEDEE2;line-height:1.5;text-wrap:pretty">{{ r.text }}</div>
+                    <div style="margin-top:4px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">{{ r.meta }}</div>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+            <div style="margin-top:14px;padding:11px 12px;border:1px dashed #26262B;border-radius:3px;font-size:12.5px;color:#8A8A91;line-height:1.5;text-wrap:pretty">Six units, all small, all in one plan, none of them urgent and none of them near main. Nothing here has tested whether he speaks up when it is expensive to be wrong.</div>
+          </div>
+
+          <div style="width:520px;flex:none;padding:14px 22px 0;display:flex;flex-direction:column;min-height:0">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHAT WOULD MAKE THIS PAGE WORTH READING</div>
+            <div style="margin-top:10px;display:flex;flex-direction:column;gap:9px">
+              <sc-for list="{{ whatWouldTell }}" as="w" hint-placeholder-count="3">
+                <div style="display:flex;gap:9px">
+                  <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ w.dot }}"></div>
+                  <div style="flex:1;font-size:12.5px;color:#C9C9CF;line-height:1.5;text-wrap:pretty">{{ w.text }}</div>
+                </div>
+              </sc-for>
+            </div>
+
+            <div style="margin-top:18px;padding:12px 13px;border:1px solid #1F1F22;background:#0B0B0C;border-radius:3px">
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHAT HIS ROLE DOES BY DEFAULT — NOT WHAT HE HAS PROVED</div>
+              <div style="margin-top:9px;display:flex;flex-direction:column;gap:8px">
+                <sc-for list="{{ roleDefaults }}" as="r" hint-placeholder-count="3">
+                  <div style="display:flex;gap:9px">
+                    <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:#3E3E45"></div>
+                    <div style="flex:1;font-size:12.5px;color:#9A9AA2;line-height:1.5;text-wrap:pretty">{{ r.text }}</div>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+
+            <div style="margin-top:16px;padding:12px 13px;border:1px solid #1F1F22;border-left:2px solid #F0A35A;background:#0B0B0C">
+              <div style="font-size:13.5px;color:#F2F2F4;line-height:1.5;text-wrap:pretty">If you are choosing who takes stalled work today, choose on evidence and not on this page. Pike and Bex have records; Orin has six easy units.</div>
+              <div style="margin-top:9px;border:1px solid #26262B;border-radius:3px;background:#0A0A0B;padding:9px 11px;font-size:12.5px;color:#4A4A52">Or give him something small and see — say what to hand him…</div>
+              <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">The only way this page gets useful. Small and reversible is the right kind of first test.</div>
+            </div>
+
+            <div style="flex:1"></div>
+            <div style="padding:12px 0 14px;border-top:1px solid #1F1F22;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52;line-height:1.8">
+              <div>sample&nbsp;&nbsp;<span style="color:#6A6A72">6 units · too few for any rate</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ 5a · A DECISION FROM THREE WEEKS AGO ══════════ -->
+    <div style="{{ s5a }}">
+      <div style="flex:1;display:flex;flex-direction:column;min-height:0">
+        <div style="flex:none;padding:14px 26px 12px;border-bottom:1px solid #1F1F22">
+          <div style="display:flex;align-items:center;gap:14px">
+            <div style="flex:1;border:1px solid #F0A35A;border-radius:3px;background:#0B0B0C;padding:10px 12px;display:flex;align-items:center;gap:10px">
+              <div style="font-size:14px;color:#F2F2F4">why don't we cache the invoice totals</div>
+              <div style="width:1px;height:16px;background:#F0A35A"></div>
+            </div>
+            <div style="flex:none;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61;line-height:1.7;text-align:right">
+              <div>1 decision · kept whole</div>
+              <div>4 July · three weeks ago</div>
+            </div>
+          </div>
+        </div>
+
+        <div style="flex:1;display:flex;min-height:0">
+          <div style="flex:1;padding:14px 26px 0;border-right:1px solid #1F1F22;min-width:0">
+            <div style="padding:13px 14px;border:1px solid #1F1F22;border-left:2px solid #F0A35A;background:#0B0B0C">
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">YOUR DECISION · 4 JULY 16:22 · KEPT AT FULL FIDELITY</div>
+              <div style="margin-top:9px;font-size:16px;line-height:1.5;color:#F2F2F4;text-wrap:pretty">"No cache. The totals are read twice a day and wrong totals are much worse than slow ones — if it's slow, make the query better."</div>
+              <div style="margin-top:8px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">you · to Tam · 4.2 invoicing · still in force</div>
+            </div>
+
+            <div style="margin-top:16px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHAT WAS KNOWN AT THE TIME — THE EVIDENCE IN FRONT OF YOU THEN</div>
+            <div style="margin-top:10px;display:flex;flex-direction:column;gap:8px">
+              <sc-for list="{{ knownThen }}" as="k" hint-placeholder-count="4">
+                <div style="display:flex;gap:11px;padding:10px 11px;border:1px solid #1F1F22;background:#0B0B0C;border-radius:3px">
+                  <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ k.dot }}"></div>
+                  <div style="flex:1">
+                    <div style="font-size:12.5px;color:#DEDEE2;line-height:1.5;text-wrap:pretty">{{ k.text }}</div>
+                    <div style="margin-top:4px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">{{ k.meta }}</div>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+            <div style="margin-top:12px;font-size:12.5px;color:#8A8A91;line-height:1.5;text-wrap:pretty">Decisions and the evidence that was in front of you are the only things kept whole forever. Everything else around them is compacted, and says so.</div>
+          </div>
+
+          <div style="width:520px;flex:none;padding:14px 22px 0;display:flex;flex-direction:column;min-height:0">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHAT HAS CHANGED SINCE — SO YOU CAN SEE IF IT STILL HOLDS</div>
+            <div style="margin-top:10px;display:flex;flex-direction:column;gap:9px">
+              <sc-for list="{{ changedSince }}" as="c" hint-placeholder-count="3">
+                <div style="display:flex;gap:9px">
+                  <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ c.dot }}"></div>
+                  <div style="flex:1;font-size:12.5px;color:#C9C9CF;line-height:1.5;text-wrap:pretty">{{ c.text }}</div>
+                </div>
+              </sc-for>
+            </div>
+
+            <div style="margin-top:18px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHAT THIS DECISION HAS SHAPED SINCE</div>
+            <div style="margin-top:10px;display:flex;flex-direction:column">
+              <sc-for list="{{ shaped }}" as="p" hint-placeholder-count="3">
+                <div style="display:flex;align-items:baseline;gap:11px;padding:9px 0;border-top:1px solid #17171A;cursor:pointer" style-hover="background:#0E0E0F">
+                  <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#8A8A91;width:40px;flex:none">{{ p.addr }}</div>
+                  <div style="flex:1;font-size:12.5px;color:#C9C9CF;line-height:1.45;text-wrap:pretty">{{ p.text }}</div>
+                </div>
+              </sc-for>
+            </div>
+
+            <div style="flex:1"></div>
+            <div style="padding:13px 0 14px;border-top:1px solid #1F1F22;display:flex;align-items:flex-start;gap:12px">
+              <div style="flex:1">
+                <div style="border:1px solid #F0A35A;border-radius:3px;background:#0A0A0B;padding:9px 11px;font-size:12.5px;color:#4A4A52">Change your mind in words — "cache them, but only the closed months"…</div>
+                <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">The old decision stays in the record with its date. Nothing is rewritten, and Tam quotes both.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ 5b · THE SAME, ONCE THE DETAIL WAS COMPACTED ══════════ -->
+    <div style="{{ s5b }}">
+      <div style="flex:1;display:flex;flex-direction:column;min-height:0">
+        <div style="flex:none;padding:14px 26px 12px;border-bottom:1px solid #1F1F22">
+          <div style="display:flex;align-items:center;gap:14px">
+            <div style="flex:1;border:1px solid #F0A35A;border-radius:3px;background:#0B0B0C;padding:10px 12px;display:flex;align-items:center;gap:10px">
+              <div style="font-size:14px;color:#F2F2F4">the march reindex, why we skipped retry budgets</div>
+              <div style="width:1px;height:16px;background:#F0A35A"></div>
+            </div>
+            <div style="flex:none;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61;line-height:1.7;text-align:right">
+              <div>1 decision · kept whole</div>
+              <div>the work around it · compacted 12 June</div>
+            </div>
+          </div>
+        </div>
+
+        <div style="flex:1;display:flex;min-height:0">
+          <div style="flex:1;padding:14px 26px 0;border-right:1px solid #1F1F22;min-width:0">
+            <div style="padding:13px 14px;border:1px solid #1F1F22;border-left:2px solid #F0A35A;background:#0B0B0C">
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">YOUR DECISION · 12 MARCH 11:04 · KEPT AT FULL FIDELITY</div>
+              <div style="margin-top:9px;font-size:16px;line-height:1.5;color:#F2F2F4;text-wrap:pretty">"Leave retry budgets out of this. I want the reindex small enough that I can read the whole thing in one sitting."</div>
+              <div style="margin-top:8px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">you · to Tam · 6.1 search-reindex · archived 2 June</div>
+            </div>
+
+            <div style="margin-top:14px;padding:12px 13px;border:1px solid #241A17;border-left:2px solid #B4553A;background:#100D0C">
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#C2704A">THE DETAIL BEHIND THIS WAS COMPACTED ON 12 JUNE · THIS IS A SUMMARY, NOT THE RECORD</div>
+              <div style="margin-top:8px;font-size:13.5px;color:#DEDEE2;line-height:1.5;text-wrap:pretty">Nine hundred events, four agent sessions and eleven test runs became six sentences. The decision above and the three pieces of evidence beside it were kept exactly; the rest is gone and is not recoverable.</div>
+              <div style="margin-top:7px;font-size:12.5px;color:#9A9AA2;line-height:1.5;text-wrap:pretty">Compaction happens ninety days after a plan is archived, and it never touches a decision, the evidence attached to one, or anything you wrote.</div>
+            </div>
+
+            <div style="margin-top:16px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHAT SURVIVED, AND AT WHAT FIDELITY</div>
+            <div style="margin-top:10px;display:flex;flex-direction:column;gap:8px">
+              <sc-for list="{{ survived }}" as="s" hint-placeholder-count="4">
+                <div style="display:flex;gap:11px;padding:10px 11px;border:1px solid {{ s.border }};background:#0B0B0C;border-radius:3px">
+                  <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ s.dot }}"></div>
+                  <div style="flex:1">
+                    <div style="font-size:12.5px;color:#DEDEE2;line-height:1.5;text-wrap:pretty">{{ s.text }}</div>
+                    <div style="margin-top:4px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:{{ s.metaFg }}">{{ s.meta }}</div>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+
+          <div style="width:520px;flex:none;padding:14px 22px 0;display:flex;flex-direction:column;min-height:0">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#C2704A">WHAT WAS DROPPED, NAMED</div>
+            <div style="margin-top:10px;display:flex;flex-direction:column;gap:8px">
+              <sc-for list="{{ dropped }}" as="d" hint-placeholder-count="4">
+                <div style="display:flex;align-items:baseline;gap:11px">
+                  <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#6A6A72;width:52px;flex:none;text-align:right">{{ d.n }}</div>
+                  <div style="flex:1;font-size:12.5px;color:#9A9AA2;line-height:1.5;text-wrap:pretty">{{ d.text }}</div>
+                </div>
+              </sc-for>
+            </div>
+
+            <div style="margin-top:18px;padding:12px 13px;border:1px solid #1F1F22;background:#0B0B0C;border-radius:3px">
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHO DECIDED TO COMPACT IT</div>
+              <div style="margin-top:8px;font-size:13px;color:#DEDEE2;line-height:1.5;text-wrap:pretty">A rule you gave on 2 June: "compact archived plans after ninety days, keep decisions and anything I wrote." It has run on four plans and this is the first one you have opened since.</div>
+              <div style="margin-top:10px;display:flex;gap:10px">
+                <button style="flex:1;background:transparent;color:#C9C9CF;border:1px solid #33333A;border-radius:3px;padding:8px 12px;font-size:12.5px;font-family:inherit;cursor:pointer" style-hover="border-color:#4A4A52;color:#E8E8EA">Keep more next time</button>
+                <button style="flex:1;background:transparent;color:#C9C9CF;border:1px solid #33333A;border-radius:3px;padding:8px 12px;font-size:12.5px;font-family:inherit;cursor:pointer" style-hover="border-color:#4A4A52;color:#E8E8EA">Never compact this plan</button>
+              </div>
+              <div style="margin-top:7px;font-size:11.5px;color:#6A6A72;line-height:1.45">Neither restores what is gone. Both change what happens to the six plans due for compaction next month.</div>
+            </div>
+
+            <div style="flex:1"></div>
+            <div style="padding:12px 0 14px;border-top:1px solid #1F1F22;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52;line-height:1.8">
+              <div>this page never claims to be the whole record</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ 6a · FIVE UNANSWERED QUESTIONS ACROSS A WEEKEND ══════════ -->
+    <div style="{{ s6a }}">
+      <div style="flex:1;display:flex;flex-direction:column;min-height:0">
+        <div style="flex:none;padding:14px 26px 12px;border-bottom:1px solid #1F1F22;border-left:2px solid #B4553A;background:#100D0C;display:flex;align-items:flex-start;gap:16px">
+          <div style="flex:1">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.16em;color:#C2704A">FIVE QUESTIONS, FOUR AGENTS, ONE CAUSE · SATURDAY 09:12 TO SUNDAY 21:40</div>
+            <div style="margin-top:9px;font-size:18px;line-height:1.4;color:#F2F2F4;text-wrap:pretty">Nobody was here for two days, so the fleet asked five times, waited, and then followed its own rule five times.</div>
+            <div style="margin-top:7px;font-size:13px;color:#9A9AA2;line-height:1.5;text-wrap:pretty;max-width:860px">This is one event, not five. Four of the five were reversible and were taken; the fifth could not be, and that plan has been still since Saturday lunchtime.</div>
+          </div>
+          <div style="flex:none;text-align:right;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61;line-height:1.8">
+            <div>machine time lost&nbsp;&nbsp;<span style="color:#8A8A91">31h</span></div>
+            <div>work thrown away&nbsp;&nbsp;<span style="color:#8A8A91">none</span></div>
+          </div>
+        </div>
+
+        <div style="flex:1;display:flex;min-height:0">
+          <div style="flex:1;padding:14px 26px 0;border-right:1px solid #1F1F22;min-width:0">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHAT EACH ONE DID IN YOUR ABSENCE</div>
+            <div style="margin-top:10px;display:flex;flex-direction:column;gap:8px">
+              <sc-for list="{{ unanswered }}" as="u" hint-placeholder-count="5">
+                <div style="display:flex;gap:11px;padding:10px 11px;border:1px solid {{ u.border }};background:#0B0B0C;border-radius:3px">
+                  <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ u.dot }}"></div>
+                  <div style="flex:1;min-width:0">
+                    <div style="font-size:13px;color:#DEDEE2;line-height:1.5;text-wrap:pretty">{{ u.q }}</div>
+                    <div style="margin-top:4px;font-size:12px;color:#8A8A91;line-height:1.45;text-wrap:pretty">{{ u.did }}</div>
+                    <div style="margin-top:4px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:{{ u.metaFg }}">{{ u.meta }}</div>
+                  </div>
+                  <div style="flex:none;width:120px;text-align:right;font-size:11.5px;color:{{ u.stateFg }};line-height:1.4">{{ u.state }}</div>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+
+          <div style="width:520px;flex:none;padding:14px 22px 0;display:flex;flex-direction:column;min-height:0">
+            <div style="padding:12px 13px;border:1px solid #1F1F22;border-left:2px solid #26262B;background:#0B0B0C">
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">THE RULE THEY FOLLOWED, IN YOUR WORDS</div>
+              <div style="margin-top:9px;font-size:14px;line-height:1.5;color:#F2F2F4;text-wrap:pretty">"Wait forty minutes. If it's reversible, take the reversible option and tell me. If it isn't, stop and keep everything."</div>
+              <div style="margin-top:7px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">given 11 June · quoted at each of the five points it took effect</div>
+            </div>
+
+            <div style="margin-top:16px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHAT THE RULE GOT RIGHT AND WRONG THIS WEEKEND</div>
+            <div style="margin-top:10px;display:flex;flex-direction:column;gap:9px">
+              <sc-for list="{{ ruleVerdict }}" as="r" hint-placeholder-count="3">
+                <div style="display:flex;gap:9px">
+                  <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ r.dot }}"></div>
+                  <div style="flex:1;font-size:12.5px;color:#C9C9CF;line-height:1.5;text-wrap:pretty">{{ r.text }}</div>
+                </div>
+              </sc-for>
+            </div>
+
+            <div style="flex:1"></div>
+            <div style="padding:13px 0 14px;border-top:1px solid #1F1F22;display:flex;align-items:flex-start;gap:12px">
+              <div style="flex:none;width:210px">
+                <button style="width:100%;background:#F0A35A;color:#140D06;border:none;border-radius:3px;padding:9px 14px;font-size:13px;font-weight:600;font-family:inherit;cursor:pointer">Fix the one that stopped</button>
+                <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">Gives the credential and wakes a fresh agent on Juno's branch. The reindex moves this morning.</div>
+              </div>
+              <div style="flex:1">
+                <button style="width:100%;background:transparent;color:#C9C9CF;border:1px solid #33333A;border-radius:3px;padding:8px 12px;font-size:12.5px;font-family:inherit;cursor:pointer" style-hover="border-color:#4A4A52;color:#E8E8EA">Change the rule instead</button>
+                <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">Because a plan going still for 51 hours is the actual defect here, not the five questions.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ 6b · THE STANDING RULE BEING CHANGED ══════════ -->
+    <div style="{{ s6b }}">
+      <div style="flex:1;display:flex;flex-direction:column;min-height:0">
+        <div style="flex:none;padding:14px 26px 12px;border-bottom:1px solid #1F1F22;display:flex;align-items:flex-start;gap:16px">
+          <div style="flex:1">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.16em;color:#5A5A61">CHANGING WHAT THE FLEET DOES WHEN NOBODY ANSWERS</div>
+            <div style="margin-top:9px;font-size:17.5px;line-height:1.4;color:#F2F2F4;text-wrap:pretty">Waiting forever wastes machines. Guessing risks the work. Dying quietly is how a fleet stops without anyone noticing.</div>
+            <div style="margin-top:7px;font-size:13px;color:#9A9AA2;line-height:1.5;text-wrap:pretty;max-width:860px">The third answer is to keep asking a smaller question of somebody else — the plan, then the fleet, then a written note that can be picked up cold. Here is that rule, tested against the weekend you just read.</div>
+          </div>
+          <div style="flex:none;text-align:right;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61;line-height:1.8">
+            <div>rule in force since&nbsp;&nbsp;<span style="color:#8A8A91">11 June</span></div>
+            <div>this change would alter&nbsp;&nbsp;<span style="color:#8A8A91">1 of 5</span></div>
+          </div>
+        </div>
+
+        <div style="flex:1;display:flex;min-height:0">
+          <div style="flex:1;padding:14px 26px 0;border-right:1px solid #1F1F22;min-width:0">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">THE PROPOSED RULE, IN THE ORDER IT WOULD RUN</div>
+            <div style="margin-top:10px;display:flex;flex-direction:column;gap:6px">
+              <sc-for list="{{ escalation }}" as="e" hint-placeholder-count="5">
+                <div style="display:flex;gap:12px;padding:11px 12px;border:1px solid {{ e.border }};background:#0B0B0C;border-radius:3px">
+                  <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#5A5A61;width:64px;flex:none;padding-top:2px">{{ e.after }}</div>
+                  <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ e.dot }}"></div>
+                  <div style="flex:1">
+                    <div style="font-size:13.5px;color:#F2F2F4;line-height:1.45;text-wrap:pretty">{{ e.step }}</div>
+                    <div style="margin-top:4px;font-size:12px;color:#8A8A91;line-height:1.45;text-wrap:pretty">{{ e.why }}</div>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+            <div style="margin-top:14px;padding:11px 12px;border:1px dashed #26262B;border-radius:3px;font-size:12.5px;color:#8A8A91;line-height:1.5;text-wrap:pretty">No step in this guesses at something irreversible, and no step ends in silence. The last one is a written handover an agent — or a person — can pick up cold on Monday.</div>
+          </div>
+
+          <div style="width:520px;flex:none;padding:14px 22px 0;display:flex;flex-direction:column;min-height:0">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">RUN AGAINST LAST WEEKEND</div>
+            <div style="margin-top:10px;display:flex;flex-direction:column;gap:8px">
+              <sc-for list="{{ replay }}" as="r" hint-placeholder-count="3">
+                <div style="display:flex;gap:11px;padding:10px 11px;border:1px solid #1F1F22;background:#0B0B0C;border-radius:3px">
+                  <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ r.dot }}"></div>
+                  <div style="flex:1">
+                    <div style="font-size:12.5px;color:#DEDEE2;line-height:1.5;text-wrap:pretty">{{ r.text }}</div>
+                    <div style="margin-top:4px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">{{ r.meta }}</div>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+
+            <div style="margin-top:16px;padding:12px 13px;border:1px solid #241A17;border-left:2px solid #B4553A;background:#100D0C;font-size:12.5px;color:#C9C9CF;line-height:1.5;text-wrap:pretty">It would not have saved the credential. Nothing in a rule can invent a secret it is not allowed to read — that one needs a person, and the honest version of this rule says so instead of pretending.</div>
+
+            <div style="flex:1"></div>
+            <div style="padding:13px 0 14px;border-top:1px solid #1F1F22;display:flex;align-items:flex-start;gap:12px">
+              <div style="flex:none;width:210px">
+                <button style="width:100%;background:#F0A35A;color:#140D06;border:none;border-radius:3px;padding:9px 14px;font-size:13px;font-weight:600;font-family:inherit;cursor:pointer">Make this the rule</button>
+                <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">Quoted wherever it takes effect, and takeable back in one action with its cost shown.</div>
+              </div>
+              <div style="flex:1">
+                <div style="border:1px solid #26262B;border-radius:3px;background:#0A0A0B;padding:9px 11px;font-size:12.5px;color:#4A4A52">Or write the rule yourself — it is stored as your sentence…</div>
+                <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">The fleet re-runs it against the last month and tells you what would have changed before it takes effect.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1640,&quot;height&quot;:1100},&quot;screen&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;1a&quot;,&quot;1b&quot;,&quot;2a&quot;,&quot;2b&quot;,&quot;3a&quot;,&quot;3b&quot;,&quot;4a&quot;,&quot;4b&quot;,&quot;5a&quot;,&quot;5b&quot;,&quot;6a&quot;,&quot;6b&quot;],&quot;default&quot;:null,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Surface&quot;}}">
+const G='#4FA97D', B='#5B8DEF', A='#D9A03C', ALARM='#B4553A', D='#4A4A52';
+const SHOW = 'flex:1;display:flex;min-height:0';
+
+class Component extends DCLogic {
+  state = { screen: '1a', touched: false };
+  cur() { return this.state.touched ? this.state.screen : (this.props.screen ?? this.state.screen); }
+  tab(id) {
+    const on = this.cur() === id;
+    return "font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;letter-spacing:.04em;padding:5px 10px;border-radius:3px;cursor:pointer;border:1px solid " +
+      (on ? '#F0A35A;color:#F0A35A;background:#150F08' : '#1F1F22;color:#6A6A72;background:transparent');
+  }
+
+  renderVals() {
+    const s = this.cur();
+    const set = (screen) => () => this.setState({ screen, touched: true });
+    const show = (id) => s === id ? SHOW : 'display:none';
+
+    const meta = {
+      '1a': { cap: 'Reversibility decides: she acts on the three lines she can undo, holds the one she cannot, and shows her whole reading either way.', fleet: '47 units working · 5 plans · 0 waiting', clock: '14:10 Thu', ra: 'reading back · 3.2', rb: '1 of 4 lines held' },
+      '1b': { cap: 'One line of the reading was wrong. The cost is stated, and correcting one line keeps the rest.', fleet: '47 units working · 5 plans · 0 waiting', clock: '14:14 Thu', ra: 'correcting line 3', rb: 'wrong for 5m 12s' },
+      '2a': { cap: 'Not a settings page: a pattern in four answers you already gave, replayed against the real interruptions.', fleet: '47 units working · 5 plans · 0 waiting', clock: '16:02 Thu', ra: 'autonomy · 5 rules', rb: '17 interruptions this month' },
+      '2b': { cap: 'Every rule is takeable back, and says what it saved and what it cost before you do.', fleet: '47 units working · 5 plans · 0 waiting', clock: '16:06 Thu', ra: 'autonomy · 5 rules', rb: 'reviewing 1 of them' },
+      '3a': { cap: 'A collision legible without opening either plan: both claims, the overlap, each resolution priced, and their own preference.', fleet: '45 units working · 5 plans · 1 waiting on you', clock: '15:38 Thu', ra: 'collision · 4.3 vs 5.1', rb: '45 units unaffected' },
+      '3b': { cap: 'The same collision class, settled by the fleet under your rule and reported afterwards — reversible in one action.', fleet: '47 units working · 5 plans · 0 waiting', clock: '15:31 Thu', ra: 'collisions this week  9', rb: 'needed you  1' },
+      '4a': { cap: 'An honest record: asked-when-it-need-not-have, stayed-quiet-when-it-should-not-have, and never a rank against others.', fleet: '47 units working · 5 plans · 0 waiting', clock: '15:20 Thu', ra: 'pike · 214 units', rb: 'since 4 April' },
+      '4b': { cap: 'Six units is not a record. The page says so, separates role defaults from proof, and tells you what would make it useful.', fleet: '47 units working · 5 plans · 0 waiting', clock: '15:22 Thu', ra: 'orin · 6 units', rb: 'sample too small' },
+      '5a': { cap: 'A decision three weeks old, kept whole with the evidence that was in front of you at the time.', fleet: '47 units working · 5 plans · 0 waiting', clock: '17:41 Thu', ra: 'archive · 4.2', rb: 'decision kept whole' },
+      '5b': { cap: 'The same, once the surrounding detail was compacted: what survived, at what fidelity, and what is gone for good.', fleet: '47 units working · 5 plans · 0 waiting', clock: '17:44 Thu', ra: 'archive · 6.1', rb: 'compacted 12 June' },
+      '6a': { cap: 'Five unanswered questions read as one event with one cause — four resolved reversibly, one that could not be.', fleet: '44 units working · 5 plans · 1 waiting 51h', clock: '08:36 Mon', ra: 'weekend · 5 unanswered', rb: '31h machine time lost' },
+      '6b': { cap: 'The third answer: escalate the question to the plan, then the fleet, then a written handover — never guess, never go silent.', fleet: '44 units working · 5 plans · 1 waiting 51h', clock: '08:44 Mon', ra: 'standing rule', rb: 'tested on last weekend' }
+    }[s] || {};
+
+    return {
+      caption: meta.cap, fleetLine: meta.fleet, clock: meta.clock, railFootA: meta.ra, railFootB: meta.rb,
+      go1a: set('1a'), go1b: set('1b'), go2a: set('2a'), go2b: set('2b'), go3a: set('3a'), go3b: set('3b'),
+      go4a: set('4a'), go4b: set('4b'), go5a: set('5a'), go5b: set('5b'), go6a: set('6a'), go6b: set('6b'),
+      t1a: this.tab('1a'), t1b: this.tab('1b'), t2a: this.tab('2a'), t2b: this.tab('2b'), t3a: this.tab('3a'), t3b: this.tab('3b'),
+      t4a: this.tab('4a'), t4b: this.tab('4b'), t5a: this.tab('5a'), t5b: this.tab('5b'), t6a: this.tab('6a'), t6b: this.tab('6b'),
+      s1a: show('1a'), s1b: show('1b'), s2a: show('2a'), s2b: show('2b'), s3a: show('3a'), s3b: show('3b'),
+      s4a: show('4a'), s4b: show('4b'), s5a: show('5a'), s5b: show('5b'), s6a: show('6a'), s6b: show('6b'),
+
+      plans: [
+        { name:'auth-service', n:9, dot:B }, { name:'row-migration', n:7, dot:B },
+        { name:'invoicing', n:6, dot:A }, { name:'search-reindex', n:11, dot:B }
+      ],
+      roster: [
+        { name:'Wren', role:'implementer · configurable window', dot:B },
+        { name:'Pike', role:'verifier · re-running 3.2 checks', dot:B },
+        { name:'Ash', role:'migrator · invoice reader', dot:B },
+        { name:'Bex', role:'implementer · month-end guard', dot:B },
+        { name:'Tam', role:'planner · watching two collisions', dot:B },
+        { name:'Rune', role:'implementer · second unit', dot:B },
+        { name:'Vale', role:'indexer · shard two', dot:B },
+        { name:'Juno', role:'auth · gone, no credential', dot:ALARM },
+        { name:'Orin', role:'verifier · idle since Monday', dot:D }
+      ],
+
+      reading: [
+        { took:'Count refusals per endpoint, and drop the per-customer branch entirely.', from:'from “per endpoint is right”', state:'done · 4 minutes ago', stateFg:'#7A9E86', undo:'one line to undo', dot:G, bg:'transparent' },
+        { took:'Make the thirty-second window a setting rather than a constant, defaulting to thirty.', from:'from “make the window configurable”', state:'writing it now', stateFg:'#8FA8CC', undo:'one line to undo', dot:B, bg:'transparent' },
+        { took:'Do not re-run yesterday\u2019s load test for this change.', from:'from “don\u2019t bother re-running the load test”', state:'done · nothing was run', stateFg:'#7A9E86', undo:'nothing to undo', dot:G, bg:'transparent' },
+        { took:'Name the setting, which puts it in the service config where ops will depend on the name.', from:'implied — you did not say what to call it', state:'waiting for you', stateFg:'#C9A46A', undo:'cannot be undone quietly', dot:A, bg:'#100E0C' }
+      ],
+      conditions: [
+        { text:'It can be undone in about a line, and she says so in the same breath as doing it.', dot:G },
+        { text:'Nothing reaches main, no name becomes public, no data is deleted, no money moves.', dot:G },
+        { text:'She is confident of your words. Where she had to infer — like the name — she stops instead.', dot:A }
+      ],
+
+      misreadCost: [
+        { text:'She removed the unit\u2019s own load test from the plan, so 3.2 was five minutes from asking to merge without one.', meta:'3.2 · 14:09–14:14', metaFg:'#B0842F', dot:A },
+        { text:'Nothing was merged, nothing on main changed, and the test file itself was never deleted.', meta:'main untouched', metaFg:'#4A4A52', dot:G },
+        { text:'The two lines she read correctly — per-endpoint counting and the configurable window — are still good work.', meta:'9 minutes, kept', metaFg:'#4A4A52', dot:G }
+      ],
+      misreadSafe: [
+        { text:'3.2.1 kept working behind her; the backoff table never depended on the load test.', dot:G },
+        { text:'No other agent read your sentence, so nothing else drifted from it.', dot:G },
+        { text:'Your original words are still in the conversation, unedited, above her reading.', dot:G }
+      ],
+
+      evidence: [
+        { q:'Ash: drop the 41 unowned rows, or assign them to the system account?', you:'You said: assign them — we can always drop them later.', meta:'Thursday 12:40 · 5.1 · you answered in 3m', dot:G },
+        { q:'Bex: half-open probe on one call, or a percentage of traffic?', you:'You said: one probe, and stop asking about things you can undo in a line.', meta:'Thursday 13:34 · 3.3 · you answered in 2m', dot:G },
+        { q:'Rune: keep the flaky assertion, or delete it and open a unit?', you:'You said: keep it and open the unit — deleting evidence is the worse mistake.', meta:'Tuesday 10:18 · 3.3.1 · you answered in 11m', dot:G },
+        { q:'Vale: restart the shard from scratch, or resume from the checkpoint?', you:'You said: resume, and if it\u2019s wrong we lose an hour rather than a day.', meta:'Monday 16:52 · 6.2 · you answered in 26m', dot:G }
+      ],
+      boundaries: [
+        { text:'Agents settle anything reversible in about a line, and say that they did.', meta:'proposed now · would have removed 4 stops this month', metaFg:'#B0842F', dot:A },
+        { text:'Whoever is closest to finishing keeps a contested file, unless the other is on main.', meta:'your words · 2 July · settled 8 collisions, 1 overturned', metaFg:'#4A4A52', dot:G },
+        { text:'Flaky-looking failures are kept and opened as their own unit, never deleted.', meta:'your words · 14 June · used 6 times', metaFg:'#4A4A52', dot:G },
+        { text:'Archived plans are compacted after ninety days, keeping decisions and anything you wrote.', meta:'your words · 2 June · run on 4 plans', metaFg:'#4A4A52', dot:G },
+        { text:'Nobody names a public setting, touches a credential, or deletes data without you.', meta:'never widened · 3 stops this month came from it', metaFg:'#4A4A52', dot:D }
+      ],
+
+      ruleSaved: [
+        { text:'Eleven questions were settled without reaching you, seven of them outside working hours.', meta:'11 June – 24 July · average wait before acting: 40 minutes', dot:G },
+        { text:'Ten of the eleven matched what you later said you would have chosen.', meta:'you reviewed 9 of them within a day', dot:G },
+        { text:'No work was thrown away by it, because reversible was the condition rather than the guess.', meta:'0 units re-done', dot:G }
+      ],
+      ruleBack: [
+        { text:'Agents stop and wait whenever the answer is not already in your words, reversible or not.', dot:A },
+        { text:'On this month\u2019s pattern that is about eleven more stops in the next six weeks.', dot:A },
+        { text:'The eleven decisions it already made stay as they are — taking a rule back is not an undo.', dot:G },
+        { text:'The record keeps the rule, its dates, and everything it did, so this page still works in October.', dot:G }
+      ],
+
+      claims: [
+        { who:'Ash', addr:'5.1 · row-migration', wants:'Needs the invoice reader while he finishes moving the last 12,000 rows.', state:'Started 40 minutes ago. He can pause between batches without losing anything.', meta:'2 of 3 batches done · pausing costs nothing', dot:B },
+        { who:'Bex', addr:'4.3 · month-end guard', wants:'Needs the same two files to pin the month-end totals before anything changes them.', state:'Started 6 minutes ago. Cannot begin at all until she has them.', meta:'blocked · 4.4 and 4.5 sit behind her', dot:A }
+      ],
+      overlap: [
+        { text:'the invoice reader', meta:'both · the real conflict', dot:ALARM },
+        { text:'the nightly summary job', meta:'both · Ash reads, Bex writes', dot:A },
+        { text:'everything else in either plan', meta:'no overlap · 11 files', dot:G }
+      ],
+      resolutions: [
+        { name:'Bex goes first', text:'Ash pauses between batches for about forty minutes. Nothing is thrown away and the guard exists before anything changes the totals.', cost:'ash waits 40m', costFg:'#8A8A91', border:'#F0A35A', fg:'#F2F2F4' },
+        { name:'Ash finishes first', text:'Bex waits about ninety minutes, and 4.4 and 4.5 wait behind her. The totals are changed before the guard that protects them exists.', cost:'3 units wait 90m', costFg:'#B0842F', border:'#1F1F22', fg:'#E8E8EA' },
+        { name:'Tam re-plans invoicing around it', text:'Six units re-shaped so the guard uses a copy of the reader. Nobody waits, and there is a copy to delete later.', cost:'6 units re-planned', costFg:'#B0842F', border:'#1F1F22', fg:'#E8E8EA' },
+        { name:'You do nothing', text:'Bex holds the question open. At forty minutes she takes the reversible path on her own — a copy of the reader — and tells you she did.', cost:'decides itself in 34m', costFg:'#C2704A', border:'#241A17', fg:'#C9C9CF' }
+      ],
+      settled: [
+        { text:'Vale kept the index writer and finished eleven minutes later.', meta:'6.2 · done 15:40', dot:G },
+        { text:'Rune moved to his second unit instead of waiting, and lost nothing because he had not started.', meta:'3.3.1 · working', dot:B },
+        { text:'Nothing was re-planned and nothing was thrown away.', meta:'0 units changed shape', dot:G }
+      ],
+      collisionLedger: [
+        { text:'Vale and Rune, the search index writer — settled by closeness to finishing.', meta:'today 15:29 · this one', dot:G },
+        { text:'Bex and Ash, the invoice reader — needed you, because both were already started.', meta:'today 15:38 · waiting on you', dot:A },
+        { text:'Seven others this week, all settled inside a minute and none reported to you individually.', meta:'Mon–Thu · in the event runs', dot:G },
+        { text:'One overturned in April, when the rule preferred speed over the agent that was on main.', meta:'11 April · rule reworded that day', dot:ALARM }
+      ],
+
+      record: [
+        { num:'4', label:'times he asked when he did not need to', conf:'214 units · reliable', confFg:'#7A9E86', numFg:'#7A9E86', note:'Low, and three of the four were about credentials, which nobody is allowed to settle alone. He is not a nervous agent.' },
+        { num:'2', label:'times he stayed quiet when he should have spoken', conf:'214 units · reliable', confFg:'#7A9E86', numFg:'#C9A46A', note:'Both were races he judged to be flakiness. Someone else found both, one of them four days later. This is the number that should decide what you hand him.' },
+        { num:'31', label:'questions he answered for other agents', conf:'reliable', confFg:'#7A9E86', numFg:'#8FA8CC', note:'Agents ask him rather than you. Six of those would otherwise have reached you as interruptions.' },
+        { num:'2.4×', label:'longer than the fleet median on the same kind of unit', conf:'88 comparable units', confFg:'#7A9E86', numFg:'#8FA8CC', note:'Slow, consistently, and never late for a reason he did not report. Slowness that is announced is a different thing from unreliability.' }
+      ],
+      silences: [
+        { text:'A count that varied between runs in the tripped-counter test. He recorded it as flaky and moved on; Rune hit it four days later and it was a race.', meta:'3.3.1 · 20 July · cost about a day' },
+        { text:'A session-expiry test that passed on retry twice in one hour. He noted it and did not raise it; the clock bug behind it surfaced on Thursday.', meta:'2.2 · 11 July · cost about two hours' }
+      ],
+      slowVsBad: [
+        { text:'He has never reported something as done that was not done. Zero in 214 units.', dot:G },
+        { text:'He is late often, and says he is late every time, with what is left. Predictably slow is plannable.', dot:B },
+        { text:'His weakness is a kind of problem, not a kind of day: anything that looks intermittent, he under-calls.', dot:A }
+      ],
+
+      thinRecord: [
+        { text:'Wrote the operations note for the circuit breaker, and it was read once and not queried.', meta:'3.3.2 · Tuesday · 11 minutes', dot:G },
+        { text:'Verified five small units in the invoicing plan. All five passed, none of them near main.', meta:'4.1–4.5 · Mon–Wed', dot:G },
+        { text:'Asked one question: whether a doc note needed the exact setting name. It did.', meta:'Wednesday · answered in 4m', dot:B },
+        { text:'Has never been handed stalled work, never hit a failure, and never worked outside one plan.', meta:'no evidence either way', dot:D }
+      ],
+      whatWouldTell: [
+        { text:'One unit where being wrong would have cost something, so there is a chance to see him speak up or not.', dot:A },
+        { text:'About thirty units before any rate here means anything at all.', dot:A },
+        { text:'One handover of somebody else\u2019s half-finished work, which is where agents differ most.', dot:A }
+      ],
+      roleDefaults: [
+        { text:'Verifiers re-run evidence before reading code, and never merge their own work.' },
+        { text:'Verifiers escalate a third consecutive failure rather than retry a fourth time.' },
+        { text:'These are the role\u2019s rules, not Orin\u2019s habits. He has had no chance to break or keep them.' }
+      ],
+
+      knownThen: [
+        { text:'The totals query took 1.9 seconds against the March data, on a table a third the size of today\u2019s.', meta:'measured 4 July 15:58 · Vale', dot:B },
+        { text:'Nobody read the totals more than twice a day, from two internal pages.', meta:'measured over 30 days · kept', dot:B },
+        { text:'A cached version had been wrong once before, in February, for nine hours.', meta:'the reason you gave · 4.2', dot:A },
+        { text:'Tam\u2019s proposal was a fifteen-minute cache, and he preferred it.', meta:'his preference is kept with your answer', dot:D }
+      ],
+      changedSince: [
+        { text:'The table is now three times the size, and the same query takes 4.1 seconds.', dot:A },
+        { text:'The totals are read six times a day since the finance page shipped.', dot:A },
+        { text:'Nothing about correctness changed — a wrong total is still worse than a slow one.', dot:G }
+      ],
+      shaped: [
+        { addr:'4.2', text:'The totals query was rewritten twice rather than cached.' },
+        { addr:'4.6', text:'Tam refused his own cache proposal in June, citing this decision.' },
+        { addr:'7.2', text:'The month-end guard pins totals rather than caching them.' }
+      ],
+
+      survived: [
+        { text:'Your decision, word for word, and the question that prompted it.', meta:'full fidelity · never compacted', metaFg:'#4A4A52', dot:G, border:'#1F1F22' },
+        { text:'Three pieces of evidence that were attached to it: two measurements and Tam\u2019s proposal.', meta:'full fidelity · kept because they were cited', metaFg:'#4A4A52', dot:G, border:'#1F1F22' },
+        { text:'A six-sentence account of what the plan did, written at compaction time by Tam.', meta:'summary · not the record', metaFg:'#B0842F', dot:A, border:'#241A17' },
+        { text:'The shape of the tree — eleven units, who did them, what each produced.', meta:'names and outcomes only · no conversation', metaFg:'#B0842F', dot:A, border:'#241A17' }
+      ],
+      dropped: [
+        { n:'900', text:'machine events. Test runs, patches and commits, none of them cited in a decision.' },
+        { n:'4', text:'agent sessions in full. Their conclusions survive in the six sentences; their reasoning does not.' },
+        { n:'11', text:'test runs including their output. The fact that they passed survives; the logs do not.' },
+        { n:'0', text:'things you wrote. Nothing you said has ever been compacted.' }
+      ],
+
+      unanswered: [
+        { q:'Ash: drop the 41 unowned rows, or assign them to the system account?', did:'Waited forty minutes, then assigned them, and said so in the conversation.', meta:'Saturday 12:40 · 5.1 · reversible · you corrected it Monday 08:51', state:'settled itself', stateFg:'#7A9E86', dot:G, border:'#1F1F22' },
+        { q:'Bex: is the month-end format allowed to move, or must it be byte-identical?', did:'Waited, then took the stricter reading — byte-identical — because that is the undoable one.', meta:'Saturday 15:02 · 4.3 · reversible · still correct', state:'settled itself', stateFg:'#7A9E86', dot:G, border:'#1F1F22' },
+        { q:'Rune: retry the flaky assertion a fourth time, or open a unit?', did:'Opened 3.3.3 and left the failure in place, per your rule about keeping evidence.', meta:'Sunday 09:41 · 3.3.1 · reversible', state:'settled itself', stateFg:'#7A9E86', dot:G, border:'#1F1F22' },
+        { q:'Vale: resume the second shard from the checkpoint, or restart it?', did:'Resumed. Finished at 21:40 Sunday and reported the result.', meta:'Sunday 18:20 · 6.2 · reversible', state:'settled itself', stateFg:'#7A9E86', dot:G, border:'#1F1F22' },
+        { q:'Juno: I need a credential I do not have to read the staging secret.', did:'Waited forty minutes, could not proceed reversibly, kept everything and ended her session.', meta:'Saturday 09:12 · 6.1 · not reversible · 51 hours still', state:'stopped, and stayed stopped', stateFg:'#C2704A', dot:ALARM, border:'#2A1A15' }
+      ],
+      ruleVerdict: [
+        { text:'Right four times: each one was genuinely reversible, and each one told you it had happened.', dot:G },
+        { text:'Wrong once, in a way the rule cannot fix: a credential is not a decision, so waiting was the only honest option.', dot:ALARM },
+        { text:'The defect is not that it asked five times. It is that one plan went still for fifty-one hours and nothing escalated.', dot:A }
+      ],
+
+      escalation: [
+        { after:'40 min', step:'Take the reversible option, and say plainly that it was taken without you.', why:'Unchanged. This is the part that has worked eleven times.', dot:G, border:'#1F1F22' },
+        { after:'40 min', step:'If nothing reversible exists, ask the plan\u2019s other agents whether any of them can answer it.', why:'New. Half of what reaches you is knowable by another agent in the same plan.', dot:B, border:'#1F1F22' },
+        { after:'2 hours', step:'If the plan cannot answer, ask whether the rest of the plan can proceed without this unit.', why:'New. This is the step that would have stopped one question from freezing eleven units.', dot:B, border:'#F0A35A' },
+        { after:'4 hours', step:'Write the handover: what was tried, what is missing, what the next agent should do first.', why:'New. Written for someone picking it up cold, not as a log.', dot:A, border:'#1F1F22' },
+        { after:'4 hours', step:'End the session, keep everything, and stay visible as one waiting item — never five.', why:'The session still ends; the difference is that it leaves a door rather than a gap.', dot:A, border:'#1F1F22' }
+      ],
+      replay: [
+        { text:'Four of the five weekend questions would have been identical — reversible, taken, reported.', meta:'Ash, Bex, Rune, Vale · no change', dot:G },
+        { text:'Juno\u2019s question would have escalated to the plan at 09:52 and then asked whether the other ten units could proceed without her.', meta:'they could · about 9 of 11 units', dot:B },
+        { text:'The reindex would have moved roughly thirty-one hours of machine time instead of standing still, and you would have come back to one waiting item with a written handover.', meta:'the credential would still be waiting for you', dot:A }
+      ]
+    };
+  }
+}
+
+</script>
+</body>
+</html>

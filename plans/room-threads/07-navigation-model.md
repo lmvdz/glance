@@ -23,7 +23,14 @@ around a guess.
    - true multi-homing (a node appears under every parent, one identity)
    Whichever is chosen, `BLOCKED_BY` edges in plan docs are already a DAG and should be the test case.
 
-3. Breadcrumbs must stay honest under whichever model wins — a node reachable by two paths must not
+3. **Are the panes coupled, or is the middle always global?** The reference surfaces this and does
+   not resolve it: on its busy screen the tree says `payments-retry / 3.2` while the conversation
+   beside it carries Pike on auth-service, Ash on the migration and Tam on invoicing — four different
+   plans. So either selection scopes the conversation to that node, or the middle pane is always the
+   org-level feed and the tree is navigation only. Both are defensible; picking by accident is not.
+   This is the single biggest open question in the plan — concern 03's shell is built on the answer.
+
+4. Breadcrumbs must stay honest under whichever model wins — a node reachable by two paths must not
    claim a single canonical ancestry it does not have.
 
 ## Cross-Repo Side Effects
