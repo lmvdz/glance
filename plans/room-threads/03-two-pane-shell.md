@@ -4,8 +4,22 @@ PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
 TOUCHES: webapp/src/components/hub/HubShell.tsx, webapp/src/components/hub/ChannelRail.tsx, webapp/src/lib/hub.ts, webapp/src/lib/router.ts, tests
-BLOCKED_BY: 01, 02
+BLOCKED_BY: 01, 02, 20
 MODE: afk
+
+## AMENDED 2026-07-25 (RECONCILE finding 2) — the room is the home frame
+
+The coupled-pane thesis is superseded as the *home* frame. The settled direction is a **room home
+screen** whose rail is a standing entrance and into which depth events project cards back.
+
+- Selecting a plan in the rail **does not** make the main conversation stop being the room narrative.
+  The busy room explicitly shows cross-plan conversation beside a selected plan.
+- Detailed unit context is **entered from the work or the card**, not by selecting in the rail.
+- Coupling still exists — but one level down, once you have entered a node, not at the home frame.
+
+Build against `reference/01-room.html` (busy and quiet) and `reference/02-surfaces.html` → 3a, 8b,
+plus `DIRECTION.md` §What we are building. The obsolete "global feed versus coupled panes" fork is
+closed; see the amendment on concern 07.
 
 ## Goal
 State on one side, that node's conversation on the other. Drilling into state changes both, so the

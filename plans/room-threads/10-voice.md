@@ -4,7 +4,23 @@ PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
 TOUCHES: src/squad-manager.ts (card titles and bodies), webapp/src/lib/channelTimeline.ts, webapp/src/components/hub/*, tests
+BLOCKED_BY: 11, 16, 17, 20, 21
 MODE: afk
+
+## AMENDED 2026-07-25 (RECONCILE finding 7) — the facts must exist to be spoken
+
+This concern is necessary and was underscoped. A string lint cannot recover a fact that the event
+contract never carried. The copy the design requires needs source facts not presently emitted:
+
+- the rule's sentence, author, and date (concern 11)
+- evidence age and the action staleness implies (concerns 17, 21)
+- what a compaction cut, and at what fidelity (concern 17)
+- a decision's consequence and blast radius (concerns 20, 21)
+- uncertainty backed by a sample size (concerns 16, 18)
+
+So this concern additionally **defines the typed proof-card payloads** those strings read from, and
+ships with each new proof emitter rather than as a final copy pass over finished work. Retrofitting copy
+does not work, because the meaning is discarded at the emit site.
 
 ## Goal
 The product's copy carries as much of the design as its layout does. This concern makes that a
