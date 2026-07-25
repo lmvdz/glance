@@ -20,6 +20,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { sql } from "kysely";
 import type { Channel, ChannelEntry, ChannelMembership, ChannelReadCursor } from "../channels.ts";
+import type { Node } from "../nodes.ts";
 import type { PersistedAgent, PersistedFeature, RunReceipt, TranscriptEntry } from "../types.ts";
 import { normalizeCapabilitySnapshot, type CapabilitySnapshot } from "../capabilities/index.ts";
 import { emptyFeedbackSnapshot, type FeedbackSnapshot } from "../feedback.ts";
@@ -44,6 +45,25 @@ function readChannel(value: unknown): Channel | undefined {
 	return typeof value.id === "string" && typeof value.name === "string" && typeof value.createdAt === "number" && (kind === "default" || kind === "user")
 		? { id: value.id, name: value.name, createdAt: value.createdAt, kind, visibility, creatorUserId: typeof value.creatorUserId === "string" ? value.creatorUserId : undefined }
 		: undefined;
+}
+
+function readNode(value: unknown): Node | undefined {
+	if (!isPlainObject(value)) return undefined;
+	const kind = value.kind;
+	const state = value.state;
+	if (!(typeof value.id === "string" && typeof value.title === "string" && typeof value.createdAt === "number" && (kind === "plan" || kind === "unit" || kind === "subagent" || kind === "landing") && typeof state === "string")) return undefined;
+	return {
+		id: value.id,
+		parentId: typeof value.parentId === "string" ? value.parentId : undefined,
+		kind,
+		title: value.title,
+		state: state as Node["state"],
+		ownerId: typeof value.ownerId === "string" ? value.ownerId : undefined,
+		goal: typeof value.goal === "string" ? value.goal : undefined,
+		createdAt: value.createdAt,
+		settledAt: typeof value.settledAt === "number" ? value.settledAt : undefined,
+		channelId: typeof value.channelId === "string" ? value.channelId : undefined,
+	};
 }
 
 function readChannelMembership(value: unknown): ChannelMembership | undefined {
@@ -152,6 +172,12 @@ export interface Store {
 	listChannels(): Promise<Channel[]>;
 	getChannel(id: string): Promise<Channel | undefined>;
 	putChannel(channel: Channel): Promise<void>;
+	/** Work graph primitives. Node visibility is always inherited from the bound channel. */
+	listNodes(): Promise<Node[]>;
+	getNode(id: string): Promise<Node | undefined>;
+	putNode(node: Node): Promise<void>;
+	/** Bind a lazy channel exactly once; returns undefined for an unknown node. */
+	bindNodeChannel(nodeId: string, channelId: string): Promise<Node | undefined>;
 	listChannelEntries(channelId: string, since?: number): Promise<ChannelEntry[]>;
 	searchChannelEntries?(q: string, limit?: number, offset?: number): Promise<ChannelSearchResult[]>;
 	appendChannelEntry(entry: Omit<ChannelEntry, "seq">): Promise<ChannelEntry>;
@@ -191,6 +217,7 @@ export class FileStore implements Store {
 	private lastSaveWarnAt = 0;
 	private static readonly channelWriteLocks = new Map<string, Promise<void>>();
 	private static readonly channelEntryWriteLocks = new Map<string, Promise<void>>();
+	private static readonly nodeWriteLocks = new Map<string, Promise<void>>();
 	constructor(private readonly stateDir: string) {
 		this.stateFile = path.join(stateDir, "state.json");
 		this.feedbackFile = path.join(stateDir, "feedback.json");
@@ -258,6 +285,63 @@ export class FileStore implements Store {
 	// Single-tenant file mode: audit/usage live in the on-disk receipts; the DB ledger is DB-mode only.
 	async appendAudit(): Promise<void> {}
 	async appendUsage(): Promise<void> {}
+
+	async listNodes(): Promise<Node[]> {
+		const raw = await getStorageBackend().readText(path.join(this.stateDir, "nodes.json"));
+		if (!raw) return [];
+		try {
+			const decoded = JSON.parse(raw);
+			return Array.isArray(decoded) ? decoded.map(readNode).filter((node): node is Node => node !== undefined).sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)) : [];
+		} catch {
+			return [];
+		}
+	}
+
+	async getNode(id: string): Promise<Node | undefined> {
+		return (await this.listNodes()).find((node) => node.id === id);
+	}
+
+	async putNode(node: Node): Promise<void> {
+		const file = path.join(this.stateDir, "nodes.json");
+		const prior = FileStore.nodeWriteLocks.get(file) ?? Promise.resolve();
+		let release!: () => void;
+		const next = prior.then(() => new Promise<void>((resolve) => { release = resolve; }));
+		FileStore.nodeWriteLocks.set(file, next);
+		await prior;
+		try {
+			const nodes = await this.listNodes();
+			const index = nodes.findIndex((existing) => existing.id === node.id);
+			if (index >= 0) nodes[index] = node;
+			else nodes.push(node);
+			await getStorageBackend().writeDurable(file, JSON.stringify(nodes.sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)), null, 2));
+		} finally {
+			release();
+			if (FileStore.nodeWriteLocks.get(file) === next) FileStore.nodeWriteLocks.delete(file);
+		}
+	}
+
+	async bindNodeChannel(nodeId: string, channelId: string): Promise<Node | undefined> {
+		const file = path.join(this.stateDir, "nodes.json");
+		const prior = FileStore.nodeWriteLocks.get(file) ?? Promise.resolve();
+		let release!: () => void;
+		const next = prior.then(() => new Promise<void>((resolve) => { release = resolve; }));
+		FileStore.nodeWriteLocks.set(file, next);
+		await prior;
+		try {
+			const nodes = await this.listNodes();
+			const index = nodes.findIndex((node) => node.id === nodeId);
+			if (index < 0) return undefined;
+			const current = nodes[index]!;
+			if (current.channelId) return current;
+			const bound = { ...current, channelId };
+			nodes[index] = bound;
+			await getStorageBackend().writeDurable(file, JSON.stringify(nodes, null, 2));
+			return bound;
+		} finally {
+			release();
+			if (FileStore.nodeWriteLocks.get(file) === next) FileStore.nodeWriteLocks.delete(file);
+		}
+	}
 
 	async listChannels(): Promise<Channel[]> {
 		const raw = await getStorageBackend().readText(path.join(this.stateDir, "channels.json"));
@@ -647,6 +731,27 @@ export class DbStore implements Store {
 				.onConflict((oc) => oc.columns(["org_id", "id"]).doNothing())
 				.execute(),
 		);
+	}
+
+	async listNodes(): Promise<Node[]> {
+		const rows = await withOrg(this.ctx, this.orgId, (trx) => trx.selectFrom("nodes").selectAll().where("org_id", "=", this.orgId).orderBy("created_at").execute());
+		return rows.map((row) => ({ id: row.id, parentId: row.parent_id ?? undefined, kind: row.kind as Node["kind"], title: row.title, state: row.state as Node["state"], ownerId: row.owner_id ?? undefined, goal: row.goal ?? undefined, createdAt: Number(row.created_at), settledAt: row.settled_at === null ? undefined : Number(row.settled_at), channelId: row.channel_id ?? undefined }));
+	}
+
+	async getNode(id: string): Promise<Node | undefined> {
+		const row = await withOrg(this.ctx, this.orgId, (trx) => trx.selectFrom("nodes").selectAll().where("org_id", "=", this.orgId).where("id", "=", id).executeTakeFirst());
+		return row ? { id: row.id, parentId: row.parent_id ?? undefined, kind: row.kind as Node["kind"], title: row.title, state: row.state as Node["state"], ownerId: row.owner_id ?? undefined, goal: row.goal ?? undefined, createdAt: Number(row.created_at), settledAt: row.settled_at === null ? undefined : Number(row.settled_at), channelId: row.channel_id ?? undefined } : undefined;
+	}
+
+	async putNode(node: Node): Promise<void> {
+		await withOrg(this.ctx, this.orgId, (trx) =>
+			trx.insertInto("nodes").values({ org_id: this.orgId, id: node.id, parent_id: node.parentId ?? null, kind: node.kind, title: node.title, state: node.state, owner_id: node.ownerId ?? null, goal: node.goal ?? null, created_at: node.createdAt, settled_at: node.settledAt ?? null, channel_id: node.channelId ?? null }).onConflict((oc) => oc.columns(["org_id", "id"]).doUpdateSet({ parent_id: node.parentId ?? null, kind: node.kind, title: node.title, state: node.state, owner_id: node.ownerId ?? null, goal: node.goal ?? null, created_at: node.createdAt, settled_at: node.settledAt ?? null, channel_id: node.channelId ?? null })).execute(),
+		);
+	}
+
+	async bindNodeChannel(nodeId: string, channelId: string): Promise<Node | undefined> {
+		await withOrg(this.ctx, this.orgId, (trx) => trx.updateTable("nodes").set({ channel_id: channelId }).where("org_id", "=", this.orgId).where("id", "=", nodeId).where("channel_id", "is", null).execute());
+		return this.getNode(nodeId);
 	}
 
 	async listChannelEntries(channelId: string, since = 0): Promise<ChannelEntry[]> {

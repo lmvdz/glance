@@ -26,6 +26,7 @@ import { type DbHandle, openDatabase, openDb } from "../src/db/index.ts";
 import { appMigrations } from "../src/db/migrations.ts";
 import type { PersistedAgent, PersistedFeature, RunReceipt } from "../src/types.ts";
 import { ChannelStore } from "../src/channels.ts";
+import { NodeStore } from "../src/nodes.ts";
 
 let dir: string;
 let handle: DbHandle;
@@ -290,6 +291,71 @@ test("ChannelStore: concurrent manager appends allocate a contiguous reconnect t
 		const tail = await channels.entries("fleet", baseline.seq, actor);
 		expect(tail.map((entry) => entry.seq)).toEqual(seqs);
 	}
+});
+
+test("NodeStore: nodes round-trip through FileStore and DbStore with parent links and no eager channel", async () => {
+	const fdir = path.join(dir, "nodes-file-roundtrip");
+	const stores = [
+		{ name: "FileStore", store: new FileStore(fdir) },
+		{ name: "DbStore", store: dbStore("A") },
+	];
+	for (const { name, store } of stores) {
+		const nodes = new NodeStore(store, () => 100);
+		await nodes.create({ id: `${name}-parent`, kind: "plan", title: "Parent", state: "working", createdAt: 1 });
+		await nodes.create({ id: `${name}-child`, parentId: `${name}-parent`, kind: "unit", title: "Child", state: "pending", ownerId: "alice", goal: "ship it", createdAt: 2 });
+		expect(await nodes.get(`${name}-child`)).toEqual({ id: `${name}-child`, parentId: `${name}-parent`, kind: "unit", title: "Child", state: "pending", ownerId: "alice", goal: "ship it", createdAt: 2 });
+		expect(await store.getChannel(`node:${name}-child`)).toBeUndefined();
+		expect(await new NodeStore(store).get(`${name}-child`)).toMatchObject({ parentId: `${name}-parent` });
+	}
+});
+
+test("ChannelStore: first concurrent node messages create one channel and bind it once in FileStore and DbStore", async () => {
+	const actor = { id: "web:operator", displayName: "Operator", origin: "local" as const, role: "admin" as const };
+	const fdir = path.join(dir, "nodes-file-channel-race");
+	const stores = [
+		{ name: "FileStore", stateDir: fdir, store: new FileStore(fdir) },
+		{ name: "DbStore", stateDir: orgDir("A"), store: dbStore("A") },
+	];
+	for (const { name, stateDir, store } of stores) {
+		const nodes = new NodeStore(store);
+		await nodes.create({ id: `${name}-node`, kind: "unit", title: "Race node", state: "working", createdAt: 1 });
+		const channels = new ChannelStore(stateDir, store);
+		await Promise.all(Array.from({ length: 5 }, (_, n) => channels.appendNodeClient(`${name}-node`, actor, { text: `message ${n}` })));
+		const node = await nodes.get(`${name}-node`);
+		expect(node?.channelId).toBe(`node:${name}-node`);
+		expect((await store.listChannels()).filter((channel) => channel.id === node?.channelId)).toHaveLength(1);
+		expect(await store.listChannelEntries(node!.channelId!)).toHaveLength(5);
+	}
+});
+
+test("ChannelStore: node reads inherit private channel membership in FileStore and DbStore", async () => {
+	const owner = { id: "db:owner", displayName: "Owner", origin: "local" as const, role: "admin" as const };
+	const outsider = { id: "db:outsider", displayName: "Outsider", origin: "local" as const, role: "viewer" as const };
+	const fdir = path.join(dir, "nodes-file-private-membership");
+	const stores = [
+		{ name: "FileStore", stateDir: fdir, store: new FileStore(fdir) },
+		{ name: "DbStore", stateDir: orgDir("A"), store: dbStore("A") },
+	];
+	for (const { name, stateDir, store } of stores) {
+		const nodes = new NodeStore(store);
+		await nodes.create({ id: `${name}-private`, kind: "unit", title: "Private", state: "working", createdAt: 1 });
+		const channels = new ChannelStore(stateDir, store);
+		const channel = await channels.createChannel(owner, { id: `${name}-private-channel`, name: "private", visibility: "private" });
+		await store.bindNodeChannel(`${name}-private`, channel.id);
+		await channels.appendNodeClient(`${name}-private`, owner, { text: "private message" });
+		await expect(channels.entriesForNode(`${name}-private`, 0, outsider)).rejects.toThrow("channel forbidden");
+	}
+});
+
+test("NodeStore: a state directory written before nodes migrates agents once without changing channels", async () => {
+	const fdir = path.join(dir, "nodes-file-migration");
+	const store = new FileStore(fdir);
+	await store.save({ agents: [agent("legacy", { task: "legacy goal", parentId: "parent" })], transcripts: {}, features: [] });
+	await store.putChannel({ id: "existing", name: "#existing", kind: "user", createdAt: 1, visibility: "org-public" });
+	const nodes = new NodeStore(store, () => 42);
+	expect(await nodes.get("legacy")).toEqual({ id: "legacy", parentId: "parent", kind: "unit", title: "legacy", state: "working", goal: "legacy goal", createdAt: 42 });
+	expect(await store.getChannel("existing")).toMatchObject({ id: "existing", name: "#existing" });
+	expect((await nodes.list()).filter((node) => node.id === "legacy")).toHaveLength(1);
 });
 
 test("ChannelStore: concurrent human and manager appends persist in FileStore and DbStore", async () => {
