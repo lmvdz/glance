@@ -7,6 +7,23 @@ TOUCHES: src/squad-manager.ts (projectedChannelId → projectedNodeId), src/serv
 BLOCKED_BY: 01
 MODE: afk
 
+## AMENDED 2026-07-25 (RECONCILE finding 3)
+
+"Everything else stays at its node" is too absolute. The design requires manager-authored, unforgeable
+**proof cards** in the room for layer-2 events, while local detail stays local and noise stays
+suppressed. A `projectedNodeId` alone carries neither provenance nor a projection policy.
+
+So the binary upward-flow rule is replaced by **explicit event classes with proof-card contracts**:
+
+- Each event class declares whether it projects to the room, and what it projects — never the raw event.
+- A projected card is **authored by the manager and unforgeable by a unit**; a unit cannot manufacture
+  a room presence for itself.
+- A projected card carries **provenance**: which node, which agent, which rule fired (concern 11), and
+  the evidence behind it.
+- Everything not in a projecting class still stays at its node. The anti-firehose goal is unchanged;
+  only the mechanism is.
+- Proposed plan nodes (concern 20) are distinguished from started work; a proposal is not in flight.
+
 ## Goal
 Lifecycle telemetry stops reaching the root channel and lands at its own node, so lane separation is a
 property of addressing rather than a rule anyone has to enforce.

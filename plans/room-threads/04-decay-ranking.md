@@ -4,8 +4,17 @@ PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical
 TOUCHES: webapp/src/lib/hub.ts, src/nodes.ts, tests
-BLOCKED_BY: 01
+BLOCKED_BY: 01, 13
 MODE: afk
+
+## AMENDED 2026-07-25 (RECONCILE finding 4) — ordering only
+
+This concern is **ordering, and nothing else**. Velocity may order in-flight nodes within a region.
+
+Stall detection is NOT here. The design's judgement about stillness is per-plan, measured against that
+plan's own normal, explicitly excludes parked work, and surfaces as a planner message with causal facts
+and recovery choices. That lives in concern 13, and this concern may consume its data but must never
+invent it. A UI that claims calm or still status cannot ship before 13.
 
 ## Goal
 The state pane orders itself and stays honest over months without anyone curating it.

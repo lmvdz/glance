@@ -7,6 +7,15 @@ TOUCHES: src/nodes.ts, src/after-action.ts, src/squad-manager.ts, tests
 BLOCKED_BY: 01
 MODE: afk
 
+## AMENDED 2026-07-25 (RECONCILE finding 5) — live summaries only
+
+"Regenerate, never append" is correct for **live** summaries and is all this concern now covers.
+
+The archive is a different thing with different rules: decisions and their then-known evidence and human
+text are preserved at full fidelity, other material is compacted only under an authorized policy, the cut
+is declared, and the result is never called the record. That is concern 17. This concern provides the
+current statement of a node; it does not replace, and must not shadow, the archive model.
+
 ## Goal
 What flows between nodes is a summary, never a raw log. Each node maintains a current statement of
 itself; raw history stays addressable at the node but is not what propagates.
