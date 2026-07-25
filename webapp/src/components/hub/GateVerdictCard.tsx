@@ -14,8 +14,8 @@ interface GateVerdictProofResponse {
 }
 
 const toneClass: Record<ChannelCardTone, string> = {
-  neutral: 'border-zinc-800 bg-[#0c0c0e] text-zinc-200',
-  info: 'border-sky-400/25 bg-sky-400/7 text-zinc-100',
+  neutral: 'border-ink-border bg-panel text-ink-text-body',
+  info: 'border-sky-400/25 bg-sky-400/7 text-ink-text',
   warning: 'border-amber-400/35 bg-amber-400/10 text-amber-50',
   success: 'border-emerald-400/30 bg-emerald-400/10 text-emerald-50',
   destructive: 'border-red-400/35 bg-red-400/10 text-red-50',
@@ -123,7 +123,7 @@ export function GateVerdictCard({ view }: { view: ChannelCardView }) {
               </div>
             ) : null}
             <div className="mt-3 flex flex-wrap items-center gap-2">
-              <a href={doorHref} onClick={openDoor} className="inline-flex min-h-10 items-center gap-1.5 rounded-full border border-current/20 bg-black/20 px-3 text-xs font-semibold hover:bg-black/30 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900">
+              <a href={doorHref} onClick={openDoor} className="inline-flex min-h-10 items-center gap-1.5 rounded-full border border-current/20 bg-black/20 px-3 text-xs font-semibold hover:bg-black/30 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-ink-border">
                 <ExternalLink className="h-3.5 w-3.5" aria-hidden />
                 {opening ? 'Opening proof…' : 'Open proof record'}
               </a>

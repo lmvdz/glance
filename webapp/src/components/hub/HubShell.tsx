@@ -44,32 +44,32 @@ function ChannelHeader({ channel, presence, selectedAgent }: { channel: Channel;
   const overflow = Math.max(0, presence.users.length - visible.length);
   const label = count === 1 ? '1 human present' : `${count} humans present`;
   return (
-    <header className="flex min-h-12 flex-shrink-0 items-center justify-between gap-4 border-b border-zinc-800 bg-[#0c0c0e] px-4 py-2 text-zinc-100">
+    <header className="flex min-h-12 flex-shrink-0 items-center justify-between gap-4 border-b border-ink-border bg-panel px-4 py-2 text-ink-text">
       <div className="flex min-w-0 items-center gap-2">
-        <Hash className="h-4 w-4 text-amber-300" aria-hidden />
+        <Hash className="h-4 w-4 text-ember" aria-hidden />
         <div className="min-w-0">
           <h1 className="truncate text-sm font-semibold tracking-tight">{channel.name}</h1>
-          <p className="truncate text-[11px] text-zinc-500">{selectedAgent ? `Addressing ${selectedAgent.name || selectedAgent.id}` : 'Fleet channel'}</p>
+          <p className="truncate text-[11px] text-ink-text-muted">{selectedAgent ? `Addressing ${selectedAgent.name || selectedAgent.id}` : 'Fleet channel'}</p>
         </div>
       </div>
       <div className="flex min-w-0 items-center gap-3" aria-label={label}>
         <div className="hidden min-w-0 items-center justify-end gap-1.5 sm:flex">
           {visible.map((user) => (
-            <span key={user.id} className="max-w-32 truncate rounded-full border border-zinc-800 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-300" title={`${user.displayName} · ${user.socketCount} socket${user.socketCount === 1 ? '' : 's'}`}>
+            <span key={user.id} className="max-w-32 truncate rounded-full border border-ink-border bg-ink-surface px-2 py-1 text-[11px] text-ink-text-label" title={`${user.displayName} · ${user.socketCount} socket${user.socketCount === 1 ? '' : 's'}`}>
               {user.displayName}
-              <span className="ml-1 text-zinc-500">×{user.socketCount}</span>
+              <span className="ml-1 text-ink-text-muted">×{user.socketCount}</span>
             </span>
           ))}
-          {overflow > 0 ? <span className="rounded-full border border-zinc-800 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-500">+{overflow}</span> : null}
+          {overflow > 0 ? <span className="rounded-full border border-ink-border bg-ink-surface px-2 py-1 text-[11px] text-ink-text-muted">+{overflow}</span> : null}
         </div>
         <div className="flex -space-x-1" aria-hidden>
           {visible.map((user) => (
-            <div key={user.id} className="flex h-7 w-7 items-center justify-center rounded-full border border-zinc-950 bg-zinc-800 text-[10px] font-semibold text-zinc-200" title={`${user.displayName} · ${user.socketCount} socket${user.socketCount === 1 ? '' : 's'}`}>
+            <div key={user.id} className="flex h-7 w-7 items-center justify-center rounded-full border border-ink bg-ink-surface text-[10px] font-semibold text-ink-text-body" title={`${user.displayName} · ${user.socketCount} socket${user.socketCount === 1 ? '' : 's'}`}>
               {(user.displayName || user.id).slice(0, 1).toUpperCase()}
             </div>
           ))}
         </div>
-        <div className="flex items-center gap-1.5 text-xs text-zinc-400">
+        <div className="flex items-center gap-1.5 text-xs text-ink-text-label">
           <Users className="h-3.5 w-3.5" aria-hidden />
           <span className="tabular-nums">{count}</span>
         </div>
@@ -311,42 +311,42 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
   };
 
   return (
-    <div className="dark flex h-screen w-full overflow-hidden bg-[#0a0a0b] text-sm text-zinc-200">
+    <div className="dark flex h-screen w-full overflow-hidden bg-ink text-sm text-ink-text-body">
       <ChannelRail channels={channels} activeChannelId={activeChannelId} agents={agents} selectedAgentId={selectedAgentId} onSelectAgent={setSelectedAgentId} workbenchActive={route.kind === 'workbench'} />
-      <main id="omp-main-content" className="flex min-w-0 flex-1 flex-col overflow-hidden bg-[#0a0a0b]">
+      <main id="omp-main-content" className="flex min-w-0 flex-1 flex-col overflow-hidden bg-ink">
         {route.kind === 'workbench' ? renderWorkbench(route) : (
           <>
             <ChannelHeader channel={channel} presence={presence} selectedAgent={selectedAgent} />
-            <div className="border-b border-zinc-800 bg-[#0a0a0b] px-4 py-2">
+            <div className="border-b border-ink-border bg-ink px-4 py-2">
               <label className="relative block">
                 <span className="sr-only">Search channel history</span>
-                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" aria-hidden />
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-text-muted" aria-hidden />
                 <input
                   value={searchQuery}
                   onChange={(event) => setSearchQuery(event.target.value)}
                   placeholder="Search room history"
-                  className="h-9 w-full rounded-full border border-zinc-800 bg-zinc-950 pl-9 pr-9 text-sm text-zinc-100 placeholder:text-zinc-600 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950"
+                  className="h-9 w-full rounded-full border border-ink-border bg-ink pl-9 pr-9 text-sm text-ink-text placeholder:text-ink-text-subtle focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-ink"
                 />
                 {searchQuery ? (
                   <button
                     type="button"
                     aria-label="Clear search"
                     onClick={() => setSearchQuery('')}
-                    className="absolute right-1 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950"
+                    className="absolute right-1 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full text-ink-text-muted hover:bg-ink-surface hover:text-ink-text-body focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-ink"
                   >
                     <X className="h-4 w-4" aria-hidden />
                   </button>
                 ) : null}
               </label>
               {searchQuery.trim() ? (
-                <div className="mt-2 max-h-48 overflow-y-auto rounded-xl border border-zinc-800 bg-zinc-950 shadow-xl">
-                  {searchLoading ? <div className="px-3 py-2 text-xs text-zinc-500">Searching…</div> : searchError ? <div className="px-3 py-2 text-xs text-red-300" role="alert">{searchError}</div> : searchResults.length === 0 ? <div className="px-3 py-2 text-xs text-zinc-500">No matches in durable history.</div> : (
-                    <ol className="divide-y divide-zinc-800">
+                <div className="mt-2 max-h-48 overflow-y-auto rounded-xl border border-ink-border bg-ink shadow-xl">
+                  {searchLoading ? <div className="px-3 py-2 text-xs text-ink-text-muted">Searching…</div> : searchError ? <div className="px-3 py-2 text-xs text-red-300" role="alert">{searchError}</div> : searchResults.length === 0 ? <div className="px-3 py-2 text-xs text-ink-text-muted">No matches in durable history.</div> : (
+                    <ol className="divide-y divide-ink-border">
                       {searchResults.map((result) => (
                         <li key={result.entry.id}>
-                          <a href={hubHref(result.entry.channelId, result.entry.id)} onClick={() => setAnchorEntryId(result.entry.id)} className="block px-3 py-2 text-left hover:bg-zinc-900 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-inset">
-                            <span className="block text-[11px] font-medium text-zinc-300">{resultTitle(result.entry)}</span>
-                            <span className="mt-0.5 block line-clamp-2 text-xs text-zinc-500">{result.snippet}</span>
+                          <a href={hubHref(result.entry.channelId, result.entry.id)} onClick={() => setAnchorEntryId(result.entry.id)} className="block px-3 py-2 text-left hover:bg-ink-surface focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-inset">
+                            <span className="block text-[11px] font-medium text-ink-text-label">{resultTitle(result.entry)}</span>
+                            <span className="mt-0.5 block line-clamp-2 text-xs text-ink-text-muted">{result.snippet}</span>
                           </a>
                         </li>
                       ))}
@@ -356,20 +356,20 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
               ) : null}
             </div>
             <ChannelTimeline entries={entries} loading={loading} error={error} anchorEntryId={anchorEntryId} onReply={(entry) => { setReplyTarget(entry); setReplyFocusKey((key) => key + 1); }} />
-            <div className="border-t border-zinc-800 bg-[#0a0a0b]">
-              {typingLabel ? <div className="flex h-6 items-center gap-2 px-4 text-[11px] text-zinc-500">{typingLabel}</div> : null}
-              {sending ? <div className="flex h-6 items-center gap-2 px-4 text-[11px] text-zinc-500"><Loader2 className="h-3 w-3 animate-spin" aria-hidden /> Posting…</div> : null}
+            <div className="border-t border-ink-border bg-ink">
+              {typingLabel ? <div className="flex h-6 items-center gap-2 px-4 text-[11px] text-ink-text-muted">{typingLabel}</div> : null}
+              {sending ? <div className="flex h-6 items-center gap-2 px-4 text-[11px] text-ink-text-muted"><Loader2 className="h-3 w-3 animate-spin" aria-hidden /> Posting…</div> : null}
               {replyTarget ? (
-                <div className="flex items-center justify-between gap-3 border-b border-zinc-800 px-4 py-2 text-xs text-zinc-400">
+                <div className="flex items-center justify-between gap-3 border-b border-ink-border px-4 py-2 text-xs text-ink-text-label">
                   <div className="min-w-0">
-                    <span className="font-medium text-zinc-300">Replying to #{replyTarget.seq}</span>
+                    <span className="font-medium text-ink-text-label">Replying to #{replyTarget.seq}</span>
                     <span className="ml-2 line-clamp-1">{replyTarget.displayText ?? replyTarget.text}</span>
                   </div>
                   <button
                     type="button"
                     aria-label="Cancel reply"
                     onClick={() => setReplyTarget(undefined)}
-                    className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950"
+                    className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-ink-text-muted hover:bg-ink-surface hover:text-ink-text-body focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-ink"
                   >
                     <X className="h-4 w-4" aria-hidden />
                   </button>

@@ -8,8 +8,8 @@ import { channelScrollAfterRowsChange, channelScrollAfterUserScroll, initialChan
 import { GateVerdictCard } from './GateVerdictCard';
 
 const toneClass: Record<ChannelCardTone, string> = {
-  neutral: 'border-zinc-800 bg-[#0c0c0e] text-zinc-200',
-  info: 'border-sky-400/25 bg-sky-400/7 text-zinc-100',
+  neutral: 'border-ink-border bg-panel text-ink-text-body',
+  info: 'border-sky-400/25 bg-sky-400/7 text-ink-text',
   warning: 'border-amber-400/35 bg-amber-400/10 text-amber-50',
   success: 'border-emerald-400/30 bg-emerald-400/10 text-emerald-50',
   destructive: 'border-red-400/35 bg-red-400/10 text-red-50',
@@ -39,7 +39,7 @@ const iconClass: Record<ChannelCardView['kind'], typeof ShieldAlert> = {
 function LoadingTimeline() {
   return (
     <div className="space-y-3 p-4" aria-label="Loading channel">
-      {Array.from({ length: 7 }).map((_, i) => <div key={i} className="h-14 rounded-xl border border-zinc-800 bg-zinc-900/60 skeleton" />)}
+      {Array.from({ length: 7 }).map((_, i) => <div key={i} className="h-14 rounded-xl border border-ink-border bg-ink-surface/60 skeleton" />)}
     </div>
   );
 }
@@ -48,12 +48,12 @@ function EmptyTimeline() {
   return (
     <div className="flex h-full items-center justify-center p-8 text-center">
       <div className="relative">
-        <div className="absolute inset-0 -rotate-3 rounded-2xl border border-zinc-800 bg-zinc-950" aria-hidden />
-        <div className="absolute inset-0 rotate-3 rounded-2xl border border-zinc-800 bg-zinc-950" aria-hidden />
-        <div className="relative max-w-sm rounded-2xl border border-zinc-800 bg-[#0c0c0e] p-6">
-          <Hash className="mx-auto mb-3 h-6 w-6 text-amber-300" aria-hidden />
-          <h2 className="text-sm font-semibold text-zinc-100">No entries yet.</h2>
-          <p className="mt-1 text-xs leading-5 text-zinc-500">Fleet cards and operator messages will land here as the room wakes up.</p>
+        <div className="absolute inset-0 -rotate-3 rounded-2xl border border-ink-border bg-ink" aria-hidden />
+        <div className="absolute inset-0 rotate-3 rounded-2xl border border-ink-border bg-ink" aria-hidden />
+        <div className="relative max-w-sm rounded-2xl border border-ink-border bg-panel p-6">
+          <Hash className="mx-auto mb-3 h-6 w-6 text-ember" aria-hidden />
+          <h2 className="text-sm font-semibold text-ink-text">No entries yet.</h2>
+          <p className="mt-1 text-xs leading-5 text-ink-text-muted">Fleet cards and operator messages will land here as the room wakes up.</p>
         </div>
       </div>
     </div>
@@ -66,14 +66,14 @@ const ChannelTimelineRow = memo(function ChannelTimelineRow({ view, onReply }: {
   if (view.kind === 'message') {
     return (
       <li data-entry-id={view.id} className={`group flex ${user ? 'justify-end' : 'justify-start'}`}>
-        <article className={`max-w-[80%] rounded-2xl border px-3 py-2 text-sm leading-6 transition-colors duration-200 ${user ? 'border-zinc-700 bg-zinc-800 text-zinc-100 hover:bg-zinc-750' : toneClass.neutral}`}>
-          <div className="mb-1 flex items-center gap-2 text-[10px] uppercase tracking-[0.14em] text-zinc-500 opacity-80 transition-opacity duration-200 group-hover:opacity-100">
+        <article className={`max-w-[80%] rounded-2xl border px-3 py-2 text-sm leading-6 transition-colors duration-200 ${user ? 'border-ink-border-2 bg-ink-surface text-ink-text hover:bg-ink-border' : toneClass.neutral}`}>
+          <div className="mb-1 flex items-center gap-2 text-[10px] uppercase tracking-[0.14em] text-ink-text-muted opacity-80 transition-opacity duration-200 group-hover:opacity-100">
             <span>{view.authorLabel}</span>
             <time dateTime={new Date(view.entry.ts).toISOString()} className="tabular-nums">{entryTimeLabel(view.entry.ts)}</time>
           </div>
           {view.replyContext ? (
-            <a href={hubHref(view.replyContext.channelId, view.replyContext.id)} className="mb-2 block rounded-xl border border-zinc-700/70 bg-black/20 px-2 py-1.5 text-xs text-zinc-400 hover:text-zinc-200 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900">
-              <span className="block text-[10px] uppercase tracking-[0.12em] text-zinc-500">Reply to {view.replyContext.authorLabel}</span>
+            <a href={hubHref(view.replyContext.channelId, view.replyContext.id)} className="mb-2 block rounded-xl border border-ink-border-2 bg-black/20 px-2 py-1.5 text-xs text-ink-text-label hover:text-ink-text-body focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-ink-border">
+              <span className="block text-[10px] uppercase tracking-[0.12em] text-ink-text-muted">Reply to {view.replyContext.authorLabel}</span>
               <span className="line-clamp-2">{view.replyContext.body}</span>
             </a>
           ) : null}
@@ -83,13 +83,13 @@ const ChannelTimelineRow = memo(function ChannelTimelineRow({ view, onReply }: {
               <button
                 type="button"
                 onClick={() => onReply(view.entry)}
-                className="inline-flex min-h-8 items-center gap-1 rounded-full px-2 text-[11px] font-medium text-zinc-500 transition-colors hover:bg-zinc-700/50 hover:text-zinc-200 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900"
+                className="inline-flex min-h-8 items-center gap-1 rounded-full px-2 text-[11px] font-medium text-ink-text-muted transition-colors hover:bg-ink-surface hover:text-ink-text-body focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-ink-border"
               >
                 <Reply className="h-3.5 w-3.5" aria-hidden />
                 Reply
               </button>
             ) : null}
-            {view.repliedBy ? <span className="text-[11px] text-zinc-500">{view.repliedBy} {view.repliedBy === 1 ? 'reply' : 'replies'}</span> : null}
+            {view.repliedBy ? <span className="text-[11px] text-ink-text-muted">{view.repliedBy} {view.repliedBy === 1 ? 'reply' : 'replies'}</span> : null}
           </div>
         </article>
       </li>
@@ -111,7 +111,7 @@ const ChannelTimelineRow = memo(function ChannelTimelineRow({ view, onReply }: {
               <time dateTime={new Date(view.entry.ts).toISOString()} className="text-[10px] tabular-nums opacity-50">{entryTimeLabel(view.entry.ts)}</time>
             </div>
             {(view.actionHref ?? view.href) ? (
-              <a href={view.actionHref ?? view.href} className="mt-1 block text-sm font-semibold tracking-tight underline-offset-4 hover:underline focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900">{view.title}</a>
+              <a href={view.actionHref ?? view.href} className="mt-1 block text-sm font-semibold tracking-tight underline-offset-4 hover:underline focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-ink-border">{view.title}</a>
             ) : (
               <h3 className="mt-1 text-sm font-semibold tracking-tight">{view.title}</h3>
             )}
@@ -130,7 +130,7 @@ const ChannelTimelineRow = memo(function ChannelTimelineRow({ view, onReply }: {
             {view.href ? (
               <a
                 href={view.href}
-                className="mt-3 inline-flex min-h-10 items-center justify-center rounded-full border border-current/15 bg-current/10 px-3 text-xs font-semibold transition-[background-color,border-color] hover:bg-current/15 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900"
+                className="mt-3 inline-flex min-h-10 items-center justify-center rounded-full border border-current/15 bg-current/10 px-3 text-xs font-semibold transition-[background-color,border-color] hover:bg-current/15 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-ink-border"
               >
                 {doorLabel(view.kind)}
               </a>
@@ -147,13 +147,13 @@ function LifecycleRun({ views, onReply }: { views: ChannelCardView[]; onReply?: 
   const unit = views[0]!.pinned.find((item) => item.label === 'Unit')?.value ?? views[0]!.authorLabel;
   return (
     <li data-entry-id={views[0]!.id}>
-      <details open className="group rounded-2xl border border-zinc-800 bg-[#0c0c0e]">
-        <summary className="flex min-h-10 cursor-pointer list-none items-center gap-2 px-3 py-2 text-xs font-semibold text-zinc-200 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-500">
+      <details open className="group rounded-2xl border border-ink-border bg-panel">
+        <summary className="flex min-h-10 cursor-pointer list-none items-center gap-2 px-3 py-2 text-xs font-semibold text-ink-text-body focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-500">
           <ChevronRight className="h-4 w-4 transition-transform group-open:rotate-90" aria-hidden />
           <span className="truncate">{unit}</span>
-          <span className="ml-auto text-[10px] font-medium uppercase tracking-[0.14em] text-zinc-500">{views.length} lifecycle updates</span>
+          <span className="ml-auto text-[10px] font-medium uppercase tracking-[0.14em] text-ink-text-muted">{views.length} lifecycle updates</span>
         </summary>
-        <ol className="space-y-3 border-t border-zinc-800 p-3">{views.map((view) => <ChannelTimelineRow key={view.id} view={view} onReply={onReply} />)}</ol>
+        <ol className="space-y-3 border-t border-ink-border p-3">{views.map((view) => <ChannelTimelineRow key={view.id} view={view} onReply={onReply} />)}</ol>
       </details>
     </li>
   );
