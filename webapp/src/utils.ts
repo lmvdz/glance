@@ -7,7 +7,7 @@ export function getCategoryBadge(category: string) {
     case 'database': return 'bg-[#dcfce7] text-[#15803d]';
     // Honest-fallback bucket — deliberately the same neutral tone as the unknown-value default,
     // since 'other' IS "we don't know", not a fifth warm color competing for attention.
-    case 'other': return 'bg-gray-100 text-gray-700';
-    default: return 'bg-gray-100 text-gray-700';
+    case 'other': return 'bg-ink-surface text-ink-text-label';
+    default: return 'bg-ink-surface text-ink-text-label';
   }
 }

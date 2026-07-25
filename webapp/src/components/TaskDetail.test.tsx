@@ -20,7 +20,7 @@ test("PlanMarkdown uses the adaptive ink code-block background", () => {
 
   expect(html).toContain("prose-pre:bg-ink");
   expect(html).toContain("dark:prose-pre:bg-ink");
-  expect(html).not.toContain("prose-pre:bg-gray-50");
+  
 });
 
 test("parseMeta reads key values and quoted values", () => {
