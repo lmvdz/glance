@@ -20,15 +20,15 @@ export interface PanelShellProps {
 }
 
 export const PanelShell: React.FC<PanelShellProps> = ({ icon, title, subtitle, actions, children }) => (
-  <main className="flex-1 flex flex-col h-full overflow-hidden bg-white dark:bg-gray-950 transition-colors duration-200">
-    <div className="flex items-center justify-between border-b border-gray-200 dark:border-gray-800 px-5 py-3 flex-shrink-0 bg-white dark:bg-gray-950">
+  <main className="flex-1 flex flex-col h-full overflow-hidden bg-panel transition-colors duration-200">
+    <div className="flex items-center justify-between border-b border-ink-border px-5 py-3 flex-shrink-0 bg-panel">
       <div className="flex items-center gap-2.5 min-w-0">
         <span className="flex-shrink-0" aria-hidden="true">
           {icon}
         </span>
         <div className="min-w-0">
-          <h1 className="text-sm font-semibold text-gray-900 dark:text-gray-100 truncate">{title}</h1>
-          {subtitle != null && <div className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">{subtitle}</div>}
+          <h1 className="text-sm font-semibold text-ink-text truncate">{title}</h1>
+          {subtitle != null && <div className="mt-0.5 text-xs text-ink-text-muted">{subtitle}</div>}
         </div>
       </div>
       {actions && <div className="flex items-center gap-2 flex-shrink-0">{actions}</div>}
