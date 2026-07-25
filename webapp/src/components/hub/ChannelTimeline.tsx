@@ -66,7 +66,7 @@ const ChannelTimelineRow = memo(function ChannelTimelineRow({ view, onReply }: {
   if (view.kind === 'message') {
     return (
       <li data-entry-id={view.id} className={`group flex ${user ? 'justify-end' : 'justify-start'}`}>
-        <article className={`max-w-[80%] rounded-2xl border px-3 py-2 text-sm leading-6 transition-colors duration-200 ${user ? 'border-zinc-700 bg-zinc-800 text-zinc-100 hover:bg-zinc-750' : toneClass.neutral}`}>
+        <article className={`max-w-[80%] rounded-2xl border px-3 py-2 text-sm leading-6 transition-colors duration-200 ${user ? 'border-zinc-700 bg-zinc-800 text-zinc-100 hover:bg-zinc-700' : toneClass.neutral}`}>
           <div className="mb-1 flex items-center gap-2 text-[10px] uppercase tracking-[0.14em] text-zinc-500 opacity-80 transition-opacity duration-200 group-hover:opacity-100">
             <span>{view.authorLabel}</span>
             <time dateTime={new Date(view.entry.ts).toISOString()} className="tabular-nums">{entryTimeLabel(view.entry.ts)}</time>
