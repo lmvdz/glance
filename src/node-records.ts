@@ -138,6 +138,32 @@ const EvidenceSchema = Schema.Struct({
 	withdrawnAt: Schema.optional(Schema.Number),
 });
 
+/**
+ * A decision a human actually made: what they were asked, what they chose, and how long they took.
+ *
+ * This is the evidence rule proposals are generated FROM. Without it a "learned" rule is a configured
+ * rule wearing a costume — there is nothing to replay, nothing to show the human, and no way to check
+ * that the pattern being generalised was ever real. The audit log cannot serve: it is a no-op in file
+ * mode, so half the fleet would silently have no evidence and every proposal would look unfounded.
+ */
+const DecisionSchema = Schema.Struct({
+	...base,
+	kind: Schema.Literal("decision"),
+	/** What the human was asked, verbatim. */
+	question: Schema.String,
+	/** The choices they were offered, if any. Free-text answers have none. */
+	options: Schema.Array(Schema.String),
+	/** What they chose, verbatim — their own words when they answered in words. */
+	chose: Schema.String,
+	decidedBy: Schema.String,
+	askedAt: Schema.Number,
+	decidedAt: Schema.Number,
+	/** Why this reached a human at all. A rule proposal must not generalise across different reasons. */
+	reason: Schema.Literals(["gate-class", "non-delegatable", "no-rule-applied", "asked-explicitly"]),
+	/** Set when the decision belongs to the immutable class, so no proposal can ever draw on it. */
+	boundaryClass: Schema.optional(Schema.Literals(nonDelegatableClasses)),
+});
+
 /** Exactly one accountable human per question; authorship that survives every render path. */
 const HumanAuthoritySchema = Schema.Struct({
 	...base,
@@ -177,6 +203,7 @@ const NodeRecordSchema = Schema.Union([
 	ObjectionSchema,
 	PlanMotionSchema,
 	EvidenceSchema,
+	DecisionSchema,
 	HumanAuthoritySchema,
 	HandoverSchema,
 	RetentionSchema,
@@ -188,11 +215,12 @@ export type InstructionReadbackRecord = typeof InstructionReadbackSchema.Type;
 export type ObjectionRecord = typeof ObjectionSchema.Type;
 export type PlanMotionRecord = typeof PlanMotionSchema.Type;
 export type EvidenceRecord = typeof EvidenceSchema.Type;
+export type DecisionRecord = typeof DecisionSchema.Type;
 export type HumanAuthorityRecord = typeof HumanAuthoritySchema.Type;
 export type HandoverRecord = typeof HandoverSchema.Type;
 export type RetentionRecord = typeof RetentionSchema.Type;
 export type NodeRecord = typeof NodeRecordSchema.Type;
-export const nodeRecordKinds = ["rule", "delegation-boundary", "instruction-readback", "objection", "plan-motion", "evidence", "human-authority", "handover", "retention"] as const;
+export const nodeRecordKinds = ["rule", "delegation-boundary", "instruction-readback", "objection", "plan-motion", "evidence", "decision", "human-authority", "handover", "retention"] as const;
 
 const decode = Schema.decodeUnknownResult(NodeRecordSchema);
 
@@ -216,6 +244,13 @@ export class NodeRecordStore {
 		if (!record.id.trim() || !record.nodeId.trim() || !Number.isFinite(record.createdAt)) {
 			throw new Error("node record id, node id, and creation time required");
 		}
+		// Node existence is checked FIRST so a record for a node that is not there reports that, rather
+		// than whichever kind-specific rule happens to fail earlier. A misleading error is a bug that
+		// costs someone an hour.
+		if (!(await this.store.getNode(record.nodeId))) {
+			this.log(`refusing record ${record.id}: node ${record.nodeId} is absent`);
+			throw new Error("node record node not found");
+		}
 		if (record.kind === "objection" && !record.prediction.trim()) {
 			// An objection without a falsifiable prediction cannot be scored against reality later, which
 			// is the only thing that makes an overrule reviewable rather than a grudge.
@@ -232,10 +267,17 @@ export class NodeRecordStore {
 			if (overreach) {
 				throw new Error(`a rule cannot settle ${overreach[0]}: ${overreach[1]} decisions always reach a person, and no rule widens that`);
 			}
-		}
-		if (!(await this.store.getNode(record.nodeId))) {
-			this.log(`refusing record ${record.id}: node ${record.nodeId} is absent`);
-			throw new Error("node record node not found");
+			// A rule claims to have been proposed from real decisions. Check that they exist, or
+			// "learned" is decoration a configured rule can wear: nothing to replay to the human, and
+			// no way to tell a generalisation from an assertion.
+			if (record.proposedFrom.length === 0) {
+				throw new Error("a rule is proposed from decisions the human already made — an empty proposedFrom is a configured rule wearing a costume");
+			}
+			const known = new Set((await this.list(record.nodeId)).filter((other) => other.kind === "decision").map((other) => other.id));
+			const missing = record.proposedFrom.filter((id) => !known.has(id));
+			if (missing.length > 0) {
+				throw new Error(`a rule cannot cite evidence that is not there: no decision record for ${missing.join(", ")}`);
+			}
 		}
 		await this.store.putNodeRecord(record);
 	}

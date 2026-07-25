@@ -6,12 +6,17 @@ import { FileStore } from "../src/dal/store.ts";
 import { NodeRecordStore, nodeRecordKinds, readNodeRecord, type NodeRecord } from "../src/node-records.ts";
 import type { Node } from "../src/nodes.ts";
 
-async function store(): Promise<{ store: FileStore; records: NodeRecordStore; dir: string }> {
+async function store(opts: { seedEvidence?: boolean } = {}): Promise<{ store: FileStore; records: NodeRecordStore; dir: string }> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "node-records-"));
 	const fileStore = new FileStore(dir);
 	const node: Node = { id: "n1", kind: "unit", title: "the unit", state: "working", createdAt: 1, channelId: null };
 	await fileStore.putNode(node);
-	return { store: fileStore, records: new NodeRecordStore(fileStore), dir };
+	const records = new NodeRecordStore(fileStore);
+	// A rule may only cite decisions that exist, so any test that writes one needs its evidence present.
+	// Seeded with the SAME id the rule sample cites, so the round-trip test's own decision write lands
+	// on this row rather than adding one — the record count still equals the number of kinds.
+	if (opts.seedEvidence !== false) await records.put(samples.decision);
+	return { store: fileStore, records, dir };
 }
 
 /**
@@ -34,7 +39,7 @@ const samples: Record<(typeof nodeRecordKinds)[number], NodeRecord> = {
 		withdrawnAt: 99,
 		withdrawnBy: "db:lars",
 		replacedById: "r2",
-		proposedFrom: ["decision-41", "decision-52", "decision-58", "decision-61"],
+		proposedFrom: ["decision-41"],
 		wouldNotHaveCaught: ["the credential rotation on the 14th — that stays yours"],
 		invocations: [{ at: 11, outcome: "settled", nodeId: "n1" }, { at: 12, outcome: "outside-clear-reach", nodeId: "n1" }],
 	},
@@ -99,6 +104,20 @@ const samples: Record<(typeof nodeRecordKinds)[number], NodeRecord> = {
 		staleAt: 999,
 		withdrawnAt: 1000,
 	},
+	decision: {
+		kind: "decision",
+		id: "decision-41",
+		nodeId: "n1",
+		createdAt: 10,
+		question: "Take the reversible option?",
+		options: ["yes", "no"],
+		chose: "yes",
+		decidedBy: "db:lars",
+		askedAt: 5,
+		decidedAt: 65_000,
+		reason: "no-rule-applied",
+		boundaryClass: "publishing",
+	},
 	"human-authority": { kind: "human-authority", id: "h1", nodeId: "n1", createdAt: 10, humanId: "db:lars", role: "accountable" },
 	handover: {
 		kind: "handover",
@@ -143,7 +162,7 @@ test("every record kind survives a round trip with every optional field intact",
 test("a withdrawn rule keeps when it was withdrawn, by whom, and what replaced it", async () => {
 	const { store: fileStore, records, dir } = await store();
 	await records.put(samples.rule);
-	const [back] = await fileStore.listNodeRecords("n1");
+	const back = (await fileStore.listNodeRecords("n1")).find((record) => record.kind === "rule");
 	expect(back?.kind).toBe("rule");
 	if (back?.kind !== "rule") throw new Error("expected a rule");
 	expect(back.withdrawnAt).toBe(99);
@@ -226,7 +245,7 @@ test("a half-written record is dropped whole, never half-read", () => {
 });
 
 test("records are listed in creation order and scoped to their own node", async () => {
-	const { store: fileStore, records, dir } = await store();
+	const { store: fileStore, records, dir } = await store({ seedEvidence: false });
 	await fileStore.putNode({ id: "n2", kind: "unit", title: "another", state: "idle", createdAt: 1, channelId: null });
 	await records.put({ ...samples.evidence, id: "e-late", createdAt: 300 });
 	await records.put({ ...samples.evidence, id: "e-early", createdAt: 100 });

@@ -235,6 +235,8 @@ import { truncateLabel } from "./text-util.ts";
 import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
 import { ChannelStore, DEFAULT_CHANNEL_ID, type ChannelEntry, type ClientChannelPost, type Channel, type CreateChannelInput, type ChannelMemberInput } from "./channels.ts";
 import { NodeStore, type NodeState } from "./nodes.ts";
+import { NodeRecordStore } from "./node-records.ts";
+import { proposeRules, type RuleProposal } from "./rule-proposals.ts";
 import { DelegationBoundaryError, assertHumanAuthority, commandAction, grantFor, nonDelegatableClassOf, type DelegationGrant } from "./delegation-boundary.ts";
 import { buildTrace, traceMaxSpans, traceSampleRatio, traceSpansEnabled, type TraceResponse } from "./spans.ts";
 import { traceExporterFromEnv, type TraceExportQueue } from "./trace-exporter.ts";
@@ -3805,6 +3807,48 @@ export class SquadManager extends EventEmitter {
 			this.log("info", "delegation-boundary: recorded the existing autoland configuration as a grant — revoke it to stop autonomous merging");
 		} catch (err) {
 			this.log("warn", `delegation-boundary: could not record the autoland grant: ${errText(err)}`);
+		}
+	}
+
+	/**
+	 * Persist one decision a human made, against the unit's node. Fire-and-forget and fully guarded:
+	 * losing a decision record costs future evidence, but it must never fail an answer the person has
+	 * already given.
+	 */
+	private async recordDecision(rec: AgentRecord, req: PendingRequest, value: unknown, actor: Actor): Promise<void> {
+		try {
+			if (!isRoomWorthyPending(req)) return; // routine tool approvals are noise, not decisions
+			const node = await this.ensureProjectedNode(rec);
+			const chose = typeof value === "string" ? value : JSON.stringify(value ?? "");
+			await new NodeRecordStore(this.store, (m) => this.log("warn", `node-records: ${m}`)).put({
+				kind: "decision",
+				id: `decision:${rec.dto.id}:${req.id}`,
+				nodeId: node.id,
+				createdAt: Date.now(),
+				question: req.title ?? req.message ?? req.kind,
+				options: req.options ?? [],
+				chose,
+				decidedBy: actor.id,
+				askedAt: req.createdAt ?? Date.now(),
+				decidedAt: Date.now(),
+				reason: gateClassOf(req) ? "gate-class" : "no-rule-applied",
+			});
+		} catch (err) {
+			this.log("warn", `decision record for ${rec.dto.id}/${req.id} not kept: ${errText(err)}`);
+		}
+	}
+
+	/**
+	 * What the fleet would offer to stop asking about, for one node — generated from decisions this
+	 * person actually made, never from configuration. Returns nothing until there is enough evidence,
+	 * which is the honest answer rather than a weak suggestion.
+	 */
+	async ruleProposals(nodeId: string): Promise<RuleProposal[]> {
+		try {
+			return proposeRules(await new NodeRecordStore(this.store).list(nodeId));
+		} catch (err) {
+			this.log("warn", `rule proposals for ${nodeId} unavailable: ${errText(err)}`);
+			return [];
 		}
 	}
 
@@ -7637,6 +7681,11 @@ export class SquadManager extends EventEmitter {
 				const req = rec.dto.pending.find((p) => p.id === cmd.requestId);
 				if (!req) break;
 				this.answerPending(rec, req, cmd.value, actor);
+				// Record what the person actually decided. This is the evidence rule proposals are
+				// generated from (concern 11): without it a "learned" rule has nothing to replay, and
+				// there is no way to tell a generalisation from an assertion. The audit log cannot serve
+				// — it is a no-op in file mode, so half the fleet would silently have no evidence.
+				void this.recordDecision(rec, req, cmd.value, actor);
 				break;
 			}
 			case "interrupt":
