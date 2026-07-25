@@ -47,7 +47,7 @@ function tone(node: WorkflowFlowNode, isCurrent: boolean): { border: string; dot
   if (isCurrent) return { border: 'border-l-blue-500 ring-2 ring-blue-400 dark:ring-blue-500', dot: 'bg-blue-500', text: 'text-blue-600 dark:text-blue-400' };
   if (node.status === 'completed') return { border: 'border-l-emerald-500', dot: 'bg-emerald-500', text: 'text-emerald-600 dark:text-emerald-400' };
   if (node.status === 'in_progress') return { border: 'border-l-blue-500', dot: 'bg-blue-500', text: 'text-blue-600 dark:text-blue-400' };
-  return { border: 'border-l-gray-300 dark:border-l-gray-700', dot: 'bg-gray-300 dark:bg-gray-600', text: 'text-gray-500 dark:text-gray-400' };
+  return { border: 'border-l-gray-300 dark:border-l-gray-700', dot: 'bg-ink-border-2 bg-ink-text-label', text: 'text-ink-text-muted' };
 }
 
 export const WorkflowGraphOverlay: React.FC<WorkflowGraphOverlayProps> = ({ graph, state, orientation = 'horizontal', traceId }) => {
@@ -88,7 +88,7 @@ export const WorkflowGraphOverlay: React.FC<WorkflowGraphOverlayProps> = ({ grap
   }, [flow, vertical]);
 
   if (flow.nodes.length === 0) {
-    return <div className="px-4 py-6 text-center text-sm text-gray-500 dark:text-gray-400">No workflow graph to chart.</div>;
+    return <div className="px-4 py-6 text-center text-sm text-ink-text-muted">No workflow graph to chart.</div>;
   }
 
   const rowsPerCol = new Map<number, number>();
@@ -103,12 +103,12 @@ export const WorkflowGraphOverlay: React.FC<WorkflowGraphOverlayProps> = ({ grap
   const height = PAD * 2 + yCount * NODE_H + (yCount - 1) * yGap;
 
   return (
-    <div className="overflow-x-auto rounded-lg border border-gray-200 dark:border-gray-800 bg-gray-50/60 dark:bg-gray-950/40 p-1 scrollbar-custom">
+    <div className="overflow-x-auto rounded-lg border border-ink-border bg-ink/60 bg-ink/40 p-1 scrollbar-custom">
       <div className="relative" style={{ width, height }}>
         <svg className="pointer-events-none absolute inset-0" width={width} height={height} aria-hidden="true">
           <defs>
             <marker id="workflowflow-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
-              <path d="M0,0 L7,3.5 L0,7 Z" className="fill-gray-400 dark:fill-gray-600" />
+              <path d="M0,0 L7,3.5 L0,7 Z" className="fill-ink-text-subtle fill-ink-text-label" />
             </marker>
           </defs>
           {flow.edges.map((e, i) => {
@@ -131,13 +131,13 @@ export const WorkflowGraphOverlay: React.FC<WorkflowGraphOverlayProps> = ({ grap
               <React.Fragment key={`${e.from}->${e.to}:${e.kind}:${i}`}>
                 <path
                   d={d}
-                  className={e.kind === 'retry' ? 'fill-none stroke-amber-400 dark:stroke-amber-500' : 'fill-none stroke-gray-300 dark:stroke-gray-700'}
+                  className={e.kind === 'retry' ? 'fill-none stroke-amber-400 dark:stroke-amber-500' : 'fill-none stroke-ink-text-label stroke-ink-text-label'}
                   strokeWidth={1.5}
                   strokeDasharray={e.kind === 'retry' ? '4 3' : undefined}
                   markerEnd="url(#workflowflow-arrow)"
                 />
                 {edgeLabel && (
-                  <text x={midX} y={midY - 4} textAnchor="middle" className="fill-gray-500 dark:fill-gray-400" style={{ fontSize: 9 }}>
+                  <text x={midX} y={midY - 4} textAnchor="middle" className="fill-ink-text0 fill-ink-text-subtle" style={{ fontSize: 9 }}>
                     {edgeLabel}
                   </text>
                 )}
@@ -158,16 +158,16 @@ export const WorkflowGraphOverlay: React.FC<WorkflowGraphOverlayProps> = ({ grap
               onClick={traceId ? () => handleNodeClick(n) : undefined}
               onKeyDown={traceId ? (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); handleNodeClick(n); } } : undefined}
               title={`${n.label} — ${n.status}${n.kind ? ` · ${n.kind}` : ''}${traceId ? ' · click for trace' : ''}`}
-              className={`absolute flex flex-col justify-center gap-1 rounded-lg border border-l-4 ${t.border} bg-white dark:bg-gray-900 px-2.5 py-1.5 shadow-sm${traceId ? ' cursor-pointer hover:ring-1 hover:ring-gray-300 dark:hover:ring-gray-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400' : ''}`}
+              className={`absolute flex flex-col justify-center gap-1 rounded-lg border border-l-4 ${t.border} bg-panel px-2.5 py-1.5 shadow-sm${traceId ? ' cursor-pointer hover:ring-1 hover:ring-ink-border-2 dark:hover:ring-ink-border-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400' : ''}`}
               style={{ left: p.x, top: p.y, width: COL_W, height: NODE_H }}
             >
               <div className="flex items-center gap-1.5">
                 <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${t.dot}`} aria-hidden="true" />
-                <span className="truncate text-xs font-medium text-gray-800 dark:text-gray-200">{n.label}</span>
+                <span className="truncate text-xs font-medium text-ink-text-body">{n.label}</span>
               </div>
               <div className="flex items-center gap-1.5">
-                <span className={`text-[10px] uppercase tracking-wide ${t.text}`}>{isCurrent ? 'current' : n.status.replace('_', ' ')}</span>
-                <span className="ml-auto truncate text-[10px] text-gray-400">{n.kind}</span>
+                <span className={`text-caption uppercase tracking-wide ${t.text}`}>{isCurrent ? 'current' : n.status.replace('_', ' ')}</span>
+                <span className="ml-auto truncate text-caption text-ink-text-subtle">{n.kind}</span>
               </div>
             </div>
           );
@@ -192,16 +192,16 @@ const TraceDrilldown: React.FC<{ data: TraceResponseDTO | null; loading: boolean
   onClose,
 }) => {
   return (
-    <div className="mt-1 rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-3 text-xs">
+    <div className="mt-1 rounded-lg border border-ink-border bg-panel p-3 text-xs">
       <div className="mb-2 flex items-center gap-2">
-        <span className="font-medium text-gray-700 dark:text-gray-200">Trace</span>
+        <span className="font-medium text-ink-text-label text-ink-text-body">Trace</span>
         {data?.partial ? (
-          <span className="rounded-full bg-amber-100 dark:bg-amber-900/40 px-2 py-0.5 text-[10px] uppercase tracking-wide text-amber-700 dark:text-amber-400">
+          <span className="rounded-full bg-amber-100 dark:bg-amber-900/40 px-2 py-0.5 text-caption uppercase tracking-wide text-amber-700 dark:text-amber-400">
             partial
           </span>
         ) : (
           data?.sampled && (
-            <span className="rounded-full bg-gray-100 dark:bg-gray-800 px-2 py-0.5 text-[10px] uppercase tracking-wide text-gray-500 dark:text-gray-400">
+            <span className="rounded-full bg-ink-surface px-2 py-0.5 text-caption uppercase tracking-wide text-ink-text-muted">
               tool detail sampled
             </span>
           )
@@ -209,12 +209,12 @@ const TraceDrilldown: React.FC<{ data: TraceResponseDTO | null; loading: boolean
         <button
           type="button"
           onClick={onClose}
-          className="ml-auto text-[11px] text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 focus:outline-none focus-visible:underline"
+          className="ml-auto text-caption text-ink-text-subtle hover:text-ink-text-label dark:hover:text-ink-text-body focus:outline-none focus-visible:underline"
         >
           Close
         </button>
       </div>
-      {loading && <div className="text-gray-500 dark:text-gray-400">Loading trace…</div>}
+      {loading && <div className="text-ink-text-muted">Loading trace…</div>}
       {error && <div className="text-red-500 dark:text-red-400">Failed to load trace: {error}</div>}
       {!loading && !error && data && (
         <>
@@ -226,21 +226,21 @@ const TraceDrilldown: React.FC<{ data: TraceResponseDTO | null; loading: boolean
             <Stat label="duration" value={formatDurationMs(data.rollup.durationMs)} />
             <Stat label="errors" value={String(data.rollup.errors)} />
           </div>
-          <div className="mt-3 border-t border-gray-100 dark:border-gray-800 pt-2">
-            <div className="mb-1 text-[10px] uppercase tracking-wide text-gray-400">Span waterfall</div>
+          <div className="mt-3 border-t border-ink-border pt-2">
+            <div className="mb-1 text-caption uppercase tracking-wide text-ink-text-subtle">Span waterfall</div>
             <TraceSpanRow node={data.root} depth={0} />
           </div>
         </>
       )}
-      {!loading && !error && !data && <div className="text-gray-500 dark:text-gray-400">No trace data.</div>}
+      {!loading && !error && !data && <div className="text-ink-text-muted">No trace data.</div>}
     </div>
   );
 };
 
 const Stat: React.FC<{ label: string; value: string }> = ({ label, value }) => (
   <div className="flex flex-col">
-    <span className="text-[10px] uppercase tracking-wide text-gray-400">{label}</span>
-    <span className="text-xs font-medium text-gray-700 dark:text-gray-200">{value}</span>
+    <span className="text-caption uppercase tracking-wide text-ink-text-subtle">{label}</span>
+    <span className="text-xs font-medium text-ink-text-label text-ink-text-body">{value}</span>
   </div>
 );
 
@@ -285,10 +285,10 @@ const DigestPeek: React.FC<{ agentId: string }> = ({ agentId }) => {
   }, [agentId]);
 
   return (
-    <div className="mt-1 max-h-48 overflow-auto rounded border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-950 p-2" style={{ marginLeft: 14 }}>
-      {error && <div className="text-[10px] text-red-500 dark:text-red-400">Failed to load reasoning: {error}</div>}
-      {!error && text === null && <div className="text-[10px] text-gray-500 dark:text-gray-400">Loading reasoning…</div>}
-      {!error && text !== null && <pre className="whitespace-pre-wrap text-[10px] text-gray-700 dark:text-gray-300">{text}</pre>}
+    <div className="mt-1 max-h-48 overflow-auto rounded border border-ink-border bg-ink p-2" style={{ marginLeft: 14 }}>
+      {error && <div className="text-caption text-red-500 dark:text-red-400">Failed to load reasoning: {error}</div>}
+      {!error && text === null && <div className="text-caption text-ink-text-muted">Loading reasoning…</div>}
+      {!error && text !== null && <pre className="whitespace-pre-wrap text-caption text-ink-text-label">{text}</pre>}
     </div>
   );
 };
@@ -299,19 +299,19 @@ const TraceSpanRow: React.FC<{ node: TraceNodeDTO; depth: number }> = ({ node, d
   return (
     <div>
       <div className="flex items-center gap-1.5 py-0.5" style={{ paddingLeft: depth * 14 }}>
-        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${KIND_TINT[node.kind] ?? SPAN_STATUS_DOT[node.status] ?? 'bg-gray-300'}`} aria-hidden="true" />
-        <span className="truncate text-gray-700 dark:text-gray-300">{node.name}</span>
-        <span className="text-[10px] text-gray-400">{node.kind}</span>
+        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${KIND_TINT[node.kind] ?? SPAN_STATUS_DOT[node.status] ?? 'bg-ink-border-2'}`} aria-hidden="true" />
+        <span className="truncate text-ink-text-label">{node.name}</span>
+        <span className="text-caption text-ink-text-subtle">{node.kind}</span>
         {digestAgent && (
           <button
             type="button"
             onClick={() => setDigestOpen((v) => !v)}
-            className="text-[10px] text-blue-500 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 focus:outline-none focus-visible:underline"
+            className="text-caption text-blue-500 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 focus:outline-none focus-visible:underline"
           >
             reasoning
           </button>
         )}
-        <span className="ml-auto shrink-0 text-[10px] text-gray-400">
+        <span className="ml-auto shrink-0 text-caption text-ink-text-subtle">
           {node.endedAt !== undefined ? formatDurationMs(node.endedAt - node.startedAt) : 'running'}
         </span>
       </div>

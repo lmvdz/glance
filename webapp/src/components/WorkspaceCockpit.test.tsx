@@ -27,7 +27,7 @@ function TestRosterAgentRow({
             e.stopPropagation();
             onIntervene(agent.id);
           }}
-          className="flex-shrink-0 rounded border border-gray-200 bg-white px-2 py-0.5 text-[10px] font-medium text-gray-600 transition-colors hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-gray-800"
+          className="flex-shrink-0 rounded border border-ink-border bg-panel px-2 py-0.5 text-[10px] font-medium text-ink-text-label transition-colors hover:bg-ink-surface focus:outline-none focus-visible:ring-2 focus-visible:ring-ember"
           style={{ minHeight: '44px', minWidth: '44px' }}
         >
           Step in
@@ -106,20 +106,18 @@ describe('RosterAgentRow Step in button', () => {
       <TestRosterAgentRow agent={agent} onIntervene={() => {}} />
     );
     expect(html).toContain('focus-visible:ring-2');
-    expect(html).toContain('focus-visible:ring-amber-500');
+    expect(html).toContain('focus-visible:ring-ember');
   });
 
-  test('button matches file Tailwind idiom (border, hover, dark mode)', () => {
+  test('button uses shared ink tokens', () => {
     const agent = mockAgent('input');
     const html = renderToStaticMarkup(
       <TestRosterAgentRow agent={agent} onIntervene={() => {}} />
     );
-    // Matches InlineOptions button pattern
-    expect(html).toContain('border border-gray-200');
-    expect(html).toContain('hover:bg-gray-50');
-    expect(html).toContain('dark:border-gray-700');
-    expect(html).toContain('dark:bg-gray-900');
-    expect(html).toContain('dark:text-gray-300');
+    expect(html).toContain('border border-ink-border');
+    expect(html).toContain('hover:bg-ink-surface');
+    expect(html).toContain('bg-panel');
+    expect(html).toContain('text-ink-text-label');
   });
 
   test('button has minimum 44px hit target', () => {

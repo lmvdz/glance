@@ -164,13 +164,13 @@ export const AnnotationToolbar = ({
   onCancel: () => void;
   onDone: () => void;
 }) => (
-  <div className="flex items-center justify-between gap-2 border-b border-gray-200 bg-white px-3 py-2 dark:border-gray-800 dark:bg-gray-950">
+  <div className="flex items-center justify-between gap-2 border-b border-ink-border bg-white px-3 py-2 border-ink-border bg-ink">
     <div className="flex items-center gap-1" role="group" aria-label="Annotation tool">
       <button
         type="button"
         aria-pressed={tool === 'box'}
         onClick={() => onToolChange('box')}
-        className={`flex h-8 items-center gap-1.5 rounded-full px-2.5 text-[11px] font-medium transition-colors ${tool === 'box' ? 'bg-amber-100 text-amber-800 dark:bg-amber-500/20 dark:text-amber-300' : 'text-gray-600 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`}
+        className={`flex h-8 items-center gap-1.5 rounded-full px-2.5 text-caption font-medium transition-colors ${tool === 'box' ? 'bg-amber-100 text-amber-800 dark:bg-amber-500/20 dark:text-amber-300' : 'text-ink-text-label hover:bg-ink-surface text-ink-text-subtle dark:hover:bg-ink-surface'}`}
       >
         <Square className="h-3.5 w-3.5" aria-hidden /> Box
       </button>
@@ -178,7 +178,7 @@ export const AnnotationToolbar = ({
         type="button"
         aria-pressed={tool === 'pin'}
         onClick={() => onToolChange('pin')}
-        className={`flex h-8 items-center gap-1.5 rounded-full px-2.5 text-[11px] font-medium transition-colors ${tool === 'pin' ? 'bg-amber-100 text-amber-800 dark:bg-amber-500/20 dark:text-amber-300' : 'text-gray-600 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`}
+        className={`flex h-8 items-center gap-1.5 rounded-full px-2.5 text-caption font-medium transition-colors ${tool === 'pin' ? 'bg-amber-100 text-amber-800 dark:bg-amber-500/20 dark:text-amber-300' : 'text-ink-text-label hover:bg-ink-surface text-ink-text-subtle dark:hover:bg-ink-surface'}`}
       >
         <MapPin className="h-3.5 w-3.5" aria-hidden /> Pin
       </button>
@@ -187,7 +187,7 @@ export const AnnotationToolbar = ({
         aria-label="Undo last annotation"
         disabled={!canUndo}
         onClick={onUndo}
-        className="flex h-8 w-8 items-center justify-center rounded-full text-gray-500 hover:bg-gray-100 disabled:opacity-30 dark:text-gray-400 dark:hover:bg-gray-800"
+        className="flex h-8 w-8 items-center justify-center rounded-full text-ink-text0 hover:bg-ink-surface disabled:opacity-30 text-ink-text-subtle dark:hover:bg-ink-surface"
       >
         <Undo2 className="h-3.5 w-3.5" aria-hidden />
       </button>
@@ -195,7 +195,7 @@ export const AnnotationToolbar = ({
         <button
           type="button"
           onClick={onClear}
-          className="text-[11px] font-medium text-gray-500 hover:text-gray-800 hover:underline dark:text-gray-400 dark:hover:text-gray-200"
+          className="text-caption font-medium text-ink-text0 hover:text-ink-text-body hover:underline text-ink-text-subtle dark:hover:text-ink-text-body"
         >
           Clear all
         </button>
@@ -205,14 +205,14 @@ export const AnnotationToolbar = ({
       <button
         type="button"
         onClick={onCancel}
-        className="flex h-8 items-center gap-1 rounded-full px-2.5 text-[11px] font-medium text-gray-600 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800"
+        className="flex h-8 items-center gap-1 rounded-full px-2.5 text-caption font-medium text-ink-text-label hover:bg-ink-surface text-ink-text-subtle dark:hover:bg-ink-surface"
       >
         <X className="h-3.5 w-3.5" aria-hidden /> Cancel
       </button>
       <button
         type="button"
         onClick={onDone}
-        className="flex h-8 items-center gap-1 rounded-full bg-gray-900 px-3 text-[11px] font-semibold text-white hover:bg-black dark:bg-gray-200 dark:text-gray-900 dark:hover:bg-white"
+        className="flex h-8 items-center gap-1 rounded-full bg-panel px-3 text-caption font-semibold text-white hover:bg-black bg-ink-border text-ink-text dark:hover:bg-white"
       >
         <Check className="h-3.5 w-3.5" aria-hidden /> Done
       </button>
@@ -306,7 +306,7 @@ export const ImageAnnotator = ({ image, initialAnnotations, onDone, onCancel }: 
 
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4" role="dialog" aria-modal="true" aria-label="Annotate image">
-      <div className="flex max-h-full w-full max-w-3xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl dark:bg-gray-950">
+      <div className="flex max-h-full w-full max-w-3xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl bg-ink">
         <AnnotationToolbar
           tool={tool}
           onToolChange={setTool}
@@ -317,7 +317,7 @@ export const ImageAnnotator = ({ image, initialAnnotations, onDone, onCancel }: 
           onCancel={onCancel}
           onDone={() => void handleDone()}
         />
-        <div className="relative flex-1 overflow-auto bg-gray-100 p-3 dark:bg-gray-900">
+        <div className="relative flex-1 overflow-auto bg-ink-surface p-3 bg-panel">
           <div className="relative mx-auto" style={{ maxWidth: '100%' }}>
             <img src={image.dataUrl} alt="Attachment to annotate" className="block w-full select-none" draggable={false} />
             <svg
@@ -361,14 +361,14 @@ export const ImageAnnotator = ({ image, initialAnnotations, onDone, onCancel }: 
                       onBlur={commitPinText}
                       placeholder="Label this pin…"
                       aria-label="Pin label"
-                      className="w-40 rounded-md border border-amber-400 bg-white px-2 py-1 text-xs shadow-lg outline-none dark:bg-gray-900 dark:text-gray-100"
+                      className="w-40 rounded-md border border-amber-400 bg-white px-2 py-1 text-xs shadow-lg outline-none bg-panel text-ink-text"
                     />
                   </div>
                 );
               })()}
           </div>
         </div>
-        <div className="border-t border-gray-200 px-3 py-1.5 text-[11px] text-gray-500 dark:border-gray-800 dark:text-gray-500">
+        <div className="border-t border-ink-border px-3 py-1.5 text-caption text-ink-text0 border-ink-border text-ink-text0">
           {isFlattening ? 'Flattening annotations…' : `${annotations.length} annotation${annotations.length === 1 ? '' : 's'} — box to mark an area, pin to leave a note`}
         </div>
       </div>

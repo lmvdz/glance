@@ -19,10 +19,10 @@ export interface PanelSectionProps {
 }
 
 export const PanelSection: React.FC<PanelSectionProps> = ({ title, right, children, className, bodyClassName }) => (
-  <section className={`flex flex-col overflow-hidden rounded-md border border-gray-200 bg-white dark:border-ink-border dark:bg-panel ${className ?? ''}`}>
-    <header className="flex flex-shrink-0 items-center justify-between gap-2 border-b border-gray-200 px-3 py-1.5 dark:border-ink-border">
+  <section className={`flex flex-col overflow-hidden rounded-md border border-ink-border bg-white dark:border-ink-border dark:bg-panel ${className ?? ''}`}>
+    <header className="flex flex-shrink-0 items-center justify-between gap-2 border-b border-ink-border px-3 py-1.5 dark:border-ink-border">
       <MonoLabel>{title}</MonoLabel>
-      {right != null && <div className="flex-shrink-0 text-[11px] text-gray-400 dark:text-gray-500">{right}</div>}
+      {right != null && <div className="flex-shrink-0 text-caption text-ink-text-subtle">{right}</div>}
     </header>
     <div className={`min-h-0 flex-1 ${bodyClassName ?? ''}`}>{children}</div>
   </section>

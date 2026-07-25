@@ -45,16 +45,16 @@ export const JoinRequests = () => {
   if (reqs.length === 0) return null;
 
   return (
-    <div className="border-t border-gray-100 px-3 py-2 dark:border-gray-800">
-      <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold text-gray-500 dark:text-gray-400">
+    <div className="border-t border-ink-border px-3 py-2 border-ink-border">
+      <div className="mb-1.5 flex items-center gap-1.5 text-caption font-semibold text-ink-text-muted">
         <UserPlus className="h-3 w-3" aria-hidden="true" />
         Join requests
-        <span className="rounded bg-gray-100 px-1 font-mono dark:bg-gray-800">{reqs.length}</span>
+        <span className="rounded bg-ink-surface px-1 font-mono bg-ink-surface">{reqs.length}</span>
       </div>
       <div className="flex flex-col gap-1">
         {reqs.map((r) => (
           <div key={r.id} className="flex items-center gap-2 text-xs">
-            <span className="min-w-0 flex-1 truncate text-gray-700 dark:text-gray-200" title={r.email}>
+            <span className="min-w-0 flex-1 truncate text-ink-text-label text-ink-text-body" title={r.email}>
               {r.email}
             </span>
             <button
@@ -69,7 +69,7 @@ export const JoinRequests = () => {
             <button
               onClick={() => void decide(r.id, 'deny')}
               disabled={busy === r.id}
-              className="flex h-6 w-6 items-center justify-center rounded text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 disabled:opacity-50 dark:hover:bg-gray-800 dark:hover:text-gray-300"
+              className="flex h-6 w-6 items-center justify-center rounded text-ink-text-subtle transition-colors hover:bg-ink-surface hover:text-ink-text-label disabled:opacity-50 dark:hover:bg-ink-surface dark:hover:text-ink-text-label"
               aria-label={`Deny ${r.email}`}
               title="Deny"
             >

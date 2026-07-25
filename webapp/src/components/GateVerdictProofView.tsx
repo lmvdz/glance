@@ -64,7 +64,7 @@ export function GateVerdictProofView({ routeId }: { routeId?: string }) {
   }, [routeId]);
 
   if (!ids) return <Shell><ErrorBox message="Gate verdict route is missing a channel or entry id." /></Shell>;
-  if (loading) return <Shell><div className="flex items-center gap-2 text-sm text-zinc-300"><Loader2 className="h-4 w-4 animate-spin" aria-hidden /> Loading proof record…</div></Shell>;
+  if (loading) return <Shell><div className="flex items-center gap-2 text-sm text-ink-text-label"><Loader2 className="h-4 w-4 animate-spin" aria-hidden /> Loading proof record…</div></Shell>;
   if (error) return <Shell><ErrorBox message={error} backHref={hubHref(ids.channelId, ids.entryId)} /></Shell>;
   if (!proof) return <Shell><ErrorBox message="No proof record returned." backHref={hubHref(ids.channelId, ids.entryId)} /></Shell>;
 
@@ -74,49 +74,49 @@ export function GateVerdictProofView({ routeId }: { routeId?: string }) {
     <Shell>
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div>
-          <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-amber-300">Unit landed — proof record</p>
-          <h1 className="mt-1 text-2xl font-semibold tracking-tight text-zinc-50">{proof.unitName ?? proof.unitId ?? 'Departed unit'}</h1>
-          <p className="mt-1 text-sm text-zinc-400">{proof.branch ?? 'unknown branch'} · {proof.repo ?? 'unknown repo'}</p>
+          <p className="text-caption font-semibold uppercase tracking-[0.18em] text-amber-300">Unit landed — proof record</p>
+          <h1 className="mt-1 text-2xl font-semibold tracking-tight text-ink-text">{proof.unitName ?? proof.unitId ?? 'Departed unit'}</h1>
+          <p className="mt-1 text-sm text-ink-text-subtle">{proof.branch ?? 'unknown branch'} · {proof.repo ?? 'unknown repo'}</p>
         </div>
-        <a href={hubHref(ids.channelId, ids.entryId)} className="inline-flex min-h-10 items-center rounded-full border border-zinc-700 px-3 text-xs font-semibold text-zinc-200 hover:bg-zinc-900 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-black">Back to card</a>
+        <a href={hubHref(ids.channelId, ids.entryId)} className="inline-flex min-h-10 items-center rounded-full border border-ink-border-2 px-3 text-xs font-semibold text-ink-text-body hover:bg-panel focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-black">Back to card</a>
       </div>
 
-      <section className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+      <section className="rounded-2xl border border-ink-border bg-ink p-4">
         <div className="flex items-start gap-3">
           <div className="flex h-9 w-9 items-center justify-center rounded-full border border-current/20 bg-black/20 text-emerald-300">
             {validation?.verdict === 'veto' ? <ShieldAlert className="h-5 w-5" aria-hidden /> : <CheckCircle2 className="h-5 w-5" aria-hidden />}
           </div>
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="rounded-full border border-zinc-700 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-200">{validation?.verdict ?? 'unknown'}</span>
-              <span className="text-xs text-zinc-500">agreement {pct(validation?.agreement)} · confidence {pct(validation?.confidence)}</span>
+              <span className="rounded-full border border-ink-border-2 px-2 py-0.5 text-caption font-semibold uppercase tracking-[0.12em] text-ink-text-body">{validation?.verdict ?? 'unknown'}</span>
+              <span className="text-xs text-ink-text0">agreement {pct(validation?.agreement)} · confidence {pct(validation?.confidence)}</span>
             </div>
-            <p className="mt-2 text-sm leading-6 text-zinc-300">{validation?.rationale ?? 'Pinned verdict payload did not include a rationale.'}</p>
+            <p className="mt-2 text-sm leading-6 text-ink-text-label">{validation?.rationale ?? 'Pinned verdict payload did not include a rationale.'}</p>
           </div>
         </div>
       </section>
 
       <div className="mt-4 grid gap-4 lg:grid-cols-[1.2fr_0.8fr]">
-        <section className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
-          <h2 className="text-sm font-semibold text-zinc-100">Per-criterion verdict</h2>
+        <section className="rounded-2xl border border-ink-border bg-ink p-4">
+          <h2 className="text-sm font-semibold text-ink-text">Per-criterion verdict</h2>
           {criteria.length ? (
-            <ul className="mt-3 divide-y divide-zinc-800">
+            <ul className="mt-3 divide-y divide-ink-border">
               {criteria.map((criterion) => (
                 <li key={`${criterion.id}-${criterion.note ?? ''}`} className="py-3 text-sm">
                   <div className="flex items-center gap-2">
                     <span className={criterion.satisfied ? 'text-emerald-300' : 'text-red-300'}>{criterion.satisfied ? '✓' : '×'}</span>
-                    <span className="font-mono text-xs text-zinc-300">{criterion.id}</span>
+                    <span className="font-mono text-xs text-ink-text-label">{criterion.id}</span>
                   </div>
-                  {criterion.note ? <p className="mt-1 text-sm leading-6 text-zinc-400">{criterion.note}</p> : null}
+                  {criterion.note ? <p className="mt-1 text-sm leading-6 text-ink-text-subtle">{criterion.note}</p> : null}
                 </li>
               ))}
             </ul>
-          ) : <p className="mt-3 text-sm text-zinc-500">No per-criterion payload was pinned on this card.</p>}
+          ) : <p className="mt-3 text-sm text-ink-text0">No per-criterion payload was pinned on this card.</p>}
         </section>
 
         <aside className="space-y-4">
-          <section className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
-            <div className="flex items-center gap-2 text-sm font-semibold text-zinc-100"><GitMerge className="h-4 w-4" aria-hidden /> Done proof</div>
+          <section className="rounded-2xl border border-ink-border bg-ink p-4">
+            <div className="flex items-center gap-2 text-sm font-semibold text-ink-text"><GitMerge className="h-4 w-4" aria-hidden /> Done proof</div>
             {proof.doneProof ? (
               <dl className="mt-3 space-y-2 text-sm">
                 <Row label="verified" value={proof.doneProof.verified} />
@@ -126,10 +126,10 @@ export function GateVerdictProofView({ routeId }: { routeId?: string }) {
                 <Row label="mode" value={proof.doneProof.mode} />
                 {proof.doneProof.prUrl ? <Row label="PR" value={proof.doneProof.prUrl} /> : null}
               </dl>
-            ) : <p className="mt-3 text-sm text-zinc-500">No done-proof matched the pinned branch or issue.</p>}
+            ) : <p className="mt-3 text-sm text-ink-text0">No done-proof matched the pinned branch or issue.</p>}
           </section>
-          <section className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
-            <h2 className="text-sm font-semibold text-zinc-100">Land assessment</h2>
+          <section className="rounded-2xl border border-ink-border bg-ink p-4">
+            <h2 className="text-sm font-semibold text-ink-text">Land assessment</h2>
             {proof.landAttempt ? (
               <dl className="mt-3 space-y-2 text-sm">
                 <Row label="attempt" value={proof.landAttempt.attemptId} mono />
@@ -137,7 +137,7 @@ export function GateVerdictProofView({ routeId }: { routeId?: string }) {
                 <Row label="result" value={shortSha(proof.landAttempt.resultCommit)} mono />
                 <Row label="observed" value={proof.landAttempt.observedAt ?? 'unknown'} />
               </dl>
-            ) : <p className="mt-3 text-sm text-zinc-500">No land-assessment event matched this unit, feature, or done-proof commit.</p>}
+            ) : <p className="mt-3 text-sm text-ink-text0">No land-assessment event matched this unit, feature, or done-proof commit.</p>}
             {proof.malformedLandRecords ? <p className="mt-3 text-xs text-amber-200">{proof.malformedLandRecords} malformed land-assessment record(s) were counted and ignored.</p> : null}
           </section>
         </aside>
@@ -147,7 +147,7 @@ export function GateVerdictProofView({ routeId }: { routeId?: string }) {
 }
 
 function Shell({ children }: { children: React.ReactNode }) {
-  return <main className="min-h-full overflow-y-auto bg-[#09090a] p-5 text-zinc-100"><div className="mx-auto max-w-5xl">{children}</div></main>;
+  return <main className="min-h-full overflow-y-auto bg-[#09090a] p-5 text-ink-text"><div className="mx-auto max-w-5xl">{children}</div></main>;
 }
 
 function ErrorBox({ message, backHref }: { message: string; backHref?: string }) {
@@ -155,5 +155,5 @@ function ErrorBox({ message, backHref }: { message: string; backHref?: string })
 }
 
 function Row({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
-  return <div className="flex items-start justify-between gap-3"><dt className="text-xs uppercase tracking-[0.12em] text-zinc-500">{label}</dt><dd className={`text-right text-zinc-300 ${mono ? 'font-mono text-xs' : ''}`}>{value}</dd></div>;
+  return <div className="flex items-start justify-between gap-3"><dt className="text-xs uppercase tracking-[0.12em] text-ink-text0">{label}</dt><dd className={`text-right text-ink-text-label ${mono ? 'font-mono text-xs' : ''}`}>{value}</dd></div>;
 }

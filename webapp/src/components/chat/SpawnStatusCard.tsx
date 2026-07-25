@@ -28,23 +28,23 @@ export const SpawnStatusCard = ({
   const derived = spawnCardStatus(agent);
   return (
     <div
-      className="flex flex-col gap-2 rounded-lg border border-gray-200 bg-white p-3 dark:border-gray-800 dark:bg-gray-950"
+      className="flex flex-col gap-2 rounded-lg border border-ink-border bg-white p-3 border-ink-border bg-ink"
       data-spawn-status-card
       aria-label={`Spawned unit ${agent?.name ?? record.agentId}`}
     >
       <div className="flex items-center gap-2">
         <StatusChip status={derived.status} tone={derived.tone} />
-        <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-gray-800 dark:text-gray-200">{agent?.name ?? record.agentId}</span>
-        <span className="flex-shrink-0 text-[10px] text-gray-400 dark:text-gray-500">{new Date(record.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+        <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-ink-text-body">{agent?.name ?? record.agentId}</span>
+        <span className="flex-shrink-0 text-caption text-ink-text-subtle">{new Date(record.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
       </div>
-      <p className="text-[11px] text-gray-500 dark:text-gray-400">{derived.detail}</p>
+      <p className="text-caption text-ink-text-muted">{derived.detail}</p>
       {agent && <AgentMetaBar agent={agent}><AgentLandControls agent={agent} showToast={showToast} /></AgentMetaBar>}
       <div className="flex flex-wrap items-center gap-2">
         <button
           type="button"
           onClick={onViewRun}
           disabled={!agent}
-          className="flex min-h-7 items-center gap-1 rounded-full border border-gray-200 px-2.5 text-[11px] font-medium text-gray-600 transition-colors hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800"
+          className="flex min-h-7 items-center gap-1 rounded-full border border-ink-border px-2.5 text-caption font-medium text-ink-text-label transition-colors hover:bg-ink-surface disabled:cursor-not-allowed disabled:opacity-40 border-ink-border-2 text-ink-text-label dark:hover:bg-ink-surface"
         >
           <ExternalLink className="h-3 w-3" aria-hidden />
           View run
@@ -54,7 +54,7 @@ export const SpawnStatusCard = ({
             href={agent.prUrl}
             target="_blank"
             rel="noreferrer"
-            className="flex min-h-7 items-center gap-1 rounded-full border border-emerald-300 bg-emerald-50 px-2.5 text-[11px] font-medium text-emerald-700 transition-colors hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300 dark:hover:bg-emerald-900/40"
+            className="flex min-h-7 items-center gap-1 rounded-full border border-emerald-300 bg-emerald-50 px-2.5 text-caption font-medium text-emerald-700 transition-colors hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300 dark:hover:bg-emerald-900/40"
           >
             <GitMerge className="h-3 w-3" aria-hidden />
             Open PR #{agent.prNumber}

@@ -195,12 +195,12 @@ export const ComposerAttachmentChip = ({
   onInsertInline: () => void;
 }) => (
   <div className="flex flex-col items-start">
-    <div className="flex items-center gap-1 rounded-lg border border-gray-200 bg-white pl-2 pr-1 py-1 dark:border-gray-700 dark:bg-gray-950">
+    <div className="flex items-center gap-1 rounded-lg border border-ink-border bg-white pl-2 pr-1 py-1 border-ink-border-2 bg-ink">
       <button
         type="button"
         onClick={onToggle}
         title={chip.content.slice(0, 400)}
-        className="flex items-center gap-1.5 text-[11px] font-medium text-gray-700 hover:text-gray-900 dark:text-gray-300 dark:hover:text-gray-100"
+        className="flex items-center gap-1.5 text-caption font-medium text-ink-text-label hover:text-ink-text text-ink-text-label dark:hover:text-ink-text"
       >
         <Paperclip className="h-3 w-3" aria-hidden />
         {chip.label}
@@ -209,19 +209,19 @@ export const ComposerAttachmentChip = ({
         type="button"
         aria-label={`Remove ${chip.label}`}
         onClick={onRemove}
-        className="flex h-5 w-5 items-center justify-center rounded-full text-gray-400 hover:bg-gray-100 hover:text-gray-700 dark:hover:bg-gray-800 dark:hover:text-gray-300"
+        className="flex h-5 w-5 items-center justify-center rounded-full text-ink-text-subtle hover:bg-ink-surface hover:text-ink-text-label dark:hover:bg-ink-surface dark:hover:text-ink-text-label"
       >
         <X className="h-3 w-3" aria-hidden />
       </button>
     </div>
     {expanded && (
-      <div className="mt-1 max-h-40 w-full max-w-xs overflow-y-auto rounded-lg border border-gray-200 bg-gray-50 p-2 text-[11px] font-mono whitespace-pre-wrap text-gray-700 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300">
+      <div className="mt-1 max-h-40 w-full max-w-xs overflow-y-auto rounded-lg border border-ink-border bg-ink p-2 text-caption font-mono whitespace-pre-wrap text-ink-text-label border-ink-border bg-panel text-ink-text-label">
         {chip.content}
         <div className="mt-1 flex justify-end">
           <button
             type="button"
             onClick={onInsertInline}
-            className="text-[11px] font-medium text-amber-600 hover:underline dark:text-amber-400"
+            className="text-caption font-medium text-amber-600 hover:underline dark:text-amber-400"
           >
             Insert inline
           </button>
@@ -244,7 +244,7 @@ export const ComposerImageThumb = ({
   onAnnotate: () => void;
   onRemove: () => void;
 }) => (
-  <div className="group relative h-16 w-16 flex-shrink-0 overflow-hidden rounded-lg border border-gray-200 dark:border-gray-700">
+  <div className="group relative h-16 w-16 flex-shrink-0 overflow-hidden rounded-lg border border-ink-border">
     <img src={image.dataUrl} alt="Attached" className="h-full w-full object-cover" />
     {image.annotations.length > 0 && (
       <span className="absolute bottom-1 left-1 h-1.5 w-1.5 rounded-full bg-amber-500" aria-hidden title={`${image.annotations.length} annotation${image.annotations.length === 1 ? '' : 's'}`} />
@@ -254,7 +254,7 @@ export const ComposerImageThumb = ({
         type="button"
         aria-label="Annotate image"
         onClick={onAnnotate}
-        className="flex h-5 w-5 items-center justify-center rounded-full bg-white/90 text-gray-700 hover:bg-white dark:bg-gray-900/90 dark:text-gray-200"
+        className="flex h-5 w-5 items-center justify-center rounded-full bg-white/90 text-ink-text-label hover:bg-panel/90 text-ink-text-body"
       >
         <Pencil className="h-3 w-3" aria-hidden />
       </button>
@@ -262,7 +262,7 @@ export const ComposerImageThumb = ({
         type="button"
         aria-label="Remove image"
         onClick={onRemove}
-        className="flex h-5 w-5 items-center justify-center rounded-full bg-white/90 text-gray-700 hover:bg-white dark:bg-gray-900/90 dark:text-gray-200"
+        className="flex h-5 w-5 items-center justify-center rounded-full bg-white/90 text-ink-text-label hover:bg-panel/90 text-ink-text-body"
       >
         <X className="h-3 w-3" aria-hidden />
       </button>
@@ -299,8 +299,8 @@ export const ComposerSendButton = ({
         disabled={stopPending}
         className={`flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full transition-colors ${
           stopPending
-            ? 'bg-gray-200 text-gray-400 dark:bg-gray-800 dark:text-gray-500'
-            : 'bg-gray-900 text-white hover:bg-black dark:bg-gray-200 dark:text-gray-900 dark:hover:bg-white'
+            ? 'bg-ink-border text-ink-text-subtle bg-ink-surface text-ink-text0'
+            : 'bg-panel text-white hover:bg-black bg-ink-border text-ink-text dark:hover:bg-white'
         }`}
       >
         {stopPending ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Square className="h-3.5 w-3.5" aria-hidden />}
@@ -315,8 +315,8 @@ export const ComposerSendButton = ({
       disabled={!canSend}
       className={`flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full transition-colors ${
         canSend
-          ? 'bg-gray-900 text-white hover:bg-black dark:bg-gray-200 dark:text-gray-900 dark:hover:bg-white'
-          : 'bg-gray-200 text-gray-400 dark:bg-gray-800 dark:text-gray-500'
+          ? 'bg-panel text-white hover:bg-black bg-ink-border text-ink-text dark:hover:bg-white'
+          : 'bg-ink-border text-ink-text-subtle bg-ink-surface text-ink-text0'
       }`}
     >
       <ArrowUp className="h-4 w-4" aria-hidden />
@@ -836,7 +836,7 @@ export const Composer = ({
   };
 
   return (
-    <div className="p-3 bg-white dark:bg-gray-950 flex-shrink-0 border-t border-gray-200 dark:border-gray-800">
+    <div className="p-3 bg-panel flex-shrink-0 border-t border-ink-border">
       <div className="mb-2 flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-hide" aria-label="Contextual suggestions">
         {suggestionChips.map((suggestion, index) => (
           <button
@@ -848,7 +848,7 @@ export const Composer = ({
               setInput((prev) => applySuggestionChip(prev, suggestion.prompt));
               composerTextareaRef.current?.focus();
             }}
-            className="flex min-h-8 items-center gap-1.5 rounded-full border border-gray-200 bg-gray-100 px-2.5 py-1 text-[11px] font-medium text-gray-700 transition-colors whitespace-nowrap hover:bg-gray-200 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-gray-800 dark:focus-visible:ring-offset-gray-950"
+            className="flex min-h-8 items-center gap-1.5 rounded-full border border-ink-border bg-ink-surface px-2.5 py-1 text-caption font-medium text-ink-text-label transition-colors whitespace-nowrap hover:bg-ink-border focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 border-ink-border bg-panel text-ink-text-label dark:hover:bg-ink-surface dark:focus-visible:ring-offset-gray-950"
           >
             {index === 0 && <Sparkles className="h-3.5 w-3.5 text-amber-500 dark:text-amber-400" aria-hidden />}
             {suggestion.label}
@@ -857,7 +857,7 @@ export const Composer = ({
       </div>
 
       <div
-        className={`relative bg-gray-50 dark:bg-gray-900 border rounded-xl flex flex-col transition-colors ${isDragOver ? 'border-amber-500 ring-2 ring-amber-500/30' : 'border-gray-200 dark:border-gray-800 focus-within:border-gray-400 dark:focus-within:border-gray-600'}`}
+        className={`relative bg-ink-surface border rounded-xl flex flex-col transition-colors ${isDragOver ? 'border-amber-500 ring-2 ring-amber-500/30' : 'border-ink-border focus-within:border-ink-border-2 dark:focus-within:border-ink-border-2'}`}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
@@ -873,9 +873,9 @@ export const Composer = ({
             id={mentionMenu.listboxId}
             role="listbox"
             aria-label="Mention an agent or issue"
-            className="absolute bottom-full left-0 mb-2 w-full max-h-48 overflow-y-auto bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl shadow-lg z-50"
+            className="absolute bottom-full left-0 mb-2 w-full max-h-48 overflow-y-auto bg-panel border border-ink-border rounded-xl shadow-lg z-50"
           >
-            <div className="p-2 text-xs font-medium text-gray-500 border-b border-gray-200 dark:border-gray-800">
+            <div className="p-2 text-xs font-medium text-ink-text0 border-b border-ink-border">
               Mention an agent or issue
             </div>
             {/* `mentionMenu.isOpen` is only true when there's at least one match — a
@@ -883,7 +883,7 @@ export const Composer = ({
                 rather than showing a "No matching tasks" popup that hijacks the keyboard. */}
             {buildMentionSections(agents, tasks, mentionMenu.query).map((section) => section.items.length > 0 && (
               <div key={section.id} data-mention-section={section.id}>
-                <div className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-gray-400">{section.label}</div>
+                <div className="px-3 py-1.5 text-caption font-semibold uppercase tracking-wide text-ink-text-subtle">{section.label}</div>
                 {section.items.map((item) => {
                   const index = mentionMenu.items.findIndex((candidate) => candidate.kind === item.kind && candidate.id === item.id);
                   return (
@@ -891,7 +891,7 @@ export const Composer = ({
                       key={`${item.kind}:${item.id}`}
                       type="button"
                       {...mentionMenu.getOptionProps(index)}
-                      className={`w-full text-left px-3 py-2 text-sm transition-colors flex items-center gap-2 ${index === mentionMenu.activeIndex ? 'bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100' : 'text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800'}`}
+                      className={`w-full text-left px-3 py-2 text-sm transition-colors flex items-center gap-2 ${index === mentionMenu.activeIndex ? 'bg-ink-surface text-ink-text' : 'text-ink-text-label hover:bg-ink-surface'}`}
                     >
                       <span className="w-2 h-2 rounded-full" style={{ backgroundColor: item.kind === 'agent' ? (item.status === 'working' ? '#f59e0b' : item.status === 'input' || item.status === 'idle' ? '#10b981' : '#64748b') : '#3b82f6' }}></span>
                       <span className="truncate">{mentionLabel(item)}</span>
@@ -927,13 +927,13 @@ export const Composer = ({
         )}
 
         {attachError && (
-          <div className="px-2.5 pt-2 text-[11px] text-red-600 dark:text-red-400" role="alert">
+          <div className="px-2.5 pt-2 text-caption text-red-600 dark:text-red-400" role="alert">
             {attachError}
           </div>
         )}
 
         {voiceError && (
-          <div className="px-2.5 pt-2 text-[11px] text-red-600 dark:text-red-400" role="alert">
+          <div className="px-2.5 pt-2 text-caption text-red-600 dark:text-red-400" role="alert">
             {voiceError}
           </div>
         )}
@@ -948,7 +948,7 @@ export const Composer = ({
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
           placeholder={placeholder ?? 'Type @ to link a task...'}
-          className="w-full bg-transparent border-none outline-none text-[13px] text-gray-900 dark:text-gray-200 px-3 py-2.5 resize-none overflow-y-auto"
+          className="w-full bg-transparent border-none outline-none text-[13px] text-ink-text text-ink-text-body px-3 py-2.5 resize-none overflow-y-auto"
           disabled={isLoading || isSending}
           rows={1}
           {...mentionMenu.comboboxProps}
@@ -958,7 +958,7 @@ export const Composer = ({
             <select
               value={selectedModel}
               onChange={(event) => onModelChange(event.target.value)}
-              className="h-8 max-w-36 rounded-full border border-gray-200 bg-white px-2 text-[11px] font-medium text-gray-700 outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-300"
+              className="h-8 max-w-36 rounded-full border border-ink-border bg-white px-2 text-caption font-medium text-ink-text-label outline-none focus-visible:ring-2 focus-visible:ring-amber-500 border-ink-border-2 bg-ink text-ink-text-label"
               aria-label="Model"
             >
               {modelOptions.map((option) => (
@@ -972,7 +972,7 @@ export const Composer = ({
               aria-label="Attach image"
               title="Attach image"
               onClick={() => fileInputRef.current?.click()}
-              className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800"
+              className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-ink-text0 hover:bg-ink-surface text-ink-text-subtle dark:hover:bg-ink-surface"
             >
               <ImagePlus className="h-4 w-4" aria-hidden />
             </button>
@@ -982,7 +982,7 @@ export const Composer = ({
               title="Capture view"
               disabled={isCapturing}
               onClick={() => void handleCaptureView()}
-              className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-gray-500 hover:bg-gray-100 disabled:opacity-40 dark:text-gray-400 dark:hover:bg-gray-800"
+              className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-ink-text0 hover:bg-ink-surface disabled:opacity-40 text-ink-text-subtle dark:hover:bg-ink-surface"
             >
               {isCapturing ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Camera className="h-4 w-4" aria-hidden />}
             </button>
@@ -1001,7 +1001,7 @@ export const Composer = ({
               className={`flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full transition-colors disabled:opacity-40 ${
                 isListening
                   ? 'bg-red-100 text-red-500 dark:bg-red-900/30'
-                  : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'
+                  : 'text-ink-text0 hover:bg-ink-surface text-ink-text-subtle dark:hover:bg-ink-surface'
               }`}
             >
               <Mic className="h-4 w-4" aria-hidden />
@@ -1015,13 +1015,13 @@ export const Composer = ({
                 aria-expanded={grrOpen}
                 onClick={() => (grrOpen ? closeGrr() : setGrrOpen(true))}
                 className={`flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full transition-colors ${
-                  grrOpen ? 'bg-amber-100 text-amber-600 dark:bg-amber-500/20 dark:text-amber-400' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'
+                  grrOpen ? 'bg-amber-100 text-amber-600 dark:bg-amber-500/20 dark:text-amber-400' : 'text-ink-text0 hover:bg-ink-surface text-ink-text-subtle dark:hover:bg-ink-surface'
                 }`}
               >
                 <Frown className="h-4 w-4" aria-hidden />
               </button>
               {grrOpen && (
-                <div className="absolute bottom-10 left-0 z-50 w-72 rounded-xl border border-gray-200 bg-white p-2 shadow-lg dark:border-gray-800 dark:bg-gray-900" role="dialog" aria-label="Log friction">
+                <div className="absolute bottom-10 left-0 z-50 w-72 rounded-xl border border-ink-border bg-white p-2 shadow-lg border-ink-border bg-panel" role="dialog" aria-label="Log friction">
                   <input
                     ref={grrInputRef}
                     value={grrText}
@@ -1029,9 +1029,9 @@ export const Composer = ({
                     onKeyDown={handleGrrKeyDown}
                     placeholder="What just annoyed you?"
                     disabled={grrBusy}
-                    className="w-full rounded-lg bg-gray-50 px-2 py-1.5 text-[13px] text-gray-900 outline-none placeholder:text-gray-400 dark:bg-gray-950 dark:text-gray-200"
+                    className="w-full rounded-lg bg-ink px-2 py-1.5 text-[13px] text-ink-text outline-none placeholder:text-ink-text-subtle bg-ink text-ink-text-body"
                   />
-                  <div className="mt-1 flex items-center justify-between px-1 text-[10px] text-gray-400">
+                  <div className="mt-1 flex items-center justify-between px-1 text-caption text-ink-text-subtle">
                     <span>{grrBusy ? 'Logging…' : 'Enter logs it · Esc cancels'}</span>
                     <Frown className="h-3 w-3 text-amber-500/70" aria-hidden />
                   </div>

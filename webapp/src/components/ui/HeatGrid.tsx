@@ -23,7 +23,7 @@ export interface HeatGridProps {
 
 /** Five-step intensity ramp keyed to the row's own max (relative heat). */
 function cellClass(value: number, rowMax: number): string {
-  if (!value || value <= 0) return 'bg-gray-100 dark:bg-gray-800/60';
+  if (!value || value <= 0) return 'bg-ink-surface';
   const r = value / (rowMax || 1);
   if (r > 0.75) return 'bg-orange-600 dark:bg-orange-500';
   if (r > 0.5) return 'bg-orange-500 dark:bg-orange-500/80';
@@ -38,7 +38,7 @@ function shortDay(iso: string): string {
 
 export const HeatGrid: React.FC<HeatGridProps> = ({ days, rows, emptyLabel = 'No activity in this window.' }) => {
   if (rows.length === 0) {
-    return <div className="px-4 py-6 text-center text-sm text-gray-500 dark:text-gray-400">{emptyLabel}</div>;
+    return <div className="px-4 py-6 text-center text-sm text-ink-text-muted">{emptyLabel}</div>;
   }
 
   return (
@@ -48,7 +48,7 @@ export const HeatGrid: React.FC<HeatGridProps> = ({ days, rows, emptyLabel = 'No
           <tr>
             <th className="w-0" />
             {days.map((d) => (
-              <th key={d} className="px-0 text-center text-[9px] font-medium tabular-nums text-gray-400" title={d}>
+              <th key={d} className="px-0 text-center text-[9px] font-medium tabular-nums text-ink-text-subtle" title={d}>
                 {shortDay(d)}
               </th>
             ))}
@@ -60,7 +60,7 @@ export const HeatGrid: React.FC<HeatGridProps> = ({ days, rows, emptyLabel = 'No
             const rowMax = Math.max(0, ...row.daily);
             return (
               <tr key={row.label} className="group">
-                <td className="max-w-[14rem] truncate pr-3 text-xs font-medium text-gray-700 dark:text-gray-300" title={row.label}>
+                <td className="max-w-[14rem] truncate pr-3 text-xs font-medium text-ink-text-label" title={row.label}>
                   {row.label}
                 </td>
                 {days.map((d, i) => {
@@ -75,7 +75,7 @@ export const HeatGrid: React.FC<HeatGridProps> = ({ days, rows, emptyLabel = 'No
                     </td>
                   );
                 })}
-                {row.note != null && <td className="whitespace-nowrap pl-3 text-right text-[11px] text-gray-400">{row.note}</td>}
+                {row.note != null && <td className="whitespace-nowrap pl-3 text-right text-caption text-ink-text-subtle">{row.note}</td>}
               </tr>
             );
           })}

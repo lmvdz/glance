@@ -15,12 +15,12 @@ test("PlanMarkdown renders plan markdown with prose/table styling", () => {
   expect(html).toContain("<table>");
 });
 
-test("PlanMarkdown uses a light code-block background outside dark mode", () => {
+test("PlanMarkdown uses the adaptive ink code-block background", () => {
   const html = renderToStaticMarkup(<PlanMarkdown content={"```ts\nconst ok = true;\n```"} />);
 
-  expect(html).toContain("prose-pre:bg-gray-50");
-  expect(html).toContain("dark:prose-pre:bg-gray-950");
-  expect(html).not.toContain(" prose-pre:bg-gray-950 ");
+  expect(html).toContain("prose-pre:bg-ink");
+  expect(html).toContain("dark:prose-pre:bg-ink");
+  
 });
 
 test("parseMeta reads key values and quoted values", () => {

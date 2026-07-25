@@ -57,7 +57,7 @@ export default function CalloutBlock({ body, params, blockId }: BlockProps) {
       className="not-prose my-3 rounded-md border border-[var(--wf-border)] border-l-4 bg-[var(--wf-surface-raised)] p-3 text-sm text-[var(--wf-text-muted)] shadow-sm"
       style={{ borderLeftColor: style.color }}
     >
-      <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide" style={{ color: style.color }}>
+      <div className="mb-2 text-caption font-semibold uppercase tracking-wide" style={{ color: style.color }}>
         {style.label}
       </div>
       <div className="leading-relaxed">

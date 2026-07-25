@@ -11,7 +11,7 @@ import { fmtDuration } from './ToolCallGroup';
 // formatting helpers they share.
 
 const fmtTokens = (n?: number) => n == null ? undefined : n < 1000 ? `${n}` : n < 1_000_000 ? `${(n / 1000).toFixed(1)}K` : `${(n / 1_000_000).toFixed(1)}M`;
-const ctxTone = (pct?: number) => pct == null ? 'text-gray-500 dark:text-gray-400' : pct > 0.9 ? 'text-red-600 dark:text-red-400' : pct > 0.7 ? 'text-amber-600 dark:text-amber-400' : 'text-gray-700 dark:text-gray-300';
+const ctxTone = (pct?: number) => pct == null ? 'text-ink-text-muted' : pct > 0.9 ? 'text-red-600 dark:text-red-400' : pct > 0.7 ? 'text-amber-600 dark:text-amber-400' : 'text-ink-text-label';
 
 const gitSummary = (agent?: AgentDTO, changedFiles?: number | null) => {
   if (!agent) return '';
@@ -24,8 +24,8 @@ export const AgentMetaBar = ({ agent, changedFiles, children }: { agent?: AgentD
   const validation = validationBadge(agent);
   const confidence = confidenceBadge(agent);
   return (
-    <div className="flex flex-shrink-0 items-center gap-2 border-b border-gray-200 bg-white px-4 py-1.5 text-[11px] text-gray-500 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-400" aria-label="Agent mode and git status">
-      <span className="rounded-full border border-gray-200 px-1.5 py-0.5 uppercase text-gray-600 dark:border-gray-800 dark:text-gray-300" title={agent.blockedReason ? `Blocked: ${agent.blockedReason}` : `Requested ${agent.autonomyMode ?? 'assist'}; effective ${agent.effectiveMode ?? 'assist'}`}>{agent.effectiveMode ?? 'assist'}</span>
+    <div className="flex flex-shrink-0 items-center gap-2 border-b border-ink-border bg-white px-4 py-1.5 text-caption text-ink-text0 border-ink-border bg-ink text-ink-text-subtle" aria-label="Agent mode and git status">
+      <span className="rounded-full border border-ink-border px-1.5 py-0.5 uppercase text-ink-text-label border-ink-border text-ink-text-label" title={agent.blockedReason ? `Blocked: ${agent.blockedReason}` : `Requested ${agent.autonomyMode ?? 'assist'}; effective ${agent.effectiveMode ?? 'assist'}`}>{agent.effectiveMode ?? 'assist'}</span>
       {/* Unit chrome for a promoted console chat (daily-onramp 06): same thread, same agent id —
           only its standing changed, and this pill is the visible half of that flip. */}
       {agent.promoted && (
@@ -33,7 +33,7 @@ export const AgentMetaBar = ({ agent, changedFiles, children }: { agent?: AgentD
           unit
         </span>
       )}
-      <span className="rounded-full border border-gray-200 px-1.5 py-0.5 text-gray-600 dark:border-gray-800 dark:text-gray-300" title={agent.proof?.fingerprint ?? 'No proof fingerprint'}>proof: {agent.verificationState ?? 'unknown'}</span>
+      <span className="rounded-full border border-ink-border px-1.5 py-0.5 text-ink-text-label border-ink-border text-ink-text-label" title={agent.proof?.fingerprint ?? 'No proof fingerprint'}>proof: {agent.verificationState ?? 'unknown'}</span>
       {validation && <span className={`rounded-full px-1.5 py-0.5 ${validation.cls}`} title={validation.title}>{validation.label}</span>}
       {confidence && <span className={`rounded-full px-1.5 py-0.5 ${confidence.cls}`} title={confidence.title}>{confidence.label}</span>}
       <span className="truncate font-mono" title={`${agent.repo}${agent.branch ? ` · ${agent.branch}` : ''}`}>{gitSummary(agent, changedFiles)}</span>
@@ -93,7 +93,7 @@ export const AgentLandControls = ({ agent, showToast }: { agent?: AgentDTO; show
     }
   };
 
-  const pill = 'flex min-h-6 items-center gap-1 rounded-full border px-2 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 disabled:cursor-not-allowed disabled:opacity-50';
+  const pill = 'flex min-h-6 items-center gap-1 rounded-full border px-2 text-caption font-medium transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 disabled:cursor-not-allowed disabled:opacity-50';
   return (
     <>
       <button
@@ -101,7 +101,7 @@ export const AgentLandControls = ({ agent, showToast }: { agent?: AgentDTO; show
         disabled={busy != null}
         onClick={() => void runVerify()}
         title="Run the repo's acceptance command in this worktree and record a land proof"
-        className={`${pill} border-gray-200 text-gray-600 hover:bg-gray-100 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800`}
+        className={`${pill} border-ink-border text-ink-text-label hover:bg-ink-surface border-ink-border-2 text-ink-text-label dark:hover:bg-ink-surface`}
       >
         {busy === 'verify' ? 'Verifying…' : 'Verify'}
       </button>
@@ -153,7 +153,7 @@ export const AgentPromoteButton = ({ agent, showToast }: { agent?: AgentDTO; sho
       disabled={busy}
       onClick={() => void promote()}
       title="Promote this chat into a gated working unit — keeps this thread and its history"
-      className="flex min-h-6 items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 text-[11px] font-medium text-amber-700 transition-colors hover:bg-amber-100 focus-visible:ring-2 focus-visible:ring-amber-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-300 dark:hover:bg-amber-900/40"
+      className="flex min-h-6 items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 text-caption font-medium text-amber-700 transition-colors hover:bg-amber-100 focus-visible:ring-2 focus-visible:ring-amber-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-300 dark:hover:bg-amber-900/40"
     >
       {busy ? 'Promoting…' : 'Make this a unit'}
     </button>
@@ -190,7 +190,7 @@ export const AgentOpenWorktreeButton = ({ agent, showToast }: { agent?: AgentDTO
       disabled={busy}
       onClick={() => void open()}
       title={`Open ${agent.worktree} in your editor (daemon-side; copies the path when it can't)`}
-      className="flex min-h-6 items-center gap-1 rounded-full border border-gray-200 px-2 text-[11px] font-medium text-gray-600 transition-colors hover:bg-gray-100 focus-visible:ring-2 focus-visible:ring-amber-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800"
+      className="flex min-h-6 items-center gap-1 rounded-full border border-ink-border px-2 text-caption font-medium text-ink-text-label transition-colors hover:bg-ink-surface focus-visible:ring-2 focus-visible:ring-amber-500 disabled:cursor-not-allowed disabled:opacity-50 border-ink-border-2 text-ink-text-label dark:hover:bg-ink-surface"
     >
       {busy ? 'Opening…' : 'Open worktree'}
     </button>
@@ -209,5 +209,5 @@ export const ComposerStats = ({ agent }: { agent?: AgentDTO }) => {
     duration && <span key="time" title="run time">{duration}</span>,
   ].filter(Boolean);
   if (!parts.length) return null;
-  return <div className="flex min-w-0 items-center gap-1.5 truncate text-[11px] text-gray-500 dark:text-gray-400" aria-label="Run metrics">{parts.map((part, index) => <React.Fragment key={index}>{index > 0 && <span className="text-gray-300 dark:text-gray-700">·</span>}{part}</React.Fragment>)}</div>;
+  return <div className="flex min-w-0 items-center gap-1.5 truncate text-caption text-ink-text-muted" aria-label="Run metrics">{parts.map((part, index) => <React.Fragment key={index}>{index > 0 && <span className="text-ink-text-label text-ink-text-label">·</span>}{part}</React.Fragment>)}</div>;
 };

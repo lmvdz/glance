@@ -39,14 +39,14 @@ export const PageContextDebugPanel: React.FC = () => {
   return (
     <div
       data-testid="page-context-debug-panel"
-      className="fixed bottom-16 right-4 z-50 flex max-h-[60vh] w-96 flex-col overflow-hidden rounded-lg border border-gray-700 bg-black/90 shadow-2xl"
+      className="fixed bottom-16 right-4 z-50 flex max-h-[60vh] w-96 flex-col overflow-hidden rounded-lg border border-ink-border-2 bg-black/90 shadow-2xl"
     >
-      <div className="flex flex-shrink-0 items-center justify-between border-b border-gray-700 px-3 py-1.5 text-[11px] text-gray-400">
+      <div className="flex flex-shrink-0 items-center justify-between border-b border-ink-border-2 px-3 py-1.5 text-caption text-ink-text-subtle">
         <span>PageContext (dev only — ⌃⇧D to toggle)</span>
         <button
           type="button"
           onClick={() => setOpen(false)}
-          className="rounded px-1 text-gray-500 hover:bg-gray-800 hover:text-gray-200"
+          className="rounded px-1 text-ink-text0 hover:bg-ink-surface hover:text-ink-text-body"
           aria-label="Close PageContext debug panel"
         >
           ×
@@ -54,7 +54,7 @@ export const PageContextDebugPanel: React.FC = () => {
       </div>
       <pre
         data-testid="page-context-debug-json"
-        className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words p-3 font-mono text-[11px] text-emerald-300"
+        className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words p-3 font-mono text-caption text-emerald-300"
       >
         {pageContext ? JSON.stringify(pageContext, null, 2) : 'null — no view has published a PageContext yet'}
       </pre>

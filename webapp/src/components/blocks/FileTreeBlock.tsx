@@ -102,7 +102,7 @@ function ChangeBadge({ change }: { change: FileChange }) {
 
   return (
     <span
-      className="ml-auto max-w-[min(28rem,55vw)] truncate rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
+      className="ml-auto max-w-[min(28rem,55vw)] truncate rounded-full border px-2 py-0.5 text-caption font-semibold uppercase tracking-wide"
       style={KIND_STYLES[change.kind]}
       title={label}
     >
@@ -121,7 +121,7 @@ function TreeRows({ nodes, depth = 0 }: { nodes: TreeNode[]; depth?: number }) {
           <React.Fragment key={node.path}>
             <div className="flex min-h-7 items-center gap-2 rounded-md px-2 py-1.5" style={{ paddingLeft: `${0.5 + depth * 1.25}rem` }}>
               <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden="true" style={{ color: isDirectory ? 'var(--wf-accent)' : 'var(--wf-text-subtle)' }} />
-              <span className="min-w-0 truncate font-mono text-[11px] leading-5" style={{ color: 'var(--wf-text)' }} title={node.change?.path ?? node.path}>
+              <span className="min-w-0 truncate font-mono text-caption leading-5" style={{ color: 'var(--wf-text)' }} title={node.change?.path ?? node.path}>
                 {node.name}
               </span>
               {node.change ? <ChangeBadge change={node.change} /> : null}
@@ -151,7 +151,7 @@ export default function FileTreeBlock({ body, blockId }: BlockProps) {
         <div className="font-semibold uppercase tracking-wide" style={{ color: 'var(--wf-text)' }}>
           File tree
         </div>
-        <div className="font-mono text-[10px]" style={{ color: 'var(--wf-text-subtle)' }}>
+        <div className="font-mono text-caption" style={{ color: 'var(--wf-text-subtle)' }}>
           {changes.length} {changes.length === 1 ? 'file' : 'files'}
         </div>
       </div>
@@ -161,7 +161,7 @@ export default function FileTreeBlock({ body, blockId }: BlockProps) {
           <TreeRows nodes={roots} />
         </div>
       ) : (
-        <div className="rounded-md border px-3 py-2 font-mono text-[11px]" style={{ backgroundColor: 'var(--wf-paper)', borderColor: 'var(--wf-border)', color: 'var(--wf-text-subtle)' }}>
+        <div className="rounded-md border px-3 py-2 font-mono text-caption" style={{ backgroundColor: 'var(--wf-paper)', borderColor: 'var(--wf-border)', color: 'var(--wf-text-subtle)' }}>
           No files
         </div>
       )}

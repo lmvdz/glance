@@ -55,7 +55,7 @@ export default function AnnotatedCodeBlock({ body, params, blockId }: BlockProps
       </div>
 
       <div className="grid gap-0 lg:grid-cols-[minmax(0,1fr)_18rem]">
-        <div className="min-w-0 overflow-x-auto bg-gray-950">
+        <div className="min-w-0 overflow-x-auto bg-ink">
           <CodeHighlight
             language={language}
             showLineNumbers
@@ -90,7 +90,7 @@ export default function AnnotatedCodeBlock({ body, params, blockId }: BlockProps
                   key={`${note.start}-${note.end}-${index}`}
                   className="rounded-md border border-[var(--wf-border)] bg-[var(--wf-surface)] p-3"
                 >
-                  <div className="mb-1 font-mono text-[11px] font-semibold uppercase tracking-wide text-[var(--wf-accent)]">
+                  <div className="mb-1 font-mono text-caption font-semibold uppercase tracking-wide text-[var(--wf-accent)]">
                     {lineLabel(note)}
                   </div>
                   <p className="m-0 text-sm leading-relaxed text-[var(--wf-text)]">{note.note}</p>

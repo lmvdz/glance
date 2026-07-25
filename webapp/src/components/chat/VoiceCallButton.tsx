@@ -39,7 +39,7 @@ export const VoiceCallButton = ({
       className={`flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
         active
           ? 'border-amber-300 bg-amber-50 text-amber-600 dark:border-amber-800/60 dark:bg-amber-900/20 dark:text-amber-400'
-          : 'border-transparent text-gray-500 hover:bg-amber-50 hover:text-amber-600 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 dark:text-gray-400 dark:hover:bg-amber-900/20 dark:hover:text-amber-400 dark:focus-visible:ring-offset-gray-950'
+          : 'border-transparent text-ink-text0 hover:bg-amber-50 hover:text-amber-600 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 text-ink-text-subtle dark:hover:bg-amber-900/20 dark:hover:text-amber-400 dark:focus-visible:ring-offset-gray-950'
       }`}
     >
       <PhoneCall className="h-4 w-4" aria-hidden />

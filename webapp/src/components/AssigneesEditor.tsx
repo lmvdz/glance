@@ -119,8 +119,8 @@ export const AssigneesEditor: React.FC<AssigneesEditorProps> = ({ featureId, rep
   if (!loaded) return null;
 
   const header = (
-    <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest flex items-center gap-2 mb-3 border-b border-gray-100 dark:border-gray-800 pb-2">
-      <Users className="w-3.5 h-3.5" /> Assignees <span className="text-gray-500 font-medium">{assignees.length}</span>
+    <div className="text-caption font-semibold text-ink-text-subtle uppercase tracking-widest flex items-center gap-2 mb-3 border-b border-ink-border pb-2">
+      <Users className="w-3.5 h-3.5" /> Assignees <span className="text-ink-text0 font-medium">{assignees.length}</span>
     </div>
   );
 
@@ -141,20 +141,20 @@ export const AssigneesEditor: React.FC<AssigneesEditorProps> = ({ featureId, rep
                 onClick={() => toggle(m.userId)}
                 aria-pressed={on}
                 title={m.email}
-                className={`rounded px-2 py-0.5 text-[11px] font-medium border transition-colors disabled:opacity-60 ${
+                className={`rounded px-2 py-0.5 text-caption font-medium border transition-colors disabled:opacity-60 ${
                   on
                     ? 'border-amber-400/60 bg-amber-50 text-amber-800 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-300'
-                    : 'border-gray-200 bg-white text-gray-600 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-gray-800'
+                    : 'border-ink-border bg-white text-ink-text-label hover:bg-ink border-ink-border-2 bg-panel text-ink-text-label dark:hover:bg-ink-surface'
                 }`}
               >
                 {me && m.userId === me.user.id ? `${m.name || m.email} (You)` : m.name || m.email}
               </button>
             );
           })}
-          {members.length === 0 && <span className="text-gray-400 text-xs italic">No org members.</span>}
+          {members.length === 0 && <span className="text-ink-text-subtle text-xs italic">No org members.</span>}
         </div>
         {err && (
-          <div className="mt-2 text-[11px] text-red-600 dark:text-red-400" role="alert">
+          <div className="mt-2 text-caption text-red-600 dark:text-red-400" role="alert">
             {err}
           </div>
         )}
@@ -169,7 +169,7 @@ export const AssigneesEditor: React.FC<AssigneesEditorProps> = ({ featureId, rep
         {header}
         <div className="flex flex-wrap gap-1.5">
           {assignees.length === 0 ? (
-            <span className="text-gray-400 text-xs italic">No assignees.</span>
+            <span className="text-ink-text-subtle text-xs italic">No assignees.</span>
           ) : (
             assignees.map((id) => <StatusChip key={id} status={labelFor(id)} tone="human" variant="dim" />)
           )}
@@ -185,12 +185,12 @@ export const AssigneesEditor: React.FC<AssigneesEditorProps> = ({ featureId, rep
         {header}
         <div className="flex flex-wrap items-center gap-1.5">
           {assignees.length === 0 ? (
-            <span className="text-gray-400 text-xs italic">No assignees.</span>
+            <span className="text-ink-text-subtle text-xs italic">No assignees.</span>
           ) : (
             assignees.map((id) => <StatusChip key={id} status={labelFor(id)} tone="human" variant="dim" />)
           )}
         </div>
-        <div className="mt-2 text-[11px] text-gray-400 dark:text-gray-500">
+        <div className="mt-2 text-caption text-ink-text-subtle">
           Single-operator mode. Multi-user voting needs DB mode.
         </div>
       </div>

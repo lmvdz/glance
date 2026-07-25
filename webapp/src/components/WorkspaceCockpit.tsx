@@ -102,7 +102,7 @@ function matchesFilter(text: string, needle: string): boolean {
 const PlanLine: React.FC<{ item?: ActiveWorkItem }> = ({ item }) => {
   if (!item) return null;
   return (
-    <div className="mt-1 flex min-w-0 items-center gap-1.5 text-[11px] text-gray-400 dark:text-gray-500">
+    <div className="mt-1 flex min-w-0 items-center gap-1.5 text-caption text-ink-text-subtle">
       <FolderGit2 className="h-3 w-3 flex-shrink-0" aria-hidden="true" />
       <span className="truncate">{item.title}</span>
       {item.progress && item.progress.total > 0 && (
@@ -125,7 +125,7 @@ const InlineOptions: React.FC<{ options: string[]; onPick: (opt: string) => void
       <button
         key={opt}
         onClick={(e) => { e.stopPropagation(); onPick(opt); }}
-        className="rounded border border-gray-200 bg-white px-1.5 py-0.5 text-[10px] font-medium text-gray-700 transition-colors hover:border-amber-400 hover:bg-amber-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-200 dark:hover:border-amber-600 dark:hover:bg-amber-950/30"
+        className="rounded border border-ink-border bg-white px-1.5 py-0.5 text-caption font-medium text-ink-text-label transition-colors hover:border-amber-400 hover:bg-amber-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 border-ink-border-2 bg-ink text-ink-text-body dark:hover:border-amber-600 dark:hover:bg-amber-950/30"
       >
         {opt}
       </button>
@@ -148,10 +148,10 @@ const RowActionChip: React.FC<{ action: AttentionItem['action']; onClick: () => 
   return (
     <button
       onClick={(e) => { e.stopPropagation(); onClick(); }}
-      className={`flex-shrink-0 rounded-md px-2 py-0.5 text-[10px] font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 ${
+      className={`flex-shrink-0 rounded-md px-2 py-0.5 text-caption font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 ${
         solid
           ? 'bg-amber-500 text-white hover:bg-amber-600'
-          : 'border border-gray-200 bg-white text-gray-600 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300'
+          : 'border border-ink-border bg-white text-ink-text-label hover:bg-ink border-ink-border-2 bg-panel text-ink-text-label'
       }`}
     >
       {action.label}
@@ -182,12 +182,12 @@ const RosterAgentRow: React.FC<{
       onClick={onSelect}
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(); } }}
       aria-current={selected ? 'true' : undefined}
-      className={`flex w-full flex-col items-start gap-1 border-b border-gray-100 px-3 py-2 text-left transition-colors dark:border-ink-border ${
-        selected ? 'bg-[color:var(--wf-accent-soft)]' : 'cursor-pointer hover:bg-gray-50 dark:hover:bg-ink-surface/60'
+      className={`flex w-full flex-col items-start gap-1 border-b border-ink-border px-3 py-2 text-left transition-colors dark:border-ink-border ${
+        selected ? 'bg-[color:var(--wf-accent-soft)]' : 'cursor-pointer hover:bg-ink dark:hover:bg-ink-surface/60'
       }`}
     >
       <div className="flex w-full items-center gap-2">
-        <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-gray-900 dark:text-gray-100">{agent.name}</span>
+        <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-ink-text">{agent.name}</span>
         {/* Ember discipline (brand.md): solid ember reserved for the selected/streaming thing. */}
         <StatusChip
           status={agent.status}
@@ -196,14 +196,14 @@ const RosterAgentRow: React.FC<{
         {(agent.status === 'input' || agent.status === 'error') && (
           <button
             onClick={(e) => { e.stopPropagation(); onIntervene(agent.id); }}
-            className="flex-shrink-0 rounded border border-gray-200 bg-white px-2 py-0.5 text-[10px] font-medium text-gray-600 transition-colors hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-gray-800"
+            className="flex-shrink-0 rounded border border-ink-border bg-white px-2 py-0.5 text-caption font-medium text-ink-text-label transition-colors hover:bg-ink focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 border-ink-border-2 bg-panel text-ink-text-label dark:hover:bg-ink-surface"
             style={{ minHeight: '44px', minWidth: '44px' }}
           >
             Step in
           </button>
         )}
       </div>
-      <div className="flex w-full items-center gap-2 text-[11px] text-gray-400 dark:text-gray-500">
+      <div className="flex w-full items-center gap-2 text-caption text-ink-text-subtle">
         {agent.branch && (
           <span className="flex min-w-0 items-center gap-1 truncate font-mono">
             <GitBranch className="h-3 w-3 flex-shrink-0" aria-hidden="true" />
@@ -214,7 +214,7 @@ const RosterAgentRow: React.FC<{
       </div>
       <PlanLine item={planItem} />
       {attn?.detail && (
-        <div className={`w-full truncate text-[11px] ${attn.severity === 'critical' ? 'text-red-500 dark:text-red-400' : 'text-amber-600 dark:text-amber-400'}`} title={attn.detail}>
+        <div className={`w-full truncate text-caption ${attn.severity === 'critical' ? 'text-red-500 dark:text-red-400' : 'text-amber-600 dark:text-amber-400'}`} title={attn.detail}>
           {attn.detail}
         </div>
       )}
@@ -250,7 +250,7 @@ const RosterAgentRow: React.FC<{
 const VirtualNeedsRow: React.FC<{ item: AttentionItem; onOpen: (agentId?: string) => void; onRaiseCap: () => void }> = ({ item, onOpen, onRaiseCap }) => {
   const t = toneClasses(item.severity === 'critical' ? 'critical' : 'warn');
   return (
-    <div className="flex items-start gap-2 border-b border-gray-100 px-3 py-2 dark:border-ink-border">
+    <div className="flex items-start gap-2 border-b border-ink-border px-3 py-2 dark:border-ink-border">
       <span className={`mt-1.5 h-2 w-2 flex-shrink-0 rounded-full ${t.dot}`} aria-hidden="true" />
       <button
         type="button"
@@ -258,8 +258,8 @@ const VirtualNeedsRow: React.FC<{ item: AttentionItem; onOpen: (agentId?: string
         disabled={!item.agentId}
         className="min-w-0 flex-1 rounded text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 disabled:cursor-default"
       >
-        <div className="truncate text-[12px] font-medium text-gray-900 dark:text-gray-100">{item.title}</div>
-        {item.detail && <div className="truncate text-[11px] text-gray-500 dark:text-gray-400" title={item.detail}>{item.detail}</div>}
+        <div className="truncate text-[12px] font-medium text-ink-text">{item.title}</div>
+        {item.detail && <div className="truncate text-caption text-ink-text-muted" title={item.detail}>{item.detail}</div>}
       </button>
       {item.action?.kind === 'raise-cap' && <RowActionChip action={item.action} onClick={onRaiseCap} mostUrgent={false} />}
     </div>
@@ -276,17 +276,17 @@ const UnstaffedRow: React.FC<{ row: FleetUnstaffedRow; busy: boolean; onStaff: (
       tabIndex={0}
       onClick={() => onOpen(row.item)}
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpen(row.item); } }}
-      className="flex cursor-pointer items-center gap-2 border-b border-gray-100 px-3 py-2 text-left transition-colors hover:bg-gray-50 dark:border-ink-border dark:hover:bg-ink-surface/60"
+      className="flex cursor-pointer items-center gap-2 border-b border-ink-border px-3 py-2 text-left transition-colors hover:bg-ink dark:border-ink-border dark:hover:bg-ink-surface/60"
     >
       <div className="min-w-0 flex-1">
-        <div className="truncate text-[13px] font-medium text-gray-900 dark:text-gray-100">{row.item.title}</div>
-        <div className="truncate text-[11px] text-gray-400 dark:text-gray-500">{row.item.stage ?? 'un-staffed'}</div>
+        <div className="truncate text-[13px] font-medium text-ink-text">{row.item.title}</div>
+        <div className="truncate text-caption text-ink-text-subtle">{row.item.stage ?? 'un-staffed'}</div>
       </div>
       {action.kind === 'staff' && (
         <button
           onClick={(e) => { e.stopPropagation(); onStaff(row.item); }}
           disabled={busy}
-          className="flex flex-shrink-0 items-center gap-1 rounded-md bg-amber-500 px-2 py-1 text-[10px] font-semibold text-white transition-colors hover:bg-amber-600 disabled:cursor-not-allowed disabled:opacity-50"
+          className="flex flex-shrink-0 items-center gap-1 rounded-md bg-amber-500 px-2 py-1 text-caption font-semibold text-white transition-colors hover:bg-amber-600 disabled:cursor-not-allowed disabled:opacity-50"
         >
           <UserPlus className="h-3 w-3" aria-hidden="true" />
           {busy ? '…' : action.label}
@@ -307,15 +307,15 @@ const GroupHeader: React.FC<{ title: string; count: number; collapsed?: boolean;
   const body = (
     <>
       <MonoLabel>{title}</MonoLabel>
-      <span className="text-[10px] text-gray-400">{count}</span>
+      <span className="text-caption text-ink-text-subtle">{count}</span>
     </>
   );
   const toneCls = tone === 'ember'
     ? 'border-l-2 border-l-[color:var(--wf-accent)] bg-[color:var(--wf-accent-soft)]'
-    : 'bg-gray-50/60 dark:bg-ink-surface/40';
+    : 'bg-ink/60 dark:bg-ink-surface/40';
   if (!onToggle) {
     return (
-      <div className={`flex items-center gap-2 border-y border-gray-100 px-3 py-1 dark:border-ink-border ${toneCls}`}>
+      <div className={`flex items-center gap-2 border-y border-ink-border px-3 py-1 dark:border-ink-border ${toneCls}`}>
         {body}
         {right && <span className="ml-auto">{right}</span>}
       </div>
@@ -324,11 +324,11 @@ const GroupHeader: React.FC<{ title: string; count: number; collapsed?: boolean;
   return (
     <button
       onClick={onToggle}
-      className={`flex w-full items-center gap-2 border-y border-gray-100 px-3 py-1 text-left transition-colors hover:bg-gray-100 dark:border-ink-border dark:hover:bg-ink-surface/70 ${toneCls}`}
+      className={`flex w-full items-center gap-2 border-y border-ink-border px-3 py-1 text-left transition-colors hover:bg-ink-surface dark:border-ink-border dark:hover:bg-ink-surface/70 ${toneCls}`}
       aria-expanded={!collapsed}
     >
       {body}
-      <ChevronDown className={`ml-auto h-3 w-3 text-gray-400 transition-transform ${collapsed ? '-rotate-90' : ''}`} aria-hidden="true" />
+      <ChevronDown className={`ml-auto h-3 w-3 text-ink-text-subtle transition-transform ${collapsed ? '-rotate-90' : ''}`} aria-hidden="true" />
     </button>
   );
 };
@@ -342,13 +342,13 @@ const PendingBanner: React.FC<{ agent: AgentDTO; onAnswer: (requestId: string, v
   if (!pending) return null;
   return (
     <div className="flex-shrink-0 border-b border-amber-200 bg-amber-50 px-4 py-2.5 dark:border-amber-900/50 dark:bg-amber-950/20">
-      <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-widest text-amber-700 dark:text-amber-400">
+      <div className="flex items-center gap-1.5 text-caption font-semibold uppercase tracking-widest text-amber-700 dark:text-amber-400">
         <Bell className="h-3 w-3" aria-hidden="true" />
         Waiting on you
       </div>
-      <div className="mt-0.5 text-sm text-gray-900 dark:text-gray-100">{pending.title}</div>
+      <div className="mt-0.5 text-sm text-ink-text">{pending.title}</div>
       {pending.message && pending.message !== pending.title && (
-        <div className="mt-0.5 text-xs text-gray-600 dark:text-gray-400">{pending.message}</div>
+        <div className="mt-0.5 text-xs text-ink-text-label text-ink-text-subtle">{pending.message}</div>
       )}
       {pending.options && pending.options.length > 0 && (
         <div className="mt-2 flex flex-wrap gap-1.5">
@@ -356,7 +356,7 @@ const PendingBanner: React.FC<{ agent: AgentDTO; onAnswer: (requestId: string, v
             <button
               key={opt}
               onClick={() => onAnswer(pending.id, opt)}
-              className="rounded-md border border-amber-300 bg-white px-2.5 py-1 text-xs font-medium text-amber-800 transition-colors hover:bg-amber-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-amber-800 dark:bg-gray-950 dark:text-amber-300 dark:hover:bg-amber-950/40"
+              className="rounded-md border border-amber-300 bg-white px-2.5 py-1 text-xs font-medium text-amber-800 transition-colors hover:bg-amber-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-amber-800 bg-ink dark:text-amber-300 dark:hover:bg-amber-950/40"
             >
               {opt}
             </button>
@@ -364,7 +364,7 @@ const PendingBanner: React.FC<{ agent: AgentDTO; onAnswer: (requestId: string, v
         </div>
       )}
       {(!pending.options || pending.options.length === 0) && (
-        <div className="mt-1.5 text-[11px] text-amber-700 dark:text-amber-400">Type your reply in the composer below.</div>
+        <div className="mt-1.5 text-caption text-amber-700 dark:text-amber-400">Type your reply in the composer below.</div>
       )}
     </div>
   );
@@ -383,7 +383,7 @@ const LandRail: React.FC<{
   const landable = agent ? canLand(agent) : false;
 
   return (
-    <div className="flex h-full w-80 flex-shrink-0 flex-col gap-2 overflow-y-auto border-l border-gray-200 bg-gray-50/60 p-2 dark:border-ink-border dark:bg-ink">
+    <div className="flex h-full w-80 flex-shrink-0 flex-col gap-2 overflow-y-auto border-l border-ink-border bg-ink/60 p-2 dark:border-ink-border dark:bg-ink">
       <PanelSection
         title="Land"
         right={
@@ -401,23 +401,23 @@ const LandRail: React.FC<{
       >
         <div className="flex flex-col gap-2 p-3">
           {!agent ? (
-            <p className="text-[12px] text-gray-400">Select an agent to see its land readiness.</p>
+            <p className="text-[12px] text-ink-text-subtle">Select an agent to see its land readiness.</p>
           ) : !landable ? (
-            <p className="text-[12px] text-gray-400">No branch/worktree of its own — nothing to land.</p>
+            <p className="text-[12px] text-ink-text-subtle">No branch/worktree of its own — nothing to land.</p>
           ) : (
             <>
               <div className="flex flex-wrap items-center gap-1.5">
                 {validation && (
-                  <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${validation.cls}`} title={validation.title}>
+                  <span className={`rounded-full px-2 py-0.5 text-caption font-semibold ${validation.cls}`} title={validation.title}>
                     {validation.label}
                   </span>
                 )}
                 {confidence && (
-                  <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${confidence.cls}`} title={confidence.title}>
+                  <span className={`rounded-full px-2 py-0.5 text-caption font-semibold ${confidence.cls}`} title={confidence.title}>
                     {confidence.label}
                   </span>
                 )}
-                {!validation && !confidence && <span className="text-[11px] text-gray-400">No run-end verdict yet</span>}
+                {!validation && !confidence && <span className="text-caption text-ink-text-subtle">No run-end verdict yet</span>}
               </div>
               {agent.prUrl && (
                 <a
@@ -444,14 +444,14 @@ const LandRail: React.FC<{
 
       <PanelSection title="Changes" right={<DiffStat added={totals.added} removed={totals.removed} />} className="min-h-0 flex-1">
         {diffs.length === 0 ? (
-          <p className="p-3 text-[12px] text-gray-400">No changed files{agent ? '' : ' — select an agent'}.</p>
+          <p className="p-3 text-[12px] text-ink-text-subtle">No changed files{agent ? '' : ' — select an agent'}.</p>
         ) : (
-          <ul className="divide-y divide-gray-100 overflow-y-auto dark:divide-gray-900">
+          <ul className="divide-y divide-ink-border overflow-y-auto divide-ink-border">
             {diffs.map((d) => {
               const counts = countDiffLines(d.diff);
               return (
-                <li key={d.file} className="flex items-center gap-2 px-3 py-1.5 text-[11px]">
-                  <span className="min-w-0 flex-1 truncate font-mono text-gray-700 dark:text-gray-300" title={d.file}>
+                <li key={d.file} className="flex items-center gap-2 px-3 py-1.5 text-caption">
+                  <span className="min-w-0 flex-1 truncate font-mono text-ink-text-label" title={d.file}>
                     {d.status ? `${d.status} ` : ''}
                     {d.file}
                   </span>
@@ -465,9 +465,9 @@ const LandRail: React.FC<{
 
       {/* Terminal tab — deliberately deferred (no PTY backend); see the original cockpit's note. */}
       <PanelSection title="Run" bodyClassName="p-0">
-        <div className="flex items-center gap-2 border-b border-gray-100 px-3 py-1.5 text-[11px] dark:border-ink-border">
-          <span className="rounded bg-gray-100 px-1.5 py-0.5 font-medium text-gray-600 dark:bg-gray-800 dark:text-gray-300">Transcript</span>
-          <span className="ml-auto flex items-center gap-1 text-gray-400 dark:text-gray-600" title="No PTY backend exists yet — deliberately deferred">
+        <div className="flex items-center gap-2 border-b border-ink-border px-3 py-1.5 text-caption dark:border-ink-border">
+          <span className="rounded bg-ink-surface px-1.5 py-0.5 font-medium text-ink-text-label bg-ink-surface text-ink-text-label">Transcript</span>
+          <span className="ml-auto flex items-center gap-1 text-ink-text-subtle text-ink-text-label" title="No PTY backend exists yet — deliberately deferred">
             <TerminalIcon className="h-3 w-3" aria-hidden="true" />
             Terminal
           </span>
@@ -799,14 +799,14 @@ export const WorkspaceCockpit: React.FC = () => {
 
   return (
     <PageContextScope value={pageContext}>
-    <div className="dark flex h-full min-h-0 w-full bg-ink text-gray-100">
+    <div className="dark flex h-full min-h-0 w-full bg-ink text-ink-text">
       {/* Left rail — the Fleet roster: state-grouped, NEEDS YOU pinned at top (never collapses,
           never scrolls away — §6g), everything else scrolling underneath. */}
-      <div className="flex h-full w-72 flex-shrink-0 flex-col border-r border-gray-200 dark:border-ink-border">
-        <div className="flex flex-shrink-0 flex-col gap-1.5 border-b border-gray-200 bg-white px-3 py-2 dark:border-ink-border dark:bg-panel">
+      <div className="flex h-full w-72 flex-shrink-0 flex-col border-r border-ink-border dark:border-ink-border">
+        <div className="flex flex-shrink-0 flex-col gap-1.5 border-b border-ink-border bg-white px-3 py-2 dark:border-ink-border dark:bg-panel">
           <div className="flex items-center justify-between">
             <span className="flex items-center gap-1.5">
-              <Layers className="h-3.5 w-3.5 text-gray-400" aria-hidden="true" />
+              <Layers className="h-3.5 w-3.5 text-ink-text-subtle" aria-hidden="true" />
               <MonoLabel>Fleet</MonoLabel>
             </span>
             <div className="flex items-center gap-1.5">
@@ -814,7 +814,7 @@ export const WorkspaceCockpit: React.FC = () => {
                 <button
                   onClick={() => void enablePushHere()}
                   disabled={pushPerm === 'granted'}
-                  className="flex items-center gap-1 rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600 disabled:cursor-default disabled:opacity-60 dark:hover:bg-gray-800 dark:hover:text-gray-300"
+                  className="flex items-center gap-1 rounded p-1 text-ink-text-subtle hover:bg-ink-surface hover:text-ink-text-label disabled:cursor-default disabled:opacity-60 dark:hover:bg-ink-surface dark:hover:text-ink-text-label"
                   title={pushPerm === 'granted' ? 'Background push enabled' : 'Enable background push for a blocked unit'}
                   aria-label="Enable background notifications"
                 >
@@ -824,17 +824,17 @@ export const WorkspaceCockpit: React.FC = () => {
               <Kbd keys="↑↓" label="select" />
             </div>
           </div>
-          <div className="flex items-center gap-3 text-[10px] text-gray-400">
+          <div className="flex items-center gap-3 text-caption text-ink-text-subtle">
             <span title={capacity.headline}>{capacityFractionLabel(capacity.used, capacity.cap)} agents</span>
             <span className="truncate" title={activityRollup.headline}>{activityRollup.headline}</span>
           </div>
           <div className="relative">
-            <Search className="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-gray-400" aria-hidden="true" />
+            <Search className="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-ink-text-subtle" aria-hidden="true" />
             <input
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
               placeholder="Filter roster…"
-              className="w-full rounded-md border border-gray-200 bg-gray-50 py-1 pl-6 pr-2 text-[11px] text-gray-700 outline-none focus:border-amber-400 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200"
+              className="w-full rounded-md border border-ink-border bg-ink py-1 pl-6 pr-2 text-caption text-ink-text-label outline-none focus:border-amber-400 border-ink-border-2 bg-panel text-ink-text-body"
               aria-label="Filter roster"
             />
           </div>
@@ -842,7 +842,7 @@ export const WorkspaceCockpit: React.FC = () => {
 
         {/* NEEDS YOU — pinned, never collapses. Own scroll cap so a pathological number of
             blocked agents can't swallow the whole rail; everything else scrolls below it. */}
-        <div className="flex-shrink-0 border-b border-gray-200 dark:border-ink-border">
+        <div className="flex-shrink-0 border-b border-ink-border dark:border-ink-border">
           <GroupHeader
             title="Needs you"
             count={needsCount}
@@ -852,7 +852,7 @@ export const WorkspaceCockpit: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setAttnSort((s) => (s === 'severity' ? 'blocked-longest' : 'severity'))}
-                  className="rounded px-1.5 py-0.5 text-[10px] font-medium text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-gray-400 dark:hover:bg-ink-surface/70 dark:hover:text-gray-200"
+                  className="rounded px-1.5 py-0.5 text-caption font-medium text-ink-text0 transition-colors hover:bg-ink-surface hover:text-ink-text-label focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 text-ink-text-subtle dark:hover:bg-ink-surface/70 dark:hover:text-ink-text-body"
                   title={attnSort === 'severity' ? 'Rank by how long each row has been waiting on you' : 'Rank by severity'}
                   aria-label={`Sort needs-you rows by ${attnSort === 'severity' ? 'blocked longest' : 'severity'}`}
                 >
@@ -862,7 +862,7 @@ export const WorkspaceCockpit: React.FC = () => {
             }
           />
           {needsCount === 0 ? (
-            <div className="flex items-center gap-2 px-3 py-3 text-[11px] text-emerald-600 dark:text-emerald-400">
+            <div className="flex items-center gap-2 px-3 py-3 text-caption text-emerald-600 dark:text-emerald-400">
               {calmLine(filteredWorking.length, capacity.roomFor)}
             </div>
           ) : (
@@ -890,7 +890,7 @@ export const WorkspaceCockpit: React.FC = () => {
         {/* Everything else scrolls under the pinned NEEDS YOU header (§6g). */}
         <div className="min-h-0 flex-1 overflow-y-auto">
           {agents.length === 0 && roster.unstaffed.length === 0 && (
-            <div className="p-4 text-[12px] text-gray-400">No agents in the fleet right now.</div>
+            <div className="p-4 text-[12px] text-ink-text-subtle">No agents in the fleet right now.</div>
           )}
 
           {filteredLand.length > 0 && (
@@ -929,7 +929,7 @@ export const WorkspaceCockpit: React.FC = () => {
               {!workingExpanded && filteredWorking.length > WORKING_VISIBLE_CAP && (
                 <button
                   onClick={() => setWorkingExpanded(true)}
-                  className="w-full px-3 py-1.5 text-left text-[11px] text-amber-600 hover:underline dark:text-amber-400"
+                  className="w-full px-3 py-1.5 text-left text-caption text-amber-600 hover:underline dark:text-amber-400"
                 >
                   Show {filteredWorking.length - WORKING_VISIBLE_CAP} more…
                 </button>
@@ -982,13 +982,13 @@ export const WorkspaceCockpit: React.FC = () => {
       <div className="flex min-w-0 flex-1 flex-col">
         {selectedAgent ? (
           <>
-            <div className="flex flex-shrink-0 items-center gap-2 border-b border-gray-200 bg-white px-4 py-2 dark:border-ink-border dark:bg-panel">
-              <span className="truncate text-sm font-semibold text-gray-900 dark:text-gray-100">{selectedAgent.name}</span>
+            <div className="flex flex-shrink-0 items-center gap-2 border-b border-ink-border bg-white px-4 py-2 dark:border-ink-border dark:bg-panel">
+              <span className="truncate text-sm font-semibold text-ink-text">{selectedAgent.name}</span>
               <StatusChip status={selectedAgent.status} />
-              {selectedAgent.branch && <span className="truncate font-mono text-[11px] text-gray-400">{shortBranch(selectedAgent.branch)}</span>}
+              {selectedAgent.branch && <span className="truncate font-mono text-caption text-ink-text-subtle">{shortBranch(selectedAgent.branch)}</span>}
               {/* Per-plan progress in the detail header (§6c). */}
               {selectedPlanItem && (
-                <span className="flex min-w-0 items-center gap-1.5 truncate text-[11px] text-gray-400" title={selectedPlanItem.title}>
+                <span className="flex min-w-0 items-center gap-1.5 truncate text-caption text-ink-text-subtle" title={selectedPlanItem.title}>
                   <FolderGit2 className="h-3 w-3 flex-shrink-0" aria-hidden="true" />
                   {selectedPlanItem.title}
                   {selectedPlanItem.progress && selectedPlanItem.progress.total > 0 && (
@@ -999,7 +999,7 @@ export const WorkspaceCockpit: React.FC = () => {
               <span className="ml-auto"><Kbd keys="]" label="next tab" /></span>
             </div>
             <PendingBanner agent={selectedAgent} onAnswer={(requestId, value) => sendAnswer(selectedAgent.id, requestId, value)} />
-            <div className="min-h-0 flex-1 overflow-y-auto bg-gray-50 p-3 dark:bg-ink md:p-4">
+            <div className="min-h-0 flex-1 overflow-y-auto bg-ink p-3 dark:bg-ink md:p-4">
               <div className="space-y-4">
                 <TranscriptTimeline
                   entries={transcriptEntries}
@@ -1034,7 +1034,7 @@ export const WorkspaceCockpit: React.FC = () => {
             />
           </>
         ) : (
-          <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-gray-400">
+          <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-ink-text-subtle">
             <LayoutPanelLeft className="h-8 w-8" aria-hidden="true" />
             <p className="text-sm">No agent selected — the fleet is empty.</p>
           </div>

@@ -31,27 +31,27 @@ export function sessionRowsFromAgents(agents: AgentDTO[]): TaskSessionRow[] {
 export function TaskSessionsTable({ rows, onOpenSession }: { rows: TaskSessionRow[]; onOpenSession: (id: string) => void }) {
   if (rows.length === 0) {
     return (
-      <div className="rounded-lg border border-dashed border-gray-200 px-4 py-6 text-center text-xs text-gray-400 dark:border-gray-800 dark:text-gray-500">
+      <div className="rounded-lg border border-dashed border-ink-border px-4 py-6 text-center text-xs text-ink-text-subtle border-ink-border text-ink-text0">
         No sessions yet. Create Session to start the first one.
       </div>
     );
   }
   return (
-    <div className="overflow-hidden rounded-lg border border-gray-200 dark:border-gray-800">
+    <div className="overflow-hidden rounded-lg border border-ink-border">
       <table className="w-full border-collapse text-left text-xs">
         <thead>
-          <tr className="border-b border-gray-100 bg-gray-50/60 text-[10px] font-semibold uppercase tracking-widest text-gray-400 dark:border-gray-800 dark:bg-gray-900/40 dark:text-gray-500">
+          <tr className="border-b border-ink-border bg-ink/60 text-caption font-semibold uppercase tracking-widest text-ink-text-subtle border-ink-border bg-panel/40 text-ink-text0">
             <th className="px-3 py-2 font-semibold">Status</th>
             <th className="px-3 py-2 font-semibold">Session</th>
             <th className="px-3 py-2 text-right font-semibold">Updated</th>
           </tr>
         </thead>
-        <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
+        <tbody className="divide-y divide-ink-border divide-ink-border">
           {rows.map((row) => (
             <tr
               key={row.id}
               onClick={() => onOpenSession(row.id)}
-              className="cursor-pointer bg-white transition-colors hover:bg-gray-50 dark:bg-gray-950 dark:hover:bg-gray-900/60"
+              className="cursor-pointer bg-white transition-colors hover:bg-ink dark:hover:bg-panel/60"
             >
               <td className="px-3 py-2 align-middle">
                 {/* Kit chip = the universal state language (X1's KNOWN map: working→RUNNING solid
@@ -61,14 +61,14 @@ export function TaskSessionsTable({ rows, onOpenSession }: { rows: TaskSessionRo
               </td>
               <td className="min-w-0 px-3 py-2 align-middle">
                 <div className="flex min-w-0 items-center gap-2">
-                  <span className="truncate text-gray-800 dark:text-gray-200">{row.name}</span>
+                  <span className="truncate text-ink-text-body">{row.name}</span>
                   {/* Untyped "Session" renders muted (neutral tone) so a real derived type is
                       visually distinct from the honest fallback — the chip must not dress a
                       guess up as knowledge. */}
                   <StatusChip status={row.type} tone={sessionTypeTone(row.type)} />
                 </div>
               </td>
-              <td className="whitespace-nowrap px-3 py-2 text-right text-gray-400 dark:text-gray-500">
+              <td className="whitespace-nowrap px-3 py-2 text-right text-ink-text-subtle">
                 {row.lastActivity ? fmtSince(Math.max(0, Math.floor((Date.now() - row.lastActivity) / 1000))) : '—'}
               </td>
             </tr>

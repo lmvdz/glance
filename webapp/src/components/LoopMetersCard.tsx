@@ -25,13 +25,13 @@ export const LoopMetersCard: React.FC<{
   const chips = loop ? flagChips(loop.flags) : [];
   const rows = loop ? meterRows(loop.rollup) : [];
   const onCount = chips.filter((c) => c.on).length;
-  const right = chips.length > 0 ? <span className="font-mono text-[11px]">{`${onCount}/${chips.length} on`}</span> : undefined;
+  const right = chips.length > 0 ? <span className="font-mono text-caption">{`${onCount}/${chips.length} on`}</span> : undefined;
   return (
     <SectionCard title="Learning loop" right={right}>
       {!loaded ? (
         <div className="space-y-2 p-4" aria-label="Loading learning-loop meters">
           {[1, 2].map((n) => (
-            <div key={n} className="h-8 animate-pulse rounded-md bg-gray-100 dark:bg-gray-800" />
+            <div key={n} className="h-8 animate-pulse rounded-md bg-ink-surface" />
           ))}
         </div>
       ) : error ? (
@@ -41,18 +41,18 @@ export const LoopMetersCard: React.FC<{
       ) : (
         <div className="space-y-4 p-4">
           <div>
-            <div className="mb-2 text-[11px] font-semibold uppercase tracking-widest text-gray-400">Flags</div>
+            <div className="mb-2 text-caption font-semibold uppercase tracking-widest text-ink-text-subtle">Flags</div>
             {chips.length === 0 ? (
-              <p className="text-xs text-gray-500 dark:text-gray-400">The daemon reported no learning flags.</p>
+              <p className="text-xs text-ink-text-muted">The daemon reported no learning flags.</p>
             ) : (
               <ul className="flex flex-wrap gap-1.5">
                 {chips.map((c) => (
                   <li
                     key={c.key}
-                    className={`rounded-full px-2.5 py-0.5 text-[11px] font-medium ${
+                    className={`rounded-full px-2.5 py-0.5 text-caption font-medium ${
                       c.on
                         ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'
-                        : 'bg-gray-100 text-gray-400 dark:bg-gray-800 dark:text-gray-500'
+                        : 'bg-ink-surface text-ink-text-subtle bg-ink-surface text-ink-text0'
                     }`}
                     title={`${c.key}: ${c.on ? 'on' : 'off'}`}
                   >
@@ -63,10 +63,10 @@ export const LoopMetersCard: React.FC<{
             )}
           </div>
           <div>
-            <div className="mb-2 text-[11px] font-semibold uppercase tracking-widest text-gray-400">Meters</div>
+            <div className="mb-2 text-caption font-semibold uppercase tracking-widest text-ink-text-subtle">Meters</div>
             {rows.length === 0 ? (
-              <div className="flex items-start gap-2 text-xs text-gray-500 dark:text-gray-400">
-                <FlaskConical className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-gray-300 dark:text-gray-600" aria-hidden="true" />
+              <div className="flex items-start gap-2 text-xs text-ink-text-muted">
+                <FlaskConical className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-ink-text-subtle" aria-hidden="true" />
                 <p>
                   No metric samples in the window — the loop hasn&rsquo;t run any measured units recently, so nothing here is
                   proven either way. An honest blank, not a zero.
@@ -77,13 +77,13 @@ export const LoopMetersCard: React.FC<{
                 {rows.map((r) => (
                   <li
                     key={r.name}
-                    className="flex items-baseline justify-between gap-2 rounded-md border border-gray-100 px-2.5 py-1.5 dark:border-gray-800"
+                    className="flex items-baseline justify-between gap-2 rounded-md border border-ink-border px-2.5 py-1.5 border-ink-border"
                   >
-                    <span className="truncate text-xs text-gray-600 dark:text-gray-300" title={r.name}>
+                    <span className="truncate text-xs text-ink-text-muted" title={r.name}>
                       {r.label}
                     </span>
-                    <span className="whitespace-nowrap font-mono text-sm font-semibold tabular-nums text-gray-900 dark:text-gray-100">
-                      {r.value} <span className="text-[10px] font-normal text-gray-400">n={r.n}</span>
+                    <span className="whitespace-nowrap font-mono text-sm font-semibold tabular-nums text-ink-text">
+                      {r.value} <span className="text-caption font-normal text-ink-text-subtle">n={r.n}</span>
                     </span>
                   </li>
                 ))}

@@ -22,7 +22,7 @@ export const ScrollToLatestPill = ({
         type="button"
         onClick={onClick}
         aria-label="Jump to latest messages"
-        className="pill-rise pointer-events-auto flex min-h-8 items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 shadow-lg transition-colors hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200 dark:hover:bg-gray-800"
+        className="pill-rise pointer-events-auto flex min-h-8 items-center gap-1.5 rounded-full border border-ink-border bg-white px-3 py-1.5 text-xs font-medium text-ink-text-label shadow-lg transition-colors hover:bg-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 border-ink-border-2 bg-panel text-ink-text-body dark:hover:bg-ink-surface"
       >
         <ArrowDown className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" aria-hidden />
         New messages

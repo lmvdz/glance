@@ -46,7 +46,7 @@ function repoBasename(repo: string): string {
  *  "no activity recorded" empty state -- never zeros dressed up as data. Pure in `view`. */
 export const AdoptionCounters: React.FC<{ view: AdoptionView }> = ({ view }) => (
   <section aria-label="Adoption counters">
-    <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.2em] text-amber-700 dark:text-amber-400">
+    <div className="mb-2 text-caption font-semibold uppercase tracking-[0.2em] text-amber-700 dark:text-amber-400">
       Adoption &middot; the loop&rsquo;s real success metric
     </div>
     {view.hasActivity ? (
@@ -62,11 +62,11 @@ export const AdoptionCounters: React.FC<{ view: AdoptionView }> = ({ view }) => 
         ))}
       </div>
     ) : (
-      <div className="rounded-lg border border-dashed border-gray-300 p-6 text-center dark:border-gray-700">
-        <div className="text-sm font-medium text-gray-700 dark:text-gray-200">No activity recorded yet</div>
-        <p className="mx-auto mt-1 max-w-md text-xs text-gray-500 dark:text-gray-400">
+      <div className="rounded-lg border border-dashed border-ink-border-2 p-6 text-center border-ink-border-2">
+        <div className="text-sm font-medium text-ink-text-label text-ink-text-body">No activity recorded yet</div>
+        <p className="mx-auto mt-1 max-w-md text-xs text-ink-text-muted">
           No casual sessions, prompts, or push taps in the last 7 days. Start one with{' '}
-          <code className="rounded bg-gray-100 px-1 py-0.5 font-mono text-[11px] dark:bg-gray-800">glance here</code>{' '}
+          <code className="rounded bg-ink-surface px-1 py-0.5 font-mono text-caption bg-ink-surface">glance here</code>{' '}
           and it lands here.
         </p>
       </div>
@@ -84,7 +84,7 @@ export const FrictionRow: React.FC<{ entry: FrictionEntryWire; now?: number }> =
   const age = relativeAge(entry.ts, now);
   return (
     <li
-      className={`flex gap-3 border-b border-gray-100 px-4 py-3 last:border-b-0 dark:border-gray-800/60 ${
+      className={`flex gap-3 border-b border-ink-border px-4 py-3 last:border-b-0 border-ink-border/60 ${
         auto ? 'border-l-2 border-l-blue-400 dark:border-l-blue-500' : 'border-l-2 border-l-amber-400 dark:border-l-amber-500'
       }`}
     >
@@ -96,10 +96,10 @@ export const FrictionRow: React.FC<{ entry: FrictionEntryWire; now?: number }> =
         )}
       </span>
       <div className="min-w-0 flex-1">
-        <p className="text-sm text-gray-800 dark:text-gray-200">{entry.gripe}</p>
-        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-gray-500 dark:text-gray-400">
+        <p className="text-sm text-ink-text-body">{entry.gripe}</p>
+        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-caption text-ink-text-muted">
           <span
-            className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${
+            className={`rounded px-1.5 py-0.5 text-caption font-semibold uppercase tracking-wider ${
               auto
                 ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'
                 : 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'
@@ -109,12 +109,12 @@ export const FrictionRow: React.FC<{ entry: FrictionEntryWire; now?: number }> =
           </span>
           {age && <span className="font-mono" title={new Date(entry.ts).toISOString()}>{age} ago</span>}
           {entry.repo && (
-            <span className="max-w-[10rem] truncate font-mono text-gray-400 dark:text-gray-500" title={entry.repo}>
+            <span className="max-w-[10rem] truncate font-mono text-ink-text-subtle" title={entry.repo}>
               {repoBasename(entry.repo)}
             </span>
           )}
           {contextLabel && (
-            <span className="rounded-full bg-gray-100 px-2 py-0.5 text-gray-500 dark:bg-gray-800 dark:text-gray-400">
+            <span className="rounded-full bg-ink-surface px-2 py-0.5 text-ink-text0 bg-ink-surface text-ink-text-subtle">
               {contextLabel}
             </span>
           )}
@@ -135,14 +135,14 @@ export const FrictionLedger: React.FC<{
   const counts = frictionCounts(entries);
   const right =
     entries.length > 0 ? (
-      <span className="font-mono text-[11px]">{`${entries.length} \u00b7 ${counts.auto} auto \u00b7 ${counts.human} yours`}</span>
+      <span className="font-mono text-caption">{`${entries.length} \u00b7 ${counts.auto} auto \u00b7 ${counts.human} yours`}</span>
     ) : undefined;
   return (
     <SectionCard title="Friction ledger" right={right}>
       {!loaded ? (
         <div className="space-y-2 p-4" aria-label="Loading friction ledger">
           {[1, 2, 3].map((n) => (
-            <div key={n} className="h-10 animate-pulse rounded-md bg-gray-100 dark:bg-gray-800" />
+            <div key={n} className="h-10 animate-pulse rounded-md bg-ink-surface" />
           ))}
         </div>
       ) : error ? (
@@ -151,10 +151,10 @@ export const FrictionLedger: React.FC<{
         </div>
       ) : entries.length === 0 ? (
         <div className="px-4 py-10 text-center">
-          <Inbox className="mx-auto mb-2 h-6 w-6 text-gray-300 dark:text-gray-600" aria-hidden="true" />
-          <div className="text-sm font-medium text-gray-600 dark:text-gray-300">Nothing filed</div>
-          <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-            <code className="rounded bg-gray-100 px-1 py-0.5 font-mono text-[11px] dark:bg-gray-800">grr</code> something when
+          <Inbox className="mx-auto mb-2 h-6 w-6 text-ink-text-subtle" aria-hidden="true" />
+          <div className="text-sm font-medium text-ink-text-muted">Nothing filed</div>
+          <p className="mt-1 text-xs text-ink-text-muted">
+            <code className="rounded bg-ink-surface px-1 py-0.5 font-mono text-caption bg-ink-surface">grr</code> something when
             the loop annoys you &mdash; the daemon files its own friction here too.
           </p>
         </div>
@@ -238,7 +238,7 @@ export const DailyPanel: React.FC = () => {
     <button
       type="button"
       onClick={() => void load()}
-      className="flex items-center gap-1 rounded-md border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 transition-colors hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-gray-800"
+      className="flex items-center gap-1 rounded-md border border-ink-border bg-white px-2 py-1 text-xs text-ink-text-label transition-colors hover:bg-ink focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 border-ink-border-2 bg-panel text-ink-text-label dark:hover:bg-ink-surface"
       title="Refresh"
       aria-label="Refresh daily driver signals"
     >
@@ -262,7 +262,7 @@ export const DailyPanel: React.FC = () => {
         <div className="space-y-4">
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-label="Loading adoption counters">
             {[1, 2, 3, 4].map((n) => (
-              <div key={n} className="h-20 animate-pulse rounded-lg bg-gray-100 dark:bg-gray-800" />
+              <div key={n} className="h-20 animate-pulse rounded-lg bg-ink-surface" />
             ))}
           </div>
           <FrictionLedger entries={[]} loaded={false} />
@@ -284,7 +284,7 @@ export const DailyPanel: React.FC = () => {
               panel's self-fetch + 10s poll only run once expanded — a <details>' children stay
               mounted in React whether or not the disclosure is open. */}
           <details className="group" onToggle={(e) => setMatrixOpen((e.currentTarget as HTMLDetailsElement).open)}>
-            <summary className="flex cursor-pointer select-none items-center gap-2 rounded-lg border border-gray-200 px-4 py-2.5 text-[11px] font-semibold uppercase tracking-widest text-gray-400 hover:text-gray-600 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-500 dark:border-gray-800 dark:hover:text-gray-200 list-none">
+            <summary className="flex cursor-pointer select-none items-center gap-2 rounded-lg border border-ink-border px-4 py-2.5 text-caption font-semibold uppercase tracking-widest text-ink-text-subtle hover:text-ink-text-label focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-500 border-ink-border dark:hover:text-ink-text-body list-none">
               <ChevronRight className="h-3.5 w-3.5 transition-transform group-open:rotate-90" aria-hidden="true" />
               <Table2 className="h-3.5 w-3.5" aria-hidden="true" />
               <span className="mr-auto">Task-class &times; model scoreboard</span>

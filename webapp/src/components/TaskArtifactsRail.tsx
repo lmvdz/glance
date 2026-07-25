@@ -67,9 +67,9 @@ export function TaskArtifactsRail({
   return (
     <PanelSection title="Artifacts" right={right} className={className} bodyClassName={bodyClassName}>
       {toolbar}
-      <div className="divide-y divide-gray-100 dark:divide-gray-800">
+      <div className="divide-y divide-ink-border divide-ink-border">
         {documents.length === 0 && !doneProof && (
-          <div className="px-3 py-6 text-center text-xs text-gray-400 dark:text-gray-500">No artifacts yet.</div>
+          <div className="px-3 py-6 text-center text-xs text-ink-text-subtle">No artifacts yet.</div>
         )}
         {documents.map((doc) => {
           const count = counts.get(doc.path) ?? 0;
@@ -79,13 +79,13 @@ export function TaskArtifactsRail({
               key={doc.path}
               type="button"
               onClick={() => onSelect(doc.path)}
-              className={`flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-500 dark:hover:bg-gray-900/60 ${isSelected ? 'bg-amber-50/60 dark:bg-amber-950/20' : ''}`}
+              className={`flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-ink focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-500 dark:hover:bg-panel/60 ${isSelected ? 'bg-amber-50/60 dark:bg-amber-950/20' : ''}`}
               aria-current={isSelected}
             >
-              <FileText className="h-3.5 w-3.5 flex-shrink-0 text-gray-400" aria-hidden="true" />
-              <span className="min-w-0 flex-1 truncate text-gray-700 dark:text-gray-300">{doc.file}</span>
+              <FileText className="h-3.5 w-3.5 flex-shrink-0 text-ink-text-subtle" aria-hidden="true" />
+              <span className="min-w-0 flex-1 truncate text-ink-text-label">{doc.file}</span>
               {count > 0 && (
-                <span className="flex flex-shrink-0 items-center gap-0.5 rounded-full bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium text-gray-500 dark:bg-gray-800 dark:text-gray-400">
+                <span className="flex flex-shrink-0 items-center gap-0.5 rounded-full bg-ink-surface px-1.5 py-0.5 text-caption font-medium text-ink-text0 bg-ink-surface text-ink-text-subtle">
                   <MessageSquare className="h-2.5 w-2.5" aria-hidden="true" />
                   {count}
                 </span>
@@ -97,11 +97,11 @@ export function TaskArtifactsRail({
           <div className="flex items-start gap-2 px-3 py-2.5 text-xs">
             <CheckCircle2 className="h-3.5 w-3.5 flex-shrink-0 text-emerald-500" aria-hidden="true" />
             <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-1.5 text-gray-700 dark:text-gray-300">
+              <div className="flex items-center gap-1.5 text-ink-text-label">
                 <span className="font-medium">done-proof</span>
                 <StatusChip status={doneProof.verified} tone={doneProof.verified === 'green' ? 'success' : doneProof.verified === 'red-baseline' ? 'attention' : 'neutral'} />
               </div>
-              <div className="mt-0.5 truncate font-mono text-[10px] text-gray-400 dark:text-gray-500">{doneProof.commit.slice(0, 10)} · {fmtSince(Math.max(0, Math.floor((Date.now() - doneProof.provenAt) / 1000)))}</div>
+              <div className="mt-0.5 truncate font-mono text-caption text-ink-text-subtle">{doneProof.commit.slice(0, 10)} · {fmtSince(Math.max(0, Math.floor((Date.now() - doneProof.provenAt) / 1000)))}</div>
             </div>
           </div>
         )}
