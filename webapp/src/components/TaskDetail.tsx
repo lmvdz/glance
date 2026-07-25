@@ -103,7 +103,7 @@ interface PlaneLinks {
 
 const EmptyStateIllustration = () => (
   <svg width="200" height="200" viewBox="0 0 200 200" fill="none" xmlns="http://www.w3.org/2000/svg" className="mb-6">
-    <rect x="25" y="40" width="150" height="120" rx="12" fill="#FDE4D0" className="dark:fill-gray-800" />
+    <rect x="25" y="40" width="150" height="120" rx="12" fill="#FDE4D0" className="fill-ink-text-body" />
     <path d="M50 70H150" stroke="#F0A35A" strokeWidth="6" strokeLinecap="round" className="dark:stroke-amber-500" />
     <path d="M50 100H120" stroke="#F0A35A" strokeWidth="6" strokeLinecap="round" className="dark:stroke-amber-500" />
     <path d="M50 130H90" stroke="#F0A35A" strokeWidth="6" strokeLinecap="round" className="dark:stroke-amber-500" />
@@ -115,7 +115,7 @@ const EmptyStateIllustration = () => (
 /** Small status-color badge for one lifecycle status, reusing the roster row's palette
  *  (agentStatusBadgeClass) so the timeline strip's from/to pills never drift from it. */
 export function StatusPill({ status }: { status: TransitionEntry['from'] }) {
-  return <span className={`rounded px-1 py-0.5 text-[10px] font-semibold uppercase border ${agentStatusBadgeClass(status)}`}>{status}</span>;
+  return <span className={`rounded px-1 py-0.5 text-caption font-semibold uppercase border ${agentStatusBadgeClass(status)}`}>{status}</span>;
 }
 
 /** True once a live transition newer than a cached "Load full history" fetch has landed for an agent —
@@ -150,32 +150,32 @@ export function LifecycleTimeline({
   if (agent.transitions === undefined) return null;
   const entries = fullEntries ?? agent.transitions;
   return (
-    <div className="border-t border-gray-100 dark:border-gray-800">
+    <div className="border-t border-ink-border">
       <button
         type="button"
         onClick={onToggle}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] font-medium text-gray-500 hover:bg-gray-50 dark:text-gray-400 dark:hover:bg-gray-900/50 transition-colors focus-visible:ring-2 focus-visible:ring-amber-500"
+        className="flex w-full items-center gap-2 px-3 py-2 text-left text-caption font-medium text-ink-text0 hover:bg-ink text-ink-text-subtle dark:hover:bg-panel/50 transition-colors focus-visible:ring-2 focus-visible:ring-amber-500"
       >
         <ChevronRight className={`h-3 w-3 flex-shrink-0 transition-transform ${isOpen ? 'rotate-90' : ''}`} />
         <span>Lifecycle</span>
-        <span className="ml-auto rounded-full bg-gray-100 dark:bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-500 dark:text-gray-400">{agent.transitions.length}</span>
+        <span className="ml-auto rounded-full bg-ink-surface px-1.5 py-0.5 text-caption text-ink-text-muted">{agent.transitions.length}</span>
       </button>
       {isOpen && (
         <div className="px-3 pb-3 pt-1 space-y-1">
           {entries.length === 0 && (
-            <div className="text-[11px] italic text-gray-400 dark:text-gray-500">No recent transitions in memory.</div>
+            <div className="text-caption italic text-ink-text-subtle">No recent transitions in memory.</div>
           )}
           {entries.slice().reverse().map((t, i) => (
-            <div key={`${t.at}-${i}`} className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400">
-              <span className="font-mono text-[10px] text-gray-400">{new Date(t.at).toLocaleTimeString()}</span>
-              <StatusPill status={t.from} /><span className="text-gray-300">→</span><StatusPill status={t.to} />
-              <span className="text-gray-400">{t.reason}</span>
+            <div key={`${t.at}-${i}`} className="flex items-center gap-2 text-xs text-ink-text-label text-ink-text-subtle">
+              <span className="font-mono text-caption text-ink-text-subtle">{new Date(t.at).toLocaleTimeString()}</span>
+              <StatusPill status={t.from} /><span className="text-ink-text-label">→</span><StatusPill status={t.to} />
+              <span className="text-ink-text-subtle">{t.reason}</span>
               {t.cause?.error && <span className="truncate text-red-500 dark:text-red-400">{t.cause.error}</span>}
-              {t.denied && <span className="text-amber-500 text-[10px] uppercase">denied</span>}
+              {t.denied && <span className="text-amber-500 text-caption uppercase">denied</span>}
             </div>
           ))}
           {!fullEntries && (
-            <button type="button" onClick={onLoadFull} className="text-[10px] text-amber-600 hover:underline">
+            <button type="button" onClick={onLoadFull} className="text-caption text-amber-600 hover:underline">
               Load full history
             </button>
           )}
@@ -258,13 +258,13 @@ export function ForkPicker({
   return (
     <div className="flex items-center gap-2 rounded-md border border-amber-200 bg-amber-50/60 px-2 py-1 dark:border-amber-900 dark:bg-amber-950/30">
       {sorted.length === 0 ? (
-        <span className="text-xs text-gray-500 dark:text-gray-400">No checkpoints recorded yet</span>
+        <span className="text-xs text-ink-text-muted">No checkpoints recorded yet</span>
       ) : (
         <select
           autoFocus
           value={selectedSeq ?? ''}
           onChange={(e) => onSelect(Number(e.target.value))}
-          className="text-xs bg-transparent border-none outline-none text-gray-700 dark:text-gray-200 cursor-pointer"
+          className="text-xs bg-transparent border-none outline-none text-ink-text-label text-ink-text-body cursor-pointer"
           aria-label="Fork from checkpoint"
         >
           {sorted.map((c) => (
@@ -276,7 +276,7 @@ export function ForkPicker({
         </select>
       )}
       {selectedSeq !== null && selectedSeq !== latestSeq && (
-        <span className="text-[10px] font-medium text-amber-700 dark:text-amber-400">routing state only — code stays at the branch tip</span>
+        <span className="text-caption font-medium text-amber-700 dark:text-amber-400">routing state only — code stays at the branch tip</span>
       )}
       <button
         type="button"
@@ -286,7 +286,7 @@ export function ForkPicker({
       >
         Fork
       </button>
-      <button type="button" onClick={onCancel} className="text-xs text-gray-400 hover:text-gray-600">✕</button>
+      <button type="button" onClick={onCancel} className="text-xs text-ink-text-subtle hover:text-ink-text-label">✕</button>
     </div>
   );
 }
@@ -296,12 +296,12 @@ function commentFromApi(comment: ArtifactCommentDTO): TaskComment {
 }
 
 
-const PLAN_MARKDOWN_CLASS = "prose prose-sm max-w-none dark:prose-invert prose-headings:scroll-mt-4 prose-headings:text-gray-900 dark:prose-headings:text-gray-100 prose-p:text-gray-700 dark:prose-p:text-gray-300 prose-li:text-gray-700 dark:prose-li:text-gray-300 prose-strong:text-gray-900 dark:prose-strong:text-gray-100 prose-code:rounded prose-code:bg-gray-100 prose-code:px-1 prose-code:py-0.5 prose-code:text-gray-900 dark:prose-code:bg-gray-900 dark:prose-code:text-gray-100 prose-pre:border prose-pre:border-gray-200 prose-pre:bg-gray-50 prose-pre:text-gray-900 dark:prose-pre:border-gray-800 dark:prose-pre:bg-gray-950 dark:prose-pre:text-gray-100 prose-table:text-sm prose-th:border prose-th:border-gray-200 prose-th:bg-gray-50 prose-th:px-3 prose-th:py-2 prose-td:border prose-td:border-gray-200 prose-td:px-3 prose-td:py-2 dark:prose-th:border-gray-800 dark:prose-th:bg-gray-900 dark:prose-td:border-gray-800";
+const PLAN_MARKDOWN_CLASS = "prose prose-sm max-w-none dark:prose-invert prose-headings:scroll-mt-4 prose-headings:text-ink-text dark:prose-headings:text-ink-text prose-p:text-ink-text-label dark:prose-p:text-ink-text-label prose-li:text-ink-text-label dark:prose-li:text-ink-text-label prose-strong:text-ink-text dark:prose-strong:text-ink-text prose-code:rounded prose-code:bg-ink-surface prose-code:px-1 prose-code:py-0.5 prose-code:text-ink-text dark:prose-code:bg-panel dark:prose-code:text-ink-text prose-pre:border prose-pre:border-ink-border prose-pre:bg-ink prose-pre:text-ink-text dark:prose-pre:border-ink-border dark:prose-pre:bg-ink dark:prose-pre:text-ink-text prose-table:text-sm prose-th:border prose-th:border-ink-border prose-th:bg-ink prose-th:px-3 prose-th:py-2 prose-td:border prose-td:border-ink-border prose-td:px-3 prose-td:py-2 dark:prose-th:border-ink-border dark:prose-th:bg-panel dark:prose-td:border-ink-border";
 // Compact plan-action button — the left-pane Artifacts toolbar's non-primary actions (Module,
 // Sync tickets, Clear orphans). Smaller than the old doc-viewer toolbar's nav-button class (now
 // deleted along with the toolbar it lived in) since it now lives inside a PanelSection toolbar
 // row rather than a full-width doc-viewer header.
-const ARTIFACT_ACTION_BUTTON_CLASS = "inline-flex min-h-7 items-center gap-1 rounded-md border border-gray-200 px-2 py-1 text-[11px] font-medium text-gray-700 transition-colors hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-800 dark:text-gray-200 dark:hover:bg-gray-900";
+const ARTIFACT_ACTION_BUTTON_CLASS = "inline-flex min-h-7 items-center gap-1 rounded-md border border-ink-border px-2 py-1 text-caption font-medium text-ink-text-label transition-colors hover:bg-ink focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50 border-ink-border text-ink-text-body dark:hover:bg-panel";
 
 
 export const PlanMarkdown = React.forwardRef<HTMLElement, React.HTMLAttributes<HTMLElement> & { content: string }>(({ content, className = '', ...props }, ref) => (
@@ -319,17 +319,17 @@ export function PlanMarkdownLoading() {
           <FileText className="h-4 w-4" aria-hidden="true" />
         </div>
         <div className="min-w-0">
-          <div className="text-sm font-semibold text-gray-800 dark:text-gray-100">Loading plan documents</div>
-          <div className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">Fetching markdown, annotations, and plan metadata.</div>
+          <div className="text-sm font-semibold text-ink-text-body text-ink-text">Loading plan documents</div>
+          <div className="mt-0.5 text-xs text-ink-text-muted">Fetching markdown, annotations, and plan metadata.</div>
         </div>
       </div>
       <div className="space-y-4 animate-pulse">
-        <div className="h-5 w-44 rounded bg-gray-200 dark:bg-gray-800" />
-        <div className="h-8 w-3/4 rounded bg-gray-200 dark:bg-gray-800" />
+        <div className="h-5 w-44 rounded bg-ink-border bg-ink-surface" />
+        <div className="h-8 w-3/4 rounded bg-ink-border bg-ink-surface" />
         <div className="space-y-2">
-          <div className="h-3 rounded bg-gray-100 dark:bg-gray-900" />
-          <div className="h-3 rounded bg-gray-100 dark:bg-gray-900" />
-          <div className="h-3 w-2/3 rounded bg-gray-100 dark:bg-gray-900" />
+          <div className="h-3 rounded bg-ink-surface" />
+          <div className="h-3 rounded bg-ink-surface" />
+          <div className="h-3 w-2/3 rounded bg-ink-surface" />
         </div>
       </div>
     </div>
@@ -1281,8 +1281,8 @@ export const TaskDetail = () => {
     if (expandedContext === 'spec') {
       const docs = pipeline?.documents ?? [];
       return (
-        <div className="p-4 bg-gray-50 dark:bg-gray-950 border-t border-gray-100 dark:border-gray-800">
-          <div className="mb-3 text-xs text-gray-500 dark:text-gray-400">
+        <div className="p-4 bg-ink border-t border-ink-border">
+          <div className="mb-3 text-xs text-ink-text-muted">
             Select a plan document here; it renders in the reading pane on the right.
           </div>
           <div className="space-y-1 max-h-72 overflow-auto pr-1 scrollbar-custom">
@@ -1292,9 +1292,9 @@ export const TaskDetail = () => {
                 Loading plan documents
               </div>
             ) : docs.length === 0 ? (
-              <div className="rounded border border-dashed border-gray-200 dark:border-gray-800 p-3 text-sm text-gray-500 dark:text-gray-400">No plan documents found.</div>
+              <div className="rounded border border-dashed border-ink-border p-3 text-sm text-ink-text-muted">No plan documents found.</div>
             ) : docs.map((item) => (
-              <button key={item.path} onClick={() => selectPlanDoc(item.path)} className={`flex min-h-10 w-full items-center gap-2 rounded px-3 py-2 text-left text-sm transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-gray-950 ${selectedPlanDoc?.path === item.path ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300' : 'text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-900'}`}>
+              <button key={item.path} onClick={() => selectPlanDoc(item.path)} className={`flex min-h-10 w-full items-center gap-2 rounded px-3 py-2 text-left text-sm transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-gray-950 ${selectedPlanDoc?.path === item.path ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300' : 'text-ink-text-label hover:bg-ink-surface text-ink-text-label dark:hover:bg-panel'}`}>
                 <FileText className="h-4 w-4 flex-shrink-0" aria-hidden="true" />
                 <span className="truncate">{item.path}</span>
               </button>
@@ -1305,7 +1305,7 @@ export const TaskDetail = () => {
     }
     if (expandedContext === 'criteria') {
       return (
-        <div className="p-4 bg-gray-50 dark:bg-gray-950 border-t border-gray-100 dark:border-gray-800 text-sm text-gray-700 dark:text-gray-300 space-y-2">
+        <div className="p-4 bg-ink border-t border-ink-border text-sm text-ink-text-label space-y-2">
           {task.acceptanceCriteria.length ? task.acceptanceCriteria.map(c => <div key={c.id}>• {c.text}</div>) : <div>{task.contextBundle.criteria}</div>}
           {pipeline?.issues.map(issue => (
             <div key={issue.id} className="flex items-center gap-2">
@@ -1316,7 +1316,7 @@ export const TaskDetail = () => {
                   disabled={promotingIssueId !== null}
                   onClick={() => void handlePromote(issue)}
                   title="Enrich this Backlog ticket with Tier-1/Tier-2 context (adw-factory-borrows 05)"
-                  className="inline-flex min-h-6 flex-shrink-0 items-center rounded-md border border-gray-200 px-1.5 py-0.5 text-[10px] font-medium text-gray-700 transition-colors hover:bg-gray-100 focus-visible:ring-2 focus-visible:ring-amber-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-900"
+                  className="inline-flex min-h-6 flex-shrink-0 items-center rounded-md border border-ink-border px-1.5 py-0.5 text-caption font-medium text-ink-text-label transition-colors hover:bg-ink-surface focus-visible:ring-2 focus-visible:ring-amber-500 disabled:cursor-not-allowed disabled:opacity-50 border-ink-border-2 text-ink-text-body dark:hover:bg-panel"
                 >
                   {promotingIssueId === issue.id ? 'Promoting…' : 'Promote'}
                 </button>
@@ -1328,13 +1328,13 @@ export const TaskDetail = () => {
     }
     if (expandedContext === 'prerequisites') {
       const prereqs = (pipeline?.concerns ?? []).flatMap((concern) => concern.prerequisites.map((text) => `${concern.file}: ${text}`));
-      return <div className="p-4 bg-gray-50 dark:bg-gray-950 border-t border-gray-100 dark:border-gray-800 text-sm text-gray-700 dark:text-gray-300 space-y-2">{prereqs.length ? prereqs.map((p) => <div key={p}>• {p}</div>) : <div>{task.contextBundle.prerequisites}</div>}</div>;
+      return <div className="p-4 bg-ink border-t border-ink-border text-sm text-ink-text-label space-y-2">{prereqs.length ? prereqs.map((p) => <div key={p}>• {p}</div>) : <div>{task.contextBundle.prerequisites}</div>}</div>;
     }
     if (expandedContext === 'decisions') {
-      return <div className="p-4 bg-gray-50 dark:bg-gray-950 border-t border-gray-100 dark:border-gray-800 text-sm text-gray-700 dark:text-gray-300 space-y-2">{task.decisions.length ? task.decisions.map(d => <div key={d.id}>• {d.text}</div>) : <div>{task.contextBundle.decisions}</div>}</div>;
+      return <div className="p-4 bg-ink border-t border-ink-border text-sm text-ink-text-label space-y-2">{task.decisions.length ? task.decisions.map(d => <div key={d.id}>• {d.text}</div>) : <div>{task.contextBundle.decisions}</div>}</div>;
     }
     const touches = (pipeline?.concerns ?? []).flatMap((concern) => concern.touches.map((text) => `${concern.file}: ${text}`));
-    return <div className="p-4 bg-gray-50 dark:bg-gray-950 border-t border-gray-100 dark:border-gray-800 text-sm text-gray-700 dark:text-gray-300 space-y-2">{touches.length ? touches.map((item) => <div key={item}>• {item}</div>) : <div>{pipeline?.agentIds.length ? pipeline.agentIds.join(', ') : task.contextBundle.downstream}</div>}</div>;
+    return <div className="p-4 bg-ink border-t border-ink-border text-sm text-ink-text-label space-y-2">{touches.length ? touches.map((item) => <div key={item}>• {item}</div>) : <div>{pipeline?.agentIds.length ? pipeline.agentIds.join(', ') : task.contextBundle.downstream}</div>}</div>;
   };
 
   const renderPlanDocPane = () => {
@@ -1343,25 +1343,25 @@ export const TaskDetail = () => {
     }
     if (!selectedPlanDoc) {
       return (
-        <div className="flex h-full flex-col items-center justify-center gap-2 p-8 text-center text-gray-500 dark:text-gray-400">
+        <div className="flex h-full flex-col items-center justify-center gap-2 p-8 text-center text-ink-text-muted">
           <FileText className="h-8 w-8" aria-hidden="true" />
-          <div className="text-sm font-medium text-gray-700 dark:text-gray-300">No plan markdown</div>
+          <div className="text-sm font-medium text-ink-text-label">No plan markdown</div>
           <p className="max-w-sm text-xs">This task has no linked plan documents yet. The bundle rows still show criteria, prerequisites, decisions, and downstream context.</p>
         </div>
       );
     }
     return (
       <>
-        <div className="flex-shrink-0 border-b border-gray-200 bg-white px-4 py-3 dark:border-gray-800 dark:bg-gray-950">
+        <div className="flex-shrink-0 border-b border-ink-border bg-white px-4 py-3 border-ink-border bg-ink">
           <div className="flex flex-col gap-2 xl:flex-row xl:items-start xl:justify-between">
             <div className="min-w-0">
-              <div className="mb-1 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-widest text-gray-500 dark:text-gray-400">
+              <div className="mb-1 flex items-center gap-2 text-caption font-semibold uppercase tracking-widest text-ink-text-muted">
                 <FileText className="h-3.5 w-3.5" aria-hidden="true" />
                 Plan markdown
               </div>
-              <h2 className="truncate text-[15px] font-semibold text-gray-900 dark:text-gray-100">{selectedPlanDoc.title || selectedPlanDoc.file}</h2>
-              <div className="mt-1 truncate font-mono text-[11px] text-gray-500 dark:text-gray-400">{selectedPlanDoc.path}</div>
-              <div className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">Updated {formatWhen(selectedPlanDoc.updatedAt)}</div>
+              <h2 className="truncate text-[15px] font-semibold text-ink-text">{selectedPlanDoc.title || selectedPlanDoc.file}</h2>
+              <div className="mt-1 truncate font-mono text-caption text-ink-text-muted">{selectedPlanDoc.path}</div>
+              <div className="mt-2 text-caption text-ink-text-muted">Updated {formatWhen(selectedPlanDoc.updatedAt)}</div>
             </div>
             {/* Document selection (Prev/Next, the Documents strip, action buttons) moved to the
                 left-pane Artifacts section — this pane keeps only content + its title line, plus
@@ -1370,7 +1370,7 @@ export const TaskDetail = () => {
               <button
                 type="button"
                 onClick={() => openReview(featureId, selectedPlanDoc.path)}
-                className="inline-flex min-h-8 shrink-0 items-center gap-1 rounded-md px-2 text-[11px] font-medium text-amber-700 hover:bg-amber-50 focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-amber-300 dark:hover:bg-amber-950/40"
+                className="inline-flex min-h-8 shrink-0 items-center gap-1 rounded-md px-2 text-caption font-medium text-amber-700 hover:bg-amber-50 focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-amber-300 dark:hover:bg-amber-950/40"
               >
                 Design Review →
               </button>
@@ -1384,31 +1384,31 @@ export const TaskDetail = () => {
                 event.preventDefault();
                 void saveAnnotation(false);
               }}
-              className="absolute z-30 w-80 rounded-xl border border-gray-200 bg-white p-3 shadow-xl dark:border-gray-800 dark:bg-gray-950"
+              className="absolute z-30 w-80 rounded-xl border border-ink-border bg-white p-3 shadow-xl border-ink-border bg-ink"
               style={{ top: annotationDraft.top, left: annotationDraft.left }}
             >
               <div className="mb-2 flex items-start justify-between gap-2">
                 <div>
-                  <div className="text-xs font-semibold text-gray-900 dark:text-gray-100">{annotationDraft.blockId ? 'Comment on block' : 'Annotate selection'}</div>
-                  <div className="mt-0.5 text-[11px] text-gray-500 dark:text-gray-400">
+                  <div className="text-xs font-semibold text-ink-text">{annotationDraft.blockId ? 'Comment on block' : 'Annotate selection'}</div>
+                  <div className="mt-0.5 text-caption text-ink-text-muted">
                     {annotationDraft.blockId ? 'Anchored to this rendered block' : annotationDraft.lineStart ? `Line ${annotationDraft.lineStart}${annotationDraft.lineEnd && annotationDraft.lineEnd !== annotationDraft.lineStart ? `-${annotationDraft.lineEnd}` : ''}` : 'Selected markdown text'}
                   </div>
                 </div>
-                <button type="button" onClick={() => setAnnotationDraft(null)} className="flex min-h-10 w-10 items-center justify-center rounded-md text-gray-400 hover:bg-gray-100 hover:text-gray-700 focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:bg-gray-900 dark:hover:text-gray-200" aria-label="Close annotation popover">
+                <button type="button" onClick={() => setAnnotationDraft(null)} className="flex min-h-10 w-10 items-center justify-center rounded-md text-ink-text-subtle hover:bg-ink-surface hover:text-ink-text-label focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:bg-panel dark:hover:text-ink-text-body" aria-label="Close annotation popover">
                   <X className="h-4 w-4" aria-hidden="true" />
                 </button>
               </div>
               {annotationDraft.quote && (
-                <blockquote className="mb-2 max-h-24 overflow-auto rounded border-l-4 border-amber-400 bg-amber-50 p-2 text-xs text-gray-700 dark:bg-amber-950/30 dark:text-gray-300">{annotationDraft.quote}</blockquote>
+                <blockquote className="mb-2 max-h-24 overflow-auto rounded border-l-4 border-amber-400 bg-amber-50 p-2 text-xs text-ink-text-label dark:bg-amber-950/30 text-ink-text-label">{annotationDraft.quote}</blockquote>
               )}
-              <label htmlFor="plan-annotation-body" className="mb-1 block text-xs font-medium text-gray-700 dark:text-gray-300">What should change?</label>
+              <label htmlFor="plan-annotation-body" className="mb-1 block text-xs font-medium text-ink-text-label">What should change?</label>
               <textarea
                 ref={annotationTextareaRef}
                 id="plan-annotation-body"
                 value={annotationText}
                 onChange={(event) => setAnnotationText(event.target.value)}
                 placeholder="Leave a note for collaborators or a planner agent."
-                className="min-h-24 w-full resize-none rounded-md border border-gray-200 bg-white p-2 text-sm text-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200"
+                className="min-h-24 w-full resize-none rounded-md border border-ink-border bg-white p-2 text-sm text-ink-text-body focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 border-ink-border bg-panel text-ink-text-body"
               />
               <div className="mt-3 flex flex-wrap items-center gap-2">
                 <button type="submit" disabled={!annotationText.trim()} className="min-h-10 rounded-md bg-amber-500 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-amber-600 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 dark:focus-visible:ring-offset-gray-950">Save</button>
@@ -1425,36 +1425,36 @@ export const TaskDetail = () => {
               onClick={handleBlockAnchorClick}
             />
           </PlanBlockContext.Provider>
-          <div className="mt-6 space-y-3 border-t border-gray-200 pt-4 dark:border-gray-800">
+          <div className="mt-6 space-y-3 border-t border-ink-border pt-4 border-ink-border">
             <div className="flex items-center justify-between">
-              <h3 className="text-xs font-semibold uppercase tracking-widest text-gray-500 dark:text-gray-400">Live annotations</h3>
-              <span className="text-xs text-gray-400">{selectedDocAnnotations.filter((item) => !item.resolvedAt).length} open</span>
+              <h3 className="text-xs font-semibold uppercase tracking-widest text-ink-text-muted">Live annotations</h3>
+              <span className="text-xs text-ink-text-subtle">{selectedDocAnnotations.filter((item) => !item.resolvedAt).length} open</span>
             </div>
             {selectedDocAnnotations.length === 0 ? (
-              <div className="rounded-lg border border-dashed border-gray-200 p-4 text-sm text-gray-500 dark:border-gray-800 dark:text-gray-400">No annotations on this document yet. Select text in the plan to start one.</div>
+              <div className="rounded-lg border border-dashed border-ink-border p-4 text-sm text-ink-text0 border-ink-border text-ink-text-subtle">No annotations on this document yet. Select text in the plan to start one.</div>
             ) : selectedDocAnnotations.map((annotation) => {
               const colors = annotationColors(annotation.author);
               return (
-                <div id={`annotation-${annotation.id}`} key={annotation.id} className={`rounded-lg border p-3 transition-colors ${annotation.resolvedAt ? 'border-gray-200 bg-gray-50 opacity-70 dark:border-gray-800 dark:bg-gray-900/40' : activeAnnotationId === annotation.id ? 'ring-2 ring-amber-500' : ''}`} style={!annotation.resolvedAt ? { borderColor: colors.border, backgroundColor: colors.card } : undefined}>
+                <div id={`annotation-${annotation.id}`} key={annotation.id} className={`rounded-lg border p-3 transition-colors ${annotation.resolvedAt ? 'border-ink-border bg-ink opacity-70 border-ink-border bg-panel/40' : activeAnnotationId === annotation.id ? 'ring-2 ring-amber-500' : ''}`} style={!annotation.resolvedAt ? { borderColor: colors.border, backgroundColor: colors.card } : undefined}>
                   <div className="mb-2 flex items-start justify-between gap-3">
-                    <div className="flex min-w-0 items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+                    <div className="flex min-w-0 items-center gap-2 text-xs text-ink-text-muted">
                       <span className="h-2.5 w-2.5 flex-shrink-0 rounded-full" style={{ backgroundColor: colors.border }} />
                       <span className="truncate">{annotation.author ?? 'User'} · {new Date(annotation.timestamp).toLocaleString()}{annotation.annotation?.lineStart ? ` · line ${annotation.annotation.lineStart}${annotation.annotation.lineEnd && annotation.annotation.lineEnd !== annotation.annotation.lineStart ? `-${annotation.annotation.lineEnd}` : ''}` : ''}</span>
-                      {(annotation.annotation as PlanAnnotationTargetDTO | undefined)?.blockId && <span className="flex-shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-950/50 dark:text-amber-300">block</span>}
+                      {(annotation.annotation as PlanAnnotationTargetDTO | undefined)?.blockId && <span className="flex-shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-caption font-medium text-amber-700 dark:bg-amber-950/50 dark:text-amber-300">block</span>}
                     </div>
-                    {annotation.resolvedAt ? <span className="text-xs text-gray-400">Resolved</span> : <button onClick={() => void resolveAnnotation(annotation)} className="min-h-10 rounded px-2 text-xs text-gray-500 hover:bg-white focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:bg-gray-900">Resolve</button>}
+                    {annotation.resolvedAt ? <span className="text-xs text-ink-text-subtle">Resolved</span> : <button onClick={() => void resolveAnnotation(annotation)} className="min-h-10 rounded px-2 text-xs text-ink-text0 hover:bg-white focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:bg-panel">Resolve</button>}
                   </div>
-                  {annotation.annotation?.quote && <blockquote className="mb-2 rounded border-l-4 bg-white/70 p-2 text-xs text-gray-700 dark:bg-gray-950/60 dark:text-gray-300" style={{ borderColor: colors.border }}>{annotation.annotation.quote}</blockquote>}
-                  <p className="whitespace-pre-wrap text-sm text-gray-800 dark:text-gray-200">{annotation.text}</p>
+                  {annotation.annotation?.quote && <blockquote className="mb-2 rounded border-l-4 bg-white/70 p-2 text-xs text-ink-text-label bg-ink/60 text-ink-text-label" style={{ borderColor: colors.border }}>{annotation.annotation.quote}</blockquote>}
+                  <p className="whitespace-pre-wrap text-sm text-ink-text-body">{annotation.text}</p>
                   {!annotation.resolvedAt && <div className="mt-3 flex flex-wrap items-center gap-2">
-                    <button disabled={sendingAnnotationId === annotation.id} onClick={() => void sendAnnotation(annotation, 'planner')} className="min-h-10 rounded-md bg-gray-900 px-3 py-2 text-xs font-medium text-white focus-visible:ring-2 focus-visible:ring-amber-500 disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900">Send to planner</button>
+                    <button disabled={sendingAnnotationId === annotation.id} onClick={() => void sendAnnotation(annotation, 'planner')} className="min-h-10 rounded-md bg-panel px-3 py-2 text-xs font-medium text-white focus-visible:ring-2 focus-visible:ring-amber-500 disabled:opacity-50 bg-ink-surface text-ink-text">Send to planner</button>
                     {activeAgents.length > 0 && (
                       <>
-                        <select value={targetAgentByAnnotation[annotation.id] ?? ''} onChange={(event) => setTargetAgentByAnnotation((prev) => ({ ...prev, [annotation.id]: event.target.value }))} className="min-h-10 rounded-md border border-gray-200 bg-white px-2 text-xs focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
+                        <select value={targetAgentByAnnotation[annotation.id] ?? ''} onChange={(event) => setTargetAgentByAnnotation((prev) => ({ ...prev, [annotation.id]: event.target.value }))} className="min-h-10 rounded-md border border-ink-border bg-white px-2 text-xs focus-visible:ring-2 focus-visible:ring-amber-500 border-ink-border bg-ink text-ink-text-body">
                           <option value="">Pick agent</option>
                           {activeAgents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
                         </select>
-                        <button disabled={sendingAnnotationId === annotation.id} onClick={() => void sendAnnotation(annotation, 'agent')} className="min-h-10 rounded-md border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 focus-visible:ring-2 focus-visible:ring-amber-500 disabled:opacity-50 dark:border-gray-800 dark:text-gray-300">Send to agent</button>
+                        <button disabled={sendingAnnotationId === annotation.id} onClick={() => void sendAnnotation(annotation, 'agent')} className="min-h-10 rounded-md border border-ink-border px-3 py-2 text-xs font-medium text-ink-text-label focus-visible:ring-2 focus-visible:ring-amber-500 disabled:opacity-50 border-ink-border text-ink-text-label">Send to agent</button>
                       </>
                     )}
                   </div>}
@@ -1468,8 +1468,8 @@ export const TaskDetail = () => {
   };
 
   return (
-    <main className="flex-1 flex flex-col h-full overflow-hidden bg-white dark:bg-gray-950 z-0 transition-colors duration-200">
-      <div className="h-10 border-b border-gray-200 dark:border-gray-800 flex items-center justify-end px-3 gap-2 bg-white dark:bg-gray-950 z-10 flex-shrink-0 transition-colors duration-200">
+    <main className="flex-1 flex flex-col h-full overflow-hidden bg-panel z-0 transition-colors duration-200">
+      <div className="h-10 border-b border-ink-border flex items-center justify-end px-3 gap-2 bg-panel z-10 flex-shrink-0 transition-colors duration-200">
         {interruptTargets.length > 0 && (
           <button type="button" onClick={handleInterruptAgents} title={`Interrupt current turn for ${interruptTargets.length} agent(s)`} aria-label="Interrupt agent" className="min-h-8 rounded-md px-2.5 text-xs font-medium flex items-center gap-1.5 transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 text-amber-600 hover:bg-amber-50 dark:text-amber-400 dark:hover:bg-amber-900/30">
             <span className="inline-block h-2.5 w-2.5 rounded-full border-2 border-current" aria-hidden="true" /> Interrupt{interruptTargets.length > 1 ? ` (${interruptTargets.length})` : ''}
@@ -1506,17 +1506,17 @@ export const TaskDetail = () => {
               del worktree
             </label>
             <button type="button" onClick={handleRemoveConfirm} className="text-xs font-medium text-red-700 dark:text-red-300 hover:text-red-900 focus-visible:ring-2 focus-visible:ring-red-500">Confirm remove</button>
-            <button type="button" onClick={() => { setRemoveTarget(null); setRemoveDeleteWorktree(false); }} className="text-xs text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200">✕</button>
+            <button type="button" onClick={() => { setRemoveTarget(null); setRemoveDeleteWorktree(false); }} className="text-xs text-ink-text0 hover:text-ink-text-label text-ink-text-subtle dark:hover:text-ink-text-body">✕</button>
           </div>
         )}
         {/* Per-agent model picker — opens when the model button is clicked */}
         {modelPickerAgentId && (
-          <div className="flex items-center gap-1 rounded-md border border-gray-200 bg-white px-2 py-1 dark:border-gray-700 dark:bg-gray-900">
+          <div className="flex items-center gap-1 rounded-md border border-ink-border bg-white px-2 py-1 border-ink-border-2 bg-panel">
             <select
               autoFocus
               value={modelPickerValue}
               onChange={(e) => setModelPickerValue(e.target.value)}
-              className="text-xs bg-transparent border-none outline-none text-gray-700 dark:text-gray-200 cursor-pointer"
+              className="text-xs bg-transparent border-none outline-none text-ink-text-label text-ink-text-body cursor-pointer"
               aria-label="Select model"
             >
               <option value="">pick model…</option>
@@ -1528,10 +1528,10 @@ export const TaskDetail = () => {
               onChange={(e) => setModelPickerValue(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') handleSetModel(modelPickerAgentId, modelPickerValue); if (e.key === 'Escape') { setModelPickerAgentId(null); setModelPickerValue(''); } }}
               placeholder="or type model id…"
-              className="w-36 text-xs bg-transparent border-none outline-none text-gray-700 dark:text-gray-200 placeholder:text-gray-400"
+              className="w-36 text-xs bg-transparent border-none outline-none text-ink-text-label text-ink-text-body placeholder:text-ink-text-subtle"
             />
             <button type="button" onClick={() => handleSetModel(modelPickerAgentId, modelPickerValue)} disabled={!modelPickerValue.trim()} className="text-xs font-medium text-amber-600 dark:text-amber-400 disabled:opacity-40 hover:text-amber-800 focus-visible:ring-2 focus-visible:ring-amber-500">Set</button>
-            <button type="button" onClick={() => { setModelPickerAgentId(null); setModelPickerValue(''); }} className="text-xs text-gray-400 hover:text-gray-600">✕</button>
+            <button type="button" onClick={() => { setModelPickerAgentId(null); setModelPickerValue(''); }} className="text-xs text-ink-text-subtle hover:text-ink-text-label">✕</button>
           </div>
         )}
         {/* Fork-from-checkpoint picker — opens when a Fork button (toolbar or per-agent row) is clicked */}
@@ -1548,38 +1548,38 @@ export const TaskDetail = () => {
             REAL binding; jump-to-task-search is one row inside the palette. Taste-review nit 4:
             labeled "Search" (not "Jump") — it opens a search/command surface, and "Jump" no
             longer describes what the click does. */}
-        <button onClick={openCommandPalette} className="min-h-8 rounded-md px-2 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300 text-xs flex items-center gap-1 focus-visible:ring-2 focus-visible:ring-amber-500" title="Command palette (⌘K)" aria-label="Open command palette"><Search className="w-3.5 h-3.5" /> Search <span className="bg-gray-100 dark:bg-gray-800 px-1 rounded border border-gray-200 dark:border-gray-700 text-[10px]">⌘K</span></button>
-        <button onClick={toggleTheme} className="flex min-h-8 w-8 items-center justify-center rounded-md text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300 transition-colors focus-visible:ring-2 focus-visible:ring-amber-500" title="Toggle theme" aria-label="Toggle theme">{theme === 'light' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}</button>
-        <button onClick={() => setIsChatOpen(!isChatOpen)} className={`flex min-h-8 items-center gap-1.5 px-2.5 rounded-md text-xs font-medium transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${isChatOpen ? 'bg-amber-100 dark:bg-amber-900/50 text-amber-700 dark:text-amber-300' : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700'}`}><Bot className="w-3.5 h-3.5" /> Agent</button>
+        <button onClick={openCommandPalette} className="min-h-8 rounded-md px-2 text-ink-text-subtle hover:bg-ink-surface hover:text-ink-text-label dark:hover:bg-ink-surface dark:hover:text-ink-text-label text-xs flex items-center gap-1 focus-visible:ring-2 focus-visible:ring-amber-500" title="Command palette (⌘K)" aria-label="Open command palette"><Search className="w-3.5 h-3.5" /> Search <span className="bg-ink-surface px-1 rounded border border-ink-border text-caption">⌘K</span></button>
+        <button onClick={toggleTheme} className="flex min-h-8 w-8 items-center justify-center rounded-md text-ink-text-subtle hover:bg-ink-surface hover:text-ink-text-label dark:hover:bg-ink-surface dark:hover:text-ink-text-label transition-colors focus-visible:ring-2 focus-visible:ring-amber-500" title="Toggle theme" aria-label="Toggle theme">{theme === 'light' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}</button>
+        <button onClick={() => setIsChatOpen(!isChatOpen)} className={`flex min-h-8 items-center gap-1.5 px-2.5 rounded-md text-xs font-medium transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${isChatOpen ? 'bg-amber-100 dark:bg-amber-900/50 text-amber-700 dark:text-amber-300' : 'bg-ink-surface text-ink-text-muted hover:bg-ink-border dark:hover:bg-ink-text-label'}`}><Bot className="w-3.5 h-3.5" /> Agent</button>
       </div>
 
       {!task ? (
         // Master list in the MAIN pane — the viewport used to sit empty while the actual task
         // list hid below the fold of the 300px rail. Click a row to open its detail here.
-        <div className="flex-1 overflow-y-auto scrollbar-custom bg-gray-50/30 p-6 transition-colors duration-200 dark:bg-gray-900/30">
+        <div className="flex-1 overflow-y-auto scrollbar-custom bg-ink/30 p-6 transition-colors duration-200 bg-panel/30">
           {tasks.length === 0 ? (
-            <div className="flex h-full flex-col items-center justify-center text-center text-gray-400">
+            <div className="flex h-full flex-col items-center justify-center text-center text-ink-text-subtle">
               <EmptyStateIllustration />
-              <h2 className="mb-2 text-xl font-semibold text-gray-700 dark:text-gray-300">No tasks yet</h2>
+              <h2 className="mb-2 text-xl font-semibold text-ink-text-label">No tasks yet</h2>
               <p className="max-w-sm text-sm">Create a task from the rail, run /plan, or dispatch a Plane issue — plans and features show up here.</p>
             </div>
           ) : (
             <div className="mx-auto max-w-3xl">
               <div className="mb-3 flex items-baseline justify-between">
-                <h2 className="text-sm font-semibold uppercase tracking-widest text-gray-500 dark:text-gray-400">Tasks</h2>
-                <span className="text-xs text-gray-400">{tasks.length} total — select one to open its plan, proof, and agents</span>
+                <h2 className="text-sm font-semibold uppercase tracking-widest text-ink-text-muted">Tasks</h2>
+                <span className="text-xs text-ink-text-subtle">{tasks.length} total — select one to open its plan, proof, and agents</span>
               </div>
-              <div className="divide-y divide-gray-100 overflow-hidden rounded-lg border border-gray-200 bg-white dark:divide-gray-800 dark:border-gray-800 dark:bg-gray-950">
+              <div className="divide-y divide-ink-border overflow-hidden rounded-lg border border-ink-border bg-white divide-ink-border border-ink-border bg-ink">
                 {tasks.map((item) => (
                   <button
                     key={item.id}
                     onClick={() => selectTask(item.id)}
-                    className="flex min-h-11 w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-500 dark:hover:bg-gray-900/60"
+                    className="flex min-h-11 w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-ink focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-500 dark:hover:bg-panel/60"
                   >
-                    <span className={`h-2 w-2 flex-shrink-0 rounded-full ${item.status === 'done' ? 'bg-emerald-500' : item.status === 'active' ? 'bg-blue-500' : 'bg-gray-300 dark:bg-gray-600'}`} aria-label={item.status} />
-                    <span className="min-w-0 flex-1 truncate text-sm text-gray-900 dark:text-gray-100">{item.title}</span>
-                    {taskRef(item) && <span className="flex-shrink-0 font-mono text-[11px] text-gray-400 dark:text-gray-500">{taskRef(item)}</span>}
-                    <span className="flex-shrink-0 rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-gray-500 dark:bg-gray-900 dark:text-gray-400">{item.properties.status}</span>
+                    <span className={`h-2 w-2 flex-shrink-0 rounded-full ${item.status === 'done' ? 'bg-emerald-500' : item.status === 'active' ? 'bg-blue-500' : 'bg-ink-border-2 bg-ink-text-label'}`} aria-label={item.status} />
+                    <span className="min-w-0 flex-1 truncate text-sm text-ink-text">{item.title}</span>
+                    {taskRef(item) && <span className="flex-shrink-0 font-mono text-caption text-ink-text-subtle">{taskRef(item)}</span>}
+                    <span className="flex-shrink-0 rounded bg-ink-surface px-1.5 py-0.5 text-caption font-medium uppercase tracking-wide text-ink-text0 bg-panel text-ink-text-subtle">{item.properties.status}</span>
                   </button>
                 ))}
               </div>
@@ -1595,14 +1595,14 @@ export const TaskDetail = () => {
           <section className="min-w-0 flex-1 overflow-y-auto scrollbar-custom lg:flex-none lg:[flex-basis:var(--detail-pane-width)]">
             <div className="mx-auto max-w-5xl px-4 py-5 lg:px-5">
               <div className="flex items-start justify-between mb-4">
-                <div className="flex items-center gap-1.5 text-gray-500 dark:text-gray-400 text-xs mb-2"><button onClick={() => selectTask(null)} className="flex items-center gap-1 rounded px-1.5 py-0.5 font-medium text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200" title="Back to all work items"><ChevronLeft className="h-3.5 w-3.5" aria-hidden="true" />Tasks</button><ChevronRight className="w-3 h-3" /><span className="font-medium text-gray-700 dark:text-gray-300">{taskRef(task) ?? task.properties.project.shortCode}</span><ChevronRight className="w-3 h-3" /><span>{task.properties.project.name}</span></div>
+                <div className="flex items-center gap-1.5 text-ink-text-muted text-xs mb-2"><button onClick={() => selectTask(null)} className="flex items-center gap-1 rounded px-1.5 py-0.5 font-medium text-ink-text0 transition-colors hover:bg-ink-surface hover:text-ink-text-label focus-visible:ring-2 focus-visible:ring-amber-500 text-ink-text-subtle dark:hover:bg-ink-surface dark:hover:text-ink-text-body" title="Back to all work items"><ChevronLeft className="h-3.5 w-3.5" aria-hidden="true" />Tasks</button><ChevronRight className="w-3 h-3" /><span className="font-medium text-ink-text-label">{taskRef(task) ?? task.properties.project.shortCode}</span><ChevronRight className="w-3 h-3" /><span>{task.properties.project.name}</span></div>
                 <div className="flex items-center gap-2">
-                  <button onClick={() => setShowProperties(!showProperties)} className={`w-7 h-7 rounded border border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-900 flex items-center justify-center transition-colors ${showProperties ? 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-200' : 'text-gray-400'}`} title="Toggle Properties" aria-label="Toggle properties panel" aria-expanded={showProperties}><PanelRight className="w-3.5 h-3.5" /></button>
-                  <button onClick={() => { navigator.clipboard.writeText(`${taskRef(task) ?? task.id}: ${task.title}`).then(() => showToast('Copied task ID + title', 'info')).catch(() => undefined); }} className="w-7 h-7 rounded border border-gray-200 dark:border-gray-800 text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-900 flex items-center justify-center transition-colors focus-visible:ring-2 focus-visible:ring-amber-500" title="Copy task ID + title" aria-label="Copy task ID and title"><Copy className="w-3.5 h-3.5" /></button>
+                  <button onClick={() => setShowProperties(!showProperties)} className={`w-7 h-7 rounded border border-ink-border hover:bg-ink-surface flex items-center justify-center transition-colors ${showProperties ? 'bg-ink-surface text-ink-text-label text-ink-text-body' : 'text-ink-text-subtle'}`} title="Toggle Properties" aria-label="Toggle properties panel" aria-expanded={showProperties}><PanelRight className="w-3.5 h-3.5" /></button>
+                  <button onClick={() => { navigator.clipboard.writeText(`${taskRef(task) ?? task.id}: ${task.title}`).then(() => showToast('Copied task ID + title', 'info')).catch(() => undefined); }} className="w-7 h-7 rounded border border-ink-border text-ink-text-subtle hover:bg-ink-surface flex items-center justify-center transition-colors focus-visible:ring-2 focus-visible:ring-amber-500" title="Copy task ID + title" aria-label="Copy task ID and title"><Copy className="w-3.5 h-3.5" /></button>
                 </div>
               </div>
 
-              <input key={`${task.id}:title`} className="w-full rounded text-2xl font-bold text-gray-900 dark:text-gray-100 mb-2 outline-none leading-tight bg-transparent focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-gray-950" defaultValue={task.title} onBlur={(e) => e.currentTarget.value !== task.title && updateTask(task.id, { title: e.currentTarget.value })} />
+              <input key={`${task.id}:title`} className="w-full rounded text-2xl font-bold text-ink-text mb-2 outline-none leading-tight bg-transparent focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-gray-950" defaultValue={task.title} onBlur={(e) => e.currentTarget.value !== task.title && updateTask(task.id, { title: e.currentTarget.value })} />
 
               {/* Task pipeline header (reference A): issue-id chip + repo path give the "what is
                   this and where does it live" answer at a glance; Create Session / Create Design
@@ -1610,15 +1610,15 @@ export const TaskDetail = () => {
               <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
                 <div className="flex flex-wrap items-center gap-2 text-xs">
                   {issueIdentifier(task) && (
-                    <span className="rounded border border-gray-200 px-1.5 py-0.5 font-mono text-[11px] font-medium text-gray-600 dark:border-gray-700 dark:text-gray-300">{issueIdentifier(task)}</span>
+                    <span className="rounded border border-ink-border px-1.5 py-0.5 font-mono text-caption font-medium text-ink-text-label border-ink-border-2 text-ink-text-label">{issueIdentifier(task)}</span>
                   )}
-                  <span className="font-mono text-[11px] text-gray-500 dark:text-gray-400">{task.properties.project.id}</span>
+                  <span className="font-mono text-caption text-ink-text-muted">{task.properties.project.id}</span>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                   <button
                     type="button"
                     onClick={() => setSessionComposerOpen((open) => !open)}
-                    className="inline-flex min-h-8 items-center gap-1.5 rounded-md border border-gray-200 px-2.5 py-1 text-xs font-semibold text-gray-700 transition-colors hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-800"
+                    className="inline-flex min-h-8 items-center gap-1.5 rounded-md border border-ink-border px-2.5 py-1 text-xs font-semibold text-ink-text-label transition-colors hover:bg-ink focus-visible:ring-2 focus-visible:ring-amber-500 border-ink-border-2 text-ink-text-body dark:hover:bg-ink-surface"
                   >
                     Create Session <Kbd keys="c" />
                   </button>
@@ -1633,7 +1633,7 @@ export const TaskDetail = () => {
                 </div>
               </div>
               {sessionComposerOpen && (
-                <div className="mb-5 flex gap-2 rounded-lg border border-gray-200 bg-gray-50 p-2.5 dark:border-gray-800 dark:bg-gray-900/40">
+                <div className="mb-5 flex gap-2 rounded-lg border border-ink-border bg-ink p-2.5 border-ink-border bg-panel/40">
                   <input
                     autoFocus
                     type="text"
@@ -1641,13 +1641,13 @@ export const TaskDetail = () => {
                     onChange={(e) => setSessionComposerText(e.target.value)}
                     onKeyDown={(e) => { if (e.key === 'Enter') void createSession(); if (e.key === 'Escape') setSessionComposerOpen(false); }}
                     placeholder="What should this session do?"
-                    className="flex-1 rounded border border-gray-200 bg-white px-2 py-1.5 text-sm text-gray-700 outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-200"
+                    className="flex-1 rounded border border-ink-border bg-white px-2 py-1.5 text-sm text-ink-text-label outline-none focus-visible:ring-2 focus-visible:ring-amber-500 border-ink-border-2 bg-ink text-ink-text-body"
                   />
                   <button
                     type="button"
                     disabled={creatingSession || !sessionComposerText.trim()}
                     onClick={() => void createSession()}
-                    className="rounded bg-gray-900 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-gray-200"
+                    className="rounded bg-panel px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-ink-surface disabled:cursor-not-allowed disabled:opacity-50 bg-ink-surface text-ink-text dark:hover:bg-ink-border"
                   >
                     {creatingSession ? 'Starting…' : 'Start'}
                   </button>
@@ -1668,8 +1668,8 @@ export const TaskDetail = () => {
                   from the same activeAgents the Agent-detail cockpit below renders; a row click
                   scrolls to that agent's full control panel instead of duplicating its controls. */}
               <div className="mb-6">
-                <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest flex items-center gap-2 mb-3 border-b border-gray-100 dark:border-gray-800 pb-2">
-                  Sessions <span className="text-gray-500 font-medium">{sessionRows.length}</span>
+                <div className="text-caption font-semibold text-ink-text-subtle uppercase tracking-widest flex items-center gap-2 mb-3 border-b border-ink-border pb-2">
+                  Sessions <span className="text-ink-text0 font-medium">{sessionRows.length}</span>
                 </div>
                 <TaskSessionsTable rows={sessionRows} onOpenSession={openSession} />
               </div>
@@ -1699,13 +1699,13 @@ export const TaskDetail = () => {
                     ) : undefined
                   }
                   toolbar={
-                    <div className="space-y-2 border-b border-gray-100 px-3 py-2 dark:border-gray-800">
+                    <div className="space-y-2 border-b border-ink-border px-3 py-2 border-ink-border">
                       <div className="flex flex-wrap items-center gap-1.5" aria-label="Plan actions">
                         <button
                           type="button"
                           disabled={planAction !== null}
                           onClick={() => void startImplementation()}
-                          className="inline-flex min-h-7 items-center gap-1 rounded-md bg-gray-900 px-2 py-1 text-[11px] font-semibold text-white transition-colors hover:bg-gray-800 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-gray-200"
+                          className="inline-flex min-h-7 items-center gap-1 rounded-md bg-panel px-2 py-1 text-caption font-semibold text-white transition-colors hover:bg-ink-surface focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50 bg-ink-surface text-ink-text dark:hover:bg-ink-border"
                         >
                           <Bot className="h-3.5 w-3.5" aria-hidden="true" />
                           {planAction === 'implement' ? 'Starting...' : 'Implement'}
@@ -1728,27 +1728,27 @@ export const TaskDetail = () => {
                         </button>
                       </div>
                       {planeLinks && (planeLinks.moduleUrl || planeLinks.tickets === null || (planeLinks.tickets?.length ?? 0) > 0) && (
-                        <div className="flex flex-wrap items-center gap-2 rounded-md border border-gray-200 bg-gray-50 px-2 py-1.5 text-[11px] text-gray-600 dark:border-gray-800 dark:bg-gray-900/50 dark:text-gray-300" aria-label="Plane links">
-                          <span className="inline-flex items-center gap-1 font-semibold text-gray-700 dark:text-gray-200">
+                        <div className="flex flex-wrap items-center gap-2 rounded-md border border-ink-border bg-ink px-2 py-1.5 text-caption text-ink-text-label border-ink-border bg-panel/50 text-ink-text-label" aria-label="Plane links">
+                          <span className="inline-flex items-center gap-1 font-semibold text-ink-text-label text-ink-text-body">
                             <Box className="h-3 w-3" aria-hidden="true" />
                             Plane
                           </span>
                           {planeLinks.moduleUrl && (
-                            <a href={planeLinks.moduleUrl} target="_blank" rel="noreferrer" className="rounded border border-gray-200 bg-white px-1.5 py-0.5 font-medium text-amber-700 transition-colors hover:bg-amber-50 focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-700 dark:bg-gray-950 dark:text-amber-300 dark:hover:bg-amber-950/40">
+                            <a href={planeLinks.moduleUrl} target="_blank" rel="noreferrer" className="rounded border border-ink-border bg-white px-1.5 py-0.5 font-medium text-amber-700 transition-colors hover:bg-amber-50 focus-visible:ring-2 focus-visible:ring-amber-500 border-ink-border-2 bg-ink dark:text-amber-300 dark:hover:bg-amber-950/40">
                               Module linked
                             </a>
                           )}
                           {planeLinks.tickets === null ? (
                             <span className="rounded bg-amber-50 px-1.5 py-0.5 font-medium text-amber-700 dark:bg-amber-950/30 dark:text-amber-300">Tickets unavailable</span>
                           ) : (
-                            <span className="rounded bg-gray-100 px-1.5 py-0.5 font-medium text-gray-600 dark:bg-gray-800 dark:text-gray-300">{planeLinks.tickets.length} ticket{planeLinks.tickets.length === 1 ? '' : 's'}</span>
+                            <span className="rounded bg-ink-surface px-1.5 py-0.5 font-medium text-ink-text-label bg-ink-surface text-ink-text-label">{planeLinks.tickets.length} ticket{planeLinks.tickets.length === 1 ? '' : 's'}</span>
                           )}
                           {planeLinks.tickets?.slice(0, 4).map((ticket) => (
-                            <a key={ticket.identifier} href={ticket.url} target="_blank" rel="noreferrer" className="max-w-44 truncate rounded border border-gray-200 bg-white px-1.5 py-0.5 font-mono text-[10px] text-gray-600 transition-colors hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-300 dark:hover:bg-gray-900" title={`${ticket.identifier}: ${ticket.name}`}>
+                            <a key={ticket.identifier} href={ticket.url} target="_blank" rel="noreferrer" className="max-w-44 truncate rounded border border-ink-border bg-white px-1.5 py-0.5 font-mono text-caption text-ink-text-label transition-colors hover:bg-ink focus-visible:ring-2 focus-visible:ring-amber-500 border-ink-border-2 bg-ink text-ink-text-label dark:hover:bg-panel" title={`${ticket.identifier}: ${ticket.name}`}>
                               {ticket.identifier}
                             </a>
                           ))}
-                          {(planeLinks.tickets?.length ?? 0) > 4 && <span className="text-gray-400">+{(planeLinks.tickets?.length ?? 0) - 4} more</span>}
+                          {(planeLinks.tickets?.length ?? 0) > 4 && <span className="text-ink-text-subtle">+{(planeLinks.tickets?.length ?? 0) - 4} more</span>}
                         </div>
                       )}
                     </div>
@@ -1757,22 +1757,22 @@ export const TaskDetail = () => {
               </div>
 
               {planFlowConcerns.length >= 2 && (
-                <details open className="group mb-6 rounded-lg border border-gray-200 dark:border-gray-800">
-                  <summary className="flex cursor-pointer select-none items-center gap-2 px-3 py-2.5 text-[11px] font-semibold uppercase tracking-widest text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-500 list-none">
+                <details open className="group mb-6 rounded-lg border border-ink-border">
+                  <summary className="flex cursor-pointer select-none items-center gap-2 px-3 py-2.5 text-caption font-semibold uppercase tracking-widest text-ink-text-subtle hover:text-ink-text-label dark:hover:text-ink-text-body focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-500 list-none">
                     <ChevronRight className="h-3.5 w-3.5 transition-transform group-open:rotate-90" aria-hidden="true" />
                     <GitBranch className="h-3.5 w-3.5" aria-hidden="true" />
                     <span className="mr-auto">Plan flow</span>
-                    <span className="font-normal normal-case text-gray-400">{planFlowConcerns.length} concerns</span>
+                    <span className="font-normal normal-case text-ink-text-subtle">{planFlowConcerns.length} concerns</span>
                     <button
                       type="button"
                       onClick={(e) => { e.preventDefault(); e.stopPropagation(); setFlowFocus(true); }}
                       title="Open full-pane flow view"
-                      className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium normal-case tracking-normal text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200 focus-visible:ring-2 focus-visible:ring-amber-500"
+                      className="flex items-center gap-1 rounded px-1.5 py-0.5 text-caption font-medium normal-case tracking-normal text-ink-text0 hover:bg-ink-surface hover:text-ink-text-label text-ink-text-subtle dark:hover:bg-ink-surface dark:hover:text-ink-text-body focus-visible:ring-2 focus-visible:ring-amber-500"
                     >
                       <Maximize2 className="h-3 w-3" aria-hidden="true" /> Expand
                     </button>
                   </summary>
-                  <div className="border-t border-gray-100 dark:border-gray-800 p-3">
+                  <div className="border-t border-ink-border p-3">
                     <PlanFlowDiagram
                       concerns={planFlowConcerns}
                       overviewText={overviewDoc?.content ?? ''}
@@ -1793,31 +1793,31 @@ export const TaskDetail = () => {
               )}
 
               {workflowGraphAgent?.workflowGraph && (
-                <details open className="group mb-6 rounded-lg border border-gray-200 dark:border-gray-800">
-                  <summary className="flex cursor-pointer select-none items-center gap-2 px-3 py-2.5 text-[11px] font-semibold uppercase tracking-widest text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-500 list-none">
+                <details open className="group mb-6 rounded-lg border border-ink-border">
+                  <summary className="flex cursor-pointer select-none items-center gap-2 px-3 py-2.5 text-caption font-semibold uppercase tracking-widest text-ink-text-subtle hover:text-ink-text-label dark:hover:text-ink-text-body focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-500 list-none">
                     <ChevronRight className="h-3.5 w-3.5 transition-transform group-open:rotate-90" aria-hidden="true" />
                     <GitBranch className="h-3.5 w-3.5" aria-hidden="true" />
                     <span className="mr-auto">Workflow graph</span>
-                    <span className="font-normal normal-case text-gray-400">{workflowGraphAgent.workflowGraph.nodes.length} nodes</span>
+                    <span className="font-normal normal-case text-ink-text-subtle">{workflowGraphAgent.workflowGraph.nodes.length} nodes</span>
                     <button
                       type="button"
                       onClick={(e) => { e.preventDefault(); e.stopPropagation(); setWorkflowFlowFocus(true); }}
                       title="Open full-pane graph view"
-                      className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium normal-case tracking-normal text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200 focus-visible:ring-2 focus-visible:ring-amber-500"
+                      className="flex items-center gap-1 rounded px-1.5 py-0.5 text-caption font-medium normal-case tracking-normal text-ink-text0 hover:bg-ink-surface hover:text-ink-text-label text-ink-text-subtle dark:hover:bg-ink-surface dark:hover:text-ink-text-body focus-visible:ring-2 focus-visible:ring-amber-500"
                     >
                       <Maximize2 className="h-3 w-3" aria-hidden="true" /> Expand
                     </button>
                   </summary>
-                  <div className="border-t border-gray-100 dark:border-gray-800 p-3">
+                  <div className="border-t border-ink-border p-3">
                     <WorkflowGraphOverlay graph={workflowGraphAgent.workflowGraph} state={workflowGraphAgent.workflowState} traceId={workflowGraphTraceId} />
                   </div>
                 </details>
               )}
 
-              <div className="mb-5 grid gap-2 rounded-lg border border-gray-200 bg-gray-50 p-2.5 text-xs text-gray-600 dark:border-gray-800 dark:bg-gray-900/40 dark:text-gray-400 sm:grid-cols-3">
-                <div><div className="font-semibold uppercase tracking-widest text-gray-400">Status</div><div className="mt-1 font-medium text-gray-900 dark:text-gray-100">{task.properties.status}</div></div>
-                <div><div className="font-semibold uppercase tracking-widest text-gray-400">Plan created</div><div className="mt-1">{formatWhen(task.properties.createdAt ?? pipeline?.feature?.createdAt)}</div></div>
-                <div><div className="font-semibold uppercase tracking-widest text-gray-400">Plan updated</div><div className="mt-1">{formatWhen(task.properties.updatedAt ?? pipeline?.feature?.updatedAt)}</div></div>
+              <div className="mb-5 grid gap-2 rounded-lg border border-ink-border bg-ink p-2.5 text-xs text-ink-text-label border-ink-border bg-panel/40 text-ink-text-subtle sm:grid-cols-3">
+                <div><div className="font-semibold uppercase tracking-widest text-ink-text-subtle">Status</div><div className="mt-1 font-medium text-ink-text">{task.properties.status}</div></div>
+                <div><div className="font-semibold uppercase tracking-widest text-ink-text-subtle">Plan created</div><div className="mt-1">{formatWhen(task.properties.createdAt ?? pipeline?.feature?.createdAt)}</div></div>
+                <div><div className="font-semibold uppercase tracking-widest text-ink-text-subtle">Plan updated</div><div className="mt-1">{formatWhen(task.properties.updatedAt ?? pipeline?.feature?.updatedAt)}</div></div>
               </div>
 
               <div className="mb-7"><ProofProvenancePanel task={task} /></div>
@@ -1829,46 +1829,46 @@ export const TaskDetail = () => {
 
               {!overviewDoc && (
                 <div className="mb-10">
-                  <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest mb-3 border-b border-gray-100 dark:border-gray-800 pb-2">Description</div>
-                  <textarea key={`${task.id}:description`} className="w-full min-h-32 text-gray-700 dark:text-gray-300 leading-relaxed text-[15px] whitespace-pre-wrap bg-transparent border border-transparent hover:border-gray-200 dark:hover:border-gray-800 focus:border-amber-400 focus:ring-2 focus:ring-amber-500/20 rounded p-2 outline-none" defaultValue={task.description} onBlur={(e) => e.currentTarget.value !== task.description && updateTask(task.id, { description: e.currentTarget.value })} placeholder="Describe what the agent needs to do and why." />
+                  <div className="text-caption font-semibold text-ink-text-subtle uppercase tracking-widest mb-3 border-b border-ink-border pb-2">Description</div>
+                  <textarea key={`${task.id}:description`} className="w-full min-h-32 text-ink-text-label leading-relaxed text-[15px] whitespace-pre-wrap bg-transparent border border-transparent hover:border-ink-border dark:hover:border-ink-border focus:border-amber-400 focus:ring-2 focus:ring-amber-500/20 rounded p-2 outline-none" defaultValue={task.description} onBlur={(e) => e.currentTarget.value !== task.description && updateTask(task.id, { description: e.currentTarget.value })} placeholder="Describe what the agent needs to do and why." />
                 </div>
               )}
 
               <div className="mb-7">
-                <div className="flex items-center justify-between mb-3 border-b border-gray-100 dark:border-gray-800 pb-2">
-                  <button type="button" onClick={() => setCriteriaFolded((value) => !value)} className="flex min-h-8 items-center gap-2 rounded text-left text-[11px] font-semibold uppercase tracking-widest text-gray-400 transition-colors hover:text-gray-600 focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:text-gray-300" aria-expanded={!criteriaFolded} aria-controls="acceptance-criteria-list">
+                <div className="flex items-center justify-between mb-3 border-b border-ink-border pb-2">
+                  <button type="button" onClick={() => setCriteriaFolded((value) => !value)} className="flex min-h-8 items-center gap-2 rounded text-left text-caption font-semibold uppercase tracking-widest text-ink-text-subtle transition-colors hover:text-ink-text-label focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:text-ink-text-label" aria-expanded={!criteriaFolded} aria-controls="acceptance-criteria-list">
                     <ChevronRight className={`h-3.5 w-3.5 transition-transform ${criteriaFolded ? '' : 'rotate-90'}`} aria-hidden="true" />
-                    Acceptance Criteria <span className="text-gray-500 font-medium">{task.acceptanceCriteria.filter(c => c.completed).length} / {task.acceptanceCriteria.length}</span>
+                    Acceptance Criteria <span className="text-ink-text0 font-medium">{task.acceptanceCriteria.filter(c => c.completed).length} / {task.acceptanceCriteria.length}</span>
                   </button>
-                  <button onClick={() => { setCriteriaFolded(false); setIsAddingCriteria(true); }} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 text-xs font-medium flex items-center gap-1 transition-colors"><Plus className="w-3 h-3" /> Add</button>
+                  <button onClick={() => { setCriteriaFolded(false); setIsAddingCriteria(true); }} className="text-ink-text-subtle hover:text-ink-text-label dark:hover:text-ink-text-label text-xs font-medium flex items-center gap-1 transition-colors"><Plus className="w-3 h-3" /> Add</button>
                 </div>
                 {!criteriaFolded && <div id="acceptance-criteria-list" className="space-y-1.5">
-                  {task.acceptanceCriteria.length === 0 && !isAddingCriteria ? <div className="text-gray-400 dark:text-gray-500 italic text-sm py-2">No acceptance criteria defined.</div> : task.acceptanceCriteria.map(criteria => (
-                    <div key={criteria.id} className="group flex items-start gap-3 p-3 border border-gray-200 dark:border-gray-800 rounded-lg hover:border-gray-300 dark:hover:border-gray-700 bg-white dark:bg-gray-900 transition-colors">
-                      <input type="checkbox" checked={criteria.completed} onChange={() => handleToggleCriteria(criteria.id)} className="mt-1 w-4 h-4 text-amber-600 rounded border-gray-300 dark:border-gray-700 focus:ring-amber-500 bg-transparent cursor-pointer" />
-                      <div className={`flex-1 text-sm leading-snug ${criteria.completed ? 'text-gray-400 line-through' : 'text-gray-700 dark:text-gray-300'}`}>{criteria.text}</div>
-                      <button onClick={() => handleDeleteCriteria(criteria.id)} className="opacity-0 group-hover:opacity-100 p-1 text-gray-400 hover:text-red-500 transition-all rounded hover:bg-red-50 dark:hover:bg-red-900/30"><X className="w-3.5 h-3.5" /></button>
+                  {task.acceptanceCriteria.length === 0 && !isAddingCriteria ? <div className="text-ink-text-subtle italic text-sm py-2">No acceptance criteria defined.</div> : task.acceptanceCriteria.map(criteria => (
+                    <div key={criteria.id} className="group flex items-start gap-3 p-3 border border-ink-border rounded-lg hover:border-ink-border-2 dark:hover:border-ink-border-2 bg-panel transition-colors">
+                      <input type="checkbox" checked={criteria.completed} onChange={() => handleToggleCriteria(criteria.id)} className="mt-1 w-4 h-4 text-amber-600 rounded border-ink-border-2 border-ink-border-2 focus:ring-amber-500 bg-transparent cursor-pointer" />
+                      <div className={`flex-1 text-sm leading-snug ${criteria.completed ? 'text-ink-text-subtle line-through' : 'text-ink-text-label'}`}>{criteria.text}</div>
+                      <button onClick={() => handleDeleteCriteria(criteria.id)} className="opacity-0 group-hover:opacity-100 p-1 text-ink-text-subtle hover:text-red-500 transition-all rounded hover:bg-red-50 dark:hover:bg-red-900/30"><X className="w-3.5 h-3.5" /></button>
                     </div>
                   ))}
-                  {isAddingCriteria && <div className="flex items-start gap-3 p-3 border border-amber-300 dark:border-amber-700 rounded-lg bg-amber-50/30 dark:bg-amber-900/10"><input type="checkbox" disabled className="mt-1 w-4 h-4 text-gray-300 rounded border-gray-200 bg-transparent" /><input autoFocus type="text" value={newCriteriaText} onChange={(e) => setNewCriteriaText(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') handleAddCriteria(); if (e.key === 'Escape') setIsAddingCriteria(false); }} placeholder="Add acceptance criteria..." className="flex-1 bg-transparent border-none outline-none text-sm w-full dark:text-gray-200" /><button onClick={handleAddCriteria} className="text-xs px-3 py-1 bg-amber-500 hover:bg-amber-600 text-white rounded font-medium transition-colors">Save</button></div>}
+                  {isAddingCriteria && <div className="flex items-start gap-3 p-3 border border-amber-300 dark:border-amber-700 rounded-lg bg-amber-50/30 dark:bg-amber-900/10"><input type="checkbox" disabled className="mt-1 w-4 h-4 text-ink-text-label rounded border-ink-border bg-transparent" /><input autoFocus type="text" value={newCriteriaText} onChange={(e) => setNewCriteriaText(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') handleAddCriteria(); if (e.key === 'Escape') setIsAddingCriteria(false); }} placeholder="Add acceptance criteria..." className="flex-1 bg-transparent border-none outline-none text-sm w-full text-ink-text-body" /><button onClick={handleAddCriteria} className="text-xs px-3 py-1 bg-amber-500 hover:bg-amber-600 text-white rounded font-medium transition-colors">Save</button></div>}
                 </div>}
               </div>
 
-              <details className="group mb-7 rounded-lg border border-gray-200 dark:border-gray-800">
-              <summary className="flex cursor-pointer select-none items-center gap-2 px-3 py-2.5 text-[11px] font-semibold uppercase tracking-widest text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-500 list-none">
+              <details className="group mb-7 rounded-lg border border-ink-border">
+              <summary className="flex cursor-pointer select-none items-center gap-2 px-3 py-2.5 text-caption font-semibold uppercase tracking-widest text-ink-text-subtle hover:text-ink-text-label dark:hover:text-ink-text-body focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-500 list-none">
                 <ChevronRight className="h-3.5 w-3.5 transition-transform group-open:rotate-90" aria-hidden="true" />
                 <span className="mr-auto">Plan context, decisions &amp; relationships</span>
-                <span className="font-normal normal-case text-gray-400">{task.decisions.length} decision{task.decisions.length === 1 ? '' : 's'} · {task.relationships.length} link{task.relationships.length === 1 ? '' : 's'}</span>
+                <span className="font-normal normal-case text-ink-text-subtle">{task.decisions.length} decision{task.decisions.length === 1 ? '' : 's'} · {task.relationships.length} link{task.relationships.length === 1 ? '' : 's'}</span>
               </summary>
-              <div className="space-y-6 border-t border-gray-100 dark:border-gray-800 px-3 py-4">
+              <div className="space-y-6 border-t border-ink-border px-3 py-4">
               <div className="mb-1">
-                <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest mb-3 border-b border-gray-100 dark:border-gray-800 pb-2 flex items-center gap-2">Context Bundle From Plan <span className="px-1.5 py-0.5 rounded bg-amber-50 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400 lowercase font-normal">agent input</span></div>
-                <div className="border border-gray-200 dark:border-gray-800 rounded-lg overflow-hidden bg-white dark:bg-gray-900 transition-colors">
-                  <div className="px-3 py-2 bg-white dark:bg-gray-900 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between"><div className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300"><Box className="w-4 h-4 text-amber-500" /> planning bundle</div><span className="text-[10px] font-mono bg-gray-100 dark:bg-gray-800 px-1.5 py-0.5 rounded text-gray-500 dark:text-gray-400 border border-gray-200 dark:border-gray-700">MD</span></div>
+                <div className="text-caption font-semibold text-ink-text-subtle uppercase tracking-widest mb-3 border-b border-ink-border pb-2 flex items-center gap-2">Context Bundle From Plan <span className="px-1.5 py-0.5 rounded bg-amber-50 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400 lowercase font-normal">agent input</span></div>
+                <div className="border border-ink-border rounded-lg overflow-hidden bg-panel transition-colors">
+                  <div className="px-3 py-2 bg-panel border-b border-ink-border flex items-center justify-between"><div className="flex items-center gap-2 text-sm font-medium text-ink-text-label"><Box className="w-4 h-4 text-amber-500" /> planning bundle</div><span className="text-caption font-mono bg-ink-surface px-1.5 py-0.5 rounded text-ink-text-muted border border-ink-border">MD</span></div>
                   <div className="h-0.5 bg-amber-500 w-full"></div>
                   {(['spec', 'criteria', 'prerequisites', 'decisions', 'downstream'] as const).map((key) => (
-                    <button key={key} onClick={() => setExpandedContext(expandedContext === key ? null : key)} className="w-full flex min-h-10 items-center justify-between px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors border-b border-gray-100 dark:border-gray-800 last:border-b-0 focus-visible:ring-2 focus-visible:ring-amber-500">
-                      <div className="grid min-w-0 flex-1 grid-cols-[0.25rem_6.5rem_minmax(0,1fr)] items-center gap-3 text-left"><div className="h-4 w-1 bg-amber-400 rounded-full"></div><span className="text-xs font-semibold text-gray-600 dark:text-gray-400 uppercase">{key}</span><span className="truncate text-sm text-gray-800 dark:text-gray-200">{task.contextBundle[key]}</span></div><ChevronRight className={`w-4 h-4 flex-shrink-0 text-gray-400 transition-transform ${expandedContext === key ? 'rotate-90' : ''}`} />
+                    <button key={key} onClick={() => setExpandedContext(expandedContext === key ? null : key)} className="w-full flex min-h-10 items-center justify-between px-3 py-2 hover:bg-ink-surface/50 transition-colors border-b border-ink-border last:border-b-0 focus-visible:ring-2 focus-visible:ring-amber-500">
+                      <div className="grid min-w-0 flex-1 grid-cols-[0.25rem_6.5rem_minmax(0,1fr)] items-center gap-3 text-left"><div className="h-4 w-1 bg-amber-400 rounded-full"></div><span className="text-xs font-semibold text-ink-text-label text-ink-text-subtle uppercase">{key}</span><span className="truncate text-sm text-ink-text-body">{task.contextBundle[key]}</span></div><ChevronRight className={`w-4 h-4 flex-shrink-0 text-ink-text-subtle transition-transform ${expandedContext === key ? 'rotate-90' : ''}`} />
                     </button>
                   ))}
                   {renderContextDetail()}
@@ -1876,15 +1876,15 @@ export const TaskDetail = () => {
               </div>
 
               <div className="mb-6">
-                <div className="flex items-center justify-between border-b border-gray-100 dark:border-gray-800 pb-2 mb-3"><div className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest">Decisions</div></div>
-                <div className="space-y-2 mb-3">{task.decisions.map(decision => <div key={decision.id} className="text-sm text-gray-700 dark:text-gray-300 border border-gray-200 dark:border-gray-800 rounded p-3"><div>{decision.text}</div>{decision.source === 'agent' && <AgentSourceBadge className="mt-1" />}{decision.source === 'model-delta' && (<><ModelDeltaBadge className="mt-1" />{!!decision.evidence?.length && <ul className="mt-1 list-disc pl-4 text-xs text-gray-500 dark:text-gray-400">{decision.evidence.map((e, i) => <li key={i} className="font-mono">{e}</li>)}</ul>}</>)}</div>)}</div>
-                <div className="flex gap-2"><input value={newDecisionText} onChange={(e) => setNewDecisionText(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && addDecision()} placeholder="Record a decision for future agents..." className="flex-1 text-sm bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded px-3 py-2" /><button onClick={addDecision} className="px-3 py-2 rounded bg-gray-900 text-white dark:bg-gray-100 dark:text-gray-900 text-xs"><Plus className="w-3 h-3 inline" /> Add</button></div>
+                <div className="flex items-center justify-between border-b border-ink-border pb-2 mb-3"><div className="text-caption font-semibold text-ink-text-subtle uppercase tracking-widest">Decisions</div></div>
+                <div className="space-y-2 mb-3">{task.decisions.map(decision => <div key={decision.id} className="text-sm text-ink-text-label border border-ink-border rounded p-3"><div>{decision.text}</div>{decision.source === 'agent' && <AgentSourceBadge className="mt-1" />}{decision.source === 'model-delta' && (<><ModelDeltaBadge className="mt-1" />{!!decision.evidence?.length && <ul className="mt-1 list-disc pl-4 text-xs text-ink-text-muted">{decision.evidence.map((e, i) => <li key={i} className="font-mono">{e}</li>)}</ul>}</>)}</div>)}</div>
+                <div className="flex gap-2"><input value={newDecisionText} onChange={(e) => setNewDecisionText(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && addDecision()} placeholder="Record a decision for future agents..." className="flex-1 text-sm bg-panel border border-ink-border rounded px-3 py-2" /><button onClick={addDecision} className="px-3 py-2 rounded bg-panel text-white bg-ink-surface text-ink-text text-xs"><Plus className="w-3 h-3 inline" /> Add</button></div>
               </div>
 
               <div className="mb-6 pb-6">
-                <div className="flex items-center justify-between border-b border-gray-100 dark:border-gray-800 pb-2 mb-4"><div className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest">Relationships <span className="text-gray-500 font-medium">{task.relationships.length}</span></div></div>
-                <div className="space-y-3 mb-3">{task.relationships.map(rel => <div key={rel.id} className="flex items-start gap-2"><CheckCircle2 className="w-4 h-4 text-emerald-500 mt-0.5" /><div><span className="text-gray-500 font-medium mr-2">{rel.targetId}</span><span className="text-gray-800 dark:text-gray-200 font-medium">{rel.targetTitle}</span></div></div>)}</div>
-                <div className="flex gap-2"><input value={newRelationshipText} onChange={(e) => setNewRelationshipText(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && addRelationship()} placeholder="Link issue, feature, or doc id..." className="flex-1 text-sm bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded px-3 py-2" /><button onClick={addRelationship} className="px-3 py-2 rounded bg-gray-900 text-white dark:bg-gray-100 dark:text-gray-900 text-xs"><Plus className="w-3 h-3 inline" /> Add</button></div>
+                <div className="flex items-center justify-between border-b border-ink-border pb-2 mb-4"><div className="text-caption font-semibold text-ink-text-subtle uppercase tracking-widest">Relationships <span className="text-ink-text0 font-medium">{task.relationships.length}</span></div></div>
+                <div className="space-y-3 mb-3">{task.relationships.map(rel => <div key={rel.id} className="flex items-start gap-2"><CheckCircle2 className="w-4 h-4 text-emerald-500 mt-0.5" /><div><span className="text-ink-text0 font-medium mr-2">{rel.targetId}</span><span className="text-ink-text-body font-medium">{rel.targetTitle}</span></div></div>)}</div>
+                <div className="flex gap-2"><input value={newRelationshipText} onChange={(e) => setNewRelationshipText(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && addRelationship()} placeholder="Link issue, feature, or doc id..." className="flex-1 text-sm bg-panel border border-ink-border rounded px-3 py-2" /><button onClick={addRelationship} className="px-3 py-2 rounded bg-panel text-white bg-ink-surface text-ink-text text-xs"><Plus className="w-3 h-3 inline" /> Add</button></div>
               </div>
               </div>
               </details>
@@ -1893,73 +1893,73 @@ export const TaskDetail = () => {
 
               {activeAgents.length > 0 && (
                 <div className="mb-6">
-                  <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest flex items-center gap-2 mb-3 border-b border-gray-100 dark:border-gray-800 pb-2">
-                    Agent detail <span className="text-gray-500 font-medium">{activeAgents.length}</span>
+                  <div className="text-caption font-semibold text-ink-text-subtle uppercase tracking-widest flex items-center gap-2 mb-3 border-b border-ink-border pb-2">
+                    Agent detail <span className="text-ink-text0 font-medium">{activeAgents.length}</span>
                   </div>
                   <div className="space-y-2">
                     {activeAgents.map((agent) => {
                       const isTerminal = agent.status === 'stopped' || agent.status === 'error';
                       const isWorking = agent.status === 'working' || agent.status === 'starting';
                       const isAwaiting = agent.status === 'input' || agent.pending.length > 0;
-                      const statusColor = agent.status === 'working' ? 'text-emerald-600 dark:text-emerald-400' : agent.status === 'error' ? 'text-red-500' : agent.status === 'input' ? 'text-amber-500' : agent.status === 'stopped' ? 'text-gray-400' : 'text-blue-500';
+                      const statusColor = agent.status === 'working' ? 'text-emerald-600 dark:text-emerald-400' : agent.status === 'error' ? 'text-red-500' : agent.status === 'input' ? 'text-amber-500' : agent.status === 'stopped' ? 'text-ink-text-subtle' : 'text-blue-500';
                       return (
-                        <div key={agent.id} id={`agent-${agent.id}`} className="scroll-mt-4 rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
+                        <div key={agent.id} id={`agent-${agent.id}`} className="scroll-mt-4 rounded-lg border border-ink-border bg-panel overflow-hidden">
                           <div className="flex items-center justify-between gap-2 px-3 py-2">
                             <div className="min-w-0 flex items-center gap-2">
-                              <span className={`text-[11px] font-semibold uppercase rounded px-1.5 py-0.5 border ${agentStatusBadgeClass(agent.status)}`}>{agent.status}</span>
-                              <span className="truncate text-sm font-medium text-gray-800 dark:text-gray-200">{agent.name}</span>
-                              {agent.model && <span className={`hidden sm:block text-[10px] ${statusColor}`}>{agent.model}</span>}
-                              {agent.prState && <span className={`rounded px-1.5 py-0.5 text-[10px] ${prStateBadgeClass(agent.prState)}`}>{prStateBadgeLabel(agent.prState)}</span>}
-                              {agent.prUrl && <a href={agent.prUrl} target="_blank" rel="noreferrer" className="text-[10px] font-medium text-amber-600 underline hover:text-amber-500 dark:text-amber-400">PR #{agent.prNumber}</a>}
+                              <span className={`text-caption font-semibold uppercase rounded px-1.5 py-0.5 border ${agentStatusBadgeClass(agent.status)}`}>{agent.status}</span>
+                              <span className="truncate text-sm font-medium text-ink-text-body">{agent.name}</span>
+                              {agent.model && <span className={`hidden sm:block text-caption ${statusColor}`}>{agent.model}</span>}
+                              {agent.prState && <span className={`rounded px-1.5 py-0.5 text-caption ${prStateBadgeClass(agent.prState)}`}>{prStateBadgeLabel(agent.prState)}</span>}
+                              {agent.prUrl && <a href={agent.prUrl} target="_blank" rel="noreferrer" className="text-caption font-medium text-amber-600 underline hover:text-amber-500 dark:text-amber-400">PR #{agent.prNumber}</a>}
                             </div>
                             <div className="flex items-center gap-1 flex-shrink-0">
                               {!isTerminal && isWorking && (
-                                <button type="button" onClick={() => sendConsoleCommand(interruptCommand(agent.id))} title="Interrupt current turn" className="min-h-7 rounded px-2 text-[11px] font-medium text-amber-600 hover:bg-amber-50 dark:text-amber-400 dark:hover:bg-amber-900/30 transition-colors focus-visible:ring-2 focus-visible:ring-amber-500">
+                                <button type="button" onClick={() => sendConsoleCommand(interruptCommand(agent.id))} title="Interrupt current turn" className="min-h-7 rounded px-2 text-caption font-medium text-amber-600 hover:bg-amber-50 dark:text-amber-400 dark:hover:bg-amber-900/30 transition-colors focus-visible:ring-2 focus-visible:ring-amber-500">
                                   Interrupt
                                 </button>
                               )}
                               {!isTerminal && (
-                                <button type="button" onClick={() => sendConsoleCommand(stopCommand(agent.id))} title="Stop this agent" className="min-h-7 rounded px-2 text-[11px] font-medium text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-900/30 transition-colors focus-visible:ring-2 focus-visible:ring-red-500">
+                                <button type="button" onClick={() => sendConsoleCommand(stopCommand(agent.id))} title="Stop this agent" className="min-h-7 rounded px-2 text-caption font-medium text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-900/30 transition-colors focus-visible:ring-2 focus-visible:ring-red-500">
                                   Stop
                                 </button>
                               )}
                               {isTerminal && (
-                                <button type="button" onClick={() => sendConsoleCommand(restartCommand(agent.id))} title="Restart this agent" className="min-h-7 rounded px-2 text-[11px] font-medium text-emerald-700 hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-900/30 transition-colors focus-visible:ring-2 focus-visible:ring-emerald-500">
+                                <button type="button" onClick={() => sendConsoleCommand(restartCommand(agent.id))} title="Restart this agent" className="min-h-7 rounded px-2 text-caption font-medium text-emerald-700 hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-900/30 transition-colors focus-visible:ring-2 focus-visible:ring-emerald-500">
                                   ↺ Restart
                                 </button>
                               )}
                               {agent.forkAvailable && (
-                                <button type="button" onClick={() => handleOpenForkPicker(agent.id)} title={`Fork ${agent.name} from a checkpoint`} className={`min-h-7 rounded px-2 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${forkPickerAgentId === agent.id ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300' : 'text-amber-700 hover:bg-amber-50 dark:text-amber-400 dark:hover:bg-amber-900/30'}`}>
+                                <button type="button" onClick={() => handleOpenForkPicker(agent.id)} title={`Fork ${agent.name} from a checkpoint`} className={`min-h-7 rounded px-2 text-caption font-medium transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${forkPickerAgentId === agent.id ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300' : 'text-amber-700 hover:bg-amber-50 dark:text-amber-400 dark:hover:bg-amber-900/30'}`}>
                                   ⑂ Fork
                                 </button>
                               )}
                               {agent.continueAvailable && (
-                                <button type="button" onClick={() => handleContinue(agent.id, agent.name)} title={`Continue ${agent.name} in place — reset retry budgets and re-run the verify gate on this worktree`} className="min-h-7 rounded px-2 text-[11px] font-medium text-sky-700 hover:bg-sky-50 dark:text-sky-400 dark:hover:bg-sky-900/30 transition-colors focus-visible:ring-2 focus-visible:ring-sky-500">
+                                <button type="button" onClick={() => handleContinue(agent.id, agent.name)} title={`Continue ${agent.name} in place — reset retry budgets and re-run the verify gate on this worktree`} className="min-h-7 rounded px-2 text-caption font-medium text-sky-700 hover:bg-sky-50 dark:text-sky-400 dark:hover:bg-sky-900/30 transition-colors focus-visible:ring-2 focus-visible:ring-sky-500">
                                   ▶ Continue
                                 </button>
                               )}
-                              <button type="button" onClick={() => { setModelPickerAgentId(modelPickerAgentId === agent.id ? null : agent.id); setModelPickerValue(agent.model ?? ''); }} title="Set model" className={`min-h-7 rounded px-2 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${modelPickerAgentId === agent.id ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`}>
+                              <button type="button" onClick={() => { setModelPickerAgentId(modelPickerAgentId === agent.id ? null : agent.id); setModelPickerValue(agent.model ?? ''); }} title="Set model" className={`min-h-7 rounded px-2 text-caption font-medium transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${modelPickerAgentId === agent.id ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300' : 'text-ink-text0 hover:bg-ink-surface text-ink-text-subtle dark:hover:bg-ink-surface'}`}>
                                 Model
                               </button>
-                              <button type="button" onClick={() => setRemoveTarget(removeTarget === agent.id ? null : agent.id)} title="Remove agent" className={`min-h-7 rounded px-2 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-red-500 ${removeTarget === agent.id ? 'bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300' : 'text-gray-400 hover:bg-gray-100 hover:text-red-600 dark:text-gray-500 dark:hover:bg-gray-800 dark:hover:text-red-400'}`}>
+                              <button type="button" onClick={() => setRemoveTarget(removeTarget === agent.id ? null : agent.id)} title="Remove agent" className={`min-h-7 rounded px-2 text-caption font-medium transition-colors focus-visible:ring-2 focus-visible:ring-red-500 ${removeTarget === agent.id ? 'bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300' : 'text-ink-text-subtle hover:bg-ink-surface hover:text-red-600 text-ink-text0 dark:hover:bg-ink-surface dark:hover:text-red-400'}`}>
                                 Remove
                               </button>
                             </div>
                           </div>
                           {/* Inline model picker for this agent */}
                           {modelPickerAgentId === agent.id && (
-                            <div className="border-t border-gray-100 dark:border-gray-800 px-3 py-2 flex items-center gap-2">
-                              <select value={modelPickerValue} onChange={(e) => setModelPickerValue(e.target.value)} className="text-xs rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 text-gray-700 dark:text-gray-200 px-2 py-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500">
+                            <div className="border-t border-ink-border px-3 py-2 flex items-center gap-2">
+                              <select value={modelPickerValue} onChange={(e) => setModelPickerValue(e.target.value)} className="text-xs rounded border border-ink-border bg-panel text-ink-text-label text-ink-text-body px-2 py-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500">
                                 <option value="">pick model…</option>
                                 {KNOWN_MODELS.map((m) => <option key={m} value={m}>{m}</option>)}
                               </select>
-                              <input type="text" value={modelPickerValue} onChange={(e) => setModelPickerValue(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') handleSetModel(agent.id, modelPickerValue); if (e.key === 'Escape') { setModelPickerAgentId(null); setModelPickerValue(''); } }} placeholder="or type model id…" className="flex-1 text-xs rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 text-gray-700 dark:text-gray-200 px-2 py-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 placeholder:text-gray-400" />
+                              <input type="text" value={modelPickerValue} onChange={(e) => setModelPickerValue(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') handleSetModel(agent.id, modelPickerValue); if (e.key === 'Escape') { setModelPickerAgentId(null); setModelPickerValue(''); } }} placeholder="or type model id…" className="flex-1 text-xs rounded border border-ink-border bg-panel text-ink-text-label text-ink-text-body px-2 py-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 placeholder:text-ink-text-subtle" />
                               <button type="button" onClick={() => handleSetModel(agent.id, modelPickerValue)} disabled={!modelPickerValue.trim()} className="text-xs font-medium px-2 py-1 rounded bg-amber-500 text-white hover:bg-amber-600 disabled:opacity-40 focus-visible:ring-2 focus-visible:ring-amber-500">Set</button>
                             </div>
                           )}
                           {/* Inline fork-from-checkpoint picker for this agent */}
                           {forkPickerAgentId === agent.id && (
-                            <div className="border-t border-gray-100 dark:border-gray-800 px-3 py-2">
+                            <div className="border-t border-ink-border px-3 py-2">
                               <ForkPicker
                                 checkpoints={forkCheckpoints}
                                 selectedSeq={forkSelectedSeq}
@@ -1972,12 +1972,12 @@ export const TaskDetail = () => {
                           {/* Pending input / Answer section */}
                           {isAwaiting && agent.pending.map((req) => (
                             <div key={req.id} className="border-t border-amber-100 dark:border-amber-900/40 bg-amber-50/50 dark:bg-amber-950/20 px-3 py-2">
-                              <div className="mb-1 text-[11px] font-semibold text-amber-700 dark:text-amber-400">Awaiting input: {req.title}</div>
-                              {req.message && <p className="mb-2 text-xs text-gray-700 dark:text-gray-300 whitespace-pre-wrap">{req.message}</p>}
+                              <div className="mb-1 text-caption font-semibold text-amber-700 dark:text-amber-400">Awaiting input: {req.title}</div>
+                              {req.message && <p className="mb-2 text-xs text-ink-text-label whitespace-pre-wrap">{req.message}</p>}
                               {req.options && req.options.length > 0 ? (
                                 <div className="flex flex-wrap gap-1">
                                   {req.options.map((opt) => (
-                                    <button key={opt} type="button" onClick={() => { sendConsoleCommand(answerCommand(agent.id, req.id, opt)); showToast('Answer sent', 'info'); }} className="rounded border border-amber-200 dark:border-amber-800 bg-white dark:bg-gray-900 px-2 py-1 text-xs text-amber-700 dark:text-amber-300 hover:bg-amber-50 dark:hover:bg-amber-950/40 transition-colors focus-visible:ring-2 focus-visible:ring-amber-500">
+                                    <button key={opt} type="button" onClick={() => { sendConsoleCommand(answerCommand(agent.id, req.id, opt)); showToast('Answer sent', 'info'); }} className="rounded border border-amber-200 dark:border-amber-800 bg-panel px-2 py-1 text-xs text-amber-700 dark:text-amber-300 hover:bg-amber-50 dark:hover:bg-amber-950/40 transition-colors focus-visible:ring-2 focus-visible:ring-amber-500">
                                       {opt}
                                     </button>
                                   ))}
@@ -1990,7 +1990,7 @@ export const TaskDetail = () => {
                                     onChange={(e) => setAnswerValues((prev) => ({ ...prev, [req.id]: e.target.value }))}
                                     onKeyDown={(e) => { if (e.key === 'Enter') handleAnswer(agent.id, req.id); }}
                                     placeholder={req.placeholder ?? 'Type your answer…'}
-                                    className="flex-1 text-xs rounded border border-amber-200 dark:border-amber-800 bg-white dark:bg-gray-900 px-2 py-1 text-gray-700 dark:text-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 placeholder:text-gray-400"
+                                    className="flex-1 text-xs rounded border border-amber-200 dark:border-amber-800 bg-panel px-2 py-1 text-ink-text-label text-ink-text-body focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 placeholder:text-ink-text-subtle"
                                   />
                                   <button type="button" onClick={() => handleAnswer(agent.id, req.id)} disabled={!answerValues[req.id]?.trim()} className="text-xs font-medium px-2 py-1 rounded bg-amber-500 text-white hover:bg-amber-600 disabled:opacity-40 focus-visible:ring-2 focus-visible:ring-amber-500">
                                     Send
@@ -2014,19 +2014,19 @@ export const TaskDetail = () => {
                             const isDetailOpen = transcriptDetailOpenIds.has(agent.id);
                             if (!isWorking && agentTranscript.length === 0) return null;
                             return (
-                              <div className="border-t border-gray-100 dark:border-gray-800">
+                              <div className="border-t border-ink-border">
                                 <button
                                   type="button"
                                   onClick={() => toggleTranscript(agent.id)}
-                                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] font-medium text-gray-500 hover:bg-gray-50 dark:text-gray-400 dark:hover:bg-gray-900/50 transition-colors focus-visible:ring-2 focus-visible:ring-amber-500"
+                                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-caption font-medium text-ink-text0 hover:bg-ink text-ink-text-subtle dark:hover:bg-panel/50 transition-colors focus-visible:ring-2 focus-visible:ring-amber-500"
                                 >
                                   <ChevronRight className={`h-3 w-3 flex-shrink-0 transition-transform ${isOpen ? 'rotate-90' : ''}`} />
                                   {isWorking && <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-emerald-500 animate-pulse" aria-hidden />}
                                   <span>Live transcript</span>
-                                  {agentTranscript.length > 0 && <span className="ml-auto rounded-full bg-gray-100 dark:bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-500 dark:text-gray-400">{agentTranscript.length}</span>}
+                                  {agentTranscript.length > 0 && <span className="ml-auto rounded-full bg-ink-surface px-1.5 py-0.5 text-caption text-ink-text-muted">{agentTranscript.length}</span>}
                                 </button>
                                 {isOpen && (
-                                  <div className="max-h-[28rem] overflow-y-auto border-t border-gray-100 px-3 pb-3 pt-2 dark:border-gray-800 scrollbar-custom">
+                                  <div className="max-h-[28rem] overflow-y-auto border-t border-ink-border px-3 pb-3 pt-2 border-ink-border scrollbar-custom">
                                     <TranscriptTimeline
                                       entries={agentTranscript}
                                       messages={[]}
@@ -2048,9 +2048,9 @@ export const TaskDetail = () => {
               )}
 
               <div className="mb-6 pb-6">
-                <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest flex items-center gap-2 mb-4 border-b border-gray-100 dark:border-gray-800 pb-2">Comments <span className="text-gray-500 font-medium">{regularComments.length}</span></div>
-                <div className="space-y-4">{regularComments.map(comment => <div key={comment.id} className="bg-gray-50 dark:bg-gray-800/50 p-4 rounded-lg border border-gray-100 dark:border-gray-800 transition-colors"><div className="flex items-center justify-between mb-2"><span className="text-xs font-medium text-gray-700 dark:text-gray-300">{comment.author ?? 'User'}</span><span className="text-xs text-gray-400">{new Date(comment.timestamp).toLocaleString()}</span></div><p className="text-sm text-gray-700 dark:text-gray-300 whitespace-pre-wrap">{comment.text}</p></div>)}</div>
-                <div className="mt-4 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden focus-within:ring-2 focus-within:ring-amber-500/20 focus-within:border-amber-400 transition-all"><textarea value={commentText} onChange={(e) => setCommentText(e.target.value)} placeholder="Add an instruction/comment for agents working this task..." className="w-full p-3 bg-white dark:bg-gray-900 text-sm text-gray-700 dark:text-gray-200 focus:outline-none min-h-[80px] resize-none" onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) void submitComment(); }} /><div className="px-3 py-2 bg-gray-50 dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700 flex justify-between items-center text-xs"><span className="text-gray-400">Saved comments are included in feature workflow prompts.</span><button onClick={() => void submitComment()} className="bg-amber-500 hover:bg-amber-600 text-white px-3 py-1.5 rounded font-medium transition-colors">Comment</button></div></div>
+                <div className="text-caption font-semibold text-ink-text-subtle uppercase tracking-widest flex items-center gap-2 mb-4 border-b border-ink-border pb-2">Comments <span className="text-ink-text0 font-medium">{regularComments.length}</span></div>
+                <div className="space-y-4">{regularComments.map(comment => <div key={comment.id} className="bg-ink bg-ink-surface/50 p-4 rounded-lg border border-ink-border transition-colors"><div className="flex items-center justify-between mb-2"><span className="text-xs font-medium text-ink-text-label">{comment.author ?? 'User'}</span><span className="text-xs text-ink-text-subtle">{new Date(comment.timestamp).toLocaleString()}</span></div><p className="text-sm text-ink-text-label whitespace-pre-wrap">{comment.text}</p></div>)}</div>
+                <div className="mt-4 border border-ink-border rounded-lg overflow-hidden focus-within:ring-2 focus-within:ring-amber-500/20 focus-within:border-amber-400 transition-all"><textarea value={commentText} onChange={(e) => setCommentText(e.target.value)} placeholder="Add an instruction/comment for agents working this task..." className="w-full p-3 bg-panel text-sm text-ink-text-label text-ink-text-body focus:outline-none min-h-[80px] resize-none" onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) void submitComment(); }} /><div className="px-3 py-2 bg-ink bg-ink-surface border-t border-ink-border flex justify-between items-center text-xs"><span className="text-ink-text-subtle">Saved comments are included in feature workflow prompts.</span><button onClick={() => void submitComment()} className="bg-amber-500 hover:bg-amber-600 text-white px-3 py-1.5 rounded font-medium transition-colors">Comment</button></div></div>
               </div>
             </div>
           </section>
@@ -2065,9 +2065,9 @@ export const TaskDetail = () => {
             className="group hidden w-2 flex-shrink-0 cursor-col-resize items-center justify-center bg-transparent transition-colors hover:bg-amber-500/15 focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:bg-amber-400/15 lg:flex"
             title="Drag to resize panes. Double-click to reset."
           >
-            <span className="h-10 w-px rounded-full bg-gray-300 transition-colors group-hover:bg-amber-500 dark:bg-gray-700 dark:group-hover:bg-amber-400" aria-hidden="true" />
+            <span className="h-10 w-px rounded-full bg-ink-border-2 transition-colors group-hover:bg-amber-500 bg-ink-text-label dark:group-hover:bg-amber-400" aria-hidden="true" />
           </div>
-          <aside className="flex min-h-[22rem] min-w-0 flex-1 flex-col border-t border-gray-200 bg-gray-50/60 dark:border-gray-800 dark:bg-gray-950/60 lg:min-h-0 lg:border-l lg:border-t-0">
+          <aside className="flex min-h-[22rem] min-w-0 flex-1 flex-col border-t border-ink-border bg-ink/60 border-ink-border bg-ink/60 lg:min-h-0 lg:border-l lg:border-t-0">
             {renderPlanDocPane()}
           </aside>
           {showProperties && <TaskProperties task={task} />}
@@ -2075,17 +2075,17 @@ export const TaskDetail = () => {
           {/* Plan flow focus mode — fills the DETAIL pane (full height, no reading-width cap) while the
               plan-markdown pane stays visible on the right. Full-width below lg where the panes stack. */}
           {flowFocus && planFlowConcerns.length >= 2 && (
-            <div className="absolute inset-0 z-30 flex flex-col bg-white dark:bg-gray-950 lg:right-auto lg:w-[var(--detail-pane-width)]" role="dialog" aria-modal="true" aria-label="Plan flow">
-              <div className="flex items-center gap-2 border-b border-gray-200 px-4 py-3 dark:border-gray-800">
-                <GitBranch className="h-4 w-4 text-gray-500" aria-hidden="true" />
-                <span className="text-sm font-semibold text-gray-800 dark:text-gray-100">Plan flow</span>
-                <span className="text-xs text-gray-400">{task.title}</span>
-                <span className="ml-auto text-xs text-gray-400">{planFlowConcerns.length} concerns</span>
+            <div className="absolute inset-0 z-30 flex flex-col bg-panel lg:right-auto lg:w-[var(--detail-pane-width)]" role="dialog" aria-modal="true" aria-label="Plan flow">
+              <div className="flex items-center gap-2 border-b border-ink-border px-4 py-3 border-ink-border">
+                <GitBranch className="h-4 w-4 text-ink-text0" aria-hidden="true" />
+                <span className="text-sm font-semibold text-ink-text-body text-ink-text">Plan flow</span>
+                <span className="text-xs text-ink-text-subtle">{task.title}</span>
+                <span className="ml-auto text-xs text-ink-text-subtle">{planFlowConcerns.length} concerns</span>
                 <button
                   type="button"
                   onClick={() => setFlowFocus(false)}
                   title="Close (Esc)"
-                  className="ml-2 flex items-center gap-1 rounded px-2 py-1 text-xs text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200 focus-visible:ring-2 focus-visible:ring-amber-500"
+                  className="ml-2 flex items-center gap-1 rounded px-2 py-1 text-xs text-ink-text0 hover:bg-ink-surface hover:text-ink-text-label text-ink-text-subtle dark:hover:bg-ink-surface dark:hover:text-ink-text-body focus-visible:ring-2 focus-visible:ring-amber-500"
                 >
                   <X className="h-3.5 w-3.5" aria-hidden="true" /> Close
                 </button>
@@ -2105,17 +2105,17 @@ export const TaskDetail = () => {
 
           {/* Workflow graph focus mode — same full-pane pattern as Plan flow. */}
           {workflowFlowFocus && workflowGraphAgent?.workflowGraph && (
-            <div className="absolute inset-0 z-30 flex flex-col bg-white dark:bg-gray-950 lg:right-auto lg:w-[var(--detail-pane-width)]" role="dialog" aria-modal="true" aria-label="Workflow graph">
-              <div className="flex items-center gap-2 border-b border-gray-200 px-4 py-3 dark:border-gray-800">
-                <GitBranch className="h-4 w-4 text-gray-500" aria-hidden="true" />
-                <span className="text-sm font-semibold text-gray-800 dark:text-gray-100">Workflow graph</span>
-                <span className="text-xs text-gray-400">{workflowGraphAgent.name}</span>
-                <span className="ml-auto text-xs text-gray-400">{workflowGraphAgent.workflowGraph.nodes.length} nodes</span>
+            <div className="absolute inset-0 z-30 flex flex-col bg-panel lg:right-auto lg:w-[var(--detail-pane-width)]" role="dialog" aria-modal="true" aria-label="Workflow graph">
+              <div className="flex items-center gap-2 border-b border-ink-border px-4 py-3 border-ink-border">
+                <GitBranch className="h-4 w-4 text-ink-text0" aria-hidden="true" />
+                <span className="text-sm font-semibold text-ink-text-body text-ink-text">Workflow graph</span>
+                <span className="text-xs text-ink-text-subtle">{workflowGraphAgent.name}</span>
+                <span className="ml-auto text-xs text-ink-text-subtle">{workflowGraphAgent.workflowGraph.nodes.length} nodes</span>
                 <button
                   type="button"
                   onClick={() => setWorkflowFlowFocus(false)}
                   title="Close (Esc)"
-                  className="ml-2 flex items-center gap-1 rounded px-2 py-1 text-xs text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200 focus-visible:ring-2 focus-visible:ring-amber-500"
+                  className="ml-2 flex items-center gap-1 rounded px-2 py-1 text-xs text-ink-text0 hover:bg-ink-surface hover:text-ink-text-label text-ink-text-subtle dark:hover:bg-ink-surface dark:hover:text-ink-text-body focus-visible:ring-2 focus-visible:ring-amber-500"
                 >
                   <X className="h-3.5 w-3.5" aria-hidden="true" /> Close
                 </button>

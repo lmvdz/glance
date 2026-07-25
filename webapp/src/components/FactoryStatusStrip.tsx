@@ -71,14 +71,14 @@ const LoopChip: React.FC<{ report: FactoryLoopReport }> = ({ report }) => {
       <HeartbeatDot report={report} />
       <div className="flex min-w-0 flex-col leading-tight">
         <div className="flex items-center gap-1.5">
-          <span className="text-xs font-semibold text-gray-900 dark:text-gray-100">{report.label}</span>
-          <span className={`text-[10px] font-semibold uppercase tracking-wide ${meta.text}`}>{meta.label}</span>
+          <span className="text-xs font-semibold text-ink-text">{report.label}</span>
+          <span className={`text-caption font-semibold uppercase tracking-wide ${meta.text}`}>{meta.label}</span>
           {heartbeat && report.secondsSinceLastTick !== undefined && (
-            <span className="text-[10px] tabular-nums text-gray-400 dark:text-gray-500">{fmtSince(report.secondsSinceLastTick)}</span>
+            <span className="text-caption tabular-nums text-ink-text-subtle">{fmtSince(report.secondsSinceLastTick)}</span>
           )}
         </div>
         {reason && (
-          <span className="max-w-[15rem] truncate text-[10px] text-gray-500 dark:text-gray-400" title={reason}>
+          <span className="max-w-[15rem] truncate text-caption text-ink-text-muted" title={reason}>
             {reason}
           </span>
         )}
@@ -99,10 +99,10 @@ const ShadowExitRow: React.FC<{ s: ShadowExitScoreboard }> = ({ s }) => {
   if (s.laneTotal === 0 && s.modelRouteShadowTotal === 0 && s.costGateShadowTotal === 0) return null;
   return (
     <div
-      className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-gray-100 px-4 py-1.5 text-[10px] text-gray-500 dark:border-gray-900 dark:text-gray-400"
+      className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-ink-border px-4 py-1.5 text-caption text-ink-text0 border-ink-border text-ink-text-subtle"
       title="Shadow-exit scoreboard: what the fleet would do if a shadow-mode lane/decision were flipped to apply/enforce — read this before flipping one."
     >
-      <span className="font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">Shadow exits</span>
+      <span className="font-semibold uppercase tracking-wide text-ink-text-subtle">Shadow exits</span>
       {lanes.length > 0 && (
         <span>
           lanes:{' '}
@@ -153,17 +153,17 @@ const CapacityChip: React.FC<{ capacity: CapacitySummary; ncpu?: number; costUsd
       <Gauge className={`h-3.5 w-3.5 flex-shrink-0 ${t.text}`} aria-hidden="true" />
       <div className="flex min-w-0 flex-col leading-tight">
         <div className="flex items-center gap-1.5">
-          <span className="text-xs font-semibold text-gray-900 dark:text-gray-100">
+          <span className="text-xs font-semibold text-ink-text">
             {capacityFractionLabel(capacity.used, capacity.cap)}
           </span>
-          <span className={`text-[10px] font-semibold uppercase tracking-wide ${t.text}`}>
+          <span className={`text-caption font-semibold uppercase tracking-wide ${t.text}`}>
             {capacity.verdict === 'healthy' ? 'flowing' : capacity.verdict === 'warn' ? 'at cap' : 'throttled'}
           </span>
         </div>
         {/* Compact mem/load line is always visible (a single glance answers "why"); the hover
             `title` above adds the full breakdown (spend, next limit) without more always-on chrome —
             this chip is a header scalar, not a dashboard. */}
-        <span className="max-w-[13rem] truncate text-[10px] text-gray-500 dark:text-gray-400">
+        <span className="max-w-[13rem] truncate text-caption text-ink-text-muted">
           mem {Math.round(capacity.memPct)}% · load {Math.round(capacity.loadPct)}%
         </span>
       </div>
@@ -182,7 +182,7 @@ const NeedsYouBadge: React.FC<{ count: number }> = ({ count }) => {
   return (
     <span className="relative flex flex-shrink-0 items-center" title={`${count} agent${count === 1 ? '' : 's'} need you`}>
       <span className="absolute inset-0 animate-ping rounded-full bg-red-400 opacity-60" aria-hidden="true" />
-      <span className="relative flex items-center gap-1 rounded-full bg-red-500 px-2 py-0.5 text-[10px] font-bold text-white">
+      <span className="relative flex items-center gap-1 rounded-full bg-red-500 px-2 py-0.5 text-caption font-bold text-white">
         <Bell className="h-3 w-3" aria-hidden="true" />
         {count} need{count === 1 ? 's' : ''} you
       </span>
@@ -247,8 +247,8 @@ export const FactoryStatusStrip: React.FC = () => {
   // Loading: keep the bar height stable, no flash.
   if (!loaded && !data) {
     return (
-      <div className="flex-shrink-0 border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-950 px-4 py-2">
-        <div className="h-6 w-64 animate-pulse rounded bg-gray-100 dark:bg-gray-800" />
+      <div className="flex-shrink-0 border-b border-ink-border bg-panel px-4 py-2">
+        <div className="h-6 w-64 animate-pulse rounded bg-ink-surface" />
       </div>
     );
   }
@@ -276,7 +276,7 @@ export const FactoryStatusStrip: React.FC = () => {
   const landBlocked = landBlockedLine(data);
 
   return (
-    <div className="flex-shrink-0 border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-950">
+    <div className="flex-shrink-0 border-b border-ink-border bg-panel">
       {/* "Fleet cannot land" banner — the loudest row when a retryable refusal (dirty main) is live,
           because EVERY auto-land is being refused and the learning ledgers are starved until it clears
           (research-sirvir/01-recording-unlock, part 2). */}
@@ -295,11 +295,11 @@ export const FactoryStatusStrip: React.FC = () => {
           {overall.ping && <span className={`absolute inline-flex h-full w-full animate-ping rounded-full opacity-75 ${overall.dot}`} />}
           <span className={`relative inline-flex h-2.5 w-2.5 rounded-full ${overall.dot} ${overall.breathe ? 'animate-pulse' : ''}`} />
         </span>
-        <span className="min-w-0 truncate text-xs font-semibold text-gray-900 dark:text-gray-100">
+        <span className="min-w-0 truncate text-xs font-semibold text-ink-text">
           {overallHeadline(data)}
         </span>
         {notArmedCount > 0 && (
-          <span className="hidden flex-shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700 dark:bg-amber-900/40 dark:text-amber-300 sm:inline">
+          <span className="hidden flex-shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-caption font-semibold text-amber-700 dark:bg-amber-900/40 dark:text-amber-300 sm:inline">
             {notArmedCount} loop{notArmedCount === 1 ? '' : 's'} not fueled
           </span>
         )}
@@ -308,7 +308,7 @@ export const FactoryStatusStrip: React.FC = () => {
           {gov && <CapacityChip capacity={capacity} ncpu={gov.health?.sample?.ncpu} costUsd={usage?.costUsd} />}
           <button
             onClick={() => void load()}
-            className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
+            className="rounded p-1 text-ink-text-subtle hover:bg-ink-surface hover:text-ink-text-label dark:hover:bg-ink-surface dark:hover:text-ink-text-label focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
             title="Refresh"
             aria-label="Refresh factory status"
           >
@@ -316,7 +316,7 @@ export const FactoryStatusStrip: React.FC = () => {
           </button>
           <button
             onClick={() => setExpanded((v) => !v)}
-            className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
+            className="rounded p-1 text-ink-text-subtle hover:bg-ink-surface hover:text-ink-text-label dark:hover:bg-ink-surface dark:hover:text-ink-text-label focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
             aria-expanded={expanded}
             aria-label={expanded ? 'Collapse loop details' : 'Expand loop details'}
           >

@@ -49,7 +49,7 @@ const LINE_BG: Record<DiffLineKind, string> = {
   add: 'bg-emerald-500/10 dark:bg-emerald-500/10',
   del: 'bg-red-500/10 dark:bg-red-500/10',
   hunk: 'bg-blue-500/5 text-blue-600 dark:text-blue-400',
-  meta: 'text-gray-400 dark:text-gray-500',
+  meta: 'text-ink-text-subtle',
   ctx: '',
 };
 
@@ -78,31 +78,31 @@ const InterveneFileDiff: React.FC<{
   };
 
   return (
-    <div className="overflow-hidden rounded-md border border-gray-200 dark:border-gray-800">
+    <div className="overflow-hidden rounded-md border border-ink-border">
       <button
         onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center gap-2 bg-gray-50 px-3 py-1.5 text-left text-[11px] transition-colors hover:bg-gray-100 dark:bg-gray-900/60 dark:hover:bg-gray-900"
+        className="flex w-full items-center gap-2 bg-ink px-3 py-1.5 text-left text-caption transition-colors hover:bg-ink-surface/60 dark:hover:bg-panel"
         aria-expanded={open}
       >
-        <FileText className="h-3.5 w-3.5 flex-shrink-0 text-gray-400" aria-hidden />
-        <span className="truncate font-mono text-gray-700 dark:text-gray-300">{diff.status ? `${diff.status} ` : ''}{diff.file}</span>
+        <FileText className="h-3.5 w-3.5 flex-shrink-0 text-ink-text-subtle" aria-hidden />
+        <span className="truncate font-mono text-ink-text-label">{diff.status ? `${diff.status} ` : ''}{diff.file}</span>
         <span className="ml-auto flex flex-shrink-0 items-center gap-1.5 tabular-nums">
           {added > 0 && <span className="text-emerald-600 dark:text-emerald-400">+{added}</span>}
           {removed > 0 && <span className="text-red-600 dark:text-red-400">−{removed}</span>}
         </span>
       </button>
       {open && diff.diff && (
-        <div className="overflow-x-auto bg-white font-mono text-[11px] leading-relaxed dark:bg-gray-950">
+        <div className="overflow-x-auto bg-white font-mono text-caption leading-relaxed bg-ink">
           {lines.map((ln) => {
             const commentable = isCommentableLine(ln.kind);
             return (
               <div key={ln.i}>
                 <div className={`group flex items-start ${LINE_BG[ln.kind]}`}>
-                  <pre className="flex-1 overflow-visible whitespace-pre px-3 py-px text-gray-800 dark:text-gray-200">{ln.text || ' '}</pre>
+                  <pre className="flex-1 overflow-visible whitespace-pre px-3 py-px text-ink-text-body">{ln.text || ' '}</pre>
                   {commentable && (
                     <button
                       onClick={() => { setCommentingLine(commentingLine === ln.i ? null : ln.i); setCommentText(''); }}
-                      className="mr-1 mt-px flex-shrink-0 rounded p-0.5 text-gray-300 opacity-0 transition-opacity hover:bg-amber-100 hover:text-amber-600 group-hover:opacity-100 focus:opacity-100 focus-visible:opacity-100 dark:text-gray-600 dark:hover:bg-amber-950/40"
+                      className="mr-1 mt-px flex-shrink-0 rounded p-0.5 text-ink-text-label opacity-0 transition-opacity hover:bg-amber-100 hover:text-amber-600 group-hover:opacity-100 focus:opacity-100 focus-visible:opacity-100 text-ink-text-label dark:hover:bg-amber-950/40"
                       title="Comment on this line — sends the agent a targeted fix"
                       aria-label="Comment on this line"
                     >
@@ -122,14 +122,14 @@ const InterveneFileDiff: React.FC<{
                       }}
                       rows={2}
                       placeholder="What should change here? Sends the agent a targeted fix for this line."
-                      className="w-full resize-y rounded-md border border-amber-200 bg-white px-2.5 py-1.5 font-sans text-xs text-gray-900 placeholder:text-gray-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-amber-800 dark:bg-gray-950 dark:text-gray-100"
+                      className="w-full resize-y rounded-md border border-amber-200 bg-white px-2.5 py-1.5 font-sans text-xs text-ink-text placeholder:text-ink-text-subtle focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-amber-800 bg-ink text-ink-text"
                     />
                     <div className="mt-1.5 flex items-center justify-end gap-2">
-                      <button onClick={() => { setCommentingLine(null); setCommentText(''); }} className="rounded px-2 py-1 text-[11px] text-gray-500 hover:text-gray-700 dark:hover:text-gray-300">Cancel</button>
+                      <button onClick={() => { setCommentingLine(null); setCommentText(''); }} className="rounded px-2 py-1 text-caption text-ink-text0 hover:text-ink-text-label dark:hover:text-ink-text-label">Cancel</button>
                       <button
                         onClick={() => submit(ln.text)}
                         disabled={!commentText.trim()}
-                        className="flex items-center gap-1 rounded-md bg-amber-500 px-2.5 py-1 text-[11px] font-semibold text-white transition-colors hover:bg-amber-600 disabled:cursor-not-allowed disabled:opacity-50"
+                        className="flex items-center gap-1 rounded-md bg-amber-500 px-2.5 py-1 text-caption font-semibold text-white transition-colors hover:bg-amber-600 disabled:cursor-not-allowed disabled:opacity-50"
                       >
                         <Send className="h-3 w-3" aria-hidden /> Send fix (⌘↵)
                       </button>
@@ -151,14 +151,14 @@ export function InterveneMissingAgentFallback({ agentId, onBack }: { agentId: st
     ? `The needs-you card pointed at ${agentId}, but that agent is no longer in the live roster. The request was likely answered or the unit was removed.`
     : 'Open a needs-you card or fleet row to step into an agent.';
   return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center text-gray-500 dark:text-gray-400">
+    <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center text-ink-text-muted">
       <Inbox className="h-8 w-8" aria-hidden />
-      <div className="text-sm font-semibold text-gray-700 dark:text-gray-200">{title}</div>
+      <div className="text-sm font-semibold text-ink-text-label text-ink-text-body">{title}</div>
       <p className="max-w-md text-xs leading-5">{detail}</p>
       <button
         type="button"
         onClick={onBack}
-        className="min-h-10 rounded-md border border-gray-200 px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-800 dark:focus-visible:ring-offset-gray-950"
+        className="min-h-10 rounded-md border border-ink-border px-3 py-2 text-xs font-semibold text-ink-text-label hover:bg-ink focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 border-ink-border-2 text-ink-text-body dark:hover:bg-ink-surface dark:focus-visible:ring-offset-gray-950"
       >
         Go to Fleet
       </button>
@@ -341,22 +341,22 @@ export const IntervenceView: React.FC = () => {
     warn: 'border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/20 dark:text-amber-200',
     success: 'border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900/60 dark:bg-emerald-950/20 dark:text-emerald-200',
     info: 'border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/60 dark:bg-blue-950/20 dark:text-blue-200',
-    neutral: 'border-gray-200 bg-gray-50 text-gray-700 dark:border-gray-800 dark:bg-gray-900/40 dark:text-gray-300',
+    neutral: 'border-ink-border bg-ink text-ink-text-label border-ink-border bg-panel/40 text-ink-text-label',
   };
 
   return (
     <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
       {/* Header */}
-      <div className="flex flex-shrink-0 items-center gap-2 border-b border-gray-200 bg-white px-4 py-2 dark:border-gray-800 dark:bg-gray-950">
-        <button onClick={() => setView('fleet')} className="flex items-center gap-1 rounded-md px-1.5 py-1 text-xs text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-800 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100" aria-label="Back to Fleet">
+      <div className="flex flex-shrink-0 items-center gap-2 border-b border-ink-border bg-white px-4 py-2 border-ink-border bg-ink">
+        <button onClick={() => setView('fleet')} className="flex items-center gap-1 rounded-md px-1.5 py-1 text-xs text-ink-text0 transition-colors hover:bg-ink-surface hover:text-ink-text-body text-ink-text-subtle dark:hover:bg-ink-surface dark:hover:text-ink-text" aria-label="Back to Fleet">
           <ArrowLeft className="h-3.5 w-3.5" aria-hidden /> Fleet
         </button>
-        <span className="text-gray-300 dark:text-gray-700">/</span>
-        <span className="truncate text-sm font-semibold text-gray-900 dark:text-gray-100">{agent.name || agent.id}</span>
-        <span className={`flex-shrink-0 rounded-full border px-1.5 py-0.5 text-[10px] font-semibold uppercase ${agentStatusBadgeClass(agent.status)}`}>{agent.status}</span>
-        {agent.model && <span className="flex-shrink-0 truncate text-[11px] text-gray-400" title={agent.model}>{agent.model}</span>}
-        {agent.startedAt && <span className="ml-auto flex-shrink-0 text-[11px] tabular-nums text-gray-400">{relativeAge(agent.startedAt)}</span>}
-        {!connected && <span className="flex-shrink-0 text-[11px] text-red-500">daemon offline</span>}
+        <span className="text-ink-text-label text-ink-text-label">/</span>
+        <span className="truncate text-sm font-semibold text-ink-text">{agent.name || agent.id}</span>
+        <span className={`flex-shrink-0 rounded-full border px-1.5 py-0.5 text-caption font-semibold uppercase ${agentStatusBadgeClass(agent.status)}`}>{agent.status}</span>
+        {agent.model && <span className="flex-shrink-0 truncate text-caption text-ink-text-subtle" title={agent.model}>{agent.model}</span>}
+        {agent.startedAt && <span className="ml-auto flex-shrink-0 text-caption tabular-nums text-ink-text-subtle">{relativeAge(agent.startedAt)}</span>}
+        {!connected && <span className="flex-shrink-0 text-caption text-red-500">daemon offline</span>}
       </div>
 
       {/* On-track strip: validation / confidence / proof / branch — reused verbatim from the console. */}
@@ -370,7 +370,7 @@ export const IntervenceView: React.FC = () => {
             target="_blank"
             rel="noreferrer"
             onClick={onPrReviewed}
-            className="flex items-center gap-1 rounded-full border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700 transition-colors hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300 dark:hover:bg-emerald-900/40"
+            className="flex items-center gap-1 rounded-full border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-caption font-medium text-emerald-700 transition-colors hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300 dark:hover:bg-emerald-900/40"
           >
             <GitMerge className="h-3 w-3" aria-hidden /> PR #{agent.prNumber}{agent.prState ? ` · ${prStateBadgeLabel(agent.prState)}` : ''}
           </a>
@@ -383,8 +383,8 @@ export const IntervenceView: React.FC = () => {
 
         {/* Goal / issue context, when present. */}
         {agent.issue?.name && (
-          <div className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs text-gray-600 dark:border-gray-800 dark:bg-gray-900/40 dark:text-gray-300">
-            <span className="font-semibold text-gray-500 dark:text-gray-400">Goal</span> · {agent.issue.identifier ? `${agent.issue.identifier} — ` : ''}{agent.issue.name}
+          <div className="rounded-lg border border-ink-border bg-white px-3 py-2 text-xs text-ink-text-label border-ink-border bg-panel/40 text-ink-text-label">
+            <span className="font-semibold text-ink-text-muted">Goal</span> · {agent.issue.identifier ? `${agent.issue.identifier} — ` : ''}{agent.issue.name}
           </div>
         )}
 
@@ -397,7 +397,7 @@ export const IntervenceView: React.FC = () => {
             the teaching moment. Empty state renders nothing (no placeholder nagging). */}
         {bullets.length > 0 && (
           <div className="space-y-1.5">
-            <div className="text-[11px] font-semibold uppercase tracking-widest text-gray-400">What changed here</div>
+            <div className="text-caption font-semibold uppercase tracking-widest text-ink-text-subtle">What changed here</div>
             {bullets.map((b) => (
               <div key={b.id} className="rounded-lg border border-violet-200 bg-violet-50 px-3 py-2 text-xs text-violet-900 dark:border-violet-900/50 dark:bg-violet-950/20 dark:text-violet-100">
                 <div>{b.text}</div>
@@ -406,7 +406,7 @@ export const IntervenceView: React.FC = () => {
                     <button
                       key={anchor}
                       onClick={() => jumpToFile(parseEvidenceAnchor(anchor).file)}
-                      className="rounded border border-violet-200 bg-white px-1.5 py-0.5 font-mono text-[10px] text-violet-700 underline decoration-dotted transition-colors hover:bg-violet-100 dark:border-violet-800 dark:bg-gray-950 dark:text-violet-300 dark:hover:bg-violet-900/40"
+                      className="rounded border border-violet-200 bg-white px-1.5 py-0.5 font-mono text-caption text-violet-700 underline decoration-dotted transition-colors hover:bg-violet-100 dark:border-violet-800 bg-ink dark:text-violet-300 dark:hover:bg-violet-900/40"
                       title={`Scroll to ${parseEvidenceAnchor(anchor).file}`}
                     >
                       {anchor}
@@ -415,7 +415,7 @@ export const IntervenceView: React.FC = () => {
                   <button
                     onClick={() => onSurprise(b.id, b.evidence)}
                     disabled={surprisedIds.has(b.id)}
-                    className="ml-auto flex-shrink-0 rounded-full border border-violet-300 px-2 py-0.5 text-[10px] font-semibold text-violet-700 transition-colors hover:bg-violet-100 disabled:cursor-default disabled:opacity-60 dark:border-violet-700 dark:text-violet-300 dark:hover:bg-violet-900/40"
+                    className="ml-auto flex-shrink-0 rounded-full border border-violet-300 px-2 py-0.5 text-caption font-semibold text-violet-700 transition-colors hover:bg-violet-100 disabled:cursor-default disabled:opacity-60 dark:border-violet-700 dark:text-violet-300 dark:hover:bg-violet-900/40"
                     title="Flag that this diverged from your mental model — raises this file's comprehension debt"
                   >
                     {surprisedIds.has(b.id) ? 'Noted' : 'Surprised me'}
@@ -428,14 +428,14 @@ export const IntervenceView: React.FC = () => {
 
         {/* The diff — the spine. What it changed, file by file, with line-level correction. */}
         <div>
-          <div className="mb-1.5 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-widest text-gray-400">
+          <div className="mb-1.5 flex items-center gap-2 text-caption font-semibold uppercase tracking-widest text-ink-text-subtle">
             <span>Changes</span>
-            <span className="text-gray-300 dark:text-gray-600">·</span>
+            <span className="text-ink-text-subtle">·</span>
             <span>{diffs == null ? 'loading…' : `${diffs.length} changed ${diffs.length === 1 ? 'file' : 'files'}`}</span>
             {diffs != null && diffs.length > 1 && (
               <button
                 onClick={() => setOrderMode((m) => (m === 'story' ? 'path' : 'story'))}
-                className="ml-auto flex-shrink-0 rounded-full border border-gray-200 px-2 py-0.5 text-[10px] font-medium normal-case tracking-normal text-gray-500 transition-colors hover:bg-gray-100 dark:border-gray-700 dark:text-gray-400 dark:hover:bg-gray-800"
+                className="ml-auto flex-shrink-0 rounded-full border border-ink-border px-2 py-0.5 text-caption font-medium normal-case tracking-normal text-ink-text0 transition-colors hover:bg-ink-surface border-ink-border-2 text-ink-text-subtle dark:hover:bg-ink-surface"
                 title="Toggle between a definition-before-use reading order and plain path order"
               >
                 {orderMode === 'story' ? 'Story order' : 'Path order'}
@@ -443,7 +443,7 @@ export const IntervenceView: React.FC = () => {
             )}
           </div>
           {diffs != null && diffs.length === 0 && (
-            <div className="rounded-md border border-dashed border-gray-200 px-3 py-4 text-center text-xs text-gray-400 dark:border-gray-800">No file changes yet.</div>
+            <div className="rounded-md border border-dashed border-ink-border px-3 py-4 text-center text-xs text-ink-text-subtle border-ink-border">No file changes yet.</div>
           )}
           <div className="space-y-2">
             {orderedDiffs?.map((d) => (
@@ -456,7 +456,7 @@ export const IntervenceView: React.FC = () => {
       </div>
 
       {/* Action dock — the one action, plus the full step-in toolset, always reachable. */}
-      <div className="flex-shrink-0 border-t border-gray-200 bg-white p-3 dark:border-gray-800 dark:bg-gray-950">
+      <div className="flex-shrink-0 border-t border-ink-border bg-white p-3 border-ink-border bg-ink">
         {/* Steer composer is the default one action (answer is handled inline above via the gate). */}
         <div className="flex items-end gap-2">
           <textarea
@@ -466,7 +466,7 @@ export const IntervenceView: React.FC = () => {
             onKeyDown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); sendSteer(); } }}
             rows={2}
             placeholder={primary === 'answer' ? 'Answer above, or type a redirect…' : 'Redirect this agent — a fresh steering turn…'}
-            className="min-w-0 flex-1 resize-y rounded-md border border-gray-200 bg-white px-2.5 py-1.5 text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-100"
+            className="min-w-0 flex-1 resize-y rounded-md border border-ink-border bg-white px-2.5 py-1.5 text-sm text-ink-text placeholder:text-ink-text-subtle focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 border-ink-border-2 bg-ink text-ink-text"
             aria-label="Steer this agent"
           />
           <button
@@ -481,22 +481,22 @@ export const IntervenceView: React.FC = () => {
         {/* Secondary tools: interrupt / restart / fork / verify+land / open console. */}
         <div className="mt-2 flex flex-wrap items-center gap-1.5">
           {(agent.status === 'working' || agent.status === 'starting') && (
-            <button onClick={() => { sendConsoleCommand(interruptCommand(agent.id)); showToast('Interrupt sent', 'info'); }} className="flex items-center gap-1 rounded-full border border-gray-200 px-2 py-1 text-[11px] font-medium text-gray-600 transition-colors hover:bg-gray-100 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800">
+            <button onClick={() => { sendConsoleCommand(interruptCommand(agent.id)); showToast('Interrupt sent', 'info'); }} className="flex items-center gap-1 rounded-full border border-ink-border px-2 py-1 text-caption font-medium text-ink-text-label transition-colors hover:bg-ink-surface border-ink-border-2 text-ink-text-label dark:hover:bg-ink-surface">
               <Square className="h-3 w-3" aria-hidden /> Interrupt
             </button>
           )}
           {(agent.status === 'error' || agent.status === 'stopped') && (
-            <button onClick={() => { sendConsoleCommand(restartCommand(agent.id)); showToast('Restart sent', 'success'); }} className="flex items-center gap-1 rounded-full border border-gray-200 px-2 py-1 text-[11px] font-medium text-gray-600 transition-colors hover:bg-gray-100 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800">
+            <button onClick={() => { sendConsoleCommand(restartCommand(agent.id)); showToast('Restart sent', 'success'); }} className="flex items-center gap-1 rounded-full border border-ink-border px-2 py-1 text-caption font-medium text-ink-text-label transition-colors hover:bg-ink-surface border-ink-border-2 text-ink-text-label dark:hover:bg-ink-surface">
               <RotateCcw className="h-3 w-3" aria-hidden /> Restart
             </button>
           )}
           {agent.forkAvailable && (
-            <button onClick={() => { sendConsoleCommand(forkCommand(agent.id)); showToast('Forked from latest checkpoint', 'success'); }} title="Branch a new run from the latest checkpoint (open the console for step-by-step fork)" className="flex items-center gap-1 rounded-full border border-gray-200 px-2 py-1 text-[11px] font-medium text-gray-600 transition-colors hover:bg-gray-100 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800">
+            <button onClick={() => { sendConsoleCommand(forkCommand(agent.id)); showToast('Forked from latest checkpoint', 'success'); }} title="Branch a new run from the latest checkpoint (open the console for step-by-step fork)" className="flex items-center gap-1 rounded-full border border-ink-border px-2 py-1 text-caption font-medium text-ink-text-label transition-colors hover:bg-ink-surface border-ink-border-2 text-ink-text-label dark:hover:bg-ink-surface">
               <GitBranch className="h-3 w-3" aria-hidden /> Fork
             </button>
           )}
           <AgentLandControls agent={agent} showToast={showToast} />
-          <button onClick={() => openConsole(agent.id)} className="ml-auto flex items-center gap-1 rounded-full border border-gray-200 px-2 py-1 text-[11px] font-medium text-gray-600 transition-colors hover:bg-gray-100 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800">
+          <button onClick={() => openConsole(agent.id)} className="ml-auto flex items-center gap-1 rounded-full border border-ink-border px-2 py-1 text-caption font-medium text-ink-text-label transition-colors hover:bg-ink-surface border-ink-border-2 text-ink-text-label dark:hover:bg-ink-surface">
             <ExternalLink className="h-3 w-3" aria-hidden /> Full console
           </button>
         </div>

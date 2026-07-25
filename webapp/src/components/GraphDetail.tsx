@@ -37,13 +37,13 @@ const DiffFile: React.FC<{ file: CommitFile }> = ({ file }) => (
   <div className="mb-2 overflow-hidden rounded-md border border-[#1c2230]">
     <div className="flex items-center gap-2 border-b border-[#1c2230] bg-[#0d1017] px-2.5 py-1.5">
       <FileText className="h-3 w-3 flex-shrink-0 text-[#6d7480]" aria-hidden="true" />
-      <span className="truncate font-mono text-[11px] text-[#c4c9d2]" title={file.path}>{file.path}</span>
+      <span className="truncate font-mono text-caption text-[#c4c9d2]" title={file.path}>{file.path}</span>
       <span className={`ml-auto flex-shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase ${FILE_STATUS[file.status]}`}>{file.status}</span>
-      <span className="flex-shrink-0 font-mono text-[10px] text-emerald-400">+{file.additions}</span>
-      <span className="flex-shrink-0 font-mono text-[10px] text-red-400">−{file.deletions}</span>
+      <span className="flex-shrink-0 font-mono text-caption text-emerald-400">+{file.additions}</span>
+      <span className="flex-shrink-0 font-mono text-caption text-red-400">−{file.deletions}</span>
     </div>
     <div className="overflow-x-auto">
-      <table className="w-full border-collapse font-mono text-[11px] leading-[1.5]">
+      <table className="w-full border-collapse font-mono text-caption leading-[1.5]">
         <tbody>
           {file.lines.map((ln, i) => {
             if (ln.t === 'hunk') {
@@ -102,10 +102,10 @@ export const CommitView: React.FC<{ sha: string }> = ({ sha }) => {
   return (
     <div className="p-3">
       <div className="mb-2 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <span className="font-mono text-[11px] text-[#f2913d]">{detail.sha.slice(0, 7)}</span>
+        <span className="font-mono text-caption text-[#f2913d]">{detail.sha.slice(0, 7)}</span>
         <span className="text-sm font-semibold text-[#e5e8ee]">{detail.subject}</span>
       </div>
-      <div className="mb-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-[#7a8390]">
+      <div className="mb-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-caption text-[#7a8390]">
         <span>{detail.author}</span>
         <span>·</span>
         <span>{fmtDate(detail.dateMs)}</span>
@@ -115,7 +115,7 @@ export const CommitView: React.FC<{ sha: string }> = ({ sha }) => {
         </span>
       </div>
       {detail.files.map((f, i) => <DiffFile key={i} file={f} />)}
-      {detail.truncated && <div className="px-1 py-2 text-[11px] text-amber-400/80">Diff truncated at 900 lines — open the commit locally for the full patch.</div>}
+      {detail.truncated && <div className="px-1 py-2 text-caption text-amber-400/80">Diff truncated at 900 lines — open the commit locally for the full patch.</div>}
     </div>
   );
 };
@@ -136,10 +136,10 @@ const GenericView: React.FC<{ datum: GraphDatum; onOpenTask?: (id: string) => vo
         <span className="mt-1.5 inline-block h-2 w-2 flex-shrink-0 rounded-full" style={{ background: accent }} />
         <div className="min-w-0">
           <div className="text-sm font-semibold text-[#e5e8ee]">{datum.title}</div>
-          <div className="mt-0.5 text-[11px] text-[#7a8390]">{fmtDate(datum.t)}{datum.t1 ? ` → ${fmtDate(datum.t1)}` : ''}</div>
+          <div className="mt-0.5 text-caption text-[#7a8390]">{fmtDate(datum.t)}{datum.t1 ? ` → ${fmtDate(datum.t1)}` : ''}</div>
         </div>
       </div>
-      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-[11px]">
+      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-caption">
         <Row k="track" v={datum.trackLabel} />
         <Row k="source" v={datum.source} />
         {datum.kind && <Row k="kind" v={datum.kind} />}
@@ -148,7 +148,7 @@ const GenericView: React.FC<{ datum: GraphDatum; onOpenTask?: (id: string) => vo
         {datum.meta && Object.entries(datum.meta).filter(([k]) => k !== 'sha').map(([k, v]) => <Row key={k} k={k} v={String(v)} />)}
       </dl>
       {id && onOpenTask && (
-        <button onClick={() => onOpenTask(id)} className="mt-4 flex items-center gap-1.5 rounded-md border border-[#232b38] bg-[#11151d] px-2.5 py-1.5 text-[11px] font-medium text-[#c4c9d2] transition-colors hover:bg-[#171c26]">
+        <button onClick={() => onOpenTask(id)} className="mt-4 flex items-center gap-1.5 rounded-md border border-[#232b38] bg-[#11151d] px-2.5 py-1.5 text-caption font-medium text-[#c4c9d2] transition-colors hover:bg-[#171c26]">
           <ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" /> Open {id} in Tasks
         </button>
       )}
@@ -166,8 +166,8 @@ export const GraphDetail: React.FC<{ datum: GraphDatum; onClose: () => void; onO
         ) : (
           <span className="inline-block h-2 w-2 flex-shrink-0 rounded-full" style={{ background: datum.kind ? kindColor(datum.kind) : datum.status ? statusColor(datum.status) : '#f2913d' }} />
         )}
-        <span className="flex-shrink-0 text-[11px] font-semibold uppercase tracking-widest text-[#8a92a0]">{sha ? 'Commit' : datum.trackLabel}</span>
-        <span className="truncate text-[11px] text-[#5a6270]">{sha ? datum.title : ''}</span>
+        <span className="flex-shrink-0 text-caption font-semibold uppercase tracking-widest text-[#8a92a0]">{sha ? 'Commit' : datum.trackLabel}</span>
+        <span className="truncate text-caption text-[#5a6270]">{sha ? datum.title : ''}</span>
         <button onClick={onClose} className="ml-auto flex h-6 w-6 flex-shrink-0 items-center justify-center rounded text-[#6d7480] transition-colors hover:bg-[#171c26] hover:text-[#c4c9d2]" aria-label="Close detail">
           <X className="h-3.5 w-3.5" aria-hidden="true" />
         </button>

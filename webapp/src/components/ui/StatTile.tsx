@@ -22,7 +22,7 @@ export const StatTile: React.FC<StatTileProps> = ({ label, value, sub, spark, to
   const t = toneClasses(tone);
   return (
     <div className="flex min-w-[140px] flex-1 flex-col gap-1 rounded-lg border border-ink-border bg-panel p-3 transition-colors">
-      <div className="text-caption font-semibold uppercase tracking-widest text-gray-400">{label}</div>
+      <div className="text-caption font-semibold uppercase tracking-widest text-ink-text-subtle">{label}</div>
       <div className="flex items-end justify-between gap-2">
         <div className="min-w-0">
           <div className={`text-2xl font-semibold leading-tight tabular-nums ${tone === 'neutral' ? 'text-ink-text' : t.text}`}>{value}</div>

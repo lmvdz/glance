@@ -37,7 +37,7 @@ export const ProgressRing: React.FC<ProgressRingProps> = ({ value, total, label,
   return (
     <div className="flex flex-col items-center gap-1" role="img" aria-label={`${label}: ${display}`}>
       <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="-rotate-90" aria-hidden="true">
-        <circle cx={center} cy={center} r={radius} fill="none" strokeWidth={strokeWidth} className="stroke-gray-200 dark:stroke-gray-800" />
+        <circle cx={center} cy={center} r={radius} fill="none" strokeWidth={strokeWidth} className="stroke-ink-text-body stroke-ink-text-body" />
         <circle
           cx={center}
           cy={center}
@@ -57,13 +57,13 @@ export const ProgressRing: React.FC<ProgressRingProps> = ({ value, total, label,
           dominantBaseline="central"
           fontSize={fontSize}
           fontWeight={600}
-          className="rotate-90 fill-gray-900 font-mono tabular-nums dark:fill-gray-100"
+          className="rotate-90 fill-ink-text font-mono tabular-nums fill-ink-text"
           style={{ transformOrigin: `${center}px ${center}px` }}
         >
           {display}
         </text>
       </svg>
-      <span className="text-center text-[10px] font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">{label}</span>
+      <span className="text-center text-caption font-medium uppercase tracking-wide text-ink-text-muted">{label}</span>
     </div>
   );
 };

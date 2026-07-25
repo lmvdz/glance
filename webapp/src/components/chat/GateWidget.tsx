@@ -15,7 +15,7 @@ export const GateWidget = ({
   if (request.options && request.options.length > 0) {
     return (
       <div data-chat-message className="mt-1 rounded-lg border border-amber-200 bg-amber-50 p-3 dark:border-amber-800/60 dark:bg-amber-950/20">
-        <div className="mb-2 text-[11px] font-semibold text-amber-700 dark:text-amber-300">{request.title}</div>
+        <div className="mb-2 text-caption font-semibold text-amber-700 dark:text-amber-300">{request.title}</div>
         <div className="flex flex-wrap gap-2">
           {request.options.map((opt) => (
             <button
@@ -32,8 +32,8 @@ export const GateWidget = ({
   }
   return (
     <div data-chat-message className="mt-1 rounded-lg border border-amber-200 bg-amber-50 p-3 dark:border-amber-800/60 dark:bg-amber-950/20">
-      <div className="mb-2 text-[11px] font-semibold text-amber-700 dark:text-amber-300">{request.title}</div>
-      {request.message && <div className="mb-2 text-[11px] text-gray-600 dark:text-gray-400">{request.message}</div>}
+      <div className="mb-2 text-caption font-semibold text-amber-700 dark:text-amber-300">{request.title}</div>
+      {request.message && <div className="mb-2 text-caption text-ink-text-label text-ink-text-subtle">{request.message}</div>}
       <textarea
         value={text}
         onChange={(e) => setText(e.target.value)}
@@ -45,7 +45,7 @@ export const GateWidget = ({
         }}
         rows={2}
         placeholder={request.placeholder ?? 'Type your reply…'}
-        className="w-full resize-y rounded-md border border-amber-200 bg-white px-2.5 py-1.5 text-xs text-gray-900 placeholder:text-gray-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-amber-700 dark:bg-gray-950 dark:text-gray-100"
+        className="w-full resize-y rounded-md border border-amber-200 bg-white px-2.5 py-1.5 text-xs text-ink-text placeholder:text-ink-text-subtle focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-amber-700 bg-ink text-ink-text"
       />
       <div className="mt-2 flex justify-end">
         <button

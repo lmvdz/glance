@@ -48,7 +48,7 @@ export const HeatGrid: React.FC<HeatGridProps> = ({ days, rows, emptyLabel = 'No
           <tr>
             <th className="w-0" />
             {days.map((d) => (
-              <th key={d} className="px-0 text-center text-[9px] font-medium tabular-nums text-gray-400" title={d}>
+              <th key={d} className="px-0 text-center text-[9px] font-medium tabular-nums text-ink-text-subtle" title={d}>
                 {shortDay(d)}
               </th>
             ))}
@@ -75,7 +75,7 @@ export const HeatGrid: React.FC<HeatGridProps> = ({ days, rows, emptyLabel = 'No
                     </td>
                   );
                 })}
-                {row.note != null && <td className="whitespace-nowrap pl-3 text-right text-caption text-gray-400">{row.note}</td>}
+                {row.note != null && <td className="whitespace-nowrap pl-3 text-right text-caption text-ink-text-subtle">{row.note}</td>}
               </tr>
             );
           })}

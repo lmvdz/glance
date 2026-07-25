@@ -735,7 +735,7 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean; onSelect?: 
       {/* FLEET PULSE readout — all four layered metrics at the hovered x */}
       {pulseHover && pulseStats && pulseStats.length > 0 && (
         <div
-          className="pointer-events-none absolute z-10 min-w-[150px] rounded-md border border-[#232b38] bg-[#0b0e14]/95 px-2.5 py-2 text-[10px] shadow-xl"
+          className="pointer-events-none absolute z-10 min-w-[150px] rounded-md border border-[#232b38] bg-[#0b0e14]/95 px-2.5 py-2 text-caption shadow-xl"
           style={{ left: Math.min(pulseHover.x + 14, view.width - 168), top: Math.max(HEADER_H + 4, Math.min((pulseRow ? pulseRow.y - view.offsetY : HEADER_H) - 6, viewportH - 92)) }}
         >
           <div className="mb-1 flex items-center gap-2">
@@ -754,7 +754,7 @@ export const GraphCanvas: React.FC<{ doc: GraphDoc; blend?: boolean; onSelect?: 
       {/* per-datum tooltip — describes exactly the mark under the cursor */}
       {hoverDatum && (
         <div
-          className="pointer-events-none absolute z-10 max-w-[260px] rounded-md border border-[#232b38] bg-[#0b0e14]/95 px-2.5 py-2 text-[10px] shadow-xl"
+          className="pointer-events-none absolute z-10 max-w-[260px] rounded-md border border-[#232b38] bg-[#0b0e14]/95 px-2.5 py-2 text-caption shadow-xl"
           style={{ left: Math.min(hoverDatum.px + 12, view.width - 250), top: Math.max(HEADER_H + 4, Math.min(hoverDatum.py - 6, viewportH - 96)) }}
         >
           <div className="mb-1 flex items-center gap-1.5">

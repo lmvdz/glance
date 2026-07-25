@@ -81,8 +81,8 @@ export const FogView: React.FC = () => {
           aria-pressed={days === r}
           className={`rounded-md px-2 py-1 text-xs font-medium transition-colors ${
             days === r
-              ? 'bg-gray-900 text-white dark:bg-gray-100 dark:text-gray-900'
-              : 'border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800'
+              ? 'bg-panel text-white bg-ink-surface text-ink-text'
+              : 'border border-ink-border bg-panel text-ink-text-muted hover:bg-ink-surface'
           }`}
         >
           {r}d
@@ -95,7 +95,7 @@ export const FogView: React.FC = () => {
     <button
       type="button"
       onClick={() => void load()}
-      className="flex items-center gap-1 rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-2 py-1 text-xs text-gray-600 dark:text-gray-300 transition-colors hover:bg-gray-50 dark:hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
+      className="flex items-center gap-1 rounded-md border border-ink-border bg-panel px-2 py-1 text-xs text-ink-text-muted transition-colors hover:bg-ink-surface focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
       title="Refresh"
       aria-label="Refresh fog data"
     >
@@ -119,7 +119,7 @@ export const FogView: React.FC = () => {
         {!loaded && !error && (
           <div className="space-y-3 animate-pulse" aria-label="Loading fog data">
             {[1, 2, 3].map((n) => (
-              <div key={n} className="h-12 rounded-lg bg-gray-100 dark:bg-gray-800" />
+              <div key={n} className="h-12 rounded-lg bg-ink-surface" />
             ))}
           </div>
         )}

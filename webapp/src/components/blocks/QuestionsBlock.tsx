@@ -105,7 +105,7 @@ function resolvedAnswer(decisions: string[], prompt: string): string | null {
 function ResolvedRow({ value }: { value: string }) {
   return (
     <span
-      className="inline-flex items-center gap-1.5 rounded-md border px-2 py-1 font-mono text-[11px]"
+      className="inline-flex items-center gap-1.5 rounded-md border px-2 py-1 font-mono text-caption"
       style={{
         borderColor: 'color-mix(in srgb, var(--wf-accent) 34%, transparent)',
         backgroundColor: 'var(--wf-accent-soft, color-mix(in srgb, var(--wf-accent) 10%, transparent))',
@@ -171,7 +171,7 @@ function QuestionField({ question, resolved, onSubmit, disabled }: QuestionField
               />
               <span>{option}</span>
               {question.recommended.includes(option) ? (
-                <span className="rounded px-1 text-[10px] font-semibold uppercase tracking-wide" style={{ color: 'var(--wf-accent)' }}>recommended</span>
+                <span className="rounded px-1 text-caption font-semibold uppercase tracking-wide" style={{ color: 'var(--wf-accent)' }}>recommended</span>
               ) : null}
             </label>
           ))}
@@ -187,7 +187,7 @@ function QuestionField({ question, resolved, onSubmit, disabled }: QuestionField
               />
               <span>{option}</span>
               {question.recommended.includes(option) ? (
-                <span className="rounded px-1 text-[10px] font-semibold uppercase tracking-wide" style={{ color: 'var(--wf-accent)' }}>recommended</span>
+                <span className="rounded px-1 text-caption font-semibold uppercase tracking-wide" style={{ color: 'var(--wf-accent)' }}>recommended</span>
               ) : null}
             </label>
           ))}
@@ -255,7 +255,7 @@ export default function QuestionsBlock({ body, blockId }: BlockProps) {
       onSubmit={(event) => event.preventDefault()}
       style={{ borderColor: 'var(--wf-border)', backgroundColor: 'var(--wf-surface-raised)', boxShadow: 'var(--wf-shadow-soft)' }}
     >
-      <div className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: 'var(--wf-text)' }}>
+      <div className="text-caption font-semibold uppercase tracking-wide" style={{ color: 'var(--wf-text)' }}>
         Open questions
       </div>
       {questions.map((question) => (

@@ -94,7 +94,7 @@ export const RunStatusHeader = ({
   <button
     type="button"
     onClick={onToggle}
-    className="flex min-h-9 w-full items-center gap-2 border-t border-gray-200 pt-3 text-left text-xs text-gray-500 transition-colors hover:text-gray-800 focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-800 dark:text-gray-400 dark:hover:text-gray-200"
+    className="flex min-h-9 w-full items-center gap-2 border-t border-ink-border pt-3 text-left text-xs text-ink-text0 transition-colors hover:text-ink-text-body focus-visible:ring-2 focus-visible:ring-amber-500 border-ink-border text-ink-text-subtle dark:hover:text-ink-text-body"
     aria-expanded={expanded}
   >
     <ChevronRight className={`h-3.5 w-3.5 flex-shrink-0 transition-transform ${expanded ? 'rotate-90' : ''}`} aria-hidden />
@@ -258,24 +258,24 @@ export const TranscriptEntryView = React.memo(({ entry }: { entry: TranscriptEnt
             className={`rounded-2xl rounded-tr-md px-3.5 py-2.5 text-[13px] leading-relaxed whitespace-pre-wrap ${
               undelivered
                 ? 'border border-red-300 bg-red-50 text-red-900 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-200'
-                : 'bg-gray-200 text-gray-900 dark:bg-gray-900 dark:text-gray-100'
+                : 'bg-ink-border text-ink-text bg-panel text-ink-text'
             }`}
           >
             {shown}
           </div>
           {undelivered && (
             <div className="flex items-center gap-2 px-1">
-              <span className="text-[10px] font-medium text-red-600 dark:text-red-400">Not delivered</span>
+              <span className="text-caption font-medium text-red-600 dark:text-red-400">Not delivered</span>
               <button
                 type="button"
                 onClick={() => copyToClipboard(shown)}
-                className="text-[10px] font-medium text-red-600 underline decoration-red-300 hover:text-red-700 dark:text-red-400 dark:decoration-red-800"
+                className="text-caption font-medium text-red-600 underline decoration-red-300 hover:text-red-700 dark:text-red-400 dark:decoration-red-800"
               >
                 Copy text
               </button>
             </div>
           )}
-          <span className="text-[10px] text-gray-400 dark:text-gray-500 px-1">
+          <span className="text-caption text-ink-text-subtle px-1">
             {new Date(entry.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
           </span>
         </div>
@@ -288,10 +288,10 @@ export const TranscriptEntryView = React.memo(({ entry }: { entry: TranscriptEnt
     if (entry.format === 'stage') {
       const label = entry.text.replace(/^[▸►]\s*stage:\s*/i, '');
       return (
-        <div data-chat-message className="flex items-center gap-2 py-1.5 text-[11px] text-gray-400 dark:text-gray-500">
-          <div className="h-px flex-1 bg-gray-100 dark:bg-gray-800" />
+        <div data-chat-message className="flex items-center gap-2 py-1.5 text-caption text-ink-text-subtle">
+          <div className="h-px flex-1 bg-ink-surface" />
           <span className="font-medium uppercase tracking-wider">{label}</span>
-          <div className="h-px flex-1 bg-gray-100 dark:bg-gray-800" />
+          <div className="h-px flex-1 bg-ink-surface" />
         </div>
       );
     }
@@ -305,13 +305,13 @@ export const TranscriptEntryView = React.memo(({ entry }: { entry: TranscriptEnt
     const running = entry.status === 'running';
     return (
       <details data-chat-message open={running} className="group rounded-md">
-        <summary className="flex min-h-9 cursor-pointer list-none items-center gap-2 rounded-md px-1.5 text-xs text-gray-500 transition-colors hover:bg-gray-100 focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-gray-400 dark:hover:bg-gray-900">
+        <summary className="flex min-h-9 cursor-pointer list-none items-center gap-2 rounded-md px-1.5 text-xs text-ink-text0 transition-colors hover:bg-ink-surface focus-visible:ring-2 focus-visible:ring-amber-500 text-ink-text-subtle dark:hover:bg-panel">
           <ChevronRight className="h-3.5 w-3.5 flex-shrink-0 transition-transform group-open:rotate-90" aria-hidden />
           <Sparkles className="h-3.5 w-3.5 flex-shrink-0 text-amber-500 dark:text-amber-400" aria-hidden />
-          <span className={`font-medium uppercase tracking-wide ${running ? 'shimmer' : 'text-gray-700 dark:text-gray-300'}`}>Thinking</span>
-          <span className="text-gray-400 dark:text-gray-600">{running ? 'streaming' : 'folded'}</span>
+          <span className={`font-medium uppercase tracking-wide ${running ? 'shimmer' : 'text-ink-text-label'}`}>Thinking</span>
+          <span className="text-ink-text-subtle text-ink-text-label">{running ? 'streaming' : 'folded'}</span>
         </summary>
-        <div className="ml-6 mt-1 border-l border-gray-200 pl-3 text-xs leading-relaxed text-gray-600 dark:border-gray-800 dark:text-gray-400 whitespace-pre-wrap">
+        <div className="ml-6 mt-1 border-l border-ink-border pl-3 text-xs leading-relaxed text-ink-text-label border-ink-border text-ink-text-subtle whitespace-pre-wrap">
           {entry.text}
         </div>
       </details>
@@ -320,19 +320,19 @@ export const TranscriptEntryView = React.memo(({ entry }: { entry: TranscriptEnt
 
   if (entry.kind === 'system') {
     return (
-      <div data-chat-message className="rounded-md bg-gray-100 px-2 py-1.5 text-[11px] font-mono leading-relaxed text-gray-600 dark:bg-gray-900 dark:text-gray-400 whitespace-pre-wrap">
+      <div data-chat-message className="rounded-md bg-ink-surface px-2 py-1.5 text-caption font-mono leading-relaxed text-ink-text-label bg-panel text-ink-text-subtle whitespace-pre-wrap">
         {entry.text}
       </div>
     );
   }
 
   return (
-    <div data-chat-message className="w-full text-gray-800 dark:text-gray-300">
-      <div className="mb-1.5 flex items-center gap-2 text-[11px] text-gray-500">
-        {entry.kind === 'assistant' ? 'glance' : entry.kind} <span className="w-1 h-1 rounded-full bg-gray-300 dark:bg-gray-600"></span> {new Date(entry.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-        {entry.status === 'running' && <span className="shimmer text-[10px]">streaming</span>}
+    <div data-chat-message className="w-full text-ink-text-body text-ink-text-label">
+      <div className="mb-1.5 flex items-center gap-2 text-caption text-ink-text0">
+        {entry.kind === 'assistant' ? 'glance' : entry.kind} <span className="w-1 h-1 rounded-full bg-ink-border-2 bg-ink-text-label"></span> {new Date(entry.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+        {entry.status === 'running' && <span className="shimmer text-caption">streaming</span>}
       </div>
-      <div className="markdown-body prose dark:prose-invert prose-sm max-w-none text-gray-800 dark:text-gray-300 prose-headings:text-sm prose-headings:font-semibold prose-headings:mb-1 prose-headings:mt-2">
+      <div className="markdown-body prose dark:prose-invert prose-sm max-w-none text-ink-text-body text-ink-text-label prose-headings:text-sm prose-headings:font-semibold prose-headings:mb-1 prose-headings:mt-2">
         <SettledMarkdown text={entry.text} status={entry.status} />
       </div>
     </div>

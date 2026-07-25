@@ -35,7 +35,7 @@ export const AttentionRow: React.FC<AttentionRowProps> = ({ item, onAction, onOp
     <>
       <div className="flex items-center gap-2">
         <span className="truncate text-sm font-medium text-ink-text">{item.title}</span>
-        {age && <span className="flex-shrink-0 text-caption tabular-nums text-gray-400">{age}</span>}
+        {age && <span className="flex-shrink-0 text-caption tabular-nums text-ink-text-subtle">{age}</span>}
       </div>
       {item.detail && <div className="mt-0.5 truncate text-xs text-ink-text-muted" title={item.detail}>{item.detail}</div>}
     </>

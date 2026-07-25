@@ -17,25 +17,25 @@ function PlanBriefIndexCard({ feature, onOpen }: { feature: FeatureDTO; onOpen: 
     <button
       type="button"
       onClick={onOpen}
-      className="group flex min-h-40 flex-col items-start justify-between rounded-2xl border border-gray-200 bg-white p-5 text-left shadow-sm transition-colors hover:border-amber-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-800 dark:bg-gray-950 dark:hover:border-amber-800"
+      className="group flex min-h-40 flex-col items-start justify-between rounded-2xl border border-ink-border bg-white p-5 text-left shadow-sm transition-colors hover:border-amber-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 border-ink-border bg-ink dark:hover:border-amber-800"
     >
-      <span className="inline-flex items-center gap-2 rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-amber-700 dark:border-amber-900/70 dark:bg-amber-950/40 dark:text-amber-300">
+      <span className="inline-flex items-center gap-2 rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-caption font-semibold uppercase tracking-[0.18em] text-amber-700 dark:border-amber-900/70 dark:bg-amber-950/40 dark:text-amber-300">
         <Sparkles className="h-3.5 w-3.5" aria-hidden="true" /> Brief
       </span>
       <div className="min-w-0 space-y-1">
-        <div className="truncate text-sm font-semibold text-gray-950 group-hover:text-amber-700 dark:text-gray-100 dark:group-hover:text-amber-300">{feature.title}</div>
-        <div className="truncate font-mono text-[11px] text-gray-500 dark:text-gray-400">plans/{name}</div>
+        <div className="truncate text-sm font-semibold text-ink-text group-hover:text-amber-700 text-ink-text dark:group-hover:text-amber-300">{feature.title}</div>
+        <div className="truncate font-mono text-caption text-ink-text-muted">plans/{name}</div>
       </div>
-      <span className="text-xs text-gray-500 dark:text-gray-400">Open the human explainer: outcome, diagram, gates, scope.</span>
+      <span className="text-xs text-ink-text-muted">Open the human explainer: outcome, diagram, gates, scope.</span>
     </button>
   );
 }
 
-function Metric({ label, value, tone = 'text-gray-950 dark:text-gray-100' }: { label: string; value: number | string; tone?: string }) {
+function Metric({ label, value, tone = 'text-ink-text text-ink-text' }: { label: string; value: number | string; tone?: string }) {
   return (
-    <div className="rounded-2xl border border-gray-200 bg-white/80 p-4 dark:border-gray-800 dark:bg-gray-950/80">
+    <div className="rounded-2xl border border-ink-border bg-white/80 p-4 border-ink-border bg-ink/80">
       <div className={`text-2xl font-semibold tabular-nums ${tone}`}>{value}</div>
-      <div className="mt-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-gray-500 dark:text-gray-400">{label}</div>
+      <div className="mt-1 text-caption font-semibold uppercase tracking-[0.2em] text-ink-text-muted">{label}</div>
     </div>
   );
 }
@@ -44,11 +44,11 @@ function PlanBriefLoading() {
   return (
     <div className="h-full overflow-y-auto p-6">
       <div className="mx-auto max-w-7xl space-y-4">
-        <div className="h-48 animate-pulse rounded-3xl bg-gray-100 dark:bg-gray-900" />
+        <div className="h-48 animate-pulse rounded-3xl bg-ink-surface" />
         <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-          <div className="h-48 animate-pulse rounded-2xl bg-gray-100 dark:bg-gray-900" />
-          <div className="h-48 animate-pulse rounded-2xl bg-gray-100 dark:bg-gray-900" />
-          <div className="h-48 animate-pulse rounded-2xl bg-gray-100 dark:bg-gray-900" />
+          <div className="h-48 animate-pulse rounded-2xl bg-ink-surface" />
+          <div className="h-48 animate-pulse rounded-2xl bg-ink-surface" />
+          <div className="h-48 animate-pulse rounded-2xl bg-ink-surface" />
         </div>
       </div>
     </div>
@@ -61,24 +61,24 @@ function PlanBriefBody({ brief }: { brief: PlanBriefDTO }) {
   return (
     <div className="h-full overflow-y-auto bg-[radial-gradient(circle_at_top_left,rgba(245,158,11,0.16),transparent_34rem)] p-4 md:p-6">
       <div className="mx-auto max-w-7xl space-y-6">
-        <section className="overflow-hidden rounded-3xl border border-gray-200 bg-gray-950 text-white shadow-sm dark:border-gray-800">
+        <section className="overflow-hidden rounded-3xl border border-ink-border bg-ink text-white shadow-sm border-ink-border">
           <div className="grid gap-8 p-6 md:grid-cols-[1.25fr_0.75fr] md:p-8">
             <div className="space-y-5">
-              <div className="inline-flex items-center gap-2 rounded-full border border-amber-300/30 bg-amber-300/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] text-amber-200">
+              <div className="inline-flex items-center gap-2 rounded-full border border-amber-300/30 bg-amber-300/10 px-3 py-1 text-caption font-semibold uppercase tracking-[0.22em] text-amber-200">
                 <Palette className="h-3.5 w-3.5" aria-hidden="true" /> Human comprehension brief
               </div>
               <div className="space-y-2">
                 <h1 className="max-w-4xl text-3xl font-semibold tracking-tight md:text-5xl">{brief.title}</h1>
-                <p className="max-w-3xl text-sm leading-6 text-gray-300 md:text-base">{brief.outcome}</p>
+                <p className="max-w-3xl text-sm leading-6 text-ink-text-label md:text-base">{brief.outcome}</p>
               </div>
-              <div className="flex flex-wrap gap-2 font-mono text-[11px] text-gray-300">
+              <div className="flex flex-wrap gap-2 font-mono text-caption text-ink-text-label">
                 <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">{brief.planDir}</span>
                 <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">{brief.status.total} concern{brief.status.total === 1 ? '' : 's'}</span>
                 <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">updated {new Date(brief.updatedAt).toLocaleDateString()}</span>
               </div>
             </div>
             <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-5">
-              <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-gray-400">Live status split</div>
+              <div className="text-caption font-semibold uppercase tracking-[0.24em] text-ink-text-subtle">Live status split</div>
               <div className="mt-4 space-y-3">
                 {statusEntries.map(([status, count]) => (
                   <div key={status} className="space-y-1.5">
@@ -108,16 +108,16 @@ function PlanBriefBody({ brief }: { brief: PlanBriefDTO }) {
         )}
 
         <section className="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
-          <div className="rounded-3xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-gray-950">
-            <div className="flex items-center gap-2 text-sm font-semibold text-gray-950 dark:text-gray-100"><GitBranch className="h-4 w-4 text-amber-600" aria-hidden="true" /> What changes, in dependency order</div>
+          <div className="rounded-3xl border border-ink-border bg-white p-5 shadow-sm border-ink-border bg-ink">
+            <div className="flex items-center gap-2 text-sm font-semibold text-ink-text text-ink-text"><GitBranch className="h-4 w-4 text-amber-600" aria-hidden="true" /> What changes, in dependency order</div>
             <div className="mt-5 grid gap-3" style={{ gridTemplateColumns: `repeat(${maxPhase}, minmax(10rem, 1fr))` }}>
               {Array.from({ length: maxPhase }, (_, index) => index + 1).map((phase) => (
-                <div key={phase} className="min-w-0 space-y-3 rounded-2xl border border-gray-200 bg-gray-50 p-3 dark:border-gray-800 dark:bg-gray-900/50">
-                  <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-gray-500 dark:text-gray-400">Phase {phase}</div>
+                <div key={phase} className="min-w-0 space-y-3 rounded-2xl border border-ink-border bg-ink p-3 border-ink-border bg-panel/50">
+                  <div className="text-caption font-semibold uppercase tracking-[0.2em] text-ink-text-muted">Phase {phase}</div>
                   {brief.concerns.filter((c) => c.phase === phase).map((concern) => (
                     <div key={concern.file} className={`rounded-xl border p-3 ${toneByStatus(concern.status, concern.open)}`}>
                       <div className="text-xs font-semibold leading-5">{concern.title}</div>
-                      <div className="mt-1 flex flex-wrap gap-1 font-mono text-[10px] opacity-80"><span>{concern.status}</span>{concern.complexity && <span>· {concern.complexity}</span>}</div>
+                      <div className="mt-1 flex flex-wrap gap-1 font-mono text-caption opacity-80"><span>{concern.status}</span>{concern.complexity && <span>· {concern.complexity}</span>}</div>
                     </div>
                   ))}
                 </div>
@@ -125,17 +125,17 @@ function PlanBriefBody({ brief }: { brief: PlanBriefDTO }) {
             </div>
           </div>
 
-          <div className="rounded-3xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-gray-950">
-            <div className="flex items-center gap-2 text-sm font-semibold text-gray-950 dark:text-gray-100"><Layers3 className="h-4 w-4 text-amber-600" aria-hidden="true" /> Batch timeline with gates</div>
+          <div className="rounded-3xl border border-ink-border bg-white p-5 shadow-sm border-ink-border bg-ink">
+            <div className="flex items-center gap-2 text-sm font-semibold text-ink-text text-ink-text"><Layers3 className="h-4 w-4 text-amber-600" aria-hidden="true" /> Batch timeline with gates</div>
             <ol className="mt-5 space-y-4">
               {brief.timeline.map((item) => (
                 <li key={item.phase} className="flex gap-3">
-                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gray-950 text-xs font-semibold text-white dark:bg-gray-100 dark:text-gray-950">{item.phase}</span>
-                  <div className="min-w-0 border-b border-gray-100 pb-4 last:border-0 dark:border-gray-800">
-                    <div className="text-sm font-semibold text-gray-950 dark:text-gray-100">{item.title}</div>
-                    <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">Gate: {item.gate}</div>
-                    <div className="mt-2 flex flex-wrap gap-1 font-mono text-[10px] text-gray-500 dark:text-gray-400">
-                      {item.concernFiles.map((file) => <span key={file} className="rounded bg-gray-100 px-1.5 py-0.5 dark:bg-gray-900">{file}</span>)}
+                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-ink text-xs font-semibold text-white bg-ink-surface text-ink-text">{item.phase}</span>
+                  <div className="min-w-0 border-b border-ink-border pb-4 last:border-0 border-ink-border">
+                    <div className="text-sm font-semibold text-ink-text text-ink-text">{item.title}</div>
+                    <div className="mt-1 text-xs text-ink-text-muted">Gate: {item.gate}</div>
+                    <div className="mt-2 flex flex-wrap gap-1 font-mono text-caption text-ink-text-muted">
+                      {item.concernFiles.map((file) => <span key={file} className="rounded bg-ink-surface px-1.5 py-0.5 bg-panel">{file}</span>)}
                     </div>
                   </div>
                 </li>
@@ -145,27 +145,27 @@ function PlanBriefBody({ brief }: { brief: PlanBriefDTO }) {
         </section>
 
         <section className="grid gap-4 lg:grid-cols-3">
-          <div className="rounded-3xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-gray-950">
-            <div className="flex items-center gap-2 text-sm font-semibold text-gray-950 dark:text-gray-100"><CheckCircle2 className="h-4 w-4 text-emerald-600" aria-hidden="true" /> Decisions</div>
-            {brief.decisions.length === 0 ? <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">No explicit decisions captured yet.</p> : (
-              <ul className="mt-3 space-y-2 text-xs leading-5 text-gray-600 dark:text-gray-300">
-                {brief.decisions.map((decision) => <li key={`${decision.source}:${decision.text}`} className="rounded-xl bg-gray-50 p-3 dark:bg-gray-900/60">{decision.text}</li>)}
+          <div className="rounded-3xl border border-ink-border bg-white p-5 shadow-sm border-ink-border bg-ink">
+            <div className="flex items-center gap-2 text-sm font-semibold text-ink-text text-ink-text"><CheckCircle2 className="h-4 w-4 text-emerald-600" aria-hidden="true" /> Decisions</div>
+            {brief.decisions.length === 0 ? <p className="mt-3 text-xs text-ink-text-muted">No explicit decisions captured yet.</p> : (
+              <ul className="mt-3 space-y-2 text-xs leading-5 text-ink-text-muted">
+                {brief.decisions.map((decision) => <li key={`${decision.source}:${decision.text}`} className="rounded-xl bg-ink p-3 bg-panel/60">{decision.text}</li>)}
               </ul>
             )}
           </div>
-          <div className="rounded-3xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-gray-950">
-            <div className="flex items-center gap-2 text-sm font-semibold text-gray-950 dark:text-gray-100"><Boxes className="h-4 w-4 text-amber-600" aria-hidden="true" /> Out of scope</div>
-            {brief.outOfScope.length === 0 ? <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">No explicit non-goals listed.</p> : (
-              <ul className="mt-3 list-disc space-y-2 pl-5 text-xs leading-5 text-gray-600 dark:text-gray-300">
+          <div className="rounded-3xl border border-ink-border bg-white p-5 shadow-sm border-ink-border bg-ink">
+            <div className="flex items-center gap-2 text-sm font-semibold text-ink-text text-ink-text"><Boxes className="h-4 w-4 text-amber-600" aria-hidden="true" /> Out of scope</div>
+            {brief.outOfScope.length === 0 ? <p className="mt-3 text-xs text-ink-text-muted">No explicit non-goals listed.</p> : (
+              <ul className="mt-3 list-disc space-y-2 pl-5 text-xs leading-5 text-ink-text-muted">
                 {brief.outOfScope.map((item) => <li key={item}>{item}</li>)}
               </ul>
             )}
           </div>
-          <div className="rounded-3xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-gray-950">
-            <div className="flex items-center gap-2 text-sm font-semibold text-gray-950 dark:text-gray-100"><FileText className="h-4 w-4 text-amber-600" aria-hidden="true" /> Touched surface</div>
-            {brief.touches.length === 0 ? <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">No TOUCHES entries yet.</p> : (
-              <ul className="mt-3 space-y-1 font-mono text-[11px] text-gray-600 dark:text-gray-300">
-                {brief.touches.slice(0, 12).map((file) => <li key={file} className="truncate rounded bg-gray-50 px-2 py-1 dark:bg-gray-900/60">{file}</li>)}
+          <div className="rounded-3xl border border-ink-border bg-white p-5 shadow-sm border-ink-border bg-ink">
+            <div className="flex items-center gap-2 text-sm font-semibold text-ink-text text-ink-text"><FileText className="h-4 w-4 text-amber-600" aria-hidden="true" /> Touched surface</div>
+            {brief.touches.length === 0 ? <p className="mt-3 text-xs text-ink-text-muted">No TOUCHES entries yet.</p> : (
+              <ul className="mt-3 space-y-1 font-mono text-caption text-ink-text-muted">
+                {brief.touches.slice(0, 12).map((file) => <li key={file} className="truncate rounded bg-ink px-2 py-1 bg-panel/60">{file}</li>)}
               </ul>
             )}
           </div>
@@ -180,16 +180,16 @@ function PlanBriefIndex() {
   const plans = React.useMemo(() => planBriefFeatures(features), [features]);
   return (
     <div className="flex h-full flex-col overflow-hidden">
-      <header className="flex-shrink-0 border-b border-gray-200 px-6 py-4 dark:border-gray-800">
-        <div className="flex items-center gap-2 text-sm font-semibold text-gray-900 dark:text-gray-100"><Sparkles className="h-4 w-4 text-amber-600" aria-hidden="true" /> Plan briefs</div>
-        <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">Styled HTML explainers generated from plans/&lt;name&gt; directories.</p>
+      <header className="flex-shrink-0 border-b border-ink-border px-6 py-4 border-ink-border">
+        <div className="flex items-center gap-2 text-sm font-semibold text-ink-text"><Sparkles className="h-4 w-4 text-amber-600" aria-hidden="true" /> Plan briefs</div>
+        <p className="mt-1 text-xs text-ink-text-muted">Styled HTML explainers generated from plans/&lt;name&gt; directories.</p>
       </header>
       <div className="min-h-0 flex-1 overflow-y-auto p-6">
         {plans.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-2 py-16 text-center">
-            <Sparkles className="h-8 w-8 text-gray-300 dark:text-gray-700" aria-hidden="true" />
-            <p className="text-sm font-medium text-gray-600 dark:text-gray-300">No plan briefs yet</p>
-            <p className="text-xs text-gray-400 dark:text-gray-500">Create a plans/&lt;name&gt; directory and its explainer appears here.</p>
+            <Sparkles className="h-8 w-8 text-ink-text-label text-ink-text-label" aria-hidden="true" />
+            <p className="text-sm font-medium text-ink-text-muted">No plan briefs yet</p>
+            <p className="text-xs text-ink-text-subtle">Create a plans/&lt;name&gt; directory and its explainer appears here.</p>
           </div>
         ) : (
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -222,13 +222,13 @@ export function PlanBriefView() {
   if (!planBriefName) return <PlanBriefIndex />;
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden">
-      <header className="flex flex-shrink-0 items-center gap-3 border-b border-gray-200 bg-white/80 px-4 py-3 backdrop-blur dark:border-gray-800 dark:bg-gray-950/80">
-        <button type="button" onClick={closePlanBrief} className="flex min-h-10 min-w-10 items-center justify-center rounded-md text-gray-500 hover:bg-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-gray-400 dark:hover:bg-gray-900" aria-label="Back to plan briefs">
+      <header className="flex flex-shrink-0 items-center gap-3 border-b border-ink-border bg-white/80 px-4 py-3 backdrop-blur border-ink-border bg-ink/80">
+        <button type="button" onClick={closePlanBrief} className="flex min-h-10 min-w-10 items-center justify-center rounded-md text-ink-text0 hover:bg-ink-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 text-ink-text-subtle dark:hover:bg-panel" aria-label="Back to plan briefs">
           <ArrowLeft className="h-4 w-4" aria-hidden="true" />
         </button>
         <div className="min-w-0">
-          <div className="truncate text-sm font-semibold text-gray-950 dark:text-gray-100">Plan brief</div>
-          <a className="truncate font-mono text-[11px] text-amber-700 underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-amber-300" href={buildPlanBriefHash({ name: planBriefName })}>#/plans/{planBriefName}/brief</a>
+          <div className="truncate text-sm font-semibold text-ink-text text-ink-text">Plan brief</div>
+          <a className="truncate font-mono text-caption text-amber-700 underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-amber-300" href={buildPlanBriefHash({ name: planBriefName })}>#/plans/{planBriefName}/brief</a>
         </div>
       </header>
       {loading ? <PlanBriefLoading /> : error ? (

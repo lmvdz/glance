@@ -686,7 +686,7 @@ export const FleetPulseCanvas: React.FC<Props> = ({ model, attribution, plan, re
         @media (prefers-reduced-motion: reduce) { .fp-pulse { animation: none; } .fp-drc { transition: none; } }
       `}</style>
       {viz === 'flat' && (loadingOlder || (atHistoryLimit && view.s <= model.start + (view.e - view.s) * 0.04)) && (
-        <div className="pointer-events-none absolute left-2 top-2 z-10 flex items-center gap-1.5 rounded-md border border-white/10 bg-black/55 px-2 py-1 text-[10px] font-medium tracking-wide text-white/80 backdrop-blur">
+        <div className="pointer-events-none absolute left-2 top-2 z-10 flex items-center gap-1.5 rounded-md border border-white/10 bg-black/55 px-2 py-1 text-caption font-medium tracking-wide text-white/80 backdrop-blur">
           {loadingOlder && <span className="inline-block h-2.5 w-2.5 animate-spin rounded-full border border-white/30 border-t-white/80" aria-hidden="true" />}
           {loadingOlder ? 'Loading older history…' : 'Start of loaded history'}
         </div>
@@ -759,7 +759,7 @@ export const FleetPulseCanvas: React.FC<Props> = ({ model, attribution, plan, re
       </svg>
       {hover && (
         <div
-          className="pointer-events-none absolute z-10 rounded border px-2.5 py-2 font-mono text-[11px]"
+          className="pointer-events-none absolute z-10 rounded border px-2.5 py-2 font-mono text-caption"
           style={{ left: Math.min(hover.x + 18, W - 230), top: Math.min(hover.y + 14, 760), background: 'rgba(10,11,15,0.96)', borderColor: HAIRLINE2, color: INK.mid, minWidth: 150 }}
         >
           <div style={{ color: hover.titleColor ?? INK.hi, fontWeight: 600, marginBottom: 4, letterSpacing: '0.04em' }}>{hover.title}</div>

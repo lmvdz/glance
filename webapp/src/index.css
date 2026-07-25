@@ -33,11 +33,40 @@
   --color-ember-link: #d97706;
   --color-ember-hi: #fff6ea;
 
-  /* Compatibility names resolve into the single ink system; no independent ramps remain. */
-  --color-gray-950: var(--color-ink);
-  --color-gray-900: var(--color-panel);
+  /* Legacy neutral families are aliases, never alternate palettes. */
+  --color-gray-50: var(--color-ink);
+  --color-gray-100: var(--color-ink-surface);
+  --color-gray-200: var(--color-ink-border);
+  --color-gray-300: var(--color-ink-border-2);
+  --color-gray-400: var(--color-ink-text-subtle);
+  --color-gray-500: var(--color-ink-text-muted);
+  --color-gray-600: var(--color-ink-text-label);
+  --color-gray-700: var(--color-ink-text-label);
   --color-gray-800: var(--color-ink-surface);
-  --color-gray-700: var(--color-ink-border-2);
+  --color-gray-900: var(--color-panel);
+  --color-gray-950: var(--color-ink);
+  --color-zinc-50: var(--color-ink);
+  --color-zinc-100: var(--color-ink-surface);
+  --color-zinc-200: var(--color-ink-border);
+  --color-zinc-300: var(--color-ink-border-2);
+  --color-zinc-400: var(--color-ink-text-subtle);
+  --color-zinc-500: var(--color-ink-text-muted);
+  --color-zinc-600: var(--color-ink-text-label);
+  --color-zinc-700: var(--color-ink-text-label);
+  --color-zinc-800: var(--color-ink-surface);
+  --color-zinc-900: var(--color-panel);
+  --color-zinc-950: var(--color-ink);
+  --color-slate-50: var(--color-ink);
+  --color-slate-100: var(--color-ink-surface);
+  --color-slate-200: var(--color-ink-border);
+  --color-slate-300: var(--color-ink-border-2);
+  --color-slate-400: var(--color-ink-text-subtle);
+  --color-slate-500: var(--color-ink-text-muted);
+  --color-slate-600: var(--color-ink-text-label);
+  --color-slate-700: var(--color-ink-text-label);
+  --color-slate-800: var(--color-ink-surface);
+  --color-slate-900: var(--color-panel);
+  --color-slate-950: var(--color-ink);
 
   --wf-paper: var(--color-ink);
   --wf-paper-muted: var(--color-ink-surface);

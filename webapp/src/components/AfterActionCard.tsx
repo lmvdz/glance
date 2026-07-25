@@ -24,12 +24,12 @@ import { fetchAfterActions } from '../lib/api';
 import { coerceAfterActions, reportsForAgents, type AfterActionWire } from '../lib/loop-meters';
 import { relativeAge } from './ui/time';
 
-const MARKDOWN_CLASS = 'prose prose-sm max-w-none dark:prose-invert prose-pre:text-[11px] prose-headings:text-sm';
+const MARKDOWN_CLASS = 'prose prose-sm max-w-none dark:prose-invert prose-pre:text-caption prose-headings:text-sm';
 
 const CLASSIFICATION_STYLE: Record<AfterActionWire['classification'], string> = {
   environment: 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300',
   implementation: 'bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300',
-  unknown: 'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400',
+  unknown: 'bg-ink-surface text-ink-text0 bg-ink-surface text-ink-text-subtle',
 };
 
 /** One report row: headline (classification + reason + when), branch-state line, expandable full
@@ -45,33 +45,33 @@ export const AfterActionRow: React.FC<{ report: AfterActionWire; now?: number }>
     .filter(Boolean)
     .join(' · ');
   return (
-    <li className="border-b border-gray-100 last:border-b-0 dark:border-gray-800/60">
+    <li className="border-b border-ink-border last:border-b-0 border-ink-border/60">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
-        className="flex w-full items-start gap-2 px-3 py-2.5 text-left transition-colors hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-500 dark:hover:bg-gray-800/60"
+        className="flex w-full items-start gap-2 px-3 py-2.5 text-left transition-colors hover:bg-ink focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-500 dark:hover:bg-ink-surface/60"
       >
         <ChevronRight
-          className={`mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-gray-400 transition-transform ${open ? 'rotate-90' : ''}`}
+          className={`mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-ink-text-subtle transition-transform ${open ? 'rotate-90' : ''}`}
           aria-hidden="true"
         />
         <span className="min-w-0 flex-1">
           <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <span
-              className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${CLASSIFICATION_STYLE[report.classification]}`}
+              className={`rounded px-1.5 py-0.5 text-caption font-semibold uppercase tracking-wider ${CLASSIFICATION_STYLE[report.classification]}`}
             >
               {report.classification}
             </span>
-            <span className="text-xs font-medium text-gray-800 dark:text-gray-200">{report.terminalReason}</span>
+            <span className="text-xs font-medium text-ink-text-body">{report.terminalReason}</span>
             {age && (
-              <span className="text-[11px] text-gray-400" title={new Date(report.terminalAt).toISOString()}>
+              <span className="text-caption text-ink-text-subtle" title={new Date(report.terminalAt).toISOString()}>
                 {age} ago
               </span>
             )}
           </span>
-          <span className="mt-0.5 block truncate font-mono text-[11px] text-gray-500 dark:text-gray-400" title={report.id}>
-            {report.name} {branchState && <span className="text-gray-400 dark:text-gray-500">— {branchState}</span>}
+          <span className="mt-0.5 block truncate font-mono text-caption text-ink-text-muted" title={report.id}>
+            {report.name} {branchState && <span className="text-ink-text-subtle">— {branchState}</span>}
           </span>
         </span>
       </button>
@@ -86,16 +86,16 @@ export const AfterActionRow: React.FC<{ report: AfterActionWire; now?: number }>
 
 /** The pure list block — exported so fixture tests never need a fetch. */
 export const AfterActionList: React.FC<{ reports: AfterActionWire[]; now?: number }> = ({ reports, now }) => (
-  <details open className="group rounded-lg border border-gray-200 dark:border-gray-800">
-    <summary className="flex cursor-pointer select-none list-none items-center gap-2 px-3 py-2.5 text-[11px] font-semibold uppercase tracking-widest text-gray-400 hover:text-gray-600 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-500 dark:hover:text-gray-200">
+  <details open className="group rounded-lg border border-ink-border">
+    <summary className="flex cursor-pointer select-none list-none items-center gap-2 px-3 py-2.5 text-caption font-semibold uppercase tracking-widest text-ink-text-subtle hover:text-ink-text-label focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-500 dark:hover:text-ink-text-body">
       <ChevronRight className="h-3.5 w-3.5 transition-transform group-open:rotate-90" aria-hidden="true" />
       <FileClock className="h-3.5 w-3.5" aria-hidden="true" />
       <span className="mr-auto">After-action</span>
-      <span className="font-normal normal-case text-gray-400">
+      <span className="font-normal normal-case text-ink-text-subtle">
         {reports.length} report{reports.length === 1 ? '' : 's'}
       </span>
     </summary>
-    <ul className="border-t border-gray-100 dark:border-gray-800">
+    <ul className="border-t border-ink-border">
       {reports.map((r) => (
         <AfterActionRow key={r.id} report={r} now={now} />
       ))}

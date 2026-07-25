@@ -53,13 +53,13 @@ export default function ColumnsBlock({ body, params, blockId }: BlockProps) {
   return (
     <div data-block-id={blockId} className="not-prose my-3 grid gap-3 md:grid-cols-2">
       <section className="rounded-md border border-[var(--wf-border)] bg-[var(--wf-surface-raised)] p-3 text-sm text-[var(--wf-text-muted)] shadow-sm">
-        <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-[var(--wf-text-subtle)]">{leftLabel}</div>
+        <div className="mb-2 text-caption font-semibold uppercase tracking-wide text-[var(--wf-text-subtle)]">{leftLabel}</div>
         <div className="leading-relaxed">
           <ColumnMarkdown content={left} />
         </div>
       </section>
       <section className="rounded-md border border-[var(--wf-border)] bg-[var(--wf-surface-raised)] p-3 text-sm text-[var(--wf-text-muted)] shadow-sm">
-        <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-[var(--wf-text-subtle)]">{rightLabel}</div>
+        <div className="mb-2 text-caption font-semibold uppercase tracking-wide text-[var(--wf-text-subtle)]">{rightLabel}</div>
         <div className="leading-relaxed">
           <ColumnMarkdown content={right} />
         </div>

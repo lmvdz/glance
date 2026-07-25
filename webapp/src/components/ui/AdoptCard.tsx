@@ -32,11 +32,11 @@ export const AdoptCard: React.FC<AdoptCardProps> = ({ session, busy, onAdopt }) 
       <span className="mt-1.5 h-2 w-2 flex-shrink-0 rounded-full bg-amber-500" aria-hidden="true" />
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
-          <Terminal className="h-3 w-3 flex-shrink-0 text-gray-400" aria-hidden="true" />
+          <Terminal className="h-3 w-3 flex-shrink-0 text-ink-text-subtle" aria-hidden="true" />
           <span className="truncate text-sm font-medium text-ink-text" title={session.label}>
             {session.harness} session <span className="font-mono text-xs text-ink-text-muted">{shortSessionId(session.sessionId)}</span>
           </span>
-          {age && <span className="flex-shrink-0 text-caption tabular-nums text-gray-400">{age}</span>}
+          {age && <span className="flex-shrink-0 text-caption tabular-nums text-ink-text-subtle">{age}</span>}
         </div>
         <div className="mt-0.5 truncate text-xs text-ink-text-muted" title={session.cwd}>
           {session.repoName}

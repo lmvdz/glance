@@ -12,7 +12,7 @@ export const ToastContainer = () => {
       {toasts.map(toast => (
         <div 
           key={toast.id} 
-          className="flex items-center gap-3 bg-gray-900 text-white px-4 py-3 rounded-lg shadow-lg text-sm min-w-[300px] animate-in slide-in-from-bottom-5 fade-in duration-300"
+          className="flex items-center gap-3 bg-panel text-white px-4 py-3 rounded-lg shadow-lg text-sm min-w-[300px] animate-in slide-in-from-bottom-5 fade-in duration-300"
         >
           {toast.type === 'success' && <CheckCircle2 className="w-5 h-5 text-emerald-400" />}
           {toast.type === 'error' && <AlertCircle className="w-5 h-5 text-red-400" />}
