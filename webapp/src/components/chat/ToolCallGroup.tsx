@@ -88,24 +88,24 @@ export const ToolCallRow = ({ entry, stampChatMessage = true }: { entry: Transcr
   const hasBody = view.command || view.output || view.stderr || view.raw.length > 0;
   return (
     <details {...(stampChatMessage ? { 'data-chat-message': true } : {})} open={running} className="group rounded-md">
-      <summary className="flex min-h-8 cursor-pointer list-none items-center gap-2 rounded-md px-1.5 py-1 text-xs hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:bg-gray-900/60">
+      <summary className="flex min-h-8 cursor-pointer list-none items-center gap-2 rounded-md px-1.5 py-1 text-xs hover:bg-ink focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:bg-panel/60">
         <span className={`h-2 w-2 flex-shrink-0 rounded-full ${statusDotClass(entry.status)} ${running ? 'animate-pulse' : ''}`} aria-label={entry.status ?? 'ok'} />
-        <span className="font-semibold text-gray-900 dark:text-gray-100">{toolLabel}</span>
-        <span className={`min-w-0 flex-1 truncate text-gray-500 dark:text-gray-400 ${running ? 'shimmer' : ''}`}>{view.title !== toolLabel ? view.title : ''}</span>
-        {hasBody && <ChevronRight className="ml-auto h-3 w-3 flex-shrink-0 text-gray-300 transition-transform group-open:rotate-90 dark:text-gray-600" aria-hidden />}
+        <span className="font-semibold text-ink-text">{toolLabel}</span>
+        <span className={`min-w-0 flex-1 truncate text-ink-text-muted ${running ? 'shimmer' : ''}`}>{view.title !== toolLabel ? view.title : ''}</span>
+        {hasBody && <ChevronRight className="ml-auto h-3 w-3 flex-shrink-0 text-ink-text-label transition-transform group-open:rotate-90 text-ink-text-label" aria-hidden />}
       </summary>
       {hasBody && (
-        <div className="mt-1 ml-4 space-y-1.5 text-[11px]">
+        <div className="mt-1 ml-4 space-y-1.5 text-caption">
           {view.command && (
             <div className="flex gap-2">
-              <span className="w-6 flex-shrink-0 pt-1.5 text-[9px] font-bold uppercase tracking-wider text-gray-400 dark:text-gray-500">IN</span>
-              <code className="flex-1 rounded bg-gray-100 px-2 py-1.5 font-mono leading-relaxed text-gray-700 dark:bg-gray-900 dark:text-gray-300 whitespace-pre-wrap">{view.command}</code>
+              <span className="w-6 flex-shrink-0 pt-1.5 text-[9px] font-bold uppercase tracking-wider text-ink-text-subtle">IN</span>
+              <code className="flex-1 rounded bg-ink-surface px-2 py-1.5 font-mono leading-relaxed text-ink-text-label bg-panel text-ink-text-label whitespace-pre-wrap">{view.command}</code>
             </div>
           )}
           {view.output && (
             <div className="flex gap-2">
-              <span className="w-6 flex-shrink-0 pt-1.5 text-[9px] font-bold uppercase tracking-wider text-gray-400 dark:text-gray-500">OUT</span>
-              <pre className="max-h-48 flex-1 overflow-auto rounded bg-gray-100 px-2 py-1.5 leading-relaxed text-gray-700 dark:bg-gray-900 dark:text-gray-300 whitespace-pre-wrap scrollbar-custom">{view.output}</pre>
+              <span className="w-6 flex-shrink-0 pt-1.5 text-[9px] font-bold uppercase tracking-wider text-ink-text-subtle">OUT</span>
+              <pre className="max-h-48 flex-1 overflow-auto rounded bg-ink-surface px-2 py-1.5 leading-relaxed text-ink-text-label bg-panel text-ink-text-label whitespace-pre-wrap scrollbar-custom">{view.output}</pre>
             </div>
           )}
           {view.stderr && (
@@ -115,22 +115,22 @@ export const ToolCallRow = ({ entry, stampChatMessage = true }: { entry: Transcr
             </div>
           )}
           {(view.exitCode !== undefined || entry.tool?.durationMs !== undefined) && (
-            <div className="flex items-center gap-2 pl-8 text-[10px] text-gray-400 dark:text-gray-500">
+            <div className="flex items-center gap-2 pl-8 text-caption text-ink-text-subtle">
               {view.exitCode !== undefined && <span>exit {view.exitCode}</span>}
               {entry.tool?.durationMs !== undefined && <span>{fmtDuration(entry.tool.durationMs)}</span>}
             </div>
           )}
           {view.raw.length > 0 && (
             <details className="group/raw ml-8">
-              <summary className="inline-flex min-h-7 cursor-pointer list-none items-center gap-1.5 rounded px-1.5 text-[10px] text-gray-400 hover:bg-gray-100 focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-gray-500 dark:hover:bg-gray-900">
+              <summary className="inline-flex min-h-7 cursor-pointer list-none items-center gap-1.5 rounded px-1.5 text-caption text-ink-text-subtle hover:bg-ink-surface focus-visible:ring-2 focus-visible:ring-amber-500 text-ink-text0 dark:hover:bg-panel">
                 <ChevronRight className="h-3 w-3 transition-transform group-open/raw:rotate-90" aria-hidden />
                 Raw payload
               </summary>
               <div className="mt-1 space-y-2">
                 {view.raw.map(([name, value]) => (
                   <div key={name as string}>
-                    <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">{name as string}</div>
-                    <pre className="max-h-44 overflow-auto rounded-md bg-gray-950 p-2.5 leading-relaxed text-gray-100 whitespace-pre-wrap scrollbar-custom">{prettyJson(value)}</pre>
+                    <div className="mb-1 text-caption font-semibold uppercase tracking-wide text-ink-text-subtle">{name as string}</div>
+                    <pre className="max-h-44 overflow-auto rounded-md bg-ink p-2.5 leading-relaxed text-ink-text whitespace-pre-wrap scrollbar-custom">{prettyJson(value)}</pre>
                   </div>
                 ))}
               </div>
@@ -241,7 +241,7 @@ export const ToolCallGroup = ({ entries }: { entries: TranscriptEntry[] }) => {
               toggle();
             }
           }}
-          className="mb-0.5 flex min-h-6 cursor-pointer select-none items-center gap-1.5 rounded px-1.5 text-[11px] text-gray-400 hover:bg-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-gray-500 dark:hover:bg-gray-900"
+          className="mb-0.5 flex min-h-6 cursor-pointer select-none items-center gap-1.5 rounded px-1.5 text-caption text-ink-text-subtle hover:bg-ink-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 text-ink-text0 dark:hover:bg-panel"
         >
           <ChevronRight className={`h-3 w-3 flex-shrink-0 transition-transform ${expanded ? 'rotate-90' : ''}`} aria-hidden />
           {expanded ? 'Hide previous steps' : `${previousEntries.length} previous ${previousEntries.length === 1 ? 'step' : 'steps'}`}

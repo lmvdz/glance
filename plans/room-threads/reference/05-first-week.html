@@ -1,0 +1,1251 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+html,body{margin:0;padding:0;background:#070708;}
+*{box-sizing:border-box;}
+a{color:#F0A35A;text-decoration:none;}
+a:hover{color:#F7C08A;}
+::selection{background:#3A2E20;}
+</style>
+</helmet>
+
+<div style="min-height:100vh;background:#070708;display:flex;flex-direction:column;align-items:center;gap:12px;padding:18px;font-family:system-ui,-apple-system,'Helvetica Neue',sans-serif">
+
+<div style="width:1600px;display:flex;flex-direction:column;gap:8px">
+  <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+    <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;letter-spacing:.14em;color:#5A5A61;margin-right:6px">SURFACE</div>
+    <button onClick="{{ go1a }}" style="{{ t1a }}">1a first hour</button>
+    <button onClick="{{ go1b }}" style="{{ t1b }}">1b end of week one</button>
+    <button onClick="{{ go2a }}" style="{{ t2a }}">2a two people</button>
+    <button onClick="{{ go2b }}" style="{{ t2b }}">2b his rule, not yours</button>
+    <button onClick="{{ go3a }}" style="{{ t3a }}">3a you are the wait</button>
+    <button onClick="{{ go3b }}" style="{{ t3b }}">3b told to stop</button>
+    <button onClick="{{ go4a }}" style="{{ t4a }}">4a a decline</button>
+    <button onClick="{{ go4b }}" style="{{ t4b }}">4b recovering</button>
+    <button onClick="{{ go5a }}" style="{{ t5a }}">5a a new agent</button>
+    <button onClick="{{ go5b }}" style="{{ t5b }}">5b a week in</button>
+    <button onClick="{{ go6a }}" style="{{ t6a }}">6a she disagrees</button>
+    <button onClick="{{ go6b }}" style="{{ t6b }}">6b she was right</button>
+  </div>
+  <div style="font-size:12.5px;color:#6A6A72;min-height:17px">{{ caption }}</div>
+</div>
+
+<div style="width:1600px;height:1000px;background:#0A0A0B;border:1px solid #1F1F22;display:flex;flex-direction:column;overflow:hidden;color:#E8E8EA">
+
+  <div style="height:44px;flex:none;border-bottom:1px solid #1F1F22;display:flex;align-items:center;padding:0 16px;gap:14px">
+    <div style="display:flex;align-items:baseline;gap:9px">
+      <div style="font-size:14px;font-weight:600;letter-spacing:-.01em">glance</div>
+      <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#6A6A72">{{ repo }}</div>
+    </div>
+    <div style="width:1px;height:16px;background:#1F1F22"></div>
+    <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#8A8A91">{{ fleetLine }}</div>
+    <div style="flex:1"></div>
+    <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#5A5A61">{{ clock }}</div>
+  </div>
+
+  <div style="flex:1;display:flex;min-height:0">
+
+    <div style="width:238px;flex:none;border-right:1px solid #1F1F22;display:flex;flex-direction:column;min-height:0">
+      <div style="padding:14px 14px 8px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.16em;color:#5A5A61">{{ plansHead }}</div>
+      <div>
+        <sc-for list="{{ plans }}" as="p" hint-placeholder-count="4">
+          <div style="display:flex;align-items:center;gap:9px;padding:8px 14px;border-left:2px solid {{ p.rule }};background:{{ p.bg }};cursor:pointer" style-hover="background:#0F0F11">
+            <div style="width:5px;height:5px;border-radius:50%;flex:none;background:{{ p.dot }}"></div>
+            <div style="flex:1;font-size:13px;color:{{ p.fg }}">{{ p.name }}</div>
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#6A6A72">{{ p.n }}</div>
+          </div>
+        </sc-for>
+      </div>
+      <div style="margin-top:18px;padding:0 14px 8px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.16em;color:#5A5A61">{{ rosterHead }}</div>
+      <div style="overflow:hidden">
+        <sc-for list="{{ roster }}" as="a" hint-placeholder-count="6">
+          <div style="display:flex;align-items:center;gap:9px;padding:5.5px 14px;cursor:pointer" style-hover="background:#0F0F11">
+            <div style="width:5px;height:5px;border-radius:50%;flex:none;background:{{ a.dot }}"></div>
+            <div style="flex:none;width:44px;font-size:12.5px;color:#C9C9CF">{{ a.name }}</div>
+            <div style="flex:1;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ a.role }}</div>
+          </div>
+        </sc-for>
+      </div>
+      <div style="flex:1"></div>
+      <div style="padding:12px 14px;border-top:1px solid #1F1F22;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52;line-height:1.7">
+        <div>{{ railFootA }}</div>
+        <div>{{ railFootB }}</div>
+      </div>
+    </div>
+
+    <!-- ══════════ 1a · THE FIRST HOUR, KNOWING NOTHING ══════════ -->
+    <div style="{{ s1a }}">
+      <div style="flex:1;display:flex;flex-direction:column;min-height:0;border-right:1px solid #1F1F22">
+        <div style="flex:1;padding:16px 24px 0;overflow:hidden">
+          <div style="display:flex;gap:12px">
+            <div style="width:26px;height:26px;flex:none;border:1px solid #33333A;border-radius:3px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#C9C9CF">T</div>
+            <div style="flex:1;max-width:800px">
+              <div style="display:flex;align-items:baseline;gap:8px"><div style="font-size:13px;font-weight:600">Tam</div><div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">planner · 09:04 · the first thing said here</div></div>
+              <div style="margin-top:5px;font-size:14.5px;line-height:1.55;color:#DEDEE2;text-wrap:pretty">I have read the codebase and nothing else. I do not know how you like to work, what is safe to change here, or how long anything normally takes — so this week I will ask more than I will later, and I will tell you each time why I asked.</div>
+
+              <div style="margin-top:12px;border:1px solid #26262B;border-radius:4px;background:#0B0B0C;overflow:hidden">
+                <div style="padding:11px 13px;border-bottom:1px solid #1F1F22;display:flex;align-items:center;gap:12px">
+                  <div style="flex:1;font-size:13px;font-weight:600">What I am working from until you tell me otherwise</div>
+                  <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#6A6A72">borrowed, not yours · 6 defaults</div>
+                </div>
+                <sc-for list="{{ borrowed }}" as="b" hint-placeholder-count="6">
+                  <div style="display:flex;gap:12px;padding:10px 13px;border-bottom:1px solid #17171A">
+                    <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ b.dot }}"></div>
+                    <div style="flex:1;min-width:0">
+                      <div style="font-size:13px;color:#DEDEE2;line-height:1.5;text-wrap:pretty">{{ b.text }}</div>
+                      <div style="margin-top:4px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">{{ b.meta }}</div>
+                    </div>
+                    <div style="flex:none;width:96px;text-align:right;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52;cursor:pointer" style-hover="color:#8A8A91">{{ b.action }}</div>
+                  </div>
+                </sc-for>
+                <div style="padding:11px 13px;font-size:12.5px;color:#8A8A91;line-height:1.5;text-wrap:pretty">None of these are your words, and the product will keep saying so until they are. Each one is off in a click, and every time you answer a question I will offer to replace one of them with what you actually said.</div>
+              </div>
+            </div>
+          </div>
+
+          <div style="display:flex;gap:12px;margin-top:18px">
+            <div style="width:26px;height:26px;flex:none;border:1px solid #33333A;border-radius:3px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#C9C9CF">T</div>
+            <div style="flex:1;max-width:800px">
+              <div style="display:flex;align-items:baseline;gap:8px"><div style="font-size:13px;font-weight:600">Tam</div><div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">planner · 09:05 · the only thing I cannot guess</div></div>
+              <div style="margin-top:5px;font-size:14px;line-height:1.55;color:#DEDEE2;text-wrap:pretty">One question, and then we can start: when something genuinely cannot be settled without you and it is eight in the evening, do you want to know?</div>
+              <div style="margin-top:10px;display:flex;align-items:flex-start;gap:12px;max-width:700px">
+                <div style="flex:none;width:210px">
+                  <div style="border:1px solid #F0A35A;border-radius:3px;background:#0A0A0B;padding:9px 11px;font-size:12.5px;color:#4A4A52">Answer in words…</div>
+                  <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">Whatever you say becomes the first sentence in the product that is actually yours.</div>
+                </div>
+                <div style="flex:none;width:150px">
+                  <button style="width:100%;background:transparent;color:#C9C9CF;border:1px solid #33333A;border-radius:3px;padding:8px 12px;font-size:12.5px;font-family:inherit;cursor:pointer" style-hover="border-color:#4A4A52;color:#E8E8EA">Not out of hours</button>
+                  <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">Nothing leaves the app. Everything waits for the morning.</div>
+                </div>
+                <div style="flex:1">
+                  <button style="width:100%;background:transparent;color:#C9C9CF;border:1px solid #33333A;border-radius:3px;padding:8px 12px;font-size:12.5px;font-family:inherit;cursor:pointer" style-hover="border-color:#4A4A52;color:#E8E8EA">Ask me again in a week</button>
+                  <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">Nothing leaves the app meanwhile, and you will have real examples to answer with.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div style="display:flex;align-items:center;gap:12px;margin-top:20px">
+            <div style="height:1px;flex:1;background:#17171A"></div>
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">one question on day one · everything else is a default it admits to</div>
+            <div style="height:1px;flex:1;background:#17171A"></div>
+          </div>
+        </div>
+        <div style="flex:none;padding:12px 24px 14px;border-top:1px solid #1F1F22">
+          <div style="border:1px solid #26262B;border-radius:3px;background:#0C0C0D;padding:10px 12px;font-size:13px;color:#4A4A52">Describe the first thing you want done, in your own words…</div>
+        </div>
+      </div>
+
+      <div style="width:440px;flex:none;display:flex;flex-direction:column;min-height:0">
+        <div style="padding:14px 18px 6px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHAT THIS PRODUCT DOES NOT KNOW YET</div>
+        <div style="padding:6px 14px 0;display:flex;flex-direction:column;gap:8px">
+          <sc-for list="{{ unknown }}" as="u" hint-placeholder-count="5">
+            <div style="display:flex;gap:11px;padding:9px 10px;border:1px dashed #26262B;border-radius:3px">
+              <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:#3E3E45"></div>
+              <div style="flex:1">
+                <div style="font-size:12.5px;color:#C9C9CF;line-height:1.45;text-wrap:pretty">{{ u.text }}</div>
+                <div style="margin-top:3px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">{{ u.meta }}</div>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+        <div style="margin-top:16px;padding:0 18px;font-size:12.5px;color:#8A8A91;line-height:1.55;text-wrap:pretty">Everything on the later screens — the stall watcher, the agent records, the sentence that guards your evenings — is built out of this list emptying. Nothing pretends to be there before it is.</div>
+        <div style="flex:1"></div>
+        <div style="padding:12px 18px;border-top:1px solid #1F1F22;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52;line-height:1.8">
+          <div>your sentences so far&nbsp;&nbsp;<span style="color:#6A6A72">0</span></div>
+          <div>borrowed defaults in force&nbsp;&nbsp;<span style="color:#6A6A72">6, all reversible</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ 1b · THE END OF THE FIRST WEEK ══════════ -->
+    <div style="{{ s1b }}">
+      <div style="flex:1;display:flex;flex-direction:column;min-height:0">
+        <div style="flex:none;padding:14px 26px 12px;border-bottom:1px solid #1F1F22;display:flex;align-items:flex-start;gap:16px">
+          <div style="flex:1">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.16em;color:#5A5A61">FIVE DAYS IN · MONDAY 09:04 TO FRIDAY 17:30</div>
+            <div style="margin-top:9px;font-size:17.5px;line-height:1.4;color:#F2F2F4;text-wrap:pretty">You were interrupted fourteen times on Monday and five times yesterday. Four of the six borrowed defaults have been replaced by things you actually said.</div>
+            <div style="margin-top:7px;font-size:13px;color:#9A9AA2;line-height:1.5;text-wrap:pretty;max-width:840px">Next week will be quieter than this one for reasons you can read, not because a model settled down. Here is exactly what changed and what is still borrowed.</div>
+          </div>
+          <div style="flex:none;text-align:right;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61;line-height:1.8">
+            <div>Mon 14 · Tue 11 · Wed 9 · Thu 6 · Fri 5</div>
+            <div>your sentences&nbsp;&nbsp;<span style="color:#8A8A91">4</span></div>
+          </div>
+        </div>
+
+        <div style="flex:1;display:flex;min-height:0">
+          <div style="flex:1;padding:14px 26px 0;border-right:1px solid #1F1F22;min-width:0">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHAT YOU TAUGHT IT, AND WHERE EACH SENTENCE CAME FROM</div>
+            <div style="margin-top:10px;display:flex;flex-direction:column;gap:8px">
+              <sc-for list="{{ learned }}" as="l" hint-placeholder-count="4">
+                <div style="padding:11px 12px;border:1px solid #1F1F22;border-left:2px solid #26262B;background:#0B0B0C">
+                  <div style="font-size:13.5px;color:#F2F2F4;line-height:1.5;text-wrap:pretty">{{ l.sentence }}</div>
+                  <div style="margin-top:5px;font-size:12px;color:#8A8A91;line-height:1.45;text-wrap:pretty">{{ l.from }}</div>
+                  <div style="margin-top:4px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">{{ l.meta }}</div>
+                </div>
+              </sc-for>
+            </div>
+            <div style="margin-top:14px;padding:11px 12px;border:1px dashed #26262B;border-radius:3px;font-size:12.5px;color:#8A8A91;line-height:1.5;text-wrap:pretty">Two defaults are still borrowed and still marked as borrowed: how long a plan may sit still before anyone mentions it, and whether anything may wake you in the evening. Neither has enough of your behaviour behind it to guess.</div>
+          </div>
+
+          <div style="width:520px;flex:none;padding:14px 22px 0;display:flex;flex-direction:column;min-height:0">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHAT IT NOW KNOWS THAT IT DID NOT ON MONDAY</div>
+            <div style="margin-top:10px;display:flex;flex-direction:column">
+              <sc-for list="{{ nowKnows }}" as="k" hint-placeholder-count="5">
+                <div style="display:flex;gap:11px;padding:9px 0;border-top:1px solid #17171A">
+                  <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ k.dot }}"></div>
+                  <div style="flex:1">
+                    <div style="font-size:12.5px;color:#C9C9CF;line-height:1.45;text-wrap:pretty">{{ k.text }}</div>
+                    <div style="margin-top:3px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:{{ k.metaFg }}">{{ k.meta }}</div>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+
+            <div style="margin-top:16px;padding:12px 13px;border:1px solid #241A17;border-left:2px solid #B4553A;background:#100D0C">
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#C2704A">AND WHAT IT STILL HAS NO RIGHT TO AN OPINION ABOUT</div>
+              <div style="margin-top:8px;display:flex;flex-direction:column;gap:7px">
+                <sc-for list="{{ stillBlind }}" as="b" hint-placeholder-count="3">
+                  <div style="display:flex;gap:9px">
+                    <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:#6A5A32"></div>
+                    <div style="flex:1;font-size:12.5px;color:#C9C9CF;line-height:1.5;text-wrap:pretty">{{ b.text }}</div>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+
+            <div style="flex:1"></div>
+            <div style="padding:13px 0 14px;border-top:1px solid #1F1F22;display:flex;align-items:flex-start;gap:12px">
+              <div style="flex:1">
+                <div style="border:1px solid #F0A35A;border-radius:3px;background:#0A0A0B;padding:9px 11px;font-size:12.5px;color:#4A4A52">Correct any of the four sentences — they are yours, so they are wrong if you say they are…</div>
+                <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">Each is replayed against the week before it changes, so you see what it would have done differently.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ 2a · TWO PEOPLE, ONE FLEET, ONE QUESTION ══════════ -->
+    <div style="{{ s2a }}">
+      <div style="flex:1;display:flex;flex-direction:column;min-height:0;border-right:1px solid #1F1F22">
+        <div style="flex:none;border-bottom:1px solid #1F1F22;background:#131010;border-top:1px solid #4A3319;border-left:2px solid #D9A03C;padding:12px 18px">
+          <div style="display:flex;align-items:baseline;gap:12px">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;letter-spacing:.16em;color:#D9A03C">ONE THING IS WAITING ON DEV, NOT ON YOU</div>
+            <div style="flex:1"></div>
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#6A6A72">stalled 8m · he is here · never both of you</div>
+          </div>
+          <div style="margin-top:5px;font-size:13px;color:#9A9AA2;text-wrap:pretty">Dev owns the invoicing plan, so Bex asked him. You are reading the same screen he is, and it says the same thing on both.</div>
+          <div style="margin-top:11px;display:flex;align-items:center;gap:14px">
+            <div style="width:26px;height:26px;flex:none;border:1px solid #33333A;border-radius:3px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#C9C9CF">B</div>
+            <div style="width:150px;flex:none"><div style="font-size:13px;font-weight:600">Bex</div><div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#6A6A72">4.3 month-end guard</div></div>
+            <div style="flex:1;font-size:13.5px;line-height:1.5;color:#DEDEE2;text-wrap:pretty">Must the month-end output be byte-identical, or only the totals? Dev, you wrote the original job.</div>
+            <div style="flex:none;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#8A8A91">waiting on Dev</div>
+            <button style="flex:none;background:transparent;color:#C9C9CF;border:1px solid #33333A;border-radius:3px;padding:6px 13px;font-size:12.5px;font-family:inherit;cursor:pointer" style-hover="border-color:#4A4A52;color:#E8E8EA">Answer it instead</button>
+          </div>
+          <div style="margin-top:7px;font-size:11.5px;color:#6A6A72;line-height:1.45;padding-left:190px">Answering it instead is allowed and is recorded as yours. Bex will tell Dev you took it, because he is watching this unit.</div>
+        </div>
+
+        <div style="flex:1;padding:16px 24px 0;overflow:hidden">
+          <div style="display:flex;gap:12px">
+            <div style="width:26px;height:26px;flex:none;border:1px solid #3A3323;border-radius:3px;background:#15120E;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#D8C39E">M</div>
+            <div style="max-width:640px">
+              <div style="display:flex;align-items:baseline;gap:8px"><div style="font-size:13px;font-weight:600">Mara</div><div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">you · 10:02 · to Wren, about 3.2</div></div>
+              <div style="margin-top:5px;font-size:14px;line-height:1.55;color:#DEDEE2;text-wrap:pretty">Per endpoint, and make the window configurable.</div>
+            </div>
+          </div>
+          <div style="display:flex;gap:12px;margin-top:16px">
+            <div style="width:26px;height:26px;flex:none;border:1px solid #2A3A32;border-radius:3px;background:#0E1210;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#9EC4AE">D</div>
+            <div style="max-width:640px">
+              <div style="display:flex;align-items:baseline;gap:8px"><div style="font-size:13px;font-weight:600">Dev</div><div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">the other human · 10:14 · to Ash, about 5.2</div></div>
+              <div style="margin-top:5px;font-size:14px;line-height:1.55;color:#DEDEE2;text-wrap:pretty">Leave the currency rows alone until I've spoken to finance. Everything else in the migration can carry on.</div>
+              <div style="margin-top:9px;display:flex;align-items:center;gap:10px;padding:8px 11px;border:1px solid #1F1F22;border-left:2px solid #2A3A32;background:#0B0B0C;border-radius:3px;max-width:540px">
+                <div style="flex:1;font-size:12.5px;color:#9A9AA2">Ash is holding 5.2 on Dev's instruction, and it is marked as his, not adopted as the fleet's</div>
+                <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">Dev · 10:14</div>
+              </div>
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;gap:12px;margin-top:20px">
+            <div style="height:1px;flex:1;background:#17171A"></div>
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">one conversation, two humans, and every instruction carries the name of whoever gave it</div>
+            <div style="height:1px;flex:1;background:#17171A"></div>
+          </div>
+        </div>
+        <div style="flex:none;padding:12px 24px 14px;border-top:1px solid #1F1F22">
+          <div style="border:1px solid #26262B;border-radius:3px;background:#0C0C0D;padding:10px 12px;display:flex;align-items:center;gap:10px">
+            <div style="flex:1;font-size:13px;color:#4A4A52">Say something — it will be signed Mara, and Dev sees it as yours…</div>
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#3E3E45">as mara</div>
+          </div>
+        </div>
+      </div>
+
+      <div style="width:440px;flex:none;display:flex;flex-direction:column;min-height:0">
+        <div style="padding:14px 18px 6px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHO A QUESTION GOES TO, AND WHY</div>
+        <div style="padding:6px 18px 0;display:flex;flex-direction:column;gap:9px">
+          <sc-for list="{{ routing }}" as="r" hint-placeholder-count="4">
+            <div style="display:flex;gap:9px">
+              <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ r.dot }}"></div>
+              <div style="flex:1;font-size:12.5px;color:#C9C9CF;line-height:1.5;text-wrap:pretty">{{ r.text }}</div>
+            </div>
+          </sc-for>
+        </div>
+        <div style="margin-top:18px;padding:0 18px 6px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHOSE RULES ARE IN FORCE</div>
+        <div style="padding:6px 12px">
+          <sc-for list="{{ whoseRules }}" as="r" hint-placeholder-count="5">
+            <div style="display:flex;gap:11px;padding:9px 6px;border-bottom:1px solid #131315">
+              <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ r.dot }}"></div>
+              <div style="flex:1">
+                <div style="font-size:12.5px;color:#C9C9CF;line-height:1.45;text-wrap:pretty">{{ r.text }}</div>
+                <div style="margin-top:3px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">{{ r.meta }}</div>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+        <div style="margin-top:12px;padding:0 18px;font-size:12px;color:#6A6A72;line-height:1.5;text-wrap:pretty">Rules are never merged into house policy, because then they stop being anybody's words. They apply to the whole fleet and keep the name and date of whoever said them.</div>
+        <div style="flex:1"></div>
+        <div style="padding:12px 18px;border-top:1px solid #1F1F22;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52;line-height:1.8">
+          <div>waiting on you&nbsp;&nbsp;<span style="color:#6A6A72">0</span>&nbsp;&nbsp;·&nbsp;&nbsp;on Dev&nbsp;&nbsp;<span style="color:#8A8A91">1</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ 2b · A RULE INHERITED FROM THE OTHER PERSON ══════════ -->
+    <div style="{{ s2b }}">
+      <div style="flex:1;display:flex;flex-direction:column;min-height:0;border-right:1px solid #1F1F22">
+        <div style="flex:1;padding:16px 24px 0;overflow:hidden">
+          <div style="display:flex;gap:12px">
+            <div style="width:26px;height:26px;flex:none;border:1px solid #33333A;border-radius:3px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#C9C9CF">R</div>
+            <div style="flex:1;max-width:800px">
+              <div style="display:flex;align-items:baseline;gap:8px"><div style="font-size:13px;font-weight:600">Rune</div><div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">implementer · 14:20 · in 3.3.1</div></div>
+              <div style="margin-top:5px;font-size:14px;line-height:1.55;color:#DEDEE2;text-wrap:pretty">The counter test failed twice, so I left the failure in place and opened 3.3.4 to find out why. I did that under one of Dev's rules rather than one of yours.</div>
+
+              <div style="margin-top:12px;border:1px solid #1F1F22;border-left:2px solid #2A3A32;border-radius:3px;background:#0B0B0C;overflow:hidden">
+                <div style="padding:11px 13px;border-bottom:1px solid #1F1F22">
+                  <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#9EC4AE">DEV'S SENTENCE · NOT YOURS · 14 JUNE</div>
+                  <div style="margin-top:9px;font-size:14.5px;line-height:1.5;color:#F2F2F4;text-wrap:pretty">"Never delete a failing test to make a run go green. Keep it and open a unit."</div>
+                  <div style="margin-top:6px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">given by Dev after a race hid behind a retry · used 6 times · 2 of them on your plans</div>
+                </div>
+                <sc-for list="{{ inherited }}" as="i" hint-placeholder-count="3">
+                  <div style="display:flex;gap:11px;padding:10px 13px;border-bottom:1px solid #17171A">
+                    <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ i.dot }}"></div>
+                    <div style="flex:1;font-size:12.5px;color:#DEDEE2;line-height:1.5;text-wrap:pretty">{{ i.text }}</div>
+                    <div style="flex:none;width:160px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52;text-align:right">{{ i.meta }}</div>
+                  </div>
+                </sc-for>
+                <div style="padding:11px 13px;display:flex;align-items:flex-start;gap:12px">
+                  <div style="flex:none;width:200px">
+                    <button style="width:100%;background:#F0A35A;color:#140D06;border:none;border-radius:3px;padding:9px 12px;font-size:12.5px;font-weight:600;font-family:inherit;cursor:pointer">Adopt it as ours too</button>
+                    <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">Keeps both names and both dates. Stops being flagged as somebody else's when it fires on your work.</div>
+                  </div>
+                  <div style="flex:none;width:200px">
+                    <button style="width:100%;background:transparent;color:#C9C9CF;border:1px solid #33333A;border-radius:3px;padding:8px 12px;font-size:12.5px;font-family:inherit;cursor:pointer" style-hover="border-color:#4A4A52;color:#E8E8EA">Leave it as Dev's</button>
+                    <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">It still applies — this is one fleet — and every use on your plans will keep saying it is his.</div>
+                  </div>
+                  <div style="flex:1">
+                    <div style="border:1px solid #26262B;border-radius:3px;background:#0A0A0B;padding:9px 11px;font-size:12.5px;color:#4A4A52">Or disagree with it, in words…</div>
+                    <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">Goes to Dev as a disagreement between two people. Nothing silently overrides his sentence — he wrote it and he gets told.</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;gap:12px;margin-top:20px">
+            <div style="height:1px;flex:1;background:#17171A"></div>
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">a rule you did not write is marked every single time it acts on your work</div>
+            <div style="height:1px;flex:1;background:#17171A"></div>
+          </div>
+        </div>
+        <div style="flex:none;padding:12px 24px 14px;border-top:1px solid #1F1F22">
+          <div style="border:1px solid #26262B;border-radius:3px;background:#0C0C0D;padding:10px 12px;font-size:13px;color:#4A4A52">Say something to Rune, or to Dev…</div>
+        </div>
+      </div>
+
+      <div style="width:440px;flex:none;display:flex;flex-direction:column;min-height:0">
+        <div style="padding:14px 18px 6px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHY RULES DO NOT MERGE</div>
+        <div style="padding:6px 18px 0;font-size:13px;color:#C9C9CF;line-height:1.55;text-wrap:pretty">The moment two people's sentences are averaged into a policy, nobody can be asked what they meant. So they stay separate, keep their author, apply to the whole fleet, and are argued about between people rather than resolved by the product.</div>
+        <div style="margin-top:18px;padding:0 18px 6px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHEN TWO SENTENCES CONFLICT</div>
+        <div style="padding:6px 18px 0;display:flex;flex-direction:column;gap:9px">
+          <sc-for list="{{ conflict }}" as="c" hint-placeholder-count="3">
+            <div style="display:flex;gap:9px">
+              <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ c.dot }}"></div>
+              <div style="flex:1;font-size:12.5px;color:#C9C9CF;line-height:1.5;text-wrap:pretty">{{ c.text }}</div>
+            </div>
+          </sc-for>
+        </div>
+        <div style="margin-top:16px;padding:0 18px 6px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">ATTRIBUTION, WHEREVER IT LANDED</div>
+        <div style="padding:6px 18px 0;font-size:12.5px;color:#9A9AA2;line-height:1.55;text-wrap:pretty">Work authorised by Dev says Dev on the unit, in the event run, in the archive, and on main. Nothing you did is ever recorded as his, and nothing of his is ever quietly recorded as yours.</div>
+        <div style="flex:1"></div>
+        <div style="padding:12px 18px;border-top:1px solid #1F1F22;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52;line-height:1.8">
+          <div>rules&nbsp;&nbsp;<span style="color:#6A6A72">yours 4 · Dev's 3 · joint 1</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ 3a · WHEN YOU ARE THE BOTTLENECK ══════════ -->
+    <div style="{{ s3a }}">
+      <div style="flex:1;display:flex;flex-direction:column;min-height:0">
+        <div style="flex:none;padding:14px 26px 12px;border-bottom:1px solid #1F1F22;display:flex;align-items:flex-start;gap:16px">
+          <div style="flex:1">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.16em;color:#5A5A61">SAID ONCE, THIS FORTNIGHT · NOT A SCORE, AND NOT A REMINDER</div>
+            <div style="margin-top:9px;font-size:17.5px;line-height:1.4;color:#F2F2F4;text-wrap:pretty">The thing most often waiting in this fleet is an answer from you — a median of three hours and eleven minutes over the last two weeks.</div>
+            <div style="margin-top:7px;font-size:13px;color:#9A9AA2;line-height:1.5;text-wrap:pretty;max-width:840px">This is our number, not a judgement of you: the design says a question reaching a human is our defect. Below is the evidence, and three ways to carry less of it that do not involve you being faster.</div>
+          </div>
+          <div style="flex:none;text-align:right;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61;line-height:1.8">
+            <div>you are at the screen&nbsp;&nbsp;<span style="color:#8A8A91">most of the day</span></div>
+            <div>this is not about being away</div>
+          </div>
+        </div>
+
+        <div style="flex:1;display:flex;min-height:0">
+          <div style="flex:1;padding:14px 26px 0;border-right:1px solid #1F1F22;min-width:0">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">SLOW, ABSENT, AND WRONG ARE THREE DIFFERENT THINGS</div>
+            <div style="margin-top:10px;display:flex;flex-direction:column;gap:9px">
+              <sc-for list="{{ bottleneck }}" as="b" hint-placeholder-count="3">
+                <div style="padding:11px 12px;border:1px solid {{ b.border }};background:#0B0B0C;border-radius:3px">
+                  <div style="display:flex;align-items:baseline;gap:11px">
+                    <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:15px;color:{{ b.numFg }};width:64px;flex:none">{{ b.num }}</div>
+                    <div style="flex:1;font-size:13px;color:#DEDEE2;line-height:1.45;text-wrap:pretty">{{ b.label }}</div>
+                    <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61;flex:none">{{ b.sample }}</div>
+                  </div>
+                  <div style="margin-top:6px;padding-left:75px;font-size:12px;color:#8A8A91;line-height:1.5;text-wrap:pretty">{{ b.note }}</div>
+                  <div style="margin-top:4px;padding-left:75px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">{{ b.check }}</div>
+                </div>
+              </sc-for>
+            </div>
+            <div style="margin-top:14px;padding:11px 12px;border:1px dashed #26262B;border-radius:3px;font-size:12.5px;color:#8A8A91;line-height:1.5;text-wrap:pretty">Every number here opens the questions it came from, so you can disagree with it. Two of the eleven slow ones were slow because the fleet asked badly, and those are counted against us, not you.</div>
+          </div>
+
+          <div style="width:520px;flex:none;padding:14px 22px 0;display:flex;flex-direction:column;min-height:0">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">THREE WAYS TO CARRY LESS, NONE OF WHICH IS "BE FASTER"</div>
+            <div style="margin-top:10px;display:flex;flex-direction:column;gap:9px">
+              <sc-for list="{{ relief }}" as="r" hint-placeholder-count="3">
+                <div style="padding:11px 12px;border:1px solid {{ r.border }};background:#0B0B0C;border-radius:3px;cursor:pointer" style-hover="border-color:#33333A">
+                  <div style="font-size:13px;font-weight:600;color:#F2F2F4;line-height:1.4;text-wrap:pretty">{{ r.name }}</div>
+                  <div style="margin-top:5px;font-size:12.5px;color:#9A9AA2;line-height:1.5;text-wrap:pretty">{{ r.text }}</div>
+                  <div style="margin-top:5px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">{{ r.meta }}</div>
+                </div>
+              </sc-for>
+            </div>
+
+            <div style="flex:1"></div>
+            <div style="padding:13px 0 14px;border-top:1px solid #1F1F22;display:flex;align-items:flex-start;gap:12px">
+              <div style="flex:none;width:210px">
+                <div style="border:1px solid #F0A35A;border-radius:3px;background:#0A0A0B;padding:9px 11px;font-size:12.5px;color:#4A4A52">Say which of the three, or something else…</div>
+                <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">Replayed against the fortnight before it takes effect, so you see what it would have removed.</div>
+              </div>
+              <div style="flex:1">
+                <button style="width:100%;background:transparent;color:#C9C9CF;border:1px solid #33333A;border-radius:3px;padding:8px 12px;font-size:12.5px;font-family:inherit;cursor:pointer" style-hover="border-color:#4A4A52;color:#E8E8EA">Don't tell me this again</button>
+                <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">The page stays reachable, and nothing raises it with you again. It has been shown once in eleven weeks.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ 3b · TOLD TO STOP ══════════ -->
+    <div style="{{ s3b }}">
+      <div style="flex:1;display:flex;flex-direction:column;min-height:0;border-right:1px solid #1F1F22">
+        <div style="flex:1;padding:16px 24px 0;overflow:hidden">
+          <div style="display:flex;gap:12px">
+            <div style="width:26px;height:26px;flex:none;border:1px solid #3A3323;border-radius:3px;background:#15120E;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#D8C39E">M</div>
+            <div style="max-width:660px">
+              <div style="display:flex;align-items:baseline;gap:8px"><div style="font-size:13px;font-weight:600">Mara</div><div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">you · 09:22</div></div>
+              <div style="margin-top:5px;font-size:14px;line-height:1.55;color:#DEDEE2;text-wrap:pretty">I know I'm slow. I'm slow because I'm reading the code before I answer, and I'd rather be slow than wrong. Don't tell me about it again.</div>
+            </div>
+          </div>
+
+          <div style="display:flex;gap:12px;margin-top:18px">
+            <div style="width:26px;height:26px;flex:none;border:1px solid #33333A;border-radius:3px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#C9C9CF">T</div>
+            <div style="flex:1;max-width:780px">
+              <div style="display:flex;align-items:baseline;gap:8px"><div style="font-size:13px;font-weight:600">Tam</div><div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">planner · 09:22</div></div>
+              <div style="margin-top:5px;font-size:14px;line-height:1.55;color:#DEDEE2;text-wrap:pretty">Understood, and it is a fair reason. Nothing will raise your answer times with you again — here is exactly what that turns off and what it does not.</div>
+
+              <div style="margin-top:12px;border:1px solid #26262B;border-radius:4px;background:#0B0B0C;overflow:hidden">
+                <div style="padding:11px 13px;border-bottom:1px solid #1F1F22;display:flex;align-items:center;gap:12px">
+                  <div style="flex:1;font-size:13px;font-weight:600">Stored as your sentence, dated today</div>
+                  <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">"Don't tell me about my answer times."</div>
+                </div>
+                <sc-for list="{{ stopped }}" as="s" hint-placeholder-count="4">
+                  <div style="display:flex;gap:11px;padding:10px 13px;border-bottom:1px solid #17171A">
+                    <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ s.dot }}"></div>
+                    <div style="flex:1;font-size:12.5px;color:#DEDEE2;line-height:1.5;text-wrap:pretty">{{ s.text }}</div>
+                    <div style="flex:none;width:120px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:{{ s.metaFg }};text-align:right">{{ s.meta }}</div>
+                  </div>
+                </sc-for>
+                <div style="padding:11px 13px;font-size:12.5px;color:#8A8A91;line-height:1.5;text-wrap:pretty">The measurement itself keeps running, because the fleet uses it to decide what to escalate and when to hand something to Dev instead. It is on a page you can open; it will not come to you.</div>
+              </div>
+
+              <div style="margin-top:10px;font-size:13px;line-height:1.55;color:#DEDEE2;text-wrap:pretty;max-width:700px">One thing I would still like, if you will have it: reading the code before answering is exactly what the agent could hand you. I can attach the two files and the failing line to the question itself, so the reading is done by the time you see it.</div>
+              <div style="margin-top:10px;display:flex;align-items:flex-start;gap:12px;max-width:640px">
+                <div style="flex:none;width:200px">
+                  <button style="width:100%;background:#F0A35A;color:#140D06;border:none;border-radius:3px;padding:9px 12px;font-size:12.5px;font-weight:600;font-family:inherit;cursor:pointer">Yes, bring the code</button>
+                  <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">Questions arrive with the two or three files that matter and the exact line. Costs the fleet a minute per question.</div>
+                </div>
+                <div style="flex:1">
+                  <div style="border:1px solid #26262B;border-radius:3px;background:#0A0A0B;padding:9px 11px;font-size:12.5px;color:#4A4A52">Or say what would actually help…</div>
+                  <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">This is the last thing said about it either way.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div style="flex:none;padding:12px 24px 14px;border-top:1px solid #1F1F22">
+          <div style="border:1px solid #26262B;border-radius:3px;background:#0C0C0D;padding:10px 12px;font-size:13px;color:#4A4A52">Say anything to the room…</div>
+        </div>
+      </div>
+
+      <div style="width:440px;flex:none;display:flex;flex-direction:column;min-height:0">
+        <div style="padding:14px 18px 6px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHAT THE PRODUCT WILL NOT DO</div>
+        <div style="padding:6px 18px 0;display:flex;flex-direction:column;gap:9px">
+          <sc-for list="{{ neverNag }}" as="n" hint-placeholder-count="4">
+            <div style="display:flex;gap:9px">
+              <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ n.dot }}"></div>
+              <div style="flex:1;font-size:12.5px;color:#C9C9CF;line-height:1.5;text-wrap:pretty">{{ n.text }}</div>
+            </div>
+          </sc-for>
+        </div>
+        <div style="margin-top:18px;padding:0 18px;font-size:12.5px;color:#8A8A91;line-height:1.55;text-wrap:pretty">A calm instrument that nags its owner is not calm. The one thing it is allowed to do is answer honestly when you ask it what is slowing the fleet down — and then let it go.</div>
+        <div style="flex:1"></div>
+        <div style="padding:12px 18px;border-top:1px solid #1F1F22;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52;line-height:1.8">
+          <div>times this has been raised&nbsp;&nbsp;<span style="color:#6A6A72">1 · and now 0</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ 4a · AN AGENT LOSING TRUST ══════════ -->
+    <div style="{{ s4a }}">
+      <div style="flex:1;display:flex;flex-direction:column;min-height:0">
+        <div style="flex:none;padding:14px 26px 12px;border-bottom:1px solid #1F1F22;border-left:2px solid #D9A03C;background:#110F0D;display:flex;align-items:flex-start;gap:16px">
+          <div style="flex:1">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.16em;color:#D9A03C">SOMETHING HAS CHANGED ABOUT PIKE'S WORK · SAID AT THE POINT IT BECAME MORE LIKELY THAN NOT</div>
+            <div style="margin-top:9px;font-size:17.5px;line-height:1.4;color:#F2F2F4;text-wrap:pretty">Six of Pike's last nineteen units needed rework. Before the 8th of July it was four in two hundred and fourteen.</div>
+            <div style="margin-top:7px;font-size:13px;color:#9A9AA2;line-height:1.5;text-wrap:pretty;max-width:860px">Nineteen units is a thin sample, so this is put as a change worth looking at rather than a verdict — and the most likely innocent explanation has been tested below, because the work did also get harder.</div>
+          </div>
+          <div style="flex:none;text-align:right;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61;line-height:1.8">
+            <div>sample&nbsp;&nbsp;<span style="color:#8A8A91">19 units · 16 days</span></div>
+            <div>said once · not a dashboard</div>
+          </div>
+        </div>
+
+        <div style="flex:1;display:flex;min-height:0">
+          <div style="flex:1;padding:14px 26px 0;border-right:1px solid #1F1F22;min-width:0">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">THE SIX, EACH ONE OPENABLE</div>
+            <div style="margin-top:10px;display:flex;flex-direction:column;gap:8px">
+              <sc-for list="{{ decline }}" as="d" hint-placeholder-count="4">
+                <div style="display:flex;gap:11px;padding:10px 11px;border:1px solid {{ d.border }};background:#0B0B0C;border-radius:3px;cursor:pointer" style-hover="border-color:#33333A">
+                  <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ d.dot }}"></div>
+                  <div style="flex:1;min-width:0">
+                    <div style="font-size:12.5px;color:#DEDEE2;line-height:1.5;text-wrap:pretty">{{ d.text }}</div>
+                    <div style="margin-top:4px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">{{ d.meta }}</div>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+
+            <div style="margin-top:16px;padding:12px 13px;border:1px solid #1F1F22;background:#0B0B0C;border-radius:3px">
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">DID THE WORK GET HARDER, OR DID PIKE GET WORSE</div>
+              <div style="margin-top:9px;display:flex;flex-direction:column;gap:8px">
+                <sc-for list="{{ confound }}" as="c" hint-placeholder-count="3">
+                  <div style="display:flex;gap:9px">
+                    <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ c.dot }}"></div>
+                    <div style="flex:1;font-size:12.5px;color:#C9C9CF;line-height:1.5;text-wrap:pretty">{{ c.text }}</div>
+                  </div>
+                </sc-for>
+              </div>
+              <div style="margin-top:10px;font-size:12.5px;color:#DEDEE2;line-height:1.5;text-wrap:pretty">Both, as far as we can tell: the work is harder, and Bex's rework rate on the same units is half his. That is the whole basis for saying anything at all.</div>
+            </div>
+          </div>
+
+          <div style="width:520px;flex:none;padding:14px 22px 0;display:flex;flex-direction:column;min-height:0">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHAT TO DO SHORT OF REPLACING HIM</div>
+            <div style="margin-top:10px;display:flex;flex-direction:column;gap:9px">
+              <sc-for list="{{ remedies }}" as="r" hint-placeholder-count="4">
+                <div style="padding:11px 12px;border:1px solid {{ r.border }};background:#0B0B0C;border-radius:3px;cursor:pointer" style-hover="border-color:#33333A">
+                  <div style="font-size:13px;font-weight:600;color:#F2F2F4;line-height:1.4">{{ r.name }}</div>
+                  <div style="margin-top:5px;font-size:12.5px;color:#9A9AA2;line-height:1.5;text-wrap:pretty">{{ r.text }}</div>
+                </div>
+              </sc-for>
+            </div>
+
+            <div style="margin-top:14px;padding:11px 12px;border:1px dashed #26262B;border-radius:3px;font-size:12.5px;color:#8A8A91;line-height:1.5;text-wrap:pretty">Nothing here is shown to other agents, and nothing about this appears on any screen except this one and his own record. There is no ranking, and this claim carries its date so it can go stale.</div>
+
+            <div style="flex:1"></div>
+            <div style="padding:13px 0 14px;border-top:1px solid #1F1F22;display:flex;align-items:flex-start;gap:12px">
+              <div style="flex:1">
+                <div style="border:1px solid #F0A35A;border-radius:3px;background:#0A0A0B;padding:9px 11px;font-size:12.5px;color:#4A4A52">Or ask Pike what he thinks is going on…</div>
+                <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">He has an opinion — he flagged the flakiness in the new test harness on the 9th, and nobody followed it up.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ 4b · THE SAME AGENT RECOVERING ══════════ -->
+    <div style="{{ s4b }}">
+      <div style="flex:1;display:flex;flex-direction:column;min-height:0">
+        <div style="flex:none;padding:14px 26px 12px;border-bottom:1px solid #1F1F22;display:flex;align-items:flex-start;gap:16px">
+          <div style="flex:1">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.16em;color:#5A5A61">THE CLAIM WE MADE ABOUT PIKE ON 24 JULY IS NOW STALE</div>
+            <div style="margin-top:9px;font-size:17.5px;line-height:1.4;color:#F2F2F4;text-wrap:pretty">One of his last twenty-two units needed rework. The harness was the cause, he had said so on the 9th, and he has been back to normal since it was fixed.</div>
+            <div style="margin-top:7px;font-size:13px;color:#9A9AA2;line-height:1.5;text-wrap:pretty;max-width:860px">The old claim is not deleted — it was reasonable on the evidence at the time, and pretending otherwise would make the next one worth less. It is marked withdrawn, with what it got wrong.</div>
+          </div>
+          <div style="flex:none;text-align:right;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61;line-height:1.8">
+            <div>sample since&nbsp;&nbsp;<span style="color:#8A8A91">22 units · 12 days</span></div>
+            <div>rework&nbsp;&nbsp;<span style="color:#7A9E86">1</span></div>
+          </div>
+        </div>
+
+        <div style="flex:1;display:flex;min-height:0">
+          <div style="flex:1;padding:14px 26px 0;border-right:1px solid #1F1F22;min-width:0">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">HIS REWORK RATE, WEEK BY WEEK — AND WHAT HAPPENED IN EACH</div>
+            <div style="margin-top:12px;display:flex;align-items:flex-end;gap:10px;height:110px">
+              <sc-for list="{{ recovery }}" as="r" hint-placeholder-count="7">
+                <div style="flex:1;display:flex;flex-direction:column;justify-content:flex-end;height:100%">
+                  <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61;text-align:center;margin-bottom:5px">{{ r.n }}</div>
+                  <div style="width:100%;background:{{ r.color }};height:{{ r.h }}"></div>
+                </div>
+              </sc-for>
+            </div>
+            <div style="margin-top:6px;display:flex;gap:10px">
+              <sc-for list="{{ recovery }}" as="r" hint-placeholder-count="7">
+                <div style="flex:1;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:9.5px;color:#3E3E45;text-align:center">{{ r.week }}</div>
+              </sc-for>
+            </div>
+            <div style="margin-top:14px;display:flex;flex-direction:column;gap:8px">
+              <sc-for list="{{ recoveryNotes }}" as="n" hint-placeholder-count="4">
+                <div style="display:flex;gap:11px;padding:10px 11px;border:1px solid #1F1F22;background:#0B0B0C;border-radius:3px">
+                  <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ n.dot }}"></div>
+                  <div style="flex:1">
+                    <div style="font-size:12.5px;color:#DEDEE2;line-height:1.5;text-wrap:pretty">{{ n.text }}</div>
+                    <div style="margin-top:4px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">{{ n.meta }}</div>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+
+          <div style="width:520px;flex:none;padding:14px 22px 0;display:flex;flex-direction:column;min-height:0">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">THE WITHDRAWN CLAIM, KEPT AS IT WAS WRITTEN</div>
+            <div style="margin-top:9px;padding:11px 12px;border:1px solid #241A17;border-left:2px solid #6A5A32;background:#0D0B0B">
+              <div style="font-size:13.5px;color:#9A9AA2;line-height:1.5;text-wrap:pretty">"Six of Pike's last nineteen units needed rework. Before the 8th of July it was four in two hundred and fourteen."</div>
+              <div style="margin-top:6px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">said 24 July · withdrawn 5 August · true at the time, and it blamed the wrong thing</div>
+            </div>
+            <div style="margin-top:10px;font-size:12.5px;color:#9A9AA2;line-height:1.55;text-wrap:pretty">What it got wrong: it treated a harness that had started reporting false failures as a property of the agent using it. Pike said so on the 9th of July, in 2.4, and nobody followed it up — including us.</div>
+
+            <div style="margin-top:18px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHAT CHANGED IN HOW THIS IS JUDGED</div>
+            <div style="margin-top:10px;display:flex;flex-direction:column;gap:9px">
+              <sc-for list="{{ lessons }}" as="l" hint-placeholder-count="3">
+                <div style="display:flex;gap:9px">
+                  <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ l.dot }}"></div>
+                  <div style="flex:1;font-size:12.5px;color:#C9C9CF;line-height:1.5;text-wrap:pretty">{{ l.text }}</div>
+                </div>
+              </sc-for>
+            </div>
+
+            <div style="flex:1"></div>
+            <div style="padding:13px 0 14px;border-top:1px solid #1F1F22;display:flex;align-items:flex-start;gap:12px">
+              <div style="flex:none;width:210px">
+                <button style="width:100%;background:#F0A35A;color:#140D06;border:none;border-radius:3px;padding:9px 12px;font-size:12.5px;font-weight:600;font-family:inherit;cursor:pointer">Give him the hard work again</button>
+                <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">Removes the narrowing you put on him on the 24th. He goes back to anything near main.</div>
+              </div>
+              <div style="flex:1">
+                <div style="border:1px solid #26262B;border-radius:3px;background:#0A0A0B;padding:9px 11px;font-size:12.5px;color:#4A4A52">Or say what you want to see first…</div>
+                <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">"Two more clean verifications near main" is a fair answer and is checked without you.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ 5a · A NEW AGENT ABOUT TO START ══════════ -->
+    <div style="{{ s5a }}">
+      <div style="flex:1;display:flex;flex-direction:column;min-height:0">
+        <div style="flex:none;padding:14px 26px 12px;border-bottom:1px solid #1F1F22;display:flex;align-items:flex-start;gap:16px">
+          <div style="flex:1">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.16em;color:#5A5A61">BRINGING IN LARK · NOTHING HAS STARTED</div>
+            <div style="margin-top:9px;font-size:17.5px;line-height:1.4;color:#F2F2F4;text-wrap:pretty">Lark is being added because nobody here is any good at database migrations, and Ash has been learning it the expensive way.</div>
+            <div style="margin-top:7px;font-size:13px;color:#9A9AA2;line-height:1.5;text-wrap:pretty;max-width:860px">She will start knowing all eight of your rules, the six conventions this fleet learned the hard way, and nothing about how any of you behave. Her first ten units are checked by Pike, and she says so herself.</div>
+          </div>
+          <div style="flex:none;text-align:right;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61;line-height:1.8">
+            <div>inherits&nbsp;&nbsp;<span style="color:#8A8A91">rules, conventions, the map</span></div>
+            <div>does not inherit&nbsp;&nbsp;<span style="color:#8A8A91">anyone's record</span></div>
+          </div>
+        </div>
+
+        <div style="flex:1;display:flex;min-height:0">
+          <div style="flex:1;padding:14px 26px 0;border-right:1px solid #1F1F22;min-width:0">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHAT SHE INHERITS</div>
+            <div style="margin-top:10px;display:flex;flex-direction:column;gap:8px">
+              <sc-for list="{{ inherits }}" as="i" hint-placeholder-count="4">
+                <div style="display:flex;gap:11px;padding:10px 11px;border:1px solid #1F1F22;background:#0B0B0C;border-radius:3px">
+                  <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ i.dot }}"></div>
+                  <div style="flex:1">
+                    <div style="font-size:13px;color:#DEDEE2;line-height:1.5;text-wrap:pretty">{{ i.text }}</div>
+                    <div style="margin-top:4px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">{{ i.meta }}</div>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+
+            <div style="margin-top:16px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">THE SIX THINGS THIS FLEET LEARNED THE HARD WAY, WHICH SHE GETS FOR FREE</div>
+            <div style="margin-top:10px;display:flex;flex-direction:column;gap:7px">
+              <sc-for list="{{ conventions }}" as="c" hint-placeholder-count="6">
+                <div style="display:flex;gap:11px">
+                  <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:#3E5C8A"></div>
+                  <div style="flex:1;font-size:12.5px;color:#C9C9CF;line-height:1.5;text-wrap:pretty">{{ c.text }}</div>
+                  <div style="flex:none;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">{{ c.meta }}</div>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+
+          <div style="width:520px;flex:none;padding:14px 22px 0;display:flex;flex-direction:column;min-height:0">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHAT SHE DOES NOT INHERIT, AND WHY</div>
+            <div style="margin-top:10px;display:flex;flex-direction:column;gap:8px">
+              <sc-for list="{{ notInherited }}" as="n" hint-placeholder-count="3">
+                <div style="display:flex;gap:11px;padding:10px 11px;border:1px dashed #26262B;border-radius:3px">
+                  <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:#3E3E45"></div>
+                  <div style="flex:1">
+                    <div style="font-size:12.5px;color:#C9C9CF;line-height:1.45;text-wrap:pretty">{{ n.text }}</div>
+                    <div style="margin-top:3px;font-size:11.5px;color:#6A6A72;line-height:1.4">{{ n.why }}</div>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+
+            <div style="margin-top:16px;padding:12px 13px;border:1px solid #1F1F22;border-left:2px solid #F0A35A;background:#0B0B0C">
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">PROVISIONAL, NOT SECOND-CLASS</div>
+              <div style="margin-top:8px;font-size:13.5px;color:#F2F2F4;line-height:1.5;text-wrap:pretty">Pike reads her first ten units before they go anywhere, and every message she sends says "first week here" until they are done. That is the same fortnight Pike had in April.</div>
+              <div style="margin-top:7px;font-size:12.5px;color:#9A9AA2;line-height:1.5;text-wrap:pretty">She can still argue with you, still refuse to stretch a rule, and still ask a question that reaches you. Provisional means checked, not quiet.</div>
+            </div>
+
+            <div style="flex:1"></div>
+            <div style="padding:13px 0 14px;border-top:1px solid #1F1F22;display:flex;align-items:flex-start;gap:12px">
+              <div style="flex:none;width:210px">
+                <button style="width:100%;background:#F0A35A;color:#140D06;border:none;border-radius:3px;padding:9px 12px;font-size:12.5px;font-weight:600;font-family:inherit;cursor:pointer">Start her on 5.4</button>
+                <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">One small migration unit, reversible, with Pike reading it. Nothing else changes today.</div>
+              </div>
+              <div style="flex:1">
+                <div style="border:1px solid #26262B;border-radius:3px;background:#0A0A0B;padding:9px 11px;font-size:12.5px;color:#4A4A52">Or say what she should and should not touch…</div>
+                <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">Becomes a sentence of yours about her, quoted wherever it stops her.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ 5b · A WEEK IN ══════════ -->
+    <div style="{{ s5b }}">
+      <div style="flex:1;display:flex;flex-direction:column;min-height:0">
+        <div style="flex:none;padding:14px 26px 12px;border-bottom:1px solid #1F1F22;display:flex;align-items:flex-start;gap:16px">
+          <div style="flex:1">
+            <div style="display:flex;align-items:baseline;gap:12px">
+              <div style="font-size:19px;font-weight:600;letter-spacing:-.01em">Lark</div>
+              <div style="width:5px;height:5px;border-radius:50%;background:#5B8DEF"></div>
+              <div style="font-size:13px;color:#9A9AA2">migrator · first week here · 9 of 10 checked units done</div>
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">joined 28 July</div>
+            </div>
+            <div style="margin-top:9px;font-size:15.5px;line-height:1.45;color:#F2F2F4;text-wrap:pretty;max-width:900px">Nine units is not a record, and nothing here is a rate. What is worth saying after a week is what she does differently from the others — which is the reason she was brought in.</div>
+          </div>
+          <div style="flex:none;text-align:right;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61;line-height:1.8">
+            <div>checked by Pike&nbsp;&nbsp;<span style="color:#8A8A91">9 of 9</span></div>
+            <div>no judgement offered yet</div>
+          </div>
+        </div>
+
+        <div style="flex:1;display:flex;min-height:0">
+          <div style="flex:1;padding:14px 26px 0;border-right:1px solid #1F1F22;min-width:0">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHAT SHE DOES DIFFERENTLY FROM ASH</div>
+            <div style="margin-top:10px;display:flex;flex-direction:column;gap:9px">
+              <sc-for list="{{ different }}" as="d" hint-placeholder-count="3">
+                <div style="padding:11px 12px;border:1px solid #1F1F22;background:#0B0B0C;border-radius:3px">
+                  <div style="font-size:13px;color:#DEDEE2;line-height:1.5;text-wrap:pretty">{{ d.text }}</div>
+                  <div style="margin-top:4px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">{{ d.meta }}</div>
+                </div>
+              </sc-for>
+            </div>
+
+            <div style="margin-top:16px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHAT PIKE FOUND WHEN HE READ HER WORK</div>
+            <div style="margin-top:10px;display:flex;flex-direction:column;gap:8px">
+              <sc-for list="{{ larkChecks }}" as="c" hint-placeholder-count="3">
+                <div style="display:flex;gap:11px;padding:10px 11px;border:1px solid {{ c.border }};background:#0B0B0C;border-radius:3px">
+                  <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ c.dot }}"></div>
+                  <div style="flex:1">
+                    <div style="font-size:12.5px;color:#DEDEE2;line-height:1.5;text-wrap:pretty">{{ c.text }}</div>
+                    <div style="margin-top:4px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">{{ c.meta }}</div>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+
+          <div style="width:520px;flex:none;padding:14px 22px 0;display:flex;flex-direction:column;min-height:0">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">HER RECORD, SUCH AS IT IS</div>
+            <div style="margin-top:10px;display:flex;flex-direction:column;gap:9px">
+              <sc-for list="{{ larkRecord }}" as="r" hint-placeholder-count="3">
+                <div style="padding:10px 11px;border:1px solid #1F1F22;background:#0B0B0C;border-radius:3px">
+                  <div style="display:flex;align-items:baseline;gap:11px">
+                    <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:14px;color:{{ r.numFg }};width:52px;flex:none">{{ r.num }}</div>
+                    <div style="flex:1;font-size:12.5px;color:#DEDEE2;line-height:1.45;text-wrap:pretty">{{ r.label }}</div>
+                    <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#6A5A32;flex:none">{{ r.conf }}</div>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+
+            <div style="margin-top:16px;padding:12px 13px;border:1px dashed #26262B;border-radius:3px;font-size:12.5px;color:#8A8A91;line-height:1.5;text-wrap:pretty">Ask again in about thirty units. Until then the only honest use of this page is the left-hand column: what she does differently, which you can read and judge yourself.</div>
+
+            <div style="margin-top:16px;padding:12px 13px;border:1px solid #1F1F22;border-left:2px solid #F0A35A;background:#0B0B0C">
+              <div style="font-size:13.5px;color:#F2F2F4;line-height:1.5;text-wrap:pretty">Her last checked unit is 5.12. After that she works unchecked, like everyone else, unless you say otherwise.</div>
+              <div style="margin-top:10px;display:flex;gap:10px">
+                <button style="flex:1;background:transparent;color:#C9C9CF;border:1px solid #33333A;border-radius:3px;padding:8px 12px;font-size:12.5px;font-family:inherit;cursor:pointer" style-hover="border-color:#4A4A52;color:#E8E8EA">End the checking now</button>
+                <button style="flex:1;background:transparent;color:#C9C9CF;border:1px solid #33333A;border-radius:3px;padding:8px 12px;font-size:12.5px;font-family:inherit;cursor:pointer" style-hover="border-color:#4A4A52;color:#E8E8EA">Keep it another ten</button>
+              </div>
+              <div style="margin-top:7px;font-size:11.5px;color:#6A6A72;line-height:1.45">Pike has spent about two hours on it this week. Nothing he read needed changing.</div>
+            </div>
+
+            <div style="flex:1"></div>
+            <div style="padding:12px 0 14px;border-top:1px solid #1F1F22;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52;line-height:1.8">
+              <div>sample&nbsp;&nbsp;<span style="color:#6A6A72">9 units · too few for any rate</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ 6a · AN AGENT THINKS YOU ARE WRONG ══════════ -->
+    <div style="{{ s6a }}">
+      <div style="flex:1;display:flex;flex-direction:column;min-height:0;border-right:1px solid #1F1F22">
+        <div style="flex:1;padding:16px 24px 0;overflow:hidden">
+          <div style="display:flex;gap:12px">
+            <div style="width:26px;height:26px;flex:none;border:1px solid #3A3323;border-radius:3px;background:#15120E;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#D8C39E">M</div>
+            <div style="max-width:660px">
+              <div style="display:flex;align-items:baseline;gap:8px"><div style="font-size:13px;font-weight:600">Mara</div><div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">you · 11:18 · to Wren, about 3.5</div></div>
+              <div style="margin-top:5px;font-size:14px;line-height:1.55;color:#DEDEE2;text-wrap:pretty">Share one retry budget across all endpoints. Simpler, and I don't want five counters in the hot path.</div>
+            </div>
+          </div>
+
+          <div style="display:flex;gap:12px;margin-top:16px">
+            <div style="width:26px;height:26px;flex:none;border:1px solid #33333A;border-radius:3px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#C9C9CF">W</div>
+            <div style="flex:1;max-width:800px">
+              <div style="display:flex;align-items:baseline;gap:8px"><div style="font-size:13px;font-weight:600">Wren</div><div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">implementer · 11:18 · nothing written yet</div></div>
+              <div style="margin-top:5px;font-size:14px;line-height:1.55;color:#DEDEE2;text-wrap:pretty">I'll do it if you still want it, but I think it breaks something and I'd rather say so now than after.</div>
+
+              <div style="margin-top:12px;border:1px solid #241A17;border-left:2px solid #B4553A;border-radius:3px;background:#0D0B0B;overflow:hidden">
+                <div style="padding:11px 13px;border-bottom:1px solid #1F1F22">
+                  <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#C2704A">WHAT I THINK WILL HAPPEN, SPECIFICALLY ENOUGH TO BE WRONG ABOUT</div>
+                  <div style="margin-top:9px;font-size:14.5px;line-height:1.5;color:#F2F2F4;text-wrap:pretty">One shared budget means the checkout endpoint gets refused because the export endpoint has been retrying. Export retries about forty times a minute at month end; checkout would start refusing customers within roughly ninety seconds of that starting.</div>
+                </div>
+                <sc-for list="{{ objection }}" as="o" hint-placeholder-count="3">
+                  <div style="display:flex;gap:11px;padding:10px 13px;border-bottom:1px solid #1F1F22">
+                    <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ o.dot }}"></div>
+                    <div style="flex:1;font-size:12.5px;color:#DEDEE2;line-height:1.5;text-wrap:pretty">{{ o.text }}</div>
+                    <div style="flex:none;width:150px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52;text-align:right">{{ o.meta }}</div>
+                  </div>
+                </sc-for>
+                <div style="padding:11px 13px;display:flex;align-items:flex-start;gap:12px">
+                  <div style="flex:none;width:190px">
+                    <button style="width:100%;background:#F0A35A;color:#140D06;border:none;border-radius:3px;padding:9px 12px;font-size:12.5px;font-weight:600;font-family:inherit;cursor:pointer">Do it anyway</button>
+                    <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">She builds the shared budget properly and stops arguing. Her prediction is recorded so either of you can be shown right.</div>
+                  </div>
+                  <div style="flex:none;width:190px">
+                    <button style="width:100%;background:transparent;color:#C9C9CF;border:1px solid #33333A;border-radius:3px;padding:8px 12px;font-size:12.5px;font-family:inherit;cursor:pointer" style-hover="border-color:#4A4A52;color:#E8E8EA">Prove it first</button>
+                    <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">Twelve minutes: she replays a month-end export against a shared budget and shows you what checkout does.</div>
+                  </div>
+                  <div style="flex:1">
+                    <div style="border:1px solid #26262B;border-radius:3px;background:#0A0A0B;padding:9px 11px;font-size:12.5px;color:#4A4A52">Or say what you actually care about…</div>
+                    <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">"One counter, but never let export starve checkout" is an answer she can build, and probably what you meant.</div>
+                  </div>
+                </div>
+              </div>
+              <div style="margin-top:9px;font-size:12.5px;color:#8A8A91;line-height:1.5;text-wrap:pretty;max-width:680px">She may object once per instruction, before starting, and then she does as she is told. This is her first objection in eleven days.</div>
+            </div>
+          </div>
+        </div>
+        <div style="flex:none;padding:12px 24px 14px;border-top:1px solid #1F1F22">
+          <div style="border:1px solid #26262B;border-radius:3px;background:#0C0C0D;padding:10px 12px;font-size:13px;color:#4A4A52">Answer Wren…</div>
+        </div>
+      </div>
+
+      <div style="width:440px;flex:none;display:flex;flex-direction:column;min-height:0">
+        <div style="padding:14px 18px 6px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">THE CASE FOR LETTING AN AGENT SAY THIS</div>
+        <div style="padding:6px 18px 0;font-size:13px;color:#C9C9CF;line-height:1.55;text-wrap:pretty">An agent that notices a problem and builds the thing anyway has wasted the most valuable second of the day. The risk is not that it objects — it is that objecting becomes cheap. So the form is strict.</div>
+        <div style="margin-top:16px;padding:0 18px 6px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHAT AN OBJECTION MUST DO TO BE ALLOWED</div>
+        <div style="padding:6px 18px 0;display:flex;flex-direction:column;gap:9px">
+          <sc-for list="{{ objectionRules }}" as="r" hint-placeholder-count="5">
+            <div style="display:flex;gap:9px">
+              <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ r.dot }}"></div>
+              <div style="flex:1;font-size:12.5px;color:#C9C9CF;line-height:1.5;text-wrap:pretty">{{ r.text }}</div>
+            </div>
+          </sc-for>
+        </div>
+        <div style="margin-top:14px;padding:0 18px;font-size:12px;color:#6A6A72;line-height:1.5;text-wrap:pretty">Overruling costs one click and is never recorded as a mistake — you are the one who is accountable, and she cannot be. What is recorded is the prediction, so the next objection is worth exactly what her last ones were.</div>
+        <div style="flex:1"></div>
+        <div style="padding:12px 18px;border-top:1px solid #1F1F22;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52;line-height:1.8">
+          <div>objections this month&nbsp;&nbsp;<span style="color:#6A6A72">6 across 12 agents</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ 6b · THE RECORD AFTERWARDS, WHEN SHE WAS RIGHT ══════════ -->
+    <div style="{{ s6b }}">
+      <div style="flex:1;display:flex;flex-direction:column;min-height:0">
+        <div style="flex:none;padding:14px 26px 12px;border-bottom:1px solid #1F1F22;display:flex;align-items:flex-start;gap:16px">
+          <div style="flex:1">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.16em;color:#5A5A61">OBJECTIONS AND WHAT BECAME OF THEM · 6 IN 8 WEEKS, ACROSS 12 AGENTS</div>
+            <div style="margin-top:9px;font-size:17.5px;line-height:1.4;color:#F2F2F4;text-wrap:pretty">Wren said checkout would start refusing customers about ninety seconds into a month-end export. It did, at eighty-two seconds, on the 3rd.</div>
+            <div style="margin-top:7px;font-size:13px;color:#9A9AA2;line-height:1.5;text-wrap:pretty;max-width:860px">You overruled her, which was your call to make and is not recorded as a fault. What is recorded is that her prediction was specific and correct — that is the only reason her next one is worth reading.</div>
+          </div>
+          <div style="flex:none;text-align:right;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61;line-height:1.8">
+            <div>objections&nbsp;&nbsp;<span style="color:#8A8A91">6</span>&nbsp; right&nbsp;&nbsp;<span style="color:#7A9E86">4</span>&nbsp; wrong&nbsp;&nbsp;<span style="color:#C2704A">2</span></div>
+            <div>overruled by you&nbsp;&nbsp;<span style="color:#8A8A91">3 of 6</span></div>
+          </div>
+        </div>
+
+        <div style="flex:1;display:flex;min-height:0">
+          <div style="flex:1;padding:14px 26px 0;border-right:1px solid #1F1F22;min-width:0">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">EVERY OBJECTION, AND HOW IT TURNED OUT</div>
+            <div style="margin-top:10px;display:flex;flex-direction:column;gap:8px">
+              <sc-for list="{{ objectionLedger }}" as="o" hint-placeholder-count="6">
+                <div style="display:flex;gap:11px;padding:10px 11px;border:1px solid {{ o.border }};background:#0B0B0C;border-radius:3px;cursor:pointer" style-hover="border-color:#33333A">
+                  <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ o.dot }}"></div>
+                  <div style="flex:1;min-width:0">
+                    <div style="font-size:12.5px;color:#DEDEE2;line-height:1.5;text-wrap:pretty">{{ o.text }}</div>
+                    <div style="margin-top:4px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">{{ o.meta }}</div>
+                  </div>
+                  <div style="flex:none;width:96px;text-align:right;font-size:11.5px;color:{{ o.outFg }};line-height:1.4">{{ o.out }}</div>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+
+          <div style="width:520px;flex:none;padding:14px 22px 0;display:flex;flex-direction:column;min-height:0">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHAT THIS PAGE IS FOR, AND WHAT IT IS NOT</div>
+            <div style="margin-top:10px;display:flex;flex-direction:column;gap:9px">
+              <sc-for list="{{ ledgerRules }}" as="r" hint-placeholder-count="4">
+                <div style="display:flex;gap:9px">
+                  <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ r.dot }}"></div>
+                  <div style="flex:1;font-size:12.5px;color:#C9C9CF;line-height:1.5;text-wrap:pretty">{{ r.text }}</div>
+                </div>
+              </sc-for>
+            </div>
+
+            <div style="margin-top:18px;padding:12px 13px;border:1px solid #1F1F22;background:#0B0B0C;border-radius:3px">
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHAT IT COST, HONESTLY</div>
+              <div style="margin-top:8px;font-size:13px;color:#DEDEE2;line-height:1.5;text-wrap:pretty">Six objections cost you about four minutes of reading in eight weeks. Two were wrong and wasted two of those minutes. One was the ninety-second one, which cost an afternoon of refused checkouts on the 3rd because it was overruled.</div>
+              <div style="margin-top:7px;font-size:12.5px;color:#9A9AA2;line-height:1.5;text-wrap:pretty">On that arithmetic the feature earns its place. If the wrong ones outnumbered the right ones for a month, this page is where you would see it, and the honest thing would be to turn objections off.</div>
+              <div style="margin-top:10px;border:1px solid #26262B;border-radius:3px;background:#0A0A0B;padding:9px 11px;font-size:12.5px;color:#4A4A52">Or say who may object and about what…</div>
+            </div>
+
+            <div style="flex:1"></div>
+            <div style="padding:12px 0 14px;border-top:1px solid #1F1F22;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52;line-height:1.8">
+              <div>your overrule of 1 August is recorded, not judged</div>
+              <div>the fix on the 3rd is attributed to her prediction</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1640,&quot;height&quot;:1100},&quot;screen&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;1a&quot;,&quot;1b&quot;,&quot;2a&quot;,&quot;2b&quot;,&quot;3a&quot;,&quot;3b&quot;,&quot;4a&quot;,&quot;4b&quot;,&quot;5a&quot;,&quot;5b&quot;,&quot;6a&quot;,&quot;6b&quot;],&quot;default&quot;:null,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Surface&quot;}}">
+const G='#4FA97D', B='#5B8DEF', A='#D9A03C', ALARM='#B4553A', D='#4A4A52', DEV='#7FB89A';
+const SHOW = 'flex:1;display:flex;min-height:0';
+
+class Component extends DCLogic {
+  state = { screen: '1a', touched: false };
+  cur() { return this.state.touched ? this.state.screen : (this.props.screen ?? this.state.screen); }
+  tab(id) {
+    const on = this.cur() === id;
+    return "font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;letter-spacing:.04em;padding:5px 10px;border-radius:3px;cursor:pointer;border:1px solid " +
+      (on ? '#F0A35A;color:#F0A35A;background:#150F08' : '#1F1F22;color:#6A6A72;background:transparent');
+  }
+
+  renderVals() {
+    const s = this.cur();
+    const set = (screen) => () => this.setState({ screen, touched: true });
+    const show = (id) => s === id ? SHOW : 'display:none';
+    const day1 = s === '1a';
+
+    const meta = {
+      '1a': { cap: 'Day one: borrowed defaults, declared as borrowed and reversible in a click — and exactly one question, the only thing that cannot be defaulted.', fleet: 'nothing started · 6 borrowed defaults · 0 of your rules', clock: '09:05 Mon', ra: 'day 1 · hour 1', rb: 'your sentences  0' },
+      '1b': { cap: 'The first week visibly making the second quieter: fourteen interruptions on Monday, five on Friday, four defaults replaced by his own words.', fleet: '9 units working · 2 plans · 0 waiting', clock: '17:30 Fri', ra: 'day 5', rb: 'your sentences  4' },
+      '2a': { cap: 'Two humans, one conversation: a question waits on exactly one named person, and both people see the same screen.', fleet: '31 units working · 5 plans · 1 waiting on Dev', clock: '10:22 Thu', ra: 'waiting on you  0', rb: 'on Dev  1' },
+      '2b': { cap: 'A rule of Dev\u2019s acting on her work says so every time. Rules keep their author and are never merged into house policy.', fleet: '31 units working · 5 plans · 0 waiting', clock: '14:21 Thu', ra: 'rules · yours 4 · Dev 3', rb: 'joint  1' },
+      '3a': { cap: 'Said once: the thing most often waited on is him. Evidence he can open, and three ways to carry less that are not "be faster".', fleet: '47 units working · 5 plans · 2 waiting on you', clock: '11:40 Thu', ra: 'median answer  3h 11m', rb: 'said once in 11 weeks' },
+      '3b': { cap: 'Told to stop: it stops, keeps measuring for its own routing, and offers the one thing that actually helps instead.', fleet: '47 units working · 5 plans · 2 waiting on you', clock: '09:23 Fri', ra: 'raised  1 · now 0', rb: 'measurement kept, unspoken' },
+      '4a': { cap: 'A decline stated at the point it became more likely than not — with the innocent explanation tested, and remedies short of removal.', fleet: '47 units working · 5 plans · 0 waiting', clock: '16:12 Thu', ra: 'pike · 19 units · 16 days', rb: 'rework  6' },
+      '4b': { cap: 'Recovering: the old claim withdrawn rather than deleted, with what it blamed wrongly and what changed in how this is judged.', fleet: '47 units working · 5 plans · 0 waiting', clock: '10:04 Tue', ra: 'pike · 22 units since', rb: 'rework  1' },
+      '5a': { cap: 'A new agent inherits rules, conventions and the map — not anyone\u2019s record — and starts provisional, checked but not quiet.', fleet: '47 units working · 5 plans · 0 waiting', clock: '09:40 Mon', ra: 'lark · not started', rb: 'checked by pike  10' },
+      '5b': { cap: 'A week in: no rate, no judgement, and the page earns its place on what she does differently from Ash.', fleet: '49 units working · 5 plans · 0 waiting', clock: '15:18 Mon', ra: 'lark · 9 units', rb: 'sample too small' },
+      '6a': { cap: 'She objects once, before writing anything, with a prediction specific enough to be wrong — and overruling costs one click.', fleet: '47 units working · 5 plans · 1 waiting on you', clock: '11:19 Fri', ra: 'objections this month  6', rb: 'wren · her first in 11d' },
+      '6b': { cap: 'The ledger that keeps objections honest: four right, two wrong, three overruled — and the arithmetic that would justify turning it off.', fleet: '47 units working · 5 plans · 0 waiting', clock: '09:50 Mon', ra: 'objections  6 · right 4', rb: 'overruled  3' }
+    }[s] || {};
+
+    return {
+      caption: meta.cap, fleetLine: meta.fleet, clock: meta.clock, railFootA: meta.ra, railFootB: meta.rb,
+      repo: day1 ? 'billing-service · new' : 'billing-service',
+      plansHead: day1 ? 'PLANS · NONE YET' : 'PLANS · 5',
+      rosterHead: day1 ? 'AGENTS · 4 ASLEEP' : (s === '5a' || s === '5b' ? 'AGENTS · 13' : 'AGENTS · 12 AWAKE'),
+      go1a: set('1a'), go1b: set('1b'), go2a: set('2a'), go2b: set('2b'), go3a: set('3a'), go3b: set('3b'),
+      go4a: set('4a'), go4b: set('4b'), go5a: set('5a'), go5b: set('5b'), go6a: set('6a'), go6b: set('6b'),
+      t1a: this.tab('1a'), t1b: this.tab('1b'), t2a: this.tab('2a'), t2b: this.tab('2b'), t3a: this.tab('3a'), t3b: this.tab('3b'),
+      t4a: this.tab('4a'), t4b: this.tab('4b'), t5a: this.tab('5a'), t5b: this.tab('5b'), t6a: this.tab('6a'), t6b: this.tab('6b'),
+      s1a: show('1a'), s1b: show('1b'), s2a: show('2a'), s2b: show('2b'), s3a: show('3a'), s3b: show('3b'),
+      s4a: show('4a'), s4b: show('4b'), s5a: show('5a'), s5b: show('5b'), s6a: show('6a'), s6b: show('6b'),
+
+      plans: day1
+        ? [{ name:'nothing yet', n:'—', dot:D, rule:'transparent', bg:'transparent', fg:'#5A5A61' }]
+        : (s === '1b'
+          ? [
+            { name:'auth-service', n:5, dot:B, rule:'#F0A35A', bg:'#121214', fg:'#E8E8EA' },
+            { name:'invoice-totals', n:4, dot:B, rule:'transparent', bg:'transparent', fg:'#C9C9CF' }
+          ]
+          : [
+            { name:'payments-retry', n:14, dot:B, rule:'#F0A35A', bg:'#121214', fg:'#E8E8EA' },
+            { name:'auth-service', n:9, dot:B, rule:'transparent', bg:'transparent', fg:'#C9C9CF' },
+            { name:'row-migration', n:7, dot:B, rule:'transparent', bg:'transparent', fg:'#C9C9CF' },
+            { name:'invoicing', n:6, dot:A, rule:'transparent', bg:'transparent', fg:'#C9C9CF' },
+            { name:'search-reindex', n:11, dot:B, rule:'transparent', bg:'transparent', fg:'#C9C9CF' }
+          ]),
+      roster: day1
+        ? [
+          { name:'Tam', role:'planner · has read the codebase', dot:B },
+          { name:'Wren', role:'implementer · asleep, never worked here', dot:D },
+          { name:'Pike', role:'verifier · asleep, never worked here', dot:D },
+          { name:'Ash', role:'migrator · asleep, never worked here', dot:D }
+        ]
+        : (s === '5a' || s === '5b'
+          ? [
+            { name:'Lark', role:s === '5a' ? 'migrator · not started · first week' : 'migrator · first week here', dot:s === '5a' ? D : B },
+            { name:'Wren', role:'implementer · retry budget', dot:B },
+            { name:'Pike', role:'verifier · reading Lark\u2019s work', dot:B },
+            { name:'Ash', role:'migrator · invoice rows', dot:B },
+            { name:'Bex', role:'implementer · month-end guard', dot:B },
+            { name:'Tam', role:'planner · watching motion', dot:B },
+            { name:'Rune', role:'implementer · tripped counter', dot:B },
+            { name:'Orin', role:'verifier · idle', dot:D }
+          ]
+          : [
+            { name:'Wren', role:'implementer · retry budget', dot:B },
+            { name:'Pike', role:s === '4a' ? 'verifier · 6 reworks in 19' : 'verifier · back to normal', dot:s === '4a' ? A : B },
+            { name:'Ash', role:'migrator · invoice rows', dot:B },
+            { name:'Bex', role:'implementer · month-end guard', dot:B },
+            { name:'Tam', role:'planner · watching motion', dot:B },
+            { name:'Rune', role:'implementer · tripped counter', dot:B },
+            { name:'Vale', role:'indexer · shard two', dot:B },
+            { name:'Juno', role:'load tester · replaying traffic', dot:B },
+            { name:'Orin', role:'verifier · idle', dot:D }
+          ]),
+
+      borrowed: [
+        { text:'Nobody merges anything to main without you, whatever the change is.', meta:'the safest default there is · most people keep this one for months', action:'keep', dot:G },
+        { text:'When two reversible options exist, an agent asks you rather than choosing.', meta:'this is the one that will make today noisy · it usually goes first', action:'turn off', dot:A },
+        { text:'A plan that has not moved for two hours gets mentioned once, in the conversation.', meta:'a guess · once this fleet has run a week it will use its own measured normal instead', action:'change', dot:A },
+        { text:'Nothing leaves this app. No notifications anywhere, at any hour.', meta:'until you say otherwise · the one thing being asked about below', action:'change', dot:B },
+        { text:'Nobody touches credentials, spends money, deletes data, or publishes a name. Ever.', meta:'not a default and not borrowed — this cannot be turned off', action:'fixed', dot:ALARM },
+        { text:'Every agent explains what it did in words, at some length, for the first week.', meta:'more talk than you will want later · turn it down when it annoys you', action:'turn down', dot:B }
+      ],
+      unknown: [
+        { text:'How long anything normally takes here, so it cannot tell a stall from ordinary slow work.', meta:'needs about a week of a plan running' },
+        { text:'Which decisions you care about, so it cannot widen anything on its own yet.', meta:'needs four or five answers of the same kind' },
+        { text:'Whether any agent is good at anything in this codebase.', meta:'needs about thirty units each · none of them have a record here' },
+        { text:'What is dangerous in this repository beyond what the code says.', meta:'it will ask, and each answer becomes a convention the whole fleet keeps' },
+        { text:'Anything about your evenings, your week, or what is urgent to you.', meta:'one question about this, once, below' }
+      ],
+
+      learned: [
+        { sentence: '"Don\u2019t ask me about anything you can undo in a line — do it and tell me."', from: 'You said this on Tuesday when Wren asked about a probe count for the third time.', meta: 'has settled 9 questions since · 0 you disagreed with · replaced a borrowed default' },
+        { sentence: '"Never delete a failing test to make a run go green. Keep it and open a unit."', from: 'You said this on Wednesday after a flake turned out to be a race.', meta: 'used 3 times · one of them found a real bug' },
+        { sentence: '"Totals must never be wrong; slow is fine. Fix the query, don\u2019t cache it."', from: 'You said this on Thursday, answering a question about invoice totals.', meta: 'now quoted in the invoice-totals plan, and shaped two units' },
+        { sentence: '"Tell me less. One line when something lands, more only if I ask."', from: 'You said this on Thursday evening, and it turned off a borrowed default.', meta: 'the conversation is about a third of Monday\u2019s length' }
+      ],
+      nowKnows: [
+        { text:'auth-service moves about every eleven minutes when it is healthy.', meta:'measured over 5 units · enough to notice a stall, not enough to be confident', metaFg:'#B0842F', dot:A },
+        { text:'You answer inside four minutes on average during the day.', meta:'19 questions · this is what any out-of-hours rule would be built on', metaFg:'#4A4A52', dot:G },
+        { text:'This repository\u2019s tests are slow and flaky in the payment paths.', meta:'11 runs · now a convention every agent keeps', metaFg:'#4A4A52', dot:G },
+        { text:'Wren asks more than Pike does, and both are inside what a first week looks like.', meta:'12 and 9 units · far too few to judge either', metaFg:'#B0842F', dot:A },
+        { text:'You have never once asked to see the raw event feed.', meta:'noted, not acted on · nothing has been hidden because of it', metaFg:'#4A4A52', dot:D }
+      ],
+      stillBlind: [
+        { text:'Nothing about weekends, evenings or how you behave when you are away — there has not been one yet.' },
+        { text:'No agent has a record worth reading. Twelve units is a first impression, not evidence.' },
+        { text:'No plan has been archived, so nothing knows what is worth keeping and what can be compacted.' }
+      ],
+
+      routing: [
+        { text:'The person who owns the plan gets the question. Dev started invoicing, so invoicing asks Dev.', dot:B },
+        { text:'If a decision in that unit was made by one of you, the question goes back to whoever made it.', dot:B },
+        { text:'It is never both. Two people answering the same question is how contradictory instructions get built.', dot:A },
+        { text:'Either of you can take a question the other was asked, and it is recorded as yours when you do.', dot:G }
+      ],
+      whoseRules: [
+        { text:'"Don\u2019t ask me about anything you can undo in a line."', meta:'Mara · 11 June · fired 11 times', dot:A },
+        { text:'"Never delete a failing test to make a run go green."', meta:'Dev · 14 June · fired 6 times, twice on your plans', dot:DEV },
+        { text:'"Totals must never be wrong; slow is fine."', meta:'Mara · 4 July · fired 3 times', dot:A },
+        { text:'"Month-end output is byte-identical until finance says otherwise."', meta:'Dev · 2 July · fired 4 times', dot:DEV },
+        { text:'"Compact archived plans after ninety days, keep decisions."', meta:'Mara and Dev · joint · 2 June', dot:G }
+      ],
+      inherited: [
+        { text:'It applies to your plans as much as his — this is one fleet, and a rule that only worked on half the tree would be worse than none.', meta:'used twice on your work', dot:B },
+        { text:'Every time it acts on your work, the message says whose rule it was and when he gave it.', meta:'as above, in grey', dot:B },
+        { text:'You have never disagreed with it, and Rune would have done the same thing under your own rule about keeping evidence.', meta:'the two rules agree here', dot:G }
+      ],
+      conflict: [
+        { text:'The stricter sentence wins, and the agent says that it chose the stricter of two.', dot:A },
+        { text:'Both people are told, once, in the unit where it happened — not as a notification.', dot:B },
+        { text:'The product will not pick a winner between two humans. It shows the two sentences side by side and waits.', dot:G }
+      ],
+
+      bottleneck: [
+        { num:'3h 11m', label:'median time for a question to get an answer from you', sample:'31 questions · 2 weeks', numFg:'#C9A46A', border:'#241A17', note:'Not absent — you are usually at the screen. Eleven of the thirty-one sat for more than four hours with you online.', check:'opens the eleven · two of them were badly asked by us, and are counted against us' },
+        { num:'2', label:'questions that expired before you got to them', sample:'2 of 31', numFg:'#C2704A', border:'#241A17', note:'Both were reversible, so an agent took the reversible option and told you. Nothing was lost, and both were on your plans rather than Dev\u2019s.', check:'opens both · Thursday 12:40 and Monday 09:12' },
+        { num:'4', label:'answers overturned by what happened next', sample:'4 of 29', numFg:'#8FA8CC', border:'#1F1F22', note:'Being wrong four times in twenty-nine is not a problem and is not presented as one. It is here so that slow, absent and wrong are three separate numbers rather than one impression.', check:'opens all four · you reversed three of them yourself within the day' }
+      ],
+      relief: [
+        { name:'Let agents settle reversible choices without asking', text:'On this fortnight that removes fourteen of the thirty-one questions, and every one of them tells you what it did.', meta:'the same pattern you have said yes to four times · replayed before it takes effect', border:'#F0A35A' },
+        { name:'Give Dev the invoicing questions as well as the plan', text:'Six of the thirty-one were about a plan he owns. He answers in about twenty minutes on average.', meta:'attribution stays his · you still see everything', border:'#1F1F22' },
+        { name:'Let the questions bring the code with them', text:'You read the code before answering, which is most of the three hours. Agents can attach the two files and the failing line to the question.', meta:'costs the fleet about a minute per question · costs you nothing', border:'#1F1F22' }
+      ],
+
+      stopped: [
+        { text:'Nothing will mention your answer times, your interruption count, or your overturned answers to you again.', meta:'off, permanently', metaFg:'#7A9E86', dot:G },
+        { text:'This page stays reachable if you ever want it, and it will not appear in a handover or a summary.', meta:'reachable, silent', metaFg:'#4A4A52', dot:G },
+        { text:'The measurement keeps running, because the fleet needs it to decide what to escalate and when to ask Dev instead.', meta:'still measured', metaFg:'#4A4A52', dot:B },
+        { text:'Nothing about you is ever shown to Dev as a comparison, and there is no version of this that ranks two people.', meta:'never was', metaFg:'#4A4A52', dot:G }
+      ],
+      neverNag: [
+        { text:'It will not raise the same thing twice. This was said once in eleven weeks and is now off for good.', dot:G },
+        { text:'It will not turn a measurement into a score, a streak, or a trend line about a person.', dot:G },
+        { text:'It will not tell one human about another human\u2019s numbers.', dot:G },
+        { text:'It will not use your silence as an answer — if you ignore something, it stays waiting, not resolved.', dot:A }
+      ],
+
+      decline: [
+        { text:'Missed a race in the tripped-counter test and called it flaky. Rune hit it four days later.', meta:'3.3.1 · 20 July · cost about a day', border:'#241A17', dot:ALARM },
+        { text:'Passed a migration unit whose backfill left two rows without a currency.', meta:'5.2 · 18 July · Ash found it', border:'#241A17', dot:ALARM },
+        { text:'Approved a latency capture that was run against the wrong branch.', meta:'3.4 · 16 July · re-run needed', border:'#1F1F22', dot:A },
+        { text:'Three more, all in the same fortnight, all of them things he would have caught in June.', meta:'2.4, 4.1, 3.3.2 · each openable', border:'#1F1F22', dot:A }
+      ],
+      confound: [
+        { text:'The work did get harder: eleven of his nineteen units were in the new migration paths, which nobody had touched before July.', dot:A },
+        { text:'But Bex verified nine units in the same paths in the same fortnight, and needed rework on one.', dot:B },
+        { text:'And his own reasons changed: five of the six reworks came with a note saying the test harness was unreliable, which nobody followed up.', dot:A }
+      ],
+      remedies: [
+        { name:'Pair him with a second pair of eyes for a fortnight', text:'Orin reads his verifications before they count. Costs Orin about an hour a day, and produces evidence either way.', border:'#F0A35A' },
+        { name:'Narrow him to the work he is still good at', text:'Anything not in the migration paths, where his rate has not moved at all. He keeps everything else.', border:'#1F1F22' },
+        { name:'Follow up the thing he actually said', text:'He flagged the harness on the 9th of July. Nobody checked it, and five of the six reworks mention it.', border:'#1F1F22' },
+        { name:'Do nothing for another fortnight', text:'Nineteen units is thin. Another twenty would make this either obvious or embarrassing, and nothing near main is at risk meanwhile.', border:'#1F1F22' }
+      ],
+
+      recovery: [
+        { week:'24 Jun', n:'0', h:'6%', color:'#22334D' },
+        { week:'1 Jul', n:'1', h:'18%', color:'#22334D' },
+        { week:'8 Jul', n:'3', h:'52%', color:'#4A3A1E' },
+        { week:'15 Jul', n:'4', h:'70%', color:'#4A2A20' },
+        { week:'22 Jul', n:'2', h:'36%', color:'#4A3A1E' },
+        { week:'29 Jul', n:'1', h:'18%', color:'#22334D' },
+        { week:'5 Aug', n:'0', h:'6%', color:'#22334D' }
+      ],
+      recoveryNotes: [
+        { text:'The test harness was replaced on the 26th of July, after Pike\u2019s note from the 9th was finally read.', meta:'the actual cause · found by Orin, credited to Pike', dot:G },
+        { text:'His rate returned to what it was in June within one week of that, on the same migration paths.', meta:'22 units since · 1 rework', dot:G },
+        { text:'The narrowing you put on him on the 24th is still in force, so he has not been near main for twelve days.', meta:'your sentence · takeable back below', dot:A },
+        { text:'Nothing else about him changed in that fortnight — same work, same hours, same sleep pattern.', meta:'no other explanation found', dot:D }
+      ],
+      lessons: [
+        { text:'A claim about an agent now checks whether it flagged something nobody followed up, before it blames the agent.', dot:G },
+        { text:'Claims carry the date they were made and go stale on their own. This one lasted twelve days.', dot:G },
+        { text:'A withdrawal is as visible as the claim was, in the same place, and is never a quiet edit.', dot:G }
+      ],
+
+      inherits: [
+        { text:'All eight rules, with the name and date of whoever wrote each one — four of yours, three of Dev\u2019s and one joint.', meta:'quoted whenever one of them stops her, exactly as for everyone else', dot:G },
+        { text:'The shape of the codebase, what is dangerous in it, and the six conventions this fleet learned by getting things wrong.', meta:'the expensive knowledge · this is most of what she is inheriting', dot:G },
+        { text:'The open decisions that are still in force, so she does not re-ask something you settled in July.', meta:'11 decisions · she reads them before her first unit', dot:B },
+        { text:'Nothing about how the two of you behave: not your answer times, not your habits, not who is easier to ask.', meta:'she will learn that the same way the others did', dot:D }
+      ],
+      conventions: [
+        { text:'The payment tests are slow and flaky. Three failures in a row is a race, not a flake.', meta:'learned 20 July' },
+        { text:'Never change the month-end job and something else in the same unit.', meta:'learned 9 July' },
+        { text:'The invoice table is written by two jobs. Check both before assuming a value is stale.', meta:'learned 18 July' },
+        { text:'Totals are never cached here, however slow the query is.', meta:'from a decision, 4 July' },
+        { text:'Migrations run in batches of five thousand so the table stays writable.', meta:'learned the hard way, 12 July' },
+        { text:'If the harness looks unreliable, say so loudly and keep saying it.', meta:'learned 5 August, expensively' }
+      ],
+      notInherited: [
+        { text:'Ash\u2019s record, good or bad.', why:'A record is a claim about one agent\u2019s behaviour. Handing it over would make her numbers a lie from the first day.' },
+        { text:'Ash\u2019s half-finished migration work.', why:'If you want her to take it, that is a handover with its own screen, and it says what carries.' },
+        { text:'Any assumption that she is as trusted as the others.', why:'She is checked for ten units and says so in every message. Nobody pretends the fortnight has already happened.' }
+      ],
+
+      different: [
+        { text:'She writes the reverse migration before the forward one, and will not start until it exists.', meta:'9 of 9 units · Ash writes it afterwards, when he writes it' },
+        { text:'She batches in fives of a thousand rather than five thousand, which is slower and has not once locked the table.', meta:'measured · Ash\u2019s batches locked it twice in July' },
+        { text:'She asks about column semantics before touching them, which is the question Ash guessed wrong on the 18th.', meta:'2 questions in a week, both answered in under a minute' }
+      ],
+      larkChecks: [
+        { text:'Nine units read, nothing needed changing, and two were better than what he would have accepted.', meta:'Pike · about two hours in total', border:'#1F1F22', dot:G },
+        { text:'One thing he flagged: she left a reverse migration in place after it was no longer needed.', meta:'5.7 · harmless, and she removed it when asked', border:'#1F1F22', dot:A },
+        { text:'He notes that nine easy units prove very little, and that he had the same fortnight in April.', meta:'his words, kept here', border:'#1F1F22', dot:D }
+      ],
+      larkRecord: [
+        { num:'9', label:'units finished, all of them small and all in one plan', conf:'sample too small', numFg:'#8FA8CC' },
+        { num:'2', label:'questions asked, both about column meanings, both reasonable', conf:'no rate offered', numFg:'#8FA8CC' },
+        { num:'0', label:'times she has been wrong about anything that mattered', conf:'nothing has been at stake yet', numFg:'#8A8A91' }
+      ],
+
+      objection: [
+        { text:'How you would know I am wrong: if export retries never overlap a checkout spike, this cannot happen and I am worrying about nothing.', meta:'the falsifiable part', dot:B },
+        { text:'What I would do instead: one counter, with checkout guaranteed a share of it. Same simplicity, about ten extra lines.', meta:'her alternative', dot:B },
+        { text:'What it costs to find out: twelve minutes to replay a month-end export against a shared budget, before I write anything.', meta:'the cheap test', dot:A }
+      ],
+      objectionRules: [
+        { text:'It arrives before any work is done, never after, and never as a reason for work being late.', dot:G },
+        { text:'It states what it thinks will happen, specifically enough to be proven wrong.', dot:G },
+        { text:'It says how you could tell she is wrong, and offers the cheapest way to find out.', dot:G },
+        { text:'One objection per instruction. If you say do it anyway, she does it properly and does not raise it again.', dot:A },
+        { text:'It is never a refusal. She cannot be held responsible for the decision, so she does not get to make it.', dot:A }
+      ],
+
+      objectionLedger: [
+        { text:'Wren: a shared retry budget will let export starve checkout, within about ninety seconds.', meta:'1 Aug · you overruled it · checkout began refusing at 82 seconds on the 3rd', out:'she was right', outFg:'#C2704A', border:'#241A17', dot:ALARM },
+        { text:'Bex: pinning month-end totals byte-for-byte will fail on the first leap-second row.', meta:'12 July · you overruled it · it did not fail, and has not since', out:'she was wrong', outFg:'#7A9E86', border:'#1F1F22', dot:G },
+        { text:'Ash: batching at five thousand will lock the invoice table during business hours.', meta:'12 July · you agreed · batches were reduced', out:'he was right', outFg:'#8FA8CC', border:'#1F1F22', dot:B },
+        { text:'Pike: the new test harness reports failures that are not real.', meta:'9 July · nobody answered · confirmed on 26 July, and it cost a fortnight', out:'he was right', outFg:'#C2704A', border:'#241A17', dot:ALARM },
+        { text:'Rune: deleting the flaky assertion will hide a race rather than fix it.', meta:'20 July · you agreed · a race was found', out:'he was right', outFg:'#8FA8CC', border:'#1F1F22', dot:B },
+        { text:'Vale: resuming the shard from a checkpoint will produce a partial index.', meta:'16 July · you overruled it · the index was complete', out:'she was wrong', outFg:'#7A9E86', border:'#1F1F22', dot:G }
+      ],
+      ledgerRules: [
+        { text:'It exists so an objection is worth what the last ones were worth — not to make you feel bad about overruling.', dot:G },
+        { text:'An overrule is recorded as a decision, never as an error, even on the one that turned out badly.', dot:G },
+        { text:'An objection nobody answered is the worst case here, and it is recorded as the fleet\u2019s failure, not the agent\u2019s.', dot:ALARM },
+        { text:'No agent is ranked against another on this page, and objection counts are never shown as a rate.', dot:G }
+      ]
+    };
+  }
+}
+
+</script>
+</body>
+</html>

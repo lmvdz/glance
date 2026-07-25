@@ -173,12 +173,12 @@ export const CommandPalette: React.FC = () => {
         // Taste-review nit 2: a ~150ms scale+fade entrance (brand.md's micro-interaction beat,
         // GPU transform/opacity only) so the palette settles in instead of appearing instantly.
         // `.palette-rise` is a no-op transition/animation under prefers-reduced-motion.
-        className="palette-rise w-full max-w-xl overflow-hidden rounded-xl border border-gray-200 bg-white shadow-2xl dark:border-[#2A2A2E] dark:bg-[#0C0C0E]"
+        className="palette-rise w-full max-w-xl overflow-hidden rounded-xl border border-ink-border bg-white shadow-2xl dark:border-[#2A2A2E] dark:bg-[#0C0C0E]"
         onKeyDown={onKeyDown}
       >
         {/* Search input — the palette's one focal point (brand.md: one ember signal per view). */}
-        <div className="relative border-b border-gray-200 dark:border-[#1C1C20]">
-          <Search className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400 dark:text-[#5C5C62]" aria-hidden="true" />
+        <div className="relative border-b border-ink-border dark:border-[#1C1C20]">
+          <Search className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-text-subtle dark:text-[#5C5C62]" aria-hidden="true" />
           <input
             ref={inputRef}
             type="text"
@@ -186,7 +186,7 @@ export const CommandPalette: React.FC = () => {
             onChange={(e) => { setQuery(e.target.value); setSelectedIndex(0); }}
             placeholder="Jump to a view, or search the fleet's memory…"
             aria-label="Command palette search"
-            className="w-full bg-transparent py-3.5 pl-11 pr-20 text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none dark:text-gray-100 dark:placeholder:text-[#5C5C62]"
+            className="w-full bg-transparent py-3.5 pl-11 pr-20 text-sm text-ink-text placeholder:text-ink-text-subtle focus:outline-none text-ink-text dark:placeholder:text-[#5C5C62]"
           />
           <div className="absolute right-3 top-1/2 -translate-y-1/2">
             <Kbd keys="esc" label="close" />
@@ -196,7 +196,7 @@ export const CommandPalette: React.FC = () => {
         {/* Rows */}
         <ul ref={listRef} className="max-h-[50vh] overflow-y-auto py-1" role="listbox" aria-label="Commands and results">
           {rows.length === 0 && !searching && (
-            <li className="px-4 py-8 text-center text-sm text-gray-500 dark:text-gray-400">
+            <li className="px-4 py-8 text-center text-sm text-ink-text-muted">
               Nothing matches. Try a view name, a file path, or a decision.
             </li>
           )}
@@ -212,25 +212,25 @@ export const CommandPalette: React.FC = () => {
                   className={`flex w-full items-center gap-3 px-4 py-2 text-left transition-colors focus:outline-none ${
                     active
                       ? 'bg-amber-50 dark:bg-[color:var(--wf-accent-soft)]'
-                      : 'hover:bg-gray-50 dark:hover:bg-[#151517]'
+                      : 'hover:bg-ink dark:hover:bg-[#151517]'
                   }`}
                 >
-                  <Icon className={`h-4 w-4 flex-shrink-0 ${active ? 'text-amber-600 dark:text-[color:var(--wf-accent)]' : 'text-gray-400 dark:text-[#5C5C62]'}`} aria-hidden="true" />
+                  <Icon className={`h-4 w-4 flex-shrink-0 ${active ? 'text-amber-600 dark:text-[color:var(--wf-accent)]' : 'text-ink-text-subtle dark:text-[#5C5C62]'}`} aria-hidden="true" />
                   <span className="min-w-0 flex-1">
-                    <span className={`block truncate text-sm ${active ? 'font-medium text-gray-900 dark:text-gray-100' : 'text-gray-700 dark:text-gray-300'}`}>
+                    <span className={`block truncate text-sm ${active ? 'font-medium text-ink-text' : 'text-ink-text-label'}`}>
                       {row.label}
                     </span>
                     {row.kind === 'fabric' && (
-                      <span className="mt-0.5 block truncate text-xs text-gray-500 dark:text-gray-400">{row.snippet}</span>
+                      <span className="mt-0.5 block truncate text-xs text-ink-text-muted">{row.snippet}</span>
                     )}
                   </span>
                   {row.kind === 'fabric' && (
-                    <span className="flex-shrink-0 rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-semibold text-gray-500 dark:bg-[#151517] dark:text-gray-400">
+                    <span className="flex-shrink-0 rounded bg-ink-surface px-1.5 py-0.5 text-caption font-semibold text-ink-text0 dark:bg-[#151517] text-ink-text-subtle">
                       {row.typeLabel}
                     </span>
                   )}
                   {row.kind === 'nav' && (
-                    <span className="flex-shrink-0 text-[10px] font-medium uppercase tracking-wider text-gray-400 dark:text-[#5C5C62]">
+                    <span className="flex-shrink-0 text-caption font-medium uppercase tracking-wider text-ink-text-subtle dark:text-[#5C5C62]">
                       {row.view === 'org' ? 'settings' : 'view'}
                     </span>
                   )}
@@ -240,7 +240,7 @@ export const CommandPalette: React.FC = () => {
             );
           })}
           {searching && (
-            <li className="flex items-center gap-2 px-4 py-2 text-xs text-gray-400 dark:text-gray-500" aria-live="polite">
+            <li className="flex items-center gap-2 px-4 py-2 text-xs text-ink-text-subtle" aria-live="polite">
               <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500" aria-hidden="true" />
               Searching the knowledge base…
             </li>
@@ -248,10 +248,10 @@ export const CommandPalette: React.FC = () => {
         </ul>
 
         {/* Footer — kbd legend per the reference language (kit/Kbd chips, never bare tooltips). */}
-        <div className="flex items-center gap-4 border-t border-gray-200 px-4 py-2 dark:border-[#1C1C20]">
+        <div className="flex items-center gap-4 border-t border-ink-border px-4 py-2 dark:border-[#1C1C20]">
           <Kbd keys="↑↓" label="navigate" />
-          <span className="inline-flex items-center gap-1.5 font-mono text-[10px] text-gray-400 dark:text-gray-500">
-            <kbd className="rounded border border-gray-300 bg-gray-100 px-1 py-0.5 leading-none text-gray-500 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-400">
+          <span className="inline-flex items-center gap-1.5 font-mono text-caption text-ink-text-subtle">
+            <kbd className="rounded border border-ink-border-2 bg-ink-surface px-1 py-0.5 leading-none text-ink-text0 border-ink-border-2 bg-ink-surface text-ink-text-subtle">
               <CornerDownLeft className="h-2.5 w-2.5" aria-hidden="true" />
             </kbd>
             open

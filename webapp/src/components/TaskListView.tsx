@@ -32,7 +32,7 @@ interface StatusOption { group: string; label: string; dot: string; text: string
 // Only the groups that survive a reload: the write path maps status → 3 FeatureStages, so backlog,
 // unstarted (Todo) and cancelled all collapse to 'planned' and reload as Backlog. Offer the 3 distinct ones.
 export const TASK_STATUSES: StatusOption[] = [
-  { group: 'backlog', label: 'Backlog', dot: 'bg-gray-400', text: 'text-gray-500 dark:text-gray-400' },
+  { group: 'backlog', label: 'Backlog', dot: 'bg-ink-text-subtle', text: 'text-ink-text-muted' },
   { group: 'started', label: 'In Progress', dot: 'bg-amber-500', text: 'text-amber-500' },
   { group: 'completed', label: 'Done', dot: 'bg-emerald-500', text: 'text-emerald-500' },
 ];
@@ -62,7 +62,7 @@ const avatarColor = (name: string): string => {
 const initials = (name: string): string => name.split(/[\s\-_./]+/).filter(Boolean).slice(0, 2).map((s) => s[0]?.toUpperCase()).join('') || '?';
 const agentRing: Record<string, string> = { working: 'ring-emerald-500', starting: 'ring-emerald-500', error: 'ring-red-500', idle: 'ring-amber-400' };
 const Avatar: React.FC<{ agent: AgentDTO }> = ({ agent }) => (
-  <span className={`inline-flex h-5 w-5 items-center justify-center rounded-full text-[9px] font-semibold text-white ring-2 ring-offset-1 ring-offset-white dark:ring-offset-gray-950 ${avatarColor(agent.name)} ${agentRing[agent.status] ?? 'ring-gray-400'}`} title={`${agent.name} · ${agent.status}`}>
+  <span className={`inline-flex h-5 w-5 items-center justify-center rounded-full text-[9px] font-semibold text-white ring-2 ring-offset-1 ring-offset-white dark:ring-offset-gray-950 ${avatarColor(agent.name)} ${agentRing[agent.status] ?? 'ring-ink-border-2'}`} title={`${agent.name} · ${agent.status}`}>
     {initials(agent.name)}
   </span>
 );
@@ -81,28 +81,28 @@ const StatusCell: React.FC<{ current: StatusOption; onChange: (s: StatusOption) 
     <div ref={ref} className="relative" onClick={(e) => e.stopPropagation()}>
       <button
         onClick={() => setOpen((o) => !o)}
-        className="flex items-center gap-1.5 rounded px-1.5 py-1 text-xs transition-colors hover:bg-gray-100 dark:hover:bg-gray-800"
+        className="flex items-center gap-1.5 rounded px-1.5 py-1 text-xs transition-colors hover:bg-ink-surface"
         aria-haspopup="listbox"
         aria-expanded={open}
         title="Change status"
       >
         <span className={`h-2 w-2 flex-shrink-0 rounded-full ${current.dot}`} />
         <span className={current.text}>{current.label}</span>
-        <ChevronDown className="h-3 w-3 text-gray-400" aria-hidden="true" />
+        <ChevronDown className="h-3 w-3 text-ink-text-subtle" aria-hidden="true" />
       </button>
       {open && (
-        <div className="absolute left-0 top-full z-20 mt-1 w-44 rounded-md border border-gray-200 bg-white py-1 shadow-lg dark:border-gray-700 dark:bg-gray-900" role="listbox">
+        <div className="absolute left-0 top-full z-20 mt-1 w-44 rounded-md border border-ink-border bg-white py-1 shadow-lg border-ink-border-2 bg-panel" role="listbox">
           {TASK_STATUSES.map((s) => (
             <button
               key={s.group}
               onClick={() => { onChange(s); setOpen(false); }}
-              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-xs transition-colors hover:bg-gray-100 dark:hover:bg-gray-800"
+              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-xs transition-colors hover:bg-ink-surface"
               role="option"
               aria-selected={s.group === current.group}
             >
               <span className={`h-2 w-2 flex-shrink-0 rounded-full ${s.dot}`} />
               <span className={`${s.text} ${s.group === current.group ? 'font-semibold' : ''}`}>{s.label}</span>
-              {s.group === current.group && <Check className="ml-auto h-3 w-3 text-gray-400" aria-hidden="true" />}
+              {s.group === current.group && <Check className="ml-auto h-3 w-3 text-ink-text-subtle" aria-hidden="true" />}
             </button>
           ))}
         </div>
@@ -132,7 +132,7 @@ const COLUMNS: TaskColumn[] = [
     header: '',
     cell: 'w-7 flex-shrink-0',
     render: ({ pinned, togglePin }) => (
-      <button onClick={(e) => { e.stopPropagation(); togglePin(); }} className={`flex h-6 w-6 items-center justify-center rounded transition-colors hover:bg-gray-100 dark:hover:bg-gray-800 ${pinned ? 'text-amber-500' : 'text-gray-300 hover:text-gray-500 dark:text-gray-600'}`} title={pinned ? 'Unpin' : 'Pin to top'} aria-pressed={pinned}>
+      <button onClick={(e) => { e.stopPropagation(); togglePin(); }} className={`flex h-6 w-6 items-center justify-center rounded transition-colors hover:bg-ink-surface ${pinned ? 'text-amber-500' : 'text-ink-text-label hover:text-ink-text0 text-ink-text-label'}`} title={pinned ? 'Unpin' : 'Pin to top'} aria-pressed={pinned}>
         <Pin className={`h-3.5 w-3.5 ${pinned ? 'fill-amber-400' : ''}`} aria-hidden="true" />
       </button>
     ),
@@ -141,7 +141,7 @@ const COLUMNS: TaskColumn[] = [
     key: 'id',
     header: 'ID',
     cell: 'w-24 flex-shrink-0',
-    render: ({ task }) => <span className="truncate font-mono text-[11px] text-gray-400" title={task.planDir ?? task.id}>{taskRef(task) ?? task.id.slice(0, 8)}</span>,
+    render: ({ task }) => <span className="truncate font-mono text-caption text-ink-text-subtle" title={task.planDir ?? task.id}>{taskRef(task) ?? task.id.slice(0, 8)}</span>,
   },
   {
     key: 'title',
@@ -149,8 +149,8 @@ const COLUMNS: TaskColumn[] = [
     cell: 'min-w-0 flex-1',
     render: ({ task }) => (
       <div className="flex min-w-0 items-center gap-2">
-        <span className={`truncate text-sm ${task.status === 'done' ? 'text-gray-400 line-through dark:text-gray-600' : 'font-medium text-gray-900 dark:text-gray-100'}`} title={task.title}>{task.title}</span>
-        <span className={`hidden flex-shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium sm:inline ${getCategoryBadge(task.category)}`}>{task.category}</span>
+        <span className={`truncate text-sm ${task.status === 'done' ? 'text-ink-text-subtle line-through text-ink-text-label' : 'font-medium text-ink-text'}`} title={task.title}>{task.title}</span>
+        <span className={`hidden flex-shrink-0 rounded px-1.5 py-0.5 text-caption font-medium sm:inline ${getCategoryBadge(task.category)}`}>{task.category}</span>
       </div>
     ),
   },
@@ -166,15 +166,15 @@ const COLUMNS: TaskColumn[] = [
     cell: 'w-28 flex-shrink-0',
     render: ({ task }) => {
       const total = task.acceptanceCriteria.length;
-      if (total === 0) return <span className="text-xs text-gray-300 dark:text-gray-700">—</span>;
+      if (total === 0) return <span className="text-xs text-ink-text-label text-ink-text-label">—</span>;
       const done = task.acceptanceCriteria.filter((c) => c.completed).length;
       const pct = Math.round((done / total) * 100);
       return (
         <div className="flex items-center gap-2" title={`${done}/${total} acceptance criteria`}>
-          <span className="h-1.5 w-14 overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800">
+          <span className="h-1.5 w-14 overflow-hidden rounded-full bg-ink-border bg-ink-surface">
             <span className={`block h-1.5 rounded-full ${pct === 100 ? 'bg-emerald-500' : 'bg-amber-500'}`} style={{ width: `${pct}%` }} />
           </span>
-          <span className="font-mono text-[10px] text-gray-400">{pct}%</span>
+          <span className="font-mono text-caption text-ink-text-subtle">{pct}%</span>
         </div>
       );
     },
@@ -185,11 +185,11 @@ const COLUMNS: TaskColumn[] = [
     cell: 'w-24 flex-shrink-0',
     render: ({ status }) => {
       const on = [...status.working, ...status.errored, ...status.idle, ...status.stopped];
-      if (!on.length) return <Users className="h-3.5 w-3.5 text-gray-300 dark:text-gray-700" aria-hidden="true" />;
+      if (!on.length) return <Users className="h-3.5 w-3.5 text-ink-text-label text-ink-text-label" aria-hidden="true" />;
       return (
         <div className="flex items-center">
           <div className="flex -space-x-1.5">{on.slice(0, 3).map((a) => <Avatar key={a.id} agent={a} />)}</div>
-          {on.length > 3 && <span className="ml-1 text-[10px] text-gray-400">+{on.length - 3}</span>}
+          {on.length > 3 && <span className="ml-1 text-caption text-ink-text-subtle">+{on.length - 3}</span>}
         </div>
       );
     },
@@ -202,7 +202,7 @@ const TaskRow: React.FC<{ ctx: SlotCtx; onSelect: () => void }> = ({ ctx, onSele
     tabIndex={0}
     onClick={onSelect}
     onKeyDown={(e) => { if (e.key === 'Enter') onSelect(); }}
-    className="flex cursor-pointer items-center gap-3 border-b border-gray-100 px-4 py-2.5 transition-colors hover:bg-gray-50 focus:outline-none focus-visible:bg-gray-50 dark:border-gray-800/60 dark:hover:bg-gray-900/60 dark:focus-visible:bg-gray-900/60"
+    className="flex cursor-pointer items-center gap-3 border-b border-ink-border px-4 py-2.5 transition-colors hover:bg-ink focus:outline-none focus-visible:bg-ink border-ink-border/60 dark:hover:bg-panel/60 dark:focus-visible:bg-panel/60"
   >
     {COLUMNS.map((col) => (
       <div key={col.key} className={`flex items-center ${col.cell}`}>{col.render(ctx)}</div>
@@ -211,10 +211,10 @@ const TaskRow: React.FC<{ ctx: SlotCtx; onSelect: () => void }> = ({ ctx, onSele
 );
 
 const SectionHeader: React.FC<{ title: string; count: number; hint?: string; tone?: string }> = ({ title, count, hint, tone }) => (
-  <div className="flex items-baseline gap-2 border-b border-gray-200 bg-gray-50 px-4 py-1.5 dark:border-gray-800 dark:bg-gray-900/40">
-    <h2 className={`text-[11px] font-semibold uppercase tracking-widest ${tone ?? 'text-gray-500'}`}>{title}</h2>
-    <span className="font-mono text-[11px] text-gray-400">{count}</span>
-    {hint && <span className="text-[11px] text-gray-400">· {hint}</span>}
+  <div className="flex items-baseline gap-2 border-b border-ink-border bg-ink px-4 py-1.5 border-ink-border bg-panel/40">
+    <h2 className={`text-caption font-semibold uppercase tracking-widest ${tone ?? 'text-ink-text0'}`}>{title}</h2>
+    <span className="font-mono text-caption text-ink-text-subtle">{count}</span>
+    {hint && <span className="text-caption text-ink-text-subtle">· {hint}</span>}
   </div>
 );
 
@@ -230,17 +230,17 @@ const VIEW_MODES: Array<{ key: TasksListMode; label: string }> = [
 ];
 
 export const ViewModeToggle: React.FC<{ mode: TasksListMode; onChange: (mode: TasksListMode) => void }> = ({ mode, onChange }) => (
-  <div role="group" aria-label="Task view" className="flex items-center gap-0.5 rounded-md border border-gray-200 p-0.5 dark:border-gray-800">
+  <div role="group" aria-label="Task view" className="flex items-center gap-0.5 rounded-md border border-ink-border p-0.5 border-ink-border">
     {VIEW_MODES.map((m) => (
       <button
         key={m.key}
         type="button"
         onClick={() => onChange(m.key)}
         aria-pressed={mode === m.key}
-        className={`min-h-6 rounded px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 ${
+        className={`min-h-6 rounded px-2.5 py-1 text-caption font-semibold uppercase tracking-wide transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 ${
           mode === m.key
             ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300'
-            : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'
+            : 'text-ink-text0 hover:bg-ink-surface hover:text-ink-text-label text-ink-text-subtle dark:hover:bg-ink-surface dark:hover:text-ink-text-body'
         }`}
       >
         {m.label}
@@ -315,18 +315,18 @@ export const TaskListView: React.FC = () => {
     );
 
   return (
-    <main className="flex h-full flex-1 flex-col overflow-hidden bg-white dark:bg-gray-950">
-      <div className="flex flex-shrink-0 items-center gap-2.5 border-b border-gray-200 px-5 py-3 dark:border-gray-800">
+    <main className="flex h-full flex-1 flex-col overflow-hidden bg-panel">
+      <div className="flex flex-shrink-0 items-center gap-2.5 border-b border-ink-border px-5 py-3 border-ink-border">
         <Inbox className="h-4 w-4 text-blue-500" aria-hidden="true" />
-        <h1 className="text-sm font-semibold text-gray-900 dark:text-gray-100">All work items</h1>
-        <span className="font-mono text-xs text-gray-400">{total}</span>
+        <h1 className="text-sm font-semibold text-ink-text">All work items</h1>
+        <span className="font-mono text-xs text-ink-text-subtle">{total}</span>
         {tasksListMode === 'list' && taskCategoryFilter && (
           // Taste-review nit 3: the canvas's "+N more" chip lands HERE now — filtered, not the
           // full list — and this chip is the honest, visible, dismissible record of that filter
           // (so it never reads as a silent, unexplained shrink of "All work items"). Ember via
           // `var(--wf-accent)` — real ember hex in both themes (index.css) — not a hardcoded hex.
           <span
-            className="flex items-center gap-1 rounded-full border py-0.5 pl-2 pr-1 text-[11px] font-medium"
+            className="flex items-center gap-1 rounded-full border py-0.5 pl-2 pr-1 text-caption font-medium"
             style={{ borderColor: 'color-mix(in srgb, var(--wf-accent) 40%, transparent)', backgroundColor: 'color-mix(in srgb, var(--wf-accent) 12%, transparent)', color: 'var(--wf-accent)' }}
           >
             {categoryLabel(taskCategoryFilter)}
@@ -343,7 +343,7 @@ export const TaskListView: React.FC = () => {
           </span>
         )}
         <span className="ml-auto flex items-center gap-3">
-          <span className="hidden text-[11px] text-gray-400 sm:inline">
+          <span className="hidden text-caption text-ink-text-subtle sm:inline">
             {tasksListMode === 'list' ? 'click a row for full detail · click status to change' : 'click a category, then a plan, for full detail'}
           </span>
           <Kbd keys="V" label="list/canvas" />
@@ -353,16 +353,16 @@ export const TaskListView: React.FC = () => {
 
       {tasksListMode === 'list' ? (
         <>
-          <div className="flex flex-shrink-0 items-center gap-3 border-b border-gray-200 px-4 py-1.5 dark:border-gray-800">
+          <div className="flex flex-shrink-0 items-center gap-3 border-b border-ink-border px-4 py-1.5 border-ink-border">
             {COLUMNS.map((col) => (
-              <div key={col.key} className={`text-[10px] font-semibold uppercase tracking-wider text-gray-400 ${col.cell}`}>{col.header}</div>
+              <div key={col.key} className={`text-caption font-semibold uppercase tracking-wider text-ink-text-subtle ${col.cell}`}>{col.header}</div>
             ))}
           </div>
 
           <div className="flex-1 overflow-y-auto scrollbar-custom">
             {total === 0 ? (
-              <div className="flex flex-col items-center gap-2 py-24 text-center text-gray-500 dark:text-gray-400">
-                <Inbox className="h-8 w-8 text-gray-300 dark:text-gray-600" aria-hidden="true" />
+              <div className="flex flex-col items-center gap-2 py-24 text-center text-ink-text-muted">
+                <Inbox className="h-8 w-8 text-ink-text-subtle" aria-hidden="true" />
                 <div className="text-sm font-medium">{taskCategoryFilter ? `No work items in ${categoryLabel(taskCategoryFilter)}` : 'No work items yet'}</div>
                 <div className="text-xs">
                   {taskCategoryFilter ? (

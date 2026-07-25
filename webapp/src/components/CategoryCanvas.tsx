@@ -214,7 +214,7 @@ const SatelliteChip: React.FC<{ sat: SatelliteNode; index: number; reducedMotion
   >
     <div className="flex w-full items-center gap-1.5">
       <ProgressRing pct={sat.pct} size={16} />
-      <span className="truncate text-[11px] font-medium text-[color:var(--wf-text)]">{sat.title}</span>
+      <span className="truncate text-caption font-medium text-[color:var(--wf-text)]">{sat.title}</span>
     </div>
     {sat.needsYou && <StatusChip status="input" className="scale-90 origin-left" />}
   </button>
@@ -287,7 +287,7 @@ export const CategoryCanvasView: React.FC<CategoryCanvasViewProps> = ({
     // D6: "Zero open → calm one-liner (existing empty-state voice)" — the same restrained
     // register TaskListView's own empty state uses, not a broken-looking dimmed ring.
     return (
-      <div className={`flex h-full flex-1 flex-col items-center justify-center gap-2 py-24 text-center text-gray-500 dark:text-gray-400 ${className ?? ""}`}>
+      <div className={`flex h-full flex-1 flex-col items-center justify-center gap-2 py-24 text-center text-ink-text-muted ${className ?? ""}`}>
         <div className="text-sm font-medium">Nothing open, in any category.</div>
         <div className="text-xs">Plans and features will concentrate here as the fleet picks up work.</div>
       </div>
@@ -297,8 +297,8 @@ export const CategoryCanvasView: React.FC<CategoryCanvasViewProps> = ({
   return (
     <div
       // Taste-review nit 4: the frame now uses the SAME `--wf-surface`/`--wf-border` tokens the
-      // rest of the app's chrome does, instead of an ad hoc `bg-white dark:bg-gray-950` /
-      // `border-gray-200 dark:border-gray-800` pairing that happened to look similar but didn't
+      // rest of the app's chrome does, instead of an ad hoc `bg-panel` /
+      // `border-ink-border` pairing that happened to look similar but didn't
       // actually move with the app's real light/dark tokens (the plain-gray chrome, on top of
       // hue-family rim colors under-tuned for light backgrounds, is what read as "generic bubble
       // chart" — see the `--cc-rim-*` fix above for the other half).
@@ -312,11 +312,11 @@ export const CategoryCanvasView: React.FC<CategoryCanvasViewProps> = ({
             <button type="button" onClick={onBack} className="rounded px-1 py-0.5 font-medium text-[color:var(--wf-accent)] outline-none hover:underline focus-visible:ring-2 focus-visible:ring-[color:var(--wf-accent)]">
               All categories
             </button>
-            <span className="text-gray-400">/</span>
+            <span className="text-ink-text-subtle">/</span>
             <span className="text-[color:var(--wf-text)]">{selectedBucket.label}</span>
           </nav>
         ) : (
-          <span className="text-[11px] text-gray-400">select a category to see its plans</span>
+          <span className="text-caption text-ink-text-subtle">select a category to see its plans</span>
         )}
         <span className="ml-auto flex items-center gap-2">
           <Kbd keys="←→" label="cycle" />
@@ -358,7 +358,7 @@ export const CategoryCanvasView: React.FC<CategoryCanvasViewProps> = ({
         </div>
 
         {selectedBucket && selectedBucket.tasks.length === 0 && (
-          <div className="absolute left-1/2 top-[78%] w-64 -translate-x-1/2 text-center text-xs text-gray-400" style={{ top: `${((VIEWPORT.height / 2 + 90) / VIEWPORT.height) * 100}%` }}>
+          <div className="absolute left-1/2 top-[78%] w-64 -translate-x-1/2 text-center text-xs text-ink-text-subtle" style={{ top: `${((VIEWPORT.height / 2 + 90) / VIEWPORT.height) * 100}%` }}>
             No plans yet in {selectedBucket.label}.
           </div>
         )}
@@ -374,7 +374,7 @@ export const CategoryCanvasView: React.FC<CategoryCanvasViewProps> = ({
               e.stopPropagation();
               onShowMore?.(selectedBucket.id, satelliteLayout.overflow.map((t) => t.id));
             }}
-            className="absolute flex min-h-[44px] min-w-[44px] items-center justify-center rounded-full border border-dashed border-[color:var(--wf-border-strong)] bg-[color:var(--wf-surface)] px-2 text-[11px] font-medium text-[color:var(--wf-text-muted)] outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--wf-accent)]"
+            className="absolute flex min-h-[44px] min-w-[44px] items-center justify-center rounded-full border border-dashed border-[color:var(--wf-border-strong)] bg-[color:var(--wf-surface)] px-2 text-caption font-medium text-[color:var(--wf-text-muted)] outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--wf-accent)]"
             style={{ left: pct(overflowPos.x, VIEWPORT.width), top: pct(overflowPos.y, VIEWPORT.height), transform: "translate(-50%, -50%)" }}
           >
             +{satelliteLayout.overflow.length} more

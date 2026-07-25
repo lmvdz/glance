@@ -34,15 +34,15 @@ export const AttentionRow: React.FC<AttentionRowProps> = ({ item, onAction, onOp
   const body = (
     <>
       <div className="flex items-center gap-2">
-        <span className="truncate text-sm font-medium text-gray-900 dark:text-gray-100">{item.title}</span>
-        {age && <span className="flex-shrink-0 text-[10px] tabular-nums text-gray-400">{age}</span>}
+        <span className="truncate text-sm font-medium text-ink-text">{item.title}</span>
+        {age && <span className="flex-shrink-0 text-caption tabular-nums text-ink-text-subtle">{age}</span>}
       </div>
-      {item.detail && <div className="mt-0.5 truncate text-xs text-gray-500 dark:text-gray-400" title={item.detail}>{item.detail}</div>}
+      {item.detail && <div className="mt-0.5 truncate text-xs text-ink-text-muted" title={item.detail}>{item.detail}</div>}
     </>
   );
 
   return (
-    <div className="flex items-start gap-3 px-4 py-3 transition-colors hover:bg-gray-50 dark:hover:bg-gray-800/40">
+    <div className="flex items-start gap-3 px-4 py-3 transition-colors hover:bg-ink-surface">
       <span className={`mt-1.5 h-2 w-2 flex-shrink-0 rounded-full ${t.dot}`} aria-hidden="true" />
       {canOpen ? (
         <button onClick={() => onOpen?.(item)} className="min-w-0 flex-1 rounded text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500" aria-label={`Step into ${item.title}`}>

@@ -28,8 +28,8 @@ test("CategoryChip: an override selects that option, not Auto", () => {
 test("CategoryChip: 'other' renders the honest neutral tone, not a made-up fifth color", () => {
   const html = renderToStaticMarkup(<CategoryChip category="other" onChange={() => {}} />);
   expect(html).toContain("Auto · other");
-  expect(html).toContain("bg-gray-100");
-  expect(html).toContain("text-gray-700");
+  expect(html).toContain("bg-ink-surface");
+  expect(html).toContain("text-ink-text-label");
 });
 
 test("CategoryChip: every option renders as a real <option>, none dropped", () => {

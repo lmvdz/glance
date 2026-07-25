@@ -1,0 +1,802 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+html,body{margin:0;padding:0;background:#070708;}
+*{box-sizing:border-box;}
+a{color:#F0A35A;text-decoration:none;}
+a:hover{color:#F7C08A;}
+::selection{background:#3A2E20;}
+@keyframes breathe{0%,100%{opacity:.34}50%{opacity:1}}
+@keyframes crawl{0%{transform:translateX(-100%)}100%{transform:translateX(340%)}}
+</style>
+</helmet>
+
+<div style="min-height:100vh;background:#070708;display:flex;flex-direction:column;align-items:center;gap:12px;padding:18px;font-family:system-ui,-apple-system,'Helvetica Neue',sans-serif">
+
+<div style="width:1600px;display:flex;flex-direction:column;gap:8px">
+  <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+    <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;letter-spacing:.14em;color:#5A5A61;margin-right:6px">SHELL</div>
+    <button onClick="{{ go1 }}" style="{{ t1 }}">1 at rest</button>
+    <button onClick="{{ go2 }}" style="{{ t2 }}">2 in flight, watched</button>
+    <button onClick="{{ go3 }}" style="{{ t3 }}">3 from across the room</button>
+    <button onClick="{{ go4 }}" style="{{ t4 }}">4 permission mid-speech</button>
+    <button onClick="{{ go5 }}" style="{{ t5 }}">5 talking → typing</button>
+    <button onClick="{{ go6 }}" style="{{ t6 }}">6 several sessions</button>
+    <button onClick="{{ go7 }}" style="{{ t7 }}">7 sound, motion, silence</button>
+  </div>
+  <div style="font-size:12.5px;color:#6A6A72;min-height:17px">{{ caption }}</div>
+</div>
+
+<!-- ══════════ 3 · FROM ACROSS THE ROOM ══════════ -->
+<div style="{{ roomBoard }}">
+  <div style="width:1600px;height:1000px;background:#0A0A0B;border:1px solid #1F1F22;display:flex;flex-direction:column;overflow:hidden;color:#E8E8EA;padding:26px 30px">
+    <div style="flex:none">
+      <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.16em;color:#5A5A61">THE SAME MOMENT AS SURFACE 2, AT THE DISTANCES IT IS ACTUALLY READ FROM</div>
+      <div style="margin-top:9px;font-size:17.5px;line-height:1.4;color:#F2F2F4;text-wrap:pretty;max-width:1100px">Nothing in the interface survives four metres except one strip along the top edge of the window. So that strip carries the entire state, and it carries it in motion rather than colour.</div>
+      <div style="margin-top:6px;font-size:13px;color:#9A9AA2;line-height:1.5;text-wrap:pretty;max-width:1040px">Colour is the first thing peripheral vision loses and the first thing a colour-blind reader never had. Movement is the last. The strip is four pixels tall, the full width of the window, and it is the only animated element anywhere in this product.</div>
+    </div>
+
+    <div style="flex:1;display:flex;gap:26px;margin-top:22px;min-height:0">
+      <div style="flex:1;display:flex;flex-direction:column;gap:18px;min-width:0">
+        <sc-for list="{{ distances }}" as="d" hint-placeholder-count="4">
+          <div style="display:flex;align-items:center;gap:20px">
+            <div style="width:120px;flex:none;text-align:right">
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:13px;color:#C9C9CF">{{ d.dist }}</div>
+              <div style="margin-top:3px;font-size:11.5px;color:#5A5A61;line-height:1.4">{{ d.who }}</div>
+            </div>
+            <div style="flex:1;border:1px solid #1F1F22;background:#0B0B0C;overflow:hidden;height:{{ d.h }}">
+              <div style="height:{{ d.spine }};background:#2E4A6E;position:relative;overflow:hidden">
+                <div style="position:absolute;inset:0;width:22%;background:#5B8DEF;animation:crawl 2.6s linear infinite"></div>
+              </div>
+              <div style="padding:{{ d.pad }};display:flex;flex-direction:column;gap:{{ d.gap }}">
+                <div style="height:{{ d.line }};width:38%;background:#232329"></div>
+                <div style="height:{{ d.line }};width:64%;background:#1B1B20"></div>
+                <div style="height:{{ d.line }};width:52%;background:#1B1B20"></div>
+                <div style="height:{{ d.line }};width:71%;background:#161619"></div>
+              </div>
+            </div>
+            <div style="width:300px;flex:none;font-size:12.5px;color:#9A9AA2;line-height:1.5;text-wrap:pretty">{{ d.reads }}</div>
+          </div>
+        </sc-for>
+      </div>
+
+      <div style="width:430px;flex:none;border-left:1px solid #1F1F22;padding-left:24px;display:flex;flex-direction:column;min-height:0">
+        <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHAT THE STRIP SAYS, IN MOTION ALONE</div>
+        <div style="margin-top:12px;display:flex;flex-direction:column;gap:12px">
+          <sc-for list="{{ spineStates }}" as="s" hint-placeholder-count="6">
+            <div style="display:flex;gap:14px;align-items:flex-start">
+              <div style="width:104px;flex:none;height:16px;border:1px solid #17171A;background:{{ s.bg }};position:relative;overflow:hidden;margin-top:2px">
+                <div style="{{ s.inner }}"></div>
+              </div>
+              <div style="flex:1">
+                <div style="font-size:12.5px;color:#DEDEE2;line-height:1.4">{{ s.name }}</div>
+                <div style="margin-top:3px;font-size:11.5px;color:#6A6A72;line-height:1.45;text-wrap:pretty">{{ s.motion }}</div>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+        <div style="margin-top:18px;padding:11px 12px;border:1px dashed #26262B;border-radius:3px;font-size:12px;color:#8A8A91;line-height:1.5;text-wrap:pretty">Six states, and only three of them move. Nothing else in the product animates, so movement anywhere in the corner of your eye means exactly one thing: the shell's state changed.</div>
+        <div style="margin-top:14px;padding:11px 12px;border:1px solid #241A17;border-left:2px solid #B4553A;background:#100D0C;font-size:12.5px;color:#C9C9CF;line-height:1.5;text-wrap:pretty">The expensive mistake is talking into a dead microphone. Live is the only state that breathes at a human rate — about one cycle every four seconds — and it is the only one you can feel without looking directly at it.</div>
+        <div style="flex:1"></div>
+        <div style="padding-top:14px;border-top:1px solid #1F1F22;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52;line-height:1.8">
+          <div>at four metres the answer is not a smaller screen</div>
+          <div>it is one moving line and, if it matters, a sound</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════ 7 · SOUND, MOTION, SILENCE ══════════ -->
+<div style="{{ soundBoard }}">
+  <div style="width:1600px;height:1000px;background:#0A0A0B;border:1px solid #1F1F22;display:flex;flex-direction:column;overflow:hidden;color:#E8E8EA;padding:24px 30px">
+    <div style="flex:none">
+      <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.16em;color:#5A5A61">THE NON-VISUAL SPECIFICATION · WHAT EACH MEDIUM CARRIES, AND WHAT IT MAY NEVER CARRY</div>
+      <div style="margin-top:9px;font-size:17.5px;line-height:1.4;color:#F2F2F4;text-wrap:pretty;max-width:1180px">A spoken claim carries its own uncertainty in grammar, not in a disclaimer. Verified things are said plainly; unverified things are said with their source attached.</div>
+      <div style="margin-top:6px;font-size:13px;color:#9A9AA2;line-height:1.5;text-wrap:pretty;max-width:1120px">"The auth tests pass" versus "Pike says the auth tests pass, I haven't run them myself." Both are one sentence, neither is a caveat, and a person half listening from across a room registers the difference without being taught it — because that is already how people report second-hand information.</div>
+    </div>
+
+    <div style="flex:1;display:flex;gap:26px;margin-top:20px;min-height:0">
+      <div style="flex:1;min-width:0;display:flex;flex-direction:column">
+        <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">THE THREE CLAIM STATES, SPOKEN</div>
+        <div style="margin-top:11px;display:flex;flex-direction:column;gap:9px">
+          <sc-for list="{{ spokenStates }}" as="c" hint-placeholder-count="3">
+            <div style="padding:12px 13px;border:1px solid {{ c.border }};background:#0B0B0C;border-radius:3px">
+              <div style="display:flex;align-items:baseline;gap:10px">
+                <div style="width:5px;height:5px;border-radius:50%;background:{{ c.dot }}"></div>
+                <div style="font-size:13px;font-weight:600;color:#F2F2F4">{{ c.name }}</div>
+                <div style="flex:1"></div>
+                <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">{{ c.freq }}</div>
+              </div>
+              <div style="margin-top:8px;font-size:14px;color:#DEDEE2;line-height:1.5;text-wrap:pretty">{{ c.said }}</div>
+              <div style="margin-top:6px;font-size:12px;color:#8A8A91;line-height:1.5;text-wrap:pretty">{{ c.rule }}</div>
+            </div>
+          </sc-for>
+        </div>
+
+        <div style="margin-top:18px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">AND THE GRAMMAR THAT KEEPS A STEP FROM SOUNDING LIKE A RESULT</div>
+        <div style="margin-top:11px;display:flex;flex-direction:column;gap:8px">
+          <sc-for list="{{ grammar }}" as="g" hint-placeholder-count="3">
+            <div style="display:flex;gap:14px;padding:10px 12px;border:1px solid #1F1F22;background:#0B0B0C;border-radius:3px">
+              <div style="width:96px;flex:none;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:{{ g.tagFg }};padding-top:2px">{{ g.tag }}</div>
+              <div style="flex:1">
+                <div style="font-size:13px;color:#DEDEE2;line-height:1.5;text-wrap:pretty">{{ g.example }}</div>
+                <div style="margin-top:4px;font-size:11.5px;color:#6A6A72;line-height:1.45;text-wrap:pretty">{{ g.rule }}</div>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+        <div style="margin-top:12px;padding:11px 12px;border:1px solid #241A17;border-left:2px solid #B4553A;background:#100D0C;font-size:12.5px;color:#C9C9CF;line-height:1.5;text-wrap:pretty">The voice model may never speak an outcome it did not receive as an outcome. It is allowed to narrate steps, and it is allowed to say it does not know yet. It is not allowed to summarise a stream of steps into a conclusion — that is the single rule that keeps a claim from becoming a belief in audio.</div>
+      </div>
+
+      <div style="width:560px;flex:none;border-left:1px solid #1F1F22;padding-left:24px;display:flex;flex-direction:column;min-height:0">
+        <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHAT EACH MEDIUM IS FOR</div>
+        <div style="margin-top:11px;display:flex;flex-direction:column">
+          <sc-for list="{{ media }}" as="m" hint-placeholder-count="5">
+            <div style="display:flex;gap:14px;padding:10px 0;border-top:1px solid #17171A">
+              <div style="width:74px;flex:none;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#C9C9CF;padding-top:1px">{{ m.name }}</div>
+              <div style="flex:1">
+                <div style="font-size:12.5px;color:#DEDEE2;line-height:1.45;text-wrap:pretty">{{ m.carries }}</div>
+                <div style="margin-top:3px;font-size:11.5px;color:#8A6A5A;line-height:1.45;text-wrap:pretty">never: {{ m.never }}</div>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+
+        <div style="margin-top:18px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">EVERY SOUND THIS PRODUCT MAKES · FOUR, AND ONE OF THEM IS RARE</div>
+        <div style="margin-top:11px;display:flex;flex-direction:column;gap:8px">
+          <sc-for list="{{ sounds }}" as="s" hint-placeholder-count="4">
+            <div style="display:flex;gap:12px;padding:10px 11px;border:1px solid #1F1F22;background:#0B0B0C;border-radius:3px">
+              <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ s.dot }}"></div>
+              <div style="flex:1">
+                <div style="display:flex;align-items:baseline;gap:9px">
+                  <div style="font-size:12.5px;font-weight:600;color:#F2F2F4">{{ s.name }}</div>
+                  <div style="flex:1"></div>
+                  <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">{{ s.spec }}</div>
+                </div>
+                <div style="margin-top:4px;font-size:12px;color:#9A9AA2;line-height:1.45;text-wrap:pretty">{{ s.means }}</div>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+        <div style="margin-top:12px;padding:11px 12px;border:1px dashed #26262B;border-radius:3px;font-size:12px;color:#8A8A91;line-height:1.5;text-wrap:pretty">No sound for a step, a message arriving, a test passing, or work finishing. In a room with other people in it, a product that pings when something goes right gets muted within a week — and then it cannot tell you the one thing that mattered.</div>
+        <div style="flex:1"></div>
+        <div style="padding-top:14px;border-top:1px solid #1F1F22;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52;line-height:1.8">
+          <div>silence carries one thing, and only because motion carries the other</div>
+          <div>quiet with a moving strip is working · quiet with a still strip is stopped</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════ THE SHELL ITSELF ══════════ -->
+<div style="{{ shell }}">
+
+  <div style="height:4px;flex:none;background:{{ spineBg }};position:relative;overflow:hidden">
+    <div style="{{ spineInner }}"></div>
+  </div>
+
+  <div style="height:46px;flex:none;border-bottom:1px solid #1F1F22;display:flex;align-items:center;padding:0 16px;gap:14px">
+    <div style="display:flex;align-items:baseline;gap:9px">
+      <div style="font-size:14px;font-weight:600;letter-spacing:-.01em">glance</div>
+      <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#6A6A72">{{ repo }}</div>
+    </div>
+    <div style="width:1px;height:16px;background:#1F1F22"></div>
+    <div style="display:flex;align-items:center;gap:8px">
+      <div style="width:5px;height:5px;border-radius:50%;background:{{ stateDot }}"></div>
+      <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;letter-spacing:.1em;color:{{ stateFg }}">{{ stateWord }}</div>
+    </div>
+    <div style="font-size:12.5px;color:#8A8A91">{{ stateSays }}</div>
+    <div style="flex:1"></div>
+    <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#5A5A61">{{ clock }}</div>
+  </div>
+
+  <div style="flex:1;display:flex;min-height:0">
+
+    <div style="width:230px;flex:none;border-right:1px solid #1F1F22;display:flex;flex-direction:column;min-height:0">
+      <div style="padding:14px 14px 8px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.16em;color:#5A5A61">{{ plansHead }}</div>
+      <div>
+        <sc-for list="{{ plans }}" as="p" hint-placeholder-count="4">
+          <div style="display:flex;align-items:center;gap:9px;padding:8px 14px;border-left:2px solid {{ p.rule }};background:{{ p.bg }};cursor:pointer" style-hover="background:#0F0F11">
+            <div style="width:5px;height:5px;border-radius:50%;flex:none;background:{{ p.dot }}"></div>
+            <div style="flex:1;font-size:13px;color:{{ p.fg }}">{{ p.name }}</div>
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#6A6A72">{{ p.n }}</div>
+          </div>
+        </sc-for>
+      </div>
+      <div style="margin-top:18px;padding:0 14px 8px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.16em;color:#5A5A61">{{ rosterHead }}</div>
+      <div style="overflow:hidden">
+        <sc-for list="{{ roster }}" as="a" hint-placeholder-count="6">
+          <div style="display:flex;align-items:center;gap:9px;padding:5.5px 14px;cursor:pointer" style-hover="background:#0F0F11">
+            <div style="width:5px;height:5px;border-radius:50%;flex:none;background:{{ a.dot }}"></div>
+            <div style="flex:none;width:44px;font-size:12.5px;color:#C9C9CF">{{ a.name }}</div>
+            <div style="flex:1;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ a.role }}</div>
+          </div>
+        </sc-for>
+      </div>
+      <div style="flex:1"></div>
+      <div style="padding:12px 14px;border-top:1px solid #1F1F22;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52;line-height:1.7">
+        <div>{{ railFootA }}</div>
+        <div>{{ railFootB }}</div>
+      </div>
+    </div>
+
+    <div style="flex:1;display:flex;flex-direction:column;min-height:0;border-right:1px solid #1F1F22">
+
+      <!-- ─── 1 · AT REST ─── -->
+      <div style="{{ c1 }}">
+        <div style="flex:1;padding:18px 26px 0;overflow:hidden">
+          <div style="display:flex;align-items:center;gap:14px;padding:14px 16px;border:1px solid #1F1F22;background:#0B0B0C;border-radius:3px;max-width:820px">
+            <div style="width:6px;height:6px;border-radius:50%;background:#4FA97D;flex:none"></div>
+            <div style="flex:1">
+              <div style="font-size:17px;font-weight:600;letter-spacing:-.01em;color:#F2F2F4">Nothing needs anyone, and nothing is stuck.</div>
+              <div style="margin-top:5px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#6A6A72">0 waiting on a human&nbsp; ·&nbsp; 6h 12m of unbroken autonomy&nbsp; ·&nbsp; best this month 9h 04m</div>
+            </div>
+            <div style="text-align:right;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#4A4A52;line-height:1.8">
+              <div>last spoke&nbsp;&nbsp;<span style="color:#8A8A91">09:41</span></div>
+              <div>microphone&nbsp;&nbsp;<span style="color:#8A8A91">off</span></div>
+            </div>
+          </div>
+
+          <div style="margin-top:22px;display:flex;align-items:center;gap:12px">
+            <div style="height:1px;flex:1;background:#17171A"></div>
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">the last thing that happened, four hours ago</div>
+            <div style="height:1px;flex:1;background:#17171A"></div>
+          </div>
+
+          <div style="display:flex;gap:12px;margin-top:18px">
+            <div style="width:26px;height:26px;flex:none;border:1px solid #33333A;border-radius:3px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#C9C9CF">P</div>
+            <div style="max-width:640px">
+              <div style="display:flex;align-items:baseline;gap:8px"><div style="font-size:13px;font-weight:600">Pike</div><div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">verifier · 09:41</div></div>
+              <div style="margin-top:5px;font-size:14px;line-height:1.55;color:#9A9AA2;text-wrap:pretty">The retry budget is on main and the suite is green against it. I ran it myself twice.</div>
+            </div>
+          </div>
+
+          <div style="margin-top:24px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHAT THE SHELL IS DOING RIGHT NOW</div>
+          <div style="margin-top:10px;display:flex;flex-direction:column;gap:9px;max-width:760px">
+            <sc-for list="{{ atRest }}" as="r" hint-placeholder-count="4">
+              <div style="display:flex;gap:9px">
+                <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ r.dot }}"></div>
+                <div style="flex:1;font-size:13px;color:#C9C9CF;line-height:1.5;text-wrap:pretty">{{ r.text }}</div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+        <div style="flex:none;padding:12px 26px 16px;border-top:1px solid #1F1F22">
+          <div style="display:flex;align-items:center;gap:12px">
+            <div style="flex:1;border:1px solid #26262B;border-radius:3px;background:#0C0C0D;padding:11px 12px;font-size:13.5px;color:#4A4A52">Type here, or hold space to talk…</div>
+            <div style="flex:none;display:flex;align-items:center;gap:8px;padding:9px 12px;border:1px solid #1F1F22;border-radius:3px">
+              <div style="width:5px;height:5px;border-radius:50%;background:#33333A"></div>
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#6A6A72">MIC OFF</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ─── 2 · IN FLIGHT, WATCHED ─── -->
+      <div style="{{ c2 }}">
+        <div style="flex:1;padding:18px 26px 0;overflow:hidden">
+          <div style="display:flex;gap:12px">
+            <div style="width:26px;height:26px;flex:none;border:1px solid #3A3323;border-radius:3px;background:#15120E;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#D8C39E">M</div>
+            <div style="max-width:660px">
+              <div style="display:flex;align-items:baseline;gap:8px"><div style="font-size:13px;font-weight:600">Mara</div><div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">spoken · 11:04:02</div></div>
+              <div style="margin-top:5px;font-size:14px;line-height:1.55;color:#DEDEE2;text-wrap:pretty">Why is the login flow slow on staging?</div>
+            </div>
+          </div>
+
+          <div style="display:flex;gap:12px;margin-top:14px">
+            <div style="width:26px;height:26px;flex:none;border:1px solid #2A3A4A;border-radius:3px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#9EB4CC">◗</div>
+            <div style="max-width:660px">
+              <div style="display:flex;align-items:baseline;gap:8px"><div style="font-size:13px;font-weight:600">glance</div><div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">spoken · 11:04:03 · answered in 0.9s</div></div>
+              <div style="margin-top:5px;font-size:14px;line-height:1.55;color:#DEDEE2;text-wrap:pretty">I don't know yet — I've asked Wren to look. She's starting in the auth service.</div>
+              <div style="margin-top:5px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">the voice said what it knew, which was nothing, and named who is finding out</div>
+            </div>
+          </div>
+
+          <div style="margin-top:16px;margin-left:38px;max-width:740px;border:1px solid #26262B;border-radius:4px;background:#0B0B0C;overflow:hidden">
+            <div style="padding:10px 13px;border-bottom:1px solid #1F1F22;display:flex;align-items:center;gap:11px">
+              <div style="width:44px;height:3px;background:#22334D;position:relative;overflow:hidden;flex:none">
+                <div style="position:absolute;inset:0;width:30%;background:#5B8DEF;animation:crawl 2.2s linear infinite"></div>
+              </div>
+              <div style="flex:1;font-size:12.5px;color:#C9C9CF">Wren is working on this. Nothing she has found is a conclusion yet.</div>
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">1m 48s · 3.6</div>
+            </div>
+            <sc-for list="{{ steps }}" as="s" hint-placeholder-count="5">
+              <div style="display:flex;align-items:baseline;gap:12px;padding:6px 13px;border-bottom:1px solid #131315;background:{{ s.bg }}">
+                <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#3E3E45;width:52px;flex:none">{{ s.t }}</div>
+                <div style="flex:1;font-size:12.5px;color:{{ s.fg }};line-height:1.5;text-wrap:pretty">{{ s.text }}</div>
+                <div style="flex:none;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:{{ s.tagFg }}">{{ s.tag }}</div>
+              </div>
+            </sc-for>
+            <div style="padding:8px 13px;display:flex;align-items:center;gap:11px">
+              <div style="flex:1;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#3E3E45">61 steps in the last two minutes · 4 shown · the rest were opening and reading files</div>
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52;cursor:pointer" style-hover="color:#8A8A91">show all</div>
+            </div>
+          </div>
+
+          <div style="margin-top:14px;margin-left:38px;max-width:740px;padding:11px 12px;border:1px dashed #26262B;border-radius:3px">
+            <div style="font-size:12.5px;color:#9A9AA2;line-height:1.5;text-wrap:pretty">Nothing in that box is a finding. It is set in the present participle, indented under the question, and it has no verdict column — because the moment a step can be read as an answer, this feature has made the product less trustworthy rather than more.</div>
+          </div>
+
+          <div style="margin-top:18px;display:flex;align-items:center;gap:12px">
+            <div style="height:1px;flex:1;background:#17171A"></div>
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">two other plans are moving normally · neither has anything to say</div>
+            <div style="height:1px;flex:1;background:#17171A"></div>
+          </div>
+        </div>
+        <div style="flex:none;padding:12px 26px 16px;border-top:1px solid #1F1F22">
+          <div style="display:flex;align-items:center;gap:12px">
+            <div style="flex:1;border:1px solid #1F1F22;border-radius:3px;background:#0B0B0C;padding:11px 12px;font-size:13.5px;color:#4A4A52">Say something, or type to switch — nothing is lost either way…</div>
+            <div style="flex:none;display:flex;align-items:center;gap:8px;padding:9px 12px;border:1px solid #2E4A6E;border-radius:3px;background:#0B0D10">
+              <div style="width:5px;height:5px;border-radius:50%;background:#5B8DEF;animation:breathe 4s ease-in-out infinite"></div>
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#9EB4CC">LISTENING</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ─── 4 · PERMISSION MID-SPEECH ─── -->
+      <div style="{{ c4 }}">
+        <div style="flex:1;padding:18px 26px 0;overflow:hidden">
+          <div style="display:flex;gap:12px">
+            <div style="width:26px;height:26px;flex:none;border:1px solid #2A3A4A;border-radius:3px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#9EB4CC">◗</div>
+            <div style="max-width:700px">
+              <div style="display:flex;align-items:baseline;gap:8px"><div style="font-size:13px;font-weight:600">glance</div><div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">spoken · 11:09:14 · cut off mid-sentence</div></div>
+              <div style="margin-top:5px;font-size:14px;line-height:1.55;color:#9A9AA2;text-wrap:pretty">"Wren has narrowed it to the session lookup — she thinks the index is missing on the staging copy, and she'd like to—"</div>
+              <div style="margin-top:5px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#6A5A32">stopped here · will be spoken again from the start of the sentence when this is answered</div>
+            </div>
+          </div>
+
+          <div style="margin-top:16px;margin-left:38px;max-width:760px;border:1px solid #4A3319;border-left:2px solid #F0A35A;border-radius:4px;background:#131010;overflow:hidden">
+            <div style="padding:12px 14px;border-bottom:1px solid #241A17">
+              <div style="display:flex;align-items:baseline;gap:12px">
+                <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.16em;color:#D9A03C">WREN NEEDS YOUR PERMISSION · SHE HAS STOPPED, AND SO HAVE I</div>
+                <div style="flex:1"></div>
+                <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#6A6A72">asked 3s ago</div>
+              </div>
+              <div style="margin-top:9px;font-size:17px;line-height:1.45;color:#F2F2F4;text-wrap:pretty">May she build the missing index on the staging database? It locks the sessions table for about ninety seconds and cannot be undone quickly.</div>
+              <div style="margin-top:7px;font-size:12.5px;color:#9A9AA2;line-height:1.5;text-wrap:pretty">Staging only. Nothing in production is touched, and the other four plans keep working while you decide.</div>
+            </div>
+            <div style="padding:12px 14px;display:flex;align-items:flex-start;gap:12px">
+              <div style="flex:none;width:200px">
+                <button style="width:100%;background:#F0A35A;color:#140D06;border:none;border-radius:3px;padding:9px 12px;font-size:12.5px;font-weight:600;font-family:inherit;cursor:pointer">Yes, build it</button>
+                <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">Ninety seconds of locked table on staging. She confirms when it is built, and I finish the sentence you just lost.</div>
+              </div>
+              <div style="flex:none;width:200px">
+                <button style="width:100%;background:transparent;color:#C9C9CF;border:1px solid #33333A;border-radius:3px;padding:8px 12px;font-size:12.5px;font-family:inherit;cursor:pointer" style-hover="border-color:#4A4A52;color:#E8E8EA">Not now</button>
+                <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">She writes up what she found and stops there. You will have the diagnosis without the fix.</div>
+              </div>
+              <div style="flex:1">
+                <div style="border:1px solid #26262B;border-radius:3px;background:#0A0A0B;padding:9px 11px;font-size:12.5px;color:#4A4A52">Or just say it — "do it, but wait until this evening"…</div>
+                <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">Speaking works here. The microphone stayed live through the interruption and the strip never stopped breathing.</div>
+              </div>
+            </div>
+          </div>
+
+          <div style="margin-top:16px;margin-left:38px;max-width:760px;padding:11px 12px;border:1px solid #1F1F22;background:#0B0B0C;border-radius:3px">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">HOW THIS SOUNDED, IN ORDER</div>
+            <div style="margin-top:9px;display:flex;flex-direction:column;gap:7px">
+              <sc-for list="{{ interruptAudio }}" as="i" hint-placeholder-count="5">
+                <div style="display:flex;gap:12px;align-items:baseline">
+                  <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#3E3E45;width:50px;flex:none">{{ i.t }}</div>
+                  <div style="flex:1;font-size:12.5px;color:#C9C9CF;line-height:1.5;text-wrap:pretty">{{ i.text }}</div>
+                </div>
+              </sc-for>
+            </div>
+            <div style="margin-top:10px;font-size:12px;color:#8A8A91;line-height:1.5;text-wrap:pretty">A crash sounds like a sentence stopping. This sounds like a person stopping — the voice falls rather than cuts, there is a short gap, and then it explains itself. The gap is the whole difference.</div>
+          </div>
+        </div>
+        <div style="flex:none;padding:12px 26px 16px;border-top:1px solid #1F1F22">
+          <div style="display:flex;align-items:center;gap:12px">
+            <div style="flex:1;border:1px solid #4A3319;border-radius:3px;background:#100D0C;padding:11px 12px;font-size:13.5px;color:#8A8A91">Answer about the index — anything you say now is read as your answer to it…</div>
+            <div style="flex:none;display:flex;align-items:center;gap:8px;padding:9px 12px;border:1px solid #2E4A6E;border-radius:3px;background:#0B0D10">
+              <div style="width:5px;height:5px;border-radius:50%;background:#5B8DEF;animation:breathe 4s ease-in-out infinite"></div>
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#9EB4CC">LISTENING</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ─── 5 · TALKING TO TYPING ─── -->
+      <div style="{{ c5 }}">
+        <div style="flex:1;padding:18px 26px 0;overflow:hidden">
+          <div style="display:flex;gap:12px">
+            <div style="width:26px;height:26px;flex:none;border:1px solid #3A3323;border-radius:3px;background:#15120E;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#D8C39E">M</div>
+            <div style="max-width:660px">
+              <div style="display:flex;align-items:baseline;gap:8px"><div style="font-size:13px;font-weight:600">Mara</div><div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">spoken · 11:12:40</div></div>
+              <div style="margin-top:5px;font-size:14px;line-height:1.55;color:#9A9AA2;text-wrap:pretty">Alright, build the index, but only on staging and tell me the query time before and after.</div>
+            </div>
+          </div>
+
+          <div style="margin-top:16px;display:flex;align-items:center;gap:12px">
+            <div style="height:1px;flex:1;background:#1F1F22"></div>
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#6A6A72;letter-spacing:.06em">YOU STARTED TYPING · 11:13:02 · MICROPHONE OFF, NOTHING ELSE CHANGED</div>
+            <div style="height:1px;flex:1;background:#1F1F22"></div>
+          </div>
+
+          <div style="margin-top:16px;display:flex;gap:12px">
+            <div style="width:26px;height:26px;flex:none;border:1px solid #2A3A4A;border-radius:3px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#9EB4CC">◗</div>
+            <div style="max-width:700px">
+              <div style="display:flex;align-items:baseline;gap:8px"><div style="font-size:13px;font-weight:600">glance</div><div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">written, not spoken · 11:13:03</div></div>
+              <div style="margin-top:5px;font-size:14px;line-height:1.55;color:#DEDEE2;text-wrap:pretty">Staging only, with timings before and after. Wren has it. I'll write from here rather than talk over you.</div>
+            </div>
+          </div>
+
+          <div style="margin-top:16px;margin-left:38px;max-width:760px;border:1px solid #1F1F22;background:#0B0B0C;border-radius:3px;overflow:hidden">
+            <div style="padding:10px 13px;border-bottom:1px solid #17171A;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHAT CARRIED ACROSS THE SWITCH</div>
+            <sc-for list="{{ carried }}" as="c" hint-placeholder-count="5">
+              <div style="display:flex;gap:11px;padding:9px 13px;border-bottom:1px solid #131315">
+                <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ c.dot }}"></div>
+                <div style="flex:1;font-size:12.5px;color:#DEDEE2;line-height:1.5;text-wrap:pretty">{{ c.text }}</div>
+                <div style="flex:none;width:150px;text-align:right;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">{{ c.meta }}</div>
+              </div>
+            </sc-for>
+            <div style="padding:10px 13px;font-size:12px;color:#8A8A91;line-height:1.5;text-wrap:pretty">One shell, one timeline, one conversation — talking and typing are two doors into the same room, and the room does not rearrange itself when you change door. What changes is where the answer comes out: speech answers speech, text answers text, and neither ever repeats the other.</div>
+          </div>
+
+          <div style="margin-top:16px;display:flex;gap:12px">
+            <div style="width:26px;height:26px;flex:none;border:1px solid #33333A;border-radius:3px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#C9C9CF">W</div>
+            <div style="max-width:700px">
+              <div style="display:flex;align-items:baseline;gap:8px"><div style="font-size:13px;font-weight:600">Wren</div><div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">implementer · 11:13:04 · in 3.6</div></div>
+              <div style="margin-top:5px;font-size:14px;line-height:1.55;color:#DEDEE2;text-wrap:pretty">Building it on staging now, with a timing either side. About two minutes.</div>
+            </div>
+          </div>
+        </div>
+        <div style="flex:none;padding:12px 26px 16px;border-top:1px solid #1F1F22">
+          <div style="display:flex;align-items:center;gap:12px">
+            <div style="flex:1;border:1px solid #F0A35A;border-radius:3px;background:#0B0B0C;padding:11px 12px;display:flex;align-items:center;gap:9px">
+              <div style="font-size:13.5px;color:#F2F2F4">and while you're there, check whether prod has the same index</div>
+              <div style="width:1px;height:16px;background:#F0A35A"></div>
+            </div>
+            <div style="flex:none;display:flex;align-items:center;gap:8px;padding:9px 12px;border:1px solid #1F1F22;border-radius:3px">
+              <div style="width:5px;height:5px;border-radius:50%;background:#33333A"></div>
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#6A6A72">MIC OFF</div>
+            </div>
+          </div>
+          <div style="margin-top:7px;font-size:11.5px;color:#6A6A72;line-height:1.45">Hold space to go back to talking. The half-typed line stays where it is.</div>
+        </div>
+      </div>
+
+      <!-- ─── 6 · SEVERAL SESSIONS ─── -->
+      <div style="{{ c6 }}">
+        <div style="flex:1;padding:18px 26px 0;overflow:hidden">
+          <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">FOUR SESSIONS IN ISOLATED COPIES OF THE CODEBASE · ONE OF YOU</div>
+          <div style="margin-top:10px;display:flex;flex-direction:column;gap:8px;max-width:900px">
+            <sc-for list="{{ sessions }}" as="s" hint-placeholder-count="4">
+              <div style="border:1px solid {{ s.border }};background:#0B0B0C;border-radius:3px;overflow:hidden;cursor:pointer" style-hover="border-color:#33333A">
+                <div style="display:flex;align-items:center;gap:12px;padding:10px 12px">
+                  <div style="width:44px;height:3px;background:{{ s.trackBg }};position:relative;overflow:hidden;flex:none">
+                    <div style="{{ s.track }}"></div>
+                  </div>
+                  <div style="width:110px;flex:none">
+                    <div style="font-size:13px;font-weight:600;color:{{ s.nameFg }}">{{ s.name }}</div>
+                    <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">{{ s.addr }}</div>
+                  </div>
+                  <div style="flex:1;font-size:13px;color:#DEDEE2;line-height:1.45;text-wrap:pretty">{{ s.doing }}</div>
+                  <div style="flex:none;width:170px;text-align:right">
+                    <div style="font-size:11.5px;color:{{ s.stateFg }};line-height:1.4">{{ s.state }}</div>
+                    <div style="margin-top:2px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">{{ s.meta }}</div>
+                  </div>
+                </div>
+              </div>
+            </sc-for>
+          </div>
+
+          <div style="margin-top:18px;max-width:900px;padding:12px 13px;border:1px solid #4A3319;border-left:2px solid #F0A35A;background:#131010">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.16em;color:#D9A03C">THE VOICE IS ATTACHED TO ONE SESSION AT A TIME, AND SAYS WHICH</div>
+            <div style="margin-top:8px;font-size:14px;color:#F2F2F4;line-height:1.5;text-wrap:pretty">You are talking about the login flow. If Bex asks for permission on the migration, the voice will name the session before it says anything else — "on the migration, Bex needs…" — because the most dangerous sentence in a four-session product is one that begins without saying where it is from.</div>
+            <div style="margin-top:7px;font-size:12.5px;color:#9A9AA2;line-height:1.5;text-wrap:pretty">Say "switch to the migration" and the strip and the header change together. Nothing about the login session is lost; it goes on working and its progress keeps accruing behind the tab.</div>
+          </div>
+
+          <div style="margin-top:18px;display:flex;align-items:center;gap:12px">
+            <div style="height:1px;flex:1;background:#17171A"></div>
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">the strip at the top is the loudest session, not this one · right now that is the migration</div>
+            <div style="height:1px;flex:1;background:#17171A"></div>
+          </div>
+
+          <div style="margin-top:16px;max-width:900px;padding:11px 12px;border:1px dashed #26262B;border-radius:3px;font-size:12.5px;color:#8A8A91;line-height:1.5;text-wrap:pretty">One strip, four sessions: it shows the state that most needs a person, in this order — needs permission, failed, stopped without anyone deciding, working, listening, at rest. A single strip that showed an average would be worse than no strip at all.</div>
+        </div>
+        <div style="flex:none;padding:12px 26px 16px;border-top:1px solid #1F1F22">
+          <div style="display:flex;align-items:center;gap:12px">
+            <div style="flex:1;border:1px solid #1F1F22;border-radius:3px;background:#0B0B0C;padding:11px 12px;font-size:13.5px;color:#4A4A52">Talking about the login flow — say a session's name to move…</div>
+            <div style="flex:none;display:flex;align-items:center;gap:8px;padding:9px 12px;border:1px solid #2E4A6E;border-radius:3px;background:#0B0D10">
+              <div style="width:5px;height:5px;border-radius:50%;background:#5B8DEF;animation:breathe 4s ease-in-out infinite"></div>
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#9EB4CC">LISTENING · LOGIN FLOW</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div style="width:414px;flex:none;display:flex;flex-direction:column;min-height:0">
+      <div style="padding:14px 18px 6px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">{{ asideHead }}</div>
+      <div style="padding:6px 18px 0;font-size:13px;color:#C9C9CF;line-height:1.55;text-wrap:pretty">{{ asideLead }}</div>
+      <div style="margin-top:16px;padding:0 18px;display:flex;flex-direction:column;gap:10px">
+        <sc-for list="{{ aside }}" as="a" hint-placeholder-count="4">
+          <div style="display:flex;gap:10px">
+            <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ a.dot }}"></div>
+            <div style="flex:1">
+              <div style="font-size:12.5px;color:#C9C9CF;line-height:1.5;text-wrap:pretty">{{ a.text }}</div>
+              <div style="margin-top:3px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">{{ a.meta }}</div>
+            </div>
+          </div>
+        </sc-for>
+      </div>
+      <div style="margin-top:18px;padding:0 18px">
+        <div style="padding:11px 12px;border:1px solid #1F1F22;border-left:2px solid #26262B;background:#0B0B0C;font-size:12.5px;color:#9A9AA2;line-height:1.5;text-wrap:pretty">{{ asideNote }}</div>
+      </div>
+      <div style="flex:1"></div>
+      <div style="padding:12px 18px;border-top:1px solid #1F1F22;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52;line-height:1.8">
+        <div>{{ asideFootA }}</div>
+        <div>{{ asideFootB }}</div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1640,&quot;height&quot;:1100},&quot;screen&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;1&quot;,&quot;2&quot;,&quot;3&quot;,&quot;4&quot;,&quot;5&quot;,&quot;6&quot;,&quot;7&quot;],&quot;default&quot;:null,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Shell&quot;}}">
+const G='#4FA97D', B='#5B8DEF', A='#D9A03C', ALARM='#B4553A', D='#4A4A52';
+const SHELL = 'width:1600px;height:1000px;background:#0A0A0B;border:1px solid #1F1F22;display:flex;flex-direction:column;overflow:hidden;color:#E8E8EA';
+const COL = 'flex:1;display:flex;flex-direction:column;min-height:0';
+const HIDE = 'display:none';
+const BOARD = 'display:flex;flex-direction:column;align-items:center';
+
+class Component extends DCLogic {
+  state = { screen: '1', touched: false };
+  cur() { return this.state.touched ? this.state.screen : (this.props.screen ?? this.state.screen); }
+  tab(id) {
+    const on = this.cur() === id;
+    return "font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;letter-spacing:.04em;padding:5px 10px;border-radius:3px;cursor:pointer;border:1px solid " +
+      (on ? '#F0A35A;color:#F0A35A;background:#150F08' : '#1F1F22;color:#6A6A72;background:transparent');
+  }
+
+  renderVals() {
+    const s = this.cur();
+    const set = (screen) => () => this.setState({ screen, touched: true });
+    const inShell = ['1','2','4','5','6'].includes(s);
+
+    const crawl = (c, dur) => 'position:absolute;inset:0;width:24%;background:' + c + ';animation:crawl ' + dur + ' linear infinite';
+    const breathe = (c) => 'position:absolute;inset:0;background:' + c + ';animation:breathe 4s ease-in-out infinite';
+
+    const meta = {
+      '1': {
+        cap: 'At rest: the strip is a still, dim line — present and not moving. Quiet is stated as an achievement, and the microphone is unmistakably off.',
+        clock: '13:58 Thu', repo: 'billing-service', word: 'AT REST', dot: G, fg: '#7A9E86',
+        says: 'nothing working, nothing waiting, microphone off',
+        spineBg: '#14171A', spineInner: 'position:absolute;inset:0;background:#1C2530',
+        asideHead: 'WHAT THE SHELL IS AT REST',
+        asideLead: 'A dim, still line along the top edge, a green dot, and the word. Nothing pulses, nothing spins, nothing counts up. Six rounds of design have treated quiet as the achievement, and an idle animation would quietly argue the opposite.',
+        asideNote: 'Restraint is the answer to one of the six questions: at rest, this product belongs to nothing. No sound, no motion, no badge, no summary nobody asked for. It is a lit instrument in a dark room.',
+        footA: 'the strip is present and still', footB: 'still and dim is healthy · still and dark is dead',
+        ra: 'awake  2 · asleep  11', rb: 'quiet since  09:41'
+      },
+      '2': {
+        cap: 'In flight: the voice answers in under a second and says it does not know. Steps appear as a run under the question — present participle, no verdict column.',
+        clock: '11:06 Thu', repo: 'billing-service', word: 'WORKING · LISTENING', dot: B, fg: '#8FA8CC',
+        says: 'Wren is on the login flow · you are on the microphone',
+        spineBg: '#22334D', spineInner: crawl('#5B8DEF', '2.6s'),
+        asideHead: 'WHICH STEPS EARN A MENTION',
+        asideLead: 'Sixty-one steps arrived in two minutes and four are on screen. The screen and the voice have different thresholds, because a glance is cheap and an interruption of your thinking is not.',
+        asideNote: 'The agent doing the work decides, not a filter over the stream: an agent knows when it has changed direction and a rule reading strings does not. It is wrong sometimes, and "show all" is always there.',
+        footA: 'spoken steps today  3', footB: 'steps generated today  4 210',
+        ra: 'working  1 of 5 plans', rb: 'waiting on you  0'
+      },
+      '4': {
+        cap: 'Permission: the voice falls rather than cuts, leaves a gap, then explains — and the sentence it lost is spoken again from the start afterwards.',
+        clock: '11:09 Thu', repo: 'billing-service', word: 'NEEDS YOU', dot: A, fg: '#C9A46A',
+        says: 'Wren has stopped · the other four plans have not',
+        spineBg: '#3A2A14', spineInner: breathe('#F0A35A'),
+        asideHead: 'WHAT AN INTERRUPT MAY AND MAY NOT DO',
+        asideLead: 'This is the only thing in the product allowed to stop speech mid-sentence, and the only thing allowed to make the strip amber. Both of those are worth protecting, so the list of what qualifies is short and fixed.',
+        asideNote: 'It never sounds like a failure. A crash is a sentence that stops; this is a person stopping — falling pitch, a held gap, then an explanation that begins with what is needed rather than with an apology.',
+        footA: 'interrupts this month  2', footB: 'both were spending or locking',
+        ra: 'waiting on you  1', rb: 'still working  4 plans'
+      },
+      '5': {
+        cap: 'Talking to typing: one shell, one timeline. The mode changes where the answer comes out — speech answers speech, text answers text — and nothing repeats.',
+        clock: '11:13 Thu', repo: 'billing-service', word: 'WORKING · TYPING', dot: B, fg: '#8FA8CC',
+        says: 'microphone off since 11:13:02 · Wren still working',
+        spineBg: '#22334D', spineInner: crawl('#5B8DEF', '2.6s'),
+        asideHead: 'ONE SHELL, TWO DOORS',
+        asideLead: 'They are genuinely different modes of use, and that is a fact about the person rather than about the interface. So the interface keeps one state and changes only two things: where input comes from, and where the reply is delivered.',
+        asideNote: 'The switch is never a command. Typing a character turns the microphone off; holding space turns it back on. Neither is confirmed, neither is announced, and the strip tells you which is true.',
+        footA: 'switches today  14', footB: 'context lost  none',
+        ra: 'microphone  off since 11:13', rb: 'waiting on you  0'
+      },
+      '6': {
+        cap: 'Four sessions, one strip: it shows the state that most needs a person, and the voice names the session before it says anything else.',
+        clock: '11:41 Thu', repo: '4 sessions', word: 'NEEDS YOU · MIGRATION', dot: A, fg: '#C9A46A',
+        says: 'the strip is showing the migration, not the session you are talking about',
+        spineBg: '#3A2A14', spineInner: breathe('#F0A35A'),
+        asideHead: 'HOW FOUR SESSIONS SHARE ONE PERSON',
+        asideLead: 'The shell does not multiply. There is one strip, one voice and one composer, and the rule for all three is the same: they belong to whatever most needs a person, and they say which one that is.',
+        asideNote: 'Nothing here is a dashboard of four progress bars. Three of the four sessions have nothing to say, and a row that says nothing should read as a quiet row rather than as a widget waiting to be interpreted.',
+        footA: 'sessions  4 · needing you  1', footB: 'strip follows need, not focus',
+        ra: 'sessions  4 · running  3', rb: 'you are in  login flow'
+      }
+    }[s] || {};
+
+    const capOnly = { '3': 'From four metres nothing survives but one moving line. Motion carries state, because colour is the first thing peripheral vision loses.', '7': 'The answer to the hardest question: a spoken claim carries its uncertainty in grammar. Verified is said plainly; unverified is said with its source attached.' }[s];
+
+    return {
+      caption: meta.cap || capOnly,
+      shell: inShell ? SHELL : HIDE,
+      roomBoard: s === '3' ? BOARD : HIDE,
+      soundBoard: s === '7' ? BOARD : HIDE,
+      c1: s === '1' ? COL : HIDE, c2: s === '2' ? COL : HIDE, c4: s === '4' ? COL : HIDE,
+      c5: s === '5' ? COL : HIDE, c6: s === '6' ? COL : HIDE,
+      go1: set('1'), go2: set('2'), go3: set('3'), go4: set('4'), go5: set('5'), go6: set('6'), go7: set('7'),
+      t1: this.tab('1'), t2: this.tab('2'), t3: this.tab('3'), t4: this.tab('4'), t5: this.tab('5'), t6: this.tab('6'), t7: this.tab('7'),
+
+      clock: meta.clock, repo: meta.repo, stateWord: meta.word, stateDot: meta.dot, stateFg: meta.fg, stateSays: meta.says,
+      spineBg: meta.spineBg, spineInner: meta.spineInner,
+      asideHead: meta.asideHead, asideLead: meta.asideLead, asideNote: meta.asideNote,
+      asideFootA: meta.footA, asideFootB: meta.footB,
+      railFootA: meta.ra, railFootB: meta.rb,
+
+      plansHead: s === '6' ? 'SESSIONS · 4' : 'PLANS · 5',
+      rosterHead: s === '1' ? 'AGENTS · 2 AWAKE' : 'AGENTS · 12 AWAKE',
+      plans: s === '6'
+        ? [
+          { name:'login flow', n:'3.6', dot:B, rule:'#F0A35A', bg:'#121214', fg:'#E8E8EA' },
+          { name:'row migration', n:'5.4', dot:A, rule:'transparent', bg:'transparent', fg:'#C9C9CF' },
+          { name:'month-end guard', n:'4.3', dot:B, rule:'transparent', bg:'transparent', fg:'#C9C9CF' },
+          { name:'search reindex', n:'6.2', dot:G, rule:'transparent', bg:'transparent', fg:'#C9C9CF' }
+        ]
+        : [
+          { name:'payments-retry', n:14, dot:s === '1' ? G : B, rule:'#F0A35A', bg:'#121214', fg:'#E8E8EA' },
+          { name:'auth-service', n:9, dot:s === '1' ? G : B, rule:'transparent', bg:'transparent', fg:'#C9C9CF' },
+          { name:'row-migration', n:7, dot:s === '1' ? G : B, rule:'transparent', bg:'transparent', fg:'#C9C9CF' },
+          { name:'invoicing', n:6, dot:D, rule:'transparent', bg:'transparent', fg:'#C9C9CF' },
+          { name:'search-reindex', n:11, dot:s === '1' ? G : B, rule:'transparent', bg:'transparent', fg:'#C9C9CF' }
+        ],
+      roster: s === '1'
+        ? [
+          { name:'Wren', role:'indexer · second shard', dot:B },
+          { name:'Pike', role:'verifier · latency capture', dot:B },
+          { name:'Ash', role:'asleep since 11:26', dot:D },
+          { name:'Bex', role:'asleep since 12:04', dot:D },
+          { name:'Tam', role:'asleep · nothing to plan', dot:D }
+        ]
+        : [
+          { name:'Wren', role:s === '2' || s === '4' ? 'implementer · the login flow' : 'implementer · staging index', dot:B },
+          { name:'Pike', role:'verifier · re-running checks', dot:B },
+          { name:'Ash', role:'migrator · invoice rows', dot:B },
+          { name:'Bex', role:s === '6' ? 'migrator · waiting on you' : 'implementer · month-end guard', dot:s === '6' ? A : B },
+          { name:'Tam', role:'planner · watching motion', dot:B },
+          { name:'Rune', role:'implementer · tripped counter', dot:B },
+          { name:'Vale', role:'indexer · shard two', dot:B },
+          { name:'Orin', role:'verifier · idle', dot:D }
+        ],
+
+      atRest: [
+        { text:'Listening for nothing. The microphone is off and the strip is not breathing, so you can tell from the doorway.', dot:D },
+        { text:'Watching five plans for stillness, and saying nothing, because all five are moving inside their own normal gaps.', dot:G },
+        { text:'Holding two agents awake and eleven asleep. Sleeping costs nothing, which is why they sleep.', dot:D },
+        { text:'Making no sound of any kind. The only sound this product makes at rest is none.', dot:G }
+      ],
+
+      steps: [
+        { t:'11:04:07', text:'Opening the session middleware', tag:'', tagFg:'#3E3E45', fg:'#8A8A91', bg:'transparent' },
+        { t:'11:04:31', text:'Timing the session lookup against the staging database', tag:'spoken', tagFg:'#6A7E96', fg:'#C9C9CF', bg:'#0C0D0F' },
+        { t:'11:05:12', text:'Comparing the staging schema with production', tag:'spoken', tagFg:'#6A7E96', fg:'#C9C9CF', bg:'#0C0D0F' },
+        { t:'11:05:44', text:'Reading the index definitions on the sessions table', tag:'', tagFg:'#3E3E45', fg:'#8A8A91', bg:'transparent' },
+        { t:'11:05:51', text:'Re-running the timing to see whether it is consistent', tag:'', tagFg:'#3E3E45', fg:'#8A8A91', bg:'transparent' }
+      ],
+
+      distances: [
+        { dist:'40 cm', who:'at the screen, reading', h:'190px', spine:'4px', pad:'14px', gap:'9px', line:'9px', reads:'Everything. The steps, the timeline, the state word, the composer. This is the only distance at which text is doing any work.' },
+        { dist:'1.5 m', who:'leaned back, glancing', h:'104px', spine:'4px', pad:'10px', gap:'6px', line:'6px', reads:'Shapes and the strip. You can see there are messages and that something is moving, and you would have to lean in to know what.' },
+        { dist:'4 m', who:'standing, pacing', h:'56px', spine:'4px', pad:'7px', gap:'4px', line:'3px', reads:'The strip, and nothing else. Its movement tells you work is happening; its stillness would tell you it is not. That is the whole message at this distance and it is enough.' },
+        { dist:'peripheral', who:'not looking at all', h:'30px', spine:'4px', pad:'5px', gap:'3px', line:'2px', reads:'Only change. You will not read the strip, but you will notice it start or stop — which is exactly the two events worth noticing.' }
+      ],
+      spineStates: [
+        { name:'At rest', motion:'A still, dim line. Present, so you can tell it apart from a dead application.', bg:'#14171A', inner:'position:absolute;inset:0;background:#1C2530' },
+        { name:'Working', motion:'A short segment crawling left to right, every 2.6 seconds. Motion means work is happening somewhere.', bg:'#22334D', inner:'position:absolute;inset:0;width:24%;background:#5B8DEF;animation:crawl 2.6s linear infinite' },
+        { name:'Microphone live', motion:'The whole line breathes, about one cycle every four seconds. Nothing else in the product breathes.', bg:'#0F1A2A', inner:'position:absolute;inset:0;background:#5B8DEF;animation:breathe 4s ease-in-out infinite' },
+        { name:'Needs you', motion:'The whole line breathes in ember, faster. The only amber in the shell, and the only thing that may interrupt speech.', bg:'#3A2A14', inner:'position:absolute;inset:0;background:#F0A35A;animation:breathe 2.4s ease-in-out infinite' },
+        { name:'Stopped without anyone deciding', motion:'Still, and darker than at rest. Stillness where there should be movement is the message.', bg:'#1A1212', inner:'position:absolute;inset:0;background:#3A2420' },
+        { name:'Disconnected', motion:'Still, in the deeper warm tone, with the age of the screen in the header. Nothing on screen can be trusted to be current.', bg:'#241A17', inner:'position:absolute;inset:0;background:#B4553A' }
+      ],
+
+      interruptAudio: [
+        { t:'+0.0s', text:'The voice is mid-sentence: "…and she\u2019d like to—"' },
+        { t:'+0.1s', text:'It falls in pitch over about a tenth of a second and stops. Not a cut — a sentence being abandoned the way a person abandons one.' },
+        { t:'+0.2s', text:'A single low tone, 180 milliseconds. This is the only sound in the product that means "stop and listen", and it is used about twice a month.' },
+        { t:'+0.6s', text:'Four tenths of a second of nothing. The gap is what makes it read as deliberate rather than broken.' },
+        { t:'+1.0s', text:'"Before I go on — Wren needs permission to build an index on staging. It locks a table for ninety seconds and can\u2019t be undone quickly. Nothing in production, and everything else keeps running."' },
+        { t:'after', text:'When you answer, it picks the abandoned sentence up from its beginning, not from the syllable it died on.' }
+      ],
+
+      carried: [
+        { text:'The question you asked out loud, and everything said since, in one timeline.', meta:'spoken turns marked spoken', dot:G },
+        { text:'The session you were talking about, so "check whether prod has it too" still means the login flow.', meta:'no re-stating required', dot:G },
+        { text:'Wren\u2019s in-flight work and its steps, which never depended on your mode at all.', meta:'3.6 · still running', dot:B },
+        { text:'The permission you granted by voice, attributed to you as a spoken decision.', meta:'11:12:40 · spoken', dot:G },
+        { text:'What did not carry: the voice. It stops talking the moment you type and answers in text instead.', meta:'no double replies', dot:A }
+      ],
+
+      sessions: [
+        { name:'login flow', addr:'3.6 · Wren', doing:'Building the missing index on staging, with a timing either side', state:'working', stateFg:'#8FA8CC', meta:'1m 12s · you are here', border:'#1F1F22', nameFg:'#F2F2F4', trackBg:'#22334D', track:'position:absolute;inset:0;width:26%;background:#5B8DEF;animation:crawl 2.6s linear infinite' },
+        { name:'row migration', addr:'5.4 · Bex', doing:'Stopped — she needs permission to drop a column that nothing appears to read', state:'needs you', stateFg:'#C9A46A', meta:'waiting 40s', border:'#4A3319', nameFg:'#F2F2F4', trackBg:'#3A2A14', track:'position:absolute;inset:0;background:#F0A35A;animation:breathe 2.4s ease-in-out infinite' },
+        { name:'month-end guard', addr:'4.3 · Pike', doing:'Re-pinning the totals after last night\u2019s correction', state:'working', stateFg:'#8FA8CC', meta:'22m · nothing to report', border:'#1F1F22', nameFg:'#C9C9CF', trackBg:'#22334D', track:'position:absolute;inset:0;width:26%;background:#5B8DEF;animation:crawl 3.4s linear infinite' },
+        { name:'search reindex', addr:'6.2 · Vale', doing:'Finished the third shard at 11:28 and reported it', state:'done', stateFg:'#7A9E86', meta:'nothing running', border:'#1F1F22', nameFg:'#C9C9CF', trackBg:'#16231C', track:'position:absolute;inset:0;background:#1F3A2C' }
+      ],
+
+      spokenStates: [
+        { name:'Checked — we asked the thing itself', freq:'most claims · unmarked', said:'"The login timing is down from 1.9 seconds to 40 milliseconds. Wren ran it before and after."', rule:'Said plainly, in the past tense, with the measurement. No hedge, because hedging everything is how a person learns to ignore hedges.', border:'#1F1F22', dot:G },
+        { name:'On an agent\u2019s word', freq:'about 1 in 7', said:'"Wren says the index fixed it. I haven\u2019t seen a timing myself."', rule:'The claim keeps its source as its subject, and a five-word admission follows. This is how people already report second-hand things, so nobody has to be taught it.', border:'#241A17', dot:A },
+        { name:'Cannot be verified right now', freq:'rare', said:'"I can\u2019t reach staging, so I can\u2019t tell you whether it worked. Wren thinks it did. I\u2019ll know within a minute of it coming back."', rule:'What is unknown, who thinks what, and what would settle it — in that order. Never "everything looks fine", which is what a system says when it cannot see.', border:'#2A1A15', dot:ALARM }
+      ],
+      grammar: [
+        { tag:'IN FLIGHT', tagFg:'#6A7E96', example:'"She\u2019s timing the session lookup against staging."', rule:'Present participle, an agent as the subject, and never an adjective about the thing being examined. A step describes a person acting, not a system being well.' },
+        { tag:'CLAIMED', tagFg:'#B0842F', example:'"Wren says the missing index is the cause."', rule:'Past tense arrives, but attached to a name. The moment a sentence has a conclusion in it, it also has whoever is responsible for the conclusion.' },
+        { tag:'VERIFIED', tagFg:'#7A9E86', example:'"The lookup is 40 milliseconds now. I have the timing."', rule:'Past tense, no attribution needed, and the evidence named in the same breath. This is the only form allowed to sound settled, and it is the ordinary one.' }
+      ],
+      media: [
+        { name:'MOTION', carries:'State, and only state: working, listening, needs you. One element, the strip, four pixels tall.', never:'progress amount, quantity, urgency by speed, or decoration of any kind.' },
+        { name:'SOUND', carries:'Two things: a permission interrupt, and the microphone opening or closing under your hand.', never:'a step, a message, a completion, an error an agent has already handled, or anything at all at rest.' },
+        { name:'SPEECH', carries:'Answers, questions, and its own uncertainty in the grammar of the sentence.', never:'a conclusion drawn from steps it was not given as a conclusion, and never a filler noise while waiting.' },
+        { name:'SCREEN', carries:'Everything with detail in it: the timeline, the steps, the evidence, the tree, the record.', never:'anything the person is expected to catch while not looking at it.' },
+        { name:'NOTHING', carries:'The overwhelming majority of what happens. Sixty-one steps produced four screen lines and no sound.', never:'anything a person is waiting on, or anything that has stopped without a person deciding.' }
+      ],
+      sounds: [
+        { name:'The stop tone', spec:'180 ms · low · falling', means:'Something needs your permission and speech has been abandoned mid-sentence. Used about twice a month.', dot:A },
+        { name:'Microphone opening', spec:'60 ms · soft · rising', means:'Under your own hand, so it confirms rather than informs. Without it you would have to look to know you were live.', dot:B },
+        { name:'Microphone closing', spec:'60 ms · soft · falling', means:'The mirror of the last one, and the one that stops you talking into a dead microphone.', dot:B },
+        { name:'Nothing at all', spec:'the other 99%', means:'Steps, messages, completions, agents waking and sleeping, plans finishing, tests passing. All silent, always.', dot:D }
+      ],
+
+      aside: {
+        '1': [
+          { text:'The strip is dim and still rather than absent, because "no strip" and "at rest" would look identical and mean opposite things.', meta:'still and dim  healthy', dot:G },
+          { text:'The autonomy figure is the only number on the screen that is going up, and it is going up because nothing is happening.', meta:'6h 12m · best 9h 04m', dot:G },
+          { text:'The last message is four hours old and is shown at full size. Age dims the type, it does not shrink it.', meta:'09:41 · Pike', dot:D },
+          { text:'Nothing summarises the last four hours unless you ask. Silence that has to be explained was not really silence.', meta:'0 unread anything', dot:D }
+        ],
+        '2': [
+          { text:'On screen: a step earns a line if it changed what the agent is doing, or if nothing has been shown for twenty seconds. Everything else accrues into the count.', meta:'4 of 61 shown', dot:B },
+          { text:'In speech: far stricter. A step is spoken only if the person is listening, it has been over thirty seconds since the last thing said, and it changes what they should expect.', meta:'2 of 61 spoken', dot:A },
+          { text:'The agent marks its own steps as worth saying, because only it knows it has just changed direction. The threshold is not a filter reading strings.', meta:'wren marked 2', dot:B },
+          { text:'The run collapses to a single line the moment there is a result. The steps stop competing with the answer they led to.', meta:'automatic', dot:G }
+        ],
+        '4': [
+          { text:'Spending money, deleting something, or touching the world outside this machine. Nothing else may cut into speech, ever.', meta:'the fixed list · 3 kinds', dot:ALARM },
+          { text:'It says the blast radius in the first breath: staging only, nothing in production, four plans unaffected.', meta:'before the options', dot:A },
+          { text:'Both options carry their consequence, and speaking a third answer is as available as either button.', meta:'"do it this evening"', dot:B },
+          { text:'The interrupted sentence is never lost and never resumed mid-word. It restarts from its beginning.', meta:'you did not miss anything', dot:G }
+        ],
+        '5': [
+          { text:'Typing a single character closes the microphone. No confirmation, no toast, and the strip stops breathing within a frame.', meta:'the only signal you need', dot:B },
+          { text:'The voice does not read out what it has just written, and does not write out what it has just said. One reply, in the mode you are in.', meta:'no double delivery', dot:G },
+          { text:'A spoken turn stays marked as spoken in the record for good, because "he said it out loud in passing" and "he wrote it down" are different weights of instruction.', meta:'permanently marked', dot:B },
+          { text:'Half-typed text survives going back to voice, and a spoken sentence in progress survives you starting to type — it is transcribed into the timeline, not thrown away.', meta:'nothing is repeated', dot:G }
+        ],
+        '6': [
+          { text:'One strip for four sessions, showing whichever most needs a person. Needs permission beats failed beats still beats working.', meta:'never an average', dot:A },
+          { text:'The voice belongs to one session and names it before anything else when it changes: "on the migration, Bex needs…"', meta:'said first, always', dot:A },
+          { text:'Sessions you are not in keep working and keep accruing. Nothing pauses because you looked away from it.', meta:'3 running behind this', dot:B },
+          { text:'A session with nothing to say is one quiet row. It does not get a progress bar for the sake of symmetry.', meta:'search reindex, today', dot:D }
+        ]
+      }[s] || []
+    };
+  }
+}
+
+</script>
+</body>
+</html>

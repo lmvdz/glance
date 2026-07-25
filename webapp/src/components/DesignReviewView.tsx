@@ -119,7 +119,7 @@ const DOC_MARKDOWN_CLASS =
   'prose prose-invert prose-sm max-w-none prose-h1:hidden prose-h2:hidden prose-h3:hidden prose-h4:hidden prose-h5:hidden prose-h6:hidden ' +
   'prose-table:my-2 prose-table:text-xs ' +
   'prose-th:border prose-th:border-ink-border prose-th:bg-ink-surface-2 prose-th:px-3 prose-th:py-2 ' +
-  'prose-th:font-mono prose-th:text-[10px] prose-th:font-semibold prose-th:uppercase prose-th:tracking-wide prose-th:text-ink-text-muted ' +
+  'prose-th:font-mono prose-th:text-caption prose-th:font-semibold prose-th:uppercase prose-th:tracking-wide prose-th:text-ink-text-muted ' +
   'prose-td:border prose-td:border-ink-border prose-td:px-3 prose-td:py-2 prose-td:align-top';
 
 // Strike treatment is brand-muted (reduced-opacity struck text), never raw red — red is reserved
@@ -155,7 +155,7 @@ function authorInitial(author: string): string {
 function AuthorAvatar({ author, isAgent }: { author: string; isAgent: boolean }) {
   return (
     <span
-      className={`inline-flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full text-[10px] font-semibold ${
+      className={`inline-flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full text-caption font-semibold ${
         isAgent ? 'bg-teal-500/20 text-teal-300' : 'bg-sky-500/20 text-sky-300'
       }`}
       title={author}
@@ -720,7 +720,7 @@ export const DesignReviewView: React.FC = () => {
                               type="button"
                               disabled={castingChoice !== null}
                               onClick={() => void castVote('approve')}
-                              className={`rounded-[2px] px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase leading-none tracking-wide transition-colors focus-visible:ring-2 focus-visible:ring-ember focus-visible:ring-offset-2 focus-visible:ring-offset-ink disabled:opacity-50 ${myChoice === 'approve' ? 'bg-emerald-400 text-black' : 'text-emerald-400 hover:bg-emerald-950/40'}`}
+                              className={`rounded-[2px] px-1.5 py-0.5 font-mono text-caption font-semibold uppercase leading-none tracking-wide transition-colors focus-visible:ring-2 focus-visible:ring-ember focus-visible:ring-offset-2 focus-visible:ring-offset-ink disabled:opacity-50 ${myChoice === 'approve' ? 'bg-emerald-400 text-black' : 'text-emerald-400 hover:bg-emerald-950/40'}`}
                             >
                               {castingChoice === 'approve' ? 'Approving…' : 'You: approve'}
                             </button>
@@ -728,7 +728,7 @@ export const DesignReviewView: React.FC = () => {
                               type="button"
                               disabled={castingChoice !== null}
                               onClick={() => void castVote('reject')}
-                              className={`rounded-[2px] px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase leading-none tracking-wide transition-colors focus-visible:ring-2 focus-visible:ring-ember focus-visible:ring-offset-2 focus-visible:ring-offset-ink disabled:opacity-50 ${myChoice === 'reject' ? 'bg-red-400 text-black' : 'text-red-400 hover:bg-red-950/40'}`}
+                              className={`rounded-[2px] px-1.5 py-0.5 font-mono text-caption font-semibold uppercase leading-none tracking-wide transition-colors focus-visible:ring-2 focus-visible:ring-ember focus-visible:ring-offset-2 focus-visible:ring-offset-ink disabled:opacity-50 ${myChoice === 'reject' ? 'bg-red-400 text-black' : 'text-red-400 hover:bg-red-950/40'}`}
                             >
                               {castingChoice === 'reject' ? 'Rejecting…' : 'You: reject'}
                             </button>
@@ -812,7 +812,7 @@ export const DesignReviewView: React.FC = () => {
                     {resolved && <Check className="h-3.5 w-3.5 text-emerald-400" aria-label="Resolved" />}
                   </div>
                   {heading && (
-                    <button onClick={() => setActiveHeading(heading)} className="mb-1.5 inline-block rounded bg-ink-surface-2 px-1.5 py-0.5 font-mono text-[10px] text-ink-text-muted hover:text-ember-link">
+                    <button onClick={() => setActiveHeading(heading)} className="mb-1.5 inline-block rounded bg-ink-surface-2 px-1.5 py-0.5 font-mono text-caption text-ink-text-muted hover:text-ember-link">
                       § {heading}
                     </button>
                   )}
@@ -849,7 +849,7 @@ export const DesignReviewView: React.FC = () => {
             onSubmit={(e) => { e.preventDefault(); void postComment(); }}
             className="border-t border-ink-border bg-panel p-3"
           >
-            {activeHeading && <div className="mb-1.5 text-[10px] text-ink-text-subtle">On: § {activeHeading}</div>}
+            {activeHeading && <div className="mb-1.5 text-caption text-ink-text-subtle">On: § {activeHeading}</div>}
             <textarea
               value={commentBody}
               onChange={(e) => setCommentBody(e.target.value)}

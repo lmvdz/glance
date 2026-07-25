@@ -199,7 +199,7 @@ export const HeatTree: React.FC<HeatTreeProps> = ({
 
   if (rows.length === 0 || n === 0) {
     return (
-      <div className="rounded-lg border border-gray-200 dark:border-gray-800 bg-[#0c0a1e] px-4 py-10 text-center text-sm text-white/50">
+      <div className="rounded-lg border border-ink-border bg-[#0c0a1e] px-4 py-10 text-center text-sm text-white/50">
         {emptyLabel}
       </div>
     );
@@ -253,17 +253,17 @@ export const HeatTree: React.FC<HeatTreeProps> = ({
             : null;
 
   return (
-    <section className="overflow-hidden rounded-lg border border-gray-200 dark:border-gray-800 bg-[#0c0a1e] text-white">
+    <section className="overflow-hidden rounded-lg border border-ink-border bg-[#0c0a1e] text-white">
       {/* ── mode toggle ── */}
       <div className="flex items-center justify-between gap-3 border-b border-white/10 px-4 py-2">
-        <span className="text-[10px] font-semibold uppercase tracking-widest text-white/45">
+        <span className="text-caption font-semibold uppercase tracking-widest text-white/45">
           {fogMode ? 'Comprehension fog' : 'Context heat graph'}
         </span>
         <button
           type="button"
           onClick={() => setFogMode((v) => !v)}
           aria-pressed={fogMode}
-          className={`rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide transition-colors ${
+          className={`rounded-full px-2.5 py-1 text-caption font-semibold uppercase tracking-wide transition-colors ${
             fogMode ? 'bg-indigo-500/30 text-indigo-200' : 'bg-white/5 text-white/50 hover:bg-white/10'
           }`}
         >
@@ -273,7 +273,7 @@ export const HeatTree: React.FC<HeatTreeProps> = ({
 
       {/* ── disclosure (persistent while fog mode is active) ── */}
       {fogMode && (
-        <p className="border-b border-white/10 px-4 py-1.5 text-[10px] leading-relaxed text-white/40">
+        <p className="border-b border-white/10 px-4 py-1.5 text-caption leading-relaxed text-white/40">
           view activity is recorded to compute this overlay · team-level, renames reset history
         </p>
       )}
@@ -285,7 +285,7 @@ export const HeatTree: React.FC<HeatTreeProps> = ({
           {/* ── top-10 debt shortlist headline ── */}
           {showFog && shortlist.length > 0 && (
             <div className="border-b border-white/10 px-4 py-3">
-              <div className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-white/45">
+              <div className="mb-2 text-caption font-semibold uppercase tracking-widest text-white/45">
                 Comprehension debt — top {shortlist.length}
               </div>
               <ul className="space-y-0.5">
@@ -303,7 +303,7 @@ export const HeatTree: React.FC<HeatTreeProps> = ({
                         <span className="min-w-0 flex-1 truncate font-mono">{entry.file}</span>
                         <span className="shrink-0 text-white/50">last seen {fogLastSeenLabel(entry.lastSeenAt, Date.now())}</span>
                         <span
-                          className="shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold"
+                          className="shrink-0 rounded-full px-1.5 py-0.5 text-caption font-semibold"
                           style={{ backgroundColor: magma(entry.debt), color: '#0c0a1e' }}
                         >
                           {Math.round(entry.debt * 100)}%
@@ -319,10 +319,10 @@ export const HeatTree: React.FC<HeatTreeProps> = ({
           <div className="overflow-x-auto">
             <div className="grid min-w-[34rem] grid-cols-[minmax(11rem,18rem)_1fr]">
               {/* ── headers ── */}
-              <div className="border-b border-r border-white/10 px-4 py-2.5 text-[10px] font-semibold uppercase tracking-widest text-white/45">
+              <div className="border-b border-r border-white/10 px-4 py-2.5 text-caption font-semibold uppercase tracking-widest text-white/45">
                 File / module
               </div>
-              <div className="border-b border-white/10 px-3 py-2.5 text-[10px] font-semibold uppercase tracking-widest text-white/45">
+              <div className="border-b border-white/10 px-3 py-2.5 text-caption font-semibold uppercase tracking-widest text-white/45">
                 {showFog ? 'Comprehension debt' : 'Heat over time'}
               </div>
 
@@ -380,13 +380,13 @@ export const HeatTree: React.FC<HeatTreeProps> = ({
                     row replaces the dates with a single label rather than implying day-resolution
                     data that doesn't exist. */}
                 {showFog ? (
-                  <div className={`${ROW_H} flex items-center justify-end border-b border-white/10 px-3 text-[10px] font-medium tabular-nums text-white/40`}>
+                  <div className={`${ROW_H} flex items-center justify-end border-b border-white/10 px-3 text-caption font-medium tabular-nums text-white/40`}>
                     debt
                   </div>
                 ) : (
                   <div className={`grid ${ROW_H} border-b border-white/10`} style={gridCols}>
                     {days.map((d) => (
-                      <div key={d} className="flex items-center justify-center text-[10px] font-medium tabular-nums text-white/40" title={d}>
+                      <div key={d} className="flex items-center justify-center text-caption font-medium tabular-nums text-white/40" title={d}>
                         {fmtDay(d)}
                       </div>
                     ))}
@@ -441,7 +441,7 @@ export const HeatTree: React.FC<HeatTreeProps> = ({
           </div>
 
           {/* footer / hover readout */}
-          <div className="flex items-center justify-between gap-4 border-t border-white/10 px-4 py-2.5 text-[11px] text-white/45">
+          <div className="flex items-center justify-between gap-4 border-t border-white/10 px-4 py-2.5 text-caption text-white/45">
             <span>{showFog ? 'Fog = comprehension debt since you last looked, from agent receipts + your view history.' : 'Heat = files touched per day, from agent receipts.'}</span>
             {!showFog && hover && (
               <span className="shrink-0 font-mono text-white/80">

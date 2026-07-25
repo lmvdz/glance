@@ -20,18 +20,18 @@ export const CodeBlock = ({ inline, className, children, ...props }: any) => {
   }
 
   return (
-    <div className="relative group rounded-md overflow-hidden bg-gray-100 dark:bg-gray-900 border border-gray-200 dark:border-gray-800 my-4">
-      <div className="flex items-center justify-between px-4 py-2 bg-gray-50 dark:bg-gray-950 border-b border-gray-200 dark:border-gray-800">
-        <span className="text-xs text-gray-500 dark:text-gray-400 font-mono">{match[1]}</span>
+    <div className="relative group rounded-md overflow-hidden bg-ink-surface border border-ink-border my-4">
+      <div className="flex items-center justify-between px-4 py-2 bg-ink border-b border-ink-border">
+        <span className="text-xs text-ink-text-muted font-mono">{match[1]}</span>
         <button
           onClick={handleCopy}
-          className="text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 transition-colors flex items-center gap-1 text-xs"
+          className="text-ink-text-muted hover:text-ink-text-label dark:hover:text-ink-text-body transition-colors flex items-center gap-1 text-xs"
         >
           {copied ? <Check className="w-3.5 h-3.5 text-green-500 dark:text-green-400" /> : <Copy className="w-3.5 h-3.5" />}
           {copied ? 'Copied' : 'Copy'}
         </button>
       </div>
-      <div className="p-4 overflow-x-auto text-sm text-gray-700 dark:text-gray-300">
+      <div className="p-4 overflow-x-auto text-sm text-ink-text-label">
         <CodeHighlight
           language={match[1]}
           customStyle={{ margin: 0, padding: 0, background: 'transparent' }}

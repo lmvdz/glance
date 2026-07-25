@@ -77,13 +77,13 @@ const fmtUsd = (n: number) => `$${n.toFixed(4)}`;
 
 function BucketTable({ title, rows }: { title: string; rows: EconomicsBucket[] }) {
   return (
-    <SectionCard title={title} right={<span className="font-mono text-[11px]">{rows.length}</span>}>
+    <SectionCard title={title} right={<span className="font-mono text-caption">{rows.length}</span>}>
       {rows.length === 0 ? (
-        <div className="p-4 text-sm text-gray-500 dark:text-gray-400">No receipt rows yet.</div>
+        <div className="p-4 text-sm text-ink-text-muted">No receipt rows yet.</div>
       ) : (
         <div className="overflow-x-auto">
           <table className="min-w-full text-left text-sm">
-            <thead className="border-b border-gray-200 text-[11px] uppercase tracking-[0.12em] text-gray-500 dark:border-gray-800">
+            <thead className="border-b border-ink-border text-caption uppercase tracking-[0.12em] text-ink-text0 border-ink-border">
               <tr>
                 <th className="px-4 py-2 font-medium">Key</th>
                 <th className="px-4 py-2 font-medium">Runs</th>
@@ -93,10 +93,10 @@ function BucketTable({ title, rows }: { title: string; rows: EconomicsBucket[] }
                 <th className="px-4 py-2 font-medium">Tools</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
+            <tbody className="divide-y divide-ink-border divide-ink-border">
               {rows.map((row) => (
                 <tr key={row.key}>
-                  <td className="max-w-[18rem] truncate px-4 py-2 font-medium text-gray-900 dark:text-gray-100" title={row.key}>{row.key}</td>
+                  <td className="max-w-[18rem] truncate px-4 py-2 font-medium text-ink-text" title={row.key}>{row.key}</td>
                   <td className="px-4 py-2 font-mono text-xs">{row.runs}</td>
                   <td className="px-4 py-2 font-mono text-xs">{row.units}</td>
                   <td className="px-4 py-2 font-mono text-xs">{fmtTokens(row.tokens)}</td>
@@ -139,7 +139,7 @@ export function FleetEconomicsView() {
       {error ? <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300" role="alert">{error}</div> : null}
       {!economics ? (
         <div className="space-y-2" aria-label="Loading fleet economics">
-          {[1, 2, 3].map((n) => <div key={n} className="h-20 rounded-xl border border-gray-200 bg-gray-50 skeleton dark:border-gray-800 dark:bg-gray-900" />)}
+          {[1, 2, 3].map((n) => <div key={n} className="h-20 rounded-xl border border-ink-border bg-ink skeleton border-ink-border bg-panel" />)}
         </div>
       ) : (
         <div className="space-y-4">

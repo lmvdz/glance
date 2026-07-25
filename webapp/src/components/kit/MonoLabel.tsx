@@ -8,7 +8,7 @@ import React from 'react';
  * furniture in a dense, data-forward screen is the same register).
  */
 export const MonoLabel: React.FC<{ children: React.ReactNode; className?: string }> = ({ children, className }) => (
-  <span className={`font-mono text-[10px] font-semibold uppercase tracking-widest text-gray-400 dark:text-gray-500 ${className ?? ''}`}>
+  <span className={`font-mono text-caption font-semibold uppercase tracking-widest text-ink-text-subtle ${className ?? ''}`}>
     {children}
   </span>
 );

@@ -42,10 +42,10 @@ export const SpawnConfirmSheet: React.FC<SpawnConfirmSheetProps> = ({ promptSeed
 
   return (
     <div role="dialog" aria-modal="true" aria-label="Confirm spawning a unit" className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4">
-      <div className="flex max-h-[85vh] w-full max-w-lg flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-xl dark:border-gray-800 dark:bg-gray-950">
-        <div className="flex flex-shrink-0 items-center justify-between border-b border-gray-200 px-4 py-3 dark:border-gray-800">
-          <h2 className="text-sm font-semibold text-gray-900 dark:text-gray-100">Spawn a unit to build this</h2>
-          <button type="button" onClick={onCancel} aria-label="Cancel" className="rounded-md p-1 text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800">
+      <div className="flex max-h-[85vh] w-full max-w-lg flex-col overflow-hidden rounded-xl border border-ink-border bg-white shadow-xl border-ink-border bg-ink">
+        <div className="flex flex-shrink-0 items-center justify-between border-b border-ink-border px-4 py-3 border-ink-border">
+          <h2 className="text-sm font-semibold text-ink-text">Spawn a unit to build this</h2>
+          <button type="button" onClick={onCancel} aria-label="Cancel" className="rounded-md p-1 text-ink-text-subtle hover:bg-ink-surface">
             <X className="h-4 w-4" aria-hidden />
           </button>
         </div>
@@ -53,7 +53,7 @@ export const SpawnConfirmSheet: React.FC<SpawnConfirmSheetProps> = ({ promptSeed
         <div className="flex-1 space-y-3 overflow-y-auto px-4 py-3">
           {imagePaths.length > 0 && (
             <div>
-              <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">Annotated capture</div>
+              <div className="mb-1 text-caption font-medium uppercase tracking-wide text-ink-text-muted">Annotated capture</div>
               <div className="flex flex-wrap gap-2" aria-label="Annotated capture thumbnails">
                 {imagePaths.map((p) => {
                   const id = attachmentIdFromPath(p);
@@ -62,7 +62,7 @@ export const SpawnConfirmSheet: React.FC<SpawnConfirmSheetProps> = ({ promptSeed
                       key={p}
                       src={`/api/chat-attachments/${id}`}
                       alt="Annotated capture attached to this turn"
-                      className="h-20 w-20 rounded-lg border border-gray-200 object-cover dark:border-gray-700"
+                      className="h-20 w-20 rounded-lg border border-ink-border object-cover border-ink-border-2"
                     />
                   ) : null;
                 })}
@@ -71,7 +71,7 @@ export const SpawnConfirmSheet: React.FC<SpawnConfirmSheetProps> = ({ promptSeed
           )}
 
           <div>
-            <label htmlFor="spawn-confirm-prompt" className="mb-1 block text-[11px] font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">
+            <label htmlFor="spawn-confirm-prompt" className="mb-1 block text-caption font-medium uppercase tracking-wide text-ink-text-muted">
               Prompt (editable)
             </label>
             <textarea
@@ -79,41 +79,41 @@ export const SpawnConfirmSheet: React.FC<SpawnConfirmSheetProps> = ({ promptSeed
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               rows={6}
-              className="w-full rounded-lg border border-gray-200 bg-gray-50 p-2 text-[12px] leading-relaxed text-gray-800 outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200"
+              className="w-full rounded-lg border border-ink-border bg-ink p-2 text-[12px] leading-relaxed text-ink-text-body outline-none focus-visible:ring-2 focus-visible:ring-amber-500 border-ink-border-2 bg-panel text-ink-text-body"
             />
           </div>
 
-          <div className="rounded-lg border border-gray-200 bg-gray-50 p-2 dark:border-gray-700 dark:bg-gray-900">
-            <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">Target repo</div>
-            <div className="font-mono text-[12px] text-gray-700 dark:text-gray-300">{repoLabel}</div>
+          <div className="rounded-lg border border-ink-border bg-ink p-2 border-ink-border-2 bg-panel">
+            <div className="mb-1 text-caption font-medium uppercase tracking-wide text-ink-text-muted">Target repo</div>
+            <div className="font-mono text-[12px] text-ink-text-label">{repoLabel}</div>
           </div>
 
           {pageContextBlock && (
-            <details className="rounded-lg border border-gray-200 bg-gray-50 p-2 dark:border-gray-700 dark:bg-gray-900">
-              <summary className="cursor-pointer text-[11px] font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">
+            <details className="rounded-lg border border-ink-border bg-ink p-2 border-ink-border-2 bg-panel">
+              <summary className="cursor-pointer text-caption font-medium uppercase tracking-wide text-ink-text-muted">
                 Serialized page context
               </summary>
-              <pre className="mt-1 whitespace-pre-wrap font-mono text-[10px] leading-relaxed text-gray-600 dark:text-gray-400">{pageContextBlock}</pre>
+              <pre className="mt-1 whitespace-pre-wrap font-mono text-caption leading-relaxed text-ink-text-label text-ink-text-subtle">{pageContextBlock}</pre>
             </details>
           )}
 
-          <div className="rounded-lg border border-dashed border-gray-300 p-2 text-[11px] text-gray-500 dark:border-gray-700 dark:text-gray-400">
+          <div className="rounded-lg border border-dashed border-ink-border-2 p-2 text-caption text-ink-text0 border-ink-border-2 text-ink-text-subtle">
             {SPAWN_CONTRACT_LINE}
           </div>
 
           {error && (
-            <p role="alert" className="text-[11px] text-red-600 dark:text-red-400">
+            <p role="alert" className="text-caption text-red-600 dark:text-red-400">
               {error}
             </p>
           )}
         </div>
 
-        <div className="flex flex-shrink-0 items-center justify-end gap-2 border-t border-gray-200 px-4 py-3 dark:border-gray-800">
+        <div className="flex flex-shrink-0 items-center justify-end gap-2 border-t border-ink-border px-4 py-3 border-ink-border">
           <button
             type="button"
             onClick={onCancel}
             disabled={busy}
-            className="rounded-full border border-gray-200 px-3 py-1.5 text-[12px] font-medium text-gray-600 transition-colors hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800"
+            className="rounded-full border border-ink-border px-3 py-1.5 text-[12px] font-medium text-ink-text-label transition-colors hover:bg-ink-surface disabled:cursor-not-allowed disabled:opacity-50 border-ink-border-2 text-ink-text-label dark:hover:bg-ink-surface"
           >
             Cancel
           </button>
@@ -121,7 +121,7 @@ export const SpawnConfirmSheet: React.FC<SpawnConfirmSheetProps> = ({ promptSeed
             type="button"
             onClick={() => void handleConfirm()}
             disabled={busy || !prompt.trim()}
-            className="flex items-center gap-1.5 rounded-full bg-amber-600 px-3.5 py-1.5 text-[12px] font-semibold text-white transition-colors hover:bg-amber-700 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-amber-500 dark:text-gray-950 dark:hover:bg-amber-400"
+            className="flex items-center gap-1.5 rounded-full bg-amber-600 px-3.5 py-1.5 text-[12px] font-semibold text-white transition-colors hover:bg-amber-700 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-amber-500 text-ink-text dark:hover:bg-amber-400"
           >
             {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : <Rocket className="h-3.5 w-3.5" aria-hidden />}
             Confirm — spawn the unit

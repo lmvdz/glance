@@ -3,7 +3,7 @@
 export function AgentSourceBadge({ className = '' }: { className?: string }) {
   return (
     <span
-      className={`inline-block rounded-sm bg-emerald-100 px-1 py-px text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300 ${className}`}
+      className={`inline-block rounded-sm bg-emerald-100 px-1 py-px text-caption font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300 ${className}`}
       title="captured by an agent"
     >
       agent
@@ -17,7 +17,7 @@ export function AgentSourceBadge({ className = '' }: { className?: string }) {
 export function ModelDeltaBadge({ className = '' }: { className?: string }) {
   return (
     <span
-      className={`inline-block rounded-sm bg-sky-100 px-1 py-px text-[10px] font-medium text-sky-700 dark:bg-sky-900/40 dark:text-sky-300 ${className}`}
+      className={`inline-block rounded-sm bg-sky-100 px-1 py-px text-caption font-medium text-sky-700 dark:bg-sky-900/40 dark:text-sky-300 ${className}`}
       title="mental-model delta — evidence-anchored, recorded mid-run"
     >
       model-delta

@@ -368,7 +368,7 @@ export const ChatMessagesViewport = ({
         aria-live="polite"
         aria-busy={anyEntryRunning}
         tabIndex={0}
-        className="h-full overflow-y-auto p-3 md:p-4 scrollbar-custom bg-gray-50 dark:bg-gray-950"
+        className="h-full overflow-y-auto p-3 md:p-4 scrollbar-custom bg-ink"
       >
         <div ref={contentRef} className="space-y-4">
           <TranscriptTimeline
@@ -396,9 +396,9 @@ export const ChatMessagesViewport = ({
             </div>
           )}
           {isLoading && (
-            <div className="flex flex-col w-full items-start text-gray-800 dark:text-gray-300">
-              <div className="text-[11px] text-gray-500 dark:text-gray-500 mb-2 flex items-center gap-2">
-                glance workflow <span className="w-1 h-1 rounded-full bg-gray-400 dark:bg-gray-600"></span> Starting...
+            <div className="flex flex-col w-full items-start text-ink-text-body text-ink-text-label">
+              <div className="text-caption text-ink-text0 text-ink-text0 mb-2 flex items-center gap-2">
+                glance workflow <span className="w-1 h-1 rounded-full bg-ink-text-subtle bg-ink-text-label"></span> Starting...
               </div>
               <div className="flex gap-1 items-center h-6">
                 <span className="w-2 h-2 bg-amber-500 rounded-full animate-bounce"></span>
@@ -860,7 +860,7 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
     setChatWidth((width) => clampNumber(width + (event.key === 'ArrowLeft' ? 24 : -24), CHAT_MIN_WIDTH, CHAT_MAX_WIDTH));
   };
 
-  const chatShellClass = `relative flex flex-col bg-white dark:bg-gray-950 border-l border-gray-200 dark:border-gray-800 flex-shrink-0 z-20 transition-colors ${isMaximized ? 'fixed inset-0 w-full z-50' : ''}`;
+  const chatShellClass = `relative flex flex-col bg-panel border-l border-ink-border flex-shrink-0 z-20 transition-colors ${isMaximized ? 'fixed inset-0 w-full z-50' : ''}`;
   const chatShellStyle = isMaximized ? undefined : ({ width: chatWidth } as React.CSSProperties);
   const chatResizeHandle = !isMaximized && (
     <div
@@ -877,7 +877,7 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
       className="group absolute inset-y-0 left-0 z-30 hidden w-1 cursor-col-resize items-center justify-center bg-transparent transition-colors hover:bg-amber-500/20 focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:bg-amber-400/20 lg:flex"
       title="Drag to resize chat. Double-click to reset."
     >
-      <span className="h-10 w-px rounded-full bg-gray-300 transition-colors group-hover:bg-amber-500 dark:bg-gray-700 dark:group-hover:bg-amber-400" aria-hidden="true" />
+      <span className="h-10 w-px rounded-full bg-ink-border-2 transition-colors group-hover:bg-amber-500 bg-ink-text-label dark:group-hover:bg-amber-400" aria-hidden="true" />
     </div>
   );
 
@@ -886,38 +886,38 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
     return (
       <div ref={chatPanelRef} className={chatShellClass} style={chatShellStyle}>
         {chatResizeHandle}
-        <div className="h-10 flex items-center justify-between px-3 flex-shrink-0 text-gray-800 dark:text-gray-200 border-b border-gray-200 dark:border-gray-800">
+        <div className="h-10 flex items-center justify-between px-3 flex-shrink-0 text-ink-text-body border-b border-ink-border">
           <div className="flex items-center gap-2">
-            <MessageSquare className="w-4 h-4 text-gray-500" />
+            <MessageSquare className="w-4 h-4 text-ink-text0" />
             <h3 className="text-sm font-medium">Session History</h3>
           </div>
           <div className="flex items-center gap-2">
-            <button onClick={() => setIsMaximized(!isMaximized)} className="p-1.5 text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-md transition-colors" title={isMaximized ? "Minimize" : "Maximize"}>
+            <button onClick={() => setIsMaximized(!isMaximized)} className="p-1.5 text-ink-text-muted hover:text-ink-text dark:hover:text-ink-text-body hover:bg-ink-surface rounded-md transition-colors" title={isMaximized ? "Minimize" : "Maximize"}>
               {isMaximized ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
             </button>
-            <button onClick={onClose} className="p-1.5 text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-md transition-colors" title="Close Chat">
+            <button onClick={onClose} className="p-1.5 text-ink-text-muted hover:text-ink-text dark:hover:text-ink-text-body hover:bg-ink-surface rounded-md transition-colors" title="Close Chat">
               <X className="w-4 h-4" />
             </button>
           </div>
         </div>
         <div className="flex-1 overflow-y-auto p-3 space-y-2 scrollbar-custom">
           {sessions.length === 0 && (
-            <div className="text-center text-sm text-gray-500 py-10">No sessions found</div>
+            <div className="text-center text-sm text-ink-text0 py-10">No sessions found</div>
           )}
           {sessions.sort((a,b) => b.updatedAt - a.updatedAt).map(session => (
             <div
               key={session.id}
               onClick={() => setActiveSessionId(session.id)}
-              className="flex flex-col p-2.5 rounded-lg border border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-900 cursor-pointer transition-colors group"
+              className="flex flex-col p-2.5 rounded-lg border border-ink-border hover:bg-ink-surface cursor-pointer transition-colors group"
             >
               <div className="flex items-start justify-between mb-2">
                 <div>
-                  <div className="font-medium text-sm text-gray-900 dark:text-gray-200 mb-0.5">{session.title}</div>
-                  <div className="text-[11px] text-gray-500">{new Date(session.updatedAt).toLocaleDateString()} {new Date(session.updatedAt).toLocaleTimeString()}</div>
+                  <div className="font-medium text-sm text-ink-text text-ink-text-body mb-0.5">{session.title}</div>
+                  <div className="text-caption text-ink-text0">{new Date(session.updatedAt).toLocaleDateString()} {new Date(session.updatedAt).toLocaleTimeString()}</div>
                 </div>
                 <button
                   onClick={(e) => deleteSession(session.id, e)}
-                  className="p-1.5 text-gray-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity rounded-md hover:bg-red-50 dark:hover:bg-red-900/20"
+                  className="p-1.5 text-ink-text-subtle hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity rounded-md hover:bg-red-50 dark:hover:bg-red-900/20"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
                 </button>
@@ -926,11 +926,11 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
               {/* Metadata Display */}
               <div className="flex flex-wrap gap-2 mt-1">
                 {session.metadata?.status && (
-                  <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                  <span className={`text-caption px-1.5 py-0.5 rounded font-medium ${
                     session.metadata.status === 'active' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400' :
                     session.metadata.status === 'waiting' ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400' :
                     session.metadata.status === 'autonomous' ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400' :
-                    'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-400'
+                    'bg-ink-surface text-ink-text-label bg-ink-surface text-ink-text-subtle'
                   }`}>
                     {session.metadata.status === 'active' ? '● Running' :
                      session.metadata.status === 'waiting' ? '○ Waiting for Input' :
@@ -939,12 +939,12 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
                   </span>
                 )}
                 {session.metadata?.stage && (
-                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 border border-gray-200 dark:border-gray-700">
+                  <span className="text-caption px-1.5 py-0.5 rounded bg-ink-surface text-ink-text-label text-ink-text-subtle border border-ink-border">
                     Stage: {session.metadata.stage}
                   </span>
                 )}
                 {session.metadata?.tasksDiscussed && session.metadata.tasksDiscussed.length > 0 && (
-                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 border border-gray-200 dark:border-gray-700 flex items-center gap-1">
+                  <span className="text-caption px-1.5 py-0.5 rounded bg-ink-surface text-ink-text-label text-ink-text-subtle border border-ink-border flex items-center gap-1">
                     <Paperclip className="w-2.5 h-2.5" /> {session.metadata.tasksDiscussed.length} task(s)
                   </span>
                 )}
@@ -952,10 +952,10 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
             </div>
           ))}
         </div>
-        <div className="p-3 border-t border-gray-200 dark:border-gray-800">
+        <div className="p-3 border-t border-ink-border">
           <button
             onClick={createNewSession}
-            className="w-full py-2.5 bg-gray-900 dark:bg-gray-200 text-white dark:text-gray-900 rounded-lg text-sm font-medium hover:bg-black dark:hover:bg-white transition-colors flex items-center justify-center gap-2"
+            className="w-full py-2.5 bg-panel bg-ink-border text-white text-ink-text rounded-lg text-sm font-medium hover:bg-black dark:hover:bg-white transition-colors flex items-center justify-center gap-2"
           >
             <Plus className="w-4 h-4" /> New Chat
           </button>
@@ -968,26 +968,26 @@ export const AssistantChat = ({ onClose }: { onClose: () => void }) => {
     <div ref={chatPanelRef} className={chatShellClass} style={chatShellStyle}>
       {chatResizeHandle}
       {/* Header */}
-      <div className="h-10 flex items-center justify-between px-3 flex-shrink-0 text-gray-800 dark:text-gray-200 border-b border-gray-200 dark:border-gray-800">
+      <div className="h-10 flex items-center justify-between px-3 flex-shrink-0 text-ink-text-body border-b border-ink-border">
         <div className="flex items-center gap-2">
-          <button onClick={() => setActiveSessionId(null)} className="p-1.5 -ml-1.5 text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-md transition-colors" title="Back to Sessions">
+          <button onClick={() => setActiveSessionId(null)} className="p-1.5 -ml-1.5 text-ink-text-muted hover:text-ink-text dark:hover:text-ink-text-body hover:bg-ink-surface rounded-md transition-colors" title="Back to Sessions">
             <ArrowLeft className="w-4 h-4" />
           </button>
           <Sparkles className="w-4 h-4 text-amber-500 dark:text-amber-400" />
           <h3 className="text-sm font-medium truncate max-w-[150px]" title={activeSession?.title}>{activeSession?.title || 'glance'}</h3>
         </div>
         <div className="flex items-center gap-1">
-          <button onClick={downloadHistory} className="p-1.5 text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-md transition-colors" title="Export Chat">
+          <button onClick={downloadHistory} className="p-1.5 text-ink-text-muted hover:text-ink-text dark:hover:text-ink-text-body hover:bg-ink-surface rounded-md transition-colors" title="Export Chat">
             <Download className="w-4 h-4" />
           </button>
-          <button onClick={clearChat} className="p-1.5 text-gray-500 dark:text-gray-400 hover:text-red-500 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-md transition-colors" title="Clear Chat">
+          <button onClick={clearChat} className="p-1.5 text-ink-text-muted hover:text-red-500 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-md transition-colors" title="Clear Chat">
             <Trash2 className="w-4 h-4" />
           </button>
-          <div className="w-px h-4 bg-gray-300 dark:bg-gray-700 mx-1"></div>
-          <button onClick={() => setIsMaximized(!isMaximized)} className="p-1.5 text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-md transition-colors" title={isMaximized ? "Minimize" : "Maximize"}>
+          <div className="w-px h-4 bg-ink-border-2 bg-ink-text-label mx-1"></div>
+          <button onClick={() => setIsMaximized(!isMaximized)} className="p-1.5 text-ink-text-muted hover:text-ink-text dark:hover:text-ink-text-body hover:bg-ink-surface rounded-md transition-colors" title={isMaximized ? "Minimize" : "Maximize"}>
             {isMaximized ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
           </button>
-          <button onClick={onClose} className="p-1.5 text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-md transition-colors" title="Close Chat">
+          <button onClick={onClose} className="p-1.5 text-ink-text-muted hover:text-ink-text dark:hover:text-ink-text-body hover:bg-ink-surface rounded-md transition-colors" title="Close Chat">
             <X className="w-4 h-4" />
           </button>
         </div>

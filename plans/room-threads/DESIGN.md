@@ -25,8 +25,8 @@ link — a plan, a unit, a subagent, a landing are all nodes at different depths
 nodes. The UI is two coupled panes: state on one side, that node's conversation on the other.
 Drilling into state changes both.
 
-Lane separation then stops being a rule we enforce and becomes a property of addressing:
-`unit-spawned` lands at the unit node because that is what it is about, and never touches the root.
+Lane separation then stops being a rule we enforce and becomes a property of addressing: `unit-spawned`
+lands at the unit node because that is what it is about, and never touches the root.
 
 ## Key Decisions
 
@@ -42,6 +42,76 @@ Lane separation then stops being a rule we enforce and becomes a property of add
 | Visibility | Nodes inherit channel membership | Separate genesis/invite model | Two visibility models can disagree about who may see what — we shipped and fixed exactly that bug this week. |
 | Overlap detection | Extend `ownershipConflict` from paths to goals | Adopt GraphRAG | We declare the graph (`refs`, ownership, `BLOCKED_BY`); GraphRAG's value is *inferring* one from unstructured text. Paying to re-derive declared structure is the same category error as the feed. |
 | Cross-boundary disclosure | Existence + owner, never content | Full visibility, or silence | The law-firm conflict check: the system knows, and reveals that a conflict exists without disclosing the other matter. |
+
+## Standing rule: name things the way a person recognises them
+
+Found in the concern 23 cold boot, and it generalises past the two cards it was found on. The room
+speaks *system* where it should speak *human*:
+
+- a card's REPO chip showed `/home/lars/.claude/jobs/…/love…` — an absolute path truncated past the
+  point of carrying information. The question the chip answers is "which repo", and the answer to
+  that is a name.
+- its BRANCH chip showed `squad/doc-greet-mrzklccg-3-26b99e03`, whose only human part is buried
+  between a generated prefix and a hash.
+- "Capabilities" sits in the standing rail named after its implementation (a capability-pack
+  registry), answering a question asked once during setup, and is empty until someone imports a pack.
+
+The rule every concern in this plan inherits: **identity at a glance, address on demand.** Show the
+name; keep the exact value one hover or one click away. Shortening must never mean losing. And a
+surface earns a place in the rail by answering a question someone has *repeatedly* — setup-shaped
+things belong behind the command palette.
+
+
+## The design, established
+
+The visual and voice direction is settled. Reference implementation, self-contained and runnable:
+[`reference/quiet-inbox.html`](reference/quiet-inbox.html) — four screens (busy, quiet, a decision,
+the decision arrived at too late), with screenshots alongside it.
+
+**The copy is the design.** This is the finding that matters most, and every concern inherits it. The
+reference does not label states, it explains them:
+
+- "Three of these at once is a defect in the work, not a list for you to keep."
+- "Nothing has needed you since 09:41 · 6h 12m of unbroken autonomy · longest run this month 9h 04m"
+- "Wren cannot merge her own work. Everything else in the fleet is still moving."
+- "Wren waited 46 minutes, then closed her own session rather than hold a machine open. That is the
+  rule she was given, not a crash."
+
+Each states a fact AND what it means. A string that only names a state is not finished.
+
+### Six patterns that are now requirements
+
+| Pattern | What it means |
+|---|---|
+| **Autonomy as a streak** | Needs-you is not a count, it is a broken record. Show elapsed unbroken autonomy and the best run this month. Zero is an achievement, not an empty list. |
+| **Consequences under every option** | Each control carries a sentence saying what will happen. "Four files land on main. Wren moves straight on to 3.3 without asking again." No control acts without saying what it does. |
+| **A free-text third option** | Every decision offers "answer in words", which the agent interprets. This is what keeps a decision screen part of a conversation instead of becoming a form. |
+| **Evidence decays** | Preserved results carry their age and what to do about it: "These results are 34 minutes old. Whoever picks this up should re-run them against today's main." |
+| **Blast radius, unprompted** | Every interruption states what is NOT affected — "44 units unaffected", "Nothing else in the tree depends on it". Answer the anxious question before it is asked. |
+| **Collapsed runs carry a verdict** | A folded run of events summarises and judges: "38 events · Wren, Pike, Ash +5 · tests, patches, two commits · nothing unusual." |
+
+### Addressing and identity
+
+Work is numbered and spoken: `3.2`, `3.2.1`, `3.3.2`. From the reference's own footnote — *"say 'three
+point two' out loud and you both mean the same unit."* That is the addressability principle made
+usable, and it replaces the branch-slug identifiers the current room shows.
+
+Agents have names and persistent identity (Wren, Pike, Ash, Juno, Tam, Bex, Rune, Vale, Orin), each
+with a role and a live one-line status. A conversation with a team, not a log from a process pool.
+
+### Raw values are footnotes
+
+`agent_exit wren@3.2 · 14:48:02` appears in the bottom-left corner of the too-late screen while the
+human sentence carries the meaning. That is the placement rule for every internal identifier.
+
+### Reconciliation needed before build
+
+- The reference is almost entirely monospace. `brand.md` specifies mono for identifiers and system
+  sans for prose, and the long explanatory sentences — the best thing in the design — would read
+  better in sans. Test a mixed setting before committing.
+- It introduces a second warm tone, `#D9A03C`, separating ALARM from ACTION (`#F0A35A`). This is a
+  good idea not currently in `brand.md` and should be added there rather than dropped.
+- Its neutral ramp runs slightly cooler than `brand.md`'s ink surfaces. Reconcile toward brand.md.
 
 ## Risks
 
