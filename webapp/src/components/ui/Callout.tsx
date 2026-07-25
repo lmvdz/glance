@@ -31,12 +31,12 @@ export const Callout: React.FC<CalloutProps> = ({ tone, title, children, action 
       <Icon className={`mt-0.5 h-4 w-4 flex-shrink-0 ${t.text}`} aria-hidden={true} />
       <div className="min-w-0 flex-1">
         <div className={`text-sm font-semibold ${t.text}`}>{title}</div>
-        {children != null && <div className="mt-0.5 text-xs text-gray-600 dark:text-gray-300">{children}</div>}
+        {children != null && <div className="mt-0.5 text-xs text-ink-text-muted">{children}</div>}
       </div>
       {action && (
         <button
           onClick={action.onClick}
-          className={`flex-shrink-0 rounded-md border ${t.border} bg-white/70 dark:bg-gray-900/50 px-2.5 py-1 text-xs font-medium ${t.text} transition-colors hover:bg-white dark:hover:bg-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500`}
+          className={`flex-shrink-0 rounded-md border ${t.border} bg-white/70 bg-panel/50 px-2.5 py-1 text-xs font-medium ${t.text} transition-colors hover:bg-ink-surface-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500`}
         >
           {action.label}
         </button>

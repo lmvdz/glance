@@ -123,7 +123,7 @@ export function GateVerdictCard({ view }: { view: ChannelCardView }) {
               </div>
             ) : null}
             <div className="mt-3 flex flex-wrap items-center gap-2">
-              <a href={doorHref} onClick={openDoor} className="inline-flex min-h-10 items-center gap-1.5 rounded-full border border-current/20 bg-black/20 px-3 text-xs font-semibold hover:bg-black/30 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-ink-border">
+              <a href={doorHref} onClick={openDoor} className="inline-flex min-h-10 items-center gap-1.5 rounded-full border border-current/20 bg-black/20 px-3 text-xs font-semibold hover:bg-black/30 focus-visible:ring-2 focus-visible:ring-ember focus-visible:ring-offset-2 focus-visible:ring-offset-ink">
                 <ExternalLink className="h-3.5 w-3.5" aria-hidden />
                 {opening ? 'Opening proof…' : 'Open proof record'}
               </a>

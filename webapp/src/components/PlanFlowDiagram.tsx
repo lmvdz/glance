@@ -126,7 +126,7 @@ export const PlanFlowDiagram: React.FC<PlanFlowDiagramProps> = ({ concerns, over
   }, [graph, editId]);
 
   if (graph.nodes.length === 0) {
-    return <div className="px-4 py-6 text-center text-sm text-gray-500 dark:text-gray-400">No concerns to chart in this plan.</div>;
+    return <div className="px-4 py-6 text-center text-sm text-ink-text-muted">No concerns to chart in this plan.</div>;
   }
 
   const rowsPerCol = new Map<number, number>();
@@ -189,13 +189,13 @@ export const PlanFlowDiagram: React.FC<PlanFlowDiagramProps> = ({ concerns, over
           </ul>
         </div>
       )}
-      <div className="overflow-x-auto rounded-lg border border-gray-200 dark:border-gray-800 bg-gray-50/60 dark:bg-gray-950/40 p-1 scrollbar-custom">
+      <div className="overflow-x-auto rounded-lg border border-ink-border bg-ink/60 bg-ink/40 p-1 scrollbar-custom">
         <div className="relative" style={{ width, height }}>
           {/* edge layer */}
           <svg className="pointer-events-none absolute inset-0" width={width} height={height} aria-hidden="true">
             <defs>
               <marker id="planflow-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
-                <path d="M0,0 L7,3.5 L0,7 Z" className="fill-gray-400 dark:fill-gray-600" />
+                <path d="M0,0 L7,3.5 L0,7 Z" className="fill-ink-text-subtle fill-ink-text-label" />
               </marker>
             </defs>
             {graph.edges.map((e) => {
@@ -216,7 +216,7 @@ export const PlanFlowDiagram: React.FC<PlanFlowDiagramProps> = ({ concerns, over
                 <path
                   key={`${e.from}->${e.to}`}
                   d={d}
-                  className="fill-none stroke-gray-300 dark:stroke-gray-700"
+                  className="fill-none stroke-ink-text-label stroke-ink-text-label"
                   strokeWidth={1.5}
                   markerEnd="url(#planflow-arrow)"
                 />
@@ -228,7 +228,7 @@ export const PlanFlowDiagram: React.FC<PlanFlowDiagramProps> = ({ concerns, over
           {Array.from({ length: graph.cols }, (_, c) => (
             <div
               key={`hdr-${c}`}
-              className="absolute text-[10px] font-semibold uppercase tracking-wider text-gray-400"
+              className="absolute text-caption font-semibold uppercase tracking-wider text-ink-text-subtle"
               style={vertical
                 ? { left: PAD, top: PAD + HEADER_H + c * (NODE_H + Y_GAP_V) + NODE_H / 2 - 6, width: V_GUTTER - 10 }
                 : { left: PAD + c * (COL_W + COL_GAP), top: PAD - 2, width: COL_W }}
@@ -250,17 +250,17 @@ export const PlanFlowDiagram: React.FC<PlanFlowDiagramProps> = ({ concerns, over
                 type="button"
                 onClick={() => onSelect?.(n.id)}
                 title={`${n.title} — ${n.status}${n.touches.length ? ` · touches ${n.touches.length}` : ''}${inCycle ? ' · in a dependency cycle' : ''}`}
-                className={`absolute flex flex-col justify-center gap-1 rounded-lg border border-l-4 ${t.border} bg-white dark:bg-gray-900 ${onEdit ? 'pl-2.5 pr-7' : 'px-2.5'} py-1.5 text-left shadow-sm transition-colors hover:border-gray-300 dark:hover:border-gray-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 ${active || editing ? 'ring-2 ring-amber-500' : inCycle ? 'ring-2 ring-red-400 dark:ring-red-500' : ''}`}
+                className={`absolute flex flex-col justify-center gap-1 rounded-lg border border-l-4 ${t.border} bg-panel ${onEdit ? 'pl-2.5 pr-7' : 'px-2.5'} py-1.5 text-left shadow-sm transition-colors hover:border-ink-border-2 dark:hover:border-ink-border-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 ${active || editing ? 'ring-2 ring-amber-500' : inCycle ? 'ring-2 ring-red-400 dark:ring-red-500' : ''}`}
                 style={{ left: p.x, top: p.y, width: COL_W, height: NODE_H }}
               >
                 <div className="flex items-center gap-1.5">
-                  {n.num != null && <span className="shrink-0 rounded bg-gray-100 dark:bg-gray-800 px-1 text-[10px] font-semibold tabular-nums text-gray-500 dark:text-gray-400">{String(n.num).padStart(2, '0')}</span>}
-                  <span className="truncate text-xs font-medium text-gray-800 dark:text-gray-200">{n.title}</span>
+                  {n.num != null && <span className="shrink-0 rounded bg-ink-surface px-1 text-caption font-semibold tabular-nums text-ink-text-muted">{String(n.num).padStart(2, '0')}</span>}
+                  <span className="truncate text-xs font-medium text-ink-text-body">{n.title}</span>
                 </div>
                 <div className="flex items-center gap-1.5">
                   <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${t.dot}`} aria-hidden="true" />
-                  <span className={`text-[10px] ${t.text}`}>{n.open ? n.status || 'open' : 'done'}</span>
-                  {n.complexity && <span className="ml-auto truncate text-[10px] text-gray-400">{n.complexity}</span>}
+                  <span className={`text-caption ${t.text}`}>{n.open ? n.status || 'open' : 'done'}</span>
+                  {n.complexity && <span className="ml-auto truncate text-caption text-ink-text-subtle">{n.complexity}</span>}
                 </div>
               </button>
             );
@@ -278,7 +278,7 @@ export const PlanFlowDiagram: React.FC<PlanFlowDiagramProps> = ({ concerns, over
                 title="Edit status & dependencies"
                 aria-label={`Edit ${n.title}`}
                 aria-pressed={editing}
-                className={`absolute z-10 flex h-5 w-5 items-center justify-center rounded text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:hover:bg-gray-800 dark:hover:text-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 ${editing ? 'bg-amber-100 text-amber-600 dark:bg-amber-950 dark:text-amber-300' : ''}`}
+                className={`absolute z-10 flex h-5 w-5 items-center justify-center rounded text-ink-text-subtle transition-colors hover:bg-ink-surface hover:text-ink-text-label dark:hover:bg-ink-surface dark:hover:text-ink-text-body focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 ${editing ? 'bg-amber-100 text-amber-600 dark:bg-amber-950 dark:text-amber-300' : ''}`}
                 style={{ left: p.x + COL_W - 23, top: p.y + 5 }}
               >
                 <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -295,25 +295,25 @@ export const PlanFlowDiagram: React.FC<PlanFlowDiagramProps> = ({ concerns, over
       {onEdit && editNode && (
         <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50/60 p-3 dark:border-amber-900 dark:bg-amber-950/30">
           <div className="mb-2 flex items-center gap-2">
-            {editNode.num != null && <span className="rounded bg-white dark:bg-gray-900 px-1.5 text-[10px] font-semibold tabular-nums text-gray-500 dark:text-gray-400">{String(editNode.num).padStart(2, '0')}</span>}
-            <span className="truncate text-sm font-medium text-gray-800 dark:text-gray-100">{editNode.title}</span>
-            <button type="button" onClick={() => setEditId(null)} className="ml-auto text-[11px] text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 focus:outline-none focus-visible:underline">Close</button>
+            {editNode.num != null && <span className="rounded bg-panel px-1.5 text-caption font-semibold tabular-nums text-ink-text-muted">{String(editNode.num).padStart(2, '0')}</span>}
+            <span className="truncate text-sm font-medium text-ink-text-body text-ink-text">{editNode.title}</span>
+            <button type="button" onClick={() => setEditId(null)} className="ml-auto text-caption text-ink-text-subtle hover:text-ink-text-label dark:hover:text-ink-text-body focus:outline-none focus-visible:underline">Close</button>
           </div>
           <div className="grid gap-3 sm:grid-cols-[auto_1fr]">
-            <label className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-300">
-              <span className="font-semibold uppercase tracking-wider text-gray-400">Status</span>
+            <label className="flex items-center gap-2 text-xs text-ink-text-muted">
+              <span className="font-semibold uppercase tracking-wider text-ink-text-subtle">Status</span>
               <select
                 value={statusValue}
                 onChange={(ev) => setStatusValue(ev.target.value)}
-                className="rounded border border-gray-300 bg-white px-2 py-1 text-xs text-gray-800 focus:border-amber-500 focus:outline-none dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
+                className="rounded border border-ink-border-2 bg-white px-2 py-1 text-xs text-ink-text-body focus:border-amber-500 focus:outline-none border-ink-border-2 bg-panel text-ink-text"
               >
                 {STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
               </select>
             </label>
-            <div className="text-xs text-gray-600 dark:text-gray-300">
-              <div className="mb-1 font-semibold uppercase tracking-wider text-gray-400">Blocked by</div>
+            <div className="text-xs text-ink-text-muted">
+              <div className="mb-1 font-semibold uppercase tracking-wider text-ink-text-subtle">Blocked by</div>
               {blockerChoices.length === 0 ? (
-                <div className="text-gray-400">No other concerns to depend on.</div>
+                <div className="text-ink-text-subtle">No other concerns to depend on.</div>
               ) : (
                 <div className="flex flex-wrap gap-1.5">
                   {blockerChoices.map((c) => {
@@ -325,7 +325,7 @@ export const PlanFlowDiagram: React.FC<PlanFlowDiagramProps> = ({ concerns, over
                         onClick={() => toggleBlocker(c.num)}
                         aria-pressed={on}
                         title={c.title}
-                        className={`rounded-full border px-2 py-0.5 text-[11px] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 ${on ? 'border-amber-400 bg-amber-100 text-amber-700 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-300' : 'border-gray-300 text-gray-600 hover:border-gray-400 dark:border-gray-700 dark:text-gray-300'}`}
+                        className={`rounded-full border px-2 py-0.5 text-caption transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 ${on ? 'border-amber-400 bg-amber-100 text-amber-700 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-300' : 'border-ink-border-2 text-ink-text-label hover:border-ink-border-2 border-ink-border-2 text-ink-text-label'}`}
                       >
                         <span className="tabular-nums">#{c.num}</span> <span className="opacity-70">{c.title.length > 22 ? `${c.title.slice(0, 22)}…` : c.title}</span>
                       </button>
@@ -344,13 +344,13 @@ export const PlanFlowDiagram: React.FC<PlanFlowDiagramProps> = ({ concerns, over
             >
               {saving ? 'Saving…' : 'Save'}
             </button>
-            <button type="button" onClick={() => setEditId(null)} disabled={saving} className="rounded px-3 py-1 text-xs text-gray-600 hover:bg-gray-100 disabled:opacity-60 dark:text-gray-300 dark:hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500">Cancel</button>
-            <span className="text-[11px] text-gray-400">Writes the concern doc + overview dependency table.</span>
+            <button type="button" onClick={() => setEditId(null)} disabled={saving} className="rounded px-3 py-1 text-xs text-ink-text-label hover:bg-ink-surface disabled:opacity-60 text-ink-text-label dark:hover:bg-ink-surface focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500">Cancel</button>
+            <span className="text-caption text-ink-text-subtle">Writes the concern doc + overview dependency table.</span>
           </div>
         </div>
       )}
 
-      <div className="flex items-center gap-3 px-2 py-1 text-[10px] text-gray-400">
+      <div className="flex items-center gap-3 px-2 py-1 text-caption text-ink-text-subtle">
         <span>{graph.nodes.length} concerns · {graph.cols} batch{graph.cols === 1 ? '' : 'es'} · {doneCount} done{graph.issues.length ? ` · ${graph.issues.length} dependency issue${graph.issues.length === 1 ? '' : 's'}` : ''}</span>
         <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" /> done</span>
         <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-amber-400" /> open</span>

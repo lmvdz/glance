@@ -29,21 +29,21 @@ export const SymptomRows: React.FC<{ symptoms: SymptomWire[]; now?: number }> = 
     {symptoms.map((s) => {
       const age = relativeAge(s.landedAt, now);
       return (
-        <li key={s.id} className="border-b border-gray-100 px-4 py-3 last:border-b-0 dark:border-gray-800/60">
-          <p className="text-sm text-gray-800 dark:text-gray-200">{s.symptom}</p>
-          <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-gray-500 dark:text-gray-400">
+        <li key={s.id} className="border-b border-ink-border px-4 py-3 last:border-b-0 border-ink-border/60">
+          <p className="text-sm text-ink-text-body">{s.symptom}</p>
+          <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-caption text-ink-text-muted">
             {age && (
               <span className="font-mono" title={new Date(s.landedAt).toISOString()}>
                 {age} ago
               </span>
             )}
             {s.repo && (
-              <span className="max-w-[10rem] truncate font-mono text-gray-400 dark:text-gray-500" title={s.repo}>
+              <span className="max-w-[10rem] truncate font-mono text-ink-text-subtle" title={s.repo}>
                 {repoBasename(s.repo)}
               </span>
             )}
             {s.fixedBy?.prNumber !== undefined && (
-              <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">
+              <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-caption font-semibold text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">
                 fixed by #{s.fixedBy.prNumber}
               </span>
             )}
@@ -53,7 +53,7 @@ export const SymptomRows: React.FC<{ symptoms: SymptomWire[]; now?: number }> = 
               {s.whereToLook.map((w) => (
                 <code
                   key={w}
-                  className="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[10px] text-gray-600 dark:bg-gray-800 dark:text-gray-300"
+                  className="rounded bg-ink-surface px-1.5 py-0.5 font-mono text-caption text-ink-text-label bg-ink-surface text-ink-text-label"
                 >
                   {w}
                 </code>
@@ -93,12 +93,12 @@ export const SymptomsCard: React.FC = () => {
   return (
     <SectionCard
       title="Known symptoms"
-      right={symptoms && symptoms.length > 0 ? <span className="font-mono text-[11px]">{symptoms.length}</span> : undefined}
+      right={symptoms && symptoms.length > 0 ? <span className="font-mono text-caption">{symptoms.length}</span> : undefined}
     >
       {symptoms === null ? (
         <div className="space-y-2 p-4" aria-label="Loading symptom index">
           {[1, 2].map((n) => (
-            <div key={n} className="h-10 animate-pulse rounded-md bg-gray-100 dark:bg-gray-800" />
+            <div key={n} className="h-10 animate-pulse rounded-md bg-ink-surface" />
           ))}
         </div>
       ) : error ? (
@@ -107,9 +107,9 @@ export const SymptomsCard: React.FC = () => {
         </div>
       ) : symptoms.length === 0 ? (
         <div className="px-4 py-8 text-center">
-          <Stethoscope className="mx-auto mb-2 h-6 w-6 text-gray-300 dark:text-gray-600" aria-hidden="true" />
-          <div className="text-sm font-medium text-gray-600 dark:text-gray-300">No symptoms recorded</div>
-          <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+          <Stethoscope className="mx-auto mb-2 h-6 w-6 text-ink-text-subtle" aria-hidden="true" />
+          <div className="text-sm font-medium text-ink-text-muted">No symptoms recorded</div>
+          <p className="mt-1 text-xs text-ink-text-muted">
             Units record recurring failure modes here as they hit them — searchable in ⌘K, browsable here.
           </p>
         </div>

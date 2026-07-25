@@ -22,7 +22,7 @@ export const Sparkline: React.FC<SparklineProps> = ({ values, width = 64, height
 
   if (pts.length === 0) {
     return (
-      <svg width={width} height={height} role="img" aria-label={label ?? 'no data'} className="text-gray-300 dark:text-gray-700">
+      <svg width={width} height={height} role="img" aria-label={label ?? 'no data'} className="text-ink-text-label text-ink-text-label">
         <line x1={0} y1={height - 1} x2={width} y2={height - 1} stroke="currentColor" strokeWidth={1} strokeDasharray="2 2" />
       </svg>
     );

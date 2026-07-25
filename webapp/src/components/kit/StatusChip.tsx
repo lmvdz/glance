@@ -93,9 +93,9 @@ function toneClasses(tone: StatusChipTone, variant: StatusChipVariant): string {
     return 'bg-amber-50 text-amber-500 border-transparent dark:bg-amber-950/30 dark:text-amber-500';
   }
   // neutral
-  if (variant === 'solid') return 'bg-gray-200 text-gray-700 border-transparent dark:bg-gray-800 dark:text-gray-300';
-  if (variant === 'outline') return 'border-gray-300 text-gray-500 bg-transparent dark:border-gray-700 dark:text-gray-400';
-  return 'bg-gray-100 text-gray-400 border-transparent dark:bg-gray-900 dark:text-gray-600';
+  if (variant === 'solid') return 'bg-ink-border text-ink-text-label border-transparent bg-ink-surface text-ink-text-label';
+  if (variant === 'outline') return 'border-ink-border-2 text-ink-text0 bg-transparent border-ink-border-2 text-ink-text-subtle';
+  return 'bg-ink-surface text-ink-text-subtle border-transparent bg-panel text-ink-text-label';
 }
 
 function resolve(
@@ -123,7 +123,7 @@ export const StatusChip: React.FC<StatusChipProps> = ({ status, variant, tone, c
   const meta = resolve(status, variant, tone);
   return (
     <span
-      className={`inline-flex flex-shrink-0 items-center rounded-[3px] border px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase leading-none tracking-wide ${toneClasses(meta.tone, meta.variant)} ${className ?? ''}`}
+      className={`inline-flex flex-shrink-0 items-center rounded-[3px] border px-1.5 py-0.5 font-mono text-caption font-semibold uppercase leading-none tracking-wide ${toneClasses(meta.tone, meta.variant)} ${className ?? ''}`}
       title={status}
     >
       {meta.label}

@@ -215,7 +215,7 @@ export const Login = () => {
                 <>
                   <div className="my-5 flex items-center gap-3">
                     <div className="h-px flex-1 bg-[#1f1f23]" />
-                    <span className="text-[11px] uppercase tracking-wider text-[#5c5c62]">or</span>
+                    <span className="text-caption uppercase tracking-wider text-[#5c5c62]">or</span>
                     <div className="h-px flex-1 bg-[#1f1f23]" />
                   </div>
                   <div className="flex flex-col gap-2.5">
@@ -239,7 +239,7 @@ export const Login = () => {
 
           {/* Footer */}
           <div className="relative px-8 pb-6 sm:px-14">
-            <p className="mx-auto max-w-[320px] text-[11px] text-[#4b4b52]">
+            <p className="mx-auto max-w-[320px] text-caption text-[#4b4b52]">
               Protected by end-to-end encrypted sessions.
             </p>
           </div>

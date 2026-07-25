@@ -13,11 +13,11 @@ export interface DiffStatProps {
 
 export const DiffStat: React.FC<DiffStatProps> = ({ added, removed, className }) => {
   if (!added && !removed) {
-    return <span className={`font-mono text-[11px] text-gray-400 dark:text-gray-600 ${className ?? ''}`}>—</span>;
+    return <span className={`font-mono text-caption text-ink-text-subtle text-ink-text-label ${className ?? ''}`}>—</span>;
   }
   return (
     <span
-      className={`inline-flex flex-shrink-0 items-center gap-1 font-mono text-[11px] tabular-nums ${className ?? ''}`}
+      className={`inline-flex flex-shrink-0 items-center gap-1 font-mono text-caption tabular-nums ${className ?? ''}`}
       aria-label={`${added} added, ${removed} removed`}
       title={`+${added} -${removed}`}
     >

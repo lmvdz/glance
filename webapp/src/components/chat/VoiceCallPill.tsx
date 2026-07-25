@@ -79,12 +79,12 @@ export const VoiceCallPillView = ({
   onEndCall,
 }: VoiceCallPillViewProps) => (
   <div
-    className={`pill-rise fixed z-[55] flex w-80 max-w-[calc(100vw-2rem)] flex-col gap-2 rounded-2xl border border-gray-200 bg-white/95 p-3 shadow-xl backdrop-blur transition-colors dark:border-gray-800 dark:bg-gray-950/95 ${panelOpen ? 'top-16 right-4' : 'bottom-16 right-4'}`}
+    className={`pill-rise fixed z-[55] flex w-80 max-w-[calc(100vw-2rem)] flex-col gap-2 rounded-2xl border border-ink-border bg-white/95 p-3 shadow-xl backdrop-blur transition-colors border-ink-border bg-ink/95 ${panelOpen ? 'top-16 right-4' : 'bottom-16 right-4'}`}
     role="status"
     aria-live="polite"
   >
     {reconnectNotice && (
-      <div className="rounded-lg bg-amber-50 px-2 py-1 text-[11px] font-medium text-amber-700 dark:bg-amber-900/20 dark:text-amber-400" role="alert">
+      <div className="rounded-lg bg-amber-50 px-2 py-1 text-caption font-medium text-amber-700 dark:bg-amber-900/20 dark:text-amber-400" role="alert">
         {reconnectNotice}
       </div>
     )}
@@ -93,7 +93,7 @@ export const VoiceCallPillView = ({
         since unlike the reconnect notice this one asks for something rather than just reporting. */}
     {showPushNudge && (
       <div
-        className="flex items-center justify-between gap-2 rounded-lg bg-amber-50 px-2 py-1 text-[11px] font-medium text-amber-700 dark:bg-amber-900/20 dark:text-amber-400"
+        className="flex items-center justify-between gap-2 rounded-lg bg-amber-50 px-2 py-1 text-caption font-medium text-amber-700 dark:bg-amber-900/20 dark:text-amber-400"
         role="status"
       >
         <span className="truncate">{PUSH_NUDGE_TEXT}</span>
@@ -118,7 +118,7 @@ export const VoiceCallPillView = ({
       </div>
     )}
     <div className="flex items-center justify-between gap-2">
-      <span className="truncate text-[11px] font-medium text-gray-500 dark:text-gray-400" title={bindingBanner}>
+      <span className="truncate text-caption font-medium text-ink-text-muted" title={bindingBanner}>
         {bindingBanner}
       </span>
       {onViewAgent && (
@@ -127,7 +127,7 @@ export const VoiceCallPillView = ({
           aria-label="View console agent"
           title="View the console agent's work (turns, tool calls)"
           onClick={onViewAgent}
-          className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 dark:hover:bg-gray-800 dark:hover:text-gray-200 dark:focus-visible:ring-offset-gray-950"
+          className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-ink-text-subtle transition-colors hover:bg-ink-surface hover:text-ink-text-label focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 dark:hover:bg-ink-surface dark:hover:text-ink-text-body dark:focus-visible:ring-offset-gray-950"
         >
           <Bot className="h-4 w-4" aria-hidden />
         </button>
@@ -137,7 +137,7 @@ export const VoiceCallPillView = ({
         aria-label="End voice call"
         title="End voice call"
         onClick={onEndCall}
-        className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-gray-400 transition-colors hover:bg-red-50 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:ring-offset-2 dark:hover:bg-red-900/20 dark:hover:text-red-400 dark:focus-visible:ring-offset-gray-950"
+        className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-ink-text-subtle transition-colors hover:bg-red-50 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:ring-offset-2 dark:hover:bg-red-900/20 dark:hover:text-red-400 dark:focus-visible:ring-offset-gray-950"
       >
         <PhoneOff className="h-4 w-4" aria-hidden />
       </button>
@@ -158,14 +158,14 @@ export const VoiceCallPillView = ({
         className={`flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-950 active:scale-[0.99] ${
           pttEngaged
             ? 'bg-amber-500 text-white'
-            : 'bg-gray-900 text-white hover:bg-black dark:bg-gray-200 dark:text-gray-900 dark:hover:bg-white'
+            : 'bg-panel text-white hover:bg-black bg-ink-border text-ink-text dark:hover:bg-white'
         }`}
       >
         <Mic className="h-4 w-4" aria-hidden />
       </button>
       <div className="flex flex-1 flex-col items-end text-right">
-        <span className="text-xs font-medium text-gray-700 dark:text-gray-300">{stateLabel}</span>
-        <span className="text-[11px] text-gray-400 dark:text-gray-500">
+        <span className="text-xs font-medium text-ink-text-label">{stateLabel}</span>
+        <span className="text-caption text-ink-text-subtle">
           {elapsedLabel} · {costLabel}
         </span>
       </div>

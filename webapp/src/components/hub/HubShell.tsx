@@ -325,14 +325,14 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
                   value={searchQuery}
                   onChange={(event) => setSearchQuery(event.target.value)}
                   placeholder="Search room history"
-                  className="h-9 w-full rounded-full border border-ink-border bg-ink pl-9 pr-9 text-sm text-ink-text placeholder:text-ink-text-subtle focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-ink"
+                  className="h-9 w-full rounded-full border border-ink-border bg-ink pl-9 pr-9 text-sm text-ink-text placeholder:text-ink-text-subtle focus-visible:ring-2 focus-visible:ring-ember focus-visible:ring-offset-2 focus-visible:ring-offset-ink"
                 />
                 {searchQuery ? (
                   <button
                     type="button"
                     aria-label="Clear search"
                     onClick={() => setSearchQuery('')}
-                    className="absolute right-1 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full text-ink-text-muted hover:bg-ink-surface hover:text-ink-text-body focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-ink"
+                    className="absolute right-1 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full text-ink-text-muted hover:bg-ink-surface hover:text-ink-text-body focus-visible:ring-2 focus-visible:ring-ember focus-visible:ring-offset-2 focus-visible:ring-offset-ink"
                   >
                     <X className="h-4 w-4" aria-hidden />
                   </button>
@@ -344,7 +344,7 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
                     <ol className="divide-y divide-ink-border">
                       {searchResults.map((result) => (
                         <li key={result.entry.id}>
-                          <a href={hubHref(result.entry.channelId, result.entry.id)} onClick={() => setAnchorEntryId(result.entry.id)} className="block px-3 py-2 text-left hover:bg-ink-surface focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-inset">
+                          <a href={hubHref(result.entry.channelId, result.entry.id)} onClick={() => setAnchorEntryId(result.entry.id)} className="block px-3 py-2 text-left hover:bg-ink-surface focus-visible:ring-2 focus-visible:ring-ember focus-visible:ring-inset">
                             <span className="block text-[11px] font-medium text-ink-text-label">{resultTitle(result.entry)}</span>
                             <span className="mt-0.5 block line-clamp-2 text-xs text-ink-text-muted">{result.snippet}</span>
                           </a>
@@ -369,7 +369,7 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
                     type="button"
                     aria-label="Cancel reply"
                     onClick={() => setReplyTarget(undefined)}
-                    className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-ink-text-muted hover:bg-ink-surface hover:text-ink-text-body focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-ink"
+                    className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-ink-text-muted hover:bg-ink-surface hover:text-ink-text-body focus-visible:ring-2 focus-visible:ring-ember focus-visible:ring-offset-2 focus-visible:ring-offset-ink"
                   >
                     <X className="h-4 w-4" aria-hidden />
                   </button>

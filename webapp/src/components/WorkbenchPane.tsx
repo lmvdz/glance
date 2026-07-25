@@ -184,7 +184,7 @@ export const TaskRailRow: React.FC<{
   const ref = taskRef(task);
   return (
     <div
-      className={`group flex min-h-12 items-stretch border-b border-gray-100 transition-colors dark:border-gray-800/50 ${isActive ? 'border-l-2 border-l-amber-500 bg-amber-50 dark:bg-amber-900/20' : critical ? 'border-l-2 border-l-red-400 bg-red-50/60 hover:bg-red-50 dark:border-l-red-500 dark:bg-red-900/15' : attention ? 'border-l-2 border-l-amber-400 bg-amber-50/50 hover:bg-amber-50 dark:border-l-amber-500 dark:bg-amber-900/10' : 'border-l-2 border-l-transparent hover:bg-gray-50 dark:hover:bg-gray-900/70'}`}
+      className={`group flex min-h-12 items-stretch border-b border-ink-border transition-colors border-ink-border/50 ${isActive ? 'border-l-2 border-l-amber-500 bg-amber-50 dark:bg-amber-900/20' : critical ? 'border-l-2 border-l-red-400 bg-red-50/60 hover:bg-red-50 dark:border-l-red-500 dark:bg-red-900/15' : attention ? 'border-l-2 border-l-amber-400 bg-amber-50/50 hover:bg-amber-50 dark:border-l-amber-500 dark:bg-amber-900/10' : 'border-l-2 border-l-transparent hover:bg-ink dark:hover:bg-panel/70'}`}
     >
       <button onClick={onSelect} className="flex min-w-0 flex-1 items-center py-1 pl-2 text-left focus-visible:ring-2 focus-visible:ring-amber-500">
         <span className="ml-0.5 flex w-5 flex-shrink-0 justify-center" title={status && status.total > 0 ? status.headline : `Status: ${task.properties.status}`}>
@@ -195,16 +195,16 @@ export const TaskRailRow: React.FC<{
           ) : isWorking ? (
             <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" aria-hidden="true" />
           ) : (
-            <Circle className={`h-3.5 w-3.5 ${isActive ? 'text-amber-400' : 'text-gray-300 dark:text-gray-600'}`} aria-hidden="true" />
+            <Circle className={`h-3.5 w-3.5 ${isActive ? 'text-amber-400' : 'text-ink-text-label text-ink-text-label'}`} aria-hidden="true" />
           )}
         </span>
         <span className="min-w-0 flex-1 px-2">
-          <span className={`block truncate ${isDone ? 'text-gray-400 line-through dark:text-gray-600' : isActive ? 'font-medium text-gray-900 dark:text-gray-100' : 'text-gray-700 dark:text-gray-300'}`} title={task.title}>
+          <span className={`block truncate ${isDone ? 'text-ink-text-subtle line-through text-ink-text-label' : isActive ? 'font-medium text-ink-text' : 'text-ink-text-label'}`} title={task.title}>
             {task.title}
           </span>
           <span className="mt-0.5 flex min-w-0 items-center gap-1.5">
             {ref && (
-              <span className={`max-w-[8rem] truncate font-medium ${isDone ? 'text-gray-400 dark:text-gray-600' : isActive ? 'text-amber-700 dark:text-amber-400' : 'text-amber-600 dark:text-amber-500'}`} title={task.planDir ?? task.id}>
+              <span className={`max-w-[8rem] truncate font-medium ${isDone ? 'text-ink-text-subtle text-ink-text-label' : isActive ? 'text-amber-700 dark:text-amber-400' : 'text-amber-600 dark:text-amber-500'}`} title={task.planDir ?? task.id}>
                 {ref}
               </span>
             )}
@@ -214,7 +214,7 @@ export const TaskRailRow: React.FC<{
               </span>
             )}
             {task.priority && <span className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${priorityColor}`} title={`Priority: ${task.priority}`} />}
-            <span className={`max-w-[5.5rem] truncate rounded px-1.5 py-0.5 text-[10px] font-medium ${getCategoryBadge(task.category)}`}>
+            <span className={`max-w-[5.5rem] truncate rounded px-1.5 py-0.5 text-caption font-medium ${getCategoryBadge(task.category)}`}>
               {task.category}
             </span>
             {attention && (
@@ -227,10 +227,10 @@ export const TaskRailRow: React.FC<{
             )}
           </span>
         </span>
-        <span className={`ml-1 w-8 flex-shrink-0 text-right ${isActive ? 'font-medium text-gray-500 dark:text-gray-400' : 'text-gray-400 dark:text-gray-500'}`}>{task.duration}</span>
+        <span className={`ml-1 w-8 flex-shrink-0 text-right ${isActive ? 'font-medium text-ink-text-muted' : 'text-ink-text-subtle'}`}>{task.duration}</span>
       </button>
       <button
-        className="mr-1 flex min-h-10 w-8 flex-shrink-0 items-center justify-center self-center rounded text-gray-400 opacity-0 transition-colors hover:bg-red-50 hover:text-red-500 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-amber-500 group-hover:opacity-100 dark:hover:bg-red-900/30"
+        className="mr-1 flex min-h-10 w-8 flex-shrink-0 items-center justify-center self-center rounded text-ink-text-subtle opacity-0 transition-colors hover:bg-red-50 hover:text-red-500 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-amber-500 group-hover:opacity-100 dark:hover:bg-red-900/30"
         onClick={onDelete}
         aria-label={`Archive ${task.title}`}
         title="Archive task"
@@ -416,7 +416,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
       case 'High': return 'bg-red-400';
       case 'Medium': return 'bg-amber-400';
       case 'Low': return 'bg-blue-400';
-      default: return 'bg-gray-300';
+      default: return 'bg-ink-border-2';
     }
   };
 
@@ -440,8 +440,8 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
 
   if (collapsed) {
     return (
-      <aside className="flex h-full w-12 flex-shrink-0 flex-col items-center border-r border-gray-200 bg-gray-50 py-1.5 dark:border-gray-800 dark:bg-[#18191b]">
-        <button onClick={onToggleCollapsed} className="mb-1 flex min-h-10 w-10 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200" aria-label="Expand workbench pane" title="Expand workbench pane">
+      <aside className="flex h-full w-12 flex-shrink-0 flex-col items-center border-r border-ink-border bg-ink py-1.5 border-ink-border dark:bg-[#18191b]">
+        <button onClick={onToggleCollapsed} className="mb-1 flex min-h-10 w-10 items-center justify-center rounded-md text-ink-text0 transition-colors hover:bg-ink-surface hover:text-ink-text-label focus-visible:ring-2 focus-visible:ring-amber-500 text-ink-text-subtle dark:hover:bg-ink-surface dark:hover:text-ink-text-body" aria-label="Expand workbench pane" title="Expand workbench pane">
           <Menu className="h-4 w-4" aria-hidden="true" />
         </button>
         {NAV_ITEMS.map((item) => {
@@ -451,7 +451,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
             <button
               key={item.view}
               onClick={() => setView(item.view)}
-              className={`relative mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === item.view ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`}
+              className={`relative mt-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === item.view ? 'bg-ink-border text-ink-text bg-ink-surface text-ink-text' : 'text-ink-text0 hover:bg-ink-surface text-ink-text-subtle dark:hover:bg-ink-surface'}`}
               aria-label={isFleet && needsYouCount ? `${item.label} (${needsYouCount} need you)` : item.label}
               title={item.title}
             >
@@ -463,40 +463,40 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
           );
         })}
         <div className="mt-3 flex h-full items-center">
-          <div className="-rotate-90 whitespace-nowrap text-xs font-semibold uppercase tracking-widest text-gray-400">
+          <div className="-rotate-90 whitespace-nowrap text-xs font-semibold uppercase tracking-widest text-ink-text-subtle">
             {collapsedLabel}
           </div>
         </div>
         {/* The gear — org/settings live here now (GRAPH-FOLD.md §6e), not in the nav. */}
         <button
           onClick={() => setView('org')}
-          className={`mb-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === 'org' ? 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`}
+          className={`mb-1 flex min-h-10 w-10 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === 'org' ? 'bg-ink-border text-ink-text bg-ink-surface text-ink-text' : 'text-ink-text0 hover:bg-ink-surface text-ink-text-subtle dark:hover:bg-ink-surface'}`}
           aria-label="Organization settings"
           title="Organization settings"
         >
           <Settings className="h-4 w-4" aria-hidden="true" />
         </button>
-        <div className={`mb-2 h-2 w-2 rounded-full ${connected ? 'bg-emerald-500' : 'bg-gray-400'}`} title={connected ? 'Daemon live' : 'Daemon offline'} />
+        <div className={`mb-2 h-2 w-2 rounded-full ${connected ? 'bg-emerald-500' : 'bg-ink-text-subtle'}`} title={connected ? 'Daemon live' : 'Daemon offline'} />
       </aside>
     );
   }
 
   return (
-    <aside className="flex h-full w-[22rem] flex-shrink-0 flex-col border-r border-gray-200 bg-white transition-colors duration-200 dark:border-gray-800 dark:bg-gray-950">
-      <div className="border-b border-gray-200 bg-gray-50/70 px-3 py-2 dark:border-gray-800 dark:bg-gray-950">
+    <aside className="flex h-full w-[22rem] flex-shrink-0 flex-col border-r border-ink-border bg-white transition-colors duration-200 border-ink-border bg-ink">
+      <div className="border-b border-ink-border bg-ink/70 px-3 py-2 border-ink-border bg-ink">
         <div className="flex min-w-0 items-center justify-between gap-2">
           <div className="flex min-w-0 items-center gap-2 text-sm">
-            <GlanceLogo size={20} className="flex-shrink-0 text-gray-900 dark:text-gray-100" />
-            <span className="font-semibold text-gray-900 dark:text-gray-100">glance</span>
-            <ChevronRight className="h-3 w-3 flex-shrink-0 text-gray-400" aria-hidden="true" />
-            <span className="truncate font-medium text-gray-600 dark:text-gray-300">{currentProject?.name ?? 'No project'}</span>
-            <span className={`flex flex-shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-semibold ${connected ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400' : 'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400'}`}>
-              <span className={`h-1.5 w-1.5 rounded-full ${connected ? 'bg-emerald-500' : 'bg-gray-400'}`} aria-hidden="true" />
+            <GlanceLogo size={20} className="flex-shrink-0 text-ink-text" />
+            <span className="font-semibold text-ink-text">glance</span>
+            <ChevronRight className="h-3 w-3 flex-shrink-0 text-ink-text-subtle" aria-hidden="true" />
+            <span className="truncate font-medium text-ink-text-muted">{currentProject?.name ?? 'No project'}</span>
+            <span className={`flex flex-shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-caption font-semibold ${connected ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400' : 'bg-ink-surface text-ink-text0 bg-ink-surface text-ink-text-subtle'}`}>
+              <span className={`h-1.5 w-1.5 rounded-full ${connected ? 'bg-emerald-500' : 'bg-ink-text-subtle'}`} aria-hidden="true" />
               {connected ? 'LIVE' : 'OFFLINE'}
             </span>
           </div>
           <div className="flex flex-shrink-0 items-center gap-1.5">
-            <button onClick={onToggleCollapsed} className="flex min-h-10 w-10 flex-shrink-0 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:bg-gray-800 dark:hover:text-gray-300" aria-label="Collapse workbench pane" title="Collapse workbench pane">
+            <button onClick={onToggleCollapsed} className="flex min-h-10 w-10 flex-shrink-0 items-center justify-center rounded-md text-ink-text-subtle transition-colors hover:bg-ink-surface hover:text-ink-text-label focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:bg-ink-surface dark:hover:text-ink-text-label" aria-label="Collapse workbench pane" title="Collapse workbench pane">
               <Menu className="h-4 w-4" aria-hidden="true" />
             </button>
           </div>
@@ -505,13 +505,13 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
         {showTaskDrill ? (
           <button
             onClick={() => setDrilled(false)}
-            className="mt-2 flex min-h-9 w-full items-center gap-2 rounded-md px-2 text-sm font-semibold text-gray-900 transition-colors hover:bg-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-gray-100 dark:hover:bg-gray-800/70"
+            className="mt-2 flex min-h-9 w-full items-center gap-2 rounded-md px-2 text-sm font-semibold text-ink-text transition-colors hover:bg-ink-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 text-ink-text dark:hover:bg-ink-surface/70"
             title="Back to navigation"
           >
-            <ChevronLeft className="h-4 w-4 flex-shrink-0 text-gray-400" aria-hidden="true" />
+            <ChevronLeft className="h-4 w-4 flex-shrink-0 text-ink-text-subtle" aria-hidden="true" />
             <Inbox className="h-4 w-4 flex-shrink-0 text-blue-500" aria-hidden="true" />
             Tasks
-            <span className="ml-auto font-mono text-[11px] text-gray-400">{filteredTasks.length}</span>
+            <span className="ml-auto font-mono text-caption text-ink-text-subtle">{filteredTasks.length}</span>
           </button>
         ) : (
           <nav className="mt-2 space-y-0.5">
@@ -525,12 +525,12 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
                 onClick={() => { setView(item.view); setDrilled(item.view === 'tasks'); }}
                 aria-current={active ? 'page' : undefined}
                 title={item.title}
-                className={`group flex min-h-8 w-full items-center gap-2.5 rounded-md px-2 text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 ${active ? 'bg-amber-50 font-medium text-amber-700 dark:bg-amber-950/50 dark:text-amber-300' : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800/70 dark:hover:text-gray-200'}`}
+                className={`group flex min-h-8 w-full items-center gap-2.5 rounded-md px-2 text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 ${active ? 'bg-amber-50 font-medium text-amber-700 dark:bg-amber-950/50 dark:text-amber-300' : 'text-ink-text-label hover:bg-ink-surface hover:text-ink-text text-ink-text-subtle dark:hover:bg-ink-surface/70 dark:hover:text-ink-text-body'}`}
               >
-                <Icon className={`h-4 w-4 flex-shrink-0 ${active ? '' : 'text-gray-400 group-hover:text-gray-500 dark:group-hover:text-gray-300'}`} aria-hidden="true" />
+                <Icon className={`h-4 w-4 flex-shrink-0 ${active ? '' : 'text-ink-text-subtle group-hover:text-ink-text0 dark:group-hover:text-ink-text-label'}`} aria-hidden="true" />
                 <span className="flex-1 truncate text-left">{item.label}</span>
                 {badge > 0 && (
-                  <span className={`min-w-[18px] rounded-full px-1.5 py-0.5 text-center text-[10px] font-semibold leading-none ${active ? 'bg-amber-500 text-white' : item.view === 'fleet' ? 'bg-red-500 text-white' : 'bg-gray-200 text-gray-500 dark:bg-gray-800 dark:text-gray-400'}`}>
+                  <span className={`min-w-[18px] rounded-full px-1.5 py-0.5 text-center text-caption font-semibold leading-none ${active ? 'bg-amber-500 text-white' : item.view === 'fleet' ? 'bg-red-500 text-white' : 'bg-ink-border text-ink-text0 bg-ink-surface text-ink-text-subtle'}`}>
                     {badge}
                   </span>
                 )}
@@ -544,14 +544,14 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
         <div className="mt-2">
           <label className="sr-only" htmlFor="workbench-search">Search tasks</label>
           <div className="relative">
-            <Search className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gray-400" aria-hidden="true" />
+            <Search className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-text-subtle" aria-hidden="true" />
             {/* No ⌘K chip here anymore: the hotkey opens the command palette now, not this box —
                 the palette's "Search tasks…" row is what routes here. A chip must never advertise
                 a key that isn't actually bound to this control. */}
             <input
               id="workbench-search"
               type="search"
-              className="w-full rounded-md border border-gray-200 bg-white py-1.5 pl-8 pr-3 text-xs text-gray-900 transition-colors duration-150 placeholder:text-gray-400 focus:border-amber-500 focus:outline-none focus:ring-1 focus:ring-amber-500 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200"
+              className="w-full rounded-md border border-ink-border bg-white py-1.5 pl-8 pr-3 text-xs text-ink-text transition-colors duration-150 placeholder:text-ink-text-subtle focus:border-amber-500 focus:outline-none focus:ring-1 focus:ring-amber-500 border-ink-border bg-panel text-ink-text-body"
               placeholder="Search tasks by title or ID"
               value={searchQuery}
               onChange={(event) => setSearchQuery(event.target.value)}
@@ -564,32 +564,32 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
       <div className="flex-1 overflow-y-auto scrollbar-custom">
         {showTaskScopedBlock && (
         <>
-        <div className="border-b border-gray-200 p-3 dark:border-gray-800">
+        <div className="border-b border-ink-border p-3 border-ink-border">
           <div className="grid grid-cols-4 gap-1">
             {taskFilters.map((filter) => (
-              <button key={filter.key} onClick={() => setTaskFilter(filter.key)} className={`min-h-9 rounded-md px-2 text-left text-[11px] transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${taskFilter === filter.key ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'}`}>
+              <button key={filter.key} onClick={() => setTaskFilter(filter.key)} className={`min-h-9 rounded-md px-2 text-left text-caption transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${taskFilter === filter.key ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300' : 'text-ink-text0 hover:bg-ink-surface hover:text-ink-text-label text-ink-text-subtle dark:hover:bg-ink-surface dark:hover:text-ink-text-body'}`}>
                 <span className="block font-medium">{filter.label}</span>
-                <span className="font-mono text-[10px] text-gray-400">{taskCount(filter.key)}</span>
+                <span className="font-mono text-caption text-ink-text-subtle">{taskCount(filter.key)}</span>
               </button>
             ))}
           </div>
           <div className="mt-3">
-            <div className="mb-1.5 flex items-baseline justify-between text-[11px] font-semibold uppercase tracking-wider text-gray-400">
+            <div className="mb-1.5 flex items-baseline justify-between text-caption font-semibold uppercase tracking-wider text-ink-text-subtle">
               <span>Progress</span>
               <span className="font-mono">{progressPercentage}%</span>
             </div>
-            <div className="h-1.5 rounded-full bg-gray-200 dark:bg-gray-800">
+            <div className="h-1.5 rounded-full bg-ink-border bg-ink-surface">
               <div className="h-1.5 rounded-full bg-amber-500 transition-[width] duration-300 ease-out" style={{ width: `${progressPercentage}%` }} />
             </div>
-            <div className="mt-1.5 text-[11px] text-gray-500 dark:text-gray-400">
+            <div className="mt-1.5 text-caption text-ink-text-muted">
               {completedTasks} of {totalTasks} features completed · {connected ? 'live' : 'offline'}
             </div>
           </div>
         </div>
 
         {!showTaskDrill && (
-        <section className="border-b border-gray-200 dark:border-gray-800">
-          <button onClick={() => setWorkspaceOpen((open) => !open)} className="flex min-h-9 w-full items-center gap-1 px-3 text-[11px] font-semibold uppercase tracking-wider text-gray-400 transition-colors hover:text-gray-600 focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:text-gray-300">
+        <section className="border-b border-ink-border">
+          <button onClick={() => setWorkspaceOpen((open) => !open)} className="flex min-h-9 w-full items-center gap-1 px-3 text-caption font-semibold uppercase tracking-wider text-ink-text-subtle transition-colors hover:text-ink-text-label focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:text-ink-text-label">
             {workspaceOpen ? <ChevronDown className="h-3 w-3" aria-hidden="true" /> : <ChevronRight className="h-3 w-3" aria-hidden="true" />}
             Workspace
           </button>
@@ -605,12 +605,12 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
                 const dto = projectDtos.find((p) => p.id === project.id);
                 return (
                   <div key={project.id}>
-                    <div className={`flex min-h-9 w-full items-center ${isActive ? 'bg-gray-50 dark:bg-gray-900/60' : ''}`}>
+                    <div className={`flex min-h-9 w-full items-center ${isActive ? 'bg-ink-surface/60' : ''}`}>
                       <button
                         onClick={() => setOpenProjects((state) => ({ ...state, [project.id]: !open }))}
                         aria-label={open ? `Collapse ${project.name} details` : `Expand ${project.name} details`}
                         aria-expanded={open}
-                        className="flex h-9 w-6 flex-shrink-0 items-center justify-center text-gray-400 transition-colors hover:text-gray-600 focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:text-gray-300"
+                        className="flex h-9 w-6 flex-shrink-0 items-center justify-center text-ink-text-subtle transition-colors hover:text-ink-text-label focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:text-ink-text-label"
                       >
                         {open ? <ChevronDown className="h-3 w-3" aria-hidden="true" /> : <ChevronRight className="h-3 w-3" aria-hidden="true" />}
                       </button>
@@ -618,24 +618,24 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
                         onClick={() => selectProject(project.id)}
                         aria-current={isActive ? 'true' : undefined}
                         title={project.id}
-                        className={`flex min-h-9 min-w-0 flex-1 items-center justify-between pr-3 text-left transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${isActive ? 'font-medium text-gray-900 dark:text-gray-100' : 'text-gray-600 hover:bg-gray-50 dark:text-gray-400 dark:hover:bg-gray-900/70'}`}
+                        className={`flex min-h-9 min-w-0 flex-1 items-center justify-between pr-3 text-left transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${isActive ? 'font-medium text-ink-text' : 'text-ink-text-label hover:bg-ink text-ink-text-subtle dark:hover:bg-panel/70'}`}
                       >
                         <span className="flex min-w-0 items-center gap-2">
-                          <span className={`h-2 w-2 flex-shrink-0 rounded-full ${isActive ? project.colorClass : 'bg-transparent ring-1 ring-gray-300 dark:ring-gray-600'}`} aria-hidden="true" />
+                          <span className={`h-2 w-2 flex-shrink-0 rounded-full ${isActive ? project.colorClass : 'bg-transparent ring-1 ring-ink-border-2 ring-ink-border-2'}`} aria-hidden="true" />
                           <span className="truncate">{project.name}</span>
                         </span>
-                        <span className="ml-2 flex-shrink-0 text-[10px] text-gray-400">{project.shortCode}</span>
+                        <span className="ml-2 flex-shrink-0 text-caption text-ink-text-subtle">{project.shortCode}</span>
                       </button>
                     </div>
                     {open && (
-                      <div className="ml-8 space-y-1 pb-1 text-xs text-gray-500 dark:text-gray-400">
-                        <div className="flex items-center gap-2"><ListChecks className="h-3 w-3" aria-hidden="true" /> Features <span className="font-mono text-gray-400">{dto?.featureCount ?? 0}</span></div>
-                        <div className="flex items-center gap-2"><ChevronRight className="h-3 w-3" aria-hidden="true" /> Agents <span className="font-mono text-gray-400">{dto?.agentCount ?? 0}</span></div>
-                        <div className="truncate font-mono text-[10px] text-gray-400" title={project.id}>{project.id}</div>
+                      <div className="ml-8 space-y-1 pb-1 text-xs text-ink-text-muted">
+                        <div className="flex items-center gap-2"><ListChecks className="h-3 w-3" aria-hidden="true" /> Features <span className="font-mono text-ink-text-subtle">{dto?.featureCount ?? 0}</span></div>
+                        <div className="flex items-center gap-2"><ChevronRight className="h-3 w-3" aria-hidden="true" /> Agents <span className="font-mono text-ink-text-subtle">{dto?.agentCount ?? 0}</span></div>
+                        <div className="truncate font-mono text-caption text-ink-text-subtle" title={project.id}>{project.id}</div>
                         {dto?.registered && (
                           <button
                             onClick={() => void removeProject(project.id)}
-                            className="text-[11px] text-gray-400 underline-offset-2 transition-colors hover:text-red-500 hover:underline focus-visible:ring-2 focus-visible:ring-amber-500"
+                            className="text-caption text-ink-text-subtle underline-offset-2 transition-colors hover:text-red-500 hover:underline focus-visible:ring-2 focus-visible:ring-amber-500"
                           >
                             Remove from workspace
                           </button>
@@ -664,14 +664,14 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
                     onChange={(event) => setNewProjectRepo(event.target.value)}
                     onKeyDown={(event) => { if (event.key === 'Escape') { setAddingProject(false); setNewProjectRepo(''); } }}
                     placeholder="/absolute/path/to/repo"
-                    className="min-h-9 w-full rounded border border-gray-300 bg-white px-2 text-xs text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
+                    className="min-h-9 w-full rounded border border-ink-border-2 bg-white px-2 text-xs text-ink-text focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 border-ink-border-2 bg-panel text-ink-text"
                   />
-                  <p className="mt-1 text-[10px] text-gray-400">Must be an absolute path to a git repository.</p>
+                  <p className="mt-1 text-caption text-ink-text-subtle">Must be an absolute path to a git repository.</p>
                 </form>
               ) : (
                 <button
                   onClick={() => setAddingProject(true)}
-                  className="mt-1 flex min-h-9 w-full items-center gap-2 px-3 text-left text-xs text-gray-500 transition-colors hover:bg-gray-50 hover:text-gray-700 focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-gray-400 dark:hover:bg-gray-900/70 dark:hover:text-gray-200"
+                  className="mt-1 flex min-h-9 w-full items-center gap-2 px-3 text-left text-xs text-ink-text0 transition-colors hover:bg-ink hover:text-ink-text-label focus-visible:ring-2 focus-visible:ring-amber-500 text-ink-text-subtle dark:hover:bg-panel/70 dark:hover:text-ink-text-body"
                 >
                   <span aria-hidden="true" className="text-sm leading-none">+</span> Add project…
                 </button>
@@ -683,29 +683,29 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
 
         {showTaskDrill ? (
           <>
-            <section className="border-b border-gray-200 dark:border-gray-800">
-              <button onClick={() => setFiltersOpen((open) => !open)} className="flex min-h-9 w-full items-center justify-between px-3 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-gray-400 dark:hover:bg-gray-900/70">
+            <section className="border-b border-ink-border">
+              <button onClick={() => setFiltersOpen((open) => !open)} className="flex min-h-9 w-full items-center justify-between px-3 text-xs font-medium text-ink-text-label transition-colors hover:bg-ink focus-visible:ring-2 focus-visible:ring-amber-500 text-ink-text-subtle dark:hover:bg-panel/70">
                 <span className="flex items-center gap-1.5">
                   {filtersOpen ? <ChevronDown className="h-3 w-3" aria-hidden="true" /> : <ChevronRight className="h-3 w-3" aria-hidden="true" />}
                   <Filter className="h-3.5 w-3.5" aria-hidden="true" />
                   Filters
                 </span>
-                <span className="font-mono text-[10px] text-gray-400">{filteredTasks.length}</span>
+                <span className="font-mono text-caption text-ink-text-subtle">{filteredTasks.length}</span>
               </button>
               {filtersOpen && (
                 <div className="space-y-2 px-3 pb-3">
                   <div className="grid grid-cols-2 gap-2">
                     <label className="space-y-1">
-                      <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-400">Category</span>
-                      <select value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value as 'all' | Task['category'])} className="min-h-9 w-full rounded-md border border-gray-200 bg-white px-2 text-xs text-gray-600 focus:outline-none focus:ring-2 focus:ring-amber-500 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300">
+                      <span className="text-caption font-semibold uppercase tracking-wider text-ink-text-subtle">Category</span>
+                      <select value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value as 'all' | Task['category'])} className="min-h-9 w-full rounded-md border border-ink-border bg-white px-2 text-xs text-ink-text-label focus:outline-none focus:ring-2 focus:ring-amber-500 border-ink-border bg-panel text-ink-text-label">
                         {categories.map((category) => (
                           <option key={category} value={category}>{category === 'all' ? 'All categories' : category}</option>
                         ))}
                       </select>
                     </label>
                     <label className="space-y-1">
-                      <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-400">Sort</span>
-                      <select value={sortBy} onChange={(event) => setSortBy(event.target.value as 'attention' | 'creation')} className="min-h-9 w-full rounded-md border border-gray-200 bg-white px-2 text-xs text-gray-600 focus:outline-none focus:ring-2 focus:ring-amber-500 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300">
+                      <span className="text-caption font-semibold uppercase tracking-wider text-ink-text-subtle">Sort</span>
+                      <select value={sortBy} onChange={(event) => setSortBy(event.target.value as 'attention' | 'creation')} className="min-h-9 w-full rounded-md border border-ink-border bg-white px-2 text-xs text-ink-text-label focus:outline-none focus:ring-2 focus:ring-amber-500 border-ink-border bg-panel text-ink-text-label">
                         <option value="attention">Attention</option>
                         <option value="creation">Creation</option>
                       </select>
@@ -713,9 +713,9 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
                   </div>
                   {allAvailableTags.length > 0 && (
                     <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-hide">
-                      <Tag className="h-3 w-3 flex-shrink-0 text-gray-400" aria-hidden="true" />
+                      <Tag className="h-3 w-3 flex-shrink-0 text-ink-text-subtle" aria-hidden="true" />
                       {allAvailableTags.map((tag) => (
-                        <button key={tag} onClick={() => toggleTagFilter(tag)} className={`min-h-8 flex-shrink-0 rounded border px-2 text-[10px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${selectedTags.includes(tag) ? 'border-amber-200 bg-amber-100 text-amber-700 dark:border-amber-700 dark:bg-amber-900/50 dark:text-amber-300' : 'border-gray-200 bg-gray-50 text-gray-500 hover:bg-gray-100 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-400 dark:hover:bg-gray-700'}`}>
+                        <button key={tag} onClick={() => toggleTagFilter(tag)} className={`min-h-8 flex-shrink-0 rounded border px-2 text-caption font-medium transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${selectedTags.includes(tag) ? 'border-amber-200 bg-amber-100 text-amber-700 dark:border-amber-700 dark:bg-amber-900/50 dark:text-amber-300' : 'border-ink-border bg-ink text-ink-text0 hover:bg-ink-surface border-ink-border-2 bg-ink-surface text-ink-text-subtle dark:hover:bg-ink-text-label'}`}>
                           {tag}
                         </button>
                       ))}
@@ -728,37 +728,37 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
             <button
               type="button"
               onClick={() => setShowArchived((value) => !value)}
-              className="flex min-h-9 w-full items-center justify-between border-b border-gray-200 px-3 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-800 dark:text-gray-400 dark:hover:bg-gray-900/70"
+              className="flex min-h-9 w-full items-center justify-between border-b border-ink-border px-3 text-xs font-medium text-ink-text-label transition-colors hover:bg-ink focus-visible:ring-2 focus-visible:ring-amber-500 border-ink-border text-ink-text-subtle dark:hover:bg-panel/70"
               aria-expanded={showArchived}
             >
               <span className="flex items-center gap-1.5">
                 <Archive className="h-3.5 w-3.5" aria-hidden="true" />
                 {showArchived ? 'Hide archived' : 'Archived'}
               </span>
-              {archived.length > 0 && <span className="rounded-full bg-gray-200 px-1.5 font-mono text-[10px] text-gray-500 dark:bg-gray-800 dark:text-gray-400">{archived.length}</span>}
+              {archived.length > 0 && <span className="rounded-full bg-ink-border px-1.5 font-mono text-caption text-ink-text0 bg-ink-surface text-ink-text-subtle">{archived.length}</span>}
             </button>
 
             {showArchived ? (
               <section aria-label="Archived features">
-                <div className="sticky top-0 z-10 flex items-center gap-2 border-b border-gray-200 bg-gray-50/95 px-3 py-1 text-xs font-medium text-gray-600 backdrop-blur dark:border-gray-800 dark:bg-gray-950/95 dark:text-gray-400">
-                  <Archive className="h-3.5 w-3.5 text-gray-400" aria-hidden="true" />
+                <div className="sticky top-0 z-10 flex items-center gap-2 border-b border-ink-border bg-ink/95 px-3 py-1 text-xs font-medium text-ink-text-label backdrop-blur border-ink-border bg-ink/95 text-ink-text-subtle">
+                  <Archive className="h-3.5 w-3.5 text-ink-text-subtle" aria-hidden="true" />
                   ARCHIVED
-                  <span className="font-mono text-[10px] text-gray-400">{archived.length}</span>
+                  <span className="font-mono text-caption text-ink-text-subtle">{archived.length}</span>
                 </div>
                 <div className="flex flex-col text-xs">
                   {archived.length === 0 ? (
-                    <div className="px-4 py-8 text-center text-gray-500 dark:text-gray-400">Nothing archived. Archived plans land here — restore them or delete permanently.</div>
+                    <div className="px-4 py-8 text-center text-ink-text-muted">Nothing archived. Archived plans land here — restore them or delete permanently.</div>
                   ) : (
                     archived.map((feature) => (
-                      <div key={feature.id} className="group flex min-h-12 items-center gap-2 border-b border-gray-100 px-3 py-2 dark:border-gray-800/50">
+                      <div key={feature.id} className="group flex min-h-12 items-center gap-2 border-b border-ink-border px-3 py-2 border-ink-border/50">
                         <div className="min-w-0 flex-1">
-                          <div className="truncate text-gray-700 dark:text-gray-300" title={feature.title}>{feature.title}</div>
-                          <div className="truncate font-mono text-[10px] text-gray-400" title={feature.planDir ?? feature.id}>{feature.planDir ?? feature.id}</div>
+                          <div className="truncate text-ink-text-label" title={feature.title}>{feature.title}</div>
+                          <div className="truncate font-mono text-caption text-ink-text-subtle" title={feature.planDir ?? feature.id}>{feature.planDir ?? feature.id}</div>
                         </div>
                         <button
                           type="button"
                           onClick={() => { void restoreFeature(feature.id, feature.repo).then(refreshArchived); }}
-                          className="flex min-h-8 items-center gap-1 rounded px-2 text-[11px] font-medium text-emerald-700 transition-colors hover:bg-emerald-50 focus-visible:ring-2 focus-visible:ring-emerald-500 dark:text-emerald-400 dark:hover:bg-emerald-900/30"
+                          className="flex min-h-8 items-center gap-1 rounded px-2 text-caption font-medium text-emerald-700 transition-colors hover:bg-emerald-50 focus-visible:ring-2 focus-visible:ring-emerald-500 dark:text-emerald-400 dark:hover:bg-emerald-900/30"
                           title="Restore — un-archive and move the plan back"
                         >
                           <RotateCcw className="h-3 w-3" aria-hidden="true" /> Restore
@@ -767,7 +767,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
                           <button
                             type="button"
                             onClick={() => { void hardDeleteFeature(feature.id, { repo: feature.repo }).then(refreshArchived); setArchivedConfirm(null); }}
-                            className="flex min-h-8 items-center gap-1 rounded bg-red-600 px-2 text-[11px] font-semibold text-white transition-colors hover:bg-red-700 focus-visible:ring-2 focus-visible:ring-red-500"
+                            className="flex min-h-8 items-center gap-1 rounded bg-red-600 px-2 text-caption font-semibold text-white transition-colors hover:bg-red-700 focus-visible:ring-2 focus-visible:ring-red-500"
                             title="Confirm: permanently delete the feature and its plan files"
                           >
                             <Trash2 className="h-3 w-3" aria-hidden="true" /> Confirm
@@ -776,7 +776,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
                           <button
                             type="button"
                             onClick={() => setArchivedConfirm(feature.id)}
-                            className="flex min-h-8 items-center gap-1 rounded px-2 text-[11px] font-medium text-red-600 transition-colors hover:bg-red-50 focus-visible:ring-2 focus-visible:ring-red-500 dark:text-red-400 dark:hover:bg-red-900/30"
+                            className="flex min-h-8 items-center gap-1 rounded px-2 text-caption font-medium text-red-600 transition-colors hover:bg-red-50 focus-visible:ring-2 focus-visible:ring-red-500 dark:text-red-400 dark:hover:bg-red-900/30"
                             title="Delete permanently (plan files removed)"
                           >
                             <Trash2 className="h-3 w-3" aria-hidden="true" /> Delete
@@ -789,20 +789,20 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
               </section>
             ) : (
             <section>
-              <div className="sticky top-0 z-10 flex items-center justify-between border-b border-gray-200 bg-gray-50/95 px-3 py-1 backdrop-blur dark:border-gray-800 dark:bg-gray-950/95">
-                <div className="flex items-center gap-2 text-xs font-medium text-gray-600 dark:text-gray-400">
-                  <Layers className="h-3.5 w-3.5 text-gray-400" aria-hidden="true" />
+              <div className="sticky top-0 z-10 flex items-center justify-between border-b border-ink-border bg-ink/95 px-3 py-1 backdrop-blur border-ink-border bg-ink/95">
+                <div className="flex items-center gap-2 text-xs font-medium text-ink-text-label text-ink-text-subtle">
+                  <Layers className="h-3.5 w-3.5 text-ink-text-subtle" aria-hidden="true" />
                   PLANNABLE
-                  <span className="font-mono text-[10px] text-gray-400">{filteredTasks.length}</span>
+                  <span className="font-mono text-caption text-ink-text-subtle">{filteredTasks.length}</span>
                 </div>
                 <div className="flex items-center gap-1">
-                  <button onClick={handleVoiceToTask} className={`flex min-h-8 min-w-8 items-center justify-center rounded transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${isListening ? 'bg-red-100 text-red-500 dark:bg-red-900/30' : 'text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300'}`} aria-label="Create task from voice" title="Create task from voice">
+                  <button onClick={handleVoiceToTask} className={`flex min-h-8 min-w-8 items-center justify-center rounded transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${isListening ? 'bg-red-100 text-red-500 dark:bg-red-900/30' : 'text-ink-text-subtle hover:bg-ink-surface hover:text-ink-text-label dark:hover:bg-ink-surface dark:hover:text-ink-text-label'}`} aria-label="Create task from voice" title="Create task from voice">
                     <Mic className="h-3.5 w-3.5" aria-hidden="true" />
                   </button>
                   {/* Kbd chip mirrors the REAL binding GlobalShortcuts registers (⌘/Ctrl+N) — the
                       reference shows a bare `N`, but a chip must never advertise a key that isn't
                       actually bound. */}
-                  <button onClick={handleCreateTask} className="flex min-h-8 items-center justify-center gap-1 rounded px-1.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:bg-gray-800 dark:hover:text-gray-300" aria-label="Create task" title="Create task (⌘N)">
+                  <button onClick={handleCreateTask} className="flex min-h-8 items-center justify-center gap-1 rounded px-1.5 text-ink-text-subtle transition-colors hover:bg-ink-surface hover:text-ink-text-label focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:bg-ink-surface dark:hover:text-ink-text-label" aria-label="Create task" title="Create task (⌘N)">
                     <Plus className="h-3.5 w-3.5" aria-hidden="true" />
                     <Kbd keys="⌘N" />
                   </button>
@@ -811,7 +811,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
 
               <div className="flex flex-col text-xs">
                 {filteredTasks.length === 0 ? (
-                  <div className="px-4 py-8 text-center text-gray-500 dark:text-gray-400">No tasks match your filters.</div>
+                  <div className="px-4 py-8 text-center text-ink-text-muted">No tasks match your filters.</div>
                 ) : (
                   filteredTasks.map((task) => (
                     <TaskRailRow
@@ -833,18 +833,18 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
           </>
         ) : (
           <section className="p-3">
-            <div className="rounded-md border border-gray-200 bg-gray-50 p-3 dark:border-gray-800 dark:bg-gray-900/60">
-              <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-gray-900 dark:text-gray-100">
+            <div className="rounded-md border border-ink-border bg-ink p-3 border-ink-border bg-panel/60">
+              <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-ink-text">
                 <Boxes className="h-4 w-4 text-blue-500" aria-hidden="true" />
                 Capability registry
               </div>
-              <div className="grid grid-cols-2 gap-2 text-xs text-gray-500 dark:text-gray-400">
-                <div className="rounded border border-gray-200 bg-white p-2 dark:border-gray-800 dark:bg-gray-950">
-                  <b className="block font-mono text-gray-900 dark:text-gray-100">{capabilities.packs.length}</b>
+              <div className="grid grid-cols-2 gap-2 text-xs text-ink-text-muted">
+                <div className="rounded border border-ink-border bg-white p-2 border-ink-border bg-ink">
+                  <b className="block font-mono text-ink-text">{capabilities.packs.length}</b>
                   trusted packs
                 </div>
-                <div className="rounded border border-gray-200 bg-white p-2 dark:border-gray-800 dark:bg-gray-950">
-                  <b className="block font-mono text-gray-900 dark:text-gray-100">{publicCatalog.length}</b>
+                <div className="rounded border border-ink-border bg-white p-2 border-ink-border bg-ink">
+                  <b className="block font-mono text-ink-text">{publicCatalog.length}</b>
                   catalog entries
                 </div>
               </div>
@@ -855,21 +855,21 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
         )}
       </div>
 
-      <div className="border-t border-gray-200 dark:border-gray-800">
+      <div className="border-t border-ink-border">
         {/* Taste-review nit 1: the calm footer-anchored context line — non-Tasks views only, the
             task-scoped block above already speaks for Tasks. */}
         {footerContext && (
-          <div className="border-b border-gray-100 px-3 py-2 dark:border-gray-800/50">
+          <div className="border-b border-ink-border px-3 py-2 border-ink-border/50">
             <MonoLabel>{footerContext}</MonoLabel>
           </div>
         )}
-        <button onClick={exportTasks} className="flex min-h-10 w-full items-center gap-2 border-b border-gray-200 px-3 text-xs text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-900 focus-visible:ring-2 focus-visible:ring-amber-500 dark:border-gray-800 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200">
+        <button onClick={exportTasks} className="flex min-h-10 w-full items-center gap-2 border-b border-ink-border px-3 text-xs text-ink-text-label transition-colors hover:bg-ink-surface hover:text-ink-text focus-visible:ring-2 focus-visible:ring-amber-500 border-ink-border text-ink-text-subtle dark:hover:bg-ink-surface dark:hover:text-ink-text-body">
           <Download className="h-4 w-4" aria-hidden="true" />
           Export Snapshot
         </button>
-        <div className="flex min-h-11 items-center justify-between px-3 text-gray-600 dark:text-gray-400">
+        <div className="flex min-h-11 items-center justify-between px-3 text-ink-text-label text-ink-text-subtle">
           <div className="flex min-w-0 items-center gap-2">
-            <div className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full bg-gray-700 text-xs text-white">G</div>
+            <div className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full bg-ink-text-label text-xs text-white">G</div>
             <span className="truncate text-xs">{connected ? 'Daemon live' : 'Daemon offline'}</span>
           </div>
           {/* The gear (GRAPH-FOLD.md §6e): org/settings left the nav — this is its home now.
@@ -878,7 +878,7 @@ export const WorkbenchPane = ({ collapsed, onToggleCollapsed }: WorkbenchPanePro
             <AccountMenu />
             <button
               onClick={() => setView('org')}
-              className={`flex min-h-8 w-8 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === 'org' ? 'bg-gray-200 text-gray-700 dark:bg-gray-800 dark:text-gray-200' : 'text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300'}`}
+              className={`flex min-h-8 w-8 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-amber-500 ${view === 'org' ? 'bg-ink-border text-ink-text-label bg-ink-surface text-ink-text-body' : 'text-ink-text-subtle hover:bg-ink-surface hover:text-ink-text-label dark:hover:bg-ink-surface dark:hover:text-ink-text-label'}`}
               aria-label="Organization settings"
               title="Organization settings"
             >

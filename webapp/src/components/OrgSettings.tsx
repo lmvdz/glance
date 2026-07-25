@@ -27,7 +27,7 @@ interface OrgProfile {
 interface Member { userId: string; name: string; email: string; role: string }
 interface JoinReq { id: string; userId: string; email: string; createdAt: number }
 
-const card = 'rounded-lg border border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-900';
+const card = 'rounded-lg border border-ink-border bg-white border-ink-border bg-panel';
 
 export const OrgSettings = () => {
   const { me } = useAuth();
@@ -175,7 +175,7 @@ export const OrgSettings = () => {
 
   if (loading) {
     return (
-      <div className="flex flex-1 items-center justify-center text-gray-400">
+      <div className="flex flex-1 items-center justify-center text-ink-text-subtle">
         <Loader2 className="h-5 w-5 animate-spin" />
       </div>
     );
@@ -183,7 +183,7 @@ export const OrgSettings = () => {
 
   if (!org) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center text-gray-500 dark:text-gray-400">
+      <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center text-ink-text-muted">
         <Building2 className="h-6 w-6" />
         <p className="text-sm">You’re not part of an organization yet.</p>
       </div>
@@ -191,12 +191,12 @@ export const OrgSettings = () => {
   }
 
   return (
-    <div className="flex-1 overflow-y-auto bg-[#f7f8f9] px-6 py-8 dark:bg-gray-950">
+    <div className="flex-1 overflow-y-auto bg-[#f7f8f9] px-6 py-8 bg-ink">
       <div className="mx-auto w-full max-w-2xl">
         <div className="mb-6 flex items-center gap-2">
-          <Building2 className="h-5 w-5 text-gray-500 dark:text-gray-400" />
-          <h1 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Organization settings</h1>
-          {org.personal && <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[11px] font-medium text-gray-500 dark:bg-gray-800 dark:text-gray-400">personal workspace</span>}
+          <Building2 className="h-5 w-5 text-ink-text-muted" />
+          <h1 className="text-lg font-semibold text-ink-text">Organization settings</h1>
+          {org.personal && <span className="rounded bg-ink-surface px-1.5 py-0.5 text-caption font-medium text-ink-text0 bg-ink-surface text-ink-text-subtle">personal workspace</span>}
         </div>
 
         {err && (
@@ -207,11 +207,11 @@ export const OrgSettings = () => {
 
         {/* Profile */}
         <section className={`${card} mb-5 p-4`}>
-          <h2 className="mb-3 text-sm font-semibold text-gray-900 dark:text-gray-100">Profile</h2>
-          <label className="mb-1.5 block text-xs font-medium text-gray-500 dark:text-gray-400">Name</label>
+          <h2 className="mb-3 text-sm font-semibold text-ink-text">Profile</h2>
+          <label className="mb-1.5 block text-xs font-medium text-ink-text-muted">Name</label>
           <div className="flex gap-2">
             <input
-              className="min-w-0 flex-1 rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 outline-none focus:border-[#f0a35a] focus:ring-2 focus:ring-[#f0a35a]/20 disabled:opacity-60 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100"
+              className="min-w-0 flex-1 rounded-md border border-ink-border-2 bg-white px-3 py-2 text-sm text-ink-text outline-none focus:border-[#f0a35a] focus:ring-2 focus:ring-[#f0a35a]/20 disabled:opacity-60 border-ink-border-2 bg-ink-surface text-ink-text"
               value={name}
               disabled={!isAdmin}
               onChange={(e) => setName(e.target.value)}
@@ -221,18 +221,18 @@ export const OrgSettings = () => {
               <button
                 onClick={() => void saveName()}
                 disabled={savingName || !name.trim() || name === org.name}
-                className="flex items-center rounded-md bg-gray-900 px-4 text-sm font-medium text-white transition-colors hover:bg-gray-700 disabled:opacity-40 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
+                className="flex items-center rounded-md bg-panel px-4 text-sm font-medium text-white transition-colors hover:bg-ink-text-label disabled:opacity-40 bg-ink-surface text-ink-text dark:hover:bg-white"
               >
                 {savingName ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Save'}
               </button>
             )}
           </div>
-          <p className="mt-2 text-xs text-gray-400">{org.memberCount} member{org.memberCount === 1 ? '' : 's'}{org.workosOrgId ? ' · enterprise (WorkOS)' : ''}</p>
+          <p className="mt-2 text-xs text-ink-text-subtle">{org.memberCount} member{org.memberCount === 1 ? '' : 's'}{org.workosOrgId ? ' · enterprise (WorkOS)' : ''}</p>
         </section>
 
         {!isAdmin && (
           <>
-            <p className="mb-5 text-sm text-gray-500 dark:text-gray-400">Only organization admins can manage members.</p>
+            <p className="mb-5 text-sm text-ink-text-muted">Only organization admins can manage members.</p>
             <VoiceKeyCard
               isAdmin={false}
               status={null}
@@ -266,14 +266,14 @@ export const OrgSettings = () => {
             {/* Domain-join policy (WorkOS-backed orgs) */}
             {joinPolicy !== null && (
               <section className={`${card} mb-5 p-4`}>
-                <h2 className="mb-1 text-sm font-semibold text-gray-900 dark:text-gray-100">Domain join</h2>
-                <p className="mb-3 text-xs text-gray-500 dark:text-gray-400">How people with a verified company email domain join this organization.</p>
-                <div className="inline-flex rounded-md border border-gray-200 p-0.5 dark:border-gray-800">
+                <h2 className="mb-1 text-sm font-semibold text-ink-text">Domain join</h2>
+                <p className="mb-3 text-xs text-ink-text-muted">How people with a verified company email domain join this organization.</p>
+                <div className="inline-flex rounded-md border border-ink-border p-0.5 border-ink-border">
                   {(['approval', 'auto'] as const).map((p) => (
                     <button
                       key={p}
                       onClick={() => void setPolicy(p)}
-                      className={`rounded px-3 py-1 text-xs font-medium transition-colors ${joinPolicy === p ? 'bg-[#f0a35a] text-black' : 'text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200'}`}
+                      className={`rounded px-3 py-1 text-xs font-medium transition-colors ${joinPolicy === p ? 'bg-[#f0a35a] text-black' : 'text-ink-text0 hover:text-ink-text-body text-ink-text-subtle dark:hover:text-ink-text-body'}`}
                     >
                       {p === 'approval' ? 'Require approval' : 'Auto-join'}
                     </button>
@@ -285,18 +285,18 @@ export const OrgSettings = () => {
             {/* Pending join requests */}
             {requests.length > 0 && (
               <section className={`${card} mb-5 p-4`}>
-                <h2 className="mb-3 flex items-center gap-1.5 text-sm font-semibold text-gray-900 dark:text-gray-100">
+                <h2 className="mb-3 flex items-center gap-1.5 text-sm font-semibold text-ink-text">
                   <UserPlus className="h-4 w-4" /> Join requests
-                  <span className="rounded bg-gray-100 px-1.5 text-[11px] font-mono dark:bg-gray-800">{requests.length}</span>
+                  <span className="rounded bg-ink-surface px-1.5 text-caption font-mono bg-ink-surface">{requests.length}</span>
                 </h2>
                 <ul className="flex flex-col gap-1.5">
                   {requests.map((r) => (
                     <li key={r.id} className="flex items-center gap-2 text-sm">
-                      <span className="min-w-0 flex-1 truncate text-gray-700 dark:text-gray-200">{r.email}</span>
+                      <span className="min-w-0 flex-1 truncate text-ink-text-label text-ink-text-body">{r.email}</span>
                       <button onClick={() => void decide(r.id, 'approve')} className="flex h-7 items-center gap-1 rounded-md bg-emerald-600 px-2.5 text-xs font-medium text-white hover:bg-emerald-500" title="Approve">
                         <Check className="h-3.5 w-3.5" /> Approve
                       </button>
-                      <button onClick={() => void decide(r.id, 'deny')} className="flex h-7 w-7 items-center justify-center rounded-md text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800" aria-label="Deny" title="Deny">
+                      <button onClick={() => void decide(r.id, 'deny')} className="flex h-7 w-7 items-center justify-center rounded-md text-ink-text-subtle hover:bg-ink-surface hover:text-ink-text-label dark:hover:bg-ink-surface" aria-label="Deny" title="Deny">
                         <X className="h-3.5 w-3.5" />
                       </button>
                     </li>
@@ -307,7 +307,7 @@ export const OrgSettings = () => {
 
             {/* Members */}
             <section className={`${card} p-4`}>
-              <h2 className="mb-3 flex items-center gap-1.5 text-sm font-semibold text-gray-900 dark:text-gray-100">
+              <h2 className="mb-3 flex items-center gap-1.5 text-sm font-semibold text-ink-text">
                 <ShieldCheck className="h-4 w-4" /> Members
               </h2>
               {/* Invite by email */}
@@ -320,13 +320,13 @@ export const OrgSettings = () => {
                   value={inviteEmail}
                   onChange={(e) => setInviteEmail(e.target.value)}
                   placeholder="teammate@company.com"
-                  className="min-w-0 flex-1 rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-900 outline-none focus:border-[#f0a35a] focus:ring-2 focus:ring-[#f0a35a]/20 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100"
+                  className="min-w-0 flex-1 rounded-md border border-ink-border-2 bg-white px-3 py-1.5 text-sm text-ink-text outline-none focus:border-[#f0a35a] focus:ring-2 focus:ring-[#f0a35a]/20 border-ink-border-2 bg-ink-surface text-ink-text"
                   aria-label="Invite by email"
                 />
                 <select
                   value={inviteRole}
                   onChange={(e) => setInviteRole(e.target.value)}
-                  className="rounded-md border border-gray-300 bg-white px-2 py-1.5 text-xs text-gray-700 outline-none dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200"
+                  className="rounded-md border border-ink-border-2 bg-white px-2 py-1.5 text-xs text-ink-text-label outline-none border-ink-border-2 bg-ink-surface text-ink-text-body"
                   aria-label="Invite role"
                 >
                   <option value="member">Member</option>
@@ -340,22 +340,22 @@ export const OrgSettings = () => {
                   {inviting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <><UserPlus className="h-3.5 w-3.5" /> Add</>}
                 </button>
               </form>
-              <ul className="divide-y divide-gray-100 dark:divide-gray-800">
+              <ul className="divide-y divide-ink-border divide-ink-border">
                 {members.map((m) => {
                   const isSelf = m.userId === selfId;
                   return (
                     <li key={m.userId} className="flex items-center gap-3 py-2.5">
-                      <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-gray-200 text-xs font-semibold text-gray-600 dark:bg-gray-800 dark:text-gray-300">
+                      <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-ink-border text-xs font-semibold text-ink-text-label bg-ink-surface text-ink-text-label">
                         {(m.name || m.email).trim().charAt(0).toUpperCase()}
                       </div>
                       <div className="min-w-0 flex-1">
-                        <div className="truncate text-sm font-medium text-gray-900 dark:text-gray-100">
-                          {m.name || m.email} {isSelf && <span className="text-xs font-normal text-gray-400">(you)</span>}
+                        <div className="truncate text-sm font-medium text-ink-text">
+                          {m.name || m.email} {isSelf && <span className="text-xs font-normal text-ink-text-subtle">(you)</span>}
                         </div>
-                        <div className="truncate text-xs text-gray-500 dark:text-gray-400">{m.email}</div>
+                        <div className="truncate text-xs text-ink-text-muted">{m.email}</div>
                       </div>
                       <select
-                        className="rounded-md border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 outline-none focus:border-[#f0a35a] disabled:opacity-50 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200"
+                        className="rounded-md border border-ink-border-2 bg-white px-2 py-1 text-xs text-ink-text-label outline-none focus:border-[#f0a35a] disabled:opacity-50 border-ink-border-2 bg-ink-surface text-ink-text-body"
                         value={m.role === 'owner' ? 'admin' : m.role}
                         disabled={isSelf}
                         onChange={(e) => void changeRole(m.userId, e.target.value)}
@@ -367,7 +367,7 @@ export const OrgSettings = () => {
                       <button
                         onClick={() => void removeMember(m.userId)}
                         disabled={isSelf}
-                        className="flex h-7 w-7 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-red-50 hover:text-red-600 disabled:opacity-30 dark:hover:bg-red-950/40"
+                        className="flex h-7 w-7 items-center justify-center rounded-md text-ink-text-subtle transition-colors hover:bg-red-50 hover:text-red-600 disabled:opacity-30 dark:hover:bg-red-950/40"
                         aria-label={`Remove ${m.email}`}
                         title={isSelf ? "You can't remove yourself" : 'Remove member'}
                       >
@@ -436,24 +436,24 @@ export const VoiceKeyCard = ({
 
   return (
     <section className={`${card} mb-5 p-4`}>
-      <h2 className="mb-1 flex items-center gap-1.5 text-sm font-semibold text-gray-900 dark:text-gray-100">
+      <h2 className="mb-1 flex items-center gap-1.5 text-sm font-semibold text-ink-text">
         <Mic className="h-4 w-4" /> Voice
       </h2>
-      <p className="mb-3 text-xs text-gray-500 dark:text-gray-400">
+      <p className="mb-3 text-xs text-ink-text-muted">
         Enabling voice funds every operator-tier member’s voice sessions — including the agents they spawn
         against this organization’s repositories — on this organization’s own OpenAI key. glance can show you
         who started a session, never what it spent: audio never passes through the daemon.
       </p>
 
       {!isAdmin ? (
-        <p className="text-sm text-gray-500 dark:text-gray-400">Voice is configured by an organization admin.</p>
+        <p className="text-sm text-ink-text-muted">Voice is configured by an organization admin.</p>
       ) : status?.configured ? (
         <div className="space-y-3">
           <div>
-            <div className="text-sm text-gray-700 dark:text-gray-200">
+            <div className="text-sm text-ink-text-label text-ink-text-body">
               Key ending in <span className="font-mono">{status.last4}</span> — check this matches your OpenAI key when you rotate it.
             </div>
-            <div className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+            <div className="mt-0.5 text-xs text-ink-text-muted">
               Set by {status.updatedBy ?? 'an admin'}{status.updatedAt ? ` · ${fmtWhen(status.updatedAt)}` : ''}
             </div>
           </div>
@@ -469,7 +469,7 @@ export const VoiceKeyCard = ({
             <button
               onClick={() => onToggleEnabled()}
               disabled={busy}
-              className="rounded-md border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:opacity-40 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-800"
+              className="rounded-md border border-ink-border-2 px-3 py-1.5 text-xs font-medium text-ink-text-label transition-colors hover:bg-ink disabled:opacity-40 border-ink-border-2 text-ink-text-body dark:hover:bg-ink-surface"
               aria-label={status.enabled === false ? 'Enable voice' : 'Disable voice'}
             >
               {status.enabled === false ? 'Enable' : 'Disable'}
@@ -487,7 +487,7 @@ export const VoiceKeyCard = ({
         </div>
       ) : (
         <div className="space-y-2">
-          <label htmlFor="voice-key" className="block text-xs font-medium text-gray-500 dark:text-gray-400">
+          <label htmlFor="voice-key" className="block text-xs font-medium text-ink-text-muted">
             OpenAI API key
           </label>
           {alert}
@@ -500,17 +500,17 @@ export const VoiceKeyCard = ({
               value={keyInput}
               onChange={(e) => onKeyInput(e.target.value)}
               placeholder="sk-…"
-              className="min-w-0 flex-1 rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 outline-none focus:border-[#f0a35a] focus:ring-2 focus:ring-[#f0a35a]/20 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100"
+              className="min-w-0 flex-1 rounded-md border border-ink-border-2 bg-white px-3 py-2 text-sm text-ink-text outline-none focus:border-[#f0a35a] focus:ring-2 focus:ring-[#f0a35a]/20 border-ink-border-2 bg-ink-surface text-ink-text"
             />
             <button
               onClick={() => onSave()}
               disabled={saving || !keyInput.trim()}
-              className="flex items-center rounded-md bg-gray-900 px-4 text-sm font-medium text-white transition-colors hover:bg-gray-700 disabled:opacity-40 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
+              className="flex items-center rounded-md bg-panel px-4 text-sm font-medium text-white transition-colors hover:bg-ink-text-label disabled:opacity-40 bg-ink-surface text-ink-text dark:hover:bg-white"
             >
               {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Save'}
             </button>
           </div>
-          <p className="text-xs text-gray-400">
+          <p className="text-xs text-ink-text-subtle">
             The key is verified with OpenAI before it’s saved, then stored encrypted. It goes to the daemon and nowhere else.
           </p>
         </div>

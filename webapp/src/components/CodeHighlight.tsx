@@ -33,7 +33,7 @@ const LazyPrism = React.lazy(async () => {
 export const CodeHighlight: React.FC<CodeHighlightProps> = (props) => (
   <Suspense
     fallback={
-      <pre className="overflow-x-auto whitespace-pre-wrap font-mono text-xs text-gray-200" style={props.customStyle}>
+      <pre className="overflow-x-auto whitespace-pre-wrap font-mono text-xs text-ink-text-body" style={props.customStyle}>
         {props.children}
       </pre>
     }

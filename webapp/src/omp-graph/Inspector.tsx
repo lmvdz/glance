@@ -36,7 +36,7 @@ const Btn: React.FC<React.ButtonHTMLAttributes<HTMLButtonElement>> = (props) => 
   <button
     type="button"
     {...props}
-    className="min-h-8 rounded-md border border-[#232936] px-3 py-1.5 text-[11px] font-semibold text-[#ECE7DC] transition-colors hover:border-[#F2913D] hover:bg-[#F2913D1f] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#F2913D]"
+    className="min-h-8 rounded-md border border-[#232936] px-3 py-1.5 text-caption font-semibold text-[#ECE7DC] transition-colors hover:border-[#F2913D] hover:bg-[#F2913D1f] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#F2913D]"
   />
 );
 const Step: React.FC<{ color: string; k: string; v: React.ReactNode; s?: React.ReactNode }> = ({ color, k, v, s }) => (
@@ -45,7 +45,7 @@ const Step: React.FC<{ color: string; k: string; v: React.ReactNode; s?: React.R
     <span className="min-w-0 flex-1">
       <div className="font-mono text-[9px] font-semibold tracking-[0.14em] text-[#565C68]">{k}</div>
       <div className="mt-0.5 text-xs text-[#ECE7DC]">{v}</div>
-      {s && <div className="mt-0.5 font-mono text-[10px] text-[#565C68] tabular-nums">{s}</div>}
+      {s && <div className="mt-0.5 font-mono text-caption text-[#565C68] tabular-nums">{s}</div>}
     </span>
   </div>
 );
@@ -389,7 +389,7 @@ const HourBody: React.FC<{ at: number; model: PulseModel; attribution: Attributi
       <Sect>Who was burning</Sect>
       {pairs.length ? (
         pairs.map((p, i) => (
-          <div key={i} className="flex justify-between border-b border-[#171B23] py-1 font-mono text-[11px] text-[#9BA0AB] tabular-nums">
+          <div key={i} className="flex justify-between border-b border-[#171B23] py-1 font-mono text-caption text-[#9BA0AB] tabular-nums">
             <span>
               <span className="mr-1.5 inline-block h-[7px] w-[7px] rounded-sm" style={{ background: harnessColor(p.hn) }} />
               {p.hn} → <span className="mr-1.5 inline-block h-[7px] w-[7px] rounded-sm" style={{ background: modelColor(p.mn) }} />
@@ -621,7 +621,7 @@ export const Inspector: React.FC<{
         >
           {chip}
         </span>
-        <span className="ml-auto font-mono text-[10px] text-[#565C68] tabular-nums">{when}</span>
+        <span className="ml-auto font-mono text-caption text-[#565C68] tabular-nums">{when}</span>
         <button
           type="button"
           aria-label="Close inspector"

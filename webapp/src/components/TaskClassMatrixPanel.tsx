@@ -36,9 +36,9 @@ function pct(n: number): string {
 const MatrixCell: React.FC<{ cell: TaskClassCell }> = ({ cell }) => {
   if (cell.insufficientData) {
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-0.5 rounded-md bg-gray-50 dark:bg-gray-800/40 px-2 py-2 text-center opacity-60" title={`n=${cell.n} — below the minimum sample size`}>
-        <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">insufficient data</span>
-        <span className="text-[10px] text-gray-400">n={cell.n}</span>
+      <div className="flex h-full flex-col items-center justify-center gap-0.5 rounded-md bg-ink bg-ink-surface/40 px-2 py-2 text-center opacity-60" title={`n=${cell.n} — below the minimum sample size`}>
+        <span className="text-caption font-semibold uppercase tracking-wide text-ink-text-subtle">insufficient data</span>
+        <span className="text-caption text-ink-text-subtle">n={cell.n}</span>
       </div>
     );
   }
@@ -59,13 +59,13 @@ const MatrixCell: React.FC<{ cell: TaskClassCell }> = ({ cell }) => {
   ].filter(Boolean).join(' · ');
 
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-0.5 rounded-md border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 px-2 py-2 text-center" title={title}>
-      <span className="text-sm font-semibold tabular-nums text-gray-900 dark:text-gray-100">
-        {pct(cell.mergeRate)} <span className="text-[10px] font-normal text-gray-400">(n={cell.n})</span>
+    <div className="flex h-full flex-col items-center justify-center gap-0.5 rounded-md border border-ink-border bg-panel px-2 py-2 text-center" title={title}>
+      <span className="text-sm font-semibold tabular-nums text-ink-text">
+        {pct(cell.mergeRate)} <span className="text-caption font-normal text-ink-text-subtle">(n={cell.n})</span>
       </span>
-      {costLabel && <span className="text-[10px] text-gray-500 dark:text-gray-400">{costLabel}</span>}
+      {costLabel && <span className="text-caption text-ink-text-muted">{costLabel}</span>}
       {(confLabel || reworkLabel) && (
-        <span className="text-[10px] text-gray-400 dark:text-gray-500">{[confLabel, reworkLabel].filter(Boolean).join(' · ')}</span>
+        <span className="text-caption text-ink-text-subtle">{[confLabel, reworkLabel].filter(Boolean).join(' · ')}</span>
       )}
     </div>
   );
@@ -98,7 +98,7 @@ export const TaskClassMatrixPanel: React.FC = () => {
   const refresh = (
     <button
       onClick={() => void load()}
-      className="flex items-center gap-1 rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-2 py-1 text-xs text-gray-600 dark:text-gray-300 transition-colors hover:bg-gray-50 dark:hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
+      className="flex items-center gap-1 rounded-md border border-ink-border bg-panel px-2 py-1 text-xs text-ink-text-muted transition-colors hover:bg-ink-surface focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
       title="Refresh"
       aria-label="Refresh task-class matrix"
     >
@@ -124,7 +124,7 @@ export const TaskClassMatrixPanel: React.FC = () => {
       {!loaded && !error && (
         <div className="space-y-3 animate-pulse" aria-label="Loading task-class matrix">
           {[1, 2, 3].map((nn) => (
-            <div key={nn} className="h-12 rounded-lg bg-gray-100 dark:bg-gray-800" />
+            <div key={nn} className="h-12 rounded-lg bg-ink-surface" />
           ))}
         </div>
       )}
@@ -138,10 +138,10 @@ export const TaskClassMatrixPanel: React.FC = () => {
       {loaded && !error && doc && (
         <>
           {/* ── CONTROLS ─────────────────────────────────────────────────── */}
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 px-3 py-2.5">
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-ink-border bg-panel px-3 py-2.5">
             <div className="flex items-center gap-2">
-              <span className="text-[11px] font-semibold uppercase tracking-widest text-gray-400">Range</span>
-              <div className="flex overflow-hidden rounded-md border border-gray-200 dark:border-gray-700">
+              <span className="text-caption font-semibold uppercase tracking-widest text-ink-text-subtle">Range</span>
+              <div className="flex overflow-hidden rounded-md border border-ink-border">
                 {RANGES.map((r) => (
                   <button
                     key={r}
@@ -149,7 +149,7 @@ export const TaskClassMatrixPanel: React.FC = () => {
                     className={`px-2.5 py-1 text-xs font-medium tabular-nums transition-colors ${
                       days === r
                         ? 'bg-sky-500 text-white'
-                        : 'bg-white dark:bg-gray-900 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800'
+                        : 'bg-panel text-ink-text-muted hover:bg-ink-surface'
                     }`}
                     aria-pressed={days === r}
                   >
@@ -158,15 +158,15 @@ export const TaskClassMatrixPanel: React.FC = () => {
                 ))}
               </div>
             </div>
-            <span className="text-[11px] text-gray-400">min n = {doc.minSamples} to render a rate</span>
+            <span className="text-caption text-ink-text-subtle">min n = {doc.minSamples} to render a rate</span>
           </div>
 
           {/* ── MATRIX ───────────────────────────────────────────────────── */}
           {doc.taskClasses.length === 0 ? (
-            <div className="flex flex-col items-center gap-2 rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 px-6 py-8 text-center">
-              <Table2 className="h-7 w-7 text-gray-300 dark:text-gray-600" aria-hidden="true" />
-              <div className="text-sm font-semibold text-gray-600 dark:text-gray-300">No routed units in the last {days} days</div>
-              <div className="text-xs text-gray-500 dark:text-gray-400">The matrix fills in as units are dispatched with a routing decision and land (or don't).</div>
+            <div className="flex flex-col items-center gap-2 rounded-lg border border-ink-border bg-panel px-6 py-8 text-center">
+              <Table2 className="h-7 w-7 text-ink-text-subtle" aria-hidden="true" />
+              <div className="text-sm font-semibold text-ink-text-muted">No routed units in the last {days} days</div>
+              <div className="text-xs text-ink-text-muted">The matrix fills in as units are dispatched with a routing decision and land (or don't).</div>
             </div>
           ) : (
             <SectionCard title="Merge rate by task class × model" right={`n = distinct units`}>
@@ -174,9 +174,9 @@ export const TaskClassMatrixPanel: React.FC = () => {
                 <table className="w-full border-separate border-spacing-1">
                   <thead>
                     <tr>
-                      <th className="px-2 py-1 text-left text-[11px] font-semibold uppercase tracking-widest text-gray-400">task class</th>
+                      <th className="px-2 py-1 text-left text-caption font-semibold uppercase tracking-widest text-ink-text-subtle">task class</th>
                       {doc.models.map((m) => (
-                        <th key={m} className="px-2 py-1 text-center text-[11px] font-semibold uppercase tracking-widest text-gray-400">
+                        <th key={m} className="px-2 py-1 text-center text-caption font-semibold uppercase tracking-widest text-ink-text-subtle">
                           {m}
                         </th>
                       ))}
@@ -185,12 +185,12 @@ export const TaskClassMatrixPanel: React.FC = () => {
                   <tbody>
                     {doc.taskClasses.map((tc) => (
                       <tr key={tc}>
-                        <td className="whitespace-nowrap px-2 py-1 text-xs font-mono font-medium text-gray-700 dark:text-gray-300">{tc}</td>
+                        <td className="whitespace-nowrap px-2 py-1 text-xs font-mono font-medium text-ink-text-label">{tc}</td>
                         {doc.models.map((m) => {
                           const cell = doc.cells[tc]?.[m];
                           return (
                             <td key={m} className="min-w-[7rem] p-0.5 align-top">
-                              {cell ? <MatrixCell cell={cell} /> : <div className="h-full rounded-md px-2 py-2 text-center text-[10px] text-gray-300 dark:text-gray-700">—</div>}
+                              {cell ? <MatrixCell cell={cell} /> : <div className="h-full rounded-md px-2 py-2 text-center text-caption text-ink-text-label text-ink-text-label">—</div>}
                             </td>
                           );
                         })}
@@ -203,15 +203,15 @@ export const TaskClassMatrixPanel: React.FC = () => {
           )}
 
           {/* ── RAW PAYLOAD (collapsed) ──────────────────────────────────── */}
-          <details className="group rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 text-xs">
-            <summary className="flex cursor-pointer select-none items-center gap-2 px-4 py-2.5 text-[11px] font-semibold uppercase tracking-widest text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-500 list-none">
+          <details className="group rounded-lg border border-ink-border bg-panel text-xs">
+            <summary className="flex cursor-pointer select-none items-center gap-2 px-4 py-2.5 text-caption font-semibold uppercase tracking-widest text-ink-text-subtle hover:text-ink-text-label dark:hover:text-ink-text-body focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-500 list-none">
               <span className="mr-auto">Raw matrix data</span>
-              <span className="text-gray-300 dark:text-gray-600 group-open:rotate-180 transition-transform" aria-hidden="true">
+              <span className="text-ink-text-subtle group-open:rotate-180 transition-transform" aria-hidden="true">
                 ▾
               </span>
             </summary>
-            <div className="border-t border-gray-100 dark:border-gray-800 px-4 py-3">
-              <pre className="overflow-x-auto whitespace-pre-wrap break-all font-mono text-[10px] text-gray-600 dark:text-gray-400 leading-relaxed">
+            <div className="border-t border-ink-border px-4 py-3">
+              <pre className="overflow-x-auto whitespace-pre-wrap break-all font-mono text-caption text-ink-text-label text-ink-text-subtle leading-relaxed">
                 {JSON.stringify(doc, null, 2)}
               </pre>
             </div>
