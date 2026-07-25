@@ -22,6 +22,7 @@ import { sql } from "kysely";
 import type { Channel, ChannelEntry, ChannelMembership, ChannelReadCursor } from "../channels.ts";
 import type { Node } from "../nodes.ts";
 import { readNodeRecord, type NodeRecord } from "../node-records.ts";
+import { nonDelegatableClasses, type DelegationGrant } from "../delegation-boundary.ts";
 import type { PersistedAgent, PersistedFeature, RunReceipt, TranscriptEntry } from "../types.ts";
 import { normalizeCapabilitySnapshot, type CapabilitySnapshot } from "../capabilities/index.ts";
 import { emptyFeedbackSnapshot, type FeedbackSnapshot } from "../feedback.ts";
@@ -64,6 +65,24 @@ function readNode(value: unknown): Node | undefined {
 		createdAt: value.createdAt,
 		settledAt: typeof value.settledAt === "number" ? value.settledAt : undefined,
 		channelId: typeof value.channelId === "string" ? value.channelId : undefined,
+	};
+}
+
+/** A grant is the ONLY door out of the non-delegatable class, so a half-decoded one is no grant at all. */
+function readDelegationGrant(value: unknown): DelegationGrant | undefined {
+	if (!isPlainObject(value)) return undefined;
+	const { id, action, grantedBy, grantedAt, reason, revokedAt, revokedBy } = value;
+	if (typeof id !== "string" || typeof action !== "string" || typeof grantedBy !== "string" || typeof grantedAt !== "number" || typeof reason !== "string") return undefined;
+	if (!nonDelegatableClasses.includes(value.class as never)) return undefined;
+	return {
+		id,
+		action,
+		class: value.class as DelegationGrant["class"],
+		grantedBy,
+		grantedAt,
+		reason,
+		...(typeof revokedAt === "number" ? { revokedAt } : {}),
+		...(typeof revokedBy === "string" ? { revokedBy } : {}),
 	};
 }
 
@@ -182,6 +201,9 @@ export interface Store {
 	/** Durable evidence attached to a node. Missing records are unknown, never permission. */
 	listNodeRecords(nodeId: string): Promise<NodeRecord[]>;
 	putNodeRecord(record: NodeRecord): Promise<void>;
+	/** Human grants out of the non-delegatable class. An empty list means autonomy takes none of it. */
+	listDelegationGrants(): Promise<DelegationGrant[]>;
+	putDelegationGrant(grant: DelegationGrant): Promise<void>;
 	listChannelEntries(channelId: string, since?: number): Promise<ChannelEntry[]>;
 	searchChannelEntries?(q: string, limit?: number, offset?: number): Promise<ChannelSearchResult[]>;
 	appendChannelEntry(entry: Omit<ChannelEntry, "seq">): Promise<ChannelEntry>;
@@ -375,6 +397,38 @@ export class FileStore implements Store {
 			if (index >= 0) records[index] = record;
 			else records.push(record);
 			await getStorageBackend().writeDurable(file, JSON.stringify(records.sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)), null, 2));
+		} finally {
+			release();
+			if (FileStore.nodeWriteLocks.get(file) === next) FileStore.nodeWriteLocks.delete(file);
+		}
+	}
+
+	async listDelegationGrants(): Promise<DelegationGrant[]> {
+		const raw = await getStorageBackend().readText(path.join(this.stateDir, "delegation-grants.json"));
+		if (!raw) return [];
+		try {
+			const decoded = JSON.parse(raw);
+			return Array.isArray(decoded) ? decoded.map(readDelegationGrant).filter((grant): grant is DelegationGrant => grant !== undefined).sort((a, b) => a.grantedAt - b.grantedAt || a.id.localeCompare(b.id)) : [];
+		} catch {
+			return [];
+		}
+	}
+
+	async putDelegationGrant(grant: DelegationGrant): Promise<void> {
+		const file = path.join(this.stateDir, "delegation-grants.json");
+		const prior = FileStore.nodeWriteLocks.get(file) ?? Promise.resolve();
+		let release!: () => void;
+		const next = prior.then(() => new Promise<void>((resolve) => { release = resolve; }));
+		FileStore.nodeWriteLocks.set(file, next);
+		await prior;
+		try {
+			const raw = await getStorageBackend().readText(file);
+			const existing = raw ? JSON.parse(raw) : [];
+			const grants = Array.isArray(existing) ? existing.map(readDelegationGrant).filter((value): value is DelegationGrant => value !== undefined) : [];
+			const index = grants.findIndex((value) => value.id === grant.id);
+			if (index >= 0) grants[index] = grant;
+			else grants.push(grant);
+			await getStorageBackend().writeDurable(file, JSON.stringify(grants.sort((a, b) => a.grantedAt - b.grantedAt || a.id.localeCompare(b.id)), null, 2));
 		} finally {
 			release();
 			if (FileStore.nodeWriteLocks.get(file) === next) FileStore.nodeWriteLocks.delete(file);
@@ -800,6 +854,17 @@ export class DbStore implements Store {
 	async putNodeRecord(record: NodeRecord): Promise<void> {
 		await withOrg(this.ctx, this.orgId, (trx) =>
 			trx.insertInto("node_records").values({ org_id: this.orgId, id: record.id, node_id: record.nodeId, kind: record.kind, created_at: record.createdAt, data: JSON.stringify(record) }).onConflict((oc) => oc.columns(["org_id", "id"]).doUpdateSet({ node_id: record.nodeId, kind: record.kind, created_at: record.createdAt, data: JSON.stringify(record) })).execute(),
+		);
+	}
+
+	async listDelegationGrants(): Promise<DelegationGrant[]> {
+		const rows = await withOrg(this.ctx, this.orgId, (trx) => trx.selectFrom("delegation_grants").select(["data"]).where("org_id", "=", this.orgId).orderBy("granted_at").execute());
+		return rows.map((row) => readDelegationGrant(JSON.parse(row.data))).filter((grant): grant is DelegationGrant => grant !== undefined);
+	}
+
+	async putDelegationGrant(grant: DelegationGrant): Promise<void> {
+		await withOrg(this.ctx, this.orgId, (trx) =>
+			trx.insertInto("delegation_grants").values({ org_id: this.orgId, id: grant.id, action: grant.action, granted_at: grant.grantedAt, data: JSON.stringify(grant) }).onConflict((oc) => oc.columns(["org_id", "id"]).doUpdateSet({ action: grant.action, granted_at: grant.grantedAt, data: JSON.stringify(grant) })).execute(),
 		);
 	}
 

@@ -106,6 +106,15 @@ export interface NodeRecordsTable {
 	data: string;
 }
 
+/** Human grants out of the non-delegatable class. Absence of a row is absence of permission. */
+export interface DelegationGrantsTable {
+	org_id: string;
+	id: string;
+	action: string;
+	granted_at: number;
+	data: string;
+}
+
 /** Positive-evidence channel membership rows. Inactive rows are removals, never deletions. */
 export interface ChannelMembershipsTable {
 	org_id: string;
@@ -252,6 +261,7 @@ export interface AppDatabase {
 	channel_memberships: ChannelMembershipsTable;
 	channel_read_cursors: ChannelReadCursorsTable;
 	node_records: NodeRecordsTable;
+	delegation_grants: DelegationGrantsTable;
 	nodes: NodesTable;
 	usage: UsageTable;
 	federation_peers: FederationPeersTable;

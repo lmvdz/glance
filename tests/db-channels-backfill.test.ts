@@ -37,7 +37,7 @@ test("a database that predates the channels tables migrates instead of dying on 
 		// there, AND the ledger has only reached 0008 — nothing at or after 0008b has run. Dropping
 		// the tables alone is not enough; the first pass above already recorded the backfill, so it
 		// would be skipped and the test would pass for the wrong reason.
-		for (const t of ["node_records", "nodes", "channel_read_cursors", "channel_memberships", "channel_entries", "channels"]) {
+		for (const t of ["delegation_grants", "node_records", "nodes", "channel_read_cursors", "channel_memberships", "channel_entries", "channels"]) {
 			await first.db.schema.dropTable(t).ifExists().execute();
 		}
 		await first.db.deleteFrom("kysely_migration" as never).where("name" as never, ">=", "0008b" as never).execute();

@@ -1,5 +1,6 @@
 import { Result, Schema } from "effect";
 import type { Store } from "./dal/store.ts";
+import { nonDelegatableClassOf, nonDelegatableClasses, type NonDelegatableClass } from "./delegation-boundary.ts";
 
 /**
  * Durable evidence attached to a node, as ASSOCIATED RECORDS — never as optional fields overloaded
@@ -13,9 +14,12 @@ import type { Store } from "./dal/store.ts";
  * exists in the type exists in the decoder.
  */
 
-/** Product policy, not configuration. Learned rules can never settle work in these classes. */
-export const nonDelegatableClasses = ["credentials", "spend", "deletion", "publishing", "legal"] as const;
-export type NonDelegatableClass = (typeof nonDelegatableClasses)[number];
+/**
+ * Product policy, not configuration. Learned rules can never settle work in these classes.
+ * Re-exported from `delegation-boundary.ts` rather than restated, because two copies of a boundary
+ * are two boundaries, and they drift.
+ */
+export { nonDelegatableClasses, type NonDelegatableClass };
 
 const base = {
 	id: Schema.String,
@@ -219,6 +223,15 @@ export class NodeRecordStore {
 		}
 		if (record.kind === "evidence" && (!Number.isInteger(record.sampleSize) || record.sampleSize < 1)) {
 			throw new Error("an evidence claim requires a sample size of at least one");
+		}
+		if (record.kind === "rule") {
+			// Refused at CREATION, not at invocation. A rule that names a non-delegatable action must not
+			// exist to be evaluated — otherwise the boundary depends on every future call site
+			// remembering to check it, and one that forgets is a hole nobody can see.
+			const overreach = record.settles.map((action) => [action, nonDelegatableClassOf(action)] as const).find(([, cls]) => cls !== undefined);
+			if (overreach) {
+				throw new Error(`a rule cannot settle ${overreach[0]}: ${overreach[1]} decisions always reach a person, and no rule widens that`);
+			}
 		}
 		if (!(await this.store.getNode(record.nodeId))) {
 			this.log(`refusing record ${record.id}: node ${record.nodeId} is absent`);
