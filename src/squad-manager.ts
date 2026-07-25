@@ -234,6 +234,7 @@ import { TRANSCRIPT_EVENT_TOKEN_BURN_SNAPSHOT, fleetTokenBurnPayload, tokenBurnF
 import { truncateLabel } from "./text-util.ts";
 import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
 import { ChannelStore, DEFAULT_CHANNEL_ID, type ChannelEntry, type ClientChannelPost, type Channel, type CreateChannelInput, type ChannelMemberInput } from "./channels.ts";
+import { NodeStore, type NodeState } from "./nodes.ts";
 import { buildTrace, traceMaxSpans, traceSampleRatio, traceSpansEnabled, type TraceResponse } from "./spans.ts";
 import { traceExporterFromEnv, type TraceExportQueue } from "./trace-exporter.ts";
 
@@ -267,18 +268,13 @@ import {
 	type CapabilitySnapshot,
 } from "./capabilities/index.ts";
 
-const DEFAULT_FLEET_CARD_KINDS: Record<string, true> = {
+const ESCALATION_CARD_KINDS: Record<string, true> = {
 	[TRANSCRIPT_EVENT_NEEDS_YOU]: true,
 	[TRANSCRIPT_EVENT_GATE_VERDICT]: true,
 	[TRANSCRIPT_EVENT_LAND_MERGE]: true,
 	[TRANSCRIPT_EVENT_PLAN_CARD]: true,
-	[TRANSCRIPT_EVENT_RETURN_EMIT]: true,
 	[TRANSCRIPT_EVENT_DESIGN_REVISED]: true,
-	[TRANSCRIPT_EVENT_UNIT_SPAWNED]: true,
-	[TRANSCRIPT_EVENT_UNIT_TURN_FINISHED]: true,
 	[TRANSCRIPT_EVENT_UNIT_FAILED]: true,
-	[TRANSCRIPT_EVENT_PR_OPENED]: true,
-	[TRANSCRIPT_EVENT_VERIFICATION_RAN]: true,
 };
 
 const MAX_TRANSCRIPT = 800;
@@ -1196,6 +1192,7 @@ export class SquadManager extends EventEmitter {
 	 *  last-seen map, constructed ONCE here (mirrors `transitionLog` above), never per-request. */
 	private readonly attentionStore: AttentionStore;
 	private readonly channelStore: ChannelStore;
+	private readonly nodeStore: NodeStore;
 	private readonly traceExporter?: TraceExportQueue;
 	/** Reward disbursement provider (Tremendous / Manual). Injectable for tests; default from env. */
 	private readonly paymentProvider: PaymentProvider;
@@ -1246,6 +1243,7 @@ export class SquadManager extends EventEmitter {
 		this.pushTapLog = new JsonlLog<PushTapEntry>({ path: path.join(this.stateDir, PUSH_TAPS_FILE), log: (m) => this.log("warn", `${PUSH_TAPS_FILE}: ${m}`) });
 		this.store = opts.store ?? new FileStore(this.stateDir);
 		this.channelStore = new ChannelStore(this.stateDir, this.store, (m) => this.log("warn", `channels: ${m}`));
+		this.nodeStore = new NodeStore(this.store);
 		this.attentionStore = new AttentionStore({ stateDir: this.stateDir, log: (m) => this.log("warn", `attention: ${m}`) });
 		this.bin = opts.bin;
 		this.autoLand = opts.autoLand ?? false;
@@ -3424,6 +3422,7 @@ export class SquadManager extends EventEmitter {
 
 	private async emitDesignRevisedCard(feature: FeatureDTO, concern: PlanConcern, opts: { file: string; status?: string; blockedBy?: number[] }, actor: Actor): Promise<void> {
 		const rec = feature.agentIds.map((id) => this.agents.get(id)).find(Boolean);
+		// Same rule as unit escalations: a design-revised card belongs to the room the work came from.
 		const channelId = rec?.options.channelId ?? rec?.dto.channelId ?? DEFAULT_CHANNEL_ID;
 		const changed = [
 			opts.status !== undefined ? `status → ${opts.status}` : undefined,
@@ -6728,6 +6727,7 @@ export class SquadManager extends EventEmitter {
 			}
 		}
 		this.agents.set(id, rec);
+		await this.ensureProjectedNode(rec);
 		this.wire(rec);
 		// Synthetic same-state "spawn" entry (#lifecycle-truth finding 4 / DESIGN's timeline-continuity
 		// requirement) — records regardless of pending because "spawn" is an event-class reason, not
@@ -10303,6 +10303,7 @@ export class SquadManager extends EventEmitter {
 		const face = recordObject(payload.face) ?? {};
 		const unitId = typeof refs.unitId === "string" ? refs.unitId : typeof face.unitId === "string" ? face.unitId : undefined;
 		const resident = unitId ? this.agents.get(unitId) : undefined;
+		if (resident && !(await this.canReadAgent(unitId!, actor))) throw new Error("channel forbidden");
 		if (resident) {
 			return {
 				mode: "resident",
@@ -11525,10 +11526,28 @@ export class SquadManager extends EventEmitter {
 		void this.projectUnitTranscriptEvent(rec, entry);
 	}
 
-	private projectedChannelId(rec: AgentRecord, eventKind: string): string | undefined {
-		const origin = rec.options.channelId ?? rec.dto.channelId;
-		if (origin) return origin;
-		return DEFAULT_FLEET_CARD_KINDS[eventKind] ? DEFAULT_CHANNEL_ID : undefined;
+	/** Resolve an event's subject before routing it. Missing bindings are failures, never root fallbacks. */
+	private async projectedNodeId(rec: AgentRecord): Promise<string | undefined> {
+		try {
+			return (await this.ensureProjectedNode(rec))?.id;
+		} catch (err) {
+			this.log("warn", `projection ${rec.dto.id}: node binding unavailable: ${errText(err)}`);
+			return undefined;
+		}
+	}
+
+	private async ensureProjectedNode(rec: AgentRecord): Promise<{ id: string }> {
+		const existing = await this.nodeStore.get(rec.dto.id);
+		if (existing) return existing;
+		return this.nodeStore.create({
+			id: rec.dto.id,
+			parentId: rec.dto.parentId,
+			kind: "unit",
+			title: rec.dto.name,
+			state: rec.dto.status as NodeState,
+			goal: rec.options.task,
+			createdAt: Date.now(),
+		});
 	}
 
 	private projectionDoorSurface(kind: string): string {
@@ -11655,13 +11674,13 @@ export class SquadManager extends EventEmitter {
 	private async projectUnitTranscriptEvent(rec: AgentRecord, entry: TranscriptEntry): Promise<void> {
 		const event = entry.event;
 		if (!event?.kind) return;
-		const channelId = this.projectedChannelId(rec, event.kind);
-		if (!channelId) return;
+		const nodeId = await this.projectedNodeId(rec);
+		if (!nodeId) return;
 		try {
-			const card = await this.channelStore.appendManager(channelId, {
+			const input = {
 				authorActor: "manager",
-				kind: "system",
-				format: "stage",
+				kind: "system" as const,
+				format: "stage" as const,
 				text: entry.text,
 				event: {
 					kind: event.kind,
@@ -11671,11 +11690,18 @@ export class SquadManager extends EventEmitter {
 						face: this.projectionFace(rec, entry),
 					},
 				},
-			});
-			this.emit("event", { type: "channel-entry", channelId, entry: card } satisfies SquadEvent);
+			};
+			// An escalation surfaces in the unit's ROOM, which is the channel it was spawned from —
+			// NOT unconditionally in #fleet. #fleet is org-public, so routing every escalation there
+			// would publish a private room's needs-you, gate and land cards to the whole org.
+			const room = rec.options.channelId ?? rec.dto.channelId ?? DEFAULT_CHANNEL_ID;
+			const card = ESCALATION_CARD_KINDS[event.kind]
+				? await this.channelStore.appendManager(room, input)
+				: await this.channelStore.appendNodeManager(nodeId, input, rec.options.channelId ?? rec.dto.channelId);
+			this.emit("event", { type: "channel-entry", channelId: card.channelId, entry: card } satisfies SquadEvent);
 		} catch (err) {
 			this.projectionFailures++;
-			this.log("warn", `projection ${rec.dto.id}/${event.kind} → ${channelId} failed (${this.projectionFailures} total): ${errText(err)}`);
+			this.log("warn", `projection ${rec.dto.id}/${event.kind} → ${nodeId} failed (${this.projectionFailures} total): ${errText(err)}`);
 		}
 	}
 
