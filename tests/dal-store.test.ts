@@ -342,6 +342,16 @@ test("NodeRecordStore: associated evidence round-trips and fails closed through 
 		// And it settles nothing it did not name.
 		expect(await records.mayRuleSettle(nodeId, "publish-a-release")).toBe(false);
 		expect(await records.mayRuleSettle(`${nodeId}-absent`, "reversible-change")).toBe(false);
+
+		// Delegation grants live in the same stores and must agree exactly. A grant is the only door out
+		// of the non-delegatable class, so a store that loses one silently re-closes it, and a store that
+		// invents one silently opens it.
+		expect(await store.listDelegationGrants()).toEqual([]);
+		const grant = { id: `${name}-grant-land`, action: "land", class: "publishing" as const, grantedBy: "db:lars", grantedAt: 11, reason: "Merges can land without me when the gate is green." };
+		await store.putDelegationGrant(grant);
+		expect(await store.listDelegationGrants()).toEqual([grant]);
+		await store.putDelegationGrant({ ...grant, revokedAt: 12, revokedBy: "db:lars" });
+		expect(await store.listDelegationGrants()).toEqual([{ ...grant, revokedAt: 12, revokedBy: "db:lars" }]);
 				await expect(records.put({ ...samples[0]!, id: `${name}-missing`, nodeId: `${nodeId}-missing` })).rejects.toThrow("node record node not found");
 	}
 });

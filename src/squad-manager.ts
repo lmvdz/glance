@@ -235,6 +235,7 @@ import { truncateLabel } from "./text-util.ts";
 import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
 import { ChannelStore, DEFAULT_CHANNEL_ID, type ChannelEntry, type ClientChannelPost, type Channel, type CreateChannelInput, type ChannelMemberInput } from "./channels.ts";
 import { NodeStore, type NodeState } from "./nodes.ts";
+import { DelegationBoundaryError, assertHumanAuthority, commandAction, grantFor, nonDelegatableClassOf, type DelegationGrant } from "./delegation-boundary.ts";
 import { buildTrace, traceMaxSpans, traceSampleRatio, traceSpansEnabled, type TraceResponse } from "./spans.ts";
 import { traceExporterFromEnv, type TraceExportQueue } from "./trace-exporter.ts";
 
@@ -1373,6 +1374,7 @@ export class SquadManager extends EventEmitter {
 	}
 
 	async start(): Promise<void> {
+		await this.materialiseAutoLandGrant();
 		// Recovery only matters for a daemon with prior state. A fresh start has nothing to reconnect,
 		// reap, or adopt — and a fresh-state manager must NOT reap the shared sockets dir out from under
 		// a concurrent daemon (or test). reconnectLive (use live) → reapOrphans → adopt worktree context.
@@ -3774,7 +3776,76 @@ export class SquadManager extends EventEmitter {
 	 * delay (beyond `beginAttempt`'s sub-second SHA reads), or alter a land. `autoLandWorkflow` calls this
 	 * wrapper, so a single attempt id is threaded and it never mints its own (no double `attempt-started`).
 	 */
+	/**
+	 * Live grants out of the non-delegatable class. Read fresh at every enforcement point rather than
+	 * cached: a revocation that only takes effect after a restart is not a revocation.
+	 */
+	/**
+	 * `OMP_SQUAD_AUTOLAND` enabled autonomous merging with nobody's name on it. The boundary needs a
+	 * decision it can attribute, so the flag becomes a grant: same behaviour, now answerable, visible
+	 * and revocable. Whoever set the flag is recorded as the granter, and the grant says so plainly
+	 * rather than claiming a person typed it.
+	 *
+	 * Deliberately does NOT re-grant after a revocation — otherwise every restart would silently undo
+	 * a human taking the permission back, which is the exact failure this concern exists to prevent.
+	 */
+	private async materialiseAutoLandGrant(): Promise<void> {
+		if (!this.autoLand) return;
+		try {
+			const existing = (await this.store.listDelegationGrants()).find((grant) => grant.action === "land");
+			if (existing) return;
+			await this.store.putDelegationGrant({
+				id: "grant:land",
+				action: "land",
+				class: "publishing",
+				grantedBy: `configuration:OMP_SQUAD_AUTOLAND (daemon operator ${this.operator.id})`,
+				grantedAt: Date.now(),
+				reason: "Autonomous landing was enabled by configuration (OMP_SQUAD_AUTOLAND) before grants existed. Recorded here so it can be seen and taken back; nobody has argued for it in their own words yet.",
+			});
+			this.log("info", "delegation-boundary: recorded the existing autoland configuration as a grant — revoke it to stop autonomous merging");
+		} catch (err) {
+			this.log("warn", `delegation-boundary: could not record the autoland grant: ${errText(err)}`);
+		}
+	}
+
+	async delegationGrants(): Promise<DelegationGrant[]> {
+		try {
+			return await this.store.listDelegationGrants();
+		} catch (err) {
+			// Fail CLOSED. If we cannot read the grants we cannot show that autonomy was permitted, and
+			// "we could not check" must never resolve as "allowed" — that is the defect class this
+			// codebase keeps finding.
+			this.log("warn", `delegation-boundary: grant read failed, treating autonomy as ungranted: ${errText(err)}`);
+			return [];
+		}
+	}
+
+	/** Record a human arguing one action out of the class. Attributable, revocable, never a default. */
+	async grantDelegation(input: { action: string; grantedBy: string; reason: string; at?: number }): Promise<DelegationGrant> {
+		const boundaryClass = nonDelegatableClassOf(input.action);
+		if (!boundaryClass) throw new Error(`${input.action} is not in the non-delegatable class; it needs no grant`);
+		if (!input.grantedBy.trim()) throw new Error("a grant records who made it — there is no anonymous grant");
+		if (!input.reason.trim()) throw new Error("a grant records why it was made, in the granter's own words");
+		const grant: DelegationGrant = { id: `grant:${input.action}`, action: input.action, class: boundaryClass, grantedBy: input.grantedBy.trim(), grantedAt: input.at ?? Date.now(), reason: input.reason.trim() };
+		await this.store.putDelegationGrant(grant);
+		return grant;
+	}
+
+	/** Revoke a grant. The record is kept — who granted it and who took it back are both history. */
+	async revokeDelegation(action: string, revokedBy: string, at?: number): Promise<DelegationGrant | undefined> {
+		const existing = grantFor(action, await this.delegationGrants());
+		if (!existing) return undefined;
+		const revoked: DelegationGrant = { ...existing, revokedAt: at ?? Date.now(), revokedBy };
+		await this.store.putDelegationGrant(revoked);
+		return revoked;
+	}
+
 	async land(id: string, message?: string, opts: { auto?: boolean; force?: boolean; actor?: Actor; reason?: string; validatorOverride?: { reasonClass: string } } = {}): Promise<LandResult> {
+		// Landing pushes a branch into the trunk and merges it — it leaves the machine, so it is in the
+		// non-delegatable class. An autonomous land is refused unless a person granted it, by name, with
+		// a reason. `OMP_SQUAD_AUTOLAND` used to enable this anonymously; it now materialises as exactly
+		// such a grant at boot, so the behaviour is unchanged and the decision is answerable.
+		if (opts.auto) assertHumanAuthority("land", "autonomous", await this.delegationGrants());
 		const rec = this.agents.get(id);
 		const attemptId = rec ? await this.beginLandAssessmentSafe(rec.dto.repo, rec.dto.branch) : undefined;
 		if (rec) this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_LAND_ATTEMPT, `land attempt started · ${this.safeEventLabel(rec.dto.name)} · ${this.safeEventLabel(rec.dto.branch ?? "changes")}`, { stage: "started", attemptId, repo: rec.dto.repo, branch: rec.dto.branch, agentId: rec.dto.id });
@@ -7368,6 +7439,23 @@ export class SquadManager extends EventEmitter {
 			this.emitCommandAck(this.commandAckClientTurnId(cmd), { ok: false, reason: "denied" });
 			throw new RbacDenied(need, have, cmd.type);
 		}
+		// Delegation boundary (concern 12): a SECOND axis, orthogonal to the tier check above. That one
+		// asks which human tier may do this; this one asks whether it may happen without a human at all.
+		// A command carrying source "auto" is the fleet acting on its own initiative, so credentials,
+		// spend, deletion, publishing and legal-edge actions need a grant a person made on purpose.
+		// Enforced here rather than in the client, because a label is a description of enforcement.
+		if (commandSource(cmd) === "auto") {
+			try {
+				assertHumanAuthority(commandAction(cmd), "autonomous", await this.delegationGrants());
+			} catch (err) {
+				if (!(err instanceof DelegationBoundaryError)) throw err;
+				this.log("warn", `delegation-boundary: refused autonomous "${cmd.type}" (${err.boundaryClass})`);
+				void this.store.appendAudit({ actor: actor.id, action: `boundary-refused:${cmd.type}`, target: commandTarget(cmd), detail: { class: err.boundaryClass } }).catch(() => {});
+				this.emitCommandAck(this.commandAckClientTurnId(cmd), { ok: false, reason: "denied" });
+				throw err;
+			}
+		}
+
 		// Security trail: record every accepted mutation (reads — snapshot/subscribe — are need=viewer
 		// and not audited). DB mode persists to the per-org `audit` table; FileStore is a no-op.
 		// `source` (voice/composer provenance) rides along when the command carried one — observability
