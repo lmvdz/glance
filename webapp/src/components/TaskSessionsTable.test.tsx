@@ -46,8 +46,8 @@ describe('TaskSessionsTable', () => {
       agent({ id: 'a2', name: 'Research prior art' }), // typed → ember tone
     ]);
     const html = renderToStaticMarkup(<TaskSessionsTable rows={rows} onOpenSession={() => {}} />);
-    // neutral outline (gray) on the fallback; ember (accent var) on the real type
-    expect(html).toMatch(/border-gray-300[^>]*>SESSION</);
+    // Neutral fallback resolves through the ink-border token; typed sessions keep ember emphasis.
+    expect(html).toMatch(/border-ink-border-2[^>]*>SESSION</);
     expect(html).toMatch(/var\(--wf-accent\)[^>]*>RESEARCH</);
   });
 });
