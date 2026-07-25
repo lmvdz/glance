@@ -81,6 +81,21 @@ export interface ChannelsTable {
 	creator_user_id: string | null;
 }
 
+/** Per-org durable work graph. `channel_id` remains null until first conversation. */
+export interface NodesTable {
+	org_id: string;
+	id: string;
+	parent_id: string | null;
+	kind: string;
+	title: string;
+	state: string;
+	owner_id: string | null;
+	goal: string | null;
+	created_at: number;
+	settled_at: number | null;
+	channel_id: string | null;
+}
+
 /** Positive-evidence channel membership rows. Inactive rows are removals, never deletions. */
 export interface ChannelMembershipsTable {
 	org_id: string;
@@ -226,6 +241,7 @@ export interface AppDatabase {
 	channel_entries: ChannelEntriesTable;
 	channel_memberships: ChannelMembershipsTable;
 	channel_read_cursors: ChannelReadCursorsTable;
+	nodes: NodesTable;
 	usage: UsageTable;
 	federation_peers: FederationPeersTable;
 	capability_records: CapabilityRecordsTable;

@@ -200,6 +200,37 @@ export class ChannelStore {
 		return this.appendManager(channelId, { text, replyToId, authorActor: actor.id, authorDisplayName: actor.displayName, authorOrigin: actor.origin, kind: "user", format: "markdown" });
 	}
 
+	/** Resolve a node's conversation without inventing a second visibility model. */
+	async channelForNode(nodeId: string, create = false): Promise<Channel | undefined> {
+		const node = await this.store.getNode(nodeId);
+		if (!node) return undefined;
+		if (node.channelId) return this.store.getChannel(node.channelId);
+		if (!create) return undefined;
+		const channelId = `node:${node.id}`;
+		await this.store.putChannel({ id: channelId, name: `#${node.title}`, createdAt: this.now(), kind: "user", visibility: "org-public" });
+		const bound = await this.store.bindNodeChannel(node.id, channelId);
+		if (!bound?.channelId) return undefined;
+		return this.store.getChannel(bound.channelId);
+	}
+
+	async entriesForNode(nodeId: string, since: number, actor: Actor): Promise<ChannelEntry[]> {
+		const channel = await this.channelForNode(nodeId);
+		if (!channel) throw new Error("node not found");
+		return this.entries(channel.id, since, actor);
+	}
+
+	async appendNodeClient(nodeId: string, actor: Actor, input: ClientChannelPost): Promise<ChannelEntry> {
+		const channel = await this.channelForNode(nodeId, true);
+		if (!channel) throw new Error("node not found");
+		return this.appendClient(channel.id, actor, input);
+	}
+
+	async appendNodeManager(nodeId: string, input: ManagerChannelPost): Promise<ChannelEntry> {
+		const channel = await this.channelForNode(nodeId, true);
+		if (!channel) throw new Error("node not found");
+		return this.appendManager(channel.id, input);
+	}
+
 	async createChannel(actor: Actor, input: CreateChannelInput): Promise<Channel> {
 		await this.ensureDefaultChannel();
 		const creatorUserId = actorUserId(actor);

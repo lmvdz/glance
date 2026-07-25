@@ -34,6 +34,7 @@ const APP_TABLES = [
 	"feedback_rewards",
 	"channel_memberships",
 	"channel_read_cursors",
+	"nodes",
 ] as const;
 const BASE_APP_TABLES = ["roster_index", "features", "audit", "channels", "channel_entries", "usage", "federation_peers", "capability_records"] as const;
 const FEEDBACK_TABLES = ["feedback_campaigns", "feedback_items", "feedback_validation_responses", "feedback_rewards"] as const;
@@ -323,6 +324,30 @@ const channelReadCursors: Migration = {
 	},
 };
 
+const nodes: Migration = {
+	async up(db: Kysely<any>) {
+		await db.schema
+			.createTable("nodes")
+			.addColumn("org_id", "text", (c) => c.notNull().references("organization.id").onDelete("cascade"))
+			.addColumn("id", "text", (c) => c.notNull())
+			.addColumn("parent_id", "text")
+			.addColumn("kind", "text", (c) => c.notNull())
+			.addColumn("title", "text", (c) => c.notNull())
+			.addColumn("state", "text", (c) => c.notNull())
+			.addColumn("owner_id", "text")
+			.addColumn("goal", "text")
+			.addColumn("created_at", "bigint", (c) => c.notNull())
+			.addColumn("settled_at", "bigint")
+			.addColumn("channel_id", "text")
+			.addPrimaryKeyConstraint("nodes_pk", ["org_id", "id"])
+			.execute();
+		await db.schema.createIndex("nodes_org_parent").on("nodes").columns(["org_id", "parent_id"]).execute();
+	},
+	async down(db: Kysely<any>) {
+		await db.schema.dropTable("nodes").ifExists().execute();
+	},
+};
+
 const createJoinRequests: Migration = {
 	async up(db: Kysely<any>) {
 		await db.schema
@@ -361,6 +386,8 @@ export function appMigrations(type: DbKind): Record<string, Migration> {
 		"0010_channel_memberships_rls": rlsMigration(type, ["channel_memberships"]),
 		"0011_channel_read_cursors": channelReadCursors,
 		"0012_channel_read_cursors_rls": rlsMigration(type, ["channel_read_cursors"]),
+		"0013_nodes": nodes,
+		"0014_nodes_rls": rlsMigration(type, ["nodes"]),
 	};
 }
 
