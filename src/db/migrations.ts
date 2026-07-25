@@ -35,6 +35,7 @@ const APP_TABLES = [
 	"channel_memberships",
 	"channel_read_cursors",
 	"nodes",
+	"node_records",
 ] as const;
 const BASE_APP_TABLES = ["roster_index", "features", "audit", "channels", "channel_entries", "usage", "federation_peers", "capability_records"] as const;
 const FEEDBACK_TABLES = ["feedback_campaigns", "feedback_items", "feedback_validation_responses", "feedback_rewards"] as const;
@@ -407,6 +408,25 @@ const nodes: Migration = {
 	},
 };
 
+const nodeRecords: Migration = {
+	async up(db: Kysely<any>) {
+		await db.schema
+			.createTable("node_records")
+			.addColumn("org_id", "text", (c) => c.notNull().references("organization.id").onDelete("cascade"))
+			.addColumn("id", "text", (c) => c.notNull())
+			.addColumn("node_id", "text", (c) => c.notNull())
+			.addColumn("kind", "text", (c) => c.notNull())
+			.addColumn("created_at", "bigint", (c) => c.notNull())
+			.addColumn("data", "text", (c) => c.notNull())
+			.addPrimaryKeyConstraint("node_records_pk", ["org_id", "id"])
+			.execute();
+		await db.schema.createIndex("node_records_org_node").on("node_records").columns(["org_id", "node_id", "created_at"]).execute();
+	},
+	async down(db: Kysely<any>) {
+		await db.schema.dropTable("node_records").ifExists().execute();
+	},
+};
+
 const createJoinRequests: Migration = {
 	async up(db: Kysely<any>) {
 		await db.schema
@@ -448,6 +468,8 @@ export function appMigrations(type: DbKind): Record<string, Migration> {
 		"0012_channel_read_cursors_rls": rlsMigration(type, ["channel_read_cursors"]),
 		"0013_nodes": nodes,
 		"0014_nodes_rls": rlsMigration(type, ["nodes"]),
+		"0015_node_records": nodeRecords,
+		"0016_node_records_rls": rlsMigration(type, ["node_records"]),
 	};
 }
 

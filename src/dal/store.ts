@@ -21,6 +21,7 @@ import * as path from "node:path";
 import { sql } from "kysely";
 import type { Channel, ChannelEntry, ChannelMembership, ChannelReadCursor } from "../channels.ts";
 import type { Node } from "../nodes.ts";
+import { readNodeRecord, type NodeRecord } from "../node-records.ts";
 import type { PersistedAgent, PersistedFeature, RunReceipt, TranscriptEntry } from "../types.ts";
 import { normalizeCapabilitySnapshot, type CapabilitySnapshot } from "../capabilities/index.ts";
 import { emptyFeedbackSnapshot, type FeedbackSnapshot } from "../feedback.ts";
@@ -178,6 +179,9 @@ export interface Store {
 	putNode(node: Node): Promise<void>;
 	/** Bind a lazy channel exactly once; returns undefined for an unknown node. */
 	bindNodeChannel(nodeId: string, channelId: string): Promise<Node | undefined>;
+	/** Durable evidence attached to a node. Missing records are unknown, never permission. */
+	listNodeRecords(nodeId: string): Promise<NodeRecord[]>;
+	putNodeRecord(record: NodeRecord): Promise<void>;
 	listChannelEntries(channelId: string, since?: number): Promise<ChannelEntry[]>;
 	searchChannelEntries?(q: string, limit?: number, offset?: number): Promise<ChannelSearchResult[]>;
 	appendChannelEntry(entry: Omit<ChannelEntry, "seq">): Promise<ChannelEntry>;
@@ -337,6 +341,40 @@ export class FileStore implements Store {
 			nodes[index] = bound;
 			await getStorageBackend().writeDurable(file, JSON.stringify(nodes, null, 2));
 			return bound;
+		} finally {
+			release();
+			if (FileStore.nodeWriteLocks.get(file) === next) FileStore.nodeWriteLocks.delete(file);
+		}
+	}
+
+	async listNodeRecords(nodeId: string): Promise<NodeRecord[]> {
+		const raw = await getStorageBackend().readText(path.join(this.stateDir, "node-records.json"));
+		if (!raw) return [];
+		try {
+			const decoded = JSON.parse(raw);
+			return Array.isArray(decoded)
+				? decoded.map(readNodeRecord).filter((record): record is NodeRecord => record !== undefined && record.nodeId === nodeId).sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))
+				: [];
+		} catch {
+			return [];
+		}
+	}
+
+	async putNodeRecord(record: NodeRecord): Promise<void> {
+		const file = path.join(this.stateDir, "node-records.json");
+		const prior = FileStore.nodeWriteLocks.get(file) ?? Promise.resolve();
+		let release!: () => void;
+		const next = prior.then(() => new Promise<void>((resolve) => { release = resolve; }));
+		FileStore.nodeWriteLocks.set(file, next);
+		await prior;
+		try {
+			const raw = await getStorageBackend().readText(file);
+			const existing = raw ? JSON.parse(raw) : [];
+			const records = Array.isArray(existing) ? existing.map(readNodeRecord).filter((value): value is NodeRecord => value !== undefined) : [];
+			const index = records.findIndex((value) => value.id === record.id);
+			if (index >= 0) records[index] = record;
+			else records.push(record);
+			await getStorageBackend().writeDurable(file, JSON.stringify(records.sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)), null, 2));
 		} finally {
 			release();
 			if (FileStore.nodeWriteLocks.get(file) === next) FileStore.nodeWriteLocks.delete(file);
@@ -752,6 +790,17 @@ export class DbStore implements Store {
 	async bindNodeChannel(nodeId: string, channelId: string): Promise<Node | undefined> {
 		await withOrg(this.ctx, this.orgId, (trx) => trx.updateTable("nodes").set({ channel_id: channelId }).where("org_id", "=", this.orgId).where("id", "=", nodeId).where("channel_id", "is", null).execute());
 		return this.getNode(nodeId);
+	}
+
+	async listNodeRecords(nodeId: string): Promise<NodeRecord[]> {
+		const rows = await withOrg(this.ctx, this.orgId, (trx) => trx.selectFrom("node_records").select(["data"]).where("org_id", "=", this.orgId).where("node_id", "=", nodeId).orderBy("created_at").execute());
+		return rows.map((row) => readNodeRecord(JSON.parse(row.data))).filter((record): record is NodeRecord => record !== undefined);
+	}
+
+	async putNodeRecord(record: NodeRecord): Promise<void> {
+		await withOrg(this.ctx, this.orgId, (trx) =>
+			trx.insertInto("node_records").values({ org_id: this.orgId, id: record.id, node_id: record.nodeId, kind: record.kind, created_at: record.createdAt, data: JSON.stringify(record) }).onConflict((oc) => oc.columns(["org_id", "id"]).doUpdateSet({ node_id: record.nodeId, kind: record.kind, created_at: record.createdAt, data: JSON.stringify(record) })).execute(),
+		);
 	}
 
 	async listChannelEntries(channelId: string, since = 0): Promise<ChannelEntry[]> {

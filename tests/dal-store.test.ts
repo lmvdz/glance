@@ -27,6 +27,7 @@ import { appMigrations } from "../src/db/migrations.ts";
 import type { PersistedAgent, PersistedFeature, RunReceipt } from "../src/types.ts";
 import { ChannelStore } from "../src/channels.ts";
 import { NodeStore } from "../src/nodes.ts";
+import { NodeRecordStore, type NodeRecord } from "../src/node-records.ts";
 
 let dir: string;
 let handle: DbHandle;
@@ -306,6 +307,42 @@ test("NodeStore: nodes round-trip through FileStore and DbStore with parent link
 		expect(await nodes.get(`${name}-child`)).toEqual({ id: `${name}-child`, parentId: `${name}-parent`, kind: "unit", title: "Child", state: "pending", ownerId: "alice", goal: "ship it", createdAt: 2 });
 		expect(await store.getChannel(`node:${name}-child`)).toBeUndefined();
 		expect(await new NodeStore(store).get(`${name}-child`)).toMatchObject({ parentId: `${name}-parent` });
+	}
+});
+
+test("NodeRecordStore: associated evidence round-trips and fails closed through FileStore and DbStore", async () => {
+	const fdir = path.join(dir, "node-records-file-roundtrip");
+	const stores = [
+		{ name: "FileStore", store: new FileStore(fdir) },
+		{ name: "DbStore", store: dbStore("B") },
+	];
+	for (const { name, store } of stores) {
+		const nodeId = `${name}-records`;
+		await new NodeStore(store).create({ id: nodeId, kind: "plan", title: "Records", state: "working", createdAt: 1 });
+		const records = new NodeRecordStore(store);
+		const samples: NodeRecord[] = [
+			{ id: `${name}-rule`, nodeId, kind: "rule", sentence: "Take reversible actions without asking.", authorId: "human", scope: "plan", settles: ["reversible-change"], status: "active", proposedFrom: ["decision-1"], wouldNotHaveCaught: ["the credential rotation"], invocations: [], createdAt: 2 },
+			{ id: `${name}-boundary`, nodeId, kind: "delegation-boundary", class: "credentials", justification: "A credential you did not hand over is not one you agreed to spend.", createdAt: 3 },
+			{ id: `${name}-readback`, nodeId, kind: "instruction-readback", instruction: "Ship it.", authorId: "human", agentId: "agent", reversible: [{ element: "run the suite", reading: "verify before shipping", correctionCost: "eleven minutes" }], irreversible: [{ element: "publish", reading: "push a tag", nearestRepair: "a superseding release" }], ambiguous: [], irreversibleStatus: "pending", createdAt: 4 },
+			{ id: `${name}-objection`, nodeId, kind: "objection", instructionId: `${name}-readback`, agentId: "agent", prediction: "The migration will fail on the channels table.", status: "raised", createdAt: 5 },
+			{ id: `${name}-motion`, nodeId, kind: "plan-motion", lastMeaningfulMovementAt: 6, baselineMs: 2_040_000, baselineSampleSize: 11, parked: false, intentionalStill: false, eligibleSuccessorCount: 1, createdAt: 6 },
+			{ id: `${name}-evidence`, nodeId, kind: "evidence", claim: "Tests passed.", verification: "checked", sampleSize: 34, sourceNodeIds: [nodeId], checkedAt: 7, createdAt: 7 },
+			{ id: `${name}-authority`, nodeId, kind: "human-authority", humanId: "human", role: "accountable", createdAt: 8 },
+			{ id: `${name}-handover`, nodeId, kind: "handover", fromActorId: "a", toActorId: "b", carried: ["context"], notCarried: ["the reasoning"], staleEvidenceIds: [`${name}-evidence`], reverifyAgainstRef: "origin/main", createdAt: 9 },
+			{ id: `${name}-retention`, nodeId, kind: "retention", authorizedBy: "human", compactedAt: 10, cut: ["tool logs"], preserved: ["the decision", "every human sentence"], fidelity: "compacted", createdAt: 10 },
+		];
+		for (const record of samples) await records.put(record);
+		// Byte-for-byte, in both stores: FileStore and DbStore must not disagree about what was written.
+		const read = await new NodeRecordStore(store).list(nodeId);
+		expect(read.map((record) => record.kind)).toEqual(samples.map((record) => record.kind));
+		expect(read).toEqual(samples);
+		expect(await records.mayRuleSettle(nodeId, "reversible-change")).toBe(true);
+		// A rule that names an action still cannot settle it inside the non-delegatable class.
+		expect(await records.mayRuleSettle(nodeId, "reversible-change", "credentials")).toBe(false);
+		// And it settles nothing it did not name.
+		expect(await records.mayRuleSettle(nodeId, "publish-a-release")).toBe(false);
+		expect(await records.mayRuleSettle(`${nodeId}-absent`, "reversible-change")).toBe(false);
+				await expect(records.put({ ...samples[0]!, id: `${name}-missing`, nodeId: `${nodeId}-missing` })).rejects.toThrow("node record node not found");
 	}
 });
 
