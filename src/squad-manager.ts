@@ -3422,7 +3422,8 @@ export class SquadManager extends EventEmitter {
 
 	private async emitDesignRevisedCard(feature: FeatureDTO, concern: PlanConcern, opts: { file: string; status?: string; blockedBy?: number[] }, actor: Actor): Promise<void> {
 		const rec = feature.agentIds.map((id) => this.agents.get(id)).find(Boolean);
-		const channelId = DEFAULT_CHANNEL_ID;
+		// Same rule as unit escalations: a design-revised card belongs to the room the work came from.
+		const channelId = rec?.options.channelId ?? rec?.dto.channelId ?? DEFAULT_CHANNEL_ID;
 		const changed = [
 			opts.status !== undefined ? `status → ${opts.status}` : undefined,
 			opts.blockedBy !== undefined ? `blockers → ${opts.blockedBy.length ? opts.blockedBy.map((n) => `#${n}`).join(", ") : "none"}` : undefined,
@@ -11690,8 +11691,12 @@ export class SquadManager extends EventEmitter {
 					},
 				},
 			};
+			// An escalation surfaces in the unit's ROOM, which is the channel it was spawned from —
+			// NOT unconditionally in #fleet. #fleet is org-public, so routing every escalation there
+			// would publish a private room's needs-you, gate and land cards to the whole org.
+			const room = rec.options.channelId ?? rec.dto.channelId ?? DEFAULT_CHANNEL_ID;
 			const card = ESCALATION_CARD_KINDS[event.kind]
-				? await this.channelStore.appendManager(DEFAULT_CHANNEL_ID, input)
+				? await this.channelStore.appendManager(room, input)
 				: await this.channelStore.appendNodeManager(nodeId, input, rec.options.channelId ?? rec.dto.channelId);
 			this.emit("event", { type: "channel-entry", channelId: card.channelId, entry: card } satisfies SquadEvent);
 		} catch (err) {

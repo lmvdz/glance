@@ -272,7 +272,8 @@ test("pending request and room card are one needs-you substrate and both resolve
 	const rec = host.agents.get(dto.id);
 	if (!rec) throw new Error("missing record");
 
-	const pendingCard = waitForChannelEntry(mgr, DEFAULT_CHANNEL_ID, (entry) => entry.event?.kind === "needs-you");
+	// The escalation surfaces in the room the unit was spawned from, not unconditionally in #fleet.
+	const pendingCard = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === "needs-you");
 	// `gate_`-prefixed id = gate-class = a decision no supervisor may auto-answer. Only these earn a
 	// permanent room card; see isRoomWorthyPending and the coverage below.
 	host.onUi(rec, { method: "confirm", id: "gate_req-1", title: "Approve deploy", message: "ship it?" } as RpcExtensionUIRequest);
@@ -291,7 +292,7 @@ test("pending request and room card are one needs-you substrate and both resolve
 	await mgr.appendChannelPost("ops", LOCAL_ACTOR, { text: "room steering" });
 	expect((await mgr.adoptionCounters()).roomInteractionsByDay[openedDay]).toBe(2);
 
-	const resolvedCard = waitForChannelEntry(mgr, DEFAULT_CHANNEL_ID, (entry) => entry.event?.kind === "needs-you" && isEventPayload(entry.event.payload) && entry.event.payload.face.pendingStatus === "resolved");
+	const resolvedCard = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === "needs-you" && isEventPayload(entry.event.payload) && entry.event.payload.face.pendingStatus === "resolved");
 	await mgr.applyCommand({ type: "answer", id: dto.id, requestId: "gate_req-1", value: "yes" }, LOCAL_ACTOR);
 	const resolved = await resolvedCard;
 	expect(mgr.getAgent(dto.id)?.pending).toEqual([]);
@@ -312,7 +313,7 @@ test("plan revision candidates project plan cards with DAG door refs", async () 
 	await fs.writeFile(path.join(repo, "plans", "the-room", "02-b.md"), "# B\nSTATUS: open\n");
 	const feature = mgr.createFeature({ title: "The room", repo, planDir: "plans/the-room" });
 	const dto = await mgr.create({ name: "planner", repo, approvalMode: "yolo", channelId: "ops", autoRoute: false, featureId: feature.id });
-	const projected = waitForChannelEntry(mgr, DEFAULT_CHANNEL_ID, (entry) => entry.event?.kind === TRANSCRIPT_EVENT_PLAN_CARD);
+	const projected = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === TRANSCRIPT_EVENT_PLAN_CARD);
 
 	const candidate = await mgr.addPlanRevisionCandidate({ repo, featureId: feature.id, planPath: "plans/the-room/01-a.md", producerAgentId: dto.id, summary: "split the door concern" });
 	const card = await projected;
@@ -337,7 +338,7 @@ test("plan-surface save emits design-revised room card", async () => {
 	await fs.writeFile(path.join(repo, "plans", "the-room", "01-a.md"), "# A\nSTATUS: open\n");
 	const feature = mgr.createFeature({ title: "The room", repo, planDir: "plans/the-room" });
 	await mgr.create({ name: "planner", repo, approvalMode: "yolo", channelId: "ops", autoRoute: false, featureId: feature.id });
-	const projected = waitForChannelEntry(mgr, DEFAULT_CHANNEL_ID, (entry) => entry.event?.kind === TRANSCRIPT_EVENT_DESIGN_REVISED);
+	const projected = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === TRANSCRIPT_EVENT_DESIGN_REVISED);
 
 	const concern = await mgr.updateConcern(feature.id, { repo, file: "01-a.md", status: "done", blockedBy: [] }, LOCAL_ACTOR);
 	const card = await projected;
@@ -360,11 +361,11 @@ test("projection is scoped to the manager org store", async () => {
 	await createChannel(a.host, "ops");
 	await createChannel(b.host, "ops");
 	const dto = await a.mgr.create({ name: "unit-org-a", repo: a.repo, approvalMode: "yolo", channelId: "ops", autoRoute: false });
-	const projected = waitForChannelEntry(a.mgr, DEFAULT_CHANNEL_ID, (entry) => entry.event?.kind === TRANSCRIPT_EVENT_GATE_VERDICT);
+	const projected = waitForChannelEntry(a.mgr, "ops", (entry) => entry.event?.kind === TRANSCRIPT_EVENT_GATE_VERDICT);
 
 	a.host.emitUnitTranscriptEvent(dto.id, TRANSCRIPT_EVENT_GATE_VERDICT, "gate verdict · pass", { verdict: "pass" });
 	await projected;
-	expect((await a.mgr.channelEntries(DEFAULT_CHANNEL_ID)).map((entry) => entry.event?.kind)).toContain(TRANSCRIPT_EVENT_GATE_VERDICT);
+	expect((await a.mgr.channelEntries("ops")).map((entry) => entry.event?.kind)).toContain(TRANSCRIPT_EVENT_GATE_VERDICT);
 	expect(await b.mgr.channelEntries("ops")).toHaveLength(0);
 	await a.mgr.stop();
 	await b.mgr.stop();
@@ -390,11 +391,41 @@ test("routine tool approvals never become room cards — only gate-class pending
 	expect(await mgr.channelEntries("ops")).toEqual([]);
 
 	// A gate-class request — the kind no supervisor may auto-answer — still earns its card.
-	const gateCard = waitForChannelEntry(mgr, DEFAULT_CHANNEL_ID, (entry) => entry.event?.kind === "needs-you");
+	const gateCard = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === "needs-you");
 	host.onUi(rec, { method: "confirm", id: "acpui_8", title: "GATE: ship to production?", message: "3 services" } as RpcExtensionUIRequest);
 	const card = await gateCard;
 	expect(isEventPayload(card.event?.payload)).toBe(true);
 	if (!isEventPayload(card.event?.payload)) throw new Error("bad payload");
 	expect(card.event.payload.face.title).toBe("Needs you · GATE: ship to production?");
+	await mgr.stop();
+});
+
+test("a private room's escalations never reach org-public #fleet", async () => {
+	// The regression this pins: routing every escalation to DEFAULT_CHANNEL_ID unconditionally reads as
+	// "escalations belong in the room" — but #fleet is org-public, so a unit spawned from a PRIVATE room
+	// would publish its needs-you, gate verdict and land-merge cards to the entire organisation. The
+	// membership enforcement built in wave 4 protects the channel; it cannot protect a card the manager
+	// itself addressed to a public channel. An escalation surfaces in the unit's own room.
+	const { mgr, host, repo } = await makeMgr("projection-private-escalation");
+	const alice = { id: "db:alice", displayName: "Alice", origin: "local" as const, role: "admin" as const };
+	const bob = { id: "db:bob", displayName: "Bob", origin: "local" as const, role: "admin" as const };
+	await mgr.createChannel(alice, { id: "war-room", name: "#war-room", visibility: "private" });
+	const dto = await mgr.create({ name: "unit-private", repo, approvalMode: "yolo", channelId: "war-room", autoRoute: false });
+
+	const escalation = waitForChannelEntry(mgr, "war-room", (entry) => entry.event?.kind === TRANSCRIPT_EVENT_GATE_VERDICT);
+	host.emitUnitTranscriptEvent(dto.id, TRANSCRIPT_EVENT_GATE_VERDICT, "gate verdict · pass on the embargoed release", { verdict: "pass" });
+	const card = await escalation;
+
+	expect(card.channelId).toBe("war-room");
+	// Nothing about the private unit is legible from the org-public room.
+	const fleet = await mgr.channelEntries(DEFAULT_CHANNEL_ID);
+	expect(fleet.some((entry) => entry.event?.kind === TRANSCRIPT_EVENT_GATE_VERDICT)).toBe(false);
+	expect(fleet.some((entry) => entry.text.includes("embargoed"))).toBe(false);
+	expect(fleet.some((entry) => entry.text.includes("unit-private"))).toBe(false);
+	// The member CAN read it where it landed — without this the negative below would also pass if the
+	// card had simply gone nowhere.
+	expect((await mgr.channelEntries("war-room", 0, alice)).some((entry) => entry.event?.kind === TRANSCRIPT_EVENT_GATE_VERDICT)).toBe(true);
+	// And a same-org non-member still cannot read it where it actually landed.
+	await expect(mgr.channelEntries("war-room", 0, bob)).rejects.toThrow();
 	await mgr.stop();
 });
