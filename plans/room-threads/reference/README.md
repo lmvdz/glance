@@ -9,6 +9,7 @@ between its states. Screenshots of every state sit alongside in `shots-*/`.
 | `02-surfaces.html` | what sits beneath it | 19 — answering, opened runs, standing in a unit, handover, mentions, search, starting work, handover of stalled work |
 | `03-machinery.html` | what sits beneath those | 12 — reading an instruction back, widening autonomy, collisions, agent records, the archive, unanswered questions |
 | `04-beyond.html` | when nobody is at the screen | 12 — the phone, stall detection, the undelegatable category, rules firing, unwinding, cost |
+| `07-shell.html` | the frame, once the product has a voice | 7 — at rest, in flight watched, **from across the room**, permission mid-speech, talking→typing, several sessions, **sound/motion/silence** |
 | `05-first-week.html` | cold start and other people | 12 — day one, two humans, the human as bottleneck, trust changing, a new agent, disagreement |
 
 ## Read these first, in this order
@@ -36,3 +37,36 @@ sentences. Every string states a fact AND what it means. A string that only name
 unfinished work — that is concern 10, and it is p0 and architectural rather than polish, because the
 strings are minted at the emit sites and by the time a card reaches the timeline the meaning has
 already been thrown away.
+
+
+## The shell round — two findings that change implementation
+
+**Motion is the state channel, and it is the only animation in the product.** A four-pixel strip on
+the top edge carries six states in movement rather than colour — "colour is the first thing
+peripheral vision loses and the first thing a colour-blind reader never had; movement is the last."
+Only three of the six move and nothing else animates, so motion in the corner of the eye is
+unambiguous. Live microphone is the only state that *breathes* at a human rate, because talking into
+a dead mic is the expensive mistake. Stopped-without-anyone-deciding is *stiller and darker* than at
+rest. `07-shell.html` → 3.
+
+**Uncertainty lives in grammar, not in disclaimers.** `07-shell.html` → 7 gives round six's three
+claim states a spoken form:
+
+| form | shape | example |
+|---|---|---|
+| verified | past tense, evidence in the same breath, no attribution | "The lookup is 40 milliseconds now. I have the timing." |
+| second-hand | the source is the subject | "Wren says the missing index is the cause." |
+| unverifiable | who thinks what, then what would settle it | "…so I can't tell you whether it worked. Wren thinks it did." |
+| a step | present participle, agent as subject, never an adjective about the thing examined | "She's timing the session lookup against staging." |
+
+Only the first is allowed to sound settled, and it is the ordinary one. A step describes a person
+acting, not a system being well. It survives a half-listening reader because it is already how people
+report second-hand information.
+
+**The governing rule: the product may never speak an outcome it did not receive as an outcome.** It
+may narrate steps and may say it does not know; it may not summarise a stream of steps into a
+conclusion. That is the line between a claim and a belief.
+
+Four sounds exist in the entire product — a stop tone for permission (twice a month), the microphone
+opening and closing under the user's own hand, and nothing at all for the other 99%. Silence is
+specified as a medium with its own budget: "Sixty-one steps produced four screen lines and no sound."
