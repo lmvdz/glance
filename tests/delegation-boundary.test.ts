@@ -120,7 +120,8 @@ test("a rule that names a non-delegatable action is refused at creation, not at 
 	for (const [action, cls] of [["land", "publishing"], ["deleteFeature", "deletion"], ["disburseReward", "spend"]] as const) {
 		await expect(records.put({ ...rule, settles: [action] })).rejects.toThrow(new RegExp(`cannot settle ${action}[\\s\\S]*${cls}`));
 	}
-	// A rule that settles something ordinary is fine.
+	// A rule that settles something ordinary is fine — once its cited evidence actually exists.
+	await records.put({ kind: "decision", id: "decision-1", nodeId: "n1", createdAt: 1, question: "Take the reversible option?", options: ["yes", "no"], chose: "yes", decidedBy: "db:lars", askedAt: 1, decidedAt: 2, reason: "no-rule-applied" });
 	await records.put({ ...rule, settles: ["reversible-change"] });
 	expect(await records.mayRuleSettle("n1", "reversible-change")).toBe(true);
 	// And even had one existed, evaluation refuses the class too — belt and braces, because the

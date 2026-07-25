@@ -321,7 +321,8 @@ test("NodeRecordStore: associated evidence round-trips and fails closed through 
 		await new NodeStore(store).create({ id: nodeId, kind: "plan", title: "Records", state: "working", createdAt: 1 });
 		const records = new NodeRecordStore(store);
 		const samples: NodeRecord[] = [
-			{ id: `${name}-rule`, nodeId, kind: "rule", sentence: "Take reversible actions without asking.", authorId: "human", scope: "plan", settles: ["reversible-change"], status: "active", proposedFrom: ["decision-1"], wouldNotHaveCaught: ["the credential rotation"], invocations: [], createdAt: 2 },
+			{ id: `${name}-decision`, nodeId, kind: "decision", question: "Take the reversible option?", options: ["yes", "no"], chose: "yes", decidedBy: "human", askedAt: 1, decidedAt: 60_000, reason: "no-rule-applied", createdAt: 1 },
+			{ id: `${name}-rule`, nodeId, kind: "rule", sentence: "Take reversible actions without asking.", authorId: "human", scope: "plan", settles: ["reversible-change"], status: "active", proposedFrom: [`${name}-decision`], wouldNotHaveCaught: ["the credential rotation"], invocations: [], createdAt: 2 },
 			{ id: `${name}-boundary`, nodeId, kind: "delegation-boundary", class: "credentials", justification: "A credential you did not hand over is not one you agreed to spend.", createdAt: 3 },
 			{ id: `${name}-readback`, nodeId, kind: "instruction-readback", instruction: "Ship it.", authorId: "human", agentId: "agent", reversible: [{ element: "run the suite", reading: "verify before shipping", correctionCost: "eleven minutes" }], irreversible: [{ element: "publish", reading: "push a tag", nearestRepair: "a superseding release" }], ambiguous: [], irreversibleStatus: "pending", createdAt: 4 },
 			{ id: `${name}-objection`, nodeId, kind: "objection", instructionId: `${name}-readback`, agentId: "agent", prediction: "The migration will fail on the channels table.", status: "raised", createdAt: 5 },
