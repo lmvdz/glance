@@ -7,6 +7,19 @@ TOUCHES: webapp/src/components/hub/HubShell.tsx, webapp/src/lib/router.ts, src/n
 BLOCKED_BY: 01
 MODE: afk
 
+## AMENDED 2026-07-25 (RECONCILE finding 6) — one fork is closed
+
+The centre-pane question is **resolved by the design and is no longer open here**: the room timeline is
+the default narrative, depth is entered through cards and the rail, and selection must not yank a
+conversation mid-read. Remove the "global feed versus coupled panes" fork before shell work begins.
+
+What genuinely remains open is narrower and still real:
+
+- exact router interaction for select-versus-enter, and
+- primary-home references versus true multi-homing for a unit or PR serving two plans.
+
+Decide the second against real `BLOCKED_BY` and landing examples, not in the abstract.
+
 ## Goal
 Two unresolved shape questions, each with a real failure mode, settled before the shell hardens
 around a guess.
