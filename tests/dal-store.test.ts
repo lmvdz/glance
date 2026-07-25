@@ -27,6 +27,7 @@ import { appMigrations } from "../src/db/migrations.ts";
 import type { PersistedAgent, PersistedFeature, RunReceipt } from "../src/types.ts";
 import { ChannelStore } from "../src/channels.ts";
 import { NodeStore } from "../src/nodes.ts";
+import { NodeRecordStore, type NodeRecord } from "../src/node-records.ts";
 
 let dir: string;
 let handle: DbHandle;
@@ -306,6 +307,35 @@ test("NodeStore: nodes round-trip through FileStore and DbStore with parent link
 		expect(await nodes.get(`${name}-child`)).toEqual({ id: `${name}-child`, parentId: `${name}-parent`, kind: "unit", title: "Child", state: "pending", ownerId: "alice", goal: "ship it", createdAt: 2 });
 		expect(await store.getChannel(`node:${name}-child`)).toBeUndefined();
 		expect(await new NodeStore(store).get(`${name}-child`)).toMatchObject({ parentId: `${name}-parent` });
+	}
+});
+
+test("NodeRecordStore: associated evidence round-trips and fails closed through FileStore and DbStore", async () => {
+	const fdir = path.join(dir, "node-records-file-roundtrip");
+	const stores = [
+		{ name: "FileStore", store: new FileStore(fdir) },
+		{ name: "DbStore", store: dbStore("B") },
+	];
+	for (const { name, store } of stores) {
+		const nodeId = `${name}-records`;
+		await new NodeStore(store).create({ id: nodeId, kind: "plan", title: "Records", state: "working", createdAt: 1 });
+		const records = new NodeRecordStore(store);
+		const samples: NodeRecord[] = [
+			{ id: `${name}-rule`, nodeId, kind: "rule", sentence: "Take reversible actions.", authorId: "human", scope: "plan", status: "active", invocations: [], createdAt: 2 },
+			{ id: `${name}-boundary`, nodeId, kind: "delegation-boundary", class: "credentials", createdAt: 3 },
+			{ id: `${name}-readback`, nodeId, kind: "instruction-readback", instruction: "Ship it.", authorId: "human", agentId: "agent", reversible: ["test"], irreversible: ["publish"], irreversibleStatus: "pending", createdAt: 4 },
+			{ id: `${name}-objection`, nodeId, kind: "objection", instructionId: `${name}-readback`, agentId: "agent", prediction: "The migration will fail.", status: "raised", createdAt: 5 },
+			{ id: `${name}-motion`, nodeId, kind: "plan-motion", lastMeaningfulMovementAt: 6, parked: false, intentionalStill: false, eligibleSuccessorCount: 1, createdAt: 6 },
+			{ id: `${name}-evidence`, nodeId, kind: "evidence", claim: "Tests passed.", verification: "checked", checkedAt: 7, createdAt: 7 },
+			{ id: `${name}-authority`, nodeId, kind: "human-authority", humanId: "human", role: "accountable", createdAt: 8 },
+			{ id: `${name}-handover`, nodeId, kind: "handover", fromActorId: "a", toActorId: "b", carried: ["context"], staleEvidenceIds: [`${name}-evidence`], createdAt: 9 },
+			{ id: `${name}-retention`, nodeId, kind: "retention", authorizedBy: "human", compactedAt: 10, cut: ["tool logs"], createdAt: 10 },
+		];
+		for (const record of samples) await records.put(record);
+		expect((await new NodeRecordStore(store).list(nodeId)).map((record) => record.kind)).toEqual(samples.map((record) => record.kind));
+		expect(await records.mayRuleSettle(nodeId, "credentials")).toBe(false);
+		expect(await records.mayRuleSettle(`${nodeId}-absent`)).toBe(false);
+		await expect(records.put({ ...samples[0]!, id: `${name}-missing`, nodeId: `${nodeId}-missing` })).rejects.toThrow("node record node not found");
 	}
 });
 

@@ -96,6 +96,16 @@ export interface NodesTable {
 	channel_id: string | null;
 }
 
+/** Typed evidence records associated with nodes; `data` keeps each record's own schema intact. */
+export interface NodeRecordsTable {
+	org_id: string;
+	id: string;
+	node_id: string;
+	kind: string;
+	created_at: number;
+	data: string;
+}
+
 /** Positive-evidence channel membership rows. Inactive rows are removals, never deletions. */
 export interface ChannelMembershipsTable {
 	org_id: string;
@@ -241,6 +251,7 @@ export interface AppDatabase {
 	channel_entries: ChannelEntriesTable;
 	channel_memberships: ChannelMembershipsTable;
 	channel_read_cursors: ChannelReadCursorsTable;
+	node_records: NodeRecordsTable;
 	nodes: NodesTable;
 	usage: UsageTable;
 	federation_peers: FederationPeersTable;
