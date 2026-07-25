@@ -43,6 +43,24 @@ lands at the unit node because that is what it is about, and never touches the r
 | Overlap detection | Extend `ownershipConflict` from paths to goals | Adopt GraphRAG | We declare the graph (`refs`, ownership, `BLOCKED_BY`); GraphRAG's value is *inferring* one from unstructured text. Paying to re-derive declared structure is the same category error as the feed. |
 | Cross-boundary disclosure | Existence + owner, never content | Full visibility, or silence | The law-firm conflict check: the system knows, and reveals that a conflict exists without disclosing the other matter. |
 
+## Standing rule: name things the way a person recognises them
+
+Found in the concern 23 cold boot, and it generalises past the two cards it was found on. The room
+speaks *system* where it should speak *human*:
+
+- a card's REPO chip showed `/home/lars/.claude/jobs/…/love…` — an absolute path truncated past the
+  point of carrying information. The question the chip answers is "which repo", and the answer to
+  that is a name.
+- its BRANCH chip showed `squad/doc-greet-mrzklccg-3-26b99e03`, whose only human part is buried
+  between a generated prefix and a hash.
+- "Capabilities" sits in the standing rail named after its implementation (a capability-pack
+  registry), answering a question asked once during setup, and is empty until someone imports a pack.
+
+The rule every concern in this plan inherits: **identity at a glance, address on demand.** Show the
+name; keep the exact value one hover or one click away. Shortening must never mean losing. And a
+surface earns a place in the rail by answering a question someone has *repeatedly* — setup-shaped
+things belong behind the command palette.
+
 ## Risks
 
 - **Rebuilds the room's centre pane.** Supersedes A-M1's assumption that a linear stream is the

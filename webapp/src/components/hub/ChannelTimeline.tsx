@@ -117,11 +117,16 @@ const ChannelTimelineRow = memo(function ChannelTimelineRow({ view, onReply }: {
             )}
             {view.body ? <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-6 opacity-85">{view.body}</p> : null}
             {view.pinned.length ? (
-              <dl className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+              <dl className="mt-3 flex flex-wrap gap-x-5 gap-y-2">
                 {view.pinned.map((item) => (
-                  <div key={item.label} className="rounded-lg border border-current/10 bg-black/10 px-2 py-1.5">
-                    <dt className="text-[10px] uppercase tracking-[0.12em] opacity-50">{item.label}</dt>
-                    <dd className="mt-0.5 truncate text-xs font-medium">{item.value}</dd>
+                  <div key={item.label} className="min-w-0">
+                    <dt className="font-mono text-[10px] uppercase tracking-[0.14em] opacity-45">{item.label}</dt>
+                    <dd
+                      className="mt-0.5 truncate font-mono text-xs font-medium"
+                      title={item.full ?? undefined}
+                    >
+                      {item.value}
+                    </dd>
                   </div>
                 ))}
               </dl>
