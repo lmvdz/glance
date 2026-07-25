@@ -6,33 +6,51 @@
 @theme {
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
-  
-  --color-gray-950: #131314;
-  --color-gray-900: #1e1e20;
-  --color-gray-800: #282a2c;
-  --color-gray-700: #3f4145;
 
-  /* brand.md ink surface ramp (dark, brand-forward). The cockpit route renders on these by
-     default (the one data-forward screen that opted in); migrating the whole app from the
-     gray ramp to ink is a named follow-up, not this pass. Values are brand.md's, verbatim. */
-  --color-ink: #0A0A0B;
-  --color-panel: #0C0C0E;
-  --color-ink-surface: #151517;
-  --color-ink-border: #1C1C20;
-  --color-ink-border-2: #2A2A2E;
+  /* Shared type scale: heading / label / body / caption. */
+  --text-heading: 1.625rem;
+  --text-heading--line-height: 1.1;
+  --text-label: 0.8125rem;
+  --text-label--line-height: 1.25rem;
+  --text-body: 0.84375rem;
+  --text-body--line-height: 1.375rem;
+  --text-caption: 0.75rem;
+  --text-caption--line-height: 1rem;
 
-  --wf-paper: #f8fafc;
-  --wf-paper-muted: #f1f5f9;
-  --wf-surface: #ffffff;
-  --wf-surface-raised: #f8fafc;
-  --wf-surface-hover: #f1f5f9;
-  --wf-border: #e2e8f0;
-  --wf-border-strong: #cbd5e1;
-  --wf-text: #0f172a;
-  --wf-text-muted: #475569;
-  --wf-text-subtle: #64748b;
-  --wf-accent: #F0A35A;
-  --wf-accent-soft: #fde4d0;
+  /* Light counterpart of the ink system. `.dark` supplies brand.md's dark-forward ramp. */
+  --color-ink: #f8fafc;
+  --color-panel: #ffffff;
+  --color-ink-surface: #f1f5f9;
+  --color-ink-surface-2: #f8fafc;
+  --color-ink-border: #e2e8f0;
+  --color-ink-border-2: #cbd5e1;
+  --color-ink-text: #0f172a;
+  --color-ink-text-body: #1e293b;
+  --color-ink-text-label: #334155;
+  --color-ink-text-muted: #475569;
+  --color-ink-text-subtle: #64748b;
+  --color-ember: #f0a35a;
+  --color-ember-link: #d97706;
+  --color-ember-hi: #fff6ea;
+
+  /* Compatibility names resolve into the single ink system; no independent ramps remain. */
+  --color-gray-950: var(--color-ink);
+  --color-gray-900: var(--color-panel);
+  --color-gray-800: var(--color-ink-surface);
+  --color-gray-700: var(--color-ink-border-2);
+
+  --wf-paper: var(--color-ink);
+  --wf-paper-muted: var(--color-ink-surface);
+  --wf-surface: var(--color-panel);
+  --wf-surface-raised: var(--color-ink-surface-2);
+  --wf-surface-hover: var(--color-ink-surface);
+  --wf-border: var(--color-ink-border);
+  --wf-border-strong: var(--color-ink-border-2);
+  --wf-text: var(--color-ink-text);
+  --wf-text-muted: var(--color-ink-text-muted);
+  --wf-text-subtle: var(--color-ink-text-subtle);
+  --wf-accent: var(--color-ember);
+  --wf-accent-soft: color-mix(in srgb, var(--color-ember) 16%, transparent);
   --wf-danger: #dc2626;
   --wf-warning: #d97706;
   --wf-success: #16a34a;
@@ -58,35 +76,21 @@
   --cc-rim-database: #15803d;
   --cc-rim-other: #6b7280;
 
-  /* Brand ember accent + extended ink-text ramp (brand.md), layered onto the ink surface ramp
-   * above rather than re-declaring it — `--color-ink`/`--color-panel`/`--color-ink-surface`/
-   * `--color-ink-border*` already exist (cockpit route); the design-review screen (also
-   * ink-by-default) adds only what's genuinely new: a second surface tone, the ember accent
-   * itself, and a full text ramp instead of the bare `--wf-text*` trio. */
+}
+
+.dark {
+  --color-ink: #0a0a0b;
+  --color-panel: #0c0c0e;
+  --color-ink-surface: #151517;
   --color-ink-surface-2: #0f0f11;
-  --color-ember: #f0a35a;
-  --color-ember-link: #f0b478;
-  --color-ember-hi: #fff6ea;
+  --color-ink-border: #1c1c20;
+  --color-ink-border-2: #2a2a2e;
   --color-ink-text: #f4f4f5;
   --color-ink-text-body: #e7e7e9;
   --color-ink-text-label: #c7c7cc;
   --color-ink-text-muted: #8a8a90;
   --color-ink-text-subtle: #5c5c62;
-}
-
-.dark {
-  --wf-paper: var(--color-gray-950);
-  --wf-paper-muted: var(--color-gray-900);
-  --wf-surface: var(--color-gray-900);
-  --wf-surface-raised: var(--color-gray-800);
-  --wf-surface-hover: var(--color-gray-700);
-  --wf-border: #34363a;
-  --wf-border-strong: #4b4d52;
-  --wf-text: #f8fafc;
-  --wf-text-muted: #cbd5e1;
-  --wf-text-subtle: #94a3b8;
-  --wf-accent: #F5B678;
-  --wf-accent-soft: rgb(240 163 90 / 0.16);
+  --color-ember-link: #f0b478;
   --wf-danger: #f87171;
   --wf-warning: #fbbf24;
   --wf-success: #4ade80;
