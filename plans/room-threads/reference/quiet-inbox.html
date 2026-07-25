@@ -1,0 +1,875 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+html,body{margin:0;padding:0;background:#070708;}
+*{box-sizing:border-box;}
+a{color:#F0A35A;text-decoration:none;}
+a:hover{color:#F7C08A;}
+::selection{background:#3A2E20;}
+</style>
+</helmet>
+
+<div style="min-height:100vh;background:#070708;display:flex;flex-direction:column;align-items:center;gap:14px;padding:18px;font-family:system-ui,-apple-system,'Helvetica Neue',sans-serif">
+
+<div style="width:1600px;display:flex;align-items:center;gap:8px">
+  <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;letter-spacing:.14em;color:#5A5A61;margin-right:6px">SCREEN</div>
+  <button onClick="{{ goBusy }}" style="{{ tabBusy }}">1 · Busy</button>
+  <button onClick="{{ goQuiet }}" style="{{ tabQuiet }}">2 · Quiet</button>
+  <button onClick="{{ goDecision }}" style="{{ tabDecision }}">3 · A decision</button>
+  <button onClick="{{ goLate }}" style="{{ tabLate }}">4 · Too late</button>
+</div>
+
+<div style="width:1600px;height:1000px;background:#0A0A0B;border:1px solid #1F1F22;display:flex;flex-direction:column;overflow:hidden;color:#E8E8EA">
+
+  <!-- ═══ BUSY ═══ -->
+  <div style="{{ screenBusy }}">
+  <div style="height:44px;flex:none;border-bottom:1px solid #1F1F22;display:flex;align-items:center;padding:0 16px;gap:14px">
+    <div style="display:flex;align-items:baseline;gap:9px">
+      <div style="font-size:14px;font-weight:600;letter-spacing:-.01em">glance</div>
+      <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#6A6A72">billing-service</div>
+    </div>
+    <div style="width:1px;height:16px;background:#1F1F22"></div>
+    <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#8A8A91">47 units working · 5 plans · 3 waiting on you</div>
+    <div style="flex:1"></div>
+    <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#5A5A61">14:08 Thu</div>
+  </div>
+  <div style="flex:1;display:flex;flex-direction:column;min-height:0">
+
+    <div style="flex:none;background:#131010;border-bottom:1px solid #1F1F22;border-top:1px solid #4A3319">
+      <div style="display:flex;align-items:flex-end;justify-content:space-between;padding:14px 16px 10px 18px">
+        <div>
+          <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;letter-spacing:.16em;color:#D9A03C">THREE THINGS ARE WAITING ON YOU</div>
+          <div style="margin-top:6px;font-size:13px;color:#9A9AA2;max-width:640px;text-wrap:pretty">The fleet is meant to finish without asking. Three of these at once is a defect in the work, not a list for you to keep.</div>
+        </div>
+        <div style="text-align:right;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#6A6A72;line-height:1.7">
+          <div>oldest stalled 2h 41m</div>
+          <div>normal for a Thursday: 0</div>
+        </div>
+      </div>
+
+      <div style="display:flex;flex-direction:column">
+        <div style="display:flex;align-items:center;gap:14px;padding:11px 16px 11px 16px;border-top:1px solid #211C16;border-left:2px solid #D9A03C;background:#161211">
+          <div style="width:26px;height:26px;flex:none;border:1px solid #33333A;border-radius:3px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#C9C9CF">W</div>
+          <div style="width:150px;flex:none">
+            <div style="font-size:13px;font-weight:600">Wren</div>
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#6A6A72">3.2 retry-budget</div>
+          </div>
+          <div style="flex:1;font-size:13.5px;line-height:1.5;color:#DEDEE2;text-wrap:pretty">Should the retry budget be counted per customer or per endpoint? Both are cheap to build; they behave very differently in a spike.</div>
+          <div style="width:110px;flex:none;text-align:right;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#D9A03C">stalled 14m</div>
+          <button style="flex:none;background:#F0A35A;color:#140D06;border:none;border-radius:3px;padding:7px 14px;font-size:12.5px;font-weight:600;font-family:inherit;cursor:pointer">Answer</button>
+        </div>
+
+        <div style="display:flex;align-items:center;gap:14px;padding:11px 16px;border-top:1px solid #211C16;border-left:2px solid #8A6224;background:#141212">
+          <div style="width:26px;height:26px;flex:none;border:1px solid #33333A;border-radius:3px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#C9C9CF">A</div>
+          <div style="width:150px;flex:none">
+            <div style="font-size:13px;font-weight:600">Ash</div>
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#6A6A72">5.1 row-migration</div>
+          </div>
+          <div style="flex:1;font-size:13.5px;line-height:1.5;color:#C9C9CF;text-wrap:pretty">41 old rows have no owner. Drop them, or assign them to the system account and keep them?</div>
+          <div style="width:110px;flex:none;text-align:right;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#B0842F">stalled 1h 06m</div>
+          <button style="flex:none;background:transparent;color:#C9C9CF;border:1px solid #33333A;border-radius:3px;padding:6px 13px;font-size:12.5px;font-family:inherit;cursor:pointer" style-hover="border-color:#4A4A52;color:#E8E8EA">Answer</button>
+        </div>
+
+        <div style="display:flex;align-items:center;gap:14px;padding:11px 16px;border-top:1px solid #211C16;border-left:2px solid #8A6224;background:#141212">
+          <div style="width:26px;height:26px;flex:none;border:1px solid #33333A;border-radius:3px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#C9C9CF">J</div>
+          <div style="width:150px;flex:none">
+            <div style="font-size:13px;font-weight:600">Juno</div>
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#6A6A72">2.4 auth-service</div>
+          </div>
+          <div style="flex:1;font-size:13.5px;line-height:1.5;color:#C9C9CF;text-wrap:pretty">I cannot read the staging secret — nobody gave this agent that permission. I have stopped rather than guess.</div>
+          <div style="width:110px;flex:none;text-align:right;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#B0842F">stalled 2h 41m</div>
+          <button style="flex:none;background:transparent;color:#C9C9CF;border:1px solid #33333A;border-radius:3px;padding:6px 13px;font-size:12.5px;font-family:inherit;cursor:pointer" style-hover="border-color:#4A4A52;color:#E8E8EA">Answer</button>
+        </div>
+      </div>
+    </div>
+
+    <div style="flex:1;display:flex;min-height:0">
+
+      <div style="width:238px;flex:none;border-right:1px solid #1F1F22;display:flex;flex-direction:column;min-height:0">
+        <div style="padding:14px 14px 8px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.16em;color:#5A5A61">PLANS · 5</div>
+        <div style="display:flex;flex-direction:column">
+          <div style="display:flex;align-items:center;gap:9px;padding:8px 14px;border-left:2px solid #F0A35A;background:#121214">
+            <div style="width:5px;height:5px;border-radius:50%;background:#D9A03C;flex:none"></div>
+            <div style="flex:1;font-size:13px;font-weight:600">payments-retry</div>
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#8A8A91">14</div>
+          </div>
+          <sc-for list="{{ busyPlans }}" as="p" hint-placeholder-count="4">
+            <div style="display:flex;align-items:center;gap:9px;padding:8px 14px;border-left:2px solid transparent;cursor:pointer" style-hover="background:#0F0F11">
+              <div style="width:5px;height:5px;border-radius:50%;flex:none;background:{{ p.dot }}"></div>
+              <div style="flex:1;font-size:13px;color:#C9C9CF">{{ p.name }}</div>
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#6A6A72">{{ p.n }}</div>
+            </div>
+          </sc-for>
+        </div>
+
+        <div style="margin-top:18px;padding:0 14px 8px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.16em;color:#5A5A61">AGENTS · 12 AWAKE</div>
+        <div style="overflow:hidden">
+          <sc-for list="{{ roster }}" as="a" hint-placeholder-count="8">
+            <div style="display:flex;align-items:center;gap:9px;padding:5.5px 14px;cursor:pointer" style-hover="background:#0F0F11">
+              <div style="width:5px;height:5px;border-radius:50%;flex:none;background:{{ a.dot }}"></div>
+              <div style="flex:none;width:44px;font-size:12.5px;color:#C9C9CF">{{ a.name }}</div>
+              <div style="flex:1;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ a.role }}</div>
+            </div>
+          </sc-for>
+        </div>
+        <div style="flex:1"></div>
+        <div style="padding:12px 14px;border-top:1px solid #1F1F22;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52;line-height:1.7">
+          <div>events this hour&nbsp;&nbsp;<span style="color:#8A8A91">143</span></div>
+          <div>human messages&nbsp;&nbsp;<span style="color:#8A8A91">5</span></div>
+        </div>
+      </div>
+
+      <div style="flex:1;display:flex;flex-direction:column;min-height:0">
+        <div style="flex:1;overflow:hidden;padding:16px 26px 0">
+
+          <div style="display:flex;align-items:center;gap:10px;padding:7px 10px;border:1px solid #17171A;background:#0C0C0D;border-radius:3px">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#4A4A52">09:12–09:31</div>
+            <div style="width:5px;height:5px;border-radius:50%;background:#3E5C8A;flex:none"></div>
+            <div style="flex:1;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#6A6A72">38 events&nbsp; ·&nbsp; Wren, Pike, Ash +5&nbsp; ·&nbsp; tests, patches, two commits&nbsp; ·&nbsp; nothing unusual</div>
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#4A4A52;cursor:pointer" style-hover="color:#8A8A91">open</div>
+          </div>
+
+          <div style="display:flex;gap:12px;margin-top:20px">
+            <div style="width:26px;height:26px;flex:none;border:1px solid #2A3A4A;border-radius:3px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#9EB4CC">P</div>
+            <div style="max-width:660px">
+              <div style="display:flex;align-items:baseline;gap:8px">
+                <div style="font-size:13px;font-weight:600">Pike</div>
+                <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">verifier · 09:33</div>
+              </div>
+              <div style="margin-top:5px;font-size:14px;line-height:1.55;color:#DEDEE2;text-wrap:pretty">auth-service is green again. The flake was the clock in the session-expiry test, not the retry logic — I pinned the clock and left a note in the test explaining why.</div>
+            </div>
+          </div>
+
+          <div style="display:flex;gap:12px;margin-top:18px">
+            <div style="width:26px;height:26px;flex:none;border:1px solid #3A3323;border-radius:3px;background:#15120E;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#D8C39E">M</div>
+            <div style="max-width:660px">
+              <div style="display:flex;align-items:baseline;gap:8px">
+                <div style="font-size:13px;font-weight:600">Mara</div>
+                <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">you · 09:35</div>
+              </div>
+              <div style="margin-top:5px;font-size:14px;line-height:1.55;color:#DEDEE2;text-wrap:pretty">Good — then leave the retry logic alone. Ash, keep going on the migration and don't wait on me for anything reversible.</div>
+            </div>
+          </div>
+
+          <div style="display:flex;gap:12px;margin-top:18px">
+            <div style="width:26px;height:26px;flex:none;border:1px solid #33333A;border-radius:3px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#C9C9CF">A</div>
+            <div style="max-width:660px">
+              <div style="display:flex;align-items:baseline;gap:8px">
+                <div style="font-size:13px;font-weight:600">Ash</div>
+                <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">migrator · 09:36</div>
+              </div>
+              <div style="margin-top:5px;font-size:14px;line-height:1.55;color:#DEDEE2;text-wrap:pretty">Understood. I'm on step three of seven — backfilling the old rows in batches of five thousand so the table stays writable while I work. The owner question above is the only thing I actually need you for.</div>
+            </div>
+          </div>
+
+          <div style="margin-top:20px;border:1px solid #17171A;background:#0C0C0D;border-radius:3px">
+            <div style="display:flex;align-items:center;gap:10px;padding:7px 10px;border-bottom:1px solid #17171A">
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#4A4A52">09:36–09:57</div>
+              <div style="width:5px;height:5px;border-radius:50%;background:#3E5C8A;flex:none"></div>
+              <div style="flex:1;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#6A6A72">35 events&nbsp; ·&nbsp; all normal</div>
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#4A4A52;cursor:pointer" style-hover="color:#8A8A91">close</div>
+            </div>
+            <div style="padding:4px 0">
+              <sc-for list="{{ events }}" as="e" hint-placeholder-count="5">
+                <div style="display:flex;align-items:center;gap:12px;padding:3px 12px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;line-height:1.6">
+                  <div style="color:#3E3E45;width:52px;flex:none">{{ e.t }}</div>
+                  <div style="width:5px;height:5px;border-radius:50%;flex:none;background:{{ e.dot }}"></div>
+                  <div style="color:#7A7A82;width:44px;flex:none">{{ e.who }}</div>
+                  <div style="color:#6A6A72;flex:1">{{ e.what }}</div>
+                  <div style="color:#3E3E45">{{ e.where }}</div>
+                </div>
+              </sc-for>
+              <div style="padding:4px 12px 6px 108px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#3E3E45">+30 more of the same</div>
+            </div>
+          </div>
+
+          <div style="display:flex;align-items:center;gap:12px;margin-top:18px">
+            <div style="height:1px;flex:1;background:#17171A"></div>
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">invoicing has not changed in 22 minutes — by design, it is waiting on the migration</div>
+            <div style="height:1px;flex:1;background:#17171A"></div>
+          </div>
+
+          <div style="display:flex;gap:12px;margin-top:18px">
+            <div style="width:26px;height:26px;flex:none;border:1px solid #33333A;border-radius:3px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#C9C9CF">T</div>
+            <div style="max-width:660px">
+              <div style="display:flex;align-items:baseline;gap:8px">
+                <div style="font-size:13px;font-weight:600">Tam</div>
+                <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">planner · 09:59</div>
+              </div>
+              <div style="margin-top:5px;font-size:14px;line-height:1.55;color:#DEDEE2;text-wrap:pretty">I split invoicing into six units. Two of them read the table Ash is rewriting, so I've held those two rather than race him. Nothing here needs you yet.</div>
+            </div>
+          </div>
+        </div>
+
+        <div style="flex:none;padding:14px 26px 16px;border-top:1px solid #1F1F22">
+          <div style="border:1px solid #26262B;border-radius:3px;background:#0C0C0D;padding:10px 12px;display:flex;align-items:center;gap:10px">
+            <div style="flex:1;font-size:13.5px;color:#4A4A52">Answer Wren about the retry budget, or say what should happen next…</div>
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#3E3E45">3.2</div>
+          </div>
+        </div>
+      </div>
+
+      <div style="width:376px;flex:none;border-left:1px solid #1F1F22;display:flex;flex-direction:column;min-height:0">
+        <div style="padding:14px 16px 4px">
+          <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.16em;color:#5A5A61">WHERE YOU ARE STANDING</div>
+          <div style="margin-top:8px;display:flex;align-items:baseline;gap:8px">
+            <div style="font-size:14px;font-weight:600">payments-retry</div>
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#6A6A72">plan 3 · 14 units · depth 3</div>
+          </div>
+        </div>
+        <div style="padding:10px 8px 0">
+          <sc-for list="{{ tree }}" as="n" hint-placeholder-count="8">
+            <div style="display:flex;gap:10px;padding:7px 8px;border-left:2px solid {{ n.rule }};background:{{ n.bg }};margin-bottom:1px;cursor:pointer">
+              <div style="flex:none;width:{{ n.indent }}"></div>
+              <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:5px;background:{{ n.dot }}"></div>
+              <div style="flex:1;min-width:0">
+                <div style="display:flex;align-items:baseline;gap:8px">
+                  <div style="font-size:12.5px;font-weight:600;color:{{ n.fg }}">{{ n.name }}</div>
+                  <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">{{ n.addr }}</div>
+                </div>
+                <div style="margin-top:3px;font-size:12px;line-height:1.45;color:{{ n.subfg }};text-wrap:pretty">{{ n.status }}</div>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+        <div style="flex:1"></div>
+        <div style="padding:12px 16px;border-top:1px solid #1F1F22;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52;line-height:1.8">
+          <div>say “three point two” out loud and you both mean the same unit</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  </div>
+
+  <!-- ═══ QUIET ═══ -->
+  <div style="{{ screenQuiet }}">
+  <div style="height:44px;flex:none;border-bottom:1px solid #1F1F22;display:flex;align-items:center;padding:0 16px;gap:14px">
+    <div style="display:flex;align-items:baseline;gap:9px">
+      <div style="font-size:14px;font-weight:600;letter-spacing:-.01em">glance</div>
+      <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#6A6A72">billing-service</div>
+    </div>
+    <div style="width:1px;height:16px;background:#1F1F22"></div>
+    <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#8A8A91">2 units working · 0 waiting</div>
+    <div style="flex:1"></div>
+    <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#5A5A61">13:58 Thu</div>
+  </div>
+  <div style="flex:1;display:flex;flex-direction:column;min-height:0">
+
+    <div style="flex:none;border-bottom:1px solid #1F1F22;padding:18px 18px 18px 16px;display:flex;align-items:center;gap:14px">
+      <div style="width:6px;height:6px;border-radius:50%;background:#4FA97D;flex:none"></div>
+      <div style="flex:1">
+        <div style="font-size:19px;font-weight:600;letter-spacing:-.01em">Nothing has needed you since 09:41.</div>
+        <div style="margin-top:5px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#6A6A72">2 units working&nbsp; ·&nbsp; 3 plans finished today&nbsp; ·&nbsp; 0 waiting on a human&nbsp; ·&nbsp; 6h 12m of unbroken autonomy</div>
+      </div>
+      <div style="text-align:right;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#4A4A52;line-height:1.8">
+        <div>longest run this month&nbsp;&nbsp;<span style="color:#8A8A91">9h 04m</span></div>
+        <div>this run&nbsp;&nbsp;<span style="color:#8A8A91">6h 12m</span></div>
+      </div>
+    </div>
+
+    <div style="flex:1;display:flex;min-height:0">
+      <div style="width:238px;flex:none;border-right:1px solid #1F1F22;display:flex;flex-direction:column">
+        <div style="padding:14px 14px 8px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.16em;color:#5A5A61">PLANS · 2 ACTIVE</div>
+        <div>
+          <div style="display:flex;align-items:center;gap:9px;padding:8px 14px;border-left:2px solid #F0A35A;background:#121214">
+            <div style="width:5px;height:5px;border-radius:50%;background:#5B8DEF;flex:none"></div>
+            <div style="flex:1;font-size:13px;font-weight:600">search-reindex</div>
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#8A8A91">2</div>
+          </div>
+          <sc-for list="{{ quietPlans }}" as="p" hint-placeholder-count="4">
+            <div style="display:flex;align-items:center;gap:9px;padding:8px 14px;border-left:2px solid transparent;cursor:pointer" style-hover="background:#0F0F11">
+              <div style="width:5px;height:5px;border-radius:50%;flex:none;background:{{ p.dot }}"></div>
+              <div style="flex:1;font-size:13px;color:#8A8A91">{{ p.name }}</div>
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#4A4A52">{{ p.n }}</div>
+            </div>
+          </sc-for>
+        </div>
+        <div style="margin-top:18px;padding:0 14px 8px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.16em;color:#5A5A61">AGENTS · 2 AWAKE</div>
+        <div>
+          <div style="display:flex;align-items:center;gap:9px;padding:5.5px 14px">
+            <div style="width:5px;height:5px;border-radius:50%;background:#5B8DEF;flex:none"></div>
+            <div style="width:44px;font-size:12.5px;color:#C9C9CF">Wren</div>
+            <div style="flex:1;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">indexer</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:9px;padding:5.5px 14px">
+            <div style="width:5px;height:5px;border-radius:50%;background:#5B8DEF;flex:none"></div>
+            <div style="width:44px;font-size:12.5px;color:#C9C9CF">Pike</div>
+            <div style="flex:1;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">verifier</div>
+          </div>
+          <div style="padding:10px 14px;font-size:12px;color:#4A4A52;line-height:1.5">Ten others are asleep. They wake when there is work.</div>
+        </div>
+      </div>
+
+      <div style="flex:1;display:flex;flex-direction:column;min-height:0">
+        <div style="flex:1;padding:16px 26px 0;overflow:hidden">
+          <div style="display:flex;align-items:center;gap:10px;padding:7px 10px;border:1px solid #17171A;background:#0C0C0D;border-radius:3px">
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#4A4A52">09:41–13:58</div>
+            <div style="width:5px;height:5px;border-radius:50%;background:#3E5C8A;flex:none"></div>
+            <div style="flex:1;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#6A6A72">312 events&nbsp; ·&nbsp; 3 plans finished&nbsp; ·&nbsp; no one asked for you</div>
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#4A4A52;cursor:pointer" style-hover="color:#8A8A91">open</div>
+          </div>
+
+          <div style="display:flex;gap:12px;margin-top:20px">
+            <div style="width:26px;height:26px;flex:none;border:1px solid #33333A;border-radius:3px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#C9C9CF">W</div>
+            <div style="max-width:660px">
+              <div style="display:flex;align-items:baseline;gap:8px">
+                <div style="font-size:13px;font-weight:600">Wren</div>
+                <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">indexer · 13:20</div>
+              </div>
+              <div style="margin-top:5px;font-size:14px;line-height:1.55;color:#DEDEE2;text-wrap:pretty">Reindexing the second shard now. It is slow rather than difficult — about forty minutes left, and I'll tell you only if the throughput drops.</div>
+            </div>
+          </div>
+
+          <div style="display:flex;gap:12px;margin-top:18px">
+            <div style="width:26px;height:26px;flex:none;border:1px solid #3A3323;border-radius:3px;background:#15120E;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#D8C39E">M</div>
+            <div style="max-width:660px">
+              <div style="display:flex;align-items:baseline;gap:8px">
+                <div style="font-size:13px;font-weight:600">Mara</div>
+                <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">you · 13:22</div>
+              </div>
+              <div style="margin-top:5px;font-size:14px;line-height:1.55;color:#DEDEE2;text-wrap:pretty">Fine. When it's done, don't start the third shard — I want to read the query latencies first.</div>
+            </div>
+          </div>
+
+          <div style="display:flex;gap:12px;margin-top:18px">
+            <div style="width:26px;height:26px;flex:none;border:1px solid #2A3A4A;border-radius:3px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#9EB4CC">P</div>
+            <div style="max-width:660px">
+              <div style="display:flex;align-items:baseline;gap:8px">
+                <div style="font-size:13px;font-weight:600">Pike</div>
+                <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">verifier · 13:58</div>
+              </div>
+              <div style="margin-top:5px;font-size:14px;line-height:1.55;color:#DEDEE2;text-wrap:pretty">Noted, and I've put a hold on the third shard so nobody picks it up by accident. Meanwhile I'm re-running yesterday's latency capture against the first shard so you have a before and after to read.</div>
+            </div>
+          </div>
+
+          <div style="display:flex;align-items:center;gap:12px;margin-top:22px">
+            <div style="height:1px;flex:1;background:#17171A"></div>
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">quiet for 14 minutes · both units still moving</div>
+            <div style="height:1px;flex:1;background:#17171A"></div>
+          </div>
+        </div>
+
+        <div style="flex:none;padding:14px 26px 16px;border-top:1px solid #1F1F22">
+          <div style="border:1px solid #26262B;border-radius:3px;background:#0C0C0D;padding:10px 12px;display:flex;align-items:center;gap:10px">
+            <div style="flex:1;font-size:13.5px;color:#4A4A52">Start a plan, or ask the fleet a question…</div>
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#3E3E45">⌘K</div>
+          </div>
+        </div>
+      </div>
+
+      <div style="width:376px;flex:none;border-left:1px solid #1F1F22;display:flex;flex-direction:column">
+        <div style="padding:14px 16px 10px">
+          <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.16em;color:#5A5A61">WHAT GOT DONE WHILE YOU DIDN'T LOOK</div>
+        </div>
+        <div style="padding:0 16px">
+          <sc-for list="{{ ledger }}" as="l" hint-placeholder-count="5">
+            <div style="display:flex;gap:12px;padding:9px 0;border-top:1px solid #17171A">
+              <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:6px;background:{{ l.dot }}"></div>
+              <div style="flex:1">
+                <div style="font-size:12.5px;color:#C9C9CF;line-height:1.45;text-wrap:pretty">{{ l.text }}</div>
+                <div style="margin-top:3px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">{{ l.meta }}</div>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+
+        <div style="margin-top:20px;padding:0 16px">
+          <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.16em;color:#5A5A61">FLEET PULSE · EVENTS PER HOUR</div>
+          <div style="margin-top:12px;display:flex;align-items:flex-end;gap:4px;height:64px">
+            <sc-for list="{{ pulse }}" as="b" hint-placeholder-count="12">
+              <div style="flex:1;display:flex;flex-direction:column;justify-content:flex-end;height:100%">
+                <div style="width:100%;background:{{ b.color }};height:{{ b.h }}"></div>
+              </div>
+            </sc-for>
+          </div>
+          <div style="margin-top:6px;display:flex;justify-content:space-between;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:9.5px;color:#3E3E45">
+            <div>06:00</div><div>10:00</div><div>14:00</div>
+          </div>
+          <div style="margin-top:10px;font-size:12px;color:#6A6A72;line-height:1.5;text-wrap:pretty">The dip at 11:00 is the one interruption today. You answered it in three minutes and the fleet recovered on its own.</div>
+        </div>
+        <div style="flex:1"></div>
+        <div style="padding:12px 16px;border-top:1px solid #1F1F22;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52;line-height:1.8">
+          <div>last interruption&nbsp;&nbsp;<span style="color:#8A8A91">11:02 · answered in 3m</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  </div>
+
+  <!-- ═══ DECISION ═══ -->
+  <div style="{{ screenDecision }}">
+  <div style="height:44px;flex:none;border-bottom:1px solid #1F1F22;display:flex;align-items:center;padding:0 16px;gap:14px">
+    <div style="display:flex;align-items:baseline;gap:9px">
+      <div style="font-size:14px;font-weight:600;letter-spacing:-.01em">glance</div>
+      <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#6A6A72">billing-service</div>
+    </div>
+    <div style="width:1px;height:16px;background:#1F1F22"></div>
+    <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#8A8A91">46 units working · 5 plans · 1 waiting on you</div>
+    <div style="flex:1"></div>
+    <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#5A5A61">14:08 Thu</div>
+  </div>
+  <div style="flex:1;display:flex;flex-direction:column;min-height:0">
+    <div style="flex:none;background:#131010;border-bottom:1px solid #1F1F22;border-top:1px solid #4A3319;display:flex;align-items:center;gap:14px;padding:12px 18px 12px 16px;border-left:2px solid #D9A03C">
+      <div style="flex:1">
+        <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;letter-spacing:.16em;color:#D9A03C">ONE THING IS WAITING ON YOU</div>
+        <div style="margin-top:5px;font-size:13px;color:#9A9AA2">Wren cannot merge her own work. Everything else in the fleet is still moving.</div>
+      </div>
+      <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#6A6A72">stalled 6m&nbsp; ·&nbsp; 46 units unaffected</div>
+    </div>
+
+    <div style="flex:1;display:flex;min-height:0">
+      <div style="width:238px;flex:none;border-right:1px solid #1F1F22;display:flex;flex-direction:column">
+        <div style="padding:14px 14px 8px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.16em;color:#5A5A61">PLANS · 5</div>
+        <div>
+          <div style="display:flex;align-items:center;gap:9px;padding:8px 14px;border-left:2px solid #F0A35A;background:#121214">
+            <div style="width:5px;height:5px;border-radius:50%;background:#D9A03C;flex:none"></div>
+            <div style="flex:1;font-size:13px;font-weight:600">payments-retry</div>
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#8A8A91">14</div>
+          </div>
+          <sc-for list="{{ busyPlans }}" as="p" hint-placeholder-count="4">
+            <div style="display:flex;align-items:center;gap:9px;padding:8px 14px;border-left:2px solid transparent">
+              <div style="width:5px;height:5px;border-radius:50%;flex:none;background:{{ p.dot }}"></div>
+              <div style="flex:1;font-size:13px;color:#8A8A91">{{ p.name }}</div>
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#4A4A52">{{ p.n }}</div>
+            </div>
+          </sc-for>
+        </div>
+        <div style="margin-top:18px;padding:0 14px 8px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.16em;color:#5A5A61">THIS UNIT</div>
+        <div style="padding:0 14px;font-size:12.5px;color:#8A8A91;line-height:1.55;text-wrap:pretty">Wren has been on the retry budget for 2h 08m. She wrote the code, the tests and the note; the only thing she is missing is your permission.</div>
+        <div style="flex:1"></div>
+        <div style="padding:12px 14px;border-top:1px solid #1F1F22;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52;line-height:1.7">
+          <div>fleet&nbsp;&nbsp;<span style="color:#8A8A91">46 working</span></div>
+          <div>waiting&nbsp;&nbsp;<span style="color:#D9A03C">1</span></div>
+        </div>
+      </div>
+
+      <div style="flex:1;display:flex;flex-direction:column;min-height:0">
+        <div style="flex:1;overflow:hidden;padding:16px 26px 0">
+          <div style="display:flex;gap:12px">
+            <div style="width:26px;height:26px;flex:none;border:1px solid #33333A;border-radius:3px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#C9C9CF">W</div>
+            <div style="max-width:700px">
+              <div style="display:flex;align-items:baseline;gap:8px">
+                <div style="font-size:13px;font-weight:600">Wren</div>
+                <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">implementer · 14:02</div>
+              </div>
+              <div style="margin-top:5px;font-size:14px;line-height:1.55;color:#DEDEE2;text-wrap:pretty">The retry budget is done and counted per endpoint, the way you said. Four files, and one of them is the test. I'd like to put it on main — I can't do that myself.</div>
+            </div>
+          </div>
+
+          <div style="margin-top:14px;margin-left:38px;max-width:760px;border:1px solid #26262B;border-radius:4px;background:#0C0C0D">
+            <div style="display:flex;align-items:center;gap:12px;padding:11px 14px;border-bottom:1px solid #1F1F22">
+              <div style="width:5px;height:5px;border-radius:50%;background:#D9A03C;flex:none"></div>
+              <div style="flex:1;font-size:13px;font-weight:600">Merge the retry budget into main</div>
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#5A5A61">3.2 retry-budget · 4 files · +118 −24</div>
+            </div>
+
+            <div style="display:flex;border-bottom:1px solid #1F1F22">
+              <div style="flex:1;padding:12px 14px;border-right:1px solid #1F1F22">
+                <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHAT THE CHECKS SAY</div>
+                <div style="margin-top:9px;display:flex;flex-direction:column;gap:7px">
+                  <sc-for list="{{ checks }}" as="c" hint-placeholder-count="4">
+                    <div style="display:flex;align-items:center;gap:9px">
+                      <div style="width:5px;height:5px;border-radius:50%;flex:none;background:{{ c.dot }}"></div>
+                      <div style="flex:1;font-size:12.5px;color:#C9C9CF">{{ c.name }}</div>
+                      <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:{{ c.fg }}">{{ c.detail }}</div>
+                    </div>
+                  </sc-for>
+                </div>
+                <div style="margin-top:10px;font-size:12px;color:#6A6A72;line-height:1.5;text-wrap:pretty">Pike ran these, not Wren. The one amber line is a latency test that is 4ms slower than yesterday — inside the noise band, but he flagged it rather than hide it.</div>
+              </div>
+              <div style="width:270px;flex:none;padding:12px 14px">
+                <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHAT CHANGES IN THE PRODUCT</div>
+                <div style="margin-top:9px;font-size:12.5px;color:#C9C9CF;line-height:1.5;text-wrap:pretty">A caller that fails repeatedly now gets refused for thirty seconds instead of retrying forever. Refusals are counted per endpoint.</div>
+                <div style="margin-top:10px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52;line-height:1.7">
+                  <div>billing-service · retry.py</div>
+                  <div>billing-service · budget.py</div>
+                  <div>+ 2 more</div>
+                </div>
+              </div>
+            </div>
+
+            <div style="padding:12px 14px;border-bottom:1px solid #1F1F22">
+              <div style="display:flex;align-items:center;gap:10px">
+                <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#8A8A91">retry.py</div>
+                <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#3E3E45">the substantive change · 3 other files are wiring and a test</div>
+              </div>
+              <div style="margin-top:9px;border:1px solid #17171A;background:#090909;border-radius:3px;overflow:hidden">
+                <sc-for list="{{ diff }}" as="d" hint-placeholder-count="9">
+                  <div style="display:flex;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;line-height:1.75;background:{{ d.bg }}">
+                    <div style="width:38px;flex:none;text-align:right;padding-right:10px;color:#333338">{{ d.ln }}</div>
+                    <div style="width:14px;flex:none;color:{{ d.fg }}">{{ d.sign }}</div>
+                    <div style="flex:1;color:{{ d.fg }};white-space:pre">{{ d.code }}</div>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+
+            <div style="padding:13px 14px;display:flex;align-items:flex-start;gap:12px">
+              <div style="flex:none;width:210px">
+                <button style="width:100%;background:#F0A35A;color:#140D06;border:none;border-radius:3px;padding:9px 14px;font-size:13px;font-weight:600;font-family:inherit;cursor:pointer">Put it on main</button>
+                <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">Four files land on main. Wren moves straight on to 3.3 without asking again.</div>
+              </div>
+              <div style="flex:none;width:210px">
+                <button style="width:100%;background:transparent;color:#C9C9CF;border:1px solid #33333A;border-radius:3px;padding:8px 14px;font-size:13px;font-family:inherit;cursor:pointer" style-hover="border-color:#4A4A52;color:#E8E8EA">Send it back</button>
+                <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">Nothing is applied. Wren keeps the branch and revises, and will come back to you once.</div>
+              </div>
+              <div style="flex:1">
+                <div style="border:1px solid #26262B;border-radius:3px;background:#0A0A0B;padding:9px 11px;font-size:12.5px;color:#4A4A52">Or answer in words — “per endpoint is right, but make the window configurable”</div>
+                <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">Wren reads it as instruction and decides for herself whether that is a merge.</div>
+              </div>
+            </div>
+          </div>
+
+          <div style="display:flex;align-items:center;gap:12px;margin-top:18px">
+            <div style="height:1px;flex:1;background:#17171A"></div>
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">while you read this · 46 units still working · 21 events</div>
+            <div style="height:1px;flex:1;background:#17171A"></div>
+          </div>
+        </div>
+      </div>
+
+      <div style="width:376px;flex:none;border-left:1px solid #1F1F22;display:flex;flex-direction:column">
+        <div style="padding:14px 16px 4px">
+          <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.16em;color:#5A5A61">WHERE YOU ARE STANDING</div>
+          <div style="margin-top:8px;display:flex;align-items:baseline;gap:8px">
+            <div style="font-size:14px;font-weight:600">payments-retry</div>
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#6A6A72">plan 3 · unit 3.2 selected</div>
+          </div>
+        </div>
+        <div style="padding:10px 8px 0">
+          <sc-for list="{{ tree }}" as="n" hint-placeholder-count="8">
+            <div style="display:flex;gap:10px;padding:7px 8px;border-left:2px solid {{ n.rule }};background:{{ n.bg }};margin-bottom:1px">
+              <div style="flex:none;width:{{ n.indent }}"></div>
+              <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:5px;background:{{ n.dot }}"></div>
+              <div style="flex:1;min-width:0">
+                <div style="display:flex;align-items:baseline;gap:8px">
+                  <div style="font-size:12.5px;font-weight:600;color:{{ n.fg }}">{{ n.name }}</div>
+                  <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">{{ n.addr }}</div>
+                </div>
+                <div style="margin-top:3px;font-size:12px;line-height:1.45;color:{{ n.subfg }};text-wrap:pretty">{{ n.status }}</div>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+        <div style="flex:1"></div>
+        <div style="padding:12px 16px;border-top:1px solid #1F1F22;font-size:12px;color:#6A6A72;line-height:1.5;text-wrap:pretty">3.2.1 is holding for this answer. Nothing else in the tree depends on it.</div>
+      </div>
+    </div>
+  </div>
+  </div>
+
+  <!-- ═══ TOO LATE ═══ -->
+  <div style="{{ screenLate }}">
+  <div style="height:44px;flex:none;border-bottom:1px solid #1F1F22;display:flex;align-items:center;padding:0 16px;gap:14px">
+    <div style="display:flex;align-items:baseline;gap:9px">
+      <div style="font-size:14px;font-weight:600;letter-spacing:-.01em">glance</div>
+      <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#6A6A72">billing-service</div>
+    </div>
+    <div style="width:1px;height:16px;background:#1F1F22"></div>
+    <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#8A8A91">44 units working · 5 plans · 1 unanswered</div>
+    <div style="flex:1"></div>
+    <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#5A5A61">15:14 Thu</div>
+  </div>
+  <div style="flex:1;display:flex;flex-direction:column;min-height:0">
+    <div style="flex:none;background:#100F0F;border-bottom:1px solid #1F1F22;border-top:1px solid #3A3A42;display:flex;align-items:center;gap:14px;padding:12px 18px 12px 16px;border-left:2px solid #6A6A72">
+      <div style="flex:1">
+        <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;letter-spacing:.16em;color:#9A9AA2">THE AGENT ENDED ITS OWN SESSION BEFORE YOU REPLIED</div>
+        <div style="margin-top:5px;font-size:13px;color:#9A9AA2">Nothing was applied. The question and its evidence are still here, and the rest of the fleet never stopped.</div>
+      </div>
+      <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#6A6A72">ended 14:48&nbsp; ·&nbsp; 26m ago&nbsp; ·&nbsp; 44 units unaffected</div>
+    </div>
+
+    <div style="flex:1;display:flex;min-height:0">
+      <div style="width:238px;flex:none;border-right:1px solid #1F1F22;display:flex;flex-direction:column">
+        <div style="padding:14px 14px 8px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.16em;color:#5A5A61">PLANS · 5</div>
+        <div>
+          <div style="display:flex;align-items:center;gap:9px;padding:8px 14px;border-left:2px solid #F0A35A;background:#121214">
+            <div style="width:5px;height:5px;border-radius:50%;background:#8A8A91;flex:none"></div>
+            <div style="flex:1;font-size:13px;font-weight:600">payments-retry</div>
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#8A8A91">13</div>
+          </div>
+          <sc-for list="{{ busyPlans }}" as="p" hint-placeholder-count="4">
+            <div style="display:flex;align-items:center;gap:9px;padding:8px 14px;border-left:2px solid transparent">
+              <div style="width:5px;height:5px;border-radius:50%;flex:none;background:{{ p.dot }}"></div>
+              <div style="flex:1;font-size:13px;color:#8A8A91">{{ p.name }}</div>
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#4A4A52">{{ p.n }}</div>
+            </div>
+          </sc-for>
+        </div>
+        <div style="margin-top:18px;padding:0 14px 8px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.16em;color:#5A5A61">WHAT IS TRUE RIGHT NOW</div>
+        <div style="padding:0 14px;display:flex;flex-direction:column;gap:9px">
+          <sc-for list="{{ facts }}" as="f" hint-placeholder-count="4">
+            <div style="display:flex;gap:9px">
+              <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:5px;background:{{ f.dot }}"></div>
+              <div style="flex:1;font-size:12.5px;color:#C9C9CF;line-height:1.45;text-wrap:pretty">{{ f.text }}</div>
+            </div>
+          </sc-for>
+        </div>
+        <div style="flex:1"></div>
+        <div style="padding:12px 14px;border-top:1px solid #1F1F22;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52;line-height:1.7">
+          <div>agent_exit&nbsp;&nbsp;<span style="color:#6A6A72">wren@3.2 · 14:48:02</span></div>
+        </div>
+      </div>
+
+      <div style="flex:1;display:flex;flex-direction:column;min-height:0">
+        <div style="flex:1;overflow:hidden;padding:16px 26px 0">
+          <div style="display:flex;gap:12px">
+            <div style="width:26px;height:26px;flex:none;border:1px solid #26262B;border-radius:3px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#8A8A91">W</div>
+            <div style="max-width:700px">
+              <div style="display:flex;align-items:baseline;gap:8px">
+                <div style="font-size:13px;font-weight:600;color:#C9C9CF">Wren</div>
+                <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">implementer · 14:02 · session over</div>
+              </div>
+              <div style="margin-top:5px;font-size:14px;line-height:1.55;color:#9A9AA2;text-wrap:pretty">The retry budget is done and counted per endpoint, the way you said. Four files, and one of them is the test. I'd like to put it on main — I can't do that myself.</div>
+            </div>
+          </div>
+
+          <div style="margin-top:14px;margin-left:38px;max-width:760px;border:1px solid #26262B;border-radius:4px;background:#0B0B0C">
+            <div style="display:flex;align-items:center;gap:10px;padding:9px 14px;background:#111112;border-bottom:1px solid #1F1F22">
+              <div style="width:5px;height:5px;border-radius:50%;background:#8A8A91;flex:none"></div>
+              <div style="flex:1;font-size:12.5px;color:#C9C9CF">Wren stopped waiting at 14:48. This question was never answered and nothing on main changed.</div>
+            </div>
+
+            <div style="display:flex;align-items:center;gap:12px;padding:11px 14px;border-bottom:1px solid #1F1F22">
+              <div style="flex:1;font-size:13px;font-weight:600;color:#C9C9CF">Merge the retry budget into main</div>
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#5A5A61">3.2 retry-budget · 4 files · +118 −24 · kept</div>
+            </div>
+
+            <div style="display:flex;border-bottom:1px solid #1F1F22">
+              <div style="flex:1;padding:12px 14px;border-right:1px solid #1F1F22">
+                <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">THE EVIDENCE SURVIVED</div>
+                <div style="margin-top:9px;display:flex;flex-direction:column;gap:7px">
+                  <sc-for list="{{ checksMuted }}" as="c" hint-placeholder-count="4">
+                    <div style="display:flex;align-items:center;gap:9px">
+                      <div style="width:5px;height:5px;border-radius:50%;flex:none;background:{{ c.dot }}"></div>
+                      <div style="flex:1;font-size:12.5px;color:#9A9AA2">{{ c.name }}</div>
+                      <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#5A5A61">{{ c.detail }}</div>
+                    </div>
+                  </sc-for>
+                </div>
+                <div style="margin-top:10px;font-size:12px;color:#6A6A72;line-height:1.5;text-wrap:pretty">These results are 34 minutes old. Whoever picks this up should re-run them against today's main before merging.</div>
+              </div>
+              <div style="width:270px;flex:none;padding:12px 14px">
+                <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.14em;color:#5A5A61">WHY SHE STOPPED</div>
+                <div style="margin-top:9px;font-size:12.5px;color:#9A9AA2;line-height:1.5;text-wrap:pretty">Wren waited 46 minutes, then closed her own session rather than hold a machine open. That is the rule she was given, not a crash.</div>
+                <div style="margin-top:10px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52;line-height:1.7">
+                  <div>branch kept&nbsp; ·&nbsp; wren/retry-budget</div>
+                  <div>main untouched&nbsp; ·&nbsp; 0 files</div>
+                </div>
+              </div>
+            </div>
+
+            <div style="padding:12px 14px;border-bottom:1px solid #1F1F22">
+              <div style="display:flex;align-items:center;gap:10px">
+                <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#8A8A91">retry.py</div>
+                <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#3E3E45">unchanged on main · this is still only proposed</div>
+              </div>
+              <div style="margin-top:9px;border:1px solid #17171A;background:#090909;border-radius:3px;overflow:hidden">
+                <sc-for list="{{ diffMuted }}" as="d" hint-placeholder-count="9">
+                  <div style="display:flex;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;line-height:1.75;background:{{ d.bg }}">
+                    <div style="width:38px;flex:none;text-align:right;padding-right:10px;color:#2E2E33">{{ d.ln }}</div>
+                    <div style="width:14px;flex:none;color:{{ d.fg }}">{{ d.sign }}</div>
+                    <div style="flex:1;color:{{ d.fg }};white-space:pre">{{ d.code }}</div>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+
+            <div style="padding:13px 14px;display:flex;align-items:flex-start;gap:12px">
+              <div style="flex:none;width:210px">
+                <button style="width:100%;background:#F0A35A;color:#140D06;border:none;border-radius:3px;padding:9px 14px;font-size:13px;font-weight:600;font-family:inherit;cursor:pointer">Give this to Pike</button>
+                <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">Pike wakes with Wren's branch, notes and checks. He re-runs them, then asks you once.</div>
+              </div>
+              <div style="flex:none;width:210px">
+                <button style="width:100%;background:transparent;color:#C9C9CF;border:1px solid #33333A;border-radius:3px;padding:8px 14px;font-size:13px;font-family:inherit;cursor:pointer" style-hover="border-color:#4A4A52;color:#E8E8EA">Merge it as it stands</button>
+                <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">Applies the four files on 34-minute-old checks. Nobody re-verifies against today's main.</div>
+              </div>
+              <div style="flex:1">
+                <div style="border:1px solid #26262B;border-radius:3px;background:#0A0A0B;padding:9px 11px;font-size:12.5px;color:#4A4A52">Or answer Wren's question anyway — whoever picks it up reads it first</div>
+                <div style="margin-top:6px;font-size:11.5px;color:#6A6A72;line-height:1.45">Your words are kept with the branch. Discarding the branch is under the unit in the tree.</div>
+              </div>
+            </div>
+          </div>
+
+          <div style="display:flex;align-items:center;gap:12px;margin-top:18px">
+            <div style="height:1px;flex:1;background:#17171A"></div>
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#4A4A52">since Wren stopped · 44 units still working · 61 events · nothing else waiting</div>
+            <div style="height:1px;flex:1;background:#17171A"></div>
+          </div>
+        </div>
+      </div>
+
+      <div style="width:376px;flex:none;border-left:1px solid #1F1F22;display:flex;flex-direction:column">
+        <div style="padding:14px 16px 4px">
+          <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.16em;color:#5A5A61">WHERE YOU ARE STANDING</div>
+          <div style="margin-top:8px;display:flex;align-items:baseline;gap:8px">
+            <div style="font-size:14px;font-weight:600">payments-retry</div>
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#6A6A72">plan 3 · unit 3.2 has no agent</div>
+          </div>
+        </div>
+        <div style="padding:10px 8px 0">
+          <sc-for list="{{ treeLate }}" as="n" hint-placeholder-count="8">
+            <div style="display:flex;gap:10px;padding:7px 8px;border-left:2px solid {{ n.rule }};background:{{ n.bg }};margin-bottom:1px">
+              <div style="flex:none;width:{{ n.indent }}"></div>
+              <div style="width:5px;height:5px;border-radius:50%;flex:none;margin-top:5px;background:{{ n.dot }}"></div>
+              <div style="flex:1;min-width:0">
+                <div style="display:flex;align-items:baseline;gap:8px">
+                  <div style="font-size:12.5px;font-weight:600;color:{{ n.fg }}">{{ n.name }}</div>
+                  <div style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5A5A61">{{ n.addr }}</div>
+                </div>
+                <div style="margin-top:3px;font-size:12px;line-height:1.45;color:{{ n.subfg }};text-wrap:pretty">{{ n.status }}</div>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+        <div style="flex:1"></div>
+        <div style="padding:12px 16px;border-top:1px solid #1F1F22;font-size:12px;color:#6A6A72;line-height:1.5;text-wrap:pretty">One unit lost its agent. Nine below it are still moving, and none of them are blocked by this.</div>
+      </div>
+    </div>
+  </div>
+  </div>
+
+</div>
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1640,&quot;height&quot;:1090},&quot;screen&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;busy&quot;,&quot;quiet&quot;,&quot;decision&quot;,&quot;late&quot;],&quot;default&quot;:&quot;busy&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Screen&quot;},&quot;collapseActivity&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Volume&quot;}}">
+const G='#4FA97D', B='#5B8DEF', A='#D9A03C', R='#C4554D', D='#4A4A52';
+
+class Component extends DCLogic {
+  state = { screen: 'busy', touched: false };
+
+  current() {
+    return this.state.touched ? this.state.screen : (this.props.screen ?? this.state.screen);
+  }
+
+  tab(id, label) {
+    const on = this.current() === id;
+    return "font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;letter-spacing:.06em;padding:5px 11px;border-radius:3px;cursor:pointer;border:1px solid " +
+      (on ? '#F0A35A;color:#F0A35A;background:#150F08' : '#1F1F22;color:#6A6A72;background:transparent');
+  }
+
+  renderVals() {
+    const s = this.current();
+    const dense = this.props.collapseActivity ?? true;
+    const set = (screen) => () => this.setState({ screen, touched: true });
+
+    const tree = [
+      { name:'payments-retry', addr:'3', status:'the plan · 14 units, 3 levels deep', dot:A, indent:'0px', rule:'transparent', bg:'transparent', fg:'#E8E8EA', subfg:'#6A6A72' },
+      { name:'rate-limiter', addr:'3.1', status:'done — on main since 09:38', dot:G, indent:'12px', rule:'transparent', bg:'transparent', fg:'#9A9AA2', subfg:'#5A5A61' },
+      { name:'retry-budget', addr:'3.2', status:'Wren is waiting on your answer about scope', dot:A, indent:'12px', rule:'#F0A35A', bg:'#121214', fg:'#E8E8EA', subfg:'#C9A46A' },
+      { name:'backoff table', addr:'3.2.1', status:'holding — cannot start until 3.2 is decided', dot:D, indent:'26px', rule:'transparent', bg:'transparent', fg:'#8A8A91', subfg:'#5A5A61' },
+      { name:'circuit-breaker', addr:'3.3', status:'Bex is writing tests for the half-open path', dot:B, indent:'12px', rule:'transparent', bg:'transparent', fg:'#C9C9CF', subfg:'#6A6A72' },
+      { name:'tripped-counter', addr:'3.3.1', status:'Rune is adding a counter for tripped breakers', dot:B, indent:'26px', rule:'transparent', bg:'transparent', fg:'#C9C9CF', subfg:'#6A6A72' },
+      { name:'the note in the docs', addr:'3.3.2', status:'queued — nobody has picked it up', dot:D, indent:'26px', rule:'transparent', bg:'transparent', fg:'#8A8A91', subfg:'#5A5A61' },
+      { name:'load test', addr:'3.4', status:'Juno is replaying yesterday at three times the rate', dot:B, indent:'12px', rule:'transparent', bg:'transparent', fg:'#C9C9CF', subfg:'#6A6A72' }
+    ];
+
+    const treeLate = tree.map(n => {
+      if (n.addr === '3.2') return { ...n, dot:'#8A8A91', status:'no agent — Wren ended her session, branch kept', subfg:'#8A8A91' };
+      if (n.addr === '3.2.1') return { ...n, status:'still holding — it does not know Wren is gone yet' };
+      return n;
+    });
+
+    const diff = [
+      { ln:'41', sign:' ', code:'def send(self, req, attempt=0):', fg:'#5A5A61', bg:'transparent' },
+      { ln:'42', sign:'-', code:'    while True:', fg:'#C4776F', bg:'#140E0E' },
+      { ln:'43', sign:'-', code:'        try:  return self._post(req)', fg:'#C4776F', bg:'#140E0E' },
+      { ln:'42', sign:'+', code:'    budget = self.budgets.for_endpoint(req.path)', fg:'#84B08A', bg:'#0D130F' },
+      { ln:'43', sign:'+', code:'    if budget.spent():', fg:'#84B08A', bg:'#0D130F' },
+      { ln:'44', sign:'+', code:'        raise Refused(retry_after=30)', fg:'#84B08A', bg:'#0D130F' },
+      { ln:'45', sign:'+', code:'    with budget.charge():', fg:'#84B08A', bg:'#0D130F' },
+      { ln:'46', sign:'+', code:'        return self._post(req)', fg:'#84B08A', bg:'#0D130F' },
+      { ln:'47', sign:' ', code:'        # callers see Refused, not a hang', fg:'#5A5A61', bg:'transparent' }
+    ];
+
+    const checks = [
+      { name:'the test suite', detail:'1 284 passed', dot:G, fg:'#7A9E86' },
+      { name:'the retry tests Wren wrote', detail:'19 new, all pass', dot:G, fg:'#7A9E86' },
+      { name:'latency under load', detail:'+4ms vs yesterday', dot:A, fg:'#B0842F' },
+      { name:'nothing else on main broke', detail:'no callers changed', dot:G, fg:'#7A9E86' }
+    ];
+
+    return {
+      screenBusy: s === 'busy' ? 'flex:1;display:flex;flex-direction:column;min-height:0' : 'display:none',
+      screenQuiet: s === 'quiet' ? 'flex:1;display:flex;flex-direction:column;min-height:0' : 'display:none',
+      screenDecision: s === 'decision' ? 'flex:1;display:flex;flex-direction:column;min-height:0' : 'display:none',
+      screenLate: s === 'late' ? 'flex:1;display:flex;flex-direction:column;min-height:0' : 'display:none',
+      goBusy: set('busy'), goQuiet: set('quiet'), goDecision: set('decision'), goLate: set('late'),
+      tabBusy: this.tab('busy'), tabQuiet: this.tab('quiet'), tabDecision: this.tab('decision'), tabLate: this.tab('late'),
+      clock: s === 'quiet' ? '13:58 Thu' : (s === 'late' ? '15:14 Thu' : '14:08 Thu'),
+      fleetLine: s === 'quiet' ? '2 units working · 0 waiting'
+        : s === 'busy' ? '47 units working · 5 plans · 3 waiting on you'
+        : s === 'decision' ? '46 units working · 5 plans · 1 waiting on you'
+        : '44 units working · 5 plans · 1 unanswered',
+
+      busyPlans: [
+        { name:'auth-service', n:9, dot:A },
+        { name:'row-migration', n:7, dot:A },
+        { name:'invoicing', n:6, dot:D },
+        { name:'search-reindex', n:11, dot:B }
+      ],
+      quietPlans: [
+        { name:'payments-retry', n:'done', dot:G },
+        { name:'auth-service', n:'done', dot:G },
+        { name:'row-migration', n:'done', dot:G },
+        { name:'invoicing', n:'held', dot:D }
+      ],
+      roster: [
+        { name:'Wren', role:'implementer · retry budget', dot:A },
+        { name:'Ash', role:'migrator · backfilling rows', dot:A },
+        { name:'Juno', role:'auth · stopped, no credential', dot:A },
+        { name:'Pike', role:'verifier · re-running auth tests', dot:B },
+        { name:'Tam', role:'planner · splitting invoicing', dot:B },
+        { name:'Bex', role:'implementer · circuit breaker', dot:B },
+        { name:'Rune', role:'implementer · tripped counter', dot:B },
+        { name:'Vale', role:'indexer · shard two of three', dot:B },
+        { name:'Orin', role:'verifier · idle, nothing to check', dot:D }
+      ],
+      events: [
+        { t:'09:38:02', who:'Wren', what:'put the rate limiter on main', where:'3.1', dot:G },
+        { t:'09:41:17', who:'Pike', what:'ran the suite — everything passed', where:'2.2', dot:G },
+        { t:'09:44:51', who:'Ash', what:'backfilled 5 000 rows', where:'5.1', dot:B },
+        { t:'09:47:09', who:'Bex', what:'wrote a test for the half-open path', where:'3.3', dot:B },
+        { t:'09:52:40', who:'Rune', what:'a test failed, then passed on retry', where:'3.3.1', dot:A }
+      ],
+      ledger: [
+        { text:'The retry budget is on main. Refusals are counted per endpoint, as you asked.', meta:'Wren · plan 3 · finished 11:26', dot:G },
+        { text:'auth-service is green again. The flake was a clock in a test, not the retry logic.', meta:'Pike · plan 2 · finished 12:04', dot:G },
+        { text:'Every old row now has an owner. Forty-one went to the system account.', meta:'Ash · plan 5 · finished 13:12', dot:G },
+        { text:'Invoicing is planned but deliberately held — it reads the table Ash just rewrote.', meta:'Tam · plan 4 · held 13:15', dot:D },
+        { text:'One question came to you today, at 11:02. Nothing has needed you since.', meta:'answered in 3m', dot:A }
+      ],
+      pulse: [
+        { h:'34%', color:'#22334D' }, { h:'52%', color:'#22334D' }, { h:'71%', color:'#2A3F5C' },
+        { h:'86%', color:'#2A3F5C' }, { h:'62%', color:'#2A3F5C' }, { h:'28%', color:'#4A3A1E' },
+        { h:'74%', color:'#2A3F5C' }, { h:'91%', color:'#2A3F5C' }, { h:'68%', color:'#2A3F5C' },
+        { h:'44%', color:'#22334D' }, { h:'30%', color:'#22334D' }, { h:'22%', color:'#1C2A3D' }
+      ],
+      facts: [
+        { text:'Nothing was applied. main is exactly where it was at 14:02.', dot:G },
+        { text:"Wren's branch and her four files are kept, not deleted.", dot:G },
+        { text:'The checks she ran are 34 minutes old and should be re-run.', dot:A },
+        { text:'44 units in the other four plans never stopped working.', dot:B }
+      ],
+      checks, checksMuted: checks.map(c => ({ ...c, dot: c.dot === G ? '#3E5C4A' : '#6A5A32' })),
+      diff, diffMuted: diff.map(d => ({ ...d, fg: d.fg === '#84B08A' ? '#5E7A63' : (d.fg === '#C4776F' ? '#7A5450' : '#46464C'), bg:'transparent' })),
+      tree, treeLate, dense
+    };
+  }
+}
+
+</script>
+</body>
+</html>
