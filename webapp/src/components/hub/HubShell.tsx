@@ -4,6 +4,8 @@ import { Composer, type ModelOption } from '../chat/Composer';
 import { ChannelRail } from './ChannelRail';
 import { ChannelTimeline } from './ChannelTimeline';
 import { AgentRecordPanel } from './AgentRecordPanel';
+import { StatePane } from './StatePane';
+import { agentsToRoomNodes } from '../../lib/roomState';
 import { apiJson, jsonInit } from '../../lib/api';
 import { buildPromptCommand, channelAgentSessionId, channelDraftSessionId, ensureConsoleAgent, postChannelMessage } from '../../lib/chat/sendCore';
 import { resolveMentionRoute } from '../../lib/mentionGrammar';
@@ -314,6 +316,13 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
   return (
     <div className="dark flex h-screen w-full overflow-hidden bg-ink text-sm text-ink-text-body">
       <ChannelRail channels={channels} activeChannelId={activeChannelId} agents={agents} selectedAgentId={selectedAgentId} onSelectAgent={setSelectedAgentId} workbenchActive={route.kind === 'workbench'} />
+      {/* The room is the home frame: the state pane sits BESIDE the room narrative and never replaces
+          it. Selecting a node here previews; entering is a separate, explicit act (concern 07). */}
+      {route.kind === 'workbench' ? null : (
+        <aside className="hidden w-72 flex-shrink-0 border-r border-ink-border lg:block" aria-label="Fleet state">
+          <StatePane nodes={agentsToRoomNodes(agents)} now={Date.now()} />
+        </aside>
+      )}
       <main id="omp-main-content" className="flex min-w-0 flex-1 flex-col overflow-hidden bg-ink">
         {route.kind === 'workbench' ? renderWorkbench(route) : (
           <>
