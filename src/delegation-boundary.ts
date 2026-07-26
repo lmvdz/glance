@@ -58,6 +58,8 @@ const nonDelegatableActions: Record<string, NonDelegatableClass> = {
 	remove: "deletion",
 	/** Removes a feature, its plan directory, and detaches its agents. */
 	deleteFeature: "deletion",
+	/** Compaction REMOVES records. Whatever else it is called, it is deletion, and it reaches a person. */
+	compactNodeRecords: "deletion",
 	/** Disburses a reward through a payment provider. */
 	disburseReward: "spend",
 };
