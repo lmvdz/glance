@@ -37,6 +37,7 @@ const APP_TABLES = [
 	"nodes",
 	"node_records",
 	"delegation_grants",
+	"plan_proposals",
 ] as const;
 const BASE_APP_TABLES = ["roster_index", "features", "audit", "channels", "channel_entries", "usage", "federation_peers", "capability_records"] as const;
 const FEEDBACK_TABLES = ["feedback_campaigns", "feedback_items", "feedback_validation_responses", "feedback_rewards"] as const;
@@ -446,6 +447,24 @@ const delegationGrants: Migration = {
 	},
 };
 
+const planProposals: Migration = {
+	async up(db: Kysely<any>) {
+		await db.schema
+			.createTable("plan_proposals")
+			.addColumn("org_id", "text", (c) => c.notNull().references("organization.id").onDelete("cascade"))
+			.addColumn("id", "text", (c) => c.notNull())
+			.addColumn("status", "text", (c) => c.notNull())
+			.addColumn("created_at", "bigint", (c) => c.notNull())
+			.addColumn("data", "text", (c) => c.notNull())
+			.addPrimaryKeyConstraint("plan_proposals_pk", ["org_id", "id"])
+			.execute();
+		await db.schema.createIndex("plan_proposals_org_status").on("plan_proposals").columns(["org_id", "status"]).execute();
+	},
+	async down(db: Kysely<any>) {
+		await db.schema.dropTable("plan_proposals").ifExists().execute();
+	},
+};
+
 const createJoinRequests: Migration = {
 	async up(db: Kysely<any>) {
 		await db.schema
@@ -491,6 +510,8 @@ export function appMigrations(type: DbKind): Record<string, Migration> {
 		"0016_node_records_rls": rlsMigration(type, ["node_records"]),
 		"0017_delegation_grants": delegationGrants,
 		"0018_delegation_grants_rls": rlsMigration(type, ["delegation_grants"]),
+		"0019_plan_proposals": planProposals,
+		"0020_plan_proposals_rls": rlsMigration(type, ["plan_proposals"]),
 	};
 }
 

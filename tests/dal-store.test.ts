@@ -353,6 +353,13 @@ test("NodeRecordStore: associated evidence round-trips and fails closed through 
 		expect(await store.listDelegationGrants()).toEqual([grant]);
 		await store.putDelegationGrant({ ...grant, revokedAt: 12, revokedBy: "db:lars" });
 		expect(await store.listDelegationGrants()).toEqual([{ ...grant, revokedAt: 12, revokedBy: "db:lars" }]);
+
+		// Plan proposals, same parity requirement: a proposal that survives in one store and not the
+		// other would let the same plan read as "not yet work" in one mode and as nothing at all in the other.
+		expect(await store.listPlanProposals()).toEqual([]);
+		const proposal = { id: `${name}-proposal`, originalWords: "  make the room stop burying my messages  ", authorId: "db:lars", createdAt: 20, repo: "/r", assumptions: [{ text: "you mean #fleet", insteadOf: "you naming the room" }], units: [{ address: "1", title: "u", rationale: "r", after: [], touches: ["src/a.ts"] }], needsClarification: "which room?", status: "proposed" as const, startedAt: 21 };
+		await store.putPlanProposal(proposal);
+		expect(await store.listPlanProposals()).toEqual([proposal]);
 				await expect(records.put({ ...samples[0]!, id: `${name}-missing`, nodeId: `${nodeId}-missing` })).rejects.toThrow("node record node not found");
 	}
 });

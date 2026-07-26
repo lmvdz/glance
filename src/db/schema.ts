@@ -115,6 +115,15 @@ export interface DelegationGrantsTable {
 	data: string;
 }
 
+/** Plans shown to a human but not started. A proposal is never counted as work in flight. */
+export interface PlanProposalsTable {
+	org_id: string;
+	id: string;
+	status: string;
+	created_at: number;
+	data: string;
+}
+
 /** Positive-evidence channel membership rows. Inactive rows are removals, never deletions. */
 export interface ChannelMembershipsTable {
 	org_id: string;
@@ -262,6 +271,7 @@ export interface AppDatabase {
 	channel_read_cursors: ChannelReadCursorsTable;
 	node_records: NodeRecordsTable;
 	delegation_grants: DelegationGrantsTable;
+	plan_proposals: PlanProposalsTable;
 	nodes: NodesTable;
 	usage: UsageTable;
 	federation_peers: FederationPeersTable;
