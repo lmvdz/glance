@@ -140,6 +140,94 @@ describe('channel timeline dispatch', () => {
   });
 });
 
+describe('return-emit and design-revised cards', () => {
+  // Fixture shapes mirror the real emit sites: return-emit from
+  // squad-manager.ts appendCommandReturnEmit (~line 7318) and design-revised
+  // from squad-manager.ts emitDesignRevisedCard (~line 3445). Both kinds
+  // regressed to "This room event is from a newer daemon" boilerplate
+  // because the webapp registry never learned them — see concern 06.
+  test('return-emit renders the room echo face and opens the intervene door for its unit', () => {
+    const card = dispatchChannelCard(entry({
+      id: 'return-1',
+      seq: 10,
+      text: 'operator steered room-42: do the thing',
+      event: {
+        kind: 'return-emit',
+        payload: {
+          refs: { unitId: 'room-42' },
+          doorSurface: 'intervence',
+          face: {
+            unitId: 'room-42',
+            unitName: 'Room 42',
+            eventKind: 'return-emit',
+            title: 'Control accepted',
+            eyebrow: 'Room echo',
+            body: 'operator steered room-42: do the thing',
+            tone: 'info',
+            pinned: { actor: 'operator', action: 'steer', target: 'Room 42' },
+          },
+          actor: 'operator',
+          action: 'steer',
+          target: 'room-42',
+          source: 'mention',
+        },
+      },
+    }));
+    expect(card.kind).toBe('return-emit');
+    expect(card.title).toBe('Control accepted');
+    expect(card.body).toBe('operator steered room-42: do the thing');
+    expect(card.href).toBe('#/intervene/room-42');
+    expect(doorLabel(card.kind)).toBe('Step into the agent');
+  });
+
+  test('design-revised renders the plan-saved face and opens the plan DAG door for its plan', () => {
+    const card = dispatchChannelCard(entry({
+      id: 'design-1',
+      seq: 11,
+      text: 'design revised · voice-orchestrated-room-integration · Harden the timeline-card kind registry · status → done',
+      event: {
+        kind: 'design-revised',
+        payload: {
+          refs: { planId: 'feat-9', planPath: 'plans/voice-orchestrated-room-integration/06-card-registry-hardening.md', unitId: 'room-42' },
+          doorSurface: 'plan',
+          face: {
+            unitId: 'room-42',
+            unitName: 'Room 42',
+            eventKind: 'design-revised',
+            title: 'Design revised',
+            eyebrow: 'Plan saved',
+            body: 'Harden the timeline-card kind registry: status → done',
+            detail: 'plans/voice-orchestrated-room-integration/06-card-registry-hardening.md',
+            tone: 'info',
+            planName: 'voice-orchestrated-room-integration',
+            pinned: { actor: 'operator', concern: '06-card-registry-hardening.md', status: 'done' },
+          },
+          actor: 'operator',
+          featureId: 'feat-9',
+          planPath: 'plans/voice-orchestrated-room-integration/06-card-registry-hardening.md',
+          planName: 'voice-orchestrated-room-integration',
+          changed: 'status → done',
+        },
+      },
+    }));
+    expect(card.kind).toBe('design-revised');
+    expect(card.title).toBe('Design revised');
+    expect(card.body).toBe('Harden the timeline-card kind registry: status → done');
+    expect(card.href).toBe('#/workbench/task/feat-9');
+    expect(doorLabel(card.kind)).toBe('Open plan DAG');
+  });
+
+  test('an unmapped kind still falls back to unknown-event without throwing', () => {
+    const build = () => dispatchChannelCard(entry({
+      id: 'voice-call',
+      seq: 12,
+      event: { kind: 'voice-call', payload: { refs: { unitId: 'room-42' }, doorSurface: 'intervence', face: { title: 'Voice call started' } } },
+    }));
+    expect(build).not.toThrow();
+    expect(build().kind).toBe('unknown-event');
+  });
+});
+
 describe('unit lifecycle cards', () => {
   const kinds = ['unit-spawned', 'unit-turn-finished', 'unit-failed', 'pr-opened', 'verification-ran'] as const;
 
