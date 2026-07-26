@@ -3767,7 +3767,7 @@ export class SquadManager extends EventEmitter {
 						provenAt: Date.now(),
 					});
 				}
-				this.emitUnitTranscriptEvent(w.agentId, TRANSCRIPT_EVENT_LAND_MERGE, `land merge finalized · ${this.safeEventLabel(w.branch ?? "changes")} · ${res.mode ?? "local"}`, { stage: "finalized", repo: pf.repo, branch: w.branch, agentId: w.agentId, featureId: id, issueId: rec?.dto.issue?.id, issueIdentifier: rec?.dto.issue?.identifier, mode: res.mode ?? "local", prUrl: res.prUrl, prNumber: res.prNumber, prState: res.prState, outcome: res.prState ?? "merged", doneProofVerified: res.detail?.includes("landed onto a red baseline") ? "red-baseline" : "green", detail: res.detail });
+				this.emitUnitTranscriptEvent(w.agentId, TRANSCRIPT_EVENT_LAND_MERGE, `${this.safeEventLabel(w.branch ?? "changes")} is on main. That has left this machine and a revert would be a new change, not an undo. Nothing else in the fleet was touched.`, { stage: "finalized", repo: pf.repo, branch: w.branch, agentId: w.agentId, featureId: id, issueId: rec?.dto.issue?.id, issueIdentifier: rec?.dto.issue?.identifier, mode: res.mode ?? "local", prUrl: res.prUrl, prNumber: res.prNumber, prState: res.prState, outcome: res.prState ?? "merged", doneProofVerified: res.detail?.includes("landed onto a red baseline") ? "red-baseline" : "green", detail: res.detail });
 				void this.closeLandedIssue(rec?.dto.issue, { branch: w.branch, repo: pf.repo }); // real merge ⇒ close its tracking issue (idempotent)
 			}
 		}
@@ -4644,7 +4644,7 @@ export class SquadManager extends EventEmitter {
 						provenAt: Date.now(),
 					});
 				}
-				this.emitUnitTranscriptEvent(id, TRANSCRIPT_EVENT_LAND_MERGE, `land merge finalized · ${this.safeEventLabel(dto.branch ?? "changes")} · ${result.mode ?? "local"}`, { stage: "finalized", repo: dto.repo, branch: dto.branch, agentId: id, featureId: dto.featureId, issueId: dto.issue?.id, issueIdentifier: dto.issue?.identifier, mode: result.mode ?? "local", prUrl: result.prUrl, prNumber: result.prNumber, prState: result.prState, outcome: result.prState ?? "merged", doneProofVerified: result.detail?.includes("landed onto a red baseline") ? "red-baseline" : "green", detail: result.detail ?? result.message });
+				this.emitUnitTranscriptEvent(id, TRANSCRIPT_EVENT_LAND_MERGE, `${this.safeEventLabel(dto.branch ?? "changes")} is on main. That has left this machine and a revert would be a new change, not an undo. Nothing else in the fleet was touched.`, { stage: "finalized", repo: dto.repo, branch: dto.branch, agentId: id, featureId: dto.featureId, issueId: dto.issue?.id, issueIdentifier: dto.issue?.identifier, mode: result.mode ?? "local", prUrl: result.prUrl, prNumber: result.prNumber, prState: result.prState, outcome: result.prState ?? "merged", doneProofVerified: result.detail?.includes("landed onto a red baseline") ? "red-baseline" : "green", detail: result.detail ?? result.message });
 				await this.closeLandedIssue(dto.issue, { branch: dto.branch, repo: dto.repo }); // real merge ⇒ close its tracking issue (idempotent, best-effort)
 			} else this.log("info", `not closing ${dto.issue?.identifier ?? dto.issue?.id ?? id}: land made no merge`);
 		}
@@ -12283,7 +12283,7 @@ export class SquadManager extends EventEmitter {
 		for (const request of next) {
 			if (previous.has(request.id)) continue;
 			if (!isRoomWorthyPending(request)) continue;
-			this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_NEEDS_YOU, `needs you · ${this.safeEventLabel(request.title)}`, {
+			this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_NEEDS_YOU, `${this.safeEventLabel(request.title)} — ${this.safeEventLabel(rec.dto.name)} stopped rather than guess. Everything else in the fleet is still moving.`, {
 				status: "pending",
 				pendingId: request.id,
 				gateClass: gateClassOf(request),
@@ -12299,7 +12299,7 @@ export class SquadManager extends EventEmitter {
 			// Symmetric with the emit above: a pending that never became a card must never emit a
 			// resolution card, or the room fills with orphan "resolved" faces for facts it never showed.
 			if (!isRoomWorthyPending(request)) continue;
-			this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_NEEDS_YOU, `needs you resolved · ${this.safeEventLabel(request.title)}`, {
+			this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_NEEDS_YOU, `${this.safeEventLabel(request.title)} is answered. ${this.safeEventLabel(rec.dto.name)} picks the work back up from where it stopped.`, {
 				status: "resolved",
 				pendingId: request.id,
 				gateClass: gateClassOf(request),
@@ -12312,7 +12312,7 @@ export class SquadManager extends EventEmitter {
 	}
 
 	private emitValidationVerdictEvent(rec: AgentRecord, record: ValidationRecord): void {
-		this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_GATE_VERDICT, `gate verdict · ${record.verdict} · agreement ${record.agreement.toFixed(2)} · confidence ${record.confidence.toFixed(2)}`, {
+		this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_GATE_VERDICT, `The gate says ${record.verdict}, with reviewers agreeing ${(record.agreement * 100).toFixed(0)}% of the time and ${(record.confidence * 100).toFixed(0)}% confidence. ${record.verdict === "pass" ? "Nothing is waiting on you unless you disagree with it." : "This one needs you before it can go further."}`, {
 			verdict: record.verdict,
 			agreement: record.agreement,
 			confidence: record.confidence,
