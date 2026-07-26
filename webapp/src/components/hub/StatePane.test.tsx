@@ -56,3 +56,20 @@ test("every control states what it will do", () => {
   // The collapse toggle carries a consequence sentence, not just a caret.
   expect(html).toContain("Show the 1 settled item again.");
 });
+
+test("an empty region renders nothing at all — not a heading over blank space", () => {
+  // Seen live on a booted room: "NEEDS YOU" rendered as a header with nothing beneath it, directly
+  // under a band that had just said nothing needs you. A heading over emptiness reads as something
+  // that failed to load, and it contradicted the sentence above it.
+  const html = renderToStaticMarkup(<StatePane nodes={[nodes[1]!]} now={T} />);
+  expect(html).toContain("In flight");
+  expect(html).not.toContain("Needs you");
+  expect(html).not.toContain("Settled");
+});
+
+test("a pane with no work at all is the band alone", () => {
+  const html = renderToStaticMarkup(<StatePane nodes={[]} now={T} autonomy={{ sinceMs: T - 3_600_000 }} />);
+  expect(html).toContain("unbroken autonomy");
+  expect(html).not.toContain("Needs you");
+  expect(html).not.toContain("In flight");
+});

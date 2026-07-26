@@ -1,7 +1,8 @@
 import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertCircle, CheckCircle2, ChevronRight, CircleDot, FileText, Flame, GitMerge, Hash, Reply, Rocket, ShieldAlert } from 'lucide-react';
 import type { ChannelEntry } from '../../lib/dto';
-import { buildChannelThreadViews, doorLabel, groupLifecycleRuns, type ChannelCardTone, type ChannelCardView } from '../../lib/channelTimeline';
+import { buildChannelThreadViews, doorLabel, groupLifecycleRuns, runSummary, type ChannelCardTone, type ChannelCardView } from '../../lib/channelTimeline';
+import { foldVerdict } from '../../lib/roomState';
 import { entryTimeLabel } from '../../lib/hub';
 import { hubHref } from '../../lib/router';
 import { channelScrollAfterRowsChange, channelScrollAfterUserScroll, initialChannelScrollState, type ChannelScrollState } from '../../lib/channelScroll';
@@ -174,13 +175,20 @@ export const ChannelTimelineRow = memo(function ChannelTimelineRow({ view, onRep
 function LifecycleRun({ views, onReply }: { views: ChannelCardView[]; onReply?: (entry: ChannelEntry) => void }) {
   if (views.length === 1) return <ChannelTimelineRow view={views[0]!} onReply={onReply} />;
   const unit = views[0]!.pinned.find((item) => item.label === 'Unit')?.value ?? views[0]!.authorLabel;
+  const summary = runSummary(views);
+  // Folded by DEFAULT. An open fold is not a fold, and leaving these expanded is how #fleet became
+  // 544 cards nobody read. A run that contains something alarming opens itself, because the whole
+  // point of the verdict is that a person can trust the closed ones.
   return (
     <li data-entry-id={views[0]!.id}>
-      <details open className="group rounded-2xl border border-ink-border bg-panel">
-        <summary className="flex min-h-10 cursor-pointer list-none items-center gap-2 px-3 py-2 text-xs font-semibold text-ink-text-body focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ember">
-          <ChevronRight className="h-4 w-4 transition-transform group-open:rotate-90" aria-hidden />
-          <span className="truncate">{unit}</span>
-          <span className="ml-auto text-[10px] font-medium uppercase tracking-[0.14em] text-ink-text-muted">{views.length} lifecycle updates</span>
+      <details open={Boolean(summary.unusual)} className="group rounded-2xl border border-ink-border bg-panel">
+        <summary className="flex min-h-10 cursor-pointer list-none items-start gap-2 px-3 py-2 text-xs text-ink-text-body focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ember">
+          <ChevronRight className="mt-0.5 h-4 w-4 flex-shrink-0 transition-transform group-open:rotate-90" aria-hidden />
+          <span className="min-w-0 flex-1">
+            <span className="block truncate font-semibold">{unit}</span>
+            {/* A verdict, not a count: something a person could disagree with. */}
+            <span className={`block text-[11px] leading-snug ${summary.unusual ? 'text-amber-200' : 'text-ink-text-muted'}`}>{foldVerdict(summary)}</span>
+          </span>
         </summary>
         <ol className="space-y-3 border-t border-ink-border p-3">{views.map((view) => <ChannelTimelineRow key={view.id} view={view} onReply={onReply} />)}</ol>
       </details>
