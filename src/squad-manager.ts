@@ -235,15 +235,14 @@ import { truncateLabel } from "./text-util.ts";
 import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
 import { ChannelStore, DEFAULT_CHANNEL_ID, type ChannelEntry, type ClientChannelPost, type Channel, type CreateChannelInput, type ChannelMemberInput } from "./channels.ts";
 import { NodeStore, type NodeState } from "./nodes.ts";
-import { NodeRecordStore } from "./node-records.ts";
 import { ForgedCardError, assertAuthentic, projectsToRoom, type CardProvenance } from "./projection-classes.ts";
-import { NodeRecordStore, type PlanMotionRecord } from "./node-records.ts";
+import { coldStartLearningState } from "./unknowns.ts";
+import { NodeRecordStore, type NodeRecord, type InstructionReadbackRecord, type ObjectionRecord, type PlanMotionRecord } from "./node-records.ts";
 import { approveIrreversible, beginInstruction, overruleObjection, raiseObjection, recordObjectionOutcome, rejectIrreversible, type InstructionExecution } from "./instructions.ts";
-import type { InstructionReadbackRecord, ObjectionRecord } from "./node-records.ts";
 import { regenerateNodeSummaries } from "./node-summaries.ts";
 import { agentRecordView, type AgentRecordView } from "./agent-records.ts";
 import { proposeRules, type RuleProposal } from "./rule-proposals.ts";
-import { assessPlanMotion as assessPlanMotionEvidence, type PlanMotionInput, type PlanMotionAssessment } from "./plan-motion.ts";
+import { assessPlanMotion as assessPlanMotionEvidence, planMotionMetrics, type PlanMotionInput, type PlanMotionAssessment } from "./plan-motion.ts";
 import { compactionNotice, planCompaction, planHandover, type CompactionPlan, type CompactionPolicy, type HandoverPlan } from "./archive.ts";
 import { consequenceSentence, reshape, type PlanProposal, type ReshapeOp } from "./plan-proposals.ts";
 import { DelegationBoundaryError, assertHumanAuthority, commandAction, grantFor, nonDelegatableClassOf, type Authority, type DelegationGrant } from "./delegation-boundary.ts";
@@ -1377,6 +1376,7 @@ export class SquadManager extends EventEmitter {
 
 	async start(): Promise<void> {
 		await this.materialiseAutoLandGrant();
+		await this.materialiseColdStart();
 		// Recovery only matters for a daemon with prior state. A fresh start has nothing to reconnect,
 		// reap, or adopt — and a fresh-state manager must NOT reap the shared sockets dir out from under
 		// a concurrent daemon (or test). reconnectLive (use live) → reapOrphans → adopt worktree context.
@@ -3791,6 +3791,59 @@ export class SquadManager extends EventEmitter {
 	 * Deliberately does NOT re-grant after a revocation — otherwise every restart would silently undo
 	 * a human taking the permission back, which is the exact failure this concern exists to prevent.
 	 */
+	/** The node the fleet's own org-level records hang from. Created once, reused forever. */
+	static readonly ROOT_NODE_ID = "fleet";
+
+	/**
+	 * On a fresh install the product knows nothing about this person, and concern 16's whole point is
+	 * that it says so out loud: six defaults marked BORROWED from other teams, one question that has no
+	 * default at all (out-of-hours contact), and a ledger of what it cannot yet know.
+	 *
+	 * Without this the learning state is never created, which means `proposalSampleFloor` always returns
+	 * undefined, the borrowed defaults never exist, and cold start is a module nobody calls. Idempotent:
+	 * an existing state is never overwritten, or every restart would silently undo a person's answers.
+	 */
+	private async materialiseColdStart(): Promise<void> {
+		try {
+			const nodes = new NodeStore(this.store);
+			const rootId = SquadManager.ROOT_NODE_ID;
+			if (!(await nodes.get(rootId))) {
+				await nodes.create({ id: rootId, kind: "plan", title: "the fleet", state: "working", createdAt: Date.now() });
+			}
+			const records = new NodeRecordStore(this.store, (m) => this.log("warn", `node-records: ${m}`));
+			if ((await records.list(rootId)).some((record) => record.kind === "learning-state")) return;
+			await records.put(coldStartLearningState(rootId, Date.now()));
+			this.log("info", "cold start: recorded six borrowed defaults and the unknowns ledger — nothing here was learned from you yet");
+		} catch (err) {
+			this.log("warn", `cold start not recorded: ${errText(err)}`);
+		}
+	}
+
+	/**
+	 * How often stall detection fired, and how often it was wrong. Concern 13's verify list requires
+	 * this to be surfaced — the reference shows "stalls noticed 2 in 8 weeks · 0 false". A detector
+	 * whose false-positive rate nobody can see is one people learn to ignore.
+	 */
+	async planMotionHealth(nodeId: string, now = Date.now()): Promise<{ noticed: number; falsePositive: number }> {
+		try {
+			const records = (await new NodeRecordStore(this.store).list(nodeId)).filter((record): record is PlanMotionRecord => record.kind === "plan-motion");
+			return planMotionMetrics(records, now);
+		} catch (err) {
+			this.log("warn", `plan motion health unavailable for ${nodeId}: ${errText(err)}`);
+			return { noticed: 0, falsePositive: 0 };
+		}
+	}
+
+	/** The learning state: what is borrowed, what is unknown, and what would settle each. */
+	async learningState(): Promise<NodeRecord | undefined> {
+		try {
+			return (await new NodeRecordStore(this.store).list(SquadManager.ROOT_NODE_ID)).find((record) => record.kind === "learning-state");
+		} catch (err) {
+			this.log("warn", `learning state unavailable: ${errText(err)}`);
+			return undefined;
+		}
+	}
+
 	private async materialiseAutoLandGrant(): Promise<void> {
 		if (!this.autoLand) return;
 		try {

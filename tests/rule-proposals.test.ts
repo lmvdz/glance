@@ -208,10 +208,14 @@ test("answering a gate-class pending leaves a decision record; a routine approva
 	// A gate-class question is exactly the kind a rule might one day settle.
 	host.onUi(rec, { method: "confirm", id: "gate_1", title: "Take the reversible option?", message: "revert or retry?" });
 	await mgr.applyCommand({ type: "answer", id: dto.id, requestId: "gate_1", value: "yes" }, LOCAL_ACTOR);
-	await Bun.sleep(60);
-
+	// Poll rather than sleep a fixed amount: the decision write is fire-and-forget and shares its file
+	// lock with summary regeneration, so any constant here is a flake waiting for a slower machine.
 	const records = new NodeRecordStore(new FileStore(stateDir));
-	const decisions = (await records.list(dto.id)).filter((record) => record.kind === "decision");
+	let decisions = (await records.list(dto.id)).filter((record) => record.kind === "decision");
+	for (let attempt = 0; attempt < 100 && decisions.length === 0; attempt++) {
+		await Bun.sleep(20);
+		decisions = (await records.list(dto.id)).filter((record) => record.kind === "decision");
+	}
 	expect(decisions).toHaveLength(1);
 	expect(decisions[0]).toMatchObject({ question: "Take the reversible option?", chose: "yes", decidedBy: LOCAL_ACTOR.id, reason: "gate-class" });
 

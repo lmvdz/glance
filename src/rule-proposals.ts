@@ -1,3 +1,25 @@
+/**
+ * rule-proposals.ts — noticing that a human keeps making the same decision, and offering to stop asking.
+ *
+ * There is no settings page for autonomy, and that is the point. A rule is never configured; it is
+ * proposed from decisions the person actually made, and it is stored as their own sentence so it can
+ * be quoted verbatim wherever it decides work.
+ *
+ * Three properties make a proposal honest, and all three are enforced here rather than left to the
+ * caller:
+ *
+ * 1. **It replays real decisions.** Every proposal cites the decision records it was generated from,
+ *    with what was asked, what was chosen, and how long it took. A proposal that cannot show its
+ *    evidence is a configuration prompt with better manners.
+ * 2. **It states what it would NOT have caught.** The design's own example keeps a credential
+ *    interruption visible and says plainly that the rule would not have touched it. A rule that
+ *    oversells its reach is worse than no rule, because the human calibrates on the overselling.
+ * 3. **It refuses to generalise across different reasons.** Four "yes"es to four different kinds of
+ *    question is not a pattern, it is a coincidence with a sample size.
+ *
+ * Nothing here writes a rule. A proposal is an offer; only a human's sentence becomes a rule.
+ */
+
 import { nonDelegatableClassOf } from "./delegation-boundary.ts";
 import type { DecisionRecord, NodeRecord } from "./node-records.ts";
 import { proposalSampleFloor } from "./unknowns.ts";
@@ -14,7 +36,11 @@ export interface RuleProposal {
 	sentence: string;
 }
 
-/** The verbatim question is the only safe subject: fuzzy similarity would silently stretch a rule. */
+/**
+ * The question a decision is "about", used to tell repetitions apart. Deliberately the verbatim
+ * question rather than a fuzzy match: two questions that merely look similar are two questions, and
+ * generalising across them is how a rule ends up settling something nobody agreed to.
+ */
 function subject(decision: DecisionRecord): string {
 	return decision.question.trim().toLowerCase();
 }
@@ -26,8 +52,15 @@ function minutes(ms: number): string {
 }
 
 /**
- * Propose rules only from repeated, consistent decisions. The unknowns ledger can raise the floor
- * for an unsettled subject; an offer below its own declared evidence requirement is never shown.
+ * Propose rules from a node's decision history.
+ *
+ * Fails closed in the ways that matter: decisions in the non-delegatable class never generate a
+ * proposal (no rule may widen that boundary, so offering one would be offering something that cannot
+ * be accepted), and neither do actions whose class says they always reach a person.
+ *
+ * The unknowns ledger (concern 16) can RAISE the floor for a subject it has not settled yet — an offer
+ * made below its own declared evidence requirement would be the product contradicting itself in the
+ * same breath. It can never lower it.
  */
 export function proposeRules(records: readonly NodeRecord[], opts: { sampleFloor?: number } = {}): RuleProposal[] {
 	const floor = Math.max(MIN_SAMPLE, opts.sampleFloor ?? MIN_SAMPLE);
@@ -65,6 +98,10 @@ export function proposeRules(records: readonly NodeRecord[], opts: { sampleFloor
 	return proposals.sort((a, b) => b.evidence.length - a.evidence.length || a.action.localeCompare(b.action));
 }
 
+/**
+ * The proposal as the human reads it. Every clause states a fact AND what it means, and the last
+ * clause is the one that matters most: what this would not have caught.
+ */
 function proposalSentence(evidence: DecisionRecord[], choice: string, wouldNotHaveCaught: DecisionRecord[], medianLatencyMs: number): string {
 	const times = evidence.length;
 	const question = evidence[0]!.question.trim();

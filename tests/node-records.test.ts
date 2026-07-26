@@ -162,6 +162,7 @@ const samples: Record<(typeof nodeRecordKinds)[number], NodeRecord> = {
 		direction: "upward",
 		markdown: "Current state: input.",
 		sources: ["record:decision-41", "plan:plans/room-threads/06-node-summaries.md"],
+	},
 	"learning-state": {
 		kind: "learning-state",
 		id: "l1",

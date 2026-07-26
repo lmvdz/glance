@@ -29,8 +29,7 @@ import type { NodeRecord, RetentionRecord } from "./node-records.ts";
  * them. Kept as an explicit list rather than a predicate so the exhaustiveness test can assert that
  * every kind was considered.
  */
-export const preservedKinds = ["decision", "rule", "objection", "instruction-readback", "human-authority", "delegation-boundary", "agent-profile"] as const;
-export const preservedKinds = ["decision", "rule", "objection", "instruction-readback", "human-authority", "delegation-boundary", "learning-state"] as const;
+export const preservedKinds = ["decision", "rule", "objection", "instruction-readback", "human-authority", "delegation-boundary", "agent-profile", "learning-state"] as const;
 export type PreservedKind = (typeof preservedKinds)[number];
 
 /**
@@ -130,7 +129,6 @@ function describe(record: NodeRecord): string {
 			return `${record.borrowedDefaults.length} borrowed defaults and ${record.unknowns.length} declared unknowns`;
 	}
 }
-	}
 
 /**
  * How a compacted record must be introduced wherever it is read. Returned as a sentence rather than a

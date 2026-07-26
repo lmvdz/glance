@@ -331,8 +331,11 @@ test("NodeRecordStore: associated evidence round-trips and fails closed through 
 			{ id: `${name}-authority`, nodeId, kind: "human-authority", humanId: "human", role: "accountable", createdAt: 8 },
 			{ id: `${name}-handover`, nodeId, kind: "handover", fromActorId: "a", toActorId: "b", carried: ["context"], notCarried: ["the reasoning"], staleEvidenceIds: [`${name}-evidence`], reverifyAgainstRef: "origin/main", createdAt: 9 },
 			{ id: `${name}-retention`, nodeId, kind: "retention", authorizedBy: "human", compactedAt: 10, cut: ["tool logs"], preserved: ["the decision", "every human sentence"], fidelity: "compacted", createdAt: 10 },
+			// agent-profile arrived with concern 18 but had no parity sample — a kind that is never written
+			// through both stores is a kind whose persistence nobody has checked.
+			{ id: `${name}-profile`, nodeId, kind: "agent-profile", agentId: "wren", roleDefault: "implementer", status: "provisional", checking: { requiredUnits: 5, checkedUnits: 2, reviewerId: "db:lars" }, createdAt: 11 },
 			{ id: `summary:${nodeId}:upward`, nodeId, kind: "summary", direction: "upward", markdown: "Current state: working.", sources: [`record:${name}-decision`], createdAt: 11 },
-			{ id: `${name}-learning`, nodeId, kind: "learning-state", borrowedDefaults: [{ id: "merge", sentence: "Nobody merges to main without you.", reversal: "Withdraw this default in one action.", status: "borrowed" }], outOfHoursContact: "unset", unknowns: [{ id: "decisions", statement: "Which decisions you care about.", settlingEvidence: "Five identical answers.", requiredSampleSize: 5, costOfNotKnowing: "The fleet keeps asking.", proposalSubjects: ["*"] }], createdAt: 11 },
+			{ id: `${name}-learning`, nodeId, kind: "learning-state", borrowedDefaults: [{ id: "merge", sentence: "Nobody merges to main without you.", reversal: "Withdraw this default in one action.", status: "borrowed" }], outOfHoursContact: "unset", unknowns: [{ id: "decisions", statement: "Which decisions you care about.", settlingEvidence: "Five identical answers.", requiredSampleSize: 5, costOfNotKnowing: "The fleet keeps asking.", proposalSubjects: ["*"] }], createdAt: 12 },
 		];
 		for (const record of samples) await records.put(record);
 		// Byte-for-byte, in both stores: FileStore and DbStore must not disagree about what was written.

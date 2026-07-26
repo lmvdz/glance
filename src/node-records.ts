@@ -290,12 +290,9 @@ export type HumanAuthorityRecord = typeof HumanAuthoritySchema.Type;
 export type HandoverRecord = typeof HandoverSchema.Type;
 export type RetentionRecord = typeof RetentionSchema.Type;
 export type NodeSummaryRecord = typeof NodeSummarySchema.Type;
-export type NodeRecord = typeof NodeRecordSchema.Type;
-export const nodeRecordKinds = ["rule", "delegation-boundary", "instruction-readback", "objection", "plan-motion", "evidence", "decision", "human-authority", "handover", "retention", "summary"] as const;
-export const nodeRecordKinds = ["rule", "delegation-boundary", "instruction-readback", "objection", "plan-motion", "evidence", "agent-profile", "decision", "human-authority", "handover", "retention"] as const;
 export type LearningStateRecord = typeof LearningStateSchema.Type;
 export type NodeRecord = typeof NodeRecordSchema.Type;
-export const nodeRecordKinds = ["rule", "delegation-boundary", "instruction-readback", "objection", "plan-motion", "evidence", "decision", "human-authority", "handover", "retention", "learning-state"] as const;
+export const nodeRecordKinds = ["rule", "delegation-boundary", "instruction-readback", "objection", "plan-motion", "evidence", "agent-profile", "decision", "human-authority", "handover", "retention", "summary", "learning-state"] as const;
 
 const decode = Schema.decodeUnknownResult(NodeRecordSchema);
 
