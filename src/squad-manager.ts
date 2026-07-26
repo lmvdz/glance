@@ -237,6 +237,7 @@ import { ChannelStore, DEFAULT_CHANNEL_ID, type ChannelEntry, type ClientChannel
 import { NodeStore, type NodeState } from "./nodes.ts";
 import { ForgedCardError, assertAuthentic, projectsToRoom, type CardProvenance } from "./projection-classes.ts";
 import { coldStartLearningState } from "./unknowns.ts";
+import { assessReversal, costEventsFrom, shouldDiscloseCost, summariseCost, type CostSummary, type ReversalAssessment, type ReversalNode } from "./decision-impact.ts";
 import { NodeRecordStore, type NodeRecord, type InstructionReadbackRecord, type ObjectionRecord, type PlanMotionRecord } from "./node-records.ts";
 import { approveIrreversible, beginInstruction, overruleObjection, raiseObjection, recordObjectionOutcome, rejectIrreversible, type InstructionExecution } from "./instructions.ts";
 import { regenerateNodeSummaries } from "./node-summaries.ts";
@@ -3832,6 +3833,51 @@ export class SquadManager extends EventEmitter {
 			this.log("warn", `plan motion health unavailable for ${nodeId}: ${errText(err)}`);
 			return { noticed: 0, falsePositive: 0 };
 		}
+	}
+
+	/**
+	 * What undoing a piece of work would actually take, following what was built on it. Reads the live
+	 * roster rather than a separate model — a second view of the same fleet is how two views start
+	 * disagreeing.
+	 */
+	async reversalCost(agentId: string): Promise<ReversalAssessment | undefined> {
+		const rec = this.agents.get(agentId);
+		if (!rec) return undefined;
+		const children = new Map<string, string[]>();
+		for (const { dto } of this.agents.values()) {
+			if (!dto.parentId) continue;
+			children.set(dto.parentId, [...(children.get(dto.parentId) ?? []), dto.id]);
+		}
+		const nodes: ReversalNode[] = [...this.agents.values()].map(({ dto }) => ({
+			id: dto.id,
+			address: dto.id,
+			title: dto.name || dto.id,
+			dependents: children.get(dto.id) ?? [],
+			// A MERGED pull request has left the machine: that part is not undoable by doing more work
+			// here, and a revert is a new change rather than an undo.
+			...(dto.prState === "merged" ? { irreversible: { what: `the merge from ${dto.name || dto.id}`, nearestRepair: "a revert commit, which is a new change rather than an undo" } } : {}),
+		}));
+		return assessReversal(nodes, agentId);
+	}
+
+	/**
+	 * What a node's work spent, and what of that was wasted, read from its retained records.
+	 *
+	 * The disclosure rule is applied HERE rather than left to each caller: a rule every render site
+	 * has to remember is a rule one of them will forget, and the failure is silent — a cost ticker
+	 * appears somewhere it changes nothing, and people learn to stop reading costs entirely. Callers
+	 * ask whether this cost sits beside a choice; the answer to "should this be shown" comes back with
+	 * the number.
+	 */
+	async costSummary(nodeId: string, context: { changesTheDecision?: boolean; notableCents?: number } = {}): Promise<CostSummary & { disclose: boolean }> {
+		let summary: CostSummary;
+		try {
+			summary = summariseCost(costEventsFrom(await new NodeRecordStore(this.store).list(nodeId)));
+		} catch (err) {
+			this.log("warn", `cost summary unavailable for ${nodeId}: ${errText(err)}`);
+			summary = summariseCost([]);
+		}
+		return { ...summary, disclose: shouldDiscloseCost({ changesTheDecision: context.changesTheDecision ?? false, cents: summary.spentCents, notableCents: context.notableCents }) };
 	}
 
 	/** The learning state: what is borrowed, what is unknown, and what would settle each. */
