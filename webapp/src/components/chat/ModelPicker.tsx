@@ -23,7 +23,27 @@ const MONO = "'JetBrains Mono',ui-monospace,monospace";
 export type Effort = 'low' | 'medium' | 'high' | 'max';
 const EFFORTS: Effort[] = ['low', 'medium', 'high', 'max'];
 
-/** Provider inferred from the model id, so the mark and grouping need no extra plumbing. */
+/**
+ * Harness first, provider only as a fallback.
+ *
+ * Grouping by provider was wrong, and the giveaway was `anthropic/claude-opus-4-5` sitting under the
+ * same heading as a bare `claude-opus-4-5`: the same MODEL reached through two different harnesses.
+ * The harness decides where a prompt actually goes; the provider is a substring of an id. Inference is
+ * used only when the daemon told us nothing — an older daemon, or a model configured by env — and it
+ * is LABELLED as a guess when it is one, because a guess presented as a fact is what was wrong here.
+ */
+export function groupOf(option: { value: string; harness?: string }): string {
+  return option.harness?.trim() || `~${providerOf(option.value)}`;
+}
+
+/** A group heading: the harness by name, or an inferred provider marked as inferred. */
+export function groupLabel(group: string): string {
+  if (!group.startsWith('~')) return group;
+  const provider = group.slice(1);
+  return `${PROVIDER_NAME[provider] ?? provider} · inferred`;
+}
+
+/** Provider inferred from the model id. Fallback only — see `groupOf`. */
 export function providerOf(value: string): string {
   const id = value.toLowerCase();
   if (id.includes('claude') || id.includes('opus') || id.includes('sonnet') || id.includes('haiku') || id.includes('fable')) return 'anthropic';
@@ -99,10 +119,25 @@ export function ModelPicker({ options, value, onChange, effort = 'high', onEffor
   const searchRef = useRef<HTMLInputElement | null>(null);
 
   const current = options.find((option) => option.value === value) ?? options[0];
-  const provider = providerOf(current?.value ?? '');
+  // The trigger mark follows the same rule: harness when known, inferred provider otherwise.
+  const provider = current?.harness ? 'default' : providerOf(current?.value ?? '');
   const searchable = options.length > 8;
 
-  const names = useMemo(() => modelDisplayNames(options.map((option) => option.value)), [options]);
+  // Collisions are resolved WITHIN a harness. The same model offered by two harnesses is not a
+  // collision — it is the same name in two places, and disambiguating it by date would suggest a
+  // difference that is not there.
+  const names = useMemo(() => {
+    const merged = new Map<string, string>();
+    const byGroup = new Map<string, string[]>();
+    for (const option of options) {
+      const group = groupOf(option);
+      byGroup.set(group, [...(byGroup.get(group) ?? []), option.value]);
+    }
+    for (const values of byGroup.values()) {
+      for (const [value, name] of modelDisplayNames(values)) merged.set(value, name);
+    }
+    return merged;
+  }, [options]);
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -174,16 +209,16 @@ export function ModelPicker({ options, value, onChange, effort = 'high', onEffor
               </div>
             ) : filtered.map((option, index) => {
               const selected = option.value === value;
-              const optionProvider = providerOf(option.value);
+              const optionGroup = groupOf(option);
               // A quiet provider heading each time the group changes: eleven ids in a row read as one
               // wall, and the mark alone is too small to break it up.
-              const startsGroup = index === 0 || providerOf(filtered[index - 1]!.value) !== optionProvider;
+              const startsGroup = index === 0 || groupOf(filtered[index - 1]!) !== optionGroup;
               const name = names.get(option.value) ?? modelDisplayName(option.value);
               return (
                 <React.Fragment key={option.value || 'default'}>
                   {startsGroup ? (
                     <div className="px-2.5 pb-0.5 pt-2" style={{ fontFamily: MONO, fontSize: 9.5, letterSpacing: '.14em', color: '#4A4A52' }}>
-                      {(PROVIDER_NAME[optionProvider] ?? 'Other').toUpperCase()}
+                      {groupLabel(optionGroup).toUpperCase()}
                     </div>
                   ) : null}
                   <button

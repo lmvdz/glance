@@ -30,3 +30,33 @@ test("provider is inferred from the id, so grouping needs no extra plumbing", ()
   expect(providerOf("grok-4.5")).toBe("xai");
   expect(providerOf("")).toBe("default");
 });
+
+test("grouping follows the DECLARED harness, not a provider guessed from the id", async () => {
+  const { groupOf, groupLabel } = await import("./ModelPicker");
+  // The giveaway that provider-grouping was wrong: the same model reached through two harnesses.
+  const viaOmp = { value: "anthropic/claude-opus-4-5", harness: "omp" };
+  const viaClaudeCode = { value: "claude-opus-4-5", harness: "claude-code" };
+  expect(groupOf(viaOmp)).toBe("omp");
+  expect(groupOf(viaClaudeCode)).toBe("claude-code");
+  expect(groupOf(viaOmp)).not.toBe(groupOf(viaClaudeCode));
+  expect(groupLabel("omp")).toBe("omp");
+});
+
+test("an inferred group says it is inferred", async () => {
+  const { groupOf, groupLabel } = await import("./ModelPicker");
+  // A guess presented as a fact is exactly what was wrong. When the daemon told us nothing, the
+  // heading admits it rather than claiming knowledge it does not have.
+  const untagged = { value: "anthropic/claude-3-opus" };
+  expect(groupOf(untagged)).toBe("~anthropic");
+  expect(groupLabel(groupOf(untagged))).toBe("Anthropic · inferred");
+});
+
+test("the same model in two harnesses is not a name collision", async () => {
+  const { modelDisplayNames } = await import("./ModelPicker");
+  // Disambiguating by date here would suggest a difference that is not there: it is one model, in two
+  // places. Collisions are resolved WITHIN a harness, which is where a real ambiguity lives.
+  const withinOne = modelDisplayNames(["anthropic/claude-3-5-sonnet-20240620", "anthropic/claude-3-5-sonnet-20241022"]);
+  expect(new Set(withinOne.values()).size).toBe(2);
+  const acrossHarnesses = modelDisplayNames(["claude-opus-4-5"]);
+  expect(acrossHarnesses.get("claude-opus-4-5")).toBe("Claude Opus 4.5");
+});
