@@ -232,3 +232,26 @@ test("goalConflict: a goal too short to judge is not a conflict", () => {
 		expect(goalConflict(live, { name: "new", repo: "/r", status: "working", goal })).toBeUndefined();
 	}
 });
+
+test("goalConflict: two ordinary tracker issues in one repo do not collide", () => {
+	// The regression this pins. The dispatcher spawns units from Plane issues, and its own fixture pair
+	// — "issue a / spec a" and "issue b / spec b" — scored 0.67 against each other and blocked the
+	// second spawn. Three dispatcher tests hung on it. The fleet's entire job is running many units in
+	// one repo, so any check that refuses on this shape is unusable regardless of how it is tuned.
+	const live: GoalOwner[] = [{ name: "wren", repo: "/r", status: "working", goal: "issue a\n\nspec a" }];
+	expect(goalConflict(live, { name: "new", repo: "/r", status: "working", goal: "issue b\n\nspec b" })?.strength).not.toBe("structural");
+});
+
+test("goalConflicts: structural overlap is exact, fuzzy overlap is a heuristic — only one may block", () => {
+	// The split the manager relies on. A shared declared reference is exact and blocks a spawn, exactly
+	// as ownershipConflict already blocks on shared paths. Semantic and BM25 similarity over two short
+	// strings is a guess, and a guess must not be able to refuse work outright — it discloses instead.
+	const structural: GoalOwner[] = [{ name: "wren", repo: "/r", status: "working", goal: "unrelated words entirely", planRefs: ["plan-7"] }];
+	expect(goalConflict(structural, { name: "new", repo: "/r", status: "working", goal: "nothing alike here", planRefs: ["plan-7"] })?.strength).toBe("structural");
+
+	const fuzzy: GoalOwner[] = [{ name: "wren", repo: "/r", status: "working", goal: "add request rate limiting to the public API" }];
+	const hit = goalConflict(fuzzy, { name: "new", repo: "/r", status: "working", goal: "build request throttling controls for the API" });
+	expect(hit?.strength).toBe("semantic");
+	// Whatever the strength, the disclosure carries the owner and nothing else — asserted, not assumed.
+	expect(Object.keys(hit ?? {}).sort()).toEqual(["agent", "strength"]);
+});

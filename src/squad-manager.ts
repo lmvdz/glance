@@ -6399,8 +6399,31 @@ export class SquadManager extends EventEmitter {
 				planRefs: opts.featureId ? [opts.featureId] : [],
 			},
 		);
+		// Structural overlap is EXACT — a shared declared path, issue or plan reference — so it blocks,
+		// exactly as `ownershipConflict` already blocks on paths. Semantic and BM25 overlap are
+		// heuristics over short strings, and blocking on those refuses real work: the dispatcher's own
+		// two fixture issues ("issue a / spec a" and "issue b / spec b") score 0.67 against each other,
+		// and the fleet's whole job is spawning many units into one repo. So the fuzzy signals DISCLOSE
+		// instead. That is what the law-firm conflict check actually is — the firm tells you a conflict
+		// exists; it does not refuse to open your mail.
+		if (goalOverlap?.strength === "structural") {
+			throw new Error(`goal overlap conflict: "${goalOverlap.agent}" already owns overlapping work — request access from that owner; the other work's details remain private`);
+		}
 		if (goalOverlap) {
-			throw new Error(`goal overlap conflict: "${goalOverlap.agent}" already owns potentially overlapping work — request access from that owner; the other work's details remain private`);
+			// Disclosure, not refusal: existence and owner, never a word of the other work. Fire and
+			// forget — a failure to disclose must not fail the spawn, but it is logged rather than
+			// swallowed, because a disclosure nobody saw is the same as no disclosure.
+			const room = opts.channelId ?? DEFAULT_CHANNEL_ID;
+			const owner = this.safeEventLabel(goalOverlap.agent);
+			void this.channelStore
+				.appendManager(room, {
+					authorActor: "manager",
+					kind: "system",
+					format: "stage",
+					text: `${this.safeEventLabel(opts.name?.trim() || "new unit")} may be duplicating work ${owner} already has in hand. Both are running — nothing was blocked. If they are the same goal, one of you is about to do the other's week; if they are not, ignore this. Ask ${owner} directly; what they are working on stays private until they say otherwise.`,
+					event: { kind: "goal-overlap", payload: { refs: { unitName: opts.name }, doorSurface: "unit", face: { title: "Possibly duplicated work", owner: goalOverlap.agent, strength: goalOverlap.strength, pinned: { owner: goalOverlap.agent, basis: goalOverlap.strength } } } },
+				})
+				.catch((err) => this.log("warn", `goal-overlap disclosure not delivered to ${room}: ${errText(err)}`));
 		}
 		const produces = opts.produces ?? opts.owns;
 		if (opts.requires?.length) {

@@ -220,6 +220,11 @@ function bm25GoalOwners(live: readonly GoalOwner[], goal: string): Map<string, n
  * matches. Results are intentionally disclosure-safe: callers learn the owner, never the other
  * goal or the evidence that matched it.
  */
+/**
+ * @substrate the ranked list behind `goalConflict`, kept exported because concern 05's verify list
+ * requires that structural overlap outranks semantic and BM25 in the RESULT ORDER — which is only
+ * observable on the full list. The manager discloses the top hit; this is how the ordering is checked.
+ */
 export function goalConflicts(live: readonly GoalOwner[], request: GoalOwner): GoalConflict[] {
 	const candidates = live.filter((owner) => owner.repo === request.repo && owner.status !== "stopped" && owner.status !== "error");
 	const bm25 = request.goal?.trim() ? bm25GoalOwners(candidates, request.goal) : new Map<string, number>();
