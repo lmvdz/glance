@@ -545,6 +545,18 @@ export interface FeatureDecision {
 	 *  entries, each required to name a file the recording run actually touched (the anti-slop floor —
 	 *  DESIGN.md "Delta quality floor"). Absent for every other source. */
 	evidence?: string[];
+	/** Ledger supersession (plans/research-long-horizon-agent-memory): id of a prior decision on the
+	 *  SAME feature that this one replaces. `recordAgentDecision` stamps the target's
+	 *  `supersededBy`/`supersededAt` in the same write — invalidate, never delete, never coexist. */
+	supersedes?: string;
+	/** Set when a later decision replaced this one (the id of the replacement). A superseded decision
+	 *  stays on the record for audit and history, but is EXCLUDED from the fabric/primer projection —
+	 *  a stale fact in a spawned agent's context gets adopted regardless of labeling (compliance
+	 *  trap, arXiv 2607.10608); see the decisions loop in fabric.ts. Server-authoritative through
+	 *  the webapp PATCH merge (`featureDecisions` keeps stored fields, takes only `text`). */
+	supersededBy?: string;
+	/** Epoch ms when superseded — the close of this decision's validity window. */
+	supersededAt?: number;
 }
 
 export interface FeatureRelationship {
