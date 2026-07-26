@@ -1,5 +1,5 @@
 # Instruction readback and the recorded objection
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural

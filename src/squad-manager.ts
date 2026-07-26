@@ -238,6 +238,8 @@ import { NodeStore, type NodeState } from "./nodes.ts";
 import { NodeRecordStore } from "./node-records.ts";
 import { ForgedCardError, assertAuthentic, projectsToRoom, type CardProvenance } from "./projection-classes.ts";
 import { NodeRecordStore, type PlanMotionRecord } from "./node-records.ts";
+import { approveIrreversible, beginInstruction, overruleObjection, raiseObjection, recordObjectionOutcome, rejectIrreversible, type InstructionExecution } from "./instructions.ts";
+import type { InstructionReadbackRecord, ObjectionRecord } from "./node-records.ts";
 import { proposeRules, type RuleProposal } from "./rule-proposals.ts";
 import { assessPlanMotion as assessPlanMotionEvidence, type PlanMotionInput, type PlanMotionAssessment } from "./plan-motion.ts";
 import { compactionNotice, planCompaction, planHandover, type CompactionPlan, type CompactionPolicy, type HandoverPlan } from "./archive.ts";
@@ -3891,6 +3893,43 @@ export class SquadManager extends EventEmitter {
 		});
 	}
 
+
+	/**
+	 * The only manager entry point that releases instruction work. It persists the agent's reading
+	 * before exposing the reversible executor; irreversible permission remains queryable and pending.
+	 */
+	async beginInstruction(
+		readback: InstructionReadbackRecord,
+		reversibleWork: () => Promise<void>,
+	): Promise<InstructionExecution> {
+		return beginInstruction(new NodeRecordStore(this.store, (m) => this.log("warn", `node-records: ${m}`)), readback, reversibleWork);
+	}
+
+	async approveInstructionIrreversible(nodeId: string, instructionId: string): Promise<InstructionReadbackRecord> {
+		return approveIrreversible(new NodeRecordStore(this.store), nodeId, instructionId);
+	}
+
+	async rejectInstructionIrreversible(nodeId: string, instructionId: string): Promise<InstructionReadbackRecord> {
+		return rejectIrreversible(new NodeRecordStore(this.store), nodeId, instructionId);
+	}
+
+	async raiseInstructionObjection(objection: ObjectionRecord): Promise<ObjectionRecord> {
+		return raiseObjection(new NodeRecordStore(this.store), objection);
+	}
+
+	async overruleInstructionObjection(nodeId: string, objectionId: string, overruledBy: string): Promise<ObjectionRecord> {
+		return overruleObjection(new NodeRecordStore(this.store), nodeId, objectionId, overruledBy);
+	}
+
+	async recordInstructionObjectionOutcome(
+		nodeId: string,
+		objectionId: string,
+		outcome: string,
+		matchedPrediction: boolean,
+		at = Date.now(),
+	): Promise<ObjectionRecord> {
+		return recordObjectionOutcome(new NodeRecordStore(this.store), nodeId, objectionId, outcome, matchedPrediction, at);
+	}
 
 	/**
 	 * What the fleet would offer to stop asking about, for one node — generated from decisions this
