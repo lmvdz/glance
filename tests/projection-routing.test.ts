@@ -283,7 +283,7 @@ test("pending request and room card are one needs-you substrate and both resolve
 	if (!isEventPayload(opened.event?.payload)) throw new Error("bad open payload");
 	expect(opened.event.payload.face.pendingStatus).toBe("pending");
 	expect(opened.event.payload.face.pendingId).toBe("gate_req-1");
-	expect(opened.event.payload.face.title).toBe("Needs you · Approve deploy");
+	expect(opened.event.payload.face.title).toBe(`Needs you · Approve deploy — ${LOCAL_ACTOR.id} is accountable.`);
 	expect(opened.event.payload.face.body).toBe("ship it?");
 	expect(opened.event.payload.face.tone).toBe("warning");
 	expect(opened.event.payload.face.pinned).toEqual({ agent: "unit-c", age: "just now" });
@@ -299,7 +299,7 @@ test("pending request and room card are one needs-you substrate and both resolve
 	expect(isEventPayload(resolved.event?.payload)).toBe(true);
 	if (!isEventPayload(resolved.event?.payload)) throw new Error("bad resolved payload");
 	expect(resolved.id).not.toBe(opened.id);
-	expect(resolved.event.payload.face.title).toBe("Resolved · Approve deploy");
+	expect(resolved.event.payload.face.title).toBe(`Resolved · Approve deploy — ${LOCAL_ACTOR.id} is accountable.`);
 	expect(resolved.event.payload.face.tone).toBe("success");
 	expect(resolved.event.payload.face.detail).toContain("Original pending card remains unchanged");
 	await mgr.stop();
@@ -396,7 +396,7 @@ test("routine tool approvals never become room cards — only gate-class pending
 	const card = await gateCard;
 	expect(isEventPayload(card.event?.payload)).toBe(true);
 	if (!isEventPayload(card.event?.payload)) throw new Error("bad payload");
-	expect(card.event.payload.face.title).toBe("Needs you · GATE: ship to production?");
+	expect(card.event.payload.face.title).toBe(`Needs you · GATE: ship to production? — ${LOCAL_ACTOR.id} is accountable.`);
 	await mgr.stop();
 });
 
