@@ -238,6 +238,7 @@ import { NodeStore, type NodeState } from "./nodes.ts";
 import { NodeRecordStore } from "./node-records.ts";
 import { proposeRules, type RuleProposal } from "./rule-proposals.ts";
 import { compactionNotice, planCompaction, planHandover, type CompactionPlan, type CompactionPolicy, type HandoverPlan } from "./archive.ts";
+import { consequenceSentence, reshape, type PlanProposal, type ReshapeOp } from "./plan-proposals.ts";
 import { DelegationBoundaryError, assertHumanAuthority, commandAction, grantFor, nonDelegatableClassOf, type Authority, type DelegationGrant } from "./delegation-boundary.ts";
 import { buildTrace, traceMaxSpans, traceSampleRatio, traceSpansEnabled, type TraceResponse } from "./spans.ts";
 import { traceExporterFromEnv, type TraceExportQueue } from "./trace-exporter.ts";
@@ -3886,6 +3887,47 @@ export class SquadManager extends EventEmitter {
 	/** What moves to the next agent and what does not, stated before the handover is confirmed. */
 	async planHandover(nodeId: string, from: string, to: string, opts: { now?: number; ref?: string } = {}): Promise<HandoverPlan> {
 		return planHandover(await new NodeRecordStore(this.store).list(nodeId), { from, to, now: opts.now ?? Date.now(), ref: opts.ref });
+	}
+
+	/** Plans a person has been shown. A proposal is never work — see `startProposal`. */
+	async planProposals(status?: PlanProposal["status"]): Promise<PlanProposal[]> {
+		const all = await this.store.listPlanProposals();
+		return status ? all.filter((proposal) => proposal.status === status) : all;
+	}
+
+	/** Record a proposal, with the consequence sentence a person reads before deciding. */
+	async proposePlan(proposal: PlanProposal): Promise<{ proposal: PlanProposal; consequence: string }> {
+		if (!proposal.originalWords.trim()) throw new Error("a proposal keeps the person's own words — there is nothing to derive from an empty sentence");
+		if (proposal.units.length > 0 && proposal.needsClarification) {
+			// Asking and proposing at once means the units were built on a guess the planner itself
+			// flagged as unsafe. It asks BEFORE spawning, or it proposes; never both.
+			throw new Error("a proposal that needs clarification proposes no units");
+		}
+		await this.store.putPlanProposal(proposal);
+		return { proposal, consequence: consequenceSentence(proposal) };
+	}
+
+	/** Change the shape before it starts — split, merge, reorder, drop. Approve/reject is not review. */
+	async reshapeProposal(id: string, op: ReshapeOp): Promise<{ proposal: PlanProposal; consequence: string }> {
+		const proposal = (await this.store.listPlanProposals()).find((candidate) => candidate.id === id);
+		if (!proposal) throw new Error(`there is no proposal ${id}`);
+		if (proposal.status !== "proposed") throw new Error(`${id} has already started — its shape is the work now, and changing it is steering, not planning`);
+		const next: PlanProposal = { ...proposal, units: reshape(proposal.units, op) };
+		await this.store.putPlanProposal(next);
+		return { proposal: next, consequence: consequenceSentence(next) };
+	}
+
+	/** Starting is one deliberate act. It cannot happen as a side effect of looking at a proposal. */
+	async startProposal(id: string, at = Date.now()): Promise<PlanProposal> {
+		const proposal = (await this.store.listPlanProposals()).find((candidate) => candidate.id === id);
+		if (!proposal) throw new Error(`there is no proposal ${id}`);
+		if (proposal.needsClarification) throw new Error(`${id} is still waiting on an answer: ${proposal.needsClarification}`);
+		if (proposal.units.length === 0) throw new Error(`${id} proposes no units — there is nothing to start`);
+		if (proposal.status === "started") return proposal;
+		if (proposal.status === "abandoned") throw new Error(`${id} was abandoned; propose it again rather than reviving it silently`);
+		const started: PlanProposal = { ...proposal, status: "started", startedAt: at };
+		await this.store.putPlanProposal(started);
+		return started;
 	}
 
 	async delegationGrants(): Promise<DelegationGrant[]> {
