@@ -1,5 +1,5 @@
 # Cards land at the node they describe
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -7,7 +7,30 @@ TOUCHES: src/squad-manager.ts (projectedChannelId → projectedNodeId), src/serv
 BLOCKED_BY: 01
 MODE: afk
 
-## Landed so far
+## Completed 2026-07-25
+
+`src/projection-classes.ts` replaces the binary `ESCALATION_CARD_KINDS` list with a declared table:
+every event class states where it projects AND **why**, in a sentence written for someone who disagrees
+with the choice. A projection table with no reasons is a volume knob with more steps, which is what
+concerns 26 and 27 were both symptoms of.
+
+The room stays small. `unit-spawned`, `turn-finished`, `verification-ran`, `pr-opened` and
+`return-emit` all land at the node — "that tests RAN is not a result; the verdict projects, the run
+does not."
+
+**Provenance travels with the card and is checked before it is written.** A unit may say anything about
+itself and nothing about anyone else, so a card whose subject is a different node is refused as a
+forgery regardless of which emit site produced it — and it is logged as REFUSED rather than as a
+transient failure, because those want different responses. A card that interrupts a person must also
+carry either openable evidence or the rule that decided it; a claim a person cannot open is one they
+have to take on trust, which is the opposite of a proof card.
+
+An unclassified event stays at its node. That is deliberately the OPPOSITE default from the delegation
+boundary, for a stated reason: there, an unclassified autonomous action is refused because the cost of
+a wrong guess is irreversible. Here the cost of a missed card is that someone looks at the node, and
+the cost of an unearned one is that every card beside it stops being read.
+
+## Landed earlier
 
 Node addressing works: routine lifecycle telemetry lands at the unit's node channel, escalation classes
 surface in the unit's own room, and a node channel inherits the visibility and memberships of the room
