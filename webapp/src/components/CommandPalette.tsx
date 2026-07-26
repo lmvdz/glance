@@ -23,7 +23,7 @@ import { useTaskContext, type AppView } from '../context/TaskContext';
 import { apiJson } from '../lib/api';
 import { reportAnswerRead } from '../lib/attention';
 import { jumpToTaskSearch } from '../lib/jump';
-import { buildRows, moveSelection, type FabricSearchResult, type PaletteRow } from '../lib/commandPalette';
+import { buildRows, moveSelection, paletteNavigationHref, type FabricSearchResult, type PaletteRow } from '../lib/commandPalette';
 import { Kbd } from './kit/Kbd';
 
 /** Icons for the static rows — mirrors the rail's icon grammar so a palette jump and a rail click
@@ -106,6 +106,8 @@ export const CommandPalette: React.FC = () => {
     (row: PaletteRow) => {
       closeCommandPalette();
       if (row.kind === 'nav') {
+        const href = paletteNavigationHref(row.view);
+        if (href) window.location.hash = href;
         setView(row.view);
         return;
       }

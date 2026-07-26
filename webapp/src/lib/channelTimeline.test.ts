@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { channelCardActionHref, dispatchChannelCard, doorLabel, groupLifecycleRuns, latestChannelSeq, reduceChannelEntryWindow } from './channelTimeline';
+import { channelCardActionHref, dispatchChannelCard, doorLabel, groupLifecycleRuns, latestChannelSeq, pinnedChip, reduceChannelEntryWindow } from './channelTimeline';
 import type { ChannelEntry } from './dto';
 
 const entry = (overrides: Partial<ChannelEntry> & Pick<ChannelEntry, 'id' | 'seq'>): ChannelEntry => ({
@@ -230,5 +230,33 @@ describe('door labels', () => {
     const card = dispatchChannelCard(entry({ id: 'tb', seq: 4, event: { kind: 'token-burn-snapshot', payload: { face: { title: 'Fleet burn' } } } }));
     expect(card.href).toBe('#/workbench/economics');
     expect(doorLabel(card.kind)).toBe('Open fleet economics');
+  });
+});
+
+describe('pinned chip identity', () => {
+  test('keeps complete repo and generated branch addresses on demand', () => {
+    expect(pinnedChip('Repo', '/home/lars/src/omp-squad')).toEqual({
+      label: 'Repo',
+      value: 'omp-squad',
+      full: '/home/lars/src/omp-squad',
+    });
+    expect(pinnedChip('Branch', 'squad/rail-earns-its-place-ms14z9hk-4-f9abafdc')).toEqual({
+      label: 'Branch',
+      value: 'rail-earns-its-place',
+      full: 'squad/rail-earns-its-place-ms14z9hk-4-f9abafdc',
+    });
+  });
+
+  test('applies the same address-on-demand rule to land-card branch chips', () => {
+    const card = dispatchChannelCard(entry({
+      id: 'land-branch',
+      seq: 4,
+      event: { kind: 'land-attempt', payload: { refs: { unitId: 'room-09' }, face: { branch: 'squad/rail-earns-its-place-ms14z9hk-4-f9abafdc' } } },
+    }));
+    expect(card.pinned).toContainEqual({
+      label: 'Branch',
+      value: 'rail-earns-its-place',
+      full: 'squad/rail-earns-its-place-ms14z9hk-4-f9abafdc',
+    });
   });
 });

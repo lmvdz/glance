@@ -92,7 +92,7 @@ export function ChannelRail({
           <div className="flex flex-col gap-3">
             {groups.length === 0 ? (
               <div className="mx-0.5 rounded-md border border-dashed border-ink-border-2 px-3 py-2.5 text-[12px] text-ink-text-muted">
-                No active units.
+                No active units yet. Work started from the composer appears here while it runs.
               </div>
             ) : groups.map((group) => (
               <div key={group.key}>
@@ -134,7 +134,6 @@ export function ChannelRail({
               ['Fleet', workbenchHref('fleet'), 'Factory pulse'],
               ['Tasks', workbenchHref('tasks'), 'Plan work'],
               ['Graph', workbenchHref('graph'), 'System map'],
-              ['Capabilities', workbenchHref('capabilities'), 'Tool registry'],
             ].map(([label, href, detail]) => (
               <a key={label} href={href} className={`${ROW} ${ROW_REST}`}>
                 <span className="truncate">{label}</span>
