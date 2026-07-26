@@ -1,5 +1,5 @@
 # Goal-level overlap detection
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -24,6 +24,33 @@ without either being able to read the other's private work.
    week. This is an embedding index over a few thousand short strings.
 4. Cross-boundary disclosure: to a requester without membership, reveal EXISTENCE, OWNER and a
    request-access path — never content. The law-firm conflict check.
+
+## Built 2026-07-25 — with one correction to this concern's own approach
+
+`goalConflicts` in `src/ownership.ts` ranks three signals: structural (shared declared paths, issue or
+plan refs), semantic concept overlap, and BM25 as the lexical fallback. The result carries `{agent,
+strength}` and nothing else — no goal, path, issue or plan reference can be added to it, and a test
+asserts the shape rather than trusting the comment.
+
+**Point 1 of the Approach above was wrong, and this is the correction.** It said to lift
+`ownershipConflict`'s blocking behaviour to goals. Blocking is right for structural overlap — a shared
+declared reference is exact, and paths already block. It is wrong for the fuzzy signals: the
+dispatcher's own two fixture issues ("issue a / spec a" and "issue b / spec b") score 0.67 against each
+other, and three dispatcher tests hung when the first implementation refused the second spawn. The
+fleet's entire job is running many units in one repo, so a heuristic that can refuse a spawn is
+unusable at any threshold.
+
+So structural overlap blocks and the fuzzy signals **disclose** — a manager-authored card naming the
+owner and stating plainly that nothing was blocked. That is what the law-firm conflict check actually
+is: the firm tells you a conflict exists; it does not refuse to open your mail.
+
+**The Verify list was also missing its other half.** It asked for a false-NEGATIVE corpus and said
+nothing about false positives — for a mechanism that can refuse work, that is the expensive direction.
+A false-positive corpus is now in place, and it immediately found a real defect: a one-word goal scored
+a total match after concept folding ("rate" collapses to "rate-limit", 1/1), so a spawn could be
+refused on no evidence at all. Fixed with a minimum-evidence floor counted on RAW terms before folding
+— counting after folding is equally wrong in the other direction, since "rate limiting" is two real
+words that fold to one concept and is a perfectly good goal.
 
 ## Cross-Repo Side Effects
 None.

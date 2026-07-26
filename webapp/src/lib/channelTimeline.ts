@@ -178,7 +178,7 @@ export function dispatchChannelCard(entry: ChannelEntry): ChannelCardView {
   }
   const authorLabel = entryAuthorLabel(entry);
   const landCard = landCardView(entry, entry.event?.payload, authorLabel);
-  if (landCard) return landCard;
+  if (landCard) return { ...landCard, pinned: landCard.pinned.map(({ label, value }) => pinnedChip(label, value)) };
   const face = faceFromPayload(entry.event?.payload);
   const title = face?.title || labelFromKey(eventKind);
   const body = cardBody(face?.body, entry.text, title);

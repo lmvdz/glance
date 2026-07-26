@@ -6,6 +6,7 @@ import { entryTimeLabel } from '../../lib/hub';
 import { hubHref } from '../../lib/router';
 import { channelScrollAfterRowsChange, channelScrollAfterUserScroll, initialChannelScrollState, type ChannelScrollState } from '../../lib/channelScroll';
 import { GateVerdictCard } from './GateVerdictCard';
+import { attachmentIdFromPath, extractAttachedImagePaths, stripAttachedImageMarkers } from '../../lib/spawnProposal';
 
 const toneClass: Record<ChannelCardTone, string> = {
   neutral: 'border-ink-border bg-panel text-ink-text-body',
@@ -59,10 +60,13 @@ function EmptyTimeline() {
     </div>
   );
 }
-
-const ChannelTimelineRow = memo(function ChannelTimelineRow({ view, onReply }: { view: ChannelCardView; onReply?: (entry: ChannelEntry) => void }) {
+export const ChannelTimelineRow = memo(function ChannelTimelineRow({ view, onReply }: { view: ChannelCardView; onReply?: (entry: ChannelEntry) => void }) {
   const user = view.entry.kind === 'user';
   const Icon = iconClass[view.kind];
+  const attachmentIds = extractAttachedImagePaths(view.body)
+    .map(attachmentIdFromPath)
+    .filter((id): id is string => id !== undefined);
+  const visibleBody = stripAttachedImageMarkers(view.body);
   if (view.kind === 'message') {
     return (
       <li data-entry-id={view.id} className={`group flex ${user ? 'justify-end' : 'justify-start'}`}>
@@ -77,7 +81,27 @@ const ChannelTimelineRow = memo(function ChannelTimelineRow({ view, onReply }: {
               <span className="line-clamp-2">{view.replyContext.body}</span>
             </a>
           ) : null}
-          <p className="whitespace-pre-wrap break-words">{view.body}</p>
+          {visibleBody ? <p className="whitespace-pre-wrap break-words">{visibleBody}</p> : null}
+          {attachmentIds.length > 0 ? (
+            <div className="mt-2 flex flex-wrap gap-2" aria-label={`${attachmentIds.length} attached image${attachmentIds.length === 1 ? '' : 's'}`}>
+              {attachmentIds.map((id) => (
+                <a
+                  key={id}
+                  href={`/api/chat-attachments/${id}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="block overflow-hidden rounded-xl border border-ink-border-2 bg-ink focus-visible:ring-2 focus-visible:ring-ember focus-visible:ring-offset-2 focus-visible:ring-offset-ink"
+                >
+                  <img
+                    src={`/api/chat-attachments/${id}`}
+                    alt={`Image attached by ${view.authorLabel}`}
+                    loading="lazy"
+                    className="max-h-80 max-w-full object-contain"
+                  />
+                </a>
+              ))}
+            </div>
+          ) : null}
           <div className="mt-2 flex items-center gap-2">
             {onReply ? (
               <button

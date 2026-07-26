@@ -121,6 +121,12 @@ export const CapabilityPanel = () => {
           </div>
         )}
 
+        {capabilities.packs.length === 0 && publicCatalog.length === 0 && (
+          <p className="mb-8 text-center text-sm text-ink-text-muted">
+            No public packs are available in this room. When a trusted catalog is connected, its recipes will appear here.
+          </p>
+        )}
+
         {/* ── trusted packs, sorted attention-first, state as the hero ── */}
         {summary.packs.length > 0 && (
           <section className="mb-8">

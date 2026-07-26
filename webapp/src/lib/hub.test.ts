@@ -59,6 +59,24 @@ describe('Hub reductions', () => {
     expect(html).toContain('#fleet');
   });
 
+  test('room rail keeps setup-only capabilities in the command palette, not a standing door', () => {
+    const html = renderToStaticMarkup(
+      React.createElement(ChannelRail, {
+        channels: [],
+        activeChannelId: 'fleet',
+        agents: [],
+        selectedAgentId: undefined,
+        onSelectAgent: () => {},
+        workbenchActive: false,
+      }),
+    );
+    expect(html).toContain('No active units yet. Work started from the composer appears here while it runs.');
+    expect(html).toContain('Fleet');
+    expect(html).toContain('Tasks');
+    expect(html).toContain('Graph');
+    expect(html).not.toContain('Capabilities');
+  });
+
   test('presence count counts humans, not sockets', () => {
     expect(presenceCount({ users: [{ id: 'u1', displayName: 'Lars', socketCount: 5 }] })).toBe(1);
   });

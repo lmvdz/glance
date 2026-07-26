@@ -15,6 +15,7 @@
  */
 
 import type { AppView } from '../context/TaskContext';
+import { normalizeWorkbenchView, workbenchHref } from './router';
 
 export type PaletteRowKind = 'nav' | 'action' | 'fabric';
 
@@ -66,6 +67,12 @@ export const NAV_ROWS: readonly PaletteNavRow[] = [
   { kind: 'nav', id: 'nav-capabilities', label: 'Capabilities', view: 'capabilities' },
   { kind: 'nav', id: 'nav-org', label: 'Organization settings', view: 'org' },
 ];
+
+/** The room shell is hash-routed; preserve a palette jump as a shareable, reloadable destination. */
+export function paletteNavigationHref(view: AppView): string | undefined {
+  const workbenchView = normalizeWorkbenchView(view);
+  return workbenchView ? workbenchHref(workbenchView) : undefined;
+}
 
 export const SEARCH_TASKS_ROW: PaletteActionRow = {
   kind: 'action',

@@ -104,7 +104,7 @@ import { assertMerged, deletePendingPr, ensurePr, isFullyConfirmedPendingPr, lan
 import { ghJson } from "./gh.ts";
 import { repoIdentity } from "./repo-identity.ts";
 import { autoLandOnSuccess } from "./autoland.ts";
-import { ownershipConflict, requiresConflict, outOfScopeWrites, producesAllowlist } from "./ownership.ts";
+import { goalConflict, ownershipConflict, requiresConflict, outOfScopeWrites, producesAllowlist } from "./ownership.ts";
 import { buildRecentlyLandedBlock, type RecentlyLandedEntry } from "./landed-context.ts";
 import { headCommit, isFresh, proofFingerprint, proofFor, proofGate, runProof, setProofRoot, sweepProofs } from "./proof.ts";
 import { setGateLogRoot, sweepGateLogs } from "./gate-logs.ts";
@@ -6382,6 +6382,48 @@ export class SquadManager extends EventEmitter {
 				...opts,
 				appendSystemPrompt: [opts.appendSystemPrompt, specBlock].filter((text): text is string => typeof text === "string" && text.length > 0).join("\n\n") || undefined,
 			};
+		}
+		const goalOverlap = goalConflict(
+			[...this.agents.values()].map(({ dto, options }) => ({
+				...dto,
+				goal: options.task ?? options.workflowState?.goal ?? dto.workflowState?.goal,
+				issueRefs: [options.issue?.id, options.issue?.identifier].filter((ref): ref is string => typeof ref === "string"),
+				planRefs: options.featureId ? [options.featureId] : [],
+			})),
+			{
+				...opts,
+				name: opts.name?.trim() || "new agent",
+				status: "working",
+				goal: opts.task ?? opts.workflowState?.goal,
+				issueRefs: [opts.issue?.id, opts.issue?.identifier].filter((ref): ref is string => typeof ref === "string"),
+				planRefs: opts.featureId ? [opts.featureId] : [],
+			},
+		);
+		// Structural overlap is EXACT — a shared declared path, issue or plan reference — so it blocks,
+		// exactly as `ownershipConflict` already blocks on paths. Semantic and BM25 overlap are
+		// heuristics over short strings, and blocking on those refuses real work: the dispatcher's own
+		// two fixture issues ("issue a / spec a" and "issue b / spec b") score 0.67 against each other,
+		// and the fleet's whole job is spawning many units into one repo. So the fuzzy signals DISCLOSE
+		// instead. That is what the law-firm conflict check actually is — the firm tells you a conflict
+		// exists; it does not refuse to open your mail.
+		if (goalOverlap?.strength === "structural") {
+			throw new Error(`goal overlap conflict: "${goalOverlap.agent}" already owns overlapping work — request access from that owner; the other work's details remain private`);
+		}
+		if (goalOverlap) {
+			// Disclosure, not refusal: existence and owner, never a word of the other work. Fire and
+			// forget — a failure to disclose must not fail the spawn, but it is logged rather than
+			// swallowed, because a disclosure nobody saw is the same as no disclosure.
+			const room = opts.channelId ?? DEFAULT_CHANNEL_ID;
+			const owner = this.safeEventLabel(goalOverlap.agent);
+			void this.channelStore
+				.appendManager(room, {
+					authorActor: "manager",
+					kind: "system",
+					format: "stage",
+					text: `${this.safeEventLabel(opts.name?.trim() || "new unit")} may be duplicating work ${owner} already has in hand. Both are running — nothing was blocked. If they are the same goal, one of you is about to do the other's week; if they are not, ignore this. Ask ${owner} directly; what they are working on stays private until they say otherwise.`,
+					event: { kind: "goal-overlap", payload: { refs: { unitName: opts.name }, doorSurface: "unit", face: { title: "Possibly duplicated work", owner: goalOverlap.agent, strength: goalOverlap.strength, pinned: { owner: goalOverlap.agent, basis: goalOverlap.strength } } } },
+				})
+				.catch((err) => this.log("warn", `goal-overlap disclosure not delivered to ${room}: ${errText(err)}`));
 		}
 		const produces = opts.produces ?? opts.owns;
 		if (opts.requires?.length) {
