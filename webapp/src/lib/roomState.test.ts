@@ -195,3 +195,17 @@ describe("the roster projected as room state", () => {
 		expect(nodes.find((n) => n.id === "c1")!.dependents).toBeUndefined();
 	});
 });
+
+describe("copy that only breaks on screen", () => {
+	test("the omitted-events line agrees in number", () => {
+		// Seen live: "1 quieter event are not listed here". Grammar is not a detail in a product whose
+		// first law is that the copy IS the design — a reader who catches the machine mis-speaking
+		// starts discounting everything else it says.
+		const one = handoverSummary({ awayMs: 0, finished: [], changedDirection: [], wentUnanswered: [], omitted: 1 }).join(" ");
+		expect(one).toContain("1 quieter event is not listed here");
+		expect(one).toContain("it is on its own node.");
+		const many = handoverSummary({ awayMs: 0, finished: [], changedDirection: [], wentUnanswered: [], omitted: 3 }).join(" ");
+		expect(many).toContain("3 quieter events are not listed here");
+		expect(many).toContain("they are on their own nodes.");
+	});
+});

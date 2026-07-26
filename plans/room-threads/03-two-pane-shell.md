@@ -1,5 +1,5 @@
 # The two-pane shell, coupled by depth
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -42,9 +42,20 @@ must not make work vanish.
 Two of my own defects were caught by these tests: `duration(30s)` rounded up to "1m", and the
 in-flight line was 22 characters that named a state and stopped.
 
-**Still open:** the doors, the folded-run open view, the handover screen rendered (its copy exists and
-is tested), and the depth coupling once you have entered a node. `foldVerdict` and `handoverSummary`
-are built and tested but not yet rendered.
+**Completed 2026-07-26.** Entering is wired: selecting previews and Enter navigates to that node's own
+conversation, verified live — the hash stays on the room while selecting, and moves only on Enter. The
+handover renders in place of the old empty state. The fold carries its verdict and is closed by default.
+
+Four defects were found by booting it rather than by testing it: an empty region rendered a heading over
+blank space; `unit-failed` rendered identically to `unit-spawned`; the omitted-events line said "1
+quieter event ARE not listed"; and every channel described itself as "Fleet channel", including the ones
+that are not. Each is a small lie in a fixed position, which is the kind a reader stops noticing and
+then stops trusting.
+
+Deliberately not built: depth coupling BELOW a node (entering a node shows its conversation, but its
+children do not yet re-couple), and the rail's "Active work" still lists what the state pane lists. That
+duplication is real and concern 09's rule covers it — but which of the two a person actually reads is
+what a cold boot answers, so it is left for concern 23 rather than guessed at.
 
 ## Goal
 State on one side, that node's conversation on the other. Drilling into state changes both, so the

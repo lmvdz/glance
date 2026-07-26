@@ -5,6 +5,7 @@ import { ChannelRail } from './ChannelRail';
 import { ChannelTimeline } from './ChannelTimeline';
 import { AgentRecordPanel } from './AgentRecordPanel';
 import { StatePane } from './StatePane';
+import { QuietRoom } from './QuietRoom';
 import { agentsToRoomNodes } from '../../lib/roomState';
 import { apiJson, jsonInit } from '../../lib/api';
 import { buildPromptCommand, channelAgentSessionId, channelDraftSessionId, ensureConsoleAgent, postChannelMessage } from '../../lib/chat/sendCore';
@@ -41,6 +42,14 @@ function resultTitle(entry: ChannelEntry): string {
   return `${actor || 'message'} · #${entry.seq}`;
 }
 
+/** What this channel IS, said accurately for each kind of channel there is. */
+function channelSubtitle(channel: Channel, selectedAgent?: AgentDTO): string {
+  if (selectedAgent) return `Addressing ${selectedAgent.name || selectedAgent.id}`;
+  if (channel.id === DEFAULT_CHANNEL_ID) return 'Everything the fleet brings to you';
+  if (channel.id.startsWith('node:')) return "This unit's own conversation — its detail stays here rather than in the room";
+  return channel.visibility === 'private' ? 'A private room — only its members can read this' : 'A room you and your team share';
+}
+
 function ChannelHeader({ channel, presence, selectedAgent }: { channel: Channel; presence: PresenceSnapshot; selectedAgent?: AgentDTO }) {
   const count = presenceCount(presence);
   const visible = presence.users.slice(0, 5);
@@ -52,7 +61,10 @@ function ChannelHeader({ channel, presence, selectedAgent }: { channel: Channel;
         <Hash className="h-4 w-4 text-ember" aria-hidden />
         <div className="min-w-0">
           <h1 className="truncate text-sm font-semibold tracking-tight">{channel.name}</h1>
-          <p className="truncate text-[11px] text-ink-text-muted">{selectedAgent ? `Addressing ${selectedAgent.name || selectedAgent.id}` : 'Fleet channel'}</p>
+          {/* Every channel used to describe itself as "Fleet channel", including the ones that are not.
+              A node's own conversation saying it is the fleet room is a small lie in a fixed position,
+              which is the kind a reader stops noticing and then stops trusting. */}
+          <p className="truncate text-[11px] text-ink-text-muted">{channelSubtitle(channel, selectedAgent)}</p>
         </div>
       </div>
       <div className="flex min-w-0 items-center gap-3" aria-label={label}>
@@ -320,7 +332,14 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
           it. Selecting a node here previews; entering is a separate, explicit act (concern 07). */}
       {route.kind === 'workbench' ? null : (
         <aside className="hidden w-72 flex-shrink-0 border-r border-ink-border lg:block" aria-label="Fleet state">
-          <StatePane nodes={agentsToRoomNodes(agents)} now={Date.now()} />
+          <StatePane
+            nodes={agentsToRoomNodes(agents)}
+            now={Date.now()}
+            // Entering navigates to that node's own conversation. The pane's preview promises exactly
+            // this — "Press Enter to read its conversation" — and a promise the UI does not keep is
+            // worse than one it never made, because the reader stops trusting the rest of the copy.
+            onEnter={(node) => { window.location.hash = hubHref(`node:${node.id}`); }}
+          />
         </aside>
       )}
       <main id="omp-main-content" className="flex min-w-0 flex-1 flex-col overflow-hidden bg-ink">
@@ -366,7 +385,17 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
                 </div>
               ) : null}
             </div>
-            <ChannelTimeline entries={entries} loading={loading} error={error} anchorEntryId={anchorEntryId} onReply={(entry) => { setReplyTarget(entry); setReplyFocusKey((key) => key + 1); }} />
+            <ChannelTimeline
+              entries={entries}
+              loading={loading}
+              error={error}
+              anchorEntryId={anchorEntryId}
+              onReply={(entry) => { setReplyTarget(entry); setReplyFocusKey((key) => key + 1); }}
+              // A quiet ROOM is the designed state — unit telemetry stays at its node — so the empty
+              // room is a handover of what happened, not a promise that something will. Only the root
+              // room gets this; a quiet node channel really is just an empty conversation.
+              emptyState={activeChannelId === DEFAULT_CHANNEL_ID ? <QuietRoom nodes={agentsToRoomNodes(agents)} now={Date.now()} /> : undefined}
+            />
             <div className="border-t border-ink-border bg-ink">
               {typingLabel ? <div className="flex h-6 items-center gap-2 px-4 text-[11px] text-ink-text-muted">{typingLabel}</div> : null}
               {sending ? <div className="flex h-6 items-center gap-2 px-4 text-[11px] text-ink-text-muted"><Loader2 className="h-3 w-3 animate-spin" aria-hidden /> Posting…</div> : null}

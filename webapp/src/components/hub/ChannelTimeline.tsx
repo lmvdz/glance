@@ -196,7 +196,7 @@ function LifecycleRun({ views, onReply }: { views: ChannelCardView[]; onReply?: 
   );
 }
 
-export function ChannelTimeline({ entries, loading, error, anchorEntryId, onReply }: { entries: ChannelEntry[]; loading: boolean; error: string; anchorEntryId?: string; onReply?: (entry: ChannelEntry) => void }) {
+export function ChannelTimeline({ entries, loading, error, anchorEntryId, onReply, emptyState }: { entries: ChannelEntry[]; loading: boolean; error: string; anchorEntryId?: string; onReply?: (entry: ChannelEntry) => void; emptyState?: React.ReactNode }) {
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const scrollStateRef = useRef<ChannelScrollState>(initialChannelScrollState());
   const [stableRows, setStableRows] = useState<ChannelCardView[]>([]);
@@ -237,7 +237,7 @@ export function ChannelTimeline({ entries, loading, error, anchorEntryId, onRepl
 
   return (
     <div ref={scrollerRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto bg-[#09090a]" data-scroll-mode={scrollStateRef.current.mode}>
-      {loading ? <LoadingTimeline /> : error ? <div className="m-4 flex items-center gap-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200" role="alert"><AlertCircle className="h-4 w-4" aria-hidden /> {error}</div> : stableRows.length === 0 ? <EmptyTimeline /> : <ol className="mx-auto w-full max-w-4xl space-y-3 p-4 pb-10">{runs.map((run) => <LifecycleRun key={run[0]!.id} views={run} onReply={onReply} />)}</ol>}
+      {loading ? <LoadingTimeline /> : error ? <div className="m-4 flex items-center gap-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200" role="alert"><AlertCircle className="h-4 w-4" aria-hidden /> {error}</div> : stableRows.length === 0 ? (emptyState ?? <EmptyTimeline />) : <ol className="mx-auto w-full max-w-4xl space-y-3 p-4 pb-10">{runs.map((run) => <LifecycleRun key={run[0]!.id} views={run} onReply={onReply} />)}</ol>}
     </div>
   );
 }
