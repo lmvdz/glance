@@ -236,7 +236,8 @@ test("create() with an Effect-shaped task: pointer fires iff the UNIT'S repo car
 	const skillDir = path.join(repo, ".claude", "skills", "effect");
 	await fs.mkdir(skillDir, { recursive: true });
 	await fs.writeFile(path.join(skillDir, "SKILL.md"), ["---", "name: effect", "description: t", "verified-against: effect@4.0.0-beta.98", "---", "b"].join("\n"));
-	const dto2 = await mgr.create({ repo, name: "u4", task: "write an Effect service layer for the ingest pipeline", approvalMode: "yolo", autoRoute: false });
+	// A second, distinct Effect-shaped goal proves the pointer path without competing for u3's work.
+	const dto2 = await mgr.create({ repo, name: "u4", task: "add Effect schema validation for deployment config", approvalMode: "yolo", autoRoute: false });
 	const rec2 = (mgr as unknown as InternalHost).agents.get(dto2.id)!;
 	const prompt2 = rec2.options.appendSystemPrompt ?? "";
 	expect(prompt2).toContain(DO_NOT_BLOCK);

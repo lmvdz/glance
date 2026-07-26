@@ -128,3 +128,29 @@ test("create(): DTO carries scope contract and defaults produces to owns", async
 
 	await mgr.stop();
 });
+
+test("create(): rejects duplicate goal work before spawning and discloses only the owner", async () => {
+	delete process.env.OMP_SQUAD_RESOURCE_GATE;
+	const repo = await makeRepo();
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "goal-overlap-state-"));
+	const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "goal-overlap-wt-"));
+	tmps.push(stateDir, worktreeBase);
+
+	const mgr = new SquadManager({ stateDir, worktreeBase });
+	await mgr.start();
+	const host: DriverFactoryHost = mgr as unknown as DriverFactoryHost;
+	host.makeDriver = () => new ReadyDriver();
+
+	await mgr.create({ name: "rate-owner", repo, approvalMode: "yolo", task: "Build request throttling controls" });
+	const rejection = await mgr.create({ name: "new-team", repo, approvalMode: "yolo", task: "Implement rate limiting" }).then(
+		() => undefined,
+		(error: unknown) => error instanceof Error ? error.message : String(error),
+	);
+
+	expect(rejection).toContain('"rate-owner"');
+	expect(rejection).toContain("request access");
+	expect(rejection).not.toContain("request throttling");
+	expect(rejection).not.toContain("rate limiting");
+	expect(await fs.readdir(worktreeBase)).toHaveLength(1);
+	await mgr.stop();
+});

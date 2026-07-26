@@ -104,7 +104,7 @@ import { assertMerged, deletePendingPr, ensurePr, isFullyConfirmedPendingPr, lan
 import { ghJson } from "./gh.ts";
 import { repoIdentity } from "./repo-identity.ts";
 import { autoLandOnSuccess } from "./autoland.ts";
-import { ownershipConflict, requiresConflict, outOfScopeWrites, producesAllowlist } from "./ownership.ts";
+import { goalConflict, ownershipConflict, requiresConflict, outOfScopeWrites, producesAllowlist } from "./ownership.ts";
 import { buildRecentlyLandedBlock, type RecentlyLandedEntry } from "./landed-context.ts";
 import { headCommit, isFresh, proofFingerprint, proofFor, proofGate, runProof, setProofRoot, sweepProofs } from "./proof.ts";
 import { setGateLogRoot, sweepGateLogs } from "./gate-logs.ts";
@@ -6382,6 +6382,25 @@ export class SquadManager extends EventEmitter {
 				...opts,
 				appendSystemPrompt: [opts.appendSystemPrompt, specBlock].filter((text): text is string => typeof text === "string" && text.length > 0).join("\n\n") || undefined,
 			};
+		}
+		const goalOverlap = goalConflict(
+			[...this.agents.values()].map(({ dto, options }) => ({
+				...dto,
+				goal: options.task ?? options.workflowState?.goal ?? dto.workflowState?.goal,
+				issueRefs: [options.issue?.id, options.issue?.identifier].filter((ref): ref is string => typeof ref === "string"),
+				planRefs: options.featureId ? [options.featureId] : [],
+			})),
+			{
+				...opts,
+				name: opts.name?.trim() || "new agent",
+				status: "working",
+				goal: opts.task ?? opts.workflowState?.goal,
+				issueRefs: [opts.issue?.id, opts.issue?.identifier].filter((ref): ref is string => typeof ref === "string"),
+				planRefs: opts.featureId ? [opts.featureId] : [],
+			},
+		);
+		if (goalOverlap) {
+			throw new Error(`goal overlap conflict: "${goalOverlap.agent}" already owns potentially overlapping work — request access from that owner; the other work's details remain private`);
 		}
 		const produces = opts.produces ?? opts.owns;
 		if (opts.requires?.length) {

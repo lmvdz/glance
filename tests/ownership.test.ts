@@ -5,7 +5,7 @@
  */
 
 import { expect, test } from "bun:test";
-import { type Owner, isWithinAny, outOfScopeWrites, ownershipConflict, ownershipOverlap, producesAllowlist, requiresConflict } from "../src/ownership.ts";
+import { type GoalOwner, type Owner, goalConflict, goalConflicts, isWithinAny, outOfScopeWrites, ownershipConflict, ownershipOverlap, producesAllowlist, requiresConflict } from "../src/ownership.ts";
 
 test("ownershipOverlap: exact, nested (both ways), and normalized slashes hit", () => {
 	expect(ownershipOverlap(["src/web"], ["src/web"])).toEqual(["src/web"]);
@@ -91,6 +91,67 @@ test("requiresConflict: read deps ignore read-only, terminal, and disjoint agent
 	expect(requiresConflict([owner()], "/r", ["src/server.ts"])).toBeUndefined();
 	expect(requiresConflict([owner()], "/other", ["src/web"])).toBeUndefined();
 	expect(requiresConflict([owner()], "/r", [])).toBeUndefined();
+});
+
+const goalOwner = (over: Partial<GoalOwner> = {}): GoalOwner => ({
+	repo: "/r",
+	name: "private-team",
+	status: "working",
+	goal: "Build request throttling controls",
+	...over,
+});
+
+test("goalConflict: semantically equivalent goals conflict without shared paths", () => {
+	const conflict = goalConflict(
+		[goalOwner()],
+		{ repo: "/r", name: "new-team", status: "working", goal: "Implement rate limiting" },
+	);
+	expect(conflict).toEqual({ agent: "private-team", strength: "semantic" });
+});
+
+test("goalConflict: BM25 catches a lower-overlap lexical duplicate", () => {
+	const conflict = goalConflict(
+		[goalOwner({ goal: "Build billing invoice reconciliation dashboard" })],
+		{ repo: "/r", name: "new-team", status: "working", goal: "Implement billing invoice worker monitoring" },
+	);
+	expect(conflict).toEqual({ agent: "private-team", strength: "bm25" });
+});
+
+test("goalConflict: disclosure names the owner without leaking private work content", () => {
+	const privateGoal = "Replace the confidential acquisition pricing rules";
+	const result = goalConflict(
+		[goalOwner({ name: "legal-owner", goal: privateGoal, issueRefs: ["matter-42"] })],
+		{ repo: "/r", name: "requester", status: "working", issueRefs: ["matter-42"] },
+	);
+	expect(result).toEqual({ agent: "legal-owner", strength: "structural" });
+	expect(JSON.stringify(result)).not.toContain(privateGoal);
+	expect(JSON.stringify(result)).not.toContain("matter-42");
+	expect(JSON.stringify(result)).not.toContain("goal");
+});
+
+test("goalConflicts: structural declarations outrank semantic matches", () => {
+	const conflicts = goalConflicts(
+		[
+			goalOwner({ name: "semantic-owner", goal: "Implement request throttling" }),
+			goalOwner({ name: "structural-owner", goal: "Unrelated work", produces: ["src/rate-limit.ts"] }),
+		],
+		{ repo: "/r", name: "requester", status: "working", goal: "Implement rate limiting", produces: ["src/rate-limit.ts"] },
+	);
+	expect(conflicts).toEqual([
+		{ agent: "structural-owner", strength: "structural" },
+		{ agent: "semantic-owner", strength: "semantic" },
+	]);
+});
+
+test("goalConflict: known duplicate naming corpus has no false negatives", () => {
+	const duplicates: Array<[string, string]> = [
+		["Implement rate limiting", "Build request throttling controls"],
+		["Add authentication to the API", "Implement API authorization"],
+		["Create a billing webhook retry queue", "Build retry queue for billing webhooks"],
+	];
+	for (const [first, second] of duplicates) {
+		expect(goalConflict([goalOwner({ goal: first })], { repo: "/r", name: "requester", status: "working", goal: second })?.agent).toBe("private-team");
+	}
 });
 
 // ── produces audit (concern 08) ──────────────────────────────────────────────
