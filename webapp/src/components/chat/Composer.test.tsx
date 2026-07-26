@@ -3,11 +3,13 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
   applySuggestionChip,
   ComposerAttachmentChip,
+  ComposerImageThumb,
   assembleSendText,
   frictionCaptureBody,
   clampGrownHeight,
   COMPOSER_MAX_HEIGHT_PX,
   formatPasteSize,
+  imageAttachmentError,
   INITIAL_RECALL_STATE,
   pasteChipLabel,
   PASTE_CHIP_THRESHOLD,
@@ -17,6 +19,7 @@ import {
   recallOlder,
   shouldChipPaste,
   type HistoryRecallState,
+  type ImageAttachment,
   type PasteChip,
 } from "./Composer";
 
@@ -135,6 +138,15 @@ test("assembleSendText handles a chip-only send (no typed text)", () => {
   expect(assembleSendText("", chips)).toBe("```\njust this\n```");
 });
 
+test("imageAttachmentError keeps rejected files visible with a concrete recovery message", () => {
+  expect(imageAttachmentError({ name: "notes.pdf", type: "application/pdf", size: 10 } as File)).toBe(
+    "notes.pdf is not a supported image. Attach a PNG, JPEG, GIF, WebP, or another raster image instead.",
+  );
+  expect(imageAttachmentError({ name: "huge.png", type: "image/png", size: 4 * 1024 * 1024 + 1 } as File)).toBe(
+    "huge.png is 4.0 MB. Images must be 4 MB or smaller before upload.",
+  );
+});
+
 // ---------------------------------------------------------------------------
 // Suggestion chips: insert, never destroy the draft, never auto-send.
 // ---------------------------------------------------------------------------
@@ -169,6 +181,13 @@ test("ComposerAttachmentChip shows the preview and insert-inline escape hatch wh
   );
   expect(html).toContain("the full pasted content");
   expect(html).toContain("Insert inline");
+});
+
+test("ComposerImageThumb keeps a failed preview visible and names the retry action", () => {
+  const image: ImageAttachment = { id: "image-1", dataUrl: "data:image/png;base64,abc", width: 1, height: 1, annotations: [], annotated: false };
+  const html = renderToStaticMarkup(<ComposerImageThumb image={image} status="failed" onAnnotate={() => {}} onRemove={() => {}} />);
+  expect(html).toContain('alt="Image ready to send"');
+  expect(html).toContain("Upload failed. Send again to retry.");
 });
 
 // ---------------------------------------------------------------------------

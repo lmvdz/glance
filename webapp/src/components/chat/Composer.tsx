@@ -9,6 +9,7 @@ import {
   downscaleToPng,
   isRasterImageType,
   joinImagePromptRefs,
+  MAX_UPLOAD_BYTES,
   nextImageAttachmentId,
   uploadChatAttachment,
 } from '../../lib/imageAttachment';
@@ -106,6 +107,17 @@ export function formatPasteSize(byteLength: number): string {
 
 export function pasteChipLabel(text: string): string {
   return `Pasted text · ${formatPasteSize(new TextEncoder().encode(text).length)}`;
+}
+
+/** Explain why a selected file cannot be attached before it disappears from the picker/drop zone. */
+export function imageAttachmentError(file: Pick<File, 'name' | 'size' | 'type'>): string | null {
+  if (!isRasterImageType(file.type)) {
+    return `${file.name || 'That file'} is not a supported image. Attach a PNG, JPEG, GIF, WebP, or another raster image instead.`;
+  }
+  if (file.size > MAX_UPLOAD_BYTES) {
+    return `${file.name || 'That image'} is ${(file.size / (1024 * 1024)).toFixed(1)} MB. Images must be 4 MB or smaller before upload.`;
+  }
+  return null;
 }
 
 /**
@@ -237,24 +249,32 @@ export const ComposerAttachmentChip = ({
  *  as `ComposerAttachmentChip`. */
 export const ComposerImageThumb = ({
   image,
+  status,
   onAnnotate,
   onRemove,
 }: {
   image: ImageAttachment;
+  status?: 'uploading' | 'failed';
   onAnnotate: () => void;
   onRemove: () => void;
 }) => (
   <div className="group relative h-16 w-16 flex-shrink-0 overflow-hidden rounded-lg border border-ink-border">
-    <img src={image.dataUrl} alt="Attached" className="h-full w-full object-cover" />
+    <img src={image.dataUrl} alt="Image ready to send" className="h-full w-full object-cover" />
     {image.annotations.length > 0 && (
       <span className="absolute bottom-1 left-1 h-1.5 w-1.5 rounded-full bg-amber-500" aria-hidden title={`${image.annotations.length} annotation${image.annotations.length === 1 ? '' : 's'}`} />
+    )}
+    {status && (
+      <div className={`absolute inset-0 flex items-center justify-center p-1 text-center text-[10px] font-medium leading-tight ${status === 'failed' ? 'bg-red-950/80 text-red-100' : 'bg-black/65 text-white'}`} role={status === 'failed' ? 'alert' : 'status'}>
+        {status === 'failed' ? 'Upload failed. Send again to retry.' : 'Uploading…'}
+      </div>
     )}
     <div className="absolute inset-0 flex items-start justify-end gap-0.5 bg-black/0 p-0.5 opacity-0 transition-opacity group-hover:bg-black/20 group-hover:opacity-100 focus-within:opacity-100">
       <button
         type="button"
         aria-label="Annotate image"
         onClick={onAnnotate}
-        className="flex h-5 w-5 items-center justify-center rounded-full bg-white/90 text-ink-text-label hover:bg-panel/90 text-ink-text-body"
+        disabled={status === 'uploading'}
+        className="flex h-5 w-5 items-center justify-center rounded-full bg-white/90 text-ink-text-label hover:bg-panel/90 text-ink-text-body disabled:opacity-50"
       >
         <Pencil className="h-3 w-3" aria-hidden />
       </button>
@@ -262,7 +282,8 @@ export const ComposerImageThumb = ({
         type="button"
         aria-label="Remove image"
         onClick={onRemove}
-        className="flex h-5 w-5 items-center justify-center rounded-full bg-white/90 text-ink-text-label hover:bg-panel/90 text-ink-text-body"
+        disabled={status === 'uploading'}
+        className="flex h-5 w-5 items-center justify-center rounded-full bg-white/90 text-ink-text-label hover:bg-panel/90 text-ink-text-body disabled:opacity-50"
       >
         <X className="h-3 w-3" aria-hidden />
       </button>
@@ -420,6 +441,8 @@ export const Composer = ({
   const [annotatingId, setAnnotatingId] = useState<string | null>(null);
   const [isCapturing, setIsCapturing] = useState(false);
   const [isSending, setIsSending] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<{ completed: number; total: number } | null>(null);
+  const [failedImageIds, setFailedImageIds] = useState<string[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -587,20 +610,23 @@ export const Composer = ({
     try {
       const downscaled = await downscaleToPng(source);
       setImages((prev) => [...prev, { id: nextImageAttachmentId(), ...downscaled, annotations: [], annotated: false }]);
-      setAttachError(null);
     } catch {
-      setAttachError('Could not read that image — try a different file.');
+      setAttachError('Could not read that image, so it was not attached. Try a different image file.');
     }
   };
 
   const addImageFiles = (files: Iterable<File>) => {
-    for (const file of files) {
-      if (isRasterImageType(file.type)) void addImageFromSource(file);
+    const rejected = Array.from(files).map((file) => ({ file, error: imageAttachmentError(file) }));
+    const firstError = rejected.find(({ error }) => error)?.error;
+    if (firstError) setAttachError(firstError);
+    for (const { file, error } of rejected) {
+      if (!error) void addImageFromSource(file);
     }
   };
 
   const removeImage = (id: string) => {
     setImages((prev) => prev.filter((img) => img.id !== id));
+    setFailedImageIds((prev) => prev.filter((failedId) => failedId !== id));
     setAnnotatingId((prev) => (prev === id ? null : prev));
   };
 
@@ -664,39 +690,41 @@ export const Composer = ({
     const typed = input.trim();
     if ((!typed && chips.length === 0 && images.length === 0) || isLoading || isSending) return;
     setIsSending(true);
+    setFailedImageIds([]);
+    setAttachError(null);
+    setUploadProgress(images.length > 0 ? { completed: 0, total: images.length } : null);
     try {
-      // Upload every attached image BEFORE the turn goes out — the outgoing text needs each
-      // one's server-assigned path to fence in (D2/D5's artifact-path transport decision;
-      // imageAttachment.ts's header comment covers why there's no inline-image channel to use
-      // instead). A failed upload aborts the whole send rather than silently dropping the image
-      // or sending a broken reference — the draft (text/chips/images) is left intact so the
-      // operator can just retry.
-      const uploaded = await Promise.all(images.map((img) => uploadChatAttachment(img.dataUrl)));
-      const imageRefs = joinImagePromptRefs(uploaded.map((u) => u.path));
+      const uploadedPaths: string[] = [];
+      for (const [index, image] of images.entries()) {
+        try {
+          const uploaded = await uploadChatAttachment(image.dataUrl);
+          uploadedPaths.push(uploaded.path);
+          setUploadProgress({ completed: index + 1, total: images.length });
+        } catch (error) {
+          setFailedImageIds([image.id]);
+          const reason = error instanceof Error && error.message ? ` ${error.message}` : '';
+          throw new Error(`Couldn't upload image ${index + 1} of ${images.length}.${reason} The preview is still attached; check the image or connection, then send again to retry.`);
+        }
+      }
+      const imageRefs = joinImagePromptRefs(uploadedPaths);
       const textToSend = [assembleSendText(typed, chips), imageRefs].filter(Boolean).join('\n\n');
       const nextHistory = typed ? pushPromptHistory(promptHistory, typed) : promptHistory;
-      // The cleared arrays are shared between setState and the snapshot rebase below — the flush
-      // dirty check compares by identity, so they must be the same instances the next render sees.
       const clearedChips: PasteChip[] = [];
       const clearedImages: ImageAttachment[] = [];
       setInput('');
       setChips(clearedChips);
       setExpandedChipId(null);
       setImages(clearedImages);
-      setAttachError(null);
       setPromptHistory(nextHistory);
       setRecallState(INITIAL_RECALL_STATE);
-      // Clear-on-send must also clear the PERSISTED draft — a stale draft reappearing after a
-      // successful send is data loss in reverse. Synchronous (not debounced), with the snapshot
-      // ref updated in the same tick so a beforeunload racing the re-render can't flush the
-      // pre-send draft back. History rides along: it's the one piece that grows on send.
       draftSnapshotRef.current = { sessionId: boundSessionIdRef.current, input: '', promptHistory: nextHistory, chips: clearedChips, images: clearedImages };
       flushDraftRef.current();
       onSend(textToSend);
-    } catch {
-      setAttachError('Could not attach one or more images — check your connection and try sending again.');
+    } catch (error) {
+      setAttachError(error instanceof Error && error.message ? error.message : 'Could not upload the image. The preview is still attached; check your connection and send again to retry.');
     } finally {
       setIsSending(false);
+      setUploadProgress(null);
     }
   };
 
@@ -921,11 +949,21 @@ export const Composer = ({
         {images.length > 0 && (
           <div className="flex flex-wrap gap-1.5 px-2.5 pt-2" aria-label="Attached images">
             {images.map((image) => (
-              <ComposerImageThumb key={image.id} image={image} onAnnotate={() => setAnnotatingId(image.id)} onRemove={() => removeImage(image.id)} />
+              <ComposerImageThumb
+                key={image.id}
+                image={image}
+                status={isSending ? 'uploading' : failedImageIds.includes(image.id) ? 'failed' : undefined}
+                onAnnotate={() => setAnnotatingId(image.id)}
+                onRemove={() => removeImage(image.id)}
+              />
             ))}
           </div>
         )}
-
+        {uploadProgress && (
+          <div className="px-2.5 pt-2 text-caption text-ink-text-muted" role="status">
+            Uploading image {uploadProgress.completed + 1} of {uploadProgress.total}. The message will send when every preview is stored.
+          </div>
+        )}
         {attachError && (
           <div className="px-2.5 pt-2 text-caption text-red-600 dark:text-red-400" role="alert">
             {attachError}
