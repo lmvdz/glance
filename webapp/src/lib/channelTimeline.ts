@@ -94,6 +94,10 @@ function toneFor(kind: string, face?: PointerCardFace): ChannelCardTone {
   if (kind === 'token-burn-snapshot') return face?.status === 'deny' ? 'destructive' : face?.status === 'ask' ? 'warning' : 'info';
   if (kind === 'mention-confirm-required') return 'warning';
   if (kind === 'mention-steer-failed') return 'destructive';
+  // A unit that stopped in a way it did not choose rendered NEUTRAL — identical to a unit starting.
+  // Every lifecycle card looked the same, so the one that mattered was invisible among the ones that
+  // did not. Failure is the loudest lifecycle fact there is.
+  if (kind === 'unit-failed') return 'destructive';
   if (kind === 'spawn-proposal' || kind === 'mention-steer' || kind === 'plan-card') return 'info';
   return 'neutral';
 }
@@ -245,4 +249,31 @@ export function reduceChannelEntryWindow(entries: ChannelEntry[], incoming: Chan
 
 export function latestChannelSeq(entries: readonly ChannelEntry[]): number {
   return entries.reduce((max, entry) => Math.max(max, entry.seq), 0);
+}
+
+/**
+ * What a folded run of lifecycle events actually amounts to.
+ *
+ * The fold's job is to let a person NOT read 38 events, which only works if the summary makes a
+ * claim they could disagree with. "38 lifecycle updates" is a count: it tells you the size of the
+ * thing you are not reading and nothing about whether you should. A verdict — "nothing unusual", or
+ * the one thing that was — is what makes the fold safe to leave folded.
+ */
+const ALARMING_RUN_KINDS: Partial<Record<ChannelCardView['kind'], true>> = { 'unit-failed': true, 'mention-steer-failed': true, 'land-assessment': true };
+
+export function runSummary(views: readonly ChannelCardView[]): { count: number; agents: string[]; kinds: string[]; unusual?: string } {
+  const agents = [...new Set(views.map((view) => view.pinned.find((item) => item.label === 'Unit')?.value ?? view.authorLabel).filter(Boolean))];
+  const kinds = [...new Set(views.map((view) => view.kind).filter((kind) => kind !== 'unknown-event'))];
+  // Anything the renderer already considered alarming is, by definition, the thing a person would
+  // have wanted surfaced — so it is surfaced rather than folded away under a reassuring count.
+  // Keyed on KIND as well as tone. Tone is a rendering decision that can be wrong — it was: a failed
+  // unit rendered neutral until this was found — and a fold that inherits that mistake hides exactly
+  // the run a person needed. Absence of an alarming tone must not read as "nothing happened".
+  const alarming = views.filter((view) => view.tone === 'destructive' || view.tone === 'warning' || ALARMING_RUN_KINDS[view.kind]);
+  const unusual = alarming.length === 0
+    ? undefined
+    : alarming.length === 1
+      ? alarming[0]!.title
+      : `${alarming.length} of these need a look, starting with ${alarming[0]!.title}`;
+  return { count: views.length, agents, kinds, ...(unusual ? { unusual } : {}) };
 }

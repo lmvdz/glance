@@ -145,7 +145,11 @@ describe('unit lifecycle cards', () => {
       expect(rendered.kind).toBe(kind);
       expect(rendered.title).toBe(`${kind} title`);
       expect(malformed.kind).toBe(kind);
-      expect(malformed.tone).toBe('neutral');
+      // Deliberate change: severity that comes from the KIND survives an unreadable payload. A
+      // `unit-failed` whose payload did not parse is still a failure, and rendering it neutral is the
+      // absence-as-answer bug — the payload was missing, so the card said nothing was wrong. Every
+      // other lifecycle kind takes its severity from its payload and correctly falls back to neutral.
+      expect(malformed.tone).toBe(kind === 'unit-failed' ? 'destructive' : 'neutral');
       expect(malformed.title).toBe(kind.replace(/-/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase()));
     }
   });
