@@ -166,7 +166,7 @@ export function handoverSummary(input: {
 	lines.push(
 		input.omitted === 0
 			? "That is everything, not a selection."
-			: `${input.omitted} quieter event${input.omitted === 1 ? "" : "s"} are not listed here; they are on their own nodes.`,
+			: `${input.omitted} quieter event${input.omitted === 1 ? " is" : "s are"} not listed here; ${input.omitted === 1 ? "it is" : "they are"} on ${input.omitted === 1 ? "its" : "their"} own node${input.omitted === 1 ? "" : "s"}.`,
 	);
 	return lines;
 }
