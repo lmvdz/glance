@@ -236,6 +236,7 @@ import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
 import { ChannelStore, DEFAULT_CHANNEL_ID, type ChannelEntry, type ClientChannelPost, type Channel, type CreateChannelInput, type ChannelMemberInput } from "./channels.ts";
 import { NodeStore, type NodeState } from "./nodes.ts";
 import { NodeRecordStore } from "./node-records.ts";
+import { ForgedCardError, assertAuthentic, projectsToRoom, type CardProvenance } from "./projection-classes.ts";
 import { proposeRules, type RuleProposal } from "./rule-proposals.ts";
 import { compactionNotice, planCompaction, planHandover, type CompactionPlan, type CompactionPolicy, type HandoverPlan } from "./archive.ts";
 import { consequenceSentence, reshape, type PlanProposal, type ReshapeOp } from "./plan-proposals.ts";
@@ -272,15 +273,6 @@ import {
 	type CapabilityInstallPatch,
 	type CapabilitySnapshot,
 } from "./capabilities/index.ts";
-
-const ESCALATION_CARD_KINDS: Record<string, true> = {
-	[TRANSCRIPT_EVENT_NEEDS_YOU]: true,
-	[TRANSCRIPT_EVENT_GATE_VERDICT]: true,
-	[TRANSCRIPT_EVENT_LAND_MERGE]: true,
-	[TRANSCRIPT_EVENT_PLAN_CARD]: true,
-	[TRANSCRIPT_EVENT_DESIGN_REVISED]: true,
-	[TRANSCRIPT_EVENT_UNIT_FAILED]: true,
-};
 
 const MAX_TRANSCRIPT = 800;
 const POLL_MS = 2500;
@@ -11952,13 +11944,27 @@ export class SquadManager extends EventEmitter {
 			// NOT unconditionally in #fleet. #fleet is org-public, so routing every escalation there
 			// would publish a private room's needs-you, gate and land cards to the whole org.
 			const room = rec.options.channelId ?? rec.dto.channelId ?? DEFAULT_CHANNEL_ID;
-			const card = ESCALATION_CARD_KINDS[event.kind]
-				? await this.channelStore.appendManager(room, input)
-				: await this.channelStore.appendNodeManager(nodeId, input, rec.options.channelId ?? rec.dto.channelId);
+			// Provenance travels WITH the card and is checked before it is written. A unit may say
+			// anything about itself and nothing about anyone else, so a card whose subject is a
+			// different node is a forgery regardless of which emit site produced it.
+			const provenance: CardProvenance = {
+				nodeId,
+				agentId: rec.dto.id,
+				evidenceIds: Object.values(this.projectionRefs(rec, entry)).filter((ref): ref is string => typeof ref === "string" && ref.length > 0),
+			};
+			assertAuthentic(event.kind, provenance, nodeId);
+			const projectedInput = { ...input, event: { ...input.event, payload: { ...input.event.payload, provenance } } };
+			const card = projectsToRoom(event.kind)
+				? await this.channelStore.appendManager(room, projectedInput)
+				: await this.channelStore.appendNodeManager(nodeId, projectedInput, rec.options.channelId ?? rec.dto.channelId);
 			this.emit("event", { type: "channel-entry", channelId: card.channelId, entry: card } satisfies SquadEvent);
 		} catch (err) {
 			this.projectionFailures++;
-			this.log("warn", `projection ${rec.dto.id}/${event.kind} → ${nodeId} failed (${this.projectionFailures} total): ${errText(err)}`);
+			// A forgery is not a transient failure and must not read as one in the log. A projection that
+			// could not be written is worth retrying; a card that claimed to be about someone else's work
+			// is worth investigating.
+			const label = err instanceof ForgedCardError ? "REFUSED as forged" : "failed";
+			this.log("warn", `projection ${rec.dto.id}/${event.kind} → ${nodeId} ${label} (${this.projectionFailures} total): ${errText(err)}`);
 		}
 	}
 
