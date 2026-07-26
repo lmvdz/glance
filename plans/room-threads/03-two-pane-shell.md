@@ -21,6 +21,31 @@ Build against `reference/01-room.html` (busy and quiet) and `reference/02-surfac
 plus `DIRECTION.md` §What we are building. The obsolete "global feed versus coupled panes" fork is
 closed; see the amendment on concern 07.
 
+## Partly built 2026-07-26 — the state side
+
+`webapp/src/lib/roomState.ts` + `StatePane.tsx`, wired into `HubShell` beside the room narrative
+rather than replacing it, which is the home-frame amendment made structural.
+
+**The copy lives in the lib, not in JSX**, so the rules it must satisfy are testable. Every string
+states a fact and what it means, and a test asserts no status line is a bare state word — the rule
+that is hardest to retrofit. Three regions in a fixed order; settled work collapses off the working
+surface but stays readable. Select previews and changes nothing you are reading; Enter is the only
+key that navigates (concern 07).
+
+The alarm band explains rather than counts: at zero it reports elapsed unbroken autonomy and the
+month's best run, and with several at once it says outright that this is a defect in the work rather
+than a list to keep. Parked work carries no elapsed number, however long it has sat, because an age
+beside parked work reads as overdue and parked is a decision. An unknown agent status projects as
+in-flight, never settled — settled work leaves the working surface, so a status nobody recognises
+must not make work vanish.
+
+Two of my own defects were caught by these tests: `duration(30s)` rounded up to "1m", and the
+in-flight line was 22 characters that named a state and stopped.
+
+**Still open:** the doors, the folded-run open view, the handover screen rendered (its copy exists and
+is tested), and the depth coupling once you have entered a node. `foldVerdict` and `handoverSummary`
+are built and tested but not yet rendered.
+
 ## Goal
 State on one side, that node's conversation on the other. Drilling into state changes both, so the
 conversation is always about what you are looking at — and is found by navigating to the thing rather
