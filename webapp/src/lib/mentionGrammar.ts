@@ -91,3 +91,56 @@ function routeForAgent(target: MentionTarget, text: string, mentionText: string)
   if (target.status === 'working' || target.status === 'starting') return { kind: 'confirm', target, text, mentionText };
   return { kind: 'steer', target, text, mentionText };
 }
+
+/**
+ * The token a person sees while typing, and the address it expands to on send.
+ *
+ * The composer used to insert the full `[@pike](omp://agent/pike-ms24cs99-2-0a509ab2)` straight into
+ * the textarea, so you typed to Pike and watched a UUID appear mid-sentence. Painting a chip over it
+ * does not work either: the chip is eight characters wide and the address is forty-five, so the text
+ * after it is shoved across the line by the difference.
+ *
+ * So the visible text carries the token `@pike` and the address is restored at send. Identity at a
+ * glance, address on demand — the same rule the room applies to branches and repos.
+ */
+export function mentionToken(target: MentionTarget): string {
+  return `@${target.label.replace(/\s+/g, '-')}`;
+}
+
+/**
+ * Restore addresses before the text goes on the wire. Unknown tokens are left exactly as typed.
+ *
+ * ONE pass, not one per target: expanding sequentially rewrites text that later passes then match
+ * inside. Expanding "@pike-two" first produces "[@pike two](omp://…)", and a following pass for
+ * "@pike" happily matches the "@pike" now sitting inside that link and corrupts it. A single scan
+ * with the longest token winning at each position cannot do that, because it never revisits what it
+ * has already written.
+ */
+export function expandMentionTokens(text: string, targets: readonly MentionTarget[]): string {
+  if (targets.length === 0) return text;
+  const ordered = [...targets].sort((a, b) => mentionToken(b).length - mentionToken(a).length);
+  let out = '';
+  let i = 0;
+  outer: while (i < text.length) {
+    if (text[i] === '@') {
+      const before = i === 0 ? '' : text[i - 1]!;
+      // A token only counts at a word boundary — "a@pike.dev" is an address, not a mention.
+      if (!/[\w@-]/.test(before)) {
+        for (const target of ordered) {
+          const token = mentionToken(target);
+          if (text.startsWith(token, i)) {
+            const after = text[i + token.length] ?? '';
+            if (!/[\w-]/.test(after)) {
+              out += serializeMention(target);
+              i += token.length;
+              continue outer;
+            }
+          }
+        }
+      }
+    }
+    out += text[i];
+    i += 1;
+  }
+  return out;
+}

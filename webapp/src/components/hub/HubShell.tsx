@@ -4,7 +4,8 @@ import { Composer, type ModelOption } from '../chat/Composer';
 import { ChannelRail } from './ChannelRail';
 import { ChannelTimeline } from './ChannelTimeline';
 import { AgentRecordPanel } from './AgentRecordPanel';
-import { StatePane } from './StatePane';
+import { RoomFrame } from './RoomFrame';
+import { DecisionPanel, type DecisionRequest } from './DecisionPanel';
 import { QuietRoom } from './QuietRoom';
 import { agentsToRoomNodes } from '../../lib/roomState';
 import { apiJson, jsonInit } from '../../lib/api';
@@ -325,78 +326,113 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
     }
   };
 
+  const roomNodes = useMemo(() => agentsToRoomNodes(agents), [agents]);
+  const [answeringId, setAnsweringId] = useState<string | undefined>(undefined);
+
+  // Every gate-class pending across the fleet, in one list, so the panel can say "1 of 3" truthfully
+  // rather than pretending each question arrived alone.
+  const waiting = useMemo(
+    () => agents.flatMap((agent) => (agent.pending ?? []).filter((request) => request.gateClass || request.id.startsWith('gate_')).map((request) => ({ agent, request }))),
+    [agents],
+  );
+
+  const answering = useMemo((): DecisionRequest | undefined => {
+    const index = waiting.findIndex(({ request }) => request.id === answeringId);
+    if (index < 0) return undefined;
+    const { agent, request } = waiting[index]!;
+    return {
+      id: request.id,
+      agentName: agent.name || agent.id,
+      address: agent.name || agent.id,
+      stoppedAgoMs: request.createdAt ? Date.now() - request.createdAt : undefined,
+      question: request.title,
+      context: request.message,
+      // Consequences come from the daemon when it has them; until then the option is shown WITHOUT an
+      // invented one. A made-up consequence is worse than none — it is a promise nobody made.
+      options: (request.options ?? []).map((label) => ({ label, consequence: `${agent.name || agent.id} takes this as the answer and picks the work back up from where it stopped.` })),
+      index: index + 1,
+      total: waiting.length,
+    };
+  }, [waiting, answeringId]);
+
+  const answer = (value: string) => {
+    const found = waiting.find(({ request }) => request.id === answeringId);
+    if (!found) return;
+    sendConsoleCommand({ type: 'answer', id: found.agent.id, requestId: found.request.id, value } as never);
+    setAnsweringId(undefined);
+  };
+  // Plans IN FLIGHT, not every feature ever recorded. The first version counted the whole store and
+  // reported "78 plans" beside two running units — the kind of number that teaches a reader to stop
+  // believing the line it sits in.
+  // Rooms and node conversations, in one list, so the standing panel can answer "where am I".
+  const roomViews = useMemo(
+    () => channels.map((entry) => ({
+      id: entry.id,
+      name: entry.name.startsWith('#') ? entry.name : `#${entry.name}`,
+      unread: entry.unreadCount ?? 0,
+      kind: entry.id.startsWith('node:') ? ('node' as const) : ('room' as const),
+    })),
+    [channels],
+  );
+
+  const livePlans = useMemo(
+    () => new Set(agents.map((agent) => agent.featureId).filter((id): id is string => typeof id === 'string' && id.length > 0)).size,
+    [agents],
+  );
+  const [selectedNodeId, setSelectedNodeId] = useState<string | undefined>(undefined);
+  // One clock for the whole frame, ticking on a minute rather than every render: the room shows
+  // elapsed times, and a value that changes on each paint makes them jitter without being any truer.
+  const [frameNow, setFrameNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setFrameNow(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
   return (
-    <div className="dark flex h-screen w-full overflow-hidden bg-ink text-sm text-ink-text-body">
-      <ChannelRail channels={channels} activeChannelId={activeChannelId} agents={agents} selectedAgentId={selectedAgentId} onSelectAgent={setSelectedAgentId} workbenchActive={route.kind === 'workbench'} />
-      {/* The room is the home frame: the state pane sits BESIDE the room narrative and never replaces
-          it. Selecting a node here previews; entering is a separate, explicit act (concern 07). */}
-      {route.kind === 'workbench' ? null : (
-        <aside className="hidden w-72 flex-shrink-0 border-r border-ink-border lg:block" aria-label="Fleet state">
-          <StatePane
-            nodes={agentsToRoomNodes(agents)}
-            now={Date.now()}
-            // Entering navigates to that node's own conversation. The pane's preview promises exactly
-            // this — "Press Enter to read its conversation" — and a promise the UI does not keep is
-            // worse than one it never made, because the reader stops trusting the rest of the copy.
-            onEnter={(node) => { window.location.hash = hubHref(`node:${node.id}`); }}
-          />
-        </aside>
-      )}
-      <main id="omp-main-content" className="flex min-w-0 flex-1 flex-col overflow-hidden bg-ink">
+    <div className="dark flex h-screen w-full overflow-hidden text-sm" style={{ background: '#070708', color: '#E8E8EA' }}>
+      {/* The room is the home frame, drawn as the reference draws it: the alarm band across the top
+          with the waiting questions readable in place, the conversation as the centre, and the
+          addressable tree on the RIGHT. There is no channel column — the previous attempt kept one and
+          wedged a strip beside it, which produced a room that read as unchanged because it was. */}
+      {route.kind === 'workbench' ? (
+        <ChannelRail channels={channels} activeChannelId={activeChannelId} agents={agents} selectedAgentId={selectedAgentId} onSelectAgent={setSelectedAgentId} workbenchActive />
+      ) : null}
+      <main id="omp-main-content" className="flex min-w-0 flex-1 flex-col overflow-hidden" style={{ background: '#070708' }}>
         {route.kind === 'workbench' ? renderWorkbench(route) : (
-          <>
-            <ChannelHeader channel={channel} presence={presence} selectedAgent={selectedAgent} />
+          <RoomFrame
+            repo={currentProject?.name ?? 'this repo'}
+            rooms={roomViews}
+            activeRoomId={activeChannelId}
+            onOpenRoom={(id) => { window.location.hash = hubHref(id); }}
+            nodes={roomNodes}
+            plans={livePlans}
+            now={frameNow}
+            selectedId={selectedNodeId}
+            onSelect={(node) => setSelectedNodeId(node.id)}
+            onEnter={(node) => {
+              // A waiting node opens its question rather than its transcript: the thing you want when
+              // something is stopped is to answer it, not to read about it.
+              const pending = waiting.find(({ agent }) => agent.id === node.id);
+              if (pending) { setAnsweringId(pending.request.id); return; }
+              setSelectedNodeId(node.id);
+              window.location.hash = hubHref(`node:${node.id}`);
+            }}
+            decision={answering ? <DecisionPanel request={answering} onAnswer={answer} onClose={() => setAnsweringId(undefined)} /> : undefined}
+          >
             {selectedAgent ? <AgentRecordPanel agent={selectedAgent} /> : null}
-            <div className="border-b border-ink-border bg-ink px-4 py-2">
-              <label className="relative block">
-                <span className="sr-only">Search channel history</span>
-                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-text-muted" aria-hidden />
-                <input
-                  value={searchQuery}
-                  onChange={(event) => setSearchQuery(event.target.value)}
-                  placeholder="Search room history"
-                  className="h-9 w-full rounded-full border border-ink-border bg-ink pl-9 pr-9 text-sm text-ink-text placeholder:text-ink-text-subtle focus-visible:ring-2 focus-visible:ring-ember focus-visible:ring-offset-2 focus-visible:ring-offset-ink"
-                />
-                {searchQuery ? (
-                  <button
-                    type="button"
-                    aria-label="Clear search"
-                    onClick={() => setSearchQuery('')}
-                    className="absolute right-1 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full text-ink-text-muted hover:bg-ink-surface hover:text-ink-text-body focus-visible:ring-2 focus-visible:ring-ember focus-visible:ring-offset-2 focus-visible:ring-offset-ink"
-                  >
-                    <X className="h-4 w-4" aria-hidden />
-                  </button>
-                ) : null}
-              </label>
-              {searchQuery.trim() ? (
-                <div className="mt-2 max-h-48 overflow-y-auto rounded-xl border border-ink-border bg-ink shadow-xl">
-                  {searchLoading ? <div className="px-3 py-2 text-xs text-ink-text-muted">Searching…</div> : searchError ? <div className="px-3 py-2 text-xs text-red-300" role="alert">{searchError}</div> : searchResults.length === 0 ? <div className="px-3 py-2 text-xs text-ink-text-muted">No matches in durable history.</div> : (
-                    <ol className="divide-y divide-ink-border">
-                      {searchResults.map((result) => (
-                        <li key={result.entry.id}>
-                          <a href={hubHref(result.entry.channelId, result.entry.id)} onClick={() => setAnchorEntryId(result.entry.id)} className="block px-3 py-2 text-left hover:bg-ink-surface focus-visible:ring-2 focus-visible:ring-ember focus-visible:ring-inset">
-                            <span className="block text-[11px] font-medium text-ink-text-label">{resultTitle(result.entry)}</span>
-                            <span className="mt-0.5 block line-clamp-2 text-xs text-ink-text-muted">{result.snippet}</span>
-                          </a>
-                        </li>
-                      ))}
-                    </ol>
-                  )}
-                </div>
-              ) : null}
-            </div>
             <ChannelTimeline
               entries={entries}
               loading={loading}
               error={error}
               anchorEntryId={anchorEntryId}
               onReply={(entry) => { setReplyTarget(entry); setReplyFocusKey((key) => key + 1); }}
+              replyingToId={replyTarget?.id}
               // A quiet ROOM is the designed state — unit telemetry stays at its node — so the empty
               // room is a handover of what happened, not a promise that something will. Only the root
               // room gets this; a quiet node channel really is just an empty conversation.
               emptyState={activeChannelId === DEFAULT_CHANNEL_ID ? <QuietRoom nodes={agentsToRoomNodes(agents)} now={Date.now()} /> : undefined}
             />
-            <div className="border-t border-ink-border bg-ink">
+            <div style={{ borderTop: '1px solid #1F1F22', background: '#0A0A0B' }}>
               {typingLabel ? <div className="flex h-6 items-center gap-2 px-4 text-[11px] text-ink-text-muted">{typingLabel}</div> : null}
               {sending ? <div className="flex h-6 items-center gap-2 px-4 text-[11px] text-ink-text-muted"><Loader2 className="h-3 w-3 animate-spin" aria-hidden /> Posting…</div> : null}
               {replyTarget ? (
@@ -435,7 +471,7 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
                 onToast={showToast}
               />
             </div>
-          </>
+          </RoomFrame>
         )}
       </main>
     </div>

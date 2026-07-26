@@ -7808,11 +7808,22 @@ export class SquadManager extends EventEmitter {
 		const prefix = follows ? `${actor.id} steered @${targetLabel} (follows ${follows.actor}\'s steer):` : `${actor.id} steered @${targetLabel}:`;
 		const text = `${prefix} ${cmd.displayText ?? cmd.message}`;
 		this.recentSteers.set(rec.dto.id, { actor: actor.id, targetLabel, at: now });
-		const entry = await this.channelStore.appendManager(channelId, {
+		// WHERE this lands is the question, and the answer is: not on top of what you just said.
+		//
+		// When the steer was typed here, the room ALREADY shows it — your own message is right there —
+		// so a manager card restating it is the room telling you what you did, one line after you did
+		// it. That is the same firehose reflex concern 26 was filed over, in a politer voice.
+		//
+		// When it came from somewhere else — the CLI, Intervene, a mention resolved elsewhere — the room
+		// has no other trace of it, and then the echo is the only thing that says the fleet was steered.
+		// So: typed here goes to the unit's node, arrived from elsewhere reaches the room.
+		const typedInThisRoom = (commandSource(cmd) === "mention" || commandSource(cmd) === "composer") && Boolean(cmd.channelId);
+		const nodeId = typedInThisRoom ? (await this.projectedNodeId(rec)) : undefined;
+		const post = {
 			authorActor: "manager",
 			text,
-			kind: "system",
-			format: "markdown",
+			kind: "system" as const,
+			format: "markdown" as const,
 			event: {
 				kind: "mention-steer",
 				payload: {
@@ -7828,8 +7839,11 @@ export class SquadManager extends EventEmitter {
 					clientTurnId: cmd.clientTurnId,
 				},
 			},
-		});
-		this.emit("event", { type: "channel-entry", channelId, entry } satisfies SquadEvent);
+		};
+		const entry = nodeId
+			? await this.channelStore.appendNodeManager(nodeId, post, channelId)
+			: await this.channelStore.appendManager(channelId, post);
+		this.emit("event", { type: "channel-entry", channelId: entry.channelId, entry } satisfies SquadEvent);
 	}
 
 	private commandReturnText(cmd: ClientCommand, actor: Actor, rec: AgentRecord): string | undefined {
