@@ -4,7 +4,9 @@ Visual review: https://claude.ai/code/artifact/0cc5bc55-b43e-410b-b751-e5ce7824c
 Design brief: [DESIGN.md](DESIGN.md)
 **Reference: [`reference/`](reference/)** — seven rounds, ~72 designed states, runnable, with
 screenshots. `reference/README.md` indexes them. Build against these, not against prose.
-**Reconciliation: [RECONCILE.md](RECONCILE.md)** — what the design decided that the plan did not know.
+**Reconciliations: [RECONCILE.md](RECONCILE.md)** — what the design decided that the plan did not know.
+**[RECONCILE-VOICE.md](RECONCILE-VOICE.md)** — where `~/cavern`'s voice plan fits against this one.
+Original: — what the design decided that the plan did not know.
 
 ## Outcome
 
