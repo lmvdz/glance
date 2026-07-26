@@ -103,7 +103,11 @@ test("mention steer echo is authored from resolved target, not client echo prove
 	const { mgr, host, repo } = await makeMgr("projection-mention-echo");
 	await createChannel(host, "ops");
 	const dto = await mgr.create({ name: "resident-agent", repo, approvalMode: "yolo", channelId: "ops", autoRoute: false });
-	const projected = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === "mention-steer");
+	// Deliberate change: a steer TYPED in a room lands at the unit's node, because the room already
+	// shows the message you just sent and a manager card restating it is the room telling you what you
+	// did. What this test is actually about — that the echo is manager-authored and cannot be forged
+	// from client-supplied text — is unchanged by where it lands.
+	const projected = waitForChannelEntry(mgr, `node:${dto.id}`, (entry) => entry.event?.kind === "mention-steer");
 
 	await mgr.applyCommand({
 		type: "prompt",
@@ -132,7 +136,10 @@ test("mention steer echo is authored from resolved target, not client echo prove
 		actor: LOCAL_ACTOR.id,
 		target: dto.id,
 	});
-	expect((await mgr.channelEntries("ops")).filter((candidate) => candidate.event?.kind === "mention-steer" || candidate.event?.kind === TRANSCRIPT_EVENT_RETURN_EMIT)).toHaveLength(1);
+	// Exactly one echo, and it is not ALSO in the room: the point of moving it was to stop the room
+	// restating what the person just typed there.
+	expect((await mgr.channelEntries(`node:${dto.id}`)).filter((candidate) => candidate.event?.kind === "mention-steer")).toHaveLength(1);
+	expect((await mgr.channelEntries("ops")).filter((candidate) => candidate.event?.kind === "mention-steer")).toHaveLength(0);
 	await mgr.stop();
 });
 
@@ -175,13 +182,13 @@ test("second mention steer in the turn window echoes which actor it follows", as
 	const alice = { id: "db:alice", displayName: "Alice", origin: "local" as const, role: "admin" as const };
 	const bob = { id: "db:bob", displayName: "Bob", origin: "local" as const, role: "admin" as const };
 
-	const firstEcho = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === "mention-steer");
+	const firstEcho = waitForChannelEntry(mgr, `node:${dto.id}`, (entry) => entry.event?.kind === "mention-steer");
 	await mgr.applyCommand({ type: "prompt", id: dto.id, message: "triage logs", channelId: "ops", source: "mention", clientTurnId: "alice-turn" } as ClientCommand, alice);
 	const first = await firstEcho;
 	expect(first.text).toBe("db:alice steered @resident-agent: triage logs");
 	expect(first.event?.payload).toMatchObject({ follows: undefined, face: { pinned: { actor: "db:alice", target: "resident-agent", clientTurnId: "alice-turn" } } });
 
-	const secondEcho = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === "mention-steer" && entry.text.includes("follows db:alice's steer"));
+	const secondEcho = waitForChannelEntry(mgr, `node:${dto.id}`, (entry) => entry.event?.kind === "mention-steer" && entry.text.includes("follows db:alice's steer"));
 	await mgr.applyCommand({ type: "prompt", id: dto.id, message: "escalate impact", channelId: "ops", source: "mention", clientTurnId: "bob-turn" } as ClientCommand, bob);
 	const second = await secondEcho;
 
@@ -449,5 +456,23 @@ test("a NAMED accountable human reaches the card headline; an unnamed operator d
 	// Whether or not this deployment names its operator, the id is on the payload for anyone who can
 	// resolve it — the headline is a rendering decision, not the record.
 	expect(String(JSON.stringify(opened.event.payload))).toContain("accountableHuman");
+	await mgr.stop();
+});
+
+test("a steer that arrived from OUTSIDE the room still reaches the room", async () => {
+	// The other half of the rule, and the reason this is routing rather than suppression: a steer sent
+	// from the CLI or from Intervene leaves no other trace in the room, so the echo is the only thing
+	// that says the fleet was steered at all. Killing it outright would have made those invisible.
+	const { mgr, host, repo } = await makeMgr("projection-steer-outside");
+	await createChannel(host, "ops");
+	const dto = await mgr.create({ name: "outside-agent", repo, approvalMode: "yolo", channelId: "ops", autoRoute: false });
+	const inRoom = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === TRANSCRIPT_EVENT_RETURN_EMIT);
+
+	// No `source` and no `channelId`: this is the CLI shape.
+	await mgr.applyCommand({ type: "prompt", id: dto.id, message: "look at the retry budget" }, LOCAL_ACTOR);
+	const card = await inRoom;
+
+	expect(card.channelId).toBe("ops");
+	expect(card.text).toContain("look at the retry budget");
 	await mgr.stop();
 });
