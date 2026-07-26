@@ -237,6 +237,7 @@ import { ChannelStore, DEFAULT_CHANNEL_ID, type ChannelEntry, type ClientChannel
 import { NodeStore, compareActivity, type NodeState } from "./nodes.ts";
 import { ForgedCardError, assertAuthentic, projectsToRoom, type CardProvenance } from "./projection-classes.ts";
 import { coldStartLearningState } from "./unknowns.ts";
+import { RECOVERY_DELAY_MS, gateHealth, notificationText, readGateEvaluation, shouldLeaveTheApp, type GateEvaluation, type GateHealth, type WorthItReview } from "./leaving-the-app.ts";
 import { assessReversal, costEventsFrom, shouldDiscloseCost, summariseCost, type CostSummary, type ReversalAssessment, type ReversalNode } from "./decision-impact.ts";
 import { NodeRecordStore, quoteRule, type NodeRecord, type InstructionReadbackRecord, type ObjectionRecord, type PlanMotionRecord } from "./node-records.ts";
 import { approveIrreversible, beginInstruction, overruleObjection, raiseObjection, recordObjectionOutcome, rejectIrreversible, type InstructionExecution } from "./instructions.ts";
@@ -3899,6 +3900,36 @@ export class SquadManager extends EventEmitter {
 			this.log("warn", `rules for ${nodeId}/${action} unavailable: ${errText(err)}`);
 			return [];
 		}
+	}
+
+	/**
+	 * Whether an interruption may leave the app, and the sentence explaining the answer either way.
+	 *
+	 * Evaluated at the seam rather than at each caller for the same reason the delegation boundary and
+	 * the cost-disclosure rule are: a gate every notification site must remember to consult is a gate
+	 * one of them will skip, and the failure is invisible — a person's evening is interrupted and
+	 * nothing records that it should not have been.
+	 */
+	mayLeaveTheApp(evaluation: unknown, now = Date.now()): { send: boolean; because: string; text: string } {
+		// Decoded, never trusted. A half-written evaluation is the only thing standing between a
+		// person's evening and a notification, and a partially-read one would be judged on whichever
+		// conditions happened to survive — absence reading as consent.
+		const decoded = readGateEvaluation(evaluation);
+		if (!decoded) {
+			return { send: false, because: "This did not decode as a complete evaluation, so it is not one — nobody is interrupted on a record we cannot read.", text: "" };
+		}
+		const decision = shouldLeaveTheApp(decoded, now);
+		return { send: decision.send, because: decision.because, text: notificationText(decoded) };
+	}
+
+	/** How often the fleet has interrupted anyone, and whether they thought it was worth it. */
+	notificationHealth(evaluations: readonly GateEvaluation[], reviews: readonly WorthItReview[]): GateHealth {
+		return gateHealth(evaluations, reviews);
+	}
+
+	/** How long the fleet gets to recover before anyone is interrupted. */
+	get recoveryDelayMs(): number {
+		return RECOVERY_DELAY_MS;
 	}
 
 	/** The learning state: what is borrowed, what is unknown, and what would settle each. */
