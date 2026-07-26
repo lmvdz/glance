@@ -237,7 +237,9 @@ import { ChannelStore, DEFAULT_CHANNEL_ID, type ChannelEntry, type ClientChannel
 import { NodeStore, type NodeState } from "./nodes.ts";
 import { NodeRecordStore } from "./node-records.ts";
 import { ForgedCardError, assertAuthentic, projectsToRoom, type CardProvenance } from "./projection-classes.ts";
+import { NodeRecordStore, type PlanMotionRecord } from "./node-records.ts";
 import { proposeRules, type RuleProposal } from "./rule-proposals.ts";
+import { assessPlanMotion as assessPlanMotionEvidence, type PlanMotionInput, type PlanMotionAssessment } from "./plan-motion.ts";
 import { compactionNotice, planCompaction, planHandover, type CompactionPlan, type CompactionPolicy, type HandoverPlan } from "./archive.ts";
 import { consequenceSentence, reshape, type PlanProposal, type ReshapeOp } from "./plan-proposals.ts";
 import { DelegationBoundaryError, assertHumanAuthority, commandAction, grantFor, nonDelegatableClassOf, type Authority, type DelegationGrant } from "./delegation-boundary.ts";
@@ -3831,6 +3833,64 @@ export class SquadManager extends EventEmitter {
 			this.log("warn", `decision record for ${rec.dto.id}/${req.id} not kept: ${errText(err)}`);
 		}
 	}
+	/**
+	 * Notice a plan that has gone still from its own movement history. This is deliberately invoked
+	 * by the planner's plan observer, not a global timeout loop: different plans have different
+	 * normal gaps, and an unmeasured plan is not silently judged.
+	 */
+	async assessPlanMotion(input: PlanMotionInput): Promise<PlanMotionAssessment> {
+		const assessment = assessPlanMotionEvidence(input);
+		const existingNode = await this.nodeStore.get(input.planId);
+		if (!existingNode) {
+			await this.nodeStore.create({
+				id: input.planId,
+				kind: "plan",
+				title: input.planTitle,
+				state: "working",
+				createdAt: input.now,
+			});
+		}
+		const records = new NodeRecordStore(this.store, (message) => this.log("warn", `node-records: ${message}`));
+		const id = `plan-motion:${input.planId}:${assessment.record.lastMeaningfulMovementAt}`;
+		const prior = (await records.list(input.planId)).filter((record): record is PlanMotionRecord => record.kind === "plan-motion").find((record) => record.id === id);
+		const record = {
+			...assessment.record,
+			id,
+			nodeId: input.planId,
+			createdAt: input.now,
+			noticedAt: prior?.noticedAt,
+			outcome: prior?.outcome,
+		};
+		await records.put(record);
+		if (!assessment.stalled || prior?.noticedAt !== undefined || !assessment.message) return assessment;
+
+		const entry = await this.channelStore.appendManager(DEFAULT_CHANNEL_ID, {
+			authorActor: "planner",
+			kind: "system",
+			format: "markdown",
+			text: `${assessment.message} Noticing, not alarming.`,
+		});
+		await records.put({ ...record, noticedAt: input.now });
+		this.emit("event", { type: "channel-entry", channelId: DEFAULT_CHANNEL_ID, entry } satisfies SquadEvent);
+		return assessment;
+	}
+
+	/** Record the human's outcome, so the false-positive rate is evidence rather than a dashboard claim. */
+	async resolvePlanMotion(planId: string, lastMeaningfulMovementAt: number, outcome: "acknowledged" | "parked" | "dropped" | "resumed" | "false-positive", now = Date.now()): Promise<void> {
+		const records = new NodeRecordStore(this.store, (message) => this.log("warn", `node-records: ${message}`));
+		const id = `plan-motion:${planId}:${lastMeaningfulMovementAt}`;
+		const record = (await records.list(planId)).filter((candidate): candidate is PlanMotionRecord => candidate.kind === "plan-motion").find((candidate) => candidate.id === id);
+		if (!record) throw new Error(`plan motion evidence ${id} not found`);
+		await records.put({
+			...record,
+			createdAt: now,
+			outcome,
+			parked: outcome === "parked" ? true : record.parked,
+			intentionalStill: outcome === "parked" ? true : record.intentionalStill,
+			baselineMs: outcome === "parked" ? undefined : record.baselineMs,
+		});
+	}
+
 
 	/**
 	 * What the fleet would offer to stop asking about, for one node — generated from decisions this

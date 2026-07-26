@@ -118,6 +118,10 @@ const PlanMotionSchema = Schema.Struct({
 	intentionalStill: Schema.Boolean,
 	blockedCause: Schema.optional(Schema.String),
 	eligibleSuccessorCount: Schema.Number,
+	/** The one planner message was emitted; retained to avoid repeating one absence as a feed. */
+	noticedAt: Schema.optional(Schema.Number),
+	/** What happened after the notice. Parked work remains intentionally numberless. */
+	outcome: Schema.optional(Schema.Literals(["acknowledged", "parked", "dropped", "resumed", "false-positive"])),
 });
 
 /**

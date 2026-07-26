@@ -90,6 +90,8 @@ const samples: Record<(typeof nodeRecordKinds)[number], NodeRecord> = {
 		intentionalStill: false,
 		blockedCause: "waiting on a review nobody was asked for",
 		eligibleSuccessorCount: 3,
+		noticedAt: 70,
+		outcome: "acknowledged",
 	},
 	evidence: {
 		kind: "evidence",
