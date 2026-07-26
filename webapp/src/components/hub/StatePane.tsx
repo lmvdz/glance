@@ -40,7 +40,11 @@ function Region({
   collapsible?: boolean;
 }) {
   const [open, setOpen] = useState(!collapsible);
-  if (nodes.length === 0 && collapsible) return null;
+  // An empty region renders NOTHING — not a heading over blank space. Seen live: "NEEDS YOU" sat as a
+  // header with nothing under it, directly under a band that had just said nothing needs you. A
+  // heading over emptiness reads as a thing that failed to load, and it contradicted the sentence
+  // above it. Zero is already reported by the band, which is where the streak belongs.
+  if (nodes.length === 0) return null;
   return (
     <section className="border-b border-ink-border last:border-b-0">
       <h2 className="flex items-center justify-between px-3 py-2 font-mono text-[10px] uppercase tracking-wider text-ink-text-muted">
