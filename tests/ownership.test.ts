@@ -183,3 +183,52 @@ test("producesAllowlist: OMP_SQUAD_PRODUCES_ALLOW extends the defaults (basename
 	const allow = producesAllowlist("codegen/schema.ts, .env.example");
 	expect(outOfScopeWrites(["codegen/schema.ts", "src/x.ts"], ["src/web"], allow)).toEqual(["src/x.ts"]);
 });
+
+test("goalConflict: unrelated goals in the same repo do NOT conflict", () => {
+	// The missing half of concern 05's verify list. It asks for a false-NEGATIVE corpus and says
+	// nothing about false positives — but this mechanism BLOCKS unit creation, so a false positive is
+	// the expensive failure: you cannot spawn the work at all, and there is no way around it from
+	// outside the code. A detector tuned only against misses will refuse everything.
+	const live: GoalOwner[] = [
+		{ name: "wren", repo: "/r", status: "working", goal: "add request rate limiting to the public API" },
+		{ name: "pike", repo: "/r", status: "working", goal: "write an Effect service layer for the ingest pipeline" },
+		{ name: "ash", repo: "/r", status: "working", goal: "fix the flaky restart-reattach test" },
+	];
+	const unrelated = [
+		"add a dark theme to the settings page",
+		"upgrade the sqlite driver to the current release",
+		"document the deployment runbook for new operators",
+		"reduce the docker image size for the gate container",
+		"add keyboard navigation to the command palette",
+		"write an Effect schema for the deployment config",
+		"fix a memory leak in the transcript renderer",
+	];
+	for (const goal of unrelated) {
+		expect(goalConflict(live, { name: "new", repo: "/r", status: "working", goal })).toBeUndefined();
+	}
+});
+
+test("goalConflict: a different repo is never a conflict, however similar the goal", () => {
+	// Two people building the same thing in two different repositories are not duplicating each other.
+	const live: GoalOwner[] = [{ name: "wren", repo: "/a", status: "working", goal: "add request rate limiting to the public API" }];
+	expect(goalConflict(live, { name: "new", repo: "/b", status: "working", goal: "add request rate limiting to the public API" })).toBeUndefined();
+});
+
+test("goalConflict: a stopped or errored owner releases its goal, a finished one does not", () => {
+	// Matches the sibling path primitive exactly: stopped and error release, everything else holds.
+	// `done` deliberately still holds — a finished-but-unlanded unit owns its goal until it lands or is
+	// reaped off the roster, and someone starting the same work meanwhile IS duplicating it.
+	const goal = "add request rate limiting to the public API";
+	for (const status of ["stopped", "error"] as const) {
+		expect(goalConflict([{ name: "wren", repo: "/r", status, goal }], { name: "new", repo: "/r", status: "working", goal })).toBeUndefined();
+	}
+	expect(goalConflict([{ name: "wren", repo: "/r", status: "done", goal }], { name: "new", repo: "/r", status: "working", goal })).toMatchObject({ agent: "wren" });
+});
+
+test("goalConflict: a goal too short to judge is not a conflict", () => {
+	// One or two words carries no evidence. Refusing on it would be refusing on nothing.
+	const live: GoalOwner[] = [{ name: "wren", repo: "/r", status: "working", goal: "rate limiting" }];
+	for (const goal of ["fix it", "rate", ""]) {
+		expect(goalConflict(live, { name: "new", repo: "/r", status: "working", goal })).toBeUndefined();
+	}
+});

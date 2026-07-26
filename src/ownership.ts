@@ -150,6 +150,9 @@ export interface GoalConflict {
 	strength: GoalConflictStrength;
 }
 
+/** Below this, a goal carries too little to refuse anything on. */
+const MIN_GOAL_TERMS = 2;
+
 const GOAL_STOPWORDS = new Set(["a", "an", "and", "build", "for", "implement", "in", "of", "on", "the", "to", "with"]);
 const GOAL_CONCEPTS: Readonly<Record<string, string>> = {
 	rate: "rate-limit",
@@ -169,6 +172,11 @@ function refsOverlap(a: readonly string[] | undefined, b: readonly string[] | un
 	return b.some((ref) => claims.has(ref.trim()));
 }
 
+/** Meaningful words, before concept folding — this is what "enough to judge on" is measured in. */
+function rawGoalTerms(goal: string): Set<string> {
+	return new Set(tokenize(goal).filter((term) => !GOAL_STOPWORDS.has(term)));
+}
+
 function goalTerms(goal: string): Set<string> {
 	return new Set(tokenize(goal).filter((term) => !GOAL_STOPWORDS.has(term)).map((term) => GOAL_CONCEPTS[term] ?? term));
 }
@@ -177,7 +185,12 @@ function goalTerms(goal: string): Set<string> {
 function semanticGoalOverlap(a: string, b: string): boolean {
 	const left = goalTerms(a);
 	const right = goalTerms(b);
-	if (!left.size || !right.size) return false;
+	// Two meaningful terms minimum on both sides, counted BEFORE concept folding. Without a floor a
+	// one-word goal is a total match after folding — "rate" collapses to "rate-limit", scores 1/1, and
+	// refuses a spawn on no evidence at all. Counting after folding instead would be just as wrong in
+	// the other direction: "rate limiting" is two real words that fold to one concept, and it is a
+	// perfectly good goal. This check BLOCKS creation, so both mistakes are expensive.
+	if (rawGoalTerms(a).size < MIN_GOAL_TERMS || rawGoalTerms(b).size < MIN_GOAL_TERMS) return false;
 	let shared = 0;
 	for (const term of left) if (right.has(term)) shared++;
 	return shared / Math.min(left.size, right.size) >= 0.6;
