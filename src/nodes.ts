@@ -22,7 +22,7 @@ export interface ActivityRankCandidate {
  * ordering: callers choose state regions before applying it, so a quiet request for help cannot
  * lose to a chatty healthy unit.
  */
-export function activityScore(candidate: ActivityRankCandidate, now: number): number {
+function activityScore(candidate: ActivityRankCandidate, now: number): number {
 	if (!Number.isFinite(candidate.lastActivity) || candidate.lastActivity <= 0) return 0;
 	const lastActivity = Math.min(candidate.lastActivity, now);
 	const candidateCreatedAt = candidate.createdAt;

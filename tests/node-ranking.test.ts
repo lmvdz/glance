@@ -2,7 +2,7 @@ import { describe, expect, test } from "vitest";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { ACTIVITY_HALF_LIFE_MS, activityScore, compareActivity } from "../src/nodes.ts";
+import { ACTIVITY_HALF_LIFE_MS, compareActivity } from "../src/nodes.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import type { AgentDTO } from "../src/types.ts";
 
@@ -32,7 +32,10 @@ describe("node activity ranking", () => {
 		const fresh = candidate("fresh", NOW - 1_000);
 		const stale = candidate("stale", NOW - ACTIVITY_HALF_LIFE_MS - 1_000);
 
-		expect(activityScore(fresh, NOW)).toBeGreaterThan(activityScore(stale, NOW));
+		// Asserted through `compareActivity`, the seam every caller actually uses: the raw score is an
+		// implementation detail, and a test on it can pass while the comparator callers use is wrong.
+		expect(compareActivity(fresh, stale, NOW)).toBeLessThan(0);
+		expect(compareActivity(stale, fresh, NOW)).toBeGreaterThan(0);
 		expect([stale, fresh].sort((a, b) => compareActivity(a, b, NOW)).map(({ id }) => id)).toEqual(["fresh", "stale"]);
 	});
 

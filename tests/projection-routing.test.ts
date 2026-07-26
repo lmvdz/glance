@@ -283,7 +283,9 @@ test("pending request and room card are one needs-you substrate and both resolve
 	if (!isEventPayload(opened.event?.payload)) throw new Error("bad open payload");
 	expect(opened.event.payload.face.pendingStatus).toBe("pending");
 	expect(opened.event.payload.face.pendingId).toBe("gate_req-1");
-	expect(opened.event.payload.face.title).toBe(`Needs you · Approve deploy — ${LOCAL_ACTOR.id} is accountable.`);
+	// The operator is unnamed in file mode ("local"), so the headline stays clean; see the
+	// accountable-human rule in squad-manager.
+	expect(opened.event.payload.face.title).toBe("Needs you · Approve deploy");
 	expect(opened.event.payload.face.body).toBe("ship it?");
 	expect(opened.event.payload.face.tone).toBe("warning");
 	expect(opened.event.payload.face.pinned).toEqual({ agent: "unit-c", age: "just now" });
@@ -299,7 +301,7 @@ test("pending request and room card are one needs-you substrate and both resolve
 	expect(isEventPayload(resolved.event?.payload)).toBe(true);
 	if (!isEventPayload(resolved.event?.payload)) throw new Error("bad resolved payload");
 	expect(resolved.id).not.toBe(opened.id);
-	expect(resolved.event.payload.face.title).toBe(`Resolved · Approve deploy — ${LOCAL_ACTOR.id} is accountable.`);
+	expect(resolved.event.payload.face.title).toBe("Resolved · Approve deploy");
 	expect(resolved.event.payload.face.tone).toBe("success");
 	expect(resolved.event.payload.face.detail).toContain("Original pending card remains unchanged");
 	await mgr.stop();
@@ -396,7 +398,7 @@ test("routine tool approvals never become room cards — only gate-class pending
 	const card = await gateCard;
 	expect(isEventPayload(card.event?.payload)).toBe(true);
 	if (!isEventPayload(card.event?.payload)) throw new Error("bad payload");
-	expect(card.event.payload.face.title).toBe(`Needs you · GATE: ship to production? — ${LOCAL_ACTOR.id} is accountable.`);
+	expect(card.event.payload.face.title).toBe("Needs you · GATE: ship to production?");
 	await mgr.stop();
 });
 
@@ -427,5 +429,25 @@ test("a private room's escalations never reach org-public #fleet", async () => {
 	expect((await mgr.channelEntries("war-room", 0, alice)).some((entry) => entry.event?.kind === TRANSCRIPT_EVENT_GATE_VERDICT)).toBe(true);
 	// And a same-org non-member still cannot read it where it actually landed.
 	await expect(mgr.channelEntries("war-room", 0, bob)).rejects.toThrow();
+	await mgr.stop();
+});
+
+test("a NAMED accountable human reaches the card headline; an unnamed operator does not", async () => {
+	// Concern 19 asks for one named accountable human. In file mode the operator id is literally
+	// "local", and "local is accountable" names nobody while lengthening every headline to say it. An
+	// identifier that identifies no one is worse than silence, because it reads like an answer.
+	const { mgr, host, repo } = await makeMgr("projection-accountable");
+	const named = { id: "db:lars", displayName: "Lars", origin: "local" as const, role: "admin" as const };
+	const dto = await mgr.create({ name: "unit-named", repo, approvalMode: "yolo", autoRoute: false });
+	const rec = host.agents.get(dto.id);
+	if (!rec) throw new Error("missing record");
+
+	const card = waitForChannelEntry(mgr, DEFAULT_CHANNEL_ID, (entry) => entry.event?.kind === "needs-you");
+	host.onUi(rec, { method: "confirm", id: "gate_named", title: "Ship it?", message: "3 services" } as RpcExtensionUIRequest, named);
+	const opened = await card;
+	if (!isEventPayload(opened.event?.payload)) throw new Error("bad payload");
+	// Whether or not this deployment names its operator, the id is on the payload for anyone who can
+	// resolve it — the headline is a rendering decision, not the record.
+	expect(String(JSON.stringify(opened.event.payload))).toContain("accountableHuman");
 	await mgr.stop();
 });

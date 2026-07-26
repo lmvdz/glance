@@ -238,7 +238,7 @@ import { NodeStore, compareActivity, type NodeState } from "./nodes.ts";
 import { ForgedCardError, assertAuthentic, projectsToRoom, type CardProvenance } from "./projection-classes.ts";
 import { coldStartLearningState } from "./unknowns.ts";
 import { assessReversal, costEventsFrom, shouldDiscloseCost, summariseCost, type CostSummary, type ReversalAssessment, type ReversalNode } from "./decision-impact.ts";
-import { NodeRecordStore, type NodeRecord, type InstructionReadbackRecord, type ObjectionRecord, type PlanMotionRecord } from "./node-records.ts";
+import { NodeRecordStore, quoteRule, type NodeRecord, type InstructionReadbackRecord, type ObjectionRecord, type PlanMotionRecord } from "./node-records.ts";
 import { approveIrreversible, beginInstruction, overruleObjection, raiseObjection, recordObjectionOutcome, rejectIrreversible, type InstructionExecution } from "./instructions.ts";
 import { regenerateNodeSummaries } from "./node-summaries.ts";
 import { agentRecordView, type AgentRecordView } from "./agent-records.ts";
@@ -3883,6 +3883,22 @@ export class SquadManager extends EventEmitter {
 			summary = summariseCost([]);
 		}
 		return { ...summary, disclose: shouldDiscloseCost({ changesTheDecision: context.changesTheDecision ?? false, cents: summary.spentCents, notableCents: context.notableCents }) };
+	}
+
+	/**
+	 * The rules that settled an action, each quoted with the person whose words they are.
+	 *
+	 * Concern 11 requires a rule to be quotable verbatim wherever it decides work, and concern 19
+	 * requires its author to survive every render path — a rule that dissolves into anonymous house
+	 * policy the moment it is displayed has lost the thing that made it answerable.
+	 */
+	async rulesQuotedFor(nodeId: string, action: string): Promise<string[]> {
+		try {
+			return (await new NodeRecordStore(this.store).rulesSettling(nodeId, action)).map(quoteRule);
+		} catch (err) {
+			this.log("warn", `rules for ${nodeId}/${action} unavailable: ${errText(err)}`);
+			return [];
+		}
 	}
 
 	/** The learning state: what is borrowed, what is unknown, and what would settle each. */
@@ -12127,7 +12143,12 @@ export class SquadManager extends EventEmitter {
 		const ageMs = Math.max(0, entry.ts - createdAt);
 		const age = ageMs < 60_000 ? "just now" : `${Math.floor(ageMs / 60_000)}m`;
 		const resolved = pendingStatus === "resolved";
-		const namedTitle = accountableHuman ? `${title} — ${accountableHuman} is accountable.` : title;
+		// Concern 19 wants ONE NAMED accountable human, and a name is the point. In file mode the actor
+		// id is literally "local", so appending it produces "local is accountable", which names nobody
+		// and lengthens every headline to say it. An unnamed operator is left off rather than rendered
+		// as a name — an identifier that identifies no one is worse than silence, because it reads like
+		// an answer. The accountable id still rides on the payload for anyone who can resolve it.
+		const namedTitle = accountableHuman && accountableHuman !== "local" ? `${title} — ${accountableHuman} is accountable.` : title;
 		return {
 			unitId: rec.dto.id,
 			unitName: rec.dto.name,

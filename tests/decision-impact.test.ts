@@ -132,3 +132,39 @@ test("the manager answers the cost AND whether it should be shown", async () => 
 	await mgr.stop();
 	for (const dir of [stateDir, worktreeBase]) await fs.rm(dir, { recursive: true, force: true });
 });
+
+test("a rule reaches the point it acts with its author attached", async () => {
+	// Concern 11 wants the sentence quotable verbatim; concern 19 wants the author to survive every
+	// render path. A rule that becomes anonymous house policy on display has lost what made it
+	// answerable — you cannot argue with a rule when you cannot see whose it is.
+	const fs = await import("node:fs/promises");
+	const os = await import("node:os");
+	const path = await import("node:path");
+	const { SquadManager } = await import("../src/squad-manager.ts");
+	const { FileStore } = await import("../src/dal/store.ts");
+	const { NodeRecordStore } = await import("../src/node-records.ts");
+
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "quote-"));
+	const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "quote-wt-"));
+	const mgr = new SquadManager({ stateDir, worktreeBase });
+	await mgr.start();
+
+	const store = new FileStore(stateDir);
+	await store.putNode({ id: "n1", kind: "unit", title: "u", state: "working", createdAt: 1, channelId: null });
+	const records = new NodeRecordStore(store);
+	await records.put({ kind: "decision", id: "d1", nodeId: "n1", createdAt: 1, question: "q", options: [], chose: "yes", decidedBy: "db:lars", askedAt: 1, decidedAt: 2, reason: "no-rule-applied" });
+	await records.put({
+		kind: "rule", id: "r1", nodeId: "n1", createdAt: 3, authorId: "db:lars", scope: "org", status: "active",
+		sentence: "If it can be undone in under a minute, just do it and tell me afterwards.",
+		settles: ["reversible-change"], proposedFrom: ["d1"], wouldNotHaveCaught: [], invocations: [],
+	});
+
+	expect(await mgr.rulesQuotedFor("n1", "reversible-change")).toEqual([
+		'"If it can be undone in under a minute, just do it and tell me afterwards." — db:lars',
+	]);
+	// An action no rule names quotes nothing, rather than quoting the nearest rule.
+	expect(await mgr.rulesQuotedFor("n1", "publish-a-release")).toEqual([]);
+
+	await mgr.stop();
+	for (const dir of [stateDir, worktreeBase]) await fs.rm(dir, { recursive: true, force: true });
+});
