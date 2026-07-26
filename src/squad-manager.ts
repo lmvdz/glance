@@ -237,7 +237,8 @@ import { ChannelStore, DEFAULT_CHANNEL_ID, type ChannelEntry, type ClientChannel
 import { NodeStore, type NodeState } from "./nodes.ts";
 import { NodeRecordStore } from "./node-records.ts";
 import { proposeRules, type RuleProposal } from "./rule-proposals.ts";
-import { DelegationBoundaryError, assertHumanAuthority, commandAction, grantFor, nonDelegatableClassOf, type DelegationGrant } from "./delegation-boundary.ts";
+import { compactionNotice, planCompaction, planHandover, type CompactionPlan, type CompactionPolicy, type HandoverPlan } from "./archive.ts";
+import { DelegationBoundaryError, assertHumanAuthority, commandAction, grantFor, nonDelegatableClassOf, type Authority, type DelegationGrant } from "./delegation-boundary.ts";
 import { buildTrace, traceMaxSpans, traceSampleRatio, traceSpansEnabled, type TraceResponse } from "./spans.ts";
 import { traceExporterFromEnv, type TraceExportQueue } from "./trace-exporter.ts";
 
@@ -3850,6 +3851,41 @@ export class SquadManager extends EventEmitter {
 			this.log("warn", `rule proposals for ${nodeId} unavailable: ${errText(err)}`);
 			return [];
 		}
+	}
+
+	/**
+	 * What a compaction policy WOULD cut, without cutting it. Shown to a person before they authorize
+	 * it — "every control says what it will do before it is used" applies hardest to the one that
+	 * destroys things.
+	 */
+	async planCompaction(nodeId: string, policy: CompactionPolicy, now = Date.now()): Promise<CompactionPlan> {
+		return planCompaction(await new NodeRecordStore(this.store).list(nodeId), policy, now);
+	}
+
+	/**
+	 * Apply a compaction. Compaction REMOVES records, so whatever it is called it is deletion, and
+	 * deletion is in the non-delegatable class (concern 12) — an autonomous caller is refused unless a
+	 * person granted it by name. The retention record is written BEFORE anything is removed, so a crash
+	 * between the two leaves a declared cut with the data still present rather than silent loss.
+	 */
+	async applyCompaction(
+		nodeId: string,
+		policy: CompactionPolicy,
+		opts: { authority?: Authority; now?: number } = {},
+	): Promise<{ plan: CompactionPlan; removed: number; notice: string }> {
+		const now = opts.now ?? Date.now();
+		assertHumanAuthority("compactNodeRecords", opts.authority ?? "autonomous", await this.delegationGrants());
+		const records = new NodeRecordStore(this.store, (m) => this.log("warn", `node-records: ${m}`));
+		const plan = await this.planCompaction(nodeId, policy, now);
+		const retention = { ...plan.retention, id: `retention:${nodeId}:${now}`, nodeId };
+		await records.put(retention);
+		const removed = plan.cut.length > 0 ? await this.store.deleteNodeRecords(nodeId, plan.cut.map((record) => record.id)) : 0;
+		return { plan, removed, notice: compactionNotice(retention) };
+	}
+
+	/** What moves to the next agent and what does not, stated before the handover is confirmed. */
+	async planHandover(nodeId: string, from: string, to: string, opts: { now?: number; ref?: string } = {}): Promise<HandoverPlan> {
+		return planHandover(await new NodeRecordStore(this.store).list(nodeId), { from, to, now: opts.now ?? Date.now(), ref: opts.ref });
 	}
 
 	async delegationGrants(): Promise<DelegationGrant[]> {

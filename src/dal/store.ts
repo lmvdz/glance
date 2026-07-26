@@ -201,6 +201,8 @@ export interface Store {
 	/** Durable evidence attached to a node. Missing records are unknown, never permission. */
 	listNodeRecords(nodeId: string): Promise<NodeRecord[]>;
 	putNodeRecord(record: NodeRecord): Promise<void>;
+	/** Remove records by id. Only reachable through an authorized compaction — see `archive.ts`. */
+	deleteNodeRecords(nodeId: string, ids: readonly string[]): Promise<number>;
 	/** Human grants out of the non-delegatable class. An empty list means autonomy takes none of it. */
 	listDelegationGrants(): Promise<DelegationGrant[]>;
 	putDelegationGrant(grant: DelegationGrant): Promise<void>;
@@ -397,6 +399,27 @@ export class FileStore implements Store {
 			if (index >= 0) records[index] = record;
 			else records.push(record);
 			await getStorageBackend().writeDurable(file, JSON.stringify(records.sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)), null, 2));
+		} finally {
+			release();
+			if (FileStore.nodeWriteLocks.get(file) === next) FileStore.nodeWriteLocks.delete(file);
+		}
+	}
+
+	async deleteNodeRecords(nodeId: string, ids: readonly string[]): Promise<number> {
+		const file = path.join(this.stateDir, "node-records.json");
+		const remove = new Set(ids);
+		const prior = FileStore.nodeWriteLocks.get(file) ?? Promise.resolve();
+		let release!: () => void;
+		const next = prior.then(() => new Promise<void>((resolve) => { release = resolve; }));
+		FileStore.nodeWriteLocks.set(file, next);
+		await prior;
+		try {
+			const raw = await getStorageBackend().readText(file);
+			const existing = raw ? JSON.parse(raw) : [];
+			const records = Array.isArray(existing) ? existing.map(readNodeRecord).filter((value): value is NodeRecord => value !== undefined) : [];
+			const kept = records.filter((record) => !(record.nodeId === nodeId && remove.has(record.id)));
+			await getStorageBackend().writeDurable(file, JSON.stringify(kept, null, 2));
+			return records.length - kept.length;
 		} finally {
 			release();
 			if (FileStore.nodeWriteLocks.get(file) === next) FileStore.nodeWriteLocks.delete(file);
@@ -855,6 +878,14 @@ export class DbStore implements Store {
 		await withOrg(this.ctx, this.orgId, (trx) =>
 			trx.insertInto("node_records").values({ org_id: this.orgId, id: record.id, node_id: record.nodeId, kind: record.kind, created_at: record.createdAt, data: JSON.stringify(record) }).onConflict((oc) => oc.columns(["org_id", "id"]).doUpdateSet({ node_id: record.nodeId, kind: record.kind, created_at: record.createdAt, data: JSON.stringify(record) })).execute(),
 		);
+	}
+
+	async deleteNodeRecords(nodeId: string, ids: readonly string[]): Promise<number> {
+		if (ids.length === 0) return 0;
+		const result = await withOrg(this.ctx, this.orgId, (trx) =>
+			trx.deleteFrom("node_records").where("org_id", "=", this.orgId).where("node_id", "=", nodeId).where("id", "in", [...ids]).executeTakeFirst(),
+		);
+		return Number(result?.numDeletedRows ?? 0);
 	}
 
 	async listDelegationGrants(): Promise<DelegationGrant[]> {

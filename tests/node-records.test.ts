@@ -255,3 +255,20 @@ test("records are listed in creation order and scoped to their own node", async 
 	expect((await records.list("n2")).map((record) => record.id)).toEqual(["e-other"]);
 	await fs.rm(dir, { recursive: true, force: true });
 });
+
+test("a record that could not be read back is refused at write, never silently lost", async () => {
+	// The defect this pins, which shipped in the first version of this store: `put` validated a handful
+	// of fields and the reader decoded the whole schema. A record missing a required field was WRITTEN
+	// successfully and then vanished on read — no error at the write, no error at the read, no record.
+	// A write that reports success and produces nothing is the worst shape absence-as-answer can take.
+	const { records, dir } = await store();
+	const { reason: _reason, ...noReason } = samples.decision as Extract<NodeRecord, { kind: "decision" }>;
+	await expect(records.put(noReason as NodeRecord)).rejects.toThrow(/cannot be read back/);
+
+	const { verification: _v, ...noVerification } = samples.evidence as Extract<NodeRecord, { kind: "evidence" }>;
+	await expect(records.put(noVerification as NodeRecord)).rejects.toThrow(/cannot be read back/);
+
+	// Nothing was persisted by either refusal.
+	expect((await records.list("n1")).map((record) => record.id)).toEqual(["decision-41"]);
+	await fs.rm(dir, { recursive: true, force: true });
+});

@@ -244,6 +244,13 @@ export class NodeRecordStore {
 		if (!record.id.trim() || !record.nodeId.trim() || !Number.isFinite(record.createdAt)) {
 			throw new Error("node record id, node id, and creation time required");
 		}
+		// Refuse anything that would not survive its own round trip. Without this a record can be
+		// WRITTEN and then never read back: `put` checked a handful of fields, the reader decodes the
+		// whole schema, and a record missing a required field vanishes on read with no error anywhere.
+		// A write that reports success and produces nothing is the worst shape this defect can take.
+		if (!readNodeRecord(record)) {
+			throw new Error(`a ${record.kind} record that cannot be read back is not written — check its required fields`);
+		}
 		// Node existence is checked FIRST so a record for a node that is not there reports that, rather
 		// than whichever kind-specific rule happens to fail earlier. A misleading error is a bug that
 		// costs someone an hour.
