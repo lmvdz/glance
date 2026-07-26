@@ -106,6 +106,16 @@ const samples: Record<(typeof nodeRecordKinds)[number], NodeRecord> = {
 		staleAt: 999,
 		withdrawnAt: 1000,
 	},
+	"agent-profile": {
+		kind: "agent-profile",
+		id: "profile-1",
+		nodeId: "n1",
+		agentId: "n1",
+		createdAt: 10,
+		roleDefault: "database migrator",
+		status: "provisional",
+		checking: { requiredUnits: 10, checkedUnits: 3, reviewerId: "pike" },
+	},
 	decision: {
 		kind: "decision",
 		id: "decision-41",

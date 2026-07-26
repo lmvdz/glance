@@ -241,6 +241,7 @@ import { NodeRecordStore, type PlanMotionRecord } from "./node-records.ts";
 import { approveIrreversible, beginInstruction, overruleObjection, raiseObjection, recordObjectionOutcome, rejectIrreversible, type InstructionExecution } from "./instructions.ts";
 import type { InstructionReadbackRecord, ObjectionRecord } from "./node-records.ts";
 import { regenerateNodeSummaries } from "./node-summaries.ts";
+import { agentRecordView, type AgentRecordView } from "./agent-records.ts";
 import { proposeRules, type RuleProposal } from "./rule-proposals.ts";
 import { assessPlanMotion as assessPlanMotionEvidence, type PlanMotionInput, type PlanMotionAssessment } from "./plan-motion.ts";
 import { compactionNotice, planCompaction, planHandover, type CompactionPlan, type CompactionPolicy, type HandoverPlan } from "./archive.ts";
@@ -3946,6 +3947,29 @@ export class SquadManager extends EventEmitter {
 		}
 	}
 
+	/** One agent's evidence record. There is deliberately no fleet-wide equivalent to rank people. */
+	async agentRecord(agentId: string, now = Date.now()): Promise<AgentRecordView | undefined> {
+		if (!this.agents.has(agentId)) return undefined;
+		return agentRecordView(agentId, await new NodeRecordStore(this.store).list(agentId), now);
+	}
+
+	/** Every new agent starts with a role default and an explicit provisional checking contract. */
+	private async ensureAgentProfile(rec: AgentRecord): Promise<void> {
+		const records = new NodeRecordStore(this.store, (message) => this.log("warn", `node-records: ${message}`));
+		const existing = await records.list(rec.dto.id);
+		if (existing.some((record) => record.kind === "agent-profile" && record.agentId === rec.dto.id)) return;
+		await records.put({
+			kind: "agent-profile",
+			id: `agent-profile:${rec.dto.id}`,
+			nodeId: rec.dto.id,
+			agentId: rec.dto.id,
+			createdAt: rec.dto.startedAt ?? Date.now(),
+			roleDefault: rec.dto.executionRole ?? "general coding",
+			status: "provisional",
+			checking: { requiredUnits: 10, checkedUnits: 0 },
+		});
+	}
+
 	/**
 	 * What a compaction policy WOULD cut, without cutting it. Shown to a person before they authorize
 	 * it — "every control says what it will do before it is used" applies hardest to the one that
@@ -7069,6 +7093,7 @@ export class SquadManager extends EventEmitter {
 		}
 		this.agents.set(id, rec);
 		await this.ensureProjectedNode(rec);
+		await this.ensureAgentProfile(rec);
 		this.wire(rec);
 		// Synthetic same-state "spawn" entry (#lifecycle-truth finding 4 / DESIGN's timeline-continuity
 		// requirement) — records regardless of pending because "spawn" is an event-class reason, not

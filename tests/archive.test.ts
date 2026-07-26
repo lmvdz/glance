@@ -28,6 +28,8 @@ function rec(kind: NodeRecord["kind"], id: string, createdAt: number): NodeRecor
 			return { ...base, kind, class: "credentials", justification: "A credential you did not hand over is not one you agreed to spend." };
 		case "evidence":
 			return { ...base, kind, claim: "Tests passed.", verification: "checked", sampleSize: 3, sourceNodeIds: ["n1"], checkedAt: createdAt };
+		case "agent-profile":
+			return { ...base, kind, agentId: "n1", roleDefault: "general coding", status: "provisional", checking: { requiredUnits: 10, checkedUnits: 0 } };
 		case "plan-motion":
 			return { ...base, kind, lastMeaningfulMovementAt: createdAt, baselineSampleSize: 4, parked: false, intentionalStill: false, eligibleSuccessorCount: 1 };
 		case "handover":

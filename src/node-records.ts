@@ -143,6 +143,26 @@ const EvidenceSchema = Schema.Struct({
 });
 
 /**
+ * The configured role and initial checking contract for one agent. This is deliberately distinct
+ * from evidence: a role says what the fleet asked for; evidence says what actually happened.
+ */
+const AgentProfileSchema = Schema.Struct({
+	...base,
+	kind: Schema.Literal("agent-profile"),
+	agentId: Schema.String,
+	roleDefault: Schema.String,
+	status: Schema.Literals(["provisional", "established"]),
+	/** Provisional agents are checked, not silently trusted or distrusted. */
+	checking: Schema.optional(
+		Schema.Struct({
+			requiredUnits: Schema.Number,
+			checkedUnits: Schema.Number,
+			reviewerId: Schema.optional(Schema.String),
+		}),
+	),
+});
+
+/**
  * A decision a human actually made: what they were asked, what they chose, and how long they took.
  *
  * This is the evidence rule proposals are generated FROM. Without it a "learned" rule is a configured
@@ -218,6 +238,7 @@ const NodeRecordSchema = Schema.Union([
 	ObjectionSchema,
 	PlanMotionSchema,
 	EvidenceSchema,
+	AgentProfileSchema,
 	DecisionSchema,
 	HumanAuthoritySchema,
 	HandoverSchema,
@@ -231,6 +252,7 @@ export type InstructionReadbackRecord = typeof InstructionReadbackSchema.Type;
 export type ObjectionRecord = typeof ObjectionSchema.Type;
 export type PlanMotionRecord = typeof PlanMotionSchema.Type;
 export type EvidenceRecord = typeof EvidenceSchema.Type;
+export type AgentProfileRecord = typeof AgentProfileSchema.Type;
 export type DecisionRecord = typeof DecisionSchema.Type;
 export type HumanAuthorityRecord = typeof HumanAuthoritySchema.Type;
 export type HandoverRecord = typeof HandoverSchema.Type;
@@ -238,6 +260,7 @@ export type RetentionRecord = typeof RetentionSchema.Type;
 export type NodeSummaryRecord = typeof NodeSummarySchema.Type;
 export type NodeRecord = typeof NodeRecordSchema.Type;
 export const nodeRecordKinds = ["rule", "delegation-boundary", "instruction-readback", "objection", "plan-motion", "evidence", "decision", "human-authority", "handover", "retention", "summary"] as const;
+export const nodeRecordKinds = ["rule", "delegation-boundary", "instruction-readback", "objection", "plan-motion", "evidence", "agent-profile", "decision", "human-authority", "handover", "retention"] as const;
 
 const decode = Schema.decodeUnknownResult(NodeRecordSchema);
 

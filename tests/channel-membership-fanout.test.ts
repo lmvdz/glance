@@ -368,6 +368,7 @@ test("non-members get 403 for every per-agent HTTP route", async () => {
 		{ name: "transcript", method: "GET", suffix: "/transcript" },
 		{ name: "transitions", method: "GET", suffix: "/transitions" },
 		{ name: "subagents", method: "GET", suffix: "/subagents" },
+		{ name: "record", method: "GET", suffix: "/record" },
 		{ name: "receipts", method: "GET", suffix: "/receipts" },
 		{ name: "checkpoints", method: "GET", suffix: "/checkpoints" },
 		{ name: "commands", method: "GET", suffix: "/commands" },

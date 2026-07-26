@@ -3113,6 +3113,15 @@ export class SquadServer {
 			if (ph) return Response.json({ id: ph.id, name: ph.name, repo: ph.repo, harness: ph.harness, at: ph.at, dead: true, deadReason: ph.deadReason, transcriptEntries: ph.transcript.length });
 			return new Response("no such agent", { status: 404 });
 		}
+		const magentRecord = url.pathname.match(/^\/api\/agents\/([^/]+)\/record$/);
+		if (magentRecord && req.method === "GET") {
+			const id = decodeURIComponent(magentRecord[1]);
+			const denied = await guardAgent(id);
+			if (denied) return denied;
+			const record = await manager.agentRecord(id);
+			if (!record) return new Response("no such agent", { status: 404 });
+			return Response.json(record);
+		}
 		const mt = url.pathname.match(/^\/api\/agents\/([^/]+)\/transcript$/);
 		if (mt) {
 			const id = decodeURIComponent(mt[1]);

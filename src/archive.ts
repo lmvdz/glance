@@ -29,7 +29,7 @@ import type { NodeRecord, RetentionRecord } from "./node-records.ts";
  * them. Kept as an explicit list rather than a predicate so the exhaustiveness test can assert that
  * every kind was considered.
  */
-export const preservedKinds = ["decision", "rule", "objection", "instruction-readback", "human-authority", "delegation-boundary"] as const;
+export const preservedKinds = ["decision", "rule", "objection", "instruction-readback", "human-authority", "delegation-boundary", "agent-profile"] as const;
 export type PreservedKind = (typeof preservedKinds)[number];
 
 /**
@@ -107,6 +107,8 @@ function describe(record: NodeRecord): string {
 			return `rule "${record.sentence}" (${record.authorId})`;
 		case "evidence":
 			return `evidence "${record.claim}" (${record.verification}, n=${record.sampleSize})`;
+		case "agent-profile":
+			return `agent profile ${record.agentId} (${record.status})`;
 		case "handover":
 			return `handover ${record.fromActorId} → ${record.toActorId}`;
 		case "plan-motion":

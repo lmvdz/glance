@@ -3,6 +3,7 @@ import { Hash, Loader2, Search, Users, X } from 'lucide-react';
 import { Composer, type ModelOption } from '../chat/Composer';
 import { ChannelRail } from './ChannelRail';
 import { ChannelTimeline } from './ChannelTimeline';
+import { AgentRecordPanel } from './AgentRecordPanel';
 import { apiJson, jsonInit } from '../../lib/api';
 import { buildPromptCommand, channelAgentSessionId, channelDraftSessionId, ensureConsoleAgent, postChannelMessage } from '../../lib/chat/sendCore';
 import { resolveMentionRoute } from '../../lib/mentionGrammar';
@@ -317,6 +318,7 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
         {route.kind === 'workbench' ? renderWorkbench(route) : (
           <>
             <ChannelHeader channel={channel} presence={presence} selectedAgent={selectedAgent} />
+            {selectedAgent ? <AgentRecordPanel agent={selectedAgent} /> : null}
             <div className="border-b border-ink-border bg-ink px-4 py-2">
               <label className="relative block">
                 <span className="sr-only">Search channel history</span>
