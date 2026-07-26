@@ -144,6 +144,15 @@ const samples: Record<(typeof nodeRecordKinds)[number], NodeRecord> = {
 		preserved: ["the decision to ship", "the evidence known at the time", "every human sentence"],
 		fidelity: "compacted",
 	},
+	summary: {
+		kind: "summary",
+		id: "summary:n1:upward",
+		nodeId: "n1",
+		createdAt: 10,
+		direction: "upward",
+		markdown: "Current state: input.",
+		sources: ["record:decision-41", "plan:plans/room-threads/06-node-summaries.md"],
+	},
 };
 
 test("every record kind survives a round trip with every optional field intact", async () => {

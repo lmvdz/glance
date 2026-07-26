@@ -200,6 +200,17 @@ const RetentionSchema = Schema.Struct({
 	fidelity: Schema.Literals(["full", "compacted"]),
 });
 
+/** A current, regenerated statement for one consumer direction — not an archive or event log. */
+const NodeSummarySchema = Schema.Struct({
+	...base,
+	kind: Schema.Literal("summary"),
+	direction: Schema.Literals(["upward", "downward"]),
+	markdown: Schema.String,
+	/** References to the durable facts the statement was rebuilt from; content is never copied here. */
+	sources: Schema.Array(Schema.String),
+});
+
+
 const NodeRecordSchema = Schema.Union([
 	RuleSchema,
 	DelegationBoundarySchema,
@@ -211,6 +222,7 @@ const NodeRecordSchema = Schema.Union([
 	HumanAuthoritySchema,
 	HandoverSchema,
 	RetentionSchema,
+	NodeSummarySchema,
 ]);
 
 export type RuleRecord = typeof RuleSchema.Type;
@@ -223,8 +235,9 @@ export type DecisionRecord = typeof DecisionSchema.Type;
 export type HumanAuthorityRecord = typeof HumanAuthoritySchema.Type;
 export type HandoverRecord = typeof HandoverSchema.Type;
 export type RetentionRecord = typeof RetentionSchema.Type;
+export type NodeSummaryRecord = typeof NodeSummarySchema.Type;
 export type NodeRecord = typeof NodeRecordSchema.Type;
-export const nodeRecordKinds = ["rule", "delegation-boundary", "instruction-readback", "objection", "plan-motion", "evidence", "decision", "human-authority", "handover", "retention"] as const;
+export const nodeRecordKinds = ["rule", "delegation-boundary", "instruction-readback", "objection", "plan-motion", "evidence", "decision", "human-authority", "handover", "retention", "summary"] as const;
 
 const decode = Schema.decodeUnknownResult(NodeRecordSchema);
 

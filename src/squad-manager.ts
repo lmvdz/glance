@@ -240,6 +240,7 @@ import { ForgedCardError, assertAuthentic, projectsToRoom, type CardProvenance }
 import { NodeRecordStore, type PlanMotionRecord } from "./node-records.ts";
 import { approveIrreversible, beginInstruction, overruleObjection, raiseObjection, recordObjectionOutcome, rejectIrreversible, type InstructionExecution } from "./instructions.ts";
 import type { InstructionReadbackRecord, ObjectionRecord } from "./node-records.ts";
+import { regenerateNodeSummaries } from "./node-summaries.ts";
 import { proposeRules, type RuleProposal } from "./rule-proposals.ts";
 import { assessPlanMotion as assessPlanMotionEvidence, type PlanMotionInput, type PlanMotionAssessment } from "./plan-motion.ts";
 import { compactionNotice, planCompaction, planHandover, type CompactionPlan, type CompactionPolicy, type HandoverPlan } from "./archive.ts";
@@ -4834,6 +4835,7 @@ export class SquadManager extends EventEmitter {
 					commitsAhead: ev.commitsAhead,
 					dirtyFiles: ev.dirtyFiles,
 					now: Date.now(),
+					upwardSummary: await this.refreshNodeSummaries(rec, true),
 				};
 				report = composeAfterAction(input);
 				if (!(await saveAfterAction(this.stateDir, report))) return;
@@ -4852,6 +4854,19 @@ export class SquadManager extends EventEmitter {
 		} catch {
 			/* best-effort — the catastrophe path must survive a failed report */
 		}
+	}
+
+	/** Replaces the two live consumer statements after a lifecycle change, without creating nodes as a side effect. */
+	private async refreshNodeSummaries(rec: AgentRecord, materialize = false): Promise<string | undefined> {
+		const existing = await this.nodeStore.get(rec.dto.id);
+		const projected = existing ?? (materialize ? await this.ensureProjectedNode(rec) : undefined);
+		if (!projected) return undefined;
+		const node = await this.nodeStore.transition(projected.id, rec.dto.status as NodeState);
+		if (!node) return undefined;
+		const records = new NodeRecordStore(this.store, (m) => this.log("warn", `node-records: ${m}`));
+		const summaries = regenerateNodeSummaries({ node, records: await records.list(node.id), now: Date.now() });
+		await Promise.all(summaries.map((summary) => records.put(summary)));
+		return summaries[0].markdown;
 	}
 
 	/** What the dead unit left behind — the two counts the reap policy and the report's fault call
@@ -11240,6 +11255,7 @@ export class SquadManager extends EventEmitter {
 		rec.dto.status = to;
 		if (redactedCause?.error !== undefined) rec.dto.error = redactedCause.error; // fixes fail/markCatastrophe push-payload ordering (S6)
 		this.recordTransition(rec, from, to, reason, redactedCause);
+		void this.refreshNodeSummaries(rec).catch((err) => this.log("warn", `node summaries for ${rec.dto.id}: ${errText(err)}`));
 	}
 
 	/** Mirrors transition() for `rec.dto.pending`. `opts.callerOwnsStatus` is for sites that manage status
