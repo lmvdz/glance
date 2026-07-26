@@ -58,6 +58,27 @@ test("a javascript: link inside a chat callout body stays inert", () => {
   expect(html).not.toContain("javascript:alert");
 });
 
+test("a wireframe fence in chat sanitizes hostile HTML in the fence body", () => {
+  // Now that chat makes fence bodies agent-reachable, a wireframe body is
+  // untrusted the same way a callout/columns body is. `WireframeBlock`
+  // sanitizes through `lib/sanitize`; this pins that the hostile parts never
+  // reach rendered output, regardless of which sanitizer path runs them.
+  const text =
+    '```wireframe id=wf-hostile\n' +
+    '<div class="wf-card">Hello<script>alert(1)</script>' +
+    '<img src="x.png" onerror="alert(1)">' +
+    '<a href="javascript:alert(1)">click</a></div>\n' +
+    '```';
+  const html = renderToStaticMarkup(<SettledMarkdown text={text} status="ok" />);
+
+  expect(html).toContain('data-block-id="wf-hostile"');
+  expect(html).toContain("Hello");
+  expect(html).not.toContain("<script");
+  expect(html).not.toContain("alert(1)");
+  expect(html).not.toContain("onerror");
+  expect(html).not.toContain("javascript:alert");
+});
+
 test("the settled prefix is decoupled from tail-only changes across WS frames", () => {
   // No jsdom in this suite (see OrgSettings.test.tsx), so we assert the
   // precondition for React.memo to skip work in a real mounted tree: the

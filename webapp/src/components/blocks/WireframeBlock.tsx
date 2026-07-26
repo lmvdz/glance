@@ -361,11 +361,31 @@ function replaceIconMarkers(html: string): string {
   return html.replace(ICON_MARKER, (_match, _quote, name: string) => iconSvg(name));
 }
 
+// Browsers still parse `javascript:`/`vbscript:` schemes with whitespace
+// interleaved inside them (for example a tab between "java" and "script:");
+// collapse whitespace before checking the scheme so that trick can't slip
+// past this fallback.
+const UNSAFE_URL_SCHEME = /^(?:javascript|vbscript):/i;
+
+function isUnsafeUrlAttrValue(value: string): boolean {
+  return UNSAFE_URL_SCHEME.test(value.replace(/\s+/g, ''));
+}
+
 function fallbackSanitize(html: string): string {
   return html
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
     .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '')
     .replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    // Belt-and-suspenders for the rare case DOMPurify itself throws: neutralize
+    // `javascript:`/`vbscript:` URLs in href/src attributes rather than leaving
+    // them to reach the DOM unsanitized.
+    .replace(
+      /\s+(href|src|xlink:href)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi,
+      (match, _attr: string, dq: string | undefined, sq: string | undefined, uq: string | undefined) => {
+        const value = dq ?? sq ?? uq ?? '';
+        return isUnsafeUrlAttrValue(value) ? '' : match;
+      },
+    )
     .replace(/\s+style\s*=\s*(["'])(.*?)\1/gi, (_match, _quote, value: string) => {
       const safeStyle = sanitizeStyle(value);
       return safeStyle ? ` style="${escapeHtml(safeStyle)}"` : '';
