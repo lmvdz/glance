@@ -162,6 +162,15 @@ const samples: Record<(typeof nodeRecordKinds)[number], NodeRecord> = {
 		direction: "upward",
 		markdown: "Current state: input.",
 		sources: ["record:decision-41", "plan:plans/room-threads/06-node-summaries.md"],
+	"learning-state": {
+		kind: "learning-state",
+		id: "l1",
+		nodeId: "n1",
+		createdAt: 10,
+		borrowedDefaults: [{ id: "merge", sentence: "Nobody merges to main without you.", reversal: "Withdraw this default in one action.", status: "replaced", replacedByRuleId: "r1" }],
+		outOfHoursContact: "answered",
+		outOfHoursSentence: "Nothing leaves the app after six.",
+		unknowns: [{ id: "decisions", statement: "Which decisions you care about.", settlingEvidence: "Five identical answers.", requiredSampleSize: 5, costOfNotKnowing: "The fleet keeps asking.", proposalSubjects: ["*"], settledAt: 99 }],
 	},
 };
 

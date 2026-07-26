@@ -38,6 +38,8 @@ function rec(kind: NodeRecord["kind"], id: string, createdAt: number): NodeRecor
 			return { ...base, kind, authorizedBy: "db:lars", compactedAt: createdAt, cut: [], preserved: [], fidelity: "full" };
 		case "summary":
 			return { ...base, kind, direction: "upward", markdown: "Current state: working.", sources: [] };
+		case "learning-state":
+			return { ...base, kind, borrowedDefaults: [{ id: "merge", sentence: "Nobody merges to main without you.", reversal: "Withdraw this default in one action.", status: "borrowed" }], outOfHoursContact: "unset", unknowns: [{ id: "decisions", statement: "Which decisions you care about.", settlingEvidence: "Five identical answers.", requiredSampleSize: 5, costOfNotKnowing: "The fleet keeps asking.", proposalSubjects: ["*"] }] };
 	}
 }
 

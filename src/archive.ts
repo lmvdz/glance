@@ -30,6 +30,7 @@ import type { NodeRecord, RetentionRecord } from "./node-records.ts";
  * every kind was considered.
  */
 export const preservedKinds = ["decision", "rule", "objection", "instruction-readback", "human-authority", "delegation-boundary", "agent-profile"] as const;
+export const preservedKinds = ["decision", "rule", "objection", "instruction-readback", "human-authority", "delegation-boundary", "learning-state"] as const;
 export type PreservedKind = (typeof preservedKinds)[number];
 
 /**
@@ -125,6 +126,9 @@ function describe(record: NodeRecord): string {
 			return `an earlier compaction authorized by ${record.authorizedBy}`;
 		case "summary":
 			return `live ${record.direction} summary`;
+		case "learning-state":
+			return `${record.borrowedDefaults.length} borrowed defaults and ${record.unknowns.length} declared unknowns`;
+	}
 }
 	}
 
