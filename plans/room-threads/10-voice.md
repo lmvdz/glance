@@ -1,5 +1,5 @@
 # The voice — every string explains, not labels
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -21,6 +21,33 @@ contract never carried. The copy the design requires needs source facts not pres
 So this concern additionally **defines the typed proof-card payloads** those strings read from, and
 ships with each new proof emitter rather than as a final copy pass over finished work. Retrofitting copy
 does not work, because the meaning is discarded at the emit site.
+
+## Built 2026-07-26
+
+`scripts/voice.ts` + `tests/voice-ratchet.test.ts`, beside `dead-exports` and for the same reason:
+this is a lint over the source, not a runtime dependency.
+
+**Measured first.** All 12 human-facing card strings the manager emitted were label-only —
+"land attempt finished · wren · ok" is true and tells a person nothing they can act on. The five that
+INTERRUPT a person are rewritten and are held to the rule outright; the remaining seven are node-level
+diagnostics and are ratcheted at 7, which may only fall.
+
+Ratcheted rather than demanded all at once on purpose: a rule that requires a large rewrite before it
+can land is a rule that never lands, and the point is to stop the count rising while the rest is worked
+off.
+
+The rewritten copy carries what the amendment said it needed. A merge now says what it means — "…is on
+main. That has left this machine and a revert would be a new change, not an undo. Nothing else in the
+fleet was touched." A needs-you says who stopped and that everything else is still moving. A gate
+verdict says whether anything is waiting on you.
+
+The lint guards itself: a scan that found nothing would pass while proving nothing, so it asserts it
+found strings at all, and the rule is tested against known labels and known explanations. This is the
+same fail-open the gate ratchets in this repo already guard against.
+
+**What a lint cannot do**, which is why the amendment exists: it tests SHAPE. It cannot recover a fact
+the event contract never carried. The payload contracts in `projection-classes.ts` are what make the
+shape achievable, and they landed with concern 02.
 
 ## Goal
 The product's copy carries as much of the design as its layout does. This concern makes that a
