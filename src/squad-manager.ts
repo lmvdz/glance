@@ -234,7 +234,7 @@ import { TRANSCRIPT_EVENT_TOKEN_BURN_SNAPSHOT, fleetTokenBurnPayload, tokenBurnF
 import { truncateLabel } from "./text-util.ts";
 import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
 import { ChannelStore, DEFAULT_CHANNEL_ID, type ChannelEntry, type ClientChannelPost, type Channel, type CreateChannelInput, type ChannelMemberInput } from "./channels.ts";
-import { NodeStore, type NodeState } from "./nodes.ts";
+import { NodeStore, compareActivity, type NodeState } from "./nodes.ts";
 import { ForgedCardError, assertAuthentic, projectsToRoom, type CardProvenance } from "./projection-classes.ts";
 import { coldStartLearningState } from "./unknowns.ts";
 import { assessReversal, costEventsFrom, shouldDiscloseCost, summariseCost, type CostSummary, type ReversalAssessment, type ReversalNode } from "./decision-impact.ts";
@@ -2411,13 +2411,16 @@ export class SquadManager extends EventEmitter {
 	}
 
 	list(): AgentDTO[] {
-		return [...this.agents.values()].map((r) => {
+		const agents = [...this.agents.values()].map((r) => {
 			// Boot-recompute (t3-face concern 06): recomputed fresh on EVERY read, not only at
 			// mutation/emit sites — a restart-restored roster answers correctly on its very first
 			// GET, before any agent has mutated (and re-broadcast) since boot. See syncLadder's doc.
 			this.syncLadder(r.dto);
 			return r.dto;
 		});
+		// State-pane regions remain the client's concern; this only gives each region the same
+		// deterministic recency/velocity order through the roster it already consumes.
+		return agents.sort((a, b) => compareActivity(a, b, Date.now()));
 	}
 
 	/**
