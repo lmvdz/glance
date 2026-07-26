@@ -235,9 +235,14 @@ import { truncateLabel } from "./text-util.ts";
 import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
 import { ChannelStore, DEFAULT_CHANNEL_ID, type ChannelEntry, type ClientChannelPost, type Channel, type CreateChannelInput, type ChannelMemberInput } from "./channels.ts";
 import { NodeStore, type NodeState } from "./nodes.ts";
-import { NodeRecordStore } from "./node-records.ts";
 import { ForgedCardError, assertAuthentic, projectsToRoom, type CardProvenance } from "./projection-classes.ts";
+import { coldStartLearningState } from "./unknowns.ts";
+import { NodeRecordStore, type NodeRecord, type InstructionReadbackRecord, type ObjectionRecord, type PlanMotionRecord } from "./node-records.ts";
+import { approveIrreversible, beginInstruction, overruleObjection, raiseObjection, recordObjectionOutcome, rejectIrreversible, type InstructionExecution } from "./instructions.ts";
+import { regenerateNodeSummaries } from "./node-summaries.ts";
+import { agentRecordView, type AgentRecordView } from "./agent-records.ts";
 import { proposeRules, type RuleProposal } from "./rule-proposals.ts";
+import { assessPlanMotion as assessPlanMotionEvidence, planMotionMetrics, type PlanMotionInput, type PlanMotionAssessment } from "./plan-motion.ts";
 import { compactionNotice, planCompaction, planHandover, type CompactionPlan, type CompactionPolicy, type HandoverPlan } from "./archive.ts";
 import { consequenceSentence, reshape, type PlanProposal, type ReshapeOp } from "./plan-proposals.ts";
 import { DelegationBoundaryError, assertHumanAuthority, commandAction, grantFor, nonDelegatableClassOf, type Authority, type DelegationGrant } from "./delegation-boundary.ts";
@@ -1371,6 +1376,7 @@ export class SquadManager extends EventEmitter {
 
 	async start(): Promise<void> {
 		await this.materialiseAutoLandGrant();
+		await this.materialiseColdStart();
 		// Recovery only matters for a daemon with prior state. A fresh start has nothing to reconnect,
 		// reap, or adopt — and a fresh-state manager must NOT reap the shared sockets dir out from under
 		// a concurrent daemon (or test). reconnectLive (use live) → reapOrphans → adopt worktree context.
@@ -3785,6 +3791,59 @@ export class SquadManager extends EventEmitter {
 	 * Deliberately does NOT re-grant after a revocation — otherwise every restart would silently undo
 	 * a human taking the permission back, which is the exact failure this concern exists to prevent.
 	 */
+	/** The node the fleet's own org-level records hang from. Created once, reused forever. */
+	static readonly ROOT_NODE_ID = "fleet";
+
+	/**
+	 * On a fresh install the product knows nothing about this person, and concern 16's whole point is
+	 * that it says so out loud: six defaults marked BORROWED from other teams, one question that has no
+	 * default at all (out-of-hours contact), and a ledger of what it cannot yet know.
+	 *
+	 * Without this the learning state is never created, which means `proposalSampleFloor` always returns
+	 * undefined, the borrowed defaults never exist, and cold start is a module nobody calls. Idempotent:
+	 * an existing state is never overwritten, or every restart would silently undo a person's answers.
+	 */
+	private async materialiseColdStart(): Promise<void> {
+		try {
+			const nodes = new NodeStore(this.store);
+			const rootId = SquadManager.ROOT_NODE_ID;
+			if (!(await nodes.get(rootId))) {
+				await nodes.create({ id: rootId, kind: "plan", title: "the fleet", state: "working", createdAt: Date.now() });
+			}
+			const records = new NodeRecordStore(this.store, (m) => this.log("warn", `node-records: ${m}`));
+			if ((await records.list(rootId)).some((record) => record.kind === "learning-state")) return;
+			await records.put(coldStartLearningState(rootId, Date.now()));
+			this.log("info", "cold start: recorded six borrowed defaults and the unknowns ledger — nothing here was learned from you yet");
+		} catch (err) {
+			this.log("warn", `cold start not recorded: ${errText(err)}`);
+		}
+	}
+
+	/**
+	 * How often stall detection fired, and how often it was wrong. Concern 13's verify list requires
+	 * this to be surfaced — the reference shows "stalls noticed 2 in 8 weeks · 0 false". A detector
+	 * whose false-positive rate nobody can see is one people learn to ignore.
+	 */
+	async planMotionHealth(nodeId: string, now = Date.now()): Promise<{ noticed: number; falsePositive: number }> {
+		try {
+			const records = (await new NodeRecordStore(this.store).list(nodeId)).filter((record): record is PlanMotionRecord => record.kind === "plan-motion");
+			return planMotionMetrics(records, now);
+		} catch (err) {
+			this.log("warn", `plan motion health unavailable for ${nodeId}: ${errText(err)}`);
+			return { noticed: 0, falsePositive: 0 };
+		}
+	}
+
+	/** The learning state: what is borrowed, what is unknown, and what would settle each. */
+	async learningState(): Promise<NodeRecord | undefined> {
+		try {
+			return (await new NodeRecordStore(this.store).list(SquadManager.ROOT_NODE_ID)).find((record) => record.kind === "learning-state");
+		} catch (err) {
+			this.log("warn", `learning state unavailable: ${errText(err)}`);
+			return undefined;
+		}
+	}
+
 	private async materialiseAutoLandGrant(): Promise<void> {
 		if (!this.autoLand) return;
 		try {
@@ -3831,6 +3890,101 @@ export class SquadManager extends EventEmitter {
 			this.log("warn", `decision record for ${rec.dto.id}/${req.id} not kept: ${errText(err)}`);
 		}
 	}
+	/**
+	 * Notice a plan that has gone still from its own movement history. This is deliberately invoked
+	 * by the planner's plan observer, not a global timeout loop: different plans have different
+	 * normal gaps, and an unmeasured plan is not silently judged.
+	 */
+	async assessPlanMotion(input: PlanMotionInput): Promise<PlanMotionAssessment> {
+		const assessment = assessPlanMotionEvidence(input);
+		const existingNode = await this.nodeStore.get(input.planId);
+		if (!existingNode) {
+			await this.nodeStore.create({
+				id: input.planId,
+				kind: "plan",
+				title: input.planTitle,
+				state: "working",
+				createdAt: input.now,
+			});
+		}
+		const records = new NodeRecordStore(this.store, (message) => this.log("warn", `node-records: ${message}`));
+		const id = `plan-motion:${input.planId}:${assessment.record.lastMeaningfulMovementAt}`;
+		const prior = (await records.list(input.planId)).filter((record): record is PlanMotionRecord => record.kind === "plan-motion").find((record) => record.id === id);
+		const record = {
+			...assessment.record,
+			id,
+			nodeId: input.planId,
+			createdAt: input.now,
+			noticedAt: prior?.noticedAt,
+			outcome: prior?.outcome,
+		};
+		await records.put(record);
+		if (!assessment.stalled || prior?.noticedAt !== undefined || !assessment.message) return assessment;
+
+		const entry = await this.channelStore.appendManager(DEFAULT_CHANNEL_ID, {
+			authorActor: "planner",
+			kind: "system",
+			format: "markdown",
+			text: `${assessment.message} Noticing, not alarming.`,
+		});
+		await records.put({ ...record, noticedAt: input.now });
+		this.emit("event", { type: "channel-entry", channelId: DEFAULT_CHANNEL_ID, entry } satisfies SquadEvent);
+		return assessment;
+	}
+
+	/** Record the human's outcome, so the false-positive rate is evidence rather than a dashboard claim. */
+	async resolvePlanMotion(planId: string, lastMeaningfulMovementAt: number, outcome: "acknowledged" | "parked" | "dropped" | "resumed" | "false-positive", now = Date.now()): Promise<void> {
+		const records = new NodeRecordStore(this.store, (message) => this.log("warn", `node-records: ${message}`));
+		const id = `plan-motion:${planId}:${lastMeaningfulMovementAt}`;
+		const record = (await records.list(planId)).filter((candidate): candidate is PlanMotionRecord => candidate.kind === "plan-motion").find((candidate) => candidate.id === id);
+		if (!record) throw new Error(`plan motion evidence ${id} not found`);
+		await records.put({
+			...record,
+			createdAt: now,
+			outcome,
+			parked: outcome === "parked" ? true : record.parked,
+			intentionalStill: outcome === "parked" ? true : record.intentionalStill,
+			baselineMs: outcome === "parked" ? undefined : record.baselineMs,
+		});
+	}
+
+
+	/**
+	 * The only manager entry point that releases instruction work. It persists the agent's reading
+	 * before exposing the reversible executor; irreversible permission remains queryable and pending.
+	 */
+	async beginInstruction(
+		readback: InstructionReadbackRecord,
+		reversibleWork: () => Promise<void>,
+	): Promise<InstructionExecution> {
+		return beginInstruction(new NodeRecordStore(this.store, (m) => this.log("warn", `node-records: ${m}`)), readback, reversibleWork);
+	}
+
+	async approveInstructionIrreversible(nodeId: string, instructionId: string): Promise<InstructionReadbackRecord> {
+		return approveIrreversible(new NodeRecordStore(this.store), nodeId, instructionId);
+	}
+
+	async rejectInstructionIrreversible(nodeId: string, instructionId: string): Promise<InstructionReadbackRecord> {
+		return rejectIrreversible(new NodeRecordStore(this.store), nodeId, instructionId);
+	}
+
+	async raiseInstructionObjection(objection: ObjectionRecord): Promise<ObjectionRecord> {
+		return raiseObjection(new NodeRecordStore(this.store), objection);
+	}
+
+	async overruleInstructionObjection(nodeId: string, objectionId: string, overruledBy: string): Promise<ObjectionRecord> {
+		return overruleObjection(new NodeRecordStore(this.store), nodeId, objectionId, overruledBy);
+	}
+
+	async recordInstructionObjectionOutcome(
+		nodeId: string,
+		objectionId: string,
+		outcome: string,
+		matchedPrediction: boolean,
+		at = Date.now(),
+	): Promise<ObjectionRecord> {
+		return recordObjectionOutcome(new NodeRecordStore(this.store), nodeId, objectionId, outcome, matchedPrediction, at);
+	}
 
 	/**
 	 * What the fleet would offer to stop asking about, for one node — generated from decisions this
@@ -3844,6 +3998,29 @@ export class SquadManager extends EventEmitter {
 			this.log("warn", `rule proposals for ${nodeId} unavailable: ${errText(err)}`);
 			return [];
 		}
+	}
+
+	/** One agent's evidence record. There is deliberately no fleet-wide equivalent to rank people. */
+	async agentRecord(agentId: string, now = Date.now()): Promise<AgentRecordView | undefined> {
+		if (!this.agents.has(agentId)) return undefined;
+		return agentRecordView(agentId, await new NodeRecordStore(this.store).list(agentId), now);
+	}
+
+	/** Every new agent starts with a role default and an explicit provisional checking contract. */
+	private async ensureAgentProfile(rec: AgentRecord): Promise<void> {
+		const records = new NodeRecordStore(this.store, (message) => this.log("warn", `node-records: ${message}`));
+		const existing = await records.list(rec.dto.id);
+		if (existing.some((record) => record.kind === "agent-profile" && record.agentId === rec.dto.id)) return;
+		await records.put({
+			kind: "agent-profile",
+			id: `agent-profile:${rec.dto.id}`,
+			nodeId: rec.dto.id,
+			agentId: rec.dto.id,
+			createdAt: rec.dto.startedAt ?? Date.now(),
+			roleDefault: rec.dto.executionRole ?? "general coding",
+			status: "provisional",
+			checking: { requiredUnits: 10, checkedUnits: 0 },
+		});
 	}
 
 	/**
@@ -4735,6 +4912,7 @@ export class SquadManager extends EventEmitter {
 					commitsAhead: ev.commitsAhead,
 					dirtyFiles: ev.dirtyFiles,
 					now: Date.now(),
+					upwardSummary: await this.refreshNodeSummaries(rec, true),
 				};
 				report = composeAfterAction(input);
 				if (!(await saveAfterAction(this.stateDir, report))) return;
@@ -4753,6 +4931,19 @@ export class SquadManager extends EventEmitter {
 		} catch {
 			/* best-effort — the catastrophe path must survive a failed report */
 		}
+	}
+
+	/** Replaces the two live consumer statements after a lifecycle change, without creating nodes as a side effect. */
+	private async refreshNodeSummaries(rec: AgentRecord, materialize = false): Promise<string | undefined> {
+		const existing = await this.nodeStore.get(rec.dto.id);
+		const projected = existing ?? (materialize ? await this.ensureProjectedNode(rec) : undefined);
+		if (!projected) return undefined;
+		const node = await this.nodeStore.transition(projected.id, rec.dto.status as NodeState);
+		if (!node) return undefined;
+		const records = new NodeRecordStore(this.store, (m) => this.log("warn", `node-records: ${m}`));
+		const summaries = regenerateNodeSummaries({ node, records: await records.list(node.id), now: Date.now() });
+		await Promise.all(summaries.map((summary) => records.put(summary)));
+		return summaries[0].markdown;
 	}
 
 	/** What the dead unit left behind — the two counts the reap policy and the report's fault call
@@ -6955,6 +7146,7 @@ export class SquadManager extends EventEmitter {
 		}
 		this.agents.set(id, rec);
 		await this.ensureProjectedNode(rec);
+		await this.ensureAgentProfile(rec);
 		this.wire(rec);
 		// Synthetic same-state "spawn" entry (#lifecycle-truth finding 4 / DESIGN's timeline-continuity
 		// requirement) — records regardless of pending because "spawn" is an event-class reason, not
@@ -11141,6 +11333,7 @@ export class SquadManager extends EventEmitter {
 		rec.dto.status = to;
 		if (redactedCause?.error !== undefined) rec.dto.error = redactedCause.error; // fixes fail/markCatastrophe push-payload ordering (S6)
 		this.recordTransition(rec, from, to, reason, redactedCause);
+		void this.refreshNodeSummaries(rec).catch((err) => this.log("warn", `node summaries for ${rec.dto.id}: ${errText(err)}`));
 	}
 
 	/** Mirrors transition() for `rec.dto.pending`. `opts.callerOwnsStatus` is for sites that manage status

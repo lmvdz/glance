@@ -118,6 +118,10 @@ const PlanMotionSchema = Schema.Struct({
 	intentionalStill: Schema.Boolean,
 	blockedCause: Schema.optional(Schema.String),
 	eligibleSuccessorCount: Schema.Number,
+	/** The one planner message was emitted; retained to avoid repeating one absence as a feed. */
+	noticedAt: Schema.optional(Schema.Number),
+	/** What happened after the notice. Parked work remains intentionally numberless. */
+	outcome: Schema.optional(Schema.Literals(["acknowledged", "parked", "dropped", "resumed", "false-positive"])),
 });
 
 /**
@@ -136,6 +140,26 @@ const EvidenceSchema = Schema.Struct({
 	checkedAt: Schema.optional(Schema.Number),
 	staleAt: Schema.optional(Schema.Number),
 	withdrawnAt: Schema.optional(Schema.Number),
+});
+
+/**
+ * The configured role and initial checking contract for one agent. This is deliberately distinct
+ * from evidence: a role says what the fleet asked for; evidence says what actually happened.
+ */
+const AgentProfileSchema = Schema.Struct({
+	...base,
+	kind: Schema.Literal("agent-profile"),
+	agentId: Schema.String,
+	roleDefault: Schema.String,
+	status: Schema.Literals(["provisional", "established"]),
+	/** Provisional agents are checked, not silently trusted or distrusted. */
+	checking: Schema.optional(
+		Schema.Struct({
+			requiredUnits: Schema.Number,
+			checkedUnits: Schema.Number,
+			reviewerId: Schema.optional(Schema.String),
+		}),
+	),
 });
 
 /**
@@ -196,6 +220,48 @@ const RetentionSchema = Schema.Struct({
 	fidelity: Schema.Literals(["full", "compacted"]),
 });
 
+/** A current, regenerated statement for one consumer direction — not an archive or event log. */
+const NodeSummarySchema = Schema.Struct({
+	...base,
+	kind: Schema.Literal("summary"),
+	direction: Schema.Literals(["upward", "downward"]),
+	markdown: Schema.String,
+	/** References to the durable facts the statement was rebuilt from; content is never copied here. */
+	sources: Schema.Array(Schema.String),
+});
+
+
+/**
+ * The first-week learning state. Borrowed defaults remain named as borrowed until a human sentence
+ * replaces or withdraws each one; unknowns carry the evidence and sample that would settle them.
+ */
+const LearningStateSchema = Schema.Struct({
+	...base,
+	kind: Schema.Literal("learning-state"),
+	borrowedDefaults: Schema.Array(
+		Schema.Struct({
+			id: Schema.String,
+			sentence: Schema.String,
+			reversal: Schema.String,
+			status: Schema.Literals(["borrowed", "withdrawn", "replaced"]),
+			replacedByRuleId: Schema.optional(Schema.String),
+		}),
+	),
+	outOfHoursContact: Schema.Literals(["unset", "answered"]),
+	outOfHoursSentence: Schema.optional(Schema.String),
+	unknowns: Schema.Array(
+		Schema.Struct({
+			id: Schema.String,
+			statement: Schema.String,
+			settlingEvidence: Schema.String,
+			requiredSampleSize: Schema.Number,
+			costOfNotKnowing: Schema.String,
+			proposalSubjects: Schema.Array(Schema.String),
+			settledAt: Schema.optional(Schema.Number),
+		}),
+	),
+});
+
 const NodeRecordSchema = Schema.Union([
 	RuleSchema,
 	DelegationBoundarySchema,
@@ -203,10 +269,13 @@ const NodeRecordSchema = Schema.Union([
 	ObjectionSchema,
 	PlanMotionSchema,
 	EvidenceSchema,
+	AgentProfileSchema,
 	DecisionSchema,
 	HumanAuthoritySchema,
 	HandoverSchema,
 	RetentionSchema,
+	NodeSummarySchema,
+	LearningStateSchema,
 ]);
 
 export type RuleRecord = typeof RuleSchema.Type;
@@ -215,12 +284,15 @@ export type InstructionReadbackRecord = typeof InstructionReadbackSchema.Type;
 export type ObjectionRecord = typeof ObjectionSchema.Type;
 export type PlanMotionRecord = typeof PlanMotionSchema.Type;
 export type EvidenceRecord = typeof EvidenceSchema.Type;
+export type AgentProfileRecord = typeof AgentProfileSchema.Type;
 export type DecisionRecord = typeof DecisionSchema.Type;
 export type HumanAuthorityRecord = typeof HumanAuthoritySchema.Type;
 export type HandoverRecord = typeof HandoverSchema.Type;
 export type RetentionRecord = typeof RetentionSchema.Type;
+export type NodeSummaryRecord = typeof NodeSummarySchema.Type;
+export type LearningStateRecord = typeof LearningStateSchema.Type;
 export type NodeRecord = typeof NodeRecordSchema.Type;
-export const nodeRecordKinds = ["rule", "delegation-boundary", "instruction-readback", "objection", "plan-motion", "evidence", "decision", "human-authority", "handover", "retention"] as const;
+export const nodeRecordKinds = ["rule", "delegation-boundary", "instruction-readback", "objection", "plan-motion", "evidence", "agent-profile", "decision", "human-authority", "handover", "retention", "summary", "learning-state"] as const;
 
 const decode = Schema.decodeUnknownResult(NodeRecordSchema);
 

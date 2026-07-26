@@ -64,6 +64,19 @@ export class NodeStore {
 		return (await this.store.getNode(node.id)) ?? node;
 	}
 
+	/** Update lifecycle state without overloading the node with derived evidence. */
+	async transition(id: string, state: NodeState, now = this.now()): Promise<Node | undefined> {
+		const current = await this.get(id);
+		if (!current) return undefined;
+		const node: Node = {
+			...current,
+			state,
+			settledAt: state === "settled" ? current.settledAt ?? now : undefined,
+		};
+		await this.store.putNode(node);
+		return (await this.store.getNode(id)) ?? node;
+	}
+
 	/** Idempotently materialize unit nodes for state written before nodes existed. */
 	async migrateLegacyAgents(): Promise<void> {
 		this.migration ??= (async () => {

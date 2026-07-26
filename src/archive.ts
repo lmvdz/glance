@@ -29,14 +29,16 @@ import type { NodeRecord, RetentionRecord } from "./node-records.ts";
  * them. Kept as an explicit list rather than a predicate so the exhaustiveness test can assert that
  * every kind was considered.
  */
-export const preservedKinds = ["decision", "rule", "objection", "instruction-readback", "human-authority", "delegation-boundary"] as const;
+export const preservedKinds = ["decision", "rule", "objection", "instruction-readback", "human-authority", "delegation-boundary", "agent-profile", "learning-state"] as const;
 export type PreservedKind = (typeof preservedKinds)[number];
 
 /**
- * Kinds a policy may compact. Every remaining kind must appear here, or the exhaustiveness test fails.
- * @substrate paired with `preservedKinds` as the audit surface; see above.
+ * Kinds a policy may compact. Every remaining archival kind must appear here, or the exhaustiveness
+ * test fails. Live summaries are deliberately excluded: they are regenerated state, not history.
  */
 export const compactableKinds = ["evidence", "plan-motion", "handover", "retention"] as const;
+/** Current replace-in-place records that are neither archive evidence nor compaction candidates. */
+export const liveKinds = ["summary"] as const;
 
 function isPreserved(kind: NodeRecord["kind"]): boolean {
 	return (preservedKinds as readonly string[]).includes(kind);
@@ -70,6 +72,7 @@ export function planCompaction(records: readonly NodeRecord[], policy: Compactio
 	const cut: NodeRecord[] = [];
 	const kept: CompactionPlan["kept"] = [];
 	for (const record of records) {
+		if ((liveKinds as readonly string[]).includes(record.kind)) continue;
 		if (isPreserved(record.kind)) {
 			kept.push({ record, because: "preserved-kind" });
 			continue;
@@ -104,6 +107,8 @@ function describe(record: NodeRecord): string {
 			return `rule "${record.sentence}" (${record.authorId})`;
 		case "evidence":
 			return `evidence "${record.claim}" (${record.verification}, n=${record.sampleSize})`;
+		case "agent-profile":
+			return `agent profile ${record.agentId} (${record.status})`;
 		case "handover":
 			return `handover ${record.fromActorId} → ${record.toActorId}`;
 		case "plan-motion":
@@ -118,6 +123,10 @@ function describe(record: NodeRecord): string {
 			return `boundary ${record.class}`;
 		case "retention":
 			return `an earlier compaction authorized by ${record.authorizedBy}`;
+		case "summary":
+			return `live ${record.direction} summary`;
+		case "learning-state":
+			return `${record.borrowedDefaults.length} borrowed defaults and ${record.unknowns.length} declared unknowns`;
 	}
 }
 

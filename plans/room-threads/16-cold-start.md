@@ -1,5 +1,5 @@
 # Cold start — six borrowed defaults and a ledger of what we do not know
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural

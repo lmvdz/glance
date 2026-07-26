@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { compactableKinds, compactionNotice, evidenceAge, planCompaction, planHandover, preservedKinds } from "../src/archive.ts";
+import { compactableKinds, compactionNotice, evidenceAge, liveKinds, planCompaction, planHandover, preservedKinds } from "../src/archive.ts";
 import { NodeRecordStore, nodeRecordKinds, type NodeRecord } from "../src/node-records.ts";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -28,23 +28,30 @@ function rec(kind: NodeRecord["kind"], id: string, createdAt: number): NodeRecor
 			return { ...base, kind, class: "credentials", justification: "A credential you did not hand over is not one you agreed to spend." };
 		case "evidence":
 			return { ...base, kind, claim: "Tests passed.", verification: "checked", sampleSize: 3, sourceNodeIds: ["n1"], checkedAt: createdAt };
+		case "agent-profile":
+			return { ...base, kind, agentId: "n1", roleDefault: "general coding", status: "provisional", checking: { requiredUnits: 10, checkedUnits: 0 } };
 		case "plan-motion":
 			return { ...base, kind, lastMeaningfulMovementAt: createdAt, baselineSampleSize: 4, parked: false, intentionalStill: false, eligibleSuccessorCount: 1 };
 		case "handover":
 			return { ...base, kind, fromActorId: "wren", toActorId: "pike", carried: [], notCarried: [], staleEvidenceIds: [] };
 		case "retention":
 			return { ...base, kind, authorizedBy: "db:lars", compactedAt: createdAt, cut: [], preserved: [], fidelity: "full" };
+		case "summary":
+			return { ...base, kind, direction: "upward", markdown: "Current state: working.", sources: [] };
+		case "learning-state":
+			return { ...base, kind, borrowedDefaults: [{ id: "merge", sentence: "Nobody merges to main without you.", reversal: "Withdraw this default in one action.", status: "borrowed" }], outOfHoursContact: "unset", unknowns: [{ id: "decisions", statement: "Which decisions you care about.", settlingEvidence: "Five identical answers.", requiredSampleSize: 5, costOfNotKnowing: "The fleet keeps asking.", proposalSubjects: ["*"] }] };
 	}
 }
 
 const policy = { authorizedBy: "db:lars", olderThanMs: 24 * 60 * 60 * 1000, reason: "Tool chatter past a day is not worth the disk." };
 
-test("every record kind is either preserved or compactable — none is unconsidered", () => {
+test("every record kind is explicitly archival or live state — none is unconsidered", () => {
 	// The classification is only a boundary if nothing can be added beside it without a decision.
-	const classified = new Set<string>([...preservedKinds, ...compactableKinds]);
+	const classified = new Set<string>([...preservedKinds, ...compactableKinds, ...liveKinds]);
 	expect(nodeRecordKinds.filter((kind) => !classified.has(kind))).toEqual([]);
-	// And no kind is both.
+	// No kind is both archival classes, and live state cannot quietly enter either archive lane.
 	expect(preservedKinds.filter((kind) => (compactableKinds as readonly string[]).includes(kind))).toEqual([]);
+	expect(liveKinds.filter((kind) => ([...preservedKinds, ...compactableKinds] as readonly string[]).includes(kind))).toEqual([]);
 });
 
 test("decisions, rules, readings, objections and authority are never cut — at any age, under any policy", () => {
@@ -53,7 +60,13 @@ test("decisions, rules, readings, objections and authority are never cut — at 
 	expect(plan.cut).toEqual([]);
 	expect(plan.kept.every(({ because }) => because === "preserved-kind")).toBe(true);
 	expect(plan.retention.fidelity).toBe("full");
+});
 
+test("a live summary is neither archived nor compacted", () => {
+	const plan = planCompaction([rec("summary", "summary:n1:upward", OLD)], policy, T);
+	expect(plan.cut).toEqual([]);
+	expect(plan.kept).toEqual([]);
+	expect(plan.retention.fidelity).toBe("full");
 });
 
 test("a compaction declares what it cut, what it kept, when, and who authorized it", () => {

@@ -12,6 +12,9 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentDriver } from "../src/agent-driver.ts";
+import { readAfterAction } from "../src/after-action.ts";
+import { FileStore } from "../src/dal/store.ts";
+import { NodeRecordStore } from "../src/node-records.ts";
 import { checkpointLogPath, readCheckpoints } from "../src/workflow/checkpoint-log.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import type { AgentDTO, PersistedAgent, RpcSessionState } from "../src/types.ts";
@@ -256,6 +259,10 @@ test("a terminal-marked workflow's transcript survives a restart (reattachTermin
 	expect(texts.slice(0, 2)).toEqual(["do the thing", "working on it"]);
 	expect(texts[2]?.startsWith("📋 After-action report")).toBe(true);
 	expect(mgr2.list().find((a) => a.name === "wf-transcript")?.messageCount).toBe(3);
+	const report = await readAfterAction(stateDir, dto.id);
+	const summaries = (await new NodeRecordStore(new FileStore(stateDir)).list(dto.id)).filter((record) => record.kind === "summary");
+	expect(report?.upwardSummary).toBe(summaries.find((record) => record.direction === "upward")?.markdown);
+	expect(summaries).toHaveLength(2);
 	await mgr2.stop();
 });
 

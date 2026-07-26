@@ -90,6 +90,8 @@ const samples: Record<(typeof nodeRecordKinds)[number], NodeRecord> = {
 		intentionalStill: false,
 		blockedCause: "waiting on a review nobody was asked for",
 		eligibleSuccessorCount: 3,
+		noticedAt: 70,
+		outcome: "acknowledged",
 	},
 	evidence: {
 		kind: "evidence",
@@ -103,6 +105,16 @@ const samples: Record<(typeof nodeRecordKinds)[number], NodeRecord> = {
 		checkedAt: 20,
 		staleAt: 999,
 		withdrawnAt: 1000,
+	},
+	"agent-profile": {
+		kind: "agent-profile",
+		id: "profile-1",
+		nodeId: "n1",
+		agentId: "n1",
+		createdAt: 10,
+		roleDefault: "database migrator",
+		status: "provisional",
+		checking: { requiredUnits: 10, checkedUnits: 3, reviewerId: "pike" },
 	},
 	decision: {
 		kind: "decision",
@@ -141,6 +153,25 @@ const samples: Record<(typeof nodeRecordKinds)[number], NodeRecord> = {
 		cut: ["407 tool-approval prompts"],
 		preserved: ["the decision to ship", "the evidence known at the time", "every human sentence"],
 		fidelity: "compacted",
+	},
+	summary: {
+		kind: "summary",
+		id: "summary:n1:upward",
+		nodeId: "n1",
+		createdAt: 10,
+		direction: "upward",
+		markdown: "Current state: input.",
+		sources: ["record:decision-41", "plan:plans/room-threads/06-node-summaries.md"],
+	},
+	"learning-state": {
+		kind: "learning-state",
+		id: "l1",
+		nodeId: "n1",
+		createdAt: 10,
+		borrowedDefaults: [{ id: "merge", sentence: "Nobody merges to main without you.", reversal: "Withdraw this default in one action.", status: "replaced", replacedByRuleId: "r1" }],
+		outOfHoursContact: "answered",
+		outOfHoursSentence: "Nothing leaves the app after six.",
+		unknowns: [{ id: "decisions", statement: "Which decisions you care about.", settlingEvidence: "Five identical answers.", requiredSampleSize: 5, costOfNotKnowing: "The fleet keeps asking.", proposalSubjects: ["*"], settledAt: 99 }],
 	},
 };
 
