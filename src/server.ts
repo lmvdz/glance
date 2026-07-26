@@ -261,6 +261,8 @@ const PUBLIC_ASSETS: Record<string, string> = {
 export interface ModelOption {
 	label: string;
 	value: string;
+	/** Which harness offers it — declared, never inferred from the model id. */
+	harness?: string;
 }
 
 export function modelOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): ModelOption[] {
@@ -277,12 +279,19 @@ export function modelOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): Model
 	return [{ label: "omp default", value: "" }, ...models.map((value) => ({ label: value, value }))];
 }
 
+/**
+ * Merge model lists from every source, keyed by HARNESS AND value.
+ *
+ * Deduping on value alone collapsed the same model offered by two harnesses into one entry — which
+ * would have quietly undone the reason harness is carried at all, since reaching `claude-opus-4-5`
+ * through omp and through claude-code are two different destinations for a prompt.
+ */
 export function mergeModelOptions(...groups: ModelOption[][]): ModelOption[] {
 	const seen = new Set<string>();
 	return groups.flat().filter((option) => {
-		const value = option.value || "__default__";
-		if (seen.has(value)) return false;
-		seen.add(value);
+		const key = `${option.harness ?? ""}\u0000${option.value || "__default__"}`;
+		if (seen.has(key)) return false;
+		seen.add(key);
 		return true;
 	});
 }

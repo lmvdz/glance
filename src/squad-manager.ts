@@ -2755,18 +2755,41 @@ export class SquadManager extends EventEmitter {
 		return this.profiles(repo).find((p) => p.id === id);
 	}
 
+	/**
+	 * Every model this fleet can actually reach, tagged with the harness that offers it.
+	 *
+	 * Previously this returned the FIRST live agent's list and stopped, so a fleet running two
+	 * harnesses showed one of them and silently hid the other — and the picker then grouped what it
+	 * got by a provider string inferred from the model id, which cannot tell `claude-opus-4-5` reached
+	 * through omp from the same model reached through claude-code. Harness is the declared fact.
+	 *
+	 * One agent per harness is asked, not one per agent: the answer is a property of the harness, and
+	 * querying forty units for the same list would be forty round trips for one answer.
+	 */
 	async modelOptions(): Promise<RuntimeModelOption[]> {
+		const asked = new Set<string>();
+		const out: RuntimeModelOption[] = [];
+		const seen = new Set<string>();
 		for (const rec of this.agents.values()) {
 			if (!rec.agent.isAlive || !rec.agent.getAvailableModels) continue;
+			const harness = rec.dto.harness ?? rec.options.harness ?? "unknown";
+			if (asked.has(harness)) continue;
+			asked.add(harness);
 			try {
 				const result = await rec.agent.getAvailableModels();
-				const options = modelOptionsFromRuntime(result.models);
-				if (options.length) return options;
+				for (const option of modelOptionsFromRuntime(result.models)) {
+					// The same model offered by two harnesses is two entries, because they are two
+					// different places a prompt can go. Deduped within a harness, never across.
+					const key = `${harness}\u0000${option.value}`;
+					if (seen.has(key)) continue;
+					seen.add(key);
+					out.push({ ...option, harness });
+				}
 			} catch {
-				/* fall back to configured models */
+				/* this harness could not be asked; the others still answer */
 			}
 		}
-		return [];
+		return out;
 	}
 
 	async listFeedbackCampaigns(): Promise<FeedbackCampaign[]> {

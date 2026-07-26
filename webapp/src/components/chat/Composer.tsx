@@ -33,6 +33,8 @@ import type { Task } from '../../types';
 export interface ModelOption {
   label: string;
   value: string;
+  /** Which harness offers this model. Declared by the daemon, never inferred from the id. */
+  harness?: string;
 }
 
 export interface SuggestionChip {
