@@ -234,10 +234,11 @@ import { TRANSCRIPT_EVENT_TOKEN_BURN_SNAPSHOT, fleetTokenBurnPayload, tokenBurnF
 import { truncateLabel } from "./text-util.ts";
 import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
 import { ChannelStore, DEFAULT_CHANNEL_ID, type ChannelEntry, type ClientChannelPost, type Channel, type CreateChannelInput, type ChannelMemberInput } from "./channels.ts";
-import { NodeStore, type NodeState } from "./nodes.ts";
+import { NodeStore, compareActivity, type NodeState } from "./nodes.ts";
 import { ForgedCardError, assertAuthentic, projectsToRoom, type CardProvenance } from "./projection-classes.ts";
 import { coldStartLearningState } from "./unknowns.ts";
-import { NodeRecordStore, type NodeRecord, type InstructionReadbackRecord, type ObjectionRecord, type PlanMotionRecord } from "./node-records.ts";
+import { assessReversal, costEventsFrom, shouldDiscloseCost, summariseCost, type CostSummary, type ReversalAssessment, type ReversalNode } from "./decision-impact.ts";
+import { NodeRecordStore, quoteRule, type NodeRecord, type InstructionReadbackRecord, type ObjectionRecord, type PlanMotionRecord } from "./node-records.ts";
 import { approveIrreversible, beginInstruction, overruleObjection, raiseObjection, recordObjectionOutcome, rejectIrreversible, type InstructionExecution } from "./instructions.ts";
 import { regenerateNodeSummaries } from "./node-summaries.ts";
 import { agentRecordView, type AgentRecordView } from "./agent-records.ts";
@@ -1129,6 +1130,8 @@ export class SquadManager extends EventEmitter {
 	private readonly unverifiedProofEscalated = new Set<string>();
 	/** Per-agent count of auto-supervised answers spent this run (OMP_SQUAD_AUTOSUPERVISE attempt budget). */
 	private readonly superviseBudget = new Map<string, number>();
+	/** Pending authority writes keyed by agent/question, so readers observe the routing decision once it is durable. */
+	private readonly authorityWrites = new Map<string, Promise<void>>();
 	/** Manager card projections that exhausted ChannelStore's bounded append retry. */
 	private projectionFailures = 0;
 	/** Per-agent count of advisory peer messages spent this run (OMP_SQUAD_PEERMSG_BUDGET). */
@@ -2410,13 +2413,16 @@ export class SquadManager extends EventEmitter {
 	}
 
 	list(): AgentDTO[] {
-		return [...this.agents.values()].map((r) => {
+		const agents = [...this.agents.values()].map((r) => {
 			// Boot-recompute (t3-face concern 06): recomputed fresh on EVERY read, not only at
 			// mutation/emit sites — a restart-restored roster answers correctly on its very first
 			// GET, before any agent has mutated (and re-broadcast) since boot. See syncLadder's doc.
 			this.syncLadder(r.dto);
 			return r.dto;
 		});
+		// State-pane regions remain the client's concern; this only gives each region the same
+		// deterministic recency/velocity order through the roster it already consumes.
+		return agents.sort((a, b) => compareActivity(a, b, Date.now()));
 	}
 
 	/**
@@ -3834,6 +3840,67 @@ export class SquadManager extends EventEmitter {
 		}
 	}
 
+	/**
+	 * What undoing a piece of work would actually take, following what was built on it. Reads the live
+	 * roster rather than a separate model — a second view of the same fleet is how two views start
+	 * disagreeing.
+	 */
+	async reversalCost(agentId: string): Promise<ReversalAssessment | undefined> {
+		const rec = this.agents.get(agentId);
+		if (!rec) return undefined;
+		const children = new Map<string, string[]>();
+		for (const { dto } of this.agents.values()) {
+			if (!dto.parentId) continue;
+			children.set(dto.parentId, [...(children.get(dto.parentId) ?? []), dto.id]);
+		}
+		const nodes: ReversalNode[] = [...this.agents.values()].map(({ dto }) => ({
+			id: dto.id,
+			address: dto.id,
+			title: dto.name || dto.id,
+			dependents: children.get(dto.id) ?? [],
+			// A MERGED pull request has left the machine: that part is not undoable by doing more work
+			// here, and a revert is a new change rather than an undo.
+			...(dto.prState === "merged" ? { irreversible: { what: `the merge from ${dto.name || dto.id}`, nearestRepair: "a revert commit, which is a new change rather than an undo" } } : {}),
+		}));
+		return assessReversal(nodes, agentId);
+	}
+
+	/**
+	 * What a node's work spent, and what of that was wasted, read from its retained records.
+	 *
+	 * The disclosure rule is applied HERE rather than left to each caller: a rule every render site
+	 * has to remember is a rule one of them will forget, and the failure is silent — a cost ticker
+	 * appears somewhere it changes nothing, and people learn to stop reading costs entirely. Callers
+	 * ask whether this cost sits beside a choice; the answer to "should this be shown" comes back with
+	 * the number.
+	 */
+	async costSummary(nodeId: string, context: { changesTheDecision?: boolean; notableCents?: number } = {}): Promise<CostSummary & { disclose: boolean }> {
+		let summary: CostSummary;
+		try {
+			summary = summariseCost(costEventsFrom(await new NodeRecordStore(this.store).list(nodeId)));
+		} catch (err) {
+			this.log("warn", `cost summary unavailable for ${nodeId}: ${errText(err)}`);
+			summary = summariseCost([]);
+		}
+		return { ...summary, disclose: shouldDiscloseCost({ changesTheDecision: context.changesTheDecision ?? false, cents: summary.spentCents, notableCents: context.notableCents }) };
+	}
+
+	/**
+	 * The rules that settled an action, each quoted with the person whose words they are.
+	 *
+	 * Concern 11 requires a rule to be quotable verbatim wherever it decides work, and concern 19
+	 * requires its author to survive every render path — a rule that dissolves into anonymous house
+	 * policy the moment it is displayed has lost the thing that made it answerable.
+	 */
+	async rulesQuotedFor(nodeId: string, action: string): Promise<string[]> {
+		try {
+			return (await new NodeRecordStore(this.store).rulesSettling(nodeId, action)).map(quoteRule);
+		} catch (err) {
+			this.log("warn", `rules for ${nodeId}/${action} unavailable: ${errText(err)}`);
+			return [];
+		}
+	}
+
 	/** The learning state: what is borrowed, what is unknown, and what would settle each. */
 	async learningState(): Promise<NodeRecord | undefined> {
 		try {
@@ -3889,6 +3956,39 @@ export class SquadManager extends EventEmitter {
 		} catch (err) {
 			this.log("warn", `decision record for ${rec.dto.id}/${req.id} not kept: ${errText(err)}`);
 		}
+	}
+
+	/**
+	 * A pending question is addressed before it is shown. Today's manager has one configured
+	 * operator; multi-human routing can replace this selection, but it must still persist one person
+	 * rather than silently becoming a group inbox.
+	 */
+	private async recordQuestionAuthority(rec: AgentRecord, questionId: string): Promise<void> {
+		const node = await this.ensureProjectedNode(rec);
+		const records = new NodeRecordStore(this.store, (message) => this.log("warn", `node-records: ${message}`));
+		await records.put({
+			kind: "human-authority",
+			id: `human-authority:${node.id}:${questionId}`,
+			nodeId: node.id,
+			questionId,
+			humanId: this.operator.id,
+			role: "accountable",
+			createdAt: Date.now(),
+		});
+	}
+
+	/** The named person responsible for this question, if its originating unit still exists. */
+	async questionAuthority(agentId: string, questionId: string) {
+		const rec = this.agents.get(agentId);
+		if (!rec) return undefined;
+		await this.authorityWrites.get(`${agentId}:${questionId}`);
+		const node = await this.ensureProjectedNode(rec);
+		return new NodeRecordStore(this.store).accountableHumanForQuestion(node.id, questionId);
+	}
+
+	/** Competing rules stay inspectable as disagreement until humans decide precedence semantics. */
+	async ruleDisagreements(nodeId: string, action?: string) {
+		return new NodeRecordStore(this.store).ruleDisagreements(nodeId, action);
 	}
 	/**
 	 * Notice a plan that has gone still from its own movement history. This is deliberately invoked
@@ -10946,6 +11046,14 @@ export class SquadManager extends EventEmitter {
 				replayed: this.settling.has(rec.dto.id) ? true : undefined,
 			};
 			this.setPending(rec, [...rec.dto.pending.filter((p) => p.id !== req.id), added], "pending-add");
+			const authorityKey = `${rec.dto.id}:${req.id}`;
+			const authorityWrite = this.recordQuestionAuthority(rec, req.id).catch((err) => {
+				this.log("warn", `question authority for ${rec.dto.id}/${req.id} not recorded: ${errText(err)}`);
+			});
+			this.authorityWrites.set(authorityKey, authorityWrite);
+			void authorityWrite.finally(() => {
+				if (this.authorityWrites.get(authorityKey) === authorityWrite) this.authorityWrites.delete(authorityKey);
+			});
 			this.append(rec, "system", `⛔ needs input: ${added.title}`, { pending: { requestId: added.id, action: "created" }, status: "running" });
 		}
 		// Idempotent when a branch above already ran setPending (derive() is deterministic and pure over
@@ -12029,18 +12137,26 @@ export class SquadManager extends EventEmitter {
 	private needsYouFace(rec: AgentRecord, payload: Record<string, unknown>, entry: TranscriptEntry): Record<string, unknown> {
 		const pendingStatus = typeof payload.status === "string" ? payload.status : undefined;
 		const title = typeof payload.title === "string" && payload.title ? payload.title : "operator input";
+		const accountableHuman = typeof payload.accountableHuman === "string" && payload.accountableHuman ? payload.accountableHuman : undefined;
 		const message = typeof payload.message === "string" && payload.message ? payload.message : undefined;
 		const createdAt = typeof payload.createdAt === "number" && Number.isFinite(payload.createdAt) ? payload.createdAt : entry.ts;
 		const ageMs = Math.max(0, entry.ts - createdAt);
 		const age = ageMs < 60_000 ? "just now" : `${Math.floor(ageMs / 60_000)}m`;
 		const resolved = pendingStatus === "resolved";
+		// Concern 19 wants ONE NAMED accountable human, and a name is the point. In file mode the actor
+		// id is literally "local", so appending it produces "local is accountable", which names nobody
+		// and lengthens every headline to say it. An unnamed operator is left off rather than rendered
+		// as a name — an identifier that identifies no one is worse than silence, because it reads like
+		// an answer. The accountable id still rides on the payload for anyone who can resolve it.
+		const namedTitle = accountableHuman && accountableHuman !== "local" ? `${title} — ${accountableHuman} is accountable.` : title;
 		return {
 			unitId: rec.dto.id,
 			unitName: rec.dto.name,
 			eventKind: entry.event?.kind,
 			pendingId: typeof payload.pendingId === "string" ? payload.pendingId : undefined,
 			pendingStatus,
-			title: resolved ? `Resolved · ${title}` : `Needs you · ${title}`,
+			accountableHuman,
+			title: resolved ? `Resolved · ${namedTitle}` : `Needs you · ${namedTitle}`,
 			eyebrow: resolved ? "Resolved" : "Needs you",
 			// A card that says the same sentence three times (title, body, "why stopped") reads as
 			// broken, and for approval-shaped pendings `message` IS the title. Say it once.
@@ -12172,6 +12288,7 @@ export class SquadManager extends EventEmitter {
 				pendingId: request.id,
 				gateClass: gateClassOf(request),
 				title: request.title,
+				accountableHuman: this.operator.id,
 				message: request.message,
 				createdAt: request.createdAt,
 				agentId: rec.dto.id,
@@ -12187,6 +12304,7 @@ export class SquadManager extends EventEmitter {
 				pendingId: request.id,
 				gateClass: gateClassOf(request),
 				title: request.title,
+				accountableHuman: this.operator.id,
 				createdAt: request.createdAt,
 				agentId: rec.dto.id,
 			});

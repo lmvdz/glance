@@ -193,8 +193,20 @@ const HumanAuthoritySchema = Schema.Struct({
 	...base,
 	kind: Schema.Literal("human-authority"),
 	humanId: Schema.String,
+	/** The pending request this authority assignment answers. Old records predate question routing. */
+	questionId: Schema.optional(Schema.String),
 	role: Schema.Literals(["accountable", "instruction-author"]),
 });
+
+export interface RuleDisagreement {
+	action: string;
+	rules: readonly RuleRecord[];
+}
+
+/** Quote a rule with the person who owns its words; roster changes can never erase that attribution. */
+export function quoteRule(rule: RuleRecord): string {
+	return `"${rule.sentence}" — ${rule.authorId}`;
+}
 
 /** What moves to the next agent, what does not, and which of the carried evidence is already stale. */
 const HandoverSchema = Schema.Struct({
@@ -358,6 +370,18 @@ export class NodeRecordStore {
 				throw new Error(`a rule cannot cite evidence that is not there: no decision record for ${missing.join(", ")}`);
 			}
 		}
+		if (record.kind === "human-authority" && record.role === "accountable" && record.questionId?.trim()) {
+			const existing = (await this.list(record.nodeId)).filter(
+				(candidate): candidate is HumanAuthorityRecord =>
+					candidate.kind === "human-authority" &&
+					candidate.role === "accountable" &&
+					candidate.questionId === record.questionId &&
+					candidate.id !== record.id,
+			);
+			if (existing.length > 0) {
+				throw new Error(`question ${record.questionId} already has an accountable human: ${existing[0]!.humanId}`);
+			}
+		}
 		await this.store.putNodeRecord(record);
 	}
 
@@ -369,7 +393,7 @@ export class NodeRecordStore {
 	async mayRuleSettle(nodeId: string, action: string, actionClass?: NonDelegatableClass): Promise<boolean> {
 		if (!action.trim()) return false;
 		if (actionClass && nonDelegatableClasses.includes(actionClass)) return false;
-		return (await this.rulesSettling(nodeId, action)).length > 0;
+		return (await this.ruleDisagreements(nodeId, action)).length === 0 && (await this.rulesSettling(nodeId, action)).length > 0;
 	}
 
 	/** The rules that decided an action, so each can be quoted verbatim at the point it acted. */
@@ -377,5 +401,41 @@ export class NodeRecordStore {
 		return (await this.list(nodeId)).filter(
 			(record): record is RuleRecord => record.kind === "rule" && record.status === "active" && record.settles.includes(action),
 		);
+	}
+
+	/**
+	 * Rule precedence is deliberately unsettled. Different people claiming the same action therefore
+	 * remain a visible human disagreement, not an accidental last-write-wins policy.
+	 */
+	async ruleDisagreements(nodeId: string, action?: string): Promise<RuleDisagreement[]> {
+		const active = (await this.list(nodeId)).filter(
+			(record): record is RuleRecord => record.kind === "rule" && record.status === "active",
+		);
+		const byAction = new Map<string, RuleRecord[]>();
+		for (const rule of active) {
+			for (const settled of rule.settles) {
+				if (action && settled !== action) continue;
+				const rules = byAction.get(settled) ?? [];
+				rules.push(rule);
+				byAction.set(settled, rules);
+			}
+		}
+		return [...byAction].flatMap(([settled, rules]) =>
+			new Set(rules.map((rule) => rule.authorId)).size > 1 ? [{ action: settled, rules }] : [],
+		);
+	}
+
+	/** A question resolves to exactly one named person, never an anonymous group inbox. */
+	async accountableHumanForQuestion(nodeId: string, questionId: string): Promise<HumanAuthorityRecord | undefined> {
+		const accountable = (await this.list(nodeId)).filter(
+			(record): record is HumanAuthorityRecord =>
+				record.kind === "human-authority" &&
+				record.role === "accountable" &&
+				record.questionId === questionId,
+		);
+		if (accountable.length > 1) {
+			throw new Error(`question ${questionId} has ${accountable.length} accountable humans; it must have exactly one`);
+		}
+		return accountable[0];
 	}
 }

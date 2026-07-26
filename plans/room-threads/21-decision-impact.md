@@ -1,5 +1,5 @@
 # What a decision cost, and what unwinding it would cost
-STATUS: open
+STATUS: done
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: architectural

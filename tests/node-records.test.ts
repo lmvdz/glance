@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { FileStore } from "../src/dal/store.ts";
-import { NodeRecordStore, nodeRecordKinds, readNodeRecord, type NodeRecord } from "../src/node-records.ts";
+import { NodeRecordStore, nodeRecordKinds, quoteRule, readNodeRecord, type NodeRecord } from "../src/node-records.ts";
 import type { Node } from "../src/nodes.ts";
 
 async function store(opts: { seedEvidence?: boolean } = {}): Promise<{ store: FileStore; records: NodeRecordStore; dir: string }> {
@@ -130,7 +130,7 @@ const samples: Record<(typeof nodeRecordKinds)[number], NodeRecord> = {
 		reason: "no-rule-applied",
 		boundaryClass: "publishing",
 	},
-	"human-authority": { kind: "human-authority", id: "h1", nodeId: "n1", createdAt: 10, humanId: "db:lars", role: "accountable" },
+	"human-authority": { kind: "human-authority", id: "h1", nodeId: "n1", createdAt: 10, humanId: "db:lars", questionId: "pending-41", role: "accountable" },
 	handover: {
 		kind: "handover",
 		id: "v1",
@@ -239,6 +239,47 @@ test("the rules that settled an action are retrievable so each can be quoted ver
 		"If it can be undone in under a minute, just do it and tell me afterwards.",
 		"Never wake me for a test flake.",
 	]);
+	await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("rules from different people remain a visible disagreement instead of silently settling work", async () => {
+	const { records, dir } = await store();
+	await records.put({ ...samples.rule, id: "r-lars", status: "active", withdrawnAt: undefined, withdrawnBy: undefined, replacedById: undefined });
+	await records.put({
+		...samples.rule,
+		id: "r-alex",
+		authorId: "db:alex",
+		sentence: "Ask before every reversible change.",
+		status: "active",
+		withdrawnAt: undefined,
+		withdrawnBy: undefined,
+		replacedById: undefined,
+	});
+
+	const disagreements = await records.ruleDisagreements("n1", "reversible-change");
+	expect(disagreements).toHaveLength(1);
+	expect(disagreements[0]).toEqual({
+		action: "reversible-change",
+		rules: expect.arrayContaining([
+			expect.objectContaining({ authorId: "db:lars", sentence: "If it can be undone in under a minute, just do it and tell me afterwards." }),
+			expect.objectContaining({ authorId: "db:alex", sentence: "Ask before every reversible change." }),
+		]),
+	});
+	expect(await records.mayRuleSettle("n1", "reversible-change")).toBe(false);
+	await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("a question has one named accountable human and a removed authority never erases a rule author", async () => {
+	const { store: fileStore, records, dir } = await store();
+	await records.put(samples["human-authority"]);
+	await expect(records.put({ ...samples["human-authority"], id: "h2", humanId: "db:alex" })).rejects.toThrow(/already has an accountable human/);
+	expect((await records.accountableHumanForQuestion("n1", "pending-41"))?.humanId).toBe("db:lars");
+
+	await records.put({ ...samples.rule, id: "r-authored", status: "active", withdrawnAt: undefined, withdrawnBy: undefined, replacedById: undefined });
+	await fileStore.deleteNodeRecords("n1", ["h1"]);
+	const rule = (await records.list("n1")).find((record) => record.id === "r-authored");
+	if (!rule || rule.kind !== "rule") throw new Error("expected authored rule");
+	expect(quoteRule(rule)).toBe(`"${rule.sentence}" — db:lars`);
 	await fs.rm(dir, { recursive: true, force: true });
 });
 
