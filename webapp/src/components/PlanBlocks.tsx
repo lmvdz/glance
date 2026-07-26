@@ -71,7 +71,7 @@ type MarkdownElementNode = {
   data?: unknown;
 };
 
-type MarkdownPreProps = React.ComponentPropsWithoutRef<'pre'> & {
+export type MarkdownPreProps = React.ComponentPropsWithoutRef<'pre'> & {
   node?: unknown;
 };
 
@@ -120,21 +120,35 @@ function bodyOf(node: MarkdownElementNode): string {
   return typeof firstChild.value === 'string' ? firstChild.value.replace(/\n$/, '') : '';
 }
 
-export function PlanPre({ node, children, ...props }: MarkdownPreProps) {
-  const codeNode = codeNodeOf(node);
-  const cls = codeNode ? firstClassName(codeNode) : '';
-  const lang = /^language-([\w-]+)/.exec(cls)?.[1];
-  const Comp = lang ? BLOCK_REGISTRY[lang] : undefined;
+/**
+ * Factory behind both `PlanPre` and chat's `ChatPre` — a `pre` renderer parameterized by
+ * which block registry it dispatches into and what it falls back to for non-block fences.
+ * Parameterized by closure rather than props: react-markdown's component contract only
+ * passes it `node`/`children`/DOM props, so registry and fallback have to be baked in ahead
+ * of time rather than threaded per-render.
+ */
+export function createRegistryPre(
+  registry: Record<string, React.FC<BlockProps>>,
+  renderFallback: (children: React.ReactNode, props: React.ComponentPropsWithoutRef<'pre'>) => React.ReactNode,
+) {
+  return function RegistryPre({ node, children, ...props }: MarkdownPreProps) {
+    const codeNode = codeNodeOf(node);
+    const cls = codeNode ? firstClassName(codeNode) : '';
+    const lang = /^language-([\w-]+)/.exec(cls)?.[1];
+    const Comp = lang ? registry[lang] : undefined;
 
-  if (Comp && codeNode) {
-    const params = parseMeta(metaOf(codeNode));
-    const body = bodyOf(codeNode);
-    const blockId = params.id || hashBody(body);
-    return <Comp params={params} body={body} blockId={blockId} />;
-  }
+    if (Comp && codeNode) {
+      const params = parseMeta(metaOf(codeNode));
+      const body = bodyOf(codeNode);
+      const blockId = params.id || hashBody(body);
+      return <Comp params={params} body={body} blockId={blockId} />;
+    }
 
-  return <pre {...props}>{children}</pre>;
+    return renderFallback(children, props);
+  };
 }
+
+export const PlanPre = createRegistryPre(BLOCK_REGISTRY, (children, props) => <pre {...props}>{children}</pre>);
 
 export function MarkdownCode({ node: _node, className, children, ...props }: MarkdownCodeProps) {
   const match = /language-(\w+)/.exec(className || '');
