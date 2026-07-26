@@ -12,6 +12,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { buildFabricSnapshot } from "../src/fabric.ts";
 import { fabricDocuments, searchFabric } from "../src/fabric-search.ts";
+import { featureDecisions } from "../src/server.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import type { FeatureDecision, PersistedFeature } from "../src/types.ts";
 
@@ -107,4 +108,42 @@ test("fabric projection excludes superseded decisions (exclusion, not annotation
 	expect(docs[0]!.id).toBe("decision:d2");
 	const hits = searchFabric(snapshot, "target prod", { type: "decision" });
 	expect(hits[0]?.id).toBe("decision:d2");
+});
+
+test("a supersedes id copied verbatim from kb output (decision:<id>) is accepted, not bounced", async () => {
+	const dir = await tmpDir("sup-prefix-");
+	const { mgr, store } = seededManager(dir, [dec("d1", "target = staging")]);
+	const outcome = await mgr.recordAgentDecision("f", dec("d2", "target = prod", { supersedes: "decision:d1" }));
+	expect(outcome).toBe("recorded");
+	const decisions = store.get("f")?.decisions ?? [];
+	expect(decisions.find((d) => d.id === "d1")?.supersededBy).toBe("d2");
+	expect(decisions.find((d) => d.id === "d2")?.supersedes).toBe("d1"); // stored normalized, prefix stripped
+});
+
+test("PATCH merge: a stale client omitting the replacement cannot delete supersession-chain members", () => {
+	const stored: FeatureDecision[] = [
+		dec("d1", "target = staging", { supersededBy: "d2", supersededAt: 2000 }),
+		dec("d2", "target = prod", { supersedes: "d1" }),
+		dec("d3", "unrelated plain decision"),
+	];
+	// Stale client loaded before d2 existed: PATCHes back only d1 + d3 (and deletes d3 on purpose).
+	const out = featureDecisions([{ id: "d1", text: "target = staging" }], stored)!;
+	const ids = out.map((d) => d.id).sort();
+	expect(ids).toEqual(["d1", "d2"]); // d2 re-appended (chain member), d3 deleted (plain), d1 kept
+	expect(out.find((d) => d.id === "d1")?.supersededBy).toBe("d2"); // stamps survive the round-trip
+	expect(out.find((d) => d.id === "d2")?.supersedes).toBe("d1");
+});
+
+test("PATCH merge: a superseded entry is history — text edits are ignored, stamps kept verbatim", () => {
+	const stored: FeatureDecision[] = [dec("d1", "target = staging", { supersededBy: "d2", supersededAt: 2000 }), dec("d2", "target = prod", { supersedes: "d1" })];
+	const out = featureDecisions(
+		[
+			{ id: "d1", text: "REWRITTEN history" },
+			{ id: "d2", text: "target = prod (edited)" },
+		],
+		stored,
+	)!;
+	expect(out.find((d) => d.id === "d1")?.text).toBe("target = staging"); // history immutable
+	expect(out.find((d) => d.id === "d2")?.text).toBe("target = prod (edited)"); // current stays editable
+	expect(out.find((d) => d.id === "d2")?.supersedes).toBe("d1"); // client can't strip the link
 });

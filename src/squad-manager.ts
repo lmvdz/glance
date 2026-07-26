@@ -3377,14 +3377,29 @@ export class SquadManager extends EventEmitter {
 	 *   that was later reversed (A→B→A) is legal ledger history, not a silent no-op;
 	 * - superseding an already-superseded target is rejected — supersede the current decision, not
 	 *   a historical one (prevents forked "current" chains under concurrent writers).
+	 *
+	 * Concurrency: the check-and-write below is one synchronous block over the STORE-RESIDENT
+	 * feature object, re-resolved after the only await (the adopt path), and adoptDerivedFeature
+	 * itself re-checks the store before setting — so two near-simultaneous captures serialize on
+	 * the same object instead of one silently clobbering the other's adopt.
 	 */
 	async recordAgentDecision(
 		featureId: string,
 		decision: FeatureDecision,
 		repo?: string,
 	): Promise<"recorded" | "duplicate" | "no-feature" | "supersede-missing" | "supersede-superseded"> {
-		const pf = this.featureStore.get(featureId) ?? (await this.adoptDerivedFeature(featureId, repo));
-		if (!pf) return "no-feature";
+		// After the adopt await, re-resolve from the store: adoptDerivedFeature's own race guard
+		// guarantees the store-resident object wins, and every read below must be against THAT
+		// object, in the synchronous block, or a concurrent capture could be checked against a
+		// stale copy.
+		const adopted = this.featureStore.get(featureId) ?? (await this.adoptDerivedFeature(featureId, repo));
+		if (!adopted) return "no-feature";
+		const pf = this.featureStore.get(featureId) ?? adopted;
+		// Agents copy decision ids from kb-search output, where they render as `decision:<id>` doc
+		// ids — accept that form rather than bouncing a correct reference (blind-review finding:
+		// a false refusal here steered agents toward recording WITHOUT supersedes, the exact
+		// two-live-currents failure this path exists to prevent).
+		if (decision.supersedes?.startsWith("decision:")) decision = { ...decision, supersedes: decision.supersedes.slice("decision:".length) };
 		const norm = (s: string): string => s.replace(/\s+/g, " ").trim().toLowerCase();
 		const target = norm(decision.text);
 		const existing = pf.decisions ?? [];
@@ -3597,6 +3612,13 @@ export class SquadManager extends EventEmitter {
 			createdAt: now,
 			updatedAt: now,
 		};
+		// Adopt race guard (blind-review finding): two concurrent callers can both miss the store,
+		// then both reach here after their awaits. Whoever set second would clobber the first
+		// caller's freshly-adopted object — and any decision the first caller had already recorded
+		// onto it would be silently lost while its tool reply said "recorded". The store-resident
+		// object always wins; the loser's derived copy is discarded unused.
+		const raced = this.featureStore.get(pf.id);
+		if (raced) return raced;
 		this.featureStore.set(pf.id, pf);
 		for (const agentId of found.agentIds) {
 			const rec = this.agents.get(agentId);
@@ -11441,7 +11463,10 @@ export class SquadManager extends EventEmitter {
 				return;
 			}
 			if (outcome === "supersede-missing") {
-				rec.agent.respondHostTool(call.id, `supersedes target "${supersedes}" not found on this feature — decision NOT recorded. Use squad_kb_search to find the current decision's id, or record without \`supersedes\`.`, true);
+				// Do NOT advise recording without `supersedes` here — if this decision genuinely reverses
+				// a prior one, dropping the link records two live contradictory decisions, the exact
+				// failure supersession exists to prevent (blind-review finding).
+				rec.agent.respondHostTool(call.id, `supersedes target "${supersedes}" not found on this feature — decision NOT recorded. Run squad_kb_search({ type: "decision" }) and retry with the exact id shown. Only omit \`supersedes\` if this decision does NOT contradict any existing decision.`, true);
 				return;
 			}
 			if (outcome === "supersede-superseded") {
