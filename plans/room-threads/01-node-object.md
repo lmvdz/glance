@@ -1,5 +1,5 @@
 # The node object and its channel binding
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -60,6 +60,15 @@ parent link, state, owner, and a lazily-created channel. Everything else in this
 
 ## Cross-Repo Side Effects
 None.
+
+## Closed 2026-07-25
+
+Every verify item below has coverage on main, and the associated-records extension has landed:
+
+- node tree round-trips through both stores, parent links survive restart — `dal-store.test.ts`
+- lazy channel created exactly once under concurrency — `ChannelStore: first concurrent node messages`
+- a non-member cannot read a private node channel, per store — `node reads inherit private channel membership`
+- existing agents become unit nodes — `ensureProjectedNode`, on spawn and on projection
 
 ## Verify
 - A node tree round-trips through both stores; parent links survive a restart.
