@@ -1,5 +1,5 @@
 import React from 'react';
-import { handoverSummary, type RoomNode } from '../../lib/roomState';
+import { duration, handoverSummary, nodeStatusLine, type RoomNode } from '../../lib/roomState';
 import { FleetPulse, type Interruption, type PulseBucket } from './FleetPulse';
 
 /**
@@ -11,14 +11,22 @@ import { FleetPulse, type Interruption, type PulseBucket } from './FleetPulse';
  * promise about the future and tells a person nothing about the present. Somebody returning after
  * four hours wants to know what happened, not that something might.
  *
- * So the quiet room is a HANDOVER. It distinguishes what finished, what changed direction, and what
- * needed a person and got no answer — and it says what it left out, because a bounded summary that
- * does not admit its bounds reads as a complete one.
+ * `01-room.html` gives it a name — **WHAT GOT DONE WHILE YOU DIDN'T LOOK** — and a shape: zones down
+ * the conversation column, each line a fact with its own meta underneath, with FLEET PULSE beneath
+ * them. The first version of this put the whole handover in a rounded card floated in the middle of an
+ * empty column, which reads as a dialog interrupting a room rather than as the room's own account of
+ * itself. Nothing else in the design is boxed; this should not have been either.
+ *
+ * It still distinguishes what finished, what changed direction, and what needed a person and got no
+ * answer — and it still says what it left out, because a bounded summary that does not admit its
+ * bounds reads as a complete one.
  *
  * When there is genuinely no history at all — a fresh install, nothing has ever run — it says that
  * instead. "Nothing has happened yet" and "nothing happened while you were away" are different facts
  * and must not share a screen.
  */
+
+const MONO = "'JetBrains Mono',ui-monospace,monospace";
 
 export interface QuietRoomProps {
   nodes: readonly RoomNode[];
@@ -38,18 +46,17 @@ export function QuietRoom({ nodes, awayMs, now, pulse, lastInterruption }: Quiet
 
   if (nodes.length === 0) {
     return (
-      <div className="flex h-full items-center justify-center p-8 text-center">
-        <div className="max-w-md rounded-2xl border border-ink-border bg-panel p-6">
-          <h2 className="text-sm font-semibold text-ink-text">Nothing has run here yet.</h2>
-          <p className="mt-2 text-xs leading-5 text-ink-text-muted">
-            This is a first visit, not a quiet morning — there is no history to summarise. Start work and this becomes the
-            record of what happened while you were not watching.
-          </p>
+      <div className="flex h-full flex-col justify-end px-6 pb-8">
+        <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.14em', color: '#5A5A61' }}>NOTHING HAS RUN HERE YET</div>
+        <div className="mt-2.5 max-w-[560px] text-[13px] leading-[1.6]" style={{ color: '#8A8A91', textWrap: 'pretty' }}>
+          This is a first visit, not a quiet morning — there is no history to summarise. Start work from the line below and
+          this becomes the record of what happened while you were not watching.
         </div>
       </div>
     );
   }
 
+  const away = awayMs && awayMs > 60_000 ? awayMs : undefined;
   const lines = handoverSummary({
     awayMs: awayMs ?? 0,
     finished: settled.map((node) => `${node.address} ${node.title}`),
@@ -61,28 +68,52 @@ export function QuietRoom({ nodes, awayMs, now, pulse, lastInterruption }: Quiet
   });
 
   return (
-    <div className="flex h-full items-center justify-center p-8">
-      <div className="max-w-lg rounded-2xl border border-ink-border bg-panel p-6">
-        {/* "While you were away" is a claim about absence. With no recorded absence it is a small lie,
-            and small lies in the copy are how a reader learns to discount the rest of it. */}
-        <h2 className="font-mono text-[10px] uppercase tracking-wider text-ink-text-muted">
-          {awayMs && awayMs > 60_000 ? 'While you were away' : 'Where things stand'}
-        </h2>
-        <div className="mt-3 space-y-2">
-          {lines.slice(1).map((line) => (
-            <p key={line} className="text-xs leading-5 text-ink-text-body">{line}</p>
-          ))}
-        </div>
-        <p className="mt-4 pt-3 text-[11px] leading-5" style={{ borderTop: '1px solid #1F1F22', color: '#6A6A72' }}>
-          The room is quiet because unit telemetry stays at its own node. Quiet here means the fleet is working, not that
-          nothing is.
-        </p>
-        {pulse && pulse.length > 0 ? (
-          <div className="mt-4 pt-4" style={{ borderTop: '1px solid #1F1F22', marginLeft: -16, marginRight: -16 }}>
-            <FleetPulse buckets={pulse} last={lastInterruption} now={now} />
-          </div>
-        ) : null}
+    <div className="flex h-full min-h-0 flex-col justify-end overflow-y-auto px-6 pb-6 pt-8">
+      <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.14em', color: '#5A5A61' }}>
+        {/* The reference's heading — "WHAT GOT DONE WHILE YOU DIDN'T LOOK" — is itself a claim about an
+            absence, so it is only used when there was one. With no recorded absence it becomes WHERE
+            THINGS STAND, which claims nothing. Small lies in the copy are how a reader learns to
+            discount the rest of it, and this one was caught by its own test rather than by reading. */}
+        {away ? `WHAT GOT DONE WHILE YOU DIDN'T LOOK · ${duration(away).toUpperCase()}` : 'WHERE THINGS STAND'}
       </div>
+
+      {settled.length > 0 ? (
+        <div className="mt-3 flex max-w-[660px] flex-col">
+          {settled.slice(0, 6).map((node) => (
+            <div key={node.id} className="flex gap-3 py-2" style={{ borderTop: '1px solid #17171A' }}>
+              <div className="mt-[7px] h-[5px] w-[5px] flex-none rounded-full" style={{ background: '#3E7D57' }} />
+              <div className="min-w-0 flex-1">
+                <div className="text-[13px] leading-[1.5]" style={{ color: '#DEDEE2', textWrap: 'pretty' }}>{node.title}</div>
+                <div className="mt-[3px] truncate" style={{ fontFamily: MONO, fontSize: 10, color: '#5A5A61' }}>
+                  {node.address} · {nodeStatusLine(node, now)}
+                </div>
+              </div>
+            </div>
+          ))}
+          {settled.length > 6 ? (
+            <div className="pt-2" style={{ fontFamily: MONO, fontSize: 10, color: '#4A4A52' }}>and {settled.length - 6} more, all finished</div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {/* The prose handover carries what a list cannot: that nothing needed you, and what was left out.
+          When the finished work is already listed above, its line is dropped rather than repeated. */}
+      <div className="mt-3.5 flex max-w-[660px] flex-col gap-1.5">
+        {lines.slice(settled.length > 0 ? 2 : 1).map((line) => (
+          <div key={line} className="text-[12.5px] leading-[1.55]" style={{ color: '#8A8A91', textWrap: 'pretty' }}>{line}</div>
+        ))}
+      </div>
+
+      <div className="mt-3 max-w-[660px] text-[11.5px] leading-[1.5]" style={{ color: '#4A4A52', textWrap: 'pretty' }}>
+        The room is quiet because unit telemetry stays at its own node. Quiet here means the fleet is working, not that
+        nothing is.
+      </div>
+
+      {pulse && pulse.length > 0 ? (
+        <div className="mt-6 max-w-[660px] pt-5" style={{ borderTop: '1px solid #1F1F22' }}>
+          <FleetPulse buckets={pulse} last={lastInterruption} now={now} />
+        </div>
+      ) : null}
     </div>
   );
 }
