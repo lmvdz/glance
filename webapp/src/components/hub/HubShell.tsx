@@ -21,10 +21,12 @@ import {
   decisionAnnouncement,
   decisionDoorModel,
   decisionUrgency,
+  focusHudRegion,
   groupArtifacts,
   initialPaneStack,
   popPane,
   pushPane,
+  reconcileArtifactPane,
   setStackFilter,
   shouldSteer,
   steerStatusLine,
@@ -574,6 +576,15 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
   const waitingDecisions = useMemo(() => call.decisions.filter((decision) => decisionUrgency(decision) !== 'settled'), [call.decisions]);
   const artifactRowById = useMemo(() => new Map(artifactGroups.flatMap((group) => group.rows).map((row) => [row.id, row])), [artifactGroups]);
 
+  // A stack whose top points at an artifact row that has since gone missing (the call ended and a
+  // later poll pruned it) renders nothing in the `voicePanel` derivation below, but would keep the
+  // phantom entry on top forever — Escape and the panel's own Back would have nothing left to pop
+  // back to. Reconciling here, on every change to the stack or the rows it can point at, means the
+  // conversation comes back the moment the row disappears rather than staying stuck behind it.
+  useEffect(() => {
+    setPaneStack((stack) => reconcileArtifactPane(stack, artifactRowById));
+  }, [paneStack, artifactRowById]);
+
   // The last human or agent activity in this thread, for the idle-hangup line. Read from the room's
   // own entries rather than a separate clock, so the copy can never disagree with the timeline.
   const lastActivityAt = useMemo(() => entries.reduce((max, entry) => Math.max(max, entry.ts), 0) || undefined, [entries]);
@@ -687,11 +698,14 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
               error={error}
               anchorEntryId={anchorEntryId}
               onAnswerDecision={(decisionId) => openDecision(decisionId)}
-              onOpenCall={() => hudRef.current?.scrollIntoView({ block: 'nearest' })}
+              onOpenCall={() => focusHudRegion(hudRef.current)}
               // The call's chrome rides ABOVE the scroller (see ChannelTimeline's own note), so a
               // phase change or a status line arriving never moves the conversation underneath it.
               header={
-                <div ref={hudRef}>
+                // tabIndex={-1} makes this a valid programmatic focus target for the "Open the
+                // call" door above (`focusHudRegion`) without adding it to the Tab order — nothing
+                // else here focuses it, so it must never intercept a Tab press.
+                <div ref={hudRef} tabIndex={-1}>
                   <VoiceCallHudView
                     // A unit's own conversation is not where you start a call — it has its own panel
                     // and its own vocabulary. A call already BOUND to one still renders in full;

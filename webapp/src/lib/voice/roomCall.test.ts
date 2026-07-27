@@ -17,6 +17,7 @@ import {
   decisionStateLine,
   decisionUrgency,
   endedUnexpectedly,
+  focusHudRegion,
   groupArtifacts,
   idlePolicyLine,
   initialPaneStack,
@@ -27,6 +28,7 @@ import {
   popPane,
   pushPane,
   readResolveAck,
+  reconcileArtifactPane,
   recommendedOptionIndex,
   registerPresentation,
   resolveOutcomeCopy,
@@ -533,5 +535,51 @@ describe('single-pane back stack', () => {
   test('re-opening the pane already on top does not stack a duplicate', () => {
     const stack = pushPane(pushPane(initialPaneStack(), { pane: 'artifacts', agentFilter: ALL_AGENTS }, 0), { pane: 'artifacts', agentFilter: ALL_AGENTS }, 10);
     expect(stack).toHaveLength(2);
+  });
+
+  test('a phantom artifact pane — its row gone from the index — pops back to something real', () => {
+    const stack = pushPane(initialPaneStack(), { pane: 'artifact', agentFilter: ALL_AGENTS, artifactId: 'gone' }, 0);
+    const reconciled = reconcileArtifactPane(stack, new Map());
+    expect(currentPane(reconciled).pane).toBe('conversation');
+  });
+
+  test('an artifact pane whose row IS in the index is left alone — the same stack comes back', () => {
+    const rows = new Map(groupArtifacts([artifact({ id: 'art-1' })], 'call-abcdef01').flatMap((group) => group.rows).map((row) => [row.id, row]));
+    const stack = pushPane(initialPaneStack(), { pane: 'artifact', agentFilter: ALL_AGENTS, artifactId: 'art-1' }, 0);
+    // Same reference, not just an equal one: a caller wiring this into `setState` relies on that to
+    // avoid re-rendering (and re-triggering itself) over a no-op.
+    expect(reconcileArtifactPane(stack, rows)).toBe(stack);
+  });
+
+  test('a non-artifact top is left alone regardless of what the index contains', () => {
+    const stack = pushPane(initialPaneStack(), { pane: 'artifacts', agentFilter: ALL_AGENTS }, 0);
+    expect(reconcileArtifactPane(stack, new Map())).toBe(stack);
+  });
+});
+
+// -------------------------------------------------------------------------------------------------
+// The call HUD focus target — "Open the call" in a fixed header that never scrolls out of view
+// -------------------------------------------------------------------------------------------------
+
+describe('focusHudRegion', () => {
+  test('scrolls (harmlessly) and then moves focus, in that order', () => {
+    const calls: string[] = [];
+    const node = {
+      scrollIntoView: (options?: ScrollIntoViewOptions) => calls.push(`scroll:${JSON.stringify(options)}`),
+      focus: () => calls.push('focus'),
+    };
+    focusHudRegion(node);
+    expect(calls).toEqual(['scroll:{"block":"nearest"}', 'focus']);
+  });
+
+  test('a region with no scrollIntoView still gets focus', () => {
+    const calls: string[] = [];
+    focusHudRegion({ focus: () => calls.push('focus') });
+    expect(calls).toEqual(['focus']);
+  });
+
+  test('a not-yet-mounted ref is a no-op rather than a throw', () => {
+    expect(() => focusHudRegion(null)).not.toThrow();
+    expect(() => focusHudRegion(undefined)).not.toThrow();
   });
 });

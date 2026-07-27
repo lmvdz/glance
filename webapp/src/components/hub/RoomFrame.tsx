@@ -169,7 +169,10 @@ export function RoomFrame({ repo, rooms, activeRoomId, onOpenRoom, nodes, plans,
 					    leave the fleet to answer one question about it, and the standing tree is exactly
 					    the context that makes them comfortable answering at all. */}
 					{voicePanel}
-					{decision}
+					{/* The fleet decision panel defers to the call workspace panel, same precedence autonomy
+					    and unit already give it below — two side panels at once would squeeze the
+					    conversation on wide screens exactly the way a third rail column used to. */}
+					{!voicePanel && decision}
 					{!voicePanel && autonomyOpen && autonomyPanel ? <div className="hidden w-[520px] flex-none md:block" style={{ borderLeft: '1px solid #1F1F22' }}>{autonomyPanel}</div> : null}
 					{!voicePanel && !autonomyOpen && !decision && unitPanel ? <div className="hidden w-[520px] flex-none md:block" style={{ borderLeft: '1px solid #1F1F22' }}>{unitPanel}</div> : null}
 

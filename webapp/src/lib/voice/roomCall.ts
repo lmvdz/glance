@@ -821,3 +821,39 @@ export function currentPane(stack: readonly PaneStackEntry[]): PaneStackEntry {
 export function setStackFilter(stack: readonly PaneStackEntry[], agentFilter: string): PaneStackEntry[] {
   return stack.map((entry) => ({ ...entry, agentFilter }));
 }
+
+/**
+ * If the stack's top is an `artifact` pane pointing at an id `artifactRowById` no longer has — the
+ * call ended and a later poll pruned the row, or a restored stack points at an id that was never
+ * fetched — HubShell's `voicePanel` derivation renders nothing for it, but the phantom entry stays
+ * on top of the stack. That is worse than an empty panel: Escape and the panel's own Back control
+ * have nothing left behind them to return to, so they silently stop doing anything.
+ *
+ * Returns `stack` itself (same reference) when there is nothing to reconcile, so a caller wiring
+ * this into a `setState` updater never triggers a re-render loop over a no-op.
+ */
+export function reconcileArtifactPane(stack: PaneStackEntry[], artifactRowById: ReadonlyMap<string, ArtifactRow>): PaneStackEntry[] {
+  const top = currentPane(stack);
+  if (top.pane === 'artifact' && top.artifactId && !artifactRowById.has(top.artifactId)) return popPane(stack);
+  return stack;
+}
+
+// =================================================================================================
+// The call HUD lives in the fixed header — it never scrolls out of view
+// =================================================================================================
+
+/**
+ * What pressing a `voice-call` card's "Open the call" door actually does.
+ *
+ * The HUD is rendered in `ChannelTimeline`'s `header`, which HubShell pins above the scroller in the
+ * room's always-visible fixed frame — it is never off-screen, so `scrollIntoView` alone is a no-op
+ * there and the door looked like it did nothing. Moving focus into the region is the part a
+ * keyboard or assistive-technology user can actually perceive. `scrollIntoView` stays, guarded by
+ * `?.`, for the one case it is not a no-op — a layout where the HUD genuinely can scroll off — where
+ * it is harmless alongside the focus move.
+ */
+export function focusHudRegion(node: { focus: () => void; scrollIntoView?: (options?: ScrollIntoViewOptions) => void } | null | undefined): void {
+  if (!node) return;
+  node.scrollIntoView?.({ block: 'nearest' });
+  node.focus();
+}
