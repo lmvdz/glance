@@ -2514,8 +2514,13 @@ export class SquadServer {
 			if (Result.isFailure(decoded)) return new Response("text and supersedes (decision id) required", { status: 400 });
 			const body = decoded.success;
 			const text = body.text.trim();
-			if (!text) return new Response("text and supersedes (decision id) required", { status: 400 });
-			const decision: FeatureDecision = { id: randomUUID(), text, source: "human", createdAt: Date.now(), supersedes: body.supersedes };
+			// Blind-review fix: an empty or bare-prefix `supersedes` would evaluate falsy in the write
+			// rule and silently degrade this into an unconditional append while the route advertises
+			// supersession. Normalize like the write path (accept a copied `decision:<id>`), then
+			// reject empty outright.
+			const supersedesId = body.supersedes.trim().replace(/^decision:/, "");
+			if (!text || !supersedesId) return new Response("text and supersedes (decision id) required", { status: 400 });
+			const decision: FeatureDecision = { id: randomUUID(), text, source: "human", createdAt: Date.now(), supersedes: supersedesId };
 			const outcome = await manager.recordAgentDecision(decodeURIComponent(mfsupersede[1]), decision, typeof body.repo === "string" ? body.repo : undefined);
 			if (outcome === "no-feature") return new Response("no such feature", { status: 404 });
 			if (outcome === "supersede-missing") return new Response(`supersedes target "${body.supersedes}" not found on this feature`, { status: 409 });

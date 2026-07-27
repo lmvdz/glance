@@ -81,6 +81,12 @@ test("conflict outcomes map to explicit statuses, never silent drops", async () 
 	// malformed body → 400
 	const bad = await fetch(`${url}/api/features/${encodeURIComponent(featureId)}/decisions/supersede`, authed({ method: "POST", body: JSON.stringify({ text: "" }) }));
 	expect(bad.status).toBe(400);
+
+	// blind-review lock: empty or bare-prefix supersedes must 400, never degrade to a plain append
+	for (const supersedes of ["", "  ", "decision:"]) {
+		const degenerate = await fetch(`${url}/api/features/${encodeURIComponent(featureId)}/decisions/supersede`, authed({ method: "POST", body: JSON.stringify({ text: "target = other.api.internal", supersedes }) }));
+		expect(degenerate.status).toBe(400);
+	}
 });
 
 test("the route cannot be used to mint stamps: supersededBy/supersededAt in the body are ignored", async () => {
