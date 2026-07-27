@@ -42,7 +42,7 @@ export const fmtDuration = (ms?: number) => {
 
 export const statusDotClass = (status?: TranscriptEntry['status']) => {
   if (status === 'error') return 'bg-red-500';
-  if (status === 'running') return 'bg-blue-500';
+  if (status === 'running') return 'bg-sky-500';
   if (status === 'cancelled') return 'bg-amber-500';
   return 'bg-emerald-500';
 };
@@ -98,20 +98,20 @@ export const ToolCallRow = ({ entry, stampChatMessage = true }: { entry: Transcr
         <div className="mt-1 ml-4 space-y-1.5 text-caption">
           {view.command && (
             <div className="flex gap-2">
-              <span className="w-6 flex-shrink-0 pt-1.5 text-[9px] font-bold uppercase tracking-wider text-ink-text-subtle">IN</span>
-              <code className="flex-1 rounded bg-ink-surface px-2 py-1.5 font-mono leading-relaxed text-ink-text-label bg-panel text-ink-text-label whitespace-pre-wrap">{view.command}</code>
+              <span className="w-6 flex-shrink-0 pt-1.5 text-caption font-bold uppercase tracking-[0.16em] text-ink-text-subtle">IN</span>
+              <code className="flex-1 whitespace-pre-wrap rounded bg-panel px-2 py-1.5 font-mono leading-relaxed text-ink-text-label">{view.command}</code>
             </div>
           )}
           {view.output && (
             <div className="flex gap-2">
-              <span className="w-6 flex-shrink-0 pt-1.5 text-[9px] font-bold uppercase tracking-wider text-ink-text-subtle">OUT</span>
-              <pre className="max-h-48 flex-1 overflow-auto rounded bg-ink-surface px-2 py-1.5 leading-relaxed text-ink-text-label bg-panel text-ink-text-label whitespace-pre-wrap scrollbar-custom">{view.output}</pre>
+              <span className="w-6 flex-shrink-0 pt-1.5 text-caption font-bold uppercase tracking-[0.16em] text-ink-text-subtle">OUT</span>
+              <pre className="max-h-48 flex-1 overflow-auto whitespace-pre-wrap rounded bg-panel px-2 py-1.5 font-mono leading-relaxed text-ink-text-label scrollbar-custom">{view.output}</pre>
             </div>
           )}
           {view.stderr && (
             <div className="flex gap-2">
-              <span className="w-6 flex-shrink-0 pt-1.5 text-[9px] font-bold uppercase tracking-wider text-red-400">ERR</span>
-              <pre className="max-h-32 flex-1 overflow-auto rounded bg-red-50 px-2 py-1.5 leading-relaxed text-red-800 dark:bg-red-950/30 dark:text-red-200 whitespace-pre-wrap scrollbar-custom">{view.stderr}</pre>
+              <span className="w-6 flex-shrink-0 pt-1.5 text-caption font-bold uppercase tracking-[0.16em] text-red-400">ERR</span>
+              <pre className="max-h-32 flex-1 overflow-auto whitespace-pre-wrap rounded bg-red-50 px-2 py-1.5 font-mono leading-relaxed text-red-800 dark:bg-red-950/30 dark:text-red-200 scrollbar-custom">{view.stderr}</pre>
             </div>
           )}
           {(view.exitCode !== undefined || entry.tool?.durationMs !== undefined) && (

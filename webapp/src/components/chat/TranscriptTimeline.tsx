@@ -255,10 +255,10 @@ export const TranscriptEntryView = React.memo(({ entry }: { entry: TranscriptEnt
       <div data-chat-message className="flex flex-col w-full items-end">
         <div className="flex flex-col items-end gap-1 max-w-[88%]">
           <div
-            className={`rounded-2xl rounded-tr-md px-3.5 py-2.5 text-[13px] leading-relaxed whitespace-pre-wrap ${
+            className={`rounded-2xl rounded-tr-md px-3.5 py-2.5 text-body leading-relaxed whitespace-pre-wrap ${
               undelivered
                 ? 'border border-red-300 bg-red-50 text-red-900 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-200'
-                : 'bg-ink-border text-ink-text bg-panel text-ink-text'
+                : 'bg-panel text-ink-text'
             }`}
           >
             {shown}

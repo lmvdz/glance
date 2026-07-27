@@ -182,8 +182,8 @@ export const CommandPalette: React.FC = () => {
         onKeyDown={onKeyDown}
       >
         {/* Search input — the palette's one focal point (brand.md: one ember signal per view). */}
-        <div className="relative" style={{ borderBottom: '1px solid #1A1A1D' }}>
-          <Search className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-text-subtle dark:text-[#5C5C62]" aria-hidden="true" />
+        <div className="relative border-b border-ink-border">
+          <Search className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-text-subtle" aria-hidden="true" />
           <input
             ref={inputRef}
             type="text"

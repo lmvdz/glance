@@ -34,7 +34,7 @@ export const SpawnStatusCard = ({
     >
       <div className="flex items-center gap-2">
         <StatusChip status={derived.status} tone={derived.tone} />
-        <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-ink-text-body">{agent?.name ?? record.agentId}</span>
+        <span className="min-w-0 flex-1 truncate text-caption font-medium text-ink-text-body">{agent?.name ?? record.agentId}</span>
         <span className="flex-shrink-0 text-caption text-ink-text-subtle">{new Date(record.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
       </div>
       <p className="text-caption text-ink-text-muted">{derived.detail}</p>
