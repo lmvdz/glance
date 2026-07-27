@@ -128,3 +128,65 @@ test("create(): DTO carries scope contract and defaults produces to owns", async
 
 	await mgr.stop();
 });
+
+test("create(): a STRUCTURAL goal overlap blocks the spawn and discloses only the owner", async () => {
+	// Deliberate change from this test's first version, which rejected on SEMANTIC overlap too.
+	// Blocking on a heuristic over two short strings refuses real work: the dispatcher's own fixture
+	// issues ("issue a / spec a" vs "issue b / spec b") score 0.67 and three dispatcher tests hung on
+	// it. Structural overlap — a shared declared plan or issue reference — is exact, and blocks exactly
+	// as `ownershipConflict` already blocks on shared paths. Fuzzy overlap discloses instead.
+	delete process.env.OMP_SQUAD_RESOURCE_GATE;
+	const repo = await makeRepo();
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "goal-overlap-state-"));
+	const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "goal-overlap-wt-"));
+	tmps.push(stateDir, worktreeBase);
+
+	const mgr = new SquadManager({ stateDir, worktreeBase });
+	await mgr.start();
+	const host: DriverFactoryHost = mgr as unknown as DriverFactoryHost;
+	host.makeDriver = () => new ReadyDriver();
+
+	await mgr.create({ name: "rate-owner", repo, approvalMode: "yolo", task: "Build request throttling controls", featureId: "plan-7" });
+	const rejection = await mgr.create({ name: "new-team", repo, approvalMode: "yolo", task: "Something else entirely", featureId: "plan-7" }).then(
+		() => undefined,
+		(error: unknown) => (error instanceof Error ? error.message : String(error)),
+	);
+
+	expect(rejection).toContain('"rate-owner"');
+	expect(rejection).toContain("request access");
+	// Existence and owner, never content — the law-firm conflict check.
+	expect(rejection).not.toContain("request throttling");
+	expect(rejection).not.toContain("Something else");
+	expect(await fs.readdir(worktreeBase)).toHaveLength(1);
+	await mgr.stop();
+});
+
+test("create(): a SEMANTIC goal overlap discloses in the room and lets both units run", async () => {
+	delete process.env.OMP_SQUAD_RESOURCE_GATE;
+	const repo = await makeRepo();
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "goal-disclose-state-"));
+	const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "goal-disclose-wt-"));
+	tmps.push(stateDir, worktreeBase);
+
+	const mgr = new SquadManager({ stateDir, worktreeBase });
+	await mgr.start();
+	const host: DriverFactoryHost = mgr as unknown as DriverFactoryHost;
+	host.makeDriver = () => new ReadyDriver();
+
+	await mgr.create({ name: "rate-owner", repo, approvalMode: "yolo", task: "Build request throttling controls" });
+	// Not blocked: the fleet's job is running many units in one repo, and this signal is a guess.
+	const second = await mgr.create({ name: "new-team", repo, approvalMode: "yolo", task: "Implement rate limiting" });
+	expect(second.id).toBeTruthy();
+	expect(await fs.readdir(worktreeBase)).toHaveLength(2);
+
+	// But it IS disclosed, in the room, naming the owner and nothing else.
+	const cards = (await mgr.channelEntries("fleet")).filter((entry) => entry.event?.kind === "goal-overlap");
+	expect(cards).toHaveLength(1);
+	expect(cards[0]!.text).toContain("rate-owner");
+	expect(cards[0]!.text).toContain("nothing was blocked");
+	// The other team's actual goal never appears.
+	expect(cards[0]!.text).not.toContain("request throttling");
+	expect(JSON.stringify(cards[0]!.event?.payload)).not.toContain("throttling");
+	await mgr.stop();
+});
+

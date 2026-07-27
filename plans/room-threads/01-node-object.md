@@ -1,9 +1,43 @@
 # The node object and its channel binding
-STATUS: open
+STATUS: done
 PRIORITY: p0
 REPOS: omp-squad
 COMPLEXITY: architectural
 TOUCHES: src/nodes.ts (new), src/channels.ts, src/dal/store.ts, src/db/migrations.ts, src/db/schema.ts, tests
+
+## EXTENDED 2026-07-25 (RECONCILE finding 1) — associated records
+
+The merged `Node` — one `parentId`, one `ownerId`, lifecycle state, goal, timestamps, `channelId` —
+is materially too narrow for what the design decided. It cannot carry rule provenance, instruction
+readings, decision alternatives and consequences, human authority, parked or stall evidence, evidence
+age, the handover chain, retention fidelity, or the immutable delegation class.
+
+The governing rule: **extend through ASSOCIATED RECORDS, never by overloading optional fields onto
+`Node`.** `Node` answers "what is this piece of work". The records answer "what do we know, who said
+so, and when". Their lifetimes differ — a node settles, its evidence outlives it — and a node with
+thirty optional fields, most null, tells you nothing about which of them were ever populated.
+
+`src/node-records.ts` defines nine kinds — rule, delegation-boundary, instruction-readback, objection,
+plan-motion, evidence, human-authority, handover, retention — as effect Schemas, with the TypeScript
+types derived from the schemas rather than written beside them. That is not a style preference: the
+first version declared interfaces and hand-wrote a per-kind reader, and the reader silently dropped
+every field it forgot. A withdrawn rule round-tripped as withdrawn with no withdrawal time and no
+pointer to what replaced it — a rule that cannot say when it was taken back is not reversible in the
+sense concern 11 requires. Deriving the type from the schema makes that class of drift impossible.
+
+Fail-closed everywhere, because absence of evidence is the recurring defect in this codebase:
+
+- A rule settles an action only when it is active AND names that action in `settles`. An earlier
+  version returned true whenever any active rule existed on the node, so one rule about reversible
+  changes authorised everything else on it.
+- No rule reaches the non-delegatable class, whatever it names (concern 12).
+- An objection with no falsifiable prediction is refused at creation (concern 14).
+- An evidence claim with no sample size is refused (concern 18).
+- A record that does not decode whole is dropped whole, never half-read.
+
+FileStore and DbStore parity is asserted byte-for-byte, with migration `0015_node_records` and its RLS
+companion.
+
 MODE: afk
 
 ## Goal
@@ -26,6 +60,15 @@ parent link, state, owner, and a lazily-created channel. Everything else in this
 
 ## Cross-Repo Side Effects
 None.
+
+## Closed 2026-07-25
+
+Every verify item below has coverage on main, and the associated-records extension has landed:
+
+- node tree round-trips through both stores, parent links survive restart — `dal-store.test.ts`
+- lazy channel created exactly once under concurrency — `ChannelStore: first concurrent node messages`
+- a non-member cannot read a private node channel, per store — `node reads inherit private channel membership`
+- existing agents become unit nodes — `ensureProjectedNode`, on spawn and on projection
 
 ## Verify
 - A node tree round-trips through both stores; parent links survive a restart.

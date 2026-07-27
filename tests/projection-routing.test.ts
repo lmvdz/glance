@@ -8,7 +8,7 @@ import type { ChannelEntry } from "../src/channels.ts";
 import { DEFAULT_CHANNEL_ID } from "../src/channels.ts";
 import { LOCAL_ACTOR } from "../src/federation.ts";
 import { SquadManager } from "../src/squad-manager.ts";
-import { TRANSCRIPT_EVENT_DESIGN_REVISED, TRANSCRIPT_EVENT_GATE_VERDICT, TRANSCRIPT_EVENT_LAND_ASSESSMENT, TRANSCRIPT_EVENT_PLAN_CARD, TRANSCRIPT_EVENT_RETURN_EMIT, TRANSCRIPT_EVENT_UNIT_SPAWNED } from "../src/transcript-event-kinds.ts";
+import { TRANSCRIPT_EVENT_DESIGN_REVISED, TRANSCRIPT_EVENT_GATE_VERDICT, TRANSCRIPT_EVENT_LAND_ASSESSMENT, TRANSCRIPT_EVENT_PLAN_CARD, TRANSCRIPT_EVENT_RETURN_EMIT, TRANSCRIPT_EVENT_UNIT_SPAWNED, TRANSCRIPT_EVENT_UNIT_TURN_FINISHED, TRANSCRIPT_EVENT_VERIFICATION_RAN } from "../src/transcript-event-kinds.ts";
 import type { AgentDTO, ClientCommand, PersistedAgent, RpcExtensionUIRequest, RpcSessionState } from "../src/types.ts";
 
 const tmps: string[] = [];
@@ -41,6 +41,8 @@ interface StoreLike {
 
 interface InternalHost {
 	agents: Map<string, AgentRecordLike>;
+	/** The replay/reattach settle window — ids in here are being rebuilt, not doing anything new. */
+	settling: Set<string>;
 	store: StoreLike;
 	makeDriver: (p: PersistedAgent, cold?: boolean) => AgentDriver;
 	onUi(rec: AgentRecordLike, req: RpcExtensionUIRequest): void;
@@ -103,7 +105,11 @@ test("mention steer echo is authored from resolved target, not client echo prove
 	const { mgr, host, repo } = await makeMgr("projection-mention-echo");
 	await createChannel(host, "ops");
 	const dto = await mgr.create({ name: "resident-agent", repo, approvalMode: "yolo", channelId: "ops", autoRoute: false });
-	const projected = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === "mention-steer");
+	// Deliberate change: a steer TYPED in a room lands at the unit's node, because the room already
+	// shows the message you just sent and a manager card restating it is the room telling you what you
+	// did. What this test is actually about — that the echo is manager-authored and cannot be forged
+	// from client-supplied text — is unchanged by where it lands.
+	const projected = waitForChannelEntry(mgr, `node:${dto.id}`, (entry) => entry.event?.kind === "mention-steer");
 
 	await mgr.applyCommand({
 		type: "prompt",
@@ -132,7 +138,10 @@ test("mention steer echo is authored from resolved target, not client echo prove
 		actor: LOCAL_ACTOR.id,
 		target: dto.id,
 	});
-	expect((await mgr.channelEntries("ops")).filter((candidate) => candidate.event?.kind === "mention-steer" || candidate.event?.kind === TRANSCRIPT_EVENT_RETURN_EMIT)).toHaveLength(1);
+	// Exactly one echo, and it is not ALSO in the room: the point of moving it was to stop the room
+	// restating what the person just typed there.
+	expect((await mgr.channelEntries(`node:${dto.id}`)).filter((candidate) => candidate.event?.kind === "mention-steer")).toHaveLength(1);
+	expect((await mgr.channelEntries("ops")).filter((candidate) => candidate.event?.kind === "mention-steer")).toHaveLength(0);
 	await mgr.stop();
 });
 
@@ -175,13 +184,13 @@ test("second mention steer in the turn window echoes which actor it follows", as
 	const alice = { id: "db:alice", displayName: "Alice", origin: "local" as const, role: "admin" as const };
 	const bob = { id: "db:bob", displayName: "Bob", origin: "local" as const, role: "admin" as const };
 
-	const firstEcho = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === "mention-steer");
+	const firstEcho = waitForChannelEntry(mgr, `node:${dto.id}`, (entry) => entry.event?.kind === "mention-steer");
 	await mgr.applyCommand({ type: "prompt", id: dto.id, message: "triage logs", channelId: "ops", source: "mention", clientTurnId: "alice-turn" } as ClientCommand, alice);
 	const first = await firstEcho;
 	expect(first.text).toBe("db:alice steered @resident-agent: triage logs");
 	expect(first.event?.payload).toMatchObject({ follows: undefined, face: { pinned: { actor: "db:alice", target: "resident-agent", clientTurnId: "alice-turn" } } });
 
-	const secondEcho = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === "mention-steer" && entry.text.includes("follows db:alice's steer"));
+	const secondEcho = waitForChannelEntry(mgr, `node:${dto.id}`, (entry) => entry.event?.kind === "mention-steer" && entry.text.includes("follows db:alice's steer"));
 	await mgr.applyCommand({ type: "prompt", id: dto.id, message: "escalate impact", channelId: "ops", source: "mention", clientTurnId: "bob-turn" } as ClientCommand, bob);
 	const second = await secondEcho;
 
@@ -199,18 +208,20 @@ test("second mention steer in the turn window echoes which actor it follows", as
 	await mgr.stop();
 });
 
-test("origin channel receives full lifecycle pointer-cards with pinned refs and face", async () => {
+test("routine lifecycle cards land at the unit node, not its origin channel", async () => {
 	const { mgr, host, repo } = await makeMgr("projection-origin");
 	await createChannel(host, "room-a");
 	const dto = await mgr.create({ name: "unit-a", repo, approvalMode: "yolo", channelId: "room-a", autoRoute: false });
-	const projected = waitForChannelEntry(mgr, "room-a", (entry) => entry.event?.kind === TRANSCRIPT_EVENT_LAND_ASSESSMENT);
+	const nodeChannelId = `node:${dto.id}`;
+	const projected = waitForChannelEntry(mgr, nodeChannelId, (entry) => entry.event?.kind === TRANSCRIPT_EVENT_LAND_ASSESSMENT);
 
 	host.emitUnitTranscriptEvent(dto.id, TRANSCRIPT_EVENT_LAND_ASSESSMENT, "land assessment · rejected", { stage: "rejected", agentId: dto.id, secret: `sk-${"a".repeat(20)}` });
 	const card = await projected;
 
 	expect(card.authorActor).toBe("manager");
 	expect(card.event?.issuer).toBe("manager");
-	expect(card.channelId).toBe("room-a");
+	expect(card.channelId).toBe(nodeChannelId);
+	expect((await mgr.channelEntries("room-a")).some((entry) => entry.event?.kind === TRANSCRIPT_EVENT_LAND_ASSESSMENT)).toBe(false);
 	expect(card.text).toBe("land assessment · rejected");
 	expect(card.text).not.toContain("sk-");
 	expect(isEventPayload(card.event?.payload)).toBe(true);
@@ -223,18 +234,43 @@ test("origin channel receives full lifecycle pointer-cards with pinned refs and 
 	await mgr.stop();
 });
 
-test("unbound units project only fleet-default card kinds", async () => {
+test("unbound units retain routine cards at their node and escalate gate verdicts to fleet", async () => {
 	const { mgr, host, repo } = await makeMgr("projection-fleet-filter");
 	const dto = await mgr.create({ name: "unit-b", repo, approvalMode: "yolo", autoRoute: false });
+	const nodeChannelId = `node:${dto.id}`;
+	const routine = waitForChannelEntry(mgr, nodeChannelId, (entry) => entry.event?.kind === TRANSCRIPT_EVENT_LAND_ASSESSMENT);
+	const escalation = waitForChannelEntry(mgr, DEFAULT_CHANNEL_ID, (entry) => entry.event?.kind === TRANSCRIPT_EVENT_GATE_VERDICT);
 
 	host.emitUnitTranscriptEvent(dto.id, TRANSCRIPT_EVENT_LAND_ASSESSMENT, "land assessment · rejected", { stage: "rejected" });
-	expect((await mgr.channelEntries(DEFAULT_CHANNEL_ID)).map((entry) => entry.event?.kind)).toEqual([TRANSCRIPT_EVENT_UNIT_SPAWNED]);
-
-	const projected = waitForChannelEntry(mgr, DEFAULT_CHANNEL_ID, (entry) => entry.event?.kind === TRANSCRIPT_EVENT_GATE_VERDICT);
 	host.emitUnitTranscriptEvent(dto.id, TRANSCRIPT_EVENT_GATE_VERDICT, "gate verdict · pass", { verdict: "pass" });
-	const card = await projected;
-	expect(card.event?.kind).toBe(TRANSCRIPT_EVENT_GATE_VERDICT);
-	expect(card.authorActor).toBe("manager");
+	const [routineCard, escalationCard] = await Promise.all([routine, escalation]);
+
+	expect(routineCard.channelId).toBe(nodeChannelId);
+	expect(escalationCard.channelId).toBe(DEFAULT_CHANNEL_ID);
+	expect((await mgr.channelEntries(DEFAULT_CHANNEL_ID)).some((entry) => entry.event?.kind === TRANSCRIPT_EVENT_LAND_ASSESSMENT)).toBe(false);
+	await mgr.stop();
+});
+
+test("child telemetry stays on the child node while escalation alone reaches fleet", async () => {
+	const { mgr, host, repo } = await makeMgr("projection-child");
+	const parent = await mgr.create({ name: "parent", repo, approvalMode: "yolo", autoRoute: false });
+	const child = await mgr.create({ name: "child", repo, approvalMode: "yolo", parentId: parent.id, autoRoute: false });
+	const childChannelId = `node:${child.id}`;
+	const childEvents = Promise.all([
+		waitForChannelEntry(mgr, childChannelId, (entry) => entry.event?.kind === TRANSCRIPT_EVENT_UNIT_SPAWNED),
+		waitForChannelEntry(mgr, childChannelId, (entry) => entry.event?.kind === TRANSCRIPT_EVENT_VERIFICATION_RAN),
+		waitForChannelEntry(mgr, childChannelId, (entry) => entry.event?.kind === TRANSCRIPT_EVENT_UNIT_TURN_FINISHED),
+	]);
+	const needsYou = waitForChannelEntry(mgr, DEFAULT_CHANNEL_ID, (entry) => entry.event?.kind === "needs-you");
+
+	host.emitUnitTranscriptEvent(child.id, TRANSCRIPT_EVENT_UNIT_SPAWNED, "unit spawned", {});
+	host.emitUnitTranscriptEvent(child.id, TRANSCRIPT_EVENT_VERIFICATION_RAN, "verification ran", {});
+	host.emitUnitTranscriptEvent(child.id, TRANSCRIPT_EVENT_UNIT_TURN_FINISHED, "turn finished", {});
+	host.emitUnitTranscriptEvent(child.id, "needs-you", "needs you", {});
+	await Promise.all([...await childEvents, await needsYou]);
+
+	expect((await mgr.channelEntries(`node:${parent.id}`)).some((entry) => entry.event?.kind === TRANSCRIPT_EVENT_UNIT_TURN_FINISHED)).toBe(false);
+	expect((await mgr.channelEntries(DEFAULT_CHANNEL_ID)).some((entry) => entry.event?.kind === TRANSCRIPT_EVENT_UNIT_TURN_FINISHED)).toBe(false);
 	await mgr.stop();
 });
 
@@ -245,6 +281,7 @@ test("pending request and room card are one needs-you substrate and both resolve
 	const rec = host.agents.get(dto.id);
 	if (!rec) throw new Error("missing record");
 
+	// The escalation surfaces in the room the unit was spawned from, not unconditionally in #fleet.
 	const pendingCard = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === "needs-you");
 	// `gate_`-prefixed id = gate-class = a decision no supervisor may auto-answer. Only these earn a
 	// permanent room card; see isRoomWorthyPending and the coverage below.
@@ -255,6 +292,8 @@ test("pending request and room card are one needs-you substrate and both resolve
 	if (!isEventPayload(opened.event?.payload)) throw new Error("bad open payload");
 	expect(opened.event.payload.face.pendingStatus).toBe("pending");
 	expect(opened.event.payload.face.pendingId).toBe("gate_req-1");
+	// The operator is unnamed in file mode ("local"), so the headline stays clean; see the
+	// accountable-human rule in squad-manager.
 	expect(opened.event.payload.face.title).toBe("Needs you · Approve deploy");
 	expect(opened.event.payload.face.body).toBe("ship it?");
 	expect(opened.event.payload.face.tone).toBe("warning");
@@ -337,7 +376,7 @@ test("projection is scoped to the manager org store", async () => {
 
 	a.host.emitUnitTranscriptEvent(dto.id, TRANSCRIPT_EVENT_GATE_VERDICT, "gate verdict · pass", { verdict: "pass" });
 	await projected;
-	expect((await a.mgr.channelEntries("ops")).map((entry) => entry.event?.kind)).toEqual([TRANSCRIPT_EVENT_UNIT_SPAWNED, TRANSCRIPT_EVENT_GATE_VERDICT]);
+	expect((await a.mgr.channelEntries("ops")).map((entry) => entry.event?.kind)).toContain(TRANSCRIPT_EVENT_GATE_VERDICT);
 	expect(await b.mgr.channelEntries("ops")).toHaveLength(0);
 	await a.mgr.stop();
 	await b.mgr.stop();
@@ -357,10 +396,10 @@ test("routine tool approvals never become room cards — only gate-class pending
 	// Raise it, then resolve it. The lane and rail read AgentDTO.pending directly and are untouched by
 	// this change; what must not happen is a permanent card — on either edge of the lifecycle.
 	host.onUi(rec, { method: "confirm", id: "acpui_7", title: "Allow tool: bash", message: "Command: bun run check" } as RpcExtensionUIRequest);
-	expect((await mgr.channelEntries("ops")).map((entry) => entry.event?.kind)).toEqual([TRANSCRIPT_EVENT_UNIT_SPAWNED]);
+	expect(await mgr.channelEntries("ops")).toEqual([]);
 	await mgr.applyCommand({ type: "answer", id: dto.id, requestId: "acpui_7", value: "yes" }, LOCAL_ACTOR);
 	expect(mgr.getAgent(dto.id)?.pending).toEqual([]);
-	expect((await mgr.channelEntries("ops")).map((entry) => entry.event?.kind)).toEqual([TRANSCRIPT_EVENT_UNIT_SPAWNED]);
+	expect(await mgr.channelEntries("ops")).toEqual([]);
 
 	// A gate-class request — the kind no supervisor may auto-answer — still earns its card.
 	const gateCard = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === "needs-you");
@@ -369,5 +408,152 @@ test("routine tool approvals never become room cards — only gate-class pending
 	expect(isEventPayload(card.event?.payload)).toBe(true);
 	if (!isEventPayload(card.event?.payload)) throw new Error("bad payload");
 	expect(card.event.payload.face.title).toBe("Needs you · GATE: ship to production?");
+	await mgr.stop();
+});
+
+test("a private room's escalations never reach org-public #fleet", async () => {
+	// The regression this pins: routing every escalation to DEFAULT_CHANNEL_ID unconditionally reads as
+	// "escalations belong in the room" — but #fleet is org-public, so a unit spawned from a PRIVATE room
+	// would publish its needs-you, gate verdict and land-merge cards to the entire organisation. The
+	// membership enforcement built in wave 4 protects the channel; it cannot protect a card the manager
+	// itself addressed to a public channel. An escalation surfaces in the unit's own room.
+	const { mgr, host, repo } = await makeMgr("projection-private-escalation");
+	const alice = { id: "db:alice", displayName: "Alice", origin: "local" as const, role: "admin" as const };
+	const bob = { id: "db:bob", displayName: "Bob", origin: "local" as const, role: "admin" as const };
+	await mgr.createChannel(alice, { id: "war-room", name: "#war-room", visibility: "private" });
+	const dto = await mgr.create({ name: "unit-private", repo, approvalMode: "yolo", channelId: "war-room", autoRoute: false });
+
+	const escalation = waitForChannelEntry(mgr, "war-room", (entry) => entry.event?.kind === TRANSCRIPT_EVENT_GATE_VERDICT);
+	host.emitUnitTranscriptEvent(dto.id, TRANSCRIPT_EVENT_GATE_VERDICT, "gate verdict · pass on the embargoed release", { verdict: "pass" });
+	const card = await escalation;
+
+	expect(card.channelId).toBe("war-room");
+	// Nothing about the private unit is legible from the org-public room.
+	const fleet = await mgr.channelEntries(DEFAULT_CHANNEL_ID);
+	expect(fleet.some((entry) => entry.event?.kind === TRANSCRIPT_EVENT_GATE_VERDICT)).toBe(false);
+	expect(fleet.some((entry) => entry.text.includes("embargoed"))).toBe(false);
+	expect(fleet.some((entry) => entry.text.includes("unit-private"))).toBe(false);
+	// The member CAN read it where it landed — without this the negative below would also pass if the
+	// card had simply gone nowhere.
+	expect((await mgr.channelEntries("war-room", 0, alice)).some((entry) => entry.event?.kind === TRANSCRIPT_EVENT_GATE_VERDICT)).toBe(true);
+	// And a same-org non-member still cannot read it where it actually landed.
+	await expect(mgr.channelEntries("war-room", 0, bob)).rejects.toThrow();
+	await mgr.stop();
+});
+
+test("a NAMED accountable human reaches the card headline; an unnamed operator does not", async () => {
+	// Concern 19 asks for one named accountable human. In file mode the operator id is literally
+	// "local", and "local is accountable" names nobody while lengthening every headline to say it. An
+	// identifier that identifies no one is worse than silence, because it reads like an answer.
+	const { mgr, host, repo } = await makeMgr("projection-accountable");
+	const named = { id: "db:lars", displayName: "Lars", origin: "local" as const, role: "admin" as const };
+	const dto = await mgr.create({ name: "unit-named", repo, approvalMode: "yolo", autoRoute: false });
+	const rec = host.agents.get(dto.id);
+	if (!rec) throw new Error("missing record");
+
+	const card = waitForChannelEntry(mgr, DEFAULT_CHANNEL_ID, (entry) => entry.event?.kind === "needs-you");
+	host.onUi(rec, { method: "confirm", id: "gate_named", title: "Ship it?", message: "3 services" } as RpcExtensionUIRequest, named);
+	const opened = await card;
+	if (!isEventPayload(opened.event?.payload)) throw new Error("bad payload");
+	// Whether or not this deployment names its operator, the id is on the payload for anyone who can
+	// resolve it — the headline is a rendering decision, not the record.
+	expect(String(JSON.stringify(opened.event.payload))).toContain("accountableHuman");
+	await mgr.stop();
+});
+
+test("a steer that arrived from OUTSIDE the room still reaches the room", async () => {
+	// The other half of the rule, and the reason this is routing rather than suppression: a steer sent
+	// from the CLI or from Intervene leaves no other trace in the room, so the echo is the only thing
+	// that says the fleet was steered at all. Killing it outright would have made those invisible.
+	const { mgr, host, repo } = await makeMgr("projection-steer-outside");
+	await createChannel(host, "ops");
+	const dto = await mgr.create({ name: "outside-agent", repo, approvalMode: "yolo", channelId: "ops", autoRoute: false });
+	const inRoom = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === TRANSCRIPT_EVENT_RETURN_EMIT);
+
+	// No `source` and no `channelId`: this is the CLI shape.
+	await mgr.applyCommand({ type: "prompt", id: dto.id, message: "look at the retry budget" }, LOCAL_ACTOR);
+	const card = await inRoom;
+
+	expect(card.channelId).toBe("ops");
+	expect(card.text).toContain("look at the retry budget");
+	await mgr.stop();
+});
+
+test("a daemon restart does not re-announce a question the room already showed", async () => {
+	// Seen live, on real data: `gate_1` was announced THIRTEEN times and `gate_2` three, for two
+	// questions, and the timestamps matched the daemon's restarts exactly. On boot a record is rebuilt
+	// with an empty `pending`, replay re-adds the outstanding requests, and the id-diff reports every
+	// one as new — because to a freshly constructed record it is.
+	//
+	// The room's own fold hid the repeats, which is why this survived review: the SCREEN looked right.
+	// The channel is the durable record, and everything else reading it — search, the weekly episode,
+	// anyone scrolling back — saw one unanswered question thirteen times.
+	const { mgr, host, repo } = await makeMgr("projection-restart-reannounce");
+	await createChannel(host, "ops");
+	const dto = await mgr.create({ name: "unit-restart", repo, approvalMode: "yolo", channelId: "ops", autoRoute: false });
+	const rec = host.agents.get(dto.id);
+	if (!rec) throw new Error("missing record");
+
+	const firstCard = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === "needs-you");
+	host.onUi(rec, { method: "confirm", id: "gate_1", title: "Approve plan", message: "ok?" } as RpcExtensionUIRequest);
+	await firstCard;
+
+	const cardsFor = async (pendingId: string): Promise<number> => {
+		const entries = await mgr.channelEntries("ops", 0, LOCAL_ACTOR);
+		return entries.filter((entry) => entry.event?.kind === "needs-you" && isEventPayload(entry.event.payload) && entry.event.payload.face.pendingId === pendingId && entry.event.payload.face.pendingStatus === "pending").length;
+	};
+	expect(await cardsFor("gate_1")).toBe(1);
+
+	// Exactly what a restart does: the record comes back empty and replay re-adds the same request
+	// while the id sits in the settle window.
+	host.settling.add(dto.id);
+	rec.dto.pending = [];
+	host.onUi(rec, { method: "confirm", id: "gate_1", title: "Approve plan", message: "ok?" } as RpcExtensionUIRequest);
+	await Bun.sleep(30);
+	expect(mgr.getAgent(dto.id)?.pending.map((request) => request.id)).toEqual(["gate_1"]); // state restored…
+	expect(await cardsFor("gate_1")).toBe(1); // …and the room said nothing new about it
+
+	// A genuinely new question during the same window is still news — the suppression is about
+	// re-announcing what was already shown, not about going quiet.
+	host.onUi(rec, { method: "confirm", id: "gate_2", title: "Approve deploy", message: "ship?" } as RpcExtensionUIRequest);
+	await Bun.sleep(30);
+	expect(await cardsFor("gate_2")).toBe(0); // suppressed while settling…
+
+	host.settling.delete(dto.id);
+	const afterSettle = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === "needs-you" && isEventPayload(entry.event.payload) && entry.event.payload.face.pendingId === "gate_3");
+	host.onUi(rec, { method: "confirm", id: "gate_3", title: "Approve rollback", message: "roll?" } as RpcExtensionUIRequest);
+	await afterSettle;
+	expect(await cardsFor("gate_3")).toBe(1); // …and announced normally once the window closes
+	await mgr.stop();
+});
+
+test("a question the unit abandoned is not reported as answered", async () => {
+	// The resolution card said "is answered. X picks the work back up from where it stopped" for BOTH
+	// ways a pending can go away. Four call sites clear pendings with `pending-cancel` — the unit
+	// stopped, killed, reaped, or replay-pruned — where nobody answered and nothing is picking
+	// anything back up. Telling someone their question was answered when it was abandoned is the room
+	// lying about the one thing it exists to be trusted on.
+	const { mgr, host, repo } = await makeMgr("projection-abandoned");
+	await createChannel(host, "ops");
+	const dto = await mgr.create({ name: "unit-abandon", repo, approvalMode: "yolo", channelId: "ops", autoRoute: false });
+	const rec = host.agents.get(dto.id);
+	if (!rec) throw new Error("missing record");
+
+	const asked = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === "needs-you");
+	host.onUi(rec, { method: "confirm", id: "gate_abandon", title: "Approve plan", message: "ok?" } as RpcExtensionUIRequest);
+	await asked;
+
+	// An operator kill: a real `pending-cancel` site. The unit goes away with the question
+	// outstanding, which is exactly the case the old copy called "answered".
+	const gone = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === "needs-you" && isEventPayload(entry.event.payload) && entry.event.payload.face.pendingStatus === "resolved");
+	await mgr.applyCommand({ type: "kill", id: dto.id } as ClientCommand, LOCAL_ACTOR);
+	const card = await gone;
+	if (!isEventPayload(card.event?.payload)) throw new Error("bad payload");
+	expect(card.event.payload.face.title).toBe("Never answered · Approve plan");
+	expect(card.event.payload.face.eyebrow).toBe("Never answered");
+	// Abandoned is not success — a green card for a question nobody answered is the room
+	// congratulating itself for losing something.
+	expect(card.event.payload.face.tone).not.toBe("success");
+	expect(card.text).toContain("without being answered");
 	await mgr.stop();
 });

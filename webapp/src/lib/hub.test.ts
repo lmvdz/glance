@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { entryAuthorLabel, entryTimeLabel, groupActiveWork, latestSeq, presenceCount, reduceChannelEntries } from './hub';
 import { renderToStaticMarkup } from 'react-dom/server';
 import React from 'react';
-import { ChannelRail } from '../components/hub/ChannelRail';
+import { TopBar } from '../components/hub/RoomFrame';
 import type { AgentDTO, ChannelEntry } from './dto';
 
 const entry = (overrides: Partial<ChannelEntry> & Pick<ChannelEntry, 'id' | 'seq'>): ChannelEntry => ({
@@ -43,20 +43,23 @@ describe('Hub reductions', () => {
     ]);
   });
 
-  test('room rail active work shows console/casual unit channel routing with #fleet fallback', () => {
+  test('a surface opened from the room keeps the room’s bar and says how to leave', () => {
+    // There is no second navigation any more. The rail that used to sit here listed WORKBENCH DOORS —
+    // Fleet, Tasks, Graph — which is a menu for a different application, and having one is why opening
+    // anything still felt like leaving the room.
     const html = renderToStaticMarkup(
-      React.createElement(ChannelRail, {
-        channels: [{ id: 'fleet', name: '#fleet', kind: 'default', createdAt: 1 }, { id: 'ops', name: 'ops', kind: 'user', createdAt: 2 }],
-        activeChannelId: 'fleet',
-        agents: [agent('chat-1', 'input', { name: 'chat', channelId: 'ops' }), agent('chat-2', 'working', { name: 'chat' })],
-        selectedAgentId: undefined,
-        onSelectAgent: () => {},
-        workbenchActive: false,
-      }),
+      React.createElement(TopBar, { repo: 'omp-squad', summary: '3 units working', now: 0, back: '#fleet' }),
     );
-    expect(html).toContain('Active work');
-    expect(html).toContain('#ops');
-    expect(html).toContain('#fleet');
+    expect(html).toContain('glance');
+    expect(html).toContain('omp-squad');
+    expect(html).toContain('3 units working');
+    expect(html).toContain('esc goes back to the room');
+    expect(html).not.toContain('WORKBENCH DOORS');
+  });
+
+  test('the room’s own bar offers no way back, because there is nowhere behind it', () => {
+    const html = renderToStaticMarkup(React.createElement(TopBar, { repo: 'omp-squad', now: 0 }));
+    expect(html).not.toContain('esc goes back');
   });
 
   test('presence count counts humans, not sockets', () => {

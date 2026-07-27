@@ -1,14 +1,21 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Hash, Loader2, Search, Users, X } from 'lucide-react';
 import { Composer, type ModelOption } from '../chat/Composer';
-import { ChannelRail } from './ChannelRail';
 import { ChannelTimeline } from './ChannelTimeline';
+import { AgentRecordPanel } from './AgentRecordPanel';
+import { RoomFrame, TopBar } from './RoomFrame';
+import { DecisionPanel, type DecisionRequest } from './DecisionPanel';
+import { AutonomyPanel, type AutonomyState } from './AutonomyPanel';
+import { UnitPanel } from './UnitPanel';
+import { QuietRoom } from './QuietRoom';
+import { agentsToRoomNodes } from '../../lib/roomState';
+import { fleetSummary } from '../../lib/roomFrame';
 import { apiJson, jsonInit } from '../../lib/api';
 import { buildPromptCommand, channelAgentSessionId, channelDraftSessionId, ensureConsoleAgent, postChannelMessage } from '../../lib/chat/sendCore';
 import { resolveMentionRoute } from '../../lib/mentionGrammar';
 import type { AgentDTO, Channel, ChannelEntry, CommandAckDTO, PresenceSnapshot } from '../../lib/dto';
 import { latestSeq, presenceCount, reduceChannelEntries } from '../../lib/hub';
-import { DEFAULT_CHANNEL_ID, hubHref, type HubRoute } from '../../lib/router';
+import { DEFAULT_CHANNEL_ID, hubHref, unitHref, type HubRoute } from '../../lib/router';
 import { useTaskContext } from '../../context/TaskContext';
 
 const EMPTY_PRESENCE: PresenceSnapshot = { users: [] };
@@ -38,6 +45,14 @@ function resultTitle(entry: ChannelEntry): string {
   return `${actor || 'message'} · #${entry.seq}`;
 }
 
+/** What this channel IS, said accurately for each kind of channel there is. */
+function channelSubtitle(channel: Channel, selectedAgent?: AgentDTO): string {
+  if (selectedAgent) return `Addressing ${selectedAgent.name || selectedAgent.id}`;
+  if (channel.id === DEFAULT_CHANNEL_ID) return 'Everything the fleet brings to you';
+  if (channel.id.startsWith('node:')) return "This unit's own conversation — its detail stays here rather than in the room";
+  return channel.visibility === 'private' ? 'A private room — only its members can read this' : 'A room you and your team share';
+}
+
 function ChannelHeader({ channel, presence, selectedAgent }: { channel: Channel; presence: PresenceSnapshot; selectedAgent?: AgentDTO }) {
   const count = presenceCount(presence);
   const visible = presence.users.slice(0, 5);
@@ -49,7 +64,10 @@ function ChannelHeader({ channel, presence, selectedAgent }: { channel: Channel;
         <Hash className="h-4 w-4 text-ember" aria-hidden />
         <div className="min-w-0">
           <h1 className="truncate text-sm font-semibold tracking-tight">{channel.name}</h1>
-          <p className="truncate text-[11px] text-ink-text-muted">{selectedAgent ? `Addressing ${selectedAgent.name || selectedAgent.id}` : 'Fleet channel'}</p>
+          {/* Every channel used to describe itself as "Fleet channel", including the ones that are not.
+              A node's own conversation saying it is the fleet room is a small lie in a fixed position,
+              which is the kind a reader stops noticing and then stops trusting. */}
+          <p className="truncate text-[11px] text-ink-text-muted">{channelSubtitle(channel, selectedAgent)}</p>
         </div>
       </div>
       <div className="flex min-w-0 items-center gap-3" aria-label={label}>
@@ -310,53 +328,212 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
     }
   };
 
+  const roomNodes = useMemo(() => agentsToRoomNodes(agents), [agents]);
+  const [answeringId, setAnsweringId] = useState<string | undefined>(undefined);
+  const [autonomyOpen, setAutonomyOpen] = useState(false);
+  const [autonomy, setAutonomy] = useState<AutonomyState | undefined>(undefined);
+  const [autonomyError, setAutonomyError] = useState('');
+
+  useEffect(() => {
+    if (!autonomyOpen) return;
+    // Fetched when opened rather than polled: this is a state you go and read, not a ticker.
+    setAutonomyError('');
+    void apiJson<AutonomyState>('/api/autonomy')
+      .then(setAutonomy)
+      // A failed read must not look like a slow one. Swallowing the error left the panel saying
+      // "reading…" forever, which is a claim that something is on its way — the same absence-as-answer
+      // this whole surface exists to stop.
+      .catch((err) => setAutonomyError(err instanceof Error ? err.message : String(err)));
+  }, [autonomyOpen]);
+
+  // Every gate-class pending across the fleet, in one list, so the panel can say "1 of 3" truthfully
+  // rather than pretending each question arrived alone.
+  const waiting = useMemo(
+    () => agents.flatMap((agent) => (agent.pending ?? []).filter((request) => request.gateClass || request.id.startsWith('gate_')).map((request) => ({ agent, request }))),
+    [agents],
+  );
+
+  const answering = useMemo((): DecisionRequest | undefined => {
+    const index = waiting.findIndex(({ request }) => request.id === answeringId);
+    if (index < 0) return undefined;
+    const { agent, request } = waiting[index]!;
+    return {
+      id: request.id,
+      agentName: agent.name || agent.id,
+      address: agent.name || agent.id,
+      stoppedAgoMs: request.createdAt ? Date.now() - request.createdAt : undefined,
+      question: request.title,
+      context: request.message,
+      // Consequences come from the daemon when it has them; until then the option is shown WITHOUT an
+      // invented one. A made-up consequence is worse than none — it is a promise nobody made.
+      options: (request.options ?? []).map((label) => ({ label, consequence: `${agent.name || agent.id} takes this as the answer and picks the work back up from where it stopped.` })),
+      index: index + 1,
+      total: waiting.length,
+      // So the panel can show what the question is actually about, and reach the conversation when
+      // it cannot.
+      unitId: agent.id,
+      unitHref: unitHref(agent.id),
+    };
+  }, [waiting, answeringId]);
+
+  const answer = (value: string) => {
+    const found = waiting.find(({ request }) => request.id === answeringId);
+    if (!found) return;
+    sendConsoleCommand({ type: 'answer', id: found.agent.id, requestId: found.request.id, value } as never);
+    setAnsweringId(undefined);
+  };
+  // Plans IN FLIGHT, not every feature ever recorded. The first version counted the whole store and
+  // reported "78 plans" beside two running units — the kind of number that teaches a reader to stop
+  // believing the line it sits in.
+  // Rooms and node conversations, in one list, so the standing panel can answer "where am I".
+  const roomViews = useMemo(
+    () => channels.map((entry) => ({
+      id: entry.id,
+      name: entry.name.startsWith('#') ? entry.name : `#${entry.name}`,
+      unread: entry.unreadCount ?? 0,
+      kind: entry.id.startsWith('node:') ? ('node' as const) : ('room' as const),
+    })),
+    [channels],
+  );
+
+  const livePlans = useMemo(
+    () => new Set(agents.map((agent) => agent.featureId).filter((id): id is string => typeof id === 'string' && id.length > 0)).size,
+    [agents],
+  );
+  const [selectedNodeId, setSelectedNodeId] = useState<string | undefined>(undefined);
+  // One clock for the whole frame, ticking on a minute rather than every render: the room shows
+  // elapsed times, and a value that changes on each paint makes them jitter without being any truer.
+  const [frameNow, setFrameNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setFrameNow(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  // The bar on an opened surface says "esc goes back to the room", so escape goes back to the room.
+  // Copy that promises a key and is not wired to one is how a person learns to stop believing the
+  // words on the screen.
+  const inWorkbench = route.kind === 'workbench';
+  useEffect(() => {
+    if (!inWorkbench) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      // Not while someone is typing: escape in a field means "abandon what I am writing", and stealing
+      // it would throw away their words to satisfy a navigation shortcut.
+      const target = event.target as HTMLElement | null;
+      if (target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return;
+      window.location.hash = hubHref(DEFAULT_CHANNEL_ID);
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [inWorkbench]);
+
+  // Events per hour, from the room's own entries — the fleet's activity as it was actually recorded,
+  // not a separate metrics pipeline that could disagree with the timeline beside it.
+  const pulse = useMemo(() => {
+    const hour = 3_600_000;
+    const start = Math.floor((frameNow - 11 * hour) / hour) * hour;
+    const buckets = Array.from({ length: 12 }, (_, index) => ({ at: start + index * hour, events: 0, interrupted: false }));
+    for (const entry of entries) {
+      const index = Math.floor((entry.ts - start) / hour);
+      if (index < 0 || index >= buckets.length) continue;
+      buckets[index]!.events += 1;
+      if (entry.event?.kind === 'needs-you') buckets[index]!.interrupted = true;
+    }
+    return buckets;
+  }, [entries, frameNow]);
+
+
   return (
-    <div className="dark flex h-screen w-full overflow-hidden bg-ink text-sm text-ink-text-body">
-      <ChannelRail channels={channels} activeChannelId={activeChannelId} agents={agents} selectedAgentId={selectedAgentId} onSelectAgent={setSelectedAgentId} workbenchActive={route.kind === 'workbench'} />
-      <main id="omp-main-content" className="flex min-w-0 flex-1 flex-col overflow-hidden bg-ink">
-        {route.kind === 'workbench' ? renderWorkbench(route) : (
+    <div className="dark flex h-screen w-full overflow-hidden text-sm" style={{ background: '#070708', color: '#E8E8EA' }}>
+      {/* The room is the home frame, drawn as the reference draws it: the alarm band across the top
+          with the waiting questions readable in place, the conversation as the centre, and the
+          addressable tree on the RIGHT. There is no channel column — the previous attempt kept one and
+          wedged a strip beside it, which produced a room that read as unchanged because it was. */}
+      <main id="omp-main-content" className="flex min-w-0 flex-1 flex-col overflow-hidden" style={{ background: '#070708' }}>
+        {/* A surface opened from the room keeps the room's bar and says how to leave. It used to get a
+            channel rail with a WORKBENCH DOORS list — a second navigation for a second application,
+            and the reason opening anything still felt like leaving. */}
+        {route.kind === 'workbench' ? (
           <>
-            <ChannelHeader channel={channel} presence={presence} selectedAgent={selectedAgent} />
-            <div className="border-b border-ink-border bg-ink px-4 py-2">
-              <label className="relative block">
-                <span className="sr-only">Search channel history</span>
-                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-text-muted" aria-hidden />
-                <input
-                  value={searchQuery}
-                  onChange={(event) => setSearchQuery(event.target.value)}
-                  placeholder="Search room history"
-                  className="h-9 w-full rounded-full border border-ink-border bg-ink pl-9 pr-9 text-sm text-ink-text placeholder:text-ink-text-subtle focus-visible:ring-2 focus-visible:ring-ember focus-visible:ring-offset-2 focus-visible:ring-offset-ink"
-                />
-                {searchQuery ? (
-                  <button
-                    type="button"
-                    aria-label="Clear search"
-                    onClick={() => setSearchQuery('')}
-                    className="absolute right-1 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full text-ink-text-muted hover:bg-ink-surface hover:text-ink-text-body focus-visible:ring-2 focus-visible:ring-ember focus-visible:ring-offset-2 focus-visible:ring-offset-ink"
-                  >
-                    <X className="h-4 w-4" aria-hidden />
-                  </button>
-                ) : null}
-              </label>
-              {searchQuery.trim() ? (
-                <div className="mt-2 max-h-48 overflow-y-auto rounded-xl border border-ink-border bg-ink shadow-xl">
-                  {searchLoading ? <div className="px-3 py-2 text-xs text-ink-text-muted">Searching…</div> : searchError ? <div className="px-3 py-2 text-xs text-red-300" role="alert">{searchError}</div> : searchResults.length === 0 ? <div className="px-3 py-2 text-xs text-ink-text-muted">No matches in durable history.</div> : (
-                    <ol className="divide-y divide-ink-border">
-                      {searchResults.map((result) => (
-                        <li key={result.entry.id}>
-                          <a href={hubHref(result.entry.channelId, result.entry.id)} onClick={() => setAnchorEntryId(result.entry.id)} className="block px-3 py-2 text-left hover:bg-ink-surface focus-visible:ring-2 focus-visible:ring-ember focus-visible:ring-inset">
-                            <span className="block text-[11px] font-medium text-ink-text-label">{resultTitle(result.entry)}</span>
-                            <span className="mt-0.5 block line-clamp-2 text-xs text-ink-text-muted">{result.snippet}</span>
-                          </a>
-                        </li>
-                      ))}
-                    </ol>
-                  )}
-                </div>
-              ) : null}
-            </div>
-            <ChannelTimeline entries={entries} loading={loading} error={error} anchorEntryId={anchorEntryId} onReply={(entry) => { setReplyTarget(entry); setReplyFocusKey((key) => key + 1); }} />
-            <div className="border-t border-ink-border bg-ink">
+            <TopBar repo={currentProject?.name ?? 'this repo'} summary={fleetSummary(roomNodes, livePlans)} now={frameNow} back={hubHref(DEFAULT_CHANNEL_ID)} />
+            <div className="flex min-h-0 flex-1 flex-col">{renderWorkbench(route)}</div>
+          </>
+        ) : (
+          <RoomFrame
+            repo={currentProject?.name ?? 'this repo'}
+            rooms={roomViews}
+            activeRoomId={activeChannelId}
+            onOpenRoom={(id) => { window.location.hash = hubHref(id); }}
+            nodes={roomNodes}
+            plans={livePlans}
+            now={frameNow}
+            selectedId={selectedNodeId}
+            onSelect={(node) => setSelectedNodeId(node.id)}
+            onEnter={(node) => {
+              // A waiting node opens its question rather than its transcript: the thing you want when
+              // something is stopped is to answer it, not to read about it.
+              const pending = waiting.find(({ agent }) => agent.id === node.id);
+              if (pending) { setAnsweringId(pending.request.id); return; }
+              setSelectedNodeId(node.id);
+              window.location.hash = hubHref(`node:${node.id}`);
+            }}
+            decision={answering ? <DecisionPanel request={answering} onAnswer={answer} onClose={() => setAnsweringId(undefined)} /> : undefined}
+            unitPanel={
+              // Standing inside a unit: its own conversation in the centre, its state beside it. The
+              // old workbench put a FLEET roster, a transcript and a LAND/CHANGES/RUN stack on screen
+              // at once and named none of the three questions a person actually has.
+              activeChannelId.startsWith('node:')
+                ? (() => {
+                    const unit = agents.find((candidate) => `node:${candidate.id}` === activeChannelId);
+                    // `siblings` is the whole roster: the panel derives above/beneath/beside from it,
+                    // so it must be able to see the units that are NOT this one.
+                    return unit ? <UnitPanel agent={unit} now={frameNow} siblings={agents} onClose={() => { window.location.hash = hubHref(DEFAULT_CHANNEL_ID); }} /> : undefined;
+                  })()
+                : undefined
+            }
+            autonomyOpen={autonomyOpen}
+            onToggleAutonomy={() => setAutonomyOpen((open) => !open)}
+            autonomyPanel={
+              autonomy
+                ? <AutonomyPanel state={autonomy} onClose={() => setAutonomyOpen(false)} />
+                : (
+                  <div className="p-5 text-[12.5px] leading-[1.5]" style={{ color: autonomyError ? '#C2704A' : '#6A6A72' }}>
+                    {autonomyError
+                      ? `Could not read what the fleet may settle: ${autonomyError}. That is not the same as it being allowed to settle nothing — this panel does not know either way right now.`
+                      : 'Reading what the fleet may settle…'}
+                  </div>
+                )
+            }
+          >
+            {selectedAgent ? <AgentRecordPanel agent={selectedAgent} /> : null}
+            <ChannelTimeline
+              entries={entries}
+              loading={loading}
+              error={error}
+              anchorEntryId={anchorEntryId}
+              onReply={(entry) => { setReplyTarget(entry); setReplyFocusKey((key) => key + 1); }}
+              // A waiting card opens the question, with what it is about beside it — the room's own
+              // tree already did this; the card was the one place that sent you to the transcript.
+              onAnswer={(unitId) => {
+                // A card carries whatever the daemon projected onto it, which is usually the unit's
+                // NAME ("ompsq-480") while the roster is keyed by its full id
+                // ("ompsq-480-ms2kfv09-6-01fcf897"). Matching only on id meant the button did nothing
+                // at all — silently, which is the worst of the three outcomes.
+                const pending = waiting.find(({ agent }) => agent.id === unitId || agent.name === unitId);
+                if (pending) { setAnsweringId(pending.request.id); return; }
+                const unit = agents.find((agent) => agent.id === unitId || agent.name === unitId);
+                if (unit) { window.location.hash = unitHref(unit.id); return; }
+                // Nothing to open is worth saying rather than swallowing: the question this card is
+                // about has been answered or the unit is gone.
+                showToast('That question is no longer waiting — the unit it belonged to has gone or it has already been answered.', 'info');
+              }}
+              replyingToId={replyTarget?.id}
+              // A quiet ROOM is the designed state — unit telemetry stays at its node — so the empty
+              // room is a handover of what happened, not a promise that something will. Only the root
+              // room gets this; a quiet node channel really is just an empty conversation.
+              emptyState={activeChannelId === DEFAULT_CHANNEL_ID ? <QuietRoom nodes={roomNodes} now={frameNow} pulse={pulse} /> : undefined}
+            />
+            <div style={{ borderTop: '1px solid #1F1F22', background: '#0A0A0B' }}>
               {typingLabel ? <div className="flex h-6 items-center gap-2 px-4 text-[11px] text-ink-text-muted">{typingLabel}</div> : null}
               {sending ? <div className="flex h-6 items-center gap-2 px-4 text-[11px] text-ink-text-muted"><Loader2 className="h-3 w-3 animate-spin" aria-hidden /> Posting…</div> : null}
               {replyTarget ? (
@@ -395,7 +572,7 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
                 onToast={showToast}
               />
             </div>
-          </>
+          </RoomFrame>
         )}
       </main>
     </div>

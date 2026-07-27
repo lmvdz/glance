@@ -53,6 +53,8 @@ export interface AfterActionReport {
 	/** The rendered human-readable post-mortem. Contains redacted agent/gate output — render it,
 	 *  never execute or re-prompt it. */
 	markdown: string;
+	/** The last regenerated escalation statement for this settled node. */
+	upwardSummary?: string;
 	createdAt: number;
 }
 
@@ -71,6 +73,7 @@ const AfterActionSchema = Schema.Struct({
 	commitsAhead: Schema.Number,
 	dirtyFiles: Schema.Number,
 	markdown: Schema.String,
+	upwardSummary: Schema.optional(Schema.String),
 	createdAt: Schema.Number,
 });
 
@@ -110,6 +113,8 @@ export interface AfterActionInput {
 	commitsAhead: number;
 	dirtyFiles: number;
 	now: number;
+	/** Current escalation statement generated from node state and evidence at settlement. */
+	upwardSummary?: string;
 }
 
 const GATE_TAIL_CAP = 2_000;
@@ -142,6 +147,7 @@ export function composeAfterAction(input: AfterActionInput): AfterActionReport {
 		commitsAhead,
 		dirtyFiles,
 		markdown: renderMarkdown(input, classification),
+		upwardSummary: input.upwardSummary,
 		createdAt: input.now,
 	};
 }

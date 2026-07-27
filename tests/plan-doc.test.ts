@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { isPlanDocPath, planDocDiffSince, planDocHeadRevision, readPlanDoc, resolveSafeDocPath } from "../src/plan-doc.ts";
+import { isPlanDocPath, planDocDiffSince, planDocHeadRevision, readPlanDoc, resolveSafeDocPath , readUnitPlan } from "../src/plan-doc.ts";
 
 const cleanups: Array<() => Promise<void> | void> = [];
 afterEach(async () => {
@@ -60,4 +60,23 @@ test("planDocDiffSince degrades to an empty diff when `since` is blank", async (
   await fs.writeFile(path.join(repo, "plans", "a.md"), "# A\n");
   const result = await planDocDiffSince(repo, "plans/a.md", "");
   expect(result.diff).toBe("");
+});
+
+test("readUnitPlan reads a unit's own plan, and refuses to leave its worktree", async () => {
+	// Found by using the product: an "Approve plan" gate arrived carrying only a title and two
+	// buttons, while the plan sat in the unit's worktree as plan.md.
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "unit-plan-"));
+	await fs.writeFile(path.join(dir, "plan.md"), "# the plan\n1. do the thing\n");
+	const doc = await readUnitPlan(dir);
+	expect(doc?.path).toBe("plan.md");
+	expect(doc?.content).toContain("do the thing");
+
+	// No worktree is "no plan", never a read of somewhere else.
+	expect(await readUnitPlan(undefined)).toBeUndefined();
+	expect(await readUnitPlan("")).toBeUndefined();
+
+	// A unit with no plan file gets an honest absence rather than the nearest markdown.
+	const empty = await fs.mkdtemp(path.join(os.tmpdir(), "unit-noplan-"));
+	await fs.writeFile(path.join(empty, "NOTES.md"), "not a plan");
+	expect(await readUnitPlan(empty)).toBeUndefined();
 });

@@ -290,3 +290,17 @@ test("autosupervise OFF (opt-out): every request waits for a human", async () =>
 	expect(drv.uiCalls.length).toBe(0);
 	expect(mgr.getAgent("a1")?.pending.map((p) => p.id)).toEqual(["r1"]);
 });
+
+test("a real pending question is routed to exactly one named accountable human", async () => {
+	process.env.OMP_SQUAD_AUTOSUPERVISE = "0";
+	const mgr = await freshManager();
+	seed(mgr, "a1");
+	mgr.fireUi("a1", confirmReq("authority-q1", "Choose the rollout?", "This answer changes the release path."));
+
+	const authority = await mgr.questionAuthority("a1", "authority-q1");
+	expect(authority).toEqual(expect.objectContaining({
+		questionId: "authority-q1",
+		humanId: mgr.operatorId,
+		role: "accountable",
+	}));
+});

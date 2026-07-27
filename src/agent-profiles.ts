@@ -12,6 +12,15 @@ import { getHarness } from "./harness-registry.ts";
 export interface RuntimeModelOption {
 	label: string;
 	value: string;
+	/**
+	 * Which harness offers this model — the DECLARED fact, not a guess.
+	 *
+	 * The picker was grouping by provider inferred from the model id, which reads "anthropic" off
+	 * `anthropic/claude-opus-4-5` and off a bare `claude-opus-4-5` alike, and therefore cannot tell
+	 * apart the same model reached through two different harnesses. Harness is what actually decides
+	 * where a prompt goes; provider is a substring.
+	 */
+	harness?: string;
 }
 
 export function modelOptionsFromRuntime(models: unknown): RuntimeModelOption[] {

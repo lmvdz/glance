@@ -102,3 +102,36 @@ export async function planDocDiffSince(repo: string, docPath: string, since: str
 	const r = await hardenedGit(["-C", repo, "diff", "--no-ext-diff", since.trim(), "--", docPath]);
 	return { diff: r.code === 0 || r.code === 1 ? r.stdout : "", sha };
 }
+
+/**
+ * The plan a unit is asking you to approve, read from its OWN worktree.
+ *
+ * This exists because of a defect found by using the product: a unit raised an "Approve plan" gate
+ * whose entire payload was `{title, options:["Approve","Revise"]}` — no plan, no body, no pointer to
+ * one. The plan was real; the agent had just written it to `plan.md` in its worktree and said so in
+ * its transcript. There was simply no way to look at it from the question.
+ *
+ * The root is supplied by the DAEMON from the agent record, never by the caller — `readPlanDoc`'s
+ * `repo` parameter is caller-controlled on its HTTP route, and an approve-gate must not become a way
+ * to name an arbitrary directory. `resolveSafeDocPath` still guards containment as a second check.
+ *
+ * Candidate names, newest first by mtime. Deliberately a small fixed list rather than a glob: a unit
+ * that wrote its plan somewhere unusual gets "no plan found", which is honest, instead of this
+ * returning whatever markdown happened to be nearest.
+ */
+export async function readUnitPlan(worktree: string | undefined): Promise<PlanDocRead | undefined> {
+	if (!worktree?.trim()) return undefined;
+	const candidates = ["plan.md", "PLAN.md", ".plan.md", "IMPLEMENTATION.md", "docs/plan.md"];
+	let best: { doc: PlanDocRead; at: number } | undefined;
+	for (const name of candidates) {
+		const abs = resolveSafeDocPath(worktree, name);
+		if (!abs) continue;
+		const stat = await fs.stat(abs).catch(() => undefined);
+		if (!stat?.isFile()) continue;
+		const content = await fs.readFile(abs, "utf8").catch(() => undefined);
+		if (content === undefined) continue;
+		const at = stat.mtimeMs;
+		if (!best || at > best.at) best = { doc: { path: name, content, sha: "" }, at };
+	}
+	return best?.doc;
+}

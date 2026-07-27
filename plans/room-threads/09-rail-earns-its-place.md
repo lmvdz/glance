@@ -1,5 +1,5 @@
 # The rail earns its place — doors, names, and empty states
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical

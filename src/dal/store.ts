@@ -21,6 +21,9 @@ import * as path from "node:path";
 import { sql } from "kysely";
 import type { Channel, ChannelEntry, ChannelMembership, ChannelReadCursor } from "../channels.ts";
 import type { Node } from "../nodes.ts";
+import { readNodeRecord, type NodeRecord } from "../node-records.ts";
+import { nonDelegatableClasses, type DelegationGrant } from "../delegation-boundary.ts";
+import { readPlanProposal, type PlanProposal } from "../plan-proposals.ts";
 import type { PersistedAgent, PersistedFeature, RunReceipt, TranscriptEntry } from "../types.ts";
 import { normalizeCapabilitySnapshot, type CapabilitySnapshot } from "../capabilities/index.ts";
 import { emptyFeedbackSnapshot, type FeedbackSnapshot } from "../feedback.ts";
@@ -63,6 +66,24 @@ function readNode(value: unknown): Node | undefined {
 		createdAt: value.createdAt,
 		settledAt: typeof value.settledAt === "number" ? value.settledAt : undefined,
 		channelId: typeof value.channelId === "string" ? value.channelId : undefined,
+	};
+}
+
+/** A grant is the ONLY door out of the non-delegatable class, so a half-decoded one is no grant at all. */
+function readDelegationGrant(value: unknown): DelegationGrant | undefined {
+	if (!isPlainObject(value)) return undefined;
+	const { id, action, grantedBy, grantedAt, reason, revokedAt, revokedBy } = value;
+	if (typeof id !== "string" || typeof action !== "string" || typeof grantedBy !== "string" || typeof grantedAt !== "number" || typeof reason !== "string") return undefined;
+	if (!nonDelegatableClasses.includes(value.class as never)) return undefined;
+	return {
+		id,
+		action,
+		class: value.class as DelegationGrant["class"],
+		grantedBy,
+		grantedAt,
+		reason,
+		...(typeof revokedAt === "number" ? { revokedAt } : {}),
+		...(typeof revokedBy === "string" ? { revokedBy } : {}),
 	};
 }
 
@@ -178,6 +199,17 @@ export interface Store {
 	putNode(node: Node): Promise<void>;
 	/** Bind a lazy channel exactly once; returns undefined for an unknown node. */
 	bindNodeChannel(nodeId: string, channelId: string): Promise<Node | undefined>;
+	/** Durable evidence attached to a node. Missing records are unknown, never permission. */
+	listNodeRecords(nodeId: string): Promise<NodeRecord[]>;
+	putNodeRecord(record: NodeRecord): Promise<void>;
+	/** Remove records by id. Only reachable through an authorized compaction — see `archive.ts`. */
+	deleteNodeRecords(nodeId: string, ids: readonly string[]): Promise<number>;
+	/** Human grants out of the non-delegatable class. An empty list means autonomy takes none of it. */
+	listDelegationGrants(): Promise<DelegationGrant[]>;
+	putDelegationGrant(grant: DelegationGrant): Promise<void>;
+	/** Plans a human has been shown but not yet started. A proposal is not work. */
+	listPlanProposals(): Promise<PlanProposal[]>;
+	putPlanProposal(proposal: PlanProposal): Promise<void>;
 	listChannelEntries(channelId: string, since?: number): Promise<ChannelEntry[]>;
 	searchChannelEntries?(q: string, limit?: number, offset?: number): Promise<ChannelSearchResult[]>;
 	appendChannelEntry(entry: Omit<ChannelEntry, "seq">): Promise<ChannelEntry>;
@@ -337,6 +369,125 @@ export class FileStore implements Store {
 			nodes[index] = bound;
 			await getStorageBackend().writeDurable(file, JSON.stringify(nodes, null, 2));
 			return bound;
+		} finally {
+			release();
+			if (FileStore.nodeWriteLocks.get(file) === next) FileStore.nodeWriteLocks.delete(file);
+		}
+	}
+
+	async listNodeRecords(nodeId: string): Promise<NodeRecord[]> {
+		const raw = await getStorageBackend().readText(path.join(this.stateDir, "node-records.json"));
+		if (!raw) return [];
+		try {
+			const decoded = JSON.parse(raw);
+			return Array.isArray(decoded)
+				? decoded.map(readNodeRecord).filter((record): record is NodeRecord => record !== undefined && record.nodeId === nodeId).sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))
+				: [];
+		} catch {
+			return [];
+		}
+	}
+
+	async putNodeRecord(record: NodeRecord): Promise<void> {
+		const file = path.join(this.stateDir, "node-records.json");
+		const prior = FileStore.nodeWriteLocks.get(file) ?? Promise.resolve();
+		let release!: () => void;
+		const next = prior.then(() => new Promise<void>((resolve) => { release = resolve; }));
+		FileStore.nodeWriteLocks.set(file, next);
+		await prior;
+		try {
+			const raw = await getStorageBackend().readText(file);
+			const existing = raw ? JSON.parse(raw) : [];
+			const records = Array.isArray(existing) ? existing.map(readNodeRecord).filter((value): value is NodeRecord => value !== undefined) : [];
+			const index = records.findIndex((value) => value.id === record.id);
+			if (index >= 0) records[index] = record;
+			else records.push(record);
+			await getStorageBackend().writeDurable(file, JSON.stringify(records.sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)), null, 2));
+		} finally {
+			release();
+			if (FileStore.nodeWriteLocks.get(file) === next) FileStore.nodeWriteLocks.delete(file);
+		}
+	}
+
+	async deleteNodeRecords(nodeId: string, ids: readonly string[]): Promise<number> {
+		const file = path.join(this.stateDir, "node-records.json");
+		const remove = new Set(ids);
+		const prior = FileStore.nodeWriteLocks.get(file) ?? Promise.resolve();
+		let release!: () => void;
+		const next = prior.then(() => new Promise<void>((resolve) => { release = resolve; }));
+		FileStore.nodeWriteLocks.set(file, next);
+		await prior;
+		try {
+			const raw = await getStorageBackend().readText(file);
+			const existing = raw ? JSON.parse(raw) : [];
+			const records = Array.isArray(existing) ? existing.map(readNodeRecord).filter((value): value is NodeRecord => value !== undefined) : [];
+			const kept = records.filter((record) => !(record.nodeId === nodeId && remove.has(record.id)));
+			await getStorageBackend().writeDurable(file, JSON.stringify(kept, null, 2));
+			return records.length - kept.length;
+		} finally {
+			release();
+			if (FileStore.nodeWriteLocks.get(file) === next) FileStore.nodeWriteLocks.delete(file);
+		}
+	}
+
+	async listPlanProposals(): Promise<PlanProposal[]> {
+		const raw = await getStorageBackend().readText(path.join(this.stateDir, "plan-proposals.json"));
+		if (!raw) return [];
+		try {
+			const decoded = JSON.parse(raw);
+			return Array.isArray(decoded) ? decoded.map(readPlanProposal).filter((value): value is PlanProposal => value !== undefined).sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)) : [];
+		} catch {
+			return [];
+		}
+	}
+
+	async putPlanProposal(proposal: PlanProposal): Promise<void> {
+		const file = path.join(this.stateDir, "plan-proposals.json");
+		const prior = FileStore.nodeWriteLocks.get(file) ?? Promise.resolve();
+		let release!: () => void;
+		const next = prior.then(() => new Promise<void>((resolve) => { release = resolve; }));
+		FileStore.nodeWriteLocks.set(file, next);
+		await prior;
+		try {
+			const raw = await getStorageBackend().readText(file);
+			const existing = raw ? JSON.parse(raw) : [];
+			const all = Array.isArray(existing) ? existing.map(readPlanProposal).filter((value): value is PlanProposal => value !== undefined) : [];
+			const index = all.findIndex((value) => value.id === proposal.id);
+			if (index >= 0) all[index] = proposal;
+			else all.push(proposal);
+			await getStorageBackend().writeDurable(file, JSON.stringify(all.sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)), null, 2));
+		} finally {
+			release();
+			if (FileStore.nodeWriteLocks.get(file) === next) FileStore.nodeWriteLocks.delete(file);
+		}
+	}
+
+	async listDelegationGrants(): Promise<DelegationGrant[]> {
+		const raw = await getStorageBackend().readText(path.join(this.stateDir, "delegation-grants.json"));
+		if (!raw) return [];
+		try {
+			const decoded = JSON.parse(raw);
+			return Array.isArray(decoded) ? decoded.map(readDelegationGrant).filter((grant): grant is DelegationGrant => grant !== undefined).sort((a, b) => a.grantedAt - b.grantedAt || a.id.localeCompare(b.id)) : [];
+		} catch {
+			return [];
+		}
+	}
+
+	async putDelegationGrant(grant: DelegationGrant): Promise<void> {
+		const file = path.join(this.stateDir, "delegation-grants.json");
+		const prior = FileStore.nodeWriteLocks.get(file) ?? Promise.resolve();
+		let release!: () => void;
+		const next = prior.then(() => new Promise<void>((resolve) => { release = resolve; }));
+		FileStore.nodeWriteLocks.set(file, next);
+		await prior;
+		try {
+			const raw = await getStorageBackend().readText(file);
+			const existing = raw ? JSON.parse(raw) : [];
+			const grants = Array.isArray(existing) ? existing.map(readDelegationGrant).filter((value): value is DelegationGrant => value !== undefined) : [];
+			const index = grants.findIndex((value) => value.id === grant.id);
+			if (index >= 0) grants[index] = grant;
+			else grants.push(grant);
+			await getStorageBackend().writeDurable(file, JSON.stringify(grants.sort((a, b) => a.grantedAt - b.grantedAt || a.id.localeCompare(b.id)), null, 2));
 		} finally {
 			release();
 			if (FileStore.nodeWriteLocks.get(file) === next) FileStore.nodeWriteLocks.delete(file);
@@ -752,6 +903,47 @@ export class DbStore implements Store {
 	async bindNodeChannel(nodeId: string, channelId: string): Promise<Node | undefined> {
 		await withOrg(this.ctx, this.orgId, (trx) => trx.updateTable("nodes").set({ channel_id: channelId }).where("org_id", "=", this.orgId).where("id", "=", nodeId).where("channel_id", "is", null).execute());
 		return this.getNode(nodeId);
+	}
+
+	async listNodeRecords(nodeId: string): Promise<NodeRecord[]> {
+		const rows = await withOrg(this.ctx, this.orgId, (trx) => trx.selectFrom("node_records").select(["data"]).where("org_id", "=", this.orgId).where("node_id", "=", nodeId).orderBy("created_at").execute());
+		return rows.map((row) => readNodeRecord(JSON.parse(row.data))).filter((record): record is NodeRecord => record !== undefined);
+	}
+
+	async putNodeRecord(record: NodeRecord): Promise<void> {
+		await withOrg(this.ctx, this.orgId, (trx) =>
+			trx.insertInto("node_records").values({ org_id: this.orgId, id: record.id, node_id: record.nodeId, kind: record.kind, created_at: record.createdAt, data: JSON.stringify(record) }).onConflict((oc) => oc.columns(["org_id", "id"]).doUpdateSet({ node_id: record.nodeId, kind: record.kind, created_at: record.createdAt, data: JSON.stringify(record) })).execute(),
+		);
+	}
+
+	async deleteNodeRecords(nodeId: string, ids: readonly string[]): Promise<number> {
+		if (ids.length === 0) return 0;
+		const result = await withOrg(this.ctx, this.orgId, (trx) =>
+			trx.deleteFrom("node_records").where("org_id", "=", this.orgId).where("node_id", "=", nodeId).where("id", "in", [...ids]).executeTakeFirst(),
+		);
+		return Number(result?.numDeletedRows ?? 0);
+	}
+
+	async listPlanProposals(): Promise<PlanProposal[]> {
+		const rows = await withOrg(this.ctx, this.orgId, (trx) => trx.selectFrom("plan_proposals").select(["data"]).where("org_id", "=", this.orgId).orderBy("created_at").execute());
+		return rows.map((row) => readPlanProposal(JSON.parse(row.data))).filter((value): value is PlanProposal => value !== undefined);
+	}
+
+	async putPlanProposal(proposal: PlanProposal): Promise<void> {
+		await withOrg(this.ctx, this.orgId, (trx) =>
+			trx.insertInto("plan_proposals").values({ org_id: this.orgId, id: proposal.id, status: proposal.status, created_at: proposal.createdAt, data: JSON.stringify(proposal) }).onConflict((oc) => oc.columns(["org_id", "id"]).doUpdateSet({ status: proposal.status, created_at: proposal.createdAt, data: JSON.stringify(proposal) })).execute(),
+		);
+	}
+
+	async listDelegationGrants(): Promise<DelegationGrant[]> {
+		const rows = await withOrg(this.ctx, this.orgId, (trx) => trx.selectFrom("delegation_grants").select(["data"]).where("org_id", "=", this.orgId).orderBy("granted_at").execute());
+		return rows.map((row) => readDelegationGrant(JSON.parse(row.data))).filter((grant): grant is DelegationGrant => grant !== undefined);
+	}
+
+	async putDelegationGrant(grant: DelegationGrant): Promise<void> {
+		await withOrg(this.ctx, this.orgId, (trx) =>
+			trx.insertInto("delegation_grants").values({ org_id: this.orgId, id: grant.id, action: grant.action, granted_at: grant.grantedAt, data: JSON.stringify(grant) }).onConflict((oc) => oc.columns(["org_id", "id"]).doUpdateSet({ action: grant.action, granted_at: grant.grantedAt, data: JSON.stringify(grant) })).execute(),
+		);
 	}
 
 	async listChannelEntries(channelId: string, since = 0): Promise<ChannelEntry[]> {

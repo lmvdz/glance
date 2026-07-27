@@ -45,7 +45,7 @@ export const JoinRequests = () => {
   if (reqs.length === 0) return null;
 
   return (
-    <div className="border-t border-ink-border px-3 py-2 border-ink-border">
+    <div className="px-3 py-2" style={{ borderTop: '1px solid #1F1F22' }}>
       <div className="mb-1.5 flex items-center gap-1.5 text-caption font-semibold text-ink-text-muted">
         <UserPlus className="h-3 w-3" aria-hidden="true" />
         Join requests

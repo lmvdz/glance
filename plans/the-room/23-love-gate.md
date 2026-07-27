@@ -8,9 +8,26 @@ BLOCKED_BY: 07, 08, 09, 10, 11, 12, 13, 14, 15, 16, 17
 MODE: hitl
 
 ## Goal
-The t3-face-13 protocol re-targeted at the webapp room, run against the WHOLE experience after
-waves 1-3 land. Lars's reaction is the real gate; instrumentation serves his judgment, never
-substitutes for it. No new-surface feature work past this point until it passes.
+The t3-face-13 protocol re-targeted at the webapp room. Lars's reaction is the real gate;
+instrumentation serves his judgment, never substitutes for it.
+
+## RE-TARGETED 2026-07-25 — this gate is on room-threads, not on the current room
+
+Originally this gated the wave 1–3 room. That no longer makes sense: seven rounds of design
+(`plans/room-threads/reference/`, ~72 states) have specified a replacement for the surface this
+concern was going to judge. Cold-booting the room we are already replacing measures the wrong thing
+and spends the one reaction we get.
+
+So concern 23 now gates **room-threads** — it is the finish line of that plan, not a gate in front
+of it. Consequences:
+
+- The "no new-surface feature work until it passes" clause no longer blocks room-threads. Building
+  room-threads IS the work this gate judges.
+- The protocol below still stands, but runs against the room-threads shell once concern 03 lands,
+  and against a fleet at REAL volume — the premise the whole plan rests on (that a linear feed
+  buries human messages at 80–160 events/hour) has never been tested at that scale.
+- The falsifiable axes below are superseded by the design's own success criteria, which are sharper
+  and already written: see `plans/room-threads/reference/README.md`.
 
 ## Protocol
 Scratch-daemon with real seeded fleet data (landed units, a pending request, a plan, receipts);

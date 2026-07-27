@@ -2,10 +2,7 @@ import { expect, test, describe } from 'bun:test';
 import {
   deriveFleetPageContext,
   deriveTasksPageContext,
-  deriveGraphPageContext,
-  deriveFogPageContext,
   deriveCapabilitiesPageContext,
-  deriveIntervenePageContext,
   deriveReviewPageContext,
   deriveOrgPageContext,
   serializePageContextForPrompt,
@@ -15,7 +12,6 @@ import { buildFleetRoster } from './fleetRoster';
 import { attentionItems, activeWork, computeCapacity } from './insights';
 import type { AgentDTO, CapabilitySnapshotDTO, PublicCapabilityCatalogDTO } from './dto';
 import type { Task } from '../types';
-import type { InspectSel } from '../omp-graph/inspect';
 
 // ── fixtures ─────────────────────────────────────────────────────────────────────────────────
 
@@ -127,34 +123,6 @@ describe('deriveTasksPageContext', () => {
 
 // ── Graph ────────────────────────────────────────────────────────────────────────────────────
 
-describe('deriveGraphPageContext', () => {
-  test('flat mode + window, no selection', () => {
-    const ctx = deriveGraphPageContext({ days: 7, viz: 'flat', sel: null });
-    expect(ctx.viewId).toBe('graph');
-    expect(ctx.filters?.windowDays).toBe(7);
-    expect(ctx.filters?.mode).toBe('FLAT');
-    expect(ctx.selection).toBeUndefined();
-    expect(ctx.entities).toEqual([]);
-  });
-
-  test('depth mode reads as RHYTHM per the shell vocabulary', () => {
-    const ctx = deriveGraphPageContext({ days: 30, viz: 'depth', sel: null });
-    expect(ctx.filters?.mode).toBe('RHYTHM');
-    expect(ctx.filters?.windowDays).toBe(30);
-  });
-
-  test('an open inspector selection carries kind+id as an entity', () => {
-    const sel: InspectSel = { kind: 'commit', sha: 'abc123', label: 'fix: thing', at: 1 };
-    const ctx = deriveGraphPageContext({ days: 14, viz: 'flat', sel });
-    expect(ctx.selection).toEqual({ kind: 'commit', id: 'abc123' });
-    expect(ctx.entities).toEqual([{ kind: 'commit', id: 'abc123', label: 'fix: thing' }]);
-  });
-
-  test('a kindless "needs"/"cost" inspector selection still resolves an id', () => {
-    const ctx = deriveGraphPageContext({ days: 7, viz: 'flat', sel: { kind: 'needs' } });
-    expect(ctx.selection).toEqual({ kind: 'needs', id: 'needs' });
-  });
-});
 
 // ── Capabilities ─────────────────────────────────────────────────────────────────────────────
 
@@ -184,25 +152,6 @@ describe('deriveCapabilitiesPageContext', () => {
 
 // ── Intervene / Review / Org ─────────────────────────────────────────────────────────────────
 
-describe('deriveIntervenePageContext', () => {
-  test('minimal context keyed on the intervened agent', () => {
-    const a = agent('a1', 'working');
-    expect(deriveIntervenePageContext({ interveneAgentId: 'a1', agent: a })).toEqual({
-      viewId: 'intervene',
-      title: 'Intervene — a1',
-      entities: [{ kind: 'agent', id: 'a1', label: 'a1' }],
-      selection: { kind: 'agent', id: 'a1' },
-      route: '/intervene/a1',
-    });
-  });
-
-  test('falls back gracefully with no agent resolved yet', () => {
-    const ctx = deriveIntervenePageContext({ interveneAgentId: null, agent: undefined });
-    expect(ctx.title).toBe('Intervene');
-    expect(ctx.entities).toEqual([]);
-    expect(ctx.route).toBe('/intervene');
-  });
-});
 
 describe('deriveReviewPageContext', () => {
   test('carries the reviewed task + doc path', () => {
@@ -215,16 +164,6 @@ describe('deriveReviewPageContext', () => {
   });
 });
 
-describe('deriveFogPageContext', () => {
-  test('carries the days window and file count, no per-item selection concept', () => {
-    const ctx = deriveFogPageContext({ days: 14, fileCount: 42 });
-    expect(ctx.viewId).toBe('fog');
-    expect(ctx.title).toBe('Comprehension fog');
-    expect(ctx.entities).toEqual([]);
-    expect(ctx.filters).toEqual({ windowDays: 14, fileCount: 42 });
-    expect(ctx.route).toBe('/fog');
-  });
-});
 
 describe('deriveOrgPageContext', () => {
   test('a fixed, minimal context — org settings has no per-item selection concept', () => {

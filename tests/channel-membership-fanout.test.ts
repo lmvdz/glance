@@ -368,6 +368,7 @@ test("non-members get 403 for every per-agent HTTP route", async () => {
 		{ name: "transcript", method: "GET", suffix: "/transcript" },
 		{ name: "transitions", method: "GET", suffix: "/transitions" },
 		{ name: "subagents", method: "GET", suffix: "/subagents" },
+		{ name: "record", method: "GET", suffix: "/record" },
 		{ name: "receipts", method: "GET", suffix: "/receipts" },
 		{ name: "checkpoints", method: "GET", suffix: "/checkpoints" },
 		{ name: "commands", method: "GET", suffix: "/commands" },
@@ -399,6 +400,8 @@ test("non-members get 403 for every per-agent HTTP route", async () => {
 test("gate-verdict-proof returns 403 for private channel non-members", async () => {
 	const { mgr, url, headers, agent } = await startedPrivateAgentServer("gate-proof-membership-");
 	const host = mgr as unknown as TranscriptEventHost;
+	// `ops` here is PRIVATE. An escalation from a private room stays in that room; it must never be
+	// addressed to org-public #fleet, where membership enforcement cannot help it.
 	const projected = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === TRANSCRIPT_EVENT_GATE_VERDICT);
 
 	host.emitUnitTranscriptEvent(agent.id, TRANSCRIPT_EVENT_GATE_VERDICT, "gate verdict · pass", { verdict: "pass" });
@@ -415,7 +418,9 @@ test("ordinary unit lifecycle projects a bounded five-card cycle from transition
 	if (!record) throw new Error("seed agent missing");
 	const host = mgr as unknown as TransitionHost;
 	const emit = async (reason: string, status: AgentDTO["status"], kind: string, cause?: Record<string, unknown>) => {
-		const projected = waitForChannelEntry(mgr, "ops", (item) => item.event?.kind === kind);
+		// Routine telemetry lands at the unit's node; the failure escalates to the unit's own room.
+		const channelId = kind === TRANSCRIPT_EVENT_UNIT_FAILED ? "ops" : `node:${agent.id}`;
+		const projected = waitForChannelEntry(mgr, channelId, (item) => item.event?.kind === kind);
 		host.transition(record, status, reason, cause);
 		return projected;
 	};
@@ -501,7 +506,7 @@ test("a completion with nothing to report projects no card", async () => {
 
 	// Now it has actually produced something — the card lands, once.
 	seeded.transcript.push({ id: "s1", seq: 1, kind: "assistant", text: "Added the JSDoc comment and committed it.", ts: 1 });
-	const projected = waitForChannelEntry(mgr, "ops", (item) => item.event?.kind === TRANSCRIPT_EVENT_UNIT_TURN_FINISHED);
+	const projected = waitForChannelEntry(mgr, `node:${agent.id}`, (item) => item.event?.kind === TRANSCRIPT_EVENT_UNIT_TURN_FINISHED);
 	host.transition(record, "working", "task-start");
 	host.transition(record, "idle", "exit-clean");
 	await projected;

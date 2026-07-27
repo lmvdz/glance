@@ -104,7 +104,7 @@ import { assertMerged, deletePendingPr, ensurePr, isFullyConfirmedPendingPr, lan
 import { ghJson } from "./gh.ts";
 import { repoIdentity } from "./repo-identity.ts";
 import { autoLandOnSuccess } from "./autoland.ts";
-import { ownershipConflict, requiresConflict, outOfScopeWrites, producesAllowlist } from "./ownership.ts";
+import { goalConflict, ownershipConflict, requiresConflict, outOfScopeWrites, producesAllowlist } from "./ownership.ts";
 import { buildRecentlyLandedBlock, type RecentlyLandedEntry } from "./landed-context.ts";
 import { headCommit, isFresh, proofFingerprint, proofFor, proofGate, runProof, setProofRoot, sweepProofs } from "./proof.ts";
 import { setGateLogRoot, sweepGateLogs } from "./gate-logs.ts";
@@ -234,6 +234,20 @@ import { TRANSCRIPT_EVENT_TOKEN_BURN_SNAPSHOT, fleetTokenBurnPayload, tokenBurnF
 import { truncateLabel } from "./text-util.ts";
 import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
 import { ChannelStore, DEFAULT_CHANNEL_ID, type ChannelEntry, type ClientChannelPost, type Channel, type CreateChannelInput, type ChannelMemberInput } from "./channels.ts";
+import { NodeStore, compareActivity, type NodeState } from "./nodes.ts";
+import { ForgedCardError, assertAuthentic, projectsToRoom, type CardProvenance } from "./projection-classes.ts";
+import { coldStartLearningState } from "./unknowns.ts";
+import { RECOVERY_DELAY_MS, gateHealth, notificationText, readGateEvaluation, shouldLeaveTheApp, type GateEvaluation, type GateHealth, type WorthItReview } from "./leaving-the-app.ts";
+import { assessReversal, costEventsFrom, shouldDiscloseCost, summariseCost, type CostSummary, type ReversalAssessment, type ReversalNode } from "./decision-impact.ts";
+import { NodeRecordStore, quoteRule, type NodeRecord, type InstructionReadbackRecord, type ObjectionRecord, type PlanMotionRecord } from "./node-records.ts";
+import { approveIrreversible, beginInstruction, overruleObjection, raiseObjection, recordObjectionOutcome, rejectIrreversible, type InstructionExecution } from "./instructions.ts";
+import { regenerateNodeSummaries } from "./node-summaries.ts";
+import { agentRecordView, type AgentRecordView } from "./agent-records.ts";
+import { proposeRules, type RuleProposal } from "./rule-proposals.ts";
+import { assessPlanMotion as assessPlanMotionEvidence, planMotionMetrics, type PlanMotionInput, type PlanMotionAssessment } from "./plan-motion.ts";
+import { compactionNotice, planCompaction, planHandover, type CompactionPlan, type CompactionPolicy, type HandoverPlan } from "./archive.ts";
+import { consequenceSentence, reshape, type PlanProposal, type ReshapeOp } from "./plan-proposals.ts";
+import { DelegationBoundaryError, assertHumanAuthority, boundaryJustification, commandAction, grantFor, nonDelegatableClasses, nonDelegatableClassOf, type Authority, type DelegationGrant } from "./delegation-boundary.ts";
 import { buildTrace, traceMaxSpans, traceSampleRatio, traceSpansEnabled, type TraceResponse } from "./spans.ts";
 import { traceExporterFromEnv, type TraceExportQueue } from "./trace-exporter.ts";
 
@@ -266,20 +280,6 @@ import {
 	type CapabilityInstallPatch,
 	type CapabilitySnapshot,
 } from "./capabilities/index.ts";
-
-const DEFAULT_FLEET_CARD_KINDS: Record<string, true> = {
-	[TRANSCRIPT_EVENT_NEEDS_YOU]: true,
-	[TRANSCRIPT_EVENT_GATE_VERDICT]: true,
-	[TRANSCRIPT_EVENT_LAND_MERGE]: true,
-	[TRANSCRIPT_EVENT_PLAN_CARD]: true,
-	[TRANSCRIPT_EVENT_RETURN_EMIT]: true,
-	[TRANSCRIPT_EVENT_DESIGN_REVISED]: true,
-	[TRANSCRIPT_EVENT_UNIT_SPAWNED]: true,
-	[TRANSCRIPT_EVENT_UNIT_TURN_FINISHED]: true,
-	[TRANSCRIPT_EVENT_UNIT_FAILED]: true,
-	[TRANSCRIPT_EVENT_PR_OPENED]: true,
-	[TRANSCRIPT_EVENT_VERIFICATION_RAN]: true,
-};
 
 const MAX_TRANSCRIPT = 800;
 const POLL_MS = 2500;
@@ -1131,6 +1131,8 @@ export class SquadManager extends EventEmitter {
 	private readonly unverifiedProofEscalated = new Set<string>();
 	/** Per-agent count of auto-supervised answers spent this run (OMP_SQUAD_AUTOSUPERVISE attempt budget). */
 	private readonly superviseBudget = new Map<string, number>();
+	/** Pending authority writes keyed by agent/question, so readers observe the routing decision once it is durable. */
+	private readonly authorityWrites = new Map<string, Promise<void>>();
 	/** Manager card projections that exhausted ChannelStore's bounded append retry. */
 	private projectionFailures = 0;
 	/** Per-agent count of advisory peer messages spent this run (OMP_SQUAD_PEERMSG_BUDGET). */
@@ -1196,6 +1198,7 @@ export class SquadManager extends EventEmitter {
 	 *  last-seen map, constructed ONCE here (mirrors `transitionLog` above), never per-request. */
 	private readonly attentionStore: AttentionStore;
 	private readonly channelStore: ChannelStore;
+	private readonly nodeStore: NodeStore;
 	private readonly traceExporter?: TraceExportQueue;
 	/** Reward disbursement provider (Tremendous / Manual). Injectable for tests; default from env. */
 	private readonly paymentProvider: PaymentProvider;
@@ -1246,6 +1249,7 @@ export class SquadManager extends EventEmitter {
 		this.pushTapLog = new JsonlLog<PushTapEntry>({ path: path.join(this.stateDir, PUSH_TAPS_FILE), log: (m) => this.log("warn", `${PUSH_TAPS_FILE}: ${m}`) });
 		this.store = opts.store ?? new FileStore(this.stateDir);
 		this.channelStore = new ChannelStore(this.stateDir, this.store, (m) => this.log("warn", `channels: ${m}`));
+		this.nodeStore = new NodeStore(this.store);
 		this.attentionStore = new AttentionStore({ stateDir: this.stateDir, log: (m) => this.log("warn", `attention: ${m}`) });
 		this.bin = opts.bin;
 		this.autoLand = opts.autoLand ?? false;
@@ -1375,6 +1379,8 @@ export class SquadManager extends EventEmitter {
 	}
 
 	async start(): Promise<void> {
+		await this.materialiseAutoLandGrant();
+		await this.materialiseColdStart();
 		// Recovery only matters for a daemon with prior state. A fresh start has nothing to reconnect,
 		// reap, or adopt — and a fresh-state manager must NOT reap the shared sockets dir out from under
 		// a concurrent daemon (or test). reconnectLive (use live) → reapOrphans → adopt worktree context.
@@ -2408,13 +2414,16 @@ export class SquadManager extends EventEmitter {
 	}
 
 	list(): AgentDTO[] {
-		return [...this.agents.values()].map((r) => {
+		const agents = [...this.agents.values()].map((r) => {
 			// Boot-recompute (t3-face concern 06): recomputed fresh on EVERY read, not only at
 			// mutation/emit sites — a restart-restored roster answers correctly on its very first
 			// GET, before any agent has mutated (and re-broadcast) since boot. See syncLadder's doc.
 			this.syncLadder(r.dto);
 			return r.dto;
 		});
+		// State-pane regions remain the client's concern; this only gives each region the same
+		// deterministic recency/velocity order through the roster it already consumes.
+		return agents.sort((a, b) => compareActivity(a, b, Date.now()));
 	}
 
 	/**
@@ -2746,18 +2755,41 @@ export class SquadManager extends EventEmitter {
 		return this.profiles(repo).find((p) => p.id === id);
 	}
 
+	/**
+	 * Every model this fleet can actually reach, tagged with the harness that offers it.
+	 *
+	 * Previously this returned the FIRST live agent's list and stopped, so a fleet running two
+	 * harnesses showed one of them and silently hid the other — and the picker then grouped what it
+	 * got by a provider string inferred from the model id, which cannot tell `claude-opus-4-5` reached
+	 * through omp from the same model reached through claude-code. Harness is the declared fact.
+	 *
+	 * One agent per harness is asked, not one per agent: the answer is a property of the harness, and
+	 * querying forty units for the same list would be forty round trips for one answer.
+	 */
 	async modelOptions(): Promise<RuntimeModelOption[]> {
+		const asked = new Set<string>();
+		const out: RuntimeModelOption[] = [];
+		const seen = new Set<string>();
 		for (const rec of this.agents.values()) {
 			if (!rec.agent.isAlive || !rec.agent.getAvailableModels) continue;
+			const harness = rec.dto.harness ?? rec.options.harness ?? "unknown";
+			if (asked.has(harness)) continue;
+			asked.add(harness);
 			try {
 				const result = await rec.agent.getAvailableModels();
-				const options = modelOptionsFromRuntime(result.models);
-				if (options.length) return options;
+				for (const option of modelOptionsFromRuntime(result.models)) {
+					// The same model offered by two harnesses is two entries, because they are two
+					// different places a prompt can go. Deduped within a harness, never across.
+					const key = `${harness}\u0000${option.value}`;
+					if (seen.has(key)) continue;
+					seen.add(key);
+					out.push({ ...option, harness });
+				}
 			} catch {
-				/* fall back to configured models */
+				/* this harness could not be asked; the others still answer */
 			}
 		}
-		return [];
+		return out;
 	}
 
 	async listFeedbackCampaigns(): Promise<FeedbackCampaign[]> {
@@ -3424,6 +3456,7 @@ export class SquadManager extends EventEmitter {
 
 	private async emitDesignRevisedCard(feature: FeatureDTO, concern: PlanConcern, opts: { file: string; status?: string; blockedBy?: number[] }, actor: Actor): Promise<void> {
 		const rec = feature.agentIds.map((id) => this.agents.get(id)).find(Boolean);
+		// Same rule as unit escalations: a design-revised card belongs to the room the work came from.
 		const channelId = rec?.options.channelId ?? rec?.dto.channelId ?? DEFAULT_CHANNEL_ID;
 		const changed = [
 			opts.status !== undefined ? `status → ${opts.status}` : undefined,
@@ -3758,7 +3791,7 @@ export class SquadManager extends EventEmitter {
 						provenAt: Date.now(),
 					});
 				}
-				this.emitUnitTranscriptEvent(w.agentId, TRANSCRIPT_EVENT_LAND_MERGE, `land merge finalized · ${this.safeEventLabel(w.branch ?? "changes")} · ${res.mode ?? "local"}`, { stage: "finalized", repo: pf.repo, branch: w.branch, agentId: w.agentId, featureId: id, issueId: rec?.dto.issue?.id, issueIdentifier: rec?.dto.issue?.identifier, mode: res.mode ?? "local", prUrl: res.prUrl, prNumber: res.prNumber, prState: res.prState, outcome: res.prState ?? "merged", doneProofVerified: res.detail?.includes("landed onto a red baseline") ? "red-baseline" : "green", detail: res.detail });
+				this.emitUnitTranscriptEvent(w.agentId, TRANSCRIPT_EVENT_LAND_MERGE, `${this.safeEventLabel(w.branch ?? "changes")} is on main. That has left this machine and a revert would be a new change, not an undo. Nothing else in the fleet was touched.`, { stage: "finalized", repo: pf.repo, branch: w.branch, agentId: w.agentId, featureId: id, issueId: rec?.dto.issue?.id, issueIdentifier: rec?.dto.issue?.identifier, mode: res.mode ?? "local", prUrl: res.prUrl, prNumber: res.prNumber, prState: res.prState, outcome: res.prState ?? "merged", doneProofVerified: res.detail?.includes("landed onto a red baseline") ? "red-baseline" : "green", detail: res.detail });
 				void this.closeLandedIssue(rec?.dto.issue, { branch: w.branch, repo: pf.repo }); // real merge ⇒ close its tracking issue (idempotent)
 			}
 		}
@@ -3775,7 +3808,530 @@ export class SquadManager extends EventEmitter {
 	 * delay (beyond `beginAttempt`'s sub-second SHA reads), or alter a land. `autoLandWorkflow` calls this
 	 * wrapper, so a single attempt id is threaded and it never mints its own (no double `attempt-started`).
 	 */
+	/**
+	 * Live grants out of the non-delegatable class. Read fresh at every enforcement point rather than
+	 * cached: a revocation that only takes effect after a restart is not a revocation.
+	 */
+	/**
+	 * `OMP_SQUAD_AUTOLAND` enabled autonomous merging with nobody's name on it. The boundary needs a
+	 * decision it can attribute, so the flag becomes a grant: same behaviour, now answerable, visible
+	 * and revocable. Whoever set the flag is recorded as the granter, and the grant says so plainly
+	 * rather than claiming a person typed it.
+	 *
+	 * Deliberately does NOT re-grant after a revocation — otherwise every restart would silently undo
+	 * a human taking the permission back, which is the exact failure this concern exists to prevent.
+	 */
+	/** The node the fleet's own org-level records hang from. Created once, reused forever. */
+	static readonly ROOT_NODE_ID = "fleet";
+
+	/**
+	 * On a fresh install the product knows nothing about this person, and concern 16's whole point is
+	 * that it says so out loud: six defaults marked BORROWED from other teams, one question that has no
+	 * default at all (out-of-hours contact), and a ledger of what it cannot yet know.
+	 *
+	 * Without this the learning state is never created, which means `proposalSampleFloor` always returns
+	 * undefined, the borrowed defaults never exist, and cold start is a module nobody calls. Idempotent:
+	 * an existing state is never overwritten, or every restart would silently undo a person's answers.
+	 */
+	private async materialiseColdStart(): Promise<void> {
+		try {
+			const nodes = new NodeStore(this.store);
+			const rootId = SquadManager.ROOT_NODE_ID;
+			if (!(await nodes.get(rootId))) {
+				await nodes.create({ id: rootId, kind: "plan", title: "the fleet", state: "working", createdAt: Date.now() });
+			}
+			const records = new NodeRecordStore(this.store, (m) => this.log("warn", `node-records: ${m}`));
+			if ((await records.list(rootId)).some((record) => record.kind === "learning-state")) return;
+			await records.put(coldStartLearningState(rootId, Date.now()));
+			this.log("info", "cold start: recorded six borrowed defaults and the unknowns ledger — nothing here was learned from you yet");
+		} catch (err) {
+			this.log("warn", `cold start not recorded: ${errText(err)}`);
+		}
+	}
+
+	/**
+	 * How often stall detection fired, and how often it was wrong. Concern 13's verify list requires
+	 * this to be surfaced — the reference shows "stalls noticed 2 in 8 weeks · 0 false". A detector
+	 * whose false-positive rate nobody can see is one people learn to ignore.
+	 */
+	async planMotionHealth(nodeId: string, now = Date.now()): Promise<{ noticed: number; falsePositive: number }> {
+		try {
+			const records = (await new NodeRecordStore(this.store).list(nodeId)).filter((record): record is PlanMotionRecord => record.kind === "plan-motion");
+			return planMotionMetrics(records, now);
+		} catch (err) {
+			this.log("warn", `plan motion health unavailable for ${nodeId}: ${errText(err)}`);
+			return { noticed: 0, falsePositive: 0 };
+		}
+	}
+
+	/**
+	 * What undoing a piece of work would actually take, following what was built on it. Reads the live
+	 * roster rather than a separate model — a second view of the same fleet is how two views start
+	 * disagreeing.
+	 */
+	async reversalCost(agentId: string): Promise<ReversalAssessment | undefined> {
+		const rec = this.agents.get(agentId);
+		if (!rec) return undefined;
+		const children = new Map<string, string[]>();
+		for (const { dto } of this.agents.values()) {
+			if (!dto.parentId) continue;
+			children.set(dto.parentId, [...(children.get(dto.parentId) ?? []), dto.id]);
+		}
+		const nodes: ReversalNode[] = [...this.agents.values()].map(({ dto }) => ({
+			id: dto.id,
+			address: dto.id,
+			title: dto.name || dto.id,
+			dependents: children.get(dto.id) ?? [],
+			// A MERGED pull request has left the machine: that part is not undoable by doing more work
+			// here, and a revert is a new change rather than an undo.
+			...(dto.prState === "merged" ? { irreversible: { what: `the merge from ${dto.name || dto.id}`, nearestRepair: "a revert commit, which is a new change rather than an undo" } } : {}),
+		}));
+		return assessReversal(nodes, agentId);
+	}
+
+	/**
+	 * What a node's work spent, and what of that was wasted, read from its retained records.
+	 *
+	 * The disclosure rule is applied HERE rather than left to each caller: a rule every render site
+	 * has to remember is a rule one of them will forget, and the failure is silent — a cost ticker
+	 * appears somewhere it changes nothing, and people learn to stop reading costs entirely. Callers
+	 * ask whether this cost sits beside a choice; the answer to "should this be shown" comes back with
+	 * the number.
+	 */
+	async costSummary(nodeId: string, context: { changesTheDecision?: boolean; notableCents?: number } = {}): Promise<CostSummary & { disclose: boolean }> {
+		let summary: CostSummary;
+		try {
+			summary = summariseCost(costEventsFrom(await new NodeRecordStore(this.store).list(nodeId)));
+		} catch (err) {
+			this.log("warn", `cost summary unavailable for ${nodeId}: ${errText(err)}`);
+			summary = summariseCost([]);
+		}
+		return { ...summary, disclose: shouldDiscloseCost({ changesTheDecision: context.changesTheDecision ?? false, cents: summary.spentCents, notableCents: context.notableCents }) };
+	}
+
+	/**
+	 * The rules that settled an action, each quoted with the person whose words they are.
+	 *
+	 * Concern 11 requires a rule to be quotable verbatim wherever it decides work, and concern 19
+	 * requires its author to survive every render path — a rule that dissolves into anonymous house
+	 * policy the moment it is displayed has lost the thing that made it answerable.
+	 */
+	async rulesQuotedFor(nodeId: string, action: string): Promise<string[]> {
+		try {
+			return (await new NodeRecordStore(this.store).rulesSettling(nodeId, action)).map(quoteRule);
+		} catch (err) {
+			this.log("warn", `rules for ${nodeId}/${action} unavailable: ${errText(err)}`);
+			return [];
+		}
+	}
+
+	/**
+	 * Whether an interruption may leave the app, and the sentence explaining the answer either way.
+	 *
+	 * Evaluated at the seam rather than at each caller for the same reason the delegation boundary and
+	 * the cost-disclosure rule are: a gate every notification site must remember to consult is a gate
+	 * one of them will skip, and the failure is invisible — a person's evening is interrupted and
+	 * nothing records that it should not have been.
+	 */
+	mayLeaveTheApp(evaluation: unknown, now = Date.now()): { send: boolean; because: string; text: string } {
+		// Decoded, never trusted. A half-written evaluation is the only thing standing between a
+		// person's evening and a notification, and a partially-read one would be judged on whichever
+		// conditions happened to survive — absence reading as consent.
+		const decoded = readGateEvaluation(evaluation);
+		if (!decoded) {
+			return { send: false, because: "This did not decode as a complete evaluation, so it is not one — nobody is interrupted on a record we cannot read.", text: "" };
+		}
+		const decision = shouldLeaveTheApp(decoded, now);
+		return { send: decision.send, because: decision.because, text: notificationText(decoded) };
+	}
+
+	/** How often the fleet has interrupted anyone, and whether they thought it was worth it. */
+	notificationHealth(evaluations: readonly GateEvaluation[], reviews: readonly WorthItReview[]): GateHealth {
+		return gateHealth(evaluations, reviews);
+	}
+
+	/** How long the fleet gets to recover before anyone is interrupted. */
+	get recoveryDelayMs(): number {
+		return RECOVERY_DELAY_MS;
+	}
+
+	/**
+	 * The fleet's autonomy as a state a person can read — what it may settle alone, what it never may,
+	 * and anything it is currently offering to take over.
+	 *
+	 * Concerns 11 and 12 have been built and invisible: the rule that settles a person's work is stored
+	 * with their exact sentence and could not be seen anywhere, and the boundary refuses on their
+	 * behalf without ever saying so. A rule nobody can read is indistinguishable from a setting
+	 * somebody changed.
+	 */
+	async autonomyState(nodeId = SquadManager.ROOT_NODE_ID): Promise<{
+		rules: Array<{ id: string; sentence: string; authorId: string; since: number; settles: string[]; invocations: number; wouldNotHaveCaught: string[] }>;
+		neverAlone: Array<{ class: string; because: string }>;
+		proposals: RuleProposal[];
+	}> {
+		try {
+			const records = await new NodeRecordStore(this.store).list(nodeId);
+			const rules = records
+				.filter((record): record is Extract<NodeRecord, { kind: "rule" }> => record.kind === "rule" && record.status === "active")
+				.map((rule) => ({
+					id: rule.id,
+					sentence: rule.sentence,
+					authorId: rule.authorId,
+					since: rule.createdAt,
+					settles: [...rule.settles],
+					invocations: rule.invocations.length,
+					wouldNotHaveCaught: [...rule.wouldNotHaveCaught],
+				}));
+			return {
+				rules,
+				// Product policy, shown so it can be argued with — not so it can be switched off.
+				neverAlone: nonDelegatableClasses.map((cls) => ({ class: cls, because: boundaryJustification[cls] })),
+				proposals: proposeRules(records),
+			};
+		} catch (err) {
+			this.log("warn", `autonomy state unavailable: ${errText(err)}`);
+			// Fail QUIET but not silent: an empty list of rules would read as "the fleet settles nothing",
+			// which is a claim. Returning the boundary alone says what is certain and omits what is not.
+			return { rules: [], neverAlone: nonDelegatableClasses.map((cls) => ({ class: cls, because: boundaryJustification[cls] })), proposals: [] };
+		}
+	}
+
+	/** The learning state: what is borrowed, what is unknown, and what would settle each. */
+	async learningState(): Promise<NodeRecord | undefined> {
+		try {
+			return (await new NodeRecordStore(this.store).list(SquadManager.ROOT_NODE_ID)).find((record) => record.kind === "learning-state");
+		} catch (err) {
+			this.log("warn", `learning state unavailable: ${errText(err)}`);
+			return undefined;
+		}
+	}
+
+	private async materialiseAutoLandGrant(): Promise<void> {
+		if (!this.autoLand) return;
+		try {
+			const existing = (await this.store.listDelegationGrants()).find((grant) => grant.action === "land");
+			if (existing) return;
+			await this.store.putDelegationGrant({
+				id: "grant:land",
+				action: "land",
+				class: "publishing",
+				grantedBy: `configuration:OMP_SQUAD_AUTOLAND (daemon operator ${this.operator.id})`,
+				grantedAt: Date.now(),
+				reason: "Autonomous landing was enabled by configuration (OMP_SQUAD_AUTOLAND) before grants existed. Recorded here so it can be seen and taken back; nobody has argued for it in their own words yet.",
+			});
+			this.log("info", "delegation-boundary: recorded the existing autoland configuration as a grant — revoke it to stop autonomous merging");
+		} catch (err) {
+			this.log("warn", `delegation-boundary: could not record the autoland grant: ${errText(err)}`);
+		}
+	}
+
+	/**
+	 * Persist one decision a human made, against the unit's node. Fire-and-forget and fully guarded:
+	 * losing a decision record costs future evidence, but it must never fail an answer the person has
+	 * already given.
+	 */
+	private async recordDecision(rec: AgentRecord, req: PendingRequest, value: unknown, actor: Actor): Promise<void> {
+		try {
+			if (!isRoomWorthyPending(req)) return; // routine tool approvals are noise, not decisions
+			const node = await this.ensureProjectedNode(rec);
+			const chose = typeof value === "string" ? value : JSON.stringify(value ?? "");
+			await new NodeRecordStore(this.store, (m) => this.log("warn", `node-records: ${m}`)).put({
+				kind: "decision",
+				id: `decision:${rec.dto.id}:${req.id}`,
+				nodeId: node.id,
+				createdAt: Date.now(),
+				question: req.title ?? req.message ?? req.kind,
+				options: req.options ?? [],
+				chose,
+				decidedBy: actor.id,
+				askedAt: req.createdAt ?? Date.now(),
+				decidedAt: Date.now(),
+				reason: gateClassOf(req) ? "gate-class" : "no-rule-applied",
+			});
+		} catch (err) {
+			this.log("warn", `decision record for ${rec.dto.id}/${req.id} not kept: ${errText(err)}`);
+		}
+	}
+
+	/**
+	 * A pending question is addressed before it is shown. Today's manager has one configured
+	 * operator; multi-human routing can replace this selection, but it must still persist one person
+	 * rather than silently becoming a group inbox.
+	 */
+	private async recordQuestionAuthority(rec: AgentRecord, questionId: string): Promise<void> {
+		const node = await this.ensureProjectedNode(rec);
+		const records = new NodeRecordStore(this.store, (message) => this.log("warn", `node-records: ${message}`));
+		await records.put({
+			kind: "human-authority",
+			id: `human-authority:${node.id}:${questionId}`,
+			nodeId: node.id,
+			questionId,
+			humanId: this.operator.id,
+			role: "accountable",
+			createdAt: Date.now(),
+		});
+	}
+
+	/** The named person responsible for this question, if its originating unit still exists. */
+	async questionAuthority(agentId: string, questionId: string) {
+		const rec = this.agents.get(agentId);
+		if (!rec) return undefined;
+		await this.authorityWrites.get(`${agentId}:${questionId}`);
+		const node = await this.ensureProjectedNode(rec);
+		return new NodeRecordStore(this.store).accountableHumanForQuestion(node.id, questionId);
+	}
+
+	/** Competing rules stay inspectable as disagreement until humans decide precedence semantics. */
+	async ruleDisagreements(nodeId: string, action?: string) {
+		return new NodeRecordStore(this.store).ruleDisagreements(nodeId, action);
+	}
+	/**
+	 * Notice a plan that has gone still from its own movement history. This is deliberately invoked
+	 * by the planner's plan observer, not a global timeout loop: different plans have different
+	 * normal gaps, and an unmeasured plan is not silently judged.
+	 */
+	async assessPlanMotion(input: PlanMotionInput): Promise<PlanMotionAssessment> {
+		const assessment = assessPlanMotionEvidence(input);
+		const existingNode = await this.nodeStore.get(input.planId);
+		if (!existingNode) {
+			await this.nodeStore.create({
+				id: input.planId,
+				kind: "plan",
+				title: input.planTitle,
+				state: "working",
+				createdAt: input.now,
+			});
+		}
+		const records = new NodeRecordStore(this.store, (message) => this.log("warn", `node-records: ${message}`));
+		const id = `plan-motion:${input.planId}:${assessment.record.lastMeaningfulMovementAt}`;
+		const prior = (await records.list(input.planId)).filter((record): record is PlanMotionRecord => record.kind === "plan-motion").find((record) => record.id === id);
+		const record = {
+			...assessment.record,
+			id,
+			nodeId: input.planId,
+			createdAt: input.now,
+			noticedAt: prior?.noticedAt,
+			outcome: prior?.outcome,
+		};
+		await records.put(record);
+		if (!assessment.stalled || prior?.noticedAt !== undefined || !assessment.message) return assessment;
+
+		const entry = await this.channelStore.appendManager(DEFAULT_CHANNEL_ID, {
+			authorActor: "planner",
+			kind: "system",
+			format: "markdown",
+			text: `${assessment.message} Noticing, not alarming.`,
+		});
+		await records.put({ ...record, noticedAt: input.now });
+		this.emit("event", { type: "channel-entry", channelId: DEFAULT_CHANNEL_ID, entry } satisfies SquadEvent);
+		return assessment;
+	}
+
+	/** Record the human's outcome, so the false-positive rate is evidence rather than a dashboard claim. */
+	async resolvePlanMotion(planId: string, lastMeaningfulMovementAt: number, outcome: "acknowledged" | "parked" | "dropped" | "resumed" | "false-positive", now = Date.now()): Promise<void> {
+		const records = new NodeRecordStore(this.store, (message) => this.log("warn", `node-records: ${message}`));
+		const id = `plan-motion:${planId}:${lastMeaningfulMovementAt}`;
+		const record = (await records.list(planId)).filter((candidate): candidate is PlanMotionRecord => candidate.kind === "plan-motion").find((candidate) => candidate.id === id);
+		if (!record) throw new Error(`plan motion evidence ${id} not found`);
+		await records.put({
+			...record,
+			createdAt: now,
+			outcome,
+			parked: outcome === "parked" ? true : record.parked,
+			intentionalStill: outcome === "parked" ? true : record.intentionalStill,
+			baselineMs: outcome === "parked" ? undefined : record.baselineMs,
+		});
+	}
+
+
+	/**
+	 * The only manager entry point that releases instruction work. It persists the agent's reading
+	 * before exposing the reversible executor; irreversible permission remains queryable and pending.
+	 */
+	async beginInstruction(
+		readback: InstructionReadbackRecord,
+		reversibleWork: () => Promise<void>,
+	): Promise<InstructionExecution> {
+		return beginInstruction(new NodeRecordStore(this.store, (m) => this.log("warn", `node-records: ${m}`)), readback, reversibleWork);
+	}
+
+	async approveInstructionIrreversible(nodeId: string, instructionId: string): Promise<InstructionReadbackRecord> {
+		return approveIrreversible(new NodeRecordStore(this.store), nodeId, instructionId);
+	}
+
+	async rejectInstructionIrreversible(nodeId: string, instructionId: string): Promise<InstructionReadbackRecord> {
+		return rejectIrreversible(new NodeRecordStore(this.store), nodeId, instructionId);
+	}
+
+	async raiseInstructionObjection(objection: ObjectionRecord): Promise<ObjectionRecord> {
+		return raiseObjection(new NodeRecordStore(this.store), objection);
+	}
+
+	async overruleInstructionObjection(nodeId: string, objectionId: string, overruledBy: string): Promise<ObjectionRecord> {
+		return overruleObjection(new NodeRecordStore(this.store), nodeId, objectionId, overruledBy);
+	}
+
+	async recordInstructionObjectionOutcome(
+		nodeId: string,
+		objectionId: string,
+		outcome: string,
+		matchedPrediction: boolean,
+		at = Date.now(),
+	): Promise<ObjectionRecord> {
+		return recordObjectionOutcome(new NodeRecordStore(this.store), nodeId, objectionId, outcome, matchedPrediction, at);
+	}
+
+	/**
+	 * What the fleet would offer to stop asking about, for one node — generated from decisions this
+	 * person actually made, never from configuration. Returns nothing until there is enough evidence,
+	 * which is the honest answer rather than a weak suggestion.
+	 */
+	async ruleProposals(nodeId: string): Promise<RuleProposal[]> {
+		try {
+			return proposeRules(await new NodeRecordStore(this.store).list(nodeId));
+		} catch (err) {
+			this.log("warn", `rule proposals for ${nodeId} unavailable: ${errText(err)}`);
+			return [];
+		}
+	}
+
+	/** One agent's evidence record. There is deliberately no fleet-wide equivalent to rank people. */
+	async agentRecord(agentId: string, now = Date.now()): Promise<AgentRecordView | undefined> {
+		if (!this.agents.has(agentId)) return undefined;
+		return agentRecordView(agentId, await new NodeRecordStore(this.store).list(agentId), now);
+	}
+
+	/** Every new agent starts with a role default and an explicit provisional checking contract. */
+	private async ensureAgentProfile(rec: AgentRecord): Promise<void> {
+		const records = new NodeRecordStore(this.store, (message) => this.log("warn", `node-records: ${message}`));
+		const existing = await records.list(rec.dto.id);
+		if (existing.some((record) => record.kind === "agent-profile" && record.agentId === rec.dto.id)) return;
+		await records.put({
+			kind: "agent-profile",
+			id: `agent-profile:${rec.dto.id}`,
+			nodeId: rec.dto.id,
+			agentId: rec.dto.id,
+			createdAt: rec.dto.startedAt ?? Date.now(),
+			roleDefault: rec.dto.executionRole ?? "general coding",
+			status: "provisional",
+			checking: { requiredUnits: 10, checkedUnits: 0 },
+		});
+	}
+
+	/**
+	 * What a compaction policy WOULD cut, without cutting it. Shown to a person before they authorize
+	 * it — "every control says what it will do before it is used" applies hardest to the one that
+	 * destroys things.
+	 */
+	async planCompaction(nodeId: string, policy: CompactionPolicy, now = Date.now()): Promise<CompactionPlan> {
+		return planCompaction(await new NodeRecordStore(this.store).list(nodeId), policy, now);
+	}
+
+	/**
+	 * Apply a compaction. Compaction REMOVES records, so whatever it is called it is deletion, and
+	 * deletion is in the non-delegatable class (concern 12) — an autonomous caller is refused unless a
+	 * person granted it by name. The retention record is written BEFORE anything is removed, so a crash
+	 * between the two leaves a declared cut with the data still present rather than silent loss.
+	 */
+	async applyCompaction(
+		nodeId: string,
+		policy: CompactionPolicy,
+		opts: { authority?: Authority; now?: number } = {},
+	): Promise<{ plan: CompactionPlan; removed: number; notice: string }> {
+		const now = opts.now ?? Date.now();
+		assertHumanAuthority("compactNodeRecords", opts.authority ?? "autonomous", await this.delegationGrants());
+		const records = new NodeRecordStore(this.store, (m) => this.log("warn", `node-records: ${m}`));
+		const plan = await this.planCompaction(nodeId, policy, now);
+		const retention = { ...plan.retention, id: `retention:${nodeId}:${now}`, nodeId };
+		await records.put(retention);
+		const removed = plan.cut.length > 0 ? await this.store.deleteNodeRecords(nodeId, plan.cut.map((record) => record.id)) : 0;
+		return { plan, removed, notice: compactionNotice(retention) };
+	}
+
+	/** What moves to the next agent and what does not, stated before the handover is confirmed. */
+	async planHandover(nodeId: string, from: string, to: string, opts: { now?: number; ref?: string } = {}): Promise<HandoverPlan> {
+		return planHandover(await new NodeRecordStore(this.store).list(nodeId), { from, to, now: opts.now ?? Date.now(), ref: opts.ref });
+	}
+
+	/** Plans a person has been shown. A proposal is never work — see `startProposal`. */
+	async planProposals(status?: PlanProposal["status"]): Promise<PlanProposal[]> {
+		const all = await this.store.listPlanProposals();
+		return status ? all.filter((proposal) => proposal.status === status) : all;
+	}
+
+	/** Record a proposal, with the consequence sentence a person reads before deciding. */
+	async proposePlan(proposal: PlanProposal): Promise<{ proposal: PlanProposal; consequence: string }> {
+		if (!proposal.originalWords.trim()) throw new Error("a proposal keeps the person's own words — there is nothing to derive from an empty sentence");
+		if (proposal.units.length > 0 && proposal.needsClarification) {
+			// Asking and proposing at once means the units were built on a guess the planner itself
+			// flagged as unsafe. It asks BEFORE spawning, or it proposes; never both.
+			throw new Error("a proposal that needs clarification proposes no units");
+		}
+		await this.store.putPlanProposal(proposal);
+		return { proposal, consequence: consequenceSentence(proposal) };
+	}
+
+	/** Change the shape before it starts — split, merge, reorder, drop. Approve/reject is not review. */
+	async reshapeProposal(id: string, op: ReshapeOp): Promise<{ proposal: PlanProposal; consequence: string }> {
+		const proposal = (await this.store.listPlanProposals()).find((candidate) => candidate.id === id);
+		if (!proposal) throw new Error(`there is no proposal ${id}`);
+		if (proposal.status !== "proposed") throw new Error(`${id} has already started — its shape is the work now, and changing it is steering, not planning`);
+		const next: PlanProposal = { ...proposal, units: reshape(proposal.units, op) };
+		await this.store.putPlanProposal(next);
+		return { proposal: next, consequence: consequenceSentence(next) };
+	}
+
+	/** Starting is one deliberate act. It cannot happen as a side effect of looking at a proposal. */
+	async startProposal(id: string, at = Date.now()): Promise<PlanProposal> {
+		const proposal = (await this.store.listPlanProposals()).find((candidate) => candidate.id === id);
+		if (!proposal) throw new Error(`there is no proposal ${id}`);
+		if (proposal.needsClarification) throw new Error(`${id} is still waiting on an answer: ${proposal.needsClarification}`);
+		if (proposal.units.length === 0) throw new Error(`${id} proposes no units — there is nothing to start`);
+		if (proposal.status === "started") return proposal;
+		if (proposal.status === "abandoned") throw new Error(`${id} was abandoned; propose it again rather than reviving it silently`);
+		const started: PlanProposal = { ...proposal, status: "started", startedAt: at };
+		await this.store.putPlanProposal(started);
+		return started;
+	}
+
+	async delegationGrants(): Promise<DelegationGrant[]> {
+		try {
+			return await this.store.listDelegationGrants();
+		} catch (err) {
+			// Fail CLOSED. If we cannot read the grants we cannot show that autonomy was permitted, and
+			// "we could not check" must never resolve as "allowed" — that is the defect class this
+			// codebase keeps finding.
+			this.log("warn", `delegation-boundary: grant read failed, treating autonomy as ungranted: ${errText(err)}`);
+			return [];
+		}
+	}
+
+	/** Record a human arguing one action out of the class. Attributable, revocable, never a default. */
+	async grantDelegation(input: { action: string; grantedBy: string; reason: string; at?: number }): Promise<DelegationGrant> {
+		const boundaryClass = nonDelegatableClassOf(input.action);
+		if (!boundaryClass) throw new Error(`${input.action} is not in the non-delegatable class; it needs no grant`);
+		if (!input.grantedBy.trim()) throw new Error("a grant records who made it — there is no anonymous grant");
+		if (!input.reason.trim()) throw new Error("a grant records why it was made, in the granter's own words");
+		const grant: DelegationGrant = { id: `grant:${input.action}`, action: input.action, class: boundaryClass, grantedBy: input.grantedBy.trim(), grantedAt: input.at ?? Date.now(), reason: input.reason.trim() };
+		await this.store.putDelegationGrant(grant);
+		return grant;
+	}
+
+	/** Revoke a grant. The record is kept — who granted it and who took it back are both history. */
+	async revokeDelegation(action: string, revokedBy: string, at?: number): Promise<DelegationGrant | undefined> {
+		const existing = grantFor(action, await this.delegationGrants());
+		if (!existing) return undefined;
+		const revoked: DelegationGrant = { ...existing, revokedAt: at ?? Date.now(), revokedBy };
+		await this.store.putDelegationGrant(revoked);
+		return revoked;
+	}
+
 	async land(id: string, message?: string, opts: { auto?: boolean; force?: boolean; actor?: Actor; reason?: string; validatorOverride?: { reasonClass: string } } = {}): Promise<LandResult> {
+		// Landing pushes a branch into the trunk and merges it — it leaves the machine, so it is in the
+		// non-delegatable class. An autonomous land is refused unless a person granted it, by name, with
+		// a reason. `OMP_SQUAD_AUTOLAND` used to enable this anonymously; it now materialises as exactly
+		// such a grant at boot, so the behaviour is unchanged and the decision is answerable.
+		if (opts.auto) assertHumanAuthority("land", "autonomous", await this.delegationGrants());
 		const rec = this.agents.get(id);
 		const attemptId = rec ? await this.beginLandAssessmentSafe(rec.dto.repo, rec.dto.branch) : undefined;
 		if (rec) this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_LAND_ATTEMPT, `land attempt started · ${this.safeEventLabel(rec.dto.name)} · ${this.safeEventLabel(rec.dto.branch ?? "changes")}`, { stage: "started", attemptId, repo: rec.dto.repo, branch: rec.dto.branch, agentId: rec.dto.id });
@@ -4183,7 +4739,7 @@ export class SquadManager extends EventEmitter {
 						provenAt: Date.now(),
 					});
 				}
-				this.emitUnitTranscriptEvent(id, TRANSCRIPT_EVENT_LAND_MERGE, `land merge finalized · ${this.safeEventLabel(dto.branch ?? "changes")} · ${result.mode ?? "local"}`, { stage: "finalized", repo: dto.repo, branch: dto.branch, agentId: id, featureId: dto.featureId, issueId: dto.issue?.id, issueIdentifier: dto.issue?.identifier, mode: result.mode ?? "local", prUrl: result.prUrl, prNumber: result.prNumber, prState: result.prState, outcome: result.prState ?? "merged", doneProofVerified: result.detail?.includes("landed onto a red baseline") ? "red-baseline" : "green", detail: result.detail ?? result.message });
+				this.emitUnitTranscriptEvent(id, TRANSCRIPT_EVENT_LAND_MERGE, `${this.safeEventLabel(dto.branch ?? "changes")} is on main. That has left this machine and a revert would be a new change, not an undo. Nothing else in the fleet was touched.`, { stage: "finalized", repo: dto.repo, branch: dto.branch, agentId: id, featureId: dto.featureId, issueId: dto.issue?.id, issueIdentifier: dto.issue?.identifier, mode: result.mode ?? "local", prUrl: result.prUrl, prNumber: result.prNumber, prState: result.prState, outcome: result.prState ?? "merged", doneProofVerified: result.detail?.includes("landed onto a red baseline") ? "red-baseline" : "green", detail: result.detail ?? result.message });
 				await this.closeLandedIssue(dto.issue, { branch: dto.branch, repo: dto.repo }); // real merge ⇒ close its tracking issue (idempotent, best-effort)
 			} else this.log("info", `not closing ${dto.issue?.identifier ?? dto.issue?.id ?? id}: land made no merge`);
 		}
@@ -4551,6 +5107,7 @@ export class SquadManager extends EventEmitter {
 					commitsAhead: ev.commitsAhead,
 					dirtyFiles: ev.dirtyFiles,
 					now: Date.now(),
+					upwardSummary: await this.refreshNodeSummaries(rec, true),
 				};
 				report = composeAfterAction(input);
 				if (!(await saveAfterAction(this.stateDir, report))) return;
@@ -4569,6 +5126,19 @@ export class SquadManager extends EventEmitter {
 		} catch {
 			/* best-effort — the catastrophe path must survive a failed report */
 		}
+	}
+
+	/** Replaces the two live consumer statements after a lifecycle change, without creating nodes as a side effect. */
+	private async refreshNodeSummaries(rec: AgentRecord, materialize = false): Promise<string | undefined> {
+		const existing = await this.nodeStore.get(rec.dto.id);
+		const projected = existing ?? (materialize ? await this.ensureProjectedNode(rec) : undefined);
+		if (!projected) return undefined;
+		const node = await this.nodeStore.transition(projected.id, rec.dto.status as NodeState);
+		if (!node) return undefined;
+		const records = new NodeRecordStore(this.store, (m) => this.log("warn", `node-records: ${m}`));
+		const summaries = regenerateNodeSummaries({ node, records: await records.list(node.id), now: Date.now() });
+		await Promise.all(summaries.map((summary) => records.put(summary)));
+		return summaries[0].markdown;
 	}
 
 	/** What the dead unit left behind — the two counts the reap policy and the report's fault call
@@ -6233,6 +6803,48 @@ export class SquadManager extends EventEmitter {
 				appendSystemPrompt: [opts.appendSystemPrompt, specBlock].filter((text): text is string => typeof text === "string" && text.length > 0).join("\n\n") || undefined,
 			};
 		}
+		const goalOverlap = goalConflict(
+			[...this.agents.values()].map(({ dto, options }) => ({
+				...dto,
+				goal: options.task ?? options.workflowState?.goal ?? dto.workflowState?.goal,
+				issueRefs: [options.issue?.id, options.issue?.identifier].filter((ref): ref is string => typeof ref === "string"),
+				planRefs: options.featureId ? [options.featureId] : [],
+			})),
+			{
+				...opts,
+				name: opts.name?.trim() || "new agent",
+				status: "working",
+				goal: opts.task ?? opts.workflowState?.goal,
+				issueRefs: [opts.issue?.id, opts.issue?.identifier].filter((ref): ref is string => typeof ref === "string"),
+				planRefs: opts.featureId ? [opts.featureId] : [],
+			},
+		);
+		// Structural overlap is EXACT — a shared declared path, issue or plan reference — so it blocks,
+		// exactly as `ownershipConflict` already blocks on paths. Semantic and BM25 overlap are
+		// heuristics over short strings, and blocking on those refuses real work: the dispatcher's own
+		// two fixture issues ("issue a / spec a" and "issue b / spec b") score 0.67 against each other,
+		// and the fleet's whole job is spawning many units into one repo. So the fuzzy signals DISCLOSE
+		// instead. That is what the law-firm conflict check actually is — the firm tells you a conflict
+		// exists; it does not refuse to open your mail.
+		if (goalOverlap?.strength === "structural") {
+			throw new Error(`goal overlap conflict: "${goalOverlap.agent}" already owns overlapping work — request access from that owner; the other work's details remain private`);
+		}
+		if (goalOverlap) {
+			// Disclosure, not refusal: existence and owner, never a word of the other work. Fire and
+			// forget — a failure to disclose must not fail the spawn, but it is logged rather than
+			// swallowed, because a disclosure nobody saw is the same as no disclosure.
+			const room = opts.channelId ?? DEFAULT_CHANNEL_ID;
+			const owner = this.safeEventLabel(goalOverlap.agent);
+			void this.channelStore
+				.appendManager(room, {
+					authorActor: "manager",
+					kind: "system",
+					format: "stage",
+					text: `${this.safeEventLabel(opts.name?.trim() || "new unit")} may be duplicating work ${owner} already has in hand. Both are running — nothing was blocked. If they are the same goal, one of you is about to do the other's week; if they are not, ignore this. Ask ${owner} directly; what they are working on stays private until they say otherwise.`,
+					event: { kind: "goal-overlap", payload: { refs: { unitName: opts.name }, doorSurface: "unit", face: { title: "Possibly duplicated work", owner: goalOverlap.agent, strength: goalOverlap.strength, pinned: { owner: goalOverlap.agent, basis: goalOverlap.strength } } } },
+				})
+				.catch((err) => this.log("warn", `goal-overlap disclosure not delivered to ${room}: ${errText(err)}`));
+		}
 		const produces = opts.produces ?? opts.owns;
 		if (opts.requires?.length) {
 			const conflict = requiresConflict([...this.agents.values()].map((r) => r.dto), opts.repo, opts.requires);
@@ -6728,6 +7340,8 @@ export class SquadManager extends EventEmitter {
 			}
 		}
 		this.agents.set(id, rec);
+		await this.ensureProjectedNode(rec);
+		await this.ensureAgentProfile(rec);
 		this.wire(rec);
 		// Synthetic same-state "spawn" entry (#lifecycle-truth finding 4 / DESIGN's timeline-continuity
 		// requirement) — records regardless of pending because "spawn" is an event-class reason, not
@@ -7258,11 +7872,22 @@ export class SquadManager extends EventEmitter {
 		const prefix = follows ? `${actor.id} steered @${targetLabel} (follows ${follows.actor}\'s steer):` : `${actor.id} steered @${targetLabel}:`;
 		const text = `${prefix} ${cmd.displayText ?? cmd.message}`;
 		this.recentSteers.set(rec.dto.id, { actor: actor.id, targetLabel, at: now });
-		const entry = await this.channelStore.appendManager(channelId, {
+		// WHERE this lands is the question, and the answer is: not on top of what you just said.
+		//
+		// When the steer was typed here, the room ALREADY shows it — your own message is right there —
+		// so a manager card restating it is the room telling you what you did, one line after you did
+		// it. That is the same firehose reflex concern 26 was filed over, in a politer voice.
+		//
+		// When it came from somewhere else — the CLI, Intervene, a mention resolved elsewhere — the room
+		// has no other trace of it, and then the echo is the only thing that says the fleet was steered.
+		// So: typed here goes to the unit's node, arrived from elsewhere reaches the room.
+		const typedInThisRoom = (commandSource(cmd) === "mention" || commandSource(cmd) === "composer") && Boolean(cmd.channelId);
+		const nodeId = typedInThisRoom ? (await this.projectedNodeId(rec)) : undefined;
+		const post = {
 			authorActor: "manager",
 			text,
-			kind: "system",
-			format: "markdown",
+			kind: "system" as const,
+			format: "markdown" as const,
 			event: {
 				kind: "mention-steer",
 				payload: {
@@ -7278,8 +7903,11 @@ export class SquadManager extends EventEmitter {
 					clientTurnId: cmd.clientTurnId,
 				},
 			},
-		});
-		this.emit("event", { type: "channel-entry", channelId, entry } satisfies SquadEvent);
+		};
+		const entry = nodeId
+			? await this.channelStore.appendNodeManager(nodeId, post, channelId)
+			: await this.channelStore.appendManager(channelId, post);
+		this.emit("event", { type: "channel-entry", channelId: entry.channelId, entry } satisfies SquadEvent);
 	}
 
 	private commandReturnText(cmd: ClientCommand, actor: Actor, rec: AgentRecord): string | undefined {
@@ -7368,6 +7996,23 @@ export class SquadManager extends EventEmitter {
 			this.emitCommandAck(this.commandAckClientTurnId(cmd), { ok: false, reason: "denied" });
 			throw new RbacDenied(need, have, cmd.type);
 		}
+		// Delegation boundary (concern 12): a SECOND axis, orthogonal to the tier check above. That one
+		// asks which human tier may do this; this one asks whether it may happen without a human at all.
+		// A command carrying source "auto" is the fleet acting on its own initiative, so credentials,
+		// spend, deletion, publishing and legal-edge actions need a grant a person made on purpose.
+		// Enforced here rather than in the client, because a label is a description of enforcement.
+		if (commandSource(cmd) === "auto") {
+			try {
+				assertHumanAuthority(commandAction(cmd), "autonomous", await this.delegationGrants());
+			} catch (err) {
+				if (!(err instanceof DelegationBoundaryError)) throw err;
+				this.log("warn", `delegation-boundary: refused autonomous "${cmd.type}" (${err.boundaryClass})`);
+				void this.store.appendAudit({ actor: actor.id, action: `boundary-refused:${cmd.type}`, target: commandTarget(cmd), detail: { class: err.boundaryClass } }).catch(() => {});
+				this.emitCommandAck(this.commandAckClientTurnId(cmd), { ok: false, reason: "denied" });
+				throw err;
+			}
+		}
+
 		// Security trail: record every accepted mutation (reads — snapshot/subscribe — are need=viewer
 		// and not audited). DB mode persists to the per-org `audit` table; FileStore is a no-op.
 		// `source` (voice/composer provenance) rides along when the command carried one — observability
@@ -7549,6 +8194,11 @@ export class SquadManager extends EventEmitter {
 				const req = rec.dto.pending.find((p) => p.id === cmd.requestId);
 				if (!req) break;
 				this.answerPending(rec, req, cmd.value, actor);
+				// Record what the person actually decided. This is the evidence rule proposals are
+				// generated from (concern 11): without it a "learned" rule has nothing to replay, and
+				// there is no way to tell a generalisation from an assertion. The audit log cannot serve
+				// — it is a no-op in file mode, so half the fleet would silently have no evidence.
+				void this.recordDecision(rec, req, cmd.value, actor);
 				break;
 			}
 			case "interrupt":
@@ -10303,6 +10953,7 @@ export class SquadManager extends EventEmitter {
 		const face = recordObject(payload.face) ?? {};
 		const unitId = typeof refs.unitId === "string" ? refs.unitId : typeof face.unitId === "string" ? face.unitId : undefined;
 		const resident = unitId ? this.agents.get(unitId) : undefined;
+		if (resident && !(await this.canReadAgent(unitId!, actor))) throw new Error("channel forbidden");
 		if (resident) {
 			return {
 				mode: "resident",
@@ -10504,6 +11155,14 @@ export class SquadManager extends EventEmitter {
 				replayed: this.settling.has(rec.dto.id) ? true : undefined,
 			};
 			this.setPending(rec, [...rec.dto.pending.filter((p) => p.id !== req.id), added], "pending-add");
+			const authorityKey = `${rec.dto.id}:${req.id}`;
+			const authorityWrite = this.recordQuestionAuthority(rec, req.id).catch((err) => {
+				this.log("warn", `question authority for ${rec.dto.id}/${req.id} not recorded: ${errText(err)}`);
+			});
+			this.authorityWrites.set(authorityKey, authorityWrite);
+			void authorityWrite.finally(() => {
+				if (this.authorityWrites.get(authorityKey) === authorityWrite) this.authorityWrites.delete(authorityKey);
+			});
 			this.append(rec, "system", `⛔ needs input: ${added.title}`, { pending: { requestId: added.id, action: "created" }, status: "running" });
 		}
 		// Idempotent when a branch above already ran setPending (derive() is deterministic and pure over
@@ -10891,6 +11550,7 @@ export class SquadManager extends EventEmitter {
 		rec.dto.status = to;
 		if (redactedCause?.error !== undefined) rec.dto.error = redactedCause.error; // fixes fail/markCatastrophe push-payload ordering (S6)
 		this.recordTransition(rec, from, to, reason, redactedCause);
+		void this.refreshNodeSummaries(rec).catch((err) => this.log("warn", `node summaries for ${rec.dto.id}: ${errText(err)}`));
 	}
 
 	/** Mirrors transition() for `rec.dto.pending`. `opts.callerOwnsStatus` is for sites that manage status
@@ -10905,7 +11565,7 @@ export class SquadManager extends EventEmitter {
 	 *  redaction chokepoint doesn't already cover (#lifecycle-truth concern 02). */
 	private setPending(rec: AgentRecord, next: PendingRequest[], reason: DerivedReason, cause?: TransitionCause, opts?: { callerOwnsStatus?: boolean }): void {
 		const redacted = next.map((p) => ({ ...p, title: redact(p.title), message: p.message === undefined ? undefined : redact(p.message) }));
-		this.emitNeedsYouProjection(rec, redacted);
+		this.emitNeedsYouProjection(rec, redacted, reason);
 		rec.dto.pending = redacted;
 		// Debounced persist trigger (concern 04) — scheduled regardless of the callerOwnsStatus branch
 		// below, since `pending` already changed above either way. Suppressed during the replay settle
@@ -11525,10 +12185,28 @@ export class SquadManager extends EventEmitter {
 		void this.projectUnitTranscriptEvent(rec, entry);
 	}
 
-	private projectedChannelId(rec: AgentRecord, eventKind: string): string | undefined {
-		const origin = rec.options.channelId ?? rec.dto.channelId;
-		if (origin) return origin;
-		return DEFAULT_FLEET_CARD_KINDS[eventKind] ? DEFAULT_CHANNEL_ID : undefined;
+	/** Resolve an event's subject before routing it. Missing bindings are failures, never root fallbacks. */
+	private async projectedNodeId(rec: AgentRecord): Promise<string | undefined> {
+		try {
+			return (await this.ensureProjectedNode(rec))?.id;
+		} catch (err) {
+			this.log("warn", `projection ${rec.dto.id}: node binding unavailable: ${errText(err)}`);
+			return undefined;
+		}
+	}
+
+	private async ensureProjectedNode(rec: AgentRecord): Promise<{ id: string }> {
+		const existing = await this.nodeStore.get(rec.dto.id);
+		if (existing) return existing;
+		return this.nodeStore.create({
+			id: rec.dto.id,
+			parentId: rec.dto.parentId,
+			kind: "unit",
+			title: rec.dto.name,
+			state: rec.dto.status as NodeState,
+			goal: rec.options.task,
+			createdAt: Date.now(),
+		});
 	}
 
 	private projectionDoorSurface(kind: string): string {
@@ -11568,24 +12246,43 @@ export class SquadManager extends EventEmitter {
 	private needsYouFace(rec: AgentRecord, payload: Record<string, unknown>, entry: TranscriptEntry): Record<string, unknown> {
 		const pendingStatus = typeof payload.status === "string" ? payload.status : undefined;
 		const title = typeof payload.title === "string" && payload.title ? payload.title : "operator input";
+		const accountableHuman = typeof payload.accountableHuman === "string" && payload.accountableHuman ? payload.accountableHuman : undefined;
 		const message = typeof payload.message === "string" && payload.message ? payload.message : undefined;
 		const createdAt = typeof payload.createdAt === "number" && Number.isFinite(payload.createdAt) ? payload.createdAt : entry.ts;
 		const ageMs = Math.max(0, entry.ts - createdAt);
 		const age = ageMs < 60_000 ? "just now" : `${Math.floor(ageMs / 60_000)}m`;
 		const resolved = pendingStatus === "resolved";
+		// A resolved card is one of two facts, and they are not close: somebody answered, or the unit
+		// went away without an answer. `answered` is stamped by emitNeedsYouProjection from the same
+		// `reason` that already distinguishes them; an OLD card carries no flag and is read as
+		// answered, which is what it always claimed.
+		const abandoned = resolved && payload.answered === false;
+		// Concern 19 wants ONE NAMED accountable human, and a name is the point. In file mode the actor
+		// id is literally "local", so appending it produces "local is accountable", which names nobody
+		// and lengthens every headline to say it. An unnamed operator is left off rather than rendered
+		// as a name — an identifier that identifies no one is worse than silence, because it reads like
+		// an answer. The accountable id still rides on the payload for anyone who can resolve it.
+		const namedTitle = accountableHuman && accountableHuman !== "local" ? `${title} — ${accountableHuman} is accountable.` : title;
 		return {
 			unitId: rec.dto.id,
 			unitName: rec.dto.name,
 			eventKind: entry.event?.kind,
 			pendingId: typeof payload.pendingId === "string" ? payload.pendingId : undefined,
 			pendingStatus,
-			title: resolved ? `Resolved · ${title}` : `Needs you · ${title}`,
-			eyebrow: resolved ? "Resolved" : "Needs you",
+			accountableHuman,
+			title: abandoned ? `Never answered · ${namedTitle}` : resolved ? `Resolved · ${namedTitle}` : `Needs you · ${namedTitle}`,
+			eyebrow: abandoned ? "Never answered" : resolved ? "Resolved" : "Needs you",
 			// A card that says the same sentence three times (title, body, "why stopped") reads as
 			// broken, and for approval-shaped pendings `message` IS the title. Say it once.
 			body: message && message.trim() !== title.trim() ? message : undefined,
-			detail: resolved ? "Follow-up resolution card. Original pending card remains unchanged." : "Click to step into the agent.",
-			tone: resolved ? "success" : "warning",
+			detail: abandoned
+				? "The unit stopped before anyone replied. Nothing is waiting on you for it, and nothing came of it."
+				: resolved
+					? "Follow-up resolution card. Original pending card remains unchanged."
+					: "Click to step into the agent.",
+			// Abandoned is NOT success. A green card for a question nobody answered is the room
+			// congratulating itself for losing something.
+			tone: abandoned ? "neutral" : resolved ? "success" : "warning",
 			pinned: {
 				agent: rec.dto.name || rec.dto.id,
 				age,
@@ -11655,13 +12352,13 @@ export class SquadManager extends EventEmitter {
 	private async projectUnitTranscriptEvent(rec: AgentRecord, entry: TranscriptEntry): Promise<void> {
 		const event = entry.event;
 		if (!event?.kind) return;
-		const channelId = this.projectedChannelId(rec, event.kind);
-		if (!channelId) return;
+		const nodeId = await this.projectedNodeId(rec);
+		if (!nodeId) return;
 		try {
-			const card = await this.channelStore.appendManager(channelId, {
+			const input = {
 				authorActor: "manager",
-				kind: "system",
-				format: "stage",
+				kind: "system" as const,
+				format: "stage" as const,
 				text: entry.text,
 				event: {
 					kind: event.kind,
@@ -11671,25 +12368,72 @@ export class SquadManager extends EventEmitter {
 						face: this.projectionFace(rec, entry),
 					},
 				},
-			});
-			this.emit("event", { type: "channel-entry", channelId, entry: card } satisfies SquadEvent);
+			};
+			// An escalation surfaces in the unit's ROOM, which is the channel it was spawned from —
+			// NOT unconditionally in #fleet. #fleet is org-public, so routing every escalation there
+			// would publish a private room's needs-you, gate and land cards to the whole org.
+			const room = rec.options.channelId ?? rec.dto.channelId ?? DEFAULT_CHANNEL_ID;
+			// Provenance travels WITH the card and is checked before it is written. A unit may say
+			// anything about itself and nothing about anyone else, so a card whose subject is a
+			// different node is a forgery regardless of which emit site produced it.
+			const provenance: CardProvenance = {
+				nodeId,
+				agentId: rec.dto.id,
+				evidenceIds: Object.values(this.projectionRefs(rec, entry)).filter((ref): ref is string => typeof ref === "string" && ref.length > 0),
+			};
+			assertAuthentic(event.kind, provenance, nodeId);
+			const projectedInput = { ...input, event: { ...input.event, payload: { ...input.event.payload, provenance } } };
+			const card = projectsToRoom(event.kind)
+				? await this.channelStore.appendManager(room, projectedInput)
+				: await this.channelStore.appendNodeManager(nodeId, projectedInput, rec.options.channelId ?? rec.dto.channelId);
+			this.emit("event", { type: "channel-entry", channelId: card.channelId, entry: card } satisfies SquadEvent);
 		} catch (err) {
 			this.projectionFailures++;
-			this.log("warn", `projection ${rec.dto.id}/${event.kind} → ${channelId} failed (${this.projectionFailures} total): ${errText(err)}`);
+			// A forgery is not a transient failure and must not read as one in the log. A projection that
+			// could not be written is worth retrying; a card that claimed to be about someone else's work
+			// is worth investigating.
+			const label = err instanceof ForgedCardError ? "REFUSED as forged" : "failed";
+			this.log("warn", `projection ${rec.dto.id}/${event.kind} → ${nodeId} ${label} (${this.projectionFailures} total): ${errText(err)}`);
 		}
 	}
 
-	private emitNeedsYouProjection(rec: AgentRecord, next: PendingRequest[]): void {
+	/**
+	 * Announce a pending ONCE — not once per daemon restart.
+	 *
+	 * Seen live, in the room, on real data: `gate_1` was announced thirteen times and `gate_2` three,
+	 * for two questions. The timestamps matched the daemon's restarts exactly. On boot a record is
+	 * rebuilt with an empty `pending`, replay re-adds the outstanding requests, and the id-diff below
+	 * correctly reports every one of them as new — because to a freshly constructed record, it is.
+	 *
+	 * The room's own fold hides the repeats, which is why this survived: the SCREEN looked right. But
+	 * the channel is the durable record, and everything else reading it — search, the weekly episode,
+	 * a digest, anyone scrolling back — saw one unanswered question thirteen times. A restart is not
+	 * news about the work.
+	 *
+	 * `this.settling` is the existing replay-window marker; it already suppresses the PERSIST directly
+	 * below the call site, for the same reason and in the same words ("a ghost pending rebuilt by ring
+	 * replay must never resurrect a stale question"). This extends that reasoning to the projection,
+	 * which is where a person actually meets it.
+	 *
+	 * Resolutions are deliberately NOT suppressed. A question that was answered while the daemon was
+	 * down is news, and the worse failure is a room still showing something as waiting when it is not.
+	 */
+	private emitNeedsYouProjection(rec: AgentRecord, next: PendingRequest[], reason?: DerivedReason): void {
+		const replaying = this.settling.has(rec.dto.id);
 		const previous = new Map(rec.dto.pending.map((request) => [request.id, request]));
 		const upcoming = new Map(next.map((request) => [request.id, request]));
 		for (const request of next) {
 			if (previous.has(request.id)) continue;
+			// A pending restored by replay was announced before the restart. Re-announcing it says the
+			// fleet stopped again, which it did not.
+			if (replaying) continue;
 			if (!isRoomWorthyPending(request)) continue;
-			this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_NEEDS_YOU, `needs you · ${this.safeEventLabel(request.title)}`, {
+			this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_NEEDS_YOU, `${this.safeEventLabel(request.title)} — ${this.safeEventLabel(rec.dto.name)} stopped rather than guess. Everything else in the fleet is still moving.`, {
 				status: "pending",
 				pendingId: request.id,
 				gateClass: gateClassOf(request),
 				title: request.title,
+				accountableHuman: this.operator.id,
 				message: request.message,
 				createdAt: request.createdAt,
 				agentId: rec.dto.id,
@@ -11700,11 +12444,21 @@ export class SquadManager extends EventEmitter {
 			// Symmetric with the emit above: a pending that never became a card must never emit a
 			// resolution card, or the room fills with orphan "resolved" faces for facts it never showed.
 			if (!isRoomWorthyPending(request)) continue;
-			this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_NEEDS_YOU, `needs you resolved · ${this.safeEventLabel(request.title)}`, {
+			// A pending goes away for two very different reasons and the card said "is answered" for
+			// both. `pending-cancel` is the unit being stopped, killed, reaped or replay-pruned —
+			// nobody answered it and nothing is picking the work back up. Telling a person their
+			// question was answered when it was abandoned is the room lying about the one thing it
+			// exists to be trusted on. The distinction was already in `reason`; it was just not read.
+			const answered = reason !== "pending-cancel";
+			this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_NEEDS_YOU, answered
+				? `${this.safeEventLabel(request.title)} is answered. ${this.safeEventLabel(rec.dto.name)} picks the work back up from where it stopped.`
+				: `${this.safeEventLabel(request.title)} went away without being answered — ${this.safeEventLabel(rec.dto.name)} stopped before anyone replied. Nothing is waiting on you for it any more, and nothing came of it either.`, {
 				status: "resolved",
+				answered,
 				pendingId: request.id,
 				gateClass: gateClassOf(request),
 				title: request.title,
+				accountableHuman: this.operator.id,
 				createdAt: request.createdAt,
 				agentId: rec.dto.id,
 			});
@@ -11712,7 +12466,7 @@ export class SquadManager extends EventEmitter {
 	}
 
 	private emitValidationVerdictEvent(rec: AgentRecord, record: ValidationRecord): void {
-		this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_GATE_VERDICT, `gate verdict · ${record.verdict} · agreement ${record.agreement.toFixed(2)} · confidence ${record.confidence.toFixed(2)}`, {
+		this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_GATE_VERDICT, `The gate says ${record.verdict}, with reviewers agreeing ${(record.agreement * 100).toFixed(0)}% of the time and ${(record.confidence * 100).toFixed(0)}% confidence. ${record.verdict === "pass" ? "Nothing is waiting on you unless you disagree with it." : "This one needs you before it can go further."}`, {
 			verdict: record.verdict,
 			agreement: record.agreement,
 			confidence: record.confidence,

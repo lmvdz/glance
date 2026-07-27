@@ -35,6 +35,9 @@ const APP_TABLES = [
 	"channel_memberships",
 	"channel_read_cursors",
 	"nodes",
+	"node_records",
+	"delegation_grants",
+	"plan_proposals",
 ] as const;
 const BASE_APP_TABLES = ["roster_index", "features", "audit", "channels", "channel_entries", "usage", "federation_peers", "capability_records"] as const;
 const FEEDBACK_TABLES = ["feedback_campaigns", "feedback_items", "feedback_validation_responses", "feedback_rewards"] as const;
@@ -283,6 +286,65 @@ const usageTraceId: Migration = {
 // RLS/FK app table: it's written during onboarding OUTSIDE the org-scoped DAL context (the requester isn't
 // a member yet), like the better-auth-owned org/member tables. Admin reads scope by org_id explicitly.
 
+/**
+ * Backfill for databases created BEFORE `channels`/`channel_entries` were added to
+ * `0001_app_tables`.
+ *
+ * Those two tables were introduced by editing an ALREADY-APPLIED migration (commit 5d64fb26,
+ * "Add durable org channel store") rather than by adding a new one. Kysely records 0001 as
+ * applied and never re-runs it, so every database that existed before that commit permanently
+ * lacks both tables — and then `0009_channel_memberships` calls `alterTable("channels")` and the
+ * daemon dies on boot with `no such table: channels`. It cannot be restarted, ever, without this.
+ *
+ * Named `0008b_` so it sorts after `0008_org_secret_rls` and before `0009_channel_memberships`,
+ * which is the migration that needs the table to exist.
+ *
+ * Idempotent by necessity: on a fresh database `0001` has already created both tables, so this
+ * must be a no-op rather than an error. `ifNotExists()` is what makes the same migration correct
+ * on both an old database and a new one.
+ *
+ * The lesson, recorded because this class of defect is invisible until an upgrade: never edit a
+ * migration that has shipped. A new table goes in a new migration, even when the old one is
+ * "obviously" the right home for it.
+ */
+const channelsBackfill: Migration = {
+	async up(db: Kysely<any>) {
+		await db.schema
+			.createTable("channels")
+			.ifNotExists()
+			.addColumn("org_id", "text", (c) => c.notNull().references("organization.id").onDelete("cascade"))
+			.addColumn("id", "text", (c) => c.notNull())
+			.addColumn("name", "text", (c) => c.notNull())
+			.addColumn("kind", "text", (c) => c.notNull())
+			.addColumn("created_at", "bigint", (c) => c.notNull())
+			.addPrimaryKeyConstraint("channels_pk", ["org_id", "id"])
+			.execute();
+
+		await db.schema
+			.createTable("channel_entries")
+			.ifNotExists()
+			.addColumn("org_id", "text", (c) => c.notNull().references("organization.id").onDelete("cascade"))
+			.addColumn("channel_id", "text", (c) => c.notNull())
+			.addColumn("id", "text", (c) => c.notNull())
+			.addColumn("seq", "bigint", (c) => c.notNull())
+			.addColumn("author_actor", "text", (c) => c.notNull())
+			.addColumn("reply_to_id", "text")
+			.addColumn("ts", "bigint", (c) => c.notNull())
+			.addColumn("data", "text", (c) => c.notNull())
+			.addPrimaryKeyConstraint("channel_entries_pk", ["org_id", "channel_id", "seq"])
+			.execute();
+
+		await db.schema
+			.createIndex("channel_entries_org_channel_seq")
+			.ifNotExists()
+			.on("channel_entries")
+			.columns(["org_id", "channel_id", "seq"])
+			.execute();
+	},
+	/** Never drops: on a fresh database these tables belong to 0001 and are not this migration's to remove. */
+	async down() {},
+};
+
 const channelMemberships: Migration = {
 	async up(db: Kysely<any>) {
 		await db.schema.alterTable("channels").addColumn("visibility", "text", (c) => c.notNull().defaultTo("org-public")).execute();
@@ -348,6 +410,61 @@ const nodes: Migration = {
 	},
 };
 
+const nodeRecords: Migration = {
+	async up(db: Kysely<any>) {
+		await db.schema
+			.createTable("node_records")
+			.addColumn("org_id", "text", (c) => c.notNull().references("organization.id").onDelete("cascade"))
+			.addColumn("id", "text", (c) => c.notNull())
+			.addColumn("node_id", "text", (c) => c.notNull())
+			.addColumn("kind", "text", (c) => c.notNull())
+			.addColumn("created_at", "bigint", (c) => c.notNull())
+			.addColumn("data", "text", (c) => c.notNull())
+			.addPrimaryKeyConstraint("node_records_pk", ["org_id", "id"])
+			.execute();
+		await db.schema.createIndex("node_records_org_node").on("node_records").columns(["org_id", "node_id", "created_at"]).execute();
+	},
+	async down(db: Kysely<any>) {
+		await db.schema.dropTable("node_records").ifExists().execute();
+	},
+};
+
+const delegationGrants: Migration = {
+	async up(db: Kysely<any>) {
+		await db.schema
+			.createTable("delegation_grants")
+			.addColumn("org_id", "text", (c) => c.notNull().references("organization.id").onDelete("cascade"))
+			.addColumn("id", "text", (c) => c.notNull())
+			.addColumn("action", "text", (c) => c.notNull())
+			.addColumn("granted_at", "bigint", (c) => c.notNull())
+			.addColumn("data", "text", (c) => c.notNull())
+			.addPrimaryKeyConstraint("delegation_grants_pk", ["org_id", "id"])
+			.execute();
+		await db.schema.createIndex("delegation_grants_org_action").on("delegation_grants").columns(["org_id", "action"]).execute();
+	},
+	async down(db: Kysely<any>) {
+		await db.schema.dropTable("delegation_grants").ifExists().execute();
+	},
+};
+
+const planProposals: Migration = {
+	async up(db: Kysely<any>) {
+		await db.schema
+			.createTable("plan_proposals")
+			.addColumn("org_id", "text", (c) => c.notNull().references("organization.id").onDelete("cascade"))
+			.addColumn("id", "text", (c) => c.notNull())
+			.addColumn("status", "text", (c) => c.notNull())
+			.addColumn("created_at", "bigint", (c) => c.notNull())
+			.addColumn("data", "text", (c) => c.notNull())
+			.addPrimaryKeyConstraint("plan_proposals_pk", ["org_id", "id"])
+			.execute();
+		await db.schema.createIndex("plan_proposals_org_status").on("plan_proposals").columns(["org_id", "status"]).execute();
+	},
+	async down(db: Kysely<any>) {
+		await db.schema.dropTable("plan_proposals").ifExists().execute();
+	},
+};
+
 const createJoinRequests: Migration = {
 	async up(db: Kysely<any>) {
 		await db.schema
@@ -382,12 +499,19 @@ export function appMigrations(type: DbKind): Record<string, Migration> {
 		"0006_join_requests": createJoinRequests,
 		"0007_org_secret": createOrgSecretTable,
 		"0008_org_secret_rls": rlsMigration(type, ["org_secret"]),
+		"0008b_channels_backfill": channelsBackfill,
 		"0009_channel_memberships": channelMemberships,
 		"0010_channel_memberships_rls": rlsMigration(type, ["channel_memberships"]),
 		"0011_channel_read_cursors": channelReadCursors,
 		"0012_channel_read_cursors_rls": rlsMigration(type, ["channel_read_cursors"]),
 		"0013_nodes": nodes,
 		"0014_nodes_rls": rlsMigration(type, ["nodes"]),
+		"0015_node_records": nodeRecords,
+		"0016_node_records_rls": rlsMigration(type, ["node_records"]),
+		"0017_delegation_grants": delegationGrants,
+		"0018_delegation_grants_rls": rlsMigration(type, ["delegation_grants"]),
+		"0019_plan_proposals": planProposals,
+		"0020_plan_proposals_rls": rlsMigration(type, ["plan_proposals"]),
 	};
 }
 

@@ -92,7 +92,7 @@ import {
 import { mergeAdoptionCounters } from "./adoption-counters.ts";
 import { worktreeDiffSinceFork, worktreeTree } from "./explore.ts";
 import { appendConcernDecision, listPlanDirs, parsePlanConcerns, parsePlanDocuments } from "./features.ts";
-import { isPlanDocPath, planDocDiffSince, planDocHeadRevision, readPlanDoc } from "./plan-doc.ts";
+import { isPlanDocPath, planDocDiffSince, planDocHeadRevision, readPlanDoc, readUnitPlan } from "./plan-doc.ts";
 import { assemblePlanBrief } from "./plan-brief.ts";
 import { planVoteGateOpen, tallyPlanVoteRound } from "./plan-votes.ts";
 import { hardenedGit } from "./git-harden.ts";
@@ -261,6 +261,8 @@ const PUBLIC_ASSETS: Record<string, string> = {
 export interface ModelOption {
 	label: string;
 	value: string;
+	/** Which harness offers it — declared, never inferred from the model id. */
+	harness?: string;
 }
 
 export function modelOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): ModelOption[] {
@@ -277,12 +279,19 @@ export function modelOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): Model
 	return [{ label: "omp default", value: "" }, ...models.map((value) => ({ label: value, value }))];
 }
 
+/**
+ * Merge model lists from every source, keyed by HARNESS AND value.
+ *
+ * Deduping on value alone collapsed the same model offered by two harnesses into one entry — which
+ * would have quietly undone the reason harness is carried at all, since reaching `claude-opus-4-5`
+ * through omp and through claude-code are two different destinations for a prompt.
+ */
 export function mergeModelOptions(...groups: ModelOption[][]): ModelOption[] {
 	const seen = new Set<string>();
 	return groups.flat().filter((option) => {
-		const value = option.value || "__default__";
-		if (seen.has(value)) return false;
-		seen.add(value);
+		const key = `${option.harness ?? ""}\u0000${option.value || "__default__"}`;
+		if (seen.has(key)) return false;
+		seen.add(key);
 		return true;
 	});
 }
@@ -2351,6 +2360,7 @@ export class SquadServer {
 		}
 		if (url.pathname === "/api/workflows") return Response.json(workflowSnapshot(await manager.visibleAgents(actor), manager.capabilityWorkflowDefinitions()));
 		if (url.pathname === "/api/models") return Response.json({ models: mergeModelOptions(modelOptionsFromEnv(), await manager.modelOptions()) });
+		if (url.pathname === "/api/autonomy") return Response.json(await manager.autonomyState());
 		if (url.pathname === "/api/profiles") return Response.json({ profiles: manager.profiles() });
 		if (url.pathname === "/api/capabilities") return Response.json(manager.capabilities());
 		if (url.pathname === "/api/capability-audit") return Response.json({ audit: manager.capabilities().audit });
@@ -3113,6 +3123,15 @@ export class SquadServer {
 			if (ph) return Response.json({ id: ph.id, name: ph.name, repo: ph.repo, harness: ph.harness, at: ph.at, dead: true, deadReason: ph.deadReason, transcriptEntries: ph.transcript.length });
 			return new Response("no such agent", { status: 404 });
 		}
+		const magentRecord = url.pathname.match(/^\/api\/agents\/([^/]+)\/record$/);
+		if (magentRecord && req.method === "GET") {
+			const id = decodeURIComponent(magentRecord[1]);
+			const denied = await guardAgent(id);
+			if (denied) return denied;
+			const record = await manager.agentRecord(id);
+			if (!record) return new Response("no such agent", { status: 404 });
+			return Response.json(record);
+		}
 		const mt = url.pathname.match(/^\/api\/agents\/([^/]+)\/transcript$/);
 		if (mt) {
 			const id = decodeURIComponent(mt[1]);
@@ -3124,6 +3143,22 @@ export class SquadServer {
 			const sinceRaw = url.searchParams.get("since");
 			const since = sinceRaw !== null ? Number.parseInt(sinceRaw, 10) : Number.NaN;
 			return Response.json(Number.isFinite(since) ? manager.getTranscriptSince(id, since) : manager.getTranscript(id));
+		}
+		// The plan a unit is asking you to approve. Found by using the product: an "Approve plan" gate
+		// arrived carrying only {title, options} — no plan and no pointer to one — so the question was
+		// unanswerable without leaving for a terminal. The worktree root comes from the AGENT RECORD,
+		// never from the caller.
+		const mplan = url.pathname.match(/^\/api\/agents\/([^/]+)\/plan$/);
+		if (mplan) {
+			const id = decodeURIComponent(mplan[1]);
+			const denied = await guardAgent(id);
+			if (denied) return denied;
+			// `manager.agents` is a Map, not an accessor — `list()` is the reader every other route uses.
+			const agent = manager.list().find((a) => a.id === id);
+			const doc = await readUnitPlan(agent?.worktree);
+			// 404 means "this unit has no plan file we can find", which the caller renders as an
+			// absence rather than as an empty plan.
+			return doc ? Response.json(doc) : new Response("no plan found in this unit's worktree", { status: 404 });
 		}
 		const mtrans = url.pathname.match(/^\/api\/agents\/([^/]+)\/transitions$/);
 		if (mtrans) {

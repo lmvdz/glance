@@ -1,5 +1,5 @@
 import { expect, test, describe } from 'bun:test';
-import { staticRows, fabricRows, buildRows, moveSelection, NAV_ROWS, SEARCH_TASKS_ROW, type FabricSearchResult } from './commandPalette';
+import { staticRows, fabricRows, buildRows, moveSelection, NAV_ROWS, paletteNavigationHref, SEARCH_TASKS_ROW, type FabricSearchResult } from './commandPalette';
 
 describe('staticRows', () => {
   test('blank query returns the nav rows + Org + Search tasks, in order', () => {
@@ -114,5 +114,11 @@ describe('moveSelection', () => {
   test('an empty row list never returns an out-of-range index', () => {
     expect(moveSelection(0, 0, 1)).toBe(0);
     expect(moveSelection(0, 0, -1)).toBe(0);
+  });
+});
+
+describe('palette navigation destinations', () => {
+  test('keeps setup-only capabilities reachable through a shareable room route', () => {
+    expect(paletteNavigationHref('capabilities')).toBe('#/workbench/capabilities');
   });
 });

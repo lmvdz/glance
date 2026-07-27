@@ -6,6 +6,36 @@ export type NodeKind = "plan" | "unit" | "subagent" | "landing";
 /** Work-state vocabulary accepts agent lifecycle states during the legacy migration. */
 export type NodeState = "pending" | "starting" | "working" | "idle" | "input" | "error" | "stopped" | "settled";
 
+/** Activity fades by half every six hours without a new event. */
+export const ACTIVITY_HALF_LIFE_MS = 6 * 60 * 60 * 1_000;
+
+/** The durable fields used to order work already assigned to one state region. */
+export interface ActivityRankCandidate {
+	id: string;
+	createdAt?: number;
+	lastActivity: number;
+	messageCount?: number;
+}
+
+/**
+ * Recent, dense activity earns prominence; silence fades it out. This deliberately answers only
+ * ordering: callers choose state regions before applying it, so a quiet request for help cannot
+ * lose to a chatty healthy unit.
+ */
+function activityScore(candidate: ActivityRankCandidate, now: number): number {
+	if (!Number.isFinite(candidate.lastActivity) || candidate.lastActivity <= 0) return 0;
+	const lastActivity = Math.min(candidate.lastActivity, now);
+	const candidateCreatedAt = candidate.createdAt;
+	const createdAt = candidateCreatedAt !== undefined && Number.isFinite(candidateCreatedAt) && candidateCreatedAt > 0 ? Math.min(candidateCreatedAt, lastActivity) : lastActivity;
+	const velocity = Math.max(1, candidate.messageCount ?? 0) / Math.max(1, lastActivity - createdAt);
+	return velocity * Math.exp((-Math.LN2 * Math.max(0, now - lastActivity)) / ACTIVITY_HALF_LIFE_MS);
+}
+
+/** Descending activity score with deterministic, stable fallbacks. */
+export function compareActivity(a: ActivityRankCandidate, b: ActivityRankCandidate, now: number): number {
+	return activityScore(b, now) - activityScore(a, now) || b.lastActivity - a.lastActivity || a.id.localeCompare(b.id);
+}
+
 /** One addressable unit of work and, once somebody speaks, its conversation. */
 export interface Node {
 	id: string;
@@ -62,6 +92,19 @@ export class NodeStore {
 		const node: Node = { ...input, id: input.id.trim(), title: input.title.trim() };
 		await this.store.putNode(node);
 		return (await this.store.getNode(node.id)) ?? node;
+	}
+
+	/** Update lifecycle state without overloading the node with derived evidence. */
+	async transition(id: string, state: NodeState, now = this.now()): Promise<Node | undefined> {
+		const current = await this.get(id);
+		if (!current) return undefined;
+		const node: Node = {
+			...current,
+			state,
+			settledAt: state === "settled" ? current.settledAt ?? now : undefined,
+		};
+		await this.store.putNode(node);
+		return (await this.store.getNode(id)) ?? node;
 	}
 
 	/** Idempotently materialize unit nodes for state written before nodes existed. */
