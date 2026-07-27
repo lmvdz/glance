@@ -29,6 +29,18 @@ method, and — pre-registered, before any implementation — the result that ki
 > threshold-calibration procedure (current thresholds are provisional priors until the baseline
 > pass locks them as effect sizes) live in [HARNESS-SPEC.md](HARNESS-SPEC.md). Taxonomy without
 > detectors is poetry; that file is the detectors.
+>
+> **Execution status (2026-07-27)**: the seam-level slice is LIVE on main — PR #277 (L1
+> supersession), #293 (region-partitioned primer), #294 (harness scenarios: 11 deterministic
+> tests, coverage enumerated in tests/memory-harness-COVERAGE.md with honest PARTIAL labels),
+> #295 (C5 miss counter: kb-retrieval-miss metric, regime-classified, redacted, flood-deduped —
+> the passive counter this file says should run from day one now does). Every PR went through
+> the same pipeline: worktree, full gates, blind adversarial review pre-merge — three of the
+> four reviews found real defects (adopt race; primer cap bypass; over-claiming test labels +
+> query-text leak surface), all fixed before landing. The remaining frontier, named: the
+> live-runner scenario family (action-level E_gov/E_abstract locks, G02/G11's worker-kill and
+> handoff fixtures — blocked on room-threads node summaries), the calibration baseline pass, and
+> the C1/C7/C9 offline ablations over the replay corpus.
 
 ## The claim ledger
 
