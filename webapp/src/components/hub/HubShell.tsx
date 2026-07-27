@@ -405,6 +405,22 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
     return () => window.clearInterval(timer);
   }, []);
 
+  // Events per hour, from the room's own entries — the fleet's activity as it was actually recorded,
+  // not a separate metrics pipeline that could disagree with the timeline beside it.
+  const pulse = useMemo(() => {
+    const hour = 3_600_000;
+    const start = Math.floor((frameNow - 11 * hour) / hour) * hour;
+    const buckets = Array.from({ length: 12 }, (_, index) => ({ at: start + index * hour, events: 0, interrupted: false }));
+    for (const entry of entries) {
+      const index = Math.floor((entry.ts - start) / hour);
+      if (index < 0 || index >= buckets.length) continue;
+      buckets[index]!.events += 1;
+      if (entry.event?.kind === 'needs-you') buckets[index]!.interrupted = true;
+    }
+    return buckets;
+  }, [entries, frameNow]);
+
+
   return (
     <div className="dark flex h-screen w-full overflow-hidden text-sm" style={{ background: '#070708', color: '#E8E8EA' }}>
       {/* The room is the home frame, drawn as the reference draws it: the alarm band across the top
@@ -471,7 +487,7 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
               // A quiet ROOM is the designed state — unit telemetry stays at its node — so the empty
               // room is a handover of what happened, not a promise that something will. Only the root
               // room gets this; a quiet node channel really is just an empty conversation.
-              emptyState={activeChannelId === DEFAULT_CHANNEL_ID ? <QuietRoom nodes={agentsToRoomNodes(agents)} now={Date.now()} /> : undefined}
+              emptyState={activeChannelId === DEFAULT_CHANNEL_ID ? <QuietRoom nodes={roomNodes} now={frameNow} pulse={pulse} /> : undefined}
             />
             <div style={{ borderTop: '1px solid #1F1F22', background: '#0A0A0B' }}>
               {typingLabel ? <div className="flex h-6 items-center gap-2 px-4 text-[11px] text-ink-text-muted">{typingLabel}</div> : null}

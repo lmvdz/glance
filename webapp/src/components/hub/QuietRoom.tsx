@@ -1,5 +1,6 @@
 import React from 'react';
 import { handoverSummary, type RoomNode } from '../../lib/roomState';
+import { FleetPulse, type Interruption, type PulseBucket } from './FleetPulse';
 
 /**
  * QuietRoom — what a silent room says.
@@ -21,12 +22,16 @@ import { handoverSummary, type RoomNode } from '../../lib/roomState';
 
 export interface QuietRoomProps {
   nodes: readonly RoomNode[];
+  /** Events per hour. The reference puts this on the QUIET screen — it exists to make a calm fleet
+   *  legible, not to give a busy one a dashboard. */
+  pulse?: readonly PulseBucket[];
+  lastInterruption?: Interruption;
   /** How long since this person last read the room. Absent on a first visit. */
   awayMs?: number;
   now: number;
 }
 
-export function QuietRoom({ nodes, awayMs, now }: QuietRoomProps) {
+export function QuietRoom({ nodes, awayMs, now, pulse, lastInterruption }: QuietRoomProps) {
   const settled = nodes.filter((node) => node.state === 'settled');
   const needsYou = nodes.filter((node) => node.state === 'needs-you');
   const inFlight = nodes.filter((node) => node.state === 'in-flight' || node.state === 'blocked');
@@ -68,10 +73,15 @@ export function QuietRoom({ nodes, awayMs, now }: QuietRoomProps) {
             <p key={line} className="text-xs leading-5 text-ink-text-body">{line}</p>
           ))}
         </div>
-        <p className="mt-4 border-t border-ink-border pt-3 text-[11px] leading-5 text-ink-text-muted">
+        <p className="mt-4 pt-3 text-[11px] leading-5" style={{ borderTop: '1px solid #1F1F22', color: '#6A6A72' }}>
           The room is quiet because unit telemetry stays at its own node. Quiet here means the fleet is working, not that
           nothing is.
         </p>
+        {pulse && pulse.length > 0 ? (
+          <div className="mt-4 pt-4" style={{ borderTop: '1px solid #1F1F22', marginLeft: -16, marginRight: -16 }}>
+            <FleetPulse buckets={pulse} last={lastInterruption} now={now} />
+          </div>
+        ) : null}
       </div>
     </div>
   );
