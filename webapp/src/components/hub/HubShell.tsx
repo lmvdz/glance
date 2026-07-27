@@ -1,15 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Hash, Loader2, Search, Users, X } from 'lucide-react';
 import { Composer, type ModelOption } from '../chat/Composer';
-import { ChannelRail } from './ChannelRail';
 import { ChannelTimeline } from './ChannelTimeline';
 import { AgentRecordPanel } from './AgentRecordPanel';
-import { RoomFrame } from './RoomFrame';
+import { RoomFrame, TopBar } from './RoomFrame';
 import { DecisionPanel, type DecisionRequest } from './DecisionPanel';
 import { AutonomyPanel, type AutonomyState } from './AutonomyPanel';
 import { UnitPanel } from './UnitPanel';
 import { QuietRoom } from './QuietRoom';
 import { agentsToRoomNodes } from '../../lib/roomState';
+import { fleetSummary } from '../../lib/roomFrame';
 import { apiJson, jsonInit } from '../../lib/api';
 import { buildPromptCommand, channelAgentSessionId, channelDraftSessionId, ensureConsoleAgent, postChannelMessage } from '../../lib/chat/sendCore';
 import { resolveMentionRoute } from '../../lib/mentionGrammar';
@@ -405,6 +405,24 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
     return () => window.clearInterval(timer);
   }, []);
 
+  // The bar on an opened surface says "esc goes back to the room", so escape goes back to the room.
+  // Copy that promises a key and is not wired to one is how a person learns to stop believing the
+  // words on the screen.
+  const inWorkbench = route.kind === 'workbench';
+  useEffect(() => {
+    if (!inWorkbench) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      // Not while someone is typing: escape in a field means "abandon what I am writing", and stealing
+      // it would throw away their words to satisfy a navigation shortcut.
+      const target = event.target as HTMLElement | null;
+      if (target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return;
+      window.location.hash = hubHref(DEFAULT_CHANNEL_ID);
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [inWorkbench]);
+
   // Events per hour, from the room's own entries — the fleet's activity as it was actually recorded,
   // not a separate metrics pipeline that could disagree with the timeline beside it.
   const pulse = useMemo(() => {
@@ -427,11 +445,16 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
           with the waiting questions readable in place, the conversation as the centre, and the
           addressable tree on the RIGHT. There is no channel column — the previous attempt kept one and
           wedged a strip beside it, which produced a room that read as unchanged because it was. */}
-      {route.kind === 'workbench' ? (
-        <ChannelRail channels={channels} activeChannelId={activeChannelId} agents={agents} selectedAgentId={selectedAgentId} onSelectAgent={setSelectedAgentId} workbenchActive />
-      ) : null}
       <main id="omp-main-content" className="flex min-w-0 flex-1 flex-col overflow-hidden" style={{ background: '#070708' }}>
-        {route.kind === 'workbench' ? renderWorkbench(route) : (
+        {/* A surface opened from the room keeps the room's bar and says how to leave. It used to get a
+            channel rail with a WORKBENCH DOORS list — a second navigation for a second application,
+            and the reason opening anything still felt like leaving. */}
+        {route.kind === 'workbench' ? (
+          <>
+            <TopBar repo={currentProject?.name ?? 'this repo'} summary={fleetSummary(roomNodes, livePlans)} now={frameNow} back={hubHref(DEFAULT_CHANNEL_ID)} />
+            <div className="flex min-h-0 flex-1 flex-col">{renderWorkbench(route)}</div>
+          </>
+        ) : (
           <RoomFrame
             repo={currentProject?.name ?? 'this repo'}
             rooms={roomViews}
@@ -458,7 +481,9 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
               activeChannelId.startsWith('node:')
                 ? (() => {
                     const unit = agents.find((candidate) => `node:${candidate.id}` === activeChannelId);
-                    return unit ? <UnitPanel agent={unit} now={frameNow} onClose={() => { window.location.hash = hubHref(DEFAULT_CHANNEL_ID); }} /> : undefined;
+                    // `siblings` is the whole roster: the panel derives above/beneath/beside from it,
+                    // so it must be able to see the units that are NOT this one.
+                    return unit ? <UnitPanel agent={unit} now={frameNow} siblings={agents} onClose={() => { window.location.hash = hubHref(DEFAULT_CHANNEL_ID); }} /> : undefined;
                   })()
                 : undefined
             }

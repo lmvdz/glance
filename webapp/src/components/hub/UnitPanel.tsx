@@ -1,6 +1,8 @@
 import React from 'react';
 import type { AgentDTO } from '../../lib/dto';
 import { duration } from '../../lib/roomState';
+import { unitHref } from '../../lib/router';
+import { beneathSentence, besideLabel, inherited, inheritedAbsence, placement, trail } from '../../lib/nodePlacement';
 
 /**
  * UnitPanel — standing inside one piece of work.
@@ -79,7 +81,65 @@ export function unitChecks(agent: AgentDTO): UnitCheck[] {
   return out;
 }
 
-export function UnitPanel({ agent, now, onClose }: { agent: AgentDTO; now: number; onClose?: () => void }) {
+/**
+ * Where this sits, from `02-surfaces.html`: ABOVE THIS / BENEATH THIS / BESIDE IT, and what the work
+ * above handed down. A unit read without its place in the tree is a task with no reason.
+ */
+function Placement({ agent, siblings }: { agent: AgentDTO; siblings: readonly AgentDTO[] }) {
+  const nodes = React.useMemo(
+    () => siblings.map((candidate) => ({ id: candidate.id, name: candidate.name || candidate.id, parentId: candidate.parentId, goal: candidate.issue?.name })),
+    [siblings],
+  );
+  const place = React.useMemo(() => placement(nodes, agent.id), [nodes, agent.id]);
+  if (!place) return null;
+  const carried = inherited(place.above);
+
+  return (
+    <div className="mt-4 px-5">
+      {place.path.length > 1 ? (
+        <div className="truncate" style={{ fontFamily: MONO, fontSize: 10, color: '#4A4A52' }} title={trail(place.path)}>
+          {trail(place.path)}
+        </div>
+      ) : null}
+
+      <div className="mt-2.5" style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.14em', color: '#5A5A61' }}>
+        {place.above ? `INHERITED FROM ${(place.above.name || place.above.id).toUpperCase()}` : 'INHERITED'}
+      </div>
+      {/* Quoted when it exists, and admitted when it does not. Paraphrasing a parent's title into a
+          constraint would put words in someone's mouth about what their work requires. */}
+      <div className="mt-1.5 text-[12px] leading-[1.5]" style={{ color: carried ? '#C9C9CF' : '#6A6A72', textWrap: 'pretty' }}>
+        {carried ? `“${carried}”` : inheritedAbsence(place.above)}
+      </div>
+
+      <div className="mt-4" style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.14em', color: '#5A5A61' }}>BENEATH THIS</div>
+      <div className="mt-1.5 text-[12px] leading-[1.5]" style={{ color: '#6A6A72', textWrap: 'pretty' }}>{beneathSentence(place.beneath.length)}</div>
+      {place.beneath.length > 0 ? (
+        <div className="mt-1.5 flex flex-col gap-1">
+          {place.beneath.map((child) => (
+            <a key={child.id} href={unitHref(child.id)} className="truncate text-[12px]" style={{ color: '#C9C9CF' }} title={child.id}>
+              {child.name || child.id}
+            </a>
+          ))}
+        </div>
+      ) : null}
+
+      {place.beside.length > 0 ? (
+        <>
+          <div className="mt-4" style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.14em', color: '#5A5A61' }}>{besideLabel(place.beside.length)}</div>
+          <div className="mt-1.5 flex flex-col gap-1">
+            {place.beside.map((sibling) => (
+              <a key={sibling.id} href={unitHref(sibling.id)} className="truncate text-[12px]" style={{ color: '#C9C9CF' }} title={sibling.id}>
+                {sibling.name || sibling.id}
+              </a>
+            ))}
+          </div>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+export function UnitPanel({ agent, now, onClose, siblings }: { agent: AgentDTO; now: number; onClose?: () => void; siblings?: readonly AgentDTO[] }) {
   const checks = unitChecks(agent);
   const goal = agent.issue?.name;
 
@@ -136,6 +196,8 @@ export function UnitPanel({ agent, now, onClose }: { agent: AgentDTO; now: numbe
           </div>
         </div>
       </div>
+
+      {siblings && siblings.length > 0 ? <Placement agent={agent} siblings={siblings} /> : null}
 
       <div className="flex-1" />
       <div className="px-5 py-3" style={{ borderTop: '1px solid #1F1F22', fontFamily: MONO, fontSize: 10, color: '#4A4A52', lineHeight: 1.7 }}>

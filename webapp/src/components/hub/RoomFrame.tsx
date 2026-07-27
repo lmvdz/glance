@@ -90,6 +90,31 @@ function Waiting({ nodes, now, onEnter }: { nodes: readonly RoomNode[]; now: num
 	);
 }
 
+/**
+ * The 44px bar the reference puts across every screen: who you are, which repo, what the fleet is
+ * doing, and the time. It is exported because a surface opened FROM the room — cost, a plan, the
+ * graph — must keep it. The previous shell gave those surfaces a channel rail with a WORKBENCH DOORS
+ * list instead, which is why opening one still felt like leaving for the old application.
+ */
+export function TopBar({ repo, summary, now, back }: { repo: string; summary?: string; now: number; back?: string }) {
+	return (
+		<div className="flex h-11 flex-none items-center gap-3.5 px-4" style={{ borderBottom: '1px solid #1F1F22', background: '#0A0A0B' }}>
+			<div className="flex items-baseline gap-2.5">
+				<div className="text-sm font-semibold tracking-tight">glance</div>
+				<div style={{ fontFamily: MONO, fontSize: 11, color: '#6A6A72' }}>{repo}</div>
+			</div>
+			<div className="h-4 w-px" style={{ background: '#1F1F22' }} />
+			{summary ? <div style={{ fontFamily: MONO, fontSize: 11, color: '#8A8A91' }}>{summary}</div> : null}
+			<div className="flex-1" />
+			{/* Every surface you can open says how to leave it. */}
+			{back ? <a href={back} style={{ fontFamily: MONO, fontSize: 10.5, color: '#5A5A61' }} title="Back to the room. Nothing here is lost.">esc goes back to the room</a> : null}
+			<div style={{ fontFamily: MONO, fontSize: 11, color: '#5A5A61' }}>
+				{new Date(now).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+			</div>
+		</div>
+	);
+}
+
 export function RoomFrame({ repo, rooms, activeRoomId, onOpenRoom, nodes, plans, now, autonomy, autonomyPanel, autonomyOpen, onToggleAutonomy, unitPanel, selectedId, onSelect, onEnter, children, decision }: RoomFrameProps) {
 	const waiting = nodes.filter((node) => node.state === 'needs-you');
 	const selected = nodes.find((node) => node.id === selectedId);
@@ -98,19 +123,7 @@ export function RoomFrame({ repo, rooms, activeRoomId, onOpenRoom, nodes, plans,
 
 	return (
 		<div className="flex h-full min-h-0 flex-1 flex-col" style={{ background: '#0A0A0B', color: '#E8E8EA' }}>
-			{/* ── top bar ─────────────────────────────────────────────────────────── */}
-			<div className="flex h-11 flex-none items-center gap-3.5 px-4" style={{ borderBottom: '1px solid #1F1F22' }}>
-				<div className="flex items-baseline gap-2.5">
-					<div className="text-sm font-semibold tracking-tight">glance</div>
-					<div style={{ fontFamily: MONO, fontSize: 11, color: '#6A6A72' }}>{repo}</div>
-				</div>
-				<div className="h-4 w-px" style={{ background: '#1F1F22' }} />
-				<div style={{ fontFamily: MONO, fontSize: 11, color: '#8A8A91' }}>{fleetSummary(nodes, plans)}</div>
-				<div className="flex-1" />
-				<div style={{ fontFamily: MONO, fontSize: 11, color: '#5A5A61' }}>
-					{new Date(now).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-				</div>
-			</div>
+			<TopBar repo={repo} summary={fleetSummary(nodes, plans)} now={now} />
 
 			<div className="flex min-h-0 flex-1 flex-col">
 				{/* ── alarm band ─────────────────────────────────────────────────────── */}
@@ -227,6 +240,9 @@ export function RoomFrame({ repo, rooms, activeRoomId, onOpenRoom, nodes, plans,
 								{selectionPreview(selected)}
 							</div>
 						) : null}
+						<div className="px-4 py-3" style={{ borderTop: '1px solid #1F1F22', fontFamily: MONO, fontSize: 10, color: '#4A4A52', lineHeight: 1.8 }}>
+							{ADDRESSABILITY_NOTE}
+						</div>
 						{onToggleAutonomy ? (
 							<button
 								type="button"
@@ -235,12 +251,9 @@ export function RoomFrame({ repo, rooms, activeRoomId, onOpenRoom, nodes, plans,
 								style={{ borderTop: '1px solid #1F1F22', fontFamily: MONO, fontSize: 10, letterSpacing: '.14em', color: autonomyOpen ? '#F0A35A' : '#5A5A61' }}
 								title="What the fleet may settle without you, and what it never will — as a state you can read."
 							>
-								{autonomyOpen ? 'CLOSE AUTONOMY' : 'WHAT THE FLEET MAY SETTLE'}
+								{autonomyOpen ? 'CLOSE AUTONOMY' : 'WHAT THE FLEET MAY SETTLE ›'}
 							</button>
 						) : null}
-						<div className="px-4 py-3" style={{ borderTop: '1px solid #1F1F22', fontFamily: MONO, fontSize: 10, color: '#4A4A52', lineHeight: 1.8 }}>
-							{ADDRESSABILITY_NOTE}
-						</div>
 					</aside>
 					)}
 				</div>
