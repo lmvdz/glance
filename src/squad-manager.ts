@@ -237,6 +237,12 @@ import { emitDesignRevisedCard, emitGoalOverlapCard, emitMentionSteerCard, emitR
 import { truncateLabel } from "./text-util.ts";
 import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
 import { ChannelStore, DEFAULT_CHANNEL_ID, type ChannelEntry, type ClientChannelPost, type Channel, type CreateChannelInput, type ChannelMemberInput } from "./channels.ts";
+import type { VoiceCallBindingView, VoiceCallRetention } from "./voice-call-binding.ts";
+import type { JournalGap, StoredTranscriptEntry } from "./voice-call-projection.ts";
+import type { ArtifactSnapshotRecord } from "./voice-call-artifacts.ts";
+import type { JournalDecisionSnapshot } from "./voice-call-journal.ts";
+import type { BridgeControlAck } from "./voice-call-bridge-client.ts";
+import { VoiceCallCoordinator, type BrokerClient, type CoordinatorResult } from "./voice-call-manager.ts";
 import { NodeStore, compareActivity, type NodeState } from "./nodes.ts";
 import { ForgedCardError, assertAuthentic, projectsToRoom, type CardProvenance } from "./projection-classes.ts";
 import { coldStartLearningState } from "./unknowns.ts";
@@ -950,6 +956,14 @@ export interface SquadManagerOptions {
 	 *  wedging forever. Overridable so tests using a fake driver that never emits "replayComplete" don't
 	 *  pay the full production timeout. */
 	replaySettleTimeoutMs?: number;
+	/** Voice-call push substrate (concern 02, plans/voice-orchestrated-room-integration). Undefined
+	 *  means voice-decision notifications are a documented no-op (`VoiceAttentionSource` reports
+	 *  `"no-push-service"`) rather than silently constructing a second, un-configured PushService —
+	 *  the daemon's real single-tenant/per-org PushService lifecycle lives at the server layer
+	 *  (`server.ts`'s `opts.push`/`orgPush`), so this is deliberately injected, not self-constructed. */
+	voicePush?: PushService;
+	/** Injectable broker client for tests; default talks to the real loopback broker via `fetch`. */
+	voiceBroker?: BrokerClient;
 }
 
 /**
@@ -1138,6 +1152,12 @@ export class SquadManager extends EventEmitter {
 	private readonly authorityWrites = new Map<string, Promise<void>>();
 	/** Manager card projections that exhausted ChannelStore's bounded append retry. */
 	private projectionFailures = 0;
+	/** First-sight-per-kind debug log for `projectUnitTranscriptEvent`'s `isTranscriptEventKind` guard
+	 *  — mirrors `schema/channel-card.ts`'s `warnedUnknownKinds` (re-port review follow-up, concern 02):
+	 *  a transcript event carrying a kind this build doesn't recognize used to be silently skipped with
+	 *  no signal anywhere; now it logs once per newly-seen kind rather than either staying silent or
+	 *  spamming a line per emit (a chatty unit could emit the same unknown kind hundreds of times). */
+	private readonly warnedUnknownTranscriptEventKinds = new Set<string>();
 	/** Per-agent count of advisory peer messages spent this run (OMP_SQUAD_PEERMSG_BUDGET). */
 	private readonly peerMessageBudget = new Map<string, number>();
 	/** Agent ids the daemon reattached to (surviving hosts) this run. */
@@ -1202,6 +1222,10 @@ export class SquadManager extends EventEmitter {
 	private readonly attentionStore: AttentionStore;
 	private readonly channelStore: ChannelStore;
 	private readonly nodeStore: NodeStore;
+	/** Concern 02's per-thread live-call durable owner (plans/voice-orchestrated-room-integration).
+	 *  One coordinator per manager (i.e. per org in DB mode) — bindings are keyed by channelId, which
+	 *  is already scoped to this manager's own ChannelStore. */
+	readonly voiceCall: VoiceCallCoordinator;
 	private readonly traceExporter?: TraceExportQueue;
 	/** Reward disbursement provider (Tremendous / Manual). Injectable for tests; default from env. */
 	private readonly paymentProvider: PaymentProvider;
@@ -1262,6 +1286,23 @@ export class SquadManager extends EventEmitter {
 		this.traceExporter = traceExporterFromEnv((m) => this.log("warn", m), this.stateDir);
 		this.paymentProvider = opts.paymentProvider ?? paymentProviderFromEnv();
 		this.replaySettleTimeoutMs = opts.replaySettleTimeoutMs ?? 2000;
+		this.voiceCall = new VoiceCallCoordinator({
+			stateDir: this.stateDir,
+			log: (m) => this.log("warn", `voice-call: ${m}`),
+			broker: opts.voiceBroker,
+			push: opts.voicePush,
+			channelMemberUserIds: (channelId) => this.channelStore.memberUserIds(channelId),
+			emitCard: async (input) => {
+				const entry = await this.channelStore.appendManager(input.channelId, {
+					authorActor: "manager",
+					kind: "system",
+					format: "stage",
+					text: input.text,
+					event: { kind: input.kind, payload: input.payload },
+				});
+				this.emit("event", { type: "channel-entry", channelId: entry.channelId, entry } satisfies SquadEvent);
+			},
+		});
 	}
 
 	private blockedReason(dto: Pick<AgentDTO, "pending" | "error">): string | undefined {
@@ -1382,6 +1423,10 @@ export class SquadManager extends EventEmitter {
 	}
 
 	async start(): Promise<void> {
+		// Concern 02: every binding that was connecting/live/degraded when the daemon last stopped has
+		// no surviving socket or in-flight tailer now — corroborate each against the broker before
+		// this manager claims anything live about it (never silently keep claiming liveness).
+		await this.voiceCall.rehydrateOnBoot().catch((err) => this.log("warn", `voice-call rehydrate failed: ${errText(err)}`));
 		await this.materialiseAutoLandGrant();
 		await this.materialiseColdStart();
 		// Recovery only matters for a daemon with prior state. A fresh start has nothing to reconnect,
@@ -1898,6 +1943,7 @@ export class SquadManager extends EventEmitter {
 		// Flush the attention store's debounced last-seen-map write (comprehension concern 01) — same
 		// "only a crash may lose it" contract as the pendingPersistTimers flush above.
 		this.attentionStore.stop();
+		this.voiceCall.stop();
 		await this.channelStore.stop();
 		await this.persist();
 		// Best-effort timeline marker (#lifecycle-truth finding 4 / DESIGN's "a best-effort daemon-stop
@@ -12131,6 +12177,62 @@ export class SquadManager extends EventEmitter {
 		return entry;
 	}
 
+	// ── Voice call (concern 02, plans/voice-orchestrated-room-integration) ─────────────────────────
+	// Every method below gates on the SAME `canReadChannel` room-membership check every other channel
+	// API already enforces — a thread-bound call is a fact about that thread, so reading or acting on
+	// it requires exactly the access a member of that room has. The coordinator itself re-checks
+	// `isAuthorized` as its own last gate before relaying anything to the bridge (voice-call-manager.ts),
+	// so a caller that skipped this check would still be refused, not silently trusted twice.
+
+	async startVoiceCall(channelId: string, actor: Actor, input: { sessionRoot?: string; retention?: VoiceCallRetention; resumeSessionId?: string }): Promise<CoordinatorResult<VoiceCallBindingView>> {
+		if (!(await this.channelStore.canReadChannel(channelId, actor))) return { ok: false, reason: "forbidden" };
+		return this.voiceCall.startCall(channelId, { ownerActorId: actor.id, ...input });
+	}
+
+	async voiceCallState(channelId: string, actor: Actor): Promise<VoiceCallBindingView | undefined> {
+		if (!(await this.channelStore.canReadChannel(channelId, actor))) throw new Error("channel forbidden");
+		return this.voiceCall.state(channelId);
+	}
+
+	async endVoiceCall(channelId: string, actor: Actor): Promise<CoordinatorResult<VoiceCallBindingView>> {
+		const isAuthorized = await this.channelStore.canReadChannel(channelId, actor);
+		return this.voiceCall.endCall(channelId, isAuthorized);
+	}
+
+	async resolveVoiceCallDecision(channelId: string, actor: Actor, input: { decisionId: string; optionIndex: number; label: string; confirmToken?: string }): Promise<CoordinatorResult<BridgeControlAck>> {
+		const isAuthorized = await this.channelStore.canReadChannel(channelId, actor);
+		return this.voiceCall.resolveDecision(channelId, isAuthorized, input);
+	}
+
+	async steerVoiceCall(channelId: string, actor: Actor, text: string): Promise<CoordinatorResult<true>> {
+		const isAuthorized = await this.channelStore.canReadChannel(channelId, actor);
+		return this.voiceCall.steer(channelId, isAuthorized, text);
+	}
+
+	async voiceCallDecisions(channelId: string, actor: Actor): Promise<JournalDecisionSnapshot[]> {
+		if (!(await this.channelStore.canReadChannel(channelId, actor))) throw new Error("channel forbidden");
+		return this.voiceCall.decisions(channelId);
+	}
+
+	async voiceCallGaps(channelId: string, actor: Actor): Promise<JournalGap[]> {
+		if (!(await this.channelStore.canReadChannel(channelId, actor))) throw new Error("channel forbidden");
+		return this.voiceCall.gaps(channelId);
+	}
+
+	async voiceCallTranscript(channelId: string, actor: Actor): Promise<StoredTranscriptEntry[]> {
+		if (!(await this.channelStore.canReadChannel(channelId, actor))) throw new Error("channel forbidden");
+		return this.voiceCall.transcript(channelId);
+	}
+
+	async voiceCallArtifacts(channelId: string, actor: Actor): Promise<ArtifactSnapshotRecord[]> {
+		if (!(await this.channelStore.canReadChannel(channelId, actor))) throw new Error("channel forbidden");
+		return this.voiceCall.listArtifacts(channelId);
+	}
+
+	voiceCallLadderPriority(channelId: string): LadderPriority {
+		return this.voiceCall.ladderPriority(channelId);
+	}
+
 	private safeEventLabel(value: unknown): string {
 		const flat = redact(String(value ?? ""))
 			.replace(/={5,}/g, (run) => "═".repeat(run.length))
@@ -12342,7 +12444,14 @@ export class SquadManager extends EventEmitter {
 
 	private async projectUnitTranscriptEvent(rec: AgentRecord, entry: TranscriptEntry): Promise<void> {
 		const event = entry.event;
-		if (!event?.kind || !isTranscriptEventKind(event.kind)) return;
+		if (!event?.kind) return;
+		if (!isTranscriptEventKind(event.kind)) {
+			if (!this.warnedUnknownTranscriptEventKinds.has(event.kind)) {
+				this.warnedUnknownTranscriptEventKinds.add(event.kind);
+				this.log("warn", `projection ${rec.dto.id}: unknown transcript event kind "${event.kind}" — skipped (newer daemon, or unregistered kind; logged once)`);
+			}
+			return;
+		}
 		const nodeId = await this.projectedNodeId(rec);
 		if (!nodeId) return;
 		try {

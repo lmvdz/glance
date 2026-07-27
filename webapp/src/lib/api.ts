@@ -309,3 +309,169 @@ export function fetchPlanBrief(name: string, repo?: string): Promise<PlanBriefDT
   const qs = repo ? `?repo=${encodeURIComponent(repo)}` : '';
   return apiJson<{ brief: PlanBriefDTO }>(`/api/plans/${encodeURIComponent(name)}/brief${qs}`).then((r) => r.brief);
 }
+
+// -----------------------------------------------------------------------------------------------
+// Voice call (concern 02, plans/voice-orchestrated-room-integration) — the daemon-owned, thread-bound
+// live call. This module gets the wire TYPES and thin fetch wrappers only; concern 03 owns rendering
+// them (the call HUD, decision cards, transcript/artifact panels). Mirrors `src/voice-call-binding.ts`
+// (`VoiceCallBindingView` — never carries the control token, see its own doc), `src/voice-call-
+// journal.ts` (`JournalDecisionSnapshot`), `src/voice-call-projection.ts` (`StoredTranscriptEntry`,
+// `JournalGap`), and `src/voice-call-artifacts.ts` (`ArtifactSnapshotRecord`) exactly.
+// -----------------------------------------------------------------------------------------------
+
+export type VoiceCallState = 'connecting' | 'live' | 'degraded' | 'ended';
+export type VoiceCallRetention = 'full' | 'tails' | 'off';
+export type VoiceCallTerminalReason = 'operator-ended' | 'terminal' | 'journal-end' | 'broker-exit' | 'stale-binding' | 'port-reused' | 'start-failed';
+
+/** `GET/POST/DELETE /api/channels/:id/voice-call`'s response shape. Never carries a control token —
+ *  the daemon holds it and relays authenticated bridge controls itself (resolve/steer below); a page
+ *  that can read call state must never learn the secret that would let it forge one. */
+export interface VoiceCallBindingDTO {
+  channelId: string;
+  callId?: string;
+  sessionId?: string;
+  port?: number;
+  bridgeUrl?: string;
+  journalPath?: string;
+  sessionRoot: string;
+  ownerActorId: string;
+  retention: VoiceCallRetention;
+  startedAt: number;
+  updatedAt: number;
+  state: VoiceCallState;
+  degradedSince?: number;
+  degradedReason?: 'socket-loss';
+  terminalReason?: VoiceCallTerminalReason;
+  terminalError?: string | null;
+  endedAt?: number;
+  lastJournalSeq?: number;
+  resumeSessionId?: string;
+}
+
+export type VoiceCallDecisionState = 'open' | 'awaiting-confirmation' | 'answered' | 'expired' | 'cancelled' | 'failed';
+
+export interface VoiceCallDecisionOptionDTO {
+  index: number;
+  label: string;
+  consequence: string;
+}
+
+export interface VoiceCallDecisionDTO {
+  id: string;
+  prompt: string;
+  options: VoiceCallDecisionOptionDTO[];
+  requiresConfirmation: boolean;
+  state: VoiceCallDecisionState;
+  createdAt: number;
+  updatedAt: number;
+  resolution?: { optionIndex: number; label: string; source: 'voice' | 'ui' };
+}
+
+export interface VoiceCallTranscriptEntryDTO {
+  callId: string;
+  turn: number;
+  role: 'user' | 'assistant';
+  text?: string;
+  final: boolean;
+  at: number;
+  redacted?: boolean;
+  gapBefore?: { missingCount: number };
+}
+
+export type VoiceCallArtifactStatus = 'ready' | 'failed' | 'incomplete';
+
+export interface VoiceCallArtifactDTO {
+  id: string;
+  channelId: string;
+  callId: string;
+  sourcePath: string;
+  status: VoiceCallArtifactStatus;
+  contentHash?: string;
+  revision?: number;
+  snapshotPath?: string;
+  error?: string;
+  copiedAt: number;
+}
+
+export interface VoiceCallJournalGapDTO {
+  callId: string;
+  atSeq: number;
+  missingCount: number;
+  detectedAt: number;
+}
+
+export interface StartVoiceCallInput {
+  sessionRoot?: string;
+  retention?: VoiceCallRetention;
+  resumeSessionId?: string;
+}
+
+/** `GET /api/channels/:id/voice-call`. `null` for the normal "no call has ever been started for this
+ *  channel" case (mapped from the route's 404) — never thrown, exactly like `getVoiceConfig`'s own
+ *  404-is-a-normal-state discipline above. A genuine authorization failure (403, a private channel
+ *  this actor cannot read) still throws via `apiJson`. */
+export async function fetchVoiceCallState(channelId: string): Promise<VoiceCallBindingDTO | null> {
+  const response = await apiFetch(`/api/channels/${encodeURIComponent(channelId)}/voice-call`);
+  if (response.status === 404) return null;
+  if (!response.ok) throw new ApiError(await response.text(), response.status);
+  return response.json() as Promise<VoiceCallBindingDTO>;
+}
+
+/** `POST /api/channels/:id/voice-call` — thread-aware start. Throws (via `apiJson`) on any refusal:
+ *  403 forbidden, 409 an active call already occupies this thread, or a 502 broker/bridge failure
+ *  carrying the daemon's own explanatory text as the error message. */
+export function startVoiceCall(channelId: string, input: StartVoiceCallInput = {}): Promise<VoiceCallBindingDTO> {
+  return apiJson<VoiceCallBindingDTO>(`/api/channels/${encodeURIComponent(channelId)}/voice-call`, jsonInit('POST', input));
+}
+
+/** `DELETE /api/channels/:id/voice-call` — operator-initiated end. */
+export function endVoiceCall(channelId: string): Promise<VoiceCallBindingDTO> {
+  return apiJson<VoiceCallBindingDTO>(`/api/channels/${encodeURIComponent(channelId)}/voice-call`, { method: 'DELETE' });
+}
+
+/** `GET /api/channels/:id/voice-call/decisions` — every decision this channel's projection store has
+ *  witnessed, in mint order, at its CURRENT state (open/awaiting-confirmation/answered/…) — the live
+ *  read surface a decision panel polls, distinct from the append-only timeline card history. */
+export function fetchVoiceCallDecisions(channelId: string): Promise<VoiceCallDecisionDTO[]> {
+  return apiJson<{ decisions: VoiceCallDecisionDTO[] }>(`/api/channels/${encodeURIComponent(channelId)}/voice-call/decisions`).then((r) => r.decisions);
+}
+
+export interface ResolveVoiceCallDecisionInput {
+  optionIndex: number;
+  label: string;
+  confirmToken?: string;
+}
+
+/** `POST /api/channels/:id/voice-call/decisions/:decisionId/resolve` — relayed through the daemon's
+ *  tokenized bridge control after a room-membership/role check. The response is the bridge's own
+ *  `controlAck` shape: `ok` may be `false` with an arbiter-composed `reason` (e.g. `label-mismatch`,
+ *  `already-terminal`) even on a 200 — that is the arbiter saying no, not a transport failure, so it
+ *  is never thrown here. A 403/404/409 (forbidden / no active call / bridge unavailable) still throws. */
+export function resolveVoiceCallDecision(channelId: string, decisionId: string, input: ResolveVoiceCallDecisionInput): Promise<{ ok: boolean; reason?: string; decision?: VoiceCallDecisionDTO; confirmToken?: string }> {
+  return apiJson(`/api/channels/${encodeURIComponent(channelId)}/voice-call/decisions/${encodeURIComponent(decisionId)}/resolve`, jsonInit('POST', input));
+}
+
+/** `POST /api/channels/:id/voice-call/steer` — composer steering relay (unauthenticated at the bridge
+ *  layer, per PROTOCOL.md, but still gated here by room membership/role like every other mutation). */
+export function steerVoiceCall(channelId: string, text: string): Promise<{ ok: boolean }> {
+  return apiJson<{ ok: boolean }>(`/api/channels/${encodeURIComponent(channelId)}/voice-call/steer`, jsonInit('POST', { text }));
+}
+
+/** `GET /api/channels/:id/voice-call/transcript` — the retained transcript for THIS channel's call
+ *  (its `callId`), oldest-first, collapsed by `(role, turn)`. Empty when retention is `off`, or when
+ *  no call has ever bound this channel. */
+export function fetchVoiceCallTranscript(channelId: string): Promise<VoiceCallTranscriptEntryDTO[]> {
+  return apiJson<{ transcript: VoiceCallTranscriptEntryDTO[] }>(`/api/channels/${encodeURIComponent(channelId)}/voice-call/transcript`).then((r) => r.transcript);
+}
+
+/** `GET /api/channels/:id/voice-call/artifacts` — the per-thread artifact snapshot index (immutable,
+ *  content-hash-addressed room-owned copies; see `src/voice-call-artifacts.ts`). */
+export function fetchVoiceCallArtifacts(channelId: string): Promise<VoiceCallArtifactDTO[]> {
+  return apiJson<{ artifacts: VoiceCallArtifactDTO[] }>(`/api/channels/${encodeURIComponent(channelId)}/voice-call/artifacts`).then((r) => r.artifacts);
+}
+
+/** `GET /api/channels/:id/voice-call/gaps` — visible journal gaps (a dropped/missed sequence range),
+ *  per call. Empty is the common, honest case: no gap was ever detected. */
+export function fetchVoiceCallGaps(channelId: string): Promise<VoiceCallJournalGapDTO[]> {
+  return apiJson<{ gaps: VoiceCallJournalGapDTO[] }>(`/api/channels/${encodeURIComponent(channelId)}/voice-call/gaps`).then((r) => r.gaps);
+}

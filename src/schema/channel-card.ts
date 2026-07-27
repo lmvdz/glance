@@ -46,6 +46,8 @@ import {
 	TRANSCRIPT_EVENT_UNIT_SPAWNED,
 	TRANSCRIPT_EVENT_UNIT_TURN_FINISHED,
 	TRANSCRIPT_EVENT_VERIFICATION_RAN,
+	TRANSCRIPT_EVENT_VOICE_CALL,
+	TRANSCRIPT_EVENT_VOICE_DECISION,
 	type TranscriptEventKind,
 	isTranscriptEventKind,
 } from "../transcript-event-kinds.ts";
@@ -107,6 +109,11 @@ const RefsSchema = Schema.Struct({
 	// goal-overlap's only ref: the disclosure fires before the new unit has an id, so it names the
 	// candidate by its requested display name instead (`squad-manager.ts#spawnAgent`).
 	unitName: Schema.optional(Schema.String),
+	// voice-call / voice-decision (concern 02): the broker-minted call identity, and — for a
+	// voice-decision card only — the OMP arbiter's decision id. Neither is a `unitId`: a call is
+	// bound to a thread/channel, not to a fleet unit.
+	callId: Schema.optional(Schema.String),
+	decisionId: Schema.optional(Schema.String),
 });
 
 /**
@@ -176,6 +183,31 @@ const DesignRevisedFaceSchema = Schema.Struct({
 	planName: Schema.optional(Schema.String),
 });
 
+/** `VoiceCallCoordinator`'s call-lifecycle card (`src/voice-call-manager.ts`) — a bespoke inline
+ *  emit, one card per binding-state transition (connecting/live/degraded/ended). System-authored
+ *  (never agent prose), so it never sets `register`. */
+const VoiceCallFaceSchema = Schema.Struct({
+	...BaseFaceFields,
+	callId: Schema.optional(Schema.String),
+	state: Schema.optional(Schema.Literals(["connecting", "live", "degraded", "ended"])),
+	terminalReason: Schema.optional(Schema.String),
+});
+
+/** `CallProjectionStore`'s decision card (`src/voice-call-projection.ts`) — a bespoke inline emit,
+ *  one card per journal-witnessed decision state. The OPEN-state card's `face.body`/`face.detail`
+ *  carry the agent-minted prompt verbatim, so THAT card sets `register: "claim"` per concern 07's
+ *  epistemic-register semantics (an agent's own assertion, not a daemon-checked fact); a follow-up
+ *  card at a terminal state reports the arbiter's own outcome and leaves `register` unset. */
+const VoiceDecisionFaceSchema = Schema.Struct({
+	...BaseFaceFields,
+	callId: Schema.optional(Schema.String),
+	decisionId: Schema.optional(Schema.String),
+	decisionState: Schema.optional(Schema.Literals(["open", "awaiting-confirmation", "answered", "expired", "cancelled", "failed"])),
+	requiresConfirmation: Schema.optional(Schema.Boolean),
+	optionLabels: Schema.optional(Schema.Array(Schema.String)),
+	resolutionSource: Schema.optional(Schema.Literals(["voice", "ui"])),
+});
+
 /** `squad-manager.ts#spawnAgent`'s goal-overlap disclosure (`goalConflict` check) — a bespoke
  *  inline emit added to main after 06/07's original base; registered here in the same reland that
  *  found it (see EXECUTION-LOG.md / this reland's task brief). Deliberately no `body`/`tone`: the
@@ -227,6 +259,10 @@ export const CARD_PAYLOAD_SCHEMAS = {
 	[TRANSCRIPT_EVENT_MENTION_STEER]: cardPayload(BaseFaceSchema),
 	// Bespoke — `refs: { unitName }` (no unitId; see RefsSchema), `doorSurface: "unit"`.
 	[TRANSCRIPT_EVENT_GOAL_OVERLAP]: cardPayload(GoalOverlapFaceSchema),
+	// Bespoke — `refs: { callId }`, no `doorSurface` (concern 03 owns the call HUD's own routing).
+	[TRANSCRIPT_EVENT_VOICE_CALL]: cardPayload(VoiceCallFaceSchema),
+	// Bespoke — `refs: { callId, decisionId }`, no `doorSurface`.
+	[TRANSCRIPT_EVENT_VOICE_DECISION]: cardPayload(VoiceDecisionFaceSchema),
 } satisfies Record<TranscriptEventKind, Schema.Top>;
 
 const DECODERS = Object.fromEntries(
@@ -283,7 +319,7 @@ export function __resetCardPayloadValidationState(): void {
 	warnedUnknownKinds.clear();
 }
 
-type CardPayloadType<K extends TranscriptEventKind> = (typeof CARD_PAYLOAD_SCHEMAS)[K]["Type"];
+export type CardPayloadType<K extends TranscriptEventKind> = (typeof CARD_PAYLOAD_SCHEMAS)[K]["Type"];
 
 function emitCardConstructor<K extends TranscriptEventKind>(kind: K) {
 	return <P>(payload: P & CardPayloadType<K>): { kind: K; payload: P & CardPayloadType<K> } => ({ kind, payload });
@@ -308,6 +344,8 @@ export const emitMentionSteerCard = emitCardConstructor(TRANSCRIPT_EVENT_MENTION
 export const emitReturnEmitCard = emitCardConstructor(TRANSCRIPT_EVENT_RETURN_EMIT);
 export const emitTokenBurnSnapshotCard = emitCardConstructor(TRANSCRIPT_EVENT_TOKEN_BURN_SNAPSHOT);
 export const emitGoalOverlapCard = emitCardConstructor(TRANSCRIPT_EVENT_GOAL_OVERLAP);
+export const emitVoiceCallCard = emitCardConstructor(TRANSCRIPT_EVENT_VOICE_CALL);
+export const emitVoiceDecisionCard = emitCardConstructor(TRANSCRIPT_EVENT_VOICE_DECISION);
 
 /** `emitTokenBurnSnapshotCard`'s payload shape (the fleet-rollup bespoke site only — the unit-path
  *  emit stays in the untyped funnel, see the file header). */

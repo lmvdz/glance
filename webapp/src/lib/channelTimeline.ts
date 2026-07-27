@@ -8,7 +8,7 @@ export type ChannelCardTone = 'neutral' | 'info' | 'warning' | 'success' | 'dest
  *  `local:` on the wire by HubShell's managerCardEntry to keep them out of the daemon's kind
  *  space. See tests/channel-card-kinds-sync.test.ts for the cross-build invariant this protects. */
 export type LocalCardKind = 'local:mention-confirm-required' | 'local:mention-steer-failed' | 'local:spawn-proposal';
-export type ChannelCardKind = 'message' | 'needs-you' | 'gate-verdict' | LandCardKind | 'mention-steer' | 'goal-overlap' | LocalCardKind | 'plan-card' | 'return-emit' | 'design-revised' | 'token-burn-snapshot' | 'unit-spawned' | 'unit-turn-finished' | 'unit-failed' | 'pr-opened' | 'verification-ran' | 'unknown-event';
+export type ChannelCardKind = 'message' | 'needs-you' | 'gate-verdict' | LandCardKind | 'mention-steer' | 'goal-overlap' | LocalCardKind | 'plan-card' | 'return-emit' | 'design-revised' | 'token-burn-snapshot' | 'unit-spawned' | 'unit-turn-finished' | 'unit-failed' | 'pr-opened' | 'verification-ran' | 'voice-call' | 'voice-decision' | 'unknown-event';
 
 /** Epistemic register for the face's TEXT (title/body/detail — the claim content), never chrome
  *  (eyebrow/status/pinned/icon/door stay system-authored regardless). Reserved wire field: no
@@ -151,6 +151,8 @@ const POINTER_EVENT_KINDS = {
   'unit-failed': true,
   'pr-opened': true,
   'verification-ran': true,
+  'voice-call': true,
+  'voice-decision': true,
 } satisfies Record<Exclude<ChannelCardKind, 'message' | 'unknown-event' | LocalCardKind>, true>;
 
 // Client-minted kinds (see LocalCardKind). Exhaustive over LocalCardKind the same way.
@@ -233,6 +235,12 @@ function toneFor(kind: string, face?: PointerCardFace): ChannelCardTone {
   // so this is a heads-up to check, not an alarm.
   if (kind === 'goal-overlap') return 'warning';
   if (kind === 'local:spawn-proposal' || kind === 'mention-steer' || kind === 'plan-card') return 'info';
+  // voice-call: connecting/live are ordinary in-progress facts; degraded is a warning (socket lost,
+  // liveness unconfirmed); ended is neutral — it's the honest terminal state, not itself bad news.
+  if (kind === 'voice-call') return face?.status === 'degraded' ? 'warning' : face?.status === 'ended' ? 'neutral' : 'info';
+  // voice-decision: open/awaiting-confirmation genuinely need a human; answered is a success; a
+  // decision that never got one (expired/cancelled/failed) is neutral, not a failure of the room.
+  if (kind === 'voice-decision') return face?.status === 'answered' ? 'success' : face?.status === 'open' || face?.status === 'awaiting-confirmation' ? 'warning' : 'neutral';
   return 'neutral';
 }
 
@@ -387,6 +395,8 @@ const DOOR_LABELS: Record<string, string> = {
   'local:spawn-proposal': 'Open the proposal',
   'return-emit': 'Step into the agent',
   'design-revised': 'Open plan DAG',
+  'voice-call': 'Open the call',
+  'voice-decision': 'Answer it',
 };
 
 /** Label for a card's door button. Was hardcoded to "Open plan DAG" for every kind — a token-burn
