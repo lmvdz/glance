@@ -2,6 +2,7 @@ import type { ChannelEntry } from './dto';
 import { landCardView, type LandCardKind } from '../components/hub/LandCards';
 import { entryAuthorLabel, entryTimeLabel } from './hub';
 import { unitHref } from './router';
+import { withoutRawRoomEvents } from './voice/roomCall';
 
 export type ChannelCardTone = 'neutral' | 'info' | 'warning' | 'success' | 'destructive';
 /** Kinds minted client-side only (optimistic UI, never persisted by the daemon) — namespaced
@@ -48,6 +49,14 @@ export interface ChannelCardView {
   askedAgain?: number;
   /** When it was last re-announced. */
   lastAskedAt?: number;
+  /** The epistemic register its emitter asserted for the card's TEXT (never its chrome). Concern
+   *  03's voice-decision card is the first emitter; `ChannelTimelineRow` styles and announces it. */
+  register?: ChannelCardRegister;
+  /** The call this card belongs to, when it belongs to one — provenance the row prints so a voice
+   *  card is never a floating sentence. */
+  callId?: string;
+  /** The decision this card is about, so its door opens THAT question rather than a panel. */
+  decisionId?: string;
 }
 
 /**
@@ -114,7 +123,10 @@ export function previewChannelBody(text: string, limit = 120): string {
 }
 
 export function buildChannelThreadViews(entries: ChannelEntry[]): ChannelCardView[] {
-  const baseViews = entries.map(dispatchChannelCard);
+  // Raw tool bookkeeping never reaches a card. `yield`, heartbeats and empty completions are
+  // diagnostic-only (DESIGN.md's "Workspace activity" row) — dropping them HERE covers the room and
+  // a unit's own conversation in one place, because both render through this function.
+  const baseViews = withoutRawRoomEvents(entries).map(dispatchChannelCard);
   const byId = new Map(baseViews.map((view) => [view.id, view]));
   const replyCounts = new Map<string, number>();
   for (const entry of entries) {
@@ -349,7 +361,12 @@ export function dispatchChannelCard(entry: ChannelEntry): ChannelCardView {
   const body = cardBody(face?.body, entry.text, title);
   const pinned = Object.entries(face?.pinned ?? {}).flatMap(([label, value]) => value == null || value === '' || repeatsTitle(String(value), title) ? [] : [pinnedChip(labelFromKey(label), String(value))]);
   const doorHrefResolved = eventKind === 'token-burn-snapshot' ? '#/workbench/economics' : (face?.href ?? hrefFromPayload(entry.event?.payload));
-  return { id: entry.id, entry, kind: cardKind, tone: toneFor(eventKind, face), authorLabel: entryAuthorLabel(entry), title, eyebrow: face?.eyebrow, body, detail: face?.detail, pinned, actionHref: channelCardActionHref(entry), href: doorHrefResolved };
+  // Voice cards carry their call (and, for a decision, which question) so the row can print
+  // provenance and open the RIGHT door — a decision card whose door opened "the decisions panel"
+  // rather than that decision is the same class of lie as a token-burn card offering a plan DAG.
+  const callId = cardKind === 'voice-call' || cardKind === 'voice-decision' ? stringFromPath(entry.event?.payload, ['refs', 'callId']) : undefined;
+  const decisionId = cardKind === 'voice-decision' ? stringFromPath(entry.event?.payload, ['refs', 'decisionId']) : undefined;
+  return { id: entry.id, entry, kind: cardKind, tone: toneFor(eventKind, face), authorLabel: entryAuthorLabel(entry), title, eyebrow: face?.eyebrow, body, detail: face?.detail, pinned, actionHref: channelCardActionHref(entry), href: doorHrefResolved, register: face?.register, callId, decisionId };
 }
 
 /**
@@ -396,7 +413,11 @@ const DOOR_LABELS: Record<string, string> = {
   'return-emit': 'Step into the agent',
   'design-revised': 'Open plan DAG',
   'voice-call': 'Open the call',
-  'voice-decision': 'Answer it',
+  // Deliberately NOT needs-you's "Answer it". A fleet question and a call question are different
+  // work with different vocabulary — the fleet's opens a unit's task and diff, this one opens a
+  // question the call is blocked on — and two doors reading the same three words is how a person
+  // learns that the label does not tell them where they are going.
+  'voice-decision': 'Answer the question',
 };
 
 /** Label for a card's door button. Was hardcoded to "Open plan DAG" for every kind — a token-burn

@@ -87,6 +87,7 @@ import {
 	PresenceClaimBodySchema,
 	ProjectRegisterBodySchema,
 	TaskStartBodySchema,
+	VoiceCallMuteBodySchema,
 	VoiceCallResolveDecisionBodySchema,
 	VoiceCallStartBodySchema,
 	VoiceCallSteerBodySchema,
@@ -3615,6 +3616,33 @@ export class SquadServer {
 				if (err instanceof Error && err.message === "channel forbidden") return new Response("forbidden", { status: 403 });
 				throw err;
 			}
+		}
+		// One artifact's immutable snapshot bytes (concern 03's room Markdown viewer). Every failure the
+		// store names gets a DISTINCT answer, because the viewer renders each one differently — a
+		// `ready` row whose snapshot file has vanished must never arrive as an empty document.
+		const voiceCallArtifactMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/voice-call\/artifacts\/([^/]+)$/);
+		if (voiceCallArtifactMatch && req.method === "GET") {
+			const channelId = decodeURIComponent(voiceCallArtifactMatch[1]!);
+			const artifactId = decodeURIComponent(voiceCallArtifactMatch[2]!);
+			try {
+				const result = await manager.voiceCallArtifact(channelId, actor, artifactId);
+				if (result.ok) return Response.json({ artifact: result.record, content: result.content });
+				if (result.reason === "not-found") return new Response("no such artifact for this channel", { status: 404 });
+				return Response.json({ artifact: result.record, error: result.reason, detail: result.detail }, { status: result.reason === "too-large" ? 413 : 409 });
+			} catch (err) {
+				if (err instanceof Error && err.message === "channel forbidden") return new Response("forbidden", { status: 403 });
+				throw err;
+			}
+		}
+		// Visible mute (concern 03's HUD). A SET, not the wire's own toggle — see
+		// `VoiceCallCoordinator#setMuted` for why the daemon owns the idempotence.
+		const voiceCallMuteMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/voice-call\/mute$/);
+		if (voiceCallMuteMatch && req.method === "POST") {
+			const channelId = decodeURIComponent(voiceCallMuteMatch[1]!);
+			const decoded = decodeBody(VoiceCallMuteBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response(`bad mute: ${decoded.failure.message}`, { status: 400 });
+			const result = await manager.setVoiceCallMuted(channelId, actor, decoded.success.muted);
+			return result.ok ? Response.json(result.value) : voiceCallErrorResponse(result.reason);
 		}
 		const voiceCallGapsMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/voice-call\/gaps$/);
 		if (voiceCallGapsMatch && req.method === "GET") {

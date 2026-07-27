@@ -239,7 +239,7 @@ import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
 import { ChannelStore, DEFAULT_CHANNEL_ID, type ChannelEntry, type ClientChannelPost, type Channel, type CreateChannelInput, type ChannelMemberInput } from "./channels.ts";
 import type { VoiceCallBindingView, VoiceCallRetention } from "./voice-call-binding.ts";
 import type { JournalGap, StoredTranscriptEntry } from "./voice-call-projection.ts";
-import type { ArtifactSnapshotRecord } from "./voice-call-artifacts.ts";
+import type { ArtifactReadResult, ArtifactSnapshotRecord } from "./voice-call-artifacts.ts";
 import type { JournalDecisionSnapshot } from "./voice-call-journal.ts";
 import type { BridgeControlAck } from "./voice-call-bridge-client.ts";
 import { VoiceCallCoordinator, type BrokerClient, type CoordinatorResult } from "./voice-call-manager.ts";
@@ -12227,6 +12227,21 @@ export class SquadManager extends EventEmitter {
 	async voiceCallArtifacts(channelId: string, actor: Actor): Promise<ArtifactSnapshotRecord[]> {
 		if (!(await this.channelStore.canReadChannel(channelId, actor))) throw new Error("channel forbidden");
 		return this.voiceCall.listArtifacts(channelId);
+	}
+
+	/** One artifact's immutable snapshot bytes (concern 03's room Markdown viewer). Same
+	 *  `canReadChannel` gate as the index it was listed from — reading an artifact's CONTENT is
+	 *  exactly as sensitive as knowing that it exists. */
+	async voiceCallArtifact(channelId: string, actor: Actor, artifactId: string): Promise<ArtifactReadResult> {
+		if (!(await this.channelStore.canReadChannel(channelId, actor))) throw new Error("channel forbidden");
+		return this.voiceCall.readArtifact(channelId, artifactId);
+	}
+
+	/** Visible mute relay (concern 03's call HUD) — see `VoiceCallCoordinator#setMuted` for why this
+	 *  is a SET rather than the wire's own toggle. */
+	async setVoiceCallMuted(channelId: string, actor: Actor, muted: boolean): Promise<CoordinatorResult<{ muted: boolean }>> {
+		const isAuthorized = await this.channelStore.canReadChannel(channelId, actor);
+		return this.voiceCall.setMuted(channelId, isAuthorized, muted);
 	}
 
 	/** @substrate no caller yet — plans/voice-orchestrated-room-integration/03 (the room-side ladder

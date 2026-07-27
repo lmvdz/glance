@@ -539,6 +539,13 @@ export const VoiceCallSteerBodySchema = Schema.Struct({
 	text: Schema.String,
 });
 
+/** POST /api/channels/:id/voice-call/mute — visible mute for the room call HUD (concern 03). A SET
+ *  (`muted: true|false`), never the wire's own bare toggle: the daemon tracks what it last asked for
+ *  so a double-click, or a second client, cannot race the mic back open. */
+export const VoiceCallMuteBodySchema = Schema.Struct({
+	muted: Schema.Boolean,
+});
+
 /** PUT /api/org/voice-key — set/rotate the session org's voice provider key
  *  (plans/voice-db-mode/05-admin-endpoints.md). `apiKey` required: an empty PUT can never verify
  *  against anything, and the handler must reject before it ever reaches the store. `provider`

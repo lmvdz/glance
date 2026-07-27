@@ -35,6 +35,16 @@ export interface ArtifactSnapshotRecord {
 	copiedAt: number;
 }
 
+/** Byte cap for `ArtifactSnapshotStore#read` — a Markdown VIEWER, not a file server. Past this a
+ *  read is refused with the snapshot's true size rather than truncated, because a document that
+ *  silently stops halfway is worse than one that says it is too big to show here. */
+export const ARTIFACT_VIEW_MAX_BYTES = 2 * 1024 * 1024;
+
+export type ArtifactReadResult =
+	| { ok: true; record: ArtifactSnapshotRecord; content: string }
+	| { ok: false; reason: "not-found" }
+	| { ok: false; reason: "not-ready" | "missing" | "too-large" | "read-error"; record: ArtifactSnapshotRecord; detail?: string };
+
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
 	return !!value && typeof value === "object" && !Array.isArray(value);
 }
@@ -263,6 +273,39 @@ export class ArtifactSnapshotStore {
 		};
 		this.record(record);
 		return record;
+	}
+
+	/**
+	 * Read one artifact's IMMUTABLE SNAPSHOT bytes (concern 03's Markdown viewer).
+	 *
+	 * Reads `snapshotPath` — the daemon-owned copy this store itself wrote under `stateDir` — and
+	 * NEVER `sourcePath`. That is the whole point of the snapshot: the viewer shows what the room
+	 * witnessed, not whatever the worktree happens to hold now. No client-supplied string ever
+	 * reaches the filesystem either: the only input is an artifact id looked up in this channel's own
+	 * registry, so there is no path to traverse.
+	 *
+	 * Every failure is a NAMED state rather than a throw, because the viewer renders each one
+	 * differently: `not-found` (no such id in this channel), `not-ready` (a `failed`/`incomplete`
+	 * row — which carries its own reason), `missing` (a `ready` row whose snapshot file has gone: a
+	 * real, reportable inconsistency, not an empty document), `too-large`, and `read-error`.
+	 */
+	async read(channelId: string, artifactId: string, maxBytes = ARTIFACT_VIEW_MAX_BYTES): Promise<ArtifactReadResult> {
+		const record = this.registryFor(channelId).find((entry) => entry.id === artifactId);
+		if (!record) return { ok: false, reason: "not-found" };
+		if (record.status !== "ready" || !record.snapshotPath) return { ok: false, reason: "not-ready", record };
+		let stat: Awaited<ReturnType<typeof fs.stat>>;
+		try {
+			stat = await fs.stat(record.snapshotPath);
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return { ok: false, reason: "missing", record, detail: `the snapshot file is gone: ${record.snapshotPath}` };
+			return { ok: false, reason: "read-error", record, detail: errText(err) };
+		}
+		if (stat.size > maxBytes) return { ok: false, reason: "too-large", record, detail: `${stat.size} bytes exceeds the ${maxBytes}-byte viewer cap` };
+		try {
+			return { ok: true, record, content: await fs.readFile(record.snapshotPath, "utf8") };
+		} catch (err) {
+			return { ok: false, reason: "read-error", record, detail: errText(err) };
+		}
 	}
 
 	private snapshotDir(channelId: string, callId: string, contentHash: string): string {

@@ -50,6 +50,16 @@ export interface RoomFrameProps {
 	children: React.ReactNode;
 	/** Open when someone is answering. Sits BESIDE the room — answering never takes the room away. */
 	decision?: React.ReactNode;
+	/**
+	 * The call workspace's own panel: a voice decision door, the artifacts index, or one artifact.
+	 *
+	 * Wide screens put it exactly where `decision` goes — beside the conversation, never over it. A
+	 * NARROW screen cannot hold both (376px of panel beside a 320px conversation is two unusable
+	 * columns), so the frame becomes a single pane: the panel fills the width and the conversation
+	 * is hidden until it is popped. Escape and the panel's own back control do the popping, and the
+	 * scroll position and agent filter ride the back stack home (see `PaneStackEntry`).
+	 */
+	voicePanel?: React.ReactNode;
 	/** The fleet's autonomy, readable from the room rather than from a settings page. */
 	autonomyPanel?: React.ReactNode;
 	/** Shown when standing inside a unit — replaces the tree, same as the other panels. */
@@ -115,7 +125,7 @@ export function TopBar({ repo, summary, now, back }: { repo: string; summary?: s
 	);
 }
 
-export function RoomFrame({ repo, rooms, activeRoomId, onOpenRoom, nodes, plans, now, autonomy, autonomyPanel, autonomyOpen, onToggleAutonomy, unitPanel, selectedId, onSelect, onEnter, children, decision }: RoomFrameProps) {
+export function RoomFrame({ repo, rooms, activeRoomId, onOpenRoom, nodes, plans, now, autonomy, autonomyPanel, autonomyOpen, onToggleAutonomy, unitPanel, selectedId, onSelect, onEnter, children, decision, voicePanel }: RoomFrameProps) {
 	const waiting = nodes.filter((node) => node.state === 'needs-you');
 	const selected = nodes.find((node) => node.id === selectedId);
 	const stats = alarmStats(nodes, now);
@@ -149,21 +159,33 @@ export function RoomFrame({ repo, rooms, activeRoomId, onOpenRoom, nodes, plans,
 
 				{/* ── conversation + standing tree ───────────────────────────────────── */}
 				<div className="flex min-h-0 flex-1">
-					<div className="flex min-w-0 flex-1 flex-col">{children}</div>
+					{/* Narrow screens are a single pane: an open workspace panel takes the whole width and
+					    the conversation steps aside until it is popped. Wide screens keep both, which is
+					    the arrangement the reference draws and the one that makes answering feel like
+					    part of the room rather than a departure from it. */}
+					<div className={`min-w-0 flex-1 flex-col ${voicePanel ? 'hidden md:flex' : 'flex'}`}>{children}</div>
 
 					{/* Answering sits beside the conversation, never over it. A modal would make a person
 					    leave the fleet to answer one question about it, and the standing tree is exactly
 					    the context that makes them comfortable answering at all. */}
-					{decision}
-					{autonomyOpen && autonomyPanel ? <div className="w-[520px] flex-none" style={{ borderLeft: '1px solid #1F1F22' }}>{autonomyPanel}</div> : null}
-					{!autonomyOpen && !decision && unitPanel ? <div className="w-[520px] flex-none" style={{ borderLeft: '1px solid #1F1F22' }}>{unitPanel}</div> : null}
+					{voicePanel}
+					{/* The fleet decision panel defers to the call workspace panel, same precedence autonomy
+					    and unit already give it below — two side panels at once would squeeze the
+					    conversation on wide screens exactly the way a third rail column used to. */}
+					{!voicePanel && decision}
+					{!voicePanel && autonomyOpen && autonomyPanel ? <div className="hidden w-[520px] flex-none md:block" style={{ borderLeft: '1px solid #1F1F22' }}>{autonomyPanel}</div> : null}
+					{!voicePanel && !autonomyOpen && !decision && unitPanel ? <div className="hidden w-[520px] flex-none md:block" style={{ borderLeft: '1px solid #1F1F22' }}>{unitPanel}</div> : null}
 
 					{/* A panel TAKES THE RAIL'S PLACE rather than adding a third column. The reference draws
 					    two columns — room and panel — and three at 1600px squeezed the conversation to
 					    380px, which is narrower than the reading measure the messages are set to. The
-					    rail comes back the moment the panel closes. */}
-					{decision || (autonomyOpen && autonomyPanel) || unitPanel ? null : (
-					<aside className="flex w-[376px] flex-none flex-col" style={{ borderLeft: '1px solid #1F1F22' }} aria-label="Where you are standing">
+					    rail comes back the moment the panel closes.
+
+					    It is also hidden below the tablet breakpoint outright: 376px of standing tree
+					    beside a phone-width conversation leaves neither of them readable, and the rooms
+					    list is reachable from the top bar there instead. */}
+					{voicePanel || decision || (autonomyOpen && autonomyPanel) || unitPanel ? null : (
+					<aside className="hidden w-[376px] flex-none flex-col lg:flex" style={{ borderLeft: '1px solid #1F1F22' }} aria-label="Where you are standing">
 						<div className="px-4 pb-1 pt-3.5">
 							<div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.16em', color: '#5A5A61' }}>WHERE YOU ARE STANDING</div>
 							<div className="mt-2 flex items-baseline gap-2">
