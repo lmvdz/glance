@@ -29,7 +29,7 @@ import { PlanSurface } from './components/hub/PlanSurface';
 import { VerdictSurface } from './components/hub/VerdictSurface';
 import { PeopleSurface } from './components/hub/PeopleSurface';
 import { FileSignIn } from './components/FileSignIn';
-import { FirstRunSetup } from './components/FirstRunSetup';
+import { DayOne } from './components/hub/DayOne';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { Login } from './components/Login';
 import { PendingApproval } from './components/PendingApproval';
@@ -73,7 +73,7 @@ const WorkbenchRoute = ({ route }: { route: Extract<HubRoute, { kind: 'workbench
   );
   const orgPageContext = React.useMemo(() => deriveOrgPageContext(), []);
 
-  if (status === 'authed' && !currentProject && route.view !== 'org') return <FirstRunSetup />;
+  if (status === 'authed' && !currentProject && route.view !== 'org') return <DayOne />;
   if (route.view === 'fog') return <UnseenSurface />;
   if (route.view === 'daily') return <MondaySurface />;
   if (route.view === 'economics') return <CostSurface />;
