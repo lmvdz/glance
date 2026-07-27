@@ -238,6 +238,34 @@ export function searchFabric(
 	return rankKbDocs(docs, query, { topK: opts.topK });
 }
 
+/**
+ * C5 regime classifier (plans/research-long-horizon-agent-memory/VALIDATION.md, refined by the
+ * five-corpus retrieval study in arXiv 2607.21503): lexical vs dense retrieval win in different
+ * REGIMES — keyword decisively where the query carries specific entities, dense decisively across
+ * wide semantic gaps. So every zero-result kb search is logged with its regime, and the
+ * add-a-vector-channel question is decided by the SEMANTIC-GAP share alone, never by aggregate
+ * miss volume. Heuristic, deliberately cheap: a query is "entity" when any token looks like an
+ * opaque identifier — path, hex hash, uuid, CLI flag, issue key, camelCase/snake_case symbol, or
+ * SCREAMING_CASE constant. Everything else is "semantic" (natural-language description with no
+ * shared vocabulary guarantee). Misclassification is expected and bounded: the calibration step
+ * hand-labels a sample and the kill threshold must clear the measured noise floor first.
+ */
+export function classifyQueryShape(query: string): "entity" | "semantic" {
+	const ENTITY = [
+		/[a-z0-9_-]+\/[a-z0-9_./-]+/i, // path-like
+		/\b[0-9a-f]{7,}\b/i, // hex hash
+		/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i, // uuid
+		/(^|\s)--[a-z][a-z0-9-]+/i, // CLI flag
+		/\b[A-Z][A-Z0-9]+-\d+\b/, // issue key (OMPSQ-12)
+		/\b[a-z]+[A-Z][a-zA-Z0-9]*\b/, // camelCase
+		/\b[A-Z][a-z]+[A-Z][a-zA-Z0-9]*\b/, // PascalCase (blind-review: symbol names under-fired)
+		/\b[a-z0-9]+_[a-z0-9_]+\b/, // snake_case
+		/\b[A-Z][A-Z0-9_]{3,}\b/, // SCREAMING_CASE
+		/\.[a-z]{2,4}\b/, // file extension
+	];
+	return ENTITY.some((re) => re.test(query)) ? "entity" : "semantic";
+}
+
 // ───────────────────────────── agent cold-start primer ─────────────────────────────
 
 const PRIMER_LABEL: Record<KbDocType, string> = {

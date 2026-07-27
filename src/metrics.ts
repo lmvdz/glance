@@ -146,7 +146,15 @@ export type MetricName =
 	 *  always 1. `mode !== "enforce"` rows are the "shadow would-have-asked/denied" counterfactual the
 	 *  factory-status scoreboard reports; `mode === "enforce"` rows are the REAL (already-acted-on)
 	 *  verdicts. */
-	| "cost-gate-verdict";
+	| "cost-gate-verdict"
+	/** C5 passive counter (plans/research-long-horizon-agent-memory/VALIDATION.md): a
+	 *  `squad_kb_search` returned ZERO results. Tags `{shape, query}` — `shape` classifies the
+	 *  query regime per the C5 kill criterion (entity-carrying vs semantic-gap; see
+	 *  `classifyQueryShape` in fabric-search.ts), `query` is the truncated text so the spooled
+	 *  JSONL doubles as the hand-labelable audit corpus. The dense-retrieval question opens only
+	 *  if the SEMANTIC-GAP share of these clears the calibrated threshold — never on aggregate
+	 *  miss volume. */
+	| "kb-retrieval-miss";
 
 export interface MetricEvent {
 	/** Strictly-increasing id (epoch millis, bumped on collision) — stable sort + dedupe key. */
