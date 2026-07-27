@@ -247,7 +247,7 @@ import { proposeRules, type RuleProposal } from "./rule-proposals.ts";
 import { assessPlanMotion as assessPlanMotionEvidence, planMotionMetrics, type PlanMotionInput, type PlanMotionAssessment } from "./plan-motion.ts";
 import { compactionNotice, planCompaction, planHandover, type CompactionPlan, type CompactionPolicy, type HandoverPlan } from "./archive.ts";
 import { consequenceSentence, reshape, type PlanProposal, type ReshapeOp } from "./plan-proposals.ts";
-import { DelegationBoundaryError, assertHumanAuthority, commandAction, grantFor, nonDelegatableClassOf, type Authority, type DelegationGrant } from "./delegation-boundary.ts";
+import { DelegationBoundaryError, assertHumanAuthority, boundaryJustification, commandAction, grantFor, nonDelegatableClasses, nonDelegatableClassOf, type Authority, type DelegationGrant } from "./delegation-boundary.ts";
 import { buildTrace, traceMaxSpans, traceSampleRatio, traceSpansEnabled, type TraceResponse } from "./spans.ts";
 import { traceExporterFromEnv, type TraceExportQueue } from "./trace-exporter.ts";
 
@@ -2755,18 +2755,41 @@ export class SquadManager extends EventEmitter {
 		return this.profiles(repo).find((p) => p.id === id);
 	}
 
+	/**
+	 * Every model this fleet can actually reach, tagged with the harness that offers it.
+	 *
+	 * Previously this returned the FIRST live agent's list and stopped, so a fleet running two
+	 * harnesses showed one of them and silently hid the other — and the picker then grouped what it
+	 * got by a provider string inferred from the model id, which cannot tell `claude-opus-4-5` reached
+	 * through omp from the same model reached through claude-code. Harness is the declared fact.
+	 *
+	 * One agent per harness is asked, not one per agent: the answer is a property of the harness, and
+	 * querying forty units for the same list would be forty round trips for one answer.
+	 */
 	async modelOptions(): Promise<RuntimeModelOption[]> {
+		const asked = new Set<string>();
+		const out: RuntimeModelOption[] = [];
+		const seen = new Set<string>();
 		for (const rec of this.agents.values()) {
 			if (!rec.agent.isAlive || !rec.agent.getAvailableModels) continue;
+			const harness = rec.dto.harness ?? rec.options.harness ?? "unknown";
+			if (asked.has(harness)) continue;
+			asked.add(harness);
 			try {
 				const result = await rec.agent.getAvailableModels();
-				const options = modelOptionsFromRuntime(result.models);
-				if (options.length) return options;
+				for (const option of modelOptionsFromRuntime(result.models)) {
+					// The same model offered by two harnesses is two entries, because they are two
+					// different places a prompt can go. Deduped within a harness, never across.
+					const key = `${harness}\u0000${option.value}`;
+					if (seen.has(key)) continue;
+					seen.add(key);
+					out.push({ ...option, harness });
+				}
 			} catch {
-				/* fall back to configured models */
+				/* this harness could not be asked; the others still answer */
 			}
 		}
-		return [];
+		return out;
 	}
 
 	async listFeedbackCampaigns(): Promise<FeedbackCampaign[]> {
@@ -3930,6 +3953,47 @@ export class SquadManager extends EventEmitter {
 	/** How long the fleet gets to recover before anyone is interrupted. */
 	get recoveryDelayMs(): number {
 		return RECOVERY_DELAY_MS;
+	}
+
+	/**
+	 * The fleet's autonomy as a state a person can read — what it may settle alone, what it never may,
+	 * and anything it is currently offering to take over.
+	 *
+	 * Concerns 11 and 12 have been built and invisible: the rule that settles a person's work is stored
+	 * with their exact sentence and could not be seen anywhere, and the boundary refuses on their
+	 * behalf without ever saying so. A rule nobody can read is indistinguishable from a setting
+	 * somebody changed.
+	 */
+	async autonomyState(nodeId = SquadManager.ROOT_NODE_ID): Promise<{
+		rules: Array<{ id: string; sentence: string; authorId: string; since: number; settles: string[]; invocations: number; wouldNotHaveCaught: string[] }>;
+		neverAlone: Array<{ class: string; because: string }>;
+		proposals: RuleProposal[];
+	}> {
+		try {
+			const records = await new NodeRecordStore(this.store).list(nodeId);
+			const rules = records
+				.filter((record): record is Extract<NodeRecord, { kind: "rule" }> => record.kind === "rule" && record.status === "active")
+				.map((rule) => ({
+					id: rule.id,
+					sentence: rule.sentence,
+					authorId: rule.authorId,
+					since: rule.createdAt,
+					settles: [...rule.settles],
+					invocations: rule.invocations.length,
+					wouldNotHaveCaught: [...rule.wouldNotHaveCaught],
+				}));
+			return {
+				rules,
+				// Product policy, shown so it can be argued with — not so it can be switched off.
+				neverAlone: nonDelegatableClasses.map((cls) => ({ class: cls, because: boundaryJustification[cls] })),
+				proposals: proposeRules(records),
+			};
+		} catch (err) {
+			this.log("warn", `autonomy state unavailable: ${errText(err)}`);
+			// Fail QUIET but not silent: an empty list of rules would read as "the fleet settles nothing",
+			// which is a claim. Returning the boundary alone says what is certain and omits what is not.
+			return { rules: [], neverAlone: nonDelegatableClasses.map((cls) => ({ class: cls, because: boundaryJustification[cls] })), proposals: [] };
+		}
 	}
 
 	/** The learning state: what is borrowed, what is unknown, and what would settle each. */
@@ -7808,11 +7872,22 @@ export class SquadManager extends EventEmitter {
 		const prefix = follows ? `${actor.id} steered @${targetLabel} (follows ${follows.actor}\'s steer):` : `${actor.id} steered @${targetLabel}:`;
 		const text = `${prefix} ${cmd.displayText ?? cmd.message}`;
 		this.recentSteers.set(rec.dto.id, { actor: actor.id, targetLabel, at: now });
-		const entry = await this.channelStore.appendManager(channelId, {
+		// WHERE this lands is the question, and the answer is: not on top of what you just said.
+		//
+		// When the steer was typed here, the room ALREADY shows it — your own message is right there —
+		// so a manager card restating it is the room telling you what you did, one line after you did
+		// it. That is the same firehose reflex concern 26 was filed over, in a politer voice.
+		//
+		// When it came from somewhere else — the CLI, Intervene, a mention resolved elsewhere — the room
+		// has no other trace of it, and then the echo is the only thing that says the fleet was steered.
+		// So: typed here goes to the unit's node, arrived from elsewhere reaches the room.
+		const typedInThisRoom = (commandSource(cmd) === "mention" || commandSource(cmd) === "composer") && Boolean(cmd.channelId);
+		const nodeId = typedInThisRoom ? (await this.projectedNodeId(rec)) : undefined;
+		const post = {
 			authorActor: "manager",
 			text,
-			kind: "system",
-			format: "markdown",
+			kind: "system" as const,
+			format: "markdown" as const,
 			event: {
 				kind: "mention-steer",
 				payload: {
@@ -7828,8 +7903,11 @@ export class SquadManager extends EventEmitter {
 					clientTurnId: cmd.clientTurnId,
 				},
 			},
-		});
-		this.emit("event", { type: "channel-entry", channelId, entry } satisfies SquadEvent);
+		};
+		const entry = nodeId
+			? await this.channelStore.appendNodeManager(nodeId, post, channelId)
+			: await this.channelStore.appendManager(channelId, post);
+		this.emit("event", { type: "channel-entry", channelId: entry.channelId, entry } satisfies SquadEvent);
 	}
 
 	private commandReturnText(cmd: ClientCommand, actor: Actor, rec: AgentRecord): string | undefined {

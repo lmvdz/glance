@@ -212,7 +212,16 @@ export function asThinking(v: string | undefined): ThinkingLevel | undefined {
 	return v === "minimal" || v === "low" || v === "medium" || v === "high" || v === "xhigh" ? v : undefined;
 }
 
-/** Pick the candidate whose name the task mentions, else the cwd, else the first candidate. */
+/**
+ * Pick the candidate whose name the task mentions, else the cwd, else the first candidate.
+ *
+ * @substrate Called once inside this module and covered directly by `tests/smart-spawn.test.ts`,
+ * which is outside the ratchet's src+webapp reference universe. It only started counting as dead when
+ * `AssistantChat.tsx` was deleted — a COMMENT in that file was the sole reference outside this one,
+ * which is a reminder that the ratchet counts prose as usage. Exported for that test rather than
+ * inlined, because the repo-choice heuristic is exactly the kind of thing that should be pinned by
+ * name.
+ */
 export function pickRepoHeuristic(prompt: string, candidates: string[], cwd: string): string {
 	const low = prompt.toLowerCase();
 	let best: string | undefined;

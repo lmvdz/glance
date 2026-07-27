@@ -14,9 +14,11 @@ test("a quiet room is a handover, not a promise that something will happen", () 
   // The old empty state said fleet cards "will land here as the room wakes up" — a statement about
   // the future. Somebody back after four hours wants to know what happened, not what might.
   const html = renderToStaticMarkup(<QuietRoom nodes={nodes} awayMs={4 * 3_600_000} now={T} />);
-  expect(html).toContain("While you were away");
-  expect(html).toContain("Finished");
+  expect(html).toContain("WHAT GOT DONE WHILE YOU DIDN&#x27;T LOOK");
+  // What finished is now the list under the heading rather than a "Finished:" prose line — the
+  // heading already says these are the things that got done.
   expect(html).toContain("the parser");
+  expect(html).toContain("3.1");
   expect(html).not.toContain("will land here");
 });
 
@@ -38,7 +40,7 @@ test("a first visit is not a quiet morning, and does not pretend to be", () => {
   // "Nothing has happened yet" and "nothing happened while you were away" are different facts and
   // must not share a screen.
   const html = renderToStaticMarkup(<QuietRoom nodes={[]} now={T} />);
-  expect(html).toContain("Nothing has run here yet");
+  expect(html).toContain("NOTHING HAS RUN HERE YET");
   expect(html).toContain("first visit, not a quiet morning");
   expect(html).not.toContain("While you were away");
 });
@@ -54,8 +56,10 @@ test("it does not claim an absence that did not happen", () => {
   // Seen live: the panel said "WHILE YOU WERE AWAY" on a first load with no recorded absence. Small
   // lies in the copy are how a reader learns to discount the rest of it.
   const arrived = renderToStaticMarkup(<QuietRoom nodes={nodes} now={T} />);
-  expect(arrived).toContain("Where things stand");
+  expect(arrived).toContain("WHERE THINGS STAND");
+  expect(arrived).not.toContain("WHILE YOU DIDN");
   expect(arrived).not.toContain("While you were away");
+  // The absence is stated once, in the heading, with how long it was.
   const away = renderToStaticMarkup(<QuietRoom nodes={nodes} awayMs={4 * 3_600_000} now={T} />);
-  expect(away).toContain("While you were away");
+  expect(away).toContain("WHAT GOT DONE WHILE YOU DIDN&#x27;T LOOK · 4H");
 });

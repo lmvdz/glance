@@ -5,13 +5,12 @@
 
 import React from 'react';
 import { HubShell } from './components/hub/HubShell';
-import { TaskDetail } from './components/TaskDetail';
-import { TaskListView } from './components/TaskListView';
+import { DocSurface } from './components/hub/DocSurface';
+import { WorkSurface } from './components/hub/WorkSurface';
 import { TaskProvider, useTaskContext } from './context/TaskContext';
 import { PageContextProvider, PageContextScope } from './context/PageContext';
 import {
   deriveCapabilitiesPageContext,
-  deriveIntervenePageContext,
   deriveOrgPageContext,
   deriveReviewPageContext,
   deriveTasksPageContext,
@@ -19,21 +18,18 @@ import {
 import { GlobalShortcuts } from './components/GlobalShortcuts';
 import { ToastContainer } from './components/ToastContainer';
 import { ThemeProvider } from './context/ThemeContext';
-import { CapabilityPanel } from './components/CapabilityPanel';
+import { BorrowedSurface } from './components/hub/BorrowedSurface';
 import { CommandPalette } from './components/CommandPalette';
-import { OmpGraphPanel } from './components/OmpGraphPanel';
-import { FogView } from './components/FogView';
-import { DailyPanel } from './components/DailyPanel';
-import { FleetEconomicsView } from './components/FleetEconomicsView';
-import { IntervenceView } from './components/IntervenceView';
-import { DesignReviewView } from './components/DesignReviewView';
-import { PlanRealityView } from './components/PlanRealityView';
-import { PlanBriefView } from './components/PlanBriefView';
-import { GateVerdictProofView } from './components/GateVerdictProofView';
-import { WorkspaceCockpit } from './components/WorkspaceCockpit';
-import { OrgSettings } from './components/OrgSettings';
+import { UnseenSurface } from './components/hub/UnseenSurface';
+import { MondaySurface } from './components/hub/MondaySurface';
+import { CostSurface } from './components/hub/CostSurface';
+
+import { RealitySurface } from './components/hub/RealitySurface';
+import { PlanSurface } from './components/hub/PlanSurface';
+import { VerdictSurface } from './components/hub/VerdictSurface';
+import { PeopleSurface } from './components/hub/PeopleSurface';
 import { FileSignIn } from './components/FileSignIn';
-import { FirstRunSetup } from './components/FirstRunSetup';
+import { DayOne } from './components/hub/DayOne';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { Login } from './components/Login';
 import { PendingApproval } from './components/PendingApproval';
@@ -56,24 +52,16 @@ const useHubRoute = () => {
 };
 
 const WorkbenchRoute = ({ route }: { route: Extract<HubRoute, { kind: 'workbench' }> }) => {
-  const { selectedTaskId, selectTask, currentProject, tasks, taskFilter, tasksListMode, agents, openIntervene, reviewTaskId, reviewDocPath, capabilities, publicCatalog } = useTaskContext();
+  const { selectedTaskId, selectTask, currentProject, tasks, taskFilter, tasksListMode, reviewTaskId, reviewDocPath, capabilities, publicCatalog } = useTaskContext();
   const { status } = useAuth();
 
   React.useEffect(() => {
-    if (route.view === 'intervene' && route.id) openIntervene(route.id);
-  }, [route.view, route.id]);
-  React.useEffect(() => {
     if (route.view === 'task' && route.id) selectTask(route.id);
   }, [route.view, route.id, selectTask]);
-  const interveneAgent = React.useMemo(() => agents.find((a) => a.id === route.id), [agents, route.id]);
   const reviewTask = React.useMemo(() => tasks.find((t) => t.id === reviewTaskId || t.sourceId === reviewTaskId), [tasks, reviewTaskId]);
   const tasksPageContext = React.useMemo(
     () => deriveTasksPageContext({ tasks, selectedTaskId, taskFilter, listMode: tasksListMode }),
     [tasks, selectedTaskId, taskFilter, tasksListMode],
-  );
-  const intervenePageContext = React.useMemo(
-    () => deriveIntervenePageContext({ interveneAgentId: route.id ?? null, agent: interveneAgent }),
-    [route.id, interveneAgent],
   );
   const reviewPageContext = React.useMemo(
     () => deriveReviewPageContext({ reviewTaskId, reviewDocPath, task: reviewTask }),
@@ -85,56 +73,19 @@ const WorkbenchRoute = ({ route }: { route: Extract<HubRoute, { kind: 'workbench
   );
   const orgPageContext = React.useMemo(() => deriveOrgPageContext(), []);
 
-  if (status === 'authed' && !currentProject && route.view !== 'org') return <FirstRunSetup />;
-  if (route.view === 'fleet') return <WorkspaceCockpit />;
-  if (route.view === 'fog') return <FogView />;
-  if (route.view === 'daily') return <DailyPanel />;
-  if (route.view === 'economics') return <FleetEconomicsView />;
-  if (route.view === 'intervene') {
-    return (
-      <PageContextScope value={intervenePageContext}>
-        <IntervenceView />
-      </PageContextScope>
-    );
-  }
-  if (route.view === 'review') {
-    return (
-      <PageContextScope value={reviewPageContext}>
-        <DesignReviewView />
-      </PageContextScope>
-    );
-  }
-  if (route.view === 'capabilities') {
-    return (
-      <PageContextScope value={capabilitiesPageContext}>
-        <CapabilityPanel />
-      </PageContextScope>
-    );
-  }
-  if (route.view === 'graph') return <OmpGraphPanel />;
-  if (route.view === 'plan-reality') return <PlanRealityView />;
-  if (route.view === 'plans') return <PlanBriefView />;
-  if (route.view === 'gate-verdict') return <GateVerdictProofView routeId={route.id} />;
-  if (route.view === 'org') {
-    return (
-      <PageContextScope value={orgPageContext}>
-        <OrgSettings />
-      </PageContextScope>
-    );
-  }
-  if (route.view === 'tasks' && !selectedTaskId) {
-    return (
-      <PageContextScope value={tasksPageContext}>
-        <TaskListView />
-      </PageContextScope>
-    );
-  }
+  if (status === 'authed' && !currentProject && route.view !== 'org') return <DayOne />;
+  if (route.view === 'fog') return <UnseenSurface />;
+  if (route.view === 'daily') return <MondaySurface />;
+  if (route.view === 'economics') return <CostSurface />;
+  if (route.view === 'review') return <DocSurface taskId={reviewTaskId ?? undefined} docPath={reviewDocPath} />;
+  if (route.view === 'capabilities') return <BorrowedSurface />;
+  if (route.view === 'plan-reality') return <RealitySurface />;
+  if (route.view === 'plans') return <PlanSurface name={route.id} />;
+  if (route.view === 'gate-verdict') return <VerdictSurface routeId={route.id} />;
+  if (route.view === 'org') return <PeopleSurface />;
+  if (route.view === 'tasks' && !selectedTaskId) return <WorkSurface />;
 
-  return (
-    <PageContextScope value={tasksPageContext}>
-      <TaskDetail />
-    </PageContextScope>
-  );
+  return <DocSurface taskId={selectedTaskId ?? undefined} />;
 };
 
 const AppContent = () => {

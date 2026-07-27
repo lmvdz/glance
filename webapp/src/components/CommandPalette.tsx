@@ -175,11 +175,14 @@ export const CommandPalette: React.FC = () => {
         // Taste-review nit 2: a ~150ms scale+fade entrance (brand.md's micro-interaction beat,
         // GPU transform/opacity only) so the palette settles in instead of appearing instantly.
         // `.palette-rise` is a no-op transition/animation under prefers-reduced-motion.
-        className="palette-rise w-full max-w-xl overflow-hidden rounded-xl border border-ink-border bg-white shadow-2xl dark:border-[#2A2A2E] dark:bg-[#0C0C0E]"
+        // The room's own surface treatment: a 1px border, no rounding beyond 3px, no drop shadow.
+        // A shadowed rounded card floats ABOVE the product; the palette is part of it.
+        className="palette-rise w-full max-w-xl overflow-hidden"
+        style={{ border: '1px solid #26262B', background: '#0C0C0D', borderRadius: 3 }}
         onKeyDown={onKeyDown}
       >
         {/* Search input — the palette's one focal point (brand.md: one ember signal per view). */}
-        <div className="relative border-b border-ink-border dark:border-[#1C1C20]">
+        <div className="relative" style={{ borderBottom: '1px solid #1A1A1D' }}>
           <Search className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-text-subtle dark:text-[#5C5C62]" aria-hidden="true" />
           <input
             ref={inputRef}
@@ -188,7 +191,8 @@ export const CommandPalette: React.FC = () => {
             onChange={(e) => { setQuery(e.target.value); setSelectedIndex(0); }}
             placeholder="Jump to a view, or search the fleet's memory…"
             aria-label="Command palette search"
-            className="w-full bg-transparent py-3.5 pl-11 pr-20 text-sm text-ink-text placeholder:text-ink-text-subtle focus:outline-none text-ink-text dark:placeholder:text-[#5C5C62]"
+            className="w-full bg-transparent py-3.5 pl-11 pr-20 focus:outline-none"
+            style={{ fontSize: 13, color: '#C9C9CF' }}
           />
           <div className="absolute right-3 top-1/2 -translate-y-1/2">
             <Kbd keys="esc" label="close" />
@@ -198,8 +202,9 @@ export const CommandPalette: React.FC = () => {
         {/* Rows */}
         <ul ref={listRef} className="max-h-[50vh] overflow-y-auto py-1" role="listbox" aria-label="Commands and results">
           {rows.length === 0 && !searching && (
-            <li className="px-4 py-8 text-center text-sm text-ink-text-muted">
-              Nothing matches. Try a view name, a file path, or a decision.
+            <li className="px-4 py-6 text-[12.5px] leading-[1.5]" style={{ color: '#6A6A72', textWrap: 'pretty' }}>
+              Nothing matches “{query}”. This searches the views and the fleet's own memory — if something is missing from
+              both, it is missing from the record rather than from the search.
             </li>
           )}
           {rows.map((row, i) => {
@@ -211,29 +216,26 @@ export const CommandPalette: React.FC = () => {
                   type="button"
                   onClick={() => runRow(row)}
                   onMouseMove={() => setSelectedIndex(i)}
-                  className={`flex w-full items-center gap-3 px-4 py-2 text-left transition-colors focus:outline-none ${
-                    active
-                      ? 'bg-amber-50 dark:bg-[color:var(--wf-accent-soft)]'
-                      : 'hover:bg-ink dark:hover:bg-[#151517]'
-                  }`}
+                  className="flex w-full items-center gap-3 px-4 py-2 text-left focus:outline-none"
+                  style={active ? { background: '#1A1512' } : undefined}
                 >
-                  <Icon className={`h-4 w-4 flex-shrink-0 ${active ? 'text-amber-600 dark:text-[color:var(--wf-accent)]' : 'text-ink-text-subtle dark:text-[#5C5C62]'}`} aria-hidden="true" />
+                  <Icon className="h-3.5 w-3.5 flex-shrink-0" style={{ color: active ? '#F0A35A' : '#4A4A52' }} aria-hidden="true" />
                   <span className="min-w-0 flex-1">
-                    <span className={`block truncate text-sm ${active ? 'font-medium text-ink-text' : 'text-ink-text-label'}`}>
+                    <span className="block truncate" style={{ fontSize: 12.5, color: active ? '#E8E8EA' : '#A8A8B0' }}>
                       {row.label}
                     </span>
                     {row.kind === 'fabric' && (
-                      <span className="mt-0.5 block truncate text-xs text-ink-text-muted">{row.snippet}</span>
+                      <span className="mt-0.5 block truncate" style={{ fontSize: 11, color: '#6A6A72' }}>{row.snippet}</span>
                     )}
                   </span>
                   {row.kind === 'fabric' && (
-                    <span className="flex-shrink-0 rounded bg-ink-surface px-1.5 py-0.5 text-caption font-semibold text-ink-text0 dark:bg-[#151517] text-ink-text-subtle">
+                    <span className="flex-shrink-0" style={{ fontFamily: "'JetBrains Mono',ui-monospace,monospace", fontSize: 9.5, letterSpacing: '.1em', color: '#4A4A52' }}>
                       {row.typeLabel}
                     </span>
                   )}
                   {row.kind === 'nav' && (
-                    <span className="flex-shrink-0 text-caption font-medium uppercase tracking-wider text-ink-text-subtle dark:text-[#5C5C62]">
-                      {row.view === 'org' ? 'settings' : 'view'}
+                    <span className="flex-shrink-0" style={{ fontFamily: "'JetBrains Mono',ui-monospace,monospace", fontSize: 9.5, letterSpacing: '.1em', color: '#4A4A52' }}>
+                      {row.view === 'org' ? 'who is here' : 'a surface'}
                     </span>
                   )}
                   {active && <Kbd keys="↵" className="flex-shrink-0" />}
@@ -242,15 +244,14 @@ export const CommandPalette: React.FC = () => {
             );
           })}
           {searching && (
-            <li className="flex items-center gap-2 px-4 py-2 text-xs text-ink-text-subtle" aria-live="polite">
-              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500" aria-hidden="true" />
-              Searching the knowledge base…
+            <li className="px-4 py-2" style={{ fontFamily: "'JetBrains Mono',ui-monospace,monospace", fontSize: 10, color: '#4A4A52' }} aria-live="polite">
+              searching what the fleet remembers…
             </li>
           )}
         </ul>
 
         {/* Footer — kbd legend per the reference language (kit/Kbd chips, never bare tooltips). */}
-        <div className="flex items-center gap-4 border-t border-ink-border px-4 py-2 dark:border-[#1C1C20]">
+        <div className="flex items-center gap-4 px-4 py-2" style={{ borderTop: '1px solid #1A1A1D' }}>
           <Kbd keys="↑↓" label="navigate" />
           <span className="inline-flex items-center gap-1.5 font-mono text-caption text-ink-text-subtle">
             <kbd className="rounded border border-ink-border-2 bg-ink-surface px-1 py-0.5 leading-none text-ink-text0 border-ink-border-2 bg-ink-surface text-ink-text-subtle">

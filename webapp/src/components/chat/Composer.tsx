@@ -3,6 +3,8 @@ import { Camera, Frown, ImagePlus, Loader2, Mic, Paperclip, Pencil, Sparkles, Ar
 import { apiFetch, jsonInit } from '../../lib/api';
 import { isImeComposing, useTriggerMenu, type TriggerSource } from '../../hooks/chat/useTriggerMenu';
 import { ComposerStats } from './AgentMetaBar';
+import { ModelPicker, type Effort } from './ModelPicker';
+import { MentionOverlay } from './MentionOverlay';
 import { ImageAnnotator, type Annotation } from './ImageAnnotator';
 import {
   captureElementToPng,
@@ -17,7 +19,7 @@ import { isSpeechRecognitionSupported, startVoiceInput, type VoiceInputSession }
 import { DRAFT_PERSIST_DEBOUNCE_MS, loadDraft, persistDraft, type DraftV1 } from '../../lib/chat/draftStore';
 import { VoiceCallButton } from './VoiceCallButton';
 import type { AgentDTO } from '../../lib/dto';
-import { buildMentionSections, flattenMentionSections, mentionLabel, serializeMention, type MentionTarget } from '../../lib/mentionGrammar';
+import { buildMentionSections, expandMentionTokens, flattenMentionSections, mentionLabel, mentionToken, type MentionTarget } from '../../lib/mentionGrammar';
 import type { Task } from '../../types';
 
 // Declared state-relocation (concern 09 — monolith split, DESIGN.md "Monolith
@@ -31,6 +33,8 @@ import type { Task } from '../../types';
 export interface ModelOption {
   label: string;
   value: string;
+  /** Which harness offers this model. Declared by the daemon, never inferred from the id. */
+  harness?: string;
 }
 
 export interface SuggestionChip {
@@ -446,6 +450,25 @@ export const Composer = ({
   const [attachError, setAttachError] = useState<string | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Targets the person has actually picked from the menu. Only these expand — an unknown "@word" is
+  // left exactly as typed, because guessing who someone meant is worse than sending what they wrote.
+  const [mentioned, setMentioned] = useState<MentionTarget[]>([]);
+  // Effort is remembered rather than reset each visit: a control that silently returns to a default is
+  // one that quietly changes what runs without anybody having chosen it.
+  // Read LAZILY, on first use rather than at mount. A defensive mount with no sessionId must touch no
+  // storage at all — reading here made every such mount hit localStorage, which is the behaviour that
+  // test exists to forbid, and it would have run on the server render too.
+  const [effort, setEffortState] = useState<Effort>('high');
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem('glance:effort') as Effort | null;
+      if (stored) setEffortState(stored);
+    } catch { /* storage blocked — the default stands for this session */ }
+  }, []);
+  const setEffort = (next: Effort) => {
+    setEffortState(next);
+    try { window.localStorage.setItem('glance:effort', next); } catch { /* storage blocked; the choice still applies to this session */ }
+  };
 
   // ---------------------------------------------------------------------------
   // Draft persistence wiring (daily-composer concern 01).
@@ -662,7 +685,11 @@ export const Composer = ({
       search: (query) => flattenMentionSections(buildMentionSections(agents, tasks, query)),
       getId: (item) => `${item.kind}:${item.id}`,
       getLabel: mentionLabel,
-      getReplacement: serializeMention,
+      getReplacement: (target: MentionTarget) => {
+        // The readable token goes in the box; the address is restored at send.
+        setMentioned((prev) => (prev.some((t) => t.kind === target.kind && t.id === target.id) ? prev : [...prev, target]));
+        return mentionToken(target);
+      },
     },
   ], [agents, tasks]);
   const mentionMenu = useTriggerMenu(composerTextareaRef, mentionTriggers, setInput);
@@ -707,7 +734,9 @@ export const Composer = ({
         }
       }
       const imageRefs = joinImagePromptRefs(uploadedPaths);
-      const textToSend = [assembleSendText(typed, chips), imageRefs].filter(Boolean).join('\n\n');
+      // Addresses restored here, at the last moment: everything the person saw and edited was the
+      // readable token, and the wire format `resolveMentionRoute` parses is unchanged.
+      const textToSend = [expandMentionTokens(assembleSendText(typed, chips), mentioned), imageRefs].filter(Boolean).join('\n\n');
       const nextHistory = typed ? pushPromptHistory(promptHistory, typed) : promptHistory;
       const clearedChips: PasteChip[] = [];
       const clearedImages: ImageAttachment[] = [];
@@ -885,7 +914,12 @@ export const Composer = ({
       </div>
 
       <div
-        className={`relative bg-ink-surface border rounded-xl flex flex-col transition-colors ${isDragOver ? 'border-amber-500 ring-2 ring-amber-500/30' : 'border-ink-border focus-within:border-ink-border-2 dark:focus-within:border-ink-border-2'}`}
+        // NO box. The composer sits inside the room's own footer band, which already has a top rule —
+        // drawing another border here put a rectangle inside a rectangle, and the inner one was doing
+        // no work except making the input look like a widget dropped into the page. The drag state is
+        // the one case that needs an edge, so it is the only case that draws one.
+        style={{ background: 'transparent', borderColor: isDragOver ? '#D9A03C' : 'transparent', borderRadius: 3 }}
+        className={`relative flex flex-col border transition-colors ${isDragOver ? 'ring-2 ring-amber-500/20' : ''}`}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
@@ -976,6 +1010,10 @@ export const Composer = ({
           </div>
         )}
 
+        <div className="relative">
+        {/* Mentions drawn as chips over the real characters. The text underneath is unchanged, so the
+            wire format `resolveMentionRoute` parses stays exactly as it was. */}
+        <MentionOverlay text={input} />
         <textarea
           ref={composerTextareaRef}
           value={input}
@@ -986,23 +1024,24 @@ export const Composer = ({
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
           placeholder={placeholder ?? 'Type @ to link a task...'}
-          className="w-full bg-transparent border-none outline-none text-[13px] text-ink-text text-ink-text-body px-3 py-2.5 resize-none overflow-y-auto"
+          className="relative w-full resize-none overflow-y-auto border-none bg-transparent px-3 py-2.5 text-[13px] leading-6 outline-none"
+          // Transparent text, visible caret: the overlay draws what a person reads, the textarea keeps
+          // what gets sent. Selection stays visible via ::selection on the real input.
+          style={{ color: 'transparent', caretColor: '#F0A35A' }}
           disabled={isLoading || isSending}
           rows={1}
           {...mentionMenu.comboboxProps}
         />
+        </div>
         <div className="flex items-center justify-between gap-2 px-2.5 pb-2.5">
           <div className="flex min-w-0 items-center gap-1">
-            <select
+            <ModelPicker
+              options={modelOptions}
               value={selectedModel}
-              onChange={(event) => onModelChange(event.target.value)}
-              className="h-8 max-w-36 rounded-full border border-ink-border bg-white px-2 text-caption font-medium text-ink-text-label outline-none focus-visible:ring-2 focus-visible:ring-amber-500 border-ink-border-2 bg-ink text-ink-text-label"
-              aria-label="Model"
-            >
-              {modelOptions.map((option) => (
-                <option key={option.value || 'default'} value={option.value}>{option.label}</option>
-              ))}
-            </select>
+              onChange={onModelChange}
+              effort={effort}
+              onEffortChange={setEffort}
+            />
             <ComposerStats agent={agent} />
             <input ref={fileInputRef} type="file" accept="image/*" multiple className="hidden" onChange={handleFileInputChange} />
             <button

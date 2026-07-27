@@ -189,7 +189,11 @@ export const Login = () => {
                 <button
                   type="submit"
                   disabled={busy}
-                  className="mt-1 flex h-11 items-center justify-center rounded-lg bg-white text-[14px] font-semibold text-black shadow-[0_10px_30px_-12px_rgba(240,163,90,0.45)] transition-all hover:shadow-[0_14px_44px_-12px_rgba(240,163,90,0.6)] active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#f0a35a]/60 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0c0c0e] disabled:opacity-60"
+                  // The one white surface left in the product, on the screen that introduces it. The
+                  // primary action is the ember everywhere else and now here too — a white slab with an
+                  // amber glow behind it was the old palette wearing the new accent.
+                  className="mt-1 flex h-11 items-center justify-center rounded-[3px] text-[14px] font-semibold transition-opacity active:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#f0a35a]/60 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0c0c0e] disabled:opacity-60"
+                  style={{ background: '#F0A35A', color: '#140D06' }}
                 >
                   {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : mode === 'signup' ? 'Create account' : 'Sign in'}
                 </button>
