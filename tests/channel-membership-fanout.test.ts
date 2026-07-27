@@ -613,6 +613,35 @@ test("private agent events, removals, bound logs, and missing channels never fan
 	expect(frames.carol).toEqual([]);
 });
 
+test("actual private-agent removal retains its member scope after the record is deleted", async () => {
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "private-removal-scope-"));
+	const mgr = new SquadManager({ stateDir });
+	await mgr.start();
+	const server = new SquadServer(mgr, { port: 0 });
+	cleanups.push(async () => {
+		server.stop();
+		await mgr.stop();
+		await fs.rm(stateDir, { recursive: true, force: true });
+	});
+	await mgr.createChannel(actor("alice"), { id: "ops", name: "#ops", visibility: "private" });
+	const unit = agentDto("private-removed-unit", "ops");
+	seedAgent(mgr, unit);
+	let removed: SquadEvent | undefined;
+	mgr.on("event", (event: SquadEvent) => {
+		if (event.type === "removed" && event.id === unit.id) removed = event;
+	});
+
+	await mgr.applyCommand({ type: "remove", id: unit.id, deleteWorktree: false }, actor("alice"));
+	expect(removed).toEqual({ type: "removed", id: unit.id, channelId: "ops" });
+
+	const frames: Record<string, string[]> = { alice: [], carol: [] };
+	const host = server as unknown as DeliverHost;
+	for (const userId of ["alice", "carol"]) host.clients.add({ data: { userId, orgId: "org-a", role: "admin", displayName: userId }, send: (frame: string) => frames[userId]!.push(frame) });
+	await host.deliverEvent(undefined, removed!);
+	expect(frames.alice).toHaveLength(1);
+	expect(frames.carol).toEqual([]);
+});
+
 test("a failed membership recheck drops the event instead of using its stale member list", async () => {
 	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "channel-recheck-failure-"));
 	const mgr = new SquadManager({ stateDir });

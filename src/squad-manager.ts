@@ -7499,9 +7499,10 @@ export class SquadManager extends EventEmitter {
 			const rec = this.agents.get(id);
 			if (!rec) continue;
 			await rec.agent.stop().catch(() => {});
+			const channelId = rec.dto.channelId;
 			this.agents.delete(id);
 			this.reconciledStops.add(id);
-			this.emit("event", { type: "removed", id } satisfies SquadEvent);
+			this.emit("event", { type: "removed", id, channelId } satisfies SquadEvent);
 			stoppedAny = true;
 		}
 		if (stoppedAny) await this.persist();
@@ -7547,9 +7548,10 @@ export class SquadManager extends EventEmitter {
 		if (id && this.agents.has(id)) {
 			const stale = this.agents.get(id)!;
 			await stale.agent.stop().catch(() => {});
+			const channelId = stale.dto.channelId;
 			this.agents.delete(id);
 			this.reconciledStops.add(id);
-			this.emit("event", { type: "removed", id } satisfies SquadEvent);
+			this.emit("event", { type: "removed", id, channelId } satisfies SquadEvent);
 		}
 		// reconcileParallelResume (or the self-heal above) just stopped a live agent under this exact id
 		// ahead of this re-spawn: prior partial work may already sit in the reused worktree — say so in the
@@ -7695,8 +7697,9 @@ export class SquadManager extends EventEmitter {
 			// reconcileParallelResume's teardown: delete + emit removed + persist) before rethrowing so the
 			// commission workflow still learns the onboard step failed.
 			await rec.agent.stop().catch(() => {});
+			const channelId = rec.dto.channelId;
 			this.agents.delete(id);
-			this.emit("event", { type: "removed", id } satisfies SquadEvent);
+			this.emit("event", { type: "removed", id, channelId } satisfies SquadEvent);
 			await this.persist();
 			throw err;
 		}
