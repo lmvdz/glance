@@ -50,8 +50,8 @@ export function MentionOverlay({ text }: { text: string }) {
   return (
     <div
       aria-hidden
-      className="pointer-events-none absolute inset-0 whitespace-pre-wrap break-words px-3 py-2.5 text-[13px] leading-6"
-      style={{ color: '#DEDEE2' }}
+      className="pointer-events-none absolute inset-0 whitespace-pre-wrap break-words px-3 py-2.5 text-body leading-6"
+      style={{ color: 'var(--color-ink-text-body)' }}
     >
       {segments.map((segment, index) =>
         segment.kind === 'text' ? (

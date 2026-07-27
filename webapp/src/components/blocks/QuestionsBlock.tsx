@@ -160,7 +160,7 @@ function QuestionField({ question, resolved, onSubmit, disabled }: QuestionField
       ) : (
         <div className="space-y-1.5">
           {question.type === 'single' && question.options.map((option) => (
-            <label key={option} className="flex cursor-pointer items-center gap-2 text-[13px]" style={{ color: 'var(--wf-text-muted)' }}>
+            <label key={option} className="flex cursor-pointer items-center gap-2 text-body" style={{ color: 'var(--wf-text-muted)' }}>
               <input
                 type="radio"
                 name={`${question.id}`}
@@ -177,7 +177,7 @@ function QuestionField({ question, resolved, onSubmit, disabled }: QuestionField
           ))}
 
           {question.type === 'multi' && question.options.map((option) => (
-            <label key={option} className="flex cursor-pointer items-center gap-2 text-[13px]" style={{ color: 'var(--wf-text-muted)' }}>
+            <label key={option} className="flex cursor-pointer items-center gap-2 text-body" style={{ color: 'var(--wf-text-muted)' }}>
               <input
                 type="checkbox"
                 value={option}
@@ -198,7 +198,7 @@ function QuestionField({ question, resolved, onSubmit, disabled }: QuestionField
               onChange={(event) => setFreeform(event.target.value)}
               rows={3}
               placeholder="Type your answer…"
-              className="w-full rounded-md border px-2 py-1.5 text-[13px] outline-none"
+              className="w-full rounded-md border px-2 py-1.5 text-body outline-none"
               style={{ borderColor: 'var(--wf-border)', backgroundColor: 'var(--wf-paper)', color: 'var(--wf-text)' }}
             />
           )}
@@ -208,7 +208,7 @@ function QuestionField({ question, resolved, onSubmit, disabled }: QuestionField
               type="button"
               disabled={!canSubmit}
               onClick={submit}
-              className="rounded-md border px-2.5 py-1 text-[12px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+              className="rounded-md border px-2.5 py-1 text-caption font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50"
               style={{ borderColor: 'var(--wf-border-strong, var(--wf-border))', color: 'var(--wf-accent)', backgroundColor: 'var(--wf-surface-raised)' }}
             >
               Save answer

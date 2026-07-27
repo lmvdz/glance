@@ -104,8 +104,8 @@ const AuthGate = ({ children }: { children: React.ReactNode }) => {
   const { status } = useAuth();
   if (status === 'loading') {
     return (
-      <div className="flex h-screen w-full items-center justify-center bg-[#0a0a0b]">
-        <Loader2 className="h-5 w-5 animate-spin text-[#5c5c62]" />
+      <div className="flex h-screen w-full items-center justify-center bg-ink">
+        <Loader2 className="h-5 w-5 animate-spin text-ink-text-subtle" />
       </div>
     );
   }

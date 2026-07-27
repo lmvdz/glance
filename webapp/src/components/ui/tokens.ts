@@ -62,25 +62,22 @@ const MAP: Record<Tone, ToneClasses> = {
     stroke: 'text-red-500',
   },
   info: {
-    dot: 'bg-blue-400',
-    text: 'text-blue-600 dark:text-blue-400',
-    pillBg: 'bg-blue-100 dark:bg-blue-900/40',
-    pillText: 'text-blue-700 dark:text-blue-300',
-    border: 'border-blue-200 dark:border-blue-900/60',
-    softBg: 'bg-blue-50 dark:bg-blue-950/30',
-    stroke: 'text-blue-500',
+    dot: 'bg-sky-400',
+    text: 'text-sky-700 dark:text-sky-300',
+    pillBg: 'bg-sky-100 dark:bg-sky-950/40',
+    pillText: 'text-sky-800 dark:text-sky-200',
+    border: 'border-sky-200 dark:border-sky-900/60',
+    softBg: 'bg-sky-50 dark:bg-sky-950/30',
+    stroke: 'text-sky-500',
   },
   neutral: {
-    dot: 'bg-gray-300 dark:bg-gray-600',
-    text: 'text-gray-600 dark:text-gray-300',
-    pillBg: 'bg-gray-100 dark:bg-gray-800',
-    pillText: 'text-gray-600 dark:text-gray-300',
-    border: 'border-gray-200 dark:border-gray-800',
-    softBg: 'bg-gray-50 dark:bg-gray-900',
-    // gray-500 in light lifts the neutral sparkline off the white card (gray-400 was faint there);
-    // gray-400 in dark keeps it legible without reintroducing a warm accent. Only StatTile's neutral
-    // sparkline reads this stroke, so the bump is scoped to the Daily panel.
-    stroke: 'text-gray-500 dark:text-gray-400',
+    dot: 'bg-ink-border-2',
+    text: 'text-ink-text-label',
+    pillBg: 'bg-ink-surface',
+    pillText: 'text-ink-text-label',
+    border: 'border-ink-border',
+    softBg: 'bg-ink',
+    stroke: 'text-ink-text-muted',
   },
 };
 

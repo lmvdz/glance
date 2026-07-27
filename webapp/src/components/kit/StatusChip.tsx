@@ -65,16 +65,14 @@ const KNOWN: Record<string, StatusMeta> = {
 
 function toneClasses(tone: StatusChipTone, variant: StatusChipVariant): string {
   if (tone === 'ember') {
-    if (variant === 'solid') return 'bg-[color:var(--wf-accent)] text-black border-transparent';
-    if (variant === 'outline') return 'border-[color:var(--wf-accent)] text-[color:var(--wf-accent)] bg-transparent';
-    return 'bg-[color:var(--wf-accent-soft)] text-[color:var(--wf-accent)] border-transparent';
+    if (variant === 'solid') return 'bg-ember text-ink border-transparent';
+    if (variant === 'outline') return 'border-ember text-ember-link bg-transparent';
+    return 'bg-ember/10 text-ember-link border-transparent';
   }
   if (tone === 'human') {
-    // The references' pink role, translated to the app's cool blue ramp (humans = cool,
-    // agents = warm ember — visually distinct species, per the brand decision).
-    if (variant === 'solid') return 'bg-blue-100 text-blue-700 border-transparent dark:bg-blue-950/50 dark:text-blue-300';
-    if (variant === 'outline') return 'border-blue-300 text-blue-600 bg-transparent dark:border-blue-800 dark:text-blue-400';
-    return 'bg-blue-50 text-blue-500 border-transparent dark:bg-blue-950/30 dark:text-blue-400';
+    if (variant === 'solid') return 'bg-ink-surface text-ink-text-label border-transparent';
+    if (variant === 'outline') return 'border-ink-border-2 text-ink-text-label bg-transparent';
+    return 'bg-ink text-ink-text-muted border-transparent';
   }
   if (tone === 'success') {
     // Reference B's resolved-check green — matches the app's existing emerald semantic ramp.
@@ -92,10 +90,9 @@ function toneClasses(tone: StatusChipTone, variant: StatusChipVariant): string {
     if (variant === 'outline') return 'border-amber-300 text-amber-600 bg-transparent dark:border-amber-800 dark:text-amber-400';
     return 'bg-amber-50 text-amber-500 border-transparent dark:bg-amber-950/30 dark:text-amber-500';
   }
-  // neutral
-  if (variant === 'solid') return 'bg-ink-border text-ink-text-label border-transparent bg-ink-surface text-ink-text-label';
-  if (variant === 'outline') return 'border-ink-border-2 text-ink-text0 bg-transparent border-ink-border-2 text-ink-text-subtle';
-  return 'bg-ink-surface text-ink-text-subtle border-transparent bg-panel text-ink-text-label';
+  if (variant === 'solid') return 'bg-ink-surface text-ink-text-label border-transparent';
+  if (variant === 'outline') return 'border-ink-border-2 text-ink-text-subtle bg-transparent';
+  return 'bg-panel text-ink-text-label border-transparent';
 }
 
 function resolve(

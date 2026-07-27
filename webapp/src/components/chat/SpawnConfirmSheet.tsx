@@ -79,13 +79,13 @@ export const SpawnConfirmSheet: React.FC<SpawnConfirmSheetProps> = ({ promptSeed
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               rows={6}
-              className="w-full rounded-lg border border-ink-border bg-ink p-2 text-[12px] leading-relaxed text-ink-text-body outline-none focus-visible:ring-2 focus-visible:ring-amber-500 border-ink-border-2 bg-panel text-ink-text-body"
+              className="w-full rounded-lg border border-ink-border-2 bg-panel p-2 text-caption leading-relaxed text-ink-text-body outline-none focus-visible:ring-2 focus-visible:ring-ember"
             />
           </div>
 
-          <div className="rounded-lg border border-ink-border bg-ink p-2 border-ink-border-2 bg-panel">
-            <div className="mb-1 text-caption font-medium uppercase tracking-wide text-ink-text-muted">Target repo</div>
-            <div className="font-mono text-[12px] text-ink-text-label">{repoLabel}</div>
+          <div className="rounded-lg border border-ink-border-2 bg-panel p-2">
+            <div className="mb-1 font-mono text-caption font-medium uppercase tracking-[0.16em] text-ink-text-muted">Target repo</div>
+            <div className="font-mono text-caption text-ink-text-label">{repoLabel}</div>
           </div>
 
           {pageContextBlock && (
@@ -113,7 +113,7 @@ export const SpawnConfirmSheet: React.FC<SpawnConfirmSheetProps> = ({ promptSeed
             type="button"
             onClick={onCancel}
             disabled={busy}
-            className="rounded-full border border-ink-border px-3 py-1.5 text-[12px] font-medium text-ink-text-label transition-colors hover:bg-ink-surface disabled:cursor-not-allowed disabled:opacity-50 border-ink-border-2 text-ink-text-label dark:hover:bg-ink-surface"
+            className="rounded-full border border-ink-border-2 px-3 py-1.5 text-caption font-medium text-ink-text-label transition-colors hover:bg-ink-surface disabled:cursor-not-allowed disabled:opacity-50"
           >
             Cancel
           </button>
@@ -121,7 +121,7 @@ export const SpawnConfirmSheet: React.FC<SpawnConfirmSheetProps> = ({ promptSeed
             type="button"
             onClick={() => void handleConfirm()}
             disabled={busy || !prompt.trim()}
-            className="flex items-center gap-1.5 rounded-full bg-amber-600 px-3.5 py-1.5 text-[12px] font-semibold text-white transition-colors hover:bg-amber-700 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-amber-500 text-ink-text dark:hover:bg-amber-400"
+            className="flex items-center gap-1.5 rounded-full bg-ember px-3.5 py-1.5 text-caption font-semibold text-ink transition-colors hover:bg-ember-link disabled:cursor-not-allowed disabled:opacity-50"
           >
             {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : <Rocket className="h-3.5 w-3.5" aria-hidden />}
             Confirm — spawn the unit

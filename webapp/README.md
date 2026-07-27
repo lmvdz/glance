@@ -5,7 +5,9 @@ This is the active Vite + React starter UI for the future dashboard.
 The previous React dashboard lives in `../webapp-legacy/` for reference while
 we rip useful pieces forward.
 
-The UI keeps the starter look. Omp-squad data enters through thin adapters:
+The UI uses one shared ink-and-ember design system: `src/index.css` owns the
+light/dark ink ramps and typography scale; components use `ink-*`, `panel`, and
+`ember` tokens, reserving semantic amber, sky, emerald, and red for state.
 `/api/projects`, `/api/features`, `/api/features/:id/pipeline`,
 `/api/agents`, `/api/capabilities`, `/api/capability-catalog`, and `/ws`
 are mapped into the starter task/capability surfaces in `src/lib/task-model.ts`,

@@ -5,9 +5,9 @@ import type { TodoPhaseDTO, TodoStatus } from '../../lib/dto';
 // Moved verbatim from AssistantChat.tsx (concern 09 — monolith split).
 
 const todoDotStyle: Record<TodoStatus, string> = {
-  completed: 'border-emerald-500 bg-emerald-500 text-white dark:border-emerald-400 dark:bg-emerald-400 dark:text-emerald-950',
-  in_progress: 'border-blue-500 bg-blue-500 text-white dark:border-blue-400 dark:bg-blue-400 dark:text-blue-950',
-  pending: 'border-ink-border-2 bg-transparent text-transparent border-ink-border-2',
+  completed: 'border-emerald-500 bg-emerald-500 text-white dark:border-emerald-400 dark:bg-emerald-400 dark:text-ink',
+  in_progress: 'border-sky-500 bg-sky-500 text-white dark:border-sky-400 dark:bg-sky-400 dark:text-ink',
+  pending: 'border-ink-border-2 bg-transparent text-transparent',
 };
 
 export const TodoPanel = ({ phases, collapsed, onToggle }: { phases: TodoPhaseDTO[]; collapsed: boolean; onToggle: () => void }) => {

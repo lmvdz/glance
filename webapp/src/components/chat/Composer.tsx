@@ -1024,10 +1024,10 @@ export const Composer = ({
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
           placeholder={placeholder ?? 'Type @ to link a task...'}
-          className="relative w-full resize-none overflow-y-auto border-none bg-transparent px-3 py-2.5 text-[13px] leading-6 outline-none"
+          className="relative w-full resize-none overflow-y-auto border-none bg-transparent px-3 py-2.5 text-body leading-6 outline-none"
           // Transparent text, visible caret: the overlay draws what a person reads, the textarea keeps
           // what gets sent. Selection stays visible via ::selection on the real input.
-          style={{ color: 'transparent', caretColor: '#F0A35A' }}
+          style={{ color: 'transparent', caretColor: 'var(--color-ember)' }}
           disabled={isLoading || isSending}
           rows={1}
           {...mentionMenu.comboboxProps}
@@ -1106,7 +1106,7 @@ export const Composer = ({
                     onKeyDown={handleGrrKeyDown}
                     placeholder="What just annoyed you?"
                     disabled={grrBusy}
-                    className="w-full rounded-lg bg-ink px-2 py-1.5 text-[13px] text-ink-text outline-none placeholder:text-ink-text-subtle bg-ink text-ink-text-body"
+                    className="w-full rounded-lg bg-ink px-2 py-1.5 text-body text-ink-text-body outline-none placeholder:text-ink-text-subtle"
                   />
                   <div className="mt-1 flex items-center justify-between px-1 text-caption text-ink-text-subtle">
                     <span>{grrBusy ? 'Logging…' : 'Enter logs it · Esc cancels'}</span>
