@@ -118,8 +118,26 @@ export class VoiceCallBridgeClient {
 			const timer = setTimeout(() => {
 				if (settled) return;
 				settled = true;
+				// A hello that never arrives leaves the socket half-open with nothing left to wait for —
+				// close it here rather than leaking an open connection (matches `pinSession` rejection's
+				// own `client.close()` a few lines down in the caller for the same reason). Detach the
+				// handlers FIRST — this rejection already tells the caller everything it needs to know, so
+				// the close this triggers must not ALSO fire `onSocketLoss` a tick later (that would be a
+				// second, redundant "the connection died" signal for what is really just an abandoned
+				// connect attempt).
+				try {
+					if (socket) {
+						socket.onclose = null;
+						socket.onerror = null;
+						socket.onmessage = null;
+						socket.close();
+					}
+				} catch {
+					/* already gone */
+				}
 				reject(new Error(`bridge hello timed out after ${this.helloTimeoutMs}ms (${this.url})`));
 			}, this.helloTimeoutMs);
+			timer.unref?.(); // every other timer in this codebase does this (voice-call-journal.ts, voice-call-manager.ts, etc.) — a pending hello must never keep the process/test-runner alive.
 			let socket: BridgeSocketLike;
 			try {
 				socket = this.connectFn(this.url);
@@ -213,6 +231,7 @@ export class VoiceCallBridgeClient {
 				this.pending.delete(requestId);
 				resolve({ requestId, ok: false, reason: "ack-timeout" });
 			}, this.ackTimeoutMs);
+			timer.unref?.(); // same hygiene as the hello timer above — an outstanding ack must never keep the process alive.
 			this.pending.set(requestId, { resolve, timer });
 			try {
 				this.send(frame);

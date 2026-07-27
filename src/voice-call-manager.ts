@@ -221,6 +221,12 @@ interface ChannelRuntime {
 	tailer?: JournalTailer;
 	bridge?: VoiceCallBridgeClient;
 	livenessTimer?: ReturnType<typeof setInterval>;
+	/** Guards against overlapping liveness-probe ticks — a broker round-trip plus a bridge reconnect
+	 *  attempt can easily outlast `livenessProbeIntervalMs`, exactly like `observer.ts`'s own documented
+	 *  "the gate run can outlast the interval" guard. Without this, a slow tick leaves the PREVIOUS
+	 *  probe's `connectAndPin` (and its real WebSocket connect attempt) still in flight while the next
+	 *  timer tick starts a brand new one — unbounded concurrent reconnect attempts under load. */
+	livenessProbing?: boolean;
 	ended: boolean;
 }
 
@@ -377,6 +383,12 @@ export class VoiceCallCoordinator {
 			},
 		});
 		const hello = await client.connect();
+		if (rt.ended) {
+			// The runtime moved on (ended via another path, or `stop()`) while this connect attempt was
+			// still in flight — never let a stale reconnect resurrect a binding that has already closed.
+			client.close();
+			return;
+		}
 		const pinned = this.bindings.pinSession(channelId, hello.sessionId);
 		if (!pinned.ok) {
 			client.close();
@@ -415,34 +427,43 @@ export class VoiceCallCoordinator {
 	}
 
 	/** One liveness check while `degraded`: ask the broker whether the process is still alive, and if
-	 *  so, attempt to reconnect the bridge (which re-checks the pinned session identity). */
+	 *  so, attempt to reconnect the bridge (which re-checks the pinned session identity). Re-entrancy
+	 *  guarded (`rt.livenessProbing`, see `ChannelRuntime`'s doc) — a tick that outlasts the interval
+	 *  must never overlap with the next one. */
 	private async probeLiveness(channelId: string): Promise<void> {
-		const binding = this.bindings.get(channelId);
-		if (!binding || binding.state !== "degraded" || !binding.callId) {
-			this.stopLivenessProbe(channelId);
-			return;
-		}
-		let calls: BrokerCallView[];
+		const rt = this.runtime(channelId);
+		if (rt.livenessProbing) return;
+		rt.livenessProbing = true;
 		try {
-			calls = await this.broker.listCalls();
-		} catch {
-			return; // broker itself unreachable right now — stay degraded, try again next tick
-		}
-		const mine = calls.find((c) => c.callId === binding.callId);
-		if (!mine || mine.exit !== null) {
-			this.stopLivenessProbe(channelId);
-			await this.endBinding(channelId, "broker-exit");
-			return;
-		}
-		// Broker says the process is still alive — try to reconnect the bridge socket.
-		try {
-			await this.connectAndPin(channelId, binding, binding.controlToken);
-			this.stopLivenessProbe(channelId);
-		} catch {
-			// Still unreachable (or a port-reuse rejection already ended the binding above) — stay
-			// degraded and let the next tick retry, unless connectAndPin already ended it.
-			const after = this.bindings.get(channelId);
-			if (after?.state === "ended") this.stopLivenessProbe(channelId);
+			const binding = this.bindings.get(channelId);
+			if (!binding || binding.state !== "degraded" || !binding.callId) {
+				this.stopLivenessProbe(channelId);
+				return;
+			}
+			let calls: BrokerCallView[];
+			try {
+				calls = await this.broker.listCalls();
+			} catch {
+				return; // broker itself unreachable right now — stay degraded, try again next tick
+			}
+			const mine = calls.find((c) => c.callId === binding.callId);
+			if (!mine || mine.exit !== null) {
+				this.stopLivenessProbe(channelId);
+				await this.endBinding(channelId, "broker-exit");
+				return;
+			}
+			// Broker says the process is still alive — try to reconnect the bridge socket.
+			try {
+				await this.connectAndPin(channelId, binding, binding.controlToken);
+				this.stopLivenessProbe(channelId);
+			} catch {
+				// Still unreachable (or a port-reuse rejection already ended the binding above) — stay
+				// degraded and let the next tick retry, unless connectAndPin already ended it.
+				const after = this.bindings.get(channelId);
+				if (after?.state === "ended") this.stopLivenessProbe(channelId);
+			}
+		} finally {
+			rt.livenessProbing = false;
 		}
 	}
 
@@ -637,6 +658,7 @@ export class VoiceCallCoordinator {
 
 	stop(): void {
 		for (const [channelId, rt] of this.runtimes) {
+			rt.ended = true; // matches onJournalMissing/endCall — guards a still in-flight connectAndPin (see its own `rt.ended` check) against resurrecting a binding after shutdown.
 			rt.tailer?.stop();
 			this.stopLivenessProbe(channelId);
 			try {

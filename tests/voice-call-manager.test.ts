@@ -120,13 +120,18 @@ async function waitFor(predicate: () => boolean, timeoutMs = 3000, stepMs = 15):
 }
 
 function makeCoordinator(opts: { stateDir: string; broker: BrokerClient; cards: EmitCardInput[]; livenessProbeIntervalMs?: number; journalPollIntervalMs?: number }): VoiceCallCoordinator {
-	return new VoiceCallCoordinator({
+	const coordinator = new VoiceCallCoordinator({
 		stateDir: opts.stateDir,
 		broker: opts.broker,
 		emitCard: async (input) => { opts.cards.push(input); },
 		journalPollIntervalMs: opts.journalPollIntervalMs ?? 30,
 		livenessProbeIntervalMs: opts.livenessProbeIntervalMs ?? 60,
 	});
+	// Registered here (not just the explicit `coordinator.stop()` calls each test makes on its own
+	// happy path) so a failed assertion mid-test still tears down every real timer/socket this
+	// coordinator owns — `stop()` is idempotent, so this is a harmless no-op on the tests' own calls.
+	cleanups.push(() => coordinator.stop());
+	return coordinator;
 }
 
 describe("startCall: thread-aware start with pinned identity", () => {
