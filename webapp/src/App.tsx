@@ -6,7 +6,7 @@
 import React from 'react';
 import { HubShell } from './components/hub/HubShell';
 import { TaskDetail } from './components/TaskDetail';
-import { TaskListView } from './components/TaskListView';
+import { WorkSurface } from './components/hub/WorkSurface';
 import { TaskProvider, useTaskContext } from './context/TaskContext';
 import { PageContextProvider, PageContextScope } from './context/PageContext';
 import {
@@ -89,13 +89,7 @@ const WorkbenchRoute = ({ route }: { route: Extract<HubRoute, { kind: 'workbench
   if (route.view === 'plans') return <PlanSurface name={route.id} />;
   if (route.view === 'gate-verdict') return <VerdictSurface routeId={route.id} />;
   if (route.view === 'org') return <PeopleSurface />;
-  if (route.view === 'tasks' && !selectedTaskId) {
-    return (
-      <PageContextScope value={tasksPageContext}>
-        <TaskListView />
-      </PageContextScope>
-    );
-  }
+  if (route.view === 'tasks' && !selectedTaskId) return <WorkSurface />;
 
   return (
     <PageContextScope value={tasksPageContext}>
