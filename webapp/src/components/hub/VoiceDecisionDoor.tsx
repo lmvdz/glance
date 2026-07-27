@@ -125,7 +125,7 @@ export function VoiceDecisionDoor({
           role="note"
           aria-label={register?.ariaLabel}
           title={register?.title}
-          className="mt-2.5 max-w-[480px] text-[17px] leading-[1.45] focus-visible:outline-none"
+          className="mt-2.5 max-w-[480px] rounded-[3px] text-[17px] leading-[1.45] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ember focus-visible:ring-offset-4 focus-visible:ring-offset-[#0C0B0B]"
           style={{ textWrap: 'pretty', ...(register?.style ?? { color: '#F2F2F4' }) }}
         >
           {model.question}

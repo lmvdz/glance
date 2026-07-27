@@ -239,6 +239,16 @@ describe('VoiceDecisionDoor', () => {
     expect(html).not.toContain('opacity:0.6');
   });
 
+  test('every control in the door shows a focus ring — none is suppressed', () => {
+    const html = renderToStaticMarkup(<VoiceDecisionDoor {...doorProps} />);
+    // `outline-none` with nothing in its place is an invisible focus target. Every element that
+    // suppresses the default outline must put a ring back.
+    for (const fragment of html.split('class="').slice(1)) {
+      const classes = fragment.slice(0, fragment.indexOf('"'));
+      if (classes.includes('focus-visible:outline-none')) expect(classes).toContain('focus-visible:ring-2');
+    }
+  });
+
   test('options are real, keyboard-reachable buttons with their consequences', () => {
     const html = renderToStaticMarkup(<VoiceDecisionDoor {...doorProps} />);
     expect(html).toContain('<button type="button"');
