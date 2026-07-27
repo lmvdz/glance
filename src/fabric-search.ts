@@ -282,21 +282,70 @@ function agoLabel(ts: number | undefined, now: number): string | undefined {
  * "Do not repeat: " so the injected line reads as an imperative instruction, not a passive
  * description — the label taxonomy (`PRIMER_LABEL`) is untouched, only the body text changes.
  */
-export function buildContextPrimer(snapshot: FabricSnapshot, query: string, opts: { topK?: number; now?: number } = {}): string {
-	const results = searchFabric(snapshot, query, { topK: opts.topK ?? 6 });
-	if (results.length === 0) return "";
+/** Render one primer line — shared by pinned docs and ranked hits so both regions read
+ *  identically. `weak` is only ever set for ranked hits: a pinned fact is present by STATE, and
+ *  labeling it "weak match" would invite the model to discount exactly the line that must hold. */
+function primerLine(opts: { type: KbDocType; title: string; body: string; source?: string; ts?: number; now: number; weak?: boolean }): string {
+	const provenance: string[] = [];
+	if (opts.source) provenance.push(`src: ${opts.source}`);
+	const ago = agoLabel(opts.ts, opts.now);
+	if (ago) provenance.push(ago);
+	if (opts.weak) provenance.push("weak match");
+	const suffix = provenance.length ? ` (${provenance.join(", ")})` : "";
+	const imperative = opts.type === "failure" ? "Do not repeat: " : "";
+	return `- **${PRIMER_LABEL[opts.type]}** — ${imperative}${trim(`${opts.title}: ${opts.body}`.replace(/\s+/g, " ").trim(), 200)}${suffix}`;
+}
+
+/** Primer region caps and the deterministic character budget (~800 tokens). Exported for tests. */
+export const PRIMER_BUDGET = { failures: 3, decisions: 4, chars: 3200 } as const;
+
+/**
+ * The primer is REGION-PARTITIONED, not one relevance ranking (research-memory-eval-harness
+ * Rank 1; HARNESS-SPEC G09). The failure this prevents is structural: a constraint like "do not
+ * repeat X" has near-zero lexical overlap with the task query that violates it, so any pure
+ * ranking eventually evicts exactly the line that mattered, exactly when it matters.
+ *
+ *   Region 1 — governance: recurring-failure warnings, pinned UNCONDITIONALLY (most recent
+ *     first, capped). Never evicted for other content; the budget cannot touch them.
+ *   Region 2 — settled state: currently-valid decisions, pinned (superseded decisions never
+ *     reach the snapshot — fabric.ts excludes them at projection). Evicted only after Region 3
+ *     is empty, oldest first.
+ *   Region 3 — episodic: everything else, ranked by relevance as before. First to be evicted
+ *     under budget pressure.
+ *
+ * Consequence, deliberate: an irrelevant query no longer yields an empty primer when pinned
+ * facts exist — current decisions and standing warnings are relevant BY STATE, not by query.
+ * "" still means "this actor's world holds nothing pinned and nothing relevant".
+ */
+export function buildContextPrimer(snapshot: FabricSnapshot, query: string, opts: { topK?: number; now?: number; budgetChars?: number } = {}): string {
 	const now = opts.now ?? Date.now();
-	const topScore = results[0]!.score;
-	const lines = results.map((r) => {
-		const provenance: string[] = [];
-		if (r.source) provenance.push(`src: ${r.source}`);
-		const ago = agoLabel(r.ranAt, now);
-		if (ago) provenance.push(ago);
-		if (topScore > 0 && r.score < topScore * 0.4) provenance.push("weak match");
-		const suffix = provenance.length ? ` (${provenance.join(", ")})` : "";
-		const imperative = r.type === "failure" ? "Do not repeat: " : "";
-		return `- **${PRIMER_LABEL[r.type]}** — ${imperative}${trim(`${r.title}: ${r.snippet}`.replace(/\s+/g, " ").trim(), 200)}${suffix}`;
-	});
-	const body = ["### Related context from prior work (read-only, may be stale):", ...lines].join("\n");
-	return fenceUntrusted("context primer", body);
+	const budget = opts.budgetChars ?? PRIMER_BUDGET.chars;
+	const byTsDesc = (a: KbDoc, b: KbDoc): number => (b.ts ?? 0) - (a.ts ?? 0);
+	const docs = fabricDocuments(snapshot);
+	const pinnedFailures = docs.filter((d) => d.type === "failure").sort(byTsDesc).slice(0, PRIMER_BUDGET.failures);
+	const pinnedDecisions = docs.filter((d) => d.type === "decision").sort(byTsDesc).slice(0, PRIMER_BUDGET.decisions);
+	const pinnedIds = new Set([...pinnedFailures, ...pinnedDecisions].map((d) => d.id));
+
+	// Region 3: over-fetch by the pinned count so exclusion can't starve it, then re-cap.
+	const topK = opts.topK ?? 6;
+	const ranked = searchFabric(snapshot, query, { topK: topK + pinnedIds.size })
+		.filter((r) => !pinnedIds.has(r.id))
+		.slice(0, topK);
+
+	if (pinnedIds.size === 0 && ranked.length === 0) return "";
+	const topScore = ranked[0]?.score ?? 0;
+
+	const region1 = pinnedFailures.map((d) => primerLine({ type: d.type, title: d.title, body: d.text, source: d.source, ts: d.ts, now }));
+	const region2 = pinnedDecisions.map((d) => primerLine({ type: d.type, title: d.title, body: d.text, source: d.source, ts: d.ts, now }));
+	const region3 = ranked.map((r) => primerLine({ type: r.type, title: r.title, body: r.snippet, source: r.source, ts: r.ranAt, now, weak: topScore > 0 && r.score < topScore * 0.4 }));
+
+	// Deterministic budget eviction: drop Region 3 from the bottom, then Region 2 from the bottom
+	// (oldest — the lists are recency-sorted), NEVER Region 1. If constraints alone exceed the
+	// budget, they all stay: a truncated warning is a governance failure, an over-budget primer is
+	// a cost. (HARNESS-SPEC G09's kill condition is a constraint losing its slot to episodic chat.)
+	const header = "### Related context from prior work (read-only, may be stale):";
+	const assemble = (): string => [header, ...region1, ...region2, ...region3].join("\n");
+	while (assemble().length > budget && region3.length > 0) region3.pop();
+	while (assemble().length > budget && region2.length > 0) region2.pop();
+	return fenceUntrusted("context primer", assemble());
 }
