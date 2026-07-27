@@ -5,7 +5,7 @@
 
 import React from 'react';
 import { HubShell } from './components/hub/HubShell';
-import { TaskDetail } from './components/TaskDetail';
+import { DocSurface } from './components/hub/DocSurface';
 import { WorkSurface } from './components/hub/WorkSurface';
 import { TaskProvider, useTaskContext } from './context/TaskContext';
 import { PageContextProvider, PageContextScope } from './context/PageContext';
@@ -23,7 +23,7 @@ import { CommandPalette } from './components/CommandPalette';
 import { UnseenSurface } from './components/hub/UnseenSurface';
 import { MondaySurface } from './components/hub/MondaySurface';
 import { CostSurface } from './components/hub/CostSurface';
-import { DesignReviewView } from './components/DesignReviewView';
+
 import { RealitySurface } from './components/hub/RealitySurface';
 import { PlanSurface } from './components/hub/PlanSurface';
 import { VerdictSurface } from './components/hub/VerdictSurface';
@@ -77,13 +77,7 @@ const WorkbenchRoute = ({ route }: { route: Extract<HubRoute, { kind: 'workbench
   if (route.view === 'fog') return <UnseenSurface />;
   if (route.view === 'daily') return <MondaySurface />;
   if (route.view === 'economics') return <CostSurface />;
-  if (route.view === 'review') {
-    return (
-      <PageContextScope value={reviewPageContext}>
-        <DesignReviewView />
-      </PageContextScope>
-    );
-  }
+  if (route.view === 'review') return <DocSurface taskId={reviewTaskId ?? undefined} docPath={reviewDocPath} />;
   if (route.view === 'capabilities') return <BorrowedSurface />;
   if (route.view === 'plan-reality') return <RealitySurface />;
   if (route.view === 'plans') return <PlanSurface name={route.id} />;
@@ -91,11 +85,7 @@ const WorkbenchRoute = ({ route }: { route: Extract<HubRoute, { kind: 'workbench
   if (route.view === 'org') return <PeopleSurface />;
   if (route.view === 'tasks' && !selectedTaskId) return <WorkSurface />;
 
-  return (
-    <PageContextScope value={tasksPageContext}>
-      <TaskDetail />
-    </PageContextScope>
-  );
+  return <DocSurface taskId={selectedTaskId ?? undefined} />;
 };
 
 const AppContent = () => {
