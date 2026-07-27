@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { askedAgainLine, buildChannelThreadViews, channelCardActionHref, dispatchChannelCard, doorLabel, foldRepeatedAsks, groupLifecycleRuns, latestChannelSeq, pinnedChip, reduceChannelEntryWindow } from './channelTimeline';
+import { askedAgainLine, cardUnitId, buildChannelThreadViews, channelCardActionHref, dispatchChannelCard, doorLabel, foldRepeatedAsks, groupLifecycleRuns, latestChannelSeq, pinnedChip, reduceChannelEntryWindow } from './channelTimeline';
 import type { ChannelEntry } from './dto';
 import { entryTimeLabel } from './hub';
 
@@ -27,14 +27,18 @@ describe('channel timeline dispatch', () => {
     expect(card.pinned).toEqual([{ label: 'Agent', value: 'room-08' }, { label: 'Verdict', value: 'held' }]);
   });
 
-  test('needs-you cards link to the intervene hash route from projected refs', () => {
+  test('needs-you cards carry the unit they are about, and fall back to its room', () => {
     const card = dispatchChannelCard(entry({
       id: 'n-route',
       seq: 2,
       event: { kind: 'needs-you', payload: { refs: { unitId: 'agent one' }, face: { title: 'Needs you', pinned: { agent: 'agent one', age: '2m', 'why stopped': 'Approve gate' } } } },
     }));
-    expect(card.actionHref).toBe('#/intervene/agent%20one');
-    expect(channelCardActionHref(card.entry)).toBe('#/intervene/agent%20one');
+    // In the room the card opens the QUESTION via onAnswer; the href is the fallback for anywhere
+    // that cannot answer in place, and it goes to the unit's own room rather than a step-in screen
+    // that no longer exists.
+    expect(cardUnitId(card.entry)).toBe('agent one');
+    expect(card.actionHref).toBe('#/channel/node%3Aagent%20one');
+    expect(channelCardActionHref(card.entry)).toBe('#/channel/node%3Aagent%20one');
   });
 
   test('needs-you resolution is a separate success card, not a mutation of the original card', () => {
@@ -228,7 +232,9 @@ describe('card body de-duplication', () => {
 describe('door labels', () => {
   test('each kind names where its door actually goes', () => {
     expect([doorLabel('plan-card'), doorLabel('token-burn-snapshot'), doorLabel('needs-you'), doorLabel('what-is-this')])
-      .toEqual(['Open plan DAG', 'Open fleet economics', 'Step into the agent', 'Open']);
+      // A waiting card's door says what you are about to DO, not where you are about to go: the thing
+      // you want when something is stopped is to answer it.
+      .toEqual(['Open plan DAG', 'Open fleet economics', 'Answer it', 'Open']);
   });
 
   test('a token-burn card never offers to open a plan DAG', () => {

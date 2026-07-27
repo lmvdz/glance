@@ -1,7 +1,7 @@
 import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertCircle, CheckCircle2, ChevronRight, CircleDot, FileText, Flame, GitMerge, Hash, Reply, Rocket, ShieldAlert } from 'lucide-react';
 import type { ChannelEntry } from '../../lib/dto';
-import { askedAgainLine, buildChannelThreadViews, doorLabel, groupLifecycleRuns, runSummary, type ChannelCardTone, type ChannelCardView } from '../../lib/channelTimeline';
+import { askedAgainLine, buildChannelThreadViews, cardUnitId, doorLabel, groupLifecycleRuns, runSummary, type ChannelCardTone, type ChannelCardView } from '../../lib/channelTimeline';
 import { foldVerdict } from '../../lib/roomState';
 import { entryTimeLabel } from '../../lib/hub';
 import { hubHref } from '../../lib/router';
@@ -73,7 +73,11 @@ function EmptyTimeline() {
     </div>
   );
 }
-export const ChannelTimelineRow = memo(function ChannelTimelineRow({ view, onReply, replyingTo }: { view: ChannelCardView; onReply?: (entry: ChannelEntry) => void; replyingTo?: boolean }) {
+export const ChannelTimelineRow = memo(function ChannelTimelineRow({ view, onReply, replyingTo, onAnswer }: { view: ChannelCardView; onReply?: (entry: ChannelEntry) => void; replyingTo?: boolean; onAnswer?: (unitId: string) => void }) {
+  // A waiting card opens its QUESTION, not its transcript. Its only affordance used to read "Click to
+  // step into the agent", which took you to the conversation — the one place in the room that did the
+  // opposite of what the reference asks for.
+  const answerable = view.kind === 'needs-you' ? cardUnitId(view.entry) : undefined;
   const user = view.entry.kind === 'user';
   const Icon = iconClass[view.kind];
   const attachmentIds = extractAttachedImagePaths(view.body)
@@ -198,10 +202,21 @@ export const ChannelTimelineRow = memo(function ChannelTimelineRow({ view, onRep
               </dl>
             ) : null}
             {view.detail ? <p className="mt-2 text-xs leading-5 opacity-60">{view.detail}</p> : null}
-            {view.href ? (
+            {answerable && onAnswer ? (
+              <button
+                type="button"
+                onClick={() => onAnswer(answerable)}
+                className="mt-3 inline-flex min-h-9 items-center justify-center rounded-[3px] px-3 text-[12px] font-semibold"
+                style={{ background: '#F0A35A', color: '#140D06' }}
+                title="Opens the question, with what it is about, beside the conversation."
+              >
+                {doorLabel(view.kind)}
+              </button>
+            ) : view.href ? (
               <a
                 href={view.href}
-                className="mt-3 inline-flex min-h-10 items-center justify-center rounded-full border border-current/15 bg-current/10 px-3 text-xs font-semibold transition-[background-color,border-color] hover:bg-current/15 focus-visible:ring-2 focus-visible:ring-ember focus-visible:ring-offset-2 focus-visible:ring-offset-ink"
+                className="mt-3 inline-flex min-h-9 items-center justify-center rounded-[3px] px-3 text-[12px] font-semibold"
+                style={{ border: '1px solid #26262B', color: '#C9C9CF' }}
               >
                 {doorLabel(view.kind)}
               </a>
@@ -213,9 +228,9 @@ export const ChannelTimelineRow = memo(function ChannelTimelineRow({ view, onRep
   );
 });
 
-function LifecycleRun({ views, onReply, replyingToId }: { views: ChannelCardView[]; onReply?: (entry: ChannelEntry) => void; replyingToId?: string }) {
+function LifecycleRun({ views, onReply, replyingToId, onAnswer }: { views: ChannelCardView[]; onReply?: (entry: ChannelEntry) => void; replyingToId?: string; onAnswer?: (unitId: string) => void }) {
   const [open, setOpen] = useState(false);
-  if (views.length === 1) return <ChannelTimelineRow view={views[0]!} onReply={onReply} replyingTo={views[0]!.id === replyingToId} />;
+  if (views.length === 1) return <ChannelTimelineRow view={views[0]!} onReply={onReply} replyingTo={views[0]!.id === replyingToId} onAnswer={onAnswer} />;
   const summary = runSummary(views);
   const first = views[0]!.entry.ts;
   const last = views[views.length - 1]!.entry.ts;
@@ -241,12 +256,12 @@ function LifecycleRun({ views, onReply, replyingToId }: { views: ChannelCardView
         </div>
         <div style={{ fontFamily: MONO, fontSize: 10.5, color: '#4A4A52' }}>{open ? 'close' : 'open'}</div>
       </div>
-      {open ? <ol className="mt-1 pl-[38px]">{views.map((view) => <ChannelTimelineRow key={view.id} view={view} onReply={onReply} replyingTo={view.id === replyingToId} />)}</ol> : null}
+      {open ? <ol className="mt-1 pl-[38px]">{views.map((view) => <ChannelTimelineRow key={view.id} view={view} onReply={onReply} replyingTo={view.id === replyingToId} onAnswer={onAnswer} />)}</ol> : null}
     </li>
   );
 }
 
-export function ChannelTimeline({ entries, loading, error, anchorEntryId, onReply, emptyState, replyingToId }: { entries: ChannelEntry[]; loading: boolean; error: string; anchorEntryId?: string; onReply?: (entry: ChannelEntry) => void; emptyState?: React.ReactNode; replyingToId?: string }) {
+export function ChannelTimeline({ entries, loading, error, anchorEntryId, onReply, emptyState, replyingToId, onAnswer }: { entries: ChannelEntry[]; loading: boolean; error: string; anchorEntryId?: string; onReply?: (entry: ChannelEntry) => void; emptyState?: React.ReactNode; replyingToId?: string; onAnswer?: (unitId: string) => void }) {
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const scrollStateRef = useRef<ChannelScrollState>(initialChannelScrollState());
   const [stableRows, setStableRows] = useState<ChannelCardView[]>([]);
@@ -287,7 +302,7 @@ export function ChannelTimeline({ entries, loading, error, anchorEntryId, onRepl
 
   return (
     <div ref={scrollerRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto bg-[#09090a]" data-scroll-mode={scrollStateRef.current.mode}>
-      {loading ? <LoadingTimeline /> : error ? <div className="m-4 flex items-center gap-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200" role="alert"><AlertCircle className="h-4 w-4" aria-hidden /> {error}</div> : stableRows.length === 0 ? (emptyState ?? <EmptyTimeline />) : <ol className="mx-auto w-full max-w-4xl space-y-3 p-4 pb-10">{runs.map((run) => <LifecycleRun key={run[0]!.id} views={run} onReply={onReply} replyingToId={replyingToId} />)}</ol>}
+      {loading ? <LoadingTimeline /> : error ? <div className="m-4 flex items-center gap-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200" role="alert"><AlertCircle className="h-4 w-4" aria-hidden /> {error}</div> : stableRows.length === 0 ? (emptyState ?? <EmptyTimeline />) : <ol className="mx-auto w-full max-w-4xl space-y-3 p-4 pb-10">{runs.map((run) => <LifecycleRun onAnswer={onAnswer} key={run[0]!.id} views={run} onReply={onReply} replyingToId={replyingToId} />)}</ol>}
     </div>
   );
 }

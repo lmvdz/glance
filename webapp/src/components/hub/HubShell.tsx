@@ -15,7 +15,7 @@ import { buildPromptCommand, channelAgentSessionId, channelDraftSessionId, ensur
 import { resolveMentionRoute } from '../../lib/mentionGrammar';
 import type { AgentDTO, Channel, ChannelEntry, CommandAckDTO, PresenceSnapshot } from '../../lib/dto';
 import { latestSeq, presenceCount, reduceChannelEntries } from '../../lib/hub';
-import { DEFAULT_CHANNEL_ID, hubHref, type HubRoute } from '../../lib/router';
+import { DEFAULT_CHANNEL_ID, hubHref, unitHref, type HubRoute } from '../../lib/router';
 import { useTaskContext } from '../../context/TaskContext';
 
 const EMPTY_PRESENCE: PresenceSnapshot = { users: [] };
@@ -369,6 +369,10 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
       options: (request.options ?? []).map((label) => ({ label, consequence: `${agent.name || agent.id} takes this as the answer and picks the work back up from where it stopped.` })),
       index: index + 1,
       total: waiting.length,
+      // So the panel can show what the question is actually about, and reach the conversation when
+      // it cannot.
+      unitId: agent.id,
+      unitHref: unitHref(agent.id),
     };
   }, [waiting, answeringId]);
 
@@ -508,6 +512,21 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
               error={error}
               anchorEntryId={anchorEntryId}
               onReply={(entry) => { setReplyTarget(entry); setReplyFocusKey((key) => key + 1); }}
+              // A waiting card opens the question, with what it is about beside it — the room's own
+              // tree already did this; the card was the one place that sent you to the transcript.
+              onAnswer={(unitId) => {
+                // A card carries whatever the daemon projected onto it, which is usually the unit's
+                // NAME ("ompsq-480") while the roster is keyed by its full id
+                // ("ompsq-480-ms2kfv09-6-01fcf897"). Matching only on id meant the button did nothing
+                // at all — silently, which is the worst of the three outcomes.
+                const pending = waiting.find(({ agent }) => agent.id === unitId || agent.name === unitId);
+                if (pending) { setAnsweringId(pending.request.id); return; }
+                const unit = agents.find((agent) => agent.id === unitId || agent.name === unitId);
+                if (unit) { window.location.hash = unitHref(unit.id); return; }
+                // Nothing to open is worth saying rather than swallowing: the question this card is
+                // about has been answered or the unit is gone.
+                showToast('That question is no longer waiting — the unit it belonged to has gone or it has already been answered.', 'info');
+              }}
               replyingToId={replyTarget?.id}
               // A quiet ROOM is the designed state — unit telemetry stays at its node — so the empty
               // room is a handover of what happened, not a promise that something will. Only the root

@@ -78,3 +78,27 @@ test("a question with no options is still answerable", () => {
   expect(html).toContain("ANSWER IN WORDS");
   expect(html).toContain("Should the retry budget");
 });
+
+test('a decision about a plan admits when the plan did not come with it', () => {
+  // Found by using the product: an "Approve plan" gate arrived carrying only a title and two
+  // buttons. Answering it meant answering blind, and nothing on screen said so.
+  const html = renderToStaticMarkup(
+    <DecisionPanel
+      request={{ id: 'g', agentName: 'ompsq-480', address: 'ompsq-480', question: 'Approve plan', options: [{ label: 'Approve' }, { label: 'Revise' }], unitHref: '#/channel/node%3Aompsq-480' }}
+      onAnswer={() => {}}
+    />,
+  );
+  expect(html).toContain('THE PLAN ITSELF DID NOT COME WITH THE QUESTION');
+  expect(html).toContain('answering blind');
+  expect(html).toContain('open the unit');
+});
+
+test('a decision that is not about a document does not apologise for having none', () => {
+  const html = renderToStaticMarkup(
+    <DecisionPanel
+      request={{ id: 'g', agentName: 'wren', address: 'wren', question: 'Allow tool: bash', options: [{ label: 'Allow' }] }}
+      onAnswer={() => {}}
+    />,
+  );
+  expect(html).not.toContain('DID NOT COME WITH THE QUESTION');
+});

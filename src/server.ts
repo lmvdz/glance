@@ -92,7 +92,7 @@ import {
 import { mergeAdoptionCounters } from "./adoption-counters.ts";
 import { worktreeDiffSinceFork, worktreeTree } from "./explore.ts";
 import { appendConcernDecision, listPlanDirs, parsePlanConcerns, parsePlanDocuments } from "./features.ts";
-import { isPlanDocPath, planDocDiffSince, planDocHeadRevision, readPlanDoc } from "./plan-doc.ts";
+import { isPlanDocPath, planDocDiffSince, planDocHeadRevision, readPlanDoc, readUnitPlan } from "./plan-doc.ts";
 import { assemblePlanBrief } from "./plan-brief.ts";
 import { planVoteGateOpen, tallyPlanVoteRound } from "./plan-votes.ts";
 import { hardenedGit } from "./git-harden.ts";
@@ -3143,6 +3143,22 @@ export class SquadServer {
 			const sinceRaw = url.searchParams.get("since");
 			const since = sinceRaw !== null ? Number.parseInt(sinceRaw, 10) : Number.NaN;
 			return Response.json(Number.isFinite(since) ? manager.getTranscriptSince(id, since) : manager.getTranscript(id));
+		}
+		// The plan a unit is asking you to approve. Found by using the product: an "Approve plan" gate
+		// arrived carrying only {title, options} — no plan and no pointer to one — so the question was
+		// unanswerable without leaving for a terminal. The worktree root comes from the AGENT RECORD,
+		// never from the caller.
+		const mplan = url.pathname.match(/^\/api\/agents\/([^/]+)\/plan$/);
+		if (mplan) {
+			const id = decodeURIComponent(mplan[1]);
+			const denied = await guardAgent(id);
+			if (denied) return denied;
+			// `manager.agents` is a Map, not an accessor — `list()` is the reader every other route uses.
+			const agent = manager.list().find((a) => a.id === id);
+			const doc = await readUnitPlan(agent?.worktree);
+			// 404 means "this unit has no plan file we can find", which the caller renders as an
+			// absence rather than as an empty plan.
+			return doc ? Response.json(doc) : new Response("no plan found in this unit's worktree", { status: 404 });
 		}
 		const mtrans = url.pathname.match(/^\/api\/agents\/([^/]+)\/transitions$/);
 		if (mtrans) {

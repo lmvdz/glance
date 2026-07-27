@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { apiJson } from '../../lib/api';
 
 /**
  * DecisionPanel — a person answering a stopped agent.
@@ -49,6 +50,10 @@ export interface DecisionRequest {
   /** How many are waiting in total, for the "1 of 3" counter. */
   index?: number;
   total?: number;
+  /** The unit this belongs to, so the panel can fetch what is being decided about. */
+  unitId?: string;
+  /** Where its conversation lives, for when there is nothing else to show. */
+  unitHref?: string;
 }
 
 function ago(ms: number | undefined): string {
@@ -58,6 +63,80 @@ function ago(ms: number | undefined): string {
   if (mins < 60) return `${mins}m ago`;
   const hours = Math.floor(mins / 60);
   return `${hours}h ${mins % 60}m ago`;
+}
+
+/**
+ * The thing the question is about.
+ *
+ * Fetches the unit's own plan when there is one. When there is not, it says so and points at the
+ * unit's conversation, which is where the reasoning actually lives — because "nothing to show" and
+ * "nothing exists" are different, and only one of them is a reason to answer blind.
+ */
+function Subject({ unitId, unitHref, question }: { unitId?: string; unitHref?: string; question: string }) {
+  const [plan, setPlan] = React.useState<{ path: string; content: string } | undefined>();
+  const [state, setState] = React.useState<'idle' | 'loading' | 'none'>('idle');
+  const [open, setOpen] = React.useState(true);
+
+  React.useEffect(() => {
+    if (!unitId) { setState('none'); return; }
+    let alive = true;
+    setState('loading');
+    apiJson<{ path: string; content: string }>(`/api/agents/${encodeURIComponent(unitId)}/plan`)
+      .then((doc) => { if (alive) { setPlan(doc); setState('idle'); } })
+      .catch(() => { if (alive) { setPlan(undefined); setState('none'); } });
+    return () => { alive = false; };
+  }, [unitId]);
+
+  const aboutAPlan = /\bplan\b/i.test(question);
+
+  if (state === 'loading') {
+    return <div style={{ fontFamily: MONO, fontSize: 10, color: '#4A4A52' }}>reading what this is about…</div>;
+  }
+
+  if (!plan) {
+    // Only claimed where it matters. A gate that is not about a document does not need to apologise
+    // for having no document.
+    if (!aboutAPlan) return null;
+    return (
+      <div className="px-3.5 py-2.5" style={{ border: '1px solid #241A17', borderLeft: '2px solid #B4553A', background: '#100D0C' }}>
+        <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.14em', color: '#C2704A' }}>THE PLAN ITSELF DID NOT COME WITH THE QUESTION</div>
+        <div className="mt-2 text-[12.5px] leading-[1.5]" style={{ color: '#DEDEE2', textWrap: 'pretty' }}>
+          You are being asked to approve something this screen cannot show you. No plan file was found in the unit's
+          worktree, so the reasoning is wherever it said it — answering without reading it is answering blind, and that
+          is worth knowing before you pick.
+        </div>
+        {unitHref ? (
+          <a href={unitHref} className="mt-2 inline-block" style={{ fontFamily: MONO, fontSize: 10.5, color: '#F0A35A' }}>
+            open the unit's conversation ›
+          </a>
+        ) : null}
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        className="flex w-full items-baseline gap-2.5 text-left"
+        style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.14em', color: '#5A5A61' }}
+      >
+        <span>WHAT YOU ARE BEING ASKED TO APPROVE</span>
+        <span style={{ color: '#4A4A52' }}>{plan.path}</span>
+        <span className="flex-1" />
+        <span style={{ color: '#4A4A52' }}>{open ? 'hide' : 'read it'}</span>
+      </button>
+      {open ? (
+        <div
+          className="mt-2.5 overflow-y-auto whitespace-pre-wrap px-3.5 py-3 text-[12.5px]"
+          style={{ border: '1px solid #1F1F22', background: '#0C0C0D', color: '#C9C9CF', lineHeight: 1.65, maxHeight: 340, textWrap: 'pretty' }}
+        >
+          {plan.content}
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 export function DecisionPanel({
@@ -114,6 +193,13 @@ export function DecisionPanel({
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-5 pt-3.5">
+        {/* WHAT YOU ARE BEING ASKED TO APPROVE.
+            Found by using the product: an "Approve plan" gate arrived carrying only a title and two
+            buttons. The plan was real — the unit had written it and said so — but the question was
+            unanswerable without leaving for a terminal. A decision surface that cannot show its own
+            subject is not a decision surface. */}
+        <Subject unitId={request.unitId} unitHref={request.unitHref} question={request.question} />
+
         {request.findings && request.findings.length > 0 ? (
           <>
             <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.14em', color: '#5A5A61' }}>
