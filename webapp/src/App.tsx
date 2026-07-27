@@ -18,11 +18,11 @@ import {
 import { GlobalShortcuts } from './components/GlobalShortcuts';
 import { ToastContainer } from './components/ToastContainer';
 import { ThemeProvider } from './context/ThemeContext';
-import { CapabilityPanel } from './components/CapabilityPanel';
+import { BorrowedSurface } from './components/hub/BorrowedSurface';
 import { CommandPalette } from './components/CommandPalette';
 import { OmpGraphPanel } from './components/OmpGraphPanel';
 import { UnseenSurface } from './components/hub/UnseenSurface';
-import { DailyPanel } from './components/DailyPanel';
+import { MondaySurface } from './components/hub/MondaySurface';
 import { CostSurface } from './components/hub/CostSurface';
 import { DesignReviewView } from './components/DesignReviewView';
 import { RealitySurface } from './components/hub/RealitySurface';
@@ -76,7 +76,7 @@ const WorkbenchRoute = ({ route }: { route: Extract<HubRoute, { kind: 'workbench
 
   if (status === 'authed' && !currentProject && route.view !== 'org') return <FirstRunSetup />;
   if (route.view === 'fog') return <UnseenSurface />;
-  if (route.view === 'daily') return <DailyPanel />;
+  if (route.view === 'daily') return <MondaySurface />;
   if (route.view === 'economics') return <CostSurface />;
   if (route.view === 'review') {
     return (
@@ -85,13 +85,7 @@ const WorkbenchRoute = ({ route }: { route: Extract<HubRoute, { kind: 'workbench
       </PageContextScope>
     );
   }
-  if (route.view === 'capabilities') {
-    return (
-      <PageContextScope value={capabilitiesPageContext}>
-        <CapabilityPanel />
-      </PageContextScope>
-    );
-  }
+  if (route.view === 'capabilities') return <BorrowedSurface />;
   if (route.view === 'graph') return <OmpGraphPanel />;
   if (route.view === 'plan-reality') return <RealitySurface />;
   if (route.view === 'plans') return <PlanSurface name={route.id} />;

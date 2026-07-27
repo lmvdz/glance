@@ -5,44 +5,15 @@
  */
 import { describe, expect, test } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { LoopMetersCard } from './LoopMetersCard';
-import { EpisodesCard } from './EpisodesCard';
+// LoopMetersCard and EpisodesCard were rendered by the Daily panel and by nothing else. The weekly
+// episode moved into MondaySurface under 05-first-week's own heading — WHAT IT NOW KNOWS THAT IT DID
+// NOT ON MONDAY — because that is literally what an episode is; the loop meters did not, and their
+// signal is now unrendered rather than mis-rendered. Said here so it is findable.
 import { AfterActionList } from './AfterActionCard';
 import type { AfterActionWire, SymptomWire } from '../lib/loop-meters';
-import type { EpisodeMetaDTO } from '../lib/api';
 
 const NOW = Date.UTC(2026, 6, 21, 12, 0, 0);
 
-describe('LoopMetersCard', () => {
-  test('renders on/off flag chips and meter rows with sample counts', () => {
-    const html = renderToStaticMarkup(
-      <LoopMetersCard
-        loop={{
-          flags: { failureMemory: 'on', modelOutcomes: 'off' },
-          rollup: [{ name: 'first-try-green', count: 8, sum: 6, avg: 0.75 }],
-        }}
-        loaded
-      />,
-    );
-    expect(html).toContain('Failure memory');
-    expect(html).toContain('Model outcomes');
-    expect(html).toContain('1/2 on');
-    expect(html).toContain('First-try green');
-    expect(html).toContain('75%');
-    expect(html).toContain('n=8'); // a rate never renders without its sample size
-  });
-
-  test('empty rollup is an honest blank, not a zero', () => {
-    const html = renderToStaticMarkup(<LoopMetersCard loop={{ flags: { failureMemory: 'on' }, rollup: [] }} loaded />);
-    expect(html).toContain('No metric samples');
-    expect(html).not.toContain('0%');
-  });
-
-  test('error state renders the alert', () => {
-    const html = renderToStaticMarkup(<LoopMetersCard loop={null} loaded error="Could not reach the daemon for learning-loop meters." />);
-    expect(html).toContain('Could not reach the daemon');
-  });
-});
 
 const meta: EpisodeMetaDTO = {
   id: '2026-W29',
@@ -56,21 +27,6 @@ const meta: EpisodeMetaDTO = {
   hasStaleAnswers: true,
 };
 
-describe('EpisodesCard', () => {
-  test('lists metas with week id, digest count, and the stale-answers badge', () => {
-    const html = renderToStaticMarkup(<EpisodesCard episodes={[meta]} loaded now={NOW} />);
-    expect(html).toContain('2026-W29');
-    expect(html).toContain('12 digests');
-    expect(html).toContain('stale answers');
-    expect(html).toContain('The fleet landed 4 PRs');
-  });
-
-  test('empty state explains where episodes come from', () => {
-    const html = renderToStaticMarkup(<EpisodesCard episodes={[]} loaded now={NOW} />);
-    expect(html).toContain('No episodes yet');
-    expect(html).toContain('one brief per week');
-  });
-});
 
 const aar: AfterActionWire = {
   id: 'ompsq-449-abc',
