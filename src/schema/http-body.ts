@@ -513,6 +513,32 @@ export const VoiceTokenBodySchema = Schema.Struct({
 	provider: Schema.optional(Schema.Unknown),
 });
 
+/** POST /api/channels/:id/voice-call — thread-aware call start (concern 02). No required field:
+ *  `retention` defaults to `"full"` downstream (concern 05's recorded product default), `sessionRoot`
+ *  defaults to the daemon's own cwd, and `resumeSessionId` is the OMP `--resume` session file to
+ *  reattach to, when resuming a prior call's conversation. */
+export const VoiceCallStartBodySchema = Schema.Struct({
+	sessionRoot: Schema.optional(Schema.Unknown),
+	retention: Schema.optional(Schema.Unknown),
+	resumeSessionId: Schema.optional(Schema.Unknown),
+});
+
+/** POST /api/channels/:id/voice-call/decisions/:decisionId/resolve — relays to the OMP arbiter via
+ *  the daemon-held bridge control token. `optionIndex`/`label` required (the label is echoed and
+ *  checked by the arbiter itself, per PROTOCOL.md — this schema only asserts the envelope shape);
+ *  `confirmToken` present only for the second, confirming act a `requiresConfirmation` decision needs. */
+export const VoiceCallResolveDecisionBodySchema = Schema.Struct({
+	optionIndex: Schema.Number,
+	label: Schema.String,
+	confirmToken: Schema.optional(Schema.String),
+});
+
+/** POST /api/channels/:id/voice-call/steer — composer steering relay. `text` required; length/steer-
+ *  enabled checks happen downstream at the bridge (mirrors `coven-bridge.ts`'s own trim+cap). */
+export const VoiceCallSteerBodySchema = Schema.Struct({
+	text: Schema.String,
+});
+
 /** PUT /api/org/voice-key — set/rotate the session org's voice provider key
  *  (plans/voice-db-mode/05-admin-endpoints.md). `apiKey` required: an empty PUT can never verify
  *  against anything, and the handler must reject before it ever reaches the store. `provider`

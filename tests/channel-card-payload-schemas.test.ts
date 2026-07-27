@@ -18,6 +18,8 @@ import {
 	emitMentionSteerCard,
 	emitReturnEmitCard,
 	emitTokenBurnSnapshotCard,
+	emitVoiceCallCard,
+	emitVoiceDecisionCard,
 	validateCardPayload,
 } from "../src/schema/channel-card.ts";
 import {
@@ -37,6 +39,8 @@ import {
 	TRANSCRIPT_EVENT_UNIT_SPAWNED,
 	TRANSCRIPT_EVENT_UNIT_TURN_FINISHED,
 	TRANSCRIPT_EVENT_VERIFICATION_RAN,
+	TRANSCRIPT_EVENT_VOICE_CALL,
+	TRANSCRIPT_EVENT_VOICE_DECISION,
 	type TranscriptEventKind,
 } from "../src/transcript-event-kinds.ts";
 
@@ -114,6 +118,25 @@ const FIXTURES: Record<TranscriptEventKind, unknown> = {
 		refs: { unitName: "room-51" },
 		doorSurface: "unit",
 		face: { title: "Possibly duplicated work", owner: "room-12", strength: "structural", pinned: { owner: "room-12", basis: "structural" } },
+	},
+	[TRANSCRIPT_EVENT_VOICE_CALL]: {
+		refs: { callId: "call-7-8790" },
+		face: { title: "Call live", status: "live", callId: "call-7-8790", state: "live", tone: "info" },
+	},
+	[TRANSCRIPT_EVENT_VOICE_DECISION]: {
+		refs: { callId: "call-7-8790", decisionId: "d1" },
+		face: {
+			title: "Which name?",
+			body: "Keep it, or rename to session.ts?",
+			status: "open",
+			callId: "call-7-8790",
+			decisionId: "d1",
+			decisionState: "open",
+			requiresConfirmation: false,
+			optionLabels: ["Keep it", "Rename to session.ts"],
+			tone: "warning",
+			register: "claim",
+		},
 	},
 };
 
@@ -228,6 +251,27 @@ describe("emitCard constructors round-trip their schema", () => {
 		const decode = Schema.decodeUnknownResult(CARD_PAYLOAD_SCHEMAS[TRANSCRIPT_EVENT_TOKEN_BURN_SNAPSHOT]);
 		expect(Result.isSuccess(decode(event.payload))).toBe(true);
 	});
+
+	test("emitVoiceCallCard", () => {
+		const event = emitVoiceCallCard(FIXTURES[TRANSCRIPT_EVENT_VOICE_CALL] as never);
+		expect(event.kind).toBe(TRANSCRIPT_EVENT_VOICE_CALL);
+		const decode = Schema.decodeUnknownResult(CARD_PAYLOAD_SCHEMAS[TRANSCRIPT_EVENT_VOICE_CALL]);
+		expect(Result.isSuccess(decode(event.payload))).toBe(true);
+	});
+
+	test("emitVoiceDecisionCard", () => {
+		const event = emitVoiceDecisionCard(FIXTURES[TRANSCRIPT_EVENT_VOICE_DECISION] as never);
+		expect(event.kind).toBe(TRANSCRIPT_EVENT_VOICE_DECISION);
+		const decode = Schema.decodeUnknownResult(CARD_PAYLOAD_SCHEMAS[TRANSCRIPT_EVENT_VOICE_DECISION]);
+		expect(Result.isSuccess(decode(event.payload))).toBe(true);
+	});
+
+	test("emitVoiceDecisionCard rejects a bogus decisionState (closed enum)", () => {
+		const bad = { ...(FIXTURES[TRANSCRIPT_EVENT_VOICE_DECISION] as Record<string, unknown>) };
+		const face = { ...(bad.face as Record<string, unknown>), decisionState: "bogus" };
+		const decode = Schema.decodeUnknownResult(CARD_PAYLOAD_SCHEMAS[TRANSCRIPT_EVENT_VOICE_DECISION]);
+		expect(Result.isFailure(decode({ ...bad, face }))).toBe(true);
+	});
 });
 
 describe("validateCardPayload", () => {
@@ -249,9 +293,12 @@ describe("validateCardPayload", () => {
 	});
 
 	test("an unregistered kind warns exactly once across repeated emits", () => {
-		const first = validateCardPayload("voice-call", { face: { title: "x" } });
-		const second = validateCardPayload("voice-call", { face: { title: "x" } });
-		const third = validateCardPayload("voice-call", { face: { title: "y" } });
+		// Placeholder names for a kind that does NOT (yet) have a registered schema — concern 02
+		// registered "voice-call"/"voice-decision" (this file's previous placeholders), so this test
+		// now uses names that stay genuinely unregistered.
+		const first = validateCardPayload("future-kind-x", { face: { title: "x" } });
+		const second = validateCardPayload("future-kind-x", { face: { title: "x" } });
+		const third = validateCardPayload("future-kind-x", { face: { title: "y" } });
 		expect(first.ok).toBe(false);
 		expect(second.ok).toBe(false);
 		expect(third.ok).toBe(false);
@@ -259,7 +306,7 @@ describe("validateCardPayload", () => {
 		expect(second.logLine).toBeUndefined();
 		expect(third.logLine).toBeUndefined();
 		// A DIFFERENT unregistered kind still gets its own first warning.
-		const otherFirst = validateCardPayload("voice-decision", { face: { title: "x" } });
+		const otherFirst = validateCardPayload("future-kind-y", { face: { title: "x" } });
 		expect(otherFirst.logLine).toBeTruthy();
 	});
 });
@@ -317,12 +364,14 @@ describe("appendManager chokepoint (channels.ts)", () => {
 	test("an unregistered kind warns once and the card still lands every time", async () => {
 		const logs: string[] = [];
 		const channels = new ChannelStore(dir, new FileStore(dir), (m) => logs.push(m));
-		const payload = { face: { title: "Voice call started" } };
-		const first = await channels.appendManager("fleet", { authorActor: "manager", text: "voice call", event: { kind: "voice-call" as never, payload } });
-		const second = await channels.appendManager("fleet", { authorActor: "manager", text: "voice call", event: { kind: "voice-call" as never, payload } });
+		const payload = { face: { title: "Some future card" } };
+		// "future-kind-z" — concern 02 registered this file's previous placeholder ("voice-call"),
+		// so this uses a name that stays genuinely unregistered.
+		const first = await channels.appendManager("fleet", { authorActor: "manager", text: "future card", event: { kind: "future-kind-z" as never, payload } });
+		const second = await channels.appendManager("fleet", { authorActor: "manager", text: "future card", event: { kind: "future-kind-z" as never, payload } });
 		expect(first.event?.payload).toEqual(payload);
 		expect(second.event?.payload).toEqual(payload);
-		expect(logs.filter((line) => line.includes("voice-call")).length).toBe(1);
+		expect(logs.filter((line) => line.includes("future-kind-z")).length).toBe(1);
 	});
 
 	test("a javascript: href injected past the daemon is rejected in production mode too (logged, card still lands)", async () => {

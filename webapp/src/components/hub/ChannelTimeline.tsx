@@ -1,5 +1,5 @@
 import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertCircle, CheckCircle2, ChevronRight, CircleDot, FileText, Flame, GitMerge, Hash, Reply, Rocket, ShieldAlert } from 'lucide-react';
+import { AlertCircle, CheckCircle2, ChevronRight, CircleDot, FileText, Flame, GitMerge, Hash, Phone, Reply, Rocket, ShieldAlert, ShieldQuestion } from 'lucide-react';
 import type { ChannelEntry } from '../../lib/dto';
 import { askedAgainLine, buildChannelThreadViews, cardUnitId, doorLabel, groupLifecycleRuns, runSummary, type ChannelCardTone, type ChannelCardView } from '../../lib/channelTimeline';
 import { foldVerdict } from '../../lib/roomState';
@@ -50,6 +50,8 @@ const iconClass: Record<ChannelCardView['kind'], typeof ShieldAlert> = {
   'unit-failed': AlertCircle,
   'pr-opened': GitMerge,
   'verification-ran': CheckCircle2,
+  'voice-call': Phone,
+  'voice-decision': ShieldQuestion,
   'unknown-event': CircleDot,
 };
 

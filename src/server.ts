@@ -87,6 +87,9 @@ import {
 	PresenceClaimBodySchema,
 	ProjectRegisterBodySchema,
 	TaskStartBodySchema,
+	VoiceCallResolveDecisionBodySchema,
+	VoiceCallStartBodySchema,
+	VoiceCallSteerBodySchema,
 	VoiceTokenBodySchema,
 } from "./schema/http-body.ts";
 import { mergeAdoptionCounters } from "./adoption-counters.ts";
@@ -158,6 +161,18 @@ import { appendOrgAudit, deleteOrgAuditRow, deleteOrgSecret, finalizeOrgAuditDet
  *  deliberately excluded here (unlike squad-manager's private `commandTarget`, which audits it). */
 function commandAgentTarget(cmd: ClientCommand): string | undefined {
 	return "id" in cmd ? cmd.id : undefined;
+}
+
+/** Maps a `CoordinatorResult` failure reason (voice-call-manager.ts) to an HTTP status. Every reason
+ *  is one of the coordinator's own honest, closed set — `forbidden` (room membership/role denied),
+ *  `no-active-call` (nothing to act on), `bridge-unavailable` (degraded/no live socket to relay to),
+ *  or a free-text broker/bridge failure detail (start-time errors) — never a generic 500. */
+function voiceCallErrorResponse(reason: string): Response {
+	if (reason === "forbidden") return new Response("forbidden", { status: 403 });
+	if (reason === "no-active-call") return new Response(reason, { status: 404 });
+	if (reason === "bridge-unavailable") return new Response(reason, { status: 409 });
+	if (reason.includes("already has an active call")) return new Response(reason, { status: 409 });
+	return new Response(reason, { status: 502 });
 }
 
 function requestScope(body: unknown): Pick<CreateAgentOptions, "requires" | "owns" | "produces" | "scopeSource"> {
@@ -3522,6 +3537,96 @@ export class SquadServer {
 			}
 		}
 
+		// ── Voice call (concern 02, plans/voice-orchestrated-room-integration) ─────────────────────
+		// Every route is channel-scoped: `manager.voiceCall*` re-checks room membership itself
+		// (`ChannelStore#canReadChannel`) before touching the binding, and the mutating routes pass
+		// that same authorization down into the coordinator as the LAST gate before any bridge frame
+		// is relayed (voice-call-manager.ts). The RBAC tier above (`restActionTier`'s coarse GET=viewer/
+		// mutation=operator default — no bespoke entry needed, these paths don't match any of the
+		// more specific rules) is the FIRST gate; both must pass.
+		const voiceCallStateMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/voice-call$/);
+		if (voiceCallStateMatch && req.method === "GET") {
+			const channelId = decodeURIComponent(voiceCallStateMatch[1]!);
+			try {
+				const state = await manager.voiceCallState(channelId, actor);
+				return state ? Response.json(state) : new Response("no call for this channel", { status: 404 });
+			} catch (err) {
+				if (err instanceof Error && err.message === "channel forbidden") return new Response("forbidden", { status: 403 });
+				throw err;
+			}
+		}
+		if (voiceCallStateMatch && req.method === "POST") {
+			const channelId = decodeURIComponent(voiceCallStateMatch[1]!);
+			const decoded = decodeBodyOrEmpty(VoiceCallStartBodySchema, await req.json().catch(() => null));
+			const sessionRoot = typeof decoded.sessionRoot === "string" ? decoded.sessionRoot : undefined;
+			const retention = decoded.retention === "full" || decoded.retention === "tails" || decoded.retention === "off" ? decoded.retention : undefined;
+			const resumeSessionId = typeof decoded.resumeSessionId === "string" ? decoded.resumeSessionId : undefined;
+			const result = await manager.startVoiceCall(channelId, actor, { sessionRoot, retention, resumeSessionId });
+			return result.ok ? Response.json(result.value, { status: 201 }) : voiceCallErrorResponse(result.reason);
+		}
+		if (voiceCallStateMatch && req.method === "DELETE") {
+			const channelId = decodeURIComponent(voiceCallStateMatch[1]!);
+			const result = await manager.endVoiceCall(channelId, actor);
+			return result.ok ? Response.json(result.value) : voiceCallErrorResponse(result.reason);
+		}
+		const voiceCallDecisionsMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/voice-call\/decisions$/);
+		if (voiceCallDecisionsMatch && req.method === "GET") {
+			const channelId = decodeURIComponent(voiceCallDecisionsMatch[1]!);
+			try {
+				return Response.json({ decisions: await manager.voiceCallDecisions(channelId, actor) });
+			} catch (err) {
+				if (err instanceof Error && err.message === "channel forbidden") return new Response("forbidden", { status: 403 });
+				throw err;
+			}
+		}
+		const voiceCallResolveMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/voice-call\/decisions\/([^/]+)\/resolve$/);
+		if (voiceCallResolveMatch && req.method === "POST") {
+			const channelId = decodeURIComponent(voiceCallResolveMatch[1]!);
+			const decisionId = decodeURIComponent(voiceCallResolveMatch[2]!);
+			const decoded = decodeBody(VoiceCallResolveDecisionBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response(`bad resolve decision: ${decoded.failure.message}`, { status: 400 });
+			const result = await manager.resolveVoiceCallDecision(channelId, actor, { decisionId, ...decoded.success });
+			return result.ok ? Response.json(result.value) : voiceCallErrorResponse(result.reason);
+		}
+		const voiceCallSteerMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/voice-call\/steer$/);
+		if (voiceCallSteerMatch && req.method === "POST") {
+			const channelId = decodeURIComponent(voiceCallSteerMatch[1]!);
+			const decoded = decodeBody(VoiceCallSteerBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response(`bad steer: ${decoded.failure.message}`, { status: 400 });
+			const result = await manager.steerVoiceCall(channelId, actor, decoded.success.text);
+			return result.ok ? Response.json({ ok: true }) : voiceCallErrorResponse(result.reason);
+		}
+		const voiceCallTranscriptMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/voice-call\/transcript$/);
+		if (voiceCallTranscriptMatch && req.method === "GET") {
+			const channelId = decodeURIComponent(voiceCallTranscriptMatch[1]!);
+			try {
+				return Response.json({ transcript: await manager.voiceCallTranscript(channelId, actor) });
+			} catch (err) {
+				if (err instanceof Error && err.message === "channel forbidden") return new Response("forbidden", { status: 403 });
+				throw err;
+			}
+		}
+		const voiceCallArtifactsMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/voice-call\/artifacts$/);
+		if (voiceCallArtifactsMatch && req.method === "GET") {
+			const channelId = decodeURIComponent(voiceCallArtifactsMatch[1]!);
+			try {
+				return Response.json({ artifacts: await manager.voiceCallArtifacts(channelId, actor) });
+			} catch (err) {
+				if (err instanceof Error && err.message === "channel forbidden") return new Response("forbidden", { status: 403 });
+				throw err;
+			}
+		}
+		const voiceCallGapsMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/voice-call\/gaps$/);
+		if (voiceCallGapsMatch && req.method === "GET") {
+			const channelId = decodeURIComponent(voiceCallGapsMatch[1]!);
+			try {
+				return Response.json({ gaps: await manager.voiceCallGaps(channelId, actor) });
+			} catch (err) {
+				if (err instanceof Error && err.message === "channel forbidden") return new Response("forbidden", { status: 403 });
+				throw err;
+			}
+		}
+
 		if (url.pathname === "/api/command" && req.method === "POST") {
 			let body: unknown;
 			try {
@@ -3918,7 +4023,7 @@ export class SquadServer {
 		const out: LeaseEntry[] = [];
 		for (const r of repos) {
 			for (const lease of await leasesFor(r).catch(() => [])) {
-				const key = `${lease.repo} ${lease.id}`;
+				const key = `${lease.repo}\0${lease.id}`;
 				if (seen.has(key)) continue;
 				seen.add(key);
 				out.push(lease);

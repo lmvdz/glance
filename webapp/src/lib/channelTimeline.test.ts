@@ -217,11 +217,59 @@ describe('return-emit and design-revised cards', () => {
     expect(doorLabel(card.kind)).toBe('Open plan DAG');
   });
 
+  test('voice-call cards render generically: title/tone from the face, no throw on any state', () => {
+    const live = dispatchChannelCard(entry({
+      id: 'vc-1',
+      seq: 20,
+      event: { kind: 'voice-call', payload: { refs: { callId: 'call-1' }, face: { title: 'Call live', status: 'live', callId: 'call-1', state: 'live' } } },
+    }));
+    expect(live.kind).toBe('voice-call');
+    expect(live.title).toBe('Call live');
+    expect(live.tone).toBe('info');
+
+    const degraded = dispatchChannelCard(entry({
+      id: 'vc-2',
+      seq: 21,
+      event: { kind: 'voice-call', payload: { refs: { callId: 'call-1' }, face: { title: 'Call degraded', status: 'degraded', callId: 'call-1', state: 'degraded' } } },
+    }));
+    expect(degraded.tone).toBe('warning');
+
+    const ended = dispatchChannelCard(entry({
+      id: 'vc-3',
+      seq: 22,
+      event: { kind: 'voice-call', payload: { refs: { callId: 'call-1' }, face: { title: 'Call ended', status: 'ended', callId: 'call-1', state: 'ended' } } },
+    }));
+    expect(ended.tone).toBe('neutral');
+    expect(doorLabel(ended.kind)).toBe('Open the call');
+  });
+
+  test('voice-decision cards carry the agent-authored prompt with register:"claim" on mint, and resolve to success on answer', () => {
+    const minted = dispatchChannelCard(entry({
+      id: 'vd-1',
+      seq: 30,
+      event: { kind: 'voice-decision', payload: { refs: { callId: 'call-1', decisionId: 'd1' }, face: { title: 'Which name?', status: 'open', callId: 'call-1', decisionId: 'd1', decisionState: 'open', register: 'claim', tone: 'warning' } } },
+    }));
+    expect(minted.kind).toBe('voice-decision');
+    expect(minted.title).toBe('Which name?');
+    expect(minted.tone).toBe('warning');
+    expect(faceFromPayload(minted.entry.event?.payload)?.register).toBe('claim');
+
+    const resolved = dispatchChannelCard(entry({
+      id: 'vd-2',
+      seq: 31,
+      event: { kind: 'voice-decision', payload: { refs: { callId: 'call-1', decisionId: 'd1' }, face: { title: 'Resolved · Keep it', status: 'answered', callId: 'call-1', decisionId: 'd1', decisionState: 'answered', tone: 'success' } } },
+    }));
+    expect(resolved.tone).toBe('success');
+    expect(doorLabel(resolved.kind)).toBe('Answer it');
+  });
+
   test('an unmapped kind still falls back to unknown-event without throwing', () => {
+    // "future-kind" — concern 02 registered this file's previous placeholder ("voice-call"), so this
+    // uses a name that stays genuinely unmapped.
     const build = () => dispatchChannelCard(entry({
-      id: 'voice-call',
+      id: 'future-kind',
       seq: 12,
-      event: { kind: 'voice-call', payload: { refs: { unitId: 'room-42' }, doorSurface: 'intervence', face: { title: 'Voice call started' } } },
+      event: { kind: 'future-kind', payload: { refs: { unitId: 'room-42' }, doorSurface: 'intervence', face: { title: 'Some future card' } } },
     }));
     expect(build).not.toThrow();
     expect(build().kind).toBe('unknown-event');
