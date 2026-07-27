@@ -323,13 +323,21 @@ function featureCriteria(value: unknown): FeatureCriterion[] | undefined {
  * can never mint `model-delta` records, because those are only minted through
  * `squad_record_decision`'s evidence validation. (Model-deltas always live on persisted features —
  * `recordAgentDecision` adopts before writing — so `stored` is never missing for them.)
+ *
+ * Supersession-chain members (`supersedes`/`supersededBy` set) get ledger protection
+ * (blind-review finding): a STALE client that loaded the feature before a replacement was
+ * recorded PATCHes the full array back WITHOUT the replacement — omission-as-delete would then
+ * destroy the current decision while its predecessor stays stamped superseded-by-a-ghost,
+ * vanishing BOTH from projection. Chain members therefore survive omission (re-appended, stored
+ * order), and a SUPERSEDED entry is immutable like a model-delta — it is history, and history
+ * does not take text edits.
  * @substrate exported for tests only — the PATCH handler in this file is the one production caller;
  * the merge semantics above are exactly what tests/feature-decisions-merge.test.ts pins.
  */
 export function featureDecisions(value: unknown, stored: FeatureDecision[] | undefined): FeatureDecision[] | undefined {
 	if (!Array.isArray(value)) return undefined;
 	const byId = new Map((stored ?? []).map((d) => [d.id, d]));
-	return value.flatMap((item): FeatureDecision[] => {
+	const out = value.flatMap((item): FeatureDecision[] => {
 		if (!item || typeof item !== "object") return [];
 		const rec = item as Record<string, unknown>;
 		const id = typeof rec.id === "string" ? rec.id : undefined;
@@ -340,11 +348,21 @@ export function featureDecisions(value: unknown, stored: FeatureDecision[] | und
 		// was validated against the recording run's evidence anchors, and accepting a client text edit
 		// while keeping source/evidence/sourceRef would present a rewritten claim as run-validated —
 		// the exact fabricated-verification pattern the lane exists to prevent. A client may still
-		// DELETE one by omitting it; editing any other source's text stays allowed.
+		// DELETE one by omitting it (unless it is a supersession-chain member — see below); editing
+		// any other source's text stays allowed.
 		if (existing?.source === "model-delta") return [existing];
+		// Superseded entries are history: keep them verbatim, no text edits.
+		if (existing?.supersededBy) return [existing];
 		if (existing) return [{ ...existing, text }];
 		return [{ id, text, source: rec.source === "plan" || rec.source === "human" || rec.source === "agent" ? rec.source : "human", createdAt: typeof rec.createdAt === "number" ? rec.createdAt : undefined }];
 	});
+	// Ledger guard: chain members cannot be deleted by omission. Re-append any stored
+	// `supersedes`/`supersededBy` carrier the client's array dropped, in stored order.
+	const present = new Set(out.map((d) => d.id));
+	for (const d of stored ?? []) {
+		if (!present.has(d.id) && (d.supersededBy || d.supersedes)) out.push(d);
+	}
+	return out;
 }
 
 function featureRelationships(value: unknown): FeatureRelationship[] | undefined {

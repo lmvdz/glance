@@ -101,8 +101,11 @@ export function fabricDocuments(snapshot: FabricSnapshot): KbDoc[] {
 		docs.push({ type: "lease", id: `lease:${l.lease.repo}:${l.lease.file}`, title: `${l.lease.file} (held by ${l.lease.session})`, text: `${l.lease.file} ${l.lease.session} ${l.lease.repo}`, repo: l.lease.repo, ref: l.lease.file, source: `held by ${l.lease.session}` });
 	}
 
-	for (const [i, dec] of snapshot.decisions.entries()) {
-		docs.push({ type: "decision", id: `decision:${dec.source.featureId ?? i}:${i}`, title: `Decision · ${dec.featureTitle}`, text: `${dec.text} ${dec.featureTitle}`, repo: dec.source.repo, ref: dec.source.featureId, source: dec.decisionSource ? `${dec.decisionSource} decision` : "decision", ts: dec.createdAt });
+	for (const dec of snapshot.decisions) {
+		// Doc id carries the REAL FeatureDecision id (not a positional synthetic): kb-search surfaces
+		// it so an agent recording a reversal can pass it as `supersedes` — the id an agent can see
+		// must be the id the write path accepts.
+		docs.push({ type: "decision", id: `decision:${dec.id}`, title: `Decision · ${dec.featureTitle}`, text: `${dec.text} ${dec.featureTitle}`, repo: dec.source.repo, ref: dec.source.featureId, source: dec.decisionSource ? `${dec.decisionSource} decision` : "decision", ts: dec.createdAt });
 	}
 
 	// Recurring-failure memory (concern 05, OMP_SQUAD_FAILURE_MEMORY): warn the next agent it's about

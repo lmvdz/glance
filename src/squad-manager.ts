@@ -391,6 +391,7 @@ const RECORD_DECISION_TOOL_DEF: HostToolDef = {
 	name: RECORD_DECISION_TOOL,
 	description:
 		'Record a consequential decision you made and WHY (an architecture choice, a tradeoff, an approach picked over an alternative) so future agents on this work inherit it instead of re-deciding it. Non-blocking — you keep working. Use SPARINGLY, only for genuinely load-bearing decisions, not routine steps.\n\n' +
+		'If your decision REVERSES or replaces a decision already in your context (from the cold-start primer or squad_kb_search), pass that decision\'s id as `supersedes` — the old decision is invalidated in the same write and stops reaching future agents, while staying on the record as history. NEVER record a contradicting decision without superseding: two live contradictory decisions is the exact failure this exists to prevent.\n\n' +
 		'ALSO, before you finish: if you changed how the system actually works (not just what code exists), set source:"model-delta" and record up to 3 such deltas — state what was true BEFORE and what is true NOW. Each model-delta entry REQUIRES `evidence`: one or more repo-relative files (or `file:start-end`) THIS RUN touched — an anchorless or made-up-file delta is rejected. Skip entirely when nothing architectural changed; an empty record is honest, slop is not.',
 	parameters: {
 		type: "object",
@@ -401,6 +402,10 @@ const RECORD_DECISION_TOOL_DEF: HostToolDef = {
 				type: "array",
 				items: { type: "string" },
 				description: 'Required when source is "model-delta": repo-relative file paths (or `file:start-end`) this run touched, each proving the delta. Ignored for a routine decision.',
+			},
+			supersedes: {
+				type: "string",
+				description: "Optional. The id of a prior decision on this work that this decision replaces or reverses. The prior decision is invalidated (kept as history, excluded from future agents' context).",
 			},
 		},
 		required: ["text"],
@@ -3391,16 +3396,55 @@ export class SquadManager extends EventEmitter {
 	 * feature's CURRENT decisions at write time and appends in one synchronous step — no stale
 	 * read-modify-write over a client snapshot, so concurrent agent captures can't clobber each other.
 	 * De-dupes on normalized text. Returns the outcome so the caller can tell the agent what happened.
+	 *
+	 * Supersession (plans/research-long-horizon-agent-memory — "recurrence promotes, contradiction
+	 * supersedes"): when `decision.supersedes` names a prior decision on the feature, this write
+	 * stamps that target's `supersededBy`/`supersededAt` in the SAME atomic step that appends the
+	 * new decision — one current assertion per subject, the loser invalidated-not-deleted and kept
+	 * addressable as history. Two rules with teeth:
+	 * - the text de-dupe considers only CURRENT (non-superseded) decisions, so re-asserting a fact
+	 *   that was later reversed (A→B→A) is legal ledger history, not a silent no-op;
+	 * - superseding an already-superseded target is rejected — supersede the current decision, not
+	 *   a historical one (prevents forked "current" chains under concurrent writers).
+	 *
+	 * Concurrency: the check-and-write below is one synchronous block over the STORE-RESIDENT
+	 * feature object, re-resolved after the only await (the adopt path), and adoptDerivedFeature
+	 * itself re-checks the store before setting — so two near-simultaneous captures serialize on
+	 * the same object instead of one silently clobbering the other's adopt.
 	 */
-	async recordAgentDecision(featureId: string, decision: FeatureDecision, repo?: string): Promise<"recorded" | "duplicate" | "no-feature"> {
-		const pf = this.featureStore.get(featureId) ?? (await this.adoptDerivedFeature(featureId, repo));
-		if (!pf) return "no-feature";
+	async recordAgentDecision(
+		featureId: string,
+		decision: FeatureDecision,
+		repo?: string,
+	): Promise<"recorded" | "duplicate" | "no-feature" | "supersede-missing" | "supersede-superseded"> {
+		// After the adopt await, re-resolve from the store: adoptDerivedFeature's own race guard
+		// guarantees the store-resident object wins, and every read below must be against THAT
+		// object, in the synchronous block, or a concurrent capture could be checked against a
+		// stale copy.
+		const adopted = this.featureStore.get(featureId) ?? (await this.adoptDerivedFeature(featureId, repo));
+		if (!adopted) return "no-feature";
+		const pf = this.featureStore.get(featureId) ?? adopted;
+		// Agents copy decision ids from kb-search output, where they render as `decision:<id>` doc
+		// ids — accept that form rather than bouncing a correct reference (blind-review finding:
+		// a false refusal here steered agents toward recording WITHOUT supersedes, the exact
+		// two-live-currents failure this path exists to prevent).
+		if (decision.supersedes?.startsWith("decision:")) decision = { ...decision, supersedes: decision.supersedes.slice("decision:".length) };
 		const norm = (s: string): string => s.replace(/\s+/g, " ").trim().toLowerCase();
 		const target = norm(decision.text);
 		const existing = pf.decisions ?? [];
-		if (existing.some((d) => norm(d.text) === target)) return "duplicate";
-		pf.decisions = [...existing, decision];
-		pf.updatedAt = Date.now();
+		if (existing.some((d) => !d.supersededBy && norm(d.text) === target)) return "duplicate";
+		let superseded: FeatureDecision | undefined;
+		if (decision.supersedes) {
+			superseded = existing.find((d) => d.id === decision.supersedes);
+			if (!superseded) return "supersede-missing";
+			if (superseded.supersededBy) return "supersede-superseded";
+		}
+		const now = Date.now();
+		pf.decisions = [
+			...existing.map((d) => (superseded && d.id === superseded.id ? { ...d, supersededBy: decision.id, supersededAt: now } : d)),
+			decision,
+		];
+		pf.updatedAt = now;
 		this.emitFeaturesChanged();
 		return "recorded";
 	}
@@ -3597,6 +3641,13 @@ export class SquadManager extends EventEmitter {
 			createdAt: now,
 			updatedAt: now,
 		};
+		// Adopt race guard (blind-review finding): two concurrent callers can both miss the store,
+		// then both reach here after their awaits. Whoever set second would clobber the first
+		// caller's freshly-adopted object — and any decision the first caller had already recorded
+		// onto it would be silently lost while its tool reply said "recorded". The store-resident
+		// object always wins; the loser's derived copy is discarded unused.
+		const raced = this.featureStore.get(pf.id);
+		if (raced) return raced;
 		this.featureStore.set(pf.id, pf);
 		for (const agentId of found.agentIds) {
 			const rec = this.agents.get(agentId);
@@ -11388,8 +11439,11 @@ export class SquadManager extends EventEmitter {
 		try {
 			const snapshot = await this.fabric(agentActor(rec.dto.id), { repos: [rec.dto.repo], includeLeases: true });
 			const results = searchFabric(snapshot, query, { topK, type });
+			// Decision hits surface their real FeatureDecision id (doc id = `decision:<id>`, see
+			// fabricDocuments) so an agent recording a reversal can pass it as `supersedes` — the id an
+			// agent can see must be the id the write path accepts.
 			const body = results.length
-				? results.map((r) => `- [${r.type}] ${r.title}\n  ${r.snippet}${r.repo ? `\n  (${r.repo})` : ""}`).join("\n")
+				? results.map((r) => `- [${r.type}] ${r.title}${r.type === "decision" && r.id.startsWith("decision:") ? ` (id: ${r.id.slice("decision:".length)})` : ""}\n  ${r.snippet}${r.repo ? `\n  (${r.repo})` : ""}`).join("\n")
 				: "No matching context in the knowledge base.";
 			rec.agent.respondHostTool(call.id, body);
 			this.append(rec, "system", `🔎 ${KB_SEARCH_TOOL}("${truncateLabel(query, 80)}") → ${results.length} result${results.length === 1 ? "" : "s"}`, {
@@ -11460,9 +11514,10 @@ export class SquadManager extends EventEmitter {
 			const args = call.arguments && typeof call.arguments === "object" ? (call.arguments as Record<string, unknown>) : {};
 			const text = typeof args.text === "string" ? args.text.trim() : "";
 			if (!text) {
-				rec.agent.respondHostTool(call.id, `usage: ${RECORD_DECISION_TOOL}({ text: string, source?: "model-delta", evidence?: string[] })`, true);
+				rec.agent.respondHostTool(call.id, `usage: ${RECORD_DECISION_TOOL}({ text: string, source?: "model-delta", evidence?: string[], supersedes?: string })`, true);
 				return;
 			}
+			const supersedes = typeof args.supersedes === "string" && args.supersedes.trim() ? args.supersedes.trim() : undefined;
 			const isModelDelta = args.source === "model-delta";
 			const evidence = Array.isArray(args.evidence) ? args.evidence.filter((e): e is string => typeof e === "string" && e.trim().length > 0) : undefined;
 			const featureId = rec.dto.featureId;
@@ -11492,6 +11547,7 @@ export class SquadManager extends EventEmitter {
 				// jump, PR-body anchors) keys on the STORED string — a raw "./src/x.ts" would silently
 				// no-op them all.
 				...(isModelDelta ? { evidence: (evidence ?? []).map((e) => e.trim().replace(/^\.\//, "").replace(/^\/+/, "")) } : {}),
+				...(supersedes ? { supersedes } : {}),
 			};
 			// Atomic, adopt-aware append (resolves plan-derived features + can't clobber a concurrent capture).
 			const outcome = await this.recordAgentDecision(featureId, decision, rec.dto.repo);
@@ -11503,10 +11559,28 @@ export class SquadManager extends EventEmitter {
 				rec.agent.respondHostTool(call.id, "decision already recorded — no change");
 				return;
 			}
+			if (outcome === "supersede-missing") {
+				// Do NOT advise recording without `supersedes` here — if this decision genuinely reverses
+				// a prior one, dropping the link records two live contradictory decisions, the exact
+				// failure supersession exists to prevent (blind-review finding).
+				rec.agent.respondHostTool(call.id, `supersedes target "${supersedes}" not found on this feature — decision NOT recorded. Run squad_kb_search({ type: "decision" }) and retry with the exact id shown. Only omit \`supersedes\` if this decision does NOT contradict any existing decision.`, true);
+				return;
+			}
+			if (outcome === "supersede-superseded") {
+				rec.agent.respondHostTool(call.id, `decision "${supersedes}" was already superseded — supersede the CURRENT decision that replaced it, not a historical one. Use squad_kb_search to find what is currently in force.`, true);
+				return;
+			}
 			// Durably written. Respond success FIRST so a throw in the cosmetic post-steps below can never
 			// flip an already-persisted decision to a "failed" reply (which would make the agent retry).
 			this.learningMetrics.record("decision-captured", 1, { flag: "decision-capture", variant: learningFlags(rec.dto.id).decisionCapture });
-			rec.agent.respondHostTool(call.id, isModelDelta ? "model-delta recorded — future agents on this work will inherit it" : "decision recorded — future agents on this work will inherit it");
+			rec.agent.respondHostTool(
+				call.id,
+				supersedes
+					? "decision recorded and the prior decision superseded — future agents inherit only the new one; the old stays on the record as history"
+					: isModelDelta
+						? "model-delta recorded — future agents on this work will inherit it"
+						: "decision recorded — future agents on this work will inherit it",
+			);
 			try {
 				this.append(rec, "system", `📝 ${isModelDelta ? "model-delta" : "decision"} recorded: ${truncateLabel(text, 200)}`, { status: "ok", tool: { callId: call.id, name: RECORD_DECISION_TOOL, args: call.arguments, argsText: safeJson(call.arguments) } });
 				void this.recordAudit(agentActor(rec.dto.id), "decision.recorded", featureId, "ok", truncateLabel(text, 120));
