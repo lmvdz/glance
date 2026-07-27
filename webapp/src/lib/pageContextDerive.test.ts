@@ -2,7 +2,6 @@ import { expect, test, describe } from 'bun:test';
 import {
   deriveFleetPageContext,
   deriveTasksPageContext,
-  deriveGraphPageContext,
   deriveCapabilitiesPageContext,
   deriveReviewPageContext,
   deriveOrgPageContext,
@@ -13,7 +12,6 @@ import { buildFleetRoster } from './fleetRoster';
 import { attentionItems, activeWork, computeCapacity } from './insights';
 import type { AgentDTO, CapabilitySnapshotDTO, PublicCapabilityCatalogDTO } from './dto';
 import type { Task } from '../types';
-import type { InspectSel } from '../omp-graph/inspect';
 
 // ── fixtures ─────────────────────────────────────────────────────────────────────────────────
 
@@ -125,34 +123,6 @@ describe('deriveTasksPageContext', () => {
 
 // ── Graph ────────────────────────────────────────────────────────────────────────────────────
 
-describe('deriveGraphPageContext', () => {
-  test('flat mode + window, no selection', () => {
-    const ctx = deriveGraphPageContext({ days: 7, viz: 'flat', sel: null });
-    expect(ctx.viewId).toBe('graph');
-    expect(ctx.filters?.windowDays).toBe(7);
-    expect(ctx.filters?.mode).toBe('FLAT');
-    expect(ctx.selection).toBeUndefined();
-    expect(ctx.entities).toEqual([]);
-  });
-
-  test('depth mode reads as RHYTHM per the shell vocabulary', () => {
-    const ctx = deriveGraphPageContext({ days: 30, viz: 'depth', sel: null });
-    expect(ctx.filters?.mode).toBe('RHYTHM');
-    expect(ctx.filters?.windowDays).toBe(30);
-  });
-
-  test('an open inspector selection carries kind+id as an entity', () => {
-    const sel: InspectSel = { kind: 'commit', sha: 'abc123', label: 'fix: thing', at: 1 };
-    const ctx = deriveGraphPageContext({ days: 14, viz: 'flat', sel });
-    expect(ctx.selection).toEqual({ kind: 'commit', id: 'abc123' });
-    expect(ctx.entities).toEqual([{ kind: 'commit', id: 'abc123', label: 'fix: thing' }]);
-  });
-
-  test('a kindless "needs"/"cost" inspector selection still resolves an id', () => {
-    const ctx = deriveGraphPageContext({ days: 7, viz: 'flat', sel: { kind: 'needs' } });
-    expect(ctx.selection).toEqual({ kind: 'needs', id: 'needs' });
-  });
-});
 
 // ── Capabilities ─────────────────────────────────────────────────────────────────────────────
 

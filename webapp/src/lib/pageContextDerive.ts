@@ -11,7 +11,6 @@ import type { AgentDTO, CapabilitySnapshotDTO, PublicCapabilityCatalogDTO } from
 import type { Task } from '../types';
 import type { FleetRoster } from './fleetRoster';
 import type { CapacitySummary } from './insights';
-import type { InspectSel } from '../omp-graph/inspect';
 
 /** Cap + tag helper shared by every deriver below. */
 function capEntities(entities: PageContextEntity[]): PageContextEntity[] {
@@ -99,62 +98,8 @@ export function deriveTasksPageContext({ tasks, selectedTaskId, taskFilter, list
   };
 }
 
-// ── Graph ──────────────────────────────────────────────────────────────────────────────────────
-
-export interface GraphPageContextInput {
-  days: 7 | 14 | 30;
-  viz: 'flat' | 'depth';
-  sel: InspectSel | null;
-}
-
-/** OmpGraphPanel's own context: the time window, FLAT vs DEPTH (rhythm) mode, and whatever the
- *  inspector currently has open — the three axes that actually change what's on screen. */
-export function deriveGraphPageContext({ days, viz, sel }: GraphPageContextInput): PageContext {
-  const selection: PageContextSelection | undefined = sel ? { kind: sel.kind, id: inspectSelId(sel) } : undefined;
-  const entities: PageContextEntity[] = sel ? [{ kind: sel.kind, id: inspectSelId(sel), label: inspectSelLabel(sel) }] : [];
-  return {
-    viewId: 'graph',
-    title: 'Graph',
-    entities,
-    selection,
-    filters: {
-      windowDays: days,
-      mode: viz === 'depth' ? 'RHYTHM' : 'FLAT',
-    },
-    route: '/graph',
-  };
-}
 
 // ── Fog (comprehension batch-3 review: FogView, the new nav item mounting HeatTree's fog mode) ──
-
-function inspectSelId(sel: InspectSel): string {
-  switch (sel.kind) {
-    case 'commit': return sel.sha;
-    case 'ticket': return sel.ticket;
-    case 'run': return sel.session.agentId ?? `${sel.session.t0}-${sel.session.t1}`;
-    case 'hour': return String(sel.at);
-    case 'loop': return sel.sub;
-    case 'meeting': return String(sel.at);
-    case 'week': return String(sel.index);
-    case 'collision': return `${sel.collision.file}:${sel.at}`;
-    default: return sel.kind;
-  }
-}
-
-function inspectSelLabel(sel: InspectSel): string {
-  switch (sel.kind) {
-    case 'commit': return sel.label;
-    case 'ticket': return sel.label;
-    case 'run': return `run ${sel.session.label}`;
-    case 'hour': return 'hour detail';
-    case 'needs': return 'needs you';
-    case 'cost': return 'cost';
-    case 'loop': return sel.label;
-    case 'meeting': return sel.label;
-    case 'week': return sel.label;
-    case 'collision': return `collision on ${sel.collision.file}`;
-  }
-}
 
 // ── Capabilities ───────────────────────────────────────────────────────────────────────────────
 

@@ -58,7 +58,7 @@ export function parseHubHash(hash: string): HubRoute {
     // The fleet roster dissolved into the room: FLEET PULSE says whether the fleet is calm and the
     // standing tree says where everything is. An unrecognised workbench view lands there too, rather
     // than on a page that exists only because a URL named it.
-    if (!view || view === 'fleet' || view === 'intervene') return { kind: 'hub', channelId: DEFAULT_CHANNEL_ID };
+    if (!view || view === 'fleet' || view === 'intervene' || view === 'graph') return { kind: 'hub', channelId: DEFAULT_CHANNEL_ID };
     return { kind: 'workbench', view, ...(view === 'task' && decode(sub) ? { id: decode(sub) } : {}) };
   }
   return { kind: 'hub', channelId: DEFAULT_CHANNEL_ID };

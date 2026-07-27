@@ -20,7 +20,6 @@ import { ToastContainer } from './components/ToastContainer';
 import { ThemeProvider } from './context/ThemeContext';
 import { BorrowedSurface } from './components/hub/BorrowedSurface';
 import { CommandPalette } from './components/CommandPalette';
-import { OmpGraphPanel } from './components/OmpGraphPanel';
 import { UnseenSurface } from './components/hub/UnseenSurface';
 import { MondaySurface } from './components/hub/MondaySurface';
 import { CostSurface } from './components/hub/CostSurface';
@@ -86,7 +85,6 @@ const WorkbenchRoute = ({ route }: { route: Extract<HubRoute, { kind: 'workbench
     );
   }
   if (route.view === 'capabilities') return <BorrowedSurface />;
-  if (route.view === 'graph') return <OmpGraphPanel />;
   if (route.view === 'plan-reality') return <RealitySurface />;
   if (route.view === 'plans') return <PlanSurface name={route.id} />;
   if (route.view === 'gate-verdict') return <VerdictSurface routeId={route.id} />;

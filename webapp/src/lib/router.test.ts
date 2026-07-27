@@ -14,9 +14,17 @@ describe('Hub hash router', () => {
   });
 
   test('demoted workbench routes stay behind the hub shell', () => {
-    expect(parseHubHash('#/workbench/graph')).toEqual({ kind: 'workbench', view: 'graph' });
-    expect(parseHubHash('#/workbench/omp-graph')).toEqual({ kind: 'workbench', view: 'graph' });
     expect(workbenchHref('capabilities')).toBe('#/workbench/capabilities');
+    expect(parseHubHash('#/workbench/capabilities')).toEqual({ kind: 'workbench', view: 'capabilities' });
+  });
+
+  test('the graph dissolves into the room, under both of its spellings', () => {
+    // The Observe surface was a full-viewport dashboard from a design locked before the room-threads
+    // pivot. 01-room answers the same question deliberately smaller — FLEET PULSE with a sentence
+    // under it — and a product whose standing law is that watching should not be necessary cannot
+    // also ship a watching screen.
+    expect(parseHubHash('#/workbench/graph')).toEqual({ kind: 'hub', channelId: 'fleet' });
+    expect(parseHubHash('#/workbench/omp-graph')).toEqual({ kind: 'hub', channelId: 'fleet' });
   });
 
   test('every old way of opening a unit lands in the room, standing at that node', () => {
