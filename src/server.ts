@@ -4023,7 +4023,7 @@ export class SquadServer {
 		const out: LeaseEntry[] = [];
 		for (const r of repos) {
 			for (const lease of await leasesFor(r).catch(() => [])) {
-				const key = `${lease.repo} ${lease.id}`;
+				const key = `${lease.repo}\0${lease.id}`;
 				if (seen.has(key)) continue;
 				seen.add(key);
 				out.push(lease);
