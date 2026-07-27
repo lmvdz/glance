@@ -46,7 +46,7 @@ export const PageContextDebugPanel: React.FC = () => {
         <button
           type="button"
           onClick={() => setOpen(false)}
-          className="rounded px-1 text-ink-text0 hover:bg-ink-surface hover:text-ink-text-body"
+          className="rounded px-1 text-ink-text hover:bg-ink-surface hover:text-ink-text-body"
           aria-label="Close PageContext debug panel"
         >
           ×

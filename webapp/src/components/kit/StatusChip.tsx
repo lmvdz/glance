@@ -94,7 +94,7 @@ function toneClasses(tone: StatusChipTone, variant: StatusChipVariant): string {
   }
   // neutral
   if (variant === 'solid') return 'bg-ink-border text-ink-text-label border-transparent bg-ink-surface text-ink-text-label';
-  if (variant === 'outline') return 'border-ink-border-2 text-ink-text0 bg-transparent border-ink-border-2 text-ink-text-subtle';
+  if (variant === 'outline') return 'border-ink-border-2 text-ink-text bg-transparent border-ink-border-2 text-ink-text-subtle';
   return 'bg-ink-surface text-ink-text-subtle border-transparent bg-panel text-ink-text-label';
 }
 

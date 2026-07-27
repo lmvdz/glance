@@ -254,7 +254,7 @@ export const CommandPalette: React.FC = () => {
         <div className="flex items-center gap-4 px-4 py-2" style={{ borderTop: '1px solid #1A1A1D' }}>
           <Kbd keys="↑↓" label="navigate" />
           <span className="inline-flex items-center gap-1.5 font-mono text-caption text-ink-text-subtle">
-            <kbd className="rounded border border-ink-border-2 bg-ink-surface px-1 py-0.5 leading-none text-ink-text0 border-ink-border-2 bg-ink-surface text-ink-text-subtle">
+            <kbd className="rounded border border-ink-border-2 bg-ink-surface px-1 py-0.5 leading-none text-ink-text border-ink-border-2 bg-ink-surface text-ink-text-subtle">
               <CornerDownLeft className="h-2.5 w-2.5" aria-hidden="true" />
             </kbd>
             open
