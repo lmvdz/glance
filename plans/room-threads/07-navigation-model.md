@@ -26,10 +26,17 @@ around a guess.
 3. Breadcrumbs must stay honest under whichever model wins — a node reachable by two paths must not
    claim a single canonical ancestry it does not have.
 
+4. **Current state is a property of the node, never of the path.** Whichever multi-homing model wins,
+   both parents render the same current state — divergent parent views of one node is the
+   parallel-worker "temporal disagreement" failure, resolved at the node by concern 02's supersession
+   rule, not per-view. (Source: plans/research-long-horizon-agent-memory/BRIEF.md, Rank 2.)
+
 ## Cross-Repo Side Effects
 None.
 
 ## Verify
 - Reading a conversation survives clicking three nodes in the state pane.
 - A node with two parents renders correctly from both, and its breadcrumb does not lie.
+- A node with two parents reports the same current state from both — parent views may not diverge
+  (E_contradiction guard).
 - A cycle in the graph is rejected at write time, not discovered at render time.

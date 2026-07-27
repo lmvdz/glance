@@ -64,6 +64,13 @@ by remembering when it happened.
 
 - [DESIGN.md](DESIGN.md) — a node is the unit of work AND of conversation; up carries events, down
   carries context; state picks the region and velocity only orders within it.
+- [plans/research-long-horizon-agent-memory/BRIEF.md](../research-long-horizon-agent-memory/BRIEF.md)
+  (2026-07-25) — amended 02 (conflicting escalations supersede, never coexist; abnormal exit is
+  escalation-grade), 06 (abnormal-exit regeneration from daemon exhaust; ≤800-token downward-summary
+  budget, frozen at spawn), 07 (current state is a property of the node, never of the path). Same
+  brief independently validates 04 and 06's existing rules against three external lineages; its error
+  taxonomy (E_contradiction, E_pollution, E_abstraction, E_anachronism) is the naming used in verify
+  sections.
 
 ## Notes
 
