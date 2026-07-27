@@ -129,3 +129,70 @@ Two defects in this pass were found only by booting the room and looking — the
 WORKBENCH DOORS list, and nine identical "nothing to check it against" lines down a plan column. A
 third was found by a test rather than by reading: the new WHAT GOT DONE WHILE YOU DIDN'T LOOK heading
 claims an absence, and it rendered with no absence recorded. Reading the diff caught none of the three.
+
+---
+
+## Second pass, same day — no pre-design view survives
+
+The first re-measurement left 5,900 lines of pre-design UI standing and said so. That is now zero: **every
+view in the application comes from the designs**, and the measured zone count is **31 of 123** (still a
+floor — runtime-generated zones cannot be string-matched).
+
+| screen | audit | pass 1 | pass 2 |
+|---|---|---|---|
+| `01-room` | 4/12 | 6/12 | 6/12 |
+| `02-surfaces` | 5/34 | 10/34 | 11/34 |
+| `03-machinery` | 3/24 | 3/24 | 3/24 |
+| `04-beyond` | 0/18 | 2/18 | 2/18 |
+| `05-first-week` | 2/15 | 2/15 | 5/15 |
+| `06-other-side` | 1/17 | 3/17 | 4/17 |
+| `07-shell` | 0/3 | 0/3 | 0/3 |
+
+### Rebuilt in this pass
+
+- **Fog → WHAT HAS CHANGED UNDER YOU** (`05-first-week`). A tri-state colour overlay on a folder tree
+  behind a 7d/14d/30d toggle became a ranked list where each row says in words why it is there.
+- **Capabilities → WHAT THIS PRODUCT CAN DO THAT YOU DID NOT TEACH IT** (`05-first-week`). A capability
+  pack is a borrowed default. IN FORCE is kept apart from ON OFFER.
+- **Daily → WHAT CHANGED IN HOW THIS GETS USED** (`05-first-week`). Sparklines out; a direction in real
+  units and the friction grouped by what it *is*. The weekly episode moved here under the reference's
+  own heading.
+- **Org settings → WHO IS IN THIS ROOM** (`05-first-week`). Roles described by what a person's word does
+  to the fleet, not by what boxes are ticked.
+- **Task board → WHAT IS ON** (`02-surfaces`). Ordered by whether it needs you, with WHERE YOU HAVE BEEN
+  STANDING TODAY beside it.
+- **TaskDetail + DesignReview → WHAT HAPPENED TO WHAT YOU WROTE** (`06-other-side`). One screen, and the
+  four-state lifecycle instead of a resolved tick.
+- **First run → DAY ONE** (`05-first-week`). The last screen wearing the old application, and the first
+  one anybody sees.
+- **Chrome**: toasts, the command palette, the waiting-room, and Login's one white button.
+
+### Retired rather than translated — one call worth flagging
+
+The **Graph / Observe surface** (4,619 lines, its own `docs/design/fleet-pulse/DESIGN.md`, concept locked
+2026-07-02) is deleted. `01-room` answers the same question deliberately smaller — FLEET PULSE with a
+sentence under it — and a product whose standing law is that watching should not be necessary cannot also
+ship a watching screen. Its design doc is untouched; only the implementation that contradicts the
+canonical one is gone. **This is the one place a design was superseded rather than translated.**
+
+Also kept deliberately: `SpawnConfirmSheet` and `SpawnStatusCard`, orphaned but implementing a design
+(`02-surfaces`' "TAM HAS PROPOSED A SHAPE FOR YOUR WORDS") the room has not rebuilt. They render nowhere.
+
+### What booting kept finding
+
+Every pass, the defects came from running it rather than reading it:
+
+1. The workbench rail with its WORKBENCH DOORS list, and a `Fleet` door that had become a link to itself.
+2. Nine identical "nothing to check it against" lines down a plan column — a finding turned into wallpaper.
+3. One unanswered question rendered as two identical cards while the alarm band already carried it.
+4. **The top bar reading "1 waiting on you" while the surface below read "not one of them needs you."**
+   Both true of what they measured; together a contradiction, which is worse than either being wrong,
+   because a reader cannot tell which screen to believe.
+
+And two that only a test found: a heading claiming an absence that had not been recorded, and a dedupe key
+matching a chip label case-sensitively so that two *different* agents asking the same question folded into
+one — strictly worse than the duplicate it was written to fix.
+
+**The audit's original correction still holds, and now has a second half.** A concern is not done when its
+data is right; it is done when a person can see it. And it is not done when a person can see it either —
+it is done when what they see does not contradict the screen next to it.
