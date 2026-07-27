@@ -8,7 +8,6 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { LoopMetersCard } from './LoopMetersCard';
 import { EpisodesCard } from './EpisodesCard';
 import { AfterActionList } from './AfterActionCard';
-import { SymptomRows } from './SymptomsCard';
 import type { AfterActionWire, SymptomWire } from '../lib/loop-meters';
 import type { EpisodeMetaDTO } from '../lib/api';
 
@@ -107,13 +106,8 @@ const symptom: SymptomWire = {
   fixedBy: { prNumber: 42 },
 };
 
-describe('SymptomRows', () => {
-  test('renders the symptom phrasing, where-to-look chips, repo basename, and the fixed-by badge', () => {
-    const html = renderToStaticMarkup(<SymptomRows symptoms={[symptom]} now={NOW} />);
-    expect(html).toContain('dispatch stalled');
-    expect(html).toContain('src/dispatch.ts');
-    expect(html).toContain('glance doctor');
-    expect(html).toContain('fixed by #42');
-    expect(html).toContain('>glance<'); // basename, not the full path, as the visible label
-  });
-});
+// The SymptomRows tests went with SymptomsCard, which was rendered by exactly one mount (the old Fog
+// view) and by nothing after it was replaced. The symptom signal itself is still recorded and still
+// worth a face — 03-machinery's "THE TWO TIMES HE SHOULD HAVE SPOKEN AND DID NOT" is the shape it
+// wants — but a component nothing renders is not that face, and keeping it would have meant keeping
+// a screen the designs replaced.

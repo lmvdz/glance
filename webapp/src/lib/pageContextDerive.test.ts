@@ -3,7 +3,6 @@ import {
   deriveFleetPageContext,
   deriveTasksPageContext,
   deriveGraphPageContext,
-  deriveFogPageContext,
   deriveCapabilitiesPageContext,
   deriveReviewPageContext,
   deriveOrgPageContext,
@@ -195,16 +194,6 @@ describe('deriveReviewPageContext', () => {
   });
 });
 
-describe('deriveFogPageContext', () => {
-  test('carries the days window and file count, no per-item selection concept', () => {
-    const ctx = deriveFogPageContext({ days: 14, fileCount: 42 });
-    expect(ctx.viewId).toBe('fog');
-    expect(ctx.title).toBe('Comprehension fog');
-    expect(ctx.entities).toEqual([]);
-    expect(ctx.filters).toEqual({ windowDays: 14, fileCount: 42 });
-    expect(ctx.route).toBe('/fog');
-  });
-});
 
 describe('deriveOrgPageContext', () => {
   test('a fixed, minimal context — org settings has no per-item selection concept', () => {

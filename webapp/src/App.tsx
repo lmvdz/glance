@@ -21,7 +21,7 @@ import { ThemeProvider } from './context/ThemeContext';
 import { CapabilityPanel } from './components/CapabilityPanel';
 import { CommandPalette } from './components/CommandPalette';
 import { OmpGraphPanel } from './components/OmpGraphPanel';
-import { FogView } from './components/FogView';
+import { UnseenSurface } from './components/hub/UnseenSurface';
 import { DailyPanel } from './components/DailyPanel';
 import { CostSurface } from './components/hub/CostSurface';
 import { DesignReviewView } from './components/DesignReviewView';
@@ -75,7 +75,7 @@ const WorkbenchRoute = ({ route }: { route: Extract<HubRoute, { kind: 'workbench
   const orgPageContext = React.useMemo(() => deriveOrgPageContext(), []);
 
   if (status === 'authed' && !currentProject && route.view !== 'org') return <FirstRunSetup />;
-  if (route.view === 'fog') return <FogView />;
+  if (route.view === 'fog') return <UnseenSurface />;
   if (route.view === 'daily') return <DailyPanel />;
   if (route.view === 'economics') return <CostSurface />;
   if (route.view === 'review') {
