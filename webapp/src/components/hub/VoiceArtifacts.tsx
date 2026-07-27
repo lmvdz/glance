@@ -286,7 +286,10 @@ export function VoiceArtifactViewer({ row, content, loading, failure, onBack }: 
         ) : (
           // The room's existing renderer, on an immutable snapshot. `status="ok"`: a snapshot is
           // complete by construction, so the streaming-tail machinery has nothing to do here.
-          <div className="prose-room text-[13.5px] leading-[1.65]" style={{ color: '#DEDEE2' }}>
+          // The SAME prose classes the chat lane wraps `SettledMarkdown` in
+          // (`TranscriptTimeline`). A document viewer that invented its own type scale would drift
+          // from every other markdown surface in the app the first time either changed.
+          <div className="markdown-body prose dark:prose-invert prose-sm max-w-none text-[13.5px] leading-[1.65] prose-headings:font-semibold prose-headings:mb-1 prose-headings:mt-3" style={{ color: '#DEDEE2' }}>
             <SettledMarkdown text={content ?? ''} status="ok" />
           </div>
         )}
