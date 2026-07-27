@@ -28,7 +28,7 @@ import { DesignReviewView } from './components/DesignReviewView';
 import { RealitySurface } from './components/hub/RealitySurface';
 import { PlanSurface } from './components/hub/PlanSurface';
 import { VerdictSurface } from './components/hub/VerdictSurface';
-import { OrgSettings } from './components/OrgSettings';
+import { PeopleSurface } from './components/hub/PeopleSurface';
 import { FileSignIn } from './components/FileSignIn';
 import { FirstRunSetup } from './components/FirstRunSetup';
 import { AuthProvider, useAuth } from './context/AuthContext';
@@ -90,13 +90,7 @@ const WorkbenchRoute = ({ route }: { route: Extract<HubRoute, { kind: 'workbench
   if (route.view === 'plan-reality') return <RealitySurface />;
   if (route.view === 'plans') return <PlanSurface name={route.id} />;
   if (route.view === 'gate-verdict') return <VerdictSurface routeId={route.id} />;
-  if (route.view === 'org') {
-    return (
-      <PageContextScope value={orgPageContext}>
-        <OrgSettings />
-      </PageContextScope>
-    );
-  }
+  if (route.view === 'org') return <PeopleSurface />;
   if (route.view === 'tasks' && !selectedTaskId) {
     return (
       <PageContextScope value={tasksPageContext}>
