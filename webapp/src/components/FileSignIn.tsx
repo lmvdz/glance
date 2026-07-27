@@ -55,7 +55,7 @@ export const FileSignIn = (): React.ReactElement => {
           </p>
         </div>
 
-        <div className="space-y-2 rounded-md border border-current/15 p-4">
+        <div className="space-y-2 p-4" style={{ border: '1px solid #26262B', borderRadius: 3 }}>
           <p className="text-sm font-medium">Where to find the token</p>
           <p className="text-sm opacity-80">
             The daemon printed a sign-in link when it started. Otherwise, read the token and paste it below:
