@@ -30,6 +30,11 @@ The 2026-07-25 amendment closed the centre-pane fork before this research began:
 the default narrative; depth opens from cards and the rail; selection never yanks a conversation
 mid-read. The remaining router and containment questions are settled below.
 
+4. **Current state is a property of the node, never of the path.** Whichever multi-homing model wins,
+   both parents render the same current state — divergent parent views of one node is the
+   parallel-worker "temporal disagreement" failure, resolved at the node by concern 02's supersession
+   rule, not per-view. (Source: plans/research-long-horizon-agent-memory/BRIEF.md, Rank 2.)
+
 ## Cross-Repo Side Effects
 None.
 
@@ -37,6 +42,8 @@ None.
 - Selecting three state-pane nodes leaves the current conversation route and reading position unchanged.
 - Entering and then backing out restores the prior route and its exact reading position.
 - A shared unit or landing appears once at its primary home and as an honest typed reference elsewhere.
+- A node with two parents reports the same current state from both — parent views may not diverge
+  (E_contradiction guard), and its breadcrumb does not lie about which home it is being read from.
 - A `parentId` cycle is rejected at write time; a valid typed reference never changes containment.
 
 ## Settled
