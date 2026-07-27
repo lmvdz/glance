@@ -50,6 +50,10 @@ export interface RoomFrameProps {
 	children: React.ReactNode;
 	/** Open when someone is answering. Sits BESIDE the room — answering never takes the room away. */
 	decision?: React.ReactNode;
+	/** The fleet's autonomy, readable from the room rather than from a settings page. */
+	autonomyPanel?: React.ReactNode;
+	autonomyOpen?: boolean;
+	onToggleAutonomy?: () => void;
 }
 
 const MONO = "'JetBrains Mono',ui-monospace,monospace";
@@ -84,7 +88,7 @@ function Waiting({ nodes, now, onEnter }: { nodes: readonly RoomNode[]; now: num
 	);
 }
 
-export function RoomFrame({ repo, rooms, activeRoomId, onOpenRoom, nodes, plans, now, autonomy, selectedId, onSelect, onEnter, children, decision }: RoomFrameProps) {
+export function RoomFrame({ repo, rooms, activeRoomId, onOpenRoom, nodes, plans, now, autonomy, autonomyPanel, autonomyOpen, onToggleAutonomy, selectedId, onSelect, onEnter, children, decision }: RoomFrameProps) {
 	const waiting = nodes.filter((node) => node.state === 'needs-you');
 	const selected = nodes.find((node) => node.id === selectedId);
 	const stats = alarmStats(nodes, now);
@@ -136,7 +140,13 @@ export function RoomFrame({ repo, rooms, activeRoomId, onOpenRoom, nodes, plans,
 					    leave the fleet to answer one question about it, and the standing tree is exactly
 					    the context that makes them comfortable answering at all. */}
 					{decision}
+					{autonomyOpen && autonomyPanel ? <div className="w-[520px] flex-none" style={{ borderLeft: '1px solid #1F1F22' }}>{autonomyPanel}</div> : null}
 
+					{/* A panel TAKES THE RAIL'S PLACE rather than adding a third column. The reference draws
+					    two columns — room and panel — and three at 1600px squeezed the conversation to
+					    380px, which is narrower than the reading measure the messages are set to. The
+					    rail comes back the moment the panel closes. */}
+					{decision || (autonomyOpen && autonomyPanel) ? null : (
 					<aside className="flex w-[376px] flex-none flex-col" style={{ borderLeft: '1px solid #1F1F22' }} aria-label="Where you are standing">
 						<div className="px-4 pb-1 pt-3.5">
 							<div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.16em', color: '#5A5A61' }}>WHERE YOU ARE STANDING</div>
@@ -214,10 +224,22 @@ export function RoomFrame({ repo, rooms, activeRoomId, onOpenRoom, nodes, plans,
 								{selectionPreview(selected)}
 							</div>
 						) : null}
+						{onToggleAutonomy ? (
+							<button
+								type="button"
+								onClick={onToggleAutonomy}
+								className="px-4 py-2.5 text-left"
+								style={{ borderTop: '1px solid #1F1F22', fontFamily: MONO, fontSize: 10, letterSpacing: '.14em', color: autonomyOpen ? '#F0A35A' : '#5A5A61' }}
+								title="What the fleet may settle without you, and what it never will — as a state you can read."
+							>
+								{autonomyOpen ? 'CLOSE AUTONOMY' : 'WHAT THE FLEET MAY SETTLE'}
+							</button>
+						) : null}
 						<div className="px-4 py-3" style={{ borderTop: '1px solid #1F1F22', fontFamily: MONO, fontSize: 10, color: '#4A4A52', lineHeight: 1.8 }}>
 							{ADDRESSABILITY_NOTE}
 						</div>
 					</aside>
+					)}
 				</div>
 			</div>
 		</div>

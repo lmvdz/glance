@@ -6,6 +6,7 @@ import { ChannelTimeline } from './ChannelTimeline';
 import { AgentRecordPanel } from './AgentRecordPanel';
 import { RoomFrame } from './RoomFrame';
 import { DecisionPanel, type DecisionRequest } from './DecisionPanel';
+import { AutonomyPanel, type AutonomyState } from './AutonomyPanel';
 import { QuietRoom } from './QuietRoom';
 import { agentsToRoomNodes } from '../../lib/roomState';
 import { apiJson, jsonInit } from '../../lib/api';
@@ -328,6 +329,21 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
 
   const roomNodes = useMemo(() => agentsToRoomNodes(agents), [agents]);
   const [answeringId, setAnsweringId] = useState<string | undefined>(undefined);
+  const [autonomyOpen, setAutonomyOpen] = useState(false);
+  const [autonomy, setAutonomy] = useState<AutonomyState | undefined>(undefined);
+  const [autonomyError, setAutonomyError] = useState('');
+
+  useEffect(() => {
+    if (!autonomyOpen) return;
+    // Fetched when opened rather than polled: this is a state you go and read, not a ticker.
+    setAutonomyError('');
+    void apiJson<AutonomyState>('/api/autonomy')
+      .then(setAutonomy)
+      // A failed read must not look like a slow one. Swallowing the error left the panel saying
+      // "reading…" forever, which is a claim that something is on its way — the same absence-as-answer
+      // this whole surface exists to stop.
+      .catch((err) => setAutonomyError(err instanceof Error ? err.message : String(err)));
+  }, [autonomyOpen]);
 
   // Every gate-class pending across the fleet, in one list, so the panel can say "1 of 3" truthfully
   // rather than pretending each question arrived alone.
@@ -418,6 +434,19 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
               window.location.hash = hubHref(`node:${node.id}`);
             }}
             decision={answering ? <DecisionPanel request={answering} onAnswer={answer} onClose={() => setAnsweringId(undefined)} /> : undefined}
+            autonomyOpen={autonomyOpen}
+            onToggleAutonomy={() => setAutonomyOpen((open) => !open)}
+            autonomyPanel={
+              autonomy
+                ? <AutonomyPanel state={autonomy} onClose={() => setAutonomyOpen(false)} />
+                : (
+                  <div className="p-5 text-[12.5px] leading-[1.5]" style={{ color: autonomyError ? '#C2704A' : '#6A6A72' }}>
+                    {autonomyError
+                      ? `Could not read what the fleet may settle: ${autonomyError}. That is not the same as it being allowed to settle nothing — this panel does not know either way right now.`
+                      : 'Reading what the fleet may settle…'}
+                  </div>
+                )
+            }
           >
             {selectedAgent ? <AgentRecordPanel agent={selectedAgent} /> : null}
             <ChannelTimeline

@@ -247,7 +247,7 @@ import { proposeRules, type RuleProposal } from "./rule-proposals.ts";
 import { assessPlanMotion as assessPlanMotionEvidence, planMotionMetrics, type PlanMotionInput, type PlanMotionAssessment } from "./plan-motion.ts";
 import { compactionNotice, planCompaction, planHandover, type CompactionPlan, type CompactionPolicy, type HandoverPlan } from "./archive.ts";
 import { consequenceSentence, reshape, type PlanProposal, type ReshapeOp } from "./plan-proposals.ts";
-import { DelegationBoundaryError, assertHumanAuthority, commandAction, grantFor, nonDelegatableClassOf, type Authority, type DelegationGrant } from "./delegation-boundary.ts";
+import { DelegationBoundaryError, assertHumanAuthority, boundaryJustification, commandAction, grantFor, nonDelegatableClasses, nonDelegatableClassOf, type Authority, type DelegationGrant } from "./delegation-boundary.ts";
 import { buildTrace, traceMaxSpans, traceSampleRatio, traceSpansEnabled, type TraceResponse } from "./spans.ts";
 import { traceExporterFromEnv, type TraceExportQueue } from "./trace-exporter.ts";
 
@@ -3953,6 +3953,47 @@ export class SquadManager extends EventEmitter {
 	/** How long the fleet gets to recover before anyone is interrupted. */
 	get recoveryDelayMs(): number {
 		return RECOVERY_DELAY_MS;
+	}
+
+	/**
+	 * The fleet's autonomy as a state a person can read — what it may settle alone, what it never may,
+	 * and anything it is currently offering to take over.
+	 *
+	 * Concerns 11 and 12 have been built and invisible: the rule that settles a person's work is stored
+	 * with their exact sentence and could not be seen anywhere, and the boundary refuses on their
+	 * behalf without ever saying so. A rule nobody can read is indistinguishable from a setting
+	 * somebody changed.
+	 */
+	async autonomyState(nodeId = SquadManager.ROOT_NODE_ID): Promise<{
+		rules: Array<{ id: string; sentence: string; authorId: string; since: number; settles: string[]; invocations: number; wouldNotHaveCaught: string[] }>;
+		neverAlone: Array<{ class: string; because: string }>;
+		proposals: RuleProposal[];
+	}> {
+		try {
+			const records = await new NodeRecordStore(this.store).list(nodeId);
+			const rules = records
+				.filter((record): record is Extract<NodeRecord, { kind: "rule" }> => record.kind === "rule" && record.status === "active")
+				.map((rule) => ({
+					id: rule.id,
+					sentence: rule.sentence,
+					authorId: rule.authorId,
+					since: rule.createdAt,
+					settles: [...rule.settles],
+					invocations: rule.invocations.length,
+					wouldNotHaveCaught: [...rule.wouldNotHaveCaught],
+				}));
+			return {
+				rules,
+				// Product policy, shown so it can be argued with — not so it can be switched off.
+				neverAlone: nonDelegatableClasses.map((cls) => ({ class: cls, because: boundaryJustification[cls] })),
+				proposals: proposeRules(records),
+			};
+		} catch (err) {
+			this.log("warn", `autonomy state unavailable: ${errText(err)}`);
+			// Fail QUIET but not silent: an empty list of rules would read as "the fleet settles nothing",
+			// which is a claim. Returning the boundary alone says what is certain and omits what is not.
+			return { rules: [], neverAlone: nonDelegatableClasses.map((cls) => ({ class: cls, because: boundaryJustification[cls] })), proposals: [] };
+		}
 	}
 
 	/** The learning state: what is borrowed, what is unknown, and what would settle each. */

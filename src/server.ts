@@ -2360,6 +2360,7 @@ export class SquadServer {
 		}
 		if (url.pathname === "/api/workflows") return Response.json(workflowSnapshot(await manager.visibleAgents(actor), manager.capabilityWorkflowDefinitions()));
 		if (url.pathname === "/api/models") return Response.json({ models: mergeModelOptions(modelOptionsFromEnv(), await manager.modelOptions()) });
+		if (url.pathname === "/api/autonomy") return Response.json(await manager.autonomyState());
 		if (url.pathname === "/api/profiles") return Response.json({ profiles: manager.profiles() });
 		if (url.pathname === "/api/capabilities") return Response.json(manager.capabilities());
 		if (url.pathname === "/api/capability-audit") return Response.json({ audit: manager.capabilities().audit });
