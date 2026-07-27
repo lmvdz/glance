@@ -126,3 +126,20 @@ test("interruptState reports the gate as UNWIRED, because it is", async () => {
   expect(state.leaves.some((what) => /needs you|waiting/i.test(what))).toBe(false);
   await fs.rm(dir, { recursive: true, force: true });
 });
+
+test("the gate is OFF by default — nothing starts interrupting anyone on upgrade", async () => {
+  // Sending is the only thing this system does that can reach someone not looking at it. Defaulting
+  // that to on, for every existing install, without anyone asking, is the move the gate exists to
+  // prevent.
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const { SquadManager } = await import("../src/squad-manager.ts");
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gate-default-off-"));
+  const mgr = new SquadManager({ stateDir: dir, worktreeBase: dir });
+  expect(mgr.interruptState().wired).toBe(false);
+  // And with the gate off, a tick does nothing at all rather than quietly recording.
+  await mgr.considerInterrupting();
+  expect(mgr.interruptState().health).toBeUndefined();
+  await fs.rm(dir, { recursive: true, force: true });
+});

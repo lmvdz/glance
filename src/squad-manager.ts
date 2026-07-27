@@ -238,6 +238,8 @@ import { NodeStore, compareActivity, type NodeState } from "./nodes.ts";
 import { ForgedCardError, assertAuthentic, projectsToRoom, type CardProvenance } from "./projection-classes.ts";
 import { coldStartLearningState } from "./unknowns.ts";
 import { RECOVERY_DELAY_MS, gateHealth, notificationText, readGateEvaluation, shouldLeaveTheApp, type GateEvaluation, type GateHealth, type WorthItReview } from "./leaving-the-app.ts";
+import { GateStore } from "./gate-store.ts";
+import { buildEvaluation } from "./gate-wiring.ts";
 import { assessReversal, costEventsFrom, shouldDiscloseCost, summariseCost, type CostSummary, type ReversalAssessment, type ReversalNode } from "./decision-impact.ts";
 import { NodeRecordStore, quoteRule, type NodeRecord, type InstructionReadbackRecord, type ObjectionRecord, type PlanMotionRecord } from "./node-records.ts";
 import { approveIrreversible, beginInstruction, overruleObjection, raiseObjection, recordObjectionOutcome, rejectIrreversible, type InstructionExecution } from "./instructions.ts";
@@ -1174,6 +1176,18 @@ export class SquadManager extends EventEmitter {
 	/** Agent ids currently draining agent-host ring replay on reattach — transition()/setPending() apply
 	 *  the state change but record nothing, and maybeAutoSupervise is suppressed, until settling clears. */
 	private readonly settling = new Set<string>();
+	/**
+	 * The interrupt gate's durable record, and whether the gate is switched on at all.
+	 *
+	 * OFF by default. Sending a notification is the only thing this system does that can reach someone
+	 * who is not looking at it, and defaulting that to on — for every existing install, on upgrade,
+	 * without anyone asking — is exactly the move the gate exists to prevent. `GLANCE_INTERRUPT=1`
+	 * turns it on; web push additionally requires a device to have subscribed, so a person who has
+	 * never opted in still receives nothing.
+	 */
+	private gateStore?: GateStore;
+	private readonly interruptGateOn = envBoolAliased("GLANCE_INTERRUPT", "OMP_SQUAD_INTERRUPT", false);
+	private interruptLoop?: ReturnType<typeof setInterval>;
 	/** Resolvers awaiting concern 2's replay-completion marker frame from a reattached agent's host,
 	 *  keyed by agent id. Armed by attachExisting BEFORE agent.start() is called (a host that replays
 	 *  its whole ring inside the first socket read can emit the marker synchronously during start()'s
@@ -1687,6 +1701,19 @@ export class SquadManager extends EventEmitter {
 			}
 		}
 
+		// The interrupt gate. Off unless asked for — see `interruptGateOn`. The tick is a minute
+		// because the WAIT is the product: a decision made at minute zero is not the decision at
+		// minute nine, and re-deciding is how the delay earns its keep.
+		this.gateStore = new GateStore(path.join(this.stateDir, "interrupt-gate.jsonl"), (m) => this.log("warn", `interrupt-gate: ${m}`));
+		if (this.interruptGateOn) {
+			this.interruptLoop = setInterval(() => {
+				void this.considerInterrupting().catch((err) => this.log("warn", `interrupt tick: ${errText(err)}`));
+			}, 60_000);
+			this.log("info", `interrupt gate ON (three conditions, ${Math.round(RECOVERY_DELAY_MS / 60_000)}m wait, every send reviewed)`);
+		} else {
+			this.log("info", "interrupt gate off — nothing about work waiting on you leaves this app (GLANCE_INTERRUPT=1 to turn it on)");
+		}
+
 		// Resident planner (Epic 1) — the inverse of plan-sync: ingests plans/<name>/OBJECTIVE.md and
 		// maintains its concern-DAG against verified (DoneProof) state. Opt-IN ("=== 1", not "!== 0")
 		// unlike every loop above — it is an LLM-cost-bearing writer of source-tree files.
@@ -1890,6 +1917,8 @@ export class SquadManager extends EventEmitter {
 		for (const s of this.scouts.values()) s.stop();
 		for (const o of this.opportunities) o.stop();
 		for (const l of this.episodeLoops) l.stop();
+		// A timer that outlives the daemon keeps a dead process able to interrupt somebody.
+		if (this.interruptLoop) { clearInterval(this.interruptLoop); this.interruptLoop = undefined; }
 		for (const p of this.residentPlanners) p.stop();
 		clearInterval(this.leaseGossipTimer);
 		// Flush the attention store's debounced last-seen-map write (comprehension concern 01) — same
@@ -3963,10 +3992,78 @@ export class SquadManager extends EventEmitter {
 	 * It is derived, not configured: `wired` is false because there is no call site, and it becomes
 	 * true by wiring one, not by editing a flag.
 	 */
-	interruptState(): { wired: boolean; leaves: string[]; recoveryDelayMs: number; health?: GateHealth } {
+	interruptState(): { wired: boolean; leaves: string[]; recoveryDelayMs: number; health?: GateHealth; awaitingReview?: Array<{ id: string; question: string; sentAt: number }> } {
 		const leaves: string[] = [];
 		if (envBoolAliased("GLANCE_EPISODE", "OMP_SQUAD_EPISODE", true)) leaves.push("the weekly brief");
-		return { wired: false, leaves, recoveryDelayMs: RECOVERY_DELAY_MS };
+		const wired = this.interruptGateOn;
+		if (wired) leaves.push("a question that passes all three conditions");
+		const store = this.gateStore;
+		if (!store) return { wired, leaves, recoveryDelayMs: RECOVERY_DELAY_MS };
+		return {
+			wired,
+			leaves,
+			recoveryDelayMs: RECOVERY_DELAY_MS,
+			health: gateHealth(store.evaluations(), store.reviews()),
+			awaitingReview: store.awaitingReview().map((evaluation) => ({ id: evaluation.id, question: evaluation.question, sentAt: evaluation.sentAt ?? 0 })),
+		};
+	}
+
+	/**
+	 * Consider every stopped unit, and interrupt somebody only if all three conditions and the wait
+	 * hold. Runs on a tick because the WAIT is the point: the decision at minute zero is not the
+	 * decision at minute nine, and most things that look blocking at zero are gone by nine.
+	 *
+	 * Every pass records, including the ones that decline. A gate that only records what it sent
+	 * cannot be audited for what it suppressed, and suppression is the direction nobody notices.
+	 */
+	async considerInterrupting(now = Date.now()): Promise<void> {
+		const store = this.gateStore;
+		if (!store || !this.interruptGateOn) return;
+		const fleet = this.list().map((agent) => ({ id: agent.id, status: agent.status }));
+		const rules = (await this.autonomyState().catch(() => undefined))?.rules ?? [];
+		const settling = rules.map((rule) => ({ sentence: rule.sentence, settles: rule.settles }));
+		const live = new Set<string>();
+
+		for (const agent of this.list()) {
+			for (const request of agent.pending ?? []) {
+				if (!isRoomWorthyPending(request)) continue;
+				const evaluation = buildEvaluation({ request, agent, fleet, rules: settling, nodeId: agent.id, now });
+				live.add(evaluation.id);
+				store.put(evaluation);
+			}
+		}
+
+		for (const evaluation of store.evaluations()) {
+			if (evaluation.sentAt !== undefined || evaluation.cancelledAt !== undefined) continue;
+			// The question went away during the wait. That is the delay doing its job, and it is
+			// recorded as such rather than silently dropped — it is the gate's best evidence about
+			// itself.
+			if (!live.has(evaluation.id)) {
+				store.markCancelled(evaluation.id, now, "it was answered or the unit moved on before anyone was interrupted");
+				continue;
+			}
+			const decision = shouldLeaveTheApp(evaluation, now);
+			if (!decision.send) continue;
+			try {
+				const push = new PushService(this.stateDir);
+				await push.init();
+				await push.notify({ title: "glance", body: notificationText(evaluation), url: `/#/agent/${evaluation.nodeId}?push=1`, tag: `gate:${evaluation.id}` });
+				// Marked sent only AFTER the send resolves: marking first would lose the notification
+				// on a failure and record that somebody was told when they were not.
+				store.markSent(evaluation.id, now);
+				this.log("info", `interrupt sent: ${evaluation.question}`);
+			} catch (err) {
+				this.log("warn", `interrupt could not be sent, leaving it eligible: ${errText(err)}`);
+			}
+		}
+	}
+
+	/** A person's verdict on being interrupted. A gate whose sends are never reviewed drifts. */
+	reviewInterrupt(evaluationId: string, worthIt: boolean, because: string, now = Date.now()): boolean {
+		const store = this.gateStore;
+		if (!store?.get(evaluationId)) return false;
+		store.review({ evaluationId, reviewedAt: now, worthIt, because });
+		return true;
 	}
 
 	/** How long the fleet gets to recover before anyone is interrupted. */

@@ -2361,6 +2361,20 @@ export class SquadServer {
 		if (url.pathname === "/api/workflows") return Response.json(workflowSnapshot(await manager.visibleAgents(actor), manager.capabilityWorkflowDefinitions()));
 		if (url.pathname === "/api/models") return Response.json({ models: mergeModelOptions(modelOptionsFromEnv(), await manager.modelOptions()) });
 		if (url.pathname === "/api/autonomy") return Response.json({ ...(await manager.autonomyState()), interrupt: manager.interruptState() });
+		// A person's verdict on being interrupted. The gate is only allowed to keep interrupting people
+		// because it is checked afterwards, and it can only be checked if saying so is one tap.
+		if (url.pathname === "/api/interrupt/review" && req.method === "POST") {
+			const body: unknown = await req.json().catch(() => null);
+			const record = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+			const id = typeof record.id === "string" ? record.id : "";
+			const worthIt = record.worthIt === true;
+			const because = typeof record.because === "string" ? record.because : "";
+			if (!id) return new Response("id required", { status: 400 });
+			// A verdict with no reason cannot correct the gate — leaving-the-app.ts says so on the
+			// field itself — but refusing the verdict outright would lose the signal entirely.
+			const ok = manager.reviewInterrupt(id, worthIt, because || (worthIt ? "worth it" : "not worth it"));
+			return ok ? Response.json({ ok: true }) : new Response("no such interruption", { status: 404 });
+		}
 		if (url.pathname === "/api/profiles") return Response.json({ profiles: manager.profiles() });
 		if (url.pathname === "/api/capabilities") return Response.json(manager.capabilities());
 		if (url.pathname === "/api/capability-audit") return Response.json({ audit: manager.capabilities().audit });

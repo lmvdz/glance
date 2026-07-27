@@ -10,10 +10,13 @@
  * nine, and a review afterwards because a gate whose decisions are never checked drifts, and the
  * direction it drifts is always toward sending more.
  *
- * And none of it is wired. `mayLeaveTheApp` is called by its own test and nothing else; the only
- * thing that actually leaves this app is the weekly brief. So this screen's first job is to say that
- * plainly, because a gate nobody can see is how it stays unwired — the same failure the design audit
- * found across this whole plan, in the one place where the consequence is somebody's evening.
+ * It is now wired, and OFF by default: `GLANCE_INTERRUPT=1` turns it on, and web push additionally
+ * needs a device to have subscribed, so somebody who never opted in still receives nothing. This
+ * screen's first job is to say which of those two states it is in, because a gate that declined and a
+ * gate nothing asks produce the same "0 sent" and mean opposite things.
+ *
+ * Its second job is the review. A gate keeps its licence to interrupt people only by being checked
+ * afterwards, and it can only be checked if saying so is one tap.
  */
 
 export interface GateHealth {
@@ -24,8 +27,16 @@ export interface GateHealth {
   sentence: string;
 }
 
+export interface AwaitingReview {
+  id: string;
+  question: string;
+  sentAt: number;
+}
+
 export interface InterruptState {
   health?: GateHealth;
+  /** Sends nobody has judged yet. The gate keeps its licence by being checked. */
+  awaitingReview?: AwaitingReview[];
   /** True when the needs-you gate is actually consulted before anything is sent. */
   wired: boolean;
   /** What DOES leave the app today, named. */
@@ -98,3 +109,13 @@ export function calibrationLine(health: GateHealth | undefined): string | undefi
   }
   return `Every one of the ${health.sent} was reviewed afterwards, and you said ${health.worthIt} ${health.worthIt === 1 ? 'was' : 'were'} worth it.`;
 }
+
+/** The ask, for a send nobody has judged yet. Named so it reads as a question, not a survey. */
+export function reviewPrompt(item: AwaitingReview, now: number): string {
+  const mins = Math.max(1, Math.round((now - item.sentAt) / 60_000));
+  return `${item.question} — sent ${mins} minute${mins === 1 ? '' : 's'} ago. Was interrupting you right?`;
+}
+
+/** Why the ask exists, said once beneath the list rather than on every row. */
+export const WHY_REVIEW =
+  'Answering this is the only thing keeping the gate honest. A gate whose sends are never checked drifts, and the direction it drifts is always toward sending more.';
