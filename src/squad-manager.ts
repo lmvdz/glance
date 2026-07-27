@@ -114,7 +114,7 @@ import { evaluateCompliance, type ComplianceFinding } from "./compliance.ts";
 import { reapDeadSessions, releaseSession, sweepLeases } from "./leases.ts";
 import { agentActor, scopeFor } from "./agent-scope.ts";
 import { actorVisibleRepoSet, buildFabricSnapshot, loadScoutFacts, type FabricSnapshot } from "./fabric.ts";
-import { buildContextPrimer, searchFabric, type KbDocType } from "./fabric-search.ts";
+import { buildContextPrimer, classifyQueryShape, searchFabric, type KbDocType } from "./fabric-search.ts";
 import { sweepPresence, who } from "./presence.ts";
 import { harnessEventDecision } from "./harness-hooks.ts";
 import { adoptBranchName, adoptBrief, isSafeUntrackedPath, parseNulList } from "./adopt.ts";
@@ -1123,6 +1123,8 @@ export class SquadManager extends EventEmitter {
 	 *  escalation, land-failure-streak, primer-empty) the rest of the learning loop is A/B'd against.
 	 *  Assigned in the constructor (needs stateDir). Never gates behavior — read-only observability. */
 	private readonly learningMetrics: LearningMetrics;
+	/** C5 miss-dedupe window (blind-review hardening): (agentId, normalized query) → last-recorded epoch ms. */
+	private readonly kbMissSeen = new Map<string, number>();
 	/** Per-repo epoch ms until which the cold-start primer is skipped, after a fabric read of THAT repo
 	 *  blew its budget. Per-repo, not global: one repo with thousands of receipts (or a Plane project
 	 *  behind a stalled fetch) must not silently mute priming for every other repo the daemon serves.
@@ -11445,6 +11447,24 @@ export class SquadManager extends EventEmitter {
 			const body = results.length
 				? results.map((r) => `- [${r.type}] ${r.title}${r.type === "decision" && r.id.startsWith("decision:") ? ` (id: ${r.id.slice("decision:".length)})` : ""}\n  ${r.snippet}${r.repo ? `\n  (${r.repo})` : ""}`).join("\n")
 				: "No matching context in the knowledge base.";
+			// C5 passive miss counter (VALIDATION.md): every zero-result search is logged with its
+			// query REGIME — the dense-retrieval question is decided by the semantic-gap share of
+			// these, never by aggregate volume. Recording is fire-and-forget (record never throws).
+			// Blind-review hardening: the query is REDACTED before it persists (agents paste
+			// anything into searches, and the metrics spool is durable JSONL — the first free-text
+			// learning metric must not become a secret sink), tagged with the agent for attribution,
+			// and deduped per (agent, normalized query) in a 10-minute window so one retry-looping
+			// agent cannot swamp the regime share the C5 kill criterion keys on.
+			if (results.length === 0) {
+				const dedupeKey = `${rec.dto.id}:${query.replace(/\s+/g, " ").trim().toLowerCase()}`;
+				const now = Date.now();
+				const last = this.kbMissSeen.get(dedupeKey);
+				if (!last || now - last > 10 * 60_000) {
+					if (this.kbMissSeen.size > 500) this.kbMissSeen.clear(); // crude bound; dedupe is best-effort
+					this.kbMissSeen.set(dedupeKey, now);
+					this.learningMetrics.record("kb-retrieval-miss", 1, { shape: classifyQueryShape(query), agentId: rec.dto.id, query: redact(truncateLabel(query, 120)) });
+				}
+			}
 			rec.agent.respondHostTool(call.id, body);
 			this.append(rec, "system", `🔎 ${KB_SEARCH_TOOL}("${truncateLabel(query, 80)}") → ${results.length} result${results.length === 1 ? "" : "s"}`, {
 				status: "ok",
