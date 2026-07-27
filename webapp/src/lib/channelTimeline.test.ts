@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
-import { channelCardActionHref, dispatchChannelCard, doorLabel, groupLifecycleRuns, latestChannelSeq, pinnedChip, reduceChannelEntryWindow } from './channelTimeline';
+import { askedAgainLine, buildChannelThreadViews, channelCardActionHref, dispatchChannelCard, doorLabel, foldRepeatedAsks, groupLifecycleRuns, latestChannelSeq, pinnedChip, reduceChannelEntryWindow } from './channelTimeline';
 import type { ChannelEntry } from './dto';
+import { entryTimeLabel } from './hub';
 
 const entry = (overrides: Partial<ChannelEntry> & Pick<ChannelEntry, 'id' | 'seq'>): ChannelEntry => ({
   id: overrides.id,
@@ -263,4 +264,62 @@ describe('pinned chip identity', () => {
       full: 'squad/rail-earns-its-place-ms14z9hk-4-f9abafdc',
     });
   });
+});
+
+describe('foldRepeatedAsks', () => {
+  const ask = (id: string, ts: number, title: string, agent: string): ChannelEntry => ({
+    id, seq: ts, channelId: 'fleet', authorActor: 'manager', kind: 'system', text: title, ts,
+    event: { kind: 'needs-you', payload: { face: { title, pinned: { agent } } } },
+  } as ChannelEntry);
+
+  test('the room does not ask the same question twice', () => {
+    // Seen live: one unanswered question rendered as two identical cards two minutes apart, while
+    // the alarm band was already carrying it. Three copies of one question.
+    const views = buildChannelThreadViews([
+      ask('a', 1, 'Needs you · Approve plan', 'ompsq-480'),
+      ask('b', 2, 'Needs you · Approve plan', 'ompsq-480'),
+      ask('c', 3, 'Needs you · Approve plan', 'ompsq-480'),
+    ]);
+    expect(views).toHaveLength(1);
+    // The FIRST card survives: when it was first asked is the fact worth keeping.
+    expect(views[0]!.id).toBe('a');
+    expect(views[0]!.askedAgain).toBe(2);
+    expect(views[0]!.lastAskedAt).toBe(3);
+  });
+
+  test('two different questions from one agent are two things to answer', () => {
+    const views = buildChannelThreadViews([
+      ask('a', 1, 'Needs you · Approve plan', 'ompsq-480'),
+      ask('b', 2, 'Needs you · Allow tool: bash', 'ompsq-480'),
+    ]);
+    expect(views).toHaveLength(2);
+  });
+
+  test('the same question from two agents is two things to answer', () => {
+    const views = buildChannelThreadViews([
+      ask('a', 1, 'Needs you · Approve plan', 'ompsq-480'),
+      ask('b', 2, 'Needs you · Approve plan', 'ompsq-479'),
+    ]);
+    expect(views).toHaveLength(2);
+  });
+
+  test('only needs-you folds — an ordinary message repeating itself is still two messages', () => {
+    const message = (id: string, ts: number): ChannelEntry => ({ id, seq: ts, channelId: 'fleet', authorActor: 'db:u1', kind: 'user', text: 'ok', ts } as ChannelEntry);
+    expect(buildChannelThreadViews([message('a', 1), message('b', 2)])).toHaveLength(2);
+  });
+
+  test('the folded card says it plainly, once', () => {
+    expect(askedAgainLine({ askedAgain: 1, lastAskedAt: undefined })).toContain('Asked again once');
+    expect(askedAgainLine({ askedAgain: 3, lastAskedAt: undefined })).toContain('Asked again 3 times');
+    expect(askedAgainLine({ askedAgain: 0 })).toBeUndefined();
+    expect(askedAgainLine({})).toBeUndefined();
+  });
+});
+
+test('the folded line uses the same clock as the card header', () => {
+  // A card headed "20:48" carrying a line reading "08:57 PM" makes a reader stop and work out
+  // whether those are even the same day.
+  const at = new Date('2026-07-26T20:57:00').getTime();
+  const line = askedAgainLine({ askedAgain: 2, lastAskedAt: at }, at)!;
+  expect(line).toContain(entryTimeLabel(at, at));
 });

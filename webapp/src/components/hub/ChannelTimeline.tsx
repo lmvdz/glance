@@ -1,7 +1,7 @@
 import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertCircle, CheckCircle2, ChevronRight, CircleDot, FileText, Flame, GitMerge, Hash, Reply, Rocket, ShieldAlert } from 'lucide-react';
 import type { ChannelEntry } from '../../lib/dto';
-import { buildChannelThreadViews, doorLabel, groupLifecycleRuns, runSummary, type ChannelCardTone, type ChannelCardView } from '../../lib/channelTimeline';
+import { askedAgainLine, buildChannelThreadViews, doorLabel, groupLifecycleRuns, runSummary, type ChannelCardTone, type ChannelCardView } from '../../lib/channelTimeline';
 import { foldVerdict } from '../../lib/roomState';
 import { entryTimeLabel } from '../../lib/hub';
 import { hubHref } from '../../lib/router';
@@ -177,6 +177,11 @@ export const ChannelTimelineRow = memo(function ChannelTimelineRow({ view, onRep
               <h3 className="mt-1 text-[13px] font-semibold" style={{ color: '#E8E8EA' }}>{view.title}</h3>
             )}
             {view.body ? <p className="mt-[5px] whitespace-pre-wrap break-words" style={{ fontSize: 14, lineHeight: 1.7, color: '#DEDEE2', textWrap: 'pretty' }}><MentionedText text={view.body} /></p> : null}
+            {/* A question the fleet re-asked folds into the card already on screen and says so once.
+                Three copies of one question makes the room look like it lost track of what it said. */}
+            {askedAgainLine(view) ? (
+              <p className="mt-2 text-[12px] leading-[1.5]" style={{ color: '#8A8A91', textWrap: 'pretty' }}>{askedAgainLine(view)}</p>
+            ) : null}
             {view.pinned.length ? (
               <dl className="mt-3 flex flex-wrap gap-x-5 gap-y-2">
                 {view.pinned.map((item) => (
