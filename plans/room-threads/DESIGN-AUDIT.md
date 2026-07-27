@@ -65,3 +65,67 @@ invisible, because almost every concern's Verify list checks a record and not a 
 a person can see it. Any future concern in this plan should carry a Verify item naming the zone in the
 reference it makes visible — and if it names none, that is worth noticing before the work starts
 rather than after.
+
+---
+
+## Re-measured, 2026-07-26 — after the rebuild pass
+
+The same probe over the same reference now finds **26 of 123 zones**, up from 10. It undercounts:
+several zones are generated at runtime (`alarmEyebrow` builds "THREE THINGS ARE WAITING ON YOU" from a
+count rather than storing that string), so the literal-match probe cannot see them. Treat 26 as a
+floor and 10 → 26 as the honest direction.
+
+| screen | before | now |
+|---|---|---|
+| `01-room` | 4/12 | 6/12 |
+| `02-surfaces` | 5/34 | 10/34 |
+| `03-machinery` | 3/24 | 3/24 |
+| `04-beyond` | 0/18 | 2/18 |
+| `05-first-week` | 2/15 | 2/15 |
+| `06-other-side` | 1/17 | 3/17 |
+| `07-shell` | 0/3 | 0/3 |
+
+### What was built, and what it replaced
+
+- **Cost** (`04-beyond`) — spend and waste counted separately, waste only where a cause can be named,
+  an unpriced run reported as unpriced rather than free. Replaced three tables of Key / Runs / Units /
+  Tokens / Cost / Tools.
+- **A verdict** (`02-surfaces`) — the judgement as a sentence, failures first, quiet passes named so a
+  reader can tell them from checks that never ran. Replaced a chip that rendered `unknown` when nothing
+  had been pinned.
+- **The agent record** (`03-machinery`) — the refusal to judge comes before the claims, and a sample
+  too small to carry a rate says so. Replaced a card that showed the same facts with no framing.
+- **Plan vs reality** (`01-room` + `06-other-side`) — the gap is the headline, stale is never folded
+  into proven, `reachable: null` is neither yes nor no. Replaced two progress rings.
+- **A plan** (`02-surfaces`) — NOTHING HAS STARTED is derived rather than printed, parallelism is
+  counted, out-of-scope sits beside the plan. Replaced an amber gradient with four metric tiles.
+- **WHERE THIS SITS** (`02-surfaces`) — above / beneath / beside, with a leaf saying why it is a leaf.
+- **WHAT GOT DONE WHILE YOU DIDN'T LOOK** (`01-room`) — the room's own account instead of a card
+  floating in an empty column.
+- **One shell** — every opened surface keeps the room's bar and `esc goes back to the room`, wired.
+
+### Deleted, ~3,500 lines
+
+`WorkspaceCockpit`, `IntervenceView`, `FleetEconomicsView`, `ChannelRail`, `GateVerdictProofView`,
+`PlanBriefView`, `PlanRealityView`, `AssistantChat` (mounted nowhere), plus `diff-order.ts` and
+`deriveIntervenePageContext`. Every old URL still resolves: `/intervene/<id>` and `/agent/<id>` open
+the unit's own room, `/workbench/fleet` and any unrecognised workbench view open the room.
+
+### Still old
+
+`TaskDetail` (2,132), `DesignReviewView` (871), `OrgSettings` (520), `TaskListView` (413),
+`OmpGraphPanel` (302), `DailyPanel` (298), `CapabilityPanel` (176), `FogView` (150). All reachable
+only through the command palette now — no standing door leads to any of them. `TaskDetail` and
+`DesignReviewView` carry real capability the designs do specify (line-level annotation is
+`06-other-side`'s "WHAT HAPPENED TO WHAT YOU WROTE"), so they need rebuilding rather than deleting.
+
+`SpawnConfirmSheet` and `SpawnStatusCard` are orphaned but kept deliberately: they implement
+`02-surfaces`' "TAM HAS PROPOSED A SHAPE FOR YOUR WORDS", which the room has not rebuilt. They render
+nowhere, so nobody meets the old UI through them.
+
+### What the rebuild pass confirmed about the original finding
+
+Two defects in this pass were found only by booting the room and looking — the workbench rail with its
+WORKBENCH DOORS list, and nine identical "nothing to check it against" lines down a plan column. A
+third was found by a test rather than by reading: the new WHAT GOT DONE WHILE YOU DIDN'T LOOK heading
+claims an absence, and it rendered with no absence recorded. Reading the diff caught none of the three.
