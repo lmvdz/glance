@@ -27,7 +27,7 @@ import { CostSurface } from './components/hub/CostSurface';
 import { DesignReviewView } from './components/DesignReviewView';
 import { PlanRealityView } from './components/PlanRealityView';
 import { PlanBriefView } from './components/PlanBriefView';
-import { GateVerdictProofView } from './components/GateVerdictProofView';
+import { VerdictSurface } from './components/hub/VerdictSurface';
 import { OrgSettings } from './components/OrgSettings';
 import { FileSignIn } from './components/FileSignIn';
 import { FirstRunSetup } from './components/FirstRunSetup';
@@ -95,7 +95,7 @@ const WorkbenchRoute = ({ route }: { route: Extract<HubRoute, { kind: 'workbench
   if (route.view === 'graph') return <OmpGraphPanel />;
   if (route.view === 'plan-reality') return <PlanRealityView />;
   if (route.view === 'plans') return <PlanBriefView />;
-  if (route.view === 'gate-verdict') return <GateVerdictProofView routeId={route.id} />;
+  if (route.view === 'gate-verdict') return <VerdictSurface routeId={route.id} />;
   if (route.view === 'org') {
     return (
       <PageContextScope value={orgPageContext}>

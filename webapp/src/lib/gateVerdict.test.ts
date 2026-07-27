@@ -1,0 +1,76 @@
+import { describe, expect, it } from 'bun:test';
+import { absences, confidenceLine, consideredNotSurfaced, notSurfacedSentence, restsOn, verdictSentence, type VerdictCriterion } from './gateVerdict';
+
+describe('verdictSentence', () => {
+  it('distinguishes a missing verdict from a verdict of unknown', () => {
+    // The old chip rendered `verdict ?? 'unknown'`, which reads as a reviewer saying they were unsure.
+    // Nobody having reviewed is a different fact and a more alarming one.
+    const line = verdictSentence({});
+    expect(line).toContain('No verdict was pinned');
+    expect(line).toContain('not a verdict of');
+  });
+
+  it('leads with the reason on a veto and with the failures on a fail', () => {
+    expect(verdictSentence({ verdict: 'veto', unitName: 'wren' })).toContain('vetoed');
+    expect(verdictSentence({ verdict: 'fail', unitName: 'wren' })).toContain('failing checks are first');
+  });
+
+  it('frames a pass as a judgement you can disagree with', () => {
+    expect(verdictSentence({ verdict: 'pass', unitName: 'wren' })).toContain('disagree with it in under a minute');
+  });
+
+  it('quotes a verdict word it does not recognise rather than dropping it', () => {
+    expect(verdictSentence({ verdict: 'deferred' })).toContain('“deferred”');
+  });
+});
+
+describe('confidenceLine', () => {
+  it('states confidence in words rather than a comparable percentage', () => {
+    expect(confidenceLine({ confidence: 0.95 })).toContain('was sure');
+    expect(confidenceLine({ confidence: 0.4 })).toContain('not sure');
+    expect(confidenceLine({ confidence: 0.95, agreement: 0.3 })).toContain('disagreed with each other');
+  });
+
+  it('says nothing when nothing was recorded', () => {
+    expect(confidenceLine({})).toBeUndefined();
+  });
+});
+
+describe('restsOn', () => {
+  const criteria: VerdictCriterion[] = [
+    { id: 'tests', satisfied: true, note: 'suite green on the merge base' },
+    { id: 'quiet', satisfied: true },
+    { id: 'lint', satisfied: false, note: 'two new warnings' },
+  ];
+
+  it('puts failures first — order is the argument', () => {
+    expect(restsOn(criteria).map((c) => c.id)).toEqual(['lint', 'tests']);
+  });
+
+  it('keeps quiet passes out of the argument and names them separately', () => {
+    expect(consideredNotSurfaced(criteria).map((c) => c.id)).toEqual(['quiet']);
+  });
+});
+
+describe('notSurfacedSentence', () => {
+  it('explains why the quiet list exists at all', () => {
+    expect(notSurfacedSentence(3)).toContain('a check that never ran');
+  });
+  it('says plainly when nothing was left out', () => {
+    expect(notSurfacedSentence(0)).toContain('Nothing was left out');
+  });
+});
+
+describe('absences', () => {
+  it('says a missing proof is a failure to find, not a proof of absence', () => {
+    expect(absences({}).some((line) => line.includes('not that it does not exist'))).toBe(true);
+  });
+
+  it('counts ignored records as a risk rather than a footnote', () => {
+    expect(absences({ malformedLandRecords: 2 }).some((line) => line.includes('Ignored is not the same as absent'))).toBe(true);
+  });
+
+  it('is silent about what is present', () => {
+    expect(absences({ validation: {}, doneProof: {}, landAttempt: {} })).toEqual([]);
+  });
+});
