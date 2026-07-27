@@ -60,8 +60,10 @@ interface TestRecord {
 	options: PersistedAgent;
 	transcript: TranscriptEntry[];
 	assistantBuf: string;
+	thinkingBuf: string;
 	streaming: boolean;
 	subs: SubagentTracker;
+	toolEntries: Map<string, unknown>;
 	/** Capability tool-grant allow-list (squad-manager.ts's `AgentRecord.toolGrants`) — absent means
 	 *  unscoped (full tool access, the historical default); present means hard-deny anything outside it. */
 	toolGrants?: string[];
@@ -102,8 +104,10 @@ function record(agent: AgentDTO, replies: Array<{ callId: string; text: string; 
 		options: { id: agent.id, name: agent.name, repo: agent.repo, worktree: agent.worktree, approvalMode: agent.approvalMode },
 		transcript: [],
 		assistantBuf: "",
+		thinkingBuf: "",
 		streaming: false,
 		subs: new SubagentTracker(),
+		toolEntries: new Map(),
 		toolGrants,
 	};
 }
@@ -163,7 +167,16 @@ describe("G01 supersede-endpoint (E_anach) — a decision reversal must never le
 // (src/squad-manager.ts, "Capability tool-grant enforcement (#3)").
 // ═════════════════════════════════════════════════════════════════════════════════════════════════
 
-describe("G03 revoke-then-tempt (E_gov_breach) — the very next tempting call after an out-of-band revocation must be hard-denied, not surfaced for approval", () => {
+/**
+ * HONEST SCOPE (blind-review adjudication, 2026-07-27): these three suites lock ONE property — the
+ * gate consults LIVE grant state on every call (authority is never cached at registration; a
+ * regression that snapshots grants once would fail G12). What they do NOT lock: a product
+ * revocation CHANNEL (none exists yet — the tests mutate the grant list directly), and the
+ * action-LEVEL E_gov_breach/E_gov_halt locks (an unsafe action executing / a valid action
+ * completing), which need the live-runner scenario family alongside G02/G11. COVERAGE.md carries
+ * the same split.
+ */
+describe("G03 revoke-then-tempt (gate half) — the very next tempting call after grant-state loses a tool must be hard-denied, not surfaced for approval", () => {
 	test("granted: the call is NOT hard-denied (it becomes a pending host approval, no error reply)", async () => {
 		const mgr = new SquadManager({ stateDir: await tmpDir("g03-grant-") });
 		const replies: Array<{ callId: string; text: string; isError?: boolean }> = [];
@@ -203,7 +216,7 @@ describe("G03 revoke-then-tempt (E_gov_breach) — the very next tempting call a
 	});
 });
 
-describe("G03b restore-then-tempt (E_gov_halt guard) — the revocation's revocation is honored: restoring the grant lifts the halt on the very next call", () => {
+describe("G03b restore-then-tempt (gate half of the E_gov_halt guard) — restoring the grant lifts the hard-deny on the very next call (permission surface, not action completion)", () => {
 	test("revoke then restore then call again: the restored grant is NOT hard-denied — no spurious permanent halt", async () => {
 		const mgr = new SquadManager({ stateDir: await tmpDir("g03b-") });
 		const replies: Array<{ callId: string; text: string; isError?: boolean }> = [];
@@ -228,7 +241,7 @@ describe("G03b restore-then-tempt (E_gov_halt guard) — the revocation's revoca
 	});
 });
 
-describe("G12 mid-turn-revoke-gate (E_gov_breach, authority-at-the-gate probe) — a revocation landing between two consecutive calls with NO other state change still blocks the second", () => {
+describe("G12 mid-turn-revoke-gate — grant state read per-call, never cached: a grant-list change between two identical calls blocks the second", () => {
 	test("same tool, same call shape, only the grant list changes between calls — second call is denied and the denial names the grant list", async () => {
 		const mgr = new SquadManager({ stateDir: await tmpDir("g12-") });
 		const replies: Array<{ callId: string; text: string; isError?: boolean }> = [];
@@ -315,15 +328,18 @@ describe("G04 exact-identifier-drilldown (E_abstract) — an exact token must ne
 		const rawHasToken = transcript.some((e) => e.text.includes(TOKEN));
 		expect(rawHasToken).toBe(true);
 
+		// E_halluc lock (blind-review strengthening): EVERY uuid-shaped token the digest emits must
+		// BE the token, byte-exact — a fabricated or edited identifier anywhere in the digest fails,
+		// whether or not it shares a prefix with the real one.
+		const uuidLike = digest.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi) ?? [];
+		for (const u of uuidLike) expect(u.toLowerCase()).toBe(TOKEN);
 		if (digest.includes(TOKEN)) {
 			// If the summarizer DID surface it, that's a pass too — assert it's exact, not truncated.
 			expect(digest).toContain(`DEPLOYMENT_LOCK_TOKEN: ${TOKEN}`);
 		} else {
 			// The expected, verified-empirically outcome: extractive summarization drops the
-			// lexically-isolated token line. Never accept an ALTERED token — assert no truncated/edited
-			// variant (a bare hyphen-stripped or partial-hex fragment) leaked into the digest either.
-			expect(digest).not.toContain(TOKEN.slice(0, 20)); // no partial/truncated fragment either
-			expect(rawHasToken).toBe(true); // drill-down path: the raw transcript still holds it exact
+			// lexically-isolated token line. No truncated fragment may survive either.
+			expect(digest).not.toContain(TOKEN.slice(0, 20));
 		}
 	});
 });
@@ -359,6 +375,62 @@ describe("G05 parallel-contradict (E_contra / I5) — two concurrent supersessio
 		const current = decisions.filter((d) => !d.supersededBy);
 		expect(current).toHaveLength(1); // exactly one current decision on the feature — never two
 		expect(decisions.find((d) => d.id === "d1")?.supersededBy).toBeDefined(); // the original is invalidated exactly once
+	});
+
+	/**
+	 * The ADOPT-path race (blind-review strengthening): the pre-seeded test above never crosses an
+	 * await, so it exercises only the synchronous outcome contract. Here the feature is NOT in the
+	 * store — both concurrent captures miss, both take the `await adoptDerivedFeature` path, and
+	 * the raced-store guard (#277's blind-review fix: re-check the store after the await; the
+	 * resident object wins) is what keeps the second adopt from clobbering the first caller's
+	 * already-recorded decision. Delete that guard and this test fails with two live currents or a
+	 * silently lost write.
+	 */
+	test("adopt-path race: two concurrent captures on a NOT-yet-persisted feature — the store-resident object wins, exactly one current", async () => {
+		const dir = await tmpDir("g05-adopt-");
+		class DerivedManager extends SquadManager {
+			// Override the derived-features read that adoptDerivedFeature consults, with the exact
+			// fields it touches (planDir/issueIdentifiers optional; assignees/agentIds must be arrays).
+			override async features(): Promise<never> {
+				return [
+					{ id: "fd", title: "derived-feature", repo: "/repo", description: undefined, acceptanceCriteria: undefined, decisions: [{ id: "d1", text: "migration = v1", source: "plan" }], relationships: undefined, contextBundle: undefined, assignees: [], agentIds: [] },
+				] as never;
+			}
+		}
+		const mgr = new DerivedManager({ stateDir: dir });
+		const store = (mgr as unknown as { featureStore: Map<string, PersistedFeature> }).featureStore;
+		expect(store.has("fd")).toBe(false); // both calls below must take the adopt await
+
+		const [r1, r2] = await Promise.all([
+			mgr.recordAgentDecision("fd", dec("dA", "migration = v2-workerA", { supersedes: "d1" }), "/repo"),
+			mgr.recordAgentDecision("fd", dec("dB", "migration = v2-workerB", { supersedes: "d1" }), "/repo"),
+		]);
+
+		expect([r1, r2].sort()).toEqual(["recorded", "supersede-superseded"]);
+		const decisions = store.get("fd")?.decisions ?? [];
+		expect(decisions.filter((d) => !d.supersededBy)).toHaveLength(1); // one current — the winner
+		expect(decisions).toHaveLength(2); // d1 (stamped) + exactly one winner; no lost write, no duplicate adopt
+	});
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════════
+// G07 supplement — the primer half of aba-reassert (the store half lives in
+// tests/decision-supersession.test.ts)
+// ═════════════════════════════════════════════════════════════════════════════════════════════════
+
+describe("G07 supplement (E_anach) — after A→B→A, the primer serves final-A exactly once and never B", () => {
+	test("re-asserted A is the one current fact the projection carries", async () => {
+		const dir = await tmpDir("g07-");
+		const { store } = seededManager(dir, [
+			dec("d1", "target = staging.api.internal", { supersededBy: "d2", supersededAt: 2000 }),
+			dec("d2", "target = prod.api.internal", { supersedes: "d1", supersededBy: "d3", supersededAt: 3000 }),
+			dec("d3", "target = staging.api.internal", { supersedes: "d2" }),
+		]);
+		const humanActor = { id: "web:admin", origin: "local" as const, role: "admin" as const };
+		const snapshot = await buildFabricSnapshot({ actor: humanActor, agents: [], stateDir: dir, features: [store.get("f")!], now: () => 5000 });
+		const primer = buildContextPrimer(snapshot, "target endpoint", { now: 5000 });
+		expect(primer).not.toContain("prod.api.internal"); // B is history
+		expect(primer.split("target = staging.api.internal").length - 1).toBe(1); // final A, exactly once
 	});
 });
 
