@@ -329,3 +329,16 @@ test('the folded line uses the same clock as the card header', () => {
   const line = askedAgainLine({ askedAgain: 2, lastAskedAt: at }, at)!;
   expect(line).toContain(entryTimeLabel(at, at));
 });
+
+test('a question nobody answered never renders as a success', () => {
+  // The daemon stamps tone:'neutral' and "Never answered ·" on a pending that went away with the
+  // unit rather than with an answer. `toneFor` must keep honouring the face tone over its own
+  // needs-you default, or a question that was LOST renders green like one that was settled.
+  const card = dispatchChannelCard({
+    id: 'gone', seq: 9, channelId: 'fleet', authorActor: 'manager', kind: 'system', text: 'went away without being answered', ts: 5,
+    event: { kind: 'needs-you', payload: { refs: { unitId: 'u1' }, face: { title: 'Never answered · Approve plan', eyebrow: 'Never answered', tone: 'neutral', status: 'resolved', pendingStatus: 'resolved', pendingId: 'gate_1' } } },
+  } as ChannelEntry);
+  expect(card.tone).toBe('neutral');
+  expect(card.tone).not.toBe('success');
+  expect(card.title).toContain('Never answered');
+});

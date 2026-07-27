@@ -41,6 +41,8 @@ interface StoreLike {
 
 interface InternalHost {
 	agents: Map<string, AgentRecordLike>;
+	/** The replay/reattach settle window — ids in here are being rebuilt, not doing anything new. */
+	settling: Set<string>;
 	store: StoreLike;
 	makeDriver: (p: PersistedAgent, cold?: boolean) => AgentDriver;
 	onUi(rec: AgentRecordLike, req: RpcExtensionUIRequest): void;
@@ -474,5 +476,84 @@ test("a steer that arrived from OUTSIDE the room still reaches the room", async 
 
 	expect(card.channelId).toBe("ops");
 	expect(card.text).toContain("look at the retry budget");
+	await mgr.stop();
+});
+
+test("a daemon restart does not re-announce a question the room already showed", async () => {
+	// Seen live, on real data: `gate_1` was announced THIRTEEN times and `gate_2` three, for two
+	// questions, and the timestamps matched the daemon's restarts exactly. On boot a record is rebuilt
+	// with an empty `pending`, replay re-adds the outstanding requests, and the id-diff reports every
+	// one as new — because to a freshly constructed record it is.
+	//
+	// The room's own fold hid the repeats, which is why this survived review: the SCREEN looked right.
+	// The channel is the durable record, and everything else reading it — search, the weekly episode,
+	// anyone scrolling back — saw one unanswered question thirteen times.
+	const { mgr, host, repo } = await makeMgr("projection-restart-reannounce");
+	await createChannel(host, "ops");
+	const dto = await mgr.create({ name: "unit-restart", repo, approvalMode: "yolo", channelId: "ops", autoRoute: false });
+	const rec = host.agents.get(dto.id);
+	if (!rec) throw new Error("missing record");
+
+	const firstCard = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === "needs-you");
+	host.onUi(rec, { method: "confirm", id: "gate_1", title: "Approve plan", message: "ok?" } as RpcExtensionUIRequest);
+	await firstCard;
+
+	const cardsFor = async (pendingId: string): Promise<number> => {
+		const entries = await mgr.channelEntries("ops", 0, LOCAL_ACTOR);
+		return entries.filter((entry) => entry.event?.kind === "needs-you" && isEventPayload(entry.event.payload) && entry.event.payload.face.pendingId === pendingId && entry.event.payload.face.pendingStatus === "pending").length;
+	};
+	expect(await cardsFor("gate_1")).toBe(1);
+
+	// Exactly what a restart does: the record comes back empty and replay re-adds the same request
+	// while the id sits in the settle window.
+	host.settling.add(dto.id);
+	rec.dto.pending = [];
+	host.onUi(rec, { method: "confirm", id: "gate_1", title: "Approve plan", message: "ok?" } as RpcExtensionUIRequest);
+	await Bun.sleep(30);
+	expect(mgr.getAgent(dto.id)?.pending.map((request) => request.id)).toEqual(["gate_1"]); // state restored…
+	expect(await cardsFor("gate_1")).toBe(1); // …and the room said nothing new about it
+
+	// A genuinely new question during the same window is still news — the suppression is about
+	// re-announcing what was already shown, not about going quiet.
+	host.onUi(rec, { method: "confirm", id: "gate_2", title: "Approve deploy", message: "ship?" } as RpcExtensionUIRequest);
+	await Bun.sleep(30);
+	expect(await cardsFor("gate_2")).toBe(0); // suppressed while settling…
+
+	host.settling.delete(dto.id);
+	const afterSettle = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === "needs-you" && isEventPayload(entry.event.payload) && entry.event.payload.face.pendingId === "gate_3");
+	host.onUi(rec, { method: "confirm", id: "gate_3", title: "Approve rollback", message: "roll?" } as RpcExtensionUIRequest);
+	await afterSettle;
+	expect(await cardsFor("gate_3")).toBe(1); // …and announced normally once the window closes
+	await mgr.stop();
+});
+
+test("a question the unit abandoned is not reported as answered", async () => {
+	// The resolution card said "is answered. X picks the work back up from where it stopped" for BOTH
+	// ways a pending can go away. Four call sites clear pendings with `pending-cancel` — the unit
+	// stopped, killed, reaped, or replay-pruned — where nobody answered and nothing is picking
+	// anything back up. Telling someone their question was answered when it was abandoned is the room
+	// lying about the one thing it exists to be trusted on.
+	const { mgr, host, repo } = await makeMgr("projection-abandoned");
+	await createChannel(host, "ops");
+	const dto = await mgr.create({ name: "unit-abandon", repo, approvalMode: "yolo", channelId: "ops", autoRoute: false });
+	const rec = host.agents.get(dto.id);
+	if (!rec) throw new Error("missing record");
+
+	const asked = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === "needs-you");
+	host.onUi(rec, { method: "confirm", id: "gate_abandon", title: "Approve plan", message: "ok?" } as RpcExtensionUIRequest);
+	await asked;
+
+	// An operator kill: a real `pending-cancel` site. The unit goes away with the question
+	// outstanding, which is exactly the case the old copy called "answered".
+	const gone = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === "needs-you" && isEventPayload(entry.event.payload) && entry.event.payload.face.pendingStatus === "resolved");
+	await mgr.applyCommand({ type: "kill", id: dto.id } as ClientCommand, LOCAL_ACTOR);
+	const card = await gone;
+	if (!isEventPayload(card.event?.payload)) throw new Error("bad payload");
+	expect(card.event.payload.face.title).toBe("Never answered · Approve plan");
+	expect(card.event.payload.face.eyebrow).toBe("Never answered");
+	// Abandoned is not success — a green card for a question nobody answered is the room
+	// congratulating itself for losing something.
+	expect(card.event.payload.face.tone).not.toBe("success");
+	expect(card.text).toContain("without being answered");
 	await mgr.stop();
 });
