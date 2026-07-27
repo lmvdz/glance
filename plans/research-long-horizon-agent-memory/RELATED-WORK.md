@@ -152,7 +152,7 @@ disruption-operator vocabulary, zero-tolerance vector scoring, and E_orphan/E_dr
 named classes. Its sharpest actionable finding is a LIVE glance gap: `buildContextPrimer` is
 pure BM25 top-6 with no pinned region, so constraints/failure-warnings compete with episodic
 chatter — the position's own "state, never score" rule unapplied at its most consequential
-injection point. Filed as the next code unit in the fabric lane.
+injection point. Filed as the next code unit in the fabric lane — **LANDED 2026-07-27** (PR #293, region-partitioned primer: pinned failures never evicted, pinned current decisions, ranked episodic remainder; blind review found and closed a cap bypass).
 
 ## What the sweep says about the position
 
