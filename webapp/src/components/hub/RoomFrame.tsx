@@ -52,6 +52,8 @@ export interface RoomFrameProps {
 	decision?: React.ReactNode;
 	/** The fleet's autonomy, readable from the room rather than from a settings page. */
 	autonomyPanel?: React.ReactNode;
+	/** Shown when standing inside a unit — replaces the tree, same as the other panels. */
+	unitPanel?: React.ReactNode;
 	autonomyOpen?: boolean;
 	onToggleAutonomy?: () => void;
 }
@@ -88,7 +90,7 @@ function Waiting({ nodes, now, onEnter }: { nodes: readonly RoomNode[]; now: num
 	);
 }
 
-export function RoomFrame({ repo, rooms, activeRoomId, onOpenRoom, nodes, plans, now, autonomy, autonomyPanel, autonomyOpen, onToggleAutonomy, selectedId, onSelect, onEnter, children, decision }: RoomFrameProps) {
+export function RoomFrame({ repo, rooms, activeRoomId, onOpenRoom, nodes, plans, now, autonomy, autonomyPanel, autonomyOpen, onToggleAutonomy, unitPanel, selectedId, onSelect, onEnter, children, decision }: RoomFrameProps) {
 	const waiting = nodes.filter((node) => node.state === 'needs-you');
 	const selected = nodes.find((node) => node.id === selectedId);
 	const stats = alarmStats(nodes, now);
@@ -141,12 +143,13 @@ export function RoomFrame({ repo, rooms, activeRoomId, onOpenRoom, nodes, plans,
 					    the context that makes them comfortable answering at all. */}
 					{decision}
 					{autonomyOpen && autonomyPanel ? <div className="w-[520px] flex-none" style={{ borderLeft: '1px solid #1F1F22' }}>{autonomyPanel}</div> : null}
+					{!autonomyOpen && !decision && unitPanel ? <div className="w-[520px] flex-none" style={{ borderLeft: '1px solid #1F1F22' }}>{unitPanel}</div> : null}
 
 					{/* A panel TAKES THE RAIL'S PLACE rather than adding a third column. The reference draws
 					    two columns — room and panel — and three at 1600px squeezed the conversation to
 					    380px, which is narrower than the reading measure the messages are set to. The
 					    rail comes back the moment the panel closes. */}
-					{decision || (autonomyOpen && autonomyPanel) ? null : (
+					{decision || (autonomyOpen && autonomyPanel) || unitPanel ? null : (
 					<aside className="flex w-[376px] flex-none flex-col" style={{ borderLeft: '1px solid #1F1F22' }} aria-label="Where you are standing">
 						<div className="px-4 pb-1 pt-3.5">
 							<div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.16em', color: '#5A5A61' }}>WHERE YOU ARE STANDING</div>

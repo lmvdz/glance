@@ -7,6 +7,7 @@ import { AgentRecordPanel } from './AgentRecordPanel';
 import { RoomFrame } from './RoomFrame';
 import { DecisionPanel, type DecisionRequest } from './DecisionPanel';
 import { AutonomyPanel, type AutonomyState } from './AutonomyPanel';
+import { UnitPanel } from './UnitPanel';
 import { QuietRoom } from './QuietRoom';
 import { agentsToRoomNodes } from '../../lib/roomState';
 import { apiJson, jsonInit } from '../../lib/api';
@@ -434,6 +435,17 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
               window.location.hash = hubHref(`node:${node.id}`);
             }}
             decision={answering ? <DecisionPanel request={answering} onAnswer={answer} onClose={() => setAnsweringId(undefined)} /> : undefined}
+            unitPanel={
+              // Standing inside a unit: its own conversation in the centre, its state beside it. The
+              // old workbench put a FLEET roster, a transcript and a LAND/CHANGES/RUN stack on screen
+              // at once and named none of the three questions a person actually has.
+              activeChannelId.startsWith('node:')
+                ? (() => {
+                    const unit = agents.find((candidate) => `node:${candidate.id}` === activeChannelId);
+                    return unit ? <UnitPanel agent={unit} now={frameNow} onClose={() => { window.location.hash = hubHref(DEFAULT_CHANNEL_ID); }} /> : undefined;
+                  })()
+                : undefined
+            }
             autonomyOpen={autonomyOpen}
             onToggleAutonomy={() => setAutonomyOpen((open) => !open)}
             autonomyPanel={
