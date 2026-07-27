@@ -4,7 +4,11 @@ import { entryAuthorLabel, entryTimeLabel } from './hub';
 import { unitHref } from './router';
 
 export type ChannelCardTone = 'neutral' | 'info' | 'warning' | 'success' | 'destructive';
-export type ChannelCardKind = 'message' | 'needs-you' | 'gate-verdict' | LandCardKind | 'mention-steer' | 'mention-confirm-required' | 'mention-steer-failed' | 'spawn-proposal' | 'plan-card' | 'token-burn-snapshot' | 'unit-spawned' | 'unit-turn-finished' | 'unit-failed' | 'pr-opened' | 'verification-ran' | 'unknown-event';
+/** Kinds minted client-side only (optimistic UI, never persisted by the daemon) — namespaced
+ *  `local:` on the wire by HubShell's managerCardEntry to keep them out of the daemon's kind
+ *  space. See tests/channel-card-kinds-sync.test.ts for the cross-build invariant this protects. */
+export type LocalCardKind = 'local:mention-confirm-required' | 'local:mention-steer-failed' | 'local:spawn-proposal';
+export type ChannelCardKind = 'message' | 'needs-you' | 'gate-verdict' | LandCardKind | 'mention-steer' | LocalCardKind | 'plan-card' | 'return-emit' | 'design-revised' | 'token-burn-snapshot' | 'unit-spawned' | 'unit-turn-finished' | 'unit-failed' | 'pr-opened' | 'verification-ran' | 'unknown-event';
 
 export interface PointerCardFace {
   title: string;
@@ -120,7 +124,42 @@ export function buildChannelThreadViews(entries: ChannelEntry[]): ChannelCardVie
   return foldRepeatedAsks(withReplies);
 }
 
-const POINTER_EVENT_KINDS: Record<string, true> = { 'needs-you': true, 'gate-verdict': true, 'land-attempt': true, 'land-assessment': true, 'land-merge': true, 'mention-steer': true, 'mention-confirm-required': true, 'mention-steer-failed': true, 'spawn-proposal': true, 'token-burn-snapshot': true, 'plan-card': true, 'unit-spawned': true, 'unit-turn-finished': true, 'unit-failed': true, 'pr-opened': true, 'verification-ran': true };
+// Daemon-emitted kinds only. Compile-time exhaustive: adding a member to ChannelCardKind that
+// isn't 'message' | 'unknown-event' | LocalCardKind forces a matching entry here (or the
+// `satisfies` fails), and an entry here for a kind that doesn't exist fails the same way.
+const POINTER_EVENT_KINDS = {
+  'needs-you': true,
+  'gate-verdict': true,
+  'land-attempt': true,
+  'land-assessment': true,
+  'land-merge': true,
+  'mention-steer': true,
+  'plan-card': true,
+  'return-emit': true,
+  'design-revised': true,
+  'token-burn-snapshot': true,
+  'unit-spawned': true,
+  'unit-turn-finished': true,
+  'unit-failed': true,
+  'pr-opened': true,
+  'verification-ran': true,
+} satisfies Record<Exclude<ChannelCardKind, 'message' | 'unknown-event' | LocalCardKind>, true>;
+
+// Client-minted kinds (see LocalCardKind). Exhaustive over LocalCardKind the same way.
+const LOCAL_CARD_KINDS = {
+  'local:mention-confirm-required': true,
+  'local:mention-steer-failed': true,
+  'local:spawn-proposal': true,
+} satisfies Record<LocalCardKind, true>;
+
+/** Narrows a raw wire `eventKind` string to a known ChannelCardKind, or undefined if the daemon
+ *  (or webapp) doesn't know how to render it yet. Replaces an unsound `as ChannelCardKind` cast
+ *  that indexed iconClass to `undefined` and threw mid-render for any unmapped kind. */
+function pointerCardKind(eventKind: string): ChannelCardKind | undefined {
+  if (Object.prototype.hasOwnProperty.call(POINTER_EVENT_KINDS, eventKind)) return eventKind as ChannelCardKind;
+  if (Object.prototype.hasOwnProperty.call(LOCAL_CARD_KINDS, eventKind)) return eventKind as ChannelCardKind;
+  return undefined;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -145,6 +184,7 @@ function hrefFromPayload(payload: unknown): string | undefined {
   if (!isRecord(payload)) return undefined;
   if (typeof payload.href === 'string') return payload.href;
   if (payload.doorSurface === 'plan' && isRecord(payload.refs) && typeof payload.refs.planId === 'string') return `#/workbench/task/${encodeURIComponent(payload.refs.planId)}`;
+  if (payload.doorSurface === 'intervence' && isRecord(payload.refs) && typeof payload.refs.unitId === 'string') return `#/intervene/${encodeURIComponent(payload.refs.unitId)}`;
   return undefined;
 }
 
@@ -158,13 +198,13 @@ function toneFor(kind: string, face?: PointerCardFace): ChannelCardTone {
   if (kind === 'gate-verdict') return face?.status === 'pass' || face?.status === 'approved' ? 'success' : face?.status === 'fail' || face?.status === 'veto' ? 'destructive' : 'info';
   if (kind === 'land-merge') return face?.status === 'merged' || face?.status === 'landed' ? 'success' : 'info';
   if (kind === 'token-burn-snapshot') return face?.status === 'deny' ? 'destructive' : face?.status === 'ask' ? 'warning' : 'info';
-  if (kind === 'mention-confirm-required') return 'warning';
-  if (kind === 'mention-steer-failed') return 'destructive';
+  if (kind === 'local:mention-confirm-required') return 'warning';
+  if (kind === 'local:mention-steer-failed') return 'destructive';
   // A unit that stopped in a way it did not choose rendered NEUTRAL — identical to a unit starting.
   // Every lifecycle card looked the same, so the one that mattered was invisible among the ones that
   // did not. Failure is the loudest lifecycle fact there is.
   if (kind === 'unit-failed') return 'destructive';
-  if (kind === 'spawn-proposal' || kind === 'mention-steer' || kind === 'plan-card') return 'info';
+  if (kind === 'local:spawn-proposal' || kind === 'mention-steer' || kind === 'plan-card') return 'info';
   return 'neutral';
 }
 
@@ -261,7 +301,8 @@ export function dispatchChannelCard(entry: ChannelEntry): ChannelCardView {
   if (!eventKind) {
     return { id: entry.id, entry, kind: 'message', tone: entry.kind === 'user' ? 'info' : 'neutral', authorLabel: entryAuthorLabel(entry), title: entryAuthorLabel(entry), body: entry.displayText || entry.text, pinned: [] };
   }
-  if (!POINTER_EVENT_KINDS[eventKind]) {
+  const cardKind = pointerCardKind(eventKind);
+  if (!cardKind) {
     return { id: entry.id, entry, kind: 'unknown-event', tone: 'neutral', authorLabel: entryAuthorLabel(entry), title: labelFromKey(eventKind), eyebrow: 'Event', body: entry.text || 'This room event is from a newer daemon. Update the client to see the full card.', pinned: [] };
   }
   const authorLabel = entryAuthorLabel(entry);
@@ -272,7 +313,7 @@ export function dispatchChannelCard(entry: ChannelEntry): ChannelCardView {
   const body = cardBody(face?.body, entry.text, title);
   const pinned = Object.entries(face?.pinned ?? {}).flatMap(([label, value]) => value == null || value === '' || repeatsTitle(String(value), title) ? [] : [pinnedChip(labelFromKey(label), String(value))]);
   const doorHrefResolved = eventKind === 'token-burn-snapshot' ? '#/workbench/economics' : (face?.href ?? hrefFromPayload(entry.event?.payload));
-  return { id: entry.id, entry, kind: eventKind as ChannelCardKind, tone: toneFor(eventKind, face), authorLabel: entryAuthorLabel(entry), title, eyebrow: face?.eyebrow, body, detail: face?.detail, pinned, actionHref: channelCardActionHref(entry), href: doorHrefResolved };
+  return { id: entry.id, entry, kind: cardKind, tone: toneFor(eventKind, face), authorLabel: entryAuthorLabel(entry), title, eyebrow: face?.eyebrow, body, detail: face?.detail, pinned, actionHref: channelCardActionHref(entry), href: doorHrefResolved };
 }
 
 /**
@@ -315,7 +356,9 @@ const DOOR_LABELS: Record<string, string> = {
   'land-attempt': 'Open the land record',
   'land-assessment': 'Open the land record',
   'land-merge': 'Open the land record',
-  'spawn-proposal': 'Open the proposal',
+  'local:spawn-proposal': 'Open the proposal',
+  'return-emit': 'Step into the agent',
+  'design-revised': 'Open plan DAG',
 };
 
 /** Label for a card's door button. Was hardcoded to "Open plan DAG" for every kind — a token-burn
@@ -343,7 +386,7 @@ export function latestChannelSeq(entries: readonly ChannelEntry[]): number {
  * thing you are not reading and nothing about whether you should. A verdict — "nothing unusual", or
  * the one thing that was — is what makes the fold safe to leave folded.
  */
-const ALARMING_RUN_KINDS: Partial<Record<ChannelCardView['kind'], true>> = { 'unit-failed': true, 'mention-steer-failed': true, 'land-assessment': true };
+const ALARMING_RUN_KINDS: Partial<Record<ChannelCardView['kind'], true>> = { 'unit-failed': true, 'local:mention-steer-failed': true, 'land-assessment': true };
 
 export function runSummary(views: readonly ChannelCardView[]): { count: number; agents: string[]; kinds: string[]; unusual?: string } {
   const agents = [...new Set(views.map((view) => view.pinned.find((item) => item.label === 'Unit')?.value ?? view.authorLabel).filter(Boolean))];

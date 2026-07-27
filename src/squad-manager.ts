@@ -221,6 +221,7 @@ import {
 	TRANSCRIPT_EVENT_LAND_ASSESSMENT,
 	TRANSCRIPT_EVENT_LAND_ATTEMPT,
 	TRANSCRIPT_EVENT_LAND_MERGE,
+	TRANSCRIPT_EVENT_MENTION_STEER,
 	TRANSCRIPT_EVENT_NEEDS_YOU,
 	TRANSCRIPT_EVENT_PLAN_CARD,
 	TRANSCRIPT_EVENT_PR_OPENED,
@@ -229,6 +230,7 @@ import {
 	TRANSCRIPT_EVENT_UNIT_SPAWNED,
 	TRANSCRIPT_EVENT_UNIT_TURN_FINISHED,
 	TRANSCRIPT_EVENT_VERIFICATION_RAN,
+	isTranscriptEventKind,
 } from "./transcript-event-kinds.ts";
 import { TRANSCRIPT_EVENT_TOKEN_BURN_SNAPSHOT, fleetTokenBurnPayload, tokenBurnFace, unitTokenBurnPayload } from "./token-burn.ts";
 import { truncateLabel } from "./text-util.ts";
@@ -7889,7 +7891,7 @@ export class SquadManager extends EventEmitter {
 			kind: "system" as const,
 			format: "markdown" as const,
 			event: {
-				kind: "mention-steer",
+				kind: TRANSCRIPT_EVENT_MENTION_STEER,
 				payload: {
 					face: {
 						title: "Mention steer accepted",
@@ -12351,7 +12353,7 @@ export class SquadManager extends EventEmitter {
 
 	private async projectUnitTranscriptEvent(rec: AgentRecord, entry: TranscriptEntry): Promise<void> {
 		const event = entry.event;
-		if (!event?.kind) return;
+		if (!event?.kind || !isTranscriptEventKind(event.kind)) return;
 		const nodeId = await this.projectedNodeId(rec);
 		if (!nodeId) return;
 		try {

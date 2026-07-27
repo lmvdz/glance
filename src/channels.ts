@@ -3,7 +3,7 @@ import type { Store } from "./dal/store.ts";
 import { neutralizeDelimiters } from "./digest.ts";
 import { errText } from "./err-text.ts";
 import { redact } from "./redact.ts";
-import { EVENT_ISSUER_MANAGER } from "./transcript-event-kinds.ts";
+import { EVENT_ISSUER_MANAGER, type TranscriptEventKind } from "./transcript-event-kinds.ts";
 import type { Actor, TranscriptEntry } from "./types.ts";
 
 export const DEFAULT_CHANNEL_ID = "fleet";
@@ -51,7 +51,7 @@ export interface ManagerChannelPost {
 	authorDisplayName?: string;
 	authorOrigin?: Actor["origin"];
 	replyToId?: string;
-	event?: { kind: string; payload: unknown };
+	event?: { kind: TranscriptEventKind; payload: unknown };
 	kind?: ChannelEntry["kind"];
 	format?: ChannelEntry["format"];
 }
