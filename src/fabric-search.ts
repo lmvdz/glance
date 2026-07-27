@@ -320,16 +320,21 @@ export const PRIMER_BUDGET = { failures: 3, decisions: 4, chars: 3200 } as const
 export function buildContextPrimer(snapshot: FabricSnapshot, query: string, opts: { topK?: number; now?: number; budgetChars?: number } = {}): string {
 	const now = opts.now ?? Date.now();
 	const budget = opts.budgetChars ?? PRIMER_BUDGET.chars;
-	const byTsDesc = (a: KbDoc, b: KbDoc): number => (b.ts ?? 0) - (a.ts ?? 0);
+	// Recency sort with an id tie-break: Array.sort is spec-stable, but the tie-break makes
+	// determinism independent of upstream assembly order rather than reliant on it (I3).
+	const byTsDesc = (a: KbDoc, b: KbDoc): number => (b.ts ?? 0) - (a.ts ?? 0) || a.id.localeCompare(b.id);
 	const docs = fabricDocuments(snapshot);
 	const pinnedFailures = docs.filter((d) => d.type === "failure").sort(byTsDesc).slice(0, PRIMER_BUDGET.failures);
 	const pinnedDecisions = docs.filter((d) => d.type === "decision").sort(byTsDesc).slice(0, PRIMER_BUDGET.decisions);
 	const pinnedIds = new Set([...pinnedFailures, ...pinnedDecisions].map((d) => d.id));
 
-	// Region 3: over-fetch by the pinned count so exclusion can't starve it, then re-cap.
+	// Region 3 excludes the pinned TYPES wholesale, not just the pinned ids (blind-review
+	// finding): with an id-only filter, a repo carrying more failures/decisions than the caps
+	// could re-enter the overflow through the ranked region — making the caps pin-only fiction
+	// and the region boundaries advisory. Pinned types are pinned-or-absent.
 	const topK = opts.topK ?? 6;
 	const ranked = searchFabric(snapshot, query, { topK: topK + pinnedIds.size })
-		.filter((r) => !pinnedIds.has(r.id))
+		.filter((r) => r.type !== "failure" && r.type !== "decision")
 		.slice(0, topK);
 
 	if (pinnedIds.size === 0 && ranked.length === 0) return "";
@@ -347,5 +352,9 @@ export function buildContextPrimer(snapshot: FabricSnapshot, query: string, opts
 	const assemble = (): string => [header, ...region1, ...region2, ...region3].join("\n");
 	while (assemble().length > budget && region3.length > 0) region3.pop();
 	while (assemble().length > budget && region2.length > 0) region2.pop();
+	// Eviction can empty every region (no pinned facts + a budget below the smallest ranked
+	// line). A header announcing nothing is not a primer (blind-review finding) — "" keeps the
+	// caller's inject-nothing contract.
+	if (region1.length + region2.length + region3.length === 0) return "";
 	return fenceUntrusted("context primer", assemble());
 }

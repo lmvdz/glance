@@ -278,6 +278,33 @@ describe("primer regions (research-memory-eval-harness Rank 1 / HARNESS-SPEC G09
 		const hits = primer.split("15-minute access token TTL").length - 1;
 		expect(hits).toBe(1);
 	});
+
+	test("caps are TOTAL, not pin-only: overflow failures cannot re-enter through the ranked region", () => {
+		// All four failures lexically match this query; only the 3 most recent may render, and the
+		// oldest must not sneak back in as a ranked hit (blind-review finding: id-only exclusion
+		// made the caps advisory).
+		const primer = buildContextPrimer(regionSnapshot(), "recent failure oldest", { topK: 8 });
+		expect(primer.split("Do not repeat").length - 1).toBe(3);
+		expect(primer).not.toContain("oldest failure");
+	});
+
+	test("decision cap is total too: at most 4 render, most recent first", () => {
+		const snap = snapshot({
+			decisions: [1, 2, 3, 4, 5].map((n) => ({
+				type: "decision" as const, source: { repo: "/r", featureId: `f${n}` }, id: `d${n}`,
+				featureTitle: `Feature ${n}`, text: `settled choice number ${n}`, decisionSource: "human" as const, createdAt: n * 1000,
+			})),
+		});
+		const primer = buildContextPrimer(snap, "settled choice number", { topK: 8 });
+		expect(primer.split("**Decision**").length - 1).toBe(4);
+		expect(primer).not.toContain("settled choice number 1"); // oldest dropped
+	});
+
+	test("a header announcing nothing is not a primer: full eviction returns empty string", () => {
+		const snap = snapshot({ decisions: [], failures: [] });
+		const primer = buildContextPrimer(snap, "refresh token rotation", { budgetChars: 70 });
+		expect(primer).toBe(""); // header alone would fit; nothing else does
+	});
 });
 
 describe("reward-boost ranking (concern 03)", () => {
