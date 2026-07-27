@@ -1,7 +1,6 @@
 import React from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import { MarkdownComponents, PlanBlockContext } from '../PlanBlocks';
+import { PlanBlockContext } from '../PlanBlocks';
+import { PlanProse } from './PlanProse';
 import { apiJson, jsonInit } from '../../lib/api';
 import { useTaskContext } from '../../context/TaskContext';
 import type { ArtifactCommentDTO } from '../../lib/dto';
@@ -107,8 +106,11 @@ export function DocSurface({ taskId, docPath }: { taskId?: string; docPath?: str
             // are how the plan actually argues, and dropping to plain markdown would have quietly
             // turned every one of them into a fenced code block.
             <PlanBlockContext.Provider value={{ featureId: taskId, repo, planPath: path }}>
-              <article className="mt-6" style={{ maxWidth: 680, color: '#DEDEE2', fontSize: 14.5, lineHeight: 1.75 }}>
-                <ReactMarkdown remarkPlugins={[remarkGfm]} components={MarkdownComponents}>{doc.markdown}</ReactMarkdown>
+              {/* Same typesetting as the decision panel, so a plan reads the same wherever you meet
+                  it — the one you approve in a rail and the one you review at full width are the
+                  same document and should not look like two kinds of thing. */}
+              <article className="mt-6">
+                <PlanProse markdown={doc.markdown} measure={72} />
               </article>
             </PlanBlockContext.Provider>
           ) : !error ? (

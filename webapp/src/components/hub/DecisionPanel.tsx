@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { apiJson } from '../../lib/api';
+import { PlanProse } from './PlanProse';
 
 /**
  * DecisionPanel — a person answering a stopped agent.
@@ -129,10 +130,13 @@ function Subject({ unitId, unitHref, question }: { unitId?: string; unitHref?: s
       </button>
       {open ? (
         <div
-          className="mt-2.5 overflow-y-auto whitespace-pre-wrap px-3.5 py-3 text-[12.5px]"
-          style={{ border: '1px solid #1F1F22', background: '#0C0C0D', color: '#C9C9CF', lineHeight: 1.65, maxHeight: 340, textWrap: 'pretty' }}
+          className="mt-2.5 overflow-y-auto px-3.5 py-3"
+          style={{ border: '1px solid #1F1F22', background: '#0C0C0D', maxHeight: 380 }}
         >
-          {plan.content}
+          {/* A plan is a numbered argument and the numbers ARE the argument. Rendering it
+              pre-wrapped threw away every distinction its author made, at the exact moment we
+              are asking someone to be careful. */}
+          <PlanProse markdown={plan.content} measure={54} />
         </div>
       ) : null}
     </div>
