@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { calibrationLine, delaySentence, interruptHeadline, leavesSentence, unwiredNote, type InterruptState } from './interruptSurface';
+import { calibrationLine, delaySentence, interruptHeadline, leavesSentence, reviewPrompt, unwiredNote, type InterruptState } from './interruptSurface';
 
 const state = (over: Partial<InterruptState> = {}): InterruptState => ({ wired: true, leaves: ['the weekly brief'], recoveryDelayMs: 9 * 60_000, ...over });
 
@@ -55,5 +55,25 @@ describe('calibrationLine', () => {
   });
   it('is silent when nothing was ever sent', () => {
     expect(calibrationLine({ sent: 0, cancelledByDelay: 3, reviewed: 0, worthIt: 0, sentence: '' })).toBeUndefined();
+  });
+});
+
+describe('reviewPrompt', () => {
+  it('asks a question rather than presenting a survey', () => {
+    const line = reviewPrompt({ id: 'a', question: 'wren needs you: Approve plan', sentAt: 1_000_000 }, 1_000_000 + 3 * 60_000);
+    expect(line).toContain('Approve plan');
+    expect(line).toContain('sent 3 minutes ago');
+    expect(line).toContain('Was interrupting you right?');
+  });
+
+  it('never says "0 minutes ago"', () => {
+    expect(reviewPrompt({ id: 'a', question: 'q', sentAt: 1_000_000 }, 1_000_000)).toContain('1 minute ago');
+  });
+});
+
+describe('the wired state', () => {
+  it('says what leaves once the gate is on, so "on" is not an abstraction', () => {
+    const line = leavesSentence(['the weekly brief', 'a question that passes all three conditions']);
+    expect(line).toContain('all three conditions');
   });
 });

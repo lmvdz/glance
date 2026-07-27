@@ -1,5 +1,6 @@
 import React, { useEffect } from 'react';
-import { ALL_THREE, CONDITIONS, calibrationLine, delaySentence, interruptHeadline, leavesSentence, unwiredNote, type InterruptState } from '../../lib/interruptSurface';
+import { ALL_THREE, CONDITIONS, WHY_REVIEW, calibrationLine, delaySentence, interruptHeadline, leavesSentence, reviewPrompt, unwiredNote, type InterruptState } from '../../lib/interruptSurface';
+import { apiJson, jsonInit } from '../../lib/api';
 
 /**
  * AutonomyPanel — the fleet's autonomy as a state you can read.
@@ -63,6 +64,8 @@ export interface AutonomyState {
  * and only one of them means you can walk away safely.
  */
 function Interrupt({ state }: { state: InterruptState }) {
+  const [judged, setJudged] = React.useState<Record<string, boolean>>({});
+  const pendingReview = (state.awaitingReview ?? []).filter((item) => judged[item.id] === undefined);
   const note = unwiredNote(state);
   const calibration = calibrationLine(state.health);
   return (
@@ -89,6 +92,43 @@ function Interrupt({ state }: { state: InterruptState }) {
       <div className="mt-2 text-[11.5px] leading-[1.5]" style={{ color: '#6A6A72', textWrap: 'pretty' }}>{leavesSentence(state.leaves)}</div>
       {/* A gate whose sends are never reviewed has no evidence it is calibrated. */}
       {calibration ? <div className="mt-2 text-[11.5px] leading-[1.5]" style={{ color: '#8A6A45', textWrap: 'pretty' }}>{calibration}</div> : null}
+
+      {pendingReview.length > 0 ? (
+        <div className="mt-5">
+          <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.14em', color: '#D9A03C' }}>
+            WAS INTERRUPTING YOU RIGHT?
+          </div>
+          <div className="mt-2.5 flex flex-col gap-3">
+            {pendingReview.map((item) => (
+              <div key={item.id}>
+                <div className="text-[12.5px] leading-[1.5]" style={{ color: '#DEDEE2', textWrap: 'pretty' }}>{reviewPrompt(item, Date.now())}</div>
+                <div className="mt-1.5 flex gap-2">
+                  {[true, false].map((worthIt) => (
+                    <button
+                      key={String(worthIt)}
+                      type="button"
+                      onClick={() => {
+                        // Optimistic, because the whole point is that answering costs one tap. A
+                        // failed write means the question comes back on the next read, which is the
+                        // correct outcome — an unrecorded verdict must not read as a recorded one.
+                        setJudged((prior) => ({ ...prior, [item.id]: worthIt }));
+                        void apiJson('/api/interrupt/review', jsonInit('POST', { id: item.id, worthIt })).catch(() => {
+                          setJudged((prior) => { const next = { ...prior }; delete next[item.id]; return next; });
+                        });
+                      }}
+                      className="h-7 rounded-[3px] px-2.5"
+                      style={{ border: '1px solid #26262B', fontFamily: MONO, fontSize: 10, color: worthIt ? '#6F9E85' : '#C2704A' }}
+                    >
+                      {worthIt ? 'yes, worth it' : 'no, it could have waited'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="mt-2.5 text-[11.5px] leading-[1.5]" style={{ color: '#6A6A72', textWrap: 'pretty' }}>{WHY_REVIEW}</div>
+        </div>
+      ) : null}
     </div>
   );
 }
