@@ -16,11 +16,13 @@
  * failure does (see `CallBindingStore.markEnded`'s terminal-reason taxonomy).
  */
 
+import { existsSync } from "node:fs";
+import * as path from "node:path";
 import { emitVoiceCallCard, emitVoiceDecisionCard } from "./schema/channel-card.ts";
 import type { CardPayloadType } from "./schema/channel-card.ts";
 import { TRANSCRIPT_EVENT_VOICE_CALL, TRANSCRIPT_EVENT_VOICE_DECISION } from "./transcript-event-kinds.ts";
 import { errText } from "./err-text.ts";
-import { ArtifactSnapshotStore, type ArtifactSnapshotRecord } from "./voice-call-artifacts.ts";
+import { ArtifactSnapshotStore, resolveWithinSessionRoot, type ArtifactSnapshotRecord } from "./voice-call-artifacts.ts";
 import {
 	CallBindingStore,
 	redactBinding,
@@ -29,7 +31,7 @@ import {
 	type VoiceCallRetention,
 	type VoiceCallTerminalReason,
 } from "./voice-call-binding.ts";
-import { VoiceCallBridgeClient, type BridgeConnectFn, type BridgeControlAck } from "./voice-call-bridge-client.ts";
+import { VoiceCallBridgeClient, type BridgeConnectFn, type BridgeControlAck, type BridgeHelloFrame } from "./voice-call-bridge-client.ts";
 import { JournalTailer, type JournalEnvelope } from "./voice-call-journal.ts";
 import { CallProjectionStore, type EmitVoiceDecisionCardInput, type JournalGap, type StoredTranscriptEntry } from "./voice-call-projection.ts";
 import { VoiceAttentionSource, voiceChannelLadderPriority } from "./voice-attention.ts";
@@ -44,6 +46,10 @@ export interface BrokerCallView {
 	journalPath: string;
 	startedAt: number;
 	exit: number | null;
+	/** The directory the broker actually launched `omp live` in (`broker/broker.ts`'s `PROJECT_DIR`,
+	 *  passed to the child as its real `cwd` — not a guess). Absent only against an OLDER broker build
+	 *  that predates this field; see `resolveEffectiveSessionRoot`. */
+	sessionRoot?: string;
 }
 
 export interface BrokerCallCreated extends BrokerCallView {
@@ -53,7 +59,7 @@ export interface BrokerCallCreated extends BrokerCallView {
 /** The broker's own HTTP surface (`opencoven-viz/broker/broker.ts`) — injectable so this module never
  *  needs a real broker process (or a real microphone) to be tested. */
 export interface BrokerClient {
-	createCall(opts?: { resume?: string }): Promise<BrokerCallCreated>;
+	createCall(opts?: { resume?: string; retention?: VoiceCallRetention }): Promise<BrokerCallCreated>;
 	endCall(callId: string): Promise<void>;
 	listCalls(): Promise<BrokerCallView[]>;
 }
@@ -77,7 +83,10 @@ export function httpBrokerClient(baseUrl: string = brokerBaseUrl()): BrokerClien
 	}
 	return {
 		async createCall(opts) {
-			return (await call("/calls", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ resume: opts?.resume }) })) as BrokerCallCreated;
+			// `recording` is the broker's own field name (`broker/broker.ts`'s `POST /calls`, validated
+			// full|tails|off server-side) for what becomes `OMP_LIVE_RECORDING_MODE` in the spawned
+			// process — the binding's `retention` is exactly that policy, so it rides straight through.
+			return (await call("/calls", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ resume: opts?.resume, recording: opts?.retention }) })) as BrokerCallCreated;
 		},
 		async endCall(callId) {
 			await call(`/calls/${encodeURIComponent(callId)}`, { method: "DELETE" });
@@ -87,6 +96,45 @@ export function httpBrokerClient(baseUrl: string = brokerBaseUrl()): BrokerClien
 			return body.calls;
 		},
 	};
+}
+
+/**
+ * Reconciles the caller-supplied `sessionRoot` override (if any) against the broker's own answer for
+ * where it actually launched `omp live` — DESIGN.md's artifact-snapshot boundary is only as good as
+ * `sessionRoot` being trustworthy, so an override gets no special credit just because a client asked
+ * for one:
+ *  - No override at all → the broker's root (the ground truth), or `process.cwd()` if the broker
+ *    predates the field (an older build — additive, not a hard requirement).
+ *  - An override that isn't an absolute path, or doesn't exist on disk → dropped; same fallback.
+ *  - An override that IS absolute and exists, but — when the broker DID report a root — resolves
+ *    outside it (`resolveWithinSessionRoot`, the same symlink-aware containment check
+ *    `voice-call-artifacts.ts` uses for artifact paths) → dropped; same fallback. A client cannot walk
+ *    the daemon's artifact snapshots outside the directory the broker itself actually ran in.
+ *  - Otherwise (absolute, exists, and — if a broker root is known — contained within it) → accepted.
+ * Every drop is logged (never thrown) — `startCall` still succeeds, just with the honest root instead
+ * of the rejected one.
+ */
+export async function resolveEffectiveSessionRoot(clientOverride: string | undefined, brokerRoot: string | undefined, log: (msg: string) => void): Promise<string> {
+	const fallback = brokerRoot ?? process.cwd();
+	if (!clientOverride) return fallback;
+	if (!path.isAbsolute(clientOverride)) {
+		log(`voice-call: dropping non-absolute sessionRoot override "${clientOverride}" — using ${fallback}`);
+		return fallback;
+	}
+	if (brokerRoot === undefined) {
+		// No broker-provided root to check containment against — still require the override to exist.
+		if (!existsSync(clientOverride)) {
+			log(`voice-call: dropping sessionRoot override "${clientOverride}" — path does not exist — using ${fallback}`);
+			return fallback;
+		}
+		return clientOverride;
+	}
+	const contained = await resolveWithinSessionRoot(brokerRoot, clientOverride);
+	if (!contained.ok) {
+		log(`voice-call: dropping sessionRoot override "${clientOverride}" — ${contained.reason}: ${contained.detail} — using broker-provided root ${fallback}`);
+		return fallback;
+	}
+	return clientOverride;
 }
 
 export interface EmitCardInput {
@@ -143,7 +191,9 @@ function voiceCallFacePayload(binding: VoiceCallBinding): CardPayloadType<typeof
 					? terminalReasonDetail(binding.terminalReason, binding.terminalError)
 					: binding.state === "degraded"
 						? "Socket connection lost — confirming with the call broker."
-						: undefined,
+						: binding.retentionMismatch
+							? `Recording mode mismatch: the room asked for "${binding.retentionMismatch.expected}", the session reports "${binding.retentionMismatch.reported}".`
+							: undefined,
 		},
 	};
 }
@@ -211,6 +261,12 @@ function voiceDecisionFacePayload(channelId: string, callId: string, decision: J
 			optionLabels,
 			resolutionSource: resolution?.source,
 			tone: decision.state === "answered" ? "success" : "neutral",
+			// Every terminal title still embeds `decision.prompt` verbatim (a resolved decision falls
+			// back to it too, whenever `resolution?.label` is absent) — the SAME agent-authored assertion
+			// the mint card carries, just prefixed with a state word ("Expired · ", "Failed · ", ...).
+			// Prefixing it with a state label doesn't change what the embedded text IS, so this gets the
+			// SAME register:"claim" the mint card sets, per concern 07's epistemic-register semantics.
+			register: "claim",
 		},
 	};
 }
@@ -278,6 +334,59 @@ export class VoiceCallCoordinator {
 		return rt;
 	}
 
+	/** Start (or restart) a channel's runtime with a clean slate. Called at the top of `startCall`,
+	 *  never by any reconnect/recovery path (those must keep reusing the SAME runtime object their
+	 *  in-flight timers/callbacks already closed over — see `runtime()`). Without this, a channel that
+	 *  hosted and ended a PREVIOUS call would hand the fresh call the previous runtime's `ended: true`
+	 *  — `connectAndPin`'s stale-guard (`if (rt.ended) { client.close(); return; }`) would then close
+	 *  the brand-new bridge the instant its `hello` arrives, and the binding would sit at `connecting`
+	 *  forever even though `startCall` itself already returned `ok: true`. `beginConnecting` (called
+	 *  just before this, in `startCall`) already guarantees any PRIOR binding on this channel is
+	 *  `ended`, so replacing the map entry outright — rather than trying to reset fields on the reused
+	 *  object — can never drop a still-active call's own state. */
+	private resetRuntime(channelId: string): ChannelRuntime {
+		const rt: ChannelRuntime = { ended: false };
+		this.runtimes.set(channelId, rt);
+		return rt;
+	}
+
+	/**
+	 * Full per-channel runtime teardown — the ONE place a tailer, liveness timer, or bridge socket is
+	 * guaranteed to stop outliving the binding it served. Called from `endBinding` (every termination
+	 * path — terminal/journal-end/broker-exit/stale-binding/port-reused/start-failed/operator-ended —
+	 * funnels through it, so a caller that already tore its own pieces down redundantly is harmless),
+	 * from `onJournalMissing`'s already-ended branch (a leaked tailer that outlived its binding must
+	 * still be shut down even when there's no NEW `endBinding` call to make), and from `stop()` at
+	 * daemon shutdown. Idempotent: `JournalTailer.stop`, `clearInterval`, and
+	 * `VoiceCallBridgeClient.close` are all themselves idempotent, so calling this twice — or on a
+	 * channel with no runtime at all — is a harmless no-op.
+	 */
+	private teardownRuntime(channelId: string): void {
+		const rt = this.runtime(channelId);
+		rt.ended = true;
+		rt.tailer?.stop();
+		rt.tailer = undefined;
+		this.stopLivenessProbe(channelId);
+		try {
+			rt.bridge?.close();
+		} catch {
+			/* best-effort */
+		}
+		rt.bridge = undefined;
+	}
+
+	/** @substrate exported for tests only — tests/voice-call-manager.test.ts asserts every
+	 *  termination path actually tears down the per-channel runtime (tailer stopped, liveness probe
+	 *  stopped, bridge closed), not merely that the binding reads `ended`. Never consulted by
+	 *  production code: the daemon itself only ever needs the binding's own state (`state()`), never
+	 *  "is anything still running for this channel" — a leaked timer is a bug the runtime should never
+	 *  need to ask about itself. */
+	hasActiveRuntime(channelId: string): boolean {
+		const rt = this.runtimes.get(channelId);
+		if (!rt) return false;
+		return Boolean(rt.tailer || rt.bridge || rt.livenessTimer);
+	}
+
 	state(channelId: string): VoiceCallBindingView | undefined {
 		const binding = this.bindings.get(channelId);
 		return binding ? redactBinding(binding) : undefined;
@@ -327,16 +436,19 @@ export class VoiceCallCoordinator {
 			return { ok: false, reason: errText(err) };
 		}
 		await this.announceCallState(binding);
-		const rt = this.runtime(channelId);
+		const rt = this.resetRuntime(channelId);
 
 		let created: BrokerCallCreated;
 		try {
-			created = await this.broker.createCall({ resume: input.resumeSessionId });
+			created = await this.broker.createCall({ resume: input.resumeSessionId, retention: binding.retention });
 		} catch (err) {
 			await this.endBinding(channelId, "start-failed", errText(err));
 			return { ok: false, reason: `broker: ${errText(err)}` };
 		}
-		binding = this.bindings.attachBroker(channelId, created);
+		// Reconcile the caller's own `sessionRoot` guess against the broker's authoritative answer for
+		// where it actually ran `omp live` — see `resolveEffectiveSessionRoot`'s doc.
+		const sessionRoot = await resolveEffectiveSessionRoot(input.sessionRoot, created.sessionRoot, this.log);
+		binding = this.bindings.attachBroker(channelId, { ...created, sessionRoot });
 
 		// Tail from the first byte — journal records land before the bridge or any viewer hears about
 		// them (journal.ts's write-before-act contract), so tailing starts here, not after `hello`.
@@ -397,7 +509,27 @@ export class VoiceCallCoordinator {
 		}
 		rt.bridge = client;
 		rt.ended = false;
-		await this.announceCallState(pinned.binding);
+		const checked = this.checkRetentionMismatch(channelId, pinned.binding, hello.recordingMode);
+		await this.announceCallState(checked);
+	}
+
+	/**
+	 * Cross-checks what the session actually did (`hello.recordingMode` — set by whatever
+	 * `OMP_LIVE_RECORDING_MODE` the broker's child process saw) against what the room asked for at
+	 * attach time (`binding.retention`, sent to the broker as `createCall`'s `retention` option). The
+	 * daemon sends the request; it does NOT get to assume the broker (a separate process, possibly a
+	 * stale build, possibly misconfigured) actually honored it. `recordingMode` absent entirely is NOT
+	 * a mismatch — an older bridge build never sends it at all (PROTOCOL.md's "Feature-off, not
+	 * disconnected"), so there is no signal to disagree with, honest or otherwise. Persists (and
+	 * returns the updated binding) only on an actual change — see `setRetentionMismatch`'s own
+	 * idempotence.
+	 */
+	private checkRetentionMismatch(channelId: string, binding: VoiceCallBinding, reported: BridgeHelloFrame["recordingMode"]): VoiceCallBinding {
+		if (reported === undefined || reported === binding.retention) {
+			return binding.retentionMismatch ? this.bindings.setRetentionMismatch(channelId, undefined) : binding;
+		}
+		this.log(`voice-call ${channelId}: recording-mode mismatch — room retention "${binding.retention}", session reports "${reported}"`);
+		return this.bindings.setRetentionMismatch(channelId, { expected: binding.retention, reported });
 	}
 
 	private async onSocketLoss(channelId: string): Promise<void> {
@@ -530,18 +662,16 @@ export class VoiceCallCoordinator {
 	 * its call directory was removed out from under it.
 	 */
 	private async onJournalMissing(channelId: string): Promise<void> {
+		const rt = this.runtime(channelId);
+		const alreadyTornDown = rt.ended;
+		// Tear this channel's runtime down UNCONDITIONALLY, even when the binding already ended via
+		// another path (broker-exit, port-reused, ...) that never itself owned THIS tailer's shutdown —
+		// otherwise a leaked tailer just keeps polling the (now-gone) journal path and re-firing
+		// `onMissing` every tick, forever, since the old early return here never touched it.
+		this.teardownRuntime(channelId);
+		if (alreadyTornDown) return;
 		const binding = this.bindings.get(channelId);
 		if (!binding || binding.state === "ended") return;
-		const rt = this.runtime(channelId);
-		if (rt.ended) return;
-		rt.ended = true;
-		rt.tailer?.stop();
-		this.stopLivenessProbe(channelId);
-		try {
-			rt.bridge?.close();
-		} catch {
-			/* best-effort */
-		}
 		await this.endBinding(channelId, "journal-end");
 	}
 
@@ -566,10 +696,7 @@ export class VoiceCallCoordinator {
 			}
 		}
 		if (outcome.status === "applied-terminal") {
-			this.runtime(channelId).ended = true;
-			this.runtime(channelId).tailer?.stop();
-			this.stopLivenessProbe(channelId);
-			this.runtime(channelId).bridge?.close();
+			// `endBinding` itself runs the full runtime teardown (tailer/liveness/bridge) now — see its doc.
 			await this.endBinding(channelId, "terminal", outcome.error);
 		}
 	}
@@ -587,15 +714,19 @@ export class VoiceCallCoordinator {
 	}
 
 	/**
-	 * The ONE path that ends a binding: marks it terminal, announces the state, and runs the SAME
-	 * end-of-call cleanup every terminal/journal-end/broker-exit/stale-binding/port-reused/operator-
-	 * ended path needs (DESIGN.md risk table): expire every still-open/awaiting decision (there is no
-	 * arbiter left to do it properly) and clear their attention/push dedup entries. Idempotent by
-	 * construction — `markEnded` and `expireActiveDecisions` both no-op on an already-terminal input,
-	 * so calling this on an already-ended binding is harmless.
+	 * The ONE path that ends a binding: marks it terminal, tears down the FULL per-channel runtime
+	 * (`teardownRuntime` — tailer stopped, liveness probe stopped, bridge closed with its handlers
+	 * detached), announces the state, and runs the SAME end-of-call cleanup every terminal/journal-
+	 * end/broker-exit/stale-binding/port-reused/start-failed/operator-ended path needs (DESIGN.md risk
+	 * table): expire every still-open/awaiting decision (there is no arbiter left to do it properly)
+	 * and clear their attention/push dedup entries. Idempotent by construction — `markEnded`,
+	 * `teardownRuntime`, and `expireActiveDecisions` all no-op on an already-terminal/torn-down input,
+	 * so calling this on an already-ended binding (or a caller that already tore its own pieces down
+	 * redundantly) is harmless.
 	 */
 	private async endBinding(channelId: string, reason: VoiceCallTerminalReason, error?: string | null): Promise<VoiceCallBinding> {
 		const ended = this.bindings.markEnded(channelId, reason, error);
+		this.teardownRuntime(channelId);
 		await this.announceCallState(ended);
 		if (ended.callId) {
 			const expired = await this.projection.expireActiveDecisions(channelId, ended.callId);
@@ -636,9 +767,9 @@ export class VoiceCallCoordinator {
 		if (!binding) return { ok: false, reason: "no-active-call" };
 		if (binding.state === "ended") return { ok: true, value: redactBinding(binding) };
 		const rt = this.runtime(channelId);
-		rt.ended = true;
+		rt.ended = true; // set early — guards a concurrent liveness-probe reconnect (connectAndPin's own `rt.ended` check) against resurrecting this binding while the broker round-trip below is in flight.
 		try {
-			rt.bridge?.stop();
+			rt.bridge?.stop(); // the wire "stop" control frame — distinct from, and sent before, closing the socket.
 		} catch {
 			/* best-effort */
 		}
@@ -649,24 +780,16 @@ export class VoiceCallCoordinator {
 				this.log(`voice-call ${channelId}: broker end failed (marking ended anyway): ${errText(err)}`);
 			}
 		}
-		rt.tailer?.stop();
-		this.stopLivenessProbe(channelId);
-		rt.bridge?.close();
+		// `endBinding` runs the full runtime teardown (tailer/liveness/bridge close) — see its doc.
 		const ended = await this.endBinding(channelId, "operator-ended");
 		return { ok: true, value: redactBinding(ended) };
 	}
 
 	stop(): void {
-		for (const [channelId, rt] of this.runtimes) {
-			rt.ended = true; // matches onJournalMissing/endCall — guards a still in-flight connectAndPin (see its own `rt.ended` check) against resurrecting a binding after shutdown.
-			rt.tailer?.stop();
-			this.stopLivenessProbe(channelId);
-			try {
-				rt.bridge?.close();
-			} catch {
-				/* best-effort */
-			}
-		}
+		// Daemon shutdown, NOT call termination — bindings stay whatever state they were in (a live
+		// binding is still live on disk) so `rehydrateOnBoot` has something honest to corroborate next
+		// start; only the in-process runtime (tailer/liveness/bridge) is torn down here.
+		for (const channelId of this.runtimes.keys()) this.teardownRuntime(channelId);
 		this.bindings.stop();
 	}
 }

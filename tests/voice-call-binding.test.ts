@@ -155,3 +155,52 @@ describe("markDegraded / markLiveAgain", () => {
 		expect(recovered.degradedSince).toBeUndefined();
 	});
 });
+
+describe("CRITICAL 3 — attachBroker's sessionRoot override, and retentionMismatch", () => {
+	test("attachBroker's `sessionRoot`, when given, replaces beginConnecting's provisional guess", () => {
+		const store = new CallBindingStore(dir);
+		store.beginConnecting("room-1", { ownerActorId: "operator", sessionRoot: "/tmp/daemon-guess", retention: "full" });
+		const attached = store.attachBroker("room-1", { callId: "call-1", port: 8788, bridgeUrl: "ws://127.0.0.1:8788", journalPath: "/tmp/j.jsonl", controlToken: "tok-1", sessionRoot: "/tmp/broker-root" });
+		expect(attached.sessionRoot).toBe("/tmp/broker-root");
+	});
+
+	test("attachBroker without `sessionRoot` leaves beginConnecting's guess untouched (back-compat with an older caller)", () => {
+		const store = new CallBindingStore(dir);
+		store.beginConnecting("room-1", { ownerActorId: "operator", sessionRoot: "/tmp/daemon-guess", retention: "full" });
+		const attached = store.attachBroker("room-1", { callId: "call-1", port: 8788, bridgeUrl: "ws://127.0.0.1:8788", journalPath: "/tmp/j.jsonl", controlToken: "tok-1" });
+		expect(attached.sessionRoot).toBe("/tmp/daemon-guess");
+	});
+
+	test("setRetentionMismatch sets, persists across a fresh store instance, and clears", () => {
+		const store = new CallBindingStore(dir);
+		store.beginConnecting("room-1", { ownerActorId: "operator", sessionRoot: "/tmp/proj", retention: "full" });
+		const mismatched = store.setRetentionMismatch("room-1", { expected: "full", reported: "tails" });
+		expect(mismatched.retentionMismatch).toEqual({ expected: "full", reported: "tails" });
+
+		// Durable, not just in-memory — a fresh store instance pointed at the same dir sees it too.
+		const rehydrated = new CallBindingStore(dir);
+		expect(rehydrated.get("room-1")?.retentionMismatch).toEqual({ expected: "full", reported: "tails" });
+
+		const cleared = store.setRetentionMismatch("room-1", undefined);
+		expect(cleared.retentionMismatch).toBeUndefined();
+	});
+
+	test("setRetentionMismatch is a no-op write when the value is unchanged (no updatedAt churn)", () => {
+		const store = new CallBindingStore(dir);
+		store.beginConnecting("room-1", { ownerActorId: "operator", sessionRoot: "/tmp/proj", retention: "full" });
+		const first = store.setRetentionMismatch("room-1", { expected: "full", reported: "tails" });
+		const second = store.setRetentionMismatch("room-1", { expected: "full", reported: "tails" });
+		expect(second.updatedAt).toBe(first.updatedAt);
+	});
+
+	test("a corrupt retentionMismatch shape on disk is dropped, not trusted verbatim", () => {
+		const store = new CallBindingStore(dir);
+		store.beginConnecting("room-1", { ownerActorId: "operator", sessionRoot: "/tmp/proj", retention: "full" });
+		const { writeFileSync, readFileSync } = require("node:fs") as typeof import("node:fs");
+		const raw = JSON.parse(readFileSync(path.join(dir, "voice-calls.json"), "utf8"));
+		raw["room-1"].retentionMismatch = { expected: "full", reported: "not-a-real-mode" };
+		writeFileSync(path.join(dir, "voice-calls.json"), JSON.stringify(raw));
+		const rehydrated = new CallBindingStore(dir);
+		expect(rehydrated.get("room-1")?.retentionMismatch).toBeUndefined();
+	});
+});

@@ -194,10 +194,12 @@ const VoiceCallFaceSchema = Schema.Struct({
 });
 
 /** `CallProjectionStore`'s decision card (`src/voice-call-projection.ts`) — a bespoke inline emit,
- *  one card per journal-witnessed decision state. The OPEN-state card's `face.body`/`face.detail`
- *  carry the agent-minted prompt verbatim, so THAT card sets `register: "claim"` per concern 07's
- *  epistemic-register semantics (an agent's own assertion, not a daemon-checked fact); a follow-up
- *  card at a terminal state reports the arbiter's own outcome and leaves `register` unset. */
+ *  one card per journal-witnessed decision state. Every card's title embeds the agent-minted
+ *  `decision.prompt` verbatim (the terminal-state titles just prefix it with "Expired · " /
+ *  "Cancelled · " / "Failed · ", and "Resolved · " falls back to it whenever `resolution.label` is
+ *  absent) — a state-word prefix doesn't change what the embedded text IS, so EVERY card here sets
+ *  `register: "claim"` per concern 07's epistemic-register semantics (an agent's own assertion, not
+ *  a daemon-checked fact), mint and terminal alike. */
 const VoiceDecisionFaceSchema = Schema.Struct({
 	...BaseFaceFields,
 	callId: Schema.optional(Schema.String),

@@ -4,7 +4,27 @@
  * token, session, and label-echo checks) — a genuine wire-protocol exercise, not a mocked client.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { VoiceCallBridgeClient } from "../src/voice-call-bridge-client.ts";
+import { VoiceCallBridgeClient, type BridgeSocketLike } from "../src/voice-call-bridge-client.ts";
+
+/** Minimal hand-rolled `BridgeSocketLike` — for the handler-detachment tests (MINOR 10) below, which
+ *  need to fire `onerror`/`onclose` on cue rather than depend on a real socket's own timing. */
+class FakeSocket implements BridgeSocketLike {
+	closed = false;
+	onopen: (() => void) | null = null;
+	onmessage: ((ev: { data: string }) => void) | null = null;
+	onclose: (() => void) | null = null;
+	onerror: ((ev: unknown) => void) | null = null;
+	send(): void {}
+	close(): void {
+		this.closed = true;
+	}
+	fireError(err: unknown): void {
+		this.onerror?.(err);
+	}
+	fireClose(): void {
+		this.onclose?.();
+	}
+}
 
 interface FakeDecision {
 	label: string;
@@ -107,6 +127,40 @@ describe("connect", () => {
 		cleanups.push(bridge.stop);
 		const client = new VoiceCallBridgeClient({ url: bridge.url, helloTimeoutMs: 300 });
 		await expect(client.connect()).rejects.toBeTruthy();
+	});
+});
+
+describe("MINOR 10 — handler detachment on an abandoned/closed socket", () => {
+	test("a pre-hello socket error rejects connect AND detaches handlers before closing — a later close on the same socket never double-fires onSocketLoss", async () => {
+		let onSocketLoss = 0;
+		const socket = new FakeSocket();
+		const client = new VoiceCallBridgeClient({ url: "ws://fake", connect: () => socket, onSocketLoss: () => { onSocketLoss++; } });
+		const pending = client.connect();
+		socket.fireError(new Error("connection refused"));
+		await expect(pending).rejects.toBeTruthy();
+		// Detached before close — exactly like the hello-timeout path this mirrors.
+		expect(socket.closed).toBe(true);
+		expect(socket.onerror).toBeNull();
+		expect(socket.onclose).toBeNull();
+		expect(socket.onmessage).toBeNull();
+		// A LATER close event on this same (already abandoned) socket must never reach onSocketLoss —
+		// this rejection already told the caller everything it needs to know.
+		socket.fireClose();
+		expect(onSocketLoss).toBe(0);
+	});
+
+	test("close() detaches handlers before closing the real socket — an async close afterward never fires onSocketLoss", async () => {
+		const bridge = startFakeBridge({ sessionId: "live-123" });
+		cleanups.push(bridge.stop);
+		let onSocketLoss = 0;
+		const client = new VoiceCallBridgeClient({ url: bridge.url, onSocketLoss: () => { onSocketLoss++; } });
+		await client.connect();
+		client.close();
+		// Give the real WebSocket's own async close a real chance to fire, if it ever will — the fix
+		// this guards is exactly that a LATER close must not read as a fresh socket-loss signal (the
+		// spurious "degraded" card racing in after an "ended" card that MINOR 10 flagged).
+		await new Promise((r) => setTimeout(r, 150));
+		expect(onSocketLoss).toBe(0);
 	});
 });
 

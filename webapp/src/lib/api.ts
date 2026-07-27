@@ -346,6 +346,10 @@ export interface VoiceCallBindingDTO {
   endedAt?: number;
   lastJournalSeq?: number;
   resumeSessionId?: string;
+  /** Set when the session's own reported recording mode disagrees with `retention` (the room's own
+   *  request) — see `voice-call-binding.ts#VoiceCallBinding.retentionMismatch`'s doc server-side.
+   *  Absent when they agree, or the bridge never reported one at all (an older build). */
+  retentionMismatch?: { expected: VoiceCallRetention; reported: 'full' | 'tails' | 'off' };
 }
 
 export type VoiceCallDecisionState = 'open' | 'awaiting-confirmation' | 'answered' | 'expired' | 'cancelled' | 'failed';

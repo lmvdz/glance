@@ -12229,6 +12229,12 @@ export class SquadManager extends EventEmitter {
 		return this.voiceCall.listArtifacts(channelId);
 	}
 
+	/** @substrate no caller yet — plans/voice-orchestrated-room-integration/03 (the room-side ladder
+	 *  panel/composer surface that actually needs a channel's voice-decision urgency rung) is what
+	 *  wires this up. Concern 02 (this file's own scope) only needs to PROJECT decisions into the
+	 *  ladder-shaped priority `voiceChannelLadderPriority` computes — a channel-scoped read of that
+	 *  roll-up, exposed here so 03 has a `SquadManager`-level seam to call rather than reaching into
+	 *  `voiceCall` directly. Deliberate, not dead: do not remove without checking 03's status first. */
 	voiceCallLadderPriority(channelId: string): LadderPriority {
 		return this.voiceCall.ladderPriority(channelId);
 	}

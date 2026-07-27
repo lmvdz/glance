@@ -151,6 +151,18 @@ export class VoiceCallBridgeClient {
 				if (!settled) {
 					settled = true;
 					clearTimeout(timer);
+					// Detach + close exactly like the hello-timeout path above: this rejection already
+					// tells the caller everything it needs to know, so a LATER `onclose` from this same
+					// abandoned socket (many WebSocket implementations fire error then close) must never
+					// ALSO fire `onSocketLoss` as a second, redundant "the connection died" signal.
+					try {
+						socket.onclose = null;
+						socket.onerror = null;
+						socket.onmessage = null;
+						socket.close();
+					} catch {
+						/* already gone */
+					}
 					reject(err instanceof Error ? err : new Error(`bridge socket error: ${String(err)}`));
 					return;
 				}
@@ -271,9 +283,20 @@ export class VoiceCallBridgeClient {
 		this.send({ v: 1, type: "control", action: "toggleMute" });
 	}
 
+	/** Intentional close — used by the coordinator on every path that decides THIS bridge socket is
+	 *  done (port reuse, end of call, runtime teardown). Detaches the socket's own handlers BEFORE
+	 *  closing it: an async close can otherwise still fire `onclose` a tick later, which (since
+	 *  `settled` is already true by the time anyone calls `close()`) would read as `onSocketLoss` — a
+	 *  spurious "degraded" signal racing in AFTER the caller has already announced whatever card this
+	 *  close was part of (e.g. the "ended" card from a port-reused rejection). */
 	close(): void {
 		this.rejectAllPending("client closed");
 		try {
+			if (this.socket) {
+				this.socket.onclose = null;
+				this.socket.onerror = null;
+				this.socket.onmessage = null;
+			}
 			this.socket?.close();
 		} catch {
 			/* already gone */

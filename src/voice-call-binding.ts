@@ -84,6 +84,17 @@ export interface VoiceCallBinding {
 	lastJournalSeq?: number;
 	/** `--resume` session file passed to `omp live`, when this call resumed a prior one. */
 	resumeSessionId?: string;
+	/**
+	 * Set when the bridge's own `hello.recordingMode` (what the SESSION actually did, per
+	 * `OMP_LIVE_RECORDING_MODE`) disagrees with `retention` (what the ROOM asked for at attach time).
+	 * The daemon sends the room's retention through to the broker (see `VoiceCallCoordinator#startCall`
+	 * / `BrokerClient#createCall`'s `retention` option), but the broker is a separate process that
+	 * could be stale, misconfigured, or simply not the same build the daemon expects — surfacing the
+	 * disagreement here is the honest alternative to silently trusting either side. Absent when they
+	 * agree (or the bridge never reported a `recordingMode` at all — an older bridge build, additive
+	 * per PROTOCOL.md, is not itself a mismatch). Cleared if a later reconnect reports agreement.
+	 */
+	retentionMismatch?: { expected: VoiceCallRetention; reported: "full" | "tails" | "off" };
 }
 
 /** Read-only view: never carries `controlToken`. Every daemon read API (state, rehydration) returns
@@ -147,6 +158,12 @@ function narrowBinding(raw: unknown): VoiceCallBinding | undefined {
 	if (typeof raw.endedAt === "number") out.endedAt = raw.endedAt;
 	if (typeof raw.lastJournalSeq === "number") out.lastJournalSeq = raw.lastJournalSeq;
 	if (typeof raw.resumeSessionId === "string") out.resumeSessionId = raw.resumeSessionId;
+	if (isPlainRecord(raw.retentionMismatch)) {
+		const { expected, reported } = raw.retentionMismatch;
+		const expectedOk = expected === "full" || expected === "tails" || expected === "off";
+		const reportedOk = reported === "full" || reported === "tails" || reported === "off";
+		if (expectedOk && reportedOk) out.retentionMismatch = { expected, reported };
+	}
 	return out;
 }
 
@@ -236,8 +253,12 @@ export class CallBindingStore {
 	}
 
 	/** Attach the broker's response to a `connecting` binding. Throws if the binding is missing or has
-	 *  already moved past `connecting` (a caller race — the binding was ended out from under it). */
-	attachBroker(channelId: string, broker: { callId: string; port: number; bridgeUrl: string; journalPath: string; controlToken: string }): VoiceCallBinding {
+	 *  already moved past `connecting` (a caller race — the binding was ended out from under it).
+	 *  `sessionRoot`, when given, REPLACES the provisional guess `beginConnecting` recorded — the
+	 *  caller (`VoiceCallCoordinator#startCall`) is expected to have already reconciled the broker's
+	 *  own answer against any client-supplied override before calling this (see
+	 *  `resolveEffectiveSessionRoot`); omitted entirely, the provisional guess stands unchanged. */
+	attachBroker(channelId: string, broker: { callId: string; port: number; bridgeUrl: string; journalPath: string; controlToken: string; sessionRoot?: string }): VoiceCallBinding {
 		const binding = this.requireBinding(channelId);
 		if (binding.state !== "connecting") throw new Error(`channel ${channelId} binding is not connecting (${binding.state})`);
 		const updated: VoiceCallBinding = { ...binding, ...broker, updatedAt: this.now() };
@@ -268,6 +289,21 @@ export class CallBindingStore {
 		const binding = this.requireBinding(channelId);
 		if (binding.state === "ended") return binding;
 		const updated: VoiceCallBinding = { ...binding, state: "degraded", degradedSince: binding.degradedSince ?? this.now(), degradedReason: reason, updatedAt: this.now() };
+		this.bindingsMap().set(channelId, updated);
+		this.persist();
+		return updated;
+	}
+
+	/** Sets or clears `retentionMismatch` — see the field's own doc. `undefined` clears it (a
+	 *  reconnect that now agrees with what the room asked for). A no-op write when the new value is
+	 *  already what's recorded, so a repeated identical mismatch across several reconnects doesn't
+	 *  churn `updatedAt`/persist on every one. */
+	setRetentionMismatch(channelId: string, mismatch: { expected: VoiceCallRetention; reported: "full" | "tails" | "off" } | undefined): VoiceCallBinding {
+		const binding = this.requireBinding(channelId);
+		const current = binding.retentionMismatch;
+		const unchanged = mismatch === undefined ? current === undefined : current !== undefined && current.expected === mismatch.expected && current.reported === mismatch.reported;
+		if (unchanged) return binding;
+		const updated: VoiceCallBinding = { ...binding, retentionMismatch: mismatch, updatedAt: this.now() };
 		this.bindingsMap().set(channelId, updated);
 		this.persist();
 		return updated;

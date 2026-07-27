@@ -8,17 +8,19 @@
  * no real broker process, but a genuine socket and a genuine journal file on disk.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { BridgeConnectFn, BridgeSocketLike } from "../src/voice-call-bridge-client.ts";
+import type { VoiceCallRetention } from "../src/voice-call-binding.ts";
 import type { EmitCardInput, BrokerCallCreated, BrokerCallView, BrokerClient } from "../src/voice-call-manager.ts";
-import { VoiceCallCoordinator } from "../src/voice-call-manager.ts";
+import { httpBrokerClient, resolveEffectiveSessionRoot, VoiceCallCoordinator } from "../src/voice-call-manager.ts";
 
 function tmpDir(prefix: string): string {
 	return mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
-function startFakeBridge(sessionId: string, port = 0) {
+function startFakeBridge(sessionId: string, port = 0, recordingMode?: "full" | "tails" | "off") {
 	const sockets = new Set<{ send(data: string): void }>();
 	let decisions = new Map<string, { label: string }>();
 	const server = Bun.serve({
@@ -31,7 +33,7 @@ function startFakeBridge(sessionId: string, port = 0) {
 		websocket: {
 			open(ws) {
 				sockets.add(ws as unknown as { send(data: string): void });
-				ws.send(JSON.stringify({ v: 1, sessionId, seq: 0, type: "hello", canResolve: true }));
+				ws.send(JSON.stringify({ v: 1, sessionId, seq: 0, type: "hello", canResolve: true, ...(recordingMode ? { recordingMode } : {}) }));
 			},
 			message(ws, message) {
 				const frame = JSON.parse(typeof message === "string" ? message : message.toString()) as Record<string, unknown>;
@@ -84,16 +86,21 @@ class FakeBroker implements BrokerClient {
 }
 
 /** A broker whose `createCall` actually spins up a fake bridge + journal file, matching the real
- *  broker's own `POST /calls` contract closely enough for the coordinator's start path. */
+ *  broker's own `POST /calls` contract closely enough for the coordinator's start path. Records
+ *  every `createCall` call's own `opts` (CRITICAL 3: asserting `retention` actually reaches the
+ *  broker) and can be told to answer with its own `sessionRoot`, like a real broker's `PROJECT_DIR`. */
 class ScriptedBroker extends FakeBroker {
+	readonly createCallOpts: Array<{ resume?: string; retention?: VoiceCallRetention }> = [];
+	sessionRoot: string | undefined;
 	constructor(private readonly journalDir: string, private readonly bridge: ReturnType<typeof startFakeBridge>, private readonly controlToken = "tok-1") {
 		super();
 	}
-	override async createCall(): Promise<BrokerCallCreated> {
+	override async createCall(opts?: { resume?: string; retention?: VoiceCallRetention }): Promise<BrokerCallCreated> {
+		this.createCallOpts.push(opts ?? {});
 		const callId = this.nextId();
 		const journalPath = path.join(this.journalDir, `${callId}.jsonl`);
 		writeFileSync(journalPath, "");
-		const view: BrokerCallCreated = { callId, port: this.bridge.port, bridgeUrl: this.bridge.url, journalPath, startedAt: Date.now(), exit: null, controlToken: this.controlToken };
+		const view: BrokerCallCreated = { callId, port: this.bridge.port, bridgeUrl: this.bridge.url, journalPath, startedAt: Date.now(), exit: null, controlToken: this.controlToken, ...(this.sessionRoot ? { sessionRoot: this.sessionRoot } : {}) };
 		this.registerLiveCall(view);
 		return view;
 	}
@@ -119,10 +126,11 @@ async function waitFor(predicate: () => boolean, timeoutMs = 3000, stepMs = 15):
 	if (!predicate()) throw new Error("waitFor: condition never became true within timeout");
 }
 
-function makeCoordinator(opts: { stateDir: string; broker: BrokerClient; cards: EmitCardInput[]; livenessProbeIntervalMs?: number; journalPollIntervalMs?: number }): VoiceCallCoordinator {
+function makeCoordinator(opts: { stateDir: string; broker: BrokerClient; cards: EmitCardInput[]; livenessProbeIntervalMs?: number; journalPollIntervalMs?: number; connectBridge?: BridgeConnectFn }): VoiceCallCoordinator {
 	const coordinator = new VoiceCallCoordinator({
 		stateDir: opts.stateDir,
 		broker: opts.broker,
+		connectBridge: opts.connectBridge,
 		emitCard: async (input) => { opts.cards.push(input); },
 		journalPollIntervalMs: opts.journalPollIntervalMs ?? 30,
 		livenessProbeIntervalMs: opts.livenessProbeIntervalMs ?? 60,
@@ -171,6 +179,38 @@ describe("startCall: thread-aware start with pinned identity", () => {
 		expect(second.ok).toBe(false);
 		coordinator.stop();
 	});
+
+	test("bridge-connect failure tears down the tailer startCall already started (CRITICAL 2 known leak path)", async () => {
+		const stateDir = tmpDir("voice-mgr-state-");
+		const journalDir = tmpDir("voice-mgr-journal-");
+		cleanups.push(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(journalDir, { recursive: true, force: true }); });
+		class NoAnswerBroker extends FakeBroker {
+			override async createCall(): Promise<BrokerCallCreated> {
+				const callId = this.nextId();
+				const journalPath = path.join(journalDir, `${callId}.jsonl`);
+				writeFileSync(journalPath, "");
+				const view: BrokerCallCreated = { callId, port: 1, bridgeUrl: "ws://127.0.0.1:1", journalPath, startedAt: Date.now(), exit: null, controlToken: "tok-1" };
+				this.registerLiveCall(view);
+				return view;
+			}
+		}
+		const broker = new NoAnswerBroker();
+		const cards: EmitCardInput[] = [];
+		// A `connectBridge` whose socket fires `onerror` right after the client attaches its handlers —
+		// the broker answered (a real process/port), but the bridge itself never comes up. Fast and
+		// deterministic, unlike waiting out the real 10s hello timeout.
+		const connectBridge = (): BridgeSocketLike => {
+			const socket = { send() {}, close() {}, onopen: null as (() => void) | null, onmessage: null as ((ev: { data: string }) => void) | null, onclose: null as (() => void) | null, onerror: null as ((ev: unknown) => void) | null };
+			queueMicrotask(() => socket.onerror?.(new Error("connection refused")));
+			return socket as unknown as BridgeSocketLike;
+		};
+		const coordinator = makeCoordinator({ stateDir, broker, cards, journalPollIntervalMs: 20, connectBridge });
+		const result = await coordinator.startCall("room-1", { ownerActorId: "operator" });
+		expect(result.ok).toBe(false);
+		expect(coordinator.state("room-1")!.state).toBe("ended");
+		expect(coordinator.state("room-1")!.terminalReason).toBe("start-failed");
+		expect(coordinator.hasActiveRuntime("room-1")).toBe(false);
+	});
 });
 
 describe("journal-driven decision projection end-to-end", () => {
@@ -214,6 +254,7 @@ describe("journal-driven decision projection end-to-end", () => {
 		expect(ended.state).toBe("ended");
 		expect(ended.terminalReason).toBe("terminal");
 		expect(ended.terminalError).toBe("provider disconnected");
+		expect(coordinator.hasActiveRuntime("room-1")).toBe(false);
 		coordinator.stop();
 	});
 });
@@ -266,6 +307,9 @@ describe("distinct honest states", () => {
 		const ended = coordinator.state("room-1")!;
 		expect(ended.state).toBe("ended");
 		expect(ended.terminalReason).toBe("broker-exit");
+		// The known leak this path used to have (CRITICAL 2): `probeLiveness`'s broker-exit branch
+		// stopped the liveness probe but never the tailer, which kept polling the journal forever.
+		expect(coordinator.hasActiveRuntime("room-1")).toBe(false);
 		coordinator.stop();
 	});
 
@@ -300,6 +344,9 @@ describe("distinct honest states", () => {
 		const ended = coordinator.state("room-1")!;
 		expect(ended.terminalReason).toBe("port-reused");
 		expect(ended.sessionId).toBe("session-A"); // the OLD pinned identity, never overwritten
+		// The known leak this path used to have (CRITICAL 2): `connectAndPin`'s port-reused rejection
+		// never stopped the tailer that `startCall` had already started for this channel.
+		expect(coordinator.hasActiveRuntime("room-1")).toBe(false);
 		coordinator.stop();
 	});
 
@@ -320,6 +367,37 @@ describe("distinct honest states", () => {
 		await waitFor(() => coordinator.state("room-1")!.state === "ended");
 		const ended = coordinator.state("room-1")!;
 		expect(ended.terminalReason).toBe("journal-end");
+		expect(coordinator.hasActiveRuntime("room-1")).toBe(false);
+		coordinator.stop();
+	});
+
+	test("onJournalMissing tears down a leaked tailer even when the binding was already marked ended by another path", async () => {
+		const stateDir = tmpDir("voice-mgr-state-");
+		const journalDir = tmpDir("voice-mgr-journal-");
+		cleanups.push(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(journalDir, { recursive: true, force: true }); });
+		const bridge = startFakeBridge("live-abc");
+		cleanups.push(bridge.stop);
+		const broker = new ScriptedBroker(journalDir, bridge);
+		const cards: EmitCardInput[] = [];
+		const coordinator = makeCoordinator({ stateDir, broker, cards, journalPollIntervalMs: 15 });
+		await coordinator.startCall("room-1", { ownerActorId: "operator" });
+		const binding = coordinator.state("room-1")!;
+		const journalPath = path.join(journalDir, `${binding.callId}.jsonl`);
+		expect(coordinator.hasActiveRuntime("room-1")).toBe(true); // the tailer is running
+
+		// Mark the BINDING ended directly, bypassing `endBinding`/`teardownRuntime` entirely — simulating
+		// some path that decided the call is over without going through the ONE method that owns full
+		// runtime cleanup. The tailer this channel started is still alive and still polling, by
+		// construction: this is the exact leaked-tailer shape the old `onJournalMissing` early return
+		// could never clean up (it bailed the instant `binding.state === "ended"`, before ever touching
+		// the runtime).
+		coordinator.bindings.markEnded("room-1", "operator-ended");
+		expect(coordinator.hasActiveRuntime("room-1")).toBe(true); // still leaked, by construction
+
+		// The journal file now disappears — `onJournalMissing` must tear the tailer down even though the
+		// binding already reads "ended".
+		rmSync(journalPath);
+		await waitFor(() => !coordinator.hasActiveRuntime("room-1"));
 		coordinator.stop();
 	});
 
@@ -363,6 +441,43 @@ describe("distinct honest states", () => {
 		const ended = coordinator.state("room-1")!;
 		expect(ended.state).toBe("ended");
 		expect(ended.terminalReason).toBe("stale-binding");
+		coordinator.stop();
+	});
+
+	test("rehydrateOnBoot: broker says the process is still alive — resumes tailing, starts honestly degraded, then reconnects to live", async () => {
+		const stateDir = tmpDir("voice-mgr-state-");
+		const journalDir = tmpDir("voice-mgr-journal-");
+		cleanups.push(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(journalDir, { recursive: true, force: true }); });
+		// The SAME session identity the prior process's binding pinned — the bridge that survives the
+		// daemon restart is the OMP process itself, which never went away; only the daemon did.
+		const bridge = startFakeBridge("live-abc");
+		cleanups.push(bridge.stop);
+		const journalPath = path.join(journalDir, "call-ghost.jsonl");
+		writeFileSync(journalPath, "");
+		const view: BrokerCallCreated = { callId: "call-ghost", port: bridge.port, bridgeUrl: bridge.url, journalPath, startedAt: Date.now(), exit: null, controlToken: "tok-1" };
+		const broker = new FakeBroker();
+		broker.registerLiveCall(view);
+		const cards: EmitCardInput[] = [];
+		const coordinator = makeCoordinator({ stateDir, broker, cards, livenessProbeIntervalMs: 30, journalPollIntervalMs: 20 });
+		// Simulate a prior process's binding, persisted as "live" with no surviving runtime state.
+		coordinator.bindings.beginConnecting("room-1", { ownerActorId: "operator", sessionRoot: "/tmp", retention: "full" });
+		coordinator.bindings.attachBroker("room-1", view);
+		coordinator.bindings.pinSession("room-1", "live-abc");
+
+		await coordinator.rehydrateOnBoot();
+		// Immediately after rehydrate: honest — the broker corroborates the PROCESS, but there is no
+		// live socket yet, so this must never claim "live" before actually reconnecting.
+		expect(coordinator.state("room-1")!.state).toBe("degraded");
+		expect(coordinator.state("room-1")!.terminalReason).toBeUndefined();
+
+		// The liveness probe's very first (immediate, un-awaited) tick reconnects the bridge against the
+		// SAME pinned session — proving rehydrate wired up BOTH the liveness probe and the pinned-session
+		// check, not just one of them.
+		await waitFor(() => coordinator.state("room-1")!.state === "live");
+
+		// And the resumed tailer is genuinely live, not a decoration — a NEW journal record projects.
+		appendFileSync(journalPath, journalLine(0, "live-abc", { type: "decision", decision: { id: "d1", prompt: "Which name?", options: [{ index: 0, label: "Keep it", consequence: "no-op" }], requiresConfirmation: false, state: "open", createdAt: 1, updatedAt: 1 } }));
+		await waitFor(() => coordinator.decisions("room-1").length > 0);
 		coordinator.stop();
 	});
 });
@@ -444,6 +559,38 @@ describe("endCall", () => {
 			expect(result.value.state).toBe("ended");
 			expect(result.value.terminalReason).toBe("operator-ended");
 		}
+		expect(coordinator.hasActiveRuntime("room-1")).toBe(false);
+		coordinator.stop();
+	});
+
+	test("a channel can host a SECOND call after the first one ends — start → live → endCall → start again → live (CRITICAL 1 repro)", async () => {
+		const stateDir = tmpDir("voice-mgr-state-");
+		const journalDir = tmpDir("voice-mgr-journal-");
+		cleanups.push(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(journalDir, { recursive: true, force: true }); });
+		const bridge1 = startFakeBridge("live-1");
+		cleanups.push(bridge1.stop);
+		const broker = new ScriptedBroker(journalDir, bridge1);
+		const cards: EmitCardInput[] = [];
+		const coordinator = makeCoordinator({ stateDir, broker, cards });
+
+		const first = await coordinator.startCall("room-1", { ownerActorId: "operator" });
+		expect(first.ok).toBe(true);
+		expect(coordinator.state("room-1")!.state).toBe("live");
+
+		const ended = await coordinator.endCall("room-1", true);
+		expect(ended.ok).toBe(true);
+		expect(coordinator.state("room-1")!.state).toBe("ended");
+		expect(coordinator.hasActiveRuntime("room-1")).toBe(false);
+
+		// A SECOND call on the SAME channel, against a fresh bridge connection. Before the fix,
+		// `runtime()` reused the first call's `ChannelRuntime` object — still `ended: true` from the
+		// teardown above — so `connectAndPin`'s stale-guard would close this brand-new bridge the
+		// instant its `hello` arrived, and the binding would stick at "connecting" forever even though
+		// `startCall` itself returns `ok: true`.
+		const second = await coordinator.startCall("room-1", { ownerActorId: "operator" });
+		expect(second.ok).toBe(true);
+		await waitFor(() => coordinator.state("room-1")!.state === "live");
+		expect(coordinator.state("room-1")!.state).toBe("live"); // not stuck at "connecting"
 		coordinator.stop();
 	});
 
@@ -470,5 +617,232 @@ describe("endCall", () => {
 		const decisionCards = cards.filter((c) => c.kind === "voice-decision");
 		expect(decisionCards.map((c) => (c.payload as { face: { decisionState: string } }).face.decisionState)).toEqual(["open", "expired"]);
 		coordinator.stop();
+	});
+});
+
+describe("CRITICAL 3 — retention delivered end-to-end, sessionRoot reconciliation", () => {
+	test("the binding's retention reaches the broker's createCall as `retention`", async () => {
+		const stateDir = tmpDir("voice-mgr-state-");
+		const journalDir = tmpDir("voice-mgr-journal-");
+		cleanups.push(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(journalDir, { recursive: true, force: true }); });
+		const bridge = startFakeBridge("live-abc");
+		cleanups.push(bridge.stop);
+		const broker = new ScriptedBroker(journalDir, bridge);
+		const cards: EmitCardInput[] = [];
+		const coordinator = makeCoordinator({ stateDir, broker, cards });
+		await coordinator.startCall("room-1", { ownerActorId: "operator", retention: "tails" });
+		expect(broker.createCallOpts).toEqual([{ resume: undefined, retention: "tails" }]);
+		coordinator.stop();
+	});
+
+	test("the daemon-side default retention ('full') reaches the broker too, not just an explicit choice", async () => {
+		const stateDir = tmpDir("voice-mgr-state-");
+		const journalDir = tmpDir("voice-mgr-journal-");
+		cleanups.push(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(journalDir, { recursive: true, force: true }); });
+		const bridge = startFakeBridge("live-abc");
+		cleanups.push(bridge.stop);
+		const broker = new ScriptedBroker(journalDir, bridge);
+		const cards: EmitCardInput[] = [];
+		const coordinator = makeCoordinator({ stateDir, broker, cards });
+		await coordinator.startCall("room-1", { ownerActorId: "operator" }); // no retention specified
+		expect(broker.createCallOpts[0]!.retention).toBe("full");
+		coordinator.stop();
+	});
+
+	test("a recordingMode that agrees with the binding's retention leaves no mismatch", async () => {
+		const stateDir = tmpDir("voice-mgr-state-");
+		const journalDir = tmpDir("voice-mgr-journal-");
+		cleanups.push(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(journalDir, { recursive: true, force: true }); });
+		const bridge = startFakeBridge("live-abc", 0, "full");
+		cleanups.push(bridge.stop);
+		const broker = new ScriptedBroker(journalDir, bridge);
+		const cards: EmitCardInput[] = [];
+		const coordinator = makeCoordinator({ stateDir, broker, cards });
+		await coordinator.startCall("room-1", { ownerActorId: "operator", retention: "full" });
+		expect(coordinator.state("room-1")!.retentionMismatch).toBeUndefined();
+		coordinator.stop();
+	});
+
+	test("a recordingMode that disagrees with the binding's retention surfaces honestly on the binding and the live card", async () => {
+		const stateDir = tmpDir("voice-mgr-state-");
+		const journalDir = tmpDir("voice-mgr-journal-");
+		cleanups.push(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(journalDir, { recursive: true, force: true }); });
+		// The room asked for "full" but the session reports "tails" — a broker that ignored (or
+		// mis-mapped) the request, or a stale build. Never a silent accept.
+		const bridge = startFakeBridge("live-abc", 0, "tails");
+		cleanups.push(bridge.stop);
+		const broker = new ScriptedBroker(journalDir, bridge);
+		const cards: EmitCardInput[] = [];
+		const coordinator = makeCoordinator({ stateDir, broker, cards });
+		await coordinator.startCall("room-1", { ownerActorId: "operator", retention: "full" });
+		const binding = coordinator.state("room-1")!;
+		expect(binding.retentionMismatch).toEqual({ expected: "full", reported: "tails" });
+
+		const liveCards = cards.filter((c) => c.kind === "voice-call" && (c.payload as { face: { state: string } }).face.state === "live");
+		expect(liveCards.length).toBeGreaterThan(0);
+		const detail = (liveCards[liveCards.length - 1]!.payload as { face: { detail?: string } }).face.detail;
+		expect(detail).toBe('Recording mode mismatch: the room asked for "full", the session reports "tails".');
+		coordinator.stop();
+	});
+
+	test("an absent recordingMode (an older bridge build) is never treated as a mismatch", async () => {
+		const stateDir = tmpDir("voice-mgr-state-");
+		const journalDir = tmpDir("voice-mgr-journal-");
+		cleanups.push(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(journalDir, { recursive: true, force: true }); });
+		const bridge = startFakeBridge("live-abc"); // no recordingMode in its hello frame at all
+		cleanups.push(bridge.stop);
+		const broker = new ScriptedBroker(journalDir, bridge);
+		const cards: EmitCardInput[] = [];
+		const coordinator = makeCoordinator({ stateDir, broker, cards });
+		await coordinator.startCall("room-1", { ownerActorId: "operator", retention: "off" });
+		expect(coordinator.state("room-1")!.retentionMismatch).toBeUndefined();
+		coordinator.stop();
+	});
+
+	test("sessionRoot: the broker's own answer is preferred over the daemon's default guess", async () => {
+		const stateDir = tmpDir("voice-mgr-state-");
+		const journalDir = tmpDir("voice-mgr-journal-");
+		const brokerRoot = tmpDir("voice-mgr-broker-root-");
+		cleanups.push(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(journalDir, { recursive: true, force: true }); rmSync(brokerRoot, { recursive: true, force: true }); });
+		const bridge = startFakeBridge("live-abc");
+		cleanups.push(bridge.stop);
+		const broker = new ScriptedBroker(journalDir, bridge);
+		broker.sessionRoot = brokerRoot;
+		const cards: EmitCardInput[] = [];
+		const coordinator = makeCoordinator({ stateDir, broker, cards });
+		await coordinator.startCall("room-1", { ownerActorId: "operator" }); // no client override at all
+		expect(coordinator.state("room-1")!.sessionRoot).toBe(brokerRoot);
+		coordinator.stop();
+	});
+
+	test("sessionRoot: a client override outside the broker's root is dropped in favor of the broker's root", async () => {
+		const stateDir = tmpDir("voice-mgr-state-");
+		const journalDir = tmpDir("voice-mgr-journal-");
+		const brokerRoot = tmpDir("voice-mgr-broker-root-");
+		const outsideRoot = tmpDir("voice-mgr-outside-root-"); // exists, absolute, but NOT beneath brokerRoot
+		cleanups.push(() => {
+			rmSync(stateDir, { recursive: true, force: true });
+			rmSync(journalDir, { recursive: true, force: true });
+			rmSync(brokerRoot, { recursive: true, force: true });
+			rmSync(outsideRoot, { recursive: true, force: true });
+		});
+		const bridge = startFakeBridge("live-abc");
+		cleanups.push(bridge.stop);
+		const broker = new ScriptedBroker(journalDir, bridge);
+		broker.sessionRoot = brokerRoot;
+		const cards: EmitCardInput[] = [];
+		const coordinator = makeCoordinator({ stateDir, broker, cards });
+		await coordinator.startCall("room-1", { ownerActorId: "operator", sessionRoot: outsideRoot });
+		expect(coordinator.state("room-1")!.sessionRoot).toBe(brokerRoot); // the override never wins
+		coordinator.stop();
+	});
+
+	test("sessionRoot: a client override contained WITHIN the broker's root is accepted", async () => {
+		const stateDir = tmpDir("voice-mgr-state-");
+		const journalDir = tmpDir("voice-mgr-journal-");
+		const brokerRoot = tmpDir("voice-mgr-broker-root-");
+		const insideRoot = path.join(brokerRoot, "nested");
+		mkdirSync(insideRoot);
+		cleanups.push(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(journalDir, { recursive: true, force: true }); rmSync(brokerRoot, { recursive: true, force: true }); });
+		const bridge = startFakeBridge("live-abc");
+		cleanups.push(bridge.stop);
+		const broker = new ScriptedBroker(journalDir, bridge);
+		broker.sessionRoot = brokerRoot;
+		const cards: EmitCardInput[] = [];
+		const coordinator = makeCoordinator({ stateDir, broker, cards });
+		await coordinator.startCall("room-1", { ownerActorId: "operator", sessionRoot: insideRoot });
+		expect(coordinator.state("room-1")!.sessionRoot).toBe(insideRoot);
+		coordinator.stop();
+	});
+});
+
+describe("resolveEffectiveSessionRoot (pure reconciliation logic)", () => {
+	const noopLog = () => {};
+
+	test("no override at all → the broker's root", async () => {
+		expect(await resolveEffectiveSessionRoot(undefined, "/some/broker/root", noopLog)).toBe("/some/broker/root");
+	});
+
+	test("no override, no broker root → process.cwd()", async () => {
+		expect(await resolveEffectiveSessionRoot(undefined, undefined, noopLog)).toBe(process.cwd());
+	});
+
+	test("a non-absolute override is dropped", async () => {
+		expect(await resolveEffectiveSessionRoot("relative/path", "/some/broker/root", noopLog)).toBe("/some/broker/root");
+	});
+
+	test("an absolute override that does not exist is dropped, even with no broker root to check containment against", async () => {
+		expect(await resolveEffectiveSessionRoot("/definitely/does/not/exist/xyz", undefined, noopLog)).toBe(process.cwd());
+	});
+
+	test("an absolute, existing override with NO broker root to check containment against is accepted", async () => {
+		const dir = tmpDir("voice-mgr-resolve-root-");
+		try {
+			expect(await resolveEffectiveSessionRoot(dir, undefined, noopLog)).toBe(dir);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("an override contained within the broker's root is accepted", async () => {
+		const root = tmpDir("voice-mgr-resolve-root-");
+		const nested = path.join(root, "nested");
+		mkdirSync(nested);
+		try {
+			expect(await resolveEffectiveSessionRoot(nested, root, noopLog)).toBe(nested);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test("an override OUTSIDE the broker's root is dropped in favor of the broker's root", async () => {
+		const root = tmpDir("voice-mgr-resolve-root-");
+		const outside = tmpDir("voice-mgr-resolve-outside-");
+		try {
+			expect(await resolveEffectiveSessionRoot(outside, root, noopLog)).toBe(root);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+			rmSync(outside, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("httpBrokerClient: the wire request the real broker actually receives", () => {
+	test("createCall's `retention` option becomes the POST body's `recording` field", async () => {
+		let receivedBody: unknown;
+		const server = Bun.serve({
+			port: 0,
+			hostname: "127.0.0.1",
+			async fetch(req) {
+				receivedBody = await req.json();
+				return new Response(JSON.stringify({ callId: "c1", port: 1, bridgeUrl: "ws://127.0.0.1:1", journalPath: "/tmp/x.jsonl", startedAt: Date.now(), exit: null, controlToken: "tok" }), { headers: { "content-type": "application/json" } });
+			},
+		});
+		try {
+			const client = httpBrokerClient(`http://127.0.0.1:${server.port}`);
+			await client.createCall({ resume: "sess-1", retention: "tails" });
+			expect(receivedBody).toEqual({ resume: "sess-1", recording: "tails" });
+		} finally {
+			server.stop(true);
+		}
+	});
+
+	test("no retention specified ⇒ the body's `recording` field is undefined, matching the broker's own optional-field contract", async () => {
+		let receivedBody: unknown;
+		const server = Bun.serve({
+			port: 0,
+			hostname: "127.0.0.1",
+			async fetch(req) {
+				receivedBody = await req.json();
+				return new Response(JSON.stringify({ callId: "c1", port: 1, bridgeUrl: "ws://127.0.0.1:1", journalPath: "/tmp/x.jsonl", startedAt: Date.now(), exit: null, controlToken: "tok" }), { headers: { "content-type": "application/json" } });
+			},
+		});
+		try {
+			const client = httpBrokerClient(`http://127.0.0.1:${server.port}`);
+			await client.createCall();
+			expect((receivedBody as Record<string, unknown>).recording).toBeUndefined();
+		} finally {
+			server.stop(true);
+		}
 	});
 });
