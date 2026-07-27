@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { askedAgainLine, cardUnitId, buildChannelThreadViews, channelCardActionHref, dispatchChannelCard, doorLabel, foldRepeatedAsks, groupLifecycleRuns, latestChannelSeq, pinnedChip, reduceChannelEntryWindow } from './channelTimeline';
+import { askedAgainLine, cardUnitId, buildChannelThreadViews, channelCardActionHref, dispatchChannelCard, doorLabel, faceFromPayload, foldRepeatedAsks, groupLifecycleRuns, latestChannelSeq, pinnedChip, reduceChannelEntryWindow } from './channelTimeline';
 import type { ChannelEntry } from './dto';
 import { entryTimeLabel } from './hub';
 
@@ -140,6 +140,94 @@ describe('channel timeline dispatch', () => {
   });
 });
 
+describe('return-emit and design-revised cards', () => {
+  // Fixture shapes mirror the real emit sites: return-emit from
+  // squad-manager.ts appendCommandReturnEmit (~line 7318) and design-revised
+  // from squad-manager.ts emitDesignRevisedCard (~line 3445). Both kinds
+  // regressed to "This room event is from a newer daemon" boilerplate
+  // because the webapp registry never learned them — see concern 06.
+  test('return-emit renders the room echo face and opens the intervene door for its unit', () => {
+    const card = dispatchChannelCard(entry({
+      id: 'return-1',
+      seq: 10,
+      text: 'operator steered room-42: do the thing',
+      event: {
+        kind: 'return-emit',
+        payload: {
+          refs: { unitId: 'room-42' },
+          doorSurface: 'intervence',
+          face: {
+            unitId: 'room-42',
+            unitName: 'Room 42',
+            eventKind: 'return-emit',
+            title: 'Control accepted',
+            eyebrow: 'Room echo',
+            body: 'operator steered room-42: do the thing',
+            tone: 'info',
+            pinned: { actor: 'operator', action: 'steer', target: 'Room 42' },
+          },
+          actor: 'operator',
+          action: 'steer',
+          target: 'room-42',
+          source: 'mention',
+        },
+      },
+    }));
+    expect(card.kind).toBe('return-emit');
+    expect(card.title).toBe('Control accepted');
+    expect(card.body).toBe('operator steered room-42: do the thing');
+    expect(card.href).toBe('#/intervene/room-42');
+    expect(doorLabel(card.kind)).toBe('Step into the agent');
+  });
+
+  test('design-revised renders the plan-saved face and opens the plan DAG door for its plan', () => {
+    const card = dispatchChannelCard(entry({
+      id: 'design-1',
+      seq: 11,
+      text: 'design revised · voice-orchestrated-room-integration · Harden the timeline-card kind registry · status → done',
+      event: {
+        kind: 'design-revised',
+        payload: {
+          refs: { planId: 'feat-9', planPath: 'plans/voice-orchestrated-room-integration/06-card-registry-hardening.md', unitId: 'room-42' },
+          doorSurface: 'plan',
+          face: {
+            unitId: 'room-42',
+            unitName: 'Room 42',
+            eventKind: 'design-revised',
+            title: 'Design revised',
+            eyebrow: 'Plan saved',
+            body: 'Harden the timeline-card kind registry: status → done',
+            detail: 'plans/voice-orchestrated-room-integration/06-card-registry-hardening.md',
+            tone: 'info',
+            planName: 'voice-orchestrated-room-integration',
+            pinned: { actor: 'operator', concern: '06-card-registry-hardening.md', status: 'done' },
+          },
+          actor: 'operator',
+          featureId: 'feat-9',
+          planPath: 'plans/voice-orchestrated-room-integration/06-card-registry-hardening.md',
+          planName: 'voice-orchestrated-room-integration',
+          changed: 'status → done',
+        },
+      },
+    }));
+    expect(card.kind).toBe('design-revised');
+    expect(card.title).toBe('Design revised');
+    expect(card.body).toBe('Harden the timeline-card kind registry: status → done');
+    expect(card.href).toBe('#/workbench/task/feat-9');
+    expect(doorLabel(card.kind)).toBe('Open plan DAG');
+  });
+
+  test('an unmapped kind still falls back to unknown-event without throwing', () => {
+    const build = () => dispatchChannelCard(entry({
+      id: 'voice-call',
+      seq: 12,
+      event: { kind: 'voice-call', payload: { refs: { unitId: 'room-42' }, doorSurface: 'intervence', face: { title: 'Voice call started' } } },
+    }));
+    expect(build).not.toThrow();
+    expect(build().kind).toBe('unknown-event');
+  });
+});
+
 describe('unit lifecycle cards', () => {
   const kinds = ['unit-spawned', 'unit-turn-finished', 'unit-failed', 'pr-opened', 'verification-ran'] as const;
 
@@ -226,6 +314,59 @@ describe('card body de-duplication', () => {
       event: { kind: 'needs-you', payload: { face: { title: 'Needs you · run the gate', pinned: { 'why stopped': 'run the gate', agent: 'room-18' } } } },
     }));
     expect(card.pinned.map((item) => item.label)).toEqual(['Agent']);
+  });
+});
+
+describe('href sink closed (client-side, defense in depth)', () => {
+  test('faceFromPayload drops a javascript: or https: face.href, keeps a #/ route', () => {
+    expect(faceFromPayload({ face: { title: 'x', href: 'javascript:alert(1)' } })?.href).toBeUndefined();
+    expect(faceFromPayload({ face: { title: 'x', href: 'https://evil.example' } })?.href).toBeUndefined();
+    expect(faceFromPayload({ face: { title: 'x', href: '#/intervene/room-1' } })?.href).toBe('#/intervene/room-1');
+  });
+
+  test('a javascript: href injected past the daemon never reaches the anchor tag', () => {
+    const card = dispatchChannelCard(entry({
+      id: 'evil-href',
+      seq: 1,
+      event: { kind: 'mention-steer', payload: { face: { title: 'Mention steer accepted', href: 'javascript:alert(document.cookie)' } } },
+    }));
+    expect(card.href).toBeUndefined();
+  });
+
+  test('a top-level payload.href is dropped when unsafe, used when it is a #/ route', () => {
+    const bad = dispatchChannelCard(entry({ id: 'bad-top', seq: 1, event: { kind: 'plan-card', payload: { href: 'https://evil.example', doorSurface: 'plan', refs: {}, face: { title: 'x' } } } }));
+    expect(bad.href).toBeUndefined();
+    const good = dispatchChannelCard(entry({ id: 'good-top', seq: 2, event: { kind: 'plan-card', payload: { href: '#/intervene/x', face: { title: 'x' } } } }));
+    expect(good.href).toBe('#/intervene/x');
+  });
+});
+
+describe('register (reserved wire field, no styling)', () => {
+  test('faceFromPayload round-trips checked/claim/unverified', () => {
+    expect(faceFromPayload({ face: { title: 'x', register: 'checked' } })?.register).toBe('checked');
+    expect(faceFromPayload({ face: { title: 'x', register: 'claim' } })?.register).toBe('claim');
+    expect(faceFromPayload({ face: { title: 'x', register: 'unverified' } })?.register).toBe('unverified');
+  });
+
+  test('a bogus register value is dropped rather than passed through', () => {
+    expect(faceFromPayload({ face: { title: 'x', register: 'trust me' } })?.register).toBeUndefined();
+  });
+
+  test('an absent register renders identically to today: card rendering is unaffected', () => {
+    const withRegister = dispatchChannelCard(entry({
+      id: 'reg-1',
+      seq: 1,
+      event: { kind: 'needs-you', payload: { face: { title: 'Review gate', body: 'Approve the run', register: 'claim' } } },
+    }));
+    const without = dispatchChannelCard(entry({
+      id: 'reg-2',
+      seq: 2,
+      event: { kind: 'needs-you', payload: { face: { title: 'Review gate', body: 'Approve the run' } } },
+    }));
+    // No rendered field (tone/title/body/pinned/href) differs based on register — it carries no
+    // visual weight yet (see concern 07's addendum: the first emitter drives styling).
+    const strip = (card: typeof withRegister) => ({ ...card, id: undefined, entry: undefined });
+    expect(strip(withRegister)).toEqual(strip(without));
   });
 });
 

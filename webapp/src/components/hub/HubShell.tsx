@@ -22,6 +22,13 @@ const EMPTY_PRESENCE: PresenceSnapshot = { users: [] };
 const DEFAULT_CHANNEL: Channel = { id: DEFAULT_CHANNEL_ID, name: DEFAULT_CHANNEL_ID, kind: 'default', createdAt: 0, visibility: 'org-public', unreadCount: 0, lastReadSeq: 0 };
 const DEFAULT_MODELS: ModelOption[] = [{ value: '', label: 'Default model' }];
 
+/**
+ * Optimistic-UI pattern: mints a client-local card entry that never touches the daemon or the
+ * channel store — used for confirm/failure/proposal cards that need to render before (or instead
+ * of) a round trip. `kind` MUST carry the `local:` prefix (see LocalCardKind in channelTimeline.ts)
+ * so it can never collide with a daemon-emitted TranscriptEventKind, even one reserved for future
+ * use (e.g. `spawn-proposal`, reserved in transcript-event-kinds.ts for a future daemon reader).
+ */
 const managerCardEntry = (channelId: string, text: string, kind: string, payload: unknown): ChannelEntry => ({
   id: `local-card:${Date.now()}:${Math.random().toString(36).slice(2)}`,
   seq: Number.MAX_SAFE_INTEGER,
@@ -223,7 +230,7 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
         pendingMentionTurns.current.delete(ack.clientTurnId);
       } else {
         pendingMentionTurns.current.delete(ack.clientTurnId);
-        setEntries((prev) => reduceChannelEntries(prev, [managerCardEntry(pending.channelId, `Mention steer failed for ${pending.target}: ${ack.reason}`, 'mention-steer-failed', { face: { title: 'Mention steer failed', body: ack.reason, tone: 'destructive', pinned: { target: pending.target } }, ack })], activeChannelId));
+        setEntries((prev) => reduceChannelEntries(prev, [managerCardEntry(pending.channelId, `Mention steer failed for ${pending.target}: ${ack.reason}`, 'local:mention-steer-failed', { face: { title: 'Mention steer failed', body: ack.reason, tone: 'destructive', pinned: { target: pending.target } }, ack })], activeChannelId));
       }
     }
   }, [activeChannelId, commandAcks]);
@@ -312,9 +319,9 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
         const target = agents.find((item) => item.id === routeResult.target?.id);
         if (target) dispatchMentionSteer(target, routeResult.text || text);
       } else if (routeResult.kind === 'confirm' && routeResult.target) {
-        setEntries((prev) => reduceChannelEntries(prev, [managerCardEntry(activeChannelId, `Confirm before steering working agent @${routeResult.target?.label}.`, 'mention-confirm-required', { face: { title: 'Confirm steer', body: routeResult.text, detail: 'Target is already working; queue or confirm before delivery.', tone: 'warning', pinned: { target: routeResult.target?.label } }, target: routeResult.target, text: routeResult.text })], activeChannelId));
+        setEntries((prev) => reduceChannelEntries(prev, [managerCardEntry(activeChannelId, `Confirm before steering working agent @${routeResult.target?.label}.`, 'local:mention-confirm-required', { face: { title: 'Confirm steer', body: routeResult.text, detail: 'Target is already working; queue or confirm before delivery.', tone: 'warning', pinned: { target: routeResult.target?.label } }, target: routeResult.target, text: routeResult.text })], activeChannelId));
       } else if (routeResult.kind === 'spawn' && routeResult.target) {
-        setEntries((prev) => reduceChannelEntries(prev, [managerCardEntry(activeChannelId, `Spawn proposal for @${routeResult.target?.label}.`, 'spawn-proposal', { face: { title: 'Spawn proposed', body: routeResult.text, detail: 'Non-resident mention enters the existing /api/spawn flow with this channel attached.', tone: 'info', pinned: { target: routeResult.target?.label, channel: activeChannelId } }, target: routeResult.target, text: routeResult.text, channelId: activeChannelId })], activeChannelId));
+        setEntries((prev) => reduceChannelEntries(prev, [managerCardEntry(activeChannelId, `Spawn proposal for @${routeResult.target?.label}.`, 'local:spawn-proposal', { face: { title: 'Spawn proposed', body: routeResult.text, detail: 'Non-resident mention enters the existing /api/spawn flow with this channel attached.', tone: 'info', pinned: { target: routeResult.target?.label, channel: activeChannelId } }, target: routeResult.target, text: routeResult.text, channelId: activeChannelId })], activeChannelId));
       } else if (selectedAgent) {
         const sessionId = channelAgentSessionId(activeChannelId, selectedAgent.id);
         const clientTurnId = `hub-turn:${Date.now()}:${Math.random().toString(36).slice(2)}`;
