@@ -3950,6 +3950,25 @@ export class SquadManager extends EventEmitter {
 		return gateHealth(evaluations, reviews);
 	}
 
+	/**
+	 * What may reach a person who is not looking at the room — reported honestly, including the part
+	 * that is not built.
+	 *
+	 * `mayLeaveTheApp` is called by its own test and by nothing in production: no needs-you ever
+	 * consults this gate, and the only thing that leaves this app is the weekly brief. Reporting
+	 * `sent: 0` without saying so would be the worst kind of true — a reader would take it as a gate
+	 * that considered and declined, when it is a gate nothing asks. `wired` is what makes those two
+	 * distinguishable on screen.
+	 *
+	 * It is derived, not configured: `wired` is false because there is no call site, and it becomes
+	 * true by wiring one, not by editing a flag.
+	 */
+	interruptState(): { wired: boolean; leaves: string[]; recoveryDelayMs: number; health?: GateHealth } {
+		const leaves: string[] = [];
+		if (envBoolAliased("GLANCE_EPISODE", "OMP_SQUAD_EPISODE", true)) leaves.push("the weekly brief");
+		return { wired: false, leaves, recoveryDelayMs: RECOVERY_DELAY_MS };
+	}
+
 	/** How long the fleet gets to recover before anyone is interrupted. */
 	get recoveryDelayMs(): number {
 		return RECOVERY_DELAY_MS;

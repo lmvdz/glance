@@ -1,4 +1,5 @@
 import React, { useEffect } from 'react';
+import { ALL_THREE, CONDITIONS, calibrationLine, delaySentence, interruptHeadline, leavesSentence, unwiredNote, type InterruptState } from '../../lib/interruptSurface';
 
 /**
  * AutonomyPanel — the fleet's autonomy as a state you can read.
@@ -46,6 +47,50 @@ export interface AutonomyState {
   rules: AutonomyRule[];
   neverAlone: Array<{ class: string; because: string }>;
   proposals: AutonomyProposal[];
+  /** What may reach this person when they are not looking at the room. See `interruptSurface`. */
+  interrupt?: InterruptState;
+}
+
+/**
+ * WHEN THIS IS ALLOWED TO INTERRUPT YOU — `04-beyond`.
+ *
+ * It belongs beside what the fleet may settle, because they are the same question asked twice: what
+ * the product may do without you, and what it may pull you back for. A person reading one wants the
+ * other.
+ *
+ * Its first job is to say that the gate is not wired, when it is not. "0 sent" from an unwired gate
+ * and "0 sent" from a gate that considered and declined are the same number meaning opposite things,
+ * and only one of them means you can walk away safely.
+ */
+function Interrupt({ state }: { state: InterruptState }) {
+  const note = unwiredNote(state);
+  const calibration = calibrationLine(state.health);
+  return (
+    <div className="mt-6">
+      <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.14em', color: state.wired ? '#5A5A61' : '#C2704A' }}>
+        WHEN THIS IS ALLOWED TO INTERRUPT YOU
+      </div>
+      <div className="mt-2.5 text-[12.5px] leading-[1.55]" style={{ color: '#DEDEE2', textWrap: 'pretty' }}>{interruptHeadline(state)}</div>
+      {note ? <div className="mt-2 text-[12px] leading-[1.5]" style={{ color: '#8A8A91', textWrap: 'pretty' }}>{note}</div> : null}
+
+      <div className="mt-3.5 flex flex-col">
+        {CONDITIONS.map((entry, index) => (
+          <div key={entry.condition} className="flex gap-3 py-2" style={{ borderTop: '1px solid #17171A' }}>
+            <div className="flex-none pt-[1px]" style={{ fontFamily: MONO, fontSize: 10.5, color: '#5A5A61' }}>{index + 1}</div>
+            <div className="flex-1">
+              <div className="text-[12.5px]" style={{ color: '#DEDEE2' }}>{entry.condition}</div>
+              <div className="mt-[3px] text-[11.5px] leading-[1.45]" style={{ color: '#6A6A72', textWrap: 'pretty' }}>{entry.because}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="mt-2.5 text-[11.5px] leading-[1.5]" style={{ color: '#8A8A91', textWrap: 'pretty' }}>{ALL_THREE}</div>
+      <div className="mt-2 text-[11.5px] leading-[1.5]" style={{ color: '#6A6A72', textWrap: 'pretty' }}>{delaySentence(state.recoveryDelayMs)}</div>
+      <div className="mt-2 text-[11.5px] leading-[1.5]" style={{ color: '#6A6A72', textWrap: 'pretty' }}>{leavesSentence(state.leaves)}</div>
+      {/* A gate whose sends are never reviewed has no evidence it is calibrated. */}
+      {calibration ? <div className="mt-2 text-[11.5px] leading-[1.5]" style={{ color: '#8A6A45', textWrap: 'pretty' }}>{calibration}</div> : null}
+    </div>
+  );
 }
 
 function since(ms: number): string {
@@ -57,7 +102,7 @@ function since(ms: number): string {
 }
 
 export function AutonomyPanel({ state, onAccept, onClose }: { state: AutonomyState; onAccept?: (proposal: AutonomyProposal, sentence: string) => void; onClose?: () => void }) {
-  const { rules, neverAlone, proposals } = state;
+  const { rules, neverAlone, proposals, interrupt } = state;
   useEffect(() => {
     if (!onClose) return;
     const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose(); };
@@ -199,6 +244,8 @@ export function AutonomyPanel({ state, onAccept, onClose }: { state: AutonomySta
           settle one of these is refused when it is written, not when it is used.
         </div>
       </div>
+
+      {interrupt ? <Interrupt state={interrupt} /> : null}
     </div>
   );
 }
