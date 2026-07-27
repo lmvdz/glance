@@ -2,26 +2,24 @@ import { afterEach, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
   buildTranscriptRenderEntries,
-  ChatMessagesViewport,
   chatWidthFromClientX,
   clearEchoedPendingSends,
   deriveSuggestionChips,
   detectedPlanDirs,
   messageToTranscriptEntry,
-  normalizeAssistantSessions,
   partitionSessionMessages,
-  type Message,
-} from "./AssistantChat";
-import { AgentLandControls, AgentMetaBar } from "./chat/AgentMetaBar";
-import { Composer, ComposerSendButton } from "./chat/Composer";
-import { ComposerStats } from "./chat/AgentMetaBar";
-import { DiffReviewPanel } from "./chat/DiffReviewPanel";
-import { GateWidget } from "./chat/GateWidget";
-import { RunStatusHeader, TranscriptEntryView, TranscriptTimeline, runStatusLabel } from "./chat/TranscriptTimeline";
-import { TodoPanel } from "./chat/TodoPanel";
-import { ScrollToLatestPill } from "./chat/ScrollToLatestPill";
-import type { AgentDTO, PendingRequest, TodoPhaseDTO, TranscriptEntry } from "../lib/dto";
-import { COMPOSER_DRAFTS_KEY } from "../lib/chat/draftStore";
+} from "./transcriptModel";
+import { normalizeAssistantSessions, type Message } from "./sessionStore";
+import { AgentLandControls, AgentMetaBar } from "../../components/chat/AgentMetaBar";
+import { Composer, ComposerSendButton } from "../../components/chat/Composer";
+import { ComposerStats } from "../../components/chat/AgentMetaBar";
+import { DiffReviewPanel } from "../../components/chat/DiffReviewPanel";
+import { GateWidget } from "../../components/chat/GateWidget";
+import { RunStatusHeader, TranscriptEntryView, TranscriptTimeline, runStatusLabel } from "../../components/chat/TranscriptTimeline";
+import { TodoPanel } from "../../components/chat/TodoPanel";
+import { ScrollToLatestPill } from "../../components/chat/ScrollToLatestPill";
+import type { AgentDTO, PendingRequest, TodoPhaseDTO, TranscriptEntry } from "../dto";
+import { COMPOSER_DRAFTS_KEY } from "./draftStore";
 
 const originalWindow = (globalThis as any).window;
 
@@ -450,68 +448,11 @@ test("ComposerSendButton's own rendered subtree carries no attach/mic decoration
   expect(html).not.toContain('aria-label="Voice input"');
 });
 
-test("ChatMessagesViewport's scroll container is an announced log region, aria-busy while a real transcript entry is running, while a send is loading, or while a pendingSend is in flight (review finding 2 — these are computed separately from the work-fold's own running)", () => {
-  const runningEntries: TranscriptEntry[] = [{ id: "e1", kind: "assistant", text: "working…", ts: 1, status: "running" }];
-  const settledEntries: TranscriptEntry[] = [{ id: "e2", kind: "assistant", text: "done", ts: 1, status: "ok" }];
-
-  const running = renderToStaticMarkup(
-    <ChatMessagesViewport
-      entries={runningEntries}
-      transcriptEntries={runningEntries}
-      agentDiffs={[]}
-      workExpanded={false}
-      onToggleWork={() => {}}
-      isLoading={false}
-    />,
-  );
-  expect(running).toContain('role="log"');
-  expect(running).toContain('aria-live="polite"');
-  expect(running).toContain('aria-busy="true"');
-  expect(running).toContain('tabindex="0"');
-
-  const settled = renderToStaticMarkup(
-    <ChatMessagesViewport
-      entries={settledEntries}
-      transcriptEntries={settledEntries}
-      agentDiffs={[]}
-      workExpanded={false}
-      onToggleWork={() => {}}
-      isLoading={false}
-    />,
-  );
-  expect(settled).toContain('aria-busy="false"');
-
-  // isLoading (the brief agent-creation await) makes the log busy even though the real
-  // transcript hasn't produced anything running yet.
-  const loading = renderToStaticMarkup(
-    <ChatMessagesViewport
-      entries={settledEntries}
-      transcriptEntries={settledEntries}
-      agentDiffs={[]}
-      workExpanded={false}
-      onToggleWork={() => {}}
-      isLoading
-    />,
-  );
-  expect(loading).toContain('aria-busy="true"');
-
-  // A running pendingSend (still in flight, not yet echoed) also makes the log busy — but,
-  // critically, it must NOT be part of `transcriptEntries`/`entries` (that would let it
-  // corrupt the work-fold's own running calc — see the TranscriptTimeline-level test below).
-  const pendingInFlight: TranscriptEntry[] = [{ id: "pending:s1:turn-a", kind: "user", text: "sending…", ts: 2, status: "running", clientTurnId: "turn-a" }];
-  const sending = renderToStaticMarkup(
-    <ChatMessagesViewport
-      entries={settledEntries}
-      transcriptEntries={settledEntries}
-      trailingEntries={pendingInFlight}
-      agentDiffs={[]}
-      workExpanded={false}
-      onToggleWork={() => {}}
-      isLoading={false}
-    />,
-  );
-  expect(sending).toContain('aria-busy="true"');
-});
+// The ChatMessagesViewport aria-busy test went with the component. It covered the assistant dock's
+// own scroll container, which this application stopped mounting when the room replaced it; the room's
+// timeline (ChannelTimeline) has its own tests. The distinction it protected — that "a run is in
+// progress" is computed separately from the work-fold's own notion of running — lives on in
+// buildTranscriptRenderEntries, which is still tested below.
 
 test("each transcript entry is wrapped in an <article> naming its sender", () => {
   const entries: TranscriptEntry[] = [
