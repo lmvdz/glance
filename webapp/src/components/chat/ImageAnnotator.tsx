@@ -187,7 +187,7 @@ export const AnnotationToolbar = ({
         aria-label="Undo last annotation"
         disabled={!canUndo}
         onClick={onUndo}
-        className="flex h-8 w-8 items-center justify-center rounded-full text-ink-text0 hover:bg-ink-surface disabled:opacity-30 text-ink-text-subtle dark:hover:bg-ink-surface"
+        className="flex h-8 w-8 items-center justify-center rounded-full text-ink-text hover:bg-ink-surface disabled:opacity-30 text-ink-text-subtle dark:hover:bg-ink-surface"
       >
         <Undo2 className="h-3.5 w-3.5" aria-hidden />
       </button>
@@ -195,7 +195,7 @@ export const AnnotationToolbar = ({
         <button
           type="button"
           onClick={onClear}
-          className="text-caption font-medium text-ink-text0 hover:text-ink-text-body hover:underline text-ink-text-subtle dark:hover:text-ink-text-body"
+          className="text-caption font-medium text-ink-text hover:text-ink-text-body hover:underline text-ink-text-subtle dark:hover:text-ink-text-body"
         >
           Clear all
         </button>
@@ -368,7 +368,7 @@ export const ImageAnnotator = ({ image, initialAnnotations, onDone, onCancel }: 
               })()}
           </div>
         </div>
-        <div className="border-t border-ink-border px-3 py-1.5 text-caption text-ink-text0 border-ink-border text-ink-text0">
+        <div className="border-t border-ink-border px-3 py-1.5 text-caption text-ink-text border-ink-border text-ink-text">
           {isFlattening ? 'Flattening annotations…' : `${annotations.length} annotation${annotations.length === 1 ? '' : 's'} — box to mark an area, pin to leave a note`}
         </div>
       </div>

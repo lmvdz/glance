@@ -122,7 +122,7 @@ export const ToolCallRow = ({ entry, stampChatMessage = true }: { entry: Transcr
           )}
           {view.raw.length > 0 && (
             <details className="group/raw ml-8">
-              <summary className="inline-flex min-h-7 cursor-pointer list-none items-center gap-1.5 rounded px-1.5 text-caption text-ink-text-subtle hover:bg-ink-surface focus-visible:ring-2 focus-visible:ring-amber-500 text-ink-text0 dark:hover:bg-panel">
+              <summary className="inline-flex min-h-7 cursor-pointer list-none items-center gap-1.5 rounded px-1.5 text-caption text-ink-text-subtle hover:bg-ink-surface focus-visible:ring-2 focus-visible:ring-amber-500 text-ink-text dark:hover:bg-panel">
                 <ChevronRight className="h-3 w-3 transition-transform group-open/raw:rotate-90" aria-hidden />
                 Raw payload
               </summary>
@@ -241,7 +241,7 @@ export const ToolCallGroup = ({ entries }: { entries: TranscriptEntry[] }) => {
               toggle();
             }
           }}
-          className="mb-0.5 flex min-h-6 cursor-pointer select-none items-center gap-1.5 rounded px-1.5 text-caption text-ink-text-subtle hover:bg-ink-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 text-ink-text0 dark:hover:bg-panel"
+          className="mb-0.5 flex min-h-6 cursor-pointer select-none items-center gap-1.5 rounded px-1.5 text-caption text-ink-text-subtle hover:bg-ink-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 text-ink-text dark:hover:bg-panel"
         >
           <ChevronRight className={`h-3 w-3 flex-shrink-0 transition-transform ${expanded ? 'rotate-90' : ''}`} aria-hidden />
           {expanded ? 'Hide previous steps' : `${previousEntries.length} previous ${previousEntries.length === 1 ? 'step' : 'steps'}`}

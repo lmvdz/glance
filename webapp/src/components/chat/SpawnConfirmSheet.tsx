@@ -97,7 +97,7 @@ export const SpawnConfirmSheet: React.FC<SpawnConfirmSheetProps> = ({ promptSeed
             </details>
           )}
 
-          <div className="rounded-lg border border-dashed border-ink-border-2 p-2 text-caption text-ink-text0 border-ink-border-2 text-ink-text-subtle">
+          <div className="rounded-lg border border-dashed border-ink-border-2 p-2 text-caption text-ink-text border-ink-border-2 text-ink-text-subtle">
             {SPAWN_CONTRACT_LINE}
           </div>
 

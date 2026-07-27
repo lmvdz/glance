@@ -324,7 +324,7 @@ export const ComposerSendButton = ({
         disabled={stopPending}
         className={`flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full transition-colors ${
           stopPending
-            ? 'bg-ink-border text-ink-text-subtle bg-ink-surface text-ink-text0'
+            ? 'bg-ink-border text-ink-text-subtle bg-ink-surface text-ink-text'
             : 'bg-panel text-white hover:bg-black bg-ink-border text-ink-text dark:hover:bg-white'
         }`}
       >
@@ -341,7 +341,7 @@ export const ComposerSendButton = ({
       className={`flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full transition-colors ${
         canSend
           ? 'bg-panel text-white hover:bg-black bg-ink-border text-ink-text dark:hover:bg-white'
-          : 'bg-ink-border text-ink-text-subtle bg-ink-surface text-ink-text0'
+          : 'bg-ink-border text-ink-text-subtle bg-ink-surface text-ink-text'
       }`}
     >
       <ArrowUp className="h-4 w-4" aria-hidden />
@@ -905,7 +905,7 @@ export const Composer = ({
               setInput((prev) => applySuggestionChip(prev, suggestion.prompt));
               composerTextareaRef.current?.focus();
             }}
-            className="flex min-h-8 items-center gap-1.5 rounded-full border border-ink-border bg-ink-surface px-2.5 py-1 text-caption font-medium text-ink-text-label transition-colors whitespace-nowrap hover:bg-ink-border focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 border-ink-border bg-panel text-ink-text-label dark:hover:bg-ink-surface dark:focus-visible:ring-offset-gray-950"
+            className="flex min-h-8 items-center gap-1.5 rounded-full border border-ink-border bg-ink-surface px-2.5 py-1 text-caption font-medium text-ink-text-label transition-colors whitespace-nowrap hover:bg-ink-border focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 border-ink-border bg-panel text-ink-text-label dark:hover:bg-ink-surface focus-visible:ring-offset-ink"
           >
             {index === 0 && <Sparkles className="h-3.5 w-3.5 text-amber-500 dark:text-amber-400" aria-hidden />}
             {suggestion.label}
@@ -937,7 +937,7 @@ export const Composer = ({
             aria-label="Mention an agent or issue"
             className="absolute bottom-full left-0 mb-2 w-full max-h-48 overflow-y-auto bg-panel border border-ink-border rounded-xl shadow-lg z-50"
           >
-            <div className="p-2 text-xs font-medium text-ink-text0 border-b border-ink-border">
+            <div className="p-2 text-xs font-medium text-ink-text border-b border-ink-border">
               Mention an agent or issue
             </div>
             {/* `mentionMenu.isOpen` is only true when there's at least one match — a
@@ -1049,7 +1049,7 @@ export const Composer = ({
               aria-label="Attach image"
               title="Attach image"
               onClick={() => fileInputRef.current?.click()}
-              className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-ink-text0 hover:bg-ink-surface text-ink-text-subtle dark:hover:bg-ink-surface"
+              className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-ink-text hover:bg-ink-surface text-ink-text-subtle dark:hover:bg-ink-surface"
             >
               <ImagePlus className="h-4 w-4" aria-hidden />
             </button>
@@ -1059,7 +1059,7 @@ export const Composer = ({
               title="Capture view"
               disabled={isCapturing}
               onClick={() => void handleCaptureView()}
-              className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-ink-text0 hover:bg-ink-surface disabled:opacity-40 text-ink-text-subtle dark:hover:bg-ink-surface"
+              className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-ink-text hover:bg-ink-surface disabled:opacity-40 text-ink-text-subtle dark:hover:bg-ink-surface"
             >
               {isCapturing ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Camera className="h-4 w-4" aria-hidden />}
             </button>
@@ -1078,7 +1078,7 @@ export const Composer = ({
               className={`flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full transition-colors disabled:opacity-40 ${
                 isListening
                   ? 'bg-red-100 text-red-500 dark:bg-red-900/30'
-                  : 'text-ink-text0 hover:bg-ink-surface text-ink-text-subtle dark:hover:bg-ink-surface'
+                  : 'text-ink-text hover:bg-ink-surface text-ink-text-subtle dark:hover:bg-ink-surface'
               }`}
             >
               <Mic className="h-4 w-4" aria-hidden />
@@ -1092,7 +1092,7 @@ export const Composer = ({
                 aria-expanded={grrOpen}
                 onClick={() => (grrOpen ? closeGrr() : setGrrOpen(true))}
                 className={`flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full transition-colors ${
-                  grrOpen ? 'bg-amber-100 text-amber-600 dark:bg-amber-500/20 dark:text-amber-400' : 'text-ink-text0 hover:bg-ink-surface text-ink-text-subtle dark:hover:bg-ink-surface'
+                  grrOpen ? 'bg-amber-100 text-amber-600 dark:bg-amber-500/20 dark:text-amber-400' : 'text-ink-text hover:bg-ink-surface text-ink-text-subtle dark:hover:bg-ink-surface'
                 }`}
               >
                 <Frown className="h-4 w-4" aria-hidden />

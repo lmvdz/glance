@@ -18,7 +18,7 @@ export const SpawnProposalCard = ({ onPropose }: { onPropose: () => void }) => (
     <button
       type="button"
       onClick={onPropose}
-      className="flex flex-shrink-0 items-center gap-1.5 rounded-full bg-amber-600 px-3 py-1.5 text-caption font-semibold text-white transition-colors hover:bg-amber-700 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 dark:bg-amber-500 text-ink-text dark:hover:bg-amber-400 dark:focus-visible:ring-offset-gray-950"
+      className="flex flex-shrink-0 items-center gap-1.5 rounded-full bg-amber-600 px-3 py-1.5 text-caption font-semibold text-white transition-colors hover:bg-amber-700 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 dark:bg-amber-500 text-ink-text dark:hover:bg-amber-400 focus-visible:ring-offset-ink"
     >
       <Rocket className="h-3.5 w-3.5" aria-hidden />
       Spawn a unit to build this.
