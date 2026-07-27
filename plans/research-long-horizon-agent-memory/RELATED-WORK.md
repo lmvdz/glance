@@ -154,6 +154,19 @@ pure BM25 top-6 with no pinned region, so constraints/failure-warnings compete w
 chatter — the position's own "state, never score" rule unapplied at its most consequential
 injection point. Filed as the next code unit in the fabric lane — **LANDED 2026-07-27** (PR #293, region-partitioned primer: pinned failures never evicted, pinned current decisions, ranked episodic remainder; blind review found and closed a cap bypass).
 
+## Late addition (2026-07-27): mnemosyne, compared fresh-context
+
+Full brief: [../research-mnemosyne/BRIEF.md](../research-mnemosyne/BRIEF.md) (scout cloned
+33540d2, 1,870-star shipping OSS memory library). Three things it gives this lane: independent
+supersession-field convergence (supports the two-fields minimalism claim); a shipping instance of
+the ungated-write + accretive-summary design whose own benchmark breakdown (CR 50 / KU 50 / EO
+25% at 100K) lands where the position predicts; and one directly borrowable battle-tested
+pattern — claim-before-write orphan tolerance in its sleep() path — filed as the reference read
+for C3/E_orphan's abnormal-exit sweep. Its honest counterweight: they have 58 contributors of
+adversarial integration scar tissue and external benchmark participation; we have design
+argument, seam tests, and n=12 probes. Priority nudge accepted: run LongMemEval's mapped subsets
+once calibration exists, not "when convenient".
+
 ## What the sweep says about the position
 
 1. **No refutation found of the core thesis.** No widely-adopted flat-vector memory system is held
