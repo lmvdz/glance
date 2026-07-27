@@ -7,8 +7,44 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { LocalStorageBackend, setStorageBackend, type StorageBackend } from "../src/dal/storage.ts";
 import { CallProjectionStore, type EmitVoiceDecisionCardInput } from "../src/voice-call-projection.ts";
 import type { JournalEnvelope } from "../src/voice-call-journal.ts";
+
+/** Wraps a real `LocalStorageBackend` but fails ONLY `appendDurable` — the transcript-append write
+ *  path — everything else (the projection state file's own sync writes/reads) behaves normally.
+ *  Matches `tests/gate-logs.test.ts`'s `FailingBackend`/`CountingBackend` fault-injection precedent. */
+class AppendFailingBackend implements StorageBackend {
+	readonly name = "append-failing";
+	private readonly inner = new LocalStorageBackend();
+	writeDurable(file: string, data: string, opts?: { mode?: number }): Promise<void> {
+		return this.inner.writeDurable(file, data, opts);
+	}
+	writeDurableSync(file: string, data: string, opts?: { mode?: number }): void {
+		this.inner.writeDurableSync(file, data, opts);
+	}
+	async appendDurable(): Promise<void> {
+		throw new Error("disk full");
+	}
+	readText(file: string): Promise<string | undefined> {
+		return this.inner.readText(file);
+	}
+	readTextSync(file: string): string | undefined {
+		return this.inner.readTextSync(file);
+	}
+	readdir(dir: string): Promise<string[]> {
+		return this.inner.readdir(dir);
+	}
+	remove(target: string): Promise<void> {
+		return this.inner.remove(target);
+	}
+	mkdir(dir: string): Promise<void> {
+		return this.inner.mkdir(dir);
+	}
+	exists(file: string): boolean {
+		return this.inner.exists(file);
+	}
+}
 
 let dir: string;
 beforeEach(() => {
@@ -130,6 +166,44 @@ describe("visible journal gap marker", () => {
 	test("no gap is recorded for the first envelope ever seen (no prior cursor to compare against)", async () => {
 		const store = new CallProjectionStore(dir);
 		await store.applyEnvelope("room-1", "call-1", decisionEnvelope(7, { id: "d1", state: "open" }), "full");
+		expect(store.gaps("room-1")).toHaveLength(0);
+	});
+});
+
+describe("a failed transcript append never silently loses the turn", () => {
+	afterEach(() => {
+		setStorageBackend(new LocalStorageBackend()); // never leak the fault-injecting backend into another suite
+	});
+
+	test("the durable cursor does NOT advance on append failure — the same envelope re-delivered (idempotent re-tail) is a genuine retry, not a duplicate no-op", async () => {
+		setStorageBackend(new AppendFailingBackend());
+		const store = new CallProjectionStore(dir);
+		const envelope = transcriptEnvelope(0, 0, "user", "check the auth module");
+		const failed = await store.applyEnvelope("room-1", "call-1", envelope, "full");
+		expect(failed.status).toBe("transcript-append-failed");
+
+		// A restarted tailer re-tailing from byte 0 (this class's own documented idempotent-re-tail
+		// contract) delivers the EXACT SAME envelope again. If the cursor had wrongly advanced on the
+		// failed attempt, this would read "duplicate" and the turn would be gone for good.
+		setStorageBackend(new LocalStorageBackend());
+		const retried = await store.applyEnvelope("room-1", "call-1", envelope, "full");
+		expect(retried.status).toBe("applied-transcript");
+
+		const transcript = await store.transcript("call-1");
+		expect(transcript).toHaveLength(1);
+		expect(transcript[0]!.text).toBe("check the auth module");
+	});
+
+	test("a failed append records no false gap for the NEXT envelope once the backend recovers", async () => {
+		setStorageBackend(new AppendFailingBackend());
+		const store = new CallProjectionStore(dir);
+		await store.applyEnvelope("room-1", "call-1", transcriptEnvelope(0, 0, "user", "hello"), "full");
+
+		setStorageBackend(new LocalStorageBackend());
+		const outcome = await store.applyEnvelope("room-1", "call-1", transcriptEnvelope(1, 1, "assistant", "hi there"), "full");
+		expect(outcome.status).toBe("applied-transcript");
+		// The failed seq-0 attempt never became a cursor value, so seq 1 is still "the first envelope
+		// this store has ever successfully seen" — not a one-past-a-known-cursor jump.
 		expect(store.gaps("room-1")).toHaveLength(0);
 	});
 });

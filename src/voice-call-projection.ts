@@ -93,6 +93,11 @@ export type ApplyOutcome =
 	| { status: "duplicate" }
 	| { status: "applied-decision"; decision: JournalDecisionSnapshot; cardKind: "mint" | "terminal" | "none" }
 	| { status: "applied-transcript"; entry: StoredTranscriptEntry }
+	/** The append itself failed (a disk error, not a missing journal record) — the durable cursor was
+	 *  deliberately NOT advanced for this seq; see `applyEnvelope`'s doc for why. `entry` is still
+	 *  handed back (it carries what WOULD have been written) so a caller can log/surface it, even
+	 *  though it was never durably persisted. */
+	| { status: "transcript-append-failed"; entry: StoredTranscriptEntry }
 	| { status: "applied-artifact"; artifact: JournalArtifact }
 	| { status: "applied-terminal"; error: string | null };
 
@@ -227,6 +232,16 @@ export class CallProjectionStore {
 	 * Returns `{status:"duplicate"}` for a seq at or below the already-applied cursor — no state
 	 * mutation, no card. A gap (seq more than one past the cursor) is recorded before the record
 	 * itself is applied, so the gap is visible even if this envelope's own application then fails.
+	 *
+	 * The durable cursor (`state.lastAppliedSeq[callId]`) only advances past `envelope.seq` once this
+	 * envelope's own application has actually SUCCEEDED — for `transcript`, that means the append to
+	 * disk itself, not merely "we decided what to write". Advancing it unconditionally would mark a
+	 * failed write "already applied" forever: this class's own idempotent-re-tail contract (module
+	 * doc) means a restarted tailer re-reading the SAME journal from byte 0 is the only real retry a
+	 * transcript append ever gets, and a cursor that already claims this seq is done would make that
+	 * retry a silent no-op `{status:"duplicate"}` — the turn is gone for good, with no record it was
+	 * ever lost. `decision`/`artifact`/`terminal` records only ever mutate an in-memory map (nothing
+	 * that can fail the way a filesystem append can), so their cursor advance stays unconditional.
 	 */
 	async applyEnvelope(channelId: string, callId: string, envelope: JournalEnvelope, retention: VoiceCallRetention): Promise<ApplyOutcome> {
 		const state = this.stateFor(channelId);
@@ -237,6 +252,19 @@ export class CallProjectionStore {
 			gap = { callId, atSeq: envelope.seq, missingCount: envelope.seq - cursor - 1, detectedAt: this.now() };
 			state.gaps.push(gap);
 		}
+
+		if (envelope.record.type === "transcript") {
+			const appended = await this.appendTranscript(callId, envelope.record.transcript, envelope.at, retention, gap);
+			if (!appended.ok) {
+				// Cursor NOT advanced — see this method's doc. The gap (if any) is still worth keeping.
+				this.persist(channelId);
+				return { status: "transcript-append-failed", entry: appended.entry };
+			}
+			state.lastAppliedSeq[callId] = envelope.seq;
+			this.persist(channelId);
+			return { status: "applied-transcript", entry: appended.entry };
+		}
+
 		state.lastAppliedSeq[callId] = envelope.seq;
 
 		if (envelope.record.type === "decision") {
@@ -246,12 +274,6 @@ export class CallProjectionStore {
 			const cardKind: "mint" | "terminal" | "none" = decision.state === "open" ? "mint" : DECISION_TERMINAL_STATES.has(decision.state) ? "terminal" : "none";
 			if (cardKind !== "none") await this.onDecisionCard?.({ channelId, callId, decision, cardKind });
 			return { status: "applied-decision", decision, cardKind };
-		}
-
-		if (envelope.record.type === "transcript") {
-			const entry = await this.appendTranscript(callId, envelope.record.transcript, envelope.at, retention, gap);
-			this.persist(channelId);
-			return { status: "applied-transcript", entry };
 		}
 
 		if (envelope.record.type === "artifact") {
@@ -264,7 +286,7 @@ export class CallProjectionStore {
 		return { status: "applied-terminal", error: envelope.record.error };
 	}
 
-	private async appendTranscript(callId: string, transcript: JournalTranscript, at: number, retention: VoiceCallRetention, gap: JournalGap | undefined): Promise<StoredTranscriptEntry> {
+	private async appendTranscript(callId: string, transcript: JournalTranscript, at: number, retention: VoiceCallRetention, gap: JournalGap | undefined): Promise<{ ok: boolean; entry: StoredTranscriptEntry }> {
 		const entry: StoredTranscriptEntry =
 			retention === "off"
 				? { callId, turn: transcript.turn, role: transcript.role, final: transcript.final, at, redacted: true }
@@ -272,9 +294,10 @@ export class CallProjectionStore {
 		if (gap) entry.gapBefore = { missingCount: gap.missingCount };
 		try {
 			await getStorageBackend().appendDurable(transcriptPath(this.stateDir, callId), `${JSON.stringify(entry)}\n`);
+			return { ok: true, entry };
 		} catch (err) {
 			this.log(`voice-transcripts/${callId}.jsonl append failed: ${errText(err)}`);
+			return { ok: false, entry };
 		}
-		return entry;
 	}
 }
