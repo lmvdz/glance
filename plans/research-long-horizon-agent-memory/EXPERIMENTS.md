@@ -136,3 +136,38 @@ What this does and does not update:
   action-context ablation is the live-runner family's job.
 - Instrument lessons banked: provenance ago-labels are validity metadata (run 2's flaw); an
   explicit undeterminable escape separates honest hedging from arbitrary picking.
+
+---
+
+## LIVE-1: G01 against a scratch daemon — 2026-07-27 (re-baselined after the fact)
+
+A background agent booted an isolated scratch daemon per .claude/skills/scratch-daemon and drove
+G01 over real HTTP. **Re-baselining note, established afterward**: the daemon was built from the
+LOCAL working tree, whose `main` has diverged from origin/main (local tip 26aa1841, a voice-lane
+line WITHOUT the merged supersession PRs; origin/main tip 83e10a98 carries them all). So the run
+tested the pre-#277 baseline — voiding its "current code fails G01" reading and converting it
+into an accidental CONTROL run:
+
+- **The before-photo, live**: on a real daemon without supersession, a seeded stale decision and
+  its replacement surface in /api/fabric and /api/fabric/search at IDENTICAL BM25 scores
+  (0.3646… each) — the compliance-trap shape, reproduced on the production binary. This is the
+  live demonstration of what #277/#293 exist to prevent. Evidence: /tmp/g01-live-evidence.md.
+- **The finding that survives re-baselining (true on origin/main too)**: supersession is
+  UNREACHABLE over HTTP. The write rule lives in recordAgentDecision behind the agent-only
+  squad_record_decision tool; PATCH /api/features/:id silently drops a client `supersedes` field
+  (deliberate anti-forgery in featureDecisions — clients must not mint stamps). Net: the human/UI
+  lane can ADD or DELETE a decision but can never SUPERSEDE one — the ledger's core verb is
+  missing from the human lane, and deletion is exactly the verb the ledger forbids. Next unit: an
+  authenticated supersede route that goes through recordAgentDecision's write rule.
+- **Environment finding for the operator**: local main ≠ origin/main (diverged, not merely
+  behind) — anything built from the local tree, scratch daemons included, tests different code
+  than what is merged. Surfaced, not "fixed" — the local line carries unmerged fleet work.
+- Stretch (real unit spawn) failed for environmental reasons (bare git-init repo, isolated HOME)
+  — the primer-consumption half remains open for the live-runner family, unchanged.
+
+**LIVE-1 follow-through (2026-07-27)**: the surviving finding is closed — PR #298 ships
+`POST /api/features/:id/decisions/supersede`, the human lane's supersession verb, riding
+recordAgentDecision's write rule (stamps server-authored; forged stamps schema-stripped;
+degenerate `supersedes` 400s instead of degrading to a plain append — the blind review's one real
+finding, fixed and locked). The ledger's core verb is now reachable from every lane: agent tool,
+and human HTTP.
