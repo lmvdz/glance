@@ -11565,7 +11565,7 @@ export class SquadManager extends EventEmitter {
 	 *  redaction chokepoint doesn't already cover (#lifecycle-truth concern 02). */
 	private setPending(rec: AgentRecord, next: PendingRequest[], reason: DerivedReason, cause?: TransitionCause, opts?: { callerOwnsStatus?: boolean }): void {
 		const redacted = next.map((p) => ({ ...p, title: redact(p.title), message: p.message === undefined ? undefined : redact(p.message) }));
-		this.emitNeedsYouProjection(rec, redacted);
+		this.emitNeedsYouProjection(rec, redacted, reason);
 		rec.dto.pending = redacted;
 		// Debounced persist trigger (concern 04) — scheduled regardless of the callerOwnsStatus branch
 		// below, since `pending` already changed above either way. Suppressed during the replay settle
@@ -12252,6 +12252,11 @@ export class SquadManager extends EventEmitter {
 		const ageMs = Math.max(0, entry.ts - createdAt);
 		const age = ageMs < 60_000 ? "just now" : `${Math.floor(ageMs / 60_000)}m`;
 		const resolved = pendingStatus === "resolved";
+		// A resolved card is one of two facts, and they are not close: somebody answered, or the unit
+		// went away without an answer. `answered` is stamped by emitNeedsYouProjection from the same
+		// `reason` that already distinguishes them; an OLD card carries no flag and is read as
+		// answered, which is what it always claimed.
+		const abandoned = resolved && payload.answered === false;
 		// Concern 19 wants ONE NAMED accountable human, and a name is the point. In file mode the actor
 		// id is literally "local", so appending it produces "local is accountable", which names nobody
 		// and lengthens every headline to say it. An unnamed operator is left off rather than rendered
@@ -12265,13 +12270,19 @@ export class SquadManager extends EventEmitter {
 			pendingId: typeof payload.pendingId === "string" ? payload.pendingId : undefined,
 			pendingStatus,
 			accountableHuman,
-			title: resolved ? `Resolved · ${namedTitle}` : `Needs you · ${namedTitle}`,
-			eyebrow: resolved ? "Resolved" : "Needs you",
+			title: abandoned ? `Never answered · ${namedTitle}` : resolved ? `Resolved · ${namedTitle}` : `Needs you · ${namedTitle}`,
+			eyebrow: abandoned ? "Never answered" : resolved ? "Resolved" : "Needs you",
 			// A card that says the same sentence three times (title, body, "why stopped") reads as
 			// broken, and for approval-shaped pendings `message` IS the title. Say it once.
 			body: message && message.trim() !== title.trim() ? message : undefined,
-			detail: resolved ? "Follow-up resolution card. Original pending card remains unchanged." : "Click to step into the agent.",
-			tone: resolved ? "success" : "warning",
+			detail: abandoned
+				? "The unit stopped before anyone replied. Nothing is waiting on you for it, and nothing came of it."
+				: resolved
+					? "Follow-up resolution card. Original pending card remains unchanged."
+					: "Click to step into the agent.",
+			// Abandoned is NOT success. A green card for a question nobody answered is the room
+			// congratulating itself for losing something.
+			tone: abandoned ? "neutral" : resolved ? "success" : "warning",
 			pinned: {
 				agent: rec.dto.name || rec.dto.id,
 				age,
@@ -12386,11 +12397,36 @@ export class SquadManager extends EventEmitter {
 		}
 	}
 
-	private emitNeedsYouProjection(rec: AgentRecord, next: PendingRequest[]): void {
+	/**
+	 * Announce a pending ONCE — not once per daemon restart.
+	 *
+	 * Seen live, in the room, on real data: `gate_1` was announced thirteen times and `gate_2` three,
+	 * for two questions. The timestamps matched the daemon's restarts exactly. On boot a record is
+	 * rebuilt with an empty `pending`, replay re-adds the outstanding requests, and the id-diff below
+	 * correctly reports every one of them as new — because to a freshly constructed record, it is.
+	 *
+	 * The room's own fold hides the repeats, which is why this survived: the SCREEN looked right. But
+	 * the channel is the durable record, and everything else reading it — search, the weekly episode,
+	 * a digest, anyone scrolling back — saw one unanswered question thirteen times. A restart is not
+	 * news about the work.
+	 *
+	 * `this.settling` is the existing replay-window marker; it already suppresses the PERSIST directly
+	 * below the call site, for the same reason and in the same words ("a ghost pending rebuilt by ring
+	 * replay must never resurrect a stale question"). This extends that reasoning to the projection,
+	 * which is where a person actually meets it.
+	 *
+	 * Resolutions are deliberately NOT suppressed. A question that was answered while the daemon was
+	 * down is news, and the worse failure is a room still showing something as waiting when it is not.
+	 */
+	private emitNeedsYouProjection(rec: AgentRecord, next: PendingRequest[], reason?: DerivedReason): void {
+		const replaying = this.settling.has(rec.dto.id);
 		const previous = new Map(rec.dto.pending.map((request) => [request.id, request]));
 		const upcoming = new Map(next.map((request) => [request.id, request]));
 		for (const request of next) {
 			if (previous.has(request.id)) continue;
+			// A pending restored by replay was announced before the restart. Re-announcing it says the
+			// fleet stopped again, which it did not.
+			if (replaying) continue;
 			if (!isRoomWorthyPending(request)) continue;
 			this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_NEEDS_YOU, `${this.safeEventLabel(request.title)} — ${this.safeEventLabel(rec.dto.name)} stopped rather than guess. Everything else in the fleet is still moving.`, {
 				status: "pending",
@@ -12408,8 +12444,17 @@ export class SquadManager extends EventEmitter {
 			// Symmetric with the emit above: a pending that never became a card must never emit a
 			// resolution card, or the room fills with orphan "resolved" faces for facts it never showed.
 			if (!isRoomWorthyPending(request)) continue;
-			this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_NEEDS_YOU, `${this.safeEventLabel(request.title)} is answered. ${this.safeEventLabel(rec.dto.name)} picks the work back up from where it stopped.`, {
+			// A pending goes away for two very different reasons and the card said "is answered" for
+			// both. `pending-cancel` is the unit being stopped, killed, reaped or replay-pruned —
+			// nobody answered it and nothing is picking the work back up. Telling a person their
+			// question was answered when it was abandoned is the room lying about the one thing it
+			// exists to be trusted on. The distinction was already in `reason`; it was just not read.
+			const answered = reason !== "pending-cancel";
+			this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_NEEDS_YOU, answered
+				? `${this.safeEventLabel(request.title)} is answered. ${this.safeEventLabel(rec.dto.name)} picks the work back up from where it stopped.`
+				: `${this.safeEventLabel(request.title)} went away without being answered — ${this.safeEventLabel(rec.dto.name)} stopped before anyone replied. Nothing is waiting on you for it any more, and nothing came of it either.`, {
 				status: "resolved",
+				answered,
 				pendingId: request.id,
 				gateClass: gateClassOf(request),
 				title: request.title,
