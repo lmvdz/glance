@@ -30,8 +30,8 @@ function snapshot(over: Partial<FabricSnapshot> = {}): FabricSnapshot {
 			{ type: "lease", source: { repo: "/r", file: "src/auth/token.ts" }, lease: { id: "l1", repo: "/r", file: "src/auth/token.ts", operator: "op", session: "auth-bot", host: "h" } as FabricSnapshot["leases"][number]["lease"] },
 		],
 		decisions: [
-			{ type: "decision", source: { repo: "/r", featureId: "feat-auth" }, featureTitle: "Auth tokens", text: "Use a 15-minute access token TTL with rotating refresh tokens.", decisionSource: "human", createdAt: 0 },
-			{ type: "decision", source: { repo: "/r", featureId: "feat-ui" }, featureTitle: "Dashboard", text: "Adopt the magma colormap for the heat graph.", decisionSource: "human", createdAt: 0 },
+			{ type: "decision", source: { repo: "/r", featureId: "feat-auth" }, id: "d-auth", featureTitle: "Auth tokens", text: "Use a 15-minute access token TTL with rotating refresh tokens.", decisionSource: "human", createdAt: 0 },
+			{ type: "decision", source: { repo: "/r", featureId: "feat-ui" }, id: "d-ui", featureTitle: "Dashboard", text: "Adopt the magma colormap for the heat graph.", decisionSource: "human", createdAt: 0 },
 		],
 		failures: [],
 		symptoms: [
@@ -187,8 +187,17 @@ describe("buildContextPrimer", () => {
 		expect(primer).toContain("refresh");
 	});
 
-	test("returns empty string when nothing is relevant (caller injects nothing)", () => {
-		expect(buildContextPrimer(snapshot(), "kubernetes helm chart")).toBe("");
+	test("an irrelevant query still yields the PINNED regions — decisions are relevant by state, not by query (G09)", () => {
+		// Semantic flip, deliberate (research-memory-eval-harness Rank 1): before region partitioning
+		// this returned "" — which meant an agent spawning onto an unrelated task inherited none of
+		// the repo's settled decisions. Pinned facts are present by state; episodic stays query-gated.
+		const primer = buildContextPrimer(snapshot(), "kubernetes helm chart");
+		expect(primer).toContain("**Decision**");
+		expect(primer).not.toContain("**Prior session**");
+	});
+
+	test('"" still means: nothing pinned AND nothing relevant', () => {
+		expect(buildContextPrimer(snapshot({ decisions: [], failures: [] }), "kubernetes helm chart")).toBe("");
 	});
 
 	test("a recorded symptom is folded into the cold-start primer as a Known symptom (concern 07)", () => {
@@ -212,7 +221,7 @@ describe("buildContextPrimer", () => {
 	test("a hit carries provenance (source + age) when the underlying fact has a timestamp (concern 02)", () => {
 		const now = 10_000_000;
 		const snap = snapshot({
-			decisions: [{ type: "decision", source: { repo: "/r", featureId: "feat-auth" }, featureTitle: "Auth tokens", text: "Use a 15-minute access token TTL with rotating refresh tokens.", decisionSource: "human", createdAt: now - 2 * 60 * 60 * 1000 }],
+			decisions: [{ type: "decision", source: { repo: "/r", featureId: "feat-auth" }, id: "d-auth", featureTitle: "Auth tokens", text: "Use a 15-minute access token TTL with rotating refresh tokens.", decisionSource: "human", createdAt: now - 2 * 60 * 60 * 1000 }],
 		});
 		const primer = buildContextPrimer(snap, "refresh token ttl", { now });
 		expect(primer).toContain("src: human decision");
@@ -223,6 +232,78 @@ describe("buildContextPrimer", () => {
 		// "token" hits the decision strongly and the lease only incidentally via its file path.
 		const results = buildContextPrimer(snapshot(), "token rotation ttl 15-minute access", { topK: 6 });
 		expect(results).toContain("weak match");
+	});
+});
+
+describe("primer regions (research-memory-eval-harness Rank 1 / HARNESS-SPEC G09)", () => {
+	function regionSnapshot(): FabricSnapshot {
+		return snapshot({
+			failures: [
+				{ type: "failure", source: { repo: "/r" }, fingerprint: "f-old", branch: "squad/old", rootCause: "oldest failure", at: 100 },
+				{ type: "failure", source: { repo: "/r" }, fingerprint: "f-1", branch: "squad/b1", rootCause: "first recent failure", at: 1000 },
+				{ type: "failure", source: { repo: "/r" }, fingerprint: "f-2", branch: "squad/b2", rootCause: "second recent failure", at: 2000 },
+				{ type: "failure", source: { repo: "/r" }, fingerprint: "f-3", branch: "squad/b3", rootCause: "third recent failure", at: 3000 },
+			],
+		});
+	}
+
+	test("budget evicts episodic before decisions, and never touches failures", () => {
+		const roomy = buildContextPrimer(regionSnapshot(), "refresh token rotation", { budgetChars: 3200 });
+		expect(roomy).toContain("**Prior session**"); // episodic present when budget allows
+
+		const mid = buildContextPrimer(regionSnapshot(), "refresh token rotation", { budgetChars: 900 });
+		expect(mid).toContain("Do not repeat"); // region 1 intact
+		expect(mid).not.toContain("**Prior session**"); // region 3 evicted first
+
+		const tiny = buildContextPrimer(regionSnapshot(), "refresh token rotation", { budgetChars: 300 });
+		expect(tiny).toContain("Do not repeat"); // region 1 survives even an impossible budget
+		expect(tiny).not.toContain("**Decision**"); // region 2 evicted after region 3
+	});
+
+	test("region caps: at most 3 failures, most recent first — the oldest is the one dropped", () => {
+		const primer = buildContextPrimer(regionSnapshot(), "kubernetes helm chart");
+		expect(primer).toContain("first recent failure");
+		expect(primer).toContain("third recent failure");
+		expect(primer).not.toContain("oldest failure");
+	});
+
+	test("identical inputs render byte-identical primers (prefix-cache discipline)", () => {
+		const a = buildContextPrimer(regionSnapshot(), "refresh token rotation", { now: 5000 });
+		const b = buildContextPrimer(regionSnapshot(), "refresh token rotation", { now: 5000 });
+		expect(a).toBe(b);
+	});
+
+	test("a pinned decision is not double-served through the ranked region", () => {
+		const primer = buildContextPrimer(snapshot(), "refresh token rotation ttl", { topK: 6 });
+		const hits = primer.split("15-minute access token TTL").length - 1;
+		expect(hits).toBe(1);
+	});
+
+	test("caps are TOTAL, not pin-only: overflow failures cannot re-enter through the ranked region", () => {
+		// All four failures lexically match this query; only the 3 most recent may render, and the
+		// oldest must not sneak back in as a ranked hit (blind-review finding: id-only exclusion
+		// made the caps advisory).
+		const primer = buildContextPrimer(regionSnapshot(), "recent failure oldest", { topK: 8 });
+		expect(primer.split("Do not repeat").length - 1).toBe(3);
+		expect(primer).not.toContain("oldest failure");
+	});
+
+	test("decision cap is total too: at most 4 render, most recent first", () => {
+		const snap = snapshot({
+			decisions: [1, 2, 3, 4, 5].map((n) => ({
+				type: "decision" as const, source: { repo: "/r", featureId: `f${n}` }, id: `d${n}`,
+				featureTitle: `Feature ${n}`, text: `settled choice number ${n}`, decisionSource: "human" as const, createdAt: n * 1000,
+			})),
+		});
+		const primer = buildContextPrimer(snap, "settled choice number", { topK: 8 });
+		expect(primer.split("**Decision**").length - 1).toBe(4);
+		expect(primer).not.toContain("settled choice number 1"); // oldest dropped
+	});
+
+	test("a header announcing nothing is not a primer: full eviction returns empty string", () => {
+		const snap = snapshot({ decisions: [], failures: [] });
+		const primer = buildContextPrimer(snap, "refresh token rotation", { budgetChars: 70 });
+		expect(primer).toBe(""); // header alone would fit; nothing else does
 	});
 });
 
@@ -306,9 +387,13 @@ describe("recurring-failure memory (concern 05 + skills-hardening concern 05)", 
 		expect(primer).not.toContain("Do not repeat");
 	});
 
-	test("a task unrelated to any recorded failure gets no failure injection", () => {
+	test("a standing failure warning is PINNED — it reaches even an unrelated task's primer (G09)", () => {
+		// Semantic flip, deliberate: "do not repeat X" has near-zero lexical overlap with the task
+		// that repeats X, so relevance-gating a warning defeats it. Bounded (3 most recent) and
+		// repo-scoped by the snapshot itself, so this is a standing hazard sign, not a firehose.
 		const primer = buildContextPrimer(failureSnapshot(), "kubernetes helm chart");
-		expect(primer).toBe("");
+		expect(primer).toContain("Do not repeat");
+		expect(primer).not.toContain("weak match"); // pinned facts are never discounted as weak
 	});
 
 	test("non-failure hit types are never prefixed with the imperative", () => {

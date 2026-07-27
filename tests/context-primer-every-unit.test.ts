@@ -142,11 +142,20 @@ test("a fabric failure logs and the spawn proceeds unprimed — never blocked", 
 	expect(opts).toEqual(DISPATCHED); // untouched
 });
 
-test("an empty fabric ⇒ no primer, and the spawn is untouched", async () => {
+test("a truly empty fabric ⇒ no primer, and the spawn is untouched", async () => {
+	const mgr = await manager();
+	mgr.snapshot = { ...snapshotWith("irrelevant", "irrelevant"), decisions: [] } as FabricSnapshot;
+	const { hasPrimer } = await mgr.prime({ repo: "/srv/app", task: "zzzzqqqq nonmatching" } as CreateAgentOptions);
+	expect(hasPrimer).toBe(false);
+});
+
+test("an unrelated but SETTLED decision still primes — pinned by state, not by query (HARNESS-SPEC G09)", async () => {
+	// Semantic flip, deliberate (primer region partitioning): a repo's currently-valid decisions
+	// reach every spawn in scope; only episodic content stays relevance-gated.
 	const mgr = await manager();
 	mgr.snapshot = snapshotWith("something wholly unrelated", "nothing matches the query at all");
 	const { hasPrimer } = await mgr.prime({ repo: "/srv/app", task: "zzzzqqqq nonmatching" } as CreateAgentOptions);
-	expect(hasPrimer).toBe(false);
+	expect(hasPrimer).toBe(true);
 });
 
 test("nothing to search on ⇒ the fabric is never even read", async () => {
