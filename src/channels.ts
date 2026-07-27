@@ -3,6 +3,7 @@ import type { Store } from "./dal/store.ts";
 import { neutralizeDelimiters } from "./digest.ts";
 import { errText } from "./err-text.ts";
 import { redact } from "./redact.ts";
+import { cardPayloadStrict, validateCardPayload } from "./schema/channel-card.ts";
 import { EVENT_ISSUER_MANAGER, type TranscriptEventKind } from "./transcript-event-kinds.ts";
 import type { Actor, TranscriptEntry } from "./types.ts";
 
@@ -321,6 +322,19 @@ export class ChannelStore {
 		await this.ensureDefaultChannel();
 		const channel = await this.store.getChannel(channelId);
 		if (!channel) throw new Error("channel not found");
+		// Observational schema check on the POST-sanitization payload (what actually gets persisted
+		// and served) — outside the append lock below, since it never needs the serialized queue.
+		// The original payload is always what lands, pass or fail: clients read fields outside the
+		// face whitelist (channelTimeline.ts#stringFromPath), so a normalizing decode output would
+		// silently strip them. See 07-card-payload-schemas.md.
+		const sanitizedPayload = input.event ? sanitizeManagerValue(input.event.payload) : undefined;
+		if (input.event) {
+			const check = validateCardPayload(input.event.kind, sanitizedPayload);
+			if (!check.ok) {
+				if (check.logLine) this._log(`channel ${channelId} card schema: ${check.logLine}`);
+				if (cardPayloadStrict()) throw new Error(`card schema: ${check.reason}`);
+			}
+		}
 		const entry: Omit<ChannelEntry, "seq"> = {
 			id: randomUUID(),
 			channelId,
@@ -333,7 +347,7 @@ export class ChannelStore {
 			ts: this.now(),
 			status: "ok",
 			format: input.format ?? "markdown",
-			...(input.event ? { event: { kind: input.event.kind, issuer: EVENT_ISSUER_MANAGER, payload: sanitizeManagerValue(input.event.payload) } } : {}),
+			...(input.event ? { event: { kind: input.event.kind, issuer: EVENT_ISSUER_MANAGER, payload: sanitizedPayload } } : {}),
 		};
 		const prior = this.appendLocks.get(channelId)?.catch(() => {}) ?? Promise.resolve();
 		let release!: () => void;

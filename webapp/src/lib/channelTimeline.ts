@@ -10,6 +10,12 @@ export type ChannelCardTone = 'neutral' | 'info' | 'warning' | 'success' | 'dest
 export type LocalCardKind = 'local:mention-confirm-required' | 'local:mention-steer-failed' | 'local:spawn-proposal';
 export type ChannelCardKind = 'message' | 'needs-you' | 'gate-verdict' | LandCardKind | 'mention-steer' | 'goal-overlap' | LocalCardKind | 'plan-card' | 'return-emit' | 'design-revised' | 'token-burn-snapshot' | 'unit-spawned' | 'unit-turn-finished' | 'unit-failed' | 'pr-opened' | 'verification-ran' | 'unknown-event';
 
+/** Epistemic register for the face's TEXT (title/body/detail — the claim content), never chrome
+ *  (eyebrow/status/pinned/icon/door stay system-authored regardless). Reserved wire field: no
+ *  emitter sets it yet and no styling reads it — the first emitter (concern 03's voice-decision
+ *  card) drives the visual treatment. Absent means default rendering, identical to today. */
+export type ChannelCardRegister = 'checked' | 'claim' | 'unverified';
+
 export interface PointerCardFace {
   title: string;
   eyebrow?: string;
@@ -19,6 +25,7 @@ export interface PointerCardFace {
   tone?: ChannelCardTone;
   pinned?: Record<string, string | number | boolean | null | undefined>;
   href?: string;
+  register?: ChannelCardRegister;
 }
 
 export interface ChannelCardView {
@@ -166,7 +173,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
-function faceFromPayload(payload: unknown): PointerCardFace | undefined {
+/** Internal-route guard, mirrored from the server schema (`src/schema/channel-card.ts`): a card
+ *  href may only ever be a client hash route. Defense in depth for an old daemon that predates the
+ *  schema check, or a future mistake — a `javascript:`/`https:` href lands raw in `<a href>`
+ *  (`ChannelTimeline.tsx`), so this is dropped rather than trusted. */
+function safeHref(value: unknown): string | undefined {
+  return typeof value === 'string' && value.startsWith('#/') ? value : undefined;
+}
+
+function isRegister(value: unknown): value is ChannelCardRegister {
+  return value === 'checked' || value === 'claim' || value === 'unverified';
+}
+
+/** Exported for direct testing of the wire→face parse (register round-trip, href guard) —
+ *  `dispatchChannelCard` is the only other caller. */
+export function faceFromPayload(payload: unknown): PointerCardFace | undefined {
   if (!isRecord(payload) || !isRecord(payload.face)) return undefined;
   const face = payload.face;
   const pinned = isRecord(face.pinned) ? Object.fromEntries(Object.entries(face.pinned).filter(([, value]) => ['string', 'number', 'boolean'].includes(typeof value) || value == null)) as PointerCardFace['pinned'] : undefined;
@@ -178,12 +199,15 @@ function faceFromPayload(payload: unknown): PointerCardFace | undefined {
     status: typeof face.status === 'string' ? face.status : undefined,
     tone: isTone(face.tone) ? face.tone : undefined,
     pinned,
+    href: safeHref(face.href),
+    register: isRegister(face.register) ? face.register : undefined,
   };
 }
 
 function hrefFromPayload(payload: unknown): string | undefined {
   if (!isRecord(payload)) return undefined;
-  if (typeof payload.href === 'string') return payload.href;
+  const direct = safeHref(payload.href);
+  if (direct) return direct;
   if (payload.doorSurface === 'plan' && isRecord(payload.refs) && typeof payload.refs.planId === 'string') return `#/workbench/task/${encodeURIComponent(payload.refs.planId)}`;
   if (payload.doorSurface === 'intervence' && isRecord(payload.refs) && typeof payload.refs.unitId === 'string') return `#/intervene/${encodeURIComponent(payload.refs.unitId)}`;
   return undefined;

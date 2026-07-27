@@ -218,7 +218,6 @@ import {
 	EVENT_ISSUER_MANAGER,
 	TRANSCRIPT_EVENT_DESIGN_REVISED,
 	TRANSCRIPT_EVENT_GATE_VERDICT,
-	TRANSCRIPT_EVENT_GOAL_OVERLAP,
 	TRANSCRIPT_EVENT_LAND_ASSESSMENT,
 	TRANSCRIPT_EVENT_LAND_ATTEMPT,
 	TRANSCRIPT_EVENT_LAND_MERGE,
@@ -234,6 +233,7 @@ import {
 	isTranscriptEventKind,
 } from "./transcript-event-kinds.ts";
 import { TRANSCRIPT_EVENT_TOKEN_BURN_SNAPSHOT, fleetTokenBurnPayload, tokenBurnFace, unitTokenBurnPayload } from "./token-burn.ts";
+import { emitDesignRevisedCard, emitGoalOverlapCard, emitMentionSteerCard, emitReturnEmitCard, emitTokenBurnSnapshotCard } from "./schema/channel-card.ts";
 import { truncateLabel } from "./text-util.ts";
 import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
 import { ChannelStore, DEFAULT_CHANNEL_ID, type ChannelEntry, type ClientChannelPost, type Channel, type CreateChannelInput, type ChannelMemberInput } from "./channels.ts";
@@ -3473,30 +3473,27 @@ export class SquadManager extends EventEmitter {
 				text,
 				kind: "system",
 				format: "stage",
-				event: {
-					kind: TRANSCRIPT_EVENT_DESIGN_REVISED,
-					payload: {
-						refs: { planId: feature.id, planPath: opts.file, unitId: rec?.dto.id },
-						doorSurface: "plan",
-						face: {
-							unitId: rec?.dto.id,
-							unitName: rec?.dto.name,
-							eventKind: TRANSCRIPT_EVENT_DESIGN_REVISED,
-							title: "Design revised",
-							eyebrow: "Plan saved",
-							body: `${concern.title}: ${changed}`,
-							detail: opts.file,
-							tone: "info",
-							planName,
-							pinned: { actor: actor.id, concern: concern.file, status: concern.status },
-						},
-						actor: actor.id,
-						featureId: feature.id,
-						planPath: opts.file,
+				event: emitDesignRevisedCard({
+					refs: { planId: feature.id, planPath: opts.file, unitId: rec?.dto.id },
+					doorSurface: "plan",
+					face: {
+						unitId: rec?.dto.id,
+						unitName: rec?.dto.name,
+						eventKind: TRANSCRIPT_EVENT_DESIGN_REVISED,
+						title: "Design revised",
+						eyebrow: "Plan saved",
+						body: `${concern.title}: ${changed}`,
+						detail: opts.file,
+						tone: "info",
 						planName,
-						changed,
+						pinned: { actor: actor.id, concern: concern.file, status: concern.status },
 					},
-				},
+					actor: actor.id,
+					featureId: feature.id,
+					planPath: opts.file,
+					planName,
+					changed,
+				}),
 			});
 			this.emit("event", { type: "channel-entry", channelId, entry } satisfies SquadEvent);
 		} catch (err) {
@@ -6844,7 +6841,7 @@ export class SquadManager extends EventEmitter {
 					kind: "system",
 					format: "stage",
 					text: `${this.safeEventLabel(opts.name?.trim() || "new unit")} may be duplicating work ${owner} already has in hand. Both are running — nothing was blocked. If they are the same goal, one of you is about to do the other's week; if they are not, ignore this. Ask ${owner} directly; what they are working on stays private until they say otherwise.`,
-					event: { kind: TRANSCRIPT_EVENT_GOAL_OVERLAP, payload: { refs: { unitName: opts.name }, doorSurface: "unit", face: { title: "Possibly duplicated work", owner: goalOverlap.agent, strength: goalOverlap.strength, pinned: { owner: goalOverlap.agent, basis: goalOverlap.strength } } } },
+					event: emitGoalOverlapCard({ refs: { unitName: opts.name }, doorSurface: "unit", face: { title: "Possibly duplicated work", owner: goalOverlap.agent, strength: goalOverlap.strength, pinned: { owner: goalOverlap.agent, basis: goalOverlap.strength } } }),
 				})
 				.catch((err) => this.log("warn", `goal-overlap disclosure not delivered to ${room}: ${errText(err)}`));
 		}
@@ -7891,21 +7888,18 @@ export class SquadManager extends EventEmitter {
 			text,
 			kind: "system" as const,
 			format: "markdown" as const,
-			event: {
-				kind: TRANSCRIPT_EVENT_MENTION_STEER,
-				payload: {
-					face: {
-						title: "Mention steer accepted",
-						body: text,
-						tone: "info",
-						pinned: { actor: actor.id, target: targetLabel, clientTurnId: cmd.clientTurnId, ...(follows ? { follows: follows.actor } : {}) },
-					},
-					actor: actor.id,
-					target: cmd.id,
-					follows: follows?.actor,
-					clientTurnId: cmd.clientTurnId,
+			event: emitMentionSteerCard({
+				face: {
+					title: "Mention steer accepted",
+					body: text,
+					tone: "info",
+					pinned: { actor: actor.id, target: targetLabel, clientTurnId: cmd.clientTurnId, ...(follows ? { follows: follows.actor } : {}) },
 				},
-			},
+				actor: actor.id,
+				target: cmd.id,
+				follows: follows?.actor,
+				clientTurnId: cmd.clientTurnId,
+			}),
 		};
 		const entry = nodeId
 			? await this.channelStore.appendNodeManager(nodeId, post, channelId)
@@ -7942,27 +7936,24 @@ export class SquadManager extends EventEmitter {
 				text,
 				kind: "system",
 				format: "stage",
-				event: {
-					kind: TRANSCRIPT_EVENT_RETURN_EMIT,
-					payload: {
-						refs: { unitId: rec.dto.id },
-						doorSurface: "intervence",
-						face: {
-							unitId: rec.dto.id,
-							unitName: rec.dto.name,
-							eventKind: TRANSCRIPT_EVENT_RETURN_EMIT,
-							title: "Control accepted",
-							eyebrow: "Room echo",
-							body: text,
-							tone: "info",
-							pinned: { actor: actor.id, action: cmd.type, target: targetLabel },
-						},
-						actor: actor.id,
-						action: cmd.type,
-						target: rec.dto.id,
-						source: commandSource(cmd),
+				event: emitReturnEmitCard({
+					refs: { unitId: rec.dto.id },
+					doorSurface: "intervence",
+					face: {
+						unitId: rec.dto.id,
+						unitName: rec.dto.name,
+						eventKind: TRANSCRIPT_EVENT_RETURN_EMIT,
+						title: "Control accepted",
+						eyebrow: "Room echo",
+						body: text,
+						tone: "info",
+						pinned: { actor: actor.id, action: cmd.type, target: targetLabel },
 					},
-				},
+					actor: actor.id,
+					action: cmd.type,
+					target: rec.dto.id,
+					source: commandSource(cmd),
+				}),
 			});
 			this.emit("event", { type: "channel-entry", channelId, entry } satisfies SquadEvent);
 		} catch (err) {
@@ -12341,10 +12332,7 @@ export class SquadManager extends EventEmitter {
 				kind: "system",
 				format: "stage",
 				text: `fleet token burn · ${payload.totals.tokens} tokens · $${payload.totals.costUsd.toFixed(4)}`,
-				event: {
-					kind: TRANSCRIPT_EVENT_TOKEN_BURN_SNAPSHOT,
-					payload: { refs: { reason: payload.reason }, doorSurface: "fleet-economics", face: tokenBurnFace(payload), ...payload },
-				},
+				event: emitTokenBurnSnapshotCard({ refs: { reason: payload.reason }, doorSurface: "fleet-economics", face: tokenBurnFace(payload), ...payload }),
 			});
 			this.emit("event", { type: "channel-entry", channelId: DEFAULT_CHANNEL_ID, entry: card } satisfies SquadEvent);
 		} catch (err) {
