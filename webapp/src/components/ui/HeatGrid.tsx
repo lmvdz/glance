@@ -25,10 +25,10 @@ export interface HeatGridProps {
 function cellClass(value: number, rowMax: number): string {
   if (!value || value <= 0) return 'bg-ink-surface';
   const r = value / (rowMax || 1);
-  if (r > 0.75) return 'bg-orange-600 dark:bg-orange-500';
-  if (r > 0.5) return 'bg-orange-500 dark:bg-orange-500/80';
-  if (r > 0.25) return 'bg-amber-400 dark:bg-amber-500/70';
-  return 'bg-amber-300/80 dark:bg-amber-600/40';
+  if (r > 0.75) return 'bg-ember';
+  if (r > 0.5) return 'bg-ember/80';
+  if (r > 0.25) return 'bg-ember/55';
+  return 'bg-ember/30';
 }
 
 function shortDay(iso: string): string {
@@ -38,7 +38,7 @@ function shortDay(iso: string): string {
 
 export const HeatGrid: React.FC<HeatGridProps> = ({ days, rows, emptyLabel = 'No activity in this window.' }) => {
   if (rows.length === 0) {
-    return <div className="px-4 py-6 text-center text-sm text-ink-text-muted">{emptyLabel}</div>;
+    return <div className="px-4 py-6 text-center text-body text-ink-text-muted">{emptyLabel}</div>;
   }
 
   return (
@@ -48,7 +48,7 @@ export const HeatGrid: React.FC<HeatGridProps> = ({ days, rows, emptyLabel = 'No
           <tr>
             <th className="w-0" />
             {days.map((d) => (
-              <th key={d} className="px-0 text-center text-[9px] font-medium tabular-nums text-ink-text-subtle" title={d}>
+              <th key={d} className="px-0 text-center text-caption font-medium tabular-nums text-ink-text-subtle" title={d}>
                 {shortDay(d)}
               </th>
             ))}
@@ -60,7 +60,7 @@ export const HeatGrid: React.FC<HeatGridProps> = ({ days, rows, emptyLabel = 'No
             const rowMax = Math.max(0, ...row.daily);
             return (
               <tr key={row.label} className="group">
-                <td className="max-w-[14rem] truncate pr-3 text-xs font-medium text-ink-text-label" title={row.label}>
+                <td className="max-w-[14rem] truncate pr-3 text-caption font-medium text-ink-text-label" title={row.label}>
                   {row.label}
                 </td>
                 {days.map((d, i) => {

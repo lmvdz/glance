@@ -27,8 +27,8 @@ export const PanelShell: React.FC<PanelShellProps> = ({ icon, title, subtitle, a
           {icon}
         </span>
         <div className="min-w-0">
-          <h1 className="text-sm font-semibold text-ink-text truncate">{title}</h1>
-          {subtitle != null && <div className="mt-0.5 text-xs text-ink-text-muted">{subtitle}</div>}
+          <h1 className="truncate text-heading font-semibold tracking-tight text-ink-text">{title}</h1>
+          {subtitle != null && <div className="mt-0.5 text-caption text-ink-text-muted">{subtitle}</div>}
         </div>
       </div>
       {actions && <div className="flex items-center gap-2 flex-shrink-0">{actions}</div>}

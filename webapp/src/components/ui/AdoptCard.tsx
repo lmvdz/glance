@@ -33,12 +33,12 @@ export const AdoptCard: React.FC<AdoptCardProps> = ({ session, busy, onAdopt }) 
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <Terminal className="h-3 w-3 flex-shrink-0 text-ink-text-subtle" aria-hidden="true" />
-          <span className="truncate text-sm font-medium text-ink-text" title={session.label}>
-            {session.harness} session <span className="font-mono text-xs text-ink-text-muted">{shortSessionId(session.sessionId)}</span>
+          <span className="truncate text-body font-medium text-ink-text" title={session.label}>
+            {session.harness} session <span className="font-mono text-caption text-ink-text-muted">{shortSessionId(session.sessionId)}</span>
           </span>
           {age && <span className="flex-shrink-0 text-caption tabular-nums text-ink-text-subtle">{age}</span>}
         </div>
-        <div className="mt-0.5 truncate text-xs text-ink-text-muted" title={session.cwd}>
+        <div className="mt-0.5 truncate text-caption text-ink-text-muted" title={session.cwd}>
           {session.repoName}
           {session.branch ? ` · ${session.branch}` : ''} · running outside glance
         </div>
@@ -48,7 +48,7 @@ export const AdoptCard: React.FC<AdoptCardProps> = ({ session, busy, onAdopt }) 
         onClick={() => onAdopt(session)}
         disabled={busy}
         title="Capture this session's uncommitted work into a fresh gated unit — the original checkout stays untouched"
-        className="flex-shrink-0 rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-700 transition-colors hover:bg-amber-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-300 dark:hover:bg-amber-900/40"
+        className="flex-shrink-0 rounded-md border border-ember/50 bg-ember/10 px-2.5 py-1 text-caption font-semibold text-ember-link transition-colors hover:bg-ember/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-ember disabled:cursor-not-allowed disabled:opacity-50"
         aria-label={`Adopt ${session.label} into glance`}
       >
         {busy ? 'Adopting…' : 'Adopt'}

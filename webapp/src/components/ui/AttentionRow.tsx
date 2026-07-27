@@ -34,10 +34,10 @@ export const AttentionRow: React.FC<AttentionRowProps> = ({ item, onAction, onOp
   const body = (
     <>
       <div className="flex items-center gap-2">
-        <span className="truncate text-sm font-medium text-ink-text">{item.title}</span>
+        <span className="truncate text-body font-medium text-ink-text">{item.title}</span>
         {age && <span className="flex-shrink-0 text-caption tabular-nums text-ink-text-subtle">{age}</span>}
       </div>
-      {item.detail && <div className="mt-0.5 truncate text-xs text-ink-text-muted" title={item.detail}>{item.detail}</div>}
+      {item.detail && <div className="mt-0.5 truncate text-caption text-ink-text-muted" title={item.detail}>{item.detail}</div>}
     </>
   );
 
@@ -45,7 +45,7 @@ export const AttentionRow: React.FC<AttentionRowProps> = ({ item, onAction, onOp
     <div className="flex items-start gap-3 px-4 py-3 transition-colors hover:bg-ink-surface">
       <span className={`mt-1.5 h-2 w-2 flex-shrink-0 rounded-full ${t.dot}`} aria-hidden="true" />
       {canOpen ? (
-        <button onClick={() => onOpen?.(item)} className="min-w-0 flex-1 rounded text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500" aria-label={`Step into ${item.title}`}>
+        <button onClick={() => onOpen?.(item)} className="min-w-0 flex-1 rounded text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-ember" aria-label={`Step into ${item.title}`}>
           {body}
         </button>
       ) : (
@@ -55,7 +55,7 @@ export const AttentionRow: React.FC<AttentionRowProps> = ({ item, onAction, onOp
         <button
           onClick={() => onAction?.(item)}
           disabled={busy}
-          className={`flex-shrink-0 rounded-md border px-2.5 py-1 text-xs font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 disabled:cursor-not-allowed disabled:opacity-50 ${t.border} ${t.softBg} ${t.text} hover:brightness-95`}
+          className={`flex-shrink-0 rounded-md border px-2.5 py-1 text-caption font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-ember disabled:cursor-not-allowed disabled:opacity-50 ${t.border} ${t.softBg} ${t.text} hover:brightness-95`}
           aria-label={`${item.action.label}: ${item.title}`}
         >
           {busy ? '…' : item.action.label}
