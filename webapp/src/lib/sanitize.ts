@@ -40,10 +40,17 @@ export function sanitizeHtml(dirty: string): string {
     DOMPurify.addHook("afterSanitizeAttributes", scrubStyleAttribute);
   }
   try {
+    // No `FORBID_TAGS: ["style"]` here: the `dropStyleElement` hook above
+    // already detaches every `<style>` node during `uponSanitizeElement`.
+    // Also forbidding the tag makes DOMPurify's own tag-removal pass try to
+    // detach the same (already-removed) node a second time, which throws
+    // "a node selected for removal could not be detached from its tree" —
+    // the exact failure this function is named after guarding against, just
+    // self-inflicted within a single call instead of across two. The hook
+    // alone is sufficient and this call never throws for `<style>` bodies.
     return DOMPurify.sanitize(dirty, {
       USE_PROFILES: { html: true, svg: true, svgFilters: true },
       ADD_ATTR: ["data-icon", "style"],
-      FORBID_TAGS: ["style"],
     });
   } finally {
     if (canHook) {
