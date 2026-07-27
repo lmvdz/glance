@@ -22,7 +22,7 @@ import { emitVoiceCallCard, emitVoiceDecisionCard } from "./schema/channel-card.
 import type { CardPayloadType } from "./schema/channel-card.ts";
 import { TRANSCRIPT_EVENT_VOICE_CALL, TRANSCRIPT_EVENT_VOICE_DECISION } from "./transcript-event-kinds.ts";
 import { errText } from "./err-text.ts";
-import { ArtifactSnapshotStore, resolveWithinSessionRoot, type ArtifactSnapshotRecord } from "./voice-call-artifacts.ts";
+import { ArtifactSnapshotStore, resolveWithinSessionRoot, type ArtifactReadResult, type ArtifactSnapshotRecord } from "./voice-call-artifacts.ts";
 import {
 	CallBindingStore,
 	redactBinding,
@@ -166,6 +166,23 @@ export interface StartCallInput {
 
 export type CoordinatorResult<T> = { ok: true; value: T } | { ok: false; reason: string };
 
+/**
+ * What a reader of a channel's call actually gets: the redacted binding PLUS the two facts that
+ * live in the in-process runtime rather than on the durable record — whether the daemon has asked
+ * the mic to be muted, and whether a live bridge socket exists at all right now.
+ *
+ * `micMuted` is deliberately NOT persisted onto the binding: a mute is a property of the live
+ * session, and a daemon restart genuinely does not know what the mic is doing. Reading `false`
+ * after a restart is the honest answer, not a lost setting.
+ */
+export interface VoiceCallStateView extends VoiceCallBindingView {
+	micMuted: boolean;
+	/** `true` only while a connected bridge client exists — the precondition for steering, resolving,
+	 *  and muting. A `live` binding with no socket (mid-reconnect) can therefore be shown as "controls
+	 *  are unavailable right now" instead of offering buttons that will be refused. */
+	controlsAvailable: boolean;
+}
+
 const DEFAULT_JOURNAL_POLL_MS = 400;
 const DEFAULT_LIVENESS_PROBE_MS = 5_000;
 
@@ -277,6 +294,13 @@ interface ChannelRuntime {
 	tailer?: JournalTailer;
 	bridge?: VoiceCallBridgeClient;
 	livenessTimer?: ReturnType<typeof setInterval>;
+	/** What the daemon has last ASKED this call's mic to be (concern 03's visible mute control).
+	 *  The wire control is `toggleMute` — unauthenticated, fire-and-forget, no ack (PROTOCOL.md), so
+	 *  this is honestly "what we asked for", not "what the mic is". Tracking it here is what lets a
+	 *  caller say `setMuted(true)` idempotently: a second identical request sends no toggle at all,
+	 *  rather than un-muting the mic the operator just muted. Cleared with the runtime, so a new
+	 *  call never inherits the previous call's mute. */
+	micMuted?: boolean;
 	/** Guards against overlapping liveness-probe ticks — a broker round-trip plus a bridge reconnect
 	 *  attempt can easily outlast `livenessProbeIntervalMs`, exactly like `observer.ts`'s own documented
 	 *  "the gate run can outlast the interval" guard. Without this, a slow tick leaves the PREVIOUS
@@ -373,6 +397,9 @@ export class VoiceCallCoordinator {
 			/* best-effort */
 		}
 		rt.bridge = undefined;
+		// A torn-down runtime has no mic to be muted. Leaving `true` here would have `state()` report
+		// an ended call as muted, which is a claim about a session that no longer exists.
+		rt.micMuted = undefined;
 	}
 
 	/** @substrate exported for tests only — tests/voice-call-manager.test.ts asserts every
@@ -387,9 +414,11 @@ export class VoiceCallCoordinator {
 		return Boolean(rt.tailer || rt.bridge || rt.livenessTimer);
 	}
 
-	state(channelId: string): VoiceCallBindingView | undefined {
+	state(channelId: string): VoiceCallStateView | undefined {
 		const binding = this.bindings.get(channelId);
-		return binding ? redactBinding(binding) : undefined;
+		if (!binding) return undefined;
+		const rt = this.runtimes.get(channelId);
+		return { ...redactBinding(binding), micMuted: rt?.micMuted === true, controlsAvailable: binding.state === "live" && Boolean(rt?.bridge) };
 	}
 
 	list(): VoiceCallBindingView[] {
@@ -415,6 +444,12 @@ export class VoiceCallCoordinator {
 
 	listArtifacts(channelId: string): ArtifactSnapshotRecord[] {
 		return this.artifacts.list(channelId);
+	}
+
+	/** One artifact's immutable snapshot bytes, for the room's Markdown viewer. Delegates straight to
+	 *  the store — see `ArtifactSnapshotStore#read` for why every failure is a named state. */
+	readArtifact(channelId: string, artifactId: string): Promise<ArtifactReadResult> {
+		return this.artifacts.read(channelId, artifactId);
 	}
 
 	/**
@@ -746,6 +781,33 @@ export class VoiceCallCoordinator {
 		if (binding.state !== "live" || !rt.bridge) return { ok: false, reason: "bridge-unavailable" };
 		const ack = await rt.bridge.resolveDecision(input);
 		return { ok: true, value: ack };
+	}
+
+	/**
+	 * Visible mute (concern 03's call HUD). The wire control is `toggleMute` — unauthenticated and
+	 * ack-less by PROTOCOL.md — so this layer makes it IDEMPOTENT and stateful daemon-side: it tracks
+	 * what it last asked for and sends a toggle only when the request actually differs. Without that,
+	 * two clients (or one double-click) race the mic back open, and the HUD has no honest value to
+	 * render at all.
+	 *
+	 * The returned `muted` is therefore "what the daemon has asked the session for", never a
+	 * confirmed mic state — the HUD's own copy says exactly that rather than implying a read-back the
+	 * protocol cannot provide.
+	 */
+	async setMuted(channelId: string, isAuthorized: boolean, muted: boolean): Promise<CoordinatorResult<{ muted: boolean }>> {
+		if (!isAuthorized) return { ok: false, reason: "forbidden" };
+		const binding = this.bindings.get(channelId);
+		if (!binding || binding.state === "ended") return { ok: false, reason: "no-active-call" };
+		const rt = this.runtime(channelId);
+		if (binding.state !== "live" || !rt.bridge) return { ok: false, reason: "bridge-unavailable" };
+		if ((rt.micMuted === true) === muted) return { ok: true, value: { muted } };
+		try {
+			rt.bridge.toggleMute();
+		} catch (err) {
+			return { ok: false, reason: errText(err) };
+		}
+		rt.micMuted = muted;
+		return { ok: true, value: { muted } };
 	}
 
 	async steer(channelId: string, isAuthorized: boolean, text: string): Promise<CoordinatorResult<true>> {

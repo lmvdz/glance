@@ -260,7 +260,11 @@ describe('return-emit and design-revised cards', () => {
       event: { kind: 'voice-decision', payload: { refs: { callId: 'call-1', decisionId: 'd1' }, face: { title: 'Resolved · Keep it', status: 'answered', callId: 'call-1', decisionId: 'd1', decisionState: 'answered', tone: 'success' } } },
     }));
     expect(resolved.tone).toBe('success');
-    expect(doorLabel(resolved.kind)).toBe('Answer it');
+    // Concern 03 gave this door its own words. A fleet question and a call question are different
+    // work, and two doors reading the same three words is how a person learns that the label does
+    // not tell them where they are going — so this asserts the DISTINCTION, not only the string.
+    expect(doorLabel(resolved.kind)).toBe('Answer the question');
+    expect(doorLabel(resolved.kind)).not.toBe(doorLabel('needs-you'));
   });
 
   test('an unmapped kind still falls back to unknown-event without throwing', () => {
@@ -389,7 +393,7 @@ describe('href sink closed (client-side, defense in depth)', () => {
   });
 });
 
-describe('register (reserved wire field, no styling)', () => {
+describe('register (wire field; concern 03 is the first emitter to style it)', () => {
   test('faceFromPayload round-trips checked/claim/unverified', () => {
     expect(faceFromPayload({ face: { title: 'x', register: 'checked' } })?.register).toBe('checked');
     expect(faceFromPayload({ face: { title: 'x', register: 'claim' } })?.register).toBe('claim');
@@ -400,7 +404,7 @@ describe('register (reserved wire field, no styling)', () => {
     expect(faceFromPayload({ face: { title: 'x', register: 'trust me' } })?.register).toBeUndefined();
   });
 
-  test('an absent register renders identically to today: card rendering is unaffected', () => {
+  test('a register changes NOTHING a card says — only how its text is presented', () => {
     const withRegister = dispatchChannelCard(entry({
       id: 'reg-1',
       seq: 1,
@@ -411,10 +415,21 @@ describe('register (reserved wire field, no styling)', () => {
       seq: 2,
       event: { kind: 'needs-you', payload: { face: { title: 'Review gate', body: 'Approve the run' } } },
     }));
-    // No rendered field (tone/title/body/pinned/href) differs based on register — it carries no
-    // visual weight yet (see concern 07's addendum: the first emitter drives styling).
-    const strip = (card: typeof withRegister) => ({ ...card, id: undefined, entry: undefined });
-    expect(strip(withRegister)).toEqual(strip(without));
+    // Concern 03 surfaces `register` on the view so the row can style and ANNOUNCE it. That is the
+    // only difference: no CONTENT field (tone/title/body/detail/pinned/href/actionHref) may vary
+    // with it, because a register is a claim about text, never a change to what the text says.
+    const content = (card: typeof withRegister) => ({ ...card, id: undefined, entry: undefined, register: undefined });
+    expect(content(withRegister)).toEqual(content(without));
+    expect(withRegister.register).toBe('claim');
+    expect(without.register).toBeUndefined();
+  });
+
+  test('a register only reaches the view when the emitter actually asserted one', () => {
+    // The wire field is optional and most kinds never set it; surfacing it must not invent one.
+    const plain = dispatchChannelCard(entry({ id: 'reg-3', seq: 3, event: { kind: 'gate-verdict', payload: { face: { title: 'Gate passed', status: 'pass' } } } }));
+    expect(plain.register).toBeUndefined();
+    const bogus = dispatchChannelCard(entry({ id: 'reg-4', seq: 4, event: { kind: 'voice-decision', payload: { face: { title: 'x', register: 'trust me' } } } }));
+    expect(bogus.register).toBeUndefined();
   });
 });
 

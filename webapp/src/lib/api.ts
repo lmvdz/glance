@@ -350,6 +350,14 @@ export interface VoiceCallBindingDTO {
    *  request) — see `voice-call-binding.ts#VoiceCallBinding.retentionMismatch`'s doc server-side.
    *  Absent when they agree, or the bridge never reported one at all (an older build). */
   retentionMismatch?: { expected: VoiceCallRetention; reported: 'full' | 'tails' | 'off' };
+  /** What the daemon has last ASKED this call's mic to be (concern 03's visible mute). The wire
+   *  control is ack-less, so this records the request, never a confirmed mic state — the HUD copy
+   *  says exactly that. Absent on the POST/DELETE responses, which return the bare binding. */
+  micMuted?: boolean;
+  /** `true` only while a connected bridge socket exists — the precondition for steering, resolving
+   *  and muting. Lets the HUD say "controls are unavailable right now" instead of offering buttons
+   *  the daemon is going to refuse. */
+  controlsAvailable?: boolean;
 }
 
 export type VoiceCallDecisionState = 'open' | 'awaiting-confirmation' | 'answered' | 'expired' | 'cancelled' | 'failed';
@@ -472,6 +480,52 @@ export function fetchVoiceCallTranscript(channelId: string): Promise<VoiceCallTr
  *  content-hash-addressed room-owned copies; see `src/voice-call-artifacts.ts`). */
 export function fetchVoiceCallArtifacts(channelId: string): Promise<VoiceCallArtifactDTO[]> {
   return apiJson<{ artifacts: VoiceCallArtifactDTO[] }>(`/api/channels/${encodeURIComponent(channelId)}/voice-call/artifacts`).then((r) => r.artifacts);
+}
+
+/** Why an artifact's snapshot could not be read. Mirrors `src/voice-call-artifacts.ts`'s
+ *  `ArtifactReadResult` failure arm exactly — each one renders as its own state in the viewer, so a
+ *  vanished snapshot never arrives looking like an empty document. */
+export type VoiceCallArtifactReadFailure = 'not-ready' | 'missing' | 'too-large' | 'read-error';
+
+export interface VoiceCallArtifactContentDTO {
+  artifact: VoiceCallArtifactDTO;
+  content: string;
+}
+
+/** `GET /api/channels/:id/voice-call/artifacts/:artifactId` — one artifact's IMMUTABLE snapshot
+ *  bytes. Reads the daemon-owned copy, never the worktree source, so the viewer shows what the room
+ *  witnessed. A named failure (409/413) rejects with a `VoiceCallArtifactReadError` carrying the
+ *  reason and the artifact row itself; a 404 (no such id in this channel) throws via `apiJson`. */
+export async function fetchVoiceCallArtifactContent(channelId: string, artifactId: string): Promise<VoiceCallArtifactContentDTO> {
+  const response = await apiFetch(`/api/channels/${encodeURIComponent(channelId)}/voice-call/artifacts/${encodeURIComponent(artifactId)}`);
+  if (response.ok) return response.json() as Promise<VoiceCallArtifactContentDTO>;
+  if (response.status === 409 || response.status === 413) {
+    const body = (await response.json().catch(() => ({}))) as { artifact?: VoiceCallArtifactDTO; error?: string; detail?: string };
+    throw new VoiceCallArtifactReadError((body.error as VoiceCallArtifactReadFailure) ?? 'read-error', body.detail, body.artifact);
+  }
+  throw new ApiError(await response.text(), response.status);
+}
+
+/** A NAMED artifact-read failure, so the viewer can branch on `reason` rather than string-matching a
+ *  message. Extends `Error` (not `ApiError`) because these are not transport failures — the daemon
+ *  answered, and its answer was "this artifact cannot be shown, and here is exactly why". */
+export class VoiceCallArtifactReadError extends Error {
+  constructor(
+    readonly reason: VoiceCallArtifactReadFailure,
+    readonly detail?: string,
+    readonly artifact?: VoiceCallArtifactDTO,
+  ) {
+    super(detail ? `${reason}: ${detail}` : reason);
+    this.name = 'VoiceCallArtifactReadError';
+  }
+}
+
+/** `POST /api/channels/:id/voice-call/mute` — visible mute for the room call HUD. A SET, not the
+ *  wire's bare toggle: the daemon tracks what it last asked for, so a double-click (or a second
+ *  client) cannot race the mic back open. The response echoes what was asked, never a confirmed mic
+ *  state — the protocol gives no read-back and the HUD's copy says so. */
+export function setVoiceCallMuted(channelId: string, muted: boolean): Promise<{ muted: boolean }> {
+  return apiJson<{ muted: boolean }>(`/api/channels/${encodeURIComponent(channelId)}/voice-call/mute`, jsonInit('POST', { muted }));
 }
 
 /** `GET /api/channels/:id/voice-call/gaps` — visible journal gaps (a dropped/missed sequence range),

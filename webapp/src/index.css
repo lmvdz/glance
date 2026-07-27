@@ -343,6 +343,27 @@
     animation: none;
     transition: none;
   }
+
+  /*
+   * The room's call workspace (plans/voice-orchestrated-room-integration, concern 03).
+   *
+   * The named-class list above only covers the motion that existed when each of those classes was
+   * written, so a surface built out of Tailwind utilities — `animate-spin` on an in-flight control,
+   * `active:scale` on a button, `transition-colors` on a row — inherits none of it. This marks the
+   * whole subtree instead: everything under `[data-room-workspace]` stops animating, stops
+   * transitioning and stops scaling under the pointer. `scroll-behavior` goes with it, so opening
+   * an artifact never smooth-scrolls a reader who asked for no motion.
+   */
+  [data-room-workspace],
+  [data-room-workspace] * {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+
+  [data-room-workspace] *:active {
+    transform: none !important;
+  }
 }
 
 .plan-annotation-mark {

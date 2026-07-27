@@ -8,9 +8,33 @@ import { DecisionPanel, type DecisionRequest } from './DecisionPanel';
 import { AutonomyPanel, type AutonomyState } from './AutonomyPanel';
 import { UnitPanel } from './UnitPanel';
 import { QuietRoom } from './QuietRoom';
+import { VoiceCallHudView } from './VoiceCallHud';
+import { VoiceStatusRegion } from './VoiceStatusRegion';
+import { VoiceDecisionDoor } from './VoiceDecisionDoor';
+import { VoiceArtifactsList, VoiceArtifactViewer } from './VoiceArtifacts';
+import { useRoomCall } from '../../hooks/useRoomCall';
+import {
+  ALL_AGENTS,
+  artifactAgentOptions,
+  attentionChipLabel,
+  currentPane,
+  decisionAnnouncement,
+  decisionDoorModel,
+  decisionUrgency,
+  groupArtifacts,
+  initialPaneStack,
+  popPane,
+  pushPane,
+  setStackFilter,
+  shouldSteer,
+  steerStatusLine,
+  threadStatus,
+  type ArtifactRow,
+  type PaneStackEntry,
+} from '../../lib/voice/roomCall';
 import { agentsToRoomNodes } from '../../lib/roomState';
 import { fleetSummary } from '../../lib/roomFrame';
-import { apiJson, jsonInit } from '../../lib/api';
+import { VoiceCallArtifactReadError, apiJson, fetchVoiceCallArtifactContent, jsonInit, type VoiceCallArtifactReadFailure } from '../../lib/api';
 import { buildPromptCommand, channelAgentSessionId, channelDraftSessionId, ensureConsoleAgent, postChannelMessage } from '../../lib/chat/sendCore';
 import { resolveMentionRoute } from '../../lib/mentionGrammar';
 import type { AgentDTO, Channel, ChannelEntry, CommandAckDTO, PresenceSnapshot } from '../../lib/dto';
@@ -128,6 +152,9 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState('');
   const activeChannelId = route.kind === 'hub' ? route.channelId : DEFAULT_CHANNEL_ID;
+  // Declared up here, beside the room's other per-channel state, because `handleSend` below routes
+  // composer text through it — the workspace's own derivations live further down, near the render.
+  const call = useRoomCall(activeChannelId);
   const routedEntryId = route.kind === 'hub' ? route.entryId : undefined;
   const selectedAgent = useMemo(() => agents.find((agent) => agent.id === selectedAgentId), [agents, selectedAgentId]);
   const selectedTask = useMemo(() => tasks.find((task) => task.id === selectedTaskId), [tasks, selectedTaskId]);
@@ -315,6 +342,13 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
       setAnchorEntryId(result.entry.id);
       setReplyTarget(undefined);
       const routeResult = resolveMentionRoute(text, agents);
+      // Non-mention text, while a call is up, is STEERING — it goes to the session through the
+      // daemon, and the room says "delivered" only once the daemon acknowledges the relay. Fleet
+      // mention semantics are untouched: an addressed @mention is still a fleet instruction and
+      // takes the branch below, exactly as before.
+      if (shouldSteer({ callState: call.binding?.state, mentionRoute: routeResult.kind, text })) {
+        void call.sendSteer(text);
+      }
       if (routeResult.kind === 'steer' && routeResult.target) {
         const target = agents.find((item) => item.id === routeResult.target?.id);
         if (target) dispatchMentionSteer(target, routeResult.text || text);
@@ -450,6 +484,139 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
   }, [entries, frameNow]);
 
 
+  // ── The room-native call workspace (plans/voice-orchestrated-room-integration, concern 03) ─────
+  // The thread IS the workspace: the same conversation, with the call's chrome above it, its
+  // decisions and artifacts in the panel beside it, and its steering routed through the composer
+  // that was already there. No second dashboard, no separate transcript pane. (`call` itself is
+  // declared beside `activeChannelId` above — `handleSend` needs it.)
+  const [paneStack, setPaneStack] = useState<PaneStackEntry[]>(initialPaneStack);
+  const [openDecisionId, setOpenDecisionId] = useState<string | undefined>(undefined);
+  const [announcement, setAnnouncement] = useState<string | undefined>(undefined);
+  const announcedDecisionIds = useRef(new Set<string>());
+  const [artifactDoc, setArtifactDoc] = useState<{ id: string; loading: boolean; content?: string; failure?: { reason: VoiceCallArtifactReadFailure; detail?: string } } | undefined>(undefined);
+  const hudRef = useRef<HTMLDivElement | null>(null);
+
+  const pane = currentPane(paneStack);
+
+  // A new channel is a new workspace: the stack, the open question and the announcement dedup all
+  // reset, so a question from the room you just left can never be answered from this one.
+  useEffect(() => {
+    setPaneStack(initialPaneStack());
+    setOpenDecisionId(undefined);
+    setAnnouncement(undefined);
+    setArtifactDoc(undefined);
+    announcedDecisionIds.current = new Set();
+  }, [activeChannelId]);
+
+  // Announce an ARRIVING decision politely and take nothing else. No focus move, no scroll, no
+  // panel opening itself over what someone is reading — the chip in the status region is the
+  // affordance, and it waits.
+  useEffect(() => {
+    const next = decisionAnnouncement(announcedDecisionIds.current, call.decisions);
+    for (const decision of call.decisions) announcedDecisionIds.current.add(decision.id);
+    if (next) setAnnouncement(next);
+  }, [call.decisions]);
+
+  const openDecision = useCallback((decisionId?: string) => {
+    const target = decisionId ?? call.decisions.find((decision) => decisionUrgency(decision) !== 'settled')?.id;
+    if (!target) return;
+    setOpenDecisionId(target);
+    setPaneStack((stack) => pushPane(stack, { pane: 'decision', agentFilter: currentPane(stack).agentFilter }, 0));
+  }, [call.decisions]);
+
+  const openArtifacts = useCallback(() => {
+    setPaneStack((stack) => pushPane(stack, { pane: 'artifacts', agentFilter: currentPane(stack).agentFilter }, 0));
+  }, []);
+
+  const back = useCallback(() => {
+    setPaneStack((stack) => {
+      const next = popPane(stack);
+      if (currentPane(next).pane !== 'decision') setOpenDecisionId(undefined);
+      if (currentPane(next).pane !== 'artifact') setArtifactDoc(undefined);
+      return next;
+    });
+  }, []);
+
+  const openArtifact = useCallback((row: ArtifactRow) => {
+    setPaneStack((stack) => pushPane(stack, { pane: 'artifact', agentFilter: currentPane(stack).agentFilter, artifactId: row.id }, currentPane(stack).scrollTop));
+    setArtifactDoc({ id: row.id, loading: true });
+  }, []);
+
+  // The document read is its own effect keyed on the id, so a re-render (or a poll landing under
+  // the reader) never re-fetches the file they are already reading.
+  useEffect(() => {
+    const id = artifactDoc?.id;
+    if (!id || !artifactDoc?.loading) return;
+    let alive = true;
+    void fetchVoiceCallArtifactContent(activeChannelId, id)
+      .then((doc) => {
+        if (alive) setArtifactDoc({ id, loading: false, content: doc.content });
+      })
+      .catch((err) => {
+        if (!alive) return;
+        // A NAMED failure keeps its name — the viewer says "the snapshot is gone" rather than
+        // rendering an empty document, which is the one thing an evidence viewer must never do.
+        if (err instanceof VoiceCallArtifactReadError) setArtifactDoc({ id, loading: false, failure: { reason: err.reason, detail: err.detail } });
+        else setArtifactDoc({ id, loading: false, failure: { reason: 'read-error', detail: err instanceof Error ? err.message : String(err) } });
+      });
+    return () => { alive = false; };
+  }, [activeChannelId, artifactDoc?.id, artifactDoc?.loading]);
+
+  const activeAgentCount = useMemo(() => roomNodes.filter((node) => node.state === 'in-flight').length, [roomNodes]);
+  const status = useMemo(() => threadStatus({ binding: call.binding, decisions: call.decisions, activeAgents: activeAgentCount, gaps: call.gaps }), [call.binding, call.decisions, call.gaps, activeAgentCount]);
+  const chipLabel = useMemo(() => attentionChipLabel(call.decisions), [call.decisions]);
+  const artifactGroups = useMemo(() => groupArtifacts(call.artifacts, call.binding?.callId, pane.agentFilter), [call.artifacts, call.binding?.callId, pane.agentFilter]);
+  const artifactAgents = useMemo(() => artifactAgentOptions(call.artifacts), [call.artifacts]);
+  const openDecisionModel = useMemo(() => {
+    const decision = call.decisions.find((candidate) => candidate.id === openDecisionId);
+    return decision ? decisionDoorModel(decision) : undefined;
+  }, [call.decisions, openDecisionId]);
+  const waitingDecisions = useMemo(() => call.decisions.filter((decision) => decisionUrgency(decision) !== 'settled'), [call.decisions]);
+  const artifactRowById = useMemo(() => new Map(artifactGroups.flatMap((group) => group.rows).map((row) => [row.id, row])), [artifactGroups]);
+
+  // The last human or agent activity in this thread, for the idle-hangup line. Read from the room's
+  // own entries rather than a separate clock, so the copy can never disagree with the timeline.
+  const lastActivityAt = useMemo(() => entries.reduce((max, entry) => Math.max(max, entry.ts), 0) || undefined, [entries]);
+
+  const voicePanel =
+    pane.pane === 'decision' && openDecisionModel ? (
+      <VoiceDecisionDoor
+        model={openDecisionModel}
+        callId={call.binding?.callId}
+        agentLabel="the call"
+        index={waitingDecisions.findIndex((decision) => decision.id === openDecisionModel.id) + 1 || undefined}
+        total={waitingDecisions.length}
+        pendingOptionIndex={call.pendingOption?.decisionId === openDecisionModel.id ? call.pendingOption.optionIndex : undefined}
+        refusal={call.refusals[openDecisionModel.id]}
+        onChoose={(optionIndex, label) => void call.chooseOption(openDecisionModel.id, optionIndex, label)}
+        onConfirm={() => void call.confirm()}
+        onCancelConfirm={call.cancelConfirm}
+        onClose={back}
+      />
+    ) : pane.pane === 'artifacts' ? (
+      <VoiceArtifactsList
+        groups={artifactGroups}
+        agentOptions={artifactAgents}
+        agentFilter={pane.agentFilter}
+        onFilterChange={(value) => setPaneStack((stack) => setStackFilter(stack, value))}
+        onOpen={openArtifact}
+        onClose={back}
+        loading={call.loading}
+        binding={call.binding}
+        now={frameNow}
+        scrollTop={pane.scrollTop}
+        onScroll={(scrollTop) => setPaneStack((stack) => stack.map((entry, index) => (index === stack.length - 1 ? { ...entry, scrollTop } : entry)))}
+      />
+    ) : pane.pane === 'artifact' && pane.artifactId && artifactRowById.get(pane.artifactId) ? (
+      <VoiceArtifactViewer
+        row={artifactRowById.get(pane.artifactId)!}
+        content={artifactDoc?.content}
+        loading={artifactDoc?.loading ?? true}
+        failure={artifactDoc?.failure}
+        onBack={back}
+      />
+    ) : undefined;
+
   return (
     <div className="dark flex h-screen w-full overflow-hidden text-sm" style={{ background: '#070708', color: '#E8E8EA' }}>
       {/* The room is the home frame, drawn as the reference draws it: the alarm band across the top
@@ -485,6 +652,7 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
               window.location.hash = hubHref(`node:${node.id}`);
             }}
             decision={answering ? <DecisionPanel request={answering} onAnswer={answer} onClose={() => setAnsweringId(undefined)} /> : undefined}
+            voicePanel={voicePanel}
             unitPanel={
               // Standing inside a unit: its own conversation in the centre, its state beside it. The
               // old workbench put a FLEET roster, a transcript and a LAND/CHANGES/RUN stack on screen
@@ -518,6 +686,40 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
               loading={loading}
               error={error}
               anchorEntryId={anchorEntryId}
+              onAnswerDecision={(decisionId) => openDecision(decisionId)}
+              onOpenCall={() => hudRef.current?.scrollIntoView({ block: 'nearest' })}
+              // The call's chrome rides ABOVE the scroller (see ChannelTimeline's own note), so a
+              // phase change or a status line arriving never moves the conversation underneath it.
+              header={
+                <div ref={hudRef}>
+                  <VoiceCallHudView
+                    // A unit's own conversation is not where you start a call — it has its own panel
+                    // and its own vocabulary. A call already BOUND to one still renders in full;
+                    // only the invitation is withheld.
+                    canStart={!activeChannelId.startsWith('node:')}
+                    binding={call.binding}
+                    starting={call.starting}
+                    ending={call.ending}
+                    muted={call.muted}
+                    muteBusy={call.muteBusy}
+                    controlsAvailable={call.controlsAvailable}
+                    lastActivityAt={lastActivityAt}
+                    now={frameNow}
+                    error={call.error || undefined}
+                    onStart={call.start}
+                    onEnd={call.end}
+                    onToggleMute={call.toggleMute}
+                  />
+                  <VoiceStatusRegion
+                    status={status}
+                    chipLabel={chipLabel}
+                    announcement={announcement}
+                    onOpenDecisions={waitingDecisions.length > 0 ? () => openDecision() : undefined}
+                    onOpenArtifacts={call.binding ? openArtifacts : undefined}
+                    artifactCount={call.artifacts.length}
+                  />
+                </div>
+              }
               onReply={(entry) => { setReplyTarget(entry); setReplyFocusKey((key) => key + 1); }}
               // A waiting card opens the question, with what it is about beside it — the room's own
               // tree already did this; the card was the one place that sent you to the transcript.
@@ -541,6 +743,28 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
               emptyState={activeChannelId === DEFAULT_CHANNEL_ID ? <QuietRoom nodes={roomNodes} now={frameNow} pulse={pulse} /> : undefined}
             />
             <div style={{ borderTop: '1px solid #1F1F22', background: '#0A0A0B' }}>
+              {/* Steering never claims delivery it has not been given. "Sending" while the relay is
+                  in flight, "Delivered to the call" only on the daemon's ok, and a REFUSAL that
+                  says what actually happened and that the session did not hear it — never a silent
+                  drop, which is the one outcome the concern names explicitly. */}
+              {call.steer ? (
+                <div
+                  className="flex items-start gap-2 px-4 py-1.5 text-[11.5px] leading-[1.5]"
+                  style={{ borderBottom: '1px solid #17171A', color: call.steer.status === 'refused' ? '#C2704A' : call.steer.status === 'delivered' ? '#7FB093' : '#8A8A91' }}
+                  role={call.steer.status === 'refused' ? 'alert' : 'status'}
+                >
+                  <span className="min-w-0 flex-1" style={{ textWrap: 'pretty' }}>{steerStatusLine(call.steer)}</span>
+                  <button
+                    type="button"
+                    onClick={call.clearSteer}
+                    aria-label="Dismiss the steering status"
+                    className="flex h-10 w-10 flex-none items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ember"
+                    style={{ color: '#5A5A61' }}
+                  >
+                    <X className="h-3 w-3" aria-hidden />
+                  </button>
+                </div>
+              ) : null}
               {typingLabel ? <div className="flex h-6 items-center gap-2 px-4 text-[11px] text-ink-text-muted">{typingLabel}</div> : null}
               {sending ? <div className="flex h-6 items-center gap-2 px-4 text-[11px] text-ink-text-muted"><Loader2 className="h-3 w-3 animate-spin" aria-hidden /> Posting…</div> : null}
               {replyTarget ? (
