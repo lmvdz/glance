@@ -3,7 +3,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Clock, LogOut } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
 // Shown when a user's domain-matched join request is awaiting an org admin's approval (org policy =
@@ -12,23 +11,29 @@ import { useAuth } from '../context/AuthContext';
 export const PendingApproval = () => {
   const { pendingOrg, signOut } = useAuth();
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#0a0a0b] p-6 text-[#e7e7e9]">
-      <div className="w-full max-w-[420px] rounded-xl border border-[#1c1c20] bg-[#0d0d0f] p-8 text-center">
-        <div className="mx-auto mb-5 flex h-12 w-12 items-center justify-center rounded-full border border-[#2a2a2e] bg-[#161618]">
-          <Clock className="h-5 w-5 text-[#8a8a90]" />
+    <div className="fixed inset-0 z-50 flex items-center justify-center px-8" style={{ background: '#0A0A0B', color: '#E8E8EA' }}>
+      <div className="w-full" style={{ maxWidth: 560 }}>
+        <div style={{ fontFamily: "'JetBrains Mono',ui-monospace,monospace", fontSize: 10, letterSpacing: '.16em', color: '#5A5A61' }}>
+          NOTHING IS WRONG · SOMEBODY HAS TO LET YOU IN
         </div>
-        <h1 className="text-[17px] font-semibold">Request pending approval</h1>
-        <p className="mx-auto mt-2 max-w-[320px] text-[13px] leading-relaxed text-[#8a8a90]">
-          Your request to join{' '}
-          <span className="font-medium text-[#e7e7e9]">{pendingOrg ?? 'your organization'}</span> is waiting
-          for an admin to approve it. You’ll get access as soon as they do — try again shortly.
-        </p>
+        {/* The old version put a clock glyph in a circle above a centred card, which reads as an
+            error state. Nobody has failed anything here — a person simply has not answered yet. */}
+        <div className="mt-3.5 text-[17px] leading-[1.5]" style={{ textWrap: 'pretty' }}>
+          You asked to join {pendingOrg ?? 'this organisation'}, and it is set up so that a person there decides. Until one
+          of them does, there is nothing here for you to see — not because anything went wrong, but because you are not in
+          the room yet.
+        </div>
+        <div className="mt-3 text-[12.5px] leading-[1.55]" style={{ color: '#8A8A91', textWrap: 'pretty' }}>
+          Nothing is being held against you and nothing needs doing on your side. Come back and you will either be in, or
+          still waiting on the same person.
+        </div>
         <button
+          type="button"
           onClick={() => void signOut()}
-          className="mt-6 inline-flex items-center gap-2 rounded-md border border-[#2a2a2e] px-4 py-2 text-[13px] font-medium text-[#e7e7e9] transition-colors hover:bg-[#161618]"
+          className="mt-6 h-8 rounded-[3px] px-3"
+          style={{ border: '1px solid #26262B', fontFamily: "'JetBrains Mono',ui-monospace,monospace", fontSize: 10.5, color: '#C9C9CF' }}
         >
-          <LogOut className="h-3.5 w-3.5" />
-          Sign out
+          sign out
         </button>
       </div>
     </div>
