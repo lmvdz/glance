@@ -59,10 +59,11 @@ describe("voiceDecisionPushPayload", () => {
 		expect(payload?.tag).toBe("voice-decision:room-1:d1");
 	});
 
-	test("a deep link back to the room", () => {
+	test("a deep link back to the room, using the router's real '#/channel/<id>' route — not a nonexistent '/room/' path", () => {
 		const payload = voiceDecisionPushPayload("room-1", decision({ id: "d1", state: "open" }));
-		expect(payload?.url).toContain("room-1");
-		expect(payload?.url).toContain("push=1");
+		// Asserting the id is present isn't enough — that would still pass for the old, broken
+		// '/#/room/room-1?push=1' link. Assert the actual route prefix `parseHubHash` recognizes.
+		expect(payload?.url).toBe("/#/channel/room-1?push=1");
 	});
 });
 

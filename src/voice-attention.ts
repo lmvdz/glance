@@ -52,7 +52,9 @@ export function voiceDecisionPushPayload(channelId: string, decision: JournalDec
 	if (!ACTIVE_DECISION_STATES.has(decision.state)) return null;
 	const title = decision.state === "awaiting-confirmation" ? `⏳ Confirm: ${decision.prompt}` : `📞 ${decision.prompt}`;
 	const body = decision.options.map((o) => o.label).join(" · ") || "Waiting on your call.";
-	return { title, body, url: `/#/room/${encodeURIComponent(channelId)}?push=1`, tag: `voice-decision:${channelId}:${decision.id}` };
+	// `webapp/src/lib/router.ts#parseHubHash`'s `head === "channel"` branch is the real route for a
+	// room — there is no `/room/` route (that name never existed; the room IS the channel/thread).
+	return { title, body, url: `/#/channel/${encodeURIComponent(channelId)}?push=1`, tag: `voice-decision:${channelId}:${decision.id}` };
 }
 
 function pushSentPath(stateDir: string, channelId: string): string {

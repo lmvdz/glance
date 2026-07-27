@@ -13,6 +13,14 @@ describe('Hub hash router', () => {
     expect(hubHref('ops/night')).toBe('#/channel/ops%2Fnight');
   });
 
+  test('a `?push=1` marker on a channel route is stripped, not glued onto the channel id', () => {
+    // src/voice-attention.ts's push deep link is exactly this shape: `/#/channel/<id>?push=1`. A
+    // fragment has no browser-parsed query string, so without stripping this ourselves the id would
+    // literally become "room-1?push=1" — a channel that doesn't exist, silently landing nowhere.
+    expect(parseHubHash('#/channel/room-1?push=1')).toEqual({ kind: 'hub', channelId: 'room-1' });
+    expect(parseHubHash('#/channel/room-1?push=1&view=diff')).toEqual({ kind: 'hub', channelId: 'room-1' });
+  });
+
   test('demoted workbench routes stay behind the hub shell', () => {
     expect(workbenchHref('capabilities')).toBe('#/workbench/capabilities');
     expect(parseHubHash('#/workbench/capabilities')).toEqual({ kind: 'workbench', view: 'capabilities' });
