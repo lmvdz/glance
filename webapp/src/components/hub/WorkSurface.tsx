@@ -45,6 +45,13 @@ export function WorkSurface() {
     [tasks, agents],
   );
 
+  // Units attached to no task on this list. Without this the surface makes a claim about the FLEET
+  // from task-scoped data, which is how it came to say "not one of them needs you" while the room's
+  // own bar said "1 waiting on you".
+  const unattached = React.useMemo(
+    () => agents.filter((agent) => !agent.featureId || !tasks.some((task) => task.id === agent.featureId)).length,
+    [agents, tasks],
+  );
   const grouped = bands(items);
   const recent = whereYouHaveBeen(items, now);
 
@@ -55,7 +62,7 @@ export function WorkSurface() {
         {/* Leads with what needs you. "18 tasks, 4 in progress" is the shape of a board and says
             nothing about whether you can close the tab. */}
         <div className="mt-3.5 text-[17px] leading-[1.5]" style={{ color: '#E8E8EA', textWrap: 'pretty', maxWidth: 720 }}>
-          {workHeadline(items)}
+          {workHeadline(items, unattached)}
         </div>
 
         <div className="mt-7 flex gap-9">

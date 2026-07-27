@@ -28,8 +28,22 @@ describe('workHeadline', () => {
     expect(line.startsWith('1 of the 3')).toBe(true);
   });
 
-  it('says plainly when nothing needs you', () => {
-    expect(workHeadline([item(), item({ id: 'b', posture: 'idle' })])).toContain('not one of them needs you');
+  it('scopes "nothing needs you" to what it can actually see', () => {
+    expect(workHeadline([item(), item({ id: 'b', posture: 'idle' })])).toContain('none of these needs you');
+  });
+
+  it('never contradicts the room about whether the fleet needs you', () => {
+    // Seen live: the top bar read "1 waiting on you" while this line read "not one of them needs
+    // you". Both were true of what they measured, and together they were a contradiction — which is
+    // worse than either being wrong, because a reader cannot tell which screen to believe.
+    const line = workHeadline([item({ posture: 'idle' })], 1);
+    expect(line).toContain('1 unit is running outside any plan on this list');
+    expect(line).toContain('the room is where it lives');
+  });
+
+  it('does not call the fleet empty when it has unattached work', () => {
+    expect(workHeadline([], 2)).toContain('The fleet is not idle');
+    expect(workHeadline([], 0)).toContain('no work here at all');
   });
 
   it('distinguishes an empty list from a filtered one', () => {

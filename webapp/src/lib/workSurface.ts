@@ -50,17 +50,31 @@ export function ranked(items: readonly WorkItem[]): WorkItem[] {
  *
  * Leads with the count that requires action. "18 tasks, 4 in progress" is the shape of a board and
  * tells a person nothing about whether they can close the tab.
+ *
+ * `unattached` is the units belonging to no task on this list, and it exists because of a defect seen
+ * live: the top bar read "1 waiting on you" while this line read "not one of them needs you". Both
+ * were true of what they measured and together they were a contradiction, which is worse than either
+ * being wrong — a reader cannot tell which screen to believe. This line is scoped to what it can
+ * actually see, and says so when there is work it cannot.
  */
-export function workHeadline(items: readonly WorkItem[]): string {
+export function workHeadline(items: readonly WorkItem[], unattached = 0): string {
   const live = items.filter((item) => !item.done);
-  if (items.length === 0) return 'Nothing is on. This is not a filtered view — there is no work here at all.';
-  if (live.length === 0) return `Everything here is finished. ${items.length} thing${items.length === 1 ? '' : 's'}, none of them waiting on anything.`;
+  const elsewhere = unattached > 0
+    ? ` ${unattached} unit${unattached === 1 ? ' is' : 's are'} running outside any plan on this list — the room is where ${unattached === 1 ? 'it lives' : 'they live'}.`
+    : '';
+  if (items.length === 0) {
+    return unattached > 0
+      ? `No plan is on. The fleet is not idle —${elsewhere}`
+      : 'Nothing is on. This is not a filtered view — there is no work here at all.';
+  }
+  if (live.length === 0) return `Everything here is finished. ${items.length} thing${items.length === 1 ? '' : 's'}, none of them waiting on anything.${elsewhere}`;
   const needs = live.filter((item) => item.posture === 'needs-you');
   if (needs.length === 0) {
     const working = live.filter((item) => item.posture === 'working').length;
-    return `${live.length} thing${live.length === 1 ? '' : 's'} on, ${working === 0 ? 'none of them moving' : `${working} of them moving`}, and not one of them needs you.`;
+    // "not one of them needs you" is scoped to THESE — never a claim about the fleet.
+    return `${live.length} thing${live.length === 1 ? '' : 's'} on, ${working === 0 ? 'none of them moving' : `${working} of them moving`}, and none of these needs you.${elsewhere}`;
   }
-  return `${needs.length} of the ${live.length} things on ${needs.length === 1 ? 'needs' : 'need'} you. The rest are moving or waiting on each other.`;
+  return `${needs.length} of the ${live.length} things on ${needs.length === 1 ? 'needs' : 'need'} you. The rest are moving or waiting on each other.${elsewhere}`;
 }
 
 /** The band a thing sits in, named as a state of the world rather than a workflow column. */
