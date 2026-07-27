@@ -5,7 +5,6 @@ import {
   deriveGraphPageContext,
   deriveFogPageContext,
   deriveCapabilitiesPageContext,
-  deriveIntervenePageContext,
   deriveReviewPageContext,
   deriveOrgPageContext,
   serializePageContextForPrompt,
@@ -184,25 +183,6 @@ describe('deriveCapabilitiesPageContext', () => {
 
 // ── Intervene / Review / Org ─────────────────────────────────────────────────────────────────
 
-describe('deriveIntervenePageContext', () => {
-  test('minimal context keyed on the intervened agent', () => {
-    const a = agent('a1', 'working');
-    expect(deriveIntervenePageContext({ interveneAgentId: 'a1', agent: a })).toEqual({
-      viewId: 'intervene',
-      title: 'Intervene — a1',
-      entities: [{ kind: 'agent', id: 'a1', label: 'a1' }],
-      selection: { kind: 'agent', id: 'a1' },
-      route: '/intervene/a1',
-    });
-  });
-
-  test('falls back gracefully with no agent resolved yet', () => {
-    const ctx = deriveIntervenePageContext({ interveneAgentId: null, agent: undefined });
-    expect(ctx.title).toBe('Intervene');
-    expect(ctx.entities).toEqual([]);
-    expect(ctx.route).toBe('/intervene');
-  });
-});
 
 describe('deriveReviewPageContext', () => {
   test('carries the reviewed task + doc path', () => {

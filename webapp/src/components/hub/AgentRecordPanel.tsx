@@ -1,32 +1,32 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { AlertCircle, RefreshCw } from 'lucide-react';
 import { apiJson } from '../../lib/api';
-import { workbenchHref } from '../../lib/router';
+import { unitHref } from '../../lib/router';
 import type { AgentDTO } from '../../lib/dto';
+import { NEVER_RANKED, claimBasis, sampleCaveat, sampleLine, whatWouldMakeThisWorthReading, type AgentRecordView } from '../../lib/agentRecord';
 
-type ClaimState = 'current' | 'stale' | 'withdrawn';
-interface AgentRecordView {
-  agentId: string;
-  roleDefault?: string;
-  provisional: boolean;
-  checking?: { requiredUnits: number; checkedUnits: number; reviewerId?: string };
-  profileMissing: boolean;
-  claims: Array<{ id: string; claim: string; verification: 'checked' | 'agent-word' | 'unverifiable'; sampleSize: number; date: number; state: ClaimState; sourceNodeIds: string[] }>;
-}
+/**
+ * AgentRecordPanel — what an agent has actually done, and the refusal to turn it into a reputation.
+ *
+ * This rendered inside the new room still wearing the old application's clothes: rounded cards, an ink-
+ * surface refresh button, an amber "provisional" pill. `03-machinery.html` draws it as prose under mono
+ * zone headings, and — more importantly — draws it as an argument against itself. The zones are
+ * *"WHAT HE HAS ACTUALLY DONE — ALL OF IT"*, *"WHAT WOULD MAKE THIS PAGE WORTH READING"*, and *"WHAT HIS
+ * ROLE DOES BY DEFAULT — NOT WHAT HE HAS PROVED"*, with the standing line **a wrong reputation is worse
+ * than none** across the top of the thin case.
+ *
+ * The old version had every fact and none of the framing: it showed claims with sample sizes and left
+ * the reader to notice that six units cannot support a conclusion. This one says so first.
+ */
 
+const MONO = "'JetBrains Mono',ui-monospace,monospace";
 const DATE = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' });
-
-function claimCopy(claim: AgentRecordView['claims'][number]): string {
-  const basis = `${claim.sampleSize} ${claim.sampleSize === 1 ? 'unit' : 'units'} · ${DATE.format(claim.date)}`;
-  if (claim.state === 'withdrawn') return `${basis} · withdrawn; it remains here because it was true to its evidence then.`;
-  if (claim.state === 'stale') return `${basis} · stale; check the source units before relying on it.`;
-  return `${basis} · ${claim.verification === 'checked' ? 'checked' : claim.verification === 'agent-word' ? 'reported by the agent' : 'not verifiable right now'}.`;
-}
 
 export function AgentRecordPanel({ agent }: { agent: AgentDTO }) {
   const [record, setRecord] = useState<AgentRecordView>();
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
+  const name = agent.name || agent.id;
+
   const load = useCallback(async () => {
     setLoading(true);
     setError('');
@@ -34,30 +34,109 @@ export function AgentRecordPanel({ agent }: { agent: AgentDTO }) {
       setRecord(await apiJson<AgentRecordView>(`/api/agents/${encodeURIComponent(agent.id)}/record`));
     } catch {
       setRecord(undefined);
-      setError('Could not load this record. Try again; no claim is being assumed true.');
+      // A failed read is not an empty record. Saying "nothing recorded" here would be the page making
+      // the claim it exists to avoid making.
+      setError('This record could not be read. That is a failed request, not an empty history — no claim about this agent is being assumed either way.');
     } finally {
       setLoading(false);
     }
   }, [agent.id]);
   useEffect(() => { void load(); }, [load]);
 
+  const caveat = record ? sampleCaveat(record, name) : undefined;
+
   return (
-    <section className="border-b border-ink-border bg-panel px-4 py-3" aria-label={`${agent.name || agent.id} record`} aria-busy={loading}>
-      <div className="flex items-baseline justify-between gap-3">
-        <div>
-          <p className="font-mono text-[10px] font-medium uppercase tracking-[0.16em] text-ink-text-subtle">Record, not a score</p>
-          <p className="mt-1 text-sm text-ink-text-body">{record?.roleDefault ? `Configured for ${record.roleDefault}.` : 'Could not verify this agent’s configured role.'}</p>
-        </div>
-        <button type="button" onClick={() => void load()} className="flex h-10 w-10 items-center justify-center rounded-md text-ink-text-muted hover:bg-ink-surface hover:text-ink-text focus-visible:ring-2 focus-visible:ring-ember focus-visible:ring-offset-2 focus-visible:ring-offset-ink" aria-label="Reload agent record" disabled={loading}>
-          <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin motion-reduce:animate-none' : ''}`} aria-hidden />
+    <section
+      className="px-5 py-3.5"
+      style={{ borderBottom: '1px solid #1F1F22', background: '#0A0A0B' }}
+      aria-label={`${name} record`}
+      aria-busy={loading}
+    >
+      <div className="flex items-baseline gap-3">
+        <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.14em', color: '#5A5A61' }}>WHAT {name.toUpperCase()} HAS ACTUALLY DONE — ALL OF IT</div>
+        <div className="flex-1" />
+        {record ? <div style={{ fontFamily: MONO, fontSize: 10, color: '#4A4A52' }}>{sampleLine(record)}</div> : null}
+        <button
+          type="button"
+          onClick={() => void load()}
+          disabled={loading}
+          style={{ fontFamily: MONO, fontSize: 10, color: '#5A5A61' }}
+          title="Read this record again."
+        >
+          {loading ? 'reading…' : 'reload'}
         </button>
       </div>
-      {loading ? <div className="mt-3 space-y-2" aria-label="Loading agent record"><div className="h-4 w-2/3 animate-pulse rounded bg-ink-surface motion-reduce:animate-none" /><div className="h-12 rounded bg-ink-surface animate-pulse motion-reduce:animate-none" /></div> : null}
-      {error ? <div className="mt-3 flex items-start gap-2 rounded-md border border-red-400/30 bg-red-400/10 p-3 text-xs text-red-200"><AlertCircle className="mt-0.5 h-4 w-4 flex-none" aria-hidden /><p>{error}</p></div> : null}
-      {!loading && !error && record ? <>
-        {record.provisional ? <p className="mt-3 rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-xs leading-5 text-ink-text-body">Provisional and being checked: {record.checking?.checkedUnits ?? 0} of {record.checking?.requiredUnits ?? 0} units reviewed. This is a safeguard, not a judgement.</p> : record.profileMissing ? <p className="mt-3 text-xs text-ink-text-muted">Could not verify whether this agent is provisional. There is no onboarding record yet.</p> : null}
-        {record.claims.length === 0 ? <p className="mt-3 text-xs leading-5 text-ink-text-muted">No proven behaviour is recorded yet. The role above is a default, not a prediction.</p> : <ul className="mt-3 space-y-2">{record.claims.map((claim) => <li key={claim.id} className="rounded-md border border-ink-border bg-ink px-3 py-2"><p className="text-sm text-ink-text-body">{claim.claim}</p><p className="mt-1 font-mono text-[11px] leading-5 text-ink-text-muted">{claimCopy(claim)}</p><div className="mt-2 flex flex-wrap gap-2">{claim.sourceNodeIds.map((sourceId) => <a key={sourceId} href={workbenchHref('intervene', sourceId)} className="min-h-10 rounded-md border border-ink-border px-2 py-2 font-mono text-[11px] text-ember-link hover:bg-ink-surface focus-visible:ring-2 focus-visible:ring-ember focus-visible:ring-offset-2 focus-visible:ring-offset-ink">Open unit {sourceId}</a>)}</div></li>)}</ul>}
-      </> : null}
+
+      {error ? (
+        <div className="mt-2.5 px-3 py-2.5 text-[12px] leading-[1.5]" style={{ border: '1px solid #241A17', borderLeft: '2px solid #B4553A', background: '#100D0C', color: '#DEDEE2', textWrap: 'pretty' }}>
+          {error}
+        </div>
+      ) : null}
+
+      {!loading && !error && record ? (
+        <>
+          {/* The refusal comes FIRST. Putting it under the claims would let someone read three claims as
+              a character assessment before reaching the sentence that says they are not one. */}
+          {caveat ? (
+            <div className="mt-2.5">
+              <div className="text-[12.5px] leading-[1.55]" style={{ color: '#DEDEE2', textWrap: 'pretty' }}>{caveat}</div>
+              <div className="mt-1" style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.06em', color: '#8A6A45' }}>
+                no judgement offered · a wrong reputation is worse than none
+              </div>
+            </div>
+          ) : null}
+
+          {record.provisional ? (
+            <div className="mt-2.5 text-[12px] leading-[1.5]" style={{ color: '#8A8A91', textWrap: 'pretty' }}>
+              Still being checked: {record.checking?.checkedUnits ?? 0} of {record.checking?.requiredUnits ?? 0} units reviewed. That is a safeguard on new work, not a judgement about {name}.
+            </div>
+          ) : record.profileMissing ? (
+            <div className="mt-2.5 text-[12px] leading-[1.5]" style={{ color: '#6A6A72', textWrap: 'pretty' }}>
+              Whether {name} is still being checked is unknown — there is no onboarding record. Unknown, not no.
+            </div>
+          ) : null}
+
+          {record.claims.length > 0 ? (
+            <div className="mt-3 flex flex-col">
+              {record.claims.map((claim) => (
+                <div key={claim.id} className="py-2.5" style={{ borderTop: '1px solid #17171A', opacity: claim.state === 'withdrawn' ? 0.62 : 1 }}>
+                  <div className="text-[12.5px] leading-[1.5]" style={{ color: '#DEDEE2', textWrap: 'pretty' }}>{claim.claim}</div>
+                  <div className="mt-[3px] flex flex-wrap items-baseline gap-x-3" style={{ fontFamily: MONO, fontSize: 10, color: '#5A5A61' }}>
+                    <span>{claimBasis(claim, (ms) => DATE.format(ms))}</span>
+                    {/* Nothing is inferred from anything you cannot open. */}
+                    {claim.sourceNodeIds.map((sourceId) => (
+                      <a key={sourceId} href={unitHref(sourceId)} style={{ color: '#F0A35A' }} title={`Stand in ${sourceId}.`}>
+                        {sourceId}
+                      </a>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : null}
+
+          <div className="mt-4 flex gap-8">
+            <div className="flex-1 min-w-0">
+              <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.14em', color: '#5A5A61' }}>WHAT WOULD MAKE THIS PAGE WORTH READING</div>
+              <div className="mt-2 flex flex-col gap-1.5">
+                {whatWouldMakeThisWorthReading(record).map((line) => (
+                  <div key={line} className="text-[11.5px] leading-[1.5]" style={{ color: '#6A6A72', textWrap: 'pretty' }}>{line}</div>
+                ))}
+              </div>
+            </div>
+            <div className="w-[300px] flex-none">
+              <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.14em', color: '#5A5A61' }}>WHAT THE ROLE DOES BY DEFAULT — NOT WHAT IT HAS PROVED</div>
+              <div className="mt-2 text-[11.5px] leading-[1.5]" style={{ color: '#8A8A91', textWrap: 'pretty' }}>
+                {record.roleDefault
+                  ? `Configured for ${record.roleDefault}. That is what the role does, and it says nothing about whether ${name} does it well.`
+                  : `The configured role could not be read, so not even a default can be shown here.`}
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-3.5 text-[11.5px] leading-[1.5]" style={{ color: '#4A4A52', textWrap: 'pretty' }}>{NEVER_RANKED}</div>
+        </>
+      ) : null}
     </section>
   );
 }

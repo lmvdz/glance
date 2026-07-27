@@ -214,22 +214,6 @@ export function deriveCapabilitiesPageContext({ capabilities, publicCatalog }: C
 
 // ── Intervene ──────────────────────────────────────────────────────────────────────────────────
 
-export interface IntervenePageContextInput {
-  interveneAgentId: string | null;
-  agent: AgentDTO | undefined;
-}
-
-export function deriveIntervenePageContext({ interveneAgentId, agent }: IntervenePageContextInput): PageContext {
-  const entities: PageContextEntity[] = agent ? [{ kind: 'agent', id: agent.id, label: agent.name }] : [];
-  return {
-    viewId: 'intervene',
-    title: agent ? `Intervene — ${agent.name}` : 'Intervene',
-    entities,
-    selection: interveneAgentId ? { kind: 'agent', id: interveneAgentId } : undefined,
-    route: interveneAgentId ? `/intervene/${interveneAgentId}` : '/intervene',
-  };
-}
-
 // ── Review ─────────────────────────────────────────────────────────────────────────────────────
 
 export interface ReviewPageContextInput {
