@@ -38,6 +38,7 @@ const iconClass: Record<ChannelCardView['kind'], typeof ShieldAlert> = {
   'land-merge': GitMerge,
   'token-burn-snapshot': Flame,
   'mention-steer': CircleDot,
+  'goal-overlap': ShieldAlert,
   'local:mention-confirm-required': ShieldAlert,
   'local:mention-steer-failed': AlertCircle,
   'local:spawn-proposal': CircleDot,

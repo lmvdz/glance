@@ -24,6 +24,10 @@ export const TRANSCRIPT_EVENT_UNIT_FAILED = "unit-failed";
 export const TRANSCRIPT_EVENT_PR_OPENED = "pr-opened";
 export const TRANSCRIPT_EVENT_VERIFICATION_RAN = "verification-ran";
 export const TRANSCRIPT_EVENT_MENTION_STEER = "mention-steer";
+// Added post-base (main's wave-7 goal-conflict disclosure, `goalConflict`/spawnAgent in
+// squad-manager.ts) — discovered by the sweep this reland's registry hardening depends on;
+// registered here in the same landing as its webapp reader and schema.
+export const TRANSCRIPT_EVENT_GOAL_OVERLAP = "goal-overlap";
 
 const TRANSCRIPT_EVENT_KINDS = [
 	TRANSCRIPT_EVENT_LAND_ATTEMPT,
@@ -41,6 +45,7 @@ const TRANSCRIPT_EVENT_KINDS = [
 	TRANSCRIPT_EVENT_PR_OPENED,
 	TRANSCRIPT_EVENT_VERIFICATION_RAN,
 	TRANSCRIPT_EVENT_MENTION_STEER,
+	TRANSCRIPT_EVENT_GOAL_OVERLAP,
 ] as const;
 
 export type TranscriptEventKind = (typeof TRANSCRIPT_EVENT_KINDS)[number];

@@ -8,7 +8,7 @@ export type ChannelCardTone = 'neutral' | 'info' | 'warning' | 'success' | 'dest
  *  `local:` on the wire by HubShell's managerCardEntry to keep them out of the daemon's kind
  *  space. See tests/channel-card-kinds-sync.test.ts for the cross-build invariant this protects. */
 export type LocalCardKind = 'local:mention-confirm-required' | 'local:mention-steer-failed' | 'local:spawn-proposal';
-export type ChannelCardKind = 'message' | 'needs-you' | 'gate-verdict' | LandCardKind | 'mention-steer' | LocalCardKind | 'plan-card' | 'return-emit' | 'design-revised' | 'token-burn-snapshot' | 'unit-spawned' | 'unit-turn-finished' | 'unit-failed' | 'pr-opened' | 'verification-ran' | 'unknown-event';
+export type ChannelCardKind = 'message' | 'needs-you' | 'gate-verdict' | LandCardKind | 'mention-steer' | 'goal-overlap' | LocalCardKind | 'plan-card' | 'return-emit' | 'design-revised' | 'token-burn-snapshot' | 'unit-spawned' | 'unit-turn-finished' | 'unit-failed' | 'pr-opened' | 'verification-ran' | 'unknown-event';
 
 export interface PointerCardFace {
   title: string;
@@ -134,6 +134,7 @@ const POINTER_EVENT_KINDS = {
   'land-assessment': true,
   'land-merge': true,
   'mention-steer': true,
+  'goal-overlap': true,
   'plan-card': true,
   'return-emit': true,
   'design-revised': true,
@@ -204,6 +205,9 @@ function toneFor(kind: string, face?: PointerCardFace): ChannelCardTone {
   // Every lifecycle card looked the same, so the one that mattered was invisible among the ones that
   // did not. Failure is the loudest lifecycle fact there is.
   if (kind === 'unit-failed') return 'destructive';
+  // Disclosure, not refusal (see squad-manager.ts's goalConflict comment) — nothing was blocked,
+  // so this is a heads-up to check, not an alarm.
+  if (kind === 'goal-overlap') return 'warning';
   if (kind === 'local:spawn-proposal' || kind === 'mention-steer' || kind === 'plan-card') return 'info';
   return 'neutral';
 }

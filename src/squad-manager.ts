@@ -218,6 +218,7 @@ import {
 	EVENT_ISSUER_MANAGER,
 	TRANSCRIPT_EVENT_DESIGN_REVISED,
 	TRANSCRIPT_EVENT_GATE_VERDICT,
+	TRANSCRIPT_EVENT_GOAL_OVERLAP,
 	TRANSCRIPT_EVENT_LAND_ASSESSMENT,
 	TRANSCRIPT_EVENT_LAND_ATTEMPT,
 	TRANSCRIPT_EVENT_LAND_MERGE,
@@ -6843,7 +6844,7 @@ export class SquadManager extends EventEmitter {
 					kind: "system",
 					format: "stage",
 					text: `${this.safeEventLabel(opts.name?.trim() || "new unit")} may be duplicating work ${owner} already has in hand. Both are running — nothing was blocked. If they are the same goal, one of you is about to do the other's week; if they are not, ignore this. Ask ${owner} directly; what they are working on stays private until they say otherwise.`,
-					event: { kind: "goal-overlap", payload: { refs: { unitName: opts.name }, doorSurface: "unit", face: { title: "Possibly duplicated work", owner: goalOverlap.agent, strength: goalOverlap.strength, pinned: { owner: goalOverlap.agent, basis: goalOverlap.strength } } } },
+					event: { kind: TRANSCRIPT_EVENT_GOAL_OVERLAP, payload: { refs: { unitName: opts.name }, doorSurface: "unit", face: { title: "Possibly duplicated work", owner: goalOverlap.agent, strength: goalOverlap.strength, pinned: { owner: goalOverlap.agent, basis: goalOverlap.strength } } } },
 				})
 				.catch((err) => this.log("warn", `goal-overlap disclosure not delivered to ${room}: ${errText(err)}`));
 		}
