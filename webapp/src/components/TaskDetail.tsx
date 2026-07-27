@@ -21,7 +21,7 @@ import { PlanFlowDiagram } from './PlanFlowDiagram';
 import { WorkflowGraphOverlay } from './WorkflowGraphOverlay';
 import { TaskSessionsTable, sessionRowsFromAgents } from './TaskSessionsTable';
 import { TaskArtifactsRail } from './TaskArtifactsRail';
-import { PlanRealityStrip } from './PlanRealityView';
+import { RealityStrip } from './hub/RealitySurface';
 import { AfterActionSection } from './AfterActionCard';
 import { Kbd } from './kit/Kbd';
 import type { GraphConcernInput } from '../lib/planGraph';
@@ -1789,7 +1789,7 @@ export const TaskDetail = () => {
                   standalone comprehension screen (nav rail's "Plan reality" item, or
                   `#/plan-reality/:featureId`) for the full DAG + per-concern proof breakdown. */}
               {task.planDir && featureId && repo && (
-                <div className="mb-6"><PlanRealityStrip featureId={featureId} repo={repo} /></div>
+                <div className="mb-6"><RealityStrip featureId={featureId} repo={repo} /></div>
               )}
 
               {workflowGraphAgent?.workflowGraph && (
