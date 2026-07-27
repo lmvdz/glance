@@ -275,6 +275,16 @@ export const FeaturePatchBodySchema = Schema.Struct({
 	relationships: Schema.optional(Schema.Unknown),
 });
 
+/** POST /api/features/:id/decisions/supersede — the human lane's supersession verb: `text` (the
+ *  replacing decision) and `supersedes` (the id of the decision it replaces) are required. The
+ *  stamp itself is always server-authored (recordAgentDecision's write rule) — this schema never
+ *  carries supersededBy/supersededAt, so a client cannot mint them here any more than via PATCH. */
+export const FeatureDecisionSupersedeBodySchema = Schema.Struct({
+	text: Schema.String,
+	supersedes: Schema.String,
+	repo: Schema.optional(Schema.Unknown),
+});
+
 /** PUT /api/features/:id/assignees — `assignees` (a string[] of user identities) required. Each id
  *  is validated post-decode against the org roster (DB mode) or the operator identity (file mode);
  *  the schema only asserts the envelope is `{ assignees: string[] }`, rejecting a non-array body. */

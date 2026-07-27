@@ -14,6 +14,7 @@ import { CONSOLE_SYSTEM_PROMPT } from "./console-prompt.ts";
 import { existsSync, readFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { randomUUID } from "node:crypto";
 import type { Server, ServerWebSocket } from "bun";
 import { Result } from "effect";
 import type { ArtifactCommentDTO, ClientCommand, CreateAgentOptions, FeatureCategory, FeatureCriterion, FeatureDecision, FeatureDTO, FeatureRelationship, FeatureStage, IssueRef, PlanAnnotationTarget, PlanRevisionCandidateState, PresenceSnapshot, SquadEvent } from "./types.ts";
@@ -52,6 +53,7 @@ import {
 	decodeBodyOrEmpty,
 	DiscardHeldSyncBodySchema,
 	FeatureAgentsLinkBodySchema,
+	FeatureDecisionSupersedeBodySchema,
 	FeatureAnswersBodySchema,
 	FeatureAutoBodySchema,
 	FeatureConcernsPatchBodySchema,
@@ -2498,6 +2500,33 @@ export class SquadServer {
 			if ("relationships" in body) patch.relationships = featureRelationships(body.relationships);
 			const pf = await manager.updateFeature(decodeURIComponent(mfpatch[1]), patch);
 			return pf ? Response.json(pf) : new Response("no such feature", { status: 404 });
+		}
+		// The human lane's supersession verb (LIVE-1 finding, research-long-horizon-agent-memory/
+		// EXPERIMENTS.md): PATCH deliberately drops a client `supersedes` (anti-forgery — a
+		// round-tripping UI must never mint stamps) and squad_record_decision is agent-tool-only,
+		// which left the ledger's core verb unreachable from the UI — where the only alternative was
+		// DELETE, exactly the verb the ledger forbids for chain members. This route goes through
+		// recordAgentDecision's single write rule, so the stamp is server-authored and atomic, and
+		// every conflict outcome maps to an explicit status instead of a silent drop.
+		const mfsupersede = url.pathname.match(/^\/api\/features\/([^/]+)\/decisions\/supersede$/);
+		if (mfsupersede && req.method === "POST") {
+			const decoded = decodeBody(FeatureDecisionSupersedeBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response("text and supersedes (decision id) required", { status: 400 });
+			const body = decoded.success;
+			const text = body.text.trim();
+			// Blind-review fix: an empty or bare-prefix `supersedes` would evaluate falsy in the write
+			// rule and silently degrade this into an unconditional append while the route advertises
+			// supersession. Normalize like the write path (accept a copied `decision:<id>`), then
+			// reject empty outright.
+			const supersedesId = body.supersedes.trim().replace(/^decision:/, "");
+			if (!text || !supersedesId) return new Response("text and supersedes (decision id) required", { status: 400 });
+			const decision: FeatureDecision = { id: randomUUID(), text, source: "human", createdAt: Date.now(), supersedes: supersedesId };
+			const outcome = await manager.recordAgentDecision(decodeURIComponent(mfsupersede[1]), decision, typeof body.repo === "string" ? body.repo : undefined);
+			if (outcome === "no-feature") return new Response("no such feature", { status: 404 });
+			if (outcome === "supersede-missing") return new Response(`supersedes target "${body.supersedes}" not found on this feature`, { status: 409 });
+			if (outcome === "supersede-superseded") return new Response(`decision "${body.supersedes}" was already superseded — supersede the current decision instead`, { status: 409 });
+			if (outcome === "duplicate") return new Response("an identical decision is already current — no change", { status: 409 });
+			return Response.json({ ok: true, decision });
 		}
 		if (mfpatch && req.method === "DELETE") {
 			const repo = url.searchParams.get("repo") ?? undefined;
