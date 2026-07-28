@@ -13,6 +13,8 @@ import {
   validateSupersedeText,
   supersedeFailureMessage,
   submitSupersede,
+  runSupersedeSubmit,
+  type InFlightRef,
 } from './decisionSurface';
 
 function decision(over: Partial<TaskDecision>): TaskDecision {
@@ -322,5 +324,133 @@ describe('submitSupersede', () => {
     });
     expect(result.ok).toBe(false);
     expect(result.message).toBeDefined();
+  });
+});
+
+describe('runSupersedeSubmit (double-submit guard)', () => {
+  function decision(over: Partial<TaskDecision>): TaskDecision {
+    return { id: 'd1', text: 'text', ...over };
+  }
+
+  /** Records every value each setter was called with, in order — so a test can assert not just
+   *  the FINAL state but the exact sequence a real re-render would have driven the UI through. */
+  function recordingDeps() {
+    const submittingCalls: boolean[] = [];
+    const succeededCalls: boolean[] = [];
+    const errorCalls: (string | undefined)[] = [];
+    let reloadCount = 0;
+    return {
+      submittingCalls,
+      succeededCalls,
+      errorCalls,
+      getReloadCount: () => reloadCount,
+      setSubmitting: (v: boolean) => submittingCalls.push(v),
+      setSucceeded: (v: boolean) => succeededCalls.push(v),
+      setError: (v: string | undefined) => errorCalls.push(v),
+      onSuperseded: () => {
+        reloadCount++;
+      },
+    };
+  }
+
+  it('a second call issued before the first resolves never reaches postSupersede — only ONE network call is ever made', async () => {
+    let calls = 0;
+    let resolveFirst: (d: TaskDecision) => void = () => {};
+    const postSupersede = () =>
+      new Promise<TaskDecision>((resolve) => {
+        calls++;
+        resolveFirst = resolve;
+      });
+    const inFlightRef: InFlightRef = { current: false };
+    const deps = recordingDeps();
+
+    // Simulates a rapid double-click (or Enter held): the second call happens synchronously,
+    // before the first request has resolved — the exact race a `submitting` STATE check alone
+    // cannot close, since both calls would read `submitting`'s stale pre-update value.
+    const first = runSupersedeSubmit({ text: 'use postgres', decisionId: 'd1', postSupersede, inFlightRef, ...deps });
+    const second = runSupersedeSubmit({ text: 'use postgres', decisionId: 'd1', postSupersede, inFlightRef, ...deps });
+
+    expect(calls).toBe(1);
+    expect(inFlightRef.current).toBe(true);
+    // The second call returned synchronously without ever touching `setSubmitting` again.
+    expect(deps.submittingCalls).toEqual([true]);
+    expect(second).toBeUndefined();
+
+    resolveFirst(decision({ id: 'new' }));
+    await first;
+
+    expect(calls).toBe(1);
+    expect(deps.getReloadCount()).toBe(1);
+    expect(deps.succeededCalls).toEqual([true]);
+    expect(deps.errorCalls).toEqual([]);
+  });
+
+  it('releases the guard on failure so a genuine retry can go through', async () => {
+    const inFlightRef: InFlightRef = { current: false };
+    let calls = 0;
+    const deps = recordingDeps();
+    const failOnce = () => {
+      calls++;
+      return calls === 1
+        ? Promise.reject(Object.assign(new Error('an identical decision is already current — no change'), { status: 409 }))
+        : Promise.resolve(decision({ id: 'new' }));
+    };
+
+    await runSupersedeSubmit({ text: 'use postgres', decisionId: 'd1', postSupersede: failOnce, inFlightRef, ...deps });
+    expect(inFlightRef.current).toBe(false);
+    expect(deps.errorCalls).toEqual(['an identical decision is already current — no change']);
+    expect(deps.getReloadCount()).toBe(0);
+
+    // The retry is a genuinely NEW call, not blocked by a guard left over from the failed attempt.
+    await runSupersedeSubmit({ text: 'use postgres', decisionId: 'd1', postSupersede: failOnce, inFlightRef, ...deps });
+    expect(calls).toBe(2);
+    expect(deps.succeededCalls).toEqual([true]);
+    expect(deps.getReloadCount()).toBe(1);
+  });
+
+  it('never releases the guard on success — it stays set for the life of the caller, not just through the await', async () => {
+    const inFlightRef: InFlightRef = { current: false };
+    const deps = recordingDeps();
+    await runSupersedeSubmit({
+      text: 'use postgres',
+      decisionId: 'd1',
+      postSupersede: async () => decision({ id: 'new' }),
+      inFlightRef,
+      ...deps,
+    });
+    expect(inFlightRef.current).toBe(true);
+    // A THIRD call after the guard is set post-success still never reaches the network.
+    let calledAgain = false;
+    const result = runSupersedeSubmit({
+      text: 'use postgres',
+      decisionId: 'd1',
+      postSupersede: async () => {
+        calledAgain = true;
+        return decision({ id: 'newer' });
+      },
+      inFlightRef,
+      ...deps,
+    });
+    expect(result).toBeUndefined();
+    expect(calledAgain).toBe(false);
+  });
+
+  it('never calls postSupersede for empty text — the guard is still released so the person can correct it and retry', async () => {
+    const inFlightRef: InFlightRef = { current: false };
+    let called = false;
+    const deps = recordingDeps();
+    await runSupersedeSubmit({
+      text: '   ',
+      decisionId: 'd1',
+      postSupersede: async () => {
+        called = true;
+        return decision({ id: 'new' });
+      },
+      inFlightRef,
+      ...deps,
+    });
+    expect(called).toBe(false);
+    expect(inFlightRef.current).toBe(false);
+    expect(deps.errorCalls.length).toBe(1);
   });
 });

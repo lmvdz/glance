@@ -158,7 +158,7 @@ test('renders acceptance criteria with their completed state and an honest empty
 // only way to change one; there is no edit or delete anywhere on this panel.
 const AFFORDANCE_TEXT = 'supersede this decision';
 
-test('a "supersede" affordance appears on every current decision', () => {
+test('renders a "supersede" affordance on every current decision', () => {
   const decisions = [
     decision({ id: 'live-1', text: 'use postgres', createdAt: T }),
     decision({ id: 'live-2', text: 'use redis for cache', createdAt: T - 500 }),
@@ -168,7 +168,7 @@ test('a "supersede" affordance appears on every current decision', () => {
   expect(html.split(AFFORDANCE_TEXT).length - 1).toBe(2);
 });
 
-test('the "supersede" affordance never appears on a superseded (historical) decision', () => {
+test('never renders the "supersede" affordance on a superseded (historical) decision', () => {
   const decisions = [
     decision({ id: 'dead-1', text: 'use sqlite', createdAt: T - 10_000, supersededBy: 'ghost-1' }),
     decision({ id: 'dead-2', text: 'use mongo', createdAt: T - 20_000, supersededBy: 'ghost-2' }),
@@ -180,7 +180,7 @@ test('the "supersede" affordance never appears on a superseded (historical) deci
   expect(html).not.toContain(AFFORDANCE_TEXT);
 });
 
-test('a mixed ledger offers the affordance only on the current decision, not its superseded predecessor', () => {
+test('renders the affordance only beside the current decision in a mixed ledger, never its superseded predecessor', () => {
   const decisions = [
     decision({ id: 'live', text: 'use postgres', createdAt: T }),
     decision({ id: 'dead', text: 'use sqlite', createdAt: T - 10_000, supersededBy: 'live' }),
@@ -189,10 +189,14 @@ test('a mixed ledger offers the affordance only on the current decision, not its
   expect(html.split(AFFORDANCE_TEXT).length - 1).toBe(1);
 });
 
-test('a successful supersede is reflected once the ledger is refreshed: the replacement reads current, the original reads struck-through history', () => {
-  // Modeling BEFORE/AFTER a successful POST /api/features/:id/decisions/supersede — this panel
-  // never mutates its own props, it only ever re-renders from what the reload hands back, so
-  // "success" at the render layer means: given the server's post-write ledger, the split is right.
+// This is a RENDER assertion, not an interaction test: it does not click "supersede", type into the
+// composer, or submit anything (this package has no DOM/hook-render harness to drive that — see
+// decisionSurface.ts's `runSupersedeSubmit` doc, whose OWN tests exercise the real click-handler
+// logic and its consequences). What this pins is narrower and still real: given the exact ledger
+// shape the server hands back after a successful supersede (the old decision now carries
+// `supersededBy`, the new one does not), DecisionsPanel's render — not a mutation it performs
+// itself — puts the replacement in the current ledger and the original in struck-through history.
+test('given the post-supersede ledger shape, renders the replacement as current and the original as struck-through history', () => {
   const before = [decision({ id: 'old', text: 'use sqlite', source: 'human', createdAt: T - 10_000 })];
   const beforeHtml = renderToStaticMarkup(<DecisionsPanel decisions={before} criteria={[]} now={T} featureId="f1" />);
   expect(beforeHtml).toContain('use sqlite');

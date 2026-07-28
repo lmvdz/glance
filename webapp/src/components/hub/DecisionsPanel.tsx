@@ -7,9 +7,9 @@ import {
   decisionAge,
   decisionSourceLabel,
   decisionsEmptyState,
+  runSupersedeSubmit,
   shouldCollapseSuperseded,
   splitDecisions,
-  submitSupersede,
 } from '../../lib/decisionSurface';
 
 /**
@@ -81,6 +81,12 @@ function postSupersedeRequest(featureId: string, repo: string | undefined, input
  * working on this ›"); opening it reveals a small composer. Never optimistic: the row this belongs
  * to stays exactly as-is (current, un-struck) until the server confirms the write — `onSuperseded`
  * (a reload of the feature's real decisions) is the only thing that ever moves it into history.
+ *
+ * Guarded against double-submit for the same reason: this is a ledger write, not a cosmetic toggle,
+ * so a second POST for the same supersession is a real defect (it either mints an unwanted second
+ * replacement or 409s on an action that already succeeded) — see `runSupersedeSubmit`'s doc in
+ * decisionSurface.ts for the full guard, and why it stays SET through success rather than resetting
+ * as soon as the request resolves.
  */
 function SupersedeAction({
   featureId,
@@ -96,7 +102,13 @@ function SupersedeAction({
   const [open, setOpen] = React.useState(false);
   const [text, setText] = React.useState('');
   const [submitting, setSubmitting] = React.useState(false);
+  const [succeeded, setSucceeded] = React.useState(false);
   const [error, setError] = React.useState<string | undefined>(undefined);
+  // The double-submit guard's real source of truth (see `runSupersedeSubmit`'s doc, decisionSurface.ts):
+  // a `useRef` cell, not `submitting` state — two clicks landing in the same tick both close over the
+  // PRE-update `submitting` value, since React hasn't committed the re-render yet. The ref is written
+  // synchronously, so the second call sees the first call's write immediately.
+  const inFlightRef = React.useRef(false);
 
   if (!open) {
     return (
@@ -111,25 +123,27 @@ function SupersedeAction({
     );
   }
 
-  const handleSubmit = async () => {
-    setSubmitting(true);
-    const outcome = await submitSupersede({
+  const disabled = submitting || succeeded;
+
+  const handleSubmit = () => {
+    // Defensive early return mirroring the `disabled` attribute below — the authoritative guard is
+    // `inFlightRef` inside `runSupersedeSubmit`, but a click that somehow reaches this handler while
+    // React still has the button rendered enabled (e.g. a queued event from just before a re-render)
+    // should not even attempt to build the request.
+    if (disabled) return;
+    void runSupersedeSubmit({
       text,
       decisionId,
       postSupersede: (input) =>
         featureId
           ? postSupersedeRequest(featureId, repo, input)
           : Promise.reject(new Error('This decision has no feature to record the replacement against.')),
+      inFlightRef,
+      setSubmitting,
+      setError,
+      setSucceeded,
+      onSuperseded,
     });
-    setSubmitting(false);
-    if (!outcome.ok) {
-      setError(outcome.message);
-      return;
-    }
-    setOpen(false);
-    setText('');
-    setError(undefined);
-    onSuperseded?.();
   };
 
   return (
@@ -145,7 +159,7 @@ function SupersedeAction({
         }}
         placeholder="What replaces this decision?"
         rows={2}
-        disabled={submitting}
+        disabled={disabled}
         className="w-full resize-none rounded-[3px] bg-transparent px-2.5 py-2 outline-none disabled:opacity-60"
         style={{ border: '1px solid #26262B', fontSize: 12.5, color: '#C9C9CF' }}
       />
@@ -155,12 +169,12 @@ function SupersedeAction({
       <div className="flex gap-2">
         <button
           type="button"
-          onClick={() => void handleSubmit()}
-          disabled={submitting || !text.trim()}
+          onClick={handleSubmit}
+          disabled={disabled || !text.trim()}
           className="h-7 rounded-[3px] px-3 disabled:opacity-40"
           style={{ border: '1px solid #26262B', fontFamily: MONO, fontSize: 10, color: '#F0A35A' }}
         >
-          {submitting ? 'recording…' : 'record replacement'}
+          {succeeded ? 'recorded — refreshing…' : submitting ? 'recording…' : 'record replacement'}
         </button>
         <button
           type="button"
@@ -169,7 +183,7 @@ function SupersedeAction({
             setText('');
             setError(undefined);
           }}
-          disabled={submitting}
+          disabled={disabled}
           className="h-7 rounded-[3px] px-3"
           style={{ border: '1px solid #26262B', fontFamily: MONO, fontSize: 10, color: '#8A8A91' }}
         >

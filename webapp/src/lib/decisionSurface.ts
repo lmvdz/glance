@@ -185,3 +185,60 @@ export async function submitSupersede(input: SupersedeSubmitInput): Promise<Supe
     return { ok: false, message: supersedeFailureMessage(typeof status === 'number' ? status : undefined, message) };
   }
 }
+
+/** A plain `{current: boolean}` cell — the same shape `useRef` produces, so a real ref and a plain
+ *  test double are interchangeable (mirrors `useVoiceDispatcher.ts`'s `DispatcherRefs`). */
+export interface InFlightRef {
+  current: boolean;
+}
+
+export interface GuardedSupersedeSubmitDeps extends SupersedeSubmitInput {
+  /** Must read `true` the instant a submit starts and stay `true` through success — a REACT STATE
+   *  flag alone cannot do this: two clicks (or one held Enter) inside the same tick both read the
+   *  state variable's stale (pre-update) value from their closures, since `setSubmitting(true)`
+   *  hasn't committed a re-render yet. A ref's `.current` is a plain mutable cell with no batching,
+   *  so the SECOND call sees the first call's write immediately, synchronously, before either has
+   *  awaited anything. */
+  inFlightRef: InFlightRef;
+  setSubmitting: (submitting: boolean) => void;
+  setError: (message: string | undefined) => void;
+  /** Set once the server confirms — and, unlike `setSubmitting`, never unset here on success. See
+   *  the function doc below for why leaving it set is the point. */
+  setSucceeded: (succeeded: boolean) => void;
+  onSuperseded?: () => void;
+}
+
+/**
+ * The composer's actual click-handler logic, factored out exactly like `submitSupersede` above —
+ * so the double-submit guard's ordering is unit-testable without a DOM/hook-render harness. A
+ * second call while `inFlightRef.current` is already `true` returns immediately without ever
+ * invoking `postSupersede`: for a ledger write, a duplicate POST is not cosmetic — it either mints
+ * an unwanted second replacement decision, or comes back 409 "already superseded" and shows the
+ * person an error for an action that, from the first request, actually succeeded.
+ *
+ * On success this deliberately does NOT clear `inFlightRef` or call `setSubmitting(false)` — the
+ * guard stays SET, and the control the caller renders from `submitting`/`succeeded` stays disabled,
+ * for the rest of this component's life. The only thing that ever legitimately ends a successful
+ * supersede's composer is `onSuperseded`'s reload landing with fresh decisions where this one is now
+ * HISTORICAL — at which point the caller (`DecisionsPanel`) stops rendering this action for it at
+ * all and the whole subtree (guard included) unmounts. Resetting the guard locally after success
+ * would reopen the exact race this exists to close: a second click landing on a decision the server
+ * has already superseded, before the reload has had a chance to say so.
+ */
+export function runSupersedeSubmit(deps: GuardedSupersedeSubmitDeps): Promise<void> | undefined {
+  if (deps.inFlightRef.current) return undefined;
+  deps.inFlightRef.current = true;
+  deps.setSubmitting(true);
+  return submitSupersede({ text: deps.text, decisionId: deps.decisionId, postSupersede: deps.postSupersede }).then((outcome) => {
+    if (!outcome.ok) {
+      // Failure releases the guard — a genuine retry (fixed text, a since-resolved conflict) must
+      // be able to go through, unlike the success path above.
+      deps.inFlightRef.current = false;
+      deps.setSubmitting(false);
+      deps.setError(outcome.message);
+      return;
+    }
+    deps.setSucceeded(true);
+    deps.onSuperseded?.();
+  });
+}
