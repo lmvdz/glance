@@ -25,6 +25,7 @@ import { type AutonomyFacts, doctorHostVisible } from "./doctor.ts";
 import { DERIVED_SANDBOX_IMAGE } from "./gate-runner.ts";
 import { errText } from "./err-text.ts";
 import { globalDefaultHarness, listHarnesses, listHarnessTiers } from "./harness-registry.ts";
+import { discoveredModelOptions } from "./model-discovery.ts";
 import { decodeClientCommand } from "./schema/client-command.ts";
 import {
 	AdoptBodySchema,
@@ -281,6 +282,11 @@ export interface ModelOption {
 	value: string;
 	/** Which harness offers it — declared, never inferred from the model id. */
 	harness?: string;
+	/** Where the entry's knowledge comes from — `"live-probe"` (cold harness probe,
+	 *  model-discovery.ts) or `"static-catalog"` (the registry's baked fallback when a probe fails).
+	 *  Absent on env-configured, live-agent, and default entries (pre-existing sources, shape
+	 *  unchanged for older webapps). */
+	provenance?: string;
 }
 
 export function modelOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): ModelOption[] {
@@ -334,6 +340,27 @@ export function harnessDefaultModelOptions(): ModelOption[] {
 	return listHarnessTiers()
 		.filter((t) => available.has(t.name) && t.binDetected)
 		.map((t) => ({ label: `${t.name} default`, value: "", harness: t.name }));
+}
+
+/**
+ * Stable-sort merged options so each harness's entries are CONTIGUOUS, ordered by the group's first
+ * appearance, with harness-less (env/legacy) entries pinned first.
+ *
+ * The webapp's ModelPicker renders a group heading whenever consecutive options change groups — it
+ * never re-sorts. Merged input arrives source-major (all defaults, then all discovered, then all
+ * live), which would render each harness's heading two or three times with its entries scattered
+ * between other harnesses' sections. Within a group the merge order is preserved, which is exactly
+ * the wanted display order: the blank-value "<harness> default" entry (merged before discovery)
+ * stays the section's first row, followed by that harness's real models.
+ * @substrate exported for tests only — the `/api/models` handler in this file is the production caller.
+ */
+export function sortModelOptionsForPicker(options: ModelOption[]): ModelOption[] {
+	const rank = new Map<string, number>();
+	for (const option of options) {
+		const group = option.harness ?? "";
+		if (!rank.has(group)) rank.set(group, group === "" ? -1 : rank.size);
+	}
+	return [...options].sort((a, b) => (rank.get(a.harness ?? "") ?? 0) - (rank.get(b.harness ?? "") ?? 0));
 }
 
 function capabilityInstallState(value: unknown): CapabilityInstallState | undefined {
@@ -2596,7 +2623,10 @@ export class SquadServer {
 		// Daemon-global (not manager-scoped) — see `harnessesResponse`'s doc for why this must also be
 		// reachable here, not just from `noFleet`.
 		if (url.pathname === "/api/harnesses") return this.harnessesResponse(url);
-		if (url.pathname === "/api/models") return Response.json({ models: mergeModelOptions(modelOptionsFromEnv(), harnessDefaultModelOptions(), await manager.modelOptions()) });
+		// Env-configured + per-harness defaults + COLD-DISCOVERED rosters (model-discovery.ts — the fix
+		// for every section showing only "<harness> default" until an agent happened to be live) + any
+		// live agents' answers, deduped per harness+value and sorted so each harness section renders once.
+		if (url.pathname === "/api/models") return Response.json({ models: sortModelOptionsForPicker(mergeModelOptions(modelOptionsFromEnv(), harnessDefaultModelOptions(), await discoveredModelOptions(), await manager.modelOptions())) });
 		if (url.pathname === "/api/autonomy") return Response.json({ ...(await manager.autonomyState()), interrupt: manager.interruptState() });
 		// A person's verdict on being interrupted. The gate is only allowed to keep interrupting people
 		// because it is checked afterwards, and it can only be checked if saying so is one tap.

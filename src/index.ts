@@ -31,6 +31,7 @@ import { renderDoctor, runDoctor } from "./doctor.ts";
 import { makeDoctorProbe } from "./doctor-probe.ts";
 import { envBool, envInt, rootFactoryEnabledWith } from "./config.ts";
 import { installHarnessHooks, uninstallHarnessHooks } from "./harness-hooks.ts";
+import { warmModelDiscovery } from "./model-discovery.ts";
 import { PushService } from "./push.ts";
 import { LocalFederationBus, NullFederationBus } from "./federation.ts";
 import { all as allPresence, who as whoPresence } from "./presence.ts";
@@ -432,6 +433,13 @@ async function cmdUp(args: string[]): Promise<void> {
 	// ManagerRegistry uses (`<stateDir>/orgs/<orgId>`) — see server.ts's orgPush field.
 	const server = new SquadServer(manager, { port, hostname: host, token, tls, push, pushRoot: stateDir, roleTokens, auth, db: dbHandle ?? undefined, trustedOrigins, registry, runtimeSettings, policy, rootOrgId, superviseExternal });
 	const url = server.start();
+
+	// Cold per-harness model discovery (model-discovery.ts): ARM it here — real daemon boot only,
+	// mirroring applyWellKnownDirsToProcessPath's discipline above, so no test-constructed
+	// SquadServer ever spawns genuine harness CLIs — and warm the cache immediately, so the create
+	// surface's first `/api/models` fetch finds real per-harness rosters instead of eating the
+	// probes' full latency (or, before this existed, showing one bare "default" per harness).
+	warmModelDiscovery();
 
 	// Persistent autonomy: surface raw omp sessions in presence, and (unless opted out) answer
 	// pending agent prompts hands-free — both started by the daemon so they live and die with it.

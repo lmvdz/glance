@@ -35,6 +35,10 @@ export interface ModelOption {
   value: string;
   /** Which harness offers this model. Declared by the daemon, never inferred from the id. */
   harness?: string;
+  /** Where the daemon learned of it — "live-probe" (cold harness enumeration) or "static-catalog"
+   *  (registry fallback). Absent on env/default/live-agent entries. Informational; rendering never
+   *  branches on it. */
+  provenance?: string;
 }
 
 export interface SuggestionChip {
