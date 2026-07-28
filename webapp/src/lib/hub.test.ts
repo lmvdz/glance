@@ -1,8 +1,11 @@
 import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { entryAuthorLabel, entryTimeLabel, groupActiveWork, latestSeq, presenceCount, reduceChannelEntries } from './hub';
 import { renderToStaticMarkup } from 'react-dom/server';
 import React from 'react';
-import { TopBar } from '../components/hub/RoomFrame';
+import { RoomFrame, TopBar } from '../components/hub/RoomFrame';
+import { NAV_ROWS } from './commandPalette';
 import type { AgentDTO, ChannelEntry } from './dto';
 
 const entry = (overrides: Partial<ChannelEntry> & Pick<ChannelEntry, 'id' | 'seq'>): ChannelEntry => ({
@@ -75,6 +78,39 @@ describe('Hub reductions', () => {
   test('without a palette opener the bar stays exactly as before — no half-wired hint pointing at nothing', () => {
     const html = renderToStaticMarkup(React.createElement(TopBar, { repo: 'omp-squad', now: 0 }));
     expect(html).not.toContain('⌘K');
+  });
+
+  // The workbench nav strip (WorkbenchNavStrip.tsx) fixed "I was only able to navigate through ⌘K"
+  // for the nine workbench surfaces — but it must not leak into the room. RoomFrame's own header
+  // comment is the law here: "no channel column — plans and doors are reached from the tree and the
+  // palette." That is about the room staying a narrative home screen with cards as doors, and this
+  // proves RoomFrame renders none of the strip's markers when given a normal, unremarkable frame.
+  test('the room does not render the workbench nav strip — that law only ever governed the room', () => {
+    const html = renderToStaticMarkup(
+      React.createElement(
+        RoomFrame,
+        { repo: 'omp-squad', rooms: [], activeRoomId: 'fleet', onOpenRoom: () => undefined, nodes: [], plans: 0, now: 0, onSelect: () => undefined, onEnter: () => undefined },
+        'room content',
+      ),
+    );
+    expect(html).not.toContain('aria-label="Workbench surfaces"');
+    // Every NAV_ROWS label, not a sample of three — a name this test doesn't check is exactly the
+    // one a future edit could leak into the room unnoticed. ('Fleet' is excluded: the room's own
+    // "WHERE YOU ARE STANDING" tree legitimately prints room names, and the default room IS named
+    // "fleet" — that word appearing here would not mean the strip leaked in.)
+    for (const row of NAV_ROWS) {
+      if (row.label === 'Fleet') continue;
+      expect(html).not.toContain(row.label);
+    }
+  });
+
+  // The rendered-output check above proves the room's OUTPUT is clean for one representative set of
+  // props; it can't rule out a prop combination that would light the strip up. This proves the
+  // actual component boundary instead: RoomFrame.tsx does not import WorkbenchNavStrip at all, so
+  // there is no code path — no matter what props RoomFrame is given — that could render it.
+  test('RoomFrame does not import the workbench nav strip — the boundary is enforced in the source, not just in one rendered sample', () => {
+    const source = readFileSync(join(import.meta.dir, '../components/hub/RoomFrame.tsx'), 'utf8');
+    expect(source).not.toContain('WorkbenchNavStrip');
   });
 
   test('presence count counts humans, not sockets', () => {
