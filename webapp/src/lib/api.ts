@@ -321,7 +321,7 @@ export function fetchPlanBrief(name: string, repo?: string): Promise<PlanBriefDT
 
 export type VoiceCallState = 'connecting' | 'live' | 'degraded' | 'ended';
 export type VoiceCallRetention = 'full' | 'tails' | 'off';
-export type VoiceCallTerminalReason = 'operator-ended' | 'terminal' | 'journal-end' | 'broker-exit' | 'stale-binding' | 'port-reused' | 'start-failed';
+export type VoiceCallTerminalReason = 'operator-ended' | 'terminal' | 'journal-end' | 'broker-exit' | 'stale-binding' | 'port-reused' | 'start-failed' | 'idle';
 
 /** `GET/POST/DELETE /api/channels/:id/voice-call`'s response shape. Never carries a control token —
  *  the daemon holds it and relays authenticated bridge controls itself (resolve/steer below); a page
@@ -368,11 +368,17 @@ export interface VoiceCallDecisionOptionDTO {
   consequence: string;
 }
 
+/** Concern 05's recorded voice-resolution policy — "destructive" is UI-only, "routine" (or the
+ *  field simply absent, on a decision minted before a caller declared one) stays voice-resolvable.
+ *  Mirrors `src/voice-call-journal.ts`'s `JournalDecisionClass`. */
+export type VoiceCallDecisionClass = 'destructive' | 'routine';
+
 export interface VoiceCallDecisionDTO {
   id: string;
   prompt: string;
   options: VoiceCallDecisionOptionDTO[];
   requiresConfirmation: boolean;
+  decisionClass?: VoiceCallDecisionClass;
   state: VoiceCallDecisionState;
   createdAt: number;
   updatedAt: number;

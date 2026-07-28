@@ -99,7 +99,12 @@ export type ApplyOutcome =
 	 *  though it was never durably persisted. */
 	| { status: "transcript-append-failed"; entry: StoredTranscriptEntry }
 	| { status: "applied-artifact"; artifact: JournalArtifact }
-	| { status: "applied-terminal"; error: string | null };
+	/** `reason` is additive (concern 05's idle-hangup policy, e.g. `"idle"`) — see journal.ts's own
+	 *  `JournalRecord["terminal"]`. Absent for every terminal record that predates this field. */
+	| { status: "applied-terminal"; error: string | null; reason?: string }
+	/** OMP's idle-hangup policy spoke its warning — nothing to mint a card for, but the cursor still
+	 *  advances so a restarted tailer does not re-observe it as new. */
+	| { status: "applied-idle-warning" };
 
 const DECISION_TERMINAL_STATES = new Set(["answered", "expired", "cancelled", "failed"]);
 
@@ -281,9 +286,14 @@ export class CallProjectionStore {
 			return { status: "applied-artifact", artifact: envelope.record.artifact };
 		}
 
+		if (envelope.record.type === "idle-warning") {
+			this.persist(channelId);
+			return { status: "applied-idle-warning" };
+		}
+
 		// terminal
 		this.persist(channelId);
-		return { status: "applied-terminal", error: envelope.record.error };
+		return { status: "applied-terminal", error: envelope.record.error, ...(envelope.record.reason === undefined ? {} : { reason: envelope.record.reason }) };
 	}
 
 	private async appendTranscript(callId: string, transcript: JournalTranscript, at: number, retention: VoiceCallRetention, gap: JournalGap | undefined): Promise<{ ok: boolean; entry: StoredTranscriptEntry }> {

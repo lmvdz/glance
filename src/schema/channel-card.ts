@@ -208,6 +208,9 @@ const VoiceDecisionFaceSchema = Schema.Struct({
 	requiresConfirmation: Schema.optional(Schema.Boolean),
 	optionLabels: Schema.optional(Schema.Array(Schema.String)),
 	resolutionSource: Schema.optional(Schema.Literals(["voice", "ui"])),
+	/** Concern 05's recorded voice-resolution policy — "destructive" is UI-only, "routine" (or
+	 *  absent) stays voice-resolvable. See voice-call-journal.ts's `JournalDecisionClass`. */
+	decisionClass: Schema.optional(Schema.Literals(["destructive", "routine"])),
 });
 
 /** `squad-manager.ts#spawnAgent`'s goal-overlap disclosure (`goalConflict` check) — a bespoke

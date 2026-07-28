@@ -30,11 +30,23 @@ export interface JournalDecisionResolution {
 	source: "voice" | "ui";
 }
 
+/**
+ * The recorded voice-resolution policy for a decision (concern 05's Decisions:
+ * "destructive"/outward decision classes are UI-only in V1, everything else —
+ * "routine", or an absent class on a decision minted before a caller declared
+ * one — stays voice-resolvable). Mirrors OMP's own `JournalDecisionClass`
+ * (`~/src/oh-my-pi`'s `journal.ts`) without importing it, same as every other
+ * type in this file.
+ */
+export type JournalDecisionClass = "destructive" | "routine";
+
 export interface JournalDecisionSnapshot {
 	id: string;
 	prompt: string;
 	options: JournalDecisionOption[];
 	requiresConfirmation: boolean;
+	/** Absent means unclassified — voice-resolvable, same as `"routine"`. */
+	decisionClass?: JournalDecisionClass;
 	state: "open" | "awaiting-confirmation" | "answered" | "expired" | "cancelled" | "failed";
 	createdAt: number;
 	updatedAt: number;
@@ -57,7 +69,14 @@ export type JournalRecord =
 	| { type: "decision"; decision: JournalDecisionSnapshot }
 	| { type: "transcript"; transcript: JournalTranscript }
 	| { type: "artifact"; artifact: JournalArtifact }
-	| { type: "terminal"; error: string | null };
+	/** OMP's idle-hangup policy spoke its warning — see `JournalRecord["terminal"]`'s `reason`. */
+	| { type: "idle-warning" }
+	/**
+	 * `reason` names why the session ended beyond bare error/no-error, e.g.
+	 * `"idle"` for the 10-minute idle-hangup policy. Additive and optional,
+	 * mirroring OMP's own `journal.ts`.
+	 */
+	| { type: "terminal"; error: string | null; reason?: string };
 
 export interface JournalEnvelope {
 	seq: number;
@@ -101,7 +120,12 @@ export function parseJournalLine(line: string): JournalEnvelope | undefined {
 	if (type === "terminal") {
 		const error = record.error;
 		if (error !== null && typeof error !== "string") return undefined;
-		return { seq, at, sessionId, record: { type: "terminal", error } };
+		const reason = record.reason;
+		if (reason !== undefined && typeof reason !== "string") return undefined;
+		return { seq, at, sessionId, record: { type: "terminal", error, ...(reason === undefined ? {} : { reason }) } };
+	}
+	if (type === "idle-warning") {
+		return { seq, at, sessionId, record: { type: "idle-warning" } };
 	}
 	return undefined;
 }

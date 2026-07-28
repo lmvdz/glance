@@ -176,6 +176,14 @@ describe('call phase chrome', () => {
     expect(endedUnexpectedly(binding({ state: 'live' }))).toBe(false);
     expect(endedUnexpectedly(null)).toBe(false);
   });
+
+  // Concern 05's idle-hangup policy ending the call is a normal, chosen-by-policy outcome — the same
+  // shape as an operator ending it — not a surprise the status region should raise.
+  test('the idle-hangup policy ending the call is honest, and not "unexpected"', () => {
+    expect(terminalReasonCopy('idle')).toContain('idle');
+    expect(terminalReasonCopy('idle')).toContain('10 minutes');
+    expect(endedUnexpectedly(binding({ state: 'ended', terminalReason: 'idle' }))).toBe(false);
+  });
 });
 
 describe('recording and retention, visible at call start', () => {
@@ -271,6 +279,34 @@ describe('decision door', () => {
     expect(isUiOnlyDecision(decision({ prompt: 'Publish 3.2 to npm?' }))).toBe(true);
     expect(isUiOnlyDecision(decision({ options: [{ index: 0, label: 'Delete the worktree', consequence: 'It is gone.' }] }))).toBe(true);
     expect(isUiOnlyDecision(decision())).toBe(false);
+  });
+
+  // Concern 05's mechanism: the wire now carries a real decisionClass the arbiter enforces. It is a
+  // FACT and takes precedence unconditionally — even over a heuristic that would have guessed the
+  // opposite — and the door model exposes WHICH source produced `uiOnly` so it can render a fact
+  // differently from a guess. A classless decision keeps the old heuristic-only behavior exactly.
+  describe('decisionClass (concern 05): the wire field is a fact, and wins over the heuristic', () => {
+    test('a wire-declared "destructive" decision is UI-only even with entirely unremarkable words', () => {
+      const d = decision({ prompt: 'Choose a font?', decisionClass: 'destructive' });
+      expect(isUiOnlyDecision(d)).toBe(true);
+      expect(decisionDoorModel(d).uiOnlySource).toBe('wire');
+    });
+
+    test('a wire-declared "routine" decision is NOT UI-only even when its words look destructive', () => {
+      const d = decision({ prompt: 'Merge the branch now?', decisionClass: 'routine' });
+      expect(isUiOnlyDecision(d)).toBe(false);
+      expect(decisionDoorModel(d).uiOnlySource).toBe('wire');
+    });
+
+    test('a classless decision falls back to the text heuristic, exactly as before this field existed', () => {
+      const destructive = decision({ prompt: 'Merge the branch now?' });
+      expect(isUiOnlyDecision(destructive)).toBe(true);
+      expect(decisionDoorModel(destructive).uiOnlySource).toBe('heuristic');
+
+      const routine = decision();
+      expect(isUiOnlyDecision(routine)).toBe(false);
+      expect(decisionDoorModel(routine).uiOnlySource).toBe('heuristic');
+    });
   });
 
   test('an ack that says ok:false is a REFUSAL with its real reason, not a transport error', () => {

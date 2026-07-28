@@ -47,10 +47,15 @@ export type VoiceCallRetention = "full" | "tails" | "off";
  *                          daemon refuses to claim liveness it cannot verify.
  *  - `port-reused`      — a reconnect attempt produced a `hello` whose `sessionId` does not match the
  *                          one this binding pinned; the daemon refuses to adopt the new session.
+ *  - `idle`             — OMP's own idle-hangup policy (concern 05's recorded default: 10 minutes with
+ *                          no human or agent activity, a spoken warning first) ended the call. Distinct
+ *                          from the generic `terminal` a journaled `{type:"terminal"}` record otherwise
+ *                          maps to — see `onJournalEnvelope`'s reason mapping — so the ended card and the
+ *                          HUD can say "ended after sitting idle" rather than a bare "ended cleanly".
  */
-export type VoiceCallTerminalReason = "operator-ended" | "terminal" | "journal-end" | "broker-exit" | "stale-binding" | "port-reused" | "start-failed";
+export type VoiceCallTerminalReason = "operator-ended" | "terminal" | "journal-end" | "broker-exit" | "stale-binding" | "port-reused" | "start-failed" | "idle";
 
-const TERMINAL_REASONS: readonly VoiceCallTerminalReason[] = ["operator-ended", "terminal", "journal-end", "broker-exit", "stale-binding", "port-reused", "start-failed"];
+const TERMINAL_REASONS: readonly VoiceCallTerminalReason[] = ["operator-ended", "terminal", "journal-end", "broker-exit", "stale-binding", "port-reused", "start-failed", "idle"];
 
 export interface VoiceCallBinding {
 	channelId: string;

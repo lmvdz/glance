@@ -272,6 +272,26 @@ describe("emitCard constructors round-trip their schema", () => {
 		const decode = Schema.decodeUnknownResult(CARD_PAYLOAD_SCHEMAS[TRANSCRIPT_EVENT_VOICE_DECISION]);
 		expect(Result.isFailure(decode({ ...bad, face }))).toBe(true);
 	});
+
+	// Concern 05's decisionClass field — additive on the schema, closed to the two recorded values.
+	test("emitVoiceDecisionCard accepts a decisionClass of \"destructive\" or \"routine\", and absent", () => {
+		const decode = Schema.decodeUnknownResult(CARD_PAYLOAD_SCHEMAS[TRANSCRIPT_EVENT_VOICE_DECISION]);
+		const base = FIXTURES[TRANSCRIPT_EVENT_VOICE_DECISION] as Record<string, unknown>;
+		for (const decisionClass of ["destructive", "routine"] as const) {
+			const face = { ...(base.face as Record<string, unknown>), decisionClass };
+			const event = emitVoiceDecisionCard({ ...base, face } as never);
+			expect(Result.isSuccess(decode(event.payload))).toBe(true);
+		}
+		// Absent is the pre-existing fixture itself — already proven ok above, restated here for locality.
+		expect(Result.isSuccess(decode(emitVoiceDecisionCard(base as never).payload))).toBe(true);
+	});
+
+	test("emitVoiceDecisionCard rejects a decisionClass outside the two recorded values (closed enum)", () => {
+		const base = FIXTURES[TRANSCRIPT_EVENT_VOICE_DECISION] as Record<string, unknown>;
+		const face = { ...(base.face as Record<string, unknown>), decisionClass: "urgent" };
+		const decode = Schema.decodeUnknownResult(CARD_PAYLOAD_SCHEMAS[TRANSCRIPT_EVENT_VOICE_DECISION]);
+		expect(Result.isFailure(decode({ ...base, face }))).toBe(true);
+	});
 });
 
 describe("validateCardPayload", () => {
