@@ -63,6 +63,7 @@ let synthRunCounter = 0;
 export const COMMITTED_SKILL_NAMES: readonly string[] = [
 	"blind-review",
 	"bounce",
+	"distill-plan",
 	"dogfood-drain",
 	"effect",
 	"execute-plan",
