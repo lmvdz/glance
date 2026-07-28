@@ -41,7 +41,7 @@ function toDocComment(comment: ArtifactCommentDTO): DocComment {
 }
 
 export function DocSurface({ taskId, docPath }: { taskId?: string; docPath?: string }) {
-  const { tasks, currentProject } = useTaskContext();
+  const { tasks, currentProject, reload } = useTaskContext();
   const task = tasks.find((entry) => entry.id === taskId);
   const repo = currentProject?.id ?? '';
   const path = docPath ?? (task?.planDir ? `${task.planDir}/DESIGN.md` : undefined);
@@ -104,7 +104,15 @@ export function DocSurface({ taskId, docPath }: { taskId?: string; docPath?: str
           {/* Recorded server-side, writable via PATCH/supersede, and — until this — rendered nowhere a
               person could see when they opened a feature. Sits above the plan doc, not buried in a rail:
               a feature's decisions and acceptance criteria are what a person opening it usually came for. */}
-          {task ? <DecisionsPanel decisions={task.decisions} criteria={task.acceptanceCriteria} /> : null}
+          {task ? (
+            <DecisionsPanel
+              decisions={task.decisions}
+              criteria={task.acceptanceCriteria}
+              featureId={taskId}
+              repo={repo}
+              onSuperseded={() => void reload()}
+            />
+          ) : null}
 
           {doc ? (
             // Prose at a reading measure, in the room's own type — not a rendered README in a card.

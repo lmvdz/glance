@@ -153,3 +153,79 @@ test('renders acceptance criteria with their completed state and an honest empty
   expect(html).toContain('errors are logged');
   expect(html).toContain('1 of 2 met');
 });
+
+// The supersede action — the only path to "correcting" a decision. Recording a replacement is the
+// only way to change one; there is no edit or delete anywhere on this panel.
+const AFFORDANCE_TEXT = 'supersede this decision';
+
+test('renders a "supersede" affordance on every current decision', () => {
+  const decisions = [
+    decision({ id: 'live-1', text: 'use postgres', createdAt: T }),
+    decision({ id: 'live-2', text: 'use redis for cache', createdAt: T - 500 }),
+  ];
+  const html = renderToStaticMarkup(<DecisionsPanel decisions={decisions} criteria={[]} now={T} featureId="f1" />);
+  // Exactly one affordance per current decision — never merged into one, never missing from one.
+  expect(html.split(AFFORDANCE_TEXT).length - 1).toBe(2);
+});
+
+test('never renders the "supersede" affordance on a superseded (historical) decision', () => {
+  const decisions = [
+    decision({ id: 'dead-1', text: 'use sqlite', createdAt: T - 10_000, supersededBy: 'ghost-1' }),
+    decision({ id: 'dead-2', text: 'use mongo', createdAt: T - 20_000, supersededBy: 'ghost-2' }),
+  ];
+  // Both decisions are historical — current is empty, so there is nothing left to supersede.
+  const html = renderToStaticMarkup(<DecisionsPanel decisions={decisions} criteria={[]} now={T} featureId="f1" />);
+  expect(html).toContain('use sqlite');
+  expect(html).toContain('use mongo');
+  expect(html).not.toContain(AFFORDANCE_TEXT);
+});
+
+test('renders the affordance only beside the current decision in a mixed ledger, never its superseded predecessor', () => {
+  const decisions = [
+    decision({ id: 'live', text: 'use postgres', createdAt: T }),
+    decision({ id: 'dead', text: 'use sqlite', createdAt: T - 10_000, supersededBy: 'live' }),
+  ];
+  const html = renderToStaticMarkup(<DecisionsPanel decisions={decisions} criteria={[]} now={T} featureId="f1" />);
+  expect(html.split(AFFORDANCE_TEXT).length - 1).toBe(1);
+});
+
+// This is a RENDER assertion, not an interaction test: it does not click "supersede", type into the
+// composer, or submit anything (this package has no DOM/hook-render harness to drive that — see
+// decisionSurface.ts's `runSupersedeSubmit` doc, whose OWN tests exercise the real click-handler
+// logic and its consequences). What this pins is narrower and still real: given the exact ledger
+// shape the server hands back after a successful supersede (the old decision now carries
+// `supersededBy`, the new one does not), DecisionsPanel's render — not a mutation it performs
+// itself — puts the replacement in the current ledger and the original in struck-through history.
+test('given the post-supersede ledger shape, renders the replacement as current and the original as struck-through history', () => {
+  const before = [decision({ id: 'old', text: 'use sqlite', source: 'human', createdAt: T - 10_000 })];
+  const beforeHtml = renderToStaticMarkup(<DecisionsPanel decisions={before} criteria={[]} now={T} featureId="f1" />);
+  expect(beforeHtml).toContain('use sqlite');
+  expect(beforeHtml).not.toContain('line-through');
+  expect(beforeHtml).toContain('1 current');
+
+  const after = [
+    decision({ id: 'new', text: 'use postgres', source: 'human', createdAt: T, supersedes: 'old' }),
+    decision({ id: 'old', text: 'use sqlite', source: 'human', createdAt: T - 10_000, supersededBy: 'new' }),
+  ];
+  const afterHtml = renderToStaticMarkup(<DecisionsPanel decisions={after} criteria={[]} now={T} featureId="f1" />);
+  expect(afterHtml).toContain('use postgres');
+  expect(afterHtml).toContain('1 current');
+  // The old decision is still on the page — never deleted — but now struck through and labeled.
+  expect(afterHtml).toContain('use sqlite');
+  expect(afterHtml).toContain('line-through');
+  expect(afterHtml).toContain('superseded');
+  // And it no longer offers to be superseded again — only the new current decision does.
+  expect(afterHtml.split(AFFORDANCE_TEXT).length - 1).toBe(1);
+});
+
+test('no edit or delete affordance exists anywhere on the panel, for a current or a superseded decision', () => {
+  const decisions = [
+    decision({ id: 'live', text: 'use postgres', createdAt: T }),
+    decision({ id: 'dead', text: 'use sqlite', createdAt: T - 10_000, supersededBy: 'live' }),
+  ];
+  const criteria = [criterion({ id: 'a', text: 'endpoint returns 200', completed: true })];
+  const html = renderToStaticMarkup(<DecisionsPanel decisions={decisions} criteria={criteria} now={T} featureId="f1" />);
+  expect(html).not.toMatch(/\bedit\b/i);
+  expect(html).not.toMatch(/\bdelete\b/i);
+  expect(html).not.toMatch(/\bremove\b/i);
+});
