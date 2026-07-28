@@ -4,6 +4,7 @@ import { Composer, type ModelOption } from '../chat/Composer';
 import { ChannelTimeline } from './ChannelTimeline';
 import { AgentRecordPanel } from './AgentRecordPanel';
 import { RoomFrame, TopBar } from './RoomFrame';
+import { WorkbenchNavStrip } from './WorkbenchNavStrip';
 import { DecisionPanel, type DecisionRequest } from './DecisionPanel';
 import { AutonomyPanel, type AutonomyState } from './AutonomyPanel';
 import { UnitPanel } from './UnitPanel';
@@ -456,6 +457,7 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
         {route.kind === 'workbench' ? (
           <>
             <TopBar repo={currentProject?.name ?? 'this repo'} summary={fleetSummary(roomNodes, livePlans)} now={frameNow} back={hubHref(DEFAULT_CHANNEL_ID)} onOpenPalette={openCommandPalette} />
+            <WorkbenchNavStrip view={route.view} id={route.id} />
             <div className="flex min-h-0 flex-1 flex-col">{renderWorkbench(route)}</div>
           </>
         ) : (
