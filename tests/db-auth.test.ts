@@ -15,7 +15,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { openDatabase } from "../src/db/index.ts";
-import { DEV_INSECURE_SECRET, makeAuth } from "../src/db/auth.ts";
+import { DEV_INSECURE_SECRET, makeAuth, expandLoopbackOrigins } from "../src/db/auth.ts";
 import { secretBootDecision } from "../src/index.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import { SquadServer } from "../src/server.ts";
@@ -216,4 +216,38 @@ test("secretBootDecision: weak secret refuses non-loopback, warns on loopback, o
 	expect(secretBootDecision(DEV_INSECURE_SECRET, "::1")).toBe("warn");
 	// A strong secret is fine anywhere.
 	expect(secretBootDecision("a-strong-32-byte-hex-secret-value", "0.0.0.0")).toBe("ok");
+});
+
+// ── loopback origin expansion (the "Invalid callbackURL with SSO" bug) ─────────────────────────────
+// Bound to 127.0.0.1 and browsed as http://localhost:<port>, the SPA sends
+// `callbackURL: window.location.origin` = the localhost spelling. Production derived trustedOrigins
+// from the bind literal ALONE, so better-auth rejected it and SSO/social sign-in dead-ended on the
+// URL a person naturally types. (This suite's own harness hardcoded BOTH spellings, which is exactly
+// how the production gap stayed invisible.)
+
+test("a loopback bind trusts every spelling of itself — 127.0.0.1, localhost, and [::1]", () => {
+	const out = expandLoopbackOrigins(["http://127.0.0.1:7878"]);
+	expect(out).toContain("http://127.0.0.1:7878");
+	expect(out).toContain("http://localhost:7878");
+	expect(out).toContain("http://[::1]:7878");
+});
+
+test("the localhost spelling expands to the same set — direction does not matter", () => {
+	expect(new Set(expandLoopbackOrigins(["http://localhost:7878"]))).toEqual(new Set(expandLoopbackOrigins(["http://127.0.0.1:7878"])));
+});
+
+test("a NON-loopback origin passes through untouched — this widens nothing reachable", () => {
+	expect(expandLoopbackOrigins(["https://glance.example.com"])) .toEqual(["https://glance.example.com"]);
+	expect(expandLoopbackOrigins(["http://192.168.1.20:7878"])).toEqual(["http://192.168.1.20:7878"]);
+});
+
+test("mixed input keeps LAN origins and dedupes the loopback aliases", () => {
+	const out = expandLoopbackOrigins(["http://127.0.0.1:7878", "http://192.168.1.20:7878", "http://localhost:7878"]);
+	expect(out.filter((o) => o === "http://localhost:7878")).toHaveLength(1);
+	expect(out).toContain("http://192.168.1.20:7878");
+});
+
+test("scheme and port are preserved; an unparseable origin is never dropped", () => {
+	expect(expandLoopbackOrigins(["https://localhost:8443"])).toContain("https://127.0.0.1:8443");
+	expect(expandLoopbackOrigins(["not a url"])).toEqual(["not a url"]);
 });

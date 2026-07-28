@@ -46,7 +46,7 @@ import { planeRepos } from "./plane.ts";
 import { openDatabase } from "./db/index.ts";
 import { DbStore, FileStore } from "./dal/store.ts";
 import type { OrgContext } from "./dal/context.ts";
-import { DEV_INSECURE_SECRET, makeAuth } from "./db/auth.ts";
+import { DEV_INSECURE_SECRET, expandLoopbackOrigins, makeAuth } from "./db/auth.ts";
 import { curatePlaneIssues, renderClusterReport } from "./plane-curator.ts";
 import { concernNumFromFile, parsePlanConcerns, validatePlanConcerns } from "./features.ts";
 import { decompose, DECOMPOSE_TIMEOUT_MS, type VerifiedConcern } from "./planner.ts";
@@ -292,7 +292,18 @@ async function cmdUp(args: string[]): Promise<void> {
 	// F4/F5: trust the reachable daemon origins plus the external BETTER_AUTH_URL origin (TLS tunnel).
 	// The same set gates better-auth's origin check AND the squad's own cross-site mutation defense.
 	const externalOrigin = process.env.BETTER_AUTH_URL ? new URL(process.env.BETTER_AUTH_URL).origin : undefined;
-	const trustedOrigins = [...new Set([...reachableUrls(host, port, scheme).map((u) => new URL(u).origin), ...(externalOrigin ? [externalOrigin] : [])])];
+	// Loopback aliases are DISTINCT origins to a browser and to better-auth's allowlist, but the same
+	// daemon to a person: bound to 127.0.0.1 and browsed as http://localhost:<port>, the SPA sends
+	// `callbackURL: window.location.origin` = the localhost spelling, which fails the origin check with
+	// "Invalid callbackURL" — SSO and social sign-in dead-end on the URL a human naturally types.
+	// So when the bind is loopback, trust every spelling of it (127.0.0.1 / localhost / [::1]). This
+	// widens nothing reachable: all three already resolve to this host only.
+	const trustedOrigins = [
+		...new Set([
+			...expandLoopbackOrigins(reachableUrls(host, port, scheme).map((u) => new URL(u).origin)),
+			...(externalOrigin ? [externalOrigin] : []),
+		]),
+	];
 	const auth: AuthInstance | undefined = dbHandle
 		? (makeAuth({
 				dialect: dbHandle.dialect,
