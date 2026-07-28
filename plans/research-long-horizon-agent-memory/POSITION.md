@@ -36,7 +36,16 @@ episode-vs-entity split, MemGPT's tiers, and independently re-derived by working
 teams — is four layers with strict rules about what may flow between them.
 
 **Layer 0 — append-only exhaust, owned by the runtime, not the model.** Raw transcripts, tool
-outputs, receipts, gate logs. Immutable, cheap to write, never destructively summarized. Everything
+outputs, receipts, gate logs. Immutable, cheap to write, never destructively summarized.
+**Append-only is not the same as unbounded** (added 2026-07-28 after measuring a real deployment:
+2.1 GB of state, receipts self-flagging "no rotation/retention" — EXPERIMENTS.md FIELD-1). A store
+that only grows is eventually truncated by something that is not you: a full disk, a container
+rebuild, a manual `rm`. That is uncontrolled loss of the exact layer every claim above depends on
+regenerating from. So the rule is **bounded with guards, never merely deleted**: time-based
+retention gated by a minimum-retained floor, plus a circuit breaker that refuses the whole prune
+when the expired fraction exceeds a ceiling — because a wrong clock or config must never be able
+to empty the ground truth. Systems that inspired this position failed by over-deleting; a runtime
+that has never deleted anything is at the opposite pole of the same axis, not safely off it. Everything
 above this layer is a *derived view* and must be rebuildable from it. The critical ownership point:
 this layer must survive the death of any individual context window, which means the **runtime**
 (daemon, supervisor, harness) writes it as a side effect of execution — it is never something an
