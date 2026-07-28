@@ -185,6 +185,47 @@ export function duration(ms: number): string {
 	return days === 1 ? "a day" : `${days} days`;
 }
 
+/** One row in "WHERE YOU ARE STANDING" — #fleet, another room, or a unit's own conversation. */
+export interface RoomView {
+	id: string;
+	name: string;
+	unread: number;
+	/** Node channels are a unit's own conversation, not a room you joined. */
+	kind: "room" | "node";
+	/**
+	 * A node channel whose unit is no longer active (or no longer exists at all) — the rail folds it
+	 * into a collapsed section rather than growing forever. A plain room (#fleet, or a channel a
+	 * person created directly) is never settled — it has no unit to settle.
+	 */
+	settled: boolean;
+}
+
+/**
+ * Projects the raw channel list into what the standing tree shows: one row per channel id — a
+ * defensive dedupe. The daemon already collapses duplicate-named node channels at list time
+ * (src/channels.ts's `reconcileDuplicateNodeChannels`) and never emits two rows sharing an id, but a
+ * fetch race, a stale response landing after a newer one, or a daemon that predates the fix must
+ * never be able to double a row here either — this is the last line of defense, not the fix itself.
+ *
+ * The fold is matched by display NAME rather than channel id, because a unit re-dispatched across a
+ * restart gets a fresh node id (deliberate — see `spawn-identity.ts`'s `newAgentId`) but keeps the
+ * same title, and the fold has to track the UNIT, not whichever id most recently got bound to its
+ * channel.
+ */
+export function roomViewsFrom(
+	channels: ReadonlyArray<{ id: string; name: string; unreadCount?: number }>,
+	units: ReadonlyArray<{ title: string; state: NodeState }>,
+): RoomView[] {
+	const activeTitles = new Set(units.filter((unit) => unit.state !== "settled").map((unit) => unit.title));
+	const byId = new Map<string, RoomView>();
+	for (const entry of channels) {
+		const name = entry.name.startsWith("#") ? entry.name : `#${entry.name}`;
+		const kind: RoomView["kind"] = entry.id.startsWith("node:") ? "node" : "room";
+		byId.set(entry.id, { id: entry.id, name, unread: entry.unreadCount ?? 0, kind, settled: kind === "node" && !activeTitles.has(name.slice(1)) });
+	}
+	return [...byId.values()];
+}
+
 /**
  * The fleet roster, read as room state.
  *

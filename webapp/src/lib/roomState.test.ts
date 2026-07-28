@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { agentsToRoomNodes, alarmBand, backLabel, duration, foldVerdict, groupByState, handoverSummary, nodeStatusLine, selectionPreview, type RoomNode } from "./roomState";
+import { agentsToRoomNodes, alarmBand, backLabel, duration, foldVerdict, groupByState, handoverSummary, nodeStatusLine, roomViewsFrom, selectionPreview, type RoomNode } from "./roomState";
 
 const T = 1_000_000_000;
 
@@ -193,6 +193,59 @@ describe("the roster projected as room state", () => {
 		expect(nodes.find((n) => n.id === "p")!.dependents).toEqual(["child one", "child two"]);
 		// And a leaf says so rather than carrying an empty list that renders as nothing.
 		expect(nodes.find((n) => n.id === "c1")!.dependents).toBeUndefined();
+	});
+});
+
+describe("the rail — deduped by id, folded by unit activity", () => {
+	test("two rows sharing an id collapse to one, keyed by whichever is seen last", () => {
+		// Defensive: the daemon already dedupes and reconciles duplicate-named node channels at list
+		// time (src/channels.ts), but a fetch race must never be able to double a row here either.
+		const rows = roomViewsFrom(
+			[
+				{ id: "fleet", name: "#fleet", unreadCount: 0 },
+				{ id: "node:a", name: "#ompsq-463", unreadCount: 1 },
+				{ id: "node:a", name: "#ompsq-463", unreadCount: 3 },
+			],
+			[],
+		);
+		expect(rows.map((r) => r.id)).toEqual(["fleet", "node:a"]);
+		expect(rows.find((r) => r.id === "node:a")?.unread).toBe(3);
+	});
+
+	test("a node channel whose unit is still active never folds", () => {
+		const rows = roomViewsFrom(
+			[{ id: "node:a", name: "#ompsq-463", unreadCount: 0 }],
+			[{ title: "ompsq-463", state: "in-flight" }],
+		);
+		expect(rows[0]?.settled).toBe(false);
+	});
+
+	test("a node channel whose unit settled folds", () => {
+		const rows = roomViewsFrom(
+			[{ id: "node:a", name: "#ompsq-463", unreadCount: 0 }],
+			[{ title: "ompsq-463", state: "settled" }],
+		);
+		expect(rows[0]?.settled).toBe(true);
+	});
+
+	test("a node channel with no matching unit at all folds too — gone is not different from settled here", () => {
+		const rows = roomViewsFrom([{ id: "node:orphan", name: "#ompsq-999", unreadCount: 0 }], []);
+		expect(rows[0]?.settled).toBe(true);
+	});
+
+	test("#fleet, and any room a person created directly, never fold — they have no unit to settle", () => {
+		const rows = roomViewsFrom([{ id: "fleet", name: "#fleet", unreadCount: 0 }], []);
+		expect(rows[0]?.kind).toBe("room");
+		expect(rows[0]?.settled).toBe(false);
+	});
+
+	test("a name lacking the leading # is normalized before it is matched against a unit's title", () => {
+		const rows = roomViewsFrom(
+			[{ id: "node:a", name: "ompsq-463", unreadCount: 0 }],
+			[{ title: "ompsq-463", state: "in-flight" }],
+		);
+		expect(rows[0]?.name).toBe("#ompsq-463");
+		expect(rows[0]?.settled).toBe(false);
 	});
 });
 

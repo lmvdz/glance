@@ -40,7 +40,7 @@ import {
   type ArtifactRow,
   type PaneStackEntry,
 } from '../../lib/voice/roomCall';
-import { agentsToRoomNodes } from '../../lib/roomState';
+import { agentsToRoomNodes, roomViewsFrom } from '../../lib/roomState';
 import { fleetSummary } from '../../lib/roomFrame';
 import { VoiceCallArtifactReadError, apiJson, fetchVoiceCallArtifactContent, jsonInit, type VoiceCallArtifactReadFailure } from '../../lib/api';
 import { buildPromptCommand, channelAgentSessionId, channelDraftSessionId, ensureConsoleAgent, postChannelMessage } from '../../lib/chat/sendCore';
@@ -439,16 +439,11 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
   // Plans IN FLIGHT, not every feature ever recorded. The first version counted the whole store and
   // reported "78 plans" beside two running units — the kind of number that teaches a reader to stop
   // believing the line it sits in.
-  // Rooms and node conversations, in one list, so the standing panel can answer "where am I".
-  const roomViews = useMemo(
-    () => channels.map((entry) => ({
-      id: entry.id,
-      name: entry.name.startsWith('#') ? entry.name : `#${entry.name}`,
-      unread: entry.unreadCount ?? 0,
-      kind: entry.id.startsWith('node:') ? ('node' as const) : ('room' as const),
-    })),
-    [channels],
-  );
+  // Rooms and node conversations, in one list, so the standing panel can answer "where am I". Deduped
+  // by channel id and folded by unit activity in roomViewsFrom (lib/roomState.ts) — that dedupe is
+  // defensive (the daemon's own list endpoint already reconciles duplicate node channels), the fold
+  // is the real fix for a rail that would otherwise only ever grow.
+  const roomViews = useMemo(() => roomViewsFrom(channels, roomNodes), [channels, roomNodes]);
 
   const livePlans = useMemo(
     () => new Set(agents.map((agent) => agent.featureId).filter((id): id is string => typeof id === 'string' && id.length > 0)).size,

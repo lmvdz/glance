@@ -56,3 +56,51 @@ describe('RoomFrame — one side panel at a time', () => {
     expect(html).toContain('VOICE PANEL MARKER');
   });
 });
+
+describe('RoomFrame — the standing tree folds settled units and never grows unbounded', () => {
+  const rooms = [
+    { id: 'fleet', name: '#fleet', unread: 0, kind: 'room' as const, settled: false },
+    { id: 'node:live', name: '#ompsq-461', unread: 2, kind: 'node' as const, settled: false },
+    { id: 'node:done', name: '#ompsq-463', unread: 0, kind: 'node' as const, settled: true },
+  ];
+
+  test('#fleet and every active unit render unconditionally', () => {
+    const html = renderToStaticMarkup(
+      <RoomFrame {...baseProps} rooms={rooms}>
+        <div>the conversation</div>
+      </RoomFrame>,
+    );
+    expect(html).toContain('#fleet');
+    expect(html).toContain('#ompsq-461');
+  });
+
+  test('a settled unit’s channel is folded away by default, behind a count rather than a row', () => {
+    const html = renderToStaticMarkup(
+      <RoomFrame {...baseProps} rooms={rooms}>
+        <div>the conversation</div>
+      </RoomFrame>,
+    );
+    expect(html).not.toContain('#ompsq-463');
+    expect(html).toContain('1 settled');
+  });
+
+  test('the rail is a bounded, scrollable region — the ink idiom other panels already use — not an unbounded list', () => {
+    const html = renderToStaticMarkup(
+      <RoomFrame {...baseProps} rooms={rooms}>
+        <div>the conversation</div>
+      </RoomFrame>,
+    );
+    expect(html).toContain('max-h-64');
+    expect(html).toContain('overflow-y-auto');
+    expect(html).toContain('scrollbar-custom');
+  });
+
+  test('with nothing settled, no fold control renders at all', () => {
+    const html = renderToStaticMarkup(
+      <RoomFrame {...baseProps} rooms={rooms.filter((room) => !room.settled)}>
+        <div>the conversation</div>
+      </RoomFrame>,
+    );
+    expect(html).not.toContain('settled');
+  });
+});

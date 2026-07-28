@@ -119,6 +119,55 @@ function channelSort(a: Channel, b: Channel): number {
 	return a.createdAt - b.createdAt || a.id.localeCompare(b.id);
 }
 
+/**
+ * The most recent existing node channel with this display name, if one exists. Node ids are unique
+ * per dispatch — never shared, even across a daemon restart or a redispatch of the same named unit
+ * (spawn-identity.ts's `newAgentId` doc comment: deliberate, so two attempts never share a branch or
+ * worktree). Left unguarded, `channelForNode` mints a brand-new `node:<id>` channel for every fresh
+ * incarnation of what a person reading the rail sees as ONE unit ("#ompsq-463") — the channel rail
+ * then accumulates one row per restart, forever. Reusing the latest existing channel keeps one
+ * conversation per named unit, which is also the more honest read: the unit's thread continues
+ * across restarts rather than starting over amnesiac each time.
+ */
+function findReusableNodeChannel(channels: readonly Channel[], name: string): Channel | undefined {
+	let best: Channel | undefined;
+	for (const channel of channels) {
+		if (channel.kind !== "user" || !channel.id.startsWith("node:") || channel.name !== name) continue;
+		if (!best || channel.createdAt > best.createdAt) best = channel;
+	}
+	return best;
+}
+
+/**
+ * Collapses channel rows already duplicated by the gap `findReusableNodeChannel` now closes, so state
+ * written before this fix shipped heals the next time anything lists channels — no migration, no
+ * rewrite of the durable store, just a list-time projection. Each duplicate group (same display name,
+ * both node channels) collapses to its most recently created member, tagged with every id in the
+ * group so the caller can still fold stray unread counts left stranded on the older rows into it.
+ * Anything that isn't a node channel (the default #fleet, or a channel a person created directly)
+ * passes through untouched — two of those can only collide by an id a person chose, which is a
+ * different, pre-existing concern `createChannel`/`putChannel` already guard at write time.
+ */
+function reconcileDuplicateNodeChannels(channels: readonly Channel[]): { channel: Channel; duplicateIds: string[] }[] {
+	const groups = new Map<string, Channel[]>();
+	const singles: Channel[] = [];
+	for (const channel of channels) {
+		if (channel.kind !== "user" || !channel.id.startsWith("node:")) {
+			singles.push(channel);
+			continue;
+		}
+		const group = groups.get(channel.name);
+		if (group) group.push(channel);
+		else groups.set(channel.name, [channel]);
+	}
+	const out: { channel: Channel; duplicateIds: string[] }[] = singles.map((channel) => ({ channel, duplicateIds: [channel.id] }));
+	for (const group of groups.values()) {
+		const canonical = group.reduce((latest, candidate) => (candidate.createdAt > latest.createdAt ? candidate : latest));
+		out.push({ channel: canonical, duplicateIds: group.map((c) => c.id) });
+	}
+	return out.sort((a, b) => channelSort(a.channel, b.channel));
+}
+
 function entrySort(a: ChannelEntry, b: ChannelEntry): number {
 	return a.seq - b.seq || a.ts - b.ts || a.id.localeCompare(b.id);
 }
@@ -146,18 +195,34 @@ export class ChannelStore {
 
 	async listChannels(actor: Actor): Promise<ChannelWithUnread[]> {
 		await this.ensureDefaultChannel();
-		const channels = (await this.store.listChannels()).sort(channelSort);
+		// Reconciled at list time (see reconcileDuplicateNodeChannels' own doc comment): heals any
+		// duplicate node channels a pre-fix daemon already accumulated, without touching the store.
+		const reconciled = reconcileDuplicateNodeChannels(await this.store.listChannels());
 		const allowed: ChannelWithUnread[] = [];
 		const userId = actorUserId(actor);
-		for (const channel of channels) {
+		for (const { channel, duplicateIds } of reconciled) {
 			if (!(await this.canReadChannel(channel.id, actor))) continue;
 			if (!userId) {
 				allowed.push(channel);
 				continue;
 			}
-			const [lastSeq, cursor] = await Promise.all([this.store.nextChannelSeq(channel.id), this.store.getChannelReadCursor(channel.id, userId)]);
-			const lastReadSeq = cursor?.lastReadSeq ?? 0;
-			allowed.push({ ...channel, lastReadSeq, unreadCount: Math.max(0, lastSeq - lastReadSeq) });
+			if (duplicateIds.length === 1) {
+				const [lastSeq, cursor] = await Promise.all([this.store.nextChannelSeq(channel.id), this.store.getChannelReadCursor(channel.id, userId)]);
+				const lastReadSeq = cursor?.lastReadSeq ?? 0;
+				allowed.push({ ...channel, lastReadSeq, unreadCount: Math.max(0, lastSeq - lastReadSeq) });
+				continue;
+			}
+			// A collapsed group: unread may be stranded on an older incarnation's id (someone posted
+			// there before a restart minted the next one), so take the max across every id in the group
+			// rather than only the canonical id's own count.
+			const perId = await Promise.all(
+				duplicateIds.map(async (id) => {
+					const [lastSeq, cursor] = await Promise.all([this.store.nextChannelSeq(id), this.store.getChannelReadCursor(id, userId)]);
+					return { lastReadSeq: cursor?.lastReadSeq ?? 0, unreadCount: Math.max(0, lastSeq - (cursor?.lastReadSeq ?? 0)) };
+				}),
+			);
+			const canonicalLastReadSeq = perId.find((_, index) => duplicateIds[index] === channel.id)?.lastReadSeq ?? 0;
+			allowed.push({ ...channel, lastReadSeq: canonicalLastReadSeq, unreadCount: Math.max(...perId.map((p) => p.unreadCount)) });
 		}
 		return allowed;
 	}
@@ -201,6 +266,10 @@ export class ChannelStore {
 		return this.appendManager(channelId, { text, replyToId, authorActor: actor.id, authorDisplayName: actor.displayName, authorOrigin: actor.origin, kind: "user", format: "markdown" });
 	}
 
+	private async findReusableChannelForTitle(title: string): Promise<Channel | undefined> {
+		return findReusableNodeChannel(await this.store.listChannels(), `#${title}`);
+	}
+
 	/** Resolve a node's conversation without inventing a second visibility model.
 	 * When a unit came from a private room, its lazy node channel inherits that room's
 	 * visibility and memberships rather than creating a second authorization scheme. */
@@ -209,6 +278,16 @@ export class ChannelStore {
 		if (!node) return undefined;
 		if (node.channelId) return this.store.getChannel(node.channelId);
 		if (!create) return undefined;
+		// The true source of the channel-rail duplication defect: without this, every fresh node id
+		// for a recurring named unit (a restart-adopted re-run, a redispatch of the same issue — node
+		// ids are unique per dispatch by design, see findReusableNodeChannel's doc comment) minted its
+		// own brand-new channel. Reusing the latest existing one keeps a single continuing conversation
+		// per named unit instead of a fresh, amnesiac one every time.
+		const reusable = await this.findReusableChannelForTitle(node.title);
+		if (reusable) {
+			const bound = await this.store.bindNodeChannel(node.id, reusable.id);
+			return bound?.channelId ? this.store.getChannel(bound.channelId) : undefined;
+		}
 		const source = inheritedFromChannelId ? await this.store.getChannel(inheritedFromChannelId) : undefined;
 		const channelId = `node:${node.id}`;
 		await this.store.putChannel({

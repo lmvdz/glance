@@ -616,3 +616,76 @@ test("ChannelStore: event issuer is stamped from the verified writer, never from
 	expect(forged.event?.issuer).toBe("manager");
 	expect((await store.listChannelEntries("fleet"))[0]?.event?.issuer).toBe("manager");
 });
+
+// ── channel-rail dedup: node ids are unique per dispatch (spawn-identity.ts), so a unit redispatched
+// across a restart used to mint a fresh `node:<id>` channel every time — the rail defect fixed here.
+
+test("ChannelStore: listChannels collapses same-name node channels to the newest, and leaves a same-named channel that isn't node-shaped alone", async () => {
+	const actor = { id: "web:operator", displayName: "Operator", origin: "local" as const, role: "admin" as const };
+	const fdir = path.join(dir, "channel-file-dup-passthrough");
+	const store = new FileStore(fdir);
+	await store.putChannel({ id: "node:a", name: "#ompsq-463", kind: "user", createdAt: 1, visibility: "org-public" });
+	await store.putChannel({ id: "node:b", name: "#ompsq-463", kind: "user", createdAt: 3, visibility: "org-public" });
+	await store.putChannel({ id: "node:c", name: "#ompsq-463", kind: "user", createdAt: 2, visibility: "org-public" });
+	// Same display name, but not a node channel (no "node:" id prefix) — a person could have named a
+	// room this by hand. Must never be folded into the node group.
+	await store.putChannel({ id: "custom-room", name: "#ompsq-463", kind: "user", createdAt: 5, visibility: "org-public" });
+
+	const channels = new ChannelStore(fdir, store);
+	const rows = (await channels.listChannels(actor)).filter((channel) => channel.name === "#ompsq-463");
+	expect(rows.map((channel) => channel.id).sort()).toEqual(["custom-room", "node:b"]);
+});
+
+test("ChannelStore: a unit redispatched under a fresh node id reuses its channel instead of minting a duplicate, in FileStore and DbStore", async () => {
+	const actor = { id: "web:operator", displayName: "Operator", origin: "local" as const, role: "admin" as const };
+	const fdir = path.join(dir, "nodes-file-channel-reuse");
+	const stores = [
+		{ name: "FileStore", stateDir: fdir, store: new FileStore(fdir) },
+		{ name: "DbStore", stateDir: orgDir("A"), store: dbStore("A") },
+	];
+	for (const { name, stateDir, store } of stores) {
+		const nodes = new NodeStore(store);
+		const channels = new ChannelStore(stateDir, store);
+
+		// First incarnation speaks and lazily gets its own channel, same as any unit.
+		const firstId = `${name}-attempt-1`;
+		await nodes.create({ id: firstId, kind: "unit", title: "ompsq-463", state: "working", createdAt: 1 });
+		await channels.appendNodeClient(firstId, actor, { text: "attempt one" });
+		const first = await nodes.get(firstId);
+
+		// A restart adopts/redispatches the SAME named unit under a fresh node id — spawn-identity.ts
+		// guarantees this id is unique, never reused. Before the fix this minted a second `node:<id>`
+		// channel; the rail then showed "#ompsq-463" once per restart, forever.
+		const secondId = `${name}-attempt-2`;
+		await nodes.create({ id: secondId, kind: "unit", title: "ompsq-463", state: "working", createdAt: 2 });
+		await channels.appendNodeClient(secondId, actor, { text: "attempt two" });
+		const second = await nodes.get(secondId);
+
+		expect(second?.channelId).toBe(first?.channelId);
+		expect((await store.listChannels()).filter((channel) => channel.name === "#ompsq-463")).toHaveLength(1);
+		// Both attempts land in the one continuing conversation rather than two disjoint ones.
+		expect((await store.listChannelEntries(first!.channelId!)).map((entry) => entry.text)).toEqual(["attempt one", "attempt two"]);
+	}
+});
+
+test("ChannelStore: listChannels heals node channels a pre-fix daemon already duplicated — newest wins as canonical, unread is the max stranded across the group", async () => {
+	const actor = { id: "db:alice", displayName: "alice", origin: "local" as const, role: "admin" as const };
+	const fdir = path.join(dir, "channel-file-dup-reconcile");
+	const store = new FileStore(fdir);
+	// Simulated pre-fix state: three restarts, three `node:<id>` channels, one shared display name,
+	// never collapsed — exactly the `~/.glance/channels.json` shape observed in production.
+	await store.putChannel({ id: "node:ompsq-463-a", name: "#ompsq-463", kind: "user", createdAt: 1, visibility: "org-public" });
+	await store.putChannel({ id: "node:ompsq-463-b", name: "#ompsq-463", kind: "user", createdAt: 2, visibility: "org-public" });
+	await store.putChannel({ id: "node:ompsq-463-c", name: "#ompsq-463", kind: "user", createdAt: 3, visibility: "org-public" });
+	await store.appendChannelEntry({ id: "e1", channelId: "node:ompsq-463-a", authorActor: "manager", kind: "system", text: "old attempt", ts: 1, status: "ok" });
+	await store.appendChannelEntry({ id: "e2", channelId: "node:ompsq-463-a", authorActor: "manager", kind: "system", text: "old attempt 2", ts: 2, status: "ok" });
+	await store.appendChannelEntry({ id: "e3", channelId: "node:ompsq-463-c", authorActor: "manager", kind: "system", text: "newest attempt", ts: 3, status: "ok" });
+
+	const channels = new ChannelStore(fdir, store);
+	const rows = (await channels.listChannels(actor)).filter((channel) => channel.name === "#ompsq-463");
+	expect(rows).toHaveLength(1);
+	expect(rows[0]?.id).toBe("node:ompsq-463-c"); // the newest incarnation is canonical
+	// alice never read any of them; two messages are stranded on the OLDEST id (node-a), one on the
+	// canonical one (node-c) — the collapsed row must report the max (2), not just its own id's (1).
+	expect(rows[0]?.unreadCount).toBe(2);
+});
