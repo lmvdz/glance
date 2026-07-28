@@ -30,6 +30,32 @@ export interface AuthConfig {
 	baseURL?: string;
 }
 
+/** Loopback spellings are DISTINCT origins to a browser and to better-auth's allowlist, but the same
+ *  daemon to a person. Bound to 127.0.0.1 and browsed as `http://localhost:<port>`, the SPA sends
+ *  `callbackURL: window.location.origin` (the localhost spelling) and better-auth rejects it —
+ *  "Invalid callbackURL" — dead-ending SSO and social sign-in on the URL a human naturally types.
+ *  Expanding a loopback origin to all of its spellings widens nothing reachable: every alias here
+ *  resolves to this host only. Non-loopback origins pass through untouched. */
+export function expandLoopbackOrigins(origins: string[]): string[] {
+	const LOOPBACK = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+	const out: string[] = [];
+	for (const origin of origins) {
+		let u: URL;
+		try {
+			u = new URL(origin);
+		} catch {
+			out.push(origin); // never drop an origin we cannot parse — fail open to the caller's intent
+			continue;
+		}
+		if (!LOOPBACK.has(u.hostname)) {
+			out.push(origin);
+			continue;
+		}
+		for (const host of ["127.0.0.1", "localhost", "[::1]"]) out.push(`${u.protocol}//${host}${u.port ? `:${u.port}` : ""}`);
+	}
+	return [...new Set(out)];
+}
+
 /** The placeholder session-signing secret. Used ONLY as a loopback-dev fallback when
  *  BETTER_AUTH_SECRET is unset; boot refuses it on a non-loopback bind (see secretBootDecision in index.ts). */
 export const DEV_INSECURE_SECRET = "dev-insecure-secret-set-BETTER_AUTH_SECRET-in-prod";
