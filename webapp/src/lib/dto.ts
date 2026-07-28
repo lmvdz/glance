@@ -152,6 +152,15 @@ export interface FeatureDecisionDTO {
    *  to `sourceRef?.agentId === thisAgent.id` — two units can share one feature, so a decision another
    *  unit recorded must never render under this unit's diff. */
   sourceRef?: { agentId?: string; runId?: string };
+  /** Ledger supersession (mirrors backend `FeatureDecision.supersedes`/`supersededBy`/`supersededAt`,
+   *  src/types.ts — already on the wire via `GET /api/features`'s `found.decisions` passthrough and
+   *  writable via `POST /api/features/:id/decisions/supersede`; this DTO just hadn't declared the
+   *  fields yet). "Invalidate, never delete, never coexist": a decision with `supersededBy` set stays
+   *  on the record for audit/history but is no longer in force — DecisionsPanel (webapp/src/components/
+   *  hub/DecisionsPanel.tsx) is what renders that distinction instead of silently flattening the ledger. */
+  supersedes?: string;
+  supersededBy?: string;
+  supersededAt?: number;
 }
 
 export interface FeatureRelationshipDTO {
