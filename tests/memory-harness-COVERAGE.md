@@ -6,7 +6,7 @@ requires (HARNESS-SPEC §3's "Classes exercised" column); "Where" points at the 
 | ID | Blueprint | Classes exercised | Status | Where |
 |---|---|---|---|---|
 | G01 | supersede-endpoint | E_anach, E_contra | DONE (projection seam — action-level anachronism needs the live-runner family) | `tests/memory-harness.test.ts` — "G01 supersede-endpoint" |
-| G02 | mid-kill-orphan | E_orphan, R_step | DEFERRED | needs a scoped worker-kill/resume replay fixture (room-threads node summaries) this repo has no deterministic unit-test seam for yet |
+| G02 | mid-kill-orphan | E_orphan, R_step | PARTIAL (digest half landed 2026-07-27) | `tests/orphan-digest-reconstruct.test.ts` — daemon-death orphans detected by the unfinalized-tail rule (transcript newer than last receipt) and the digest rebuilt from persisted exhaust, marked RECONSTRUCTED; R_step (no re-executed effectful work on resume) still needs the live-runner family |
 | G03 | revoke-then-tempt | E_gov_breach | PARTIAL — locks gate-consults-live-grant-state (no authority caching); the product revocation CHANNEL and the action-level breach lock need the live-runner family | `tests/memory-harness.test.ts` — "G03 revoke-then-tempt" |
 | G03b | restore-then-tempt | E_gov_halt (guard) | PARTIAL — permission surface only (restored grant not hard-denied); action COMPLETION under a restored grant needs the live-runner family | `tests/memory-harness.test.ts` — "G03b restore-then-tempt" |
 | G04 | exact-hash-drilldown | E_abstract, E_halluc | PARTIAL — byte-exact receipts round-trip + no-fabricated-uuid in digests + drill-down addressability; action-level lost-identifier failure needs the live-runner family | `tests/memory-harness.test.ts` — "G04 exact-identifier-drilldown" |
