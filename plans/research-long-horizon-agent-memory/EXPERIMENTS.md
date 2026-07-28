@@ -171,3 +171,23 @@ recordAgentDecision's write rule (stamps server-authored; forged stamps schema-s
 degenerate `supersedes` 400s instead of degrading to a plain append — the blind review's one real
 finding, fixed and locked). The ledger's core verb is now reachable from every lane: agent tool,
 and human HTTP.
+
+
+---
+
+## Borrow log: mnemosyne → C3 (2026-07-27)
+
+The fresh-context comparison (plans/research-mnemosyne/BRIEF.md) filed one direct borrow: the
+claim-before-write, originals-preserved shape of mnemosyne's `sleep()` consolidation. Applied in
+PR #301 as orphaned-run digest reconstruction — with the glance-specific twist that our exhaust
+(receipts + persisted transcripts) is runtime-owned and survives the worker AND the daemon, so
+reconstruction can happen at adopt time from durable evidence rather than needing a crash-safe
+claim protocol inside the summarizer.
+
+Second blind-review lesson banked, and it is about our own testing: the first cut's detector
+compared max-over-ALL transcript entries to the last receipt, which would have relabeled every
+cleanly finalized run as a post-mortem — because finalizeRun emits its token-burn system entry
+AFTER writing the receipt. The accompanying test passed only because its fixture hand-ordered
+the timestamps into the convenient shape. **A fixture that does not reproduce the real ordering
+of the code under test is not a test of that code.** The detector now reads agent-authored turns
+only; the fixtures mirror production ordering.
