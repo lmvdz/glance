@@ -45,6 +45,47 @@ describe("parseJournalLine", () => {
 		expect(parseJournalLine("{}")).toBeUndefined();
 		expect(parseJournalLine(JSON.stringify({ seq: 0, at: 1, sessionId: "s1", record: { type: "mystery" } }))).toBeUndefined();
 	});
+
+	// Concern 05's two mechanisms: a decision's recorded voice-resolution class, and the
+	// idle-hangup policy's warning record + distinct terminal reason.
+	test("a decision record's decisionClass passes through, and is absent when the mint didn't set one", () => {
+		const withClass = parseJournalLine(
+			JSON.stringify({
+				seq: 0,
+				at: 1,
+				sessionId: "s1",
+				record: {
+					type: "decision",
+					decision: { id: "d1", prompt: "Merge to main?", options: [], requiresConfirmation: false, decisionClass: "destructive", state: "open", createdAt: 1, updatedAt: 1 },
+				},
+			}),
+		);
+		expect(withClass?.record.type).toBe("decision");
+		expect(withClass?.record.type === "decision" && withClass.record.decision.decisionClass).toBe("destructive");
+
+		const unclassified = parseJournalLine(
+			JSON.stringify({ seq: 1, at: 1, sessionId: "s1", record: { type: "decision", decision: { id: "d2", prompt: "?", options: [], requiresConfirmation: false, state: "open", createdAt: 1, updatedAt: 1 } } }),
+		);
+		expect(unclassified?.record.type === "decision" && unclassified.record.decision.decisionClass).toBeUndefined();
+	});
+
+	test("parses an idle-warning record", () => {
+		const envelope = parseJournalLine(JSON.stringify({ seq: 0, at: 1, sessionId: "s1", record: { type: "idle-warning" } }));
+		expect(envelope?.record).toEqual({ type: "idle-warning" });
+	});
+
+	test("a terminal record's reason is additive — present when set, absent otherwise", () => {
+		const idle = parseJournalLine(JSON.stringify({ seq: 0, at: 1, sessionId: "s1", record: { type: "terminal", error: null, reason: "idle" } }));
+		expect(idle?.record).toEqual({ type: "terminal", error: null, reason: "idle" });
+
+		const plain = parseJournalLine(JSON.stringify({ seq: 1, at: 1, sessionId: "s1", record: { type: "terminal", error: null } }));
+		expect(plain?.record).toEqual({ type: "terminal", error: null });
+		expect(plain?.record && "reason" in plain.record).toBe(false);
+	});
+
+	test("a terminal record with a non-string reason is rejected, not silently coerced", () => {
+		expect(parseJournalLine(JSON.stringify({ seq: 0, at: 1, sessionId: "s1", record: { type: "terminal", error: null, reason: 42 } }))).toBeUndefined();
+	});
 });
 
 describe("JournalTailer.poll", () => {

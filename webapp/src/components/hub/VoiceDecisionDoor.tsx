@@ -59,6 +59,9 @@ export function VoiceDecisionDoor({
 }: VoiceDecisionDoorProps) {
   const headingRef = useRef<HTMLDivElement | null>(null);
   const register = registerPresentation(model.register);
+  // The UI-only note's OWN register, when the wire declared the class — deliberately independent of
+  // `register` above, which styles the agent's question, never this daemon-observed chrome.
+  const uiOnlyChecked = model.uiOnlySource === 'wire' ? registerPresentation('checked') : undefined;
 
   useEffect(() => {
     // Escape returns to the room, exactly as the panel's own chrome promises — but never while
@@ -140,9 +143,25 @@ export function VoiceDecisionDoor({
         <div className="mt-2 text-[12px] leading-[1.5]" style={{ color: '#8A8A91' }}>{model.stateLine}</div>
 
         {model.uiOnly && !inspectOnly ? (
-          <div className="mt-2 text-[11.5px] leading-[1.5]" style={{ color: '#C2704A', textWrap: 'pretty' }}>
-            This one is answered here, by hand. Merging, publishing, spending and deleting are never resolved by voice.
-          </div>
+          model.uiOnlySource === 'wire' ? (
+            // The wire declared this decision's class — the arbiter itself refuses a voice answer for
+            // it, so this is a FACT the daemon observed, not a guess from the decision's words. Same
+            // "checked" register the daemon's own chrome uses elsewhere: plain ink, no hedge, an
+            // accessible name that says so.
+            <div
+              role="note"
+              aria-label={uiOnlyChecked?.ariaLabel}
+              title={uiOnlyChecked?.title}
+              className="mt-2 text-[11.5px] leading-[1.5]"
+              style={{ color: uiOnlyChecked?.style.color ?? '#DEDEE2', textWrap: 'pretty' }}
+            >
+              This is answered here, by hand — the room refuses a voice answer for it.
+            </div>
+          ) : (
+            <div className="mt-2 text-[11.5px] leading-[1.5]" style={{ color: '#C2704A', textWrap: 'pretty' }}>
+              This one is answered here, by hand. Merging, publishing, spending and deleting are never resolved by voice.
+            </div>
+          )
         ) : null}
       </div>
 

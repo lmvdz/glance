@@ -51,11 +51,17 @@ export interface FakeDecisionResolution {
 	source: "voice" | "ui";
 }
 
+/** Concern 05's recorded voice-resolution policy — mirrors OMP's own `JournalDecisionClass`
+ *  (`~/src/oh-my-pi`'s `journal.ts`) / `decision-arbiter.ts`'s `DecisionClass`. */
+export type FakeDecisionClass = "destructive" | "routine";
+
 export interface FakeDecisionSnapshot {
 	id: string;
 	prompt: string;
 	options: FakeDecisionOption[];
 	requiresConfirmation: boolean;
+	/** Absent means unclassified — voice-resolvable, same as `"routine"`. */
+	decisionClass?: FakeDecisionClass;
 	state: FakeDecisionState;
 	createdAt: number;
 	updatedAt: number;
@@ -70,7 +76,10 @@ export type FakeDecisionRejectionReason =
 	| "label-mismatch"
 	| "duplicate-request"
 	| "wrong-request-id"
-	| "already-terminal";
+	| "already-terminal"
+	/** A voice-sourced resolve/confirm against a `"destructive"`-class decision — concern 05's policy,
+	 *  enforced here exactly like the real arbiter's `#resolveLocked`. */
+	| "ui-only-class";
 
 export type FakeDecisionResult =
 	| { ok: true; decision: FakeDecisionSnapshot; confirmToken?: string }
@@ -80,6 +89,8 @@ export interface MintDecisionInput {
 	prompt: string;
 	options: readonly FakeDecisionOption[];
 	requiresConfirmation?: boolean;
+	/** See `FakeDecisionSnapshot`'s doc — `"destructive"` is voice-refused by concern 05's policy. */
+	decisionClass?: FakeDecisionClass;
 }
 
 export interface ResolveDecisionInput {
@@ -224,6 +235,7 @@ export class FakeOmpCall {
 			prompt: input.prompt,
 			options: input.options.map((o) => ({ ...o })),
 			requiresConfirmation: input.requiresConfirmation ?? false,
+			...(input.decisionClass === undefined ? {} : { decisionClass: input.decisionClass }),
 			state: "open",
 			createdAt: this.now(),
 			updatedAt: this.now(),
@@ -269,6 +281,11 @@ export class FakeOmpCall {
 		const option = decision.options[input.optionIndex];
 		if (!option) return { ok: false, reason: "invalid-option", decision };
 		if (option.label !== input.label) return { ok: false, reason: "label-mismatch", decision };
+		// Concern 05's recorded policy, enforced here exactly like the real arbiter: a voice-sourced
+		// resolve against a "destructive" decision is refused outright, never silently advanced.
+		if (input.source === "voice" && decision.decisionClass === "destructive") {
+			return { ok: false, reason: "ui-only-class", decision };
+		}
 		seen?.add(input.requestId);
 		if (!decision.requiresConfirmation) return this.finalize(decision, input.optionIndex, option.label, input.source);
 		const confirmToken = this.idFactory();
@@ -331,13 +348,22 @@ export class FakeOmpCall {
 		await this.appendJournal({ type: "artifact", artifact: entry });
 	}
 
+	/** OMP's idle-hangup policy (concern 05: 10-minute default, spoken warning at ~90%) speaking its
+	 *  warning — journaled, mirroring `LiveSessionController#speakIdleWarning`'s own journal append.
+	 *  This fixture has no audio to actually speak the warning over; the record IS the effect. */
+	async publishIdleWarning(): Promise<void> {
+		await this.appendJournal({ type: "idle-warning" });
+	}
+
 	/** Clean end: journal terminal record first, then the bridge's own terminal frame + socket
-	 *  teardown — the honest path a real `/live` session exiting cleanly takes. */
-	async publishTerminal(error: string | null): Promise<void> {
+	 *  teardown — the honest path a real `/live` session exiting cleanly takes. `reason` is additive
+	 *  (mirrors `journal.ts`'s own `JournalRecord["terminal"]`) — e.g. `"idle"` for the idle-hangup
+	 *  policy above. */
+	async publishTerminal(error: string | null, reason?: string): Promise<void> {
 		if (this.closed) return;
-		await this.appendJournal({ type: "terminal", error });
+		await this.appendJournal({ type: "terminal", error, ...(reason === undefined ? {} : { reason }) });
 		this.closed = true;
-		this.broadcast({ type: "terminal", error });
+		this.broadcast({ type: "terminal", error, ...(reason === undefined ? {} : { reason }) });
 		const sockets = [...this.sockets];
 		this.sockets.clear();
 		const server = this.server;
@@ -359,6 +385,13 @@ export class FakeOmpCall {
 				/* already gone */
 			}
 		}, 0);
+	}
+
+	/** Concern 05's idle-hangup policy, end to end: the warning record, then the same clean
+	 *  `publishTerminal(null, "idle")` a real idle-hangup produces. */
+	async idleHangup(): Promise<void> {
+		await this.publishIdleWarning();
+		await this.publishTerminal(null, "idle");
 	}
 
 	/** Dishonest exit: the process dies with NO terminal journal record and NO terminal bridge frame

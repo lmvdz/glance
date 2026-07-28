@@ -176,16 +176,23 @@ export function terminalReasonCopy(reason: VoiceCallTerminalReason | undefined, 
       return 'A different session took over this call’s port. The room refused to adopt it as a continuation.';
     case 'start-failed':
       return 'The call never started.';
+    case 'idle':
+      // Duration-free deliberately: the idle-hangup window is env-overridable
+      // (OMP_COVEN_IDLE_HANGUP_MS) and the binding does not carry the value that
+      // was actually configured for this call, so naming a fixed number here
+      // would drift from reality the moment an operator changes it.
+      return 'The call ended after sitting idle with no one speaking.';
     default:
       return 'The call ended.';
   }
 }
 
 /** `true` when a call ended in a way nobody chose — the one terminal case the status region raises
- *  rather than files away. An operator-ended call and a clean session exit are both normal. */
+ *  rather than files away. An operator-ended call, the idle-hangup policy doing exactly what it was
+ *  configured to do, and a clean session exit are all normal — not surprises to raise. */
 export function endedUnexpectedly(binding: VoiceCallBindingDTO | null): boolean {
   if (!binding || binding.state !== 'ended') return false;
-  if (binding.terminalReason === 'operator-ended') return false;
+  if (binding.terminalReason === 'operator-ended' || binding.terminalReason === 'idle') return false;
   if (binding.terminalReason === 'terminal') return Boolean(binding.terminalError);
   return true;
 }
@@ -272,14 +279,32 @@ export const UI_ONLY_DECISION_NOTE = 'Merging, publishing, spending and deleting
 const UI_ONLY_PATTERN = /\b(merge[sd]?|merging|publish(?:es|ed|ing)?|deploy(?:s|ed|ing)?|releas(?:e|es|ed|ing)|spend(?:s|ing)?|pay(?:s|ment)?|charge[sd]?|delete[sd]?|deleting|destroy(?:s|ed|ing)?|drop(?:s|ped|ping)?|revoke[sd]?|force[- ]push)\b/i;
 
 /**
- * Whether a decision falls in the UI-only class. Read from the decision's own words, because the
- * wire carries no class field — so this is a CONSERVATIVE reading whose only effect is to add a
- * warning line, never to hide an option or block an answer. Getting it wrong in the cautious
- * direction costs one extra sentence; the other direction would silently drop a guard.
+ * Whether a decision falls in the UI-only class.
+ *
+ * The wire NOW carries a class field (`decisionClass`, concern 05's mechanism) — the arbiter itself
+ * enforces it, refusing a voice resolve outright, so when it is present it is a FACT, not a guess,
+ * and takes precedence unconditionally: `"destructive"` is UI-only, `"routine"` is not, even if the
+ * text pattern below would have guessed the opposite either way. Only a CLASSLESS decision (one
+ * minted before a caller declared one) falls back to reading the decision's own words — still a
+ * CONSERVATIVE heuristic whose only effect is to add a warning line, never to hide an option or
+ * block an answer, exactly as before this field existed.
  */
-export function isUiOnlyDecision(decision: Pick<VoiceCallDecisionDTO, 'prompt' | 'options'>): boolean {
+export function isUiOnlyDecision(decision: Pick<VoiceCallDecisionDTO, 'prompt' | 'options' | 'decisionClass'>): boolean {
+  if (decision.decisionClass !== undefined) return decision.decisionClass === 'destructive';
   if (UI_ONLY_PATTERN.test(decision.prompt)) return true;
   return decision.options.some((option) => UI_ONLY_PATTERN.test(option.label) || UI_ONLY_PATTERN.test(option.consequence));
+}
+
+/**
+ * Whether `isUiOnlyDecision`'s answer came from the wire's own `decisionClass` (a fact the arbiter
+ * enforces) or from the text heuristic (a guess that only ever adds a warning). The decision door
+ * renders these two differently — a fact in the daemon's `"checked"` register, a guess in the same
+ * hedged copy it always used — so this needs to be observable, not just folded into one boolean.
+ */
+export type UiOnlyDecisionSource = 'wire' | 'heuristic';
+
+export function uiOnlyDecisionSource(decision: Pick<VoiceCallDecisionDTO, 'decisionClass'>): UiOnlyDecisionSource {
+  return decision.decisionClass === undefined ? 'heuristic' : 'wire';
 }
 
 // =================================================================================================
@@ -354,6 +379,9 @@ export interface DecisionDoorModel {
   /** Set once resolved: what was chosen and who chose it. */
   resolution?: { label: string; source: 'voice' | 'ui' };
   uiOnly: boolean;
+  /** Whether `uiOnly` is a wire-declared fact (the arbiter enforces it) or the text heuristic's
+   *  guess. The door renders the two differently — see `uiOnlyDecisionSource`'s doc. */
+  uiOnlySource: UiOnlyDecisionSource;
 }
 
 /** Daemon-observed state, in words. This is CHROME — it never carries the agent's register. */
@@ -393,6 +421,7 @@ export function decisionDoorModel(decision: VoiceCallDecisionDTO): DecisionDoorM
     awaitingConfirmation: decision.state === 'awaiting-confirmation',
     resolution: decision.resolution ? { label: decision.resolution.label, source: decision.resolution.source } : undefined,
     uiOnly: isUiOnlyDecision(decision),
+    uiOnlySource: uiOnlyDecisionSource(decision),
   };
 }
 

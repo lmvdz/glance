@@ -231,6 +231,12 @@ function terminalReasonDetail(reason: VoiceCallTerminalReason | undefined, termi
 			return "A different session reused this call's port — refusing to adopt it as a continuation.";
 		case "start-failed":
 			return "The call could not be started.";
+		case "idle":
+			// Duration-free deliberately: the idle-hangup window is env-overridable
+			// (OMP_COVEN_IDLE_HANGUP_MS) and this record does not carry the value that
+			// was actually configured for this call, so naming a fixed number here
+			// would drift from reality the moment an operator changes it.
+			return "The call ended after sitting idle with no one speaking.";
 		default:
 			return "Ended.";
 	}
@@ -252,6 +258,7 @@ function voiceDecisionFacePayload(channelId: string, callId: string, decision: J
 				decisionState: decision.state,
 				requiresConfirmation: decision.requiresConfirmation,
 				optionLabels,
+				...(decision.decisionClass === undefined ? {} : { decisionClass: decision.decisionClass }),
 				tone: "warning",
 				register: "claim",
 			},
@@ -276,6 +283,7 @@ function voiceDecisionFacePayload(channelId: string, callId: string, decision: J
 			decisionState: decision.state,
 			requiresConfirmation: decision.requiresConfirmation,
 			optionLabels,
+			...(decision.decisionClass === undefined ? {} : { decisionClass: decision.decisionClass }),
 			resolutionSource: resolution?.source,
 			tone: decision.state === "answered" ? "success" : "neutral",
 			// Every terminal title still embeds `decision.prompt` verbatim (a resolved decision falls
@@ -730,9 +738,17 @@ export class VoiceCallCoordinator {
 				this.artifacts.recordFailed({ channelId, callId: binding.callId, sessionRoot: binding.sessionRoot, sourcePath: artifact.path }, "journal reported artifact status: failed");
 			}
 		}
+		if (outcome.status === "applied-idle-warning") {
+			// Nothing to project — OMP already spoke the warning over its own live session; this
+			// daemon has no HUD countdown to update from it. The record exists so the journal (and this
+			// tailer's cursor) has an honest entry for it, matching the terminal record that follows.
+		}
 		if (outcome.status === "applied-terminal") {
-			// `endBinding` itself runs the full runtime teardown (tailer/liveness/bridge) now — see its doc.
-			await this.endBinding(channelId, "terminal", outcome.error);
+			// `endBinding` itself runs the full runtime teardown (tailer/liveness/bridge) now — see its
+			// doc. `reason === "idle"` (concern 05's idle-hangup policy) is projected as its OWN distinct
+			// binding reason, not folded into the generic "terminal" every other clean/errored journaled
+			// end maps to — see VoiceCallTerminalReason's doc.
+			await this.endBinding(channelId, outcome.reason === "idle" ? "idle" : "terminal", outcome.error);
 		}
 	}
 
