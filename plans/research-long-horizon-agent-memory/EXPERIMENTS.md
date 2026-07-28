@@ -191,3 +191,40 @@ AFTER writing the receipt. The accompanying test passed only because its fixture
 the timestamps into the convenient shape. **A fixture that does not reproduce the real ordering
 of the code under test is not a test of that code.** The detector now reads agent-authored turns
 only; the fixtures mirror production ordering.
+
+---
+
+## FIELD-1: L0 growth measured on a real long-running deployment — 2026-07-28
+
+Not an experiment; a measurement, taken from the operator's live daemon state dir (`~/.glance`,
+running continuously for weeks across a real fleet). It answers a question POSITION §2 never asks.
+
+| Store | Size | Bounded? |
+|---|---|---|
+| worktrees | 1.2 G | reaped (`worktree-reaper.ts`) — not a memory store |
+| orgs | 882 M | per-org disk (transcripts/receipts/digests within) |
+| automation.jsonl | 7.7 M | **append-only, no rotation** |
+| workflow-checkpoints | 5.1 M | unbounded |
+| receipts | 2.9 M / 536 files | **`receipts.ts` self-flags "no rotation/retention"** |
+| state.json | 1.9 M | snapshot, rewritten |
+| gate-logs | 1.9 M | unbounded |
+| digests | 1.6 M | one per agent, never expired |
+| audit.jsonl | 1.2 M | append-only |
+| **total** | **2.1 G** | |
+
+**The gap this exposes in the position itself**: POSITION §2's L0 rule is "append-only, immutable,
+cheap to write, never destructively summarized" — and it says NOTHING about bounds. Taken
+literally that is a disk leak with a philosophy. The honest form of the rule, which the position
+should carry: **L0 is append-only and bounded — retention is a floor-and-circuit-breaker problem,
+not a deletion problem.** The tencentdb research already banked the shape (Rank 3): time-based
+deletion gated by a minimum-retained floor per agent, plus a circuit breaker that refuses the
+whole prune when the expired fraction exceeds a ceiling (a bad clock or config must not be able to
+empty the ground truth every layer above regenerates from). Glance sits at the OPPOSITE failure
+pole from the systems that inspired the rule: they over-deleted; this one has never deleted at all.
+
+Not fixed in this pass — recorded as evidenced, unblocked work with a known design. The reason it
+matters for the ledger and not just for disk: every claim in this lane (C2 regeneration, C3
+post-mortem reconstruction, drill-down provenance) assumes L0 is *there* to regenerate from. An
+unbounded store eventually gets truncated by something that is not us — a full disk, a manual
+`rm`, a container rebuild — and that is exactly the uncontrolled loss the architecture exists to
+prevent. Bounded-with-guards is how the guarantee survives contact with a finite machine.
