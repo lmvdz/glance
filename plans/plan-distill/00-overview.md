@@ -60,7 +60,7 @@ vocabulary and, eventually, machinery.
 
 | Concern | Why it exists | Complexity | Touches |
 |---|---|---|---|
-| 01 distillation contract + skill | The 6-point contract above as a `/distill-plan` skill: input = plans/<name> + render-plan.ts's parsed structure; output = self-contained DIGEST.html honoring the contract | architectural | .claude/skills/distill-plan, scripts/render-plan.ts (export the parser) |
+| 01 distillation contract + skill | **DONE 2026-07-27** — `.claude/skills/distill-plan/SKILL.md` carries the six-rule contract; `scripts/render-plan.ts` exports `parseConcern`/`readPlan` and gained `--json` so the skill consumes the SAME structural read the HTML renderer draws (tests: `tests/render-plan-structure.test.ts`) | architectural | .claude/skills/distill-plan, scripts/render-plan.ts |
 | 02 regeneration + staleness honesty | Digest carries provenance (commit, date, per-concern STATUS hash) and is regenerated on plan change; a stale digest renders its own staleness banner rather than lying | architectural | skill, scripts, maybe a daemon hook post-STATUS-flip |
 | 03 where digests live + surfacing | plans/<name>/DIGEST.html committed beside the docs; `glance` serves/opens them; LATER (post-love-gate): the room projects a digest card when one regenerates | mechanical | scripts, src/server.ts (static serve), room card kind (deferred) |
 
@@ -75,3 +75,12 @@ vocabulary and, eventually, machinery.
 - One house style. The contract fixes what a digest must DO; identity stays per-plan.
 - Replacing render-plan.ts — it is the structural substrate, not a competitor.
 - Any webapp surface before the love-gate verdict (sequencing law).
+
+## Progress
+
+- **2026-07-27 — concern 01 landed.** The contract exists as a skill and the structural seam is
+  shared (one parser, `--json`), so a digest can never drift from what `render-plan.ts` draws.
+  Concerns 02 (regeneration + staleness honesty) and 03 (where digests live + room surfacing)
+  remain open; 03's room-card half still waits on the love gate per the sequencing law. Deliberate
+  scope call, unchanged from the overview: generation stays a human-in-loop skill until the
+  practice sticks — dogfood before machinery.

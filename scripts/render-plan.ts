@@ -18,7 +18,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
-interface Concern {
+export interface Concern {
 	file: string;
 	num: string;
 	title: string;
@@ -28,7 +28,7 @@ interface Concern {
 
 const FIELD = /^([A-Z_]+):\s*(.*)$/;
 
-function parseConcern(file: string, raw: string): Concern {
+export function parseConcern(file: string, raw: string): Concern {
 	const lines = raw.split("\n");
 	const title = (lines[0] ?? "").replace(/^#\s*/, "").trim();
 	const fields: Record<string, string> = {};
@@ -97,25 +97,59 @@ function md(src: string): string {
 
 const STATUS_TONE: Record<string, string> = { done: "done", open: "open", blocked: "blocked", cancelled: "cancelled" };
 
-async function main() {
-	const dir = process.argv[2];
-	if (!dir) { console.error("usage: bun scripts/render-plan.ts plans/<name> [out.html]"); process.exit(1); }
-	const out = process.argv[3] ?? path.join(dir, "plan.html");
+/** The structural read of a plan directory, shared by the HTML renderer and `--json`.
+ *  Exported so a distillation pass (`/distill-plan`) consumes the SAME parsed structure the
+ *  renderer draws, instead of re-deriving status/blocker/actionable logic and drifting from it. */
+export interface PlanStructure {
+	plan: string;
+	overview?: Concern;
+	items: Concern[];
+	total: number;
+	done: number;
+	/** Open, with every blocker already done — the question a plan is actually opened to answer. */
+	actionable: Concern[];
+	/** Per concern: the blockers that are NOT yet done. */
+	blockedBy: Record<string, string[]>;
+}
+
+export async function readPlan(dir: string): Promise<PlanStructure> {
 	const names = (await fs.readdir(dir)).filter((n) => /^\d+.*\.md$/.test(n)).sort();
 	const concerns: Concern[] = [];
 	for (const n of names) concerns.push(parseConcern(n, await fs.readFile(path.join(dir, n), "utf8")));
-
 	const overview = concerns.find((c) => c.num === "00");
 	const items = concerns.filter((c) => c.num !== "00");
 	const statusOf = (c: Concern) => (c.fields.STATUS ?? "open").toLowerCase();
-	const doneNums = new Set(items.filter((c) => statusOf(c) === "done").length ? items.filter((c) => statusOf(c) === "done").map((c) => c.num) : []);
-	const total = items.length;
-	const done = items.filter((c) => statusOf(c) === "done").length;
+	const doneNums = new Set(items.filter((c) => statusOf(c) === "done").map((c) => c.num));
+	const blockers = (c: Concern) => (c.fields.BLOCKED_BY ?? "").split(",").map((x) => x.trim().padStart(2, "0")).filter((x) => x && x !== "00");
+	const blockedBy: Record<string, string[]> = {};
+	for (const c of items) blockedBy[c.num] = blockers(c).filter((b) => !doneNums.has(b));
+	return {
+		plan: path.basename(dir),
+		overview,
+		items,
+		total: items.length,
+		done: items.filter((c) => statusOf(c) === "done").length,
+		actionable: items.filter((c) => statusOf(c) === "open" && blockers(c).every((b) => doneNums.has(b))),
+		blockedBy,
+	};
+}
 
+async function main() {
+	const argv = process.argv.slice(2).filter((a) => a !== "--json");
+	const jsonMode = process.argv.includes("--json");
+	const dir = argv[0];
+	if (!dir) { console.error("usage: bun scripts/render-plan.ts plans/<name> [out.html] [--json]"); process.exit(1); }
+	const structure = await readPlan(dir);
+	// `--json` emits the parsed structure for a distillation pass (see .claude/skills/distill-plan):
+	// same parser, same status/blocker/actionable logic the HTML renderer uses — one source of truth.
+	if (jsonMode) { console.log(JSON.stringify(structure, null, 2)); return; }
+	const out = argv[1] ?? path.join(dir, "plan.html");
+	const { overview, items, total, done, actionable } = structure;
+	const statusOf = (c: Concern) => (c.fields.STATUS ?? "open").toLowerCase();
+	const doneNums = new Set(items.filter((c) => statusOf(c) === "done").map((c) => c.num));
 	const blockers = (c: Concern) => (c.fields.BLOCKED_BY ?? "").split(",").map((s) => s.trim().padStart(2, "0")).filter((s) => s && s !== "00");
-	const actionable = items.filter((c) => statusOf(c) === "open" && blockers(c).every((b) => doneNums.has(b)));
 
-	const planName = path.basename(dir);
+	const planName = structure.plan;
 	const rendered = `<title>${planName} — plan review</title>
 <style>
 :root{
@@ -227,4 +261,6 @@ ${overview ? Object.entries(overview.sections).filter(([k]) => !["Outcome", "Wor
 	console.log(`  ${done}/${total} done · ${actionable.length} actionable now${actionable.length ? `: ${actionable.map((c) => c.num).join(", ")}` : ""}`);
 }
 
-void main();
+// Guarded so `readPlan`/`parseConcern` can be imported (by tests and by any distillation pass)
+// without the CLI firing on module load and exiting the importing process.
+if (import.meta.main) void main();
