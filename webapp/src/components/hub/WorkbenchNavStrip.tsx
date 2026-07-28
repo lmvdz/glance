@@ -1,5 +1,5 @@
 import React from 'react';
-import { NAV_ROWS, currentNavRowId, paletteNavigationHref } from '../../lib/commandPalette';
+import { NAV_ROWS, currentNavRow, paletteNavigationHref } from '../../lib/commandPalette';
 import type { WorkbenchRouteView } from '../../lib/router';
 
 const MONO = "'JetBrains Mono',ui-monospace,monospace";
@@ -26,9 +26,18 @@ const HREF_FALLBACK = '#fleet';
  *
  * One source of truth: NAV_ROWS (commandPalette.ts) — the same nine rows the ⌘K palette lists.
  * Adding a destination there is the only edit needed for it to appear here too.
+ *
+ * Exact vs. ancestor (see `currentNavRow`'s doc comment): standing on a row's own list surface
+ * marks it as a plain, unclickable span — but standing one level below it (a task's detail, an
+ * open plan brief, an open plan-reality doc) must keep that row a LIVE LINK back to the list. The
+ * first cut of this strip collapsed both into "current = not a link," which reproduced the exact
+ * complaint that prompted the strip, one level down: from a task's detail page, "Tasks" went dead
+ * with no on-screen way back to the list it came from. An ancestor match stays a link, marked with
+ * `aria-current="true"` (not `"page"` — the operator isn't standing on that literal page) so it
+ * still reads as the section they're in without being a dead end.
  */
-export function WorkbenchNavStrip({ view }: { view: WorkbenchRouteView }) {
-  const currentId = currentNavRowId(view);
+export function WorkbenchNavStrip({ view, id }: { view: WorkbenchRouteView; id?: string }) {
+  const current = currentNavRow(view, id);
   return (
     <nav
       aria-label="Workbench surfaces"
@@ -36,10 +45,12 @@ export function WorkbenchNavStrip({ view }: { view: WorkbenchRouteView }) {
       style={{ borderBottom: '1px solid #1F1F22', background: '#0A0A0B' }}
     >
       {NAV_ROWS.map((row) => {
-        const here = row.id === currentId;
-        // The current surface is marked, never a link to itself — clicking it would "navigate"
-        // nowhere, which reads as broken rather than as confirmation of where you are.
-        if (here) {
+        const isExact = current?.id === row.id && current.match === 'exact';
+        const isAncestor = current?.id === row.id && current.match === 'ancestor';
+        // Only the exact match is unclickable — a link back to where you already stand is noise.
+        // An ancestor match (one level below the row) must stay a real link, or the operator lands
+        // exactly where the original report started: on a detail page with no way back to the list.
+        if (isExact) {
           return (
             <span key={row.id} aria-current="page" style={{ fontFamily: MONO, fontSize: 11, color: '#F0A35A' }}>
               {row.label}
@@ -50,8 +61,9 @@ export function WorkbenchNavStrip({ view }: { view: WorkbenchRouteView }) {
           <a
             key={row.id}
             href={paletteNavigationHref(row.view) ?? HREF_FALLBACK}
+            aria-current={isAncestor ? 'true' : undefined}
             className="rounded-[2px] transition-colors hover:text-[#E8E8EA] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ember focus-visible:ring-offset-2 focus-visible:ring-offset-ink"
-            style={{ fontFamily: MONO, fontSize: 11, color: '#7A7A82' }}
+            style={{ fontFamily: MONO, fontSize: 11, color: isAncestor ? '#F0A35A' : '#7A7A82' }}
           >
             {row.label}
           </a>

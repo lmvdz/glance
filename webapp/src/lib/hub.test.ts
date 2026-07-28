@@ -1,8 +1,11 @@
 import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { entryAuthorLabel, entryTimeLabel, groupActiveWork, latestSeq, presenceCount, reduceChannelEntries } from './hub';
 import { renderToStaticMarkup } from 'react-dom/server';
 import React from 'react';
 import { RoomFrame, TopBar } from '../components/hub/RoomFrame';
+import { NAV_ROWS } from './commandPalette';
 import type { AgentDTO, ChannelEntry } from './dto';
 
 const entry = (overrides: Partial<ChannelEntry> & Pick<ChannelEntry, 'id' | 'seq'>): ChannelEntry => ({
@@ -91,11 +94,23 @@ describe('Hub reductions', () => {
       ),
     );
     expect(html).not.toContain('aria-label="Workbench surfaces"');
-    // Labels that only the strip would ever print in this exact form (the room's own "WHERE YOU ARE
-    // STANDING" tree names channels and units, never these workbench surface names).
-    expect(html).not.toContain('Plan briefs');
-    expect(html).not.toContain('Organization settings');
-    expect(html).not.toContain('Capabilities');
+    // Every NAV_ROWS label, not a sample of three — a name this test doesn't check is exactly the
+    // one a future edit could leak into the room unnoticed. ('Fleet' is excluded: the room's own
+    // "WHERE YOU ARE STANDING" tree legitimately prints room names, and the default room IS named
+    // "fleet" — that word appearing here would not mean the strip leaked in.)
+    for (const row of NAV_ROWS) {
+      if (row.label === 'Fleet') continue;
+      expect(html).not.toContain(row.label);
+    }
+  });
+
+  // The rendered-output check above proves the room's OUTPUT is clean for one representative set of
+  // props; it can't rule out a prop combination that would light the strip up. This proves the
+  // actual component boundary instead: RoomFrame.tsx does not import WorkbenchNavStrip at all, so
+  // there is no code path — no matter what props RoomFrame is given — that could render it.
+  test('RoomFrame does not import the workbench nav strip — the boundary is enforced in the source, not just in one rendered sample', () => {
+    const source = readFileSync(join(import.meta.dir, '../components/hub/RoomFrame.tsx'), 'utf8');
+    expect(source).not.toContain('WorkbenchNavStrip');
   });
 
   test('presence count counts humans, not sockets', () => {

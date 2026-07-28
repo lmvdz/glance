@@ -457,7 +457,7 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
         {route.kind === 'workbench' ? (
           <>
             <TopBar repo={currentProject?.name ?? 'this repo'} summary={fleetSummary(roomNodes, livePlans)} now={frameNow} back={hubHref(DEFAULT_CHANNEL_ID)} onOpenPalette={openCommandPalette} />
-            <WorkbenchNavStrip view={route.view} />
+            <WorkbenchNavStrip view={route.view} id={route.id} />
             <div className="flex min-h-0 flex-1 flex-col">{renderWorkbench(route)}</div>
           </>
         ) : (

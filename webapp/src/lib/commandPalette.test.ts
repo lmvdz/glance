@@ -1,5 +1,5 @@
 import { expect, test, describe } from 'bun:test';
-import { staticRows, fabricRows, buildRows, moveSelection, NAV_ROWS, currentNavRowId, paletteNavigationHref, SEARCH_TASKS_ROW, type FabricSearchResult } from './commandPalette';
+import { staticRows, fabricRows, buildRows, moveSelection, NAV_ROWS, currentNavRow, paletteNavigationHref, SEARCH_TASKS_ROW, type FabricSearchResult } from './commandPalette';
 import { canonicalHubHash, hubHref, parseHubHash } from './router';
 
 describe('staticRows', () => {
@@ -180,30 +180,47 @@ describe('palette navigation destinations', () => {
 });
 
 // The workbench nav strip's "you are here" mark (WorkbenchNavStrip.tsx) is built on this: which
-// NAV_ROWS entry (if any) a workbench route is standing on.
-describe('currentNavRowId', () => {
-  test('maps every workbench route a NAV_ROWS entry actually resolves to, back onto that entry', () => {
-    const cases: Array<{ view: Parameters<typeof currentNavRowId>[0]; id: string }> = [
+// NAV_ROWS entry (if any) a workbench route is standing on, and whether it's the row's own list
+// surface ('exact', renders unclickable) or a child of it ('ancestor', must stay a live link back
+// to the list — see the WorkbenchNavStrip.tsx doc comment for the regression this distinction
+// fixes: collapsing both into "current" left a task's detail page with no way back to Tasks).
+describe('currentNavRow', () => {
+  test('a route with no id, on a row whose surface has no child detail, is an exact match', () => {
+    const cases: Array<{ view: Parameters<typeof currentNavRow>[0]; id: string }> = [
       { view: 'tasks', id: 'nav-tasks' },
       { view: 'daily', id: 'nav-daily' },
       { view: 'fog', id: 'nav-fog' },
-      { view: 'plan-reality', id: 'nav-plan-reality' },
-      { view: 'plans', id: 'nav-plans' }, // 'plans' is the workbench spelling of the 'plan-brief' nav row
       { view: 'economics', id: 'nav-economics' },
       { view: 'capabilities', id: 'nav-capabilities' },
       { view: 'org', id: 'nav-org' },
     ];
-    for (const { view, id } of cases) expect(currentNavRowId(view)).toBe(id);
+    for (const { view, id } of cases) expect(currentNavRow(view)).toEqual({ id, match: 'exact' });
   });
 
-  test('a task detail counts as standing on the Tasks row, not as nowhere on the strip', () => {
-    expect(currentNavRowId('task')).toBe('nav-tasks');
+  // 'plans' and 'plan-reality' are ONE route view for both the list and a single open item —
+  // PlanSurface/RealitySurface branch on the id, not on a different view name — so `id` is what
+  // tells the two apart here.
+  test('"plans" (Plan briefs) and "plan-reality" with no id are exact matches on their list', () => {
+    expect(currentNavRow('plans')).toEqual({ id: 'nav-plans', match: 'exact' });
+    expect(currentNavRow('plan-reality')).toEqual({ id: 'nav-plan-reality', match: 'exact' });
+  });
+
+  test('"plans" and "plan-reality" WITH an id are ancestor matches — a single item is open, not the list', () => {
+    expect(currentNavRow('plans', 'my-plan')).toEqual({ id: 'nav-plans', match: 'ancestor' });
+    expect(currentNavRow('plan-reality', 'my-plan')).toEqual({ id: 'nav-plan-reality', match: 'ancestor' });
+  });
+
+  // The regression this whole distinction exists for: an operator on a task's detail page reported
+  // "Tasks" as unclickable, with no way back to the list it came from.
+  test('a task detail is an ancestor match on the Tasks row, not an exact (unclickable) one', () => {
+    expect(currentNavRow('task')).toEqual({ id: 'nav-tasks', match: 'ancestor' });
+    expect(currentNavRow('task', 'some-task-id')).toEqual({ id: 'nav-tasks', match: 'ancestor' });
   });
 
   test('routes with no nav-strip destination (review, gate-verdict, dissolved graph/intervene) resolve to no current row', () => {
-    expect(currentNavRowId('review')).toBeUndefined();
-    expect(currentNavRowId('gate-verdict')).toBeUndefined();
-    expect(currentNavRowId('graph')).toBeUndefined();
-    expect(currentNavRowId('intervene')).toBeUndefined();
+    expect(currentNavRow('review')).toBeUndefined();
+    expect(currentNavRow('gate-verdict')).toBeUndefined();
+    expect(currentNavRow('graph')).toBeUndefined();
+    expect(currentNavRow('intervene')).toBeUndefined();
   });
 });

@@ -96,17 +96,40 @@ export function paletteNavigationHref(view: AppView): string | undefined {
   return workbenchView ? workbenchHref(workbenchView) : undefined;
 }
 
+/** Which NAV_ROWS entry a workbench route is standing on, and how closely. */
+export interface NavRowMatch {
+  id: string;
+  /**
+   * `'exact'` — standing on the row's own list surface itself (e.g. the Tasks list, the Plan
+   * briefs index). A link back to where you already are is noise, so the nav strip renders this
+   * as a plain marked span, not a link.
+   *
+   * `'ancestor'` — standing one level below the row (a single task's detail, an open plan brief,
+   * an open plan-reality doc). The row must stay a clickable way back to the list — this is
+   * exactly the case an operator hit and reported: from a task detail, "Tasks" had gone dead
+   * because it collapsed into the exact-match case, leaving no on-screen way back to the list.
+   */
+  match: 'exact' | 'ancestor';
+}
+
 /**
  * Which NAV_ROWS entry (if any) a workbench route is standing on — the on-screen nav strip's "you
  * are here" mark (comprehension: the operator's own report that ⌘K was the ONLY way to move between
  * these nine surfaces once landed on one — there was nothing on screen to say which one that was,
- * either). `'task'` (a single task's detail, `#/workbench/task/<id>`) counts as standing on the
- * Tasks row: it is the same surface family as `'tasks'`, just with one item open, and treating it
- * as a different destination would make the current-task view claim to be nowhere on the strip.
+ * either).
+ *
+ * `view` alone is ambiguous for two of the nine rows: `'plans'` and `'plan-reality'` are the SAME
+ * route view whether you're on the list (no `id`) or a single item is open (`id` set) — PlanSurface
+ * and RealitySurface both branch on the id, not on a different view name. `'task'` (singular) is
+ * `'tasks'`'s own distinct detail view instead, always with an id. `id` is threaded through here so
+ * both shapes can be told apart rather than collapsed into one "current" bucket.
  */
-export function currentNavRowId(view: WorkbenchRouteView): string | undefined {
-  if (view === 'task') return 'nav-tasks';
-  return NAV_ROWS.find((row) => normalizeWorkbenchView(row.view) === view)?.id;
+export function currentNavRow(view: WorkbenchRouteView, id?: string): NavRowMatch | undefined {
+  if (view === 'task') return { id: 'nav-tasks', match: 'ancestor' };
+  const row = NAV_ROWS.find((r) => normalizeWorkbenchView(r.view) === view);
+  if (!row) return undefined;
+  const hasChildOpen = (view === 'plans' || view === 'plan-reality') && Boolean(id);
+  return { id: row.id, match: hasChildOpen ? 'ancestor' : 'exact' };
 }
 
 export const SEARCH_TASKS_ROW: PaletteActionRow = {
