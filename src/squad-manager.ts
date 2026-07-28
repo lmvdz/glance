@@ -40,6 +40,7 @@ import { LANE_POLICY, type WorkLane, type WorkLaneSource } from "./lane.ts";
 import type { WorkflowDefinition } from "./workflow-catalog.ts";
 import { Dispatcher } from "./dispatch.ts";
 import { openDispatchLedger } from "./dispatch-ledger.ts";
+import { openGoalOverlapLedger, type GoalOverlapLedger } from "./goal-overlap-ledger.ts";
 import { openRaceLedger, type RaceLedger } from "./race-ledger.ts";
 import { type Answer, answerBrief, listAnswers, possiblyStale, readAnswer, saveAnswer } from "./answers.ts";
 import { AFTER_ACTION_MARKER, type AfterActionInput, type AfterActionReport, composeAfterAction, listAfterActions, readAfterAction, saveAfterAction, selectTerminalReaps, type TerminalReapCandidate } from "./after-action.ts";
@@ -1003,6 +1004,39 @@ export interface CommissionOptions {
 	dir?: string;
 }
 
+/** Human phrasing of an `AgentStatus`, for the goal-overlap disclosure's copy (createWithId) —
+ *  the card used to unconditionally claim "Both are running" without checking either side. Never
+ *  called for `stopped`/`error`: `createWithId` suppresses the whole disclosure before this would
+ *  ever run for a dead unit — see `isDeadAgentStatus` below. */
+function agentStatusPhrase(status: AgentStatus): string {
+	switch (status) {
+		case "starting":
+			return "starting up";
+		case "working":
+			return "actively working";
+		case "idle":
+			return "idle";
+		case "input":
+			return "waiting on a decision";
+		case "error":
+			return "errored";
+		case "stopped":
+			return "stopped";
+	}
+}
+
+/**
+ * Whether a unit's status counts as "gone" for the goal-overlap disclosure: a conflict with a
+ * dead unit is noise, not news. `AgentStatus` (types.ts) has no dedicated "settled" value the way
+ * a workflow node does (nodes.ts's `NodeState`) — `stopped`/`error` are its own terminal set
+ * (agent-lifecycle.ts), and `undefined` covers a unit that isn't in the roster at all (already
+ * reaped, or — for the disclosure's OWNER side — never resolved to a live record in the first
+ * place). All three read the same way here: nothing to warn anyone about.
+ */
+function isDeadAgentStatus(status: AgentStatus | undefined): status is undefined | "stopped" | "error" {
+	return status === undefined || status === "stopped" || status === "error";
+}
+
 function recordObject(value: unknown): Record<string, unknown> | undefined {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
 	return value as Record<string, unknown>;
@@ -1114,6 +1148,12 @@ export class SquadManager extends EventEmitter {
 	 *  remove(); CLEARED by createWithId when an authorized creator deliberately reuses the id
 	 *  (deterministic workflow-branch ids must stay resurrectable by their parent's resume). */
 	private readonly removedLedger: RemovedLedger;
+	/** Restart-safe "already disclosed this goal-overlap pair" set (goal-overlap-ledger.ts) — closes
+	 *  the exact incident that ledger's own header documents: a resumed workflow branch's
+	 *  deterministic id survives a restart, and without this the in-process-only `goalConflict`
+	 *  check re-discloses the same (owner, candidate) pair every single boot. Consulted and stamped
+	 *  by `createWithId`'s goal-overlap disclosure only. */
+	private readonly goalOverlapLedger: GoalOverlapLedger;
 	/** Durable repos-this-operator-works-in set; unioned into `projects()`. See project-registry.ts. */
 	private readonly projectRegistry: ProjectRegistry;
 	/** Restart-safe "raced this issue already, ever" ledger (adw-factory-borrows concern 07). Consulted
@@ -1294,6 +1334,7 @@ export class SquadManager extends EventEmitter {
 		if (envBool("OMP_SQUAD_LAND_ASSESSMENT", false)) this.landAssessment = new LandAssessmentHook(this.stateDir, (level, msg) => this.log(level, msg));
 		this.scoutCursor = readScoutCursors(this.stateDir);
 		this.removedLedger = openRemovedLedger(this.stateDir);
+		this.goalOverlapLedger = openGoalOverlapLedger(this.stateDir);
 		this.projectRegistry = openProjectRegistry(this.stateDir);
 		this.boundarySyncHeld = new HeldSyncStore(path.join(this.stateDir, "boundary-sync"));
 		// Reload session-scoped registration markers so a mid-session daemon restart cannot promote an
@@ -7084,22 +7125,13 @@ export class SquadManager extends EventEmitter {
 		if (goalOverlap?.strength === "structural") {
 			throw new Error(`goal overlap conflict: "${goalOverlap.agent}" already owns overlapping work — request access from that owner; the other work's details remain private`);
 		}
-		if (goalOverlap) {
-			// Disclosure, not refusal: existence and owner, never a word of the other work. Fire and
-			// forget — a failure to disclose must not fail the spawn, but it is logged rather than
-			// swallowed, because a disclosure nobody saw is the same as no disclosure.
-			const room = opts.channelId ?? DEFAULT_CHANNEL_ID;
-			const owner = this.safeEventLabel(goalOverlap.agent);
-			void this.channelStore
-				.appendManager(room, {
-					authorActor: "manager",
-					kind: "system",
-					format: "stage",
-					text: `${this.safeEventLabel(opts.name?.trim() || "new unit")} may be duplicating work ${owner} already has in hand. Both are running — nothing was blocked. If they are the same goal, one of you is about to do the other's week; if they are not, ignore this. Ask ${owner} directly; what they are working on stays private until they say otherwise.`,
-					event: emitGoalOverlapCard({ refs: { unitName: opts.name }, doorSurface: "unit", face: { title: "Possibly duplicated work", owner: goalOverlap.agent, strength: goalOverlap.strength, pinned: { owner: goalOverlap.agent, basis: goalOverlap.strength } } }),
-				})
-				.catch((err) => this.log("warn", `goal-overlap disclosure not delivered to ${room}: ${errText(err)}`));
-		}
+		// Disclosure (non-structural overlap only — never a refusal) is deferred to the very end of
+		// this method, AFTER the candidate unit actually exists and its real post-spawn status is
+		// known — see the `goalOverlap` consumer just before `return rec.dto`. Computed here, where the
+		// live roster snapshot and the request's declared paths/refs are still on hand, but NOT acted
+		// on yet: emitting it this early named a unit that might still fail to spawn (a candidate
+		// whose `start()` throws lands in `error` a few hundred lines below) and unconditionally
+		// claimed "Both are running" without ever having checked either side's actual state.
 		const produces = opts.produces ?? opts.owns;
 		if (opts.requires?.length) {
 			const conflict = requiresConflict([...this.agents.values()].map((r) => r.dto), opts.repo, opts.requires);
@@ -7651,6 +7683,41 @@ export class SquadManager extends EventEmitter {
 		await this.persist();
 		const failed = rec.dto.status === "error";
 		await this.recordAudit(actor, "create", rec.dto.id, failed ? "error" : "ok", failed ? rec.dto.error : truncateLabel(opts.task ?? rec.dto.name, 80), source);
+		// Goal-overlap disclosure (non-structural — never a refusal; see the `goalOverlap` computation
+		// above), deferred to HERE deliberately: the candidate now has a real id and a real post-spawn
+		// status (it may have landed in `error` a few lines up), and the owner has had the full width
+		// of this method's `await`s (routing, Plane registration, worktree provisioning, `agent.start()`)
+		// to have changed state too. Checking both freshly, right before posting, is what makes the
+		// card's claim about their state true rather than assumed.
+		if (goalOverlap) {
+			const ownerRecord = [...this.agents.values()].find((candidate) => candidate.dto.name === goalOverlap.agent);
+			const ownerStatus = ownerRecord?.dto.status;
+			const candidateStatus = rec.dto.status;
+			if (!isDeadAgentStatus(ownerStatus) && !isDeadAgentStatus(candidateStatus) && ownerRecord) {
+				// Durable restart-dedup (goal-overlap-ledger.ts) only applies to a DETERMINISTIC candidate
+				// id (`explicitId` — spawnFleetBranch's resumed branch ids are the exact incident this
+				// closes): an ad-hoc spawn mints a fresh random id every time and is never resumed
+				// identically after a restart, so it has nothing stable to dedupe against and always
+				// discloses fresh, same as before this fix.
+				const alreadyDisclosed = explicitId !== undefined && this.goalOverlapLedger.has(ownerRecord.dto.id, id);
+				if (!alreadyDisclosed) {
+					if (explicitId !== undefined) this.goalOverlapLedger.add(ownerRecord.dto.id, id);
+					const room = opts.channelId ?? DEFAULT_CHANNEL_ID;
+					const owner = this.safeEventLabel(goalOverlap.agent);
+					const candidateLabel = this.safeEventLabel(rec.dto.name);
+					// Disclosure, not refusal: existence and owner, never a word of the other work.
+					await this.channelStore
+						.appendManager(room, {
+							authorActor: "manager",
+							kind: "system",
+							format: "stage",
+							text: `${candidateLabel} may be duplicating work ${owner} already has in hand — ${owner} is ${agentStatusPhrase(ownerStatus)}, ${candidateLabel} is ${agentStatusPhrase(candidateStatus)}; nothing was blocked. If they are the same goal, one of you is about to do the other's week; if they are not, ignore this. Ask ${owner} directly; what they are working on stays private until they say otherwise.`,
+							event: emitGoalOverlapCard({ refs: { unitId: id, unitName: rec.dto.name }, doorSurface: "unit", face: { title: "Possibly duplicated work", owner: goalOverlap.agent, strength: goalOverlap.strength, pinned: { owner: goalOverlap.agent, basis: goalOverlap.strength } } }),
+						})
+						.catch((err) => this.log("warn", `goal-overlap disclosure not delivered to ${room}: ${errText(err)}`));
+				}
+			}
+		}
 		return rec.dto;
 	}
 

@@ -263,14 +263,51 @@ function lifecycleUnitId(view: ChannelCardView): string | undefined {
   return stringFromPath(payload, ['refs', 'unitId']) ?? stringFromPath(payload, ['face', 'unitId']);
 }
 
-/** Consecutive lifecycle facts for one unit form one disclosure run. An intervening unit or
- * non-lifecycle event always breaks the run, preserving chronology rather than merely grouping by id. */
+/** The owner named by a goal-overlap card — `face.owner`, the same field the card's tone/copy
+ *  already reads (squad-manager.ts's `emitGoalOverlapCard`; never the owner's id, per the
+ *  disclosure's own privacy contract, see channel-card.ts). */
+function goalOverlapOwner(view: ChannelCardView): string | undefined {
+  return stringFromPath(view.entry.event?.payload, ['face', 'owner']);
+}
+
+/**
+ * The two card families a "run" ever folds, and the key each groups on. Kept as one lookup
+ * (rather than two separately-exported group functions) because a run is a property of the
+ * FLAT, chronological card list — one pass has to decide, card by card, whether it continues the
+ * previous group, and that decision needs both families available at once.
+ */
+function runFamily(kind: ChannelCardView['kind']): 'lifecycle' | 'goal-overlap' | undefined {
+  if (LIFECYCLE_CARD_KINDS[kind]) return 'lifecycle';
+  if (kind === 'goal-overlap') return 'goal-overlap';
+  return undefined;
+}
+
+/**
+ * Consecutive disclosures that are, in substance, one event form one run. An intervening card
+ * from outside the family always breaks it, preserving chronology rather than merely grouping by
+ * key.
+ *
+ * Two families fold today:
+ *  - Lifecycle facts (`unit-spawned`/`unit-turn-finished`/`unit-failed`/`pr-opened`/
+ *    `verification-ran`) for the SAME UNIT — the original shape this function was named for.
+ *  - `goal-overlap` disclosures for the SAME OWNER — a single dispatch sweep that spawns many
+ *    new units against one already-busy owner is a legitimate run, not spam (the actual spam —
+ *    the SAME pair repeating across daemon restarts — is fixed upstream, at the source: see
+ *    goal-overlap-ledger.ts). Each card in the run still names a different candidate; folding
+ *    only changes how many rows a person has to read, never what was disclosed.
+ */
 export function groupLifecycleRuns(views: ChannelCardView[]): ChannelCardView[][] {
   const groups: ChannelCardView[][] = [];
   for (const view of views) {
     const previous = groups.at(-1);
-    const sameUnit = previous?.[0] && lifecycleUnitId(previous[0]) === lifecycleUnitId(view);
-    if (LIFECYCLE_CARD_KINDS[view.kind] && sameUnit && LIFECYCLE_CARD_KINDS[previous[0].kind]) previous.push(view);
+    const first = previous?.[0];
+    const family = first && runFamily(first.kind);
+    const sameFamily = family && family === runFamily(view.kind);
+    const sameGroup =
+      sameFamily &&
+      first &&
+      (family === 'lifecycle' ? lifecycleUnitId(first) === lifecycleUnitId(view) : goalOverlapOwner(first) === goalOverlapOwner(view));
+    if (sameGroup) previous!.push(view);
     else groups.push([view]);
   }
   return groups;
@@ -448,7 +485,10 @@ export function latestChannelSeq(entries: readonly ChannelEntry[]): number {
 const ALARMING_RUN_KINDS: Partial<Record<ChannelCardView['kind'], true>> = { 'unit-failed': true, 'local:mention-steer-failed': true, 'land-assessment': true };
 
 export function runSummary(views: readonly ChannelCardView[]): { count: number; agents: string[]; kinds: string[]; unusual?: string } {
-  const agents = [...new Set(views.map((view) => view.pinned.find((item) => item.label === 'Unit')?.value ?? view.authorLabel).filter(Boolean))];
+  // goal-overlap has no "Unit" chip (its pinned face is `{owner, basis}` — see channel-card.ts) —
+  // fall back to "Owner" before the generic authorLabel (always "manager" for this kind, which
+  // told a reader nothing about which owner the run was actually about).
+  const agents = [...new Set(views.map((view) => view.pinned.find((item) => item.label === 'Unit')?.value ?? view.pinned.find((item) => item.label === 'Owner')?.value ?? view.authorLabel).filter(Boolean))];
   const kinds = [...new Set(views.map((view) => view.kind).filter((kind) => kind !== 'unknown-event'))];
   // Anything the renderer already considered alarming is, by definition, the thing a person would
   // have wanted surfaced — so it is surfaced rather than folded away under a reassuring count.

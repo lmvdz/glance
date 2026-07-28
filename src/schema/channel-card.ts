@@ -106,8 +106,10 @@ const RefsSchema = Schema.Struct({
 	issueId: Schema.optional(Schema.String),
 	issueIdentifier: Schema.optional(Schema.String),
 	reason: Schema.optional(Schema.String),
-	// goal-overlap's only ref: the disclosure fires before the new unit has an id, so it names the
-	// candidate by its requested display name instead (`squad-manager.ts#spawnAgent`).
+	// goal-overlap (`squad-manager.ts#createWithId`): `unitId` is the candidate's real id (the
+	// disclosure now fires only after the candidate exists, post-spawn — see the goal-overlap-ledger
+	// header for why), `unitName` its display name; both ride alongside `face.owner`, never the
+	// owner's own id (privacy: existence and owner only, per `GoalConflict`'s contract).
 	unitName: Schema.optional(Schema.String),
 	// voice-call / voice-decision (concern 02): the broker-minted call identity, and — for a
 	// voice-decision card only — the OMP arbiter's decision id. Neither is a `unitId`: a call is
@@ -213,10 +215,13 @@ const VoiceDecisionFaceSchema = Schema.Struct({
 	decisionClass: Schema.optional(Schema.Literals(["destructive", "routine"])),
 });
 
-/** `squad-manager.ts#spawnAgent`'s goal-overlap disclosure (`goalConflict` check) — a bespoke
+/** `squad-manager.ts#createWithId`'s goal-overlap disclosure (`goalConflict` check) — a bespoke
  *  inline emit added to main after 06/07's original base; registered here in the same reland that
  *  found it (see EXECUTION-LOG.md / this reland's task brief). Deliberately no `body`/`tone`: the
- *  human-readable sentence lives in `text`, not `face.body`, at this emit site. */
+ *  human-readable sentence lives in `text`, not `face.body`, at this emit site. Post-ship fix
+ *  (EXECUTION-LOG.md "goal-overlap spam"): the emit now fires once per (owner, deterministic
+ *  candidate id) pair, EVER — durable across restarts (goal-overlap-ledger.ts) — and only after
+ *  both sides' post-spawn status is confirmed alive (never `stopped`/`error`). */
 const GoalOverlapFaceSchema = Schema.Struct({
 	...BaseFaceFields,
 	owner: Schema.optional(Schema.String),
