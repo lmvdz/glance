@@ -20,6 +20,23 @@ import * as path from "node:path";
 import type { BrokerCallCreated, BrokerCallView, BrokerClient } from "../../src/voice-call-manager.ts";
 import type { VoiceCallRetention } from "../../src/voice-call-binding.ts";
 
+/** Trimmed transcript length, in code points — mirrors `MAX_TRANSCRIPT_POINTS` in
+ *  `~/src/oh-my-pi/packages/coding-agent/src/live/coven-bridge.ts` (opencoven-viz's own copy lives at
+ *  `opencoven-viz/omp-patch/coven-bridge.ts`) exactly, so a daemon that wrongly sourced full turns
+ *  from the wire instead of the journal would fail THIS spine, not just a unit test of the trimmer. */
+const MAX_TRANSCRIPT_POINTS = 480;
+
+/**
+ * Trims to the last `max` **code points** — a byte-for-byte port of `coven-bridge.ts`'s own
+ * `trimCodePoints`. `String.prototype.slice` counts UTF-16 code units and can cut a surrogate pair
+ * in half; iterating with `Array.from` walks code points and cannot split one.
+ */
+function trimCodePoints(text: string, max: number): string {
+	const points = Array.from(text);
+	if (points.length <= max) return text;
+	return points.slice(points.length - max).join("");
+}
+
 export interface FakeDecisionOption {
 	index: number;
 	label: string;
@@ -129,6 +146,11 @@ export class FakeOmpCall {
 	private closed = false;
 	private muted = false;
 	private interruptPolicy: "allow" | "doNotInterrupt" = "allow";
+	/** Every `steer` control frame's `text` this call's socket has received, in receipt order — this
+	 *  fixture has no daemon to steer, so recording is the only way a test can prove the text actually
+	 *  reached the wire (a daemon-level ack remains the honest maximum; see PROTOCOL.md's unauthenticated
+	 *  `stop`/`toggleMute`/`steer` trio, which predates the record/control plane and gets no ack at all). */
+	private receivedSteers: string[] = [];
 
 	private decisions = new Map<string, FakeDecisionSnapshot>();
 	private pendingConfirm = new Map<string, PendingConfirmation>();
@@ -286,14 +308,23 @@ export class FakeOmpCall {
 		return this.decisions.get(decisionId);
 	}
 
+	/** Every `steer` frame's text this call's socket has received so far, in receipt order — a test's
+	 *  only handle on "the text actually reached the wire" (see `receivedSteers`'s own doc comment). */
+	steersReceived(): readonly string[] {
+		return [...this.receivedSteers];
+	}
+
 	// ── Transcript / artifact / terminal — journal + (for transcript) bridge presentation ──────────
 
 	async publishTranscript(entry: { role: "user" | "assistant"; text: string; turn: number; final: boolean }): Promise<void> {
 		// Retention governs the DURABLE record only — PROTOCOL.md: "recordingMode... changes nothing
 		// about what crosses THIS wire". The bridge frame always goes out; the journal record is
-		// written only when the call isn't recording `off`.
+		// written only when the call isn't recording `off`. The journal keeps the FULL turn (retention
+		// is a journal-only concern); the bridge frame is trimmed to the last 480 code points, exactly
+		// like the real `CovenBridge#publishTranscript` → `trimCodePoints`, so a daemon that wrongly
+		// sourced full turns from the wire instead of the journal-derived projection fails HERE.
 		if (this.recordingMode !== "off") await this.appendJournal({ type: "transcript", transcript: entry });
-		this.broadcast({ type: "transcript", ...entry });
+		this.broadcast({ type: "transcript", ...entry, text: trimCodePoints(entry.text, MAX_TRANSCRIPT_POINTS) });
 	}
 
 	async publishArtifact(entry: { path: string; status: "ready" | "failed" }): Promise<void> {
@@ -309,15 +340,25 @@ export class FakeOmpCall {
 		this.broadcast({ type: "terminal", error });
 		const sockets = [...this.sockets];
 		this.sockets.clear();
-		for (const ws of sockets) {
+		const server = this.server;
+		this.server = undefined;
+		// Tearing the socket down in the SAME tick as the broadcast can drop the terminal frame before
+		// it reaches the wire — mirrors `CovenBridge#close`'s own `setTimeout(..., 0)` deferral exactly:
+		// yield once so the frame is flushed, then release the sockets and stop the server.
+		setTimeout(() => {
+			for (const ws of sockets) {
+				try {
+					(ws as unknown as { close?: () => void }).close?.();
+				} catch {
+					/* already gone */
+				}
+			}
 			try {
-				(ws as unknown as { close?: () => void }).close?.();
+				server?.stop(true);
 			} catch {
 				/* already gone */
 			}
-		}
-		this.server?.stop(true);
-		this.server = undefined;
+		}, 0);
 	}
 
 	/** Dishonest exit: the process dies with NO terminal journal record and NO terminal bridge frame
@@ -367,10 +408,15 @@ export class FakeOmpCall {
 		else if (frame.action === "toggleMute") {
 			this.muted = !this.muted;
 			this.broadcast({ type: "muted", muted: this.muted });
+		} else if (frame.action === "steer") {
+			// Unauthenticated, like the real bridge's own `stop`/`toggleMute`/`steer` trio (predates the
+			// record/control plane — no requestId, no ack). Recording the text is the only thing that
+			// lets a test prove it reached the wire at all; a daemon-level ack remains the honest maximum.
+			this.receivedSteers.push(typeof frame.text === "string" ? frame.text : "");
 		}
-		// stop/steer: accepted and ignored by this fixture — no test in this suite drives them through
-		// the wire (steering and stop are exercised at the coordinator level, which never sends them
-		// through THIS fixture's control path in the spine).
+		// stop: accepted and ignored by this fixture — no test in this suite drives it through the wire
+		// (stop is exercised at the coordinator level, which never sends it through THIS fixture's
+		// control path in the spine).
 	}
 
 	private authorize(frame: Record<string, unknown>): { requestId: string; reason?: string } | undefined {

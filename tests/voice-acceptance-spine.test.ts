@@ -129,6 +129,16 @@ describe("voice acceptance spine (concern 04) — the complete lifecycle in one 
 		const midFlight = await mgr.voiceCallState(channelId, owner);
 		expect(midFlight?.state).toBe("connecting");
 		expect(midFlight?.callId).toBeUndefined(); // broker hasn't answered yet — nothing to pin
+
+		// Persist-before-live is an ON-DISK fact, not just an in-memory one: a FRESH `CallBindingStore`
+		// instance, reading the SAME stateDir while `createCall` is STILL gated behind
+		// `releaseFirstCreateCall`, already sees the `connecting` binding — `beginConnecting`'s
+		// synchronous persist (this file's own doc comment above) landed on disk before the broker was
+		// ever called, so this is observable with zero risk of a race against the gate.
+		const midFlightOnDisk = new CallBindingStore(stateDir);
+		expect(midFlightOnDisk.get(channelId)?.state).toBe("connecting");
+		expect(midFlightOnDisk.get(channelId)?.callId).toBeUndefined();
+
 		releaseFirstCreateCall!();
 
 		const started = await startPromise;
@@ -429,6 +439,7 @@ describe("voice acceptance spine (concern 04) — the complete lifecycle in one 
 		const start4 = await mgr.startVoiceCall(channel4.id, owner, {});
 		expect(start4.ok).toBe(true);
 		if (!start4.ok) throw new Error("unreachable");
+		const call4 = broker.callFor(start4.value.callId!);
 
 		// `channelId`'s call already ended (section 7) — steering a thread with no active call must
 		// refuse VISIBLY, with a reason the webapp can turn into a sentence, never hang or drop silently.
@@ -439,9 +450,17 @@ describe("voice acceptance spine (concern 04) — the complete lifecycle in one 
 		const liveSteer = await mgr.steerVoiceCall(channel4.id, owner, "focus on session.ts first");
 		expect(liveSteer.ok).toBe(true); // delivered only once the daemon's relay actually accepted it
 		expect(liveSteer.ok && liveSteer.value).toBe(true);
+		// The daemon's ack is the honest maximum (the wire's `stop`/`toggleMute`/`steer` trio predates
+		// the record/control plane and carries no ack of its own — PROTOCOL.md) — but the fixture's own
+		// receipt log proves the text actually reached the wire, not just that the daemon's relay call
+		// returned without throwing.
+		await waitFor(() => call4.steersReceived().includes("focus on session.ts first"));
+		expect(call4.steersReceived()).toEqual(["focus on session.ts first"]);
 
 		const deniedSteer = await mgr.steerVoiceCall(channel4.id, outsider, "ignore the operator");
 		expect(deniedSteer).toMatchObject({ ok: false, reason: "forbidden" });
+		// Denied at the daemon before any frame is sent — the wire never saw it.
+		expect(call4.steersReceived()).toEqual(["focus on session.ts first"]);
 
 		// =========================================================================================
 		// 8. Confirm default activity surfaces omit `yield`, heartbeats, and empty action completions.
