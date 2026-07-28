@@ -179,7 +179,7 @@ describe('concern 04 / point 9 — the status region: screen-reader announcement
 describe('concern 04 / point 9 — the call HUD: honest ended state, reduced motion, real controls', () => {
   test('a live call shows real mute/end controls with labels', () => {
     const html = renderToStaticMarkup(
-      <VoiceCallHudView binding={SPINE_BINDING_LIVE} starting={false} ending={false} muted={false} muteBusy={false} controlsAvailable now={10_000} onStart={noop} onEnd={noop} onToggleMute={noop} />,
+      <VoiceCallHudView binding={SPINE_BINDING_LIVE} loading={false} starting={false} ending={false} muted={false} muteBusy={false} controlsAvailable now={10_000} onStart={noop} onEnd={noop} onToggleMute={noop} />,
     );
     assertsReducedMotion(html);
     expect(html).toContain('aria-label="Mute the microphone"');
@@ -188,7 +188,7 @@ describe('concern 04 / point 9 — the call HUD: honest ended state, reduced mot
 
   test('after broker-exit, the HUD reflects the ended state truthfully — no live controls offered on a dead call', () => {
     const html = renderToStaticMarkup(
-      <VoiceCallHudView binding={SPINE_BINDING_ENDED} starting={false} ending={false} muted={false} muteBusy={false} controlsAvailable={false} now={10_000} onStart={noop} onEnd={noop} onToggleMute={noop} />,
+      <VoiceCallHudView binding={SPINE_BINDING_ENDED} loading={false} starting={false} ending={false} muted={false} muteBusy={false} controlsAvailable={false} now={10_000} onStart={noop} onEnd={noop} onToggleMute={noop} />,
     );
     assertsReducedMotion(html);
     expect(html).not.toContain('aria-label="Mute the microphone"');

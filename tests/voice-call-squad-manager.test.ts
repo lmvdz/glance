@@ -119,4 +119,61 @@ describe("room membership gates voice-call reads/mutations", () => {
 		expect(attach.ok).toBe(false);
 		if (!attach.ok) expect(attach.reason).toBe("no-active-call"); // authorized, but nothing to attach to — not "forbidden"
 	});
+
+	// Concern 10 (call-management-ui): reattach follows the SAME canReadChannel-then-delegate shape
+	// every other channel-scoped voice-call mutation on this file already proves.
+	test("reattachVoiceCall refuses a non-member with 'forbidden', before the coordinator is ever consulted", async () => {
+		const mgr = makeManager();
+		const owner = actor("alice");
+		const outsider = actor("mallory");
+		const channel = await mgr.createChannel(owner, { name: "private-room-7", visibility: "private" });
+		const result = await mgr.reattachVoiceCall(channel.id, outsider);
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.reason).toBe("forbidden");
+	});
+
+	test("reattachVoiceCall authorizes a member through to the coordinator, which then refuses honestly for a channel with no active call", async () => {
+		const mgr = makeManager();
+		const owner = actor("alice");
+		const channel = await mgr.createChannel(owner, { name: "private-room-8", visibility: "private" });
+		const result = await mgr.reattachVoiceCall(channel.id, owner);
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.reason).toBe("no-active-call"); // authorized, but nothing to reattach to
+	});
+});
+
+describe("listVoiceCallsSurface / endOrphanVoiceCall (concern 10: call-management-ui)", () => {
+	test("only shows bindings the actor can actually read; orphans (which have no channel) are shown regardless", async () => {
+		const mgr = makeManager();
+		const alice = actor("alice");
+		const bob = actor("bob");
+		const alicesRoom = await mgr.createChannel(alice, { name: "alices-room", visibility: "private" });
+		const bobsRoom = await mgr.createChannel(bob, { name: "bobs-room", visibility: "private" });
+		// Both channels get a "connecting" binding directly on the store (bypassing the broker, which
+		// this test's InertBroker refuses to actually create a call against) — enough to exercise the
+		// membership filter without needing a real bridge/journal.
+		mgr.voiceCall.bindings.beginConnecting(alicesRoom.id, { ownerActorId: alice.id, sessionRoot: "/tmp", retention: "full" });
+		mgr.voiceCall.bindings.beginConnecting(bobsRoom.id, { ownerActorId: bob.id, sessionRoot: "/tmp", retention: "full" });
+
+		const aliceSurface = await mgr.listVoiceCallsSurface(alice);
+		expect(aliceSurface.bindings.map((b) => b.channelId)).toEqual([alicesRoom.id]);
+
+		const bobSurface = await mgr.listVoiceCallsSurface(bob);
+		expect(bobSurface.bindings.map((b) => b.channelId)).toEqual([bobsRoom.id]);
+	});
+
+	test("endOrphanVoiceCall needs no channel/membership check at all — an orphan has no channel to check", async () => {
+		const stateDir = mkdtempSync(path.join(os.tmpdir(), "voice-call-mgr-"));
+		cleanups.push(() => rmSync(stateDir, { recursive: true, force: true }));
+		const reaped: string[] = [];
+		class TrackingBroker extends InertBroker {
+			override async endCall(callId: string): Promise<void> {
+				reaped.push(callId);
+			}
+		}
+		const mgr = new SquadManager({ stateDir, skipGlobalJanitors: true, voiceBroker: new TrackingBroker() });
+		const result = await mgr.endOrphanVoiceCall("call-orphan-1");
+		expect(result).toEqual({ ok: true, value: { ended: true } });
+		expect(reaped).toEqual(["call-orphan-1"]);
+	});
 });

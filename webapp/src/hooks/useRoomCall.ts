@@ -5,6 +5,7 @@ import {
   fetchVoiceCallDecisions,
   fetchVoiceCallGaps,
   fetchVoiceCallState,
+  reattachVoiceCall,
   resolveVoiceCallDecision,
   setVoiceCallMuted,
   startVoiceCall,
@@ -14,7 +15,7 @@ import {
   type VoiceCallDecisionDTO,
   type VoiceCallJournalGapDTO,
 } from '../lib/api';
-import { readResolveAck, steerRefusalCopy, type ResolveOutcome, type SteerState } from '../lib/voice/roomCall';
+import { isCallConflictError, readResolveAck, steerRefusalCopy, type ResolveOutcome, type SteerState } from '../lib/voice/roomCall';
 
 /**
  * useRoomCall — the thread's live call, as one piece of state the room can render.
@@ -44,6 +45,9 @@ export interface RoomCallState {
   error: string;
   starting: boolean;
   ending: boolean;
+  /** Concern 10: a user-triggered reconnect is in flight — same single-flight discipline as
+   *  `starting`/`ending` above. */
+  reattaching: boolean;
   muteBusy: boolean;
   /** What the daemon has last been asked for; `false` when there is no live call. */
   muted: boolean;
@@ -57,6 +61,7 @@ export interface RoomCallState {
   confirmPending: { decisionId: string; optionIndex: number; label: string; confirmToken?: string } | undefined;
   start: () => void;
   end: () => void;
+  reattach: () => void;
   toggleMute: () => void;
   chooseOption: (decisionId: string, optionIndex: number, label: string) => Promise<ResolveOutcome | undefined>;
   confirm: () => Promise<ResolveOutcome | undefined>;
@@ -79,6 +84,7 @@ export function useRoomCall(channelId: string): RoomCallState {
   const [error, setError] = useState('');
   const [starting, setStarting] = useState(false);
   const [ending, setEnding] = useState(false);
+  const [reattaching, setReattaching] = useState(false);
   const [muteBusy, setMuteBusy] = useState(false);
   const [steer, setSteer] = useState<SteerState | undefined>(undefined);
   const [refusals, setRefusals] = useState<Record<string, string>>({});
@@ -86,7 +92,7 @@ export function useRoomCall(channelId: string): RoomCallState {
   const [confirmPending, setConfirmPending] = useState<RoomCallState['confirmPending']>(undefined);
   const [pollTick, setPollTick] = useState(0);
 
-  const inFlight = useRef({ start: false, end: false, mute: false, resolve: false });
+  const inFlight = useRef({ start: false, end: false, reattach: false, mute: false, resolve: false });
   const aliveRef = useRef(true);
 
   // Every piece of per-channel state resets on a channel change — a decision from the room you just
@@ -157,11 +163,36 @@ export function useRoomCall(channelId: string): RoomCallState {
       })
       .catch((err) => {
         if (!aliveRef.current) return;
-        setError(`The call did not start: ${errorText(err)}`);
+        const message = errorText(err);
+        // A conflict ("a session is already running") is not a dead end — this channel already has
+        // a binding, and `refresh()` below re-polls immediately, so the REAL binding (with its real
+        // End/Mute/Reattach controls) is one poll away. Leaving the raw conflict string up as a
+        // persistent banner OVER those now-working controls is exactly the dead-end UX concern 10
+        // exists to close, so it is suppressed here rather than shown.
+        setError(isCallConflictError(message) ? '' : `The call did not start: ${message}`);
       })
       .finally(() => {
         inFlight.current.start = false;
         setStarting(false);
+        refresh();
+      });
+  }, [channelId, refresh]);
+
+  const reattach = useCallback(() => {
+    if (inFlight.current.reattach) return;
+    inFlight.current.reattach = true;
+    setReattaching(true);
+    setError('');
+    void reattachVoiceCall(channelId)
+      .then((next) => {
+        if (aliveRef.current) setBinding(next);
+      })
+      .catch((err) => {
+        if (aliveRef.current) setError(`Reattach failed: ${errorText(err)}`);
+      })
+      .finally(() => {
+        inFlight.current.reattach = false;
+        setReattaching(false);
         refresh();
       });
   }, [channelId, refresh]);
@@ -302,6 +333,7 @@ export function useRoomCall(channelId: string): RoomCallState {
       error,
       starting,
       ending,
+      reattaching,
       muteBusy,
       muted,
       controlsAvailable: binding?.controlsAvailable === true,
@@ -311,6 +343,7 @@ export function useRoomCall(channelId: string): RoomCallState {
       confirmPending,
       start,
       end,
+      reattach,
       toggleMute,
       chooseOption,
       confirm,
@@ -319,6 +352,6 @@ export function useRoomCall(channelId: string): RoomCallState {
       clearSteer,
       refresh,
     }),
-    [binding, decisions, artifacts, gaps, loading, error, starting, ending, muteBusy, muted, steer, refusals, pendingOption, confirmPending, start, end, toggleMute, chooseOption, confirm, cancelConfirm, sendSteer, clearSteer, refresh],
+    [binding, decisions, artifacts, gaps, loading, error, starting, ending, reattaching, muteBusy, muted, steer, refusals, pendingOption, confirmPending, start, end, reattach, toggleMute, chooseOption, confirm, cancelConfirm, sendSteer, clearSteer, refresh],
   );
 }

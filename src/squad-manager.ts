@@ -243,7 +243,7 @@ import type { JournalGap, StoredTranscriptEntry } from "./voice-call-projection.
 import type { ArtifactReadResult, ArtifactSnapshotRecord } from "./voice-call-artifacts.ts";
 import type { JournalDecisionSnapshot } from "./voice-call-journal.ts";
 import type { BridgeControlAck } from "./voice-call-bridge-client.ts";
-import { VoiceCallCoordinator, type BrokerClient, type CoordinatorResult } from "./voice-call-manager.ts";
+import { VoiceCallCoordinator, type BrokerClient, type CoordinatorResult, type VoiceCallsSurface } from "./voice-call-manager.ts";
 import { NodeStore, compareActivity, type NodeState } from "./nodes.ts";
 import { ForgedCardError, assertAuthentic, projectsToRoom, type CardProvenance } from "./projection-classes.ts";
 import { coldStartLearningState } from "./unknowns.ts";
@@ -1376,6 +1376,12 @@ export class SquadManager extends EventEmitter {
 					event: { kind: input.kind, payload: input.payload },
 				});
 				this.emit("event", { type: "channel-entry", channelId: entry.channelId, entry } satisfies SquadEvent);
+			},
+			// Concern 11: the SAME `emit("event", ...)` bus `emitCard` above already uses for
+			// channel-entry cards, riding a DIFFERENT SquadEvent variant so a turn can never be
+			// mistaken for (or accidentally rendered alongside) a channel timeline card.
+			onTranscriptTurn: (input) => {
+				this.emit("event", { type: "voice-call-transcript-turn", channelId: input.channelId, callId: input.callId, entry: input.entry } satisfies SquadEvent);
 			},
 		});
 	}
@@ -12516,6 +12522,14 @@ export class SquadManager extends EventEmitter {
 		return this.voiceCall.endCall(channelId, isAuthorized);
 	}
 
+	/** User-triggered reconnect (concern 10: call-management-ui) — see
+	 *  `VoiceCallCoordinator#reattach` for the full precondition/outcome set. Same membership gate as
+	 *  every other voice-call mutation on this channel. */
+	async reattachVoiceCall(channelId: string, actor: Actor): Promise<CoordinatorResult<VoiceCallBindingView>> {
+		const isAuthorized = await this.channelStore.canReadChannel(channelId, actor);
+		return this.voiceCall.reattach(channelId, isAuthorized);
+	}
+
 	async resolveVoiceCallDecision(channelId: string, actor: Actor, input: { decisionId: string; optionIndex: number; label: string; confirmToken?: string }): Promise<CoordinatorResult<BridgeControlAck>> {
 		const isAuthorized = await this.channelStore.canReadChannel(channelId, actor);
 		return this.voiceCall.resolveDecision(channelId, isAuthorized, input);
@@ -12584,6 +12598,31 @@ export class SquadManager extends EventEmitter {
 	 *  `voiceCall` directly. Deliberate, not dead: do not remove without checking 03's status first. */
 	voiceCallLadderPriority(channelId: string): LadderPriority {
 		return this.voiceCall.ladderPriority(channelId);
+	}
+
+	/**
+	 * Concern 10 (call-management-ui): the calls surface's data source — every binding this manager
+	 * knows about that `actor` can actually read, plus every broker-orphaned call process (which has
+	 * no channel, and therefore no membership check to apply — see `VoiceCallCoordinator#listCallsSurface`).
+	 * Filters bindings AFTER the coordinator builds the full list rather than asking it to filter
+	 * itself, mirroring the existing `for (const dto of this.list()) if (await canReadChannel(...))`
+	 * shape this file already uses for agent listing — the coordinator has no `Actor`/RBAC concept of
+	 * its own, by design (module doc: "it knows nothing about ChannelStore/AgentDTO/RBAC").
+	 */
+	async listVoiceCallsSurface(actor: Actor): Promise<VoiceCallsSurface> {
+		const surface = await this.voiceCall.listCallsSurface();
+		const visible: VoiceCallBindingView[] = [];
+		for (const binding of surface.bindings) {
+			if (await this.channelStore.canReadChannel(binding.channelId, actor)) visible.push(binding);
+		}
+		return { bindings: visible, orphans: surface.orphans };
+	}
+
+	/** Ends an orphaned broker call (no channel, so no membership gate applies — see
+	 *  `VoiceCallCoordinator#endOrphan`). Gated at the REST tier by `authz.ts`'s default
+	 *  GET=viewer/mutation=operator floor, the same tier every other voice-call mutation route uses. */
+	async endOrphanVoiceCall(callId: string): Promise<CoordinatorResult<{ ended: true }>> {
+		return this.voiceCall.endOrphan(callId);
 	}
 
 	private safeEventLabel(value: unknown): string {

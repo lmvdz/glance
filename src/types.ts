@@ -19,6 +19,7 @@ import type { HarnessScorecard } from "./harness-scorecard.ts";
 import type { WorkLane, WorkLaneSource } from "./lane.ts";
 import type { ComplexityTier } from "./model-outcomes.ts";
 import type { LadderPriority } from "./attention-ladder.ts";
+import type { StoredTranscriptEntry } from "./voice-call-projection.ts";
 
 /** Derived, human-meaningful lifecycle state of one managed agent. */
 export type AgentStatus =
@@ -1557,7 +1558,14 @@ export type SquadEvent =
 	| { type: "command-ack"; clientTurnId: string; ok: true }
 	| { type: "command-ack"; clientTurnId: string; ok: false; reason: CommandAckReason }
 	| { type: "presence"; presence: PresenceSnapshot }
-	| TypingEvent;
+	| TypingEvent
+	// Concern 11 (voice-transcript-in-thread): pushed once per journaled transcript record actually
+	// appended to disk — see `VoiceCallCoordinatorOptions.onTranscriptTurn`'s doc. Rides the SAME
+	// per-channel `canReadChannel`-gated WS fanout every other SquadEvent already uses; deliberately
+	// its own variant rather than a `channel-entry` so a call's per-utterance turns can never leak
+	// into the main channel timeline the way `channel-entry` cards do (the product decision this
+	// concern's plan doc records: the timeline gets no turns, ever).
+	| { type: "voice-call-transcript-turn"; channelId: string; callId: string; entry: StoredTranscriptEntry };
 
 /** The daemon's periodic background loops — the ones that run without an operator and were, until the
  *  automation log, invisible. Scout reads agent reasoning; Sentinel (plans/sentinel-drift-probe, v0

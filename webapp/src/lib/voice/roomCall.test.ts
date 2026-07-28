@@ -12,6 +12,12 @@ import {
   attentionChipLabel,
   bindingBanner,
   browserAudioStatusLine,
+  callPhase,
+  callRowMicState,
+  callSurfaceBindingRow,
+  callSurfaceOrphanRow,
+  callSurfaceRowDetail,
+  callSurfaceRows,
   currentPane,
   decisionAnnouncement,
   decisionDoorModel,
@@ -22,6 +28,7 @@ import {
   groupArtifacts,
   idlePolicyLine,
   initialPaneStack,
+  isCallConflictError,
   isRawRoomEvent,
   isUiOnlyDecision,
   optionLabelWithoutMarker,
@@ -42,7 +49,7 @@ import {
   threadStatus,
   withoutRawRoomEvents,
 } from './roomCall';
-import type { VoiceCallArtifactDTO, VoiceCallBindingDTO, VoiceCallDecisionDTO } from '../api';
+import type { VoiceCallArtifactDTO, VoiceCallBindingDTO, VoiceCallDecisionDTO, VoiceCallOrphanDTO } from '../api';
 
 // -------------------------------------------------------------------------------------------------
 // Fixtures
@@ -691,5 +698,136 @@ describe('browserAudioStatusLine', () => {
 
   test('a ready relay with an idle mic (the brief tick before requesting fires) has nothing to say yet', () => {
     expect(browserAudioStatusLine({ micStatus: 'idle', relayStatus: 'ready' })).toBeUndefined();
+  });
+});
+
+// -------------------------------------------------------------------------------------------------
+// The refresh-rehydration phase (concern 10) — the "checking" window between mount and the first
+// read resolving must never look like "no call".
+// -------------------------------------------------------------------------------------------------
+
+describe('callPhase / phaseExplanation: the checking window', () => {
+  test('no binding, still loading: "checking" — never "none"', () => {
+    expect(callPhase(null, true)).toBe('checking');
+  });
+
+  test('no binding, done loading: genuinely "none"', () => {
+    expect(callPhase(null, false)).toBe('none');
+  });
+
+  test('a binding present takes precedence over loading — a poll refetch mid-flight must never look unattached', () => {
+    expect(callPhase(binding({ state: 'live' }), true)).toBe('live');
+    expect(callPhase(binding({ state: 'degraded' }), true)).toBe('degraded');
+  });
+
+  test('PHASE_LABEL/PHASE_LABEL_CH cover the new phase without shrinking the reserved width', () => {
+    expect(PHASE_LABEL.checking).toBe('checking');
+    expect(PHASE_LABEL_CH).toBeGreaterThanOrEqual('connecting'.length);
+  });
+
+  test('phaseExplanation says the room does not know yet, not that there is no call', () => {
+    expect(phaseExplanation(null, true)).toContain('Checking');
+    expect(phaseExplanation(null, true)).not.toContain('No call is bound');
+    expect(phaseExplanation(null, false)).toContain('No call is bound');
+  });
+
+  test('phaseExplanation defaults loading to false — every pre-existing call site (no second argument) is unaffected', () => {
+    expect(phaseExplanation(null)).toBe('No call is bound to this thread.');
+  });
+});
+
+describe('isCallConflictError: recognising the daemon\'s own "already has an active call" guard', () => {
+  test('matches the exact daemon wording, whatever channel id or state it names', () => {
+    expect(isCallConflictError('channel room-1 already has an active call (degraded)')).toBe(true);
+    expect(isCallConflictError('channel node:abc already has an active call (live)')).toBe(true);
+  });
+
+  test('a genuine broker/bridge failure is NOT a conflict — it must still show as an error', () => {
+    expect(isCallConflictError('broker: ECONNREFUSED')).toBe(false);
+    expect(isCallConflictError('bridge: timed out waiting for hello')).toBe(false);
+    expect(isCallConflictError('forbidden')).toBe(false);
+  });
+});
+
+// -------------------------------------------------------------------------------------------------
+// Calls management surface (concern 10) — mic-state honesty and row-building for the cross-room
+// calls panel.
+// -------------------------------------------------------------------------------------------------
+
+function orphan(over: Partial<VoiceCallOrphanDTO> = {}): VoiceCallOrphanDTO {
+  return { callId: 'call-orphan-1', startedAt: 1_000, ...over };
+}
+
+describe('callRowMicState: checked while capturing, unverified when nobody can confirm it, none once ended', () => {
+  test('ended: none — there is nothing left to verify', () => {
+    expect(callRowMicState(binding({ state: 'ended', controlsAvailable: false }))).toBe('none');
+  });
+
+  test('live with a connected bridge (controlsAvailable): checked — a live socket actually confirms it', () => {
+    expect(callRowMicState(binding({ state: 'live', controlsAvailable: true }))).toBe('checked');
+  });
+
+  test('degraded (the socket dropped): unverified — nobody can confirm the mic right now', () => {
+    expect(callRowMicState(binding({ state: 'degraded', controlsAvailable: false }))).toBe('unverified');
+  });
+
+  test('connecting (no bridge yet): unverified — honestly, not yet anything to check', () => {
+    expect(callRowMicState(binding({ state: 'connecting', controlsAvailable: false }))).toBe('unverified');
+  });
+});
+
+describe('callSurfaceBindingRow / callSurfaceOrphanRow: the register rules — urgent door only for the unattended-but-not-ended case', () => {
+  test('a degraded binding is urgent — it WAS confirmed live and now nobody can verify it', () => {
+    const row = callSurfaceBindingRow(binding({ channelId: 'room-1', state: 'degraded', controlsAvailable: false }));
+    expect(row).toMatchObject({ kind: 'binding', micState: 'unverified', urgent: true, canEnd: true, canReattach: true });
+  });
+
+  test('a brand-new connecting binding is unverified but NOT urgent — routine, bounded dialling, not a privacy incident', () => {
+    const row = callSurfaceBindingRow(binding({ channelId: 'room-1', state: 'connecting', controlsAvailable: false }));
+    expect(row.micState).toBe('unverified');
+    expect(row.urgent).toBe(false);
+    expect(row.canReattach).toBe(false); // nothing to reattach to yet — it's already mid-connect
+  });
+
+  test('a live, checked binding is neither urgent nor reattachable — nothing wrong, nothing to reconnect', () => {
+    const row = callSurfaceBindingRow(binding({ channelId: 'room-1', state: 'live', controlsAvailable: true }));
+    expect(row).toMatchObject({ micState: 'checked', urgent: false, canReattach: false, canEnd: true });
+  });
+
+  test('an ended binding can neither be ended again nor reattached', () => {
+    const row = callSurfaceBindingRow(binding({ channelId: 'room-1', state: 'ended', controlsAvailable: false }));
+    expect(row).toMatchObject({ micState: 'none', urgent: false, canEnd: false, canReattach: false });
+  });
+
+  test('every orphan is unverified, urgent, and End-only — there is no channel to reattach through', () => {
+    const row = callSurfaceOrphanRow(orphan({ callId: 'call-ghost' }));
+    expect(row).toEqual({ kind: 'orphan', callId: 'call-ghost', startedAt: 1_000, sessionRoot: undefined, micState: 'unverified', urgent: true, canEnd: true });
+  });
+});
+
+describe('callSurfaceRows: stable total order, bindings then orphans', () => {
+  test('a poll returning the identical rows never reshuffles them', () => {
+    const bindings = [binding({ channelId: 'room-b', state: 'live', controlsAvailable: true }), binding({ channelId: 'room-a', state: 'degraded', controlsAvailable: false })];
+    const orphans = [orphan({ callId: 'call-z' }), orphan({ callId: 'call-a' })];
+    const rows = callSurfaceRows(bindings, orphans);
+    expect(rows.map((r) => (r.kind === 'binding' ? r.channelId : r.callId))).toEqual(['room-a', 'room-b', 'call-a', 'call-z']);
+    // Re-running against the SAME (re-ordered-on-the-wire) input produces the identical order.
+    const again = callSurfaceRows([...bindings].reverse(), [...orphans].reverse());
+    expect(again.map((r) => (r.kind === 'binding' ? r.channelId : r.callId))).toEqual(rows.map((r) => (r.kind === 'binding' ? r.channelId : r.callId)));
+  });
+});
+
+describe('callSurfaceRowDetail: chrome, never a claim', () => {
+  test('an orphan explains why no room can act on it', () => {
+    expect(callSurfaceRowDetail(callSurfaceOrphanRow(orphan()))).toContain('broker still lists this process running');
+  });
+
+  test('a degraded binding names Reattach by name, so the copy and the button agree', () => {
+    expect(callSurfaceRowDetail(callSurfaceBindingRow(binding({ state: 'degraded', controlsAvailable: false })))).toContain('Reattach');
+  });
+
+  test('an ended binding reuses the SAME terminal-reason copy the HUD itself shows — one vocabulary, not two', () => {
+    const withReason = callSurfaceBindingRow(binding({ state: 'ended', controlsAvailable: false, terminalReason: 'operator-ended' }));
+    expect(callSurfaceRowDetail(withReason)).toBe(terminalReasonCopy('operator-ended', undefined));
   });
 });
