@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { askedAgainLine, cardUnitId, buildChannelThreadViews, channelCardActionHref, dispatchChannelCard, doorLabel, faceFromPayload, foldRepeatedAsks, groupLifecycleRuns, latestChannelSeq, pinnedChip, reduceChannelEntryWindow } from './channelTimeline';
+import { askedAgainLine, cardUnitId, buildChannelThreadViews, channelCardActionHref, dispatchChannelCard, doorLabel, faceFromPayload, foldRepeatedAsks, groupLifecycleRuns, latestChannelSeq, pinnedChip, reduceChannelEntryWindow, runSummary } from './channelTimeline';
 import type { ChannelEntry } from './dto';
 import { entryTimeLabel } from './hub';
 
@@ -307,6 +307,49 @@ describe('unit lifecycle cards', () => {
       dispatchChannelCard(entry({ id: 'a3', seq: 4, event: { kind: 'pr-opened', payload: { refs: { unitId: 'a' }, face: { title: 'A PR' } } } })),
     ];
     expect(groupLifecycleRuns(views).map((run) => run.map((view) => view.id))).toEqual([['a1', 'a2'], ['b1'], ['a3']]);
+  });
+});
+
+describe('goal-overlap disclosure runs', () => {
+  const goalOverlapCard = (id: string, seq: number, owner: string) => dispatchChannelCard(entry({
+    id,
+    seq,
+    event: {
+      kind: 'goal-overlap',
+      payload: {
+        doorSurface: 'unit',
+        refs: { unitId: `candidate-${id}`, unitName: `candidate-${id}` },
+        face: { title: 'Possibly duplicated work', owner, strength: 'semantic', pinned: { owner, basis: 'semantic' } },
+      },
+    },
+  }));
+
+  test('folds a same-owner sweep into one run, but a different owner breaks it', () => {
+    const views = [
+      goalOverlapCard('o1', 1, 'rate-owner'),
+      goalOverlapCard('o2', 2, 'rate-owner'),
+      goalOverlapCard('o3', 3, 'auth-owner'),
+      goalOverlapCard('o4', 4, 'rate-owner'),
+    ];
+    // Same shape as the lifecycle test above: consecutive same-owner cards fold, an intervening
+    // different owner breaks the run rather than merging non-adjacent matches back together.
+    expect(groupLifecycleRuns(views).map((run) => run.map((view) => view.id))).toEqual([['o1', 'o2'], ['o3'], ['o4']]);
+  });
+
+  test('a lifecycle card between two goal-overlap cards for the same owner still breaks the run', () => {
+    const views = [
+      goalOverlapCard('g1', 1, 'rate-owner'),
+      dispatchChannelCard(entry({ id: 'u1', seq: 2, event: { kind: 'unit-spawned', payload: { refs: { unitId: 'x' }, face: { title: 'X spawned' } } } })),
+      goalOverlapCard('g2', 3, 'rate-owner'),
+    ];
+    expect(groupLifecycleRuns(views).map((run) => run.map((view) => view.id))).toEqual([['g1'], ['u1'], ['g2']]);
+  });
+
+  test('runSummary names the owner a goal-overlap run is about, not the generic manager author', () => {
+    const views = [goalOverlapCard('s1', 1, 'rate-owner'), goalOverlapCard('s2', 2, 'rate-owner')];
+    const summary = runSummary(views);
+    expect(summary.agents).toEqual(['rate-owner']);
+    expect(summary.count).toBe(2);
   });
 });
 
