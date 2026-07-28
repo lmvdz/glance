@@ -313,6 +313,29 @@ export function mergeModelOptions(...groups: ModelOption[][]): ModelOption[] {
 		return true;
 	});
 }
+
+/**
+ * One "<harness> default" fallback entry per harness this daemon can actually launch RIGHT NOW —
+ * available per `listHarnesses` (verified, or unverified too under OMP_SQUAD_UNVERIFIED_HARNESS=1)
+ * AND with its binary resolvable on the daemon's real spawn PATH (`listHarnessTiers`'s `binDetected`).
+ *
+ * `manager.modelOptions()` can only ask a harness that already has a LIVE agent connected — a
+ * chicken-and-egg gap at the exact moment the create-agent surface needs an answer: before any agent
+ * exists. A fresh daemon (or a room with zero live agents of a given harness) answered with nothing
+ * for that harness, and the picker's per-harness grouping then showed NO group at all for it — visually
+ * indistinguishable from "no harnesses, no models" even though the harness is real and spawnable. This
+ * is additive, never a replacement: a harness that DOES have a live-reported model list keeps every one
+ * of those too (`mergeModelOptions` dedupes per harness+value, and a blank-value default never collides
+ * with a named model). A harness whose binary isn't actually on PATH is silently omitted rather than
+ * offered and then failing to spawn — the same honesty rule `/api/harnesses` already applies.
+ */
+export function harnessDefaultModelOptions(): ModelOption[] {
+	const available = new Set(listHarnesses().map((h) => h.name));
+	return listHarnessTiers()
+		.filter((t) => available.has(t.name) && t.binDetected)
+		.map((t) => ({ label: `${t.name} default`, value: "", harness: t.name }));
+}
+
 function capabilityInstallState(value: unknown): CapabilityInstallState | undefined {
 	return value === "imported" || value === "validated" || value === "approved" || value === "enabled" || value === "disabled" || value === "failed" || value === "removed" ? value : undefined;
 }
@@ -1445,27 +1468,41 @@ export class SquadServer {
 		this.emitPresence(ws.data.orgId);
 	}
 
+	/**
+	 * Available coding-agent harnesses for the create surfaces — daemon-global data (the registry
+	 * plus a live PATH probe), never scoped to an org/manager. Unverified ones appear only when
+	 * OMP_SQUAD_UNVERIFIED_HARNESS=1 (honest gating — a harness not smoke-tested against a live binary
+	 * isn't offered by default). `?all=1` includes them regardless so an operator can inspect the roster.
+	 *
+	 * Shared by `noFleet` (an actor with no active org/manager — DB-registry mode pre-onboarding) AND
+	 * the manager-present GET path (`/api/harnesses` below): this listing needs no manager at all, so
+	 * it must not live ONLY behind the `!manager` branch. It did, from the day it was added — and since
+	 * `fleetForOrg` always resolves a manager in file mode (`!this.registry` ⇒ always `this.singleManager`,
+	 * regardless of org), `noFleet` is unreachable dead code there. Every file-mode daemon (today's only
+	 * shipped mode) therefore 404'd on this route — the create-agent surface's harness listing was DEAD
+	 * IN PRODUCTION. Mirrors the existing duplication pattern for `/api/version`/`/api/info`, which this
+	 * file already serves from both branches for the same reason.
+	 */
+	private harnessesResponse(url: URL): Response {
+		const all = url.searchParams.get("all") === "1";
+		// Tiers are additive to the existing shape — `verified` (the gate's own bit) is untouched;
+		// `tier`/`binDetected`/`usageVerified`/`alert` are honest labels alongside it, not a replacement.
+		const tiers = new Map(listHarnessTiers().map((t) => [t.name, t]));
+		return Response.json({
+			default: globalDefaultHarness(),
+			harnesses: listHarnesses(all || undefined).map((h) => {
+				const t = tiers.get(h.name);
+				return { name: h.name, protocol: h.protocol, verified: h.verified, capabilities: h.capabilities, note: t?.note ?? h.note, tier: t?.tier, binDetected: t?.binDetected, usageVerified: t?.usageVerified ?? false, alert: t?.alert };
+			}),
+		});
+	}
+
 	/** DB-registry response for an actor with no active org: reads are empty, mutations denied. */
 	private noFleet(req: Request, url: URL): Response {
 		if (req.method !== "GET") return new Response("no active organization", { status: 403 });
 		if (url.pathname === "/api/version") return Response.json({ version: this.uiVersion });
 		if (url.pathname === "/api/info") return Response.json({ cwd: process.cwd() });
-		// Available coding-agent harnesses for the create surfaces. Unverified ones appear only when
-		// OMP_SQUAD_UNVERIFIED_HARNESS=1 (honest gating — a harness not smoke-tested against a live binary
-		// isn't offered by default). `?all=1` includes them regardless so an operator can inspect the roster.
-		if (url.pathname === "/api/harnesses") {
-			const all = url.searchParams.get("all") === "1";
-			// Tiers are additive to the existing shape — `verified` (the gate's own bit) is untouched;
-			// `tier`/`binDetected`/`usageVerified`/`alert` are honest labels alongside it, not a replacement.
-			const tiers = new Map(listHarnessTiers().map((t) => [t.name, t]));
-			return Response.json({
-				default: globalDefaultHarness(),
-				harnesses: listHarnesses(all || undefined).map((h) => {
-					const t = tiers.get(h.name);
-					return { name: h.name, protocol: h.protocol, verified: h.verified, capabilities: h.capabilities, note: t?.note ?? h.note, tier: t?.tier, binDetected: t?.binDetected, usageVerified: t?.usageVerified ?? false, alert: t?.alert };
-				}),
-			});
-		}
+		if (url.pathname === "/api/harnesses") return this.harnessesResponse(url);
 		return Response.json([]);
 	}
 
@@ -2556,7 +2593,10 @@ export class SquadServer {
 			return Response.json({ ok: true, repo: dropped.repo, removed: dropped.removed, projects: manager.projects() });
 		}
 		if (url.pathname === "/api/workflows") return Response.json(workflowSnapshot(await manager.visibleAgents(actor), manager.capabilityWorkflowDefinitions()));
-		if (url.pathname === "/api/models") return Response.json({ models: mergeModelOptions(modelOptionsFromEnv(), await manager.modelOptions()) });
+		// Daemon-global (not manager-scoped) — see `harnessesResponse`'s doc for why this must also be
+		// reachable here, not just from `noFleet`.
+		if (url.pathname === "/api/harnesses") return this.harnessesResponse(url);
+		if (url.pathname === "/api/models") return Response.json({ models: mergeModelOptions(modelOptionsFromEnv(), harnessDefaultModelOptions(), await manager.modelOptions()) });
 		if (url.pathname === "/api/autonomy") return Response.json({ ...(await manager.autonomyState()), interrupt: manager.interruptState() });
 		// A person's verdict on being interrupted. The gate is only allowed to keep interrupting people
 		// because it is checked afterwards, and it can only be checked if saying so is one tap.

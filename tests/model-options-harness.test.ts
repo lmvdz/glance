@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { mergeModelOptions } from "../src/server.ts";
+import { listHarnesses, listHarnessTiers } from "../src/harness-registry.ts";
+import { harnessDefaultModelOptions, mergeModelOptions } from "../src/server.ts";
 
 test("merging keys on harness AND value, so one model in two harnesses survives as two", () => {
   // Deduping on value alone collapsed them into one entry, which would have quietly undone the whole
@@ -100,4 +101,32 @@ test("a harness that cannot be asked does not silence the others", async () => {
   expect(options.map((option) => option.harness)).toEqual(["omp"]);
   await mgr.stop();
   for (const dir of [stateDir, worktreeBase]) await fs.rm(dir, { recursive: true, force: true });
+});
+
+// ── harnessDefaultModelOptions (post-ship harness-dropdown fix) ──────────────────────────────────
+// `manager.modelOptions()` can only ask a harness that already has a LIVE agent connected — a
+// chicken-and-egg gap at the exact moment the create-agent surface needs an answer: before any agent
+// exists. This is the static, harness-registry-backed fallback that fixes the production symptom
+// (the webapp's model/harness picker showing nothing but a placeholder default) independent of
+// whether any agent happens to be running.
+
+test("harnessDefaultModelOptions offers exactly one blank-value default entry per harness that is both listed (verified, or unverified under the env escape hatch) AND bin-detected right now — never a harness whose binary isn't actually on PATH", () => {
+  const options = harnessDefaultModelOptions();
+  const available = new Set(listHarnesses().map((h) => h.name));
+  const detected = new Set(listHarnessTiers().filter((t) => t.binDetected).map((t) => t.name));
+  for (const option of options) {
+    expect(option.value).toBe("");
+    expect(option.harness).toBeDefined();
+    expect(available.has(option.harness!)).toBe(true);
+    expect(detected.has(option.harness!)).toBe(true);
+  }
+  // omp ships as a devDependency of this very repo, so it is always both verified and bin-detected
+  // here — the sanity check that this isn't vacuously empty.
+  expect(options.find((o) => o.harness === "omp")).toEqual({ label: "omp default", value: "", harness: "omp" });
+});
+
+test("harnessDefaultModelOptions merges additively alongside live-reported models for the SAME harness — never replaces a real model list with just the default", () => {
+  const merged = mergeModelOptions(harnessDefaultModelOptions(), [{ label: "Real Omp Model", value: "anthropic/claude-opus-4-5", harness: "omp" }]);
+  const ompEntries = merged.filter((o) => o.harness === "omp");
+  expect(ompEntries.map((o) => o.value).sort()).toEqual(["", "anthropic/claude-opus-4-5"]);
 });

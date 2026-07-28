@@ -26,6 +26,7 @@ import * as path from "node:path";
 import { readdir, readFile, realpath } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { loadOrCreateToken } from "./auth.ts";
+import { applyWellKnownDirsToProcessPath } from "./bin-dirs.ts";
 import { renderDoctor, runDoctor } from "./doctor.ts";
 import { makeDoctorProbe } from "./doctor-probe.ts";
 import { envBool, envInt, rootFactoryEnabledWith } from "./config.ts";
@@ -232,6 +233,15 @@ export function secretBootDecision(secret: string | undefined, host: string): "o
 }
 
 async function cmdUp(args: string[]): Promise<void> {
+	// FIRST line, before anything below can spawn a harness child: widen this real daemon process's
+	// OWN PATH once (bin-dirs.ts) — a bare `nohup omp-squad up &` respawn from a non-interactive shell
+	// never sources the user's profile, so a genuinely-installed harness binary otherwise reads as
+	// missing for the rest of this process's life (2026-07-28 production incident). Every later spawn
+	// (agent-host.ts/omp-call.ts/acp-agent-driver.ts's `scrubbedSpawnEnv`, harness-registry.ts's
+	// `binResolvable`) just reads `process.env.PATH` at call time, so widening it here once is enough —
+	// deliberately NOT inside `scrubbedSpawnEnv` itself, which unit tests share and rely on being able
+	// to narrow (see bin-dirs.ts's doc).
+	applyWellKnownDirsToProcessPath();
 	const { flags } = parseArgs(args);
 	// Configure Plane from the shared secret so the squad runs Plane-connected with no manual sourcing.
 	const planeKeys = loadEnvFile(path.join(os.homedir(), ".claude", "secrets", "plane.env"));

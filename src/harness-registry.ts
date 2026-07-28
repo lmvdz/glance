@@ -15,6 +15,7 @@
  */
 
 import * as path from "node:path";
+import { augmentPathWithWellKnownDirs } from "./bin-dirs.ts";
 import { harnessLineage } from "./model-lineage.ts";
 
 export type HarnessProtocol = "omp-rpc" | "acp";
@@ -144,9 +145,12 @@ export function resolveSpawnBin(d: HarnessDescriptor): string {
 /** true when `bin` resolves on a PATH that matches how the daemon actually launches it: the raw
  *  env PATH, ALSO augmented with `<cwd>/node_modules/.bin` (npm/bun script invocation prepends
  *  this; a bare `Bun.which` from a differently-invoked process — e.g. this CLI itself — can miss it
- *  and falsely alarm on `omp`, which is never installed globally, only as a local devDependency). */
+ *  and falsely alarm on `omp`, which is never installed globally, only as a local devDependency),
+ *  AND with the same well-known install-dir fallback `scrubbedSpawnEnv` now applies to every actual
+ *  spawn (bin-dirs.ts) — so this detection never reports a harness "not found" that would in fact
+ *  spawn fine, and never reports one "found" that a thinner spawn-time PATH would then fail on. */
 function binResolvable(bin: string, cwd: string = process.cwd()): boolean {
-	const augmentedPath = `${path.join(cwd, "node_modules", ".bin")}${path.delimiter}${process.env.PATH ?? ""}`;
+	const augmentedPath = augmentPathWithWellKnownDirs(`${path.join(cwd, "node_modules", ".bin")}${path.delimiter}${process.env.PATH ?? ""}`);
 	return Bun.which(bin, { PATH: augmentedPath, cwd }) !== null;
 }
 
