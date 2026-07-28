@@ -4,7 +4,10 @@
  * ⌘K used to be a single-purpose binding: jump to the Tasks search box (PR #124). The fold
  * upgrades it into a real command palette, open from EVERY view:
  *
- *   · nav jump — the rail's nav items (Fleet · Tasks · Graph · Fog · Capabilities) + Org settings
+ *   · nav jump — every surface that isn't a card door: Fleet · Tasks · Daily · Fog · Plan reality ·
+ *     Plan briefs · Economics · Capabilities + Org settings (see lib/commandPalette.ts's NAV_ROWS
+ *     for why "Graph" isn't in that list any more, and why this is the whole nav now that the rail
+ *     is gone)
  *   · "Search tasks…" — the old direct binding, demoted to a row (it still jump-focuses the
  *     Tasks search box; the hotkey itself now always opens this palette)
  *   · Fabric/Knowledge search — the dead Knowledge-base page's GET /api/fabric/search, debounced,
@@ -18,7 +21,7 @@
  * this component owns only the fetch, the keyboard wiring, and the chrome.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Boxes, Building2, CloudFog, CornerDownLeft, Inbox, Layers, Library, Search, Waypoints, type LucideIcon } from 'lucide-react';
+import { Boxes, Building2, CloudFog, CornerDownLeft, FileText, Flame, Inbox, Layers, Library, Search, Sunrise, type LucideIcon } from 'lucide-react';
 import { useTaskContext, type AppView } from '../context/TaskContext';
 import { apiJson } from '../lib/api';
 import { reportAnswerRead } from '../lib/attention';
@@ -26,13 +29,19 @@ import { jumpToTaskSearch } from '../lib/jump';
 import { buildRows, moveSelection, paletteNavigationHref, type FabricSearchResult, type PaletteRow } from '../lib/commandPalette';
 import { Kbd } from './kit/Kbd';
 
-/** Icons for the static rows — mirrors the rail's icon grammar so a palette jump and a rail click
- *  read as the same destination. */
+/** Icons for the static rows. There is no nav rail to mirror any more (see commandPalette.ts's
+ *  NAV_ROWS comment) — 'nav-economics' reuses the SAME Flame glyph ChannelTimeline.tsx gives a
+ *  token-burn-snapshot card's "Open fleet economics" door, so a palette jump and a card-door click
+ *  read as the same destination; 'nav-plans' mirrors the plan-card door's FileText for the same
+ *  reason. Any row without an entry here (e.g. 'nav-plan-reality') falls back to the generic Search
+ *  glyph below, same as before this list grew. */
 const NAV_ICONS: Record<string, LucideIcon> = {
   'nav-fleet': Layers,
   'nav-tasks': Inbox,
-  'nav-graph': Waypoints,
+  'nav-daily': Sunrise,
   'nav-fog': CloudFog,
+  'nav-plans': FileText,
+  'nav-economics': Flame,
   'nav-capabilities': Boxes,
   'nav-org': Building2,
   'action-search-tasks': Search,
