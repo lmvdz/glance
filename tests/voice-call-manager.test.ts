@@ -163,7 +163,7 @@ async function waitFor(predicate: () => boolean, timeoutMs = 3000, stepMs = 15):
 	if (!predicate()) throw new Error("waitFor: condition never became true within timeout");
 }
 
-function makeCoordinator(opts: { stateDir: string; broker: BrokerClient; cards: EmitCardInput[]; livenessProbeIntervalMs?: number; journalPollIntervalMs?: number; connectBridge?: BridgeConnectFn }): VoiceCallCoordinator {
+function makeCoordinator(opts: { stateDir: string; broker: BrokerClient; cards: EmitCardInput[]; livenessProbeIntervalMs?: number; journalPollIntervalMs?: number; connectBridge?: BridgeConnectFn; onTranscriptTurn?: (input: { channelId: string; callId: string; entry: unknown }) => void }): VoiceCallCoordinator {
 	const coordinator = new VoiceCallCoordinator({
 		stateDir: opts.stateDir,
 		broker: opts.broker,
@@ -171,6 +171,7 @@ function makeCoordinator(opts: { stateDir: string; broker: BrokerClient; cards: 
 		emitCard: async (input) => { opts.cards.push(input); },
 		journalPollIntervalMs: opts.journalPollIntervalMs ?? 30,
 		livenessProbeIntervalMs: opts.livenessProbeIntervalMs ?? 60,
+		onTranscriptTurn: opts.onTranscriptTurn as never,
 	});
 	// Registered here (not just the explicit `coordinator.stop()` calls each test makes on its own
 	// happy path) so a failed assertion mid-test still tears down every real timer/socket this
@@ -214,6 +215,11 @@ describe("startCall: thread-aware start with pinned identity", () => {
 		await coordinator.startCall("room-1", { ownerActorId: "operator" });
 		const second = await coordinator.startCall("room-1", { ownerActorId: "operator" });
 		expect(second.ok).toBe(false);
+		// Concern 10 (call-management-ui): the webapp's `isCallConflictError` (lib/voice/roomCall.ts)
+		// recognises a conflict SPECIFICALLY by this substring, to suppress the dead-end error banner
+		// in favour of the real (already-live) binding one poll away. Pinning the exact wording here
+		// keeps the two sides of that contract from drifting apart silently.
+		if (!second.ok) expect(second.reason).toContain("already has an active call");
 		coordinator.stop();
 	});
 
@@ -1101,5 +1107,306 @@ describe("browser-audio-transport (concern 09): attachAudioSink / pushMicAudio",
 		const deviceAudio = await startAudioLessCall({ noLocalAudio: false });
 		expect(deviceAudio.coordinator.state(deviceAudio.channelId)?.audioAvailable).toBe(false);
 		deviceAudio.coordinator.stop();
+	});
+});
+
+describe("listCallsSurface / endOrphan (concern 10: call-management-ui)", () => {
+	test("a broker call with no matching non-ended binding is listed as an orphan; a binding's own live call is not", async () => {
+		const stateDir = tmpDir("voice-mgr-state-");
+		const journalDir = tmpDir("voice-mgr-journal-");
+		cleanups.push(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(journalDir, { recursive: true, force: true }); });
+		const bridge = startFakeBridge("live-abc");
+		cleanups.push(bridge.stop);
+		const broker = new ScriptedBroker(journalDir, bridge);
+		const cards: EmitCardInput[] = [];
+		const coordinator = makeCoordinator({ stateDir, broker, cards });
+		await coordinator.startCall("room-1", { ownerActorId: "operator" });
+		const mine = coordinator.state("room-1")!;
+
+		// A SECOND broker-tracked call this coordinator's own binding store has never heard of —
+		// e.g. a process the broker spawned before a daemon restart wiped this coordinator's memory of
+		// it, or one started by curl directly against the broker. This is the exact "three orphan
+		// reaps required manual curl against the broker" production observation.
+		broker.registerLiveCall({ callId: "call-ghost", port: 1, bridgeUrl: "ws://127.0.0.1:1", journalPath: path.join(journalDir, "ghost.jsonl"), startedAt: Date.now(), exit: null, controlToken: "ghost-token" });
+
+		const surface = await coordinator.listCallsSurface();
+		expect(surface.bindings.map((b) => b.channelId)).toEqual(["room-1"]);
+		expect(surface.orphans.map((o) => o.callId)).toEqual(["call-ghost"]);
+		// The coordinator's OWN live call must never double-count as an orphan just because it also
+		// appears in the broker's own listing.
+		expect(surface.orphans.some((o) => o.callId === mine.callId)).toBe(false);
+		coordinator.stop();
+	});
+
+	test("an EXITED broker call with no binding is not listed as an orphan — it isn't running", async () => {
+		const stateDir = tmpDir("voice-mgr-state-");
+		const journalDir = tmpDir("voice-mgr-journal-");
+		cleanups.push(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(journalDir, { recursive: true, force: true }); });
+		const broker = new FakeBroker();
+		broker.registerLiveCall({ callId: "call-dead", port: 1, bridgeUrl: "ws://127.0.0.1:1", journalPath: "/tmp/dead.jsonl", startedAt: Date.now(), exit: null, controlToken: "t" });
+		broker.corroborateExit("call-dead", 0);
+		const coordinator = makeCoordinator({ stateDir, broker, cards: [] });
+		const surface = await coordinator.listCallsSurface();
+		expect(surface.orphans).toEqual([]);
+		coordinator.stop();
+	});
+
+	test("a broker that cannot be reached reports zero orphans rather than failing the whole surface", async () => {
+		const stateDir = tmpDir("voice-mgr-state-");
+		cleanups.push(() => rmSync(stateDir, { recursive: true, force: true }));
+		class UnreachableBroker extends FakeBroker {
+			override async listCalls(): Promise<BrokerCallView[]> {
+				throw new Error("ECONNREFUSED");
+			}
+		}
+		const coordinator = makeCoordinator({ stateDir, broker: new UnreachableBroker(), cards: [] });
+		const surface = await coordinator.listCallsSurface();
+		expect(surface.bindings).toEqual([]);
+		expect(surface.orphans).toEqual([]);
+		coordinator.stop();
+	});
+
+	test("endOrphan reaps the broker's own call record directly — there is no binding/channel to route through", async () => {
+		const stateDir = tmpDir("voice-mgr-state-");
+		cleanups.push(() => rmSync(stateDir, { recursive: true, force: true }));
+		const broker = new FakeBroker();
+		broker.registerLiveCall({ callId: "call-orphan", port: 1, bridgeUrl: "ws://127.0.0.1:1", journalPath: "/tmp/o.jsonl", startedAt: Date.now(), exit: null, controlToken: "t" });
+		const coordinator = makeCoordinator({ stateDir, broker, cards: [] });
+		const result = await coordinator.endOrphan("call-orphan");
+		expect(result).toEqual({ ok: true, value: { ended: true } });
+		expect(broker.reapedCallIds).toEqual(["call-orphan"]);
+		coordinator.stop();
+	});
+
+	test("endOrphan reports the broker's own honest failure reason rather than throwing", async () => {
+		const stateDir = tmpDir("voice-mgr-state-");
+		cleanups.push(() => rmSync(stateDir, { recursive: true, force: true }));
+		const broker = new FakeBroker();
+		broker.failReapWith = new Error("call-not-found");
+		const coordinator = makeCoordinator({ stateDir, broker, cards: [] });
+		const result = await coordinator.endOrphan("call-gone");
+		expect(result).toEqual({ ok: false, reason: "call-not-found" });
+		coordinator.stop();
+	});
+});
+
+describe("reattach (concern 10: call-management-ui) — the user-triggered counterpart to rehydrateBinding's automatic recovery", () => {
+	test("unauthorized is refused before anything else is checked", async () => {
+		const stateDir = tmpDir("voice-mgr-state-");
+		const journalDir = tmpDir("voice-mgr-journal-");
+		cleanups.push(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(journalDir, { recursive: true, force: true }); });
+		const bridge = startFakeBridge("live-abc");
+		cleanups.push(bridge.stop);
+		const broker = new ScriptedBroker(journalDir, bridge);
+		const coordinator = makeCoordinator({ stateDir, broker, cards: [] });
+		await coordinator.startCall("room-1", { ownerActorId: "operator" });
+		const result = await coordinator.reattach("room-1", false);
+		expect(result).toEqual({ ok: false, reason: "forbidden" });
+		coordinator.stop();
+	});
+
+	test("no binding at all for this channel", async () => {
+		const stateDir = tmpDir("voice-mgr-state-");
+		cleanups.push(() => rmSync(stateDir, { recursive: true, force: true }));
+		const coordinator = makeCoordinator({ stateDir, broker: new FakeBroker(), cards: [] });
+		const result = await coordinator.reattach("no-such-room", true);
+		expect(result).toEqual({ ok: false, reason: "no-active-call" });
+		coordinator.stop();
+	});
+
+	test("an ended binding refuses reattach — there is nothing left to reattach to", async () => {
+		const stateDir = tmpDir("voice-mgr-state-");
+		const journalDir = tmpDir("voice-mgr-journal-");
+		cleanups.push(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(journalDir, { recursive: true, force: true }); });
+		const bridge = startFakeBridge("live-abc");
+		cleanups.push(bridge.stop);
+		const broker = new ScriptedBroker(journalDir, bridge);
+		const coordinator = makeCoordinator({ stateDir, broker, cards: [] });
+		await coordinator.startCall("room-1", { ownerActorId: "operator" });
+		await coordinator.endCall("room-1", true);
+		const result = await coordinator.reattach("room-1", true);
+		expect(result).toEqual({ ok: false, reason: "no-active-call" });
+		coordinator.stop();
+	});
+
+	test("already live with a connected bridge: a no-op that reports the current binding rather than reconnecting redundantly", async () => {
+		const stateDir = tmpDir("voice-mgr-state-");
+		const journalDir = tmpDir("voice-mgr-journal-");
+		cleanups.push(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(journalDir, { recursive: true, force: true }); });
+		const bridge = startFakeBridge("live-abc");
+		cleanups.push(bridge.stop);
+		const broker = new ScriptedBroker(journalDir, bridge);
+		const coordinator = makeCoordinator({ stateDir, broker, cards: [] });
+		await coordinator.startCall("room-1", { ownerActorId: "operator" });
+		const result = await coordinator.reattach("room-1", true);
+		expect(result.ok).toBe(true);
+		if (result.ok) expect(result.value.state).toBe("live");
+		coordinator.stop();
+	});
+
+	test("no callId at all (never got past connecting): ends it honestly as stale-binding, refuses to reattach", async () => {
+		const stateDir = tmpDir("voice-mgr-state-");
+		cleanups.push(() => rmSync(stateDir, { recursive: true, force: true }));
+		const coordinator = makeCoordinator({ stateDir, broker: new FakeBroker(), cards: [] });
+		coordinator.bindings.beginConnecting("room-1", { ownerActorId: "operator", sessionRoot: "/tmp", retention: "full" });
+		const result = await coordinator.reattach("room-1", true);
+		expect(result).toEqual({ ok: false, reason: "no-active-call" });
+		expect(coordinator.state("room-1")!.state).toBe("ended");
+		expect(coordinator.state("room-1")!.terminalReason).toBe("stale-binding");
+		coordinator.stop();
+	});
+
+	test("degraded, and the broker still lists the call running: reconnects the SAME pinned session back to live", async () => {
+		const stateDir = tmpDir("voice-mgr-state-");
+		const journalDir = tmpDir("voice-mgr-journal-");
+		cleanups.push(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(journalDir, { recursive: true, force: true }); });
+		const bridge = startFakeBridge("live-abc");
+		const broker = new ScriptedBroker(journalDir, bridge);
+		const cards: EmitCardInput[] = [];
+		// A huge liveness-probe interval means the coordinator's OWN automatic recovery loop's later
+		// ticks never fire within this test's window — proving the reconnect below came from the
+		// explicit `reattach()` call, not a race with the automatic probe.
+		const coordinator = makeCoordinator({ stateDir, broker, cards, livenessProbeIntervalMs: 100_000 });
+		await coordinator.startCall("room-1", { ownerActorId: "operator" });
+		const port = bridge.port;
+		bridge.stop();
+		await waitFor(() => coordinator.state("room-1")!.state === "degraded");
+
+		// The SAME OMP process, answering again on the SAME port with the SAME pinned session identity
+		// — exactly what a real reconnect looks like.
+		let revived: ReturnType<typeof startFakeBridge> | undefined;
+		for (let attempt = 0; attempt < 10 && !revived; attempt++) {
+			try {
+				revived = startFakeBridge("live-abc", port);
+			} catch {
+				await new Promise((r) => setTimeout(r, 30));
+			}
+		}
+		expect(revived).toBeTruthy();
+		cleanups.push(() => revived?.stop());
+
+		const result = await coordinator.reattach("room-1", true);
+		expect(result.ok).toBe(true);
+		if (result.ok) {
+			expect(result.value.state).toBe("live");
+			expect(result.value.sessionId).toBe("live-abc");
+		}
+		expect(coordinator.state("room-1")!.state).toBe("live");
+		coordinator.stop();
+	});
+
+	test("degraded, and the broker now says the process exited: ends it broker-exit instead of pretending a reattach is possible", async () => {
+		const stateDir = tmpDir("voice-mgr-state-");
+		const journalDir = tmpDir("voice-mgr-journal-");
+		cleanups.push(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(journalDir, { recursive: true, force: true }); });
+		const bridge = startFakeBridge("live-abc");
+		const broker = new ScriptedBroker(journalDir, bridge);
+		const cards: EmitCardInput[] = [];
+		const coordinator = makeCoordinator({ stateDir, broker, cards, livenessProbeIntervalMs: 100_000 });
+		await coordinator.startCall("room-1", { ownerActorId: "operator" });
+		const callId = coordinator.state("room-1")!.callId!;
+		bridge.stop();
+		await waitFor(() => coordinator.state("room-1")!.state === "degraded");
+		broker.corroborateExit(callId);
+
+		const result = await coordinator.reattach("room-1", true);
+		expect(result).toEqual({ ok: false, reason: "no-active-call" });
+		expect(coordinator.state("room-1")!.state).toBe("ended");
+		expect(coordinator.state("room-1")!.terminalReason).toBe("broker-exit");
+		coordinator.stop();
+	});
+
+	test("the broker itself is unreachable: reports a distinct honest reason, never claims success or silently ends the binding", async () => {
+		const stateDir = tmpDir("voice-mgr-state-");
+		const journalDir = tmpDir("voice-mgr-journal-");
+		cleanups.push(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(journalDir, { recursive: true, force: true }); });
+		const bridge = startFakeBridge("live-abc");
+		class FlakyBroker extends ScriptedBroker {
+			unreachable = false;
+			override async listCalls(): Promise<BrokerCallView[]> {
+				if (this.unreachable) throw new Error("ECONNREFUSED");
+				return super.listCalls();
+			}
+		}
+		const broker = new FlakyBroker(journalDir, bridge);
+		const coordinator = makeCoordinator({ stateDir, broker, cards: [], livenessProbeIntervalMs: 100_000 });
+		await coordinator.startCall("room-1", { ownerActorId: "operator" });
+		bridge.stop();
+		await waitFor(() => coordinator.state("room-1")!.state === "degraded");
+		broker.unreachable = true;
+
+		const result = await coordinator.reattach("room-1", true);
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.reason).toContain("ECONNREFUSED");
+		expect(coordinator.state("room-1")!.state).toBe("degraded"); // never silently ended
+		coordinator.stop();
+	});
+});
+
+describe("onTranscriptTurn (concern 11: voice-transcript-in-thread) — live push the moment a turn is durably appended", () => {
+	test("fires exactly once per journaled transcript record actually appended, with the stored entry's real shape", async () => {
+		const stateDir = tmpDir("voice-mgr-state-");
+		const journalDir = tmpDir("voice-mgr-journal-");
+		cleanups.push(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(journalDir, { recursive: true, force: true }); });
+		const bridge = startFakeBridge("live-abc");
+		cleanups.push(bridge.stop);
+		const broker = new ScriptedBroker(journalDir, bridge);
+		const turns: Array<{ channelId: string; callId: string; entry: unknown }> = [];
+		const coordinator = makeCoordinator({ stateDir, broker, cards: [], onTranscriptTurn: (input) => turns.push(input) });
+		await coordinator.startCall("room-1", { ownerActorId: "operator" });
+		const binding = coordinator.state("room-1")!;
+		const journalPath = path.join(journalDir, `${binding.callId}.jsonl`);
+
+		appendFileSync(journalPath, journalLine(0, "live-abc", { type: "transcript", transcript: { turn: 0, role: "user", text: "hello there", final: true } }));
+		await waitFor(() => turns.length > 0);
+		expect(turns).toHaveLength(1);
+		expect(turns[0]).toEqual({ channelId: "room-1", callId: binding.callId, entry: { callId: binding.callId, turn: 0, role: "user", final: true, at: expect.any(Number) as unknown as number, text: "hello there" } });
+
+		// A second, different turn fires a second, distinct push — never coalesced or dropped.
+		appendFileSync(journalPath, journalLine(1, "live-abc", { type: "transcript", transcript: { turn: 0, role: "assistant", text: "hi!", final: true } }));
+		await waitFor(() => turns.length > 1);
+		expect(turns[1]!.entry).toMatchObject({ role: "assistant", text: "hi!" });
+		coordinator.stop();
+	});
+
+	test("retention 'off': the pushed entry is redacted (no text), same as what transcript() itself stores", async () => {
+		const stateDir = tmpDir("voice-mgr-state-");
+		const journalDir = tmpDir("voice-mgr-journal-");
+		cleanups.push(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(journalDir, { recursive: true, force: true }); });
+		const bridge = startFakeBridge("live-abc");
+		cleanups.push(bridge.stop);
+		const broker = new ScriptedBroker(journalDir, bridge);
+		const turns: Array<{ channelId: string; callId: string; entry: { text?: string; redacted?: boolean } }> = [];
+		const coordinator = makeCoordinator({ stateDir, broker, cards: [], onTranscriptTurn: (input) => turns.push(input as never) });
+		await coordinator.startCall("room-1", { ownerActorId: "operator", retention: "off" });
+		const binding = coordinator.state("room-1")!;
+		const journalPath = path.join(journalDir, `${binding.callId}.jsonl`);
+
+		appendFileSync(journalPath, journalLine(0, "live-abc", { type: "transcript", transcript: { turn: 0, role: "user", text: "sensitive", final: true } }));
+		await waitFor(() => turns.length > 0);
+		expect(turns[0]!.entry.text).toBeUndefined();
+		expect(turns[0]!.entry.redacted).toBe(true);
+		coordinator.stop();
+	});
+
+	test("a re-tailed journal never re-fires for an already-applied seq — idempotent exactly like the projection's own cursor", async () => {
+		const stateDir = tmpDir("voice-mgr-state-");
+		const journalDir = tmpDir("voice-mgr-journal-");
+		cleanups.push(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(journalDir, { recursive: true, force: true }); });
+		const bridge = startFakeBridge("live-abc");
+		cleanups.push(bridge.stop);
+		const broker = new ScriptedBroker(journalDir, bridge);
+		const turns: unknown[] = [];
+		const coordinator = makeCoordinator({ stateDir, broker, cards: [], journalPollIntervalMs: 15, onTranscriptTurn: (input) => turns.push(input) });
+		await coordinator.startCall("room-1", { ownerActorId: "operator" });
+		const binding = coordinator.state("room-1")!;
+		const journalPath = path.join(journalDir, `${binding.callId}.jsonl`);
+
+		appendFileSync(journalPath, journalLine(0, "live-abc", { type: "transcript", transcript: { turn: 0, role: "user", text: "hi", final: true } }));
+		await waitFor(() => turns.length > 0);
+		// Several more polls tick over the SAME already-applied line — never a second push for it.
+		await new Promise((r) => setTimeout(r, 80));
+		expect(turns).toHaveLength(1);
+		coordinator.stop();
 	});
 });

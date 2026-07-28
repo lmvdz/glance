@@ -19,6 +19,7 @@ import type {
   VoiceCallDecisionDTO,
   VoiceCallDecisionOptionDTO,
   VoiceCallJournalGapDTO,
+  VoiceCallOrphanDTO,
   VoiceCallRetention,
   VoiceCallState,
   VoiceCallTerminalReason,
@@ -105,7 +106,16 @@ export function registerPresentation(register: ChannelCardRegister | undefined):
 // Call phase chrome — fixed size, honest labels
 // =================================================================================================
 
-export type CallPhase = VoiceCallState | 'none';
+/**
+ * `'checking'` is the honest fifth phase (concern 10: call-management-ui) for the window between
+ * mount and the FIRST binding fetch resolving — see `callPhase`'s doc for the production bug this
+ * closes: without it, that window rendered as `'none'`, which offered "Start a call" during a
+ * refresh mid-call. A click there would race the daemon's own "already has an active call" guard
+ * rather than silently starting a duplicate, but the OFFER itself was the dead-end — a person
+ * refreshing mid-call saw no attached call and no End/Mute controls, exactly the production
+ * observation this concern's Goal names.
+ */
+export type CallPhase = VoiceCallState | 'none' | 'checking';
 
 /**
  * The phase word. Deliberately short and, crucially, RESERVED to a constant width by the caller —
@@ -115,11 +125,28 @@ export type CallPhase = VoiceCallState | 'none';
  */
 export const PHASE_LABEL: Record<CallPhase, string> = {
   none: 'no call',
+  checking: 'checking',
   connecting: 'connecting',
   live: 'live',
   degraded: 'degraded',
   ended: 'ended',
 };
+
+/**
+ * The phase the HUD should render, honest about what is actually known yet.
+ *
+ * `binding === null` is ambiguous by itself: it means either "confirmed — no call has ever bound
+ * this thread" (the initial REST read already resolved, and there truly is none) or "not confirmed
+ * yet — the first read is still in flight" (a fresh mount, e.g. a page refresh mid-call). Only
+ * `loading` tells the two apart. Rendering the first read's pending window as `'none'` is the
+ * refresh-rehydration defect concern 10 exists to close: the HUD offered "Start a call" during that
+ * window, which is both a false "no call here" claim and an invitation to race the daemon's own
+ * single-active-call guard the moment the real (possibly live) binding arrives a beat later.
+ */
+export function callPhase(binding: VoiceCallBindingDTO | null, loading: boolean): CallPhase {
+  if (binding) return binding.state;
+  return loading ? 'checking' : 'none';
+}
 
 /** Widest label above, in `ch` units, so every phase occupies exactly one reserved box. */
 export const PHASE_LABEL_CH = Math.max(...Object.values(PHASE_LABEL).map((label) => label.length));
@@ -143,9 +170,10 @@ export function bindingBanner(binding: VoiceCallBindingDTO | null): string | und
 }
 
 /** The sentence under the phase word. Says what is actually happening, including the two states a
- *  call HUD is normally tempted to paper over. */
-export function phaseExplanation(binding: VoiceCallBindingDTO | null): string {
-  if (!binding) return 'No call is bound to this thread.';
+ *  call HUD is normally tempted to paper over — plus, now, the THIRD: `loading` says the room does
+ *  not know yet, which reads honestly rather than as a confident (and possibly wrong) "no call". */
+export function phaseExplanation(binding: VoiceCallBindingDTO | null, loading: boolean = false): string {
+  if (!binding) return loading ? 'Checking whether a call is already live in this thread…' : 'No call is bound to this thread.';
   switch (binding.state) {
     case 'connecting':
       return 'Dialling the session and waiting for it to answer.';
@@ -480,6 +508,22 @@ const STEER_REASON_COPY: Record<string, string> = {
   forbidden: 'You do not have permission to steer this call.',
 };
 
+/**
+ * `true` when a `startVoiceCall` failure is the daemon's own "a session is already running" guard
+ * (`CallBindingStore#beginConnecting`'s exact wording: `channel ${id} already has an active call
+ * (${state})`) rather than a genuine broker/bridge failure.
+ *
+ * Concern 10 (call-management-ui): this is NOT a dead end — the channel already has a binding, and
+ * `useRoomCall`'s own `start()` already re-polls immediately afterward (its `finally` calls
+ * `refresh()`), so the REAL binding (with its real End/Reattach controls) is one poll away. Leaving
+ * the raw conflict string up as a persistent error banner under those now-working controls would be
+ * exactly the "dead-end string" the concern's Goal names — so `useRoomCall` suppresses it instead of
+ * showing it, once it recognises this specific shape.
+ */
+export function isCallConflictError(message: string): boolean {
+  return message.includes('already has an active call');
+}
+
 export function steerRefusalCopy(reason: string | undefined): string {
   if (!reason) return 'The daemon refused to relay this to the call and did not say why. The session did not hear it.';
   const key = Object.keys(STEER_REASON_COPY).find((candidate) => reason.includes(candidate));
@@ -802,7 +846,13 @@ export function artifactStateCopy(row: Pick<ArtifactRow, 'state' | 'error'>): st
 // Narrow screens — a single-pane back stack that keeps scroll and filter
 // =================================================================================================
 
-export type WorkspacePane = 'conversation' | 'decision' | 'artifacts' | 'artifact';
+/**
+ * `'transcript'` (concern 11) and `'calls'` (concern 10) join the existing back-stack — the SAME
+ * `pushPane`/`popPane`/`currentPane`/`reconcileArtifactPane` machinery below is already generic over
+ * `WorkspacePane`, so neither concern needed a second navigation model or a differently-named panel
+ * slot; they are one more branch in the same stack.
+ */
+export type WorkspacePane = 'conversation' | 'decision' | 'artifacts' | 'artifact' | 'transcript' | 'calls';
 
 /**
  * The back stack for a single-pane (narrow) layout.
@@ -920,4 +970,95 @@ export function browserAudioStatusLine(input: { micStatus: BrowserAudioMicStatus
   if (micStatus === 'denied') return { text: error ?? 'Microphone access was denied.', tone: 'error', showRetry: true };
   if (micStatus === 'active') return { text: 'Browser microphone and speaker connected.', tone: 'neutral', showRetry: false };
   return undefined; // micStatus 'idle' with a ready relay — the brief tick before requesting fires
+}
+
+// =================================================================================================
+// Calls management surface (concern 10, plans/voice-orchestrated-room-integration/10-call-
+// management-ui.md) — every binding this actor can see, across every room, plus every broker
+// ORPHAN (a call the broker still lists with no daemon binding at all), each with an honest
+// mic-capture register and the actions that actually apply to it.
+// =================================================================================================
+
+/**
+ * Mic-state honesty, per the register rules the concern's Goal names explicitly: "while any session
+ * is capturing, the room shows it (`checked`); a session nobody is attached to gets `unverified`
+ * treatment". `controlsAvailable` (daemon-checked: `state==="live" && a connected bridge exists`) is
+ * the one fact this can be built from truthfully — it is exactly "is anything actually attached to
+ * this call right now", the same precondition every mutating control (mute/steer/resolve/reattach)
+ * already requires before it will touch the bridge.
+ */
+export type CallRowMicState = 'checked' | 'unverified' | 'none';
+
+export function callRowMicState(binding: Pick<VoiceCallBindingDTO, 'state' | 'controlsAvailable'>): CallRowMicState {
+  if (binding.state === 'ended') return 'none';
+  return binding.controlsAvailable ? 'checked' : 'unverified';
+}
+
+export interface CallSurfaceBindingRow {
+  kind: 'binding';
+  channelId: string;
+  state: VoiceCallState;
+  callId?: string;
+  terminalReason?: VoiceCallTerminalReason;
+  micState: CallRowMicState;
+  /** The urgent-door case the register rules name: a call that WAS confirmed live and has since
+   *  lost that confirmation (`degraded`) — never a brand-new `connecting` call, which is routine and
+   *  bounded, not a privacy incident waiting to be noticed. */
+  urgent: boolean;
+  canEnd: boolean;
+  /** Only a `degraded` binding is genuinely reattachable — `connecting` is already mid-flow (nothing
+   *  to reattach to yet), `live` already has a working bridge, and `ended` is terminal. */
+  canReattach: boolean;
+}
+
+export interface CallSurfaceOrphanRow {
+  kind: 'orphan';
+  callId: string;
+  startedAt?: number;
+  sessionRoot?: string;
+  micState: 'unverified';
+  urgent: true;
+  canEnd: true;
+}
+
+export type CallSurfaceRow = CallSurfaceBindingRow | CallSurfaceOrphanRow;
+
+export function callSurfaceBindingRow(binding: Pick<VoiceCallBindingDTO, 'channelId' | 'state' | 'callId' | 'terminalReason' | 'controlsAvailable'>): CallSurfaceBindingRow {
+  const micState = callRowMicState(binding);
+  return {
+    kind: 'binding',
+    channelId: binding.channelId,
+    state: binding.state,
+    callId: binding.callId,
+    terminalReason: binding.terminalReason,
+    micState,
+    urgent: binding.state === 'degraded' && micState === 'unverified',
+    canEnd: binding.state !== 'ended',
+    canReattach: binding.state === 'degraded',
+  };
+}
+
+/** Every orphan is, by construction, a call the broker still lists running with nothing daemon-side
+ *  attached to confirm anything about it — always `unverified`, always urgent, End is the only
+ *  action (there is no channel/binding to reattach through). */
+export function callSurfaceOrphanRow(orphan: Pick<VoiceCallOrphanDTO, 'callId' | 'startedAt' | 'sessionRoot'>): CallSurfaceOrphanRow {
+  return { kind: 'orphan', callId: orphan.callId, startedAt: orphan.startedAt, sessionRoot: orphan.sessionRoot, micState: 'unverified', urgent: true, canEnd: true };
+}
+
+/** The full surface, bindings first (room-scoped, more actionable) then orphans — a stable, total
+ *  order (`channelId`/`callId` as the tie-break) so a poll that returns the same rows never reshuffles
+ *  them under a reader, matching `groupArtifacts`'s own ordering discipline. */
+export function callSurfaceRows(bindings: readonly Parameters<typeof callSurfaceBindingRow>[0][], orphans: readonly Parameters<typeof callSurfaceOrphanRow>[0][]): CallSurfaceRow[] {
+  const bindingRows = bindings.map(callSurfaceBindingRow).sort((a, b) => a.channelId.localeCompare(b.channelId));
+  const orphanRows = orphans.map(callSurfaceOrphanRow).sort((a, b) => a.callId.localeCompare(b.callId));
+  return [...bindingRows, ...orphanRows];
+}
+
+/** One line describing WHY a row needs attention — chrome, not a claim, so it carries no register. */
+export function callSurfaceRowDetail(row: CallSurfaceRow): string {
+  if (row.kind === 'orphan') return 'The call broker still lists this process running. Nothing in any room can see, end, or reattach to it — only this surface can.';
+  if (row.state === 'degraded') return 'The live socket dropped. The room is checking whether the session is still running; Reattach retries the SAME check on demand.';
+  if (row.state === 'ended') return row.terminalReason ? terminalReasonCopy(row.terminalReason, undefined) : 'The call ended.';
+  if (row.state === 'connecting') return 'Dialling the session.';
+  return row.micState === 'checked' ? 'A live socket confirms this call is attached and capturing.' : 'No live socket confirms this call — treat it as unattached until it does.';
 }

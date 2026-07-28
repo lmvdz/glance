@@ -1,5 +1,5 @@
 import React from 'react';
-import { Loader2, Mic, MicOff, PhoneCall, PhoneOff } from 'lucide-react';
+import { Loader2, Mic, MicOff, PhoneCall, PhoneOff, RefreshCw } from 'lucide-react';
 import {
   IDLE_HANGUP_MS,
   PHASE_LABEL,
@@ -7,6 +7,7 @@ import {
   S2S_OUTSIDE_ROOMS_NOTE,
   bindingBanner,
   browserAudioStatusLine,
+  callPhase,
   idlePolicyLine,
   phaseExplanation,
   retentionNotice,
@@ -42,9 +43,12 @@ import type { VoiceCallBindingDTO } from '../../lib/api';
 
 const MONO = "'JetBrains Mono',ui-monospace,monospace";
 
-/** Phase → the 2px rule colour. Same vocabulary as the timeline's own tone rules. */
+/** Phase → the 2px rule colour. Same vocabulary as the timeline's own tone rules. `checking` reads
+ *  as a quieter cousin of `connecting` — a real thing may be happening, the room just does not know
+ *  yet, which is a different (less certain) fact than "dialling out". */
 const PHASE_RULE: Record<CallPhase, string> = {
   none: '#2A2A30',
+  checking: '#33333A',
   connecting: '#3E5C8A',
   live: '#3E7D57',
   degraded: '#D9A03C',
@@ -53,9 +57,18 @@ const PHASE_RULE: Record<CallPhase, string> = {
 
 export interface VoiceCallHudViewProps {
   binding: VoiceCallBindingDTO | null;
+  /** `true` only until the FIRST binding read resolves after mount — see `callPhase`'s doc for why
+   *  this must gate the phase/start-offer, not just a spinner: without it, a page refresh mid-call
+   *  briefly rendered as "no call", inviting a race against the daemon's own single-active-call
+   *  guard instead of showing the real (possibly live) binding a beat later. */
+  loading: boolean;
   /** Single-flight: a start already in flight, so the button cannot be pressed twice. */
   starting: boolean;
   ending: boolean;
+  /** Concern 10: a user-triggered reconnect, offered only for a `degraded` call — see
+   *  `VoiceCallCoordinator#reattach`'s doc for what it actually does server-side. */
+  reattaching?: boolean;
+  onReattach?: () => void;
   /** What the daemon has last been ASKED to do with the mic — never a confirmed mic state. */
   muted: boolean;
   muteBusy: boolean;
@@ -99,8 +112,11 @@ function PhaseBox({ phase }: { phase: CallPhase }) {
 
 export function VoiceCallHudView({
   binding,
+  loading,
   starting,
   ending,
+  reattaching = false,
+  onReattach,
   muted,
   muteBusy,
   controlsAvailable,
@@ -113,7 +129,7 @@ export function VoiceCallHudView({
   onEnd,
   onToggleMute,
 }: VoiceCallHudViewProps) {
-  const phase: CallPhase = binding?.state ?? 'none';
+  const phase: CallPhase = callPhase(binding, loading);
   const active = binding !== null && binding.state !== 'ended';
   const retention = binding ? retentionNotice(binding) : undefined;
   const banner = bindingBanner(binding);
@@ -134,7 +150,7 @@ export function VoiceCallHudView({
         <div className="min-w-0 flex-1">
           {/* Row one is the same height in every phase: one sentence, no wrapping chrome. */}
           <p className="text-[12.5px] leading-[1.5]" style={{ color: '#C9C9CF', textWrap: 'pretty' }}>
-            {phaseExplanation(binding)}
+            {phaseExplanation(binding, loading)}
           </p>
 
           {retention ? (
@@ -205,6 +221,24 @@ export function VoiceCallHudView({
         <div className="flex flex-none items-center gap-2">
           {active ? (
             <>
+              {/* Concern 10: reattach is offered ONLY for a `degraded` call — the case where a real
+                  reconnect might actually succeed. Live already has a working bridge; connecting is
+                  already mid-flow; ended is terminal — none of those need (or make sense for) this
+                  button, so it stays out of the DOM rather than rendering disabled-forever. */}
+              {phase === 'degraded' && onReattach ? (
+                <button
+                  type="button"
+                  onClick={onReattach}
+                  disabled={reattaching}
+                  aria-label="Reattach to the call"
+                  title="Ask the daemon to reconnect to this call right now, instead of waiting for the automatic check."
+                  className="flex h-10 min-w-10 items-center justify-center gap-1.5 rounded-[3px] px-2.5 text-[12px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ember focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                  style={{ border: '1px solid #4A3319', color: '#D9A03C' }}
+                >
+                  {reattaching ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <RefreshCw className="h-4 w-4" aria-hidden />}
+                  <span>Reattach</span>
+                </button>
+              ) : null}
               <button
                 type="button"
                 onClick={onToggleMute}
@@ -237,6 +271,13 @@ export function VoiceCallHudView({
                 <span>End</span>
               </button>
             </>
+          ) : phase === 'checking' ? (
+            // The room does not know yet whether this thread already has a call — see `callPhase`'s
+            // doc. Offering "Start a call" here is exactly the refresh-rehydration defect (concern
+            // 10): a click would race the daemon's own single-active-call guard the instant the real
+            // (possibly live) binding arrives a beat later. Nothing renders in this slot until the
+            // first read resolves one way or the other.
+            <Loader2 className="h-4 w-4 flex-none animate-spin" style={{ color: '#4A4A52' }} aria-hidden />
           ) : canStart ? (
             <button
               type="button"

@@ -12,8 +12,12 @@ import { VoiceCallHudView } from './VoiceCallHud';
 import { VoiceStatusRegion } from './VoiceStatusRegion';
 import { VoiceDecisionDoor } from './VoiceDecisionDoor';
 import { VoiceArtifactsList, VoiceArtifactViewer } from './VoiceArtifacts';
+import { VoiceTranscriptPane } from './VoiceTranscriptPane';
+import { VoiceCallsPanel } from './VoiceCallsPanel';
 import { useRoomCall } from '../../hooks/useRoomCall';
 import { useRoomCallAudio } from '../../hooks/useRoomCallAudio';
+import { useVoiceCallTranscript } from '../../hooks/useVoiceCallTranscript';
+import { useVoiceCallsSurface } from '../../hooks/useVoiceCallsSurface';
 import {
   ALL_AGENTS,
   artifactAgentOptions,
@@ -133,7 +137,7 @@ function ChannelHeader({ channel, presence, selectedAgent }: { channel: Channel;
 
 
 export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWorkbench: (route: Extract<HubRoute, { kind: 'workbench' }>) => React.ReactNode }) {
-  const { tasks, agents, features, audit, currentProject, selectedTaskId, channelEntries: liveChannelEntries, presence: livePresence, typing, connected, subscribeConsole, sendConsoleCommand, showToast, commandAcks, openCommandPalette } = useTaskContext();
+  const { tasks, agents, features, audit, currentProject, selectedTaskId, channelEntries: liveChannelEntries, voiceCallTranscriptEvents, presence: livePresence, typing, connected, subscribeConsole, sendConsoleCommand, showToast, commandAcks, openCommandPalette } = useTaskContext();
   const [channels, setChannels] = useState<Channel[]>([DEFAULT_CHANNEL]);
   const [entries, setEntries] = useState<ChannelEntry[]>([]);
   const [presence, setPresence] = useState<PresenceSnapshot>(EMPTY_PRESENCE);
@@ -506,6 +510,10 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
 
   const pane = currentPane(paneStack);
 
+  // ── The call's conversation pane (concern 11) and the calls-management surface (concern 10) ────
+  const transcript = useVoiceCallTranscript(activeChannelId, call.binding?.callId, voiceCallTranscriptEvents);
+  const callsSurface = useVoiceCallsSurface(pane.pane === 'calls');
+
   // A new channel is a new workspace: the stack, the open question and the announcement dedup all
   // reset, so a question from the room you just left can never be answered from this one.
   useEffect(() => {
@@ -534,6 +542,20 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
 
   const openArtifacts = useCallback(() => {
     setPaneStack((stack) => pushPane(stack, { pane: 'artifacts', agentFilter: currentPane(stack).agentFilter }, 0));
+  }, []);
+
+  // Concern 11: the voice-call card's door ("Open the call") pushes THIS pane now, instead of only
+  // focusing the always-visible HUD — see `focusHudRegion`'s own doc for why focus-only was ever the
+  // right call for a fixed-header HUD with nothing else to open. The conversation still lives here
+  // and only here — never interleaved into the main channel timeline (the product decision recorded
+  // in the concern doc).
+  const openTranscript = useCallback(() => {
+    setPaneStack((stack) => pushPane(stack, { pane: 'transcript', agentFilter: currentPane(stack).agentFilter }, 0));
+  }, []);
+
+  // Concern 10: the calls-management surface. Cross-room by design — see `useVoiceCallsSurface`.
+  const openCalls = useCallback(() => {
+    setPaneStack((stack) => pushPane(stack, { pane: 'calls', agentFilter: currentPane(stack).agentFilter }, 0));
   }, []);
 
   const back = useCallback(() => {
@@ -632,6 +654,22 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
         failure={artifactDoc?.failure}
         onBack={back}
       />
+    ) : pane.pane === 'transcript' ? (
+      <VoiceTranscriptPane turns={transcript.turns} loading={transcript.loading} error={transcript.error} binding={call.binding} onClose={back} />
+    ) : pane.pane === 'calls' ? (
+      <VoiceCallsPanel
+        bindings={callsSurface.bindings}
+        orphans={callsSurface.orphans}
+        loading={callsSurface.loading}
+        error={callsSurface.error}
+        endingCallIds={callsSurface.endingCallIds}
+        endingChannelIds={callsSurface.endingChannelIds}
+        reattachingChannelIds={callsSurface.reattachingChannelIds}
+        onEndOrphan={callsSurface.endOrphan}
+        onEndBinding={(channelId) => (channelId === activeChannelId ? call.end() : callsSurface.endBinding(channelId))}
+        onReattachBinding={(channelId) => (channelId === activeChannelId ? call.reattach() : callsSurface.reattachBinding(channelId))}
+        onClose={back}
+      />
     ) : undefined;
 
   return (
@@ -705,7 +743,10 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
               error={error}
               anchorEntryId={anchorEntryId}
               onAnswerDecision={(decisionId) => openDecision(decisionId)}
-              onOpenCall={() => focusHudRegion(hudRef.current)}
+              // Concern 11: "Open the call" now opens the call's own conversation pane — the HUD
+              // itself is still focused too (harmless, and still the right move for a keyboard/AT
+              // user even once there is something else to open; see `focusHudRegion`'s doc).
+              onOpenCall={() => { openTranscript(); focusHudRegion(hudRef.current); }}
               // The call's chrome rides ABOVE the scroller (see ChannelTimeline's own note), so a
               // phase change or a status line arriving never moves the conversation underneath it.
               header={
@@ -719,8 +760,11 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
                     // only the invitation is withheld.
                     canStart={!activeChannelId.startsWith('node:')}
                     binding={call.binding}
+                    loading={call.loading}
                     starting={call.starting}
                     ending={call.ending}
+                    reattaching={call.reattaching}
+                    onReattach={call.reattach}
                     muted={call.muted}
                     muteBusy={call.muteBusy}
                     controlsAvailable={call.controlsAvailable}
@@ -739,6 +783,7 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
                     onOpenDecisions={waitingDecisions.length > 0 ? () => openDecision() : undefined}
                     onOpenArtifacts={call.binding ? openArtifacts : undefined}
                     artifactCount={call.artifacts.length}
+                    onOpenCalls={openCalls}
                   />
                 </div>
               }

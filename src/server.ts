@@ -3749,6 +3749,21 @@ export class SquadServer {
 			}
 		}
 
+		// ── Voice calls surface (concern 10, plans/voice-orchestrated-room-integration) ─────────────
+		// Org-wide, NOT channel-scoped — a person needs to see (and end) a call they cannot otherwise
+		// reach through any one room, which is exactly the orphan case this surface exists for. The
+		// binding half is still filtered to channels `actor` can read (`listVoiceCallsSurface`); the
+		// orphan half has no channel to filter by at all, by definition.
+		if (url.pathname === "/api/voice-calls" && req.method === "GET") {
+			return Response.json(await manager.listVoiceCallsSurface(actor));
+		}
+		const voiceCallOrphanEndMatch = url.pathname.match(/^\/api\/voice-calls\/orphans\/([^/]+)\/end$/);
+		if (voiceCallOrphanEndMatch && req.method === "POST") {
+			const callId = decodeURIComponent(voiceCallOrphanEndMatch[1]!);
+			const result = await manager.endOrphanVoiceCall(callId);
+			return result.ok ? Response.json(result.value) : voiceCallErrorResponse(result.reason);
+		}
+
 		// ── Voice call (concern 02, plans/voice-orchestrated-room-integration) ─────────────────────
 		// Every route is channel-scoped: `manager.voiceCall*` re-checks room membership itself
 		// (`ChannelStore#canReadChannel`) before touching the binding, and the mutating routes pass
@@ -3864,6 +3879,15 @@ export class SquadServer {
 				if (err instanceof Error && err.message === "channel forbidden") return new Response("forbidden", { status: 403 });
 				throw err;
 			}
+		}
+		// Concern 10 (call-management-ui): the user-triggered reconnect — see
+		// `VoiceCallCoordinator#reattach`. No body: there is nothing to negotiate, only whether the
+		// binding's own callId can be corroborated against the broker right now.
+		const voiceCallReattachMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/voice-call\/reattach$/);
+		if (voiceCallReattachMatch && req.method === "POST") {
+			const channelId = decodeURIComponent(voiceCallReattachMatch[1]!);
+			const result = await manager.reattachVoiceCall(channelId, actor);
+			return result.ok ? Response.json(result.value) : voiceCallErrorResponse(result.reason);
 		}
 
 		if (url.pathname === "/api/command" && req.method === "POST") {

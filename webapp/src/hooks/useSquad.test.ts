@@ -6,7 +6,7 @@
  * the nav (which renders a `packs.length` badge) mounts.
  */
 import { describe, expect, test } from "bun:test";
-import { appendTranscriptEntry, normalizeCapabilities, normalizeCatalog, staleSubscriptionIds } from "./useSquad";
+import { appendTranscriptEntry, appendVoiceCallTranscriptEvent, normalizeCapabilities, normalizeCatalog, staleSubscriptionIds, type VoiceCallTranscriptTurnEvent } from "./useSquad";
 import type { TranscriptEntry } from "../lib/dto";
 
 describe("normalizeCapabilities", () => {
@@ -186,5 +186,50 @@ describe("staleSubscriptionIds", () => {
   test("returns every id when the roster is empty", () => {
     const subscribed = new Set(["a", "b"]);
     expect(staleSubscriptionIds(subscribed, [])).toEqual(["a", "b"]);
+  });
+});
+
+// Concern 11 (voice-transcript-in-thread) — the live-push reducer for a call's conversation pane.
+// The regression this pins: a turn must reach `voiceCallTranscriptEvents` alone, NEVER
+// `channelEntries` — the product decision recorded in the concern doc ("#fleet's main timeline gets
+// no turns"). That isolation is structural here (this function only ever touches its own array,
+// never imports or references `ChannelEntry`/`channelEntries`), not a filter someone could forget.
+describe("appendVoiceCallTranscriptEvent", () => {
+  function event(over: Partial<VoiceCallTranscriptTurnEvent> = {}): VoiceCallTranscriptTurnEvent {
+    return {
+      type: "voice-call-transcript-turn",
+      channelId: "room-1",
+      callId: "call-1",
+      entry: { callId: "call-1", turn: 0, role: "user", final: true, at: 1_000, text: "hi" },
+      ...over,
+    };
+  }
+
+  test("appends a fresh event", () => {
+    expect(appendVoiceCallTranscriptEvent([], event())).toEqual([event()]);
+  });
+
+  test("keeps every event distinct — this reducer never collapses by (role, turn); that merge happens downstream in lib/voice/transcript.ts", () => {
+    const first = event({ entry: { callId: "call-1", turn: 0, role: "user", final: false, at: 1_000, text: "partial" } });
+    const second = event({ entry: { callId: "call-1", turn: 0, role: "user", final: true, at: 1_050, text: "complete" } });
+    const result = appendVoiceCallTranscriptEvent(appendVoiceCallTranscriptEvent([], first), second);
+    expect(result).toHaveLength(2);
+  });
+
+  test("caps the ring buffer the same way channelEntries' own slice(-N) does, oldest dropped first", () => {
+    let events: VoiceCallTranscriptTurnEvent[] = [];
+    for (let i = 0; i < 205; i++) {
+      events = appendVoiceCallTranscriptEvent(events, event({ callId: `call-${i}` }));
+    }
+    expect(events.length).toBe(200);
+    expect(events[0]!.callId).toBe("call-5"); // the oldest 5 were dropped
+    expect(events[199]!.callId).toBe("call-204");
+  });
+
+  test("never mutates the input array", () => {
+    const events = [event()];
+    const next = appendVoiceCallTranscriptEvent(events, event({ callId: "call-2" }));
+    expect(next).not.toBe(events);
+    expect(events).toHaveLength(1);
   });
 });

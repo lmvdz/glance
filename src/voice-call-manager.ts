@@ -168,6 +168,38 @@ export interface VoiceCallCoordinatorOptions {
 	channelMemberUserIds?: (channelId: string) => Promise<string[] | undefined>;
 	journalPollIntervalMs?: number;
 	livenessProbeIntervalMs?: number;
+	/**
+	 * Concern 11 (voice-transcript-in-thread): fired once per journaled transcript record that was
+	 * actually appended to disk (never for a duplicate replay or a failed append — see
+	 * `CallProjectionStore#applyEnvelope`'s own cursor-advance discipline). The caller (`SquadManager`)
+	 * turns this into a `SquadEvent` push so a call's conversation pane can update in place the moment
+	 * a turn lands, without waiting for its next poll. Additive and optional: a caller that never
+	 * passes it (every existing test fixture) loses nothing — the turn is still durably appended and
+	 * still readable via `transcript()`/`GET .../voice-call/transcript`, just without the live nudge.
+	 */
+	onTranscriptTurn?: (input: { channelId: string; callId: string; entry: StoredTranscriptEntry }) => void;
+}
+
+/** A broker-tracked call process (`BrokerClient#listCalls`) with no corresponding non-ended binding in
+ *  THIS daemon's own store — the calls-management surface's (concern 10) "ORPHAN" row: a process the
+ *  broker still lists as running that nothing in the room can see, end, or reattach to through the
+ *  normal per-channel binding APIs, because there is no channel to route through. Distinct from a
+ *  binding sitting in `degraded` (which DOES have a channel and normal End/Reattach controls) — an
+ *  orphan is the case those controls cannot reach at all. */
+export interface VoiceCallOrphan {
+	callId: string;
+	port?: number;
+	startedAt?: number;
+	sessionRoot?: string;
+	noLocalAudio?: boolean;
+}
+
+export interface VoiceCallsSurface {
+	/** Every binding this coordinator knows about, any state including `ended` — the caller
+	 *  (`SquadManager#listVoiceCallsSurface`) filters this down to the channels the requesting actor
+	 *  can actually read before it ever reaches a response body. */
+	bindings: VoiceCallBindingView[];
+	orphans: VoiceCallOrphan[];
 }
 
 export interface StartCallInput {
@@ -356,6 +388,7 @@ export class VoiceCallCoordinator {
 	private readonly channelMemberUserIds: ((channelId: string) => Promise<string[] | undefined>) | undefined;
 	private readonly journalPollIntervalMs: number;
 	private readonly livenessProbeIntervalMs: number;
+	private readonly onTranscriptTurnFn: ((input: { channelId: string; callId: string; entry: StoredTranscriptEntry }) => void) | undefined;
 
 	readonly bindings: CallBindingStore;
 	readonly projection: CallProjectionStore;
@@ -374,6 +407,7 @@ export class VoiceCallCoordinator {
 		this.channelMemberUserIds = opts.channelMemberUserIds;
 		this.journalPollIntervalMs = opts.journalPollIntervalMs ?? DEFAULT_JOURNAL_POLL_MS;
 		this.livenessProbeIntervalMs = opts.livenessProbeIntervalMs ?? DEFAULT_LIVENESS_PROBE_MS;
+		this.onTranscriptTurnFn = opts.onTranscriptTurn;
 
 		this.bindings = new CallBindingStore(this.stateDir, { log: this.log, now: this.now });
 		this.artifacts = new ArtifactSnapshotStore(this.stateDir, { log: this.log, now: this.now });
@@ -465,6 +499,48 @@ export class VoiceCallCoordinator {
 
 	list(): VoiceCallBindingView[] {
 		return this.bindings.list().map(redactBinding);
+	}
+
+	/**
+	 * Concern 10 (call-management-ui): every binding this coordinator knows about, PLUS every broker
+	 * call process that has no corresponding non-ended binding — an ORPHAN, the production-observed
+	 * failure this surface exists to close ("three orphan reaps required manual curl against the
+	 * broker"). A broker call already covered by one of this coordinator's own live/degraded/
+	 * connecting bindings is never double-listed as an orphan just because that binding happens to be
+	 * mid-reconnect; only a call the broker still lists as running (`exit === null`) with NO matching
+	 * binding at all counts. A broker that cannot be reached logs and reports zero orphans rather than
+	 * failing the whole surface — the bindings half of the answer is still worth having.
+	 */
+	async listCallsSurface(): Promise<VoiceCallsSurface> {
+		const bindings = this.list();
+		const knownCallIds = new Set(bindings.filter((binding) => binding.state !== "ended" && binding.callId).map((binding) => binding.callId!));
+		let orphans: VoiceCallOrphan[] = [];
+		try {
+			const calls = await this.broker.listCalls();
+			orphans = calls
+				.filter((call) => call.exit === null && !knownCallIds.has(call.callId))
+				.map((call) => ({ callId: call.callId, port: call.port, startedAt: call.startedAt, sessionRoot: call.sessionRoot, noLocalAudio: call.noLocalAudio }));
+		} catch (err) {
+			this.log(`voice-call: could not list broker calls for the calls-management surface: ${errText(err)}`);
+		}
+		return { bindings, orphans };
+	}
+
+	/**
+	 * Ends a broker call that has no channel to route through (an orphan — see `listCallsSurface`).
+	 * There is no binding, so there is nothing for `endBinding`'s own chokepoint to do here; this is
+	 * the one call site allowed to hit `broker.endCall` directly, precisely because it is reaping a
+	 * process `endBinding` never owned in the first place. Never throws outward — a broker that is
+	 * down, or has already reaped the call itself, or 404s on an already-gone id all mean there is
+	 * nothing left orphaned, which is what this method exists to guarantee.
+	 */
+	async endOrphan(callId: string): Promise<CoordinatorResult<{ ended: true }>> {
+		try {
+			await this.broker.endCall(callId);
+			return { ok: true, value: { ended: true } };
+		} catch (err) {
+			return { ok: false, reason: errText(err) };
+		}
 	}
 
 	ladderPriority(channelId: string): LadderPriority {
@@ -794,6 +870,12 @@ export class VoiceCallCoordinator {
 			// daemon has no HUD countdown to update from it. The record exists so the journal (and this
 			// tailer's cursor) has an honest entry for it, matching the terminal record that follows.
 		}
+		if (outcome.status === "applied-transcript") {
+			// Concern 11: nudge a live conversation pane the moment a turn actually lands on disk — see
+			// `onTranscriptTurn`'s own doc. Never fired for a duplicate replay or a failed append,
+			// because `applyEnvelope` only returns this status once the append itself succeeded.
+			this.onTranscriptTurnFn?.({ channelId, callId: binding.callId, entry: outcome.entry });
+		}
 		if (outcome.status === "applied-terminal") {
 			// `endBinding` itself runs the full runtime teardown (tailer/liveness/bridge) now — see its
 			// doc. `reason === "idle"` (concern 05's idle-hangup policy) is projected as its OWN distinct
@@ -1000,6 +1082,56 @@ export class VoiceCallCoordinator {
 		// — see both docs.
 		const ended = await this.endBinding(channelId, "operator-ended");
 		return { ok: true, value: redactBinding(ended) };
+	}
+
+	/**
+	 * Concern 10 (call-management-ui): the user-triggered counterpart to `rehydrateBinding`'s automatic
+	 * degraded→live recovery — invokable on demand from the calls-management surface's Reattach button
+	 * (and the HUD's own, for the room's current call) when the automatic liveness probe hasn't, or
+	 * doesn't ever, succeed on its own. Same corroborate-then-reconnect steps `probeLiveness` already
+	 * runs each tick, just callable directly and reporting its own outcome instead of leaving the
+	 * caller to infer one from polling the binding again:
+	 *  - already live with a connected bridge → no-op, reports the current binding (nothing to do).
+	 *  - no `callId` at all → this binding never got far enough to be reattachable; ends it honestly
+	 *    (`stale-binding`) rather than hanging a Reattach button off nothing.
+	 *  - the broker no longer lists the call, or lists it exited → ends it (`broker-exit`); reattaching
+	 *    a process that is actually gone would be claiming a liveness this daemon cannot verify.
+	 *  - otherwise → the same `connectAndPin` every first-connect and liveness-probe reconnect already
+	 *    shares, so a successful reattach re-pins the SAME session identity and refuses a different one
+	 *    exactly as any other reconnect does.
+	 * Never adds a new teardown path — every ending here still funnels through `endBinding`.
+	 */
+	async reattach(channelId: string, isAuthorized: boolean): Promise<CoordinatorResult<VoiceCallBindingView>> {
+		if (!isAuthorized) return { ok: false, reason: "forbidden" };
+		const binding = this.bindings.get(channelId);
+		if (!binding || binding.state === "ended") return { ok: false, reason: "no-active-call" };
+		const rt = this.runtime(channelId);
+		if (binding.state === "live" && rt.bridge) return { ok: true, value: redactBinding(binding) };
+		if (!binding.callId) {
+			await this.endBinding(channelId, "stale-binding");
+			return { ok: false, reason: "no-active-call" };
+		}
+		let calls: BrokerCallView[];
+		try {
+			calls = await this.broker.listCalls();
+		} catch (err) {
+			return { ok: false, reason: `broker: ${errText(err)}` };
+		}
+		const mine = calls.find((call) => call.callId === binding.callId);
+		if (!mine || mine.exit !== null) {
+			this.stopLivenessProbe(channelId);
+			await this.endBinding(channelId, "broker-exit");
+			return { ok: false, reason: "no-active-call" };
+		}
+		try {
+			await this.connectAndPin(channelId, binding, binding.controlToken);
+		} catch (err) {
+			return { ok: false, reason: `bridge: ${errText(err)}` };
+		}
+		this.stopLivenessProbe(channelId);
+		const live = this.bindings.get(channelId);
+		if (!live || live.state === "ended") return { ok: false, reason: "no-active-call" };
+		return { ok: true, value: redactBinding(live) };
 	}
 
 	stop(): void {

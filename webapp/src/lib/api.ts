@@ -547,3 +547,47 @@ export function setVoiceCallMuted(channelId: string, muted: boolean): Promise<{ 
 export function fetchVoiceCallGaps(channelId: string): Promise<VoiceCallJournalGapDTO[]> {
   return apiJson<{ gaps: VoiceCallJournalGapDTO[] }>(`/api/channels/${encodeURIComponent(channelId)}/voice-call/gaps`).then((r) => r.gaps);
 }
+
+/** `POST /api/channels/:id/voice-call/reattach` (concern 10: call-management-ui) — the user-triggered
+ *  counterpart to the daemon's own automatic degraded→live recovery. Throws (via `apiJson`) on any
+ *  refusal, exactly like `startVoiceCall`/`endVoiceCall`: 403 forbidden, 404 no-active-call (already
+ *  ended, or ended just now because the broker corroborated the process is gone), 502 a broker/bridge
+ *  failure carrying the daemon's own explanatory text. */
+export function reattachVoiceCall(channelId: string): Promise<VoiceCallBindingDTO> {
+  return apiJson<VoiceCallBindingDTO>(`/api/channels/${encodeURIComponent(channelId)}/voice-call/reattach`, { method: 'POST' });
+}
+
+// -------------------------------------------------------------------------------------------------
+// Voice calls surface (concern 10: call-management-ui) — org-wide, not channel-scoped: the room
+// that started a call is not necessarily the only room a person needs to see it, end it, or reattach
+// to it from, and a broker ORPHAN (a process the broker still lists running with no daemon binding at
+// all — see `src/voice-call-manager.ts#VoiceCallOrphan`) has no channel to route through in the first
+// place.
+// -------------------------------------------------------------------------------------------------
+
+/** A broker-tracked call process with no corresponding non-ended binding — see the daemon's own
+ *  `VoiceCallOrphan` doc for exactly what counts. There is no channel, callId is the only identity. */
+export interface VoiceCallOrphanDTO {
+  callId: string;
+  port?: number;
+  startedAt?: number;
+  sessionRoot?: string;
+  noLocalAudio?: boolean;
+}
+
+export interface VoiceCallsSurfaceDTO {
+  bindings: VoiceCallBindingDTO[];
+  orphans: VoiceCallOrphanDTO[];
+}
+
+/** `GET /api/voice-calls` — every binding this actor can read, across every channel, plus every
+ *  broker orphan (which no per-channel read could ever surface). */
+export function fetchVoiceCallsSurface(): Promise<VoiceCallsSurfaceDTO> {
+  return apiJson<VoiceCallsSurfaceDTO>('/api/voice-calls');
+}
+
+/** `POST /api/voice-calls/orphans/:callId/end` — reaps a broker call directly; there is no binding to
+ *  route through. Throws via `apiJson` on the broker's own honest refusal reason. */
+export function endOrphanVoiceCall(callId: string): Promise<{ ended: true }> {
+  return apiJson<{ ended: true }>(`/api/voice-calls/orphans/${encodeURIComponent(callId)}/end`, { method: 'POST' });
+}

@@ -42,9 +42,13 @@ export interface VoiceStatusRegionProps {
   onOpenDecisions?: () => void;
   onOpenArtifacts?: () => void;
   artifactCount: number;
+  /** Concern 10 (call-management-ui): opens the cross-room calls surface. Unlike the two buttons
+   *  above, this is never gated on the CURRENT room having a call — the whole point of that surface
+   *  is seeing calls (and broker orphans) this room's own state cannot show at all. */
+  onOpenCalls?: () => void;
 }
 
-export function VoiceStatusRegion({ status, chipLabel, announcement, onOpenDecisions, onOpenArtifacts, artifactCount }: VoiceStatusRegionProps) {
+export function VoiceStatusRegion({ status, chipLabel, announcement, onOpenDecisions, onOpenArtifacts, artifactCount, onOpenCalls }: VoiceStatusRegionProps) {
   return (
     <div
       className="flex-none"
@@ -87,6 +91,17 @@ export function VoiceStatusRegion({ status, chipLabel, announcement, onOpenDecis
               title="What this run produced."
             >
               {artifactCount === 0 ? 'artifacts' : `artifacts · ${artifactCount}`}
+            </button>
+          ) : null}
+          {onOpenCalls ? (
+            <button
+              type="button"
+              onClick={onOpenCalls}
+              className="inline-flex min-h-10 items-center rounded-full px-3 text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ember focus-visible:ring-offset-2"
+              style={{ border: '1px solid #26262B', color: '#8A8A91', fontFamily: MONO, letterSpacing: '.06em' }}
+              title="Every call this account can see across every room, plus any orphaned broker process — see, end, or reattach without curl."
+            >
+              calls
             </button>
           ) : null}
         </div>

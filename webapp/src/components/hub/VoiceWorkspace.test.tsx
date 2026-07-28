@@ -62,6 +62,7 @@ function decision(over: Partial<VoiceCallDecisionDTO> = {}): VoiceCallDecisionDT
 
 const hudProps = {
   binding: null as VoiceCallBindingDTO | null,
+  loading: false,
   starting: false,
   ending: false,
   muted: false,
@@ -227,6 +228,48 @@ describe('VoiceCallHudView', () => {
     );
     expect(html).toContain('device-audio-call');
     expect(html).toContain('Retry');
+  });
+
+  // Concern 10 (call-management-ui): the refresh-rehydration gap. Before the FIRST binding read
+  // resolves, the room does not yet know whether a call is live — offering "Start a call" during
+  // that window is the exact production defect (a refresh mid-call briefly looked unattached, with
+  // no End button, and a click would have raced the daemon's own single-active-call guard).
+  test('loading with no binding yet: never offers to start a call, never claims "no call" — the refresh-rehydration gap', () => {
+    const html = renderToStaticMarkup(<VoiceCallHudView {...hudProps} loading />);
+    expect(html).not.toContain('Start a call');
+    expect(html).not.toContain('No call is bound to this thread.');
+    expect(html).toContain('Checking');
+    expect(html).not.toContain('aria-label="End the call"'); // still nothing to end — honestly unknown, not fabricated live
+  });
+
+  test('once loading resolves to genuinely no call, the ordinary offer returns', () => {
+    const html = renderToStaticMarkup(<VoiceCallHudView {...hudProps} loading={false} />);
+    expect(html).toContain('Start a call');
+    expect(html).toContain('No call is bound to this thread.');
+  });
+
+  test('loading is irrelevant once a real binding is already known — a live call never renders as "checking"', () => {
+    const html = renderToStaticMarkup(<VoiceCallHudView {...hudProps} loading binding={binding({ state: 'live' })} controlsAvailable />);
+    expect(html).toContain('aria-label="End the call"');
+    expect(html).not.toContain('Checking');
+  });
+
+  // Concern 10: Reattach, offered only for a degraded call.
+  test('a degraded call offers Reattach alongside Mute/End', () => {
+    const html = renderToStaticMarkup(<VoiceCallHudView {...hudProps} binding={binding({ state: 'degraded' })} controlsAvailable={false} onReattach={() => {}} />);
+    expect(html).toContain('aria-label="Reattach to the call"');
+    expect(html).toContain('aria-label="End the call"'); // End is never withdrawn just because it's degraded
+  });
+
+  test('a live call never offers Reattach — there is nothing to reattach', () => {
+    const html = renderToStaticMarkup(<VoiceCallHudView {...hudProps} binding={binding({ state: 'live' })} controlsAvailable onReattach={() => {}} />);
+    expect(html).not.toContain('Reattach to the call');
+  });
+
+  test('reattaching shows a busy state and disables the button, single-flight like every other control here', () => {
+    const html = renderToStaticMarkup(<VoiceCallHudView {...hudProps} binding={binding({ state: 'degraded' })} controlsAvailable={false} onReattach={() => {}} reattaching />);
+    expect(html).toContain('aria-label="Reattach to the call"');
+    expect(html).toContain('disabled');
   });
 });
 

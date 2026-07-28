@@ -5,6 +5,12 @@ import { connectSquad, type SquadSocket } from "../lib/ws";
 
 const TRANSCRIPT_CAP = 800;
 
+/** Concern 11 (voice-transcript-in-thread): the live-push ring buffer's own cap, matching
+ *  `channelEntries`'/`commentEvents`'s own `slice(-N)` idiom below. A call's transcript pane
+ *  reconciles from a full REST fetch on open/poll anyway (see `useVoiceCallTranscript`), so this
+ *  buffer only needs to cover the gap between two polls — it is a low-latency nudge, not the record. */
+const VOICE_TRANSCRIPT_EVENT_CAP = 200;
+
 const EMPTY_CAPABILITIES: CapabilitySnapshotDTO = { sources: [], packs: [], installs: [] };
 
 /**
@@ -42,6 +48,10 @@ export function normalizeCatalog(value: unknown): PublicCapabilityCatalogDTO[] {
   return Array.isArray(catalog) ? (catalog as PublicCapabilityCatalogDTO[]) : [];
 }
 
+/** The one `SquadEvent` variant `voiceCallTranscriptEvents` below ever holds — named here so
+ *  consumers (`useVoiceCallTranscript`) don't have to `Extract<SquadEvent, ...>` themselves. */
+export type VoiceCallTranscriptTurnEvent = Extract<SquadEvent, { type: "voice-call-transcript-turn" }>;
+
 export interface SquadState {
   agents: AgentDTO[];
   features: FeatureDTO[];
@@ -54,6 +64,11 @@ export interface SquadState {
   commandAcks: CommandAckDTO[];
   resolvedCommentEvents: Map<string, number>;
   channelEntries: ChannelEntry[];
+  /** Concern 11: live-pushed transcript turns, ring-buffered exactly like `channelEntries` above —
+   *  a call-scoped conversation pane (`useVoiceCallTranscript`) filters this to its own
+   *  `(channelId, callId)` and merges each turn in place by `(role, turn)`, never appending it to the
+   *  main timeline. */
+  voiceCallTranscriptEvents: VoiceCallTranscriptTurnEvent[];
   presence: PresenceSnapshot;
   typing: TypingEvent[];
   connected: boolean;
@@ -61,6 +76,19 @@ export interface SquadState {
   send: (command: ClientCommand) => void;
   subscribe: (id: string) => void;
   unsubscribe: (id: string) => void;
+}
+
+/**
+ * The `voice-call-transcript-turn` SquadEvent case's own reducer, extracted so it is testable
+ * without a hook-render harness (this package's own convention — see `appendTranscriptEntry` right
+ * below for the identical reason `"transcript"` is extracted). A ring buffer, same cap idiom as
+ * `channelEntries`'s own `slice(-499)` — but a DIFFERENT array entirely: this function never reads
+ * or writes `ChannelEntry`/`channelEntries` in any way, which is what actually keeps a call's
+ * per-utterance turns out of the main channel timeline (concern 11's product decision) — not a
+ * runtime filter that could be forgotten, but a type/data boundary a turn simply cannot cross.
+ */
+export function appendVoiceCallTranscriptEvent(events: readonly VoiceCallTranscriptTurnEvent[], event: VoiceCallTranscriptTurnEvent): VoiceCallTranscriptTurnEvent[] {
+  return [...events.slice(-(VOICE_TRANSCRIPT_EVENT_CAP - 1)), event];
 }
 
 export function appendTranscriptEntry(entries: TranscriptEntry[], entry: TranscriptEntry): TranscriptEntry[] {
@@ -117,6 +145,7 @@ export function useSquad(): SquadState {
   const [resolvedCommentEvents, setResolvedCommentEvents] = useState<Map<string, number>>(() => new Map());
   const [commandAcks, setCommandAcks] = useState<CommandAckDTO[]>([]);
   const [channelEntries, setChannelEntries] = useState<ChannelEntry[]>([]);
+  const [voiceCallTranscriptEvents, setVoiceCallTranscriptEvents] = useState<VoiceCallTranscriptTurnEvent[]>([]);
   const [presence, setPresence] = useState<PresenceSnapshot>({ users: [] });
   const [typing, setTyping] = useState<TypingEvent[]>([]);
   const [connected, setConnected] = useState(false);
@@ -209,6 +238,9 @@ export function useSquad(): SquadState {
           case "channel-entry":
             setChannelEntries((previous) => previous.some((entry) => entry.id === event.entry.id) ? previous : [...previous.slice(-499), event.entry]);
             break;
+          case "voice-call-transcript-turn":
+            setVoiceCallTranscriptEvents((previous) => appendVoiceCallTranscriptEvent(previous, event));
+            break;
           case "presence":
             setPresence(event.presence);
             break;
@@ -239,5 +271,5 @@ export function useSquad(): SquadState {
     subscribedRef.current.delete(id);
   }, []);
 
-  return { agents: [...agents.values()], features, projects, capabilities, publicCatalog, transcripts, commands, commentEvents, resolvedCommentEvents, commandAcks, channelEntries, presence, typing, connected, reload, send, subscribe, unsubscribe };
+  return { agents: [...agents.values()], features, projects, capabilities, publicCatalog, transcripts, commands, commentEvents, resolvedCommentEvents, commandAcks, channelEntries, voiceCallTranscriptEvents, presence, typing, connected, reload, send, subscribe, unsubscribe };
 }
