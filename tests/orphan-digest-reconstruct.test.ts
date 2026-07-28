@@ -74,18 +74,55 @@ test("an unfinalized tail (transcript newer than any receipt) is reconstructed a
 	expect(onDisk).toContain("RECONSTRUCTED post-mortem");
 });
 
-test("a cleanly finalized run (receipt newer than the transcript tail) is NOT relabeled reconstructed", async () => {
+test("a cleanly finalized run is NOT relabeled — even though finalizeRun's token-burn entry lands AFTER the receipt", async () => {
+	// Blind-review regression (the first cut compared max-over-ALL-entries and would flag every clean
+	// run): finalizeRun writes the receipt at endedAt and THEN appends its token-burn system entry, so
+	// a real finalized transcript ALWAYS ends with a system entry newer than endedAt. Fixture mirrors
+	// that true ordering — agent turns before endedAt, manager bookkeeping after.
 	const dir = await tmpDir("orphan-b-");
 	const { mgr, rec } = seeded(dir);
 	await writeDigest(dir, "old-1", "## Goal\nProperly finalized digest from the last run.");
 	const receipt: RunReceipt = { agentId: "old-1", name: "old", repo: "/r", runId: "r1", startedAt: 1000, endedAt: 9000, status: "idle", toolCalls: 1, toolTally: {}, filesTouched: [] };
 	await appendReceipt(dir, receipt);
+	const finalizedTranscript: TranscriptEntry[] = [
+		{ kind: "user", text: "Rotate the frobnicator lock before the deploy window closes.", ts: 4000 },
+		{ kind: "assistant", text: "Rotated the frobnicator lock and updated src/frob/lock.ts to the new epoch.", ts: 5000 },
+		{ kind: "system", text: "token burn · old · 1234 tokens · $0.0100", ts: 9500 }, // AFTER endedAt, as in production
+	] as TranscriptEntry[];
 
-	await (mgr as unknown as Harness).surfaceResumeDigest("new-1", persisted, orphanTranscript); // tail ts 5000 < receipt endedAt 9000
+	await (mgr as unknown as Harness).surfaceResumeDigest("new-1", persisted, finalizedTranscript);
 
 	const surfaced = rec.transcript.at(-1)?.text ?? "";
 	expect(surfaced).toContain("Properly finalized digest");
 	expect(surfaced).not.toContain("RECONSTRUCTED"); // relabeling a clean run as post-mortem would be its own lie
+});
+
+test("a system-only tail after finalization is bookkeeping, not an unfinalized turn", async () => {
+	const dir = await tmpDir("orphan-e-");
+	const { mgr, rec } = seeded(dir);
+	await writeDigest(dir, "old-1", "## Goal\nFinalized.");
+	await appendReceipt(dir, { agentId: "old-1", name: "old", repo: "/r", runId: "r1", startedAt: 1000, endedAt: 2000, status: "idle", toolCalls: 0, toolTally: {}, filesTouched: [] } as RunReceipt);
+	const onlySystemAfter: TranscriptEntry[] = [
+		{ kind: "user", text: "do the thing", ts: 1500 },
+		{ kind: "system", text: "🔭 projected card", ts: 3000 },
+		{ kind: "system", text: "token burn · old · 9 tokens", ts: 3100 },
+	] as TranscriptEntry[];
+	await (mgr as unknown as Harness).surfaceResumeDigest("new-1", persisted, onlySystemAfter);
+	expect(rec.transcript.at(-1)?.text ?? "").not.toContain("RECONSTRUCTED");
+});
+
+test("a REAL unfinalized tail still fires: an agent turn after the last receipt", async () => {
+	const dir = await tmpDir("orphan-f-");
+	const { mgr, rec } = seeded(dir);
+	await appendReceipt(dir, { agentId: "old-1", name: "old", repo: "/r", runId: "r0", startedAt: 100, endedAt: 2000, status: "idle", toolCalls: 0, toolTally: {}, filesTouched: [] } as RunReceipt);
+	const interrupted: TranscriptEntry[] = [
+		{ kind: "user", text: "Now rotate the frobnicator lock as a second run.", ts: 6000 },
+		{ kind: "assistant", text: "Rotating the frobnicator lock; edited src/frob/lock.ts before the daemon died.", ts: 6500 },
+	] as TranscriptEntry[];
+	await (mgr as unknown as Harness).surfaceResumeDigest("new-1", persisted, interrupted);
+	const surfaced = rec.transcript.at(-1)?.text ?? "";
+	expect(surfaced).toContain("RECONSTRUCTED post-mortem");
+	expect(surfaced).toContain("frobnicator");
 });
 
 test("reconstruction is regenerated, never appended: a second adopt produces the identical digest, one banner", async () => {

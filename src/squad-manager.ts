@@ -2163,8 +2163,14 @@ export class SquadManager extends EventEmitter {
 			// pure and idempotent — harness G08) and MARK it reconstructed, so it reads as evidence,
 			// not self-report. Raw exhaust stays untouched; only the derived view is rebuilt (the
 			// battle-tested shape in mnemosyne's sleep() path — research-mnemosyne/BRIEF.md).
+			// Detector (blind-review corrected): compare only AGENT-AUTHORED activity (user/assistant
+			// turns) against the last finalized receipt. finalizeRun writes the receipt and THEN emits
+			// its token-burn system entry, so a raw max-over-all-entries comparison marks every cleanly
+			// finalized run as orphaned — the false-positive the first cut shipped and its fixture hid.
+			// Manager-authored system entries are bookkeeping, never evidence of an unfinalized turn.
 			let digest = "";
-			const lastTs = priorTranscript?.length ? Math.max(...priorTranscript.map((e) => e.ts ?? 0)) : 0;
+			const agentAuthored = (priorTranscript ?? []).filter((e) => e.kind === "user" || e.kind === "assistant");
+			const lastTs = agentAuthored.length ? Math.max(...agentAuthored.map((e) => e.ts ?? 0)) : 0;
 			if (lastTs > 0) {
 				const receipts = await readReceipts(this.stateDir, p.id).catch(() => [] as RunReceipt[]);
 				const lastFinalized = receipts.length ? Math.max(...receipts.map((r) => r.endedAt ?? 0)) : 0;
