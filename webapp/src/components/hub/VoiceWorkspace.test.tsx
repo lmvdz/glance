@@ -183,6 +183,51 @@ describe('VoiceCallHudView', () => {
   test('the subtree opts into reduced motion', () => {
     expect(renderToStaticMarkup(<VoiceCallHudView {...hudProps} />)).toContain('data-room-workspace');
   });
+
+  // Concern 09 (browser-audio-transport): the browser's own mic/speaker relay status.
+  test('a device-audio call (no browserAudio prop, or relayStatus idle) shows nothing extra', () => {
+    const withoutProp = renderToStaticMarkup(<VoiceCallHudView {...hudProps} binding={binding()} controlsAvailable />);
+    expect(withoutProp).not.toContain('microphone and speaker connected');
+    const idleRelay = renderToStaticMarkup(
+      <VoiceCallHudView {...hudProps} binding={binding()} controlsAvailable browserAudio={{ micStatus: 'idle', relayStatus: 'idle', onRetry: () => {} }} />,
+    );
+    expect(idleRelay).not.toContain('microphone and speaker connected');
+  });
+
+  test('an active browser mic on a ready relay is stated plainly, with no retry button', () => {
+    const html = renderToStaticMarkup(
+      <VoiceCallHudView {...hudProps} binding={binding()} controlsAvailable browserAudio={{ micStatus: 'active', relayStatus: 'ready', onRetry: () => {} }} />,
+    );
+    expect(html).toContain('Browser microphone and speaker connected.');
+    expect(html).not.toContain('Retry');
+  });
+
+  test('a denied microphone is an honest failure with a retry affordance, not a silent hang', () => {
+    const html = renderToStaticMarkup(
+      <VoiceCallHudView
+        {...hudProps}
+        binding={binding()}
+        controlsAvailable
+        browserAudio={{ micStatus: 'denied', relayStatus: 'ready', error: 'Microphone access was denied.', onRetry: () => {} }}
+      />,
+    );
+    expect(html).toContain('Microphone access was denied.');
+    expect(html).toContain('Retry');
+    expect(html).toContain('role="alert"');
+  });
+
+  test('a refused relay names the daemon’s own reason and offers a retry', () => {
+    const html = renderToStaticMarkup(
+      <VoiceCallHudView
+        {...hudProps}
+        binding={binding()}
+        controlsAvailable
+        browserAudio={{ micStatus: 'idle', relayStatus: 'refused', error: 'The browser audio relay was refused: device-audio-call', onRetry: () => {} }}
+      />,
+    );
+    expect(html).toContain('device-audio-call');
+    expect(html).toContain('Retry');
+  });
 });
 
 // -------------------------------------------------------------------------------------------------

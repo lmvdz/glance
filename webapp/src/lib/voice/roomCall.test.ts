@@ -11,6 +11,7 @@ import {
   artifactStateCopy,
   attentionChipLabel,
   bindingBanner,
+  browserAudioStatusLine,
   currentPane,
   decisionAnnouncement,
   decisionDoorModel,
@@ -620,5 +621,75 @@ describe('focusHudRegion', () => {
   test('a not-yet-mounted ref is a no-op rather than a throw', () => {
     expect(() => focusHudRegion(null)).not.toThrow();
     expect(() => focusHudRegion(undefined)).not.toThrow();
+  });
+});
+
+// -------------------------------------------------------------------------------------------------
+// Browser audio transport (concern 09) — the HUD's status line for useRoomCallAudio's own state
+// -------------------------------------------------------------------------------------------------
+
+describe('browserAudioStatusLine', () => {
+  test('a device-audio call (relayStatus idle) has nothing to say', () => {
+    expect(browserAudioStatusLine({ micStatus: 'idle', relayStatus: 'idle' })).toBeUndefined();
+  });
+
+  test('connecting the relay is a neutral, non-retryable transient line', () => {
+    expect(browserAudioStatusLine({ micStatus: 'idle', relayStatus: 'connecting' })).toEqual({
+      text: 'Connecting the browser audio relay…',
+      tone: 'neutral',
+      showRetry: false,
+    });
+  });
+
+  test('a refused relay carries the daemon reason and offers a retry', () => {
+    expect(browserAudioStatusLine({ micStatus: 'idle', relayStatus: 'refused', error: 'The browser audio relay was refused: device-audio-call' })).toEqual({
+      text: 'The browser audio relay was refused: device-audio-call',
+      tone: 'error',
+      showRetry: true,
+    });
+  });
+
+  test('a refused relay with no error text still says something specific, never a blank line', () => {
+    expect(browserAudioStatusLine({ micStatus: 'idle', relayStatus: 'refused' })).toEqual({
+      text: 'The browser audio relay was refused.',
+      tone: 'error',
+      showRetry: true,
+    });
+  });
+
+  test('a closed relay (unexpected loss) offers a retry', () => {
+    expect(browserAudioStatusLine({ micStatus: 'idle', relayStatus: 'closed' })).toEqual({
+      text: 'The browser audio relay connection was lost.',
+      tone: 'error',
+      showRetry: true,
+    });
+  });
+
+  test('a ready relay still requesting mic permission is neutral, non-retryable', () => {
+    expect(browserAudioStatusLine({ micStatus: 'requesting', relayStatus: 'ready' })).toEqual({
+      text: 'Requesting microphone access…',
+      tone: 'neutral',
+      showRetry: false,
+    });
+  });
+
+  test('a denied mic offers a retry, with the specific getUserMedia error when one is given', () => {
+    expect(browserAudioStatusLine({ micStatus: 'denied', relayStatus: 'ready', error: 'Microphone access was denied.' })).toEqual({
+      text: 'Microphone access was denied.',
+      tone: 'error',
+      showRetry: true,
+    });
+  });
+
+  test('an active mic on a ready relay is the one fully-connected, non-error state', () => {
+    expect(browserAudioStatusLine({ micStatus: 'active', relayStatus: 'ready' })).toEqual({
+      text: 'Browser microphone and speaker connected.',
+      tone: 'neutral',
+      showRetry: false,
+    });
+  });
+
+  test('a ready relay with an idle mic (the brief tick before requesting fires) has nothing to say yet', () => {
+    expect(browserAudioStatusLine({ micStatus: 'idle', relayStatus: 'ready' })).toBeUndefined();
   });
 });

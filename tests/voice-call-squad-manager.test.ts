@@ -92,4 +92,31 @@ describe("room membership gates voice-call reads/mutations", () => {
 		await mgr.listChannels(anyone); // ensures the lazily-created #fleet default channel exists
 		expect(await mgr.voiceCallState("fleet", anyone)).toBeUndefined();
 	});
+
+	// Concern 09 (browser-audio-transport): attachVoiceCallAudioSink/pushVoiceCallMicAudio go through
+	// the SAME canReadChannel gate every other voice-call mutation does, before the coordinator ever
+	// gets a chance to check `noLocalAudio`/bridge availability — a non-member must be refused
+	// "forbidden" specifically, never "no-active-call"/"bridge-unavailable" (which would leak whether
+	// a call even exists on a channel this actor cannot read).
+	test("attachVoiceCallAudioSink and pushVoiceCallMicAudio refuse a non-member with 'forbidden', before touching any bridge", async () => {
+		const mgr = makeManager();
+		const owner = actor("alice");
+		const outsider = actor("mallory");
+		const channel = await mgr.createChannel(owner, { name: "private-room-5", visibility: "private" });
+		const attach = await mgr.attachVoiceCallAudioSink(channel.id, outsider, { sendOutputAudio: () => {} });
+		expect(attach.ok).toBe(false);
+		if (!attach.ok) expect(attach.reason).toBe("forbidden");
+		const push = await mgr.pushVoiceCallMicAudio(channel.id, outsider, new Float32Array([0.1]));
+		expect(push.ok).toBe(false);
+		if (!push.ok) expect(push.reason).toBe("forbidden");
+	});
+
+	test("a member is authorized through to the coordinator, which then refuses honestly for a channel with no active call", async () => {
+		const mgr = makeManager();
+		const owner = actor("alice");
+		const channel = await mgr.createChannel(owner, { name: "private-room-6", visibility: "private" });
+		const attach = await mgr.attachVoiceCallAudioSink(channel.id, owner, { sendOutputAudio: () => {} });
+		expect(attach.ok).toBe(false);
+		if (!attach.ok) expect(attach.reason).toBe("no-active-call"); // authorized, but nothing to attach to — not "forbidden"
+	});
 });

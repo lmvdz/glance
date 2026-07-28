@@ -358,6 +358,14 @@ export interface VoiceCallBindingDTO {
    *  and muting. Lets the HUD say "controls are unavailable right now" instead of offering buttons
    *  the daemon is going to refuse. */
   controlsAvailable?: boolean;
+  /** Concern 09 (browser-audio-transport): whether the broker spawned this call's `omp live`
+   *  process audio-less — read from the broker at attach time, never a client guess. Present on the
+   *  bare binding (POST/DELETE included), unlike `audioAvailable` below. */
+  noLocalAudio?: boolean;
+  /** Concern 09: `true` only when `noLocalAudio` AND `controlsAvailable` both hold — the two facts
+   *  the room needs before it opens a mic/plays audio at all. Same POST/DELETE absence rule as
+   *  `controlsAvailable` above (present only on `GET /voice-call`'s full state read). */
+  audioAvailable?: boolean;
 }
 
 export type VoiceCallDecisionState = 'open' | 'awaiting-confirmation' | 'answered' | 'expired' | 'cancelled' | 'failed';

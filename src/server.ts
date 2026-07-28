@@ -441,6 +441,16 @@ interface SocketData {
 	 *  Lets `resolveCommandManager` route a mutating command to the agent's actual owning manager
 	 *  instead of always the root factory. Never true for a tenant session socket. */
 	bootstrapAdmin?: boolean;
+	/**
+	 * Concern 09 (browser-audio-transport): set only for a connection through the dedicated per-channel
+	 * audio WS upgrade (`/api/channels/:channelId/voice-call/audio`), never for the general `/ws`
+	 * chat/roster socket. Its presence is what the shared `websocket` handlers key on to route this
+	 * connection's frames to the voice-call audio relay instead of `applyCommand` — a completely
+	 * separate wire vocabulary (binary PCM, not `ClientCommand` JSON) on a completely separate socket,
+	 * reusing only the SAME upgrade machinery (session resolution, `Bun.serve`'s one `websocket`
+	 * config) rather than duplicating it.
+	 */
+	voiceAudio?: { channelId: string };
 }
 
 /** Resolved better-auth session shape we read (subset; structural typing tolerates better-auth's wider type). */
@@ -775,6 +785,11 @@ export class SquadServer {
 	private readonly clientsByOrg = new Map<string, Set<ServerWebSocket<SocketData>>>();
 	/** DB-registry human presence: orgId → userId → sockets + latest display label. Multiple tabs count as one present human. */
 	private readonly presenceByOrg = new Map<string, Map<string, { displayName: string; sockets: Set<ServerWebSocket<SocketData>> }>>();
+	/** Concern 09 (browser-audio-transport): the `detach()` `attachVoiceCallAudioSink` returned for a
+	 *  voice-audio socket, so `close` can release it. `WeakMap`, not a plain `Map`, so a socket that
+	 *  somehow never fires `close` (Bun always does, but this costs nothing to make true regardless)
+	 *  cannot pin a detach closure — and therefore the sink it clears — alive forever. */
+	private readonly voiceAudioDetach = new WeakMap<ServerWebSocket<SocketData>, () => void>();
 	private server?: Server<SocketData>;
 	private readonly opts: SquadServerOptions;
 	private sockSeq = 0;
@@ -1241,12 +1256,80 @@ export class SquadServer {
 	}
 
 	/** Actor for an inbound WS command — stamped session identity wins in every auth-backed topology. */
-	private actorForSocket(ws: ServerWebSocket<SocketData>): Actor {
-		if (ws.data.userId) {
-			return { id: `db:${ws.data.userId}`, displayName: ws.data.displayName, origin: "local", role: ws.data.role, orgId: ws.data.orgId };
+	/** Pure identity → `Actor` resolution, shared by `actorForSocket` (below) and the audio WS upgrade
+	 *  block (concern 09), which needs the SAME resolution BEFORE a socket exists to check channel
+	 *  membership against — a WS upgrade cannot return a REST-style 403 body after the fact, so the
+	 *  membership check has to happen pre-upgrade, which means the actor has to exist pre-upgrade too. */
+	private actorFromIdentity(role: Role, orgId: string | undefined, userId: string | undefined, displayName: string | undefined): Actor {
+		if (userId) {
+			return { id: `db:${userId}`, displayName, origin: "local", role, orgId };
 		}
-		if (!this.registry) return { ...this.operator, role: ws.data.role };
-		return { ...actorForRole(ws.data.role), orgId: ws.data.orgId };
+		if (!this.registry) return { ...this.operator, role };
+		return { ...actorForRole(role), orgId };
+	}
+
+	private actorForSocket(ws: ServerWebSocket<SocketData>): Actor {
+		return this.actorFromIdentity(ws.data.role, ws.data.orgId, ws.data.userId, ws.data.displayName);
+	}
+
+	/**
+	 * Attaches a voice-audio socket to its channel's call (concern 09). The upgrade block already
+	 * re-checked auth/tier/membership immediately before calling `server.upgrade` — this re-checks the
+	 * one thing that CAN still have changed in the gap between that check and this callback actually
+	 * running (the call itself: ended, gone device-audio, or its bridge dropped) via
+	 * `attachVoiceCallAudioSink`'s own gate. A refusal here sends one small JSON status frame (this
+	 * socket's only text frame — see `SocketData.voiceAudio`'s doc: everything else on it is binary)
+	 * naming why, THEN closes, so a browser can render an honest failure instead of a silent hang —
+	 * the task's own bar for "mic permission/failure states rendered honestly" applies just as much to
+	 * the daemon's own refusal as to the browser's getUserMedia prompt.
+	 */
+	private async openVoiceAudioSocket(ws: ServerWebSocket<SocketData>, channelId: string): Promise<void> {
+		const actor = this.actorForSocket(ws);
+		const manager = await this.managerFor(actor);
+		if (!manager) {
+			ws.send(JSON.stringify({ type: "voiceAudioError", reason: "no-fleet" }));
+			ws.close(1011, "no fleet for this actor");
+			return;
+		}
+		const attached = await manager.attachVoiceCallAudioSink(channelId, actor, {
+			sendOutputAudio: (bytes) => {
+				try {
+					ws.send(bytes);
+				} catch {
+					/* socket already gone; the coordinator's own teardown/detach will catch up via close() */
+				}
+			},
+		});
+		if (!attached.ok) {
+			ws.send(JSON.stringify({ type: "voiceAudioError", reason: attached.reason }));
+			ws.close(1008, attached.reason);
+			return;
+		}
+		this.voiceAudioDetach.set(ws, attached.value.detach);
+		ws.send(JSON.stringify({ type: "voiceAudioReady" }));
+	}
+
+	/**
+	 * One binary frame of browser mic PCM (concern 09) — mono 16 kHz `Float32`, unambiguous by
+	 * direction alone (this socket's only INBOUND binary meaning is mic audio; a text frame from a
+	 * client is simply ignored — this socket has no client-originated status vocabulary, only the
+	 * server's own `voiceAudioReady`/`voiceAudioError`). Malformed input (not a whole number of
+	 * `Float32` samples, or empty) is dropped silently, same discipline as every other untrusted wire
+	 * input in this class.
+	 */
+	private async handleVoiceAudioMessage(ws: ServerWebSocket<SocketData>, channelId: string, raw: string | Buffer): Promise<void> {
+		if (typeof raw === "string") return;
+		if (raw.length === 0 || raw.length % 4 !== 0) return;
+		// Copy defensively into a fresh, 4-byte-aligned buffer: `raw` may view a pooled ArrayBuffer at
+		// an offset `Float32Array` requires to be a multiple of 4, and the underlying allocation can be
+		// reused by the websocket implementation once this callback returns.
+		const copy = new Uint8Array(raw.length);
+		copy.set(raw);
+		const samples = new Float32Array(copy.buffer);
+		const actor = this.actorForSocket(ws);
+		const manager = await this.managerFor(actor);
+		if (!manager) return;
+		await manager.pushVoiceCallMicAudio(channelId, actor, samples);
 	}
 
 	// File mode has exactly one operator identity. Multiple tabs are socket sets for that operator,
@@ -1426,6 +1509,13 @@ export class SquadServer {
 				// socket warm so it doesn't 1006-drop and trigger the client's error/reconnect loop.
 				idleTimeout: 255,
 				open: async (ws) => {
+					// Concern 09: a completely separate wire vocabulary from the chat socket below — see
+					// `SocketData.voiceAudio`'s doc. Never joins `this.clients`/presence/roster; a browser's
+					// audio relay is not a chat participant.
+					if (ws.data.voiceAudio) {
+						await this.openVoiceAudioSocket(ws, ws.data.voiceAudio.channelId);
+						return;
+					}
 					const m = await this.registerSocket(ws);
 					const actor = this.actorForSocket(ws);
 					const agents = m ? await m.visibleAgents(actor) : [];
@@ -1435,8 +1525,19 @@ export class SquadServer {
 						if (commands?.length) ws.send(JSON.stringify({ type: "commands", id: a.id, commands } satisfies SquadEvent));
 					}
 				},
-				close: (ws) => this.unregisterSocket(ws),
+				close: (ws) => {
+					if (ws.data.voiceAudio) {
+						this.voiceAudioDetach.get(ws)?.();
+						this.voiceAudioDetach.delete(ws);
+						return;
+					}
+					this.unregisterSocket(ws);
+				},
 				message: async (ws, raw) => {
+					if (ws.data.voiceAudio) {
+						await this.handleVoiceAudioMessage(ws, ws.data.voiceAudio.channelId, raw);
+						return;
+					}
 					let parsed: unknown;
 					try {
 						parsed = JSON.parse(typeof raw === "string" ? raw : raw.toString());
@@ -1559,6 +1660,55 @@ export class SquadServer {
 			const upgraded = this.auth
 				? server.upgrade(req, { data: { id: ++this.sockSeq, role, orgId, userId, displayName, bootstrapAdmin } })
 				: server.upgrade(req, { data: { id: ++this.sockSeq, role, orgId, userId, displayName, bootstrapAdmin }, headers: { "Sec-WebSocket-Protocol": "ompsq-token" } });
+			if (upgraded) return undefined;
+			return new Response("websocket upgrade failed", { status: 426 });
+		}
+		// ── Voice call audio relay (concern 09: browser-audio-transport) ───────────────────────────
+		// A dedicated per-channel WS, deliberately separate from `/ws` above: audio is a high-frequency
+		// BINARY stream (mic PCM in, decoded speaker PCM out — PROTOCOL.md's "Browser audio transport"),
+		// not a `ClientCommand`/`SquadEvent` JSON exchange, and multiplexing it onto the chat socket
+		// would mean every text-frame consumer on that socket also has to learn to skip binary frames.
+		// Auth mirrors `/ws` EXACTLY (same session/bootstrap/role resolution) plus two gates `/ws` does
+		// not need: an explicit operator-tier floor (this endpoint's `restActionTier` rule in authz.ts —
+		// granting it is itself the mutating "drive the call" act, same tier as `steer`/mute/
+		// resolveDecision) and room membership (`canReadChannel`), both checked BEFORE the upgrade —
+		// unlike a REST 403, a WS upgrade cannot un-say a 101 after the fact, so there is nothing to gate
+		// downstream the way `/ws`'s own per-command tier check happens inside `applyCommand`.
+		const voiceCallAudioUpgradeMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/voice-call\/audio$/);
+		if (voiceCallAudioUpgradeMatch) {
+			if (this.dbMode && !this.originAllowed(req)) return new Response("forbidden origin", { status: 403 });
+			const channelId = decodeURIComponent(voiceCallAudioUpgradeMatch[1]!);
+			let role: Role | null;
+			let orgId: string | undefined;
+			let userId: string | undefined;
+			let displayName: string | undefined;
+			if (this.auth) {
+				if (this.loopbackBootstrapAdmin(req, server)) {
+					role = "admin";
+					if (this.singleManager) orgId = ROOT_FACTORY_ORG;
+				} else {
+					const session = await this.auth.api.getSession({ headers: req.headers });
+					if (session) {
+						role = await this.bridgeRole(req, session.session.activeOrganizationId);
+						orgId = session.session.activeOrganizationId ?? undefined;
+						userId = session.user.id;
+						displayName = session.user.name;
+					} else {
+						role = null;
+					}
+				}
+			} else {
+				role = resolveRole(req, this.authPolicy);
+			}
+			if (role === null) return new Response("unauthorized", { status: 401 });
+			if (!roleAtLeast(role, requiredRole("GET", url.pathname))) return new Response("forbidden", { status: 403 });
+			const actor = this.actorFromIdentity(role, orgId, userId, displayName);
+			const manager = await this.managerFor(actor);
+			if (!manager) return new Response("no fleet for this actor", { status: 404 });
+			if (!(await manager.canReadChannel(channelId, actor))) return new Response("forbidden", { status: 403 });
+			const upgraded = this.auth
+				? server.upgrade(req, { data: { id: ++this.sockSeq, role, orgId, userId, displayName, voiceAudio: { channelId } } })
+				: server.upgrade(req, { data: { id: ++this.sockSeq, role, orgId, userId, displayName, voiceAudio: { channelId } }, headers: { "Sec-WebSocket-Protocol": "ompsq-token" } });
 			if (upgraded) return undefined;
 			return new Response("websocket upgrade failed", { status: 426 });
 		}

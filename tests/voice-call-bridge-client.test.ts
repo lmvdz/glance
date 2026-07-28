@@ -11,7 +11,7 @@ import { VoiceCallBridgeClient, type BridgeSocketLike } from "../src/voice-call-
 class FakeSocket implements BridgeSocketLike {
 	closed = false;
 	onopen: (() => void) | null = null;
-	onmessage: ((ev: { data: string }) => void) | null = null;
+	onmessage: ((ev: { data: string | ArrayBuffer | Uint8Array }) => void) | null = null;
 	onclose: (() => void) | null = null;
 	onerror: ((ev: unknown) => void) | null = null;
 	send(): void {}
@@ -24,6 +24,15 @@ class FakeSocket implements BridgeSocketLike {
 	fireClose(): void {
 		this.onclose?.();
 	}
+}
+
+/** Copies a byte view into a fresh, 4-byte-aligned buffer so it can be safely read as `Float32Array`
+ *  — `subarray(1)` (stripping a 1-byte tag) shifts the byte offset by 1, which `Float32Array`'s
+ *  constructor rejects as unaligned regardless of the view's total length. */
+function asFloat32(bytes: Uint8Array): Float32Array {
+	const aligned = new Uint8Array(bytes.length);
+	aligned.set(bytes);
+	return new Float32Array(aligned.buffer);
 }
 
 interface FakeDecision {
@@ -243,5 +252,109 @@ describe("unauthenticated controls", () => {
 		expect(() => client.stop()).not.toThrow();
 		expect(() => client.toggleMute()).not.toThrow();
 		client.close();
+	});
+});
+
+describe("browser audio transport (concern 09) — binary frames alongside the JSON control protocol", () => {
+	/** A fake bridge that also understands the two binary audio tags — `0x01` (mic, client→bridge,
+	 *  echoed back verbatim as a `0x02` output frame so the test can observe the round trip) and
+	 *  records every raw binary frame it received. */
+	function startFakeAudioBridge(sessionId: string) {
+		const received: Uint8Array[] = [];
+		const sockets = new Set<{ send(data: string | Uint8Array): void }>();
+		const server = Bun.serve({
+			port: 0,
+			hostname: "127.0.0.1",
+			fetch(req, srv) {
+				if (srv.upgrade(req)) return undefined;
+				return new Response("ws only", { status: 426 });
+			},
+			websocket: {
+				open(ws) {
+					sockets.add(ws as unknown as { send(data: string | Uint8Array): void });
+					ws.send(JSON.stringify({ v: 1, sessionId, seq: 0, type: "hello", canResolve: true }));
+				},
+				message(ws, message) {
+					if (typeof message === "string") return; // this fake only exercises the binary path
+					const bytes = new Uint8Array(message.buffer, message.byteOffset, message.byteLength);
+					received.push(bytes.slice()); // detach from the (possibly pooled) underlying buffer
+					if (bytes[0] !== 0x01) return; // only the client's own mic tag gets echoed back
+					const echoed = new Uint8Array(bytes.length);
+					echoed[0] = 0x02; // re-tagged as the server→client output-audio tag
+					echoed.set(bytes.subarray(1), 1);
+					ws.send(echoed);
+				},
+				close(ws) {
+					sockets.delete(ws as unknown as { send(data: string | Uint8Array): void });
+				},
+			},
+		});
+		return {
+			url: `ws://127.0.0.1:${server.port}`,
+			received,
+			stop: () => server.stop(true),
+		};
+	}
+
+	test("sendMicAudio tags the frame 0x01 and carries the exact Float32 bytes sent", async () => {
+		const bridge = startFakeAudioBridge("live-audio-1");
+		cleanups.push(bridge.stop);
+		const client = new VoiceCallBridgeClient({ url: bridge.url });
+		await client.connect();
+		const samples = new Float32Array([0.1, -0.2, 0.3, -0.4]);
+		client.sendMicAudio(samples);
+		await new Promise((r) => setTimeout(r, 100));
+		expect(bridge.received).toHaveLength(1);
+		expect(bridge.received[0]?.[0]).toBe(0x01);
+		const payload = bridge.received[0]?.subarray(1) ?? new Uint8Array();
+		expect(asFloat32(payload)).toEqual(samples);
+		client.close();
+	});
+
+	test("a 0x02-tagged inbound frame reaches onAudioFrame with the tag byte stripped", async () => {
+		const bridge = startFakeAudioBridge("live-audio-2");
+		cleanups.push(bridge.stop);
+		const frames: Uint8Array[] = [];
+		const client = new VoiceCallBridgeClient({ url: bridge.url, onAudioFrame: (bytes) => frames.push(bytes) });
+		await client.connect();
+		client.sendMicAudio(new Float32Array([0.5, -0.5])); // the fake bridge echoes this back re-tagged 0x02
+		await new Promise((r) => setTimeout(r, 100));
+		expect(frames).toHaveLength(1);
+		expect(asFloat32(frames[0]!)).toEqual(new Float32Array([0.5, -0.5]));
+		client.close();
+	});
+
+	test("audio frames and JSON control frames coexist on the same socket without disturbing each other", async () => {
+		const bridge = startFakeAudioBridge("live-audio-3");
+		cleanups.push(bridge.stop);
+		const frames: Uint8Array[] = [];
+		const client = new VoiceCallBridgeClient({ url: bridge.url, onAudioFrame: (bytes) => frames.push(bytes) });
+		await client.connect();
+		client.sendMicAudio(new Float32Array([0.25]));
+		expect(() => client.toggleMute()).not.toThrow(); // a JSON control frame, interleaved
+		client.sendMicAudio(new Float32Array([0.75]));
+		await new Promise((r) => setTimeout(r, 100));
+		expect(frames).toHaveLength(2); // both mic frames echoed back as output-audio frames
+		expect(bridge.received.filter((b) => b[0] === 0x01)).toHaveLength(2);
+		client.close();
+	});
+
+	test("a malformed inbound binary frame (wrong tag, or too short to carry a tag at all) never reaches onAudioFrame, never throws", async () => {
+		const frames: Uint8Array[] = [];
+		const socket = new FakeSocket();
+		const client = new VoiceCallBridgeClient({ url: "ws://fake", connect: () => socket, onAudioFrame: (bytes) => frames.push(bytes) });
+		const pending = client.connect();
+		socket.onmessage?.({ data: JSON.stringify({ v: 1, sessionId: "s1", seq: 0, type: "hello", canResolve: true }) });
+		await pending;
+		expect(() => socket.onmessage?.({ data: new Uint8Array([0x01, 9, 9, 9]) })).not.toThrow(); // the client's OWN outbound tag, arriving inbound
+		expect(() => socket.onmessage?.({ data: new Uint8Array([0x02]) })).not.toThrow(); // right tag, no payload at all
+		expect(() => socket.onmessage?.({ data: new Uint8Array(0) })).not.toThrow(); // empty frame
+		expect(frames).toHaveLength(0);
+		client.close();
+	});
+
+	test("sendMicAudio throws before connect(), exactly like the JSON controls do", () => {
+		const client = new VoiceCallBridgeClient({ url: "ws://fake" });
+		expect(() => client.sendMicAudio(new Float32Array([0.1]))).toThrow();
 	});
 });
