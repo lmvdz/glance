@@ -232,7 +232,11 @@ function terminalReasonDetail(reason: VoiceCallTerminalReason | undefined, termi
 		case "start-failed":
 			return "The call could not be started.";
 		case "idle":
-			return "The call ended after sitting idle for 10 minutes with no one speaking.";
+			// Duration-free deliberately: the idle-hangup window is env-overridable
+			// (OMP_COVEN_IDLE_HANGUP_MS) and this record does not carry the value that
+			// was actually configured for this call, so naming a fixed number here
+			// would drift from reality the moment an operator changes it.
+			return "The call ended after sitting idle with no one speaking.";
 		default:
 			return "Ended.";
 	}

@@ -181,7 +181,10 @@ describe('call phase chrome', () => {
   // shape as an operator ending it — not a surprise the status region should raise.
   test('the idle-hangup policy ending the call is honest, and not "unexpected"', () => {
     expect(terminalReasonCopy('idle')).toContain('idle');
-    expect(terminalReasonCopy('idle')).toContain('10 minutes');
+    // Duration-free deliberately (concern-05 review, minor 2): the window is
+    // env-overridable and this record does not carry the configured value, so
+    // the copy must not promise a fixed number it cannot back up.
+    expect(terminalReasonCopy('idle')).not.toMatch(/\d+ minutes?/);
     expect(endedUnexpectedly(binding({ state: 'ended', terminalReason: 'idle' }))).toBe(false);
   });
 });
