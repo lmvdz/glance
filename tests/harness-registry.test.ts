@@ -427,6 +427,48 @@ test("harnessTierInfo truth table: verified×detected 2×2 including the verifie
 	});
 });
 
+test("harnessTierInfo/binResolvable: a thin daemon PATH still finds a harness binary sitting in a well-known install dir (post-ship harness-dropdown fix)", async () => {
+	// Reproduces the bare-nohup-respawn failure mode directly: HOME points at a fixture user whose
+	// ~/.local/bin holds the harness binary, but PATH is deliberately thin (no ~/.local/bin entry at
+	// all) — the exact shape of a daemon respawned via `nohup omp-squad up &` from a non-interactive
+	// shell that never sourced the user's profile.
+	const home = await fs.mkdtemp(path.join(os.tmpdir(), "harness-wellknown-home-"));
+	tmps.push(home);
+	const localBin = path.join(home, ".local", "bin");
+	await fs.mkdir(localBin, { recursive: true });
+	const fake = path.join(localBin, "definitely-not-on-a-thin-path-xyz");
+	await fs.writeFile(fake, "#!/bin/sh\necho hi\n");
+	await fs.chmod(fake, 0o755);
+
+	stashEnv("HOME", "PATH");
+	process.env.HOME = home;
+	process.env.PATH = "/usr/bin:/bin"; // deliberately thin — no ~/.local/bin entry
+
+	withHarnessOverride("gemini", { verified: true, bin: "definitely-not-on-a-thin-path-xyz", acpCommand: ["definitely-not-on-a-thin-path-xyz", "--acp"] }, () => {
+		_resetHarnessTierCacheForTests();
+		const info = harnessTierInfo(getHarness("gemini")!);
+		expect(info.binDetected).toBe(true);
+		expect(info.alert).toBeUndefined();
+	});
+	_resetHarnessTierCacheForTests();
+});
+
+test("harnessTierInfo/binResolvable: a binary that is genuinely absent (even from every well-known dir) still reports not-detected — the fallback does not manufacture false positives", async () => {
+	const home = await fs.mkdtemp(path.join(os.tmpdir(), "harness-wellknown-absent-home-"));
+	tmps.push(home);
+	stashEnv("HOME", "PATH");
+	process.env.HOME = home;
+	process.env.PATH = "/usr/bin:/bin";
+
+	withHarnessOverride("gemini", { verified: true, bin: "truly-nowhere-on-this-machine-xyz", acpCommand: ["truly-nowhere-on-this-machine-xyz", "--acp"] }, () => {
+		_resetHarnessTierCacheForTests();
+		const info = harnessTierInfo(getHarness("gemini")!);
+		expect(info.binDetected).toBe(false);
+		expect(info.alert).toMatch(/not found on the daemon PATH/);
+	});
+	_resetHarnessTierCacheForTests();
+});
+
 test("resolveSpawnBin: acp harnesses resolve their acpCommand[0] (e.g. npx), never the bare descriptor bin unconditionally for a differently-shelled adapter", () => {
 	expect(resolveSpawnBin(getHarness("omp")!)).toBe("omp"); // omp-rpc → resolveBin
 	expect(resolveSpawnBin(getHarness("codex")!)).toBe("npx"); // acp, npx-shelled — real launch argv[0]
