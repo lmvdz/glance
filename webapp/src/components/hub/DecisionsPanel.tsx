@@ -1,4 +1,3 @@
-import React from 'react';
 import type { Task, TaskDecision } from '../../types';
 import { parseEvidenceAnchor } from '../../lib/intervene';
 import {
@@ -84,31 +83,37 @@ function DecisionRow({ decision, historical, now }: { decision: TaskDecision; hi
   );
 }
 
+/**
+ * A superseded decision must stay reachable — find-in-page, a screen reader, anyone scrolling —
+ * whether or not the disclosure has been opened. A `useState`-gated `{open ? rows : null}` (the
+ * first cut of this) does the opposite: closed, the historical rows are not merely styled as
+ * hidden, they are absent from the tree entirely, which makes "superseded, never deleted" a lie
+ * the moment the panel renders collapsed. Native `<details>`/`<summary>` — the same pattern
+ * `ToolCallGroup.tsx`'s raw-payload disclosure already uses — keeps every child in the DOM
+ * regardless of the `open` attribute; only CSS visibility changes. Below `SUPERSEDED_INLINE_MAX`
+ * there's nothing to collapse, so history renders inline with no disclosure at all.
+ */
 function SupersededHistory({ decisions, now }: { decisions: TaskDecision[]; now: number }) {
-  const [open, setOpen] = React.useState(false);
   if (decisions.length === 0) return null;
 
-  const collapse = shouldCollapseSuperseded(decisions.length);
   const rows = decisions.map((decision) => <DecisionRow key={decision.id} decision={decision} historical now={now} />);
 
-  if (!collapse) {
+  if (!shouldCollapseSuperseded(decisions.length)) {
     return <div className="mt-1 flex flex-col">{rows}</div>;
   }
 
   return (
-    <div className="mt-1">
-      <button
-        type="button"
-        onClick={() => setOpen((value) => !value)}
-        className="flex w-full items-baseline gap-2 py-1.5 text-left"
+    <details className="group mt-1">
+      <summary
+        className="flex w-full cursor-pointer list-none items-baseline gap-2 py-1.5"
         style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.1em', color: '#5A5A61' }}
       >
-        <span>{open ? 'hide' : 'show'} {decisions.length} superseded decision{decisions.length === 1 ? '' : 's'}</span>
+        <span>{decisions.length} superseded decision{decisions.length === 1 ? '' : 's'}</span>
         <span className="flex-1" />
-        <span style={{ color: '#4A4A52' }}>{open ? '▾' : '▸'}</span>
-      </button>
-      {open ? <div className="flex flex-col">{rows}</div> : null}
-    </div>
+        <span className="transition-transform group-open:rotate-90" style={{ color: '#4A4A52' }}>▸</span>
+      </summary>
+      <div className="flex flex-col">{rows}</div>
+    </details>
   );
 }
 

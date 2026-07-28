@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import type { TaskDecision } from '../types';
 import {
   splitDecisions,
+  isSuperseded,
   shouldCollapseSuperseded,
   SUPERSEDED_INLINE_MAX,
   decisionSourceLabel,
@@ -46,6 +47,51 @@ describe('splitDecisions', () => {
 
   it('returns empty groups for an empty ledger', () => {
     expect(splitDecisions([])).toEqual({ current: [], superseded: [] });
+  });
+
+  // Invariant I2: the split is a partition, never a filter that can lose or duplicate a decision.
+  it('partitions every seeded decision exactly once across current+superseded — nothing dropped, nothing duplicated (I2)', () => {
+    const decisions = [
+      decision({ id: 'a' }),
+      decision({ id: 'b', supersededBy: 'z' }),
+      decision({ id: 'c', createdAt: 5 }),
+      decision({ id: 'd', supersededBy: 'a', createdAt: 1 }),
+      decision({ id: 'e', supersededBy: '' }),
+    ];
+    const { current, superseded } = splitDecisions(decisions);
+    const seenIds = [...current, ...superseded].map((d) => d.id).sort();
+    expect(seenIds).toEqual(decisions.map((d) => d.id).sort());
+    expect(new Set(seenIds).size).toBe(decisions.length);
+  });
+
+  // Junk-graph safety: splitDecisions never resolves supersededBy against other decisions' ids, so a
+  // dangling or self-referential pointer can neither throw nor make the decision vanish.
+  it('does not throw and does not drop a decision whose supersededBy names an id that does not exist on the feature', () => {
+    const decisions = [decision({ id: 'orphan', supersededBy: 'ghost-id-not-on-this-feature', createdAt: 1 })];
+    expect(() => splitDecisions(decisions)).not.toThrow();
+    const { current, superseded } = splitDecisions(decisions);
+    expect(current).toHaveLength(0);
+    expect(superseded.map((d) => d.id)).toEqual(['orphan']);
+  });
+
+  it('does not throw and does not drop a decision with a self-referential supersededBy', () => {
+    const decisions = [decision({ id: 'self-ref', supersededBy: 'self-ref', createdAt: 1 })];
+    expect(() => splitDecisions(decisions)).not.toThrow();
+    const { current, superseded } = splitDecisions(decisions);
+    expect(current).toHaveLength(0);
+    expect(superseded.map((d) => d.id)).toEqual(['self-ref']);
+  });
+});
+
+describe('isSuperseded', () => {
+  it('treats undefined and empty-string supersededBy as NOT superseded', () => {
+    expect(isSuperseded({ supersededBy: undefined })).toBe(false);
+    expect(isSuperseded({ supersededBy: '' })).toBe(false);
+  });
+
+  it('treats any non-empty supersededBy as superseded, including a dangling or self-referential id', () => {
+    expect(isSuperseded({ supersededBy: 'some-id' })).toBe(true);
+    expect(isSuperseded({ supersededBy: 'ghost-id-not-on-this-feature' })).toBe(true);
   });
 });
 

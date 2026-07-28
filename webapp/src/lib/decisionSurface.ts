@@ -26,15 +26,29 @@ export interface DecisionSplit {
 
 const byRecency = (a: TaskDecision, b: TaskDecision) => (b.createdAt ?? -Infinity) - (a.createdAt ?? -Infinity);
 
+/** Named explicitly (blind-review hardening) rather than a bare `d.supersededBy` truthiness check
+ *  at each call site: an empty-string `supersededBy` must read as "not superseded", never as a
+ *  dangling/self-referential pointer that happens to be falsy-but-present. `Boolean(x?.length)`
+ *  makes that reading the same everywhere this predicate is used, not just where someone remembered. */
+export function isSuperseded(decision: Pick<TaskDecision, 'supersededBy'>): boolean {
+  return Boolean(decision.supersededBy?.length);
+}
+
 /**
  * Current decisions (no `supersededBy`) and superseded ones (history), each newest-first. A decision
  * with no `createdAt` (a record predating the field, or a plan-derived one) sinks to the end of its
  * group rather than being guessed into "just now" — an unknown age is not the same fact as a fresh one.
+ *
+ * Junk-graph safe by construction: this is a flat filter over `supersededBy`, never a lookup against
+ * other decisions' ids. A `supersededBy` that names a decision not present on the feature, or names
+ * itself, still marks the decision historical and it still appears exactly once in `superseded` —
+ * there is no id-resolution step that could throw on a dangling pointer or silently drop a self-
+ * referential one.
  */
 export function splitDecisions(decisions: readonly TaskDecision[]): DecisionSplit {
   return {
-    current: decisions.filter((d) => !d.supersededBy).sort(byRecency),
-    superseded: decisions.filter((d) => d.supersededBy).sort(byRecency),
+    current: decisions.filter((d) => !isSuperseded(d)).sort(byRecency),
+    superseded: decisions.filter((d) => isSuperseded(d)).sort(byRecency),
   };
 }
 
