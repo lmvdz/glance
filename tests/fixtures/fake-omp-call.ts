@@ -562,6 +562,14 @@ function writeFileSyncEmpty(filePath: string): void {
  */
 export class FakeOmpBroker implements BrokerClient {
 	readonly calls = new Map<string, { view: BrokerCallCreated; call: FakeOmpCall; exit: number | null }>();
+	/** Every callId `endCall` was asked to reap, in call order — including calls for a callId this
+	 *  broker never created (a real broker's `DELETE /calls/:id` 404s on those; this fixture just
+	 *  records the attempt and no-ops, matching `endCall`'s own "if (!entry) return" below). The
+	 *  coordinator's own orphan-reap fix (`VoiceCallCoordinator#reapBrokerCall`) is the thing under
+	 *  test here — this is the ONLY handle a test has on "did the daemon actually ask the broker to
+	 *  end this call", since `endCall`'s effect (marking `exit` and crashing the fake session) is
+	 *  otherwise indistinguishable from a broker-exit the daemon merely corroborated some other way. */
+	readonly reapedCallIds: string[] = [];
 	private seq = 0;
 	constructor(
 		private readonly journalDir: string,
@@ -603,6 +611,7 @@ export class FakeOmpBroker implements BrokerClient {
 	}
 
 	async endCall(callId: string): Promise<void> {
+		this.reapedCallIds.push(callId);
 		const entry = this.calls.get(callId);
 		if (!entry) return;
 		entry.exit = 0;
