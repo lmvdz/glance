@@ -508,6 +508,13 @@ export class VoiceCallCoordinator {
 		// generally more responsive: any record already on disk by now is picked up right away rather
 		// than waiting a full `journalPollIntervalMs`.
 		await rt.tailer.poll();
+		if (rt.ended) {
+			// That first poll can consume a terminal record from a session that died between spawn and
+			// attach (e.g. the speaker failed to open) — `endBinding` already ran the full teardown, so
+			// `rt.tailer` is gone. Report the ended binding honestly instead of resurrecting anything.
+			const ended = this.bindings.get(channelId);
+			return { ok: false, reason: `session ended before attach: ${ended?.terminalError ?? ended?.terminalReason ?? "terminal"}` };
+		}
 		rt.tailer.start();
 
 		try {
@@ -693,6 +700,11 @@ export class VoiceCallCoordinator {
 		// generally more responsive: any record already on disk by now is picked up right away rather
 		// than waiting a full `journalPollIntervalMs`.
 		await rt.tailer.poll();
+		if (rt.ended) {
+			// Same pre-attach terminal race as `startCall`: the rehydration poll itself may have
+			// consumed a terminal record and torn the runtime down. Nothing left to start.
+			return;
+		}
 		rt.tailer.start();
 		this.startLivenessProbe(channelId);
 	}
