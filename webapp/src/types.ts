@@ -12,6 +12,12 @@ export interface TaskDecision {
   createdAt?: number;
   /** Evidence anchors for a `source:"model-delta"` decision (repo-relative `file` or `file:start-end`). */
   evidence?: string[];
+  /** Ledger supersession (mirrors backend `FeatureDecision`, src/types.ts): "invalidate, never delete,
+   *  never coexist". `supersededBy` set ⇒ this decision is HISTORY, not current — it stays on the
+   *  record but a later decision replaced it. `supersedes` is the id this one itself replaced, if any. */
+  supersedes?: string;
+  supersededBy?: string;
+  supersededAt?: number;
 }
 
 export interface TaskRelationship {

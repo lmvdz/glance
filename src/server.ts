@@ -14,6 +14,7 @@ import { CONSOLE_SYSTEM_PROMPT } from "./console-prompt.ts";
 import { existsSync, readFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { randomUUID } from "node:crypto";
 import type { Server, ServerWebSocket } from "bun";
 import { Result } from "effect";
 import type { ArtifactCommentDTO, ClientCommand, CreateAgentOptions, FeatureCategory, FeatureCriterion, FeatureDecision, FeatureDTO, FeatureRelationship, FeatureStage, IssueRef, PlanAnnotationTarget, PlanRevisionCandidateState, PresenceSnapshot, SquadEvent } from "./types.ts";
@@ -52,6 +53,7 @@ import {
 	decodeBodyOrEmpty,
 	DiscardHeldSyncBodySchema,
 	FeatureAgentsLinkBodySchema,
+	FeatureDecisionSupersedeBodySchema,
 	FeatureAnswersBodySchema,
 	FeatureAutoBodySchema,
 	FeatureConcernsPatchBodySchema,
@@ -339,13 +341,21 @@ function featureCriteria(value: unknown): FeatureCriterion[] | undefined {
  * can never mint `model-delta` records, because those are only minted through
  * `squad_record_decision`'s evidence validation. (Model-deltas always live on persisted features —
  * `recordAgentDecision` adopts before writing — so `stored` is never missing for them.)
+ *
+ * Supersession-chain members (`supersedes`/`supersededBy` set) get ledger protection
+ * (blind-review finding): a STALE client that loaded the feature before a replacement was
+ * recorded PATCHes the full array back WITHOUT the replacement — omission-as-delete would then
+ * destroy the current decision while its predecessor stays stamped superseded-by-a-ghost,
+ * vanishing BOTH from projection. Chain members therefore survive omission (re-appended, stored
+ * order), and a SUPERSEDED entry is immutable like a model-delta — it is history, and history
+ * does not take text edits.
  * @substrate exported for tests only — the PATCH handler in this file is the one production caller;
  * the merge semantics above are exactly what tests/feature-decisions-merge.test.ts pins.
  */
 export function featureDecisions(value: unknown, stored: FeatureDecision[] | undefined): FeatureDecision[] | undefined {
 	if (!Array.isArray(value)) return undefined;
 	const byId = new Map((stored ?? []).map((d) => [d.id, d]));
-	return value.flatMap((item): FeatureDecision[] => {
+	const out = value.flatMap((item): FeatureDecision[] => {
 		if (!item || typeof item !== "object") return [];
 		const rec = item as Record<string, unknown>;
 		const id = typeof rec.id === "string" ? rec.id : undefined;
@@ -356,11 +366,21 @@ export function featureDecisions(value: unknown, stored: FeatureDecision[] | und
 		// was validated against the recording run's evidence anchors, and accepting a client text edit
 		// while keeping source/evidence/sourceRef would present a rewritten claim as run-validated —
 		// the exact fabricated-verification pattern the lane exists to prevent. A client may still
-		// DELETE one by omitting it; editing any other source's text stays allowed.
+		// DELETE one by omitting it (unless it is a supersession-chain member — see below); editing
+		// any other source's text stays allowed.
 		if (existing?.source === "model-delta") return [existing];
+		// Superseded entries are history: keep them verbatim, no text edits.
+		if (existing?.supersededBy) return [existing];
 		if (existing) return [{ ...existing, text }];
 		return [{ id, text, source: rec.source === "plan" || rec.source === "human" || rec.source === "agent" ? rec.source : "human", createdAt: typeof rec.createdAt === "number" ? rec.createdAt : undefined }];
 	});
+	// Ledger guard: chain members cannot be deleted by omission. Re-append any stored
+	// `supersedes`/`supersededBy` carrier the client's array dropped, in stored order.
+	const present = new Set(out.map((d) => d.id));
+	for (const d of stored ?? []) {
+		if (!present.has(d.id) && (d.supersededBy || d.supersedes)) out.push(d);
+	}
+	return out;
 }
 
 function featureRelationships(value: unknown): FeatureRelationship[] | undefined {
@@ -2376,7 +2396,21 @@ export class SquadServer {
 		}
 		if (url.pathname === "/api/workflows") return Response.json(workflowSnapshot(await manager.visibleAgents(actor), manager.capabilityWorkflowDefinitions()));
 		if (url.pathname === "/api/models") return Response.json({ models: mergeModelOptions(modelOptionsFromEnv(), await manager.modelOptions()) });
-		if (url.pathname === "/api/autonomy") return Response.json(await manager.autonomyState());
+		if (url.pathname === "/api/autonomy") return Response.json({ ...(await manager.autonomyState()), interrupt: manager.interruptState() });
+		// A person's verdict on being interrupted. The gate is only allowed to keep interrupting people
+		// because it is checked afterwards, and it can only be checked if saying so is one tap.
+		if (url.pathname === "/api/interrupt/review" && req.method === "POST") {
+			const body: unknown = await req.json().catch(() => null);
+			const record = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+			const id = typeof record.id === "string" ? record.id : "";
+			const worthIt = record.worthIt === true;
+			const because = typeof record.because === "string" ? record.because : "";
+			if (!id) return new Response("id required", { status: 400 });
+			// A verdict with no reason cannot correct the gate — leaving-the-app.ts says so on the
+			// field itself — but refusing the verdict outright would lose the signal entirely.
+			const ok = manager.reviewInterrupt(id, worthIt, because || (worthIt ? "worth it" : "not worth it"));
+			return ok ? Response.json({ ok: true }) : new Response("no such interruption", { status: 404 });
+		}
 		if (url.pathname === "/api/profiles") return Response.json({ profiles: manager.profiles() });
 		if (url.pathname === "/api/capabilities") return Response.json(manager.capabilities());
 		if (url.pathname === "/api/capability-audit") return Response.json({ audit: manager.capabilities().audit });
@@ -2482,6 +2516,33 @@ export class SquadServer {
 			if ("relationships" in body) patch.relationships = featureRelationships(body.relationships);
 			const pf = await manager.updateFeature(decodeURIComponent(mfpatch[1]), patch);
 			return pf ? Response.json(pf) : new Response("no such feature", { status: 404 });
+		}
+		// The human lane's supersession verb (LIVE-1 finding, research-long-horizon-agent-memory/
+		// EXPERIMENTS.md): PATCH deliberately drops a client `supersedes` (anti-forgery — a
+		// round-tripping UI must never mint stamps) and squad_record_decision is agent-tool-only,
+		// which left the ledger's core verb unreachable from the UI — where the only alternative was
+		// DELETE, exactly the verb the ledger forbids for chain members. This route goes through
+		// recordAgentDecision's single write rule, so the stamp is server-authored and atomic, and
+		// every conflict outcome maps to an explicit status instead of a silent drop.
+		const mfsupersede = url.pathname.match(/^\/api\/features\/([^/]+)\/decisions\/supersede$/);
+		if (mfsupersede && req.method === "POST") {
+			const decoded = decodeBody(FeatureDecisionSupersedeBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response("text and supersedes (decision id) required", { status: 400 });
+			const body = decoded.success;
+			const text = body.text.trim();
+			// Blind-review fix: an empty or bare-prefix `supersedes` would evaluate falsy in the write
+			// rule and silently degrade this into an unconditional append while the route advertises
+			// supersession. Normalize like the write path (accept a copied `decision:<id>`), then
+			// reject empty outright.
+			const supersedesId = body.supersedes.trim().replace(/^decision:/, "");
+			if (!text || !supersedesId) return new Response("text and supersedes (decision id) required", { status: 400 });
+			const decision: FeatureDecision = { id: randomUUID(), text, source: "human", createdAt: Date.now(), supersedes: supersedesId };
+			const outcome = await manager.recordAgentDecision(decodeURIComponent(mfsupersede[1]), decision, typeof body.repo === "string" ? body.repo : undefined);
+			if (outcome === "no-feature") return new Response("no such feature", { status: 404 });
+			if (outcome === "supersede-missing") return new Response(`supersedes target "${body.supersedes}" not found on this feature`, { status: 409 });
+			if (outcome === "supersede-superseded") return new Response(`decision "${body.supersedes}" was already superseded — supersede the current decision instead`, { status: 409 });
+			if (outcome === "duplicate") return new Response("an identical decision is already current — no change", { status: 409 });
+			return Response.json({ ok: true, decision });
 		}
 		if (mfpatch && req.method === "DELETE") {
 			const repo = url.searchParams.get("repo") ?? undefined;

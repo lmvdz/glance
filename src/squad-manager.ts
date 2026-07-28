@@ -114,7 +114,7 @@ import { evaluateCompliance, type ComplianceFinding } from "./compliance.ts";
 import { reapDeadSessions, releaseSession, sweepLeases } from "./leases.ts";
 import { agentActor, scopeFor } from "./agent-scope.ts";
 import { actorVisibleRepoSet, buildFabricSnapshot, loadScoutFacts, type FabricSnapshot } from "./fabric.ts";
-import { buildContextPrimer, searchFabric, type KbDocType } from "./fabric-search.ts";
+import { buildContextPrimer, classifyQueryShape, searchFabric, type KbDocType } from "./fabric-search.ts";
 import { sweepPresence, who } from "./presence.ts";
 import { harnessEventDecision } from "./harness-hooks.ts";
 import { adoptBranchName, adoptBrief, isSafeUntrackedPath, parseNulList } from "./adopt.ts";
@@ -247,6 +247,8 @@ import { NodeStore, compareActivity, type NodeState } from "./nodes.ts";
 import { ForgedCardError, assertAuthentic, projectsToRoom, type CardProvenance } from "./projection-classes.ts";
 import { coldStartLearningState } from "./unknowns.ts";
 import { RECOVERY_DELAY_MS, gateHealth, notificationText, readGateEvaluation, shouldLeaveTheApp, type GateEvaluation, type GateHealth, type WorthItReview } from "./leaving-the-app.ts";
+import { GateStore } from "./gate-store.ts";
+import { buildEvaluation } from "./gate-wiring.ts";
 import { assessReversal, costEventsFrom, shouldDiscloseCost, summariseCost, type CostSummary, type ReversalAssessment, type ReversalNode } from "./decision-impact.ts";
 import { NodeRecordStore, quoteRule, type NodeRecord, type InstructionReadbackRecord, type ObjectionRecord, type PlanMotionRecord } from "./node-records.ts";
 import { approveIrreversible, beginInstruction, overruleObjection, raiseObjection, recordObjectionOutcome, rejectIrreversible, type InstructionExecution } from "./instructions.ts";
@@ -398,6 +400,7 @@ const RECORD_DECISION_TOOL_DEF: HostToolDef = {
 	name: RECORD_DECISION_TOOL,
 	description:
 		'Record a consequential decision you made and WHY (an architecture choice, a tradeoff, an approach picked over an alternative) so future agents on this work inherit it instead of re-deciding it. Non-blocking — you keep working. Use SPARINGLY, only for genuinely load-bearing decisions, not routine steps.\n\n' +
+		'If your decision REVERSES or replaces a decision already in your context (from the cold-start primer or squad_kb_search), pass that decision\'s id as `supersedes` — the old decision is invalidated in the same write and stops reaching future agents, while staying on the record as history. NEVER record a contradicting decision without superseding: two live contradictory decisions is the exact failure this exists to prevent.\n\n' +
 		'ALSO, before you finish: if you changed how the system actually works (not just what code exists), set source:"model-delta" and record up to 3 such deltas — state what was true BEFORE and what is true NOW. Each model-delta entry REQUIRES `evidence`: one or more repo-relative files (or `file:start-end`) THIS RUN touched — an anchorless or made-up-file delta is rejected. Skip entirely when nothing architectural changed; an empty record is honest, slop is not.',
 	parameters: {
 		type: "object",
@@ -408,6 +411,10 @@ const RECORD_DECISION_TOOL_DEF: HostToolDef = {
 				type: "array",
 				items: { type: "string" },
 				description: 'Required when source is "model-delta": repo-relative file paths (or `file:start-end`) this run touched, each proving the delta. Ignored for a routine decision.',
+			},
+			supersedes: {
+				type: "string",
+				description: "Optional. The id of a prior decision on this work that this decision replaces or reverses. The prior decision is invalidated (kept as history, excluded from future agents' context).",
 			},
 		},
 		required: ["text"],
@@ -1144,6 +1151,8 @@ export class SquadManager extends EventEmitter {
 	 *  escalation, land-failure-streak, primer-empty) the rest of the learning loop is A/B'd against.
 	 *  Assigned in the constructor (needs stateDir). Never gates behavior — read-only observability. */
 	private readonly learningMetrics: LearningMetrics;
+	/** C5 miss-dedupe window (blind-review hardening): (agentId, normalized query) → last-recorded epoch ms. */
+	private readonly kbMissSeen = new Map<string, number>();
 	/** Per-repo epoch ms until which the cold-start primer is skipped, after a fabric read of THAT repo
 	 *  blew its budget. Per-repo, not global: one repo with thousands of receipts (or a Plane project
 	 *  behind a stalled fetch) must not silently mute priming for every other repo the daemon serves.
@@ -1208,6 +1217,18 @@ export class SquadManager extends EventEmitter {
 	/** Agent ids currently draining agent-host ring replay on reattach — transition()/setPending() apply
 	 *  the state change but record nothing, and maybeAutoSupervise is suppressed, until settling clears. */
 	private readonly settling = new Set<string>();
+	/**
+	 * The interrupt gate's durable record, and whether the gate is switched on at all.
+	 *
+	 * OFF by default. Sending a notification is the only thing this system does that can reach someone
+	 * who is not looking at it, and defaulting that to on — for every existing install, on upgrade,
+	 * without anyone asking — is exactly the move the gate exists to prevent. `GLANCE_INTERRUPT=1`
+	 * turns it on; web push additionally requires a device to have subscribed, so a person who has
+	 * never opted in still receives nothing.
+	 */
+	private gateStore?: GateStore;
+	private readonly interruptGateOn = envBoolAliased("GLANCE_INTERRUPT", "OMP_SQUAD_INTERRUPT", false);
+	private interruptLoop?: ReturnType<typeof setInterval>;
 	/** Resolvers awaiting concern 2's replay-completion marker frame from a reattached agent's host,
 	 *  keyed by agent id. Armed by attachExisting BEFORE agent.start() is called (a host that replays
 	 *  its whole ring inside the first socket read can emit the marker synchronously during start()'s
@@ -1748,6 +1769,19 @@ export class SquadManager extends EventEmitter {
 			}
 		}
 
+		// The interrupt gate. Off unless asked for — see `interruptGateOn`. The tick is a minute
+		// because the WAIT is the product: a decision made at minute zero is not the decision at
+		// minute nine, and re-deciding is how the delay earns its keep.
+		this.gateStore = new GateStore(path.join(this.stateDir, "interrupt-gate.jsonl"), (m) => this.log("warn", `interrupt-gate: ${m}`));
+		if (this.interruptGateOn) {
+			this.interruptLoop = setInterval(() => {
+				void this.considerInterrupting().catch((err) => this.log("warn", `interrupt tick: ${errText(err)}`));
+			}, 60_000);
+			this.log("info", `interrupt gate ON (three conditions, ${Math.round(RECOVERY_DELAY_MS / 60_000)}m wait, every send reviewed)`);
+		} else {
+			this.log("info", "interrupt gate off — nothing about work waiting on you leaves this app (GLANCE_INTERRUPT=1 to turn it on)");
+		}
+
 		// Resident planner (Epic 1) — the inverse of plan-sync: ingests plans/<name>/OBJECTIVE.md and
 		// maintains its concern-DAG against verified (DoneProof) state. Opt-IN ("=== 1", not "!== 0")
 		// unlike every loop above — it is an LLM-cost-bearing writer of source-tree files.
@@ -1951,6 +1985,8 @@ export class SquadManager extends EventEmitter {
 		for (const s of this.scouts.values()) s.stop();
 		for (const o of this.opportunities) o.stop();
 		for (const l of this.episodeLoops) l.stop();
+		// A timer that outlives the daemon keeps a dead process able to interrupt somebody.
+		if (this.interruptLoop) { clearInterval(this.interruptLoop); this.interruptLoop = undefined; }
 		for (const p of this.residentPlanners) p.stop();
 		clearInterval(this.leaseGossipTimer);
 		// Flush the attention store's debounced last-seen-map write (comprehension concern 01) — same
@@ -2159,7 +2195,7 @@ export class SquadManager extends EventEmitter {
 					// adopt never recorded lineage and followLineage's crash-spanning stitch never fired for it).
 					await this.closeOrphanedPending(dto.id, p);
 					// Give the cold-adopted plain unit its prior context back (surfacing only, no auto-prompt).
-					await this.surfaceResumeDigest(dto.id, p);
+					await this.surfaceResumeDigest(dto.id, p, snapshot.transcripts[p.id]);
 				})
 				.catch((err) => this.log("warn", `take over ${p.name} failed: ${String(err)}`));
 		}
@@ -2175,12 +2211,39 @@ export class SquadManager extends EventEmitter {
 	 *  never the new dto.id. Plain units only: a resuming workflow re-executes its checkpointed node
 	 *  and carries its own rollup, so it needs no prose digest injected. Best-effort — the whole body
 	 *  is caught (an unhandled rejection detached from the boot sequence would crash the Bun daemon). */
-	private async surfaceResumeDigest(newId: string, p: PersistedAgent): Promise<void> {
+	private async surfaceResumeDigest(newId: string, p: PersistedAgent, priorTranscript?: TranscriptEntry[]): Promise<void> {
 		if (p.kind === "workflow") return;
 		try {
 			const rec = this.agents.get(newId);
 			if (!rec) return;
-			const digest = await readDigest(this.stateDir, p.id);
+			// Orphaned-run reconstruction (C3/E_orphan, plans/research-long-horizon-agent-memory):
+			// finalizeRun covers every exit INSIDE a living daemon, so the one orphan window left is
+			// the daemon itself dying mid-run — the interrupted run wrote no receipt and no digest,
+			// and the digest on disk (if any) describes the PREVIOUS finalized run. Detector,
+			// machine-checkable: persisted-transcript activity NEWER than the last finalized receipt
+			// means an unfinalized tail. Rebuild the digest from the persisted exhaust (buildDigest is
+			// pure and idempotent — harness G08) and MARK it reconstructed, so it reads as evidence,
+			// not self-report. Raw exhaust stays untouched; only the derived view is rebuilt (the
+			// battle-tested shape in mnemosyne's sleep() path — research-mnemosyne/BRIEF.md).
+			// Detector (blind-review corrected): compare only AGENT-AUTHORED activity (user/assistant
+			// turns) against the last finalized receipt. finalizeRun writes the receipt and THEN emits
+			// its token-burn system entry, so a raw max-over-all-entries comparison marks every cleanly
+			// finalized run as orphaned — the false-positive the first cut shipped and its fixture hid.
+			// Manager-authored system entries are bookkeeping, never evidence of an unfinalized turn.
+			let digest = "";
+			const agentAuthored = (priorTranscript ?? []).filter((e) => e.kind === "user" || e.kind === "assistant");
+			const lastTs = agentAuthored.length ? Math.max(...agentAuthored.map((e) => e.ts ?? 0)) : 0;
+			if (lastTs > 0) {
+				const receipts = await readReceipts(this.stateDir, p.id).catch(() => [] as RunReceipt[]);
+				const lastFinalized = receipts.length ? Math.max(...receipts.map((r) => r.endedAt ?? 0)) : 0;
+				if (lastTs > lastFinalized) {
+					const md = buildDigest({ transcript: priorTranscript ?? [], receipts });
+					digest =
+						"> ⚠ RECONSTRUCTED post-mortem — the final run never finalized (the daemon died mid-run). Rebuilt at adopt time from the persisted transcript and receipts: evidence, not self-report.\n\n" + md;
+					await writeDigest(this.stateDir, p.id, digest).catch((err) => this.log("warn", `reconstructed digest write for ${p.name} failed: ${String(err)}`));
+				}
+			}
+			if (!digest) digest = await readDigest(this.stateDir, p.id);
 			if (!digest) return;
 			this.append(rec, "system", "📒 Resume digest — prior session memory:\n" + fenceUntrusted("resume digest", digest));
 			this.emitAgent(rec);
@@ -3424,16 +3487,55 @@ export class SquadManager extends EventEmitter {
 	 * feature's CURRENT decisions at write time and appends in one synchronous step — no stale
 	 * read-modify-write over a client snapshot, so concurrent agent captures can't clobber each other.
 	 * De-dupes on normalized text. Returns the outcome so the caller can tell the agent what happened.
+	 *
+	 * Supersession (plans/research-long-horizon-agent-memory — "recurrence promotes, contradiction
+	 * supersedes"): when `decision.supersedes` names a prior decision on the feature, this write
+	 * stamps that target's `supersededBy`/`supersededAt` in the SAME atomic step that appends the
+	 * new decision — one current assertion per subject, the loser invalidated-not-deleted and kept
+	 * addressable as history. Two rules with teeth:
+	 * - the text de-dupe considers only CURRENT (non-superseded) decisions, so re-asserting a fact
+	 *   that was later reversed (A→B→A) is legal ledger history, not a silent no-op;
+	 * - superseding an already-superseded target is rejected — supersede the current decision, not
+	 *   a historical one (prevents forked "current" chains under concurrent writers).
+	 *
+	 * Concurrency: the check-and-write below is one synchronous block over the STORE-RESIDENT
+	 * feature object, re-resolved after the only await (the adopt path), and adoptDerivedFeature
+	 * itself re-checks the store before setting — so two near-simultaneous captures serialize on
+	 * the same object instead of one silently clobbering the other's adopt.
 	 */
-	async recordAgentDecision(featureId: string, decision: FeatureDecision, repo?: string): Promise<"recorded" | "duplicate" | "no-feature"> {
-		const pf = this.featureStore.get(featureId) ?? (await this.adoptDerivedFeature(featureId, repo));
-		if (!pf) return "no-feature";
+	async recordAgentDecision(
+		featureId: string,
+		decision: FeatureDecision,
+		repo?: string,
+	): Promise<"recorded" | "duplicate" | "no-feature" | "supersede-missing" | "supersede-superseded"> {
+		// After the adopt await, re-resolve from the store: adoptDerivedFeature's own race guard
+		// guarantees the store-resident object wins, and every read below must be against THAT
+		// object, in the synchronous block, or a concurrent capture could be checked against a
+		// stale copy.
+		const adopted = this.featureStore.get(featureId) ?? (await this.adoptDerivedFeature(featureId, repo));
+		if (!adopted) return "no-feature";
+		const pf = this.featureStore.get(featureId) ?? adopted;
+		// Agents copy decision ids from kb-search output, where they render as `decision:<id>` doc
+		// ids — accept that form rather than bouncing a correct reference (blind-review finding:
+		// a false refusal here steered agents toward recording WITHOUT supersedes, the exact
+		// two-live-currents failure this path exists to prevent).
+		if (decision.supersedes?.startsWith("decision:")) decision = { ...decision, supersedes: decision.supersedes.slice("decision:".length) };
 		const norm = (s: string): string => s.replace(/\s+/g, " ").trim().toLowerCase();
 		const target = norm(decision.text);
 		const existing = pf.decisions ?? [];
-		if (existing.some((d) => norm(d.text) === target)) return "duplicate";
-		pf.decisions = [...existing, decision];
-		pf.updatedAt = Date.now();
+		if (existing.some((d) => !d.supersededBy && norm(d.text) === target)) return "duplicate";
+		let superseded: FeatureDecision | undefined;
+		if (decision.supersedes) {
+			superseded = existing.find((d) => d.id === decision.supersedes);
+			if (!superseded) return "supersede-missing";
+			if (superseded.supersededBy) return "supersede-superseded";
+		}
+		const now = Date.now();
+		pf.decisions = [
+			...existing.map((d) => (superseded && d.id === superseded.id ? { ...d, supersededBy: decision.id, supersededAt: now } : d)),
+			decision,
+		];
+		pf.updatedAt = now;
 		this.emitFeaturesChanged();
 		return "recorded";
 	}
@@ -3627,6 +3729,13 @@ export class SquadManager extends EventEmitter {
 			createdAt: now,
 			updatedAt: now,
 		};
+		// Adopt race guard (blind-review finding): two concurrent callers can both miss the store,
+		// then both reach here after their awaits. Whoever set second would clobber the first
+		// caller's freshly-adopted object — and any decision the first caller had already recorded
+		// onto it would be silently lost while its tool reply said "recorded". The store-resident
+		// object always wins; the loser's derived copy is discarded unused.
+		const raced = this.featureStore.get(pf.id);
+		if (raced) return raced;
 		this.featureStore.set(pf.id, pf);
 		for (const agentId of found.agentIds) {
 			const rec = this.agents.get(agentId);
@@ -4007,6 +4116,93 @@ export class SquadManager extends EventEmitter {
 	/** How often the fleet has interrupted anyone, and whether they thought it was worth it. */
 	notificationHealth(evaluations: readonly GateEvaluation[], reviews: readonly WorthItReview[]): GateHealth {
 		return gateHealth(evaluations, reviews);
+	}
+
+	/**
+	 * What may reach a person who is not looking at the room — reported honestly, including the part
+	 * that is not built.
+	 *
+	 * `mayLeaveTheApp` is called by its own test and by nothing in production: no needs-you ever
+	 * consults this gate, and the only thing that leaves this app is the weekly brief. Reporting
+	 * `sent: 0` without saying so would be the worst kind of true — a reader would take it as a gate
+	 * that considered and declined, when it is a gate nothing asks. `wired` is what makes those two
+	 * distinguishable on screen.
+	 *
+	 * It is derived, not configured: `wired` is false because there is no call site, and it becomes
+	 * true by wiring one, not by editing a flag.
+	 */
+	interruptState(): { wired: boolean; leaves: string[]; recoveryDelayMs: number; health?: GateHealth; awaitingReview?: Array<{ id: string; question: string; sentAt: number }> } {
+		const leaves: string[] = [];
+		if (envBoolAliased("GLANCE_EPISODE", "OMP_SQUAD_EPISODE", true)) leaves.push("the weekly brief");
+		const wired = this.interruptGateOn;
+		if (wired) leaves.push("a question that passes all three conditions");
+		const store = this.gateStore;
+		if (!store) return { wired, leaves, recoveryDelayMs: RECOVERY_DELAY_MS };
+		return {
+			wired,
+			leaves,
+			recoveryDelayMs: RECOVERY_DELAY_MS,
+			health: gateHealth(store.evaluations(), store.reviews()),
+			awaitingReview: store.awaitingReview().map((evaluation) => ({ id: evaluation.id, question: evaluation.question, sentAt: evaluation.sentAt ?? 0 })),
+		};
+	}
+
+	/**
+	 * Consider every stopped unit, and interrupt somebody only if all three conditions and the wait
+	 * hold. Runs on a tick because the WAIT is the point: the decision at minute zero is not the
+	 * decision at minute nine, and most things that look blocking at zero are gone by nine.
+	 *
+	 * Every pass records, including the ones that decline. A gate that only records what it sent
+	 * cannot be audited for what it suppressed, and suppression is the direction nobody notices.
+	 */
+	async considerInterrupting(now = Date.now()): Promise<void> {
+		const store = this.gateStore;
+		if (!store || !this.interruptGateOn) return;
+		const fleet = this.list().map((agent) => ({ id: agent.id, status: agent.status }));
+		const rules = (await this.autonomyState().catch(() => undefined))?.rules ?? [];
+		const settling = rules.map((rule) => ({ sentence: rule.sentence, settles: rule.settles }));
+		const live = new Set<string>();
+
+		for (const agent of this.list()) {
+			for (const request of agent.pending ?? []) {
+				if (!isRoomWorthyPending(request)) continue;
+				const evaluation = buildEvaluation({ request, agent, fleet, rules: settling, nodeId: agent.id, now });
+				live.add(evaluation.id);
+				store.put(evaluation);
+			}
+		}
+
+		for (const evaluation of store.evaluations()) {
+			if (evaluation.sentAt !== undefined || evaluation.cancelledAt !== undefined) continue;
+			// The question went away during the wait. That is the delay doing its job, and it is
+			// recorded as such rather than silently dropped — it is the gate's best evidence about
+			// itself.
+			if (!live.has(evaluation.id)) {
+				store.markCancelled(evaluation.id, now, "it was answered or the unit moved on before anyone was interrupted");
+				continue;
+			}
+			const decision = shouldLeaveTheApp(evaluation, now);
+			if (!decision.send) continue;
+			try {
+				const push = new PushService(this.stateDir);
+				await push.init();
+				await push.notify({ title: "glance", body: notificationText(evaluation), url: `/#/agent/${evaluation.nodeId}?push=1`, tag: `gate:${evaluation.id}` });
+				// Marked sent only AFTER the send resolves: marking first would lose the notification
+				// on a failure and record that somebody was told when they were not.
+				store.markSent(evaluation.id, now);
+				this.log("info", `interrupt sent: ${evaluation.question}`);
+			} catch (err) {
+				this.log("warn", `interrupt could not be sent, leaving it eligible: ${errText(err)}`);
+			}
+		}
+	}
+
+	/** A person's verdict on being interrupted. A gate whose sends are never reviewed drifts. */
+	reviewInterrupt(evaluationId: string, worthIt: boolean, because: string, now = Date.now()): boolean {
+		const store = this.gateStore;
+		if (!store?.get(evaluationId)) return false;
+		store.review({ evaluationId, reviewedAt: now, worthIt, because });
+		return true;
 	}
 
 	/** How long the fleet gets to recover before anyone is interrupted. */
@@ -11325,9 +11521,30 @@ export class SquadManager extends EventEmitter {
 		try {
 			const snapshot = await this.fabric(agentActor(rec.dto.id), { repos: [rec.dto.repo], includeLeases: true });
 			const results = searchFabric(snapshot, query, { topK, type });
+			// Decision hits surface their real FeatureDecision id (doc id = `decision:<id>`, see
+			// fabricDocuments) so an agent recording a reversal can pass it as `supersedes` — the id an
+			// agent can see must be the id the write path accepts.
 			const body = results.length
-				? results.map((r) => `- [${r.type}] ${r.title}\n  ${r.snippet}${r.repo ? `\n  (${r.repo})` : ""}`).join("\n")
+				? results.map((r) => `- [${r.type}] ${r.title}${r.type === "decision" && r.id.startsWith("decision:") ? ` (id: ${r.id.slice("decision:".length)})` : ""}\n  ${r.snippet}${r.repo ? `\n  (${r.repo})` : ""}`).join("\n")
 				: "No matching context in the knowledge base.";
+			// C5 passive miss counter (VALIDATION.md): every zero-result search is logged with its
+			// query REGIME — the dense-retrieval question is decided by the semantic-gap share of
+			// these, never by aggregate volume. Recording is fire-and-forget (record never throws).
+			// Blind-review hardening: the query is REDACTED before it persists (agents paste
+			// anything into searches, and the metrics spool is durable JSONL — the first free-text
+			// learning metric must not become a secret sink), tagged with the agent for attribution,
+			// and deduped per (agent, normalized query) in a 10-minute window so one retry-looping
+			// agent cannot swamp the regime share the C5 kill criterion keys on.
+			if (results.length === 0) {
+				const dedupeKey = `${rec.dto.id}:${query.replace(/\s+/g, " ").trim().toLowerCase()}`;
+				const now = Date.now();
+				const last = this.kbMissSeen.get(dedupeKey);
+				if (!last || now - last > 10 * 60_000) {
+					if (this.kbMissSeen.size > 500) this.kbMissSeen.clear(); // crude bound; dedupe is best-effort
+					this.kbMissSeen.set(dedupeKey, now);
+					this.learningMetrics.record("kb-retrieval-miss", 1, { shape: classifyQueryShape(query), agentId: rec.dto.id, query: redact(truncateLabel(query, 120)) });
+				}
+			}
 			rec.agent.respondHostTool(call.id, body);
 			this.append(rec, "system", `🔎 ${KB_SEARCH_TOOL}("${truncateLabel(query, 80)}") → ${results.length} result${results.length === 1 ? "" : "s"}`, {
 				status: "ok",
@@ -11397,9 +11614,10 @@ export class SquadManager extends EventEmitter {
 			const args = call.arguments && typeof call.arguments === "object" ? (call.arguments as Record<string, unknown>) : {};
 			const text = typeof args.text === "string" ? args.text.trim() : "";
 			if (!text) {
-				rec.agent.respondHostTool(call.id, `usage: ${RECORD_DECISION_TOOL}({ text: string, source?: "model-delta", evidence?: string[] })`, true);
+				rec.agent.respondHostTool(call.id, `usage: ${RECORD_DECISION_TOOL}({ text: string, source?: "model-delta", evidence?: string[], supersedes?: string })`, true);
 				return;
 			}
+			const supersedes = typeof args.supersedes === "string" && args.supersedes.trim() ? args.supersedes.trim() : undefined;
 			const isModelDelta = args.source === "model-delta";
 			const evidence = Array.isArray(args.evidence) ? args.evidence.filter((e): e is string => typeof e === "string" && e.trim().length > 0) : undefined;
 			const featureId = rec.dto.featureId;
@@ -11429,6 +11647,7 @@ export class SquadManager extends EventEmitter {
 				// jump, PR-body anchors) keys on the STORED string — a raw "./src/x.ts" would silently
 				// no-op them all.
 				...(isModelDelta ? { evidence: (evidence ?? []).map((e) => e.trim().replace(/^\.\//, "").replace(/^\/+/, "")) } : {}),
+				...(supersedes ? { supersedes } : {}),
 			};
 			// Atomic, adopt-aware append (resolves plan-derived features + can't clobber a concurrent capture).
 			const outcome = await this.recordAgentDecision(featureId, decision, rec.dto.repo);
@@ -11440,10 +11659,28 @@ export class SquadManager extends EventEmitter {
 				rec.agent.respondHostTool(call.id, "decision already recorded — no change");
 				return;
 			}
+			if (outcome === "supersede-missing") {
+				// Do NOT advise recording without `supersedes` here — if this decision genuinely reverses
+				// a prior one, dropping the link records two live contradictory decisions, the exact
+				// failure supersession exists to prevent (blind-review finding).
+				rec.agent.respondHostTool(call.id, `supersedes target "${supersedes}" not found on this feature — decision NOT recorded. Run squad_kb_search({ type: "decision" }) and retry with the exact id shown. Only omit \`supersedes\` if this decision does NOT contradict any existing decision.`, true);
+				return;
+			}
+			if (outcome === "supersede-superseded") {
+				rec.agent.respondHostTool(call.id, `decision "${supersedes}" was already superseded — supersede the CURRENT decision that replaced it, not a historical one. Use squad_kb_search to find what is currently in force.`, true);
+				return;
+			}
 			// Durably written. Respond success FIRST so a throw in the cosmetic post-steps below can never
 			// flip an already-persisted decision to a "failed" reply (which would make the agent retry).
 			this.learningMetrics.record("decision-captured", 1, { flag: "decision-capture", variant: learningFlags(rec.dto.id).decisionCapture });
-			rec.agent.respondHostTool(call.id, isModelDelta ? "model-delta recorded — future agents on this work will inherit it" : "decision recorded — future agents on this work will inherit it");
+			rec.agent.respondHostTool(
+				call.id,
+				supersedes
+					? "decision recorded and the prior decision superseded — future agents inherit only the new one; the old stays on the record as history"
+					: isModelDelta
+						? "model-delta recorded — future agents on this work will inherit it"
+						: "decision recorded — future agents on this work will inherit it",
+			);
 			try {
 				this.append(rec, "system", `📝 ${isModelDelta ? "model-delta" : "decision"} recorded: ${truncateLabel(text, 200)}`, { status: "ok", tool: { callId: call.id, name: RECORD_DECISION_TOOL, args: call.arguments, argsText: safeJson(call.arguments) } });
 				void this.recordAudit(agentActor(rec.dto.id), "decision.recorded", featureId, "ok", truncateLabel(text, 120));
@@ -13030,7 +13267,7 @@ export class SquadManager extends EventEmitter {
 					// stitches the cause.priorId lineage entry too (#lifecycle-truth finding 4).
 					await this.closeOrphanedPending(dto.id, p);
 					// Same prior-context surfacing as the adopt path (both mint a fresh id from a PersistedAgent).
-					await this.surfaceResumeDigest(dto.id, p);
+					await this.surfaceResumeDigest(dto.id, p, snapshot.transcripts[p.id]);
 				})
 				.catch((err) => this.log("error", `restore ${p.name} failed: ${String(err)}`));
 		}

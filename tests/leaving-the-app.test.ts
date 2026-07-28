@@ -107,3 +107,39 @@ test("the manager refuses to interrupt anyone on a record it cannot read", async
   await mgr.stop();
   for (const dir of [stateDir, worktreeBase]) await fs.rm(dir, { recursive: true, force: true });
 });
+
+test("interruptState reports the gate as UNWIRED, because it is", async () => {
+  // `mayLeaveTheApp` is called by this test file and by nothing in production. No needs-you consults
+  // it; the only thing that leaves the app is the weekly brief. Reporting `sent: 0` without saying so
+  // is the worst kind of true — a reader takes it as a gate that considered and declined, when it is
+  // a gate nothing asks.
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const { SquadManager } = await import("../src/squad-manager.ts");
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "interrupt-state-"));
+  const mgr = new SquadManager({ stateDir: dir, worktreeBase: dir });
+  const state = mgr.interruptState();
+  expect(state.wired).toBe(false);
+  expect(state.recoveryDelayMs).toBe(RECOVERY_DELAY_MS);
+  // Whatever it claims leaves must not include anything about work waiting on a person.
+  expect(state.leaves.some((what) => /needs you|waiting/i.test(what))).toBe(false);
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("the gate is OFF by default — nothing starts interrupting anyone on upgrade", async () => {
+  // Sending is the only thing this system does that can reach someone not looking at it. Defaulting
+  // that to on, for every existing install, without anyone asking, is the move the gate exists to
+  // prevent.
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const { SquadManager } = await import("../src/squad-manager.ts");
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gate-default-off-"));
+  const mgr = new SquadManager({ stateDir: dir, worktreeBase: dir });
+  expect(mgr.interruptState().wired).toBe(false);
+  // And with the gate off, a tick does nothing at all rather than quietly recording.
+  await mgr.considerInterrupting();
+  expect(mgr.interruptState().health).toBeUndefined();
+  await fs.rm(dir, { recursive: true, force: true });
+});

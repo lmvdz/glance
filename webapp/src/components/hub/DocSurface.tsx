@@ -1,6 +1,7 @@
 import React from 'react';
 import { PlanBlockContext } from '../PlanBlocks';
 import { PlanProse } from './PlanProse';
+import { DecisionsPanel } from './DecisionsPanel';
 import { apiJson, jsonInit } from '../../lib/api';
 import { useTaskContext } from '../../context/TaskContext';
 import type { ArtifactCommentDTO } from '../../lib/dto';
@@ -99,6 +100,11 @@ export function DocSurface({ taskId, docPath }: { taskId?: string; docPath?: str
               {error}. That is a failed read, not an empty plan.
             </div>
           ) : null}
+
+          {/* Recorded server-side, writable via PATCH/supersede, and — until this — rendered nowhere a
+              person could see when they opened a feature. Sits above the plan doc, not buried in a rail:
+              a feature's decisions and acceptance criteria are what a person opening it usually came for. */}
+          {task ? <DecisionsPanel decisions={task.decisions} criteria={task.acceptanceCriteria} /> : null}
 
           {doc ? (
             // Prose at a reading measure, in the room's own type — not a rendered README in a card.

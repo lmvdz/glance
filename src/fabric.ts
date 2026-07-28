@@ -61,6 +61,11 @@ export interface FabricLeaseFact {
 export interface FabricDecisionFact {
 	type: "decision";
 	source: FactSource;
+	/** The underlying FeatureDecision's id — surfaced through kb search so an agent recording a
+	 *  REVERSAL can name it in `squad_record_decision({ supersedes })`. Without an addressable id
+	 *  the supersession write rule would be unreachable from the one place agents learn what the
+	 *  current decisions are. */
+	id: string;
 	featureTitle: string;
 	text: string;
 	decisionSource?: "plan" | "human" | "agent" | "model-delta";
@@ -437,9 +442,17 @@ export async function buildFabricSnapshot(deps: FabricDeps): Promise<FabricSnaps
 		if (!repoSet.has(normalizeRepoPath(f.repo))) continue;
 		for (const d of f.decisions ?? []) {
 			if (!d.text?.trim()) continue;
+			// Superseded decisions are EXCLUDED from the fabric, not annotated: a stale fact that
+			// reaches a spawned agent's context gets adopted at its first decision point regardless of
+			// labeling or placement (the compliance trap, arXiv 2607.10608), so the action-path
+			// projection serves only currently-valid decisions. The superseded entry stays on the
+			// feature record for audit/history — invalidated, never deleted.
+			// (plans/research-long-horizon-agent-memory: BRIEF Rank 3, VALIDATION C9.)
+			if (d.supersededBy) continue;
 			decisions.push({
 				type: "decision",
 				source: { repo: f.repo, featureId: f.id },
+				id: d.id,
 				featureTitle: f.title,
 				text: d.text,
 				decisionSource: d.source,

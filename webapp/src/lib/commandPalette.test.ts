@@ -1,17 +1,18 @@
 import { expect, test, describe } from 'bun:test';
 import { staticRows, fabricRows, buildRows, moveSelection, NAV_ROWS, paletteNavigationHref, SEARCH_TASKS_ROW, type FabricSearchResult } from './commandPalette';
+import { canonicalHubHash, hubHref, parseHubHash } from './router';
 
 describe('staticRows', () => {
   test('blank query returns the nav rows + Org + Search tasks, in order', () => {
     const rows = staticRows('');
     expect(rows.map((r) => r.id)).toEqual([
-      'nav-fleet', 'nav-tasks', 'nav-graph', 'nav-fog', 'nav-plan-reality', 'nav-capabilities', 'nav-org', 'action-search-tasks',
+      'nav-fleet', 'nav-tasks', 'nav-daily', 'nav-fog', 'nav-plan-reality', 'nav-plans', 'nav-economics', 'nav-capabilities', 'nav-org', 'action-search-tasks',
     ]);
   });
 
   test('filters case-insensitively by label substring', () => {
-    expect(staticRows('grap').map((r) => r.id)).toEqual(['nav-graph']);
-    expect(staticRows('GRAPH').map((r) => r.id)).toEqual(['nav-graph']);
+    expect(staticRows('econ').map((r) => r.id)).toEqual(['nav-economics']);
+    expect(staticRows('ECONOMICS').map((r) => r.id)).toEqual(['nav-economics']);
   });
 
   test('"search" query surfaces the Search tasks row', () => {
@@ -22,8 +23,16 @@ describe('staticRows', () => {
     expect(staticRows('zzz-nomatch')).toEqual([]);
   });
 
-  test('NAV_ROWS covers exactly the rail nav items + org, no dead views', () => {
-    expect(NAV_ROWS.map((r) => r.view)).toEqual(['fleet', 'tasks', 'omp-graph', 'fog', 'plan-reality', 'capabilities', 'org']);
+  test('NAV_ROWS covers exactly the real surfaces — no "Graph" (dead-doors audit: it dissolved into the same room "Fleet" already opens, with no graph content behind the label)', () => {
+    expect(NAV_ROWS.map((r) => r.view)).toEqual(['fleet', 'tasks', 'daily', 'fog', 'plan-reality', 'plan-brief', 'economics', 'capabilities', 'org']);
+    expect(NAV_ROWS.some((r) => r.label === 'Graph')).toBe(false);
+  });
+
+  test('dead-doors audit: daily, plan briefs and economics — previously orphaned, no click path anywhere — are now real nav rows', () => {
+    const byView = new Map(NAV_ROWS.map((r) => [r.view, r]));
+    expect(byView.get('daily')?.label).toBe('Daily');
+    expect(byView.get('plan-brief')?.label).toBe('Plan briefs');
+    expect(byView.get('economics')?.label).toBe('Economics');
   });
 
   test('SEARCH_TASKS_ROW is the search-tasks action', () => {
@@ -91,8 +100,8 @@ describe('buildRows', () => {
   });
 
   test('a query matching both a nav row and fabric results shows both, static first', () => {
-    const results: FabricSearchResult[] = [{ type: 'decision', id: 'd1', title: 'graph inspector decision', snippet: 'x', score: 1 }];
-    const rows = buildRows('graph', results);
+    const results: FabricSearchResult[] = [{ type: 'decision', id: 'd1', title: 'fog collision decision', snippet: 'x', score: 1 }];
+    const rows = buildRows('fog', results);
     expect(rows.map((r) => r.kind)).toEqual(['nav', 'fabric']);
   });
 });
@@ -120,5 +129,52 @@ describe('moveSelection', () => {
 describe('palette navigation destinations', () => {
   test('keeps setup-only capabilities reachable through a shareable room route', () => {
     expect(paletteNavigationHref('capabilities')).toBe('#/workbench/capabilities');
+  });
+
+  // Dead-doors audit finding 1: "Fleet" used to point at `#/workbench/fleet`, a spelling
+  // `parseHubHash` immediately redirects back to the room — a real destination, reached through a
+  // hash that only exists to bounce off of it. Fleet IS the room now, so it should say so directly.
+  test('"Fleet" points straight at the room, not through the retired workbench spelling', () => {
+    expect(paletteNavigationHref('fleet')).toBe(hubHref());
+    expect(paletteNavigationHref('fleet')).not.toBe('#/workbench/fleet');
+  });
+
+  // Dead-doors audit finding 2: daily/plans/economics had no click path anywhere. These are their
+  // hrefs; the "every entry actually renders" test below is what proves they're not new dead ends.
+  test('the previously-orphaned surfaces resolve to their real workbench hashes', () => {
+    expect(paletteNavigationHref('daily')).toBe('#/workbench/daily');
+    expect(paletteNavigationHref('plan-brief')).toBe('#/plans');
+    expect(paletteNavigationHref('economics')).toBe('#/workbench/economics');
+  });
+
+  // The regression guard for finding 1 as a class of bug, not just the one instance: every row the
+  // palette currently offers must resolve to a hash that is ALREADY canonical — i.e. `parseHubHash`
+  // does not turn around and redirect it somewhere else. A row whose href round-trips to a
+  // DIFFERENT canonical hash is exactly the "Fleet"/"Graph" bug (a labeled destination that quietly
+  // isn't one) — this test fails the moment anyone reintroduces it.
+  test('every palette nav row resolves to a real, already-canonical surface — no entry whose route redirects away', () => {
+    for (const row of NAV_ROWS) {
+      const href = paletteNavigationHref(row.view);
+      expect(href).toBeDefined();
+      const route = parseHubHash(href!);
+      expect(canonicalHubHash(route)).toBe(href);
+    }
+  });
+
+  // Directly proves "reachable from the palette": each of the three surfaces the dead-doors audit
+  // found orphaned lands on a `workbench` route naming ITSELF, not a redirect back to the room —
+  // App.tsx's WorkbenchRoute switches on exactly this `view` to render MondaySurface/PlanSurface/
+  // CostSurface.
+  test('daily, plan briefs and economics resolve to a workbench route for themselves, not a bounce back to the room', () => {
+    const cases: Array<{ appView: Parameters<typeof paletteNavigationHref>[0]; workbenchView: string }> = [
+      { appView: 'daily', workbenchView: 'daily' },
+      { appView: 'plan-brief', workbenchView: 'plans' },
+      { appView: 'economics', workbenchView: 'economics' },
+    ];
+    for (const { appView, workbenchView } of cases) {
+      const route = parseHubHash(paletteNavigationHref(appView)!);
+      expect(route.kind).toBe('workbench');
+      expect(route.kind === 'workbench' && route.view).toBe(workbenchView);
+    }
   });
 });

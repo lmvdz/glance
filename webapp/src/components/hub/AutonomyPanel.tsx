@@ -1,4 +1,6 @@
 import React, { useEffect } from 'react';
+import { ALL_THREE, CONDITIONS, WHY_REVIEW, calibrationLine, delaySentence, interruptHeadline, leavesSentence, reviewPrompt, unwiredNote, type InterruptState } from '../../lib/interruptSurface';
+import { apiJson, jsonInit } from '../../lib/api';
 
 /**
  * AutonomyPanel — the fleet's autonomy as a state you can read.
@@ -46,6 +48,89 @@ export interface AutonomyState {
   rules: AutonomyRule[];
   neverAlone: Array<{ class: string; because: string }>;
   proposals: AutonomyProposal[];
+  /** What may reach this person when they are not looking at the room. See `interruptSurface`. */
+  interrupt?: InterruptState;
+}
+
+/**
+ * WHEN THIS IS ALLOWED TO INTERRUPT YOU — `04-beyond`.
+ *
+ * It belongs beside what the fleet may settle, because they are the same question asked twice: what
+ * the product may do without you, and what it may pull you back for. A person reading one wants the
+ * other.
+ *
+ * Its first job is to say that the gate is not wired, when it is not. "0 sent" from an unwired gate
+ * and "0 sent" from a gate that considered and declined are the same number meaning opposite things,
+ * and only one of them means you can walk away safely.
+ */
+function Interrupt({ state }: { state: InterruptState }) {
+  const [judged, setJudged] = React.useState<Record<string, boolean>>({});
+  const pendingReview = (state.awaitingReview ?? []).filter((item) => judged[item.id] === undefined);
+  const note = unwiredNote(state);
+  const calibration = calibrationLine(state.health);
+  return (
+    <div className="mt-6">
+      <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.14em', color: state.wired ? '#5A5A61' : '#C2704A' }}>
+        WHEN THIS IS ALLOWED TO INTERRUPT YOU
+      </div>
+      <div className="mt-2.5 text-[12.5px] leading-[1.55]" style={{ color: '#DEDEE2', textWrap: 'pretty' }}>{interruptHeadline(state)}</div>
+      {note ? <div className="mt-2 text-[12px] leading-[1.5]" style={{ color: '#8A8A91', textWrap: 'pretty' }}>{note}</div> : null}
+
+      <div className="mt-3.5 flex flex-col">
+        {CONDITIONS.map((entry, index) => (
+          <div key={entry.condition} className="flex gap-3 py-2" style={{ borderTop: '1px solid #17171A' }}>
+            <div className="flex-none pt-[1px]" style={{ fontFamily: MONO, fontSize: 10.5, color: '#5A5A61' }}>{index + 1}</div>
+            <div className="flex-1">
+              <div className="text-[12.5px]" style={{ color: '#DEDEE2' }}>{entry.condition}</div>
+              <div className="mt-[3px] text-[11.5px] leading-[1.45]" style={{ color: '#6A6A72', textWrap: 'pretty' }}>{entry.because}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="mt-2.5 text-[11.5px] leading-[1.5]" style={{ color: '#8A8A91', textWrap: 'pretty' }}>{ALL_THREE}</div>
+      <div className="mt-2 text-[11.5px] leading-[1.5]" style={{ color: '#6A6A72', textWrap: 'pretty' }}>{delaySentence(state.recoveryDelayMs)}</div>
+      <div className="mt-2 text-[11.5px] leading-[1.5]" style={{ color: '#6A6A72', textWrap: 'pretty' }}>{leavesSentence(state.leaves)}</div>
+      {/* A gate whose sends are never reviewed has no evidence it is calibrated. */}
+      {calibration ? <div className="mt-2 text-[11.5px] leading-[1.5]" style={{ color: '#8A6A45', textWrap: 'pretty' }}>{calibration}</div> : null}
+
+      {pendingReview.length > 0 ? (
+        <div className="mt-5">
+          <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.14em', color: '#D9A03C' }}>
+            WAS INTERRUPTING YOU RIGHT?
+          </div>
+          <div className="mt-2.5 flex flex-col gap-3">
+            {pendingReview.map((item) => (
+              <div key={item.id}>
+                <div className="text-[12.5px] leading-[1.5]" style={{ color: '#DEDEE2', textWrap: 'pretty' }}>{reviewPrompt(item, Date.now())}</div>
+                <div className="mt-1.5 flex gap-2">
+                  {[true, false].map((worthIt) => (
+                    <button
+                      key={String(worthIt)}
+                      type="button"
+                      onClick={() => {
+                        // Optimistic, because the whole point is that answering costs one tap. A
+                        // failed write means the question comes back on the next read, which is the
+                        // correct outcome — an unrecorded verdict must not read as a recorded one.
+                        setJudged((prior) => ({ ...prior, [item.id]: worthIt }));
+                        void apiJson('/api/interrupt/review', jsonInit('POST', { id: item.id, worthIt })).catch(() => {
+                          setJudged((prior) => { const next = { ...prior }; delete next[item.id]; return next; });
+                        });
+                      }}
+                      className="h-7 rounded-[3px] px-2.5"
+                      style={{ border: '1px solid #26262B', fontFamily: MONO, fontSize: 10, color: worthIt ? '#6F9E85' : '#C2704A' }}
+                    >
+                      {worthIt ? 'yes, worth it' : 'no, it could have waited'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="mt-2.5 text-[11.5px] leading-[1.5]" style={{ color: '#6A6A72', textWrap: 'pretty' }}>{WHY_REVIEW}</div>
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 function since(ms: number): string {
@@ -57,7 +142,7 @@ function since(ms: number): string {
 }
 
 export function AutonomyPanel({ state, onAccept, onClose }: { state: AutonomyState; onAccept?: (proposal: AutonomyProposal, sentence: string) => void; onClose?: () => void }) {
-  const { rules, neverAlone, proposals } = state;
+  const { rules, neverAlone, proposals, interrupt } = state;
   useEffect(() => {
     if (!onClose) return;
     const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose(); };
@@ -199,6 +284,8 @@ export function AutonomyPanel({ state, onAccept, onClose }: { state: AutonomySta
           settle one of these is refused when it is written, not when it is used.
         </div>
       </div>
+
+      {interrupt ? <Interrupt state={interrupt} /> : null}
     </div>
   );
 }

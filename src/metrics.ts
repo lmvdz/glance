@@ -12,6 +12,11 @@
  *   - escalation rate       — the run reached the `escalate` node.
  *   - land-failure-streak   — how often observer.ts's ≥N land-failure finding fires.
  *   - primer-empty rate     — buildContextPrimer returned "" at a cold-start call site.
+ *                             SEMANTIC SHIFT 2026-07-27 (primer region partitioning): "" now
+ *                             means "nothing pinned AND nothing relevant" — pinned decisions/
+ *                             failure warnings render regardless of query, so this rate drops
+ *                             sharply for any repo with settled decisions. Do not compare the
+ *                             series across that boundary.
  *   - primer-undelivered    — a primer was built for a harness that cannot receive one.
  *
  * Flag pattern (reused by concerns 03/04/05/06/07): `learningFlags()` resolves each
@@ -141,7 +146,15 @@ export type MetricName =
 	 *  always 1. `mode !== "enforce"` rows are the "shadow would-have-asked/denied" counterfactual the
 	 *  factory-status scoreboard reports; `mode === "enforce"` rows are the REAL (already-acted-on)
 	 *  verdicts. */
-	| "cost-gate-verdict";
+	| "cost-gate-verdict"
+	/** C5 passive counter (plans/research-long-horizon-agent-memory/VALIDATION.md): a
+	 *  `squad_kb_search` returned ZERO results. Tags `{shape, query}` — `shape` classifies the
+	 *  query regime per the C5 kill criterion (entity-carrying vs semantic-gap; see
+	 *  `classifyQueryShape` in fabric-search.ts), `query` is the truncated text so the spooled
+	 *  JSONL doubles as the hand-labelable audit corpus. The dense-retrieval question opens only
+	 *  if the SEMANTIC-GAP share of these clears the calibrated threshold — never on aggregate
+	 *  miss volume. */
+	| "kb-retrieval-miss";
 
 export interface MetricEvent {
 	/** Strictly-increasing id (epoch millis, bumped on collision) — stable sort + dedupe key. */

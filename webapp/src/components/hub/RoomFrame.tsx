@@ -1,6 +1,7 @@
 import React from 'react';
 import { ADDRESSABILITY_NOTE, alarmEyebrow, alarmExplanation, alarmStats, fleetSummary, standingLine } from '../../lib/roomFrame';
 import { nodeStatusLine, selectionPreview, type RoomNode } from '../../lib/roomState';
+import { Kbd } from '../kit/Kbd';
 
 /**
  * RoomFrame — the room as the reference draws it.
@@ -66,6 +67,9 @@ export interface RoomFrameProps {
 	unitPanel?: React.ReactNode;
 	autonomyOpen?: boolean;
 	onToggleAutonomy?: () => void;
+	/** Threaded to the room's own TopBar — see TopBar's doc comment for why this is a prop rather
+	 *  than a direct `useTaskContext()` call. */
+	onOpenPalette?: () => void;
 }
 
 const MONO = "'JetBrains Mono',ui-monospace,monospace";
@@ -105,8 +109,16 @@ function Waiting({ nodes, now, onEnter }: { nodes: readonly RoomNode[]; now: num
  * doing, and the time. It is exported because a surface opened FROM the room — cost, a plan, the
  * graph — must keep it. The previous shell gave those surfaces a channel rail with a WORKBENCH DOORS
  * list instead, which is why opening one still felt like leaving for the old application.
+ *
+ * `onOpenPalette`, when given, renders a ⌘K hint here — the dead-doors audit found the palette is
+ * now how six of the eight built surfaces are reached (there is no rail left to click instead, see
+ * this file's own header comment) and yet nothing on screen had ever said the shortcut exists. A
+ * first-time operator who hasn't read a keybindings doc had no way to discover it. This bar is the
+ * one element every screen shares, so it is the one place a hint here reaches all of them. Optional
+ * (not `useTaskContext()` directly) so this stays the same prop-only component `hub.test.ts` renders
+ * with `renderToStaticMarkup` and no provider.
  */
-export function TopBar({ repo, summary, now, back }: { repo: string; summary?: string; now: number; back?: string }) {
+export function TopBar({ repo, summary, now, back, onOpenPalette }: { repo: string; summary?: string; now: number; back?: string; onOpenPalette?: () => void }) {
 	return (
 		<div className="flex h-11 flex-none items-center gap-3.5 px-4" style={{ borderBottom: '1px solid #1F1F22', background: '#0A0A0B' }}>
 			<div className="flex items-baseline gap-2.5">
@@ -118,6 +130,16 @@ export function TopBar({ repo, summary, now, back }: { repo: string; summary?: s
 			<div className="flex-1" />
 			{/* Every surface you can open says how to leave it. */}
 			{back ? <a href={back} style={{ fontFamily: MONO, fontSize: 10.5, color: '#5A5A61' }} title="Back to the room. Nothing here is lost.">esc goes back to the room</a> : null}
+			{onOpenPalette ? (
+				<button
+					type="button"
+					onClick={onOpenPalette}
+					className="flex items-center gap-1.5 rounded-[3px] px-1 py-0.5 hover:bg-ink-surface"
+					title="Jump to a view, or search the fleet's memory."
+				>
+					<Kbd keys="⌘K" label="jump anywhere" />
+				</button>
+			) : null}
 			<div style={{ fontFamily: MONO, fontSize: 11, color: '#5A5A61' }}>
 				{new Date(now).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
 			</div>
@@ -125,7 +147,7 @@ export function TopBar({ repo, summary, now, back }: { repo: string; summary?: s
 	);
 }
 
-export function RoomFrame({ repo, rooms, activeRoomId, onOpenRoom, nodes, plans, now, autonomy, autonomyPanel, autonomyOpen, onToggleAutonomy, unitPanel, selectedId, onSelect, onEnter, children, decision, voicePanel }: RoomFrameProps) {
+export function RoomFrame({ repo, rooms, activeRoomId, onOpenRoom, nodes, plans, now, autonomy, autonomyPanel, autonomyOpen, onToggleAutonomy, unitPanel, selectedId, onSelect, onEnter, children, decision, voicePanel, onOpenPalette }: RoomFrameProps) {
 	const waiting = nodes.filter((node) => node.state === 'needs-you');
 	const selected = nodes.find((node) => node.id === selectedId);
 	const stats = alarmStats(nodes, now);
@@ -133,7 +155,7 @@ export function RoomFrame({ repo, rooms, activeRoomId, onOpenRoom, nodes, plans,
 
 	return (
 		<div className="flex h-full min-h-0 flex-1 flex-col" style={{ background: '#0A0A0B', color: '#E8E8EA' }}>
-			<TopBar repo={repo} summary={fleetSummary(nodes, plans)} now={now} />
+			<TopBar repo={repo} summary={fleetSummary(nodes, plans)} now={now} onOpenPalette={onOpenPalette} />
 
 			<div className="flex min-h-0 flex-1 flex-col">
 				{/* ── alarm band ─────────────────────────────────────────────────────── */}

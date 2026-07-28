@@ -89,7 +89,7 @@ export function CostSurface() {
       <div className="mx-auto max-w-[1000px] px-8 py-9">
         <div className="flex items-baseline gap-4">
           <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.16em', color: '#5A5A61' }}>
-            THIS MONTH · OPENED FROM THE ONE COST LINE ON THE MAIN SCREEN
+            THIS MONTH · REACHED FROM A COST CARD IN THE ROOM WHEN ONE FIRES, OR ⌘K
           </div>
         </div>
 

@@ -3,7 +3,7 @@ import { bootstrapViewFromQuery, coerceView, isAppView, VIEW_ALIAS_MAP, VIEW_STO
 
 describe('isAppView', () => {
   test('true for every current AppView key', () => {
-    for (const v of ['fleet', 'tasks', 'omp-graph', 'fog', 'daily', 'capabilities', 'org', 'intervene', 'review', 'plan-reality', 'plan-brief']) {
+    for (const v of ['fleet', 'tasks', 'omp-graph', 'fog', 'daily', 'economics', 'capabilities', 'org', 'intervene', 'review', 'plan-reality', 'plan-brief']) {
       expect(isAppView(v)).toBe(true);
     }
   });
@@ -23,7 +23,7 @@ describe('isAppView', () => {
 });
 
 describe('coerceView — live keys pass through unchanged', () => {
-  for (const v of ['fleet', 'tasks', 'omp-graph', 'fog', 'daily', 'capabilities', 'org', 'intervene', 'review', 'plan-reality'] as const) {
+  for (const v of ['fleet', 'tasks', 'omp-graph', 'fog', 'daily', 'economics', 'capabilities', 'org', 'intervene', 'review', 'plan-reality'] as const) {
     test(`"${v}" passes through with no palette auto-open`, () => {
       expect(coerceView(v)).toEqual({ view: v, openPalette: false });
     });
@@ -146,8 +146,8 @@ describe('bootstrapViewFromQuery', () => {
     }
   });
 
-  test('supports every desktop-embed-required view (fleet, tasks, omp-graph, fog, daily, plan-reality, capabilities)', () => {
-    for (const v of ['fleet', 'tasks', 'omp-graph', 'fog', 'daily', 'plan-reality', 'capabilities']) {
+  test('supports every desktop-embed-required view (fleet, tasks, omp-graph, fog, daily, economics, plan-reality, capabilities)', () => {
+    for (const v of ['fleet', 'tasks', 'omp-graph', 'fog', 'daily', 'economics', 'plan-reality', 'capabilities']) {
       const env = stubViewBrowserEnv(`http://localhost/?view=${v}`);
       try {
         bootstrapViewFromQuery();

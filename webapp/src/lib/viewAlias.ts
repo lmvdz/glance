@@ -31,6 +31,7 @@ const VALID_VIEWS: ReadonlySet<AppView> = new Set<AppView>([
   'omp-graph',
   'fog',
   'daily',
+  'economics',
   'capabilities',
   'org',
   'intervene',

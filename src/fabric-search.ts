@@ -101,8 +101,11 @@ export function fabricDocuments(snapshot: FabricSnapshot): KbDoc[] {
 		docs.push({ type: "lease", id: `lease:${l.lease.repo}:${l.lease.file}`, title: `${l.lease.file} (held by ${l.lease.session})`, text: `${l.lease.file} ${l.lease.session} ${l.lease.repo}`, repo: l.lease.repo, ref: l.lease.file, source: `held by ${l.lease.session}` });
 	}
 
-	for (const [i, dec] of snapshot.decisions.entries()) {
-		docs.push({ type: "decision", id: `decision:${dec.source.featureId ?? i}:${i}`, title: `Decision · ${dec.featureTitle}`, text: `${dec.text} ${dec.featureTitle}`, repo: dec.source.repo, ref: dec.source.featureId, source: dec.decisionSource ? `${dec.decisionSource} decision` : "decision", ts: dec.createdAt });
+	for (const dec of snapshot.decisions) {
+		// Doc id carries the REAL FeatureDecision id (not a positional synthetic): kb-search surfaces
+		// it so an agent recording a reversal can pass it as `supersedes` — the id an agent can see
+		// must be the id the write path accepts.
+		docs.push({ type: "decision", id: `decision:${dec.id}`, title: `Decision · ${dec.featureTitle}`, text: `${dec.text} ${dec.featureTitle}`, repo: dec.source.repo, ref: dec.source.featureId, source: dec.decisionSource ? `${dec.decisionSource} decision` : "decision", ts: dec.createdAt });
 	}
 
 	// Recurring-failure memory (concern 05, OMP_SQUAD_FAILURE_MEMORY): warn the next agent it's about
@@ -235,6 +238,34 @@ export function searchFabric(
 	return rankKbDocs(docs, query, { topK: opts.topK });
 }
 
+/**
+ * C5 regime classifier (plans/research-long-horizon-agent-memory/VALIDATION.md, refined by the
+ * five-corpus retrieval study in arXiv 2607.21503): lexical vs dense retrieval win in different
+ * REGIMES — keyword decisively where the query carries specific entities, dense decisively across
+ * wide semantic gaps. So every zero-result kb search is logged with its regime, and the
+ * add-a-vector-channel question is decided by the SEMANTIC-GAP share alone, never by aggregate
+ * miss volume. Heuristic, deliberately cheap: a query is "entity" when any token looks like an
+ * opaque identifier — path, hex hash, uuid, CLI flag, issue key, camelCase/snake_case symbol, or
+ * SCREAMING_CASE constant. Everything else is "semantic" (natural-language description with no
+ * shared vocabulary guarantee). Misclassification is expected and bounded: the calibration step
+ * hand-labels a sample and the kill threshold must clear the measured noise floor first.
+ */
+export function classifyQueryShape(query: string): "entity" | "semantic" {
+	const ENTITY = [
+		/[a-z0-9_-]+\/[a-z0-9_./-]+/i, // path-like
+		/\b[0-9a-f]{7,}\b/i, // hex hash
+		/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i, // uuid
+		/(^|\s)--[a-z][a-z0-9-]+/i, // CLI flag
+		/\b[A-Z][A-Z0-9]+-\d+\b/, // issue key (OMPSQ-12)
+		/\b[a-z]+[A-Z][a-zA-Z0-9]*\b/, // camelCase
+		/\b[A-Z][a-z]+[A-Z][a-zA-Z0-9]*\b/, // PascalCase (blind-review: symbol names under-fired)
+		/\b[a-z0-9]+_[a-z0-9_]+\b/, // snake_case
+		/\b[A-Z][A-Z0-9_]{3,}\b/, // SCREAMING_CASE
+		/\.[a-z]{2,4}\b/, // file extension
+	];
+	return ENTITY.some((re) => re.test(query)) ? "entity" : "semantic";
+}
+
 // ───────────────────────────── agent cold-start primer ─────────────────────────────
 
 const PRIMER_LABEL: Record<KbDocType, string> = {
@@ -279,21 +310,79 @@ function agoLabel(ts: number | undefined, now: number): string | undefined {
  * "Do not repeat: " so the injected line reads as an imperative instruction, not a passive
  * description — the label taxonomy (`PRIMER_LABEL`) is untouched, only the body text changes.
  */
-export function buildContextPrimer(snapshot: FabricSnapshot, query: string, opts: { topK?: number; now?: number } = {}): string {
-	const results = searchFabric(snapshot, query, { topK: opts.topK ?? 6 });
-	if (results.length === 0) return "";
+/** Render one primer line — shared by pinned docs and ranked hits so both regions read
+ *  identically. `weak` is only ever set for ranked hits: a pinned fact is present by STATE, and
+ *  labeling it "weak match" would invite the model to discount exactly the line that must hold. */
+function primerLine(opts: { type: KbDocType; title: string; body: string; source?: string; ts?: number; now: number; weak?: boolean }): string {
+	const provenance: string[] = [];
+	if (opts.source) provenance.push(`src: ${opts.source}`);
+	const ago = agoLabel(opts.ts, opts.now);
+	if (ago) provenance.push(ago);
+	if (opts.weak) provenance.push("weak match");
+	const suffix = provenance.length ? ` (${provenance.join(", ")})` : "";
+	const imperative = opts.type === "failure" ? "Do not repeat: " : "";
+	return `- **${PRIMER_LABEL[opts.type]}** — ${imperative}${trim(`${opts.title}: ${opts.body}`.replace(/\s+/g, " ").trim(), 200)}${suffix}`;
+}
+
+/** Primer region caps and the deterministic character budget (~800 tokens). Exported for tests. */
+export const PRIMER_BUDGET = { failures: 3, decisions: 4, chars: 3200 } as const;
+
+/**
+ * The primer is REGION-PARTITIONED, not one relevance ranking (research-memory-eval-harness
+ * Rank 1; HARNESS-SPEC G09). The failure this prevents is structural: a constraint like "do not
+ * repeat X" has near-zero lexical overlap with the task query that violates it, so any pure
+ * ranking eventually evicts exactly the line that mattered, exactly when it matters.
+ *
+ *   Region 1 — governance: recurring-failure warnings, pinned UNCONDITIONALLY (most recent
+ *     first, capped). Never evicted for other content; the budget cannot touch them.
+ *   Region 2 — settled state: currently-valid decisions, pinned (superseded decisions never
+ *     reach the snapshot — fabric.ts excludes them at projection). Evicted only after Region 3
+ *     is empty, oldest first.
+ *   Region 3 — episodic: everything else, ranked by relevance as before. First to be evicted
+ *     under budget pressure.
+ *
+ * Consequence, deliberate: an irrelevant query no longer yields an empty primer when pinned
+ * facts exist — current decisions and standing warnings are relevant BY STATE, not by query.
+ * "" still means "this actor's world holds nothing pinned and nothing relevant".
+ */
+export function buildContextPrimer(snapshot: FabricSnapshot, query: string, opts: { topK?: number; now?: number; budgetChars?: number } = {}): string {
 	const now = opts.now ?? Date.now();
-	const topScore = results[0]!.score;
-	const lines = results.map((r) => {
-		const provenance: string[] = [];
-		if (r.source) provenance.push(`src: ${r.source}`);
-		const ago = agoLabel(r.ranAt, now);
-		if (ago) provenance.push(ago);
-		if (topScore > 0 && r.score < topScore * 0.4) provenance.push("weak match");
-		const suffix = provenance.length ? ` (${provenance.join(", ")})` : "";
-		const imperative = r.type === "failure" ? "Do not repeat: " : "";
-		return `- **${PRIMER_LABEL[r.type]}** — ${imperative}${trim(`${r.title}: ${r.snippet}`.replace(/\s+/g, " ").trim(), 200)}${suffix}`;
-	});
-	const body = ["### Related context from prior work (read-only, may be stale):", ...lines].join("\n");
-	return fenceUntrusted("context primer", body);
+	const budget = opts.budgetChars ?? PRIMER_BUDGET.chars;
+	// Recency sort with an id tie-break: Array.sort is spec-stable, but the tie-break makes
+	// determinism independent of upstream assembly order rather than reliant on it (I3).
+	const byTsDesc = (a: KbDoc, b: KbDoc): number => (b.ts ?? 0) - (a.ts ?? 0) || a.id.localeCompare(b.id);
+	const docs = fabricDocuments(snapshot);
+	const pinnedFailures = docs.filter((d) => d.type === "failure").sort(byTsDesc).slice(0, PRIMER_BUDGET.failures);
+	const pinnedDecisions = docs.filter((d) => d.type === "decision").sort(byTsDesc).slice(0, PRIMER_BUDGET.decisions);
+	const pinnedIds = new Set([...pinnedFailures, ...pinnedDecisions].map((d) => d.id));
+
+	// Region 3 excludes the pinned TYPES wholesale, not just the pinned ids (blind-review
+	// finding): with an id-only filter, a repo carrying more failures/decisions than the caps
+	// could re-enter the overflow through the ranked region — making the caps pin-only fiction
+	// and the region boundaries advisory. Pinned types are pinned-or-absent.
+	const topK = opts.topK ?? 6;
+	const ranked = searchFabric(snapshot, query, { topK: topK + pinnedIds.size })
+		.filter((r) => r.type !== "failure" && r.type !== "decision")
+		.slice(0, topK);
+
+	if (pinnedIds.size === 0 && ranked.length === 0) return "";
+	const topScore = ranked[0]?.score ?? 0;
+
+	const region1 = pinnedFailures.map((d) => primerLine({ type: d.type, title: d.title, body: d.text, source: d.source, ts: d.ts, now }));
+	const region2 = pinnedDecisions.map((d) => primerLine({ type: d.type, title: d.title, body: d.text, source: d.source, ts: d.ts, now }));
+	const region3 = ranked.map((r) => primerLine({ type: r.type, title: r.title, body: r.snippet, source: r.source, ts: r.ranAt, now, weak: topScore > 0 && r.score < topScore * 0.4 }));
+
+	// Deterministic budget eviction: drop Region 3 from the bottom, then Region 2 from the bottom
+	// (oldest — the lists are recency-sorted), NEVER Region 1. If constraints alone exceed the
+	// budget, they all stay: a truncated warning is a governance failure, an over-budget primer is
+	// a cost. (HARNESS-SPEC G09's kill condition is a constraint losing its slot to episodic chat.)
+	const header = "### Related context from prior work (read-only, may be stale):";
+	const assemble = (): string => [header, ...region1, ...region2, ...region3].join("\n");
+	while (assemble().length > budget && region3.length > 0) region3.pop();
+	while (assemble().length > budget && region2.length > 0) region2.pop();
+	// Eviction can empty every region (no pinned facts + a budget below the smallest ranked
+	// line). A header announcing nothing is not a primer (blind-review finding) — "" keeps the
+	// caller's inject-nothing contract.
+	if (region1.length + region2.length + region3.length === 0) return "";
+	return fenceUntrusted("context primer", assemble());
 }

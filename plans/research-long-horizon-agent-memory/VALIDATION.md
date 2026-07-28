@@ -29,14 +29,26 @@ method, and — pre-registered, before any implementation — the result that ki
 > threshold-calibration procedure (current thresholds are provisional priors until the baseline
 > pass locks them as effect sizes) live in [HARNESS-SPEC.md](HARNESS-SPEC.md). Taxonomy without
 > detectors is poetry; that file is the detectors.
+>
+> **Execution status (2026-07-27)**: the seam-level slice is LIVE on main — PR #277 (L1
+> supersession), #293 (region-partitioned primer), #294 (harness scenarios: 11 deterministic
+> tests, coverage enumerated in tests/memory-harness-COVERAGE.md with honest PARTIAL labels),
+> #295 (C5 miss counter: kb-retrieval-miss metric, regime-classified, redacted, flood-deduped —
+> the passive counter this file says should run from day one now does). Every PR went through
+> the same pipeline: worktree, full gates, blind adversarial review pre-merge — three of the
+> four reviews found real defects (adopt race; primer cap bypass; over-claiming test labels +
+> query-text leak surface), all fixed before landing. The remaining frontier, named: the
+> live-runner scenario family (action-level E_gov/E_abstract locks, G02/G11's worker-kill and
+> handoff fixtures — blocked on room-threads node summaries), the calibration baseline pass, and
+> the C1/C7/C9 offline ablations over the replay corpus.
 
 ## The claim ledger
 
 | # | Claim (POSITION.md §) | Ablation pair | Primary metric | Pre-registered kill criterion |
 |---|---|---|---|---|
-| C1 | Supersession/validity filtering prevents stale-fact actions (§2 L1, §3) | validity-filtered primer vs flat append store | E_anachronism + E_contradiction rate on tasks whose corpus contains seeded superseded facts | Filtered variant does not reduce stale-fact actions by ≥50% vs flat, or costs more failures than it removes |
+| C1 | Supersession/validity filtering prevents stale-fact actions (§2 L1, §3) | validity-filtered primer vs flat append store | E_anachronism + E_contradiction rate on tasks whose corpus contains seeded superseded facts | Filtered variant does not reduce stale-fact actions by ≥50% vs flat, or costs more failures than it removes. **First data (EXP-2, 2026-07-27, EXPERIMENTS.md)**: mechanism demonstrated at the information level — a truly flat projection is unanimously undeterminable (12/12) where one supersession label yields 12/12 determined-current; action-level rates await the live runner |
 | C2 | Regenerate-never-append preserves recoverability; append drifts (§2 L2) | regenerated summaries vs accreted summaries over N transitions | (a) exact-identifier survival at transition N (drill-down audit); (b) poisoned-entry recovery success | Identifier survival not better under regeneration, or regeneration cost grows superlinearly where append stays flat |
-| C3 | Exit-path ordering + post-mortem reconstruction recovers orphaned knowledge (§3) | reconstruction sweep vs no sweep, with workers killed mid-task | repeated-known-failure rate and re-derivation rate in successor sessions | Successor sessions with reconstructed summaries repeat failed paths at the same rate as without them (reconstruction is noise, not memory) |
+| C3 | Exit-path ordering + post-mortem reconstruction recovers orphaned knowledge (§3) | reconstruction sweep vs no sweep, with workers killed mid-task | repeated-known-failure rate and re-derivation rate in successor sessions | Successor sessions with reconstructed summaries repeat failed paths at the same rate as without them (reconstruction is noise, not memory). **Mechanism shipped 2026-07-27 (PR #301)**: daemon-death orphans are detected (agent-authored activity newer than the last finalized receipt) and the digest rebuilt from persisted exhaust, marked RECONSTRUCTED. The claim itself is UNTESTED — whether successors actually consume it and stop repeating work is the live-runner measurement, not this |
 | C4 | Precision-over-recall: small budgeted active set ≥ large high-recall injection (§2 L3) | ≤800-token budgeted core vs top-K unbudgeted retrieval injection | task pass rate + tool-call precision + constraint retention (E_constraint) | The large-injection variant wins on pass rate without losing constraint retention — budget discipline is then cargo cult |
 | C5 | Lexical-first suffices on agent corpora; vectors are a late add (§4) | log real memory queries; measure misses; classify miss cause AND query regime (refined 2026-07-26 per arXiv 2607.21503's five-corpus study: keyword wins entity-carrying queries decisively, dense wins semantic-gap NL→code decisively, 60–100× embedding indexing tax) | fraction of misses attributable to semantic paraphrase, measured separately for entity-carrying vs semantic-gap query shapes | Semantic-gap-regime miss share > ~15% of misses on replayed real queries — then add the dense channel for that regime and retest |
 | C6 | Declared graph ≥ inferred graph over runtime exhaust (§4) | retrieval/navigation over declared refs vs an LLM-inferred KG built from the same exhaust | answer accuracy on multi-hop "what depends on / decided / touched X" queries + build cost | Inferred graph materially beats declared on accuracy after accounting for drift from the authoritative structure |

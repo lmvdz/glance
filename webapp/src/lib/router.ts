@@ -134,3 +134,28 @@ export function shouldColdBootFleet(hash: string): boolean {
   const path = trimHash(hash);
   return !path || path === '/';
 }
+
+/**
+ * The exact hash a resolved route round-trips to — the inverse of `parseHubHash`, built from the
+ * same `hubHref`/`workbenchHref` constructors every other navigation call already uses.
+ */
+export function canonicalHubHash(route: HubRoute): string {
+  return route.kind === 'hub' ? hubHref(route.channelId, route.entryId) : workbenchHref(route.view, route.id);
+}
+
+/**
+ * Parse a browser hash AND decide whether the address bar needs correcting to match what actually
+ * renders. `parseHubHash` deliberately redirects several spellings to a different screen — a
+ * retired workbench view dissolving into the room ("Fleet", "Graph", "intervene"), an unrecognized
+ * view falling back to the room, an old `#/intervene/<id>` or `#/agent/<id>` spelling landing on the
+ * unit's node channel. Left alone, the address bar keeps naming the page that redirected while the
+ * room already moved on — a share, reload, or Back reads as pointing at a screen that disagrees with
+ * the one actually on it. `correctedHash` is the canonical hash for the route that was actually
+ * resolved, or `null` when `hash` already IS that canonical form (the common case for a normal,
+ * well-formed navigation — nothing to rewrite).
+ */
+export function reconcileHubHash(hash: string): { route: HubRoute; correctedHash: string | null } {
+  const route = parseHubHash(hash);
+  const canonical = canonicalHubHash(route);
+  return { route, correctedHash: hash === canonical ? null : canonical };
+}

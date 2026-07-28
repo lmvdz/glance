@@ -1,0 +1,1145 @@
+<title>Long-Horizon Agent Memory: The Ledger Position</title>
+<style>
+  :root {
+    --paper: #F6F7F2;
+    --ink: #1A211C;
+    --muted: #5C665E;
+    --rule: #D8DDD2;
+    --rule-soft: #E6EAE0;
+    --red: #B5372C;
+    --green: #2E6B4F;
+    --card: #FCFCF9;
+    --strike-op: 0.55;
+    --serif: Charter, "Bitstream Charter", "Sitka Text", Cambria, Georgia, serif;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #101512;
+      --ink: #E2E8E1;
+      --muted: #92A095;
+      --rule: #28322B;
+      --rule-soft: #1B231E;
+      --red: #E0705C;
+      --green: #74C299;
+      --card: #151C17;
+      --strike-op: 0.5;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #101512;
+    --ink: #E2E8E1;
+    --muted: #92A095;
+    --rule: #28322B;
+    --rule-soft: #1B231E;
+    --red: #E0705C;
+    --green: #74C299;
+    --card: #151C17;
+    --strike-op: 0.5;
+  }
+  :root[data-theme="light"] {
+    --paper: #F6F7F2;
+    --ink: #1A211C;
+    --muted: #5C665E;
+    --rule: #D8DDD2;
+    --rule-soft: #E6EAE0;
+    --red: #B5372C;
+    --green: #2E6B4F;
+    --card: #FCFCF9;
+    --strike-op: 0.55;
+  }
+
+  html { background: var(--paper); }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--serif);
+    font-size: 1.0625rem;
+    line-height: 1.62;
+    margin: 0;
+  }
+  * { box-sizing: border-box; }
+
+  .sheet {
+    max-width: 64rem;
+    margin: 0 auto;
+    padding: 0 1.5rem 6rem;
+    position: relative;
+  }
+  .sheet::before {
+    content: "";
+    position: absolute;
+    top: 0; bottom: 0;
+    left: 0.15rem;
+    width: 5px;
+    border-left: 1px solid var(--red);
+    border-right: 1px solid var(--red);
+    opacity: 0.45;
+    pointer-events: none;
+  }
+  @media (min-width: 60rem) {
+    .sheet { padding-left: 3.5rem; }
+    .sheet::before { left: 1.4rem; }
+  }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 0.6875rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  header.hero { padding-top: 4.5rem; }
+  h1 {
+    font-size: clamp(2.1rem, 6vw, 3.15rem);
+    line-height: 1.08;
+    letter-spacing: -0.015em;
+    margin: 0.75rem 0 1.4rem;
+    text-wrap: balance;
+    font-weight: 700;
+  }
+  h1 .struck {
+    text-decoration: line-through;
+    text-decoration-color: var(--red);
+    text-decoration-thickness: 3px;
+    opacity: var(--strike-op);
+  }
+  .standfirst {
+    font-size: 1.2rem;
+    line-height: 1.55;
+    max-width: 62ch;
+    margin: 0 0 2.5rem;
+  }
+
+  /* ledger entries */
+  .ledger {
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    line-height: 1.5;
+    background: var(--card);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    overflow-x: auto;
+    margin: 0 0 1rem;
+  }
+  .ledger table { border-collapse: collapse; width: 100%; min-width: 38rem; }
+  .ledger td {
+    padding: 0.55rem 0.9rem;
+    border-top: 1px solid var(--rule-soft);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .ledger tr:first-child td { border-top: none; }
+  .ledger .id { color: var(--muted); }
+  .ledger .body-cell { white-space: normal; min-width: 16rem; }
+  .ledger .tag { font-size: 0.7rem; letter-spacing: 0.06em; }
+  .tag-red { color: var(--red); }
+  .tag-green { color: var(--green); }
+  .tag-muted { color: var(--muted); }
+  tr.superseded td { opacity: var(--strike-op); }
+  tr.superseded .body-cell span {
+    text-decoration: line-through;
+    text-decoration-color: var(--red);
+    text-decoration-thickness: 2px;
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    tr.superseded .body-cell span {
+      text-decoration-color: transparent;
+      animation: strike 0.9s steps(1) 0.9s forwards;
+    }
+    @keyframes strike { to { text-decoration-color: var(--red); } }
+  }
+  .caption {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    color: var(--muted);
+    margin: 0.4rem 0 1.2rem;
+    max-width: 78ch;
+  }
+
+  section { margin-top: 4rem; }
+  .folio {
+    font-family: var(--mono);
+    font-size: 0.6875rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--red);
+    display: block;
+    margin-bottom: 0.5rem;
+  }
+  h2 {
+    font-size: 1.55rem;
+    line-height: 1.2;
+    letter-spacing: -0.01em;
+    margin: 0 0 1.1rem;
+    text-wrap: balance;
+  }
+  h3 { font-size: 1.05rem; margin: 1.8rem 0 0.5rem; }
+  p { margin: 0 0 1.1rem; max-width: 68ch; }
+  strong { font-weight: 700; }
+  .kicker { color: var(--muted); font-style: italic; }
+  code { font-family: var(--mono); font-size: 0.85em; }
+
+  /* three-things chips (§1) */
+  .needs {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+    gap: 0.55rem;
+    margin: 1.2rem 0 1.4rem;
+  }
+  .need {
+    border: 1px solid var(--rule);
+    background: var(--card);
+    border-radius: 3px;
+    padding: 0.65rem 0.85rem;
+  }
+  .need .n-name {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--green);
+    display: block;
+    margin-bottom: 0.2rem;
+  }
+  .need .n-q { font-size: 0.9rem; color: var(--muted); font-style: italic; }
+
+  /* similarity-tie panel (§1) */
+  .sim {
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    line-height: 1.6;
+    border: 1px solid var(--rule);
+    background: var(--card);
+    border-radius: 3px;
+    padding: 0.9rem 1.1rem;
+    margin: 1.4rem 0 0.3rem;
+    overflow-x: auto;
+  }
+  .sim .q { color: var(--muted); margin-bottom: 0.5rem; }
+  .sim .hit { display: flex; gap: 1rem; white-space: nowrap; }
+  .sim .score { font-variant-numeric: tabular-nums; }
+  .sim .stale { color: var(--red); }
+  .sim .stale s { text-decoration-color: var(--red); text-decoration-thickness: 2px; }
+  .sim .verdict { color: var(--muted); margin-top: 0.5rem; }
+
+  /* layer stack (§2) */
+  .stack { display: grid; gap: 0.55rem; margin: 1.6rem 0 0.5rem; }
+  .layer {
+    background: var(--card);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    padding: 0.9rem 1.1rem;
+    display: grid;
+    grid-template-columns: 3.2rem 1fr;
+    gap: 0.2rem 1rem;
+  }
+  .layer .lnum {
+    font-family: var(--mono);
+    font-size: 0.85rem;
+    color: var(--red);
+    grid-row: span 2;
+    padding-top: 0.15rem;
+  }
+  .layer .lname { font-weight: 700; font-size: 1rem; }
+  .layer .lrule { font-size: 0.92rem; color: var(--muted); line-height: 1.5; }
+  .layer .lrule b { color: var(--ink); font-weight: 700; }
+  .stack .flow {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    color: var(--muted);
+    text-align: center;
+    letter-spacing: 0.08em;
+  }
+  .layer:nth-child(1) { margin-inline: 14%; }
+  .layer:nth-child(3) { margin-inline: 9%; }
+  .layer:nth-child(5) { margin-inline: 4.5%; }
+  @media (max-width: 40rem) { .layer { margin-inline: 0 !important; } }
+
+  /* fact record (§2) */
+  .fact {
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    line-height: 1.7;
+    border: 1px solid var(--rule);
+    background: var(--card);
+    border-radius: 3px;
+    padding: 0.9rem 1.1rem;
+    margin: 1.4rem 0 0.3rem;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+  .fact .k { color: var(--muted); display: inline-block; min-width: 8.5rem; }
+  .fact .ann { color: var(--green); }
+  .fact .hdr { color: var(--muted); margin-bottom: 0.3rem; }
+
+  /* rule cards (§2) */
+  .three {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(13.5rem, 1fr));
+    gap: 0.55rem;
+    margin: 1.4rem 0 0.5rem;
+  }
+  .rulecard {
+    border: 1px solid var(--rule);
+    background: var(--card);
+    border-radius: 3px;
+    padding: 0.85rem 1rem;
+  }
+  .rulecard .r-n {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    color: var(--red);
+    display: block;
+    margin-bottom: 0.3rem;
+  }
+  .rulecard .r-t { font-weight: 700; display: block; margin-bottom: 0.35rem; font-size: 0.98rem; }
+  .rulecard .r-d { font-size: 0.88rem; line-height: 1.5; color: var(--muted); }
+
+  /* ward ↔ ledger mirror (interlude) */
+  .mirror {
+    border: 1px solid var(--rule);
+    background: var(--card);
+    border-radius: 3px;
+    margin: 1.4rem 0 0.3rem;
+  }
+  .mrow {
+    display: grid;
+    grid-template-columns: 1fr 2.4rem 1fr;
+    border-top: 1px solid var(--rule-soft);
+  }
+  .mrow:first-child { border-top: none; }
+  .mrow > div { padding: 0.75rem 0.95rem; }
+  .mrow.mhead > div {
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding-top: 0.6rem;
+    padding-bottom: 0.6rem;
+  }
+  .m-h { font-size: 0.92rem; line-height: 1.55; align-self: center; }
+  .m-h s { text-decoration-color: var(--red); text-decoration-thickness: 2px; }
+  .m-link {
+    font-family: var(--mono);
+    color: var(--muted);
+    font-size: 0.8rem;
+    align-self: center;
+    text-align: center;
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+  }
+  .m-a {
+    font-family: var(--mono);
+    font-size: 0.74rem;
+    line-height: 1.6;
+    color: var(--muted);
+    align-self: center;
+  }
+  .m-a .lref { color: var(--red); }
+  @media (max-width: 44rem) {
+    .mrow { grid-template-columns: 1fr; }
+    .m-link { display: none; }
+    .mrow .m-a { padding-top: 0; }
+  }
+
+  /* timelines (§3, §6) */
+  .timeline {
+    font-family: var(--mono);
+    font-size: 0.74rem;
+    border: 1px solid var(--rule);
+    background: var(--card);
+    border-radius: 3px;
+    padding: 1rem 1.1rem;
+    margin: 1.4rem 0 0.3rem;
+    overflow-x: auto;
+  }
+  .timeline .track {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    white-space: nowrap;
+  }
+  .timeline .step {
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    padding: 0.35rem 0.6rem;
+    background: var(--paper);
+  }
+  .timeline .step.bad { border-color: var(--red); color: var(--red); }
+  .timeline .step.good { border-color: var(--green); color: var(--green); }
+  .timeline .arrow { color: var(--muted); }
+  .timeline .sub { color: var(--muted); margin-top: 0.55rem; white-space: normal; }
+
+  /* two-panel compare (§4, §5) */
+  .duo {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+    gap: 0.55rem;
+    margin: 1.4rem 0 0.3rem;
+  }
+  .pane {
+    border: 1px solid var(--rule);
+    background: var(--card);
+    border-radius: 3px;
+    padding: 0.85rem 1rem;
+  }
+  .pane .p-tag {
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    display: block;
+    margin-bottom: 0.4rem;
+  }
+  .pane.yes .p-tag { color: var(--green); }
+  .pane.no .p-tag { color: var(--red); }
+  .pane .p-b { font-size: 0.9rem; line-height: 1.55; color: var(--muted); }
+  .pane .p-b b { color: var(--ink); }
+  .pane.no .p-b .struckline {
+    text-decoration: line-through;
+    text-decoration-color: var(--red);
+    text-decoration-thickness: 2px;
+  }
+
+  /* error class chips (§6) */
+  .chips {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+    gap: 0.55rem;
+    margin: 1.4rem 0 1rem;
+  }
+  .chip {
+    border: 1px solid var(--rule);
+    background: var(--card);
+    border-radius: 3px;
+    padding: 0.7rem 0.85rem;
+  }
+  .chip .cname {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.06em;
+    color: var(--red);
+    display: block;
+    margin-bottom: 0.25rem;
+  }
+  .chip .cdesc { font-size: 0.88rem; line-height: 1.45; color: var(--muted); }
+
+  /* rejection list (§7) */
+  ul.rejects { list-style: none; padding: 0; margin: 1.4rem 0; }
+  ul.rejects li {
+    border-top: 1px solid var(--rule-soft);
+    padding: 0.75rem 0;
+    max-width: 68ch;
+  }
+  ul.rejects li:last-child { border-bottom: 1px solid var(--rule-soft); }
+  ul.rejects .r-what {
+    text-decoration: line-through;
+    text-decoration-color: var(--red);
+    text-decoration-thickness: 2px;
+    font-weight: 700;
+  }
+  ul.rejects .r-why { color: var(--muted); }
+
+  /* claims table (§8) */
+  .claims {
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    line-height: 1.5;
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    background: var(--card);
+    overflow-x: auto;
+    margin: 1.6rem 0 0.5rem;
+  }
+  .claims table { border-collapse: collapse; width: 100%; min-width: 46rem; }
+  .claims th {
+    text-align: left;
+    font-weight: 400;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-size: 0.65rem;
+    color: var(--muted);
+    padding: 0.6rem 0.9rem;
+    border-bottom: 1px solid var(--rule);
+  }
+  .claims td {
+    padding: 0.6rem 0.9rem;
+    border-bottom: 1px solid var(--rule-soft);
+    vertical-align: top;
+  }
+  .claims tr:last-child td { border-bottom: none; }
+  .claims .cid { color: var(--muted); white-space: nowrap; }
+  .claims .kill { color: var(--red); }
+
+  footer {
+    margin-top: 5rem;
+    border-top: 1px solid var(--rule);
+    padding-top: 1.4rem;
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    line-height: 1.8;
+    color: var(--muted);
+  }
+  footer a { color: var(--muted); }
+  a { color: var(--green); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:focus-visible, :focus-visible { outline: 2px solid var(--red); outline-offset: 2px; }
+
+  .pull {
+    border-top: 1px solid var(--rule);
+    border-bottom: 1px solid var(--rule);
+    padding: 1.2rem 0;
+    margin: 2rem 0;
+    font-size: 1.25rem;
+    line-height: 1.45;
+    font-style: italic;
+    max-width: 60ch;
+    text-wrap: balance;
+  }
+
+  /* cover artwork */
+  .artwork { margin: 0 0 2.8rem; }
+  .artwork canvas {
+    display: block;
+    width: 100%;
+    height: clamp(240px, 36vw, 420px);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    background: #070b09;
+  }
+  .artwork figcaption {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    color: var(--muted);
+    margin: 0.5rem 0 0;
+    max-width: 78ch;
+    line-height: 1.6;
+  }
+</style>
+
+<div class="sheet">
+
+<header class="hero">
+  <figure class="artwork">
+    <canvas id="shiftchange" role="img" aria-label="A dark night panorama. Brief columns of pale light, each a short-lived worker mind, rise and fade above one continuous luminous line of handwriting running the full width of the frame. A few entries along the line are struck through in red but remain legible. The line ends at a single bright burning point."></canvas>
+    <figcaption>Shift change. Each column of light is a mind that will not survive the night; the line beneath them is the book they keep. Struck entries stay legible. Only the last point burns as true.</figcaption>
+  </figure>
+  <span class="eyebrow">A position paper · Long-horizon agent memory · July 2026</span>
+  <h1>Memory is a ledger,<br>not a <span class="struck">search problem</span></h1>
+  <p class="standfirst">Multi-day agents rarely fail because retrieval is imprecise. They fail because their memory stores cannot say <em>"this fact replaced that one."</em> The fix happens at write time: an append-only ledger where facts are superseded, never deleted, and everything above it is a regenerated view.</p>
+
+  <div class="ledger" role="img" aria-label="Three ledger entries: a superseded decision struck through in red, its valid replacement, and a post-mortem reconstruction">
+    <table>
+      <tr class="superseded">
+        <td class="id">#4821</td>
+        <td class="id">07-12 09:41</td>
+        <td class="body-cell"><span>decision&nbsp;&nbsp;target&nbsp;=&nbsp;staging.api.internal</span></td>
+        <td class="tag tag-red">SUPERSEDED&nbsp;→&nbsp;#5107</td>
+      </tr>
+      <tr>
+        <td class="id">#5107</td>
+        <td class="id">07-19 14:03</td>
+        <td class="body-cell">decision&nbsp;&nbsp;target&nbsp;=&nbsp;prod.api.internal</td>
+        <td class="tag tag-green">VALID&nbsp;since&nbsp;07-19</td>
+      </tr>
+      <tr>
+        <td class="id">#5211</td>
+        <td class="id">07-21 03:22</td>
+        <td class="body-cell">worker-exit&nbsp;&nbsp;unit-7f crashed; summary rebuilt from receipts</td>
+        <td class="tag tag-muted">RECONSTRUCTED</td>
+      </tr>
+    </table>
+  </div>
+  <p class="caption">The core primitive. Struck, but still legible: invalidated facts stay addressable forever.</p>
+</header>
+
+<section>
+  <span class="folio">§1 · The misdiagnosis</span>
+  <h2>"Vector soup" isn't about vectors</h2>
+  <p>Two years of debate about the index: vectors, knowledge graphs, hybrid fusion. Meanwhile the failures that kill multi-day agents happen on the <strong>write path</strong>: facts superseded but never invalidated, workers dying before committing what they learned, summaries drifting until the original detail is unrecoverable.</p>
+  <p>Rank-by-relevance over a flat pool discards the three things a long-horizon agent needs:</p>
+  <div class="needs">
+    <div class="need"><span class="n-name">Temporal order</span><span class="n-q">which of these came last?</span></div>
+    <div class="need"><span class="n-name">Supersession</span><span class="n-q">which of these is still true?</span></div>
+    <div class="need"><span class="n-name">Provenance</span><span class="n-q">what evidence produced this?</span></div>
+  </div>
+
+  <div class="sim" role="img" aria-label="A retrieval query returning a superseded fact and its replacement at near-identical scores">
+    <div class="q">query: "which endpoint do we target?"</div>
+    <div class="hit stale"><span class="score">0.87</span> <span><s>#4821&nbsp;&nbsp;target = staging.api.internal</s>&nbsp;&nbsp;superseded 07-19</span></div>
+    <div class="hit"><span class="score">0.86</span> <span>#5107&nbsp;&nbsp;target = prod.api.internal&nbsp;&nbsp;current</span></div>
+    <div class="verdict">→ a flat store returns both at equal confidence; the model picks one</div>
+  </div>
+  <p class="caption">BM25 fails this the same way cosine similarity does. The problem is the schema, not the ranking.</p>
+  <p class="pull">Better retrieval over a corrupted store retrieves corruption faster.</p>
+</section>
+
+<section>
+  <span class="folio">§2 · The architecture</span>
+  <h2>A ledger with regenerated projections</h2>
+  <p>Independent lineages keep converging on one four-layer shape: TencentDB's L0–L3 pyramid, Graphiti/Zep's episode–entity split, MemGPT's tiers, and agent-runtime teams re-deriving it from their own outages.</p>
+
+  <div class="stack">
+    <div class="layer">
+      <span class="lnum">L3</span>
+      <span class="lname">Active set</span>
+      <span class="lrule">What enters the prompt. Hard token budget (~800 — a discipline number, not physics; what matters is that one exists and is enforced), assembled and <b>frozen at session start</b>, prefix-stable. Precision over recall; must-see items surface by <b>state, never by score</b>.</span>
+    </div>
+    <div class="flow">↑ project (budgeted, filtered to currently-valid)</div>
+    <div class="layer">
+      <span class="lnum">L2</span>
+      <span class="lname">Projections — summaries</span>
+      <span class="lrule"><b>Regenerate, never append.</b> Reference, never restate. Every abstraction keeps a drill-down pointer back to raw evidence.</span>
+    </div>
+    <div class="flow">↑ regenerate on every state transition, abnormal exits included</div>
+    <div class="layer">
+      <span class="lnum">L1</span>
+      <span class="lname">Typed facts with validity</span>
+      <span class="lrule"><b>Recurrence promotes, contradiction supersedes</b> — and a human directive promotes on its own: commands arrive once, patterns arrive repeatedly. Model-observed facts always take the recurrence path. Each fact records when it became true and when it stopped; contradiction <b>invalidates, never deletes</b>. "What did we believe at time T?" is a filter, not archaeology.</span>
+    </div>
+    <div class="flow">↑ distill (through a single writer)</div>
+    <div class="layer">
+      <span class="lnum">L0</span>
+      <span class="lname">Append-only exhaust</span>
+      <span class="lrule">Transcripts, tool outputs, receipts, gate logs. <b>Owned by the runtime, not the model</b>: written as a side effect of execution, surviving the death of any context window. Everything above is rebuildable from here.</span>
+    </div>
+  </div>
+
+  <div class="fact" role="img" aria-label="A fact record showing validity and supersession fields">
+    <div class="hdr">// the whole bi-temporal mechanism, for a single runtime:</div>
+    <div><span class="k">fact</span>#5107</div>
+    <div><span class="k">body</span>target = prod.api.internal</div>
+    <div><span class="k">validFrom</span>07-19 14:03</div>
+    <div><span class="k">validTo</span>&mdash; <span class="ann">← open: currently true</span></div>
+    <div><span class="k">supersedes</span>#4821 <span class="ann">← whose validTo is now 07-19 14:03</span></div>
+  </div>
+  <p class="caption">Zep implements these semantics with a graph database, entity resolution, and LLM triple extraction. That cost fits a multi-tenant platform. A single runtime gets the same semantics from two fields and a write-path rule. Adopt the idea; skip the database. The entry side has a rule too: a fact is promoted by recurrence — observed repeatedly across sessions, with citations as receipts — not by a single model's decision to remember. Practitioners converge here independently: better a lagging memory that is never useless than an eager one that fills with noise.</p>
+
+  <h3>Three settled rules for summaries</h3>
+  <div class="three">
+    <div class="rulecard">
+      <span class="r-n">rule 1</span>
+      <span class="r-t">Regenerate, never append</span>
+      <span class="r-d">Rebuild from ground truth on each transition. An appended summary has no recovery path: a poisoned turn becomes a permanent inheritance. Regeneration lets you drop it from history and rebuild. And regeneration is a gated loop: check the result against a declared list of must-survive-verbatim fields, retry a failing compression less aggressively, never ship it. One measured cliff (arXiv:2607.21503, not our fleet): 18,282 tokens crushed to 122 dropped task accuracy 66.7% to 57.1%.</span>
+    </div>
+    <div class="rulecard">
+      <span class="r-n">rule 2</span>
+      <span class="r-t">Reference, never restate</span>
+      <span class="r-d">A summary that quotes its sources is the log again, and the reason naive summarization grows without bound. Point at the plan doc, the PR, the log line.</span>
+    </div>
+    <div class="rulecard">
+      <span class="r-n">rule 3</span>
+      <span class="r-t">Keep drill-down pointers</span>
+      <span class="r-d">Each abstraction keeps an address back to raw evidence. When the summary proves too abstract, the exact flag or hash is one lookup away instead of gone.</span>
+    </div>
+  </div>
+  <p class="caption">The precise claim: not that context reduction is harmful. Lossy reduction helps in some regimes and hurts in others (arXiv 2606.00408), and you cannot know which per item in advance. So loss must be recoverable: compact aggressively, over a ground-truth layer regeneration can always reach back into.</p>
+</section>
+
+<section>
+  <span class="folio">Interlude · Human prior art</span>
+  <h2>The night shift is a context window</h2>
+  <p>Humans already run long-horizon agents. A hospital ward does multi-day, multi-worker, life-critical work with a total change of personnel every eight hours, and no nurse holds the patient in her head across the gap. The practices that make that safe are the four layers, arrived at under harsher penalties than token costs:</p>
+
+  <div class="mirror" role="img" aria-label="Row-by-row comparison of hospital ward practice with the ledger architecture">
+    <div class="mrow mhead"><div>The ward</div><div></div><div>The ledger</div></div>
+    <div class="mrow">
+      <div class="m-h">The chart stays at the bedside. The ward owns it; no nurse carries it home in her head.</div>
+      <div class="m-link">↔</div>
+      <div class="m-a"><span class="lref">L0</span>&nbsp; exhaust written by the runtime, outside any worker's context</div>
+    </div>
+    <div class="mrow">
+      <div class="m-h">A medication order is discontinued, never erased: <s>one line through it</s>, still legible, dated and initialed.</div>
+      <div class="m-link">↔</div>
+      <div class="m-a"><span class="lref">L1</span>&nbsp; validTo + supersededBy; invalidate, never delete</div>
+    </div>
+    <div class="mrow">
+      <div class="m-h">Shift handoff is rebuilt each shift from the chart. The incoming nurse gets the current picture, not eight hours of narration.</div>
+      <div class="m-link">↔</div>
+      <div class="m-a"><span class="lref">L2</span>&nbsp; summaries regenerated from ground truth; reference, never restate</div>
+    </div>
+    <div class="mrow">
+      <div class="m-h">The whiteboard at the station: name, status, what's pending. Small, current, ordered by acuity rather than by who has been loudest.</div>
+      <div class="m-link">↔</div>
+      <div class="m-a"><span class="lref">L3</span>&nbsp; frozen, budgeted active set; surfaced by state, never by score</div>
+    </div>
+    <div class="mrow">
+      <div class="m-h">If a nurse collapses mid-shift, care continues. The chart holds what she knew; colleagues reconstruct her handoff from it.</div>
+      <div class="m-link">↔</div>
+      <div class="m-a"><span class="lref">exit</span>&nbsp; post-mortem summary rebuilt from receipts, marked reconstructed</div>
+    </div>
+    <div class="mrow">
+      <div class="m-h">Two conflicting readings go to the attending, and one order gets written. The overruled reading stays in the chart.</div>
+      <div class="m-link">↔</div>
+      <div class="m-a"><span class="lref">conflict</span>&nbsp; single-writer supersession at write time; losers stay addressable</div>
+    </div>
+    <div class="mrow">
+      <div class="m-h">The proof the system works: the next shift continues care without waking the patient to re-ask their history.</div>
+      <div class="m-link">↔</div>
+      <div class="m-a"><span class="lref">eval</span>&nbsp; kill-resume checkpoints; no re-deriving settled decisions</div>
+    </div>
+  </div>
+  <p class="caption">The standard charting rule: "Never erase. Draw a single line through the error so it remains legible; date and initial." The strikethrough on this page is that rule.</p>
+</section>
+
+<section>
+  <span class="folio">§3 · The real losses</span>
+  <h2>Memory dies in the lifecycle, not the lookup</h2>
+
+  <h3>The exit path</h3>
+  <div class="timeline" role="img" aria-label="Timeline of a worker killed mid-task whose summary is rebuilt from receipts">
+    <div class="track">
+      <span class="step">spawn</span><span class="arrow">→</span>
+      <span class="step">turn 1…n</span><span class="arrow">→</span>
+      <span class="step bad">✗ killed</span><span class="arrow">→</span>
+      <span class="step">sweep reads receipts</span><span class="arrow">→</span>
+      <span class="step good">summary: RECONSTRUCTED</span><span class="arrow">→</span>
+      <span class="step">next session consumes it</span>
+    </div>
+    <div class="sub">The context window died; the knowledge didn't, because L0 lives outside it.</div>
+  </div>
+  <p>A worker's context window is destroyed at exit, and anything uncommitted is orphaned. The orchestrator then resumes with a stale world-view and repeats paths that already failed. So the summary write belongs to the exit path itself, abnormal exits included: a sweep rebuilds a post-mortem summary from the receipts and marks it <em>reconstructed</em>, so it reads as evidence rather than self-report. An architecture that only captures clean exits is an architecture for demos.</p>
+
+  <h3>Parallel writers</h3>
+  <div class="ledger" role="img" aria-label="Two workers asserting contradictory facts, resolved to one current assertion by the supervisor">
+    <table>
+      <tr class="superseded">
+        <td class="id">worker A</td>
+        <td class="id">09:41</td>
+        <td class="body-cell"><span>migration&nbsp;=&nbsp;complete</span></td>
+        <td class="tag tag-red">SUPERSEDED at write</td>
+      </tr>
+      <tr>
+        <td class="id">worker B</td>
+        <td class="id">09:44</td>
+        <td class="body-cell">migration&nbsp;=&nbsp;rolled&nbsp;back</td>
+        <td class="tag tag-green">CURRENT</td>
+      </tr>
+    </table>
+  </div>
+  <p>Two workers will eventually assert contradictory facts, and a store without supersession serves both at equal confidence: non-determinism laundered as retrieval. Route durable writes through the single-writer supervisor and resolve at write time. One current assertion per subject; losers invalidated and still addressable. Consensus protocols solve the case where no supervisor exists. If you have one, use it.</p>
+  <p>Resolution alone is not sufficient. Agents adopt a conflicting memory at the first decision point where it appears, regardless of how it is presented; the measured effect is independent of labeling and placement, and stronger models lose more per event (arXiv 2607.10608, −2.1pp on a weak model to −25.5pp on a strong one). So superseded facts are <strong>excluded from the active set, not annotated</strong>. The exclusion is scoped to the action path: history stays addressable for audits and deliberate "why did we believe X" reads — run those in analysis contexts, never in the context that acts next.</p>
+</section>
+
+<section>
+  <span class="folio">§4 · Retrieval</span>
+  <h2>Declared structure first. Lexical first. Vectors late.</h2>
+  <div class="duo">
+    <div class="pane yes">
+      <span class="p-tag">Declared graph</span>
+      <span class="p-b"><b>task refs · ownership · dependency edges</b> — the runtime already emits them. Query them directly; they stay authoritative.</span>
+    </div>
+    <div class="pane no">
+      <span class="p-tag">Inferred graph</span>
+      <span class="p-b"><span class="struckline">LLM triples + entity resolution + PageRank</span> over your own exhaust: re-derives structure you already declared, then drifts from it.</span>
+    </div>
+  </div>
+  <p class="caption">GraphRAG and HippoRAG infer structure from unstructured text, and do it well. An agent runtime is not an unstructured corpus.</p>
+
+  <div class="timeline" role="img" aria-label="Retrieval escalation path from lexical search to an optional dense channel">
+    <div class="track">
+      <span class="step good">BM25 over validity-filtered stores</span><span class="arrow">→</span>
+      <span class="step">log every miss</span><span class="arrow">→</span>
+      <span class="step">classify the cause</span><span class="arrow">→</span>
+      <span class="step bad">paraphrase misses &gt; ~15%?</span><span class="arrow">→</span>
+      <span class="step">then add a dense channel + RRF</span>
+    </div>
+    <div class="sub">Agent memory queries are dominated by exact identifiers: function names, flags, error strings, hashes. BM25's home turf, embedding-space quicksand.</div>
+  </div>
+  <p>Start lexical over structured, validity-filtered stores. Add a dense channel after logged misses prove that semantic paraphrase costs you. Infrastructure follows evidence. The split is regime-shaped, not tool-shaped: across five corpora (arXiv:2607.21503's study, not our fleet), keyword wins decisively where queries carry specific entities (0.815 vs 0.614) and dense wins decisively across wide semantic gaps (0.914 vs 0.290 on natural-language-to-code), with a measured 60–100× indexing tax for embeddings. So classify the misses by regime, and let the semantic-gap share decide.</p>
+</section>
+
+<section>
+  <span class="folio">§5 · Control points</span>
+  <h2>The control point determines the mechanism</h2>
+  <div class="duo">
+    <div class="pane yes">
+      <span class="p-tag">The model is the runtime</span>
+      <span class="p-b">It can page its own memory tiers mid-generation (MemGPT) or keep an in-window symbolic canvas. The mechanism lives inside the live context.</span>
+    </div>
+    <div class="pane yes">
+      <span class="p-tag">A supervisor at turn boundaries</span>
+      <span class="p-b">It never touches a live window. Its equivalents: <b>spawn-time projection</b> (assemble the active set when the worker starts) and <b>exit-time reconciliation</b> (harvest state when it ends).</span>
+    </div>
+  </div>
+  <p>Memory mechanisms assume a location for the intelligence, and they do not transplant across locations. Before asking whether a published mechanism works, ask where it assumes the control point is.</p>
+  <p>The control point also answers the standard objection to freezing: what about an urgent revocation mid-turn? <strong>The frozen prefix carries knowledge; the action gate carries authority.</strong> The layer that approves each tool call is never frozen — it takes revocations effective immediately, out-of-band, and blocks the very next action regardless of what the context believes. Advice may go a session stale; permission cannot. A kill-switch that depends on rewriting a prompt was never a kill-switch.</p>
+</section>
+
+<section>
+  <span class="folio">§6 · Evaluation</span>
+  <h2>Score by error class, test with kill signals</h2>
+  <p>Long-history QA benchmarks measure whether an agent can answer questions about the past. What matters is whether the next session <em>acts</em> correctly: the right tool, the exact flag, a constraint set days ago still honored. Score by failure class, because each class has a different architectural cause:</p>
+  <div class="chips">
+    <div class="chip"><span class="cname">E_constraint</span><span class="cdesc">Violated a rule established turns or days ago</span></div>
+    <div class="chip"><span class="cname">E_contradiction</span><span class="cdesc">Reversed a finalized decision without instruction</span></div>
+    <div class="chip"><span class="cname">E_hallucination</span><span class="cdesc">Cited a past interaction that never happened</span></div>
+    <div class="chip"><span class="cname">E_abstraction</span><span class="cdesc">Compaction erased the exact identifiers work depends on</span></div>
+    <div class="chip"><span class="cname">E_anachronism</span><span class="cdesc">Acted on a superseded fact as if current</span></div>
+    <div class="chip"><span class="cname">E_pollution</span><span class="cdesc">Worker state leaked across an isolation boundary</span></div>
+    <div class="chip"><span class="cname">E_orphan</span><span class="cdesc">Uncommitted knowledge died with its worker</span></div>
+    <div class="chip"><span class="cname">E_drift</span><span class="cdesc">Repeated re-summarization distorted the record</span></div>
+    <div class="chip"><span class="cname">E_gov_halt</span><span class="cdesc">Refused a valid action, citing a revoked constraint</span></div>
+  </div>
+  <p>Score constraints in <strong>both directions</strong>. A memory system that never breaches but constantly refuses is also broken — and it will game any harness that only counts breaches. So every probe set pairs active-constraint tasks (any breach fails the run) with revoked-constraint tasks (a spurious refusal is its own named failure). The sharpest probe shape: grant broadly, revoke the permission out-of-band while the agent is idle, jump the clock a week, wipe the context, then hand it a task that tempts the revoked power.</p>
+
+  <div class="timeline" role="img" aria-label="Resume checkpoint protocol: kill the process and resume at one hour, one day, one week">
+    <div class="track">
+      <span class="step">ingest</span><span class="arrow">→</span>
+      <span class="step bad">✗ kill</span><span class="arrow">→</span>
+      <span class="step good">T+1h resume</span><span class="arrow">→</span>
+      <span class="step bad">✗ kill</span><span class="arrow">→</span>
+      <span class="step good">T+24h resume</span><span class="arrow">→</span>
+      <span class="step bad">✗ kill</span><span class="arrow">→</span>
+      <span class="step good">T+1w resume</span>
+    </div>
+    <div class="sub">Injected clock, so no real days pass. Scored: does work continue without re-deriving settled decisions or re-executing completed steps?</div>
+  </div>
+  <p>Then probe the write path: kill workers mid-task and check their knowledge survived. Seed contradictions and check one fact wins, auditably. Demand an identifier that exists only in raw logs and check drill-down reaches it. Score the result as a <strong>vector, never an average</strong> — two classes are zero-tolerance (a single governance breach or lost identifier fails the run outright, whatever the aggregate says) — and record the <strong>divergence step</strong>: not just whether a resumed trajectory failed, but the first step where it left the rails, watched over a window of steps, because first-action-correct is not resumed-correctly. Memory that cannot survive a restart is a long conversation.</p>
+</section>
+
+<section>
+  <span class="folio">§7 · Rejected</span>
+  <h2>What we strike from the ledger</h2>
+  <ul class="rejects">
+    <li><span class="r-what">Memory-as-a-platform for single-runtime agents</span> <span class="r-why">— the semantics worth having cost two fields locally; the platform costs a network dependency and a second source of truth.</span></li>
+    <li><span class="r-what">Inference layers over self-generated structure</span> <span class="r-why">— re-deriving a graph the runtime already declared.</span></li>
+    <li><span class="r-what">Hybrid retrieval as a default mandate</span> <span class="r-why">— an optimization with a prerequisite (a proven semantic-miss rate), not a foundation.</span></li>
+    <li><span class="r-what">Consensus engines where a supervisor exists</span> <span class="r-why">— single-writer supersession is simpler, auditable, sufficient.</span></li>
+    <li><span class="r-what">Unbudgeted "small" context blocks</span> <span class="r-why">— a size discipline without a number is not a discipline.</span></li>
+    <li><span class="r-what">Mechanism transplants across control points</span> <span class="r-why">— in-window paging bolted onto supervisor architectures, and vice versa.</span></li>
+  </ul>
+</section>
+
+<section>
+  <span class="folio">§8 · Falsifiability</span>
+  <h2>How we'd know we're wrong</h2>
+  <p>No architecture can be proven correct, only made falsifiable. Each claim is tested by flipping one seam on the same corpus of replayed real exhaust, where supersessions and worker deaths carry their own ground truth. Kill criteria are registered before any experiment runs:</p>
+
+  <div class="claims">
+    <table>
+      <tr><th>№</th><th>Claim</th><th>Ablation</th><th>Struck if</th></tr>
+      <tr><td class="cid">C1</td><td>Supersession prevents stale-fact actions</td><td>validity-filtered vs flat store</td><td class="kill">anachronism errors don't drop ≥50%</td></tr>
+      <tr><td class="cid">C2</td><td>Regenerate beats append</td><td>regenerated vs accreted summaries</td><td class="kill">identifier survival no better, or regen cost superlinear</td></tr>
+      <tr><td class="cid">C3</td><td>Post-mortem reconstruction recovers orphans</td><td>repair sweep vs none, workers killed mid-task</td><td class="kill">successors repeat failed paths at the same rate</td></tr>
+      <tr><td class="cid">C4</td><td>Small budgeted set ≥ big injection</td><td>≤800-token core vs top-K unbudgeted</td><td class="kill">big injection wins without losing constraint retention</td></tr>
+      <tr><td class="cid">C5</td><td>Lexical-first suffices</td><td>log real misses, classify cause</td><td class="kill">paraphrase misses exceed ~15% — add the dense channel</td></tr>
+      <tr><td class="cid">C6</td><td>Declared graph ≥ inferred graph</td><td>declared refs vs LLM-inferred KG, same exhaust</td><td class="kill">inferred wins multi-hop accuracy net of drift</td></tr>
+      <tr><td class="cid">C7</td><td>Single-writer resolution suffices</td><td>write-time supersession vs both-facts-persist</td><td class="kill">wrong-winner rate makes read-time arbitration safer</td></tr>
+      <tr><td class="cid">C8</td><td>Frozen core beats live mutation</td><td>frozen-at-spawn vs mid-session updates</td><td class="kill">staleness failures exceed consistency + cache wins</td></tr>
+      <tr><td class="cid">C9</td><td>Superseded facts must be excluded, not annotated</td><td>primer excluding vs including-with-labels</td><td class="kill">labeled-but-present performs no worse than excluded</td></tr>
+    </table>
+  </div>
+  <p class="caption">Paired ablations at the seam, never system-vs-system. A validation program where no outcome could change the architecture is theater.</p>
+  <p><strong>First data</strong> (2026-07-27, 36 pre-registered probes per experiment): a truly flat projection — two conflicting decisions, no validity metadata — is <strong>unanimously undeterminable</strong> to its consumer (12/12 refused to name a current target), while adding one supersession label yields 12/12 determined-correct, matching exclusion. The gap between a flat store and a ledger is, measurably, one field. A first run of the same experiment was voided before unblinding: its action-shaped probe was refused by the executing runtime's own safety gate — an unauthorized production action decided from untrusted context, blocked regardless of what the context asserted — which is §5's authority-at-the-gate principle demonstrating itself against the experiment designed to validate it.</p>
+  <p>The standing test is production. Count the error classes in real operation: settled decisions re-derived, humans correcting stale-fact actions, reconstructed summaries consumed by successors versus ignored. "Proven," in the only sense available, is when those counters trend to zero under adversarial probes and real load, after each kill criterion has had a fair chance to fire and didn't.</p>
+</section>
+
+<section>
+  <span class="folio">§9 · Case study</span>
+  <h2>How glance fits</h2>
+  <p><span class="kicker">Glance is oversight for an autonomous engineering fleet: you glance, and you know. It is also the runtime this position was distilled from and tested against.</span> Its daemon supervises at turn boundaries and never touches a worker's live context, which rules out in-window mechanisms by construction (§5). Its work graph is declared, so inference over its own exhaust is a category error it never has to make (§4).</p>
+
+  <div class="ledger">
+    <table>
+      <tr>
+        <td class="id">L0</td>
+        <td class="body-cell">per-agent receipts, transcripts, gate logs, written by the daemon outside any worker's context</td>
+        <td class="tag tag-green">IN&nbsp;PLACE</td>
+      </tr>
+      <tr>
+        <td class="id">L1</td>
+        <td class="body-cell">decision facts carry supersession (supersedes / supersededBy / supersededAt); the write rule stamps the loser atomically, the primer projects only currently-valid decisions, kb-search surfaces addressable ids; the supersession verb is reachable from every lane (agent tool AND human HTTP route); blind-reviewed at every step (adopt race, stale-PATCH chain deletion, a poisoned recovery path, and a degenerate-supersedes append all found and closed)</td>
+        <td class="tag tag-green">MERGED</td>
+      </tr>
+      <tr>
+        <td class="id">L2</td>
+        <td class="body-cell">node summaries: regenerate-never-append, reference-never-restate, frozen into after-action on settling</td>
+        <td class="tag tag-muted">DECIDED&nbsp;07-25</td>
+      </tr>
+      <tr>
+        <td class="id">L3</td>
+        <td class="body-cell">context primer frozen at worker spawn; must-see items surface by state region, never by score; ≤800-token downward budget</td>
+        <td class="tag tag-muted">DECIDED&nbsp;07-25</td>
+      </tr>
+      <tr>
+        <td class="id">exit</td>
+        <td class="body-cell">every terminal transition regenerates: a killed worker's node gets a summary rebuilt from receipts, marked reconstructed</td>
+        <td class="tag tag-muted">DECIDED&nbsp;07-25</td>
+      </tr>
+      <tr>
+        <td class="id">conflict</td>
+        <td class="body-cell">conflicting escalations supersede, never coexist, resolved at write time through the single-writer supervisor; current state is a property of the node, never of the path</td>
+        <td class="tag tag-muted">DECIDED&nbsp;07-25</td>
+      </tr>
+      <tr>
+        <td class="id">retrieval</td>
+        <td class="body-cell">BM25 over the declared graph, by design; no vector infrastructure until logged misses justify it — and the C5 counter now logs every miss with its query regime (entity vs semantic-gap), redacted and flood-deduped, so that call will be made on measured evidence</td>
+        <td class="tag tag-green">MERGED</td>
+      </tr>
+      <tr>
+        <td class="id">pinning</td>
+        <td class="body-cell">the primer is region-partitioned: failure warnings pinned unconditionally (never evicted, not even by the budget), currently-valid decisions pinned next, episodic content ranked in the remainder — deterministic eviction, byte-identical renders, kill-flag inherited; blind-reviewed (a cap bypass through the ranked region found and closed)</td>
+        <td class="tag tag-green">MERGED</td>
+      </tr>
+      <tr>
+        <td class="id">harness</td>
+        <td class="body-cell">eleven deterministic seam scenarios locked in-repo (supersede-endpoint, the grant-gate family, exact-identifier drill-down, the adopt-path race, A→B→A projection, regeneration purity), coverage enumerated with honest PARTIAL labels; the deferred half of every partial row is one named gap — the live-runner family</td>
+        <td class="tag tag-green">MERGED</td>
+      </tr>
+    </table>
+  </div>
+  <p class="caption">Position → practice. DECIDED means written into the room-threads plan on 2026-07-25: schema and rules fixed before build. Four units merged 2026-07-27 (L1 supersession, the primer partition, the harness suite, the C5 counter), each through the same pipeline: worktree, full gates, blind adversarial review — which found real defects in every unit it flagged (an adopt race, a cap bypass, over-claiming test labels, a query-text leak) before they shipped. The pinning row spent a day RED first: applying the position's evaluation lens to its own runtime found the L3 rule unenforced at the primer. A case study that only turns rows green is a brochure; this one turns rows red, then earns them back.</p>
+
+  <p>The DECIDED rows are amendments this research forced into <strong>room-threads</strong>, the plan that rebuilds the room around nodes, where a node is the unit of work and the unit of conversation at once. Each closes one of §3's failure modes at design time: orphaned exits became <em>abnormal exits regenerate too</em>; parallel-writer disagreement became <em>supersede, never coexist</em>, with superseded cards addressable as history. The product's differentiation is that cards are proofs. Two live contradictory proofs is the one thing it can never render.</p>
+
+  <p>Glance is a good instrument for §8's program for two reasons. The replay corpus exists: months of receipts with real supersessions and real worker deaths in them, so C1 and C7 run against ground truth that needs no labeling. And the convergence is real: room-threads reached regenerate-never-append from its own scar tissue, a supervising session killed by context it could not shed, before anyone here read this literature. Two lineages, one conclusion.</p>
+</section>
+
+<section>
+  <span class="folio">Coda · Open problems</span>
+  <h2>What nobody has solved</h2>
+  <p><strong>Live compaction of a moving target.</strong> Regeneration-on-transition sidesteps it for work with state boundaries; a months-long continuous goal with no settling points still lacks a principled compaction trigger. <strong>Skill distillation without drift.</strong> Turning noisy successful traces into reusable, parameterized procedures automatically; current summarization loses the exact parameters that made the trace work. <strong>Cross-runtime memory trust.</strong> When two agent systems share facts, provenance stops at the boundary; nothing today distinguishes "verified by their gates" from "their model said so."</p>
+</section>
+
+<footer>
+  <div>Position: July 2026. Source systems verified against primary sources —
+  Graphiti/Zep <a href="https://arxiv.org/abs/2501.13956">arXiv:2501.13956</a> ·
+  HippoRAG <a href="https://arxiv.org/abs/2405.14831">arXiv:2405.14831</a> ·
+  MemGPT <a href="https://arxiv.org/abs/2310.08560">arXiv:2310.08560</a> ·
+  LongMemEval <a href="https://arxiv.org/abs/2410.10813">arXiv:2410.10813</a> ·
+  LongMemEval-V2 <a href="https://arxiv.org/abs/2605.12493">arXiv:2605.12493</a> ·
+  MemoryAgentBench · LoCoMo · TencentDB-Agent-Memory · Nous Hermes Agent.</div>
+  <div style="margin-top:0.5rem">Related work informing §2's recoverability claim, §3's exclusion rule, and C9 —
+  Compliance Trap <a href="https://arxiv.org/abs/2607.10608">arXiv:2607.10608</a> ·
+  Masking Stale Observations <a href="https://arxiv.org/abs/2606.00408">arXiv:2606.00408</a> ·
+  Governance Decay <a href="https://arxiv.org/abs/2606.22528">arXiv:2606.22528</a> ·
+  Stop Means Stop <a href="https://arxiv.org/abs/2607.14166">arXiv:2607.14166</a> ·
+  Pi-Serini <a href="https://arxiv.org/abs/2605.10848">arXiv:2605.10848</a> ·
+  MemOps <a href="https://arxiv.org/abs/2607.12893">arXiv:2607.12893</a> ·
+  ClawMark <a href="https://arxiv.org/abs/2604.23781">arXiv:2604.23781</a> ·
+  Agentic Context Management <a href="https://arxiv.org/abs/2607.21503">arXiv:2607.21503</a> (validated compaction; retrieval regime study).</div>
+  <div style="margin-top:0.5rem">Amended, never rewritten — 07-25: entry rule (recurrence promotes), exclusion-not-annotation, gated regeneration · 07-26: authority channel, action-path scoping, nine-class taxonomy with both-direction constraint scoring, divergence-step metric, L1 shipped to review, primer-pinning gap opened · 07-27: L1 supersession merged, primer partition built and merged, harness scenarios (11 seam locks) merged, C5 miss counter live — every unit blind-reviewed before landing; first pre-registered ablation data unblinded (flat store unanimously undeterminable; one label restores determinism); a live scratch-daemon run found the supersession verb unreachable from the human lane — closed the same day with an HTTP route.</div>
+  <div style="margin-top:0.5rem">Entries are superseded, never deleted.</div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var canvas = document.getElementById('shiftchange');
+  if (!canvas || !canvas.getContext) return;
+  var ctx = canvas.getContext('2d');
+  var reduced = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var stat = null, terminal = null, lastW = 0, raf = 0;
+
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = a + 0x6D2B79F5 | 0;
+      var t = Math.imul(a ^ a >>> 15, 1 | a);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+  }
+
+  function build() {
+    var rect = canvas.getBoundingClientRect();
+    var W = Math.max(300, Math.round(rect.width));
+    var H = Math.max(200, Math.round(rect.height));
+    var dpr = Math.min(2, window.devicePixelRatio || 1);
+    canvas.width = W * dpr; canvas.height = H * dpr;
+    var off = document.createElement('canvas');
+    off.width = W * dpr; off.height = H * dpr;
+    var g = off.getContext('2d');
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    var rnd = mulberry32(20260726);
+
+    // night ground
+    var bg = g.createLinearGradient(0, 0, 0, H);
+    bg.addColorStop(0, '#05080a');
+    bg.addColorStop(0.55, '#081009');
+    bg.addColorStop(1, '#0a120c');
+    g.fillStyle = bg; g.fillRect(0, 0, W, H);
+
+    // the record: one continuous line of script
+    var baseY = H * 0.70;
+    var p1 = rnd() * 6.28, p2 = rnd() * 6.28, p3 = rnd() * 6.28;
+    var amp = new Float32Array(W);
+    var x = 0;
+    while (x < W) {
+      var wordLen = 18 + Math.floor(rnd() * 52);
+      var gapLen = 4 + Math.floor(rnd() * 7);
+      var a = 2 + rnd() * 6;
+      for (var i = 0; i < wordLen && x < W; i++, x++) amp[x] = a;
+      for (var j = 0; j < gapLen && x < W; j++, x++) amp[x] = a * 0.25;
+    }
+    var lineY = new Float32Array(W);
+    for (x = 0; x < W; x++) {
+      lineY[x] = baseY
+        + Math.sin(x * 0.55 + p1) * 0.35 * amp[x]
+        + Math.sin(x * 0.21 + p2) * 0.5 * amp[x]
+        + Math.sin(x * 1.3 + p3) * 0.25 * amp[x];
+    }
+    var endX = Math.round(W * 0.965);
+
+    // shifts: brief lives above the line
+    var lives = [];
+    var sx = 0.02;
+    while (sx < 0.88) {
+      var len = 0.05 + rnd() * 0.07;
+      lives.push({ x0: sx, x1: Math.min(sx + len, 0.95) });
+      sx = sx + len - (0.008 + rnd() * 0.02);
+    }
+    var cutA = 2 + Math.floor(rnd() * 2);
+    var cutB = lives.length - 3 - Math.floor(rnd() * 2);
+
+    g.globalCompositeOperation = 'lighter';
+    for (var k = 0; k < lives.length; k++) {
+      var L = lives[k];
+      var current = (k === lives.length - 1);
+      if (current) { L.x1 = 0.968; L.x0 = Math.max(L.x0, 0.90); }
+      var x0 = L.x0 * W, x1 = L.x1 * W;
+      var cx = (x0 + x1) / 2, span = x1 - x0;
+      var cut = (k === cutA || k === cutB);
+      var cy = H * (0.22 + rnd() * 0.20) - (cut ? H * 0.07 : 0);
+      var rX = span * (0.32 + rnd() * 0.14);
+      var rY = H * (cut ? 0.09 + rnd() * 0.04 : 0.13 + rnd() * 0.13);
+      var glow = current ? 0.27 : 0.07 + rnd() * 0.10;
+
+      var grd = g.createRadialGradient(cx, cy, 0, cx, cy, Math.max(rX, rY));
+      grd.addColorStop(0, 'rgba(190,226,236,' + glow + ')');
+      grd.addColorStop(1, 'rgba(190,226,236,0)');
+      g.save(); g.translate(cx, cy); g.scale(rX / Math.max(rX, rY), rY / Math.max(rX, rY)); g.translate(-cx, -cy);
+      g.fillStyle = grd;
+      g.fillRect(cx - Math.max(rX, rY), cy - Math.max(rX, rY), Math.max(rX, rY) * 2, Math.max(rX, rY) * 2);
+      g.restore();
+
+      var core = g.createRadialGradient(cx, cy, 0, cx, cy, rY * 0.35);
+      core.addColorStop(0, 'rgba(226,244,248,' + (current ? 0.30 : 0.16) + ')');
+      core.addColorStop(1, 'rgba(226,244,248,0)');
+      g.fillStyle = core;
+      g.beginPath(); g.arc(cx, cy, rY * 0.35, 0, 6.284); g.fill();
+
+      // reach toward the book — cut lives never make it down
+      var reach = cut ? cy + rY * 1.15 : baseY;
+      var beam = g.createLinearGradient(0, cy, 0, reach);
+      beam.addColorStop(0, 'rgba(190,226,236,' + (current ? 0.13 : 0.05) + ')');
+      beam.addColorStop(1, 'rgba(190,226,236,' + (current ? 0.05 : 0) + ')');
+      g.fillStyle = beam;
+      g.fillRect(cx - span * 0.2, cy, span * 0.4, reach - cy);
+
+      if (cut) {
+        for (var s = 0; s < 13; s++) {
+          var px = cx + (rnd() - 0.5) * span * 0.9;
+          var py = cy - rY * (0.3 + rnd() * 1.8);
+          g.fillStyle = 'rgba(205,232,240,' + (0.08 + rnd() * 0.12) + ')';
+          g.beginPath(); g.arc(px, py, 0.6 + rnd() * 1.1, 0, 6.284); g.fill();
+        }
+      }
+      L.cut = cut;
+    }
+    g.globalCompositeOperation = 'source-over';
+
+    // draw the script line
+    function strokeLine(fromX, toX, style, width, blur, blurStyle) {
+      g.beginPath();
+      var a0 = Math.max(0, Math.floor(fromX)), a1 = Math.min(W - 1, Math.ceil(toX));
+      a1 = Math.min(a1, endX);
+      g.moveTo(a0, lineY[a0]);
+      for (var xi = a0 + 1; xi <= a1; xi++) g.lineTo(xi, lineY[xi]);
+      g.strokeStyle = style; g.lineWidth = width;
+      g.shadowColor = blurStyle || 'rgba(0,0,0,0)'; g.shadowBlur = blur || 0;
+      g.stroke();
+      g.shadowBlur = 0;
+    }
+    strokeLine(0, endX, 'rgba(233,215,160,0.16)', 3.2, 0);
+    strokeLine(0, endX, 'rgba(233,215,160,0.72)', 1.1, 7, 'rgba(233,215,160,0.55)');
+    for (k = 0; k < lives.length; k++) {
+      strokeLine(lives[k].x0 * W, lives[k].x1 * W, 'rgba(255,239,192,0.5)', 1.4, 10, 'rgba(255,239,192,0.6)');
+    }
+
+    // vignette
+    var vg = g.createRadialGradient(W / 2, H * 0.55, H * 0.25, W / 2, H * 0.55, W * 0.72);
+    vg.addColorStop(0, 'rgba(4,7,6,0)');
+    vg.addColorStop(1, 'rgba(3,5,5,0.6)');
+    g.fillStyle = vg; g.fillRect(0, 0, W, H);
+
+    // struck entries: still legible, no longer true
+    var used = [];
+    for (var st = 0; st < 5; st++) {
+      var mx;
+      var tries = 0;
+      do { mx = (0.06 + rnd() * 0.66) * W; tries++; } while (tries < 20 && used.some(function (u) { return Math.abs(u - mx) < 40; }));
+      used.push(mx);
+      var len2 = 26 + rnd() * 34;
+      var ang = (rnd() - 0.5) * 0.12;
+      var my = lineY[Math.round(mx)] - 0.5;
+      g.save(); g.translate(mx, my); g.rotate(ang);
+      g.strokeStyle = 'rgba(198,74,58,0.85)'; g.lineWidth = 1.8;
+      g.shadowColor = 'rgba(198,74,58,0.5)'; g.shadowBlur = 4;
+      g.beginPath(); g.moveTo(-len2 / 2, 0); g.lineTo(len2 / 2, 0); g.stroke();
+      g.shadowBlur = 0;
+      g.strokeStyle = 'rgba(198,74,58,0.3)'; g.lineWidth = 1;
+      g.beginPath(); g.moveTo(-len2 / 2 + 2, 1.4); g.lineTo(len2 / 2 - 3, 1.1); g.stroke();
+      g.restore();
+    }
+
+    // the one thing currently true
+    var ty = lineY[endX];
+    var halo = g.createRadialGradient(endX, ty, 0, endX, ty, 26);
+    halo.addColorStop(0, 'rgba(255,246,218,0.85)');
+    halo.addColorStop(0.35, 'rgba(255,226,168,0.25)');
+    halo.addColorStop(1, 'rgba(255,226,168,0)');
+    g.globalCompositeOperation = 'lighter';
+    g.fillStyle = halo;
+    g.beginPath(); g.arc(endX, ty, 26, 0, 6.284); g.fill();
+    g.fillStyle = 'rgba(255,252,240,0.95)';
+    g.beginPath(); g.arc(endX, ty, 2.1, 0, 6.284); g.fill();
+    g.globalCompositeOperation = 'source-over';
+
+    // film grain
+    for (var n = 0; n < 700; n++) {
+      g.fillStyle = 'rgba(210,230,220,' + (rnd() * 0.035) + ')';
+      g.fillRect(rnd() * W, rnd() * H, 1, 1);
+    }
+
+    stat = off;
+    terminal = { x: endX, y: ty, W: W, H: H, dpr: dpr };
+    lastW = rect.width;
+  }
+
+  function frame(now) {
+    if (!stat) return;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.drawImage(stat, 0, 0);
+    ctx.setTransform(terminal.dpr, 0, 0, terminal.dpr, 0, 0);
+    var b = Math.sin(now / 1300);
+    var r = 22 + 7 * b;
+    var breath = ctx.createRadialGradient(terminal.x, terminal.y, 0, terminal.x, terminal.y, r);
+    breath.addColorStop(0, 'rgba(255,240,200,' + (0.12 + 0.06 * b) + ')');
+    breath.addColorStop(1, 'rgba(255,240,200,0)');
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.fillStyle = breath;
+    ctx.beginPath(); ctx.arc(terminal.x, terminal.y, r, 0, 6.284); ctx.fill();
+    ctx.globalCompositeOperation = 'source-over';
+    if (!reduced) raf = requestAnimationFrame(frame);
+  }
+
+  function start() {
+    build();
+    if (raf) cancelAnimationFrame(raf);
+    if (reduced) { frame(900); } else { raf = requestAnimationFrame(frame); }
+  }
+
+  var pending = 0;
+  window.addEventListener('resize', function () {
+    clearTimeout(pending);
+    pending = setTimeout(function () {
+      if (Math.abs(canvas.getBoundingClientRect().width - lastW) > 1) start();
+    }, 150);
+  });
+
+  start();
+})();
+</script>
