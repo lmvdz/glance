@@ -964,6 +964,17 @@ export interface SquadManagerOptions {
 	voicePush?: PushService;
 	/** Injectable broker client for tests; default talks to the real loopback broker via `fetch`. */
 	voiceBroker?: BrokerClient;
+	/** Test-only speedup for `VoiceCallCoordinator`'s journal-tail poll interval (production default:
+	 *  400ms). Same rationale as `replaySettleTimeoutMs` above — an integration test driving a call
+	 *  through `SquadManager` (rather than constructing `VoiceCallCoordinator` directly, the way
+	 *  tests/voice-call-manager.test.ts does) still needs to observe journal-tailed state without
+	 *  paying the full production interval. Omitted in production; `VoiceCallCoordinator` itself
+	 *  applies its own default when this is undefined. */
+	voiceJournalPollIntervalMs?: number;
+	/** Test-only speedup for `VoiceCallCoordinator`'s liveness-probe interval (production default:
+	 *  5000ms) — same rationale as `voiceJournalPollIntervalMs` above, for socket-loss → degraded →
+	 *  reconnect timing. */
+	voiceLivenessProbeIntervalMs?: number;
 }
 
 /**
@@ -1291,6 +1302,8 @@ export class SquadManager extends EventEmitter {
 			log: (m) => this.log("warn", `voice-call: ${m}`),
 			broker: opts.voiceBroker,
 			push: opts.voicePush,
+			journalPollIntervalMs: opts.voiceJournalPollIntervalMs,
+			livenessProbeIntervalMs: opts.voiceLivenessProbeIntervalMs,
 			channelMemberUserIds: (channelId) => this.channelStore.memberUserIds(channelId),
 			emitCard: async (input) => {
 				const entry = await this.channelStore.appendManager(input.channelId, {
