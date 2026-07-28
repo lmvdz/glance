@@ -31,9 +31,12 @@ export interface ToastInfo {
  * can construct an AppView the render switch doesn't handle. NOTE: GRAPH-FOLD's own alias map
  * still sends the dead `heat` key to `omp-graph` (unchanged, per the comprehension-fog review
  * verdict) — `fog` is a genuinely NEW view, not a resurrection of the retired Heat page; it has no
- * entry in `VIEW_ALIAS_MAP`.
+ * entry in `VIEW_ALIAS_MAP`. `economics` (dead-doors audit) is the same shape as `daily`: a fully
+ * built workbench surface (CostSurface) that had no `AppView` key at all, so the ⌘K palette — the
+ * only door left once the rail was retired — had no way to name it as a destination. Also new to
+ * `VALID_VIEWS` in `lib/viewAlias.ts`, for the same reason `daily` had to be there already.
  */
-export type AppView = 'fleet' | 'tasks' | 'omp-graph' | 'fog' | 'daily' | 'capabilities' | 'org' | 'intervene' | 'review' | 'plan-reality' | 'plan-brief';
+export type AppView = 'fleet' | 'tasks' | 'omp-graph' | 'fog' | 'daily' | 'economics' | 'capabilities' | 'org' | 'intervene' | 'review' | 'plan-reality' | 'plan-brief';
 export type TaskFilter = 'open' | 'active' | 'done' | 'all';
 
 /** Read the raw persisted view key (pre-coercion) — a plain function so both the `view` and

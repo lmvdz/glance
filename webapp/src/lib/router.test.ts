@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { gateVerdictHref, hubHref, parseHubHash, shouldColdBootFleet, unitHref, workbenchHref } from './router';
+import { canonicalHubHash, gateVerdictHref, hubHref, parseHubHash, reconcileHubHash, shouldColdBootFleet, unitHref, workbenchHref } from './router';
 
 describe('Hub hash router', () => {
   test('cold boot defaults to fleet channel', () => {
@@ -53,5 +53,56 @@ describe('Hub hash router', () => {
   test('task route opens a specific TaskDetail DAG surface', () => {
     expect(parseHubHash('#/workbench/task/feat%201')).toEqual({ kind: 'workbench', view: 'task', id: 'feat 1' });
     expect(workbenchHref('task', 'feat 1')).toBe('#/workbench/task/feat%201');
+  });
+});
+
+describe('canonicalHubHash / reconcileHubHash — the address bar must never disagree with the screen', () => {
+  // Dead-doors audit finding 1: clicking "Fleet" or "Graph" left `#/workbench/fleet` (or /graph) in
+  // the address bar while the room silently rendered underneath it — a screen and a URL naming two
+  // different pages. `canonicalHubHash` is what the URL SHOULD say for a resolved route; a hash that
+  // already matches it needs no correction (the common case for ordinary, well-formed navigation).
+
+  test('a route round-trips to its own canonical hash — this is what makes normalization idempotent', () => {
+    const cases: string[] = [
+      '#fleet',
+      '#/channel/ops%2Fnight',
+      '#/channel/ops%2Fnight/entry/e1',
+      '#/workbench/capabilities',
+      '#/workbench/daily',
+      '#/workbench/economics',
+      '#/gate-verdict/ops%2Fnight/entry%3A42',
+      '#/workbench/task/feat%201',
+      '#/plan-reality',
+      '#/plan-reality/feat-1',
+      '#/plans',
+      '#/plans/my-plan',
+    ];
+    for (const hash of cases) {
+      const canonical = canonicalHubHash(parseHubHash(hash));
+      expect(canonical).toBe(hash);
+      // And applying it again changes nothing further — no oscillation.
+      expect(canonicalHubHash(parseHubHash(canonical))).toBe(canonical);
+    }
+  });
+
+  test('the retired "Fleet" and "Graph" workbench spellings correct the address bar to the real room hash', () => {
+    expect(reconcileHubHash('#/workbench/fleet')).toEqual({ route: { kind: 'hub', channelId: 'fleet' }, correctedHash: '#fleet' });
+    expect(reconcileHubHash('#/workbench/graph')).toEqual({ route: { kind: 'hub', channelId: 'fleet' }, correctedHash: '#fleet' });
+    expect(reconcileHubHash('#/workbench/omp-graph')).toEqual({ route: { kind: 'hub', channelId: 'fleet' }, correctedHash: '#fleet' });
+  });
+
+  test('an unrecognized workbench view also corrects, rather than leaving a 404-shaped URL over a hub screen', () => {
+    expect(reconcileHubHash('#/workbench/not-a-view')).toEqual({ route: { kind: 'hub', channelId: 'fleet' }, correctedHash: '#fleet' });
+  });
+
+  test('old unit-opening spellings correct to the modern channel hash', () => {
+    expect(reconcileHubHash('#/intervene/agent%201').correctedHash).toBe(unitHref('agent 1'));
+    expect(reconcileHubHash('#/agent/agent%201').correctedHash).toBe(unitHref('agent 1'));
+  });
+
+  test('an already-canonical hash needs no correction — ordinary navigation never rewrites the URL', () => {
+    for (const hash of ['#fleet', '#/workbench/capabilities', '#/workbench/daily', '#/workbench/economics', '#/plan-reality', '#/plans']) {
+      expect(reconcileHubHash(hash).correctedHash).toBeNull();
+    }
   });
 });

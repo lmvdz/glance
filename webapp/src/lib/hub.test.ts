@@ -62,6 +62,21 @@ describe('Hub reductions', () => {
     expect(html).not.toContain('esc goes back');
   });
 
+  // Dead-doors audit: there is no nav rail (this file's own header comment) — the palette is the
+  // real nav for six of the eight built surfaces, and Ctrl/⌘+K had never once been shown on screen.
+  // A first-time operator with no reason to already know the shortcut had no way to find it. The bar
+  // is the one element every screen shares, so it is the one place a hint reaches all of them.
+  test('the bar carries a clickable ⌘K hint when a palette opener is given — the only on-screen way to discover the palette now that there is no rail', () => {
+    const html = renderToStaticMarkup(React.createElement(TopBar, { repo: 'omp-squad', now: 0, onOpenPalette: () => undefined }));
+    expect(html).toContain('⌘K');
+    expect(html).toContain('<button');
+  });
+
+  test('without a palette opener the bar stays exactly as before — no half-wired hint pointing at nothing', () => {
+    const html = renderToStaticMarkup(React.createElement(TopBar, { repo: 'omp-squad', now: 0 }));
+    expect(html).not.toContain('⌘K');
+  });
+
   test('presence count counts humans, not sockets', () => {
     expect(presenceCount({ users: [{ id: 'u1', displayName: 'Lars', socketCount: 5 }] })).toBe(1);
   });

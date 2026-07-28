@@ -15,7 +15,7 @@
  */
 
 import type { AppView } from '../context/TaskContext';
-import { normalizeWorkbenchView, workbenchHref } from './router';
+import { hubHref, normalizeWorkbenchView, workbenchHref } from './router';
 
 export type PaletteRowKind = 'nav' | 'action' | 'fabric';
 
@@ -26,7 +26,7 @@ interface PaletteRowBase {
   label: string;
 }
 
-/** Jump to one of the 4 shell views, or Org settings (routed-into, not a top-level nav item). */
+/** Jump to one of the nav-jump destinations in `NAV_ROWS` below. */
 export interface PaletteNavRow extends PaletteRowBase {
   kind: 'nav';
   view: AppView;
@@ -55,21 +55,43 @@ export interface PaletteFabricRow extends PaletteRowBase {
 
 export type PaletteRow = PaletteNavRow | PaletteActionRow | PaletteFabricRow;
 
-/** The nav-jump command set — the rail's nav items (Fleet · Tasks · Graph · Fog · Plan reality ·
- *  Capabilities) + Org (reachable from the palette even though it's gear-only in the rail now, per
- *  GRAPH-FOLD.md §6e). Order mirrors the rail. */
+/**
+ * The nav-jump command set. There is no nav rail any more (HubShell/RoomFrame: "the tree lives on
+ * the RIGHT here... there is no channel column — plans and doors are reached from the tree and the
+ * palette") — this list, not a rail, is THE way to reach every surface that isn't a card door.
+ *
+ * "Graph" used to be here too, pointed at `omp-graph`. It doesn't exist any more: `parseHubHash`
+ * dissolves every spelling of the old Observe/topology page back into the room (router.ts, "the
+ * graph dissolves into the room, under both of its spellings") — clicking it landed on the exact
+ * same screen "Fleet" already opens, with no graph content, which is a false promise with a label
+ * on it. Removed rather than wired: there is nothing left behind that spelling to point at.
+ *
+ * "Fleet" stays: it's the ROOM now, not a retired page, so it points straight at the room's own
+ * hash instead of bouncing through the `#/workbench/fleet` spelling that only exists to redirect
+ * back here anyway (App.tsx's hub-hash reconciler would catch that bounce too, but there's no
+ * reason to lean on the safety net when the true destination is already known).
+ *
+ * "Daily", "Plan briefs" and "Economics" are real, fully-built surfaces (MondaySurface,
+ * PlanSurface, CostSurface) that had NO click path anywhere before this list grew to cover them —
+ * not from a card, not from a rail that doesn't exist. The palette is the only door they need.
+ */
 export const NAV_ROWS: readonly PaletteNavRow[] = [
   { kind: 'nav', id: 'nav-fleet', label: 'Fleet', view: 'fleet' },
   { kind: 'nav', id: 'nav-tasks', label: 'Tasks', view: 'tasks' },
-  { kind: 'nav', id: 'nav-graph', label: 'Graph', view: 'omp-graph' },
+  { kind: 'nav', id: 'nav-daily', label: 'Daily', view: 'daily' },
   { kind: 'nav', id: 'nav-fog', label: 'Fog', view: 'fog' },
   { kind: 'nav', id: 'nav-plan-reality', label: 'Plan reality', view: 'plan-reality' },
+  { kind: 'nav', id: 'nav-plans', label: 'Plan briefs', view: 'plan-brief' },
+  { kind: 'nav', id: 'nav-economics', label: 'Economics', view: 'economics' },
   { kind: 'nav', id: 'nav-capabilities', label: 'Capabilities', view: 'capabilities' },
   { kind: 'nav', id: 'nav-org', label: 'Organization settings', view: 'org' },
 ];
 
 /** The room shell is hash-routed; preserve a palette jump as a shareable, reloadable destination. */
 export function paletteNavigationHref(view: AppView): string | undefined {
+  // Fleet IS the room post-fold — send it straight to the real home hash rather than through the
+  // retired `#/workbench/fleet` spelling (see the NAV_ROWS comment above).
+  if (view === 'fleet') return hubHref();
   const workbenchView = normalizeWorkbenchView(view);
   return workbenchView ? workbenchHref(workbenchView) : undefined;
 }

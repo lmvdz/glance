@@ -99,7 +99,7 @@ function ChannelHeader({ channel, presence, selectedAgent }: { channel: Channel;
 
 
 export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWorkbench: (route: Extract<HubRoute, { kind: 'workbench' }>) => React.ReactNode }) {
-  const { tasks, agents, features, audit, currentProject, selectedTaskId, channelEntries: liveChannelEntries, presence: livePresence, typing, connected, subscribeConsole, sendConsoleCommand, showToast, commandAcks } = useTaskContext();
+  const { tasks, agents, features, audit, currentProject, selectedTaskId, channelEntries: liveChannelEntries, presence: livePresence, typing, connected, subscribeConsole, sendConsoleCommand, showToast, commandAcks, openCommandPalette } = useTaskContext();
   const [channels, setChannels] = useState<Channel[]>([DEFAULT_CHANNEL]);
   const [entries, setEntries] = useState<ChannelEntry[]>([]);
   const [presence, setPresence] = useState<PresenceSnapshot>(EMPTY_PRESENCE);
@@ -455,12 +455,13 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
             and the reason opening anything still felt like leaving. */}
         {route.kind === 'workbench' ? (
           <>
-            <TopBar repo={currentProject?.name ?? 'this repo'} summary={fleetSummary(roomNodes, livePlans)} now={frameNow} back={hubHref(DEFAULT_CHANNEL_ID)} />
+            <TopBar repo={currentProject?.name ?? 'this repo'} summary={fleetSummary(roomNodes, livePlans)} now={frameNow} back={hubHref(DEFAULT_CHANNEL_ID)} onOpenPalette={openCommandPalette} />
             <div className="flex min-h-0 flex-1 flex-col">{renderWorkbench(route)}</div>
           </>
         ) : (
           <RoomFrame
             repo={currentProject?.name ?? 'this repo'}
+            onOpenPalette={openCommandPalette}
             rooms={roomViews}
             activeRoomId={activeChannelId}
             onOpenRoom={(id) => { window.location.hash = hubHref(id); }}

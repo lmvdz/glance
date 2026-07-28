@@ -36,13 +36,20 @@ import { PendingApproval } from './components/PendingApproval';
 import { PageContextDebugPanel } from './components/PageContextDebugPanel';
 import { VoiceCallProvider } from './context/VoiceCallContext';
 import { VoiceCallPill } from './components/chat/VoiceCallPill';
-import { parseHubHash, shouldColdBootFleet, type HubRoute } from './lib/router';
+import { parseHubHash, reconcileHubHash, shouldColdBootFleet, type HubRoute } from './lib/router';
 import { Loader2 } from 'lucide-react';
 
 const useHubRoute = () => {
   const [route, setRoute] = React.useState(() => parseHubHash(typeof window === 'undefined' ? '' : window.location.hash));
   React.useEffect(() => {
-    const sync = () => setRoute(parseHubHash(window.location.hash));
+    const sync = () => {
+      // `reconcileHubHash` is the single place that decides BOTH what to render and whether the
+      // address bar is lying about it. `replaceState` (not assigning `.hash`) so a redirected old
+      // link never grows the back-stack and never re-fires this same listener.
+      const { route: parsed, correctedHash } = reconcileHubHash(window.location.hash);
+      setRoute(parsed);
+      if (correctedHash !== null) history.replaceState(null, '', location.pathname + location.search + correctedHash);
+    };
     if (shouldColdBootFleet(window.location.hash)) window.location.hash = '#fleet';
     sync();
     window.addEventListener('hashchange', sync);
