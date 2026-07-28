@@ -1,6 +1,6 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { ADDRESSABILITY_NOTE, alarmEyebrow, alarmExplanation, alarmStats, fleetSummary, standingLine } from '../../lib/roomFrame';
-import { nodeStatusLine, selectionPreview, type RoomNode } from '../../lib/roomState';
+import { nodeStatusLine, selectionPreview, type RoomNode, type RoomView } from '../../lib/roomState';
 import { Kbd } from '../kit/Kbd';
 
 /**
@@ -26,13 +26,7 @@ import { Kbd } from '../kit/Kbd';
  * here and should be added there rather than dropped.
  */
 
-export interface RoomView {
-	id: string;
-	name: string;
-	unread: number;
-	/** Node channels are a unit's own conversation, not a room you joined. */
-	kind: 'room' | 'node';
-}
+export type { RoomView };
 
 export interface RoomFrameProps {
 	repo: string;
@@ -152,6 +146,33 @@ export function RoomFrame({ repo, rooms, activeRoomId, onOpenRoom, nodes, plans,
 	const selected = nodes.find((node) => node.id === selectedId);
 	const stats = alarmStats(nodes, now);
 	const quiet = waiting.length === 0;
+	// #fleet and every active unit's channel stay on screen unconditionally; a settled unit's channel
+	// (its owner finished, or the record behind it is simply gone — roomViewsFrom in lib/roomState.ts
+	// treats both the same) folds away instead of piling up beside it forever. Collapsed by default:
+	// the working surface is for what is still moving.
+	const visibleRooms = rooms.filter((room) => !room.settled);
+	const settledRooms = rooms.filter((room) => room.settled);
+	const [settledRoomsOpen, setSettledRoomsOpen] = useState(false);
+	const renderRoom = (room: RoomView) => {
+		const here = room.id === activeRoomId;
+		return (
+			<button
+				key={room.id}
+				type="button"
+				onClick={() => onOpenRoom(room.id)}
+				className="flex items-center gap-2 px-1.5 py-1 text-left"
+				style={{ borderLeft: `2px solid ${here ? '#F0A35A' : 'transparent'}`, background: here ? '#131316' : 'transparent' }}
+				title={here ? 'You are reading this one.' : `Open ${room.name} — the room you are in now stays where it is.`}
+			>
+				<span style={{ fontFamily: MONO, fontSize: 11, color: here ? '#E8E8EA' : '#7A7A82' }}>{room.name}</span>
+				{room.kind === 'node' ? <span style={{ fontFamily: MONO, fontSize: 9.5, color: '#4A4A52' }}>unit</span> : null}
+				<span className="flex-1" />
+				{room.unread > 0 ? (
+					<span style={{ fontFamily: MONO, fontSize: 10, color: '#D9A03C' }}>{room.unread}</span>
+				) : null}
+			</button>
+		);
+	};
 
 	return (
 		<div className="flex h-full min-h-0 flex-1 flex-col" style={{ background: '#0A0A0B', color: '#E8E8EA' }}>
@@ -218,32 +239,33 @@ export function RoomFrame({ repo, rooms, activeRoomId, onOpenRoom, nodes, plans,
 							    answer it — you also have to see which conversation you are in and what else there
 							    is. Removing the old channel rail without putting this here left the room with no
 							    orientation at all, while every other screen still had one. */}
-							<div className="mt-3 flex flex-col gap-px">
-								{rooms.map((room) => {
-									const here = room.id === activeRoomId;
-									return (
+							{/* Bounded and scrollable (the `scrollbar-custom` idiom other panels already use, e.g.
+							    ToolCallGroup.tsx) rather than left to grow: a duplicate-riddled or simply
+							    long-lived rail used to push everything below it off screen. #fleet and every
+							    active unit render unconditionally inside it; only settled units fold away. */}
+							<div className="mt-3 flex max-h-64 flex-col gap-px overflow-y-auto scrollbar-custom">
+								{visibleRooms.map(renderRoom)}
+								{settledRooms.length > 0 ? (
+									<div className="flex flex-col gap-px">
 										<button
-											key={room.id}
 											type="button"
-											onClick={() => onOpenRoom(room.id)}
-											className="flex items-center gap-2 px-1.5 py-1 text-left"
-											style={{ borderLeft: `2px solid ${here ? '#F0A35A' : 'transparent'}`, background: here ? '#131316' : 'transparent' }}
-											title={here ? 'You are reading this one.' : `Open ${room.name} — the room you are in now stays where it is.`}
+											onClick={() => setSettledRoomsOpen((open) => !open)}
+											aria-expanded={settledRoomsOpen}
+											className="flex items-center gap-1.5 px-1.5 py-1 text-left"
+											style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.08em', color: '#5A5A61' }}
+											title={settledRoomsOpen ? 'Hide settled units’ channels.' : 'Settled units’ channels stay readable — they are just off the working surface.'}
 										>
-											<span style={{ fontFamily: MONO, fontSize: 11, color: here ? '#E8E8EA' : '#7A7A82' }}>{room.name}</span>
-											{room.kind === 'node' ? <span style={{ fontFamily: MONO, fontSize: 9.5, color: '#4A4A52' }}>unit</span> : null}
-											<span className="flex-1" />
-											{room.unread > 0 ? (
-												<span style={{ fontFamily: MONO, fontSize: 10, color: '#D9A03C' }}>{room.unread}</span>
-											) : null}
+											<span>{settledRoomsOpen ? '▾' : '▸'}</span>
+											<span>{settledRooms.length} settled</span>
 										</button>
-									);
-								})}
+										{settledRoomsOpen ? settledRooms.map(renderRoom) : null}
+									</div>
+								) : null}
 							</div>
 							<div className="mt-3" style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.16em', color: '#5A5A61' }}>UNITS</div>
 						</div>
 
-						<div className="min-h-0 flex-1 overflow-y-auto px-2 pt-2.5">
+						<div className="min-h-0 flex-1 overflow-y-auto px-2 pt-2.5 scrollbar-custom">
 							{nodes.length === 0 ? (
 								<div className="px-2 py-3 text-[12px] leading-relaxed" style={{ color: '#6A6A72' }}>
 									No work is running. Start something from the composer and it appears here with an address you can say out loud.
