@@ -15,7 +15,7 @@
  */
 
 import type { AppView } from '../context/TaskContext';
-import { hubHref, normalizeWorkbenchView, workbenchHref } from './router';
+import { hubHref, normalizeWorkbenchView, workbenchHref, type WorkbenchRouteView } from './router';
 
 export type PaletteRowKind = 'nav' | 'action' | 'fabric';
 
@@ -94,6 +94,19 @@ export function paletteNavigationHref(view: AppView): string | undefined {
   if (view === 'fleet') return hubHref();
   const workbenchView = normalizeWorkbenchView(view);
   return workbenchView ? workbenchHref(workbenchView) : undefined;
+}
+
+/**
+ * Which NAV_ROWS entry (if any) a workbench route is standing on — the on-screen nav strip's "you
+ * are here" mark (comprehension: the operator's own report that ⌘K was the ONLY way to move between
+ * these nine surfaces once landed on one — there was nothing on screen to say which one that was,
+ * either). `'task'` (a single task's detail, `#/workbench/task/<id>`) counts as standing on the
+ * Tasks row: it is the same surface family as `'tasks'`, just with one item open, and treating it
+ * as a different destination would make the current-task view claim to be nowhere on the strip.
+ */
+export function currentNavRowId(view: WorkbenchRouteView): string | undefined {
+  if (view === 'task') return 'nav-tasks';
+  return NAV_ROWS.find((row) => normalizeWorkbenchView(row.view) === view)?.id;
 }
 
 export const SEARCH_TASKS_ROW: PaletteActionRow = {

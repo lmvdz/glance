@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { entryAuthorLabel, entryTimeLabel, groupActiveWork, latestSeq, presenceCount, reduceChannelEntries } from './hub';
 import { renderToStaticMarkup } from 'react-dom/server';
 import React from 'react';
-import { TopBar } from '../components/hub/RoomFrame';
+import { RoomFrame, TopBar } from '../components/hub/RoomFrame';
 import type { AgentDTO, ChannelEntry } from './dto';
 
 const entry = (overrides: Partial<ChannelEntry> & Pick<ChannelEntry, 'id' | 'seq'>): ChannelEntry => ({
@@ -75,6 +75,27 @@ describe('Hub reductions', () => {
   test('without a palette opener the bar stays exactly as before — no half-wired hint pointing at nothing', () => {
     const html = renderToStaticMarkup(React.createElement(TopBar, { repo: 'omp-squad', now: 0 }));
     expect(html).not.toContain('⌘K');
+  });
+
+  // The workbench nav strip (WorkbenchNavStrip.tsx) fixed "I was only able to navigate through ⌘K"
+  // for the nine workbench surfaces — but it must not leak into the room. RoomFrame's own header
+  // comment is the law here: "no channel column — plans and doors are reached from the tree and the
+  // palette." That is about the room staying a narrative home screen with cards as doors, and this
+  // proves RoomFrame renders none of the strip's markers when given a normal, unremarkable frame.
+  test('the room does not render the workbench nav strip — that law only ever governed the room', () => {
+    const html = renderToStaticMarkup(
+      React.createElement(
+        RoomFrame,
+        { repo: 'omp-squad', rooms: [], activeRoomId: 'fleet', onOpenRoom: () => undefined, nodes: [], plans: 0, now: 0, onSelect: () => undefined, onEnter: () => undefined },
+        'room content',
+      ),
+    );
+    expect(html).not.toContain('aria-label="Workbench surfaces"');
+    // Labels that only the strip would ever print in this exact form (the room's own "WHERE YOU ARE
+    // STANDING" tree names channels and units, never these workbench surface names).
+    expect(html).not.toContain('Plan briefs');
+    expect(html).not.toContain('Organization settings');
+    expect(html).not.toContain('Capabilities');
   });
 
   test('presence count counts humans, not sockets', () => {

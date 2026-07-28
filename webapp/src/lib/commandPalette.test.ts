@@ -1,5 +1,5 @@
 import { expect, test, describe } from 'bun:test';
-import { staticRows, fabricRows, buildRows, moveSelection, NAV_ROWS, paletteNavigationHref, SEARCH_TASKS_ROW, type FabricSearchResult } from './commandPalette';
+import { staticRows, fabricRows, buildRows, moveSelection, NAV_ROWS, currentNavRowId, paletteNavigationHref, SEARCH_TASKS_ROW, type FabricSearchResult } from './commandPalette';
 import { canonicalHubHash, hubHref, parseHubHash } from './router';
 
 describe('staticRows', () => {
@@ -176,5 +176,34 @@ describe('palette navigation destinations', () => {
       expect(route.kind).toBe('workbench');
       expect(route.kind === 'workbench' && route.view).toBe(workbenchView);
     }
+  });
+});
+
+// The workbench nav strip's "you are here" mark (WorkbenchNavStrip.tsx) is built on this: which
+// NAV_ROWS entry (if any) a workbench route is standing on.
+describe('currentNavRowId', () => {
+  test('maps every workbench route a NAV_ROWS entry actually resolves to, back onto that entry', () => {
+    const cases: Array<{ view: Parameters<typeof currentNavRowId>[0]; id: string }> = [
+      { view: 'tasks', id: 'nav-tasks' },
+      { view: 'daily', id: 'nav-daily' },
+      { view: 'fog', id: 'nav-fog' },
+      { view: 'plan-reality', id: 'nav-plan-reality' },
+      { view: 'plans', id: 'nav-plans' }, // 'plans' is the workbench spelling of the 'plan-brief' nav row
+      { view: 'economics', id: 'nav-economics' },
+      { view: 'capabilities', id: 'nav-capabilities' },
+      { view: 'org', id: 'nav-org' },
+    ];
+    for (const { view, id } of cases) expect(currentNavRowId(view)).toBe(id);
+  });
+
+  test('a task detail counts as standing on the Tasks row, not as nowhere on the strip', () => {
+    expect(currentNavRowId('task')).toBe('nav-tasks');
+  });
+
+  test('routes with no nav-strip destination (review, gate-verdict, dissolved graph/intervene) resolve to no current row', () => {
+    expect(currentNavRowId('review')).toBeUndefined();
+    expect(currentNavRowId('gate-verdict')).toBeUndefined();
+    expect(currentNavRowId('graph')).toBeUndefined();
+    expect(currentNavRowId('intervene')).toBeUndefined();
   });
 });
