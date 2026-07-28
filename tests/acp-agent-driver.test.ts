@@ -43,7 +43,7 @@ process.stdin.on("data", (ch) => {
         send({ jsonrpc: "2.0", id, result: { protocolVersion: 1, agentCapabilities: {} } });
         break;
       case "session/new":
-        send({ jsonrpc: "2.0", id, result: { sessionId: "s1" } });
+        send({ jsonrpc: "2.0", id, result: { sessionId: "s1", models: { currentModelId: "fake-default", availableModels: [{ modelId: "fake-default", name: "Fake Default" }, { modelId: "fake-fast" }] } } });
         break;
       case "session/prompt":
         promptId = id;
@@ -502,4 +502,19 @@ test("a tool call that opens and never closes (adapter died mid-tool) is caught 
 	// The silence window is suspended for as long as the tool call is outstanding (by design — see plan
 	// 08), so a tool call whose completion never arrives can only be caught by the unconditional hard cap.
 	await expect(driver.prompt("hi")).rejects.toThrow(/turn hard cap/);
+});
+
+test("getAvailableModels answers with session/new's advertised roster — a live ACP agent is no longer silently absent from manager.modelOptions()", async () => {
+	const { driver } = await fakeDriver();
+	await driver.start(30_000);
+
+	// The fake's session/new advertised models.availableModels (ACP's only model-listing channel);
+	// the driver must capture it at handshake and serve it verbatim — entries carry `modelId`, which
+	// modelOptionsFromRuntime maps alongside RPC's `id`, so cold, live-omp, and live-ACP answers all
+	// produce the same option values.
+	const { models } = await driver.getAvailableModels();
+	expect(Array.isArray(models)).toBe(true);
+	const { modelOptionsFromRuntime } = await import("../src/agent-profiles.ts");
+	expect(modelOptionsFromRuntime(models).map((o) => o.value)).toEqual(["fake-default", "fake-fast"]);
+	await driver.stop();
 });
