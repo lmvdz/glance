@@ -2133,7 +2133,7 @@ export class SquadManager extends EventEmitter {
 					// adopt never recorded lineage and followLineage's crash-spanning stitch never fired for it).
 					await this.closeOrphanedPending(dto.id, p);
 					// Give the cold-adopted plain unit its prior context back (surfacing only, no auto-prompt).
-					await this.surfaceResumeDigest(dto.id, p);
+					await this.surfaceResumeDigest(dto.id, p, snapshot.transcripts[p.id]);
 				})
 				.catch((err) => this.log("warn", `take over ${p.name} failed: ${String(err)}`));
 		}
@@ -2149,12 +2149,33 @@ export class SquadManager extends EventEmitter {
 	 *  never the new dto.id. Plain units only: a resuming workflow re-executes its checkpointed node
 	 *  and carries its own rollup, so it needs no prose digest injected. Best-effort — the whole body
 	 *  is caught (an unhandled rejection detached from the boot sequence would crash the Bun daemon). */
-	private async surfaceResumeDigest(newId: string, p: PersistedAgent): Promise<void> {
+	private async surfaceResumeDigest(newId: string, p: PersistedAgent, priorTranscript?: TranscriptEntry[]): Promise<void> {
 		if (p.kind === "workflow") return;
 		try {
 			const rec = this.agents.get(newId);
 			if (!rec) return;
-			const digest = await readDigest(this.stateDir, p.id);
+			// Orphaned-run reconstruction (C3/E_orphan, plans/research-long-horizon-agent-memory):
+			// finalizeRun covers every exit INSIDE a living daemon, so the one orphan window left is
+			// the daemon itself dying mid-run — the interrupted run wrote no receipt and no digest,
+			// and the digest on disk (if any) describes the PREVIOUS finalized run. Detector,
+			// machine-checkable: persisted-transcript activity NEWER than the last finalized receipt
+			// means an unfinalized tail. Rebuild the digest from the persisted exhaust (buildDigest is
+			// pure and idempotent — harness G08) and MARK it reconstructed, so it reads as evidence,
+			// not self-report. Raw exhaust stays untouched; only the derived view is rebuilt (the
+			// battle-tested shape in mnemosyne's sleep() path — research-mnemosyne/BRIEF.md).
+			let digest = "";
+			const lastTs = priorTranscript?.length ? Math.max(...priorTranscript.map((e) => e.ts ?? 0)) : 0;
+			if (lastTs > 0) {
+				const receipts = await readReceipts(this.stateDir, p.id).catch(() => [] as RunReceipt[]);
+				const lastFinalized = receipts.length ? Math.max(...receipts.map((r) => r.endedAt ?? 0)) : 0;
+				if (lastTs > lastFinalized) {
+					const md = buildDigest({ transcript: priorTranscript ?? [], receipts });
+					digest =
+						"> ⚠ RECONSTRUCTED post-mortem — the final run never finalized (the daemon died mid-run). Rebuilt at adopt time from the persisted transcript and receipts: evidence, not self-report.\n\n" + md;
+					await writeDigest(this.stateDir, p.id, digest).catch((err) => this.log("warn", `reconstructed digest write for ${p.name} failed: ${String(err)}`));
+				}
+			}
+			if (!digest) digest = await readDigest(this.stateDir, p.id);
 			if (!digest) return;
 			this.append(rec, "system", "📒 Resume digest — prior session memory:\n" + fenceUntrusted("resume digest", digest));
 			this.emitAgent(rec);
@@ -13106,7 +13127,7 @@ export class SquadManager extends EventEmitter {
 					// stitches the cause.priorId lineage entry too (#lifecycle-truth finding 4).
 					await this.closeOrphanedPending(dto.id, p);
 					// Same prior-context surfacing as the adopt path (both mint a fresh id from a PersistedAgent).
-					await this.surfaceResumeDigest(dto.id, p);
+					await this.surfaceResumeDigest(dto.id, p, snapshot.transcripts[p.id]);
 				})
 				.catch((err) => this.log("error", `restore ${p.name} failed: ${String(err)}`));
 		}
