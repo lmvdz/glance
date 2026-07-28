@@ -64,6 +64,15 @@ function startFakeBridge(sessionId: string, port = 0, recordingMode?: "full" | "
 
 class FakeBroker implements BrokerClient {
 	readonly calls = new Map<string, BrokerCallView & { controlToken: string }>();
+	/** Every callId `endCall` was asked to reap, in call order — the orphan-reap fix's own test handle
+	 *  on "did the daemon actually tell the broker to end this call", distinct from `calls`'s `exit`
+	 *  field (which a test can also set directly, e.g. via `corroborateExit`-style helpers, without
+	 *  ever going through `endCall` at all). Recorded even for a callId this broker never registered —
+	 *  a real broker 404s on that but the ATTEMPT is what a reap-path test needs to see. */
+	readonly reapedCallIds: string[] = [];
+	/** When set, `endCall` throws this instead of reaping — proves a broker reap failure is tolerated
+	 *  (bounded-logged, never re-thrown) and never blocks the binding's own end. */
+	failReapWith: Error | undefined;
 	private seq = 0;
 
 	registerLiveCall(view: BrokerCallCreated): void {
@@ -74,6 +83,8 @@ class FakeBroker implements BrokerClient {
 		throw new Error("createCall must be stubbed per test via registerLiveCall + manual attach");
 	}
 	async endCall(callId: string): Promise<void> {
+		this.reapedCallIds.push(callId);
+		if (this.failReapWith) throw this.failReapWith;
 		const call = this.calls.get(callId);
 		if (call) call.exit = 0;
 	}
@@ -82,6 +93,15 @@ class FakeBroker implements BrokerClient {
 	}
 	nextId(): string {
 		return `call-${++this.seq}`;
+	}
+	/** Corroborates a process exit WITHOUT going through `endCall` — the honest "broker says the
+	 *  process died" signal a liveness probe checks for, kept distinct from `endCall` (an
+	 *  operator/daemon-initiated reap) so a test can tell the two apart: this sets `exit` the way a
+	 *  THIRD party killing the process would, leaving `reapedCallIds` untouched, so any entry that
+	 *  later appears there for this callId can only have come from the coordinator's OWN reap. */
+	corroborateExit(callId: string, code = 1): void {
+		const call = this.calls.get(callId);
+		if (call) call.exit = code;
 	}
 }
 
@@ -180,7 +200,7 @@ describe("startCall: thread-aware start with pinned identity", () => {
 		coordinator.stop();
 	});
 
-	test("bridge-connect failure tears down the tailer startCall already started (CRITICAL 2 known leak path)", async () => {
+	test("bridge-connect failure tears down the tailer startCall already started (CRITICAL 2 known leak path), and reaps the broker's orphaned call", async () => {
 		const stateDir = tmpDir("voice-mgr-state-");
 		const journalDir = tmpDir("voice-mgr-journal-");
 		cleanups.push(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(journalDir, { recursive: true, force: true }); });
@@ -210,6 +230,12 @@ describe("startCall: thread-aware start with pinned identity", () => {
 		expect(coordinator.state("room-1")!.state).toBe("ended");
 		expect(coordinator.state("room-1")!.terminalReason).toBe("start-failed");
 		expect(coordinator.hasActiveRuntime("room-1")).toBe(false);
+		// THE production defect this closes: the broker's `createCall` already succeeded (there IS a
+		// broker-spawned `omp live` process for this callId) before the bridge connect failed — a
+		// `start-failed` ending must reap that call, or it keeps running with nothing attached to it.
+		const callId = coordinator.state("room-1")!.callId!;
+		expect(callId).toBeTruthy();
+		expect(broker.reapedCallIds).toEqual([callId]);
 	});
 });
 
@@ -255,6 +281,34 @@ describe("journal-driven decision projection end-to-end", () => {
 		expect(ended.terminalReason).toBe("terminal");
 		expect(ended.terminalError).toBe("provider disconnected");
 		expect(coordinator.hasActiveRuntime("room-1")).toBe(false);
+		// The session ended ITSELF here (an explicit journaled terminal record) — no broker reap is
+		// warranted or wanted; the process is already gone.
+		expect(broker.reapedCallIds).toEqual([]);
+		coordinator.stop();
+	});
+
+	test("an idle-hangup terminal record ends the binding with terminalReason 'idle' — and, unlike plain terminal/journal-end, is still reaped", async () => {
+		const stateDir = tmpDir("voice-mgr-state-");
+		const journalDir = tmpDir("voice-mgr-journal-");
+		cleanups.push(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(journalDir, { recursive: true, force: true }); });
+		const bridge = startFakeBridge("live-abc");
+		cleanups.push(bridge.stop);
+		const broker = new ScriptedBroker(journalDir, bridge);
+		const cards: EmitCardInput[] = [];
+		const coordinator = makeCoordinator({ stateDir, broker, cards });
+		await coordinator.startCall("room-1", { ownerActorId: "operator" });
+		const binding = coordinator.state("room-1")!;
+		const journalPath = path.join(journalDir, `${binding.callId}.jsonl`);
+		appendFileSync(journalPath, journalLine(0, "live-abc", { type: "terminal", error: null, reason: "idle" }));
+		await waitFor(() => coordinator.state("room-1")!.state === "ended");
+		const ended = coordinator.state("room-1")!;
+		expect(ended.terminalReason).toBe("idle");
+		// `idle` is journaled through the exact same "the session wrote its own terminal record" path
+		// as plain `terminal`, so the underlying `omp live` process is expected to already be gone —
+		// but it is NOT in the two hard-coded exemptions (`terminal`, `journal-end`), so this daemon
+		// still asks the broker to reap it. Best-effort and (per the broker's own idempotent
+		// `DELETE /calls/:id`) harmless even when the process really has already exited.
+		expect(broker.reapedCallIds).toEqual([binding.callId]);
 		coordinator.stop();
 	});
 });
@@ -302,11 +356,18 @@ describe("distinct honest states", () => {
 		await waitFor(() => coordinator.state("room-1")!.state === "degraded");
 
 		const binding = coordinator.state("room-1")!;
-		await broker.endCall(binding.callId!); // broker now reports exit !== null
+		// A THIRD party (not this coordinator) already reaped the process — `corroborateExit` sets
+		// `exit` the way that would look from the broker's own bookkeeping, WITHOUT going through
+		// `endCall`, so any `reapedCallIds` entry the assertion below sees can only be the coordinator's
+		// own reap, not an artifact of how this test set the scenario up.
+		broker.corroborateExit(binding.callId!);
 		await waitFor(() => coordinator.state("room-1")!.state === "ended");
 		const ended = coordinator.state("room-1")!;
 		expect(ended.state).toBe("ended");
 		expect(ended.terminalReason).toBe("broker-exit");
+		// `broker-exit` is still reaped (best-effort, deliberately defensive even though the process is
+		// already corroborated dead) — see `reapBrokerCall`'s doc.
+		expect(broker.reapedCallIds).toEqual([binding.callId]);
 		// The known leak this path used to have (CRITICAL 2): `probeLiveness`'s broker-exit branch
 		// stopped the liveness probe but never the tailer, which kept polling the journal forever.
 		expect(coordinator.hasActiveRuntime("room-1")).toBe(false);
@@ -347,6 +408,9 @@ describe("distinct honest states", () => {
 		// The known leak this path used to have (CRITICAL 2): `connectAndPin`'s port-reused rejection
 		// never stopped the tailer that `startCall` had already started for this channel.
 		expect(coordinator.hasActiveRuntime("room-1")).toBe(false);
+		// The production defect this closes: the OLD binding's broker-spawned call is still alive (a
+		// different session merely answered on its port) — ending it as `port-reused` must reap it.
+		expect(broker.reapedCallIds).toEqual([ended.callId]);
 		coordinator.stop();
 	});
 
@@ -367,6 +431,8 @@ describe("distinct honest states", () => {
 		await waitFor(() => coordinator.state("room-1")!.state === "ended");
 		const ended = coordinator.state("room-1")!;
 		expect(ended.terminalReason).toBe("journal-end");
+		// The process is the thing that disappeared — no live broker call is left to reap.
+		expect(broker.reapedCallIds).toEqual([]);
 		expect(coordinator.hasActiveRuntime("room-1")).toBe(false);
 		coordinator.stop();
 	});
@@ -441,6 +507,11 @@ describe("distinct honest states", () => {
 		const ended = coordinator.state("room-1")!;
 		expect(ended.state).toBe("ended");
 		expect(ended.terminalReason).toBe("stale-binding");
+		// The production defect this closes, window 3 (daemon restart): the broker may have simply
+		// forgotten this callId (a broker restart of its own) while the actual `omp live` process is
+		// still very much alive — a best-effort reap attempt still goes out even though this daemon
+		// cannot corroborate the process either way.
+		expect(broker.reapedCallIds).toEqual(["call-ghost"]);
 		coordinator.stop();
 	});
 
@@ -558,8 +629,56 @@ describe("endCall", () => {
 		if (result.ok) {
 			expect(result.value.state).toBe("ended");
 			expect(result.value.terminalReason).toBe("operator-ended");
+			// `endCall` no longer reaps the broker directly — `endBinding` does it exactly once, for
+			// every non-self-terminated reason including `operator-ended`. This is a genuinely live call
+			// (not already dead), so the single reap call here is the point, not an incidental cleanup.
+			expect(broker.reapedCallIds).toEqual([result.value.callId]);
 		}
 		expect(coordinator.hasActiveRuntime("room-1")).toBe(false);
+		coordinator.stop();
+	});
+
+	test("operator end still marks the binding ended even when the broker reap itself fails — reaping is best-effort, never blocking", async () => {
+		const stateDir = tmpDir("voice-mgr-state-");
+		const journalDir = tmpDir("voice-mgr-journal-");
+		cleanups.push(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(journalDir, { recursive: true, force: true }); });
+		const bridge = startFakeBridge("live-abc");
+		cleanups.push(bridge.stop);
+		const broker = new ScriptedBroker(journalDir, bridge);
+		const cards: EmitCardInput[] = [];
+		const coordinator = makeCoordinator({ stateDir, broker, cards });
+		await coordinator.startCall("room-1", { ownerActorId: "operator" });
+		broker.failReapWith = new Error("broker unreachable");
+
+		const result = await coordinator.endCall("room-1", true);
+		// The binding still ends honestly, and `endCall` itself still reports success — a broker that
+		// is down (or has already lost track of the call) must never leave the daemon's OWN state stuck
+		// mid-teardown, and must never surface as a failure to the operator who just asked to hang up.
+		expect(result.ok).toBe(true);
+		if (result.ok) expect(result.value.state).toBe("ended");
+		expect(coordinator.hasActiveRuntime("room-1")).toBe(false);
+		// The reap WAS attempted (this is what proves the failure was swallowed, not skipped).
+		expect(broker.reapedCallIds.length).toBe(1);
+		coordinator.stop();
+	});
+
+	test("stale binding: a binding that never got past 'connecting' before restart has no callId — nothing to reap", async () => {
+		const stateDir = tmpDir("voice-mgr-state-");
+		const journalDir = tmpDir("voice-mgr-journal-");
+		cleanups.push(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(journalDir, { recursive: true, force: true }); });
+		const broker = new FakeBroker();
+		const cards: EmitCardInput[] = [];
+		const coordinator = makeCoordinator({ stateDir, broker, cards });
+		// Never reached `attachBroker` — the broker was never even asked to create a call, so there is
+		// honestly nothing for a reap to target.
+		coordinator.bindings.beginConnecting("room-1", { ownerActorId: "operator", sessionRoot: "/tmp", retention: "full" });
+
+		await coordinator.rehydrateOnBoot();
+		const ended = coordinator.state("room-1")!;
+		expect(ended.state).toBe("ended");
+		expect(ended.terminalReason).toBe("stale-binding");
+		expect(ended.callId).toBeUndefined();
+		expect(broker.reapedCallIds).toEqual([]);
 		coordinator.stop();
 	});
 

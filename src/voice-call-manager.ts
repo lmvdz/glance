@@ -14,6 +14,12 @@
  * DESIGN.md requires. The bridge's own `terminal` frame is observed but never itself ends a binding;
  * only the journal's `terminal` record, a broker-corroborated exit, or a stale-binding rehydration
  * failure does (see `CallBindingStore.markEnded`'s terminal-reason taxonomy).
+ *
+ * No-orphan note (production-observed defect): ending a binding must never leave a broker-spawned
+ * `omp live` process running with nothing attached to it — the user would have no way to stop it.
+ * `endBinding` is therefore the ONE place both the runtime teardown (`teardownRuntime`) AND a
+ * best-effort broker reap (`reapBrokerCall` — the broker's `DELETE /calls/:id`) happen, for every
+ * termination path except the two where the session already ended itself (`terminal`, `journal-end`).
  */
 
 import { existsSync } from "node:fs";
@@ -781,13 +787,19 @@ export class VoiceCallCoordinator {
 	 * (`teardownRuntime` — tailer stopped, liveness probe stopped, bridge closed with its handlers
 	 * detached), announces the state, and runs the SAME end-of-call cleanup every terminal/journal-
 	 * end/broker-exit/stale-binding/port-reused/start-failed/operator-ended path needs (DESIGN.md risk
-	 * table): expire every still-open/awaiting decision (there is no arbiter left to do it properly)
-	 * and clear their attention/push dedup entries. Idempotent by construction — `markEnded`,
-	 * `teardownRuntime`, and `expireActiveDecisions` all no-op on an already-terminal/torn-down input,
-	 * so calling this on an already-ended binding (or a caller that already tore its own pieces down
-	 * redundantly) is harmless.
+	 * table): expire every still-open/awaiting decision (there is no arbiter left to do it properly),
+	 * clear their attention/push dedup entries, and — the production defect this closes — best-effort
+	 * reap the broker's own call record (`reapBrokerCall`) so a binding that ends here never leaves a
+	 * broker-spawned `omp live` process running with nothing attached to it. Idempotent by
+	 * construction — `markEnded`, `teardownRuntime`, and `expireActiveDecisions` all no-op on an
+	 * already-terminal/torn-down input, so calling this on an already-ended binding (or a caller that
+	 * already tore its own pieces down redundantly) is harmless; `wasActive` below additionally
+	 * guarantees the broker reap itself only ever fires on the ONE call that actually transitions a
+	 * binding to `ended`, never on a redundant second call.
 	 */
 	private async endBinding(channelId: string, reason: VoiceCallTerminalReason, error?: string | null): Promise<VoiceCallBinding> {
+		const before = this.bindings.get(channelId);
+		const wasActive = before !== undefined && before.state !== "ended";
 		const ended = this.bindings.markEnded(channelId, reason, error);
 		this.teardownRuntime(channelId);
 		await this.announceCallState(ended);
@@ -795,7 +807,41 @@ export class VoiceCallCoordinator {
 			const expired = await this.projection.expireActiveDecisions(channelId, ended.callId);
 			for (const decision of expired) this.attention.dismiss(channelId, decision.id);
 		}
+		// `ended.terminalReason` (not the `reason` parameter) governs the reap decision: `markEnded` is
+		// idempotent and keeps the FIRST honest reason a binding ended, so a redundant `endBinding` call
+		// with a DIFFERENT reason than the one that actually stuck must still reap (or skip reaping)
+		// according to what really happened — moot in practice since `wasActive` already keeps this to
+		// one call, but correct either way.
+		if (wasActive && ended.callId) await this.reapBrokerCall(channelId, ended.callId, ended.terminalReason ?? reason);
 		return ended;
+	}
+
+	/**
+	 * Best-effort broker cleanup for the production defect this closes: a broker-spawned `omp live`
+	 * process that keeps running and speaking with no binding attached, because nothing ever told the
+	 * broker the daemon was done with it. Skipped only for `"terminal"` and `"journal-end"` — the two
+	 * reasons that mean the OMP session already ended ITSELF (an explicit journaled terminal record,
+	 * or the journal disappearing because the process is already gone) — every other terminal reason
+	 * (`start-failed`, `stale-binding`, `port-reused`, `broker-exit`, `idle`, `operator-ended`) can
+	 * leave a broker-tracked call whose process is still alive with nothing bound to it, so all of them
+	 * get a reap attempt. `broker-exit` and `idle` are the deliberately-defensive over-approximation:
+	 * `broker-exit` has already been corroborated dead by `listCalls`, and `idle` is itself journaled
+	 * exactly like `terminal`, so in both cases the broker's own `DELETE /calls/:id` is expected to be
+	 * a harmless no-op/404 — but calling it anyway costs nothing and closes off any window where that
+	 * assumption turns out to be wrong. Never throws: the broker may be down, may have already reaped
+	 * the call itself, or may 404 on an already-gone callId — any of those means there is nothing left
+	 * orphaned, which is exactly the outcome this method exists to guarantee, so a failure here is
+	 * logged (bounded — one line, no retry loop) and never propagated. Called only from `endBinding`,
+	 * strictly after the binding's own state has already been persisted as `ended` — a reap failure can
+	 * therefore never prevent, delay-fail, or roll back the binding end itself.
+	 */
+	private async reapBrokerCall(channelId: string, callId: string, reason: VoiceCallTerminalReason): Promise<void> {
+		if (reason === "terminal" || reason === "journal-end") return;
+		try {
+			await this.broker.endCall(callId);
+		} catch (err) {
+			this.log(`voice-call ${channelId}: broker reap of call ${callId} failed (reason=${reason}, broker may already be down or the call already gone): ${errText(err)}`);
+		}
 	}
 
 	/** Authenticated, role/membership-checked decision resolution relay. `isAuthorized` is computed
@@ -850,7 +896,10 @@ export class VoiceCallCoordinator {
 
 	/** Operator-initiated end. Relays `stop` (best-effort — a degraded/unreachable call has no socket
 	 *  to relay to) and marks the binding ended with the honest `operator-ended` reason regardless of
-	 *  whether the relay succeeded, since the human's intent to end it is the fact that matters. */
+	 *  whether the relay succeeded, since the human's intent to end it is the fact that matters. The
+	 *  broker's own call record is reaped by `endBinding` itself (`reapBrokerCall` — `operator-ended`
+	 *  is not one of its two self-terminated exemptions), so there is no separate `broker.endCall` here
+	 *  — one reap call site for every termination path, not two racing to do the same thing. */
 	async endCall(channelId: string, isAuthorized: boolean): Promise<CoordinatorResult<VoiceCallBindingView>> {
 		if (!isAuthorized) return { ok: false, reason: "forbidden" };
 		const binding = this.bindings.get(channelId);
@@ -863,14 +912,8 @@ export class VoiceCallCoordinator {
 		} catch {
 			/* best-effort */
 		}
-		if (binding.callId) {
-			try {
-				await this.broker.endCall(binding.callId);
-			} catch (err) {
-				this.log(`voice-call ${channelId}: broker end failed (marking ended anyway): ${errText(err)}`);
-			}
-		}
-		// `endBinding` runs the full runtime teardown (tailer/liveness/bridge close) — see its doc.
+		// `endBinding` runs the full runtime teardown (tailer/liveness/bridge close) AND the broker reap
+		// — see both docs.
 		const ended = await this.endBinding(channelId, "operator-ended");
 		return { ok: true, value: redactBinding(ended) };
 	}
