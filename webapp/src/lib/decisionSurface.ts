@@ -108,3 +108,80 @@ export function criteriaHeadline(criteria: readonly { completed: boolean }[]): s
   if (done === criteria.length) return `All ${criteria.length} met.`;
   return `${done} of ${criteria.length} met.`;
 }
+
+// -------------------------------------------------------------------------------------------
+// Supersede composer (DecisionsPanel's "record a replacement" action) — the UI's half of the
+// human lane the server already ships (`POST /api/features/:id/decisions/supersede`,
+// src/server.ts). The philosophy this exists to honor: a decision is never edited and never
+// deleted, only replaced by a new one that supersedes it. So there is no "edit"/"delete" path
+// anywhere on this surface — correcting a decision means writing its replacement.
+// -------------------------------------------------------------------------------------------
+
+/**
+ * The UI's OWN pre-flight refusal for a replacement's text — checked before any request is ever
+ * built, so an empty or whitespace-only submission never reaches the network at all. The server's
+ * own `text and supersedes (decision id) required` 400 (src/server.ts) exists as a backstop for a
+ * client that skips this check, not as the primary UX. Returns the reason to show the person, or
+ * `undefined` when the text is fine to send.
+ */
+export function validateSupersedeText(text: string): string | undefined {
+  if (!text.trim()) return 'A replacement needs its own words — write what actually replaces this decision before recording it.';
+  return undefined;
+}
+
+/**
+ * House-voice mapping from a failed supersede attempt to what a person should read. The route's
+ * three 409 causes (src/server.ts) are each already a specific sentence — "supersedes target ...
+ * not found", "... was already superseded — supersede the current decision instead", "an identical
+ * decision is already current — no change" — so a 409 is surfaced VERBATIM rather than collapsed
+ * into one generic "conflict" message; that server text already IS the "steer to what's current"
+ * copy this UI owes the person, and re-wording it risks drifting from what the server actually did.
+ * 400/404/anything-else fall back to an honest, specific sentence only for the rare case the server
+ * sent no body text at all (a network failure short-circuited before a response reached the client).
+ */
+export function supersedeFailureMessage(status: number | undefined, serverMessage: string | undefined): string {
+  const trimmed = serverMessage?.trim();
+  if (status === 409) return trimmed || 'This decision changed since the page loaded — reload to see what is current before superseding it again.';
+  if (status === 404) return trimmed || 'This feature could not be found — it may have been archived or deleted since the page loaded.';
+  if (status === 400) return trimmed || 'The replacement needs its own text and a decision to replace — nothing was recorded.';
+  return trimmed || 'The replacement was not recorded — the server never confirmed the write, so nothing changed.';
+}
+
+/** What `submitSupersede` hands back — `ok:false` always carries a `message` (the exact house-voice
+ *  reason, ready to render); `ok:true` always carries the server's own `decision` record, never one
+ *  fabricated client-side, so a caller can never move a decision to history before the write lands. */
+export interface SupersedeSubmitResult {
+  ok: boolean;
+  decision?: TaskDecision;
+  message?: string;
+}
+
+export interface SupersedeSubmitInput {
+  text: string;
+  decisionId: string;
+  /** The actual network call, injected — see the module doc below for why. */
+  postSupersede: (input: { decisionId: string; text: string }) => Promise<TaskDecision>;
+}
+
+/**
+ * The supersede composer's submit path, factored out as a plain, framework-free function — the
+ * same discipline `useVoiceDispatcher.ts`'s `dispatchPromptAgent` uses, for the same reason: this
+ * package has no DOM/hook-render test harness (no happy-dom/jsdom, no @testing-library/react), so
+ * the ordering this function pins — validate locally FIRST and never touch the network on empty/
+ * whitespace text; on a rejection, translate the server's status+message into house voice; on
+ * success, hand back the server's OWN decision rather than a locally-guessed one — has to be
+ * testable without a React render. `postSupersede` is injected so a test double and the real
+ * `apiJson`-backed call are interchangeable, and this exercises the EXACT code the composer runs.
+ */
+export async function submitSupersede(input: SupersedeSubmitInput): Promise<SupersedeSubmitResult> {
+  const reason = validateSupersedeText(input.text);
+  if (reason) return { ok: false, message: reason };
+  try {
+    const decision = await input.postSupersede({ decisionId: input.decisionId, text: input.text.trim() });
+    return { ok: true, decision };
+  } catch (error) {
+    const status = error && typeof error === 'object' && 'status' in error ? (error as { status?: unknown }).status : undefined;
+    const message = error instanceof Error ? error.message : undefined;
+    return { ok: false, message: supersedeFailureMessage(typeof status === 'number' ? status : undefined, message) };
+  }
+}

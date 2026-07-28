@@ -10,6 +10,9 @@ import {
   decisionsEmptyState,
   criteriaEmptyState,
   criteriaHeadline,
+  validateSupersedeText,
+  supersedeFailureMessage,
+  submitSupersede,
 } from './decisionSurface';
 
 function decision(over: Partial<TaskDecision>): TaskDecision {
@@ -163,5 +166,161 @@ describe('criteriaEmptyState / criteriaHeadline', () => {
 
   it('reads zero-of-N through the same "N of M met" shape, not a special case', () => {
     expect(criteriaHeadline([{ completed: false }, { completed: false }])).toBe('0 of 2 met.');
+  });
+});
+
+describe('validateSupersedeText', () => {
+  it('refuses empty text with a reason', () => {
+    expect(validateSupersedeText('')).toBeDefined();
+    expect(validateSupersedeText('')).toContain('replacement');
+  });
+
+  it('refuses whitespace-only text with a reason', () => {
+    expect(validateSupersedeText('   \n\t  ')).toBeDefined();
+  });
+
+  it('accepts real text', () => {
+    expect(validateSupersedeText('use postgres instead')).toBeUndefined();
+  });
+});
+
+describe('supersedeFailureMessage', () => {
+  // The route's own text already IS the "steer to what's current" copy — surfaced verbatim, not
+  // collapsed into a generic conflict message.
+  it('surfaces a 409 "already superseded" server message verbatim, steering to the current decision', () => {
+    const serverText = 'decision "abc123" was already superseded — supersede the current decision instead';
+    expect(supersedeFailureMessage(409, serverText)).toBe(serverText);
+  });
+
+  it('surfaces a 409 "supersedes target not found" server message verbatim', () => {
+    const serverText = 'supersedes target "ghost" not found on this feature';
+    expect(supersedeFailureMessage(409, serverText)).toBe(serverText);
+  });
+
+  it('surfaces a 409 "duplicate" server message verbatim', () => {
+    const serverText = 'an identical decision is already current — no change';
+    expect(supersedeFailureMessage(409, serverText)).toBe(serverText);
+  });
+
+  it('falls back to an honest specific 409 message only when the server sent no text', () => {
+    expect(supersedeFailureMessage(409, '')).toContain('reload');
+    expect(supersedeFailureMessage(409, undefined)).toContain('reload');
+  });
+
+  it('surfaces the route\'s actual 404 body ("no such feature") verbatim', () => {
+    expect(supersedeFailureMessage(404, 'no such feature')).toBe('no such feature');
+  });
+
+  it('falls back to an honest specific 404 message only when the server sent no text', () => {
+    expect(supersedeFailureMessage(404, undefined)).toContain('could not be found');
+  });
+
+  it('surfaces the route\'s actual 400 body verbatim', () => {
+    expect(supersedeFailureMessage(400, 'text and supersedes (decision id) required')).toBe('text and supersedes (decision id) required');
+  });
+
+  it('falls back to an honest specific 400 message only when the server sent no text', () => {
+    expect(supersedeFailureMessage(400, undefined)).toContain('replacement');
+  });
+
+  it('gives an honest fallback for an unrecognized/network failure', () => {
+    expect(supersedeFailureMessage(undefined, undefined)).toContain('not recorded');
+  });
+});
+
+describe('submitSupersede', () => {
+  function decision(over: Partial<TaskDecision>): TaskDecision {
+    return { id: 'd1', text: 'text', ...over };
+  }
+
+  it('never calls postSupersede for empty text — refused before any request', async () => {
+    let called = false;
+    const result = await submitSupersede({
+      text: '',
+      decisionId: 'd1',
+      postSupersede: async () => {
+        called = true;
+        return decision({ id: 'new' });
+      },
+    });
+    expect(called).toBe(false);
+    expect(result.ok).toBe(false);
+    expect(result.message).toBeDefined();
+  });
+
+  it('never calls postSupersede for whitespace-only text — refused before any request', async () => {
+    let called = false;
+    const result = await submitSupersede({
+      text: '   ',
+      decisionId: 'd1',
+      postSupersede: async () => {
+        called = true;
+        return decision({ id: 'new' });
+      },
+    });
+    expect(called).toBe(false);
+    expect(result.ok).toBe(false);
+  });
+
+  it('trims text before sending it to postSupersede', async () => {
+    let sentText: string | undefined;
+    await submitSupersede({
+      text: '  use postgres  ',
+      decisionId: 'd1',
+      postSupersede: async (input) => {
+        sentText = input.text;
+        return decision({ id: 'new', text: input.text });
+      },
+    });
+    expect(sentText).toBe('use postgres');
+  });
+
+  it('returns ok:true with the SERVER-returned decision on success — never a locally-fabricated one', async () => {
+    const serverDecision = decision({ id: 'server-minted', text: 'use postgres' });
+    const result = await submitSupersede({
+      text: 'use postgres',
+      decisionId: 'd1',
+      postSupersede: async () => serverDecision,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.decision).toBe(serverDecision);
+  });
+
+  it('maps a rejected postSupersede carrying a 409 status into that status\'s specific message', async () => {
+    const apiLikeError = Object.assign(new Error('decision "d1" was already superseded — supersede the current decision instead'), { status: 409 });
+    const result = await submitSupersede({
+      text: 'use postgres',
+      decisionId: 'd1',
+      postSupersede: async () => {
+        throw apiLikeError;
+      },
+    });
+    expect(result.ok).toBe(false);
+    expect(result.message).toBe('decision "d1" was already superseded — supersede the current decision instead');
+  });
+
+  it('maps a rejected postSupersede carrying a 404 status into the server\'s "no such feature" message', async () => {
+    const apiLikeError = Object.assign(new Error('no such feature'), { status: 404 });
+    const result = await submitSupersede({
+      text: 'use postgres',
+      decisionId: 'd1',
+      postSupersede: async () => {
+        throw apiLikeError;
+      },
+    });
+    expect(result.ok).toBe(false);
+    expect(result.message).toBe('no such feature');
+  });
+
+  it('never throws — a network failure with no status still resolves to an ok:false result', async () => {
+    const result = await submitSupersede({
+      text: 'use postgres',
+      decisionId: 'd1',
+      postSupersede: async () => {
+        throw new Error('network down');
+      },
+    });
+    expect(result.ok).toBe(false);
+    expect(result.message).toBeDefined();
   });
 });
