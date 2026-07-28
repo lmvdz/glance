@@ -5,7 +5,11 @@ import { defineConfig } from "vite";
 
 const daemon = process.env.OMP_SQUAD_PROXY ?? "http://127.0.0.1:7878";
 const proxy = {
-  "/api": { target: daemon, changeOrigin: true },
+  // `ws: true` also covers the dedicated per-channel voice-call audio WS upgrade under `/api`
+  // (concern 09: browser-audio-transport, `/api/channels/:id/voice-call/audio`) — harmless for
+  // every other plain-HTTP `/api` route, since http-proxy only acts on it for an actual Upgrade
+  // request.
+  "/api": { target: daemon, changeOrigin: true, ws: true },
   "/ws": { target: daemon.replace(/^http/, "ws"), ws: true, changeOrigin: true },
 };
 

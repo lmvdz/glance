@@ -56,6 +56,13 @@ export interface BrokerCallView {
 	 *  passed to the child as its real `cwd` — not a guess). Absent only against an OLDER broker build
 	 *  that predates this field; see `resolveEffectiveSessionRoot`. */
 	sessionRoot?: string;
+	/**
+	 * Concern 09 (browser-audio-transport): whether the broker spawned this call's `omp live` process
+	 * audio-less (`broker/broker.ts`'s own `NO_LOCAL_AUDIO`, threaded through as
+	 * `OMP_LIVE_NO_LOCAL_AUDIO`). Absent against an older broker build that predates this field —
+	 * see `VoiceCallBinding.noLocalAudio`'s doc for how that absence is treated.
+	 */
+	noLocalAudio?: boolean;
 }
 
 export interface BrokerCallCreated extends BrokerCallView {
@@ -187,6 +194,13 @@ export interface VoiceCallStateView extends VoiceCallBindingView {
 	 *  and muting. A `live` binding with no socket (mid-reconnect) can therefore be shown as "controls
 	 *  are unavailable right now" instead of offering buttons that will be refused. */
 	controlsAvailable: boolean;
+	/**
+	 * Concern 09 (browser-audio-transport): `true` only when this call is BOTH audio-less
+	 * (`binding.noLocalAudio`) AND has the same live-bridge precondition `controlsAvailable` checks —
+	 * the two facts a webapp needs before it renders mic-capture UI or attempts `attachAudioSink`/
+	 * `pushMicAudio` at all, rather than offering a mic button a device-audio call would refuse.
+	 */
+	audioAvailable: boolean;
 }
 
 const DEFAULT_JOURNAL_POLL_MS = 400;
@@ -315,6 +329,14 @@ interface ChannelRuntime {
 	 *  rather than un-muting the mic the operator just muted. Cleared with the runtime, so a new
 	 *  call never inherits the previous call's mute. */
 	micMuted?: boolean;
+	/**
+	 * Concern 09 (browser-audio-transport): the connected browser's audio relay, when one has
+	 * attached via `attachAudioSink`. Receives decoded output PCM the bridge forwards (wired once, in
+	 * `connectAndPin`, regardless of whether a sink is attached yet — the bridge callback simply reads
+	 * this field at delivery time). Cleared with the rest of the runtime, so a new call never inherits
+	 * the previous call's sink, and a torn-down runtime never keeps feeding audio nobody asked for.
+	 */
+	audioSink?: { sendOutputAudio: (bytes: Uint8Array) => void };
 	/** Guards against overlapping liveness-probe ticks — a broker round-trip plus a bridge reconnect
 	 *  attempt can easily outlast `livenessProbeIntervalMs`, exactly like `observer.ts`'s own documented
 	 *  "the gate run can outlast the interval" guard. Without this, a slow tick leaves the PREVIOUS
@@ -414,6 +436,11 @@ export class VoiceCallCoordinator {
 		// A torn-down runtime has no mic to be muted. Leaving `true` here would have `state()` report
 		// an ended call as muted, which is a claim about a session that no longer exists.
 		rt.micMuted = undefined;
+		// Concern 09: a torn-down runtime has no bridge left to relay audio for — an old sink lingering
+		// here would silently swallow the NEXT call's onAudioFrame reads if a caller ever queried it
+		// (it can't: `resetRuntime` always allocates a fresh object) and, more importantly, a stale
+		// reference to a closed browser socket must never look attached.
+		rt.audioSink = undefined;
 	}
 
 	/** @substrate exported for tests only — tests/voice-call-manager.test.ts asserts every
@@ -432,7 +459,8 @@ export class VoiceCallCoordinator {
 		const binding = this.bindings.get(channelId);
 		if (!binding) return undefined;
 		const rt = this.runtimes.get(channelId);
-		return { ...redactBinding(binding), micMuted: rt?.micMuted === true, controlsAvailable: binding.state === "live" && Boolean(rt?.bridge) };
+		const controlsAvailable = binding.state === "live" && Boolean(rt?.bridge);
+		return { ...redactBinding(binding), micMuted: rt?.micMuted === true, controlsAvailable, audioAvailable: binding.noLocalAudio === true && controlsAvailable };
 	}
 
 	list(): VoiceCallBindingView[] {
@@ -497,7 +525,7 @@ export class VoiceCallCoordinator {
 		// Reconcile the caller's own `sessionRoot` guess against the broker's authoritative answer for
 		// where it actually ran `omp live` — see `resolveEffectiveSessionRoot`'s doc.
 		const sessionRoot = await resolveEffectiveSessionRoot(input.sessionRoot, created.sessionRoot, this.log);
-		binding = this.bindings.attachBroker(channelId, { ...created, sessionRoot });
+		binding = this.bindings.attachBroker(channelId, { ...created, sessionRoot, noLocalAudio: created.noLocalAudio });
 
 		// Tail from the first byte — journal records land before the bridge or any viewer hears about
 		// them (journal.ts's write-before-act contract), so tailing starts here, not after `hello`.
@@ -549,6 +577,11 @@ export class VoiceCallCoordinator {
 				// Presentation-plane signal only — see the module doc. The journal's own terminal
 				// record (tailed independently) is what actually ends the binding.
 			},
+			// Concern 09: wired unconditionally — a device-audio call's bridge simply never sends a
+			// `0x02` frame in the first place (see `LiveSessionController#handleOutputAudio`'s own
+			// `noLocalAudio` gate on the OMP side), and an audio-less call with no browser attached YET
+			// just has no `audioSink` to read here, which is a silent no-op, not an error.
+			onAudioFrame: (bytes) => this.runtime(channelId).audioSink?.sendOutputAudio(bytes),
 		});
 		const hello = await client.connect();
 		if (rt.ended) {
@@ -882,6 +915,57 @@ export class VoiceCallCoordinator {
 		}
 		rt.micMuted = muted;
 		return { ok: true, value: { muted } };
+	}
+
+	/**
+	 * Registers a browser's audio sink for a channel's live call (concern 09: browser-audio-transport)
+	 * — the daemon-side half of "speaker PCM leaves via the bridge instead of a local device". Gated
+	 * on the SAME preconditions `resolveDecision`/`steer`/`setMuted` already require (authorized,
+	 * active binding, `live`, a connected bridge) PLUS one more this class owns alone:
+	 * `binding.noLocalAudio === true` — a device-audio call already owns a real speaker and must never
+	 * ALSO hand its output audio to a browser, which would be feeding the same session's voice out of
+	 * two places at once.
+	 *
+	 * Returns a `detach()` that clears the sink ONLY if it is STILL the one this call attached — a
+	 * slow/delayed detach (e.g. a browser tab's cleanup racing a fast reconnect that already attached
+	 * a NEWER sink) must never clear a sink it does not own. Exactly one sink is held per channel: a
+	 * second `attachAudioSink` call replaces the first outright (V1 scope is one viewer's audio relay
+	 * per call, matching the "at most one active call per thread" boundary this whole feature already
+	 * lives inside) — the FIRST sink's own `detach()` becomes a harmless no-op once that happens, since
+	 * `rt.audioSink` no longer `===` it.
+	 */
+	attachAudioSink(channelId: string, isAuthorized: boolean, sink: { sendOutputAudio: (bytes: Uint8Array) => void }): CoordinatorResult<{ detach: () => void }> {
+		if (!isAuthorized) return { ok: false, reason: "forbidden" };
+		const binding = this.bindings.get(channelId);
+		if (!binding || binding.state === "ended") return { ok: false, reason: "no-active-call" };
+		if (binding.noLocalAudio !== true) return { ok: false, reason: "device-audio-call" };
+		const rt = this.runtime(channelId);
+		if (binding.state !== "live" || !rt.bridge) return { ok: false, reason: "bridge-unavailable" };
+		rt.audioSink = sink;
+		return { ok: true, value: { detach: () => { if (rt.audioSink === sink) rt.audioSink = undefined; } } };
+	}
+
+	/**
+	 * Relays one chunk of browser microphone PCM towards the session (concern 09) — mono 16 kHz
+	 * `Float32`, the format `VoiceCallBridgeClient#sendMicAudio`/oh-my-pi's own `AudioCapture` both
+	 * use. Same authorization and `noLocalAudio` gate as `attachAudioSink`; deliberately does NOT
+	 * require a sink to already be attached — a browser that only sends (never wants output audio
+	 * relayed back, or has its own separate connection for that) is not something this layer should
+	 * refuse just because it never called `attachAudioSink`.
+	 */
+	async pushMicAudio(channelId: string, isAuthorized: boolean, samples: Float32Array): Promise<CoordinatorResult<true>> {
+		if (!isAuthorized) return { ok: false, reason: "forbidden" };
+		const binding = this.bindings.get(channelId);
+		if (!binding || binding.state === "ended") return { ok: false, reason: "no-active-call" };
+		if (binding.noLocalAudio !== true) return { ok: false, reason: "device-audio-call" };
+		const rt = this.runtime(channelId);
+		if (binding.state !== "live" || !rt.bridge) return { ok: false, reason: "bridge-unavailable" };
+		try {
+			rt.bridge.sendMicAudio(samples);
+		} catch (err) {
+			return { ok: false, reason: errText(err) };
+		}
+		return { ok: true, value: true };
 	}
 
 	async steer(channelId: string, isAuthorized: boolean, text: string): Promise<CoordinatorResult<true>> {

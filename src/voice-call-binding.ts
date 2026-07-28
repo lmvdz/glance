@@ -100,6 +100,17 @@ export interface VoiceCallBinding {
 	 * per PROTOCOL.md, is not itself a mismatch). Cleared if a later reconnect reports agreement.
 	 */
 	retentionMismatch?: { expected: VoiceCallRetention; reported: "full" | "tails" | "off" };
+	/**
+	 * Concern 09 (browser-audio-transport): whether the broker spawned THIS call's `omp live` process
+	 * audio-less — read from the broker's own `BrokerCallCreated.noLocalAudio` at `attachBroker` time,
+	 * never guessed. Absent only against an older broker build that predates this field (additive, like
+	 * `sessionRoot` above) — treated as `false` (device audio) everywhere it gates a decision, since an
+	 * older broker never spawned audio-less in the first place. This is what
+	 * `VoiceCallCoordinator#pushMicAudio`/`attachAudioSink` refuse against: a call that still owns a
+	 * real local microphone must never also accept a browser's audio, or the two sources talk over
+	 * each other.
+	 */
+	noLocalAudio?: boolean;
 }
 
 /** Read-only view: never carries `controlToken`. Every daemon read API (state, rehydration) returns
@@ -169,6 +180,7 @@ function narrowBinding(raw: unknown): VoiceCallBinding | undefined {
 		const reportedOk = reported === "full" || reported === "tails" || reported === "off";
 		if (expectedOk && reportedOk) out.retentionMismatch = { expected, reported };
 	}
+	if (typeof raw.noLocalAudio === "boolean") out.noLocalAudio = raw.noLocalAudio;
 	return out;
 }
 
@@ -263,7 +275,7 @@ export class CallBindingStore {
 	 *  caller (`VoiceCallCoordinator#startCall`) is expected to have already reconciled the broker's
 	 *  own answer against any client-supplied override before calling this (see
 	 *  `resolveEffectiveSessionRoot`); omitted entirely, the provisional guess stands unchanged. */
-	attachBroker(channelId: string, broker: { callId: string; port: number; bridgeUrl: string; journalPath: string; controlToken: string; sessionRoot?: string }): VoiceCallBinding {
+	attachBroker(channelId: string, broker: { callId: string; port: number; bridgeUrl: string; journalPath: string; controlToken: string; sessionRoot?: string; noLocalAudio?: boolean }): VoiceCallBinding {
 		const binding = this.requireBinding(channelId);
 		if (binding.state !== "connecting") throw new Error(`channel ${channelId} binding is not connecting (${binding.state})`);
 		const updated: VoiceCallBinding = { ...binding, ...broker, updatedAt: this.now() };

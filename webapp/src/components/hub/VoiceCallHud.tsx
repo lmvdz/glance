@@ -6,9 +6,12 @@ import {
   PHASE_LABEL_CH,
   S2S_OUTSIDE_ROOMS_NOTE,
   bindingBanner,
+  browserAudioStatusLine,
   idlePolicyLine,
   phaseExplanation,
   retentionNotice,
+  type BrowserAudioMicStatus,
+  type BrowserAudioRelayStatus,
   type CallPhase,
 } from '../../lib/voice/roomCall';
 import type { VoiceCallBindingDTO } from '../../lib/api';
@@ -69,6 +72,13 @@ export interface VoiceCallHudViewProps {
    * full (hiding a live call would be the worse lie); only the invitation to start one is withheld.
    */
   canStart?: boolean;
+  /**
+   * Concern 09 (browser-audio-transport): `useRoomCallAudio`'s own state, when this call is
+   * audio-less. Additive and optional — a caller that never passes it (or whose call is
+   * device-audio, `relayStatus: 'idle'`) renders exactly as before this concern existed; see
+   * `browserAudioStatusLine` for why `undefined` in that shape draws nothing at all.
+   */
+  browserAudio?: { micStatus: BrowserAudioMicStatus; relayStatus: BrowserAudioRelayStatus; error?: string; onRetry: () => void };
   onStart: () => void;
   onEnd: () => void;
   onToggleMute: () => void;
@@ -98,6 +108,7 @@ export function VoiceCallHudView({
   now,
   error,
   canStart = true,
+  browserAudio,
   onStart,
   onEnd,
   onToggleMute,
@@ -106,6 +117,7 @@ export function VoiceCallHudView({
   const active = binding !== null && binding.state !== 'ended';
   const retention = binding ? retentionNotice(binding) : undefined;
   const banner = bindingBanner(binding);
+  const audioLine = browserAudio ? browserAudioStatusLine(browserAudio) : undefined;
 
   return (
     <section
@@ -155,6 +167,29 @@ export function VoiceCallHudView({
           {banner ? (
             <p className="mt-1 truncate" style={{ fontFamily: MONO, fontSize: 10, color: '#4A4A52' }} title={banner}>
               {banner}
+            </p>
+          ) : null}
+
+          {/* Concern 09: the browser's own mic/speaker relay state — only rendered for an audio-less
+              call (`browserAudioStatusLine` returns undefined for a device-audio one, or once the
+              mic is fully connected with nothing left to report). */}
+          {audioLine ? (
+            <p
+              className="mt-1 text-[11.5px] leading-[1.5]"
+              style={{ color: audioLine.tone === 'error' ? '#D9A03C' : '#6A6A72', textWrap: 'pretty' }}
+              role={audioLine.tone === 'error' ? 'alert' : undefined}
+            >
+              {audioLine.text}
+              {audioLine.showRetry ? (
+                <button
+                  type="button"
+                  onClick={browserAudio?.onRetry}
+                  className="ml-1.5 underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ember"
+                  style={{ color: '#F0A35A' }}
+                >
+                  Retry
+                </button>
+              ) : null}
             </p>
           ) : null}
 

@@ -886,3 +886,38 @@ export function focusHudRegion(node: { focus: () => void; scrollIntoView?: (opti
   node.scrollIntoView?.({ block: 'nearest' });
   node.focus();
 }
+
+// =================================================================================================
+// Browser audio transport (concern 09) — a device-audio call has NOTHING to show here; the line
+// only exists once `useRoomCallAudio` actually opened a relay (its `relayStatus` starts 'idle' for
+// exactly that case, matched below).
+// =================================================================================================
+
+export type BrowserAudioMicStatus = 'idle' | 'requesting' | 'active' | 'denied';
+export type BrowserAudioRelayStatus = 'idle' | 'connecting' | 'ready' | 'refused' | 'closed';
+
+export interface BrowserAudioStatusLine {
+  text: string;
+  tone: 'neutral' | 'error';
+  /** Whether the HUD should offer a retry affordance — every error state does; a transient
+   *  "connecting"/"requesting" line does not, since there is nothing to retry yet. */
+  showRetry: boolean;
+}
+
+/**
+ * What the HUD's browser-audio status line should say, for one snapshot of `useRoomCallAudio`'s
+ * own state. Pure and exhaustive over every `(micStatus, relayStatus)` pair this hook can actually
+ * produce, so the render layer never has to guess at a combination this function doesn't cover.
+ */
+export function browserAudioStatusLine(input: { micStatus: BrowserAudioMicStatus; relayStatus: BrowserAudioRelayStatus; error?: string }): BrowserAudioStatusLine | undefined {
+  const { micStatus, relayStatus, error } = input;
+  if (relayStatus === 'idle') return undefined; // not an audio-less call — nothing to say
+  if (relayStatus === 'connecting') return { text: 'Connecting the browser audio relay…', tone: 'neutral', showRetry: false };
+  if (relayStatus === 'refused') return { text: error ?? 'The browser audio relay was refused.', tone: 'error', showRetry: true };
+  if (relayStatus === 'closed') return { text: error ?? 'The browser audio relay connection was lost.', tone: 'error', showRetry: true };
+  // relayStatus === 'ready' from here — the socket is up; what's left is the mic's own state.
+  if (micStatus === 'requesting') return { text: 'Requesting microphone access…', tone: 'neutral', showRetry: false };
+  if (micStatus === 'denied') return { text: error ?? 'Microphone access was denied.', tone: 'error', showRetry: true };
+  if (micStatus === 'active') return { text: 'Browser microphone and speaker connected.', tone: 'neutral', showRetry: false };
+  return undefined; // micStatus 'idle' with a ready relay — the brief tick before requesting fires
+}

@@ -12561,6 +12561,21 @@ export class SquadManager extends EventEmitter {
 		return this.voiceCall.setMuted(channelId, isAuthorized, muted);
 	}
 
+	/** Registers a browser's audio sink (concern 09: browser-audio-transport) — see
+	 *  `VoiceCallCoordinator#attachAudioSink` for the full gate (membership, live, connected bridge,
+	 *  AND `noLocalAudio`). Called from the dedicated audio WS upgrade in `server.ts`, never from the
+	 *  general `/ws` chat socket. */
+	async attachVoiceCallAudioSink(channelId: string, actor: Actor, sink: { sendOutputAudio: (bytes: Uint8Array) => void }): Promise<CoordinatorResult<{ detach: () => void }>> {
+		const isAuthorized = await this.channelStore.canReadChannel(channelId, actor);
+		return this.voiceCall.attachAudioSink(channelId, isAuthorized, sink);
+	}
+
+	/** Relays one chunk of browser mic PCM (concern 09) — see `VoiceCallCoordinator#pushMicAudio`. */
+	async pushVoiceCallMicAudio(channelId: string, actor: Actor, samples: Float32Array): Promise<CoordinatorResult<true>> {
+		const isAuthorized = await this.channelStore.canReadChannel(channelId, actor);
+		return this.voiceCall.pushMicAudio(channelId, isAuthorized, samples);
+	}
+
 	/** @substrate no caller yet — plans/voice-orchestrated-room-integration/03 (the room-side ladder
 	 *  panel/composer surface that actually needs a channel's voice-decision urgency rung) is what
 	 *  wires this up. Concern 02 (this file's own scope) only needs to PROJECT decisions into the

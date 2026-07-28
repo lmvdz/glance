@@ -36,7 +36,20 @@ function startFakeBridge(sessionId: string, port = 0, recordingMode?: "full" | "
 				ws.send(JSON.stringify({ v: 1, sessionId, seq: 0, type: "hello", canResolve: true, ...(recordingMode ? { recordingMode } : {}) }));
 			},
 			message(ws, message) {
-				const frame = JSON.parse(typeof message === "string" ? message : message.toString()) as Record<string, unknown>;
+				// Concern 09 (browser-audio-transport): a binary frame is ALWAYS audio, never a JSON
+				// control frame — echoed back re-tagged 0x02 (server→client) so a coordinator-level test
+				// can observe the full mic-in → output-out round trip through a REAL bridge socket,
+				// exactly like the real oh-my-pi wire (PROTOCOL.md "Browser audio transport").
+				if (typeof message !== "string") {
+					const bytes = new Uint8Array(message.buffer, message.byteOffset, message.byteLength);
+					if (bytes.length < 2 || bytes[0] !== 0x01) return;
+					const echoed = new Uint8Array(bytes.length);
+					echoed[0] = 0x02;
+					echoed.set(bytes.subarray(1), 1);
+					ws.send(echoed);
+					return;
+				}
+				const frame = JSON.parse(message) as Record<string, unknown>;
 				if (frame.type !== "control" || typeof frame.requestId !== "string") return;
 				const requestId = frame.requestId;
 				if (frame.action === "resolveDecision") {
@@ -112,6 +125,10 @@ class FakeBroker implements BrokerClient {
 class ScriptedBroker extends FakeBroker {
 	readonly createCallOpts: Array<{ resume?: string; retention?: VoiceCallRetention }> = [];
 	sessionRoot: string | undefined;
+	/** Concern 09: what this scripted broker reports as `BrokerCallCreated.noLocalAudio` — mirrors a
+	 *  real broker's own `NO_LOCAL_AUDIO` env-derived default. `undefined` (the default) matches an
+	 *  older broker build that predates the field entirely. */
+	noLocalAudio: boolean | undefined;
 	constructor(private readonly journalDir: string, private readonly bridge: ReturnType<typeof startFakeBridge>, private readonly controlToken = "tok-1") {
 		super();
 	}
@@ -120,7 +137,7 @@ class ScriptedBroker extends FakeBroker {
 		const callId = this.nextId();
 		const journalPath = path.join(this.journalDir, `${callId}.jsonl`);
 		writeFileSync(journalPath, "");
-		const view: BrokerCallCreated = { callId, port: this.bridge.port, bridgeUrl: this.bridge.url, journalPath, startedAt: Date.now(), exit: null, controlToken: this.controlToken, ...(this.sessionRoot ? { sessionRoot: this.sessionRoot } : {}) };
+		const view: BrokerCallCreated = { callId, port: this.bridge.port, bridgeUrl: this.bridge.url, journalPath, startedAt: Date.now(), exit: null, controlToken: this.controlToken, ...(this.sessionRoot ? { sessionRoot: this.sessionRoot } : {}), ...(this.noLocalAudio === undefined ? {} : { noLocalAudio: this.noLocalAudio }) };
 		this.registerLiveCall(view);
 		return view;
 	}
@@ -963,5 +980,126 @@ describe("httpBrokerClient: the wire request the real broker actually receives",
 		} finally {
 			server.stop(true);
 		}
+	});
+});
+
+describe("browser-audio-transport (concern 09): attachAudioSink / pushMicAudio", () => {
+	/** Starts a call whose broker reports `noLocalAudio` (default `true`) and returns the live
+	 *  coordinator plus its channelId — the shared setup every test below needs before it can attach
+	 *  an audio sink at all. */
+	async function startAudioLessCall(opts?: { noLocalAudio?: boolean }): Promise<{ coordinator: VoiceCallCoordinator; channelId: string; bridge: ReturnType<typeof startFakeBridge> }> {
+		const stateDir = tmpDir("voice-mgr-audio-state-");
+		const journalDir = tmpDir("voice-mgr-audio-journal-");
+		cleanups.push(() => {
+			rmSync(stateDir, { recursive: true, force: true });
+			rmSync(journalDir, { recursive: true, force: true });
+		});
+		const bridge = startFakeBridge("live-audio-1");
+		cleanups.push(bridge.stop);
+		const broker = new ScriptedBroker(journalDir, bridge);
+		broker.noLocalAudio = opts?.noLocalAudio ?? true;
+		const cards: EmitCardInput[] = [];
+		const coordinator = makeCoordinator({ stateDir, broker, cards });
+		const channelId = "room-audio-1";
+		const result = await coordinator.startCall(channelId, { ownerActorId: "operator" });
+		expect(result.ok).toBe(true);
+		return { coordinator, channelId, bridge };
+	}
+
+	test("fixture-driven round trip: mic PCM reaches the real bridge tagged 0x01, and its 0x02 echo reaches the attached sink", async () => {
+		const { coordinator, channelId } = await startAudioLessCall();
+		const received: Uint8Array[] = [];
+		const attach = coordinator.attachAudioSink(channelId, true, { sendOutputAudio: (bytes) => received.push(bytes) });
+		expect(attach.ok).toBe(true);
+
+		const samples = new Float32Array([0.1, -0.2, 0.3, -0.4]);
+		const push = await coordinator.pushMicAudio(channelId, true, samples);
+		expect(push.ok).toBe(true);
+
+		await waitFor(() => received.length > 0);
+		expect(received).toHaveLength(1);
+		// The fake bridge echoes the mic frame's payload back verbatim under the OTHER tag — a
+		// genuine round trip through a real WebSocket, not a mocked shortcut.
+		const aligned = new Uint8Array(received[0]!.length);
+		aligned.set(received[0]!);
+		expect(new Float32Array(aligned.buffer)).toEqual(samples);
+		coordinator.stop();
+	});
+
+	test("a device-audio call (noLocalAudio: false) refuses both attachAudioSink and pushMicAudio", async () => {
+		const { coordinator, channelId } = await startAudioLessCall({ noLocalAudio: false });
+		const attach = coordinator.attachAudioSink(channelId, true, { sendOutputAudio: () => {} });
+		expect(attach.ok).toBe(false);
+		if (!attach.ok) expect(attach.reason).toBe("device-audio-call");
+		const push = await coordinator.pushMicAudio(channelId, true, new Float32Array([0.1]));
+		expect(push.ok).toBe(false);
+		if (!push.ok) expect(push.reason).toBe("device-audio-call");
+		coordinator.stop();
+	});
+
+	test("an older broker build that never reports noLocalAudio at all is treated as device-audio (refused), not silently trusted", async () => {
+		const stateDir = tmpDir("voice-mgr-audio-state-old-");
+		const journalDir = tmpDir("voice-mgr-audio-journal-old-");
+		cleanups.push(() => {
+			rmSync(stateDir, { recursive: true, force: true });
+			rmSync(journalDir, { recursive: true, force: true });
+		});
+		const bridge = startFakeBridge("live-audio-old");
+		cleanups.push(bridge.stop);
+		const broker = new ScriptedBroker(journalDir, bridge); // noLocalAudio left undefined — an older broker build
+		const cards: EmitCardInput[] = [];
+		const coordinator = makeCoordinator({ stateDir, broker, cards });
+		await coordinator.startCall("room-old-broker", { ownerActorId: "operator" });
+		const attach = coordinator.attachAudioSink("room-old-broker", true, { sendOutputAudio: () => {} });
+		expect(attach.ok).toBe(false);
+		if (!attach.ok) expect(attach.reason).toBe("device-audio-call");
+		coordinator.stop();
+	});
+
+	test("unauthorized is refused before any noLocalAudio/bridge check runs", async () => {
+		const { coordinator, channelId } = await startAudioLessCall();
+		const attach = coordinator.attachAudioSink(channelId, false, { sendOutputAudio: () => {} });
+		expect(attach.ok).toBe(false);
+		if (!attach.ok) expect(attach.reason).toBe("forbidden");
+		const push = await coordinator.pushMicAudio(channelId, false, new Float32Array([0.1]));
+		expect(push.ok).toBe(false);
+		if (!push.ok) expect(push.reason).toBe("forbidden");
+		coordinator.stop();
+	});
+
+	test("ending the call detaches the sink: a later output-audio frame is never delivered, and a stale detach() is a harmless no-op", async () => {
+		const { coordinator, channelId, bridge } = await startAudioLessCall();
+		const received: Uint8Array[] = [];
+		const attach = coordinator.attachAudioSink(channelId, true, { sendOutputAudio: (bytes) => received.push(bytes) });
+		expect(attach.ok).toBe(true);
+		if (!attach.ok) throw new Error("unreachable");
+
+		const ended = await coordinator.endCall(channelId, true);
+		expect(ended.ok).toBe(true);
+		// A stale detach from the ENDED call's own sink must never throw, and must never touch whatever
+		// a later call on this channel attaches — see the assertion below.
+		expect(() => attach.value.detach()).not.toThrow();
+
+		// The old bridge socket is closed by teardownRuntime; even if it somehow still delivered a
+		// frame, there is no sink left on the torn-down runtime to receive it.
+		bridge.closeAll();
+		await new Promise((r) => setTimeout(r, 60));
+		expect(received).toHaveLength(0);
+
+		// A fresh call on the SAME channel must not inherit the ended call's sink — attachAudioSink
+		// against the OLD (ended) binding is refused, proving there is nothing stale left to attach to.
+		const attachAfterEnd = coordinator.attachAudioSink(channelId, true, { sendOutputAudio: () => {} });
+		expect(attachAfterEnd.ok).toBe(false);
+		coordinator.stop();
+	});
+
+	test("state() reports audioAvailable only when noLocalAudio AND controlsAvailable both hold", async () => {
+		const audioLess = await startAudioLessCall({ noLocalAudio: true });
+		expect(audioLess.coordinator.state(audioLess.channelId)?.audioAvailable).toBe(true);
+		audioLess.coordinator.stop();
+
+		const deviceAudio = await startAudioLessCall({ noLocalAudio: false });
+		expect(deviceAudio.coordinator.state(deviceAudio.channelId)?.audioAvailable).toBe(false);
+		deviceAudio.coordinator.stop();
 	});
 });
