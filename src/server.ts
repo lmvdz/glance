@@ -1722,6 +1722,17 @@ export class SquadServer {
 		if (url.pathname === "/favicon.ico") return new Response(null, { status: 204 });
 		const asset = PUBLIC_ASSETS[url.pathname];
 		if (asset) return new Response(Bun.file(path.join(WEB_DIR, url.pathname.slice(1))), { headers: { "content-type": asset } });
+		// AudioWorklet modules must be tokenless too: `audioWorklet.addModule()` fetches without
+		// credentials in practice, so a gated /audio/ returns 401 and the call dies with the
+		// browser's bare "The operation was aborted." (2026-07-28 production incident). The worklet
+		// is inert plumbing code, not a secret — serve it like the shell, containment-checked.
+		if (webappEnabled() && url.pathname.startsWith("/audio/")) {
+			const resolved = path.join(WEBAPP_DIST, "audio", url.pathname.slice("/audio/".length));
+			if (resolved.startsWith(path.join(WEBAPP_DIST, "audio") + path.sep) && existsSync(resolved)) {
+				return new Response(Bun.file(resolved), { headers: { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-cache" } });
+			}
+			return new Response("not found", { status: 404 });
+		}
 		// Inert webapp seam: serve Vite's content-hashed bundle tokenless (like the shell) when enabled.
 		// Containment check keeps requests inside dist/assets — no path traversal out of the build dir.
 		if (webappEnabled() && url.pathname.startsWith("/assets/")) {
