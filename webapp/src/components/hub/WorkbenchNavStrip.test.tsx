@@ -96,6 +96,38 @@ test('a route with no matching nav row (e.g. a doc review) marks nothing current
   for (const row of NAV_ROWS) expect(html).toMatch(new RegExp(`<a[^>]*>${row.label}</a>`));
 });
 
+// The regression these two guard is NOT "the strip is missing" — every test above already passes on
+// a strip nobody can find. The first cut shipped at 28px, 11px #7A7A82 text on the page's own
+// #0A0A0B ground, and the operator it was built for reported it as absent. Present-but-invisible is
+// the same outcome as unshipped, so the chrome contract is pinned here: its own lighter ground, a
+// bottom rule that separates it from the surface below, and a row tall enough to read as a bar.
+test('the strip reads as chrome: its own ground, a bottom rule, and a bar-height row', () => {
+  const html = renderToStaticMarkup(<WorkbenchNavStrip view="tasks" />);
+  expect(html).toContain('background:#17171A');
+  expect(html).toContain('border-bottom:1px solid #26262B');
+  expect(html).toMatch(/class="[^"]*\bh-9\b/);
+});
+
+// Colour alone is both the weakest signal for a sighted operator scanning a nine-item row and
+// invisible to anyone with a colour-vision deficiency. The current entry carries a shape cue (an
+// underline rule drawn as an inset shadow) on top of the ember, and the ancestor entry carries a
+// dimmer one — so "where am I" survives the colour channel being unavailable.
+// Both halves pin the EXACT paint, not merely the presence of an underline. An assertion of
+// `toContain('inset 0 -2px 0')` alone passes on `transparent` — i.e. on a strip whose shape cue has
+// been dimmed back out of existence, which is the regression the test exists to catch. The ancestor
+// alpha specifically has a floor: it is the only non-colour carrier of "you are in this section",
+// so it must clear WCAG 1.4.11's 3:1 non-text contrast against the bar's #17171A ground. 0.55
+// composites to ~3.44:1; the 0.45 this shipped with first composites to ~2.72:1 and fails.
+test('current and ancestor entries are marked by shape, at a paint that clears non-text contrast', () => {
+  const onList = renderToStaticMarkup(<WorkbenchNavStrip view="tasks" />);
+  expect(onList.match(/<span aria-current="page"[^>]*>/)?.[0]).toContain('inset 0 -2px 0 #F0A35A');
+
+  const onDetail = renderToStaticMarkup(<WorkbenchNavStrip view="task" id="some-task-id" />);
+  expect(onDetail.match(/<a[^>]*aria-current="true"[^>]*>/)?.[0]).toContain(
+    'inset 0 -2px 0 rgba(240,163,90,0.55)',
+  );
+});
+
 test('the strip names itself for assistive tech without adding a visible heading', () => {
   const html = renderToStaticMarkup(<WorkbenchNavStrip view="tasks" />);
   expect(html).toContain('aria-label="Workbench surfaces"');
