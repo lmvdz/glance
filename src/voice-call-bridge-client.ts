@@ -19,6 +19,15 @@
  * no-ops/never-fired unless the call this client is talking to was started with `noLocalAudio`; the
  * coordinator one layer up is what enforces that (this class has no opinion on WHY audio is or isn't
  * flowing, only on how to move the bytes once asked to).
+ *
+ * Live captions fix (production defect, 2026-07-28): the bridge's `coven-bridge.ts` has ALWAYS
+ * broadcast a `{type:"transcript",role,text,turn,final}` frame per utterance chunk — including
+ * every non-final (`final:false`) partial as the agent speaks, replaced in place keyed `(role,turn)`
+ * at the bridge itself (see `CovenBridge#publishTranscript`) — but this client never gave that frame
+ * type a home: it fell through to the generic `onFrame` callback, which the coordinator never wired,
+ * so partials were silently dropped. `onTranscriptFrame` gives it one, presentation-plane only (this
+ * class never writes to the journal or the projection store — see `voice-call-manager.ts`'s own
+ * `onLiveTranscriptFrame`/`onTranscriptTurn` split for why that boundary matters).
  */
 
 const DEFAULT_ACK_TIMEOUT_MS = 8_000;
@@ -85,6 +94,16 @@ export interface BridgeFleetCall {
 	args: unknown;
 }
 
+/** One `{type:"transcript",...}` presentation frame off the bridge — a chunk of one utterance,
+ *  possibly still in progress (`final:false`). Shape matches `coven-bridge.ts`'s own `TranscriptEntry`
+ *  minus `callId`/`at`, which this client does not know (the coordinator, which does, stamps them). */
+export interface BridgeTranscriptFrame {
+	role: "user" | "assistant";
+	text: string;
+	turn: number;
+	final: boolean;
+}
+
 export interface BridgeControlAck {
 	requestId: string;
 	ok: boolean;
@@ -108,6 +127,10 @@ export interface BridgeClientOptions {
 	 *  signal (as opposed to `onTerminal`, which means the session itself said it ended). */
 	onSocketLoss?: (err?: unknown) => void;
 	onFrame?: (frame: Record<string, unknown>) => void;
+	/** Fired for every `{type:"transcript"}` frame the bridge broadcasts — one per utterance chunk,
+	 *  final or not (live captions fix, see the module doc). Malformed shapes (missing/wrong-typed
+	 *  role/text/turn/final) are dropped before this fires, same discipline as `onFleetCall`. */
+	onTranscriptFrame?: (frame: BridgeTranscriptFrame) => void;
 	/** Concern 09: fired for a `0x02`-tagged binary frame — one chunk of decoded output PCM the
 	 *  session sent back, with the tag byte already stripped. Never fired for anything else (a
 	 *  same-tagged frame arriving mistagged, or one this client did not itself send, is simply the
@@ -146,6 +169,7 @@ export class VoiceCallBridgeClient {
 	private readonly onTerminal: ((error: string | null) => void) | undefined;
 	private readonly onSocketLoss: ((err?: unknown) => void) | undefined;
 	private readonly onFrame: ((frame: Record<string, unknown>) => void) | undefined;
+	private readonly onTranscriptFrame: ((frame: BridgeTranscriptFrame) => void) | undefined;
 	private readonly onAudioFrame: ((bytes: Uint8Array) => void) | undefined;
 	private readonly onFleetCall: ((call: BridgeFleetCall) => void) | undefined;
 	private readonly connectFn: BridgeConnectFn;
@@ -163,6 +187,7 @@ export class VoiceCallBridgeClient {
 		this.onTerminal = opts.onTerminal;
 		this.onSocketLoss = opts.onSocketLoss;
 		this.onFrame = opts.onFrame;
+		this.onTranscriptFrame = opts.onTranscriptFrame;
 		this.onAudioFrame = opts.onAudioFrame;
 		this.onFleetCall = opts.onFleetCall;
 		this.connectFn = opts.connect ?? defaultConnect;
@@ -285,6 +310,20 @@ export class VoiceCallBridgeClient {
 						this.pending.delete(record.requestId);
 						clearTimeout(waiter.timer);
 						waiter.resolve(record as unknown as BridgeControlAck);
+					}
+					return;
+				}
+				if (record.type === "transcript") {
+					// Live captions fix: narrowed here (string role limited to the two known values, string
+					// text, numeric turn, boolean final) so the coordinator's handler never sees a malformed
+					// frame — same discipline as the `fleetCall` branch above.
+					if (
+						(record.role === "user" || record.role === "assistant") &&
+						typeof record.text === "string" &&
+						typeof record.turn === "number" &&
+						typeof record.final === "boolean"
+					) {
+						this.onTranscriptFrame?.({ role: record.role, text: record.text, turn: record.turn, final: record.final });
 					}
 					return;
 				}

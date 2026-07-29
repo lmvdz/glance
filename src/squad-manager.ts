@@ -1401,6 +1401,16 @@ export class SquadManager extends EventEmitter {
 			onTranscriptTurn: (input) => {
 				this.emit("event", { type: "voice-call-transcript-turn", channelId: input.channelId, callId: input.callId, entry: input.entry } satisfies SquadEvent);
 			},
+			// Live captions fix (production defect, 2026-07-28): a live bridge partial rides the
+			// IDENTICAL "voice-call-transcript-turn" SquadEvent onTranscriptTurn emits above — the
+			// webapp's mergeLiveTurn (keyed (role, turn), replace-in-place) already handles both a
+			// growing partial superseding an earlier partial AND the eventual durably-journaled
+			// final:true turn (pushed via onTranscriptTurn once tailed) superseding the last partial,
+			// with zero webapp-side change needed. This callback never appends to the journal/
+			// projection store — see onLiveTranscriptFrame's own doc for why.
+			onLiveTranscriptFrame: (input) => {
+				this.emit("event", { type: "voice-call-transcript-turn", channelId: input.channelId, callId: input.callId, entry: input.entry } satisfies SquadEvent);
+			},
 			// Concern 12 (voice-fleet-delegation): the call's fleet tool calls execute HERE, on the
 			// same authenticated paths UI commands take, as the call owner's snapshotted actor.
 			executeFleetCall: (input) => this.executeVoiceFleetCall(input),
