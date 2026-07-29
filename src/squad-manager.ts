@@ -1401,6 +1401,25 @@ export class SquadManager extends EventEmitter {
 			onTranscriptTurn: (input) => {
 				this.emit("event", { type: "voice-call-transcript-turn", channelId: input.channelId, callId: input.callId, entry: input.entry } satisfies SquadEvent);
 			},
+			// Live captions fix (production defect, 2026-07-28): a live bridge partial rides the
+			// IDENTICAL "voice-call-transcript-turn" SquadEvent onTranscriptTurn emits above — the
+			// webapp's mergeLiveTurn (keyed (role, turn), replace-in-place) already handles both a
+			// growing partial superseding an earlier partial AND the eventual durably-journaled
+			// final:true turn (pushed via onTranscriptTurn once tailed) superseding the last partial,
+			// with zero webapp-side change needed. This callback never appends to the journal/
+			// projection store — see onLiveTranscriptFrame's own doc for why.
+			onLiveTranscriptFrame: (input) => {
+				this.emit("event", { type: "voice-call-transcript-turn", channelId: input.channelId, callId: input.callId, entry: input.entry } satisfies SquadEvent);
+			},
+			// Concern 13 (multi-party-calls): presentation-plane presence nudges — see the
+			// "voice-call-participant" SquadEvent's own doc in types.ts for why this is NOT a durable
+			// journal write (state()'s own participants field is the durable-enough source of truth).
+			onParticipantJoined: (input) => {
+				this.emit("event", { type: "voice-call-participant", channelId: input.channelId, callId: input.callId, event: "joined", participant: input.participant } satisfies SquadEvent);
+			},
+			onParticipantLeft: (input) => {
+				this.emit("event", { type: "voice-call-participant", channelId: input.channelId, callId: input.callId, event: "left", participant: input.participant } satisfies SquadEvent);
+			},
 			// Concern 12 (voice-fleet-delegation): the call's fleet tool calls execute HERE, on the
 			// same authenticated paths UI commands take, as the call owner's snapshotted actor.
 			executeFleetCall: (input) => this.executeVoiceFleetCall(input),
@@ -12774,19 +12793,24 @@ export class SquadManager extends EventEmitter {
 		return this.voiceCall.setMuted(channelId, isAuthorized, muted);
 	}
 
-	/** Registers a browser's audio sink (concern 09: browser-audio-transport) — see
-	 *  `VoiceCallCoordinator#attachAudioSink` for the full gate (membership, live, connected bridge,
-	 *  AND `noLocalAudio`). Called from the dedicated audio WS upgrade in `server.ts`, never from the
-	 *  general `/ws` chat socket. */
-	async attachVoiceCallAudioSink(channelId: string, actor: Actor, sink: { sendOutputAudio: (bytes: Uint8Array) => void }): Promise<CoordinatorResult<{ detach: () => void }>> {
+	/** Registers a browser's audio sink (concern 09: browser-audio-transport; N-participant identity
+	 *  by concern 13: multi-party-calls) — see `VoiceCallCoordinator#attachAudioSink` for the full
+	 *  gate (membership, live, connected bridge, AND `noLocalAudio`) and for how `connId` disambiguates
+	 *  concurrent attaches. Called from the dedicated audio WS upgrade in `server.ts`, never from the
+	 *  general `/ws` chat socket — `actor` there is already the SAME authenticated identity resolved
+	 *  before the WS upgrade, so host/guest attribution is never guessed. */
+	async attachVoiceCallAudioSink(channelId: string, actor: Actor, connId: string, sink: { sendOutputAudio: (bytes: Uint8Array) => void }): Promise<CoordinatorResult<{ detach: () => void }>> {
 		const isAuthorized = await this.channelStore.canReadChannel(channelId, actor);
-		return this.voiceCall.attachAudioSink(channelId, isAuthorized, sink);
+		return this.voiceCall.attachAudioSink(channelId, isAuthorized, sink, { connId, actorId: actor.id, ...(actor.displayName === undefined ? {} : { displayName: actor.displayName }) });
 	}
 
-	/** Relays one chunk of browser mic PCM (concern 09) — see `VoiceCallCoordinator#pushMicAudio`. */
-	async pushVoiceCallMicAudio(channelId: string, actor: Actor, samples: Float32Array): Promise<CoordinatorResult<true>> {
+	/** Relays one chunk of browser mic PCM (concern 09; additively mixed with every other concurrent
+	 *  participant's own chunk by concern 13) — see `VoiceCallCoordinator#pushMicAudio`. `connId` must
+	 *  be the SAME id this connection's `attachVoiceCallAudioSink` call used, so the mixer's
+	 *  per-participant slot lines up with this connection's own presence entry. */
+	async pushVoiceCallMicAudio(channelId: string, actor: Actor, connId: string, samples: Float32Array): Promise<CoordinatorResult<true>> {
 		const isAuthorized = await this.channelStore.canReadChannel(channelId, actor);
-		return this.voiceCall.pushMicAudio(channelId, isAuthorized, samples);
+		return this.voiceCall.pushMicAudio(channelId, isAuthorized, samples, connId);
 	}
 
 	/** @substrate no caller yet — plans/voice-orchestrated-room-integration/03 (the room-side ladder

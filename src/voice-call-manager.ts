@@ -37,7 +37,8 @@ import {
 	type VoiceCallRetention,
 	type VoiceCallTerminalReason,
 } from "./voice-call-binding.ts";
-import { VoiceCallBridgeClient, type BridgeConnectFn, type BridgeControlAck, type BridgeFleetCall, type BridgeHelloFrame } from "./voice-call-bridge-client.ts";
+import { VoiceCallBridgeClient, type BridgeConnectFn, type BridgeControlAck, type BridgeFleetCall, type BridgeHelloFrame, type BridgeTranscriptFrame } from "./voice-call-bridge-client.ts";
+import { VoiceCallAudioMixer } from "./voice-call-audio-mixer.ts";
 import { JournalTailer, type JournalEnvelope } from "./voice-call-journal.ts";
 import type { JournalFleetAction } from "./voice-call-journal.ts";
 import { CallProjectionStore, type DeferredFleetAction, type EmitVoiceDecisionCardInput, type EmitVoiceFleetActionCardInput, type JournalGap, type StoredTranscriptEntry } from "./voice-call-projection.ts";
@@ -181,6 +182,35 @@ export interface VoiceCallCoordinatorOptions {
 	 */
 	onTranscriptTurn?: (input: { channelId: string; callId: string; entry: StoredTranscriptEntry }) => void;
 	/**
+	 * Live captions fix (production defect, 2026-07-28): fired for every `{type:"transcript"}`
+	 * presentation frame the bridge broadcasts as the agent speaks — including every non-final
+	 * (`final:false`) partial, streamed word-by-word, never just the finalized turn. DELIBERATELY
+	 * separate from `onTranscriptTurn` above: this is a presentation-plane nudge only, never touches
+	 * the journal or `CallProjectionStore` (DESIGN.md's boundary — presentation frames never mutate
+	 * durable state), so it carries none of that callback's "once per record actually appended to
+	 * disk" guarantee — the SAME `(role, turn)` key can fire here many times as one utterance grows,
+	 * by design. The caller (`SquadManager`) pushes it as the SAME `"voice-call-transcript-turn"`
+	 * `SquadEvent` `onTranscriptTurn` already uses — the webapp's existing `mergeLiveTurn` (keyed
+	 * `(role, turn)`, replace-in-place) neither knows nor cares whether a given push came from a live
+	 * bridge frame or a durably-appended journal record; the journal's own eventual `final:true` push
+	 * for the same key supersedes any partial exactly the way a later partial supersedes an earlier
+	 * one. Additive and optional: a caller that never passes it loses only the live-captions nudge —
+	 * the finalized turn still lands via `onTranscriptTurn` once the journal is tailed.
+	 */
+	onLiveTranscriptFrame?: (input: { channelId: string; callId: string; entry: StoredTranscriptEntry }) => void;
+	/**
+	 * Concern 13 (multi-party-calls): fired once per browser that successfully attaches an audio
+	 * sink (`attachAudioSink`) — a genuine join, not a reconnect racing the same connId (see that
+	 * method's own detach-identity guard). The caller (`SquadManager`) journals this as a call event
+	 * and turns it into presence the HUD/call pane can render. Additive and optional: a daemon that
+	 * never wires it loses only presence/join history, never the ability to attach at all.
+	 */
+	onParticipantJoined?: (input: { channelId: string; callId: string; participant: VoiceCallParticipant }) => void;
+	/** Concern 13: fired once per attached sink that actually detaches (own-identity guarded, same as
+	 *  `onParticipantJoined`'s join). Never fired for a stale/superseded detach that no longer owns
+	 *  the connId's entry — see `attachAudioSink`'s own doc. */
+	onParticipantLeft?: (input: { channelId: string; callId: string; participant: VoiceCallParticipant }) => void;
+	/**
 	 * Concern 12 (voice-fleet-delegation): execute one fleet tool call relayed from the live
 	 * session, as `ownerActor` (the call owner's snapshotted identity — the caller enforces the
 	 * SAME membership/RBAC gates a UI command from that actor passes; this coordinator has no RBAC
@@ -253,10 +283,21 @@ export interface VoiceCallStateView extends VoiceCallBindingView {
 	 * `pushMicAudio` at all, rather than offering a mic button a device-audio call would refuse.
 	 */
 	audioAvailable: boolean;
+	/** Concern 13 (multi-party-calls): every browser currently attached via `attachAudioSink`, for
+	 *  presence in the call pane/HUD — "who is in this call right now". Empty for a device-audio
+	 *  call (nothing can attach) or a call with nobody attached yet, never undefined — a caller
+	 *  should not have to distinguish "no presence data" from "no one is here". */
+	participants: VoiceCallParticipant[];
 }
 
 const DEFAULT_JOURNAL_POLL_MS = 400;
 const DEFAULT_LIVENESS_PROBE_MS = 5_000;
+/** Concern 13 (multi-party-calls): the connId a caller gets when it does not pass one to
+ *  `attachAudioSink`/`pushMicAudio` — every pre-concern-13 caller (and every test written before
+ *  multi-party calls existed) implicitly means "the one relay this call has", so defaulting BOTH
+ *  methods to the SAME constant keeps their behavior identical to the old single-sink design when
+ *  nobody opts into multi-party identity. */
+const DEFAULT_PARTICIPANT_CONN_ID = "__default__";
 
 function voiceCallFacePayload(binding: VoiceCallBinding): CardPayloadType<typeof TRANSCRIPT_EVENT_VOICE_CALL> {
 	const title =
@@ -368,6 +409,27 @@ function voiceDecisionFacePayload(channelId: string, callId: string, decision: J
 	};
 }
 
+/**
+ * Concern 13 (multi-party-calls): one browser's attached audio relay, tagged from the
+ * AUTHENTICATED WS session at attach time (`server.ts`'s `openVoiceAudioSocket` already resolves
+ * an `Actor` before ever calling `attachAudioSink` — the daemon never has to guess who is
+ * speaking). Keyed by a per-CONNECTION id, deliberately distinct from `actorId`: the same human
+ * opening two tabs is two participants (two independent mic/speaker relays kept alive
+ * independently), never one silently replacing the other the way the old single-sink design used
+ * to force.
+ */
+export interface VoiceCallParticipant {
+	connId: string;
+	actorId: string;
+	displayName?: string;
+	/** True for the call's HOST — computed once at attach time by comparing `actorId` against
+	 *  `binding.ownerActorId` (the actor who started the call, per the concern doc's "the person
+	 *  who starts the call is the HOST"). Never re-derived later: a call keeps the same host for
+	 *  its whole life, even if the host's own connection drops and reconnects. */
+	host: boolean;
+	joinedAt: number;
+}
+
 /** One channel's live wiring — the pieces that exist only while a call is being connected or is
  *  live/degraded for this channel. Torn down (never adopted forward) once the binding ends. */
 interface ChannelRuntime {
@@ -382,13 +444,23 @@ interface ChannelRuntime {
 	 *  call never inherits the previous call's mute. */
 	micMuted?: boolean;
 	/**
-	 * Concern 09 (browser-audio-transport): the connected browser's audio relay, when one has
-	 * attached via `attachAudioSink`. Receives decoded output PCM the bridge forwards (wired once, in
-	 * `connectAndPin`, regardless of whether a sink is attached yet — the bridge callback simply reads
-	 * this field at delivery time). Cleared with the rest of the runtime, so a new call never inherits
-	 * the previous call's sink, and a torn-down runtime never keeps feeding audio nobody asked for.
+	 * Concern 09 (browser-audio-transport), generalized to N by concern 13 (multi-party-calls): every
+	 * browser currently attached via `attachAudioSink`, keyed by its own connection id. Each receives
+	 * decoded output PCM the bridge forwards (wired once, in `connectAndPin`, regardless of whether
+	 * any sink is attached yet — the bridge callback simply fans out over whatever is in this map at
+	 * delivery time — see `onAudioFrame`). Cleared with the rest of the runtime, so a new call never
+	 * inherits the previous call's sinks, and a torn-down runtime never keeps feeding audio nobody
+	 * asked for.
 	 */
-	audioSink?: { sendOutputAudio: (bytes: Uint8Array) => void };
+	audioSinks: Map<string, { participant: VoiceCallParticipant; sink: { sendOutputAudio: (bytes: Uint8Array) => void } }>;
+	/**
+	 * Concern 13: additive-mixes every attached participant's mic PCM into the ONE input stream the
+	 * realtime provider accepts — see `voice-call-audio-mixer.ts`'s own module doc for the full
+	 * tradeoff against push-to-talk floor control. Built lazily on the first `pushMicAudio` call (an
+	 * audio-less call with no browser attached yet needs no mixer at all) and torn down with the rest
+	 * of the runtime.
+	 */
+	mixer?: VoiceCallAudioMixer;
 	/** Guards against overlapping liveness-probe ticks — a broker round-trip plus a bridge reconnect
 	 *  attempt can easily outlast `livenessProbeIntervalMs`, exactly like `observer.ts`'s own documented
 	 *  "the gate run can outlast the interval" guard. Without this, a slow tick leaves the PREVIOUS
@@ -409,6 +481,9 @@ export class VoiceCallCoordinator {
 	private readonly journalPollIntervalMs: number;
 	private readonly livenessProbeIntervalMs: number;
 	private readonly onTranscriptTurnFn: ((input: { channelId: string; callId: string; entry: StoredTranscriptEntry }) => void) | undefined;
+	private readonly onLiveTranscriptFrameFn: ((input: { channelId: string; callId: string; entry: StoredTranscriptEntry }) => void) | undefined;
+	private readonly onParticipantJoinedFn: VoiceCallCoordinatorOptions["onParticipantJoined"];
+	private readonly onParticipantLeftFn: VoiceCallCoordinatorOptions["onParticipantLeft"];
 	private readonly executeFleetCall: VoiceCallCoordinatorOptions["executeFleetCall"];
 	private readonly buildFleetContext: VoiceCallCoordinatorOptions["buildFleetContext"];
 
@@ -430,6 +505,9 @@ export class VoiceCallCoordinator {
 		this.journalPollIntervalMs = opts.journalPollIntervalMs ?? DEFAULT_JOURNAL_POLL_MS;
 		this.livenessProbeIntervalMs = opts.livenessProbeIntervalMs ?? DEFAULT_LIVENESS_PROBE_MS;
 		this.onTranscriptTurnFn = opts.onTranscriptTurn;
+		this.onLiveTranscriptFrameFn = opts.onLiveTranscriptFrame;
+		this.onParticipantJoinedFn = opts.onParticipantJoined;
+		this.onParticipantLeftFn = opts.onParticipantLeft;
 		this.executeFleetCall = opts.executeFleetCall;
 		this.buildFleetContext = opts.buildFleetContext;
 
@@ -447,7 +525,7 @@ export class VoiceCallCoordinator {
 	private runtime(channelId: string): ChannelRuntime {
 		let rt = this.runtimes.get(channelId);
 		if (!rt) {
-			rt = { ended: false };
+			rt = { ended: false, audioSinks: new Map() };
 			this.runtimes.set(channelId, rt);
 		}
 		return rt;
@@ -464,7 +542,7 @@ export class VoiceCallCoordinator {
 	 *  `ended`, so replacing the map entry outright — rather than trying to reset fields on the reused
 	 *  object — can never drop a still-active call's own state. */
 	private resetRuntime(channelId: string): ChannelRuntime {
-		const rt: ChannelRuntime = { ended: false };
+		const rt: ChannelRuntime = { ended: false, audioSinks: new Map() };
 		this.runtimes.set(channelId, rt);
 		return rt;
 	}
@@ -495,11 +573,13 @@ export class VoiceCallCoordinator {
 		// A torn-down runtime has no mic to be muted. Leaving `true` here would have `state()` report
 		// an ended call as muted, which is a claim about a session that no longer exists.
 		rt.micMuted = undefined;
-		// Concern 09: a torn-down runtime has no bridge left to relay audio for — an old sink lingering
+		// Concern 09/13: a torn-down runtime has no bridge left to relay audio for — sinks lingering
 		// here would silently swallow the NEXT call's onAudioFrame reads if a caller ever queried it
 		// (it can't: `resetRuntime` always allocates a fresh object) and, more importantly, a stale
 		// reference to a closed browser socket must never look attached.
-		rt.audioSink = undefined;
+		rt.audioSinks.clear();
+		rt.mixer?.stop();
+		rt.mixer = undefined;
 	}
 
 	/** @substrate exported for tests only — tests/voice-call-manager.test.ts asserts every
@@ -519,7 +599,8 @@ export class VoiceCallCoordinator {
 		if (!binding) return undefined;
 		const rt = this.runtimes.get(channelId);
 		const controlsAvailable = binding.state === "live" && Boolean(rt?.bridge);
-		return { ...redactBinding(binding), micMuted: rt?.micMuted === true, controlsAvailable, audioAvailable: binding.noLocalAudio === true && controlsAvailable };
+		const participants = rt ? [...rt.audioSinks.values()].map((entry) => entry.participant) : [];
+		return { ...redactBinding(binding), micMuted: rt?.micMuted === true, controlsAvailable, audioAvailable: binding.noLocalAudio === true && controlsAvailable, participants };
 	}
 
 	list(): VoiceCallBindingView[] {
@@ -683,11 +764,17 @@ export class VoiceCallCoordinator {
 			// Concern 09: wired unconditionally — a device-audio call's bridge simply never sends a
 			// `0x02` frame in the first place (see `LiveSessionController#handleOutputAudio`'s own
 			// `noLocalAudio` gate on the OMP side), and an audio-less call with no browser attached YET
-			// just has no `audioSink` to read here, which is a silent no-op, not an error.
-			onAudioFrame: (bytes) => this.runtime(channelId).audioSink?.sendOutputAudio(bytes),
+			// just has no attached sinks to read here, which is a silent no-op, not an error. Concern 13:
+			// fans out to EVERY currently-attached browser, not just one — the multi-party generalization
+			// of what used to be a single `audioSink?.sendOutputAudio` dereference.
+			onAudioFrame: (bytes) => { for (const entry of this.runtime(channelId).audioSinks.values()) entry.sink.sendOutputAudio(bytes); },
 			// Concern 12: wired unconditionally too — a bridge that never advertised `canFleet` simply
 			// never sends a `fleetCall`, and the handler itself re-checks the live-binding preconditions.
 			onFleetCall: (call) => void this.onFleetCall(channelId, call).catch((err) => this.log(`voice-call ${channelId}: fleet call handling failed: ${errText(err)}`)),
+			// Live captions fix: wired unconditionally, same rule as onAudioFrame/onFleetCall above — a
+			// bridge that predates this fix simply never sends a `transcript` frame this client would
+			// otherwise not recognize, and the handler itself re-checks the live-binding preconditions.
+			onTranscriptFrame: (frame) => this.onLiveTranscriptFrame(channelId, frame),
 		});
 		const hello = await client.connect();
 		if (rt.ended) {
@@ -789,6 +876,41 @@ export class VoiceCallCoordinator {
 				options: result.decision.options,
 				requiresConfirmation: result.decision.requiresConfirmation,
 				deferredActionId,
+			},
+		});
+	}
+
+	/**
+	 * Live captions fix (production defect, 2026-07-28): one `{type:"transcript"}` presentation
+	 * frame off the bridge — final or not — becomes a presentation-plane nudge via
+	 * `onLiveTranscriptFrame`. Deliberately mirrors `onTranscriptTurn`'s wire shape
+	 * (`{channelId, callId, entry}`) so the caller can push both through the identical `SquadEvent`
+	 * path, but does NOT touch `this.projection`/the journal — see the option's own doc for why that
+	 * boundary matters (DESIGN.md: presentation frames never mutate durable state). Dropped silently
+	 * (no binding, no callId, or the bridge that sent it is no longer this channel's live bridge) —
+	 * same discipline as `onFleetCall`/`onAudioFrame`: a stale or unattached frame has nowhere honest
+	 * to land, and this is a best-effort nudge, not a record that must never be lost.
+	 */
+	private onLiveTranscriptFrame(channelId: string, frame: BridgeTranscriptFrame): void {
+		if (!this.onLiveTranscriptFrameFn) return;
+		const binding = this.bindings.get(channelId);
+		if (!binding?.callId || binding.state !== "live") return;
+		const rt = this.runtimes.get(channelId);
+		if (!rt?.bridge) return;
+		// Retention "off" honesty, mirroring `applyEnvelope`'s own durable-path redaction (concern 11's
+		// Resolution: "retention off pushes a redacted entry, no text"): a live caption must not show
+		// text the room asked never to keep even transiently, so the presentation nudge redacts too.
+		const redacted = binding.retention === "off";
+		this.onLiveTranscriptFrameFn({
+			channelId,
+			callId: binding.callId,
+			entry: {
+				callId: binding.callId,
+				turn: frame.turn,
+				role: frame.role,
+				final: frame.final,
+				at: this.now(),
+				...(redacted ? { redacted: true } : { text: frame.text }),
 			},
 		});
 	}
@@ -1215,53 +1337,103 @@ export class VoiceCallCoordinator {
 	}
 
 	/**
-	 * Registers a browser's audio sink for a channel's live call (concern 09: browser-audio-transport)
-	 * — the daemon-side half of "speaker PCM leaves via the bridge instead of a local device". Gated
-	 * on the SAME preconditions `resolveDecision`/`steer`/`setMuted` already require (authorized,
-	 * active binding, `live`, a connected bridge) PLUS one more this class owns alone:
-	 * `binding.noLocalAudio === true` — a device-audio call already owns a real speaker and must never
-	 * ALSO hand its output audio to a browser, which would be feeding the same session's voice out of
-	 * two places at once.
+	 * Registers a browser's audio sink for a channel's live call (concern 09: browser-audio-transport;
+	 * generalized to N concurrent browsers by concern 13: multi-party-calls) — the daemon-side half of
+	 * "speaker PCM leaves via the bridge instead of a local device". Gated on the SAME preconditions
+	 * `resolveDecision`/`steer`/`setMuted` already require (authorized, active binding, `live`, a
+	 * connected bridge) PLUS one more this class owns alone: `binding.noLocalAudio === true` — a
+	 * device-audio call already owns a real speaker and must never ALSO hand its output audio to a
+	 * browser, which would be feeding the same session's voice out of two places at once.
 	 *
-	 * Returns a `detach()` that clears the sink ONLY if it is STILL the one this call attached — a
+	 * `participant` identifies WHO is attaching (the authenticated actor `server.ts` already resolved
+	 * before ever calling this — see `VoiceCallParticipant`'s own doc). Omitted, it defaults to the
+	 * single pre-concern-13 slot keyed under `DEFAULT_PARTICIPANT_CONN_ID`, attributed to the call's
+	 * own owner — every existing single-party caller keeps its exact old behavior. `host` is computed
+	 * here, once, by comparing `participant.actorId` against `binding.ownerActorId`.
+	 *
+	 * Returns a `detach()` that clears the sink ONLY if it is STILL the one THIS call attached — a
 	 * slow/delayed detach (e.g. a browser tab's cleanup racing a fast reconnect that already attached
-	 * a NEWER sink) must never clear a sink it does not own. Exactly one sink is held per channel: a
-	 * second `attachAudioSink` call replaces the first outright (V1 scope is one viewer's audio relay
-	 * per call, matching the "at most one active call per thread" boundary this whole feature already
-	 * lives inside) — the FIRST sink's own `detach()` becomes a harmless no-op once that happens, since
-	 * `rt.audioSink` no longer `===` it.
+	 * a NEWER sink under the SAME connId) must never clear a sink it does not own, checked by object
+	 * identity of the `sink` argument itself, not merely by key presence. Any number of DISTINCT
+	 * connIds may be attached at once — that is the entire point of concern 13's generalization; only
+	 * a second attach reusing the exact SAME connId replaces its own prior entry.
 	 */
-	attachAudioSink(channelId: string, isAuthorized: boolean, sink: { sendOutputAudio: (bytes: Uint8Array) => void }): CoordinatorResult<{ detach: () => void }> {
+	attachAudioSink(
+		channelId: string,
+		isAuthorized: boolean,
+		sink: { sendOutputAudio: (bytes: Uint8Array) => void },
+		participant?: { connId: string; actorId: string; displayName?: string },
+	): CoordinatorResult<{ detach: () => void }> {
 		if (!isAuthorized) return { ok: false, reason: "forbidden" };
 		const binding = this.bindings.get(channelId);
 		if (!binding || binding.state === "ended") return { ok: false, reason: "no-active-call" };
 		if (binding.noLocalAudio !== true) return { ok: false, reason: "device-audio-call" };
 		const rt = this.runtime(channelId);
 		if (binding.state !== "live" || !rt.bridge) return { ok: false, reason: "bridge-unavailable" };
-		rt.audioSink = sink;
-		return { ok: true, value: { detach: () => { if (rt.audioSink === sink) rt.audioSink = undefined; } } };
+		const identity = participant ?? { connId: DEFAULT_PARTICIPANT_CONN_ID, actorId: binding.ownerActorId };
+		const full: VoiceCallParticipant = {
+			connId: identity.connId,
+			actorId: identity.actorId,
+			...(identity.displayName === undefined ? {} : { displayName: identity.displayName }),
+			host: identity.actorId === binding.ownerActorId,
+			joinedAt: this.now(),
+		};
+		rt.audioSinks.set(identity.connId, { participant: full, sink });
+		this.onParticipantJoinedFn?.({ channelId, callId: binding.callId!, participant: full });
+		return {
+			ok: true,
+			value: {
+				detach: () => {
+					const current = rt.audioSinks.get(identity.connId);
+					if (!current || current.sink !== sink) return;
+					rt.audioSinks.delete(identity.connId);
+					rt.mixer?.remove(identity.connId);
+					this.onParticipantLeftFn?.({ channelId, callId: binding.callId!, participant: full });
+				},
+			},
+		};
 	}
 
 	/**
-	 * Relays one chunk of browser microphone PCM towards the session (concern 09) — mono 16 kHz
-	 * `Float32`, the format `VoiceCallBridgeClient#sendMicAudio`/oh-my-pi's own `AudioCapture` both
-	 * use. Same authorization and `noLocalAudio` gate as `attachAudioSink`; deliberately does NOT
-	 * require a sink to already be attached — a browser that only sends (never wants output audio
-	 * relayed back, or has its own separate connection for that) is not something this layer should
-	 * refuse just because it never called `attachAudioSink`.
+	 * Relays one chunk of browser microphone PCM towards the session (concern 09; additively mixed
+	 * with every OTHER currently-pushing participant's own chunk by concern 13 — see
+	 * `voice-call-audio-mixer.ts`'s module doc for the mixing tradeoff). Mono 16 kHz `Float32`, the
+	 * format `VoiceCallBridgeClient#sendMicAudio`/oh-my-pi's own `AudioCapture` both use. Same
+	 * authorization and `noLocalAudio` gate as `attachAudioSink`; deliberately does NOT require a sink
+	 * to already be attached — a browser that only sends (never wants output audio relayed back, or
+	 * has its own separate connection for that) is not something this layer should refuse just because
+	 * it never called `attachAudioSink`.
+	 *
+	 * `connId` defaults to the same `DEFAULT_PARTICIPANT_CONN_ID` slot `attachAudioSink` defaults to —
+	 * a caller that never opts into multi-party identity gets exactly the old single-source behavior
+	 * (the mixer's own "one pending participant" path forwards their frame byte-for-byte, unaltered).
+	 *
+	 * The actual send to the bridge is now DEFERRED to the mixer's own tick (see
+	 * `VoiceCallAudioMixer#tick`), decoupled from any one caller's `await` — a bridge-send failure can
+	 * no longer be reported back to the specific push that "caused" it (there may be several pending
+	 * participants by the time a tick fires), so it is bounded-logged here instead, matching every
+	 * other best-effort relay path in this class (e.g. `reapBrokerCall`).
 	 */
-	async pushMicAudio(channelId: string, isAuthorized: boolean, samples: Float32Array): Promise<CoordinatorResult<true>> {
+	async pushMicAudio(channelId: string, isAuthorized: boolean, samples: Float32Array, connId: string = DEFAULT_PARTICIPANT_CONN_ID): Promise<CoordinatorResult<true>> {
 		if (!isAuthorized) return { ok: false, reason: "forbidden" };
 		const binding = this.bindings.get(channelId);
 		if (!binding || binding.state === "ended") return { ok: false, reason: "no-active-call" };
 		if (binding.noLocalAudio !== true) return { ok: false, reason: "device-audio-call" };
 		const rt = this.runtime(channelId);
 		if (binding.state !== "live" || !rt.bridge) return { ok: false, reason: "bridge-unavailable" };
-		try {
-			rt.bridge.sendMicAudio(samples);
-		} catch (err) {
-			return { ok: false, reason: errText(err) };
+		if (!rt.mixer) {
+			rt.mixer = new VoiceCallAudioMixer({
+				onMixedFrame: (mixed) => {
+					try {
+						this.runtime(channelId).bridge?.sendMicAudio(mixed);
+					} catch (err) {
+						this.log(`voice-call ${channelId}: mixed mic frame could not be relayed: ${errText(err)}`);
+					}
+				},
+			});
+			rt.mixer.start();
 		}
+		rt.mixer.push(connId, samples);
 		return { ok: true, value: true };
 	}
 

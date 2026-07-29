@@ -20,6 +20,7 @@ import type { WorkLane, WorkLaneSource } from "./lane.ts";
 import type { ComplexityTier } from "./model-outcomes.ts";
 import type { LadderPriority } from "./attention-ladder.ts";
 import type { StoredTranscriptEntry } from "./voice-call-projection.ts";
+import type { VoiceCallParticipant } from "./voice-call-manager.ts";
 
 /** Derived, human-meaningful lifecycle state of one managed agent. */
 export type AgentStatus =
@@ -1565,7 +1566,17 @@ export type SquadEvent =
 	// its own variant rather than a `channel-entry` so a call's per-utterance turns can never leak
 	// into the main channel timeline the way `channel-entry` cards do (the product decision this
 	// concern's plan doc records: the timeline gets no turns, ever).
-	| { type: "voice-call-transcript-turn"; channelId: string; callId: string; entry: StoredTranscriptEntry };
+	| { type: "voice-call-transcript-turn"; channelId: string; callId: string; entry: StoredTranscriptEntry }
+	// Concern 13 (multi-party-calls): pushed once per genuine attach/detach of a browser's audio sink
+	// — see `VoiceCallCoordinatorOptions.onParticipantJoined`/`onParticipantLeft`'s own docs. Rides the
+	// SAME per-channel `canReadChannel`-gated WS fanout every other SquadEvent already uses.
+	// Presentation-plane only (like `voice-call-transcript-turn`'s live half): NOT written to the
+	// durable journal/projection store — a caller wanting a durable join/leave RECORD still needs to
+	// build that separately (named as a deferred gap in this concern's own Resolution). `state()`'s own
+	// `participants` field (read via `GET /api/channels/:id/voice-call`) is the durable-enough source
+	// of truth for "who is here right now"; this event is only the low-latency nudge, same relationship
+	// `voice-call-transcript-turn`'s live half has to the poll it nudges.
+	| { type: "voice-call-participant"; channelId: string; callId: string; event: "joined" | "left"; participant: VoiceCallParticipant };
 
 /** The daemon's periodic background loops — the ones that run without an operator and were, until the
  *  automation log, invisible. Scout reads agent reasoning; Sentinel (plans/sentinel-drift-probe, v0

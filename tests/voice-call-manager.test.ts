@@ -90,6 +90,12 @@ function startFakeBridge(sessionId: string, port = 0, recordingMode?: "full" | "
 		sendFleetCall: (fleetCallId: string, tool: string, args: unknown) => {
 			for (const ws of sockets) ws.send(JSON.stringify({ v: 1, sessionId, seq: 3, type: "fleetCall", fleetCallId, tool, args }));
 		},
+		// Live captions fix: originate one presentation-plane transcript frame to every connected
+		// client, exactly the frame shape `CovenBridge#publishTranscript` sends (including a
+		// still-in-progress, non-final partial).
+		sendTranscript: (entry: { role: "user" | "assistant"; text: string; turn: number; final: boolean }) => {
+			for (const ws of sockets) ws.send(JSON.stringify({ v: 1, sessionId, seq: 4, type: "transcript", ...entry }));
+		},
 		setDecision: (id: string, label: string) => decisions.set(id, { label }),
 		closeAll: () => { for (const ws of sockets) (ws as unknown as { close?: () => void }).close?.(); },
 		stop: () => server.stop(true),
@@ -184,7 +190,7 @@ async function waitFor(predicate: () => boolean, timeoutMs = 3000, stepMs = 15):
 	if (!predicate()) throw new Error("waitFor: condition never became true within timeout");
 }
 
-function makeCoordinator(opts: { stateDir: string; broker: BrokerClient; cards: EmitCardInput[]; livenessProbeIntervalMs?: number; journalPollIntervalMs?: number; connectBridge?: BridgeConnectFn; onTranscriptTurn?: (input: { channelId: string; callId: string; entry: unknown }) => void; executeFleetCall?: VoiceCallCoordinatorOptions["executeFleetCall"]; buildFleetContext?: VoiceCallCoordinatorOptions["buildFleetContext"] }): VoiceCallCoordinator {
+function makeCoordinator(opts: { stateDir: string; broker: BrokerClient; cards: EmitCardInput[]; livenessProbeIntervalMs?: number; journalPollIntervalMs?: number; connectBridge?: BridgeConnectFn; onTranscriptTurn?: (input: { channelId: string; callId: string; entry: unknown }) => void; onLiveTranscriptFrame?: (input: { channelId: string; callId: string; entry: unknown }) => void; onParticipantJoined?: VoiceCallCoordinatorOptions["onParticipantJoined"]; onParticipantLeft?: VoiceCallCoordinatorOptions["onParticipantLeft"]; executeFleetCall?: VoiceCallCoordinatorOptions["executeFleetCall"]; buildFleetContext?: VoiceCallCoordinatorOptions["buildFleetContext"] }): VoiceCallCoordinator {
 	const coordinator = new VoiceCallCoordinator({
 		stateDir: opts.stateDir,
 		broker: opts.broker,
@@ -193,6 +199,9 @@ function makeCoordinator(opts: { stateDir: string; broker: BrokerClient; cards: 
 		journalPollIntervalMs: opts.journalPollIntervalMs ?? 30,
 		livenessProbeIntervalMs: opts.livenessProbeIntervalMs ?? 60,
 		onTranscriptTurn: opts.onTranscriptTurn as never,
+		onLiveTranscriptFrame: opts.onLiveTranscriptFrame as never,
+		onParticipantJoined: opts.onParticipantJoined,
+		onParticipantLeft: opts.onParticipantLeft,
 		executeFleetCall: opts.executeFleetCall,
 		buildFleetContext: opts.buildFleetContext,
 	});
@@ -1133,6 +1142,155 @@ describe("browser-audio-transport (concern 09): attachAudioSink / pushMicAudio",
 	});
 });
 
+describe("multi-party calls (concern 13): N attached sinks, additive mixing, presence, join/leave", () => {
+	async function startMultiPartyCall(opts?: { ownerActorId?: string }): Promise<{ coordinator: VoiceCallCoordinator; channelId: string; bridge: ReturnType<typeof startFakeBridge>; joined: Array<{ channelId: string; callId: string; participant: { connId: string; actorId: string; host: boolean } }>; left: Array<{ channelId: string; callId: string; participant: { connId: string; actorId: string; host: boolean } }> }> {
+		const stateDir = tmpDir("voice-mgr-mp-state-");
+		const journalDir = tmpDir("voice-mgr-mp-journal-");
+		cleanups.push(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(journalDir, { recursive: true, force: true }); });
+		const bridge = startFakeBridge("live-mp-1");
+		cleanups.push(bridge.stop);
+		const broker = new ScriptedBroker(journalDir, bridge);
+		broker.noLocalAudio = true;
+		const cards: EmitCardInput[] = [];
+		const joined: Array<{ channelId: string; callId: string; participant: { connId: string; actorId: string; host: boolean } }> = [];
+		const left: Array<{ channelId: string; callId: string; participant: { connId: string; actorId: string; host: boolean } }> = [];
+		const coordinator = makeCoordinator({
+			stateDir,
+			broker,
+			cards,
+			onParticipantJoined: (input) => joined.push(input as never),
+			onParticipantLeft: (input) => left.push(input as never),
+		});
+		const channelId = "room-mp-1";
+		const ownerActorId = opts?.ownerActorId ?? "host-1";
+		const result = await coordinator.startCall(channelId, { ownerActorId });
+		expect(result.ok).toBe(true);
+		return { coordinator, channelId, bridge, joined, left };
+	}
+
+	test("two participants can attach concurrently; output fans out to BOTH, never stealing the other's sink", async () => {
+		const { coordinator, channelId } = await startMultiPartyCall();
+		const hostReceived: Uint8Array[] = [];
+		const guestReceived: Uint8Array[] = [];
+		const hostAttach = coordinator.attachAudioSink(channelId, true, { sendOutputAudio: (b) => hostReceived.push(b) }, { connId: "conn-host", actorId: "host-1" });
+		const guestAttach = coordinator.attachAudioSink(channelId, true, { sendOutputAudio: (b) => guestReceived.push(b) }, { connId: "conn-guest", actorId: "guest-1" });
+		expect(hostAttach.ok).toBe(true);
+		expect(guestAttach.ok).toBe(true);
+
+		const push = await coordinator.pushMicAudio(channelId, true, new Float32Array([0.1, 0.2]), "conn-host");
+		expect(push.ok).toBe(true);
+
+		await waitFor(() => hostReceived.length > 0 && guestReceived.length > 0);
+		expect(hostReceived).toHaveLength(1);
+		expect(guestReceived).toHaveLength(1);
+		// Both sinks received the SAME bytes — one bridge round trip, fanned out, not two separate ones.
+		expect(hostReceived[0]).toEqual(guestReceived[0]!);
+		coordinator.stop();
+	});
+
+	test("state().participants reports every attached connection, tagging host vs guest by actorId against the call's owner", async () => {
+		const { coordinator, channelId } = await startMultiPartyCall({ ownerActorId: "host-1" });
+		coordinator.attachAudioSink(channelId, true, { sendOutputAudio: () => {} }, { connId: "conn-host", actorId: "host-1", displayName: "Host Person" });
+		coordinator.attachAudioSink(channelId, true, { sendOutputAudio: () => {} }, { connId: "conn-guest", actorId: "guest-1", displayName: "Guest Person" });
+		const participants = coordinator.state(channelId)!.participants;
+		expect(participants).toHaveLength(2);
+		const host = participants.find((p) => p.connId === "conn-host")!;
+		const guest = participants.find((p) => p.connId === "conn-guest")!;
+		expect(host).toMatchObject({ actorId: "host-1", displayName: "Host Person", host: true });
+		expect(guest).toMatchObject({ actorId: "guest-1", displayName: "Guest Person", host: false });
+		coordinator.stop();
+	});
+
+	test("attaching, then pushing concurrent mic audio from host and guest, additively mixes into ONE bridge frame", async () => {
+		const { coordinator, channelId } = await startMultiPartyCall();
+		const echoed: Uint8Array[] = [];
+		coordinator.attachAudioSink(channelId, true, { sendOutputAudio: (b) => echoed.push(b) }, { connId: "conn-host", actorId: "host-1" });
+		// Two participants push in the SAME short window — the mixer must combine them into one frame
+		// rather than relaying two separate frames that would otherwise talk over each other on the wire.
+		await coordinator.pushMicAudio(channelId, true, new Float32Array([0.2, -0.2]), "conn-host");
+		await coordinator.pushMicAudio(channelId, true, new Float32Array([0.1, -0.1]), "conn-guest");
+		await waitFor(() => echoed.length > 0);
+		expect(echoed).toHaveLength(1);
+		const aligned = new Uint8Array(echoed[0]!.length);
+		aligned.set(echoed[0]!);
+		const mixed = new Float32Array(aligned.buffer);
+		expect(mixed[0]).toBeCloseTo(0.3, 5);
+		expect(mixed[1]).toBeCloseTo(-0.3, 5);
+		coordinator.stop();
+	});
+
+	test("onParticipantJoined/onParticipantLeft fire exactly once per genuine join/leave, never for a stale detach", async () => {
+		const { coordinator, channelId, joined, left } = await startMultiPartyCall({ ownerActorId: "host-1" });
+		const attach = coordinator.attachAudioSink(channelId, true, { sendOutputAudio: () => {} }, { connId: "conn-guest", actorId: "guest-1" });
+		expect(attach.ok).toBe(true);
+		if (!attach.ok) throw new Error("unreachable");
+		expect(joined).toHaveLength(1);
+		expect(joined[0]!.participant).toMatchObject({ connId: "conn-guest", actorId: "guest-1", host: false });
+
+		attach.value.detach();
+		expect(left).toHaveLength(1);
+		expect(left[0]!.participant).toMatchObject({ connId: "conn-guest", actorId: "guest-1" });
+
+		// A second detach() of the SAME already-detached handle is a harmless no-op — never a second
+		// "left" event for a departure that already happened.
+		attach.value.detach();
+		expect(left).toHaveLength(1);
+		coordinator.stop();
+	});
+
+	test("a slow/stale detach never removes a NEWER attach that reused the same connId", async () => {
+		const { coordinator, channelId, joined, left } = await startMultiPartyCall({ ownerActorId: "host-1" });
+		const firstReceived: Uint8Array[] = [];
+		const secondReceived: Uint8Array[] = [];
+		const first = coordinator.attachAudioSink(channelId, true, { sendOutputAudio: (b) => firstReceived.push(b) }, { connId: "conn-guest", actorId: "guest-1" });
+		expect(first.ok).toBe(true);
+		if (!first.ok) throw new Error("unreachable");
+		// A reconnect from the SAME browser tab reuses the SAME connId — replaces the entry outright.
+		const second = coordinator.attachAudioSink(channelId, true, { sendOutputAudio: (b) => secondReceived.push(b) }, { connId: "conn-guest", actorId: "guest-1" });
+		expect(second.ok).toBe(true);
+		expect(joined).toHaveLength(2);
+
+		// The FIRST attach's stale detach must not remove the SECOND (current) sink.
+		first.value.detach();
+		expect(left).toHaveLength(0); // the stale detach owned nothing — no "left" event fires for it
+		expect(coordinator.state(channelId)!.participants).toHaveLength(1);
+		expect(coordinator.state(channelId)!.participants[0]!.connId).toBe("conn-guest");
+		coordinator.stop();
+	});
+
+	test("a departing guest's detach never ends the call — teardown stays owned by endBinding alone", async () => {
+		const { coordinator, channelId } = await startMultiPartyCall({ ownerActorId: "host-1" });
+		coordinator.attachAudioSink(channelId, true, { sendOutputAudio: () => {} }, { connId: "conn-host", actorId: "host-1" });
+		const guestAttach = coordinator.attachAudioSink(channelId, true, { sendOutputAudio: () => {} }, { connId: "conn-guest", actorId: "guest-1" });
+		expect(guestAttach.ok).toBe(true);
+		if (!guestAttach.ok) throw new Error("unreachable");
+
+		guestAttach.value.detach();
+		// The call is still live — a guest leaving is presence-plane only, never a call-ending event.
+		// The broker's own liveness rules (last connection dropping ≠ call end) are untouched by this.
+		expect(coordinator.state(channelId)!.state).toBe("live");
+		expect(coordinator.state(channelId)!.participants).toHaveLength(1);
+		expect(coordinator.state(channelId)!.participants[0]!.connId).toBe("conn-host");
+		coordinator.stop();
+	});
+
+	test("legacy callers that omit participant identity keep the exact pre-concern-13 single-slot behavior", async () => {
+		const { coordinator, channelId } = await startMultiPartyCall({ ownerActorId: "operator" });
+		const received: Uint8Array[] = [];
+		const attach = coordinator.attachAudioSink(channelId, true, { sendOutputAudio: (b) => received.push(b) });
+		expect(attach.ok).toBe(true);
+		const participants = coordinator.state(channelId)!.participants;
+		expect(participants).toHaveLength(1);
+		expect(participants[0]).toMatchObject({ actorId: "operator", host: true });
+
+		const push = await coordinator.pushMicAudio(channelId, true, new Float32Array([0.1, 0.2]));
+		expect(push.ok).toBe(true);
+		await waitFor(() => received.length > 0);
+		expect(received).toHaveLength(1);
+		coordinator.stop();
+	});
+});
+
 describe("listCallsSurface / endOrphan (concern 10: call-management-ui)", () => {
 	test("a broker call with no matching non-ended binding is listed as an orphan; a binding's own live call is not", async () => {
 		const stateDir = tmpDir("voice-mgr-state-");
@@ -1430,6 +1588,82 @@ describe("onTranscriptTurn (concern 11: voice-transcript-in-thread) — live pus
 		// Several more polls tick over the SAME already-applied line — never a second push for it.
 		await new Promise((r) => setTimeout(r, 80));
 		expect(turns).toHaveLength(1);
+		coordinator.stop();
+	});
+});
+
+describe("onLiveTranscriptFrame (live captions fix, production defect 2026-07-28) — presentation-plane partials before finality", () => {
+	test("a non-final bridge transcript frame reaches onLiveTranscriptFrame with the same shape onTranscriptTurn uses", async () => {
+		const stateDir = tmpDir("voice-mgr-state-");
+		const journalDir = tmpDir("voice-mgr-journal-");
+		cleanups.push(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(journalDir, { recursive: true, force: true }); });
+		const bridge = startFakeBridge("live-abc");
+		cleanups.push(bridge.stop);
+		const broker = new ScriptedBroker(journalDir, bridge);
+		const frames: Array<{ channelId: string; callId: string; entry: { role: string; text?: string; turn: number; final: boolean; redacted?: boolean } }> = [];
+		const coordinator = makeCoordinator({ stateDir, broker, cards: [], onLiveTranscriptFrame: (input) => frames.push(input as never) });
+		await coordinator.startCall("room-1", { ownerActorId: "operator" });
+		const binding = coordinator.state("room-1")!;
+
+		bridge.sendTranscript({ role: "assistant", text: "Hel", turn: 0, final: false });
+		await waitFor(() => frames.length > 0);
+		expect(frames[0]).toEqual({
+			channelId: "room-1",
+			callId: binding.callId,
+			entry: { callId: binding.callId, turn: 0, role: "assistant", final: false, at: expect.any(Number) as unknown as number, text: "Hel" },
+		});
+
+		// A second, growing partial for the SAME (role, turn) fires a second, distinct push — the
+		// coordinator does not coalesce or dedupe; that discipline lives in the webapp's mergeLiveTurn.
+		bridge.sendTranscript({ role: "assistant", text: "Hello there", turn: 0, final: false });
+		await waitFor(() => frames.length > 1);
+		expect(frames[1]!.entry).toMatchObject({ text: "Hello there", final: false });
+
+		// The finalized push for the same key arrives with final:true, exactly like the durable
+		// onTranscriptTurn path would report it once the journal is tailed.
+		bridge.sendTranscript({ role: "assistant", text: "Hello there, friend.", turn: 0, final: true });
+		await waitFor(() => frames.length > 2);
+		expect(frames[2]!.entry).toMatchObject({ text: "Hello there, friend.", final: true });
+		coordinator.stop();
+	});
+
+	test("retention 'off': the live partial is redacted (no text), same honesty rule as the durable path", async () => {
+		const stateDir = tmpDir("voice-mgr-state-");
+		const journalDir = tmpDir("voice-mgr-journal-");
+		cleanups.push(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(journalDir, { recursive: true, force: true }); });
+		const bridge = startFakeBridge("live-abc");
+		cleanups.push(bridge.stop);
+		const broker = new ScriptedBroker(journalDir, bridge);
+		const frames: Array<{ entry: { text?: string; redacted?: boolean } }> = [];
+		const coordinator = makeCoordinator({ stateDir, broker, cards: [], onLiveTranscriptFrame: (input) => frames.push(input as never) });
+		await coordinator.startCall("room-1", { ownerActorId: "operator", retention: "off" });
+
+		bridge.sendTranscript({ role: "user", text: "sensitive", turn: 0, final: false });
+		await waitFor(() => frames.length > 0);
+		expect(frames[0]!.entry.text).toBeUndefined();
+		expect(frames[0]!.entry.redacted).toBe(true);
+		coordinator.stop();
+	});
+
+	test("never appends to the durable transcript store — the projection's own read stays empty until the journal is tailed", async () => {
+		const stateDir = tmpDir("voice-mgr-state-");
+		const journalDir = tmpDir("voice-mgr-journal-");
+		cleanups.push(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(journalDir, { recursive: true, force: true }); });
+		const bridge = startFakeBridge("live-abc");
+		cleanups.push(bridge.stop);
+		const broker = new ScriptedBroker(journalDir, bridge);
+		const frames: unknown[] = [];
+		const coordinator = makeCoordinator({ stateDir, broker, cards: [], onLiveTranscriptFrame: (input) => frames.push(input) });
+		await coordinator.startCall("room-1", { ownerActorId: "operator" });
+		const binding = coordinator.state("room-1")!;
+
+		bridge.sendTranscript({ role: "user", text: "hello", turn: 0, final: false });
+		await waitFor(() => frames.length > 0);
+		// The presentation-plane push landed, but nothing was ever appended to the journal/projection —
+		// the durable read (what `transcript()`/`GET .../voice-call/transcript` actually serve) stays
+		// empty until a REAL journal record is tailed (onTranscriptTurn's own path, untouched here).
+		const stored = await coordinator.transcript("room-1");
+		expect(stored).toEqual([]);
 		coordinator.stop();
 	});
 });

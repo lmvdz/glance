@@ -411,3 +411,42 @@ describe("fleet frames (concern 12): onFleetCall narrowing, attachFleet/fleetRes
 		bridge.stop();
 	});
 });
+
+describe("live captions fix: onTranscriptFrame narrowing", () => {
+	test("partial and final transcript frames reach onTranscriptFrame narrowed; malformed ones are dropped", async () => {
+		const bridge = startFakeBridge({ sessionId: "live-t" });
+		const frames: Array<{ role: "user" | "assistant"; text: string; turn: number; final: boolean }> = [];
+		const client = new VoiceCallBridgeClient({ url: bridge.url, onTranscriptFrame: (frame) => frames.push(frame) });
+		await client.connect();
+		// A growing partial for (assistant, 0) ...
+		bridge.broadcast({ v: 1, sessionId: "live-t", seq: 5, type: "transcript", role: "assistant", text: "Hel", turn: 0, final: false });
+		bridge.broadcast({ v: 1, sessionId: "live-t", seq: 6, type: "transcript", role: "assistant", text: "Hello there", turn: 0, final: false });
+		// ... superseded by its final.
+		bridge.broadcast({ v: 1, sessionId: "live-t", seq: 7, type: "transcript", role: "assistant", text: "Hello there, friend.", turn: 0, final: true });
+		// Malformed frames — dropped, never reach the handler.
+		bridge.broadcast({ v: 1, sessionId: "live-t", seq: 8, type: "transcript", role: "narrator", text: "nope", turn: 1, final: false }); // bad role
+		bridge.broadcast({ v: 1, sessionId: "live-t", seq: 9, type: "transcript", role: "user", turn: 1, final: false }); // no text
+		bridge.broadcast({ v: 1, sessionId: "live-t", seq: 10, type: "transcript", role: "user", text: "hi", final: false }); // no turn
+		bridge.broadcast({ v: 1, sessionId: "live-t", seq: 11, type: "transcript", role: "user", text: "hi", turn: 2 }); // no final
+		await new Promise((r) => setTimeout(r, 80));
+		expect(frames).toEqual([
+			{ role: "assistant", text: "Hel", turn: 0, final: false },
+			{ role: "assistant", text: "Hello there", turn: 0, final: false },
+			{ role: "assistant", text: "Hello there, friend.", turn: 0, final: true },
+		]);
+		client.close();
+		bridge.stop();
+	});
+
+	test("a transcript frame is never forwarded to the generic onFrame callback", async () => {
+		const bridge = startFakeBridge({ sessionId: "live-t2" });
+		const generic: Array<Record<string, unknown>> = [];
+		const client = new VoiceCallBridgeClient({ url: bridge.url, onFrame: (frame) => generic.push(frame) });
+		await client.connect();
+		bridge.broadcast({ v: 1, sessionId: "live-t2", seq: 5, type: "transcript", role: "user", text: "hi", turn: 0, final: false });
+		await new Promise((r) => setTimeout(r, 80));
+		expect(generic).toEqual([]);
+		client.close();
+		bridge.stop();
+	});
+});
