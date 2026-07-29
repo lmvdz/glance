@@ -9,7 +9,6 @@ import { DecisionPanel, type DecisionRequest } from './DecisionPanel';
 import { AutonomyPanel, type AutonomyState } from './AutonomyPanel';
 import { UnitPanel } from './UnitPanel';
 import { QuietRoom } from './QuietRoom';
-import { VoiceCallHudView } from './VoiceCallHud';
 import { VoiceStatusRegion } from './VoiceStatusRegion';
 import { VoiceDecisionDoor } from './VoiceDecisionDoor';
 import { VoiceArtifactsList, VoiceArtifactViewer } from './VoiceArtifacts';
@@ -166,8 +165,11 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
   // Concern 09 (browser-audio-transport): opens the browser's mic/speaker relay only once the
   // daemon itself confirms this call is audio-less AND live (`audioAvailable` is already both
   // `noLocalAudio` and `controlsAvailable`, daemon-checked) — a device-audio call never touches
-  // this hook at all beyond the one boolean it reads.
-  const callAudio = useRoomCallAudio(activeChannelId, call.binding?.audioAvailable === true);
+  // this hook at all beyond the one boolean it reads. The hook is kept for exactly that side
+  // effect; its status/error fields aren't read anywhere — they only ever fed the standing call
+  // banner removed in the post-ship fix (fleet navbar + composer call controls), and
+  // re-surfacing them elsewhere wasn't part of that fix's scope.
+  useRoomCallAudio(activeChannelId, call.binding?.audioAvailable === true);
   const routedEntryId = route.kind === 'hub' ? route.entryId : undefined;
   const selectedAgent = useMemo(() => agents.find((agent) => agent.id === selectedAgentId), [agents, selectedAgentId]);
   const selectedTask = useMemo(() => tasks.find((task) => task.id === selectedTaskId), [tasks, selectedTaskId]);
@@ -609,10 +611,6 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
     setPaneStack((stack) => reconcileArtifactPane(stack, artifactRowById));
   }, [paneStack, artifactRowById]);
 
-  // The last human or agent activity in this thread, for the idle-hangup line. Read from the room's
-  // own entries rather than a separate clock, so the copy can never disagree with the timeline.
-  const lastActivityAt = useMemo(() => entries.reduce((max, entry) => Math.max(max, entry.ts), 0) || undefined, [entries]);
-
   const voicePanel =
     pane.pane === 'decision' && openDecisionModel ? (
       <VoiceDecisionDoor
@@ -750,29 +748,14 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
                 // tabIndex={-1} makes this a valid programmatic focus target for the "Open the
                 // call" door above (`focusHudRegion`) without adding it to the Tab order — nothing
                 // else here focuses it, so it must never intercept a Tab press.
+                //
+                // Post-ship fix (fleet navbar + composer call controls): a standing call banner
+                // used to render here (retention notice, idle-policy line, the S2S-outside-rooms
+                // note, and a full-width Start/Mute/End pill) above every single timeline,
+                // permanently — the operator crossed all of it out. Its controls moved to the
+                // composer's icon row (`roomCall` prop below, `RoomCallIconControls` in Composer.tsx);
+                // the status line here is the one piece that stays, unchanged.
                 <div ref={hudRef} tabIndex={-1}>
-                  <VoiceCallHudView
-                    // A unit's own conversation is not where you start a call — it has its own panel
-                    // and its own vocabulary. A call already BOUND to one still renders in full;
-                    // only the invitation is withheld.
-                    canStart={!activeChannelId.startsWith('node:')}
-                    binding={call.binding}
-                    loading={call.loading}
-                    starting={call.starting}
-                    ending={call.ending}
-                    reattaching={call.reattaching}
-                    onReattach={call.reattach}
-                    muted={call.muted}
-                    muteBusy={call.muteBusy}
-                    controlsAvailable={call.controlsAvailable}
-                    lastActivityAt={lastActivityAt}
-                    now={frameNow}
-                    error={call.error || undefined}
-                    browserAudio={{ micStatus: callAudio.micStatus, relayStatus: callAudio.relayStatus, error: callAudio.error, onRetry: callAudio.retry }}
-                    onStart={call.start}
-                    onEnd={call.end}
-                    onToggleMute={call.toggleMute}
-                  />
                   <VoiceStatusRegion
                     status={status}
                     chipLabel={chipLabel}
@@ -865,6 +848,25 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
                 placeholder={selectedAgent ? `Message ${channel.name} and address ${selectedAgent.name || selectedAgent.id}` : `Message ${channel.name}`}
                 focusKey={replyFocusKey}
                 onToast={showToast}
+                // Post-ship fix (fleet navbar + composer call controls): the room's own live call,
+                // relocated here from the standing banner above the timeline — same `useRoomCall`
+                // handlers, unchanged. `canStart` withholds only the INVITATION
+                // to start (a unit's own conversation has its own panel and vocabulary); a call
+                // already bound to this thread still gets its mute/end controls regardless.
+                roomCall={{
+                  binding: call.binding,
+                  loading: call.loading,
+                  starting: call.starting,
+                  ending: call.ending,
+                  muted: call.muted,
+                  muteBusy: call.muteBusy,
+                  controlsAvailable: call.controlsAvailable,
+                  canStart: !activeChannelId.startsWith('node:'),
+                  error: call.error || undefined,
+                  onStart: call.start,
+                  onEnd: call.end,
+                  onToggleMute: call.toggleMute,
+                }}
               />
             </div>
           </RoomFrame>

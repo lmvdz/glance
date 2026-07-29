@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Camera, Frown, ImagePlus, Loader2, Mic, Paperclip, Pencil, Sparkles, ArrowUp, Square, X } from 'lucide-react';
+import { Camera, Frown, ImagePlus, Loader2, Mic, MicOff, Paperclip, Pencil, PhoneCall, PhoneOff, Sparkles, ArrowUp, Square, X } from 'lucide-react';
 import { apiFetch, jsonInit } from '../../lib/api';
 import { isImeComposing, useTriggerMenu, type TriggerSource } from '../../hooks/chat/useTriggerMenu';
 import { ComposerStats } from './AgentMetaBar';
@@ -18,6 +18,8 @@ import {
 import { isSpeechRecognitionSupported, startVoiceInput, type VoiceInputSession } from '../../lib/voice/speech';
 import { DRAFT_PERSIST_DEBOUNCE_MS, loadDraft, persistDraft, type DraftV1 } from '../../lib/chat/draftStore';
 import { VoiceCallButton } from './VoiceCallButton';
+import { callPhase } from '../../lib/voice/roomCall';
+import type { VoiceCallBindingDTO } from '../../lib/api';
 import type { AgentDTO } from '../../lib/dto';
 import { buildMentionSections, expandMentionTokens, flattenMentionSections, mentionLabel, mentionToken, type MentionTarget } from '../../lib/mentionGrammar';
 import type { Task } from '../../types';
@@ -353,6 +355,113 @@ export const ComposerSendButton = ({
   );
 };
 
+/**
+ * The room's own live call (concern 05/09/10/11's OMP-live lane), as an icon-only trio in the
+ * composer's icon row — post-ship fix: fleet navbar + composer call controls relocated this OUT
+ * of the standing "Call" banner `VoiceCallHudView` used to render above every timeline (retention
+ * notice, idle-policy line, the S2S-outside-rooms note, and a full-width "Start a call"/"Start
+ * another call" pill, permanently on screen whether or not anyone cared). This is a RELOCATION —
+ * `onStart`/`onEnd`/`onToggleMute` are `useRoomCall`'s own handlers, threaded through unchanged;
+ * no new call logic lives here. The honest phase/retention state that banner used to spell out is
+ * still reachable — in the call's own pane (VoiceCallHudView's info rows moved nowhere; the
+ * component itself is simply no longer mounted as chrome) and in this control's own `title`.
+ *
+ * Idle → a single phone icon (`Start a call`/`Start another call`, told apart only in
+ * `aria-label`/`title` now that there's no visible text label). Connecting/live/degraded → the
+ * SAME slot swaps to icon-only mute + end, exactly mirroring `VoiceCallHudView`'s own `active`
+ * rule (a call already bound to this thread renders its controls in full regardless of
+ * `canStart` — hiding a live call would be the worse lie; `canStart` only withholds the
+ * INVITATION to start one, e.g. on a unit's own conversation, which has its own vocabulary).
+ */
+export interface RoomCallComposerState {
+  binding: VoiceCallBindingDTO | null;
+  loading: boolean;
+  starting: boolean;
+  ending: boolean;
+  muted: boolean;
+  muteBusy: boolean;
+  controlsAvailable: boolean;
+  canStart: boolean;
+  /** Set when the last start attempt failed. `VoiceCallHudView` showed this in place, deliberately
+   *  "never as a toast that vanishes" (its own doc) — an icon has no room for standing text, so the
+   *  honest failure reaches the title instead, which is still there for as long as it needs to be. */
+  error?: string;
+  onStart: () => void;
+  onEnd: () => void;
+  onToggleMute: () => void;
+}
+
+export const RoomCallIconControls = ({
+  binding,
+  loading,
+  starting,
+  ending,
+  muted,
+  muteBusy,
+  controlsAvailable,
+  canStart,
+  error,
+  onStart,
+  onEnd,
+  onToggleMute,
+}: RoomCallComposerState) => {
+  const active = binding !== null && binding.state !== 'ended';
+  if (active) {
+    return (
+      <>
+        <button
+          type="button"
+          aria-label={muted ? 'Unmute the microphone' : 'Mute the microphone'}
+          title={
+            controlsAvailable
+              ? muted
+                ? 'Unmute. The room asked the session to mute; the protocol gives no read-back, so this is what was asked for, not a confirmed mic state.'
+                : 'Mute. The room asks the session to mute — there is no read-back, so this records what was asked.'
+              : 'There is no live socket to the session right now, so the mic cannot be changed.'
+          }
+          disabled={!controlsAvailable || muteBusy}
+          onClick={onToggleMute}
+          className={`flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full transition-colors disabled:opacity-40 ${
+            muted ? 'bg-red-100 text-red-500 dark:bg-red-900/30' : 'text-ink-text0 hover:bg-ink-surface text-ink-text-subtle dark:hover:bg-ink-surface'
+          }`}
+        >
+          {muteBusy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : muted ? <MicOff className="h-4 w-4" aria-hidden /> : <Mic className="h-4 w-4" aria-hidden />}
+        </button>
+        <button
+          type="button"
+          aria-label="End the call"
+          title="End the call. The record stays in this thread."
+          disabled={ending}
+          onClick={onEnd}
+          className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-red-500 hover:bg-ink-surface disabled:opacity-40 dark:hover:bg-ink-surface"
+        >
+          {ending ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <PhoneOff className="h-4 w-4" aria-hidden />}
+        </button>
+      </>
+    );
+  }
+  // Not active: an invitation to start, unless this surface withholds it (canStart=false — a
+  // unit's own conversation) or the room genuinely doesn't know yet whether a call already exists
+  // (`checking` — offering Start here would race the daemon's own single-active-call guard the
+  // instant the real binding arrives a beat later; see VoiceCallHudView's own doc for this rule).
+  if (!canStart || callPhase(binding, loading) === 'checking') return null;
+  const baseTitle = 'Start a live call. The mic stays open; the conversation, decisions and artifacts all land in this thread.';
+  return (
+    <button
+      type="button"
+      aria-label={error ? 'Start a call — the last attempt failed' : binding ? 'Start another call in this thread' : 'Start a call in this thread'}
+      title={error ? `${baseTitle} The last attempt failed: ${error}` : baseTitle}
+      disabled={starting}
+      onClick={onStart}
+      className={`flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full transition-colors disabled:opacity-40 ${
+        error ? 'text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20' : 'text-ink-text0 hover:bg-ink-surface text-ink-text-subtle dark:hover:bg-ink-surface'
+      }`}
+    >
+      {starting ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <PhoneCall className="h-4 w-4" aria-hidden />}
+    </button>
+  );
+};
+
 export const Composer = ({
   tasks,
   suggestionChips,
@@ -372,6 +481,7 @@ export const Composer = ({
   voiceCallEnabled = false,
   voiceCallActive = false,
   onStartVoiceCall,
+  roomCall,
   onToast,
   onInputActivity,
 }: {
@@ -411,6 +521,10 @@ export const Composer = ({
    *  active session to pin to (`AssistantChat`'s session-list screen never renders a `Composer`
    *  at all, so this is only ever absent defensively). */
   onStartVoiceCall?: () => void;
+  /** The room's own live call (post-ship fix: fleet navbar + composer call controls) — absent
+   *  entirely outside a room (e.g. any future non-room mount of this composer), present with
+   *  `canStart: false` on a unit's own conversation. See `RoomCallIconControls`'s own doc. */
+  roomCall?: RoomCallComposerState;
   /** Toast sink for the grr popover's confirmation/failure (both mounts pass their
    *  `useTaskContext().showToast` — a prop rather than a context read so this component stays
    *  importable in the jsdom-less bun test suite, same pattern as `AgentLandControls`). */
@@ -1088,6 +1202,7 @@ export const Composer = ({
               <Mic className="h-4 w-4" aria-hidden />
             </button>
             <VoiceCallButton enabled={voiceCallEnabled} active={voiceCallActive} onStart={() => onStartVoiceCall?.()} />
+            {roomCall ? <RoomCallIconControls {...roomCall} /> : null}
             <div className="relative">
               <button
                 type="button"

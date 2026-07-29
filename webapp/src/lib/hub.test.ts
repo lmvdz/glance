@@ -113,6 +113,73 @@ describe('Hub reductions', () => {
     expect(source).not.toContain('WorkbenchNavStrip');
   });
 
+  // Post-ship fix: fleet navbar. A 2026-07-28 user report found the #fleet channel view rendering
+  // without its navbar (TopBar) after a heavy merge day (suspected culprits: the rail-dedup commit,
+  // the concern 10/11 call-management restructuring, concern 12's registry rows). Diagnosis found
+  // no code path that actually drops it — TopBar sits unconditionally at the top of every
+  // RoomFrame render, for every room including fleet — but the report is real enough to deserve a
+  // permanent guard against exactly this regression, for the fleet room's own shape: an id of
+  // 'fleet', no other rooms yet, no nodes yet (a fresh install's first-ever visit).
+  test('the fleet room always renders its own TopBar ("the navbar") — it must never be conditional on room content', () => {
+    const html = renderToStaticMarkup(
+      React.createElement(
+        RoomFrame,
+        {
+          repo: 'omp-squad',
+          rooms: [{ id: 'fleet', name: '#fleet', unread: 0, kind: 'room', settled: false }],
+          activeRoomId: 'fleet',
+          onOpenRoom: () => undefined,
+          nodes: [],
+          plans: 0,
+          now: 0,
+          onSelect: () => undefined,
+          onEnter: () => undefined,
+        },
+        'room content',
+      ),
+    );
+    expect(html).toContain('glance'); // TopBar's own wordmark
+    expect(html).toContain('#fleet'); // the room itself, in the standing tree beside it
+  });
+
+  // The rendered-output check above proves one representative prop set; this proves the fleet
+  // room's TopBar survives every panel that can take the standing tree's place (voice pane,
+  // decision door, autonomy panel, unit panel) — none of those are allowed to carry the navbar
+  // away with them, since RoomFrame renders TopBar before any of that branching even starts.
+  test('the fleet room keeps its TopBar even when a decision panel takes the standing tree\'s place', () => {
+    const html = renderToStaticMarkup(
+      React.createElement(
+        RoomFrame,
+        {
+          repo: 'omp-squad',
+          rooms: [{ id: 'fleet', name: '#fleet', unread: 0, kind: 'room', settled: false }],
+          activeRoomId: 'fleet',
+          onOpenRoom: () => undefined,
+          nodes: [],
+          plans: 0,
+          now: 0,
+          onSelect: () => undefined,
+          onEnter: () => undefined,
+          decision: React.createElement('div', null, 'a decision panel'),
+        },
+        'room content',
+      ),
+    );
+    expect(html).toContain('glance');
+    expect(html).toContain('a decision panel');
+  });
+
+  // Post-ship fix: composer call controls. The standing "Call" banner (`VoiceCallHudView`) that
+  // used to render above every timeline is gone — its start/mute/end controls moved into the
+  // composer's icon row (`RoomCallIconControls`). Same boundary-enforcement idiom as the
+  // WorkbenchNavStrip check above: proves the removal in the SOURCE, not just in one rendered
+  // sample, so no future prop combination can bring the banner back by accident.
+  test('HubShell does not import the old standing call banner — its controls live in the composer now', () => {
+    const source = readFileSync(join(import.meta.dir, '../components/hub/HubShell.tsx'), 'utf8');
+    expect(source).not.toContain('VoiceCallHudView');
+    expect(source).toContain('roomCall={{'); // sanity: the replacement prop is actually wired, not just deleted
+  });
+
   test('presence count counts humans, not sockets', () => {
     expect(presenceCount({ users: [{ id: 'u1', displayName: 'Lars', socketCount: 5 }] })).toBe(1);
   });
