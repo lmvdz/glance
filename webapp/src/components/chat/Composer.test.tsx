@@ -1,9 +1,12 @@
 import { expect, test } from "bun:test";
+import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
   applySuggestionChip,
+  Composer,
   ComposerAttachmentChip,
   ComposerImageThumb,
+  RoomCallIconControls,
   assembleSendText,
   frictionCaptureBody,
   clampGrownHeight,
@@ -21,7 +24,9 @@ import {
   type HistoryRecallState,
   type ImageAttachment,
   type PasteChip,
+  type RoomCallComposerState,
 } from "./Composer";
+import type { VoiceCallBindingDTO } from "../../lib/api";
 
 // ---------------------------------------------------------------------------
 // Auto-grow
@@ -208,4 +213,132 @@ test("frictionCaptureBody still captures without an agent (repo '', no agentId) 
 test("frictionCaptureBody returns null for an empty-after-trim gripe — nothing is ever POSTed", () => {
   expect(frictionCaptureBody("   ")).toBeNull();
   expect(frictionCaptureBody("")).toBeNull();
+});
+
+// ---------------------------------------------------------------------------
+// Post-ship fix: composer call controls (fleet navbar + composer call controls).
+//
+// The room's own live call used to render as a standing "Call" banner above every timeline
+// (`VoiceCallHudView`) — permanently on screen, whether or not anyone cared, and the operator
+// crossed it out. Its start/mute/end controls relocated here, into the composer's icon row, as
+// `RoomCallIconControls` — a straight relocation of `useRoomCall`'s own handlers, not new call
+// logic. These tests prove the relocation landed: the call icon appears idle, swaps to mute+end
+// once a call is bound and live, and the old banner text never appears anywhere in Composer.
+// ---------------------------------------------------------------------------
+
+const LIVE_BINDING: VoiceCallBindingDTO = {
+  channelId: "fleet",
+  callId: "call-1",
+  sessionId: "session-1",
+  sessionRoot: "/tmp/session-1",
+  ownerActorId: "db:alice",
+  retention: "full",
+  startedAt: 1_000,
+  updatedAt: 1_000,
+  state: "live",
+  controlsAvailable: true,
+};
+
+const ENDED_BINDING: VoiceCallBindingDTO = { ...LIVE_BINDING, state: "ended", endedAt: 2_000, controlsAvailable: false };
+
+const baseRoomCall = (overrides: Partial<RoomCallComposerState> = {}): RoomCallComposerState => ({
+  binding: null,
+  loading: false,
+  starting: false,
+  ending: false,
+  muted: false,
+  muteBusy: false,
+  controlsAvailable: true,
+  canStart: true,
+  onStart: () => {},
+  onEnd: () => {},
+  onToggleMute: () => {},
+  ...overrides,
+});
+
+const minimalComposerProps = {
+  tasks: [],
+  suggestionChips: [],
+  isLoading: false,
+  isStopShown: false,
+  stopPending: false,
+  onStop: () => {},
+  onSend: () => {},
+  selectedModel: "",
+  modelOptions: [{ value: "", label: "Default model" }],
+  onModelChange: () => {},
+};
+
+test("RoomCallIconControls: idle (no binding yet) renders a single call-starting icon, nothing else", () => {
+  const html = renderToStaticMarkup(<RoomCallIconControls {...baseRoomCall()} />);
+  expect(html).toContain('aria-label="Start a call in this thread"');
+  expect(html).not.toContain("Unmute the microphone");
+  expect(html).not.toContain("Mute the microphone");
+  expect(html).not.toContain('aria-label="End the call"');
+});
+
+test("RoomCallIconControls: a call already ended distinguishes itself as \"start ANOTHER call\" (aria-label/title only — no room for visible text on an icon)", () => {
+  const html = renderToStaticMarkup(<RoomCallIconControls {...baseRoomCall({ binding: ENDED_BINDING })} />);
+  expect(html).toContain('aria-label="Start another call in this thread"');
+});
+
+test("RoomCallIconControls: canStart=false (a unit's own conversation) withholds the invitation to start", () => {
+  const html = renderToStaticMarkup(<RoomCallIconControls {...baseRoomCall({ canStart: false })} />);
+  expect(html).toBe("");
+});
+
+test("RoomCallIconControls: the daemon hasn't said yet whether a call exists (`checking`) — no button, never a click that could race the single-active-call guard", () => {
+  const html = renderToStaticMarkup(<RoomCallIconControls {...baseRoomCall({ loading: true })} />);
+  expect(html).toBe("");
+});
+
+test("RoomCallIconControls: a live call swaps the SAME slot to icon-only mute + end", () => {
+  const html = renderToStaticMarkup(<RoomCallIconControls {...baseRoomCall({ binding: LIVE_BINDING })} />);
+  expect(html).toContain('aria-label="Mute the microphone"');
+  expect(html).toContain('aria-label="End the call"');
+  expect(html).not.toContain('aria-label="Start a call in this thread"');
+  expect(html).not.toContain('aria-label="Start another call in this thread"');
+});
+
+test("RoomCallIconControls: muted reflects in the aria-label (asked-for state, no read-back — same honesty rule the old HUD copy used)", () => {
+  const html = renderToStaticMarkup(<RoomCallIconControls {...baseRoomCall({ binding: LIVE_BINDING, muted: true })} />);
+  expect(html).toContain('aria-label="Unmute the microphone"');
+  expect(html).not.toContain('aria-label="Mute the microphone"');
+});
+
+test("RoomCallIconControls: a live call bound to a unit's own conversation still shows mute+end — hiding a live call would be the worse lie", () => {
+  const html = renderToStaticMarkup(<RoomCallIconControls {...baseRoomCall({ binding: LIVE_BINDING, canStart: false })} />);
+  expect(html).toContain('aria-label="Mute the microphone"');
+  expect(html).toContain('aria-label="End the call"');
+});
+
+test("RoomCallIconControls: a failed start attempt stays honest via the icon's title, since there's no room left for standing text", () => {
+  const html = renderToStaticMarkup(<RoomCallIconControls {...baseRoomCall({ error: "the bridge refused the connection" })} />);
+  expect(html).toContain("the bridge refused the connection");
+  expect(html).toContain('aria-label="Start a call — the last attempt failed"');
+});
+
+test("Composer: the call icon shows Start when idle, and never the old standing banner's text", () => {
+  const html = renderToStaticMarkup(<Composer {...minimalComposerProps} roomCall={baseRoomCall()} />);
+  expect(html).toContain('aria-label="Start a call in this thread"');
+  expect(html).not.toContain('aria-label="Mute the microphone"');
+  expect(html).not.toContain('aria-label="End the call"');
+  // The old VoiceCallHudView banner's own copy — none of it belongs in the composer, or anywhere
+  // else in this render, now that the banner itself is gone.
+  expect(html).not.toContain("Rooms use the live call lane only");
+  expect(html).not.toContain("RECORDING IN FULL");
+});
+
+test("Composer: the call icon swaps to mute+end while the call is live", () => {
+  const html = renderToStaticMarkup(<Composer {...minimalComposerProps} roomCall={baseRoomCall({ binding: LIVE_BINDING })} />);
+  expect(html).toContain('aria-label="Mute the microphone"');
+  expect(html).toContain('aria-label="End the call"');
+  expect(html).not.toContain('aria-label="Start a call in this thread"');
+});
+
+test("Composer: with no roomCall prop at all (a mount outside any room), no call icon renders", () => {
+  const html = renderToStaticMarkup(<Composer {...minimalComposerProps} />);
+  expect(html).not.toContain('aria-label="Start a call in this thread"');
+  expect(html).not.toContain('aria-label="Mute the microphone"');
+  expect(html).not.toContain('aria-label="End the call"');
 });
