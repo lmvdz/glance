@@ -1341,7 +1341,13 @@ export class SquadServer {
 			ws.close(1011, "no fleet for this actor");
 			return;
 		}
-		const attached = await manager.attachVoiceCallAudioSink(channelId, actor, {
+		// Concern 13 (multi-party-calls): `ws.data.id` is this connection's own unique sockSeq (minted
+		// at upgrade time, never reused while the process runs) — the natural connId for the daemon's
+		// multi-participant audio-sink map. Using it (rather than the actor id alone) is what lets the
+		// SAME human open two tabs and have both keep working independently, instead of the second
+		// attach silently stealing the first tab's sink.
+		const connId = String(ws.data.id);
+		const attached = await manager.attachVoiceCallAudioSink(channelId, actor, connId, {
 			sendOutputAudio: (bytes) => {
 				try {
 					ws.send(bytes);
@@ -1379,7 +1385,8 @@ export class SquadServer {
 		const actor = this.actorForSocket(ws);
 		const manager = await this.managerFor(actor);
 		if (!manager) return;
-		await manager.pushVoiceCallMicAudio(channelId, actor, samples);
+		// Concern 13: the SAME connId this connection's own attach used — see openVoiceAudioSocket's doc.
+		await manager.pushVoiceCallMicAudio(channelId, actor, String(ws.data.id), samples);
 	}
 
 	// File mode has exactly one operator identity. Multiple tabs are socket sets for that operator,

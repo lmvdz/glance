@@ -103,10 +103,10 @@ describe("room membership gates voice-call reads/mutations", () => {
 		const owner = actor("alice");
 		const outsider = actor("mallory");
 		const channel = await mgr.createChannel(owner, { name: "private-room-5", visibility: "private" });
-		const attach = await mgr.attachVoiceCallAudioSink(channel.id, outsider, { sendOutputAudio: () => {} });
+		const attach = await mgr.attachVoiceCallAudioSink(channel.id, outsider, "conn-1", { sendOutputAudio: () => {} });
 		expect(attach.ok).toBe(false);
 		if (!attach.ok) expect(attach.reason).toBe("forbidden");
-		const push = await mgr.pushVoiceCallMicAudio(channel.id, outsider, new Float32Array([0.1]));
+		const push = await mgr.pushVoiceCallMicAudio(channel.id, outsider, "conn-1", new Float32Array([0.1]));
 		expect(push.ok).toBe(false);
 		if (!push.ok) expect(push.reason).toBe("forbidden");
 	});
@@ -115,7 +115,7 @@ describe("room membership gates voice-call reads/mutations", () => {
 		const mgr = makeManager();
 		const owner = actor("alice");
 		const channel = await mgr.createChannel(owner, { name: "private-room-6", visibility: "private" });
-		const attach = await mgr.attachVoiceCallAudioSink(channel.id, owner, { sendOutputAudio: () => {} });
+		const attach = await mgr.attachVoiceCallAudioSink(channel.id, owner, "conn-1", { sendOutputAudio: () => {} });
 		expect(attach.ok).toBe(false);
 		if (!attach.ok) expect(attach.reason).toBe("no-active-call"); // authorized, but nothing to attach to — not "forbidden"
 	});
