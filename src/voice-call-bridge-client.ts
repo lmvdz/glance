@@ -69,7 +69,20 @@ export interface BridgeHelloFrame {
 	recordingMode?: "full" | "tails" | "off";
 	decisions?: unknown[];
 	interruptPolicy?: "allow" | "doNotInterrupt";
+	/** Concern 12 (voice-fleet-delegation): the bridge accepts `attachFleet`/`fleetResult` and can
+	 *  send directed `fleetCall` frames. Absent against a TUI or pre-concern-12 bridge — feature-off,
+	 *  the daemon never attempts an attach it would be refused. */
+	canFleet?: boolean;
 	[key: string]: unknown;
+}
+
+/** One directed `fleetCall` frame — the session asking THIS daemon (the attached executor) to run
+ *  one fleet tool call. `args` is narrowed by `voice-fleet.ts`'s `parseVoiceFleetArgs`, not here —
+ *  this class stays a dumb wire client (see the module doc). */
+export interface BridgeFleetCall {
+	fleetCallId: string;
+	tool: string;
+	args: unknown;
 }
 
 export interface BridgeControlAck {
@@ -101,6 +114,10 @@ export interface BridgeClientOptions {
 	 *  ONE tag it forwards; `0x01` — its own outbound tag — arriving inbound would be a bridge bug,
 	 *  and is dropped rather than trusted). */
 	onAudioFrame?: (bytes: Uint8Array) => void;
+	/** Concern 12: fired once per directed `fleetCall` frame (this client is the attached
+	 *  executor). Malformed frames (no string `fleetCallId`/`tool`) are dropped before this fires,
+	 *  same discipline as every other inbound shape on this socket. */
+	onFleetCall?: (call: BridgeFleetCall) => void;
 	connect?: BridgeConnectFn;
 	ackTimeoutMs?: number;
 	helloTimeoutMs?: number;
@@ -130,6 +147,7 @@ export class VoiceCallBridgeClient {
 	private readonly onSocketLoss: ((err?: unknown) => void) | undefined;
 	private readonly onFrame: ((frame: Record<string, unknown>) => void) | undefined;
 	private readonly onAudioFrame: ((bytes: Uint8Array) => void) | undefined;
+	private readonly onFleetCall: ((call: BridgeFleetCall) => void) | undefined;
 	private readonly connectFn: BridgeConnectFn;
 	private readonly ackTimeoutMs: number;
 	private readonly helloTimeoutMs: number;
@@ -146,6 +164,7 @@ export class VoiceCallBridgeClient {
 		this.onSocketLoss = opts.onSocketLoss;
 		this.onFrame = opts.onFrame;
 		this.onAudioFrame = opts.onAudioFrame;
+		this.onFleetCall = opts.onFleetCall;
 		this.connectFn = opts.connect ?? defaultConnect;
 		this.ackTimeoutMs = opts.ackTimeoutMs ?? DEFAULT_ACK_TIMEOUT_MS;
 		this.helloTimeoutMs = opts.helloTimeoutMs ?? DEFAULT_HELLO_TIMEOUT_MS;
@@ -252,6 +271,14 @@ export class VoiceCallBridgeClient {
 					this.onTerminal?.(error);
 					return;
 				}
+				if (record.type === "fleetCall") {
+					// Concern 12: a directed fleet tool call for this executor. Narrowed here (string
+					// fleetCallId/tool) so the coordinator's handler never sees a malformed frame.
+					if (typeof record.fleetCallId === "string" && record.fleetCallId && typeof record.tool === "string") {
+						this.onFleetCall?.({ fleetCallId: record.fleetCallId, tool: record.tool, args: record.args });
+					}
+					return;
+				}
 				if (record.type === "controlAck" && typeof record.requestId === "string") {
 					const waiter = this.pending.get(record.requestId);
 					if (waiter) {
@@ -341,6 +368,19 @@ export class VoiceCallBridgeClient {
 
 	setInterruptPolicy(policy: "allow" | "doNotInterrupt"): Promise<BridgeControlAck> {
 		return this.sendAuthenticated("setInterruptPolicy", { policy });
+	}
+
+	/** Concern 12: register THIS client as the call's fleet executor, optionally seeding the
+	 *  session with a room-context brief. Authenticated like `resolveDecision` — the token this
+	 *  daemon already holds is what makes it, and nothing else on the loopback, the fleet. */
+	attachFleet(context?: string): Promise<BridgeControlAck> {
+		return this.sendAuthenticated("attachFleet", context === undefined ? {} : { context });
+	}
+
+	/** Concern 12: answer one directed `fleetCall`. `result` is the executor's already-shaped wire
+	 *  result (`voice-fleet.ts`'s `VoiceFleetWireResult`) — this class moves it, never inspects it. */
+	sendFleetResult(fleetCallId: string, result: unknown): Promise<BridgeControlAck> {
+		return this.sendAuthenticated("fleetResult", { fleetCallId, result });
 	}
 
 	/** Unauthenticated, like the visualizer's own `esc`/`space`/steer controls — no token/session

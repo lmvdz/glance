@@ -65,10 +65,30 @@ export interface JournalTranscript {
 	final: boolean;
 }
 
+/**
+ * One fleet-affecting action the live session's fleet tool surface recorded (concern 12) —
+ * mirrors OMP's own `JournalFleetAction` (`~/src/oh-my-pi`'s `journal.ts`) without importing it,
+ * same as every other type in this file. `requested` is write-before-act; `relayed`/`failed` are
+ * outcomes; `deferred-decision` links the arbiter decision the human must resolve
+ * (`decisionId`) with the daemon's own queued-action key (`deferredActionId`).
+ */
+export interface JournalFleetAction {
+	tool: string;
+	phase: "requested" | "relayed" | "failed" | "deferred-decision";
+	requestId: string;
+	summary: string;
+	unitId?: string;
+	detail?: string;
+	decisionId?: string;
+	deferredActionId?: string;
+}
+
 export type JournalRecord =
 	| { type: "decision"; decision: JournalDecisionSnapshot }
 	| { type: "transcript"; transcript: JournalTranscript }
 	| { type: "artifact"; artifact: JournalArtifact }
+	/** Concern 12 — see `JournalFleetAction`. */
+	| { type: "fleet-action"; action: JournalFleetAction }
 	/** OMP's idle-hangup policy spoke its warning — see `JournalRecord["terminal"]`'s `reason`. */
 	| { type: "idle-warning" }
 	/**
@@ -126,6 +146,18 @@ export function parseJournalLine(line: string): JournalEnvelope | undefined {
 	}
 	if (type === "idle-warning") {
 		return { seq, at, sessionId, record: { type: "idle-warning" } };
+	}
+	if (type === "fleet-action") {
+		const action = record.action;
+		if (!isPlainRecord(action)) return undefined;
+		if (typeof action.tool !== "string" || typeof action.requestId !== "string" || typeof action.summary !== "string") return undefined;
+		if (action.phase !== "requested" && action.phase !== "relayed" && action.phase !== "failed" && action.phase !== "deferred-decision") return undefined;
+		const narrowed: JournalFleetAction = { tool: action.tool, phase: action.phase, requestId: action.requestId, summary: action.summary };
+		if (typeof action.unitId === "string") narrowed.unitId = action.unitId;
+		if (typeof action.detail === "string") narrowed.detail = action.detail;
+		if (typeof action.decisionId === "string") narrowed.decisionId = action.decisionId;
+		if (typeof action.deferredActionId === "string") narrowed.deferredActionId = action.deferredActionId;
+		return { seq, at, sessionId, record: { type: "fleet-action", action: narrowed } };
 	}
 	return undefined;
 }

@@ -13,16 +13,20 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { BridgeConnectFn, BridgeSocketLike } from "../src/voice-call-bridge-client.ts";
 import type { VoiceCallRetention } from "../src/voice-call-binding.ts";
-import type { EmitCardInput, BrokerCallCreated, BrokerCallView, BrokerClient } from "../src/voice-call-manager.ts";
+import type { EmitCardInput, BrokerCallCreated, BrokerCallView, BrokerClient, VoiceCallCoordinatorOptions } from "../src/voice-call-manager.ts";
 import { httpBrokerClient, resolveEffectiveSessionRoot, VoiceCallCoordinator } from "../src/voice-call-manager.ts";
 
 function tmpDir(prefix: string): string {
 	return mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
-function startFakeBridge(sessionId: string, port = 0, recordingMode?: "full" | "tails" | "off") {
+function startFakeBridge(sessionId: string, port = 0, recordingMode?: "full" | "tails" | "off", opts?: { canFleet?: boolean }) {
 	const sockets = new Set<{ send(data: string): void }>();
 	let decisions = new Map<string, { label: string }>();
+	// Concern 12: what a fleet-capable bridge records from an attaching/answering executor, plus a
+	// helper to originate a directed fleetCall the way the real CovenBridge does.
+	const fleetAttaches: Array<{ token: unknown; sessionId: unknown; context?: string }> = [];
+	const fleetResults: Array<{ fleetCallId: string; result: Record<string, unknown> }> = [];
 	const server = Bun.serve({
 		port,
 		hostname: "127.0.0.1",
@@ -33,7 +37,7 @@ function startFakeBridge(sessionId: string, port = 0, recordingMode?: "full" | "
 		websocket: {
 			open(ws) {
 				sockets.add(ws as unknown as { send(data: string): void });
-				ws.send(JSON.stringify({ v: 1, sessionId, seq: 0, type: "hello", canResolve: true, ...(recordingMode ? { recordingMode } : {}) }));
+				ws.send(JSON.stringify({ v: 1, sessionId, seq: 0, type: "hello", canResolve: true, ...(recordingMode ? { recordingMode } : {}), ...(opts?.canFleet ? { canFleet: true } : {}) }));
 			},
 			message(ws, message) {
 				// Concern 09 (browser-audio-transport): a binary frame is ALWAYS audio, never a JSON
@@ -52,6 +56,16 @@ function startFakeBridge(sessionId: string, port = 0, recordingMode?: "full" | "
 				const frame = JSON.parse(message) as Record<string, unknown>;
 				if (frame.type !== "control" || typeof frame.requestId !== "string") return;
 				const requestId = frame.requestId;
+				if (frame.action === "attachFleet") {
+					fleetAttaches.push({ token: frame.token, sessionId: frame.sessionId, ...(typeof frame.context === "string" ? { context: frame.context } : {}) });
+					ws.send(JSON.stringify({ v: 1, sessionId, seq: 2, type: "controlAck", requestId, ok: opts?.canFleet === true, ...(opts?.canFleet ? {} : { reason: "not-supported" }) }));
+					return;
+				}
+				if (frame.action === "fleetResult") {
+					fleetResults.push({ fleetCallId: frame.fleetCallId as string, result: frame.result as Record<string, unknown> });
+					ws.send(JSON.stringify({ v: 1, sessionId, seq: 2, type: "controlAck", requestId, ok: true }));
+					return;
+				}
 				if (frame.action === "resolveDecision") {
 					const decision = decisions.get(frame.decisionId as string);
 					if (!decision || decision.label !== frame.label) {
@@ -69,6 +83,13 @@ function startFakeBridge(sessionId: string, port = 0, recordingMode?: "full" | "
 	return {
 		port: server.port,
 		url: `ws://127.0.0.1:${server.port}`,
+		fleetAttaches,
+		fleetResults,
+		/** Originate one directed fleetCall to every connected client (in these tests: the one
+		 *  coordinator bridge client), exactly the frame shape the real CovenBridge sends. */
+		sendFleetCall: (fleetCallId: string, tool: string, args: unknown) => {
+			for (const ws of sockets) ws.send(JSON.stringify({ v: 1, sessionId, seq: 3, type: "fleetCall", fleetCallId, tool, args }));
+		},
 		setDecision: (id: string, label: string) => decisions.set(id, { label }),
 		closeAll: () => { for (const ws of sockets) (ws as unknown as { close?: () => void }).close?.(); },
 		stop: () => server.stop(true),
@@ -163,7 +184,7 @@ async function waitFor(predicate: () => boolean, timeoutMs = 3000, stepMs = 15):
 	if (!predicate()) throw new Error("waitFor: condition never became true within timeout");
 }
 
-function makeCoordinator(opts: { stateDir: string; broker: BrokerClient; cards: EmitCardInput[]; livenessProbeIntervalMs?: number; journalPollIntervalMs?: number; connectBridge?: BridgeConnectFn; onTranscriptTurn?: (input: { channelId: string; callId: string; entry: unknown }) => void }): VoiceCallCoordinator {
+function makeCoordinator(opts: { stateDir: string; broker: BrokerClient; cards: EmitCardInput[]; livenessProbeIntervalMs?: number; journalPollIntervalMs?: number; connectBridge?: BridgeConnectFn; onTranscriptTurn?: (input: { channelId: string; callId: string; entry: unknown }) => void; executeFleetCall?: VoiceCallCoordinatorOptions["executeFleetCall"]; buildFleetContext?: VoiceCallCoordinatorOptions["buildFleetContext"] }): VoiceCallCoordinator {
 	const coordinator = new VoiceCallCoordinator({
 		stateDir: opts.stateDir,
 		broker: opts.broker,
@@ -172,6 +193,8 @@ function makeCoordinator(opts: { stateDir: string; broker: BrokerClient; cards: 
 		journalPollIntervalMs: opts.journalPollIntervalMs ?? 30,
 		livenessProbeIntervalMs: opts.livenessProbeIntervalMs ?? 60,
 		onTranscriptTurn: opts.onTranscriptTurn as never,
+		executeFleetCall: opts.executeFleetCall,
+		buildFleetContext: opts.buildFleetContext,
 	});
 	// Registered here (not just the explicit `coordinator.stop()` calls each test makes on its own
 	// happy path) so a failed assertion mid-test still tears down every real timer/socket this
@@ -1407,6 +1430,304 @@ describe("onTranscriptTurn (concern 11: voice-transcript-in-thread) — live pus
 		// Several more polls tick over the SAME already-applied line — never a second push for it.
 		await new Promise((r) => setTimeout(r, 80));
 		expect(turns).toHaveLength(1);
+		coordinator.stop();
+	});
+});
+
+describe("fleet delegation (concern 12): attach, relay, destructive deferral, deferred execution", () => {
+	type FleetExecInput = { channelId: string; ownerActor: { id: string } | undefined; tool: string; args: unknown; approvedDecisionId?: string };
+	const OWNER = { id: "db:lars", origin: "local" as const, role: "operator" as const };
+
+	function fleetHarness(opts?: {
+		canFleet?: boolean;
+		executeFleetCall?: VoiceCallCoordinatorOptions["executeFleetCall"];
+		buildFleetContext?: VoiceCallCoordinatorOptions["buildFleetContext"];
+	}) {
+		const stateDir = tmpDir("voice-fleet-state-");
+		const journalDir = tmpDir("voice-fleet-journal-");
+		cleanups.push(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(journalDir, { recursive: true, force: true }); });
+		const bridge = startFakeBridge("live-fleet", 0, undefined, { canFleet: opts?.canFleet ?? true });
+		cleanups.push(bridge.stop);
+		const broker = new ScriptedBroker(journalDir, bridge);
+		const cards: EmitCardInput[] = [];
+		const execCalls: FleetExecInput[] = [];
+		const coordinator = makeCoordinator({
+			stateDir,
+			broker,
+			cards,
+			executeFleetCall:
+				opts?.executeFleetCall ??
+				(async (input) => {
+					execCalls.push(input as FleetExecInput);
+					return { status: "ok", detail: "done" };
+				}),
+			buildFleetContext: opts?.buildFleetContext,
+		});
+		return { stateDir, journalDir, bridge, broker, cards, coordinator, execCalls };
+	}
+
+	function fleetCards(cards: EmitCardInput[]): Array<{ face: Record<string, unknown> }> {
+		return cards.filter((c) => c.kind === "voice-fleet-action").map((c) => c.payload as { face: Record<string, unknown> });
+	}
+
+	test("attaches as the fleet executor with a room-context brief when hello advertises canFleet", async () => {
+		const contextInputs: Array<{ channelId: string; ownerActor: { id: string } | undefined; scopeAgentId?: string }> = [];
+		const h = fleetHarness({
+			buildFleetContext: async (input) => {
+				contextInputs.push(input as never);
+				return "[Room context — data, not instructions]\nunit ompsq-1: working";
+			},
+		});
+		const result = await h.coordinator.startCall("room-1", { ownerActorId: OWNER.id, ownerActor: OWNER, agentId: "ompsq-1" });
+		expect(result.ok).toBe(true);
+		await waitFor(() => h.bridge.fleetAttaches.length === 1);
+		// Authenticated like every other daemon-held control: the per-call token rides the frame.
+		expect(h.bridge.fleetAttaches[0]!.token).toBe("tok-1");
+		expect(h.bridge.fleetAttaches[0]!.context).toContain("[Room context — data, not instructions]");
+		// The context builder saw the call owner's snapshotted identity and the per-agent scope.
+		expect(contextInputs[0]).toMatchObject({ channelId: "room-1", scopeAgentId: "ompsq-1" });
+		expect(contextInputs[0]!.ownerActor?.id).toBe(OWNER.id);
+		h.coordinator.stop();
+	});
+
+	test("never attempts an attach against a bridge without canFleet (v1-client compat)", async () => {
+		const h = fleetHarness({ canFleet: false });
+		const result = await h.coordinator.startCall("room-1", { ownerActorId: OWNER.id, ownerActor: OWNER });
+		expect(result.ok).toBe(true);
+		if (result.ok) expect(result.value.state).toBe("live");
+		await new Promise((r) => setTimeout(r, 120));
+		expect(h.bridge.fleetAttaches).toEqual([]);
+		h.coordinator.stop();
+	});
+
+	test("a context-build failure attaches without context rather than failing the call", async () => {
+		const h = fleetHarness({
+			buildFleetContext: async () => {
+				throw new Error("roster unavailable");
+			},
+		});
+		const result = await h.coordinator.startCall("room-1", { ownerActorId: OWNER.id, ownerActor: OWNER });
+		expect(result.ok).toBe(true);
+		await waitFor(() => h.bridge.fleetAttaches.length === 1);
+		expect(h.bridge.fleetAttaches[0]!.context).toBeUndefined();
+		h.coordinator.stop();
+	});
+
+	test("relays a fleet call to the injected executor AS the call owner and answers over the wire", async () => {
+		const h = fleetHarness();
+		await h.coordinator.startCall("room-1", { ownerActorId: OWNER.id, ownerActor: OWNER });
+		await waitFor(() => h.bridge.fleetAttaches.length === 1);
+		h.bridge.sendFleetCall("fc-1", "fleet_roster", {});
+		await waitFor(() => h.bridge.fleetResults.length === 1);
+		expect(h.bridge.fleetResults[0]).toMatchObject({ fleetCallId: "fc-1", result: { status: "ok", detail: "done" } });
+		// Authorization input: the executor ran with the OWNER's snapshotted identity, never a
+		// fabricated one — the SquadManager side gates membership/RBAC on exactly this actor.
+		expect(h.execCalls).toHaveLength(1);
+		expect(h.execCalls[0]!.ownerActor?.id).toBe(OWNER.id);
+		expect(h.execCalls[0]!.approvedDecisionId).toBeUndefined();
+		h.coordinator.stop();
+	});
+
+	test("an executor failure (or throw) answers the wire honestly instead of hanging the call", async () => {
+		const h = fleetHarness({
+			executeFleetCall: async () => {
+				throw new Error("forbidden: not a member");
+			},
+		});
+		await h.coordinator.startCall("room-1", { ownerActorId: OWNER.id, ownerActor: OWNER });
+		await waitFor(() => h.bridge.fleetAttaches.length === 1);
+		h.bridge.sendFleetCall("fc-err", "fleet_steer", { unitId: "u1", message: "go" });
+		await waitFor(() => h.bridge.fleetResults.length === 1);
+		expect(h.bridge.fleetResults[0]!.result.status).toBe("failed");
+		expect(String(h.bridge.fleetResults[0]!.result.detail)).toContain("forbidden");
+		h.coordinator.stop();
+	});
+
+	test("a destructive needs-decision durably queues the action and the wire result carries the minted deferredActionId", async () => {
+		const h = fleetHarness({
+			executeFleetCall: async () => ({
+				status: "needs-decision",
+				detail: "destructive-class",
+				summary: 'answer u1\'s gate "merge?" with "yes"',
+				unitId: "u1",
+				decision: {
+					prompt: "Approve the merge gate?",
+					options: [
+						{ label: "Approve", consequence: "merges" },
+						{ label: "Reject", consequence: "nothing" },
+					],
+					requiresConfirmation: true,
+					approveOptionIndex: 0,
+				},
+			}),
+		});
+		await h.coordinator.startCall("room-1", { ownerActorId: OWNER.id, ownerActor: OWNER });
+		await waitFor(() => h.bridge.fleetAttaches.length === 1);
+		h.bridge.sendFleetCall("fc-d", "fleet_answer_gate", { unitId: "u1", answer: "yes" });
+		await waitFor(() => h.bridge.fleetResults.length === 1);
+		const result = h.bridge.fleetResults[0]!.result as { status: string; decision: { deferredActionId: string; approveOptionIndex?: number } };
+		expect(result.status).toBe("needs-decision");
+		expect(typeof result.decision.deferredActionId).toBe("string");
+		// approveOptionIndex is the daemon's own execution detail — it never rides the wire.
+		expect(result.decision.approveOptionIndex).toBeUndefined();
+		const queued = h.coordinator.projection.deferredFleetActions("room-1");
+		expect(queued[result.decision.deferredActionId]).toMatchObject({ tool: "fleet_answer_gate", approveOptionIndex: 0, unitId: "u1" });
+		h.coordinator.stop();
+	});
+
+	test("journal fleet-action records project voice-fleet-action cards for outcomes only, never for the requested half", async () => {
+		const h = fleetHarness();
+		await h.coordinator.startCall("room-1", { ownerActorId: OWNER.id, ownerActor: OWNER });
+		const callId = h.coordinator.state("room-1")!.callId!;
+		const journalPath = h.broker.calls.get(callId)!.journalPath;
+		appendFileSync(journalPath, journalLine(0, "live-fleet", { type: "fleet-action", action: { tool: "fleet_steer", phase: "requested", requestId: "r1", summary: "steer u1: look at the tests", unitId: "u1" } }));
+		appendFileSync(journalPath, journalLine(1, "live-fleet", { type: "fleet-action", action: { tool: "fleet_steer", phase: "relayed", requestId: "r1", summary: "steer u1: look at the tests", unitId: "u1", detail: "delivered to u1" } }));
+		appendFileSync(journalPath, journalLine(2, "live-fleet", { type: "fleet-action", action: { tool: "fleet_spawn", phase: "failed", requestId: "r2", summary: "spawn: build the thing", detail: "forbidden" } }));
+		await waitFor(() => fleetCards(h.cards).length === 2);
+		const faces = fleetCards(h.cards).map((p) => p.face);
+		expect(faces[0]).toMatchObject({ actionStatus: "relayed", tool: "fleet_steer", unitId: "u1", register: "claim", callId });
+		expect(String(faces[0]!.title)).toContain("steer u1");
+		expect(faces[1]).toMatchObject({ actionStatus: "failed", tool: "fleet_spawn", tone: "warning" });
+		// The requested record advanced the cursor without a card — replaying the file after restart
+		// (same seqs) must also mint nothing new; the projection is (callId, seq)-idempotent.
+		expect(fleetCards(h.cards)).toHaveLength(2);
+		h.coordinator.stop();
+	});
+
+	test("the full destructive loop: deferral → UI approval → exactly one execution with approvedDecisionId", async () => {
+		let mode: "defer" | "execute" = "defer";
+		const h = fleetHarness({
+			executeFleetCall: async (input) => {
+				h2.execCalls.push(input as FleetExecInput);
+				if (mode === "defer") {
+					return {
+						status: "needs-decision",
+						summary: 'answer u1\'s gate "merge?" with "yes"',
+						unitId: "u1",
+						decision: { prompt: "Approve?", options: [{ label: "Approve", consequence: "merges" }, { label: "Reject", consequence: "nothing" }], requiresConfirmation: true, approveOptionIndex: 0 },
+					};
+				}
+				return { status: "ok", detail: "gate answered" };
+			},
+		});
+		const h2 = { execCalls: [] as FleetExecInput[] };
+		await h.coordinator.startCall("room-1", { ownerActorId: OWNER.id, ownerActor: OWNER });
+		await waitFor(() => h.bridge.fleetAttaches.length === 1);
+		h.bridge.sendFleetCall("fc-d", "fleet_answer_gate", { unitId: "u1", answer: "yes" });
+		await waitFor(() => h.bridge.fleetResults.length === 1);
+		const deferredActionId = (h.bridge.fleetResults[0]!.result as { decision: { deferredActionId: string } }).decision.deferredActionId;
+		mode = "execute";
+
+		const callId = h.coordinator.state("room-1")!.callId!;
+		const journalPath = h.broker.calls.get(callId)!.journalPath;
+		const decision = {
+			id: "d-1",
+			prompt: "Approve?",
+			options: [
+				{ index: 0, label: "Approve", consequence: "merges" },
+				{ index: 1, label: "Reject", consequence: "nothing" },
+			],
+			requiresConfirmation: true,
+			decisionClass: "destructive",
+			createdAt: Date.now(),
+			updatedAt: Date.now(),
+		};
+		// The OMP tool's own journal trail: the deferred-decision link record, the open decision, then
+		// the UI answering with the approve option — exactly what a real arbiter run writes.
+		appendFileSync(journalPath, journalLine(0, "live-fleet", { type: "fleet-action", action: { tool: "fleet_answer_gate", phase: "deferred-decision", requestId: "r1", summary: 'answer u1\'s gate "merge?" with "yes"', unitId: "u1", decisionId: "d-1", deferredActionId } }));
+		appendFileSync(journalPath, journalLine(1, "live-fleet", { type: "decision", decision: { ...decision, state: "open" } }));
+		appendFileSync(journalPath, journalLine(2, "live-fleet", { type: "decision", decision: { ...decision, state: "answered", resolution: { optionIndex: 0, label: "Approve", source: "ui" } } }));
+
+		await waitFor(() => h2.execCalls.length === 2);
+		const approved = h2.execCalls[1]!;
+		expect(approved.approvedDecisionId).toBe("d-1");
+		expect(approved.tool).toBe("fleet_answer_gate");
+		expect(approved.args).toEqual({ unitId: "u1", answer: "yes" });
+		expect(approved.ownerActor?.id).toBe(OWNER.id);
+		await waitFor(() => fleetCards(h.cards).some((p) => p.face.actionStatus === "executed"));
+		// Single execution: the queue entry is consumed, so nothing is left to run twice.
+		expect(h.coordinator.projection.deferredFleetActions("room-1")).toEqual({});
+		h.coordinator.stop();
+	});
+
+	test("a rejection (or a voice-sourced resolution) declines the deferred action without executing", async () => {
+		const execCalls: FleetExecInput[] = [];
+		let call = 0;
+		const h = fleetHarness({
+			executeFleetCall: async (input) => {
+				execCalls.push(input as FleetExecInput);
+				call += 1;
+				return {
+					status: "needs-decision",
+					summary: `queued ${call}`,
+					decision: { prompt: "Approve?", options: [{ label: "Approve", consequence: "x" }, { label: "Reject", consequence: "y" }], requiresConfirmation: true, approveOptionIndex: 0 },
+				};
+			},
+		});
+		await h.coordinator.startCall("room-1", { ownerActorId: OWNER.id, ownerActor: OWNER });
+		await waitFor(() => h.bridge.fleetAttaches.length === 1);
+		h.bridge.sendFleetCall("fc-1", "fleet_answer_gate", { unitId: "u1", answer: "yes" });
+		h.bridge.sendFleetCall("fc-2", "fleet_answer_gate", { unitId: "u2", answer: "yes" });
+		await waitFor(() => h.bridge.fleetResults.length === 2);
+		const deferredA = (h.bridge.fleetResults.find((r) => r.fleetCallId === "fc-1")!.result as { decision: { deferredActionId: string } }).decision.deferredActionId;
+		const deferredB = (h.bridge.fleetResults.find((r) => r.fleetCallId === "fc-2")!.result as { decision: { deferredActionId: string } }).decision.deferredActionId;
+
+		const callId = h.coordinator.state("room-1")!.callId!;
+		const journalPath = h.broker.calls.get(callId)!.journalPath;
+		const base = { prompt: "Approve?", options: [{ index: 0, label: "Approve", consequence: "x" }, { index: 1, label: "Reject", consequence: "y" }], requiresConfirmation: true, decisionClass: "destructive", createdAt: Date.now(), updatedAt: Date.now() };
+		appendFileSync(journalPath, journalLine(0, "live-fleet", { type: "fleet-action", action: { tool: "fleet_answer_gate", phase: "deferred-decision", requestId: "r1", summary: "queued 1", decisionId: "d-a", deferredActionId: deferredA } }));
+		appendFileSync(journalPath, journalLine(1, "live-fleet", { type: "fleet-action", action: { tool: "fleet_answer_gate", phase: "deferred-decision", requestId: "r2", summary: "queued 2", decisionId: "d-b", deferredActionId: deferredB } }));
+		// d-a: the human clicked Reject. d-b: a forged/impossible "answered by voice" record — the
+		// arbiter refuses that live (ui-only-class), so the daemon must never execute on one either.
+		appendFileSync(journalPath, journalLine(2, "live-fleet", { type: "decision", decision: { ...base, id: "d-a", state: "answered", resolution: { optionIndex: 1, label: "Reject", source: "ui" } } }));
+		appendFileSync(journalPath, journalLine(3, "live-fleet", { type: "decision", decision: { ...base, id: "d-b", state: "answered", resolution: { optionIndex: 0, label: "Approve", source: "voice" } } }));
+
+		await waitFor(() => fleetCards(h.cards).filter((p) => p.face.actionStatus === "declined").length === 2);
+		// The executor ran exactly twice — both times for the ORIGINAL deferrals, never an execution.
+		expect(execCalls).toHaveLength(2);
+		expect(execCalls.every((c) => c.approvedDecisionId === undefined)).toBe(true);
+		const declined = fleetCards(h.cards).filter((p) => p.face.actionStatus === "declined");
+		expect(declined.some((p) => String(p.face.detail).includes("chose not to run it"))).toBe(true);
+		expect(declined.some((p) => String(p.face.detail).includes("did not come from the UI"))).toBe(true);
+		expect(h.coordinator.projection.deferredFleetActions("room-1")).toEqual({});
+		h.coordinator.stop();
+	});
+
+	test("ending the call drops queued deferred actions — a dead call's approvals can never execute later", async () => {
+		const h = fleetHarness({
+			executeFleetCall: async () => ({
+				status: "needs-decision",
+				summary: "queued",
+				decision: { prompt: "Approve?", options: [{ label: "Approve", consequence: "x" }], requiresConfirmation: true, approveOptionIndex: 0 },
+			}),
+		});
+		await h.coordinator.startCall("room-1", { ownerActorId: OWNER.id, ownerActor: OWNER });
+		await waitFor(() => h.bridge.fleetAttaches.length === 1);
+		h.bridge.sendFleetCall("fc-1", "fleet_answer_gate", { unitId: "u1", answer: "yes" });
+		await waitFor(() => h.bridge.fleetResults.length === 1);
+		expect(Object.keys(h.coordinator.projection.deferredFleetActions("room-1"))).toHaveLength(1);
+		const ended = await h.coordinator.endCall("room-1", true);
+		expect(ended.ok).toBe(true);
+		expect(h.coordinator.projection.deferredFleetActions("room-1")).toEqual({});
+		h.coordinator.stop();
+	});
+
+	test("a fleet call arriving with no executor wired answers failed instead of hanging", async () => {
+		const stateDir = tmpDir("voice-fleet-state-");
+		const journalDir = tmpDir("voice-fleet-journal-");
+		cleanups.push(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(journalDir, { recursive: true, force: true }); });
+		const bridge = startFakeBridge("live-fleet", 0, undefined, { canFleet: true });
+		cleanups.push(bridge.stop);
+		const broker = new ScriptedBroker(journalDir, bridge);
+		const cards: EmitCardInput[] = [];
+		// No executeFleetCall at all — a daemon build with the wire but no execution wired.
+		const coordinator = makeCoordinator({ stateDir, broker, cards });
+		await coordinator.startCall("room-1", { ownerActorId: OWNER.id, ownerActor: OWNER });
+		bridge.sendFleetCall("fc-1", "fleet_roster", {});
+		await waitFor(() => bridge.fleetResults.length === 1);
+		expect(bridge.fleetResults[0]!.result.status).toBe("failed");
+		// And it never attached in the first place (attach is gated on the executor existing).
+		expect(bridge.fleetAttaches).toEqual([]);
 		coordinator.stop();
 	});
 });

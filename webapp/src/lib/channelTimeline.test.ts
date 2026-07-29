@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { askedAgainLine, cardUnitId, buildChannelThreadViews, channelCardActionHref, dispatchChannelCard, doorLabel, faceFromPayload, foldRepeatedAsks, groupLifecycleRuns, latestChannelSeq, pinnedChip, reduceChannelEntryWindow, runSummary } from './channelTimeline';
 import type { ChannelEntry } from './dto';
 import { entryTimeLabel } from './hub';
+import { unitHref } from './router';
 
 const entry = (overrides: Partial<ChannelEntry> & Pick<ChannelEntry, 'id' | 'seq'>): ChannelEntry => ({
   id: overrides.id,
@@ -265,6 +266,43 @@ describe('return-emit and design-revised cards', () => {
     // not tell them where they are going — so this asserts the DISTINCTION, not only the string.
     expect(doorLabel(resolved.kind)).toBe('Answer the question');
     expect(doorLabel(resolved.kind)).not.toBe(doorLabel('needs-you'));
+  });
+
+  test('voice-fleet-action cards (concern 12): tone per status, unit door, call/decision provenance, register claim', () => {
+    const relayed = dispatchChannelCard(entry({
+      id: 'vfa-1',
+      seq: 40,
+      event: { kind: 'voice-fleet-action', payload: { refs: { callId: 'call-1', unitId: 'u1' }, face: { title: 'Voice: steer ompsq-477: go', status: 'relayed', tone: 'info', register: 'claim', callId: 'call-1', tool: 'fleet_steer', actionStatus: 'relayed', unitId: 'u1' } } },
+    }));
+    expect(relayed.kind).toBe('voice-fleet-action');
+    expect(relayed.tone).toBe('info');
+    expect(relayed.callId).toBe('call-1');
+    // The door steps into the unit the action touched — derived from refs.unitId.
+    expect(relayed.href).toBe(unitHref('u1'));
+    expect(doorLabel(relayed.kind)).toBe('Open the unit');
+    expect(faceFromPayload(relayed.entry.event?.payload)?.register).toBe('claim');
+
+    // Tone derivation when the emitter set none: executed=success, deferred/failed=warning,
+    // declined=neutral — asserted through toneFor's own fallback, not the face tone.
+    const toneOf = (status: string) => dispatchChannelCard(entry({
+      id: `vfa-${status}`,
+      seq: 41,
+      event: { kind: 'voice-fleet-action', payload: { refs: { callId: 'call-1', decisionId: 'd1' }, face: { title: 'x', status } } },
+    })).tone;
+    expect(toneOf('executed')).toBe('success');
+    expect(toneOf('deferred')).toBe('warning');
+    expect(toneOf('failed')).toBe('warning');
+    expect(toneOf('declined')).toBe('neutral');
+
+    // A deferred card carries which decision approves it, so a reader can find the door.
+    const deferred = dispatchChannelCard(entry({
+      id: 'vfa-def',
+      seq: 42,
+      event: { kind: 'voice-fleet-action', payload: { refs: { callId: 'call-1', decisionId: 'd1' }, face: { title: 'Held for approval: answer the merge gate', status: 'deferred' } } },
+    }));
+    expect(deferred.decisionId).toBe('d1');
+    // No unitId — no door href fabricated.
+    expect(deferred.href).toBeUndefined();
   });
 
   test('an unmapped kind still falls back to unknown-event without throwing', () => {

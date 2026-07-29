@@ -53,6 +53,7 @@ const iconClass: Record<ChannelCardView['kind'], typeof ShieldAlert> = {
   'verification-ran': CheckCircle2,
   'voice-call': Phone,
   'voice-decision': ShieldQuestion,
+  'voice-fleet-action': CircleDot,
   'unknown-event': CircleDot,
 };
 
@@ -88,7 +89,7 @@ function EmptyTimeline() {
  * carries the most information — the call card prints its CALL and the decision card prints its
  * question as the agent's own claim, in the register the emitter asserted.
  */
-const VOICE_KINDS: Partial<Record<ChannelCardView['kind'], true>> = { 'voice-call': true, 'voice-decision': true };
+const VOICE_KINDS: Partial<Record<ChannelCardView['kind'], true>> = { 'voice-call': true, 'voice-decision': true, 'voice-fleet-action': true };
 
 export const ChannelTimelineRow = memo(function ChannelTimelineRow({ view, onReply, replyingTo, onAnswer, onAnswerDecision, onOpenCall }: { view: ChannelCardView; onReply?: (entry: ChannelEntry) => void; replyingTo?: boolean; onAnswer?: (unitId: string) => void; onAnswerDecision?: (decisionId: string) => void; onOpenCall?: () => void }) {
   // A waiting card opens its QUESTION, not its transcript. Its only affordance used to read "Click to

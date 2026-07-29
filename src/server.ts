@@ -3869,7 +3869,8 @@ export class SquadServer {
 			const sessionRoot = typeof decoded.sessionRoot === "string" ? decoded.sessionRoot : undefined;
 			const retention = decoded.retention === "full" || decoded.retention === "tails" || decoded.retention === "off" ? decoded.retention : undefined;
 			const resumeSessionId = typeof decoded.resumeSessionId === "string" ? decoded.resumeSessionId : undefined;
-			const result = await manager.startVoiceCall(channelId, actor, { sessionRoot, retention, resumeSessionId });
+			const agentId = typeof decoded.agentId === "string" && decoded.agentId.trim() ? decoded.agentId.trim() : undefined;
+			const result = await manager.startVoiceCall(channelId, actor, { sessionRoot, retention, resumeSessionId, agentId });
 			return result.ok ? Response.json(result.value, { status: 201 }) : voiceCallErrorResponse(result.reason);
 		}
 		if (voiceCallStateMatch && req.method === "DELETE") {

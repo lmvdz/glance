@@ -244,6 +244,24 @@ import type { ArtifactReadResult, ArtifactSnapshotRecord } from "./voice-call-ar
 import type { JournalDecisionSnapshot } from "./voice-call-journal.ts";
 import type { BridgeControlAck } from "./voice-call-bridge-client.ts";
 import { VoiceCallCoordinator, type BrokerClient, type CoordinatorResult, type VoiceCallsSurface } from "./voice-call-manager.ts";
+import { discoverRepos, planSpawn } from "./smart-spawn.ts";
+import {
+	buildDestructiveGateDecision,
+	buildFleetContextBrief,
+	formatFleetRoster,
+	formatUnitDetail,
+	FLEET_TAIL_ENTRIES,
+	isDestructiveGate,
+	normalizeGateAnswer,
+	parseVoiceFleetArgs,
+	snapshotOwnerActor,
+	sanitizeLabel as voiceFleetSanitizeLabel,
+	truncatePoints as voiceFleetTruncatePoints,
+	type FleetTranscriptTailEntry,
+	type FleetUnitView,
+	type VoiceFleetExecResult,
+	type VoiceOwnerActor,
+} from "./voice-fleet.ts";
 import { NodeStore, compareActivity, type NodeState } from "./nodes.ts";
 import { ForgedCardError, assertAuthentic, projectsToRoom, type CardProvenance } from "./projection-classes.ts";
 import { coldStartLearningState } from "./unknowns.ts";
@@ -1383,6 +1401,10 @@ export class SquadManager extends EventEmitter {
 			onTranscriptTurn: (input) => {
 				this.emit("event", { type: "voice-call-transcript-turn", channelId: input.channelId, callId: input.callId, entry: input.entry } satisfies SquadEvent);
 			},
+			// Concern 12 (voice-fleet-delegation): the call's fleet tool calls execute HERE, on the
+			// same authenticated paths UI commands take, as the call owner's snapshotted actor.
+			executeFleetCall: (input) => this.executeVoiceFleetCall(input),
+			buildFleetContext: (input) => this.voiceFleetContext(input),
 		});
 	}
 
@@ -12507,9 +12529,186 @@ export class SquadManager extends EventEmitter {
 	// `isAuthorized` as its own last gate before relaying anything to the bridge (voice-call-manager.ts),
 	// so a caller that skipped this check would still be refused, not silently trusted twice.
 
-	async startVoiceCall(channelId: string, actor: Actor, input: { sessionRoot?: string; retention?: VoiceCallRetention; resumeSessionId?: string }): Promise<CoordinatorResult<VoiceCallBindingView>> {
+	async startVoiceCall(
+		channelId: string,
+		actor: Actor,
+		input: { sessionRoot?: string; retention?: VoiceCallRetention; resumeSessionId?: string; agentId?: string },
+	): Promise<CoordinatorResult<VoiceCallBindingView>> {
 		if (!(await this.channelStore.canReadChannel(channelId, actor))) return { ok: false, reason: "forbidden" };
-		return this.voiceCall.startCall(channelId, { ownerActorId: actor.id, ...input });
+		// Concern 12: per-agent scoped start — the named unit must actually be in THIS room, or the
+		// scope would leak another room's transcript tail into this call's context seed.
+		if (input.agentId && !this.voiceFleetUnit(channelId, input.agentId)) {
+			return { ok: false, reason: `no unit "${input.agentId}" in this room` };
+		}
+		return this.voiceCall.startCall(channelId, { ownerActorId: actor.id, ownerActor: snapshotOwnerActor(actor), ...input });
+	}
+
+	// ── Voice fleet delegation (concern 12) ────────────────────────────────────────────────────────
+	// The call's voice tool surface (oh-my-pi fleet-tools.ts) relays here over the bridge. Commands
+	// execute AS the call owner's snapshotted actor through the SAME chokepoints UI commands take —
+	// `applyCommand` for steer/answer (RBAC, delegation boundary, audit), `create` for spawn — plus
+	// room-scoping this lane owns: only units of the call's own channel are visible or addressable.
+
+	/** Room roster for the fleet lane: every live unit whose room is this channel (a unit with no
+	 *  channelId belongs to the default room, mirroring `projectUnitTranscriptEvent`'s own rule). */
+	private voiceFleetUnits(channelId: string): FleetUnitView[] {
+		return this.list()
+			.filter((dto) => (dto.channelId ?? DEFAULT_CHANNEL_ID) === channelId)
+			.map((dto) => ({
+				id: dto.id,
+				name: dto.name,
+				status: dto.status,
+				...(dto.activity ? { activity: dto.activity } : {}),
+				...(dto.blockedReason ? { blockedReason: dto.blockedReason } : {}),
+				pending: dto.pending.map((req) => ({ id: req.id, title: req.title, kind: req.kind, source: req.source, options: req.options, gateClass: req.gateClass })),
+			}));
+	}
+
+	/** One room unit by id or (case-insensitive) display name — the voice model may say either. */
+	private voiceFleetUnit(channelId: string, unitRef: string): FleetUnitView | undefined {
+		const units = this.voiceFleetUnits(channelId);
+		const exact = units.find((unit) => unit.id === unitRef);
+		if (exact) return exact;
+		const lowered = unitRef.toLowerCase();
+		const byName = units.filter((unit) => unit.name.toLowerCase() === lowered);
+		return byName.length === 1 ? byName[0] : undefined;
+	}
+
+	private voiceFleetTranscriptTail(unitId: string): FleetTranscriptTailEntry[] {
+		return this.getTranscript(unitId)
+			.filter((entry) => (entry.kind === "user" || entry.kind === "assistant" || entry.kind === "system") && entry.text.trim())
+			.slice(-FLEET_TAIL_ENTRIES)
+			.map((entry) => ({ kind: entry.kind, text: entry.text }));
+	}
+
+	/**
+	 * Execute one relayed fleet tool call (concern 12) as the call owner. Every failure is a named
+	 * `{status:"failed"}` — never a throw across the coordinator boundary — and a destructive
+	 * `fleet_answer_gate` (concern 05's merge/publish/spend/delete class) returns `needs-decision`
+	 * instead of executing, unless `approvedDecisionId` marks this as the post-UI-approval
+	 * execution of an action the coordinator queued.
+	 */
+	async executeVoiceFleetCall(input: { channelId: string; ownerActor: VoiceOwnerActor | undefined; tool: string; args: unknown; approvedDecisionId?: string }): Promise<VoiceFleetExecResult> {
+		const owner = input.ownerActor;
+		if (!owner) return { status: "failed", detail: "this call has no recorded owner identity — end it and start a fresh call to enable fleet commands" };
+		const actor: Actor = {
+			id: owner.id,
+			origin: owner.origin,
+			...(owner.displayName === undefined ? {} : { displayName: owner.displayName }),
+			...(owner.role === undefined ? {} : { role: owner.role }),
+			...(owner.orgId === undefined ? {} : { orgId: owner.orgId }),
+		};
+		if (!(await this.channelStore.canReadChannel(input.channelId, actor))) {
+			return { status: "failed", detail: "forbidden: the call owner is not a member of this room" };
+		}
+		const parsed = parseVoiceFleetArgs(input.tool, input.args);
+		if (!parsed.ok) return { status: "failed", detail: parsed.detail };
+		const args = parsed.args;
+		switch (args.tool) {
+			case "fleet_roster": {
+				const { detail, data } = formatFleetRoster(this.voiceFleetUnits(input.channelId));
+				return { status: "ok", detail, ...(data === undefined ? {} : { data }) };
+			}
+			case "fleet_unit_detail": {
+				const unit = this.voiceFleetUnit(input.channelId, args.unitId);
+				if (!unit) return { status: "failed", detail: `no unit "${voiceFleetTruncatePoints(args.unitId, 60)}" in this room` };
+				const { detail, data } = formatUnitDetail(unit, this.voiceFleetTranscriptTail(unit.id));
+				return { status: "ok", detail, ...(data === undefined ? {} : { data }) };
+			}
+			case "fleet_steer": {
+				const unit = this.voiceFleetUnit(input.channelId, args.unitId);
+				if (!unit) return { status: "failed", detail: `no unit "${voiceFleetTruncatePoints(args.unitId, 60)}" in this room` };
+				try {
+					await this.applyCommand({ type: "prompt", id: unit.id, message: args.message, channelId: input.channelId, source: "voice" }, actor);
+				} catch (err) {
+					return { status: "failed", detail: err instanceof RbacDenied ? `forbidden: ${errText(err)}` : errText(err) };
+				}
+				return { status: "ok", detail: `delivered to ${voiceFleetSanitizeLabel(unit.name)}` };
+			}
+			case "fleet_spawn": {
+				try {
+					const tracked = this.projects().map((p) => p.repo);
+					const plan = await planSpawn(args.prompt, { cwd: process.cwd(), candidates: discoverRepos(process.cwd(), tracked) });
+					const dto = await this.create({ ...plan, channelId: input.channelId, track: true }, actor, "voice");
+					return { status: "ok", detail: `spawned ${voiceFleetSanitizeLabel(dto.name)}`, data: JSON.stringify({ id: dto.id, name: dto.name, repo: dto.repo }) };
+				} catch (err) {
+					return { status: "failed", detail: err instanceof RbacDenied ? `forbidden: ${errText(err)}` : errText(err) };
+				}
+			}
+			case "fleet_answer_gate": {
+				const unit = this.voiceFleetUnit(input.channelId, args.unitId);
+				if (!unit) return { status: "failed", detail: `no unit "${voiceFleetTruncatePoints(args.unitId, 60)}" in this room` };
+				const open = unit.pending;
+				const req = args.gateId ? open.find((p) => p.id === args.gateId) : open.length === 1 ? open[0] : undefined;
+				if (!req) {
+					if (open.length === 0) return { status: "failed", detail: `${voiceFleetSanitizeLabel(unit.name)} has no open question right now` };
+					if (args.gateId) return { status: "failed", detail: `no open question "${voiceFleetTruncatePoints(args.gateId, 60)}" — open: ${open.map((p) => p.id).join(", ")}` };
+					return { status: "failed", detail: `${voiceFleetSanitizeLabel(unit.name)} has ${open.length} open questions — name the gateId: ${open.map((p) => p.id).join(", ")}` };
+				}
+				// Concern 05's recorded policy, enforced BEFORE any execution: a destructive-class gate
+				// answer is never executable by voice — it becomes a UI decision. `approvedDecisionId`
+				// marks the one exception: the coordinator re-executing an action a human already
+				// approved through exactly that decision.
+				if (!input.approvedDecisionId && isDestructiveGate(req)) {
+					return buildDestructiveGateDecision(unit, req, args.answer);
+				}
+				const normalized = normalizeGateAnswer(req, args.answer);
+				if (!normalized.ok) return { status: "failed", detail: normalized.detail };
+				try {
+					await this.applyCommand({ type: "answer", id: unit.id, requestId: req.id, value: normalized.value }, actor);
+				} catch (err) {
+					return { status: "failed", detail: err instanceof RbacDenied ? `forbidden: ${errText(err)}` : errText(err) };
+				}
+				return { status: "ok", detail: `answered "${voiceFleetTruncatePoints(req.title, 80)}" for ${voiceFleetSanitizeLabel(unit.name)}` };
+			}
+		}
+	}
+
+	/**
+	 * The room-context brief seeded into the realtime session at fleet attach (concern 12): the
+	 * roster with states/activity/open questions, open voice-call decisions, the room's latest
+	 * plan-card summary, and — for a per-agent scoped start — that unit's detail and transcript
+	 * tail. Membership-gated on the call owner exactly like every fleet command; `undefined`
+	 * (attach without context) when there is no recorded owner or the owner lost room access.
+	 */
+	async voiceFleetContext(input: { channelId: string; ownerActor: VoiceOwnerActor | undefined; scopeAgentId?: string }): Promise<string | undefined> {
+		const owner = input.ownerActor;
+		if (!owner) return undefined;
+		const actor: Actor = { id: owner.id, origin: owner.origin, ...(owner.role === undefined ? {} : { role: owner.role }), ...(owner.orgId === undefined ? {} : { orgId: owner.orgId }) };
+		if (!(await this.channelStore.canReadChannel(input.channelId, actor))) return undefined;
+		const units = this.voiceFleetUnits(input.channelId);
+		const openDecisions = this.voiceCall.decisions(input.channelId).filter((d) => d.state === "open" || d.state === "awaiting-confirmation");
+		let channelName = input.channelId;
+		try {
+			const channels = await this.listChannels(actor);
+			channelName = channels.find((channel) => channel.id === input.channelId)?.name ?? input.channelId;
+		} catch {
+			/* the id is an honest fallback name */
+		}
+		let planSummary: string | undefined;
+		try {
+			const entries = await this.channelEntries(input.channelId, 0, actor);
+			for (let index = entries.length - 1; index >= 0 && index >= entries.length - 300; index--) {
+				const event = entries[index]?.event;
+				if (event?.kind !== "plan-card") continue;
+				const face = (event.payload as { face?: { title?: unknown; planName?: unknown } } | undefined)?.face;
+				const summary = typeof face?.planName === "string" ? face.planName : typeof face?.title === "string" ? face.title : undefined;
+				if (summary) {
+					planSummary = summary;
+					break;
+				}
+			}
+		} catch {
+			/* no plan summary is an honest omission */
+		}
+		const scoped = input.scopeAgentId ? this.voiceFleetUnit(input.channelId, input.scopeAgentId) : undefined;
+		return buildFleetContextBrief({
+			channelName,
+			units,
+			openDecisions,
+			...(planSummary === undefined ? {} : { planSummary }),
+			...(scoped === undefined ? {} : { scopedUnit: { unit: scoped, tail: this.voiceFleetTranscriptTail(scoped.id) } }),
+		});
 	}
 
 	async voiceCallState(channelId: string, actor: Actor): Promise<VoiceCallBindingView | undefined> {
