@@ -430,6 +430,9 @@ export interface StartVoiceCallInput {
   sessionRoot?: string;
   retention?: VoiceCallRetention;
   resumeSessionId?: string;
+  /** Concern 12: per-agent scoped start — the room unit whose detail and transcript tail seed the
+   *  call's context ("call with ompsq-477"). The daemon validates the unit is in THIS room. */
+  agentId?: string;
 }
 
 /** `GET /api/channels/:id/voice-call`. `null` for the normal "no call has ever been started for this

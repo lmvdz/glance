@@ -37,6 +37,12 @@ export const TRANSCRIPT_EVENT_GOAL_OVERLAP = "goal-overlap";
 // unit, and the daemon must not pretend the OMP live session is an `AgentDTO` to project it.
 export const TRANSCRIPT_EVENT_VOICE_CALL = "voice-call";
 export const TRANSCRIPT_EVENT_VOICE_DECISION = "voice-decision";
+// voice-orchestrated-room-integration concern 12: one fleet-affecting action taken through a
+// call's voice tool surface (steer/spawn/answer-gate), projected from the OMP journal's
+// fleet-action records — plus the coordinator-authored deferred-outcome cards (executed/declined)
+// for a destructive action the human resolved in the UI. Bespoke inline emit
+// (VoiceCallCoordinator), never the per-unit funnel, same as its two voice siblings above.
+export const TRANSCRIPT_EVENT_VOICE_FLEET_ACTION = "voice-fleet-action";
 
 const TRANSCRIPT_EVENT_KINDS = [
 	TRANSCRIPT_EVENT_LAND_ATTEMPT,
@@ -57,6 +63,7 @@ const TRANSCRIPT_EVENT_KINDS = [
 	TRANSCRIPT_EVENT_GOAL_OVERLAP,
 	TRANSCRIPT_EVENT_VOICE_CALL,
 	TRANSCRIPT_EVENT_VOICE_DECISION,
+	TRANSCRIPT_EVENT_VOICE_FLEET_ACTION,
 ] as const;
 
 export type TranscriptEventKind = (typeof TRANSCRIPT_EVENT_KINDS)[number];

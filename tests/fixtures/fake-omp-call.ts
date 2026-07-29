@@ -116,6 +116,10 @@ export interface FakeOmpCallOptions {
 	port?: number;
 	now?: () => number;
 	idFactory?: () => string;
+	/** Concern 12 (voice-fleet-delegation): advertise `canFleet: true` in hello and accept the
+	 *  authenticated `attachFleet` control (recorded in `fleetAttaches`). Off by default so every
+	 *  existing spine test keeps seeing exactly the pre-concern-12 hello. */
+	canFleet?: boolean;
 }
 
 let idSeq = 0;
@@ -179,6 +183,7 @@ export class FakeOmpCall {
 		this.recordingMode = opts.recordingMode ?? "full";
 		this.now = opts.now ?? Date.now;
 		this.idFactory = opts.idFactory ?? defaultId;
+		this.canFleet = opts.canFleet === true;
 		mkdirSync(path.dirname(this.journalPath), { recursive: true });
 		writeFileSyncEmpty(this.journalPath);
 		this.server = Bun.serve({
@@ -210,6 +215,7 @@ export class FakeOmpCall {
 						recordingMode: this.recordingMode,
 						decisions: [...this.decisions.values()].filter((d) => d.state === "open" || d.state === "awaiting-confirmation"),
 						interruptPolicy: this.interruptPolicy,
+						...(this.canFleet ? { canFleet: true } : {}),
 					});
 				},
 				close: (ws) => this.sockets.delete(ws),
@@ -426,6 +432,10 @@ export class FakeOmpCall {
 
 	// ── Wire plumbing ────────────────────────────────────────────────────────────────────────────
 
+	/** Concern 12: every authorized `attachFleet` this fixture accepted, with any context brief. */
+	readonly fleetAttaches: Array<{ context?: string }> = [];
+	private readonly canFleet: boolean;
+
 	private handleControl(ws: { send(data: string): unknown }, message: string | Buffer): void {
 		let parsed: unknown;
 		try {
@@ -436,6 +446,23 @@ export class FakeOmpCall {
 		if (!parsed || typeof parsed !== "object") return;
 		const frame = parsed as Record<string, unknown>;
 		if (frame.type !== "control") return;
+		if (frame.action === "attachFleet") {
+			// Concern 12: authorized exactly like resolveDecision; the attach (and any context brief it
+			// carried) is recorded so a spine-level test can assert the daemon seeded the session.
+			const auth = this.authorize(frame);
+			if (!auth) return;
+			if (auth.reason) {
+				this.sendTo(ws, { type: "controlAck", requestId: auth.requestId, ok: false, reason: auth.reason });
+				return;
+			}
+			if (!this.canFleet) {
+				this.sendTo(ws, { type: "controlAck", requestId: auth.requestId, ok: false, reason: "not-supported" });
+				return;
+			}
+			this.fleetAttaches.push({ ...(typeof frame.context === "string" ? { context: frame.context } : {}) });
+			this.sendTo(ws, { type: "controlAck", requestId: auth.requestId, ok: true });
+			return;
+		}
 		if (frame.action === "resolveDecision") void this.handleResolveDecision(ws, frame);
 		else if (frame.action === "setInterruptPolicy") void this.handleSetInterruptPolicy(ws, frame);
 		else if (frame.action === "toggleMute") {

@@ -9,7 +9,7 @@ export type ChannelCardTone = 'neutral' | 'info' | 'warning' | 'success' | 'dest
  *  `local:` on the wire by HubShell's managerCardEntry to keep them out of the daemon's kind
  *  space. See tests/channel-card-kinds-sync.test.ts for the cross-build invariant this protects. */
 export type LocalCardKind = 'local:mention-confirm-required' | 'local:mention-steer-failed' | 'local:spawn-proposal';
-export type ChannelCardKind = 'message' | 'needs-you' | 'gate-verdict' | LandCardKind | 'mention-steer' | 'goal-overlap' | LocalCardKind | 'plan-card' | 'return-emit' | 'design-revised' | 'token-burn-snapshot' | 'unit-spawned' | 'unit-turn-finished' | 'unit-failed' | 'pr-opened' | 'verification-ran' | 'voice-call' | 'voice-decision' | 'unknown-event';
+export type ChannelCardKind = 'message' | 'needs-you' | 'gate-verdict' | LandCardKind | 'mention-steer' | 'goal-overlap' | LocalCardKind | 'plan-card' | 'return-emit' | 'design-revised' | 'token-burn-snapshot' | 'unit-spawned' | 'unit-turn-finished' | 'unit-failed' | 'pr-opened' | 'verification-ran' | 'voice-call' | 'voice-decision' | 'voice-fleet-action' | 'unknown-event';
 
 /** Epistemic register for the face's TEXT (title/body/detail — the claim content), never chrome
  *  (eyebrow/status/pinned/icon/door stay system-authored regardless). Reserved wire field: no
@@ -165,6 +165,7 @@ const POINTER_EVENT_KINDS = {
   'verification-ran': true,
   'voice-call': true,
   'voice-decision': true,
+  'voice-fleet-action': true,
 } satisfies Record<Exclude<ChannelCardKind, 'message' | 'unknown-event' | LocalCardKind>, true>;
 
 // Client-minted kinds (see LocalCardKind). Exhaustive over LocalCardKind the same way.
@@ -253,6 +254,10 @@ function toneFor(kind: string, face?: PointerCardFace): ChannelCardTone {
   // voice-decision: open/awaiting-confirmation genuinely need a human; answered is a success; a
   // decision that never got one (expired/cancelled/failed) is neutral, not a failure of the room.
   if (kind === 'voice-decision') return face?.status === 'answered' ? 'success' : face?.status === 'open' || face?.status === 'awaiting-confirmation' ? 'warning' : 'neutral';
+  // voice-fleet-action (concern 12): an executed approval is a success; a routine relayed action is
+  // ordinary info; deferred (held for a human) and failed both genuinely want a look; declined is
+  // the neutral, honest record of a human saying no.
+  if (kind === 'voice-fleet-action') return face?.status === 'executed' ? 'success' : face?.status === 'relayed' ? 'info' : face?.status === 'declined' ? 'neutral' : 'warning';
   return 'neutral';
 }
 
@@ -397,12 +402,18 @@ export function dispatchChannelCard(entry: ChannelEntry): ChannelCardView {
   const title = face?.title || labelFromKey(eventKind);
   const body = cardBody(face?.body, entry.text, title);
   const pinned = Object.entries(face?.pinned ?? {}).flatMap(([label, value]) => value == null || value === '' || repeatsTitle(String(value), title) ? [] : [pinnedChip(labelFromKey(label), String(value))]);
-  const doorHrefResolved = eventKind === 'token-burn-snapshot' ? '#/workbench/economics' : (face?.href ?? hrefFromPayload(entry.event?.payload));
+  const fleetActionUnitId = eventKind === 'voice-fleet-action' ? stringFromPath(entry.event?.payload, ['refs', 'unitId']) : undefined;
+  const doorHrefResolved =
+    eventKind === 'token-burn-snapshot'
+      ? '#/workbench/economics'
+      : // voice-fleet-action's door steps into the unit the action touched (when it named one) —
+        // the same surface a lifecycle card about that unit opens.
+        (face?.href ?? hrefFromPayload(entry.event?.payload) ?? (fleetActionUnitId ? unitHref(fleetActionUnitId) : undefined));
   // Voice cards carry their call (and, for a decision, which question) so the row can print
   // provenance and open the RIGHT door — a decision card whose door opened "the decisions panel"
   // rather than that decision is the same class of lie as a token-burn card offering a plan DAG.
-  const callId = cardKind === 'voice-call' || cardKind === 'voice-decision' ? stringFromPath(entry.event?.payload, ['refs', 'callId']) : undefined;
-  const decisionId = cardKind === 'voice-decision' ? stringFromPath(entry.event?.payload, ['refs', 'decisionId']) : undefined;
+  const callId = cardKind === 'voice-call' || cardKind === 'voice-decision' || cardKind === 'voice-fleet-action' ? stringFromPath(entry.event?.payload, ['refs', 'callId']) : undefined;
+  const decisionId = cardKind === 'voice-decision' || cardKind === 'voice-fleet-action' ? stringFromPath(entry.event?.payload, ['refs', 'decisionId']) : undefined;
   return { id: entry.id, entry, kind: cardKind, tone: toneFor(eventKind, face), authorLabel: entryAuthorLabel(entry), title, eyebrow: face?.eyebrow, body, detail: face?.detail, pinned, actionHref: channelCardActionHref(entry), href: doorHrefResolved, register: face?.register, callId, decisionId };
 }
 
@@ -455,6 +466,9 @@ const DOOR_LABELS: Record<string, string> = {
   // question the call is blocked on — and two doors reading the same three words is how a person
   // learns that the label does not tell them where they are going.
   'voice-decision': 'Answer the question',
+  // voice-fleet-action: the card is the record of what the call did to the fleet — its door steps
+  // into the unit the action touched, same surface a lifecycle card opens.
+  'voice-fleet-action': 'Open the unit',
 };
 
 /** Label for a card's door button. Was hardcoded to "Open plan DAG" for every kind — a token-burn

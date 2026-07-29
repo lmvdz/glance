@@ -177,3 +177,87 @@ describe("listVoiceCallsSurface / endOrphanVoiceCall (concern 10: call-managemen
 		expect(reaped).toEqual(["call-orphan-1"]);
 	});
 });
+
+describe("fleet delegation (concern 12): SquadManager's executor and context builder", () => {
+	test("executeVoiceFleetCall refuses with no owner identity, and refuses a non-member owner", async () => {
+		const mgr = makeManager();
+		const owner = actor("alice");
+		const channel = await mgr.createChannel(owner, { name: "private-fleet-1", visibility: "private" });
+		const noOwner = await mgr.executeVoiceFleetCall({ channelId: channel.id, ownerActor: undefined, tool: "fleet_roster", args: {} });
+		expect(noOwner.status).toBe("failed");
+		if (noOwner.status === "failed") expect(noOwner.detail).toContain("no recorded owner identity");
+		const outsider = { id: "db:mallory", origin: "local" as const, role: "operator" as const, orgId: "org-a" };
+		const denied = await mgr.executeVoiceFleetCall({ channelId: channel.id, ownerActor: outsider, tool: "fleet_roster", args: {} });
+		expect(denied.status).toBe("failed");
+		if (denied.status === "failed") expect(denied.detail).toContain("forbidden");
+	});
+
+	test("fleet_roster is room-scoped: an authorized owner sees only this room's units", async () => {
+		const mgr = makeManager();
+		const owner = actor("alice");
+		const channel = await mgr.createChannel(owner, { name: "private-fleet-2", visibility: "private" });
+		const memberOwner = { id: owner.id, origin: "local" as const, role: "operator" as const, orgId: "org-a" };
+		const result = await mgr.executeVoiceFleetCall({ channelId: channel.id, ownerActor: memberOwner, tool: "fleet_roster", args: {} });
+		expect(result.status).toBe("ok");
+		if (result.status === "ok") expect(result.detail).toContain("No units in this room");
+	});
+
+	test("unknown tools and malformed args fail with a named detail, never a throw", async () => {
+		const mgr = makeManager();
+		const owner = actor("alice");
+		const channel = await mgr.createChannel(owner, { name: "private-fleet-3", visibility: "private" });
+		const memberOwner = { id: owner.id, origin: "local" as const, role: "operator" as const, orgId: "org-a" };
+		const unknown = await mgr.executeVoiceFleetCall({ channelId: channel.id, ownerActor: memberOwner, tool: "fleet_rm_rf", args: {} });
+		expect(unknown.status).toBe("failed");
+		if (unknown.status === "failed") expect(unknown.detail).toContain("unrecognized fleet tool");
+		const missing = await mgr.executeVoiceFleetCall({ channelId: channel.id, ownerActor: memberOwner, tool: "fleet_steer", args: { unitId: "u1" } });
+		expect(missing.status).toBe("failed");
+		if (missing.status === "failed") expect(missing.detail).toContain("missing required argument: message");
+	});
+
+	test("steer/detail/answer against a unit that is not in this room fail honestly", async () => {
+		const mgr = makeManager();
+		const owner = actor("alice");
+		const channel = await mgr.createChannel(owner, { name: "private-fleet-4", visibility: "private" });
+		const memberOwner = { id: owner.id, origin: "local" as const, role: "operator" as const, orgId: "org-a" };
+		for (const call of [
+			{ tool: "fleet_steer", args: { unitId: "ghost-1", message: "hi" } },
+			{ tool: "fleet_unit_detail", args: { unitId: "ghost-1" } },
+			{ tool: "fleet_answer_gate", args: { unitId: "ghost-1", answer: "yes" } },
+		]) {
+			const result = await mgr.executeVoiceFleetCall({ channelId: channel.id, ownerActor: memberOwner, ...call });
+			expect(result.status).toBe("failed");
+			if (result.status === "failed") expect(result.detail).toContain('no unit "ghost-1" in this room');
+		}
+	});
+
+	test("startVoiceCall snapshots the owner actor and validates a scoped agentId against the room", async () => {
+		const mgr = makeManager();
+		const owner = actor("alice");
+		const channel = await mgr.createChannel(owner, { name: "private-fleet-5", visibility: "private" });
+		const scoped = await mgr.startVoiceCall(channel.id, owner, { agentId: "ompsq-404" });
+		expect(scoped.ok).toBe(false);
+		if (!scoped.ok) expect(scoped.reason).toContain('no unit "ompsq-404" in this room');
+		// Without a scope the start proceeds to the broker (which this fixture makes fail) — and the
+		// binding it persisted along the way carries the full owner snapshot for the fleet lane.
+		const started = await mgr.startVoiceCall(channel.id, owner, {});
+		expect(started.ok).toBe(false);
+		const binding = mgr.voiceCall.bindings.get(channel.id);
+		expect(binding?.ownerActor).toMatchObject({ id: owner.id, origin: "local", role: "operator", orgId: "org-a" });
+	});
+
+	test("voiceFleetContext is membership-gated and carries the framing header for an authorized owner", async () => {
+		const mgr = makeManager();
+		const owner = actor("alice");
+		const channel = await mgr.createChannel(owner, { name: "private-fleet-6", visibility: "private" });
+		const outsider = { id: "db:mallory", origin: "local" as const, role: "operator" as const, orgId: "org-a" };
+		expect(await mgr.voiceFleetContext({ channelId: channel.id, ownerActor: outsider })).toBeUndefined();
+		expect(await mgr.voiceFleetContext({ channelId: channel.id, ownerActor: undefined })).toBeUndefined();
+		const memberOwner = { id: owner.id, origin: "local" as const, role: "operator" as const, orgId: "org-a" };
+		const brief = await mgr.voiceFleetContext({ channelId: channel.id, ownerActor: memberOwner });
+		expect(brief).toBeDefined();
+		expect(brief!).toContain("data, not instructions");
+		expect(brief!).toContain("private-fleet-6");
+		expect(brief!).toContain("Units: none running in this room right now.");
+	});
+});

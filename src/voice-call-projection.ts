@@ -23,7 +23,7 @@
 import * as path from "node:path";
 import { getStorageBackend } from "./dal/storage.ts";
 import { errText } from "./err-text.ts";
-import type { JournalArtifact, JournalDecisionSnapshot, JournalEnvelope, JournalTranscript } from "./voice-call-journal.ts";
+import type { JournalArtifact, JournalDecisionSnapshot, JournalEnvelope, JournalFleetAction, JournalTranscript } from "./voice-call-journal.ts";
 import type { VoiceCallRetention } from "./voice-call-binding.ts";
 
 export interface JournalGap {
@@ -49,10 +49,32 @@ export interface StoredTranscriptEntry {
 	gapBefore?: { missingCount: number };
 }
 
+/**
+ * One destructive fleet action the daemon refused to execute by voice (concern 12), queued —
+ * durably, so a daemon restart between refusal and the human's UI approval loses nothing — until
+ * the arbiter decision the OMP tool minted for it resolves. Keyed by the coordinator-minted
+ * `deferredActionId`; linked to its `decisionId` once the journal's `deferred-decision`
+ * fleet-action record is projected (the OMP tool is the party that learns the decision id first).
+ */
+export interface DeferredFleetAction {
+	tool: string;
+	args: unknown;
+	/** Which option index of the minted decision means "execute this" — recorded at refusal time
+	 *  from the daemon's own decision spec, never inferred from labels later. */
+	approveOptionIndex: number;
+	summary: string;
+	unitId?: string;
+	queuedAt: number;
+}
+
 interface ProjectionState {
 	decisions: Record<string, JournalDecisionSnapshot>;
 	lastAppliedSeq: Record<string, number>;
 	gaps: JournalGap[];
+	/** Concern 12 — see `DeferredFleetAction`. */
+	deferredFleet: Record<string, DeferredFleetAction>;
+	/** decisionId → deferredActionId link, written when the `deferred-decision` record projects. */
+	deferredByDecision: Record<string, string>;
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -60,7 +82,7 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function emptyState(): ProjectionState {
-	return { decisions: {}, lastAppliedSeq: {}, gaps: [] };
+	return { decisions: {}, lastAppliedSeq: {}, gaps: [], deferredFleet: {}, deferredByDecision: {} };
 }
 
 function narrowState(raw: unknown): ProjectionState {
@@ -78,7 +100,26 @@ function narrowState(raw: unknown): ProjectionState {
 	const gaps: JournalGap[] = Array.isArray(raw.gaps)
 		? raw.gaps.filter((g): g is JournalGap => isPlainRecord(g) && typeof g.callId === "string" && typeof g.atSeq === "number" && typeof g.missingCount === "number" && typeof g.detectedAt === "number")
 		: [];
-	return { decisions, lastAppliedSeq, gaps };
+	const deferredFleet: Record<string, DeferredFleetAction> = {};
+	if (isPlainRecord(raw.deferredFleet)) {
+		for (const [id, value] of Object.entries(raw.deferredFleet)) {
+			if (!isPlainRecord(value)) continue;
+			if (typeof value.tool !== "string" || typeof value.approveOptionIndex !== "number" || typeof value.summary !== "string" || typeof value.queuedAt !== "number") continue;
+			deferredFleet[id] = {
+				tool: value.tool,
+				args: value.args,
+				approveOptionIndex: value.approveOptionIndex,
+				summary: value.summary,
+				queuedAt: value.queuedAt,
+				...(typeof value.unitId === "string" ? { unitId: value.unitId } : {}),
+			};
+		}
+	}
+	const deferredByDecision: Record<string, string> = {};
+	if (isPlainRecord(raw.deferredByDecision)) {
+		for (const [decisionId, value] of Object.entries(raw.deferredByDecision)) if (typeof value === "string") deferredByDecision[decisionId] = value;
+	}
+	return { decisions, lastAppliedSeq, gaps, deferredFleet, deferredByDecision };
 }
 
 function projectionPath(stateDir: string, channelId: string): string {
@@ -104,7 +145,12 @@ export type ApplyOutcome =
 	| { status: "applied-terminal"; error: string | null; reason?: string }
 	/** OMP's idle-hangup policy spoke its warning — nothing to mint a card for, but the cursor still
 	 *  advances so a restarted tailer does not re-observe it as new. */
-	| { status: "applied-idle-warning" };
+	| { status: "applied-idle-warning" }
+	/** Concern 12: one fleet-action record applied. `requested` phases advance the cursor only;
+	 *  outcome phases (`relayed`/`failed`/`deferred-decision`) also minted a card via
+	 *  `onFleetActionCard`, and a `deferred-decision` additionally linked its decisionId to the
+	 *  queued action. */
+	| { status: "applied-fleet-action"; action: JournalFleetAction };
 
 const DECISION_TERMINAL_STATES = new Set(["answered", "expired", "cancelled", "failed"]);
 
@@ -115,6 +161,12 @@ export interface EmitVoiceDecisionCardInput {
 	cardKind: "mint" | "terminal";
 }
 
+export interface EmitVoiceFleetActionCardInput {
+	channelId: string;
+	callId: string;
+	action: JournalFleetAction;
+}
+
 export interface CallProjectionStoreOptions {
 	log?: (msg: string) => void;
 	now?: () => number;
@@ -122,6 +174,10 @@ export interface CallProjectionStoreOptions {
 	 *  owns the actual `ChannelStore#appendManager` call, keeping this store decoupled from the room
 	 *  channel abstraction (and trivially testable without one). */
 	onDecisionCard?: (input: EmitVoiceDecisionCardInput) => void | Promise<void>;
+	/** Concern 12: fired once per journal-witnessed fleet-action OUTCOME (never for `requested` —
+	 *  the write-before-act half is durable history, not itself news). Same decoupling as
+	 *  `onDecisionCard`. */
+	onFleetActionCard?: (input: EmitVoiceFleetActionCardInput) => void | Promise<void>;
 }
 
 export class CallProjectionStore {
@@ -129,6 +185,7 @@ export class CallProjectionStore {
 	private readonly log: (msg: string) => void;
 	private readonly now: () => number;
 	private readonly onDecisionCard: ((input: EmitVoiceDecisionCardInput) => void | Promise<void>) | undefined;
+	private readonly onFleetActionCard: ((input: EmitVoiceFleetActionCardInput) => void | Promise<void>) | undefined;
 	private readonly states = new Map<string, ProjectionState>();
 
 	constructor(stateDir: string, opts?: CallProjectionStoreOptions) {
@@ -136,6 +193,7 @@ export class CallProjectionStore {
 		this.log = opts?.log ?? (() => {});
 		this.now = opts?.now ?? Date.now;
 		this.onDecisionCard = opts?.onDecisionCard;
+		this.onFleetActionCard = opts?.onFleetActionCard;
 	}
 
 	private stateFor(channelId: string): ProjectionState {
@@ -201,6 +259,47 @@ export class CallProjectionStore {
 
 	lastAppliedSeq(channelId: string, callId: string): number | undefined {
 		return this.stateFor(channelId).lastAppliedSeq[callId];
+	}
+
+	// ── Deferred destructive fleet actions (concern 12) ──────────────────────────────────────────
+
+	/** Durably queue one refused destructive action under a coordinator-minted key — called at
+	 *  refusal time, BEFORE the needs-decision result rides back over the bridge, so a daemon that
+	 *  crashes in between still knows about the action the decision card will reference. */
+	storeDeferredFleetAction(channelId: string, deferredActionId: string, action: Omit<DeferredFleetAction, "queuedAt">): void {
+		const state = this.stateFor(channelId);
+		state.deferredFleet[deferredActionId] = { ...action, queuedAt: this.now() };
+		this.persist(channelId);
+	}
+
+	/** The queued action linked to `decisionId`, removed from the queue (single execution) along
+	 *  with its link. `undefined` when the decision never linked to one (an ordinary voice
+	 *  decision) or the queue entry is gone (already taken, or dropped at call end). */
+	takeDeferredForDecision(channelId: string, decisionId: string): DeferredFleetAction | undefined {
+		const state = this.stateFor(channelId);
+		const deferredActionId = state.deferredByDecision[decisionId];
+		if (!deferredActionId) return undefined;
+		delete state.deferredByDecision[decisionId];
+		const action = state.deferredFleet[deferredActionId];
+		delete state.deferredFleet[deferredActionId];
+		this.persist(channelId);
+		return action;
+	}
+
+	/** @substrate exported for tests — lets a test assert a deferral is durably queued/linked
+	 *  without executing it. Production reads go through `takeDeferredForDecision`. */
+	deferredFleetActions(channelId: string): Record<string, DeferredFleetAction> {
+		return { ...this.stateFor(channelId).deferredFleet };
+	}
+
+	/** End-of-call cleanup: a dead call's queued actions can never be approved into execution —
+	 *  the decisions that would approve them are being expired by the same caller (`endBinding`). */
+	dropDeferredFleetActions(channelId: string): void {
+		const state = this.stateFor(channelId);
+		if (Object.keys(state.deferredFleet).length === 0 && Object.keys(state.deferredByDecision).length === 0) return;
+		state.deferredFleet = {};
+		state.deferredByDecision = {};
+		this.persist(channelId);
 	}
 
 	/** Full transcript for one call, oldest-first, collapsed by `(role, turn)` (latest write per turn
@@ -289,6 +388,21 @@ export class CallProjectionStore {
 		if (envelope.record.type === "idle-warning") {
 			this.persist(channelId);
 			return { status: "applied-idle-warning" };
+		}
+
+		if (envelope.record.type === "fleet-action") {
+			const action = envelope.record.action;
+			// A deferred-decision record is the ONE place the decisionId ↔ deferredActionId link is
+			// learned (the OMP tool mints the decision, so only its journal record carries both) —
+			// recorded before the card, so a crash between the two still leaves the link durable.
+			if (action.phase === "deferred-decision" && action.decisionId && action.deferredActionId && this.stateFor(channelId).deferredFleet[action.deferredActionId]) {
+				this.stateFor(channelId).deferredByDecision[action.decisionId] = action.deferredActionId;
+			}
+			this.persist(channelId);
+			// `requested` is the write-before-act half — durable history, not itself news. Only an
+			// outcome phase mints a card.
+			if (action.phase !== "requested") await this.onFleetActionCard?.({ channelId, callId, action });
+			return { status: "applied-fleet-action", action };
 		}
 
 		// terminal

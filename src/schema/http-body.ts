@@ -531,6 +531,9 @@ export const VoiceCallStartBodySchema = Schema.Struct({
 	sessionRoot: Schema.optional(Schema.Unknown),
 	retention: Schema.optional(Schema.Unknown),
 	resumeSessionId: Schema.optional(Schema.Unknown),
+	// Concern 12: per-agent scoped start — the room unit whose detail/transcript tail seeds the
+	// call's context at fleet attach. Validated downstream (the unit must be in THIS room).
+	agentId: Schema.optional(Schema.Unknown),
 });
 
 /** POST /api/channels/:id/voice-call/decisions/:decisionId/resolve — relays to the OMP arbiter via

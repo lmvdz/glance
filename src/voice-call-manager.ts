@@ -24,9 +24,9 @@
 
 import { existsSync } from "node:fs";
 import * as path from "node:path";
-import { emitVoiceCallCard, emitVoiceDecisionCard } from "./schema/channel-card.ts";
+import { emitVoiceCallCard, emitVoiceDecisionCard, emitVoiceFleetActionCard } from "./schema/channel-card.ts";
 import type { CardPayloadType } from "./schema/channel-card.ts";
-import { TRANSCRIPT_EVENT_VOICE_CALL, TRANSCRIPT_EVENT_VOICE_DECISION } from "./transcript-event-kinds.ts";
+import { TRANSCRIPT_EVENT_VOICE_CALL, TRANSCRIPT_EVENT_VOICE_DECISION, TRANSCRIPT_EVENT_VOICE_FLEET_ACTION } from "./transcript-event-kinds.ts";
 import { errText } from "./err-text.ts";
 import { ArtifactSnapshotStore, resolveWithinSessionRoot, type ArtifactReadResult, type ArtifactSnapshotRecord } from "./voice-call-artifacts.ts";
 import {
@@ -37,9 +37,11 @@ import {
 	type VoiceCallRetention,
 	type VoiceCallTerminalReason,
 } from "./voice-call-binding.ts";
-import { VoiceCallBridgeClient, type BridgeConnectFn, type BridgeControlAck, type BridgeHelloFrame } from "./voice-call-bridge-client.ts";
+import { VoiceCallBridgeClient, type BridgeConnectFn, type BridgeControlAck, type BridgeFleetCall, type BridgeHelloFrame } from "./voice-call-bridge-client.ts";
 import { JournalTailer, type JournalEnvelope } from "./voice-call-journal.ts";
-import { CallProjectionStore, type EmitVoiceDecisionCardInput, type JournalGap, type StoredTranscriptEntry } from "./voice-call-projection.ts";
+import type { JournalFleetAction } from "./voice-call-journal.ts";
+import { CallProjectionStore, type DeferredFleetAction, type EmitVoiceDecisionCardInput, type EmitVoiceFleetActionCardInput, type JournalGap, type StoredTranscriptEntry } from "./voice-call-projection.ts";
+import { fleetActionCardTitle, type VoiceFleetActionCardStatus, type VoiceFleetExecResult, type VoiceFleetWireResult, type VoiceOwnerActor } from "./voice-fleet.ts";
 import { VoiceAttentionSource, voiceChannelLadderPriority } from "./voice-attention.ts";
 import type { JournalDecisionSnapshot } from "./voice-call-journal.ts";
 import type { LadderPriority } from "./attention-ladder.ts";
@@ -152,7 +154,7 @@ export async function resolveEffectiveSessionRoot(clientOverride: string | undef
 
 export interface EmitCardInput {
 	channelId: string;
-	kind: "voice-call" | "voice-decision";
+	kind: "voice-call" | "voice-decision" | "voice-fleet-action";
 	text: string;
 	payload: unknown;
 }
@@ -178,6 +180,20 @@ export interface VoiceCallCoordinatorOptions {
 	 * still readable via `transcript()`/`GET .../voice-call/transcript`, just without the live nudge.
 	 */
 	onTranscriptTurn?: (input: { channelId: string; callId: string; entry: StoredTranscriptEntry }) => void;
+	/**
+	 * Concern 12 (voice-fleet-delegation): execute one fleet tool call relayed from the live
+	 * session, as `ownerActor` (the call owner's snapshotted identity — the caller enforces the
+	 * SAME membership/RBAC gates a UI command from that actor passes; this coordinator has no RBAC
+	 * of its own, per the module doc). `approvedDecisionId` is set only on the deferred-execution
+	 * path — a destructive action whose UI decision just resolved with the approve option — and is
+	 * the executor's signal to skip its own destructive re-classification for this one call.
+	 * Absent entirely ⇒ this daemon has no fleet execution wired; relayed calls fail honestly.
+	 */
+	executeFleetCall?: (input: { channelId: string; ownerActor: VoiceOwnerActor | undefined; tool: string; args: unknown; approvedDecisionId?: string }) => Promise<VoiceFleetExecResult>;
+	/** Concern 12: compose the room-context brief injected at fleet attach (roster, states, open
+	 *  decisions, plan summary — the manager owns all of these; `scopeAgentId` scopes it to one
+	 *  unit's detail for a per-agent start). `undefined` ⇒ attach without context. */
+	buildFleetContext?: (input: { channelId: string; ownerActor: VoiceOwnerActor | undefined; scopeAgentId?: string }) => Promise<string | undefined>;
 }
 
 /** A broker-tracked call process (`BrokerClient#listCalls`) with no corresponding non-ended binding in
@@ -204,6 +220,10 @@ export interface VoiceCallsSurface {
 
 export interface StartCallInput {
 	ownerActorId: string;
+	/** Concern 12 — the owner's full identity snapshot; see `VoiceCallBinding.ownerActor`. */
+	ownerActor?: VoiceOwnerActor;
+	/** Concern 12 — per-agent scoped start; see `VoiceCallBinding.scopeAgentId`. */
+	agentId?: string;
 	sessionRoot?: string;
 	retention?: VoiceCallRetention;
 	resumeSessionId?: string;
@@ -389,6 +409,8 @@ export class VoiceCallCoordinator {
 	private readonly journalPollIntervalMs: number;
 	private readonly livenessProbeIntervalMs: number;
 	private readonly onTranscriptTurnFn: ((input: { channelId: string; callId: string; entry: StoredTranscriptEntry }) => void) | undefined;
+	private readonly executeFleetCall: VoiceCallCoordinatorOptions["executeFleetCall"];
+	private readonly buildFleetContext: VoiceCallCoordinatorOptions["buildFleetContext"];
 
 	readonly bindings: CallBindingStore;
 	readonly projection: CallProjectionStore;
@@ -408,6 +430,8 @@ export class VoiceCallCoordinator {
 		this.journalPollIntervalMs = opts.journalPollIntervalMs ?? DEFAULT_JOURNAL_POLL_MS;
 		this.livenessProbeIntervalMs = opts.livenessProbeIntervalMs ?? DEFAULT_LIVENESS_PROBE_MS;
 		this.onTranscriptTurnFn = opts.onTranscriptTurn;
+		this.executeFleetCall = opts.executeFleetCall;
+		this.buildFleetContext = opts.buildFleetContext;
 
 		this.bindings = new CallBindingStore(this.stateDir, { log: this.log, now: this.now });
 		this.artifacts = new ArtifactSnapshotStore(this.stateDir, { log: this.log, now: this.now });
@@ -416,6 +440,7 @@ export class VoiceCallCoordinator {
 			log: this.log,
 			now: this.now,
 			onDecisionCard: (input) => this.onDecisionCard(input),
+			onFleetActionCard: (input) => this.onFleetActionCard(input),
 		});
 	}
 
@@ -581,6 +606,8 @@ export class VoiceCallCoordinator {
 		try {
 			binding = this.bindings.beginConnecting(channelId, {
 				ownerActorId: input.ownerActorId,
+				ownerActor: input.ownerActor,
+				scopeAgentId: input.agentId,
 				sessionRoot: input.sessionRoot ?? process.cwd(),
 				retention: input.retention ?? "full",
 				resumeSessionId: input.resumeSessionId,
@@ -658,6 +685,9 @@ export class VoiceCallCoordinator {
 			// `noLocalAudio` gate on the OMP side), and an audio-less call with no browser attached YET
 			// just has no `audioSink` to read here, which is a silent no-op, not an error.
 			onAudioFrame: (bytes) => this.runtime(channelId).audioSink?.sendOutputAudio(bytes),
+			// Concern 12: wired unconditionally too — a bridge that never advertised `canFleet` simply
+			// never sends a `fleetCall`, and the handler itself re-checks the live-binding preconditions.
+			onFleetCall: (call) => void this.onFleetCall(channelId, call).catch((err) => this.log(`voice-call ${channelId}: fleet call handling failed: ${errText(err)}`)),
 		});
 		const hello = await client.connect();
 		if (rt.ended) {
@@ -676,6 +706,91 @@ export class VoiceCallCoordinator {
 		rt.ended = false;
 		const checked = this.checkRetentionMismatch(channelId, pinned.binding, hello.recordingMode);
 		await this.announceCallState(checked);
+		// Concern 12: become the call's fleet executor, seeding the session with the room's projection.
+		// AFTER pin+announce — the call is live either way, and a refused/failed attach must degrade to
+		// "no fleet surface" (the tools fail honestly OMP-side), never to a failed connect.
+		if (hello.canFleet === true && this.executeFleetCall) {
+			await this.attachFleetExecutor(channelId, client, pinned.binding);
+		}
+	}
+
+	/** Fleet attach (concern 12): compose the room-context brief (best-effort — a brief that cannot
+	 *  be built must not cost the attach) and register this daemon as the call's executor. Failures
+	 *  log and leave the call fully usable without a fleet surface; the same method serves first
+	 *  connect, liveness-probe reconnects, and user-triggered reattach, so a reconnected call
+	 *  re-seeds a FRESH brief (the roster has usually moved since the socket dropped). */
+	private async attachFleetExecutor(channelId: string, client: VoiceCallBridgeClient, binding: VoiceCallBinding): Promise<void> {
+		let context: string | undefined;
+		try {
+			context = await this.buildFleetContext?.({ channelId, ownerActor: binding.ownerActor, scopeAgentId: binding.scopeAgentId });
+		} catch (err) {
+			this.log(`voice-call ${channelId}: fleet context build failed (attaching without context): ${errText(err)}`);
+		}
+		try {
+			const ack = await client.attachFleet(context);
+			if (!ack.ok) this.log(`voice-call ${channelId}: fleet attach refused: ${ack.reason ?? "unknown"}`);
+		} catch (err) {
+			this.log(`voice-call ${channelId}: fleet attach failed: ${errText(err)}`);
+		}
+	}
+
+	/**
+	 * One relayed fleet tool call (concern 12). Preconditions mirror `steer`/`resolveDecision`'s
+	 * own live-binding gates; execution itself is the injected `executeFleetCall` (the caller owns
+	 * membership/RBAC — module doc). A destructive refusal (`needs-decision`) durably queues the
+	 * action under a coordinator-minted `deferredActionId` BEFORE the refusal rides back, so the
+	 * decision OMP mints can always be linked to a queued action this daemon still knows about.
+	 * Every path answers the call — an unanswered `fleetCall` would hang the delegated agent's
+	 * tool call for the full OMP-side timeout.
+	 */
+	private async onFleetCall(channelId: string, call: BridgeFleetCall): Promise<void> {
+		const rt = this.runtime(channelId);
+		const respond = async (result: VoiceFleetWireResult): Promise<void> => {
+			try {
+				const ack = await rt.bridge?.sendFleetResult(call.fleetCallId, result);
+				if (ack && !ack.ok) this.log(`voice-call ${channelId}: fleet result for ${call.fleetCallId} not accepted: ${ack.reason ?? "unknown"}`);
+			} catch (err) {
+				this.log(`voice-call ${channelId}: could not deliver fleet result for ${call.fleetCallId}: ${errText(err)}`);
+			}
+		};
+		const binding = this.bindings.get(channelId);
+		if (!binding || binding.state !== "live" || !rt.bridge) {
+			await respond({ status: "failed", detail: "this call has no live binding on the daemon" });
+			return;
+		}
+		if (!this.executeFleetCall) {
+			await respond({ status: "failed", detail: "this daemon has no fleet execution wired" });
+			return;
+		}
+		let result: VoiceFleetExecResult;
+		try {
+			result = await this.executeFleetCall({ channelId, ownerActor: binding.ownerActor, tool: call.tool, args: call.args });
+		} catch (err) {
+			await respond({ status: "failed", detail: errText(err) });
+			return;
+		}
+		if (result.status !== "needs-decision") {
+			await respond(result);
+			return;
+		}
+		const deferredActionId = crypto.randomUUID();
+		this.projection.storeDeferredFleetAction(channelId, deferredActionId, {
+			tool: call.tool,
+			args: call.args,
+			approveOptionIndex: result.decision.approveOptionIndex,
+			summary: result.summary,
+			...(result.unitId === undefined ? {} : { unitId: result.unitId }),
+		});
+		await respond({
+			status: "needs-decision",
+			...(result.detail === undefined ? {} : { detail: result.detail }),
+			decision: {
+				prompt: result.decision.prompt,
+				options: result.decision.options,
+				requiresConfirmation: result.decision.requiresConfirmation,
+				deferredActionId,
+			},
+		});
 	}
 
 	/**
@@ -852,6 +967,9 @@ export class VoiceCallCoordinator {
 		this.bindings.updateJournalCursor(channelId, envelope.seq);
 		if (outcome.status === "applied-decision" && outcome.cardKind === "terminal") {
 			this.attention.dismiss(channelId, outcome.decision.id);
+			// Concern 12: a terminal decision may be the UI approval a deferred destructive fleet
+			// action has been waiting on — or its rejection/expiry, which discards the queue entry.
+			await this.settleDeferredFleetAction(channelId, binding, outcome.decision);
 		}
 		if (outcome.status === "applied-decision" && outcome.cardKind === "mint") {
 			const userIds = await this.channelMemberUserIds?.(channelId);
@@ -891,6 +1009,100 @@ export class VoiceCallCoordinator {
 		await this.emitCardFn({ channelId: input.channelId, kind: "voice-decision", text: input.decision.prompt, payload: event.payload });
 	}
 
+	/** Journal-projected fleet-action card (concern 12): one card per OUTCOME record the tailer
+	 *  applied (`CallProjectionStore` never fires this for the `requested` half). */
+	private async onFleetActionCard(input: EmitVoiceFleetActionCardInput): Promise<void> {
+		const action = input.action;
+		const status: VoiceFleetActionCardStatus = action.phase === "relayed" ? "relayed" : action.phase === "deferred-decision" ? "deferred" : "failed";
+		await this.announceFleetAction(input.channelId, input.callId, {
+			tool: action.tool,
+			status,
+			summary: action.summary,
+			detail: action.detail,
+			unitId: action.unitId,
+			decisionId: action.decisionId,
+		});
+	}
+
+	/** The one emit path every `voice-fleet-action` card takes — journal-projected outcomes and the
+	 *  coordinator-authored deferred outcomes (executed/declined) alike. */
+	private async announceFleetAction(
+		channelId: string,
+		callId: string,
+		input: { tool: string; status: VoiceFleetActionCardStatus; summary: string; detail?: string; unitId?: string; decisionId?: string },
+	): Promise<void> {
+		const title = fleetActionCardTitle(input.tool, input.status, input.summary);
+		const payload: CardPayloadType<typeof TRANSCRIPT_EVENT_VOICE_FLEET_ACTION> = {
+			refs: { callId, ...(input.decisionId === undefined ? {} : { decisionId: input.decisionId }), ...(input.unitId === undefined ? {} : { unitId: input.unitId }) },
+			face: {
+				title,
+				status: input.status,
+				tone: input.status === "executed" ? "success" : input.status === "relayed" ? "info" : input.status === "declined" ? "neutral" : "warning",
+				// The summary embeds the voice model's own words (steer text, spawn prompt) — an
+				// agent's account, never a daemon-checked fact (concern 07 register semantics).
+				register: "claim",
+				callId,
+				tool: input.tool,
+				actionStatus: input.status,
+				...(input.detail === undefined ? {} : { detail: input.detail }),
+				...(input.unitId === undefined ? {} : { unitId: input.unitId }),
+				...(input.decisionId === undefined ? {} : { decisionId: input.decisionId }),
+			},
+		};
+		const event = emitVoiceFleetActionCard(payload);
+		await this.emitCardFn({ channelId, kind: "voice-fleet-action", text: title, payload: event.payload });
+	}
+
+	/**
+	 * Concern 12: settle a deferred destructive fleet action once its decision reached a terminal
+	 * state. Approval means EXACTLY: `answered`, by the UI (the arbiter already refuses a voice
+	 * source for a destructive class — re-checked here so this daemon's execution can never be
+	 * looser than the arbiter's own policy, even against a forged journal line), selecting the
+	 * approve option recorded at refusal time. Anything else — the reject option, expiry,
+	 * cancellation, failure — discards the queued action with an honest card. Execution reuses the
+	 * SAME injected executor with `approvedDecisionId` set, so the one approval executes the one
+	 * queued action once (`takeDeferredForDecision` removes it before anything runs).
+	 */
+	private async settleDeferredFleetAction(channelId: string, binding: VoiceCallBinding, decision: JournalDecisionSnapshot): Promise<void> {
+		const stored: DeferredFleetAction | undefined = this.projection.takeDeferredForDecision(channelId, decision.id);
+		if (!stored || !binding.callId) return;
+		const resolution = decision.resolution;
+		const approved = decision.state === "answered" && resolution !== undefined && resolution.optionIndex === stored.approveOptionIndex && resolution.source === "ui";
+		if (!approved) {
+			const detail =
+				decision.state === "answered"
+					? resolution?.source !== "ui"
+						? "refused: the approval did not come from the UI"
+						: "the human chose not to run it"
+					: `the decision ${decision.state} before anyone approved it`;
+			await this.announceFleetAction(channelId, binding.callId, { tool: stored.tool, status: "declined", summary: stored.summary, detail, unitId: stored.unitId, decisionId: decision.id });
+			return;
+		}
+		if (!this.executeFleetCall) {
+			await this.announceFleetAction(channelId, binding.callId, {
+				tool: stored.tool,
+				status: "failed",
+				summary: stored.summary,
+				detail: "approved, but this daemon has no fleet execution wired",
+				unitId: stored.unitId,
+				decisionId: decision.id,
+			});
+			return;
+		}
+		let result: VoiceFleetExecResult;
+		try {
+			result = await this.executeFleetCall({ channelId, ownerActor: binding.ownerActor, tool: stored.tool, args: stored.args, approvedDecisionId: decision.id });
+		} catch (err) {
+			result = { status: "failed", detail: errText(err) };
+		}
+		if (result.status === "ok") {
+			await this.announceFleetAction(channelId, binding.callId, { tool: stored.tool, status: "executed", summary: stored.summary, detail: result.detail, unitId: stored.unitId, decisionId: decision.id });
+		} else {
+			const detail = result.status === "failed" ? result.detail : "the executor re-classified the approved action as destructive — refusing to loop";
+			await this.announceFleetAction(channelId, binding.callId, { tool: stored.tool, status: "failed", summary: stored.summary, detail, unitId: stored.unitId, decisionId: decision.id });
+		}
+	}
+
 	private async announceCallState(binding: VoiceCallBinding): Promise<void> {
 		const payload = voiceCallFacePayload(binding);
 		const event = emitVoiceCallCard(payload);
@@ -922,6 +1134,9 @@ export class VoiceCallCoordinator {
 			const expired = await this.projection.expireActiveDecisions(channelId, ended.callId);
 			for (const decision of expired) this.attention.dismiss(channelId, decision.id);
 		}
+		// Concern 12: a dead call's queued destructive actions can never be approved into execution —
+		// the decisions that would approve them were just expired above.
+		this.projection.dropDeferredFleetActions(channelId);
 		// `ended.terminalReason` (not the `reason` parameter) governs the reap decision: `markEnded` is
 		// idempotent and keeps the FIRST honest reason a binding ended, so a redundant `endBinding` call
 		// with a DIFFERENT reason than the one that actually stuck must still reap (or skip reaping)

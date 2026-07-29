@@ -48,6 +48,7 @@ import {
 	TRANSCRIPT_EVENT_VERIFICATION_RAN,
 	TRANSCRIPT_EVENT_VOICE_CALL,
 	TRANSCRIPT_EVENT_VOICE_DECISION,
+	TRANSCRIPT_EVENT_VOICE_FLEET_ACTION,
 	type TranscriptEventKind,
 	isTranscriptEventKind,
 } from "../transcript-event-kinds.ts";
@@ -215,6 +216,21 @@ const VoiceDecisionFaceSchema = Schema.Struct({
 	decisionClass: Schema.optional(Schema.Literals(["destructive", "routine"])),
 });
 
+/** `VoiceCallCoordinator`'s fleet-action card (concern 12, `src/voice-call-manager.ts`) — a
+ *  bespoke inline emit: one card per journal-witnessed fleet action outcome (relayed / failed /
+ *  deferred), plus the coordinator-authored deferred-outcome cards (executed / declined) once the
+ *  human resolves a destructive approval in the UI. `summary` embeds the voice model's own words
+ *  (the steer text, the spawn prompt) — an agent's account, so every card here sets
+ *  `register: "claim"`, same reasoning as the voice-decision card above. */
+const VoiceFleetActionFaceSchema = Schema.Struct({
+	...BaseFaceFields,
+	callId: Schema.optional(Schema.String),
+	decisionId: Schema.optional(Schema.String),
+	unitId: Schema.optional(Schema.String),
+	tool: Schema.optional(Schema.String),
+	actionStatus: Schema.optional(Schema.Literals(["relayed", "failed", "deferred", "executed", "declined"])),
+});
+
 /** `squad-manager.ts#createWithId`'s goal-overlap disclosure (`goalConflict` check) — a bespoke
  *  inline emit added to main after 06/07's original base; registered here in the same reland that
  *  found it (see EXECUTION-LOG.md / this reland's task brief). Deliberately no `body`/`tone`: the
@@ -273,6 +289,8 @@ export const CARD_PAYLOAD_SCHEMAS = {
 	[TRANSCRIPT_EVENT_VOICE_CALL]: cardPayload(VoiceCallFaceSchema),
 	// Bespoke — `refs: { callId, decisionId }`, no `doorSurface`.
 	[TRANSCRIPT_EVENT_VOICE_DECISION]: cardPayload(VoiceDecisionFaceSchema),
+	// Bespoke — `refs: { callId, decisionId?, unitId? }`, no `doorSurface` (concern 12).
+	[TRANSCRIPT_EVENT_VOICE_FLEET_ACTION]: cardPayload(VoiceFleetActionFaceSchema),
 } satisfies Record<TranscriptEventKind, Schema.Top>;
 
 const DECODERS = Object.fromEntries(
@@ -356,6 +374,7 @@ export const emitTokenBurnSnapshotCard = emitCardConstructor(TRANSCRIPT_EVENT_TO
 export const emitGoalOverlapCard = emitCardConstructor(TRANSCRIPT_EVENT_GOAL_OVERLAP);
 export const emitVoiceCallCard = emitCardConstructor(TRANSCRIPT_EVENT_VOICE_CALL);
 export const emitVoiceDecisionCard = emitCardConstructor(TRANSCRIPT_EVENT_VOICE_DECISION);
+export const emitVoiceFleetActionCard = emitCardConstructor(TRANSCRIPT_EVENT_VOICE_FLEET_ACTION);
 
 /** `emitTokenBurnSnapshotCard`'s payload shape (the fleet-rollup bespoke site only — the unit-path
  *  emit stays in the untyped funnel, see the file header). */

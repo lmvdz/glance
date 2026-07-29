@@ -52,6 +52,9 @@ interface FakeBridgeOptions {
 
 function startFakeBridge(opts: FakeBridgeOptions) {
 	const sockets = new Set<{ send(data: string): void }>();
+	// Concern 12: every authorized control frame this fake saw — lets a test assert the auth
+	// envelope (token/sessionId) an attachFleet/fleetResult actually carried.
+	const receivedFrames: Array<Record<string, unknown>> = [];
 	const server = Bun.serve({
 		port: 0,
 		hostname: "127.0.0.1",
@@ -98,6 +101,11 @@ function startFakeBridge(opts: FakeBridgeOptions) {
 					ws.send(JSON.stringify({ v: 1, sessionId: opts.sessionId, seq: 2, type: "controlAck", requestId, ok: true }));
 					return;
 				}
+				if (frame.action === "attachFleet" || frame.action === "fleetResult") {
+					receivedFrames.push(frame);
+					ws.send(JSON.stringify({ v: 1, sessionId: opts.sessionId, seq: 2, type: "controlAck", requestId, ok: true }));
+					return;
+				}
 			},
 			close(ws) {
 				sockets.delete(ws as unknown as { send(data: string): void });
@@ -107,6 +115,10 @@ function startFakeBridge(opts: FakeBridgeOptions) {
 	return {
 		url: `ws://127.0.0.1:${server.port}`,
 		stop: () => server.stop(true),
+		received: () => [...receivedFrames],
+		broadcast: (frame: Record<string, unknown>) => {
+			for (const ws of sockets) ws.send(JSON.stringify(frame));
+		},
 		sendTerminal: (error: string | null) => {
 			for (const ws of sockets) ws.send(JSON.stringify({ v: 1, sessionId: opts.sessionId, seq: 9, type: "terminal", error }));
 		},
@@ -356,5 +368,46 @@ describe("browser audio transport (concern 09) — binary frames alongside the J
 	test("sendMicAudio throws before connect(), exactly like the JSON controls do", () => {
 		const client = new VoiceCallBridgeClient({ url: "ws://fake" });
 		expect(() => client.sendMicAudio(new Float32Array([0.1]))).toThrow();
+	});
+});
+
+describe("fleet frames (concern 12): onFleetCall narrowing, attachFleet/fleetResult envelopes", () => {
+	test("a directed fleetCall frame reaches onFleetCall narrowed; malformed ones are dropped", async () => {
+		const bridge = startFakeBridge({ sessionId: "live-f" });
+		const calls: Array<{ fleetCallId: string; tool: string; args: unknown }> = [];
+		const client = new VoiceCallBridgeClient({ url: bridge.url, onFleetCall: (call) => calls.push(call) });
+		await client.connect();
+		bridge.broadcast({ v: 1, sessionId: "live-f", seq: 5, type: "fleetCall", fleetCallId: "fc-1", tool: "fleet_roster", args: {} });
+		bridge.broadcast({ v: 1, sessionId: "live-f", seq: 6, type: "fleetCall", tool: "fleet_roster" }); // no fleetCallId — dropped
+		bridge.broadcast({ v: 1, sessionId: "live-f", seq: 7, type: "fleetCall", fleetCallId: "fc-2" }); // no tool — dropped
+		await new Promise((r) => setTimeout(r, 80));
+		expect(calls).toEqual([{ fleetCallId: "fc-1", tool: "fleet_roster", args: {} }]);
+		client.close();
+		bridge.stop();
+	});
+
+	test("attachFleet and sendFleetResult ride the authenticated control envelope (token + sessionId)", async () => {
+		const bridge = startFakeBridge({ sessionId: "live-f", controlToken: "tok-9" });
+		const client = new VoiceCallBridgeClient({ url: bridge.url, controlToken: "tok-9" });
+		await client.connect();
+		// The fake bridge acks any unknown-but-authorized action with ok:false "not-supported"-style
+		// handling — what matters HERE is that the frame carried the auth envelope and an ack path
+		// resolves rather than hanging; the real bridge's semantics are pinned in oh-my-pi's own
+		// coven-bridge.test.ts and in voice-call-manager.test.ts's fleet harness.
+		const attach = await client.attachFleet("[Room context] hello");
+		expect(typeof attach.ok).toBe("boolean");
+		const sent = bridge.received().filter((f) => f.action === "attachFleet");
+		expect(sent).toHaveLength(1);
+		expect(sent[0]!.token).toBe("tok-9");
+		expect(sent[0]!.sessionId).toBe("live-f");
+		expect(sent[0]!.context).toBe("[Room context] hello");
+		const result = await client.sendFleetResult("fc-1", { status: "ok", detail: "done" });
+		expect(typeof result.ok).toBe("boolean");
+		const resultFrames = bridge.received().filter((f) => f.action === "fleetResult");
+		expect(resultFrames).toHaveLength(1);
+		expect(resultFrames[0]!.fleetCallId).toBe("fc-1");
+		expect((resultFrames[0]!.result as { status: string }).status).toBe("ok");
+		client.close();
+		bridge.stop();
 	});
 });

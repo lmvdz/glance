@@ -23,6 +23,7 @@
 
 import { getStorageBackend } from "./dal/storage.ts";
 import { errText } from "./err-text.ts";
+import { narrowOwnerActor, type VoiceOwnerActor } from "./voice-fleet.ts";
 
 export type VoiceCallState = "connecting" | "live" | "degraded" | "ended";
 
@@ -74,6 +75,17 @@ export interface VoiceCallBinding {
 	 *  escape past it (see `voice-call-artifacts.ts`). */
 	sessionRoot: string;
 	ownerActorId: string;
+	/**
+	 * Concern 12 (voice-fleet-delegation): the call owner's full identity snapshot, taken at start
+	 * time — fleet commands relayed from this call execute with exactly this authority, through the
+	 * same membership/RBAC gates a UI command from the same actor would pass. Additive: a binding
+	 * that predates the field (or a corrupt snapshot, dropped by `narrowOwnerActor`) simply has no
+	 * fleet-command authority — the executor refuses honestly rather than fabricating a role.
+	 */
+	ownerActor?: VoiceOwnerActor;
+	/** Concern 12: per-agent scoped start — the unit this call was started about, whose detail and
+	 *  transcript tail seed the session context at fleet attach. Additive and optional. */
+	scopeAgentId?: string;
 	retention: VoiceCallRetention;
 	startedAt: number;
 	updatedAt: number;
@@ -125,6 +137,10 @@ export function redactBinding(binding: VoiceCallBinding): VoiceCallBindingView {
 
 export interface BeginConnectingInput {
 	ownerActorId: string;
+	/** Concern 12 — see `VoiceCallBinding.ownerActor`. */
+	ownerActor?: VoiceOwnerActor;
+	/** Concern 12 — see `VoiceCallBinding.scopeAgentId`. */
+	scopeAgentId?: string;
 	sessionRoot: string;
 	retention: VoiceCallRetention;
 	resumeSessionId?: string;
@@ -174,6 +190,9 @@ function narrowBinding(raw: unknown): VoiceCallBinding | undefined {
 	if (typeof raw.endedAt === "number") out.endedAt = raw.endedAt;
 	if (typeof raw.lastJournalSeq === "number") out.lastJournalSeq = raw.lastJournalSeq;
 	if (typeof raw.resumeSessionId === "string") out.resumeSessionId = raw.resumeSessionId;
+	const ownerActor = narrowOwnerActor(raw.ownerActor);
+	if (ownerActor) out.ownerActor = ownerActor;
+	if (typeof raw.scopeAgentId === "string") out.scopeAgentId = raw.scopeAgentId;
 	if (isPlainRecord(raw.retentionMismatch)) {
 		const { expected, reported } = raw.retentionMismatch;
 		const expectedOk = expected === "full" || expected === "tails" || expected === "off";
@@ -263,6 +282,8 @@ export class CallBindingStore {
 			updatedAt: now,
 			state: "connecting",
 			...(input.resumeSessionId ? { resumeSessionId: input.resumeSessionId } : {}),
+			...(input.ownerActor ? { ownerActor: input.ownerActor } : {}),
+			...(input.scopeAgentId ? { scopeAgentId: input.scopeAgentId } : {}),
 		};
 		this.bindingsMap().set(channelId, binding);
 		this.persist();
