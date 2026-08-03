@@ -87,7 +87,7 @@ import { syncPlanStatuses } from "./plan-sync.ts";
 import { agentsToAdopt, deferredResumable, hardAgentCeiling, newAgentId, planeIssueBranch, selectAdoptable, slugPart } from "./spawn-identity.ts";
 import { EFFECT_POINTER_MARKER, effectSkillPointerLine, gateMembraneTokens, upsertDoNotBlock, loadRepoProfiles, membraneDisciplinePrompt, membraneProfilesEnabled, modelOptionsFromRuntime, profileOptionsFromEnv, toolGrantsPrompt, type RuntimeModelOption } from "./agent-profiles.ts";
 import { escapeHtml, planConcernTicketMatches, renderPlanConcernIssueHtml } from "./concern-tickets.ts";
-import { capabilityWorkflowToDot, loadCommissionWorkflow, resolveWorkflowPath, slugifyForFile } from "./workflow-source.ts";
+import { capabilityWorkflowToDot, loadCommissionWorkflow, resolveWorkflowPath } from "./workflow-source.ts";
 export { capabilityWorkflowToDot, resolveWorkflowPath };
 import { archivePlanDir, buildFeatures, concernDocStatus, concernNumFromFile, deletePlanDir, featureLandStatus, isClosedConcernStatus, listPlanDirs, parsePlanConcerns, parsePlanDependencyGraph, planDocRefs, planeModuleUrlIn, restorePlanDir, updatePlanConcern, type LandMember, landOrder, type PlanConcern } from "./features.ts";
 import { canTransition, dedupeTransitions, deriveStatus, followLineage, type DerivedReason, type TransitionReason } from "./agent-lifecycle.ts";
@@ -285,21 +285,8 @@ import { settleRunningEntries, transcriptSince } from "./transcript-delta.ts";
 import { FeedbackLane } from "./feedback-lane.ts";
 import { type PaymentProvider, paymentProviderFromEnv } from "./payments/index.ts";
 import { type FeedbackSummary, type FeedbackValidationInput } from "./feedback.ts";
-import {
-	capabilityFederationMetadata,
-	capabilityProfiles,
-	capabilityWorkflowDefinitions,
-	diffCapabilityPacks,
-	emptyCapabilitySnapshot,
-	importCapabilitySource,
-	installCapability,
-	normalizeCapabilitySnapshot,
-	updateCapabilityInstall,
-	type CapabilityImportInput,
-	type CapabilityInstallInput,
-	type CapabilityInstallPatch,
-	type CapabilitySnapshot,
-} from "./capabilities/index.ts";
+import { type CapabilityImportInput, type CapabilityInstallInput, type CapabilityInstallPatch, type CapabilitySnapshot } from "./capabilities/index.ts";
+import { CapabilityLane } from "./capability-lane.ts";
 
 const MAX_TRANSCRIPT = 800;
 const POLL_MS = 2500;
@@ -1107,7 +1094,16 @@ export class SquadManager extends EventEmitter {
 		adopt: (id, repo) => this.adoptDerivedFeature(id, repo),
 		changed: () => this.emitFeaturesChanged(),
 	});
-	private capabilityStore: CapabilitySnapshot = emptyCapabilitySnapshot();
+	/** Capability lane implementation + state owner (src/capability-lane.ts, concern 04 island #2).
+	 *  Deps are closures (field-init runs before the constructor wires store/create). */
+	private readonly capabilityLane = new CapabilityLane({
+		stateDir: () => this.stateDir,
+		audit: (entry) => void this.store.appendAudit(entry).catch((err) => this.log("warn", `capability audit write failed: ${err instanceof Error ? err.message : String(err)}`)),
+		recordAudit: (actor, action, target, status, detail) => void this.recordAudit(actor, action, target, status, detail),
+		persist: () => void this.persist(),
+		changed: () => this.emitFeaturesChanged(),
+		create: (opts, actor) => this.create(opts, actor),
+	});
 	private readonly bin?: string;
 	private readonly autoLand: boolean;
 	/** Org-scoped worktree base override (DB mode); undefined ⇒ global worktreeBase(). */
@@ -2139,7 +2135,7 @@ export class SquadManager extends EventEmitter {
 	 *  first closes that race: by the time a workflow parent's `attachExisting` runs, every live branch
 	 *  child it could reconcile against is already in `this.agents`. */
 	private async reconnectLive(snapshot: StateSnapshot): Promise<number> {
-		this.capabilityStore = normalizeCapabilitySnapshot(snapshot.capabilities);
+		this.capabilityLane.hydrate(snapshot.capabilities);
 		for (const f of snapshot.features) this.featureStore.set(f.id, f);
 		let n = 0;
 		const workflows: PersistedAgent[] = [];
@@ -2866,119 +2862,43 @@ export class SquadManager extends EventEmitter {
 		const envIds = new Set(envProfiles.map((p) => p.id));
 		const merged = [...repoProfiles.filter((p) => !envIds.has(p.id)), ...envProfiles];
 		const mergedIds = new Set(merged.map((p) => p.id));
-		const installed = capabilityProfiles(this.capabilityStore).filter((p) => !mergedIds.has(p.id));
+		const installed = this.capabilityLane.profileOptions().filter((p) => !mergedIds.has(p.id));
 		return [...merged, ...installed];
 	}
 
+	// ── capability lane — the implementation and state live in src/capability-lane.ts (concern 04
+	// island #2); these delegations keep the manager's public surface stable for server.ts + tests.
+
 	capabilities(): CapabilitySnapshot {
-		return this.capabilityStore;
+		return this.capabilityLane.snapshot();
 	}
 
 	importCapability(input: CapabilityImportInput, actor: Actor = LOCAL_ACTOR): { source: CapabilitySnapshot["sources"][number]; pack: CapabilitySnapshot["packs"][number]; warnings: string[] } {
-		const out = importCapabilitySource(this.capabilityStore, input, actor.id);
-		void this.store.appendAudit({ actor: actor.id, action: "capability.source.import", target: out.source.id, detail: { packId: out.pack.id, checksum: out.pack.checksum } }).catch((err) => this.log("warn", `capability audit write failed: ${err instanceof Error ? err.message : String(err)}`));
-		void this.persist();
-		this.emitFeaturesChanged();
-		return out;
+		return this.capabilityLane.import(input, actor);
 	}
 
 	installCapability(input: CapabilityInstallInput, actor: Actor = LOCAL_ACTOR): CapabilitySnapshot["installs"][number] {
-		const install = installCapability(this.capabilityStore, { ...input, orgId: input.orgId ?? actor.orgId ?? "file" }, actor.id);
-		void this.store.appendAudit({ actor: actor.id, action: "capability.install", target: install.id, detail: { packId: install.packId, checksum: install.checksum } }).catch((err) => this.log("warn", `capability audit write failed: ${err instanceof Error ? err.message : String(err)}`));
-		void this.persist();
-		this.emitFeaturesChanged();
-		return install;
+		return this.capabilityLane.install(input, actor);
 	}
 
 	updateCapability(id: string, patch: CapabilityInstallPatch, actor: Actor = LOCAL_ACTOR): CapabilitySnapshot["installs"][number] {
-		const install = updateCapabilityInstall(this.capabilityStore, id, patch, actor.id);
-		void this.store.appendAudit({ actor: actor.id, action: `capability.${install.state}`, target: install.id, detail: { packId: install.packId, checksum: install.checksum } }).catch((err) => this.log("warn", `capability audit write failed: ${err instanceof Error ? err.message : String(err)}`));
-		void this.persist();
-		this.emitFeaturesChanged();
-		return install;
+		return this.capabilityLane.update(id, patch, actor);
 	}
 
 	capabilityDiff(beforeId: string, afterId: string) {
-		const before = this.capabilityStore.packs.find((pack) => pack.id === beforeId);
-		const after = this.capabilityStore.packs.find((pack) => pack.id === afterId);
-		if (!before || !after) throw new Error("capability pack not found");
-		return diffCapabilityPacks(before, after);
+		return this.capabilityLane.diff(beforeId, afterId);
 	}
 
 	capabilityFederation() {
-		return capabilityFederationMetadata(this.capabilityStore);
+		return this.capabilityLane.federation();
 	}
 
 	capabilityWorkflowDefinitions() {
-		return capabilityWorkflowDefinitions(this.capabilityStore);
+		return this.capabilityLane.workflowDefinitions();
 	}
 
 	async runCapability(installId: string, bindingKey: string | undefined, opts: { repo?: string; prompt?: string } = {}, actor: Actor = LOCAL_ACTOR): Promise<AgentDTO> {
-		const install = this.capabilityStore.installs.find((item) => item.id === installId);
-		if (!install || install.state !== "enabled") throw new Error("enabled capability install not found");
-		const pack = this.capabilityStore.packs.find((item) => item.id === install.packId);
-		if (!pack) throw new Error("capability pack not found");
-		const binding = bindingKey ? install.bindings.find((item) => item.enabled && item.key === bindingKey) : install.bindings.find((item) => item.enabled && (item.type === "profile" || item.type === "workflow" || item.type === "driver"));
-		if (!binding) throw new Error("capability binding not found");
-		// requiredEnv ENFORCEMENT (#5): packs declare env vars they need, but it was parsed and never checked
-		// — an agent would spawn blind and fail opaquely downstream. Refuse up front with a clear error naming
-		// the missing vars, before any worktree/host is created.
-		const missingEnv = pack.requiredEnv.filter((name) => !(process.env[name] && process.env[name]!.trim()));
-		if (missingEnv.length) {
-			void this.recordAudit(actor, "capability.run.blocked", binding.key, "error", `missing required env: ${missingEnv.join(", ")}`);
-			throw new Error(`capability "${pack.slug}" requires environment variable(s) not set: ${missingEnv.join(", ")}`);
-		}
-		const repo = opts.repo ?? process.cwd();
-		const prompt = opts.prompt ?? `Run capability ${binding.key}`;
-		const name = binding.key.replace(/^cap:/, "").replace(/[^a-z0-9-]+/gi, "-").slice(0, 24) || "capability";
-		if (binding.type === "driver" && binding.config.runtime === "flue-service") {
-			const dir = path.join(this.stateDir, "capabilities", install.id);
-			await fs.mkdir(dir, { recursive: true });
-			await Promise.all(pack.files.map(async (file) => {
-				if (file.content === undefined) return;
-				const target = path.join(dir, file.path);
-				if (!target.startsWith(dir + path.sep)) throw new Error("capability file path escapes install dir");
-				await fs.mkdir(path.dirname(target), { recursive: true });
-				await fs.writeFile(target, file.content);
-			}));
-			const workflow = typeof binding.config.workflow === "string" ? binding.config.workflow : pack.workflows[0]?.path ?? pack.workflows[0]?.id ?? pack.slug;
-			const target = binding.config.target === "cloudflare" ? "cloudflare" : "node";
-			return this.create({ repo, name, task: prompt, autoRoute: false, flue: { dir, workflow, target } }, actor);
-		}
-		if (binding.type === "workflow") {
-			// WORKFLOW binding execution (#2): previously this passed `workflow: binding.sourcePath`, which is
-			// undefined for inline step-graph bindings → `create` classified the agent as a plain omp-operator
-			// and the step graph never ran. Resolve the workflow path to actually drive a WorkflowDriver:
-			//  - an authored file (binding.sourcePath) is used directly;
-			//  - an inline step-graph binding is materialized to a DOT graph file in the install dir, so the
-			//    same engine that runs authored workflows executes the capability's declared steps.
-			const workflowPath = await this.resolveCapabilityWorkflowPath(install, binding);
-			return this.create({ repo, name, workflow: workflowPath, task: prompt, autoRoute: false }, actor);
-		}
-		return this.create({ repo, name, profileId: binding.key, task: prompt, autoRoute: false }, actor);
-	}
-
-	/**
-	 * Resolve a workflow binding to a graph file path the WorkflowDriver can run. An authored `sourcePath`
-	 * is returned as-is. Otherwise the binding's WorkflowDefinition (resolved by binding key via
-	 * capabilityWorkflowDefinitions) is rendered to a DOT graph and written into the per-install dir, and
-	 * that path is returned — so an inline capability step graph actually executes instead of being dropped.
-	 */
-	private async resolveCapabilityWorkflowPath(install: CapabilitySnapshot["installs"][number], binding: CapabilitySnapshot["installs"][number]["bindings"][number]): Promise<string> {
-		if (binding.sourcePath) return binding.sourcePath;
-		const definition = capabilityWorkflowDefinitions(this.capabilityStore).find((def) => def.id === binding.key);
-		if (!definition || definition.steps.length === 0) {
-			throw new Error(`capability workflow "${binding.key}" has no resolvable steps to run`);
-		}
-		const dir = path.join(this.stateDir, "capabilities", install.id, "workflows");
-		await fs.mkdir(dir, { recursive: true });
-		const dot = capabilityWorkflowToDot(definition);
-		// Validate the synthesized graph round-trips through the same parser the driver uses (exactly one
-		// start/exit, well-formed edges) before persisting it — fail loudly here, not at spawn time.
-		parseWorkflow(dot);
-		const file = path.join(dir, `${slugifyForFile(binding.key)}.fabro`);
-		await fs.writeFile(file, dot);
-		return file;
+		return this.capabilityLane.run(installId, bindingKey, opts, actor);
 	}
 
 	private profileFor(id: string | undefined, repo?: string): AgentProfile | undefined {
@@ -13329,14 +13249,14 @@ export class SquadManager extends EventEmitter {
 		const transcripts: Record<string, TranscriptEntry[]> = {};
 		for (const r of this.agents.values()) if (r.transcript.length) transcripts[r.dto.id] = r.transcript;
 		const features = [...this.featureStore.values()];
-		await this.store.save({ agents, transcripts, features, capabilities: this.capabilityStore });
+		await this.store.save({ agents, transcripts, features, capabilities: this.capabilityLane.snapshot() });
 	}
 
 	/** Re-spawn agents persisted from a previous run. Returns how many were restored. */
 	async loadPersisted(): Promise<number> {
 		const snapshot = await this.store.load();
 		this.reseedTranscriptSeq(snapshot);
-		this.capabilityStore = normalizeCapabilitySnapshot(snapshot.capabilities);
+		this.capabilityLane.hydrate(snapshot.capabilities);
 		for (const f of snapshot.features) this.featureStore.set(f.id, f);
 		const list = snapshot.agents;
 		// Review finding 4: a branch child still in-flight for its workflow parent's current parallel node

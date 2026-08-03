@@ -33,5 +33,11 @@ channels/attention delegations — verify what each shell actually adds before c
   (~230 lines incl. the payout state machine) behind FeedbackLaneDeps (loadFeedback/saveFeedback/
   stateDir/paymentProvider/audit, all closures — field-init runs before ctor assignments);
   manager keeps thin delegations, so feedback-routes.ts and all 6 test files are untouched.
-- Next: capabilities island (needs a `create` port — runCapability spawns units); then projects,
-  observability reads.
+- Island #2 capabilities lane → src/capability-lane.ts (2026-08-03): unlike feedback, this lane
+  OWNS its state — `capabilityStore` moved in; the manager touches it only at the persistence
+  seam (hydrate on load ×2 call sites, snapshot() inside persist) plus a profileOptions() read
+  for the profiles() merge. The single fleet coupling is explicit: a `create` thunk in the deps
+  port (runCapability spawns units). 8 delegations keep the surface; 6 capability test files
+  untouched.
+- Next: projects island, observability reads; then the shells audit (channels/attention — verify
+  what each adds first; see the voice refutation above).
