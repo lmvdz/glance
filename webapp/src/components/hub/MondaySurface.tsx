@@ -3,6 +3,7 @@ import { apiJson, fetchEpisodes, type EpisodeMetaDTO } from '../../lib/api';
 import { useTaskContext } from '../../context/TaskContext';
 import { buildAdoptionView, coerceAdoptionCounters, coerceFrictionEntries, type AdoptionView, type FrictionEntryWire } from '../../lib/adoption-view';
 import { NOTHING_RECORDED_LINE, direction, frictionGroups, frictionHeadline, frictionWeight, nothingRecorded } from '../../lib/mondaySurface';
+import { coerceHorizonCurve, coverageSentence, horizonBandRows, horizonSentence, type HorizonCurveWire } from '../../lib/horizonView';
 
 /**
  * MondaySurface — what changed in how this gets used, and what is still rubbing.
@@ -30,19 +31,22 @@ export function MondaySurface() {
   const { currentProject } = useTaskContext();
   const [view, setView] = React.useState<AdoptionView | undefined>();
   const [friction, setFriction] = React.useState<FrictionEntryWire[] | undefined>();
+  const [horizon, setHorizon] = React.useState<HorizonCurveWire | undefined>();
   const [episodes, setEpisodes] = React.useState<EpisodeMetaDTO[]>([]);
   const [error, setError] = React.useState('');
 
   React.useEffect(() => {
     let alive = true;
-    // Both read together and one failing never blanks the other — but a failure is reported as a
-    // failure rather than as an empty week.
-    Promise.allSettled([apiJson<unknown>('/api/adoption'), apiJson<unknown>('/api/friction?limit=50')]).then(([counters, gripes]) => {
+    // Read together and one failing never blanks the others — but a failure is reported as a
+    // failure rather than as an empty week. The horizon read failing simply omits its section
+    // (it is a capability statement, not a weekly signal — absence is not misreadable here).
+    Promise.allSettled([apiJson<unknown>('/api/adoption'), apiJson<unknown>('/api/friction?limit=50'), apiJson<unknown>('/api/horizon')]).then(([counters, gripes, curve]) => {
       if (!alive) return;
       if (counters.status === 'fulfilled') setView(buildAdoptionView(coerceAdoptionCounters(counters.value)));
       else setError('the adoption counters could not be read');
       if (gripes.status === 'fulfilled') setFriction(coerceFrictionEntries(gripes.value));
       else setFriction([]);
+      if (curve.status === 'fulfilled') setHorizon(coerceHorizonCurve(curve.value));
     });
     return () => { alive = false; };
   }, []);
@@ -91,6 +95,28 @@ export function MondaySurface() {
             ))}
           </div>
         )}
+
+        {horizon ? (
+          <div className="mt-8" style={{ borderTop: '1px solid #1F1F22', paddingTop: 22 }}>
+            <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.14em', color: '#5A5A61' }}>HOW BIG A TASK IT CAN BE TRUSTED WITH</div>
+            {/* The sentence IS the reading (METR's lesson restated for an operator: one rate hides
+                the reliability axis you actually plan around). Bands are the evidence behind it. */}
+            <div className="mt-2.5 text-[13px] leading-[1.55]" style={{ color: '#DEDEE2', textWrap: 'pretty', maxWidth: 720 }}>
+              {horizonSentence(horizon)}
+            </div>
+            {horizonBandRows(horizon).length > 0 ? (
+              <div className="mt-3.5 flex flex-col">
+                {horizonBandRows(horizon).map((row) => (
+                  <div key={row.label} className="flex items-baseline gap-3 py-2" style={{ borderTop: '1px solid #17171A' }}>
+                    <div className="w-[110px] flex-none" style={{ fontFamily: MONO, fontSize: 10.5, color: '#5A5A61' }}>{row.label}</div>
+                    <div className="text-[12.5px] leading-[1.5]" style={{ color: '#DEDEE2' }}>{row.rateLabel} landed validated</div>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            <div className="mt-3" style={{ fontFamily: MONO, fontSize: 10, color: '#4A4A52' }}>{coverageSentence(horizon)}</div>
+          </div>
+        ) : null}
 
         <div className="mt-8" style={{ borderTop: '1px solid #1F1F22', paddingTop: 22 }}>
           <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.14em', color: '#5A5A61' }}>WHAT IS STILL RUBBING</div>

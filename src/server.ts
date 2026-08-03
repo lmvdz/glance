@@ -104,6 +104,7 @@ import { assemblePlanBrief } from "./plan-brief.ts";
 import { planVoteGateOpen, tallyPlanVoteRound } from "./plan-votes.ts";
 import { hardenedGit } from "./git-harden.ts";
 import { rankKbDocs, searchFabric, type KbDoc, type KbDocType } from "./memory/fabric-search.ts";
+import { computeHorizonCurve, samplesFromReceipts } from "./horizon-curve.ts";
 import type { FabricSnapshot } from "./memory/fabric.ts";
 import { sanitizePatchDecisions } from "./memory/index.ts";
 import { redactAttentionForActor, redactSeenMapForActor } from "./attention.ts";
@@ -2455,6 +2456,14 @@ export class SquadServer {
 		// itself re-filters both inputs through this same repo list before joining (DESIGN.md's tenant-
 		// scoping row: a tested deliverable, not a single call site's discipline), so this route's own
 		// pre-filtering is belt-and-suspenders, not the only guard.
+		// Horizon × reliability curve (CS329A borrow #2, plans/deepen-modules/15): the largest task
+		// size the fleet completes at 50%/80% reliability, computed from validated-land receipts
+		// only — the module documents the honest-coverage contract (abstains and verdict-less runs
+		// are disclosed, never guessed). Viewer-readable like the other observability reads.
+		if (url.pathname === "/api/horizon" && req.method === "GET") {
+			const { samples, coverage } = samplesFromReceipts(await manager.allReceipts());
+			return Response.json(computeHorizonCurve(samples, coverage));
+		}
 		if (url.pathname === "/api/fog" && req.method === "GET") {
 			if (manager.attentionDisabled()) return Response.json({ entries: [], repoHasHistory: {}, disabled: true });
 			const visible = manager.attentionVisibleRepos(actor);
