@@ -23,9 +23,9 @@
 
 import * as path from "node:path";
 import { Schema } from "effect";
-import { getStorageBackend } from "./dal/storage.ts";
-import { redact } from "./redact.ts";
-import { decodeJsonWith } from "./schema/external-json.ts";
+import { getStorageBackend } from "../dal/storage.ts";
+import { redact } from "../redact.ts";
+import { decodeJsonWith } from "../schema/external-json.ts";
 
 /** Whose fault the terminal failure was, as far as the evidence can say. */
 type AfterActionClassification = "environment" | "implementation" | "unknown";

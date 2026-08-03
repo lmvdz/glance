@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { agentRecordView } from "../src/agent-records.ts";
-import type { NodeRecord } from "../src/node-records.ts";
+import type { NodeRecord } from "../src/memory/node-records.ts";
 
 const profile: NodeRecord = {
 	kind: "agent-profile", id: "profile:wren", nodeId: "wren", agentId: "wren", createdAt: 10,

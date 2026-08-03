@@ -2,7 +2,7 @@ import { envBool, envInt } from "./config.ts";
 import * as path from "node:path";
 import { getStorageBackend } from "./dal/storage.ts";
 import type { AutomationRecorder } from "./automation-log.ts";
-import type { FabricHotAreaFact, FabricScoutFact } from "./fabric.ts";
+import type { FabricHotAreaFact, FabricScoutFact } from "./memory/fabric.ts";
 import { jaccard, titleTokens } from "./scout.ts";
 import type { AutomationSkipReason, IssueRef } from "./types.ts";
 

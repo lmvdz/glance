@@ -24,7 +24,7 @@ import {
 	validateWhereToLookCount,
 	type SymptomEntry,
 	type SymptomSearchHit,
-} from "../src/symptoms.ts";
+} from "../src/memory/symptoms.ts";
 
 const dirs: string[] = [];
 afterEach(async () => {

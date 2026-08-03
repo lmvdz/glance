@@ -26,8 +26,8 @@ import { type DbHandle, openDatabase, openDb } from "../src/db/index.ts";
 import { appMigrations } from "../src/db/migrations.ts";
 import type { PersistedAgent, PersistedFeature, RunReceipt } from "../src/types.ts";
 import { ChannelStore } from "../src/channels.ts";
-import { NodeStore } from "../src/nodes.ts";
-import { NodeRecordStore, type NodeRecord } from "../src/node-records.ts";
+import { NodeStore } from "../src/memory/nodes.ts";
+import { NodeRecordStore, type NodeRecord } from "../src/memory/node-records.ts";
 
 let dir: string;
 let handle: DbHandle;

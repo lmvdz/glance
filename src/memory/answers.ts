@@ -36,11 +36,11 @@
 
 import * as path from "node:path";
 import { Schema } from "effect";
-import { getStorageBackend } from "./dal/storage.ts";
+import { getStorageBackend } from "../dal/storage.ts";
 import { evidenceFilePath } from "./decision-evidence.ts";
-import { normalizeRepoPath } from "./project-registry.ts";
-import { decodeJsonWith } from "./schema/external-json.ts";
-import type { RunReceipt } from "./types.ts";
+import { normalizeRepoPath } from "../project-registry.ts";
+import { decodeJsonWith } from "../schema/external-json.ts";
+import type { RunReceipt } from "../types.ts";
 
 export interface Answer {
 	/** Stable id — also the filename. Same value as the answering agent's id, so a transcript can always

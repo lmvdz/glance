@@ -1,14 +1,14 @@
 import * as path from "node:path";
-import { scopeFor } from "./agent-scope.ts";
+import { scopeFor } from "../agent-scope.ts";
 import { type Answer, possiblyStale } from "./answers.ts";
-import { getStorageBackend } from "./dal/storage.ts";
+import { getStorageBackend } from "../dal/storage.ts";
 import { readDigest } from "./digest.ts";
 import { readFailureAnnotations } from "./failure-memory.ts";
-import { leasesFor, type LeaseEntry } from "./leases.ts";
-import { normalizeRepoPath } from "./project-registry.ts";
-import { readReceipts } from "./receipts.ts";
+import { leasesFor, type LeaseEntry } from "../leases.ts";
+import { normalizeRepoPath } from "../project-registry.ts";
+import { readReceipts } from "../receipts.ts";
 import { listSymptoms, type SymptomEntry } from "./symptoms.ts";
-import type { Actor, AgentDTO, IssueRef, PersistedFeature, RunReceipt } from "./types.ts";
+import type { Actor, AgentDTO, IssueRef, PersistedFeature, RunReceipt } from "../types.ts";
 import { listEpisodes } from "./weekly-episode.ts";
 
 export interface FactSource {

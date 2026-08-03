@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { compactableKinds, compactionNotice, evidenceAge, liveKinds, planCompaction, planHandover, preservedKinds } from "../src/archive.ts";
-import { NodeRecordStore, nodeRecordKinds, type NodeRecord } from "../src/node-records.ts";
+import { NodeRecordStore, nodeRecordKinds, type NodeRecord } from "../src/memory/node-records.ts";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";

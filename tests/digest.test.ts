@@ -9,7 +9,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { RunReceipt, TranscriptEntry } from "../src/types.ts";
-import { authoredSpecBlock, buildDigest, type DigestReward, digestSummaryExcerpt, fenceUntrusted, formatRewardTag, parseDigestReward, readDigest, rewardWeight, writeDigest } from "../src/digest.ts";
+import { authoredSpecBlock, buildDigest, type DigestReward, digestSummaryExcerpt, fenceUntrusted, formatRewardTag, parseDigestReward, readDigest, rewardWeight, writeDigest } from "../src/memory/digest.ts";
 
 const tmps: string[] = [];
 afterAll(async () => {

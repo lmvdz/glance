@@ -2,7 +2,7 @@ import {
 	type InstructionReadbackRecord,
 	NodeRecordStore,
 	type ObjectionRecord,
-} from "./node-records.ts";
+} from "./memory/node-records.ts";
 
 export type InstructionExecution = {
 	readonly readback: InstructionReadbackRecord;

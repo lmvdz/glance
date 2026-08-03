@@ -14,7 +14,7 @@
  */
 
 import * as path from "node:path";
-import { getStorageBackend } from "./dal/storage.ts";
+import { getStorageBackend } from "../dal/storage.ts";
 
 export interface FailureAnnotation {
 	/** The observer's stable dedup key, e.g. `land-failing:squad/abc123`. */

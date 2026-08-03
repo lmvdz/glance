@@ -1,6 +1,6 @@
 import { Result, Schema } from "effect";
-import type { Store } from "./dal/store.ts";
-import { nonDelegatableClassOf, nonDelegatableClasses, type NonDelegatableClass } from "./delegation-boundary.ts";
+import type { Store } from "../dal/store.ts";
+import { nonDelegatableClassOf, nonDelegatableClasses, type NonDelegatableClass } from "../delegation-boundary.ts";
 
 /**
  * Durable evidence attached to a node, as ASSOCIATED RECORDS — never as optional fields overloaded

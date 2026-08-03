@@ -14,7 +14,7 @@
  */
 
 import { expect, test } from "bun:test";
-import { authoredSpecBlock, fenceUntrusted } from "../src/digest.ts";
+import { authoredSpecBlock, fenceUntrusted } from "../src/memory/digest.ts";
 
 const BEGIN = "===== BEGIN";
 const END = "===== END";

@@ -1,5 +1,5 @@
-import type { Store } from "./dal/store.ts";
-import type { PersistedAgent } from "./types.ts";
+import type { Store } from "../dal/store.ts";
+import type { PersistedAgent } from "../types.ts";
 
 export type NodeKind = "plan" | "unit" | "subagent" | "landing";
 

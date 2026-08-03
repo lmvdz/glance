@@ -59,13 +59,13 @@ import { RuntimeSettingsStore } from "./runtime-settings.ts";
 import { PolicyStore } from "./policy.ts";
 import { backendFromEnv, setStorageBackend } from "./dal/storage.ts";
 import { normalizeRepoPath } from "./project-registry.ts";
-import { formatWhereToLookEntry, groupSymptomHits, statWhereToLookEntry, type SymptomSearchHit } from "./symptoms.ts";
+import { formatWhereToLookEntry, groupSymptomHits, statWhereToLookEntry, type SymptomSearchHit } from "./memory/symptoms.ts";
 import type { AutomationRollupRow } from "./automation-log.ts";
 import type { Actor, AgentDTO, ApprovalMode, AutomationEvent, ClientCommand, CommissionResult, CommissionSpec, CreateAgentOptions, FrictionEntry, ThinkingLevel, TranscriptEntry } from "./types.ts";
 import { base, DEFAULT_PORT, parseArgs, stateDirPath, tokenHeader } from "./cli-args.ts";
 import { cmdHere } from "./here.ts";
 import type { FileDiff } from "./explore.ts";
-import type { FabricSearchResult, KbDocType } from "./fabric-search.ts";
+import type { FabricSearchResult, KbDocType } from "./memory/fabric-search.ts";
 import { runLandAssessmentCli } from "./land-assessment/cli.ts";
 
 /** Global default binary override for the default harness (a custom omp/pi fork at a nonstandard path).

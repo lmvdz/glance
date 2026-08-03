@@ -14,7 +14,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { DO_NOT_BLOCK, DO_NOT_HEADER } from "../src/agent-profiles.ts";
 import { FileStore } from "../src/dal/store.ts";
-import { writeDigest } from "../src/digest.ts";
+import { writeDigest } from "../src/memory/digest.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import type { AgentDriver } from "../src/agent-driver.ts";
 import type { PersistedAgent, RpcSessionState } from "../src/types.ts";

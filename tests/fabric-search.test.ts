@@ -4,9 +4,9 @@
  */
 
 import { afterEach, expect, test, describe } from "bun:test";
-import { tokenize, fabricDocuments, rankKbDocs, searchFabric, buildContextPrimer, type KbDoc } from "../src/fabric-search.ts";
-import { formatRewardTag } from "../src/digest.ts";
-import type { FabricSnapshot } from "../src/fabric.ts";
+import { tokenize, fabricDocuments, rankKbDocs, searchFabric, buildContextPrimer, type KbDoc } from "../src/memory/fabric-search.ts";
+import { formatRewardTag } from "../src/memory/digest.ts";
+import type { FabricSnapshot } from "../src/memory/fabric.ts";
 
 function snapshot(over: Partial<FabricSnapshot> = {}): FabricSnapshot {
 	return {

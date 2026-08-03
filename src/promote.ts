@@ -32,7 +32,7 @@ import { LOCAL_ACTOR } from "./federation.ts";
 import { fetchIssueBodyHtml, fetchIssueDetail, hashPlaneBody, listPlaneIssues, noAutoDispatchName, updatePlaneIssueBody } from "./plane.ts";
 import { parseTier2 } from "./tier2.ts";
 import type { Actor, AgentDTO, IssueRef, TaskDetail } from "./types.ts";
-import type { Answer } from "./answers.ts";
+import type { Answer } from "./memory/answers.ts";
 
 export type PromoteError =
 	| "not-configured" // Plane isn't configured for this repo

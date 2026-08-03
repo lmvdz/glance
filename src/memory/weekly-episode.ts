@@ -24,18 +24,18 @@
 import { createHash } from "node:crypto";
 import * as path from "node:path";
 import { Schema } from "effect";
-import type { AutomationRecorder, AutomationReport } from "./automation-log.ts";
-import type { FileFogEntry } from "./comprehension-fog.ts";
-import { getStorageBackend } from "./dal/storage.ts";
+import type { AutomationRecorder, AutomationReport } from "../automation-log.ts";
+import type { FileFogEntry } from "../comprehension-fog.ts";
+import { getStorageBackend } from "../dal/storage.ts";
 import { evidenceFilePath } from "./decision-evidence.ts";
-import { errText } from "./err-text.ts";
-import { sanitizeAgentProse } from "./pr-body.ts";
-import { normalizeRepoPath } from "./project-registry.ts";
-import type { PushPayload } from "./push.ts";
-import type { TestExecutionEntry } from "./pr-body.ts";
-import { decodeJsonWith } from "./schema/external-json.ts";
+import { errText } from "../err-text.ts";
+import { sanitizeAgentProse } from "../pr-body.ts";
+import { normalizeRepoPath } from "../project-registry.ts";
+import type { PushPayload } from "../push.ts";
+import type { TestExecutionEntry } from "../pr-body.ts";
+import { decodeJsonWith } from "../schema/external-json.ts";
 import { isoWeekKey, type SymptomEntry } from "./symptoms.ts";
-import type { FeatureDecision } from "./types.ts";
+import type { FeatureDecision } from "../types.ts";
 
 export const EPISODE_SCHEMA_VERSION = 1;
 

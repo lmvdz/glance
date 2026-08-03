@@ -103,13 +103,13 @@ import { isPlanDocPath, planDocDiffSince, planDocHeadRevision, readPlanDoc, read
 import { assemblePlanBrief } from "./plan-brief.ts";
 import { planVoteGateOpen, tallyPlanVoteRound } from "./plan-votes.ts";
 import { hardenedGit } from "./git-harden.ts";
-import { rankKbDocs, searchFabric, type KbDoc, type KbDocType } from "./fabric-search.ts";
-import type { FabricSnapshot } from "./fabric.ts";
+import { rankKbDocs, searchFabric, type KbDoc, type KbDocType } from "./memory/fabric-search.ts";
+import type { FabricSnapshot } from "./memory/fabric.ts";
 import { redactAttentionForActor, redactSeenMapForActor } from "./attention.ts";
 import { maxLadderPriority, type LadderPriority } from "./attention-ladder.ts";
 import { computeFog, repoHasHistory } from "./comprehension-fog.ts";
-import type { SymptomEntry, SymptomSearchHit } from "./symptoms.ts";
-import type { EpisodeMeta } from "./weekly-episode.ts";
+import type { SymptomEntry, SymptomSearchHit } from "./memory/symptoms.ts";
+import type { EpisodeMeta } from "./memory/weekly-episode.ts";
 import { normalizeRepoPath } from "./project-registry.ts";
 import { readAudit, type AuditQuery } from "./audit.ts";
 import type { AutomationEvent, AutomationLoop, AutomationQuery, AutomationRollupRow } from "./automation-log.ts";

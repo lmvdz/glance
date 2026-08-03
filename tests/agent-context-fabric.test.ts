@@ -5,13 +5,13 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { Answer } from "../src/answers.ts";
+import type { Answer } from "../src/memory/answers.ts";
 import { RbacDenied } from "../src/auth.ts";
 import { agentActor, scopeFor } from "../src/agent-scope.ts";
-import { buildFabricSnapshot, type FabricScoutFact } from "../src/fabric.ts";
+import { buildFabricSnapshot, type FabricScoutFact } from "../src/memory/fabric.ts";
 import { Opportunity, opportunityClusters } from "../src/opportunity.ts";
 import { appendReceipt } from "../src/receipts.ts";
-import { writeDigest } from "../src/digest.ts";
+import { writeDigest } from "../src/memory/digest.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import { SubagentTracker } from "../src/subagents.ts";
 import type { AgentDTO, IssueRef, PersistedAgent, PersistedFeature, TranscriptEntry } from "../src/types.ts";
@@ -358,7 +358,7 @@ test("a fabric answer fact's possiblyStale flag reflects a receipt that touched 
 
 test("(concern 05) fabric snapshot surfaces a recurring-failure annotation, repo-scoped", async () => {
 	const dir = await tmpDir("acf-failure-");
-	const { recordFailureAnnotation } = await import("../src/failure-memory.ts");
+	const { recordFailureAnnotation } = await import("../src/memory/failure-memory.ts");
 	recordFailureAnnotation(dir, { fingerprint: "land-failing:squad/a1", repo: "/repo", branch: "squad/a1", rootCause: "flaky retry backoff", at: 500 });
 	recordFailureAnnotation(dir, { fingerprint: "land-failing:squad/other-repo", repo: "/other-repo", branch: "squad/other-repo", rootCause: "unrelated", at: 500 });
 

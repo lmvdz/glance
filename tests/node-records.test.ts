@@ -3,8 +3,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { FileStore } from "../src/dal/store.ts";
-import { NodeRecordStore, nodeRecordKinds, quoteRule, readNodeRecord, type NodeRecord } from "../src/node-records.ts";
-import type { Node } from "../src/nodes.ts";
+import { NodeRecordStore, nodeRecordKinds, quoteRule, readNodeRecord, type NodeRecord } from "../src/memory/node-records.ts";
+import type { Node } from "../src/memory/nodes.ts";
 
 async function store(opts: { seedEvidence?: boolean } = {}): Promise<{ store: FileStore; records: NodeRecordStore; dir: string }> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "node-records-"));

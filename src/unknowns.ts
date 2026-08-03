@@ -1,4 +1,4 @@
-import type { LearningStateRecord, NodeRecord } from "./node-records.ts";
+import type { LearningStateRecord, NodeRecord } from "./memory/node-records.ts";
 
 /** The day-one defaults are explicit policies, never silent fallbacks. */
 export const borrowedDefaults = [

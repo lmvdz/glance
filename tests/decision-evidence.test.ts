@@ -5,7 +5,7 @@
  * `onHostTool` path end-to-end.
  */
 import { expect, test } from "bun:test";
-import { evidenceFilePath, validateModelDelta } from "../src/decision-evidence.ts";
+import { evidenceFilePath, validateModelDelta } from "../src/memory/decision-evidence.ts";
 
 test("anchorless delta is rejected", () => {
 	const result = validateModelDelta("Dispatch used to serialize spawns; it now fans out concurrently.", undefined, ["src/dispatch.ts"]);

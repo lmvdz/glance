@@ -1,4 +1,4 @@
-import { fenceUntrusted } from "./digest.ts";
+import { fenceUntrusted } from "./memory/digest.ts";
 import { ownershipOverlap } from "./ownership.ts";
 import { redact } from "./redact.ts";
 

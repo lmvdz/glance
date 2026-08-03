@@ -2,11 +2,11 @@ import { afterAll, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { composeAfterAction } from "../src/after-action.ts";
+import { composeAfterAction } from "../src/memory/after-action.ts";
 import { FileStore } from "../src/dal/store.ts";
-import { NodeRecordStore, type NodeRecord } from "../src/node-records.ts";
-import { regenerateNodeSummaries } from "../src/node-summaries.ts";
-import type { Node } from "../src/nodes.ts";
+import { NodeRecordStore, type NodeRecord } from "../src/memory/node-records.ts";
+import { regenerateNodeSummaries } from "../src/memory/node-summaries.ts";
+import type { Node } from "../src/memory/nodes.ts";
 
 const node: Node = { id: "unit-1", kind: "unit", title: "Ship summaries", state: "input", goal: "Connect plan records without leaking raw chat", createdAt: 1 };
 const records: NodeRecord[] = [

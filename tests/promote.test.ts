@@ -9,7 +9,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { promoteIssue, type PromoteManager } from "../src/promote.ts";
 import type { Actor, AgentDTO, AgentStatus } from "../src/types.ts";
-import type { Answer } from "../src/answers.ts";
+import type { Answer } from "../src/memory/answers.ts";
 
 const PLANE_ENV = ["PLANE_API_KEY", "PLANE_API_TOKEN", "PLANE_WORKSPACE", "PLANE_WORKSPACE_SLUG", "PLANE_PROJECT_MAP", "PLANE_BASE_URL", "PLANE_PROJECT_ID", "DATABASE_URL", "OMP_SQUAD_SPEC_MAX_CHARS", "OMP_SQUAD_PLANE_CACHE_MS", "OMP_SQUAD_PLANE_MIN_INTERVAL_MS"] as const;
 const saved: Record<string, string | undefined> = {};

@@ -10,7 +10,7 @@ import {
 	raiseObjection,
 	recordObjectionOutcome,
 } from "../src/instructions.ts";
-import { NodeRecordStore, type InstructionReadbackRecord, type ObjectionRecord } from "../src/node-records.ts";
+import { NodeRecordStore, type InstructionReadbackRecord, type ObjectionRecord } from "../src/memory/node-records.ts";
 
 async function fixture(): Promise<{ dir: string; records: NodeRecordStore }> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "instructions-"));

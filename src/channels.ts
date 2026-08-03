@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Store } from "./dal/store.ts";
-import { neutralizeDelimiters } from "./digest.ts";
+import { neutralizeDelimiters } from "./memory/digest.ts";
 import { errText } from "./err-text.ts";
 import { redact } from "./redact.ts";
 import { cardPayloadStrict, validateCardPayload } from "./schema/channel-card.ts";

@@ -15,7 +15,7 @@
 
 import { fenceUntrusted, parseDigestReward, rewardWeight } from "./digest.ts";
 import type { FabricSnapshot } from "./fabric.ts";
-import { isOn, learningFlags } from "./metrics.ts";
+import { isOn, learningFlags } from "../metrics.ts";
 
 export type KbDocType = "agent" | "digest" | "hot-area" | "scout" | "lease" | "decision" | "failure" | "symptom" | "episode" | "answer";
 

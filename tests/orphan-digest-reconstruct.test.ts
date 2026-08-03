@@ -11,7 +11,7 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { readDigest, writeDigest } from "../src/digest.ts";
+import { readDigest, writeDigest } from "../src/memory/digest.ts";
 import { appendReceipt } from "../src/receipts.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import type { PersistedAgent, RunReceipt, TranscriptEntry } from "../src/types.ts";

@@ -28,9 +28,9 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Schema } from "effect";
-import { getStorageBackend } from "./dal/storage.ts";
-import { normalizeRepoPath } from "./project-registry.ts";
-import { decodeJsonWith } from "./schema/external-json.ts";
+import { getStorageBackend } from "../dal/storage.ts";
+import { normalizeRepoPath } from "../project-registry.ts";
+import { decodeJsonWith } from "../schema/external-json.ts";
 
 export interface SymptomEntry {
 	/** Stable id — also the filename. `symptomId(...)` (hash of normalized text + agentId + ISO week),

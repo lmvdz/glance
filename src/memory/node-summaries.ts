@@ -1,4 +1,4 @@
-import { redact } from "./redact.ts";
+import { redact } from "../redact.ts";
 import type { Node } from "./nodes.ts";
 import type { NodeRecord, NodeSummaryRecord } from "./node-records.ts";
 

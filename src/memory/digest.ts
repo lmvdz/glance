@@ -10,9 +10,9 @@
  */
 
 import * as path from "node:path";
-import { getStorageBackend } from "./dal/storage.ts";
-import { summarize } from "./summarizer.ts";
-import type { RunReceipt, TranscriptEntry } from "./types.ts";
+import { getStorageBackend } from "../dal/storage.ts";
+import { summarize } from "../summarizer.ts";
+import type { RunReceipt, TranscriptEntry } from "../types.ts";
 
 /**
  * Reward-boost tag (agentic-learning-loop concern 03) — a fresh-checked proof outcome for the run

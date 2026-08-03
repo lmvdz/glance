@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { DecisionRecord, NodeRecord } from "../src/node-records.ts";
+import type { DecisionRecord, NodeRecord } from "../src/memory/node-records.ts";
 import { proposeRules } from "../src/rule-proposals.ts";
 import { borrowedDefaults, coldStartLearningState, proposalSampleFloor, unknownLedger } from "../src/unknowns.ts";
 

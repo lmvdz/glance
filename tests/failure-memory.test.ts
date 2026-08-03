@@ -8,7 +8,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { failureAnnotation, readFailureAnnotations, recordFailureAnnotation } from "../src/failure-memory.ts";
+import { failureAnnotation, readFailureAnnotations, recordFailureAnnotation } from "../src/memory/failure-memory.ts";
 
 function tmp(): string {
 	return mkdtempSync(path.join(os.tmpdir(), "failure-memory-"));

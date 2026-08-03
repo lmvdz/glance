@@ -12,7 +12,7 @@
 
 import { expect, test } from "bun:test";
 import { AcpAgentDriver } from "../src/acp-agent-driver.ts";
-import { fenceUntrusted } from "../src/digest.ts";
+import { fenceUntrusted } from "../src/memory/digest.ts";
 
 type Blocks = Array<{ type: "text"; text: string }>;
 const blocksOf = (d: AcpAgentDriver, msg: string): Blocks => (d as unknown as { promptBlocks(m: string): Blocks }).promptBlocks(msg);

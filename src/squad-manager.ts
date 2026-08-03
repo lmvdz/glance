@@ -42,8 +42,8 @@ import { Dispatcher } from "./dispatch.ts";
 import { openDispatchLedger } from "./dispatch-ledger.ts";
 import { openGoalOverlapLedger, type GoalOverlapLedger } from "./goal-overlap-ledger.ts";
 import { openRaceLedger, type RaceLedger } from "./race-ledger.ts";
-import { type Answer, answerBrief, listAnswers, possiblyStale, readAnswer, saveAnswer } from "./answers.ts";
-import { AFTER_ACTION_MARKER, type AfterActionInput, type AfterActionReport, composeAfterAction, listAfterActions, readAfterAction, saveAfterAction, selectTerminalReaps, type TerminalReapCandidate } from "./after-action.ts";
+import { type Answer, answerBrief, listAnswers, possiblyStale, readAnswer, saveAnswer } from "./memory/answers.ts";
+import { AFTER_ACTION_MARKER, type AfterActionInput, type AfterActionReport, composeAfterAction, listAfterActions, readAfterAction, saveAfterAction, selectTerminalReaps, type TerminalReapCandidate } from "./memory/after-action.ts";
 // Aliased: `types.ts` already exports an UNRELATED `AttentionEvent` (an agent's own notify signal,
 // used pervasively below via `AgentDTO.attentionEvents`) — importing this module's same-named type
 // bare would collide. `OperatorAttentionEvent` disambiguates at every use site in this file.
@@ -74,7 +74,7 @@ import {
 	type EpisodeMeta,
 	type OmittedEntry as EpisodeOmittedEntry,
 	type StaleAnswerEntry,
-} from "./weekly-episode.ts";
+} from "./memory/weekly-episode.ts";
 import { computeFog, topDebt, type FileFogEntry } from "./comprehension-fog.ts";
 import { PushService } from "./push.ts";
 import { ResidentPlanner } from "./resident-planner.ts";
@@ -114,8 +114,8 @@ import { type Judge, validatorGate } from "./validator.ts";
 import { evaluateCompliance, type ComplianceFinding } from "./compliance.ts";
 import { reapDeadSessions, releaseSession, sweepLeases } from "./leases.ts";
 import { agentActor, scopeFor } from "./agent-scope.ts";
-import { actorVisibleRepoSet, buildFabricSnapshot, loadScoutFacts, type FabricSnapshot } from "./fabric.ts";
-import { buildContextPrimer, classifyQueryShape, searchFabric, type KbDocType } from "./fabric-search.ts";
+import { actorVisibleRepoSet, buildFabricSnapshot, loadScoutFacts, type FabricSnapshot } from "./memory/fabric.ts";
+import { buildContextPrimer, classifyQueryShape, searchFabric, type KbDocType } from "./memory/fabric-search.ts";
 import { sweepPresence, who } from "./presence.ts";
 import { harnessEventDecision } from "./harness-hooks.ts";
 import { adoptBranchName, adoptBrief, isSafeUntrackedPath, parseNulList } from "./adopt.ts";
@@ -180,15 +180,15 @@ import { selectReapable, type WorktreeInfo } from "./worktree-reaper.ts";
 import { scrubbedSpawnEnv } from "./spawn-env.ts";
 import { changedFiles, filesTouchedSinceBase } from "./explore.ts";
 import { appendReceipt, confirmDeliveredFlags, EFFICIENCY_FLAG_PREFIX, readAllReceipts, readReceipts, RunAccumulator, splitCapabilityTokens } from "./receipts.ts";
-import { validateModelDelta } from "./decision-evidence.ts";
-import { classifyWhereToLookEntry, listSymptoms, readSymptom, saveSymptom, statWhereToLookEntry, symptomId, validateSymptomText, validateWhereToLookCount, type SymptomEntry } from "./symptoms.ts";
+import { validateModelDelta } from "./memory/decision-evidence.ts";
+import { classifyWhereToLookEntry, listSymptoms, readSymptom, saveSymptom, statWhereToLookEntry, symptomId, validateSymptomText, validateWhereToLookCount, type SymptomEntry } from "./memory/symptoms.ts";
 import { buildPrBody } from "./pr-body.ts";
 import { membraneBreakerCadence } from "./membrane-breaker-cadence.ts";
 import { appendAudit, type AuditQuery, makeAuditEntry, readAudit } from "./audit.ts";
 import { AutomationLog, type AutomationQuery } from "./automation-log.ts";
 import { isFirstTryGreen, isOn, learningFlags, LearningMetrics, type MetricRollupRow } from "./metrics.ts";
 import { reflect } from "./reflection.ts";
-import { failureAnnotation, recordFailureAnnotation } from "./failure-memory.ts";
+import { failureAnnotation, recordFailureAnnotation } from "./memory/failure-memory.ts";
 import { readModelOutcomes, recordModelOutcome, recordModelOutcomeBlocked, tierOf } from "./model-outcomes.ts";
 import { costGateMode, type CostVerdict, shadowCostCheck } from "./cost-gate.ts";
 import { recordCostLanded } from "./cost-aggregate.ts";
@@ -209,7 +209,7 @@ import { buildTaskClassMatrix } from "./omp-graph/task-class-matrix.ts";
 import { DAY_MS } from "./omp-graph/schema.ts";
 import { modelRouteMinEdgeFor, modelRouteShouldApply, routeModelForTaskClass } from "./model-route.ts";
 import { openOrchestratorState } from "./orchestrator-state.ts";
-import { authoredSpecBlock, buildDigest, type DigestReward, digestSummaryExcerpt, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
+import { authoredSpecBlock, buildDigest, type DigestReward, digestSummaryExcerpt, fenceUntrusted, readDigest, writeDigest } from "./memory/digest.ts";
 import { readChatAttachment, reapStaleChatAttachments, type SavedChatAttachment, writeChatAttachment } from "./chat-attachment.ts";
 import { harnessScorecardEnabled, scoreHarness } from "./harness-scorecard.ts";
 import { isArmed } from "./convergence-oracle.ts";
@@ -262,16 +262,16 @@ import {
 	type VoiceFleetExecResult,
 	type VoiceOwnerActor,
 } from "./voice-fleet.ts";
-import { NodeStore, compareActivity, type NodeState } from "./nodes.ts";
+import { NodeStore, compareActivity, type NodeState } from "./memory/nodes.ts";
 import { ForgedCardError, assertAuthentic, projectsToRoom, type CardProvenance } from "./projection-classes.ts";
 import { coldStartLearningState } from "./unknowns.ts";
 import { RECOVERY_DELAY_MS, gateHealth, notificationText, readGateEvaluation, shouldLeaveTheApp, type GateEvaluation, type GateHealth, type WorthItReview } from "./leaving-the-app.ts";
 import { GateStore } from "./gate-store.ts";
 import { buildEvaluation } from "./gate-wiring.ts";
-import { assessReversal, costEventsFrom, shouldDiscloseCost, summariseCost, type CostSummary, type ReversalAssessment, type ReversalNode } from "./decision-impact.ts";
-import { NodeRecordStore, quoteRule, type NodeRecord, type InstructionReadbackRecord, type ObjectionRecord, type PlanMotionRecord } from "./node-records.ts";
+import { assessReversal, costEventsFrom, shouldDiscloseCost, summariseCost, type CostSummary, type ReversalAssessment, type ReversalNode } from "./memory/decision-impact.ts";
+import { NodeRecordStore, quoteRule, type NodeRecord, type InstructionReadbackRecord, type ObjectionRecord, type PlanMotionRecord } from "./memory/node-records.ts";
 import { approveIrreversible, beginInstruction, overruleObjection, raiseObjection, recordObjectionOutcome, rejectIrreversible, type InstructionExecution } from "./instructions.ts";
-import { regenerateNodeSummaries } from "./node-summaries.ts";
+import { regenerateNodeSummaries } from "./memory/node-summaries.ts";
 import { agentRecordView, type AgentRecordView } from "./agent-records.ts";
 import { proposeRules, type RuleProposal } from "./rule-proposals.ts";
 import { assessPlanMotion as assessPlanMotionEvidence, planMotionMetrics, type PlanMotionInput, type PlanMotionAssessment } from "./plan-motion.ts";

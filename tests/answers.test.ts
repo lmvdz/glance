@@ -15,7 +15,7 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { answerBrief, extractPathTokens, listAnswers, possiblyStale, readAnswer, saveAnswer, type Answer } from "../src/answers.ts";
+import { answerBrief, extractPathTokens, listAnswers, possiblyStale, readAnswer, saveAnswer, type Answer } from "../src/memory/answers.ts";
 import { isLandingUnit } from "../src/is-landing-unit.ts";
 import type { AgentDTO, PersistedAgent, RunReceipt, TranscriptEntry } from "../src/types.ts";
 

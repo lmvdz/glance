@@ -23,8 +23,8 @@ import {
 	previousCompleteIsoWeek,
 	readEpisode,
 	saveEpisode,
-} from "../src/weekly-episode.ts";
-import { isoWeekKey } from "../src/symptoms.ts";
+} from "../src/memory/weekly-episode.ts";
+import { isoWeekKey } from "../src/memory/symptoms.ts";
 import type { FeatureDecision } from "../src/types.ts";
 
 const dirs: string[] = [];

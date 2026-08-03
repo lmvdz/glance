@@ -28,7 +28,7 @@
  */
 
 import type { FeatureDecision } from "./types.ts";
-import type { SymptomEntry } from "./symptoms.ts";
+import type { SymptomEntry } from "./memory/symptoms.ts";
 
 export const MODEL_DELTA_MARKER = "<!-- omp-squad:model-delta:v1 -->";
 export const SYMPTOM_MARKER = "<!-- omp-squad:symptom:v1 -->";

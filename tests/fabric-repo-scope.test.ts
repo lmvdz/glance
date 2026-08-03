@@ -21,13 +21,13 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { Answer } from "../src/answers.ts";
-import { writeDigest } from "../src/digest.ts";
-import { actorVisibleRepoSet, buildFabricSnapshot } from "../src/fabric.ts";
+import type { Answer } from "../src/memory/answers.ts";
+import { writeDigest } from "../src/memory/digest.ts";
+import { actorVisibleRepoSet, buildFabricSnapshot } from "../src/memory/fabric.ts";
 import { appendReceipt } from "../src/receipts.ts";
-import { saveSymptom } from "../src/symptoms.ts";
+import { saveSymptom } from "../src/memory/symptoms.ts";
 import type { Actor, AgentDTO, PersistedFeature } from "../src/types.ts";
-import { buildEpisode, saveEpisode } from "../src/weekly-episode.ts";
+import { buildEpisode, saveEpisode } from "../src/memory/weekly-episode.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {

@@ -6,7 +6,7 @@
 import { expect, test } from "bun:test";
 import { buildPrBody, hasModelDeltaMarker, MAX_DELTA_BULLETS, MODEL_DELTA_MARKER, SYMPTOM_MARKER, TESTS_MARKER } from "../src/pr-body.ts";
 import type { FeatureDecision } from "../src/types.ts";
-import type { SymptomEntry } from "../src/symptoms.ts";
+import type { SymptomEntry } from "../src/memory/symptoms.ts";
 
 function delta(text: string, evidence?: string[]): FeatureDecision {
 	return { id: crypto.randomUUID(), text, source: "model-delta", evidence, createdAt: Date.now() };
