@@ -282,19 +282,9 @@ import { buildTrace, traceMaxSpans, traceSampleRatio, traceSpansEnabled, type Tr
 import { traceExporterFromEnv, type TraceExportQueue } from "./trace-exporter.ts";
 
 import { settleRunningEntries, transcriptSince } from "./transcript-delta.ts";
-import { ManualProvider, type PaymentProvider, paymentProviderFromEnv } from "./payments/index.ts";
-import {
-	acceptFeedbackSubmission,
-	assertRewardTransition,
-	hashCampaignToken,
-	newCampaignId,
-	normalizeFeedbackValidation,
-	renderFeedbackPlaneIssue,
-	summarizeFeedback,
-	type FeedbackSnapshot,
-	type FeedbackSummary,
-	type FeedbackValidationInput,
-} from "./feedback.ts";
+import { FeedbackLane } from "./feedback-lane.ts";
+import { type PaymentProvider, paymentProviderFromEnv } from "./payments/index.ts";
+import { type FeedbackSummary, type FeedbackValidationInput } from "./feedback.ts";
 import {
 	capabilityFederationMetadata,
 	capabilityProfiles,
@@ -1327,6 +1317,15 @@ export class SquadManager extends EventEmitter {
 	private readonly traceExporter?: TraceExportQueue;
 	/** Reward disbursement provider (Tremendous / Manual). Injectable for tests; default from env. */
 	private readonly paymentProvider: PaymentProvider;
+	/** Feedback lane implementation (src/feedback-lane.ts, concern 04 island #1). Deps are closures
+	 *  because this field initializer runs before the constructor assigns store/paymentProvider. */
+	private readonly feedbackLane = new FeedbackLane({
+		loadFeedback: () => this.store.loadFeedback(),
+		saveFeedback: (snap) => this.store.saveFeedback(snap),
+		stateDir: () => this.stateDir,
+		paymentProvider: () => this.paymentProvider,
+		audit: (actor, action, target, detail) => this.recordFeedbackAudit(actor, action, target, detail),
+	});
 	/** Short-lived idempotency window for client-stamped prompt commands; request-answer prompts are exempted below. */
 	private readonly commandAckDedupe = new Map<string, number>();
 	private readonly recentSteers = new Map<string, { actor: string; targetLabel: string; at: number }>();
@@ -3024,144 +3023,51 @@ export class SquadManager extends EventEmitter {
 		return out;
 	}
 
+	// ── feedback lane — the implementation lives in src/feedback-lane.ts (concern 04 island #1);
+	// these delegations keep the manager's public surface stable for feedback-routes.ts + tests.
+
 	async listFeedbackCampaigns(): Promise<FeedbackCampaign[]> {
-		return (await this.store.loadFeedback()).campaigns;
+		return this.feedbackLane.listCampaigns();
 	}
 
 	async listFeedbackItems(): Promise<{ items: FeedbackSummary[]; raw: FeedbackItem[]; validations: FeedbackValidationResponse[]; rewards: FeedbackReward[] }> {
-		const snap = await this.store.loadFeedback();
-		return {
-			items: snap.items.map((item) => summarizeFeedback(item, snap.validations, snap.rewards.find((r) => r.feedbackId === item.id))),
-			raw: snap.items,
-			validations: snap.validations,
-			rewards: snap.rewards,
-		};
+		return this.feedbackLane.listItems();
 	}
 
 	async seedFeedbackCampaign(opts: { id?: string; name: string; repo: string; token: string; allowedOrigins?: string[]; rewardCents?: number; rewardCurrency?: string }): Promise<FeedbackCampaign> {
-		const snap = await this.store.loadFeedback();
-		const now = Date.now();
-		const id = opts.id?.trim() || newCampaignId();
-		const campaign: FeedbackCampaign = {
-			id,
-			name: opts.name.trim() || "Feedback campaign",
-			repo: normalizeRepoPath(opts.repo) || process.cwd(),
-			tokenHash: hashCampaignToken(opts.token),
-			allowedOrigins: opts.allowedOrigins?.length ? opts.allowedOrigins : ["*"],
-			rewardCents: opts.rewardCents,
-			rewardCurrency: opts.rewardCurrency,
-			createdAt: snap.campaigns.find((c) => c.id === id)?.createdAt ?? now,
-		};
-		const i = snap.campaigns.findIndex((c) => c.id === id);
-		if (i >= 0) snap.campaigns[i] = campaign;
-		else snap.campaigns.push(campaign);
-		await this.store.saveFeedback(snap);
-		return campaign;
+		return this.feedbackLane.seedCampaign(opts);
 	}
 
 	async submitFeedbackItem(body: unknown, origin?: string | null, now = Date.now()): Promise<FeedbackItem> {
-		const snap = await this.store.loadFeedback();
-		const accepted = acceptFeedbackSubmission({ campaigns: snap.campaigns, body, origin, now, maxImageBytes: feedbackMaxImageBytes() });
-		if (accepted.attachmentBytes && accepted.item.attachment && accepted.attachmentExt) {
-			const rel = path.join("feedback", "attachments", accepted.item.id, `${accepted.item.attachment.id}.${accepted.attachmentExt}`);
-			const full = path.join(this.stateDir, rel);
-			await fs.mkdir(path.dirname(full), { recursive: true });
-			const tmp = `${full}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
-			await fs.writeFile(tmp, accepted.attachmentBytes);
-			await fs.rename(tmp, full);
-			accepted.item.attachment = { ...accepted.item.attachment, path: rel };
-		}
-		snap.items.push(accepted.item);
-		if (accepted.reward) snap.rewards.push(accepted.reward);
-		await this.store.saveFeedback(snap);
-		return accepted.item;
+		return this.feedbackLane.submitItem(body, origin, now);
 	}
 
 	async acceptFeedback(id: string, actor: Actor = LOCAL_ACTOR): Promise<FeedbackItem> {
-		const snap = await this.store.loadFeedback();
-		const item = feedbackItemOrThrow(snap.items, id);
-		if (item.status === "rejected") throw new Error("rejected feedback cannot be accepted");
-		if (item.status !== "promoted") item.status = "accepted";
-		item.updatedAt = Date.now();
-		await this.store.saveFeedback(snap);
-		await this.recordFeedbackAudit(actor, "feedback.accept", id);
-		return item;
+		return this.feedbackLane.accept(id, actor);
 	}
 
 	async rejectFeedback(id: string, actor: Actor = LOCAL_ACTOR): Promise<FeedbackItem> {
-		const snap = await this.store.loadFeedback();
-		const item = feedbackItemOrThrow(snap.items, id);
-		if (item.status === "promoted") throw new Error("promoted feedback cannot be rejected");
-		item.status = "rejected";
-		item.updatedAt = Date.now();
-		await this.store.saveFeedback(snap);
-		await this.recordFeedbackAudit(actor, "feedback.reject", id);
-		return item;
+		return this.feedbackLane.reject(id, actor);
 	}
 
 	async promoteFeedback(id: string, actor: Actor = LOCAL_ACTOR): Promise<FeedbackItem> {
-		const snap = await this.store.loadFeedback();
-		const item = feedbackItemOrThrow(snap.items, id);
-		if (item.planeIssue) return item;
-		if (item.status === "rejected") throw new Error("rejected feedback cannot be promoted");
-		if (item.status !== "accepted" && item.status !== "needs-validation") throw new Error("feedback must be accepted or needs-validation before promotion");
-		const rendered = renderFeedbackPlaneIssue(item, snap.validations.filter((v) => v.feedbackId === id), snap.rewards.find((r) => r.feedbackId === id));
-		const issue = await createPlaneIssue(item.repo, rendered.title, rendered.descriptionHtml);
-		if (!issue) throw new Error("plane issue create failed");
-		item.planeIssue = issue;
-		item.status = "promoted";
-		item.updatedAt = Date.now();
-		await this.store.saveFeedback(snap);
-		await this.recordFeedbackAudit(actor, "feedback.promote", id, issue.identifier ?? issue.id);
-		return item;
+		return this.feedbackLane.promote(id, actor);
 	}
 
 	async addFeedbackValidation(id: string, input: FeedbackValidationInput, actor: Actor = LOCAL_ACTOR): Promise<FeedbackValidationResponse> {
-		const snap = await this.store.loadFeedback();
-		const item = feedbackItemOrThrow(snap.items, id);
-		const validation = normalizeFeedbackValidation(input, item);
-		snap.validations.push(validation);
-		if (item.status === "new") {
-			item.status = "needs-validation";
-			item.updatedAt = Date.now();
-		}
-		await this.store.saveFeedback(snap);
-		await this.recordFeedbackAudit(actor, "feedback.validation", id);
-		return validation;
+		return this.feedbackLane.addValidation(id, input, actor);
 	}
 
 	async listFeedbackValidations(id: string): Promise<FeedbackValidationResponse[]> {
-		const snap = await this.store.loadFeedback();
-		feedbackItemOrThrow(snap.items, id);
-		return snap.validations.filter((v) => v.feedbackId === id);
+		return this.feedbackLane.listValidations(id);
 	}
 
 	async approveFeedbackReward(id: string, actor: Actor = LOCAL_ACTOR): Promise<FeedbackReward> {
-		const snap = await this.store.loadFeedback();
-		const { item, reward } = rewardRecordOrThrow(snap, id);
-		assertRewardTransition(reward.status, "approved");
-		reward.status = "approved";
-		reward.reviewer = actor.id;
-		reward.updatedAt = Date.now();
-		item.rewardStatus = "approved";
-		item.updatedAt = reward.updatedAt;
-		await this.store.saveFeedback(snap);
-		await this.recordFeedbackAudit(actor, "feedback.reward.approve", id);
-		return reward;
+		return this.feedbackLane.approveReward(id, actor);
 	}
 
 	async voidFeedbackReward(id: string, actor: Actor = LOCAL_ACTOR): Promise<FeedbackReward> {
-		const snap = await this.store.loadFeedback();
-		const { item, reward } = rewardRecordOrThrow(snap, id);
-		assertRewardTransition(reward.status, "void");
-		reward.status = "void";
-		reward.reviewer = actor.id;
-		reward.updatedAt = Date.now();
-		item.rewardStatus = "void";
-		item.updatedAt = reward.updatedAt;
-		await this.store.saveFeedback(snap);
-		await this.recordFeedbackAudit(actor, "feedback.reward.void", id);
-		return reward;
+		return this.feedbackLane.voidReward(id, actor);
 	}
 
 	/**
@@ -3190,63 +3096,7 @@ export class SquadManager extends EventEmitter {
 		opts: { provider?: string; externalRef?: string; recipientEmail?: string; recipientName?: string; note?: string } = {},
 		actor: Actor = LOCAL_ACTOR,
 	): Promise<FeedbackReward> {
-		const operatorProvider = typeof opts.provider === "string" ? opts.provider.trim() : "";
-		const operatorRef = typeof opts.externalRef === "string" ? opts.externalRef.trim() : "";
-		const isManual = this.paymentProvider.name === "manual";
-		// Manual path keeps the original required-fields contract: an out-of-band payout is only a
-		// trustworthy ledger entry if the operator names the provider AND the proof-of-payment handle.
-		if (isManual) {
-			if (!operatorProvider) throw new Error("provider is required to record a reward payout (e.g. the payment service used)");
-			if (!operatorRef) throw new Error("externalRef is required to record a reward payout (the provider's payment/transaction reference)");
-		}
-
-		const snap = await this.store.loadFeedback();
-		const { item, reward } = rewardRecordOrThrow(snap, id);
-		// State-machine gate FIRST, before any mutation or network call.
-		assertRewardTransition(reward.status, "paid");
-
-		// Recipient comes from the explicit opt or the linked feedback item. Real disbursement needs it.
-		const recipientEmail = (opts.recipientEmail ?? item.userEmail ?? "").trim();
-		const recipientName = opts.recipientName?.trim() || undefined;
-		const note = opts.note?.trim() || `omp-squad feedback reward for ${item.id}`;
-		if (!isManual && !recipientEmail) {
-			throw new Error("recipientEmail is required to disburse this reward (set it on the request or capture userEmail on the feedback item)");
-		}
-
-		// For the manual path, seed a per-call ManualProvider with the operator's externalRef so the
-		// recorded handle is exactly what the operator supplied; otherwise use the configured provider.
-		const provider = isManual ? new ManualProvider({ name: operatorProvider, externalRef: operatorRef }) : this.paymentProvider;
-		const result = await provider.payout({
-			idempotencyKey: reward.id, // reward id == idempotency key: retries never double-pay
-			amountCents: reward.amount,
-			currency: reward.currency,
-			recipientEmail,
-			recipientName,
-			note,
-		});
-
-		if (result.status === "failed") {
-			// Do NOT mark paid. Reward stays approved. Surface a clear error to the caller.
-			await this.recordFeedbackAudit(actor, "feedback.reward.payout_failed", id, `payout via ${result.provider} failed: ${result.error ?? "unknown error"}`);
-			throw new Error(`reward payout failed (${result.provider}): ${result.error ?? "unknown error"}`);
-		}
-
-		// status "paid" or "pending": persist the RESULT's provider + externalRef and mark the reward.
-		// The reward model has no "pending" state, so a pending disbursement is recorded as paid (the
-		// money/order has been accepted upstream) — the audit detail preserves the true provider status.
-		reward.status = "paid";
-		reward.provider = result.provider;
-		reward.externalRef = result.externalRef;
-		reward.reviewer = actor.id;
-		reward.updatedAt = Date.now();
-		item.rewardStatus = "paid";
-		item.updatedAt = reward.updatedAt;
-		await this.store.saveFeedback(snap);
-		const detail = isManual
-			? `manual record of externally-executed payment via ${result.provider} (ref ${result.externalRef}); no funds moved by omp-squad`
-			: `disbursed via ${result.provider} (ref ${result.externalRef}, status ${result.status}) to ${recipientEmail}`;
-		await this.recordFeedbackAudit(actor, "feedback.reward.paid", id, detail);
-		return reward;
+		return this.feedbackLane.markRewardPaid(id, opts, actor);
 	}
 
 	/** The single read contract for subagent lineage: persisted history merged with the live tracker, live
@@ -13618,24 +13468,6 @@ export class SquadManager extends EventEmitter {
  *  fabric already knows. `OMP_SQUAD_CONTEXT_PRIMER=0` turns it off. */
 function contextPrimerEnabled(): boolean {
 	return envBool("OMP_SQUAD_CONTEXT_PRIMER", true);
-}
-
-function feedbackMaxImageBytes(): number {
-	const n = Number(process.env.OMP_SQUAD_FEEDBACK_MAX_IMAGE_BYTES);
-	return Number.isFinite(n) && n > 0 ? n : 2_000_000;
-}
-
-function feedbackItemOrThrow(items: FeedbackItem[], id: string): FeedbackItem {
-	const item = items.find((x) => x.id === id);
-	if (!item) throw new Error("feedback item not found");
-	return item;
-}
-
-function rewardRecordOrThrow(snap: FeedbackSnapshot, id: string): { item: FeedbackItem; reward: FeedbackReward } {
-	const item = feedbackItemOrThrow(snap.items, id);
-	const reward = snap.rewards.find((r) => r.feedbackId === id);
-	if (!reward || item.rewardStatus === "none") throw new Error("feedback item has no reward");
-	return { item, reward };
 }
 
 function safeJson(value: unknown, max = 2000): string | undefined {
