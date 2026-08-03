@@ -56,7 +56,8 @@ import { isConsolePrompt, stripConsolePrompt } from "./console-prompt.ts";
 import { openRemovedLedger, type RemovedLedger } from "./removed-ledger.ts";
 import { buildDeadPlaceholder, composePriorContext, DEAD_PLACEHOLDER_TTL_MS, type DeadSessionPlaceholder, reattachMarker } from "./reattach-context.ts";
 import { reapAcpOrphanChain } from "./acp-orphan-reaper.ts";
-import { normalizeRepoPath, openProjectRegistry, readEphemeralProjects, writeEphemeralProjects, type ProjectRegistry } from "./project-registry.ts";
+import { normalizeRepoPath } from "./project-registry.ts";
+import { ProjectLane } from "./project-lane.ts";
 import { Orchestrator } from "./orchestrator.ts";
 import { Observer, type Finding } from "./observer.ts";
 import { Scout, unscannedReasoning } from "./scout.ts";
@@ -1167,7 +1168,8 @@ export class SquadManager extends EventEmitter {
 	 *  by `createWithId`'s goal-overlap disclosure only. */
 	private readonly goalOverlapLedger: GoalOverlapLedger;
 	/** Durable repos-this-operator-works-in set; unioned into `projects()`. See project-registry.ts. */
-	private readonly projectRegistry: ProjectRegistry;
+	/** Project lane (src/project-lane.ts, concern 04 island #3) — owns the registry + ephemeral markers. */
+	private readonly projectLane: ProjectLane;
 	/** Restart-safe "raced this issue already, ever" ledger (adw-factory-borrows concern 07). Consulted
 	 *  and stamped by `tryRaceOnce` — see race-ledger.ts for why this must be persisted, not in-memory. */
 	private readonly raceLedger: RaceLedger;
@@ -1356,12 +1358,17 @@ export class SquadManager extends EventEmitter {
 		this.scoutCursor = readScoutCursors(this.stateDir);
 		this.removedLedger = openRemovedLedger(this.stateDir);
 		this.goalOverlapLedger = openGoalOverlapLedger(this.stateDir);
-		this.projectRegistry = openProjectRegistry(this.stateDir);
+		// Project lane (src/project-lane.ts) loads its registry + ephemeral sidecar at construction,
+		// so it is built here, after stateDir — not as a field initializer like the other lanes.
+		this.projectLane = new ProjectLane({
+			stateDir: this.stateDir,
+			log: (level, msg) => this.log(level, msg),
+			changed: () => this.emitFeaturesChanged(),
+			agentSummaries: () => [...this.agents.values()].map(({ dto }) => ({ repo: dto.repo, status: dto.status, pendingCount: dto.pending.length, lastActivity: dto.lastActivity })),
+			liveRepos: () => new Set([...this.agents.values()].map((r) => normalizeRepoPath(r.options.repo))),
+			featureRepos: () => [...this.featureStore.values()].map((pf) => pf.repo ?? ""),
+		});
 		this.boundarySyncHeld = new HeldSyncStore(path.join(this.stateDir, "boundary-sync"));
-		// Reload session-scoped registration markers so a mid-session daemon restart cannot promote an
-		// ephemeral `glance here` registration to permanent — start() reconciles them against the
-		// restored roster (reconcileEphemeralProjects).
-		this.ephemeralProjects = readEphemeralProjects(this.stateDir);
 		this.raceLedger = openRaceLedger(this.stateDir);
 		this.automation = new AutomationLog(this.stateDir, { onEvent: (event) => this.emit("event", { type: "automation", event } satisfies SquadEvent) });
 		this.learningMetrics = new LearningMetrics(this.stateDir, { log: (m) => this.log("warn", `learning-metrics: ${m}`) });
@@ -3094,223 +3101,36 @@ export class SquadManager extends EventEmitter {
 		return this.frictionLog.recent().some((e) => e.source === "auto" && e.context === context && e.agentId === agentId);
 	}
 
+	// ── project lane — implementation + state live in src/project-lane.ts (concern 04 island #3);
+	// delegations keep the manager's public surface stable for server.ts, remove(), and tests.
+
 	projects(): ProjectDTO[] {
-		const byRepo = new Map<string, ProjectDTO>();
-		const ensure = (repo: string): ProjectDTO => {
-			const key = normalizeRepoPath(repo);
-			let p = byRepo.get(key);
-			if (!p) {
-				p = { id: key, name: path.basename(key) || key, repo: key, agentCount: 0, statusCounts: {}, pendingCount: 0, lastActivity: 0, featureCount: 0, registered: false };
-				byRepo.set(key, p);
-			}
-			return p;
-		};
-
-		for (const repo of this.projectRegistry.list()) ensure(repo).registered = true;
-		for (const pf of this.featureStore.values()) if (pf.repo) ensure(pf.repo).featureCount++;
-		for (const { dto } of this.agents.values()) {
-			const p = ensure(dto.repo);
-			p.agentCount++;
-			p.statusCounts[dto.status] = (p.statusCounts[dto.status] ?? 0) + 1;
-			p.pendingCount += dto.pending.length;
-			p.lastActivity = Math.max(p.lastActivity, dto.lastActivity);
-		}
-		// Busiest first, then a stable alphabetical tail so idle registered projects don't shuffle.
-		return [...byRepo.values()].sort((a, b) => b.lastActivity - a.lastActivity || a.name.localeCompare(b.name));
+		return this.projectLane.projects();
 	}
 
-	/**
-	 * Register a repo as a project. Validated, not trusted: an absolute path to a real git worktree.
-	 *
-	 * This path is where the daemon will later create worktrees and spawn agents, so a relative path is
-	 * REFUSED rather than resolved against the daemon's cwd — that cwd is an accident of how the
-	 * operator launched it (this daemon runs from `~/lunarpup` while its code lives elsewhere), and
-	 * silently resolving against it is how you register the wrong tree.
-	 */
 	async registerProject(repo: string, opts: { promoteEphemeral?: boolean } = {}): Promise<{ ok: true; repo: string; added: boolean } | { ok: false; reason: string }> {
-		const raw = normalizeRepoPath(repo ?? "");
-		if (!raw) return { ok: false, reason: "repo is required" };
-		if (!path.isAbsolute(raw)) return { ok: false, reason: `repo must be an absolute path (got "${raw}")` };
-		if (!existsSync(raw)) return { ok: false, reason: `no such directory: ${raw}` };
-
-		// Canonicalize to the repo ROOT, through symlinks. `isGitRepo` is true for any directory INSIDE a
-		// repo (it shells `rev-parse --show-toplevel` and only falls back to a `.git` probe), so registering
-		// `/repo/src` — or a symlink to `/repo` — used to mint a project whose id matched no agent's
-		// `dto.repo` and no feature's `repo`: the workspace showed two rows for one repository and the
-		// task↔project join missed. Found by cross-lineage review (grok-4.5).
-		let root: string;
-		try {
-			root = normalizeRepoPath(await repoRoot(await fs.realpath(raw)));
-		} catch {
-			return { ok: false, reason: `not a git repository: ${raw}` };
-		}
-
-		// Never register anything inside glance's OWN data directory.
-		//
-		// A glance worktree is a git repo too, and its lifetime belongs to an agent, not the operator. But
-		// the sharper reason is tenancy: per-org managers put their worktrees under
-		// `<stateRoot>/orgs/<orgId>/worktrees` (manager-registry.ts), while `worktreeBase()` only names the
-		// ROOT manager's `<stateRoot>/worktrees`. Guarding the latter alone let one org's admin register
-		// ANOTHER org's managed worktree — and registration widens the viewer-readable `/api/graph*`
-		// allowlist (`resolveGraphRepo`), whose `/api/graph/commit` returns source diffs. That is a
-		// cross-tenant read, not a role bypass. Refusing the whole state root closes every variant at once:
-		// orgs/*/worktrees, the root worktrees dir, proof/, receipts/, and anything added later.
-		// Found by cross-lineage review (gpt-5.6-sol).
-		const forbidden = [resolveStateDir(), worktreeBase(), this.stateDir].map(normalizeRepoPath);
-		const inside = forbidden.find((base) => base.length > 0 && (root === base || root.startsWith(`${base}${path.sep}`)));
-		if (inside) {
-			return { ok: false, reason: `${root} is inside glance's own state directory (${inside}) — register the source repository instead` };
-		}
-
-		const outcome = this.projectRegistry.add(root);
-		if (outcome === "error") return { ok: false, reason: `could not persist the project registry — ${root} was NOT added` };
-		if (outcome === "added") this.log("info", `project registered: ${root}`);
-		// An explicit durable registration of a repo a live `glance here` session registered only for its
-		// lifetime is a PROMOTION ("keep it") — clear the session-scoped marker so end-of-session release
-		// no longer silently un-registers what the operator just asked to keep. Idempotent add ⇒ this is the
-		// exact case `add()` returns "exists" for. clearEphemeralMarker is a no-op when the repo was never
-		// ephemeral, so it's safe unconditionally on this explicit path. registerEphemeralProject's own
-		// delegated call passes no opts, so a fresh session registration never promotes itself.
-		if (opts.promoteEphemeral) this.clearEphemeralMarker(root);
-		this.emitFeaturesChanged();
-		return { ok: true, repo: root, added: outcome === "added" };
+		return this.projectLane.register(repo, opts);
 	}
 
-	/** Un-register a repo. Deletes NOTHING on disk; a repo with live agents or features keeps listing. */
 	unregisterProject(repo: string): { ok: true; repo: string; removed: boolean } | { ok: false; reason: string } {
-		const key = normalizeRepoPath(repo ?? "");
-		const outcome = this.projectRegistry.delete(key);
-		if (outcome === "error") return { ok: false, reason: `could not persist the project registry — ${key} was NOT removed` };
-		if (outcome === "removed") this.log("info", `project un-registered: ${key}`);
-		this.emitFeaturesChanged();
-		return { ok: true, repo: key, removed: outcome === "removed" };
+		return this.projectLane.unregister(repo);
 	}
 
-	/**
-	 * Repos registered only for the lifetime of a `glance here` session (daily-onramp 02). Persisted as
-	 * a sidecar (`ephemeral-projects.json`, loaded in the constructor) BECAUSE the registration it must
-	 * undo is durable: the first cut kept this set in-memory only, so a daemon restart mid-session lost
-	 * the marker while the `projects.json` row survived — every restart silently promoted a
-	 * session-scoped registration to a permanent, admin-gated one (fail-open; blind-review finding).
-	 * `start()` reconciles the reloaded markers against the restored roster: a session that survived the
-	 * restart (concern 04) keeps its marker for the ordinary end-of-session hooks; a session that died
-	 * with the old daemon is reaped at boot. Keys are the canonical repo roots `registerProject`
-	 * returns — the same key `projects()` groups by.
-	 */
-	private readonly ephemeralProjects: Set<string>;
-
-	/** Drop a repo's session-scoped marker (promote / release) and persist the shrunken sidecar. A
-	 *  failed sidecar write here is self-healing: boot reconciliation drops markers whose repo is no
-	 *  longer registered, and re-releasing an already-durable repo is a no-op by design. */
-	private clearEphemeralMarker(repo: string): void {
-		if (this.ephemeralProjects.delete(normalizeRepoPath(repo))) {
-			writeEphemeralProjects(this.stateDir, this.ephemeralProjects);
-		}
-	}
-
-	/**
-	 * Boot reconciliation for the reloaded ephemeral markers — runs in start() AFTER the roster is
-	 * restored (reconnectLive/adoptOrphanedAgents), so it can tell surviving sessions from dead ones:
-	 *   - marker whose repo still has a live agent → the session outlived the restart (concern 04);
-	 *     keep the marker so the ordinary session-end hooks (release route, `remove()`) still undo it;
-	 *   - marker whose repo has NO live agent → the session died with the old daemon; un-register now.
-	 *     This is the restart leak the sidecar exists to close;
-	 *   - marker whose repo is no longer registered at all → stale (released after a failed sidecar
-	 *     write, or the operator removed the project); just drop it.
-	 * A failed un-register keeps its marker so the NEXT boot retries — never drop the undo obligation
-	 * on an error.
-	 */
 	private reconcileEphemeralProjects(): void {
-		if (this.ephemeralProjects.size === 0) return;
-		const liveRepos = new Set([...this.agents.values()].map((r) => normalizeRepoPath(r.options.repo)));
-		let dirty = false;
-		for (const repo of [...this.ephemeralProjects]) {
-			if (liveRepos.has(repo)) continue;
-			if (this.projectRegistry.has(repo)) {
-				const dropped = this.unregisterProject(repo);
-				if (!dropped.ok) {
-					this.log("warn", `could not reap ephemeral project ${repo} at boot (${dropped.reason}) — marker kept for the next attempt`);
-					continue;
-				}
-				this.log("info", `ephemeral project reaped at boot (its session did not survive the restart): ${repo}`);
-			}
-			this.ephemeralProjects.delete(repo);
-			dirty = true;
-		}
-		if (dirty) writeEphemeralProjects(this.stateDir, this.ephemeralProjects);
+		this.projectLane.reconcileAtBoot();
 	}
 
 	/** Test/observability read: is this repo's registration session-scoped right now? */
 	isEphemeralProject(repo: string): boolean {
-		return this.ephemeralProjects.has(normalizeRepoPath(repo ?? ""));
+		return this.projectLane.isEphemeral(repo);
 	}
 
-	/**
-	 * Register a repo for the lifetime of a casual session: same validation and durable write as
-	 * `registerProject`, plus a marker so session end can undo it. Only a repo THIS call actually ADDED
-	 * becomes ephemeral — a repo the operator had already registered durably must never be silently
-	 * un-registered when a passing `glance here` session ends (`add()` is idempotent, so `added:false`
-	 * is exactly that case).
-	 *
-	 * `ephemeral` in the return is likewise scoped to `added`, NOT to whether the repo is currently
-	 * marked ephemeral (review finding #3, ephemeral release race): two `glance here` terminals on the
-	 * same repo are explicitly supported (boundarySyncChains), so a SECOND session's call here sees
-	 * `added:false` (the first session's marker already exists) — it must report `ephemeral:false` too,
-	 * even though `this.ephemeralProjects.has(repo)` reads true. Before this fix the second session was
-	 * told `ephemeral:true`, so its own ordinary exit (or a failed-create rollback) would call
-	 * `releaseEphemeralProject` believing it owned the registration, un-registering the FIRST session's
-	 * repo — and clearing its marker — while that session was still live and chatting. Only the session
-	 * that actually created the marker is now ever told it owns the release. `releaseEphemeralProject`
-	 * carries its own defense-in-depth guard for the case where a caller releases anyway (or a live
-	 * agent from ANY session still depends on the repo).
-	 */
 	async registerEphemeralProject(repo: string): Promise<{ ok: true; repo: string; added: boolean; ephemeral: boolean } | { ok: false; reason: string }> {
-		const result = await this.registerProject(repo);
-		if (!result.ok) return result;
-		if (result.added) {
-			this.ephemeralProjects.add(result.repo);
-			// The registration this marker must undo is already durable — a marker that exists only in
-			// memory would not survive a restart, silently promoting the session-scoped registration to
-			// permanent. Fail CLOSED: no durable marker ⇒ no ephemeral registration at all.
-			if (!writeEphemeralProjects(this.stateDir, this.ephemeralProjects)) {
-				this.ephemeralProjects.delete(result.repo);
-				const rollback = this.unregisterProject(result.repo);
-				return {
-					ok: false,
-					reason: rollback.ok
-						? `could not persist the ephemeral session marker for ${result.repo} — the registration was rolled back`
-						: `could not persist the ephemeral session marker for ${result.repo} AND the rollback failed (${rollback.reason}) — the repo is now durably registered; un-register it explicitly`,
-				};
-			}
-		}
-		// `result.added`, not `this.ephemeralProjects.has(...)` — see the doc comment above.
-		return { ...result, ephemeral: result.added };
+		return this.projectLane.registerEphemeral(repo);
 	}
 
-	/**
-	 * Undo an ephemeral registration on ordinary session end (REPL exit, or the daemon's own removal
-	 * path — see `remove()`). No-op for repos that were never session-scoped, so callers can fire it
-	 * unconditionally. Deletes nothing on disk, per `unregisterProject`'s own contract.
-	 *
-	 * Guarded the same way `remove()`'s own daemon-side cleanup is (review finding #3): a repo stays
-	 * registered as long as ANY live agent still references it, regardless of which session's marker
-	 * this call is scoped to. `registerEphemeralProject` now only reports `ephemeral:true` to the
-	 * session that actually created the marker, which closes most of the race — but this guard is the
-	 * belt: it also protects the two callers that never had `remove()`'s own last-agent check
-	 * (server.ts's `/api/console/release` route, and the `/api/console` failed-create rollback), so
-	 * even a caller that mistakenly believes it owns the release can never un-register a repo out from
-	 * under another session's still-live agent.
-	 */
 	releaseEphemeralProject(repo: string): { ok: boolean; repo: string; released: boolean; reason?: string } {
-		const key = normalizeRepoPath(repo ?? "");
-		if (!this.ephemeralProjects.has(key)) return { ok: true, repo: key, released: false };
-		if ([...this.agents.values()].some((r) => normalizeRepoPath(r.options.repo) === key)) {
-			return { ok: true, repo: key, released: false };
-		}
-		const dropped = this.unregisterProject(key);
-		if (!dropped.ok) return { ok: false, repo: key, released: false, reason: dropped.reason };
-		this.clearEphemeralMarker(key);
-		return { ok: true, repo: key, released: true };
+		return this.projectLane.releaseEphemeral(repo);
 	}
 
 	/** Feature view: persisted features + derived plan-dir/agent features with live land status, per repo. */
@@ -5930,7 +5750,7 @@ export class SquadManager extends EventEmitter {
 			// Promotion is the "keep it" signal for a `glance here` session (daily-onramp 02) — clearing
 			// the marker on the idempotent path too means a re-promote after a crashed first call still
 			// makes the registration durable.
-			this.clearEphemeralMarker(rec.dto.repo);
+			this.projectLane.clearMarker(rec.dto.repo);
 			// Keep the wire mirror honest on the retry path too (a pre-06 daemon's persisted promote, or a
 			// crashed first call, may have left the DTO unstamped even though the options flag is durable).
 			rec.dto.promoted = true;
@@ -6001,7 +5821,7 @@ export class SquadManager extends EventEmitter {
 		// Promote makes a `glance here` session's repo registration durable: with the ephemeral marker
 		// gone, session-end cleanup no longer fires (daily-onramp 02). AFTER the persist so a rolled-back
 		// promote leaves the marker (and the session's cleanup contract) intact.
-		this.clearEphemeralMarker(rec.dto.repo);
+		this.projectLane.clearMarker(rec.dto.repo);
 		this.emitAgent(rec);
 		void this.recordAudit(actor, "promote", id, "ok", `console→unit; mode ${prior.mode}→${rec.dto.autonomyMode}`);
 		await this.store.appendAudit({ actor: actor.id, action: "promote", target: id, detail: { priorMode: prior.mode, mode: rec.dto.autonomyMode, task: opts.task ? truncateLabel(opts.task, 120) : undefined } }).catch(() => {});

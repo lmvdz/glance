@@ -24,6 +24,14 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
+## Queue pivot (2026-08-03, Lars)
+
+Concerns 14–16 are the CS329A borrows (plans/research-cs329a/BRIEF.md), absorbed into this queue
+per Lars: work the borrows before further deepening. Order: 15 (horizon×reliability curve — no
+collision with the pending PR train) → 16 (reviewer weights — stacks on src/memory/) → 14
+(difficulty-targeted dispatch — BLOCKED until the #310/#311 train merges; touches
+squad-manager dispatch). Deepening concerns 05–13 resume after.
+
 ## Iteration ledger
 
 - 2026-08-03 — 01 + 02 shipped as PR #310 (src/memory/ + DecisionLedger); grok+codex clean;
