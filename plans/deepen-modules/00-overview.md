@@ -32,3 +32,8 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   now atomic+durable; json-parse-as-cast ratchet paid back from +5 to baseline; skills manifest
   gained "deepen". Lesson: a new .claude/skills/ entry fails skills-verify until
   COMMITTED_SKILL_NAMES in scripts/skills-verify.ts lists it.
+- 2026-08-03 — 04 slice 1 (feedback lane → src/feedback-lane.ts) shipped as PR #311, stacked on
+  #310; suite 4927/2 (pre-existing only); grok + codex both clean (grok byte-verified the payout
+  state machine; codex runtime-probed it). REFUTED the review's voice-shell deletion claim —
+  those delegations are the RBAC seam; recorded in 04's concern doc. WIP guard: at 3 unmerged
+  stacked deepen PRs, the loop pauses for merges.
