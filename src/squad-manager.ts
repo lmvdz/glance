@@ -180,7 +180,7 @@ import { selectReapable, type WorktreeInfo } from "./worktree-reaper.ts";
 import { scrubbedSpawnEnv } from "./spawn-env.ts";
 import { changedFiles, filesTouchedSinceBase } from "./explore.ts";
 import { appendReceipt, confirmDeliveredFlags, EFFICIENCY_FLAG_PREFIX, readAllReceipts, readReceipts, RunAccumulator, splitCapabilityTokens } from "./receipts.ts";
-import { validateModelDelta } from "./memory/decision-evidence.ts";
+import { DecisionLedger } from "./memory/index.ts";
 import { classifyWhereToLookEntry, listSymptoms, readSymptom, saveSymptom, statWhereToLookEntry, symptomId, validateSymptomText, validateWhereToLookCount, type SymptomEntry } from "./memory/symptoms.ts";
 import { buildPrBody } from "./pr-body.ts";
 import { membraneBreakerCadence } from "./membrane-breaker-cadence.ts";
@@ -1109,6 +1109,14 @@ export class SquadManager extends EventEmitter {
 	 *  durably claims the slot itself (#never-lose-work concern 04 review finding 1). */
 	private readonly forkInFlight = new Set<string>();
 	private readonly featureStore = new Map<string, PersistedFeature>();
+	/** The memory lane's decision write path (src/memory/decision-ledger.ts). The manager is the
+	 *  production adapter of its store port: the store-resident feature Map, the race-guarded
+	 *  adopt path, and persist + event fan-out. Tests adapt a bare Map instead. */
+	readonly decisionLedger = new DecisionLedger({
+		get: (id) => this.featureStore.get(id),
+		adopt: (id, repo) => this.adoptDerivedFeature(id, repo),
+		changed: () => this.emitFeaturesChanged(),
+	});
 	private capabilityStore: CapabilitySnapshot = emptyCapabilitySnapshot();
 	private readonly bin?: string;
 	private readonly autoLand: boolean;
@@ -3580,63 +3588,17 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
-	 * Atomically append one agent-captured decision to a feature, resolving the feature the SAME way
-	 * updateFeature does (adopting a plan-derived feature that isn't yet persisted — so capture works
-	 * for exactly the plan-driven agents it targets, not just already-adopted features). Reads the
-	 * feature's CURRENT decisions at write time and appends in one synchronous step — no stale
-	 * read-modify-write over a client snapshot, so concurrent agent captures can't clobber each other.
-	 * De-dupes on normalized text. Returns the outcome so the caller can tell the agent what happened.
-	 *
-	 * Supersession (plans/research-long-horizon-agent-memory — "recurrence promotes, contradiction
-	 * supersedes"): when `decision.supersedes` names a prior decision on the feature, this write
-	 * stamps that target's `supersededBy`/`supersededAt` in the SAME atomic step that appends the
-	 * new decision — one current assertion per subject, the loser invalidated-not-deleted and kept
-	 * addressable as history. Two rules with teeth:
-	 * - the text de-dupe considers only CURRENT (non-superseded) decisions, so re-asserting a fact
-	 *   that was later reversed (A→B→A) is legal ledger history, not a silent no-op;
-	 * - superseding an already-superseded target is rejected — supersede the current decision, not
-	 *   a historical one (prevents forked "current" chains under concurrent writers).
-	 *
-	 * Concurrency: the check-and-write below is one synchronous block over the STORE-RESIDENT
-	 * feature object, re-resolved after the only await (the adopt path), and adoptDerivedFeature
-	 * itself re-checks the store before setting — so two near-simultaneous captures serialize on
-	 * the same object instead of one silently clobbering the other's adopt.
+	 * Atomically append one agent-captured decision to a feature. The write rule — supersession
+	 * stamps, current-only text de-dupe, adopt-aware resolution, the concurrency contract — lives
+	 * in the memory lane's DecisionLedger (src/memory/decision-ledger.ts); this delegation exists
+	 * for the routes and tests that address the manager.
 	 */
 	async recordAgentDecision(
 		featureId: string,
 		decision: FeatureDecision,
 		repo?: string,
 	): Promise<"recorded" | "duplicate" | "no-feature" | "supersede-missing" | "supersede-superseded"> {
-		// After the adopt await, re-resolve from the store: adoptDerivedFeature's own race guard
-		// guarantees the store-resident object wins, and every read below must be against THAT
-		// object, in the synchronous block, or a concurrent capture could be checked against a
-		// stale copy.
-		const adopted = this.featureStore.get(featureId) ?? (await this.adoptDerivedFeature(featureId, repo));
-		if (!adopted) return "no-feature";
-		const pf = this.featureStore.get(featureId) ?? adopted;
-		// Agents copy decision ids from kb-search output, where they render as `decision:<id>` doc
-		// ids — accept that form rather than bouncing a correct reference (blind-review finding:
-		// a false refusal here steered agents toward recording WITHOUT supersedes, the exact
-		// two-live-currents failure this path exists to prevent).
-		if (decision.supersedes?.startsWith("decision:")) decision = { ...decision, supersedes: decision.supersedes.slice("decision:".length) };
-		const norm = (s: string): string => s.replace(/\s+/g, " ").trim().toLowerCase();
-		const target = norm(decision.text);
-		const existing = pf.decisions ?? [];
-		if (existing.some((d) => !d.supersededBy && norm(d.text) === target)) return "duplicate";
-		let superseded: FeatureDecision | undefined;
-		if (decision.supersedes) {
-			superseded = existing.find((d) => d.id === decision.supersedes);
-			if (!superseded) return "supersede-missing";
-			if (superseded.supersededBy) return "supersede-superseded";
-		}
-		const now = Date.now();
-		pf.decisions = [
-			...existing.map((d) => (superseded && d.id === superseded.id ? { ...d, supersededBy: decision.id, supersededAt: now } : d)),
-			decision,
-		];
-		pf.updatedAt = now;
-		this.emitFeaturesChanged();
-		return "recorded";
+		return this.decisionLedger.record(featureId, decision, repo);
 	}
 
 	async updateFeature(id: string, patch: { title?: string; stageOverride?: FeatureStage | null; category?: FeatureCategory | null; archived?: boolean; repo?: string; description?: string; acceptanceCriteria?: FeatureCriterion[]; decisions?: FeatureDecision[]; relationships?: FeatureRelationship[]; contextBundle?: PersistedFeature["contextBundle"] }): Promise<PersistedFeature | undefined> {
@@ -10426,7 +10388,7 @@ export class SquadManager extends EventEmitter {
 	 *  is correct: model-deltas only ever live on persisted features (recordAgentDecision adopts
 	 *  before writing). */
 	storedFeatureDecisions(id: string): FeatureDecision[] | undefined {
-		return this.featureStore.get(id)?.decisions;
+		return this.decisionLedger.stored(id);
 	}
 
 	// ── operator-attention substrate (comprehension concern 01) ──────────────────────────────────
@@ -11778,32 +11740,26 @@ export class SquadManager extends EventEmitter {
 				rec.agent.respondHostTool(call.id, "no feature is attached to this agent, so the decision was not recorded", true);
 				return;
 			}
-			if (isModelDelta) {
-				// Live blast-radius since fork (committed AND working-tree) — the SAME computation
-				// finalizeRun uses for the persisted receipt's filesTouched, so mid-run validation and a
-				// completed receipt agree on what counts as "this run touched".
-				const filesTouched = await this.runFilesTouched(rec);
-				const check = validateModelDelta(text, evidence, filesTouched);
-				if (!check.ok) {
-					rec.agent.respondHostTool(call.id, `model-delta rejected (${check.rule}): ${check.message}`, true);
-					return;
-				}
-			}
-			const decision: FeatureDecision = {
-				id: randomUUID(),
+			// Evidence gate + mint + atomic adopt-aware append, all behind the ledger's interface.
+			// `filesTouched` is a provider: the live blast-radius since fork (committed AND
+			// working-tree) — the SAME computation finalizeRun uses for the persisted receipt's
+			// filesTouched, so mid-run validation and a completed receipt agree on what counts as
+			// "this run touched". The ledger invokes it only on the model-delta path.
+			const captured = await this.decisionLedger.capture({
+				featureId,
 				text,
-				source: isModelDelta ? "model-delta" : "agent",
-				createdAt: Date.now(),
+				modelDelta: isModelDelta,
+				evidence,
+				supersedes,
+				repo: rec.dto.repo,
 				sourceRef: { agentId: rec.dto.id, runId: rec.run?.snapshot().runId },
-				// Persist evidence NORMALIZED (code-review finding 4): validateModelDelta normalizes only
-				// for its comparison, but every downstream consumer (surprise-tap fog keys, evidence-link
-				// jump, PR-body anchors) keys on the STORED string — a raw "./src/x.ts" would silently
-				// no-op them all.
-				...(isModelDelta ? { evidence: (evidence ?? []).map((e) => e.trim().replace(/^\.\//, "").replace(/^\/+/, "")) } : {}),
-				...(supersedes ? { supersedes } : {}),
-			};
-			// Atomic, adopt-aware append (resolves plan-derived features + can't clobber a concurrent capture).
-			const outcome = await this.recordAgentDecision(featureId, decision, rec.dto.repo);
+				filesTouched: () => this.runFilesTouched(rec),
+			});
+			if (captured.kind === "rejected") {
+				rec.agent.respondHostTool(call.id, `model-delta rejected (${captured.rule}): ${captured.message}`, true);
+				return;
+			}
+			const outcome = captured.kind;
 			if (outcome === "no-feature") {
 				rec.agent.respondHostTool(call.id, "no feature is attached to this agent, so the decision was not recorded", true);
 				return;

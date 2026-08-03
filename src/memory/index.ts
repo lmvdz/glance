@@ -16,6 +16,10 @@
  *   - nodes / node-records are the work-graph substrate the ledger anchors to.
  */
 
+// ── the decision ledger: the lane's single write path ───────────────────────────
+export { DecisionLedger, normalizeSupersedesRef, sanitizePatchDecisions } from "./decision-ledger.ts";
+export type { DecisionLedgerStore, RecordDecisionOutcome, CaptureDecisionInput, CaptureDecisionResult } from "./decision-ledger.ts";
+
 // ── decisions: evidence gate + reversal/cost impact ─────────────────────────────
 export { evidenceFilePath, validateModelDelta } from "./decision-evidence.ts";
 export type { EvidenceRejection, EvidenceAccepted, EvidenceValidation } from "./decision-evidence.ts";

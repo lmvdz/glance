@@ -105,6 +105,7 @@ import { planVoteGateOpen, tallyPlanVoteRound } from "./plan-votes.ts";
 import { hardenedGit } from "./git-harden.ts";
 import { rankKbDocs, searchFabric, type KbDoc, type KbDocType } from "./memory/fabric-search.ts";
 import type { FabricSnapshot } from "./memory/fabric.ts";
+import { sanitizePatchDecisions } from "./memory/index.ts";
 import { redactAttentionForActor, redactSeenMapForActor } from "./attention.ts";
 import { maxLadderPriority, type LadderPriority } from "./attention-ladder.ts";
 import { computeFog, repoHasHistory } from "./comprehension-fog.ts";
@@ -379,59 +380,9 @@ function featureCriteria(value: unknown): FeatureCriterion[] | undefined {
 	});
 }
 
-/**
- * Sanitize a PATCH body's `decisions` array against the feature's STORED decisions. The incoming
- * array defines membership and order (so deleting a decision still works), but for an entry whose
- * id already exists on the feature, the server-authoritative fields — `source`, `evidence`,
- * `sourceRef`, `createdAt` — are kept from the stored record and only the text is taken from the
- * client. Without this merge, the webapp's routine "add one decision" round-trip (it PATCHes the
- * FULL array back) coerced every stored `model-delta` decision to `source:"human"` and silently
- * dropped its evidence anchors — destroying the teaching content the comprehension lane exists to
- * produce. New entries (id not on the feature) are down-tiered exactly as before: a PATCH client
- * can never mint `model-delta` records, because those are only minted through
- * `squad_record_decision`'s evidence validation. (Model-deltas always live on persisted features —
- * `recordAgentDecision` adopts before writing — so `stored` is never missing for them.)
- *
- * Supersession-chain members (`supersedes`/`supersededBy` set) get ledger protection
- * (blind-review finding): a STALE client that loaded the feature before a replacement was
- * recorded PATCHes the full array back WITHOUT the replacement — omission-as-delete would then
- * destroy the current decision while its predecessor stays stamped superseded-by-a-ghost,
- * vanishing BOTH from projection. Chain members therefore survive omission (re-appended, stored
- * order), and a SUPERSEDED entry is immutable like a model-delta — it is history, and history
- * does not take text edits.
- * @substrate exported for tests only — the PATCH handler in this file is the one production caller;
- * the merge semantics above are exactly what tests/feature-decisions-merge.test.ts pins.
- */
-export function featureDecisions(value: unknown, stored: FeatureDecision[] | undefined): FeatureDecision[] | undefined {
-	if (!Array.isArray(value)) return undefined;
-	const byId = new Map((stored ?? []).map((d) => [d.id, d]));
-	const out = value.flatMap((item): FeatureDecision[] => {
-		if (!item || typeof item !== "object") return [];
-		const rec = item as Record<string, unknown>;
-		const id = typeof rec.id === "string" ? rec.id : undefined;
-		const text = typeof rec.text === "string" ? rec.text.trim() : "";
-		if (!id || !text) return [];
-		const existing = byId.get(id);
-		// model-delta records are IMMUTABLE through PATCH (code-review resume finding 2): their text
-		// was validated against the recording run's evidence anchors, and accepting a client text edit
-		// while keeping source/evidence/sourceRef would present a rewritten claim as run-validated —
-		// the exact fabricated-verification pattern the lane exists to prevent. A client may still
-		// DELETE one by omitting it (unless it is a supersession-chain member — see below); editing
-		// any other source's text stays allowed.
-		if (existing?.source === "model-delta") return [existing];
-		// Superseded entries are history: keep them verbatim, no text edits.
-		if (existing?.supersededBy) return [existing];
-		if (existing) return [{ ...existing, text }];
-		return [{ id, text, source: rec.source === "plan" || rec.source === "human" || rec.source === "agent" ? rec.source : "human", createdAt: typeof rec.createdAt === "number" ? rec.createdAt : undefined }];
-	});
-	// Ledger guard: chain members cannot be deleted by omission. Re-append any stored
-	// `supersedes`/`supersededBy` carrier the client's array dropped, in stored order.
-	const present = new Set(out.map((d) => d.id));
-	for (const d of stored ?? []) {
-		if (!present.has(d.id) && (d.supersededBy || d.supersedes)) out.push(d);
-	}
-	return out;
-}
+// The PATCH `decisions` sanitizer (server-authoritative merge, model-delta immutability,
+// supersession-chain omission protection) lives with the ledger: `sanitizePatchDecisions`,
+// src/memory/decision-ledger.ts — pinned by tests/feature-decisions-merge.test.ts.
 
 function featureRelationships(value: unknown): FeatureRelationship[] | undefined {
 	if (!Array.isArray(value)) return undefined;
@@ -2750,7 +2701,7 @@ export class SquadServer {
 			if ("stageOverride" in body) patch.stageOverride = typeof body.stageOverride === "string" ? (body.stageOverride as FeatureStage) : null;
 			if ("category" in body) patch.category = typeof body.category === "string" ? (body.category as FeatureCategory) : null;
 			if ("acceptanceCriteria" in body) patch.acceptanceCriteria = featureCriteria(body.acceptanceCriteria);
-			if ("decisions" in body) patch.decisions = featureDecisions(body.decisions, manager.storedFeatureDecisions(decodeURIComponent(mfpatch[1])));
+			if ("decisions" in body) patch.decisions = sanitizePatchDecisions(body.decisions, manager.storedFeatureDecisions(decodeURIComponent(mfpatch[1])));
 			if ("relationships" in body) patch.relationships = featureRelationships(body.relationships);
 			const pf = await manager.updateFeature(decodeURIComponent(mfpatch[1]), patch);
 			return pf ? Response.json(pf) : new Response("no such feature", { status: 404 });
@@ -2759,28 +2710,26 @@ export class SquadServer {
 		// EXPERIMENTS.md): PATCH deliberately drops a client `supersedes` (anti-forgery — a
 		// round-tripping UI must never mint stamps) and squad_record_decision is agent-tool-only,
 		// which left the ledger's core verb unreachable from the UI — where the only alternative was
-		// DELETE, exactly the verb the ledger forbids for chain members. This route goes through
-		// recordAgentDecision's single write rule, so the stamp is server-authored and atomic, and
-		// every conflict outcome maps to an explicit status instead of a silent drop.
+		// DELETE, exactly the verb the ledger forbids for chain members. `DecisionLedger.supersede`
+		// mints server-authored and writes through the single write rule (including the normalize-
+		// then-reject-empty guard from the blind-review fix); this route only maps outcomes to
+		// statuses so every conflict is explicit instead of a silent drop.
 		const mfsupersede = url.pathname.match(/^\/api\/features\/([^/]+)\/decisions\/supersede$/);
 		if (mfsupersede && req.method === "POST") {
 			const decoded = decodeBody(FeatureDecisionSupersedeBodySchema, await req.json().catch(() => null));
 			if (Result.isFailure(decoded)) return new Response("text and supersedes (decision id) required", { status: 400 });
 			const body = decoded.success;
-			const text = body.text.trim();
-			// Blind-review fix: an empty or bare-prefix `supersedes` would evaluate falsy in the write
-			// rule and silently degrade this into an unconditional append while the route advertises
-			// supersession. Normalize like the write path (accept a copied `decision:<id>`), then
-			// reject empty outright.
-			const supersedesId = body.supersedes.trim().replace(/^decision:/, "");
-			if (!text || !supersedesId) return new Response("text and supersedes (decision id) required", { status: 400 });
-			const decision: FeatureDecision = { id: randomUUID(), text, source: "human", createdAt: Date.now(), supersedes: supersedesId };
-			const outcome = await manager.recordAgentDecision(decodeURIComponent(mfsupersede[1]), decision, typeof body.repo === "string" ? body.repo : undefined);
-			if (outcome === "no-feature") return new Response("no such feature", { status: 404 });
-			if (outcome === "supersede-missing") return new Response(`supersedes target "${body.supersedes}" not found on this feature`, { status: 409 });
-			if (outcome === "supersede-superseded") return new Response(`decision "${body.supersedes}" was already superseded — supersede the current decision instead`, { status: 409 });
-			if (outcome === "duplicate") return new Response("an identical decision is already current — no change", { status: 409 });
-			return Response.json({ ok: true, decision });
+			const result = await manager.decisionLedger.supersede(decodeURIComponent(mfsupersede[1]), {
+				text: body.text,
+				supersedes: body.supersedes,
+				repo: typeof body.repo === "string" ? body.repo : undefined,
+			});
+			if (result.outcome === "invalid") return new Response("text and supersedes (decision id) required", { status: 400 });
+			if (result.outcome === "no-feature") return new Response("no such feature", { status: 404 });
+			if (result.outcome === "supersede-missing") return new Response(`supersedes target "${body.supersedes}" not found on this feature`, { status: 409 });
+			if (result.outcome === "supersede-superseded") return new Response(`decision "${body.supersedes}" was already superseded — supersede the current decision instead`, { status: 409 });
+			if (result.outcome === "duplicate") return new Response("an identical decision is already current — no change", { status: 409 });
+			return Response.json({ ok: true, decision: result.decision });
 		}
 		if (mfpatch && req.method === "DELETE") {
 			const repo = url.searchParams.get("repo") ?? undefined;

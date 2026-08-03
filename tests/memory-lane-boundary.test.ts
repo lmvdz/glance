@@ -39,7 +39,6 @@ const ALLOWED = new Set([
 	"src/server.ts -> weekly-episode",
 	"src/squad-manager.ts -> after-action",
 	"src/squad-manager.ts -> answers",
-	"src/squad-manager.ts -> decision-evidence",
 	"src/squad-manager.ts -> decision-impact",
 	"src/squad-manager.ts -> digest",
 	"src/squad-manager.ts -> fabric",
