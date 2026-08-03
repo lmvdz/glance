@@ -1,5 +1,5 @@
 # Horizon × reliability curve — land-rate conditioned on task size
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: moderate

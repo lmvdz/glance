@@ -54,3 +54,9 @@ squad-manager dispatch). Deepening concerns 05–13 resume after.
   (dead-exports +1 pre-existing, one isolated-pass ordering flake); grok + codex both clean.
   CS329A borrows joined the queue as 14–16 (Lars's pivot); next firing = 15 horizon curve.
   SquadManager is now ~1,100 lines lighter across the three islands.
+- 2026-08-03 — 15 done (continuous mode, no pacing): horizon×reliability curve (src/
+  horizon-curve.ts + GET /api/horizon + MondaySurface section). TWO blind rounds each caught
+  real statistical dishonesty (codex: non-monotone "up to" + outlier-anchored top band; grok:
+  cumulative laundering + sentence/evidence contradiction) — every clause of the final monotone
+  band-wise rule is a bought finding with a named regression test. Root 4938/1 (dead-exports
+  pre-existing only), webapp 2024/0.
