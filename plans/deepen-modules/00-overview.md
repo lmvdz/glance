@@ -49,3 +49,8 @@ squad-manager dispatch). Deepening concerns 05–13 resume after.
   PR #311; suite 4928/1 — consolidating the audit catch-handlers paid the error-message-idiom
   ratchet back to baseline (both voice-era overages now repaid by the loop; only dead-exports +1
   workos-provision remains red). grok + codex both clean.
+- 2026-08-03 — 04 slice 3 (project lane → src/project-lane.ts: registry + workspace projection +
+  ephemeral lifecycle, state owned, fleet behind three read thunks) on PR #311; suite 4927/2
+  (dead-exports +1 pre-existing, one isolated-pass ordering flake); grok + codex both clean.
+  CS329A borrows joined the queue as 14–16 (Lars's pivot); next firing = 15 horizon curve.
+  SquadManager is now ~1,100 lines lighter across the three islands.
