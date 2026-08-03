@@ -28,3 +28,7 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
 
 - 2026-08-03 — 01 + 02 shipped as PR #310 (src/memory/ + DecisionLedger); grok+codex clean;
   codex live-probed the adopt race. 03 executed same session (same PR, later commits).
+- 2026-08-03 — 03 done: src/ledger.ts (4 shapes), six clones → declarations, land-ledger writes
+  now atomic+durable; json-parse-as-cast ratchet paid back from +5 to baseline; skills manifest
+  gained "deepen". Lesson: a new .claude/skills/ entry fails skills-verify until
+  COMMITTED_SKILL_NAMES in scripts/skills-verify.ts lists it.

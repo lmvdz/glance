@@ -13,12 +13,12 @@
  * eviction-race window), so the persisted row is never touched at all and the very next
  * `start()` reattaches it.
  *
- * This is the same tiny-JSON-set pattern as `dispatch-ledger.ts` (restart-safe, per-stateDir —
- * which is already per-ORG in DB-root mode, see manager-registry.ts's `path.join(root, "orgs",
- * orgId)`), deliberately NOT plumbed through the `Store`/`DbStore`/`FileStore` abstraction:
- * it needs to durably persist an id EVEN when that id was never resident in `this.agents` (so
- * there is nothing to fold into a roster snapshot), which the full-snapshot-replace `Store`
- * contract doesn't support.
+ * A tiny persisted id set (shape + durability semantics: src/ledger.ts; per-stateDir is already
+ * per-ORG in DB-root mode, see manager-registry.ts's `path.join(root, "orgs", orgId)`),
+ * deliberately NOT plumbed through the `Store`/`DbStore`/`FileStore` abstraction: it needs to
+ * durably persist an id EVEN when that id was never resident in `this.agents` (so there is
+ * nothing to fold into a roster snapshot), which the full-snapshot-replace `Store` contract
+ * doesn't support.
  *
  * Keyed by AGENT id, not Plane issue id, on purpose: a tombstoned id must never resurrect, but
  * the underlying issue must remain dispatchable — a later dispatch tick mints a fresh,
@@ -37,10 +37,8 @@
  * never in place of it (see `add`'s `alsoTombstone` param).
  */
 
-import path from "node:path";
-import { Schema } from "effect";
-import { getStorageBackend } from "./dal/storage.ts";
-import { decodeJsonWith } from "./schema/external-json.ts";
+import { Result, Schema } from "effect";
+import { openSetLedger } from "./ledger.ts";
 
 export interface RemovedLedger {
 	has(id: string): boolean;
@@ -60,55 +58,23 @@ export interface RemovedLedger {
 	delete(id: string): void;
 }
 
-/** On-disk shape: a JSON array of tombstoned agent ids (written sorted by writeIds). A real Schema
- *  decode (src/schema/external-json.ts convention) rather than a `JSON.parse as` cast — persisted
- *  state survives daemon upgrades, so the shape check is a genuine trust boundary, and it keeps the
+/** On-disk shape: a JSON array of tombstoned agent ids (written sorted). A real Schema decode
+ *  (src/schema/external-json.ts convention) rather than a `JSON.parse as` cast — persisted state
+ *  survives daemon upgrades, so the shape check is a genuine trust boundary, and it keeps the
  *  json-parse-as-cast ratchet flat. */
 const RemovedIdsSchema = Schema.Array(Schema.String);
 
-function readIds(stateDir: string): Set<string> {
-	try {
-		const file = path.join(stateDir, "removed-agents.json");
-		const b = getStorageBackend();
-		if (!b.exists(file)) return new Set();
-		const raw0 = b.readTextSync(file);
-		if (raw0 === undefined) return new Set();
-		const ids = decodeJsonWith(RemovedIdsSchema, raw0);
-		return new Set((ids ?? []).filter((x) => x.length > 0));
-	} catch {
-		return new Set(); // corrupt/unreadable ⇒ behave as "nothing tombstoned" this boot; never crash start()
-	}
-}
-
-function writeIds(stateDir: string, ids: Set<string>): void {
-	try {
-		getStorageBackend().writeDurableSync(path.join(stateDir, "removed-agents.json"), JSON.stringify([...ids].sort()));
-	} catch {
-		/* best-effort: a disk failure here must not block `rm` from at least removing the live record */
-	}
-}
-
 export function openRemovedLedger(stateDir: string): RemovedLedger {
-	const ids = readIds(stateDir);
+	const ids = openSetLedger(stateDir, "removed-agents.json", (raw) => {
+		const r = Schema.decodeUnknownResult(RemovedIdsSchema)(raw);
+		return Result.isSuccess(r) ? r.success.filter((x) => x.length > 0) : [];
+	});
 	return {
-		has(id) {
-			return ids.has(id);
-		},
+		has: (id) => ids.has(id),
 		add(id, alsoTombstone) {
-			let changed = false;
-			if (!ids.has(id)) {
-				ids.add(id);
-				changed = true;
-			}
-			if (alsoTombstone && alsoTombstone !== id && !ids.has(alsoTombstone)) {
-				ids.add(alsoTombstone);
-				changed = true;
-			}
-			if (changed) writeIds(stateDir, ids);
+			if (alsoTombstone && alsoTombstone !== id) ids.add(id, alsoTombstone);
+			else ids.add(id);
 		},
-		delete(id) {
-			if (!ids.delete(id)) return;
-			writeIds(stateDir, ids);
-		},
+		delete: (id) => ids.delete(id),
 	};
 }

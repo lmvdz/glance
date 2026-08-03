@@ -68,6 +68,9 @@ export const PATTERNS: Pattern[] = [
 		// src/land-assessment/replay/incident-taxonomy.ts's `loadIncidentManifest` parses
 		// `incident-manifest.json` immediately validated via `validateIncidentManifest` before any
 		// caller sees it -- same carve-outs this pattern's own description names, two more sites.
+		// 63→58 (deepen-modules concern 03): the voice lane had pushed the live count to 63 (+5 over
+		// baseline, red on main); collapsing the six hand-rolled stateDir ledgers' `JSON.parse as`
+		// reads into src/ledger.ts's single readLedgerFile paid the overage back down to baseline.
 		baseline: 58,
 	},
 	{

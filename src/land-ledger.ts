@@ -7,14 +7,15 @@
  * restarts AND key on something stable across them: the BRANCH, not the agent id (create() mints a
  * fresh id on every re-adoption of a surviving worktree).
  *
- * ponytail: one JSON file under <stateDir>, sync read-modify-write (the manager is single-writer,
- * single event loop, so no interleave). Ceiling: the file grows one entry per ever-failing branch
+ * One JSON file under <stateDir>, sync read-modify-write per call (the manager is single-writer,
+ * single event loop, so no interleave) — shape + durability semantics: src/ledger.ts, which also
+ * made these writes atomic+durable (this file historically used raw non-atomic `node:fs`, the only
+ * ledger that bypassed the storage seam). Ceiling: the file grows one entry per ever-failing branch
  * and is pruned only to live branches by the Observer's read; a very long-lived daemon with churn
  * could accumulate dead entries. Upgrade path: prune on write, or fold into the sqlite ledger.
  */
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import * as path from "node:path";
+import { listFile, mapFile } from "./ledger.ts";
 
 export interface LandFailure {
 	/** Consecutive failed auto-lands for this branch (a successful land clears the entry). */
@@ -27,27 +28,10 @@ export interface LandFailure {
 /** branch → its failure streak. */
 export type LandLedger = Record<string, LandFailure>;
 
-function ledgerPath(stateDir: string): string {
-	return path.join(stateDir, "land-failures.json");
-}
+const failures = (stateDir: string) => mapFile<LandFailure>(stateDir, "land-failures.json");
 
 export function readLandLedger(stateDir: string): LandLedger {
-	try {
-		const p = ledgerPath(stateDir);
-		if (!existsSync(p)) return {};
-		const raw = JSON.parse(readFileSync(p, "utf8")) as unknown;
-		return raw && typeof raw === "object" ? (raw as LandLedger) : {};
-	} catch {
-		return {}; // corrupt/unreadable ⇒ start fresh (worst case: the cap forgets one branch's streak)
-	}
-}
-
-function writeLandLedger(stateDir: string, ledger: LandLedger): void {
-	try {
-		writeFileSync(ledgerPath(stateDir), JSON.stringify(ledger));
-	} catch {
-		/* best-effort: a disk failure must never break the land it records */
-	}
+	return failures(stateDir).read();
 }
 
 /** Consecutive failed auto-lands recorded for `branch` (0 when none / unknown). */
@@ -61,17 +45,18 @@ export function landFailureCount(stateDir: string, branch: string): number {
  */
 export function recordLandOutcome(stateDir: string, branch: string | undefined, ok: boolean, detail: string, now = Date.now()): number {
 	if (!branch) return 0;
-	const ledger = readLandLedger(stateDir);
+	const file = failures(stateDir);
+	const ledger = file.read();
 	if (ok) {
 		if (ledger[branch]) {
 			delete ledger[branch];
-			writeLandLedger(stateDir, ledger);
+			file.write(ledger);
 		}
 		return 0;
 	}
 	const fails = (ledger[branch]?.fails ?? 0) + 1;
 	ledger[branch] = { fails, lastDetail: detail.slice(0, 600), at: now };
-	writeLandLedger(stateDir, ledger);
+	file.write(ledger);
 	return fails;
 }
 
@@ -80,6 +65,8 @@ export function recordLandOutcome(stateDir: string, branch: string | undefined, 
  * never be invisible trust: every land that merged WITHOUT a passing proof (forcedWithoutProof) is
  * appended here with the actor + timestamp, so "who force-landed what, unproven, when" is inspectable.
  * Append-only JSON list under <stateDir>; best-effort (a disk failure must never break the land).
+ * NO retention guard, deliberately: this is a compliance-auditable record (src/compliance.ts) and
+ * must never silently drop.
  */
 export interface ForcedLand {
 	/** The branch that was force-landed without a passing proof. */
@@ -92,33 +79,18 @@ export interface ForcedLand {
 	at: number;
 }
 
-function forcedPath(stateDir: string): string {
-	return path.join(stateDir, "land-forced.json");
-}
+const forced = (stateDir: string) => listFile<ForcedLand>(stateDir, "land-forced.json");
 
 /** Every forced (proof-bypassing) land recorded, oldest first. Corrupt/missing ⇒ empty. */
 export function readForcedLands(stateDir: string): ForcedLand[] {
-	try {
-		const p = forcedPath(stateDir);
-		if (!existsSync(p)) return [];
-		const raw = JSON.parse(readFileSync(p, "utf8")) as unknown;
-		return Array.isArray(raw) ? (raw as ForcedLand[]) : [];
-	} catch {
-		return [];
-	}
+	return forced(stateDir).read();
 }
 
 /** Append one forced-land audit record. No-op for an undefined branch. Returns the new record count. */
 export function recordForcedLand(stateDir: string, branch: string | undefined, actor: string, detail: string, now = Date.now()): number {
-	if (!branch) return readForcedLands(stateDir).length;
-	const list = readForcedLands(stateDir);
-	list.push({ branch, actor, detail: detail.slice(0, 600), at: now });
-	try {
-		writeFileSync(forcedPath(stateDir), JSON.stringify(list));
-	} catch {
-		/* best-effort: a disk failure must never break the land it records */
-	}
-	return list.length;
+	const file = forced(stateDir);
+	if (!branch) return file.read().length;
+	return file.append({ branch, actor, detail: detail.slice(0, 600), at: now });
 }
 
 /**
@@ -127,7 +99,7 @@ export function recordForcedLand(stateDir: string, branch: string | undefined, a
  * bypasses a semantic judgment that the declared acceptance criteria were NOT met), so it gets its
  * own record type in its own file — never folded into `ForcedLand`/`land-forced.json`. The two
  * override classes must stay separately auditable by the compliance evaluator (src/compliance.ts).
- * Append-only JSON list under <stateDir>; best-effort (a disk failure must never break the land).
+ * Append-only JSON list under <stateDir>; best-effort; NO retention guard (compliance-auditable).
  */
 export interface ValidatorOverride {
 	/** The branch whose validator veto was overridden. */
@@ -142,20 +114,11 @@ export interface ValidatorOverride {
 	at: number;
 }
 
-function overridePath(stateDir: string): string {
-	return path.join(stateDir, "land-validator-override.json");
-}
+const overrides = (stateDir: string) => listFile<ValidatorOverride>(stateDir, "land-validator-override.json");
 
 /** Every validator-override recorded, oldest first. Corrupt/missing ⇒ empty. */
 export function readValidatorOverrides(stateDir: string): ValidatorOverride[] {
-	try {
-		const p = overridePath(stateDir);
-		if (!existsSync(p)) return [];
-		const raw = JSON.parse(readFileSync(p, "utf8")) as unknown;
-		return Array.isArray(raw) ? (raw as ValidatorOverride[]) : [];
-	} catch {
-		return [];
-	}
+	return overrides(stateDir).read();
 }
 
 /**
@@ -164,13 +127,7 @@ export function readValidatorOverrides(stateDir: string): ValidatorOverride[] {
  * not be honored (the veto stands). Returns the new record count (or the current count on refusal).
  */
 export function recordValidatorOverride(stateDir: string, branch: string | undefined, actor: string, reasonClass: string, detail: string, now = Date.now()): number {
-	if (!branch || !reasonClass.trim()) return readValidatorOverrides(stateDir).length;
-	const list = readValidatorOverrides(stateDir);
-	list.push({ branch, actor, reasonClass: reasonClass.trim(), detail: detail.slice(0, 600), at: now });
-	try {
-		writeFileSync(overridePath(stateDir), JSON.stringify(list));
-	} catch {
-		/* best-effort: a disk failure must never break the land it records */
-	}
-	return list.length;
+	const file = overrides(stateDir);
+	if (!branch || !reasonClass.trim()) return file.read().length;
+	return file.append({ branch, actor, reasonClass: reasonClass.trim(), detail: detail.slice(0, 600), at: now });
 }

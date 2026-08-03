@@ -1,5 +1,5 @@
 # One ledger implementation — collapse 8 hand-rolled stateDir persistence clones
-STATUS: in-progress
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: moderate
