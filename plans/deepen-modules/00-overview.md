@@ -37,3 +37,7 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   state machine; codex runtime-probed it). REFUTED the review's voice-shell deletion claim —
   those delegations are the RBAC seam; recorded in 04's concern doc. WIP guard: at 3 unmerged
   stacked deepen PRs, the loop pauses for merges.
+- 2026-08-03 — 04 slice 2 (capability lane → src/capability-lane.ts, WITH state ownership) on
+  PR #311; suite 4928/1 — consolidating the audit catch-handlers paid the error-message-idiom
+  ratchet back to baseline (both voice-era overages now repaid by the loop; only dead-exports +1
+  workos-provision remains red). grok + codex both clean.
