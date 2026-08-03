@@ -63,3 +63,31 @@ test("it does not claim an absence that did not happen", () => {
   const away = renderToStaticMarkup(<QuietRoom nodes={nodes} awayMs={4 * 3_600_000} now={T} />);
   expect(away).toContain("WHAT GOT DONE WHILE YOU DIDN&#x27;T LOOK · 4H");
 });
+
+// "Quiet here means the fleet is working, not that nothing is" was printed unconditionally, as
+// decoration. On a fleet where every unit is idle it is simply false — and it is the most reassuring
+// sentence on the screen, which makes it the worst one to leave unguarded. These pin the three cases.
+test("with units present but NONE running, the quiet is not sold as progress", () => {
+  const idleOnly: RoomNode[] = [
+    { id: "a", address: "3.1", title: "the parser", state: "idle" },
+    { id: "b", address: "3.2", title: "the migration", state: "idle" },
+  ];
+  const html = renderToStaticMarkup(<QuietRoom nodes={idleOnly} awayMs={4 * 3_600_000} now={T} />);
+  expect(html).toContain("2 units are idle");
+  expect(html).toContain("this quiet is not progress");
+  expect(html).not.toContain("Quiet here means the fleet is working");
+  // And they are counted as left-out-but-present rather than silently dropped: the handover must not
+  // claim to be the whole picture while two units sit unmentioned on the pane beside it.
+  expect(html).not.toContain("That is everything, not a selection.");
+});
+
+test("with something genuinely executing, the original reassurance still stands", () => {
+  const html = renderToStaticMarkup(<QuietRoom nodes={nodes} awayMs={4 * 3_600_000} now={T} />);
+  expect(html).toContain("Quiet here means the fleet is working");
+});
+
+test("with no units at all it claims neither progress nor idleness", () => {
+  const html = renderToStaticMarkup(<QuietRoom nodes={[{ id: "a", address: "3.1", title: "done", state: "settled" }]} awayMs={3_600_000} now={T} />);
+  expect(html).toContain("nothing is running and no unit is waiting to");
+  expect(html).not.toContain("Quiet here means the fleet is working");
+});

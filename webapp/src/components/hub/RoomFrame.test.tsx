@@ -104,3 +104,24 @@ describe('RoomFrame — the standing tree folds settled units and never grows un
     expect(html).not.toContain('settled');
   });
 });
+
+describe('RoomFrame — the status dot cannot contradict the count', () => {
+  // `idle` had no branch of its own and fell through to the ember reserved for running work, so the
+  // rail painted a unit as executing while the top bar (correctly) refused to count it as working.
+  // A colour channel that disagrees with the number is worse than either being wrong alone, because
+  // the operator has no way to tell which one to believe.
+  test('an idle unit is not painted with the ember reserved for running work', () => {
+    const node = { id: 'a', address: '1', title: 'the parser', state: 'idle' as const };
+    const html = renderToStaticMarkup(<RoomFrame {...baseProps} nodes={[node]} />);
+    expect(html).toContain('the parser');
+    expect(html).toContain('#4A4A52');
+    // The ember must not appear as this row's dot fill.
+    expect(html).not.toMatch(/rounded-full[^>]*background:#F0A35A/);
+  });
+
+  test('a genuinely in-flight unit keeps the ember', () => {
+    const node = { id: 'a', address: '1', title: 'the migration', state: 'in-flight' as const };
+    const html = renderToStaticMarkup(<RoomFrame {...baseProps} nodes={[node]} />);
+    expect(html).toMatch(/rounded-full[^>]*background:#F0A35A/);
+  });
+});

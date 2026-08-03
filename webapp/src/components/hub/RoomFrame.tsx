@@ -273,7 +273,10 @@ export function RoomFrame({ repo, rooms, activeRoomId, onOpenRoom, nodes, plans,
 							) : nodes.map((node) => {
 								const isSelected = node.id === selectedId;
 								const rule = node.state === 'needs-you' ? '#D9A03C' : isSelected ? '#F0A35A' : 'transparent';
-								const dot = node.state === 'needs-you' ? '#D9A03C' : node.state === 'settled' ? '#3E7D57' : node.state === 'blocked' ? '#6A6A72' : '#F0A35A';
+								// Ember is reserved for work that is actually executing. `idle` used to fall through to it,
+								// so the rail painted a unit as running while the top bar (correctly) refused to count it —
+								// the colour channel contradicting the number is worse than either being wrong alone.
+								const dot = node.state === 'needs-you' ? '#D9A03C' : node.state === 'settled' ? '#3E7D57' : node.state === 'blocked' ? '#6A6A72' : node.state === 'idle' ? '#4A4A52' : '#F0A35A';
 								return (
 									<div
 										key={node.id}

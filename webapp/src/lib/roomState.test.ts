@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { agentsToRoomNodes, alarmBand, backLabel, duration, foldVerdict, groupByState, handoverSummary, nodeStatusLine, roomViewsFrom, selectionPreview, type RoomNode } from "./roomState";
+import { fleetSummary } from "./roomFrame";
 
 const T = 1_000_000_000;
 
@@ -177,11 +178,47 @@ describe("the roster projected as room state", () => {
 		expect(agentsToRoomNodes([{ id: "b", status: "stopped" }])[0]!.state).toBe("settled");
 	});
 
-	test("an unknown status is treated as in flight, never as settled", () => {
-		// Absence-as-answer: a status nobody recognises must not read as finished, because settled work
-		// leaves the working surface and would vanish from view.
-		expect(agentsToRoomNodes([{ id: "a", status: "something-new" }])[0]!.state).toBe("in-flight");
-		expect(agentsToRoomNodes([{ id: "b" }])[0]!.state).toBe("in-flight");
+	test("an unknown or missing status stays on the working surface but is NEVER counted as working", () => {
+		// Two rules pull in opposite directions and both have to hold. (1) A status nobody recognises
+		// must not read as finished, because settled work leaves the working surface and would vanish
+		// from view. (2) It must not read as in-flight either — that is a positive claim that work is
+		// happening, and the whole point of an unknown status is that we cannot support that claim.
+		// `idle` is the only state that satisfies both: visible in the working region, uncounted.
+		for (const agent of [{ id: "a", status: "something-new" }, { id: "b" }]) {
+			const [node] = agentsToRoomNodes([agent]);
+			expect(node!.state).toBe("idle");
+			expect(node!.state).not.toBe("settled");
+			expect(groupByState([node!]).inFlight).toHaveLength(1);
+			expect(groupByState([node!]).settled).toHaveLength(0);
+			expect(fleetSummary([node!], 0)).toContain("0 units working");
+		}
+	});
+
+	test("an idle unit is alive-but-not-working: shown, and excluded from the working count", () => {
+		const [node] = agentsToRoomNodes([{ id: "a", name: "Wren", status: "idle" }]);
+		expect(node!.state).toBe("idle");
+		// Still on the working surface — an existing unit must not disappear.
+		expect(groupByState([node!]).inFlight).toEqual([node!]);
+		// ...but the top bar must not claim it as work in progress.
+		expect(fleetSummary([node!], 0)).toBe("0 units working · 1 idle · 0 plans · nothing waiting on you");
+		// And its line says the plain fact rather than dressing idleness up as progress.
+		expect(nodeStatusLine(node!, 0)).toContain("idle");
+		expect(nodeStatusLine(node!, 0)).not.toContain("is working on it");
+	});
+
+	test("a unit spinning up IS in flight; a unit asking for input needs a person", () => {
+		expect(agentsToRoomNodes([{ id: "a", status: "starting" }])[0]!.state).toBe("in-flight");
+		// Even before a pending request has materialised on the DTO.
+		expect(agentsToRoomNodes([{ id: "b", status: "input" }])[0]!.state).toBe("needs-you");
+	});
+
+	// The regression in one assertion, in the shape production actually produces: a roster of restored
+	// units that all settled to `idle` after reconnecting, none of them executing anything. This is
+	// the live daemon's state on 2026-07-29 — seven units adopted, nothing running — which the top bar
+	// reported as "7 units working".
+	test("seven idle units report as zero working, not seven", () => {
+		const nodes = agentsToRoomNodes(Array.from({ length: 7 }, (_, i) => ({ id: `unit-${i}`, status: "idle" })));
+		expect(fleetSummary(nodes, 0)).toBe("0 units working · 7 idle · 0 plans · nothing waiting on you");
 	});
 
 	test("children become the parent's blast radius", () => {

@@ -1564,6 +1564,17 @@ export class SquadManager extends EventEmitter {
 			// Dead-session honesty (daily-onramp 04): every persisted non-resumable session the paths
 			// above (correctly) declined to bring back leaves a placeholder, never a silent vanish.
 			this.recordNonResumableSkips(snapshot);
+			// The same honesty, one layer down. Everything above reconciles the ROSTER; nothing
+			// reconciles the node graph, and a node can only ever be moved by a live agent sharing its
+			// id — so a unit whose host died while the daemon was down, or whose worktree was re-adopted
+			// under a fresh id, keeps claiming "working" forever. Scheduled here, after reconnect and
+			// adopt have decided who is actually alive, so the surviving roster is the authority.
+			//
+			// Awaited, so a boot that returns has already told the truth about what is running — the
+			// alternative races the first render and shows ghosts once. It is cheap next to the work
+			// above it (reconnect, adopt, socket prune), and `reconcileOrphans` takes a live-roster
+			// PREDICATE rather than a snapshot, so moving it off the boot path later stays safe.
+			await this.reconcileOrphanedNodes();
 		}
 		// AFTER roster restore (needs the surviving agents to tell live `glance here` sessions from dead
 		// ones) and outside the snapshot guard: a fresh-state boot with leftover markers means every
@@ -5383,6 +5394,34 @@ export class SquadManager extends EventEmitter {
 	 *  exists", while the source's own marker never gets cleared to reflect it). Called once at the end of
 	 *  `start()`'s recovery sequence, after every reattach/adopt path has had a chance to put both the fork
 	 *  and its source back in `this.agents` (review finding 3). */
+	/**
+	 * Stop nodes that claim to be running when no agent under that id survived the restart.
+	 *
+	 * Best-effort by construction: a node graph that cannot be read is not a reason to refuse to boot
+	 * the fleet, and the cost of skipping is a stale count rather than lost work. What it settles is
+	 * logged rather than done silently — a unit disappearing from "working" is exactly the kind of
+	 * change an operator should be able to find an explanation for.
+	 */
+	private async reconcileOrphanedNodes(): Promise<void> {
+		try {
+			const stopped = await this.nodeStore.reconcileOrphans((id) => this.agents.has(id));
+			if (stopped.length === 0) return;
+			// Moving the node is only half the correction. The durable summaries are written by
+			// `refreshNodeSummaries`, which needs a live `AgentRecord` under the same id — precisely what
+			// an orphan does not have — so without this the row reads "stopped" while its own recorded
+			// summary goes on saying the unit is working, forever. Regenerate them from the corrected node.
+			const records = new NodeRecordStore(this.store, (m) => this.log("warn", `node-records: ${m}`));
+			const now = Date.now();
+			for (const node of stopped) {
+				const summaries = regenerateNodeSummaries({ node, records: await records.list(node.id), now });
+				await Promise.all(summaries.map((summary) => records.put(summary)));
+			}
+			this.log("info", `nodes: stopped ${stopped.length} orphaned unit${stopped.length === 1 ? "" : "s"} still claiming live work (${stopped.map((n) => n.id).join(", ")})`);
+		} catch (err) {
+			this.log("warn", `nodes: orphan reconcile skipped: ${errText(err)}`);
+		}
+	}
+
 	private reconcileForkLineage(): void {
 		for (const rec of this.agents.values()) {
 			const forkedFrom = rec.options.workflowState?.forkedFrom;

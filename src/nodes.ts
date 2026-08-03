@@ -6,6 +6,13 @@ export type NodeKind = "plan" | "unit" | "subagent" | "landing";
 /** Work-state vocabulary accepts agent lifecycle states during the legacy migration. */
 export type NodeState = "pending" | "starting" | "working" | "idle" | "input" | "error" | "stopped" | "settled";
 
+/**
+ * The states that assert "this unit is alive and doing something RIGHT NOW". Only these are worth
+ * sweeping when the agent behind them is gone — they are the ones that mislead an operator reading
+ * the fleet. `idle`, `error`, `stopped` and `settled` make no such claim.
+ */
+const CLAIMS_LIVE: ReadonlySet<NodeState> = new Set<NodeState>(["pending", "starting", "working", "input"]);
+
 /** Activity fades by half every six hours without a new event. */
 export const ACTIVITY_HALF_LIFE_MS = 6 * 60 * 60 * 1_000;
 
@@ -52,13 +59,26 @@ export interface Node {
 
 export type CreateNodeInput = Omit<Node, "channelId"> & { channelId?: never };
 
+/**
+ * `PersistedAgent` carries no `status` field — agent status is derived at runtime and never written
+ * to disk — so a migrated legacy agent has NO status to migrate from. This used to mint `"working"`
+ * unconditionally, which is a claim the data cannot support: it marked long-dead units, adopted
+ * units, and units the daemon had never reconnected as actively working, permanently (nothing ever
+ * transitions a node whose agent id is no longer in the roster). Six such nodes were still claiming
+ * "working" two days after their processes died.
+ *
+ * `idle` is the honest floor: the unit existed when state was last written, and nothing here knows
+ * more than that. A genuinely live agent is corrected within a tick by `refreshNodeSummaries`, so
+ * under-claiming costs a moment of staleness while over-claiming costs the operator's trust in the
+ * fleet counter.
+ */
 function nodeFromAgent(agent: PersistedAgent, createdAt: number): Node {
 	return {
 		id: agent.id,
 		parentId: agent.parentId,
 		kind: "unit",
 		title: agent.name,
-		state: "working",
+		state: "idle",
 		goal: agent.task,
 		createdAt,
 	};
@@ -105,6 +125,41 @@ export class NodeStore {
 		};
 		await this.store.putNode(node);
 		return (await this.store.getNode(id)) ?? node;
+	}
+
+	/**
+	 * Settle unit nodes that CLAIM to be live but have no agent behind them any more.
+	 *
+	 * A node's LIFECYCLE state is driven by `refreshNodeSummaries`, which needs a live `AgentRecord`
+	 * under the SAME id. (Node rows are also written by `create`, `transition` and the legacy
+	 * migration — this is a statement about what moves a node through its lifecycle, not about who
+	 * may write the row.) Cold adoption mints a fresh agent id for a recovered worktree, so the node
+	 * belonging to the old id is orphaned by construction — frozen at whatever it last claimed, with
+	 * nothing that will ever move it again: there is no `deleteNode`, and every existing reaper works
+	 * on the roster, sockets, or worktrees rather than on nodes. That is how six units went on
+	 * reporting "working" for two days after their processes were gone.
+	 *
+	 * Only `kind === "unit"` nodes are swept, and only out of states that assert something is running
+	 * right now. Synthetic container nodes (the root `fleet` plan) have no agent by design and must
+	 * not be settled out from under the tree, and a node that already reads `idle`/`error`/`settled`
+	 * is not lying about work even if its agent is gone.
+	 *
+	 * Takes a PREDICATE rather than a snapshot of live ids on purpose. The caller runs this on the boot
+	 * path today, but the roster is mutable and this walks the whole graph; re-asking per candidate,
+	 * immediately before the write, means a unit that came alive mid-sweep can never be stopped by a
+	 * decision made microseconds earlier — and keeps it safe to move off the boot path later.
+	 */
+	async reconcileOrphans(isLive: (id: string) => boolean): Promise<Node[]> {
+		const stopped: Node[] = [];
+		for (const node of await this.list()) {
+			if (node.kind !== "unit" || isLive(node.id) || !CLAIMS_LIVE.has(node.state)) continue;
+			// "stopped", not "settled": the unit ended without choosing to, and settled means finished.
+			// Matches `transition`, which only stamps `settledAt` for a genuine settle.
+			const next: Node = { ...node, state: "stopped", settledAt: undefined };
+			await this.store.putNode(next);
+			stopped.push(next);
+		}
+		return stopped;
 	}
 
 	/** Idempotently materialize unit nodes for state written before nodes existed. */

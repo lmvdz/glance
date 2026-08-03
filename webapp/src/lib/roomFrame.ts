@@ -15,9 +15,15 @@ import type { RoomNode } from './roomState';
 /** The one-line state of the whole fleet, in the top bar. */
 export function fleetSummary(nodes: readonly RoomNode[], plans: number): string {
 	const working = nodes.filter((node) => node.state === 'in-flight' || node.state === 'blocked').length;
+	// Idle units are alive but producing nothing. They are counted SEPARATELY rather than folded into
+	// "working" (which claimed a busy fleet when nothing was running) or dropped entirely (which would
+	// make a roster of live units read as an empty fleet). The segment only appears when there are
+	// any, so a fleet that is genuinely all-hands keeps the reference's three-part line.
+	const idle = nodes.filter((node) => node.state === 'idle').length;
 	const waiting = nodes.filter((node) => node.state === 'needs-you').length;
 	const parts = [
 		`${working} unit${working === 1 ? '' : 's'} working`,
+		...(idle > 0 ? [`${idle} idle`] : []),
 		`${plans} plan${plans === 1 ? '' : 's'}`,
 		waiting === 0 ? 'nothing waiting on you' : `${waiting} waiting on you`,
 	];

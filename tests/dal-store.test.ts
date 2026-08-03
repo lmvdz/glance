@@ -20,7 +20,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type OrgContext } from "../src/dal/context.ts";
-import { DbStore, FileStore } from "../src/dal/store.ts";
+import { DbStore, FileStore, type Store } from "../src/dal/store.ts";
 import { LocalStorageBackend, setStorageBackend, type WriteOpts } from "../src/dal/storage.ts";
 import { type DbHandle, openDatabase, openDb } from "../src/db/index.ts";
 import { appMigrations } from "../src/db/migrations.ts";
@@ -310,6 +310,71 @@ test("NodeStore: nodes round-trip through FileStore and DbStore with parent link
 	}
 });
 
+// `PersistedAgent` has no `status` field — status is derived at runtime and never written down — so
+// the legacy migration has nothing to migrate from. It used to mint every node `"working"`, which is
+// a claim about live execution that the data cannot support, and which nothing could ever undo (a
+// node only moves while a live agent shares its id). On the operator's own daemon that left six
+// units reporting "working" two days after their processes died.
+test("NodeStore: legacy migration marks agents idle, never working — status is not persisted, so working is unsupportable", async () => {
+	const fdir = path.join(dir, "nodes-migration-idle");
+	const stores = [
+		// Org "A" is one of the two the suite seeds; the FK on node/agent rows requires a real org.
+		{ name: "FileStore-mig", store: new FileStore(fdir) as Store },
+		{ name: "DbStore-mig", store: dbStore("A") as Store },
+	];
+	for (const { name, store } of stores) {
+		await store.save({ agents: [agent(`${name}-legacy`, { name: `${name} legacy unit`, task: "ship it" })], transcripts: {}, features: [] });
+		const migrated = await new NodeStore(store).get(`${name}-legacy`);
+		expect(migrated).toMatchObject({ kind: "unit", state: "idle", goal: "ship it" });
+		expect(migrated!.state).not.toBe("working");
+	}
+}, 15_000);
+
+// Cold adoption mints a FRESH agent id for a recovered worktree, so the node under the old id is
+// orphaned by construction; nothing else in the codebase can move it, because every other reaper
+// operates on the roster, sockets or worktrees rather than on nodes. Without this sweep an orphan
+// claims live work forever.
+test("NodeStore.reconcileOrphans: stops units claiming live work with no surviving agent, and touches nothing else", async () => {
+	const fdir = path.join(dir, "nodes-orphan-reconcile");
+	const stores = [
+		{ name: "FileStore-orph", store: new FileStore(fdir) as Store },
+		{ name: "DbStore-orph", store: dbStore("B") as Store },
+	];
+	for (const { name, store } of stores) {
+		const nodes = new NodeStore(store, () => 100);
+		// Four claims of live work. Only the first has an agent that survived the restart.
+		await nodes.create({ id: `${name}-alive`, kind: "unit", title: "Alive", state: "working", createdAt: 1 });
+		await nodes.create({ id: `${name}-ghost`, kind: "unit", title: "Ghost", state: "working", createdAt: 1 });
+		await nodes.create({ id: `${name}-starting-ghost`, kind: "unit", title: "Starting ghost", state: "starting", createdAt: 1 });
+		await nodes.create({ id: `${name}-input-ghost`, kind: "unit", title: "Input ghost", state: "input", createdAt: 1 });
+		// Claims nothing about live execution — must be left exactly as found even though it is orphaned.
+		await nodes.create({ id: `${name}-idle-orphan`, kind: "unit", title: "Idle orphan", state: "idle", createdAt: 1 });
+		await nodes.create({ id: `${name}-settled-orphan`, kind: "unit", title: "Settled orphan", state: "settled", createdAt: 1 });
+		// A synthetic container has no agent BY DESIGN; settling it would empty the tree out from under
+		// the operator, which is why the sweep is restricted to units.
+		await nodes.create({ id: `${name}-fleet`, kind: "plan", title: "the fleet", state: "working", createdAt: 1 });
+
+		// Filtered to this test's own prefix: the sweep is store-wide by design, and sibling tests in
+		// this file share org "B"'s node table. Asserting on the whole return value would couple this
+		// test to their fixtures rather than to the behaviour under test.
+		const mine = (ns: readonly { id: string }[]) => ns.filter((n) => n.id.startsWith(`${name}-`)).map((n) => n.id).sort();
+		expect(mine(await nodes.reconcileOrphans((id) => id === `${name}-alive`))).toEqual([`${name}-ghost`, `${name}-input-ghost`, `${name}-starting-ghost`].sort());
+
+		expect((await nodes.get(`${name}-alive`))!.state).toBe("working");
+		expect((await nodes.get(`${name}-ghost`))!.state).toBe("stopped");
+		expect((await nodes.get(`${name}-starting-ghost`))!.state).toBe("stopped");
+		expect((await nodes.get(`${name}-input-ghost`))!.state).toBe("stopped");
+		expect((await nodes.get(`${name}-idle-orphan`))!.state).toBe("idle");
+		expect((await nodes.get(`${name}-settled-orphan`))!.state).toBe("settled");
+		expect((await nodes.get(`${name}-fleet`))!.state).toBe("working");
+		// "stopped" is not "settled": the unit ended without choosing to, so it carries no settle stamp.
+		expect((await nodes.get(`${name}-ghost`))!.settledAt).toBeUndefined();
+
+		// Idempotent — a second boot finds nothing left to stop rather than re-reporting the same units.
+		expect(mine(await nodes.reconcileOrphans((id) => id === `${name}-alive`))).toEqual([]);
+	}
+}, 15_000);
+
 test("NodeRecordStore: associated evidence round-trips and fails closed through FileStore and DbStore", async () => {
 	const fdir = path.join(dir, "node-records-file-roundtrip");
 	const stores = [
@@ -413,7 +478,11 @@ test("NodeStore: a state directory written before nodes migrates agents once wit
 	await store.save({ agents: [agent("legacy", { task: "legacy goal", parentId: "parent" })], transcripts: {}, features: [] });
 	await store.putChannel({ id: "existing", name: "#existing", kind: "user", createdAt: 1, visibility: "org-public" });
 	const nodes = new NodeStore(store, () => 42);
-	expect(await nodes.get("legacy")).toEqual({ id: "legacy", parentId: "parent", kind: "unit", title: "legacy", state: "working", goal: "legacy goal", createdAt: 42 });
+	// `state: "idle"`, not `"working"`: this assertion used to pin the migration's hard-coded "working"
+	// as if it were intended. It wasn't derived from anything — `PersistedAgent` has no status field —
+	// so it asserted a claim about live execution that no data supports, and which nothing downstream
+	// could ever correct for a unit whose agent id is gone.
+	expect(await nodes.get("legacy")).toEqual({ id: "legacy", parentId: "parent", kind: "unit", title: "legacy", state: "idle", goal: "legacy goal", createdAt: 42 });
 	expect(await store.getChannel("existing")).toMatchObject({ id: "existing", name: "#existing" });
 	expect((await nodes.list()).filter((node) => node.id === "legacy")).toHaveLength(1);
 });
