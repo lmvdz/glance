@@ -24,6 +24,21 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
+## Iteration 31 (2026-08-04, goal mode)
+08 slice 1: the event-kind wire contract becomes one module — type-only cross-tree import, drift
+is now a compile error, excess keys newly impossible. Codex 1M+1L survived (the rewrite dropped
+the constants-in-list proof; stale header); its verification walked the exact compile-error
+cascade a new kind triggers. The cwd accident REPEATED (bg suite ran in webapp/ after the build's
+cd) — caught by test-count sanity; native row recorded, rule reinforced. grok flaked (7/8 today).
+
+## Iteration 32 (2026-08-04, goal mode) — CONCERN 08 → needs-lars
+The dto-mirror slices hit their real dependency: they are designed on concern 06's core-types
+kernel, which lives on unmerged PR #315 — not on main. Compatibility verified (dto's head
+mirrors are re-exportable the moment the kernel merges; the WorkLane dependency flip is
+designed), then the concern flipped to needs-lars naming the merge as the open question —
+concern 14's blocked-on-train precedent, not a stacked-PR gamble. Slice 1 (PR #317) stands
+alone. Next: concern 10 (HubShell room-session — webapp-only, independent of the type train).
+
 ## Iteration 27 (2026-08-04, goal mode)
 12 slice 1: capability lane escapes the state blob (split store methods, both modes). Codex's
 blind round was the queue's deepest — 4 High data-loss windows (unawaited single-path migration,
