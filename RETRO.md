@@ -17,4 +17,13 @@ Three standing rules (campaign doctrine):
 
 ## Entries
 
-_(none yet — first build ticket not closed)_
+### 2026-08-04 — T1 #329 (LAND_CONFIRM truth) — closed after 1 gauntlet round
+- Rounds: build + 1 fix round. Gauntlet round 1 (blind codex): caught the construction-cache vs
+  per-request-read lifetime divergence the builder's own pin test structurally couldn't see (it
+  set env before construction). Refuted 3 suspicions with per-input evidence — refutations are
+  receipts too.
+- Fix was categorical, not a patch: report the acting component's own value; never re-derive.
+- Process lesson (cost 3 lane-stalls across the round): builders background the full suite to
+  dodge the Bash tool's 2-minute default timeout, then stop and wait for a notification that
+  never comes. Fix baked into the dispatch template: run suites FOREGROUND with the Bash call's
+  own `timeout: 600000`, plus the "you will be resumed with no memory of waiting" phrasing.
