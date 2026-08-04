@@ -22,6 +22,21 @@
  *     as done (round 2 finding 1).
  *   - the whole script ACQUIRES AND HOLDS the real state-dir lock for its entire pass (round 2
  *     finding 1) — not just a read-only probe — released in a `finally`.
+ *
+ * Round 3 (fresh blind codex, invariant-only pass — the three core invariants were refuted-clean
+ * a third straight time: no attribution writes, `finally` lock coverage, atomic rename, and
+ * idempotency all held) added:
+ *   - full NESTED validation: `toolTally` values must be numeric, `tokens` rejects extra keys,
+ *     every `Span` and every `ValidationRecord` field/enum is checked, not just outer shape.
+ *   - error honesty: an unreadable receipts dir (ENOTDIR etc., not just "doesn't exist yet")
+ *     throws instead of silently reporting "0 files scanned".
+ *   - the schema guard's key set is compile-time ratcheted against `keyof RunReceipt` — this file
+ *     doesn't test that directly (a TS compile error isn't a runtime assertion), but `bun run
+ *     check` is the test: tsconfig.json now includes this script.
+ *   - mode preservation widened to `0o7777` (special bits too), regression-tested with `02750`.
+ *   - `--state-dir` rejects a following `--`-prefixed token as a misplaced flag.
+ *   - two test-gap fixes: a barrier proves the lock is genuinely HELD during the write phase (not
+ *     just acquired-then-released), and an inode-change assertion pins rename-based replacement.
  */
 
 import { afterAll, afterEach, expect, test } from "bun:test";
@@ -37,6 +52,7 @@ import {
 	MODEL_UNATTRIBUTABLE_REASON,
 	planFile,
 	printReport,
+	ReceiptsDirUnreadable,
 	runBackfill,
 	writeIfUnchanged,
 } from "../scripts/backfill-receipt-attribution.ts";
@@ -472,4 +488,165 @@ test("runBackfill: an empty/missing receipts dir reports zero scanned, never thr
 	const report = await runBackfill({ stateDir, dryRun: true });
 	expect(report.filesScanned).toBe(0);
 	expect(report.totalLines).toBe(0);
+});
+
+// ── Round 3: nested schema validation (Finding 1) ────────────────────────────────────────────
+
+test('guardReceiptShape: codex counterexample {"toolTally":{"bash":"one"}} — non-numeric tally value — FAILS', () => {
+	const failure = guardReceiptShape({ ...baseReceipt(), toolTally: { bash: "one" } });
+	expect(failure?.reason).toBe("invalid_field_type");
+	expect(failure?.detail).toBe("toolTally value");
+});
+
+test('planFile: codex counterexample {"toolTally":{"bash":"one"}} leaves the WHOLE FILE byte-identical', () => {
+	const line = JSON.stringify({ ...baseReceipt(), toolTally: { bash: "one" } });
+	const { report, outLines } = planFile("weird3.jsonl", line);
+	expect(report.skippedUnknownSchema).toBe(true);
+	expect(outLines).toEqual([line]);
+});
+
+test("guardReceiptShape: tokens rejects an extra unrecognized key, not just its five known fields", () => {
+	const tokens = { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 5, extra: 6 };
+	const failure = guardReceiptShape({ ...baseReceipt(), tokens });
+	expect(failure?.reason).toBe("invalid_field_type");
+	expect(failure?.detail).toBe("tokens.{extra}");
+});
+
+test("guardReceiptShape: a span is fully validated — required fields, enum values, and unknown keys", () => {
+	const goodSpan = { traceId: "t1", spanId: "s1", name: "n", kind: "tool", startedAt: 1, status: "ok" };
+	expect(guardReceiptShape({ ...baseReceipt(), spans: [goodSpan] })).toBeUndefined();
+
+	expect(guardReceiptShape({ ...baseReceipt(), spans: [{ ...goodSpan, kind: "not-a-real-kind" }] })?.detail).toBe("spans[0].kind");
+	expect(guardReceiptShape({ ...baseReceipt(), spans: [{ ...goodSpan, status: "not-a-real-status" }] })?.detail).toBe("spans[0].status");
+	expect(guardReceiptShape({ ...baseReceipt(), spans: [{ ...goodSpan, startedAt: "future" }] })?.detail).toBe("spans[0].startedAt");
+	expect(guardReceiptShape({ ...baseReceipt(), spans: [{ ...goodSpan, extraKey: 1 }] })?.detail).toBe("spans[0].{extraKey}");
+	expect(guardReceiptShape({ ...baseReceipt(), spans: [{ ...goodSpan, attrs: { a: 1 } }] })?.detail).toBe("spans[0].attrs value");
+});
+
+test("guardReceiptShape: a validation record is fully validated — required fields, nested perCriterion/lensAdvisory, enums, and unknown keys", () => {
+	const good = { verdict: "pass", agreement: 1, confidence: 1, perCriterion: [{ id: "c1", satisfied: true }], rationale: "ok", ranAt: 1 };
+	expect(guardReceiptShape({ ...baseReceipt(), validation: good })).toBeUndefined();
+
+	expect(guardReceiptShape({ ...baseReceipt(), validation: { ...good, verdict: "not-a-real-verdict" } })?.detail).toBe("validation.verdict");
+	expect(guardReceiptShape({ ...baseReceipt(), validation: { ...good, extraKey: 1 } })?.detail).toBe("validation.{extraKey}");
+	expect(guardReceiptShape({ ...baseReceipt(), validation: { ...good, perCriterion: [{ id: "c1", satisfied: "yes" }] } })?.detail).toBe("validation.perCriterion[0].satisfied");
+	expect(guardReceiptShape({ ...baseReceipt(), validation: { ...good, authorLineage: "not-a-real-lineage" } })?.detail).toBe("validation.authorLineage");
+	expect(guardReceiptShape({ ...baseReceipt(), validation: { ...good, lensAdvisory: [{ lens: "regression", disposition: "object", severity: "high", claim: "x" }] } })).toBeUndefined();
+	expect(guardReceiptShape({ ...baseReceipt(), validation: { ...good, lensAdvisory: [{ lens: "regression", disposition: "not-a-real-disposition", severity: "high", claim: "x" }] } })?.detail).toBe("validation.lensAdvisory[0].disposition");
+	expect(guardReceiptShape({ ...baseReceipt(), validation: { ...good, lensVerify: { lens: "regression", claim: "x", confirmed: true } } })).toBeUndefined();
+	expect(guardReceiptShape({ ...baseReceipt(), validation: { ...good, lensVerify: { lens: "regression", claim: "x", confirmed: "yes" } } })?.detail).toBe("validation.lensVerify.confirmed");
+});
+
+// ── Round 3: error honesty (Finding 2) ────────────────────────────────────────────────────────
+
+test("runBackfill: receipts dir existing as a PLAIN FILE (ENOTDIR) throws ReceiptsDirUnreadable — never reports success with 0 files", async () => {
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "backfill-enotdir-"));
+	tmps.push(stateDir);
+	await fs.writeFile(path.join(stateDir, "receipts"), "not a directory");
+
+	await expect(runBackfill({ stateDir, dryRun: true })).rejects.toBeInstanceOf(ReceiptsDirUnreadable);
+});
+
+test("runBackfill: a genuinely-missing receipts dir (ENOENT) still degrades to zero scanned, not an error", async () => {
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "backfill-enoent-"));
+	tmps.push(stateDir);
+	const report = await runBackfill({ stateDir, dryRun: true });
+	expect(report.filesScanned).toBe(0);
+});
+
+// ── Round 3: mode preservation widened to special bits (Finding 4) ──────────────────────────────
+
+/** Bun 1.3.14's `fs.chmod`/`FileHandle.chmod` silently drops the setgid bit even under
+ *  conditions where the real `chmod(1)` binary (and Node's `fs.promises.chmod`) succeed — a
+ *  confirmed Bun runtime bug, not a POSIX restriction. Test SETUP needs a genuinely-02750 fixture
+ *  regardless of that bug, so it shells out too, exactly like `chmodLikeSource` (the production
+ *  workaround this test is verifying) does. */
+async function chmodViaShell(file: string, mode: number): Promise<void> {
+	const proc = Bun.spawn(["chmod", (mode & 0o7777).toString(8).padStart(4, "0"), file], { stdout: "ignore", stderr: "ignore" });
+	if ((await proc.exited) !== 0) throw new Error(`test setup: chmod failed for ${file}`);
+}
+
+test("writeIfUnchanged: preserves SPECIAL mode bits (setgid) too, not just permission bits — 02750 fixture", async () => {
+	const stateDir = await tmpStateDir();
+	await writeRawLines(stateDir, "a1", [baseReceipt({ agentId: "a1" })]);
+	const file = receiptPath(stateDir, "a1");
+	await chmodViaShell(file, 0o2750);
+	const before = await fs.stat(file);
+	expect(before.mode & 0o7777).toBe(0o2750); // setup sanity check — proves the fixture is genuinely 02750
+
+	const result = await writeIfUnchanged(file, `${JSON.stringify(baseReceipt({ agentId: "a1", harnessUnattributableReason: "no_run_scoped_harness_evidence" }))}\n`, before);
+	expect(result.written).toBe(true);
+
+	const after = await fs.stat(file);
+	expect(after.mode & 0o7777).toBe(0o2750); // writeIfUnchanged's own chmodLikeSource preserved it across the rewrite
+});
+
+// ── Round 3: argv rejects a --state-dir value that looks like another flag (Finding 5) ───────────
+
+test("CLI argv: --state-dir followed by a --dry-run-shaped token is rejected, not silently accepted as a directory named --dry-run", async () => {
+	// parseArgs isn't exported (it's the CLI-only entry point) — drive the same failure through the
+	// actual binary via Bun.spawn, matching codex's own counterexample invocation shape.
+	const proc = Bun.spawn(["bun", "scripts/backfill-receipt-attribution.ts", "--state-dir", "--dry-run"], {
+		cwd: path.join(import.meta.dir, ".."),
+		stdout: "ignore",
+		stderr: "pipe",
+	});
+	const stderr = await new Response(proc.stderr).text();
+	const code = await proc.exited;
+	expect(code).not.toBe(0);
+	expect(stderr).toMatch(/--state-dir requires a directory path/);
+});
+
+// ── Round 3: the lock is genuinely HELD during the write phase (Finding 6 — test gap) ────────────
+
+/** Runs tests/fixtures/lock-probe-child.ts (a SEPARATE process — see its own doc for why an
+ *  in-process second `acquireStateLock` call can't prove this: same-pid reuse-detection would
+ *  reclaim it) and returns its exit code: 0 = acquired, 1 = blocked by a live owner. */
+async function probeLockFromChildProcess(stateDir: string): Promise<number> {
+	const proc = Bun.spawn(["bun", path.join(import.meta.dir, "fixtures", "lock-probe-child.ts"), stateDir], { stdout: "ignore", stderr: "inherit" });
+	return proc.exited;
+}
+
+test("runBackfill: the real lock is HELD for the whole pass — a concurrent acquireStateLock attempt from ANOTHER PROCESS fails while runBackfill is mid-pass", async () => {
+	const stateDir = await tmpStateDir();
+	await writeRawLines(stateDir, "a1", [baseReceipt({ agentId: "a1", harness: undefined })]);
+
+	let releaseBarrier!: () => void;
+	const barrier = new Promise<void>((resolve) => {
+		releaseBarrier = resolve;
+	});
+
+	const runPromise = runBackfill({ stateDir, dryRun: true, onLockHeld: () => barrier });
+
+	// Give runBackfill a moment to actually acquire the lock and enter the barrier — the acquire
+	// itself is effectively synchronous here (no live owner to wait out), so this is generous, not
+	// load-bearing precision.
+	await new Promise((r) => setTimeout(r, 50));
+
+	// A version with the real acquireStateLock call deleted would let this SUCCEED — that's
+	// exactly the test gap round 3 found in round 2's "acquires and releases" test. Must be a
+	// DIFFERENT process: an in-process second acquire would share this test's own pid and get
+	// reclaimed as "our own stale record" by acquireStateLock's reuse-detection.
+	expect(await probeLockFromChildProcess(stateDir)).toBe(1); // blocked
+
+	releaseBarrier();
+	await runPromise;
+
+	// Released afterward: a normal acquire (even from a fresh child process) now succeeds again.
+	expect(await probeLockFromChildProcess(stateDir)).toBe(0);
+});
+
+// ── Round 3: pin rename-based atomicity via inode change (Finding 7 — test gap) ──────────────────
+
+test("writeIfUnchanged: the file's inode CHANGES across a rewrite — proves replacement via rename, not an in-place overwrite", async () => {
+	const stateDir = await tmpStateDir();
+	await writeRawLines(stateDir, "a1", [baseReceipt({ agentId: "a1" })]);
+	const file = receiptPath(stateDir, "a1");
+	const before = await fs.stat(file);
+
+	const result = await writeIfUnchanged(file, `${JSON.stringify(baseReceipt({ agentId: "a1", harnessUnattributableReason: "no_run_scoped_harness_evidence" }))}\n`, before);
+	expect(result.written).toBe(true);
+
+	const after = await fs.stat(file);
+	expect(after.ino).not.toBe(before.ino); // a genuinely new inode — an in-place overwrite would keep the same one
 });

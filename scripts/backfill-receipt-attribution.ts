@@ -80,7 +80,62 @@
  *   umask, which can widen a `0600` receipt to `0644` — the rename would then silently loosen
  *   the original file's permissions. Fixed: `writeIfUnchanged` `chmod`s the temp file to
  *   `before.mode & 0o777` (the SOURCE file's own permission bits) before it's renamed into
- *   place.
+ *   place — round 3 widens this mask further, see below.
+ *
+ * GAUNTLET ROUND 3 (fresh blind codex — invariant-only findings, no CRITICAL survived this round
+ * except one that's PRE-EXISTING `state-lock.ts` code, split off as glance#345 and NOT fixed here
+ * per that ticket's scope):
+ *
+ *   Finding 1: `guardReceiptShape` checked `toolTally`'s and `tokens`'s OUTER shape but not their
+ *   VALUES or extra keys — codex's failing row `{"toolTally":{"bash":"one"}}` passed and got
+ *   rewritten. Fixed: `toolTally` values must all be finite numbers; `tokens` rejects any key
+ *   outside its five known fields; `spans[]` and `validation` are now recursively validated —
+ *   every `Span` field/enum (`guardSpan`), every `ValidationRecord` field/enum including nested
+ *   `perCriterion[]`/`lensAdvisory[]`/`lensVerify` (`guardValidationRecord`) — and any unrecognized
+ *   nested key fails the row (and so the whole file) exactly like an unrecognized top-level key.
+ *
+ *   Finding 2: `readdir`/`readFile` failures OTHER than `ENOENT` (EACCES, EIO, a `receipts` path
+ *   that's a plain file → ENOTDIR) were caught by the same bare `catch { names = [] }` as a
+ *   genuinely-missing directory, silently reporting "0 files scanned" — success-shaped output for
+ *   a state dir this script couldn't actually read. Fixed: only `ENOENT` degrades to an empty
+ *   scan; every other error throws {@link ReceiptsDirUnreadable}, which the CLI surfaces and exits
+ *   non-zero (3) for, naming the underlying error.
+ *
+ *   Finding 3: `KNOWN_RECEIPT_KEYS` was a plain runtime `Set` built by hand from `RunReceipt`'s
+ *   fields — nothing forced it to stay in sync if `RunReceipt` gained a new optional field later.
+ *   Fixed: it's now built from `RECEIPT_KEY_RECORD`, a `satisfies Record<keyof RunReceipt, true>`
+ *   literal — TypeScript now REJECTS this file at compile time if `RunReceipt` gains a field this
+ *   record doesn't list (or loses one this record still lists). This only holds because
+ *   `scripts/backfill-receipt-attribution.ts` is itself part of the `tsc --noEmit` program now
+ *   (tsconfig.json's `include`, alongside the existing `scripts/skills-verify.ts` precedent) — bun
+ *   runs this file directly and strips types at runtime, so without that `include` entry the
+ *   ratchet would silently never fire. The same `satisfies` pattern is applied to every OTHER
+ *   fixed-vocabulary field this guard checks that has a real exported union type to ratchet
+ *   against (`AgentStatus`, `WorkLane`, `ComplexityTier`, `SpanKind`, `SpanStatus`,
+ *   `ModelLineage`, `LensId`) — the handful of enums defined only as INLINE literal unions inside
+ *   `ValidationRecord` itself (`verdict`, `lensAdvisory[].disposition/.severity`) have no
+ *   importable type name to ratchet against and stay plain `Set`s, noted where they appear.
+ *
+ *   Finding 4: mode preservation only masked `& 0o777` (permission bits), dropping the special
+ *   bits (setuid/setgid/sticky, `0o7000`). Fixed: `before.mode & 0o7777`.
+ *
+ *   Finding 5: `parseArgs` accepted ANY token after `--state-dir`, including one that looks like
+ *   another flag — `--state-dir --dry-run` silently set `stateDir` to the literal string
+ *   `"--dry-run"` and left `dryRun` false, rather than erroring. Fixed: a token starting with
+ *   `--` immediately after `--state-dir` is rejected as almost certainly a misplaced flag, not a
+ *   real path.
+ *
+ *   Finding 6 (test gap): the round-2 "acquires and releases" test only proved the lock was ABSENT
+ *   before the run and ABSENT after — a version with the real `acquireStateLock` call deleted
+ *   entirely would pass that test too. Fixed: a test-only `onLockHeld` hook (never used outside
+ *   tests) lets a test await a barrier WHILE `runBackfill` is inside its locked section, and prove
+ *   a concurrent `acquireStateLock` attempt genuinely FAILS during that window.
+ *
+ *   Finding 7 (test gap): nothing pinned that the write path replaces the file via `rename` rather
+ *   than an in-place overwrite (which would reopen the same crash-truncation window Finding 1
+ *   round 1 fixed). Fixed: a minimal assertion that the file's inode NUMBER changes across a
+ *   rewrite — cheap and sufficient to distinguish rename-based replacement from in-place write,
+ *   without a full syscall-spy harness (adjudicated overkill for what this needs to prove).
  *
  * Usage:
  *   bun scripts/backfill-receipt-attribution.ts --state-dir <dir> [--dry-run]
@@ -96,8 +151,14 @@
 import type { Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import type { WorkLane } from "../src/lane.ts";
+import type { LensId } from "../src/lens-select.ts";
+import type { ModelLineage } from "../src/model-lineage.ts";
+import type { ComplexityTier } from "../src/model-outcomes.ts";
 import type { RunReceipt } from "../src/receipts.ts";
+import type { SpanKind, SpanStatus } from "../src/spans.ts";
 import { acquireStateLock, type LockRecord, probeDaemonLock, type StateLock, StateLockError } from "../src/state-lock.ts";
+import type { AgentStatus } from "../src/types.ts";
 
 /** Prefixes an external ingester's own `agentId` always carries (src/ingest/claude-code.ts's
  *  `cc-${short}`, codex.ts's `codex-${short}`, openrouter.ts's `or-${date}-${slug}`) — used ONLY
@@ -117,6 +178,22 @@ export class DaemonLockRefusal extends Error {
 				`narrows but does not eliminate.`,
 		);
 		this.name = "DaemonLockRefusal";
+	}
+}
+
+/** Refusing to report success because the receipts directory couldn't actually be read — round 3
+ *  Finding 2: a bare `catch { names = [] }` around `readdir` used to treat EACCES/EIO/ENOTDIR
+ *  (e.g. `receipts` existing as a plain FILE, not a directory) exactly like a genuinely-missing
+ *  directory, silently printing "0 files scanned" for a state dir this script couldn't actually
+ *  read. Only `ENOENT` (truly nothing there yet) still degrades to an empty scan; every other
+ *  error surfaces as this, which the CLI exits non-zero for, naming the underlying cause. */
+export class ReceiptsDirUnreadable extends Error {
+	constructor(
+		public readonly dir: string,
+		public readonly cause: unknown,
+	) {
+		super(`refusing to report success: could not read receipts dir "${dir}": ${cause instanceof Error ? cause.message : String(cause)}`);
+		this.name = "ReceiptsDirUnreadable";
 	}
 }
 
@@ -184,45 +261,76 @@ export function applyClassification(receipt: RunReceipt, result: ClassifyResult)
 	return next;
 }
 
-// ── Schema guard (round 1 Finding 5; round 2 Finding 3 — full field coverage) ────────────────
+// ── Schema guard (round 1 Finding 5; round 2 Finding 3; round 3 Finding 1+3 — nested + ratcheted) ─
 
-/** Every top-level key this version of `RunReceipt` (src/receipts.ts) can carry. A row with ANY
- *  key outside this set predates or postdates a shape this script understands. */
-const KNOWN_RECEIPT_KEYS = new Set<string>([
-	"agentId",
-	"name",
-	"repo",
-	"branch",
-	"model",
-	"runId",
-	"startedAt",
-	"endedAt",
-	"durationMs",
-	"status",
-	"toolCalls",
-	"toolTally",
-	"tokens",
-	"costUsd",
-	"filesTouched",
-	"traceId",
-	"spans",
-	"sampled",
-	"featureId",
-	"parentId",
-	"harness",
-	"harnessUnattributableReason",
-	"modelUnattributableReason",
-	"validation",
-	"confidence",
-	"efficiencyFlags",
-	"lane",
-	"tier",
-]);
+/** Every top-level key this version of `RunReceipt` (src/receipts.ts) can carry — a COMPILE-TIME
+ *  exhaustive record over `keyof RunReceipt` (round 3, Finding 3): a `RunReceipt` field this
+ *  object doesn't list (added, renamed, or removed) fails `satisfies Record<keyof RunReceipt,
+ *  true>` at typecheck time, so the guard's key set can never silently drift from the real type.
+ *  This only fires because this file is itself part of the `tsc --noEmit` program — see
+ *  tsconfig.json's `include`. */
+const RECEIPT_KEY_RECORD = {
+	agentId: true,
+	name: true,
+	repo: true,
+	branch: true,
+	model: true,
+	runId: true,
+	startedAt: true,
+	endedAt: true,
+	durationMs: true,
+	status: true,
+	toolCalls: true,
+	toolTally: true,
+	tokens: true,
+	costUsd: true,
+	filesTouched: true,
+	traceId: true,
+	spans: true,
+	sampled: true,
+	featureId: true,
+	parentId: true,
+	harness: true,
+	harnessUnattributableReason: true,
+	modelUnattributableReason: true,
+	validation: true,
+	confidence: true,
+	efficiencyFlags: true,
+	lane: true,
+	tier: true,
+} satisfies Record<keyof RunReceipt, true>;
+const KNOWN_RECEIPT_KEYS = new Set<string>(Object.keys(RECEIPT_KEY_RECORD));
 
-const AGENT_STATUSES = new Set(["starting", "working", "idle", "input", "error", "stopped"]);
-const WORK_LANES = new Set(["hotfix", "feature", "chore"]);
-const COMPLEXITY_TIERS = new Set(["light", "mid", "heavy"]);
+/** Fixed-vocabulary fields ratcheted the SAME way, against a real exported union type. */
+const AGENT_STATUS_RECORD = { starting: true, working: true, idle: true, input: true, error: true, stopped: true } satisfies Record<AgentStatus, true>;
+const AGENT_STATUSES = new Set<string>(Object.keys(AGENT_STATUS_RECORD));
+const WORK_LANE_RECORD = { hotfix: true, feature: true, chore: true } satisfies Record<WorkLane, true>;
+const WORK_LANES = new Set<string>(Object.keys(WORK_LANE_RECORD));
+const COMPLEXITY_TIER_RECORD = { light: true, mid: true, heavy: true } satisfies Record<ComplexityTier, true>;
+const COMPLEXITY_TIERS = new Set<string>(Object.keys(COMPLEXITY_TIER_RECORD));
+const SPAN_KIND_RECORD = { run: true, node: true, tool: true, subagent: true, verify: true, spawn: true, validate: true, land: true, resolve: true } satisfies Record<SpanKind, true>;
+const SPAN_KINDS = new Set<string>(Object.keys(SPAN_KIND_RECORD));
+const SPAN_STATUS_RECORD = { ok: true, error: true, running: true } satisfies Record<SpanStatus, true>;
+const SPAN_STATUSES = new Set<string>(Object.keys(SPAN_STATUS_RECORD));
+const MODEL_LINEAGE_RECORD = { anthropic: true, openai: true, google: true, xai: true, unknown: true } satisfies Record<ModelLineage, true>;
+const MODEL_LINEAGES = new Set<string>(Object.keys(MODEL_LINEAGE_RECORD));
+const LENS_ID_RECORD = { regression: true } satisfies Record<LensId, true>;
+const LENS_IDS = new Set<string>(Object.keys(LENS_ID_RECORD));
+/** `ValidationRecord.verdict`/`lensAdvisory[].disposition`/`.severity` are INLINE literal unions
+ *  inside `types.ts` (no exported type name to `satisfies` against) — plain Sets, not ratcheted.
+ *  If one of these ever grows a value, this guard rejects the new value as unrecognized until a
+ *  human updates it here, same failure MODE as before round 3, just now for a smaller surface. */
+const VALIDATION_VERDICTS = new Set(["pass", "veto", "abstain", "skipped", "inconclusive"]);
+const LENS_DISPOSITIONS = new Set(["accept", "object"]);
+const LENS_SEVERITIES = new Set(["low", "high"]);
+
 const TOKEN_FIELDS = ["input", "output", "cacheRead", "cacheWrite", "total"] as const;
+const TOKENS_KEYS = new Set<string>(TOKEN_FIELDS);
+const SPAN_KEYS = new Set(["traceId", "spanId", "parentSpanId", "name", "kind", "startedAt", "endedAt", "status", "attrs"]);
+const VALIDATION_KEYS = new Set(["verdict", "agreement", "confidence", "perCriterion", "rationale", "model", "authorLineage", "reviewerLineage", "sameLineage", "lensAdvisory", "lensVerify", "gateLogPaths", "ranAt"]);
+const PER_CRITERION_KEYS = new Set(["id", "satisfied", "note"]);
+const LENS_VERDICT_KEYS = new Set(["lens", "disposition", "severity", "claim"]);
+const LENS_VERIFY_KEYS = new Set(["lens", "claim", "confirmed"]);
 
 export interface SchemaGuardFailure {
 	reason: "not_an_object" | "unknown_keys" | "invalid_field_type";
@@ -241,21 +349,107 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 function isStringArray(v: unknown): v is string[] {
 	return Array.isArray(v) && v.every((x) => typeof x === "string");
 }
+/** Top-level keys of `obj` that aren't in `allowed` — empty when the object is closed over that set. */
+function extraKeys(obj: Record<string, unknown>, allowed: Set<string>): string[] {
+	return Object.keys(obj).filter((k) => !allowed.has(k));
+}
+
+/** `Span` (src/spans.ts), fully validated: closed key set, every required field's type, every
+ *  present optional field's type, `kind`/`status` against their real enum. Returns a failure
+ *  detail string (dotted/indexed path) or `undefined` when recognized. */
+function guardSpan(value: unknown, index: number): string | undefined {
+	if (!isPlainObject(value)) return `spans[${index}]`;
+	const extra = extraKeys(value, SPAN_KEYS);
+	if (extra.length > 0) return `spans[${index}].{${extra.join(",")}}`;
+	if (!isNonEmptyString(value.traceId)) return `spans[${index}].traceId`;
+	if (!isNonEmptyString(value.spanId)) return `spans[${index}].spanId`;
+	if (value.parentSpanId !== undefined && typeof value.parentSpanId !== "string") return `spans[${index}].parentSpanId`;
+	if (!isNonEmptyString(value.name)) return `spans[${index}].name`;
+	if (typeof value.kind !== "string" || !SPAN_KINDS.has(value.kind)) return `spans[${index}].kind`;
+	if (!isFiniteNumber(value.startedAt)) return `spans[${index}].startedAt`;
+	if (value.endedAt !== undefined && !isFiniteNumber(value.endedAt)) return `spans[${index}].endedAt`;
+	if (typeof value.status !== "string" || !SPAN_STATUSES.has(value.status)) return `spans[${index}].status`;
+	if (value.attrs !== undefined) {
+		if (!isPlainObject(value.attrs)) return `spans[${index}].attrs`;
+		for (const v of Object.values(value.attrs)) if (typeof v !== "string") return `spans[${index}].attrs value`;
+	}
+	return undefined;
+}
+
+function guardPerCriterion(value: unknown, index: number): string | undefined {
+	if (!isPlainObject(value)) return `validation.perCriterion[${index}]`;
+	const extra = extraKeys(value, PER_CRITERION_KEYS);
+	if (extra.length > 0) return `validation.perCriterion[${index}].{${extra.join(",")}}`;
+	if (!isNonEmptyString(value.id)) return `validation.perCriterion[${index}].id`;
+	if (typeof value.satisfied !== "boolean") return `validation.perCriterion[${index}].satisfied`;
+	if (value.note !== undefined && typeof value.note !== "string") return `validation.perCriterion[${index}].note`;
+	return undefined;
+}
+
+function guardLensVerdict(value: unknown, index: number): string | undefined {
+	if (!isPlainObject(value)) return `validation.lensAdvisory[${index}]`;
+	const extra = extraKeys(value, LENS_VERDICT_KEYS);
+	if (extra.length > 0) return `validation.lensAdvisory[${index}].{${extra.join(",")}}`;
+	if (typeof value.lens !== "string" || !LENS_IDS.has(value.lens)) return `validation.lensAdvisory[${index}].lens`;
+	if (typeof value.disposition !== "string" || !LENS_DISPOSITIONS.has(value.disposition)) return `validation.lensAdvisory[${index}].disposition`;
+	if (typeof value.severity !== "string" || !LENS_SEVERITIES.has(value.severity)) return `validation.lensAdvisory[${index}].severity`;
+	if (typeof value.claim !== "string") return `validation.lensAdvisory[${index}].claim`;
+	return undefined;
+}
+
+/** `ValidationRecord` (src/types.ts), fully validated: closed key set, every required field's
+ *  type, every present optional field's type (recursing into `perCriterion[]`, `lensAdvisory[]`,
+ *  `lensVerify`), and every enum against its real vocabulary where one exists. */
+function guardValidationRecord(value: unknown): string | undefined {
+	if (!isPlainObject(value)) return "validation";
+	const extra = extraKeys(value, VALIDATION_KEYS);
+	if (extra.length > 0) return `validation.{${extra.join(",")}}`;
+	if (typeof value.verdict !== "string" || !VALIDATION_VERDICTS.has(value.verdict)) return "validation.verdict";
+	if (!isFiniteNumber(value.agreement)) return "validation.agreement";
+	if (!isFiniteNumber(value.confidence)) return "validation.confidence";
+	if (!Array.isArray(value.perCriterion)) return "validation.perCriterion";
+	for (let i = 0; i < value.perCriterion.length; i++) {
+		const failure = guardPerCriterion(value.perCriterion[i], i);
+		if (failure) return failure;
+	}
+	if (typeof value.rationale !== "string") return "validation.rationale";
+	if (value.model !== undefined && typeof value.model !== "string") return "validation.model";
+	if (value.authorLineage !== undefined && (typeof value.authorLineage !== "string" || !MODEL_LINEAGES.has(value.authorLineage))) return "validation.authorLineage";
+	if (value.reviewerLineage !== undefined && (typeof value.reviewerLineage !== "string" || !MODEL_LINEAGES.has(value.reviewerLineage))) return "validation.reviewerLineage";
+	if (value.sameLineage !== undefined && typeof value.sameLineage !== "boolean") return "validation.sameLineage";
+	if (value.lensAdvisory !== undefined) {
+		if (!Array.isArray(value.lensAdvisory)) return "validation.lensAdvisory";
+		for (let i = 0; i < value.lensAdvisory.length; i++) {
+			const failure = guardLensVerdict(value.lensAdvisory[i], i);
+			if (failure) return failure;
+		}
+	}
+	if (value.lensVerify !== undefined) {
+		if (!isPlainObject(value.lensVerify)) return "validation.lensVerify";
+		const extraLv = extraKeys(value.lensVerify, LENS_VERIFY_KEYS);
+		if (extraLv.length > 0) return `validation.lensVerify.{${extraLv.join(",")}}`;
+		if (typeof value.lensVerify.lens !== "string" || !LENS_IDS.has(value.lensVerify.lens)) return "validation.lensVerify.lens";
+		if (typeof value.lensVerify.claim !== "string") return "validation.lensVerify.claim";
+		if (typeof value.lensVerify.confirmed !== "boolean") return "validation.lensVerify.confirmed";
+	}
+	if (value.gateLogPaths !== undefined && !isStringArray(value.gateLogPaths)) return "validation.gateLogPaths";
+	if (!isFiniteNumber(value.ranAt)) return "validation.ranAt";
+	return undefined;
+}
 
 /** Structural guard (deliberately NOT Effect `Schema.Struct` — `src/schema/http-body.ts`'s own
  *  doc notes `Schema.Struct` SILENTLY STRIPS excess keys, the opposite of what a trust boundary
- *  here needs). Validates: the value is a plain object; every top-level key is recognized;
- *  every REQUIRED field is present with the right type; every PRESENT optional field has the
- *  right type (including `tokens`'s five numeric sub-fields and the fixed `status`/`lane`/`tier`
- *  enums). `spans`/`validation`/`toolTally` are checked for their own outer shape (array-of-
- *  objects / object / object respectively) but not recursed into — this is a structural guard
- *  against obviously-wrong shapes, not a full schema decode of every nested type. Returns
- *  `undefined` when the row is fully recognized. */
+ *  here needs). Validates: the value is a plain object; every top-level key is recognized
+ *  (ratcheted against `keyof RunReceipt`, round 3); every REQUIRED field is present with the
+ *  right type; every PRESENT optional field has the right type — recursing FULLY into `tokens`
+ *  (closed key set, all five values numeric), `toolTally` (every value numeric), `spans[]`
+ *  (every `Span` fully validated), and `validation` (every `ValidationRecord` field/enum fully
+ *  validated, round 3 Finding 1). Returns `undefined` when the row is fully recognized. */
 export function guardReceiptShape(value: unknown): SchemaGuardFailure | undefined {
 	if (!isPlainObject(value)) return { reason: "not_an_object", detail: typeof value };
 	const obj = value;
 
-	const unknown = Object.keys(obj).filter((k) => !KNOWN_RECEIPT_KEYS.has(k));
+	const unknown = extraKeys(obj, KNOWN_RECEIPT_KEYS);
 	if (unknown.length > 0) return { reason: "unknown_keys", detail: unknown.join(",") };
 
 	const invalid = (detail: string): SchemaGuardFailure => ({ reason: "invalid_field_type", detail });
@@ -269,6 +463,7 @@ export function guardReceiptShape(value: unknown): SchemaGuardFailure | undefine
 	if (typeof obj.status !== "string" || !AGENT_STATUSES.has(obj.status)) return invalid("status");
 	if (!isFiniteNumber(obj.toolCalls)) return invalid("toolCalls");
 	if (!isPlainObject(obj.toolTally)) return invalid("toolTally");
+	for (const v of Object.values(obj.toolTally)) if (!isFiniteNumber(v)) return invalid("toolTally value");
 	if (!Array.isArray(obj.filesTouched) || !obj.filesTouched.every((x) => typeof x === "string")) return invalid("filesTouched");
 
 	// Optional: type only when present.
@@ -278,18 +473,29 @@ export function guardReceiptShape(value: unknown): SchemaGuardFailure | undefine
 	if (obj.durationMs !== undefined && !isFiniteNumber(obj.durationMs)) return invalid("durationMs");
 	if (obj.tokens !== undefined) {
 		if (!isPlainObject(obj.tokens)) return invalid("tokens");
+		const extraTokens = extraKeys(obj.tokens, TOKENS_KEYS);
+		if (extraTokens.length > 0) return invalid(`tokens.{${extraTokens.join(",")}}`);
 		for (const k of TOKEN_FIELDS) if (!isFiniteNumber(obj.tokens[k])) return invalid(`tokens.${k}`);
 	}
 	if (obj.costUsd !== undefined && !isFiniteNumber(obj.costUsd)) return invalid("costUsd");
 	if (obj.traceId !== undefined && typeof obj.traceId !== "string") return invalid("traceId");
-	if (obj.spans !== undefined && (!Array.isArray(obj.spans) || !obj.spans.every((s) => isPlainObject(s)))) return invalid("spans");
+	if (obj.spans !== undefined) {
+		if (!Array.isArray(obj.spans)) return invalid("spans");
+		for (let i = 0; i < obj.spans.length; i++) {
+			const failure = guardSpan(obj.spans[i], i);
+			if (failure) return invalid(failure);
+		}
+	}
 	if (obj.sampled !== undefined && typeof obj.sampled !== "boolean") return invalid("sampled");
 	if (obj.featureId !== undefined && typeof obj.featureId !== "string") return invalid("featureId");
 	if (obj.parentId !== undefined && typeof obj.parentId !== "string") return invalid("parentId");
 	if (obj.harness !== undefined && typeof obj.harness !== "string") return invalid("harness");
 	if (obj.harnessUnattributableReason !== undefined && typeof obj.harnessUnattributableReason !== "string") return invalid("harnessUnattributableReason");
 	if (obj.modelUnattributableReason !== undefined && typeof obj.modelUnattributableReason !== "string") return invalid("modelUnattributableReason");
-	if (obj.validation !== undefined && !isPlainObject(obj.validation)) return invalid("validation");
+	if (obj.validation !== undefined) {
+		const failure = guardValidationRecord(obj.validation);
+		if (failure) return invalid(failure);
+	}
 	if (obj.confidence !== undefined && !isFiniteNumber(obj.confidence)) return invalid("confidence");
 	if (obj.efficiencyFlags !== undefined && !isStringArray(obj.efficiencyFlags)) return invalid("efficiencyFlags");
 	if (obj.lane !== undefined && (typeof obj.lane !== "string" || !WORK_LANES.has(obj.lane))) return invalid("lane");
@@ -416,27 +622,47 @@ async function readFileWithStat(file: string): Promise<{ text: string; stat: Sta
 	}
 }
 
+/** Apply `mode`'s full permission+special bits (`& 0o7777`) to `path` by shelling out to the real
+ *  `chmod(1)` binary rather than `fs.chmod`/`FileHandle.chmod` — Bun 1.3.14's chmod binding
+ *  silently DROPS the setgid bit even when the calling process is a member of the file's own
+ *  group and a real `chmod(2)` syscall (confirmed via both the `chmod(1)` shell command and
+ *  Node's `fs.promises.chmod` under identical conditions) would succeed. This is a Bun runtime
+ *  bug, not a POSIX permission restriction — the workaround is mechanical (spawn the real
+ *  binary) rather than reimplementing the syscall. */
+async function chmodLikeSource(target: string, mode: number): Promise<void> {
+	const octal = (mode & 0o7777).toString(8).padStart(4, "0");
+	const proc = Bun.spawn(["chmod", octal, target], { stdout: "ignore", stderr: "pipe" });
+	const code = await proc.exited;
+	if (code !== 0) {
+		const stderr = await new Response(proc.stderr).text();
+		throw new Error(`chmod ${octal} ${target} failed (exit ${code}): ${stderr.trim()}`);
+	}
+}
+
 /** Write `content` for `file` durably: temp file in the SAME directory (so the final rename is
- *  same-filesystem-atomic) → chmod it to the SOURCE file's own permission bits (Finding 5, round
- *  2 — a bare `"wx"` create picks up the process umask, which can widen e.g. a `0600` receipt to
- *  `0644`) → fsync the temp file → re-`stat` `file` immediately before the rename and abort
- *  (unlinking the temp file, touching `file` not at all) if its mtime/size has drifted from
- *  `before` → rename → fsync the containing directory. NEVER opens `file` itself with a
- *  truncating mode — the source is only ever read (by the caller) or atomically replaced by a
- *  completed rename, never opened "w". This is defense in depth UNDER the real state-dir lock
- *  `runBackfill` now holds for the whole pass (Finding 1, round 2) — the re-stat here narrows
- *  the residual window further, it is not the primary guard. */
+ *  same-filesystem-atomic) → `chmod` it to the SOURCE file's own mode bits (Finding 5, round 2 —
+ *  a bare `"wx"` create picks up the process umask, which can widen e.g. a `0600` receipt to
+ *  `0644`; round 3 Finding 4 widens the preserved mask from `0o777` to `0o7777` so the special
+ *  setuid/setgid/sticky bits survive too, via `chmodLikeSource` — see its own doc for why that's
+ *  a real `chmod(1)` shell-out rather than the JS binding) → fsync the temp file → re-`stat`
+ *  `file` immediately before the rename and abort (unlinking the temp file, touching `file` not
+ *  at all) if its mtime/size has drifted from `before` → rename → fsync the containing
+ *  directory. NEVER opens `file` itself with a truncating mode — the source is only ever read
+ *  (by the caller) or atomically replaced by a completed rename, never opened "w". This is
+ *  defense in depth UNDER the real state-dir lock `runBackfill` now holds for the whole pass
+ *  (Finding 1, round 2) — the re-stat here narrows the residual window further, it is not the
+ *  primary guard. */
 export async function writeIfUnchanged(file: string, content: string, before: Stats | null): Promise<{ written: boolean; drifted: boolean }> {
 	const dir = path.dirname(file);
 	const tmp = path.join(dir, `.${path.basename(file)}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`);
 	const fh = await fs.open(tmp, "wx");
 	try {
 		await fh.writeFile(content, "utf8");
-		if (before) await fh.chmod(before.mode & 0o777);
 		await fh.sync();
 	} finally {
 		await fh.close();
 	}
+	if (before) await chmodLikeSource(tmp, before.mode);
 	const now = await statOrNull(file);
 	const drifted = !before || !now || now.mtimeMs !== before.mtimeMs || now.size !== before.size;
 	if (drifted) {
@@ -458,6 +684,12 @@ export async function writeIfUnchanged(file: string, content: string, before: St
 export interface RunOpts {
 	stateDir: string;
 	dryRun: boolean;
+	/** TEST-ONLY (round 3 Finding 6): if provided, awaited immediately after the real lock is
+	 *  acquired and BEFORE any file work begins — lets a test prove the lock is genuinely HELD for
+	 *  the whole pass (a concurrent `acquireStateLock` attempt must fail while this hook is
+	 *  pending) rather than merely acquired-then-immediately-released. Never used outside tests;
+	 *  never set by the CLI. */
+	onLockHeld?: () => Promise<void>;
 }
 
 export interface BackfillReport {
@@ -506,12 +738,19 @@ export async function runBackfill(opts: RunOpts): Promise<BackfillReport> {
 	}
 
 	try {
+		if (opts.onLockHeld) await opts.onLockHeld();
+
 		const dir = receiptsDir(opts.stateDir);
 		let names: string[];
 		try {
 			names = (await fs.readdir(dir)).filter((n) => n.endsWith(".jsonl")).sort();
-		} catch {
-			names = [];
+		} catch (err) {
+			// ENOENT (round 3 Finding 2): genuinely nothing there yet — a fresh/never-used state dir
+			// is not an error. Anything else (EACCES, EIO, ENOTDIR from `receipts` existing as a
+			// plain file, …) means this script could NOT actually read the directory, and reporting
+			// "0 files scanned" for that would be success-shaped output for a failure.
+			if ((err as NodeJS.ErrnoException).code === "ENOENT") names = [];
+			else throw new ReceiptsDirUnreadable(dir, err);
 		}
 
 		const perFile: FileReport[] = [];
@@ -576,7 +815,10 @@ Exit codes: 0 = ran (see printed counts for what it did/skipped); 2 = REFUSED to
 live daemon holds --state-dir's single-writer lock (state-lock.ts's daemon.lock — see
 DaemonLockRefusal). This script ACQUIRES AND HOLDS that same lock for its entire pass (both
 modes), so a daemon trying to start while this script is running blocks at ITS OWN startup
-instead of racing an open append descriptor against this script's rename.
+instead of racing an open append descriptor against this script's rename. 3 = the receipts
+directory could not actually be read (permissions, I/O error, a "receipts" path that's a plain
+file — anything other than it simply not existing yet) — see ReceiptsDirUnreadable; this is
+NEVER silently reported as "0 files scanned".
 
 Rules (see the module doc at the top of this file for the full two-round gauntlet rationale):
   - harness/model VALUES are NEVER written by this script. Every missing-harness row gets
@@ -605,8 +847,18 @@ function parseArgs(argv: string[]): RunOpts | "help" {
 	let dryRun = false;
 	for (let i = 0; i < argv.length; i++) {
 		const a = argv[i];
-		if (a === "--state-dir") stateDir = argv[++i];
-		else if (a === "--dry-run") dryRun = true;
+		if (a === "--state-dir") {
+			const next = argv[i + 1];
+			// Round 3 Finding 5: `--state-dir --dry-run` used to silently set stateDir to the LITERAL
+			// string "--dry-run" (and leave dryRun false) instead of erroring — a token that looks
+			// like another flag right after --state-dir is almost certainly a misplaced flag, not a
+			// real directory name worth supporting at the cost of this footgun.
+			if (next === undefined || next.startsWith("--")) {
+				throw new Error(`--state-dir requires a directory path, not ${next === undefined ? "(nothing)" : `"${next}"`} — a value starting with "--" is almost certainly a misplaced flag. usage: bun scripts/backfill-receipt-attribution.ts --state-dir <dir> [--dry-run]`);
+			}
+			stateDir = next;
+			i++;
+		} else if (a === "--dry-run") dryRun = true;
 	}
 	if (!stateDir) throw new Error("usage: bun scripts/backfill-receipt-attribution.ts --state-dir <dir> [--dry-run]  (--help for details)");
 	return { stateDir, dryRun };
@@ -640,6 +892,10 @@ if (import.meta.main) {
 		if (err instanceof DaemonLockRefusal) {
 			console.error(err.message);
 			process.exit(2);
+		}
+		if (err instanceof ReceiptsDirUnreadable) {
+			console.error(err.message);
+			process.exit(3);
 		}
 		throw err;
 	}
