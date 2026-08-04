@@ -28,6 +28,13 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
 05 slice 1 shipped: the route-table seam exists and is real (two lane adapters). Suite 4947/1
 (dead-exports pre-existing only — best state yet). PR: deepen/05-route-table branch.
 
+## Iteration 12 (2026-08-04, goal mode)
+14 slice 2: the gating DESIGN, two rounds. v1 answered the implementation-review findings; the
+design red-team then found eight holes in v1 (tick-global seam, typo re-arm, unaudited clear,
+race identity split, crash-lossable announcement, double-count) — all folded into DESIGN v2.
+Codex 22/22 on the ledger. Docs-only slice. Lesson: designs need the same two-round adversarial
+treatment as diffs — the first honest design is still wrong at the seams.
+
 ## Iteration 10 (2026-08-04, goal mode)
 14 slice 1: difficulty instrumentation shipped SHADOW-ONLY — the review earned its keep at design
 level (three High findings survived; gating refused until the redesign answers 14's open
