@@ -105,6 +105,16 @@ export interface EpisodeMeta {
 	excerpt: string;
 	digestCount: number;
 	hasStaleAnswers: boolean;
+	/** Regeneration contract (deepen 07, DESIGN v2). All optional: a legacy pre-fingerprint pair
+	 *  decodes fine and is migrated by one rebuild. `sourceFingerprint` covers DURABLE input
+	 *  classes only (deltas, symptoms, digests, verified test executions) — live-state commentary
+	 *  (fog, stale answers) is stamped at build and deliberately outside the drift trigger. */
+	sourceFingerprint?: string;
+	/** sha1 of the exact markdown written — a mismatch on disk means a hand edit: the pair is
+	 *  QUARANTINED (never silently regenerated over, never served as machine-derived). */
+	builtHash?: string;
+	quarantined?: boolean;
+	editedAt?: number;
 }
 
 export interface BuiltEpisode {
@@ -124,6 +134,10 @@ const EpisodeMetaSchema = Schema.Struct({
 	excerpt: Schema.String,
 	digestCount: Schema.Number,
 	hasStaleAnswers: Schema.Boolean,
+	sourceFingerprint: Schema.optional(Schema.String),
+	builtHash: Schema.optional(Schema.String),
+	quarantined: Schema.optional(Schema.Boolean),
+	editedAt: Schema.optional(Schema.Number),
 });
 
 // ── ISO-week boundary math ──────────────────────────────────────────────────────────────────────
@@ -294,6 +308,7 @@ export function buildEpisode(input: BuildEpisodeInput): BuiltEpisode {
 	sections.push(renderVerifiedSection(testExecutions));
 	sections.push(renderNotCoveredSection(omitted, digestIds.length, stale.notCoveredNote));
 
+	const markdown = sections.join("\n\n");
 	const meta: EpisodeMeta = {
 		version: EPISODE_SCHEMA_VERSION,
 		id: isoWeek,
@@ -305,8 +320,41 @@ export function buildEpisode(input: BuildEpisodeInput): BuiltEpisode {
 		excerpt: buildExcerpt(lead, fogTop),
 		digestCount: digestIds.length,
 		hasStaleAnswers: (staleAnswers?.length ?? 0) > 0,
+		// Regeneration contract (deepen 07): fingerprint of the durable inputs this build derived
+		// from, and the hash of the exact markdown written — both from THIS one snapshot, so the
+		// pair can never describe a different moment than its content (red-team amendment 2).
+		sourceFingerprint: episodeSourceFingerprint(input),
+		builtHash: episodeContentHash(markdown),
 	};
-	return { id: isoWeek, markdown: sections.join("\n\n"), meta };
+	return { id: isoWeek, markdown, meta };
+}
+
+// ── regeneration contract (deepen 07, DESIGN v2) ───────────────────────────────────────────────
+
+/** sha1 of markdown content — the hand-edit tripwire. */
+export function episodeContentHash(markdown: string): string {
+	return createHash("sha1").update(markdown).digest("hex");
+}
+
+/** Drift trigger over the DURABLE input classes of one gathered snapshot: per class, count +
+ *  max-timestamp + a stable hash of the sorted ID set — deletion/rotation lowers counts,
+ *  same-count substitution changes the ID-set hash (red-team amendment 1). Live-state inputs
+ *  (fogTop, staleAnswers) are commentary, not evidence, and never trigger a rebuild. */
+export function episodeSourceFingerprint(g: EpisodeGatherResult): string {
+	const cls = (ids: readonly string[], maxTs: number): string => {
+		const idHash = createHash("sha1").update([...ids].sort().join("\n")).digest("hex").slice(0, 12);
+		return `${ids.length}:${maxTs}:${idHash}`;
+	};
+	const deltas = g.deltas ?? [];
+	const symptoms = g.symptoms ?? [];
+	const tests = g.testExecutions ?? [];
+	return [
+		"v1",
+		cls(deltas.map((d) => d.id), deltas.reduce((m, d) => Math.max(m, d.createdAt ?? 0), 0)),
+		cls(symptoms.map((x) => x.id), symptoms.reduce((m, x) => Math.max(m, x.landedAt), 0)),
+		cls(g.digestIds, 0),
+		cls(tests.map((t) => `${t.command}::${t.outcome}::${t.source}`), 0),
+	].join("|");
 }
 
 // ── storage (readdir idiom, mirrors symptoms.ts) ───────────────────────────────────────────────
@@ -333,27 +381,46 @@ function metaFile(stateDir: string, repo: string, isoWeek: string): string {
 	return path.join(stateDir, DIR, episodeRepoHash(repo), `${sanitizeId(isoWeek)}.json`);
 }
 
-/** Whether this repo's artifact for `isoWeek` already exists — `EpisodeLoop`'s idempotency check.
- *  @substrate exported for tests only — `EpisodeLoop.tick` (same file) is the one production caller;
- *  the idempotency decision (exists ⇒ skip) is asserted directly. */
-export function episodeExists(stateDir: string, repo: string, isoWeek: string): boolean {
-	// BOTH halves must exist (code-review finding 2): saveEpisode writes md then meta, and a crash
-	// between the two must read as "not generated" so the next tick retries (writeDurable is
-	// atomic per file, so rewriting both is safe) — gating on the md alone wedged that week
-	// forever as generated-but-unlistable (listEpisodes indexes the meta sidecar).
-	const b = getStorageBackend();
-	return b.exists(mdFile(stateDir, repo, isoWeek)) && b.exists(metaFile(stateDir, repo, isoWeek));
-}
+// `episodeExists` (the write-once idempotency check) RETIRED by deepen 07: regeneration is the
+// contract now — tickRepo decides rebuild-vs-skip from the sidecar's sourceFingerprint against a
+// freshly gathered snapshot, and a crash between the pair's two writes still reads as "rebuild"
+// (fingerprint unreadable ⇒ legacy/incomplete ⇒ regenerate once), preserving the old finding-2
+// crash-window behavior without the write-once ceiling.
 
 /** Durable write of both the markdown and its sidecar meta. Returns false (never throws) on any
  *  write failure — a caller must never believe an episode was saved when a restart will disagree.
  *  @substrate exported for tests only — `EpisodeLoop.tick` (same file) is the one production caller;
  *  the round-trip/idempotency contract is asserted directly against a real temp state dir. */
-export async function saveEpisode(stateDir: string, repo: string, episode: BuiltEpisode): Promise<boolean> {
+export async function saveEpisode(stateDir: string, repo: string, episode: BuiltEpisode, opts?: { expectPriorHash?: string | null }): Promise<boolean> {
 	try {
 		const b = getStorageBackend();
+		const priorMd = await readEpisodeMarkdown(stateDir, repo, episode.id);
+		// Conflict guard (review finding: a hand edit racing the gather must never be rotated away):
+		// the caller states what it believes is on disk; a mismatch aborts with NO writes — the next
+		// tick's quarantine logic owns the decision.
+		if (opts?.expectPriorHash !== undefined) {
+			const actual = priorMd === undefined ? null : episodeContentHash(priorMd);
+			if (actual !== opts.expectPriorHash) return false;
+		}
+		// Publish-intent marker (grok finding: a crash between the pair's writes false-quarantined
+		// once overnight exhaust changed the fresh build). Written before the pair, removed after —
+		// its presence means "incomplete machine publication", never a hand edit.
+		// NOTE a residual TOCTOU stands documented: expectPriorHash is check-then-write, not CAS
+		// (the backend has no compare-and-swap) — an edit landing in the microseconds between the
+		// re-read above and the md write below is overwritten. Accepted: single-writer daemon, and
+		// a human editing a stateDir artifact mid-tick is already off the supported path; the .prev
+		// rotation preserves the pre-edit generation either way.
+		const marker = path.join(stateDir, DIR, episodeRepoHash(repo), `${sanitizeId(episode.id)}.publishing`);
+		await b.writeDurable(marker, episode.meta.builtHash ?? "");
+		// Publish first, rotate after (review finding: rotating before a failed publish lost the
+		// only history). priorMd is held in memory, so a successful publish can always record it;
+		// a failed publish changes nothing and .prev is untouched.
 		await b.writeDurable(mdFile(stateDir, repo, episode.id), episode.markdown);
 		await b.writeDurable(metaFile(stateDir, repo, episode.id), JSON.stringify(episode.meta, null, 2));
+		await b.remove(marker).catch(() => {});
+		if (priorMd !== undefined && episode.meta.builtHash && episodeContentHash(priorMd) !== episode.meta.builtHash) {
+			await b.writeDurable(path.join(stateDir, DIR, episodeRepoHash(repo), `${sanitizeId(episode.id)}.prev.md`), priorMd).catch(() => {});
+		}
 		return true;
 	} catch {
 		return false;
@@ -387,9 +454,16 @@ async function readEpisodeMeta(stateDir: string, repo: string, isoWeek: string):
 /** The full record (markdown + meta) for one episode, or `undefined` if either half is missing —
  *  a half-written artifact is treated as absent rather than served partially. */
 export async function readEpisode(stateDir: string, repo: string, isoWeek: string): Promise<(EpisodeMeta & { markdown: string }) | undefined> {
-	const [markdown, meta] = await Promise.all([readEpisodeMarkdown(stateDir, repo, isoWeek), readEpisodeMeta(stateDir, repo, isoWeek)]);
-	if (markdown === undefined || meta === undefined) return undefined;
-	return { ...meta, markdown };
+	for (let attempt = 0; attempt < 2; attempt++) {
+		const [markdown, meta] = await Promise.all([readEpisodeMarkdown(stateDir, repo, isoWeek), readEpisodeMeta(stateDir, repo, isoWeek)]);
+		if (markdown === undefined || meta === undefined) return undefined;
+		// Mixed-generation window (md-then-sidecar publish): validate and retry ONCE; a persistent
+		// mismatch is served as-is — it is either a hand edit awaiting quarantine (honest to show)
+		// or a crash window the next loop tick heals.
+		if (attempt === 0 && meta.builtHash && !meta.quarantined && episodeContentHash(markdown) !== meta.builtHash) continue;
+		return { ...meta, markdown };
+	}
+	return undefined; // unreachable: attempt 1 always returns
 }
 
 /** Newest-week-first index of every episode meta recorded for `repo` — readdir over the sidecar
@@ -476,6 +550,9 @@ export class EpisodeLoop {
 		}
 	}
 
+	/** Quarantine announcements already logged this process — once per pair, not per tick. */
+	private readonly quarantineLogged = new Set<string>();
+
 	private async tickRepo(repo: string): Promise<void> {
 		const log = this.deps.log ?? (() => {});
 		const clock = this.deps.now ?? Date.now;
@@ -483,37 +560,38 @@ export class EpisodeLoop {
 		let report: AutomationReport = { durationMs: 0, found: 0, filed: 0 };
 		let targetWeek: string | undefined;
 		try {
-			targetWeek = previousCompleteIsoWeek(new Date(clock()));
-			if (episodeExists(this.deps.stateDir, repo, targetWeek)) {
-				report = { durationMs: clock() - t0, found: 0, filed: 0 }; // ring-only: nothing new this tick
+			// Regeneration window (deepen 07): the two most recent COMPLETE weeks — late-arriving
+			// exhaust for the week before last still gets its story corrected; anything older is
+			// settled history (rebuildable manually from exhaust if ever needed).
+			const prev = previousCompleteIsoWeek(new Date(clock()));
+			const prevPrev = isoWeekKey(new Date(isoWeekBounds(prev).start - 1));
+			const builtWeeks: string[] = [];
+			let failedWeek: string | undefined;
+			for (const week of [prevPrev, prev]) {
+				const outcome = await this.regenerateIfDrifted(repo, week, clock, log);
+				if (outcome === "built") builtWeeks.push(week);
+				if (outcome === "failed") failedWeek = week; // keep going: an older failure must not suppress a newer build's push (review finding)
+			}
+			if (builtWeeks.length === 0) {
+				report = failedWeek
+					? { durationMs: clock() - t0, found: 1, filed: 0, level: "warn", detail: `gather/save failed for ${failedWeek}` }
+					: { durationMs: clock() - t0, found: 0, filed: 0 }; // ring-only: nothing drifted
 				return;
 			}
-			// A missing artifact for the target week IS a found candidate, regardless of what happens next.
-			let gathered: EpisodeGatherResult;
-			try {
-				gathered = await this.deps.gather(repo, isoWeekBounds(targetWeek));
-			} catch (e) {
-				log(`gather failed for ${repo}/${targetWeek}: ${errText(e)}`);
-				report = { durationMs: clock() - t0, found: 1, filed: 0, level: "warn", detail: `gather failed for ${targetWeek}` };
-				return;
-			}
-			const episode = buildEpisode({ repo, isoWeek: targetWeek, now: clock(), ...gathered });
-			const ok = await saveEpisode(this.deps.stateDir, repo, episode);
-			if (!ok) {
-				log(`save failed for ${repo}/${targetWeek}`);
-				report = { durationMs: clock() - t0, found: 1, filed: 0, level: "warn", detail: `save failed for ${targetWeek}` };
-				return;
-			}
-			report = { durationMs: clock() - t0, found: 1, filed: 1, detail: `generated episode for ${targetWeek}` };
+			// The push deep-link names the newest week that was ACTUALLY built — never a skipped one.
+			targetWeek = builtWeeks[builtWeeks.length - 1];
+			report = failedWeek
+				? { durationMs: clock() - t0, found: builtWeeks.length + 1, filed: builtWeeks.length, level: "warn", detail: `regenerated ${builtWeeks.join(", ")}; failed ${failedWeek}` }
+				: { durationMs: clock() - t0, found: builtWeeks.length, filed: builtWeeks.length, detail: `regenerated ${builtWeeks.join(", ")}` };
 			if (this.deps.notifyPush) {
 				try {
 					await this.deps.notifyPush({
 						title: "weekly brief ready",
 						body: "Tap to open glance — the weekly state-of-the-codebase brief is ready.",
-						url: `/#/episodes/${episode.id}`,
+						url: `/#/episodes/${targetWeek}`,
 						// Own namespace (never `done:`/bare agent id, per push.ts's voiceDonePayload doc) so a
 						// "brief ready" toast can never debounce-eat or be eaten by an unactioned "needs you".
-						tag: `episode:${episodeRepoHash(repo)}:${episode.id}`,
+						tag: `episode:${episodeRepoHash(repo)}:${targetWeek}`,
 					});
 				} catch (e) {
 					log(`push failed for ${repo}/${targetWeek}: ${errText(e)}`);
@@ -525,5 +603,62 @@ export class EpisodeLoop {
 		} finally {
 			this.deps.recordFor?.(repo)(report);
 		}
+	}
+
+	/**
+	 * The regeneration decision for one (repo, week) — DESIGN v2's core:
+	 *  - hand-edited pair (md hash ≠ builtHash) → QUARANTINE once (sidecar stamped, fabric skips
+	 *    it via listEpisodes' consumers), never regenerate over human content;
+	 *  - no pair / legacy pair (no fingerprint) / fingerprint drift vs a FRESH gather → rebuild;
+	 *  - a FAILED gather aborts (never treats failure as drift — the healthy projection stays).
+	 */
+	private async regenerateIfDrifted(repo: string, week: string, clock: () => number, log: (m: string) => void): Promise<"built" | "skipped" | "failed" | "quarantined"> {
+		const stateDir = this.deps.stateDir;
+		const existing = await readEpisode(stateDir, repo, week);
+		if (existing?.quarantined) return "skipped";
+		const diskHash = existing ? episodeContentHash(existing.markdown) : undefined;
+		let gathered: EpisodeGatherResult;
+		try {
+			gathered = await this.deps.gather(repo, isoWeekBounds(week));
+		} catch (e) {
+			log(`gather failed for ${repo}/${week}: ${errText(e)}`);
+			return "failed";
+		}
+		const episode = buildEpisode({ repo, isoWeek: week, now: clock(), ...gathered });
+		// Hand-edit vs crash-window, decided AFTER the fresh build (review finding): the renderer is
+		// deterministic, so an interrupted machine publication's markdown equals either the sidecar's
+		// builtHash or THIS build's hash — and any interrupted publication ALSO left its
+		// `.publishing` marker (grok finding: overnight exhaust drift made the fresh-build hash an
+		// insufficient witness on its own). Content matching neither hash AND no marker is human.
+		const publishingMarker = getStorageBackend().exists(path.join(stateDir, DIR, episodeRepoHash(repo), `${sanitizeId(week)}.publishing`));
+		if (existing?.builtHash && diskHash !== existing.builtHash && diskHash !== episode.meta.builtHash && !publishingMarker) {
+			const key = `${repo}::${week}`;
+			const b = getStorageBackend();
+			const { markdown: _md, ...meta } = existing;
+			// v2 amendment 3: the quarantined sidecar must not keep describing pre-edit content —
+			// excerpt emptied, fingerprint dropped. A FAILED quarantine write is a failure, not a
+			// quarantine: no log-suppression stamp, so the next tick retries.
+			const quarantinedMeta = { ...meta, excerpt: "", sourceFingerprint: undefined, quarantined: true, editedAt: clock() };
+			try {
+				await b.writeDurable(metaFile(stateDir, repo, week), JSON.stringify(quarantinedMeta, null, 2));
+			} catch (e) {
+				log(`quarantine write failed for ${repo}/${week}: ${errText(e)}`);
+				return "failed";
+			}
+			if (!this.quarantineLogged.has(key)) {
+				this.quarantineLogged.add(key);
+				log(`episode ${repo}/${week} was edited by hand — quarantined (kept verbatim, excluded from projections, never regenerated)`);
+			}
+			return "quarantined";
+		}
+		if (existing?.sourceFingerprint && existing.sourceFingerprint === episode.meta.sourceFingerprint && diskHash === existing.builtHash) return "skipped";
+		// Conflict-guarded publish: expect exactly what we read (null = absent). An edit landing
+		// between our read and this write aborts untouched; next tick quarantines it.
+		const ok = await saveEpisode(stateDir, repo, episode, { expectPriorHash: diskHash ?? null });
+		if (!ok) {
+			log(`save failed for ${repo}/${week}`);
+			return "failed";
+		}
+		return "built";
 	}
 }

@@ -16,7 +16,8 @@ import {
 	type EpisodeGatherResult,
 	EPISODE_SCHEMA_VERSION,
 	EpisodeLoop,
-	episodeExists,
+	episodeContentHash,
+	episodeSourceFingerprint,
 	episodeRepoHash,
 	isoWeekBounds,
 	listEpisodes,
@@ -246,12 +247,13 @@ test("isoWeekBounds throws on a malformed id rather than silently misparsing", (
 
 // ── storage: readdir idiom + idempotency ────────────────────────────────────────────────────────
 
-test("episodeExists is false before save and true after", async () => {
-	const dir = await tmpDir();
-	expect(episodeExists(dir, "/repo", "2026-W10")).toBe(false);
+test("buildEpisode stamps sourceFingerprint + builtHash from the one snapshot (deepen 07)", () => {
 	const episode = buildEpisode(baseInput());
-	expect(await saveEpisode(dir, "/repo", episode)).toBe(true);
-	expect(episodeExists(dir, "/repo", "2026-W10")).toBe(true);
+	expect(episode.meta.sourceFingerprint).toStartWith("v1|");
+	expect(episode.meta.builtHash).toBe(episodeContentHash(episode.markdown));
+	// Live-state inputs are commentary, not evidence: fog changes never change the fingerprint.
+	const withFog = buildEpisode(baseInput({ fogTop: [{ file: "src/x.ts", debt: 9 } as never] }));
+	expect(withFog.meta.sourceFingerprint).toBe(episode.meta.sourceFingerprint);
 });
 
 test("readEpisode round-trips markdown + meta; a missing episode reads as undefined, never a crash", async () => {
@@ -318,23 +320,24 @@ test("EpisodeLoop.tick generates once, pushes once, and reports a meaningful (fi
 
 	await loop.tick();
 
-	expect(gatherCalls).toBe(1);
+	expect(gatherCalls).toBe(2); // regeneration window: the two most recent complete weeks
 	expect(pushed).toHaveLength(1);
 	expect(pushed[0]?.title).toBe("weekly brief ready");
 	expect(pushed[0]?.tag).toMatch(/^episode:/);
 	expect(reports).toHaveLength(1);
-	expect(reports[0]?.filed).toBe(1);
+	expect(reports[0]?.filed).toBe(2); // both weeks were missing → both built
 
 	const targetWeek = previousCompleteIsoWeek(new Date("2026-07-15T12:00:00Z"));
-	expect(episodeExists(dir, "/repo", targetWeek)).toBe(true);
+	expect(await readEpisode(dir, "/repo", targetWeek)).toBeDefined();
 });
 
-test("EpisodeLoop.tick skips generation once the target week's artifact exists, and stays ring-only", async () => {
+test("EpisodeLoop.tick: unchanged fingerprint skips (ring-only); drift regenerates + rotates .prev; hand-edit quarantines", async () => {
 	const dir = await tmpDir();
 	const clock = () => new Date("2026-07-15T12:00:00Z").getTime();
-	const targetWeek = previousCompleteIsoWeek(new Date(clock()));
-	await saveEpisode(dir, "/repo", buildEpisode(baseInput({ isoWeek: targetWeek })));
+	const prev = previousCompleteIsoWeek(new Date(clock()));
+	const prevPrev = isoWeekKey(new Date(isoWeekBounds(prev).start - 1));
 
+	let gathered: EpisodeGatherResult = gatherResult();
 	let gatherCalls = 0;
 	const pushed: unknown[] = [];
 	const reports: AutomationReport[] = [];
@@ -343,21 +346,39 @@ test("EpisodeLoop.tick skips generation once the target week's artifact exists, 
 		stateDir: dir,
 		gather: async () => {
 			gatherCalls++;
-			return gatherResult();
+			return gathered;
 		},
 		notifyPush: (p) => void pushed.push(p),
 		now: clock,
 		recordFor: () => (r) => reports.push(r),
 	});
 
-	await loop.tick();
+	await loop.tick(); // first tick: both weeks missing → both built
+	expect(reports.at(-1)?.filed).toBe(2);
 
-	expect(gatherCalls).toBe(0); // already exists — never even gathers
-	expect(pushed).toHaveLength(0);
-	expect(reports).toHaveLength(1);
-	// Ring-only means: no skipReason, no level, and zero found/filed — automation-log.ts's
-	// isMeaningful() would read this as non-meaningful (never spooled to automation.jsonl).
-	expect(reports[0]).toEqual({ durationMs: expect.any(Number), found: 0, filed: 0 });
+	await loop.tick(); // identical gather → identical fingerprints → ring-only skip
+	expect(reports.at(-1)).toEqual({ durationMs: expect.any(Number), found: 0, filed: 0 });
+	expect(pushed).toHaveLength(1); // no second push for a no-op tick
+
+	// Drift: new durable evidence regenerates and rotates the previous generation to .prev.md.
+	const before = await readEpisode(dir, "/repo", prev);
+	gathered = gatherResult({ deltas: [delta("Fresh evidence arrived late.", ["src/late.ts"])] });
+	await loop.tick();
+	const after = await readEpisode(dir, "/repo", prev);
+	expect(after?.builtHash).not.toBe(before?.builtHash);
+	const prevGen = await fs.readFile(path.join(dir, "episodes", episodeRepoHash("/repo"), `${prev}.prev.md`), "utf8");
+	expect(prevGen).toBe(before?.markdown);
+
+	// Hand-edit: content no longer matches builtHash → quarantined, never regenerated over.
+	const mdPath = path.join(dir, "episodes", episodeRepoHash("/repo"), `${prev}.md`);
+	await fs.writeFile(mdPath, `${after?.markdown}\n\nOPERATOR NOTE: keep this.`);
+	gathered = gatherResult({ deltas: [delta("Even fresher evidence.", ["src/newer.ts"])] });
+	await loop.tick();
+	const quarantined = await readEpisode(dir, "/repo", prev);
+	expect(quarantined?.quarantined).toBeTrue();
+	expect(quarantined?.markdown).toContain("OPERATOR NOTE: keep this.");
+	void prevPrev;
+	void gatherCalls;
 });
 
 test("EpisodeLoop.tick reports level:warn (not ring-only) when gather fails, and never pushes", async () => {
@@ -420,20 +441,21 @@ test("EpisodeLoop.tick is reentrancy-safe: an overlapping call while one is in f
 	const first = loop.tick();
 	const second = loop.tick(); // fires while `first` is still running
 	await Promise.all([first, second]);
-	expect(gatherCalls).toBe(1);
+	expect(gatherCalls).toBe(2); // one tick's two-week window — the overlapping tick added nothing
 });
 
-test("an orphaned markdown half (crash between md and meta writes) reads as NOT generated — the next tick retries", async () => {
+test("an orphaned markdown half (crash between md and meta writes) reads as NOT generated — regeneration retries", async () => {
 	const dir = await tmpDir();
 	const built = buildEpisode(baseInput());
 	expect(await saveEpisode(dir, "/repo", built)).toBe(true);
-	expect(episodeExists(dir, "/repo", built.id)).toBe(true);
+	expect(await readEpisode(dir, "/repo", built.id)).toBeDefined();
 	// simulate the crash: meta sidecar gone, markdown orphaned
-	const { rm } = await import("node:fs/promises");
-	const meta = (await import("node:fs/promises")).readdir;
-	const repoDir = (await meta(dir + "/episodes"))[0];
+	const { rm, readdir } = await import("node:fs/promises");
+	const repoDir = (await readdir(dir + "/episodes"))[0];
 	await rm(`${dir}/episodes/${repoDir}/${built.id}.json`);
-	expect(episodeExists(dir, "/repo", built.id)).toBe(false);
+	// Half-written pair reads as absent (readEpisode) — and the drift logic sees no fingerprint,
+	// so the next tick rebuilds it (the old finding-2 crash-window contract, minus write-once).
+	expect(await readEpisode(dir, "/repo", built.id)).toBeUndefined();
 });
 
 test("EpisodeLoop derives its repo set LIVE each tick — a repo added after construction gets its episode without a restart", async () => {
@@ -452,7 +474,7 @@ test("EpisodeLoop derives its repo set LIVE each tick — a repo added after con
 		recordFor: () => (r) => reports.push(r),
 	});
 	await loop.tick();
-	expect(generated).toEqual(["/repo"]);
+	expect(new Set(generated)).toEqual(new Set(["/repo"])); // two-week window: same repo, twice
 	liveRepos.push("/late-added"); // no restart, no re-construction
 	await loop.tick();
 	expect(generated).toContain("/late-added");
