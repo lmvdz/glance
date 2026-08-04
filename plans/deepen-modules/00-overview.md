@@ -43,6 +43,12 @@ tombstone-after-swallowed-failure eraser). Five codex rows + one native row reco
 quota-flaked again (6th) — its absence is now a measured reliability fact on the ledger, not
 an anecdote.
 
+## Iteration 30 (2026-08-04, goal mode) — CONCERN 12 DONE
+Agents-core disposition (docs-only): after three slices, state.json on disk IS the agents lane;
+every other lane persists through its own file/rows, and the deletion test passes lane-by-lane.
+The dirty-tracking upgrade and the Store-interface split are recorded follow-ups with their
+prerequisites named. TWELVE concerns done; open: 08/09/10 (+17 on the 14-branch), 13 needs-lars.
+
 ## Iteration 29 (2026-08-04, goal mode)
 12 slice 3: transcripts escape the blob (modes converge on one layout; state.json is now the
 agents core + tombstones). The queue's first CONVERGENT cross-lineage round: grok's first

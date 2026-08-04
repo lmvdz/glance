@@ -1,5 +1,5 @@
 # Finish the StateSnapshot split — per-lane stores
-STATUS: open
+STATUS: done
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -46,13 +46,25 @@ already exist as adapters), so a lane's write amplification and crash-window is 
   with a self-migrating tombstone guard for both lanes. Codex's unique Low: two more durability
   probes constructing the legacy fileset. Nine adjudicated rows.
 
+- Agents-core disposition (2026-08-04, iteration 30) — CONCERN COMPLETE, docs-only close-out
+  (no code change; no review round needed): after slices 1-3, state.json ON DISK is the agents
+  lane — capabilities, features, transcripts, feedback, channels, nodes, node-records, grants
+  and proposals all persist through their own files/rows. The deletion test the concern asked
+  for now passes lane-by-lane: each lane's write amplification and crash window is its own.
+  The 48-method Store interface itself splitting into per-lane store objects is a candidate
+  for a FUTURE review round, not this concern's checklist.
+
 ## Follow-ups (recorded, deliberately not in slice 1)
 - Post-stop ingress race (codex M2, adjudicated pre-existing CLASS): the HTTP server keeps
   accepting mutations while manager.stop() runs, so a write enqueued after any durability
   barrier (blob writeChain, feedback saves, capability chain alike) is lost on exit. Wants a
   stopping-flag/ingress-quiesce design across ALL lanes, not a capability-only patch.
-- Remaining blob lanes for later slices: features (would also end the decision ledger's
-  ride-along — 02's follow-up), transcripts, then the agents core.
+- Per-agent transcript files + dirty tracking (the write-amplification upgrade both blind
+  reviewers concur is the future path): prerequisite is the ~86-site in-place entry-mutation
+  audit — a missed dirty-mark site means a mutation that NEVER persists, so this must not be
+  attempted casually. Single-file write-all is correct-by-construction today.
+- Store interface split into per-lane store objects (48 methods today) — a candidate for the
+  next architecture-review round.
 
 ## Provenance
 Whole-repo report candidate 7 (Worth exploring). Coordinate with 02's follow-up (a decisions
