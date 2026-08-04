@@ -24,6 +24,11 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
+## Iteration 15 (2026-08-04, goal mode — PR #314; iterations 9–14 logged on their PR branches)
+07 design round, two-round red-teamed: eight survived findings folded into DESIGN v2 (lying
+quarantine pair, snapshot coherence, failure-as-drift, live-state evidence claim, barrel break,
+.prev clobber, legacy migration). needs-design → in-progress; implementation slice scoped.
+
 ## Queue pivot (2026-08-03, Lars)
 
 Concerns 14–16 are the CS329A borrows (plans/research-cs329a/BRIEF.md), absorbed into this queue

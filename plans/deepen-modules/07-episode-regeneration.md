@@ -1,10 +1,10 @@
 # Episodes — regenerated projections, not accreted logs
-STATUS: open
+STATUS: in-progress
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: moderate
 TOUCHES: src/memory/weekly-episode.ts (episodeExists :339 blocks rebuild; EpisodeLoop :446–529), src/squad-manager.ts gatherEpisodeInputs (5241–5295)
-MODE: needs-design
+MODE: afk
 
 ## Goal
 Two defects against POSITION.md Layer 2 rule 1 ("regenerate, never append"): episodes are
