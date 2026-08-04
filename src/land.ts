@@ -17,7 +17,7 @@ import { envBool } from "./config.ts";
 import { gateExec, gateRunUnrunnable, greenGateUnproven } from "./gate-runner.ts";
 import { reduceOutput } from "./output-reduce.ts";
 import { proofGate, recordProof } from "./proof.ts";
-import { landRiskGateEnabled, landRiskReason } from "./land-risk.ts";
+import { landRiskGateEnabled, landRiskReason } from "./rail/land-risk.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV, gitNoSignEnv } from "./git-harden.ts";
 import { harnessAuthEnv, scrubbedSpawnEnv } from "./spawn-env.ts";
 import type { FeatureCriterion } from "./types.ts";

@@ -7,7 +7,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { landRiskGateEnabled, landRiskReason } from "../src/land-risk.ts";
+import { landRiskGateEnabled, landRiskReason } from "../src/rail/land-risk.ts";
 
 let repo: string;
 

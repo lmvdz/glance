@@ -6,7 +6,7 @@
 
 import { expect, test } from "bun:test";
 import { evaluateCompliance, forcedLandFindings, landRepeatedlyFailingFindings, validatorOverrideFindings } from "../src/compliance.ts";
-import type { ForcedLand, LandLedger, ValidatorOverride } from "../src/land-ledger.ts";
+import type { ForcedLand, LandLedger, ValidatorOverride } from "../src/rail/land-ledger.ts";
 
 test("forcedLandFindings: one ForcedLand ⇒ a high forced-land-without-proof finding naming branch + actor", () => {
 	const forced: ForcedLand[] = [{ branch: "squad/a1", actor: "operator@local", detail: "no proof", at: 5 }];

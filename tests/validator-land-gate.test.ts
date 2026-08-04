@@ -154,7 +154,7 @@ test("an explicit validatorOverride with a reason class bypasses the veto and re
 
 	expect(result.ok).toBe(true);
 	expect(result.merged).toBe(true);
-	const { readValidatorOverrides } = await import("../src/land-ledger.ts");
+	const { readValidatorOverrides } = await import("../src/rail/land-ledger.ts");
 	const overrides = readValidatorOverrides(stateDir);
 	expect(overrides.length).toBe(1);
 	expect(overrides[0].branch).toBe(branch);
