@@ -24,6 +24,17 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
+## Iteration 36 (2026-08-04, goal mode) — CONCERNS 17 DONE + 09 needs-lars — QUEUE RESOLVED
+17: the never-rendered attention pipeline is DELETED (~570 lines + tests) — with the round's
+real teaching: codex proved my "superseded" claim was overclaimed (reports/attentionEvents
+render nowhere — a safety-signal gap now NAMED and queued for the review round, not hidden
+behind dead code), and grok's dying narration caught the stranded import that NO gate could
+see, exposing that webapp tsconfig EXCLUDES tests from typechecking entirely (native
+blind-spot row — a review-round candidate). 09 → needs-lars (the #317 merge). Every concern
+now shows done or needs-lars: the QUEUE IS DRY. Next: the fresh architecture-review round —
+the goal's completion clause — with three pre-named candidates (reports/attentionEvents
+surface, webapp test-tsconfig gate, Store-interface split).
+
 ## Queue pivot (2026-08-03, Lars)
 
 Concerns 14–16 are the CS329A borrows (plans/research-cs329a/BRIEF.md), absorbed into this queue

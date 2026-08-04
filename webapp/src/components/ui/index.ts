@@ -10,7 +10,6 @@
  *   Callout       — insight/anomaly banner with an optional action
  *   SectionCard   — bordered card with an uppercase-tracked header
  *   HeatGrid      — GitHub-style per-day heat matrix (flat)
- *   AttentionRow  — severity dot + title + detail + age + action button
  *   AdoptCard     — "ad-hoc session detected" row with a one-click adopt action
  *
  * Color = meaning: emerald=good · amber=warn · red=critical · blue=neutral info.
@@ -23,7 +22,6 @@ export { StatTile, type StatTileProps } from './StatTile';
 export { Callout, type CalloutProps } from './Callout';
 export { SectionCard, type SectionCardProps } from './SectionCard';
 export { HeatGrid, type HeatGridProps, type HeatGridRow } from './HeatGrid';
-export { AttentionRow, type AttentionRowProps } from './AttentionRow';
 export { AdoptCard, type AdoptCardProps } from './AdoptCard';
 export { toneClasses, type Tone, type ToneLike } from './tokens';
 export { relativeAge } from './time';

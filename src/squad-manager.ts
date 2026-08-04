@@ -5556,8 +5556,10 @@ export class SquadManager extends EventEmitter {
 	 * HONEST LABEL (2nd round follow-up, blind review): when `rec` is absent, step 2 is — as of today —
 	 * the ONLY place this escalation reaches. It was believed to also surface via the cockpit's
 	 * "Needs you" lane and/or the omp-graph "land" loop node; verified false on both counts:
-	 *   - The Needs-you lane (`attentionItems` in webapp/src/lib/insights.ts) has no daemon/repo-scoped
-	 *     source at all — its `actionItems` fold-in only ever pushes `source: "health"` rows, and the
+	 *   - The old Needs-you lane (`attentionItems`, DELETED by deepen concern 17 — it was never
+	 *     rendered after the room pivot; note `reports`/`attentionEvents` currently render on NO
+	 *     surface at all, a named gap queued for the next review round) had no daemon/repo-scoped
+	 *     source at all — its `actionItems` fold-in only ever pushed `source: "health"` rows, and the
 	 *     server's `/api/action-items` only ever builds `land`/`error`/`pending` rows FROM a live agent
 	 *     in the roster. An unattached finding has neither.
 	 *   - factory-status.ts's `landBlocked` banner (the one existing repo-scoped warning slot) is
