@@ -7,6 +7,9 @@
  * the window coalesces into exactly one persist() call, (3) a graceful stop() flushes synchronously.
  */
 
+import type { TranscriptEntry } from "../src/types.ts";
+import type { CapabilitySnapshot } from "../src/capabilities/index.ts";
+import type { PersistedFeature } from "../src/types.ts";
 import { afterEach, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import * as fs from "node:fs/promises";
@@ -119,6 +122,24 @@ class SpySaveStore implements Store {
 	}
 	saveFeedback(snapshot: FeedbackSnapshot): Promise<void> {
 		return this.real.saveFeedback(snapshot);
+	}
+	loadFeatures(): Promise<PersistedFeature[]> {
+		return this.real.loadFeatures();
+	}
+	saveFeatures(features: PersistedFeature[]): Promise<void> {
+		return this.real.saveFeatures(features);
+	}
+	loadTranscripts(): Promise<Record<string, TranscriptEntry[]>> {
+		return this.real.loadTranscripts();
+	}
+	saveTranscripts(transcripts: Record<string, TranscriptEntry[]>): Promise<void> {
+		return this.real.saveTranscripts(transcripts);
+	}
+	loadCapabilities(): Promise<CapabilitySnapshot> {
+		return this.real.loadCapabilities();
+	}
+	saveCapabilities(snapshot: CapabilitySnapshot): Promise<void> {
+		return this.real.saveCapabilities(snapshot);
 	}
 	appendAudit(entry: AuditEntry): Promise<void> {
 		return this.real.appendAudit(entry);

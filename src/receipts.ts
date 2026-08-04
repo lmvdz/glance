@@ -6,7 +6,77 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { AgentStatus, ReceiptRollup, RunReceipt } from "./types.ts";
+import type { AgentStatus, ValidationRecord } from "./types.ts";
+import type { Span } from "./spans.ts";
+
+// ── RunReceipt / ReceiptRollup (deepen 06 slice 2: moved from types.ts — this lane owns them) ───
+/**
+ * Durable per-run record (one JSONL line per completed/terminated agent run).
+ * Tokens/costUsd are OPTIONAL — omitted when no assistant usage was seen.
+ */
+export interface RunReceipt {
+	agentId: string;
+	name: string;
+	repo: string;
+	branch?: string;
+	model?: string;
+	runId: string;
+	startedAt: number;
+	endedAt?: number;
+	durationMs?: number;
+	status: AgentStatus;
+	toolCalls: number;
+	toolTally: Record<string, number>;
+	tokens?: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
+	costUsd?: number;
+	filesTouched: string[];
+	/** Trace grouping id: `feat:<featureId>` for feature work, else `run:<agentId>:<runId>`. */
+	traceId?: string;
+	/** Fine-grained run spans. The structural spine (kind !== "tool") is always present on a finalized
+	 *  receipt (D1); only `tool` spans are tail-sampled. Receipt rollups above are never sampled. */
+	spans?: Span[];
+	/** True when tool-level spans were tail-sampled out; the structural spine is still present. An
+	 *  honest "tool detail sampled" signal distinct from `TraceResponse.partial` ("spine missing"). */
+	sampled?: boolean;
+	/** Feature/parent ids copied onto receipts so trace trees survive agent removal. */
+	featureId?: string;
+	parentId?: string;
+	/** Which harness drove the run ("omp" for daemon-spawned; external ingests set their own). */
+	harness?: string;
+	/** Epic 3 independent-validator verdict for this run's land attempt, copied from `AgentDTO.validation`
+	 *  at finalize time so it survives the run durably (Epic 5's confidence input, DESIGN §5). */
+	validation?: ValidationRecord;
+	/** Run-end self-confidence 0..1 (src/confidence.ts); absent until computed. */
+	confidence?: number;
+	/** Efficiency-discipline tokens (a profile's `membrane:*` capability tokens, `receipts.ts`'s
+	 *  `splitCapabilityTokens`) CONFIRMED delivered to this run — stamped by `confirmDeliveredFlags`
+	 *  only when the resolved harness's `contextInjection` was `"native"`, i.e. `appendSystemPrompt`
+	 *  actually reached the child process. Requesting a flag on a harness whose contextInjection is
+	 *  `"none"` (ACP default) yields NO flag here, even though the profile asked for one — stamping at
+	 *  request time instead of confirmed-delivery time would measure a placebo, not a real behavior
+	 *  change. Absent ⇒ nothing requested, or nothing delivered. */
+	efficiencyFlags?: string[];
+	/** Work lane the unit resolved at create time (adw-factory-borrows concern 02) — prerequisite for
+	 *  concern 08's lane-keyed cost aggregate. Stamped from the seed at `RunAccumulator.snapshot()`. */
+	lane?: WorkLane;
+	/** Complexity tier this run was bucketed under (`model-outcomes.ts`'s `tierOf(thinking)`) —
+	 *  the other half of concern 08's `(model, tier, lane)` cost-aggregate key, alongside `lane` above.
+	 *  Absent until a spawn caller stamps `RunSeed.tier` (mirrors `lane`'s own rollout exactly — see
+	 *  `cost-aggregate.ts`'s module doc "rollout note"); a receipt with no `tier` buckets under the
+	 *  aggregate's literal "unknown" tier, which a real `ComplexityTier` query never matches, so this
+	 *  field's absence is inert rather than silently misclassifying. */
+	tier?: ComplexityTier;
+}
+
+/** Compact run summary carried on the DTO for the dashboard. */
+export interface ReceiptRollup {
+	toolCalls: number;
+	costUsd?: number;
+	durationMs?: number;
+	endedAt?: number;
+	/** Total tokens across the run (sum of input/output/cache); absent when no usage seen. */
+	tokens?: number;
+}
 import type { WorkLane } from "./lane.ts";
 import type { ComplexityTier } from "./model-outcomes.ts";
 import { shouldKeepSpans, SpanCollector, traceMaxSpans, traceSampleRatio } from "./spans.ts";
