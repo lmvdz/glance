@@ -16,7 +16,9 @@ import {
 	type EpisodeGatherResult,
 	EPISODE_SCHEMA_VERSION,
 	EpisodeLoop,
-	episodeExists,
+	episodeContentHash,
+	type EpisodeSources,
+	episodeSourceFingerprint,
 	episodeRepoHash,
 	isoWeekBounds,
 	listEpisodes,
@@ -246,12 +248,13 @@ test("isoWeekBounds throws on a malformed id rather than silently misparsing", (
 
 // ── storage: readdir idiom + idempotency ────────────────────────────────────────────────────────
 
-test("episodeExists is false before save and true after", async () => {
-	const dir = await tmpDir();
-	expect(episodeExists(dir, "/repo", "2026-W10")).toBe(false);
+test("buildEpisode stamps sourceFingerprint + builtHash from the one snapshot (deepen 07)", () => {
 	const episode = buildEpisode(baseInput());
-	expect(await saveEpisode(dir, "/repo", episode)).toBe(true);
-	expect(episodeExists(dir, "/repo", "2026-W10")).toBe(true);
+	expect(episode.meta.sourceFingerprint).toStartWith("v2|");
+	expect(episode.meta.builtHash).toBe(episodeContentHash(episode.markdown));
+	// Live-state inputs are commentary, not evidence: fog changes never change the fingerprint.
+	const withFog = buildEpisode(baseInput({ fogTop: [{ file: "src/x.ts", debt: 9 } as never] }));
+	expect(withFog.meta.sourceFingerprint).toBe(episode.meta.sourceFingerprint);
 });
 
 test("readEpisode round-trips markdown + meta; a missing episode reads as undefined, never a crash", async () => {
@@ -299,6 +302,22 @@ function gatherResult(over: Partial<EpisodeGatherResult> = {}): EpisodeGatherRes
 	return { deltas: [], symptoms: [], fogTop: [], testExecutions: [], digestIds: [], omitted: [], ...over };
 }
 
+/** ok-typed EpisodeSources over a thunk — mirrors the manager adapter; `onGather` counts one
+ *  composed gather per (repo, week). `failClass` makes that one class return ok:false. */
+function fakeSources(get: (repo: string) => EpisodeGatherResult, onGather?: (repo: string) => void, failClass?: "decisions" | "symptoms" | "commentary" | "digestIds"): EpisodeSources {
+	return {
+		decisions: async (repo) => {
+			onGather?.(repo);
+			if (failClass === "decisions") return { ok: false };
+			const g = get(repo);
+			return { ok: true, value: { deltas: g.deltas, nonDeltaCount: 0 } };
+		},
+		symptoms: async (repo) => (failClass === "symptoms" ? { ok: false } : { ok: true, value: get(repo).symptoms }),
+		commentary: async (repo) => (failClass === "commentary" ? { ok: false } : { ok: true, value: { fogTop: get(repo).fogTop, staleAnswers: get(repo).staleAnswers ?? [] } }),
+		digestIds: async (repo) => (failClass === "digestIds" ? { ok: false } : { ok: true, value: get(repo).digestIds }),
+	};
+}
+
 test("EpisodeLoop.tick generates once, pushes once, and reports a meaningful (filed>0) event", async () => {
 	const dir = await tmpDir();
 	let gatherCalls = 0;
@@ -307,10 +326,7 @@ test("EpisodeLoop.tick generates once, pushes once, and reports a meaningful (fi
 	const loop = new EpisodeLoop({
 		repos: () => ["/repo"],
 		stateDir: dir,
-		gather: async () => {
-			gatherCalls++;
-			return gatherResult({ deltas: [delta("A real delta.", ["src/a.ts"])] });
-		},
+		sources: fakeSources(() => gatherResult({ deltas: [delta("A real delta.", ["src/a.ts"])] }), () => void gatherCalls++),
 		notifyPush: (p) => void pushed.push(p),
 		now: () => new Date("2026-07-15T12:00:00Z").getTime(),
 		recordFor: () => (r) => reports.push(r),
@@ -318,46 +334,62 @@ test("EpisodeLoop.tick generates once, pushes once, and reports a meaningful (fi
 
 	await loop.tick();
 
-	expect(gatherCalls).toBe(1);
+	expect(gatherCalls).toBe(2); // regeneration window: the two most recent complete weeks
 	expect(pushed).toHaveLength(1);
 	expect(pushed[0]?.title).toBe("weekly brief ready");
 	expect(pushed[0]?.tag).toMatch(/^episode:/);
 	expect(reports).toHaveLength(1);
-	expect(reports[0]?.filed).toBe(1);
+	expect(reports[0]?.filed).toBe(2); // both weeks were missing → both built
 
 	const targetWeek = previousCompleteIsoWeek(new Date("2026-07-15T12:00:00Z"));
-	expect(episodeExists(dir, "/repo", targetWeek)).toBe(true);
+	expect(await readEpisode(dir, "/repo", targetWeek)).toBeDefined();
 });
 
-test("EpisodeLoop.tick skips generation once the target week's artifact exists, and stays ring-only", async () => {
+test("EpisodeLoop.tick: unchanged fingerprint skips (ring-only); drift regenerates + rotates .prev; hand-edit quarantines", async () => {
 	const dir = await tmpDir();
 	const clock = () => new Date("2026-07-15T12:00:00Z").getTime();
-	const targetWeek = previousCompleteIsoWeek(new Date(clock()));
-	await saveEpisode(dir, "/repo", buildEpisode(baseInput({ isoWeek: targetWeek })));
+	const prev = previousCompleteIsoWeek(new Date(clock()));
+	const prevPrev = isoWeekKey(new Date(isoWeekBounds(prev).start - 1));
 
+	let gathered: EpisodeGatherResult = gatherResult();
 	let gatherCalls = 0;
 	const pushed: unknown[] = [];
 	const reports: AutomationReport[] = [];
 	const loop = new EpisodeLoop({
 		repos: () => ["/repo"],
 		stateDir: dir,
-		gather: async () => {
-			gatherCalls++;
-			return gatherResult();
-		},
+		sources: fakeSources(() => gathered, () => void gatherCalls++),
 		notifyPush: (p) => void pushed.push(p),
 		now: clock,
 		recordFor: () => (r) => reports.push(r),
 	});
 
-	await loop.tick();
+	await loop.tick(); // first tick: both weeks missing → both built
+	expect(reports.at(-1)?.filed).toBe(2);
 
-	expect(gatherCalls).toBe(0); // already exists — never even gathers
-	expect(pushed).toHaveLength(0);
-	expect(reports).toHaveLength(1);
-	// Ring-only means: no skipReason, no level, and zero found/filed — automation-log.ts's
-	// isMeaningful() would read this as non-meaningful (never spooled to automation.jsonl).
-	expect(reports[0]).toEqual({ durationMs: expect.any(Number), found: 0, filed: 0 });
+	await loop.tick(); // identical gather → identical fingerprints → ring-only skip
+	expect(reports.at(-1)).toEqual({ durationMs: expect.any(Number), found: 0, filed: 0 });
+	expect(pushed).toHaveLength(1); // no second push for a no-op tick
+
+	// Drift: new durable evidence regenerates and rotates the previous generation to .prev.md.
+	const before = await readEpisode(dir, "/repo", prev);
+	gathered = gatherResult({ deltas: [delta("Fresh evidence arrived late.", ["src/late.ts"])] });
+	await loop.tick();
+	const after = await readEpisode(dir, "/repo", prev);
+	expect(after?.builtHash).not.toBe(before?.builtHash);
+	const prevGen = await fs.readFile(path.join(dir, "episodes", episodeRepoHash("/repo"), `${prev}.prev.md`), "utf8");
+	expect(prevGen).toBe(before?.markdown);
+
+	// Hand-edit: content no longer matches builtHash → quarantined, never regenerated over.
+	const mdPath = path.join(dir, "episodes", episodeRepoHash("/repo"), `${prev}.md`);
+	await fs.writeFile(mdPath, `${after?.markdown}\n\nOPERATOR NOTE: keep this.`);
+	gathered = gatherResult({ deltas: [delta("Even fresher evidence.", ["src/newer.ts"])] });
+	await loop.tick();
+	const quarantined = await readEpisode(dir, "/repo", prev);
+	expect(quarantined?.quarantined).toBeTrue();
+	expect(quarantined?.markdown).toContain("OPERATOR NOTE: keep this.");
+	void prevPrev;
+	void gatherCalls;
 });
 
 test("EpisodeLoop.tick reports level:warn (not ring-only) when gather fails, and never pushes", async () => {
@@ -367,9 +399,9 @@ test("EpisodeLoop.tick reports level:warn (not ring-only) when gather fails, and
 	const loop = new EpisodeLoop({
 		repos: () => ["/repo"],
 		stateDir: dir,
-		gather: async () => {
+		sources: fakeSources(() => {
 			throw new Error("boom");
-		},
+		}),
 		notifyPush: (p) => void pushed.push(p),
 		now: () => new Date("2026-07-15T12:00:00Z").getTime(),
 		recordFor: () => (r) => reports.push(r),
@@ -392,7 +424,7 @@ test("EpisodeLoop.tick reports level:warn when the save itself fails (stateDir u
 	const loop = new EpisodeLoop({
 		repos: () => ["/repo"],
 		stateDir: notAFile,
-		gather: async () => gatherResult(),
+		sources: fakeSources(() => gatherResult()),
 		now: () => new Date("2026-07-15T12:00:00Z").getTime(),
 		recordFor: () => (r) => reports.push(r),
 	});
@@ -410,30 +442,29 @@ test("EpisodeLoop.tick is reentrancy-safe: an overlapping call while one is in f
 	const loop = new EpisodeLoop({
 		repos: () => ["/repo"],
 		stateDir: dir,
-		gather: async () => {
+		sources: fakeSources(() => gatherResult(), () => {
 			gatherCalls++;
-			await new Promise((r) => setTimeout(r, 20));
-			return gatherResult();
-		},
+		}),
 		now: () => new Date("2026-07-15T12:00:00Z").getTime(),
 	});
 	const first = loop.tick();
 	const second = loop.tick(); // fires while `first` is still running
 	await Promise.all([first, second]);
-	expect(gatherCalls).toBe(1);
+	expect(gatherCalls).toBe(2); // one tick's two-week window — the overlapping tick added nothing
 });
 
-test("an orphaned markdown half (crash between md and meta writes) reads as NOT generated — the next tick retries", async () => {
+test("an orphaned markdown half (crash between md and meta writes) reads as NOT generated — regeneration retries", async () => {
 	const dir = await tmpDir();
 	const built = buildEpisode(baseInput());
 	expect(await saveEpisode(dir, "/repo", built)).toBe(true);
-	expect(episodeExists(dir, "/repo", built.id)).toBe(true);
+	expect(await readEpisode(dir, "/repo", built.id)).toBeDefined();
 	// simulate the crash: meta sidecar gone, markdown orphaned
-	const { rm } = await import("node:fs/promises");
-	const meta = (await import("node:fs/promises")).readdir;
-	const repoDir = (await meta(dir + "/episodes"))[0];
+	const { rm, readdir } = await import("node:fs/promises");
+	const repoDir = (await readdir(dir + "/episodes"))[0];
 	await rm(`${dir}/episodes/${repoDir}/${built.id}.json`);
-	expect(episodeExists(dir, "/repo", built.id)).toBe(false);
+	// Half-written pair reads as absent (readEpisode) — and the drift logic sees no fingerprint,
+	// so the next tick rebuilds it (the old finding-2 crash-window contract, minus write-once).
+	expect(await readEpisode(dir, "/repo", built.id)).toBeUndefined();
 });
 
 test("EpisodeLoop derives its repo set LIVE each tick — a repo added after construction gets its episode without a restart", async () => {
@@ -444,16 +475,46 @@ test("EpisodeLoop derives its repo set LIVE each tick — a repo added after con
 	const loop = new EpisodeLoop({
 		repos: () => [...liveRepos],
 		stateDir: dir,
-		gather: async (repo) => {
+		sources: fakeSources((repo) => {
 			generated.push(repo);
 			return gatherResult();
-		},
+		}),
 		now: () => new Date("2026-07-15T12:00:00Z").getTime(),
 		recordFor: () => (r) => reports.push(r),
 	});
 	await loop.tick();
-	expect(generated).toEqual(["/repo"]);
+	expect(new Set(generated)).toEqual(new Set(["/repo"])); // two-week window: same repo, twice
 	liveRepos.push("/late-added"); // no restart, no re-construction
 	await loop.tick();
 	expect(generated).toContain("/late-added");
+});
+
+test("REGRESSION (DESIGN v2 amendment 4): one failed source class aborts the rebuild — the healthy pair survives", async () => {
+	const dir = await tmpDir();
+	const clock = () => new Date("2026-07-15T12:00:00Z").getTime();
+	const healthy = new EpisodeLoop({
+		repos: () => ["/repo"],
+		stateDir: dir,
+		sources: fakeSources(() => gatherResult({ deltas: [delta("Original evidence.", ["src/a.ts"])] })),
+		now: clock,
+	});
+	await healthy.tick();
+	const prev = previousCompleteIsoWeek(new Date(clock()));
+	const before = await readEpisode(dir, "/repo", prev);
+	expect(before).toBeDefined();
+
+	const reports: AutomationReport[] = [];
+	const broken = new EpisodeLoop({
+		repos: () => ["/repo"],
+		stateDir: dir,
+		// Evidence changed AND one class fails: without amendment 4 this would rebuild an emptier
+		// episode; with it, the week aborts and the healthy pair is untouched.
+		sources: fakeSources(() => gatherResult({ deltas: [] }), undefined, "symptoms"),
+		now: clock,
+		recordFor: () => (r) => reports.push(r),
+	});
+	await broken.tick();
+	const after = await readEpisode(dir, "/repo", prev);
+	expect(after?.builtHash).toBe(before?.builtHash);
+	expect(reports.at(-1)?.level).toBe("warn");
 });

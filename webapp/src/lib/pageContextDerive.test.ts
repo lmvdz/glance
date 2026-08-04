@@ -1,23 +1,17 @@
 import { expect, test, describe } from 'bun:test';
 import {
-  deriveFleetPageContext,
-  deriveTasksPageContext,
+    deriveTasksPageContext,
   deriveCapabilitiesPageContext,
   deriveReviewPageContext,
   deriveOrgPageContext,
   serializePageContextForPrompt,
 } from './pageContextDerive';
 import { PAGE_CONTEXT_ENTITY_CAP } from '../context/PageContext';
-import { buildFleetRoster } from './fleetRoster';
-import { attentionItems, activeWork, computeCapacity } from './insights';
-import type { AgentDTO, CapabilitySnapshotDTO, PublicCapabilityCatalogDTO } from './dto';
+import type { CapabilitySnapshotDTO, PublicCapabilityCatalogDTO } from './dto';
 import type { Task } from '../types';
 
 // ── fixtures ─────────────────────────────────────────────────────────────────────────────────
 
-function agent(id: string, status: AgentDTO['status'], extra: Partial<AgentDTO> = {}): AgentDTO {
-  return { id, name: id, status, repo: '/r', worktree: '/w', pending: [], lastActivity: 0, messageCount: 0, ...extra } as AgentDTO;
-}
 
 function task(id: string, extra: Partial<Task> = {}): Task {
   return {
@@ -36,56 +30,6 @@ function task(id: string, extra: Partial<Task> = {}): Task {
     ...extra,
   };
 }
-
-// ── Fleet ────────────────────────────────────────────────────────────────────────────────────
-
-describe('deriveFleetPageContext', () => {
-  test('surfaces group counts, needs-you ids, the selected agent, and capacity', () => {
-    const agents = [
-      agent('blocked-1', 'input', { pending: [{ id: 'r1', source: 'ui', kind: 'q', title: 'pick one', createdAt: 1 }], lastActivity: 5 }),
-      agent('working-1', 'working', { lastActivity: Date.now() }),
-    ];
-    const attn = attentionItems({ agents });
-    const work = activeWork(agents, []);
-    const roster = buildFleetRoster(agents, attn, work);
-    const capacity = computeCapacity({ wipCap: 4, health: { sample: { agents: 2, rssMb: 100, load1: 0.1, ncpu: 4, freeRatio: 0.9 }, warnings: [] } });
-
-    const ctx = deriveFleetPageContext({ roster, selectedAgent: agents[1], capacity, filterText: '' });
-
-    expect(ctx.viewId).toBe('fleet');
-    expect(ctx.selection).toEqual({ kind: 'agent', id: 'working-1' });
-    expect(ctx.filters?.needsYou).toBe(1);
-    expect(ctx.filters?.working).toBe(1);
-    expect(ctx.filters?.capacityUsed).toBe(2);
-    expect(ctx.filters?.capacityCap).toBe(4);
-    expect(ctx.filters?.needsYouIds).toBe('blocked-1');
-    expect(ctx.entities.some((e) => e.id === 'blocked-1' && e.label.includes('needs you'))).toBe(true);
-  });
-
-  test('no selection when nothing is selected', () => {
-    const roster = buildFleetRoster([], [], []);
-    const capacity = computeCapacity(null);
-    const ctx = deriveFleetPageContext({ roster, selectedAgent: undefined, capacity, filterText: '' });
-    expect(ctx.selection).toBeUndefined();
-    expect(ctx.filters?.needsYouIds).toBeUndefined();
-  });
-
-  test('entities are capped at PAGE_CONTEXT_ENTITY_CAP', () => {
-    const agents = Array.from({ length: PAGE_CONTEXT_ENTITY_CAP + 20 }, (_, i) => agent(`w-${i}`, 'working', { lastActivity: i }));
-    const attn = attentionItems({ agents });
-    const roster = buildFleetRoster(agents, attn, activeWork(agents, []));
-    const capacity = computeCapacity(null);
-    const ctx = deriveFleetPageContext({ roster, selectedAgent: undefined, capacity, filterText: '' });
-    expect(ctx.entities.length).toBe(PAGE_CONTEXT_ENTITY_CAP);
-  });
-
-  test('a non-empty filter is carried, an empty one is omitted entirely', () => {
-    const roster = buildFleetRoster([], [], []);
-    const capacity = computeCapacity(null);
-    expect(deriveFleetPageContext({ roster, selectedAgent: undefined, capacity, filterText: '  ' }).filters?.filterText).toBeUndefined();
-    expect(deriveFleetPageContext({ roster, selectedAgent: undefined, capacity, filterText: 'foo' }).filters?.filterText).toBe('foo');
-  });
-});
 
 // ── Tasks ────────────────────────────────────────────────────────────────────────────────────
 

@@ -7,10 +7,8 @@
  */
 import type { PageContext, PageContextEntity, PageContextSelection } from '../context/PageContext';
 import { PAGE_CONTEXT_ENTITY_CAP } from '../context/PageContext';
-import type { AgentDTO, CapabilitySnapshotDTO, PublicCapabilityCatalogDTO } from './dto';
+import type { CapabilitySnapshotDTO, PublicCapabilityCatalogDTO } from './dto';
 import type { Task } from '../types';
-import type { FleetRoster } from './fleetRoster';
-import type { CapacitySummary } from './insights';
 
 /** Cap + tag helper shared by every deriver below. */
 function capEntities(entities: PageContextEntity[]): PageContextEntity[] {
@@ -19,44 +17,6 @@ function capEntities(entities: PageContextEntity[]): PageContextEntity[] {
 
 // ── Fleet ──────────────────────────────────────────────────────────────────────────────────────
 
-export interface FleetPageContextInput {
-  roster: FleetRoster;
-  selectedAgent: AgentDTO | undefined;
-  capacity: CapacitySummary;
-  filterText: string;
-}
-
-/** WorkspaceCockpit's own context: roster group counts (the state-grouped rail's whole point),
- *  the selected agent, which rows are in NEEDS YOU right now (the pinned, never-collapsing group),
- *  and the capacity chip — everything the operator would otherwise have to describe in prose. */
-export function deriveFleetPageContext({ roster, selectedAgent, capacity, filterText }: FleetPageContextInput): PageContext {
-  const needsIds = roster.needs.map((row) => row.agent.id);
-  const entities: PageContextEntity[] = capEntities([
-    ...roster.needs.map((row) => ({ kind: 'agent', id: row.agent.id, label: `${row.agent.name} (needs you)` })),
-    ...roster.land.map((row) => ({ kind: 'agent', id: row.agent.id, label: `${row.agent.name} (land ready)` })),
-    ...roster.working.map((row) => ({ kind: 'agent', id: row.agent.id, label: row.agent.name })),
-    ...roster.unstaffed.map((row) => ({ kind: 'plan', id: row.item.featureId ?? row.item.title, label: `${row.item.title} (unstaffed)` })),
-  ]);
-  const selection: PageContextSelection | undefined = selectedAgent ? { kind: 'agent', id: selectedAgent.id } : undefined;
-  return {
-    viewId: 'fleet',
-    title: 'Fleet',
-    entities,
-    selection,
-    filters: {
-      needsYou: roster.needs.length + roster.virtualNeeds.length,
-      landReady: roster.land.length,
-      working: roster.working.length,
-      idle: roster.idle.length,
-      unstaffed: roster.unstaffed.length,
-      capacityUsed: capacity.used,
-      capacityCap: capacity.cap,
-      ...(filterText.trim() ? { filterText: filterText.trim() } : {}),
-      ...(needsIds.length ? { needsYouIds: needsIds.join(',') } : {}),
-    },
-    route: '/fleet',
-  };
-}
 
 // ── Tasks ──────────────────────────────────────────────────────────────────────────────────────
 
