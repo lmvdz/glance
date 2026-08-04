@@ -31,7 +31,7 @@ afterEach(async () => {
 	for (const d of tmps.splice(0)) await fs.rm(d, { recursive: true, force: true }).catch(() => {});
 });
 
-const ENV_KEYS = ["OMP_SQUAD_VALIDATOR"] as const;
+const ENV_KEYS = ["OMP_SQUAD_VALIDATOR", "OMP_SQUAD_REVIEWER_LEDGER_PATH"] as const;
 const saved: Record<string, string | undefined> = {};
 for (const k of ENV_KEYS) saved[k] = process.env[k];
 afterEach(() => {
@@ -266,4 +266,93 @@ test("validatorGate: OMP_SQUAD_VALIDATOR=0 short-circuits before touching git or
 	expect(record.verdict).toBe("skipped");
 	expect(veto).toBeUndefined();
 	expect(called).toBe(false);
+});
+
+// ── glance#332: the land receipt carries the judging lineage's MEASURED reviewer precision ─────────
+// A fixture ledger (pointed to via the test-only OMP_SQUAD_REVIEWER_LEDGER_PATH hatch, mirroring how
+// OMP_SQUAD_VALIDATOR=0 is used above) stands in for plans/.reviews/reviewer-ledger.jsonl. The default
+// (unset OMP_SQUAD_VALIDATOR_HARNESS) judge harness is "omp", whose ledger lineage tag is "native".
+
+async function tmpLedgerFile(lines: string[]): Promise<string> {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "vgate-ledger-"));
+	tmps.push(dir);
+	const file = path.join(dir, "reviewer-ledger.jsonl");
+	await fs.writeFile(file, lines.map((l) => `${l}\n`).join(""));
+	return file;
+}
+
+const ledgerRow = (survived: boolean) => JSON.stringify({ at: "2026-08-01", lineage: "native", concernClass: "test-fixture", survived, source: "fixture", note: "fixture row" });
+
+test("a landed unit's validation record carries the judging lineage's measured precision, end-to-end through the land path", async () => {
+	const stateDir = await tmpDir("vgate-precision-state-");
+	const { repo, worktree, branch } = await repoWithBranch("vgate-precision-");
+	process.env.OMP_SQUAD_REVIEWER_LEDGER_PATH = await tmpLedgerFile([ledgerRow(true), ledgerRow(false)]);
+	const mgr = new TestManager({ stateDir });
+	mgr.judge = passJudge;
+	seedAgent(mgr, "a1", repo, worktree, branch, "f1");
+	(mgr as unknown as { featureStore: Map<string, PersistedFeature> }).featureStore.set("f1", { id: "f1", title: "F1", repo, createdAt: 0, updatedAt: 0, acceptanceCriteria: CRITERIA });
+	await runProof({ repo, worktree, command: "true" });
+
+	const result = await mgr.land("a1", undefined, {});
+
+	expect(result.ok).toBe(true);
+	const precision = mgr.agents.get("a1")?.dto.validation?.reviewerPrecision;
+	expect(precision).toEqual({ lineage: "native", n: 2, survived: 1, survivedRate: 0.5, provisional: true });
+	// The same stamp rides the transcript's gate-verdict event, and the narration cites the number.
+	const verdict = mgr.getTranscript("a1").find((e) => e.event?.kind === TRANSCRIPT_EVENT_GATE_VERDICT);
+	expect(verdict?.event?.payload).toMatchObject({ reviewerPrecision: precision });
+	expect(verdict?.text).toContain("native, measured precision 50% (n=2 adjudicated rows) [provisional]");
+});
+
+test("HONESTY: a lineage with NO ledger history lands with reviewerPrecision.n === 0 and no survivedRate — never a fabricated number", async () => {
+	const stateDir = await tmpDir("vgate-precision-zero-state-");
+	const { repo, worktree, branch } = await repoWithBranch("vgate-precision-zero-");
+	process.env.OMP_SQUAD_REVIEWER_LEDGER_PATH = await tmpLedgerFile([]); // empty ledger — never-reviewed lineage
+	const mgr = new TestManager({ stateDir });
+	mgr.judge = passJudge;
+	seedAgent(mgr, "a1", repo, worktree, branch, "f1");
+	(mgr as unknown as { featureStore: Map<string, PersistedFeature> }).featureStore.set("f1", { id: "f1", title: "F1", repo, createdAt: 0, updatedAt: 0, acceptanceCriteria: CRITERIA });
+	await runProof({ repo, worktree, command: "true" });
+
+	const result = await mgr.land("a1", undefined, {});
+
+	expect(result.ok).toBe(true);
+	const precision = mgr.agents.get("a1")?.dto.validation?.reviewerPrecision;
+	expect(precision).toEqual({ lineage: "native", n: 0, survived: 0, survivedRate: undefined, provisional: true });
+	const verdict = mgr.getTranscript("a1").find((e) => e.event?.kind === TRANSCRIPT_EVENT_GATE_VERDICT);
+	expect(verdict?.text).toContain("native, unmeasured (n=0)");
+});
+
+test("FLIP THE INPUT: two lands against the SAME (still-growing) fixture ledger get DIFFERENT receipts — the number moves live, it is not baked in at startup", async () => {
+	const stateDir = await tmpDir("vgate-precision-flip-state-");
+	const ledgerPath = await tmpLedgerFile([ledgerRow(true)]);
+	process.env.OMP_SQUAD_REVIEWER_LEDGER_PATH = ledgerPath;
+	const mgr = new TestManager({ stateDir });
+	mgr.judge = passJudge;
+
+	// First land: 1 adjudicated row, 100% survived.
+	const first = await repoWithBranch("vgate-precision-flip-a-");
+	seedAgent(mgr, "a1", first.repo, first.worktree, first.branch, "f1");
+	(mgr as unknown as { featureStore: Map<string, PersistedFeature> }).featureStore.set("f1", { id: "f1", title: "F1", repo: first.repo, createdAt: 0, updatedAt: 0, acceptanceCriteria: CRITERIA });
+	await runProof({ repo: first.repo, worktree: first.worktree, command: "true" });
+	const firstResult = await mgr.land("a1", undefined, {});
+	expect(firstResult.ok).toBe(true);
+	const firstPrecision = mgr.agents.get("a1")?.dto.validation?.reviewerPrecision;
+	expect(firstPrecision).toEqual({ lineage: "native", n: 1, survived: 1, survivedRate: 1, provisional: true });
+
+	// The fixture ledger grows — a new adjudicated finding that did NOT survive.
+	await fs.appendFile(ledgerPath, `${ledgerRow(false)}\n`);
+
+	// Second land, a DIFFERENT branch/diff (a different (commit,tree) so validatorGate's cache is a genuine miss).
+	const second = await repoWithBranch("vgate-precision-flip-b-");
+	seedAgent(mgr, "a2", second.repo, second.worktree, second.branch, "f2");
+	(mgr as unknown as { featureStore: Map<string, PersistedFeature> }).featureStore.set("f2", { id: "f2", title: "F2", repo: second.repo, createdAt: 0, updatedAt: 0, acceptanceCriteria: CRITERIA });
+	await runProof({ repo: second.repo, worktree: second.worktree, command: "true" });
+	const secondResult = await mgr.land("a2", undefined, {});
+	expect(secondResult.ok).toBe(true);
+	const secondPrecision = mgr.agents.get("a2")?.dto.validation?.reviewerPrecision;
+
+	expect(secondPrecision).toEqual({ lineage: "native", n: 2, survived: 1, survivedRate: 0.5, provisional: true });
+	expect(secondPrecision?.n).not.toBe(firstPrecision?.n);
+	expect(secondPrecision?.survivedRate).not.toBe(firstPrecision?.survivedRate);
 });

@@ -18,7 +18,20 @@
  * the number a weight at all — it is labeled provisional. Clean bills are NOT rows (a review
  * that found nothing asserts nothing adjudicable); refuted ARCHITECTURE-review claims are rows
  * (a claim is a finding wherever it was raised).
+ *
+ * glance#332 (the land-path moat centerpiece): `reviewerPrecisionFor`/`reviewerPrecisionFromLedger`
+ * below are the CONSUMABLE reader `src/validator.ts`'s land-gate stamps onto every `ValidationRecord`
+ * — one lineage's {n, survived, survivedRate} at judgment time, so the land receipt a human approves
+ * cites a REAL measured number, never a fabricated or smoothed one. A lineage with zero adjudicated
+ * rows renders with `survivedRate: undefined` (never `0` — that would read as "0% precision", a
+ * fabrication) and `n: 0` — the caller's job is to print "unmeasured (n=0)", not invent a rate. This
+ * is the one read-only extension to this module's "pure half" framing: it touches `node:fs`, but only
+ * to READ the repo-committed ledger — `scripts/reviewer-ledger.ts`'s `add` command remains the sole
+ * WRITER, untouched.
  */
+
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
 
 export type ReviewerLineage = "grok" | "codex" | "native" | (string & {});
 
@@ -149,6 +162,82 @@ export function reviewerPrecision(entries: ReviewerLedgerEntry[]): LineagePrecis
 		});
 	}
 	return out.sort((a, b) => b.raised - a.raised);
+}
+
+/** The repo-committed ledger's canonical path, resolved relative to THIS module (`src/memory/` — two
+ *  dirs below repo root) — mirrors `scripts/reviewer-ledger.ts`'s own `LEDGER` constant so the two
+ *  never drift onto different files. Callers may override for tests/fixtures. */
+export const DEFAULT_REVIEWER_LEDGER_PATH = path.join(import.meta.dir, "..", "..", "plans", ".reviews", "reviewer-ledger.jsonl");
+
+export interface ReviewerPrecisionStamp {
+	/** The ledger lineage tag this stamp was computed for (e.g. "codex", "grok", "native"). */
+	lineage: string;
+	/** Adjudicated findings raised by this lineage across the whole ledger. */
+	n: number;
+	/** Of those, how many survived adjudication (a real defect / required change). Always 0 when n is 0. */
+	survived: number;
+	/** survived/n — `undefined` when `n === 0` (no history to compute a rate from; never fabricated as 0). */
+	survivedRate?: number;
+	/** True below `MIN_FINDINGS_FOR_WEIGHT` adjudicated findings — a provisional number, not yet a weight.
+	 *  Also true (trivially) whenever `n === 0`. */
+	provisional: boolean;
+}
+
+/**
+ * Measured precision for ONE lineage, from an already-parsed entry list — glance#332's land-path
+ * moat: `{n, survived, survivedRate}`, never smoothed. `survivedRate` is `undefined` exactly when
+ * `n === 0` (no adjudicated history for this lineage) — the caller must render that as "unmeasured",
+ * never as a `0`-valued precision, which would misread as "measured and 0%".
+ */
+export function reviewerPrecisionFor(entries: ReviewerLedgerEntry[], lineage: string): ReviewerPrecisionStamp {
+	const rows = entries.filter((e) => e.lineage === lineage);
+	const n = rows.length;
+	const survived = rows.filter((e) => e.survived).length;
+	return {
+		lineage,
+		n,
+		survived,
+		survivedRate: n > 0 ? survived / n : undefined,
+		provisional: n < MIN_FINDINGS_FOR_WEIGHT,
+	};
+}
+
+/**
+ * Read + parse the ledger file, tolerant of a missing or empty file (a fresh checkout, or a lineage
+ * that has never been reviewed yet) — never throws, and a read/parse fault degrades to "no entries"
+ * exactly like an absent file, so a transient fs hiccup renders as honest "unmeasured" rather than
+ * blocking the land it's asked from. `ledgerPath` defaults to the repo-committed ledger; tests pass a
+ * fixture path.
+ */
+export function readReviewerLedgerEntries(ledgerPath: string = DEFAULT_REVIEWER_LEDGER_PATH): { entries: ReviewerLedgerEntry[]; rejected: number; duplicates: number } {
+	let text = "";
+	try {
+		text = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
+	} catch {
+		text = "";
+	}
+	return parseReviewerLedger(text);
+}
+
+/**
+ * The one-call reader land code wants: this lineage's measured precision, straight from the
+ * repo-committed ledger file. Tolerant of a missing/empty ledger (renders as `n:0`, honeys as
+ * "unmeasured" by `renderReviewerPrecision`) — never fabricates a rate, never applies a prior.
+ */
+export function reviewerPrecisionFromLedger(lineage: string, ledgerPath: string = DEFAULT_REVIEWER_LEDGER_PATH): ReviewerPrecisionStamp {
+	const { entries } = readReviewerLedgerEntries(ledgerPath);
+	return reviewerPrecisionFor(entries, lineage);
+}
+
+/** Canonical one-line rendering of a precision stamp for a land receipt — "reviewer X, measured
+ *  precision p% (n=N adjudicated rows)", or "reviewer X, unmeasured (n=0)" when the lineage has no
+ *  adjudicated history yet. The honesty rule is sacred: never a fabricated or smoothed number for n=0. */
+export function renderReviewerPrecision(stamp: ReviewerPrecisionStamp): string {
+	const who = plain(stamp.lineage);
+	if (stamp.n === 0) return `${who}, unmeasured (n=0)`;
+	const pct = Math.round((stamp.survivedRate ?? 0) * 100);
+	const tag = stamp.provisional ? " [provisional]" : "";
+	return `${who}, measured precision ${pct}% (n=${stamp.n} adjudicated row${stamp.n === 1 ? "" : "s"})${tag}`;
 }
 
 /** Render the report the closing step prints — sentence-first, n on every number. */

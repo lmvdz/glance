@@ -21,8 +21,12 @@ export { DecisionLedger, normalizeSupersedesRef, sanitizePatchDecisions } from "
 export type { DecisionLedgerStore, RecordDecisionOutcome, CaptureDecisionInput, CaptureDecisionResult, FeatureDecision } from "./decision-ledger.ts";
 
 // ── reviewer-ensemble weights: measured per-lineage precision (Weaver-lite) ─────
-export { MIN_FINDINGS_FOR_WEIGHT, parseReviewerLedger, renderReviewerReport, reviewerPrecision } from "./reviewer-weights.ts";
-export type { ReviewerLineage, ReviewerLedgerEntry, LineagePrecision } from "./reviewer-weights.ts";
+export {
+	MIN_FINDINGS_FOR_WEIGHT, parseReviewerLedger, renderReviewerReport, reviewerPrecision,
+	DEFAULT_REVIEWER_LEDGER_PATH, reviewerPrecisionFor, readReviewerLedgerEntries,
+	reviewerPrecisionFromLedger, renderReviewerPrecision,
+} from "./reviewer-weights.ts";
+export type { ReviewerLineage, ReviewerLedgerEntry, LineagePrecision, ReviewerPrecisionStamp } from "./reviewer-weights.ts";
 
 // ── decisions: evidence gate + reversal/cost impact ─────────────────────────────
 export { evidenceFilePath, validateModelDelta } from "./decision-evidence.ts";

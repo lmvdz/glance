@@ -11,9 +11,9 @@
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { parseReviewerLedger, renderReviewerReport, type ReviewerLedgerEntry } from "../src/memory/reviewer-weights.ts";
+import { DEFAULT_REVIEWER_LEDGER_PATH, parseReviewerLedger, renderReviewerReport, type ReviewerLedgerEntry } from "../src/memory/reviewer-weights.ts";
 
-const LEDGER = path.join(import.meta.dir, "..", "plans", ".reviews", "reviewer-ledger.jsonl");
+const LEDGER = DEFAULT_REVIEWER_LEDGER_PATH;
 
 function arg(name: string): string | undefined {
 	const i = process.argv.indexOf(`--${name}`);

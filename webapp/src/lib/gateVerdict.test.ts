@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { absences, confidenceLine, consideredNotSurfaced, notSurfacedSentence, restsOn, verdictSentence, type VerdictCriterion } from './gateVerdict';
+import { absences, confidenceLine, consideredNotSurfaced, notSurfacedSentence, restsOn, reviewerPrecisionLine, verdictSentence, type VerdictCriterion } from './gateVerdict';
 
 describe('verdictSentence', () => {
   it('distinguishes a missing verdict from a verdict of unknown', () => {
@@ -58,6 +58,31 @@ describe('notSurfacedSentence', () => {
   });
   it('says plainly when nothing was left out', () => {
     expect(notSurfacedSentence(0)).toContain('Nothing was left out');
+  });
+});
+
+describe('reviewerPrecisionLine', () => {
+  it('renders an unmeasured lineage honestly, never a fabricated 0%', () => {
+    const line = reviewerPrecisionLine({ lineage: 'grok', n: 0 });
+    expect(line).toContain('unmeasured');
+    expect(line).not.toContain('0%');
+  });
+
+  it('states a measured precision with its n', () => {
+    const line = reviewerPrecisionLine({ lineage: 'codex', n: 52, survivedRate: 0.75, provisional: false });
+    expect(line).toContain('75%');
+    expect(line).toContain('52');
+    expect(line).not.toContain('provisional');
+  });
+
+  it('names a provisional lineage as provisional', () => {
+    const line = reviewerPrecisionLine({ lineage: 'native', n: 6, survivedRate: 1, provisional: true });
+    expect(line).toContain('provisional');
+    expect(line).toContain('6');
+  });
+
+  it('says nothing when no reviewer identity was resolved', () => {
+    expect(reviewerPrecisionLine(undefined)).toBeUndefined();
   });
 });
 

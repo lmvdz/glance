@@ -97,6 +97,29 @@ export function notSurfacedSentence(count: number): string {
   return `${count} check${count === 1 ? '' : 's'} passed with nothing to say about ${count === 1 ? 'it' : 'them'}. They are named here so you can tell a quiet pass from a check that never ran — the second is the one worth worrying about.`;
 }
 
+export interface ReviewerPrecisionInput {
+  lineage?: string;
+  n?: number;
+  survivedRate?: number;
+  provisional?: boolean;
+}
+
+/**
+ * How trustworthy THIS reviewer's own track record is, as a sentence — glance#332's land-path moat:
+ * the number is read straight from the repo-committed reviewer ledger (plans/.reviews/reviewer-ledger.jsonl)
+ * at judgment time, never fabricated or smoothed. A lineage with no adjudicated findings yet is
+ * reported as UNMEASURED, never as a 0% precision — a 0% would read as "checked and found untrustworthy",
+ * which is a different (and false) claim from "never checked at all".
+ */
+export function reviewerPrecisionLine(input: ReviewerPrecisionInput | undefined): string | undefined {
+  if (!input || !input.lineage) return undefined;
+  const n = input.n ?? 0;
+  if (n === 0) return `${input.lineage}’s findings have no adjudicated history yet — its precision is unmeasured, not assumed to be good or bad.`;
+  const pct = Math.round((input.survivedRate ?? 0) * 100);
+  const basis = input.provisional ? `provisional — only ${n} adjudicated finding${n === 1 ? '' : 's'} so far` : `measured across ${n} adjudicated findings`;
+  return `${input.lineage}’s findings have survived adjudication ${pct}% of the time (${basis}).`;
+}
+
 /** What is missing from the record, stated rather than left blank. */
 export function absences(input: { validation?: unknown; doneProof?: unknown; landAttempt?: unknown; malformedLandRecords?: number }): string[] {
   const out: string[] = [];

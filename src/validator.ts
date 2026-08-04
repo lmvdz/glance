@@ -15,6 +15,7 @@ import { envBool, envInt } from "./config.ts";
 import { budgetedExcerpt } from "./gate-logs.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV } from "./git-harden.ts";
 import { harnessLineage, type ModelLineage, modelLineage } from "./model-lineage.ts";
+import { reviewerPrecisionFromLedger, type ReviewerPrecisionStamp } from "./memory/index.ts";
 import { decideTyped, extractJsonObject } from "./omp-call.ts";
 import type { Proof } from "./proof.ts";
 import { type LensId, selectLenses } from "./lens-select.ts";
@@ -62,6 +63,38 @@ function activeReviewer(): { model: string; lineage: ModelLineage; harness: "omp
 	if (validatorHarness() === "codex" && Bun.which("codex")) return { model: "codex", lineage: "openai", harness: "codex" };
 	if (validatorHarness() === "grok" && Bun.which("grok")) return { model: "grok", lineage: "xai", harness: "grok" };
 	return { model: validatorModel(), lineage: modelLineage(validatorModel()), harness: "omp" };
+}
+
+/**
+ * `activeReviewer().harness` → the ledger's own lineage tag (glance#332). The reviewer-ledger
+ * (plans/.reviews/reviewer-ledger.jsonl, written by `scripts/reviewer-ledger.ts`/the blind-review
+ * skill) uses "codex"/"grok"/"native" — matching the harness vocabulary for the two foreign-vendor
+ * lanes exactly, but calling the first-party `omp` judge "native" rather than "omp" (what every
+ * historical ledger row and the review-closing skill both already write). Kept as its own tiny
+ * function rather than inlined so the mapping is named and greppable at the one place it can drift.
+ */
+function ledgerLineageTag(harness: "omp" | "codex" | "grok"): string {
+	return harness === "omp" ? "native" : harness;
+}
+
+/** Test-only hatch (mirrors `OMP_SQUAD_VALIDATOR`/`OMP_SQUAD_VALIDATOR_HARNESS` above): points the
+ *  precision reader at a fixture ledger instead of the repo-committed one, so a test can assert the
+ *  land receipt's number MOVES when the fixture ledger changes, without touching real repo data.
+ *  Unset in production ⇒ `reviewerPrecisionFromLedger`'s own default (`DEFAULT_REVIEWER_LEDGER_PATH`). */
+function reviewerLedgerPathOverride(): string | undefined {
+	return process.env.OMP_SQUAD_REVIEWER_LEDGER_PATH;
+}
+
+/**
+ * The judging lineage's MEASURED precision from the repo-committed reviewer ledger, at judgment time
+ * (glance#332 — the land-path moat centerpiece: the receipt a human approves must cite a REAL number,
+ * never a fabricated or smoothed one). Never throws — `reviewerPrecisionFromLedger` degrades a
+ * missing/empty ledger to an honest `n:0` stamp, which renders as "unmeasured", not a fake precision.
+ */
+function reviewerPrecisionStamp(harness: "omp" | "codex" | "grok"): ReviewerPrecisionStamp {
+	const tag = ledgerLineageTag(harness);
+	const override = reviewerLedgerPathOverride();
+	return override ? reviewerPrecisionFromLedger(tag, override) : reviewerPrecisionFromLedger(tag);
 }
 
 /**
@@ -430,11 +463,16 @@ export async function scoreAgainstCriteria(
 	if (criteria.length === 0) {
 		return { verdict: "skipped", agreement: 1, confidence: 0, perCriterion: [], rationale: "no declared criteria", ranAt };
 	}
+	// glance#332: the judging lineage's MEASURED ledger precision, stamped onto every path below that
+	// resolves a reviewer identity — the "skipped" (no criteria) return above never reads a reviewer at
+	// all, so it carries no precision either. Computed once so all three branches below cite the SAME
+	// read of the ledger.
+	const reviewerPrecision = reviewerPrecisionStamp(reviewer.harness);
 	// An empty diff means there is nothing to inspect — declared criteria cannot be judged against no
 	// change. Abstain (fail-open) rather than fabricating a veto for a change the judge never saw. This
 	// covers the in-place (worktree === repo) case where the base collapses to HEAD, plus any no-op land.
 	if (!diff.trim()) {
-		return { verdict: "abstain", agreement: 0, confidence: 0, perCriterion: [], rationale: "empty diff — nothing to validate (in-place or no-op land); not scored", model: reviewer.model, ...lineage, ranAt };
+		return { verdict: "abstain", agreement: 0, confidence: 0, perCriterion: [], rationale: "empty diff — nothing to validate (in-place or no-op land); not scored", model: reviewer.model, ...lineage, reviewerPrecision, ranAt };
 	}
 	let raw: RawVerdict | undefined;
 	try {
@@ -451,6 +489,7 @@ export async function scoreAgainstCriteria(
 			rationale: "judge unavailable or returned no verdict",
 			model: reviewer.model,
 			...lineage,
+			reviewerPrecision,
 			...(raw?.gateLogPaths?.length ? { gateLogPaths: raw.gateLogPaths } : {}),
 			ranAt,
 		};
@@ -472,6 +511,7 @@ export async function scoreAgainstCriteria(
 		rationale: truncate(raw.rationale ?? "", RATIONALE_MAX),
 		model: reviewer.model,
 		...lineage,
+		reviewerPrecision,
 		ranAt,
 	};
 }
