@@ -20,6 +20,10 @@
 export { DecisionLedger, normalizeSupersedesRef, sanitizePatchDecisions } from "./decision-ledger.ts";
 export type { DecisionLedgerStore, RecordDecisionOutcome, CaptureDecisionInput, CaptureDecisionResult } from "./decision-ledger.ts";
 
+// ── reviewer-ensemble weights: measured per-lineage precision (Weaver-lite) ─────
+export { MIN_FINDINGS_FOR_WEIGHT, parseReviewerLedger, renderReviewerReport, reviewerPrecision } from "./reviewer-weights.ts";
+export type { ReviewerLineage, ReviewerLedgerEntry, LineagePrecision } from "./reviewer-weights.ts";
+
 // ── decisions: evidence gate + reversal/cost impact ─────────────────────────────
 export { evidenceFilePath, validateModelDelta } from "./decision-evidence.ts";
 export type { EvidenceRejection, EvidenceAccepted, EvidenceValidation } from "./decision-evidence.ts";

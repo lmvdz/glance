@@ -56,7 +56,8 @@ import { isConsolePrompt, stripConsolePrompt } from "./console-prompt.ts";
 import { openRemovedLedger, type RemovedLedger } from "./removed-ledger.ts";
 import { buildDeadPlaceholder, composePriorContext, DEAD_PLACEHOLDER_TTL_MS, type DeadSessionPlaceholder, reattachMarker } from "./reattach-context.ts";
 import { reapAcpOrphanChain } from "./acp-orphan-reaper.ts";
-import { normalizeRepoPath, openProjectRegistry, readEphemeralProjects, writeEphemeralProjects, type ProjectRegistry } from "./project-registry.ts";
+import { normalizeRepoPath } from "./project-registry.ts";
+import { ProjectLane } from "./project-lane.ts";
 import { Orchestrator } from "./orchestrator.ts";
 import { Observer, type Finding } from "./observer.ts";
 import { Scout, unscannedReasoning } from "./scout.ts";
@@ -87,7 +88,7 @@ import { syncPlanStatuses } from "./plan-sync.ts";
 import { agentsToAdopt, deferredResumable, hardAgentCeiling, newAgentId, planeIssueBranch, selectAdoptable, slugPart } from "./spawn-identity.ts";
 import { EFFECT_POINTER_MARKER, effectSkillPointerLine, gateMembraneTokens, upsertDoNotBlock, loadRepoProfiles, membraneDisciplinePrompt, membraneProfilesEnabled, modelOptionsFromRuntime, profileOptionsFromEnv, toolGrantsPrompt, type RuntimeModelOption } from "./agent-profiles.ts";
 import { escapeHtml, planConcernTicketMatches, renderPlanConcernIssueHtml } from "./concern-tickets.ts";
-import { capabilityWorkflowToDot, loadCommissionWorkflow, resolveWorkflowPath, slugifyForFile } from "./workflow-source.ts";
+import { capabilityWorkflowToDot, loadCommissionWorkflow, resolveWorkflowPath } from "./workflow-source.ts";
 export { capabilityWorkflowToDot, resolveWorkflowPath };
 import { archivePlanDir, buildFeatures, concernDocStatus, concernNumFromFile, deletePlanDir, featureLandStatus, isClosedConcernStatus, listPlanDirs, parsePlanConcerns, parsePlanDependencyGraph, planDocRefs, planeModuleUrlIn, restorePlanDir, updatePlanConcern, type LandMember, landOrder, type PlanConcern } from "./features.ts";
 import { canTransition, dedupeTransitions, deriveStatus, followLineage, type DerivedReason, type TransitionReason } from "./agent-lifecycle.ts";
@@ -282,34 +283,11 @@ import { buildTrace, traceMaxSpans, traceSampleRatio, traceSpansEnabled, type Tr
 import { traceExporterFromEnv, type TraceExportQueue } from "./trace-exporter.ts";
 
 import { settleRunningEntries, transcriptSince } from "./transcript-delta.ts";
-import { ManualProvider, type PaymentProvider, paymentProviderFromEnv } from "./payments/index.ts";
-import {
-	acceptFeedbackSubmission,
-	assertRewardTransition,
-	hashCampaignToken,
-	newCampaignId,
-	normalizeFeedbackValidation,
-	renderFeedbackPlaneIssue,
-	summarizeFeedback,
-	type FeedbackSnapshot,
-	type FeedbackSummary,
-	type FeedbackValidationInput,
-} from "./feedback.ts";
-import {
-	capabilityFederationMetadata,
-	capabilityProfiles,
-	capabilityWorkflowDefinitions,
-	diffCapabilityPacks,
-	emptyCapabilitySnapshot,
-	importCapabilitySource,
-	installCapability,
-	normalizeCapabilitySnapshot,
-	updateCapabilityInstall,
-	type CapabilityImportInput,
-	type CapabilityInstallInput,
-	type CapabilityInstallPatch,
-	type CapabilitySnapshot,
-} from "./capabilities/index.ts";
+import { FeedbackLane } from "./feedback-lane.ts";
+import { type PaymentProvider, paymentProviderFromEnv } from "./payments/index.ts";
+import { type FeedbackSummary, type FeedbackValidationInput } from "./feedback.ts";
+import { type CapabilityImportInput, type CapabilityInstallInput, type CapabilityInstallPatch, type CapabilitySnapshot } from "./capabilities/index.ts";
+import { CapabilityLane } from "./capability-lane.ts";
 
 const MAX_TRANSCRIPT = 800;
 const POLL_MS = 2500;
@@ -1117,7 +1095,16 @@ export class SquadManager extends EventEmitter {
 		adopt: (id, repo) => this.adoptDerivedFeature(id, repo),
 		changed: () => this.emitFeaturesChanged(),
 	});
-	private capabilityStore: CapabilitySnapshot = emptyCapabilitySnapshot();
+	/** Capability lane implementation + state owner (src/capability-lane.ts, concern 04 island #2).
+	 *  Deps are closures (field-init runs before the constructor wires store/create). */
+	private readonly capabilityLane = new CapabilityLane({
+		stateDir: () => this.stateDir,
+		audit: (entry) => void this.store.appendAudit(entry).catch((err) => this.log("warn", `capability audit write failed: ${err instanceof Error ? err.message : String(err)}`)),
+		recordAudit: (actor, action, target, status, detail) => void this.recordAudit(actor, action, target, status, detail),
+		persist: () => void this.persist(),
+		changed: () => this.emitFeaturesChanged(),
+		create: (opts, actor) => this.create(opts, actor),
+	});
 	private readonly bin?: string;
 	private readonly autoLand: boolean;
 	/** Org-scoped worktree base override (DB mode); undefined ⇒ global worktreeBase(). */
@@ -1181,7 +1168,8 @@ export class SquadManager extends EventEmitter {
 	 *  by `createWithId`'s goal-overlap disclosure only. */
 	private readonly goalOverlapLedger: GoalOverlapLedger;
 	/** Durable repos-this-operator-works-in set; unioned into `projects()`. See project-registry.ts. */
-	private readonly projectRegistry: ProjectRegistry;
+	/** Project lane (src/project-lane.ts, concern 04 island #3) — owns the registry + ephemeral markers. */
+	private readonly projectLane: ProjectLane;
 	/** Restart-safe "raced this issue already, ever" ledger (adw-factory-borrows concern 07). Consulted
 	 *  and stamped by `tryRaceOnce` — see race-ledger.ts for why this must be persisted, not in-memory. */
 	private readonly raceLedger: RaceLedger;
@@ -1327,6 +1315,15 @@ export class SquadManager extends EventEmitter {
 	private readonly traceExporter?: TraceExportQueue;
 	/** Reward disbursement provider (Tremendous / Manual). Injectable for tests; default from env. */
 	private readonly paymentProvider: PaymentProvider;
+	/** Feedback lane implementation (src/feedback-lane.ts, concern 04 island #1). Deps are closures
+	 *  because this field initializer runs before the constructor assigns store/paymentProvider. */
+	private readonly feedbackLane = new FeedbackLane({
+		loadFeedback: () => this.store.loadFeedback(),
+		saveFeedback: (snap) => this.store.saveFeedback(snap),
+		stateDir: () => this.stateDir,
+		paymentProvider: () => this.paymentProvider,
+		audit: (actor, action, target, detail) => this.recordFeedbackAudit(actor, action, target, detail),
+	});
 	/** Short-lived idempotency window for client-stamped prompt commands; request-answer prompts are exempted below. */
 	private readonly commandAckDedupe = new Map<string, number>();
 	private readonly recentSteers = new Map<string, { actor: string; targetLabel: string; at: number }>();
@@ -1361,12 +1358,17 @@ export class SquadManager extends EventEmitter {
 		this.scoutCursor = readScoutCursors(this.stateDir);
 		this.removedLedger = openRemovedLedger(this.stateDir);
 		this.goalOverlapLedger = openGoalOverlapLedger(this.stateDir);
-		this.projectRegistry = openProjectRegistry(this.stateDir);
+		// Project lane (src/project-lane.ts) loads its registry + ephemeral sidecar at construction,
+		// so it is built here, after stateDir — not as a field initializer like the other lanes.
+		this.projectLane = new ProjectLane({
+			stateDir: this.stateDir,
+			log: (level, msg) => this.log(level, msg),
+			changed: () => this.emitFeaturesChanged(),
+			agentSummaries: () => [...this.agents.values()].map(({ dto }) => ({ repo: dto.repo, status: dto.status, pendingCount: dto.pending.length, lastActivity: dto.lastActivity })),
+			liveRepos: () => new Set([...this.agents.values()].map((r) => normalizeRepoPath(r.options.repo))),
+			featureRepos: () => [...this.featureStore.values()].map((pf) => pf.repo ?? ""),
+		});
 		this.boundarySyncHeld = new HeldSyncStore(path.join(this.stateDir, "boundary-sync"));
-		// Reload session-scoped registration markers so a mid-session daemon restart cannot promote an
-		// ephemeral `glance here` registration to permanent — start() reconciles them against the
-		// restored roster (reconcileEphemeralProjects).
-		this.ephemeralProjects = readEphemeralProjects(this.stateDir);
 		this.raceLedger = openRaceLedger(this.stateDir);
 		this.automation = new AutomationLog(this.stateDir, { onEvent: (event) => this.emit("event", { type: "automation", event } satisfies SquadEvent) });
 		this.learningMetrics = new LearningMetrics(this.stateDir, { log: (m) => this.log("warn", `learning-metrics: ${m}`) });
@@ -2140,7 +2142,7 @@ export class SquadManager extends EventEmitter {
 	 *  first closes that race: by the time a workflow parent's `attachExisting` runs, every live branch
 	 *  child it could reconcile against is already in `this.agents`. */
 	private async reconnectLive(snapshot: StateSnapshot): Promise<number> {
-		this.capabilityStore = normalizeCapabilitySnapshot(snapshot.capabilities);
+		this.capabilityLane.hydrate(snapshot.capabilities);
 		for (const f of snapshot.features) this.featureStore.set(f.id, f);
 		let n = 0;
 		const workflows: PersistedAgent[] = [];
@@ -2867,119 +2869,43 @@ export class SquadManager extends EventEmitter {
 		const envIds = new Set(envProfiles.map((p) => p.id));
 		const merged = [...repoProfiles.filter((p) => !envIds.has(p.id)), ...envProfiles];
 		const mergedIds = new Set(merged.map((p) => p.id));
-		const installed = capabilityProfiles(this.capabilityStore).filter((p) => !mergedIds.has(p.id));
+		const installed = this.capabilityLane.profileOptions().filter((p) => !mergedIds.has(p.id));
 		return [...merged, ...installed];
 	}
 
+	// ── capability lane — the implementation and state live in src/capability-lane.ts (concern 04
+	// island #2); these delegations keep the manager's public surface stable for server.ts + tests.
+
 	capabilities(): CapabilitySnapshot {
-		return this.capabilityStore;
+		return this.capabilityLane.snapshot();
 	}
 
 	importCapability(input: CapabilityImportInput, actor: Actor = LOCAL_ACTOR): { source: CapabilitySnapshot["sources"][number]; pack: CapabilitySnapshot["packs"][number]; warnings: string[] } {
-		const out = importCapabilitySource(this.capabilityStore, input, actor.id);
-		void this.store.appendAudit({ actor: actor.id, action: "capability.source.import", target: out.source.id, detail: { packId: out.pack.id, checksum: out.pack.checksum } }).catch((err) => this.log("warn", `capability audit write failed: ${err instanceof Error ? err.message : String(err)}`));
-		void this.persist();
-		this.emitFeaturesChanged();
-		return out;
+		return this.capabilityLane.import(input, actor);
 	}
 
 	installCapability(input: CapabilityInstallInput, actor: Actor = LOCAL_ACTOR): CapabilitySnapshot["installs"][number] {
-		const install = installCapability(this.capabilityStore, { ...input, orgId: input.orgId ?? actor.orgId ?? "file" }, actor.id);
-		void this.store.appendAudit({ actor: actor.id, action: "capability.install", target: install.id, detail: { packId: install.packId, checksum: install.checksum } }).catch((err) => this.log("warn", `capability audit write failed: ${err instanceof Error ? err.message : String(err)}`));
-		void this.persist();
-		this.emitFeaturesChanged();
-		return install;
+		return this.capabilityLane.install(input, actor);
 	}
 
 	updateCapability(id: string, patch: CapabilityInstallPatch, actor: Actor = LOCAL_ACTOR): CapabilitySnapshot["installs"][number] {
-		const install = updateCapabilityInstall(this.capabilityStore, id, patch, actor.id);
-		void this.store.appendAudit({ actor: actor.id, action: `capability.${install.state}`, target: install.id, detail: { packId: install.packId, checksum: install.checksum } }).catch((err) => this.log("warn", `capability audit write failed: ${err instanceof Error ? err.message : String(err)}`));
-		void this.persist();
-		this.emitFeaturesChanged();
-		return install;
+		return this.capabilityLane.update(id, patch, actor);
 	}
 
 	capabilityDiff(beforeId: string, afterId: string) {
-		const before = this.capabilityStore.packs.find((pack) => pack.id === beforeId);
-		const after = this.capabilityStore.packs.find((pack) => pack.id === afterId);
-		if (!before || !after) throw new Error("capability pack not found");
-		return diffCapabilityPacks(before, after);
+		return this.capabilityLane.diff(beforeId, afterId);
 	}
 
 	capabilityFederation() {
-		return capabilityFederationMetadata(this.capabilityStore);
+		return this.capabilityLane.federation();
 	}
 
 	capabilityWorkflowDefinitions() {
-		return capabilityWorkflowDefinitions(this.capabilityStore);
+		return this.capabilityLane.workflowDefinitions();
 	}
 
 	async runCapability(installId: string, bindingKey: string | undefined, opts: { repo?: string; prompt?: string } = {}, actor: Actor = LOCAL_ACTOR): Promise<AgentDTO> {
-		const install = this.capabilityStore.installs.find((item) => item.id === installId);
-		if (!install || install.state !== "enabled") throw new Error("enabled capability install not found");
-		const pack = this.capabilityStore.packs.find((item) => item.id === install.packId);
-		if (!pack) throw new Error("capability pack not found");
-		const binding = bindingKey ? install.bindings.find((item) => item.enabled && item.key === bindingKey) : install.bindings.find((item) => item.enabled && (item.type === "profile" || item.type === "workflow" || item.type === "driver"));
-		if (!binding) throw new Error("capability binding not found");
-		// requiredEnv ENFORCEMENT (#5): packs declare env vars they need, but it was parsed and never checked
-		// — an agent would spawn blind and fail opaquely downstream. Refuse up front with a clear error naming
-		// the missing vars, before any worktree/host is created.
-		const missingEnv = pack.requiredEnv.filter((name) => !(process.env[name] && process.env[name]!.trim()));
-		if (missingEnv.length) {
-			void this.recordAudit(actor, "capability.run.blocked", binding.key, "error", `missing required env: ${missingEnv.join(", ")}`);
-			throw new Error(`capability "${pack.slug}" requires environment variable(s) not set: ${missingEnv.join(", ")}`);
-		}
-		const repo = opts.repo ?? process.cwd();
-		const prompt = opts.prompt ?? `Run capability ${binding.key}`;
-		const name = binding.key.replace(/^cap:/, "").replace(/[^a-z0-9-]+/gi, "-").slice(0, 24) || "capability";
-		if (binding.type === "driver" && binding.config.runtime === "flue-service") {
-			const dir = path.join(this.stateDir, "capabilities", install.id);
-			await fs.mkdir(dir, { recursive: true });
-			await Promise.all(pack.files.map(async (file) => {
-				if (file.content === undefined) return;
-				const target = path.join(dir, file.path);
-				if (!target.startsWith(dir + path.sep)) throw new Error("capability file path escapes install dir");
-				await fs.mkdir(path.dirname(target), { recursive: true });
-				await fs.writeFile(target, file.content);
-			}));
-			const workflow = typeof binding.config.workflow === "string" ? binding.config.workflow : pack.workflows[0]?.path ?? pack.workflows[0]?.id ?? pack.slug;
-			const target = binding.config.target === "cloudflare" ? "cloudflare" : "node";
-			return this.create({ repo, name, task: prompt, autoRoute: false, flue: { dir, workflow, target } }, actor);
-		}
-		if (binding.type === "workflow") {
-			// WORKFLOW binding execution (#2): previously this passed `workflow: binding.sourcePath`, which is
-			// undefined for inline step-graph bindings → `create` classified the agent as a plain omp-operator
-			// and the step graph never ran. Resolve the workflow path to actually drive a WorkflowDriver:
-			//  - an authored file (binding.sourcePath) is used directly;
-			//  - an inline step-graph binding is materialized to a DOT graph file in the install dir, so the
-			//    same engine that runs authored workflows executes the capability's declared steps.
-			const workflowPath = await this.resolveCapabilityWorkflowPath(install, binding);
-			return this.create({ repo, name, workflow: workflowPath, task: prompt, autoRoute: false }, actor);
-		}
-		return this.create({ repo, name, profileId: binding.key, task: prompt, autoRoute: false }, actor);
-	}
-
-	/**
-	 * Resolve a workflow binding to a graph file path the WorkflowDriver can run. An authored `sourcePath`
-	 * is returned as-is. Otherwise the binding's WorkflowDefinition (resolved by binding key via
-	 * capabilityWorkflowDefinitions) is rendered to a DOT graph and written into the per-install dir, and
-	 * that path is returned — so an inline capability step graph actually executes instead of being dropped.
-	 */
-	private async resolveCapabilityWorkflowPath(install: CapabilitySnapshot["installs"][number], binding: CapabilitySnapshot["installs"][number]["bindings"][number]): Promise<string> {
-		if (binding.sourcePath) return binding.sourcePath;
-		const definition = capabilityWorkflowDefinitions(this.capabilityStore).find((def) => def.id === binding.key);
-		if (!definition || definition.steps.length === 0) {
-			throw new Error(`capability workflow "${binding.key}" has no resolvable steps to run`);
-		}
-		const dir = path.join(this.stateDir, "capabilities", install.id, "workflows");
-		await fs.mkdir(dir, { recursive: true });
-		const dot = capabilityWorkflowToDot(definition);
-		// Validate the synthesized graph round-trips through the same parser the driver uses (exactly one
-		// start/exit, well-formed edges) before persisting it — fail loudly here, not at spawn time.
-		parseWorkflow(dot);
-		const file = path.join(dir, `${slugifyForFile(binding.key)}.fabro`);
-		await fs.writeFile(file, dot);
-		return file;
+		return this.capabilityLane.run(installId, bindingKey, opts, actor);
 	}
 
 	private profileFor(id: string | undefined, repo?: string): AgentProfile | undefined {
@@ -3024,144 +2950,51 @@ export class SquadManager extends EventEmitter {
 		return out;
 	}
 
+	// ── feedback lane — the implementation lives in src/feedback-lane.ts (concern 04 island #1);
+	// these delegations keep the manager's public surface stable for feedback-routes.ts + tests.
+
 	async listFeedbackCampaigns(): Promise<FeedbackCampaign[]> {
-		return (await this.store.loadFeedback()).campaigns;
+		return this.feedbackLane.listCampaigns();
 	}
 
 	async listFeedbackItems(): Promise<{ items: FeedbackSummary[]; raw: FeedbackItem[]; validations: FeedbackValidationResponse[]; rewards: FeedbackReward[] }> {
-		const snap = await this.store.loadFeedback();
-		return {
-			items: snap.items.map((item) => summarizeFeedback(item, snap.validations, snap.rewards.find((r) => r.feedbackId === item.id))),
-			raw: snap.items,
-			validations: snap.validations,
-			rewards: snap.rewards,
-		};
+		return this.feedbackLane.listItems();
 	}
 
 	async seedFeedbackCampaign(opts: { id?: string; name: string; repo: string; token: string; allowedOrigins?: string[]; rewardCents?: number; rewardCurrency?: string }): Promise<FeedbackCampaign> {
-		const snap = await this.store.loadFeedback();
-		const now = Date.now();
-		const id = opts.id?.trim() || newCampaignId();
-		const campaign: FeedbackCampaign = {
-			id,
-			name: opts.name.trim() || "Feedback campaign",
-			repo: normalizeRepoPath(opts.repo) || process.cwd(),
-			tokenHash: hashCampaignToken(opts.token),
-			allowedOrigins: opts.allowedOrigins?.length ? opts.allowedOrigins : ["*"],
-			rewardCents: opts.rewardCents,
-			rewardCurrency: opts.rewardCurrency,
-			createdAt: snap.campaigns.find((c) => c.id === id)?.createdAt ?? now,
-		};
-		const i = snap.campaigns.findIndex((c) => c.id === id);
-		if (i >= 0) snap.campaigns[i] = campaign;
-		else snap.campaigns.push(campaign);
-		await this.store.saveFeedback(snap);
-		return campaign;
+		return this.feedbackLane.seedCampaign(opts);
 	}
 
 	async submitFeedbackItem(body: unknown, origin?: string | null, now = Date.now()): Promise<FeedbackItem> {
-		const snap = await this.store.loadFeedback();
-		const accepted = acceptFeedbackSubmission({ campaigns: snap.campaigns, body, origin, now, maxImageBytes: feedbackMaxImageBytes() });
-		if (accepted.attachmentBytes && accepted.item.attachment && accepted.attachmentExt) {
-			const rel = path.join("feedback", "attachments", accepted.item.id, `${accepted.item.attachment.id}.${accepted.attachmentExt}`);
-			const full = path.join(this.stateDir, rel);
-			await fs.mkdir(path.dirname(full), { recursive: true });
-			const tmp = `${full}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
-			await fs.writeFile(tmp, accepted.attachmentBytes);
-			await fs.rename(tmp, full);
-			accepted.item.attachment = { ...accepted.item.attachment, path: rel };
-		}
-		snap.items.push(accepted.item);
-		if (accepted.reward) snap.rewards.push(accepted.reward);
-		await this.store.saveFeedback(snap);
-		return accepted.item;
+		return this.feedbackLane.submitItem(body, origin, now);
 	}
 
 	async acceptFeedback(id: string, actor: Actor = LOCAL_ACTOR): Promise<FeedbackItem> {
-		const snap = await this.store.loadFeedback();
-		const item = feedbackItemOrThrow(snap.items, id);
-		if (item.status === "rejected") throw new Error("rejected feedback cannot be accepted");
-		if (item.status !== "promoted") item.status = "accepted";
-		item.updatedAt = Date.now();
-		await this.store.saveFeedback(snap);
-		await this.recordFeedbackAudit(actor, "feedback.accept", id);
-		return item;
+		return this.feedbackLane.accept(id, actor);
 	}
 
 	async rejectFeedback(id: string, actor: Actor = LOCAL_ACTOR): Promise<FeedbackItem> {
-		const snap = await this.store.loadFeedback();
-		const item = feedbackItemOrThrow(snap.items, id);
-		if (item.status === "promoted") throw new Error("promoted feedback cannot be rejected");
-		item.status = "rejected";
-		item.updatedAt = Date.now();
-		await this.store.saveFeedback(snap);
-		await this.recordFeedbackAudit(actor, "feedback.reject", id);
-		return item;
+		return this.feedbackLane.reject(id, actor);
 	}
 
 	async promoteFeedback(id: string, actor: Actor = LOCAL_ACTOR): Promise<FeedbackItem> {
-		const snap = await this.store.loadFeedback();
-		const item = feedbackItemOrThrow(snap.items, id);
-		if (item.planeIssue) return item;
-		if (item.status === "rejected") throw new Error("rejected feedback cannot be promoted");
-		if (item.status !== "accepted" && item.status !== "needs-validation") throw new Error("feedback must be accepted or needs-validation before promotion");
-		const rendered = renderFeedbackPlaneIssue(item, snap.validations.filter((v) => v.feedbackId === id), snap.rewards.find((r) => r.feedbackId === id));
-		const issue = await createPlaneIssue(item.repo, rendered.title, rendered.descriptionHtml);
-		if (!issue) throw new Error("plane issue create failed");
-		item.planeIssue = issue;
-		item.status = "promoted";
-		item.updatedAt = Date.now();
-		await this.store.saveFeedback(snap);
-		await this.recordFeedbackAudit(actor, "feedback.promote", id, issue.identifier ?? issue.id);
-		return item;
+		return this.feedbackLane.promote(id, actor);
 	}
 
 	async addFeedbackValidation(id: string, input: FeedbackValidationInput, actor: Actor = LOCAL_ACTOR): Promise<FeedbackValidationResponse> {
-		const snap = await this.store.loadFeedback();
-		const item = feedbackItemOrThrow(snap.items, id);
-		const validation = normalizeFeedbackValidation(input, item);
-		snap.validations.push(validation);
-		if (item.status === "new") {
-			item.status = "needs-validation";
-			item.updatedAt = Date.now();
-		}
-		await this.store.saveFeedback(snap);
-		await this.recordFeedbackAudit(actor, "feedback.validation", id);
-		return validation;
+		return this.feedbackLane.addValidation(id, input, actor);
 	}
 
 	async listFeedbackValidations(id: string): Promise<FeedbackValidationResponse[]> {
-		const snap = await this.store.loadFeedback();
-		feedbackItemOrThrow(snap.items, id);
-		return snap.validations.filter((v) => v.feedbackId === id);
+		return this.feedbackLane.listValidations(id);
 	}
 
 	async approveFeedbackReward(id: string, actor: Actor = LOCAL_ACTOR): Promise<FeedbackReward> {
-		const snap = await this.store.loadFeedback();
-		const { item, reward } = rewardRecordOrThrow(snap, id);
-		assertRewardTransition(reward.status, "approved");
-		reward.status = "approved";
-		reward.reviewer = actor.id;
-		reward.updatedAt = Date.now();
-		item.rewardStatus = "approved";
-		item.updatedAt = reward.updatedAt;
-		await this.store.saveFeedback(snap);
-		await this.recordFeedbackAudit(actor, "feedback.reward.approve", id);
-		return reward;
+		return this.feedbackLane.approveReward(id, actor);
 	}
 
 	async voidFeedbackReward(id: string, actor: Actor = LOCAL_ACTOR): Promise<FeedbackReward> {
-		const snap = await this.store.loadFeedback();
-		const { item, reward } = rewardRecordOrThrow(snap, id);
-		assertRewardTransition(reward.status, "void");
-		reward.status = "void";
-		reward.reviewer = actor.id;
-		reward.updatedAt = Date.now();
-		item.rewardStatus = "void";
-		item.updatedAt = reward.updatedAt;
-		await this.store.saveFeedback(snap);
-		await this.recordFeedbackAudit(actor, "feedback.reward.void", id);
-		return reward;
+		return this.feedbackLane.voidReward(id, actor);
 	}
 
 	/**
@@ -3190,63 +3023,7 @@ export class SquadManager extends EventEmitter {
 		opts: { provider?: string; externalRef?: string; recipientEmail?: string; recipientName?: string; note?: string } = {},
 		actor: Actor = LOCAL_ACTOR,
 	): Promise<FeedbackReward> {
-		const operatorProvider = typeof opts.provider === "string" ? opts.provider.trim() : "";
-		const operatorRef = typeof opts.externalRef === "string" ? opts.externalRef.trim() : "";
-		const isManual = this.paymentProvider.name === "manual";
-		// Manual path keeps the original required-fields contract: an out-of-band payout is only a
-		// trustworthy ledger entry if the operator names the provider AND the proof-of-payment handle.
-		if (isManual) {
-			if (!operatorProvider) throw new Error("provider is required to record a reward payout (e.g. the payment service used)");
-			if (!operatorRef) throw new Error("externalRef is required to record a reward payout (the provider's payment/transaction reference)");
-		}
-
-		const snap = await this.store.loadFeedback();
-		const { item, reward } = rewardRecordOrThrow(snap, id);
-		// State-machine gate FIRST, before any mutation or network call.
-		assertRewardTransition(reward.status, "paid");
-
-		// Recipient comes from the explicit opt or the linked feedback item. Real disbursement needs it.
-		const recipientEmail = (opts.recipientEmail ?? item.userEmail ?? "").trim();
-		const recipientName = opts.recipientName?.trim() || undefined;
-		const note = opts.note?.trim() || `omp-squad feedback reward for ${item.id}`;
-		if (!isManual && !recipientEmail) {
-			throw new Error("recipientEmail is required to disburse this reward (set it on the request or capture userEmail on the feedback item)");
-		}
-
-		// For the manual path, seed a per-call ManualProvider with the operator's externalRef so the
-		// recorded handle is exactly what the operator supplied; otherwise use the configured provider.
-		const provider = isManual ? new ManualProvider({ name: operatorProvider, externalRef: operatorRef }) : this.paymentProvider;
-		const result = await provider.payout({
-			idempotencyKey: reward.id, // reward id == idempotency key: retries never double-pay
-			amountCents: reward.amount,
-			currency: reward.currency,
-			recipientEmail,
-			recipientName,
-			note,
-		});
-
-		if (result.status === "failed") {
-			// Do NOT mark paid. Reward stays approved. Surface a clear error to the caller.
-			await this.recordFeedbackAudit(actor, "feedback.reward.payout_failed", id, `payout via ${result.provider} failed: ${result.error ?? "unknown error"}`);
-			throw new Error(`reward payout failed (${result.provider}): ${result.error ?? "unknown error"}`);
-		}
-
-		// status "paid" or "pending": persist the RESULT's provider + externalRef and mark the reward.
-		// The reward model has no "pending" state, so a pending disbursement is recorded as paid (the
-		// money/order has been accepted upstream) — the audit detail preserves the true provider status.
-		reward.status = "paid";
-		reward.provider = result.provider;
-		reward.externalRef = result.externalRef;
-		reward.reviewer = actor.id;
-		reward.updatedAt = Date.now();
-		item.rewardStatus = "paid";
-		item.updatedAt = reward.updatedAt;
-		await this.store.saveFeedback(snap);
-		const detail = isManual
-			? `manual record of externally-executed payment via ${result.provider} (ref ${result.externalRef}); no funds moved by omp-squad`
-			: `disbursed via ${result.provider} (ref ${result.externalRef}, status ${result.status}) to ${recipientEmail}`;
-		await this.recordFeedbackAudit(actor, "feedback.reward.paid", id, detail);
-		return reward;
+		return this.feedbackLane.markRewardPaid(id, opts, actor);
 	}
 
 	/** The single read contract for subagent lineage: persisted history merged with the live tracker, live
@@ -3324,223 +3101,36 @@ export class SquadManager extends EventEmitter {
 		return this.frictionLog.recent().some((e) => e.source === "auto" && e.context === context && e.agentId === agentId);
 	}
 
+	// ── project lane — implementation + state live in src/project-lane.ts (concern 04 island #3);
+	// delegations keep the manager's public surface stable for server.ts, remove(), and tests.
+
 	projects(): ProjectDTO[] {
-		const byRepo = new Map<string, ProjectDTO>();
-		const ensure = (repo: string): ProjectDTO => {
-			const key = normalizeRepoPath(repo);
-			let p = byRepo.get(key);
-			if (!p) {
-				p = { id: key, name: path.basename(key) || key, repo: key, agentCount: 0, statusCounts: {}, pendingCount: 0, lastActivity: 0, featureCount: 0, registered: false };
-				byRepo.set(key, p);
-			}
-			return p;
-		};
-
-		for (const repo of this.projectRegistry.list()) ensure(repo).registered = true;
-		for (const pf of this.featureStore.values()) if (pf.repo) ensure(pf.repo).featureCount++;
-		for (const { dto } of this.agents.values()) {
-			const p = ensure(dto.repo);
-			p.agentCount++;
-			p.statusCounts[dto.status] = (p.statusCounts[dto.status] ?? 0) + 1;
-			p.pendingCount += dto.pending.length;
-			p.lastActivity = Math.max(p.lastActivity, dto.lastActivity);
-		}
-		// Busiest first, then a stable alphabetical tail so idle registered projects don't shuffle.
-		return [...byRepo.values()].sort((a, b) => b.lastActivity - a.lastActivity || a.name.localeCompare(b.name));
+		return this.projectLane.projects();
 	}
 
-	/**
-	 * Register a repo as a project. Validated, not trusted: an absolute path to a real git worktree.
-	 *
-	 * This path is where the daemon will later create worktrees and spawn agents, so a relative path is
-	 * REFUSED rather than resolved against the daemon's cwd — that cwd is an accident of how the
-	 * operator launched it (this daemon runs from `~/lunarpup` while its code lives elsewhere), and
-	 * silently resolving against it is how you register the wrong tree.
-	 */
 	async registerProject(repo: string, opts: { promoteEphemeral?: boolean } = {}): Promise<{ ok: true; repo: string; added: boolean } | { ok: false; reason: string }> {
-		const raw = normalizeRepoPath(repo ?? "");
-		if (!raw) return { ok: false, reason: "repo is required" };
-		if (!path.isAbsolute(raw)) return { ok: false, reason: `repo must be an absolute path (got "${raw}")` };
-		if (!existsSync(raw)) return { ok: false, reason: `no such directory: ${raw}` };
-
-		// Canonicalize to the repo ROOT, through symlinks. `isGitRepo` is true for any directory INSIDE a
-		// repo (it shells `rev-parse --show-toplevel` and only falls back to a `.git` probe), so registering
-		// `/repo/src` — or a symlink to `/repo` — used to mint a project whose id matched no agent's
-		// `dto.repo` and no feature's `repo`: the workspace showed two rows for one repository and the
-		// task↔project join missed. Found by cross-lineage review (grok-4.5).
-		let root: string;
-		try {
-			root = normalizeRepoPath(await repoRoot(await fs.realpath(raw)));
-		} catch {
-			return { ok: false, reason: `not a git repository: ${raw}` };
-		}
-
-		// Never register anything inside glance's OWN data directory.
-		//
-		// A glance worktree is a git repo too, and its lifetime belongs to an agent, not the operator. But
-		// the sharper reason is tenancy: per-org managers put their worktrees under
-		// `<stateRoot>/orgs/<orgId>/worktrees` (manager-registry.ts), while `worktreeBase()` only names the
-		// ROOT manager's `<stateRoot>/worktrees`. Guarding the latter alone let one org's admin register
-		// ANOTHER org's managed worktree — and registration widens the viewer-readable `/api/graph*`
-		// allowlist (`resolveGraphRepo`), whose `/api/graph/commit` returns source diffs. That is a
-		// cross-tenant read, not a role bypass. Refusing the whole state root closes every variant at once:
-		// orgs/*/worktrees, the root worktrees dir, proof/, receipts/, and anything added later.
-		// Found by cross-lineage review (gpt-5.6-sol).
-		const forbidden = [resolveStateDir(), worktreeBase(), this.stateDir].map(normalizeRepoPath);
-		const inside = forbidden.find((base) => base.length > 0 && (root === base || root.startsWith(`${base}${path.sep}`)));
-		if (inside) {
-			return { ok: false, reason: `${root} is inside glance's own state directory (${inside}) — register the source repository instead` };
-		}
-
-		const outcome = this.projectRegistry.add(root);
-		if (outcome === "error") return { ok: false, reason: `could not persist the project registry — ${root} was NOT added` };
-		if (outcome === "added") this.log("info", `project registered: ${root}`);
-		// An explicit durable registration of a repo a live `glance here` session registered only for its
-		// lifetime is a PROMOTION ("keep it") — clear the session-scoped marker so end-of-session release
-		// no longer silently un-registers what the operator just asked to keep. Idempotent add ⇒ this is the
-		// exact case `add()` returns "exists" for. clearEphemeralMarker is a no-op when the repo was never
-		// ephemeral, so it's safe unconditionally on this explicit path. registerEphemeralProject's own
-		// delegated call passes no opts, so a fresh session registration never promotes itself.
-		if (opts.promoteEphemeral) this.clearEphemeralMarker(root);
-		this.emitFeaturesChanged();
-		return { ok: true, repo: root, added: outcome === "added" };
+		return this.projectLane.register(repo, opts);
 	}
 
-	/** Un-register a repo. Deletes NOTHING on disk; a repo with live agents or features keeps listing. */
 	unregisterProject(repo: string): { ok: true; repo: string; removed: boolean } | { ok: false; reason: string } {
-		const key = normalizeRepoPath(repo ?? "");
-		const outcome = this.projectRegistry.delete(key);
-		if (outcome === "error") return { ok: false, reason: `could not persist the project registry — ${key} was NOT removed` };
-		if (outcome === "removed") this.log("info", `project un-registered: ${key}`);
-		this.emitFeaturesChanged();
-		return { ok: true, repo: key, removed: outcome === "removed" };
+		return this.projectLane.unregister(repo);
 	}
 
-	/**
-	 * Repos registered only for the lifetime of a `glance here` session (daily-onramp 02). Persisted as
-	 * a sidecar (`ephemeral-projects.json`, loaded in the constructor) BECAUSE the registration it must
-	 * undo is durable: the first cut kept this set in-memory only, so a daemon restart mid-session lost
-	 * the marker while the `projects.json` row survived — every restart silently promoted a
-	 * session-scoped registration to a permanent, admin-gated one (fail-open; blind-review finding).
-	 * `start()` reconciles the reloaded markers against the restored roster: a session that survived the
-	 * restart (concern 04) keeps its marker for the ordinary end-of-session hooks; a session that died
-	 * with the old daemon is reaped at boot. Keys are the canonical repo roots `registerProject`
-	 * returns — the same key `projects()` groups by.
-	 */
-	private readonly ephemeralProjects: Set<string>;
-
-	/** Drop a repo's session-scoped marker (promote / release) and persist the shrunken sidecar. A
-	 *  failed sidecar write here is self-healing: boot reconciliation drops markers whose repo is no
-	 *  longer registered, and re-releasing an already-durable repo is a no-op by design. */
-	private clearEphemeralMarker(repo: string): void {
-		if (this.ephemeralProjects.delete(normalizeRepoPath(repo))) {
-			writeEphemeralProjects(this.stateDir, this.ephemeralProjects);
-		}
-	}
-
-	/**
-	 * Boot reconciliation for the reloaded ephemeral markers — runs in start() AFTER the roster is
-	 * restored (reconnectLive/adoptOrphanedAgents), so it can tell surviving sessions from dead ones:
-	 *   - marker whose repo still has a live agent → the session outlived the restart (concern 04);
-	 *     keep the marker so the ordinary session-end hooks (release route, `remove()`) still undo it;
-	 *   - marker whose repo has NO live agent → the session died with the old daemon; un-register now.
-	 *     This is the restart leak the sidecar exists to close;
-	 *   - marker whose repo is no longer registered at all → stale (released after a failed sidecar
-	 *     write, or the operator removed the project); just drop it.
-	 * A failed un-register keeps its marker so the NEXT boot retries — never drop the undo obligation
-	 * on an error.
-	 */
 	private reconcileEphemeralProjects(): void {
-		if (this.ephemeralProjects.size === 0) return;
-		const liveRepos = new Set([...this.agents.values()].map((r) => normalizeRepoPath(r.options.repo)));
-		let dirty = false;
-		for (const repo of [...this.ephemeralProjects]) {
-			if (liveRepos.has(repo)) continue;
-			if (this.projectRegistry.has(repo)) {
-				const dropped = this.unregisterProject(repo);
-				if (!dropped.ok) {
-					this.log("warn", `could not reap ephemeral project ${repo} at boot (${dropped.reason}) — marker kept for the next attempt`);
-					continue;
-				}
-				this.log("info", `ephemeral project reaped at boot (its session did not survive the restart): ${repo}`);
-			}
-			this.ephemeralProjects.delete(repo);
-			dirty = true;
-		}
-		if (dirty) writeEphemeralProjects(this.stateDir, this.ephemeralProjects);
+		this.projectLane.reconcileAtBoot();
 	}
 
 	/** Test/observability read: is this repo's registration session-scoped right now? */
 	isEphemeralProject(repo: string): boolean {
-		return this.ephemeralProjects.has(normalizeRepoPath(repo ?? ""));
+		return this.projectLane.isEphemeral(repo);
 	}
 
-	/**
-	 * Register a repo for the lifetime of a casual session: same validation and durable write as
-	 * `registerProject`, plus a marker so session end can undo it. Only a repo THIS call actually ADDED
-	 * becomes ephemeral — a repo the operator had already registered durably must never be silently
-	 * un-registered when a passing `glance here` session ends (`add()` is idempotent, so `added:false`
-	 * is exactly that case).
-	 *
-	 * `ephemeral` in the return is likewise scoped to `added`, NOT to whether the repo is currently
-	 * marked ephemeral (review finding #3, ephemeral release race): two `glance here` terminals on the
-	 * same repo are explicitly supported (boundarySyncChains), so a SECOND session's call here sees
-	 * `added:false` (the first session's marker already exists) — it must report `ephemeral:false` too,
-	 * even though `this.ephemeralProjects.has(repo)` reads true. Before this fix the second session was
-	 * told `ephemeral:true`, so its own ordinary exit (or a failed-create rollback) would call
-	 * `releaseEphemeralProject` believing it owned the registration, un-registering the FIRST session's
-	 * repo — and clearing its marker — while that session was still live and chatting. Only the session
-	 * that actually created the marker is now ever told it owns the release. `releaseEphemeralProject`
-	 * carries its own defense-in-depth guard for the case where a caller releases anyway (or a live
-	 * agent from ANY session still depends on the repo).
-	 */
 	async registerEphemeralProject(repo: string): Promise<{ ok: true; repo: string; added: boolean; ephemeral: boolean } | { ok: false; reason: string }> {
-		const result = await this.registerProject(repo);
-		if (!result.ok) return result;
-		if (result.added) {
-			this.ephemeralProjects.add(result.repo);
-			// The registration this marker must undo is already durable — a marker that exists only in
-			// memory would not survive a restart, silently promoting the session-scoped registration to
-			// permanent. Fail CLOSED: no durable marker ⇒ no ephemeral registration at all.
-			if (!writeEphemeralProjects(this.stateDir, this.ephemeralProjects)) {
-				this.ephemeralProjects.delete(result.repo);
-				const rollback = this.unregisterProject(result.repo);
-				return {
-					ok: false,
-					reason: rollback.ok
-						? `could not persist the ephemeral session marker for ${result.repo} — the registration was rolled back`
-						: `could not persist the ephemeral session marker for ${result.repo} AND the rollback failed (${rollback.reason}) — the repo is now durably registered; un-register it explicitly`,
-				};
-			}
-		}
-		// `result.added`, not `this.ephemeralProjects.has(...)` — see the doc comment above.
-		return { ...result, ephemeral: result.added };
+		return this.projectLane.registerEphemeral(repo);
 	}
 
-	/**
-	 * Undo an ephemeral registration on ordinary session end (REPL exit, or the daemon's own removal
-	 * path — see `remove()`). No-op for repos that were never session-scoped, so callers can fire it
-	 * unconditionally. Deletes nothing on disk, per `unregisterProject`'s own contract.
-	 *
-	 * Guarded the same way `remove()`'s own daemon-side cleanup is (review finding #3): a repo stays
-	 * registered as long as ANY live agent still references it, regardless of which session's marker
-	 * this call is scoped to. `registerEphemeralProject` now only reports `ephemeral:true` to the
-	 * session that actually created the marker, which closes most of the race — but this guard is the
-	 * belt: it also protects the two callers that never had `remove()`'s own last-agent check
-	 * (server.ts's `/api/console/release` route, and the `/api/console` failed-create rollback), so
-	 * even a caller that mistakenly believes it owns the release can never un-register a repo out from
-	 * under another session's still-live agent.
-	 */
 	releaseEphemeralProject(repo: string): { ok: boolean; repo: string; released: boolean; reason?: string } {
-		const key = normalizeRepoPath(repo ?? "");
-		if (!this.ephemeralProjects.has(key)) return { ok: true, repo: key, released: false };
-		if ([...this.agents.values()].some((r) => normalizeRepoPath(r.options.repo) === key)) {
-			return { ok: true, repo: key, released: false };
-		}
-		const dropped = this.unregisterProject(key);
-		if (!dropped.ok) return { ok: false, repo: key, released: false, reason: dropped.reason };
-		this.clearEphemeralMarker(key);
-		return { ok: true, repo: key, released: true };
+		return this.projectLane.releaseEphemeral(repo);
 	}
 
 	/** Feature view: persisted features + derived plan-dir/agent features with live land status, per repo. */
@@ -6160,7 +5750,7 @@ export class SquadManager extends EventEmitter {
 			// Promotion is the "keep it" signal for a `glance here` session (daily-onramp 02) — clearing
 			// the marker on the idempotent path too means a re-promote after a crashed first call still
 			// makes the registration durable.
-			this.clearEphemeralMarker(rec.dto.repo);
+			this.projectLane.clearMarker(rec.dto.repo);
 			// Keep the wire mirror honest on the retry path too (a pre-06 daemon's persisted promote, or a
 			// crashed first call, may have left the DTO unstamped even though the options flag is durable).
 			rec.dto.promoted = true;
@@ -6231,7 +5821,7 @@ export class SquadManager extends EventEmitter {
 		// Promote makes a `glance here` session's repo registration durable: with the ephemeral marker
 		// gone, session-end cleanup no longer fires (daily-onramp 02). AFTER the persist so a rolled-back
 		// promote leaves the marker (and the session's cleanup contract) intact.
-		this.clearEphemeralMarker(rec.dto.repo);
+		this.projectLane.clearMarker(rec.dto.repo);
 		this.emitAgent(rec);
 		void this.recordAudit(actor, "promote", id, "ok", `console→unit; mode ${prior.mode}→${rec.dto.autonomyMode}`);
 		await this.store.appendAudit({ actor: actor.id, action: "promote", target: id, detail: { priorMode: prior.mode, mode: rec.dto.autonomyMode, task: opts.task ? truncateLabel(opts.task, 120) : undefined } }).catch(() => {});
@@ -13479,14 +13069,14 @@ export class SquadManager extends EventEmitter {
 		const transcripts: Record<string, TranscriptEntry[]> = {};
 		for (const r of this.agents.values()) if (r.transcript.length) transcripts[r.dto.id] = r.transcript;
 		const features = [...this.featureStore.values()];
-		await this.store.save({ agents, transcripts, features, capabilities: this.capabilityStore });
+		await this.store.save({ agents, transcripts, features, capabilities: this.capabilityLane.snapshot() });
 	}
 
 	/** Re-spawn agents persisted from a previous run. Returns how many were restored. */
 	async loadPersisted(): Promise<number> {
 		const snapshot = await this.store.load();
 		this.reseedTranscriptSeq(snapshot);
-		this.capabilityStore = normalizeCapabilitySnapshot(snapshot.capabilities);
+		this.capabilityLane.hydrate(snapshot.capabilities);
 		for (const f of snapshot.features) this.featureStore.set(f.id, f);
 		const list = snapshot.agents;
 		// Review finding 4: a branch child still in-flight for its workflow parent's current parallel node
@@ -13618,24 +13208,6 @@ export class SquadManager extends EventEmitter {
  *  fabric already knows. `OMP_SQUAD_CONTEXT_PRIMER=0` turns it off. */
 function contextPrimerEnabled(): boolean {
 	return envBool("OMP_SQUAD_CONTEXT_PRIMER", true);
-}
-
-function feedbackMaxImageBytes(): number {
-	const n = Number(process.env.OMP_SQUAD_FEEDBACK_MAX_IMAGE_BYTES);
-	return Number.isFinite(n) && n > 0 ? n : 2_000_000;
-}
-
-function feedbackItemOrThrow(items: FeedbackItem[], id: string): FeedbackItem {
-	const item = items.find((x) => x.id === id);
-	if (!item) throw new Error("feedback item not found");
-	return item;
-}
-
-function rewardRecordOrThrow(snap: FeedbackSnapshot, id: string): { item: FeedbackItem; reward: FeedbackReward } {
-	const item = feedbackItemOrThrow(snap.items, id);
-	const reward = snap.rewards.find((r) => r.feedbackId === id);
-	if (!reward || item.rewardStatus === "none") throw new Error("feedback item has no reward");
-	return { item, reward };
 }
 
 function safeJson(value: unknown, max = 2000): string | undefined {
