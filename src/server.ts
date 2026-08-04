@@ -2194,6 +2194,21 @@ export class SquadServer {
 		// mints server-authored and writes through the single write rule (including the normalize-
 		// then-reject-empty guard from the blind-review fix); this route only maps outcomes to
 		// statuses so every conflict is explicit instead of a silent drop.
+		// The audited starvation clear verb (deepen 14, DESIGN v2): operator tier (authz mutation
+		// floor), explicit, 404 when there is nothing to clear — never a silent 200.
+		// Org-local starved issues (deepen 14 item 1): the LIVE rendered surface (MondaySurface)
+		// reads this; same manager the redispatch POST resolves — org binding by construction
+		// (item 5). The cross-org bootstrap aggregate in actionItemsPayload stays view-only.
+		if (url.pathname === "/api/issues/starved" && req.method === "GET") {
+			return Response.json({ starved: manager.starvedIssueAttempts() });
+		}
+		const mstarve = url.pathname.match(/^\/api\/issues\/([^/]+)\/redispatch$/);
+		if (mstarve && req.method === "POST") {
+			const body: unknown = await req.json().catch(() => ({}));
+			const reason = body && typeof body === "object" && "reason" in body && typeof body.reason === "string" ? body.reason : undefined;
+			const cleared = await manager.clearIssueStarvationVerdict(decodeURIComponent(mstarve[1]), actor, reason);
+			return cleared ? Response.json({ ok: true }) : new Response("no starvation verdict to clear for this issue", { status: 404 });
+		}
 		const mfsupersede = url.pathname.match(/^\/api\/features\/([^/]+)\/decisions\/supersede$/);
 		if (mfsupersede && req.method === "POST") {
 			const decoded = decodeBody(FeatureDecisionSupersedeBodySchema, await req.json().catch(() => null));
@@ -3706,4 +3721,3 @@ export class SquadServer {
 		this.server?.stop(true);
 	}
 }
-

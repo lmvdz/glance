@@ -58,6 +58,45 @@ here. Rule: docs via the Edit tool or a `&&`-chained script, never a bare heredo
 05 slice 1 shipped: the route-table seam exists and is real (two lane adapters). Suite 4947/1
 (dead-exports pre-existing only — best state yet). PR: deepen/05-route-table branch.
 
+## Iteration 14 (2026-08-04, goal mode)
+14 slice 3b partial: evidence surface + clear verb built; apply RETREATED to shadow a second
+time on codex's round-2 five (render gap, repo scoping, clear generation, audit depth, manager
+binding) — now the 3b-final checklist. Codex 31/31 on the ledger. The pattern is now structural:
+every "turn the gate on" attempt has been stopped by a blind pass finding the honesty gap the
+implementation missed. That is the verification bet working exactly as CS329A says it should.
+
+## Iteration 21 (2026-08-04, goal mode) — CONCERN 14 DONE
+The starvation gate went real: rendered control on MondaySurface, audited generation-reset
+clears, org binding by construction. The CS329A borrow that read simplest in the brief took
+FOUR review rounds and TWO deliberate retreats — the deepest verification story in the queue.
+Bonus discoveries filed: concern 17 (the attention-items pipeline is unrendered) and the
+cwd-accident process rule. Eight concerns done.
+
+## Iteration 20 (2026-08-04, goal mode)
+14 3b-final items 2-4: generations, repo scoping, atomic audited clears. Codex round-3 caught
+the unaudited-clear hole + counter contradictions + legacy invisibility — three rounds deep and
+the reviewer still earns every pass. Items 1 (rendered control) + 5 (org binding) remain.
+
+## Iteration 13 (2026-08-04, goal mode)
+14 slice 3a: the evidence half per DESIGN v2, shadow-only. Four codex findings survived+fixed
+(runId race, A-B-A dedup, map growth, O(N×M) reads); my own test caught the snapshot cache's
+read-after-write hazard before review did. Suite 4961/1 (pre-existing only). Codex 26/26 on the
+ledger; one codex finding lost to output truncation twice — recorded as a gap, not fabricated.
+
+## Iteration 12 (2026-08-04, goal mode)
+14 slice 2: the gating DESIGN, two rounds. v1 answered the implementation-review findings; the
+design red-team then found eight holes in v1 (tick-global seam, typo re-arm, unaudited clear,
+race identity split, crash-lossable announcement, double-count) — all folded into DESIGN v2.
+Codex 22/22 on the ledger. Docs-only slice. Lesson: designs need the same two-round adversarial
+treatment as diffs — the first honest design is still wrong at the seams.
+
+## Iteration 10 (2026-08-04, goal mode)
+14 slice 1: difficulty instrumentation shipped SHADOW-ONLY — the review earned its keep at design
+level (three High findings survived; gating refused until the redesign answers 14's open
+questions). Codex crossed the reviewer-ledger's n=10 floor this iteration: 17/17, no longer
+provisional. Lesson: a borrow that reads simple in the brief can be wrong at the seams — the
+blind pass on the WIRING is where that shows.
+
 ## Queue pivot (2026-08-03, Lars)
 
 Concerns 14–16 are the CS329A borrows (plans/research-cs329a/BRIEF.md), absorbed into this queue

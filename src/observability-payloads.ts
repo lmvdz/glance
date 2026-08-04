@@ -655,6 +655,24 @@ export async function actionItemsPayload(managers: SquadManager[], url: URL, act
 	const agents = (await Promise.all(managers.map((m) => m.visibleAgents(actor)))).flat().filter((a) => !repo || a.repo === repo);
 	const health = await aggregateHealth(managers);
 	const items: ActionItem[] = [];
+	// Starved issues (deepen 14): derived per request from the attempts ledger — emit-from-state,
+	// so a crash can never lose the announcement and an ack silences it everywhere at once.
+	for (const m of managers) {
+		for (const s of m.starvedIssueAttempts()) {
+			// 3b-final item 2 + codex: equality filter — and a LEGACY row with no repo stays VISIBLE
+			// under any filter (fail-visible; hiding an active verdict is the worse failure).
+			if (repo && s.repo && s.repo !== repo) continue;
+			items.push({
+				id: `starved:${s.issueId}`,
+				severity: "high",
+				source: "land",
+				subject: `${s.identifier ?? s.issueId}: ${s.fails}/${s.attempts} dispatch attempts failed`,
+				rootCause: "Every judged attempt on this issue failed — more auto-dispatch is signal-free compute (deepen 14).",
+				nextAction: "Re-scope the issue, or clear the verdict to re-enable auto-dispatch",
+				targetRoute: "#/tasks",
+			});
+		}
+	}
 	for (const a of agents) {
 		for (const p of a.pending) {
 			items.push({
