@@ -36,8 +36,6 @@ import {
 	AnnotationCreateBodySchema,
 	AnnotationSendBodySchema,
 	AssigneesBodySchema,
-	AttentionEventBodySchema,
-	UnitVisitBodySchema,
 	CapabilityInstallBodySchema,
 	CapabilityInstallPatchBodySchema,
 	CapabilityInstallRunBodySchema,
@@ -106,9 +104,7 @@ import { hardenedGit } from "./git-harden.ts";
 import { rankKbDocs, searchFabric, type KbDoc, type KbDocType } from "./memory/fabric-search.ts";
 import type { FabricSnapshot } from "./memory/fabric.ts";
 import { sanitizePatchDecisions } from "./memory/index.ts";
-import { redactAttentionForActor, redactSeenMapForActor } from "./attention.ts";
-import { maxLadderPriority, type LadderPriority } from "./attention-ladder.ts";
-import { computeFog, repoHasHistory } from "./comprehension-fog.ts";
+import { computeFog } from "./comprehension-fog.ts";
 import type { SymptomEntry, SymptomSearchHit } from "./memory/symptoms.ts";
 import type { EpisodeMeta } from "./memory/weekly-episode.ts";
 import { normalizeRepoPath } from "./project-registry.ts";
@@ -142,6 +138,7 @@ import type { ManagerRegistry } from "./manager-registry.ts";
 import type { ComplianceFinding } from "./compliance.ts";
 import { actorForRole, type AuthPolicy, RbacDenied, requestToken, requiredRole, resolveRole, roleAtLeast, tokenOk } from "./auth.ts";
 import { handleFeedbackRoutes } from "./feedback-routes.ts";
+import { handleAttentionRoutes } from "./routes/attention.ts";
 import { handleMemoryRoutes } from "./routes/memory.ts";
 import { boundedNumber } from "./routes/table.ts";
 import { configuredSocialProviders, signupOpen } from "./db/auth.ts";
@@ -2333,103 +2330,11 @@ export class SquadServer {
 				return new Response(errText(err), { status: 400 });
 			}
 		}
-		// Operator-attention substrate (comprehension concern 01): a durable, tenant-scoped record of
-		// what the human has actually looked at. `viewerId`/`at` are stamped HERE, server-side, from the
-		// same `session`-derived identity `featureAuthor` above uses — never accepted from the client
-		// body (a client-supplied viewerId would let any actor impersonate another's attention, and a
-		// client-supplied `at` would let a flood backdate the seen map). `isAdmin` for redaction is the
-		// SAME `role` this request already resolved above, not re-derived.
-		if (url.pathname === "/api/attention" && req.method === "POST") {
-			if (manager.attentionDisabled()) return Response.json({ ok: false, disabled: true });
-			const decoded = decodeBody(AttentionEventBodySchema, await req.json().catch(() => null));
-			if (Result.isFailure(decoded)) return new Response("expected { kind, repo }", { status: 400 });
-			const body = decoded.success;
-			// Fail CLOSED: validated against the actor-visible repo set the same way buildFabricSnapshot
-			// derives it (fabric.ts's `actorVisibleRepoSet`) — an actor with no derivable repos (no live
-			// agents, no persisted features) rejects EVERY repo, never falls open to "unrestricted".
-			if (!manager.attentionVisibleRepos(actor).has(normalizeRepoPath(body.repo))) return new Response("unknown repo", { status: 400 });
-			const viewerId = this.attentionViewerId(actor);
-			const result = manager.recordAttention({ kind: body.kind, repo: body.repo, file: body.file, agentId: body.agentId, answerId: body.answerId, prNumber: body.prNumber, viewerId }, actor.id);
-			if (!result.ok && result.reason === "rate-limited") return new Response("rate limited", { status: 429 });
-			return Response.json({ ok: result.ok });
-		}
-		if (url.pathname === "/api/attention" && req.method === "GET") {
-			if (manager.attentionDisabled()) return Response.json({ disabled: true });
-			const visible = manager.attentionVisibleRepos(actor);
-			const repoParam = url.searchParams.get("repo");
-			// A foreign/unresolvable `?repo=` reads as "nothing" rather than a 400 — GETs are lenient
-			// (module doc: only the POST fail-closes loudly), but never leak a repo outside the actor's
-			// own visible set just because the query string named one.
-			const repos = repoParam ? (visible.has(normalizeRepoPath(repoParam)) ? [repoParam] : []) : [...visible];
-			const events = manager.attentionEvents(repos);
-			const redacted = redactAttentionForActor(events, { viewerId: this.attentionViewerId(actor), isAdmin: roleAtLeast(role, "admin") });
-			return Response.json({ events: redacted });
-		}
-		if (url.pathname === "/api/attention/seen" && req.method === "GET") {
-			if (manager.attentionDisabled()) return Response.json({ disabled: true });
-			const visible = manager.attentionVisibleRepos(actor);
-			const repoParam = url.searchParams.get("repo");
-			const repos = repoParam ? (visible.has(normalizeRepoPath(repoParam)) ? [repoParam] : []) : [...visible];
-			const seen = manager.attentionSeen(repos);
-			const redacted = redactSeenMapForActor(seen, { viewerId: this.attentionViewerId(actor), isAdmin: roleAtLeast(role, "admin") });
-			return Response.json({ seen: redacted });
-		}
-		// Needs-you ladder roll-up (t3-face concern 06, plans/daily-driver/01-charter-needs-you-ladder.md):
-		// the cockpit spine's group headers need a max-priority per project and per daemon, not just the
-		// per-unit rung already riding GET /api/agents. Personalized for the requesting viewer exactly like
-		// GET /api/agents above (same `ladderPriorityFor` call, same `viewerId` derivation) — a foreign/
-		// unresolvable identity never sees anyone else's `completed-unseen` state resolve differently.
-		if (url.pathname === "/api/attention/ladder" && req.method === "GET") {
-			const viewerId = this.attentionViewerId(actor);
-			const agents = await manager.visibleAgents(actor);
-			const units = agents.map((dto) => ({ id: dto.id, repo: dto.repo, priority: manager.ladderPriorityFor(dto, viewerId) }));
-			const byRepo = new Map<string, LadderPriority[]>();
-			for (const u of units) byRepo.set(u.repo, [...(byRepo.get(u.repo) ?? []), u.priority]);
-			const projects = [...byRepo.entries()].map(([repo, priorities]) => ({ repo, priority: maxLadderPriority(priorities) }));
-			const daemon = maxLadderPriority(units.map((u) => u.priority));
-			return Response.json({ units, projects, daemon });
-		}
-		// Needs-you ladder mark-seen (t3-face concern 06): the ONE mutation that advances a viewer's
-		// per-unit `lastVisitedAt`. `viewerId`/`at` are, like POST /api/attention above, ALWAYS
-		// server-stamped from the session — never accepted from the client body (a client-supplied
-		// viewerId would let any actor mark a unit seen on another viewer's behalf).
-		if (url.pathname === "/api/attention/ladder/seen" && req.method === "POST") {
-			const decoded = decodeBody(UnitVisitBodySchema, await req.json().catch(() => null));
-			if (Result.isFailure(decoded)) return new Response("expected { agentId }", { status: 400 });
-			const dto = manager.getAgent(decoded.success.agentId);
-			// Fail CLOSED like POST /api/attention's own repo check: an agentId outside the actor's
-			// visible repo set (or that names no live agent at all) is rejected, never silently a no-op
-			// 200 that would let a caller probe for the existence of a foreign unit.
-			if (!dto || !manager.attentionVisibleRepos(actor).has(normalizeRepoPath(dto.repo))) return new Response("no such agent", { status: 404 });
-			const viewerId = this.attentionViewerId(actor);
-			const result = manager.markUnitVisited(dto.id, viewerId);
-			return Response.json({ ok: result.ok });
-		}
-		// Comprehension fog (concern 03): a monotone per-file comprehension-debt read, joined from every
-		// completed receipt against the attention substrate's seen map. Repos are derived from the actor
-		// exactly like the two attention GETs above — NEVER solely from `?repo=` — so a foreign repo named
-		// in the query string reads as "nothing" rather than leaking another tenant's debt. `computeFog`
-		// itself re-filters both inputs through this same repo list before joining (DESIGN.md's tenant-
-		// scoping row: a tested deliverable, not a single call site's discipline), so this route's own
-		// pre-filtering is belt-and-suspenders, not the only guard.
-		if (url.pathname === "/api/fog" && req.method === "GET") {
-			if (manager.attentionDisabled()) return Response.json({ entries: [], repoHasHistory: {}, disabled: true });
-			const visible = manager.attentionVisibleRepos(actor);
-			const repoParam = url.searchParams.get("repo");
-			const repos = repoParam ? (visible.has(normalizeRepoPath(repoParam)) ? [normalizeRepoPath(repoParam)] : []) : [...visible];
-			const now = Date.now();
-			const receipts = await manager.allReceipts();
-			const seen = manager.attentionSeen(repos);
-			// Concern 08: the "surprised me" chip raises a file's effective change mass without
-			// inflating the raw `changesSinceSeen` count (attention.ts's durable, non-rotating
-			// `SurpriseCountMap` — never the raw JSONL feed, which rotates). Carries no viewer
-			// identity, so it needs no redaction pass unlike `seen` above.
-			const surpriseCounts = manager.attentionSurpriseCounts(repos);
-			const entries = computeFog({ receipts, seen, repos, now, surpriseCounts });
-			const historyByRepo: Record<string, boolean> = {};
-			for (const repo of repos) historyByRepo[repo] = repoHasHistory(seen, repo, now);
-			return Response.json({ entries, repoHasHistory: historyByRepo });
-		}
+		// Attention / needs-you-ladder / comprehension-fog routes live in routes/attention.ts
+		// (deepen 05 slice 2). Viewer context is computed ONCE here from the same session/role
+		// resolution the inline branches used, then passed explicitly — no this.* reach-back.
+		const attentionResponse = await handleAttentionRoutes(url, req, manager, actor, { viewerId: this.attentionViewerId(actor), isAdmin: roleAtLeast(role, "admin") });
+		if (attentionResponse) return attentionResponse;
 		if (url.pathname === "/api/projects" && req.method === "GET") return Response.json(manager.projects());
 		// Friction ledger (plans/daily-dogfood-engine/01): tenant-scoped like /api/projects (one ledger
 		// per manager stateDir, same as the transitionLog it's modeled on — cross-org roll-up is out of

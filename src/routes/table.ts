@@ -26,19 +26,21 @@ export interface RouteContext {
 	actor: Actor;
 }
 
-export type RouteHandler = (ctx: RouteContext, params: string[]) => Promise<Response> | Response;
+export type RouteHandler<C extends RouteContext = RouteContext> = (ctx: C, params: string[]) => Promise<Response> | Response;
 
-export interface Route {
+/** Generic over the context so a lane may EXTEND it with explicit extra deps (the attention
+ *  lane's viewer identity) instead of smuggling server-instance state through closures. */
+export interface Route<C extends RouteContext = RouteContext> {
 	method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 	/** Exact pathname, or a RegExp whose capture groups arrive (decoded) as `params`. */
 	pattern: string | RegExp;
-	handler: RouteHandler;
+	handler: RouteHandler<C>;
 }
 
 /** Dispatch one lane's table. `undefined` = no route matched — the caller's chain continues
  *  (the same fall-through contract handleFeedbackRoutes established). First match wins;
  *  registration order is the precedence order, exactly like the if-chain it replaces. */
-export async function dispatchRoutes(routes: readonly Route[], ctx: RouteContext): Promise<Response | undefined> {
+export async function dispatchRoutes<C extends RouteContext>(routes: readonly Route<C>[], ctx: C): Promise<Response | undefined> {
 	for (const route of routes) {
 		if (route.method !== ctx.req.method) continue;
 		if (typeof route.pattern === "string") {
