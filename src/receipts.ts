@@ -43,6 +43,14 @@ export interface RunReceipt {
 	parentId?: string;
 	/** Which harness drove the run ("omp" for daemon-spawned; external ingests set their own). */
 	harness?: string;
+	/** Set ONLY by `scripts/backfill-receipt-attribution.ts` when it audited this receipt's missing
+	 *  `model` and could not determine one with certainty (no independent `task-outcomes.jsonl` row
+	 *  for this `agentId`, or the unit restarted so a single joined row can't be pinned to this exact
+	 *  run). Distinguishes "considered and genuinely unknown" from "nobody has looked yet" — the
+	 *  backfill script never guesses a model, so an audited-but-still-absent `model` is expected to
+	 *  carry this instead of silently looking identical to an un-audited row. Cleared automatically if
+	 *  a later backfill pass DOES manage to attribute `model`. */
+	modelUnattributableReason?: string;
 	/** Epic 3 independent-validator verdict for this run's land attempt, copied from `AgentDTO.validation`
 	 *  at finalize time so it survives the run durably (Epic 5's confidence input, DESIGN §5). */
 	validation?: ValidationRecord;
