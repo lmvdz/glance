@@ -24,6 +24,13 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
+## Iteration 26 (2026-08-04, goal mode) — CONCERN 06 DONE
+Final slice: src/core-types.ts, the 14-type shared kernel (identity, lifecycle, transcript
+grammar, work-item ref) with one lane import and everything depending on it — the deletion
+test a kernel should pass. codex CLEAN at its most thorough (byte-identical blocks, 160
+type-only bindings, cycle erased under isolatedModules); grok quota-flaked (gap row). types.ts
+1,723 → 1,454 across the concern. ELEVEN concerns done; 08/09/10/12/17 + 13 needs-lars remain.
+
 ## Iteration 25 (2026-08-04, goal mode)
 06 slice 3: the AgentDTO split (the hard one) — six domain facets, DTO = their intersection,
 wire-identical, 72 fields in/out verified twice (my script + codex's independent AST audit).

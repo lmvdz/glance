@@ -1,5 +1,5 @@
 # types.ts split — a minimal core, lane-owned types
-STATUS: in-progress
+STATUS: done
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: mechanical
@@ -43,6 +43,15 @@ live in src/memory/.
   key disjointness (each field has exactly one home). Consumers can now name the slice they
   read — attention-ladder.ts's Pick<> idiom promoted to the declaration site. Remaining: the
   minimal core extraction (last slice).
+
+- Slice 4 done (2026-08-04, iteration 26) — CONCERN COMPLETE: src/core-types.ts is the shared
+  kernel (Role/Actor/Availability, AgentStatus, PendingRequest, ScopeSource, IssueRef, the
+  seven-type transcript grammar) — 14 types, one import (lane.ts's WorkLane), moved verbatim
+  with import-then-re-export in types.ts. The kernel passes its own deletion test: every lane
+  depends on it, it depends on none. codex CLEAN (byte-identical blocks, 160 type-only
+  bindings, cycle proven erased under isolatedModules, ratchet-simulation pinning the +1 to
+  pre-existing reconcileWorkosOrgs); grok flaked (gap recorded). types.ts: 1,723 → 1,454 over
+  the concern; feedback/decision/receipt/land/room domains lane-owned; AgentDTO faceted.
 
 ## Provenance
 Memory-lane report candidate 6; whole-repo report concurs via its wire-contract candidate (08).
