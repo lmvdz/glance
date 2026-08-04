@@ -1102,10 +1102,44 @@ export class SquadManager extends EventEmitter {
 		stateDir: () => this.stateDir,
 		audit: (entry) => void this.store.appendAudit(entry).catch((err) => this.log("warn", `capability audit write failed: ${err instanceof Error ? err.message : String(err)}`)),
 		recordAudit: (actor, action, target, status, detail) => void this.recordAudit(actor, action, target, status, detail),
-		persist: () => void this.persist(),
-		changed: () => this.emitFeaturesChanged(),
+		// Concern 12: a capability mutation persists ONLY its own lane through the split store
+		// method — it no longer rewrites agents + every transcript via the full-blob persist().
+		persist: () => this.persistCapabilities(),
+		// Emit ONLY (codex M1 on this slice): emitFeaturesChanged() opens with a full blob
+		// persist(), which silently re-created the exact write amplification the split removes —
+		// the lane's own data no longer lives in the blob, so a capability mutation has nothing
+		// to checkpoint there; surfaces still get their refresh event.
+		changed: () => this.emit("event", { type: "features-changed" } satisfies SquadEvent),
 		create: (opts, actor) => this.create(opts, actor),
 	});
+	/** Serializes capability snapshot writes so racing installs can't interleave the snapshot
+	 *  file, and stop() can await outstanding writes as a durability barrier. The chain itself
+	 *  never rejects (each link logs-and-swallows), mirroring the blob writeChain's contract. */
+	private capabilityWriteChain: Promise<void> = Promise.resolve();
+	/** True once any capability write was enqueued this run — gates stop()'s final flush so a
+	 *  daemon that never touched the lane never mints an empty capabilities.json. */
+	private capabilityWriteEnqueued = false;
+	/** Enqueue one capability-lane snapshot write (concern 12's split persist path). The snapshot
+	 *  is read at WRITE time, not enqueue time — same joiner-durability property persist() has.
+	 *  Returns the chain so migration/stop sites can AWAIT durability (codex H1/H4). */
+	private persistCapabilities(): Promise<void> {
+		this.capabilityWriteEnqueued = true;
+		this.capabilityWriteChain = this.capabilityWriteChain
+			.then(() => this.store.saveCapabilities(this.capabilityLane.snapshot()))
+			.catch((err) => this.log("warn", `capability snapshot write failed: ${errText(err)}`));
+		return this.capabilityWriteChain;
+	}
+	/** Hydrate the capability lane from a loaded snapshot and, when a LEGACY snapshot carried a
+	 *  non-empty embedded copy, AWAIT the one-time migration write through the split path before
+	 *  any blob save can strand the only copy (codex H1: both boot paths — reconnectLive and
+	 *  loadPersisted — hydrate, so both must migrate, and awaited, not fire-and-forget). */
+	private async hydrateCapabilities(snapshot: StateSnapshot): Promise<void> {
+		this.capabilityLane.hydrate(snapshot.capabilities);
+		const cap = snapshot.capabilities;
+		if (cap && (cap.sources.length || cap.packs.length || cap.installs.length || cap.verifications.length || cap.audit.length)) {
+			await this.persistCapabilities();
+		}
+	}
 	private readonly bin?: string;
 	private readonly autoLand: boolean;
 	/** Org-scoped worktree base override (DB mode); undefined ⇒ global worktreeBase(). */
@@ -2105,6 +2139,15 @@ export class SquadManager extends EventEmitter {
 		this.voiceCall.stop();
 		await this.channelStore.stop();
 		await this.persist();
+		// Per-lane durability barriers (concern 12). A FINAL write is enqueued first (codex H4):
+		// earlier links log-and-swallow transient failures, so awaiting the bare chain could
+		// resolve past a lost mutation — the final link re-reads the CURRENT snapshot, turning the
+		// barrier into a retry. Gated on ever-enqueued so a daemon that never touched the lane
+		// doesn't mint an empty split file on shutdown.
+		if (this.capabilityWriteEnqueued) await this.persistCapabilities();
+		else await this.capabilityWriteChain;
+		if (this.featureWriteEnqueued) await this.persistFeatures();
+		else await this.featureWriteChain;
 		// Best-effort timeline marker (#lifecycle-truth finding 4 / DESIGN's "a best-effort daemon-stop
 		// entry in stop()") — a graceful shutdown DETACHES agents (below), it does not actually stop them,
 		// so this is a same-state note for the transitions timeline ("supervision paused here"), not a
@@ -2143,8 +2186,8 @@ export class SquadManager extends EventEmitter {
 	 *  first closes that race: by the time a workflow parent's `attachExisting` runs, every live branch
 	 *  child it could reconcile against is already in `this.agents`. */
 	private async reconnectLive(snapshot: StateSnapshot): Promise<number> {
-		this.capabilityLane.hydrate(snapshot.capabilities);
-		for (const f of snapshot.features) this.featureStore.set(f.id, f);
+		await this.hydrateCapabilities(snapshot);
+		for (const f of snapshot.features ?? []) this.featureStore.set(f.id, f);
 		let n = 0;
 		const workflows: PersistedAgent[] = [];
 		for (const p of snapshot.agents) {
@@ -3342,6 +3385,10 @@ export class SquadManager extends EventEmitter {
 				detachedAgents += 1;
 			}
 		}
+		// AGENT-lane mutation (rec.options.featureId) needs its own blob checkpoint now that
+		// emitFeaturesChanged persists features only (codex H1 on concern 12 slice 2): without
+		// this, a crash after features.json lands restores the OLD membership from state.json.
+		if (detachedAgents) void this.persist();
 
 		let planDirRemoved = false;
 		if (pf.origin?.planDir) {
@@ -3389,14 +3436,19 @@ export class SquadManager extends EventEmitter {
 		const raced = this.featureStore.get(pf.id);
 		if (raced) return raced;
 		this.featureStore.set(pf.id, pf);
+		let stamped = 0;
 		for (const agentId of found.agentIds) {
 			const rec = this.agents.get(agentId);
 			if (rec) {
 				rec.dto.featureId = pf.id;
 				rec.options.featureId = pf.id;
 				this.emitAgent(rec);
+				stamped += 1;
 			}
 		}
+		// Agent-lane membership checkpoint (same codex-H1 rule as deleteFeature/linkAgent): a
+		// crash must not resurrect the un-adopted state from a stale agents blob.
+		if (stamped) void this.persist();
 		return pf;
 	}
 
@@ -3415,6 +3467,9 @@ export class SquadManager extends EventEmitter {
 		pf.updatedAt = Date.now();
 		this.emitAgent(rec);
 		this.emitFeaturesChanged();
+		// Membership lives on the AGENT (this method's own doc): checkpoint the agents blob too,
+		// or a crash undoes the (un)link on restore (codex H1 on concern 12 slice 2).
+		void this.persist();
 		return true;
 	}
 
@@ -5935,8 +5990,34 @@ export class SquadManager extends EventEmitter {
 		}
 	}
 
+	/** Serializes features-only snapshot writes (concern 12 slice 2 — feature churn is the
+	 *  daemon's hottest mutation path and no longer serializes every agent transcript). Same
+	 *  chain contract as capabilityWriteChain: links log-and-swallow, stop() final-flushes. */
+	private featureWriteChain: Promise<void> = Promise.resolve();
+	private featureWriteEnqueued = false;
+	private persistFeatures(): Promise<void> {
+		return this.persistFeaturesStrict().catch(() => {});
+	}
+	/** Like persistFeatures, but the returned promise REJECTS on write failure (the chain itself
+	 *  still swallows, preserving its never-rejects contract). persistNow needs the rejection:
+	 *  proceeding to the blob save after a failed features write would stamp the features:[]
+	 *  tombstone into state.json while features.json never landed — erasing a legacy boot's only
+	 *  durable feature copy (codex H2 on concern 12 slice 2). */
+	private persistFeaturesStrict(): Promise<void> {
+		this.featureWriteEnqueued = true;
+		const write = this.featureWriteChain.then(() => this.store.saveFeatures([...this.featureStore.values()]));
+		this.featureWriteChain = write.catch((err) => this.log("warn", `feature snapshot write failed: ${errText(err)}`));
+		return write;
+	}
+
 	private emitFeaturesChanged(): void {
-		void this.persist();
+		// Features-only persist (concern 12 slice 2): this used to open with a FULL blob persist —
+		// every feature tweak re-serialized every agent's entire transcript. Agent-state durability
+		// is not owed to this path (its own three chokepoints — transition()/setPending()/
+		// persistNow() — cover it; a co-mutated dto field rides the next checkpoint, the same
+		// documented ≤seconds window the pending debounce has). persist() itself still snapshots
+		// features too, so full checkpoints remain full.
+		void this.persistFeatures();
 		this.emit("event", { type: "features-changed" } satisfies SquadEvent);
 	}
 
@@ -13066,16 +13147,29 @@ export class SquadManager extends EventEmitter {
 		this.attentionStore.pruneUnits(new Set(agents.map((a) => a.id)));
 		const transcripts: Record<string, TranscriptEntry[]> = {};
 		for (const r of this.agents.values()) if (r.transcript.length) transcripts[r.dto.id] = r.transcript;
-		const features = [...this.featureStore.values()];
-		await this.store.save({ agents, transcripts, features, capabilities: this.capabilityLane.snapshot() });
+		// Capabilities and features deliberately absent from the blob call (concern 12): each lane
+		// persists through its own split chain — features via the SAME single-writer chain
+		// emitFeaturesChanged uses (awaited here so `await persist()` stays a FULL durability
+		// barrier for the ~37 sites that rely on it), capabilities at mutation time.
+		// STRICT + skip-on-failure (codex H2): if the features write fails, the blob save is
+		// SKIPPED this round — writing it would stamp the features:[] tombstone while
+		// features.json never landed, erasing a legacy boot's only durable copy. The old blob
+		// (legacy features intact) survives; the next persist retries both.
+		try {
+			await this.persistFeaturesStrict();
+		} catch (err) {
+			this.log("error", `feature snapshot write failed — skipping this blob checkpoint to preserve the previous durable copy: ${errText(err)}`);
+			return;
+		}
+		await this.store.save({ agents, transcripts });
 	}
 
 	/** Re-spawn agents persisted from a previous run. Returns how many were restored. */
 	async loadPersisted(): Promise<number> {
 		const snapshot = await this.store.load();
 		this.reseedTranscriptSeq(snapshot);
-		this.capabilityLane.hydrate(snapshot.capabilities);
-		for (const f of snapshot.features) this.featureStore.set(f.id, f);
+		await this.hydrateCapabilities(snapshot);
+		for (const f of snapshot.features ?? []) this.featureStore.set(f.id, f);
 		const list = snapshot.agents;
 		// Review finding 4: a branch child still in-flight for its workflow parent's current parallel node
 		// must NOT be restored here under a fresh id. `create()` below mints a brand-new agent id but reuses

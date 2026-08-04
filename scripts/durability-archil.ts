@@ -70,7 +70,9 @@ async function commitFileset(workdir: string): Promise<void> {
 	const transcripts = { [COMMITTED_AGENT]: [{ kind: "system", text: COMMITTED_TEXT, ts: 1 }] };
 	const state = {
 		agents: [{ id: COMMITTED_AGENT, name: COMMITTED_AGENT, repo: workdir, worktree: workdir, approvalMode: "write" }],
-		transcripts,
+		// Tombstone: transcripts live in the split file (concern 12 slice 3) — the probe's fileset
+		// mirrors what a real daemon writes, or its durability claims stop being about reality.
+		transcripts: {},
 		features: [],
 	};
 	const receipt: RunReceipt = {

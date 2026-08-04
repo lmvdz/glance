@@ -24,6 +24,39 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
+## Iteration 27 (2026-08-04, goal mode)
+12 slice 1: capability lane escapes the state blob (split store methods, both modes). Codex's
+blind round was the queue's deepest — 4 High data-loss windows (unawaited single-path migration,
+blob-before-split write order, capabilities-only store invisible to hasState, barrier past a
+swallowed failure) + the ILLUSORY-FIX Medium: the lane's changed dep still triggered a full blob
+persist, so the amplification the slice claimed to remove was still fully present. All fixed +
+regression-tested; ratchets caught my own two new hits (cast + error idiom) and both were paid
+back. grok quota-flaked (gap row). The slice is the strongest argument yet for the blind pass:
+green suites + a plausible diff hid four real crash-windows.
+
+## Iteration 28 (2026-08-04, goal mode)
+12 slice 2: features escape the blob — feature churn no longer rewrites every transcript. The
+verification stack worked in layers: I caught the two-writer race myself pre-review (native
+ledger row); the suite caught the format-contract test + my own new cast; codex caught what
+both missed (cross-lane membership sites relying on the removed free full-save, and the
+tombstone-after-swallowed-failure eraser). Five codex rows + one native row recorded. grok
+quota-flaked again (6th) — its absence is now a measured reliability fact on the ledger, not
+an anecdote.
+
+## Iteration 30 (2026-08-04, goal mode) — CONCERN 12 DONE
+Agents-core disposition (docs-only): after three slices, state.json on disk IS the agents lane;
+every other lane persists through its own file/rows, and the deletion test passes lane-by-lane.
+The dirty-tracking upgrade and the Store-interface split are recorded follow-ups with their
+prerequisites named. TWELVE concerns done; open: 08/09/10 (+17 on the 14-branch), 13 needs-lars.
+
+## Iteration 29 (2026-08-04, goal mode)
+12 slice 3: transcripts escape the blob (modes converge on one layout; state.json is now the
+agents core + tombstones). The queue's first CONVERGENT cross-lineage round: grok's first
+successful pass in seven attempts landed 2H+3M+1L with a reproduced failing test, and two of
+its findings were independently found by codex — exactly the correlated-evidence signal the
+two-lineage bet was made for. Grok's unique catch (omit-then-tombstone) even applied
+retroactively to slice 2's features lane. Nine rows recorded.
+
 ## Iteration 26 (2026-08-04, goal mode) — CONCERN 06 DONE
 Final slice: src/core-types.ts, the 14-type shared kernel (identity, lifecycle, transcript
 grammar, work-item ref) with one lane import and everything depending on it — the deletion
