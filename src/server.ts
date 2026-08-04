@@ -36,8 +36,6 @@ import {
 	AnnotationCreateBodySchema,
 	AnnotationSendBodySchema,
 	AssigneesBodySchema,
-	AttentionEventBodySchema,
-	UnitVisitBodySchema,
 	CapabilityInstallBodySchema,
 	CapabilityInstallPatchBodySchema,
 	CapabilityInstallRunBodySchema,
@@ -69,13 +67,6 @@ import {
 	FederationCommandBodySchema,
 	FeedbackItemsEnvelopeSchema,
 	FrictionBodySchema,
-	JoinRequestDecideBodySchema,
-	OrgJoinPolicyBodySchema,
-	OrgMemberInviteBodySchema,
-	OrgMemberRoleBodySchema,
-	OrgPatchBodySchema,
-	OrgVoiceEnabledBodySchema,
-	OrgVoiceKeyBodySchema,
 	PlanCandidateCreateBodySchema,
 	PlanCandidateTransitionBodySchema,
 	PlanVoteCallBodySchema,
@@ -90,11 +81,6 @@ import {
 	PresenceClaimBodySchema,
 	ProjectRegisterBodySchema,
 	TaskStartBodySchema,
-	VoiceCallMuteBodySchema,
-	VoiceCallResolveDecisionBodySchema,
-	VoiceCallStartBodySchema,
-	VoiceCallSteerBodySchema,
-	VoiceTokenBodySchema,
 } from "./schema/http-body.ts";
 import { mergeAdoptionCounters } from "./adoption-counters.ts";
 import { worktreeDiffSinceFork, worktreeTree } from "./explore.ts";
@@ -104,26 +90,10 @@ import { assemblePlanBrief } from "./plan-brief.ts";
 import { planVoteGateOpen, tallyPlanVoteRound } from "./plan-votes.ts";
 import { hardenedGit } from "./git-harden.ts";
 import { rankKbDocs, searchFabric, type KbDoc, type KbDocType } from "./memory/fabric-search.ts";
-import type { FabricSnapshot } from "./memory/fabric.ts";
 import { sanitizePatchDecisions } from "./memory/index.ts";
-import { redactAttentionForActor, redactSeenMapForActor } from "./attention.ts";
-import { maxLadderPriority, type LadderPriority } from "./attention-ladder.ts";
-import { computeFog, repoHasHistory } from "./comprehension-fog.ts";
+import { computeFog } from "./comprehension-fog.ts";
 import type { SymptomEntry, SymptomSearchHit } from "./memory/symptoms.ts";
 import type { EpisodeMeta } from "./memory/weekly-episode.ts";
-import { normalizeRepoPath } from "./project-registry.ts";
-import { readAudit, type AuditQuery } from "./audit.ts";
-import type { AutomationEvent, AutomationLoop, AutomationQuery, AutomationRollupRow } from "./automation-log.ts";
-import { learningFlags, type MetricName, type MetricRollupRow } from "./metrics.ts";
-import { buildGraph, type GraphDoc } from "./omp-graph/index.ts";
-import { buildAttribution, planFromEnv } from "./omp-graph/attribution.ts";
-import { buildTaskClassMatrix, type TaskClassMatrixDoc } from "./omp-graph/task-class-matrix.ts";
-import { buildProvenance, type ProvenanceDoc } from "./omp-graph/provenance.ts";
-import { ingestHarnesses } from "./ingest/index.ts";
-import { buildScoreboard, type Scoreboard } from "./attribution-scoreboard.ts";
-import { readModelOutcomes } from "./model-outcomes.ts";
-import { readTaskOutcomes } from "./task-outcomes.ts";
-import { readAllReceipts } from "./receipts.ts";
 import { fetchIssueDetail, listPlaneIssues, planeConfig, planeRepos } from "./plane.ts";
 import { promoteIssue } from "./promote.ts";
 import { runVisionPass } from "./vision.ts";
@@ -133,34 +103,20 @@ import { all, claim, release, who } from "./presence.ts";
 import { type LeaseEntry, claimLease, leasesFor, releaseSession } from "./leases.ts";
 import { isDaemonWorkspace, isReservedIdentity, isSafePresenceId } from "./presence-write.ts";
 import { discoverRepos, planSpawn } from "./smart-spawn.ts";
-import { hardAgentCeiling } from "./spawn-identity.ts";
-import { liveAgents as liveAgentCount } from "./scheduler.ts";
-import { assessHealth, defaultHealthLimits, type HealthSample } from "./watchdog.ts";
 import { gitState, pullLatest, reexecDaemon } from "./upgrade.ts";
 import type { SquadManager } from "./squad-manager.ts";
 import type { ManagerRegistry } from "./manager-registry.ts";
-import type { ComplianceFinding } from "./compliance.ts";
 import { actorForRole, type AuthPolicy, RbacDenied, requestToken, requiredRole, resolveRole, roleAtLeast, tokenOk } from "./auth.ts";
 import { handleFeedbackRoutes } from "./feedback-routes.ts";
+import { handleAttentionRoutes } from "./routes/attention.ts";
 import { handleMemoryRoutes } from "./routes/memory.ts";
+import { handleOrgRoutes } from "./routes/org.ts";
+import { handleVoiceCallRoutes, handleVoiceMintRoutes } from "./routes/voice.ts";
+import { actionItemsPayload, activityHeatmapPayload, aggregateHealth, attributionPayload, auditPayloadAcross, automationPayloadAcross, commitDetailPayload, fabricSnapshotAcross, governancePayload, graphPayload, heatPayload, learningLoopPayloadAcross, provenancePayload, resolveGraphRepo, scoreboardPayload, taskClassPayload, tracePayload, usagePayload } from "./observability-payloads.ts";
 import { boundedNumber } from "./routes/table.ts";
 import { configuredSocialProviders, signupOpen } from "./db/auth.ts";
-import { getWorkosOrgPolicy, parseWorkosEvent, setWorkosOrgPolicy, ssoEnabled, verifyWorkosSignature } from "./workos.ts";
-import {
-	isKnownVoiceProvider,
-	mintVoiceToken,
-	orgHasKey,
-	verifyVoiceProviderKey,
-	voiceConnectSrcOrigins,
-	voiceKeyFor,
-	voiceProviderMaxSessionWindowMs,
-	voiceProviderOrigins,
-	voiceProviderPublicInfo,
-	voiceTokenTtlSeconds,
-	VOICE_MINT_AUDIT_ACTION,
-	type VoiceKeyScope,
-} from "./voice-token.ts";
-import { appendOrgAudit, deleteOrgAuditRow, deleteOrgSecret, finalizeOrgAuditDetail, getOrgSecret, putOrgSecret, reserveOrgAuditSlot, setOrgSecretEnabled } from "./dal/store.ts";
+import { parseWorkosEvent, ssoEnabled, verifyWorkosSignature } from "./workos.ts";
+import { voiceConnectSrcOrigins, voiceProviderOrigins, type VoiceKeyScope } from "./voice-token.ts";
 
 /** The agent id/name a `ClientCommand` mutates, if any — "create"/"snapshot"/"commission" name no
  *  agent (they don't need cross-manager resolution); "message" targets a peer by `to`, but that's
@@ -170,17 +126,6 @@ function commandAgentTarget(cmd: ClientCommand): string | undefined {
 	return "id" in cmd ? cmd.id : undefined;
 }
 
-/** Maps a `CoordinatorResult` failure reason (voice-call-manager.ts) to an HTTP status. Every reason
- *  is one of the coordinator's own honest, closed set — `forbidden` (room membership/role denied),
- *  `no-active-call` (nothing to act on), `bridge-unavailable` (degraded/no live socket to relay to),
- *  or a free-text broker/bridge failure detail (start-time errors) — never a generic 500. */
-function voiceCallErrorResponse(reason: string): Response {
-	if (reason === "forbidden") return new Response("forbidden", { status: 403 });
-	if (reason === "no-active-call") return new Response(reason, { status: 404 });
-	if (reason === "bridge-unavailable") return new Response(reason, { status: 409 });
-	if (reason.includes("already has an active call")) return new Response(reason, { status: 409 });
-	return new Response(reason, { status: 502 });
-}
 
 function requestScope(body: unknown): Pick<CreateAgentOptions, "requires" | "owns" | "produces" | "scopeSource"> {
 	const out: Pick<CreateAgentOptions, "requires" | "owns" | "produces" | "scopeSource"> = {};
@@ -197,14 +142,13 @@ function requestScope(body: unknown): Pick<CreateAgentOptions, "requires" | "own
 	else if (out.requires || out.owns || out.produces) out.scopeSource = "operator";
 	return out;
 }
-import { approveJoinRequest, denyJoinRequest, ensurePersonalWorkspace, listPendingJoinRequests, onboardWorkosUser, provisionScimEvent } from "./workos-provision.ts";
-import { addMemberByEmail, getOrgProfile, listOrgMembers, removeMember, renameOrg, setMemberRole } from "./org-admin.ts";
+import { ensurePersonalWorkspace, onboardWorkosUser, provisionScimEvent } from "./workos-provision.ts";
+import { listOrgMembers } from "./org-admin.ts";
 import { dbMode as voiceDbBootMode, type DbHandle } from "./db/index.ts";
 import { openRouteDecision } from "./open-worktree.ts";
 import { completionPayload, escalationPayload, needsYouPayload, type PushPayload, PushService } from "./push.ts";
 import { TRANSCRIPT_EVENT_NEEDS_YOU } from "./transcript-event-kinds.ts";
-import type { Actor, AgentDTO, AgentStatus, AuditEntry, OperatorPresence, Role, RunReceipt } from "./types.ts";
-import type { TraceResponse } from "./spans.ts";
+import type { Actor, AgentDTO, AgentStatus, OperatorPresence, Role } from "./types.ts";
 import { type FederationSnapshot, federationView } from "./federation.ts";
 import { workflowSnapshot } from "./workflow-catalog.ts";
 import { validateRequestedMode } from "./autonomy.ts";
@@ -696,7 +640,7 @@ let voiceMintRateLimitWarned = false;
 /** OMP_SQUAD_VOICE_MINT_RATE_PER_MIN — a cheap PRE-FILTER, not the org bound (rewritten,
  *  plans/voice-db-mode/04-spend-controls.md): it keys `actor.id`, i.e. per USER, is per-process, and
  *  resets on restart — it never bounded an org and must not be described as if it did. The durable
- *  per-org bound is `resolveVoiceMaxConcurrentPerOrg` below, derived from the mint-audit table.
+ *  per-org bound is `resolveVoiceMaxConcurrentPerOrg` (routes/voice.ts), derived from the mint-audit table.
  *  `envInt` faithfully returns a configured `0` or negative value rather than silently substituting
  *  the default — correct for every OTHER env reader, but here a non-positive value must never be
  *  read as "unlimited": that's the same absence-as-success shape as an empty array meaning "nothing
@@ -712,30 +656,6 @@ function resolveVoiceMintRatePerMin(): number {
 		);
 	}
 	return VOICE_MINT_RATE_DEFAULT_PER_MIN;
-}
-
-const VOICE_MAX_CONCURRENT_PER_ORG_DEFAULT = 5;
-let voiceMaxConcurrentWarned = false;
-
-/** OMP_SQUAD_VOICE_MAX_CONCURRENT_PER_ORG — the durable, per-org concurrency cap
- *  (plans/voice-db-mode/04-spend-controls.md, DESIGN.md "Org spend bound" row): count this org's
- *  `voice.mint` audit rows inside the provider's own max-session window and refuse beyond N. Derived
- *  from the `audit` table (see `reserveOrgAuditSlot`, which counts and reserves the row atomically
- *  in one transaction — closing the check-then-act race a separate count-then-insert would have),
- *  so it's restart-safe and correct across replicas — unlike the rejected draft's "second in-memory
- *  map keyed by org", which would have
- *  inherited both defects of `voiceMintRate` above. Same non-positive clamp-and-warn-once discipline
- *  as `resolveVoiceMintRatePerMin`: a misconfigured `0`/negative must not silently zero out the cap. */
-function resolveVoiceMaxConcurrentPerOrg(): number {
-	const configured = envInt("OMP_SQUAD_VOICE_MAX_CONCURRENT_PER_ORG", VOICE_MAX_CONCURRENT_PER_ORG_DEFAULT);
-	if (configured > 0) return configured;
-	if (!voiceMaxConcurrentWarned) {
-		voiceMaxConcurrentWarned = true;
-		console.warn(
-			`[server] OMP_SQUAD_VOICE_MAX_CONCURRENT_PER_ORG="${configured}" is not a positive cap — falling back to the default (${VOICE_MAX_CONCURRENT_PER_ORG_DEFAULT})`,
-		);
-	}
-	return VOICE_MAX_CONCURRENT_PER_ORG_DEFAULT;
 }
 
 const VOICE_KEY_PUT_RATE_DEFAULT_PER_MIN = 10;
@@ -1874,172 +1794,19 @@ export class SquadServer {
 			const u = session.user;
 			return Response.json({ mode: "db", user: { id: u.id, name: u.name, email: u.email, image: u.image ?? null }, activeOrganizationId: session.session.activeOrganizationId ?? null, role });
 		}
-		// Admin: pending join requests for the caller's active org (domain-match "require approval" policy).
-		// Exposes member emails ⇒ admin-only, scoped to the caller's own active org.
-		if (url.pathname === "/api/workos/join-requests" && req.method === "GET") {
-			if (!this.auth || !this.db || session === null || !roleAtLeast(role, "admin")) return Response.json([]);
-			const orgId = session.session.activeOrganizationId;
-			return Response.json(orgId ? await listPendingJoinRequests(this.db.db, orgId) : []);
-		}
-		if (url.pathname === "/api/workos/join-requests/decide" && req.method === "POST") {
-			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
-			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
-			const orgId = session.session.activeOrganizationId;
-			if (!orgId) return new Response("no active org", { status: 400 });
-			const raw: unknown = await req.json().catch(() => null);
-			const decoded = decodeBody(JoinRequestDecideBodySchema, raw);
-			if (Result.isFailure(decoded)) return new Response("missing id", { status: 400 });
-			const body = decoded.success;
-			const ok = body.action === "deny" ? await denyJoinRequest(this.db.db, body.id, orgId) : await approveJoinRequest(this.db.db, body.id, orgId);
-			return Response.json({ ok });
-		}
-		// Org settings. Profile is visible to any member of the active org; member management is admin-only,
-		// scoped to the caller's own active org.
-		if (url.pathname === "/api/org" && req.method === "GET") {
-			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
-			const orgId = session.session.activeOrganizationId;
-			return Response.json(orgId ? await getOrgProfile(this.db.db, orgId) : null);
-		}
-		if (url.pathname === "/api/org" && req.method === "PATCH") {
-			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
-			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
-			const orgId = session.session.activeOrganizationId;
-			if (!orgId) return new Response("no active org", { status: 400 });
-			const body = decodeBodyOrEmpty(OrgPatchBodySchema, await req.json().catch(() => null));
-			const ok = await renameOrg(this.db.db, orgId, typeof body.name === "string" ? body.name : "");
-			return Response.json({ ok });
-		}
-		if (url.pathname === "/api/org/members" && req.method === "GET") {
-			if (!this.auth || !this.db || session === null || !roleAtLeast(role, "admin")) return Response.json([]);
-			const orgId = session.session.activeOrganizationId;
-			return Response.json(orgId ? await listOrgMembers(this.db.db, orgId) : []);
-		}
-		if ((url.pathname === "/api/org/members/role" || url.pathname === "/api/org/members/remove") && req.method === "POST") {
-			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
-			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
-			const orgId = session.session.activeOrganizationId;
-			if (!orgId) return new Response("no active org", { status: 400 });
-			const decoded = decodeBody(OrgMemberRoleBodySchema, await req.json().catch(() => null));
-			if (Result.isFailure(decoded) || !decoded.success.userId) return new Response("missing userId", { status: 400 });
-			const { userId, role: targetRole } = decoded.success;
-			if (userId === session.user.id) return Response.json({ ok: false, error: "you can't change your own membership here" });
-			const result =
-				url.pathname === "/api/org/members/role"
-					? await setMemberRole(this.db.db, orgId, userId, typeof targetRole === "string" ? targetRole : "")
-					: await removeMember(this.db.db, orgId, userId);
-			return Response.json(result);
-		}
-		if (url.pathname === "/api/org/members/invite" && req.method === "POST") {
-			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
-			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
-			const orgId = session.session.activeOrganizationId;
-			if (!orgId) return new Response("no active org", { status: 400 });
-			const decoded = decodeBody(OrgMemberInviteBodySchema, await req.json().catch(() => null));
-			if (Result.isFailure(decoded) || !decoded.success.email) return new Response("missing email", { status: 400 });
-			const { email, role: inviteRole } = decoded.success;
-			return Response.json(await addMemberByEmail(this.db.db, orgId, email, typeof inviteRole === "string" ? inviteRole : "member"));
-		}
-		// Domain-join policy (WorkOS orgs only) — read/set the org's auto|approval policy in WorkOS metadata.
-		if (url.pathname === "/api/org/join-policy" && req.method === "GET") {
-			if (!this.auth || !this.db || session === null || !roleAtLeast(role, "admin")) return Response.json({ policy: null });
-			const orgId = session.session.activeOrganizationId;
-			if (!orgId) return Response.json({ policy: null });
-			const profile = await getOrgProfile(this.db.db, orgId);
-			if (!profile?.workosOrgId) return Response.json({ policy: null }); // not a WorkOS org
-			return Response.json({ policy: await getWorkosOrgPolicy(profile.workosOrgId) });
-		}
-		if (url.pathname === "/api/org/join-policy" && req.method === "POST") {
-			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
-			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
-			const orgId = session.session.activeOrganizationId;
-			if (!orgId) return new Response("no active org", { status: 400 });
-			const profile = await getOrgProfile(this.db.db, orgId);
-			if (!profile?.workosOrgId) return Response.json({ ok: false, error: "not a WorkOS-backed organization" });
-			const body = decodeBodyOrEmpty(OrgJoinPolicyBodySchema, await req.json().catch(() => null));
-			const policy = body.policy === "auto" ? "auto" : "approval";
-			return Response.json({ ok: await setWorkosOrgPolicy(profile.workosOrgId, policy), policy });
-		}
-		// Org voice-key admin surface (plans/voice-db-mode/05-admin-endpoints.md): set / verify /
-		// disable / remove the org's own BYO voice provider key. Org id comes from the SESSION only,
-		// never a request parameter (the PR #152 lesson: one org's admin registering another org's
-		// worktree via a body-supplied id) — every handler below reads
-		// `session.session.activeOrganizationId` and nothing else names the org. All four routes are
-		// admin-tier, pinned in `authz.ts` (stricter than the rest of `/api/org`, whose profile GET is
-		// viewer-readable) AND re-checked here inline, mirroring the `renameOrg` idiom every other
-		// admin mutation under `/api/org` above already follows — belt and suspenders, not redundant
-		// with the authz.ts gate: a future authz.ts regression still fails closed at the handler.
-		if (url.pathname === "/api/org/voice" && req.method === "GET") {
-			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
-			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
-			const orgId = session.session.activeOrganizationId;
-			if (!orgId) return new Response("no active org", { status: 400 });
-			// `provider` query param, defaulting to "openai" — mirrors PUT/POST's body field so the
-			// four voice-key admin routes can't drift apart the moment a second provider is
-			// registered (today the registry has exactly one, so this is a no-op default). Session-
-			// org-scoped like every other field here; never trusts anything beyond `isKnownVoiceProvider`.
-			const getProviderId = url.searchParams.get("provider") || "openai";
-			if (!isKnownVoiceProvider(getProviderId)) return new Response("unknown voice provider", { status: 400 });
-			// Status only, never the key itself (DESIGN.md admin-surface row) — `getOrgSecret`'s
-			// `plaintext` field is read here but never placed on the response.
-			const secret = await getOrgSecret({ db: this.db.db, type: this.db.type }, orgId, getProviderId);
-			if (!secret) return Response.json({ configured: false });
-			return Response.json({ configured: true, last4: secret.last4, enabled: secret.enabled, updatedAt: secret.updatedAt, updatedBy: secret.updatedBy });
-		}
-		if (url.pathname === "/api/org/voice-key" && req.method === "PUT") {
-			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
-			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
-			const orgId = session.session.activeOrganizationId;
-			if (!orgId) return new Response("no active org", { status: 400 });
-			// `db:<userId>`, never role-derived — same actor-tagging convention as the mint audit write
-			// below (voiceScope's `actor.id`), computed locally: the fleet-manager `actor`/`manager`
-			// resolution further down in this handler hasn't run yet at this point in the function.
-			const actorId = `db:${session.user.id}`;
-			if (!this.voiceKeyPutRateAllowed(actorId)) return new Response("rate limited", { status: 429 });
-			const decoded = decodeBody(OrgVoiceKeyBodySchema, await req.json().catch(() => null));
-			if (Result.isFailure(decoded) || !decoded.success.apiKey) return new Response("apiKey is required", { status: 400 });
-			const { apiKey, provider: providerRaw } = decoded.success;
-			const providerId = typeof providerRaw === "string" && providerRaw ? providerRaw : "openai";
-			if (!isKnownVoiceProvider(providerId)) return new Response("unknown voice provider", { status: 400 });
-			// Verify BEFORE persist (DESIGN.md "Key verification on save"): a free GET against the
-			// provider's own auth-check endpoint, NEVER the mint endpoint (that issues a real, billable
-			// credential). A rejected key writes NOTHING — no row, no last4, no partial state.
-			if (!(await verifyVoiceProviderKey(providerId, apiKey))) return new Response("key rejected by provider", { status: 400 });
-			const summary = await putOrgSecret({ db: this.db.db, type: this.db.type }, orgId, providerId, apiKey, actorId);
-			// `undefined` only when no master key is configured server-side (secrets.ts: a write that
-			// can't be encrypted persists nothing) — an honest 501, not a silent no-op 200.
-			if (!summary) return new Response("voice key storage unavailable", { status: 501 });
-			return Response.json({ configured: true, last4: summary.last4, enabled: summary.enabled, updatedAt: summary.updatedAt, updatedBy: summary.updatedBy });
-		}
-		if (url.pathname === "/api/org/voice-key" && req.method === "DELETE") {
-			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
-			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
-			const orgId = session.session.activeOrganizationId;
-			if (!orgId) return new Response("no active org", { status: 400 });
-			// `provider` query param, same default + validation as GET above — the row PUT stored under
-			// a non-default provider must be reachable to delete, not stranded.
-			const deleteProviderId = url.searchParams.get("provider") || "openai";
-			if (!isKnownVoiceProvider(deleteProviderId)) return new Response("unknown voice provider", { status: 400 });
-			await deleteOrgSecret({ db: this.db.db, type: this.db.type }, orgId, deleteProviderId);
-			return Response.json({ configured: false });
-		}
-		if (url.pathname === "/api/org/voice/enabled" && req.method === "POST") {
-			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
-			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
-			const orgId = session.session.activeOrganizationId;
-			if (!orgId) return new Response("no active org", { status: 400 });
-			const actorId = `db:${session.user.id}`;
-			const decoded = decodeBody(OrgVoiceEnabledBodySchema, await req.json().catch(() => null));
-			if (Result.isFailure(decoded)) return new Response("enabled boolean required", { status: 400 });
-			const { enabled, provider: providerRaw } = decoded.success;
-			const providerId = typeof providerRaw === "string" && providerRaw ? providerRaw : "openai";
-			if (!isKnownVoiceProvider(providerId)) return new Response("unknown voice provider", { status: 400 });
-			// Synchronous kill switch (DESIGN.md "Kill switch" row): flips a bit without deleting the
-			// stored key — instant, reversible, no re-paste. A no-op (not an error) when the org has no
-			// row for this provider yet, matching `setOrgSecretEnabled`'s own doc comment.
-			await setOrgSecretEnabled({ db: this.db.db, type: this.db.type }, orgId, providerId, enabled, actorId);
-			const secret = await getOrgSecret({ db: this.db.db, type: this.db.type }, orgId, providerId);
-			return Response.json(secret ? { configured: true, last4: secret.last4, enabled: secret.enabled, updatedAt: secret.updatedAt, updatedBy: secret.updatedBy } : { configured: false });
-		}
+		// Org / auth-admin lane (plans/deepen-modules/05, slice 3): the 13 session-tier admin routes,
+		// dispatched as data (routes/org.ts). This lane runs BEFORE manager/actor resolution, so its
+		// context is the session/role/db trio plus the voice-key rate limiter -- made explicit, not
+		// reached back for. Same fall-through contract as the other lanes. /api/me, /api/workos/sync
+		// and /api/auth/check stay inline (any-verb matching / pre-tier-gate; see routes/org.ts doc).
+		const orgResponse = await handleOrgRoutes(url, req, {
+			auth: this.auth,
+			db: this.db,
+			session,
+			role,
+			voiceKeyPutRateAllowed: (actorId) => this.voiceKeyPutRateAllowed(actorId),
+		});
+		if (orgResponse) return orgResponse;
 		if (url.pathname === "/api/auth/check") return Response.json({ ok: true });
 		// DB-registry mode routes push key/subscribe to the CALLER'S ORG's own service (own VAPID
 		// keypair, own subscription store under `<pushRoot>/orgs/<orgId>`) — the global service (and
@@ -2153,143 +1920,14 @@ export class SquadServer {
 		const voiceScope: VoiceKeyScope = this.dbMode
 			? { mode: "db", ctx: this.db ? { db: this.db.db, type: this.db.type } : undefined, orgId }
 			: { mode: "file" };
-		if (url.pathname === "/api/voice/config" && req.method === "GET") {
-			if (!envBool("OMP_SQUAD_VOICE_ENABLED", false)) return new Response("not found", { status: 404 });
-			// MEDIUM-4, rewritten (concern 03): the old premise — no per-org attribution/budget in v1,
-			// so DB mode is refused mode-wide — is gone. Mint now runs against the SESSION ORG's own
-			// key under a durable per-org cap (concern 04), so the honest signal is per-org, not
-			// per-mode: `enabled` reflects whether `voiceScope` actually resolves a key, in EITHER
-			// mode, via the same resolver POST /api/voice/token mints through below — a flag-on daemon
-			// with no resolvable key would otherwise advertise a voice button that dies at the very
-			// first mint attempt (the "old mic scar" this capability probe exists to prevent).
-			if (!(await orgHasKey(voiceScope))) return Response.json({ enabled: false });
-			// POST /api/voice/token (the mint route, below) is operator-tier via `restActionTier`'s
-			// GET=viewer/POST=operator default — a viewer can never mint. Advertising `enabled: true` to
-			// a viewer anyway used to draw a "Start voice call" button that always 403s on click: config-
-			// honesty and mint-capability disagreeing by RBAC tier, the same shape `orgHasKey` above
-			// exists to prevent for key state. Gate the boolean itself on the SAME floor the mint route
-			// enforces (never a viewer, never a hand-picked tier that could drift from it) so a viewer
-			// sees `enabled: false` — no button — rather than one that can never succeed. Provider
-			// posture (which keys are configured) stays gated to operator+ too (DESIGN.md red-team:
-			// "leaks provider posture"), now simply implied by the same check.
-			if (!roleAtLeast(role, "operator")) return Response.json({ enabled: false });
-			return Response.json({ enabled: true, providers: await voiceProviderPublicInfo(voiceScope) });
-		}
-		if (url.pathname === "/api/voice/token" && req.method === "POST") {
-			if (!envBool("OMP_SQUAD_VOICE_ENABLED", false)) return new Response("not found", { status: 404 });
-			// MEDIUM-4, rewritten (concern 03): DB mode no longer refuses outright — the uncapped-
-			// shared-dollar shape this used to guard against (DESIGN.md "Token mint" row) is gone once
-			// mint resolves the SESSION ORG's own key (`voiceScope` below) with no fallback to the
-			// operator's env key, ever, and no root-factory bypass. A per-org refusal falls out of the
-			// ordinary "no key configured" 501 further down — the SAME path file mode has always used
-			// — rather than a mode-wide 403; no active org, no configured row, and a disabled row all
-			// read identically as "no key", by design (DESIGN.md Security model).
-			// Per-actor mint rate cap: a cheap PRE-FILTER, not the org bound (rewritten, concern 04) — it
-			// keys `actor.id` (per USER, per-process, resets on restart) and never bounded an org's
-			// spend. The durable per-org bound is the concurrency check below, derived from the audit
-			// table this same route writes to on a successful mint.
-			if (!this.voiceMintRateAllowed(actor)) return new Response("rate limited", { status: 429 });
-			// A genuinely-empty body (nothing sent) is a lenient default-to-openai case, same as every
-			// other `decodeBodyOrEmpty` endpoint. But `req.json().catch(() => null)` used to collapse a
-			// body that WAS sent but is malformed/unparseable into that exact same `null` — silently
-			// minting a cost-bearing default-provider token off a request that was actually broken. Read
-			// the raw text first so "nothing sent" and "sent but broken" are distinguishable: only the
-			// former may fall through to the empty-body default.
-			const rawBody = await req.text();
-			let bodyJson: unknown = null;
-			if (rawBody.trim().length > 0) {
-				try {
-					bodyJson = JSON.parse(rawBody);
-				} catch {
-					return new Response("malformed request body", { status: 400 });
-				}
-			}
-			const decoded = decodeBody(VoiceTokenBodySchema, bodyJson);
-			if (rawBody.trim().length > 0 && Result.isFailure(decoded)) {
-				// Valid JSON but not struct-shaped (e.g. a bare string/array/number) — still a body that
-				// was sent and is invalid, not a legitimately-absent one.
-				return new Response("invalid voice token request body", { status: 400 });
-			}
-			const body = Result.isSuccess(decoded) ? decoded.success : ({} as { provider?: unknown });
-			const providerId = typeof body.provider === "string" && body.provider ? body.provider : "openai";
-			// Mint via the SAME resolver `orgHasKey`/`GET /api/voice/config` already consulted — a
-			// newline/space-padded env value (file mode) used to make the config probe advertise
-			// `enabled:true` while every mint 502s against the untrimmed, invalid key (config-honesty
-			// and mint disagreeing on the same key). Routing both through `voiceKeyFor` keeps that
-			// impossible by construction, in either mode.
-			const apiKey = isKnownVoiceProvider(providerId) ? await voiceKeyFor(voiceScope, providerId) : undefined;
-			// Durable per-org concurrency cap (plans/voice-db-mode/04-spend-controls.md, DESIGN.md "Org
-			// spend bound" row): count this ORG's own `voice.mint` audit rows inside the provider's
-			// max-session window and refuse beyond N — restart-safe and correct across replicas because
-			// it's derived from the `audit` table, not an in-memory map (the rejected draft's "second
-			// in-memory map keyed by org"). File mode has no org concept and is exempt — its only
-			// daemon-side bound is the per-actor pre-filter above.
-			//
-			// The slot is RESERVED (row written) here, BEFORE `mintVoiceToken`'s network round trip —
-			// not counted-then-written-after like the earlier draft. That earlier shape let every
-			// request in flight during the mint's latency window see the same stale pre-mint count,
-			// so N+K parallel mints could all pass; reserving first closes that race (proven with a
-			// parallel-mint regression test, tests/voice-spend.test.ts). `reserveOrgAuditSlot` counts
-			// and inserts inside one transaction (Postgres additionally advisory-locks per org+action —
-			// see its doc comment for why SQLite doesn't need to).
-			const dbAuditable = voiceScope.mode === "db" && voiceScope.ctx && voiceScope.orgId ? { ctx: voiceScope.ctx, orgId: voiceScope.orgId } : undefined;
-			let reservedAuditId: number | undefined;
-			if (apiKey && dbAuditable && isKnownVoiceProvider(providerId)) {
-				// The window a mint counts as "possibly still live" is the provider's own session cap
-				// PLUS the token's establishment TTL (`voiceTokenTtlSeconds`, already clamped there) — a
-				// token isn't established the instant it's minted; the caller has up to the TTL to open
-				// the WebRTC connection, and only then does the provider's own session clock start.
-				// Counting only `maxSessionWindowMs` from mint time let a session established late
-				// (mint + up to TTL) stay live until mint + TTL + maxSessionWindowMs, while its
-				// reservation dropped out of the count at mint + maxSessionWindowMs — a gap of up to the
-				// TTL during which the cap undercounts genuinely-live sessions (plans/voice-db-mode/
-				// 04-spend-controls.md concern 02 fix).
-				const windowMs = voiceProviderMaxSessionWindowMs(providerId) + voiceTokenTtlSeconds() * 1000;
-				const cap = resolveVoiceMaxConcurrentPerOrg();
-				const reservation = await reserveOrgAuditSlot(dbAuditable.ctx, dbAuditable.orgId, { actor: actor.id, action: VOICE_MINT_AUDIT_ACTION, target: providerId, source: "voice" }, cap, Date.now() - windowMs);
-				if (!reservation.reserved) {
-					// The refusal is itself auditable — a DISTINCT action so a burst of refusals can never
-					// inflate the very count they're a consequence of.
-					await appendOrgAudit(dbAuditable.ctx, dbAuditable.orgId, { actor: actor.id, action: "voice.mint.refused", target: providerId, detail: { cap, windowMs } });
-					// Named honestly as a rate cap, not a "someone else is on a call" concurrency signal: it's
-					// mints-per-window (the daemon can't see a session end), so a burst of short calls can trip
-					// it with nobody else active. DESIGN.md "Cap tuning": "a rate cap is not a budget, and must
-					// not be described as one" — the flip side holds too, it must not be described as presence.
-					return new Response(`this organization has reached its voice mint limit (${cap} per ${Math.round(windowMs / 60_000)} minutes); try again later`, { status: 429 });
-				}
-				reservedAuditId = reservation.auditId;
-			}
-			const result = await mintVoiceToken(providerId, apiKey);
-			if (!result.ok) {
-				// Compensate: the mint never happened, so the reserved slot must not count against the
-				// org's cap — a provider 502 must not permanently consume a concurrency slot.
-				if (dbAuditable && reservedAuditId !== undefined) await deleteOrgAuditRow(dbAuditable.ctx, dbAuditable.orgId, reservedAuditId);
-				return new Response(result.message, { status: result.status });
-			}
-			// Mint audit, in BOTH modes (mints are unaudited today, everywhere) — actor `db:<userId>` in
-			// DB mode (never role-derived: `actor` was already resolved that way above, not re-derived
-			// here), provider, and the provider's OWN session id (previously discarded). Awaited (not
-			// `void`, unlike most other `recordAudit` call sites in this file) so the response the
-			// browser receives is only sent once the audit trail actually reflects the mint that
-			// produced it — `recordAudit` itself still swallows a disk failure rather than throwing.
-			if (manager) await manager.recordAudit(actor, VOICE_MINT_AUDIT_ACTION, providerId, "ok", result.providerSessionId ? `provider session ${result.providerSessionId}` : undefined, "voice");
-			if (dbAuditable) {
-				const detail = result.providerSessionId ? { providerSessionId: result.providerSessionId } : undefined;
-				if (reservedAuditId !== undefined) {
-					// The common path: the reserved row already exists (id/actor/action/target/at) —
-					// finalize just overwrites its detail with the provider session id now that the mint
-					// actually happened.
-					await finalizeOrgAuditDetail(dbAuditable.ctx, dbAuditable.orgId, reservedAuditId, { detail, source: "voice" });
-				} else {
-					// No reservation was made (apiKey/provider gating above didn't match — can only
-					// happen if mintVoiceToken succeeded despite that, which its own no-apiKey/unknown-
-					// provider guards make unreachable in practice). Fall back to the old direct write
-					// rather than silently dropping the audit row.
-					await appendOrgAudit(dbAuditable.ctx, dbAuditable.orgId, { actor: actor.id, action: VOICE_MINT_AUDIT_ACTION, target: providerId, detail, source: "voice" });
-				}
-			}
-			return Response.json(result.token);
-		}
+		const voiceMintResponse = await handleVoiceMintRoutes(url, req, {
+			voiceScope,
+			role,
+			actor,
+			manager,
+			voiceMintRateAllowed: (a) => this.voiceMintRateAllowed(a),
+		});
+		if (voiceMintResponse) return voiceMintResponse;
 		// Seed identity for features created this request: a real signed-in user's `db:<userId>` when
 		// there's a session, else undefined ⇒ the manager falls back to its own operator identity
 		// (file mode, or an on-box bootstrap admin with no session). Never seeds a role-derived id.
@@ -2333,103 +1971,11 @@ export class SquadServer {
 				return new Response(errText(err), { status: 400 });
 			}
 		}
-		// Operator-attention substrate (comprehension concern 01): a durable, tenant-scoped record of
-		// what the human has actually looked at. `viewerId`/`at` are stamped HERE, server-side, from the
-		// same `session`-derived identity `featureAuthor` above uses — never accepted from the client
-		// body (a client-supplied viewerId would let any actor impersonate another's attention, and a
-		// client-supplied `at` would let a flood backdate the seen map). `isAdmin` for redaction is the
-		// SAME `role` this request already resolved above, not re-derived.
-		if (url.pathname === "/api/attention" && req.method === "POST") {
-			if (manager.attentionDisabled()) return Response.json({ ok: false, disabled: true });
-			const decoded = decodeBody(AttentionEventBodySchema, await req.json().catch(() => null));
-			if (Result.isFailure(decoded)) return new Response("expected { kind, repo }", { status: 400 });
-			const body = decoded.success;
-			// Fail CLOSED: validated against the actor-visible repo set the same way buildFabricSnapshot
-			// derives it (fabric.ts's `actorVisibleRepoSet`) — an actor with no derivable repos (no live
-			// agents, no persisted features) rejects EVERY repo, never falls open to "unrestricted".
-			if (!manager.attentionVisibleRepos(actor).has(normalizeRepoPath(body.repo))) return new Response("unknown repo", { status: 400 });
-			const viewerId = this.attentionViewerId(actor);
-			const result = manager.recordAttention({ kind: body.kind, repo: body.repo, file: body.file, agentId: body.agentId, answerId: body.answerId, prNumber: body.prNumber, viewerId }, actor.id);
-			if (!result.ok && result.reason === "rate-limited") return new Response("rate limited", { status: 429 });
-			return Response.json({ ok: result.ok });
-		}
-		if (url.pathname === "/api/attention" && req.method === "GET") {
-			if (manager.attentionDisabled()) return Response.json({ disabled: true });
-			const visible = manager.attentionVisibleRepos(actor);
-			const repoParam = url.searchParams.get("repo");
-			// A foreign/unresolvable `?repo=` reads as "nothing" rather than a 400 — GETs are lenient
-			// (module doc: only the POST fail-closes loudly), but never leak a repo outside the actor's
-			// own visible set just because the query string named one.
-			const repos = repoParam ? (visible.has(normalizeRepoPath(repoParam)) ? [repoParam] : []) : [...visible];
-			const events = manager.attentionEvents(repos);
-			const redacted = redactAttentionForActor(events, { viewerId: this.attentionViewerId(actor), isAdmin: roleAtLeast(role, "admin") });
-			return Response.json({ events: redacted });
-		}
-		if (url.pathname === "/api/attention/seen" && req.method === "GET") {
-			if (manager.attentionDisabled()) return Response.json({ disabled: true });
-			const visible = manager.attentionVisibleRepos(actor);
-			const repoParam = url.searchParams.get("repo");
-			const repos = repoParam ? (visible.has(normalizeRepoPath(repoParam)) ? [repoParam] : []) : [...visible];
-			const seen = manager.attentionSeen(repos);
-			const redacted = redactSeenMapForActor(seen, { viewerId: this.attentionViewerId(actor), isAdmin: roleAtLeast(role, "admin") });
-			return Response.json({ seen: redacted });
-		}
-		// Needs-you ladder roll-up (t3-face concern 06, plans/daily-driver/01-charter-needs-you-ladder.md):
-		// the cockpit spine's group headers need a max-priority per project and per daemon, not just the
-		// per-unit rung already riding GET /api/agents. Personalized for the requesting viewer exactly like
-		// GET /api/agents above (same `ladderPriorityFor` call, same `viewerId` derivation) — a foreign/
-		// unresolvable identity never sees anyone else's `completed-unseen` state resolve differently.
-		if (url.pathname === "/api/attention/ladder" && req.method === "GET") {
-			const viewerId = this.attentionViewerId(actor);
-			const agents = await manager.visibleAgents(actor);
-			const units = agents.map((dto) => ({ id: dto.id, repo: dto.repo, priority: manager.ladderPriorityFor(dto, viewerId) }));
-			const byRepo = new Map<string, LadderPriority[]>();
-			for (const u of units) byRepo.set(u.repo, [...(byRepo.get(u.repo) ?? []), u.priority]);
-			const projects = [...byRepo.entries()].map(([repo, priorities]) => ({ repo, priority: maxLadderPriority(priorities) }));
-			const daemon = maxLadderPriority(units.map((u) => u.priority));
-			return Response.json({ units, projects, daemon });
-		}
-		// Needs-you ladder mark-seen (t3-face concern 06): the ONE mutation that advances a viewer's
-		// per-unit `lastVisitedAt`. `viewerId`/`at` are, like POST /api/attention above, ALWAYS
-		// server-stamped from the session — never accepted from the client body (a client-supplied
-		// viewerId would let any actor mark a unit seen on another viewer's behalf).
-		if (url.pathname === "/api/attention/ladder/seen" && req.method === "POST") {
-			const decoded = decodeBody(UnitVisitBodySchema, await req.json().catch(() => null));
-			if (Result.isFailure(decoded)) return new Response("expected { agentId }", { status: 400 });
-			const dto = manager.getAgent(decoded.success.agentId);
-			// Fail CLOSED like POST /api/attention's own repo check: an agentId outside the actor's
-			// visible repo set (or that names no live agent at all) is rejected, never silently a no-op
-			// 200 that would let a caller probe for the existence of a foreign unit.
-			if (!dto || !manager.attentionVisibleRepos(actor).has(normalizeRepoPath(dto.repo))) return new Response("no such agent", { status: 404 });
-			const viewerId = this.attentionViewerId(actor);
-			const result = manager.markUnitVisited(dto.id, viewerId);
-			return Response.json({ ok: result.ok });
-		}
-		// Comprehension fog (concern 03): a monotone per-file comprehension-debt read, joined from every
-		// completed receipt against the attention substrate's seen map. Repos are derived from the actor
-		// exactly like the two attention GETs above — NEVER solely from `?repo=` — so a foreign repo named
-		// in the query string reads as "nothing" rather than leaking another tenant's debt. `computeFog`
-		// itself re-filters both inputs through this same repo list before joining (DESIGN.md's tenant-
-		// scoping row: a tested deliverable, not a single call site's discipline), so this route's own
-		// pre-filtering is belt-and-suspenders, not the only guard.
-		if (url.pathname === "/api/fog" && req.method === "GET") {
-			if (manager.attentionDisabled()) return Response.json({ entries: [], repoHasHistory: {}, disabled: true });
-			const visible = manager.attentionVisibleRepos(actor);
-			const repoParam = url.searchParams.get("repo");
-			const repos = repoParam ? (visible.has(normalizeRepoPath(repoParam)) ? [normalizeRepoPath(repoParam)] : []) : [...visible];
-			const now = Date.now();
-			const receipts = await manager.allReceipts();
-			const seen = manager.attentionSeen(repos);
-			// Concern 08: the "surprised me" chip raises a file's effective change mass without
-			// inflating the raw `changesSinceSeen` count (attention.ts's durable, non-rotating
-			// `SurpriseCountMap` — never the raw JSONL feed, which rotates). Carries no viewer
-			// identity, so it needs no redaction pass unlike `seen` above.
-			const surpriseCounts = manager.attentionSurpriseCounts(repos);
-			const entries = computeFog({ receipts, seen, repos, now, surpriseCounts });
-			const historyByRepo: Record<string, boolean> = {};
-			for (const repo of repos) historyByRepo[repo] = repoHasHistory(seen, repo, now);
-			return Response.json({ entries, repoHasHistory: historyByRepo });
-		}
+		// Attention / needs-you-ladder / comprehension-fog routes live in routes/attention.ts
+		// (deepen 05 slice 2). Viewer context is computed ONCE here from the same session/role
+		// resolution the inline branches used, then passed explicitly — no this.* reach-back.
+		const attentionResponse = await handleAttentionRoutes(url, req, manager, actor, { viewerId: this.attentionViewerId(actor), isAdmin: roleAtLeast(role, "admin") });
+		if (attentionResponse) return attentionResponse;
 		if (url.pathname === "/api/projects" && req.method === "GET") return Response.json(manager.projects());
 		// Friction ledger (plans/daily-dogfood-engine/01): tenant-scoped like /api/projects (one ledger
 		// per manager stateDir, same as the transitionLog it's modeled on — cross-org roll-up is out of
@@ -3735,147 +3281,11 @@ export class SquadServer {
 			}
 		}
 
-		// ── Voice calls surface (concern 10, plans/voice-orchestrated-room-integration) ─────────────
-		// Org-wide, NOT channel-scoped — a person needs to see (and end) a call they cannot otherwise
-		// reach through any one room, which is exactly the orphan case this surface exists for. The
-		// binding half is still filtered to channels `actor` can read (`listVoiceCallsSurface`); the
-		// orphan half has no channel to filter by at all, by definition.
-		if (url.pathname === "/api/voice-calls" && req.method === "GET") {
-			return Response.json(await manager.listVoiceCallsSurface(actor));
-		}
-		const voiceCallOrphanEndMatch = url.pathname.match(/^\/api\/voice-calls\/orphans\/([^/]+)\/end$/);
-		if (voiceCallOrphanEndMatch && req.method === "POST") {
-			const callId = decodeURIComponent(voiceCallOrphanEndMatch[1]!);
-			const result = await manager.endOrphanVoiceCall(callId);
-			return result.ok ? Response.json(result.value) : voiceCallErrorResponse(result.reason);
-		}
-
-		// ── Voice call (concern 02, plans/voice-orchestrated-room-integration) ─────────────────────
-		// Every route is channel-scoped: `manager.voiceCall*` re-checks room membership itself
-		// (`ChannelStore#canReadChannel`) before touching the binding, and the mutating routes pass
-		// that same authorization down into the coordinator as the LAST gate before any bridge frame
-		// is relayed (voice-call-manager.ts). The RBAC tier above (`restActionTier`'s coarse GET=viewer/
-		// mutation=operator default — no bespoke entry needed, these paths don't match any of the
-		// more specific rules) is the FIRST gate; both must pass.
-		const voiceCallStateMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/voice-call$/);
-		if (voiceCallStateMatch && req.method === "GET") {
-			const channelId = decodeURIComponent(voiceCallStateMatch[1]!);
-			try {
-				const state = await manager.voiceCallState(channelId, actor);
-				return state ? Response.json(state) : new Response("no call for this channel", { status: 404 });
-			} catch (err) {
-				if (err instanceof Error && err.message === "channel forbidden") return new Response("forbidden", { status: 403 });
-				throw err;
-			}
-		}
-		if (voiceCallStateMatch && req.method === "POST") {
-			const channelId = decodeURIComponent(voiceCallStateMatch[1]!);
-			const decoded = decodeBodyOrEmpty(VoiceCallStartBodySchema, await req.json().catch(() => null));
-			const sessionRoot = typeof decoded.sessionRoot === "string" ? decoded.sessionRoot : undefined;
-			const retention = decoded.retention === "full" || decoded.retention === "tails" || decoded.retention === "off" ? decoded.retention : undefined;
-			const resumeSessionId = typeof decoded.resumeSessionId === "string" ? decoded.resumeSessionId : undefined;
-			const agentId = typeof decoded.agentId === "string" && decoded.agentId.trim() ? decoded.agentId.trim() : undefined;
-			const result = await manager.startVoiceCall(channelId, actor, { sessionRoot, retention, resumeSessionId, agentId });
-			return result.ok ? Response.json(result.value, { status: 201 }) : voiceCallErrorResponse(result.reason);
-		}
-		if (voiceCallStateMatch && req.method === "DELETE") {
-			const channelId = decodeURIComponent(voiceCallStateMatch[1]!);
-			const result = await manager.endVoiceCall(channelId, actor);
-			return result.ok ? Response.json(result.value) : voiceCallErrorResponse(result.reason);
-		}
-		const voiceCallDecisionsMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/voice-call\/decisions$/);
-		if (voiceCallDecisionsMatch && req.method === "GET") {
-			const channelId = decodeURIComponent(voiceCallDecisionsMatch[1]!);
-			try {
-				return Response.json({ decisions: await manager.voiceCallDecisions(channelId, actor) });
-			} catch (err) {
-				if (err instanceof Error && err.message === "channel forbidden") return new Response("forbidden", { status: 403 });
-				throw err;
-			}
-		}
-		const voiceCallResolveMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/voice-call\/decisions\/([^/]+)\/resolve$/);
-		if (voiceCallResolveMatch && req.method === "POST") {
-			const channelId = decodeURIComponent(voiceCallResolveMatch[1]!);
-			const decisionId = decodeURIComponent(voiceCallResolveMatch[2]!);
-			const decoded = decodeBody(VoiceCallResolveDecisionBodySchema, await req.json().catch(() => null));
-			if (Result.isFailure(decoded)) return new Response(`bad resolve decision: ${decoded.failure.message}`, { status: 400 });
-			const result = await manager.resolveVoiceCallDecision(channelId, actor, { decisionId, ...decoded.success });
-			return result.ok ? Response.json(result.value) : voiceCallErrorResponse(result.reason);
-		}
-		const voiceCallSteerMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/voice-call\/steer$/);
-		if (voiceCallSteerMatch && req.method === "POST") {
-			const channelId = decodeURIComponent(voiceCallSteerMatch[1]!);
-			const decoded = decodeBody(VoiceCallSteerBodySchema, await req.json().catch(() => null));
-			if (Result.isFailure(decoded)) return new Response(`bad steer: ${decoded.failure.message}`, { status: 400 });
-			const result = await manager.steerVoiceCall(channelId, actor, decoded.success.text);
-			return result.ok ? Response.json({ ok: true }) : voiceCallErrorResponse(result.reason);
-		}
-		const voiceCallTranscriptMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/voice-call\/transcript$/);
-		if (voiceCallTranscriptMatch && req.method === "GET") {
-			const channelId = decodeURIComponent(voiceCallTranscriptMatch[1]!);
-			try {
-				return Response.json({ transcript: await manager.voiceCallTranscript(channelId, actor) });
-			} catch (err) {
-				if (err instanceof Error && err.message === "channel forbidden") return new Response("forbidden", { status: 403 });
-				throw err;
-			}
-		}
-		const voiceCallArtifactsMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/voice-call\/artifacts$/);
-		if (voiceCallArtifactsMatch && req.method === "GET") {
-			const channelId = decodeURIComponent(voiceCallArtifactsMatch[1]!);
-			try {
-				return Response.json({ artifacts: await manager.voiceCallArtifacts(channelId, actor) });
-			} catch (err) {
-				if (err instanceof Error && err.message === "channel forbidden") return new Response("forbidden", { status: 403 });
-				throw err;
-			}
-		}
-		// One artifact's immutable snapshot bytes (concern 03's room Markdown viewer). Every failure the
-		// store names gets a DISTINCT answer, because the viewer renders each one differently — a
-		// `ready` row whose snapshot file has vanished must never arrive as an empty document.
-		const voiceCallArtifactMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/voice-call\/artifacts\/([^/]+)$/);
-		if (voiceCallArtifactMatch && req.method === "GET") {
-			const channelId = decodeURIComponent(voiceCallArtifactMatch[1]!);
-			const artifactId = decodeURIComponent(voiceCallArtifactMatch[2]!);
-			try {
-				const result = await manager.voiceCallArtifact(channelId, actor, artifactId);
-				if (result.ok) return Response.json({ artifact: result.record, content: result.content });
-				if (result.reason === "not-found") return new Response("no such artifact for this channel", { status: 404 });
-				return Response.json({ artifact: result.record, error: result.reason, detail: result.detail }, { status: result.reason === "too-large" ? 413 : 409 });
-			} catch (err) {
-				if (err instanceof Error && err.message === "channel forbidden") return new Response("forbidden", { status: 403 });
-				throw err;
-			}
-		}
-		// Visible mute (concern 03's HUD). A SET, not the wire's own toggle — see
-		// `VoiceCallCoordinator#setMuted` for why the daemon owns the idempotence.
-		const voiceCallMuteMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/voice-call\/mute$/);
-		if (voiceCallMuteMatch && req.method === "POST") {
-			const channelId = decodeURIComponent(voiceCallMuteMatch[1]!);
-			const decoded = decodeBody(VoiceCallMuteBodySchema, await req.json().catch(() => null));
-			if (Result.isFailure(decoded)) return new Response(`bad mute: ${decoded.failure.message}`, { status: 400 });
-			const result = await manager.setVoiceCallMuted(channelId, actor, decoded.success.muted);
-			return result.ok ? Response.json(result.value) : voiceCallErrorResponse(result.reason);
-		}
-		const voiceCallGapsMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/voice-call\/gaps$/);
-		if (voiceCallGapsMatch && req.method === "GET") {
-			const channelId = decodeURIComponent(voiceCallGapsMatch[1]!);
-			try {
-				return Response.json({ gaps: await manager.voiceCallGaps(channelId, actor) });
-			} catch (err) {
-				if (err instanceof Error && err.message === "channel forbidden") return new Response("forbidden", { status: 403 });
-				throw err;
-			}
-		}
-		// Concern 10 (call-management-ui): the user-triggered reconnect — see
-		// `VoiceCallCoordinator#reattach`. No body: there is nothing to negotiate, only whether the
-		// binding's own callId can be corroborated against the broker right now.
-		const voiceCallReattachMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/voice-call\/reattach$/);
-		if (voiceCallReattachMatch && req.method === "POST") {
-			const channelId = decodeURIComponent(voiceCallReattachMatch[1]!);
-			const result = await manager.reattachVoiceCall(channelId, actor);
-			return result.ok ? Response.json(result.value) : voiceCallErrorResponse(result.reason);
-		}
+		// Voice-calls surface + channel voice-call routes (concerns 10/02, plans/voice-orchestrated-
+		// room-integration) live in routes/voice.ts (deepen 05 slice 4 / concern 11) — every route
+		// re-checks room membership inside manager.voiceCall* before touching the binding.
+		const voiceCallResponse = await handleVoiceCallRoutes(url, req, manager, actor);
+		if (voiceCallResponse) return voiceCallResponse;
 
 		if (url.pathname === "/api/command" && req.method === "POST") {
 			let body: unknown;
@@ -4311,708 +3721,3 @@ export class SquadServer {
 		this.server?.stop(true);
 	}
 }
-
-/**
- * Per-runId trace cache: `manager.trace()` scans EVERY receipt on disk (`readAllReceipts`), which is
- * fine for an occasional click but not for one wired raw behind a fast poll. A finalized run's trace
- * never changes, so once every receipt in its tree has `endedAt` set, the response is cached; a run
- * still in flight (any receipt missing `endedAt`) is recomputed every call — that scan is cheap (one
- * active run's worth of receipts), so correctness costs nothing there.
- *
- * Scoped PER MANAGER (topology review finding 1): a bare module-level `Map<traceId, …>` would be
- * shared across every `SquadManager` instance in the process — in DB-registry mode each org gets its
- * own manager, so a shared cache would serve org A's cached receipts/costs/spans to org B on a
- * colliding trace id (and the root-factory manager would leak into every org, and vice versa). Keying
- * by the manager INSTANCE (a `WeakMap`) makes that structurally impossible — manager A's entries live
- * in manager A's Map, full stop — and needs no explicit org/manager-id plumbing since the same
- * long-lived manager instance already IS the isolation boundary (ManagerRegistry, ManagerRegistry.md).
- *
- * No receipt-count invalidation: `readAllReceipts` always does a full directory scan regardless of
- * `id`, so a cheap "has this trace grown?" check doesn't exist — computing it costs the same as
- * recomputing the trace outright. Instead of trusting the TTL alone (finding 2: a re-dispatched
- * feature's new run could otherwise stay invisible under a stale-but-unexpired `feat:<id>` cache hit
- * for up to `TRACE_CACHE_TTL_MS`), a hit is cheaply re-validated against the manager's live in-memory
- * roster (`manager.list()` — no disk I/O): if any roster entry shares the cached feature id and started
- * AFTER the entry was cached, a new run has begun under that feature and the hit is treated as a miss.
- *
- * Bounded two ways so distinct, never-repeated trace ids (a click-through of many one-off runs)
- * can't grow a manager's cache forever: `sweepExpiredTraceCache` runs on every insert (the map is
- * small — O(cache size), cheap next to the trace scan that just ran) evicting every TTL-expired entry,
- * not just the requested id; and `TRACE_CACHE_MAX` FIFO-evicts the oldest-inserted entry (Map iteration
- * order = insertion order) once the sweep still leaves that manager's cache at capacity.
- */
-type TraceCache = Map<string, { at: number; response: TraceResponse }>;
-const traceCachesByManager = new WeakMap<SquadManager, TraceCache>();
-export const TRACE_CACHE_TTL_MS = 30_000;
-export const TRACE_CACHE_MAX = 200;
-
-/** The manager-scoped cache Map, lazily created. Exported (only) for test setup/inspection. */
-export function traceCacheFor(manager: SquadManager): TraceCache {
-	let cache = traceCachesByManager.get(manager);
-	if (!cache) {
-		cache = new Map();
-		traceCachesByManager.set(manager, cache);
-	}
-	return cache;
-}
-
-export function sweepExpiredTraceCache(cache: TraceCache, now = Date.now()): void {
-	for (const [key, entry] of cache) {
-		if (now - entry.at >= TRACE_CACHE_TTL_MS) cache.delete(key);
-	}
-}
-
-/** True when a run for `id`'s feature started strictly after `cachedAt` — a re-dispatch the cached
- *  response predates. Roster-only (no disk scan), so re-validating a hit costs nothing next to the
- *  full trace recompute it's meant to avoid. Non-feature trace ids (bare / `run:`-prefixed — always
- *  scoped to one immutable run) never go stale this way, so they're always considered fresh. */
-function hasNewerRunForTrace(manager: SquadManager, id: string, cachedAt: number): boolean {
-	if (!id.startsWith("feat:")) return false;
-	const featureId = id.slice(5);
-	return manager.list().some((dto) => dto.featureId === featureId && (dto.startedAt ?? 0) > cachedAt);
-}
-
-export async function tracePayload(manager: SquadManager, id: string): Promise<TraceResponse> {
-	const cache = traceCacheFor(manager);
-	const hit = cache.get(id);
-	if (hit) {
-		if (Date.now() - hit.at < TRACE_CACHE_TTL_MS && !hasNewerRunForTrace(manager, id, hit.at)) return hit.response;
-		cache.delete(id); // expired, or superseded by a new run under the same feature — evict either way
-	}
-	const response = await manager.trace(id);
-	// Only cache once the trace looks finalized: it must have at least one receipt (an empty/not-yet-
-	// journaled trace is never "finalized" — caching it would hide receipts that land moments later for
-	// up to TRACE_CACHE_TTL_MS) and no receipt still mid-run (no receipt missing endedAt).
-	if (response.receipts.length > 0 && response.receipts.every((r) => r.endedAt !== undefined)) {
-		sweepExpiredTraceCache(cache);
-		if (cache.size >= TRACE_CACHE_MAX) {
-			const oldest = cache.keys().next().value; // Map preserves insertion order — FIFO
-			if (oldest !== undefined) cache.delete(oldest);
-		}
-		cache.set(id, { at: Date.now(), response });
-	}
-	return response;
-}
-
-/** Every persisted receipt across every manager the caller can see — a tenant session's array is always
- *  1 manager (unchanged behavior); the bootstrap-admin break-glass array can be several, so this unions
- *  them rather than reading only the first (which would silently drop every other org's history). */
-async function allReceiptsAcross(managers: SquadManager[]): Promise<RunReceipt[]> {
-	return (await Promise.all(managers.map((m) => m.allReceipts()))).flat();
-}
-
-/**
- * Knowledge-view incident, layer 1: `/api/fabric` and `/api/fabric/search` used to read the single
- * per-request `manager` like a plain feature route (post `!manager` gate), instead of joining
- * `handleObservability`'s break-glass union — the exact disease #113 fixed for graph/usage/heat/
- * activity/action-items/governance/health. A bootstrap-admin without a root factory (the daemon's
- * default: `OMP_SQUAD_ROOT_FACTORY` unset) never resolves a single `manager` at all and fell
- * through to `noFleet`'s bare `[]`; even WITH a root factory, this route's own `manager` would
- * only ever be the root's, silently omitting every other live org's facts. Unions each reachable
- * manager's own `.fabric()` — a tenant session's array is always its own 1 manager (see
- * `observabilityManagers`), so this is a no-op union for it; isolation is unaffected.
- */
-async function fabricSnapshotAcross(managers: SquadManager[], actor: Actor, opts: { repos?: string[]; includeLeases?: boolean }): Promise<FabricSnapshot> {
-	const snapshots = await Promise.all(managers.map((m) => m.fabric(actor, opts)));
-	if (snapshots.length <= 1) return snapshots[0] ?? { actor: actor.id, generatedAt: Date.now(), scope: [], agents: [], digests: [], hotAreas: [], scout: [], leases: [], decisions: [], failures: [], symptoms: [], episodes: [], answers: [] };
-	return {
-		actor: actor.id,
-		generatedAt: Math.max(...snapshots.map((s) => s.generatedAt)),
-		scope: [...new Set(snapshots.flatMap((s) => s.scope))].sort(),
-		agents: snapshots.flatMap((s) => s.agents),
-		digests: snapshots.flatMap((s) => s.digests),
-		hotAreas: snapshots
-			.flatMap((s) => s.hotAreas)
-			.sort((a, b) => b.score - a.score || a.file.localeCompare(b.file))
-			.slice(0, 50),
-		scout: snapshots.flatMap((s) => s.scout),
-		leases: snapshots.flatMap((s) => s.leases),
-		decisions: snapshots.flatMap((s) => s.decisions),
-		failures: snapshots.flatMap((s) => s.failures),
-		symptoms: snapshots.flatMap((s) => s.symptoms),
-		episodes: snapshots.flatMap((s) => s.episodes),
-		answers: snapshots.flatMap((s) => s.answers),
-	};
-}
-
-/** Same disease, `/api/audit`: union each manager's own audit log (fetched uncapped via `limit: 0`,
- *  matching `readAudit`'s own "<=0 ⇒ no cap" contract) before re-sorting newest-first and applying
- *  the CALLER's requested limit — a per-manager pre-merge cap would silently drop entries that
- *  should have made the merged top-N. */
-async function auditPayloadAcross(managers: SquadManager[], query: AuditQuery): Promise<AuditEntry[]> {
-	const perManager = await Promise.all(managers.map((m) => m.auditLog({ ...query, limit: 0 })));
-	const merged = perManager.flat().sort((a, b) => b.at - a.at || b.id - a.id);
-	const limit = query.limit ?? 200;
-	return limit > 0 ? merged.slice(0, limit) : merged;
-}
-
-function mergeAutomationRollups(rows: AutomationRollupRow[][]): AutomationRollupRow[] {
-	const merged = new Map<AutomationLoop, AutomationRollupRow>();
-	for (const list of rows) {
-		for (const r of list) {
-			const cur = merged.get(r.loop) ?? { loop: r.loop, events: 0, llmCalls: 0, found: 0, filed: 0, spawned: 0, errors: 0, lastAt: 0 };
-			cur.events += r.events;
-			cur.llmCalls += r.llmCalls;
-			cur.found += r.found;
-			cur.filed += r.filed;
-			cur.spawned += r.spawned;
-			cur.errors += r.errors;
-			if (r.lastAt >= cur.lastAt) {
-				cur.lastAt = r.lastAt;
-				cur.lastSkipReason = r.lastSkipReason;
-			}
-			merged.set(r.loop, cur);
-		}
-	}
-	return [...merged.values()].sort((a, b) => a.loop.localeCompare(b.loop));
-}
-
-/** Same disease, `/api/automation`: union each manager's recent events (fetched uncapped, same
- *  `limit: 0` convention as auditPayloadAcross) then re-sort/re-limit, and sum the per-loop rollups
- *  field-by-field (a straight count/sum aggregation — `lastAt`/`lastSkipReason` take the max). */
-async function automationPayloadAcross(managers: SquadManager[], query: AutomationQuery & { windowMs?: number }): Promise<{ events: AutomationEvent[]; rollup: AutomationRollupRow[] }> {
-	const perManager = await Promise.all(managers.map((m) => m.automationActivity({ ...query, limit: 0 })));
-	const merged = perManager.flatMap((r) => r.events).sort((a, b) => b.at - a.at || b.id - a.id);
-	const limit = query.limit ?? 200;
-	return { events: limit > 0 ? merged.slice(0, limit) : merged, rollup: mergeAutomationRollups(perManager.map((r) => r.rollup)) };
-}
-
-function mergeMetricRollups(rows: MetricRollupRow[][]): MetricRollupRow[] {
-	const merged = new Map<MetricName, MetricRollupRow>();
-	for (const list of rows) {
-		for (const r of list) {
-			const cur = merged.get(r.name) ?? { name: r.name, count: 0, sum: 0, avg: 0 };
-			cur.count += r.count;
-			cur.sum += r.sum;
-			cur.avg = cur.count ? cur.sum / cur.count : 0;
-			if (r.byTag) {
-				cur.byTag ??= {};
-				for (const [tagKey, tagVals] of Object.entries(r.byTag)) {
-					cur.byTag[tagKey] ??= {};
-					for (const [val, bucket] of Object.entries(tagVals)) {
-						const b = (cur.byTag[tagKey][val] ??= { count: 0, sum: 0, avg: 0 });
-						b.count += bucket.count;
-						b.sum += bucket.sum;
-						b.avg = b.count ? b.sum / b.count : 0;
-					}
-				}
-			}
-			merged.set(r.name, cur);
-		}
-	}
-	return [...merged.values()].sort((a, b) => a.name.localeCompare(b.name));
-}
-
-/** Same disease, `/api/metrics/learning-loop`: `flags` is pure env resolution (`learningFlags()`),
- *  identical regardless of which manager answers, so it's read once; the per-metric rollups are
- *  summed across every reachable manager. */
-function learningLoopPayloadAcross(managers: SquadManager[], windowMs?: number): { flags: ReturnType<typeof learningFlags>; rollup: MetricRollupRow[] } {
-	return { flags: learningFlags(), rollup: mergeMetricRollups(managers.map((m) => m.learningMetricsSnapshot(windowMs).rollup)) };
-}
-
-async function usagePayload(managers: SquadManager[], url: URL): Promise<{
-	runs: RunReceipt[];
-	receipts: RunReceipt[];
-	toolCalls: number;
-	costUsd?: number;
-	tokens?: number;
-	durationMs?: number;
-	agents: number;
-	since?: number;
-}> {
-	const limit = boundedNumber(url.searchParams.get("limit"), 100, 1, 1000);
-	const repo = url.searchParams.get("repo") ?? undefined;
-	const agentId = url.searchParams.get("agentId") ?? undefined;
-	const since = boundedNumber(url.searchParams.get("since"), 0, 0, Number.MAX_SAFE_INTEGER) || undefined;
-	// Source the persisted ledger (like attributionPayload/trace), not the live roster: receipts outlive
-	// the agents that produced them — reaped agents, and every agent after a daemon restart — so
-	// roster-scoping hid all but the currently-live runs' history.
-	const receipts = (await allReceiptsAcross(managers)).filter(
-		(r) => (!repo || r.repo === repo) && (!agentId || r.agentId === agentId) && (!since || (r.endedAt ?? r.startedAt) >= since),
-	);
-	const runs = receipts.sort((a, b) => (b.endedAt ?? b.startedAt) - (a.endedAt ?? a.startedAt)).slice(0, limit);
-	const totals = runs.reduce((acc, r) => {
-		acc.toolCalls += r.toolCalls;
-		acc.costUsd += r.costUsd ?? 0;
-		acc.tokens += r.tokens?.total ?? 0;
-		acc.durationMs += r.durationMs ?? 0;
-		return acc;
-	}, { toolCalls: 0, costUsd: 0, tokens: 0, durationMs: 0 });
-	return {
-		runs,
-		receipts: runs,
-		toolCalls: totals.toolCalls,
-		costUsd: totals.costUsd || undefined,
-		tokens: totals.tokens || undefined,
-		durationMs: totals.durationMs || undefined,
-		agents: new Set(receipts.map((r) => r.agentId)).size,
-		since,
-	};
-}
-
-async function heatPayload(managers: SquadManager[], url: URL): Promise<{
-	days: string[];
-	tree: { id: string; name: string; type: "file"; depth: number; heat: number[]; repo: string }[];
-	hotAreas: { path: string; heat: number; repo: string }[];
-	insights: string[];
-	source: string;
-	generatedAt: number;
-}> {
-	const count = boundedNumber(url.searchParams.get("days"), 8, 1, 31);
-	const repoParam = url.searchParams.get("repo") ?? undefined;
-	// Repo-normalize equality (comprehension concern 04, batch-3 review): the raw `r.repo === repo`
-	// compare missed a repo whose STORED receipts and the query's `?repo=` value are the same repo
-	// in an equivalent-but-differently-formed path (trailing slash, `~/`-form vs its expanded
-	// absolute form) — same bug class as the fabric leak incident, in the exact endpoint the
-	// concern-04 fog overlay extends. Same discipline every other repo-scoped GET in this file uses.
-	const repoNorm = repoParam ? normalizeRepoPath(repoParam) : undefined;
-	const end = new Date();
-	const days = Array.from({ length: count }, (_, i) => {
-		const d = new Date(end);
-		d.setDate(end.getDate() - (count - i - 1));
-		return d.toISOString().slice(0, 10);
-	});
-	const indexByDay = new Map(days.map((d, i) => [d, i]));
-	// Persisted ledger, not the live roster (see usagePayload) — otherwise reaped agents and post-restart
-	// history vanish and the panel falsely reads "No receipt-backed file writes in this window".
-	const receipts = (await allReceiptsAcross(managers)).filter((r) => !repoNorm || normalizeRepoPath(r.repo) === repoNorm);
-	// Repo-keyed aggregation (comprehension concern 04, batch-3 review): bare `file` keys collapsed
-	// same-named files across different repos into ONE heat array whenever this response spans more
-	// than one repo — an unfiltered fleet-wide read (no `?repo=`), or a bootstrap-admin's cross-org
-	// break-glass view (see observability-bootstrap-admin.test.ts). Key by
-	// `${normalizeRepoPath(repo)}\0${file}`, the SAME join convention `comprehension-fog.ts`'s
-	// `fogKey` and `attention.ts`'s `seenKey` already use, so a same-named file in a different repo
-	// never shares a heat array with this one. `repo` (the RAW, unnormalized receipt repo — the same
-	// representation `computeFog`'s `FileFogEntry.repo` exposes) is carried on every tree/hotArea
-	// entry so the concern-04 fog overlay can join heat nodes back to `/api/fog` entries without
-	// re-deriving its own repo convention.
-	const byFile = new Map<string, { repo: string; file: string; heat: number[] }>();
-	for (const r of receipts) {
-		const day = new Date(r.endedAt ?? r.startedAt).toISOString().slice(0, 10);
-		const idx = indexByDay.get(day);
-		if (idx === undefined) continue;
-		for (const file of r.filesTouched) {
-			const key = `${normalizeRepoPath(r.repo)}\0${file}`;
-			const entry = byFile.get(key) ?? { repo: normalizeRepoPath(r.repo), file, heat: Array(count).fill(0) };
-			entry.heat[idx] += 1;
-			byFile.set(key, entry);
-		}
-	}
-	const tree = [...byFile.values()]
-		.sort((a, b) => a.file.localeCompare(b.file) || a.repo.localeCompare(b.repo))
-		.map((entry) => ({
-			id: entry.file,
-			name: path.basename(entry.file),
-			type: "file" as const,
-			depth: Math.max(0, entry.file.split(/[\\/]/).length - 1),
-			heat: entry.heat,
-			repo: entry.repo,
-		}));
-	const hotAreas = tree.map((n) => ({ path: n.id, heat: n.heat.reduce((a, b) => a + b, 0), repo: n.repo })).filter((n) => n.heat > 0).sort((a, b) => b.heat - a.heat).slice(0, 8);
-	return {
-		days,
-		tree,
-		hotAreas,
-		insights: hotAreas.length ? [`${hotAreas.length} files touched in recent receipts`] : ["No receipt-backed file writes in this window"],
-		source: "receipts.filesTouched",
-		generatedAt: Date.now(),
-	};
-}
-
-/**
- * Day×hour activity matrix for the "Activity rhythm" heatmap: for each of the last
- * `days` calendar days, how many file-touches landed in each hour 00–23. Same
- * receipt source as heatPayload (filesTouched), just bucketed by hour-of-day too,
- * so the two views agree on totals.
- *
- * Server-LOCAL time throughout (the daemon runs on the operator's machine, so its
- * wall clock is the rhythm the operator actually lives) — a (day, hour) cell is
- * internally consistent because both come from the same local Date.
- */
-async function activityHeatmapPayload(managers: SquadManager[], url: URL): Promise<{
-	days: string[];
-	hours: number[];
-	matrix: { day: string; hourly: number[] }[];
-	max: number;
-	total: number;
-	source: string;
-	generatedAt: number;
-}> {
-	const count = boundedNumber(url.searchParams.get("days"), 7, 1, 31);
-	const repo = url.searchParams.get("repo") ?? undefined;
-	const localDay = (d: Date): string =>
-		`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-	const end = new Date();
-	const days = Array.from({ length: count }, (_, i) => {
-		const d = new Date(end);
-		d.setDate(end.getDate() - (count - i - 1));
-		return localDay(d);
-	});
-	const rowByDay = new Map(days.map((d) => [d, new Array<number>(24).fill(0)]));
-	// Persisted ledger, not the live roster (see usagePayload), so the rhythm survives restarts + reaps.
-	const receipts = (await allReceiptsAcross(managers)).filter((r) => !repo || r.repo === repo);
-	let max = 0;
-	let total = 0;
-	for (const r of receipts) {
-		const touched = r.filesTouched.length;
-		if (touched === 0) continue;
-		const when = new Date(r.endedAt ?? r.startedAt);
-		const row = rowByDay.get(localDay(when));
-		if (!row) continue;
-		const hour = when.getHours();
-		row[hour] += touched;
-		total += touched;
-		if (row[hour] > max) max = row[hour];
-	}
-	return {
-		days,
-		hours: Array.from({ length: 24 }, (_, i) => i),
-		matrix: days.map((day) => ({ day, hourly: rowByDay.get(day) ?? new Array<number>(24).fill(0) })),
-		max,
-		total,
-		source: "receipts.filesTouched (per day×hour, server-local)",
-		generatedAt: Date.now(),
-	};
-}
-
-/** Per-adapter config/secrets from OMP_GRAPH_<ADAPTER>_<KEY> env vars → { adapter: { KEY: value } }. */
-function graphConfigFromEnv(): Record<string, Record<string, string>> {
-	const cfg: Record<string, Record<string, string>> = {};
-	for (const [k, v] of Object.entries(process.env)) {
-		if (!v) continue;
-		const m = /^OMP_GRAPH_([A-Z0-9]+)_(.+)$/.exec(k);
-		if (!m) continue;
-		(cfg[m[1].toLowerCase()] ??= {})[m[2]] = v;
-	}
-	return cfg;
-}
-
-/** Short-TTL cache so polling clients (and future slow external adapters) don't recompute every hit. */
-const graphCache = new Map<string, { at: number; doc: GraphDoc }>();
-
-/**
- * The normalized omp-graph document (GET /api/graph) — the source-agnostic wire
- * format the living dashboard consumes. Composes the default adapter set (git +
- * receipts + automation + plane) over `days` of history plus `future` days ahead
- * (for upcoming meetings/renewals once those adapters land). Reconstructs the
- * daemon state dir like index.ts, and passes per-adapter secrets from env.
- */
-/**
- * Resolve the `?repo=` param against the allowlist (known project repos + the daemon
- * cwd). Returns null when a caller asks for a repo outside it — so an authenticated
- * viewer can't drive `git show` / adapter reads against arbitrary repos on the host.
- * No param → the daemon cwd (the webapp never sends one).
- */
-function resolveGraphRepo(url: URL, managers: SquadManager[]): string | null {
-	const raw = url.searchParams.get("repo");
-	if (!raw) return process.cwd();
-	const resolved = path.resolve(raw);
-	const allowed = new Set([path.resolve(process.cwd()), ...managers.flatMap((m) => m.projects()).map((p) => path.resolve(p.repo))]);
-	return allowed.has(resolved) ? resolved : null;
-}
-
-async function graphPayload(url: URL, repo: string): Promise<GraphDoc & { plan: { name: string; monthly: number } | null }> {
-	const days = boundedNumber(url.searchParams.get("days"), 7, 1, 31);
-	const future = boundedNumber(url.searchParams.get("future"), 0, 0, 14);
-	// explicit window (epoch ms) for history views — the DEPTH massif fetches one
-	// window per week row. Bounded to 32 days so a bad param can't walk all of git.
-	const range = explicitRange(url);
-	const stateDir = resolveStateDir();
-	const key = range ? `r${range.start}:${range.end}:${repo}` : `${days}:${future}:${repo}`;
-	const ttl = envInt("OMP_GRAPH_CACHE_MS", 10_000);
-	const fresh = url.searchParams.get("fresh"); // reload icon bypasses the cache
-	const plan = planFromEnv() ?? null;
-	const hit = graphCache.get(key);
-	if (hit && !fresh && Date.now() - hit.at < ttl) return { ...hit.doc, plan };
-	// external-harness ledgers (Claude Code sessions) fold into receipts here,
-	// throttled — so the pulse attributes EVERY harness that worked this repo
-	await ingestHarnesses(stateDir, repo);
-	const doc = await buildGraph({ repo, stateDir, config: graphConfigFromEnv() }, range ? { range } : { days, futureDays: future });
-	graphCache.set(key, { at: Date.now(), doc });
-	return { ...doc, plan };
-}
-
-/** Parse ?start=&end= (epoch ms) into a bounded TimeRange, or null when absent/invalid. */
-function explicitRange(url: URL): { start: number; end: number } | null {
-	const start = Number(url.searchParams.get("start"));
-	const end = Number(url.searchParams.get("end"));
-	if (!Number.isFinite(start) || !Number.isFinite(end) || start <= 0 || end <= start) return null;
-	const MAX_SPAN = 32 * 24 * 3_600_000;
-	return end - start > MAX_SPAN ? { start: end - MAX_SPAN, end } : { start, end };
-}
-
-/** GET /api/graph/attribution — the harness→model spend matrix behind the pulse bands. */
-async function attributionPayload(url: URL, repo: string): Promise<ReturnType<typeof buildAttribution>> {
-	const days = boundedNumber(url.searchParams.get("days"), 7, 1, 31);
-	const range = explicitRange(url) ?? { start: Date.now() - days * 24 * 3_600_000, end: Date.now() };
-	const stateDir = resolveStateDir();
-	await ingestHarnesses(stateDir, repo);
-	const receipts = (await readAllReceipts(stateDir)).filter((r) => r.repo === repo);
-	return buildAttribution(receipts, range, { plan: planFromEnv() });
-}
-
-/**
- * The model scoreboard: land-rate (per complexity tier) + $/landed-change per model, joining the
- * model-outcome ledger with receipt cost. Answers the agent-selection rubric from real outcomes.
- * Outcomes are fleet-global (the ledger is not repo-keyed); cost is this repo's receipts.
- */
-async function scoreboardPayload(repo: string): Promise<Scoreboard> {
-	const stateDir = resolveStateDir();
-	await ingestHarnesses(stateDir, repo);
-	const receipts = (await readAllReceipts(stateDir)).filter((r) => r.repo === repo);
-	return buildScoreboard(receipts, readModelOutcomes(stateDir));
-}
-
-/**
- * GET /api/graph/task-class — the task-class × model outcome matrix (model-routing-control-loop
- * concern 05). OBSERVATIONAL, NOT A DECISION ORACLE — see task-class-matrix.ts's module doc; the
- * webapp panel MUST surface `doc.note` prominently, not just tuck it into a tooltip.
- */
-async function taskClassPayload(managers: SquadManager[], url: URL): Promise<TaskClassMatrixDoc> {
-	const days = boundedNumber(url.searchParams.get("days"), 7, 1, 31);
-	const range = explicitRange(url) ?? { start: Date.now() - days * 24 * 3_600_000, end: Date.now() };
-	const stateDir = resolveStateDir();
-	const rows = await readTaskOutcomes(stateDir);
-	const denominatorPopulation = managers.flatMap((m) => m.landingRosterRouting());
-	return buildTaskClassMatrix(rows, denominatorPopulation, range);
-}
-
-/** GET /api/graph/provenance?id=OMPSQ-336 — the plan→agent→proof→land thread for one ticket. */
-async function provenancePayload(url: URL, repo: string, managers: SquadManager[]): Promise<ProvenanceDoc | { error: string }> {
-	const id = (url.searchParams.get("id") ?? "").trim().toUpperCase();
-	if (!/^[A-Z][A-Z0-9]*-\d+$/.test(id)) return { error: "invalid ticket id" };
-	const stateDir = resolveStateDir();
-	const featureLists = await Promise.all(managers.map((m) => m.features(repo).catch(() => [])));
-	const features = featureLists.flat().map((f) => ({
-		id: f.id,
-		title: f.title,
-		planDir: f.planDir,
-		issueIdentifiers: f.issueIdentifiers,
-	}));
-	return buildProvenance({ repo, stateDir, ticket: id, features });
-}
-
-// ── commit detail (GET /api/graph/commit?sha=) — the "click a milestone → diff" drilldown ──
-
-const SHA_RE = /^[0-9a-f]{7,40}$/i;
-const MAX_DIFF_LINES = 900; // bound the payload; huge refactors get a "truncated" flag
-
-interface CommitLine {
-	t: "ctx" | "add" | "del" | "hunk";
-	s: string;
-}
-interface CommitFile {
-	path: string;
-	status: "added" | "deleted" | "modified" | "renamed";
-	additions: number;
-	deletions: number;
-	lines: CommitLine[];
-}
-export interface CommitDetail {
-	sha: string;
-	author: string;
-	dateMs: number;
-	subject: string;
-	files: CommitFile[];
-	additions: number;
-	deletions: number;
-	truncated: boolean;
-}
-
-/** Parse a `git show` unified patch into per-file typed lines. Pure. */
-function parseUnifiedDiff(patch: string): { files: CommitFile[]; truncated: boolean } {
-	const files: CommitFile[] = [];
-	let cur: CommitFile | null = null;
-	let total = 0;
-	let truncated = false;
-	const push = (line: CommitLine): void => {
-		if (total < MAX_DIFF_LINES) cur?.lines.push(line);
-		else truncated = true;
-		total++;
-	};
-	for (const raw of patch.split("\n")) {
-		if (raw.startsWith("diff --git")) {
-			const m = raw.match(/ b\/(.+)$/);
-			cur = { path: m ? m[1] : "?", status: "modified", additions: 0, deletions: 0, lines: [] };
-			files.push(cur);
-		} else if (!cur) {
-			continue;
-		} else if (raw.startsWith("new file")) {
-			cur.status = "added";
-		} else if (raw.startsWith("deleted file")) {
-			cur.status = "deleted";
-		} else if (raw.startsWith("rename ")) {
-			cur.status = "renamed";
-		} else if (raw.startsWith("@@")) {
-			push({ t: "hunk", s: raw });
-		} else if (raw.startsWith("+++") || raw.startsWith("---") || raw.startsWith("index ") || raw.startsWith("similarity ") || raw.startsWith("old mode") || raw.startsWith("new mode") || raw.startsWith("Binary files")) {
-			// metadata lines — skip
-		} else if (raw.startsWith("+")) {
-			cur.additions++;
-			push({ t: "add", s: raw.slice(1) });
-		} else if (raw.startsWith("-")) {
-			cur.deletions++;
-			push({ t: "del", s: raw.slice(1) });
-		} else if (raw.startsWith(" ")) {
-			push({ t: "ctx", s: raw.slice(1) });
-		}
-	}
-	return { files, truncated };
-}
-
-async function commitDetailPayload(url: URL, repo: string): Promise<CommitDetail | { error: string }> {
-	const sha = (url.searchParams.get("sha") ?? "").trim();
-	if (!SHA_RE.test(sha)) return { error: "invalid sha" }; // guard against arg injection
-	const US = "\x1f";
-	const RS = "\x1e";
-	try {
-		const proc = Bun.spawn(["git", "-C", repo, "show", "--no-color", "--no-notes", "--patch", `--format=format:%H${US}%an${US}%aI${US}%s${RS}`, sha], { stdout: "pipe", stderr: "ignore" });
-		const out = await new Response(proc.stdout).text();
-		const code = await proc.exited;
-		if (code !== 0 || !out) return { error: "commit not found" };
-		const rsIdx = out.indexOf(RS);
-		const header = rsIdx >= 0 ? out.slice(0, rsIdx) : out;
-		const patch = rsIdx >= 0 ? out.slice(rsIdx + 1) : "";
-		const [hsha = sha, author = "", iso = "", subject = ""] = header.split(US);
-		const { files, truncated } = parseUnifiedDiff(patch);
-		const additions = files.reduce((a, f) => a + f.additions, 0);
-		const deletions = files.reduce((a, f) => a + f.deletions, 0);
-		return { sha: hsha, author, dateMs: Date.parse(iso) || 0, subject, files, additions, deletions, truncated };
-	} catch {
-		return { error: "git show failed" };
-	}
-}
-
-
-/**
- * Fleet-wide health across every manager the caller can see. `rssMb`/`load1`/`ncpu`/`freeRatio`/`hosts`
- * are process/host-wide (sampleHealth reads `process.memoryUsage()`/`os.*`, identical no matter which
- * manager answers, since every manager lives in this one daemon process) — so the first manager's own
- * sample already supplies them correctly. Only `agents` (live roster occupancy) differs per manager, so
- * for a multi-manager (bootstrap-admin) view it's summed and the warnings recomputed against the true
- * fleet-wide count — otherwise a WIP-cap warning would only ever reflect one org's agents.
- */
-async function aggregateHealth(managers: SquadManager[]): Promise<Awaited<ReturnType<SquadManager["sampleHealth"]>>> {
-	const [primary, ...rest] = managers;
-	const { sample, warnings, at } = await primary.sampleHealth();
-	if (rest.length === 0) return { sample, warnings, at };
-	const agents = liveAgentCount(managers.flatMap((m) => m.list()));
-	const combined: HealthSample = { ...sample, agents };
-	return { sample: combined, warnings: assessHealth(combined, defaultHealthLimits(sample.ncpu, hardAgentCeiling())), at };
-}
-
-async function governancePayload(managers: SquadManager[], role: Role, dbMode: boolean, dbRegistry: boolean): Promise<{
-	authMode: "db" | "file";
-	role: Role;
-	wipCap: number;
-	maxAgents: number;
-	health: Awaited<ReturnType<SquadManager["sampleHealth"]>>;
-	federation: { coordinator: boolean; dbRegistry: boolean };
-	audit: { available: true };
-	compliance: { findings: ComplianceFinding[]; evaluatedAt: number };
-}> {
-	return {
-		authMode: dbMode ? "db" : "file",
-		role,
-		wipCap: envInt("OMP_SQUAD_WIP_CAP", 3),
-		maxAgents: hardAgentCeiling(),
-		health: await aggregateHealth(managers),
-		federation: { coordinator: !!process.env.OMP_SQUAD_COORDINATOR, dbRegistry },
-		audit: { available: true },
-		// Epic 3 (leaf 05): real policy findings over the audit + land ledgers, not just RBAC/capacity.
-		compliance: { findings: (await Promise.all(managers.map((m) => m.complianceFindings()))).flat(), evaluatedAt: Date.now() },
-	};
-}
-async function actionItemsPayload(managers: SquadManager[], url: URL, actor: Actor): Promise<{ items: ActionItem[]; generatedAt: number }> {
-	const repo = url.searchParams.get("repo") ?? undefined;
-	const agents = (await Promise.all(managers.map((m) => m.visibleAgents(actor)))).flat().filter((a) => !repo || a.repo === repo);
-	const health = await aggregateHealth(managers);
-	const items: ActionItem[] = [];
-	// Starved issues (deepen 14): derived per request from the attempts ledger — emit-from-state,
-	// so a crash can never lose the announcement and an ack silences it everywhere at once.
-	for (const m of managers) {
-		for (const s of m.starvedIssueAttempts()) {
-			// 3b-final item 2 + codex: equality filter — and a LEGACY row with no repo stays VISIBLE
-			// under any filter (fail-visible; hiding an active verdict is the worse failure).
-			if (repo && s.repo && s.repo !== repo) continue;
-			items.push({
-				id: `starved:${s.issueId}`,
-				severity: "high",
-				source: "land",
-				subject: `${s.identifier ?? s.issueId}: ${s.fails}/${s.attempts} dispatch attempts failed`,
-				rootCause: "Every judged attempt on this issue failed — more auto-dispatch is signal-free compute (deepen 14).",
-				nextAction: "Re-scope the issue, or clear the verdict to re-enable auto-dispatch",
-				targetRoute: "#/tasks",
-			});
-		}
-	}
-	for (const a of agents) {
-		for (const p of a.pending) {
-			items.push({
-				id: `pending:${a.id}:${p.id}`,
-				severity: p.source === "tool" ? "high" : "medium",
-				source: p.source,
-				subject: `${a.name}: ${p.title}`,
-				rootCause: p.message ?? "Agent is waiting for operator input.",
-				nextAction: p.source === "tool" ? "Review and answer the host-tool request" : "Answer the pending prompt",
-				targetRoute: `#/console/${encodeURIComponent(a.id)}`,
-				agentId: a.id,
-				requestId: p.id,
-			});
-		}
-		if (a.status === "error") {
-			items.push({
-				id: `error:${a.id}`,
-				severity: "high",
-				source: "agent",
-				subject: `${a.name} errored`,
-				rootCause: a.error ?? "Agent reported an error.",
-				nextAction: "Open transcript, then restart or remove the agent",
-				targetRoute: `#/console/${encodeURIComponent(a.id)}`,
-				agentId: a.id,
-			});
-		}
-		if (a.landReady) {
-			items.push({
-				id: `land:${a.id}`,
-				severity: "medium",
-				source: "land",
-				subject: `${a.name} is ready to land`,
-				rootCause: "Verification passed and auto-land is holding for confirmation.",
-				nextAction: "Review proof and land the branch",
-				targetRoute: `#/agent/${encodeURIComponent(a.id)}`,
-				agentId: a.id,
-			});
-		}
-	}
-	for (const warning of health.warnings) {
-		items.push({
-			id: `health:${warning}`,
-			severity: "medium",
-			source: "health",
-			subject: "Fleet health warning",
-			rootCause: warning,
-			nextAction: "Open Fleet Health and reduce load before spawning more agents",
-			targetRoute: "#/observability",
-		});
-	}
-	items.sort((a, b) => severityRank(b.severity) - severityRank(a.severity) || a.id.localeCompare(b.id));
-	return { items, generatedAt: Date.now() };
-}
-
-type ActionItem = {
-	id: string;
-	severity: "low" | "medium" | "high";
-	source: "ui" | "tool" | "agent" | "land" | "health";
-	subject: string;
-	rootCause: string;
-	nextAction: string;
-	targetRoute: string;
-	agentId?: string;
-	requestId?: string;
-};
-
-function severityRank(s: ActionItem["severity"]): number {
-	return s === "high" ? 3 : s === "medium" ? 2 : 1;
-}
-
