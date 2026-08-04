@@ -2648,6 +2648,13 @@ export class SquadServer {
 		// mints server-authored and writes through the single write rule (including the normalize-
 		// then-reject-empty guard from the blind-review fix); this route only maps outcomes to
 		// statuses so every conflict is explicit instead of a silent drop.
+		// The audited starvation clear verb (deepen 14, DESIGN v2): operator tier (authz mutation
+		// floor), explicit, 404 when there is nothing to clear — never a silent 200.
+		const mstarve = url.pathname.match(/^\/api\/issues\/([^/]+)\/redispatch$/);
+		if (mstarve && req.method === "POST") {
+			const cleared = await manager.clearIssueStarvationVerdict(decodeURIComponent(mstarve[1]), actor);
+			return cleared ? Response.json({ ok: true }) : new Response("no starvation verdict to clear for this issue", { status: 404 });
+		}
 		const mfsupersede = url.pathname.match(/^\/api\/features\/([^/]+)\/decisions\/supersede$/);
 		if (mfsupersede && req.method === "POST") {
 			const decoded = decodeBody(FeatureDecisionSupersedeBodySchema, await req.json().catch(() => null));
@@ -4913,6 +4920,22 @@ async function actionItemsPayload(managers: SquadManager[], url: URL, actor: Act
 	const agents = (await Promise.all(managers.map((m) => m.visibleAgents(actor)))).flat().filter((a) => !repo || a.repo === repo);
 	const health = await aggregateHealth(managers);
 	const items: ActionItem[] = [];
+	// Starved issues (deepen 14): derived per request from the attempts ledger — emit-from-state,
+	// so a crash can never lose the announcement and an ack silences it everywhere at once.
+	for (const m of managers) {
+		for (const s of m.starvedIssueAttempts()) {
+			if (repo) continue; // issue attempts are daemon-scoped; repo-filtered views skip them
+			items.push({
+				id: `starved:${s.issueId}`,
+				severity: "high",
+				source: "land",
+				subject: `${s.identifier ?? s.issueId}: ${s.fails}/${s.attempts} dispatch attempts failed`,
+				rootCause: "Every judged attempt on this issue failed — more auto-dispatch is signal-free compute (deepen 14).",
+				nextAction: "Re-scope the issue, or clear the verdict to re-enable auto-dispatch",
+				targetRoute: "#/tasks",
+			});
+		}
+	}
 	for (const a of agents) {
 		for (const p of a.pending) {
 			items.push({

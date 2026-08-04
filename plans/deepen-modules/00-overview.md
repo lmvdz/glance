@@ -28,6 +28,13 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
 05 slice 1 shipped: the route-table seam exists and is real (two lane adapters). Suite 4947/1
 (dead-exports pre-existing only — best state yet). PR: deepen/05-route-table branch.
 
+## Iteration 14 (2026-08-04, goal mode)
+14 slice 3b partial: evidence surface + clear verb built; apply RETREATED to shadow a second
+time on codex's round-2 five (render gap, repo scoping, clear generation, audit depth, manager
+binding) — now the 3b-final checklist. Codex 31/31 on the ledger. The pattern is now structural:
+every "turn the gate on" attempt has been stopped by a blind pass finding the honesty gap the
+implementation missed. That is the verification bet working exactly as CS329A says it should.
+
 ## Iteration 13 (2026-08-04, goal mode)
 14 slice 3a: the evidence half per DESIGN v2, shadow-only. Four codex findings survived+fixed
 (runId race, A-B-A dedup, map growth, O(N×M) reads); my own test caught the snapshot cache's

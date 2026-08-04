@@ -90,10 +90,23 @@ dispatcher seam (transition-once log, candidate-set sweep, defer honored), STARV
 verdicts at 3/3. Four codex findings survived + fixed + recorded; codex's finding #1 lost to
 output truncation twice — not recorded, not fabricated. grok post-fix clean.
 
-## Slice 3b (remaining → then STATUS: done): the emit-from-state attention entry (rendered,
-crash-proof), the audited operator clear verb (POST /api/issues/:id/redispatch, operator tier,
-audit row, never implicit), race-eligibility explicitly not restored, apply mode becomes real
-(the refusal note retires).
+## Slice 3b shipped PARTIAL (2026-08-04, iteration 14) — apply RETREATED to shadow a 2nd time.
+Built: starvedIssues() derived reader (surface and gate read the same function), action-item
+rows (API-visible), POST /api/issues/:id/redispatch clear verb (starved-rows-only, audited,
+race-eligibility untouched), identifier captured on rows. Round-2 blind review (codex, 5
+findings, all survived) stopped apply from lying: rows may not RENDER (webapp consumer +
+no clear control), no repo on rows (?repo= views hide verdicts), clear lacks a generation
+baseline (pre-clear in-flight failure instantly re-starves), audit thin, DB-mode GET/POST
+manager-binding mismatch.
+
+## 3b-final checklist (→ then STATUS: done; each item = a round-2 finding):
+1. Rendered control: wire the row through the webapp consumer with a redispatch action that
+   calls the POST (verify insights.ts actually surfaces non-health items; else the room card).
+2. `repo` persisted on attempt rows at the write site; equality filter under ?repo=.
+3. Clear = generation baseline (attemptsAtClear watermark; verdicts computed on post-clear
+   evidence only; pre-clear in-flight runs bill the OLD generation).
+4. Audit carries prior verdict + operator reason; both backends awaited.
+5. Action carries its manager/org binding; POST resolves the originating manager (DB mode).
 
 ## Provenance
 Lecture 6 (DAPO 30→50 via dynamic sampling), lecture 7 (Absolute-Zero proposer reward maximized

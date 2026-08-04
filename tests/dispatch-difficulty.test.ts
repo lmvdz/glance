@@ -106,12 +106,29 @@ describe("issue attempts (DESIGN v2 slice 3a) — evidence half, shadow verdicts
 		for (let i = 0; i < ISSUE_STARVE_ATTEMPTS - 1; i++) recordIssueAttempt(d, "ISS-2", `run-${i}`, false);
 		expect(issueDifficultyDecision(d, { id: "ISS-2", identifier: "OMPSQ-9" }, "shadow")).toBeUndefined();
 		recordIssueAttempt(d, "ISS-2", "run-final", false);
-		for (const mode of ["shadow", "apply"] as const) {
-			const v = issueDifficultyDecision(d, { id: "ISS-2", identifier: "OMPSQ-9" }, mode)!;
-			expect(v.proceed).toBeTrue();
-			expect(v.reason).toContain("OMPSQ-9 STARVED (would defer): 3/3");
-		}
+		const shadow = issueDifficultyDecision(d, { id: "ISS-2", identifier: "OMPSQ-9" }, "shadow")!;
+		expect(shadow.proceed).toBeTrue();
+		expect(shadow.reason).toContain("OMPSQ-9 STARVED (would defer): 3/3");
+		const applied = issueDifficultyDecision(d, { id: "ISS-2", identifier: "OMPSQ-9" }, "apply")!;
+		expect(applied.proceed).toBeTrue(); // round-2 retreat: apply awaits 3b-final
 		expect(issueDifficultyDecision(d, { id: "ISS-2", identifier: "OMPSQ-9" }, "off")).toBeUndefined();
+	});
+
+	test("slice 3b (post-retreat): starved verdicts stay shadow in apply; clear verb acks starved rows only", () => {
+		const d = dir();
+		const { clearIssueStarvation, starvedIssues } = require("../src/dispatch-difficulty.ts") as typeof import("../src/dispatch-difficulty.ts");
+		for (let i = 0; i < 3; i++) recordIssueAttempt(d, "ISS-4", `run-${i}`, false, "agent-x", undefined, "OMPSQ-77");
+		expect(starvedIssues(d).map((x) => x.issueId)).toEqual(["ISS-4"]);
+		const applied = issueDifficultyDecision(d, { id: "ISS-4" }, "apply")!;
+		expect(applied.proceed).toBeTrue(); // round-2 retreat: apply awaits 3b-final
+		expect(applied.reason).toContain("gating awaits 3b-final");
+		expect(applied.reason).toContain("OMPSQ-77 STARVED (would defer)");
+		// The audited clear: ack recorded, gate silent, surface empty; double-clear is false (→404).
+		expect(clearIssueStarvation(d, "ISS-4", "lars")).toBeTrue();
+		expect(clearIssueStarvation(d, "ISS-4", "lars")).toBeFalse();
+		expect(issueDifficultyDecision(d, { id: "ISS-4" }, "apply")).toBeUndefined();
+		expect(starvedIssues(d).length).toBe(0);
+		expect(readIssueAttempts(d)["ISS-4"]!.clearedBy).toBe("lars");
 	});
 
 	test("one land breaks starvation; a mixed history never verdicts", () => {

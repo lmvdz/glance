@@ -11,7 +11,16 @@
  * pooled across model families: the model split is model-route's job; difficulty asks "does
  * this SIZE of work ever land here at all".
  *
- * SHIPPED SHADOW-ONLY, deliberately. The blind review (codex, 2026-08-04, three High findings,
+ * GATING STATUS: STILL SHADOW-ONLY, after TWO retreat rounds. Slice 3b built the evidence,
+ * the derived action-item rows, and a clear verb — and its blind review (codex, round 2) found
+ * five more holes before apply could be honest: the webapp consumer may drop the rows (no
+ * rendered control invokes the clear), ?repo= views hide verdicts (no repo on the row), clear
+ * is instantly re-starved by a pre-clear in-flight run (needs a generation baseline), the
+ * audit lacks prior-verdict/reason, and multi-manager GET/POST bindings mismatch in DB mode.
+ * plans/deepen-modules/14 "3b-final" carries that checklist; apply gates NOTHING until it
+ * clears. The TIER-pooled telemetry below remains shadow forever regardless.
+ *
+ * Original slice-1 record — SHIPPED SHADOW-ONLY, deliberately. The blind review (codex, 2026-08-04, three High findings,
  * all survived adjudication) showed the cheap gating version is wrong:
  *   1. class mismatch — this gate can only key tierOf(undefined)="mid" pre-spawn, but
  *      routeIntake assigns per-issue thinking downstream, so outcomes land in light/heavy while
@@ -113,6 +122,8 @@ export interface IssueAttemptRecord {
 	fails: number;
 	lastAt: number;
 	lastAgentId?: string;
+	/** Human-readable issue identifier (e.g. OMPSQ-42), captured at write time for surfaces. */
+	identifier?: string;
 	/** Idempotency ring: recent runIds that already billed an attempt (bounded, newest last) — a
 	 *  repeat of ANY of them is dropped, so A,B,A double-fire never double-bills (codex finding;
 	 *  consecutive-only dedup did not survive interleaved finalize/terminal fires). */
@@ -135,7 +146,7 @@ const SNAPSHOT_TTL_MS = 2000;
 const snapshotCache = new Map<string, { at: number; data: Record<string, IssueAttemptRecord> }>();
 
 /** Record one judged outcome for an issue. Record-only, never gates, never throws. */
-export function recordIssueAttempt(stateDir: string, issueId: string | undefined, runId: string | undefined, ok: boolean, agentId?: string, now = Date.now()): void {
+export function recordIssueAttempt(stateDir: string, issueId: string | undefined, runId: string | undefined, ok: boolean, agentId?: string, now = Date.now(), identifier?: string): void {
 	if (!issueId) return;
 	const file = issueAttempts(stateDir);
 	const all = file.read();
@@ -147,6 +158,7 @@ export function recordIssueAttempt(stateDir: string, issueId: string | undefined
 		fails: (prior?.fails ?? 0) + (ok ? 0 : 1),
 		lastAt: now,
 		...(agentId ? { lastAgentId: agentId } : {}),
+		...(identifier ?? prior?.identifier ? { identifier: identifier ?? prior?.identifier } : {}),
 		...(recentRunIds.length ? { recentRunIds } : {}),
 		// Ack semantics: a prior ack survives only while the issue stays BELOW the starve floor —
 		// once fresh failures reach the floor again, the ack drops and the question re-opens.
@@ -168,14 +180,43 @@ function issueAttemptsSnapshot(stateDir: string, now = Date.now()): Record<strin
 	return data;
 }
 
-/** Per-issue shadow verdict for the dispatcher's `difficultyFor` seam. Always proceeds while
+/** Starved-and-unacked entries, derived fresh from the ledger — the action-items surface and
+ *  the dispatcher gate both read THIS, so what renders and what gates can never disagree. */
+export function starvedIssues(stateDir: string, now = Date.now()): Array<{ issueId: string; record: IssueAttemptRecord }> {
+	void now;
+	return Object.entries(readIssueAttempts(stateDir))
+		.filter(([, r]) => r.attempts >= ISSUE_STARVE_ATTEMPTS && r.fails === r.attempts && !r.clearedBy)
+		.map(([issueId, record]) => ({ issueId, record }));
+}
+
+/** The audited operator clear verb (DESIGN v2 point 3): stamps the ack INTO the evidence row —
+ *  never deletes history, never touches the dispatch ledger, never implicit. Returns false when
+ *  there is nothing to clear (route maps that to 404, not a silent 200). */
+export function clearIssueStarvation(stateDir: string, issueId: string, actorId: string, now = Date.now()): boolean {
+	const file = mapFile<IssueAttemptRecord>(stateDir, "issue-attempts.json");
+	const all = file.read();
+	const rec = all[issueId];
+	// Only a currently-starved row is clearable (codex round-2): acking a healthy or already
+	// acked row is a 404, and the ack is a LOG-SILENCER until 3b-final's generation semantics
+	// make it a real gate reset.
+	if (!rec || rec.clearedBy || rec.attempts < ISSUE_STARVE_ATTEMPTS || rec.fails !== rec.attempts) return false;
+	all[issueId] = { ...rec, clearedBy: actorId, clearedAt: now };
+	file.write(all);
+	snapshotCache.delete(stateDir);
+	return true;
+}
+
+/** Per-issue verdict for the dispatcher's `difficultyFor` seam. Always proceeds while
  *  gating is unshipped; the reason carries the starve evidence when present. */
 export function issueDifficultyDecision(stateDir: string, issue: Pick<IssueRef, "id" | "identifier">, mode: DifficultyDispatchMode): DifficultyDispatchDecision | undefined {
 	if (mode === "off") return undefined;
 	const rec = issueAttemptsSnapshot(stateDir)[issue.id];
 	if (!rec || rec.attempts < ISSUE_STARVE_ATTEMPTS || rec.fails !== rec.attempts) return undefined; // nothing noteworthy — no log line
-	if (rec.clearedBy) return undefined; // acked by the (3b) human verb; silence until new evidence
-	const label = issue.identifier ?? issue.id;
-	const applyNote = mode === "apply" ? "apply requested but gating is unshipped (see module doc) — running shadow. " : "";
-	return { proceed: true, reason: `${applyNote}issue ${label} STARVED (would defer): ${rec.fails}/${rec.attempts} judged attempts failed — needs re-scope or a human call, not another unit` };
+	if (rec.clearedBy) return undefined; // acked by the human clear verb; silence until new evidence
+	const label = issue.identifier ?? rec.identifier ?? issue.id;
+	const evidence = `${rec.fails}/${rec.attempts} judged attempts failed — needs re-scope or a human call, not another unit`;
+	// Apply retreated to shadow a SECOND time (module doc "GATING STATUS"): round-2 review found
+	// the surface/clear/audit halves not yet honest. Loud refusal, never a silent downgrade.
+	const applyNote = mode === "apply" ? "apply requested but gating awaits 3b-final (see module doc GATING STATUS) — running shadow. " : "";
+	return { proceed: true, reason: `${applyNote}issue ${label} STARVED (would defer): ${evidence}` };
 }
