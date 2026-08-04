@@ -35,6 +35,13 @@ binding) — now the 3b-final checklist. Codex 31/31 on the ledger. The pattern 
 every "turn the gate on" attempt has been stopped by a blind pass finding the honesty gap the
 implementation missed. That is the verification bet working exactly as CS329A says it should.
 
+## Iteration 21 (2026-08-04, goal mode) — CONCERN 14 DONE
+The starvation gate went real: rendered control on MondaySurface, audited generation-reset
+clears, org binding by construction. The CS329A borrow that read simplest in the brief took
+FOUR review rounds and TWO deliberate retreats — the deepest verification story in the queue.
+Bonus discoveries filed: concern 17 (the attention-items pipeline is unrendered) and the
+cwd-accident process rule. Eight concerns done.
+
 ## Iteration 20 (2026-08-04, goal mode)
 14 3b-final items 2-4: generations, repo scoping, atomic audited clears. Codex round-3 caught
 the unaudited-clear hole + counter contradictions + legacy invisibility — three rounds deep and
