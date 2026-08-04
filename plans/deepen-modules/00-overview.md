@@ -24,6 +24,40 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
+## Iteration 24 (2026-08-04, goal mode) — CONCERN 05 DONE
+Slice 5: the ~650-line payload tail → src/observability-payloads.ts (17 exported builders,
+internals private). The queue's own boundary test caught the move's deep fabric import AND the
+stale allowlist entry — the allowlist discipline biting its author, exactly as designed. codex
+1 Low survived (EOF whitespace) + byte-diff/cache-singleton verification; grok flaked twice
+(honest coverage-gap row, no pretend-coverage). server.ts 4,890 → 3,709 over slices 3–5; the
+route-table seam is complete at 6 lane modules. TEN concerns done.
+
+## Iteration 23 (2026-08-04, goal mode) — CONCERN 11 DONE
+05 slice 4 = concern 11 whole: routes/voice.ts, both lanes (mint pre-gate context + 14-route
+manager-tier call cluster on decoded table params). Both blind passes CLEAN with their strongest
+verification yet — codex live-probed the reserve→compensate→finalize audit flow against an
+in-memory DB; grok byte-diffed every handler vs HEAD. ~310 more lines out of server.ts. Nine
+concerns done. Remaining in 05: payload builders only.
+
+## Iteration 22 (2026-08-04, goal mode)
+05 slice 3: routes/org.ts — 13 session-tier org/auth admin routes as data; the seam's third
+context shape (MatchContext base for pre-manager lanes, type-level relax only). Both blind
+passes CLEAN on behaviour (codex ran live fall-through probes on the role|remove RegExp);
+grok's 2 Low nits (dead imports, stale table doc) fixed + recorded. Suite 4947/1 (dead-exports
+pre-existing only), webapp 2024/0. Remaining in 05: voice lane (with 11), payload builders.
+
+## Iteration 11 (2026-08-04, goal mode)
+05 slice 2: attention/fog lane at the route seam, viewer context explicit (Route<C> generic).
+Suite 4947/1 (dead-exports pre-existing only). Both blind passes clean — no adjudicable rows.
+Process note: an unchained doc-update script failed its anchor assertion TWICE while the git
+commands after it ran anyway (newline, not &&) — two commits shipped with partial docs; healed
+here. Rule: docs via the Edit tool or a `&&`-chained script, never a bare heredoc + git line.
+(Iteration 10's note lives on the deepen/14 branch — branch topology, not an omission.)
+
+## Iteration 9 (2026-08-04, goal mode)
+05 slice 1 shipped: the route-table seam exists and is real (two lane adapters). Suite 4947/1
+(dead-exports pre-existing only — best state yet). PR: deepen/05-route-table branch.
+
 ## Queue pivot (2026-08-03, Lars)
 
 Concerns 14–16 are the CS329A borrows (plans/research-cs329a/BRIEF.md), absorbed into this queue
