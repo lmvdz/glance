@@ -104,7 +104,6 @@ import { assemblePlanBrief } from "./plan-brief.ts";
 import { planVoteGateOpen, tallyPlanVoteRound } from "./plan-votes.ts";
 import { hardenedGit } from "./git-harden.ts";
 import { rankKbDocs, searchFabric, type KbDoc, type KbDocType } from "./memory/fabric-search.ts";
-import { computeHorizonCurve, samplesFromReceipts } from "./horizon-curve.ts";
 import type { FabricSnapshot } from "./memory/fabric.ts";
 import { sanitizePatchDecisions } from "./memory/index.ts";
 import { redactAttentionForActor, redactSeenMapForActor } from "./attention.ts";
@@ -143,6 +142,8 @@ import type { ManagerRegistry } from "./manager-registry.ts";
 import type { ComplianceFinding } from "./compliance.ts";
 import { actorForRole, type AuthPolicy, RbacDenied, requestToken, requiredRole, resolveRole, roleAtLeast, tokenOk } from "./auth.ts";
 import { handleFeedbackRoutes } from "./feedback-routes.ts";
+import { handleMemoryRoutes } from "./routes/memory.ts";
+import { boundedNumber } from "./routes/table.ts";
 import { configuredSocialProviders, signupOpen } from "./db/auth.ts";
 import { getWorkosOrgPolicy, parseWorkosEvent, setWorkosOrgPolicy, ssoEnabled, verifyWorkosSignature } from "./workos.ts";
 import {
@@ -2317,56 +2318,11 @@ export class SquadServer {
 			const agents = await manager.visibleAgents(actor);
 			return Response.json(agents.map((dto) => ({ ...dto, ladderPriority: manager.ladderPriorityFor(dto, viewerId) })));
 		}
-		// R5: answers are a deliverable, not a transcript. They outlive the roster row that produced them,
-		// which is the single most common way a glance result used to evaporate — the agent reaped before
-		// anyone read what it found.
-		if (url.pathname === "/api/answers" && req.method === "GET") return Response.json(await manager.visibleAnswers(actor, url.searchParams.get("repo") ?? undefined));
-		if (url.pathname.startsWith("/api/answers/") && req.method === "GET") {
-			const answer = await manager.visibleAnswer(decodeURIComponent(url.pathname.slice("/api/answers/".length)), actor);
-			return answer ? Response.json(answer) : new Response("no such answer", { status: 404 });
-		}
-		// After-action reports mirror answers: durable post-mortems that outlive the (auto-reaped)
-		// roster row of the terminal unit that earned them — see after-action.ts.
-		if (url.pathname === "/api/after-action" && req.method === "GET") return Response.json(await manager.visibleAfterActions(actor));
-		if (url.pathname.startsWith("/api/after-action/") && req.method === "GET") {
-			const report = await manager.visibleAfterAction(decodeURIComponent(url.pathname.slice("/api/after-action/".length)), actor);
-			return report ? Response.json(report) : new Response("no such after-action report", { status: 404 });
-		}
-		// `glance symptom <query>` (comprehension concern 07): ranking stays server-side, reusing
-		// fabric-search's BM25 core (`rankKbDocs`) over symptom+whereToLook text rather than forking a
-		// second scorer — the same machinery `GET /api/fabric/search` drives off the flattened snapshot,
-		// applied here directly to `listSymptoms` so the CLI gets the FULL entry back (whereToLook array,
-		// fixedBy, landedAt) instead of a lossy KbDoc snippet. An empty/missing `q` returns no results
-		// (never the unranked full list) — ranking never degrades to an unranked dump. Browsing is a
-		// SEPARATE, explicit contract: `?browse=1` (no `q`) returns the newest entries by `landedAt`
-		// under the same actor-visible repo scoping, so the webapp can show recurring failure modes
-		// without the operator having to already know what to search for (Fog view's symptom list).
-		if (url.pathname === "/api/symptoms" && req.method === "GET") {
-			// Actor-derived repo scoping (batch-2 review): same discipline as /api/fog above — a `?repo=`
-			// outside the actor-visible set yields nothing, and no param means "everything visible",
-			// never "everything on the manager".
-			const visible = manager.attentionVisibleRepos(actor);
-			const repoParam = url.searchParams.get("repo");
-			const repos = repoParam ? (visible.has(normalizeRepoPath(repoParam)) ? [repoParam] : []) : [...visible];
-			const q = url.searchParams.get("q") ?? "";
-			const topK = boundedNumber(url.searchParams.get("topK"), 20, 1, 100);
-			if (url.searchParams.get("browse") === "1" && !q.trim()) {
-				if (repos.length === 0) return Response.json({ symptoms: [] as SymptomEntry[] });
-				const all = (await Promise.all(repos.map((r) => manager.symptoms(r)))).flat();
-				return Response.json({ symptoms: all.sort((a, b) => b.landedAt - a.landedAt).slice(0, topK) });
-			}
-			if (!q.trim() || repos.length === 0) return Response.json({ query: q, results: [] as SymptomSearchHit[] });
-			const all = (await Promise.all(repos.map((r) => manager.symptoms(r)))).flat();
-			const docs: KbDoc[] = all.map((s) => ({ type: "symptom", id: s.id, title: s.symptom, text: `${s.symptom} ${s.whereToLook.join(" ")}`, repo: s.repo, ts: s.landedAt }));
-			const byId = new Map(all.map((s) => [s.id, s]));
-			const results: SymptomSearchHit[] = rankKbDocs(docs, q, { topK })
-				.map((r) => {
-					const entry = byId.get(r.id);
-					return entry ? { id: entry.id, symptom: entry.symptom, whereToLook: entry.whereToLook, repo: entry.repo, fixedBy: entry.fixedBy, landedAt: entry.landedAt, score: r.score } : undefined;
-				})
-				.filter((r): r is SymptomSearchHit => r !== undefined);
-			return Response.json({ query: q, results });
-		}
+		// Memory-lane observability reads (answers, after-action, symptoms, episodes, horizon) live
+		// in routes/memory.ts — the second lane adapter at the routes/table.ts seam (deepen 05
+		// slice 1). Same fall-through contract as handleFeedbackRoutes.
+		const memoryResponse = await handleMemoryRoutes(url, req, manager, actor);
+		if (memoryResponse) return memoryResponse;
 		if (url.pathname === "/api/answers" && req.method === "POST") {
 			const decoded = decodeBody(AskBodySchema, await req.json().catch(() => null));
 			if (Result.isFailure(decoded)) return new Response("expected { repo, question }", { status: 400 });
@@ -2456,14 +2412,6 @@ export class SquadServer {
 		// itself re-filters both inputs through this same repo list before joining (DESIGN.md's tenant-
 		// scoping row: a tested deliverable, not a single call site's discipline), so this route's own
 		// pre-filtering is belt-and-suspenders, not the only guard.
-		// Horizon × reliability curve (CS329A borrow #2, plans/deepen-modules/15): the largest task
-		// size the fleet completes at 50%/80% reliability, computed from validated-land receipts
-		// only — the module documents the honest-coverage contract (abstains and verdict-less runs
-		// are disclosed, never guessed). Viewer-readable like the other observability reads.
-		if (url.pathname === "/api/horizon" && req.method === "GET") {
-			const { samples, coverage } = samplesFromReceipts(await manager.allReceipts());
-			return Response.json(computeHorizonCurve(samples, coverage));
-		}
 		if (url.pathname === "/api/fog" && req.method === "GET") {
 			if (manager.attentionDisabled()) return Response.json({ entries: [], repoHasHistory: {}, disabled: true });
 			const visible = manager.attentionVisibleRepos(actor);
@@ -2481,29 +2429,6 @@ export class SquadServer {
 			const historyByRepo: Record<string, boolean> = {};
 			for (const repo of repos) historyByRepo[repo] = repoHasHistory(seen, repo, now);
 			return Response.json({ entries, repoHasHistory: historyByRepo });
-		}
-		// Weekly episode brief (comprehension concern 09): list metas for the caller's visible repos
-		// (never full markdown — that's the :id route below), same actor-derived repo scoping as
-		// /api/fog and /api/symptoms above (fail closed on a foreign ?repo=).
-		if (url.pathname === "/api/episodes" && req.method === "GET") {
-			const visible = manager.attentionVisibleRepos(actor);
-			const repoParam = url.searchParams.get("repo");
-			const repos = repoParam ? (visible.has(normalizeRepoPath(repoParam)) ? [repoParam] : []) : [...visible];
-			const all = (await Promise.all(repos.map((r) => manager.episodes(r)))).flat();
-			const episodes: EpisodeMeta[] = all.sort((a, b) => b.isoWeek.localeCompare(a.isoWeek));
-			return Response.json({ episodes });
-		}
-		// Full markdown for one episode. `repo` is REQUIRED here (unlike the list route's optional
-		// filter): an isoWeek id alone isn't globally unique, only unique per repo, so there is no
-		// "search every visible repo" fallback — a missing/foreign repo reads as "unknown repo" rather
-		// than silently picking one.
-		if (url.pathname.startsWith("/api/episodes/") && req.method === "GET") {
-			const id = decodeURIComponent(url.pathname.slice("/api/episodes/".length));
-			const visible = manager.attentionVisibleRepos(actor);
-			const repoParam = url.searchParams.get("repo");
-			if (!repoParam || !visible.has(normalizeRepoPath(repoParam))) return new Response("unknown repo", { status: 400 });
-			const episode = await manager.episode(repoParam, id);
-			return episode ? Response.json(episode) : new Response("no such episode", { status: 404 });
 		}
 		if (url.pathname === "/api/projects" && req.method === "GET") return Response.json(manager.projects());
 		// Friction ledger (plans/daily-dogfood-engine/01): tenant-scoped like /api/projects (one ledger
@@ -5058,7 +4983,3 @@ function severityRank(s: ActionItem["severity"]): number {
 	return s === "high" ? 3 : s === "medium" ? 2 : 1;
 }
 
-function boundedNumber(raw: string | null, fallback: number, min: number, max: number): number {
-	const n = raw === null ? fallback : Number(raw);
-	return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.trunc(n))) : fallback;
-}

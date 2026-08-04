@@ -10,3 +10,4 @@
 {"at":"2026-08-04","lineage":"codex","concernClass":"silent-failure","survived":true,"source":"concern 16 reviewer-ledger diff","note":"all-malformed ledger printed as empty, suppressing the rejection count","severity":"medium"}
 {"at":"2026-08-04","lineage":"codex","concernClass":"cli-parsing","survived":true,"source":"concern 16 reviewer-ledger diff","note":"missing option value consumed the next flag as its value","severity":"low"}
 {"at":"2026-08-04","lineage":"codex","concernClass":"output-injection","survived":true,"source":"concern 16 reviewer-ledger diff","note":"unsanitized row strings could forge report lines via control chars","severity":"low"}
+{"at":"2026-08-04","lineage":"codex","concernClass":"semantics-drift","survived":true,"source":"deepen 05 slice 1 routes diff","note":"(.+) id patterns rejected the empty-id/trailing-slash cases the old startsWith accepted, changing degenerate-path responses","severity":"low"}

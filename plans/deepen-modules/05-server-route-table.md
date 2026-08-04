@@ -20,5 +20,14 @@ Slice 1: Route[] registry ({method, pattern, scope, handler}) + ~30-line matcher
 SECOND lane module after feedback-routes.ts, which is what makes the seam real. Later slices:
 voice lane (with concern 11), org/auth lane, payload builders move next to their lanes.
 
+## Slice ledger
+- Slice 1 done (2026-08-04, iteration 9): src/routes/table.ts (Route type + first-match dispatch,
+  string/RegExp patterns, undefined fall-through — the feedback-routes contract as data) +
+  src/routes/memory.ts (8 observability GETs moved verbatim, second lane adapter → seam is real).
+  boundedNumber de-cloned into the table module. codex found one real Low (empty-id domain drift,
+  fixed with (.*) + recorded); grok clean with itemized precedence checks. Remaining slices:
+  attention/fog lane (needs server-instance ctx made explicit), voice lane (with 11), org lane,
+  payload builders.
+
 ## Provenance
 Memory-lane report candidate 5 + whole-repo report candidate 2 (top-recommendation pair with 04).
