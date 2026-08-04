@@ -68,3 +68,55 @@ describe("difficultyDispatchDecision", () => {
 		}
 	});
 });
+
+describe("issue attempts (DESIGN v2 slice 3a) — evidence half, shadow verdicts", () => {
+	const { mkdtempSync } = require("node:fs") as typeof import("node:fs");
+	const { tmpdir } = require("node:os") as typeof import("node:os");
+	const path = require("node:path") as typeof import("node:path");
+	const { ISSUE_STARVE_ATTEMPTS, issueDifficultyDecision, readIssueAttempts, recordIssueAttempt } = require("../src/dispatch-difficulty.ts") as typeof import("../src/dispatch-difficulty.ts");
+	const dir = () => mkdtempSync(path.join(tmpdir(), "issue-attempts-"));
+
+	test("judged outcomes accumulate; the same runId never double-bills", () => {
+		const d = dir();
+		recordIssueAttempt(d, "ISS-1", "run-a", false, "agent-1");
+		recordIssueAttempt(d, "ISS-1", "run-a", false, "agent-1"); // finalize/terminal double-fire
+		recordIssueAttempt(d, "ISS-1", "run-b", false, "agent-2");
+		const rec = readIssueAttempts(d)["ISS-1"]!;
+		expect(rec.attempts).toBe(2);
+		expect(rec.fails).toBe(2);
+		expect(rec.lastAgentId).toBe("agent-2");
+	});
+
+	test("REGRESSION (codex): A,B,A interleaved double-fire never double-bills — ring dedup, not consecutive-only", () => {
+		const d = dir();
+		recordIssueAttempt(d, "ISS-ABA", "run-a", false);
+		recordIssueAttempt(d, "ISS-ABA", "run-b", false);
+		recordIssueAttempt(d, "ISS-ABA", "run-a", false); // late replay of run-a
+		expect(readIssueAttempts(d)["ISS-ABA"]!.attempts).toBe(2);
+	});
+
+	test("missing issueId writes nothing (chat/scout units carry no issue)", () => {
+		const d = dir();
+		recordIssueAttempt(d, undefined, "run-a", false);
+		expect(Object.keys(readIssueAttempts(d)).length).toBe(0);
+	});
+
+	test("starve verdict appears at 3/3 failed, stays shadow in every mode, and is silent below", () => {
+		const d = dir();
+		for (let i = 0; i < ISSUE_STARVE_ATTEMPTS - 1; i++) recordIssueAttempt(d, "ISS-2", `run-${i}`, false);
+		expect(issueDifficultyDecision(d, { id: "ISS-2", identifier: "OMPSQ-9" }, "shadow")).toBeUndefined();
+		recordIssueAttempt(d, "ISS-2", "run-final", false);
+		for (const mode of ["shadow", "apply"] as const) {
+			const v = issueDifficultyDecision(d, { id: "ISS-2", identifier: "OMPSQ-9" }, mode)!;
+			expect(v.proceed).toBeTrue();
+			expect(v.reason).toContain("OMPSQ-9 STARVED (would defer): 3/3");
+		}
+		expect(issueDifficultyDecision(d, { id: "ISS-2", identifier: "OMPSQ-9" }, "off")).toBeUndefined();
+	});
+
+	test("one land breaks starvation; a mixed history never verdicts", () => {
+		const d = dir();
+		for (let i = 0; i < 4; i++) recordIssueAttempt(d, "ISS-3", `run-${i}`, i === 1);
+		expect(issueDifficultyDecision(d, { id: "ISS-3" }, "shadow")).toBeUndefined();
+	});
+});

@@ -95,3 +95,87 @@ export function difficultyDispatchDecision(
 	}
 	return { proceed: true, reason: `${applyNote}difficulty SHADOW (would skip): tier "${verdict.tier}" has landed 0 of ${verdict.attempts} judged attempts — signal-free compute; the redesign owes this class an escalation verb` };
 }
+
+// ── Per-issue attempt evidence (DESIGN v2, slice 3a) ─────────────────────────────────────────
+// The DAPO-faithful unit: the ISSUE's own judged history, which dissolves the class-mismatch
+// finding by construction. Written at the SAME single site as recordModelOutcome (judged
+// outcomes only — retryable refusals and race "pending" placeholders write nothing), keyed
+// runId-idempotent so finalize/terminal double-fire cannot double-bill (grok finding).
+// GATING REMAINS UNSHIPPED until 3b lands the rendered surface + audited human clear verb
+// (DESIGN v2 points 3–5): verdicts here are shadow-only, like everything else in this module.
+
+import { mapFile } from "./ledger.ts";
+import type { IssueRef } from "./types.ts";
+
+export interface IssueAttemptRecord {
+	/** Judged attempts (landed or rejected — never blocked/retryable). */
+	attempts: number;
+	fails: number;
+	lastAt: number;
+	lastAgentId?: string;
+	/** Idempotency ring: recent runIds that already billed an attempt (bounded, newest last) — a
+	 *  repeat of ANY of them is dropped, so A,B,A double-fire never double-bills (codex finding;
+	 *  consecutive-only dedup did not survive interleaved finalize/terminal fires). */
+	recentRunIds?: string[];
+	/** Set by 3b's audited operator clear verb; presence means the starve verdict is acked. */
+	clearedBy?: string;
+	clearedAt?: number;
+}
+
+/** An issue is STARVED at ≥3 judged attempts, all failed (DESIGN: aligns the race-once ladder —
+ *  original + raced sibling + one more). */
+export const ISSUE_STARVE_ATTEMPTS = 3;
+
+const issueAttempts = (stateDir: string) => mapFile<IssueAttemptRecord>(stateDir, "issue-attempts.json");
+
+// One ledger parse per dispatch tick, not per candidate (codex: O(N×M) JSON on the event loop).
+// TTL sits under the dispatcher's poll interval, and every WRITE invalidates the snapshot, so
+// there is no read-after-write staleness — the cache only ever elides repeat reads within a tick.
+const SNAPSHOT_TTL_MS = 2000;
+const snapshotCache = new Map<string, { at: number; data: Record<string, IssueAttemptRecord> }>();
+
+/** Record one judged outcome for an issue. Record-only, never gates, never throws. */
+export function recordIssueAttempt(stateDir: string, issueId: string | undefined, runId: string | undefined, ok: boolean, agentId?: string, now = Date.now()): void {
+	if (!issueId) return;
+	const file = issueAttempts(stateDir);
+	const all = file.read();
+	const prior = all[issueId];
+	if (runId && prior?.recentRunIds?.includes(runId)) return; // any replay of a billed run: dropped
+	const recentRunIds = runId ? [...(prior?.recentRunIds ?? []), runId].slice(-8) : (prior?.recentRunIds ?? []);
+	all[issueId] = {
+		attempts: (prior?.attempts ?? 0) + 1,
+		fails: (prior?.fails ?? 0) + (ok ? 0 : 1),
+		lastAt: now,
+		...(agentId ? { lastAgentId: agentId } : {}),
+		...(recentRunIds.length ? { recentRunIds } : {}),
+		// Ack semantics: a prior ack survives only while the issue stays BELOW the starve floor —
+		// once fresh failures reach the floor again, the ack drops and the question re-opens.
+		...(ok ? {} : prior?.clearedBy && prior.fails + 1 < ISSUE_STARVE_ATTEMPTS ? { clearedBy: prior.clearedBy, clearedAt: prior.clearedAt } : {}),
+	};
+	file.write(all);
+	snapshotCache.delete(stateDir); // a write invalidates the tick snapshot — no read-after-write staleness
+}
+
+export function readIssueAttempts(stateDir: string): Record<string, IssueAttemptRecord> {
+	return issueAttempts(stateDir).read();
+}
+
+function issueAttemptsSnapshot(stateDir: string, now = Date.now()): Record<string, IssueAttemptRecord> {
+	const hit = snapshotCache.get(stateDir);
+	if (hit && now - hit.at < SNAPSHOT_TTL_MS) return hit.data;
+	const data = issueAttempts(stateDir).read();
+	snapshotCache.set(stateDir, { at: now, data });
+	return data;
+}
+
+/** Per-issue shadow verdict for the dispatcher's `difficultyFor` seam. Always proceeds while
+ *  gating is unshipped; the reason carries the starve evidence when present. */
+export function issueDifficultyDecision(stateDir: string, issue: Pick<IssueRef, "id" | "identifier">, mode: DifficultyDispatchMode): DifficultyDispatchDecision | undefined {
+	if (mode === "off") return undefined;
+	const rec = issueAttemptsSnapshot(stateDir)[issue.id];
+	if (!rec || rec.attempts < ISSUE_STARVE_ATTEMPTS || rec.fails !== rec.attempts) return undefined; // nothing noteworthy — no log line
+	if (rec.clearedBy) return undefined; // acked by the (3b) human verb; silence until new evidence
+	const label = issue.identifier ?? issue.id;
+	const applyNote = mode === "apply" ? "apply requested but gating is unshipped (see module doc) — running shadow. " : "";
+	return { proceed: true, reason: `${applyNote}issue ${label} STARVED (would defer): ${rec.fails}/${rec.attempts} judged attempts failed — needs re-scope or a human call, not another unit` };
+}

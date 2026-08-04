@@ -190,7 +190,7 @@ import { AutomationLog, type AutomationQuery } from "./automation-log.ts";
 import { isFirstTryGreen, isOn, learningFlags, LearningMetrics, type MetricRollupRow } from "./metrics.ts";
 import { reflect } from "./reflection.ts";
 import { failureAnnotation, recordFailureAnnotation } from "./memory/failure-memory.ts";
-import { difficultyDispatchDecision, difficultyDispatchMode } from "./dispatch-difficulty.ts";
+import { difficultyDispatchDecision, difficultyDispatchMode, issueDifficultyDecision, recordIssueAttempt } from "./dispatch-difficulty.ts";
 import { readModelOutcomes, recordModelOutcome, recordModelOutcomeBlocked, tierOf } from "./model-outcomes.ts";
 import { costGateMode, type CostVerdict, shadowCostCheck } from "./cost-gate.ts";
 import { recordCostLanded } from "./cost-aggregate.ts";
@@ -1680,6 +1680,9 @@ export class SquadManager extends EventEmitter {
 					if (mode === "off") return undefined; // off = silent, not a logged no-op per tick
 					return difficultyDispatchDecision(readModelOutcomes(this.stateDir), undefined, mode);
 				},
+				// Per-issue starve verdicts (DESIGN v2 seam — the tick-global dep above is telemetry
+				// only). Shadow until 3b ships the surface + audited clear; undefined = nothing to say.
+				difficultyFor: (_repo, issue) => issueDifficultyDecision(this.stateDir, issue, difficultyDispatchMode()),
 				liveAgents: () => this.list(),
 				scopeFinding: (repo, message) => this.fileScopeFinding("low", repo, message),
 			});
@@ -4439,6 +4442,11 @@ export class SquadManager extends EventEmitter {
 			// Never gates the land above; purely record-only, after the outcome is already known.
 			try {
 				recordModelOutcome(this.stateDir, effectiveModel, tierOf(rec.options.thinking), result.ok);
+				// Per-issue attempt evidence (deepen 14, DESIGN v2 single write point): judged outcomes
+				// only, runId-idempotent, record-only — the difficultyFor seam reads it as shadow.
+				// Active run id FIRST (codex finding: during a finalize race lastReceipt can still be the
+				// PREVIOUS run's receipt — preferring it dropped new outcomes as duplicates).
+				recordIssueAttempt(this.stateDir, dto.issue?.id, rec.run?.snapshot().runId ?? lastReceipt?.runId, result.ok, dto.id);
 				// Lane-keyed landed counter (concern 08's documented rollout wire): same record-only,
 				// never-gates posture as recordModelOutcome above.
 				if (result.ok) recordCostLanded(this.stateDir, effectiveModel, tierOf(rec.options.thinking), rec.dto.lane);
