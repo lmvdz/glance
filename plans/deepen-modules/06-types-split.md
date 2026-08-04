@@ -28,5 +28,21 @@ live in src/memory/.
   imports ChannelEntry from the lane). Remaining: land types (mostly lane-resident already),
   then the AgentDTO split (the hard one) + the minimal core extraction.
 
+- Land-types disposition (2026-08-04, iteration 25): NO MOVE. The audit found exactly one land
+  type left in types.ts — the `LandReadiness` alias — and it is feature-lane vocabulary
+  (FeatureWorktreeStatus.readiness, features.ts ranking), not land-lane machinery; the land
+  cluster (land.ts, land-ledger.ts, land-assessment/) already owns its own types. Moving one
+  alias would churn importers for zero depth. Recorded so the checklist item doesn't read as
+  forgotten.
+
+- Slice 3 done (2026-08-04, iteration 25): the AgentDTO split — six facet interfaces
+  (RosterCore/Harness/Workflow/Work/Land/Attention) with AgentDTO = their extends-intersection.
+  Wire-identical (types erase; tsc across all 112 importers is the proof), 72 fields in/out
+  verified by script, every doc comment moved with its field. tests/agent-dto-facets.test.ts
+  freezes the decomposition at compile time: mutual assignability both directions + pairwise
+  key disjointness (each field has exactly one home). Consumers can now name the slice they
+  read — attention-ladder.ts's Pick<> idiom promoted to the declaration site. Remaining: the
+  minimal core extraction (last slice).
+
 ## Provenance
 Memory-lane report candidate 6; whole-repo report concurs via its wire-contract candidate (08).

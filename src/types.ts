@@ -761,37 +761,22 @@ export interface AgentSessionSummary {
 }
 
 /** Serializable per-agent snapshot sent to surfaces. */
-export interface AgentDTO {
+/**
+ * AgentDTO facets (deepen 06, slice 3) — the 205-line roster DTO split by DOMAIN at the
+ * declaration site. `AgentDTO` below is the intersection of the six facets, so the WIRE SHAPE
+ * is byte-identical (types erase); what changes is that a consumer can now name the slice it
+ * actually reads (`AgentLandFacet`, `AgentAttentionFacet`, …) instead of the whole DTO —
+ * attention-ladder.ts's `Pick<AgentDTO, …>` narrowing idiom, promoted to the declaration site.
+ * Every field kept its incident-bought doc comment; nothing was renamed or re-typed.
+ */
+
+/** The roster spine — identity, liveness, and placement. Every surface needs these. */
+export interface AgentRosterCore {
 	id: string;
 	name: string;
 	status: AgentStatus;
 	/** Which runtime backs this agent. */
 	kind: AgentKind;
-	/** Which coding-agent harness backs this unit (omp/pi/claude-code/…) — for trust legibility so a
-	 *  surface never renders, e.g., "always-ask" over a harness that can't ask. Absent ⇒ "omp". */
-	harness?: string;
-	/** Harness capability summary surfaced for the UI (approval channel + restart survival). */
-	harnessCaps?: { toolApproval: "native" | "none" | "preauth-allowlist"; resumable: boolean; hostTools: boolean; contextInjection: "native" | "none" | "mcp" };
-	/** NAMES ONLY of the MCP servers resolved for this unit (`McpServerSpec.name`) — deliberately never
-	 *  the full spec, so `command`/`env`/`url`/`headers` (secrets/exec) never reach a surface. Absent ⇒
-	 *  no MCP servers attached. */
-	mcpServerNames?: string[];
-	/** Specialization of this unit ("tester" writes the test first, "observer" reproduces a
-	 *  regression), orthogonal to `kind`. Absent = general coder (today's default). */
-	executionRole?: ExecutionRole;
-	/** Parent workflow agent id, when this agent is a spawned fan-out branch. */
-	parentId?: string;
-	/** The node in the PARENT's workflow graph this branch executes (structural lineage — not a display
-	 *  string; distinct from `name`, which is mutable and identical across parallel siblings of one node). */
-	parentNodeId?: string;
-	/** Distinguishes same-node siblings (parallel fan-out) and cold-resume re-spawns of the same node. */
-	branchIndex?: number;
-	/** Persisted subagent tree snapshot (task-spawned children), carried opaquely through restore paths.
-	 *  Concern 02 owns the merge/dirty/flush semantics that populate and reconcile this on a live agent. */
-	subagents?: SubagentNode[];
-	/** Static workflow graph topology, captured once per run. Concern 03 owns emission (workflow.graph
-	 *  journal event) and the consuming switch case; this field is pure plumbing until then. */
-	workflowGraph?: WorkflowGraphSnapshot;
 	/** flue-service only: passed the acceptance gate at onboard time. */
 	verified?: boolean;
 	/** Repo root the worktree was cut from (host-local path; for display). */
@@ -817,6 +802,37 @@ export interface AgentDTO {
 	startedAt?: number;
 	/** Rough estimated completion time (ms epoch) from progress rate; absent until there's progress. A hint, not a deadline. */
 	etaAt?: number;
+	/** ms epoch of last activity of any kind. */
+	lastActivity: number;
+	/** Number of transcript entries (for cheap change detection). */
+	messageCount: number;
+	/** Last error string, if status === "error". */
+	error?: string;
+	/** Pending human-input requests (status === "input" when non-empty). */
+	pending: PendingRequest[];
+	/** Console chat unit promoted into a working unit (E02 / daily-onramp 06) — the wire mirror of
+	 *  `PersistedAgent.promoted`, stamped in `promote()` and carried through the reattach DTO builds.
+	 *  Display bridge only (the webapp hides its "Make this a unit" affordance and shows unit chrome
+	 *  off this); the promote gate itself stays server-side on the persisted options. */
+	promoted?: boolean;
+	/** True only on the synthetic DTO `create()` returns when a spawn is parked at the WIP cap (OMP_SQUAD_QUEUE_ON_FULL). Never set on a roster agent. */
+	queued?: boolean;
+}
+
+/** Harness/runtime detail — which engine backs the unit and what its live session looks like. */
+export interface AgentHarnessFacet {
+	/** Which coding-agent harness backs this unit (omp/pi/claude-code/…) — for trust legibility so a
+	 *  surface never renders, e.g., "always-ask" over a harness that can't ask. Absent ⇒ "omp". */
+	harness?: string;
+	/** Harness capability summary surfaced for the UI (approval channel + restart survival). */
+	harnessCaps?: { toolApproval: "native" | "none" | "preauth-allowlist"; resumable: boolean; hostTools: boolean; contextInjection: "native" | "none" | "mcp" };
+	/** NAMES ONLY of the MCP servers resolved for this unit (`McpServerSpec.name`) — deliberately never
+	 *  the full spec, so `command`/`env`/`url`/`headers` (secrets/exec) never reach a surface. Absent ⇒
+	 *  no MCP servers attached. */
+	mcpServerNames?: string[];
+	/** Specialization of this unit ("tester" writes the test first, "observer" reproduces a
+	 *  regression), orthogonal to `kind`. Absent = general coder (today's default). */
+	executionRole?: ExecutionRole;
 	/** Context window usage 0..1. */
 	contextPct?: number;
 	/** Approximate tokens currently in the context window. */
@@ -835,8 +851,104 @@ export interface AgentDTO {
 	session?: AgentSessionSummary;
 	/** Current todo phases from the backing harness, preserved for rich web rendering. */
 	todoPhases?: RpcSessionState["todoPhases"];
-	/** Pending human-input requests (status === "input" when non-empty). */
-	pending: PendingRequest[];
+	/** Pre-dispatch harness scorecard (advisory shadow, `harness-scorecard.ts`) — a static score of this
+	 *  unit's harness bundle across the five subsystems (instructions/tools/environment/state/feedback),
+	 *  computed once at `createWithId` and stamped here for display. COMPUTED, NOT PERSISTED: absent from
+	 *  `PersistedAgent`, so it is never written to state.json and never influences a restore/adopt path —
+	 *  a fresh score is always exactly as correct as this spawn's inputs, and an adopted/restored agent
+	 *  from before this shipped (or from a restart, which doesn't recompute it) simply renders without one.
+	 *  Advisory only: nothing reads this field to gate, delay, or retry a spawn. */
+	harnessScorecard?: HarnessScorecard;
+}
+
+/** Workflow lineage and topology — populated only on workflow units and their fan-out branches. */
+export interface AgentWorkflowFacet {
+	/** Parent workflow agent id, when this agent is a spawned fan-out branch. */
+	parentId?: string;
+	/** The node in the PARENT's workflow graph this branch executes (structural lineage — not a display
+	 *  string; distinct from `name`, which is mutable and identical across parallel siblings of one node). */
+	parentNodeId?: string;
+	/** Distinguishes same-node siblings (parallel fan-out) and cold-resume re-spawns of the same node. */
+	branchIndex?: number;
+	/** Persisted subagent tree snapshot (task-spawned children), carried opaquely through restore paths.
+	 *  Concern 02 owns the merge/dirty/flush semantics that populate and reconcile this on a live agent. */
+	subagents?: SubagentNode[];
+	/** Static workflow graph topology, captured once per run. Concern 03 owns emission (workflow.graph
+	 *  journal event) and the consuming switch case; this field is pure plumbing until then. */
+	workflowGraph?: WorkflowGraphSnapshot;
+	/** Workflow definition backing this agent, when kind === "workflow". */
+	workflow?: WorkflowMemberConfig;
+	/** Live workflow checkpoint/rollup, emitted on every stage boundary. */
+	workflowState?: WorkflowRunState;
+	/** Derived from `workflowState.terminal` (present and not yet superseded by a fork) — survives a
+	 *  restart because it's recomputed from the persisted marker rather than tracked independently. Gates
+	 *  the webapp's "Fork from step N" control; an old daemon that never sets this field hides the button
+	 *  instead of showing one that 404s. */
+	forkAvailable?: boolean;
+	/** Derived from `workflowState.terminal` when the terminal reason is a RECOVERABLE fix-up-ladder
+	 *  visit-cap exhaustion (present, not superseded) — gates the webapp's "Continue" control, which
+	 *  re-runs the verify gate in place on the SAME worktree (retry budgets reset) instead of forking a
+	 *  fresh branch off HEAD. An old daemon that never sets this hides the button rather than 404ing. */
+	continueAvailable?: boolean;
+}
+
+/** The work item and scope contract — what the unit is advancing and under what authority. */
+export interface AgentWorkFacet {
+	/** Work item this agent is advancing (e.g. a Plane issue). */
+	issue?: IssueRef;
+	/** Resolved work lane (adw-factory-borrows concern 02) — `opts.lane` (operator) > `issue.lane`
+	 *  (Plane label) > classifier (`routeIntake`) > `"feature"` default. Stamped once at create time,
+	 *  same precedence-clamp invariant as `IssueRef.lane`/`CreateAgentOptions.lane`. */
+	lane?: WorkLane;
+	/** Feature this agent belongs to (single source of truth for membership). */
+	featureId?: string;
+	/** Repo-relative path prefixes this agent will read. */
+	requires?: string[];
+	/** Repo-relative path prefixes this agent owns — legacy shorthand for produced writes. */
+	owns?: string[];
+	/** Repo-relative path prefixes this agent will write/create. Defaults to `owns`. */
+	produces?: string[];
+	/** Whether the scope contract came from an operator or planner inference. */
+	scopeSource?: ScopeSource;
+	/** Requested authority persisted for this run; effectiveMode is capped by daemon policy and blockers. */
+	autonomyMode?: AutonomyMode;
+	/** Actual authority after approval/env caps and blockers. */
+	effectiveMode?: AutonomyMode;
+	/** Why authority is currently capped to observe. */
+	blockedReason?: string;
+	/** Actions this surface may offer for the current effective mode. */
+	availableActions?: AgentAction[];
+	/** Run-end self-confidence 0..1, stamped by `scoreConfidence` (src/confidence.ts) at `finalizeRun`.
+	 *  Absent until a run has actually finished. Below `OMP_SQUAD_CONFIDENCE_FLOOR` caps
+	 *  `effectiveAutonomyMode` to `assist` (propose-only) — see autonomy.ts. */
+	confidence?: number;
+}
+
+/** Land/trust posture — proofs, validator verdicts, and PR-mode landing state. */
+export interface AgentLandFacet {
+	/** Current proof freshness summary for this agent's worktree. */
+	verificationState?: VerificationState;
+	/** Stable proof reference/fingerprint for display and audit correlation. */
+	proof?: { commit?: string; command?: string; ranAt?: number; fingerprint?: string };
+	/** Epic 3 independent-validator verdict for this agent's most recent land attempt (DESIGN §5) —
+	 *  the input Epic 5's confidence scorer reads via `validation.agreement`. Absent until a land
+	 *  attempt has run the validator gate. */
+	validation?: ValidationRecord;
+	/** Verified by the auto-land loop in confirm mode; awaiting a one-tap Land. */
+	landReady?: boolean;
+	/** PR-mode landing metadata (concern 06), set at push/merge time. Absent in local mode. */
+	prUrl?: string;
+	prNumber?: number;
+	prState?: "draft" | "open" | "merged" | "closed";
+	/** Re-adopted from a surviving worktree on relaunch and not yet re-run (OMPSQ-164): its work was
+	 *  complete before the stop, so the event-driven auto-land never fires. The orchestrator lands such
+	 *  an agent directly (merge→gate→rollback) instead of an isolated worktree pre-verify. Cleared the
+	 *  moment it actually runs again (a turn starts). */
+	adopted?: boolean;
+}
+
+/** Attention/push surface — the non-blocking signals and the needs-you ladder's computed rung. */
+export interface AgentAttentionFacet {
 	/** Non-blocking "I'm unsure, here's a proposal" notes the agent raised via `squad_report` (Epic 5
 	 *  DESIGN §D2). Deliberately NOT a `PendingRequest` — `pending.length` is load-bearing for
 	 *  `blockedReason`/`effectiveAutonomyMode`'s observe cap, and a report must never block the agent.
@@ -856,88 +968,6 @@ export interface AgentDTO {
 	 *  trailing 1h, computed over the FULL ring server-side — NOT derived from `transitions` above,
 	 *  which is capped and would undercount a busy/flapping agent. Feeds insights.ts hotspot ranking. */
 	errorTransitions1h?: number;
-	/** ms epoch of last activity of any kind. */
-	lastActivity: number;
-	/** Number of transcript entries (for cheap change detection). */
-	messageCount: number;
-	/** Last error string, if status === "error". */
-	error?: string;
-	/** Work item this agent is advancing (e.g. a Plane issue). */
-	issue?: IssueRef;
-	/** Resolved work lane (adw-factory-borrows concern 02) — `opts.lane` (operator) > `issue.lane`
-	 *  (Plane label) > classifier (`routeIntake`) > `"feature"` default. Stamped once at create time,
-	 *  same precedence-clamp invariant as `IssueRef.lane`/`CreateAgentOptions.lane`. */
-	lane?: WorkLane;
-	/** Feature this agent belongs to (single source of truth for membership). */
-	featureId?: string;
-	/** Repo-relative path prefixes this agent will read. */
-	requires?: string[];
-	/** Repo-relative path prefixes this agent owns — legacy shorthand for produced writes. */
-	owns?: string[];
-	/** Repo-relative path prefixes this agent will write/create. Defaults to `owns`. */
-	produces?: string[];
-	/** Whether the scope contract came from an operator or planner inference. */
-	scopeSource?: ScopeSource;
-	/** Workflow definition backing this agent, when kind === "workflow". */
-	workflow?: WorkflowMemberConfig;
-	/** Live workflow checkpoint/rollup, emitted on every stage boundary. */
-	workflowState?: WorkflowRunState;
-	/** Derived from `workflowState.terminal` (present and not yet superseded by a fork) — survives a
-	 *  restart because it's recomputed from the persisted marker rather than tracked independently. Gates
-	 *  the webapp's "Fork from step N" control; an old daemon that never sets this field hides the button
-	 *  instead of showing one that 404s. */
-	forkAvailable?: boolean;
-	/** Derived from `workflowState.terminal` when the terminal reason is a RECOVERABLE fix-up-ladder
-	 *  visit-cap exhaustion (present, not superseded) — gates the webapp's "Continue" control, which
-	 *  re-runs the verify gate in place on the SAME worktree (retry budgets reset) instead of forking a
-	 *  fresh branch off HEAD. An old daemon that never sets this hides the button rather than 404ing. */
-	continueAvailable?: boolean;
-	/** Requested authority persisted for this run; effectiveMode is capped by daemon policy and blockers. */
-	autonomyMode?: AutonomyMode;
-	/** Actual authority after approval/env caps and blockers. */
-	effectiveMode?: AutonomyMode;
-	/** Current proof freshness summary for this agent's worktree. */
-	verificationState?: VerificationState;
-	/** Stable proof reference/fingerprint for display and audit correlation. */
-	proof?: { commit?: string; command?: string; ranAt?: number; fingerprint?: string };
-	/** Epic 3 independent-validator verdict for this agent's most recent land attempt (DESIGN §5) —
-	 *  the input Epic 5's confidence scorer reads via `validation.agreement`. Absent until a land
-	 *  attempt has run the validator gate. */
-	validation?: ValidationRecord;
-	/** Why authority is currently capped to observe. */
-	blockedReason?: string;
-	/** Actions this surface may offer for the current effective mode. */
-	availableActions?: AgentAction[];
-	/** Run-end self-confidence 0..1, stamped by `scoreConfidence` (src/confidence.ts) at `finalizeRun`.
-	 *  Absent until a run has actually finished. Below `OMP_SQUAD_CONFIDENCE_FLOOR` caps
-	 *  `effectiveAutonomyMode` to `assist` (propose-only) — see autonomy.ts. */
-	confidence?: number;
-	/** Verified by the auto-land loop in confirm mode; awaiting a one-tap Land. */
-	landReady?: boolean;
-	/** PR-mode landing metadata (concern 06), set at push/merge time. Absent in local mode. */
-	prUrl?: string;
-	prNumber?: number;
-	prState?: "draft" | "open" | "merged" | "closed";
-	/** Re-adopted from a surviving worktree on relaunch and not yet re-run (OMPSQ-164): its work was
-	 *  complete before the stop, so the event-driven auto-land never fires. The orchestrator lands such
-	 *  an agent directly (merge→gate→rollback) instead of an isolated worktree pre-verify. Cleared the
-	 *  moment it actually runs again (a turn starts). */
-	adopted?: boolean;
-	/** Console chat unit promoted into a working unit (E02 / daily-onramp 06) — the wire mirror of
-	 *  `PersistedAgent.promoted`, stamped in `promote()` and carried through the reattach DTO builds.
-	 *  Display bridge only (the webapp hides its "Make this a unit" affordance and shows unit chrome
-	 *  off this); the promote gate itself stays server-side on the persisted options. */
-	promoted?: boolean;
-	/** True only on the synthetic DTO `create()` returns when a spawn is parked at the WIP cap (OMP_SQUAD_QUEUE_ON_FULL). Never set on a roster agent. */
-	queued?: boolean;
-	/** Pre-dispatch harness scorecard (advisory shadow, `harness-scorecard.ts`) — a static score of this
-	 *  unit's harness bundle across the five subsystems (instructions/tools/environment/state/feedback),
-	 *  computed once at `createWithId` and stamped here for display. COMPUTED, NOT PERSISTED: absent from
-	 *  `PersistedAgent`, so it is never written to state.json and never influences a restore/adopt path —
-	 *  a fresh score is always exactly as correct as this spawn's inputs, and an adopted/restored agent
-	 *  from before this shipped (or from a restart, which doesn't recompute it) simply renders without one.
-	 *  Advisory only: nothing reads this field to gate, delay, or retry a spawn. */
-	harnessScorecard?: HarnessScorecard;
 	/** Mirrors `PersistedAgent.completionPushArmed`, but ONLY at the exact emitted event that is this
 	 *  agent's genuine terminal completion (see squad-manager.ts's `onAgentEvent` — a workflow's per-node
 	 *  `agent_end` idles are deliberately NOT terminal; only the one paired with `workflow_done` is).
@@ -966,6 +996,10 @@ export interface AgentDTO {
 	 *  attention-ladder.ts's module doc for why per-viewer state can't live here). */
 	ladderPriority?: LadderPriority;
 }
+
+/** The full roster DTO — the intersection of the six facets above. The wire shape is unchanged
+ *  by the split (types erase); the facets exist so a consumer can NAME the slice it reads. */
+export interface AgentDTO extends AgentRosterCore, AgentHarnessFacet, AgentWorkflowFacet, AgentWorkFacet, AgentLandFacet, AgentAttentionFacet {}
 
 // RunReceipt / ReceiptRollup: MOVED to src/receipts.ts (deepen 06 slice 2) — the receipts lane
 // owns the run-exhaust shapes. Type-only re-exports keep existing importers compiling.
