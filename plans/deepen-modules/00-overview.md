@@ -24,6 +24,33 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
+## Iteration 26 (2026-08-04, goal mode) — CONCERN 06 DONE
+Final slice: src/core-types.ts, the 14-type shared kernel (identity, lifecycle, transcript
+grammar, work-item ref) with one lane import and everything depending on it — the deletion
+test a kernel should pass. codex CLEAN at its most thorough (byte-identical blocks, 160
+type-only bindings, cycle erased under isolatedModules); grok quota-flaked (gap row). types.ts
+1,723 → 1,454 across the concern. ELEVEN concerns done; 08/09/10/12/17 + 13 needs-lars remain.
+
+## Iteration 25 (2026-08-04, goal mode)
+06 slice 3: the AgentDTO split (the hard one) — six domain facets, DTO = their intersection,
+wire-identical, 72 fields in/out verified twice (my script + codex's independent AST audit).
+The slice's own freeze test was the iteration's lesson: v1 compared the DTO against its own
+facets (circular — codex proved deleting etaAt stayed green); v2 is an independent 72-entry
+frozen field+optionality map. Land-types item closed as a recorded no-move disposition.
+Remaining in 06: the minimal core extraction.
+
+## Iteration 18 (2026-08-04, goal mode — new PR; per-branch overview notes on their PRs)
+06 slice 1: feedback types leave the shared kernel for their lane, compat re-exports keep the
+world compiling. Suite 4947/1. The migration pattern (move + type-only re-export + lane-local
+import) is now proven for the remaining domains.
+
+## Iteration 19 (2026-08-04, goal mode — PR #315)
+06 slice 2: FeatureDecision home = the decision ledger (barrel-routed after codex caught the
+deep import my own allowlist would have fired on — reviewer and boundary test agreeing is the
+system working); receipt shapes home = receipts.ts. Suite 4947/2 (dead-exports pre-existing +
+one isolated-pass ordering flake). Discovery: room/channel types migrated organically long ago —
+the codebase was already partly ahead of the concern.
+
 ## Iteration 17 (2026-08-04, goal mode — PR #314) — CONCERN 07 DONE
 Gather port shipped: ok-typed sources end failure-as-drift for good; fingerprint v2 makes
 rendered omissions drift-visible; codex 4 more survived (incl. the silent-empty recreated one
