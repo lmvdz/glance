@@ -24,6 +24,11 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
+## Iteration 18 (2026-08-04, goal mode — new PR; per-branch overview notes on their PRs)
+06 slice 1: feedback types leave the shared kernel for their lane, compat re-exports keep the
+world compiling. Suite 4947/1. The migration pattern (move + type-only re-export + lane-local
+import) is now proven for the remaining domains.
+
 ## Queue pivot (2026-08-03, Lars)
 
 Concerns 14–16 are the CS329A borrows (plans/research-cs329a/BRIEF.md), absorbed into this queue

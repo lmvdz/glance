@@ -274,79 +274,20 @@ export interface IssueRef {
 
 // ── Feedback Loop domain/wire types ─────────────────────────────────────────
 
-export type FeedbackStatus = "new" | "needs-validation" | "accepted" | "promoted" | "rejected";
-export type FeedbackKind = "bug" | "feature" | "friction";
-export type FeedbackRewardStatus = "none" | "pending" | "approved" | "paid" | "void";
-export type FeedbackValidationVote = "valid" | "invalid" | "unsure";
-
-export interface FeedbackCampaign {
-	id: string;
-	name: string;
-	repo: string;
-	tokenHash: string;
-	allowedOrigins: string[];
-	rewardCents?: number;
-	rewardCurrency?: string;
-	createdAt: number;
-	archived?: boolean;
-}
-
-export interface FeedbackAttachment {
-	id: string;
-	kind: "screenshot";
-	contentType: "image/png" | "image/jpeg";
-	bytes: number;
-	path?: string;
-	sha256: string;
-}
-
-export interface FeedbackItem {
-	id: string;
-	campaignId: string;
-	repo: string;
-	kind: FeedbackKind;
-	title: string;
-	description: string;
-	url?: string;
-	userId?: string;
-	userEmail?: string;
-	browser?: string;
-	viewport?: string;
-	metadata: Record<string, string>;
-	attachment?: FeedbackAttachment;
-	status: FeedbackStatus;
-	rewardStatus: FeedbackRewardStatus;
-	planeIssue?: IssueRef;
-	createdAt: number;
-	updatedAt: number;
-}
-
-export interface FeedbackValidationResponse {
-	id: string;
-	feedbackId: string;
-	campaignId: string;
-	repo: string;
-	respondent: string;
-	vote: FeedbackValidationVote;
-	pain?: number;
-	note?: string;
-	createdAt: number;
-}
-
-export interface FeedbackReward {
-	id: string;
-	feedbackId: string;
-	campaignId: string;
-	repo: string;
-	amount: number;
-	currency: string;
-	status: FeedbackRewardStatus;
-	provider?: string;
-	externalRef?: string;
-	reviewer?: string;
-	createdAt: number;
-	updatedAt: number;
-}
+// ── Feedback domain types: MOVED to src/feedback.ts (deepen 06, slice 1) ───────────────────────
+// Type-only re-exports keep every existing importer compiling; new code should import from
+// "./feedback.ts" directly. The re-export is erased at compile time — no runtime cycle exists.
+export type {
+	FeedbackStatus,
+	FeedbackKind,
+	FeedbackRewardStatus,
+	FeedbackValidationVote,
+	FeedbackCampaign,
+	FeedbackAttachment,
+	FeedbackItem,
+	FeedbackValidationResponse,
+	FeedbackReward,
+} from "./feedback.ts";
 
 /** A Plane issue resolved with its body for the planner task view — the promote-issue Tier-2
  *  schema parsed into the sections the UI shows (description / acceptance criteria / verification /
