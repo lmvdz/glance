@@ -81,6 +81,14 @@ reviewers' leading findings were lost to output truncation and are NOT recorded)
    than reference them; that is POSITION Layer-2 rule 2 debt, tracked as its own future
    concern rather than smuggled into this one.
 
+## Implementation core DONE (2026-08-04, iteration 16): fingerprint + drift rebuild over two
+weeks + conflict-guarded save + publish-intent marker + quarantine (v2-shaped) + .prev
+publish-then-rotate + hash-validated reads + fabric skip + episodeExists retired. Seven
+survived findings fixed (codex 5, grok 2); grok's stale-fog flag refuted (asOfBuild is the
+design) — the ledger's first non-survived grok row. REMAINING (final slice → STATUS: done):
+the gather moves into an ok-typed EpisodeSources port on the manager side (amendment 4's
+failure-vs-drift currently holds at whole-gather granularity only).
+
 ## Implementation slice (after red-team): per DESIGN v2 — EpisodeSources ok-typed port +
 gather move + snapshot-coherent fingerprint (ID-set hash) + quarantine state + .prev
 rotate-on-change + barrel/test updates + legacy one-shot migration; EpisodeLoop dissolves.
