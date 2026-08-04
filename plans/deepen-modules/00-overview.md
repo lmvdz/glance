@@ -29,6 +29,13 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
 world compiling. Suite 4947/1. The migration pattern (move + type-only re-export + lane-local
 import) is now proven for the remaining domains.
 
+## Iteration 19 (2026-08-04, goal mode — PR #315)
+06 slice 2: FeatureDecision home = the decision ledger (barrel-routed after codex caught the
+deep import my own allowlist would have fired on — reviewer and boundary test agreeing is the
+system working); receipt shapes home = receipts.ts. Suite 4947/2 (dead-exports pre-existing +
+one isolated-pass ordering flake). Discovery: room/channel types migrated organically long ago —
+the codebase was already partly ahead of the concern.
+
 ## Queue pivot (2026-08-03, Lars)
 
 Concerns 14–16 are the CS329A borrows (plans/research-cs329a/BRIEF.md), absorbed into this queue

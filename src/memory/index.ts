@@ -18,7 +18,7 @@
 
 // ── the decision ledger: the lane's single write path ───────────────────────────
 export { DecisionLedger, normalizeSupersedesRef, sanitizePatchDecisions } from "./decision-ledger.ts";
-export type { DecisionLedgerStore, RecordDecisionOutcome, CaptureDecisionInput, CaptureDecisionResult } from "./decision-ledger.ts";
+export type { DecisionLedgerStore, RecordDecisionOutcome, CaptureDecisionInput, CaptureDecisionResult, FeatureDecision } from "./decision-ledger.ts";
 
 // ── reviewer-ensemble weights: measured per-lineage precision (Weaver-lite) ─────
 export { MIN_FINDINGS_FOR_WEIGHT, parseReviewerLedger, renderReviewerReport, reviewerPrecision } from "./reviewer-weights.ts";

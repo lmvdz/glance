@@ -21,5 +21,12 @@ live in src/memory/.
   (quota-shaped, noted — no coverage pretended). Next slices: room/channel types → channels
   lane, memory types → src/memory, land types, then the 210-line AgentDTO split (the hard one).
 
+- Slice 2 done (2026-08-04, iteration 19): FeatureDecision → src/memory/decision-ledger.ts (via
+  the barrel — codex caught the deep import my own boundary test would have flagged; row
+  recorded) and RunReceipt/ReceiptRollup → src/receipts.ts; types.ts keeps import-then-re-export
+  because it uses both internally. Room/channel types turned out ALREADY migrated (types.ts
+  imports ChannelEntry from the lane). Remaining: land types (mostly lane-resident already),
+  then the AgentDTO split (the hard one) + the minimal core extraction.
+
 ## Provenance
 Memory-lane report candidate 6; whole-repo report concurs via its wire-contract candidate (08).
