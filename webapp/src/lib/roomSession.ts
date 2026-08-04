@@ -1,4 +1,5 @@
-import type { ChannelEntry } from './dto';
+import type { ChannelEntry, PresenceSnapshot } from './dto';
+import { reduceChannelEntries } from './hub';
 
 /**
  * Room-session cursor (plans/deepen-modules/10, slice 1) — the seq-cursor discipline that was
@@ -104,5 +105,122 @@ export class RoomSessionCursor {
 		const incoming = entries.filter((e) => e.seq > this.lastSeqValue);
 		if (incoming.length) this.lastSeqValue = Math.max(this.lastSeqValue, latestSeq(incoming));
 		return { incoming, lastSeq: this.lastSeqValue };
+	}
+}
+
+// ── Slice 2: the transport port + session orchestrator ─────────────────────────────────────────
+
+/** Everything the session needs from the network — the PORT. Production adapts apiJson; tests
+ *  script it with controllable promises, which is what finally makes the load/poll/reconnect
+ *  INTERLEAVINGS unit-testable (slow snapshot racing a switch, poll racing live, etc). */
+export interface RoomTransport {
+	fetchEntries(channelId: string, since: number): Promise<ChannelEntry[]>;
+	fetchPresence(): Promise<PresenceSnapshot>;
+}
+
+/** Where decisions land — thin adapters over the caller's state setters. Resolved through a
+ *  ref-style getter at call time so React callers can pass their latest closures without
+ *  recreating the session (the session, like the cursor it owns, outlives renders). */
+export interface RoomSessionSinks {
+	applyEntries(apply: (prev: ChannelEntry[]) => ChannelEntry[]): void;
+	applyPresence(presence: PresenceSnapshot): void;
+	/** Mark CHANNELID read at seq — parameterized (grok HIGH on this slice): the session always
+	 *  names the channel the operation was issued for, so a completion landing in the
+	 *  render→effects window can never mark the newly-routed channel with an old channel's seq
+	 *  (the latest-closure sink pattern made the old closure-captured channel unsafe). */
+	markRead(channelId: string, seq: number): void;
+	loadStarted(): void;
+	loadFinished(error?: string): void;
+}
+
+/**
+ * The session orchestrator: owns one RoomSessionCursor plus the transport calls the four
+ * HubShell effects used to make inline. An EPOCH stamp replaces the old `alive` boolean —
+ * every openChannel bumps it, and any async continuation from a previous epoch (a slow
+ * snapshot response, a poll that started before the switch) discards itself. Combined with
+ * the cursor's own channel tag, the two stale-response classes are closed at different
+ * layers: the epoch kills stale OPENS, the tag kills stale RESYNCS.
+ */
+export class RoomSession {
+	private readonly cursor: RoomSessionCursor;
+	private epoch = 0;
+
+	constructor(
+		private readonly transport: RoomTransport,
+		private readonly sinks: () => RoomSessionSinks,
+		initialChannelId: string,
+	) {
+		this.cursor = new RoomSessionCursor(initialChannelId);
+	}
+
+	get lastSeq(): number {
+		return this.cursor.lastSeq;
+	}
+
+	get activeChannelId(): string {
+		return this.cursor.activeChannelId;
+	}
+
+	/** Live WS entries — synchronous, cursor-gated. Returns the unread candidates so the caller
+	 *  can update its channel-badge state (which lives with the channel list, not here). */
+	ingestLive(channelId: string, entries: readonly ChannelEntry[]): ChannelEntry[] {
+		this.cursor.beginChannel(channelId); // idempotent switch guard (codex HIGH, slice 1)
+		const { incoming, unreadCandidates, lastSeq } = this.cursor.ingestLive(entries);
+		if (incoming.length) {
+			this.sinks().applyEntries((prev) => reduceChannelEntries(prev, [...incoming], channelId));
+			this.sinks().markRead(channelId, lastSeq);
+		}
+		return unreadCandidates;
+	}
+
+	/** The just-posted entry from the send path. */
+	advanceTo(seq: number): void {
+		this.cursor.advanceTo(seq);
+	}
+
+	/** Channel open: initial snapshot + presence, epoch-guarded, merge-not-replace (codex
+	 *  MEDIUM, slice 1: a live entry that raced ahead of the snapshot must not flicker out). */
+	async openChannel(channelId: string): Promise<void> {
+		this.cursor.beginChannel(channelId);
+		const myEpoch = ++this.epoch;
+		this.sinks().loadStarted();
+		try {
+			const [entries, presence] = await Promise.all([
+				this.transport.fetchEntries(channelId, 0),
+				// Parity with the old inline load (grok MEDIUM): a failed presence fetch applies the
+				// EMPTY snapshot rather than stranding the previous channel's users on screen.
+				this.transport.fetchPresence().catch(() => ({ users: [] }) as PresenceSnapshot),
+			]);
+			if (myEpoch !== this.epoch) return; // a newer open superseded this one
+			this.sinks().applyEntries((prev) => reduceChannelEntries(prev, entries, channelId));
+			this.sinks().markRead(channelId, this.cursor.loadComplete(entries));
+			this.sinks().applyPresence(presence);
+			this.sinks().loadFinished();
+		} catch (err) {
+			if (myEpoch !== this.epoch) return;
+			this.sinks().loadFinished(err instanceof Error ? err.message : 'Could not load channel');
+		}
+	}
+
+	/** Poll/reconnect resync for the CURRENT channel — the fetch is tagged with the channel it
+	 *  was issued for, so a response landing after a switch is rejected by the cursor. */
+	async resync(): Promise<void> {
+		const channelId = this.cursor.activeChannelId;
+		const entries = await this.transport.fetchEntries(channelId, this.cursor.lastSeq);
+		const { incoming, lastSeq } = this.cursor.ingestResync(channelId, entries);
+		if (!incoming.length) return;
+		this.sinks().applyEntries((prev) => reduceChannelEntries(prev, incoming, channelId));
+		this.sinks().markRead(channelId, lastSeq);
+	}
+
+	/** Invalidate every in-flight openChannel (grok LOW: the old `alive` flag also covered
+	 *  unmount; callers put this in their teardown so a straggler can't sink-apply after it). */
+	cancelPending(): void {
+		this.epoch++;
+	}
+
+	async refreshPresence(): Promise<void> {
+		const presence = await this.transport.fetchPresence();
+		this.sinks().applyPresence(presence);
 	}
 }

@@ -27,6 +27,17 @@ its interface and HubShell becomes a view.
   entries + cursor regression — merge + Math.max). grok flaked (gap row). Remaining: transport
   port + scripted adapter (slice 2), optimistic-card reconciliation (slice 3).
 
+- Slice 2 done (2026-08-04, iteration 34): RoomSession orchestrator over the RoomTransport
+  PORT — openChannel (epoch-guarded supersession), channel-tagged resync, presence refresh;
+  HubShell constructs it once (lazy useRef + latest-closure sinks in a committed layout
+  effect) and its four wiring effects became one open+interval effect and two thin appliers.
+  Four scripted-transport interleaving tests (stale open discarded, live-ahead-of-snapshot
+  survives, stale poll rejected, stale failure discarded). BOTH lineages delivered convergent
+  rounds: grok HIGH (latest-closure markRead TOCTOU — the session now parameterizes the
+  channel) + MEDIUM (presence-fallback parity) + LOW (unmount cancel); codex independently
+  found the same markRead fix and presence parity, plus the render-phase ref write (sinks now
+  publish via useLayoutEffect). Seven adjudicated rows across the two rounds.
+
 ## Provenance
 Whole-repo report candidate 5 (Worth exploring); the stale-running-claims incident class
 (PR #216) is the recurring bug this seam would have caught.

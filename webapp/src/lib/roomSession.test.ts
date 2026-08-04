@@ -100,3 +100,88 @@ describe('send path', () => {
 		expect(s.lastSeq).toBe(11);
 	});
 });
+
+// ── Slice 2: RoomSession over a scripted transport — the interleavings themselves ────────────
+
+import { RoomSession, type RoomSessionSinks, type RoomTransport } from './roomSession';
+import type { PresenceSnapshot } from './dto';
+
+function deferred<T>() {
+	let resolve!: (v: T) => void;
+	let reject!: (e: unknown) => void;
+	const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+	return { promise, resolve, reject };
+}
+
+function harness() {
+	const pending: Array<{ channelId: string; since: number; d: ReturnType<typeof deferred<ChannelEntry[]>> }> = [];
+	const transport: RoomTransport = {
+		fetchEntries(channelId, since) {
+			const d = deferred<ChannelEntry[]>();
+			pending.push({ channelId, since, d });
+			return d.promise;
+		},
+		fetchPresence: () => Promise.resolve({ users: [] } as unknown as PresenceSnapshot),
+	};
+	let entries: ChannelEntry[] = [];
+	const markReads: Array<[string, number]> = [];
+	const loads: string[] = [];
+	const sinks: RoomSessionSinks = {
+		applyEntries: (apply) => { entries = apply(entries); },
+		applyPresence: () => {},
+		markRead: (channelId, seq) => markReads.push([channelId, seq]),
+		loadStarted: () => loads.push('start'),
+		loadFinished: (err) => loads.push(err ? `error:${err}` : 'done'),
+	};
+	const session = new RoomSession(transport, () => sinks, 'a');
+	return { session, pending, view: () => entries.map((e) => e.id), markReads, loads };
+}
+
+test('a slow snapshot from the OLD channel is discarded whole by the epoch guard', async () => {
+	const h = harness();
+	const openA = h.session.openChannel('a');
+	const openB = h.session.openChannel('b'); // supersedes before A's snapshot resolves
+	h.pending[1]!.d.resolve([entry('b1', 'b', 1)]);
+	await openB;
+	h.pending[0]!.d.resolve([entry('a1', 'a', 50)]); // A's slow snapshot lands last
+	await openA;
+	expect(h.view()).toEqual(['b1']); // A's snapshot never touched the timeline
+	expect(h.session.lastSeq).toBe(1); // and never corrupted the cursor
+});
+
+test('a live entry racing ahead of the snapshot survives the merge and the cursor stays monotonic', async () => {
+	const h = harness();
+	const open = h.session.openChannel('a');
+	h.session.ingestLive('a', [entry('a6', 'a', 6)]); // live lands before the snapshot response
+	h.pending[0]!.d.resolve([entry('a1', 'a', 1), entry('a5', 'a', 5)]);
+	await open;
+	expect(h.view()).toEqual(expect.arrayContaining(['a6', 'a1', 'a5']));
+	expect(h.session.lastSeq).toBe(6); // Math.max, not the snapshot head
+});
+
+test('a poll response landing after a channel switch is rejected by the tag', async () => {
+	const h = harness();
+	const openA = h.session.openChannel('a');
+	h.pending[0]!.d.resolve([entry('a1', 'a', 5)]);
+	await openA;
+	const poll = h.session.resync(); // issued for channel a (since=5)
+	const openB = h.session.openChannel('b');
+	h.pending[2]!.d.resolve([entry('b1', 'b', 2)]);
+	await openB;
+	h.pending[1]!.d.resolve([entry('a9', 'a', 900)]); // the stale poll lands now
+	await poll;
+	expect(h.view()).toEqual(['b1']);
+	expect(h.session.lastSeq).toBe(2);
+});
+
+test('openChannel failure reports the error without poisoning a superseding open', async () => {
+	const h = harness();
+	const openA = h.session.openChannel('a');
+	const openB = h.session.openChannel('b');
+	h.pending[0]!.d.reject(new Error('boom'));
+	await openA;
+	expect(h.loads.filter((l) => l.startsWith('error'))).toEqual([]); // stale failure discarded
+	h.pending[1]!.d.resolve([entry('b1', 'b', 1)]);
+	await openB;
+	expect(h.loads.at(-1)).toBe('done');
+});

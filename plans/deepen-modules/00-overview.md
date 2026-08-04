@@ -31,6 +31,13 @@ a CRITICAL TDZ my own misread check-run waved through, the effect-ordering HIGH,
 flicker MEDIUM — all fixed + tested. The layered-verification pattern held: native catch, then
 reviewer catches, each finding a different failure class. grok flaked (8/9 today).
 
+## Iteration 34 (2026-08-04, goal mode)
+10 slice 2: RoomSession over the transport port — the interleavings themselves are now
+scripted tests. SECOND convergent cross-lineage round (grok's TOCTOU HIGH and codex's
+render-phase-ref-write M arrived at the same parameterized-markRead fix from different
+directions; presence parity found by both). The port pattern is proven: ports-and-adapters
+made a React wiring hazard class table-testable.
+
 ## Queue pivot (2026-08-03, Lars)
 
 Concerns 14–16 are the CS329A borrows (plans/research-cs329a/BRIEF.md), absorbed into this queue

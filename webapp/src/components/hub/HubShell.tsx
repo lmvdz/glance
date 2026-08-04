@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Hash, Loader2, Search, Users, X } from 'lucide-react';
 import { Composer, type ModelOption } from '../chat/Composer';
 import { ChannelTimeline } from './ChannelTimeline';
@@ -46,7 +46,7 @@ import { buildPromptCommand, channelAgentSessionId, channelDraftSessionId, ensur
 import { resolveMentionRoute } from '../../lib/mentionGrammar';
 import type { AgentDTO, Channel, ChannelEntry, CommandAckDTO, PresenceSnapshot } from '../../lib/dto';
 import { presenceCount, reduceChannelEntries } from '../../lib/hub';
-import { RoomSessionCursor } from '../../lib/roomSession';
+import { RoomSession, type RoomSessionSinks } from '../../lib/roomSession';
 import { DEFAULT_CHANNEL_ID, hubHref, unitHref, type HubRoute } from '../../lib/router';
 import { useTaskContext } from '../../context/TaskContext';
 
@@ -158,10 +158,23 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState('');
   const activeChannelId = route.kind === 'hub' ? route.channelId : DEFAULT_CHANNEL_ID;
-  // The seq-cursor discipline lives in RoomSessionCursor (lib/roomSession.ts, concern 10) —
-  // decisions come back as data; these effects only apply them to React state. Declared AFTER
-  // activeChannelId (codex CRITICAL: the first draft read it in the initializer from the TDZ).
-  const sessionRef = useRef(new RoomSessionCursor(activeChannelId));
+  // The room-session orchestrator (lib/roomSession.ts, concern 10 slice 2): owns the cursor +
+  // transport calls; these effects apply its decisions. Sinks resolve through sinksRef at call
+  // time (latest-closure pattern) so the session is constructed exactly once. Declared AFTER
+  // activeChannelId (codex CRITICAL on slice 1: the first draft read it from the TDZ).
+  const sinksRef = useRef<RoomSessionSinks>(null as unknown as RoomSessionSinks);
+  const sessionRef = useRef<RoomSession | null>(null);
+  if (sessionRef.current === null) {
+    sessionRef.current = new RoomSession(
+      {
+        fetchEntries: async (channelId, since) => (await apiJson<{ entries?: ChannelEntry[] }>(`/api/channels/${encodeURIComponent(channelId)}/entries?since=${since}`)).entries ?? [],
+        fetchPresence: () => apiJson<PresenceSnapshot>('/api/room/presence'),
+      },
+      () => sinksRef.current,
+      activeChannelId,
+    );
+  }
+  const session = sessionRef.current;
   // Declared up here, beside the room's other per-channel state, because `handleSend` below routes
   // composer text through it — the workspace's own derivations live further down, near the render.
   const call = useRoomCall(activeChannelId);
@@ -195,83 +208,62 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
     setChannels(payload.channels?.length ? payload.channels : [DEFAULT_CHANNEL]);
   }, []);
 
-  const markRead = useCallback((seq: number) => {
+  const markReadFor = useCallback((channelId: string, seq: number) => {
     if (!Number.isFinite(seq) || seq <= 0) return;
-    void apiJson(`/api/channels/${encodeURIComponent(activeChannelId)}/read`, jsonInit('POST', { lastReadSeq: seq })).then(() => {
-      setChannels((prev) => prev.map((item) => item.id === activeChannelId ? { ...item, lastReadSeq: Math.max(item.lastReadSeq ?? 0, seq), unreadCount: 0 } : item));
+    void apiJson(`/api/channels/${encodeURIComponent(channelId)}/read`, jsonInit('POST', { lastReadSeq: seq })).then(() => {
+      setChannels((prev) => prev.map((item) => item.id === channelId ? { ...item, lastReadSeq: Math.max(item.lastReadSeq ?? 0, seq), unreadCount: 0 } : item));
     }).catch(() => undefined);
-  }, [activeChannelId]);
+  }, []);
+
+  // Latest-closure sinks for the session, published in a COMMITTED layout effect (codex M:
+  // React forbids non-init ref writes during render — an interrupted render must never expose
+  // uncommitted closures to in-flight session work). markRead is parameterized by the session
+  // (grok HIGH): never the render closure's channel.
+  useLayoutEffect(() => {
+    sinksRef.current = {
+      applyEntries: setEntries,
+      applyPresence: setPresence,
+      markRead: markReadFor,
+      loadStarted: () => setLoading(true),
+      loadFinished: (error) => { setError(error ?? ''); setLoading(false); },
+    };
+  });
 
   useEffect(() => {
-    // Synchronous channel guard (codex HIGH): this effect runs BEFORE the load effect on a
-    // channel-switch render, so the cursor must be re-pointed here or an old-channel live entry
-    // could be accepted and markRead'd against the NEW channel. beginChannel is idempotent.
-    sessionRef.current.beginChannel(activeChannelId);
-    const { incoming, unreadCandidates, lastSeq } = sessionRef.current.ingestLive(liveChannelEntries);
+    // The session applies timeline decisions itself (synchronous switch guard included — codex
+    // HIGH on slice 1); only the channel-badge state, which lives with the channel list, stays here.
+    const unreadCandidates = session.ingestLive(activeChannelId, liveChannelEntries);
     if (unreadCandidates.length) {
       setChannels((prev) => prev.map((channel) => {
         const count = unreadCandidates.filter((entry) => entry.channelId === channel.id && entry.seq > (channel.lastReadSeq ?? 0)).length;
         return count ? { ...channel, unreadCount: (channel.unreadCount ?? 0) + count } : channel;
       }));
     }
-    if (!incoming.length) return;
-    setEntries((prev) => reduceChannelEntries(prev, incoming, activeChannelId));
-    markRead(lastSeq);
-  }, [activeChannelId, liveChannelEntries, markRead]);
+  }, [activeChannelId, liveChannelEntries, session]);
 
   useEffect(() => {
     if (livePresence.users.length > 0) setPresence(livePresence);
   }, [livePresence]);
 
-  const resyncSince = useCallback(async (since: number) => {
-    const payload = await apiJson<{ entries?: ChannelEntry[] }>(`/api/channels/${encodeURIComponent(activeChannelId)}/entries?since=${since}`);
-    const { incoming, lastSeq } = sessionRef.current.ingestResync(activeChannelId, payload.entries ?? []);
-    if (!incoming.length) return;
-    setEntries((prev) => reduceChannelEntries(prev, incoming, activeChannelId));
-    markRead(lastSeq);
-  }, [activeChannelId, markRead]);
-
   useEffect(() => {
-    let alive = true;
-    const load = async () => {
-      try {
-        const [channelPayload, presencePayload] = await Promise.all([
-          apiJson<{ entries?: ChannelEntry[] }>(`/api/channels/${encodeURIComponent(activeChannelId)}/entries?since=0`),
-          apiJson<PresenceSnapshot>('/api/room/presence').catch(() => EMPTY_PRESENCE),
-        ]);
-        if (!alive) return;
-        // MERGE the snapshot into current state (codex MEDIUM): reduceChannelEntries filters
-        // both sides to activeChannelId, so old-channel rows drop out and a live entry that
-        // arrived AHEAD of this snapshot response survives instead of flickering out until the
-        // next poll recovers it.
-        setEntries((prev) => reduceChannelEntries(prev, channelPayload.entries ?? [], activeChannelId));
-        markRead(sessionRef.current.loadComplete(channelPayload.entries ?? []));
-        setPresence(presencePayload);
-        setError('');
-      } catch (err) {
-        if (alive) setError(err instanceof Error ? err.message : 'Could not load channel');
-      } finally {
-        if (alive) setLoading(false);
-      }
-    };
-    setLoading(true);
-    // Channel switch RESETS the cursor before the load (a hardening over the old inline refs:
-    // the previous channel's seq can no longer suppress the new channel's live entries in the
-    // pre-load window — the stale-claims class, PR #216).
-    sessionRef.current.beginChannel(activeChannelId);
+    // openChannel owns the load flow (epoch-guarded, merge-not-replace); the 5s poll delegates
+    // to session.resync (channel-tagged) + refreshPresence. The old `alive` flag is the epoch.
     void loadChannels().catch(() => undefined);
-    void load();
+    void session.openChannel(activeChannelId);
     const interval = setInterval(() => {
-      void resyncSince(sessionRef.current.lastSeq).catch(() => undefined);
-      void apiJson<PresenceSnapshot>('/api/room/presence').then(setPresence).catch(() => undefined);
+      void session.resync().catch(() => undefined);
+      void session.refreshPresence().catch(() => undefined);
     }, 5000);
-    return () => { alive = false; clearInterval(interval); };
-  }, [activeChannelId, loadChannels, resyncSince, markRead]);
+    return () => {
+      clearInterval(interval);
+      session.cancelPending(); // grok LOW: stragglers can't sink-apply after teardown/switch
+    };
+  }, [activeChannelId, loadChannels, session]);
 
   useEffect(() => {
     if (!connected || loading) return;
-    void resyncSince(sessionRef.current.lastSeq).catch(() => undefined);
-  }, [connected, loading, resyncSince]);
+    void session.resync().catch(() => undefined);
+  }, [connected, loading, session]);
 
   useEffect(() => {
     if (!commandAcks.length) return;
@@ -363,7 +355,7 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
       sendConsoleCommand({ type: 'typing', channelId: activeChannelId, active: false } as any);
       const result = await postChannelMessage({ apiJson }, activeChannelId, text, replyTarget?.id);
       setEntries((prev) => reduceChannelEntries(prev, [result.entry], activeChannelId));
-      sessionRef.current.advanceTo(result.entry.seq);
+      session.advanceTo(result.entry.seq);
       setAnchorEntryId(result.entry.id);
       setReplyTarget(undefined);
       const routeResult = resolveMentionRoute(text, agents);
