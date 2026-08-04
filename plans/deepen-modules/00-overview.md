@@ -35,6 +35,11 @@ binding) — now the 3b-final checklist. Codex 31/31 on the ledger. The pattern 
 every "turn the gate on" attempt has been stopped by a blind pass finding the honesty gap the
 implementation missed. That is the verification bet working exactly as CS329A says it should.
 
+## Iteration 20 (2026-08-04, goal mode)
+14 3b-final items 2-4: generations, repo scoping, atomic audited clears. Codex round-3 caught
+the unaudited-clear hole + counter contradictions + legacy invisibility — three rounds deep and
+the reviewer still earns every pass. Items 1 (rendered control) + 5 (org binding) remain.
+
 ## Iteration 13 (2026-08-04, goal mode)
 14 slice 3a: the evidence half per DESIGN v2, shadow-only. Four codex findings survived+fixed
 (runId race, A-B-A dedup, map growth, O(N×M) reads); my own test caught the snapshot cache's

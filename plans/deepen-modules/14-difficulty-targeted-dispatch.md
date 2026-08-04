@@ -99,7 +99,21 @@ no clear control), no repo on rows (?repo= views hide verdicts), clear lacks a g
 baseline (pre-clear in-flight failure instantly re-starves), audit thin, DB-mode GET/POST
 manager-binding mismatch.
 
-## 3b-final checklist (→ then STATUS: done; each item = a round-2 finding):
+## 3b-final items 2–4 DONE (2026-08-04, iteration 20): repo on rows (equality filter,
+legacy rows fail-VISIBLE), clear-generation watermarks (effectiveEvidence everywhere; pre-clear
+stragglers bill the old generation — regression-tested; ok-straggler + ack rules covered),
+full dual-backend awaited audit with prior EFFECTIVE verdict + reason, and audit-failure
+atomicity by compensating restore (an unaudited clear cannot survive). Codex round-3: 3 more
+survived+fixed (atomicity, counter contradiction, legacy invisibility); org binding re-flagged
+= item 5 (already tracked); 2 findings lost to truncation (gap, not absence).
+
+## 3b-final REMAINING (→ then STATUS: done):
+1. Rendered control: trace fleetRoster → component, wire a 'redispatch' AttentionAction kind
+   calling POST /api/issues/:id/redispatch (insights.ts fold-in currently drops non-health rows).
+5. Org/manager binding: starved rows carry their org; cross-org bootstrap views render
+   view-only until the POST can resolve the originating manager.
+
+## OLD 3b-final checklist (superseded above; each item = a round-2 finding):
 1. Rendered control: wire the row through the webapp consumer with a redispatch action that
    calls the POST (verify insights.ts actually surfaces non-health items; else the room card).
 2. `repo` persisted on attempt rows at the write site; equality filter under ?repo=.

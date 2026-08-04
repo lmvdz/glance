@@ -123,12 +123,30 @@ describe("issue attempts (DESIGN v2 slice 3a) — evidence half, shadow verdicts
 		expect(applied.proceed).toBeTrue(); // round-2 retreat: apply awaits 3b-final
 		expect(applied.reason).toContain("gating awaits 3b-final");
 		expect(applied.reason).toContain("OMPSQ-77 STARVED (would defer)");
-		// The audited clear: ack recorded, gate silent, surface empty; double-clear is false (→404).
-		expect(clearIssueStarvation(d, "ISS-4", "lars")).toBeTrue();
-		expect(clearIssueStarvation(d, "ISS-4", "lars")).toBeFalse();
+		// The audited clear returns the prior verdict for the audit trail; double-clear is a 404.
+		expect(clearIssueStarvation(d, "ISS-4", "lars")?.prior.fails).toBe(3);
+		expect(clearIssueStarvation(d, "ISS-4", "lars")).toBeUndefined();
 		expect(issueDifficultyDecision(d, { id: "ISS-4" }, "apply")).toBeUndefined();
 		expect(starvedIssues(d).length).toBe(0);
 		expect(readIssueAttempts(d)["ISS-4"]!.clearedBy).toBe("lars");
+	});
+
+	test("3b-final item 3: clear starts a fresh generation; pre-clear stragglers bill the old one", () => {
+		const d = dir();
+		const { clearIssueStarvation, effectiveEvidence } = require("../src/dispatch-difficulty.ts") as typeof import("../src/dispatch-difficulty.ts");
+		const t0 = 1000;
+		for (let i = 0; i < 3; i++) recordIssueAttempt(d, "ISS-GEN", `run-${i}`, false, "a", t0 + i, "OMPSQ-88", { repo: "/repo", runStartedAt: t0 + i - 10 });
+		expect(clearIssueStarvation(d, "ISS-GEN", "lars", t0 + 100)).toBeDefined();
+		// A run STARTED before the clear (t0+50 < clear at t0+100) finishing after: old generation.
+		recordIssueAttempt(d, "ISS-GEN", "run-straggler", false, "a", t0 + 200, undefined, { repo: "/repo", runStartedAt: t0 + 50 });
+		let rec = readIssueAttempts(d)["ISS-GEN"]!;
+		expect(effectiveEvidence(rec)).toEqual({ attempts: 0, fails: 0 }); // straggler cannot re-starve
+		expect(issueDifficultyDecision(d, { id: "ISS-GEN" }, "shadow")).toBeUndefined();
+		// Three genuinely-new failures re-starve the fresh generation.
+		for (let i = 0; i < 3; i++) recordIssueAttempt(d, "ISS-GEN", `run-new-${i}`, false, "a", t0 + 300 + i, undefined, { repo: "/repo", runStartedAt: t0 + 250 + i });
+		rec = readIssueAttempts(d)["ISS-GEN"]!;
+		expect(effectiveEvidence(rec)).toEqual({ attempts: 3, fails: 3 });
+		expect(issueDifficultyDecision(d, { id: "ISS-GEN" }, "shadow")?.reason).toContain("3/3");
 	});
 
 	test("one land breaks starvation; a mixed history never verdicts", () => {

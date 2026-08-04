@@ -2652,7 +2652,9 @@ export class SquadServer {
 		// floor), explicit, 404 when there is nothing to clear — never a silent 200.
 		const mstarve = url.pathname.match(/^\/api\/issues\/([^/]+)\/redispatch$/);
 		if (mstarve && req.method === "POST") {
-			const cleared = await manager.clearIssueStarvationVerdict(decodeURIComponent(mstarve[1]), actor);
+			const body: unknown = await req.json().catch(() => ({}));
+			const reason = body && typeof body === "object" && "reason" in body && typeof body.reason === "string" ? body.reason : undefined;
+			const cleared = await manager.clearIssueStarvationVerdict(decodeURIComponent(mstarve[1]), actor, reason);
 			return cleared ? Response.json({ ok: true }) : new Response("no starvation verdict to clear for this issue", { status: 404 });
 		}
 		const mfsupersede = url.pathname.match(/^\/api\/features\/([^/]+)\/decisions\/supersede$/);
@@ -4924,7 +4926,9 @@ async function actionItemsPayload(managers: SquadManager[], url: URL, actor: Act
 	// so a crash can never lose the announcement and an ack silences it everywhere at once.
 	for (const m of managers) {
 		for (const s of m.starvedIssueAttempts()) {
-			if (repo) continue; // issue attempts are daemon-scoped; repo-filtered views skip them
+			// 3b-final item 2 + codex: equality filter — and a LEGACY row with no repo stays VISIBLE
+			// under any filter (fail-visible; hiding an active verdict is the worse failure).
+			if (repo && s.repo && s.repo !== repo) continue;
 			items.push({
 				id: `starved:${s.issueId}`,
 				severity: "high",

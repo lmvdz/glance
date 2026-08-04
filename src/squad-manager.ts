@@ -190,7 +190,7 @@ import { AutomationLog, type AutomationQuery } from "./automation-log.ts";
 import { isFirstTryGreen, isOn, learningFlags, LearningMetrics, type MetricRollupRow } from "./metrics.ts";
 import { reflect } from "./reflection.ts";
 import { failureAnnotation, recordFailureAnnotation } from "./memory/failure-memory.ts";
-import { clearIssueStarvation, difficultyDispatchDecision, difficultyDispatchMode, issueDifficultyDecision, recordIssueAttempt, starvedIssues } from "./dispatch-difficulty.ts";
+import { clearIssueStarvation, difficultyDispatchDecision, difficultyDispatchMode, effectiveEvidence, issueDifficultyDecision, recordIssueAttempt, restoreIssueAttemptRecord, starvedIssues } from "./dispatch-difficulty.ts";
 import { readModelOutcomes, recordModelOutcome, recordModelOutcomeBlocked, tierOf } from "./model-outcomes.ts";
 import { costGateMode, type CostVerdict, shadowCostCheck } from "./cost-gate.ts";
 import { recordCostLanded } from "./cost-aggregate.ts";
@@ -4446,7 +4446,7 @@ export class SquadManager extends EventEmitter {
 				// only, runId-idempotent, record-only — the difficultyFor seam reads it as shadow.
 				// Active run id FIRST (codex finding: during a finalize race lastReceipt can still be the
 				// PREVIOUS run's receipt — preferring it dropped new outcomes as duplicates).
-				recordIssueAttempt(this.stateDir, dto.issue?.id, rec.run?.snapshot().runId ?? lastReceipt?.runId, result.ok, dto.id, undefined, dto.issue?.identifier);
+				recordIssueAttempt(this.stateDir, dto.issue?.id, rec.run?.snapshot().runId ?? lastReceipt?.runId, result.ok, dto.id, undefined, dto.issue?.identifier, { repo: dto.repo, runStartedAt: lastReceipt?.startedAt });
 				// Lane-keyed landed counter (concern 08's documented rollout wire): same record-only,
 				// never-gates posture as recordModelOutcome above.
 				if (result.ok) recordCostLanded(this.stateDir, effectiveModel, tierOf(rec.options.thinking), rec.dto.lane);
@@ -10001,20 +10001,39 @@ export class SquadManager extends EventEmitter {
 
 	/** Starved-and-unacked issues (deepen 14) — derived fresh from the attempts ledger, so the
 	 *  action-items surface and the dispatch gate can never disagree. */
-	starvedIssueAttempts(): Array<{ issueId: string; identifier?: string; attempts: number; fails: number; lastAt: number }> {
-		return starvedIssues(this.stateDir).map(({ issueId, record }) => ({ issueId, identifier: record.identifier, attempts: record.attempts, fails: record.fails, lastAt: record.lastAt }));
+	starvedIssueAttempts(): Array<{ issueId: string; identifier?: string; repo?: string; attempts: number; fails: number; lastAt: number }> {
+		// Effective (current-generation) counters — the surface must show the same numbers the
+		// verdict and the clear audit use, never cumulative history (codex finding).
+		return starvedIssues(this.stateDir).map(({ issueId, record }) => {
+			const e = effectiveEvidence(record);
+			return { issueId, identifier: record.identifier, repo: record.repo, attempts: e.attempts, fails: e.fails, lastAt: record.lastAt };
+		});
 	}
 
-	/** The audited operator clear verb (deepen 14, DESIGN v2 point 3): stamps the ack, writes the
-	 *  audit trail, touches neither the dispatch ledger nor race eligibility (once-per-issue-ever
-	 *  stays spent — post-starvation a human is in the loop, strictly stronger than another race). */
-	async clearIssueStarvationVerdict(issueId: string, actor: Actor): Promise<boolean> {
+	/** The audited operator clear verb (deepen 14, 3b-final items 3+4): stamps the ack + generation
+	 *  watermarks, writes BOTH audit backends with the prior verdict evidence and the operator's
+	 *  reason, awaited — a clear whose audit failed is reported as failed, never a silent success.
+	 *  Touches neither the dispatch ledger nor race eligibility (once-per-issue-ever stays spent —
+	 *  post-starvation a human is in the loop, strictly stronger than another race). */
+	async clearIssueStarvationVerdict(issueId: string, actor: Actor, reason?: string): Promise<boolean> {
 		const cleared = clearIssueStarvation(this.stateDir, issueId, actor.id);
-		if (cleared) {
-			void this.recordAudit(actor, "dispatch.starvation.cleared", issueId, "ok", "operator re-dispatch ack — auto-dispatch re-enabled for this issue");
-			await this.store.appendAudit({ actor: actor.id, action: "dispatch.starvation.cleared", target: issueId }).catch(() => {});
+		if (!cleared) return false;
+		const prior = cleared.prior;
+		// The audit reports the EFFECTIVE (current-generation) verdict the operator actually acked —
+		// cumulative counters would contradict the 3/3 the surface showed (codex finding).
+		const e = effectiveEvidence(prior);
+		const detail = `prior verdict: ${e.fails}/${e.attempts} judged attempts failed${prior.identifier ? ` (${prior.identifier})` : ""}${reason ? `; reason: ${truncateLabel(reason, 200)}` : "; no reason given"}`;
+		try {
+			await this.recordAudit(actor, "dispatch.starvation.cleared", issueId, "ok", detail);
+			await this.store.appendAudit({ actor: actor.id, action: "dispatch.starvation.cleared", target: issueId, detail: { prior: { attempts: e.attempts, fails: e.fails }, reason: reason ?? null } });
+		} catch (err) {
+			// Atomicity by compensation (codex finding): a clear whose audit failed must not survive —
+			// restore the pre-clear row so the verdict stands and the operator can retry the endpoint.
+			restoreIssueAttemptRecord(this.stateDir, issueId, prior);
+			this.log("warn", `starvation clear for ${issueId} rolled back — audit write failed: ${errText(err)}`);
+			return false;
 		}
-		return cleared;
+		return true;
 	}
 
 	// ── operator-attention substrate (comprehension concern 01) ──────────────────────────────────

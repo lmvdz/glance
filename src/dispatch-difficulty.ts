@@ -124,13 +124,22 @@ export interface IssueAttemptRecord {
 	lastAgentId?: string;
 	/** Human-readable issue identifier (e.g. OMPSQ-42), captured at write time for surfaces. */
 	identifier?: string;
+	/** Repo the attempts ran in, captured at write time — 3b-final item 2: repo-filtered surfaces
+	 *  filter by equality instead of hiding every verdict. */
+	repo?: string;
 	/** Idempotency ring: recent runIds that already billed an attempt (bounded, newest last) — a
 	 *  repeat of ANY of them is dropped, so A,B,A double-fire never double-bills (codex finding;
 	 *  consecutive-only dedup did not survive interleaved finalize/terminal fires). */
 	recentRunIds?: string[];
-	/** Set by 3b's audited operator clear verb; presence means the starve verdict is acked. */
+	/** Set by the audited operator clear verb; presence means the starve verdict is acked. */
 	clearedBy?: string;
 	clearedAt?: number;
+	/** Generation watermarks (3b-final item 3): the counters AT clear time. The starve predicate
+	 *  runs on post-clear evidence only (attempts-attemptsAtClear / fails-failsAtClear), and a run
+	 *  STARTED before the clear bills the old generation — both raw and watermark move together,
+	 *  so pre-clear stragglers can never re-starve the fresh generation. */
+	attemptsAtClear?: number;
+	failsAtClear?: number;
 }
 
 /** An issue is STARVED at ≥3 judged attempts, all failed (DESIGN: aligns the race-once ladder —
@@ -146,26 +155,55 @@ const SNAPSHOT_TTL_MS = 2000;
 const snapshotCache = new Map<string, { at: number; data: Record<string, IssueAttemptRecord> }>();
 
 /** Record one judged outcome for an issue. Record-only, never gates, never throws. */
-export function recordIssueAttempt(stateDir: string, issueId: string | undefined, runId: string | undefined, ok: boolean, agentId?: string, now = Date.now(), identifier?: string): void {
+export function recordIssueAttempt(stateDir: string, issueId: string | undefined, runId: string | undefined, ok: boolean, agentId?: string, now = Date.now(), identifier?: string, opts?: { repo?: string; runStartedAt?: number }): void {
 	if (!issueId) return;
 	const file = issueAttempts(stateDir);
 	const all = file.read();
 	const prior = all[issueId];
 	if (runId && prior?.recentRunIds?.includes(runId)) return; // any replay of a billed run: dropped
 	const recentRunIds = runId ? [...(prior?.recentRunIds ?? []), runId].slice(-8) : (prior?.recentRunIds ?? []);
+	// Generation billing (3b-final item 3): a run that STARTED before the operator's clear bills
+	// the old generation — raw counters and watermarks move together so post-clear evidence stays
+	// exactly the runs the operator's decision could not have known about.
+	const oldGeneration = prior?.clearedAt !== undefined && opts?.runStartedAt !== undefined && opts.runStartedAt < prior.clearedAt;
+	const attempts = (prior?.attempts ?? 0) + 1;
+	const fails = (prior?.fails ?? 0) + (ok ? 0 : 1);
+	const cleared = prior?.clearedBy
+		? {
+				clearedBy: prior.clearedBy,
+				clearedAt: prior.clearedAt,
+				attemptsAtClear: (prior.attemptsAtClear ?? prior.attempts) + (oldGeneration ? 1 : 0),
+				failsAtClear: (prior.failsAtClear ?? prior.fails) + (oldGeneration && !ok ? 1 : 0),
+			}
+		: {};
 	all[issueId] = {
-		attempts: (prior?.attempts ?? 0) + 1,
-		fails: (prior?.fails ?? 0) + (ok ? 0 : 1),
+		attempts,
+		fails,
 		lastAt: now,
 		...(agentId ? { lastAgentId: agentId } : {}),
 		...(identifier ?? prior?.identifier ? { identifier: identifier ?? prior?.identifier } : {}),
+		...(opts?.repo ?? prior?.repo ? { repo: opts?.repo ?? prior?.repo } : {}),
 		...(recentRunIds.length ? { recentRunIds } : {}),
-		// Ack semantics: a prior ack survives only while the issue stays BELOW the starve floor —
-		// once fresh failures reach the floor again, the ack drops and the question re-opens.
-		...(ok ? {} : prior?.clearedBy && prior.fails + 1 < ISSUE_STARVE_ATTEMPTS ? { clearedBy: prior.clearedBy, clearedAt: prior.clearedAt } : {}),
+		...cleared,
 	};
 	file.write(all);
 	snapshotCache.delete(stateDir); // a write invalidates the tick snapshot — no read-after-write staleness
+}
+
+/** Compensating restore for a failed clear-audit (atomicity by compensation — the clear must
+ *  not survive an unaudited write; see SquadManager.clearIssueStarvationVerdict). */
+export function restoreIssueAttemptRecord(stateDir: string, issueId: string, record: IssueAttemptRecord): void {
+	const file = mapFile<IssueAttemptRecord>(stateDir, "issue-attempts.json");
+	const all = file.read();
+	all[issueId] = record;
+	file.write(all);
+	snapshotCache.delete(stateDir);
+}
+
+/** Post-clear (current-generation) evidence for one row. */
+export function effectiveEvidence(r: IssueAttemptRecord): { attempts: number; fails: number } {
+	if (!r.clearedBy) return { attempts: r.attempts, fails: r.fails };
+	return { attempts: r.attempts - (r.attemptsAtClear ?? r.attempts), fails: r.fails - (r.failsAtClear ?? r.fails) };
 }
 
 export function readIssueAttempts(stateDir: string): Record<string, IssueAttemptRecord> {
@@ -185,25 +223,31 @@ function issueAttemptsSnapshot(stateDir: string, now = Date.now()): Record<strin
 export function starvedIssues(stateDir: string, now = Date.now()): Array<{ issueId: string; record: IssueAttemptRecord }> {
 	void now;
 	return Object.entries(readIssueAttempts(stateDir))
-		.filter(([, r]) => r.attempts >= ISSUE_STARVE_ATTEMPTS && r.fails === r.attempts && !r.clearedBy)
+		.filter(([, r]) => {
+			const e = effectiveEvidence(r);
+			return e.attempts >= ISSUE_STARVE_ATTEMPTS && e.fails === e.attempts && e.attempts > 0;
+		})
 		.map(([issueId, record]) => ({ issueId, record }));
 }
 
 /** The audited operator clear verb (DESIGN v2 point 3): stamps the ack INTO the evidence row —
  *  never deletes history, never touches the dispatch ledger, never implicit. Returns false when
  *  there is nothing to clear (route maps that to 404, not a silent 200). */
-export function clearIssueStarvation(stateDir: string, issueId: string, actorId: string, now = Date.now()): boolean {
+export function clearIssueStarvation(stateDir: string, issueId: string, actorId: string, now = Date.now()): { prior: IssueAttemptRecord } | undefined {
 	const file = mapFile<IssueAttemptRecord>(stateDir, "issue-attempts.json");
 	const all = file.read();
 	const rec = all[issueId];
-	// Only a currently-starved row is clearable (codex round-2): acking a healthy or already
-	// acked row is a 404, and the ack is a LOG-SILENCER until 3b-final's generation semantics
-	// make it a real gate reset.
-	if (!rec || rec.clearedBy || rec.attempts < ISSUE_STARVE_ATTEMPTS || rec.fails !== rec.attempts) return false;
-	all[issueId] = { ...rec, clearedBy: actorId, clearedAt: now };
+	// Only a currently-starved row (on its CURRENT generation) is clearable: acking a healthy or
+	// already-acked row is a 404. The clear starts a fresh generation via the watermarks — the
+	// starve predicate sees only post-clear evidence, and pre-clear in-flight runs bill the old
+	// generation (see recordIssueAttempt) — 3b-final item 3.
+	if (!rec) return undefined;
+	const e = effectiveEvidence(rec);
+	if (e.attempts < ISSUE_STARVE_ATTEMPTS || e.fails !== e.attempts || e.attempts === 0) return undefined;
+	all[issueId] = { ...rec, clearedBy: actorId, clearedAt: now, attemptsAtClear: rec.attempts, failsAtClear: rec.fails };
 	file.write(all);
 	snapshotCache.delete(stateDir);
-	return true;
+	return { prior: rec };
 }
 
 /** Per-issue verdict for the dispatcher's `difficultyFor` seam. Always proceeds while
@@ -211,10 +255,11 @@ export function clearIssueStarvation(stateDir: string, issueId: string, actorId:
 export function issueDifficultyDecision(stateDir: string, issue: Pick<IssueRef, "id" | "identifier">, mode: DifficultyDispatchMode): DifficultyDispatchDecision | undefined {
 	if (mode === "off") return undefined;
 	const rec = issueAttemptsSnapshot(stateDir)[issue.id];
-	if (!rec || rec.attempts < ISSUE_STARVE_ATTEMPTS || rec.fails !== rec.attempts) return undefined; // nothing noteworthy — no log line
-	if (rec.clearedBy) return undefined; // acked by the human clear verb; silence until new evidence
+	if (!rec) return undefined;
+	const e = effectiveEvidence(rec);
+	if (e.attempts < ISSUE_STARVE_ATTEMPTS || e.fails !== e.attempts || e.attempts === 0) return undefined; // nothing noteworthy on the CURRENT generation
 	const label = issue.identifier ?? rec.identifier ?? issue.id;
-	const evidence = `${rec.fails}/${rec.attempts} judged attempts failed — needs re-scope or a human call, not another unit`;
+	const evidence = `${e.fails}/${e.attempts} judged attempts failed — needs re-scope or a human call, not another unit`;
 	// Apply retreated to shadow a SECOND time (module doc "GATING STATUS"): round-2 review found
 	// the surface/clear/audit halves not yet honest. Loud refusal, never a silent downgrade.
 	const applyNote = mode === "apply" ? "apply requested but gating awaits 3b-final (see module doc GATING STATUS) — running shadow. " : "";
