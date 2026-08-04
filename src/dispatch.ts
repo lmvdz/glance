@@ -422,11 +422,9 @@ export class Dispatcher {
 						noteSkip("difficulty", issueDifficulty.reason);
 						continue;
 					}
-					// Difficulty defer seam (deepen 14): DORMANT today — no wired dep can return
-					// proceed:false while gating is unshipped (dispatch-difficulty.ts module doc). Kept so
-					// the redesigned gate lands as data, not dispatcher surgery: a deferral is NOT a
-					// consumption — no ledger stamp, no dispatched.add — the issue re-qualifies as the
-					// class's evidence changes. Driven by tests via a fake dep until then.
+					// Tick-global difficulty defer seam (deepen 14): permanently dormant in production —
+					// the tier-telemetry dep can never return proceed:false (only the per-issue
+					// difficultyFor above gates). Kept as the data-shaped seam; test-driven.
 					if (difficulty && !difficulty.proceed) {
 						noteSkip("difficulty", difficulty.reason);
 						continue;

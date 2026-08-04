@@ -39,7 +39,7 @@ describe("difficultyDispatchMode", () => {
 describe("difficultyDispatchDecision", () => {
 	const allFail: ModelOutcomes = { "sonnet::mid": { landed: 0, rejected: 6 } };
 
-	test("REGRESSION (codex findings 1–3): apply mode NEVER gates — it refuses loudly and runs shadow", () => {
+	test("TIER telemetry never gates in any mode — permanent shadow (codex findings 1–3)", () => {
 		const d = difficultyDispatchDecision(allFail, undefined, "apply");
 		expect(d.proceed).toBeTrue();
 		expect(d.reason).toContain("apply requested but gating is unshipped");
@@ -61,7 +61,7 @@ describe("difficultyDispatchDecision", () => {
 		expect(difficultyDispatchDecision({}, undefined, "apply").proceed).toBeTrue();
 	});
 
-	test("no mode can produce proceed:false while gating is unshipped", () => {
+	test("the tier decision can never produce proceed:false — only per-issue verdicts gate", () => {
 		const heavyFail: ModelOutcomes = { "opus::heavy": { landed: 0, rejected: 5 } };
 		for (const mode of ["off", "shadow", "apply"] as const) {
 			expect(difficultyDispatchDecision(heavyFail, "xhigh", mode).proceed).toBeTrue();
@@ -110,7 +110,7 @@ describe("issue attempts (DESIGN v2 slice 3a) — evidence half, shadow verdicts
 		expect(shadow.proceed).toBeTrue();
 		expect(shadow.reason).toContain("OMPSQ-9 STARVED (would defer): 3/3");
 		const applied = issueDifficultyDecision(d, { id: "ISS-2", identifier: "OMPSQ-9" }, "apply")!;
-		expect(applied.proceed).toBeTrue(); // round-2 retreat: apply awaits 3b-final
+		expect(applied.proceed).toBeFalse(); // 3b-final complete: per-issue apply is REAL
 		expect(issueDifficultyDecision(d, { id: "ISS-2", identifier: "OMPSQ-9" }, "off")).toBeUndefined();
 	});
 
@@ -120,9 +120,9 @@ describe("issue attempts (DESIGN v2 slice 3a) — evidence half, shadow verdicts
 		for (let i = 0; i < 3; i++) recordIssueAttempt(d, "ISS-4", `run-${i}`, false, "agent-x", undefined, "OMPSQ-77");
 		expect(starvedIssues(d).map((x) => x.issueId)).toEqual(["ISS-4"]);
 		const applied = issueDifficultyDecision(d, { id: "ISS-4" }, "apply")!;
-		expect(applied.proceed).toBeTrue(); // round-2 retreat: apply awaits 3b-final
-		expect(applied.reason).toContain("gating awaits 3b-final");
-		expect(applied.reason).toContain("OMPSQ-77 STARVED (would defer)");
+		expect(applied.proceed).toBeFalse(); // 3b-final complete: per-issue apply is REAL
+		expect(applied.reason).toContain("OMPSQ-77 STARVED (deferred)");
+		expect(applied.reason).toContain("redispatch");
 		// The audited clear returns the prior verdict for the audit trail; double-clear is a 404.
 		expect(clearIssueStarvation(d, "ISS-4", "lars")?.prior.fails).toBe(3);
 		expect(clearIssueStarvation(d, "ISS-4", "lars")).toBeUndefined();

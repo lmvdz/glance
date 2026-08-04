@@ -1,5 +1,5 @@
 # Difficulty-targeted dispatch — no learning signal from all-pass or all-fail work
-STATUS: in-progress
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: moderate
@@ -107,7 +107,16 @@ atomicity by compensating restore (an unaudited clear cannot survive). Codex rou
 survived+fixed (atomicity, counter contradiction, legacy invisibility); org binding re-flagged
 = item 5 (already tracked); 2 findings lost to truncation (gap, not absence).
 
-## 3b-final REMAINING (→ then STATUS: done):
+## 3b-final COMPLETE (2026-08-04, iteration 21) → CONCERN DONE. Item 1: the attention-items
+pipeline turned out UNRENDERED (filed as concern 17) — the control lives on the LIVE surface
+instead: MondaySurface's "WORK THE FLEET KEEPS FAILING" section reads GET /api/issues/starved
+(org-local, same manager as the POST — item 5 by construction; cross-org bootstrap aggregate
+stays view-only) with a clear-verdict button invoking the audited generation-reset. Apply mode
+is REAL: starved current-generation issues defer. codex round-4: viewer-403 button honesty +
+failed-read honesty + stale docs fixed; cwd accident (webapp-relative scripts silently no-oped
+the test flips + this file's first update) caught by codex and the root suite together.
+
+## OLD remaining list (superseded):
 1. Rendered control: trace fleetRoster → component, wire a 'redispatch' AttentionAction kind
    calling POST /api/issues/:id/redispatch (insights.ts fold-in currently drops non-health rows).
 5. Org/manager binding: starved rows carry their org; cross-org bootstrap views render

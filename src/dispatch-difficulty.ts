@@ -11,7 +11,12 @@
  * pooled across model families: the model split is model-route's job; difficulty asks "does
  * this SIZE of work ever land here at all".
  *
- * GATING STATUS: STILL SHADOW-ONLY, after TWO retreat rounds. Slice 3b built the evidence,
+ * GATING STATUS (final): PER-ISSUE apply is REAL as of 3b-final (iteration 21) — the checklist
+ * that two retreat rounds demanded is complete: rendered control on a live surface, audited
+ * generation-resetting clears, repo scoping, org binding by construction. The history below is
+ * kept because the retreats are the story of how the gate earned honesty.
+ *
+ * Prior status — STILL SHADOW-ONLY, after TWO retreat rounds. Slice 3b built the evidence,
  * the derived action-item rows, and a clear verb — and its blind review (codex, round 2) found
  * five more holes before apply could be honest: the webapp consumer may drop the rows (no
  * rendered control invokes the clear), ?repo= views hide verdicts (no repo on the row), clear
@@ -260,8 +265,10 @@ export function issueDifficultyDecision(stateDir: string, issue: Pick<IssueRef, 
 	if (e.attempts < ISSUE_STARVE_ATTEMPTS || e.fails !== e.attempts || e.attempts === 0) return undefined; // nothing noteworthy on the CURRENT generation
 	const label = issue.identifier ?? rec.identifier ?? issue.id;
 	const evidence = `${e.fails}/${e.attempts} judged attempts failed — needs re-scope or a human call, not another unit`;
-	// Apply retreated to shadow a SECOND time (module doc "GATING STATUS"): round-2 review found
-	// the surface/clear/audit halves not yet honest. Loud refusal, never a silent downgrade.
-	const applyNote = mode === "apply" ? "apply requested but gating awaits 3b-final (see module doc GATING STATUS) — running shadow. " : "";
-	return { proceed: true, reason: `${applyNote}issue ${label} STARVED (would defer): ${evidence}` };
+	// PER-ISSUE apply is REAL (3b-final complete, iteration 21): the verdict renders on a LIVE
+	// surface (MondaySurface via GET /api/issues/starved) with a control invoking the audited
+	// clear; generations make the clear a true reset; repo scoping and org binding hold. The
+	// tier-telemetry dep remains shadow forever.
+	if (mode === "apply") return { proceed: false, reason: `issue ${label} STARVED (deferred): ${evidence}. Clear via the fleet surface or POST /api/issues/${issue.id}/redispatch.` };
+	return { proceed: true, reason: `issue ${label} STARVED (would defer): ${evidence}` };
 }

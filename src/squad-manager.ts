@@ -1681,7 +1681,7 @@ export class SquadManager extends EventEmitter {
 					return difficultyDispatchDecision(readModelOutcomes(this.stateDir), undefined, mode);
 				},
 				// Per-issue starve verdicts (DESIGN v2 seam — the tick-global dep above is telemetry
-				// only). Shadow until 3b ships the surface + audited clear; undefined = nothing to say.
+				// only). REAL in apply mode since 3b-final; undefined = nothing to say.
 				difficultyFor: (_repo, issue) => issueDifficultyDecision(this.stateDir, issue, difficultyDispatchMode()),
 				liveAgents: () => this.list(),
 				scopeFinding: (repo, message) => this.fileScopeFinding("low", repo, message),

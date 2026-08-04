@@ -2650,6 +2650,12 @@ export class SquadServer {
 		// statuses so every conflict is explicit instead of a silent drop.
 		// The audited starvation clear verb (deepen 14, DESIGN v2): operator tier (authz mutation
 		// floor), explicit, 404 when there is nothing to clear — never a silent 200.
+		// Org-local starved issues (deepen 14 item 1): the LIVE rendered surface (MondaySurface)
+		// reads this; same manager the redispatch POST resolves — org binding by construction
+		// (item 5). The cross-org bootstrap aggregate in actionItemsPayload stays view-only.
+		if (url.pathname === "/api/issues/starved" && req.method === "GET") {
+			return Response.json({ starved: manager.starvedIssueAttempts() });
+		}
 		const mstarve = url.pathname.match(/^\/api\/issues\/([^/]+)\/redispatch$/);
 		if (mstarve && req.method === "POST") {
 			const body: unknown = await req.json().catch(() => ({}));
