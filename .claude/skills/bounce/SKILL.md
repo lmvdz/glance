@@ -1,6 +1,6 @@
 ---
 name: bounce
-description: Restart the glance daemon and PROVE the new code is actually serving — kill order, PATH, health probe, served-bundle marker, env-loaded checks — plus the "I don't see the change" staleness triage tree. Use when the user says "restart the daemon", "pick up the new code", "i restarted", or reports a shipped fix that looks unchanged.
+description: Restart the glance daemon and PROVE the new code is actually serving, plus the "I don't see the change" staleness triage tree. Use when the user says "restart the daemon", "pick up the new code", "i restarted", or reports a shipped fix that looks unchanged.
 ---
 
 # bounce — restart the daemon and prove it
@@ -23,13 +23,13 @@ Mined verdict: the restart-then-verify dance is the single most re-derived ritua
 
 1. Does the **built dist** contain the change? (marker grep in `webapp/dist`, mtime — dist is gitignored, merges don't rebuild it)
 2. Is the daemon serving **this repo's dist**? (global-symlink check above; main checkout parked on an old branch has served stale UI)
-3. `Cache-Control` on index.html — browsers cache-pin the shell (fixed on main, but verify on older deploys)
+3. `Cache-Control` on index.html — browsers cache-pin the shell; check the live header (`curl -sI /` and read `cache-control`) rather than assuming the fix is deployed
 4. Service worker pinning the old bundle → fresh browser session/profile
 5. Stale client state — a file-mode `ompsq_token` in localStorage poisons db-mode `/api/me`
 6. Only THEN suspect the code.
 
 ## Gotchas
 
-- Detached long-running processes: separate `export` lines + plain `nohup … &` — `run_in_background` SIGTERMs the child when the tool call ends, and compound `cd X && nohup …` chains break on the first non-zero step.
+- Detached long-running processes: use the detach pattern from `/scratch-daemon` (separate `export` lines + plain `nohup … &`; never `run_in_background`).
 - A stale daemon that survived a failed kill keeps emitting removed event tracks — if the UI shows data the code can't produce anymore, the old process is still alive.
-- Docker-based gates run containers that may leave root-owned files (fixed via `--user` on main); if a build hits EACCES on `webapp/dist`, clean with a root alpine container.
+- Docker-based gates can leave root-owned files; if a build hits EACCES on `webapp/dist`, clean with a root alpine container.

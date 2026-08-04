@@ -1,7 +1,7 @@
 ---
 name: effect
 description: |
-  Opinionated guide for building production TypeScript applications with Effect v4. Use when implementing Effect workflows, services, layers, schemas, configuration, schedules, caches, streams, HTTP clients, or tests.
+  Opinionated guide for building production TypeScript applications with Effect v4 (the effect-smol line — v3's @effect/* packages are consolidated under effect/unstable/*; v3-era snippets are the failure mode). Use when implementing Effect workflows, services, layers, schemas, configuration, schedules, caches, streams, HTTP clients, or tests.
 license: MIT
 compatibility: Requires Effect v4. Examples are reviewed against the version documented in this repository.
 vendored-from: kitlangton/skills@30dee8607214c893dd89f6eee65c669ef3dce8c9
@@ -26,7 +26,8 @@ Read only the branch references that match the task.
 
 - Data models, schemas, brands, variants, optional keys, or decoders: read `references/SCHEMA.md`.
 - Services, module surfaces, layers, runtime wiring, errors, `Effect.fn`, or test services: read `references/SERVICES_LAYERS.md`.
-- Runtime config, env variables, `ConfigProvider`, or `layerConfig`: read `references/CONFIG.md`.
+- Runtime config, env variables, `ConfigProvider`, or `layerConfig`: read `references/CONFIG.md` — and in THIS repo read `references/REPO_LOCAL.md` first: the classic `Config` API is blocked on the installed beta.
+- This repo's Effect v4 pin, migration ratchet, blocked APIs, or env/JSON-boundary recipes: read `references/REPO_LOCAL.md`.
 - Retry, repeat, polling, backoff, jitter, rate-limit-aware policies, or pass loops: read `references/SCHEDULING.md`.
 - Memoization, per-key TTL caches, deduplicating concurrent lookups, or request batching: read `references/CACHING.md`.
 - Streams, event sources, async iterables, queues/pubsubs, pagination, backpressure, or stream consumers: read `references/STREAMS.md`.

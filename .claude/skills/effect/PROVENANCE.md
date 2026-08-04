@@ -43,6 +43,20 @@
 
 3 blocks needed a genuine logic/type fix beyond "add imports and define referenced-but-undefined identifiers" to compile at `effect@4.0.0-beta.98` (item 8 above: the unfinished `get` method body, the nonexistent `PersistenceError.make` static, and the `Events.Service` dotted reference to an undefined self-export). Everything else that needed touching was purely additive scaffolding (imports, minimal stand-in types) that upstream's excerpt format never carried in the first place.
 
+## Post-vendor adaptation (2026-08-04, context-engineering pass)
+
+13. **Frontmatter description**: appended the v4-vs-v3 discriminator ("the effect-smol line —
+    v3's @effect/* packages are consolidated under effect/unstable/*; v3-era snippets are the
+    failure mode"). Upstream's generic description never named the discriminator that is THE
+    repo-relevant trigger fact; the description is the only always-loaded part of a skill.
+14. **`references/REPO_LOCAL.md` added (repo-authored, NOT vendored)**: this repo's pin,
+    blocked-API overrides (classic `Config` API unavailable on the installed beta — this
+    corrects a live contradiction where upstream's Core Defaults recommend `Config` that
+    AGENTS.md declared blocked), migration recipes (envInt/envNumber, Schema-decode at trust
+    boundaries), and the effect-solutions CLI / local-clone pointers moved out of AGENTS.md.
+    Two Branch Chooser lines added to route to it. Contains no fenced ts blocks, so the
+    skills-verify gate has nothing new to typecheck.
+
 ## Post-vendor adaptation (2026-07-15, review round)
 - SKILL.md's Source Rule no longer hardcodes a version literal in body prose — the maintained
   truth is the `verified-against` frontmatter stamp (gate-enforced); prose said "beta.98" and

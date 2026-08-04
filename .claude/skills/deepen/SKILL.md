@@ -5,33 +5,28 @@ description: One iteration of the deepen-modules loop — pick the next architec
 
 # Deepen — one module-deepening iteration
 
-Adapted from mattpocock's improve-codebase-architecture + codebase-design skills
-(github.com/mattpocock/skills), fused with this repo's house verification practice. The loop:
-review finds shallow clusters → each becomes a concern in `plans/deepen-modules/` → one iteration
-deepens one concern behind a small interface → gates + blind review → draft PR → queue updated.
+The loop (provenance in `PROVENANCE.md`): review finds shallow clusters → each becomes a concern
+in `plans/deepen-modules/` → one iteration deepens one concern behind a small interface → gates +
+blind review → draft PR → queue updated.
 
 ## Vocabulary (use these words exactly)
 
-**Module** = interface + implementation, scale-agnostic. **Interface** = everything a caller must
-know (types, invariants, ordering, error modes — not just the signature). **Deep** = lots of
-behaviour behind a small interface; **shallow** = interface nearly as complex as the
-implementation. **Seam** = where an interface lives. **Adapter** = a thing satisfying an interface
-at a seam — *one adapter is a hypothetical seam, two adapters is a real one*. **Leverage** = what
-callers gain per unit of interface learned. **Locality** = change/bugs/knowledge concentrate in
-one place. **The deletion test**: delete the module — if complexity reappears across N callers it
-earned its keep; if it just vanishes, it was a pass-through. Never substitute: component, service,
-API, boundary, wrapper. Domain nouns come from `CONTEXT.md` — extend it when a deepened module
-names a concept it lacks.
+Ousterhout terms — module, interface, deep/shallow, seam, leverage, locality — carry their
+standard meanings. The two house rules on top: *one adapter is a hypothetical seam, two adapters
+is a real one*, and **the deletion test** — delete the module; if complexity reappears across N
+callers it earned its keep, if it just vanishes it was a pass-through. Never substitute:
+component, service, API, boundary, wrapper. Domain nouns come from `CONTEXT.md` — extend it when
+a deepened module names a concept it lacks.
 
 ## The iteration
 
 1. **Select.** Read `plans/deepen-modules/00-overview.md` + the concern files. Pick the
    highest-priority OPEN concern that is unblocked (respect MODE: needs-design / needs-lars —
    those stop for a human). Flip it to `STATUS: in-progress`.
-2. **Isolate.** EnterWorktree. Check the base: if origin/main is behind local main, ff-merge
-   local main in FIRST (`git merge --ff-only <local-main-sha>`) — building on a stale base
-   collides with unpushed work. `bun install --frozen-lockfile` (root AND webapp/) — the
-   node_modules skew memory.
+2. **Isolate.** EnterWorktree. **Check the base FIRST: if origin/main is behind local main,
+   ff-merge local main in (`git merge --ff-only <local-main-sha>`) — building on a stale base
+   collides with unpushed work and has cost a whole iteration.** Then
+   `bun install --frozen-lockfile` (root AND webapp/) — the node_modules skew memory.
 3. **Read before writing.** Read every file the concern touches, in full, at the current SHA.
    The concern doc's line numbers rot; the semantics you must preserve live in the doc comments —
    they encode incident history (blind-review findings, production incidents). Moved code keeps
