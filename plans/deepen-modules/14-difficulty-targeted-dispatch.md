@@ -83,9 +83,17 @@ exists to stop).
    (one site), keyed by runId for idempotency — finalize + workflow_terminal must not double-
    bill one unit, and a race "pending" placeholder writes no attempt row.
 
-## Slice 3 (implement per DESIGN v2): issue-attempts ledger (runId-idempotent, single write
-point) + per-issue `difficultyFor` dispatcher dep + emit-from-state attention entry + the
-audited operator clear verb + apply mode becomes real (the refusal note retires).
+## Slice 3a done (2026-08-04, iteration 13): the evidence half — issue-attempts ledger
+(ring-dedup recent runIds, judged-only, write-invalidated tick snapshot), single write point
+beside recordModelOutcome (active runId preferred — finalize-race fix), per-issue difficultyFor
+dispatcher seam (transition-once log, candidate-set sweep, defer honored), STARVED shadow
+verdicts at 3/3. Four codex findings survived + fixed + recorded; codex's finding #1 lost to
+output truncation twice — not recorded, not fabricated. grok post-fix clean.
+
+## Slice 3b (remaining → then STATUS: done): the emit-from-state attention entry (rendered,
+crash-proof), the audited operator clear verb (POST /api/issues/:id/redispatch, operator tier,
+audit row, never implicit), race-eligibility explicitly not restored, apply mode becomes real
+(the refusal note retires).
 
 ## Provenance
 Lecture 6 (DAPO 30→50 via dynamic sampling), lecture 7 (Absolute-Zero proposer reward maximized

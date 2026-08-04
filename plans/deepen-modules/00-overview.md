@@ -28,6 +28,12 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
 05 slice 1 shipped: the route-table seam exists and is real (two lane adapters). Suite 4947/1
 (dead-exports pre-existing only — best state yet). PR: deepen/05-route-table branch.
 
+## Iteration 13 (2026-08-04, goal mode)
+14 slice 3a: the evidence half per DESIGN v2, shadow-only. Four codex findings survived+fixed
+(runId race, A-B-A dedup, map growth, O(N×M) reads); my own test caught the snapshot cache's
+read-after-write hazard before review did. Suite 4961/1 (pre-existing only). Codex 26/26 on the
+ledger; one codex finding lost to output truncation twice — recorded as a gap, not fabricated.
+
 ## Iteration 12 (2026-08-04, goal mode)
 14 slice 2: the gating DESIGN, two rounds. v1 answered the implementation-review findings; the
 design red-team then found eight holes in v1 (tick-global seam, typo re-arm, unaudited clear,
