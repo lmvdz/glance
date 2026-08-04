@@ -1,5 +1,5 @@
 # Server route table — make the lane-router seam real
-STATUS: in-progress
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -55,6 +55,18 @@ voice lane (with concern 11), org/auth lane, payload builders move next to their
   resolveVoiceMaxConcurrentPerOrg moved with the lane. codex CLEAN (live audit-flow probes),
   grok CLEAN (handler byte-diff). server.ts is now 4,413 lines (was 4,890 at slice 3's start).
   Remaining: the ~650 lines of homeless *Payload builders move next to their lanes.
+
+- Slice 5 done (2026-08-04, iteration 24) — CONCERN COMPLETE: src/observability-payloads.ts owns
+  the observability lane's data layer (trace cache + *Across aggregators + usage/heat/activity +
+  the /api/graph cluster + health/governance/action-items), 686 lines moved verbatim off
+  server.ts's tail; 17 builders exported with server.ts as importer, internals stay private.
+  The memory-lane BOUNDARY TEST caught the move deep-importing memory/fabric.ts past the seam
+  AND server.ts's stale allowlist entry — fixed via the barrel + ratchet-down (the allowlist
+  discipline working on its own author). codex 1 Low survived (script left double newline at
+  EOF) + byte-diff/import-probe/cache-singleton verification; grok flaked twice (recorded as a
+  coverage gap, not retried into pretend-coverage). server.ts: 4,890 → 3,709 across slices 3–5.
+  The seam's final shape: 6 lane modules (feedback, memory, attention, org, voice ×2 lanes,
+  observability data layer) + table.ts's MatchContext/RouteContext hierarchy.
 
 ## Provenance
 Memory-lane report candidate 5 + whole-repo report candidate 2 (top-recommendation pair with 04).

@@ -10,7 +10,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { appendReceipt } from "../src/receipts.ts";
 import { SquadManager } from "../src/squad-manager.ts";
-import { tracePayload, traceCacheFor, sweepExpiredTraceCache, TRACE_CACHE_TTL_MS, TRACE_CACHE_MAX } from "../src/server.ts";
+import { tracePayload, traceCacheFor, sweepExpiredTraceCache, TRACE_CACHE_TTL_MS, TRACE_CACHE_MAX } from "../src/observability-payloads.ts";
 import type { RunReceipt } from "../src/types.ts";
 
 const cleanups: Array<() => Promise<void> | void> = [];
