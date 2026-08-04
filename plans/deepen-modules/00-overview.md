@@ -24,6 +24,14 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
+## Iteration 11 (2026-08-04, goal mode)
+05 slice 2: attention/fog lane at the route seam, viewer context explicit (Route<C> generic).
+Suite 4947/1 (dead-exports pre-existing only). Both blind passes clean — no adjudicable rows.
+Process note: an unchained doc-update script failed its anchor assertion TWICE while the git
+commands after it ran anyway (newline, not &&) — two commits shipped with partial docs; healed
+here. Rule: docs via the Edit tool or a `&&`-chained script, never a bare heredoc + git line.
+(Iteration 10's note lives on the deepen/14 branch — branch topology, not an omission.)
+
 ## Iteration 9 (2026-08-04, goal mode)
 05 slice 1 shipped: the route-table seam exists and is real (two lane adapters). Suite 4947/1
 (dead-exports pre-existing only — best state yet). PR: deepen/05-route-table branch.
