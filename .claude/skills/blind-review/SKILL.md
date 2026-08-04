@@ -94,3 +94,16 @@ a git-semantics truth table — which is what made its three real findings credi
 Last gate before a PR, after `/code-review` and any composition audit — late enough that the
 other passes' blind spots exist to be caught, early enough to fix before shipping. In
 `/execute-plan` it is part of Phase 3's audit gauntlet, run in parallel with the others.
+
+## Close the loop: record adjudications (Weaver-lite, plans/deepen-modules/16)
+
+Every ADJUDICATED finding from a blind pass gets a row in the reviewer ledger — that is how
+"grok catches fail-opens codex misses" stops being an anecdote and becomes a measured weight:
+
+    bun scripts/reviewer-ledger.ts add --lineage <grok|codex|native> --class <kebab-tag> \
+      --survived <true|false> --source "<PR/diff>" --note "<one line>" [--severity high|medium|low]
+    bun scripts/reviewer-ledger.ts report
+
+Rules (src/memory/reviewer-weights.ts): a clean bill is NOT a row (nothing was adjudicated); a
+REFUTED claim IS a row (survived=false); below 10 findings a lineage's precision prints as
+provisional — a provisional number is not a weight yet.

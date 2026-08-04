@@ -60,3 +60,11 @@ squad-manager dispatch). Deepening concerns 05–13 resume after.
   cumulative laundering + sentence/evidence contradiction) — every clause of the final monotone
   band-wise rule is a bought finding with a named regression test. Root 4938/1 (dead-exports
   pre-existing only), webapp 2024/0.
+- 2026-08-03 — 16 done (continuous): reviewer ledger (src/memory/reviewer-weights.ts + repo
+  JSONL at plans/.reviews/ + scripts/reviewer-ledger.ts closing step, wired into deepen step 7
+  and blind-review). Seeded with today's REAL adjudications: codex 9/9 survived, grok 2/2,
+  native 0/1 (the voice-shell refutation) — all provisional below the n=10 floor. Codex's four
+  findings on the ledger harness itself (duplicate inflation, silent all-malformed, flag-eating
+  CLI, output injection) are fixed + regression-tested + recorded as rows. The suite also caught
+  my own new JSON.parse-as cast (ratchet works on the ratchet-payer); removed properly.
+  WIP GUARD: queue's unblocked work is exhausted until the #310/#311 train merges — loop paused.

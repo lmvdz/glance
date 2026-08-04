@@ -58,6 +58,11 @@ names a concept it lacks.
    defects"), read-only sandboxes, on the full diff. Adjudicate findings against the code — a
    finding is a hypothesis. This pairing has caught ship-blockers on every git-write/concurrency
    path it ever reviewed; a clean bill from both is signal, not formality.
+   **Close by recording every ADJUDICATED finding** in the reviewer ledger (Weaver-lite,
+   concern 16): `bun scripts/reviewer-ledger.ts add --lineage <grok|codex|native> --class
+   <kebab-tag> --survived <true|false> --source "<PR/diff>" --note "<one line>"` — clean bills
+   are not rows; a refuted claim IS a row (survived=false), whichever review raised it. Then
+   `bun scripts/reviewer-ledger.ts report` to see the measured per-lineage precision.
 8. **Ship.** Commit(s) with teaching bodies (what moved, what the seam is, what was verified,
    what was deliberately left). Push branch, draft PR — never push main, never merge. PR body
    names the concern and the deliberately-left follow-ups.

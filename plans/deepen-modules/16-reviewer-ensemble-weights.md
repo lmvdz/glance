@@ -1,5 +1,5 @@
 # Measured reviewer-ensemble weights — Weaver-lite for the blind-review gauntlet
-STATUS: open
+STATUS: done
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: moderate
