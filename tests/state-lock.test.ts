@@ -8,7 +8,7 @@ import * as fs from "node:fs/promises";
 import { writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { acquireStateLock, StateLockError } from "../src/state-lock.ts";
+import { acquireStateLock, probeDaemonLock, StateLockError } from "../src/state-lock.ts";
 
 const cleanups: Array<() => Promise<void> | void> = [];
 afterEach(async () => {
@@ -75,6 +75,36 @@ test("a live pid with a mismatched recorded start time (pid reuse) is reclaimed"
 	cleanups.push(() => lock.release());
 	const rec = JSON.parse(await fs.readFile(lock.file, "utf8"));
 	expect(rec.pid).toBe(process.pid);
+});
+
+test("probeDaemonLock: no lock file at all reports not live, never throws", async () => {
+	const dir = await tmpdir();
+	expect(probeDaemonLock(dir)).toEqual({ live: false, owner: null });
+});
+
+test("probeDaemonLock: a live owner reports live:true — read-only, never acquires or reclaims", async () => {
+	const dir = await tmpdir();
+	writeFileSync(path.join(dir, "daemon.lock"), JSON.stringify({ pid: process.ppid, host: os.hostname(), startedAt: 0 }));
+	const probe = probeDaemonLock(dir);
+	expect(probe.live).toBe(true);
+	expect(probe.owner?.pid).toBe(process.ppid);
+	// Read-only: the lock file is untouched, and a real acquire against the SAME dir still sees
+	// the live owner and refuses — probing never reclaimed or raced acquireStateLock's own logic.
+	await expect(acquireStateLock(dir, { handoffMs: 150 })).rejects.toBeInstanceOf(StateLockError);
+});
+
+test("probeDaemonLock: a stale lock (dead pid) reports live:false", async () => {
+	const dir = await tmpdir();
+	writeFileSync(path.join(dir, "daemon.lock"), JSON.stringify({ pid: 2147483647, host: os.hostname(), startedAt: 0 }));
+	const probe = probeDaemonLock(dir);
+	expect(probe.live).toBe(false);
+	expect(probe.owner?.pid).toBe(2147483647); // record still surfaced, just not live
+});
+
+test("probeDaemonLock: a corrupt lock file degrades to not-live rather than throwing", async () => {
+	const dir = await tmpdir();
+	writeFileSync(path.join(dir, "daemon.lock"), "not json {{{");
+	expect(probeDaemonLock(dir)).toEqual({ live: false, owner: null });
 });
 
 test("concurrent acquirers never both own the lock (no empty-file TOCTOU window)", async () => {

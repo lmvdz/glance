@@ -43,13 +43,26 @@ export interface RunReceipt {
 	parentId?: string;
 	/** Which harness drove the run ("omp" for daemon-spawned; external ingests set their own). */
 	harness?: string;
+	/** Set ONLY by `scripts/backfill-receipt-attribution.ts` when it audited this receipt and could
+	 *  NOT determine `harness` with positive, row-scoped evidence (a matching `state.json` roster
+	 *  entry carrying an explicit `harness` or legacy `runtime` field — see the script's module doc).
+	 *  A small fixed vocabulary of machine-readable codes, NOT free prose — e.g.
+	 *  `"no_state_json_evidence"`, `"agent_id_prefix_ambiguous"`. Absence of `harness` does NOT by
+	 *  itself prove the omp lane wrote this row (pre-fix daemon-managed ACP units — claude-code,
+	 *  grok, legacy `runtime:"acp"` → auggie — also predate the write-time harness stamp), so this
+	 *  reason exists precisely to avoid fabricating "omp" from silence. Distinguishes "audited,
+	 *  genuinely unattributable" from "nobody has looked yet". Cleared automatically if a later
+	 *  backfill pass DOES find positive evidence. */
+	harnessUnattributableReason?: string;
 	/** Set ONLY by `scripts/backfill-receipt-attribution.ts` when it audited this receipt's missing
-	 *  `model` and could not determine one with certainty (no independent `task-outcomes.jsonl` row
-	 *  for this `agentId`, or the unit restarted so a single joined row can't be pinned to this exact
-	 *  run). Distinguishes "considered and genuinely unknown" from "nobody has looked yet" — the
-	 *  backfill script never guesses a model, so an audited-but-still-absent `model` is expected to
-	 *  carry this instead of silently looking identical to an un-audited row. Cleared automatically if
-	 *  a later backfill pass DOES manage to attribute `model`. */
+	 *  `model`. The script does not attempt to attribute a model at all (no durable, run-scoped
+	 *  source exists in this codebase to cross-reference — `task-outcomes.jsonl` is agentId-keyed
+	 *  with no `runId`, so it can't be pinned to one specific run of a possibly-restarted unit
+	 *  without risking a cross-run guess), so every missing-model row gets the single fixed code
+	 *  `"no_run_scoped_model_evidence"` — a statement that no attributable source exists, NOT a claim
+	 *  about what did or didn't happen inside the run itself (this field cannot prove whether an
+	 *  assistant-usage frame arrived, a poll backfill ran, or anything else about the run's history).
+	 *  Distinguishes "audited, genuinely unattributable" from "nobody has looked yet". */
 	modelUnattributableReason?: string;
 	/** Epic 3 independent-validator verdict for this run's land attempt, copied from `AgentDTO.validation`
 	 *  at finalize time so it survives the run durably (Epic 5's confidence input, DESIGN §5). */
