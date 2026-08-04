@@ -18,7 +18,7 @@ import { randomInt } from "node:crypto";
 import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { sql } from "kysely";
+import { sql, type Transaction } from "kysely";
 import type { Channel, ChannelEntry, ChannelMembership, ChannelReadCursor } from "../channels.ts";
 import type { Node } from "../memory/nodes.ts";
 import { readNodeRecord, type NodeRecord } from "../memory/node-records.ts";
@@ -29,6 +29,8 @@ import { normalizeCapabilitySnapshot, type CapabilitySnapshot } from "../capabil
 import { emptyFeedbackSnapshot, type FeedbackSnapshot } from "../feedback.ts";
 import { decryptSecret, encryptSecret, last4 as secretLast4 } from "../secrets.ts";
 import { type OrgContext, withOrg } from "./context.ts";
+import type { AppDatabase } from "../db/schema.ts";
+import { errText } from "../err-text.ts";
 import { getStorageBackend } from "./storage.ts";
 
 export interface ChannelSearchResult {
@@ -185,6 +187,13 @@ export interface Store {
 	loadFeedback(): Promise<FeedbackSnapshot>;
 	/** Persist durable feedback loop data. */
 	saveFeedback(snapshot: FeedbackSnapshot): Promise<void>;
+	/** Load the capability lane's snapshot alone. Falls back to the legacy copy embedded in the
+	 *  full snapshot until the first saveCapabilities migrates it out (concern 12, per-lane split). */
+	loadCapabilities(): Promise<CapabilitySnapshot>;
+	/** Persist the capability lane's snapshot alone — a capability mutation no longer rewrites
+	 *  agents + every transcript through the full-blob save (its write amplification and crash
+	 *  window become its own; same escape shape feedback took). */
+	saveCapabilities(snapshot: CapabilitySnapshot): Promise<void>;
 	/** Append one audit row (no-op for single-tenant file mode). */
 	appendAudit(entry: AuditEntry): Promise<void>;
 	/** Append/replace one run usage row (no-op for file mode — receipts already on disk). */
@@ -245,6 +254,7 @@ function migrateLegacyAgentFields(agents: PersistedAgent[]): PersistedAgent[] {
 export class FileStore implements Store {
 	private readonly stateFile: string;
 	private readonly feedbackFile: string;
+	private readonly capabilitiesFile: string;
 	private saveFailureCount = 0;
 	private lastSaveWarnAt = 0;
 	private static readonly channelWriteLocks = new Map<string, Promise<void>>();
@@ -253,10 +263,14 @@ export class FileStore implements Store {
 	constructor(private readonly stateDir: string) {
 		this.stateFile = path.join(stateDir, "state.json");
 		this.feedbackFile = path.join(stateDir, "feedback.json");
+		this.capabilitiesFile = path.join(stateDir, "capabilities.json");
 	}
 
 	async hasState(): Promise<boolean> {
-		return existsSync(this.stateFile);
+		// The split capability file counts (codex H3): if it landed but the first blob write never
+		// did, a restart must still hydrate the lane — otherwise the next import overwrites the
+		// only copy from an apparently-empty lane.
+		return existsSync(this.stateFile) || existsSync(this.capabilitiesFile);
 	}
 
 	async load(): Promise<StateSnapshot> {
@@ -264,11 +278,17 @@ export class FileStore implements Store {
 		try {
 			raw = await fs.readFile(this.stateFile, "utf8");
 		} catch {
-			return { ...EMPTY };
+			// No blob yet — but the split capability file may exist alone (codex H3): fold it in.
+			const state: StateSnapshot = { ...EMPTY };
+			if (existsSync(this.capabilitiesFile)) state.capabilities = await this.loadCapabilities();
+			return state;
 		}
 		const parsed = JSON.parse(raw) as Partial<StateSnapshot>;
 		const state: StateSnapshot = { agents: migrateLegacyAgentFields(parsed.agents ?? []), transcripts: parsed.transcripts ?? {}, features: parsed.features ?? [] };
-		if (parsed.capabilities) state.capabilities = normalizeCapabilitySnapshot(parsed.capabilities);
+		// Split file wins; the copy embedded in state.json is the legacy location, read only until
+		// the first saveCapabilities writes the split file (concern 12 — same fold-in as feedback).
+		if (existsSync(this.capabilitiesFile)) state.capabilities = await this.loadCapabilities();
+		else if (parsed.capabilities) state.capabilities = normalizeCapabilitySnapshot(parsed.capabilities);
 		if (existsSync(this.feedbackFile)) state.feedback = await this.loadFeedback();
 		return state;
 	}
@@ -279,10 +299,14 @@ export class FileStore implements Store {
 		// SILENTLY: a rate-limited warn plus a cumulative counter (surfaced via factory-status) since the
 		// topology guarantee this store backs now rests on this write actually landing.
 		try {
-			const { feedback, ...state } = snapshot;
-			const cap = normalizeCapabilitySnapshot(snapshot.capabilities);
+			const { feedback, capabilities, ...state } = snapshot;
+			// Capabilities no longer ride the blob (concern 12): a caller that still passes them gets
+			// them persisted through the split file — honored, never silently dropped — but state.json
+			// itself stops carrying the copy, so a blob save stops rewriting the capability lane.
+			// ORDER MATTERS (codex H2): the split file lands durably BEFORE the blob write erases the
+			// legacy embedded copy — a crash between the two must never leave zero durable copies.
+			if (capabilities) await this.saveCapabilities(capabilities);
 			const body: StateSnapshot & { version: 1 } = { version: 1, agents: state.agents, transcripts: state.transcripts, features: state.features };
-			if (cap.sources.length || cap.packs.length || cap.installs.length || cap.verifications.length || cap.audit.length) body.capabilities = cap;
 			await writeFileDurable(this.stateFile, JSON.stringify(body, null, 2));
 			if (feedback) await this.saveFeedback(feedback);
 		} catch (err) {
@@ -312,6 +336,37 @@ export class FileStore implements Store {
 
 	async saveFeedback(snapshot: FeedbackSnapshot): Promise<void> {
 		await writeFileDurable(this.feedbackFile, JSON.stringify(snapshot, null, 2));
+	}
+
+	async loadCapabilities(): Promise<CapabilitySnapshot> {
+		// Split-file-wins is gated on EXISTENCE, not readability (codex M3): a malformed or
+		// transiently unreadable capabilities.json must NOT silently fall back to the stale legacy
+		// copy — a later mutation would then overwrite the newer snapshot with resurrected state.
+		// The corrupt bytes are set aside (recoverable), the failure is loud, and the lane starts
+		// empty rather than stale.
+		if (existsSync(this.capabilitiesFile)) {
+			try {
+				return normalizeCapabilitySnapshot(JSON.parse(await fs.readFile(this.capabilitiesFile, "utf8")));
+			} catch (err) {
+				const aside = `${this.capabilitiesFile}.corrupt-${Date.now()}`;
+				await fs.rename(this.capabilitiesFile, aside).catch(() => {});
+				console.error(`[FileStore] capabilities.json unreadable — set aside at ${aside}, NOT falling back to the stale legacy copy: ${errText(err)}`);
+				return normalizeCapabilitySnapshot(undefined);
+			}
+		}
+		// Legacy location: embedded in state.json until the first saveCapabilities migrates it
+		// out. Parsed as unknown — the normalizer IS the validator, no cast needed.
+		try {
+			const parsed: unknown = JSON.parse(await fs.readFile(this.stateFile, "utf8"));
+			const embedded = parsed !== null && typeof parsed === "object" ? (parsed as Record<string, unknown>).capabilities : undefined;
+			return normalizeCapabilitySnapshot(embedded);
+		} catch {
+			return normalizeCapabilitySnapshot(undefined);
+		}
+	}
+
+	async saveCapabilities(snapshot: CapabilitySnapshot): Promise<void> {
+		await writeFileDurable(this.capabilitiesFile, JSON.stringify(normalizeCapabilitySnapshot(snapshot), null, 2));
 	}
 
 	// Single-tenant file mode: audit/usage live in the on-disk receipts; the DB ledger is DB-mode only.
@@ -673,24 +728,29 @@ export class DbStore implements Store {
 		});
 	}
 
+	/** Parse capability_records rows into a snapshot — shared by load() and loadCapabilities(). */
+	private static capRowsToSnapshot(rows: Array<{ kind: string; data: string }>): CapabilitySnapshot {
+		const cap: Partial<CapabilitySnapshot> = {};
+		for (const row of rows) {
+			const data = JSON.parse(row.data) as unknown;
+			if (row.kind === "sources" && Array.isArray(data)) cap.sources = data as CapabilitySnapshot["sources"];
+			else if (row.kind === "packs" && Array.isArray(data)) cap.packs = data as CapabilitySnapshot["packs"];
+			else if (row.kind === "installs" && Array.isArray(data)) cap.installs = data as CapabilitySnapshot["installs"];
+			else if (row.kind === "verifications" && Array.isArray(data)) cap.verifications = data as CapabilitySnapshot["verifications"];
+			else if (row.kind === "audit" && Array.isArray(data)) cap.audit = data as CapabilitySnapshot["audit"];
+		}
+		return normalizeCapabilitySnapshot(cap);
+	}
+
 	async load(): Promise<StateSnapshot> {
 		const { agents, features, capabilities } = await withOrg(this.ctx, this.orgId, async (trx) => {
 			const rosterRows = await trx.selectFrom("roster_index").select("data").where("org_id", "=", this.orgId).execute();
 			const featureRows = await trx.selectFrom("features").select("data").where("org_id", "=", this.orgId).execute();
 			const capabilityRows = await trx.selectFrom("capability_records").select(["kind", "data"]).where("org_id", "=", this.orgId).execute();
-			const cap: Partial<CapabilitySnapshot> = {};
-			for (const row of capabilityRows) {
-				const data = JSON.parse(row.data) as unknown;
-				if (row.kind === "sources" && Array.isArray(data)) cap.sources = data as CapabilitySnapshot["sources"];
-				else if (row.kind === "packs" && Array.isArray(data)) cap.packs = data as CapabilitySnapshot["packs"];
-				else if (row.kind === "installs" && Array.isArray(data)) cap.installs = data as CapabilitySnapshot["installs"];
-				else if (row.kind === "verifications" && Array.isArray(data)) cap.verifications = data as CapabilitySnapshot["verifications"];
-				else if (row.kind === "audit" && Array.isArray(data)) cap.audit = data as CapabilitySnapshot["audit"];
-			}
 			return {
 				agents: migrateLegacyAgentFields(rosterRows.map((r) => JSON.parse(r.data) as PersistedAgent)),
 				features: featureRows.map((r) => JSON.parse(r.data) as PersistedFeature),
-				capabilities: normalizeCapabilitySnapshot(cap),
+				capabilities: DbStore.capRowsToSnapshot(capabilityRows),
 			};
 		});
 		const state: StateSnapshot = { agents, features, capabilities, transcripts: await this.loadTranscripts() };
@@ -741,18 +801,36 @@ export class DbStore implements Store {
 					})))
 					.execute();
 			}
-			await trx.deleteFrom("capability_records").where("org_id", "=", this.orgId).execute();
-			const cap = normalizeCapabilitySnapshot(snapshot.capabilities);
-			await trx.insertInto("capability_records").values([
-				{ org_id: this.orgId, id: "sources", kind: "sources", data: JSON.stringify(cap.sources), updated_at: now },
-				{ org_id: this.orgId, id: "packs", kind: "packs", data: JSON.stringify(cap.packs), updated_at: now },
-				{ org_id: this.orgId, id: "installs", kind: "installs", data: JSON.stringify(cap.installs), updated_at: now },
-				{ org_id: this.orgId, id: "verifications", kind: "verifications", data: JSON.stringify(cap.verifications), updated_at: now },
-				{ org_id: this.orgId, id: "audit", kind: "audit", data: JSON.stringify(cap.audit), updated_at: now },
-			]).execute();
+			// Capabilities no longer ride the blob save when absent (concern 12): persistNow stops
+			// passing them, and their full replace happens through saveCapabilities below. A caller
+			// that still passes them gets the same delete+insert — honored, never silently dropped.
+			if (snapshot.capabilities) await this.writeCapabilityRecords(trx, snapshot.capabilities, now);
 		});
 		await this.saveTranscripts(snapshot.transcripts);
 		if (snapshot.feedback) await this.saveFeedback(snapshot.feedback);
+	}
+
+	/** Full replace of this org's capability rows — shared by save() and saveCapabilities(). */
+	private async writeCapabilityRecords(trx: Transaction<AppDatabase>, capabilities: CapabilitySnapshot, now: number): Promise<void> {
+		await trx.deleteFrom("capability_records").where("org_id", "=", this.orgId).execute();
+		const cap = normalizeCapabilitySnapshot(capabilities);
+		await trx.insertInto("capability_records").values([
+			{ org_id: this.orgId, id: "sources", kind: "sources", data: JSON.stringify(cap.sources), updated_at: now },
+			{ org_id: this.orgId, id: "packs", kind: "packs", data: JSON.stringify(cap.packs), updated_at: now },
+			{ org_id: this.orgId, id: "installs", kind: "installs", data: JSON.stringify(cap.installs), updated_at: now },
+			{ org_id: this.orgId, id: "verifications", kind: "verifications", data: JSON.stringify(cap.verifications), updated_at: now },
+			{ org_id: this.orgId, id: "audit", kind: "audit", data: JSON.stringify(cap.audit), updated_at: now },
+		]).execute();
+	}
+
+	async loadCapabilities(): Promise<CapabilitySnapshot> {
+		const rows = await withOrg(this.ctx, this.orgId, (trx) => trx.selectFrom("capability_records").select(["kind", "data"]).where("org_id", "=", this.orgId).execute());
+		return DbStore.capRowsToSnapshot(rows);
+	}
+
+	async saveCapabilities(snapshot: CapabilitySnapshot): Promise<void> {
+		const now = Date.now();
+		await withOrg(this.ctx, this.orgId, (trx) => this.writeCapabilityRecords(trx, snapshot, now));
 	}
 
 	async loadFeedback(): Promise<FeedbackSnapshot> {

@@ -24,6 +24,16 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
+## Iteration 27 (2026-08-04, goal mode)
+12 slice 1: capability lane escapes the state blob (split store methods, both modes). Codex's
+blind round was the queue's deepest — 4 High data-loss windows (unawaited single-path migration,
+blob-before-split write order, capabilities-only store invisible to hasState, barrier past a
+swallowed failure) + the ILLUSORY-FIX Medium: the lane's changed dep still triggered a full blob
+persist, so the amplification the slice claimed to remove was still fully present. All fixed +
+regression-tested; ratchets caught my own two new hits (cast + error idiom) and both were paid
+back. grok quota-flaked (gap row). The slice is the strongest argument yet for the blind pass:
+green suites + a plausible diff hid four real crash-windows.
+
 ## Queue pivot (2026-08-03, Lars)
 
 Concerns 14–16 are the CS329A borrows (plans/research-cs329a/BRIEF.md), absorbed into this queue
