@@ -24,6 +24,17 @@ already exist as adapters), so a lane's write amplification and crash-window is 
   persist — the amplification the slice claimed to remove was still there) — all fixed with
   regression tests; 7 ledger rows. grok quota-flaked (gap row).
 
+- Slice 2 done (2026-08-04, iteration 28): the FEATURES lane escapes the blob — the daemon's
+  hottest mutation path stops serializing every transcript. Single-writer rule (self-caught
+  pre-review: blob save + feature chain were two writers to features.json; persistNow now omits
+  features and awaits the one chain, store honors only explicit callers). emitFeaturesChanged
+  is features-only + emit. Codex round: 2 High survived (cross-lane membership sites —
+  linkAgent/deleteFeature/adoptDerivedFeature — needed their own blob checkpoints; swallowed
+  features-write failure could tombstone away a legacy boot's only copy → strict-write +
+  skip-blob-on-failure), 2 Medium survived (per-entry validation gate; docs contract), 1 Medium
+  adjudicated by-design (cross-lane atomicity traded for per-lane crash windows — the concern's
+  own goal; generation/commit protocol noted below if it ever bites). grok quota-flaked (gap).
+
 ## Follow-ups (recorded, deliberately not in slice 1)
 - Post-stop ingress race (codex M2, adjudicated pre-existing CLASS): the HTTP server keeps
   accepting mutations while manager.stop() runs, so a write enqueued after any durability

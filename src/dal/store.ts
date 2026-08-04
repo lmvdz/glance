@@ -160,7 +160,10 @@ export async function writeFileDurable(file: string, data: string): Promise<void
 export interface StateSnapshot {
 	agents: PersistedAgent[];
 	transcripts: Record<string, TranscriptEntry[]>;
-	features: PersistedFeature[];
+	/** Optional on SAVE (concern 12 slice 2): the manager persists features through its own
+	 *  single-writer chain and omits them here, so features.json has exactly one writer. load()
+	 *  always populates the field. A caller that passes them still gets them honored. */
+	features?: PersistedFeature[];
 	feedback?: FeedbackSnapshot;
 	capabilities?: CapabilitySnapshot;
 }
@@ -187,6 +190,12 @@ export interface Store {
 	loadFeedback(): Promise<FeedbackSnapshot>;
 	/** Persist durable feedback loop data. */
 	saveFeedback(snapshot: FeedbackSnapshot): Promise<void>;
+	/** Load the features lane alone. Falls back to the legacy copy embedded in the full snapshot
+	 *  until the first save migrates it out (concern 12, per-lane split — slice 2). */
+	loadFeatures(): Promise<PersistedFeature[]>;
+	/** Persist the features lane alone — feature churn (the hottest mutation path in the daemon)
+	 *  no longer serializes every agent transcript through the full-blob save. */
+	saveFeatures(features: PersistedFeature[]): Promise<void>;
 	/** Load the capability lane's snapshot alone. Falls back to the legacy copy embedded in the
 	 *  full snapshot until the first saveCapabilities migrates it out (concern 12, per-lane split). */
 	loadCapabilities(): Promise<CapabilitySnapshot>;
@@ -255,6 +264,7 @@ export class FileStore implements Store {
 	private readonly stateFile: string;
 	private readonly feedbackFile: string;
 	private readonly capabilitiesFile: string;
+	private readonly featuresFile: string;
 	private saveFailureCount = 0;
 	private lastSaveWarnAt = 0;
 	private static readonly channelWriteLocks = new Map<string, Promise<void>>();
@@ -264,13 +274,15 @@ export class FileStore implements Store {
 		this.stateFile = path.join(stateDir, "state.json");
 		this.feedbackFile = path.join(stateDir, "feedback.json");
 		this.capabilitiesFile = path.join(stateDir, "capabilities.json");
+		this.featuresFile = path.join(stateDir, "features.json");
 	}
 
 	async hasState(): Promise<boolean> {
-		// The split capability file counts (codex H3): if it landed but the first blob write never
-		// did, a restart must still hydrate the lane — otherwise the next import overwrites the
-		// only copy from an apparently-empty lane.
-		return existsSync(this.stateFile) || existsSync(this.capabilitiesFile);
+		// Split files count (codex H3, slice 1): if one landed but the first blob write never did
+		// (the split-before-blob write order creates exactly this crash window), a restart must
+		// still hydrate that lane — otherwise the next mutation overwrites the only copy from an
+		// apparently-empty lane.
+		return existsSync(this.stateFile) || existsSync(this.capabilitiesFile) || existsSync(this.featuresFile);
 	}
 
 	async load(): Promise<StateSnapshot> {
@@ -278,15 +290,17 @@ export class FileStore implements Store {
 		try {
 			raw = await fs.readFile(this.stateFile, "utf8");
 		} catch {
-			// No blob yet — but the split capability file may exist alone (codex H3): fold it in.
+			// No blob yet — but split lane files may exist alone (codex H3): fold them in.
 			const state: StateSnapshot = { ...EMPTY };
+			if (existsSync(this.featuresFile)) state.features = await this.loadFeatures();
 			if (existsSync(this.capabilitiesFile)) state.capabilities = await this.loadCapabilities();
 			return state;
 		}
 		const parsed = JSON.parse(raw) as Partial<StateSnapshot>;
 		const state: StateSnapshot = { agents: migrateLegacyAgentFields(parsed.agents ?? []), transcripts: parsed.transcripts ?? {}, features: parsed.features ?? [] };
-		// Split file wins; the copy embedded in state.json is the legacy location, read only until
-		// the first saveCapabilities writes the split file (concern 12 — same fold-in as feedback).
+		// Split files win; copies embedded in state.json are the legacy location, read only until
+		// the first split write migrates them out (concern 12 — same fold-in as feedback).
+		if (existsSync(this.featuresFile)) state.features = await this.loadFeatures();
 		if (existsSync(this.capabilitiesFile)) state.capabilities = await this.loadCapabilities();
 		else if (parsed.capabilities) state.capabilities = normalizeCapabilitySnapshot(parsed.capabilities);
 		if (existsSync(this.feedbackFile)) state.feedback = await this.loadFeedback();
@@ -300,13 +314,18 @@ export class FileStore implements Store {
 		// topology guarantee this store backs now rests on this write actually landing.
 		try {
 			const { feedback, capabilities, ...state } = snapshot;
-			// Capabilities no longer ride the blob (concern 12): a caller that still passes them gets
-			// them persisted through the split file — honored, never silently dropped — but state.json
-			// itself stops carrying the copy, so a blob save stops rewriting the capability lane.
-			// ORDER MATTERS (codex H2): the split file lands durably BEFORE the blob write erases the
-			// legacy embedded copy — a crash between the two must never leave zero durable copies.
+			// Capabilities and features no longer ride the blob (concern 12): a caller that passes
+			// them gets them persisted through their split files — honored, never silently dropped —
+			// but state.json itself stops carrying the copies, so a blob save stops rewriting those
+			// lanes' bytes into it (and feature churn stops rewriting transcripts, the slice-2 win).
+			// ORDER MATTERS (codex H2, slice 1): split files land durably BEFORE the blob write
+			// erases the legacy embedded copies — a crash between must never leave zero durable copies.
 			if (capabilities) await this.saveCapabilities(capabilities);
-			const body: StateSnapshot & { version: 1 } = { version: 1, agents: state.agents, transcripts: state.transcripts, features: state.features };
+			// Single-writer rule: features.json is written ONLY here when a caller explicitly passed
+			// features — the manager's persistNow deliberately omits them (its features chain is the
+			// one production writer, so a stale overlapping blob save can never clobber a newer write).
+			if (state.features) await this.saveFeatures(state.features);
+			const body: Omit<StateSnapshot, "features"> & { version: 1; features: [] } = { version: 1, agents: state.agents, transcripts: state.transcripts, features: [] };
 			await writeFileDurable(this.stateFile, JSON.stringify(body, null, 2));
 			if (feedback) await this.saveFeedback(feedback);
 		} catch (err) {
@@ -336,6 +355,40 @@ export class FileStore implements Store {
 
 	async saveFeedback(snapshot: FeedbackSnapshot): Promise<void> {
 		await writeFileDurable(this.feedbackFile, JSON.stringify(snapshot, null, 2));
+	}
+
+	async loadFeatures(): Promise<PersistedFeature[]> {
+		// Same hardened shape as loadCapabilities below (slice-1 lessons applied at birth):
+		// existence-gated split-file-wins, corrupt bytes set aside loudly (never a silent fall
+		// back to the stale legacy copy), legacy embedded fallback until the first save migrates.
+		if (existsSync(this.featuresFile)) {
+			try {
+				const parsed: unknown = JSON.parse(await fs.readFile(this.featuresFile, "utf8"));
+				// Structural gate on every ENTRY, not just Array.isArray (codex M2): valid JSON like
+				// `[null]` must take the corrupt-set-aside path below, never crash loadPersisted's
+				// `f.id` dereference or silently drop entries one by one.
+				if (!Array.isArray(parsed) || !parsed.every((f) => f !== null && typeof f === "object" && typeof (f as { id?: unknown }).id === "string" && typeof (f as { repo?: unknown }).repo === "string")) {
+					throw new Error("schema-invalid features array (entry missing id/repo)");
+				}
+				return parsed as PersistedFeature[];
+			} catch (err) {
+				const aside = `${this.featuresFile}.corrupt-${Date.now()}`;
+				await fs.rename(this.featuresFile, aside).catch(() => {});
+				console.error(`[FileStore] features.json unreadable — set aside at ${aside}, NOT falling back to the stale legacy copy: ${errText(err)}`);
+				return [];
+			}
+		}
+		try {
+			const parsed: unknown = JSON.parse(await fs.readFile(this.stateFile, "utf8"));
+			const embedded = parsed !== null && typeof parsed === "object" ? (parsed as Record<string, unknown>).features : undefined;
+			return Array.isArray(embedded) ? (embedded as PersistedFeature[]) : [];
+		} catch {
+			return [];
+		}
+	}
+
+	async saveFeatures(features: PersistedFeature[]): Promise<void> {
+		await writeFileDurable(this.featuresFile, JSON.stringify(features, null, 2));
 	}
 
 	async loadCapabilities(): Promise<CapabilitySnapshot> {
@@ -749,7 +802,7 @@ export class DbStore implements Store {
 			const capabilityRows = await trx.selectFrom("capability_records").select(["kind", "data"]).where("org_id", "=", this.orgId).execute();
 			return {
 				agents: migrateLegacyAgentFields(rosterRows.map((r) => JSON.parse(r.data) as PersistedAgent)),
-				features: featureRows.map((r) => JSON.parse(r.data) as PersistedFeature),
+				features: featureRows.map((r) => DbStore.parseFeatureRow(r.data)),
 				capabilities: DbStore.capRowsToSnapshot(capabilityRows),
 			};
 		});
@@ -785,22 +838,8 @@ export class DbStore implements Store {
 					})))
 					.execute();
 			}
-			await trx.deleteFrom("features").where("org_id", "=", this.orgId).execute();
-			if (snapshot.features.length) {
-				await trx
-					.insertInto("features")
-					.values(snapshot.features.map((f) => ({
-						org_id: this.orgId,
-						id: f.id,
-						repo: f.repo,
-						title: f.title,
-						archived: f.archived ? 1 : 0,
-						data: JSON.stringify(f),
-						created_at: f.createdAt ?? now,
-						updated_at: f.updatedAt ?? now,
-					})))
-					.execute();
-			}
+			// Single-writer rule (see FileStore.save): only an explicit caller writes feature rows here.
+			if (snapshot.features) await this.writeFeatureRows(trx, snapshot.features, now);
 			// Capabilities no longer ride the blob save when absent (concern 12): persistNow stops
 			// passing them, and their full replace happens through saveCapabilities below. A caller
 			// that still passes them gets the same delete+insert — honored, never silently dropped.
@@ -808,6 +847,42 @@ export class DbStore implements Store {
 		});
 		await this.saveTranscripts(snapshot.transcripts);
 		if (snapshot.feedback) await this.saveFeedback(snapshot.feedback);
+	}
+
+	/** Full replace of this org's feature rows — shared by save() and saveFeatures(). */
+	private async writeFeatureRows(trx: Transaction<AppDatabase>, features: PersistedFeature[], now: number): Promise<void> {
+		await trx.deleteFrom("features").where("org_id", "=", this.orgId).execute();
+		if (features.length) {
+			await trx
+				.insertInto("features")
+				.values(features.map((f) => ({
+					org_id: this.orgId,
+					id: f.id,
+					repo: f.repo,
+					title: f.title,
+					archived: f.archived ? 1 : 0,
+					data: JSON.stringify(f),
+					created_at: f.createdAt ?? now,
+					updated_at: f.updatedAt ?? now,
+				})))
+				.execute();
+		}
+	}
+
+	/** The ONE feature-row parse (our own persisted rows — the ratchet's named carve-out class),
+	 *  shared by load() and loadFeatures() so the cast count stays at exactly one. */
+	private static parseFeatureRow(data: string): PersistedFeature {
+		return JSON.parse(data) as PersistedFeature;
+	}
+
+	async loadFeatures(): Promise<PersistedFeature[]> {
+		const rows = await withOrg(this.ctx, this.orgId, (trx) => trx.selectFrom("features").select("data").where("org_id", "=", this.orgId).execute());
+		return rows.map((r) => DbStore.parseFeatureRow(r.data));
+	}
+
+	async saveFeatures(features: PersistedFeature[]): Promise<void> {
+		const now = Date.now();
+		await withOrg(this.ctx, this.orgId, (trx) => this.writeFeatureRows(trx, features, now));
 	}
 
 	/** Full replace of this org's capability rows — shared by save() and saveCapabilities(). */

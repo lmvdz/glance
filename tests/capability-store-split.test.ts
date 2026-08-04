@@ -84,6 +84,51 @@ test("a capabilities-only store counts as persisted state and load() folds it in
 	expect((await store.load()).capabilities?.sources.map((s) => s.id)).toEqual(["lone-survivor"]);
 });
 
+// ── Features lane (slice 2) — same hardened shape, pinned independently ─────────────────────
+
+function feat(id: string): { id: string; repo: string; title: string; createdAt: number; updatedAt: number } {
+	return { id, repo: "/tmp/r", title: id, createdAt: 1, updatedAt: 1 };
+}
+
+test("features: split round-trip, and the blob save writes the split file, not an embedded copy", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "feat-split-"));
+	const store = new FileStore(dir);
+	await store.save({ agents: [], transcripts: {}, features: [feat("f-1")] as never });
+	// The split file carries the lane; state.json's features field is an empty tombstone.
+	expect((await store.loadFeatures()).map((f) => f.id)).toEqual(["f-1"]);
+	expect(JSON.parse(readFileSync(join(dir, "state.json"), "utf8")).features).toEqual([]);
+	expect((await store.load()).features.map((f) => f.id)).toEqual(["f-1"]);
+});
+
+test("features: legacy embedded copy loads until the split file exists — then the split file wins", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "feat-legacy-"));
+	writeFileSync(join(dir, "state.json"), JSON.stringify({ version: 1, agents: [], transcripts: {}, features: [feat("legacy-f")] }));
+	const store = new FileStore(dir);
+	expect((await store.loadFeatures()).map((f) => f.id)).toEqual(["legacy-f"]);
+	expect((await store.load()).features.map((f) => f.id)).toEqual(["legacy-f"]);
+	await store.saveFeatures([feat("split-f")] as never);
+	expect((await store.load()).features.map((f) => f.id)).toEqual(["split-f"]);
+});
+
+test("features: a features-only store counts as persisted state and load() folds it in", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "feat-only-"));
+	const store = new FileStore(dir);
+	await store.saveFeatures([feat("lone-f")] as never);
+	expect(await store.hasState()).toBe(true);
+	expect((await store.load()).features.map((f) => f.id)).toEqual(["lone-f"]);
+});
+
+test("features: a corrupt split file is set aside loudly, never silently outranked by the legacy copy", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "feat-corrupt-"));
+	writeFileSync(join(dir, "state.json"), JSON.stringify({ version: 1, agents: [], transcripts: {}, features: [feat("stale-f")] }));
+	writeFileSync(join(dir, "features.json"), "{ not json");
+	const store = new FileStore(dir);
+	expect(await store.loadFeatures()).toEqual([]);
+	expect(existsSync(join(dir, "features.json"))).toBe(false);
+	const aside = (await import("node:fs")).readdirSync(dir).filter((f) => f.startsWith("features.json.corrupt-"));
+	expect(aside.length).toBe(1);
+});
+
 test("a corrupt split file is set aside loudly, never silently outranked by the stale legacy copy (codex M3)", async () => {
 	const dir = mkdtempSync(join(tmpdir(), "cap-corrupt-"));
 	writeFileSync(

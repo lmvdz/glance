@@ -44,6 +44,14 @@ class CountingStore implements Store {
 		return emptyFeedbackSnapshot();
 	}
 	async saveFeedback(): Promise<void> {}
+	async loadFeatures(): Promise<PersistedFeature[]> {
+		return [];
+	}
+	async saveFeatures(_features: PersistedFeature[]): Promise<void> {}
+	async loadCapabilities(): Promise<CapabilitySnapshot> {
+		return normalizeCapabilitySnapshot(undefined);
+	}
+	async saveCapabilities(_snapshot: CapabilitySnapshot): Promise<void> {}
 	async appendAudit(_entry: AuditEntry): Promise<void> {}
 	async appendUsage(_receipt: RunReceipt): Promise<void> {}
 }

@@ -34,6 +34,15 @@ regression-tested; ratchets caught my own two new hits (cast + error idiom) and 
 back. grok quota-flaked (gap row). The slice is the strongest argument yet for the blind pass:
 green suites + a plausible diff hid four real crash-windows.
 
+## Iteration 28 (2026-08-04, goal mode)
+12 slice 2: features escape the blob — feature churn no longer rewrites every transcript. The
+verification stack worked in layers: I caught the two-writer race myself pre-review (native
+ledger row); the suite caught the format-contract test + my own new cast; codex caught what
+both missed (cross-lane membership sites relying on the removed free full-save, and the
+tombstone-after-swallowed-failure eraser). Five codex rows + one native row recorded. grok
+quota-flaked again (6th) — its absence is now a measured reliability fact on the ledger, not
+an anecdote.
+
 ## Queue pivot (2026-08-03, Lars)
 
 Concerns 14–16 are the CS329A borrows (plans/research-cs329a/BRIEF.md), absorbed into this queue
