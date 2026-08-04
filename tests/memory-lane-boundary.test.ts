@@ -33,7 +33,6 @@ const ALLOWED = new Set([
 	"src/pr-body.ts -> symptoms",
 	"src/promote.ts -> answers",
 	"src/rule-proposals.ts -> node-records",
-	"src/server.ts -> fabric",
 	"src/server.ts -> fabric-search",
 	"src/server.ts -> symptoms",
 	"src/server.ts -> weekly-episode",
