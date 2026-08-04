@@ -7,16 +7,32 @@
  * that never touched the flag was actually the SAFER of the two postures while `doctor` swore it was
  * the more dangerous one.
  *
- * The fix: one shared resolver, `config.ts`'s `landConfirmEnabled()`, that both sites now call instead
- * of re-deriving the default. This file pins three things so they can never re-diverge:
+ * The fix: one shared resolver, `config.ts`'s `landConfirmEnabled()`, that both sites called instead of
+ * re-deriving the default.
+ *
+ * Gauntlet round 1 (codex, adjudicated REAL-but-latent): that first fix left a LIFETIME mismatch —
+ * `squad-manager.ts`'s `landConfirm` field resolves `landConfirmEnabled()` ONCE, at construction, and
+ * caches it, while `server.ts`'s `autonomyFacts()` called the resolver fresh on every `/api/doctor`
+ * request. Nothing in production mutates `OMP_SQUAD_LAND_CONFIRM` after boot today (runtime-settings
+ * never touches this flag), so the two values happen to always agree in practice — but the class is
+ * open, and a doctor built to answer "what will THIS daemon actually do" must not silently start
+ * lying the moment that assumption stops holding. The fix: `SquadManager.effectiveLandConfirm` exposes
+ * the manager's own cached value, and `autonomyFacts()` now sources from a LIVE manager instance
+ * instead of re-calling the resolver.
+ *
+ * This file pins:
  *
  *   1. `landConfirmEnabled()` itself: unset ⇒ true (ON), "0" ⇒ false, "1" ⇒ true.
- *   2. A REAL `SquadManager`'s private `landConfirm` field matches `landConfirmEnabled()` — proof the
- *      manager didn't quietly grow its own copy of the default.
+ *   2. A REAL `SquadManager`'s `effectiveLandConfirm` getter matches `landConfirmEnabled()` at
+ *      construction — proof the manager didn't quietly grow its own copy of the default.
  *   3. A REAL `SquadServer`'s `/api/doctor` response (`autonomy.landConfirm`, the exact field
- *      `glance doctor` renders) matches `landConfirmEnabled()` too — end-to-end through the actual
- *      HTTP payload, both with the flag unset (default) and explicitly forced off ("0"), so the two
- *      sites are proven to move TOGETHER, not just coincidentally equal at one value.
+ *      `glance doctor` renders) matches the manager's `effectiveLandConfirm` too — end-to-end through
+ *      the actual HTTP payload, both with the flag unset (default) and explicitly forced off ("0").
+ *   4. THE LIFETIME CASE (codex's exact failing sequence): construct a manager with the flag one way,
+ *      then mutate `process.env` to the OPPOSITE. `landConfirmEnabled()` (the resolver) sees the
+ *      mutation immediately — that's correct, it's a fresh-read helper. But `/api/doctor` must keep
+ *      reporting the manager's ORIGINAL cached value, because that's what `land()` will actually do on
+ *      this instance's next GREEN verify — not what a brand-new manager constructed right now would do.
  */
 
 import { afterEach, expect, test } from "bun:test";
@@ -31,6 +47,9 @@ const saved = process.env.OMP_SQUAD_LAND_CONFIRM;
 const cleanups: Array<() => Promise<void> | void> = [];
 afterEach(async () => {
 	for (const c of cleanups.splice(0)) await c();
+	// Belt-and-suspenders on top of each test's own `finally` restore (LANE_POLICY test-pollution
+	// lesson: a shared env var mutated mid-test and left dirty poisons every test file that runs after
+	// this one in the SAME process, and only shows up as a flake in the full suite, never in isolation).
 	if (saved === undefined) delete process.env.OMP_SQUAD_LAND_CONFIRM;
 	else process.env.OMP_SQUAD_LAND_CONFIRM = saved;
 });
@@ -46,11 +65,7 @@ test("landConfirmEnabled: unset defaults ON (a GREEN verify is held for one-tap 
 	expect(landConfirmEnabled()).toBe(true);
 });
 
-// ── (2)+(3) the pin: manager's real field and the doctor payload never diverge ──
-
-interface ManagerInternals {
-	landConfirm: boolean;
-}
+// ── (2)+(3)+(4) the pin: manager's real (cached) value and the doctor payload never diverge ──
 
 async function makeManagerAndServer(): Promise<{ mgr: SquadManager; url: string; token: string }> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "land-confirm-default-"));
@@ -74,14 +89,13 @@ async function doctorLandConfirm(url: string, token: string): Promise<boolean> {
 	return body.autonomy.landConfirm;
 }
 
-test("default (flag unset): manager's real landConfirm field === landConfirmEnabled() === doctor's reported landConfirm", async () => {
+test("default (flag unset): manager's effectiveLandConfirm === landConfirmEnabled() === doctor's reported landConfirm", async () => {
 	delete process.env.OMP_SQUAD_LAND_CONFIRM;
 	const expected = landConfirmEnabled();
 	expect(expected).toBe(true); // pins the documented default itself, not just internal agreement
 
 	const { mgr, url, token } = await makeManagerAndServer();
-	const managerActual = (mgr as unknown as ManagerInternals).landConfirm;
-	expect(managerActual).toBe(expected);
+	expect(mgr.effectiveLandConfirm).toBe(expected);
 
 	const reported = await doctorLandConfirm(url, token);
 	expect(reported).toBe(expected);
@@ -93,9 +107,33 @@ test("flag forced off ('0'): manager and doctor move TOGETHER, not just coincide
 	expect(expected).toBe(false);
 
 	const { mgr, url, token } = await makeManagerAndServer();
-	const managerActual = (mgr as unknown as ManagerInternals).landConfirm;
-	expect(managerActual).toBe(expected);
+	expect(mgr.effectiveLandConfirm).toBe(expected);
 
 	const reported = await doctorLandConfirm(url, token);
 	expect(reported).toBe(expected);
+});
+
+test("lifetime (gauntlet round 1, codex): doctor reports the manager's CACHED value, not a fresh env re-read, when the env mutates after construction", async () => {
+	process.env.OMP_SQUAD_LAND_CONFIRM = "0"; // construct with landConfirm OFF
+	const { mgr, url, token } = await makeManagerAndServer();
+	const managerActual = mgr.effectiveLandConfirm;
+	expect(managerActual).toBe(false);
+
+	try {
+		// Mutate to the OPPOSITE after construction. Nothing in production does this today, but the class
+		// is open — this is exactly the divergence window the gauntlet found.
+		process.env.OMP_SQUAD_LAND_CONFIRM = "1";
+		// The resolver itself DOES see the mutation immediately — that's correct, it's a fresh-read
+		// helper, and is exactly why `autonomyFacts()` must NOT call it for this field anymore.
+		expect(landConfirmEnabled()).toBe(true);
+
+		// /api/doctor must still report what THIS manager will actually do, not what a brand-new manager
+		// constructed right now would do.
+		const reported = await doctorLandConfirm(url, token);
+		expect(reported).toBe(managerActual);
+		expect(reported).toBe(false);
+		expect(mgr.effectiveLandConfirm).toBe(false); // the manager's own cached field never moved either
+	} finally {
+		process.env.OMP_SQUAD_LAND_CONFIRM = "0"; // restore before any other code in this test file runs
+	}
 });
