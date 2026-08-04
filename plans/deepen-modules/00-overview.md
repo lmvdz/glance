@@ -24,6 +24,26 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
+## Iteration 33 (2026-08-04, goal mode)
+10 slice 1: RoomSessionCursor — the PR #216 stale-claims wiring is finally table-testable, with
+three hardenings (one self-caught: channel-tagged resync). Codex round was humbling and exact:
+a CRITICAL TDZ my own misread check-run waved through, the effect-ordering HIGH, and a UX
+flicker MEDIUM — all fixed + tested. The layered-verification pattern held: native catch, then
+reviewer catches, each finding a different failure class. grok flaked (8/9 today).
+
+## Iteration 34 (2026-08-04, goal mode)
+10 slice 2: RoomSession over the transport port — the interleavings themselves are now
+scripted tests. SECOND convergent cross-lineage round (grok's TOCTOU HIGH and codex's
+render-phase-ref-write M arrived at the same parameterized-markRead fix from different
+directions; presence parity found by both). The port pattern is proven: ports-and-adapters
+made a React wiring hazard class table-testable.
+
+## Iteration 35 (2026-08-04, goal mode) — CONCERN 10 DONE
+Slice 3 (mention-turn ledger) closes the concern: HubShell is a view; the session module owns
+cursor + transport + optimistic bookkeeping with 15 tests. Both lineages CLEAN with itemized
+parity checks, both independently naming the same pre-existing cross-channel card quirk —
+convergence even on the non-findings now. THIRTEEN concerns done.
+
 ## Iteration 31 (2026-08-04, goal mode)
 08 slice 1: the event-kind wire contract becomes one module — type-only cross-tree import, drift
 is now a compile error, excess keys newly impossible. Codex 1M+1L survived (the rewrite dropped
