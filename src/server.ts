@@ -67,13 +67,6 @@ import {
 	FederationCommandBodySchema,
 	FeedbackItemsEnvelopeSchema,
 	FrictionBodySchema,
-	JoinRequestDecideBodySchema,
-	OrgJoinPolicyBodySchema,
-	OrgMemberInviteBodySchema,
-	OrgMemberRoleBodySchema,
-	OrgPatchBodySchema,
-	OrgVoiceEnabledBodySchema,
-	OrgVoiceKeyBodySchema,
 	PlanCandidateCreateBodySchema,
 	PlanCandidateTransitionBodySchema,
 	PlanVoteCallBodySchema,
@@ -140,14 +133,14 @@ import { actorForRole, type AuthPolicy, RbacDenied, requestToken, requiredRole, 
 import { handleFeedbackRoutes } from "./feedback-routes.ts";
 import { handleAttentionRoutes } from "./routes/attention.ts";
 import { handleMemoryRoutes } from "./routes/memory.ts";
+import { handleOrgRoutes } from "./routes/org.ts";
 import { boundedNumber } from "./routes/table.ts";
 import { configuredSocialProviders, signupOpen } from "./db/auth.ts";
-import { getWorkosOrgPolicy, parseWorkosEvent, setWorkosOrgPolicy, ssoEnabled, verifyWorkosSignature } from "./workos.ts";
+import { parseWorkosEvent, ssoEnabled, verifyWorkosSignature } from "./workos.ts";
 import {
 	isKnownVoiceProvider,
 	mintVoiceToken,
 	orgHasKey,
-	verifyVoiceProviderKey,
 	voiceConnectSrcOrigins,
 	voiceKeyFor,
 	voiceProviderMaxSessionWindowMs,
@@ -157,7 +150,7 @@ import {
 	VOICE_MINT_AUDIT_ACTION,
 	type VoiceKeyScope,
 } from "./voice-token.ts";
-import { appendOrgAudit, deleteOrgAuditRow, deleteOrgSecret, finalizeOrgAuditDetail, getOrgSecret, putOrgSecret, reserveOrgAuditSlot, setOrgSecretEnabled } from "./dal/store.ts";
+import { appendOrgAudit, deleteOrgAuditRow, finalizeOrgAuditDetail, reserveOrgAuditSlot } from "./dal/store.ts";
 
 /** The agent id/name a `ClientCommand` mutates, if any — "create"/"snapshot"/"commission" name no
  *  agent (they don't need cross-manager resolution); "message" targets a peer by `to`, but that's
@@ -194,8 +187,8 @@ function requestScope(body: unknown): Pick<CreateAgentOptions, "requires" | "own
 	else if (out.requires || out.owns || out.produces) out.scopeSource = "operator";
 	return out;
 }
-import { approveJoinRequest, denyJoinRequest, ensurePersonalWorkspace, listPendingJoinRequests, onboardWorkosUser, provisionScimEvent } from "./workos-provision.ts";
-import { addMemberByEmail, getOrgProfile, listOrgMembers, removeMember, renameOrg, setMemberRole } from "./org-admin.ts";
+import { ensurePersonalWorkspace, onboardWorkosUser, provisionScimEvent } from "./workos-provision.ts";
+import { listOrgMembers } from "./org-admin.ts";
 import { dbMode as voiceDbBootMode, type DbHandle } from "./db/index.ts";
 import { openRouteDecision } from "./open-worktree.ts";
 import { completionPayload, escalationPayload, needsYouPayload, type PushPayload, PushService } from "./push.ts";
@@ -1871,172 +1864,19 @@ export class SquadServer {
 			const u = session.user;
 			return Response.json({ mode: "db", user: { id: u.id, name: u.name, email: u.email, image: u.image ?? null }, activeOrganizationId: session.session.activeOrganizationId ?? null, role });
 		}
-		// Admin: pending join requests for the caller's active org (domain-match "require approval" policy).
-		// Exposes member emails ⇒ admin-only, scoped to the caller's own active org.
-		if (url.pathname === "/api/workos/join-requests" && req.method === "GET") {
-			if (!this.auth || !this.db || session === null || !roleAtLeast(role, "admin")) return Response.json([]);
-			const orgId = session.session.activeOrganizationId;
-			return Response.json(orgId ? await listPendingJoinRequests(this.db.db, orgId) : []);
-		}
-		if (url.pathname === "/api/workos/join-requests/decide" && req.method === "POST") {
-			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
-			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
-			const orgId = session.session.activeOrganizationId;
-			if (!orgId) return new Response("no active org", { status: 400 });
-			const raw: unknown = await req.json().catch(() => null);
-			const decoded = decodeBody(JoinRequestDecideBodySchema, raw);
-			if (Result.isFailure(decoded)) return new Response("missing id", { status: 400 });
-			const body = decoded.success;
-			const ok = body.action === "deny" ? await denyJoinRequest(this.db.db, body.id, orgId) : await approveJoinRequest(this.db.db, body.id, orgId);
-			return Response.json({ ok });
-		}
-		// Org settings. Profile is visible to any member of the active org; member management is admin-only,
-		// scoped to the caller's own active org.
-		if (url.pathname === "/api/org" && req.method === "GET") {
-			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
-			const orgId = session.session.activeOrganizationId;
-			return Response.json(orgId ? await getOrgProfile(this.db.db, orgId) : null);
-		}
-		if (url.pathname === "/api/org" && req.method === "PATCH") {
-			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
-			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
-			const orgId = session.session.activeOrganizationId;
-			if (!orgId) return new Response("no active org", { status: 400 });
-			const body = decodeBodyOrEmpty(OrgPatchBodySchema, await req.json().catch(() => null));
-			const ok = await renameOrg(this.db.db, orgId, typeof body.name === "string" ? body.name : "");
-			return Response.json({ ok });
-		}
-		if (url.pathname === "/api/org/members" && req.method === "GET") {
-			if (!this.auth || !this.db || session === null || !roleAtLeast(role, "admin")) return Response.json([]);
-			const orgId = session.session.activeOrganizationId;
-			return Response.json(orgId ? await listOrgMembers(this.db.db, orgId) : []);
-		}
-		if ((url.pathname === "/api/org/members/role" || url.pathname === "/api/org/members/remove") && req.method === "POST") {
-			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
-			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
-			const orgId = session.session.activeOrganizationId;
-			if (!orgId) return new Response("no active org", { status: 400 });
-			const decoded = decodeBody(OrgMemberRoleBodySchema, await req.json().catch(() => null));
-			if (Result.isFailure(decoded) || !decoded.success.userId) return new Response("missing userId", { status: 400 });
-			const { userId, role: targetRole } = decoded.success;
-			if (userId === session.user.id) return Response.json({ ok: false, error: "you can't change your own membership here" });
-			const result =
-				url.pathname === "/api/org/members/role"
-					? await setMemberRole(this.db.db, orgId, userId, typeof targetRole === "string" ? targetRole : "")
-					: await removeMember(this.db.db, orgId, userId);
-			return Response.json(result);
-		}
-		if (url.pathname === "/api/org/members/invite" && req.method === "POST") {
-			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
-			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
-			const orgId = session.session.activeOrganizationId;
-			if (!orgId) return new Response("no active org", { status: 400 });
-			const decoded = decodeBody(OrgMemberInviteBodySchema, await req.json().catch(() => null));
-			if (Result.isFailure(decoded) || !decoded.success.email) return new Response("missing email", { status: 400 });
-			const { email, role: inviteRole } = decoded.success;
-			return Response.json(await addMemberByEmail(this.db.db, orgId, email, typeof inviteRole === "string" ? inviteRole : "member"));
-		}
-		// Domain-join policy (WorkOS orgs only) — read/set the org's auto|approval policy in WorkOS metadata.
-		if (url.pathname === "/api/org/join-policy" && req.method === "GET") {
-			if (!this.auth || !this.db || session === null || !roleAtLeast(role, "admin")) return Response.json({ policy: null });
-			const orgId = session.session.activeOrganizationId;
-			if (!orgId) return Response.json({ policy: null });
-			const profile = await getOrgProfile(this.db.db, orgId);
-			if (!profile?.workosOrgId) return Response.json({ policy: null }); // not a WorkOS org
-			return Response.json({ policy: await getWorkosOrgPolicy(profile.workosOrgId) });
-		}
-		if (url.pathname === "/api/org/join-policy" && req.method === "POST") {
-			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
-			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
-			const orgId = session.session.activeOrganizationId;
-			if (!orgId) return new Response("no active org", { status: 400 });
-			const profile = await getOrgProfile(this.db.db, orgId);
-			if (!profile?.workosOrgId) return Response.json({ ok: false, error: "not a WorkOS-backed organization" });
-			const body = decodeBodyOrEmpty(OrgJoinPolicyBodySchema, await req.json().catch(() => null));
-			const policy = body.policy === "auto" ? "auto" : "approval";
-			return Response.json({ ok: await setWorkosOrgPolicy(profile.workosOrgId, policy), policy });
-		}
-		// Org voice-key admin surface (plans/voice-db-mode/05-admin-endpoints.md): set / verify /
-		// disable / remove the org's own BYO voice provider key. Org id comes from the SESSION only,
-		// never a request parameter (the PR #152 lesson: one org's admin registering another org's
-		// worktree via a body-supplied id) — every handler below reads
-		// `session.session.activeOrganizationId` and nothing else names the org. All four routes are
-		// admin-tier, pinned in `authz.ts` (stricter than the rest of `/api/org`, whose profile GET is
-		// viewer-readable) AND re-checked here inline, mirroring the `renameOrg` idiom every other
-		// admin mutation under `/api/org` above already follows — belt and suspenders, not redundant
-		// with the authz.ts gate: a future authz.ts regression still fails closed at the handler.
-		if (url.pathname === "/api/org/voice" && req.method === "GET") {
-			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
-			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
-			const orgId = session.session.activeOrganizationId;
-			if (!orgId) return new Response("no active org", { status: 400 });
-			// `provider` query param, defaulting to "openai" — mirrors PUT/POST's body field so the
-			// four voice-key admin routes can't drift apart the moment a second provider is
-			// registered (today the registry has exactly one, so this is a no-op default). Session-
-			// org-scoped like every other field here; never trusts anything beyond `isKnownVoiceProvider`.
-			const getProviderId = url.searchParams.get("provider") || "openai";
-			if (!isKnownVoiceProvider(getProviderId)) return new Response("unknown voice provider", { status: 400 });
-			// Status only, never the key itself (DESIGN.md admin-surface row) — `getOrgSecret`'s
-			// `plaintext` field is read here but never placed on the response.
-			const secret = await getOrgSecret({ db: this.db.db, type: this.db.type }, orgId, getProviderId);
-			if (!secret) return Response.json({ configured: false });
-			return Response.json({ configured: true, last4: secret.last4, enabled: secret.enabled, updatedAt: secret.updatedAt, updatedBy: secret.updatedBy });
-		}
-		if (url.pathname === "/api/org/voice-key" && req.method === "PUT") {
-			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
-			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
-			const orgId = session.session.activeOrganizationId;
-			if (!orgId) return new Response("no active org", { status: 400 });
-			// `db:<userId>`, never role-derived — same actor-tagging convention as the mint audit write
-			// below (voiceScope's `actor.id`), computed locally: the fleet-manager `actor`/`manager`
-			// resolution further down in this handler hasn't run yet at this point in the function.
-			const actorId = `db:${session.user.id}`;
-			if (!this.voiceKeyPutRateAllowed(actorId)) return new Response("rate limited", { status: 429 });
-			const decoded = decodeBody(OrgVoiceKeyBodySchema, await req.json().catch(() => null));
-			if (Result.isFailure(decoded) || !decoded.success.apiKey) return new Response("apiKey is required", { status: 400 });
-			const { apiKey, provider: providerRaw } = decoded.success;
-			const providerId = typeof providerRaw === "string" && providerRaw ? providerRaw : "openai";
-			if (!isKnownVoiceProvider(providerId)) return new Response("unknown voice provider", { status: 400 });
-			// Verify BEFORE persist (DESIGN.md "Key verification on save"): a free GET against the
-			// provider's own auth-check endpoint, NEVER the mint endpoint (that issues a real, billable
-			// credential). A rejected key writes NOTHING — no row, no last4, no partial state.
-			if (!(await verifyVoiceProviderKey(providerId, apiKey))) return new Response("key rejected by provider", { status: 400 });
-			const summary = await putOrgSecret({ db: this.db.db, type: this.db.type }, orgId, providerId, apiKey, actorId);
-			// `undefined` only when no master key is configured server-side (secrets.ts: a write that
-			// can't be encrypted persists nothing) — an honest 501, not a silent no-op 200.
-			if (!summary) return new Response("voice key storage unavailable", { status: 501 });
-			return Response.json({ configured: true, last4: summary.last4, enabled: summary.enabled, updatedAt: summary.updatedAt, updatedBy: summary.updatedBy });
-		}
-		if (url.pathname === "/api/org/voice-key" && req.method === "DELETE") {
-			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
-			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
-			const orgId = session.session.activeOrganizationId;
-			if (!orgId) return new Response("no active org", { status: 400 });
-			// `provider` query param, same default + validation as GET above — the row PUT stored under
-			// a non-default provider must be reachable to delete, not stranded.
-			const deleteProviderId = url.searchParams.get("provider") || "openai";
-			if (!isKnownVoiceProvider(deleteProviderId)) return new Response("unknown voice provider", { status: 400 });
-			await deleteOrgSecret({ db: this.db.db, type: this.db.type }, orgId, deleteProviderId);
-			return Response.json({ configured: false });
-		}
-		if (url.pathname === "/api/org/voice/enabled" && req.method === "POST") {
-			if (!this.auth || !this.db || session === null) return new Response("unavailable", { status: 400 });
-			if (!roleAtLeast(role, "admin")) return new Response("forbidden", { status: 403 });
-			const orgId = session.session.activeOrganizationId;
-			if (!orgId) return new Response("no active org", { status: 400 });
-			const actorId = `db:${session.user.id}`;
-			const decoded = decodeBody(OrgVoiceEnabledBodySchema, await req.json().catch(() => null));
-			if (Result.isFailure(decoded)) return new Response("enabled boolean required", { status: 400 });
-			const { enabled, provider: providerRaw } = decoded.success;
-			const providerId = typeof providerRaw === "string" && providerRaw ? providerRaw : "openai";
-			if (!isKnownVoiceProvider(providerId)) return new Response("unknown voice provider", { status: 400 });
-			// Synchronous kill switch (DESIGN.md "Kill switch" row): flips a bit without deleting the
-			// stored key — instant, reversible, no re-paste. A no-op (not an error) when the org has no
-			// row for this provider yet, matching `setOrgSecretEnabled`'s own doc comment.
-			await setOrgSecretEnabled({ db: this.db.db, type: this.db.type }, orgId, providerId, enabled, actorId);
-			const secret = await getOrgSecret({ db: this.db.db, type: this.db.type }, orgId, providerId);
-			return Response.json(secret ? { configured: true, last4: secret.last4, enabled: secret.enabled, updatedAt: secret.updatedAt, updatedBy: secret.updatedBy } : { configured: false });
-		}
+		// Org / auth-admin lane (plans/deepen-modules/05, slice 3): the 13 session-tier admin routes,
+		// dispatched as data (routes/org.ts). This lane runs BEFORE manager/actor resolution, so its
+		// context is the session/role/db trio plus the voice-key rate limiter -- made explicit, not
+		// reached back for. Same fall-through contract as the other lanes. /api/me, /api/workos/sync
+		// and /api/auth/check stay inline (any-verb matching / pre-tier-gate; see routes/org.ts doc).
+		const orgResponse = await handleOrgRoutes(url, req, {
+			auth: this.auth,
+			db: this.db,
+			session,
+			role,
+			voiceKeyPutRateAllowed: (actorId) => this.voiceKeyPutRateAllowed(actorId),
+		});
+		if (orgResponse) return orgResponse;
 		if (url.pathname === "/api/auth/check") return Response.json({ ok: true });
 		// DB-registry mode routes push key/subscribe to the CALLER'S ORG's own service (own VAPID
 		// keypair, own subscription store under `<pushRoot>/orgs/<orgId>`) — the global service (and

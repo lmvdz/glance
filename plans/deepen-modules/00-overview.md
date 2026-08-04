@@ -24,6 +24,13 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
+## Iteration 22 (2026-08-04, goal mode)
+05 slice 3: routes/org.ts — 13 session-tier org/auth admin routes as data; the seam's third
+context shape (MatchContext base for pre-manager lanes, type-level relax only). Both blind
+passes CLEAN on behaviour (codex ran live fall-through probes on the role|remove RegExp);
+grok's 2 Low nits (dead imports, stale table doc) fixed + recorded. Suite 4947/1 (dead-exports
+pre-existing only), webapp 2024/0. Remaining in 05: voice lane (with 11), payload builders.
+
 ## Iteration 11 (2026-08-04, goal mode)
 05 slice 2: attention/fog lane at the route seam, viewer context explicit (Route<C> generic).
 Suite 4947/1 (dead-exports pre-existing only). Both blind passes clean — no adjudicable rows.

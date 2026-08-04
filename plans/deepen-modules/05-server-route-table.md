@@ -35,5 +35,17 @@ voice lane (with concern 11), org/auth lane, payload builders move next to their
   repo-param normalization asymmetry preserved (both blind passes verified it specifically);
   codex clean, grok clean. Remaining: voice lane (with 11), org lane, payload builders.
 
+- Slice 3 done (2026-08-04, iteration 22): routes/org.ts — the 13 session-tier org/auth admin
+  routes (join-requests, org profile/members/invite/join-policy, the four voice-key admin
+  routes) moved verbatim. Third context shape for the seam: the lane runs BEFORE manager/actor
+  resolution, so table.ts's base relaxed to MatchContext {url,req} (type-level only — existing
+  lanes still declare RouteContext) and OrgRouteContext carries auth/db/session/role + the
+  voice-key rate-limiter thunk explicitly. members role|remove collapsed to one anchored
+  non-capturing RegExp ≡ the two old string equalities (codex probed it live: trailing slash,
+  case, superset paths all fall through). /api/me, /api/workos/sync, /api/auth/check stay
+  inline deliberately (any-verb matching / pre-tier-gate; documented in the module header).
+  codex CLEAN (runtime fall-through probes + precedence trace), grok CLEAN + 2 Low import/doc
+  nits (fixed + recorded). Remaining: voice lane (with 11), payload builders.
+
 ## Provenance
 Memory-lane report candidate 5 + whole-repo report candidate 2 (top-recommendation pair with 04).
