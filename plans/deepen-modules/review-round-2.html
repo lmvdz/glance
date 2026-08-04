@@ -1,0 +1,216 @@
+<title>glance · architecture review, round 2</title>
+<style>
+  :root {
+    --bg: #faf8f5; --ink: #26221d; --ink-soft: #6b6257; --line: #e5dfd6;
+    --card: #ffffff; --accent: #c25419; --accent-soft: #f6e8de;
+    --strong: #1e6b46; --strong-bg: #e4f1e9; --explore: #8a6410; --explore-bg: #f5ecd4;
+    --skip: #6b6257; --skip-bg: #edeae4; --code-bg: #f1ede6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1c1917; --ink: #e8e2d9; --ink-soft: #a39a8d; --line: #37322c;
+      --card: #241f1c; --accent: #e06a33; --accent-soft: #3a2a1e;
+      --strong: #6fc396; --strong-bg: #1e2f26; --explore: #d9b45c; --explore-bg: #322b19;
+      --skip: #a39a8d; --skip-bg: #2b2723; --code-bg: #2b2723;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #1c1917; --ink: #e8e2d9; --ink-soft: #a39a8d; --line: #37322c;
+    --card: #241f1c; --accent: #e06a33; --accent-soft: #3a2a1e;
+    --strong: #6fc396; --strong-bg: #1e2f26; --explore: #d9b45c; --explore-bg: #322b19;
+    --skip: #a39a8d; --skip-bg: #2b2723; --code-bg: #2b2723;
+  }
+  :root[data-theme="light"] {
+    --bg: #faf8f5; --ink: #26221d; --ink-soft: #6b6257; --line: #e5dfd6;
+    --card: #ffffff; --accent: #c25419; --accent-soft: #f6e8de;
+    --strong: #1e6b46; --strong-bg: #e4f1e9; --explore: #8a6410; --explore-bg: #f5ecd4;
+    --skip: #6b6257; --skip-bg: #edeae4; --code-bg: #f1ede6;
+  }
+  body { background: var(--bg); color: var(--ink); font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+         margin: 0; padding: 3rem 1.25rem 5rem; }
+  main { max-width: 76ch; margin: 0 auto; }
+  header.masthead { border-bottom: 3px solid var(--accent); padding-bottom: 1.2rem; margin-bottom: 2rem; }
+  .eyebrow { text-transform: uppercase; letter-spacing: .14em; font-size: .72rem; color: var(--accent); font-weight: 700; }
+  h1 { font-size: 1.9rem; line-height: 1.2; margin: .3rem 0 .5rem; text-wrap: balance; }
+  .prov { color: var(--ink-soft); font-size: .88rem; }
+  h2 { font-size: 1.25rem; margin: 2.6rem 0 .8rem; border-bottom: 1px solid var(--line); padding-bottom: .35rem; }
+  h3 { font-size: 1.02rem; margin: 1.6rem 0 .4rem; }
+  p { margin: .6rem 0; }
+  .chip { display: inline-block; font-size: .7rem; font-weight: 700; text-transform: uppercase; letter-spacing: .08em;
+          padding: .18em .6em; border-radius: 2px; vertical-align: middle; }
+  .chip.strong { color: var(--strong); background: var(--strong-bg); }
+  .chip.explore { color: var(--explore); background: var(--explore-bg); }
+  .chip.skip { color: var(--skip); background: var(--skip-bg); }
+  .chip.gate { color: var(--accent); background: var(--accent-soft); }
+  .tablewrap { overflow-x: auto; margin: 1rem 0; }
+  table { border-collapse: collapse; width: 100%; font-size: .86rem; }
+  th { text-align: left; font-size: .72rem; text-transform: uppercase; letter-spacing: .07em; color: var(--ink-soft);
+       border-bottom: 2px solid var(--line); padding: .4em .7em .4em 0; }
+  td { border-bottom: 1px solid var(--line); padding: .45em .7em .45em 0; vertical-align: top; }
+  td.num, th.num { font-variant-numeric: tabular-nums; text-align: right; padding-right: 1.2em; }
+  code { font: .84em/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace; background: var(--code-bg);
+         padding: .1em .35em; border-radius: 3px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-left: 3px solid var(--accent);
+          border-radius: 4px; padding: 1rem 1.25rem; margin: 1.2rem 0; }
+  .card h3 { margin-top: 0; }
+  .meta { color: var(--ink-soft); font-size: .82rem; margin-top: .1rem; }
+  ul { padding-left: 1.2rem; } li { margin: .3rem 0; }
+  .footnote { color: var(--ink-soft); font-size: .84rem; border-top: 1px solid var(--line); margin-top: 3rem; padding-top: 1rem; }
+  a { color: var(--accent); }
+</style>
+<main>
+<header class="masthead">
+  <div class="eyebrow">glance · deepen-modules · round 2</div>
+  <h1>Architecture review: the hot spots after thirty-six iterations</h1>
+  <div class="prov">2026-08-04 · two Explore agents (daemon · webapp/cross-cutting) over current main ·
+  successor to the memory-lane report (candidates 01–07) and the whole-repo report (08–13) ·
+  ten candidates queued as concerns 18–27</div>
+</header>
+
+<p>The first queue is resolved: fourteen concerns done across PRs #310–#319, three parked as
+needs-lars with named questions. This round re-surveys what is still hot on main. Headline
+numbers: <strong>squad-manager.ts is 13,261 lines</strong> even after the lane extractions
+(205 public methods, 133 called from server.ts); the <strong>webapp's 116 test files are
+type-checked nowhere</strong> (measured: 77 real errors hiding in 24 files, zero production
+files affected); and the daemon↔webapp wire has <strong>42 mirror type pairs with exactly one
+conformance-guarded</strong> — live drift found in five minutes (the webapp's
+<code>SquadEvent</code> is missing three variants the daemon emits).</p>
+
+<h2>The queue at a glance</h2>
+<div class="tablewrap"><table>
+<tr><th>#</th><th>candidate</th><th>side</th><th>size signal</th><th>verdict</th></tr>
+<tr><td class="num">18</td><td>BoundarySyncLane leaves squad-manager</td><td>daemon</td><td class="num">~490 lines / 12 refs</td><td><span class="chip strong">Strong</span></td></tr>
+<tr><td class="num">19</td><td>UnitAttentionLane + escalation ledger</td><td>daemon</td><td class="num">~320 lines / −6 fields</td><td><span class="chip strong">Strong</span></td></tr>
+<tr><td class="num">20</td><td>Store → five per-lane backend types</td><td>daemon</td><td class="num">0 runtime lines</td><td><span class="chip strong">Strong</span></td></tr>
+<tr><td class="num">21</td><td>UnitCardProjector</td><td>daemon</td><td class="num">~446 lines / 5 methods</td><td><span class="chip explore">Worth exploring</span></td></tr>
+<tr><td class="num">22</td><td>index.ts → boot + cli client + render</td><td>daemon</td><td class="num">255 + ~600 lines</td><td><span class="chip explore">Worth exploring</span></td></tr>
+<tr><td class="num">23</td><td>Test-corpus typecheck gate</td><td>both</td><td class="num">552 files / 360 errors</td><td><span class="chip strong">Strong</span></td></tr>
+<tr><td class="num">24</td><td>DTO conformance: 1 pair → 42</td><td>wire</td><td class="num">~4 lines per pair</td><td><span class="chip strong">Strong</span></td></tr>
+<tr><td class="num">25</td><td>roomCall.ts split + dead components</td><td>webapp</td><td class="num">79 exports / ~350 dead</td><td><span class="chip strong">Strong</span></td></tr>
+<tr><td class="num">26</td><td>Room projection for reports/attentionEvents</td><td>both</td><td class="num">~350–450 lines</td><td><span class="chip explore">Worth exploring</span> <span class="chip gate">product gate</span></td></tr>
+<tr><td class="num">27</td><td>dto.ts dead regions</td><td>webapp</td><td class="num">122/893 lines dead</td><td><span class="chip explore">Worth exploring</span></td></tr>
+</table></div>
+
+<h2>Daemon findings</h2>
+
+<div class="card"><h3>18 · BoundarySyncLane <span class="chip strong">Strong</span></h3>
+<div class="meta">squad-manager 6111–6570 + 2834–2866 · 459 lines, 12 distinct <code>this.*</code>, 6-closure port</div>
+<p>The best size-to-coupling ratio left in the god class. The decision core already lives in
+<code>boundary-sync.ts</code> (1,194 lines); the manager half is turn wiring, per-realpath
+serialization chains, and the attention rows — and its own header comment declares the seam.
+Owns two manager fields and three AgentRecord fields outright. Deletion test: delete it and
+<code>here</code>-sessions silently stop syncing patches — nothing else notices. Hazard: the
+dual-key chain at 6119–6135 must move verbatim; the fail-closed annotations (N2/N3/N4/M1/C1/S5)
+survive a mechanical move, not a rewrite.</p></div>
+
+<div class="card"><h3>19 · UnitAttentionLane + escalation ledger <span class="chip strong">Strong</span></h3>
+<div class="meta">10 hand-rolled <code>attentionEvents</code> writes · 3 duplicate idempotency Sets · 3 cooldown/streak Maps · helpers 5339–5630 + 9431–9464</div>
+<p>Highest leverage per line: eight raisers each re-implement append-then-emit (inconsistently —
+some try/catch the emit, some don't), and three separate Sets do the same dedupe job. A
+five-method lane (<code>raise/clear/escalateOnce/noteEpisode/clearEpisode</code>) deletes six
+manager fields, thins the 1,025-line land region by ~40 lines, and hands concern 18 its
+raise/clear port for free. Never gates anything, so it cuts clean. Also the natural first half
+of concern 26's daemon side.</p></div>
+
+<div class="card"><h3>20 · Store → five per-lane backend types <span class="chip strong">Strong</span></h3>
+<div class="meta">dal/store.ts 177–226 · 30 members · type-only, zero runtime change</div>
+<p>The per-lane facades already exist — <code>ChannelStore</code>, <code>NodeStore</code>,
+<code>NodeRecordStore</code> exclusively own 18 of the 30 members. <code>Store</code> becomes an
+intersection of <code>SnapshotStore &amp; AuditStore &amp; ChannelBackend &amp; GraphBackend &amp;
+GovernanceStore</code>; FileStore/DbStore keep <code>implements Store</code> untouched, consumers
+narrow to their quarter. Deletion test is the tell: delete the name and nothing breaks — a bag,
+not a module. Bonus, cheapest real fix of the round: <code>new NodeRecordStore(this.store)</code>
+is constructed <strong>26 times inline</strong> with inconsistent warn loggers — make it a field.</p></div>
+
+<div class="card"><h3>21 · UnitCardProjector <span class="chip explore">Worth exploring</span></h3>
+<div class="meta">squad-manager 12436–12882 · 446 lines, 17 private methods, 4 entry points</div>
+<p>The manager hand-rolls unit-event card projection while <code>CallProjectionStore</code>
+(427 lines) is already the module-shaped twin for voice events — same concern, two shapes.
+Extracting pairs naturally with the landed transcript-event-kinds module. Settle first:
+<code>ensureProjectedNode</code> has five callers outside the region — node-binding moves with
+it or stays a shared helper.</p></div>
+
+<div class="card"><h3>22 · index.ts → boot.ts + cli/client.ts + cli/render.ts <span class="chip explore">Worth exploring</span></h3>
+<div class="meta">1,630 lines · cmdUp = 255-line composition root · 17 proxy verbs, <code>fetch</code> ×14 but <code>!res.ok</code> ×8</div>
+<p>Two different things share the file: the daemon's entire wiring diagram (untestable where it
+sits, its boot order incident-documented) and a proxy-verb smear whose response-check drift is
+already observable. Split by the deletion test, not by "CLI vs not": the local-compute verbs
+(plan-validate, decompose, curate-plane, doctor, land-assessment) are the only entry points to
+their modules and must keep their homes.</p></div>
+
+<h2>Webapp and cross-cutting findings</h2>
+
+<div class="card"><h3>23 · The untype-checked test corpus <span class="chip strong">Strong</span></h3>
+<div class="meta">webapp: 116 files / 21,443 lines excluded by tsconfig · root: 436 files / 92,453 lines never in any program</div>
+<p>Measured, not estimated: type-checking the webapp tests today yields <strong>77 errors in 24
+files — and zero production files affected</strong>; the root corpus adds 283 errors in 119
+files. The error classes are mirror rot, not noise: fixtures missing <code>ranAt</code> on the
+one DTO the existing conformance test guards, casts that no longer overlap, assertions on
+deleted fields. The gate: <code>tsconfig.tests.json</code> on each side
+(<code>types:["bun"]</code> is required — verified) wired as clauses three and four of
+<code>bun run check</code>. Land webapp first (bounded, mechanical), the root corpus second
+(the real slog). This is the enabling gate for 24, 26, and 27 — today a wire change can be
+"verified" by a green suite whose fixtures no compiler ever read.</p></div>
+
+<div class="card"><h3>24 · DTO conformance, 1 → 42 pairs <span class="chip strong">Strong</span></h3>
+<div class="meta">tests/dto-conformance.test-d.ts · machinery built, in the gate, applied to exactly one type</div>
+<p>Forty-two mirror pairs exist across the wire; one is guarded. Five minutes of hand-checking
+found live drift in the primary WS union: the webapp's <code>SquadEvent</code> lacks the
+<code>audit</code>, <code>automation</code>, and <code>voice-call-participant</code> variants
+entirely and two more variants are missing fields — unrepresentable, so no exhaustiveness check
+could ever fire. Complementary to the blocked kernel re-exports: deliberate divergences
+(<code>TransitionEntry.reason</code> widening) need conformance-with-omit-list, not re-export.
+Land in batches; expect a wall of real drift on first contact.</p></div>
+
+<div class="card"><h3>25 · roomCall.ts split + the dead-component sweep <span class="chip strong">Strong</span></h3>
+<div class="meta">1,064 lines, 79 exports, ~12 concerns · VoiceCallHud.tsx: 305 lines, zero importers</div>
+<p>Three of the twelve regions aren't voice at all — card register presentation, the raw-room-event
+filter, and generic pane-stack navigation live buried inside <code>lib/voice/</code>. And the
+sweep found a written-but-never-mounted replacement component (<code>VoiceCallHud</code>) plus
+nine more unreferenced components (~670 further lines). Order of attack: delete the dead,
+lift the three non-voice regions, split the remainder along the consumer boundaries the
+import table already draws. The deeper prize — a <code>VoiceCallSession</code> class behind
+VoiceCallContext's 10 states + 16 refs + 7 effects, the RoomSession shape again — is its own
+later PR.</p></div>
+
+<div class="card"><h3>26 · Room projection for reports / attentionEvents <span class="chip explore">Worth exploring</span> <span class="chip gate">product gate</span></h3>
+<div class="meta">10 daemon write sites → zero surfaces · machinery exists end-to-end (projection classes, face builders, card schemas, compile-forced registry)</div>
+<p>The gap named by concern 17's round: <code>squad_report</code> proposals and attention events
+(including boundary-sync's held-patch Apply and divergence Acknowledge) are write-only state.
+The shape that fits DIRECTION.md: two <em>new</em> kinds — <code>report-raised</code> (register:
+claim — an agent self-report is not a proof) and <code>attention</code> (tone by sync class) —
+never folded into <code>needs-you</code>, whose projection class means "work has stopped."
+Requires the replay-suppression discipline the needs-you emitter documents, and one Lars-level
+ruling first: does a non-blocking proposal earn a room card at all? The deletion-test
+alternative (removing both channels and their tools) is not acceptable, so the surface has to
+exist eventually.</p></div>
+
+<div class="card"><h3>27 · dto.ts dead regions <span class="chip explore">Worth exploring</span></h3>
+<div class="meta">122 of 893 lines dead (8 container families) · 5 dead AgentDTO fields · 4 dead api.ts exports</div>
+<p>Fourteen percent of the file everyone imports is dead weight — including the trace and
+scorecard DTO families and the fields (<code>subagents</code>, <code>transitions</code>) that
+justify two more. Sequence deliberately after 23 (the corpus that references these is exactly
+the code no compiler reads) and re-verify against the open kernel and deletion PRs. Check the
+daemon side too: a dead DTO whose endpoint still serves is a two-sided deletion.</p></div>
+
+<h2>Below the cut, cleared, and skipped</h2>
+<ul>
+<li><strong>Host-tool MCP surface</strong> (squad-manager 11133–11494, 361 lines / 22 refs): the daemon's MCP tool server as eight private methods — essentially a lane already; one notch below the top five.</li>
+<li><strong>PR-reconcile loop</strong> (9388–9810, 422 / 21): a background loop with its own cadence whose siblings (Observer, Scout, Opportunity) are already classes.</li>
+<li><strong>resolveWorkflowGraph()</strong>: a 4×-copy-pasted ternary, two sites admitting it in comments — ~30 net lines, fold into whatever next touches fork/continue.</li>
+<li><strong>AgentDriver</strong>: textbook deep module (16 members hiding ~1,970 lines across four implementations); only defect is two undeclared optional members — a 4-line fix.</li>
+<li><strong>StorageBackend</strong>: already the reference shape — one 11-method interface, two adapters, reasoned bypasses at the bypass sites. Skip.</li>
+<li><strong>The land module family</strong>: properly layered, no cycles — the smear is the <em>manager's</em> land region, and that waits for concern 19's field cleanup.</li>
+<li><strong>createWithId</strong> (730 lines, 43 refs): a procedure, not a state-owner — a lane port would be 20 closures wide. Decompose in place, someday, into its five sequential phases.</li>
+</ul>
+
+<div class="footnote">
+Method: two parallel Explore agents (very thorough), each given the shipped-but-unmerged PR scopes
+(#310–#319) to avoid re-recommending landed work; coupling counts by distinct <code>this.*</code>
+referents; webapp claims verified by actually running the excluded typechecks. Candidates are
+queued as plans/deepen-modules/18–27 with STATUS: open; verdicts here are the review's, and each
+concern's first slice re-verifies before cutting. Reviewer-ledger context: codex 60+ adjudicated
+findings at ~100% survival; grok 3 landed rounds + 8 quota flakes today (gaps recorded, never
+pretended); native self-catches include two write-races found pre-review.
+</div>
+</main>

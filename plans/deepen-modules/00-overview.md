@@ -24,6 +24,17 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
+## Round 2 (2026-08-04, iteration 37 — the goal's completion clause)
+Queue was dry (14 done, 3 needs-lars) → fresh review round executed: two Explore agents over
+current main (daemon: squad-manager regions with per-region coupling counts, Store, CLI,
+workflow; webapp: the test-typecheck blind spot MEASURED at 360 errors/552 files with zero
+production impact, wire-mirror drift PROVEN on SquadEvent, voice cluster, dead sweep). Report:
+plans/deepen-modules/review-round-2.html (also published as an artifact). TEN candidates queued
+as concerns 18–27 (6 Strong, 4 Worth-exploring, one carrying a named product gate for Lars).
+Below-cut items recorded in the report: host-tools MCP lane, PR-reconcile loop,
+resolveWorkflowGraph, AgentDriver's 4-line fix. Cleared as already-deep: StorageBackend, the
+land family, AgentDriver, workflow engine core.
+
 ## Queue pivot (2026-08-03, Lars)
 
 Concerns 14–16 are the CS329A borrows (plans/research-cs329a/BRIEF.md), absorbed into this queue
