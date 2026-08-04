@@ -1,5 +1,5 @@
 # One wire-contract module for daemon and webapp
-STATUS: in-progress
+STATUS: needs-lars
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -24,6 +24,18 @@ contract IS the natural core the split orbits.
   test never proved. DOOR_LABELS/toneFor stay deliberate fallbacks (codex's walk names them).
   grok quota-flaked (gap row). Remaining: the dto.ts hand-mirror (893 lines) — decide shared-vs-
   generated per-domain; transcript-event PAYLOAD schemas.
+
+## needs-lars (2026-08-04, iteration 32)
+OPEN QUESTION FOR LARS: merge the deepen PR train (at minimum #315, the concern-06 types-split
+carrying src/core-types.ts) so this concern's remaining slices can proceed. The dto.ts
+hand-mirror slices are DESIGNED on the 06 kernel: dto's head mirrors (AgentStatus,
+PendingRequest, IssueRef, the transcript cluster) are field-compatible with core-types.ts and
+become type-only re-exports the moment that file exists on main — iteration 32 verified the
+compatibility and prepared the WorkLane→core-types dependency flip (core-types must be a
+ZERO-import leaf so the webapp's tsc program footprint stays one file), then found the kernel
+absent from main. Working the slices on a branch stacked on #315 would recreate the
+stacked-PR wrong-base trap; blocking on the merge is the recorded discipline (concern 14's
+precedent). Slice 1 (event kinds, PR #317) is complete and independently mergeable.
 
 ## Provenance
 Whole-repo report candidate 3 (Strong).
