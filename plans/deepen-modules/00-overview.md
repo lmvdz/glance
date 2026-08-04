@@ -57,6 +57,84 @@ its findings were independently found by codex — exactly the correlated-eviden
 two-lineage bet was made for. Grok's unique catch (omit-then-tombstone) even applied
 retroactively to slice 2's features lane. Nine rows recorded.
 
+## Iteration 26 (2026-08-04, goal mode) — CONCERN 06 DONE
+Final slice: src/core-types.ts, the 14-type shared kernel (identity, lifecycle, transcript
+grammar, work-item ref) with one lane import and everything depending on it — the deletion
+test a kernel should pass. codex CLEAN at its most thorough (byte-identical blocks, 160
+type-only bindings, cycle erased under isolatedModules); grok quota-flaked (gap row). types.ts
+1,723 → 1,454 across the concern. ELEVEN concerns done; 08/09/10/12/17 + 13 needs-lars remain.
+
+## Iteration 25 (2026-08-04, goal mode)
+06 slice 3: the AgentDTO split (the hard one) — six domain facets, DTO = their intersection,
+wire-identical, 72 fields in/out verified twice (my script + codex's independent AST audit).
+The slice's own freeze test was the iteration's lesson: v1 compared the DTO against its own
+facets (circular — codex proved deleting etaAt stayed green); v2 is an independent 72-entry
+frozen field+optionality map. Land-types item closed as a recorded no-move disposition.
+Remaining in 06: the minimal core extraction.
+
+## Iteration 18 (2026-08-04, goal mode — new PR; per-branch overview notes on their PRs)
+06 slice 1: feedback types leave the shared kernel for their lane, compat re-exports keep the
+world compiling. Suite 4947/1. The migration pattern (move + type-only re-export + lane-local
+import) is now proven for the remaining domains.
+
+## Iteration 19 (2026-08-04, goal mode — PR #315)
+06 slice 2: FeatureDecision home = the decision ledger (barrel-routed after codex caught the
+deep import my own allowlist would have fired on — reviewer and boundary test agreeing is the
+system working); receipt shapes home = receipts.ts. Suite 4947/2 (dead-exports pre-existing +
+one isolated-pass ordering flake). Discovery: room/channel types migrated organically long ago —
+the codebase was already partly ahead of the concern.
+
+## Iteration 17 (2026-08-04, goal mode — PR #314) — CONCERN 07 DONE
+Gather port shipped: ok-typed sources end failure-as-drift for good; fingerprint v2 makes
+rendered omissions drift-visible; codex 4 more survived (incl. the silent-empty recreated one
+level down — the reviewer catching the same shape at every depth is the whole point). Suite
+4948/1. Concern 07 is the first architectural concern taken concept→design→two-round
+implementation→done entirely inside the goal loop.
+
+## Iteration 16 (2026-08-04, goal mode — PR #314)
+07 implementation core: regeneration replaces write-once. Two hardening rounds (codex 5 P1s,
+grok 2 + 1 REFUTED — first non-survived grok row: asOfBuild staleness is the design). Suite
+4947/1. Remaining: the manager-side gather port, then 07 flips done.
+
+## Iteration 15 (2026-08-04, goal mode — PR #314; iterations 9–14 logged on their PR branches)
+07 design round, two-round red-teamed: eight survived findings folded into DESIGN v2 (lying
+quarantine pair, snapshot coherence, failure-as-drift, live-state evidence claim, barrel break,
+.prev clobber, legacy migration). needs-design → in-progress; implementation slice scoped.
+
+## Iteration 24 (2026-08-04, goal mode) — CONCERN 05 DONE
+Slice 5: the ~650-line payload tail → src/observability-payloads.ts (17 exported builders,
+internals private). The queue's own boundary test caught the move's deep fabric import AND the
+stale allowlist entry — the allowlist discipline biting its author, exactly as designed. codex
+1 Low survived (EOF whitespace) + byte-diff/cache-singleton verification; grok flaked twice
+(honest coverage-gap row, no pretend-coverage). server.ts 4,890 → 3,709 over slices 3–5; the
+route-table seam is complete at 6 lane modules. TEN concerns done.
+
+## Iteration 23 (2026-08-04, goal mode) — CONCERN 11 DONE
+05 slice 4 = concern 11 whole: routes/voice.ts, both lanes (mint pre-gate context + 14-route
+manager-tier call cluster on decoded table params). Both blind passes CLEAN with their strongest
+verification yet — codex live-probed the reserve→compensate→finalize audit flow against an
+in-memory DB; grok byte-diffed every handler vs HEAD. ~310 more lines out of server.ts. Nine
+concerns done. Remaining in 05: payload builders only.
+
+## Iteration 22 (2026-08-04, goal mode)
+05 slice 3: routes/org.ts — 13 session-tier org/auth admin routes as data; the seam's third
+context shape (MatchContext base for pre-manager lanes, type-level relax only). Both blind
+passes CLEAN on behaviour (codex ran live fall-through probes on the role|remove RegExp);
+grok's 2 Low nits (dead imports, stale table doc) fixed + recorded. Suite 4947/1 (dead-exports
+pre-existing only), webapp 2024/0. Remaining in 05: voice lane (with 11), payload builders.
+
+## Iteration 11 (2026-08-04, goal mode)
+05 slice 2: attention/fog lane at the route seam, viewer context explicit (Route<C> generic).
+Suite 4947/1 (dead-exports pre-existing only). Both blind passes clean — no adjudicable rows.
+Process note: an unchained doc-update script failed its anchor assertion TWICE while the git
+commands after it ran anyway (newline, not &&) — two commits shipped with partial docs; healed
+here. Rule: docs via the Edit tool or a `&&`-chained script, never a bare heredoc + git line.
+(Iteration 10's note lives on the deepen/14 branch — branch topology, not an omission.)
+
+## Iteration 9 (2026-08-04, goal mode)
+05 slice 1 shipped: the route-table seam exists and is real (two lane adapters). Suite 4947/1
+(dead-exports pre-existing only — best state yet). PR: deepen/05-route-table branch.
+
 ## Queue pivot (2026-08-03, Lars)
 
 Concerns 14–16 are the CS329A borrows (plans/research-cs329a/BRIEF.md), absorbed into this queue

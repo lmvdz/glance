@@ -75,6 +75,7 @@ import {
 	type EpisodeMeta,
 	type OmittedEntry as EpisodeOmittedEntry,
 	type StaleAnswerEntry,
+	type EpisodeSources,
 } from "./memory/weekly-episode.ts";
 import { computeFog, topDebt, type FileFogEntry } from "./comprehension-fog.ts";
 import { PushService } from "./push.ts";
@@ -1890,7 +1891,7 @@ export class SquadManager extends EventEmitter {
 				const loop = new EpisodeLoop({
 					repos: () => this.featureRepos(),
 					stateDir: this.stateDir,
-					gather: (repo, window) => this.gatherEpisodeInputs(repo, window),
+					sources: this.episodeSources(),
 					// Fresh PushService per send, re-`init()`'d from disk every time (episode pushes fire at
 					// most weekly, so the cost is trivial): the alternative — one long-lived instance built
 					// once at start() — would cache `subs`/`vapid` from whatever existed at boot and never
@@ -4847,61 +4848,58 @@ export class SquadManager extends EventEmitter {
 	 * Best-effort throughout: a symptom/fabric read failure degrades to that input's empty value
 	 * rather than failing the whole generation (mirrors `prBodyFor`).
 	 */
-	private async gatherEpisodeInputs(repo: string, window: { start: number; end: number }): Promise<EpisodeGatherResult> {
-		const deltas: FeatureDecision[] = [];
-		let nonDeltaCount = 0;
-		for (const pf of this.featureStore.values()) {
-			if (normalizeRepoPath(pf.repo) !== normalizeRepoPath(repo)) continue;
-			for (const d of pf.decisions ?? []) {
-				if (d.createdAt === undefined || d.createdAt < window.start || d.createdAt >= window.end) continue;
-				if (d.source === "model-delta") deltas.push(d);
-				else nonDeltaCount++;
-			}
-		}
-		let symptoms: SymptomEntry[] = [];
-		try {
-			symptoms = (await this.symptoms(repo)).filter((s) => s.landedAt >= window.start && s.landedAt < window.end);
-		} catch {
-			symptoms = [];
-		}
-		let fogTop: FileFogEntry[] = [];
-		let staleAnswers: StaleAnswerEntry[] = [];
-		try {
-			const receipts = await this.allReceipts();
-			const seen = this.attentionSeen([repo]);
-			fogTop = topDebt(computeFog({ receipts, seen, repos: [repo], now: window.end, surpriseCounts: this.attentionSurpriseCounts([repo]) }), 10);
-			// Comprehension concern 10: resurface this repo's currently-stale answers — a prior
-			// question whose cited files have since changed enough that the answer may no longer
-			// hold. Staleness is a live snapshot (like `fogTop` above), not a "became stale this week"
-			// event (unlike `deltas`/`symptoms`), so every answer for this repo is re-checked against
-			// the SAME receipts fogTop just used, not filtered to ones answered inside `window`. A
-			// failure here degrades ONLY this input (own try/catch) — it must never blank an already-
-			// computed `fogTop`, matching this function's "each input degrades independently" contract.
-			try {
-				const repoAnswers = await listAnswers(this.stateDir, { repo });
-				staleAnswers = repoAnswers.filter((a) => possiblyStale(a, receipts)).map((a) => ({ id: a.id, question: a.question }));
-			} catch {
-				staleAnswers = [];
-			}
-		} catch {
-			fogTop = [];
-			staleAnswers = [];
-		}
-		let digestIds: string[] = [];
-		try {
-			const snapshot = await this.fabric(LOCAL_ACTOR, { repos: [repo], includeLeases: false });
-			digestIds = snapshot.digests.map((d) => d.source.agentId ?? d.source.runId).filter((id): id is string => Boolean(id));
-		} catch {
-			digestIds = [];
-		}
-		const omitted: EpisodeOmittedEntry[] = [];
-		if (nonDeltaCount > 0) {
-			omitted.push({
-				title: `${nonDeltaCount} non-model-delta decision${nonDeltaCount === 1 ? "" : "s"} recorded this week`,
-				reason: "plan/human/agent-sourced decisions aren't mental-model deltas",
-			});
-		}
-		return { deltas, symptoms, fogTop, testExecutions: [], digestIds, omitted, staleAnswers };
+	/** The episode gather port (deepen 07, DESIGN v2 amendment 4): the same four derivations the
+	 *  old monolithic gatherEpisodeInputs ran, each now HONEST about failure — ok:false instead of
+	 *  a silent [] (which the fingerprint would read as deletion-drift and use to overwrite a
+	 *  healthy episode with an emptier one). The module composes and aborts on any failed class. */
+	private episodeSources(): EpisodeSources {
+		return {
+			decisions: async (repo, window) => {
+				const deltas: FeatureDecision[] = [];
+				let nonDeltaCount = 0;
+				for (const pf of this.featureStore.values()) {
+					if (normalizeRepoPath(pf.repo) !== normalizeRepoPath(repo)) continue;
+					for (const d of pf.decisions ?? []) {
+						if (d.createdAt === undefined || d.createdAt < window.start || d.createdAt >= window.end) continue;
+						if (d.source === "model-delta") deltas.push(d);
+						else nonDeltaCount++;
+					}
+				}
+				return { ok: true, value: { deltas, nonDeltaCount } };
+			},
+			symptoms: async (repo, window) => {
+				try {
+					const all = await this.symptoms(repo);
+					return { ok: true, value: all.filter((x) => x.landedAt >= window.start && x.landedAt < window.end) };
+				} catch {
+					return { ok: false };
+				}
+			},
+			commentary: async (repo, window) => {
+				try {
+					const receipts = await this.allReceipts();
+					const seen = this.attentionSeen([repo]);
+					const fogTop = topDebt(computeFog({ receipts, seen, repos: [repo], now: window.end, surpriseCounts: this.attentionSurpriseCounts([repo]) }), 10);
+					// Stale answers ride the same receipts snapshot (live-state commentary, asOfBuild).
+					// "Could not check staleness" FAILS the class (codex: an inner silent-[] would render
+					// as the authoritative "checked, none stale" claim — amendment 4's exact forbidden
+					// shape, recreated one level down).
+					const repoAnswers = await listAnswers(this.stateDir, { repo });
+					const staleAnswers: StaleAnswerEntry[] = repoAnswers.filter((a) => possiblyStale(a, receipts)).map((a) => ({ id: a.id, question: a.question }));
+					return { ok: true, value: { fogTop, staleAnswers } };
+				} catch {
+					return { ok: false };
+				}
+			},
+			digestIds: async (repo) => {
+				try {
+					const snapshot = await this.fabric(LOCAL_ACTOR, { repos: [repo], includeLeases: false });
+					return { ok: true, value: snapshot.digests.map((d) => d.source.agentId ?? d.source.runId).filter((id): id is string => Boolean(id)) };
+				} catch {
+					return { ok: false };
+				}
+			},
+		};
 	}
 
 	/**
