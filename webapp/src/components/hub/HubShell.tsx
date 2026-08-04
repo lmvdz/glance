@@ -45,7 +45,8 @@ import { VoiceCallArtifactReadError, apiJson, fetchVoiceCallArtifactContent, jso
 import { buildPromptCommand, channelAgentSessionId, channelDraftSessionId, ensureConsoleAgent, postChannelMessage } from '../../lib/chat/sendCore';
 import { resolveMentionRoute } from '../../lib/mentionGrammar';
 import type { AgentDTO, Channel, ChannelEntry, CommandAckDTO, PresenceSnapshot } from '../../lib/dto';
-import { latestSeq, presenceCount, reduceChannelEntries } from '../../lib/hub';
+import { presenceCount, reduceChannelEntries } from '../../lib/hub';
+import { RoomSessionCursor } from '../../lib/roomSession';
 import { DEFAULT_CHANNEL_ID, hubHref, unitHref, type HubRoute } from '../../lib/router';
 import { useTaskContext } from '../../context/TaskContext';
 
@@ -147,9 +148,7 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
   const [selectedModel, setSelectedModel] = useState('');
   const [modelOptions, setModelOptions] = useState<ModelOption[]>(DEFAULT_MODELS);
   const [sending, setSending] = useState(false);
-  const lastSeqRef = useRef(0);
   const typingStopTimer = useRef<number | undefined>(undefined);
-  const unreadEventIds = useRef(new Set<string>());
   const pendingMentionTurns = useRef(new Map<string, { channelId: string; target: string }>());
   const [anchorEntryId, setAnchorEntryId] = useState<string | undefined>();
   const [replyTarget, setReplyTarget] = useState<ChannelEntry | undefined>();
@@ -159,6 +158,10 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState('');
   const activeChannelId = route.kind === 'hub' ? route.channelId : DEFAULT_CHANNEL_ID;
+  // The seq-cursor discipline lives in RoomSessionCursor (lib/roomSession.ts, concern 10) —
+  // decisions come back as data; these effects only apply them to React state. Declared AFTER
+  // activeChannelId (codex CRITICAL: the first draft read it in the initializer from the TDZ).
+  const sessionRef = useRef(new RoomSessionCursor(activeChannelId));
   // Declared up here, beside the room's other per-channel state, because `handleSend` below routes
   // composer text through it — the workspace's own derivations live further down, near the render.
   const call = useRoomCall(activeChannelId);
@@ -200,19 +203,20 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
   }, [activeChannelId]);
 
   useEffect(() => {
-    const inactive = liveChannelEntries.filter((entry) => entry.channelId !== activeChannelId && !unreadEventIds.current.has(entry.id));
-    if (inactive.length) {
-      for (const entry of inactive) unreadEventIds.current.add(entry.id);
+    // Synchronous channel guard (codex HIGH): this effect runs BEFORE the load effect on a
+    // channel-switch render, so the cursor must be re-pointed here or an old-channel live entry
+    // could be accepted and markRead'd against the NEW channel. beginChannel is idempotent.
+    sessionRef.current.beginChannel(activeChannelId);
+    const { incoming, unreadCandidates, lastSeq } = sessionRef.current.ingestLive(liveChannelEntries);
+    if (unreadCandidates.length) {
       setChannels((prev) => prev.map((channel) => {
-        const count = inactive.filter((entry) => entry.channelId === channel.id && entry.seq > (channel.lastReadSeq ?? 0)).length;
+        const count = unreadCandidates.filter((entry) => entry.channelId === channel.id && entry.seq > (channel.lastReadSeq ?? 0)).length;
         return count ? { ...channel, unreadCount: (channel.unreadCount ?? 0) + count } : channel;
       }));
     }
-    const incoming = liveChannelEntries.filter((entry) => entry.channelId === activeChannelId && entry.seq > lastSeqRef.current);
     if (!incoming.length) return;
     setEntries((prev) => reduceChannelEntries(prev, incoming, activeChannelId));
-    lastSeqRef.current = Math.max(lastSeqRef.current, latestSeq(incoming));
-    markRead(lastSeqRef.current);
+    markRead(lastSeq);
   }, [activeChannelId, liveChannelEntries, markRead]);
 
   useEffect(() => {
@@ -221,11 +225,10 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
 
   const resyncSince = useCallback(async (since: number) => {
     const payload = await apiJson<{ entries?: ChannelEntry[] }>(`/api/channels/${encodeURIComponent(activeChannelId)}/entries?since=${since}`);
-    const incoming = payload.entries ?? [];
+    const { incoming, lastSeq } = sessionRef.current.ingestResync(activeChannelId, payload.entries ?? []);
     if (!incoming.length) return;
     setEntries((prev) => reduceChannelEntries(prev, incoming, activeChannelId));
-    lastSeqRef.current = Math.max(lastSeqRef.current, latestSeq(incoming));
-    markRead(lastSeqRef.current);
+    markRead(lastSeq);
   }, [activeChannelId, markRead]);
 
   useEffect(() => {
@@ -237,9 +240,12 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
           apiJson<PresenceSnapshot>('/api/room/presence').catch(() => EMPTY_PRESENCE),
         ]);
         if (!alive) return;
-        setEntries(reduceChannelEntries([], channelPayload.entries ?? [], activeChannelId));
-        lastSeqRef.current = latestSeq(channelPayload.entries ?? []);
-        markRead(lastSeqRef.current);
+        // MERGE the snapshot into current state (codex MEDIUM): reduceChannelEntries filters
+        // both sides to activeChannelId, so old-channel rows drop out and a live entry that
+        // arrived AHEAD of this snapshot response survives instead of flickering out until the
+        // next poll recovers it.
+        setEntries((prev) => reduceChannelEntries(prev, channelPayload.entries ?? [], activeChannelId));
+        markRead(sessionRef.current.loadComplete(channelPayload.entries ?? []));
         setPresence(presencePayload);
         setError('');
       } catch (err) {
@@ -249,10 +255,14 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
       }
     };
     setLoading(true);
+    // Channel switch RESETS the cursor before the load (a hardening over the old inline refs:
+    // the previous channel's seq can no longer suppress the new channel's live entries in the
+    // pre-load window — the stale-claims class, PR #216).
+    sessionRef.current.beginChannel(activeChannelId);
     void loadChannels().catch(() => undefined);
     void load();
     const interval = setInterval(() => {
-      void resyncSince(lastSeqRef.current).catch(() => undefined);
+      void resyncSince(sessionRef.current.lastSeq).catch(() => undefined);
       void apiJson<PresenceSnapshot>('/api/room/presence').then(setPresence).catch(() => undefined);
     }, 5000);
     return () => { alive = false; clearInterval(interval); };
@@ -260,7 +270,7 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
 
   useEffect(() => {
     if (!connected || loading) return;
-    void resyncSince(lastSeqRef.current).catch(() => undefined);
+    void resyncSince(sessionRef.current.lastSeq).catch(() => undefined);
   }, [connected, loading, resyncSince]);
 
   useEffect(() => {
@@ -353,7 +363,7 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
       sendConsoleCommand({ type: 'typing', channelId: activeChannelId, active: false } as any);
       const result = await postChannelMessage({ apiJson }, activeChannelId, text, replyTarget?.id);
       setEntries((prev) => reduceChannelEntries(prev, [result.entry], activeChannelId));
-      lastSeqRef.current = Math.max(lastSeqRef.current, result.entry.seq);
+      sessionRef.current.advanceTo(result.entry.seq);
       setAnchorEntryId(result.entry.id);
       setReplyTarget(undefined);
       const routeResult = resolveMentionRoute(text, agents);

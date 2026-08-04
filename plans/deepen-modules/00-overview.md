@@ -24,6 +24,13 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
+## Iteration 33 (2026-08-04, goal mode)
+10 slice 1: RoomSessionCursor — the PR #216 stale-claims wiring is finally table-testable, with
+three hardenings (one self-caught: channel-tagged resync). Codex round was humbling and exact:
+a CRITICAL TDZ my own misread check-run waved through, the effect-ordering HIGH, and a UX
+flicker MEDIUM — all fixed + tested. The layered-verification pattern held: native catch, then
+reviewer catches, each finding a different failure class. grok flaked (8/9 today).
+
 ## Queue pivot (2026-08-03, Lars)
 
 Concerns 14–16 are the CS329A borrows (plans/research-cs329a/BRIEF.md), absorbed into this queue
