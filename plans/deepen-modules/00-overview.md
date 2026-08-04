@@ -24,6 +24,14 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
+## Iteration 25 (2026-08-04, goal mode)
+06 slice 3: the AgentDTO split (the hard one) — six domain facets, DTO = their intersection,
+wire-identical, 72 fields in/out verified twice (my script + codex's independent AST audit).
+The slice's own freeze test was the iteration's lesson: v1 compared the DTO against its own
+facets (circular — codex proved deleting etaAt stayed green); v2 is an independent 72-entry
+frozen field+optionality map. Land-types item closed as a recorded no-move disposition.
+Remaining in 06: the minimal core extraction.
+
 ## Iteration 18 (2026-08-04, goal mode — new PR; per-branch overview notes on their PRs)
 06 slice 1: feedback types leave the shared kernel for their lane, compat re-exports keep the
 world compiling. Suite 4947/1. The migration pattern (move + type-only re-export + lane-local
