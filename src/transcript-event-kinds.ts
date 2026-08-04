@@ -1,7 +1,9 @@
-// Typed transcript event kinds currently emitted by the daemon.
-// Landing-order rule: do not add a constant until the same change ships a reader/test for it —
-// enforced by tests/channel-card-kinds-sync.test.ts, which reads this file and the webapp
-// registry (webapp/src/lib/channelTimeline.ts) and fails if they drift apart.
+// Typed transcript event kinds currently emitted by the daemon — THE wire-contract module
+// (concern 08): the webapp derives its card-kind union and exhaustive rendering map from a
+// type-only import of this file, so a new kind is a webapp COMPILE error until its rendering
+// entry exists. Landing-order rule: add the constant AND its TRANSCRIPT_EVENT_KINDS entry in
+// the same change — tests/channel-card-kinds-sync.test.ts proves constants ⊆ list at runtime
+// (the one gap tsc can't see) plus the local: namespace rule.
 // Reserved names for later room-card readers: spawn-proposal.
 // Event issuer namespace: the attesting authority stamped on every event envelope by the
 // emitting chokepoint (never taken from client/caller input). "manager" is the only issuer
@@ -44,7 +46,11 @@ export const TRANSCRIPT_EVENT_VOICE_DECISION = "voice-decision";
 // (VoiceCallCoordinator), never the per-unit funnel, same as its two voice siblings above.
 export const TRANSCRIPT_EVENT_VOICE_FLEET_ACTION = "voice-fleet-action";
 
-const TRANSCRIPT_EVENT_KINDS = [
+/** The canonical wire list (concern 08): the webapp derives its card-kind union and its
+ *  exhaustive render-coverage map from THIS module (type-only import — no runtime coupling),
+ *  so a new daemon kind is a webapp COMPILE error until its rendering entry exists, replacing
+ *  the old two-file text-scrape sync test. */
+export const TRANSCRIPT_EVENT_KINDS = [
 	TRANSCRIPT_EVENT_LAND_ATTEMPT,
 	TRANSCRIPT_EVENT_LAND_ASSESSMENT,
 	TRANSCRIPT_EVENT_LAND_MERGE,

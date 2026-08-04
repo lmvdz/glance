@@ -1,4 +1,10 @@
 import type { ChannelEntry } from './dto';
+// THE wire-contract seam (concern 08): a TYPE-ONLY import of the daemon's canonical event-kind
+// union — vite bundles nothing, no runtime coupling exists, but the kind space now has exactly
+// one author. A kind added in src/transcript-event-kinds.ts is a COMPILE error here until
+// POINTER_EVENT_KINDS (below) gains its rendering entry — the sync guarantee the old two-file
+// text-scrape test approximated, now enforced by tsc.
+import type { TranscriptEventKind } from '../../../src/transcript-event-kinds.ts';
 import { landCardView, type LandCardKind } from '../components/hub/LandCards';
 import { entryAuthorLabel, entryTimeLabel } from './hub';
 import { unitHref } from './router';
@@ -9,7 +15,7 @@ export type ChannelCardTone = 'neutral' | 'info' | 'warning' | 'success' | 'dest
  *  `local:` on the wire by HubShell's managerCardEntry to keep them out of the daemon's kind
  *  space. See tests/channel-card-kinds-sync.test.ts for the cross-build invariant this protects. */
 export type LocalCardKind = 'local:mention-confirm-required' | 'local:mention-steer-failed' | 'local:spawn-proposal';
-export type ChannelCardKind = 'message' | 'needs-you' | 'gate-verdict' | LandCardKind | 'mention-steer' | 'goal-overlap' | LocalCardKind | 'plan-card' | 'return-emit' | 'design-revised' | 'token-burn-snapshot' | 'unit-spawned' | 'unit-turn-finished' | 'unit-failed' | 'pr-opened' | 'verification-ran' | 'voice-call' | 'voice-decision' | 'voice-fleet-action' | 'unknown-event';
+export type ChannelCardKind = 'message' | TranscriptEventKind | LocalCardKind | 'unknown-event';
 
 /** Epistemic register for the face's TEXT (title/body/detail — the claim content), never chrome
  *  (eyebrow/status/pinned/icon/door stay system-authored regardless). Reserved wire field: no
@@ -166,10 +172,12 @@ const POINTER_EVENT_KINDS = {
   'voice-call': true,
   'voice-decision': true,
   'voice-fleet-action': true,
-} satisfies Record<Exclude<ChannelCardKind, 'message' | 'unknown-event' | LocalCardKind>, true>;
+} satisfies Record<TranscriptEventKind, true>;
 
 // Client-minted kinds (see LocalCardKind). Exhaustive over LocalCardKind the same way.
-const LOCAL_CARD_KINDS = {
+// Exported (only) for tests/channel-card-kinds-sync.test.ts's runtime collision check —
+// the one cross-build invariant tsc cannot see (see that test's doc).
+export const LOCAL_CARD_KINDS = {
   'local:mention-confirm-required': true,
   'local:mention-steer-failed': true,
   'local:spawn-proposal': true,

@@ -19,7 +19,9 @@ commissioned-worker dirs.
 
 ```text title="default state dir"
 ~/.glance/
-  state.json            # roster config + transcripts + features
+  state.json            # roster config + transcripts (features/capabilities: own split files)
+  features.json         # persisted features (split from state.json; legacy embedded copies still load)
+  capabilities.json     # capability lane snapshot (same split)
   access-token          # bearer token (mode 0600)
   sockets/<id>.sock      # one agent-host UDS per live agent
   worktrees/             # per-agent git worktrees

@@ -42,7 +42,7 @@ import * as path from "node:path";
 const dir = process.argv[2];
 const mode = process.argv[3] ?? "durable";
 const transcripts = { a1: [{ kind: "system", text: "committed-work", ts: 1 }] };
-const state = { agents: [{ id: "a1", name: "a1", repo: "/r", worktree: dir, approvalMode: "write" }], transcripts, features: [] };
+const state = { agents: [{ id: "a1", name: "a1", repo: "/r", worktree: dir, approvalMode: "write" }], transcripts: {}, features: [] }; // tombstone: transcripts live in the split file (concern 12 slice 3)
 const receipt = { agentId: "a1", name: "a1", repo: "/r", runId: "run-1", startedAt: 1, status: "idle", toolCalls: 1, toolTally: { bash: 1 }, filesTouched: [] };
 const stateFile = path.join(dir, "state.json");
 const transcriptsFile = path.join(dir, "transcripts.json");
@@ -108,7 +108,9 @@ test("committed state survives SIGKILL of the writer with no clean shutdown", as
 		expect(state.version).toBe(1);
 		expect(state.agents).toHaveLength(1);
 		expect(state.agents[0].id).toBe("a1");
-		expect(state.transcripts.a1[0].text).toBe("committed-work");
+		// Concern 12 slice 3: the blob's transcripts field is a {} tombstone; the words live in
+		// the split file asserted below.
+		expect(state.transcripts).toEqual({});
 
 		// transcripts.json: parses and is uncorrupted.
 		const transcripts = JSON.parse(await fs.readFile(path.join(dir, "transcripts.json"), "utf8"));

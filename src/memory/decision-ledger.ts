@@ -21,8 +21,40 @@
  * the manager's store-resident Map in production, a bare Map in tests.
  */
 import { randomUUID } from "node:crypto";
-import type { FeatureDecision, PersistedFeature } from "../types.ts";
+import type { PersistedFeature } from "../types.ts";
 import { validateModelDelta } from "./decision-evidence.ts";
+
+// ── FeatureDecision (deepen 06 slice 2: moved from types.ts — the ledger owns its core type) ────
+export interface FeatureDecision {
+	id: string;
+	text: string;
+	/** "model-delta" (comprehension lane, concern 05): a mental-model delta — what changed about how
+	 *  the system works, before vs after — recorded by the implementing unit mid-run via
+	 *  `squad_record_decision`. Requires `evidence` (validated at record time against the run's
+	 *  `filesTouched`); see `validateModelDelta` in decision-evidence.ts. */
+	source?: "plan" | "human" | "agent" | "model-delta";
+	createdAt?: number;
+	/** Provenance backlink for agent-CAPTURED decisions (source:"agent"|"model-delta") — the run that
+	 *  recorded it. Populated only on the agent/model-delta path; never fabricated for plan/human
+	 *  sources (mirrors the "never-faked timestamp" discipline in fabric-search.ts). */
+	sourceRef?: { agentId?: string; runId?: string };
+	/** Evidence anchors for a `source:"model-delta"` decision: repo-relative `file` or `file:start-end`
+	 *  entries, each required to name a file the recording run actually touched (the anti-slop floor —
+	 *  DESIGN.md "Delta quality floor"). Absent for every other source. */
+	evidence?: string[];
+	/** Ledger supersession (plans/research-long-horizon-agent-memory): id of a prior decision on the
+	 *  SAME feature that this one replaces. `recordAgentDecision` stamps the target's
+	 *  `supersededBy`/`supersededAt` in the same write — invalidate, never delete, never coexist. */
+	supersedes?: string;
+	/** Set when a later decision replaced this one (the id of the replacement). A superseded decision
+	 *  stays on the record for audit and history, but is EXCLUDED from the fabric/primer projection —
+	 *  a stale fact in a spawned agent's context gets adopted regardless of labeling (compliance
+	 *  trap, arXiv 2607.10608); see the decisions loop in fabric.ts. Server-authoritative through
+	 *  the webapp PATCH merge (`featureDecisions` keeps stored fields, takes only `text`). */
+	supersededBy?: string;
+	/** Epoch ms when superseded — the close of this decision's validity window. */
+	supersededAt?: number;
+}
 
 export type RecordDecisionOutcome = "recorded" | "duplicate" | "no-feature" | "supersede-missing" | "supersede-superseded";
 

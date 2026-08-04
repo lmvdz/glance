@@ -1,5 +1,5 @@
 # Room-session module behind HubShell
-STATUS: open
+STATUS: done
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: moderate
@@ -12,6 +12,43 @@ cards) inline in effects — the pure view-model libs are tested but the wiring 
 stale-claim bugs actually lived has no test surface. Deepen: a room-session module (ports &
 adapters — WS adapter in prod, scripted adapter in tests) so the wiring becomes testable through
 its interface and HubShell becomes a view.
+
+## Slice ledger
+- Slice 1 done (2026-08-04, iteration 33): RoomSessionCursor (webapp/src/lib/roomSession.ts) —
+  the seq-cursor discipline extracted framework-free, decisions-as-data; HubShell's four wiring
+  effects became appliers. 9 table-driven tests now cover the PR #216 incident class (replay
+  no-ops, once-ever unread counting, switch reset, overlap gating, stale-closure rejection).
+  Three hardenings over the inline refs: cursor reset on switch, client-side resync seq gate,
+  and CHANNEL-TAGGED resync (self-caught pre-review: an in-flight old-channel response could
+  corrupt the new session's cursor — the old code had the same hole). Codex round: CRITICAL
+  (TDZ read in the ref initializer — my own check-run was misread as green; the reviewer + the
+  suite both caught it), HIGH (live-ingest effect ordering on switch renders — synchronous
+  idempotent beginChannel guard), MEDIUM (snapshot replace flickering out raced-ahead live
+  entries + cursor regression — merge + Math.max). grok flaked (gap row). Remaining: transport
+  port + scripted adapter (slice 2), optimistic-card reconciliation (slice 3).
+
+- Slice 2 done (2026-08-04, iteration 34): RoomSession orchestrator over the RoomTransport
+  PORT — openChannel (epoch-guarded supersession), channel-tagged resync, presence refresh;
+  HubShell constructs it once (lazy useRef + latest-closure sinks in a committed layout
+  effect) and its four wiring effects became one open+interval effect and two thin appliers.
+  Four scripted-transport interleaving tests (stale open discarded, live-ahead-of-snapshot
+  survives, stale poll rejected, stale failure discarded). BOTH lineages delivered convergent
+  rounds: grok HIGH (latest-closure markRead TOCTOU — the session now parameterizes the
+  channel) + MEDIUM (presence-fallback parity) + LOW (unmount cancel); codex independently
+  found the same markRead fix and presence parity, plus the render-phase ref write (sinks now
+  publish via useLayoutEffect). Seven adjudicated rows across the two rounds.
+
+- Slice 3 done (2026-08-04, iteration 35) — CONCERN COMPLETE: the optimistic mention-turn
+  ledger moves into the session (register/reconcile, pure + idempotent on ack re-delivery);
+  the local: failure CARD stays a rendering concern in HubShell. BOTH blind passes CLEAN with
+  itemized parity verification (idempotency, channel routing, reason fallback, pass-through
+  fields, leak parity) — and both independently flagged the same PRE-EXISTING quirk, preserved
+  not fixed: a failure card for a non-active channel is dropped by reduceChannelEntries
+  (recorded here as a candidate polish, not a regression). HubShell is now a view over the
+  session: cursor discipline (slice 1), transport orchestration (slice 2), and optimistic
+  bookkeeping (slice 3) all live behind lib/roomSession.ts with 15 unit tests including 4
+  scripted interleavings. Deliberately left: the WS subscription itself stays in useTaskContext
+  (an app-wide transport, not room-session state).
 
 ## Provenance
 Whole-repo report candidate 5 (Worth exploring); the stale-running-claims incident class
