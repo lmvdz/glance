@@ -42,7 +42,12 @@ export interface QuietRoomProps {
 export function QuietRoom({ nodes, awayMs, now, pulse, lastInterruption }: QuietRoomProps) {
   const settled = nodes.filter((node) => node.state === 'settled');
   const needsYou = nodes.filter((node) => node.state === 'needs-you');
-  const inFlight = nodes.filter((node) => node.state === 'in-flight' || node.state === 'blocked');
+  // `idle` counts as "still on the state pane", because that is what `omitted` measures — what this
+  // handover deliberately left out, not what is executing. Excluding it made the handover claim "that
+  // is everything, not a selection" while idle units sat unmentioned in the pane beside it.
+  const onPane = nodes.filter((node) => node.state === 'in-flight' || node.state === 'blocked' || node.state === 'idle');
+  // Genuinely executing work, which is a narrower question and the one the closing line answers.
+  const running = nodes.filter((node) => node.state === 'in-flight' || node.state === 'blocked');
 
   if (nodes.length === 0) {
     return (
@@ -62,9 +67,9 @@ export function QuietRoom({ nodes, awayMs, now, pulse, lastInterruption }: Quiet
     finished: settled.map((node) => `${node.address} ${node.title}`),
     changedDirection: [],
     wentUnanswered: needsYou.map((node) => `${node.address} ${node.title}`),
-    // Work still running is not omitted — it is on the state pane beside this, which is where it
+    // Work still on the pane is not omitted by accident — it is beside this, which is where it
     // belongs. Saying so keeps this from reading as the whole picture.
-    omitted: inFlight.length,
+    omitted: onPane.length,
   });
 
   return (
@@ -104,9 +109,15 @@ export function QuietRoom({ nodes, awayMs, now, pulse, lastInterruption }: Quiet
         ))}
       </div>
 
+      {/* "Quiet means the fleet is working" is only true when something IS working. With units present
+          but none of them executing, that sentence is exactly the reassuring lie this whole surface is
+          meant not to tell — so it is stated conditionally rather than printed as decoration. */}
       <div className="mt-3 max-w-[660px] text-[11.5px] leading-[1.5]" style={{ color: '#4A4A52', textWrap: 'pretty' }}>
-        The room is quiet because unit telemetry stays at its own node. Quiet here means the fleet is working, not that
-        nothing is.
+        {running.length > 0
+          ? 'The room is quiet because unit telemetry stays at its own node. Quiet here means the fleet is working, not that nothing is.'
+          : onPane.length > 0
+            ? `The room is quiet because nothing is running. ${onPane.length} unit${onPane.length === 1 ? ' is' : 's are'} idle — alive, but not working on anything, so this quiet is not progress.`
+            : 'The room is quiet because nothing is running and no unit is waiting to. Nothing is being worked on right now.'}
       </div>
 
       {pulse && pulse.length > 0 ? (

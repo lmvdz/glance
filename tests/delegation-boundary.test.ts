@@ -13,7 +13,7 @@ import {
 	nonDelegatableClasses,
 	type DelegationGrant,
 } from "../src/delegation-boundary.ts";
-import { NodeRecordStore } from "../src/node-records.ts";
+import { NodeRecordStore } from "../src/memory/node-records.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 
 function grant(action: string, over: Partial<DelegationGrant> = {}): DelegationGrant {

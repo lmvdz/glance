@@ -309,3 +309,288 @@ export function fetchPlanBrief(name: string, repo?: string): Promise<PlanBriefDT
   const qs = repo ? `?repo=${encodeURIComponent(repo)}` : '';
   return apiJson<{ brief: PlanBriefDTO }>(`/api/plans/${encodeURIComponent(name)}/brief${qs}`).then((r) => r.brief);
 }
+
+// -----------------------------------------------------------------------------------------------
+// Voice call (concern 02, plans/voice-orchestrated-room-integration) — the daemon-owned, thread-bound
+// live call. This module gets the wire TYPES and thin fetch wrappers only; concern 03 owns rendering
+// them (the call HUD, decision cards, transcript/artifact panels). Mirrors `src/voice-call-binding.ts`
+// (`VoiceCallBindingView` — never carries the control token, see its own doc), `src/voice-call-
+// journal.ts` (`JournalDecisionSnapshot`), `src/voice-call-projection.ts` (`StoredTranscriptEntry`,
+// `JournalGap`), and `src/voice-call-artifacts.ts` (`ArtifactSnapshotRecord`) exactly.
+// -----------------------------------------------------------------------------------------------
+
+export type VoiceCallState = 'connecting' | 'live' | 'degraded' | 'ended';
+export type VoiceCallRetention = 'full' | 'tails' | 'off';
+export type VoiceCallTerminalReason = 'operator-ended' | 'terminal' | 'journal-end' | 'broker-exit' | 'stale-binding' | 'port-reused' | 'start-failed' | 'idle';
+
+/** `GET/POST/DELETE /api/channels/:id/voice-call`'s response shape. Never carries a control token —
+ *  the daemon holds it and relays authenticated bridge controls itself (resolve/steer below); a page
+ *  that can read call state must never learn the secret that would let it forge one. */
+export interface VoiceCallBindingDTO {
+  channelId: string;
+  callId?: string;
+  sessionId?: string;
+  port?: number;
+  bridgeUrl?: string;
+  journalPath?: string;
+  sessionRoot: string;
+  ownerActorId: string;
+  retention: VoiceCallRetention;
+  startedAt: number;
+  updatedAt: number;
+  state: VoiceCallState;
+  degradedSince?: number;
+  degradedReason?: 'socket-loss';
+  terminalReason?: VoiceCallTerminalReason;
+  terminalError?: string | null;
+  endedAt?: number;
+  lastJournalSeq?: number;
+  resumeSessionId?: string;
+  /** Set when the session's own reported recording mode disagrees with `retention` (the room's own
+   *  request) — see `voice-call-binding.ts#VoiceCallBinding.retentionMismatch`'s doc server-side.
+   *  Absent when they agree, or the bridge never reported one at all (an older build). */
+  retentionMismatch?: { expected: VoiceCallRetention; reported: 'full' | 'tails' | 'off' };
+  /** What the daemon has last ASKED this call's mic to be (concern 03's visible mute). The wire
+   *  control is ack-less, so this records the request, never a confirmed mic state — the HUD copy
+   *  says exactly that. Absent on the POST/DELETE responses, which return the bare binding. */
+  micMuted?: boolean;
+  /** `true` only while a connected bridge socket exists — the precondition for steering, resolving
+   *  and muting. Lets the HUD say "controls are unavailable right now" instead of offering buttons
+   *  the daemon is going to refuse. */
+  controlsAvailable?: boolean;
+  /** Concern 09 (browser-audio-transport): whether the broker spawned this call's `omp live`
+   *  process audio-less — read from the broker at attach time, never a client guess. Present on the
+   *  bare binding (POST/DELETE included), unlike `audioAvailable` below. */
+  noLocalAudio?: boolean;
+  /** Concern 09: `true` only when `noLocalAudio` AND `controlsAvailable` both hold — the two facts
+   *  the room needs before it opens a mic/plays audio at all. Same POST/DELETE absence rule as
+   *  `controlsAvailable` above (present only on `GET /voice-call`'s full state read). */
+  audioAvailable?: boolean;
+}
+
+export type VoiceCallDecisionState = 'open' | 'awaiting-confirmation' | 'answered' | 'expired' | 'cancelled' | 'failed';
+
+export interface VoiceCallDecisionOptionDTO {
+  index: number;
+  label: string;
+  consequence: string;
+}
+
+/** Concern 05's recorded voice-resolution policy — "destructive" is UI-only, "routine" (or the
+ *  field simply absent, on a decision minted before a caller declared one) stays voice-resolvable.
+ *  Mirrors `src/voice-call-journal.ts`'s `JournalDecisionClass`. */
+export type VoiceCallDecisionClass = 'destructive' | 'routine';
+
+export interface VoiceCallDecisionDTO {
+  id: string;
+  prompt: string;
+  options: VoiceCallDecisionOptionDTO[];
+  requiresConfirmation: boolean;
+  decisionClass?: VoiceCallDecisionClass;
+  state: VoiceCallDecisionState;
+  createdAt: number;
+  updatedAt: number;
+  resolution?: { optionIndex: number; label: string; source: 'voice' | 'ui' };
+}
+
+export interface VoiceCallTranscriptEntryDTO {
+  callId: string;
+  turn: number;
+  role: 'user' | 'assistant';
+  text?: string;
+  final: boolean;
+  at: number;
+  redacted?: boolean;
+  gapBefore?: { missingCount: number };
+}
+
+export type VoiceCallArtifactStatus = 'ready' | 'failed' | 'incomplete';
+
+export interface VoiceCallArtifactDTO {
+  id: string;
+  channelId: string;
+  callId: string;
+  sourcePath: string;
+  status: VoiceCallArtifactStatus;
+  contentHash?: string;
+  revision?: number;
+  snapshotPath?: string;
+  error?: string;
+  copiedAt: number;
+}
+
+export interface VoiceCallJournalGapDTO {
+  callId: string;
+  atSeq: number;
+  missingCount: number;
+  detectedAt: number;
+}
+
+export interface StartVoiceCallInput {
+  sessionRoot?: string;
+  retention?: VoiceCallRetention;
+  resumeSessionId?: string;
+  /** Concern 12: per-agent scoped start — the room unit whose detail and transcript tail seed the
+   *  call's context ("call with ompsq-477"). The daemon validates the unit is in THIS room. */
+  agentId?: string;
+}
+
+/** `GET /api/channels/:id/voice-call`. `null` for the normal "no call has ever been started for this
+ *  channel" case (mapped from the route's 404) — never thrown, exactly like `getVoiceConfig`'s own
+ *  404-is-a-normal-state discipline above. A genuine authorization failure (403, a private channel
+ *  this actor cannot read) still throws via `apiJson`. */
+export async function fetchVoiceCallState(channelId: string): Promise<VoiceCallBindingDTO | null> {
+  const response = await apiFetch(`/api/channels/${encodeURIComponent(channelId)}/voice-call`);
+  if (response.status === 404) return null;
+  if (!response.ok) throw new ApiError(await response.text(), response.status);
+  return response.json() as Promise<VoiceCallBindingDTO>;
+}
+
+/** `POST /api/channels/:id/voice-call` — thread-aware start. Throws (via `apiJson`) on any refusal:
+ *  403 forbidden, 409 an active call already occupies this thread, or a 502 broker/bridge failure
+ *  carrying the daemon's own explanatory text as the error message. */
+export function startVoiceCall(channelId: string, input: StartVoiceCallInput = {}): Promise<VoiceCallBindingDTO> {
+  return apiJson<VoiceCallBindingDTO>(`/api/channels/${encodeURIComponent(channelId)}/voice-call`, jsonInit('POST', input));
+}
+
+/** `DELETE /api/channels/:id/voice-call` — operator-initiated end. */
+export function endVoiceCall(channelId: string): Promise<VoiceCallBindingDTO> {
+  return apiJson<VoiceCallBindingDTO>(`/api/channels/${encodeURIComponent(channelId)}/voice-call`, { method: 'DELETE' });
+}
+
+/** `GET /api/channels/:id/voice-call/decisions` — every decision this channel's projection store has
+ *  witnessed, in mint order, at its CURRENT state (open/awaiting-confirmation/answered/…) — the live
+ *  read surface a decision panel polls, distinct from the append-only timeline card history. */
+export function fetchVoiceCallDecisions(channelId: string): Promise<VoiceCallDecisionDTO[]> {
+  return apiJson<{ decisions: VoiceCallDecisionDTO[] }>(`/api/channels/${encodeURIComponent(channelId)}/voice-call/decisions`).then((r) => r.decisions);
+}
+
+export interface ResolveVoiceCallDecisionInput {
+  optionIndex: number;
+  label: string;
+  confirmToken?: string;
+}
+
+/** `POST /api/channels/:id/voice-call/decisions/:decisionId/resolve` — relayed through the daemon's
+ *  tokenized bridge control after a room-membership/role check. The response is the bridge's own
+ *  `controlAck` shape: `ok` may be `false` with an arbiter-composed `reason` (e.g. `label-mismatch`,
+ *  `already-terminal`) even on a 200 — that is the arbiter saying no, not a transport failure, so it
+ *  is never thrown here. A 403/404/409 (forbidden / no active call / bridge unavailable) still throws. */
+export function resolveVoiceCallDecision(channelId: string, decisionId: string, input: ResolveVoiceCallDecisionInput): Promise<{ ok: boolean; reason?: string; decision?: VoiceCallDecisionDTO; confirmToken?: string }> {
+  return apiJson(`/api/channels/${encodeURIComponent(channelId)}/voice-call/decisions/${encodeURIComponent(decisionId)}/resolve`, jsonInit('POST', input));
+}
+
+/** `POST /api/channels/:id/voice-call/steer` — composer steering relay (unauthenticated at the bridge
+ *  layer, per PROTOCOL.md, but still gated here by room membership/role like every other mutation). */
+export function steerVoiceCall(channelId: string, text: string): Promise<{ ok: boolean }> {
+  return apiJson<{ ok: boolean }>(`/api/channels/${encodeURIComponent(channelId)}/voice-call/steer`, jsonInit('POST', { text }));
+}
+
+/** `GET /api/channels/:id/voice-call/transcript` — the retained transcript for THIS channel's call
+ *  (its `callId`), oldest-first, collapsed by `(role, turn)`. Empty when retention is `off`, or when
+ *  no call has ever bound this channel. */
+export function fetchVoiceCallTranscript(channelId: string): Promise<VoiceCallTranscriptEntryDTO[]> {
+  return apiJson<{ transcript: VoiceCallTranscriptEntryDTO[] }>(`/api/channels/${encodeURIComponent(channelId)}/voice-call/transcript`).then((r) => r.transcript);
+}
+
+/** `GET /api/channels/:id/voice-call/artifacts` — the per-thread artifact snapshot index (immutable,
+ *  content-hash-addressed room-owned copies; see `src/voice-call-artifacts.ts`). */
+export function fetchVoiceCallArtifacts(channelId: string): Promise<VoiceCallArtifactDTO[]> {
+  return apiJson<{ artifacts: VoiceCallArtifactDTO[] }>(`/api/channels/${encodeURIComponent(channelId)}/voice-call/artifacts`).then((r) => r.artifacts);
+}
+
+/** Why an artifact's snapshot could not be read. Mirrors `src/voice-call-artifacts.ts`'s
+ *  `ArtifactReadResult` failure arm exactly — each one renders as its own state in the viewer, so a
+ *  vanished snapshot never arrives looking like an empty document. */
+export type VoiceCallArtifactReadFailure = 'not-ready' | 'missing' | 'too-large' | 'read-error';
+
+export interface VoiceCallArtifactContentDTO {
+  artifact: VoiceCallArtifactDTO;
+  content: string;
+}
+
+/** `GET /api/channels/:id/voice-call/artifacts/:artifactId` — one artifact's IMMUTABLE snapshot
+ *  bytes. Reads the daemon-owned copy, never the worktree source, so the viewer shows what the room
+ *  witnessed. A named failure (409/413) rejects with a `VoiceCallArtifactReadError` carrying the
+ *  reason and the artifact row itself; a 404 (no such id in this channel) throws via `apiJson`. */
+export async function fetchVoiceCallArtifactContent(channelId: string, artifactId: string): Promise<VoiceCallArtifactContentDTO> {
+  const response = await apiFetch(`/api/channels/${encodeURIComponent(channelId)}/voice-call/artifacts/${encodeURIComponent(artifactId)}`);
+  if (response.ok) return response.json() as Promise<VoiceCallArtifactContentDTO>;
+  if (response.status === 409 || response.status === 413) {
+    const body = (await response.json().catch(() => ({}))) as { artifact?: VoiceCallArtifactDTO; error?: string; detail?: string };
+    throw new VoiceCallArtifactReadError((body.error as VoiceCallArtifactReadFailure) ?? 'read-error', body.detail, body.artifact);
+  }
+  throw new ApiError(await response.text(), response.status);
+}
+
+/** A NAMED artifact-read failure, so the viewer can branch on `reason` rather than string-matching a
+ *  message. Extends `Error` (not `ApiError`) because these are not transport failures — the daemon
+ *  answered, and its answer was "this artifact cannot be shown, and here is exactly why". */
+export class VoiceCallArtifactReadError extends Error {
+  constructor(
+    readonly reason: VoiceCallArtifactReadFailure,
+    readonly detail?: string,
+    readonly artifact?: VoiceCallArtifactDTO,
+  ) {
+    super(detail ? `${reason}: ${detail}` : reason);
+    this.name = 'VoiceCallArtifactReadError';
+  }
+}
+
+/** `POST /api/channels/:id/voice-call/mute` — visible mute for the room call HUD. A SET, not the
+ *  wire's bare toggle: the daemon tracks what it last asked for, so a double-click (or a second
+ *  client) cannot race the mic back open. The response echoes what was asked, never a confirmed mic
+ *  state — the protocol gives no read-back and the HUD's copy says so. */
+export function setVoiceCallMuted(channelId: string, muted: boolean): Promise<{ muted: boolean }> {
+  return apiJson<{ muted: boolean }>(`/api/channels/${encodeURIComponent(channelId)}/voice-call/mute`, jsonInit('POST', { muted }));
+}
+
+/** `GET /api/channels/:id/voice-call/gaps` — visible journal gaps (a dropped/missed sequence range),
+ *  per call. Empty is the common, honest case: no gap was ever detected. */
+export function fetchVoiceCallGaps(channelId: string): Promise<VoiceCallJournalGapDTO[]> {
+  return apiJson<{ gaps: VoiceCallJournalGapDTO[] }>(`/api/channels/${encodeURIComponent(channelId)}/voice-call/gaps`).then((r) => r.gaps);
+}
+
+/** `POST /api/channels/:id/voice-call/reattach` (concern 10: call-management-ui) — the user-triggered
+ *  counterpart to the daemon's own automatic degraded→live recovery. Throws (via `apiJson`) on any
+ *  refusal, exactly like `startVoiceCall`/`endVoiceCall`: 403 forbidden, 404 no-active-call (already
+ *  ended, or ended just now because the broker corroborated the process is gone), 502 a broker/bridge
+ *  failure carrying the daemon's own explanatory text. */
+export function reattachVoiceCall(channelId: string): Promise<VoiceCallBindingDTO> {
+  return apiJson<VoiceCallBindingDTO>(`/api/channels/${encodeURIComponent(channelId)}/voice-call/reattach`, { method: 'POST' });
+}
+
+// -------------------------------------------------------------------------------------------------
+// Voice calls surface (concern 10: call-management-ui) — org-wide, not channel-scoped: the room
+// that started a call is not necessarily the only room a person needs to see it, end it, or reattach
+// to it from, and a broker ORPHAN (a process the broker still lists running with no daemon binding at
+// all — see `src/voice-call-manager.ts#VoiceCallOrphan`) has no channel to route through in the first
+// place.
+// -------------------------------------------------------------------------------------------------
+
+/** A broker-tracked call process with no corresponding non-ended binding — see the daemon's own
+ *  `VoiceCallOrphan` doc for exactly what counts. There is no channel, callId is the only identity. */
+export interface VoiceCallOrphanDTO {
+  callId: string;
+  port?: number;
+  startedAt?: number;
+  sessionRoot?: string;
+  noLocalAudio?: boolean;
+}
+
+export interface VoiceCallsSurfaceDTO {
+  bindings: VoiceCallBindingDTO[];
+  orphans: VoiceCallOrphanDTO[];
+}
+
+/** `GET /api/voice-calls` — every binding this actor can read, across every channel, plus every
+ *  broker orphan (which no per-channel read could ever surface). */
+export function fetchVoiceCallsSurface(): Promise<VoiceCallsSurfaceDTO> {
+  return apiJson<VoiceCallsSurfaceDTO>('/api/voice-calls');
+}
+
+/** `POST /api/voice-calls/orphans/:callId/end` — reaps a broker call directly; there is no binding to
+ *  route through. Throws via `apiJson` on the broker's own honest refusal reason. */
+export function endOrphanVoiceCall(callId: string): Promise<{ ended: true }> {
+  return apiJson<{ ended: true }>(`/api/voice-calls/orphans/${encodeURIComponent(callId)}/end`, { method: 'POST' });
+}

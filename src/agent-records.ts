@@ -1,4 +1,4 @@
-import type { AgentProfileRecord, EvidenceRecord, NodeRecord } from "./node-records.ts";
+import type { AgentProfileRecord, EvidenceRecord, NodeRecord } from "./memory/node-records.ts";
 
 export type AgentClaimState = "current" | "stale" | "withdrawn";
 

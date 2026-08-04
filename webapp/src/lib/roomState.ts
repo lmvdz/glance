@@ -16,7 +16,13 @@
  * - **A folded run carries a verdict**, not just a count.
  */
 
-export type NodeState = "needs-you" | "in-flight" | "settled" | "blocked" | "parked";
+/**
+ * `idle` is the state a live unit sits in BETWEEN turns — connected, not producing. It is deliberately
+ * distinct from `in-flight`: it stays on the working surface (a unit that exists must be visible) but
+ * it is not work in progress, so `fleetSummary` must not count it. Collapsing the two is what made the
+ * top bar claim "7 units working" for a fleet where nothing at all was running.
+ */
+export type NodeState = "needs-you" | "in-flight" | "idle" | "settled" | "blocked" | "parked";
 
 export interface RoomNode {
 	id: string;
@@ -49,7 +55,10 @@ export function groupByState(nodes: readonly RoomNode[]): RoomGroups {
 	const byRecency = (a: RoomNode, b: RoomNode) => (b.lastMovementAt ?? 0) - (a.lastMovementAt ?? 0) || a.address.localeCompare(b.address);
 	return {
 		needsYou: nodes.filter((n) => n.state === "needs-you").sort(byRecency),
-		inFlight: nodes.filter((n) => n.state === "in-flight" || n.state === "blocked" || n.state === "parked").sort(byRecency),
+		// `idle` belongs to the working region, not to settled: the unit still exists and is still
+		// yours to act on. It just isn't producing, which is a counting question (fleetSummary), not a
+		// visibility question.
+		inFlight: nodes.filter((n) => n.state === "in-flight" || n.state === "idle" || n.state === "blocked" || n.state === "parked").sort(byRecency),
 		settled: nodes.filter((n) => n.state === "settled").sort(byRecency),
 	};
 }
@@ -91,6 +100,12 @@ export function nodeStatusLine(node: RoomNode, now: number): string {
 		case "parked":
 			// Parked carries NO stall number, because parked is a decision (concern 13).
 			return `Parked. Someone decided this waits, so nothing here is overdue.`;
+		case "idle": {
+			// Idle is NOT parked: nobody decided this waits. The unit is alive and between turns, which
+			// is a fact worth stating plainly rather than dressing up as progress.
+			const since = node.lastMovementAt === undefined ? "" : ` Last moved ${duration(now - node.lastMovementAt)} ago.`;
+			return `${node.owner ?? "This unit"} is idle — alive, but not working on anything right now.${since} ${blastRadius(node)}`;
+		}
 		case "in-flight": {
 			if (!node.owner) return `Queued — nobody has picked it up yet. ${blastRadius(node)}`;
 			// Healthy work still states its blast radius. "Wren is working on it" names a state and stops
@@ -185,6 +200,47 @@ export function duration(ms: number): string {
 	return days === 1 ? "a day" : `${days} days`;
 }
 
+/** One row in "WHERE YOU ARE STANDING" — #fleet, another room, or a unit's own conversation. */
+export interface RoomView {
+	id: string;
+	name: string;
+	unread: number;
+	/** Node channels are a unit's own conversation, not a room you joined. */
+	kind: "room" | "node";
+	/**
+	 * A node channel whose unit is no longer active (or no longer exists at all) — the rail folds it
+	 * into a collapsed section rather than growing forever. A plain room (#fleet, or a channel a
+	 * person created directly) is never settled — it has no unit to settle.
+	 */
+	settled: boolean;
+}
+
+/**
+ * Projects the raw channel list into what the standing tree shows: one row per channel id — a
+ * defensive dedupe. The daemon already collapses duplicate-named node channels at list time
+ * (src/channels.ts's `reconcileDuplicateNodeChannels`) and never emits two rows sharing an id, but a
+ * fetch race, a stale response landing after a newer one, or a daemon that predates the fix must
+ * never be able to double a row here either — this is the last line of defense, not the fix itself.
+ *
+ * The fold is matched by display NAME rather than channel id, because a unit re-dispatched across a
+ * restart gets a fresh node id (deliberate — see `spawn-identity.ts`'s `newAgentId`) but keeps the
+ * same title, and the fold has to track the UNIT, not whichever id most recently got bound to its
+ * channel.
+ */
+export function roomViewsFrom(
+	channels: ReadonlyArray<{ id: string; name: string; unreadCount?: number }>,
+	units: ReadonlyArray<{ title: string; state: NodeState }>,
+): RoomView[] {
+	const activeTitles = new Set(units.filter((unit) => unit.state !== "settled").map((unit) => unit.title));
+	const byId = new Map<string, RoomView>();
+	for (const entry of channels) {
+		const name = entry.name.startsWith("#") ? entry.name : `#${entry.name}`;
+		const kind: RoomView["kind"] = entry.id.startsWith("node:") ? "node" : "room";
+		byId.set(entry.id, { id: entry.id, name, unread: entry.unreadCount ?? 0, kind, settled: kind === "node" && !activeTitles.has(name.slice(1)) });
+	}
+	return [...byId.values()];
+}
+
 /**
  * The fleet roster, read as room state.
  *
@@ -218,15 +274,33 @@ function roomStateOf(agent: { status?: string; pending?: unknown[] }): NodeState
 	switch (agent.status) {
 		case "working":
 			return "in-flight";
+		// Spinning up IS in flight — the unit was just told to do something and is on its way.
+		case "starting":
+			return "in-flight";
 		case "blocked":
 			return "blocked";
+		case "input":
+			// Asking for input is asking for a PERSON, even before a pending request has materialised.
+			return "needs-you";
 		case "done":
 		case "stopped":
 			return "settled";
 		case "error":
 			// An errored unit needs a person: it stopped in a way it did not choose.
 			return "needs-you";
+		case "idle":
+			return "idle";
 		default:
-			return "in-flight";
+			// Absence-as-answer, in the direction that cannot lie about work: an unrecognised or missing
+			// status must NOT read as settled (settled work leaves the working surface and would vanish),
+			// and must NOT read as in-flight either (that is a claim that work is happening, which is
+			// exactly the claim we cannot support). `idle` is the honest middle — still on the working
+			// surface, not counted as working.
+			//
+			// The bug that prompted this was the `idle` case above, not this one: `idle` had no case of
+			// its own and fell through to `in-flight`, so a fleet of live-but-unoccupied units reported
+			// as fully busy. This branch is hardened in the same direction rather than left as the one
+			// remaining path that can invent work out of a value nobody recognises.
+			return "idle";
 	}
 }

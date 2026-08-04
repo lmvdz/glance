@@ -31,7 +31,13 @@ const decode = (value: string | undefined): string | undefined => {
 };
 
 export function parseHubHash(hash: string): HubRoute {
-  const path = trimHash(hash);
+  // A `?push=1` marker (src/push.ts / voice-attention.ts append it to every push payload's deep
+  // link) is never part of the route itself — a `#` fragment has no browser-parsed query string, so
+  // anything after a literal `?` would otherwise get glued onto the LAST path segment (e.g.
+  // `#/channel/room-1?push=1` would parse `channelId` as the literal `"room-1?push=1"`). Strip it
+  // before segmenting, exactly like `push-tap.ts`'s dedicated agent-route strip does for the one
+  // route that already gets stripped pre-render — this covers every OTHER route the same way.
+  const path = trimHash(hash).split('?')[0] ?? '';
   if (!path || path === DEFAULT_CHANNEL_ID) return { kind: 'hub', channelId: DEFAULT_CHANNEL_ID };
 
   const [head, rawId, sub, rawSubId] = path.split('/');

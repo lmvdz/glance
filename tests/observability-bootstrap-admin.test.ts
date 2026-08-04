@@ -23,7 +23,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { appendReceipt } from "../src/receipts.ts";
-import { writeDigest } from "../src/digest.ts";
+import { writeDigest } from "../src/memory/digest.ts";
 import { claimLease } from "../src/leases.ts";
 import type { AutomationLog } from "../src/automation-log.ts";
 import type { LearningMetrics } from "../src/metrics.ts";

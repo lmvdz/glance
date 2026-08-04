@@ -25,6 +25,7 @@ import { type AutonomyFacts, doctorHostVisible } from "./doctor.ts";
 import { DERIVED_SANDBOX_IMAGE } from "./gate-runner.ts";
 import { errText } from "./err-text.ts";
 import { globalDefaultHarness, listHarnesses, listHarnessTiers } from "./harness-registry.ts";
+import { discoveredModelOptions } from "./model-discovery.ts";
 import { decodeClientCommand } from "./schema/client-command.ts";
 import {
 	AdoptBodySchema,
@@ -89,6 +90,10 @@ import {
 	PresenceClaimBodySchema,
 	ProjectRegisterBodySchema,
 	TaskStartBodySchema,
+	VoiceCallMuteBodySchema,
+	VoiceCallResolveDecisionBodySchema,
+	VoiceCallStartBodySchema,
+	VoiceCallSteerBodySchema,
 	VoiceTokenBodySchema,
 } from "./schema/http-body.ts";
 import { mergeAdoptionCounters } from "./adoption-counters.ts";
@@ -98,13 +103,14 @@ import { isPlanDocPath, planDocDiffSince, planDocHeadRevision, readPlanDoc, read
 import { assemblePlanBrief } from "./plan-brief.ts";
 import { planVoteGateOpen, tallyPlanVoteRound } from "./plan-votes.ts";
 import { hardenedGit } from "./git-harden.ts";
-import { rankKbDocs, searchFabric, type KbDoc, type KbDocType } from "./fabric-search.ts";
-import type { FabricSnapshot } from "./fabric.ts";
+import { rankKbDocs, searchFabric, type KbDoc, type KbDocType } from "./memory/fabric-search.ts";
+import type { FabricSnapshot } from "./memory/fabric.ts";
+import { sanitizePatchDecisions } from "./memory/index.ts";
 import { redactAttentionForActor, redactSeenMapForActor } from "./attention.ts";
 import { maxLadderPriority, type LadderPriority } from "./attention-ladder.ts";
 import { computeFog, repoHasHistory } from "./comprehension-fog.ts";
-import type { SymptomEntry, SymptomSearchHit } from "./symptoms.ts";
-import type { EpisodeMeta } from "./weekly-episode.ts";
+import type { SymptomEntry, SymptomSearchHit } from "./memory/symptoms.ts";
+import type { EpisodeMeta } from "./memory/weekly-episode.ts";
 import { normalizeRepoPath } from "./project-registry.ts";
 import { readAudit, type AuditQuery } from "./audit.ts";
 import type { AutomationEvent, AutomationLoop, AutomationQuery, AutomationRollupRow } from "./automation-log.ts";
@@ -160,6 +166,18 @@ import { appendOrgAudit, deleteOrgAuditRow, deleteOrgSecret, finalizeOrgAuditDet
  *  deliberately excluded here (unlike squad-manager's private `commandTarget`, which audits it). */
 function commandAgentTarget(cmd: ClientCommand): string | undefined {
 	return "id" in cmd ? cmd.id : undefined;
+}
+
+/** Maps a `CoordinatorResult` failure reason (voice-call-manager.ts) to an HTTP status. Every reason
+ *  is one of the coordinator's own honest, closed set — `forbidden` (room membership/role denied),
+ *  `no-active-call` (nothing to act on), `bridge-unavailable` (degraded/no live socket to relay to),
+ *  or a free-text broker/bridge failure detail (start-time errors) — never a generic 500. */
+function voiceCallErrorResponse(reason: string): Response {
+	if (reason === "forbidden") return new Response("forbidden", { status: 403 });
+	if (reason === "no-active-call") return new Response(reason, { status: 404 });
+	if (reason === "bridge-unavailable") return new Response(reason, { status: 409 });
+	if (reason.includes("already has an active call")) return new Response(reason, { status: 409 });
+	return new Response(reason, { status: 502 });
 }
 
 function requestScope(body: unknown): Pick<CreateAgentOptions, "requires" | "owns" | "produces" | "scopeSource"> {
@@ -265,6 +283,11 @@ export interface ModelOption {
 	value: string;
 	/** Which harness offers it — declared, never inferred from the model id. */
 	harness?: string;
+	/** Where the entry's knowledge comes from — `"live-probe"` (cold harness probe,
+	 *  model-discovery.ts) or `"static-catalog"` (the registry's baked fallback when a probe fails).
+	 *  Absent on env-configured, live-agent, and default entries (pre-existing sources, shape
+	 *  unchanged for older webapps). */
+	provenance?: string;
 }
 
 export function modelOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): ModelOption[] {
@@ -297,6 +320,50 @@ export function mergeModelOptions(...groups: ModelOption[][]): ModelOption[] {
 		return true;
 	});
 }
+
+/**
+ * One "<harness> default" fallback entry per harness this daemon can actually launch RIGHT NOW —
+ * available per `listHarnesses` (verified, or unverified too under OMP_SQUAD_UNVERIFIED_HARNESS=1)
+ * AND with its binary resolvable on the daemon's real spawn PATH (`listHarnessTiers`'s `binDetected`).
+ *
+ * `manager.modelOptions()` can only ask a harness that already has a LIVE agent connected — a
+ * chicken-and-egg gap at the exact moment the create-agent surface needs an answer: before any agent
+ * exists. A fresh daemon (or a room with zero live agents of a given harness) answered with nothing
+ * for that harness, and the picker's per-harness grouping then showed NO group at all for it — visually
+ * indistinguishable from "no harnesses, no models" even though the harness is real and spawnable. This
+ * is additive, never a replacement: a harness that DOES have a live-reported model list keeps every one
+ * of those too (`mergeModelOptions` dedupes per harness+value, and a blank-value default never collides
+ * with a named model). A harness whose binary isn't actually on PATH is silently omitted rather than
+ * offered and then failing to spawn — the same honesty rule `/api/harnesses` already applies.
+ */
+export function harnessDefaultModelOptions(): ModelOption[] {
+	const available = new Set(listHarnesses().map((h) => h.name));
+	return listHarnessTiers()
+		.filter((t) => available.has(t.name) && t.binDetected)
+		.map((t) => ({ label: `${t.name} default`, value: "", harness: t.name }));
+}
+
+/**
+ * Stable-sort merged options so each harness's entries are CONTIGUOUS, ordered by the group's first
+ * appearance, with harness-less (env/legacy) entries pinned first.
+ *
+ * The webapp's ModelPicker renders a group heading whenever consecutive options change groups — it
+ * never re-sorts. Merged input arrives source-major (all defaults, then all discovered, then all
+ * live), which would render each harness's heading two or three times with its entries scattered
+ * between other harnesses' sections. Within a group the merge order is preserved, which is exactly
+ * the wanted display order: the blank-value "<harness> default" entry (merged before discovery)
+ * stays the section's first row, followed by that harness's real models.
+ * @substrate exported for tests only — the `/api/models` handler in this file is the production caller.
+ */
+export function sortModelOptionsForPicker(options: ModelOption[]): ModelOption[] {
+	const rank = new Map<string, number>();
+	for (const option of options) {
+		const group = option.harness ?? "";
+		if (!rank.has(group)) rank.set(group, group === "" ? -1 : rank.size);
+	}
+	return [...options].sort((a, b) => (rank.get(a.harness ?? "") ?? 0) - (rank.get(b.harness ?? "") ?? 0));
+}
+
 function capabilityInstallState(value: unknown): CapabilityInstallState | undefined {
 	return value === "imported" || value === "validated" || value === "approved" || value === "enabled" || value === "disabled" || value === "failed" || value === "removed" ? value : undefined;
 }
@@ -313,59 +380,9 @@ function featureCriteria(value: unknown): FeatureCriterion[] | undefined {
 	});
 }
 
-/**
- * Sanitize a PATCH body's `decisions` array against the feature's STORED decisions. The incoming
- * array defines membership and order (so deleting a decision still works), but for an entry whose
- * id already exists on the feature, the server-authoritative fields — `source`, `evidence`,
- * `sourceRef`, `createdAt` — are kept from the stored record and only the text is taken from the
- * client. Without this merge, the webapp's routine "add one decision" round-trip (it PATCHes the
- * FULL array back) coerced every stored `model-delta` decision to `source:"human"` and silently
- * dropped its evidence anchors — destroying the teaching content the comprehension lane exists to
- * produce. New entries (id not on the feature) are down-tiered exactly as before: a PATCH client
- * can never mint `model-delta` records, because those are only minted through
- * `squad_record_decision`'s evidence validation. (Model-deltas always live on persisted features —
- * `recordAgentDecision` adopts before writing — so `stored` is never missing for them.)
- *
- * Supersession-chain members (`supersedes`/`supersededBy` set) get ledger protection
- * (blind-review finding): a STALE client that loaded the feature before a replacement was
- * recorded PATCHes the full array back WITHOUT the replacement — omission-as-delete would then
- * destroy the current decision while its predecessor stays stamped superseded-by-a-ghost,
- * vanishing BOTH from projection. Chain members therefore survive omission (re-appended, stored
- * order), and a SUPERSEDED entry is immutable like a model-delta — it is history, and history
- * does not take text edits.
- * @substrate exported for tests only — the PATCH handler in this file is the one production caller;
- * the merge semantics above are exactly what tests/feature-decisions-merge.test.ts pins.
- */
-export function featureDecisions(value: unknown, stored: FeatureDecision[] | undefined): FeatureDecision[] | undefined {
-	if (!Array.isArray(value)) return undefined;
-	const byId = new Map((stored ?? []).map((d) => [d.id, d]));
-	const out = value.flatMap((item): FeatureDecision[] => {
-		if (!item || typeof item !== "object") return [];
-		const rec = item as Record<string, unknown>;
-		const id = typeof rec.id === "string" ? rec.id : undefined;
-		const text = typeof rec.text === "string" ? rec.text.trim() : "";
-		if (!id || !text) return [];
-		const existing = byId.get(id);
-		// model-delta records are IMMUTABLE through PATCH (code-review resume finding 2): their text
-		// was validated against the recording run's evidence anchors, and accepting a client text edit
-		// while keeping source/evidence/sourceRef would present a rewritten claim as run-validated —
-		// the exact fabricated-verification pattern the lane exists to prevent. A client may still
-		// DELETE one by omitting it (unless it is a supersession-chain member — see below); editing
-		// any other source's text stays allowed.
-		if (existing?.source === "model-delta") return [existing];
-		// Superseded entries are history: keep them verbatim, no text edits.
-		if (existing?.supersededBy) return [existing];
-		if (existing) return [{ ...existing, text }];
-		return [{ id, text, source: rec.source === "plan" || rec.source === "human" || rec.source === "agent" ? rec.source : "human", createdAt: typeof rec.createdAt === "number" ? rec.createdAt : undefined }];
-	});
-	// Ledger guard: chain members cannot be deleted by omission. Re-append any stored
-	// `supersedes`/`supersededBy` carrier the client's array dropped, in stored order.
-	const present = new Set(out.map((d) => d.id));
-	for (const d of stored ?? []) {
-		if (!present.has(d.id) && (d.supersededBy || d.supersedes)) out.push(d);
-	}
-	return out;
-}
+// The PATCH `decisions` sanitizer (server-authoritative merge, model-delta immutability,
+// supersession-chain omission protection) lives with the ledger: `sanitizePatchDecisions`,
+// src/memory/decision-ledger.ts — pinned by tests/feature-decisions-merge.test.ts.
 
 function featureRelationships(value: unknown): FeatureRelationship[] | undefined {
 	if (!Array.isArray(value)) return undefined;
@@ -425,6 +442,16 @@ interface SocketData {
 	 *  Lets `resolveCommandManager` route a mutating command to the agent's actual owning manager
 	 *  instead of always the root factory. Never true for a tenant session socket. */
 	bootstrapAdmin?: boolean;
+	/**
+	 * Concern 09 (browser-audio-transport): set only for a connection through the dedicated per-channel
+	 * audio WS upgrade (`/api/channels/:channelId/voice-call/audio`), never for the general `/ws`
+	 * chat/roster socket. Its presence is what the shared `websocket` handlers key on to route this
+	 * connection's frames to the voice-call audio relay instead of `applyCommand` — a completely
+	 * separate wire vocabulary (binary PCM, not `ClientCommand` JSON) on a completely separate socket,
+	 * reusing only the SAME upgrade machinery (session resolution, `Bun.serve`'s one `websocket`
+	 * config) rather than duplicating it.
+	 */
+	voiceAudio?: { channelId: string };
 }
 
 /** Resolved better-auth session shape we read (subset; structural typing tolerates better-auth's wider type). */
@@ -759,6 +786,11 @@ export class SquadServer {
 	private readonly clientsByOrg = new Map<string, Set<ServerWebSocket<SocketData>>>();
 	/** DB-registry human presence: orgId → userId → sockets + latest display label. Multiple tabs count as one present human. */
 	private readonly presenceByOrg = new Map<string, Map<string, { displayName: string; sockets: Set<ServerWebSocket<SocketData>> }>>();
+	/** Concern 09 (browser-audio-transport): the `detach()` `attachVoiceCallAudioSink` returned for a
+	 *  voice-audio socket, so `close` can release it. `WeakMap`, not a plain `Map`, so a socket that
+	 *  somehow never fires `close` (Bun always does, but this costs nothing to make true regardless)
+	 *  cannot pin a detach closure — and therefore the sink it clears — alive forever. */
+	private readonly voiceAudioDetach = new WeakMap<ServerWebSocket<SocketData>, () => void>();
 	private server?: Server<SocketData>;
 	private readonly opts: SquadServerOptions;
 	private sockSeq = 0;
@@ -1225,12 +1257,87 @@ export class SquadServer {
 	}
 
 	/** Actor for an inbound WS command — stamped session identity wins in every auth-backed topology. */
-	private actorForSocket(ws: ServerWebSocket<SocketData>): Actor {
-		if (ws.data.userId) {
-			return { id: `db:${ws.data.userId}`, displayName: ws.data.displayName, origin: "local", role: ws.data.role, orgId: ws.data.orgId };
+	/** Pure identity → `Actor` resolution, shared by `actorForSocket` (below) and the audio WS upgrade
+	 *  block (concern 09), which needs the SAME resolution BEFORE a socket exists to check channel
+	 *  membership against — a WS upgrade cannot return a REST-style 403 body after the fact, so the
+	 *  membership check has to happen pre-upgrade, which means the actor has to exist pre-upgrade too. */
+	private actorFromIdentity(role: Role, orgId: string | undefined, userId: string | undefined, displayName: string | undefined): Actor {
+		if (userId) {
+			return { id: `db:${userId}`, displayName, origin: "local", role, orgId };
 		}
-		if (!this.registry) return { ...this.operator, role: ws.data.role };
-		return { ...actorForRole(ws.data.role), orgId: ws.data.orgId };
+		if (!this.registry) return { ...this.operator, role };
+		return { ...actorForRole(role), orgId };
+	}
+
+	private actorForSocket(ws: ServerWebSocket<SocketData>): Actor {
+		return this.actorFromIdentity(ws.data.role, ws.data.orgId, ws.data.userId, ws.data.displayName);
+	}
+
+	/**
+	 * Attaches a voice-audio socket to its channel's call (concern 09). The upgrade block already
+	 * re-checked auth/tier/membership immediately before calling `server.upgrade` — this re-checks the
+	 * one thing that CAN still have changed in the gap between that check and this callback actually
+	 * running (the call itself: ended, gone device-audio, or its bridge dropped) via
+	 * `attachVoiceCallAudioSink`'s own gate. A refusal here sends one small JSON status frame (this
+	 * socket's only text frame — see `SocketData.voiceAudio`'s doc: everything else on it is binary)
+	 * naming why, THEN closes, so a browser can render an honest failure instead of a silent hang —
+	 * the task's own bar for "mic permission/failure states rendered honestly" applies just as much to
+	 * the daemon's own refusal as to the browser's getUserMedia prompt.
+	 */
+	private async openVoiceAudioSocket(ws: ServerWebSocket<SocketData>, channelId: string): Promise<void> {
+		const actor = this.actorForSocket(ws);
+		const manager = await this.managerFor(actor);
+		if (!manager) {
+			ws.send(JSON.stringify({ type: "voiceAudioError", reason: "no-fleet" }));
+			ws.close(1011, "no fleet for this actor");
+			return;
+		}
+		// Concern 13 (multi-party-calls): `ws.data.id` is this connection's own unique sockSeq (minted
+		// at upgrade time, never reused while the process runs) — the natural connId for the daemon's
+		// multi-participant audio-sink map. Using it (rather than the actor id alone) is what lets the
+		// SAME human open two tabs and have both keep working independently, instead of the second
+		// attach silently stealing the first tab's sink.
+		const connId = String(ws.data.id);
+		const attached = await manager.attachVoiceCallAudioSink(channelId, actor, connId, {
+			sendOutputAudio: (bytes) => {
+				try {
+					ws.send(bytes);
+				} catch {
+					/* socket already gone; the coordinator's own teardown/detach will catch up via close() */
+				}
+			},
+		});
+		if (!attached.ok) {
+			ws.send(JSON.stringify({ type: "voiceAudioError", reason: attached.reason }));
+			ws.close(1008, attached.reason);
+			return;
+		}
+		this.voiceAudioDetach.set(ws, attached.value.detach);
+		ws.send(JSON.stringify({ type: "voiceAudioReady" }));
+	}
+
+	/**
+	 * One binary frame of browser mic PCM (concern 09) — mono 16 kHz `Float32`, unambiguous by
+	 * direction alone (this socket's only INBOUND binary meaning is mic audio; a text frame from a
+	 * client is simply ignored — this socket has no client-originated status vocabulary, only the
+	 * server's own `voiceAudioReady`/`voiceAudioError`). Malformed input (not a whole number of
+	 * `Float32` samples, or empty) is dropped silently, same discipline as every other untrusted wire
+	 * input in this class.
+	 */
+	private async handleVoiceAudioMessage(ws: ServerWebSocket<SocketData>, channelId: string, raw: string | Buffer): Promise<void> {
+		if (typeof raw === "string") return;
+		if (raw.length === 0 || raw.length % 4 !== 0) return;
+		// Copy defensively into a fresh, 4-byte-aligned buffer: `raw` may view a pooled ArrayBuffer at
+		// an offset `Float32Array` requires to be a multiple of 4, and the underlying allocation can be
+		// reused by the websocket implementation once this callback returns.
+		const copy = new Uint8Array(raw.length);
+		copy.set(raw);
+		const samples = new Float32Array(copy.buffer);
+		const actor = this.actorForSocket(ws);
+		const manager = await this.managerFor(actor);
+		if (!manager) return;
+		// Concern 13: the SAME connId this connection's own attach used — see openVoiceAudioSocket's doc.
+		await manager.pushVoiceCallMicAudio(channelId, actor, String(ws.data.id), samples);
 	}
 
 	// File mode has exactly one operator identity. Multiple tabs are socket sets for that operator,
@@ -1346,27 +1453,41 @@ export class SquadServer {
 		this.emitPresence(ws.data.orgId);
 	}
 
+	/**
+	 * Available coding-agent harnesses for the create surfaces — daemon-global data (the registry
+	 * plus a live PATH probe), never scoped to an org/manager. Unverified ones appear only when
+	 * OMP_SQUAD_UNVERIFIED_HARNESS=1 (honest gating — a harness not smoke-tested against a live binary
+	 * isn't offered by default). `?all=1` includes them regardless so an operator can inspect the roster.
+	 *
+	 * Shared by `noFleet` (an actor with no active org/manager — DB-registry mode pre-onboarding) AND
+	 * the manager-present GET path (`/api/harnesses` below): this listing needs no manager at all, so
+	 * it must not live ONLY behind the `!manager` branch. It did, from the day it was added — and since
+	 * `fleetForOrg` always resolves a manager in file mode (`!this.registry` ⇒ always `this.singleManager`,
+	 * regardless of org), `noFleet` is unreachable dead code there. Every file-mode daemon (today's only
+	 * shipped mode) therefore 404'd on this route — the create-agent surface's harness listing was DEAD
+	 * IN PRODUCTION. Mirrors the existing duplication pattern for `/api/version`/`/api/info`, which this
+	 * file already serves from both branches for the same reason.
+	 */
+	private harnessesResponse(url: URL): Response {
+		const all = url.searchParams.get("all") === "1";
+		// Tiers are additive to the existing shape — `verified` (the gate's own bit) is untouched;
+		// `tier`/`binDetected`/`usageVerified`/`alert` are honest labels alongside it, not a replacement.
+		const tiers = new Map(listHarnessTiers().map((t) => [t.name, t]));
+		return Response.json({
+			default: globalDefaultHarness(),
+			harnesses: listHarnesses(all || undefined).map((h) => {
+				const t = tiers.get(h.name);
+				return { name: h.name, protocol: h.protocol, verified: h.verified, capabilities: h.capabilities, note: t?.note ?? h.note, tier: t?.tier, binDetected: t?.binDetected, usageVerified: t?.usageVerified ?? false, alert: t?.alert };
+			}),
+		});
+	}
+
 	/** DB-registry response for an actor with no active org: reads are empty, mutations denied. */
 	private noFleet(req: Request, url: URL): Response {
 		if (req.method !== "GET") return new Response("no active organization", { status: 403 });
 		if (url.pathname === "/api/version") return Response.json({ version: this.uiVersion });
 		if (url.pathname === "/api/info") return Response.json({ cwd: process.cwd() });
-		// Available coding-agent harnesses for the create surfaces. Unverified ones appear only when
-		// OMP_SQUAD_UNVERIFIED_HARNESS=1 (honest gating — a harness not smoke-tested against a live binary
-		// isn't offered by default). `?all=1` includes them regardless so an operator can inspect the roster.
-		if (url.pathname === "/api/harnesses") {
-			const all = url.searchParams.get("all") === "1";
-			// Tiers are additive to the existing shape — `verified` (the gate's own bit) is untouched;
-			// `tier`/`binDetected`/`usageVerified`/`alert` are honest labels alongside it, not a replacement.
-			const tiers = new Map(listHarnessTiers().map((t) => [t.name, t]));
-			return Response.json({
-				default: globalDefaultHarness(),
-				harnesses: listHarnesses(all || undefined).map((h) => {
-					const t = tiers.get(h.name);
-					return { name: h.name, protocol: h.protocol, verified: h.verified, capabilities: h.capabilities, note: t?.note ?? h.note, tier: t?.tier, binDetected: t?.binDetected, usageVerified: t?.usageVerified ?? false, alert: t?.alert };
-				}),
-			});
-		}
+		if (url.pathname === "/api/harnesses") return this.harnessesResponse(url);
 		return Response.json([]);
 	}
 
@@ -1410,6 +1531,13 @@ export class SquadServer {
 				// socket warm so it doesn't 1006-drop and trigger the client's error/reconnect loop.
 				idleTimeout: 255,
 				open: async (ws) => {
+					// Concern 09: a completely separate wire vocabulary from the chat socket below — see
+					// `SocketData.voiceAudio`'s doc. Never joins `this.clients`/presence/roster; a browser's
+					// audio relay is not a chat participant.
+					if (ws.data.voiceAudio) {
+						await this.openVoiceAudioSocket(ws, ws.data.voiceAudio.channelId);
+						return;
+					}
 					const m = await this.registerSocket(ws);
 					const actor = this.actorForSocket(ws);
 					const agents = m ? await m.visibleAgents(actor) : [];
@@ -1419,8 +1547,19 @@ export class SquadServer {
 						if (commands?.length) ws.send(JSON.stringify({ type: "commands", id: a.id, commands } satisfies SquadEvent));
 					}
 				},
-				close: (ws) => this.unregisterSocket(ws),
+				close: (ws) => {
+					if (ws.data.voiceAudio) {
+						this.voiceAudioDetach.get(ws)?.();
+						this.voiceAudioDetach.delete(ws);
+						return;
+					}
+					this.unregisterSocket(ws);
+				},
 				message: async (ws, raw) => {
+					if (ws.data.voiceAudio) {
+						await this.handleVoiceAudioMessage(ws, ws.data.voiceAudio.channelId, raw);
+						return;
+					}
 					let parsed: unknown;
 					try {
 						parsed = JSON.parse(typeof raw === "string" ? raw : raw.toString());
@@ -1546,6 +1685,55 @@ export class SquadServer {
 			if (upgraded) return undefined;
 			return new Response("websocket upgrade failed", { status: 426 });
 		}
+		// ── Voice call audio relay (concern 09: browser-audio-transport) ───────────────────────────
+		// A dedicated per-channel WS, deliberately separate from `/ws` above: audio is a high-frequency
+		// BINARY stream (mic PCM in, decoded speaker PCM out — PROTOCOL.md's "Browser audio transport"),
+		// not a `ClientCommand`/`SquadEvent` JSON exchange, and multiplexing it onto the chat socket
+		// would mean every text-frame consumer on that socket also has to learn to skip binary frames.
+		// Auth mirrors `/ws` EXACTLY (same session/bootstrap/role resolution) plus two gates `/ws` does
+		// not need: an explicit operator-tier floor (this endpoint's `restActionTier` rule in authz.ts —
+		// granting it is itself the mutating "drive the call" act, same tier as `steer`/mute/
+		// resolveDecision) and room membership (`canReadChannel`), both checked BEFORE the upgrade —
+		// unlike a REST 403, a WS upgrade cannot un-say a 101 after the fact, so there is nothing to gate
+		// downstream the way `/ws`'s own per-command tier check happens inside `applyCommand`.
+		const voiceCallAudioUpgradeMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/voice-call\/audio$/);
+		if (voiceCallAudioUpgradeMatch) {
+			if (this.dbMode && !this.originAllowed(req)) return new Response("forbidden origin", { status: 403 });
+			const channelId = decodeURIComponent(voiceCallAudioUpgradeMatch[1]!);
+			let role: Role | null;
+			let orgId: string | undefined;
+			let userId: string | undefined;
+			let displayName: string | undefined;
+			if (this.auth) {
+				if (this.loopbackBootstrapAdmin(req, server)) {
+					role = "admin";
+					if (this.singleManager) orgId = ROOT_FACTORY_ORG;
+				} else {
+					const session = await this.auth.api.getSession({ headers: req.headers });
+					if (session) {
+						role = await this.bridgeRole(req, session.session.activeOrganizationId);
+						orgId = session.session.activeOrganizationId ?? undefined;
+						userId = session.user.id;
+						displayName = session.user.name;
+					} else {
+						role = null;
+					}
+				}
+			} else {
+				role = resolveRole(req, this.authPolicy);
+			}
+			if (role === null) return new Response("unauthorized", { status: 401 });
+			if (!roleAtLeast(role, requiredRole("GET", url.pathname))) return new Response("forbidden", { status: 403 });
+			const actor = this.actorFromIdentity(role, orgId, userId, displayName);
+			const manager = await this.managerFor(actor);
+			if (!manager) return new Response("no fleet for this actor", { status: 404 });
+			if (!(await manager.canReadChannel(channelId, actor))) return new Response("forbidden", { status: 403 });
+			const upgraded = this.auth
+				? server.upgrade(req, { data: { id: ++this.sockSeq, role, orgId, userId, displayName, voiceAudio: { channelId } } })
+				: server.upgrade(req, { data: { id: ++this.sockSeq, role, orgId, userId, displayName, voiceAudio: { channelId } }, headers: { "Sec-WebSocket-Protocol": "ompsq-token" } });
+			if (upgraded) return undefined;
+			return new Response("websocket upgrade failed", { status: 426 });
+		}
 		if (url.pathname === "/" || url.pathname === "/index.html") {
 			// index.html references content-hashed bundles by name, so it MUST revalidate every load —
 			// otherwise a browser caches it heuristically (no validator ⇒ stale for hours) and never
@@ -1556,6 +1744,17 @@ export class SquadServer {
 		if (url.pathname === "/favicon.ico") return new Response(null, { status: 204 });
 		const asset = PUBLIC_ASSETS[url.pathname];
 		if (asset) return new Response(Bun.file(path.join(WEB_DIR, url.pathname.slice(1))), { headers: { "content-type": asset } });
+		// AudioWorklet modules must be tokenless too: `audioWorklet.addModule()` fetches without
+		// credentials in practice, so a gated /audio/ returns 401 and the call dies with the
+		// browser's bare "The operation was aborted." (2026-07-28 production incident). The worklet
+		// is inert plumbing code, not a secret — serve it like the shell, containment-checked.
+		if (webappEnabled() && url.pathname.startsWith("/audio/")) {
+			const resolved = path.join(WEBAPP_DIST, "audio", url.pathname.slice("/audio/".length));
+			if (resolved.startsWith(path.join(WEBAPP_DIST, "audio") + path.sep) && existsSync(resolved)) {
+				return new Response(Bun.file(resolved), { headers: { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-cache" } });
+			}
+			return new Response("not found", { status: 404 });
+		}
 		// Inert webapp seam: serve Vite's content-hashed bundle tokenless (like the shell) when enabled.
 		// Containment check keeps requests inside dist/assets — no path traversal out of the build dir.
 		if (webappEnabled() && url.pathname.startsWith("/assets/")) {
@@ -2379,7 +2578,13 @@ export class SquadServer {
 			return Response.json({ ok: true, repo: dropped.repo, removed: dropped.removed, projects: manager.projects() });
 		}
 		if (url.pathname === "/api/workflows") return Response.json(workflowSnapshot(await manager.visibleAgents(actor), manager.capabilityWorkflowDefinitions()));
-		if (url.pathname === "/api/models") return Response.json({ models: mergeModelOptions(modelOptionsFromEnv(), await manager.modelOptions()) });
+		// Daemon-global (not manager-scoped) — see `harnessesResponse`'s doc for why this must also be
+		// reachable here, not just from `noFleet`.
+		if (url.pathname === "/api/harnesses") return this.harnessesResponse(url);
+		// Env-configured + per-harness defaults + COLD-DISCOVERED rosters (model-discovery.ts — the fix
+		// for every section showing only "<harness> default" until an agent happened to be live) + any
+		// live agents' answers, deduped per harness+value and sorted so each harness section renders once.
+		if (url.pathname === "/api/models") return Response.json({ models: sortModelOptionsForPicker(mergeModelOptions(modelOptionsFromEnv(), harnessDefaultModelOptions(), await discoveredModelOptions(), await manager.modelOptions())) });
 		if (url.pathname === "/api/autonomy") return Response.json({ ...(await manager.autonomyState()), interrupt: manager.interruptState() });
 		// A person's verdict on being interrupted. The gate is only allowed to keep interrupting people
 		// because it is checked afterwards, and it can only be checked if saying so is one tap.
@@ -2496,7 +2701,7 @@ export class SquadServer {
 			if ("stageOverride" in body) patch.stageOverride = typeof body.stageOverride === "string" ? (body.stageOverride as FeatureStage) : null;
 			if ("category" in body) patch.category = typeof body.category === "string" ? (body.category as FeatureCategory) : null;
 			if ("acceptanceCriteria" in body) patch.acceptanceCriteria = featureCriteria(body.acceptanceCriteria);
-			if ("decisions" in body) patch.decisions = featureDecisions(body.decisions, manager.storedFeatureDecisions(decodeURIComponent(mfpatch[1])));
+			if ("decisions" in body) patch.decisions = sanitizePatchDecisions(body.decisions, manager.storedFeatureDecisions(decodeURIComponent(mfpatch[1])));
 			if ("relationships" in body) patch.relationships = featureRelationships(body.relationships);
 			const pf = await manager.updateFeature(decodeURIComponent(mfpatch[1]), patch);
 			return pf ? Response.json(pf) : new Response("no such feature", { status: 404 });
@@ -2505,28 +2710,26 @@ export class SquadServer {
 		// EXPERIMENTS.md): PATCH deliberately drops a client `supersedes` (anti-forgery — a
 		// round-tripping UI must never mint stamps) and squad_record_decision is agent-tool-only,
 		// which left the ledger's core verb unreachable from the UI — where the only alternative was
-		// DELETE, exactly the verb the ledger forbids for chain members. This route goes through
-		// recordAgentDecision's single write rule, so the stamp is server-authored and atomic, and
-		// every conflict outcome maps to an explicit status instead of a silent drop.
+		// DELETE, exactly the verb the ledger forbids for chain members. `DecisionLedger.supersede`
+		// mints server-authored and writes through the single write rule (including the normalize-
+		// then-reject-empty guard from the blind-review fix); this route only maps outcomes to
+		// statuses so every conflict is explicit instead of a silent drop.
 		const mfsupersede = url.pathname.match(/^\/api\/features\/([^/]+)\/decisions\/supersede$/);
 		if (mfsupersede && req.method === "POST") {
 			const decoded = decodeBody(FeatureDecisionSupersedeBodySchema, await req.json().catch(() => null));
 			if (Result.isFailure(decoded)) return new Response("text and supersedes (decision id) required", { status: 400 });
 			const body = decoded.success;
-			const text = body.text.trim();
-			// Blind-review fix: an empty or bare-prefix `supersedes` would evaluate falsy in the write
-			// rule and silently degrade this into an unconditional append while the route advertises
-			// supersession. Normalize like the write path (accept a copied `decision:<id>`), then
-			// reject empty outright.
-			const supersedesId = body.supersedes.trim().replace(/^decision:/, "");
-			if (!text || !supersedesId) return new Response("text and supersedes (decision id) required", { status: 400 });
-			const decision: FeatureDecision = { id: randomUUID(), text, source: "human", createdAt: Date.now(), supersedes: supersedesId };
-			const outcome = await manager.recordAgentDecision(decodeURIComponent(mfsupersede[1]), decision, typeof body.repo === "string" ? body.repo : undefined);
-			if (outcome === "no-feature") return new Response("no such feature", { status: 404 });
-			if (outcome === "supersede-missing") return new Response(`supersedes target "${body.supersedes}" not found on this feature`, { status: 409 });
-			if (outcome === "supersede-superseded") return new Response(`decision "${body.supersedes}" was already superseded — supersede the current decision instead`, { status: 409 });
-			if (outcome === "duplicate") return new Response("an identical decision is already current — no change", { status: 409 });
-			return Response.json({ ok: true, decision });
+			const result = await manager.decisionLedger.supersede(decodeURIComponent(mfsupersede[1]), {
+				text: body.text,
+				supersedes: body.supersedes,
+				repo: typeof body.repo === "string" ? body.repo : undefined,
+			});
+			if (result.outcome === "invalid") return new Response("text and supersedes (decision id) required", { status: 400 });
+			if (result.outcome === "no-feature") return new Response("no such feature", { status: 404 });
+			if (result.outcome === "supersede-missing") return new Response(`supersedes target "${body.supersedes}" not found on this feature`, { status: 409 });
+			if (result.outcome === "supersede-superseded") return new Response(`decision "${body.supersedes}" was already superseded — supersede the current decision instead`, { status: 409 });
+			if (result.outcome === "duplicate") return new Response("an identical decision is already current — no change", { status: 409 });
+			return Response.json({ ok: true, decision: result.decision });
 		}
 		if (mfpatch && req.method === "DELETE") {
 			const repo = url.searchParams.get("repo") ?? undefined;
@@ -3583,6 +3786,148 @@ export class SquadServer {
 			}
 		}
 
+		// ── Voice calls surface (concern 10, plans/voice-orchestrated-room-integration) ─────────────
+		// Org-wide, NOT channel-scoped — a person needs to see (and end) a call they cannot otherwise
+		// reach through any one room, which is exactly the orphan case this surface exists for. The
+		// binding half is still filtered to channels `actor` can read (`listVoiceCallsSurface`); the
+		// orphan half has no channel to filter by at all, by definition.
+		if (url.pathname === "/api/voice-calls" && req.method === "GET") {
+			return Response.json(await manager.listVoiceCallsSurface(actor));
+		}
+		const voiceCallOrphanEndMatch = url.pathname.match(/^\/api\/voice-calls\/orphans\/([^/]+)\/end$/);
+		if (voiceCallOrphanEndMatch && req.method === "POST") {
+			const callId = decodeURIComponent(voiceCallOrphanEndMatch[1]!);
+			const result = await manager.endOrphanVoiceCall(callId);
+			return result.ok ? Response.json(result.value) : voiceCallErrorResponse(result.reason);
+		}
+
+		// ── Voice call (concern 02, plans/voice-orchestrated-room-integration) ─────────────────────
+		// Every route is channel-scoped: `manager.voiceCall*` re-checks room membership itself
+		// (`ChannelStore#canReadChannel`) before touching the binding, and the mutating routes pass
+		// that same authorization down into the coordinator as the LAST gate before any bridge frame
+		// is relayed (voice-call-manager.ts). The RBAC tier above (`restActionTier`'s coarse GET=viewer/
+		// mutation=operator default — no bespoke entry needed, these paths don't match any of the
+		// more specific rules) is the FIRST gate; both must pass.
+		const voiceCallStateMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/voice-call$/);
+		if (voiceCallStateMatch && req.method === "GET") {
+			const channelId = decodeURIComponent(voiceCallStateMatch[1]!);
+			try {
+				const state = await manager.voiceCallState(channelId, actor);
+				return state ? Response.json(state) : new Response("no call for this channel", { status: 404 });
+			} catch (err) {
+				if (err instanceof Error && err.message === "channel forbidden") return new Response("forbidden", { status: 403 });
+				throw err;
+			}
+		}
+		if (voiceCallStateMatch && req.method === "POST") {
+			const channelId = decodeURIComponent(voiceCallStateMatch[1]!);
+			const decoded = decodeBodyOrEmpty(VoiceCallStartBodySchema, await req.json().catch(() => null));
+			const sessionRoot = typeof decoded.sessionRoot === "string" ? decoded.sessionRoot : undefined;
+			const retention = decoded.retention === "full" || decoded.retention === "tails" || decoded.retention === "off" ? decoded.retention : undefined;
+			const resumeSessionId = typeof decoded.resumeSessionId === "string" ? decoded.resumeSessionId : undefined;
+			const agentId = typeof decoded.agentId === "string" && decoded.agentId.trim() ? decoded.agentId.trim() : undefined;
+			const result = await manager.startVoiceCall(channelId, actor, { sessionRoot, retention, resumeSessionId, agentId });
+			return result.ok ? Response.json(result.value, { status: 201 }) : voiceCallErrorResponse(result.reason);
+		}
+		if (voiceCallStateMatch && req.method === "DELETE") {
+			const channelId = decodeURIComponent(voiceCallStateMatch[1]!);
+			const result = await manager.endVoiceCall(channelId, actor);
+			return result.ok ? Response.json(result.value) : voiceCallErrorResponse(result.reason);
+		}
+		const voiceCallDecisionsMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/voice-call\/decisions$/);
+		if (voiceCallDecisionsMatch && req.method === "GET") {
+			const channelId = decodeURIComponent(voiceCallDecisionsMatch[1]!);
+			try {
+				return Response.json({ decisions: await manager.voiceCallDecisions(channelId, actor) });
+			} catch (err) {
+				if (err instanceof Error && err.message === "channel forbidden") return new Response("forbidden", { status: 403 });
+				throw err;
+			}
+		}
+		const voiceCallResolveMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/voice-call\/decisions\/([^/]+)\/resolve$/);
+		if (voiceCallResolveMatch && req.method === "POST") {
+			const channelId = decodeURIComponent(voiceCallResolveMatch[1]!);
+			const decisionId = decodeURIComponent(voiceCallResolveMatch[2]!);
+			const decoded = decodeBody(VoiceCallResolveDecisionBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response(`bad resolve decision: ${decoded.failure.message}`, { status: 400 });
+			const result = await manager.resolveVoiceCallDecision(channelId, actor, { decisionId, ...decoded.success });
+			return result.ok ? Response.json(result.value) : voiceCallErrorResponse(result.reason);
+		}
+		const voiceCallSteerMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/voice-call\/steer$/);
+		if (voiceCallSteerMatch && req.method === "POST") {
+			const channelId = decodeURIComponent(voiceCallSteerMatch[1]!);
+			const decoded = decodeBody(VoiceCallSteerBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response(`bad steer: ${decoded.failure.message}`, { status: 400 });
+			const result = await manager.steerVoiceCall(channelId, actor, decoded.success.text);
+			return result.ok ? Response.json({ ok: true }) : voiceCallErrorResponse(result.reason);
+		}
+		const voiceCallTranscriptMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/voice-call\/transcript$/);
+		if (voiceCallTranscriptMatch && req.method === "GET") {
+			const channelId = decodeURIComponent(voiceCallTranscriptMatch[1]!);
+			try {
+				return Response.json({ transcript: await manager.voiceCallTranscript(channelId, actor) });
+			} catch (err) {
+				if (err instanceof Error && err.message === "channel forbidden") return new Response("forbidden", { status: 403 });
+				throw err;
+			}
+		}
+		const voiceCallArtifactsMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/voice-call\/artifacts$/);
+		if (voiceCallArtifactsMatch && req.method === "GET") {
+			const channelId = decodeURIComponent(voiceCallArtifactsMatch[1]!);
+			try {
+				return Response.json({ artifacts: await manager.voiceCallArtifacts(channelId, actor) });
+			} catch (err) {
+				if (err instanceof Error && err.message === "channel forbidden") return new Response("forbidden", { status: 403 });
+				throw err;
+			}
+		}
+		// One artifact's immutable snapshot bytes (concern 03's room Markdown viewer). Every failure the
+		// store names gets a DISTINCT answer, because the viewer renders each one differently — a
+		// `ready` row whose snapshot file has vanished must never arrive as an empty document.
+		const voiceCallArtifactMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/voice-call\/artifacts\/([^/]+)$/);
+		if (voiceCallArtifactMatch && req.method === "GET") {
+			const channelId = decodeURIComponent(voiceCallArtifactMatch[1]!);
+			const artifactId = decodeURIComponent(voiceCallArtifactMatch[2]!);
+			try {
+				const result = await manager.voiceCallArtifact(channelId, actor, artifactId);
+				if (result.ok) return Response.json({ artifact: result.record, content: result.content });
+				if (result.reason === "not-found") return new Response("no such artifact for this channel", { status: 404 });
+				return Response.json({ artifact: result.record, error: result.reason, detail: result.detail }, { status: result.reason === "too-large" ? 413 : 409 });
+			} catch (err) {
+				if (err instanceof Error && err.message === "channel forbidden") return new Response("forbidden", { status: 403 });
+				throw err;
+			}
+		}
+		// Visible mute (concern 03's HUD). A SET, not the wire's own toggle — see
+		// `VoiceCallCoordinator#setMuted` for why the daemon owns the idempotence.
+		const voiceCallMuteMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/voice-call\/mute$/);
+		if (voiceCallMuteMatch && req.method === "POST") {
+			const channelId = decodeURIComponent(voiceCallMuteMatch[1]!);
+			const decoded = decodeBody(VoiceCallMuteBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decoded)) return new Response(`bad mute: ${decoded.failure.message}`, { status: 400 });
+			const result = await manager.setVoiceCallMuted(channelId, actor, decoded.success.muted);
+			return result.ok ? Response.json(result.value) : voiceCallErrorResponse(result.reason);
+		}
+		const voiceCallGapsMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/voice-call\/gaps$/);
+		if (voiceCallGapsMatch && req.method === "GET") {
+			const channelId = decodeURIComponent(voiceCallGapsMatch[1]!);
+			try {
+				return Response.json({ gaps: await manager.voiceCallGaps(channelId, actor) });
+			} catch (err) {
+				if (err instanceof Error && err.message === "channel forbidden") return new Response("forbidden", { status: 403 });
+				throw err;
+			}
+		}
+		// Concern 10 (call-management-ui): the user-triggered reconnect — see
+		// `VoiceCallCoordinator#reattach`. No body: there is nothing to negotiate, only whether the
+		// binding's own callId can be corroborated against the broker right now.
+		const voiceCallReattachMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/voice-call\/reattach$/);
+		if (voiceCallReattachMatch && req.method === "POST") {
+			const channelId = decodeURIComponent(voiceCallReattachMatch[1]!);
+			const result = await manager.reattachVoiceCall(channelId, actor);
+			return result.ok ? Response.json(result.value) : voiceCallErrorResponse(result.reason);
+		}
+
 		if (url.pathname === "/api/command" && req.method === "POST") {
 			let body: unknown;
 			try {
@@ -3979,7 +4324,7 @@ export class SquadServer {
 		const out: LeaseEntry[] = [];
 		for (const r of repos) {
 			for (const lease of await leasesFor(r).catch(() => [])) {
-				const key = `${lease.repo} ${lease.id}`;
+				const key = `${lease.repo}\0${lease.id}`;
 				if (seen.has(key)) continue;
 				seen.add(key);
 				out.push(lease);

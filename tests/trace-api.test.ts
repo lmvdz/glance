@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { appendAudit, makeAuditEntry } from "../src/audit.ts";
-import { writeDigest } from "../src/digest.ts";
+import { writeDigest } from "../src/memory/digest.ts";
 import { appendReceipt } from "../src/receipts.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import { SquadServer } from "../src/server.ts";

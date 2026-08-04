@@ -4,6 +4,22 @@ import type { WorkbenchRouteView } from '../../lib/router';
 
 const MONO = "'JetBrains Mono',ui-monospace,monospace";
 
+// Shared type scale for every entry. The first cut drew the strip at 28px tall with 11px #7A7A82 on
+// the page's own #0A0A0B — technically present, reported as absent by the operator it was built for
+// ("still dont see the nav strip"), which is the same failure as not shipping it. A navigation bar
+// has to read as chrome at a glance, so: uppercase with tracking, a lighter ground than the page, a
+// real bottom rule, and touch-sized rows. Being findable is the whole feature.
+const ENTRY: React.CSSProperties = {
+  fontFamily: MONO,
+  fontSize: 11,
+  letterSpacing: '0.09em',
+  textTransform: 'uppercase',
+  lineHeight: '28px',
+  padding: '0 10px',
+  borderRadius: 3,
+  whiteSpace: 'nowrap',
+};
+
 // Every NAV_ROWS entry resolves to a defined href (commandPalette.test.ts proves it); this is a
 // defensive fallback only, never expected to be exercised.
 const HREF_FALLBACK = '#fleet';
@@ -41,8 +57,8 @@ export function WorkbenchNavStrip({ view, id }: { view: WorkbenchRouteView; id?:
   return (
     <nav
       aria-label="Workbench surfaces"
-      className="flex h-8 flex-none items-center gap-4 overflow-x-auto px-4"
-      style={{ borderBottom: '1px solid #1F1F22', background: '#0A0A0B' }}
+      className="flex h-9 flex-none items-center gap-1 overflow-x-auto px-3"
+      style={{ borderBottom: '1px solid #26262B', background: '#17171A' }}
     >
       {NAV_ROWS.map((row) => {
         const isExact = current?.id === row.id && current.match === 'exact';
@@ -52,7 +68,16 @@ export function WorkbenchNavStrip({ view, id }: { view: WorkbenchRouteView; id?:
         // exactly where the original report started: on a detail page with no way back to the list.
         if (isExact) {
           return (
-            <span key={row.id} aria-current="page" style={{ fontFamily: MONO, fontSize: 11, color: '#F0A35A' }}>
+            <span
+              key={row.id}
+              aria-current="page"
+              style={{
+                ...ENTRY,
+                color: '#F0A35A',
+                background: 'rgba(240,163,90,0.13)',
+                boxShadow: 'inset 0 -2px 0 #F0A35A',
+              }}
+            >
               {row.label}
             </span>
           );
@@ -62,8 +87,18 @@ export function WorkbenchNavStrip({ view, id }: { view: WorkbenchRouteView; id?:
             key={row.id}
             href={paletteNavigationHref(row.view) ?? HREF_FALLBACK}
             aria-current={isAncestor ? 'true' : undefined}
-            className="rounded-[2px] transition-colors hover:text-[#E8E8EA] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ember focus-visible:ring-offset-2 focus-visible:ring-offset-ink"
-            style={{ fontFamily: MONO, fontSize: 11, color: isAncestor ? '#F0A35A' : '#7A7A82' }}
+            className="transition-colors hover:bg-[#26262B] hover:text-[#E8E8EA] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ember focus-visible:ring-offset-2 focus-visible:ring-offset-ink"
+            style={{
+              ...ENTRY,
+              color: isAncestor ? '#F0A35A' : '#8A8A91',
+              // The section you are inside but not standing on: ember text, no fill, a dimmer rule —
+              // distinguishable from both the exact match and a plain sibling without a legend. The
+              // alpha is a floor, not a taste knob: this rule is the ONLY non-colour carrier of "you
+              // are in this section", so it has to clear WCAG 1.4.11's 3:1 for non-text contrast
+              // against the bar's own #17171A ground. 0.45 composites to ~2.72:1 and fails; 0.55
+              // composites to ~3.44:1. Don't dim it without recomputing.
+              ...(isAncestor ? { boxShadow: 'inset 0 -2px 0 rgba(240,163,90,0.55)' } : null),
+            }}
           >
             {row.label}
           </a>

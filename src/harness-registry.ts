@@ -15,6 +15,7 @@
  */
 
 import * as path from "node:path";
+import { augmentPathWithWellKnownDirs } from "./bin-dirs.ts";
 import { harnessLineage } from "./model-lineage.ts";
 
 export type HarnessProtocol = "omp-rpc" | "acp";
@@ -82,6 +83,12 @@ export interface HarnessDescriptor {
 	usageVerified?: boolean;
 	/** Human-facing caveat, e.g. "adapter mid-migration between orgs — pin a version". */
 	note?: string;
+	/** Known-good model ids offered as a DEGRADED fallback when the cold model probe
+	 *  (model-discovery.ts) fails — surfaced with provenance `"static-catalog"`, never mixed in with
+	 *  a live-probed roster. Only for harnesses whose model surface is a stable, small contract
+	 *  (claude-code's adapter aliases, grok's fixed pair); multi-model runtimes (omp/pi/opencode)
+	 *  have no static truth worth baking, so absent means "probe or default-only". */
+	staticModels?: string[];
 }
 
 export const DEFAULT_HARNESS = "omp";
@@ -144,10 +151,21 @@ export function resolveSpawnBin(d: HarnessDescriptor): string {
 /** true when `bin` resolves on a PATH that matches how the daemon actually launches it: the raw
  *  env PATH, ALSO augmented with `<cwd>/node_modules/.bin` (npm/bun script invocation prepends
  *  this; a bare `Bun.which` from a differently-invoked process — e.g. this CLI itself — can miss it
- *  and falsely alarm on `omp`, which is never installed globally, only as a local devDependency). */
+ *  and falsely alarm on `omp`, which is never installed globally, only as a local devDependency),
+ *  AND with the same well-known install-dir fallback `scrubbedSpawnEnv` now applies to every actual
+ *  spawn (bin-dirs.ts) — so this detection never reports a harness "not found" that would in fact
+ *  spawn fine, and never reports one "found" that a thinner spawn-time PATH would then fail on. */
 function binResolvable(bin: string, cwd: string = process.cwd()): boolean {
-	const augmentedPath = `${path.join(cwd, "node_modules", ".bin")}${path.delimiter}${process.env.PATH ?? ""}`;
-	return Bun.which(bin, { PATH: augmentedPath, cwd }) !== null;
+	return resolveHarnessBinPath(bin, cwd) !== null;
+}
+
+/** Absolute path `bin` resolves to on the SAME augmented PATH `binDetected` uses — so anything that
+ *  spawns a harness binary OUTSIDE the normal driver path (model-discovery.ts's cold probes) launches
+ *  exactly what detection admitted, instead of re-resolving on a thinner child PATH and missing e.g.
+ *  the devDependency `omp` that only lives in `<cwd>/node_modules/.bin`. Null when not found. */
+export function resolveHarnessBinPath(bin: string, cwd: string = process.cwd()): string | null {
+	const augmentedPath = augmentPathWithWellKnownDirs(`${path.join(cwd, "node_modules", ".bin")}${path.delimiter}${process.env.PATH ?? ""}`);
+	return Bun.which(bin, { PATH: augmentedPath, cwd });
 }
 
 /** Pure combinator: static `verified` × live `binDetected` → an honest tier + optional alert.
@@ -404,6 +422,10 @@ registerHarness({
 	capabilities: ACP_CAPS,
 	verified: true,
 	note: "third-party ACP adapter over the official Claude Agent SDK; initialize + session/new live-verified (v0.16.2, operator login); nested-session refusal covered by the spawn-env scrub (CLAUDECODE never reaches the child)",
+	// The adapter's model surface is three stable ALIASES (session/new's availableModels, live-verified
+	// 2026-07-28: default/sonnet/haiku), not a drifting vendor catalog — safe to bake as the cold-probe
+	// fallback (model-discovery.ts, provenance "static-catalog").
+	staticModels: ["default", "sonnet", "haiku"],
 });
 
 /** codex — via the `codex-acp` adapter over `codex app-server`. Adapter is mid-migration between
@@ -449,4 +471,7 @@ registerHarness({
 	capabilities: ACP_CAPS,
 	verified: true,
 	note: "native first-party ACP (grok agent stdio); initialize + session/new live-verified; vendor-pinned xai — activates the degradation ladder",
+	// grok's roster is a fixed pair (session/new's availableModels, live-verified 2026-07-09 and
+	// re-confirmed 2026-07-28) — bake it as the cold-probe fallback (provenance "static-catalog").
+	staticModels: ["grok-4.5", "grok-composer-2.5-fast"],
 });

@@ -1,5 +1,5 @@
 /**
- * `featureDecisions` (server.ts PATCH sanitizer) — batch-1 review CRITICAL: the webapp's routine
+ * `sanitizePatchDecisions` (the PATCH sanitizer, src/memory/decision-ledger.ts) — batch-1 review CRITICAL: the webapp's routine
  * "add one decision" round-trip PATCHes the FULL decisions array back, and the pre-fix sanitizer
  * coerced every stored `model-delta` to `source:"human"` and dropped its `evidence`/`sourceRef` —
  * destroying the teaching content concern 05 exists to produce. The fix merges by id: stored
@@ -8,7 +8,7 @@
  * `model-delta`/`plan`/`agent` records it didn't already have.
  */
 import { expect, test } from "bun:test";
-import { featureDecisions } from "../src/server.ts";
+import { sanitizePatchDecisions as featureDecisions } from "../src/memory/decision-ledger.ts";
 import type { FeatureDecision } from "../src/types.ts";
 
 const stored: FeatureDecision[] = [

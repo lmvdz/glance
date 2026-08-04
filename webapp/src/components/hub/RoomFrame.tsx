@@ -1,6 +1,6 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { ADDRESSABILITY_NOTE, alarmEyebrow, alarmExplanation, alarmStats, fleetSummary, standingLine } from '../../lib/roomFrame';
-import { nodeStatusLine, selectionPreview, type RoomNode } from '../../lib/roomState';
+import { nodeStatusLine, selectionPreview, type RoomNode, type RoomView } from '../../lib/roomState';
 import { Kbd } from '../kit/Kbd';
 
 /**
@@ -26,13 +26,7 @@ import { Kbd } from '../kit/Kbd';
  * here and should be added there rather than dropped.
  */
 
-export interface RoomView {
-	id: string;
-	name: string;
-	unread: number;
-	/** Node channels are a unit's own conversation, not a room you joined. */
-	kind: 'room' | 'node';
-}
+export type { RoomView };
 
 export interface RoomFrameProps {
 	repo: string;
@@ -51,6 +45,16 @@ export interface RoomFrameProps {
 	children: React.ReactNode;
 	/** Open when someone is answering. Sits BESIDE the room — answering never takes the room away. */
 	decision?: React.ReactNode;
+	/**
+	 * The call workspace's own panel: a voice decision door, the artifacts index, or one artifact.
+	 *
+	 * Wide screens put it exactly where `decision` goes — beside the conversation, never over it. A
+	 * NARROW screen cannot hold both (376px of panel beside a 320px conversation is two unusable
+	 * columns), so the frame becomes a single pane: the panel fills the width and the conversation
+	 * is hidden until it is popped. Escape and the panel's own back control do the popping, and the
+	 * scroll position and agent filter ride the back stack home (see `PaneStackEntry`).
+	 */
+	voicePanel?: React.ReactNode;
 	/** The fleet's autonomy, readable from the room rather than from a settings page. */
 	autonomyPanel?: React.ReactNode;
 	/** Shown when standing inside a unit — replaces the tree, same as the other panels. */
@@ -137,11 +141,38 @@ export function TopBar({ repo, summary, now, back, onOpenPalette }: { repo: stri
 	);
 }
 
-export function RoomFrame({ repo, rooms, activeRoomId, onOpenRoom, nodes, plans, now, autonomy, autonomyPanel, autonomyOpen, onToggleAutonomy, unitPanel, selectedId, onSelect, onEnter, children, decision, onOpenPalette }: RoomFrameProps) {
+export function RoomFrame({ repo, rooms, activeRoomId, onOpenRoom, nodes, plans, now, autonomy, autonomyPanel, autonomyOpen, onToggleAutonomy, unitPanel, selectedId, onSelect, onEnter, children, decision, voicePanel, onOpenPalette }: RoomFrameProps) {
 	const waiting = nodes.filter((node) => node.state === 'needs-you');
 	const selected = nodes.find((node) => node.id === selectedId);
 	const stats = alarmStats(nodes, now);
 	const quiet = waiting.length === 0;
+	// #fleet and every active unit's channel stay on screen unconditionally; a settled unit's channel
+	// (its owner finished, or the record behind it is simply gone — roomViewsFrom in lib/roomState.ts
+	// treats both the same) folds away instead of piling up beside it forever. Collapsed by default:
+	// the working surface is for what is still moving.
+	const visibleRooms = rooms.filter((room) => !room.settled);
+	const settledRooms = rooms.filter((room) => room.settled);
+	const [settledRoomsOpen, setSettledRoomsOpen] = useState(false);
+	const renderRoom = (room: RoomView) => {
+		const here = room.id === activeRoomId;
+		return (
+			<button
+				key={room.id}
+				type="button"
+				onClick={() => onOpenRoom(room.id)}
+				className="flex items-center gap-2 px-1.5 py-1 text-left"
+				style={{ borderLeft: `2px solid ${here ? '#F0A35A' : 'transparent'}`, background: here ? '#131316' : 'transparent' }}
+				title={here ? 'You are reading this one.' : `Open ${room.name} — the room you are in now stays where it is.`}
+			>
+				<span style={{ fontFamily: MONO, fontSize: 11, color: here ? '#E8E8EA' : '#7A7A82' }}>{room.name}</span>
+				{room.kind === 'node' ? <span style={{ fontFamily: MONO, fontSize: 9.5, color: '#4A4A52' }}>unit</span> : null}
+				<span className="flex-1" />
+				{room.unread > 0 ? (
+					<span style={{ fontFamily: MONO, fontSize: 10, color: '#D9A03C' }}>{room.unread}</span>
+				) : null}
+			</button>
+		);
+	};
 
 	return (
 		<div className="flex h-full min-h-0 flex-1 flex-col" style={{ background: '#0A0A0B', color: '#E8E8EA' }}>
@@ -171,21 +202,33 @@ export function RoomFrame({ repo, rooms, activeRoomId, onOpenRoom, nodes, plans,
 
 				{/* ── conversation + standing tree ───────────────────────────────────── */}
 				<div className="flex min-h-0 flex-1">
-					<div className="flex min-w-0 flex-1 flex-col">{children}</div>
+					{/* Narrow screens are a single pane: an open workspace panel takes the whole width and
+					    the conversation steps aside until it is popped. Wide screens keep both, which is
+					    the arrangement the reference draws and the one that makes answering feel like
+					    part of the room rather than a departure from it. */}
+					<div className={`min-w-0 flex-1 flex-col ${voicePanel ? 'hidden md:flex' : 'flex'}`}>{children}</div>
 
 					{/* Answering sits beside the conversation, never over it. A modal would make a person
 					    leave the fleet to answer one question about it, and the standing tree is exactly
 					    the context that makes them comfortable answering at all. */}
-					{decision}
-					{autonomyOpen && autonomyPanel ? <div className="w-[520px] flex-none" style={{ borderLeft: '1px solid #1F1F22' }}>{autonomyPanel}</div> : null}
-					{!autonomyOpen && !decision && unitPanel ? <div className="w-[520px] flex-none" style={{ borderLeft: '1px solid #1F1F22' }}>{unitPanel}</div> : null}
+					{voicePanel}
+					{/* The fleet decision panel defers to the call workspace panel, same precedence autonomy
+					    and unit already give it below — two side panels at once would squeeze the
+					    conversation on wide screens exactly the way a third rail column used to. */}
+					{!voicePanel && decision}
+					{!voicePanel && autonomyOpen && autonomyPanel ? <div className="hidden w-[520px] flex-none md:block" style={{ borderLeft: '1px solid #1F1F22' }}>{autonomyPanel}</div> : null}
+					{!voicePanel && !autonomyOpen && !decision && unitPanel ? <div className="hidden w-[520px] flex-none md:block" style={{ borderLeft: '1px solid #1F1F22' }}>{unitPanel}</div> : null}
 
 					{/* A panel TAKES THE RAIL'S PLACE rather than adding a third column. The reference draws
 					    two columns — room and panel — and three at 1600px squeezed the conversation to
 					    380px, which is narrower than the reading measure the messages are set to. The
-					    rail comes back the moment the panel closes. */}
-					{decision || (autonomyOpen && autonomyPanel) || unitPanel ? null : (
-					<aside className="flex w-[376px] flex-none flex-col" style={{ borderLeft: '1px solid #1F1F22' }} aria-label="Where you are standing">
+					    rail comes back the moment the panel closes.
+
+					    It is also hidden below the tablet breakpoint outright: 376px of standing tree
+					    beside a phone-width conversation leaves neither of them readable, and the rooms
+					    list is reachable from the top bar there instead. */}
+					{voicePanel || decision || (autonomyOpen && autonomyPanel) || unitPanel ? null : (
+					<aside className="hidden w-[376px] flex-none flex-col lg:flex" style={{ borderLeft: '1px solid #1F1F22' }} aria-label="Where you are standing">
 						<div className="px-4 pb-1 pt-3.5">
 							<div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.16em', color: '#5A5A61' }}>WHERE YOU ARE STANDING</div>
 							<div className="mt-2 flex items-baseline gap-2">
@@ -196,32 +239,33 @@ export function RoomFrame({ repo, rooms, activeRoomId, onOpenRoom, nodes, plans,
 							    answer it — you also have to see which conversation you are in and what else there
 							    is. Removing the old channel rail without putting this here left the room with no
 							    orientation at all, while every other screen still had one. */}
-							<div className="mt-3 flex flex-col gap-px">
-								{rooms.map((room) => {
-									const here = room.id === activeRoomId;
-									return (
+							{/* Bounded and scrollable (the `scrollbar-custom` idiom other panels already use, e.g.
+							    ToolCallGroup.tsx) rather than left to grow: a duplicate-riddled or simply
+							    long-lived rail used to push everything below it off screen. #fleet and every
+							    active unit render unconditionally inside it; only settled units fold away. */}
+							<div className="mt-3 flex max-h-64 flex-col gap-px overflow-y-auto scrollbar-custom">
+								{visibleRooms.map(renderRoom)}
+								{settledRooms.length > 0 ? (
+									<div className="flex flex-col gap-px">
 										<button
-											key={room.id}
 											type="button"
-											onClick={() => onOpenRoom(room.id)}
-											className="flex items-center gap-2 px-1.5 py-1 text-left"
-											style={{ borderLeft: `2px solid ${here ? '#F0A35A' : 'transparent'}`, background: here ? '#131316' : 'transparent' }}
-											title={here ? 'You are reading this one.' : `Open ${room.name} — the room you are in now stays where it is.`}
+											onClick={() => setSettledRoomsOpen((open) => !open)}
+											aria-expanded={settledRoomsOpen}
+											className="flex items-center gap-1.5 px-1.5 py-1 text-left"
+											style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.08em', color: '#5A5A61' }}
+											title={settledRoomsOpen ? 'Hide settled units’ channels.' : 'Settled units’ channels stay readable — they are just off the working surface.'}
 										>
-											<span style={{ fontFamily: MONO, fontSize: 11, color: here ? '#E8E8EA' : '#7A7A82' }}>{room.name}</span>
-											{room.kind === 'node' ? <span style={{ fontFamily: MONO, fontSize: 9.5, color: '#4A4A52' }}>unit</span> : null}
-											<span className="flex-1" />
-											{room.unread > 0 ? (
-												<span style={{ fontFamily: MONO, fontSize: 10, color: '#D9A03C' }}>{room.unread}</span>
-											) : null}
+											<span>{settledRoomsOpen ? '▾' : '▸'}</span>
+											<span>{settledRooms.length} settled</span>
 										</button>
-									);
-								})}
+										{settledRoomsOpen ? settledRooms.map(renderRoom) : null}
+									</div>
+								) : null}
 							</div>
 							<div className="mt-3" style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.16em', color: '#5A5A61' }}>UNITS</div>
 						</div>
 
-						<div className="min-h-0 flex-1 overflow-y-auto px-2 pt-2.5">
+						<div className="min-h-0 flex-1 overflow-y-auto px-2 pt-2.5 scrollbar-custom">
 							{nodes.length === 0 ? (
 								<div className="px-2 py-3 text-[12px] leading-relaxed" style={{ color: '#6A6A72' }}>
 									No work is running. Start something from the composer and it appears here with an address you can say out loud.
@@ -229,7 +273,10 @@ export function RoomFrame({ repo, rooms, activeRoomId, onOpenRoom, nodes, plans,
 							) : nodes.map((node) => {
 								const isSelected = node.id === selectedId;
 								const rule = node.state === 'needs-you' ? '#D9A03C' : isSelected ? '#F0A35A' : 'transparent';
-								const dot = node.state === 'needs-you' ? '#D9A03C' : node.state === 'settled' ? '#3E7D57' : node.state === 'blocked' ? '#6A6A72' : '#F0A35A';
+								// Ember is reserved for work that is actually executing. `idle` used to fall through to it,
+								// so the rail painted a unit as running while the top bar (correctly) refused to count it —
+								// the colour channel contradicting the number is worse than either being wrong alone.
+								const dot = node.state === 'needs-you' ? '#D9A03C' : node.state === 'settled' ? '#3E7D57' : node.state === 'blocked' ? '#6A6A72' : node.state === 'idle' ? '#4A4A52' : '#F0A35A';
 								return (
 									<div
 										key={node.id}

@@ -21,7 +21,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Actor, CreateAgentOptions } from "../src/types.ts";
-import type { FabricSnapshot } from "../src/fabric.ts";
+import type { FabricSnapshot } from "../src/memory/fabric.ts";
 
 const { SquadManager } = await import("../src/squad-manager.ts");
 

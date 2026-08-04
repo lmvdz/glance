@@ -13,8 +13,8 @@ import * as path from "node:path";
 import { FileStore } from "../src/dal/store.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import { SquadServer } from "../src/server.ts";
-import { saveSymptom } from "../src/symptoms.ts";
-import type { SymptomSearchHit } from "../src/symptoms.ts";
+import { saveSymptom } from "../src/memory/symptoms.ts";
+import type { SymptomSearchHit } from "../src/memory/symptoms.ts";
 
 const cleanups: Array<() => Promise<void> | void> = [];
 afterEach(async () => {

@@ -20,14 +20,14 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type OrgContext } from "../src/dal/context.ts";
-import { DbStore, FileStore } from "../src/dal/store.ts";
+import { DbStore, FileStore, type Store } from "../src/dal/store.ts";
 import { LocalStorageBackend, setStorageBackend, type WriteOpts } from "../src/dal/storage.ts";
 import { type DbHandle, openDatabase, openDb } from "../src/db/index.ts";
 import { appMigrations } from "../src/db/migrations.ts";
 import type { PersistedAgent, PersistedFeature, RunReceipt } from "../src/types.ts";
 import { ChannelStore } from "../src/channels.ts";
-import { NodeStore } from "../src/nodes.ts";
-import { NodeRecordStore, type NodeRecord } from "../src/node-records.ts";
+import { NodeStore } from "../src/memory/nodes.ts";
+import { NodeRecordStore, type NodeRecord } from "../src/memory/node-records.ts";
 
 let dir: string;
 let handle: DbHandle;
@@ -310,6 +310,71 @@ test("NodeStore: nodes round-trip through FileStore and DbStore with parent link
 	}
 });
 
+// `PersistedAgent` has no `status` field — status is derived at runtime and never written down — so
+// the legacy migration has nothing to migrate from. It used to mint every node `"working"`, which is
+// a claim about live execution that the data cannot support, and which nothing could ever undo (a
+// node only moves while a live agent shares its id). On the operator's own daemon that left six
+// units reporting "working" two days after their processes died.
+test("NodeStore: legacy migration marks agents idle, never working — status is not persisted, so working is unsupportable", async () => {
+	const fdir = path.join(dir, "nodes-migration-idle");
+	const stores = [
+		// Org "A" is one of the two the suite seeds; the FK on node/agent rows requires a real org.
+		{ name: "FileStore-mig", store: new FileStore(fdir) as Store },
+		{ name: "DbStore-mig", store: dbStore("A") as Store },
+	];
+	for (const { name, store } of stores) {
+		await store.save({ agents: [agent(`${name}-legacy`, { name: `${name} legacy unit`, task: "ship it" })], transcripts: {}, features: [] });
+		const migrated = await new NodeStore(store).get(`${name}-legacy`);
+		expect(migrated).toMatchObject({ kind: "unit", state: "idle", goal: "ship it" });
+		expect(migrated!.state).not.toBe("working");
+	}
+}, 15_000);
+
+// Cold adoption mints a FRESH agent id for a recovered worktree, so the node under the old id is
+// orphaned by construction; nothing else in the codebase can move it, because every other reaper
+// operates on the roster, sockets or worktrees rather than on nodes. Without this sweep an orphan
+// claims live work forever.
+test("NodeStore.reconcileOrphans: stops units claiming live work with no surviving agent, and touches nothing else", async () => {
+	const fdir = path.join(dir, "nodes-orphan-reconcile");
+	const stores = [
+		{ name: "FileStore-orph", store: new FileStore(fdir) as Store },
+		{ name: "DbStore-orph", store: dbStore("B") as Store },
+	];
+	for (const { name, store } of stores) {
+		const nodes = new NodeStore(store, () => 100);
+		// Four claims of live work. Only the first has an agent that survived the restart.
+		await nodes.create({ id: `${name}-alive`, kind: "unit", title: "Alive", state: "working", createdAt: 1 });
+		await nodes.create({ id: `${name}-ghost`, kind: "unit", title: "Ghost", state: "working", createdAt: 1 });
+		await nodes.create({ id: `${name}-starting-ghost`, kind: "unit", title: "Starting ghost", state: "starting", createdAt: 1 });
+		await nodes.create({ id: `${name}-input-ghost`, kind: "unit", title: "Input ghost", state: "input", createdAt: 1 });
+		// Claims nothing about live execution — must be left exactly as found even though it is orphaned.
+		await nodes.create({ id: `${name}-idle-orphan`, kind: "unit", title: "Idle orphan", state: "idle", createdAt: 1 });
+		await nodes.create({ id: `${name}-settled-orphan`, kind: "unit", title: "Settled orphan", state: "settled", createdAt: 1 });
+		// A synthetic container has no agent BY DESIGN; settling it would empty the tree out from under
+		// the operator, which is why the sweep is restricted to units.
+		await nodes.create({ id: `${name}-fleet`, kind: "plan", title: "the fleet", state: "working", createdAt: 1 });
+
+		// Filtered to this test's own prefix: the sweep is store-wide by design, and sibling tests in
+		// this file share org "B"'s node table. Asserting on the whole return value would couple this
+		// test to their fixtures rather than to the behaviour under test.
+		const mine = (ns: readonly { id: string }[]) => ns.filter((n) => n.id.startsWith(`${name}-`)).map((n) => n.id).sort();
+		expect(mine(await nodes.reconcileOrphans((id) => id === `${name}-alive`))).toEqual([`${name}-ghost`, `${name}-input-ghost`, `${name}-starting-ghost`].sort());
+
+		expect((await nodes.get(`${name}-alive`))!.state).toBe("working");
+		expect((await nodes.get(`${name}-ghost`))!.state).toBe("stopped");
+		expect((await nodes.get(`${name}-starting-ghost`))!.state).toBe("stopped");
+		expect((await nodes.get(`${name}-input-ghost`))!.state).toBe("stopped");
+		expect((await nodes.get(`${name}-idle-orphan`))!.state).toBe("idle");
+		expect((await nodes.get(`${name}-settled-orphan`))!.state).toBe("settled");
+		expect((await nodes.get(`${name}-fleet`))!.state).toBe("working");
+		// "stopped" is not "settled": the unit ended without choosing to, so it carries no settle stamp.
+		expect((await nodes.get(`${name}-ghost`))!.settledAt).toBeUndefined();
+
+		// Idempotent — a second boot finds nothing left to stop rather than re-reporting the same units.
+		expect(mine(await nodes.reconcileOrphans((id) => id === `${name}-alive`))).toEqual([]);
+	}
+}, 15_000);
+
 test("NodeRecordStore: associated evidence round-trips and fails closed through FileStore and DbStore", async () => {
 	const fdir = path.join(dir, "node-records-file-roundtrip");
 	const stores = [
@@ -413,7 +478,11 @@ test("NodeStore: a state directory written before nodes migrates agents once wit
 	await store.save({ agents: [agent("legacy", { task: "legacy goal", parentId: "parent" })], transcripts: {}, features: [] });
 	await store.putChannel({ id: "existing", name: "#existing", kind: "user", createdAt: 1, visibility: "org-public" });
 	const nodes = new NodeStore(store, () => 42);
-	expect(await nodes.get("legacy")).toEqual({ id: "legacy", parentId: "parent", kind: "unit", title: "legacy", state: "working", goal: "legacy goal", createdAt: 42 });
+	// `state: "idle"`, not `"working"`: this assertion used to pin the migration's hard-coded "working"
+	// as if it were intended. It wasn't derived from anything — `PersistedAgent` has no status field —
+	// so it asserted a claim about live execution that no data supports, and which nothing downstream
+	// could ever correct for a unit whose agent id is gone.
+	expect(await nodes.get("legacy")).toEqual({ id: "legacy", parentId: "parent", kind: "unit", title: "legacy", state: "idle", goal: "legacy goal", createdAt: 42 });
 	expect(await store.getChannel("existing")).toMatchObject({ id: "existing", name: "#existing" });
 	expect((await nodes.list()).filter((node) => node.id === "legacy")).toHaveLength(1);
 });
@@ -615,4 +684,77 @@ test("ChannelStore: event issuer is stamped from the verified writer, never from
 
 	expect(forged.event?.issuer).toBe("manager");
 	expect((await store.listChannelEntries("fleet"))[0]?.event?.issuer).toBe("manager");
+});
+
+// ── channel-rail dedup: node ids are unique per dispatch (spawn-identity.ts), so a unit redispatched
+// across a restart used to mint a fresh `node:<id>` channel every time — the rail defect fixed here.
+
+test("ChannelStore: listChannels collapses same-name node channels to the newest, and leaves a same-named channel that isn't node-shaped alone", async () => {
+	const actor = { id: "web:operator", displayName: "Operator", origin: "local" as const, role: "admin" as const };
+	const fdir = path.join(dir, "channel-file-dup-passthrough");
+	const store = new FileStore(fdir);
+	await store.putChannel({ id: "node:a", name: "#ompsq-463", kind: "user", createdAt: 1, visibility: "org-public" });
+	await store.putChannel({ id: "node:b", name: "#ompsq-463", kind: "user", createdAt: 3, visibility: "org-public" });
+	await store.putChannel({ id: "node:c", name: "#ompsq-463", kind: "user", createdAt: 2, visibility: "org-public" });
+	// Same display name, but not a node channel (no "node:" id prefix) — a person could have named a
+	// room this by hand. Must never be folded into the node group.
+	await store.putChannel({ id: "custom-room", name: "#ompsq-463", kind: "user", createdAt: 5, visibility: "org-public" });
+
+	const channels = new ChannelStore(fdir, store);
+	const rows = (await channels.listChannels(actor)).filter((channel) => channel.name === "#ompsq-463");
+	expect(rows.map((channel) => channel.id).sort()).toEqual(["custom-room", "node:b"]);
+});
+
+test("ChannelStore: a unit redispatched under a fresh node id reuses its channel instead of minting a duplicate, in FileStore and DbStore", async () => {
+	const actor = { id: "web:operator", displayName: "Operator", origin: "local" as const, role: "admin" as const };
+	const fdir = path.join(dir, "nodes-file-channel-reuse");
+	const stores = [
+		{ name: "FileStore", stateDir: fdir, store: new FileStore(fdir) },
+		{ name: "DbStore", stateDir: orgDir("A"), store: dbStore("A") },
+	];
+	for (const { name, stateDir, store } of stores) {
+		const nodes = new NodeStore(store);
+		const channels = new ChannelStore(stateDir, store);
+
+		// First incarnation speaks and lazily gets its own channel, same as any unit.
+		const firstId = `${name}-attempt-1`;
+		await nodes.create({ id: firstId, kind: "unit", title: "ompsq-463", state: "working", createdAt: 1 });
+		await channels.appendNodeClient(firstId, actor, { text: "attempt one" });
+		const first = await nodes.get(firstId);
+
+		// A restart adopts/redispatches the SAME named unit under a fresh node id — spawn-identity.ts
+		// guarantees this id is unique, never reused. Before the fix this minted a second `node:<id>`
+		// channel; the rail then showed "#ompsq-463" once per restart, forever.
+		const secondId = `${name}-attempt-2`;
+		await nodes.create({ id: secondId, kind: "unit", title: "ompsq-463", state: "working", createdAt: 2 });
+		await channels.appendNodeClient(secondId, actor, { text: "attempt two" });
+		const second = await nodes.get(secondId);
+
+		expect(second?.channelId).toBe(first?.channelId);
+		expect((await store.listChannels()).filter((channel) => channel.name === "#ompsq-463")).toHaveLength(1);
+		// Both attempts land in the one continuing conversation rather than two disjoint ones.
+		expect((await store.listChannelEntries(first!.channelId!)).map((entry) => entry.text)).toEqual(["attempt one", "attempt two"]);
+	}
+});
+
+test("ChannelStore: listChannels heals node channels a pre-fix daemon already duplicated — newest wins as canonical, unread is the max stranded across the group", async () => {
+	const actor = { id: "db:alice", displayName: "alice", origin: "local" as const, role: "admin" as const };
+	const fdir = path.join(dir, "channel-file-dup-reconcile");
+	const store = new FileStore(fdir);
+	// Simulated pre-fix state: three restarts, three `node:<id>` channels, one shared display name,
+	// never collapsed — exactly the `~/.glance/channels.json` shape observed in production.
+	await store.putChannel({ id: "node:ompsq-463-a", name: "#ompsq-463", kind: "user", createdAt: 1, visibility: "org-public" });
+	await store.putChannel({ id: "node:ompsq-463-b", name: "#ompsq-463", kind: "user", createdAt: 2, visibility: "org-public" });
+	await store.putChannel({ id: "node:ompsq-463-c", name: "#ompsq-463", kind: "user", createdAt: 3, visibility: "org-public" });
+	await store.appendChannelEntry({ id: "e1", channelId: "node:ompsq-463-a", authorActor: "manager", kind: "system", text: "old attempt", ts: 1, status: "ok" });
+	await store.appendChannelEntry({ id: "e2", channelId: "node:ompsq-463-a", authorActor: "manager", kind: "system", text: "old attempt 2", ts: 2, status: "ok" });
+	await store.appendChannelEntry({ id: "e3", channelId: "node:ompsq-463-c", authorActor: "manager", kind: "system", text: "newest attempt", ts: 3, status: "ok" });
+
+	const channels = new ChannelStore(fdir, store);
+	const rows = (await channels.listChannels(actor)).filter((channel) => channel.name === "#ompsq-463");
+	expect(rows).toHaveLength(1);
+	expect(rows[0]?.id).toBe("node:ompsq-463-c"); // the newest incarnation is canonical
+	// alice never read any of them; two messages are stranded on the OLDEST id (node-a), one on the
+	// canonical one (node-c) — the collapsed row must report the max (2), not just its own id's (1).
+	expect(rows[0]?.unreadCount).toBe(2);
 });

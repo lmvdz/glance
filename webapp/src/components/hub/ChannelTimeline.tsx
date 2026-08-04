@@ -1,5 +1,5 @@
 import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertCircle, CheckCircle2, ChevronRight, CircleDot, FileText, Flame, GitMerge, Hash, Reply, Rocket, ShieldAlert } from 'lucide-react';
+import { AlertCircle, CheckCircle2, ChevronRight, CircleDot, FileText, Flame, GitMerge, Hash, Phone, Reply, Rocket, ShieldAlert, ShieldQuestion } from 'lucide-react';
 import type { ChannelEntry } from '../../lib/dto';
 import { askedAgainLine, buildChannelThreadViews, cardUnitId, doorLabel, groupLifecycleRuns, runSummary, type ChannelCardTone, type ChannelCardView } from '../../lib/channelTimeline';
 import { foldVerdict } from '../../lib/roomState';
@@ -7,6 +7,7 @@ import { entryTimeLabel } from '../../lib/hub';
 import { hubHref } from '../../lib/router';
 import { channelScrollAfterRowsChange, channelScrollAfterUserScroll, initialChannelScrollState, type ChannelScrollState } from '../../lib/channelScroll';
 import { GateVerdictCard } from './GateVerdictCard';
+import { registerPresentation } from '../../lib/voice/roomCall';
 import { MentionedText } from '../chat/MentionOverlay';
 import { attachmentIdFromPath, extractAttachedImagePaths, stripAttachedImageMarkers } from '../../lib/spawnProposal';
 
@@ -38,15 +39,21 @@ const iconClass: Record<ChannelCardView['kind'], typeof ShieldAlert> = {
   'land-merge': GitMerge,
   'token-burn-snapshot': Flame,
   'mention-steer': CircleDot,
-  'mention-confirm-required': ShieldAlert,
-  'mention-steer-failed': AlertCircle,
-  'spawn-proposal': CircleDot,
+  'goal-overlap': ShieldAlert,
+  'local:mention-confirm-required': ShieldAlert,
+  'local:mention-steer-failed': AlertCircle,
+  'local:spawn-proposal': CircleDot,
   'plan-card': FileText,
+  'return-emit': CircleDot,
+  'design-revised': FileText,
   'unit-spawned': Rocket,
   'unit-turn-finished': CheckCircle2,
   'unit-failed': AlertCircle,
   'pr-opened': GitMerge,
   'verification-ran': CheckCircle2,
+  'voice-call': Phone,
+  'voice-decision': ShieldQuestion,
+  'voice-fleet-action': CircleDot,
   'unknown-event': CircleDot,
 };
 
@@ -73,13 +80,32 @@ function EmptyTimeline() {
     </div>
   );
 }
-export const ChannelTimelineRow = memo(function ChannelTimelineRow({ view, onReply, replyingTo, onAnswer }: { view: ChannelCardView; onReply?: (entry: ChannelEntry) => void; replyingTo?: boolean; onAnswer?: (unitId: string) => void }) {
+/**
+ * The room's two voice kinds are visually distinct from the fleet's `needs-you` on purpose.
+ *
+ * A fleet question and a call question are different work: one opens a unit's task and diff, the
+ * other opens a question the live call is blocked on. They get different icons (`ShieldQuestion` vs
+ * `ShieldAlert`), different door copy ("Answer the question" vs "Answer it"), and — the part that
+ * carries the most information — the call card prints its CALL and the decision card prints its
+ * question as the agent's own claim, in the register the emitter asserted.
+ */
+const VOICE_KINDS: Partial<Record<ChannelCardView['kind'], true>> = { 'voice-call': true, 'voice-decision': true, 'voice-fleet-action': true };
+
+export const ChannelTimelineRow = memo(function ChannelTimelineRow({ view, onReply, replyingTo, onAnswer, onAnswerDecision, onOpenCall }: { view: ChannelCardView; onReply?: (entry: ChannelEntry) => void; replyingTo?: boolean; onAnswer?: (unitId: string) => void; onAnswerDecision?: (decisionId: string) => void; onOpenCall?: () => void }) {
   // A waiting card opens its QUESTION, not its transcript. Its only affordance used to read "Click to
   // step into the agent", which took you to the conversation — the one place in the room that did the
   // opposite of what the reference asks for.
   const answerable = view.kind === 'needs-you' ? cardUnitId(view.entry) : undefined;
   const user = view.entry.kind === 'user';
   const Icon = iconClass[view.kind];
+  // Only a voice card carries a register today, and only its TEXT does — see VOICE_KINDS above.
+  const register = VOICE_KINDS[view.kind] ? registerPresentation(view.register) : undefined;
+  const voiceDoor =
+    view.kind === 'voice-decision' && view.decisionId && onAnswerDecision
+      ? { label: doorLabel('voice-decision'), onClick: () => onAnswerDecision(view.decisionId!), primary: true }
+      : view.kind === 'voice-call' && onOpenCall
+        ? { label: doorLabel('voice-call'), onClick: onOpenCall, primary: false }
+        : undefined;
   const attachmentIds = extractAttachedImagePaths(view.body)
     .map(attachmentIdFromPath)
     .filter((id): id is string => id !== undefined);
@@ -175,11 +201,30 @@ export const ChannelTimelineRow = memo(function ChannelTimelineRow({ view, onRep
               <span>{view.authorLabel}</span>
               <time dateTime={new Date(view.entry.ts).toISOString()} className="tabular-nums">{entryTimeLabel(view.entry.ts)}</time>
             </div>
-            {(view.actionHref ?? view.href) ? (
+            {register ? (
+              // The register applies to the card's TEXT, never its chrome. `role="note"` with an
+              // accessible name is what makes the distinction survive for a screen reader — italics
+              // and a dashed rule are invisible to one — and the colour is a contrast-checked token
+              // rather than an opacity laid over an already-muted card.
+              <div
+                role="note"
+                aria-label={register.ariaLabel}
+                title={register.title}
+                className="mt-1 text-[13px] font-semibold"
+                style={{ textWrap: 'pretty', ...register.style }}
+              >
+                {view.title}
+              </div>
+            ) : (view.actionHref ?? view.href) ? (
               <a href={view.actionHref ?? view.href} className="mt-1 block text-[13px] font-semibold underline-offset-4 hover:underline" style={{ color: '#E8E8EA' }}>{view.title}</a>
             ) : (
               <h3 className="mt-1 text-[13px] font-semibold" style={{ color: '#E8E8EA' }}>{view.title}</h3>
             )}
+            {register?.marker ? (
+              <div className="mt-0.5" style={{ fontFamily: MONO, fontSize: 9.5, letterSpacing: '.12em', textTransform: 'uppercase', color: '#7A7A82' }} aria-hidden>
+                {register.marker}
+              </div>
+            ) : null}
             {view.body ? <p className="mt-[5px] whitespace-pre-wrap break-words" style={{ fontSize: 14, lineHeight: 1.7, color: '#DEDEE2', textWrap: 'pretty' }}><MentionedText text={view.body} /></p> : null}
             {/* A question the fleet re-asked folds into the card already on screen and says so once.
                 Three copies of one question makes the room look like it lost track of what it said. */}
@@ -202,7 +247,26 @@ export const ChannelTimelineRow = memo(function ChannelTimelineRow({ view, onRep
               </dl>
             ) : null}
             {view.detail ? <p className="mt-2 text-xs leading-5 opacity-60">{view.detail}</p> : null}
-            {answerable && onAnswer ? (
+            {/* Provenance for a voice card: which call it belongs to. A question with no origin is
+                a question a reader cannot weigh, and a call card with no call id is untraceable to
+                the binding it is announcing. */}
+            {view.callId ? (
+              <div className="mt-2" style={{ fontFamily: MONO, fontSize: 10, color: '#4A4A52' }} title={`Call ${view.callId}`}>
+                call {view.callId.slice(0, 8)}
+                {view.decisionId ? ` · question ${view.decisionId.slice(0, 8)}` : ''}
+              </div>
+            ) : null}
+            {voiceDoor ? (
+              <button
+                type="button"
+                onClick={voiceDoor.onClick}
+                className="mt-3 inline-flex min-h-9 items-center justify-center rounded-[3px] px-3 text-[12px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ember focus-visible:ring-offset-2"
+                style={voiceDoor.primary ? { background: '#F0A35A', color: '#140D06' } : { border: '1px solid #26262B', color: '#C9C9CF' }}
+                title={voiceDoor.primary ? 'Opens the question, with the real options and what each one does.' : 'Opens the call controls for this thread.'}
+              >
+                {voiceDoor.label}
+              </button>
+            ) : answerable && onAnswer ? (
               <button
                 type="button"
                 onClick={() => onAnswer(answerable)}
@@ -228,9 +292,9 @@ export const ChannelTimelineRow = memo(function ChannelTimelineRow({ view, onRep
   );
 });
 
-function LifecycleRun({ views, onReply, replyingToId, onAnswer }: { views: ChannelCardView[]; onReply?: (entry: ChannelEntry) => void; replyingToId?: string; onAnswer?: (unitId: string) => void }) {
+function LifecycleRun({ views, onReply, replyingToId, onAnswer, onAnswerDecision, onOpenCall }: { views: ChannelCardView[]; onReply?: (entry: ChannelEntry) => void; replyingToId?: string; onAnswer?: (unitId: string) => void; onAnswerDecision?: (decisionId: string) => void; onOpenCall?: () => void }) {
   const [open, setOpen] = useState(false);
-  if (views.length === 1) return <ChannelTimelineRow view={views[0]!} onReply={onReply} replyingTo={views[0]!.id === replyingToId} onAnswer={onAnswer} />;
+  if (views.length === 1) return <ChannelTimelineRow view={views[0]!} onReply={onReply} replyingTo={views[0]!.id === replyingToId} onAnswer={onAnswer} onAnswerDecision={onAnswerDecision} onOpenCall={onOpenCall} />;
   const summary = runSummary(views);
   const first = views[0]!.entry.ts;
   const last = views[views.length - 1]!.entry.ts;
@@ -256,12 +320,12 @@ function LifecycleRun({ views, onReply, replyingToId, onAnswer }: { views: Chann
         </div>
         <div style={{ fontFamily: MONO, fontSize: 10.5, color: '#4A4A52' }}>{open ? 'close' : 'open'}</div>
       </div>
-      {open ? <ol className="mt-1 pl-[38px]">{views.map((view) => <ChannelTimelineRow key={view.id} view={view} onReply={onReply} replyingTo={view.id === replyingToId} onAnswer={onAnswer} />)}</ol> : null}
+      {open ? <ol className="mt-1 pl-[38px]">{views.map((view) => <ChannelTimelineRow key={view.id} view={view} onReply={onReply} replyingTo={view.id === replyingToId} onAnswer={onAnswer} onAnswerDecision={onAnswerDecision} onOpenCall={onOpenCall} />)}</ol> : null}
     </li>
   );
 }
 
-export function ChannelTimeline({ entries, loading, error, anchorEntryId, onReply, emptyState, replyingToId, onAnswer }: { entries: ChannelEntry[]; loading: boolean; error: string; anchorEntryId?: string; onReply?: (entry: ChannelEntry) => void; emptyState?: React.ReactNode; replyingToId?: string; onAnswer?: (unitId: string) => void }) {
+export function ChannelTimeline({ entries, loading, error, anchorEntryId, onReply, emptyState, replyingToId, onAnswer, onAnswerDecision, onOpenCall, header }: { entries: ChannelEntry[]; loading: boolean; error: string; anchorEntryId?: string; onReply?: (entry: ChannelEntry) => void; emptyState?: React.ReactNode; replyingToId?: string; onAnswer?: (unitId: string) => void; onAnswerDecision?: (decisionId: string) => void; onOpenCall?: () => void; header?: React.ReactNode }) {
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const scrollStateRef = useRef<ChannelScrollState>(initialChannelScrollState());
   const [stableRows, setStableRows] = useState<ChannelCardView[]>([]);
@@ -301,8 +365,13 @@ export function ChannelTimeline({ entries, loading, error, anchorEntryId, onRepl
   };
 
   return (
-    <div ref={scrollerRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto bg-[#09090a]" data-scroll-mode={scrollStateRef.current.mode}>
-      {loading ? <LoadingTimeline /> : error ? <div className="m-4 flex items-center gap-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200" role="alert"><AlertCircle className="h-4 w-4" aria-hidden /> {error}</div> : stableRows.length === 0 ? (emptyState ?? <EmptyTimeline />) : <ol className="mx-auto w-full max-w-4xl space-y-3 p-4 pb-10">{runs.map((run) => <LifecycleRun onAnswer={onAnswer} key={run[0]!.id} views={run} onReply={onReply} replyingToId={replyingToId} />)}</ol>}
+    // The header (the room's call chrome) sits OUTSIDE the scroller, so starting a call, a phase
+    // change, or a status line arriving never moves the conversation the reader is in the middle of.
+    <div className="flex min-h-0 flex-1 flex-col">
+      {header}
+      <div ref={scrollerRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto bg-[#09090a]" data-scroll-mode={scrollStateRef.current.mode}>
+        {loading ? <LoadingTimeline /> : error ? <div className="m-4 flex items-center gap-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200" role="alert"><AlertCircle className="h-4 w-4" aria-hidden /> {error}</div> : stableRows.length === 0 ? (emptyState ?? <EmptyTimeline />) : <ol className="mx-auto w-full max-w-4xl space-y-3 p-4 pb-10">{runs.map((run) => <LifecycleRun onAnswer={onAnswer} onAnswerDecision={onAnswerDecision} onOpenCall={onOpenCall} key={run[0]!.id} views={run} onReply={onReply} replyingToId={replyingToId} />)}</ol>}
+      </div>
     </div>
   );
 }

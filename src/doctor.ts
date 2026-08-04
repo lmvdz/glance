@@ -32,7 +32,7 @@
 
 import { type AdoptionCounters, type AdoptionSummary, summarizeAdoption } from "./adoption-counters.ts";
 import { errText } from "./err-text.ts";
-import { tokenize } from "./fabric-search.ts";
+import { tokenize } from "./memory/fabric-search.ts";
 
 export type DoctorStatus = "ok" | "warn" | "error" | "unknown";
 

@@ -29,7 +29,11 @@ export function modelOptionsFromRuntime(models: unknown): RuntimeModelOption[] {
 	return models.flatMap((item): RuntimeModelOption[] => {
 		if (!item || typeof item !== "object") return [];
 		const rec = item as Record<string, unknown>;
-		const id = typeof rec.id === "string" ? rec.id.trim() : "";
+		// `id`/`provider` is the omp-rpc `get_available_models` shape; `modelId` is ACP's
+		// `session/new → models.availableModels` shape (AcpAgentDriver.getAvailableModels and the
+		// cold ACP probe both hand entries through verbatim). One mapper, both wire dialects — so a
+		// model's option value is identical however its harness was asked, live or cold.
+		const id = typeof rec.id === "string" ? rec.id.trim() : typeof rec.modelId === "string" ? rec.modelId.trim() : "";
 		if (!id) return [];
 		const provider = typeof rec.provider === "string" ? rec.provider.trim() : "";
 		const value = provider ? `${provider}/${id}` : id;

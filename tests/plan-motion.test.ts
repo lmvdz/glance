@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { SquadManager } from "../src/squad-manager.ts";
 import type { Actor } from "../src/types.ts";
 import { assessPlanMotion, planMotionMetrics } from "../src/plan-motion.ts";
-import type { PlanMotionRecord } from "../src/node-records.ts";
+import type { PlanMotionRecord } from "../src/memory/node-records.ts";
 
 const minute = 60_000;
 

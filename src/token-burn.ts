@@ -115,7 +115,23 @@ export function fleetTokenBurnPayload(receipts: RunReceipt[], verdict: { action:
 	};
 }
 
-export function tokenBurnFace(payload: TokenBurnPayload): Record<string, unknown> {
+/** The face literal `tokenBurnFace` actually returns — narrower than `Record<string, unknown>` so
+ *  it satisfies the schema-derived `PointerCardFace` contract (`../schema/channel-card.ts`) at
+ *  compile time, notably `title` being required rather than merely "present at runtime". */
+export interface TokenBurnFace {
+	// Index signature keeps this assignable to `Record<string, unknown>` at the one call site
+	// (`squad-manager.ts#projectionFace`) that returns it through that wider, shared return type.
+	[key: string]: unknown;
+	title: string;
+	eyebrow: string;
+	body: string;
+	detail?: string;
+	status?: string;
+	tone: "info" | "warning" | "destructive";
+	pinned: Record<string, string | number>;
+}
+
+export function tokenBurnFace(payload: TokenBurnPayload): TokenBurnFace {
 	if (payload.kind === "unit") {
 		return {
 			title: `Token burn · ${payload.unit}`,

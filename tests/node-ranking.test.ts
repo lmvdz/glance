@@ -2,7 +2,7 @@ import { describe, expect, test } from "vitest";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { ACTIVITY_HALF_LIFE_MS, compareActivity } from "../src/nodes.ts";
+import { ACTIVITY_HALF_LIFE_MS, compareActivity } from "../src/memory/nodes.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import type { AgentDTO } from "../src/types.ts";
 

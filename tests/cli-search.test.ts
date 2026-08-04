@@ -6,7 +6,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { renderSearchResults } from "../src/index.ts";
-import type { FabricSearchResult } from "../src/fabric-search.ts";
+import type { FabricSearchResult } from "../src/memory/fabric-search.ts";
 
 function hit(overrides: Partial<FabricSearchResult> = {}): FabricSearchResult {
 	return {

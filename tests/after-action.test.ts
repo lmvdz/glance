@@ -2,7 +2,7 @@ import { afterAll, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type AfterActionInput, composeAfterAction, listAfterActions, readAfterAction, saveAfterAction, selectTerminalReaps, type TerminalReapCandidate } from "../src/after-action.ts";
+import { type AfterActionInput, composeAfterAction, listAfterActions, readAfterAction, saveAfterAction, selectTerminalReaps, type TerminalReapCandidate } from "../src/memory/after-action.ts";
 
 const NOW = 1_784_500_000_000;
 

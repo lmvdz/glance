@@ -9,7 +9,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { classifyQueryShape } from "../src/fabric-search.ts";
+import { classifyQueryShape } from "../src/memory/fabric-search.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import type { MetricEvent } from "../src/metrics.ts";
 

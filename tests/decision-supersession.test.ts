@@ -10,9 +10,9 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { buildFabricSnapshot } from "../src/fabric.ts";
-import { fabricDocuments, searchFabric } from "../src/fabric-search.ts";
-import { featureDecisions } from "../src/server.ts";
+import { buildFabricSnapshot } from "../src/memory/fabric.ts";
+import { fabricDocuments, searchFabric } from "../src/memory/fabric-search.ts";
+import { sanitizePatchDecisions as featureDecisions } from "../src/memory/decision-ledger.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import type { FeatureDecision, PersistedFeature } from "../src/types.ts";
 

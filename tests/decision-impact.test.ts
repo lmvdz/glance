@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { assessReversal, costEventsFrom, shouldDiscloseCost, summariseCost, type ReversalNode } from "../src/decision-impact.ts";
+import { assessReversal, costEventsFrom, shouldDiscloseCost, summariseCost, type ReversalNode } from "../src/memory/decision-impact.ts";
 
 function node(address: string, over: Partial<ReversalNode> = {}): ReversalNode {
 	return { id: address, address, title: `unit ${address}`, dependents: [], undoMinutes: 10, ...over };
@@ -106,7 +106,7 @@ test("the manager answers the cost AND whether it should be shown", async () => 
 	const path = await import("node:path");
 	const { SquadManager } = await import("../src/squad-manager.ts");
 	const { FileStore } = await import("../src/dal/store.ts");
-	const { NodeRecordStore } = await import("../src/node-records.ts");
+	const { NodeRecordStore } = await import("../src/memory/node-records.ts");
 
 	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "impact-"));
 	const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "impact-wt-"));
@@ -142,7 +142,7 @@ test("a rule reaches the point it acts with its author attached", async () => {
 	const path = await import("node:path");
 	const { SquadManager } = await import("../src/squad-manager.ts");
 	const { FileStore } = await import("../src/dal/store.ts");
-	const { NodeRecordStore } = await import("../src/node-records.ts");
+	const { NodeRecordStore } = await import("../src/memory/node-records.ts");
 
 	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "quote-"));
 	const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "quote-wt-"));

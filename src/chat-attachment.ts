@@ -25,7 +25,7 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { envBool, envInt } from "./config.ts";
-import { fenceUntrusted } from "./digest.ts";
+import { fenceUntrusted } from "./memory/digest.ts";
 
 /** Server-side re-enforcement of the client's downscale ceiling (Composer.tsx /
  *  imageAttachment.ts): a modified or malicious client must not be able to smuggle an oversized

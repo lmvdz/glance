@@ -21,7 +21,7 @@
  */
 
 import { nonDelegatableClassOf } from "./delegation-boundary.ts";
-import type { DecisionRecord, NodeRecord } from "./node-records.ts";
+import type { DecisionRecord, NodeRecord } from "./memory/node-records.ts";
 import { proposalSampleFloor } from "./unknowns.ts";
 
 /** Below this, a repetition is a coincidence. Deliberately not configurable — see `sampleFloor`. */

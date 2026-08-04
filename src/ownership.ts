@@ -9,7 +9,7 @@
  * unit agents actually split on. Add `**`/glob matching only if a task needs fan-in.
  */
 
-import { rankKbDocs, tokenize, type KbDoc } from "./fabric-search.ts";
+import { rankKbDocs, tokenize, type KbDoc } from "./memory/fabric-search.ts";
 import type { AgentStatus } from "./types.ts";
 
 /**

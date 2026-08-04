@@ -20,7 +20,7 @@
  * replace itself; the archive is not allowed to lose anything without saying what.
  */
 
-import type { NodeRecord, RetentionRecord } from "./node-records.ts";
+import type { NodeRecord, RetentionRecord } from "./memory/node-records.ts";
 
 /**
  * Record kinds that can never be cut.

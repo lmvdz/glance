@@ -1,4 +1,4 @@
-import type { PlanMotionRecord } from "./node-records.ts";
+import type { PlanMotionRecord } from "./memory/node-records.ts";
 
 /** Meaningful work observed in one unit that belongs to a plan. */
 export interface PlanMotionUnit {

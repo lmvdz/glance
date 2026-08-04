@@ -10,7 +10,7 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { listSymptoms, readSymptom } from "../src/symptoms.ts";
+import { listSymptoms, readSymptom } from "../src/memory/symptoms.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import { SubagentTracker } from "../src/subagents.ts";
 import type { AgentDTO, PersistedAgent, PersistedFeature, TranscriptEntry } from "../src/types.ts";

@@ -833,6 +833,25 @@ export interface PresenceSnapshot {
 
 export interface TypingEvent { type: "typing"; channelId: string; userId: string; displayName: string; active: boolean; at: number }
 
+/**
+ * Concern 11 (voice-transcript-in-thread): one journaled transcript turn, pushed live. Structurally
+ * identical to `lib/api.ts`'s `VoiceCallTranscriptEntryDTO` (that file owns the canonical shape and
+ * every REST read of it) — duplicated here, not imported, because `dto.ts` sits BELOW `api.ts` in this
+ * package's own layering (`api.ts` already imports wire types FROM `dto.ts`, never the reverse) and
+ * `SquadEvent` lives here. TypeScript's structural typing means a real `VoiceCallTranscriptEntryDTO`
+ * satisfies this type with zero casting; keep the two field lists in sync if either changes.
+ */
+export interface VoiceCallTranscriptTurnDTO {
+  callId: string;
+  turn: number;
+  role: "user" | "assistant";
+  text?: string;
+  final: boolean;
+  at: number;
+  redacted?: boolean;
+  gapBefore?: { missingCount: number };
+}
+
 export type SquadEvent =
   | { type: "roster"; agents: AgentDTO[]; version: string }
   | { type: "agent"; agent: AgentDTO }
@@ -847,7 +866,11 @@ export type SquadEvent =
   | { type: "channel-entry"; channelId: string; entry: ChannelEntry }
   | CommandAckDTO
   | { type: "presence"; presence: PresenceSnapshot }
-  | TypingEvent;
+  | TypingEvent
+  // Concern 11: pushed once per journaled transcript turn actually appended — see `src/types.ts`'s
+  // matching daemon-side variant for the full rationale (deliberately its OWN SquadEvent variant,
+  // never a `channel-entry`, so a call's turns can never leak into the main channel timeline).
+  | { type: "voice-call-transcript-turn"; channelId: string; callId: string; entry: VoiceCallTranscriptTurnDTO };
 
 export type ClientCommand =
   | { type: "snapshot" }

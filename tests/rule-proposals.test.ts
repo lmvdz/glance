@@ -4,7 +4,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { FileStore } from "../src/dal/store.ts";
-import { NodeRecordStore, type DecisionRecord, type NodeRecord } from "../src/node-records.ts";
+import { NodeRecordStore, type DecisionRecord, type NodeRecord } from "../src/memory/node-records.ts";
 import { MIN_SAMPLE, proposeRules } from "../src/rule-proposals.ts";
 
 /** Minimal live driver: the manager wires real event listeners onto it, so it must be an emitter. */

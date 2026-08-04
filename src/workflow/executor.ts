@@ -15,7 +15,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentDriver } from "../agent-driver.ts";
 import { envBool } from "../config.ts";
-import { fenceUntrusted } from "../digest.ts";
+import { fenceUntrusted } from "../memory/digest.ts";
 import { errText } from "../err-text.ts";
 import { gateEnv } from "../gate-env.ts";
 import { GateSemaphore, sharedGateSemaphore } from "../gate-semaphore.ts";
@@ -23,7 +23,7 @@ import { decideRegressionGate, extractGateFailures } from "../land.ts";
 import { isOn, learningFlags } from "../metrics.ts";
 import { identityNormalize, reduceOutput } from "../output-reduce.ts";
 import { appendReflection, hashOutput, latestReflection, reflect, renderReflectionNote, renderRefutationNote, type ReflectLlm } from "../reflection.ts";
-import { readFailureAnnotations } from "../failure-memory.ts";
+import { readFailureAnnotations } from "../memory/failure-memory.ts";
 import type { NodeExecutor, NodeResult, RunContext, StageEvent, WorkflowNode } from "./types.ts";
 import type { BaselineResult } from "./verify-baseline.ts";
 

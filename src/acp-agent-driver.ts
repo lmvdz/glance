@@ -193,6 +193,11 @@ export class AcpAgentDriver extends EventEmitter implements AgentDriver {
 	/** Inbound permission requests awaiting a `respondUi`, keyed by the minted UI id. */
 	private readonly permits = new Map<string, { jsonrpcId: string | number; options: PermissionOption[] }>();
 	private sessionId?: string;
+	/** `session/new`'s `models.availableModels`, kept verbatim (entries carry `modelId`/`name`).
+	 *  ACP's only model-listing channel — captured at handshake so `getAvailableModels` can answer
+	 *  the manager's per-harness roster query the way RpcAgent does, instead of ACP harnesses being
+	 *  silently absent from `manager.modelOptions()` even WITH a live agent connected. */
+	private availableModels?: unknown[];
 	private ready = false;
 	private exited = false;
 	private detaching = false;
@@ -289,6 +294,8 @@ export class AcpAgentDriver extends EventEmitter implements AgentDriver {
 		if (isObj(init) && isObj(init.agentCapabilities)) this.emit("acpcapabilities", init.agentCapabilities);
 		const sess = await this.send("session/new", { cwd: this.opts.cwd, mcpServers: this.mcpServers() }, timeoutMs);
 		this.sessionId = isObj(sess) ? asString(sess.sessionId) : undefined;
+		const models = isObj(sess) && isObj(sess.models) ? sess.models.availableModels : undefined;
+		if (Array.isArray(models)) this.availableModels = models;
 		// Best-effort approval mode: ACP's set-mode is `unstable_`, so map yolo → an advertised auto-approve
 		// mode when one exists, and fall back silently to the per-call session/request_permission round-trip
 		// otherwise. Never fatal.
@@ -691,6 +698,14 @@ export class AcpAgentDriver extends EventEmitter implements AgentDriver {
 	abort(): Promise<unknown> {
 		if (this.sessionId) this.notify("session/cancel", { sessionId: this.sessionId });
 		return Promise.resolve();
+	}
+
+	/** The roster captured at `session/new` (see `availableModels`). Entries pass through verbatim —
+	 *  `modelOptionsFromRuntime` reads ACP's `modelId` alongside RPC's `id`, so the manager's
+	 *  `modelOptions()` maps a live ACP agent identically to a live omp one. Absent when the server
+	 *  advertised no models (the optional-method contract: `{}` means "cannot say", never "none"). */
+	getAvailableModels(): Promise<{ models?: unknown[] }> {
+		return Promise.resolve(this.availableModels ? { models: this.availableModels } : {});
 	}
 
 	getState(): Promise<RpcSessionState> {

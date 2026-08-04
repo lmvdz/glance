@@ -497,7 +497,7 @@ test("push-retry renders the unit's recorded model-delta + symptom into the crea
 	);
 	expect(outcome).toBe("recorded");
 
-	const { saveSymptom } = await import("../src/symptoms.ts");
+	const { saveSymptom } = await import("../src/memory/symptoms.ts");
 	const saved = await saveSymptom(stateDir, {
 		id: "sym-a6",
 		symptom: "daemon healthy but dispatch stalled",

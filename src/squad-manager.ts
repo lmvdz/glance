@@ -40,9 +40,10 @@ import { LANE_POLICY, type WorkLane, type WorkLaneSource } from "./lane.ts";
 import type { WorkflowDefinition } from "./workflow-catalog.ts";
 import { Dispatcher } from "./dispatch.ts";
 import { openDispatchLedger } from "./dispatch-ledger.ts";
+import { openGoalOverlapLedger, type GoalOverlapLedger } from "./goal-overlap-ledger.ts";
 import { openRaceLedger, type RaceLedger } from "./race-ledger.ts";
-import { type Answer, answerBrief, listAnswers, possiblyStale, readAnswer, saveAnswer } from "./answers.ts";
-import { AFTER_ACTION_MARKER, type AfterActionInput, type AfterActionReport, composeAfterAction, listAfterActions, readAfterAction, saveAfterAction, selectTerminalReaps, type TerminalReapCandidate } from "./after-action.ts";
+import { type Answer, answerBrief, listAnswers, possiblyStale, readAnswer, saveAnswer } from "./memory/answers.ts";
+import { AFTER_ACTION_MARKER, type AfterActionInput, type AfterActionReport, composeAfterAction, listAfterActions, readAfterAction, saveAfterAction, selectTerminalReaps, type TerminalReapCandidate } from "./memory/after-action.ts";
 // Aliased: `types.ts` already exports an UNRELATED `AttentionEvent` (an agent's own notify signal,
 // used pervasively below via `AgentDTO.attentionEvents`) — importing this module's same-named type
 // bare would collide. `OperatorAttentionEvent` disambiguates at every use site in this file.
@@ -73,7 +74,7 @@ import {
 	type EpisodeMeta,
 	type OmittedEntry as EpisodeOmittedEntry,
 	type StaleAnswerEntry,
-} from "./weekly-episode.ts";
+} from "./memory/weekly-episode.ts";
 import { computeFog, topDebt, type FileFogEntry } from "./comprehension-fog.ts";
 import { PushService } from "./push.ts";
 import { ResidentPlanner } from "./resident-planner.ts";
@@ -113,8 +114,8 @@ import { type Judge, validatorGate } from "./validator.ts";
 import { evaluateCompliance, type ComplianceFinding } from "./compliance.ts";
 import { reapDeadSessions, releaseSession, sweepLeases } from "./leases.ts";
 import { agentActor, scopeFor } from "./agent-scope.ts";
-import { actorVisibleRepoSet, buildFabricSnapshot, loadScoutFacts, type FabricSnapshot } from "./fabric.ts";
-import { buildContextPrimer, classifyQueryShape, searchFabric, type KbDocType } from "./fabric-search.ts";
+import { actorVisibleRepoSet, buildFabricSnapshot, loadScoutFacts, type FabricSnapshot } from "./memory/fabric.ts";
+import { buildContextPrimer, classifyQueryShape, searchFabric, type KbDocType } from "./memory/fabric-search.ts";
 import { sweepPresence, who } from "./presence.ts";
 import { harnessEventDecision } from "./harness-hooks.ts";
 import { adoptBranchName, adoptBrief, isSafeUntrackedPath, parseNulList } from "./adopt.ts";
@@ -179,15 +180,15 @@ import { selectReapable, type WorktreeInfo } from "./worktree-reaper.ts";
 import { scrubbedSpawnEnv } from "./spawn-env.ts";
 import { changedFiles, filesTouchedSinceBase } from "./explore.ts";
 import { appendReceipt, confirmDeliveredFlags, EFFICIENCY_FLAG_PREFIX, readAllReceipts, readReceipts, RunAccumulator, splitCapabilityTokens } from "./receipts.ts";
-import { validateModelDelta } from "./decision-evidence.ts";
-import { classifyWhereToLookEntry, listSymptoms, readSymptom, saveSymptom, statWhereToLookEntry, symptomId, validateSymptomText, validateWhereToLookCount, type SymptomEntry } from "./symptoms.ts";
+import { DecisionLedger } from "./memory/index.ts";
+import { classifyWhereToLookEntry, listSymptoms, readSymptom, saveSymptom, statWhereToLookEntry, symptomId, validateSymptomText, validateWhereToLookCount, type SymptomEntry } from "./memory/symptoms.ts";
 import { buildPrBody } from "./pr-body.ts";
 import { membraneBreakerCadence } from "./membrane-breaker-cadence.ts";
 import { appendAudit, type AuditQuery, makeAuditEntry, readAudit } from "./audit.ts";
 import { AutomationLog, type AutomationQuery } from "./automation-log.ts";
 import { isFirstTryGreen, isOn, learningFlags, LearningMetrics, type MetricRollupRow } from "./metrics.ts";
 import { reflect } from "./reflection.ts";
-import { failureAnnotation, recordFailureAnnotation } from "./failure-memory.ts";
+import { failureAnnotation, recordFailureAnnotation } from "./memory/failure-memory.ts";
 import { readModelOutcomes, recordModelOutcome, recordModelOutcomeBlocked, tierOf } from "./model-outcomes.ts";
 import { costGateMode, type CostVerdict, shadowCostCheck } from "./cost-gate.ts";
 import { recordCostLanded } from "./cost-aggregate.ts";
@@ -208,7 +209,7 @@ import { buildTaskClassMatrix } from "./omp-graph/task-class-matrix.ts";
 import { DAY_MS } from "./omp-graph/schema.ts";
 import { modelRouteMinEdgeFor, modelRouteShouldApply, routeModelForTaskClass } from "./model-route.ts";
 import { openOrchestratorState } from "./orchestrator-state.ts";
-import { authoredSpecBlock, buildDigest, type DigestReward, digestSummaryExcerpt, fenceUntrusted, readDigest, writeDigest } from "./digest.ts";
+import { authoredSpecBlock, buildDigest, type DigestReward, digestSummaryExcerpt, fenceUntrusted, readDigest, writeDigest } from "./memory/digest.ts";
 import { readChatAttachment, reapStaleChatAttachments, type SavedChatAttachment, writeChatAttachment } from "./chat-attachment.ts";
 import { harnessScorecardEnabled, scoreHarness } from "./harness-scorecard.ts";
 import { isArmed } from "./convergence-oracle.ts";
@@ -221,6 +222,7 @@ import {
 	TRANSCRIPT_EVENT_LAND_ASSESSMENT,
 	TRANSCRIPT_EVENT_LAND_ATTEMPT,
 	TRANSCRIPT_EVENT_LAND_MERGE,
+	TRANSCRIPT_EVENT_MENTION_STEER,
 	TRANSCRIPT_EVENT_NEEDS_YOU,
 	TRANSCRIPT_EVENT_PLAN_CARD,
 	TRANSCRIPT_EVENT_PR_OPENED,
@@ -229,21 +231,47 @@ import {
 	TRANSCRIPT_EVENT_UNIT_SPAWNED,
 	TRANSCRIPT_EVENT_UNIT_TURN_FINISHED,
 	TRANSCRIPT_EVENT_VERIFICATION_RAN,
+	isTranscriptEventKind,
 } from "./transcript-event-kinds.ts";
 import { TRANSCRIPT_EVENT_TOKEN_BURN_SNAPSHOT, fleetTokenBurnPayload, tokenBurnFace, unitTokenBurnPayload } from "./token-burn.ts";
+import { emitDesignRevisedCard, emitGoalOverlapCard, emitMentionSteerCard, emitReturnEmitCard, emitTokenBurnSnapshotCard } from "./schema/channel-card.ts";
 import { truncateLabel } from "./text-util.ts";
 import { FileStore, type StateSnapshot, type Store } from "./dal/store.ts";
 import { ChannelStore, DEFAULT_CHANNEL_ID, type ChannelEntry, type ClientChannelPost, type Channel, type CreateChannelInput, type ChannelMemberInput } from "./channels.ts";
-import { NodeStore, compareActivity, type NodeState } from "./nodes.ts";
+import type { VoiceCallBindingView, VoiceCallRetention } from "./voice-call-binding.ts";
+import type { JournalGap, StoredTranscriptEntry } from "./voice-call-projection.ts";
+import type { ArtifactReadResult, ArtifactSnapshotRecord } from "./voice-call-artifacts.ts";
+import type { JournalDecisionSnapshot } from "./voice-call-journal.ts";
+import type { BridgeControlAck } from "./voice-call-bridge-client.ts";
+import { VoiceCallCoordinator, type BrokerClient, type CoordinatorResult, type VoiceCallsSurface } from "./voice-call-manager.ts";
+import { discoverRepos, planSpawn } from "./smart-spawn.ts";
+import {
+	buildDestructiveGateDecision,
+	buildFleetContextBrief,
+	formatFleetRoster,
+	formatUnitDetail,
+	FLEET_TAIL_ENTRIES,
+	isDestructiveGate,
+	normalizeGateAnswer,
+	parseVoiceFleetArgs,
+	snapshotOwnerActor,
+	sanitizeLabel as voiceFleetSanitizeLabel,
+	truncatePoints as voiceFleetTruncatePoints,
+	type FleetTranscriptTailEntry,
+	type FleetUnitView,
+	type VoiceFleetExecResult,
+	type VoiceOwnerActor,
+} from "./voice-fleet.ts";
+import { NodeStore, compareActivity, type NodeState } from "./memory/nodes.ts";
 import { ForgedCardError, assertAuthentic, projectsToRoom, type CardProvenance } from "./projection-classes.ts";
 import { coldStartLearningState } from "./unknowns.ts";
 import { RECOVERY_DELAY_MS, gateHealth, notificationText, readGateEvaluation, shouldLeaveTheApp, type GateEvaluation, type GateHealth, type WorthItReview } from "./leaving-the-app.ts";
 import { GateStore } from "./gate-store.ts";
 import { buildEvaluation } from "./gate-wiring.ts";
-import { assessReversal, costEventsFrom, shouldDiscloseCost, summariseCost, type CostSummary, type ReversalAssessment, type ReversalNode } from "./decision-impact.ts";
-import { NodeRecordStore, quoteRule, type NodeRecord, type InstructionReadbackRecord, type ObjectionRecord, type PlanMotionRecord } from "./node-records.ts";
+import { assessReversal, costEventsFrom, shouldDiscloseCost, summariseCost, type CostSummary, type ReversalAssessment, type ReversalNode } from "./memory/decision-impact.ts";
+import { NodeRecordStore, quoteRule, type NodeRecord, type InstructionReadbackRecord, type ObjectionRecord, type PlanMotionRecord } from "./memory/node-records.ts";
 import { approveIrreversible, beginInstruction, overruleObjection, raiseObjection, recordObjectionOutcome, rejectIrreversible, type InstructionExecution } from "./instructions.ts";
-import { regenerateNodeSummaries } from "./node-summaries.ts";
+import { regenerateNodeSummaries } from "./memory/node-summaries.ts";
 import { agentRecordView, type AgentRecordView } from "./agent-records.ts";
 import { proposeRules, type RuleProposal } from "./rule-proposals.ts";
 import { assessPlanMotion as assessPlanMotionEvidence, planMotionMetrics, type PlanMotionInput, type PlanMotionAssessment } from "./plan-motion.ts";
@@ -954,6 +982,25 @@ export interface SquadManagerOptions {
 	 *  wedging forever. Overridable so tests using a fake driver that never emits "replayComplete" don't
 	 *  pay the full production timeout. */
 	replaySettleTimeoutMs?: number;
+	/** Voice-call push substrate (concern 02, plans/voice-orchestrated-room-integration). Undefined
+	 *  means voice-decision notifications are a documented no-op (`VoiceAttentionSource` reports
+	 *  `"no-push-service"`) rather than silently constructing a second, un-configured PushService —
+	 *  the daemon's real single-tenant/per-org PushService lifecycle lives at the server layer
+	 *  (`server.ts`'s `opts.push`/`orgPush`), so this is deliberately injected, not self-constructed. */
+	voicePush?: PushService;
+	/** Injectable broker client for tests; default talks to the real loopback broker via `fetch`. */
+	voiceBroker?: BrokerClient;
+	/** Test-only speedup for `VoiceCallCoordinator`'s journal-tail poll interval (production default:
+	 *  400ms). Same rationale as `replaySettleTimeoutMs` above — an integration test driving a call
+	 *  through `SquadManager` (rather than constructing `VoiceCallCoordinator` directly, the way
+	 *  tests/voice-call-manager.test.ts does) still needs to observe journal-tailed state without
+	 *  paying the full production interval. Omitted in production; `VoiceCallCoordinator` itself
+	 *  applies its own default when this is undefined. */
+	voiceJournalPollIntervalMs?: number;
+	/** Test-only speedup for `VoiceCallCoordinator`'s liveness-probe interval (production default:
+	 *  5000ms) — same rationale as `voiceJournalPollIntervalMs` above, for socket-loss → degraded →
+	 *  reconnect timing. */
+	voiceLivenessProbeIntervalMs?: number;
 }
 
 /**
@@ -973,6 +1020,39 @@ export interface CommissionOptions {
 	requireAcceptance?: boolean;
 	/** Worker dir override. Default: <stateDir>/workers/<name>. */
 	dir?: string;
+}
+
+/** Human phrasing of an `AgentStatus`, for the goal-overlap disclosure's copy (createWithId) —
+ *  the card used to unconditionally claim "Both are running" without checking either side. Never
+ *  called for `stopped`/`error`: `createWithId` suppresses the whole disclosure before this would
+ *  ever run for a dead unit — see `isDeadAgentStatus` below. */
+function agentStatusPhrase(status: AgentStatus): string {
+	switch (status) {
+		case "starting":
+			return "starting up";
+		case "working":
+			return "actively working";
+		case "idle":
+			return "idle";
+		case "input":
+			return "waiting on a decision";
+		case "error":
+			return "errored";
+		case "stopped":
+			return "stopped";
+	}
+}
+
+/**
+ * Whether a unit's status counts as "gone" for the goal-overlap disclosure: a conflict with a
+ * dead unit is noise, not news. `AgentStatus` (types.ts) has no dedicated "settled" value the way
+ * a workflow node does (nodes.ts's `NodeState`) — `stopped`/`error` are its own terminal set
+ * (agent-lifecycle.ts), and `undefined` covers a unit that isn't in the roster at all (already
+ * reaped, or — for the disclosure's OWNER side — never resolved to a live record in the first
+ * place). All three read the same way here: nothing to warn anyone about.
+ */
+function isDeadAgentStatus(status: AgentStatus | undefined): status is undefined | "stopped" | "error" {
+	return status === undefined || status === "stopped" || status === "error";
 }
 
 function recordObject(value: unknown): Record<string, unknown> | undefined {
@@ -1029,6 +1109,14 @@ export class SquadManager extends EventEmitter {
 	 *  durably claims the slot itself (#never-lose-work concern 04 review finding 1). */
 	private readonly forkInFlight = new Set<string>();
 	private readonly featureStore = new Map<string, PersistedFeature>();
+	/** The memory lane's decision write path (src/memory/decision-ledger.ts). The manager is the
+	 *  production adapter of its store port: the store-resident feature Map, the race-guarded
+	 *  adopt path, and persist + event fan-out. Tests adapt a bare Map instead. */
+	readonly decisionLedger = new DecisionLedger({
+		get: (id) => this.featureStore.get(id),
+		adopt: (id, repo) => this.adoptDerivedFeature(id, repo),
+		changed: () => this.emitFeaturesChanged(),
+	});
 	private capabilityStore: CapabilitySnapshot = emptyCapabilitySnapshot();
 	private readonly bin?: string;
 	private readonly autoLand: boolean;
@@ -1086,6 +1174,12 @@ export class SquadManager extends EventEmitter {
 	 *  remove(); CLEARED by createWithId when an authorized creator deliberately reuses the id
 	 *  (deterministic workflow-branch ids must stay resurrectable by their parent's resume). */
 	private readonly removedLedger: RemovedLedger;
+	/** Restart-safe "already disclosed this goal-overlap pair" set (goal-overlap-ledger.ts) — closes
+	 *  the exact incident that ledger's own header documents: a resumed workflow branch's
+	 *  deterministic id survives a restart, and without this the in-process-only `goalConflict`
+	 *  check re-discloses the same (owner, candidate) pair every single boot. Consulted and stamped
+	 *  by `createWithId`'s goal-overlap disclosure only. */
+	private readonly goalOverlapLedger: GoalOverlapLedger;
 	/** Durable repos-this-operator-works-in set; unioned into `projects()`. See project-registry.ts. */
 	private readonly projectRegistry: ProjectRegistry;
 	/** Restart-safe "raced this issue already, ever" ledger (adw-factory-borrows concern 07). Consulted
@@ -1144,6 +1238,12 @@ export class SquadManager extends EventEmitter {
 	private readonly authorityWrites = new Map<string, Promise<void>>();
 	/** Manager card projections that exhausted ChannelStore's bounded append retry. */
 	private projectionFailures = 0;
+	/** First-sight-per-kind debug log for `projectUnitTranscriptEvent`'s `isTranscriptEventKind` guard
+	 *  — mirrors `schema/channel-card.ts`'s `warnedUnknownKinds` (re-port review follow-up, concern 02):
+	 *  a transcript event carrying a kind this build doesn't recognize used to be silently skipped with
+	 *  no signal anywhere; now it logs once per newly-seen kind rather than either staying silent or
+	 *  spamming a line per emit (a chatty unit could emit the same unknown kind hundreds of times). */
+	private readonly warnedUnknownTranscriptEventKinds = new Set<string>();
 	/** Per-agent count of advisory peer messages spent this run (OMP_SQUAD_PEERMSG_BUDGET). */
 	private readonly peerMessageBudget = new Map<string, number>();
 	/** Agent ids the daemon reattached to (surviving hosts) this run. */
@@ -1220,6 +1320,10 @@ export class SquadManager extends EventEmitter {
 	private readonly attentionStore: AttentionStore;
 	private readonly channelStore: ChannelStore;
 	private readonly nodeStore: NodeStore;
+	/** Concern 02's per-thread live-call durable owner (plans/voice-orchestrated-room-integration).
+	 *  One coordinator per manager (i.e. per org in DB mode) — bindings are keyed by channelId, which
+	 *  is already scoped to this manager's own ChannelStore. */
+	readonly voiceCall: VoiceCallCoordinator;
 	private readonly traceExporter?: TraceExportQueue;
 	/** Reward disbursement provider (Tremendous / Manual). Injectable for tests; default from env. */
 	private readonly paymentProvider: PaymentProvider;
@@ -1256,6 +1360,7 @@ export class SquadManager extends EventEmitter {
 		if (envBool("OMP_SQUAD_LAND_ASSESSMENT", false)) this.landAssessment = new LandAssessmentHook(this.stateDir, (level, msg) => this.log(level, msg));
 		this.scoutCursor = readScoutCursors(this.stateDir);
 		this.removedLedger = openRemovedLedger(this.stateDir);
+		this.goalOverlapLedger = openGoalOverlapLedger(this.stateDir);
 		this.projectRegistry = openProjectRegistry(this.stateDir);
 		this.boundarySyncHeld = new HeldSyncStore(path.join(this.stateDir, "boundary-sync"));
 		// Reload session-scoped registration markers so a mid-session daemon restart cannot promote an
@@ -1280,6 +1385,54 @@ export class SquadManager extends EventEmitter {
 		this.traceExporter = traceExporterFromEnv((m) => this.log("warn", m), this.stateDir);
 		this.paymentProvider = opts.paymentProvider ?? paymentProviderFromEnv();
 		this.replaySettleTimeoutMs = opts.replaySettleTimeoutMs ?? 2000;
+		this.voiceCall = new VoiceCallCoordinator({
+			stateDir: this.stateDir,
+			log: (m) => this.log("warn", `voice-call: ${m}`),
+			broker: opts.voiceBroker,
+			push: opts.voicePush,
+			journalPollIntervalMs: opts.voiceJournalPollIntervalMs,
+			livenessProbeIntervalMs: opts.voiceLivenessProbeIntervalMs,
+			channelMemberUserIds: (channelId) => this.channelStore.memberUserIds(channelId),
+			emitCard: async (input) => {
+				const entry = await this.channelStore.appendManager(input.channelId, {
+					authorActor: "manager",
+					kind: "system",
+					format: "stage",
+					text: input.text,
+					event: { kind: input.kind, payload: input.payload },
+				});
+				this.emit("event", { type: "channel-entry", channelId: entry.channelId, entry } satisfies SquadEvent);
+			},
+			// Concern 11: the SAME `emit("event", ...)` bus `emitCard` above already uses for
+			// channel-entry cards, riding a DIFFERENT SquadEvent variant so a turn can never be
+			// mistaken for (or accidentally rendered alongside) a channel timeline card.
+			onTranscriptTurn: (input) => {
+				this.emit("event", { type: "voice-call-transcript-turn", channelId: input.channelId, callId: input.callId, entry: input.entry } satisfies SquadEvent);
+			},
+			// Live captions fix (production defect, 2026-07-28): a live bridge partial rides the
+			// IDENTICAL "voice-call-transcript-turn" SquadEvent onTranscriptTurn emits above — the
+			// webapp's mergeLiveTurn (keyed (role, turn), replace-in-place) already handles both a
+			// growing partial superseding an earlier partial AND the eventual durably-journaled
+			// final:true turn (pushed via onTranscriptTurn once tailed) superseding the last partial,
+			// with zero webapp-side change needed. This callback never appends to the journal/
+			// projection store — see onLiveTranscriptFrame's own doc for why.
+			onLiveTranscriptFrame: (input) => {
+				this.emit("event", { type: "voice-call-transcript-turn", channelId: input.channelId, callId: input.callId, entry: input.entry } satisfies SquadEvent);
+			},
+			// Concern 13 (multi-party-calls): presentation-plane presence nudges — see the
+			// "voice-call-participant" SquadEvent's own doc in types.ts for why this is NOT a durable
+			// journal write (state()'s own participants field is the durable-enough source of truth).
+			onParticipantJoined: (input) => {
+				this.emit("event", { type: "voice-call-participant", channelId: input.channelId, callId: input.callId, event: "joined", participant: input.participant } satisfies SquadEvent);
+			},
+			onParticipantLeft: (input) => {
+				this.emit("event", { type: "voice-call-participant", channelId: input.channelId, callId: input.callId, event: "left", participant: input.participant } satisfies SquadEvent);
+			},
+			// Concern 12 (voice-fleet-delegation): the call's fleet tool calls execute HERE, on the
+			// same authenticated paths UI commands take, as the call owner's snapshotted actor.
+			executeFleetCall: (input) => this.executeVoiceFleetCall(input),
+			buildFleetContext: (input) => this.voiceFleetContext(input),
+		});
 	}
 
 	private blockedReason(dto: Pick<AgentDTO, "pending" | "error">): string | undefined {
@@ -1400,6 +1553,10 @@ export class SquadManager extends EventEmitter {
 	}
 
 	async start(): Promise<void> {
+		// Concern 02: every binding that was connecting/live/degraded when the daemon last stopped has
+		// no surviving socket or in-flight tailer now — corroborate each against the broker before
+		// this manager claims anything live about it (never silently keep claiming liveness).
+		await this.voiceCall.rehydrateOnBoot().catch((err) => this.log("warn", `voice-call rehydrate failed: ${errText(err)}`));
 		await this.materialiseAutoLandGrant();
 		await this.materialiseColdStart();
 		// Recovery only matters for a daemon with prior state. A fresh start has nothing to reconnect,
@@ -1415,6 +1572,17 @@ export class SquadManager extends EventEmitter {
 			// Dead-session honesty (daily-onramp 04): every persisted non-resumable session the paths
 			// above (correctly) declined to bring back leaves a placeholder, never a silent vanish.
 			this.recordNonResumableSkips(snapshot);
+			// The same honesty, one layer down. Everything above reconciles the ROSTER; nothing
+			// reconciles the node graph, and a node can only ever be moved by a live agent sharing its
+			// id — so a unit whose host died while the daemon was down, or whose worktree was re-adopted
+			// under a fresh id, keeps claiming "working" forever. Scheduled here, after reconnect and
+			// adopt have decided who is actually alive, so the surviving roster is the authority.
+			//
+			// Awaited, so a boot that returns has already told the truth about what is running — the
+			// alternative races the first render and shows ghosts once. It is cheap next to the work
+			// above it (reconnect, adopt, socket prune), and `reconcileOrphans` takes a live-roster
+			// PREDICATE rather than a snapshot, so moving it off the boot path later stays safe.
+			await this.reconcileOrphanedNodes();
 		}
 		// AFTER roster restore (needs the surviving agents to tell live `glance here` sessions from dead
 		// ones) and outside the snapshot guard: a fresh-state boot with leftover markers means every
@@ -1931,6 +2099,7 @@ export class SquadManager extends EventEmitter {
 		// Flush the attention store's debounced last-seen-map write (comprehension concern 01) — same
 		// "only a crash may lose it" contract as the pendingPersistTimers flush above.
 		this.attentionStore.stop();
+		this.voiceCall.stop();
 		await this.channelStore.stop();
 		await this.persist();
 		// Best-effort timeline marker (#lifecycle-truth finding 4 / DESIGN's "a best-effort daemon-stop
@@ -3419,63 +3588,17 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
-	 * Atomically append one agent-captured decision to a feature, resolving the feature the SAME way
-	 * updateFeature does (adopting a plan-derived feature that isn't yet persisted — so capture works
-	 * for exactly the plan-driven agents it targets, not just already-adopted features). Reads the
-	 * feature's CURRENT decisions at write time and appends in one synchronous step — no stale
-	 * read-modify-write over a client snapshot, so concurrent agent captures can't clobber each other.
-	 * De-dupes on normalized text. Returns the outcome so the caller can tell the agent what happened.
-	 *
-	 * Supersession (plans/research-long-horizon-agent-memory — "recurrence promotes, contradiction
-	 * supersedes"): when `decision.supersedes` names a prior decision on the feature, this write
-	 * stamps that target's `supersededBy`/`supersededAt` in the SAME atomic step that appends the
-	 * new decision — one current assertion per subject, the loser invalidated-not-deleted and kept
-	 * addressable as history. Two rules with teeth:
-	 * - the text de-dupe considers only CURRENT (non-superseded) decisions, so re-asserting a fact
-	 *   that was later reversed (A→B→A) is legal ledger history, not a silent no-op;
-	 * - superseding an already-superseded target is rejected — supersede the current decision, not
-	 *   a historical one (prevents forked "current" chains under concurrent writers).
-	 *
-	 * Concurrency: the check-and-write below is one synchronous block over the STORE-RESIDENT
-	 * feature object, re-resolved after the only await (the adopt path), and adoptDerivedFeature
-	 * itself re-checks the store before setting — so two near-simultaneous captures serialize on
-	 * the same object instead of one silently clobbering the other's adopt.
+	 * Atomically append one agent-captured decision to a feature. The write rule — supersession
+	 * stamps, current-only text de-dupe, adopt-aware resolution, the concurrency contract — lives
+	 * in the memory lane's DecisionLedger (src/memory/decision-ledger.ts); this delegation exists
+	 * for the routes and tests that address the manager.
 	 */
 	async recordAgentDecision(
 		featureId: string,
 		decision: FeatureDecision,
 		repo?: string,
 	): Promise<"recorded" | "duplicate" | "no-feature" | "supersede-missing" | "supersede-superseded"> {
-		// After the adopt await, re-resolve from the store: adoptDerivedFeature's own race guard
-		// guarantees the store-resident object wins, and every read below must be against THAT
-		// object, in the synchronous block, or a concurrent capture could be checked against a
-		// stale copy.
-		const adopted = this.featureStore.get(featureId) ?? (await this.adoptDerivedFeature(featureId, repo));
-		if (!adopted) return "no-feature";
-		const pf = this.featureStore.get(featureId) ?? adopted;
-		// Agents copy decision ids from kb-search output, where they render as `decision:<id>` doc
-		// ids — accept that form rather than bouncing a correct reference (blind-review finding:
-		// a false refusal here steered agents toward recording WITHOUT supersedes, the exact
-		// two-live-currents failure this path exists to prevent).
-		if (decision.supersedes?.startsWith("decision:")) decision = { ...decision, supersedes: decision.supersedes.slice("decision:".length) };
-		const norm = (s: string): string => s.replace(/\s+/g, " ").trim().toLowerCase();
-		const target = norm(decision.text);
-		const existing = pf.decisions ?? [];
-		if (existing.some((d) => !d.supersededBy && norm(d.text) === target)) return "duplicate";
-		let superseded: FeatureDecision | undefined;
-		if (decision.supersedes) {
-			superseded = existing.find((d) => d.id === decision.supersedes);
-			if (!superseded) return "supersede-missing";
-			if (superseded.supersededBy) return "supersede-superseded";
-		}
-		const now = Date.now();
-		pf.decisions = [
-			...existing.map((d) => (superseded && d.id === superseded.id ? { ...d, supersededBy: decision.id, supersededAt: now } : d)),
-			decision,
-		];
-		pf.updatedAt = now;
-		this.emitFeaturesChanged();
-		return "recorded";
+		return this.decisionLedger.record(featureId, decision, repo);
 	}
 
 	async updateFeature(id: string, patch: { title?: string; stageOverride?: FeatureStage | null; category?: FeatureCategory | null; archived?: boolean; repo?: string; description?: string; acceptanceCriteria?: FeatureCriterion[]; decisions?: FeatureDecision[]; relationships?: FeatureRelationship[]; contextBundle?: PersistedFeature["contextBundle"] }): Promise<PersistedFeature | undefined> {
@@ -3572,30 +3695,27 @@ export class SquadManager extends EventEmitter {
 				text,
 				kind: "system",
 				format: "stage",
-				event: {
-					kind: TRANSCRIPT_EVENT_DESIGN_REVISED,
-					payload: {
-						refs: { planId: feature.id, planPath: opts.file, unitId: rec?.dto.id },
-						doorSurface: "plan",
-						face: {
-							unitId: rec?.dto.id,
-							unitName: rec?.dto.name,
-							eventKind: TRANSCRIPT_EVENT_DESIGN_REVISED,
-							title: "Design revised",
-							eyebrow: "Plan saved",
-							body: `${concern.title}: ${changed}`,
-							detail: opts.file,
-							tone: "info",
-							planName,
-							pinned: { actor: actor.id, concern: concern.file, status: concern.status },
-						},
-						actor: actor.id,
-						featureId: feature.id,
-						planPath: opts.file,
+				event: emitDesignRevisedCard({
+					refs: { planId: feature.id, planPath: opts.file, unitId: rec?.dto.id },
+					doorSurface: "plan",
+					face: {
+						unitId: rec?.dto.id,
+						unitName: rec?.dto.name,
+						eventKind: TRANSCRIPT_EVENT_DESIGN_REVISED,
+						title: "Design revised",
+						eyebrow: "Plan saved",
+						body: `${concern.title}: ${changed}`,
+						detail: opts.file,
+						tone: "info",
 						planName,
-						changed,
+						pinned: { actor: actor.id, concern: concern.file, status: concern.status },
 					},
-				},
+					actor: actor.id,
+					featureId: feature.id,
+					planPath: opts.file,
+					planName,
+					changed,
+				}),
 			});
 			this.emit("event", { type: "channel-entry", channelId, entry } satisfies SquadEvent);
 		} catch (err) {
@@ -5236,6 +5356,34 @@ export class SquadManager extends EventEmitter {
 	 *  exists", while the source's own marker never gets cleared to reflect it). Called once at the end of
 	 *  `start()`'s recovery sequence, after every reattach/adopt path has had a chance to put both the fork
 	 *  and its source back in `this.agents` (review finding 3). */
+	/**
+	 * Stop nodes that claim to be running when no agent under that id survived the restart.
+	 *
+	 * Best-effort by construction: a node graph that cannot be read is not a reason to refuse to boot
+	 * the fleet, and the cost of skipping is a stale count rather than lost work. What it settles is
+	 * logged rather than done silently — a unit disappearing from "working" is exactly the kind of
+	 * change an operator should be able to find an explanation for.
+	 */
+	private async reconcileOrphanedNodes(): Promise<void> {
+		try {
+			const stopped = await this.nodeStore.reconcileOrphans((id) => this.agents.has(id));
+			if (stopped.length === 0) return;
+			// Moving the node is only half the correction. The durable summaries are written by
+			// `refreshNodeSummaries`, which needs a live `AgentRecord` under the same id — precisely what
+			// an orphan does not have — so without this the row reads "stopped" while its own recorded
+			// summary goes on saying the unit is working, forever. Regenerate them from the corrected node.
+			const records = new NodeRecordStore(this.store, (m) => this.log("warn", `node-records: ${m}`));
+			const now = Date.now();
+			for (const node of stopped) {
+				const summaries = regenerateNodeSummaries({ node, records: await records.list(node.id), now });
+				await Promise.all(summaries.map((summary) => records.put(summary)));
+			}
+			this.log("info", `nodes: stopped ${stopped.length} orphaned unit${stopped.length === 1 ? "" : "s"} still claiming live work (${stopped.map((n) => n.id).join(", ")})`);
+		} catch (err) {
+			this.log("warn", `nodes: orphan reconcile skipped: ${errText(err)}`);
+		}
+	}
+
 	private reconcileForkLineage(): void {
 		for (const rec of this.agents.values()) {
 			const forkedFrom = rec.options.workflowState?.forkedFrom;
@@ -7025,22 +7173,13 @@ export class SquadManager extends EventEmitter {
 		if (goalOverlap?.strength === "structural") {
 			throw new Error(`goal overlap conflict: "${goalOverlap.agent}" already owns overlapping work — request access from that owner; the other work's details remain private`);
 		}
-		if (goalOverlap) {
-			// Disclosure, not refusal: existence and owner, never a word of the other work. Fire and
-			// forget — a failure to disclose must not fail the spawn, but it is logged rather than
-			// swallowed, because a disclosure nobody saw is the same as no disclosure.
-			const room = opts.channelId ?? DEFAULT_CHANNEL_ID;
-			const owner = this.safeEventLabel(goalOverlap.agent);
-			void this.channelStore
-				.appendManager(room, {
-					authorActor: "manager",
-					kind: "system",
-					format: "stage",
-					text: `${this.safeEventLabel(opts.name?.trim() || "new unit")} may be duplicating work ${owner} already has in hand. Both are running — nothing was blocked. If they are the same goal, one of you is about to do the other's week; if they are not, ignore this. Ask ${owner} directly; what they are working on stays private until they say otherwise.`,
-					event: { kind: "goal-overlap", payload: { refs: { unitName: opts.name }, doorSurface: "unit", face: { title: "Possibly duplicated work", owner: goalOverlap.agent, strength: goalOverlap.strength, pinned: { owner: goalOverlap.agent, basis: goalOverlap.strength } } } },
-				})
-				.catch((err) => this.log("warn", `goal-overlap disclosure not delivered to ${room}: ${errText(err)}`));
-		}
+		// Disclosure (non-structural overlap only — never a refusal) is deferred to the very end of
+		// this method, AFTER the candidate unit actually exists and its real post-spawn status is
+		// known — see the `goalOverlap` consumer just before `return rec.dto`. Computed here, where the
+		// live roster snapshot and the request's declared paths/refs are still on hand, but NOT acted
+		// on yet: emitting it this early named a unit that might still fail to spawn (a candidate
+		// whose `start()` throws lands in `error` a few hundred lines below) and unconditionally
+		// claimed "Both are running" without ever having checked either side's actual state.
 		const produces = opts.produces ?? opts.owns;
 		if (opts.requires?.length) {
 			const conflict = requiresConflict([...this.agents.values()].map((r) => r.dto), opts.repo, opts.requires);
@@ -7592,6 +7731,41 @@ export class SquadManager extends EventEmitter {
 		await this.persist();
 		const failed = rec.dto.status === "error";
 		await this.recordAudit(actor, "create", rec.dto.id, failed ? "error" : "ok", failed ? rec.dto.error : truncateLabel(opts.task ?? rec.dto.name, 80), source);
+		// Goal-overlap disclosure (non-structural — never a refusal; see the `goalOverlap` computation
+		// above), deferred to HERE deliberately: the candidate now has a real id and a real post-spawn
+		// status (it may have landed in `error` a few lines up), and the owner has had the full width
+		// of this method's `await`s (routing, Plane registration, worktree provisioning, `agent.start()`)
+		// to have changed state too. Checking both freshly, right before posting, is what makes the
+		// card's claim about their state true rather than assumed.
+		if (goalOverlap) {
+			const ownerRecord = [...this.agents.values()].find((candidate) => candidate.dto.name === goalOverlap.agent);
+			const ownerStatus = ownerRecord?.dto.status;
+			const candidateStatus = rec.dto.status;
+			if (!isDeadAgentStatus(ownerStatus) && !isDeadAgentStatus(candidateStatus) && ownerRecord) {
+				// Durable restart-dedup (goal-overlap-ledger.ts) only applies to a DETERMINISTIC candidate
+				// id (`explicitId` — spawnFleetBranch's resumed branch ids are the exact incident this
+				// closes): an ad-hoc spawn mints a fresh random id every time and is never resumed
+				// identically after a restart, so it has nothing stable to dedupe against and always
+				// discloses fresh, same as before this fix.
+				const alreadyDisclosed = explicitId !== undefined && this.goalOverlapLedger.has(ownerRecord.dto.id, id);
+				if (!alreadyDisclosed) {
+					if (explicitId !== undefined) this.goalOverlapLedger.add(ownerRecord.dto.id, id);
+					const room = opts.channelId ?? DEFAULT_CHANNEL_ID;
+					const owner = this.safeEventLabel(goalOverlap.agent);
+					const candidateLabel = this.safeEventLabel(rec.dto.name);
+					// Disclosure, not refusal: existence and owner, never a word of the other work.
+					await this.channelStore
+						.appendManager(room, {
+							authorActor: "manager",
+							kind: "system",
+							format: "stage",
+							text: `${candidateLabel} may be duplicating work ${owner} already has in hand — ${owner} is ${agentStatusPhrase(ownerStatus)}, ${candidateLabel} is ${agentStatusPhrase(candidateStatus)}; nothing was blocked. If they are the same goal, one of you is about to do the other's week; if they are not, ignore this. Ask ${owner} directly; what they are working on stays private until they say otherwise.`,
+							event: emitGoalOverlapCard({ refs: { unitId: id, unitName: rec.dto.name }, doorSurface: "unit", face: { title: "Possibly duplicated work", owner: goalOverlap.agent, strength: goalOverlap.strength, pinned: { owner: goalOverlap.agent, basis: goalOverlap.strength } } }),
+						})
+						.catch((err) => this.log("warn", `goal-overlap disclosure not delivered to ${room}: ${errText(err)}`));
+				}
+			}
+		}
 		return rec.dto;
 	}
 
@@ -8084,21 +8258,18 @@ export class SquadManager extends EventEmitter {
 			text,
 			kind: "system" as const,
 			format: "markdown" as const,
-			event: {
-				kind: "mention-steer",
-				payload: {
-					face: {
-						title: "Mention steer accepted",
-						body: text,
-						tone: "info",
-						pinned: { actor: actor.id, target: targetLabel, clientTurnId: cmd.clientTurnId, ...(follows ? { follows: follows.actor } : {}) },
-					},
-					actor: actor.id,
-					target: cmd.id,
-					follows: follows?.actor,
-					clientTurnId: cmd.clientTurnId,
+			event: emitMentionSteerCard({
+				face: {
+					title: "Mention steer accepted",
+					body: text,
+					tone: "info",
+					pinned: { actor: actor.id, target: targetLabel, clientTurnId: cmd.clientTurnId, ...(follows ? { follows: follows.actor } : {}) },
 				},
-			},
+				actor: actor.id,
+				target: cmd.id,
+				follows: follows?.actor,
+				clientTurnId: cmd.clientTurnId,
+			}),
 		};
 		const entry = nodeId
 			? await this.channelStore.appendNodeManager(nodeId, post, channelId)
@@ -8135,27 +8306,24 @@ export class SquadManager extends EventEmitter {
 				text,
 				kind: "system",
 				format: "stage",
-				event: {
-					kind: TRANSCRIPT_EVENT_RETURN_EMIT,
-					payload: {
-						refs: { unitId: rec.dto.id },
-						doorSurface: "intervence",
-						face: {
-							unitId: rec.dto.id,
-							unitName: rec.dto.name,
-							eventKind: TRANSCRIPT_EVENT_RETURN_EMIT,
-							title: "Control accepted",
-							eyebrow: "Room echo",
-							body: text,
-							tone: "info",
-							pinned: { actor: actor.id, action: cmd.type, target: targetLabel },
-						},
-						actor: actor.id,
-						action: cmd.type,
-						target: rec.dto.id,
-						source: commandSource(cmd),
+				event: emitReturnEmitCard({
+					refs: { unitId: rec.dto.id },
+					doorSurface: "intervence",
+					face: {
+						unitId: rec.dto.id,
+						unitName: rec.dto.name,
+						eventKind: TRANSCRIPT_EVENT_RETURN_EMIT,
+						title: "Control accepted",
+						eyebrow: "Room echo",
+						body: text,
+						tone: "info",
+						pinned: { actor: actor.id, action: cmd.type, target: targetLabel },
 					},
-				},
+					actor: actor.id,
+					action: cmd.type,
+					target: rec.dto.id,
+					source: commandSource(cmd),
+				}),
 			});
 			this.emit("event", { type: "channel-entry", channelId, entry } satisfies SquadEvent);
 		} catch (err) {
@@ -10220,7 +10388,7 @@ export class SquadManager extends EventEmitter {
 	 *  is correct: model-deltas only ever live on persisted features (recordAgentDecision adopts
 	 *  before writing). */
 	storedFeatureDecisions(id: string): FeatureDecision[] | undefined {
-		return this.featureStore.get(id)?.decisions;
+		return this.decisionLedger.stored(id);
 	}
 
 	// ── operator-attention substrate (comprehension concern 01) ──────────────────────────────────
@@ -11572,32 +11740,26 @@ export class SquadManager extends EventEmitter {
 				rec.agent.respondHostTool(call.id, "no feature is attached to this agent, so the decision was not recorded", true);
 				return;
 			}
-			if (isModelDelta) {
-				// Live blast-radius since fork (committed AND working-tree) — the SAME computation
-				// finalizeRun uses for the persisted receipt's filesTouched, so mid-run validation and a
-				// completed receipt agree on what counts as "this run touched".
-				const filesTouched = await this.runFilesTouched(rec);
-				const check = validateModelDelta(text, evidence, filesTouched);
-				if (!check.ok) {
-					rec.agent.respondHostTool(call.id, `model-delta rejected (${check.rule}): ${check.message}`, true);
-					return;
-				}
-			}
-			const decision: FeatureDecision = {
-				id: randomUUID(),
+			// Evidence gate + mint + atomic adopt-aware append, all behind the ledger's interface.
+			// `filesTouched` is a provider: the live blast-radius since fork (committed AND
+			// working-tree) — the SAME computation finalizeRun uses for the persisted receipt's
+			// filesTouched, so mid-run validation and a completed receipt agree on what counts as
+			// "this run touched". The ledger invokes it only on the model-delta path.
+			const captured = await this.decisionLedger.capture({
+				featureId,
 				text,
-				source: isModelDelta ? "model-delta" : "agent",
-				createdAt: Date.now(),
+				modelDelta: isModelDelta,
+				evidence,
+				supersedes,
+				repo: rec.dto.repo,
 				sourceRef: { agentId: rec.dto.id, runId: rec.run?.snapshot().runId },
-				// Persist evidence NORMALIZED (code-review finding 4): validateModelDelta normalizes only
-				// for its comparison, but every downstream consumer (surprise-tap fog keys, evidence-link
-				// jump, PR-body anchors) keys on the STORED string — a raw "./src/x.ts" would silently
-				// no-op them all.
-				...(isModelDelta ? { evidence: (evidence ?? []).map((e) => e.trim().replace(/^\.\//, "").replace(/^\/+/, "")) } : {}),
-				...(supersedes ? { supersedes } : {}),
-			};
-			// Atomic, adopt-aware append (resolves plan-derived features + can't clobber a concurrent capture).
-			const outcome = await this.recordAgentDecision(featureId, decision, rec.dto.repo);
+				filesTouched: () => this.runFilesTouched(rec),
+			});
+			if (captured.kind === "rejected") {
+				rec.agent.respondHostTool(call.id, `model-delta rejected (${captured.rule}): ${captured.message}`, true);
+				return;
+			}
+			const outcome = captured.kind;
 			if (outcome === "no-feature") {
 				rec.agent.respondHostTool(call.id, "no feature is attached to this agent, so the decision was not recorded", true);
 				return;
@@ -12374,6 +12536,313 @@ export class SquadManager extends EventEmitter {
 		return entry;
 	}
 
+	// ── Voice call (concern 02, plans/voice-orchestrated-room-integration) ─────────────────────────
+	// Every method below gates on the SAME `canReadChannel` room-membership check every other channel
+	// API already enforces — a thread-bound call is a fact about that thread, so reading or acting on
+	// it requires exactly the access a member of that room has. The coordinator itself re-checks
+	// `isAuthorized` as its own last gate before relaying anything to the bridge (voice-call-manager.ts),
+	// so a caller that skipped this check would still be refused, not silently trusted twice.
+
+	async startVoiceCall(
+		channelId: string,
+		actor: Actor,
+		input: { sessionRoot?: string; retention?: VoiceCallRetention; resumeSessionId?: string; agentId?: string },
+	): Promise<CoordinatorResult<VoiceCallBindingView>> {
+		if (!(await this.channelStore.canReadChannel(channelId, actor))) return { ok: false, reason: "forbidden" };
+		// Concern 12: per-agent scoped start — the named unit must actually be in THIS room, or the
+		// scope would leak another room's transcript tail into this call's context seed.
+		if (input.agentId && !this.voiceFleetUnit(channelId, input.agentId)) {
+			return { ok: false, reason: `no unit "${input.agentId}" in this room` };
+		}
+		return this.voiceCall.startCall(channelId, { ownerActorId: actor.id, ownerActor: snapshotOwnerActor(actor), ...input });
+	}
+
+	// ── Voice fleet delegation (concern 12) ────────────────────────────────────────────────────────
+	// The call's voice tool surface (oh-my-pi fleet-tools.ts) relays here over the bridge. Commands
+	// execute AS the call owner's snapshotted actor through the SAME chokepoints UI commands take —
+	// `applyCommand` for steer/answer (RBAC, delegation boundary, audit), `create` for spawn — plus
+	// room-scoping this lane owns: only units of the call's own channel are visible or addressable.
+
+	/** Room roster for the fleet lane: every live unit whose room is this channel (a unit with no
+	 *  channelId belongs to the default room, mirroring `projectUnitTranscriptEvent`'s own rule). */
+	private voiceFleetUnits(channelId: string): FleetUnitView[] {
+		return this.list()
+			.filter((dto) => (dto.channelId ?? DEFAULT_CHANNEL_ID) === channelId)
+			.map((dto) => ({
+				id: dto.id,
+				name: dto.name,
+				status: dto.status,
+				...(dto.activity ? { activity: dto.activity } : {}),
+				...(dto.blockedReason ? { blockedReason: dto.blockedReason } : {}),
+				pending: dto.pending.map((req) => ({ id: req.id, title: req.title, kind: req.kind, source: req.source, options: req.options, gateClass: req.gateClass })),
+			}));
+	}
+
+	/** One room unit by id or (case-insensitive) display name — the voice model may say either. */
+	private voiceFleetUnit(channelId: string, unitRef: string): FleetUnitView | undefined {
+		const units = this.voiceFleetUnits(channelId);
+		const exact = units.find((unit) => unit.id === unitRef);
+		if (exact) return exact;
+		const lowered = unitRef.toLowerCase();
+		const byName = units.filter((unit) => unit.name.toLowerCase() === lowered);
+		return byName.length === 1 ? byName[0] : undefined;
+	}
+
+	private voiceFleetTranscriptTail(unitId: string): FleetTranscriptTailEntry[] {
+		return this.getTranscript(unitId)
+			.filter((entry) => (entry.kind === "user" || entry.kind === "assistant" || entry.kind === "system") && entry.text.trim())
+			.slice(-FLEET_TAIL_ENTRIES)
+			.map((entry) => ({ kind: entry.kind, text: entry.text }));
+	}
+
+	/**
+	 * Execute one relayed fleet tool call (concern 12) as the call owner. Every failure is a named
+	 * `{status:"failed"}` — never a throw across the coordinator boundary — and a destructive
+	 * `fleet_answer_gate` (concern 05's merge/publish/spend/delete class) returns `needs-decision`
+	 * instead of executing, unless `approvedDecisionId` marks this as the post-UI-approval
+	 * execution of an action the coordinator queued.
+	 */
+	async executeVoiceFleetCall(input: { channelId: string; ownerActor: VoiceOwnerActor | undefined; tool: string; args: unknown; approvedDecisionId?: string }): Promise<VoiceFleetExecResult> {
+		const owner = input.ownerActor;
+		if (!owner) return { status: "failed", detail: "this call has no recorded owner identity — end it and start a fresh call to enable fleet commands" };
+		const actor: Actor = {
+			id: owner.id,
+			origin: owner.origin,
+			...(owner.displayName === undefined ? {} : { displayName: owner.displayName }),
+			...(owner.role === undefined ? {} : { role: owner.role }),
+			...(owner.orgId === undefined ? {} : { orgId: owner.orgId }),
+		};
+		if (!(await this.channelStore.canReadChannel(input.channelId, actor))) {
+			return { status: "failed", detail: "forbidden: the call owner is not a member of this room" };
+		}
+		const parsed = parseVoiceFleetArgs(input.tool, input.args);
+		if (!parsed.ok) return { status: "failed", detail: parsed.detail };
+		const args = parsed.args;
+		switch (args.tool) {
+			case "fleet_roster": {
+				const { detail, data } = formatFleetRoster(this.voiceFleetUnits(input.channelId));
+				return { status: "ok", detail, ...(data === undefined ? {} : { data }) };
+			}
+			case "fleet_unit_detail": {
+				const unit = this.voiceFleetUnit(input.channelId, args.unitId);
+				if (!unit) return { status: "failed", detail: `no unit "${voiceFleetTruncatePoints(args.unitId, 60)}" in this room` };
+				const { detail, data } = formatUnitDetail(unit, this.voiceFleetTranscriptTail(unit.id));
+				return { status: "ok", detail, ...(data === undefined ? {} : { data }) };
+			}
+			case "fleet_steer": {
+				const unit = this.voiceFleetUnit(input.channelId, args.unitId);
+				if (!unit) return { status: "failed", detail: `no unit "${voiceFleetTruncatePoints(args.unitId, 60)}" in this room` };
+				try {
+					await this.applyCommand({ type: "prompt", id: unit.id, message: args.message, channelId: input.channelId, source: "voice" }, actor);
+				} catch (err) {
+					return { status: "failed", detail: err instanceof RbacDenied ? `forbidden: ${errText(err)}` : errText(err) };
+				}
+				return { status: "ok", detail: `delivered to ${voiceFleetSanitizeLabel(unit.name)}` };
+			}
+			case "fleet_spawn": {
+				try {
+					const tracked = this.projects().map((p) => p.repo);
+					const plan = await planSpawn(args.prompt, { cwd: process.cwd(), candidates: discoverRepos(process.cwd(), tracked) });
+					const dto = await this.create({ ...plan, channelId: input.channelId, track: true }, actor, "voice");
+					return { status: "ok", detail: `spawned ${voiceFleetSanitizeLabel(dto.name)}`, data: JSON.stringify({ id: dto.id, name: dto.name, repo: dto.repo }) };
+				} catch (err) {
+					return { status: "failed", detail: err instanceof RbacDenied ? `forbidden: ${errText(err)}` : errText(err) };
+				}
+			}
+			case "fleet_answer_gate": {
+				const unit = this.voiceFleetUnit(input.channelId, args.unitId);
+				if (!unit) return { status: "failed", detail: `no unit "${voiceFleetTruncatePoints(args.unitId, 60)}" in this room` };
+				const open = unit.pending;
+				const req = args.gateId ? open.find((p) => p.id === args.gateId) : open.length === 1 ? open[0] : undefined;
+				if (!req) {
+					if (open.length === 0) return { status: "failed", detail: `${voiceFleetSanitizeLabel(unit.name)} has no open question right now` };
+					if (args.gateId) return { status: "failed", detail: `no open question "${voiceFleetTruncatePoints(args.gateId, 60)}" — open: ${open.map((p) => p.id).join(", ")}` };
+					return { status: "failed", detail: `${voiceFleetSanitizeLabel(unit.name)} has ${open.length} open questions — name the gateId: ${open.map((p) => p.id).join(", ")}` };
+				}
+				// Concern 05's recorded policy, enforced BEFORE any execution: a destructive-class gate
+				// answer is never executable by voice — it becomes a UI decision. `approvedDecisionId`
+				// marks the one exception: the coordinator re-executing an action a human already
+				// approved through exactly that decision.
+				if (!input.approvedDecisionId && isDestructiveGate(req)) {
+					return buildDestructiveGateDecision(unit, req, args.answer);
+				}
+				const normalized = normalizeGateAnswer(req, args.answer);
+				if (!normalized.ok) return { status: "failed", detail: normalized.detail };
+				try {
+					await this.applyCommand({ type: "answer", id: unit.id, requestId: req.id, value: normalized.value }, actor);
+				} catch (err) {
+					return { status: "failed", detail: err instanceof RbacDenied ? `forbidden: ${errText(err)}` : errText(err) };
+				}
+				return { status: "ok", detail: `answered "${voiceFleetTruncatePoints(req.title, 80)}" for ${voiceFleetSanitizeLabel(unit.name)}` };
+			}
+		}
+	}
+
+	/**
+	 * The room-context brief seeded into the realtime session at fleet attach (concern 12): the
+	 * roster with states/activity/open questions, open voice-call decisions, the room's latest
+	 * plan-card summary, and — for a per-agent scoped start — that unit's detail and transcript
+	 * tail. Membership-gated on the call owner exactly like every fleet command; `undefined`
+	 * (attach without context) when there is no recorded owner or the owner lost room access.
+	 */
+	async voiceFleetContext(input: { channelId: string; ownerActor: VoiceOwnerActor | undefined; scopeAgentId?: string }): Promise<string | undefined> {
+		const owner = input.ownerActor;
+		if (!owner) return undefined;
+		const actor: Actor = { id: owner.id, origin: owner.origin, ...(owner.role === undefined ? {} : { role: owner.role }), ...(owner.orgId === undefined ? {} : { orgId: owner.orgId }) };
+		if (!(await this.channelStore.canReadChannel(input.channelId, actor))) return undefined;
+		const units = this.voiceFleetUnits(input.channelId);
+		const openDecisions = this.voiceCall.decisions(input.channelId).filter((d) => d.state === "open" || d.state === "awaiting-confirmation");
+		let channelName = input.channelId;
+		try {
+			const channels = await this.listChannels(actor);
+			channelName = channels.find((channel) => channel.id === input.channelId)?.name ?? input.channelId;
+		} catch {
+			/* the id is an honest fallback name */
+		}
+		let planSummary: string | undefined;
+		try {
+			const entries = await this.channelEntries(input.channelId, 0, actor);
+			for (let index = entries.length - 1; index >= 0 && index >= entries.length - 300; index--) {
+				const event = entries[index]?.event;
+				if (event?.kind !== "plan-card") continue;
+				const face = (event.payload as { face?: { title?: unknown; planName?: unknown } } | undefined)?.face;
+				const summary = typeof face?.planName === "string" ? face.planName : typeof face?.title === "string" ? face.title : undefined;
+				if (summary) {
+					planSummary = summary;
+					break;
+				}
+			}
+		} catch {
+			/* no plan summary is an honest omission */
+		}
+		const scoped = input.scopeAgentId ? this.voiceFleetUnit(input.channelId, input.scopeAgentId) : undefined;
+		return buildFleetContextBrief({
+			channelName,
+			units,
+			openDecisions,
+			...(planSummary === undefined ? {} : { planSummary }),
+			...(scoped === undefined ? {} : { scopedUnit: { unit: scoped, tail: this.voiceFleetTranscriptTail(scoped.id) } }),
+		});
+	}
+
+	async voiceCallState(channelId: string, actor: Actor): Promise<VoiceCallBindingView | undefined> {
+		if (!(await this.channelStore.canReadChannel(channelId, actor))) throw new Error("channel forbidden");
+		return this.voiceCall.state(channelId);
+	}
+
+	async endVoiceCall(channelId: string, actor: Actor): Promise<CoordinatorResult<VoiceCallBindingView>> {
+		const isAuthorized = await this.channelStore.canReadChannel(channelId, actor);
+		return this.voiceCall.endCall(channelId, isAuthorized);
+	}
+
+	/** User-triggered reconnect (concern 10: call-management-ui) — see
+	 *  `VoiceCallCoordinator#reattach` for the full precondition/outcome set. Same membership gate as
+	 *  every other voice-call mutation on this channel. */
+	async reattachVoiceCall(channelId: string, actor: Actor): Promise<CoordinatorResult<VoiceCallBindingView>> {
+		const isAuthorized = await this.channelStore.canReadChannel(channelId, actor);
+		return this.voiceCall.reattach(channelId, isAuthorized);
+	}
+
+	async resolveVoiceCallDecision(channelId: string, actor: Actor, input: { decisionId: string; optionIndex: number; label: string; confirmToken?: string }): Promise<CoordinatorResult<BridgeControlAck>> {
+		const isAuthorized = await this.channelStore.canReadChannel(channelId, actor);
+		return this.voiceCall.resolveDecision(channelId, isAuthorized, input);
+	}
+
+	async steerVoiceCall(channelId: string, actor: Actor, text: string): Promise<CoordinatorResult<true>> {
+		const isAuthorized = await this.channelStore.canReadChannel(channelId, actor);
+		return this.voiceCall.steer(channelId, isAuthorized, text);
+	}
+
+	async voiceCallDecisions(channelId: string, actor: Actor): Promise<JournalDecisionSnapshot[]> {
+		if (!(await this.channelStore.canReadChannel(channelId, actor))) throw new Error("channel forbidden");
+		return this.voiceCall.decisions(channelId);
+	}
+
+	async voiceCallGaps(channelId: string, actor: Actor): Promise<JournalGap[]> {
+		if (!(await this.channelStore.canReadChannel(channelId, actor))) throw new Error("channel forbidden");
+		return this.voiceCall.gaps(channelId);
+	}
+
+	async voiceCallTranscript(channelId: string, actor: Actor): Promise<StoredTranscriptEntry[]> {
+		if (!(await this.channelStore.canReadChannel(channelId, actor))) throw new Error("channel forbidden");
+		return this.voiceCall.transcript(channelId);
+	}
+
+	async voiceCallArtifacts(channelId: string, actor: Actor): Promise<ArtifactSnapshotRecord[]> {
+		if (!(await this.channelStore.canReadChannel(channelId, actor))) throw new Error("channel forbidden");
+		return this.voiceCall.listArtifacts(channelId);
+	}
+
+	/** One artifact's immutable snapshot bytes (concern 03's room Markdown viewer). Same
+	 *  `canReadChannel` gate as the index it was listed from — reading an artifact's CONTENT is
+	 *  exactly as sensitive as knowing that it exists. */
+	async voiceCallArtifact(channelId: string, actor: Actor, artifactId: string): Promise<ArtifactReadResult> {
+		if (!(await this.channelStore.canReadChannel(channelId, actor))) throw new Error("channel forbidden");
+		return this.voiceCall.readArtifact(channelId, artifactId);
+	}
+
+	/** Visible mute relay (concern 03's call HUD) — see `VoiceCallCoordinator#setMuted` for why this
+	 *  is a SET rather than the wire's own toggle. */
+	async setVoiceCallMuted(channelId: string, actor: Actor, muted: boolean): Promise<CoordinatorResult<{ muted: boolean }>> {
+		const isAuthorized = await this.channelStore.canReadChannel(channelId, actor);
+		return this.voiceCall.setMuted(channelId, isAuthorized, muted);
+	}
+
+	/** Registers a browser's audio sink (concern 09: browser-audio-transport; N-participant identity
+	 *  by concern 13: multi-party-calls) — see `VoiceCallCoordinator#attachAudioSink` for the full
+	 *  gate (membership, live, connected bridge, AND `noLocalAudio`) and for how `connId` disambiguates
+	 *  concurrent attaches. Called from the dedicated audio WS upgrade in `server.ts`, never from the
+	 *  general `/ws` chat socket — `actor` there is already the SAME authenticated identity resolved
+	 *  before the WS upgrade, so host/guest attribution is never guessed. */
+	async attachVoiceCallAudioSink(channelId: string, actor: Actor, connId: string, sink: { sendOutputAudio: (bytes: Uint8Array) => void }): Promise<CoordinatorResult<{ detach: () => void }>> {
+		const isAuthorized = await this.channelStore.canReadChannel(channelId, actor);
+		return this.voiceCall.attachAudioSink(channelId, isAuthorized, sink, { connId, actorId: actor.id, ...(actor.displayName === undefined ? {} : { displayName: actor.displayName }) });
+	}
+
+	/** Relays one chunk of browser mic PCM (concern 09; additively mixed with every other concurrent
+	 *  participant's own chunk by concern 13) — see `VoiceCallCoordinator#pushMicAudio`. `connId` must
+	 *  be the SAME id this connection's `attachVoiceCallAudioSink` call used, so the mixer's
+	 *  per-participant slot lines up with this connection's own presence entry. */
+	async pushVoiceCallMicAudio(channelId: string, actor: Actor, connId: string, samples: Float32Array): Promise<CoordinatorResult<true>> {
+		const isAuthorized = await this.channelStore.canReadChannel(channelId, actor);
+		return this.voiceCall.pushMicAudio(channelId, isAuthorized, samples, connId);
+	}
+
+	/** @substrate no caller yet — plans/voice-orchestrated-room-integration/03 (the room-side ladder
+	 *  panel/composer surface that actually needs a channel's voice-decision urgency rung) is what
+	 *  wires this up. Concern 02 (this file's own scope) only needs to PROJECT decisions into the
+	 *  ladder-shaped priority `voiceChannelLadderPriority` computes — a channel-scoped read of that
+	 *  roll-up, exposed here so 03 has a `SquadManager`-level seam to call rather than reaching into
+	 *  `voiceCall` directly. Deliberate, not dead: do not remove without checking 03's status first. */
+	voiceCallLadderPriority(channelId: string): LadderPriority {
+		return this.voiceCall.ladderPriority(channelId);
+	}
+
+	/**
+	 * Concern 10 (call-management-ui): the calls surface's data source — every binding this manager
+	 * knows about that `actor` can actually read, plus every broker-orphaned call process (which has
+	 * no channel, and therefore no membership check to apply — see `VoiceCallCoordinator#listCallsSurface`).
+	 * Filters bindings AFTER the coordinator builds the full list rather than asking it to filter
+	 * itself, mirroring the existing `for (const dto of this.list()) if (await canReadChannel(...))`
+	 * shape this file already uses for agent listing — the coordinator has no `Actor`/RBAC concept of
+	 * its own, by design (module doc: "it knows nothing about ChannelStore/AgentDTO/RBAC").
+	 */
+	async listVoiceCallsSurface(actor: Actor): Promise<VoiceCallsSurface> {
+		const surface = await this.voiceCall.listCallsSurface();
+		const visible: VoiceCallBindingView[] = [];
+		for (const binding of surface.bindings) {
+			if (await this.channelStore.canReadChannel(binding.channelId, actor)) visible.push(binding);
+		}
+		return { bindings: visible, orphans: surface.orphans };
+	}
+
+	/** Ends an orphaned broker call (no channel, so no membership gate applies — see
+	 *  `VoiceCallCoordinator#endOrphan`). Gated at the REST tier by `authz.ts`'s default
+	 *  GET=viewer/mutation=operator floor, the same tier every other voice-call mutation route uses. */
+	async endOrphanVoiceCall(callId: string): Promise<CoordinatorResult<{ ended: true }>> {
+		return this.voiceCall.endOrphan(callId);
+	}
+
 	private safeEventLabel(value: unknown): string {
 		const flat = redact(String(value ?? ""))
 			.replace(/={5,}/g, (run) => "═".repeat(run.length))
@@ -12575,10 +13044,7 @@ export class SquadManager extends EventEmitter {
 				kind: "system",
 				format: "stage",
 				text: `fleet token burn · ${payload.totals.tokens} tokens · $${payload.totals.costUsd.toFixed(4)}`,
-				event: {
-					kind: TRANSCRIPT_EVENT_TOKEN_BURN_SNAPSHOT,
-					payload: { refs: { reason: payload.reason }, doorSurface: "fleet-economics", face: tokenBurnFace(payload), ...payload },
-				},
+				event: emitTokenBurnSnapshotCard({ refs: { reason: payload.reason }, doorSurface: "fleet-economics", face: tokenBurnFace(payload), ...payload }),
 			});
 			this.emit("event", { type: "channel-entry", channelId: DEFAULT_CHANNEL_ID, entry: card } satisfies SquadEvent);
 		} catch (err) {
@@ -12589,6 +13055,13 @@ export class SquadManager extends EventEmitter {
 	private async projectUnitTranscriptEvent(rec: AgentRecord, entry: TranscriptEntry): Promise<void> {
 		const event = entry.event;
 		if (!event?.kind) return;
+		if (!isTranscriptEventKind(event.kind)) {
+			if (!this.warnedUnknownTranscriptEventKinds.has(event.kind)) {
+				this.warnedUnknownTranscriptEventKinds.add(event.kind);
+				this.log("warn", `projection ${rec.dto.id}: unknown transcript event kind "${event.kind}" — skipped (newer daemon, or unregistered kind; logged once)`);
+			}
+			return;
+		}
 		const nodeId = await this.projectedNodeId(rec);
 		if (!nodeId) return;
 		try {
