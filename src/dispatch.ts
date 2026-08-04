@@ -158,6 +158,15 @@ export interface DispatchDeps {
 	 * The implementation may also close the issue to heal the drift. Errors ⇒ treated as not-done.
 	 */
 	alreadyDone?: (repo: string, issue: IssueRef) => Promise<boolean>;
+	/**
+	 * Difficulty-targeted dispatch gate (plans/deepen-modules/14, CS329A borrow #1): consulted
+	 * ONCE PER TICK — the work class is the dispatch tier, which every dispatcher spawn shares,
+	 * so one verdict covers the tick (and one ledger read replaces N; codex review). Undefined ⇒
+	 * gate off, nothing logged. `proceed:false` defers every candidate this tick — never stamped
+	 * into the persistent ledger, so issues retry as evidence changes. The dispatcher logs only
+	 * on verdict TRANSITIONS (reason changed), never per issue or per tick.
+	 */
+	difficulty?: () => { proceed: boolean; reason: string } | undefined;
 	/** Current live/queued agents; used to defer read-after-write hazards until producers land. */
 	liveAgents?: () => AgentDTO[];
 	/** Advisory scope finding sink. */
@@ -175,6 +184,9 @@ export class Dispatcher {
 	private readonly skipLogged = new Set<string>();
 	/** Issue ids skipped by the state gate — tracked only to log the skip once per episode (concern 03). */
 	private readonly stateGateLogged = new Set<string>();
+	/** Last difficulty verdict reason — logged only when it CHANGES (transition logging, so a mode
+	 *  flip or fresh evidence always re-logs and a steady state never spams; codex review). */
+	private lastDifficultyReason?: string;
 	private timer?: Timer;
 	private running = false;
 	/** True while a rate-limit pause is in effect — so the pause/resume is logged once per episode, not per tick.
@@ -205,6 +217,16 @@ export class Dispatcher {
 		// partially-wired install fails SAFE). Absent either, fall back to the pre-ladder top-of-tick
 		// global check byte-for-byte — no regression.
 		const perUnitGating = !!this.deps.providerFor && this.deps.secondLaneAvailable?.() === true;
+		// One difficulty verdict per tick (the class is the shared dispatch tier); log transitions only.
+		const difficulty = this.deps.difficulty?.();
+		if (difficulty && difficulty.reason !== this.lastDifficultyReason) {
+			this.lastDifficultyReason = difficulty.reason;
+			this.deps.log(difficulty.reason);
+		} else if (!difficulty) {
+			// Gate off/unwired: forget the last reason so re-enabling ALWAYS logs the fresh verdict,
+			// even when the evidence (and thus the reason string) hasn't changed (codex finding 4).
+			this.lastDifficultyReason = undefined;
+		}
 		if (!perUnitGating && this.deps.providerFor && !this.inertLogged) {
 			this.inertLogged = true;
 			this.deps.log("per-provider dispatch gating inert — no second verified provider lane confirmed (unconfigured or not wired); behaves like the single global pause");
@@ -372,6 +394,15 @@ export class Dispatcher {
 						this.deps.ledger?.add(issue.id);
 						this.deps.log(`skip ${issue.identifier ?? issue.id} — its plan concern is already closed in ${repo} (stale issue, not dispatching)`);
 						noteSkip("already-done", "open issue's plan concern is already closed in the repo");
+						continue;
+					}
+					// Difficulty defer seam (deepen 14): DORMANT today — no wired dep can return
+					// proceed:false while gating is unshipped (dispatch-difficulty.ts module doc). Kept so
+					// the redesigned gate lands as data, not dispatcher surgery: a deferral is NOT a
+					// consumption — no ledger stamp, no dispatched.add — the issue re-qualifies as the
+					// class's evidence changes. Driven by tests via a fake dep until then.
+					if (difficulty && !difficulty.proceed) {
+						noteSkip("difficulty", difficulty.reason);
 						continue;
 					}
 					// Scope dependency gate: operator-declared requires are real ordering constraints.

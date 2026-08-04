@@ -190,6 +190,7 @@ import { AutomationLog, type AutomationQuery } from "./automation-log.ts";
 import { isFirstTryGreen, isOn, learningFlags, LearningMetrics, type MetricRollupRow } from "./metrics.ts";
 import { reflect } from "./reflection.ts";
 import { failureAnnotation, recordFailureAnnotation } from "./memory/failure-memory.ts";
+import { difficultyDispatchDecision, difficultyDispatchMode } from "./dispatch-difficulty.ts";
 import { readModelOutcomes, recordModelOutcome, recordModelOutcomeBlocked, tierOf } from "./model-outcomes.ts";
 import { costGateMode, type CostVerdict, shadowCostCheck } from "./cost-gate.ts";
 import { recordCostLanded } from "./cost-aggregate.ts";
@@ -1670,6 +1671,15 @@ export class SquadManager extends EventEmitter {
 				record: this.automation.for("dispatch"),
 				ledger: openDispatchLedger(this.stateDir),
 				alreadyDone: (repo, issue) => this.issueAlreadyDone(repo, issue),
+				// Difficulty-targeted dispatch (deepen 14, CS329A borrow #1): evidence from the SAME
+				// model-outcomes ledger the spawn's outcome write will key (tier via the same tierOf
+				// derivation — dispatcher spawns carry no explicit thinking, so both sides key "mid").
+				// Shadow by default; OMP_SQUAD_DIFFICULTY_DISPATCH=1 makes an all-fail class defer.
+				difficulty: () => {
+					const mode = difficultyDispatchMode();
+					if (mode === "off") return undefined; // off = silent, not a logged no-op per tick
+					return difficultyDispatchDecision(readModelOutcomes(this.stateDir), undefined, mode);
+				},
 				liveAgents: () => this.list(),
 				scopeFinding: (repo, message) => this.fileScopeFinding("low", repo, message),
 			});

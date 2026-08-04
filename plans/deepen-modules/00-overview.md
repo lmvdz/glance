@@ -28,6 +28,13 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
 05 slice 1 shipped: the route-table seam exists and is real (two lane adapters). Suite 4947/1
 (dead-exports pre-existing only — best state yet). PR: deepen/05-route-table branch.
 
+## Iteration 10 (2026-08-04, goal mode)
+14 slice 1: difficulty instrumentation shipped SHADOW-ONLY — the review earned its keep at design
+level (three High findings survived; gating refused until the redesign answers 14's open
+questions). Codex crossed the reviewer-ledger's n=10 floor this iteration: 17/17, no longer
+provisional. Lesson: a borrow that reads simple in the brief can be wrong at the seams — the
+blind pass on the WIRING is where that shows.
+
 ## Queue pivot (2026-08-03, Lars)
 
 Concerns 14–16 are the CS329A borrows (plans/research-cs329a/BRIEF.md), absorbed into this queue
