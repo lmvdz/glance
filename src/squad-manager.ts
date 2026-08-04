@@ -8,7 +8,7 @@
  */
 
 import { EventEmitter } from "node:events";
-import { envBool, envBoolAliased, envInt, envNumber, raceOnceEnabled } from "./config.ts";
+import { envBool, envBoolAliased, envInt, envNumber, landConfirmEnabled, raceOnceEnabled } from "./config.ts";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import { existsSync, realpathSync } from "node:fs";
@@ -1148,8 +1148,8 @@ export class SquadManager extends EventEmitter {
 	private readonly store: Store;
 	/** True when the registry owns the machine-global janitors (DB mode). */
 	private readonly skipGlobalJanitors: boolean;
-	/** Safety valve (OMP_SQUAD_LAND_CONFIRM, default ON; set =0 to auto-merge): a GREEN verify stages a one-tap Land instead of blind-merging into the shared checkout. */
-	private readonly landConfirm = process.env.OMP_SQUAD_LAND_CONFIRM !== "0";
+	/** Safety valve (OMP_SQUAD_LAND_CONFIRM, default ON; set =0 to auto-merge): a GREEN verify stages a one-tap Land instead of blind-merging into the shared checkout. Default lives in `config.ts`'s `landConfirmEnabled()` — the observability payload reads the same helper so `glance doctor` can never report a posture the manager isn't actually running (glance#329). */
+	private readonly landConfirm = landConfirmEnabled();
 	private pollTimer?: Timer;
 	/** Throttle counter for the periodic orphan-host reap in poll(). */
 	private reapTicks = 0;

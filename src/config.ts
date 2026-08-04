@@ -172,6 +172,23 @@ export function raceOnceEnabled(): boolean {
 }
 
 /**
+ * Safety valve (OMP_SQUAD_LAND_CONFIRM, default ON; set =0 to auto-merge): a GREEN verify stages a
+ * one-tap Land instead of blind-merging into the shared checkout.
+ *
+ * The single source of truth for this flag's default — `squad-manager.ts`'s `landConfirm` field and
+ * the observability payload's `autonomyFacts().landConfirm` both call this instead of re-deriving the
+ * default independently (glance#329). Before this helper existed, the manager read
+ * `process.env.OMP_SQUAD_LAND_CONFIRM !== "0"` (default true) while `glance doctor`'s payload read
+ * `envBool("OMP_SQUAD_LAND_CONFIRM", false)` (default false) — a stock daemon that had never touched
+ * the flag was actually holding every GREEN verify for a one-tap Land, while `doctor` reported "land
+ * auto" (auto-merging, the more dangerous of the two postures) for the exact same daemon. See
+ * `tests/land-confirm-default.test.ts` for the pin that keeps the two callers from re-diverging.
+ */
+export function landConfirmEnabled(): boolean {
+	return envBool("OMP_SQUAD_LAND_CONFIRM", true)
+}
+
+/**
  * Should the operator's own autonomous factory run alongside the tenant registry?
  *
  * Enabling multi-tenancy once silently turned the factory off: the per-org managers behind the registry

@@ -19,7 +19,7 @@ import type { Server, ServerWebSocket } from "bun";
 import { Result } from "effect";
 import type { ArtifactCommentDTO, ClientCommand, CreateAgentOptions, FeatureCategory, FeatureCriterion, FeatureDecision, FeatureDTO, FeatureRelationship, FeatureStage, IssueRef, PlanAnnotationTarget, PlanRevisionCandidateState, PresenceSnapshot, SquadEvent } from "./types.ts";
 import { ChatAttachmentDimensionError, ChatAttachmentQuotaExceededError } from "./chat-attachment.ts";
-import { envBool, envBoolAliased, envInt, rootFactoryEnabledWith } from "./config.ts";
+import { envBool, envBoolAliased, envInt, landConfirmEnabled, rootFactoryEnabledWith } from "./config.ts";
 import { invalidFileAssignees, invalidOrgAssignees, isVoteAssignee } from "./feature-assignees.ts";
 import { type AutonomyFacts, doctorHostVisible } from "./doctor.ts";
 import { DERIVED_SANDBOX_IMAGE } from "./gate-runner.ts";
@@ -1046,8 +1046,13 @@ export class SquadServer {
 			// file mode — `up` knows what it actually started, so believe it when it tells us. Guessing here
 			// is how a doctor tells you a model is answering your gates when it isn't, and vice versa.
 			autosupervise: on("OMP_SQUAD_AUTOSUPERVISE") || (this.opts.superviseExternal ?? on("OMP_SQUAD_AUTO_SUPERVISE")),
-			// Not a feature flag: read straight from the env the orchestrator reads.
-			landConfirm: envBool("OMP_SQUAD_LAND_CONFIRM", false),
+			// Not a feature flag: read straight from the SAME resolver `squad-manager.ts`'s `landConfirm`
+			// field uses (`config.ts`'s `landConfirmEnabled()`) — NOT a hand-rolled `envBool(key, false)`.
+			// That hand-rolled version defaulted to OFF while the manager defaults to ON: a stock daemon
+			// that never touched the flag was actually holding every GREEN verify for a one-tap Land while
+			// `glance doctor` reported "land auto" for it — the exact false-green this file's `autonomyFacts`
+			// doc-comment warns about, just for a field outside the loop above (glance#329).
+			landConfirm: landConfirmEnabled(),
 			regressionGate: on("OMP_SQUAD_REGRESSION_GATE"),
 			// Cost-gate posture (adw-factory-borrows concern 09): mode is env-global; aggregate readiness
 			// is per-stateDir — file mode's resolveStateDir() is exactly the dir SquadManager defaults to.
