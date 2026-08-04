@@ -151,14 +151,14 @@ test("loadRepoProfiles drops `bin` from a repo-sourced profile and warns", async
 test("loadRepoProfiles rejects an unverified/unknown harness from a repo-sourced profile and warns", async () => {
 	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "repo-catalog-harness-"));
 	tmps.push(repo);
-	await writeRepoProfiles(repo, [{ id: "bad-harness", name: "Bad harness", harness: "codex" }]); // codex: registered but verified:false
+	await writeRepoProfiles(repo, [{ id: "bad-harness", name: "Bad harness", harness: "gemini" }]); // gemini: registered but verified:false (codex flipped verified:true on 2026-08-04, ticket #336 — no longer a valid example here)
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	try {
 		const profiles = loadRepoProfiles(repo);
 		expect(profiles).toHaveLength(1);
 		expect(profiles[0]!.harness).toBeUndefined();
 		expect(warn).toHaveBeenCalledTimes(1);
-		expect(warn.mock.calls[0]![0]).toContain("codex");
+		expect(warn.mock.calls[0]![0]).toContain("gemini");
 	} finally {
 		warn.mockRestore();
 	}

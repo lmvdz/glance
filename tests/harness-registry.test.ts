@@ -99,9 +99,8 @@ test("listHarnesses hides unverified harnesses unless OMP_SQUAD_UNVERIFIED_HARNE
 	stashEnv("OMP_SQUAD_UNVERIFIED_HARNESS");
 	delete process.env.OMP_SQUAD_UNVERIFIED_HARNESS;
 	const visible = listHarnesses().map((d) => d.name);
-	expect(visible).toEqual(expect.arrayContaining(["omp", "pi", "opencode", "claude-code"])); // live-verified (claude-code: 2026-07-16 smoke, daily-onramp 02)
+	expect(visible).toEqual(expect.arrayContaining(["omp", "pi", "opencode", "claude-code", "codex"])); // live-verified (claude-code: 2026-07-16 smoke, daily-onramp 02; codex: 2026-08-04 smoke, ticket #336)
 	expect(visible).not.toContain("gemini"); // unverified (binary absent) — hidden
-	expect(visible).not.toContain("codex");
 	const all = listHarnesses(true).map((d) => d.name);
 	expect(all).toEqual(expect.arrayContaining(["omp", "pi", "gemini", "opencode", "claude-code", "codex", "auggie"]));
 });
@@ -300,13 +299,16 @@ test("hasSecondVerifiedProviderLane: TRUE today — grok is verified and vendor-
 test("hasSecondVerifiedProviderLane: false when grok is the only pinned lane and it is unverified", () => {
 	stashEnv("OMP_SQUAD_UNVERIFIED_HARNESS");
 	delete process.env.OMP_SQUAD_UNVERIFIED_HARNESS;
-	// Roll back to the pre-grok, pre-claude-code world: omp/pi/opencode are verified but multi-model
-	// (unknown lineage), and gemini/codex are registered-but-unsmoked ⇒ no differentiation for the
-	// ladder. claude-code passed its own live smoke on 2026-07-16 (daily-onramp 02), so it must be
-	// held unverified here too for the pre-pinned-lane world to exist at all.
+	// Roll back to the pre-grok, pre-claude-code, pre-codex world: omp/pi/opencode are verified but
+	// multi-model (unknown lineage), and gemini is registered-but-unsmoked ⇒ no differentiation for the
+	// ladder. claude-code (2026-07-16, daily-onramp 02) and codex (2026-08-04, ticket #336) each passed
+	// their own live smoke since, so both must be held unverified here too for the pre-pinned-lane world
+	// to exist at all.
 	withHarnessOverride("grok", { verified: false }, () => {
 		withHarnessOverride("claude-code", { verified: false }, () => {
-			expect(hasSecondVerifiedProviderLane("omp")).toBe(false);
+			withHarnessOverride("codex", { verified: false }, () => {
+				expect(hasSecondVerifiedProviderLane("omp")).toBe(false);
+			});
 		});
 	});
 });
@@ -314,13 +316,15 @@ test("hasSecondVerifiedProviderLane: false when grok is the only pinned lane and
 test("hasSecondVerifiedProviderLane: OMP_SQUAD_UNVERIFIED_HARNESS=1 does NOT fabricate a lane (verified-only contract)", () => {
 	stashEnv("OMP_SQUAD_UNVERIFIED_HARNESS");
 	process.env.OMP_SQUAD_UNVERIFIED_HARNESS = "1"; // surfaces unverified harnesses on create UIs...
-	// ...but an unsmoked codex/gemini registration is NOT a real second subscription lane: telling the
-	// dispatcher otherwise would trade the fleet-safety freeze for a lane that half-works. grok AND
-	// claude-code (both genuinely verified today) are held unverified here so the ONLY thing that
-	// could flip this true is the env escape hatch.
+	// ...but an unsmoked gemini registration is NOT a real second subscription lane: telling the
+	// dispatcher otherwise would trade the fleet-safety freeze for a lane that half-works. grok,
+	// claude-code, AND codex (all genuinely verified today) are held unverified here so the ONLY thing
+	// that could flip this true is the env escape hatch.
 	withHarnessOverride("grok", { verified: false }, () => {
 		withHarnessOverride("claude-code", { verified: false }, () => {
-			expect(hasSecondVerifiedProviderLane("omp")).toBe(false);
+			withHarnessOverride("codex", { verified: false }, () => {
+				expect(hasSecondVerifiedProviderLane("omp")).toBe(false);
+			});
 		});
 	});
 });
@@ -331,11 +335,13 @@ test("hasSecondVerifiedProviderLane: true once a vendor-pinned harness is actual
 	// claude-code HAS passed a live smoke (2026-07-16, daily-onramp 02) — the "simulate" of this
 	// test's first life is now the registry's real state; the override just makes the flip explicit.
 	withHarnessOverride("grok", { verified: false }, () => {
-		withHarnessOverride("claude-code", { verified: true }, () => {
-			expect(hasSecondVerifiedProviderLane("omp")).toBe(true); // anthropic-pinned lane, distinct from omp's unknown
-		});
-		withHarnessOverride("claude-code", { verified: false }, () => {
-			expect(hasSecondVerifiedProviderLane("omp")).toBe(false); // both pinned lanes held down — pre-grok world
+		withHarnessOverride("codex", { verified: false }, () => {
+			withHarnessOverride("claude-code", { verified: true }, () => {
+				expect(hasSecondVerifiedProviderLane("omp")).toBe(true); // anthropic-pinned lane, distinct from omp's unknown
+			});
+			withHarnessOverride("claude-code", { verified: false }, () => {
+				expect(hasSecondVerifiedProviderLane("omp")).toBe(false); // all three pinned lanes held down — pre-grok world
+			});
 		});
 	});
 });
@@ -344,12 +350,14 @@ test("hasSecondVerifiedProviderLane: a vendor-pinned DEFAULT harness needs a gen
 	stashEnv("OMP_SQUAD_UNVERIFIED_HARNESS");
 	delete process.env.OMP_SQUAD_UNVERIFIED_HARNESS;
 	withHarnessOverride("grok", { verified: false }, () => {
-		withHarnessOverride("claude-code", { verified: true }, () => {
-			// default = claude-code (anthropic); the only other verified vendor-pinned harness is itself ⇒ false.
-			expect(hasSecondVerifiedProviderLane("claude-code")).toBe(false);
-			// A verified GOOGLE lane appears ⇒ genuinely different vendor ⇒ true.
-			withHarnessOverride("gemini", { verified: true }, () => {
-				expect(hasSecondVerifiedProviderLane("claude-code")).toBe(true);
+		withHarnessOverride("codex", { verified: false }, () => {
+			withHarnessOverride("claude-code", { verified: true }, () => {
+				// default = claude-code (anthropic); the only other verified vendor-pinned harness is itself ⇒ false.
+				expect(hasSecondVerifiedProviderLane("claude-code")).toBe(false);
+				// A verified GOOGLE lane appears ⇒ genuinely different vendor ⇒ true.
+				withHarnessOverride("gemini", { verified: true }, () => {
+					expect(hasSecondVerifiedProviderLane("claude-code")).toBe(true);
+				});
 			});
 		});
 	});

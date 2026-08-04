@@ -29,6 +29,7 @@ import { EventEmitter } from "node:events";
 import type { Subprocess } from "bun";
 import type { TodoPhase, TodoStatus } from "@oh-my-pi/pi-coding-agent/tools/todo";
 import type { AgentDriver } from "./agent-driver.ts";
+import { errText } from "./err-text.ts";
 import { toAcpMcpServers } from "./mcp-config.ts";
 import { harnessAuthEnv, scrubbedSpawnEnv } from "./spawn-env.ts";
 import type { McpServerSpec, RpcSessionState } from "./types.ts";
@@ -300,8 +301,48 @@ export class AcpAgentDriver extends EventEmitter implements AgentDriver {
 		// mode when one exists, and fall back silently to the per-call session/request_permission round-trip
 		// otherwise. Never fatal.
 		await this.applyApprovalMode(isObj(sess) ? sess : {});
+		await this.applyModelPin();
 		this.ready = true;
 		this.emit("ready");
+	}
+
+	/**
+	 * Best-effort SECOND model channel via ACP's unstable `session/set_model` extension, after the
+	 * CLI `--model` argv `resolveAcpCommand` already appended at spawn.
+	 *
+	 * LIVE-VERIFIED 2026-08-04 against codex-acp v1.1.9 (@openai/codex-linux-x64, the ticket #336
+	 * smoke, lmvdz/glance#336): codex-acp's CLI recognizes exactly THREE argv forms — `--version`,
+	 * `login <...>`, `cli <...>` — and silently ignores everything else, including a trailing
+	 * `--model <m>`. Two independent live sessions confirmed `session/new`'s `currentModelId` came
+	 * back as the account/config default (`gpt-5.6-sol[high]`) even when spawned with
+	 * `--model gpt-9999-does-not-exist` (a model that doesn't exist, which would have errored if the
+	 * flag were read at all) — a SILENT drop, worse than the grok acpModelArgv defect (concern 08:
+	 * that one at least errored loudly). codex-acp does expose a *working* model-selection channel:
+	 * an extension method literally named `session/set_model` (wire format `{sessionId, modelId}`,
+	 * where `modelId` must be the adapter's own `"<model>[<effort>]"` bracket-suffixed form — see the
+	 * `models.availableModels` entries `session/new` returns, e.g. `"gpt-5.6-sol[high]"`) — the same
+	 * shape `applyApprovalMode` already drives for `session/set_mode`.
+	 *
+	 * Same best-effort contract as `applyApprovalMode`: harnesses that don't implement this extension
+	 * (the rest of the roster — grok/claude-code/opencode/gemini/auggie all honor `--model` through
+	 * their own CLI, so this call is either unimplemented there or a harmless no-op restating what
+	 * argv already set) reject and are silently ignored. Never fatal; never regresses a harness whose
+	 * argv pin already worked; only a bare (non-bracketed) model string on codex still falls through
+	 * silently (`ModelId.fromString` requires the `[effort]` suffix and throws otherwise) — pin the
+	 * exact string codex's own catalog advertises to get a live pin.
+	 */
+	private async applyModelPin(): Promise<void> {
+		if (!this.opts.model || !this.sessionId) return;
+		try {
+			await this.send("session/set_model", { sessionId: this.sessionId, modelId: this.opts.model }, 10_000);
+			this.emit("modelpin", { ok: true, model: this.opts.model });
+		} catch (err) {
+			// unstable extension — unsupported (or non-compliant-string) adapters keep whatever --model
+			// argv (or their own config default) already gave them. Surfaced (not swallowed silently) so
+			// an operator who pinned a model that silently didn't take can tell — the exact gap this
+			// method exists to close.
+			this.emit("modelpin", { ok: false, model: this.opts.model, error: errText(err) });
+		}
 	}
 
 	/** MCP servers handed to the agent at session/new — the profile's resolved `McpServerSpec[]`

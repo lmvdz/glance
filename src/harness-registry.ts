@@ -428,9 +428,53 @@ registerHarness({
 	staticModels: ["default", "sonnet", "haiku"],
 });
 
-/** codex — via the `codex-acp` adapter over `codex app-server`. Adapter is mid-migration between
- *  orgs; pin a version before relying on it. */
-registerHarness({ name: "codex", protocol: "acp", bin: "npx", acpCommand: ["npx", "-y", "@agentclientprotocol/codex-acp"], capabilities: ACP_CAPS, verified: false, note: "adapter mid-migration between orgs — pin a version" });
+/**
+ * codex — via the `@agentclientprotocol/codex-acp` adapter (bundles its OWN `@openai/codex`
+ * dependency; does NOT shell out to whatever `codex` binary is on PATH — the operator's system
+ * codex CLI and the version this adapter actually drives can and do differ, see below).
+ *
+ * LIVE-VERIFIED 2026-08-04 against codex-acp v1.1.9 (bundled @openai/codex 0.145.0 — the operator's
+ * own system `codex` CLI on this host was 0.144.0 at the time, confirming the two are independent
+ * installs, exactly the "adapter mid-migration" risk this descriptor already flagged) — the ticket
+ * #336 bar (a green fake-server test does not count, see concern 08): `initialize` succeeds,
+ * `session/new` returns a real sessionId plus `models.availableModels` (32 entries across
+ * gpt-5.6-sol/terra/luna × 5 reasoning-effort tiers, gpt-5.5, gpt-5.4[-mini], gpt-5.3-codex-spark).
+ * `session/prompt` was run twice end-to-end against a throwaway scratch git repo with a trivial
+ * task ("append a line, commit it") — both times codex read/edited the file, ran real shell tool
+ * calls, and produced a real commit (auth rides ~/.codex/auth.json, a cached ChatGPT login under
+ * HOME — HOME survives `scrubbedSpawnEnv`'s keep-list, the identical pattern claude-code's
+ * ~/.claude relies on; no OPENAI_API_KEY needed or present on this host).
+ *
+ * REPRODUCED live (twice, independently) and FIXED, not just noted: codex-acp's own CLI parses
+ * exactly THREE argv forms (`--version`, `login`, `cli`) and silently ignores everything else,
+ * including the trailing `--model <m>` `resolveAcpCommand`'s default `acpModelArgv` appends for
+ * every ACP harness. Spawned with `--model gpt-9999-does-not-exist` (a model that doesn't exist —
+ * would have errored if the flag were read at all), `session/new`'s `currentModelId` still came back
+ * as the account's own config default (`gpt-5.6-sol[high]`) both times — a SILENT drop, worse than
+ * the grok acpModelArgv defect (that one at least errored loudly; this one leaves no signal anywhere
+ * in the wire protocol that the pin never took). codex-acp does expose a working model channel: an
+ * extension method literally named `session/set_model` (`{sessionId, modelId}`, where `modelId` must
+ * be the adapter's own bracket-suffixed `"<model>[<effort>]"` form). `AcpAgentDriver.applyModelPin`
+ * (added for this ticket) now calls it best-effort after every `session/new`, the same fallback
+ * contract `applyApprovalMode` already uses for `session/set_mode` — live-reconfirmed with a THIRD
+ * session pinning `gpt-5.4[low]` (`modelpin` event fired `{ok:true}`), and pinned as a regression test
+ * (tests/acp-agent-driver.test.ts, a codex-shaped fake) since the real defect was silent, not a crash,
+ * and would otherwise regress invisibly.
+ *
+ * `usageVerified` is deliberately NOT set: `message_end`'s `usage` came back `{}` on all three live
+ * turns above — codex-acp never emitted a `usage_update` notification during any of them. This is a
+ * CONFIRMED gap (not merely "untested" like the other ACP descriptors' default) — every real codex
+ * unit's usage/cost dashboards are stamped 0 tokens until that's fixed.
+ */
+registerHarness({
+	name: "codex",
+	protocol: "acp",
+	bin: "npx",
+	acpCommand: ["npx", "-y", "@agentclientprotocol/codex-acp"],
+	capabilities: ACP_CAPS,
+	verified: true,
+	note: "third-party ACP adapter bundling its own @openai/codex (pin a version — it can drift from the operator's system codex CLI); initialize/session/new/session/prompt live-verified end-to-end (real commits in a scratch repo); --model argv is silently ignored by the adapter's CLI (fixed via a session/set_model pin, see AcpAgentDriver.applyModelPin) — usage_update is CONFIRMED absent (usageVerified stays unset, not just untested)",
+});
 
 /**
  * grok (xAI Grok Build) — native first-party ACP, no adapter: `grok agent stdio`.
