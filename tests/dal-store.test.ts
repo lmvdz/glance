@@ -189,12 +189,14 @@ test("FileStore: round-trips state.json in the exact persistNow on-disk format (
 	await store.save({ agents: [a1], transcripts, features: [f1] });
 
 	expect(await store.hasState()).toBe(true);
-	// Concern 12 slice 2: features live in their split file; state.json carries an empty
-	// tombstone in the field (so pre-split readers see a well-formed shape, never undefined).
+	// Concern 12 slices 2+3: features and transcripts live in their split files; state.json
+	// carries empty tombstones (so pre-split readers see well-formed shapes, never undefined).
 	const raw = await fs.readFile(path.join(fdir, "state.json"), "utf8");
-	expect(raw).toBe(JSON.stringify({ version: 1, agents: [a1], transcripts, features: [] }, null, 2));
+	expect(raw).toBe(JSON.stringify({ version: 1, agents: [a1], transcripts: {}, features: [] }, null, 2));
 	const rawFeatures = await fs.readFile(path.join(fdir, "features.json"), "utf8");
 	expect(rawFeatures).toBe(JSON.stringify([f1], null, 2));
+	const rawTranscripts = await fs.readFile(path.join(fdir, "transcripts.json"), "utf8");
+	expect(rawTranscripts).toBe(JSON.stringify(transcripts, null, 2));
 
 	// The MERGED load() view is unchanged by the split — this is the contract 112 callers keep.
 	expect(await store.load()).toEqual({ agents: [a1], transcripts, features: [f1] });

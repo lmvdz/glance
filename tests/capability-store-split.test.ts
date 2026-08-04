@@ -129,6 +129,38 @@ test("features: a corrupt split file is set aside loudly, never silently outrank
 	expect(aside.length).toBe(1);
 });
 
+// ── Transcripts lane (slice 3) — the modes converge on DB mode's own layout ──────────────────
+
+test("transcripts: split round-trip; state.json carries a {} tombstone", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "tx-split-"));
+	const store = new FileStore(dir);
+	const transcripts = { a1: [{ kind: "system", text: "x", ts: 1 }] };
+	await store.save({ agents: [], transcripts: transcripts as never, features: [] });
+	expect(JSON.parse(readFileSync(join(dir, "state.json"), "utf8")).transcripts).toEqual({});
+	expect((await store.loadTranscripts()).a1?.map((e) => e.text)).toEqual(["x"]);
+	expect((await store.load()).transcripts.a1?.map((e) => e.text)).toEqual(["x"]);
+});
+
+test("transcripts: legacy embedded copy loads until the split file exists — then the split file wins", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "tx-legacy-"));
+	writeFileSync(join(dir, "state.json"), JSON.stringify({ version: 1, agents: [], transcripts: { a1: [{ kind: "system", text: "legacy", ts: 1 }] }, features: [] }));
+	const store = new FileStore(dir);
+	expect((await store.load()).transcripts.a1?.map((e) => e.text)).toEqual(["legacy"]);
+	await store.saveTranscripts({ a1: [{ kind: "system", text: "split", ts: 2 }] } as never);
+	expect((await store.load()).transcripts.a1?.map((e) => e.text)).toEqual(["split"]);
+});
+
+test("transcripts: corrupt split file set aside loudly, lane starts empty (never the stale copy)", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "tx-corrupt-"));
+	writeFileSync(join(dir, "state.json"), JSON.stringify({ version: 1, agents: [], transcripts: { a1: [{ kind: "system", text: "stale", ts: 1 }] }, features: [] }));
+	writeFileSync(join(dir, "transcripts.json"), "[1,2,3]");
+	const store = new FileStore(dir);
+	expect(await store.loadTranscripts()).toEqual({});
+	expect(existsSync(join(dir, "transcripts.json"))).toBe(false);
+	const aside = (await import("node:fs")).readdirSync(dir).filter((f) => f.startsWith("transcripts.json.corrupt-"));
+	expect(aside.length).toBe(1);
+});
+
 test("a corrupt split file is set aside loudly, never silently outranked by the stale legacy copy (codex M3)", async () => {
 	const dir = mkdtempSync(join(tmpdir(), "cap-corrupt-"));
 	writeFileSync(

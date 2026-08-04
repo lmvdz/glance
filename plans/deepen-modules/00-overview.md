@@ -43,6 +43,14 @@ tombstone-after-swallowed-failure eraser). Five codex rows + one native row reco
 quota-flaked again (6th) — its absence is now a measured reliability fact on the ledger, not
 an anecdote.
 
+## Iteration 29 (2026-08-04, goal mode)
+12 slice 3: transcripts escape the blob (modes converge on one layout; state.json is now the
+agents core + tombstones). The queue's first CONVERGENT cross-lineage round: grok's first
+successful pass in seven attempts landed 2H+3M+1L with a reproduced failing test, and two of
+its findings were independently found by codex — exactly the correlated-evidence signal the
+two-lineage bet was made for. Grok's unique catch (omit-then-tombstone) even applied
+retroactively to slice 2's features lane. Nine rows recorded.
+
 ## Queue pivot (2026-08-03, Lars)
 
 Concerns 14–16 are the CS329A borrows (plans/research-cs329a/BRIEF.md), absorbed into this queue

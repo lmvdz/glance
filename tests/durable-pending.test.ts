@@ -7,6 +7,7 @@
  * the window coalesces into exactly one persist() call, (3) a graceful stop() flushes synchronously.
  */
 
+import type { TranscriptEntry } from "../src/types.ts";
 import type { CapabilitySnapshot } from "../src/capabilities/index.ts";
 import type { PersistedFeature } from "../src/types.ts";
 import { afterEach, expect, test } from "bun:test";
@@ -127,6 +128,12 @@ class SpySaveStore implements Store {
 	}
 	saveFeatures(features: PersistedFeature[]): Promise<void> {
 		return this.real.saveFeatures(features);
+	}
+	loadTranscripts(): Promise<Record<string, TranscriptEntry[]>> {
+		return this.real.loadTranscripts();
+	}
+	saveTranscripts(transcripts: Record<string, TranscriptEntry[]>): Promise<void> {
+		return this.real.saveTranscripts(transcripts);
 	}
 	loadCapabilities(): Promise<CapabilitySnapshot> {
 		return this.real.loadCapabilities();

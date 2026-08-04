@@ -18,6 +18,8 @@ class MemoryStore implements Store {
 	async saveFeedback(snapshot: FeedbackSnapshot): Promise<void> { this.snap = structuredClone(snapshot); }
 	async loadFeatures(): Promise<PersistedFeature[]> { return []; }
 	async saveFeatures(_features: PersistedFeature[]): Promise<void> {}
+	async loadTranscripts(): Promise<Record<string, TranscriptEntry[]>> { return {}; }
+	async saveTranscripts(_transcripts: Record<string, TranscriptEntry[]>): Promise<void> {}
 	async loadCapabilities(): Promise<CapabilitySnapshot> { return normalizeCapabilitySnapshot(undefined); }
 	async saveCapabilities(_snapshot: CapabilitySnapshot): Promise<void> {}
 	async appendAudit(entry: { actor: string; action: string; target?: string; detail?: unknown }): Promise<void> { this.audit.push(entry); }

@@ -35,6 +35,17 @@ already exist as adapters), so a lane's write amplification and crash-window is 
   adjudicated by-design (cross-lane atomicity traded for per-lane crash windows — the concern's
   own goal; generation/commit protocol noted below if it ever bites). grok quota-flaked (gap).
 
+- Slice 3 done (2026-08-04, iteration 29): TRANSCRIPTS escape the blob — the two modes converge
+  on DB mode's own separate-file layout; state.json shrinks to the agents core + tombstones.
+  StateSnapshotSave formalizes optional-on-save/honor-when-passed. FIRST CROSS-LINEAGE
+  CONVERGENT ROUND of the queue: grok (its first successful pass after six quota flakes,
+  2H+3M+1L with a reproduced failing test) and codex (1H+1M+1L) independently found the same
+  two defects — the map-value validation hole (reseedTranscriptSeq for-of-null startup abort)
+  and the restart-reattach probe reading embedded transcripts. Grok's unique H1 was the
+  omit-then-tombstone contract hole, which LATENTLY applied to slice 2's features too — fixed
+  with a self-migrating tombstone guard for both lanes. Codex's unique Low: two more durability
+  probes constructing the legacy fileset. Nine adjudicated rows.
+
 ## Follow-ups (recorded, deliberately not in slice 1)
 - Post-stop ingress race (codex M2, adjudicated pre-existing CLASS): the HTTP server keeps
   accepting mutations while manager.stop() runs, so a write enqueued after any durability

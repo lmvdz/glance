@@ -48,6 +48,10 @@ class CountingStore implements Store {
 		return [];
 	}
 	async saveFeatures(_features: PersistedFeature[]): Promise<void> {}
+	async loadTranscripts(): Promise<Record<string, TranscriptEntry[]>> {
+		return {};
+	}
+	async saveTranscripts(_transcripts: Record<string, TranscriptEntry[]>): Promise<void> {}
 	async loadCapabilities(): Promise<CapabilitySnapshot> {
 		return normalizeCapabilitySnapshot(undefined);
 	}
