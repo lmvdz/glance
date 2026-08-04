@@ -43,16 +43,17 @@ export interface RunReceipt {
 	parentId?: string;
 	/** Which harness drove the run ("omp" for daemon-spawned; external ingests set their own). */
 	harness?: string;
-	/** Set ONLY by `scripts/backfill-receipt-attribution.ts` when it audited this receipt and could
-	 *  NOT determine `harness` with positive, row-scoped evidence (a matching `state.json` roster
-	 *  entry carrying an explicit `harness` or legacy `runtime` field — see the script's module doc).
-	 *  A small fixed vocabulary of machine-readable codes, NOT free prose — e.g.
-	 *  `"no_state_json_evidence"`, `"agent_id_prefix_ambiguous"`. Absence of `harness` does NOT by
-	 *  itself prove the omp lane wrote this row (pre-fix daemon-managed ACP units — claude-code,
-	 *  grok, legacy `runtime:"acp"` → auggie — also predate the write-time harness stamp), so this
-	 *  reason exists precisely to avoid fabricating "omp" from silence. Distinguishes "audited,
-	 *  genuinely unattributable" from "nobody has looked yet". Cleared automatically if a later
-	 *  backfill pass DOES find positive evidence. */
+	/** Set ONLY by `scripts/backfill-receipt-attribution.ts` when it audited this receipt's missing
+	 *  `harness`. The script does not attempt to attribute a harness VALUE at all — the two paths
+	 *  tried (blind-stamp-from-absence, then a `state.json` roster cross-reference) both turned
+	 *  out to be fabrication risks: absence of `harness` doesn't prove the omp lane wrote a row
+	 *  (pre-fix daemon-managed ACP units — claude-code, grok, legacy `runtime:"acp"` → auggie —
+	 *  also predate the write-time harness stamp), and a roster join is AGENT-scoped, not
+	 *  RUN-scoped (`squad-manager.ts`'s deterministic ids are a legitimate resurrection target, so
+	 *  a recreated agent under a different harness could reuse an old id and misattribute an old
+	 *  receipt). A small fixed vocabulary of machine-readable codes, NOT free prose — e.g.
+	 *  `"no_run_scoped_harness_evidence"`, `"agent_id_prefix_ambiguous"`. Distinguishes "audited,
+	 *  genuinely unattributable" from "nobody has looked yet". */
 	harnessUnattributableReason?: string;
 	/** Set ONLY by `scripts/backfill-receipt-attribution.ts` when it audited this receipt's missing
 	 *  `model`. The script does not attempt to attribute a model at all (no durable, run-scoped
