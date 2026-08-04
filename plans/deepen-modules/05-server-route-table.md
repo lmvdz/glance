@@ -47,5 +47,14 @@ voice lane (with concern 11), org/auth lane, payload builders move next to their
   codex CLEAN (runtime fall-through probes + precedence trace), grok CLEAN + 2 Low import/doc
   nits (fixed + recorded). Remaining: voice lane (with 11), payload builders.
 
+- Slice 4 done (2026-08-04, iteration 23): routes/voice.ts — BOTH voice lanes (concern 11
+  delivered whole; see its close-out). Fourth and fifth context shapes: VoiceMintRouteContext
+  (pre-!manager-gate: voiceScope + role/actor + optional manager + rate thunk) and plain
+  RouteContext for the 14-route call cluster, whose RegExp captures now arrive via the table's
+  decoded params instead of per-match decodeURIComponent. voiceCallErrorResponse +
+  resolveVoiceMaxConcurrentPerOrg moved with the lane. codex CLEAN (live audit-flow probes),
+  grok CLEAN (handler byte-diff). server.ts is now 4,413 lines (was 4,890 at slice 3's start).
+  Remaining: the ~650 lines of homeless *Payload builders move next to their lanes.
+
 ## Provenance
 Memory-lane report candidate 5 + whole-repo report candidate 2 (top-recommendation pair with 04).

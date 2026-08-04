@@ -24,6 +24,13 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
+## Iteration 23 (2026-08-04, goal mode) — CONCERN 11 DONE
+05 slice 4 = concern 11 whole: routes/voice.ts, both lanes (mint pre-gate context + 14-route
+manager-tier call cluster on decoded table params). Both blind passes CLEAN with their strongest
+verification yet — codex live-probed the reserve→compensate→finalize audit flow against an
+in-memory DB; grok byte-diffed every handler vs HEAD. ~310 more lines out of server.ts. Nine
+concerns done. Remaining in 05: payload builders only.
+
 ## Iteration 22 (2026-08-04, goal mode)
 05 slice 3: routes/org.ts — 13 session-tier org/auth admin routes as data; the seam's third
 context shape (MatchContext base for pre-manager lanes, type-level relax only). Both blind
