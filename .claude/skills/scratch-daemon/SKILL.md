@@ -41,7 +41,7 @@ cd "$SCRATCH_CWD" && nohup bun /home/lars/sui/omp-squad/src/index.ts up --no-tui
 
 - Seed reversible data: copy live receipts into the scratch state dir when real data is needed (remap absolute `repo` paths inside the copied docs — they point at the original checkout), or file a throwaway plan dir / `stageOverride` PATCH.
 - Drive the UI with agent-browser (`AGENT_BROWSER_SOCKET_DIR` must be a short path; synthetic-click "nothing happened" can be a false negative — confirm against source before declaring a bug). Screenshot to **absolute paths** (relative paths litter the repo root).
-- Component-level rendering without a daemon: SSR the component with real receipt data, bundle as **IIFE** (ESM breaks over `file://`), external script tag (inline `</script>` in data breaks the page), headless chromium screenshot. Look at it before shipping — "I iterated blind three times" is the mined anti-pattern.
+- Component-level rendering without a daemon: see `references/component-render.md`.
 - Single-endpoint smoke: curl the new route with the on-disk token, assert the JSON shape. That's the whole test — don't boot the webapp for it.
 
 ## Controlled pipeline dogfood (the factory variant)
@@ -52,6 +52,4 @@ Fresh state dir blocks stale-agent adoption. Then: `OMP_SQUAD_AUTODISPATCH=0`, `
 
 Kill **by port/pid recorded at boot**, never `pkill -f` by name (has matched the session's own shell). `rm -rf` the scratch state dir. If you copied receipts, nothing to revert — that's the point.
 
-## Prove-preexisting (companion micro-protocol)
-
-When the gate/suite fails after your change: run the identical suite at the base SHA, diff the failure sets, own only the delta. This repo has 2 stable WSL spawn flakes (PATH-dependent); pin the session's known-flake set once and diff against it on every later run instead of re-litigating.
+When the gate/suite fails after your change: diff the failure set against the base SHA's and own only the delta — `/deepen` step 6 owns that protocol (this repo has 2 stable WSL spawn flakes, PATH-dependent).

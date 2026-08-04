@@ -1,6 +1,6 @@
 ---
 name: distill-plan
-description: Distill a plans/<name>/ directory into a self-contained visual page a human reads in minutes — thesis, a metaphor from the plan's own domain, a visual per idea, honest state, drill-down provenance. Use when the user says "distill this plan", "make this plan readable", "digest plans/<name>", wants an infographic or before/after page of what a plan is, or before handing a plan to someone who wasn't in the room. Not for rendering structure alone — `bun scripts/render-plan.ts` already does that.
+description: Distill a plans/<name>/ directory into a self-contained visual page a human reads in minutes. Use when the user says "distill this plan", "make this plan readable", "digest plans/<name>", wants an infographic or before/after page of what a plan is, or before handing a plan to someone who wasn't in the room. Not for rendering structure alone — `bun scripts/render-plan.ts` already does that.
 ---
 
 # distill-plan — a plan as ideas, not as files
@@ -19,10 +19,9 @@ Exemplar (built by hand, then decomposed into the contract below):
 1. **Thesis first.** One sentence a reader can *disagree with*, not a summary of sections.
    "Memory is a ledger, not a search problem" — not "this plan covers memory architecture."
    If the thesis can't be disagreed with, you have a table of contents, not a distillation.
-2. **A metaphor from the plan's own domain.** The hospital-ward interlude in the exemplar did more
-   comprehension work than any table — and it was *derived from the content* (strike-through
-   charting is literally the mechanism), never decoration bolted on. Find the metaphor inside the
-   subject. If you can't, say so and skip it; a forced metaphor is worse than none.
+2. **A metaphor from the plan's own domain** — derived from the content, never decoration bolted
+   on. Find the metaphor inside the subject. If you can't, say so and skip it; a forced metaphor
+   is worse than none.
 3. **A visual per IDEA, not per document.** Layer stacks, timelines, compare panes, annotated
    fixtures. The visual encodes the claim; prose shrinks to a paragraph beside it. A digest that is
    one visual and ten paragraphs is a document with a picture on it.
@@ -75,7 +74,4 @@ Exemplar (built by hand, then decomposed into the contract below):
 
 ## When NOT to use this
 
-- Someone wants the structural view (status, deps, what's actionable): that's
-  `bun scripts/render-plan.ts`, no LLM pass needed.
 - The plan is 2 concerns and 40 lines: reading it IS the distillation.
-- You are mid-execution and want status: `/wip` or `/reality-audit`.

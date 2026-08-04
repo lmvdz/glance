@@ -23,19 +23,14 @@ This is a **LOOP**. Each iteration drives exactly ONE thing from "lies" to "genu
 
 The entire point is to not trust the test suite. Always confirm behavior against a live daemon:
 
-```bash
-export PATH="$PWD/node_modules/.bin:$PATH"   # REQUIRED — else `omp` isn't found; agent spawns + 2 tests fail
-SD=$(mktemp -d); P=7980                        # isolated state dir + a free port (never clobber a real daemon)
-OMP_SQUAD_STATE_DIR="$SD" OMP_SQUAD_PORT=$P bun src/index.ts up --no-tui --port $P &
-# the startup log prints an access token + dashboard URL — grab the token:
-TOKEN=...                                       # from the log line "access token: ..."
-curl -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$P/api/<endpoint>"      # exercise read APIs
-OMP_SQUAD_STATE_DIR="$SD" OMP_SQUAD_PORT=$P bun src/index.ts add /path/to/scratch-git-repo \
-  --approval yolo --task "<a task that forces the broken path to run>"           # spawn a real agent
-```
+Boot an isolated throwaway daemon per the **scratch-daemon** skill (own state dir + port, detach
+pattern, teardown — it owns the choreography). The one fact it doesn't carry:
+`export PATH="$PWD/node_modules/.bin:$PATH"` first, or `omp` isn't found (agent spawns + 2 tests
+fail). Exercise read APIs with the printed access token; spawn a real agent with
+`add <scratch-repo> --approval yolo --task "<a task that forces the broken path>"`.
 
 Know the terrain (these are the traps that send you fixing the wrong thing):
-- **The LIVE dashboard is the React `webapp/`** (a Vite SPA). It is served when `OMP_SQUAD_WEBAPP=1` and a built `webapp/dist` exist — that is how this deployment runs, so the webapp is what users actually see. `src/web/index.html` (hand-built vanilla JS) is the legacy fallback, served only when the flag/dist are absent. **Audit and fix the webapp, not the legacy file.** Two gotchas when verifying: (1) a stale service worker from a prior legacy visit can keep serving the old shell over the webapp — hard-reload / unregister the SW; (2) rebuild first (`cd webapp && bun run build`) or you'll be testing stale assets.
+- **The LIVE dashboard is the React `webapp/`** (a Vite SPA), and it is served **by default**: `src/server.ts` reads `envBool("OMP_SQUAD_WEBAPP", true)` and serves `webapp/dist` when built — `GLANCE_WEBAPP=0` is the documented off switch (`src/runtime-settings.ts` labels it "The room (web UI)"). `src/web/index.html` (hand-built vanilla JS) is the legacy fallback, served only when the webapp is disabled or `dist` is missing. **Audit and fix the webapp, not the legacy file.** Two gotchas when verifying: (1) a stale service worker from a prior legacy visit can keep serving the old shell over the webapp — hard-reload / unregister the SW; (2) rebuild first (`cd webapp && bun run build`) or you'll be testing stale assets.
 - **Background loops** (scout/observer/opportunity/dispatch) only arm when `PLANE_PROJECT_MAP` maps a repo to a project id. Use a throwaway/invalid id to make them tick without writing to the real Plane workspace. Watch them via `omp-squad automation` or `GET /api/automation`.
 - When the bug is UI-shaped, drive it in a real browser (use the **agent-browser** skill), don't just read the code.
 - Command/workflow nodes execute with `cwd = worktree` — a script path that works from the repo root can be dead in a target repo. Reproduce from a *different* repo, not omp-squad itself.
@@ -68,7 +63,7 @@ VERIFIED: <how you proved it live> · check ✓ · test <N pass/0 fail> ✓
 
 ## Where to start looking
 
-- Check the project's auto-memory **known-broken** notes first (the `omp-squad-known-broken` memory) for already-confirmed defects — e.g. the live React **webapp** missing real agent kill/restart/remove + answer-a-blocked-agent controls and shipping decorative no-op buttons / orphaned components / fabricated metadata (this is the LIVE UI — high priority); the background **Automation** observability panel currently living only in the legacy `src/web/index.html` and needing a port into `webapp/`; the codefix pre-pass resolving against the wrong cwd; capability profile/workflow bindings resolving to a generic agent; trace export blocked by the vision SSRF guard; the scout's per-agent LLM call firing before dedup; stubbed reward payout / capability verifications. **Treat these as leads, not gospel — re-reproduce before fixing; some may already be done.**
+- Check the project's auto-memory **known-broken** notes first (the `omp-squad-known-broken` memory) — but read its *remainders*, not its history: most of the 2026-06-26 audit's defects were fixed 2026-06-27 on main, and a stale lead steers your first REPRODUCE at something already done. Anything the memory still lists as open is a lead; everything marked fixed is not.
 - If none reproduce, **HUNT a fresh one**: boot the daemon, drive the UI + API + a real agent, and keep going until something lies. That's the next item.
 
 Run me self-paced (`/loop /make-it-work`) or hand the current item to the squad (`/squad`) so each fix lands in its own worktree.

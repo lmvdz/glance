@@ -16,10 +16,11 @@ Every status store in this project has lied at least once (mined evidence): plan
    - Rewrite STATUS lines to match code (with a one-line why on each flip).
    - Reopen false-Done Plane issues; retro-file tickets for implemented-but-untracked work; backfill `PLANE:` pointers and missing `blocked_by` relations (missing relations let the fleet race its own DAG).
    - Emit a ranked drift table: which store lied, in which direction, and the systemic cause if visible.
-5. **Optionally chain** into clean-slate triage: cross-reference into a keep/done/cancel/archive disposition table, get user sign-off on the kill list, then mass-execute via Plane REST (gotcha: the base URL already ends in `/api/v1` — don't double it) and re-query to verify final counts.
+5. **Optionally chain** into clean-slate triage: cross-reference into a keep/done/cancel/archive disposition table, get user sign-off on the kill list, then mass-execute via Plane REST and re-query to verify final counts.
 
 ## Rules
 
+- Plane REST: the base URL already ends in `/api/v1` — don't double it (burned a round before).
 - A green test suite is not evidence a *feature* works — this repo has canned endpoints and stubbed subsystems (see `/make-it-work`). Cite code, or drive the running system.
 - "Done" requires the change on `origin/main`, not on a branch, not in a worktree, not in a MERGED-but-wrong-base PR (see `/land-sweep` for that failure class).
 - Date-stamp the audit and store the verdict table in the plan dir or memory — the 2026-06-30 audit had to be re-derived by hand two days later because only its conclusions survived.
