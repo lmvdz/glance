@@ -17,6 +17,7 @@ import {
 	EPISODE_SCHEMA_VERSION,
 	EpisodeLoop,
 	episodeContentHash,
+	type EpisodeSources,
 	episodeSourceFingerprint,
 	episodeRepoHash,
 	isoWeekBounds,
@@ -249,7 +250,7 @@ test("isoWeekBounds throws on a malformed id rather than silently misparsing", (
 
 test("buildEpisode stamps sourceFingerprint + builtHash from the one snapshot (deepen 07)", () => {
 	const episode = buildEpisode(baseInput());
-	expect(episode.meta.sourceFingerprint).toStartWith("v1|");
+	expect(episode.meta.sourceFingerprint).toStartWith("v2|");
 	expect(episode.meta.builtHash).toBe(episodeContentHash(episode.markdown));
 	// Live-state inputs are commentary, not evidence: fog changes never change the fingerprint.
 	const withFog = buildEpisode(baseInput({ fogTop: [{ file: "src/x.ts", debt: 9 } as never] }));
@@ -301,6 +302,22 @@ function gatherResult(over: Partial<EpisodeGatherResult> = {}): EpisodeGatherRes
 	return { deltas: [], symptoms: [], fogTop: [], testExecutions: [], digestIds: [], omitted: [], ...over };
 }
 
+/** ok-typed EpisodeSources over a thunk — mirrors the manager adapter; `onGather` counts one
+ *  composed gather per (repo, week). `failClass` makes that one class return ok:false. */
+function fakeSources(get: (repo: string) => EpisodeGatherResult, onGather?: (repo: string) => void, failClass?: "decisions" | "symptoms" | "commentary" | "digestIds"): EpisodeSources {
+	return {
+		decisions: async (repo) => {
+			onGather?.(repo);
+			if (failClass === "decisions") return { ok: false };
+			const g = get(repo);
+			return { ok: true, value: { deltas: g.deltas, nonDeltaCount: 0 } };
+		},
+		symptoms: async (repo) => (failClass === "symptoms" ? { ok: false } : { ok: true, value: get(repo).symptoms }),
+		commentary: async (repo) => (failClass === "commentary" ? { ok: false } : { ok: true, value: { fogTop: get(repo).fogTop, staleAnswers: get(repo).staleAnswers ?? [] } }),
+		digestIds: async (repo) => (failClass === "digestIds" ? { ok: false } : { ok: true, value: get(repo).digestIds }),
+	};
+}
+
 test("EpisodeLoop.tick generates once, pushes once, and reports a meaningful (filed>0) event", async () => {
 	const dir = await tmpDir();
 	let gatherCalls = 0;
@@ -309,10 +326,7 @@ test("EpisodeLoop.tick generates once, pushes once, and reports a meaningful (fi
 	const loop = new EpisodeLoop({
 		repos: () => ["/repo"],
 		stateDir: dir,
-		gather: async () => {
-			gatherCalls++;
-			return gatherResult({ deltas: [delta("A real delta.", ["src/a.ts"])] });
-		},
+		sources: fakeSources(() => gatherResult({ deltas: [delta("A real delta.", ["src/a.ts"])] }), () => void gatherCalls++),
 		notifyPush: (p) => void pushed.push(p),
 		now: () => new Date("2026-07-15T12:00:00Z").getTime(),
 		recordFor: () => (r) => reports.push(r),
@@ -344,10 +358,7 @@ test("EpisodeLoop.tick: unchanged fingerprint skips (ring-only); drift regenerat
 	const loop = new EpisodeLoop({
 		repos: () => ["/repo"],
 		stateDir: dir,
-		gather: async () => {
-			gatherCalls++;
-			return gathered;
-		},
+		sources: fakeSources(() => gathered, () => void gatherCalls++),
 		notifyPush: (p) => void pushed.push(p),
 		now: clock,
 		recordFor: () => (r) => reports.push(r),
@@ -388,9 +399,9 @@ test("EpisodeLoop.tick reports level:warn (not ring-only) when gather fails, and
 	const loop = new EpisodeLoop({
 		repos: () => ["/repo"],
 		stateDir: dir,
-		gather: async () => {
+		sources: fakeSources(() => {
 			throw new Error("boom");
-		},
+		}),
 		notifyPush: (p) => void pushed.push(p),
 		now: () => new Date("2026-07-15T12:00:00Z").getTime(),
 		recordFor: () => (r) => reports.push(r),
@@ -413,7 +424,7 @@ test("EpisodeLoop.tick reports level:warn when the save itself fails (stateDir u
 	const loop = new EpisodeLoop({
 		repos: () => ["/repo"],
 		stateDir: notAFile,
-		gather: async () => gatherResult(),
+		sources: fakeSources(() => gatherResult()),
 		now: () => new Date("2026-07-15T12:00:00Z").getTime(),
 		recordFor: () => (r) => reports.push(r),
 	});
@@ -431,11 +442,9 @@ test("EpisodeLoop.tick is reentrancy-safe: an overlapping call while one is in f
 	const loop = new EpisodeLoop({
 		repos: () => ["/repo"],
 		stateDir: dir,
-		gather: async () => {
+		sources: fakeSources(() => gatherResult(), () => {
 			gatherCalls++;
-			await new Promise((r) => setTimeout(r, 20));
-			return gatherResult();
-		},
+		}),
 		now: () => new Date("2026-07-15T12:00:00Z").getTime(),
 	});
 	const first = loop.tick();
@@ -466,10 +475,10 @@ test("EpisodeLoop derives its repo set LIVE each tick — a repo added after con
 	const loop = new EpisodeLoop({
 		repos: () => [...liveRepos],
 		stateDir: dir,
-		gather: async (repo) => {
+		sources: fakeSources((repo) => {
 			generated.push(repo);
 			return gatherResult();
-		},
+		}),
 		now: () => new Date("2026-07-15T12:00:00Z").getTime(),
 		recordFor: () => (r) => reports.push(r),
 	});
@@ -478,4 +487,34 @@ test("EpisodeLoop derives its repo set LIVE each tick — a repo added after con
 	liveRepos.push("/late-added"); // no restart, no re-construction
 	await loop.tick();
 	expect(generated).toContain("/late-added");
+});
+
+test("REGRESSION (DESIGN v2 amendment 4): one failed source class aborts the rebuild — the healthy pair survives", async () => {
+	const dir = await tmpDir();
+	const clock = () => new Date("2026-07-15T12:00:00Z").getTime();
+	const healthy = new EpisodeLoop({
+		repos: () => ["/repo"],
+		stateDir: dir,
+		sources: fakeSources(() => gatherResult({ deltas: [delta("Original evidence.", ["src/a.ts"])] })),
+		now: clock,
+	});
+	await healthy.tick();
+	const prev = previousCompleteIsoWeek(new Date(clock()));
+	const before = await readEpisode(dir, "/repo", prev);
+	expect(before).toBeDefined();
+
+	const reports: AutomationReport[] = [];
+	const broken = new EpisodeLoop({
+		repos: () => ["/repo"],
+		stateDir: dir,
+		// Evidence changed AND one class fails: without amendment 4 this would rebuild an emptier
+		// episode; with it, the week aborts and the healthy pair is untouched.
+		sources: fakeSources(() => gatherResult({ deltas: [] }), undefined, "symptoms"),
+		now: clock,
+		recordFor: () => (r) => reports.push(r),
+	});
+	await broken.tick();
+	const after = await readEpisode(dir, "/repo", prev);
+	expect(after?.builtHash).toBe(before?.builtHash);
+	expect(reports.at(-1)?.level).toBe("warn");
 });

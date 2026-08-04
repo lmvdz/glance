@@ -1,5 +1,5 @@
 # Episodes — regenerated projections, not accreted logs
-STATUS: in-progress
+STATUS: done
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: moderate
@@ -88,6 +88,12 @@ survived findings fixed (codex 5, grok 2); grok's stale-fog flag refuted (asOfBu
 design) — the ledger's first non-survived grok row. REMAINING (final slice → STATUS: done):
 the gather moves into an ok-typed EpisodeSources port on the manager side (amendment 4's
 failure-vs-drift currently holds at whole-gather granularity only).
+
+## Gather port DONE (2026-08-04, iteration 17) → CONCERN DONE. EpisodeSources ok-typed port,
+module-side gatherEpisode (any failed class aborts), manager adapter with honest per-class
+failures (the inner staleAnswers silent-empty eliminated — codex), fingerprint v2 (omitted
+class now drift-visible), amendment-4 regression test (one failed class keeps the healthy
+pair). Cross-class snapshot incoherence documented as the accepted residual.
 
 ## Implementation slice (after red-team): per DESIGN v2 — EpisodeSources ok-typed port +
 gather move + snapshot-coherent fingerprint (ID-set hash) + quarantine state + .prev

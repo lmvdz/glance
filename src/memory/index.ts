@@ -54,9 +54,9 @@ export { AFTER_ACTION_MARKER, composeAfterAction, readAfterAction, listAfterActi
 export type { AfterActionReport, AfterActionInput, TerminalReapCandidate } from "./after-action.ts";
 export {
 	EPISODE_SCHEMA_VERSION, isoWeekBounds, previousCompleteIsoWeek, buildEpisode,
-	episodeRepoHash, episodeContentHash, episodeSourceFingerprint, saveEpisode, readEpisode, listEpisodes, EpisodeLoop,
+	episodeRepoHash, episodeContentHash, episodeSourceFingerprint, gatherEpisode, saveEpisode, readEpisode, listEpisodes, EpisodeLoop,
 } from "./weekly-episode.ts";
-export type { OmittedEntry, StaleAnswerEntry, BuildEpisodeInput, EpisodeMeta, BuiltEpisode, EpisodeGatherResult, EpisodeLoopDeps } from "./weekly-episode.ts";
+export type { OmittedEntry, StaleAnswerEntry, BuildEpisodeInput, EpisodeMeta, BuiltEpisode, EpisodeGatherResult, EpisodeLoopDeps, EpisodeSources, SourceRead } from "./weekly-episode.ts";
 export { readAnswer, listAnswers, saveAnswer, extractPathTokens, possiblyStale, answerBrief } from "./answers.ts";
 export type { Answer } from "./answers.ts";
 export {

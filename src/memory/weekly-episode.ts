@@ -348,12 +348,16 @@ export function episodeSourceFingerprint(g: EpisodeGatherResult): string {
 	const deltas = g.deltas ?? [];
 	const symptoms = g.symptoms ?? [];
 	const tests = g.testExecutions ?? [];
+	const omitted = g.omitted ?? [];
 	return [
-		"v1",
+		"v2",
 		cls(deltas.map((d) => d.id), deltas.reduce((m, d) => Math.max(m, d.createdAt ?? 0), 0)),
 		cls(symptoms.map((x) => x.id), symptoms.reduce((m, x) => Math.max(m, x.landedAt), 0)),
 		cls(g.digestIds, 0),
 		cls(tests.map((t) => `${t.command}::${t.outcome}::${t.source}`), 0),
+		// Omitted entries render (the Not-covered section), so their change must be drift-visible —
+		// a non-delta decision count moving from 3 to 4 regenerates (codex finding).
+		cls(omitted.map((o) => `${o.title}::${o.reason}`), 0),
 	].join("|");
 }
 
@@ -482,6 +486,53 @@ export async function listEpisodes(stateDir: string, repo: string): Promise<Epis
 	return out.sort((a, b2) => b2.isoWeek.localeCompare(a.isoWeek));
 }
 
+// ── EpisodeSources: the ok-typed gather port (deepen 07, DESIGN v2 amendment 4) ────────────────
+
+/** A source read either SUCCEEDED (possibly with zero items — an authoritative empty) or it
+ *  FAILED. The old gather collapsed both to `[]`, which the fingerprint read as deletion-drift
+ *  and rebuilt an emptier episode over a healthy one — the exact corruption amendment 4 bans. */
+export type SourceRead<T> = { ok: true; value: T } | { ok: false };
+
+export interface EpisodeSources {
+	/** Model-delta decisions in the window + how many non-delta decisions were deliberately omitted. */
+	decisions(repo: string, window: { start: number; end: number }): Promise<SourceRead<{ deltas: FeatureDecision[]; nonDeltaCount: number }>>;
+	symptoms(repo: string, window: { start: number; end: number }): Promise<SourceRead<SymptomEntry[]>>;
+	/** Live-state commentary (fog, stale answers) — asOfBuild, outside the fingerprint. */
+	commentary(repo: string, window: { start: number; end: number }): Promise<SourceRead<{ fogTop: FileFogEntry[]; staleAnswers: StaleAnswerEntry[] }>>;
+	digestIds(repo: string): Promise<SourceRead<string[]>>;
+}
+
+/** Compose one snapshot from the sources. ANY failed class aborts the whole gather (undefined) —
+ *  a partial snapshot must never masquerade as evidence. Documented residual (codex): the four
+ *  reads settle independently on a live daemon, so the composition is coherent-per-class, not a
+ *  single instant's cut — durable drift self-corrects next tick under the fingerprint; there is
+ *  no cross-class revision to validate against without a snapshot store the lane does not have. */
+export async function gatherEpisode(sources: EpisodeSources, repo: string, window: { start: number; end: number }): Promise<EpisodeGatherResult | undefined> {
+	const [decisions, symptoms, commentary, digests] = await Promise.all([
+		sources.decisions(repo, window).catch((): SourceRead<{ deltas: FeatureDecision[]; nonDeltaCount: number }> => ({ ok: false })),
+		sources.symptoms(repo, window).catch((): SourceRead<SymptomEntry[]> => ({ ok: false })),
+		sources.commentary(repo, window).catch((): SourceRead<{ fogTop: FileFogEntry[]; staleAnswers: StaleAnswerEntry[] }> => ({ ok: false })),
+		sources.digestIds(repo).catch((): SourceRead<string[]> => ({ ok: false })),
+	]);
+	if (!decisions.ok || !symptoms.ok || !commentary.ok || !digests.ok) return undefined;
+	const omitted: OmittedEntry[] = [];
+	if (decisions.value.nonDeltaCount > 0) {
+		omitted.push({
+			title: `${decisions.value.nonDeltaCount} non-model-delta decision${decisions.value.nonDeltaCount === 1 ? "" : "s"} recorded this week`,
+			reason: "plan/human/agent-sourced decisions aren't mental-model deltas",
+		});
+	}
+	return {
+		deltas: decisions.value.deltas,
+		symptoms: symptoms.value,
+		fogTop: commentary.value.fogTop,
+		staleAnswers: commentary.value.staleAnswers,
+		testExecutions: [],
+		digestIds: digests.value,
+		omitted,
+	};
+}
+
 // ── EpisodeLoop (uniform loop shape, mirrors scout.ts's/opportunity.ts's constructor+start+stop+tick) ──
 
 /** Everything one repo's target-week generation needs beyond `repo`/`isoWeek`/`now` (which the loop
@@ -496,9 +547,9 @@ export interface EpisodeLoopDeps {
 	 *  snapshot silently starved late-added projects forever. */
 	repos: () => string[];
 	stateDir: string;
-	/** Resolve one repo's target-week inputs. A rejection is treated as a contained tick failure
-	 *  (logged, reported `level:"warn"`), never an uncaught throw. */
-	gather: (repo: string, window: { start: number; end: number }) => Promise<EpisodeGatherResult>;
+	/** The ok-typed gather port (DESIGN v2 amendment 4) — the module composes the snapshot via
+	 *  `gatherEpisode`; any failed class aborts that week's rebuild, keeping the healthy pair. */
+	sources: EpisodeSources;
 	/** One push per generation (DESIGN.md "Push at motivation"; this concern's point 5) — the caller
 	 *  supplies the actual `PushService.notify` call so this module never owns a PushService instance
 	 *  or a subscription list itself (staleness-free by construction: nothing here caches subs).
@@ -617,11 +668,9 @@ export class EpisodeLoop {
 		const existing = await readEpisode(stateDir, repo, week);
 		if (existing?.quarantined) return "skipped";
 		const diskHash = existing ? episodeContentHash(existing.markdown) : undefined;
-		let gathered: EpisodeGatherResult;
-		try {
-			gathered = await this.deps.gather(repo, isoWeekBounds(week));
-		} catch (e) {
-			log(`gather failed for ${repo}/${week}: ${errText(e)}`);
+		const gathered = await gatherEpisode(this.deps.sources, repo, isoWeekBounds(week));
+		if (gathered === undefined) {
+			log(`gather incomplete for ${repo}/${week} — keeping the existing projection (a partial snapshot is not evidence)`);
 			return "failed";
 		}
 		const episode = buildEpisode({ repo, isoWeek: week, now: clock(), ...gathered });

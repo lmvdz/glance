@@ -24,6 +24,13 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
+## Iteration 17 (2026-08-04, goal mode — PR #314) — CONCERN 07 DONE
+Gather port shipped: ok-typed sources end failure-as-drift for good; fingerprint v2 makes
+rendered omissions drift-visible; codex 4 more survived (incl. the silent-empty recreated one
+level down — the reviewer catching the same shape at every depth is the whole point). Suite
+4948/1. Concern 07 is the first architectural concern taken concept→design→two-round
+implementation→done entirely inside the goal loop.
+
 ## Iteration 16 (2026-08-04, goal mode — PR #314)
 07 implementation core: regeneration replaces write-once. Two hardening rounds (codex 5 P1s,
 grok 2 + 1 REFUTED — first non-survived grok row: asOfBuild staleness is the design). Suite
