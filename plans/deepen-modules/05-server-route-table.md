@@ -29,5 +29,11 @@ voice lane (with concern 11), org/auth lane, payload builders move next to their
   attention/fog lane (needs server-instance ctx made explicit), voice lane (with 11), org lane,
   payload builders.
 
+- Slice 2 done (2026-08-04, iteration 11): routes/attention.ts — 6 attention/ladder/fog routes
+  moved with the server-instance context made EXPLICIT (Route<C> generic; viewerId/isAdmin
+  computed once in handle(), no this.* reach-back); fail-closed POSTs and the fog-vs-attention
+  repo-param normalization asymmetry preserved (both blind passes verified it specifically);
+  codex clean, grok clean. Remaining: voice lane (with 11), org lane, payload builders.
+
 ## Provenance
 Memory-lane report candidate 5 + whole-repo report candidate 2 (top-recommendation pair with 04).
