@@ -19,7 +19,7 @@ import type { Server, ServerWebSocket } from "bun";
 import { Result } from "effect";
 import type { ArtifactCommentDTO, ClientCommand, CreateAgentOptions, FeatureCategory, FeatureCriterion, FeatureDecision, FeatureDTO, FeatureRelationship, FeatureStage, IssueRef, PlanAnnotationTarget, PlanRevisionCandidateState, PresenceSnapshot, SquadEvent } from "./types.ts";
 import { ChatAttachmentDimensionError, ChatAttachmentQuotaExceededError } from "./chat-attachment.ts";
-import { envBool, envInt, rootFactoryEnabledWith } from "./config.ts";
+import { envBool, envBoolAliased, envInt, rootFactoryEnabledWith } from "./config.ts";
 import { invalidFileAssignees, invalidOrgAssignees, isVoteAssignee } from "./feature-assignees.ts";
 import { type AutonomyFacts, doctorHostVisible } from "./doctor.ts";
 import { DERIVED_SANDBOX_IMAGE } from "./gate-runner.ts";
@@ -203,7 +203,9 @@ export { CONSOLE_SYSTEM_PROMPT };
  * ponytail: env-flag + dist-exists check, not a config object — one toggle, no machinery.
  */
 export function webappEnabled(): boolean {
-	return envBool("OMP_SQUAD_WEBAPP", true) && existsSync(WEBAPP_INDEX);
+	// GLANCE_WEBAPP was documented in the comment above but never read — a dead alias (the
+	// comprehension-09 bug class). envBoolAliased makes the documented primary real.
+	return envBoolAliased("GLANCE_WEBAPP", "OMP_SQUAD_WEBAPP", true) && existsSync(WEBAPP_INDEX);
 }
 
 export function feedbackEnabled(): boolean {

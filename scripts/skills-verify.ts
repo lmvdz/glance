@@ -68,7 +68,6 @@ export const COMMITTED_SKILL_NAMES: readonly string[] = [
 	"dogfood-drain",
 	"effect",
 	"execute-plan",
-	"fleet-ide-loop",
 	"land-sweep",
 	"make-it-work",
 	"reality-audit",
