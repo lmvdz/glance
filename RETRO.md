@@ -27,3 +27,15 @@ Three standing rules (campaign doctrine):
   dodge the Bash tool's 2-minute default timeout, then stop and wait for a notification that
   never comes. Fix baked into the dispatch template: run suites FOREGROUND with the Bash call's
   own `timeout: 600000`, plus the "you will be resumed with no memory of waiting" phrasing.
+
+### 2026-08-04 — T7-S1 #335 (rail extraction slice 1) — closed after 1 dual-lineage round
+- Rounds: build + 1 fix round. Both foreign lineages independently CERTIFIED the pure move
+  (grok: SHA-256 byte-identity after import-prefix reversal — adopt that as the standard
+  pure-move proof) and independently found the same defect: the new boundary scanner was
+  fail-open on import forms its regex didn't anticipate. The guard guarding the seam was the
+  only defective thing in the slice — absence-as-evidence, again.
+- Fix pattern worth keeping: a scanner is only trustworthy with flip-the-input fixtures — one
+  fixture per bypass form asserting detection FIRES, plus a negative fixture. Ported as
+  standing doctrine: any future allowlist/ratchet test ships with per-form fixtures.
+- Builder caught a design estimate wrong (8 test files vs ~4) by grepping with .ts extensions
+  — the verify-claims-against-the-tree dispatch line keeps earning its place.
