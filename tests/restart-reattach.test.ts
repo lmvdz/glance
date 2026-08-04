@@ -235,17 +235,19 @@ test("an operator prompt persists the transcript durably — a daemon KILL right
 	await mgr.applyCommand({ type: "prompt", id: "chat-live", message: "the words a kill must not eat", displayText: "typed text" });
 	// The write chain is deduped/queued — give it a beat, then read what a KILLED daemon would leave.
 	const deadline = Date.now() + 2000;
-	let persisted: { transcripts?: Record<string, TranscriptEntry[]> } = {};
+	// Concern 12 slice 3: transcripts live in their split file now — the killed-daemon probe
+	// reads transcripts.json (state.json's field is a {} tombstone by design).
+	let persistedTranscripts: Record<string, TranscriptEntry[]> = {};
 	while (Date.now() < deadline) {
 		try {
-			persisted = JSON.parse(await fs.readFile(path.join(stateDir, "state.json"), "utf8")) as typeof persisted;
-			if (persisted.transcripts?.["chat-live"]?.length) break;
+			persistedTranscripts = JSON.parse(await fs.readFile(path.join(stateDir, "transcripts.json"), "utf8")) as typeof persistedTranscripts;
+			if (persistedTranscripts["chat-live"]?.length) break;
 		} catch {
 			/* not written yet */
 		}
 		await new Promise((r) => setTimeout(r, 25));
 	}
-	const tr = persisted.transcripts?.["chat-live"] ?? [];
+	const tr = persistedTranscripts["chat-live"] ?? [];
 	expect(tr.map((e) => e.text)).toContain("the words a kill must not eat");
 	expect(tr.find((e) => e.kind === "user")?.displayText).toBe("typed text"); // the fold's bare-text copy survives too
 });

@@ -283,7 +283,8 @@ Existing installs that predate the rename keep this exact tree under **`~/.omp/s
 
 <TypeTable
 	type={{
-		'state.json': { type: 'JSON', description: 'Persisted roster (PersistedAgent[]) and features (PersistedFeature[]). Transcript text is redacted before it is written here.' },
+		'state.json': { type: 'JSON', description: 'Persisted roster (PersistedAgent[]) and transcripts. Features moved to features.json and capabilities to capabilities.json (the features field here is an empty tombstone; legacy embedded copies still load). Transcript text is redacted before it is written here.' },
+		'features.json': { type: 'JSON', description: 'Persisted features (PersistedFeature[]) — split from state.json so feature churn does not rewrite transcripts.' },
 		'access-token': { type: 'text', description: 'Auto-generated bearer token, created on first boot (mode 0600). The CLI and the supervisor read it to authenticate to the daemon.' },
 		'settings.json': { type: 'JSON', description: 'Feature-flag toggles persisted from the web Settings screen; applied on the next daemon boot.' },
 		'orchestrator-state.json': { type: 'JSON', description: 'Branch-keyed ledger of the control loop\'s terminal decisions (halted / landed / staged) — survives restarts.' },

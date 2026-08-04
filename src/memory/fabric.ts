@@ -485,6 +485,9 @@ export async function buildFabricSnapshot(deps: FabricDeps): Promise<FabricSnaps
 	for (const repo of repos) {
 		for (const e of await listEpisodes(deps.stateDir, repo).catch(() => [])) {
 			if (!repoSet.has(normalizeRepoPath(e.repo))) continue;
+			// Quarantined pairs (deepen 07: hand-edited episodes) carry human content and a sidecar
+			// that no longer describes the markdown — never projected into agent context.
+			if (e.quarantined) continue;
 			episodes.push({ type: "episode", source: { repo: e.repo }, id: e.id, excerpt: e.excerpt, windowStart: e.windowStart, windowEnd: e.windowEnd });
 		}
 	}
