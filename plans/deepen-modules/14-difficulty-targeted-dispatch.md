@@ -4,7 +4,6 @@ PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: moderate
 TOUCHES: src/dispatch.ts, src/squad-manager.ts (escalation policy), src/model-outcomes.ts / task-outcome counters
-BLOCKED_BY: PR #310/#311 train merging (touches squad-manager dispatch paths)
 MODE: afk
 
 ## Goal
