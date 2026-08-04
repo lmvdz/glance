@@ -1,5 +1,5 @@
 # Card-kind registry — one home per channel-card kind
-STATUS: needs-lars
+STATUS: open
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: moderate
@@ -14,7 +14,7 @@ hand-synchronized. tests/channel-card-kinds-sync.test.ts stops being the only th
 tables together.
 
 ## needs-lars (2026-08-04, iteration 36)
-OPEN QUESTION FOR LARS: merge PR #317 (concern 08 slice 1 — the shared transcript-event-kinds
+UNBLOCKED (2026-08-04, merge train): the blocking merges (#317) landed — resumable. Original question was: merge PR #317 (concern 08 slice 1 — the shared transcript-event-kinds
 module). The registry this concern wants (one registration carrying schema + face + render)
 BUILDS ON that module: #317 already made the webapp's kind union and POINTER/iconClass tables
 compile-time-forced from the shared list; the registry's remaining step is deriving the daemon

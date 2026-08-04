@@ -1,5 +1,5 @@
 # One wire-contract module for daemon and webapp
-STATUS: needs-lars
+STATUS: open
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -26,7 +26,7 @@ contract IS the natural core the split orbits.
   generated per-domain; transcript-event PAYLOAD schemas.
 
 ## needs-lars (2026-08-04, iteration 32)
-OPEN QUESTION FOR LARS: merge the deepen PR train (at minimum #315, the concern-06 types-split
+UNBLOCKED (2026-08-04, merge train): the blocking merges (#315/#317) landed — resumable. Original question was: merge the deepen PR train (at minimum #315, the concern-06 types-split
 carrying src/core-types.ts) so this concern's remaining slices can proceed. The dto.ts
 hand-mirror slices are DESIGNED on the 06 kernel: dto's head mirrors (AgentStatus,
 PendingRequest, IssueRef, the transcript cluster) are field-compatible with core-types.ts and
