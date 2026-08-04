@@ -1,5 +1,5 @@
 # Room-session module behind HubShell
-STATUS: in-progress
+STATUS: done
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: moderate
@@ -37,6 +37,18 @@ its interface and HubShell becomes a view.
   channel) + MEDIUM (presence-fallback parity) + LOW (unmount cancel); codex independently
   found the same markRead fix and presence parity, plus the render-phase ref write (sinks now
   publish via useLayoutEffect). Seven adjudicated rows across the two rounds.
+
+- Slice 3 done (2026-08-04, iteration 35) — CONCERN COMPLETE: the optimistic mention-turn
+  ledger moves into the session (register/reconcile, pure + idempotent on ack re-delivery);
+  the local: failure CARD stays a rendering concern in HubShell. BOTH blind passes CLEAN with
+  itemized parity verification (idempotency, channel routing, reason fallback, pass-through
+  fields, leak parity) — and both independently flagged the same PRE-EXISTING quirk, preserved
+  not fixed: a failure card for a non-active channel is dropped by reduceChannelEntries
+  (recorded here as a candidate polish, not a regression). HubShell is now a view over the
+  session: cursor discipline (slice 1), transport orchestration (slice 2), and optimistic
+  bookkeeping (slice 3) all live behind lib/roomSession.ts with 15 unit tests including 4
+  scripted interleavings. Deliberately left: the WS subscription itself stays in useTaskContext
+  (an app-wide transport, not room-session state).
 
 ## Provenance
 Whole-repo report candidate 5 (Worth exploring); the stale-running-claims incident class

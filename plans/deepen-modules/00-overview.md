@@ -38,6 +38,12 @@ render-phase-ref-write M arrived at the same parameterized-markRead fix from dif
 directions; presence parity found by both). The port pattern is proven: ports-and-adapters
 made a React wiring hazard class table-testable.
 
+## Iteration 35 (2026-08-04, goal mode) — CONCERN 10 DONE
+Slice 3 (mention-turn ledger) closes the concern: HubShell is a view; the session module owns
+cursor + transport + optimistic bookkeeping with 15 tests. Both lineages CLEAN with itemized
+parity checks, both independently naming the same pre-existing cross-channel card quirk —
+convergence even on the non-findings now. THIRTEEN concerns done.
+
 ## Queue pivot (2026-08-03, Lars)
 
 Concerns 14–16 are the CS329A borrows (plans/research-cs329a/BRIEF.md), absorbed into this queue

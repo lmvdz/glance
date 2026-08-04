@@ -213,6 +213,27 @@ export class RoomSession {
 		this.sinks().markRead(channelId, lastSeq);
 	}
 
+	/** Register an optimistic mention-steer turn (slice 3): remembered until its ack arrives. */
+	registerMentionTurn(clientTurnId: string, channelId: string, target: string): void {
+		this.mentionTurns.set(clientTurnId, { channelId, target });
+	}
+
+	/** Reconcile a command-ack batch against pending mention turns. Success clears silently;
+	 *  failure clears AND returns the failure facts so the caller can mint its local: card.
+	 *  Pure bookkeeping — the card entry itself (a rendering concern) stays with the caller. */
+	reconcileMentionAcks(acks: ReadonlyArray<{ clientTurnId: string; ok: boolean; reason?: string }>): Array<{ channelId: string; target: string; reason: string; ack: { clientTurnId: string; ok: boolean; reason?: string } }> {
+		const failures: Array<{ channelId: string; target: string; reason: string; ack: { clientTurnId: string; ok: boolean; reason?: string } }> = [];
+		for (const ack of acks) {
+			const pending = this.mentionTurns.get(ack.clientTurnId);
+			if (!pending) continue;
+			this.mentionTurns.delete(ack.clientTurnId);
+			if (!ack.ok) failures.push({ channelId: pending.channelId, target: pending.target, reason: ack.reason ?? 'unknown', ack });
+		}
+		return failures;
+	}
+
+	private readonly mentionTurns = new Map<string, { channelId: string; target: string }>();
+
 	/** Invalidate every in-flight openChannel (grok LOW: the old `alive` flag also covered
 	 *  unmount; callers put this in their teardown so a straggler can't sink-apply after it). */
 	cancelPending(): void {

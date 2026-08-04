@@ -185,3 +185,27 @@ test('openChannel failure reports the error without poisoning a superseding open
 	await openB;
 	expect(h.loads.at(-1)).toBe('done');
 });
+
+describe('mention-turn reconciliation (slice 3)', () => {
+	test('success clears silently; failure clears and yields the card facts once', () => {
+		const h = harness();
+		h.session.registerMentionTurn('t1', 'a', 'unit-x');
+		h.session.registerMentionTurn('t2', 'a', 'unit-y');
+		const failures = h.session.reconcileMentionAcks([
+			{ clientTurnId: 't1', ok: true },
+			{ clientTurnId: 't2', ok: false, reason: 'busy' },
+			{ clientTurnId: 'unknown', ok: false, reason: 'ignored' },
+		]);
+		expect(failures.map((f) => [f.target, f.reason])).toEqual([['unit-y', 'busy']]);
+		// Replayed ack batch (the WS re-delivers): nothing pending, nothing minted twice.
+		expect(h.session.reconcileMentionAcks([{ clientTurnId: 't2', ok: false, reason: 'busy' }])).toEqual([]);
+	});
+
+	test('a failure carries the channel it was REGISTERED against, not the active one', () => {
+		const h = harness();
+		h.session.registerMentionTurn('t1', 'a', 'unit-x');
+		void h.session.openChannel('b');
+		const failures = h.session.reconcileMentionAcks([{ clientTurnId: 't1', ok: false, reason: 'gone' }]);
+		expect(failures[0]?.channelId).toBe('a');
+	});
+});

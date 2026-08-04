@@ -149,7 +149,6 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
   const [modelOptions, setModelOptions] = useState<ModelOption[]>(DEFAULT_MODELS);
   const [sending, setSending] = useState(false);
   const typingStopTimer = useRef<number | undefined>(undefined);
-  const pendingMentionTurns = useRef(new Map<string, { channelId: string; target: string }>());
   const [anchorEntryId, setAnchorEntryId] = useState<string | undefined>();
   const [replyTarget, setReplyTarget] = useState<ChannelEntry | undefined>();
   const [replyFocusKey, setReplyFocusKey] = useState(0);
@@ -267,21 +266,16 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
 
   useEffect(() => {
     if (!commandAcks.length) return;
-    for (const ack of commandAcks) {
-      const pending = pendingMentionTurns.current.get(ack.clientTurnId);
-      if (!pending) continue;
-      if (ack.ok) {
-        pendingMentionTurns.current.delete(ack.clientTurnId);
-      } else {
-        pendingMentionTurns.current.delete(ack.clientTurnId);
-        setEntries((prev) => reduceChannelEntries(prev, [managerCardEntry(pending.channelId, `Mention steer failed for ${pending.target}: ${ack.reason}`, 'local:mention-steer-failed', { face: { title: 'Mention steer failed', body: ack.reason, tone: 'destructive', pinned: { target: pending.target } }, ack })], activeChannelId));
-      }
+    // Reconciliation bookkeeping lives in the session (concern 10 slice 3); only the local:
+    // failure CARD — a rendering concern — is minted here.
+    for (const failure of session.reconcileMentionAcks(commandAcks)) {
+      setEntries((prev) => reduceChannelEntries(prev, [managerCardEntry(failure.channelId, `Mention steer failed for ${failure.target}: ${failure.reason}`, 'local:mention-steer-failed', { face: { title: 'Mention steer failed', body: failure.reason, tone: 'destructive', pinned: { target: failure.target } }, ack: failure.ack })], activeChannelId));
     }
-  }, [activeChannelId, commandAcks]);
+  }, [activeChannelId, commandAcks, session]);
 
   const dispatchMentionSteer = (target: AgentDTO, steerText: string) => {
     const clientTurnId = `mention:${Date.now()}:${Math.random().toString(36).slice(2)}`;
-    pendingMentionTurns.current.set(clientTurnId, { channelId: activeChannelId, target: target.name || target.id });
+    session.registerMentionTurn(clientTurnId, activeChannelId, target.name || target.id);
     sendConsoleCommand({
       type: 'prompt',
       id: target.id,
