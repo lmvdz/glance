@@ -287,7 +287,7 @@ test("probe FAILURE mid-land threads retryable:true onto the LandResult and roll
 // non-retryable arm is untouched (still records `rejected`).
 test("SquadManager.land(): a stale-probe FAILURE records `blocked` (never `rejected`) — a GENUINE stale finding still records `rejected` unchanged", async () => {
 	const { modelOutcomes } = await import("../src/model-outcomes.ts");
-	const { landFailureCount } = await import("../src/land-ledger.ts");
+	const { landFailureCount } = await import("../src/rail/land-ledger.ts");
 	const { recordProof } = await import("../src/proof.ts");
 	const { SquadManager } = await import("../src/squad-manager.ts");
 	const { SubagentTracker } = await import("../src/subagents.ts");

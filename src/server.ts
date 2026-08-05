@@ -19,7 +19,7 @@ import type { Server, ServerWebSocket } from "bun";
 import { Result } from "effect";
 import type { ArtifactCommentDTO, ClientCommand, CreateAgentOptions, FeatureCategory, FeatureCriterion, FeatureDecision, FeatureDTO, FeatureRelationship, FeatureStage, IssueRef, PlanAnnotationTarget, PlanRevisionCandidateState, PresenceSnapshot, SquadEvent } from "./types.ts";
 import { ChatAttachmentDimensionError, ChatAttachmentQuotaExceededError } from "./chat-attachment.ts";
-import { envBool, envBoolAliased, envInt, rootFactoryEnabledWith } from "./config.ts";
+import { envBool, envBoolAliased, envInt, landConfirmEnabled, rootFactoryEnabledWith } from "./config.ts";
 import { invalidFileAssignees, invalidOrgAssignees, isVoteAssignee } from "./feature-assignees.ts";
 import { type AutonomyFacts, doctorHostVisible } from "./doctor.ts";
 import { DERIVED_SANDBOX_IMAGE } from "./gate-runner.ts";
@@ -1006,7 +1006,7 @@ export class SquadServer {
 				webappDist: existsSync(WEBAPP_INDEX),
 				uptimeMs: Math.round(process.uptime() * 1000),
 			},
-			autonomy: await this.autonomyFacts(),
+			autonomy: await this.autonomyFacts(managers),
 			// Plane loads its secrets ONCE, at boot, in THIS process. The CLI's shell does not have them, so
 			// only the daemon can answer whether the work queue is connected. (grok-4.5)
 			plane: await this.planeHealth(),
@@ -1023,7 +1023,7 @@ export class SquadServer {
 	}
 
 	/**
-	 * The autonomy the daemon is ACTUALLY running, read from the one registry that resolves it
+	 * The autonomy the daemon is ACTUALLY running. Most flags read the one registry that resolves them
 	 * (`runtime-settings.ts`: persisted setting > env > `defaultEnabled`).
 	 *
 	 * The first cut of this hand-rolled `envBool(key, false)` for each flag — and EVERY one of these
@@ -1031,8 +1031,13 @@ export class SquadServer {
 	 * the daemon is a viewer" while that daemon was dispatching, driving, landing, and auto-answering
 	 * approval gates. The command whose entire purpose is to stop the operator from guessing at the
 	 * daemon's posture, guessing at the daemon's posture. Never re-derive a default; ask the resolver.
+	 *
+	 * `landConfirm` is the one exception to "ask the resolver": it's asked of a LIVE manager instance
+	 * instead (`SquadManager.effectiveLandConfirm`), because that field is cached once at construction —
+	 * re-calling the resolver here would re-read the CURRENT env, which can diverge from what an
+	 * already-running manager actually does (gauntlet round 1, glance#329).
 	 */
-	private async autonomyFacts(): Promise<AutonomyFacts> {
+	private async autonomyFacts(managers: SquadManager[]): Promise<AutonomyFacts> {
 		const states = this.opts.runtimeSettings ? await this.opts.runtimeSettings.states() : featureFlagStates();
 		const on = (key: FeatureFlagKey): boolean => states.find((f) => f.key === key)?.enabled ?? false;
 		return {
@@ -1046,8 +1051,17 @@ export class SquadServer {
 			// file mode — `up` knows what it actually started, so believe it when it tells us. Guessing here
 			// is how a doctor tells you a model is answering your gates when it isn't, and vice versa.
 			autosupervise: on("OMP_SQUAD_AUTOSUPERVISE") || (this.opts.superviseExternal ?? on("OMP_SQUAD_AUTO_SUPERVISE")),
-			// Not a feature flag: read straight from the env the orchestrator reads.
-			landConfirm: envBool("OMP_SQUAD_LAND_CONFIRM", false),
+			// Not a feature flag, and NOT `landConfirmEnabled()` either (gauntlet round 1, codex): that
+			// resolver re-reads `process.env` on every call, but `squad-manager.ts`'s `landConfirm` field
+			// resolves it ONCE at construction and never again. Calling the resolver here re-derives a
+			// value that can diverge from what a LIVE manager will actually do on its next GREEN verify if
+			// the env ever changes after that manager was constructed (no production path does this today —
+			// runtime-settings never touches this flag — but the class is open, and a doctor that reports a
+			// different value than the manager's own cached field defeats the entire point of this ticket).
+			// Source it from a live manager instance's own cached value instead — the SAME value `land()`
+			// will read — falling back to the construction-time resolver only when no manager exists to ask
+			// (an empty fleet; matches this file's prior behavior for that edge case).
+			landConfirm: managers[0]?.effectiveLandConfirm ?? landConfirmEnabled(),
 			regressionGate: on("OMP_SQUAD_REGRESSION_GATE"),
 			// Cost-gate posture (adw-factory-borrows concern 09): mode is env-global; aggregate readiness
 			// is per-stateDir — file mode's resolveStateDir() is exactly the dir SquadManager defaults to.

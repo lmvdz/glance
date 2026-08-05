@@ -8,7 +8,7 @@
  */
 
 import { EventEmitter } from "node:events";
-import { envBool, envBoolAliased, envInt, envNumber, raceOnceEnabled } from "./config.ts";
+import { envBool, envBoolAliased, envInt, envNumber, landConfirmEnabled, raceOnceEnabled } from "./config.ts";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import { existsSync, realpathSync } from "node:fs";
@@ -182,7 +182,7 @@ import { selectReapable, type WorktreeInfo } from "./worktree-reaper.ts";
 import { scrubbedSpawnEnv } from "./spawn-env.ts";
 import { changedFiles, filesTouchedSinceBase } from "./explore.ts";
 import { appendReceipt, confirmDeliveredFlags, EFFICIENCY_FLAG_PREFIX, readAllReceipts, readReceipts, RunAccumulator, splitCapabilityTokens } from "./receipts.ts";
-import { DecisionLedger } from "./memory/index.ts";
+import { DecisionLedger, renderReviewerPrecision } from "./memory/index.ts";
 import { classifyWhereToLookEntry, listSymptoms, readSymptom, saveSymptom, statWhereToLookEntry, symptomId, validateSymptomText, validateWhereToLookCount, type SymptomEntry } from "./memory/symptoms.ts";
 import { buildPrBody } from "./pr-body.ts";
 import { membraneBreakerCadence } from "./membrane-breaker-cadence.ts";
@@ -204,7 +204,7 @@ import { addPlanRevisionCandidate, appendCommentEvent, type ArtifactComment, typ
 import { castPlanVote as appendPlanVoteCast, closePlanVoteRound as appendPlanVoteClose, currentPlanVoteRound as readCurrentPlanVoteRound, listPlanVoteRounds as readPlanVoteRounds, type OpenPlanVoteInput, openPlanVoteRound, recordPlanVoteCommit, tallyPlanVoteRound } from "./plan-votes.ts";
 import { isPlanDocPath, planDocHeadRevision, resolveSafeDocPath } from "./plan-doc.ts";
 import type { VoteQuorum } from "./plan-vote-quorum.ts";
-import { landFailureCount, readForcedLands, readLandLedger, readValidatorOverrides, recordForcedLand, recordLandOutcome, recordValidatorOverride } from "./land-ledger.ts";
+import { landFailureCount, readForcedLands, readLandLedger, readValidatorOverrides, recordForcedLand, recordLandOutcome, recordValidatorOverride, classifyLand, writeLandReceipt, postReceiptComment, type LandReceipt } from "./rail/index.ts";
 import { isLandingUnit, landingRosterOf } from "./is-landing-unit.ts";
 import { readTaskOutcomes, recordTaskOutcome, type TaskOutcomeRow } from "./task-outcomes.ts";
 import { buildTaskClassMatrix } from "./omp-graph/task-class-matrix.ts";
@@ -1048,6 +1048,27 @@ function validationRecord(value: unknown): ValidationRecord | undefined {
 	return rec as unknown as ValidationRecord;
 }
 
+/** Parse `git diff --numstat` into a files list and summed insertions/deletions for a land receipt
+ *  (T6, glance#334). Binary files show "-\t-\t<path>" — counted as a touched file, no line delta.
+ *  Tolerant: an unparseable line is skipped, never thrown. */
+function parseNumstat(out: string): { files: string[]; insertions: number; deletions: number } {
+	const files: string[] = [];
+	let insertions = 0;
+	let deletions = 0;
+	for (const line of out.split("\n")) {
+		if (!line.trim()) continue;
+		const parts = line.split("\t");
+		if (parts.length < 3) continue;
+		const [add, del, ...rest] = parts;
+		const file = rest.join("\t");
+		if (!file) continue;
+		files.push(file);
+		if (add !== "-") insertions += Number(add) || 0;
+		if (del !== "-") deletions += Number(del) || 0;
+	}
+	return { files, insertions, deletions };
+}
+
 export class SquadManager extends EventEmitter {
 	readonly agents = new Map<string, AgentRecord>();
 	private readonly bus: FederationBus;
@@ -1148,8 +1169,14 @@ export class SquadManager extends EventEmitter {
 	private readonly store: Store;
 	/** True when the registry owns the machine-global janitors (DB mode). */
 	private readonly skipGlobalJanitors: boolean;
-	/** Safety valve (OMP_SQUAD_LAND_CONFIRM, default ON; set =0 to auto-merge): a GREEN verify stages a one-tap Land instead of blind-merging into the shared checkout. */
-	private readonly landConfirm = process.env.OMP_SQUAD_LAND_CONFIRM !== "0";
+	/** Safety valve (OMP_SQUAD_LAND_CONFIRM, default ON; set =0 to auto-merge): a GREEN verify stages a one-tap Land instead of blind-merging into the shared checkout. Resolved ONCE, at construction, from `config.ts`'s `landConfirmEnabled()` — never re-read afterward. `effectiveLandConfirm` below exposes THIS cached value (not a fresh env re-read) so `glance doctor` reports exactly what this running instance will act on, even in the (today theoretical — nothing mutates this env var post-boot) case where the process env changes after construction (glance#329, gauntlet round 1: codex found the server's payload previously re-read the env per-request while this field was cached at construction, a lifetime mismatch that could report the opposite of what a GREEN verify would actually do). */
+	private readonly landConfirm = landConfirmEnabled();
+	/** The land-confirm posture THIS instance is actually running under (see `landConfirm` above) — read
+	 *  this from the doctor/observability payload, never `landConfirmEnabled()` directly, so a report can
+	 *  never diverge from what this manager will do on its next GREEN verify. */
+	get effectiveLandConfirm(): boolean {
+		return this.landConfirm;
+	}
 	private pollTimer?: Timer;
 	/** Throttle counter for the periodic orphan-host reap in poll(). */
 	private reapTicks = 0;
@@ -4467,6 +4494,10 @@ export class SquadManager extends EventEmitter {
 		// receipts read it doesn't need.
 		const lastReceipt = !result.retryable ? (await readReceipts(this.stateDir, dto.id)).at(-1) : undefined;
 		const effectiveModel = lastReceipt?.model ?? dto.model;
+		// Snapshot the validator record for the land receipt (T6, glance#334) BEFORE the success block
+		// below clears a now-stale veto (`rec.dto.validation = undefined` on a successful override-land):
+		// the receipt should honestly cite the review that ran, veto-then-overridden included.
+		const validationForReceipt = rec.dto.validation;
 		// Update the branch's failure streak: an auto-land failure bumps it (drives the cap above), any
 		// success clears it. A manual (auto:false) failure is the operator's call — never penalized.
 		// A retryable refusal (dirty main checkout) is an environmental precondition, not a branch failure —
@@ -4707,7 +4738,93 @@ export class SquadManager extends EventEmitter {
 		}
 		void this.recordAudit(LOCAL_ACTOR, "land", id, result.ok ? "ok" : "error", result.detail ?? result.message);
 		void this.store.appendAudit({ actor: LOCAL_ACTOR.id, action: "land", target: id, detail: { outcome: result.ok ? "ok" : "error" } }).catch(() => {});
+		// The land receipt (T6, glance#334): a self-contained HTML the human approves instead of the
+		// diff, plus a compact PR comment linking it. Only for a terminal outcome — a retryable deferral
+		// (dirty main) isn't a land, so it gets no receipt. Best-effort, after the fact: never gates or
+		// delays the land it records (mirrors every other post-land ledger write above).
+		if (!result.retryable) void this.emitLandReceipt(rec, result, effectiveModel, lastReceipt, validationForReceipt);
 		return result;
+	}
+
+	/**
+	 * Write the land receipt (T6, glance#334) and post its compact PR comment. Reads the land's own
+	 * outputs — the `LandResult`, the validator record (T4's `reviewerPrecision`), the run's cost
+	 * receipt — and renders them; it never touches the land gate. Best-effort by contract: every fault
+	 * (a git read, a disk write, a `gh` call) degrades to a log line, never a thrown land failure.
+	 */
+	private async emitLandReceipt(
+		rec: AgentRecord,
+		result: LandResult,
+		effectiveModel: string | undefined,
+		lastReceipt: RunReceipt | undefined,
+		validation: ValidationRecord | undefined,
+	): Promise<void> {
+		try {
+			const dto = rec.dto;
+			const branch = dto.branch ?? "";
+			if (!branch) return; // a receipt is branch-keyed, like the land ledger — nothing to key on
+			const merged = result.merged;
+			// Attribution comes from the land's OWN in-lock SHAs (`result.head0`/`result.landedCommit`,
+			// captured while the land held the repo lock — land.ts/land-pr.ts), NOT a post-hoc HEAD re-read:
+			// a concurrent land moving HEAD between the merge and here would otherwise attribute another
+			// land's commit + rollback to this receipt (the TOCTOU). Nothing merged ⇒ no commit at all, per
+			// LandReceipt's contract (a rejected land shows no "What landed" commit).
+			const commit = merged ? result.landedCommit : undefined;
+			const rollbackPoint = merged ? result.head0 : undefined;
+			let files: string[] = [];
+			let insertions: number | undefined;
+			let deletions: number | undefined;
+			let commitMessage: string | undefined;
+			if (merged && commit) {
+				// The landed set + LOC + subject, all from FIXED SHAs (`head0..landedCommit`) — deterministic
+				// regardless of what HEAD points at now. An EMPTY numstat is the real (empty) landed set, never
+				// silently replaced by a prior receipt's file list. Best-effort: a git fault leaves the field
+				// blank (honest absence), never fabricated. In PR mode `landedCommit` is the PR's merge commit,
+				// fetched into this checkout by the land-pr path, so these reads resolve here too.
+				if (result.head0) {
+					const ns = await hardenedGit(["diff", "--numstat", `${result.head0}..${commit}`], { cwd: dto.repo });
+					if (ns.code === 0) {
+						const parsed = parseNumstat(ns.stdout);
+						files = parsed.files;
+						insertions = parsed.insertions;
+						deletions = parsed.deletions;
+					}
+				}
+				const subj = await hardenedGit(["log", "-1", "--format=%s", commit], { cwd: dto.repo });
+				commitMessage = (subj.code === 0 ? subj.stdout.trim() : "") || result.message || undefined;
+			}
+			const slug = repoIdentity(dto.repo).split("/").slice(-2).join("/");
+			const costUsd = lastReceipt?.costUsd ?? dto.receipt?.costUsd;
+			const receipt: LandReceipt = {
+				repo: slug,
+				branch,
+				commit,
+				message: commitMessage,
+				files,
+				insertions,
+				deletions,
+				landed: merged,
+				at: Date.now(),
+				gate: classifyLand(result),
+				validation,
+				rollbackPoint,
+				forcedWithoutProof: !!result.forcedWithoutProof,
+				cost: {
+					costUsd,
+					costUnknown: costUsd === undefined,
+					model: effectiveModel ?? lastReceipt?.model,
+					tokens: lastReceipt?.tokens?.total,
+				},
+			};
+			const htmlPath = await writeLandReceipt(this.stateDir, receipt);
+			this.log("info", `land receipt written for ${dto.name}: ${htmlPath}`);
+			if (result.prNumber) {
+				const posted = await postReceiptComment(dto.repo, slug, result.prNumber, receipt, { receiptHref: htmlPath, hrefKind: "path" });
+				if (!posted) this.log("warn", `land receipt PR comment failed for ${dto.name} (#${result.prNumber}) — non-fatal`);
+			}
+		} catch (err) {
+			this.log("warn", `land receipt failed for ${rec.dto.name} (non-fatal): ${errText(err)}`);
+		}
 	}
 
 	/**
@@ -5174,6 +5291,18 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
+	 * Injection seam (mirrors `validatorJudgeOverride` above) so tests can point the land receipt's
+	 * reviewer-precision reader at a fixture ledger instead of the repo-committed one — DELIBERATELY a
+	 * method, never an environment variable (gauntlet round 1, codex's "env-ledger-shadow" finding: an
+	 * env hatch here is reachable from a launch-directory `.env`, which Bun auto-loads at boot, letting
+	 * a malicious/misplaced `.env` redirect the land path's ledger read). `undefined` ⇒ `validatorGate`'s
+	 * own default (`DEFAULT_REVIEWER_LEDGER_PATH`, the real repo-committed ledger).
+	 */
+	protected reviewerLedgerPathOverride(): string | undefined {
+		return undefined;
+	}
+
+	/**
 	 * Independent-validator veto (Epic 3, DESIGN §1) — runs BEFORE any mode dispatch, on every
 	 * `landBranch` call INCLUDING forced lands (`requireProof:false` never skips it — a forced land
 	 * bypasses the proof gate, not the semantic one). Scores the diff against the feature's declared
@@ -5200,6 +5329,7 @@ export class SquadManager extends EventEmitter {
 			authorModel: rec?.dto.model,
 			authorHarness: rec?.dto.harness,
 			agentId: opts.agentId,
+			reviewerLedgerPath: this.reviewerLedgerPathOverride(),
 		});
 		if (rec) {
 			rec.dto.validation = record;
@@ -12924,7 +13054,12 @@ export class SquadManager extends EventEmitter {
 	}
 
 	private emitValidationVerdictEvent(rec: AgentRecord, record: ValidationRecord): void {
-		this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_GATE_VERDICT, `The gate says ${record.verdict}, with reviewers agreeing ${(record.agreement * 100).toFixed(0)}% of the time and ${(record.confidence * 100).toFixed(0)}% confidence. ${record.verdict === "pass" ? "Nothing is waiting on you unless you disagree with it." : "This one needs you before it can go further."}`, {
+		// glance#332: the receipt a human approves cites the judging lineage's MEASURED ledger precision
+		// — a real number ("reviewer X, measured precision p% (n adjudicated rows)") or an honest
+		// "unmeasured (n=0)", never fabricated. Absent only on the no-criteria "skipped" verdict, which
+		// never resolves a reviewer identity in the first place.
+		const precisionNote = record.reviewerPrecision ? ` (${renderReviewerPrecision(record.reviewerPrecision)})` : "";
+		this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_GATE_VERDICT, `The gate says ${record.verdict}, with reviewers agreeing ${(record.agreement * 100).toFixed(0)}% of the time and ${(record.confidence * 100).toFixed(0)}% confidence${precisionNote}. ${record.verdict === "pass" ? "Nothing is waiting on you unless you disagree with it." : "This one needs you before it can go further."}`, {
 			verdict: record.verdict,
 			agreement: record.agreement,
 			confidence: record.confidence,
@@ -12934,6 +13069,7 @@ export class SquadManager extends EventEmitter {
 			authorLineage: record.authorLineage,
 			reviewerLineage: record.reviewerLineage,
 			sameLineage: record.sameLineage,
+			reviewerPrecision: record.reviewerPrecision,
 			lensAdvisory: record.lensAdvisory,
 			lensVerify: record.lensVerify,
 			gateLogPaths: record.gateLogPaths,

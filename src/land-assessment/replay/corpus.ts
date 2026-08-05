@@ -46,7 +46,7 @@
 
 import { createHash } from "node:crypto";
 import { readDoneProofLedger, type DoneProof } from "../../done-proof.ts";
-import { readForcedLands, readLandLedger, readValidatorOverrides } from "../../land-ledger.ts";
+import { readForcedLands, readLandLedger, readValidatorOverrides } from "../../rail/index.ts";
 import { computeRepositoryId } from "../id.ts";
 import { git, type AnalyzerContext } from "../analyzers/plugin.ts";
 

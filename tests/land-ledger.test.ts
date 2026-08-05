@@ -1,5 +1,5 @@
 /**
- * Branch-keyed auto-land failure ledger (src/land-ledger.ts) — the restart-safe retry cap.
+ * Branch-keyed auto-land failure ledger (src/rail/land-ledger.ts) — the restart-safe retry cap.
  * Covers bump-on-failure, clear-on-success, the undefined-branch no-op, and on-disk persistence
  * (the whole point: the streak survives a daemon restart, keyed by branch not the re-minted agent id).
  */
@@ -8,7 +8,7 @@ import { expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { landFailureCount, readForcedLands, readLandLedger, readValidatorOverrides, recordForcedLand, recordLandOutcome, recordValidatorOverride } from "../src/land-ledger.ts";
+import { landFailureCount, readForcedLands, readLandLedger, readValidatorOverrides, recordForcedLand, recordLandOutcome, recordValidatorOverride } from "../src/rail/land-ledger.ts";
 
 async function tmpDir(): Promise<string> {
 	return fs.mkdtemp(path.join(os.tmpdir(), "ledger-"));
