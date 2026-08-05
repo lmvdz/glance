@@ -136,11 +136,13 @@
  *    a regression that silently breaks the exclusion check fails the suite
  *    even if the slower multi-process race test doesn't happen to hit it.
  *
- * ROLLOUT NOTE (codex, out of scope here — lmvdz/glance#352): an old,
+ * ROLLOUT NOTE (codex, out of scope here — lmvdz/glance#350): an old,
  * unprotected (pre-#345) daemon binary doesn't know about the fence at all
  * and can still race a new one during a mixed-version upgrade window. This
- * code can't retroactively fence a binary that predates the fence; #352
- * tracks the rollout/version-gate question separately.
+ * code can't retroactively fence a binary that predates the fence; #350
+ * tracks the rollout/version-gate question separately. (An earlier duplicate,
+ * #352, was filed independently and consolidated into #350 by the repo
+ * owner — #350 is canonical.)
  *
  * ROUND 4 (this fix). A scoped delta-verify of round 3 (codex) closed EISDIR
  * (#4 above) but found residual depth in the other three:
