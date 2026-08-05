@@ -655,6 +655,30 @@ test("landAgentPr: default merge method preserves ancestry (assertMerged ok via 
 	expect(res.ok).toBe(true);
 });
 
+test("landAgentPr surfaces receipt attribution: landedCommit = the PR's landed work (NOT local HEAD), head0 = the pre-merge base (T6, glance#334)", async () => {
+	const { repo, origin } = await baseline("lp-receipt-facts-");
+	const wt = await branchWorktree(repo, "squad/a1", { "feature.txt": "new\n" });
+	const stateDir = await tmpDir("lp-receipt-facts-state-");
+	prList = [];
+	mergeSimulator = githubMerge("squad/a1");
+
+	const localMainBefore = await gitOut(repo, "rev-parse", "main"); // the PRIMARY checkout — never merged into
+	const originBaseBefore = await gitOut(origin, "rev-parse", "main"); // the base the PR merges INTO
+	const branchTip = await gitOut(wt, "rev-parse", "HEAD"); // the actual landed work
+
+	const res = await landAgentPr({ repo, worktree: wt, branch: "squad/a1", message: "m", commitWip: false, defaultBranch: "main" }, stateDir);
+
+	expect(res.ok).toBe(true);
+	expect(res.merged).toBe(true);
+	// The gauntlet's PR-mode defect: `gh pr merge` never moves the local checkout HEAD, so a receipt
+	// built from local HEAD would record the WRONG commit. landedCommit must be the PR's landed work.
+	expect(res.landedCommit).toBe(branchTip);
+	expect(res.landedCommit).not.toBe(localMainBefore); // NOT the stale local checkout HEAD
+	expect(await gitOut(repo, "rev-parse", "main")).toBe(localMainBefore); // local main truly never moved
+	// head0 (rollback point) is the base the PR merged into, captured pre-merge.
+	expect(res.head0).toBe(originBaseBefore);
+});
+
 // ── landAgentPr — scratch gate red (acceptance) ──────────────────────────────────────────────────
 
 test("landAgentPr: acceptance gate fails on scratch merge ⇒ refused, PR stays open, no DoneProof", async () => {

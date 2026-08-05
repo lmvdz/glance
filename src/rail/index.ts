@@ -26,6 +26,7 @@ export type { LandReceipt, LandReceiptGate, LandReceiptCost, GateStatus, PanelVe
 export {
 	renderReceiptHtml,
 	renderReceiptComment,
+	mdEsc,
 	classifyLand,
 	writeLandReceipt,
 	postReceiptComment,

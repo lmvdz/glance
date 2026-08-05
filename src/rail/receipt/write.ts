@@ -28,12 +28,18 @@ export function landReceiptDir(stateDir: string): string {
 	return path.join(stateDir, "land-receipts");
 }
 
-/** A filesystem-safe, collision-resistant receipt filename for a land: branch (sanitized) + timestamp.
- *  Distinct lands on the same branch get distinct files — a receipt is a point-in-time record, never
- *  overwritten. */
-export function landReceiptFilename(branch: string, at: number): string {
+/**
+ * A filesystem-safe, collision-resistant receipt filename: sanitized branch + timestamp + a UNIQUE
+ * token. The token is the landed commit SHA when known, else random — WITHOUT it, the lossy branch
+ * sanitizer (`feature/a+b` and `feature/a-b` both → `feature-a-b`) plus a same-millisecond timestamp
+ * would collide across two concurrent cross-repo lands that share one stateDir, and the second would
+ * silently overwrite the first (gauntlet round 1, codex MEDIUM). `writeLandReceipt` additionally
+ * refuses to overwrite an existing file, so even a token collision never destroys a prior receipt.
+ */
+export function landReceiptFilename(branch: string, at: number, token?: string): string {
 	const safe = branch.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "land";
-	return `${safe}-${at}.html`;
+	const uniq = (token && token.replace(/[^a-zA-Z0-9]+/g, "").slice(0, 12)) || Math.random().toString(36).slice(2, 10);
+	return `${safe}-${at}-${uniq}.html`;
 }
 
 /**
@@ -102,9 +108,22 @@ function parseNewRegressions(detail: string): string[] {
 export async function writeLandReceipt(stateDir: string, receipt: LandReceipt): Promise<string> {
 	const dir = landReceiptDir(stateDir);
 	await fs.mkdir(dir, { recursive: true });
-	const file = path.join(dir, landReceiptFilename(receipt.branch, receipt.at));
-	await fs.writeFile(file, renderReceiptHtml(receipt), "utf8");
-	return file;
+	const html = renderReceiptHtml(receipt);
+	// `wx` = fail if the path exists — a receipt is an immutable point-in-time record and must never be
+	// silently overwritten. On the astronomically-rare collision (same branch, ms, and token), retry with
+	// a fresh random token rather than clobber the existing receipt or throw the land's best-effort call.
+	for (let attempt = 0; attempt < 5; attempt++) {
+		const token = attempt === 0 ? receipt.commit : undefined; // attempt 0 uses the commit SHA; retries force random
+		const file = path.join(dir, landReceiptFilename(receipt.branch, receipt.at, token));
+		try {
+			await fs.writeFile(file, html, { encoding: "utf8", flag: "wx" });
+			return file;
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") throw err;
+			// existing receipt at this name — loop to mint a new random token
+		}
+	}
+	throw new Error("writeLandReceipt: could not mint a non-colliding receipt filename after 5 attempts");
 }
 
 /**

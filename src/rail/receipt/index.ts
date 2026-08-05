@@ -6,5 +6,5 @@
 
 export type { LandReceipt, LandReceiptGate, LandReceiptCost, GateStatus, PanelVerdict } from "./types.ts";
 export { renderReceiptHtml } from "./render-html.ts";
-export { renderReceiptComment, type CommentOptions } from "./render-comment.ts";
+export { renderReceiptComment, mdEsc, type CommentOptions } from "./render-comment.ts";
 export { classifyLand, writeLandReceipt, postReceiptComment, landReceiptDir, landReceiptFilename } from "./write.ts";

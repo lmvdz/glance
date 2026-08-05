@@ -49,16 +49,21 @@ function fmtTime(ms: number): string {
  * class. Honest: an untrusted "green" is not "landed", a red-baseline land says so.
  */
 function verdictOf(r: LandReceipt): { word: string; tone: "ok" | "warn" | "bad"; sub: string } {
-	if (r.forcedWithoutProof) return { word: "Force-landed", tone: "warn", sub: "merged WITHOUT a passing proof — a human override" };
+	// A forced verdict only applies to a land that actually MERGED (an override that merged without a
+	// proof); a forced flag on a no-merge result is not a "Force-landed".
+	if (r.forcedWithoutProof && r.landed) return { word: "Force-landed", tone: "warn", sub: "merged WITHOUT a passing proof — a human override" };
 	switch (r.gate.status) {
 		case "green":
-			return { word: "Landed", tone: "ok", sub: "gates green — merged into main" };
+			// A green gate that did NOT merge (the "no changes to land" path) never says "Landed/merged".
+			return r.landed
+				? { word: "Landed", tone: "ok", sub: "gates green — merged into main" }
+				: { word: "Nothing to land", tone: "warn", sub: "gates green, but no change was merged" };
 		case "red-baseline":
 			return { word: "Landed on a red base", tone: "warn", sub: "no new failures, but main was not green" };
 		case "no-gate":
 			return r.landed
 				? { word: "Landed", tone: "warn", sub: "no acceptance gate ran — nothing proved it" }
-				: { word: "Not landed", tone: "warn", sub: "no acceptance gate configured" };
+				: { word: "Nothing to land", tone: "warn", sub: "no change was merged" };
 		case "unproven-rejected":
 			return { word: "Rejected", tone: "bad", sub: "a green pass could not be trusted — main rolled back" };
 		case "failed":
@@ -108,12 +113,14 @@ function renderWhat(r: LandReceipt): string {
 				.map((f) => `<li><code>${esc(f)}</code></li>`)
 				.join("")}</ul></div></details>`
 		: `<p class="muted">no files recorded${loc ? " " + loc : ""}</p>`;
+	const messageRow = r.message ? `<div><dt>message</dt><dd>${esc(r.message)}</dd></div>` : "";
 	return section(
 		"What landed",
 		`<dl class="kv">
 			<div><dt>branch</dt><dd><code>${esc(r.branch)}</code></dd></div>
 			<div><dt>repo</dt><dd><code>${esc(r.repo)}</code></dd></div>
 			<div><dt>commit</dt><dd>${commit}</dd></div>
+			${messageRow}
 		</dl>${fileList}`,
 	);
 }
@@ -179,7 +186,20 @@ function renderReviewer(r: LandReceipt): string {
 		);
 	}
 	const rationale = v.rationale ? `<p class="detail scroll"><code>${esc(v.rationale)}</code></p>` : "";
-	return section("Who reviewed it", `<dl class="kv">${parts.join("")}</dl>${rationale}` + renderPanel(r));
+	// Per-criterion notes — the reviewer's WHY at the finest grain (a reviewer's reasoning is core
+	// receipt content, not a diff detail). Only criteria that carry a note; unmet ones flagged red.
+	const noted = v.perCriterion?.filter((c) => c.note && c.note.trim()) ?? [];
+	const notes = noted.length
+		? `<ul class="criteria scroll">${noted
+				.map(
+					(c) =>
+						`<li class="${c.satisfied ? "" : "unmet"}"><code>${esc(c.id)}</code>${c.satisfied ? "" : ' <span class="pill bad">unmet</span>'} <span class="muted">${esc(
+							c.note ?? "",
+						)}</span></li>`,
+				)
+				.join("")}</ul>`
+		: "";
+	return section("Who reviewed it", `<dl class="kv">${parts.join("")}</dl>${rationale}${notes}` + renderPanel(r));
 }
 
 /** The T5 (parked) panel section — rendered ONLY when a panel is present; omitted with zero trace
@@ -343,6 +363,9 @@ code { font-family: var(--mono); font-size: 0.92em; }
 .filelist li, .failures li { font-size: 0.85rem; }
 .failures li { color: var(--bad); }
 .failures li code { color: var(--bad); }
+.criteria { list-style: none; margin: 0.7rem 0 0; padding: 0; display: grid; gap: 0.35rem; }
+.criteria li { font-size: 0.82rem; }
+.criteria li.unmet code { color: var(--bad); }
 .scroll { overflow-x: auto; max-width: 100%; -webkit-overflow-scrolling: touch; }
 .detail { background: color-mix(in srgb, var(--ink) 4%, transparent); border-radius: 0.4rem; padding: 0.6rem 0.75rem; }
 .detail code { white-space: pre-wrap; word-break: break-word; font-size: 0.8rem; color: var(--muted); }

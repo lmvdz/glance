@@ -99,6 +99,9 @@ export interface LandReceipt {
 	branch: string;
 	/** The landed commit SHA (full). Absent when nothing merged (a rejected land). */
 	commit?: string;
+	/** The landed commit's subject line — the human-written "what/why" of the change. Absent when
+	 *  nothing merged, or when it couldn't be read. A core part of approving a receipt, not a diff. */
+	message?: string;
 	/** Files the change touched (base-relative). */
 	files: string[];
 	insertions?: number;

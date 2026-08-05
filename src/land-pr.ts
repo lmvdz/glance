@@ -639,6 +639,11 @@ export async function transplantedCommitsReason(repo: string, branch: string, de
 
 async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, stateDir: string, retry: number, onOrphan?: AutomationRecorder): Promise<LandResult> {
 	const { repo, worktree, branch, message } = opts;
+	// Receipt attribution (T6, glance#334): the `origin/<default>` base the PR merges INTO, captured
+	// pre-merge inside the scratch-gate block below and surfaced on the merged result as `head0` (the
+	// receipt's rollback point). `gh pr merge` never moves the local checkout HEAD, so the receipt must
+	// use the PR's own merge commit + this base, NOT local HEAD.
+	let prBaseTip: string | undefined;
 
 	// In-place agent (no branch, or worktree === repo): nothing to merge, mirrors landAgentImpl.
 	if (!branch || worktree === repo) {
@@ -810,6 +815,7 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 		}
 
 		const head0 = (await git(["rev-parse", `origin/${opts.defaultBranch}`], repo)).stdout;
+		prBaseTip = head0 || undefined; // receipt rollback point (T6): the base the PR merges INTO, captured pre-merge
 		const regressionBlock = await applyRegressionGate({
 			repo: scratch,
 			head0,
@@ -868,7 +874,10 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 	});
 	updatePendingPr(stateDir, branch, { state: "merged", mergedAt: Date.now(), proofAt: Date.now() });
 
-	return { ok: true, committed: true, merged: true, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, prState: "merged" };
+	// Receipt attribution (T6): the landed commit is the PR's OWN merge commit (`gh pr merge` produced
+	// it on the remote; local HEAD was never moved), and the rollback point is the base captured
+	// pre-merge. Both are stable SHAs the receipt diffs/rolls-back from without racing local HEAD.
+	return { ok: true, committed: true, merged: true, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, prState: "merged", head0: prBaseTip, landedCommit: assertion.mergeCommit ?? assertion.commit };
 }
 
 /**

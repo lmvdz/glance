@@ -2,6 +2,7 @@ import { expect, test, describe } from "bun:test";
 import {
 	renderReceiptHtml,
 	renderReceiptComment,
+	mdEsc,
 	classifyLand,
 	writeLandReceipt,
 	landReceiptDir,
@@ -212,7 +213,7 @@ describe("renderReceiptComment", () => {
 			greenReceipt({ landed: false, commit: undefined, rollbackPoint: undefined, gate: { status: "failed", unprovenGreenRejected: false, newRegressions: ["a > b"], baseWasRed: false } }),
 		);
 		expect(md).toContain("❌ **Rejected**");
-		expect(md).toContain("a > b");
+		expect(md).toContain("a &gt; b"); // the failure name is markdown-escaped (the `>` neutralized)
 		expect(md).toContain("nothing merged");
 	});
 });
@@ -274,5 +275,123 @@ describe("writeLandReceipt", () => {
 		const b = landReceiptFilename("feature/weird branch!", 1001);
 		expect(a).toMatch(/^[a-zA-Z0-9._-]+\.html$/);
 		expect(a).not.toBe(b);
+	});
+
+	test("lossy-sanitized branches at the SAME ms get distinct filenames (no silent overwrite)", () => {
+		// feature/a+b and feature/a-b both sanitize to "feature-a-b"; at the same ms the timestamp
+		// collides too — the unique token is what keeps them apart (codex MEDIUM).
+		const a = landReceiptFilename("feature/a+b", 1000);
+		const b = landReceiptFilename("feature/a-b", 1000);
+		expect(a).not.toBe(b);
+	});
+
+	test("concurrent successful writes never overwrite — every receipt persists", async () => {
+		const stateDir = mkdtempSync(join(tmpdir(), "rail-receipt-conc-"));
+		// Two lands, same branch, same ms, same commit token — the wx no-overwrite guard must still
+		// produce two distinct files, not clobber the first.
+		const at = 1_722_800_000_000;
+		const p1 = await writeLandReceipt(stateDir, greenReceipt({ at, commit: "deadbeef00" }));
+		const p2 = await writeLandReceipt(stateDir, greenReceipt({ at, commit: "deadbeef00" }));
+		expect(p1).not.toBe(p2);
+		expect(readFileSync(p1, "utf8").length).toBeGreaterThan(0);
+		expect(readFileSync(p2, "utf8").length).toBeGreaterThan(0);
+	});
+});
+
+describe("mdEsc — markdown/HTML injection neutralization (gauntlet round 1)", () => {
+	test("neutralizes every control an agent string could break out with", () => {
+		expect(mdEsc("a`b|c<d>[e]\nf")).toBe("a&#96;b\\|c&lt;d&gt;&#91;e&#93; f");
+		expect(mdEsc("```")).not.toContain("`"); // fence-close cannot survive
+		expect(mdEsc("</details>")).toBe("&lt;/details&gt;");
+		expect(mdEsc("x\r\ny")).toBe("x y"); // CRLF collapses, no new row
+	});
+});
+
+describe("renderReceiptComment — injection cannot forge a verdict", () => {
+	function failedWith(over: Partial<LandReceipt>): LandReceipt {
+		return greenReceipt({ landed: false, commit: undefined, rollbackPoint: undefined, gate: { status: "failed", unprovenGreenRejected: false, newRegressions: [], baseWasRed: false }, ...over });
+	}
+	/** Count top-level markdown headings (a forged "### ✅ Landed" would add one). */
+	const headingCount = (md: string) => md.split("\n").filter((l) => l.startsWith("### ")).length;
+
+	test("a fence-close + </details> + forged heading in a regression name cannot break out", () => {
+		const evil = "sometest```\n</details>\n\n### ✅ **Landed** — gates green\n\n[approve](http://evil)";
+		const md = renderReceiptComment(failedWith({ gate: { status: "failed", unprovenGreenRejected: false, newRegressions: [evil], baseWasRed: false } }));
+		expect(headingCount(md)).toBe(1); // only OUR real ❌ Rejected header
+		expect(md).toContain("### ❌ **Rejected**");
+		expect(md).not.toMatch(/\n### ✅/); // no forged Landed heading at line start
+		expect(md).not.toContain("</details>\n\n###"); // the </details> is escaped, not structural
+		expect(md).toContain("&#96;"); // the fence backticks are neutralized
+		expect(md).not.toContain("[approve](http://evil)"); // link brackets escaped
+	});
+
+	test("a branch that closes <sub> and opens <details> cannot conceal the table or forge a link", () => {
+		const evil = "x</sub><details><summary>APPROVED](http://evil)</summary>";
+		const md = renderReceiptComment(failedWith({ branch: evil }));
+		expect(md).toContain("&lt;/sub&gt;");
+		expect(md).toContain("&lt;details&gt;");
+		expect(md).not.toContain("<details><summary>APPROVED");
+		expect(md).toContain("APPROVED&#93;(http"); // the link-text bracket escaped ⇒ no clickable link
+		expect(md).not.toMatch(/\[[^\]]*\]\(http:\/\/evil/); // no forged markdown link survives
+		expect(headingCount(md)).toBe(1);
+	});
+
+	test("pipes/newlines/bold in model / lineage / cost.model add no columns, rows, or forged emphasis", () => {
+		const evilStamp: ReviewerPrecisionStamp = { lineage: "cod|ex\n| **FORGED** | x |", n: 52, survived: 39, survivedRate: 39 / 52, provisional: false };
+		const md = renderReceiptComment(
+			greenReceipt({ validation: validation(evilStamp), cost: { costUsd: 1, costUnknown: false, model: "gpt|4\n| evil | row |" } }),
+		);
+		// Structure is intact: exactly the data rows we emit, no injected ones. The header (|---|---|)
+		// plus What/Reviewed by/Rollback to/Cost each begin with "| " — an injected "| evil |" or
+		// "| **FORGED** |" (needing a newline + real pipe) can't appear because newlines collapse and
+		// pipes escape.
+		expect(md).not.toMatch(/\n\| evil \|/);
+		expect(md).not.toMatch(/\n\| &#42;&#42;FORGED/);
+		expect(md).not.toContain("**FORGED**"); // bold neutralized to entities, never real emphasis
+		expect(md).toContain("\\|"); // pipes escaped, not delimiters
+		expect(md).toContain("&#42;"); // asterisks neutralized
+	});
+
+	test("hostile receipt href never renders as a clickable link", () => {
+		const md = renderReceiptComment(greenReceipt(), { receiptHref: "javascript:alert(1)", hrefKind: "url" });
+		expect(md).not.toContain("](javascript:");
+		const md2 = renderReceiptComment(greenReceipt(), { receiptHref: "https://ok.example/r.html", hrefKind: "url" });
+		expect(md2).toContain("[open the full receipt](https://ok.example/r.html)");
+	});
+});
+
+describe("attribution correctness (gauntlet round 1, Cluster B)", () => {
+	test("a green gate that did NOT merge says 'nothing to land', never 'Landed'", () => {
+		const r = greenReceipt({ landed: false, commit: undefined, rollbackPoint: undefined });
+		const html = renderReceiptHtml(r);
+		expect(html).toContain("Nothing to land");
+		expect(html).not.toContain(">Landed<");
+		expect(html).toContain('data-status="warn"');
+		const md = renderReceiptComment(r);
+		expect(md).toContain("Nothing to land");
+		expect(md).not.toContain("✅ **Landed**");
+	});
+
+	test("a rejected land shows NO commit under 'What landed'", () => {
+		const r = greenReceipt({ landed: false, commit: undefined, rollbackPoint: undefined, gate: { status: "failed", unprovenGreenRejected: false, newRegressions: [], baseWasRed: false } });
+		const html = renderReceiptHtml(r);
+		expect(html).toContain("nothing merged");
+		expect(html).not.toContain("abc1234def"); // the attempted branch tip is NOT shown as a landed commit
+		const md = renderReceiptComment(r);
+		expect(md).toContain("nothing merged");
+	});
+
+	test("commit message + validator per-criterion notes render on both surfaces", () => {
+		const v = validation(measured);
+		v.perCriterion = [{ id: "honest-cost", satisfied: false, note: "showed $0 for unattributed" }];
+		v.rationale = "cost criterion unmet";
+		const r = greenReceipt({ message: "rail(T6): the receipt surface", validation: v });
+		const html = renderReceiptHtml(r);
+		expect(html).toContain("rail(T6): the receipt surface");
+		expect(html).toContain("showed $0 for unattributed");
+		expect(html).toContain("honest-cost");
+		const md = renderReceiptComment(r);
+		expect(md).toContain("rail(T6): the receipt surface");
+		expect(md).toContain("showed $0 for unattributed");
 	});
 });

@@ -4758,30 +4758,34 @@ export class SquadManager extends EventEmitter {
 			const branch = dto.branch ?? "";
 			if (!branch) return; // a receipt is branch-keyed, like the land ledger — nothing to key on
 			const merged = result.merged;
-			let commit: string | undefined;
-			let rollbackPoint: string | undefined;
-			let files: string[] = lastReceipt?.filesTouched ?? [];
+			// Attribution comes from the land's OWN in-lock SHAs (`result.head0`/`result.landedCommit`,
+			// captured while the land held the repo lock — land.ts/land-pr.ts), NOT a post-hoc HEAD re-read:
+			// a concurrent land moving HEAD between the merge and here would otherwise attribute another
+			// land's commit + rollback to this receipt (the TOCTOU). Nothing merged ⇒ no commit at all, per
+			// LandReceipt's contract (a rejected land shows no "What landed" commit).
+			const commit = merged ? result.landedCommit : undefined;
+			const rollbackPoint = merged ? result.head0 : undefined;
+			let files: string[] = [];
 			let insertions: number | undefined;
 			let deletions: number | undefined;
-			if (merged) {
-				// The landed commit, and the rollback point — git's OWN record of where main sat before this
-				// land (reflog `HEAD@{1}`), which is exactly head0 for both the ff and merge-commit paths (and
-				// after a regression-gate reset+re-merge). Best-effort: any git fault leaves the field blank,
-				// which the renderer shows honestly rather than fabricating.
-				commit = (await hardenedGit(["rev-parse", "HEAD"], { cwd: dto.repo })).stdout.trim() || undefined;
-				const prev = await hardenedGit(["rev-parse", "HEAD@{1}"], { cwd: dto.repo });
-				rollbackPoint = prev.code === 0 ? prev.stdout.trim() || undefined : undefined;
-				if (commit && rollbackPoint) {
-					const ns = await hardenedGit(["diff", "--numstat", `${rollbackPoint}..${commit}`], { cwd: dto.repo });
+			let commitMessage: string | undefined;
+			if (merged && commit) {
+				// The landed set + LOC + subject, all from FIXED SHAs (`head0..landedCommit`) — deterministic
+				// regardless of what HEAD points at now. An EMPTY numstat is the real (empty) landed set, never
+				// silently replaced by a prior receipt's file list. Best-effort: a git fault leaves the field
+				// blank (honest absence), never fabricated. In PR mode `landedCommit` is the PR's merge commit,
+				// fetched into this checkout by the land-pr path, so these reads resolve here too.
+				if (result.head0) {
+					const ns = await hardenedGit(["diff", "--numstat", `${result.head0}..${commit}`], { cwd: dto.repo });
 					if (ns.code === 0) {
 						const parsed = parseNumstat(ns.stdout);
-						if (parsed.files.length) files = parsed.files;
+						files = parsed.files;
 						insertions = parsed.insertions;
 						deletions = parsed.deletions;
 					}
 				}
-			} else {
-				commit = (await headCommit(dto.worktree).catch(() => "")) || undefined; // the attempted branch tip
+				const subj = await hardenedGit(["log", "-1", "--format=%s", commit], { cwd: dto.repo });
+				commitMessage = (subj.code === 0 ? subj.stdout.trim() : "") || result.message || undefined;
 			}
 			const slug = repoIdentity(dto.repo).split("/").slice(-2).join("/");
 			const costUsd = lastReceipt?.costUsd ?? dto.receipt?.costUsd;
@@ -4789,6 +4793,7 @@ export class SquadManager extends EventEmitter {
 				repo: slug,
 				branch,
 				commit,
+				message: commitMessage,
 				files,
 				insertions,
 				deletions,
@@ -4796,7 +4801,7 @@ export class SquadManager extends EventEmitter {
 				at: Date.now(),
 				gate: classifyLand(result),
 				validation,
-				rollbackPoint: merged ? rollbackPoint : undefined,
+				rollbackPoint,
 				forcedWithoutProof: !!result.forcedWithoutProof,
 				cost: {
 					costUsd,
