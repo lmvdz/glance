@@ -22,6 +22,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ModelLineage } from "../src/model-lineage.ts";
 import {
+	avoidPathsFor,
 	canonicalLedgerTag,
 	defaultPanelReviewers,
 	diffRiskTier,
@@ -526,6 +527,125 @@ test("B4: sequential (non-concurrent) identical requests do NOT stay coalesced f
 	await runReviewPanel({ diff, source: "sequential-key", reviewers });
 	await runReviewPanel({ diff, source: "sequential-key", reviewers });
 	expect(calls).toBe(2); // the in-flight entry was cleared after the first resolved
+});
+
+// ── T5 gauntlet round 3 (glance#356, finding #5): structural coalesce key ───────────────────────
+
+test("ROUND 3 (finding #5a): a criteriaKey/repo pair that collides under a naive '::' join does NOT coalesce with a genuinely different pair", async () => {
+	process.env.OMP_SQUAD_REVIEW_PANEL = "1";
+	const diff = fakeDiff([".github/workflows/deploy.yml"]);
+	let calls = 0;
+	const reviewers = (): PanelReviewerSpec[] => [
+		{
+			lineage: "xai",
+			harness: "grok",
+			review: async () => {
+				calls++;
+				return { disposition: "accept" };
+			},
+		},
+		accept("openai", "codex"),
+	];
+	// The OLD `.join("::")` key: `[..., criteriaKey, repo, ...]` joined with "::" produces the IDENTICAL
+	// string for ("x::y", "z") and ("x", "y::z") — "x::y" + "::" + "z" === "x" + "::" + "y::z" ===
+	// "x::y::z". Two requests that genuinely differ in criteriaKey/repo would have silently shared ONE
+	// in-flight panel run (and, in the real land path, one tenant's finding queuing under the other's
+	// stateDir/reviewer pool).
+	const [a, b] = await Promise.all([
+		runReviewPanel({ diff, source: "same-source", reviewers, criteriaKey: "x::y", repo: "z" }),
+		runReviewPanel({ diff, source: "same-source", reviewers, criteriaKey: "x", repo: "y::z" }),
+	]);
+	expect(calls).toBe(2); // did NOT coalesce — the structured (JSON) key distinguishes them
+	expect(a).toBeDefined();
+	expect(b).toBeDefined();
+});
+
+test("ROUND 3 (finding #5b): two DIFFERENT injected reviewer-callback references with the SAME declared lineage/harness labels do NOT coalesce", async () => {
+	process.env.OMP_SQUAD_REVIEW_PANEL = "1";
+	const diff = fakeDiff([".github/workflows/deploy.yml"]);
+	let callsA = 0;
+	let callsB = 0;
+	// Two DISTINCT closures declaring the IDENTICAL {lineage, harness} pool shape — under the OLD key
+	// (`poolIdentity` built only from lineage:harness labels), these would be indistinguishable and the
+	// SECOND caller would silently receive the FIRST caller's (behaviorally different) verdicts.
+	const reviewersA = (): PanelReviewerSpec[] => [
+		{ lineage: "xai", harness: "grok", review: async () => { callsA++; return { disposition: "accept" }; } },
+		accept("openai", "codex"),
+	];
+	const reviewersB = (): PanelReviewerSpec[] => [
+		{ lineage: "xai", harness: "grok", review: async () => { callsB++; return { disposition: "object", severity: "high", claim: "b's own finding" }; } },
+		accept("openai", "codex"),
+	];
+	// A "high" severity object triggers claim-verification — inject a fake `verify` (production CLIs are
+	// genuinely installed on this machine, so leaving this unset would spawn a REAL grok/codex/omp call).
+	const verify = () => async () => true;
+	const [a, b] = await Promise.all([
+		runReviewPanel({ diff, source: "same-everything-else", reviewers: reviewersA, verify, repo: "/r", worktree: "/r/wt", proofTree: "t", criteriaKey: "c" }),
+		runReviewPanel({ diff, source: "same-everything-else", reviewers: reviewersB, verify, repo: "/r", worktree: "/r/wt", proofTree: "t", criteriaKey: "c" }),
+	]);
+	expect(callsA).toBe(1);
+	expect(callsB).toBe(1); // did NOT coalesce onto A's run — B's own callback actually ran
+	expect(a?.[0]?.verdict).toBe("accept");
+	expect(b?.[0]?.verdict).toBe("object"); // b's distinct behavior is visible in its own result
+});
+
+test("ROUND 3 (finding #5b, control): the SAME reviewer-callback reference reused across calls still coalesces", async () => {
+	process.env.OMP_SQUAD_REVIEW_PANEL = "1";
+	const diff = fakeDiff([".github/workflows/deploy.yml"]);
+	let calls = 0;
+	const reviewers = (): PanelReviewerSpec[] => [
+		{
+			lineage: "xai",
+			harness: "grok",
+			review: async () => {
+				calls++;
+				await new Promise((r) => setTimeout(r, 15));
+				return { disposition: "accept" };
+			},
+		},
+		accept("openai", "codex"),
+	];
+	const [a, b] = await Promise.all([
+		runReviewPanel({ diff, source: "shared-callback", reviewers, repo: "/r" }),
+		runReviewPanel({ diff, source: "shared-callback", reviewers, repo: "/r" }),
+	]);
+	expect(calls).toBe(1); // the SAME `reviewers` reference — genuinely the same run, correctly coalesced
+	expect(a).toEqual(b);
+});
+
+// ── T5 gauntlet round 3 (glance#356, finding #6b): hermetic cwd vs the COMPLETE managed-repo set ──
+//
+// The production CLI reviewers (grok/codex/omp) aren't installed in the unit-test sandbox, so an
+// end-to-end exercise of `hermeticCwd`'s rejection can't be driven through `runReviewPanel` itself
+// (`defaultPanelReviewers()` would just come back empty). `avoidPathsFor` is the exact function that
+// decides what reaches `hermeticCwd`'s validation in production — testing IT directly is the real,
+// deterministic proof that the fix is used.
+
+test("ROUND 3 (finding #6b): avoidPathsFor includes the COMPLETE registered-repo set, not just this call's repo/worktree", async () => {
+	const { openProjectRegistry } = await import("../src/project-registry.ts");
+	const stateDir = await tmpStateDir();
+	const otherManagedRepo = await fs.mkdtemp(path.join(os.tmpdir(), "rail-panel-other-managed-repo-"));
+	tmps.push(otherManagedRepo);
+	const registeredRepo = await fs.realpath(otherManagedRepo);
+	openProjectRegistry(stateDir).add(registeredRepo);
+
+	// OLD behavior (flip side, asserted first): with NO stateDir, only the named repo/worktree are
+	// returned — the fleet-wide registry was never consulted at all.
+	expect(avoidPathsFor({ repo: "/this/call/repo" })).toEqual(["/this/call/repo"]);
+
+	// FIXED behavior: with a stateDir, every OTHER registered repo is folded in too — a scratch cwd
+	// landing inside `otherManagedRepo` (registered in the fleet but NOT named by this particular call)
+	// must be just as contained as one landing inside `/this/call/repo` itself.
+	const avoid = avoidPathsFor({ repo: "/this/call/repo", stateDir });
+	expect(avoid).toContain("/this/call/repo");
+	expect(avoid).toContain(registeredRepo);
+});
+
+test("ROUND 3 (finding #6b): avoidPathsFor degrades to just the named paths (never throws) when the registry read fails", () => {
+	// A stateDir that was never set up as a real registry (no directory, no projects.json) — the
+	// registry read best-effort-degrades; the panel this feeds is advisory and must never break over it.
+	const avoid = avoidPathsFor({ repo: "/r", worktree: "/r/wt", stateDir: "/definitely/does/not/exist/at/all" });
+	expect(avoid).toEqual(["/r", "/r/wt"]);
 });
 
 // ── default reviewer pool (production wiring, no CLI invocation) ───────────────────────────────

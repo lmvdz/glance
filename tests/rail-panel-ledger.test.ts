@@ -25,6 +25,7 @@ import * as path from "node:path";
 import { DEFAULT_REVIEWER_LEDGER_PATH } from "../src/memory/index.ts";
 import { projectPendingPanelFindings, readPendingPanelFindings, recordPendingPanelFinding } from "../src/rail/panel-ledger.ts";
 import type { ReviewerLedgerEntry } from "../src/memory/index.ts";
+import { mapFile } from "../src/ledger.ts";
 
 const tmps: string[] = [];
 afterEach(async () => {
@@ -391,3 +392,228 @@ test("ROUND 2 (finding #1e): the atomic append means a projection either writes 
 	const lines = text.split("\n").filter((l) => l.trim());
 	expect(lines.length).toBe(3); // all three, in one atomic write — never a 1-of-3 or 2-of-3 state
 });
+
+// ── ROUND 3 (glance#356): HEAD-based durability rework ──────────────────────────────────────────
+// This is the fix that has fooled 3 prior single-gauntlet passes, each time reintroducing a NARROWER
+// variant of the same root cause: idempotency/durability keyed off the WORKING-TREE file, not HEAD.
+
+test("ROUND 3 (finding #1 — THE ROOT CAUSE): a crash between atomicWrite's rename and the commit leaves HEAD authoritative — the retry commits the dirty content forward instead of silently clearing the queue", async () => {
+	const { repo, ledgerPath } = await ledgerRepoFixture("panel-ledger-r3-crash-window-");
+	const stateDir = await tmpDir("panel-ledger-r3-crash-window-state-");
+	const finding = row({ note: "crash-window finding" });
+	recordPendingPanelFinding(stateDir, finding);
+
+	// Simulate the EXACT crash window the ticket describes: `atomicWrite`'s rename succeeded (the file on
+	// disk now holds the appended content) but the git commit that was supposed to follow never ran — the
+	// only difference between this and a real interrupted process is that nothing crashed; the ON-DISK
+	// STATE is identical either way.
+	await fs.writeFile(ledgerPath, `${JSON.stringify(finding)}\n`);
+	const dirtyStatus = await git(repo, "status", "--porcelain");
+	expect(dirtyStatus.out).not.toBe(""); // sanity: genuinely dirty right now
+
+	// The "next self-land's retry." Pre-fix: `readCurrentLedgerText` read this DIRTY working file, saw
+	// the finding already "present," and cleared the queue via the `toAppend.length === 0` branch WITHOUT
+	// EVER COMMITTING — the exact bug: a later rollback would then silently lose the finding forever.
+	const result = await projectPendingPanelFindings(stateDir, repo, ledgerPath);
+	expect(result.projected).toBe(0); // nothing NEW appended in THIS batch — it was reconciled into HEAD
+	expect(result.committed).toBe(true); // but a REAL commit did happen this call — the repair commit —
+	// and `committed` honestly reports that rather than underclaiming a no-op (T3/T8 honesty rule).
+
+	expect(readPendingPanelFindings(stateDir)).toEqual([]); // accounted for — genuinely durable now
+	const status = await git(repo, "status", "--porcelain");
+	expect(status.out).toBe(""); // tree is CLEAN — the content is committed, not merely sitting dirty
+	const log = await git(repo, "log", "--oneline");
+	expect(log.out.split("\n").length).toBeGreaterThanOrEqual(2); // seed + the reconciliation commit
+
+	// THE INVARIANT THAT WOULD HAVE FAILED PRE-FIX: a later, unrelated rollback (a real land.ts scenario)
+	// must never lose this finding — it can only survive a `reset --hard` if it's actually committed.
+	const afterReconcile = await git(repo, "rev-parse", "HEAD");
+	await fs.writeFile(path.join(repo, "later-change.txt"), "x\n");
+	await git(repo, "add", "-A");
+	await git(repo, "commit", "-qm", "later change that will be rolled back");
+	await git(repo, "reset", "--hard", afterReconcile.out);
+	const text = await fs.readFile(ledgerPath, "utf8");
+	expect(text.split("\n").filter((l) => l.trim()).length).toBe(1); // the finding SURVIVED the rollback
+});
+
+test("ROUND 3 (finding #1, fallback path): when the dirty crash-window content can't be committed forward (no git identity), reconciliation discards it back to HEAD instead of leaving the tree dirty forever", async () => {
+	const { repo, ledgerPath } = await ledgerRepoFixtureNoIdentity("panel-ledger-r3-crash-window-fallback-");
+	const stateDir = await tmpDir("panel-ledger-r3-crash-window-fallback-state-");
+	const finding = row({ note: "would-be finding after fallback" });
+	recordPendingPanelFinding(stateDir, finding);
+
+	// Same crash window as the primary test above — but this repo has no git identity, so
+	// reconciliation's "commit the dirty content forward" attempt itself fails and must fall back to
+	// discarding it via a CHECKED `git checkout HEAD -- <path>` rather than leaving the tree dirty.
+	await fs.writeFile(ledgerPath, `${JSON.stringify(finding)}\n`);
+
+	await withNoGitIdentity(async () => {
+		// After reconciliation restores to (empty) HEAD, the normal append attempt runs and ALSO fails to
+		// commit (still no identity) — full restore, never committed, finding stays queued for a real retry.
+		const result = await projectPendingPanelFindings(stateDir, repo, ledgerPath);
+		expect(result).toEqual({ projected: 0, committed: false });
+	});
+
+	const status = await git(repo, "status", "--porcelain");
+	expect(status.out).toBe(""); // reconciliation's fallback left the tree byte-CLEAN, not dirty
+	const text = await fs.readFile(ledgerPath, "utf8");
+	expect(text.trim()).toBe(""); // discarded back to HEAD's actual (empty) content
+	expect(readPendingPanelFindings(stateDir)).toEqual([finding]); // NEVER lost — still queued for retry
+});
+
+test("ROUND 3 (finding #2): a queued row with an UNTRIMMED severity (bypassing recordPendingPanelFinding's own normalization) still does not double-append against an existing trimmed-severity row", async () => {
+	const { repo, ledgerPath } = await ledgerRepoFixture("panel-ledger-r3-severity-norm-");
+	const stateDir = await tmpDir("panel-ledger-r3-severity-norm-state-");
+	const trimmedFinding = row({ note: "severity-normalization finding", severity: "high" });
+
+	// The finding is ALREADY committed to the ledger with a TRIMMED severity (as `parseReviewerLedger`
+	// would produce reading it back).
+	await fs.writeFile(ledgerPath, `${JSON.stringify(trimmedFinding)}\n`);
+	await git(repo, "add", "-A");
+	await git(repo, "commit", "-qm", "pre-existing committed row (trimmed severity)");
+
+	// Bypass `recordPendingPanelFinding`'s own normalization (the defense-in-depth half of finding #2) to
+	// simulate a row that reached the pending queue WITHOUT ever being schema-validated — legacy data
+	// written before this fix, or any future bug elsewhere feeding the queue directly — carrying an
+	// UNTRIMMED severity for the exact SAME finding.
+	const rawStore = mapFile<ReviewerLedgerEntry[]>(stateDir, "rail-panel-findings-pending.json");
+	rawStore.write({ queue: [{ ...trimmedFinding, severity: " high " as unknown as ReviewerLedgerEntry["severity"] }] });
+
+	const result = await projectPendingPanelFindings(stateDir, repo, ledgerPath);
+
+	// Pre-fix: `semanticKey` computed directly on the raw (untrimmed) pending entry produced a DIFFERENT
+	// key than the trimmed row already in HEAD — invisible to `seen`, so it double-appended.
+	expect(result.projected).toBe(0);
+	const text = await fs.readFile(ledgerPath, "utf8");
+	expect(text.split("\n").filter((l) => l.trim()).length).toBe(1); // still exactly one row
+	expect(readPendingPanelFindings(stateDir)).toEqual([]); // accounted for and cleared
+});
+
+test("ROUND 3 (finding #2): recordPendingPanelFinding normalizes an untrimmed severity BEFORE it ever enters the queue", async () => {
+	const stateDir = await tmpDir("panel-ledger-r3-record-normalize-state-");
+	recordPendingPanelFinding(stateDir, row({ severity: " high " as unknown as ReviewerLedgerEntry["severity"] }));
+	const queued = readPendingPanelFindings(stateDir);
+	expect(queued.length).toBe(1);
+	expect(queued[0]!.severity).toBe("high");
+});
+
+test("ROUND 3 (finding #3): an ambient GIT_DIR pointing somewhere bogus never misclassifies a real git ledgerRepo as non-git", async () => {
+	const { repo, ledgerPath } = await ledgerRepoFixture("panel-ledger-r3-gitdir-poison-");
+	const stateDir = await tmpDir("panel-ledger-r3-gitdir-poison-state-");
+	recordPendingPanelFinding(stateDir, row({ note: "gitdir-poison finding" }));
+
+	const savedGitDir = process.env.GIT_DIR;
+	process.env.GIT_DIR = "/nonexistent";
+	let result: Awaited<ReturnType<typeof projectPendingPanelFindings>>;
+	try {
+		// Pre-fix: `rev-parse --is-inside-work-tree` fails with the SAME "fatal: not a git repository"
+		// message a genuinely non-git `cwd` produces — misclassifying this REAL repo as non-git, which
+		// would write the row to disk but NEVER commit it, then clear the queue anyway.
+		result = await projectPendingPanelFindings(stateDir, repo, ledgerPath);
+	} finally {
+		if (savedGitDir === undefined) delete process.env.GIT_DIR;
+		else process.env.GIT_DIR = savedGitDir;
+	}
+
+	expect(result).toEqual({ projected: 1, committed: true });
+	const status = await git(repo, "status", "--porcelain");
+	expect(status.out).toBe(""); // committed, not left dirty-and-uncommitted
+	const log = await git(repo, "log", "-1", "--format=%s");
+	expect(log.out).toContain("gauntlet-panel finding");
+});
+
+test("ROUND 3 (finding #3): a restore failure (e.g. a concurrent .git/index.lock) is SURFACED — never silently reported as a clean revert", async () => {
+	const { repo, ledgerPath } = await ledgerRepoFixture("panel-ledger-r3-checked-restore-");
+	const stateDir = await tmpDir("panel-ledger-r3-checked-restore-state-");
+	const finding = row({ note: "checked-restore finding" });
+	recordPendingPanelFinding(stateDir, finding);
+
+	// An index.lock blocks `git add`/`git commit` AND the fallback `git checkout HEAD -- <path>` restore
+	// alike — round 2's bug was that this restore call's own exit code was never checked, so a restore
+	// that itself failed was reported as a clean revert regardless.
+	const lockPath = path.join(repo, ".git", "index.lock");
+	await fs.writeFile(lockPath, "");
+	try {
+		await expect(projectPendingPanelFindings(stateDir, repo, ledgerPath)).rejects.toThrow(/restoring it to HEAD also failed/);
+	} finally {
+		await fs.rm(lockPath, { force: true });
+	}
+
+	// Nothing was silently cleared — the finding is still queued for a genuine retry once the lock clears.
+	expect(readPendingPanelFindings(stateDir)).toEqual([finding]);
+});
+
+test("ROUND 3 (finding #7): a genuine READ fault on an EXISTING ledger path (not ENOENT) is never treated as an empty ledger — the projection throws rather than silently replacing its contents", async () => {
+	const repo = await tmpDir("panel-ledger-r3-readfault-repo-"); // plain, non-git target
+	const stateDir = await tmpDir("panel-ledger-r3-readfault-state-");
+	recordPendingPanelFinding(stateDir, row({ note: "readfault finding" }));
+	// A ledger path that is a SELF-REFERENTIAL SYMLINK: reading it fails with `ELOOP` (a genuine read
+	// fault, NOT `ENOENT`), while `fs.rename` onto the same path (the write side) succeeds regardless —
+	// POSIX `rename` replaces the destination DENTRY itself rather than resolving through it. This
+	// isolates the READ-side fix specifically: a directory-as-ledgerPath fixture would ALSO break the
+	// (unrelated) write step, masking which fix actually caught the fault.
+	const ledgerDir = await tmpDir("panel-ledger-r3-readfault-dir-");
+	const ledgerPath = path.join(ledgerDir, "reviewer-ledger.jsonl");
+	await fs.symlink(ledgerPath, ledgerPath);
+
+	await expect(projectPendingPanelFindings(stateDir, repo, ledgerPath)).rejects.toThrow(/read fault/);
+	// Never silently treated as empty and replaced — the queue is untouched, ready for a real retry.
+	expect(readPendingPanelFindings(stateDir).length).toBe(1);
+});
+
+test("ROUND 3 (finding #7) control: a genuinely ABSENT ledger file still reads as an empty ledger (ENOENT is the one legitimate 'empty' case)", async () => {
+	const repo = await tmpDir("panel-ledger-r3-absent-repo-");
+	const stateDir = await tmpDir("panel-ledger-r3-absent-state-");
+	recordPendingPanelFinding(stateDir, row({ note: "absent-ledger finding" }));
+	const ledgerPath = path.join(repo, "reviewer-ledger.jsonl"); // never created — genuinely absent
+
+	const result = await projectPendingPanelFindings(stateDir, repo, ledgerPath);
+
+	expect(result).toEqual({ projected: 1, committed: false }); // non-git target, durable write only
+	const text = await fs.readFile(ledgerPath, "utf8");
+	expect(text.split("\n").filter((l) => l.trim()).length).toBe(1);
+});
+
+// ── finding #4 (companion): an interprocess lock layered on top of withRepoLandLock ──────────────
+// `withRepoLandLock`'s own realpath canonicalization is tested directly in `tests/land-lock.test.ts`;
+// these prove the ADDITIONAL cross-process advisory lock this module layers on top (the reviewer ledger
+// repo is a daemon-global target more than one daemon PROCESS can genuinely race on).
+
+test("ROUND 3 (finding #4 companion): a STALE interprocess lock directory (left by a crashed process) is reclaimed promptly, never blocking for the full wait window", async () => {
+	const { repo, ledgerPath } = await ledgerRepoFixture("panel-ledger-r3-stale-lock-");
+	const stateDir = await tmpDir("panel-ledger-r3-stale-lock-state-");
+	recordPendingPanelFinding(stateDir, row({ note: "stale-lock finding" }));
+
+	const lockDir = path.join(repo, ".git", "panel-ledger-projection.lock");
+	await fs.mkdir(lockDir);
+	const staleTime = new Date(Date.now() - 10 * 60_000); // 10 minutes old — past the 5-minute staleness bar
+	await fs.utimes(lockDir, staleTime, staleTime);
+
+	const start = Date.now();
+	const result = await projectPendingPanelFindings(stateDir, repo, ledgerPath);
+	const elapsed = Date.now() - start;
+
+	expect(result).toEqual({ projected: 1, committed: true });
+	expect(elapsed).toBeLessThan(5_000); // reclaimed on the FIRST attempt — never waited out the 30s window
+});
+
+test("ROUND 3 (finding #4 companion): a FRESH interprocess lock held by 'another process' genuinely blocks the projection until released", async () => {
+	const { repo, ledgerPath } = await ledgerRepoFixture("panel-ledger-r3-fresh-lock-");
+	const stateDir = await tmpDir("panel-ledger-r3-fresh-lock-state-");
+	recordPendingPanelFinding(stateDir, row({ note: "fresh-lock finding" }));
+
+	const lockDir = path.join(repo, ".git", "panel-ledger-projection.lock");
+	await fs.mkdir(lockDir); // fresh — simulates another process holding the lock RIGHT NOW
+
+	const releaseAfterMs = 300;
+	setTimeout(() => {
+		fs.rm(lockDir, { recursive: true, force: true }).catch(() => {});
+	}, releaseAfterMs);
+
+	const start = Date.now();
+	const result = await projectPendingPanelFindings(stateDir, repo, ledgerPath);
+	const elapsed = Date.now() - start;
+
+	expect(result).toEqual({ projected: 1, committed: true });
+	expect(elapsed).toBeGreaterThanOrEqual(releaseAfterMs - 50); // genuinely waited for "the other process"
+}, 10_000);

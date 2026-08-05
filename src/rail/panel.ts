@@ -45,6 +45,7 @@ import { boundedHermeticSpawn, hermeticCwd, removeHermeticCwd } from "./panel-sp
 import { truncate } from "../text-util.ts";
 import type { ReviewerLedgerEntry } from "../memory/index.ts";
 import { maxDiffFiles, RISKY_PATH_RE } from "./land-risk.ts";
+import { openProjectRegistry } from "../project-registry.ts";
 
 const CLAIM_MAX = 600;
 
@@ -624,6 +625,24 @@ export function canonicalLedgerTag(harness: string, lineage: ModelLineage): stri
 
 const inFlightPanels = new Map<string, Promise<PanelVerdict[] | undefined>>();
 
+/** A stable per-reference identity marker for an injected callback (`opts.reviewers`/`opts.verify`),
+ *  folded into the coalescing key (T5 gauntlet round 3, finding #5b — see the key-construction comment
+ *  below). `WeakMap`-keyed so distinct function OBJECTS always get distinct markers (even two closures
+ *  with byte-identical source text are different references and get different markers), while the SAME
+ *  reference reused across calls always maps back to the SAME marker — no leak risk since a `WeakMap`
+ *  never keeps a function alive past its own last real reference. */
+const callbackIdentityMarkers = new WeakMap<object, number>();
+let nextCallbackIdentityMarker = 1;
+function callbackIdentity(fn: unknown): string {
+	if (typeof fn !== "function") return "none";
+	let marker = callbackIdentityMarkers.get(fn);
+	if (marker === undefined) {
+		marker = nextCallbackIdentityMarker++;
+		callbackIdentityMarkers.set(fn, marker);
+	}
+	return `fn#${marker}`;
+}
+
 export interface ReviewPanelOpts {
 	diff: string;
 	/** Traceable `source` for the reviewer-ledger row (e.g. `"land <branch>@<commit>"`) — also part of
@@ -655,6 +674,29 @@ export interface ReviewPanelOpts {
 	verify?: () => PanelVerifyReviewer;
 }
 
+/**
+ * Every path a reviewer's hermetic scratch cwd must resolve outside of — T5 gauntlet round 3
+ * (glance#356, finding #6): `opts.repo`/`opts.worktree` alone are only THIS call's land target. A
+ * daemon manages a whole FLEET of registered repos (`ProjectLane`'s registry); a scratch cwd that lands
+ * inside (or, per `panel-spawn.ts`'s bidirectional fix, that CONTAINS) some OTHER managed repo — one not
+ * named by this particular call — used to pass validation entirely, since `hermeticCwd` only ever saw
+ * the two paths this function threaded through. Best-effort: a broken/absent registry read must never
+ * break the (advisory) panel, so a read fault here degrades to "no extra paths", never a thrown error.
+ *
+ * @substrate exported for a direct test of the "complete managed-repo set" fix — the production CLI
+ * reviewers aren't available in the unit-test sandbox, so this pure function IS the testable surface for
+ * what actually reaches `hermeticCwd`'s validation.
+ */
+export function avoidPathsFor(opts: Pick<ReviewPanelOpts, "repo" | "worktree" | "stateDir">): string[] {
+	const named = [opts.repo, opts.worktree].filter((p): p is string => !!p);
+	if (!opts.stateDir) return named;
+	try {
+		return [...named, ...openProjectRegistry(opts.stateDir).list()];
+	} catch {
+		return named;
+	}
+}
+
 async function runPanelUncoalesced(opts: ReviewPanelOpts, selected: PanelReviewerSpec[]): Promise<PanelVerdict[] | undefined> {
 	const settled = await Promise.allSettled(selected.map((spec) => runOnePanelReviewer(spec, opts.diff)));
 	const verdicts: PanelVerdict[] = settled.map((r, i) =>
@@ -665,7 +707,7 @@ async function runPanelUncoalesced(opts: ReviewPanelOpts, selected: PanelReviewe
 	// them, since the panel itself is capped), cross-lineage-preferring (C6). A `confirmed:true` NEVER
 	// escalates beyond recording it; it still never vetoes — the land gate's own veto path is untouched
 	// by this module entirely.
-	const avoidPaths = [opts.repo, opts.worktree].filter((p): p is string => !!p);
+	const avoidPaths = avoidPathsFor(opts);
 	const verify = (opts.verify ?? (() => defaultPanelVerifyReviewer(avoidPaths)))();
 	for (let i = 0; i < verdicts.length; i++) {
 		const v = verdicts[i];
@@ -734,7 +776,7 @@ export async function runReviewPanel(opts: ReviewPanelOpts): Promise<PanelVerdic
 		const tier = diffRiskTier(opts.diff);
 		if (!tier.warrants) return undefined;
 
-		const avoidPaths = [opts.repo, opts.worktree].filter((p): p is string => !!p);
+		const avoidPaths = avoidPathsFor(opts);
 		const pool = opts.reviewers ? opts.reviewers() : defaultPanelReviewers(avoidPaths);
 		const seen = new Set<ModelLineage>();
 		const selected: PanelReviewerSpec[] = [];
@@ -754,8 +796,37 @@ export async function runReviewPanel(opts: ReviewPanelOpts): Promise<PanelVerdic
 		// requests actually belong to different lands: the proof tree, the criteria digest, the
 		// repo/worktree, the stateDir, AND the resolved reviewer pool's identity (lineage+harness pairs) —
 		// only a request that agrees on ALL of these is genuinely the same panel run.
+		//
+		// T5 gauntlet round 3 (glance#356, finding #5): TWO more gaps in round 2's key, both closed here.
+		//   (a) `.join("::")` is not injective — a field containing the literal separator can make two
+		//       genuinely DIFFERENT tuples produce the IDENTICAL joined string (e.g. criteriaKey="x::y",
+		//       repo="z" vs criteriaKey="x", repo="y::z" both join to "...x::y::z..."). `JSON.stringify`
+		//       of the field ARRAY is injective regardless of any field's content — the same fix already
+		//       applied to `semanticKey` in `memory/reviewer-weights.ts` for the identical class of bug,
+		//       reused here rather than re-litigated.
+		//   (b) `poolIdentity` was built ONLY from the selected specs' `{lineage, harness}` labels — two
+		//       DIFFERENT injected `opts.reviewers`/`opts.verify` callbacks (e.g. two test fakes, or two
+		//       callers wiring genuinely different behavior behind the same declared lineage/harness pair)
+		//       were INDISTINGUISHABLE by that string alone and would wrongly coalesce onto one run, with
+		//       the SECOND caller silently receiving the FIRST caller's verdicts/queue effects. Every
+		//       distinct function reference now gets its own stable identity token (`callbackIdentity`
+		//       below) folded into the key, so two different callback identities never coalesce even when
+		//       their declared pool shape is identical; the SAME reference reused across calls (the
+		//       common/production case — a shared `reviewers` closure, or no override at all) still
+		//       coalesces exactly as before.
 		const poolIdentity = selected.map((s) => `${s.lineage}:${s.harness}`).sort().join(",");
-		const key = [opts.source, Bun.hash(opts.diff).toString(), opts.proofTree ?? "", opts.criteriaKey ?? "", opts.repo ?? "", opts.worktree ?? "", opts.stateDir ?? "", poolIdentity].join("::");
+		const key = JSON.stringify([
+			opts.source,
+			Bun.hash(opts.diff).toString(),
+			opts.proofTree ?? "",
+			opts.criteriaKey ?? "",
+			opts.repo ?? "",
+			opts.worktree ?? "",
+			opts.stateDir ?? "",
+			poolIdentity,
+			callbackIdentity(opts.reviewers),
+			callbackIdentity(opts.verify),
+		]);
 		const existing = inFlightPanels.get(key);
 		if (existing) return existing;
 		const run = runPanelUncoalesced(opts, selected);

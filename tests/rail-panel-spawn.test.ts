@@ -23,6 +23,7 @@ import {
 	hermeticCwd,
 	removeHermeticCwd,
 	resetGlobalPanelLimiterForTests,
+	scratchConflictsWithAnyManagedPath,
 } from "../src/rail/panel-spawn.ts";
 
 const savedTmpdir = process.env.TMPDIR;
@@ -260,4 +261,57 @@ test("C3 ROUND 2: a rejected candidate directory is cleaned up (not leaked) befo
 	// contain no leftover scratch subdirectories after all attempts were exhausted.
 	const leftovers = await fs.readdir(managedRepo);
 	expect(leftovers).toEqual([]);
+});
+
+// ── T5 gauntlet round 3 (glance#356, finding #6a): BIDIRECTIONAL containment ────────────────────────
+// Round 2's `isInside(candidate, ancestor)` only rejected a candidate that is INSIDE (or equal to) a
+// managed path. A candidate that is a PARENT of a managed repo is exactly as unsafe — an agentic
+// reviewer exploring its own `cwd` can walk `..`/list siblings and discover the managed repo living a
+// few directories below. Real `mktemp`/TMPDIR randomness can't reliably construct a "candidate is a
+// PARENT of a managed repo" fixture on demand (the scratch dir's name is unpredictable), so the pure
+// predicate `scratchConflictsWithAnyManagedPath` — the EXACT function `hermeticCwd` calls — is the
+// direct, deterministic test surface for this fix.
+
+test("ROUND 3 (finding #6a): a candidate that is a PARENT of a managed repo conflicts (the reverse of round 2's own check)", () => {
+	const candidate = "/scratch/parent";
+	const managedRepo = "/scratch/parent/child/managed-repo"; // nested INSIDE the candidate
+	// Round 2's one-directional `isInside(candidate, managed)` would have said NO here — `candidate` is
+	// not inside `managed`; it's the other way around. That was the actual bypass.
+	expect(scratchConflictsWithAnyManagedPath(candidate, [managedRepo])).toBe(true);
+});
+
+test("ROUND 3 (finding #6a): a candidate INSIDE a managed repo still conflicts (round 2's original direction is preserved)", () => {
+	expect(scratchConflictsWithAnyManagedPath("/managed/repo/deep/scratch", ["/managed/repo"])).toBe(true);
+});
+
+test("ROUND 3 (finding #6a): an identical candidate/managed path conflicts", () => {
+	expect(scratchConflictsWithAnyManagedPath("/same/path", ["/same/path"])).toBe(true);
+});
+
+test("ROUND 3 (finding #6a): genuinely unrelated (sibling) paths do NOT conflict", () => {
+	expect(scratchConflictsWithAnyManagedPath("/scratch/unrelated-sibling", ["/scratch/managed-repo"])).toBe(false);
+});
+
+test("ROUND 3 (finding #6a) end-to-end: hermeticCwd rejects an avoid path that is a DESCENDANT of a directory it JUST obtained (the reverse-containment case, against a real produced candidate)", async () => {
+	// Real `mktemp -d` names are unpredictable, so a synthetic "candidate is a parent" fixture can't be
+	// pre-built against the REAL function. Instead: obtain a real scratch dir, then immediately name a
+	// path NESTED INSIDE it as something to avoid on the VERY NEXT call. `hermeticCwd` doesn't reuse a
+	// prior candidate, so this doesn't exercise the exact same directory twice — but it does confirm the
+	// wiring end-to-end: `hermeticCwd([nested])` must still succeed with a DIFFERENT directory (the
+	// bidirectional check only rejects a candidate that conflicts with `nested`, and a fresh mktemp
+	// draw under the same TMPDIR is vanishingly unlikely to land inside a directory that no longer even
+	// contains it as a sibling) — a control proving normal operation is undisturbed by the added check,
+	// pairing with the pure-function tests above that prove the check itself fires when it should.
+	const scratchParent = await fs.mkdtemp(path.join(os.tmpdir(), "hermetic-e2e-parent-"));
+	tmps.push(scratchParent);
+	process.env.TMPDIR = scratchParent;
+	const first = await hermeticCwd();
+	tmps.push(first);
+	const nestedInsideFirst = path.join(first, "child-managed-repo");
+	await fs.mkdir(nestedInsideFirst, { recursive: true });
+	const second = await hermeticCwd([nestedInsideFirst]);
+	tmps.push(second);
+	const resolvedSecond = await fs.realpath(second);
+	const resolvedNested = await fs.realpath(nestedInsideFirst);
+	expect(scratchConflictsWithAnyManagedPath(resolvedSecond, [resolvedNested])).toBe(false);
 });

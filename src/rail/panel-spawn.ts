@@ -143,16 +143,39 @@ function isInside(candidate: string, ancestor: string): boolean {
 }
 
 /**
+ * T5 gauntlet round 3 (glance#356, finding #6): `isInside` alone only rejects a candidate that is
+ * INSIDE (or equal to) a managed path — it said nothing about the opposite containment. A candidate
+ * that is a PARENT of a managed repo is exactly as unsafe: an agentic reviewer exploring its own `cwd`
+ * can walk `..`/list siblings and discover the managed repo living a few directories below, even though
+ * the candidate itself started out empty. Both directions must be rejected — `isInside(candidate,
+ * managed)` (candidate is inside/is the managed path) OR `isInside(managed, candidate)` (the managed
+ * path is inside/is the candidate — candidate is an ancestor of it).
+ */
+function conflictsWithManaged(candidate: string, managed: string): boolean {
+	return isInside(candidate, managed) || isInside(managed, candidate);
+}
+
+/** @substrate exported for a direct, deterministic unit test of the bidirectional containment rule —
+ *  real mktemp/TMPDIR randomness can't reliably construct a "candidate is a PARENT of a managed repo"
+ *  fixture on demand, so the pure predicate itself is the testable surface. */
+export function scratchConflictsWithAnyManagedPath(candidate: string, avoid: string[]): boolean {
+	return avoid.some((a) => conflictsWithManaged(candidate, a));
+}
+
+/**
  * A fresh, empty scratch directory with no repo, no history, nothing an agentic reviewer could
  * discover by exploring its own `cwd` — VALIDATED (gauntlet round 2, finding C3) to resolve outside
  * `process.cwd()` (the daemon's own launch directory — the original C3 threat model) AND every path in
- * `avoid` (the specific repo/worktree a caller is reviewing, when known). A hostile/misconfigured
+ * `avoid` (the specific repo/worktree a caller is reviewing, when known — round 3, finding #6: callers
+ * now pass the COMPLETE registered-repo set, not just the one land in progress). A hostile/misconfigured
  * `TMPDIR`, or a PATH-shadowed `mktemp` binary, that would otherwise place the "scratch" cwd INSIDE a
- * managed repo is rejected (the rejected candidate is cleaned up) and retried up to
- * `HERMETIC_CWD_ATTEMPTS` times; if no valid candidate can be obtained at all, this THROWS rather than
- * ever handing a reviewer a cwd that might leak the tree it's supposed to be blind to (fail closed —
- * every caller in this file already treats a thrown/rejected review as an honest "error" verdict, never
- * a fabricated one). The caller MUST remove the returned directory (`removeHermeticCwd`) when done.
+ * managed repo — OR make the scratch cwd a PARENT of one (round 3, finding #6: the reverse containment
+ * is equally unsafe, see `conflictsWithManaged` above) — is rejected (the rejected candidate is cleaned
+ * up) and retried up to `HERMETIC_CWD_ATTEMPTS` times; if no valid candidate can be obtained at all, this
+ * THROWS rather than ever handing a reviewer a cwd that might leak the tree it's supposed to be blind to
+ * (fail closed — every caller in this file already treats a thrown/rejected review as an honest "error"
+ * verdict, never a fabricated one). The caller MUST remove the returned directory (`removeHermeticCwd`)
+ * when done.
  */
 export async function hermeticCwd(avoid: string[] = []): Promise<string> {
 	const avoidResolved = await Promise.all([process.cwd(), ...avoid].map(realOrResolved));
@@ -160,11 +183,11 @@ export async function hermeticCwd(avoid: string[] = []): Promise<string> {
 	for (let attempt = 0; attempt < HERMETIC_CWD_ATTEMPTS; attempt++) {
 		const dir = await rawScratchDir();
 		const resolved = await realOrResolved(dir);
-		if (!avoidResolved.some((a) => isInside(resolved, a))) return dir;
+		if (!scratchConflictsWithAnyManagedPath(resolved, avoidResolved)) return dir;
 		lastRejected = resolved;
 		await removeHermeticCwd(dir);
 	}
-	throw new Error(`hermeticCwd: could not obtain a scratch directory outside every managed repo after ${HERMETIC_CWD_ATTEMPTS} attempts (last rejected candidate resolved inside a managed path: ${lastRejected}) — refusing to hand a reviewer a cwd that might leak the tree`);
+	throw new Error(`hermeticCwd: could not obtain a scratch directory outside every managed repo after ${HERMETIC_CWD_ATTEMPTS} attempts (last rejected candidate resolved inside/around a managed path: ${lastRejected}) — refusing to hand a reviewer a cwd that might leak the tree`);
 }
 
 export async function removeHermeticCwd(dir: string): Promise<void> {
