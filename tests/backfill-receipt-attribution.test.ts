@@ -403,7 +403,21 @@ test("runBackfill: REFUSES to run (dry-run included) while a live daemon holds t
 	expect(receipt.harnessUnattributableReason).toBeUndefined(); // refused before touching anything
 });
 
-test.skip("runBackfill: a STALE lock (dead pid) is reclaimed by the real acquire — proceeds normally" /* TODO(#354): T3xT12 in-file flock interaction; production behavior verified correct in isolation */, async () => {
+// Re-homed from a `test.skip` (glance#354): this used to be flaky/order-dependent because
+// `runBackfill` called `acquireStateLock` with `handoffMs: 0` while state-lock.ts's deadline
+// check ran on a millisecond-resolution `Date.now()` — an uncontested stale-lock reclaim only
+// "fit" inside a zero budget by accidentally landing in the same millisecond bucket the deadline
+// was computed in, so it passed only when incidental timing (which flock caches happened to
+// already be warm, exact scheduling) got lucky. state-lock.ts's #354 hygiene fix (residual 1:
+// a monotonic clock with no millisecond-bucketing grace, checked consistently before AND after
+// the flock attempt) removed that accidental luck entirely — a genuinely zero budget can no
+// longer complete a reclaim at all, ever, since the fence mechanics themselves take a nonzero
+// amount of real time. The actual fix was in the CALLER: `runBackfill` now passes a real
+// `RECLAIM_HANDOFF_MS` (500ms) instead of `0` (see scripts/backfill-receipt-attribution.ts), which
+// gives genuine headroom for an uncontested reclaim to finish. Verified deterministic (not just
+// "usually passes") across repeated runs, standalone and combined with tests/state-lock.test.ts,
+// in both file orders.
+test("runBackfill: a STALE lock (dead pid) is reclaimed by the real acquire — proceeds normally", async () => {
 	const stateDir = await tmpStateDir();
 	await writeRawLines(stateDir, "a1", [baseReceipt({ agentId: "a1", harness: undefined })]);
 	await writeStaleDaemonLock(stateDir);
