@@ -39,3 +39,17 @@ Three standing rules (campaign doctrine):
   standing doctrine: any future allowlist/ratchet test ships with per-form fixtures.
 - Builder caught a design estimate wrong (8 test files vs ~4) by grepping with .ts extensions
   — the verify-claims-against-the-tree dispatch line keeps earning its place.
+
+### 2026-08-04 — T8 #336 (codex harness verify) — closed after 1 grok round + delta-verify
+- Rounds: build (builder self-caught the ignored --model argv, added applyModelPin) + 1 grok fix
+  round + 1 grok delta-verify. Single-lineage grok, deliberately: the builder is Claude/OpenAI-
+  adjacent enabling an OpenAI harness — the xAI lineage is the only non-correlated reviewer for
+  "does enabling codex lie about codex."
+- Both HIGH findings were the SAME failure shape as T3/T4: absence rendered as a confident value
+  (pin-fail → requested model recorded as if run; unverified usage → $0 as if free). That's now
+  three independent tickets where "absence must read as unknown, never a fabricated zero/value"
+  was the load-bearing catch. Promote to a standing critic-prompt line for every attribution/
+  receipt diff: "find every place a missing measurement is coerced to a number."
+- Delta-verify earned its keep: found the fix was scope-correct but the bug CLASS lived at four
+  more sites (#348) — closing on "the findings are fixed" without it would have left codex
+  looking free in half the surfaces.
