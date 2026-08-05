@@ -197,6 +197,20 @@ import type { AgentStatus } from "../src/types.ts";
  *  to pick a more specific unattributable reason code, never to attribute anything. */
 const INGESTED_AGENT_ID_PREFIXES = ["cc-", "codex-", "or-"];
 
+/** Budget for `acquireStateLock`'s real (Layer 2) acquire below. NOT for waiting out a live
+ *  owner — Layer 1's `probeDaemonLock` already ruled out "obviously live" before we get here, so
+ *  this only ever matters for (a) the rare TOCTOU window where the owner went live between the
+ *  two probes, or (b) genuinely reclaiming a STALE lock, which state-lock.ts's own fence-acquire
+ *  loop shares this exact deadline with (glance#345 ROUND 3/4). This used to be `0`, on the
+ *  reasoning that Layer 1 already handled liveness — true, but it ALSO zeroed the budget for (b),
+ *  which state-lock.ts's glance#354 hygiene fix (a monotonic clock with no accidental
+ *  millisecond-bucketing grace period) now enforces strictly: a genuinely zero budget means a
+ *  stale-lock reclaim can no longer complete at all, even fully uncontested, because the fence
+ *  mechanics themselves (dlopen on a cold `loadFlock()`, the exclusivity self-test, a syscall or
+ *  two) take a small but nonzero amount of real time. A few hundred ms is negligible for a
+ *  maintenance CLI and gives genuine headroom for that to finish. */
+const RECLAIM_HANDOFF_MS = 500;
+
 /** Refusing to run because a live daemon holds (or started holding, between the fast probe and
  *  the real acquire attempt) the state dir's single-writer lock (Findings 1+2, round 1; Finding
  *  1, round 2). */
@@ -783,11 +797,10 @@ export async function runBackfill(opts: RunOpts): Promise<BackfillReport> {
 	// single-writer lock for the entire pass. A daemon that starts mid-pass now blocks on THIS
 	// lock at its own startup (acquireStateLock is the SAME mechanism `up.sh` calls before
 	// touching the state dir) instead of racing an already-open O_APPEND descriptor against our
-	// rename. `handoffMs: 0` — the probe above already ruled out "obviously live"; no need to
-	// also wait through the upgrade-handoff window a second time.
+	// rename. See {@link RECLAIM_HANDOFF_MS} for why this isn't `0` (glance#354).
 	let lock: StateLock;
 	try {
-		lock = await acquireStateLock(opts.stateDir, { handoffMs: 0 });
+		lock = await acquireStateLock(opts.stateDir, { handoffMs: RECLAIM_HANDOFF_MS });
 	} catch (err) {
 		if (err instanceof StateLockError) throw new DaemonLockRefusal(err.owner);
 		throw err;

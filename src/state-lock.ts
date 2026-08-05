@@ -203,6 +203,61 @@
  *    instead — every stale reclaim on macOS failed as "unsupported" even
  *    though flock itself works fine there. Fixed: the errno symbol name is
  *    now platform-branched.
+ *
+ * ROUND 5 / glance#354 (this fix). A scoped delta-verify's FINAL pass over round 4
+ * found four residuals — none a two-owner bug (the fence stays exclusive in every
+ * case below); timing/hygiene/docs only:
+ *
+ * 1. (soft-deadline overshoot) {@link acquireFenceOrThrow}'s deadline was checked
+ *    only BEFORE each `flock` attempt, so a `flock(LOCK_EX|LOCK_NB)` call that
+ *    itself took long enough (scheduler preemption, a slow FFI dispatch) to
+ *    cross the deadline still returned success straight into the critical
+ *    section — a boot a few ms later than the promised `handoffMs`, never a
+ *    double owner. Fixed: recheck the deadline immediately AFTER a successful
+ *    acquire too, releasing and giving up if we're already past budget by
+ *    then. Also switched the deadline clock from `Date.now()` (wall clock —
+ *    can jump on an NTP/manual adjustment, which could make an already-blown
+ *    deadline look not-yet-reached) to `performance.now()` (monotonic), and
+ *    unified every deadline comparison in this file on `>=` (this function
+ *    used to check `>`, {@link acquireStateLock} already used `>=` —
+ *    inconsistent operators made the boundary behavior depend on which call
+ *    site you read).
+ *
+ * 2. (EINTR busy-spin) the EINTR retry path `continue`d with no sleep at all,
+ *    so a pathological always-EINTR condition (observed: ~1.7M calls in 51ms)
+ *    tight-spun burning CPU until the deadline check finally caught up in
+ *    wall-clock terms. Fixed: a small sleep ({@link EINTR_RETRY_MS}) before
+ *    retrying — the loop still re-checks the deadline first on every
+ *    iteration (round 4 #1's fix is untouched), just no longer at spin speed.
+ *
+ * 3. (libc-absent recheck→throw TOCTOU, still open) {@link
+ *    recheckLiveBeforeUnsupported} closed the INITIAL observation's TOCTOU
+ *    (round 4 #2), but the recheck-then-throw pair at each unsupported-error
+ *    site in {@link reclaimOrCreate} is itself still a check-then-act: a
+ *    scheduler pause between the recheck returning null and the `throw`
+ *    statement executing could let a peer reclaim and go live in that exact
+ *    window, and the fatal error's "confirmed stale, rm it by hand" advice
+ *    would then be stale advice. Inserting yet another recheck only pushes
+ *    the same gap one statement later — closing it for real needs an atomic
+ *    check-and-act primitive (a lock), which is precisely what's unavailable
+ *    on this branch (no working flock/libc at all — the already-degraded
+ *    case this error exists for). Left as a documented limit: it's ADVICE,
+ *    not action (nothing here mutates the lock; the operator can verify
+ *    liveness themselves before running `rm`), so the failure mode is a
+ *    possibly-stale recommendation, never a second live owner.
+ *
+ * 4. (per-device cache staleness across remount / st_dev reuse) {@link
+ *    ensureFlockExclusive}'s per-device cache (round 4 #3a) has no expiry, so
+ *    a cached 'exclusive' verdict can survive a same-device remount with
+ *    different lock semantics, or an `st_dev` value being reused after the
+ *    original device was unmounted. Exotic (a live remount mid-run), and full
+ *    detection would need continuous `/proc/mounts` polling or mount-event
+ *    notifications for what's a rare edge case. Fixed the tractable part: the
+ *    cache now expires after {@link FLOCK_CACHE_TTL_MS} and re-probes, so a
+ *    stale verdict is bounded in how long it can survive rather than living
+ *    forever. The genuinely cross-host/no-notification case remains
+ *    documented-not-chased, same posture as the NFS cross-host case in round
+ *    4 #3.
  */
 
 import { openSync, writeSync, closeSync, readFileSync, unlinkSync, linkSync, statSync, rmdirSync } from "node:fs";
@@ -215,6 +270,22 @@ const LOCK_FILE = "daemon.lock";
 /** How long to wait for an outgoing (upgrading) daemon to release before giving up. */
 const HANDOFF_TIMEOUT_MS = 5_000;
 const HANDOFF_POLL_MS = 200;
+
+/** Monotonic clock for every deadline computation/comparison in this file
+ * (glance#354 residual 1). `Date.now()` is wall-clock: an NTP adjustment or a
+ * manual clock change can jump it backward, which would make an
+ * already-exceeded deadline look not-yet-reached and silently extend a wait
+ * past `handoffMs`. `performance.now()` (available in Bun/Node) only ever
+ * moves forward and is unaffected by wall-clock changes; it does NOT share
+ * an epoch with `Date.now()`, so it must be used for BOTH the deadline
+ * computation and every comparison against it — never mixed with `Date.now()`.
+ * @substrate exported for tests only, so a direct unit test can construct a
+ * deadline in the SAME clock basis production code uses (e.g.
+ * `monotonicNow() + 100`) rather than mixing in `Date.now()`, which has a
+ * different epoch and would make the deadline meaningless. */
+export function monotonicNow(): number {
+	return performance.now();
+}
 
 export interface LockRecord {
 	pid: number;
@@ -466,6 +537,16 @@ function unknownOwnerPlaceholder(): LockRecord {
  * fails). Never advise manual `rm` against a lock that's live right now.
  * Returns the live owner (take the normal wait/handoff path instead) or null
  * (still genuinely unreclaimable — safe to throw the fatal error).
+ *
+ * glance#354 residual 3 (still open, libc-absent only): this closes the
+ * window BEFORE the recheck, but the recheck-then-throw pair at each call
+ * site is itself a check-then-act — a pause between this returning null and
+ * the caller's `throw` executing could still let a peer go live in between.
+ * That residual gap can't be closed further without an atomic primitive
+ * (a lock), which is exactly what's unavailable on the branch this guards
+ * (no working flock/libc at all). Accepted: the thrown error is advice
+ * ("rm it by hand"), never an action, so the worst case is momentarily-stale
+ * advice, not a second live owner.
  * @substrate exported for tests only — `reclaimOrCreate` (same file) is the
  * one production caller, at both unsupported-error throw sites.
  */
@@ -647,22 +728,55 @@ export function probeFlockExclusive(f: Flock, testPath: string): boolean {
 /** Cached PER FILESYSTEM DEVICE (ROUND 4 #3a), not one global boolean — a
  * local-disk success must never make a LATER state dir on a different (and
  * possibly genuinely non-exclusive) mount skip probing entirely. */
-const flockExclusiveByDevice = new Map<number, boolean>();
+const flockExclusiveByDevice = new Map<number, { result: boolean; checkedAt: number }>();
+
+/** How long a per-device NEGATIVE ("not exclusive") verdict is trusted before being re-probed
+ * (glance#354 residual 4). Only negatives are cached now (codex #354 round 2): a stale POSITIVE would
+ * be the dangerous one — a same-device remount to non-exclusive-flock semantics, or an `st_dev` reuse,
+ * could let a cached `true` skip the self-test and admit a second owner — so `ensureFlockExclusive`
+ * never caches `true` and re-probes on every reclaim. A cached `false` is fail-closed (it can only
+ * DELAY a device's return to service), so bounding it with a TTL — rather than continuous
+ * `/proc/mounts` polling for an exotic mount-change — is the right trade: a device whose flock support
+ * recovers is re-probed within the TTL instead of staying refused forever.
+ * @substrate exported for tests only, so a TTL-expiry test can assert
+ * against the real value rather than a hardcoded duplicate. */
+export const FLOCK_CACHE_TTL_MS = 5 * 60_000;
+
+/** Test-only: clear the per-device negative-verdict cache so a cache test starts from a known-empty
+ * state (codex #354 round 2, LOW — module-level cache state otherwise leaks across tests on the same
+ * device). Never called in production. */
+export function __resetFlockExclusiveCacheForTests(): void {
+	flockExclusiveByDevice.clear();
+}
 
 /** @substrate exported for tests only — `reclaimOrCreate` (same file) is the
  * one production caller; `tests/state-lock.test.ts` calls this directly
  * against paths on two genuinely different real devices (`/tmp` and
  * `/dev/shm`, both root-free) to prove the cache is keyed per-device and not
- * one global flag (ROUND 4 #3a). */
-export function ensureFlockExclusive(f: Flock, fenceFile: string): boolean {
+ * one global flag (ROUND 4 #3a), and against one device across a simulated
+ * TTL expiry (via the `now` param) to prove a stale verdict doesn't survive
+ * forever (glance#354 residual 4).
+ * @param now Clock reading to evaluate the cache's freshness against.
+ * Defaults to {@link monotonicNow}; overridable so a test can simulate TTL
+ * expiry deterministically without sleeping the real 5 minutes. */
+export function ensureFlockExclusive(f: Flock, fenceFile: string, now: number = monotonicNow()): boolean {
 	let dev: number;
 	try {
 		dev = statSync(path.dirname(fenceFile)).dev;
 	} catch {
 		dev = -1; // can't stat the dir (astonishingly unlikely) — shared fallback bucket, still correct, just not device-specific
 	}
+	// Only NEGATIVE verdicts are cached (codex #354 round 2, HIGH). A `false` ("flock is not exclusive
+	// on this device") is fail-closed — caching it merely delays a device's return to service, never
+	// admits an owner. A `true` verdict is NEVER cached: a same-device remount to non-exclusive-flock
+	// semantics, or `st_dev` reuse, could otherwise let a stale `true` skip this self-test for up to the
+	// TTL and admit a SECOND owner — the exact invariant the fence exists to hold. The self-test is a
+	// single local flock pair; re-running it before every (rare) reclaim costs ~nothing and removes the
+	// remount window UNCONDITIONALLY rather than bounding it to 5 minutes. The `age >= 0` guard rejects a
+	// future `checkedAt` (a clock/test artifact) so a bogus entry can't read as fresh (codex LOW).
 	const cached = flockExclusiveByDevice.get(dev);
-	if (cached !== undefined) return cached;
+	const age = cached ? now - cached.checkedAt : Infinity;
+	if (cached !== undefined && cached.result === false && age >= 0 && age < FLOCK_CACHE_TTL_MS) return false;
 	// A DEDICATED, UNIQUE-per-process-per-call path, never the live fence file
 	// and never a fixed shared name: the fence can be legitimately held by
 	// another racer at any moment (that's the whole point of it), and a fixed
@@ -684,13 +798,23 @@ export function ensureFlockExclusive(f: Flock, fenceFile: string): boolean {
 			// Best-effort — the path is unique, so a leftover is harmless either way.
 		}
 	}
-	flockExclusiveByDevice.set(dev, result);
+	// Store ONLY a negative verdict (see above). On a positive, clear any prior entry for this device so
+	// a now-stale `false` can't linger, and never record the `true` — the next reclaim re-probes.
+	if (result === false) flockExclusiveByDevice.set(dev, { result, checkedAt: now });
+	else flockExclusiveByDevice.delete(dev);
 	return result;
 }
 
 type ReclaimOutcome = { kind: "created" } | { kind: "retry" } | { kind: "live"; owner: LockRecord };
 
 const RECLAIM_POLL_MS = 20;
+/** Small sleep before retrying an EINTR'd `flock` attempt (glance#354 residual
+ * 2). Retrying immediately made a pathological always-EINTR condition
+ * tight-spin (observed: ~1.7M calls in 51ms) instead of yielding — the
+ * deadline check at the top of the loop is still hit every iteration (round
+ * 4 #1's fix is unaffected), this just stops the loop from burning CPU at
+ * spin speed while it does. */
+const EINTR_RETRY_MS = 1;
 
 /**
  * ROUND 3 #1, hardened in ROUND 4 #1: acquire the fence non-blockingly
@@ -710,7 +834,7 @@ const RECLAIM_POLL_MS = 20;
  */
 export async function acquireFenceOrThrow(f: Flock, fd: number, file: string, fenceFile: string, deadline: number): Promise<void> {
 	for (;;) {
-		if (Date.now() > deadline) {
+		if (monotonicNow() >= deadline) {
 			// Someone (or something stuck/stopped) has held the fence past our
 			// whole budget, or a storm of retries burned it. We never entered the
 			// critical section, so we can't have stomped anything — give up and
@@ -721,9 +845,32 @@ export async function acquireFenceOrThrow(f: Flock, fd: number, file: string, fe
 			throw new StateLockError(file, current ?? unknownOwnerPlaceholder());
 		}
 		const ret = f.lock(fd, LOCK_EX | LOCK_NB);
-		if (ret === 0) return; // acquired, within budget
+		if (ret === 0) {
+			// glance#354 residual 1: the check above ran BEFORE this attempt, so a
+			// `flock` call that itself took long enough (scheduler preemption, a
+			// slow FFI dispatch) to cross the deadline used to return success
+			// straight into the critical section a little past budget — not a
+			// two-owner bug (the fence is still exclusive either way), just a
+			// boot that quietly overshoots `handoffMs`. Recheck immediately AFTER
+			// a successful acquire and give up cleanly (releasing what we just
+			// took) rather than proceed late and silently.
+			if (monotonicNow() >= deadline) {
+				f.lock(fd, LOCK_UN);
+				const current = readRecord(file);
+				throw new StateLockError(file, current ?? unknownOwnerPlaceholder());
+			}
+			return; // acquired, within budget
+		}
 		const errno = f.errno();
-		if (errno === EINTR) continue; // interrupted syscall — loop re-checks the deadline FIRST, not bypassed
+		if (errno === EINTR) {
+			// glance#354 residual 2: a small sleep bounds an always-EINTR
+			// condition to a sane retry rate instead of a tight spin. The
+			// deadline is still re-checked FIRST on the next iteration — this
+			// sleep never bypasses it, it just stops burning CPU while waiting
+			// to hit it.
+			await Bun.sleep(EINTR_RETRY_MS);
+			continue;
+		}
 		if (errno !== EWOULDBLOCK) throw new Error(`flock(LOCK_EX|LOCK_NB) on ${fenceFile} failed with errno ${errno}`);
 		await Bun.sleep(RECLAIM_POLL_MS);
 	}
@@ -749,6 +896,20 @@ async function reclaimOrCreate(file: string, deadline: number): Promise<ReclaimO
 	if (!f) {
 		const live = recheckLiveBeforeUnsupported(file);
 		if (live) return { kind: "live", owner: live.owner };
+		// glance#354 residual 3 (libc-absent only — this branch only runs when
+		// there's no working flock/libc at all, an already-degraded state): the
+		// recheck above closes round 4 #2's window, but recheck-then-throw is
+		// ITSELF a check-then-act pair — a scheduler pause right here, between
+		// the recheck returning null and this throw executing, could still let
+		// a peer reclaim and go live before the error is actually thrown.
+		// Inserting another recheck only moves the same gap one statement
+		// later; closing it for real needs an atomic check-and-throw
+		// primitive, which requires exactly the kernel lock this branch
+		// doesn't have. Left as a documented limit rather than chased further:
+		// the thrown error is ADVICE ("rm it by hand"), not an action — nothing
+		// here mutates the lock — so the worst case is a momentarily-stale
+		// recommendation an operator can verify before acting on, never a
+		// second live owner.
 		throw new StateLockReclaimUnsupportedError(file, "no-flock");
 	}
 
@@ -757,6 +918,7 @@ async function reclaimOrCreate(file: string, deadline: number): Promise<ReclaimO
 	if (!ensureFlockExclusive(f, fenceFile)) {
 		const live = recheckLiveBeforeUnsupported(file);
 		if (live) return { kind: "live", owner: live.owner };
+		// Same residual-3 limit as above, at the other unsupported-error site.
 		throw new StateLockReclaimUnsupportedError(file, "flock-not-exclusive");
 	}
 
@@ -802,7 +964,7 @@ export async function acquireStateLock(stateDir: string, opts: { handoffMs?: num
 	await fs.mkdir(stateDir, { recursive: true });
 	warnOnNetworkFilesystem(stateDir); // best-effort, cheap, non-fatal — see ROUND 3 #3
 	const file = lockPath(stateDir);
-	const deadline = Date.now() + (opts.handoffMs ?? HANDOFF_TIMEOUT_MS);
+	const deadline = monotonicNow() + (opts.handoffMs ?? HANDOFF_TIMEOUT_MS);
 
 	for (;;) {
 		// Fast, uncontended path: no flock needed when the lock file simply isn't
@@ -818,7 +980,7 @@ export async function acquireStateLock(stateDir: string, opts: { handoffMs?: num
 		// reclaim, which re-confirms staleness again before acting.
 		const observed = readRecord(file);
 		if (observed && ownerAlive(observed)) {
-			if (Date.now() >= deadline) throw new StateLockError(file, observed);
+			if (monotonicNow() >= deadline) throw new StateLockError(file, observed);
 			await Bun.sleep(HANDOFF_POLL_MS);
 			continue;
 		}
@@ -835,7 +997,7 @@ export async function acquireStateLock(stateDir: string, opts: { handoffMs?: num
 		// A genuinely live peer holds it. During upgrade the outgoing daemon dies
 		// within the handoff window; a genuine double-start never will, so we
 		// eventually throw.
-		if (Date.now() >= deadline) throw new StateLockError(file, outcome.owner);
+		if (monotonicNow() >= deadline) throw new StateLockError(file, outcome.owner);
 		await Bun.sleep(HANDOFF_POLL_MS);
 	}
 

@@ -18,6 +18,9 @@ import {
 	acquireFenceOrThrow,
 	recheckLiveBeforeUnsupported,
 	ensureFlockExclusive,
+	__resetFlockExclusiveCacheForTests,
+	monotonicNow,
+	FLOCK_CACHE_TTL_MS,
 	type Flock,
 } from "../src/state-lock.ts";
 
@@ -302,12 +305,80 @@ test("acquireFenceOrThrow: an EINTR storm cannot bypass the deadline (#345 round
 	cleanups.push(() => closeSync(fd));
 
 	const alwaysEintr: Flock = { lock: () => -1, errno: () => EINTR };
-	const deadline = Date.now() + 100;
+	// Deadlines are in the monotonic clock basis (glance#354 residual 1) —
+	// `monotonicNow()`, not `Date.now()` (a different epoch entirely; mixing
+	// them would make the deadline meaningless).
+	const deadline = monotonicNow() + 100;
 	const t0 = Date.now();
 	await expect(acquireFenceOrThrow(alwaysEintr, fd, file, fenceFile, deadline)).rejects.toBeInstanceOf(StateLockError);
 	const elapsedMs = Date.now() - t0;
 	// Bounded near the 100ms deadline, not an infinite tight loop.
 	expect(elapsedMs).toBeLessThan(1_000);
+});
+
+test("acquireFenceOrThrow: an always-EINTR stub retries at a bounded rate, not a tight spin (#354 residual 2)", async () => {
+	// Before the fix, the EINTR retry path `continue`d with NO sleep at all —
+	// an always-EINTR condition (observed: ~1.7M calls in 51ms) tight-spun
+	// burning CPU instead of yielding between attempts. This proves the retry
+	// rate is now bounded to something sane: a call count in the low hundreds
+	// over a 100ms window, not the millions a tight spin would produce.
+	const dir = await tmpdir();
+	const file = path.join(dir, "daemon.lock");
+	const fenceFile = reclaimFencePath(file);
+	const fd = openSync(fenceFile, "a+");
+	cleanups.push(() => closeSync(fd));
+
+	let calls = 0;
+	const alwaysEintr: Flock = {
+		lock: () => {
+			calls++;
+			return -1;
+		},
+		errno: () => EINTR,
+	};
+	const deadline = monotonicNow() + 100;
+	await expect(acquireFenceOrThrow(alwaysEintr, fd, file, fenceFile, deadline)).rejects.toBeInstanceOf(StateLockError);
+
+	expect(calls).toBeGreaterThan(0);
+	expect(calls).toBeLessThan(1_000); // pre-fix this would be in the millions
+});
+
+test("acquireFenceOrThrow: a flock success that arrives AFTER the deadline is rejected, not proceeded on late (#354 residual 1)", async () => {
+	// The exact residual: the deadline was checked only BEFORE the flock
+	// attempt, so a `flock` call that itself took long enough (scheduler
+	// preemption, a slow FFI dispatch) to cross the deadline still returned
+	// success straight into the critical section — a boot a bit later than
+	// promised, silently. This stub simulates that slow-but-successful call
+	// with a short busy-wait, so the fix must recheck the deadline AFTER
+	// success too, not just before the attempt.
+	const dir = await tmpdir();
+	const file = path.join(dir, "daemon.lock");
+	const fenceFile = reclaimFencePath(file);
+	const fd = openSync(fenceFile, "a+");
+	cleanups.push(() => closeSync(fd));
+
+	const SIMULATED_FLOCK_DELAY_MS = 15;
+	const slowSuccess: Flock = {
+		lock: () => {
+			const until = monotonicNow() + SIMULATED_FLOCK_DELAY_MS;
+			while (monotonicNow() < until) {
+				/* busy-wait: simulates a `flock` FFI call slow enough to cross a tight deadline */
+			}
+			return 0; // "succeeds" — but only after the simulated delay above
+		},
+		errno: () => 0,
+	};
+
+	// A budget smaller than the simulated delay: the flock call "succeeds",
+	// but only after the deadline has already passed — must be rejected.
+	const tightDeadline = monotonicNow() + 5;
+	await expect(acquireFenceOrThrow(slowSuccess, fd, file, fenceFile, tightDeadline)).rejects.toBeInstanceOf(StateLockError);
+
+	// Flip the input: the SAME slow-success stub against a budget that
+	// comfortably outlives the delay must succeed instead — proving the
+	// rejection above is really about the deadline, not the stub shape.
+	const generousDeadline = monotonicNow() + 5_000;
+	await expect(acquireFenceOrThrow(slowSuccess, fd, file, fenceFile, generousDeadline)).resolves.toBeUndefined();
 });
 
 test("recheckLiveBeforeUnsupported: null while stale, the live owner once a peer reclaims (#345 round 4, #2)", async () => {
@@ -352,13 +423,12 @@ test("probeFlockExclusive only accepts a genuine EWOULDBLOCK/EAGAIN as proof of 
 	expect(probeFlockExclusive(wrongErrnoStub, testPath)).toBe(false);
 });
 
-test("ensureFlockExclusive caches the exclusivity verdict PER FILESYSTEM DEVICE, not one global flag (#345 round 4, #3a)", async () => {
-	// Before the fix, a single global boolean meant a local-disk success on
-	// the FIRST state dir made every LATER state dir — even one on a
-	// genuinely different, non-exclusive filesystem — skip probing entirely.
-	// /tmp and /dev/shm are genuinely different real devices here (confirmed
-	// via `stat -c %d`), so this proves per-device isolation without needing
-	// root to fabricate a fake mount.
+test("ensureFlockExclusive caches a NEGATIVE verdict PER FILESYSTEM DEVICE, and never leaks it across devices (#345 round 4 #3a; #354 r2)", async () => {
+	// Before the per-device fix, a single global boolean meant a local-disk success on the FIRST state
+	// dir made every LATER one skip probing. Now (codex #354 r2) only NEGATIVE verdicts are cached, and
+	// per-device: /dev/shm's `false` must not leak onto /tmp. /tmp and /dev/shm are genuinely different
+	// real devices here (confirmed via `stat -c %d`), so this proves per-device isolation without root.
+	__resetFlockExclusiveCacheForTests();
 	const tmpDir = await tmpdir();
 	const shmDir = await fs.mkdtemp(path.join("/dev/shm", "glance-lock-test-"));
 	cleanups.push(() => fs.rm(shmDir, { recursive: true, force: true }));
@@ -370,20 +440,61 @@ test("ensureFlockExclusive caches the exclusivity verdict PER FILESYSTEM DEVICE,
 	expect(realFlock).not.toBeNull();
 	if (!realFlock) return; // unreachable after the assert above; narrows the type
 
-	// A stub that reports NOT exclusive (the second lock "succeeds" — a no-op,
-	// the exact shape of a client-local network mount).
+	// A stub that reports NOT exclusive (the second lock "succeeds" — a no-op, the exact shape of a
+	// client-local network mount).
 	const nonExclusiveStub: Flock = { lock: () => 0, errno: () => 0 };
 
-	// /tmp: real flock, genuinely exclusive here.
-	expect(ensureFlockExclusive(realFlock, tmpFence)).toBe(true);
-	// /dev/shm: a DIFFERENT device, probed independently — the fake stub is
-	// actually consulted (not skipped via a stale cached verdict from /tmp).
+	// /dev/shm: probed non-exclusive → false, cached per shm's device.
 	expect(ensureFlockExclusive(nonExclusiveStub, shmFence)).toBe(false);
-
-	// Re-query each device with the OPPOSITE flock instance: the CACHED verdict
-	// per device must win, proving this isn't just "always re-evaluate whatever
-	// was passed" — /tmp stays true even handed the non-exclusive stub, and
-	// /dev/shm stays false even handed the real, genuinely-working flock.
-	expect(ensureFlockExclusive(nonExclusiveStub, tmpFence)).toBe(true);
+	// /tmp: a DIFFERENT device — shm's cached `false` must NOT leak here; probed with the real flock →
+	// genuinely exclusive → true.
+	expect(ensureFlockExclusive(realFlock, tmpFence)).toBe(true);
+	// Re-query shm with the REAL flock: the cached NEGATIVE wins per-device (within TTL), proving the
+	// negative is genuinely cached and device-scoped, not re-evaluated from whatever was passed.
 	expect(ensureFlockExclusive(realFlock, shmFence)).toBe(false);
+});
+
+test("ensureFlockExclusive NEVER caches a POSITIVE — a stale `true` can't survive a device flipping non-exclusive (#354 r2, the two-owner fix)", async () => {
+	// The dangerous stale verdict is a cached `true`: a same-device remount to non-exclusive-flock
+	// semantics (or st_dev reuse) could let it skip the self-test and admit a SECOND owner. So a `true`
+	// is never cached — every reclaim re-probes. Flip-the-input WITHIN the TTL window (1ms later): the
+	// device "loses" exclusivity and the verdict flips true→false immediately, with NO stale grace.
+	__resetFlockExclusiveCacheForTests();
+	const dir = await tmpdir();
+	const fenceFile = reclaimFencePath(path.join(dir, "daemon.lock"));
+	const realFlock = loadFlock();
+	expect(realFlock).not.toBeNull();
+	if (!realFlock) return;
+	const nonExclusiveStub: Flock = { lock: () => 0, errno: () => 0 };
+
+	const t0 = 1_000_000;
+	expect(ensureFlockExclusive(realFlock, fenceFile, t0)).toBe(true); // exclusive now
+	// 1ms later — deep inside any TTL — the same device handed the non-exclusive stub returns false.
+	// If positives were cached, this would wrongly stay `true` for up to 5 minutes (the two-owner window).
+	expect(ensureFlockExclusive(nonExclusiveStub, fenceFile, t0 + 1)).toBe(false);
+});
+
+test("ensureFlockExclusive re-probes after its NEGATIVE cache TTL expires — a fail-closed verdict can't refuse forever (#354 residual 4)", async () => {
+	// A negative verdict is fail-closed (refuse to reclaim), so it's the safe one to cache — but it must
+	// still expire so a device whose flock support recovers isn't refused forever. Same device, same
+	// fenceFile — only the injected clock moves — and the cached `false` flips to a freshly-probed
+	// `true` once the TTL elapses. The `now` param makes this deterministic without a real 5-min sleep.
+	__resetFlockExclusiveCacheForTests();
+	const dir = await tmpdir();
+	const fenceFile = reclaimFencePath(path.join(dir, "daemon.lock"));
+
+	const realFlock = loadFlock();
+	expect(realFlock).not.toBeNull();
+	if (!realFlock) return; // unreachable after the assert above; narrows the type
+
+	const nonExclusiveStub: Flock = { lock: () => 0, errno: () => 0 };
+
+	const t0 = 1_000_000;
+	// Probe non-exclusive → false, cached at t0.
+	expect(ensureFlockExclusive(nonExclusiveStub, fenceFile, t0)).toBe(false);
+	// Still within TTL: the cached `false` wins even when handed the REAL, genuinely-exclusive flock —
+	// proves it's a real negative-cache hit, not a coincidence.
+	expect(ensureFlockExclusive(realFlock, fenceFile, t0 + FLOCK_CACHE_TTL_MS - 1)).toBe(false);
+	// Past TTL: same device, real flock — now re-probed → exclusive → true. Only the clock moved.
+	expect(ensureFlockExclusive(realFlock, fenceFile, t0 + FLOCK_CACHE_TTL_MS + 1)).toBe(true);
 });
