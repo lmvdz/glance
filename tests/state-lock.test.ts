@@ -91,3 +91,27 @@ test("concurrent acquirers never both own the lock (no empty-file TOCTOU window)
 	const codes = await Promise.all(procs.map((p) => p.exited));
 	expect(codes).not.toContain(3); // 0 = won or cleanly refused; 3 = double-owned a corrupted lock
 });
+
+test("two reclaimers racing a SEEDED stale lock end with exactly one owner (#345)", async () => {
+	// This is the gauntlet's exact interleaving: backfill is SIGKILLed leaving a
+	// stale lock; daemons D1 and D2 start together, both read it and determine
+	// its pid is dead. D1 unlinks it, loops, creates D1's live lock. Under the
+	// bug, D2 then executes its ALREADY-AUTHORIZED unlinkSync — deleting D1's
+	// new lock — and creates its own. Both D1 and D2 now believe they own the
+	// state dir. The prior "concurrent acquirers" test starts from an empty dir
+	// and never seeds a stale lock two racers must both reclaim — this closes
+	// that gap.
+	const dir = await tmpdir();
+	const file = path.join(dir, "daemon.lock");
+	// Pid 2^31-1 is effectively never a running process — a seeded stale lock.
+	writeFileSync(file, JSON.stringify({ pid: 2147483647, host: os.hostname(), startedAt: 0 }));
+	const child = path.join(import.meta.dir, "fixtures", "lock-race-stale-reclaimer-child.ts");
+	// Widen the decide-then-unlink window well past two racers' actual fs work
+	// (a handful of synchronous syscalls, sub-millisecond) so the interleaving
+	// is forced deterministically rather than hoping for scheduler luck.
+	const delayMs = 200;
+	const procs = [Bun.spawn(["bun", child, dir, String(delayMs)], { stdout: "ignore", stderr: "inherit" }), Bun.spawn(["bun", child, dir, String(delayMs)], { stdout: "ignore", stderr: "inherit" })];
+	const codes = await Promise.all(procs.map((p) => p.exited));
+	const owners = codes.filter((c) => c === 0).length;
+	expect(owners).toBe(1); // exactly one of the two racers may believe it owns the dir
+});

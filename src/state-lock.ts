@@ -27,9 +27,29 @@
  * we treat it as live and refuse — correct for a shared state dir, conservative
  * for a stale one. Upgrade path: a same-host NFS/foreign mount; a portable
  * start-time source for non-Linux.
+ *
+ * Stale-reclamation fence (lmvdz/glance#345): "the record is stale, unlink it" is
+ * a decision made from a snapshot (a `readRecord` + `ownerAlive` check), and a
+ * bare `unlinkSync(file)` afterward removes whatever is AT THAT PATH NOW, not
+ * necessarily what was read — the authorization outlives the lock it was granted
+ * for. Two racers who both observe the same stale lock can both authorize a
+ * reclaim; if D1 unlinks and recreates first, D2's already-authorized unlink
+ * deletes D1's brand-new live lock instead, and D2 creates its own — both
+ * believe they own the dir. PID reuse produces the identical window.
+ *
+ * The fix serializes "observe stale -> unlink" behind `reclaimMutex`, a plain
+ * `mkdirSync`/`rmdirSync` mutex (mkdir is exclusive-create, same as the
+ * link-based create above, so it needs no new primitive or dependency). Only one
+ * process at a time can be inside the decide-and-unlink section; every other
+ * racer either blocks on the mutex or, once it gets in, re-reads the CURRENT
+ * file state before acting — so nobody ever unlinks a lock they didn't just
+ * observe as stale a moment before, with no other reclaimer able to interleave.
+ * A racer that loses out (because a peer's create won first) simply falls
+ * through to the normal live-owner wait/timeout path — it never deletes what it
+ * lost to.
  */
 
-import { openSync, writeSync, closeSync, readFileSync, unlinkSync, linkSync } from "node:fs";
+import { openSync, writeSync, closeSync, readFileSync, unlinkSync, linkSync, mkdirSync, rmdirSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -170,33 +190,120 @@ function tryCreate(file: string): boolean {
 	}
 }
 
+/** Directory that doubles as a mutex guarding the stale-reclaim decision (see the
+ * fence note in the module docstring). `mkdirSync` is exclusive-create — EEXIST
+ * when it already exists — so it's a correct mutual-exclusion primitive on every
+ * platform Node supports, with no new dependency. */
+function reclaimMutexPath(file: string): string {
+	return `${file}.reclaim`;
+}
+
+/** How long to wait for a peer's reclaim mutex before assuming it's abandoned.
+ * The section it guards is a handful of synchronous fs calls with no `await` in
+ * between, so a holder can only get stuck here if it was killed mid-syscall —
+ * vanishingly rare — but a crash there must not wedge every future boot. */
+const RECLAIM_MUTEX_STEAL_MS = 5_000;
+const RECLAIM_MUTEX_POLL_MS = 10;
+
+/** Block until we hold the reclaim mutex for `file`. Returns a release function. */
+async function acquireReclaimMutex(file: string): Promise<() => void> {
+	const dir = reclaimMutexPath(file);
+	const deadline = Date.now() + RECLAIM_MUTEX_STEAL_MS;
+	for (;;) {
+		try {
+			mkdirSync(dir);
+			return () => {
+				try {
+					rmdirSync(dir);
+				} catch {
+					// Already gone — nothing to do.
+				}
+			};
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+			if (Date.now() >= deadline) {
+				// The holder appears abandoned (crashed mid-critical-section). Steal
+				// rather than wedge every future boot forever; worst case is a benign
+				// re-check, not a lost lock, since the section re-reads current state.
+				try {
+					rmdirSync(dir);
+				} catch {
+					// A peer stole/removed it first — loop and race mkdir again.
+				}
+				continue;
+			}
+			await Bun.sleep(RECLAIM_MUTEX_POLL_MS);
+		}
+	}
+}
+
+type ReclaimOutcome = { kind: "created" } | { kind: "retry" } | { kind: "live"; owner: LockRecord };
+
+/**
+ * Under the reclaim mutex: try to create fresh (a peer may already have
+ * reclaimed and recreated since our caller's own tryCreate failed), otherwise
+ * re-read the CURRENT record and, only if it's still stale, unlink it. Because
+ * this whole read-then-unlink sequence is serialized against every other
+ * racer, nothing can create a fresh lock at `file` between our read and our
+ * unlink — so we can never remove a lock we didn't just observe as stale.
+ */
+async function tryReclaimOrCreate(file: string, testOnlyReclaimDelayMs?: number): Promise<ReclaimOutcome> {
+	const release = await acquireReclaimMutex(file);
+	try {
+		if (tryCreate(file)) return { kind: "created" };
+		const rec = readRecord(file);
+		if (!rec || !ownerAlive(rec)) {
+			// Stale (owner dead/unreadable), and — because we hold the mutex — no
+			// other racer can be mid-decision right now. Safe to unlink.
+			if (testOnlyReclaimDelayMs) await Bun.sleep(testOnlyReclaimDelayMs);
+			try {
+				unlinkSync(file);
+			} catch {
+				// Shouldn't happen while we hold the mutex; tolerate it regardless.
+			}
+			return { kind: "retry" };
+		}
+		return { kind: "live", owner: rec };
+	} finally {
+		release();
+	}
+}
+
 /**
  * Acquire the single-writer lock for `stateDir`. Resolves with a handle whose
  * `release()` deletes the lock. Throws {@link StateLockError} if a live daemon
  * already holds it (after waiting out the upgrade handoff window).
  */
-export async function acquireStateLock(stateDir: string, opts: { handoffMs?: number } = {}): Promise<StateLock> {
+export async function acquireStateLock(
+	stateDir: string,
+	opts: {
+		handoffMs?: number;
+		/**
+		 * @internal test-only. Widens the window between "determined the lock is
+		 * stale" and "removed it" so a reproduction test can force two reclaimers to
+		 * interleave deterministically instead of racing on real (sub-millisecond)
+		 * scheduling luck. Zero/unset in every real caller — never set this outside
+		 * a test.
+		 */
+		testOnlyReclaimDelayMs?: number;
+	} = {},
+): Promise<StateLock> {
 	await fs.mkdir(stateDir, { recursive: true });
 	const file = lockPath(stateDir);
 	const deadline = Date.now() + (opts.handoffMs ?? HANDOFF_TIMEOUT_MS);
 
 	for (;;) {
+		// Fast, uncontended path: no mutex needed when the lock file simply isn't
+		// there yet (the common case — no stale lock to race over at all).
 		if (tryCreate(file)) break;
 
-		const rec = readRecord(file);
-		if (!rec || !ownerAlive(rec)) {
-			// Stale lock (owner gone or unreadable). Reclaim it and retry the create.
-			try {
-				unlinkSync(file);
-			} catch {
-				// Lost the race to another reclaimer — loop and re-evaluate.
-			}
-			continue;
-		}
+		const outcome = await tryReclaimOrCreate(file, opts.testOnlyReclaimDelayMs);
+		if (outcome.kind === "created") break;
+		if (outcome.kind === "retry") continue;
 
 		// A live owner holds it. During upgrade the outgoing daemon dies within the
 		// handoff window; a genuine double-start never will, so we eventually throw.
-		if (Date.now() >= deadline) throw new StateLockError(file, rec);
+		if (Date.now() >= deadline) throw new StateLockError(file, outcome.owner);
 		await Bun.sleep(HANDOFF_POLL_MS);
 	}
 
