@@ -28,31 +28,62 @@
  * for a stale one. Upgrade path: a same-host NFS/foreign mount; a portable
  * start-time source for non-Linux.
  *
- * Stale-reclamation fence (lmvdz/glance#345): "the record is stale, unlink it" is
- * a decision made from a snapshot (a `readRecord` + `ownerAlive` check), and a
- * bare `unlinkSync(file)` afterward removes whatever is AT THAT PATH NOW, not
+ * Stale-reclamation fence (lmvdz/glance#345). "The record is stale, unlink it" is
+ * a decision made from a snapshot (`readRecord` + `ownerAlive`), and a bare
+ * `unlinkSync(file)` afterward removes whatever is AT THAT PATH NOW, not
  * necessarily what was read — the authorization outlives the lock it was granted
  * for. Two racers who both observe the same stale lock can both authorize a
  * reclaim; if D1 unlinks and recreates first, D2's already-authorized unlink
  * deletes D1's brand-new live lock instead, and D2 creates its own — both
  * believe they own the dir. PID reuse produces the identical window.
  *
- * The fix serializes "observe stale -> unlink" behind `reclaimMutex`, a plain
- * `mkdirSync`/`rmdirSync` mutex (mkdir is exclusive-create, same as the
- * link-based create above, so it needs no new primitive or dependency). Only one
- * process at a time can be inside the decide-and-unlink section; every other
- * racer either blocks on the mutex or, once it gets in, re-reads the CURRENT
- * file state before acting — so nobody ever unlinks a lock they didn't just
- * observe as stale a moment before, with no other reclaimer able to interleave.
- * A racer that loses out (because a peer's create won first) simply falls
- * through to the normal live-owner wait/timeout path — it never deletes what it
- * lost to.
+ * ROUND 1 (rejected in blind gauntlet review). The first fix serialized
+ * "observe stale -> unlink" behind a `mkdirSync`/`rmdirSync` mutex with a 5s
+ * steal-on-timeout for an abandoned holder. Two independent lineages (codex
+ * gpt-5.6-sol, grok-4.5) converged on the same critical: a steal on a timeout
+ * is not a fence. If the holder is SIGKILLed mid-critical-section, its mutex
+ * dir is orphaned; once EVERY racer's deadline expires, more than one of them
+ * can steal + recreate the mutex "simultaneously" (each stealing what looks
+ * abandoned from its own vantage point) and both proceed into the decide-and-
+ * unlink section at once — reintroducing the exact double-owner outcome the
+ * fix existed to prevent. A stolen lock authorizes two holders; that is the
+ * textbook fencing failure. The steal was removed entirely, not patched.
+ *
+ * ROUND 2 (this fix): a real kernel advisory lock (flock(2), via `bun:ffi`
+ * against libc), held only for the brief decide-and-unlink-and-recreate
+ * section. flock gives what mkdir/rmdir cannot: the kernel — not a wall-clock
+ * guess — is the authority on whether the holder is gone, and it releases the
+ * lock the instant the holding process exits for ANY reason (normal return,
+ * SIGKILL, crash) as part of closing its file descriptors. There is no steal,
+ * no timeout, and therefore no window where two processes can believe they
+ * hold it. `flock(LOCK_EX)` blocks in the kernel's wait queue, so there's no
+ * poll loop either. The lock file itself (`daemon.lock.reclaim`) is never
+ * deleted — its content is irrelevant; only the OS-level advisory lock on it
+ * matters, and that state lives with the kernel, not on disk, so an "abandoned
+ * lock file" is not a thing that can exist for flock.
+ *
+ * The reclaim section, once inside the flock: re-check for real (a peer may
+ * already have reclaimed and recreated between our caller's own `tryCreate`
+ * miss and our getting the flock) before trusting anything read earlier. If
+ * still stale, unlink and recreate. If our own recreate loses to some third
+ * party's fast-path create in the sliver between unlink and recreate, we do
+ * NOT assume ownership — we defer and let the outer loop re-observe, exactly
+ * as if we'd lost the create race outright. Nobody is ever fooled about who
+ * holds the lock.
+ *
+ * ponytail: flock needs libc, so this is POSIX (Linux confirmed; Darwin via
+ * libSystem is wired but untested here). Where it can't be loaded (no FFI /
+ * unsupported platform), reclaiming a stale lock isn't attempted at all — we
+ * fail closed with a clear, distinct error rather than silently fall back to
+ * the TOCTOU-prone bare unlink this fix exists to remove. A brand-new lock
+ * (the empty-dir fast path) needs no flock and is unaffected everywhere.
  */
 
-import { openSync, writeSync, closeSync, readFileSync, unlinkSync, linkSync, mkdirSync, rmdirSync } from "node:fs";
+import { openSync, writeSync, closeSync, readFileSync, unlinkSync, linkSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { dlopen, FFIType } from "bun:ffi";
 
 const LOCK_FILE = "daemon.lock";
 /** How long to wait for an outgoing (upgrading) daemon to release before giving up. */
@@ -91,8 +122,31 @@ export class StateLockError extends Error {
 	}
 }
 
+/** Thrown when a lock LOOKS stale but reclaiming it can't be done safely on this
+ * platform (no kernel advisory lock available). Fails closed rather than risk
+ * the TOCTOU this module exists to close — distinct from {@link StateLockError}
+ * (a genuinely live owner) so the operator gets an accurate, actionable message. */
+export class StateLockReclaimUnsupportedError extends Error {
+	constructor(public readonly lockFile: string) {
+		super(
+			`${lockFile} looks stale (its owner appears gone), but this platform has no kernel ` +
+				`advisory lock (flock) available to reclaim it safely.\n` +
+				`  If you're sure no other glance daemon is using this state dir, remove the file ` +
+				`by hand and retry:\n    rm ${lockFile}\n`,
+		);
+		this.name = "StateLockReclaimUnsupportedError";
+	}
+}
+
 function lockPath(stateDir: string): string {
 	return path.join(stateDir, LOCK_FILE);
+}
+
+/** Path of the persistent flock target guarding the reclaim decision (see the
+ * ROUND 2 note above). Never deleted; its content is unused — only the OS-level
+ * advisory lock on its file descriptor matters. */
+function reclaimLockPath(file: string): string {
+	return `${file}.reclaim`;
 }
 
 /** Linux process start time (clock ticks since boot, /proc/<pid>/stat field 22), or null when /proc is unavailable or the pid is gone. */
@@ -190,114 +244,102 @@ function tryCreate(file: string): boolean {
 	}
 }
 
-/** Directory that doubles as a mutex guarding the stale-reclaim decision (see the
- * fence note in the module docstring). `mkdirSync` is exclusive-create — EEXIST
- * when it already exists — so it's a correct mutual-exclusion primitive on every
- * platform Node supports, with no new dependency. */
-function reclaimMutexPath(file: string): string {
-	return `${file}.reclaim`;
-}
+// --- flock(2) via bun:ffi -----------------------------------------------------
+// No new dependency: libc is always present where these libraries resolve.
+// Loaded lazily (and once) so a platform without it only pays for the attempt
+// the first time a reclaim is actually needed, not on every boot.
 
-/** How long to wait for a peer's reclaim mutex before assuming it's abandoned.
- * The section it guards is a handful of synchronous fs calls with no `await` in
- * between, so a holder can only get stuck here if it was killed mid-syscall —
- * vanishingly rare — but a crash there must not wedge every future boot. */
-const RECLAIM_MUTEX_STEAL_MS = 5_000;
-const RECLAIM_MUTEX_POLL_MS = 10;
+const LOCK_EX = 2;
+const LOCK_UN = 8;
 
-/** Block until we hold the reclaim mutex for `file`. Returns a release function. */
-async function acquireReclaimMutex(file: string): Promise<() => void> {
-	const dir = reclaimMutexPath(file);
-	const deadline = Date.now() + RECLAIM_MUTEX_STEAL_MS;
-	for (;;) {
+type FlockFn = (fd: number, op: number) => number;
+
+let flockFn: FlockFn | null | undefined; // undefined = not yet attempted
+
+function loadFlock(): FlockFn | null {
+	if (flockFn !== undefined) return flockFn;
+	// musl (Alpine) has no libc.so.6, hence the second Linux candidate.
+	const candidates = process.platform === "darwin" ? ["libSystem.B.dylib"] : ["libc.so.6", "libc.so"];
+	for (const name of candidates) {
 		try {
-			mkdirSync(dir);
-			return () => {
-				try {
-					rmdirSync(dir);
-				} catch {
-					// Already gone — nothing to do.
-				}
-			};
-		} catch (err) {
-			if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-			if (Date.now() >= deadline) {
-				// The holder appears abandoned (crashed mid-critical-section). Steal
-				// rather than wedge every future boot forever; worst case is a benign
-				// re-check, not a lost lock, since the section re-reads current state.
-				try {
-					rmdirSync(dir);
-				} catch {
-					// A peer stole/removed it first — loop and race mkdir again.
-				}
-				continue;
-			}
-			await Bun.sleep(RECLAIM_MUTEX_POLL_MS);
+			const lib = dlopen(name, { flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 } });
+			flockFn = (fd, op) => lib.symbols.flock(fd, op);
+			return flockFn;
+		} catch {
+			// Try the next candidate library name.
 		}
 	}
+	flockFn = null;
+	return null;
 }
 
 type ReclaimOutcome = { kind: "created" } | { kind: "retry" } | { kind: "live"; owner: LockRecord };
 
 /**
- * Under the reclaim mutex: try to create fresh (a peer may already have
- * reclaimed and recreated since our caller's own tryCreate failed), otherwise
- * re-read the CURRENT record and, only if it's still stale, unlink it. Because
- * this whole read-then-unlink sequence is serialized against every other
- * racer, nothing can create a fresh lock at `file` between our read and our
- * unlink — so we can never remove a lock we didn't just observe as stale.
+ * Reclaim-and-create, holding a real kernel advisory lock (flock) for the
+ * whole decide-and-act section (see the ROUND 2 note in the module docstring).
+ * Only one process anywhere can be inside this function's try block at a time
+ * for a given `file` — the kernel enforces it and releases it the instant a
+ * holder exits, by any means, with no timeout and no steal. Throws
+ * {@link StateLockReclaimUnsupportedError} if no advisory lock is available.
  */
-async function tryReclaimOrCreate(file: string, testOnlyReclaimDelayMs?: number): Promise<ReclaimOutcome> {
-	const release = await acquireReclaimMutex(file);
+function reclaimOrCreate(file: string): ReclaimOutcome {
+	const flock = loadFlock();
+	if (!flock) throw new StateLockReclaimUnsupportedError(file);
+
+	const reclaimFile = reclaimLockPath(file);
+	const fd = openSync(reclaimFile, "a+"); // create if missing; content is never used
 	try {
-		if (tryCreate(file)) return { kind: "created" };
-		const rec = readRecord(file);
-		if (!rec || !ownerAlive(rec)) {
-			// Stale (owner dead/unreadable), and — because we hold the mutex — no
-			// other racer can be mid-decision right now. Safe to unlink.
-			if (testOnlyReclaimDelayMs) await Bun.sleep(testOnlyReclaimDelayMs);
-			try {
-				unlinkSync(file);
-			} catch {
-				// Shouldn't happen while we hold the mutex; tolerate it regardless.
+		const ret = flock(fd, LOCK_EX); // blocks in the kernel's wait queue until we hold it exclusively
+		if (ret !== 0) throw new Error(`flock(LOCK_EX) failed with code ${ret}`);
+		try {
+			// A peer may have reclaimed and recreated between our caller's own
+			// tryCreate miss and our getting the flock — check for real.
+			if (tryCreate(file)) return { kind: "created" };
+			const rec = readRecord(file);
+			if (!rec || !ownerAlive(rec)) {
+				// Stale (owner dead/unreadable). While we hold the flock, no other
+				// racer can be inside this section — safe to unlink.
+				try {
+					unlinkSync(file);
+				} catch {
+					// Shouldn't happen while we hold the flock; tolerate it regardless.
+				}
+				// If our own recreate loses to a third party's fast-path create in
+				// this sliver, do NOT assume ownership — defer, same as losing the
+				// create race outright.
+				if (tryCreate(file)) return { kind: "created" };
+				return { kind: "retry" };
 			}
-			return { kind: "retry" };
+			return { kind: "live", owner: rec };
+		} finally {
+			flock(fd, LOCK_UN);
 		}
-		return { kind: "live", owner: rec };
 	} finally {
-		release();
+		closeSync(fd);
 	}
 }
 
 /**
  * Acquire the single-writer lock for `stateDir`. Resolves with a handle whose
  * `release()` deletes the lock. Throws {@link StateLockError} if a live daemon
- * already holds it (after waiting out the upgrade handoff window).
+ * already holds it (after waiting out the upgrade handoff window), or
+ * {@link StateLockReclaimUnsupportedError} if a stale lock is found but this
+ * platform can't reclaim it safely.
  */
-export async function acquireStateLock(
-	stateDir: string,
-	opts: {
-		handoffMs?: number;
-		/**
-		 * @internal test-only. Widens the window between "determined the lock is
-		 * stale" and "removed it" so a reproduction test can force two reclaimers to
-		 * interleave deterministically instead of racing on real (sub-millisecond)
-		 * scheduling luck. Zero/unset in every real caller — never set this outside
-		 * a test.
-		 */
-		testOnlyReclaimDelayMs?: number;
-	} = {},
-): Promise<StateLock> {
+export async function acquireStateLock(stateDir: string, opts: { handoffMs?: number } = {}): Promise<StateLock> {
 	await fs.mkdir(stateDir, { recursive: true });
 	const file = lockPath(stateDir);
 	const deadline = Date.now() + (opts.handoffMs ?? HANDOFF_TIMEOUT_MS);
 
 	for (;;) {
-		// Fast, uncontended path: no mutex needed when the lock file simply isn't
-		// there yet (the common case — no stale lock to race over at all).
+		// Fast, uncontended path: no flock needed when the lock file simply isn't
+		// there yet (the common case — no stale lock to race over at all). Safe on
+		// its own: tryCreate's link()-based create is already an atomic CAS across
+		// any number of simultaneous callers.
 		if (tryCreate(file)) break;
 
-		const outcome = await tryReclaimOrCreate(file, opts.testOnlyReclaimDelayMs);
+		const outcome = reclaimOrCreate(file);
 		if (outcome.kind === "created") break;
 		if (outcome.kind === "retry") continue;
 
