@@ -518,3 +518,146 @@ test("getAvailableModels answers with session/new's advertised roster — a live
 	expect(modelOptionsFromRuntime(models).map((o) => o.value)).toEqual(["fake-default", "fake-fast"]);
 	await driver.stop();
 });
+
+/**
+ * lmvdz/glance#336: codex live-verify (2026-08-04). codex-acp v1.1.9's own CLI parses exactly THREE
+ * argv forms (`--version`, `login`, `cli`) and silently ignores everything else — including the
+ * trailing `--model <m>` `resolveAcpCommand`'s default `acpModelArgv` appends. Two independent live
+ * sessions against the real adapter proved it: spawned with `--model gpt-9999-does-not-exist` (a
+ * model that doesn't exist — it would have errored if the flag were read at all), `session/new`'s
+ * `currentModelId` still came back as the account's own config default. Worse than the grok
+ * acpModelArgv defect (concern 08): that one at least errored loudly; this one drops the pin with no
+ * signal anywhere in the wire protocol.
+ *
+ * This fake reproduces exactly that shape — `session/new` ALWAYS answers with a fixed default model
+ * no matter what argv said — plus the real fix: codex-acp's actual (working) model channel, an
+ * extension method literally named `session/set_model` (`{sessionId, modelId}`), which `unstable_
+ * setSessionModel` on the real adapter mutates the running session with. A `test/current_model`
+ * escape hatch lets the test observe that mutation directly instead of inferring it from argv.
+ */
+const FAKE_ACP_CODEX_LIKE = String.raw`
+const send = (o) => process.stdout.write(JSON.stringify(o) + "\n");
+let currentModel = "fake-default[medium]"; // codex-like: session/new ALWAYS returns this, ignoring argv --model entirely
+let buf = "";
+process.stdin.on("data", (ch) => {
+  buf += ch;
+  let nl;
+  while ((nl = buf.indexOf("\n")) >= 0) {
+    const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+    if (!line.trim()) continue;
+    let msg; try { msg = JSON.parse(line); } catch { continue; }
+    const { id, method, params } = msg;
+    switch (method) {
+      case "initialize":
+        send({ jsonrpc: "2.0", id, result: { protocolVersion: 1, agentCapabilities: {} } });
+        break;
+      case "session/new":
+        // Codex-like: never reflects a CLI-supplied model — this is the silent drop being reproduced.
+        send({ jsonrpc: "2.0", id, result: { sessionId: "s1", currentModelId: currentModel, models: { currentModelId: currentModel, availableModels: [{ modelId: "fake-default[medium]" }, { modelId: "fake-fast[low]" }] } } });
+        break;
+      case "session/set_model": {
+        const modelId = params && params.modelId;
+        if (modelId === "fake-fast[low]") {
+          currentModel = modelId;
+          send({ jsonrpc: "2.0", id, result: {} });
+        } else {
+          send({ jsonrpc: "2.0", id, error: { code: -32602, message: "Unknown model " + modelId } });
+        }
+        break;
+      }
+      case "test/current_model":
+        send({ jsonrpc: "2.0", id, result: { currentModel } });
+        break;
+      default:
+        if (id !== undefined) send({ jsonrpc: "2.0", id, result: {} });
+    }
+  }
+});
+`;
+
+/** Same shape, but `session/set_model` is entirely unimplemented (method not found) — the adapter
+ * that genuinely has no such extension (most of the roster: grok/claude-code/opencode/gemini/auggie
+ * all honor `--model` through their own CLI, so this call would either be unimplemented or
+ * redundant there). Proves the pin attempt degrades exactly like `applyApprovalMode`'s `session/
+ * set_mode` fallback: never fatal, start() still resolves. */
+const FAKE_ACP_NO_SET_MODEL = String.raw`
+const send = (o) => process.stdout.write(JSON.stringify(o) + "\n");
+let buf = "";
+process.stdin.on("data", (ch) => {
+  buf += ch;
+  let nl;
+  while ((nl = buf.indexOf("\n")) >= 0) {
+    const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+    if (!line.trim()) continue;
+    let msg; try { msg = JSON.parse(line); } catch { continue; }
+    const { id, method } = msg;
+    switch (method) {
+      case "initialize":
+        send({ jsonrpc: "2.0", id, result: { protocolVersion: 1, agentCapabilities: {} } });
+        break;
+      case "session/new":
+        // Reports a real account/config default — the SAME shape codex-acp itself returns — so the test
+        // can prove a pin failure records THIS, never the unconfirmed requested model.
+        send({ jsonrpc: "2.0", id, result: { sessionId: "s1", models: { currentModelId: "fake-default[medium]" } } });
+        break;
+      case "session/set_model":
+        send({ jsonrpc: "2.0", id, error: { code: -32601, message: "method not found" } });
+        break;
+      default:
+        if (id !== undefined) send({ jsonrpc: "2.0", id, result: {} });
+    }
+  }
+});
+`;
+
+async function codexLikeDriver(script: string, model?: string): Promise<{ driver: AcpAgentDriver; modelpins: Array<{ ok: boolean; model?: string; error?: string }> }> {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "acp-codex-"));
+	tmps.push(dir);
+	const file = path.join(dir, "fake-acp.ts");
+	await fs.writeFile(file, script);
+	const driver = new AcpAgentDriver({ id: "t", cwd: dir, command: ["bun", file, "--model", model ?? ""], model });
+	drivers.push(driver);
+	const modelpins: Array<{ ok: boolean; model?: string; error?: string }> = [];
+	driver.on("modelpin", (e) => modelpins.push(e as { ok: boolean; model?: string; error?: string }));
+	return { driver, modelpins };
+}
+
+test("codex-class defect, reproduced+fixed: a `--model` argv pin that a codex-like adapter silently ignores is still applied via the driver's session/set_model fallback", async () => {
+	const { driver, modelpins } = await codexLikeDriver(FAKE_ACP_CODEX_LIKE, "fake-fast[low]");
+	await driver.start(30_000);
+
+	// The pin succeeded — the SAME shape as applyApprovalMode's session/set_mode call.
+	expect(modelpins).toEqual([{ ok: true, model: "fake-fast[low]" }]);
+
+	// And it actually took effect on the running session (not just a well-formed-looking success):
+	// the fake's own state, mutated only by a real session/set_model call, now reads the requested model —
+	// proof this is a REAL second channel, not merely restating whatever the (silently-ignored) argv said.
+	const check = await driver.send<{ currentModel: string }>("test/current_model", {}, 5_000);
+	expect(check.currentModel).toBe("fake-fast[low]");
+
+	// ticket #336 gauntlet finding 1 (grok, HIGH): on a CONFIRMED pin, confirmedModel — what the manager
+	// reads to correct rec.dto.model/RunReceipt.model — must equal the actual (now-pinned) model.
+	expect(driver.confirmedModel).toBe("fake-fast[low]");
+});
+
+test("no model requested → session/set_model is never called (guard clause, not just a lucky no-op)", async () => {
+	const { driver, modelpins } = await codexLikeDriver(FAKE_ACP_CODEX_LIKE, undefined);
+	await driver.start(30_000);
+	expect(modelpins).toEqual([]);
+	// No pin was ever attempted — confirmedModel is whatever session/new reported as the account default,
+	// never a fabricated pin that didn't happen.
+	expect(driver.confirmedModel).toBe("fake-default[medium]");
+});
+
+test("an adapter with no session/set_model extension degrades exactly like applyApprovalMode: start() still resolves, modelpin reports ok:false, never fatal", async () => {
+	const { driver, modelpins } = await codexLikeDriver(FAKE_ACP_NO_SET_MODEL, "fake-fast[low]");
+	await expect(driver.start(30_000)).resolves.toBeUndefined();
+	expect(driver.isReady).toBe(true);
+	expect(modelpins).toEqual([{ ok: false, model: "fake-fast[low]", error: expect.stringContaining("method not found") }]);
+
+	// ticket #336 gauntlet finding 1 (grok, HIGH) — the core of the fix: on a pin FAILURE, confirmedModel
+	// must be the session's ACTUAL reported model ("fake-default[medium]"), never the requested-but-
+	// unconfirmed "fake-fast[low]" — a receipt built from the unconfirmed model would be a receipt lie.
+	expect(driver.confirmedModel).toBe("fake-default[medium]");
+	expect(driver.confirmedModel).not.toBe("fake-fast[low]");
+});
