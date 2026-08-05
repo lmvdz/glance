@@ -77,24 +77,24 @@ function ledgerLineageTag(harness: "omp" | "codex" | "grok"): string {
 	return harness === "omp" ? "native" : harness;
 }
 
-/** Test-only hatch (mirrors `OMP_SQUAD_VALIDATOR`/`OMP_SQUAD_VALIDATOR_HARNESS` above): points the
- *  precision reader at a fixture ledger instead of the repo-committed one, so a test can assert the
- *  land receipt's number MOVES when the fixture ledger changes, without touching real repo data.
- *  Unset in production ⇒ `reviewerPrecisionFromLedger`'s own default (`DEFAULT_REVIEWER_LEDGER_PATH`). */
-function reviewerLedgerPathOverride(): string | undefined {
-	return process.env.OMP_SQUAD_REVIEWER_LEDGER_PATH;
-}
-
 /**
  * The judging lineage's MEASURED precision from the repo-committed reviewer ledger, at judgment time
  * (glance#332 — the land-path moat centerpiece: the receipt a human approves must cite a REAL number,
  * never a fabricated or smoothed one). Never throws — `reviewerPrecisionFromLedger` degrades a
  * missing/empty ledger to an honest `n:0` stamp, which renders as "unmeasured", not a fake precision.
+ *
+ * `ledgerPath` is plain DEPENDENCY INJECTION, never an environment variable (gauntlet round 1, codex's
+ * "env-ledger-shadow" finding: a `OMP_SQUAD_REVIEWER_LEDGER_PATH`-style env hatch is reachable from a
+ * launch-directory `.env` — Bun auto-loads one at boot — so a malicious/misplaced `.env` next to the
+ * daemon's cwd could point the land path at an attacker-controlled ledger, fabricating a 100% precision
+ * claim or, worse, pointing at a FIFO/device that BLOCKS the synchronous land-path read. Production
+ * never reads this from `process.env` anywhere; the only way in is `ValidatorGateOpts.reviewerLedgerPath`,
+ * threaded here from `validatorGate`/`SquadManager`'s own test-only override method — a real function
+ * parameter, not ambient global state a launch directory can set.
  */
-function reviewerPrecisionStamp(harness: "omp" | "codex" | "grok"): ReviewerPrecisionStamp {
+function reviewerPrecisionStamp(harness: "omp" | "codex" | "grok", ledgerPath?: string): ReviewerPrecisionStamp {
 	const tag = ledgerLineageTag(harness);
-	const override = reviewerLedgerPathOverride();
-	return override ? reviewerPrecisionFromLedger(tag, override) : reviewerPrecisionFromLedger(tag);
+	return ledgerPath ? reviewerPrecisionFromLedger(tag, ledgerPath) : reviewerPrecisionFromLedger(tag);
 }
 
 /**
@@ -447,6 +447,13 @@ export function ompLensJudge(lens: LensId): LensJudge {
  *  - judge unreachable/unparseable/throws ⇒ `"abstain"` (fail-open, DESIGN §3).
  *  - otherwise every input criterion gets a `perCriterion` entry (one the judge didn't mention
  *    defaults to `satisfied:false`); `"veto"` iff any is unsatisfied, else `"pass"`.
+ *
+ * Deliberately does NOT stamp `reviewerPrecision` (gauntlet round 1 ship-blocker fix): this function's
+ * result is what `validatorGate`'s `gateCache` stores and reuses across retries on the SAME
+ * (commit,tree,criteria) — the reviewer ledger keeps growing independently of that cache key, so a
+ * number baked in here would go stale the moment the ledger changed under a cached entry. `validatorGate`
+ * is the sole place that attaches `reviewerPrecision`, fresh, on EVERY resolution (cache hit or miss) —
+ * see `withFreshReviewerPrecision`.
  */
 export async function scoreAgainstCriteria(
 	criteria: FeatureCriterion[],
@@ -463,16 +470,11 @@ export async function scoreAgainstCriteria(
 	if (criteria.length === 0) {
 		return { verdict: "skipped", agreement: 1, confidence: 0, perCriterion: [], rationale: "no declared criteria", ranAt };
 	}
-	// glance#332: the judging lineage's MEASURED ledger precision, stamped onto every path below that
-	// resolves a reviewer identity — the "skipped" (no criteria) return above never reads a reviewer at
-	// all, so it carries no precision either. Computed once so all three branches below cite the SAME
-	// read of the ledger.
-	const reviewerPrecision = reviewerPrecisionStamp(reviewer.harness);
 	// An empty diff means there is nothing to inspect — declared criteria cannot be judged against no
 	// change. Abstain (fail-open) rather than fabricating a veto for a change the judge never saw. This
 	// covers the in-place (worktree === repo) case where the base collapses to HEAD, plus any no-op land.
 	if (!diff.trim()) {
-		return { verdict: "abstain", agreement: 0, confidence: 0, perCriterion: [], rationale: "empty diff — nothing to validate (in-place or no-op land); not scored", model: reviewer.model, ...lineage, reviewerPrecision, ranAt };
+		return { verdict: "abstain", agreement: 0, confidence: 0, perCriterion: [], rationale: "empty diff — nothing to validate (in-place or no-op land); not scored", model: reviewer.model, ...lineage, ranAt };
 	}
 	let raw: RawVerdict | undefined;
 	try {
@@ -489,7 +491,6 @@ export async function scoreAgainstCriteria(
 			rationale: "judge unavailable or returned no verdict",
 			model: reviewer.model,
 			...lineage,
-			reviewerPrecision,
 			...(raw?.gateLogPaths?.length ? { gateLogPaths: raw.gateLogPaths } : {}),
 			ranAt,
 		};
@@ -511,7 +512,6 @@ export async function scoreAgainstCriteria(
 		rationale: truncate(raw.rationale ?? "", RATIONALE_MAX),
 		model: reviewer.model,
 		...lineage,
-		reviewerPrecision,
 		ranAt,
 	};
 }
@@ -540,6 +540,14 @@ export interface ValidatorGateOpts {
 	/** Injected re-check factory (concern 05); production uses `ompLensVerifyJudge`. Reached only after a
 	 *  panel objection, under both the master flag and the VERIFY sub-flag. */
 	lensVerifyJudge?: () => LensVerifyJudge;
+	/** Test-only DI hatch (gauntlet round 1, codex's "env-ledger-shadow" finding): points the reviewer-
+	 *  precision reader at a fixture ledger instead of the repo-committed one, so a test can prove the
+	 *  land receipt's number moves when the fixture ledger changes, without touching real repo data.
+	 *  Deliberately a function parameter, NOT an environment variable — production never sets this
+	 *  (`SquadManager.runValidatorGate` reads it from its own `reviewerLedgerPathOverride()` seam, which
+	 *  defaults to `undefined`), so a launch-directory `.env` can never redirect the land path's read of
+	 *  the reviewer ledger. Undefined ⇒ `DEFAULT_REVIEWER_LEDGER_PATH`. */
+	reviewerLedgerPath?: string;
 }
 
 export interface ValidatorGateResult {
@@ -780,6 +788,24 @@ export async function runLensVerify(verdicts: LensVerdict[], diff: string, proof
 }
 
 /**
+ * Attach the CURRENT reviewer-ledger precision to a resolved verdict record — the fix for gauntlet
+ * round 1's SHIP-BLOCKER (both codex and grok, independently): `gateCache` below reuses a judge
+ * verdict across retries on the SAME (commit,tree,criteria), but the reviewer ledger keeps growing
+ * independently of that cache key, so a cached record must NEVER re-serve a stale precision number.
+ * Called on EVERY `validatorGate` resolution — cache hit or miss — from a NEW object (the cache entry
+ * itself, which no longer carries `reviewerPrecision` at all since `scoreAgainstCriteria` stopped
+ * stamping it, is never mutated). `skipped`/`inconclusive` verdicts never resolved a reviewer identity
+ * in the first place (see `scoreAgainstCriteria`'s own skip path and the diff-fault branch below), so
+ * they're left untouched. Never throws — `reviewerPrecisionStamp` degrades to an honest stamp on any
+ * read fault.
+ */
+function withFreshReviewerPrecision(record: ValidationRecord, reviewerLedgerPath?: string): ValidationRecord {
+	if (record.verdict === "skipped" || record.verdict === "inconclusive") return record;
+	const reviewer = activeReviewer();
+	return { ...record, reviewerPrecision: reviewerPrecisionStamp(reviewer.harness, reviewerLedgerPath) };
+}
+
+/**
  * The land-gate seam `SquadManager.landBranch` calls before dispatching to `landAgent`/`landAgentPr`
  * (DESIGN §1) — runs regardless of `requireProof`, so a forced land is still validated. Fail-open on
  * an unreachable judge, fail-closed on a real veto (DESIGN §3); a veto is bypassable ONLY by an
@@ -846,6 +872,9 @@ export async function validatorGate(opts: ValidatorGateOpts): Promise<ValidatorG
 		// cached and lands normally.
 		if (cacheKey && record.verdict !== "inconclusive") gateCache.set(cacheKey, record);
 	}
+	// glance#332 gauntlet round 1 (SHIP BLOCKER): re-stamp reviewerPrecision fresh here, unconditionally
+	// — cache hit or miss — never from the cache itself. See withFreshReviewerPrecision's doc.
+	record = withFreshReviewerPrecision(record, opts.reviewerLedgerPath);
 	if (record.verdict === "inconclusive") {
 		return {
 			record,

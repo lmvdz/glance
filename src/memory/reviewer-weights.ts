@@ -23,15 +23,26 @@
  * below are the CONSUMABLE reader `src/validator.ts`'s land-gate stamps onto every `ValidationRecord`
  * — one lineage's {n, survived, survivedRate} at judgment time, so the land receipt a human approves
  * cites a REAL measured number, never a fabricated or smoothed one. A lineage with zero adjudicated
- * rows renders with `survivedRate: undefined` (never `0` — that would read as "0% precision", a
- * fabrication) and `n: 0` — the caller's job is to print "unmeasured (n=0)", not invent a rate. This
- * is the one read-only extension to this module's "pure half" framing: it touches `node:fs`, but only
- * to READ the repo-committed ledger — `scripts/reviewer-ledger.ts`'s `add` command remains the sole
- * WRITER, untouched.
+ * rows OMITS `survivedRate` entirely (never present as `0`, and never present as an own key holding
+ * `undefined` — `Object.hasOwn` must read `false`) — the caller's job is to print "unmeasured (n=0)",
+ * not invent a rate. This is the one read-only extension to this module's "pure half" framing: it
+ * touches `node:fs`, but only to READ the repo-committed ledger — `scripts/reviewer-ledger.ts`'s `add`
+ * command remains the sole WRITER, untouched.
+ *
+ * Gauntlet round 1 (blind, dual-lineage — codex gpt-5.6-sol + grok-4.5, both converged on the cache
+ * finding independently) hardened this reader further: a genuine READ FAULT (permission denied, a
+ * FIFO/device path) is never conflated with an honestly ABSENT ledger (`unreadable` vs a plain `n:0`);
+ * a ledger that's PARTIALLY corrupt (some malformed lines) still measures from its valid rows but
+ * flags `rejected` on the stamp, and degrades FULLY to unmeasured only once malformed lines are a
+ * large FRACTION of the file (a single stray bad line must not zero out real history); near-duplicate
+ * rows (same adjudication, differently-worded note/severity) are now deduped on a semantic key, not
+ * byte-identity, so a reworded retry can't inflate `n` either. See `reviewerPrecisionFromLedger` and
+ * `parseReviewerLedger` below for the specifics.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import path from "node:path";
+import { errText } from "../err-text.ts";
 
 export type ReviewerLineage = "grok" | "codex" | "native" | (string & {});
 
@@ -55,10 +66,22 @@ export interface ReviewerLedgerEntry {
 /** Below this many adjudicated findings, a lineage's precision is provisional, not a weight. */
 export const MIN_FINDINGS_FOR_WEIGHT = 10;
 
+/** Semantic identity for de-duplication (gauntlet round 1, "near-dup" finding, grok-4.5): `note` and
+ *  `severity` are free-form commentary, not what makes two rows "the same adjudication" — a retried
+ *  `add` with a slightly reworded note (or a severity added/omitted on the retry) must not inflate a
+ *  lineage's `n` any more than a byte-identical retry does. Two rows collapse when they agree on
+ *  WHEN, WHO, WHAT CLASS, WHERE, and the OUTCOME (`at`+`lineage`+`concernClass`+`source`+`survived`).
+ *  `\0`-joined so a field value containing the literal separator can't forge a collision with a
+ *  genuinely different tuple. */
+function semanticKey(e: Pick<ReviewerLedgerEntry, "at" | "lineage" | "concernClass" | "source" | "survived">): string {
+	return [e.at, e.lineage, e.concernClass, e.source, String(e.survived)].join("\0");
+}
+
 /** Parse the JSONL ledger text. Malformed lines are counted in `rejected`, never guessed at;
- *  byte-identical duplicate rows are counted in `duplicates` and kept once — a retried `add`
- *  command must not inflate a lineage's precision or clear its provisional floor
- *  (adversarial-review finding). */
+ *  semantically-identical duplicate rows (same `at`+`lineage`+`concernClass`+`source`+`survived` —
+ *  see `semanticKey`) are counted in `duplicates` and kept once — a retried `add` command, even one
+ *  whose note/severity was reworded, must not inflate a lineage's precision or clear its provisional
+ *  floor (adversarial-review finding, sharpened by gauntlet round 1). */
 export function parseReviewerLedger(text: string): { entries: ReviewerLedgerEntry[]; rejected: number; duplicates: number } {
 	const entries: ReviewerLedgerEntry[] = [];
 	const seen = new Set<string>();
@@ -84,13 +107,12 @@ export function parseReviewerLedger(text: string): { entries: ReviewerLedgerEntr
 				typeof raw.source === "string" &&
 				typeof raw.note === "string"
 			) {
-				// Byte-identical lines only — exactly what a retried `add` appends. Rows that differ
-				// in ANY field (even severity) are distinct adjudications and both count.
-				if (seen.has(trimmed)) {
+				const key = semanticKey({ at: raw.at, lineage: raw.lineage, concernClass: raw.concernClass, source: raw.source, survived: raw.survived });
+				if (seen.has(key)) {
 					duplicates++;
 					continue;
 				}
-				seen.add(trimmed);
+				seen.add(key);
 				entries.push({
 					at: raw.at,
 					lineage: raw.lineage,
@@ -172,22 +194,46 @@ export const DEFAULT_REVIEWER_LEDGER_PATH = path.join(import.meta.dir, "..", "..
 export interface ReviewerPrecisionStamp {
 	/** The ledger lineage tag this stamp was computed for (e.g. "codex", "grok", "native"). */
 	lineage: string;
-	/** Adjudicated findings raised by this lineage across the whole ledger. */
+	/** Adjudicated findings raised by this lineage across the whole ledger (valid rows only — see
+	 *  `rejected`/`corrupt` below for what "valid" excludes). */
 	n: number;
 	/** Of those, how many survived adjudication (a real defect / required change). Always 0 when n is 0. */
 	survived: number;
-	/** survived/n — `undefined` when `n === 0` (no history to compute a rate from; never fabricated as 0). */
+	/** survived/n. Present as an OWN KEY only when `n > 0` — omitted entirely (never present holding
+	 *  `undefined`) when `n === 0`, so `Object.hasOwn(stamp, "survivedRate")` is a reliable presence
+	 *  check, not just a value check (gauntlet round 1, codex: "survivedRate present-as-undefined"). */
 	survivedRate?: number;
 	/** True below `MIN_FINDINGS_FOR_WEIGHT` adjudicated findings — a provisional number, not yet a weight.
 	 *  Also true (trivially) whenever `n === 0`. */
 	provisional: boolean;
+	/** Malformed/unparseable lines encountered in the ledger READ that produced this stamp — a
+	 *  whole-file count, not scoped to this lineage. Present only when `> 0` (gauntlet round 1, codex:
+	 *  "partial-corrupt ledger" — a mid-append crash or a hand-edit typo must be visible on the stamp,
+	 *  not silently absorbed into a confident-looking number). */
+	rejected?: number;
+	/** `true` when `rejected` was a large enough FRACTION of the ledger's lines that the surviving rows
+	 *  can't be trusted at all for this read — `n`/`survived` are forced to `0` (no `survivedRate`) and
+	 *  the caller must render this as fully unmeasured, distinct from an honest "no history yet" (the
+	 *  reason — `rejected`'s count — is still carried so the render can explain WHY). Present only when
+	 *  `true`; a lesser (nonzero but minor) `rejected` fraction leaves `n`/`survived`/`survivedRate`
+	 *  computed from the valid rows, just flagged via `rejected`. */
+	corrupt?: true;
+	/** Present only when the ledger file itself could NOT be read — a permission fault, a non-regular
+	 *  file (a FIFO/socket/device swapped in for the path), or any other I/O error. Distinct from a
+	 *  simply ABSENT ledger (a fresh checkout, or a lineage never reviewed yet), which is normal and
+	 *  NEVER sets this field — conflating "couldn't check" with "checked and found nothing" is the
+	 *  T3-lesson failure mode this guards against (gauntlet round 1, grok: "read-error == no-history"). */
+	unreadable?: string;
 }
 
 /**
  * Measured precision for ONE lineage, from an already-parsed entry list — glance#332's land-path
- * moat: `{n, survived, survivedRate}`, never smoothed. `survivedRate` is `undefined` exactly when
- * `n === 0` (no adjudicated history for this lineage) — the caller must render that as "unmeasured",
- * never as a `0`-valued precision, which would misread as "measured and 0%".
+ * moat: `{n, survived, survivedRate}`, never smoothed. `survivedRate` is OMITTED entirely (not merely
+ * `undefined`-valued) exactly when `n === 0` (no adjudicated history for this lineage) — the caller
+ * must render that as "unmeasured", never as a `0`-valued precision, which would misread as "measured
+ * and 0%". This is the PURE half — it never sees `rejected`/`corrupt`/`unreadable`, which are read-time
+ * facts about the ledger FILE, not lineage-scoped facts about already-parsed rows; see
+ * `reviewerPrecisionFromLedger` for where those attach.
  */
 export function reviewerPrecisionFor(entries: ReviewerLedgerEntry[], lineage: string): ReviewerPrecisionStamp {
 	const rows = entries.filter((e) => e.lineage === lineage);
@@ -197,47 +243,104 @@ export function reviewerPrecisionFor(entries: ReviewerLedgerEntry[], lineage: st
 		lineage,
 		n,
 		survived,
-		survivedRate: n > 0 ? survived / n : undefined,
+		...(n > 0 ? { survivedRate: survived / n } : {}),
 		provisional: n < MIN_FINDINGS_FOR_WEIGHT,
 	};
 }
 
+/** `rejected` lines at/above this FRACTION of the ledger's total lines (valid + duplicate + rejected)
+ *  means the surviving rows can no longer be trusted to represent the true picture — degrade fully to
+ *  unmeasured rather than confidently reporting a number computed from a shrinking, unrepresentative
+ *  subset (gauntlet round 1, codex's "partial-corrupt ledger", adjudicated: NOT a blanket zero-on-any-
+ *  corruption rule, which would make the whole feature flap on every ordinary mid-append race). */
+const CORRUPT_REJECTED_FRACTION = 0.5;
+
 /**
- * Read + parse the ledger file, tolerant of a missing or empty file (a fresh checkout, or a lineage
- * that has never been reviewed yet) — never throws, and a read/parse fault degrades to "no entries"
- * exactly like an absent file, so a transient fs hiccup renders as honest "unmeasured" rather than
- * blocking the land it's asked from. `ledgerPath` defaults to the repo-committed ledger; tests pass a
- * fixture path.
+ * Read + parse the ledger file. Never throws — every failure mode degrades to an honest stamp instead
+ * of blocking the land path that calls this:
+ *  - the file is genuinely ABSENT (`ENOENT`) ⇒ plain `{entries:[], rejected:0, duplicates:0}`, no
+ *    `unreadable` — a fresh checkout or a never-reviewed lineage is normal, not an error.
+ *  - the path exists but is NOT a regular file (a FIFO/socket/device — e.g. something shadowing the
+ *    real ledger) ⇒ `unreadable` set WITHOUT attempting a read, so a blocking pipe can never hang the
+ *    synchronous land-path read (gauntlet round 1, codex's "env ledger-shadow" finding).
+ *  - any OTHER read fault (permission denied, I/O error) ⇒ `unreadable` set, distinct from an absent
+ *    file (gauntlet round 1, grok's "read-error == no-history" finding).
+ * `ledgerPath` defaults to the repo-committed ledger; tests pass a fixture path directly (dependency
+ * injection — there is deliberately no environment-variable override reachable from production, so a
+ * launch-directory `.env` can never redirect this read; see `src/validator.ts`'s `ValidatorGateOpts.reviewerLedgerPath`).
  */
-export function readReviewerLedgerEntries(ledgerPath: string = DEFAULT_REVIEWER_LEDGER_PATH): { entries: ReviewerLedgerEntry[]; rejected: number; duplicates: number } {
-	let text = "";
+export function readReviewerLedgerEntries(ledgerPath: string = DEFAULT_REVIEWER_LEDGER_PATH): { entries: ReviewerLedgerEntry[]; rejected: number; duplicates: number; unreadable?: string } {
+	let stat: ReturnType<typeof statSync>;
 	try {
-		text = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
-	} catch {
-		text = "";
+		stat = statSync(ledgerPath);
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return { entries: [], rejected: 0, duplicates: 0 };
+		return { entries: [], rejected: 0, duplicates: 0, unreadable: errText(err) };
 	}
-	return parseReviewerLedger(text);
+	if (!stat.isFile()) {
+		return { entries: [], rejected: 0, duplicates: 0, unreadable: `not a regular file: ${ledgerPath}` };
+	}
+	try {
+		return parseReviewerLedger(readFileSync(ledgerPath, "utf8"));
+	} catch (err) {
+		return { entries: [], rejected: 0, duplicates: 0, unreadable: errText(err) };
+	}
 }
 
 /**
  * The one-call reader land code wants: this lineage's measured precision, straight from the
- * repo-committed ledger file. Tolerant of a missing/empty ledger (renders as `n:0`, honeys as
- * "unmeasured" by `renderReviewerPrecision`) — never fabricates a rate, never applies a prior.
+ * repo-committed ledger file. Never fabricates a rate, never applies a prior:
+ *  - a read fault (see `readReviewerLedgerEntries`) ⇒ `unreadable` carried onto the stamp, `n:0`, no
+ *    `survivedRate` — rendered distinctly from an honest "no history" by `renderReviewerPrecision`.
+ *  - a ledger whose malformed-line fraction crosses `CORRUPT_REJECTED_FRACTION` ⇒ `corrupt:true`,
+ *    `n:0`, no `survivedRate` — the surviving rows aren't trusted even though some parsed cleanly.
+ *  - otherwise: real `n`/`survived`/`survivedRate` from the valid rows, with `rejected` carried along
+ *    (present only when `> 0`) so a MINOR corruption is visible without forcing a full degrade.
  */
 export function reviewerPrecisionFromLedger(lineage: string, ledgerPath: string = DEFAULT_REVIEWER_LEDGER_PATH): ReviewerPrecisionStamp {
-	const { entries } = readReviewerLedgerEntries(ledgerPath);
-	return reviewerPrecisionFor(entries, lineage);
+	const { entries, rejected, duplicates, unreadable } = readReviewerLedgerEntries(ledgerPath);
+	if (unreadable) return { lineage, n: 0, survived: 0, provisional: true, unreadable };
+	const base = reviewerPrecisionFor(entries, lineage);
+	if (rejected === 0) return base;
+	const totalLines = entries.length + duplicates + rejected;
+	const fraction = totalLines > 0 ? rejected / totalLines : 0;
+	if (fraction >= CORRUPT_REJECTED_FRACTION) {
+		return { lineage, n: 0, survived: 0, provisional: true, corrupt: true, rejected };
+	}
+	return { ...base, rejected };
+}
+
+/** `Math.round` alone collapses any true rate below 0.5% to a printed "0%" — indistinguishable from an
+ *  honest, exact zero (gauntlet round 1, grok: n=201,survived=1 ⇒ 0.4975% ⇒ "0%" either way). A
+ *  nonzero rate under 1% renders as "<1%" instead; an EXACT zero still renders "0%", so the two stay
+ *  distinguishable. */
+function formatPrecisionPct(rate: number): string {
+	const pct = rate * 100;
+	if (pct > 0 && pct < 1) return "<1%";
+	return `${Math.round(pct)}%`;
 }
 
 /** Canonical one-line rendering of a precision stamp for a land receipt — "reviewer X, measured
  *  precision p% (n=N adjudicated rows)", or "reviewer X, unmeasured (n=0)" when the lineage has no
- *  adjudicated history yet. The honesty rule is sacred: never a fabricated or smoothed number for n=0. */
+ *  adjudicated history yet. The honesty rule is sacred: never a fabricated or smoothed number for n=0,
+ *  and (gauntlet round 1) an unreadable or too-corrupt-to-trust ledger renders as unmeasured too, with
+ *  its own distinct reason — never silently folded into the plain "no history" case. */
 export function renderReviewerPrecision(stamp: ReviewerPrecisionStamp): string {
 	const who = plain(stamp.lineage);
+	if (stamp.unreadable) return `${who}, unmeasured (ledger unreadable: ${plain(stamp.unreadable)})`;
+	if (stamp.corrupt) {
+		const rows = stamp.rejected ?? 0;
+		return `${who}, unmeasured (ledger too corrupt to trust: ${rows} unparseable row${rows === 1 ? "" : "s"})`;
+	}
 	if (stamp.n === 0) return `${who}, unmeasured (n=0)`;
-	const pct = Math.round((stamp.survivedRate ?? 0) * 100);
+	// Defensive: `n > 0` should always carry a finite `survivedRate` (reviewerPrecisionFor's own
+	// invariant) — but a wire-boundary value that violates it must still render honestly, never as a
+	// fabricated percentage (gauntlet round 1, codex: "fabricated 0%" via `?? 0`).
+	if (stamp.survivedRate === undefined || !Number.isFinite(stamp.survivedRate)) return `${who}, unmeasured (n=${stamp.n}, rate unavailable)`;
+	const pct = formatPrecisionPct(stamp.survivedRate);
 	const tag = stamp.provisional ? " [provisional]" : "";
-	return `${who}, measured precision ${pct}% (n=${stamp.n} adjudicated row${stamp.n === 1 ? "" : "s"})${tag}`;
+	const corruptionNote = stamp.rejected ? `; ${stamp.rejected} row${stamp.rejected === 1 ? "" : "s"} unparseable` : "";
+	return `${who}, measured precision ${pct} (n=${stamp.n} adjudicated row${stamp.n === 1 ? "" : "s"}${corruptionNote})${tag}`;
 }
 
 /** Render the report the closing step prints — sentence-first, n on every number. */
@@ -256,6 +359,6 @@ export function renderReviewerReport(entries: ReviewerLedgerEntry[], rejected: n
 		}
 	}
 	if (rejected > 0) lines.push(`(${rejected} malformed ledger line${rejected === 1 ? "" : "s"} ignored — fix them, they are data)`);
-	if (duplicates > 0) lines.push(`(${duplicates} exact-duplicate row${duplicates === 1 ? "" : "s"} counted once — a retried add must not inflate precision)`);
+	if (duplicates > 0) lines.push(`(${duplicates} duplicate row${duplicates === 1 ? "" : "s"} (same adjudication, note/severity aside) counted once — a retried add must not inflate precision)`);
 	return lines.join("\n");
 }

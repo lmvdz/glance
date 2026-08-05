@@ -103,14 +103,22 @@ export interface LensVerdictDTO {
 
 /** Mirrors backend `ReviewerPrecisionStamp` (src/memory/reviewer-weights.ts) — glance#332's land-path
  *  moat centerpiece: the judging lineage's MEASURED precision from the repo-committed reviewer ledger
- *  at judgment time. `survivedRate` is `undefined` exactly when `n === 0` (no adjudicated history) —
- *  render that as "unmeasured", never as a fabricated `0%`. */
+ *  at judgment time. `survivedRate` is ABSENT (not merely `undefined`-valued) exactly when `n === 0`
+ *  (no adjudicated history) — render that as "unmeasured", never as a fabricated `0%`.
+ *
+ *  Gauntlet round 1 additions: `rejected` (malformed lines seen while reading the ledger, present only
+ *  when > 0), `corrupt` (rejected was too large a FRACTION of the file to trust the surviving rows —
+ *  render fully unmeasured), `unreadable` (the ledger file itself could not be read — a permission
+ *  fault or non-regular-file path — distinct from an honestly ABSENT ledger, which never sets this). */
 export interface ReviewerPrecisionStampDTO {
   lineage: string;
   n: number;
   survived: number;
   survivedRate?: number;
   provisional: boolean;
+  rejected?: number;
+  corrupt?: true;
+  unreadable?: string;
 }
 
 /** Mirrors backend `ValidationRecord` (src/types.ts) — Epic 3's independent-validator verdict for an

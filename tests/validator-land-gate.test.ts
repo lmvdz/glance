@@ -31,7 +31,7 @@ afterEach(async () => {
 	for (const d of tmps.splice(0)) await fs.rm(d, { recursive: true, force: true }).catch(() => {});
 });
 
-const ENV_KEYS = ["OMP_SQUAD_VALIDATOR", "OMP_SQUAD_REVIEWER_LEDGER_PATH"] as const;
+const ENV_KEYS = ["OMP_SQUAD_VALIDATOR"] as const;
 const saved: Record<string, string | undefined> = {};
 for (const k of ENV_KEYS) saved[k] = process.env[k];
 afterEach(() => {
@@ -78,6 +78,12 @@ class TestManager extends SquadManager {
 	judge: Judge | undefined;
 	protected validatorJudgeOverride(): Judge | undefined {
 		return this.judge;
+	}
+	/** DI hatch for the reviewer-precision reader (gauntlet round 1: a function parameter, never an
+	 *  environment variable — see `SquadManager.reviewerLedgerPathOverride`'s doc). */
+	ledgerPath: string | undefined;
+	protected reviewerLedgerPathOverride(): string | undefined {
+		return this.ledgerPath;
 	}
 }
 
@@ -269,9 +275,11 @@ test("validatorGate: OMP_SQUAD_VALIDATOR=0 short-circuits before touching git or
 });
 
 // ── glance#332: the land receipt carries the judging lineage's MEASURED reviewer precision ─────────
-// A fixture ledger (pointed to via the test-only OMP_SQUAD_REVIEWER_LEDGER_PATH hatch, mirroring how
-// OMP_SQUAD_VALIDATOR=0 is used above) stands in for plans/.reviews/reviewer-ledger.jsonl. The default
-// (unset OMP_SQUAD_VALIDATOR_HARNESS) judge harness is "omp", whose ledger lineage tag is "native".
+// A fixture ledger, injected via `TestManager.ledgerPath` (real DI through `reviewerLedgerPathOverride`
+// — gauntlet round 1, codex's "env-ledger-shadow" finding closed this off as an env var: production
+// never reads one, so a launch-directory `.env` can no longer redirect this read), stands in for
+// plans/.reviews/reviewer-ledger.jsonl. The default (unset OMP_SQUAD_VALIDATOR_HARNESS) judge harness
+// is "omp", whose ledger lineage tag is "native".
 
 async function tmpLedgerFile(lines: string[]): Promise<string> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "vgate-ledger-"));
@@ -281,13 +289,13 @@ async function tmpLedgerFile(lines: string[]): Promise<string> {
 	return file;
 }
 
-const ledgerRow = (survived: boolean) => JSON.stringify({ at: "2026-08-01", lineage: "native", concernClass: "test-fixture", survived, source: "fixture", note: "fixture row" });
+const ledgerRow = (survived: boolean, note = "fixture row") => JSON.stringify({ at: "2026-08-01", lineage: "native", concernClass: "test-fixture", survived, source: "fixture", note });
 
 test("a landed unit's validation record carries the judging lineage's measured precision, end-to-end through the land path", async () => {
 	const stateDir = await tmpDir("vgate-precision-state-");
 	const { repo, worktree, branch } = await repoWithBranch("vgate-precision-");
-	process.env.OMP_SQUAD_REVIEWER_LEDGER_PATH = await tmpLedgerFile([ledgerRow(true), ledgerRow(false)]);
 	const mgr = new TestManager({ stateDir });
+	mgr.ledgerPath = await tmpLedgerFile([ledgerRow(true), ledgerRow(false)]);
 	mgr.judge = passJudge;
 	seedAgent(mgr, "a1", repo, worktree, branch, "f1");
 	(mgr as unknown as { featureStore: Map<string, PersistedFeature> }).featureStore.set("f1", { id: "f1", title: "F1", repo, createdAt: 0, updatedAt: 0, acceptanceCriteria: CRITERIA });
@@ -298,17 +306,18 @@ test("a landed unit's validation record carries the judging lineage's measured p
 	expect(result.ok).toBe(true);
 	const precision = mgr.agents.get("a1")?.dto.validation?.reviewerPrecision;
 	expect(precision).toEqual({ lineage: "native", n: 2, survived: 1, survivedRate: 0.5, provisional: true });
+	expect(Object.hasOwn(precision ?? {}, "survivedRate")).toBe(true); // n>0 ⇒ genuinely OWNED, not merely truthy
 	// The same stamp rides the transcript's gate-verdict event, and the narration cites the number.
 	const verdict = mgr.getTranscript("a1").find((e) => e.event?.kind === TRANSCRIPT_EVENT_GATE_VERDICT);
 	expect(verdict?.event?.payload).toMatchObject({ reviewerPrecision: precision });
 	expect(verdict?.text).toContain("native, measured precision 50% (n=2 adjudicated rows) [provisional]");
 });
 
-test("HONESTY: a lineage with NO ledger history lands with reviewerPrecision.n === 0 and no survivedRate — never a fabricated number", async () => {
+test("HONESTY: a lineage with NO ledger history lands with reviewerPrecision.n === 0 and survivedRate ABSENT (not merely undefined) — never a fabricated number", async () => {
 	const stateDir = await tmpDir("vgate-precision-zero-state-");
 	const { repo, worktree, branch } = await repoWithBranch("vgate-precision-zero-");
-	process.env.OMP_SQUAD_REVIEWER_LEDGER_PATH = await tmpLedgerFile([]); // empty ledger — never-reviewed lineage
 	const mgr = new TestManager({ stateDir });
+	mgr.ledgerPath = await tmpLedgerFile([]); // empty ledger — never-reviewed lineage
 	mgr.judge = passJudge;
 	seedAgent(mgr, "a1", repo, worktree, branch, "f1");
 	(mgr as unknown as { featureStore: Map<string, PersistedFeature> }).featureStore.set("f1", { id: "f1", title: "F1", repo, createdAt: 0, updatedAt: 0, acceptanceCriteria: CRITERIA });
@@ -318,16 +327,19 @@ test("HONESTY: a lineage with NO ledger history lands with reviewerPrecision.n =
 
 	expect(result.ok).toBe(true);
 	const precision = mgr.agents.get("a1")?.dto.validation?.reviewerPrecision;
-	expect(precision).toEqual({ lineage: "native", n: 0, survived: 0, survivedRate: undefined, provisional: true });
+	expect(precision).toEqual({ lineage: "native", n: 0, survived: 0, provisional: true });
+	// toEqual alone can't distinguish "key absent" from "key present holding undefined" (gauntlet round
+	// 1, codex's "survivedRate present-as-undefined" finding) — assert ownership explicitly.
+	expect(Object.hasOwn(precision ?? { survivedRate: 1 }, "survivedRate")).toBe(false);
 	const verdict = mgr.getTranscript("a1").find((e) => e.event?.kind === TRANSCRIPT_EVENT_GATE_VERDICT);
 	expect(verdict?.text).toContain("native, unmeasured (n=0)");
 });
 
-test("FLIP THE INPUT: two lands against the SAME (still-growing) fixture ledger get DIFFERENT receipts — the number moves live, it is not baked in at startup", async () => {
+test("FLIP THE INPUT: two lands (different commits) against the SAME still-growing fixture ledger get DIFFERENT receipts", async () => {
 	const stateDir = await tmpDir("vgate-precision-flip-state-");
 	const ledgerPath = await tmpLedgerFile([ledgerRow(true)]);
-	process.env.OMP_SQUAD_REVIEWER_LEDGER_PATH = ledgerPath;
 	const mgr = new TestManager({ stateDir });
+	mgr.ledgerPath = ledgerPath;
 	mgr.judge = passJudge;
 
 	// First land: 1 adjudicated row, 100% survived.
@@ -341,7 +353,7 @@ test("FLIP THE INPUT: two lands against the SAME (still-growing) fixture ledger 
 	expect(firstPrecision).toEqual({ lineage: "native", n: 1, survived: 1, survivedRate: 1, provisional: true });
 
 	// The fixture ledger grows — a new adjudicated finding that did NOT survive.
-	await fs.appendFile(ledgerPath, `${ledgerRow(false)}\n`);
+	await fs.appendFile(ledgerPath, `${ledgerRow(false, "second finding")}\n`);
 
 	// Second land, a DIFFERENT branch/diff (a different (commit,tree) so validatorGate's cache is a genuine miss).
 	const second = await repoWithBranch("vgate-precision-flip-b-");
@@ -355,4 +367,59 @@ test("FLIP THE INPUT: two lands against the SAME (still-growing) fixture ledger 
 	expect(secondPrecision).toEqual({ lineage: "native", n: 2, survived: 1, survivedRate: 0.5, provisional: true });
 	expect(secondPrecision?.n).not.toBe(firstPrecision?.n);
 	expect(secondPrecision?.survivedRate).not.toBe(firstPrecision?.survivedRate);
+});
+
+// ── SHIP-BLOCKER FIX (gauntlet round 1 — codex gpt-5.6-sol AND grok-4.5, converged independently): ──
+// gateCache freezes the JUDGE VERDICT keyed only on (commit,tree,criteriaHash) — a re-land of the SAME
+// commit/tree after the reviewer ledger grew must NOT return a stale reviewerPrecision, even though the
+// cached judge verdict is (correctly) reused. This is the exact scenario the earlier flip-the-input test
+// dodged by using a different cache key each time.
+test("SHIP-BLOCKER FIX: re-scoring the SAME (commit,tree,criteria) after the ledger grows MOVES reviewerPrecision even though the cached judge verdict is reused", async () => {
+	const { repo, worktree } = await repoWithBranch("vgate-precision-cachehit-");
+	const baseCommit = (await new Response(Bun.spawn(["git", "rev-parse", "HEAD"], { cwd: repo, stdout: "pipe" }).stdout).text()).trim();
+	const ledgerPath = await tmpLedgerFile([ledgerRow(true)]);
+	let judgeCalls = 0;
+	const countingPassJudge: Judge = async () => {
+		judgeCalls++;
+		return { perCriterion: [{ id: "c1", satisfied: true }, { id: "c2", satisfied: true }] };
+	};
+	const proof = { ok: true, commit: "deadbeef-precision", tree: "cafef00d-precision", branch: "b", dirty: false, baseCommit, repo, worktree, command: "test", commandHash: "h", ranAt: 1, ttlMs: 1000, detail: "", artifacts: [] };
+
+	const first = await validatorGate({ criteria: CRITERIA, repo, worktree, proof, judge: countingPassJudge, reviewerLedgerPath: ledgerPath });
+	expect(first.record.verdict).toBe("pass");
+	expect(first.record.reviewerPrecision).toEqual({ lineage: "native", n: 1, survived: 1, survivedRate: 1, provisional: true });
+	expect(judgeCalls).toBe(1);
+
+	// The ledger grows. The (commit,tree,criteria) tuple is UNCHANGED — this second call is exactly the
+	// gateCache HIT path (same key as the first call).
+	await fs.appendFile(ledgerPath, `${ledgerRow(false, "second finding")}\n`);
+
+	const second = await validatorGate({ criteria: CRITERIA, repo, worktree, proof, judge: countingPassJudge, reviewerLedgerPath: ledgerPath });
+
+	// The judge verdict itself IS the cached value — never re-invoked (caching still works).
+	expect(judgeCalls).toBe(1);
+	expect(second.record.verdict).toBe(first.record.verdict);
+	expect(second.record.agreement).toBe(first.record.agreement);
+	// But reviewerPrecision reflects the CURRENT ledger, not the ledger as it stood at the first call —
+	// this is the number that must never be served stale from the cache.
+	expect(second.record.reviewerPrecision).toEqual({ lineage: "native", n: 2, survived: 1, survivedRate: 0.5, provisional: true });
+	expect(second.record.reviewerPrecision?.n).not.toBe(first.record.reviewerPrecision?.n);
+	expect(second.record.reviewerPrecision?.survivedRate).not.toBe(first.record.reviewerPrecision?.survivedRate);
+});
+
+// ── HIGH: env-ledger-shadow closed (gauntlet round 1, codex) — there is no environment-variable path
+// into the reviewer-precision reader anymore; only ValidatorGateOpts.reviewerLedgerPath (DI) reaches it.
+test("env-ledger-shadow CLOSED: an OMP_SQUAD_REVIEWER_LEDGER_PATH env var has NO effect on the land path — only explicit DI does", async () => {
+	const { repo, worktree } = await repoWithBranch("vgate-precision-noenv-");
+	const shadowLedger = await tmpLedgerFile([ledgerRow(true), ledgerRow(true), ledgerRow(true)]); // would read as 100% precision if honored
+	process.env.OMP_SQUAD_REVIEWER_LEDGER_PATH = shadowLedger;
+	try {
+		const { record } = await validatorGate({ criteria: CRITERIA, repo, worktree, judge: passJudge }); // NO reviewerLedgerPath passed
+		// Reads whatever the REAL default ledger says (n:0 in a repo with no plans/.reviews ledger at this
+		// tmp path, or the real repo ledger if this process happens to run from the actual glance checkout)
+		// — the point is it must NOT be the shadow ledger's fabricated 100%/n=3.
+		expect(record.reviewerPrecision).not.toEqual({ lineage: "native", n: 3, survived: 3, survivedRate: 1, provisional: true });
+	} finally {
+		delete process.env.OMP_SQUAD_REVIEWER_LEDGER_PATH;
+	}
 });

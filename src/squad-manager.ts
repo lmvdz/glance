@@ -5174,6 +5174,18 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
+	 * Injection seam (mirrors `validatorJudgeOverride` above) so tests can point the land receipt's
+	 * reviewer-precision reader at a fixture ledger instead of the repo-committed one — DELIBERATELY a
+	 * method, never an environment variable (gauntlet round 1, codex's "env-ledger-shadow" finding: an
+	 * env hatch here is reachable from a launch-directory `.env`, which Bun auto-loads at boot, letting
+	 * a malicious/misplaced `.env` redirect the land path's ledger read). `undefined` ⇒ `validatorGate`'s
+	 * own default (`DEFAULT_REVIEWER_LEDGER_PATH`, the real repo-committed ledger).
+	 */
+	protected reviewerLedgerPathOverride(): string | undefined {
+		return undefined;
+	}
+
+	/**
 	 * Independent-validator veto (Epic 3, DESIGN §1) — runs BEFORE any mode dispatch, on every
 	 * `landBranch` call INCLUDING forced lands (`requireProof:false` never skips it — a forced land
 	 * bypasses the proof gate, not the semantic one). Scores the diff against the feature's declared
@@ -5200,6 +5212,7 @@ export class SquadManager extends EventEmitter {
 			authorModel: rec?.dto.model,
 			authorHarness: rec?.dto.harness,
 			agentId: opts.agentId,
+			reviewerLedgerPath: this.reviewerLedgerPathOverride(),
 		});
 		if (rec) {
 			rec.dto.validation = record;
