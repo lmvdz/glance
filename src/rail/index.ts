@@ -30,5 +30,18 @@ export {
 	diffRiskTier,
 	defaultPanelReviewers,
 	defaultPanelVerifyReviewer,
+	canonicalLedgerTag,
 	PANEL_INVARIANTS,
 } from "./panel.ts";
+
+// ── gauntlet-panel ledger projection (T5 gauntlet round 1, finding A1) ─────────────────────────────
+// The ledger write moved OUT of the land path — see panel-ledger.ts's module doc. Queuing
+// (`recordPendingPanelFinding`) is called from inside `panel.ts` itself (a rail-internal deep import,
+// no allowlist entry needed); `projectPendingPanelFindings` is the OUT-of-band lane a caller outside
+// this directory (SquadManager, after a merge settles) invokes through this barrel.
+export type { PanelLedgerProjection } from "./panel-ledger.ts";
+export { projectPendingPanelFindings, readPendingPanelFindings } from "./panel-ledger.ts";
+
+// ── bounded/hermetic panel subprocess spawning (T5 gauntlet round 1, findings B2/B4/C3) ────────────
+export type { BoundedSpawnOpts, BoundedSpawnResult } from "./panel-spawn.ts";
+export { boundedHermeticSpawn, hermeticCwd, removeHermeticCwd, globalPanelInFlightForTests, resetGlobalPanelLimiterForTests } from "./panel-spawn.ts";

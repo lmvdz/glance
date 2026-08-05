@@ -218,6 +218,14 @@ export function reviewerPrecision(entries: ReviewerLedgerEntry[]): LineagePrecis
  *  never drift onto different files. Callers may override for tests/fixtures. */
 export const DEFAULT_REVIEWER_LEDGER_PATH = path.join(import.meta.dir, "..", "..", "plans", ".reviews", "reviewer-ledger.jsonl");
 
+/** The git repo root that OWNS `DEFAULT_REVIEWER_LEDGER_PATH` — wherever THIS glance checkout is
+ *  installed, not any particular tenant repo a land happens to be operating on (T5 gauntlet round 1,
+ *  finding A1: the reviewer ledger is a daemon-global artifact, tracked in the daemon's OWN source
+ *  tree, independent of which repo a given land is landing into). `src/rail/panel-ledger.ts`'s
+ *  projection lane locks and commits against THIS root by default — never the landed tenant repo,
+ *  which in a multi-tenant daemon may be a completely different checkout. */
+export const DEFAULT_REVIEWER_LEDGER_REPO = path.join(import.meta.dir, "..", "..");
+
 /**
  * Append one row to the reviewer ledger — the SAME write `scripts/reviewer-ledger.ts`'s `add` command
  * performs, extracted here (T5, glance#333) so an IN-PROCESS caller (the in-daemon review panel,

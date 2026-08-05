@@ -2,26 +2,48 @@
  * In-code cross-lineage gauntlet panel (T5, glance#333) — the daemon's own version of the blind
  * cross-lineage review this campaign has been running BY HAND (`.claude/skills/blind-review/SKILL.md`).
  * `landBranch` (via `validator.ts`'s `validatorGate`) spawns this panel for a diff whose risk tier
- * warrants it, records each verdict to the reviewer ledger, and attaches the outcome to the land's
- * `ValidationRecord` — visibility, NOT a new merge-blocking authority (see `runReviewPanel`'s doc).
+ * warrants it, QUEUES each verdict for the reviewer ledger (never writes the tracked ledger file
+ * directly — see `panel-ledger.ts`), and attaches the outcome to the land's `ValidationRecord` —
+ * visibility, NOT a new merge-blocking authority (see `runReviewPanel`'s doc).
  *
  * BLIND, per the skill's protocol: each reviewer gets ONLY the diff + the system's invariants stated as
  * PROPERTIES — never the builder's notes/commits, never what the criteria judge decided, never another
- * panel reviewer's verdict. Reviewers run independently (no shared prompt state), so there is structurally
- * nothing to leak between them.
+ * panel reviewer's verdict, and (gauntlet round 1, finding C3) never the daemon's own launch directory
+ * either — every reviewer/recheck subprocess runs with an explicit, freshly-scratch, empty `cwd`
+ * (`panel-spawn.ts`'s `hermeticCwd`) so an agentic CLI has nothing nearby to explore into.
+ *
+ * GAUNTLET ROUND 1 (glance#333 PR #353, dual-lineage blind review — codex gpt-5.6-sol + grok-4.5, both
+ * converged on the CRITICAL finding, codex added six more, all adjudicated real): this file changed
+ * substantially to close them. Summary (full detail on each fix inline at its own site):
+ *   A1 (CRITICAL) — the ledger write moved OUT of the land path entirely; see `panel-ledger.ts`'s module
+ *       doc for the full story. This file now only QUEUES (`recordPendingPanelFinding`), never appends
+ *       to the tracked file.
+ *   A5 (HIGH) — an inconclusive/unreachable claim-verification call is a THIRD state, never coerced
+ *       into a refutation; only a genuinely confirmed/refuted claim becomes a ledger row.
+ *   A7 (MEDIUM) — ledger rows use the SAME canonical lineage tag T4's reader expects (grok/codex/native),
+ *       not the raw vendor lineage string, so a finding updates the right lineage's measured history.
+ *   B2 (HIGH) — every reviewer AND the claim-verification call is spawned in its own process GROUP and
+ *       bounded independently; a timeout kills the whole group and the caller stops awaiting its pipes.
+ *   B4 (HIGH) — a process-wide concurrency limiter plus single-flight coalescing (`panel-spawn.ts`,
+ *       `inFlightPanels` below) so N concurrent lands of the same proof spawn ONE panel, not N.
+ *   C3 (HIGH) — every subprocess runs in a hermetic scratch `cwd` (see the module doc above).
+ *   C6 (MEDIUM) — the claim-verification step is honestly named as such (never "independent recheck")
+ *       and prefers a DIFFERENT lineage than the objecting reviewer when one is available.
  *
  * Scope (this ticket): panel spawning + recording + receipt-carry ONLY. Rendering the outcome in the
  * webapp is T6 (webapp/src/lib/dto.ts's `PanelVerdictDTO` mirror is prepared here so T6 has a stable
  * shape to render, but no UI ships in this change).
  */
 
-import { errText } from "../err-text.ts";
 import { envBool, envInt } from "../config.ts";
-import { appendReviewerLedgerEntry, type ReviewerLedgerEntry } from "../memory/index.ts";
+import { errText } from "../err-text.ts";
 import { changedFilesFromDiff, selectLenses } from "../lens-select.ts";
-import { decideTyped, extractJsonObject } from "../omp-call.ts";
+import { extractJsonObject } from "../omp-call.ts";
 import { type ModelLineage } from "../model-lineage.ts";
+import { recordPendingPanelFinding } from "./panel-ledger.ts";
+import { boundedHermeticSpawn, hermeticCwd, removeHermeticCwd } from "./panel-spawn.ts";
 import { truncate } from "../text-util.ts";
+import type { ReviewerLedgerEntry } from "../memory/index.ts";
 import { maxDiffFiles, RISKY_PATH_RE } from "./land-risk.ts";
 
 const CLAIM_MAX = 600;
@@ -35,14 +57,15 @@ export function reviewPanelEnabled(): boolean {
 /** Hard cap on reviewers spawned per land (cost/safety) — also the upper bound on how many DISTINCT
  *  lineages the default reviewer pool draws from. `<= 1` disables the panel: a "panel" of one reviewer
  *  is not a cross-lineage panel, and the whole point is DISTINCT lineages corroborating or contradicting
- *  each other. */
+ *  each other. Distinct from `panel-spawn.ts`'s `OMP_SQUAD_REVIEW_PANEL_GLOBAL_MAX`, which bounds
+ *  concurrent OS processes across the WHOLE daemon, not one panel's own reviewer count. */
 export function panelMax(): number {
 	return envInt("OMP_SQUAD_REVIEW_PANEL_MAX", 2);
 }
 
-/** Per-reviewer bound (and per-recheck bound) — a hung reviewer must never wedge a land. Applied BOTH as
- *  the subprocess's own `AbortSignal.timeout` (real CLI-backed reviewers, via `decideTyped`) AND as an
- *  outer `Promise.race` in `runOnePanelReviewer` (defense in depth: a fake/injected reviewer, or any
+/** Per-reviewer bound (and per-claim-verification bound) — a hung reviewer must never wedge a land.
+ *  Enforced by `panel-spawn.ts`'s process-GROUP kill (SIGTERM→SIGKILL, B2) for real CLI-backed
+ *  reviewers, AND as an outer `Promise.race` here (defense in depth: a fake/injected reviewer, or any
  *  future reviewer implementation that doesn't itself respect a spawn timeout, still can't block the
  *  panel — its promise is simply abandoned, never awaited past the bound). */
 export function panelTimeoutMs(): number {
@@ -58,10 +81,12 @@ export type PanelReviewerVerdict = "accept" | "object" | "timeout" | "error";
 
 /**
  * One panel reviewer's outcome, attached to the land's `ValidationRecord.panel` (T6 renders this; this
- * ticket only produces + records it). `survived` is present ONLY when a high-severity objection was
- * independently rechecked (mirrors `validator.ts`'s `lensVerify` re-check discipline) — never a fabricated
- * true/false for an objection nobody adjudicated. A `timeout`/`error` verdict carries neither `severity`
- * nor `claim`: there is no finding to report, only an honest "this reviewer did not answer".
+ * ticket only produces + records it). `survived` is present ONLY when a high-severity objection's claim
+ * was independently VERIFIED — confirmed or refuted (see the module doc's C6 note: this is claim
+ * verification, not a second blind review) — never a fabricated true/false for an objection nobody
+ * checked, and never coerced from an inconclusive check (A5). A `timeout`/`error` verdict carries
+ * neither `severity` nor `claim`: there is no finding to report, only an honest "this reviewer did not
+ * answer".
  */
 export interface PanelVerdict {
 	lineage: ModelLineage;
@@ -77,8 +102,9 @@ export interface PanelVerdict {
 	 *  "toctou") — present only alongside `claim`. Falls back to a generic tag when a reviewer doesn't
 	 *  supply one. */
 	concernClass?: string;
-	/** `true`/`false` only when a high-severity objection was independently rechecked and confirmed/
-	 *  refuted; absent when no recheck ran (a low-severity objection, or `verdict` isn't `"object"`). */
+	/** `true`/`false` only when a high-severity objection's claim was independently verified and
+	 *  confirmed/refuted; absent when no verification ran, OR when it ran but could not determine an
+	 *  answer (A5 — an inconclusive check is a THIRD state, never coerced into `false`). */
 	survived?: boolean;
 	ranAt: number;
 }
@@ -94,9 +120,12 @@ export interface PanelReviewerSpec {
 	review: PanelReviewer;
 }
 
-/** Injected recheck seam — mirrors `validator.ts`'s `LensVerifyJudge`. `true` = confirmed, `false` =
- *  refuted, `undefined` = couldn't determine (treated as NOT confirmed — an unreachable recheck must
- *  never escalate a finding it couldn't verify). */
+/**
+ * Injected claim-verification seam (C6 — deliberately NOT called "recheck"/"independent review" in any
+ * doc comment: it is fed the exact claim under test, so it is confirmatory, not a fresh blind pass; see
+ * the module doc). `true` = confirmed, `false` = refuted, `undefined` = couldn't determine (A5 — treated
+ * as a genuinely unknown third state, never coerced to "refuted").
+ */
 export type PanelVerifyReviewer = (input: { lineage: ModelLineage; claim: string; diff: string }) => Promise<boolean | undefined>;
 
 /**
@@ -122,9 +151,12 @@ const PANEL_SYSTEM_PROMPT =
 	'Respond with EXACTLY one JSON object and nothing else: {"disposition":"accept"|"object","severity":"low"|"high",' +
 	'"claim":"<one-line finding with file:line evidence; empty string if accept>","concernClass":"<kebab-case tag, e.g. fail-open, permanent-wedge, toctou, false-refusal>"}.';
 
+/** C6: explicitly framed to the model as verifying a CLAIM, not conducting a fresh review — the honesty
+ *  fix applies to the model-facing prompt too, not just this codebase's own doc comments. */
 const PANEL_VERIFY_SYSTEM =
-	"You are re-checking ONE specific concern another reviewer raised about a code diff. Decide only whether that " +
-	'concern is substantiated by the diff itself. Respond with EXACTLY one JSON object: {"verdict":"confirmed"|"refuted"|"inconclusive"}.';
+	"You are verifying ONE specific claim another reviewer made about a code diff — you are NOT conducting a fresh " +
+	'review of your own. Decide only whether the claim is substantiated by the diff itself. Respond with EXACTLY one ' +
+	'JSON object: {"verdict":"confirmed"|"refuted"|"inconclusive"}.';
 
 interface PanelRawVerdict {
 	disposition: "accept" | "object";
@@ -231,65 +263,84 @@ const PANEL_VERDICT_SCHEMA = JSON.stringify({
 	required: ["disposition"],
 });
 
-/** omp (native, Anthropic-lineage) reviewer — an independent one-shot `omp -p` call. */
+// ── production reviewers (B2/C3: boundedHermeticSpawn — process-group-killed, hermetic cwd) ────────
+
+/** omp (native, Anthropic-lineage) reviewer — an independent one-shot `omp -p` call. LEAST hermetic of
+ *  the three (module doc's C3 note): no sandbox flag exists for `omp` in this codebase, so the empty
+ *  `cwd` is a real but not kernel-enforced mitigation. */
 function ompPanelReviewer(): PanelReviewer {
-	return async ({ diff, invariants }) =>
-		decideTyped<PanelRawVerdict | undefined>({
-			args: ["-p", "--system-prompt", `${PANEL_SYSTEM_PROMPT}\n\n${invariants}`, `Diff:\n${diff}`],
-			parse: parsePanelVerdictPlain,
-			fallback: undefined,
-			timeoutMs: panelTimeoutMs(),
-		});
+	return async ({ diff, invariants }) => {
+		const cwd = await hermeticCwd();
+		try {
+			const { out, code, timedOut } = await boundedHermeticSpawn({
+				bin: "omp",
+				harness: "omp",
+				cwd,
+				args: ["-p", "--system-prompt", `${PANEL_SYSTEM_PROMPT}\n\n${invariants}`, `Diff:\n${diff}`],
+				timeoutMs: panelTimeoutMs(),
+			});
+			if (timedOut || code !== 0 || !out) return undefined;
+			return parsePanelVerdictPlain(out);
+		} finally {
+			await removeHermeticCwd(cwd);
+		}
+	};
 }
 
 /** codex (OpenAI-lineage) reviewer via `codex exec -s read-only` — sandboxed, never edits the tree it
- *  is reviewing. */
+ *  is reviewing. Combined with a hermetic cwd (C3), there is no repo present for it to read even if the
+ *  sandbox's read restriction is scoped to writes rather than reads. */
 function codexPanelReviewer(): PanelReviewer {
-	return async ({ diff, invariants }) =>
-		decideTyped<PanelRawVerdict | undefined>({
-			bin: "codex",
-			args: ["exec", "-s", "read-only", `${PANEL_SYSTEM_PROMPT}\n\n${invariants}\n\nDiff:\n${diff}`],
-			parse: parsePanelVerdictCodex,
-			fallback: undefined,
-			timeoutMs: panelTimeoutMs(),
-		});
+	return async ({ diff, invariants }) => {
+		const cwd = await hermeticCwd();
+		try {
+			const { out, code, timedOut } = await boundedHermeticSpawn({
+				bin: "codex",
+				harness: "codex",
+				cwd,
+				args: ["exec", "-s", "read-only", `${PANEL_SYSTEM_PROMPT}\n\n${invariants}\n\nDiff:\n${diff}`],
+				timeoutMs: panelTimeoutMs(),
+			});
+			if (timedOut || code !== 0 || !out) return undefined;
+			return parsePanelVerdictCodex(out);
+		} finally {
+			await removeHermeticCwd(cwd);
+		}
+	};
 }
 
-/** grok (xAI-lineage) reviewer via the grok CLI — read-only sandbox, no web search, `--json-schema`
- *  constrains the model to the verdict shape (machine-parseable by construction). Stdin closed: grok is
- *  an agentic CLI and would otherwise wait on a TTY. */
+/** grok (xAI-lineage) reviewer via the grok CLI — read-only sandbox (Landlock-enforced on Linux, per
+ *  this project's own model policy: "read-only really is read-only"), no web search, `--json-schema`
+ *  constrains the model to the verdict shape. Combined with a hermetic cwd (C3), this reviewer is
+ *  GENUINELY hermetic — kernel-enforced, not merely CLI-level. Stdin closed: grok is an agentic CLI and
+ *  would otherwise wait on a TTY. */
 function grokPanelReviewer(): PanelReviewer {
-	return async ({ diff, invariants }) =>
-		decideTyped<PanelRawVerdict | undefined>({
-			bin: "grok",
-			args: [
-				"-p",
-				`${PANEL_SYSTEM_PROMPT}\n\n${invariants}\n\nDiff:\n${diff}`,
-				"--sandbox",
-				"read-only",
-				"--permission-mode",
-				"dontAsk",
-				"--disable-web-search",
-				"--json-schema",
-				PANEL_VERDICT_SCHEMA,
-			],
-			parse: parsePanelVerdictGrok,
-			fallback: undefined,
-			timeoutMs: panelTimeoutMs(),
-		});
-}
-
-/** The recheck reviewer for a high-severity objection — always the native omp harness (a recheck is a
- *  narrow, scoped question; it does not need its own cross-lineage diversity, mirroring
- *  `validator.ts`'s `ompLensVerifyJudge`). */
-function ompPanelVerifyReviewer(): PanelVerifyReviewer {
-	return async ({ claim, diff }) =>
-		decideTyped<boolean | undefined>({
-			args: ["-p", "--system-prompt", PANEL_VERIFY_SYSTEM, `A reviewer flagged this specific concern about the diff:\n${truncate(claim, CLAIM_MAX)}\n\nDiff:\n${diff}`],
-			parse: parseVerifyConfirmed,
-			fallback: undefined,
-			timeoutMs: panelTimeoutMs(),
-		});
+	return async ({ diff, invariants }) => {
+		const cwd = await hermeticCwd();
+		try {
+			const { out, code, timedOut } = await boundedHermeticSpawn({
+				bin: "grok",
+				harness: "grok",
+				cwd,
+				args: [
+					"-p",
+					`${PANEL_SYSTEM_PROMPT}\n\n${invariants}\n\nDiff:\n${diff}`,
+					"--sandbox",
+					"read-only",
+					"--permission-mode",
+					"dontAsk",
+					"--disable-web-search",
+					"--json-schema",
+					PANEL_VERDICT_SCHEMA,
+				],
+				timeoutMs: panelTimeoutMs(),
+			});
+			if (timedOut || code !== 0 || !out) return undefined;
+			return parsePanelVerdictGrok(out);
+		} finally {
+			await removeHermeticCwd(cwd);
+		}
+	};
 }
 
 /** Candidate reviewer pool, foreign lineages preferred first (blind-review doctrine: a foreign lineage
@@ -305,8 +356,70 @@ export function defaultPanelReviewers(): PanelReviewerSpec[] {
 	return candidates;
 }
 
+// ── claim verification (C6 — NOT "independent recheck"; see the module doc) ────────────────────────
+
+interface VerifyCandidate {
+	bin: "grok" | "codex" | "omp";
+	lineage: ModelLineage;
+	harness: string;
+}
+const VERIFY_CANDIDATES: VerifyCandidate[] = [
+	{ bin: "grok", lineage: "xai", harness: "grok" },
+	{ bin: "codex", lineage: "openai", harness: "codex" },
+	{ bin: "omp", lineage: "anthropic", harness: "omp" },
+];
+
+/** C6 fix: prefer a DIFFERENT lineage than the one that raised the objection under verification — a
+ *  same-lineage check (the previous default: always omp) is confirmation-prone (the same model family
+ *  grading its own kind of claim). Falls back to the objecting lineage's OWN CLI only when no other
+ *  binary is available at all; `undefined` only when nothing is available (shouldn't happen if the
+ *  panel itself ran, since that needed >= 2 distinct lineages). */
+function pickCrossLineageVerifier(objectorLineage: ModelLineage): VerifyCandidate | undefined {
+	const crossLineage = VERIFY_CANDIDATES.filter((c) => c.lineage !== objectorLineage && Bun.which(c.bin));
+	if (crossLineage.length > 0) return crossLineage[0];
+	return VERIFY_CANDIDATES.find((c) => Bun.which(c.bin));
+}
+
+function verifyArgs(bin: VerifyCandidate["bin"], claim: string, diff: string): string[] {
+	const user = `A reviewer flagged this specific claim about the diff — verify it, do not re-review from scratch:\n${truncate(claim, CLAIM_MAX)}\n\nDiff:\n${diff}`;
+	if (bin === "codex") return ["exec", "-s", "read-only", `${PANEL_VERIFY_SYSTEM}\n\n${user}`];
+	if (bin === "grok") {
+		return [
+			"-p",
+			`${PANEL_VERIFY_SYSTEM}\n\n${user}`,
+			"--sandbox",
+			"read-only",
+			"--permission-mode",
+			"dontAsk",
+			"--disable-web-search",
+			"--json-schema",
+			JSON.stringify({ type: "object", properties: { verdict: { type: "string", enum: ["confirmed", "refuted", "inconclusive"] } }, required: ["verdict"] }),
+		];
+	}
+	return ["-p", "--system-prompt", PANEL_VERIFY_SYSTEM, user];
+}
+
+/** The claim-verification reviewer, cross-lineage-preferring (C6) and hermetic/process-group-bounded
+ *  (B2/C3) like every other production spawn in this file. */
 export function defaultPanelVerifyReviewer(): PanelVerifyReviewer {
-	return ompPanelVerifyReviewer();
+	return async ({ lineage, claim, diff }) => {
+		const candidate = pickCrossLineageVerifier(lineage);
+		if (!candidate) return undefined;
+		const cwd = await hermeticCwd();
+		try {
+			const { out, code, timedOut } = await boundedHermeticSpawn({
+				bin: candidate.bin,
+				harness: candidate.harness,
+				cwd,
+				args: verifyArgs(candidate.bin, claim, diff),
+				timeoutMs: panelTimeoutMs(),
+			});
+			if (timedOut || code !== 0 || !out) return undefined;
+			return parseVerifyConfirmed(out);
+		} finally {
+			await removeHermeticCwd(cwd);
+		}
+	};
 }
 
 /**
@@ -326,9 +439,10 @@ export function diffRiskTier(diff: string): { warrants: boolean; sensitivePaths:
 
 /** Bounded wrapper: races `reviewer(...)` against `panelTimeoutMs()`. A losing (hung) reviewer's promise
  *  is simply abandoned — never awaited past the bound — so it can NEVER wedge the land, even if the
- *  underlying implementation ignores its own internal timeout. A thrown/rejected reviewer call and an
- *  `undefined` result both resolve to `"error"` (no usable signal), mirroring `Judge`/`LensJudge`'s
- *  fail-open contract: a reviewer that can't answer contributes nothing, never a fabricated verdict. */
+ *  underlying implementation ignores its own internal timeout (defense in depth over `panel-spawn.ts`'s
+ *  own process-group kill, B2). A thrown/rejected reviewer call and an `undefined` result both resolve
+ *  to `"error"` (no usable signal), mirroring `Judge`/`LensJudge`'s fail-open contract: a reviewer that
+ *  can't answer contributes nothing, never a fabricated verdict. */
 async function runOnePanelReviewer(spec: PanelReviewerSpec, diff: string): Promise<PanelVerdict> {
 	const ranAt = Date.now();
 	const TIMED_OUT = Symbol("panel-reviewer-timeout");
@@ -357,19 +471,116 @@ async function runOnePanelReviewer(spec: PanelReviewerSpec, diff: string): Promi
 	}
 }
 
+/** B2 (second finding): the claim-verification call gets its OWN independent race, exactly like
+ *  `runOnePanelReviewer` above — the earlier version awaited `verify(...)` directly with no outer
+ *  bound at all, so a hung verifier had nothing stopping it. `undefined` (timeout, throw, or the
+ *  reviewer's own "couldn't determine") are ALL the same honest "no answer" — A5's fix lives at the
+ *  CALL SITE (never coercing this `undefined` into `false`), not here. */
+async function runVerifyWithBound(verify: PanelVerifyReviewer, input: { lineage: ModelLineage; claim: string; diff: string }): Promise<boolean | undefined> {
+	const TIMED_OUT = Symbol("panel-verify-timeout");
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const bound = new Promise<typeof TIMED_OUT>((resolve) => {
+		timer = setTimeout(() => resolve(TIMED_OUT), panelTimeoutMs());
+	});
+	try {
+		const result = await Promise.race([verify(input).catch(() => undefined), bound]);
+		return result === TIMED_OUT ? undefined : result;
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
+}
+
+/** A7: translate `{lineage, harness}` into the SAME canonical ledger tag `validator.ts`'s
+ *  `ledgerLineageTagForRecord` uses (grok/codex/native) — the harness that actually ran is the primary
+ *  signal (mirrors that function's own "harness, not vendor" rule), falling back to the vendor lineage
+ *  only for an exotic harness name (e.g. a test fixture), and finally to the raw harness/lineage string
+ *  rather than ever fabricating a bucket. Without this, a grok finding created a separate `xai=1`
+ *  bucket instead of updating `grok`'s measured history — T4's reader has never heard of `"xai"`. */
+export function canonicalLedgerTag(harness: string, lineage: ModelLineage): string {
+	if (harness === "grok") return "grok";
+	if (harness === "codex") return "codex";
+	if (harness === "omp") return "native";
+	if (lineage === "xai") return "grok";
+	if (lineage === "openai") return "codex";
+	if (lineage === "anthropic" || lineage === "google") return "native";
+	return harness || lineage || "unknown";
+}
+
+// ── single-flight coalescing (B4) ───────────────────────────────────────────────────────────────────
+// 100 concurrent lands of the SAME proof (same source+diff) would otherwise each independently miss the
+// per-panel result (there is no cache until a run finishes) and spawn their own N-reviewer panel — up
+// to ~200 reviewer CLIs for one proof. Concurrent IDENTICAL requests instead share the ONE in-flight
+// promise; distinct diffs/sources never coalesce (each gets its own key).
+
+const inFlightPanels = new Map<string, Promise<PanelVerdict[] | undefined>>();
+
 export interface ReviewPanelOpts {
 	diff: string;
-	/** Traceable `source` for the reviewer-ledger row (e.g. `"land <branch>@<commit>"`). */
+	/** Traceable `source` for the reviewer-ledger row (e.g. `"land <branch>@<commit>"`) — also part of
+	 *  the single-flight coalescing key (B4), so two callers with the SAME source+diff share one run. */
 	source: string;
+	/** stateDir the panel QUEUES findings under (A1) — required whenever the panel might find anything
+	 *  to record; `runReviewPanel` still runs (and returns verdicts) without it, but any finding that
+	 *  would have queued is instead logged and dropped rather than risking a tracked-tree write. */
+	stateDir?: string;
 	/** Injected reviewer pool (tests pass fakes); `undefined` ⇒ `defaultPanelReviewers()`. */
 	reviewers?: () => PanelReviewerSpec[];
-	/** Injected recheck reviewer (tests pass a fake); `undefined` ⇒ `defaultPanelVerifyReviewer()`. */
+	/** Injected claim-verification reviewer (tests pass a fake); `undefined` ⇒ `defaultPanelVerifyReviewer()`. */
 	verify?: () => PanelVerifyReviewer;
-	/** Test-only DI hatch (mirrors `ValidatorGateOpts.reviewerLedgerPath`) — never an environment
-	 *  variable in production, for the same "no launch-directory `.env` can redirect a trust-critical
-	 *  read/write" reason `validator.ts` documents for the precision reader. `undefined` ⇒ the real
-	 *  repo-committed ledger. */
-	ledgerPath?: string;
+}
+
+async function runPanelUncoalesced(opts: ReviewPanelOpts, selected: PanelReviewerSpec[]): Promise<PanelVerdict[] | undefined> {
+	const settled = await Promise.allSettled(selected.map((spec) => runOnePanelReviewer(spec, opts.diff)));
+	const verdicts: PanelVerdict[] = settled.map((r, i) =>
+		r.status === "fulfilled" ? r.value : { lineage: selected[i].lineage, harness: selected[i].harness, verdict: "error", ranAt: Date.now() },
+	);
+
+	// High-severity objections get ONE claim-verification pass each (bounded — at most `panelMax()` of
+	// them, since the panel itself is capped), cross-lineage-preferring (C6). A `confirmed:true` NEVER
+	// escalates beyond recording it; it still never vetoes — the land gate's own veto path is untouched
+	// by this module entirely.
+	const verify = (opts.verify ?? defaultPanelVerifyReviewer)();
+	for (let i = 0; i < verdicts.length; i++) {
+		const v = verdicts[i];
+		if (v.verdict !== "object" || v.severity !== "high" || !v.claim) continue;
+		const confirmed = await runVerifyWithBound(verify, { lineage: v.lineage, claim: v.claim, diff: opts.diff });
+		// A5: `confirmed` is `true` | `false` | `undefined` (inconclusive/unreachable) — the THIRD state
+		// is left as-is (never coerced into `false`/refuted). Only a REAL answer moves `survived` off
+		// `undefined`.
+		if (confirmed !== undefined) verdicts[i] = { ...v, survived: confirmed };
+	}
+
+	// Queue every ADJUDICATED finding (an "object" verdict whose `survived` was actually determined by
+	// the verification above) for later ledger projection — the SAME rows a human runs
+	// `reviewer-ledger.ts add` for today, but NEVER written to the tracked checkout from here (A1 — see
+	// `panel-ledger.ts`). A clean bill ("accept") is NOT a row (the ledger's own honesty rule); an
+	// un-verified low-severity objection is ALSO not a row; and (A5) an INCONCLUSIVE verification is
+	// ALSO not a row — recording an adjudication that never actually resolved would fabricate the exact
+	// "survived" measurement this ledger exists to keep honest.
+	if (opts.stateDir) {
+		for (const v of verdicts) {
+			if (v.verdict !== "object" || v.survived === undefined) continue;
+			const entry: ReviewerLedgerEntry = {
+				at: new Date().toISOString().slice(0, 10),
+				lineage: canonicalLedgerTag(v.harness, v.lineage),
+				concernClass: v.concernClass ?? "gauntlet-panel-finding",
+				survived: v.survived,
+				source: opts.source,
+				note: v.claim ?? "",
+				severity: v.severity,
+			};
+			try {
+				recordPendingPanelFinding(opts.stateDir, entry);
+			} catch (err) {
+				console.error(`review-panel: failed to queue pending ledger row for ${entry.lineage} (non-fatal): ${errText(err)}`);
+			}
+		}
+	} else {
+		const adjudicated = verdicts.filter((v) => v.verdict === "object" && v.survived !== undefined);
+		if (adjudicated.length > 0) console.error(`review-panel: ${adjudicated.length} adjudicated finding(s) NOT queued — no stateDir was provided; the panel result is still returned/attached to the receipt.`);
+	}
+
+	return verdicts;
 }
 
 /**
@@ -380,9 +591,10 @@ export interface ReviewPanelOpts {
  * ran" (those are different facts; T6 needs to tell them apart).
  *
  * PURELY ADDITIVE: this function has no veto/inconclusive authority of its own. It never throws — every
- * fault (a reviewer error, a ledger-write fault) is absorbed here so a panel failure can only ever
+ * fault (a reviewer error, a ledger-queue fault) is absorbed here so a panel failure can only ever
  * shrink the reported panel, never break the land it is advisory to (mirrors `validator.ts`'s lens-panel
- * "advisory only" discipline verbatim).
+ * "advisory only" discipline verbatim). Concurrent IDENTICAL requests (same `source`+`diff`) share ONE
+ * in-flight run (B4, single-flight coalescing) rather than each spawning their own reviewer pool.
  */
 export async function runReviewPanel(opts: ReviewPanelOpts): Promise<PanelVerdict[] | undefined> {
 	if (!reviewPanelEnabled()) return undefined;
@@ -406,54 +618,16 @@ export async function runReviewPanel(opts: ReviewPanelOpts): Promise<PanelVerdic
 		}
 		if (selected.length < MIN_PANEL_LINEAGES) return undefined; // no real cross-lineage panel possible
 
-		const settled = await Promise.allSettled(selected.map((spec) => runOnePanelReviewer(spec, opts.diff)));
-		const verdicts: PanelVerdict[] = settled.map((r, i) =>
-			r.status === "fulfilled" ? r.value : { lineage: selected[i].lineage, harness: selected[i].harness, verdict: "error", ranAt: Date.now() },
-		);
-
-		// High-severity objections get ONE independent recheck each (bounded — at most `panelMax()` of
-		// them, since the panel itself is capped) — mirrors `validator.ts`'s `runLensVerify` discipline:
-		// a recheck decides `survived`, but a `confirmed:true` NEVER escalates beyond recording it; it
-		// still never vetoes (the land gate's own veto path is untouched by this module entirely).
-		const verify = (opts.verify ?? defaultPanelVerifyReviewer)();
-		for (let i = 0; i < verdicts.length; i++) {
-			const v = verdicts[i];
-			if (v.verdict !== "object" || v.severity !== "high" || !v.claim) continue;
-			try {
-				const confirmed = await verify({ lineage: v.lineage, claim: v.claim, diff: opts.diff });
-				verdicts[i] = { ...v, survived: confirmed === true };
-			} catch {
-				// an unreachable recheck must never escalate — leave `survived` unset (not yet adjudicated)
-			}
+		const key = `${opts.source}::${Bun.hash(opts.diff)}`;
+		const existing = inFlightPanels.get(key);
+		if (existing) return existing;
+		const run = runPanelUncoalesced(opts, selected);
+		inFlightPanels.set(key, run);
+		try {
+			return await run;
+		} finally {
+			inFlightPanels.delete(key);
 		}
-
-		// Record every ADJUDICATED finding (an "object" verdict whose `survived` was actually determined
-		// by the recheck above) to the reviewer ledger — the SAME rows a human runs
-		// `reviewer-ledger.ts add` for today. A clean bill ("accept") is NOT a row (the ledger's own
-		// honesty rule); an un-rechecked low-severity objection is ALSO not a row — recording an
-		// adjudication that never happened would fabricate the exact "survived" measurement this ledger
-		// exists to keep honest.
-		for (const v of verdicts) {
-			if (v.verdict !== "object" || v.survived === undefined) continue;
-			const entry: ReviewerLedgerEntry = {
-				at: new Date().toISOString().slice(0, 10),
-				lineage: v.lineage,
-				concernClass: v.concernClass ?? "gauntlet-panel-finding",
-				survived: v.survived,
-				source: opts.source,
-				note: v.claim ?? "",
-				severity: v.severity,
-			};
-			try {
-				appendReviewerLedgerEntry(entry, opts.ledgerPath);
-			} catch (err) {
-				// A ledger-write fault degrades a MEASUREMENT, never a MERGE — the panel result is still
-				// returned and still attached to the receipt even if this row didn't make it to disk.
-				console.error(`review-panel: failed to append ledger row for ${v.lineage} (non-fatal): ${errText(err)}`);
-			}
-		}
-
-		return verdicts;
 	} catch (err) {
 		// The panel is advisory only — an unexpected throw anywhere above must never reach the land path.
 		console.error(`review-panel: panel run failed (non-fatal, advisory only): ${errText(err)}`);

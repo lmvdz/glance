@@ -59,13 +59,14 @@ const vetoJudge: Judge = async ({ criteria }) => ({ perCriterion: criteria.map((
 
 const acceptPanel = (lineage: PanelReviewerSpec["lineage"], harness: string): PanelReviewerSpec => ({ lineage, harness, review: async () => ({ disposition: "accept" }) });
 
-/** A scratch ledger path so an objecting-reviewer test NEVER writes to the real repo-committed
- *  `plans/.reviews/reviewer-ledger.jsonl` — every test below that can produce an adjudicated finding
- *  passes this via `reviewerLedgerPath` (the same DI hatch `validator-land-gate.test.ts` uses). */
-async function tmpLedgerFile(): Promise<string> {
-	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gate-panel-ledger-"));
+/** A scratch stateDir so an objecting-reviewer test NEVER queues toward the real
+ *  `plans/.reviews/reviewer-ledger.jsonl` (T5 gauntlet round 1, finding A1 — the panel QUEUES under
+ *  stateDir, it never writes the tracked ledger directly) — every test below that can produce an
+ *  adjudicated finding passes this via `panelStateDir`. */
+async function tmpStateDir(): Promise<string> {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gate-panel-state-"));
 	tmps.push(dir);
-	return path.join(dir, "reviewer-ledger.jsonl");
+	return dir;
 }
 
 describe("validatorGate panel gating (master flag, mirrors lens gating)", () => {
@@ -179,6 +180,7 @@ describe("validatorGate panel wiring — live git diff", () => {
 			acceptPanel("openai", "codex"),
 		];
 		const verify: () => PanelVerifyReviewer = () => async () => true;
+		const stateDir = await tmpStateDir();
 		const { record, veto } = await validatorGate({
 			criteria: [{ id: "c1", text: "does the thing", completed: false }],
 			repo,
@@ -187,7 +189,7 @@ describe("validatorGate panel wiring — live git diff", () => {
 			judge: passJudge,
 			panelReviewers,
 			panelVerify: verify,
-			reviewerLedgerPath: await tmpLedgerFile(),
+			panelStateDir: stateDir,
 		});
 		expect(record.verdict).toBe("pass");
 		expect(veto).toBeUndefined();

@@ -160,6 +160,7 @@ const SYSTEM_ENV_EXEMPT = new Set([
 	"PATH", // spawn PATH augmentation
 	"GIT_CONFIG_COUNT", // git's own env, read by git-harden.ts to append hermetic config entries
 	"WSL_DISTRO_NAME", // OS-injected by WSL interop, read by src/here-web.ts isWsl — not glance config
+	"TMPDIR", // OS-level scratch-dir override, read by src/rail/panel-spawn.ts's hermeticCwd() fallback
 ]);
 
 /** Pilot vars consumed only by scripts/ (forward-declared config, not yet wired into src/), per

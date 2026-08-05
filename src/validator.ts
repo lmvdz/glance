@@ -574,6 +574,12 @@ export interface ValidatorGateOpts {
 	/** Injected review-panel recheck reviewer (T5, glance#333); production uses
 	 *  `defaultPanelVerifyReviewer`. Reached only for a high-severity panel objection. */
 	panelVerify?: () => PanelVerifyReviewer;
+	/** stateDir the review panel QUEUES its findings under (T5 gauntlet round 1, finding A1) — NEVER a
+	 *  path inside the repo/worktree being landed. The panel writes NOTHING to the tracked ledger file
+	 *  itself; `src/rail/panel-ledger.ts`'s `projectPendingPanelFindings` (called by `SquadManager.land()`
+	 *  only AFTER a merge settles) is the sole path from this queue into the git-tracked ledger. Absent
+	 *  ⇒ any adjudicated finding is logged and dropped rather than risking a write into a repo tree. */
+	panelStateDir?: string;
 	/** Test-only DI hatch (gauntlet round 1, codex's "env-ledger-shadow" finding): points the reviewer-
 	 *  precision reader at a fixture ledger instead of the repo-committed one, so a test can prove the
 	 *  land receipt's number moves when the fixture ledger changes, without touching real repo data.
@@ -926,7 +932,7 @@ export async function validatorGate(opts: ValidatorGateOpts): Promise<ValidatorG
 						source: `land ${opts.branch ?? "?"}@${(opts.proof?.commit ?? "nocommit").slice(0, 12)}`,
 						reviewers: opts.panelReviewers,
 						verify: opts.panelVerify,
-						ledgerPath: opts.reviewerLedgerPath,
+						stateDir: opts.panelStateDir,
 					});
 					if (panel && panel.length > 0) record = { ...record, panel };
 				} catch {

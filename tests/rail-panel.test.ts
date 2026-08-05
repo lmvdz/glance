@@ -1,8 +1,19 @@
 /**
  * In-code cross-lineage gauntlet panel (T5, glance#333) — unit-level tests for `runReviewPanel`
- * (`src/rail/panel.ts`) against fake, injected reviewers. Real git/CLI plumbing is covered by
- * `tests/rail-panel.live-smoke.test.ts` (opt-in, real codex/grok/omp binaries) and the land-path
- * wiring by `tests/validator-land-gate-panel.test.ts` / `tests/validator.gate-panel.test.ts`.
+ * (`src/rail/panel.ts`) against fake, injected reviewers.
+ *
+ * Gauntlet round 1 (dual-lineage blind review of PR #353 — codex gpt-5.6-sol + grok-4.5, both
+ * converged on a CRITICAL finding, codex added six more) rewired this file: the panel no longer writes
+ * the tracked ledger file directly (A1 — see `tests/rail-panel-ledger.test.ts` for the projection lane
+ * that now owns that write), so every ledger-shaped assertion here reads the QUEUE
+ * (`readPendingPanelFindings`) instead of a ledger file. A5 (an inconclusive claim-verification call
+ * must never be coerced into a refutation) and A7 (ledger rows use grok/codex/native, not xai/openai/
+ * anthropic) are asserted directly here.
+ *
+ * Real git/CLI plumbing (hermetic cwd, process-group kill, the production reviewer factories) is
+ * covered by `tests/rail-panel-spawn.test.ts` (fake-process fixtures) and
+ * `tests/rail-panel.live-smoke.test.ts` (opt-in, real codex/grok/omp binaries). The land-path wiring is
+ * `tests/validator.gate-panel.test.ts` / `tests/validator-land-gate-panel.test.ts`.
  */
 
 import { afterEach, expect, test } from "bun:test";
@@ -11,6 +22,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ModelLineage } from "../src/model-lineage.ts";
 import {
+	canonicalLedgerTag,
 	defaultPanelReviewers,
 	diffRiskTier,
 	panelMax,
@@ -19,6 +31,7 @@ import {
 	runReviewPanel,
 	type PanelReviewerSpec,
 } from "../src/rail/panel.ts";
+import { readPendingPanelFindings } from "../src/rail/panel-ledger.ts";
 
 const ENV_KEYS = ["OMP_SQUAD_REVIEW_PANEL", "OMP_SQUAD_REVIEW_PANEL_MAX", "OMP_SQUAD_REVIEW_PANEL_TIMEOUT_MS", "OMP_SQUAD_LAND_MAX_DIFF_FILES"] as const;
 const saved: Record<string, string | undefined> = {};
@@ -47,15 +60,10 @@ function object(lineage: ModelLineage, harness: string, severity: "low" | "high"
 	return { lineage, harness, review: async () => ({ disposition: "object", severity, claim, concernClass }) };
 }
 
-async function tmpLedgerFile(): Promise<string> {
-	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rail-panel-ledger-"));
-	tmps.push(dir);
-	return path.join(dir, "reviewer-ledger.jsonl");
-}
-
-async function readLedgerRows(ledgerPath: string): Promise<Record<string, unknown>[]> {
-	const text = await fs.readFile(ledgerPath, "utf8").catch(() => "");
-	return text.split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l));
+async function tmpStateDir(): Promise<string> {
+	const d = await fs.mkdtemp(path.join(os.tmpdir(), "rail-panel-state-"));
+	tmps.push(d);
+	return d;
 }
 
 // ── env defaults (default-off contract) ─────────────────────────────────────────────────────────
@@ -86,6 +94,21 @@ test("diffRiskTier: the blast-radius cap is env-tunable, reusing land-risk's OWN
 	expect(diffRiskTier(diff).warrants).toBe(false);
 	process.env.OMP_SQUAD_LAND_MAX_DIFF_FILES = "5";
 	expect(diffRiskTier(diff).warrants).toBe(true);
+});
+
+// ── A7: canonical ledger lineage tag ────────────────────────────────────────────────────────────
+
+test("canonicalLedgerTag: the harness (not the vendor lineage) decides the ledger bucket, matching T4's reader", () => {
+	expect(canonicalLedgerTag("grok", "xai")).toBe("grok");
+	expect(canonicalLedgerTag("codex", "openai")).toBe("codex");
+	expect(canonicalLedgerTag("omp", "anthropic")).toBe("native");
+});
+
+test("canonicalLedgerTag: falls back to lineage-derived tag for an exotic harness name (never fabricates xai/openai/anthropic as buckets)", () => {
+	expect(canonicalLedgerTag("grok-secondary", "xai")).toBe("grok");
+	expect(canonicalLedgerTag("codex-alt", "openai")).toBe("codex");
+	expect(canonicalLedgerTag("some-anthropic-fixture", "anthropic")).toBe("native");
+	expect(canonicalLedgerTag("totally-unknown", "unknown")).toBe("totally-unknown");
 });
 
 // ── master flag / docs-only / risk-tier gating ──────────────────────────────────────────────────
@@ -134,7 +157,7 @@ test("a sensitive-path diff (flag on) spawns >= 2 DISTINCT-lineage reviewers, ea
 			},
 		},
 	];
-	const panel = await runReviewPanel({ diff, source: "test", reviewers });
+	const panel = await runReviewPanel({ diff, source: "test-blind", reviewers });
 	expect(panel).toBeDefined();
 	expect(panel!.length).toBe(2);
 	expect(new Set(panel!.map((p) => p.lineage)).size).toBe(2);
@@ -152,14 +175,14 @@ test("fewer than 2 DISTINCT lineages available ⇒ no panel (never a fabricated 
 	process.env.OMP_SQUAD_REVIEW_PANEL = "1";
 	const diff = fakeDiff([".github/workflows/deploy.yml"]);
 	const reviewers = () => [accept("xai", "grok")];
-	expect(await runReviewPanel({ diff, source: "test", reviewers })).toBeUndefined();
+	expect(await runReviewPanel({ diff, source: "test-one-lineage", reviewers })).toBeUndefined();
 });
 
 test("duplicate lineages in the pool are deduped BEFORE the min-panel-size check", async () => {
 	process.env.OMP_SQUAD_REVIEW_PANEL = "1";
 	const diff = fakeDiff([".github/workflows/deploy.yml"]);
 	const reviewers = () => [accept("xai", "grok"), accept("xai", "grok-secondary")];
-	expect(await runReviewPanel({ diff, source: "test", reviewers })).toBeUndefined();
+	expect(await runReviewPanel({ diff, source: "test-dupe-lineage", reviewers })).toBeUndefined();
 });
 
 test("panelMax caps the panel size even when more distinct lineages are available", async () => {
@@ -167,7 +190,7 @@ test("panelMax caps the panel size even when more distinct lineages are availabl
 	process.env.OMP_SQUAD_REVIEW_PANEL_MAX = "2";
 	const diff = fakeDiff([".github/workflows/deploy.yml"]);
 	const reviewers = () => [accept("xai", "grok"), accept("openai", "codex"), accept("anthropic", "omp")];
-	const panel = await runReviewPanel({ diff, source: "test", reviewers });
+	const panel = await runReviewPanel({ diff, source: "test-cap", reviewers });
 	expect(panel!.length).toBe(2);
 });
 
@@ -180,7 +203,7 @@ test("a hung reviewer is bounded by panelTimeoutMs and recorded as a timeout —
 		accept("openai", "codex"),
 	];
 	const start = Date.now();
-	const panel = await runReviewPanel({ diff, source: "test", reviewers });
+	const panel = await runReviewPanel({ diff, source: "test-hung", reviewers });
 	const elapsed = Date.now() - start;
 	expect(elapsed).toBeLessThan(2_000); // bounded well under any real hang
 	expect(panel).toBeDefined();
@@ -201,13 +224,24 @@ test("a reviewer that throws is recorded as an error, never a fabricated accept/
 		},
 		accept("openai", "codex"),
 	];
-	const panel = await runReviewPanel({ diff, source: "test", reviewers });
+	const panel = await runReviewPanel({ diff, source: "test-throws", reviewers });
 	expect(panel!.find((p) => p.lineage === "xai")?.verdict).toBe("error");
 });
 
-// ── ledger recording: only ADJUDICATED findings become rows ─────────────────────────────────────
+// ── A1: the panel QUEUES (never writes the tracked ledger directly) ────────────────────────────
 
-test("a HIGH-severity objection gets rechecked and recorded to the ledger; a LOW-severity objection and a clean accept do NOT", async () => {
+test("with NO stateDir, an adjudicated finding is NOT queued anywhere — the panel result is still returned", async () => {
+	process.env.OMP_SQUAD_REVIEW_PANEL = "1";
+	const diff = fakeDiff([".github/workflows/deploy.yml"]);
+	const reviewers = () => [object("xai", "grok", "high", "a fail-open", "fail-open"), accept("openai", "codex")];
+	const verify = () => async () => true;
+	const panel = await runReviewPanel({ diff, source: "test-no-statedir", reviewers, verify });
+	expect(panel!.find((p) => p.lineage === "xai")?.survived).toBe(true); // the record is still complete
+	// No stateDir was given, so there is nowhere it COULD have queued — nothing to assert against a
+	// tracked file (this test's whole point: the panel never reaches for a default/ambient path).
+});
+
+test("a HIGH-severity objection gets verified and queued; a LOW-severity objection and a clean accept do NOT queue", async () => {
 	process.env.OMP_SQUAD_REVIEW_PANEL = "1";
 	const diff = fakeDiff([".github/workflows/deploy.yml"]);
 	const reviewers = () => [
@@ -215,60 +249,93 @@ test("a HIGH-severity objection gets rechecked and recorded to the ledger; a LOW
 		object("openai", "codex", "low", "a minor style nit", "style"),
 	];
 	const verify = () => async (input: { claim: string }) => input.claim.includes("fail-open");
-	const ledgerPath = await tmpLedgerFile();
+	const stateDir = await tmpStateDir();
 
-	const panel = await runReviewPanel({ diff, source: "land test@abc123", reviewers, verify, ledgerPath });
+	const panel = await runReviewPanel({ diff, source: "land test@abc123", reviewers, verify, stateDir });
 	expect(panel).toBeDefined();
 	const high = panel!.find((p) => p.lineage === "xai")!;
 	expect(high.verdict).toBe("object");
 	expect(high.survived).toBe(true);
 	const low = panel!.find((p) => p.lineage === "openai")!;
 	expect(low.verdict).toBe("object");
-	expect(low.survived).toBeUndefined(); // never rechecked ⇒ never adjudicated ⇒ never a fabricated boolean
+	expect(low.survived).toBeUndefined(); // never verified ⇒ never adjudicated ⇒ never queued
 
-	const rows = await readLedgerRows(ledgerPath);
-	expect(rows.length).toBe(1);
-	expect(rows[0]).toMatchObject({ lineage: "xai", concernClass: "fail-open", survived: true, source: "land test@abc123", note: "a fail-open in the new gate", severity: "high" });
+	const queued = readPendingPanelFindings(stateDir);
+	expect(queued.length).toBe(1);
+	// A7: the QUEUED row already carries the CANONICAL ledger tag ("grok"), never the raw vendor
+	// lineage ("xai") — the projection lane writes it verbatim.
+	expect(queued[0]).toMatchObject({ lineage: "grok", concernClass: "fail-open", survived: true, source: "land test@abc123", note: "a fail-open in the new gate", severity: "high" });
 });
 
-test("a clean panel (every reviewer accepts) writes NO ledger rows at all", async () => {
+test("a clean panel (every reviewer accepts) queues NOTHING", async () => {
 	process.env.OMP_SQUAD_REVIEW_PANEL = "1";
 	const diff = fakeDiff([".github/workflows/deploy.yml"]);
 	const reviewers = () => [accept("xai", "grok"), accept("openai", "codex")];
-	const ledgerPath = await tmpLedgerFile();
-	const panel = await runReviewPanel({ diff, source: "test", reviewers, ledgerPath });
+	const stateDir = await tmpStateDir();
+	const panel = await runReviewPanel({ diff, source: "test-clean", reviewers, stateDir });
 	expect(panel!.every((p) => p.verdict === "accept")).toBe(true);
-	expect(await readLedgerRows(ledgerPath)).toEqual([]);
+	expect(readPendingPanelFindings(stateDir)).toEqual([]);
 });
 
-test("a REFUTED high-severity objection is still recorded — survived:false is a row too", async () => {
+test("a REFUTED high-severity objection is still queued — survived:false is a row too", async () => {
 	process.env.OMP_SQUAD_REVIEW_PANEL = "1";
 	const diff = fakeDiff([".github/workflows/deploy.yml"]);
 	const reviewers = () => [object("xai", "grok", "high", "a claim that will be refuted", "toctou"), accept("openai", "codex")];
 	const verify = () => async () => false;
-	const ledgerPath = await tmpLedgerFile();
-	const panel = await runReviewPanel({ diff, source: "land refute@1", reviewers, verify, ledgerPath });
+	const stateDir = await tmpStateDir();
+	const panel = await runReviewPanel({ diff, source: "land refute@1", reviewers, verify, stateDir });
 	expect(panel!.find((p) => p.lineage === "xai")?.survived).toBe(false);
-	const rows = await readLedgerRows(ledgerPath);
-	expect(rows.length).toBe(1);
-	expect(rows[0]).toMatchObject({ survived: false });
+	const queued = readPendingPanelFindings(stateDir);
+	expect(queued.length).toBe(1);
+	expect(queued[0]).toMatchObject({ survived: false });
 });
 
-test("an unreachable recheck (undefined) leaves survived unset — never escalated to true", async () => {
+// ── A5: an inconclusive claim-verification call is a THIRD state, never coerced into "refuted" ────
+
+test("A5 HONESTY: an unreachable/inconclusive claim-verification call (undefined) leaves survived UNSET — it must NEVER be coerced into false", async () => {
 	process.env.OMP_SQUAD_REVIEW_PANEL = "1";
 	const diff = fakeDiff([".github/workflows/deploy.yml"]);
 	const reviewers = () => [object("xai", "grok", "high", "unverifiable claim", "toctou"), accept("openai", "codex")];
-	const verify = () => async () => undefined;
-	const ledgerPath = await tmpLedgerFile();
-	const panel = await runReviewPanel({ diff, source: "test", reviewers, verify, ledgerPath });
-	expect(panel!.find((p) => p.lineage === "xai")?.survived).toBe(false);
-	// `verify` returning `undefined` ⇒ `confirmed === true` is false ⇒ survived:false (fail-open, matches
-	// validator.ts's runLensVerify: an inconclusive recheck is treated as NOT confirmed, never escalated).
-	const rows = await readLedgerRows(ledgerPath);
-	expect(rows[0]).toMatchObject({ survived: false });
+	const verify = () => async () => undefined; // "couldn't determine" — the honest third state
+	const stateDir = await tmpStateDir();
+	const panel = await runReviewPanel({ diff, source: "test-a5", reviewers, verify, stateDir });
+	const finding = panel!.find((p) => p.lineage === "xai");
+	expect(finding?.verdict).toBe("object");
+	expect(finding?.survived).toBeUndefined(); // NOT false — this is the exact gauntlet-round-1 fix
+	expect(Object.hasOwn(finding ?? {}, "survived")).toBe(false);
+	// An inconclusive check is not an adjudication — it must NOT be queued for the ledger either
+	// (queuing `survived:false` here would fabricate a "refuted" measurement that never actually happened).
+	expect(readPendingPanelFindings(stateDir)).toEqual([]);
 });
 
-test("FLIP THE INPUT: a reviewer verdict change (accept -> confirmed high objection) moves both the panel result and the ledger", async () => {
+test("A5: a claim-verification reviewer that THROWS also leaves survived unset (never escalated, never queued)", async () => {
+	process.env.OMP_SQUAD_REVIEW_PANEL = "1";
+	const diff = fakeDiff([".github/workflows/deploy.yml"]);
+	const reviewers = () => [object("xai", "grok", "high", "x", "toctou"), accept("openai", "codex")];
+	const verify = () => async () => {
+		throw new Error("verifier CLI crashed");
+	};
+	const stateDir = await tmpStateDir();
+	const panel = await runReviewPanel({ diff, source: "test-a5-throw", reviewers, verify, stateDir });
+	expect(panel!.find((p) => p.lineage === "xai")?.survived).toBeUndefined();
+	expect(readPendingPanelFindings(stateDir)).toEqual([]);
+});
+
+test("B2: the claim-verification call has its OWN independent timeout bound — a hung verifier never wedges the panel", async () => {
+	process.env.OMP_SQUAD_REVIEW_PANEL = "1";
+	process.env.OMP_SQUAD_REVIEW_PANEL_TIMEOUT_MS = "50";
+	const diff = fakeDiff([".github/workflows/deploy.yml"]);
+	const reviewers = () => [object("xai", "grok", "high", "x", "toctou"), accept("openai", "codex")];
+	const verify = () => () => new Promise<boolean>(() => {}); // never resolves
+	const stateDir = await tmpStateDir();
+	const start = Date.now();
+	const panel = await runReviewPanel({ diff, source: "test-verify-hung", reviewers, verify, stateDir });
+	expect(Date.now() - start).toBeLessThan(2_000);
+	expect(panel!.find((p) => p.lineage === "xai")?.survived).toBeUndefined(); // timed out ⇒ inconclusive, never coerced
+	expect(readPendingPanelFindings(stateDir)).toEqual([]);
+});
+
+test("FLIP THE INPUT: a reviewer verdict change (accept -> confirmed high objection) moves both the panel result and the queue", async () => {
 	process.env.OMP_SQUAD_REVIEW_PANEL = "1";
 	const diff = fakeDiff([".github/workflows/deploy.yml"]);
 	let verdict: "accept" | "object" = "accept";
@@ -281,32 +348,102 @@ test("FLIP THE INPUT: a reviewer verdict change (accept -> confirmed high object
 		accept("openai", "codex"),
 	];
 	const verify = () => async () => true;
-	const ledgerPath = await tmpLedgerFile();
+	const stateDir = await tmpStateDir();
 
-	const first = await runReviewPanel({ diff, source: "land a@1", reviewers, verify, ledgerPath });
+	const first = await runReviewPanel({ diff, source: "land a@1", reviewers, verify, stateDir });
 	expect(first!.find((p) => p.lineage === "xai")?.verdict).toBe("accept");
-	expect(await readLedgerRows(ledgerPath)).toEqual([]);
+	expect(readPendingPanelFindings(stateDir)).toEqual([]);
 
 	verdict = "object";
-	const second = await runReviewPanel({ diff, source: "land b@2", reviewers, verify, ledgerPath });
+	const second = await runReviewPanel({ diff, source: "land b@2", reviewers, verify, stateDir });
 	expect(second!.find((p) => p.lineage === "xai")?.verdict).toBe("object");
 	expect(second!.find((p) => p.lineage === "xai")?.survived).toBe(true);
-	const rows = await readLedgerRows(ledgerPath);
-	expect(rows.length).toBe(1);
-	expect(rows[0]).toMatchObject({ source: "land b@2" });
+	const queued = readPendingPanelFindings(stateDir);
+	expect(queued.length).toBe(1);
+	expect(queued[0]).toMatchObject({ source: "land b@2" });
 });
 
-test("a ledger-write fault degrades the MEASUREMENT, never the panel result", async () => {
+test("a queue-write fault degrades the MEASUREMENT, never the panel result", async () => {
 	process.env.OMP_SQUAD_REVIEW_PANEL = "1";
 	const diff = fakeDiff([".github/workflows/deploy.yml"]);
 	const reviewers = () => [object("xai", "grok", "high", "x", "fail-open"), accept("openai", "codex")];
 	const verify = () => async () => true;
-	// A directory as the "ledger path" ⇒ appendFileSync throws (EISDIR) — the panel must still resolve.
+	// A bogus nested "stateDir" underneath a plain FILE (not a directory) — the underlying `mapFile`
+	// write is itself best-effort/never-throws, so this exercises that the panel doesn't add a NEW
+	// throw path of its own around it.
 	const badDir = await fs.mkdtemp(path.join(os.tmpdir(), "rail-panel-baddir-"));
 	tmps.push(badDir);
-	const panel = await runReviewPanel({ diff, source: "test", reviewers, verify, ledgerPath: badDir });
+	await fs.writeFile(path.join(badDir, "not-a-dir"), "x");
+	const panel = await runReviewPanel({ diff, source: "test-queue-fault", reviewers, verify, stateDir: path.join(badDir, "not-a-dir", "nested") });
 	expect(panel).toBeDefined();
 	expect(panel!.find((p) => p.lineage === "xai")?.survived).toBe(true);
+});
+
+// ── B4: single-flight coalescing ────────────────────────────────────────────────────────────────
+
+test("B4: concurrent IDENTICAL panel requests (same source+diff) share ONE run — reviewers are invoked only once", async () => {
+	process.env.OMP_SQUAD_REVIEW_PANEL = "1";
+	const diff = fakeDiff([".github/workflows/deploy.yml"]);
+	let calls = 0;
+	const reviewers = (): PanelReviewerSpec[] => [
+		{
+			lineage: "xai",
+			harness: "grok",
+			review: async () => {
+				calls++;
+				await new Promise((r) => setTimeout(r, 20));
+				return { disposition: "accept" };
+			},
+		},
+		accept("openai", "codex"),
+	];
+	const [a, b, c] = await Promise.all([
+		runReviewPanel({ diff, source: "coalesce-key", reviewers }),
+		runReviewPanel({ diff, source: "coalesce-key", reviewers }),
+		runReviewPanel({ diff, source: "coalesce-key", reviewers }),
+	]);
+	expect(calls).toBe(1); // three concurrent identical requests, ONE reviewer spawn
+	expect(a).toEqual(b);
+	expect(b).toEqual(c);
+});
+
+test("B4: distinct sources for the SAME diff do NOT coalesce — each gets its own panel run", async () => {
+	process.env.OMP_SQUAD_REVIEW_PANEL = "1";
+	const diff = fakeDiff([".github/workflows/deploy.yml"]);
+	let calls = 0;
+	const reviewers = (): PanelReviewerSpec[] => [
+		{
+			lineage: "xai",
+			harness: "grok",
+			review: async () => {
+				calls++;
+				return { disposition: "accept" };
+			},
+		},
+		accept("openai", "codex"),
+	];
+	await Promise.all([runReviewPanel({ diff, source: "source-1", reviewers }), runReviewPanel({ diff, source: "source-2", reviewers })]);
+	expect(calls).toBe(2);
+});
+
+test("B4: sequential (non-concurrent) identical requests do NOT stay coalesced forever — a later call re-runs the panel", async () => {
+	process.env.OMP_SQUAD_REVIEW_PANEL = "1";
+	const diff = fakeDiff([".github/workflows/deploy.yml"]);
+	let calls = 0;
+	const reviewers = (): PanelReviewerSpec[] => [
+		{
+			lineage: "xai",
+			harness: "grok",
+			review: async () => {
+				calls++;
+				return { disposition: "accept" };
+			},
+		},
+		accept("openai", "codex"),
+	];
+	await runReviewPanel({ diff, source: "sequential-key", reviewers });
+	await runReviewPanel({ diff, source: "sequential-key", reviewers });
+	expect(calls).toBe(2); // the in-flight entry was cleared after the first resolved
 });
 
 // ── default reviewer pool (production wiring, no CLI invocation) ───────────────────────────────

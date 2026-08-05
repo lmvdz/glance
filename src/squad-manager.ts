@@ -182,7 +182,7 @@ import { selectReapable, type WorktreeInfo } from "./worktree-reaper.ts";
 import { scrubbedSpawnEnv } from "./spawn-env.ts";
 import { changedFiles, filesTouchedSinceBase } from "./explore.ts";
 import { appendReceipt, confirmDeliveredFlags, EFFICIENCY_FLAG_PREFIX, readAllReceipts, readReceipts, RunAccumulator, splitCapabilityTokens } from "./receipts.ts";
-import { DecisionLedger, renderReviewerPrecision } from "./memory/index.ts";
+import { DecisionLedger, DEFAULT_REVIEWER_LEDGER_REPO, renderReviewerPrecision } from "./memory/index.ts";
 import { classifyWhereToLookEntry, listSymptoms, readSymptom, saveSymptom, statWhereToLookEntry, symptomId, validateSymptomText, validateWhereToLookCount, type SymptomEntry } from "./memory/symptoms.ts";
 import { buildPrBody } from "./pr-body.ts";
 import { membraneBreakerCadence } from "./membrane-breaker-cadence.ts";
@@ -204,7 +204,7 @@ import { addPlanRevisionCandidate, appendCommentEvent, type ArtifactComment, typ
 import { castPlanVote as appendPlanVoteCast, closePlanVoteRound as appendPlanVoteClose, currentPlanVoteRound as readCurrentPlanVoteRound, listPlanVoteRounds as readPlanVoteRounds, type OpenPlanVoteInput, openPlanVoteRound, recordPlanVoteCommit, tallyPlanVoteRound } from "./plan-votes.ts";
 import { isPlanDocPath, planDocHeadRevision, resolveSafeDocPath } from "./plan-doc.ts";
 import type { VoteQuorum } from "./plan-vote-quorum.ts";
-import { landFailureCount, type PanelReviewerSpec, type PanelVerifyReviewer, readForcedLands, readLandLedger, readValidatorOverrides, recordForcedLand, recordLandOutcome, recordValidatorOverride } from "./rail/index.ts";
+import { landFailureCount, type PanelReviewerSpec, type PanelVerifyReviewer, projectPendingPanelFindings, readForcedLands, readLandLedger, readValidatorOverrides, recordForcedLand, recordLandOutcome, recordValidatorOverride } from "./rail/index.ts";
 import { isLandingUnit, landingRosterOf } from "./is-landing-unit.ts";
 import { readTaskOutcomes, recordTaskOutcome, type TaskOutcomeRow } from "./task-outcomes.ts";
 import { buildTaskClassMatrix } from "./omp-graph/task-class-matrix.ts";
@@ -4307,6 +4307,10 @@ export class SquadManager extends EventEmitter {
 		}
 		if (rec) this.recordLandAssessmentTerminal(attemptId, rec.dto, result);
 		if (rec) this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_LAND_ATTEMPT, `land attempt finished · ${this.safeEventLabel(rec.dto.name)} · ${result.ok ? "ok" : "blocked"}${result.merged ? " · merged" : ""}`, { stage: "finished", attemptId, repo: rec.dto.repo, branch: rec.dto.branch, agentId: rec.dto.id, ok: result.ok, merged: result.merged, staged: result.staged, retryable: result.retryable, message: result.message, detail: result.detail });
+		// T5 gauntlet round 1 (finding A1): project any queued panel findings into the tracked reviewer
+		// ledger ONLY NOW — after the merge has actually settled — never from inside the land's own
+		// critical section. Fire-and-forget; never affects this return.
+		if (result.ok && result.merged) this.projectPanelFindingsSafe();
 		return result;
 	}
 
@@ -5201,6 +5205,44 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
+	 * Injection seam (T5 gauntlet round 1, finding A1) for the git repo root that OWNS the tracked
+	 * reviewer ledger (`plans/.reviews/reviewer-ledger.jsonl`) — a DAEMON-GLOBAL constant in production
+	 * (`DEFAULT_REVIEWER_LEDGER_REPO`, wherever THIS glance checkout is installed), never inferred from
+	 * whichever tenant repo a given land happens to be landing into. Tests override this to point the
+	 * projection lane's `withRepoLandLock`/`git commit` at a scratch fixture repo instead of the real
+	 * one. `undefined` ⇒ the production default.
+	 */
+	protected reviewerLedgerRepoOverride(): string | undefined {
+		return undefined;
+	}
+
+	/**
+	 * Project any panel findings queued during this land's validator gate into the tracked reviewer
+	 * ledger — fire-and-forget, called ONLY after a merge has actually settled (`land()` below), NEVER
+	 * from inside `runValidatorGate`/`landBranch`'s own critical section (that is exactly finding A1: the
+	 * old code appended to the tracked ledger DURING the pre-land advisory panel, dirtying the tree the
+	 * land gate was about to dirty-check). Guarded internally by `withRepoLandLock` against the SAME
+	 * per-repo lock a live land uses. Best-effort: a projection fault is logged, never surfaced through
+	 * `land()`'s return — the land already succeeded before this runs.
+	 */
+	/** @substrate exported for tests only — the last projection attempt's promise, so a test can await
+	 *  the fire-and-forget call this method makes instead of racing it with a `setTimeout`. Never read
+	 *  by production code; a test-instrumentation field only (mirrors this codebase's existing
+	 *  `readCountForTests`-style seams). */
+	protected lastPanelProjectionForTests: Promise<{ projected: number; committed: boolean }> | undefined;
+
+	private projectPanelFindingsSafe(): void {
+		const ledgerRepo = this.reviewerLedgerRepoOverride() ?? DEFAULT_REVIEWER_LEDGER_REPO;
+		const ledgerPath = this.reviewerLedgerPathOverride();
+		const run = projectPendingPanelFindings(this.stateDir, ledgerRepo, ledgerPath);
+		this.lastPanelProjectionForTests = run.catch((err) => {
+			this.log("warn", `gauntlet-panel ledger projection failed (non-fatal, findings remain queued for the next attempt): ${errText(err)}`);
+			return { projected: 0, committed: false };
+		});
+		void this.lastPanelProjectionForTests;
+	}
+
+	/**
 	 * Independent-validator veto (Epic 3, DESIGN §1) — runs BEFORE any mode dispatch, on every
 	 * `landBranch` call INCLUDING forced lands (`requireProof:false` never skips it — a forced land
 	 * bypasses the proof gate, not the semantic one). Scores the diff against the feature's declared
@@ -5230,6 +5272,7 @@ export class SquadManager extends EventEmitter {
 			reviewerLedgerPath: this.reviewerLedgerPathOverride(),
 			panelReviewers: this.panelReviewersOverride(),
 			panelVerify: this.panelVerifyOverride(),
+			panelStateDir: this.stateDir,
 		});
 		if (rec) {
 			rec.dto.validation = record;
