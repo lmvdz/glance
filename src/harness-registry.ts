@@ -337,25 +337,34 @@ export function resolveBin(d: HarnessDescriptor, perAgentBin?: string): string {
  * Would `model` (a bare family like `"opus"`, a vendor-qualified spec, or any other model
  * reference `modelLineage` can parse) actually run on harness `d`?
  *
- * Fails OPEN by construction — the same "never guessed" posture `model-lineage.ts` documents on
- * every one of its own exports:
+ * The multi-vendor branch fails OPEN — the same "never guessed" posture `model-lineage.ts`
+ * documents on every one of its own exports:
  *  - no model requested (`undefined`) ⇒ compatible, nothing to check.
  *  - `d`'s harness name carries no static vendor pin (`harnessLineage` "unknown" — every genuinely
  *    multi-model runtime: omp, pi, opencode, auggie) ⇒ compatible. These harnesses are not
  *    restricted to one family (omp's own `pickModel` accepts `anthropic/…`, `openai/…`,
  *    `google-vertex/…` specs — see model-lineage.ts's `PROVIDER_LINEAGE` doc), so there is no fact
  *    to enforce; inventing one would fabricate a restriction the harness doesn't actually have.
- *  - `model` doesn't resolve to a known lineage ⇒ compatible. An unclassifiable string is evidence
- *    of nothing, not proof of a mismatch.
- * Only a KNOWN harness vendor pin × a KNOWN, DIFFERENT model vendor is a confirmed incompatibility
- * — the exact codex+"opus" shape the gauntlet finding named.
+ *
+ * But a KNOWN single-vendor harness (codex/gemini/claude-code/grok — the ones `harnessLineage`
+ * actually pins) fails CLOSED on an unclassifiable model, deliberately asymmetric with the branch
+ * above (PR #359 blind review, codex, HIGH): `modelLineage` returning `"unknown"` means "we don't
+ * know what vendor this is", not "assume it's fine" — assuming fine is exactly the leak that let
+ * `{harness:"claude-code", model:"o1"}` through, because `modelFamily()` (omp-graph/attribution.ts)
+ * only recognizes `o3`/`o4` via its `\bo[34]\b` regex, so `o1` (a real, wrong-vendor OpenAI model)
+ * resolves to lineage `"unknown"` today and would every time a new model name outran the
+ * classifier — whack-a-mole, not a fix. A harness whose vendor IS pinned has no "maybe" case: any
+ * model that doesn't provably match that vendor is a mismatch, known-wrong or merely
+ * unclassified alike. Only a harness with NO static pin gets the benefit of the doubt.
  */
 export function harnessAcceptsModel(d: HarnessDescriptor, model?: string): boolean {
 	if (!model) return true;
 	const harness = harnessLineage(d.name);
-	if (harness === "unknown") return true;
+	if (harness === "unknown") return true; // multi-vendor harness — no fact to enforce, stays fail-open
 	const requested = modelLineage(model);
-	if (requested === "unknown") return true;
+	// Single-vendor harness: no benefit of the doubt. `requested === "unknown"` falls through to
+	// `false` here exactly as intended — an unclassifiable model on a vendor-pinned harness is a
+	// mismatch, not a pass.
 	return requested === harness;
 }
 
