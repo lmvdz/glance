@@ -25,7 +25,7 @@ import { FlueServiceDriver } from "./flue-service-driver.ts";
 import { type BranchSpec, deriveBranchAgentId, WorkflowDriver, type WorkflowFleet } from "./workflow-driver.ts";
 import { SandboxAgentDriver } from "./sandbox-agent-driver.ts";
 import { AcpAgentDriver } from "./acp-agent-driver.ts";
-import { contextReachesAgent, getHarness, type HarnessDescriptor, hasSecondVerifiedProviderLane, resolveAcpCommand, resolveBin, resolveHarness, resolveHarnessName, unverifiedHarnessesEnabled } from "./harness-registry.ts";
+import { contextReachesAgent, getHarness, harnessAcceptsModel, type HarnessDescriptor, hasSecondVerifiedProviderLane, nearestCompatibleModel, resolveAcpCommand, resolveBin, resolveHarness, resolveHarnessName, unverifiedHarnessesEnabled } from "./harness-registry.ts";
 import { resolveProvider } from "./model-lineage.ts";
 import { type Architect, OmpArchitect } from "./architect.ts";
 import { validateWorker } from "./validate.ts";
@@ -7086,6 +7086,36 @@ export class SquadManager extends EventEmitter {
 			// Reject loudly instead — the operator picked an incompatible profile/harness pair.
 			if (profile?.thinking && !harnessDesc.capabilities.thinking) {
 				throw new Error(`profile "${profile.id}" sets thinking:"${profile.thinking}" but harness "${harnessDesc.name}" has no thinking-level channel (capabilities.thinking=false) — drop the profile's thinking field or pick a different harness`);
+			}
+			// Harness↔model-family compatibility (ticket #347, grok T8 gauntlet HIGH): a route/profile/
+			// operator model literal must never be handed raw to a harness whose adapter is pinned to a
+			// DIFFERENT vendor (codex verification, #336/PR #346, is what made this reachable — see
+			// harness-registry.ts's module doc for the full defect chain). `harnessAcceptsModel` fails
+			// open for every multi-vendor harness (omp/pi/opencode/auggie) and every unclassifiable model
+			// string — only a KNOWN, DIFFERENT vendor pin is a confirmed mismatch.
+			if (opts.model !== undefined && !harnessAcceptsModel(harnessDesc, opts.model)) {
+				if (routedModel !== undefined && opts.model === routedModel) {
+					// System-caused (the model-route block above, not the operator): mirror
+					// `routeModelForTaskClass`'s own "no basis, no shift, never block" idiom instead of
+					// throwing on a decision the operator never made. Map to the harness's nearest declared
+					// model when the registry names one, else drop the override so the harness's own
+					// account/config default applies — never a guessed id. `routedModel` is updated in step
+					// so `declaredModelOf`'s rate-limit-key exclusion invariant (routing.routedModel === the
+					// applied model) keeps holding after the remap.
+					const fallback = nearestCompatibleModel(harnessDesc);
+					this.log(
+						"warn",
+						`model-route picked "${opts.model}" but harness "${harnessDesc.name}" is vendor-pinned to a different model family — ${fallback ? `remapped to "${fallback}"` : "dropped (harness account/config default applies)"}`,
+					);
+					opts = { ...opts, model: fallback };
+					routedModel = fallback;
+				} else {
+					// Operator/profile-chosen — same "reject loudly" idiom the sandbox/approval/thinking
+					// checks above already use for an incompatible profile/harness pair.
+					throw new Error(
+						`model "${opts.model}" is incompatible with harness "${harnessDesc.name}" (vendor-pinned to a different model family) — pick a model in "${harnessDesc.name}"'s family or a different harness`,
+					);
+				}
 			}
 		}
 
