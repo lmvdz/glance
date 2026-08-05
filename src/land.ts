@@ -1001,8 +1001,15 @@ async function attemptAutoResolve(a: {
 		// marker triple as context an added-lines range scan would miss), applied to the full changed
 		// set. `-z` survives unusual paths, same as the touchedFiles gather above. Deleted paths in the
 		// set are correctly skipped by ForFiles (absent from HEAD's tree → no content to carry debris).
-		const changed = (await git(["diff", "-z", "--name-only", `${head0}..HEAD`], worktree)).stdout
-			.split("\0").filter((s) => s.length > 0);
+		const changedProbe = await git(["diff", "-z", "--name-only", `${head0}..HEAD`], worktree);
+		if (changedProbe.code !== 0) {
+			// Fail CLOSED on a probe failure (grok #355 round 2, F1): an empty listing from a FAILED diff
+			// would silently shrink the scan back to `touchedFiles` and reopen the sibling hole — the same
+			// "a missing measurement read as a confident empty" class this whole gate exists to refuse. A
+			// land we cannot fully enumerate for markers is a land we do not allow.
+			return fail(`auto-resolve: could not list changed files for the conflict-marker scan (git diff ${head0}..HEAD exited ${changedProbe.code}: ${changedProbe.stderr || "no output"}) — refusing rather than scanning an incomplete set`);
+		}
+		const changed = changedProbe.stdout.split("\0").filter((s) => s.length > 0);
 		const scanSet = new Set<string>([...touchedFiles, ...changed]);
 		if (scanSet.size > 0) {
 			const markerReason = await conflictMarkerReasonForFiles(repo, branch, [...scanSet]);
