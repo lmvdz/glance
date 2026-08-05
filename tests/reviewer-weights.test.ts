@@ -94,6 +94,60 @@ describe("parseReviewerLedger", () => {
 		const codexRows = entries.filter((e) => e.lineage === "codex");
 		expect(codexRows.length).toBe(52);
 	});
+
+	// ── gauntlet round 3 (delta-verify), "dedup-nul-cross-collision": a `"\0"`-joined key is only
+	// injective while no field's CONTENT can itself contain the literal separator — a hand-edited row
+	// can carry an embedded NUL via a JSON `\0` escape, which broke that assumption. Fixed by
+	// JSON.stringify-ing the field tuple instead of joining on a separator.
+
+	test("REGRESSION FIX (gauntlet round 3): two DIFFERENT field-tuples that would produce a BYTE-IDENTICAL raw-NUL-joined key are still counted as genuinely distinct", () => {
+		// A raw `[at, lineage, ...].join(NUL)` is injective only while no field's CONTENT contains the
+		// literal separator itself. Row one's `at` embeds a real NUL right before "b", with `lineage`
+		// "c"; row two moves that same NUL+"b" into the START of `lineage` instead. Joined with a bare
+		// NUL separator, both produce the identical byte sequence "a" NUL "b" NUL "c" — the OLD key
+		// design's real vulnerability — even though the two tuples genuinely differ.
+		const NUL = String.fromCharCode(0);
+		const rowOneAt = `a${NUL}b`;
+		const rowOneLineage = "c";
+		const rowTwoAt = "a";
+		const rowTwoLineage = `b${NUL}c`;
+		// Prove the premise: a naive NUL-join really would collide for these two tuples.
+		expect([rowOneAt, rowOneLineage].join(NUL)).toBe([rowTwoAt, rowTwoLineage].join(NUL));
+
+		const text = [
+			JSON.stringify({ at: rowOneAt, lineage: rowOneLineage, concernClass: "c", survived: true, source: "s", note: "n" }),
+			JSON.stringify({ at: rowTwoAt, lineage: rowTwoLineage, concernClass: "c", survived: true, source: "s", note: "n" }),
+		].join("\n");
+		const { entries, duplicates } = parseReviewerLedger(text);
+		expect(entries.length).toBe(2);
+		expect(duplicates).toBe(0);
+	});
+
+	test("a genuinely byte-identical row is still deduped under the new JSON.stringify key (no regression on the base case)", () => {
+		const line = JSON.stringify(row());
+		const { entries, duplicates } = parseReviewerLedger([line, line].join("\n"));
+		expect(entries.length).toBe(1);
+		expect(duplicates).toBe(1);
+	});
+
+	// ── gauntlet round 3 (delta-verify), "severity-not-normalized": a strict `=== "high"` comparison
+	// discarded " high " (whitespace-padded) as an invalid severity instead of accepting it as the same
+	// severity — trimming was applied to every OTHER field but not to severity before the enum check.
+
+	test("REGRESSION FIX (gauntlet round 3): a row with severity 'high' and a near-duplicate with severity ' high ' (padded) collapse to one — severity is trimmed like every other field", () => {
+		const text = [JSON.stringify(row({ severity: "high" })), JSON.stringify(row({ severity: " high " as never }))].join("\n");
+		const { entries, duplicates } = parseReviewerLedger(text);
+		expect(entries.length).toBe(1);
+		expect(duplicates).toBe(1);
+		expect(entries[0]!.severity).toBe("high");
+	});
+
+	test("a row with a genuinely DIFFERENT severity (not just whitespace-padded) still counts as distinct", () => {
+		const text = [JSON.stringify(row({ severity: "high" })), JSON.stringify(row({ severity: "low" }))].join("\n");
+		const { entries, duplicates } = parseReviewerLedger(text);
+		expect(entries.length).toBe(2);
+		expect(duplicates).toBe(0);
+	});
 });
 
 describe("reviewerPrecision", () => {

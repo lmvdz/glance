@@ -80,11 +80,19 @@ export const MIN_FINDINGS_FOR_WEIGHT = 10;
  * 86→79 rows, codex n 52→45. Every field (INCLUDING `note` and `severity`) must agree, after trimming
  * incidental whitespace, for two rows to count as the same adjudication — this still catches a
  * byte-for-byte retried `add` and a whitespace-only variant of the same row (round 1's actual target),
- * but never merges two rows whose underlying finding differs. `\0`-joined so a field value containing
- * an ordinary space/newline can't forge a collision with a genuinely different row.
+ * but never merges two rows whose underlying finding differs.
+ *
+ * `JSON.stringify` of the field TUPLE, not a raw separator-join (gauntlet round 3, delta-verify:
+ * "dedup-nul-cross-collision" — a `"\0"`-joined key is only injective while no field's CONTENT can
+ * itself contain the literal separator; a hand-edited row can carry an embedded `\0` via a JSON
+ * string escape, which broke that assumption and made two DIFFERENT tuples hash identically).
+ * `JSON.stringify` on an array escapes every field's internal quotes/backslashes/control characters
+ * and uses the array's own comma/bracket structure as the delimiter, so no field content — NUL
+ * included — can forge a collision with a genuinely different tuple, regardless of what's inside any
+ * one field.
  */
 function semanticKey(e: Pick<ReviewerLedgerEntry, "at" | "lineage" | "concernClass" | "source" | "survived" | "note" | "severity">): string {
-	return [e.at.trim(), e.lineage.trim(), e.concernClass.trim(), e.source.trim(), String(e.survived), e.note.trim(), e.severity ?? ""].join("\0");
+	return JSON.stringify([e.at.trim(), e.lineage.trim(), e.concernClass.trim(), e.source.trim(), e.survived, e.note.trim(), e.severity ?? ""]);
 }
 
 /** Parse the JSONL ledger text. Malformed lines are counted in `rejected`, never guessed at;
@@ -119,7 +127,13 @@ export function parseReviewerLedger(text: string): { entries: ReviewerLedgerEntr
 				typeof raw.source === "string" &&
 				typeof raw.note === "string"
 			) {
-				const severity = raw.severity === "high" || raw.severity === "medium" || raw.severity === "low" ? raw.severity : undefined;
+				// Trim BEFORE the enum check (gauntlet round 3, delta-verify: "severity-not-normalized" —
+				// a strict `=== "high"` comparison discarded " high " as invalid instead of accepting it as
+				// the same severity with incidental whitespace, so it silently dropped out of the dedup
+				// key while every other field was trimmed consistently — two rows differing only in that
+				// whitespace wrongly counted as distinct).
+				const trimmedSeverity = typeof raw.severity === "string" ? raw.severity.trim() : raw.severity;
+				const severity = trimmedSeverity === "high" || trimmedSeverity === "medium" || trimmedSeverity === "low" ? trimmedSeverity : undefined;
 				const key = semanticKey({ at: raw.at, lineage: raw.lineage, concernClass: raw.concernClass, source: raw.source, survived: raw.survived, note: raw.note, severity });
 				if (seen.has(key)) {
 					duplicates++;

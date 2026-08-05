@@ -66,25 +66,42 @@ function activeReviewer(): { model: string; lineage: ModelLineage; harness: "omp
 }
 
 /**
- * Ledger lineage tag for an ALREADY-JUDGED record — reversed from the record's OWN `reviewerLineage`,
+ * Ledger lineage tag for an ALREADY-JUDGED record — reversed from the record's OWN judge identity,
  * NEVER from `activeReviewer()`/whatever harness is configured right now (gauntlet round 2,
  * delta-verify, "precision-lineage-mismatch-on-cache-hit"): `validatorGate`'s `gateCache` can serve
  * the SAME cached verdict across two resolutions whose ACTIVE harness differs — an operator flipping
  * `OMP_SQUAD_VALIDATOR_HARNESS` between lands, or codex/grok's binary coming or going — and restamping
  * precision from the CURRENT harness would then disagree with the cached verdict's own `model`/
  * `reviewerLineage` fields, showing the approver an inconsistent receipt (judged by X, precision cited
- * for Y). The mapping mirrors the ledger's own vocabulary, reversed from the VENDOR lineage the record
- * already carries: `openai` → "codex", `xai` → "grok", anything else (`anthropic`/`google`/`unknown`)
- * → "native" — the omp judge is Anthropic-vendored by default and is `activeReviewer()`'s own fallback
- * for every other case, so this mirrors that fallback exactly. Round 1's version of this function
- * (removed) derived the tag from `activeReviewer().harness` — the CURRENT config — which is exactly
- * the bug this fixes: the tag must come from the record that was ACTUALLY judged, not from whatever is
- * configured at restamp time.
+ * for Y).
+ *
+ * Round 3 (delta-verify) sharpened this twice more:
+ *  - **HARNESS, not vendor** ("vendor-not-harness-tag-derivation"): the bucket is decided by which
+ *    JUDGE HARNESS ran, not by the configured model's vendor lineage. `OMP_SQUAD_VALIDATOR_HARNESS=omp`
+ *    with `OMP_SQUAD_VALIDATOR_MODEL=openai/gpt-5.2` stamps `reviewerLineage:"openai"` (the MODEL's
+ *    vendor) even though the omp harness — not codex — ran the judge; bucketing that as "codex" would
+ *    credit the wrong reviewer. `record.model` is the harness signal: `activeReviewer()`'s codex/grok
+ *    branches hardcode `model` to the LITERAL string `"codex"`/`"grok"` (never anything else), while
+ *    its omp branch's `model` is always `validatorModel()` — whatever the operator configured, which is
+ *    a MODEL string, not a harness name, and is never literally `"codex"`/`"grok"` in practice. So a
+ *    record's `model` reveals which harness ran BEFORE it reveals which vendor the model belongs to.
+ *  - **Honest absence, never a fabricated bucket** ("absent-lineage-fabricated-as-native"): when NEITHER
+ *    `model` nor `reviewerLineage` says anything (both absent, or `reviewerLineage` is the honest
+ *    `"unknown"`), there is no reviewer identity to measure at all — returning a default bucket (this
+ *    function used to fall through to `"native"`) would fabricate a measurement for a reviewer we don't
+ *    actually know ran. Returns `undefined` for that case; `withFreshReviewerPrecision` renders it as an
+ *    explicit "unknown, unmeasured" stamp rather than either "native" or a crash.
  */
-function ledgerLineageTagForRecord(record: ValidationRecord): string {
+function ledgerLineageTagForRecord(record: ValidationRecord): string | undefined {
+	if (record.model === "codex") return "codex";
+	if (record.model === "grok") return "grok";
+	if (record.model) return "native"; // any OTHER real model string ⇒ the omp harness ran it
+	// No model recorded at all (a malformed/older-schema record) — fall back to the vendor lineage
+	// stamp, but never fabricate a bucket for a genuinely absent or unresolved one.
 	if (record.reviewerLineage === "openai") return "codex";
 	if (record.reviewerLineage === "xai") return "grok";
-	return "native";
+	if (record.reviewerLineage === "anthropic" || record.reviewerLineage === "google") return "native";
+	return undefined;
 }
 
 /**
@@ -808,16 +825,20 @@ export async function runLensVerify(verdicts: LensVerdict[], diff: string, proof
  * they're left untouched. Never throws — `reviewerPrecisionStampFor` degrades to an honest stamp on
  * any read fault.
  *
- * The lineage tag comes from `ledgerLineageTagForRecord(record)` — the CACHED verdict's OWN
- * `reviewerLineage` — NOT from `activeReviewer()` (gauntlet round 2, delta-verify, fixed a real
- * mismatch: round 1's version read the CURRENT active harness here, which can differ from the harness
- * that actually judged a cache-hit record, showing the approver a precision number for a different
- * reviewer than the one credited with the verdict).
+ * The lineage tag comes from `ledgerLineageTagForRecord(record)` — the CACHED verdict's OWN judge
+ * identity — NOT from `activeReviewer()` (gauntlet round 2, delta-verify, fixed a real mismatch:
+ * round 1's version read the CURRENT active harness here, which can differ from the harness that
+ * actually judged a cache-hit record, showing the approver a precision number for a different
+ * reviewer than the one credited with the verdict). When no identity can be determined at all
+ * (gauntlet round 3, delta-verify, "absent-lineage-fabricated-as-native"), the stamp is an explicit
+ * `{lineage:"unknown", n:0, ...}` — never silently defaulted to the "native" bucket, which would
+ * fabricate a measurement for a reviewer we don't actually know ran.
  */
 /** @substrate exported for tests only — validatorGate's own live callers never need this directly. */
 export function withFreshReviewerPrecision(record: ValidationRecord, reviewerLedgerPath?: string): ValidationRecord {
 	if (record.verdict === "skipped" || record.verdict === "inconclusive") return record;
 	const tag = ledgerLineageTagForRecord(record);
+	if (!tag) return { ...record, reviewerPrecision: { lineage: "unknown", n: 0, survived: 0, provisional: true } };
 	return { ...record, reviewerPrecision: reviewerPrecisionStampFor(tag, reviewerLedgerPath) };
 }
 

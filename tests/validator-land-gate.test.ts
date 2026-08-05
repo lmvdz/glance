@@ -482,6 +482,78 @@ test("withFreshReviewerPrecision leaves skipped/inconclusive verdicts untouched 
 	expect(withFreshReviewerPrecision(inconclusive)).toEqual(inconclusive);
 });
 
+// ── MEDIUM (gauntlet round 3, delta-verify): "absent-lineage-fabricated-as-native" — a record with no
+// resolvable reviewer identity at all (no model, reviewerLineage absent or "unknown") must render as an
+// honest "unmeasured", never silently defaulted to the "native" bucket — that would fabricate a
+// measurement for a reviewer we don't actually know ran (the campaign's signature absence-as-value bug).
+test("HONESTY (gauntlet round 3): a record with NO reviewerLineage and no model restamps as 'unknown', never fabricated as 'native'", async () => {
+	const ledgerPath = await tmpLedgerFile([ledgerRow(true), ledgerRow(false, "second finding")]); // real "native" history exists — a wrong fallback would find real numbers here
+	const noIdentity: ValidationRecord = { verdict: "pass", agreement: 1, confidence: 1, perCriterion: [], rationale: "", ranAt: 0 };
+	const restamped = withFreshReviewerPrecision(noIdentity, ledgerPath);
+	expect(restamped.reviewerPrecision?.lineage).toBe("unknown");
+	expect(restamped.reviewerPrecision?.lineage).not.toBe("native");
+	expect(restamped.reviewerPrecision).toEqual({ lineage: "unknown", n: 0, survived: 0, provisional: true });
+});
+
+test("HONESTY (gauntlet round 3): a record with reviewerLineage explicitly 'unknown' and no model ALSO restamps as 'unknown', not 'native'", async () => {
+	const ledgerPath = await tmpLedgerFile([ledgerRow(true)]);
+	const explicitlyUnknown: ValidationRecord = { verdict: "pass", agreement: 1, confidence: 1, perCriterion: [], rationale: "", reviewerLineage: "unknown", ranAt: 0 };
+	const restamped = withFreshReviewerPrecision(explicitlyUnknown, ledgerPath);
+	expect(restamped.reviewerPrecision?.lineage).toBe("unknown");
+});
+
+// ── MEDIUM (gauntlet round 3, delta-verify): "vendor-not-harness-tag-derivation" — the bucket must come
+// from the HARNESS that ran, not the configured model's vendor lineage. Failing input: the omp harness
+// configured with a non-Anthropic model string still stamps a non-"openai" reviewerLineage from
+// modelLineage(), but the judge that actually ran was omp, not codex — bucketing it as "codex" would
+// credit a foreign reviewer with a native judge's track record.
+test("REGRESSION FIX (gauntlet round 3): an omp-harness verdict configured with an openai-vendor MODEL string still buckets as 'native', not 'codex'", async () => {
+	const ledgerPath = await tmpLedgerFile([]);
+	await fs.writeFile(
+		ledgerPath,
+		[
+			JSON.stringify({ at: "2026-08-01", lineage: "native", concernClass: "test-fixture", survived: true, source: "fixture", note: "native finding" }),
+			JSON.stringify({ at: "2026-08-01", lineage: "codex", concernClass: "test-fixture", survived: true, source: "fixture", note: "codex finding" }),
+		]
+			.map((l) => `${l}\n`)
+			.join(""),
+	);
+	// This is exactly what scoreAgainstCriteria would stamp for OMP_SQUAD_VALIDATOR_HARNESS=omp +
+	// OMP_SQUAD_VALIDATOR_MODEL=openai/gpt-5.2: activeReviewer() never hardcodes model to "codex" or
+	// "grok" outside its own codex/grok branches, so `model` here is the literal configured string —
+	// but modelLineage("openai/gpt-5.2") resolves reviewerLineage to "openai" regardless of harness.
+	const ompHarnessOpenaiModel: ValidationRecord = {
+		verdict: "pass",
+		agreement: 1,
+		confidence: 1,
+		perCriterion: [],
+		rationale: "",
+		model: "openai/gpt-5.2",
+		reviewerLineage: "openai",
+		ranAt: 0,
+	};
+	const restamped = withFreshReviewerPrecision(ompHarnessOpenaiModel, ledgerPath);
+	expect(restamped.reviewerPrecision?.lineage).toBe("native");
+	expect(restamped.reviewerPrecision?.lineage).not.toBe("codex");
+	expect(restamped.reviewerPrecision).toEqual({ lineage: "native", n: 1, survived: 1, survivedRate: 1, provisional: true });
+});
+
+test("a record whose model IS the literal 'codex' still buckets as codex regardless of reviewerLineage (harness wins)", async () => {
+	const ledgerPath = await tmpLedgerFile([]);
+	await fs.writeFile(
+		ledgerPath,
+		[
+			JSON.stringify({ at: "2026-08-01", lineage: "codex", concernClass: "test-fixture", survived: true, source: "fixture", note: "codex finding" }),
+			JSON.stringify({ at: "2026-08-01", lineage: "codex", concernClass: "test-fixture", survived: false, source: "fixture", note: "codex finding two" }),
+		]
+			.map((l) => `${l}\n`)
+			.join(""),
+	);
+	const codexHarness: ValidationRecord = { verdict: "pass", agreement: 1, confidence: 1, perCriterion: [], rationale: "", model: "codex", reviewerLineage: "openai", ranAt: 0 };
+	const restamped = withFreshReviewerPrecision(codexHarness, ledgerPath);
+	expect(restamped.reviewerPrecision).toEqual({ lineage: "codex", n: 2, survived: 1, survivedRate: 0.5, provisional: true });
+});
+
 // ── HIGH: env-ledger-shadow closed (gauntlet round 1, codex) — there is no environment-variable path
 // into the reviewer-precision reader anymore; only ValidatorGateOpts.reviewerLedgerPath (DI) reaches it.
 test("env-ledger-shadow CLOSED: an OMP_SQUAD_REVIEWER_LEDGER_PATH env var has NO effect on the land path — only explicit DI does", async () => {
