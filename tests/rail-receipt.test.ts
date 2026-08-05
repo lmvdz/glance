@@ -317,6 +317,29 @@ describe("mdEsc — markdown/HTML injection neutralization (gauntlet round 1)", 
 		expect(mdEsc("http://evil.example")).not.toContain("http://");
 		expect(mdEsc("www.evil.example")).not.toContain("www.");
 	});
+
+	test("de-linkifies email + mailto:/xmpp: autolinks (gauntlet r3) — visible text, no clickable link", () => {
+		// GFM's EMAIL autolink turns a bare `foo@bar.com` into a clickable mailto link; breaking the `@`
+		// with an entity kills the match while the decoded render stays a literal `@`.
+		expect(mdEsc("foo@bar.com")).toBe("foo&#64;bar.com");
+		expect(mdEsc("foo@bar.com")).not.toContain("@"); // no raw @ survives to autolink (or ping a user)
+		// `mailto:`/`xmpp:` schemes: BOTH the scheme colon AND the `@` are broken.
+		expect(mdEsc("mailto:foo@bar.com")).toBe("mailto&#58;foo&#64;bar.com");
+		expect(mdEsc("xmpp:foo@bar.com")).toBe("xmpp&#58;foo&#64;bar.com");
+		expect(mdEsc("mailto:foo@bar.com")).not.toContain("mailto:");
+		expect(mdEsc("mailto:foo@bar.com")).not.toContain("@");
+		// A GitHub @mention in an agent string can't ping a real user.
+		expect(mdEsc("cc @octocat please")).toBe("cc &#64;octocat please");
+	});
+
+	test("de-link preserves the matched case (gauntlet r3) — WWW.Evil stays WWW.Evil, not www.Evil", () => {
+		// The case-insensitive `www.`/scheme match must rewrite ONLY the dot/colon, never lowercase the
+		// visible text (the r3 over-escape defect used a fixed lowercase replacement).
+		expect(mdEsc("WWW.Evil")).toBe("WWW&#46;Evil");
+		expect(mdEsc("WwW.Evil")).toBe("WwW&#46;Evil");
+		expect(mdEsc("FTP://Host/x")).toBe("FTP&#58;//Host/x");
+		expect(mdEsc("MAILTO:Foo@Bar")).toBe("MAILTO&#58;Foo&#64;Bar");
+	});
 });
 
 describe("renderReceiptComment — injection cannot forge a verdict", () => {
@@ -403,6 +426,20 @@ describe("attribution correctness (gauntlet round 1, Cluster B)", () => {
 		expect(html).not.toContain("abc1234def"); // the attempted branch tip is NOT shown as a landed commit
 		const md = renderReceiptComment(r);
 		expect(md).toContain("nothing merged");
+	});
+
+	test("a LANDED result whose commit couldn't be attributed renders 'unavailable', never 'nothing merged' or a wrong SHA (gauntlet r3)", () => {
+		// The honest-over-wrong fallback: land-pr.ts records landedCommit=undefined when the PR-scoped
+		// merge-commit read fails, but the land DID merge (landed:true). The receipt must say the commit is
+		// unavailable — distinct from a non-landed result's "nothing merged".
+		const r = greenReceipt({ landed: true, commit: undefined });
+		const html = renderReceiptHtml(r);
+		expect(html).toContain("unavailable");
+		expect(html).not.toContain("nothing merged"); // NOT the non-landed wording
+		expect(html).toContain("Landed"); // the verdict still reads Landed — it did merge
+		const md = renderReceiptComment(r);
+		expect(md).toContain("commit unavailable");
+		expect(md).not.toContain("nothing merged ·");
 	});
 
 	test("commit message + validator per-criterion notes render on both surfaces", () => {

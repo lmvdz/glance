@@ -100,9 +100,14 @@ function section(label: string, body: string): string {
 }
 
 function renderWhat(r: LandReceipt): string {
+	// A land that merged but whose commit SHA couldn't be attributed (the PR-scoped merge-commit read
+	// failed) renders "unavailable" — honest — never a wrong SHA, and distinct from a non-landed result's
+	// "nothing merged". See land-pr.ts's PR-scoped landedCommit binding.
 	const commit = r.commit
 		? `<code class="sha" title="${esc(r.commit)}">${esc(shortSha(r.commit))}</code>`
-		: `<span class="muted">nothing merged</span>`;
+		: r.landed
+			? `<span class="muted" title="the change merged, but its commit SHA could not be attributed">unavailable</span>`
+			: `<span class="muted">nothing merged</span>`;
 	const loc =
 		r.insertions !== undefined || r.deletions !== undefined
 			? `<span class="loc"><span class="add">+${r.insertions ?? 0}</span> <span class="del">−${r.deletions ?? 0}</span></span>`

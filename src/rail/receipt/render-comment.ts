@@ -24,12 +24,18 @@ import { renderReviewerPrecision } from "../../memory/index.ts";
  *   - backtick → entity (no inline-code, and no ```-fence close)
  *   - `[` `]` → entities (no `[label](url)` / `![img]()` disguised links)
  *   - `*` → entity (no `**bold**` forging a verdict-like emphasis inside a cell)
- *   - bare `http(s)://…` and `www.` → de-linkified (gauntlet round 2, codex HIGH / grok LOW): GFM
- *     AUTO-LINKS a bare URL an agent plants in a branch/message/note/path into a clickable link on the
- *     trust surface — a phishing sink even though it can't forge the verdict. Breaking the scheme's `:`
- *     (and `www.`'s dot) with an HTML entity kills the autolink in the raw source while still RENDERING
- *     the exact URL text (entity-decoded) — so a reviewer sees `http://evil…` as plain, non-clickable
+ *   - bare `http(s)://…`, `ftp:`, `mailto:`/`xmpp:` and `www.` → de-linkified (gauntlet r2 codex HIGH /
+ *     grok LOW; r3 codex delta-verify MEDIUM): GFM AUTO-LINKS a bare URL/scheme an agent plants in a
+ *     branch/message/note/path into a clickable link on the trust surface — a phishing sink even though
+ *     it can't forge the verdict. Breaking the scheme's `:` (and `www.`'s dot) with an HTML entity kills
+ *     the autolink in the raw source while still RENDERING the exact URL text (entity-decoded) — so a
+ *     reviewer sees `http://evil…` as plain, non-clickable text. The case of the matched scheme/`www` is
+ *     PRESERVED (`WWW.Evil` stays `WWW.Evil`, only the dot is rewritten), so we never mangle the visible
  *     text. The receipt's OWN validated link (renderHref) never passes through here, so it stays live.
+ *   - `@` → `&#64;` (gauntlet r3 codex delta-verify MEDIUM): GFM's EMAIL autolink turns a bare
+ *     `foo@bar.com` (and `mailto:foo@bar.com`) into a clickable `mailto:` link, and a GitHub `@name`
+ *     into a real user ping — both from an agent-authored string. Breaking the `@` kills both while the
+ *     entity-decoded render stays a literal `@`, so the visible text is unchanged.
  * Everything else (parens, %, digits) is inert without those. `&` is escaped first so the entities
  * this inserts are themselves literal.
  */
@@ -44,11 +50,15 @@ export function mdEsc(s: string): string {
 		.replace(/\[/g, "&#91;")
 		.replace(/\]/g, "&#93;")
 		.replace(/\*/g, "&#42;")
+		// Break `@` so GFM's email autolink (foo@bar.com) can't match and a `@name` mention can't ping a
+		// real GitHub user; renders as a literal `@` (entity-decoded), so the visible text is unchanged.
+		.replace(/@/g, "&#64;")
 		// De-linkify bare autolinks: break the scheme colon / www dot with an entity (`:`→`&#58;`,
 		// `.`→`&#46;`) so GFM's autolink pattern no longer matches the raw text, but the rendered,
-		// entity-decoded string is byte-identical to the original URL — visible, not clickable.
-		.replace(/\bhttps?:\/\//gi, (m) => m.replace(":", "&#58;"))
-		.replace(/\bwww\./gi, "www&#46;")
+		// entity-decoded string is byte-identical to the original — visible, not clickable. The match is
+		// CASE-PRESERVING (only the colon/dot is rewritten) so `WWW.Evil`/`HTTPS://…` keep their casing.
+		.replace(/\b(?:https?|ftp|mailto|xmpp):/gi, (m) => m.replace(":", "&#58;"))
+		.replace(/\bwww\./gi, (m) => m.slice(0, 3) + "&#46;")
 		.trim();
 }
 
@@ -136,7 +146,14 @@ function renderHref(opts: CommentOptions): string {
 export function renderReceiptComment(r: LandReceipt, opts: CommentOptions = {}): string {
 	const files = `${r.files.length} file${r.files.length === 1 ? "" : "s"}`;
 	const loc = r.insertions !== undefined || r.deletions !== undefined ? ` (+${r.insertions ?? 0} −${r.deletions ?? 0})` : "";
-	const whatCell = r.commit ? `${short(r.commit)} · ${files}${loc}` : `nothing merged · ${files}${loc}`;
+	// A land that merged but whose commit SHA couldn't be attributed (the PR-scoped merge-commit read
+	// failed) shows "commit unavailable" — honest — NEVER a wrong SHA and NEVER "nothing merged" (which
+	// a non-landed result says). See land-pr.ts's PR-scoped landedCommit binding.
+	const whatCell = r.commit
+		? `${short(r.commit)} · ${files}${loc}`
+		: r.landed
+			? `commit unavailable · ${files}${loc}`
+			: `nothing merged · ${files}${loc}`;
 	const lines = [
 		`### ${verdict(r)}`,
 		"",
