@@ -34,11 +34,13 @@ export function coalesceActive(active: boolean[], range: TimeRange, binMs: numbe
 
 /** Turn receipts into omp-graph tracks. Pure. */
 export function receiptTracks(receipts: RunReceipt[], range: TimeRange, group: string, source: string, limit = 400): GraphTrack[] {
-	// cost/hr: sum costUsd into hourly bins at the run's end time.
+	// cost/hr: sum costUsd into hourly bins at the run's end time. costUnknown receipts (ticket #348,
+	// same honesty rule as attribution-scoreboard.ts/token-burn.ts) are excluded here — never folded in
+	// as a fabricated $0, which would understate the fleet's true hourly burn.
 	const costPoints: SeriesPoint[] = bucketSums(
 		range,
 		HOUR_MS,
-		receipts.map((r) => ({ t: r.endedAt ?? r.startedAt, v: r.costUsd ?? 0 })),
+		receipts.filter((r) => !r.costUnknown).map((r) => ({ t: r.endedAt ?? r.startedAt, v: r.costUsd ?? 0 })),
 	).map((b) => ({ t: b.t, v: b.v }));
 
 	const cost: GraphTrack = {
@@ -62,8 +64,16 @@ export function receiptTracks(receipts: RunReceipt[], range: TimeRange, group: s
 			t1: r.endedAt as number,
 			label: r.name,
 			status: r.status,
-			value: r.costUsd ?? 0,
-			meta: { files: r.filesTouched?.length ?? 0, tokens: r.tokens?.total ?? 0, toolCalls: r.toolCalls ?? 0 },
+			// costUnknown (ticket #348): leave `value` unset rather than fabricate 0 — a hover card reading
+			// `value` as "$0.00" would misreport an unverified-usage run as a measured-free one. `meta.cost`
+			// carries the honest string either way, mirroring token-burn.ts's "cost unattributed" text.
+			value: r.costUnknown ? undefined : (r.costUsd ?? 0),
+			meta: {
+				files: r.filesTouched?.length ?? 0,
+				tokens: r.tokens?.total ?? 0,
+				toolCalls: r.toolCalls ?? 0,
+				cost: r.costUnknown ? "unattributed" : `$${(r.costUsd ?? 0).toFixed(4)}`,
+			},
 		}))
 		.sort((a, b) => a.t0 - b.t0);
 

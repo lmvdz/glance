@@ -44,9 +44,15 @@ const fmtAge = (ms: number): string => {
 
 export function derive(doc: GraphDoc, receipts: RunReceipt[], range: TimeRange, now: number): { tracks: GraphTrack[]; insights: Insight[] } {
 	const inWin = receipts.filter((r) => inRange(r.endedAt ?? r.startedAt, range));
+	// costUnknown (ticket #348, same honesty rule as attribution-scoreboard.ts/token-burn.ts): a receipt
+	// whose usage was never observed is excluded from every $ sum below (never folded in as a fabricated
+	// $0), and tallied separately so "cost / shipped ticket" etc. can say the totals are a KNOWN-cost
+	// floor rather than silently understating true spend.
+	const costed = inWin.filter((r) => !r.costUnknown);
+	const unattributedRuns = inWin.length - costed.length;
 
-	const totalCost = inWin.reduce((a, r) => a + (r.costUsd ?? 0), 0);
-	const costByDay = bucketSums(range, DAY_MS, inWin.map((r) => ({ t: r.endedAt ?? r.startedAt, v: r.costUsd ?? 0 })));
+	const totalCost = costed.reduce((a, r) => a + (r.costUsd ?? 0), 0);
+	const costByDay = bucketSums(range, DAY_MS, costed.map((r) => ({ t: r.endedAt ?? r.startedAt, v: r.costUsd ?? 0 })));
 	const commitsByDay = daySums(doc, "git.commits", range);
 	const totalCommits = commitsByDay.reduce((a, b) => a + b.v, 0);
 	const ticketsClosed = sumBars(doc, "plane.closedPerDay") || (() => {
@@ -63,8 +69,8 @@ export function derive(doc: GraphDoc, receipts: RunReceipt[], range: TimeRange, 
 	const cacheDenom = cacheRead + inputTok + cacheWrite;
 	const cacheHit = cacheDenom > 0 ? cacheRead / cacheDenom : 0;
 
-	// idle burn — spend on runs that produced no files
-	const idleRuns = inWin.filter((r) => (r.filesTouched?.length ?? 0) === 0);
+	// idle burn — spend on runs that produced no files (costed only — see the costUnknown note above)
+	const idleRuns = costed.filter((r) => (r.filesTouched?.length ?? 0) === 0);
 	const idleCost = idleRuns.reduce((a, r) => a + (r.costUsd ?? 0), 0);
 	const idlePct = totalCost > 0 ? idleCost / totalCost : 0;
 	const idleByDay = bucketSums(range, DAY_MS, idleRuns.map((r) => ({ t: r.endedAt ?? r.startedAt, v: r.costUsd ?? 0 })));
@@ -106,12 +112,16 @@ export function derive(doc: GraphDoc, receipts: RunReceipt[], range: TimeRange, 
 
 	// ── insight callouts ──
 	const costTrend = halfTrend(elapsed(costByDay));
+	// unattributedRuns > 0: totalCost (and everything derived from it below) is a KNOWN-cost floor, not
+	// the whole window's spend — say so rather than let a clean-looking dollar figure imply completeness
+	// (same discipline as token-burn.ts's tokenBurnFace unattributedNote).
+	const unattributedNote = unattributedRuns > 0 ? ` (+${unattributedRuns} unattributed)` : "";
 	const insights: Insight[] = [
 		{
 			id: "cpt",
 			label: "cost / shipped ticket",
 			value: ticketsClosed > 0 ? `$${(totalCost / ticketsClosed).toFixed(0)}` : "—",
-			sub: `${ticketsClosed} shipped`,
+			sub: `${ticketsClosed} shipped${unattributedNote}`,
 			tone: ticketsClosed === 0 ? "neutral" : totalCost / ticketsClosed > 50 ? "warn" : "good",
 		},
 		{
@@ -132,7 +142,7 @@ export function derive(doc: GraphDoc, receipts: RunReceipt[], range: TimeRange, 
 			id: "cpc",
 			label: "cost / commit",
 			value: totalCommits > 0 ? `$${(totalCost / totalCommits).toFixed(1)}` : "—",
-			sub: `${arrow(costTrend)} ${pct(costTrend)} spend`.trim(),
+			sub: `${arrow(costTrend)} ${pct(costTrend)} spend${unattributedNote}`.trim(),
 			tone: "neutral",
 		},
 	];

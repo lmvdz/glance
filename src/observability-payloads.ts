@@ -246,6 +246,10 @@ export async function usagePayload(managers: SquadManager[], url: URL): Promise<
 	durationMs?: number;
 	agents: number;
 	since?: number;
+	/** Runs in this window whose cost is UNKNOWN (unverified-usage harness — see `RunReceipt.costUnknown`),
+	 *  excluded from `costUsd` above rather than folded in as a fabricated $0 (ticket #348, same honesty
+	 *  rule as `attribution-scoreboard.ts`/`token-burn.ts`). Absent/0 when every run had a known cost. */
+	unattributedRuns?: number;
 }> {
 	const limit = boundedNumber(url.searchParams.get("limit"), 100, 1, 1000);
 	const repo = url.searchParams.get("repo") ?? undefined;
@@ -260,11 +264,15 @@ export async function usagePayload(managers: SquadManager[], url: URL): Promise<
 	const runs = receipts.sort((a, b) => (b.endedAt ?? b.startedAt) - (a.endedAt ?? a.startedAt)).slice(0, limit);
 	const totals = runs.reduce((acc, r) => {
 		acc.toolCalls += r.toolCalls;
-		acc.costUsd += r.costUsd ?? 0;
+		// costUnknown (ticket #348, same rule as attribution-scoreboard.ts/token-burn.ts): excluded from
+		// the cost sum, tallied separately — never folded into costUsd as a fabricated $0 (a harness whose
+		// usage was never observed must never render as "free").
+		if (r.costUnknown) acc.unattributedRuns += 1;
+		else acc.costUsd += r.costUsd ?? 0;
 		acc.tokens += r.tokens?.total ?? 0;
 		acc.durationMs += r.durationMs ?? 0;
 		return acc;
-	}, { toolCalls: 0, costUsd: 0, tokens: 0, durationMs: 0 });
+	}, { toolCalls: 0, costUsd: 0, tokens: 0, durationMs: 0, unattributedRuns: 0 });
 	return {
 		runs,
 		receipts: runs,
@@ -274,6 +282,7 @@ export async function usagePayload(managers: SquadManager[], url: URL): Promise<
 		durationMs: totals.durationMs || undefined,
 		agents: new Set(receipts.map((r) => r.agentId)).size,
 		since,
+		unattributedRuns: totals.unattributedRuns || undefined,
 	};
 }
 

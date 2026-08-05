@@ -217,6 +217,52 @@ describe("rebuild from receipts equals incremental state (property test)", () =>
 	});
 });
 
+describe("ticket #348: buildCostAggregateFromReceipts skips costUnknown receipts, mirroring appendReceipt", () => {
+	test("a costUnknown receipt contributes NO attempt and NO cost — never a fabricated $0", () => {
+		const now = Date.now();
+		const known = receipt({ startedAt: now, endedAt: now, model: "opus", tier: "heavy", lane: "feature", costUsd: 5 });
+		const unknown = receipt({ startedAt: now, endedAt: now, model: "opus", tier: "heavy", lane: "feature", costUsd: undefined, costUnknown: true });
+		const doc = buildCostAggregateFromReceipts([known, unknown], {});
+		const cell = doc.cells["opus::heavy::feature"];
+		expect(cell.attempts).toBe(1); // only `known` counted — `unknown` skipped entirely
+		expect(cell.costUsdSum).toBeCloseTo(5, 10); // never 5 + (undefined ?? 0) folded in as 5 + 0
+	});
+
+	// The generalizing flip test: costUnknown true → false must move the receipt from "skipped" to
+	// "counted", proving the exclusion is actually gated on the flag and not some other field.
+	test("flip: the SAME receipt with costUnknown flipped false→true moves from counted to skipped", () => {
+		const now = Date.now();
+		const base = receipt({ startedAt: now, endedAt: now, model: "sonnet", tier: "mid", lane: "chore", costUsd: 3 });
+
+		const knownDoc = buildCostAggregateFromReceipts([{ ...base, costUnknown: false }], {});
+		const knownCell = knownDoc.cells["sonnet::mid::chore"];
+		expect(knownCell.attempts).toBe(1);
+		expect(knownCell.costUsdSum).toBeCloseTo(3, 10);
+
+		const unknownDoc = buildCostAggregateFromReceipts([{ ...base, costUsd: undefined, costUnknown: true }], {});
+		expect(unknownDoc.cells["sonnet::mid::chore"]).toBeUndefined(); // no cell at all — fully skipped
+	});
+
+	test("rebuild still matches a live incremental replay when the sequence includes a costUnknown receipt (appendReceipt also skips recordCostAttempt for it)", () => {
+		const dir = tmp();
+		const now = Date.now();
+		const receipts: RunReceipt[] = [
+			receipt({ startedAt: now, endedAt: now, model: "opus", tier: "light", lane: "hotfix", costUsd: 1 }),
+			receipt({ startedAt: now + 1000, endedAt: now + 1000, model: "opus", tier: "light", lane: "hotfix", costUsd: undefined, costUnknown: true }),
+			receipt({ startedAt: now + 2000, endedAt: now + 2000, model: "opus", tier: "light", lane: "hotfix", costUsd: 2 }),
+		];
+		// Incremental: only receipts WITHOUT costUnknown ever reach recordCostAttempt (appendReceipt's
+		// skip in receipts.ts) — replicate that filtering here to mirror the live write path exactly.
+		for (const r of receipts) if (!r.costUnknown) recordCostAttempt(dir, r.model, r.tier, r.lane, r.costUsd ?? 0, r.endedAt ?? r.startedAt);
+		const incremental = readCostAggregateDoc(dir).cells["opus::light::hotfix"];
+		expect(incremental.attempts).toBe(2);
+		expect(incremental.costUsdSum).toBeCloseTo(3, 10);
+
+		const rebuilt = buildCostAggregateFromReceipts(receipts, {}).cells["opus::light::hotfix"];
+		expect(rebuilt).toEqual(incremental);
+	});
+});
+
 describe("rebuild overlays lane-agnostic `landed` from the existing model-outcomes ledger", () => {
 	test("a (model,tier) roll-up cell with cost data gets its landed count from ModelOutcomes", () => {
 		const receipts: RunReceipt[] = [

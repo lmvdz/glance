@@ -71,6 +71,29 @@ test("buildTrace stitches parent runs, audit lifecycle spans, and rolled-up cost
 	expect(trace.root.children.some((n) => n.kind === "land" && n.attrs?.operator === "op")).toBe(true);
 });
 
+test("ticket #348: a costUnknown receipt's rollup excludes its cost and tallies unattributedRuns instead — never a fabricated $0", () => {
+	const known: RunReceipt = { agentId: "a1", name: "known", repo: "/repo", runId: "r1", startedAt: 1, endedAt: 5, status: "idle", toolCalls: 1, toolTally: {}, costUsd: 0.5, filesTouched: [], traceId: "run:a1:r1" };
+	const unknown: RunReceipt = { agentId: "a2", name: "unknown", repo: "/repo", runId: "r2", startedAt: 1, endedAt: 5, status: "idle", toolCalls: 1, toolTally: {}, costUsd: undefined, costUnknown: true, filesTouched: [], traceId: "run:a1:r1" };
+
+	const trace = buildTrace("run:a1:r1", [known, unknown], []);
+	// costUsd sums ONLY the known-cost receipt — the unknown one never folds in as costUsd ?? 0.
+	expect(trace.rollup.costUsd).toBeCloseTo(0.5, 10);
+	expect(trace.rollup.unattributedRuns).toBe(1);
+	expect(trace.rollup.runs).toBe(2);
+});
+
+test("flip: the SAME receipt with costUnknown true→false moves its cost from excluded to counted", () => {
+	const base: RunReceipt = { agentId: "a1", name: "solo", repo: "/repo", runId: "r1", startedAt: 1, endedAt: 5, status: "idle", toolCalls: 0, toolTally: {}, costUsd: 2, filesTouched: [], traceId: "run:a1:r1" };
+
+	const unknownTrace = buildTrace("run:a1:r1", [{ ...base, costUnknown: true }], []);
+	expect(unknownTrace.rollup.costUsd).toBe(0);
+	expect(unknownTrace.rollup.unattributedRuns).toBe(1);
+
+	const knownTrace = buildTrace("run:a1:r1", [{ ...base, costUnknown: false }], []);
+	expect(knownTrace.rollup.costUsd).toBeCloseTo(2, 10);
+	expect(knownTrace.rollup.unattributedRuns).toBe(0);
+});
+
 test("(D2) buildTrace weaves verify/spawn audit actions under their target's run node, not as flat root siblings", () => {
 	const receipt: RunReceipt = {
 		agentId: "a1",

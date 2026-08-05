@@ -469,10 +469,13 @@ export interface SubagentNodeDTO {
 export interface TraceRollupDTO {
   runs: number;
   toolCalls: number;
+  /** Sum of costUsd across KNOWN-cost runs only — see `unattributedRuns` (ticket #348). */
   costUsd: number;
   tokens: number;
   durationMs: number;
   errors: number;
+  /** Runs rolled up here whose cost is UNKNOWN (unverified-usage harness), excluded from `costUsd`. */
+  unattributedRuns: number;
 }
 
 export type TraceSpanKindDTO = 'run' | 'node' | 'tool' | 'subagent' | 'verify' | 'spawn' | 'validate' | 'land' | 'resolve';

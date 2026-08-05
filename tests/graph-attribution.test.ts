@@ -57,6 +57,34 @@ describe("buildAttribution", () => {
 		expect(doc.byHarness.omp[0]).toBe(3);
 	});
 
+	// ticket #348: a costUnknown receipt (unverified-usage harness — see RunReceipt.costUnknown) must
+	// never fold into totalCost/byModel/byHarness/matrix as a fabricated $0, and must be tallied
+	// separately so an operator can see the totals are a KNOWN-cost floor, not the whole window's spend.
+	test("ticket #348: a costUnknown receipt is excluded from every $ sum and tallied as unattributedRuns", () => {
+		const receipts = [
+			receipt({ endedAt: 1 * HOUR_MS + 5, costUsd: 4, model: "claude-sonnet-5", harness: "omp" }),
+			receipt({ endedAt: 2 * HOUR_MS + 5, costUsd: undefined, costUnknown: true, model: "gpt-5.6-sol", harness: "codex" }),
+		];
+		const doc = buildAttribution(receipts, range, { now: range.end });
+		expect(doc.totalCost).toBe(4); // never 4 + (undefined ?? 0) folded in as 4
+		expect(doc.byModel.openai).toBeUndefined(); // the unknown receipt never touches byModel/byHarness/matrix
+		expect(doc.byHarness.codex).toBeUndefined();
+		expect(doc.matrix.codex).toBeUndefined();
+		expect(doc.unattributedRuns).toBe(1);
+	});
+
+	test("flip: the SAME receipt with costUnknown true→false moves it from unattributed to counted", () => {
+		const base = receipt({ endedAt: 1 * HOUR_MS + 5, costUsd: 7, model: "claude-sonnet-5", harness: "omp" });
+
+		const unknownDoc = buildAttribution([{ ...base, costUnknown: true }], range, { now: range.end });
+		expect(unknownDoc.totalCost).toBe(0);
+		expect(unknownDoc.unattributedRuns).toBe(1);
+
+		const knownDoc = buildAttribution([{ ...base, costUnknown: false }], range, { now: range.end });
+		expect(knownDoc.totalCost).toBe(7);
+		expect(knownDoc.unattributedRuns).toBeUndefined();
+	});
+
 	test("plan worth pro-rates to the elapsed range", () => {
 		const week = { start: 0, end: 7 * 24 * HOUR_MS };
 		const doc = buildAttribution([receipt({ endedAt: 5, costUsd: 92 })], week, { plan: { name: "max", monthly: 200 }, now: week.end });

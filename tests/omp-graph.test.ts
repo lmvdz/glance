@@ -156,6 +156,38 @@ test("receiptTracks emits cost series, session spans, and a fleet-state band", (
 	if (state?.type === "bands") expect(state.segments.length).toBe(1);
 });
 
+test("ticket #348: receiptTracks excludes a costUnknown receipt from the cost/hr sum and its span value, never a fabricated $0", () => {
+	const known = rc({ name: "known", startedAt: hour(1), endedAt: hour(2), costUsd: 1.5, status: "stopped" });
+	const unknown = rc({ name: "unknown", startedAt: hour(2), endedAt: hour(3), costUsd: undefined, costUnknown: true, status: "stopped" });
+	const tracks = receiptTracks([known, unknown], RANGE, "fleet", "receipts");
+
+	const cost = tracks.find((t) => t.id === "receipts.cost");
+	// Never 1.5 + (undefined ?? 0) folded in as 1.5 — the costUnknown receipt contributes nothing.
+	if (cost?.type === "series") expect(cost.points.reduce((a, p) => a + p.v, 0)).toBeCloseTo(1.5, 5);
+
+	const sessions = tracks.find((t) => t.id === "receipts.sessions");
+	if (sessions?.type === "spans") {
+		const unknownSpan = sessions.spans.find((s) => s.label === "unknown");
+		const knownSpan = sessions.spans.find((s) => s.label === "known");
+		expect(unknownSpan?.value).toBeUndefined(); // never a fabricated 0
+		expect(unknownSpan?.meta?.cost).toBe("unattributed");
+		expect(knownSpan?.value).toBeCloseTo(1.5, 5);
+		expect(knownSpan?.meta?.cost).toBe("$1.5000");
+	}
+});
+
+test("flip: the SAME receipt with costUnknown true→false moves its cost/hr contribution from excluded to counted", () => {
+	const base = rc({ name: "r1", startedAt: hour(1), endedAt: hour(2), costUsd: 4, status: "stopped" });
+
+	const unknownTracks = receiptTracks([{ ...base, costUnknown: true }], RANGE, "fleet", "receipts");
+	const unknownCost = unknownTracks.find((t) => t.id === "receipts.cost");
+	if (unknownCost?.type === "series") expect(unknownCost.points.reduce((a, p) => a + p.v, 0)).toBe(0);
+
+	const knownTracks = receiptTracks([{ ...base, costUnknown: false }], RANGE, "fleet", "receipts");
+	const knownCost = knownTracks.find((t) => t.id === "receipts.cost");
+	if (knownCost?.type === "series") expect(knownCost.points.reduce((a, p) => a + p.v, 0)).toBeCloseTo(4, 5);
+});
+
 // ───────────────────────────── automation adapter ─────────────────────────────
 
 const ae = (over: Partial<AutomationEvent>): AutomationEvent => ({ id: 1, at: hour(2), loop: "scout", ...over });
@@ -327,6 +359,45 @@ test("derive computes efficiency tracks + insight callouts", () => {
 	expect(insights.find((i) => i.id === 'cpc')?.value).toBe('$2.5'); // $10 / 4 commits
 	expect(tracks.find((t) => t.id === 'derived.costPerCommit')?.type).toBe('series');
 	expect(tracks.find((t) => t.id === 'derived.idleBurn')?.type).toBe('bars');
+});
+
+test("ticket #348: derive excludes a costUnknown receipt's cost from every $ insight and notes it as unattributed", () => {
+	const now = T0 + 7 * DAY_MS;
+	const range: TimeRange = { start: T0, end: now };
+	const doc: GraphDoc = {
+		range,
+		groups: [],
+		sources: [],
+		generatedAt: now,
+		tracks: [
+			{ id: 'git.commits', label: 'C', group: 'fleet', source: 'git', type: 'bars', binMs: HOUR_MS, bins: [{ t: hour(1), v: 2 }] }, // 2 commits
+			{ id: 'plane.closedPerDay', label: 'X', group: 'delivery', source: 'plane', type: 'bars', binMs: HOUR_MS, bins: [{ t: hour(5), v: 1 }] }, // 1 ticket
+		],
+	};
+	const receipts = [
+		rc({ startedAt: hour(1), endedAt: hour(2), costUsd: 10, filesTouched: ['a'] }),
+		// costUnknown: must contribute NOTHING to totalCost — never (undefined ?? 0) folded in as $0.
+		rc({ startedAt: hour(3), endedAt: hour(4), costUsd: undefined, costUnknown: true, filesTouched: ['b'] }),
+	];
+	const { insights } = derive(doc, receipts, range, now);
+
+	expect(insights.find((i) => i.id === 'cpt')?.value).toBe('$10'); // $10 / 1 ticket — the unknown never dilutes it to $5
+	expect(insights.find((i) => i.id === 'cpt')?.sub).toContain('+1 unattributed');
+	expect(insights.find((i) => i.id === 'cpc')?.value).toBe('$5.0'); // $10 / 2 commits
+	expect(insights.find((i) => i.id === 'cpc')?.sub).toContain('+1 unattributed');
+});
+
+test("flip: the SAME receipt with costUnknown true→false moves derive's totalCost from excluded to counted", () => {
+	const now = T0 + 2 * DAY_MS;
+	const range: TimeRange = { start: T0, end: now };
+	const doc: GraphDoc = { range, groups: [], sources: [], generatedAt: now, tracks: [{ id: 'plane.closedPerDay', label: 'X', group: 'delivery', source: 'plane', type: 'bars', binMs: HOUR_MS, bins: [{ t: hour(1), v: 1 }] }] };
+	const base = rc({ startedAt: hour(1), endedAt: hour(2), costUsd: 6, filesTouched: ['a'] });
+
+	const unknown = derive(doc, [{ ...base, costUnknown: true }], range, now);
+	expect(unknown.insights.find((i) => i.id === 'cpt')?.value).toBe('$0');
+
+	const known = derive(doc, [{ ...base, costUnknown: false }], range, now);
+	expect(known.insights.find((i) => i.id === 'cpt')?.value).toBe('$6');
 });
 
 // ───────────────────────────── compose ─────────────────────────────
