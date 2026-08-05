@@ -1,5 +1,5 @@
 /**
- * Branch-keyed auto-land failure ledger (src/land-ledger.ts) — the restart-safe retry cap.
+ * Branch-keyed auto-land failure ledger (src/rail/land-ledger.ts) — the restart-safe retry cap.
  * Covers bump-on-failure, clear-on-success, the undefined-branch no-op, and on-disk persistence
  * (the whole point: the streak survives a daemon restart, keyed by branch not the re-minted agent id).
  */

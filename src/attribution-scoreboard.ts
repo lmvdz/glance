@@ -47,7 +47,13 @@ export interface ModelScore {
 export interface HarnessSpend {
 	harness: string;
 	runs: number;
+	/** Sum of costUsd across KNOWN-cost runs only — see `unattributedRuns`. */
 	costUsd: number;
+	/** Runs on this harness whose cost is UNKNOWN (unverified usage ingestion — see
+	 *  `RunReceipt.costUnknown`), excluded from `costUsd` rather than folded in as a fabricated $0
+	 *  (ticket #336 gauntlet finding 3: a verified-but-usage-unconfirmed harness must never render as
+	 *  "free"). Absent/0 when every run on this harness had a known cost. */
+	unattributedRuns?: number;
 }
 
 export interface Scoreboard {
@@ -55,7 +61,7 @@ export interface Scoreboard {
 	models: ModelScore[];
 	/** total spend by harness across ALL receipts — the "where did the money go" context. */
 	harnessSpend: HarnessSpend[];
-	totals: { landed: number; rejected: number; daemonCostUsd: number; totalCostUsd: number };
+	totals: { landed: number; rejected: number; daemonCostUsd: number; totalCostUsd: number; unattributedRuns: number };
 }
 
 const rate = (landed: number, rejected: number): number | null => (landed + rejected > 0 ? landed / (landed + rejected) : null);
@@ -64,18 +70,22 @@ const rate = (landed: number, rejected: number): number | null => (landed + reje
 export function buildScoreboard(receipts: RunReceipt[], outcomes: ModelOutcomes): Scoreboard {
 	// daemon cost + run count per normalized model
 	const daemon = new Map<string, { cost: number; runs: number }>();
-	const harness = new Map<string, { cost: number; runs: number }>();
+	const harness = new Map<string, { cost: number; runs: number; unattributed: number }>();
 	for (const r of receipts) {
-		const cost = r.costUsd ?? 0;
+		// costUnknown (ticket #336 gauntlet finding 3): excluded from the cost sum, tallied separately —
+		// never folded into `cost` as a fabricated $0 (a verified-but-usage-unconfirmed harness, e.g.
+		// codex, must never render as "free"). `isDaemon` receipts are always omp/pi (usageVerified
+		// always true there), so `costUnknown` is never true on that branch — the guard is defensive.
 		const h = r.harness || "omp";
-		const he = harness.get(h) ?? { cost: 0, runs: 0 };
-		he.cost += cost;
+		const he = harness.get(h) ?? { cost: 0, runs: 0, unattributed: 0 };
 		he.runs += 1;
+		if (r.costUnknown) he.unattributed += 1;
+		else he.cost += r.costUsd ?? 0;
 		harness.set(h, he);
 		if (isDaemon(r)) {
 			const k = modelFamily(r.model);
 			const de = daemon.get(k) ?? { cost: 0, runs: 0 };
-			de.cost += cost;
+			if (!r.costUnknown) de.cost += r.costUsd ?? 0;
 			de.runs += 1;
 			daemon.set(k, de);
 		}
@@ -120,7 +130,7 @@ export function buildScoreboard(receipts: RunReceipt[], outcomes: ModelOutcomes)
 	models.sort((a, b) => b.landed - a.landed || b.daemonCostUsd - a.daemonCostUsd || a.model.localeCompare(b.model));
 
 	const harnessSpend: HarnessSpend[] = [...harness.entries()]
-		.map(([h, v]) => ({ harness: h, runs: v.runs, costUsd: v.cost }))
+		.map(([h, v]) => ({ harness: h, runs: v.runs, costUsd: v.cost, unattributedRuns: v.unattributed || undefined }))
 		.sort((a, b) => b.costUsd - a.costUsd);
 
 	const totals = {
@@ -128,6 +138,7 @@ export function buildScoreboard(receipts: RunReceipt[], outcomes: ModelOutcomes)
 		rejected: models.reduce((s, m) => s + m.rejected, 0),
 		daemonCostUsd: [...daemon.values()].reduce((s, d) => s + d.cost, 0),
 		totalCostUsd: harnessSpend.reduce((s, h) => s + h.costUsd, 0),
+		unattributedRuns: [...harness.values()].reduce((s, h) => s + h.unattributed, 0),
 	};
 
 	return { models, harnessSpend, totals };
