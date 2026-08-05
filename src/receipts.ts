@@ -29,6 +29,19 @@ export interface RunReceipt {
 	toolTally: Record<string, number>;
 	tokens?: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
 	costUsd?: number;
+	/** True when `costUsd` is absent BECAUSE this harness's usage ingestion is unverified (ACP default —
+	 *  see `HarnessDescriptor.usageVerified`), not because the run genuinely cost nothing. Ticket #336
+	 *  gauntlet finding 3 (grok, HIGH): a verified-but-usage-unconfirmed harness (codex: `usage_update`
+	 *  confirmed absent on every live smoke turn) must never render as "free" — `costUsd ?? 0` folded an
+	 *  UNKNOWN into a fabricated zero everywhere cost is summed. Stamped once at `finalizeRun`
+	 *  (`squad-manager.ts`, the one place with registry access — this module stays a pure
+	 *  registry-independent accumulator); every cost aggregator (`attribution-scoreboard.ts`,
+	 *  `token-burn.ts`, `cost-aggregate.ts` via `appendReceipt` below) must exclude or visibly flag a
+	 *  `costUnknown` row rather than summing `costUsd ?? 0` for it. Absent (false) for a harness whose
+	 *  usage IS verified (omp/pi always; an ACP harness once a future live smoke confirms its
+	 *  `usage_update` field names) — there, an absent `costUsd` really does mean a genuinely free run
+	 *  (e.g. zero assistant turns), not an unknown one. */
+	costUnknown?: boolean;
 	filesTouched: string[];
 	/** Trace grouping id: `feat:<featureId>` for feature work, else `run:<agentId>:<runId>`. */
 	traceId?: string;
@@ -360,6 +373,12 @@ export async function appendReceipt(baseDir: string, receipt: RunReceipt): Promi
 	// source of truth; this is a best-effort derived-cache update so `cost-gate.ts`'s O(1) fast path
 	// stays current — a cache-write failure must never surface as a receipt-append failure (the cache
 	// is corruption-safe by rebuild; see cost-aggregate.ts's module doc).
+	// Ticket #336 gauntlet finding 3: a `costUnknown` receipt is SKIPPED here entirely rather than fed
+	// in as `costUsd ?? 0` — recording it would pollute that (model, tier, lane) cell's `costUsdSum` /
+	// `costPerLandedChange` with a fabricated zero, exactly the "unverified usage renders as free"
+	// defect this fix closes. The cell simply has one fewer sample for this receipt, which is the
+	// honest "exclude" the aggregates are asked to do, not a corrupted attempt count.
+	if (receipt.costUnknown) return;
 	try {
 		recordCostAttempt(baseDir, receipt.model, receipt.tier, receipt.lane, receipt.costUsd ?? 0, receipt.endedAt ?? receipt.startedAt);
 	} catch {
