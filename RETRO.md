@@ -40,6 +40,21 @@ Three standing rules (campaign doctrine):
 - Builder caught a design estimate wrong (8 test files vs ~4) by grepping with .ts extensions
   — the verify-claims-against-the-tree dispatch line keeps earning its place.
 
+### 2026-08-04 — T3 #331 (receipt backfill) — closed after 3 rounds + delta-verify + round-4
+- Rounds: 3 blind codex + a scoped delta-verify (5/7) + a 2-item round-4. The premise inverted
+  under review: "stamp 430 rows" became "stamp 0, annotate reasons" once round 2 proved roster
+  evidence is epoch-unsafe. The gauntlet didn't just harden the code — it corrected what the
+  ticket was FOR. That only happened because critics got the invariant ("never fabricate
+  attribution"), not the builder's goal ("attribute the rows").
+- **Deliberate loop-stop, recorded as doctrine**: I stopped the gauntlet at round-4 rather than
+  running a 5th pass, on judgment: blast radius (a dry-run-default script that refuses on a live
+  daemon) × diminishing returns × a live-critical lane (T4) competing for the same verification
+  budget. The gauntlet is a quality mechanism, not a scheduler; spend its passes where the risk
+  is, and SAY when you stopped and why. A campaign that can't stop verifying a script can't
+  afford to verify the merge path.
+- Cost signal: T3 consumed the most subagent tokens of any lane (three 400k–600k fix rounds).
+  A script that dry-runs is not worth more verification budget than the code that merges to main.
+
 ### 2026-08-04 — T8 #336 (codex harness verify) — closed after 1 grok round + delta-verify
 - Rounds: build (builder self-caught the ignored --model argv, added applyModelPin) + 1 grok fix
   round + 1 grok delta-verify. Single-lineage grok, deliberately: the builder is Claude/OpenAI-
