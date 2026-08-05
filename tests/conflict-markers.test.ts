@@ -285,20 +285,63 @@ test("conflictMarkerReasonForFiles: an empty file list is never flagged (nothing
 });
 
 // ── delta-verify #2 continued (codex, LOW): an unreadable touched file fails CLOSED, not skip ─────
+// #355 polish round refined WHICH `git show` failures fail closed — see the tests below this section.
 
-test("delta-verify (codex LOW): a touched file that git show cannot read fails CLOSED (refuses), not silently skipped", async () => {
-	// The path was never committed at `ref` at all — the exact shape `git show ref:path` fails on.
-	const ref = shOut(["rev-parse", "HEAD"]);
-	const r = await conflictMarkerReasonForFiles(repo, ref, ["docs/never-committed.md"]);
-	expect(r).toBeDefined();
-	expect(r).toContain("conflict-markers gate:");
-	expect(r).toContain("could not read docs/never-committed.md");
-});
-
-test("conflictMarkerReasonForFiles: a mix of one readable-clean and one unreadable file still fails CLOSED overall", async () => {
+test("conflictMarkerReasonForFiles: a mix of one readable-clean and one genuinely-absent file lands (the absent one is a no-op, not a refusal)", async () => {
 	commitFiles({ "docs/plan.md": "clean\n" }, "clean file");
 	const ref = shOut(["rev-parse", "HEAD"]);
-	const r = await conflictMarkerReasonForFiles(repo, ref, ["docs/plan.md", "docs/does-not-exist.md"]);
+	// docs/does-not-exist.md was never committed at ref — same tree-absence shape as a delete-resolution
+	// (#355): there is no content there at all, so it cannot carry marker debris either.
+	expect(await conflictMarkerReasonForFiles(repo, ref, ["docs/plan.md", "docs/does-not-exist.md"])).toBeUndefined();
+});
+
+// ── #355: the delete-resolution false positive + its generalizing "flip the input" pair ───────────
+// The MEDIUM false-positive this ticket closes: `land.ts`'s AUTORESOLVE loop puts every path that
+// was EVER unresolved (`--diff-filter=U`) into `touchedFiles`, including one the resolver resolved
+// BY DELETING the file outright. That path stays in the set; `git show branch:path` then fails
+// (nothing there to show) and the OLD fail-closed rule refused the land even though there is no
+// possible marker debris — the file is legitimately gone. The two tests below are the generalizing
+// pair the ticket asks for: flip the input (a deleted path vs. a still-tracked-but-unreadable path)
+// and confirm the gate's output differs correctly.
+
+test("#355: a conflict resolved by DELETING the file lands (no content, no possible debris, not a fail-closed refusal)", async () => {
+	// Simulates exactly what land.ts's touchedFiles carries after a delete-resolution: the path was
+	// once tracked (so it's a REAL path, not a typo) but the final resolved tree has it deleted.
+	commitFiles({ "docs/plan.md": "will be conflict-deleted\n" }, "seed the path that gets deleted");
+	sh(["rm", "docs/plan.md"]);
+	sh(["commit", "-m", "resolver resolves the conflict by deleting the file"]);
+	const ref = shOut(["rev-parse", "HEAD"]);
+	expect(await conflictMarkerReasonForFiles(repo, ref, ["docs/plan.md"])).toBeUndefined();
+});
+
+test("#355: a path that's still TRACKED but genuinely unreadable (a gitlink/submodule pointer) still fails CLOSED", async () => {
+	// A gitlink (mode 160000, a submodule pointer) is a real, present tree entry — `ls-tree` lists it —
+	// but `git show ref:path` can never read it as text ("fatal: bad object"): there is no blob to open.
+	// This is the should-exist-but-unreadable shape #355 says must still refuse, distinct from a path
+	// that's simply absent from the tree (the case above, which is safe to skip).
+	const subRepo = mkdtempSync(path.join(tmpdir(), "conflictmarkers-sub-"));
+	try {
+		sh(["init", "-q", "-b", "main"], subRepo);
+		sh(["config", "user.email", "t@t"], subRepo);
+		sh(["config", "user.name", "t"], subRepo);
+		writeFileSync(path.join(subRepo, "f.txt"), "hi\n");
+		sh(["add", "-A"], subRepo);
+		sh(["commit", "-qm", "sub"], subRepo);
+		sh(["-c", "protocol.file.allow=always", "submodule", "add", subRepo, "sub"]);
+		sh(["commit", "-m", "add a gitlink entry"]);
+		const ref = shOut(["rev-parse", "HEAD"]);
+		const r = await conflictMarkerReasonForFiles(repo, ref, ["sub"]);
+		expect(r).toBeDefined();
+		expect(r).toContain("conflict-markers gate:");
+		expect(r).toContain("could not read sub");
+	} finally {
+		rmSync(subRepo, { recursive: true, force: true });
+	}
+});
+
+test("#355: a wholly bogus ref still fails CLOSED for every touched file (never silently reads them all as \"deleted\")", async () => {
+	const r = await conflictMarkerReasonForFiles(repo, "does-not-exist-ref", ["docs/plan.md"]);
 	expect(r).toBeDefined();
-	expect(r).toContain("could not read docs/does-not-exist.md");
+	expect(r).toContain("conflict-markers gate:");
+	expect(r).toContain("could not resolve does-not-exist-ref");
 });

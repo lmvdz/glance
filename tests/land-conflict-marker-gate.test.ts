@@ -292,3 +292,123 @@ test("delta-verify #2 (codex): AUTORESOLVE catches marker debris in a real unico
 	expect(res.detail).toContain("é.md");
 	expect(await out(repo, "rev-parse", "HEAD")).toBe(head0); // main never advanced past head0
 });
+
+// ── #355: delete-resolution false positive, proven end to end through the REAL attemptAutoResolve ──
+// touchedFiles loop (land.ts) — not a synthetic call into conflict-markers.ts directly. A resolver
+// that resolves the conflict by DELETING the file leaves that path in touchedFiles (it was genuinely
+// `--diff-filter=U` at the step it got resolved), but the resolved branch tip has no such path at all
+// — `git show branch:plan.md` fails with nothing to prove unsafe. The OLD fail-closed rule refused
+// this land outright (a human force-land was the only workaround); the fix lands it normally.
+
+const resolverDeletesFile: ConflictResolver = async ({ worktree, files }) => {
+	for (const f of files) await fs.rm(path.join(worktree, f));
+	return true;
+};
+
+test("#355: AUTORESOLVE resolving a conflict BY DELETING the file lands normally (not refused as unreadable)", async () => {
+	process.env.OMP_SQUAD_AUTORESOLVE = "1";
+	const { repo, wt } = await conflictRepo("plan.md");
+
+	const res = await landAgent({ repo, worktree: wt, branch: "feat", message: "land feat", commitWip: false, verify: "true", resolver: resolverDeletesFile, reviewer: approve });
+
+	expect(res.ok).toBe(true);
+	expect(res.merged).toBe(true);
+	await expect(fs.access(path.join(repo, "plan.md"))).rejects.toThrow(); // genuinely gone from main, on purpose
+});
+
+test("#355 flip-side: a resolver that leaves markers in ONE file and deletes ANOTHER still refuses on the marker file", async () => {
+	// Proves the delete-tolerance is per-file, not a blanket pass: a real marker-debris file among the
+	// touched set still fails closed even when a sibling touched file in the same land was deleted.
+	process.env.OMP_SQUAD_AUTORESOLVE = "1";
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "cm-ar-mixed-"));
+	tmps.push(repo);
+	await git(repo, "init", "-q", "-b", "main");
+	await git(repo, "config", "user.email", "t@t");
+	await git(repo, "config", "user.name", "t");
+	await git(repo, "config", "commit.gpgsign", "false");
+	await fs.writeFile(path.join(repo, "plan.md"), "base\n");
+	await fs.writeFile(path.join(repo, "keep.md"), "base\n");
+	await git(repo, "add", "-A");
+	await git(repo, "commit", "-qm", "base");
+
+	await git(repo, "branch", "feat");
+	const wt = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "cm-ar-mixed-wt-")), "feat");
+	tmps.push(path.dirname(wt));
+	await git(repo, "worktree", "add", "-q", wt, "feat");
+	await fs.writeFile(path.join(wt, "plan.md"), "branch version\n");
+	await fs.writeFile(path.join(wt, "keep.md"), "branch version\n");
+	await git(wt, "add", "-A");
+	await git(wt, "commit", "-qm", "feat edit");
+
+	await fs.writeFile(path.join(repo, "plan.md"), "main version\n");
+	await fs.writeFile(path.join(repo, "keep.md"), "main version\n");
+	await git(repo, "add", "-A");
+	await git(repo, "commit", "-qm", "main edit");
+
+	const head0 = await out(repo, "rev-parse", "HEAD");
+	const resolverDeletesOneLeavesMarkersInOther: ConflictResolver = async ({ worktree, files }) => {
+		for (const f of files) {
+			if (f === "plan.md") await fs.rm(path.join(worktree, f)); // resolved by deletion
+			else await fs.writeFile(path.join(worktree, f), ["<<<<<<< HEAD", "branch version", "=======", "main version", ">>>>>>> feat", ""].join("\n")); // still-broken resolution
+		}
+		return true;
+	};
+
+	const res = await landAgent({ repo, worktree: wt, branch: "feat", message: "land feat", commitWip: false, verify: "true", resolver: resolverDeletesOneLeavesMarkersInOther, reviewer: approve });
+
+	expect(res.ok).toBe(false);
+	expect(res.merged).toBe(false);
+	expect(res.detail).toContain("conflict-markers gate:");
+	expect(res.detail).toContain("keep.md");
+	expect(await out(repo, "rev-parse", "HEAD")).toBe(head0); // main never advanced — the marker file still blocked it
+});
+
+// ── #355 round 2 (grok): the SIBLING attack the touchedFiles-only scan missed ──────────────────────
+// The #355 fix (skip a deleted path instead of fail-closing) removed the INCIDENTAL cover that used to
+// block this: an AUTORESOLVE resolver can delete every CONFLICTED path (→ each is now legitimately
+// tree-absent → skipped) while writing live marker debris into a file it was NEVER handed as a
+// conflict — an UNTOUCHED SIBLING. That sibling is a real change in head0..HEAD but is NOT in
+// touchedFiles, so a touchedFiles-only scan never reads it, and the markers land. The fix widens the
+// autoresolve scan to the FULL head0..HEAD changed set; this proves the sibling is now caught.
+test("#355 round 2: AUTORESOLVE deleting the conflicted file while planting markers in an UNTOUCHED sibling is refused", async () => {
+	process.env.OMP_SQUAD_AUTORESOLVE = "1";
+	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "cm-ar-sib-"));
+	tmps.push(repo);
+	await git(repo, "init", "-q", "-b", "main");
+	await git(repo, "config", "user.email", "t@t");
+	await git(repo, "config", "user.name", "t");
+	await git(repo, "config", "commit.gpgsign", "false");
+	await fs.writeFile(path.join(repo, "plan.md"), "base\n"); // will conflict
+	await fs.writeFile(path.join(repo, "sneaky.md"), "base\n"); // NEVER conflicts — untouched by both sides
+	await git(repo, "add", "-A");
+	await git(repo, "commit", "-qm", "base");
+
+	await git(repo, "branch", "feat");
+	const wt = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "cm-ar-sib-wt-")), "feat");
+	tmps.push(path.dirname(wt));
+	await git(repo, "worktree", "add", "-q", wt, "feat");
+	await fs.writeFile(path.join(wt, "plan.md"), "branch version\n"); // feat edits ONLY plan.md
+	await git(wt, "add", "-A");
+	await git(wt, "commit", "-qm", "feat edit");
+
+	await fs.writeFile(path.join(repo, "plan.md"), "main version\n"); // main edits ONLY plan.md → only plan.md conflicts
+	await git(repo, "add", "-A");
+	await git(repo, "commit", "-qm", "main edit");
+
+	const head0 = await out(repo, "rev-parse", "HEAD");
+	// The attack: resolve the conflict by DELETING plan.md (→ tree-absent → skipped by #355), and smuggle
+	// marker debris into sneaky.md — a file NEVER in `files` (never conflicted), so absent from touchedFiles.
+	const resolverDeletesConflictPlantsInSibling: ConflictResolver = async ({ worktree, files }) => {
+		for (const f of files) await fs.rm(path.join(worktree, f)); // delete the conflicted path(s)
+		await fs.writeFile(path.join(worktree, "sneaky.md"), ["<<<<<<< HEAD", "branch version", "=======", "main version", ">>>>>>> feat", ""].join("\n"));
+		return true;
+	};
+
+	const res = await landAgent({ repo, worktree: wt, branch: "feat", message: "land feat", commitWip: false, verify: "true", resolver: resolverDeletesConflictPlantsInSibling, reviewer: approve });
+
+	expect(res.ok).toBe(false); // the sibling's markers must block the land
+	expect(res.merged).toBe(false);
+	expect(res.detail).toContain("conflict-markers gate:");
+	expect(res.detail).toContain("sneaky.md"); // caught in a file that was NEVER a conflict
+	expect(await out(repo, "rev-parse", "HEAD")).toBe(head0); // main never advanced
+});

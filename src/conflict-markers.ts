@@ -56,6 +56,16 @@
  *   (`git show` failing) as "nothing to scan" — fail-OPEN. It now refuses instead: an unreadable file
  *   can't be PROVEN clean, so it is never silently waved through.
  *
+ * #355 polish round (MEDIUM false-positive, post-#351): that same codex-LOW fix over-corrected —
+ * it fails closed on EVERY `git show` failure, including an AUTORESOLVE resolver that legitimately
+ * resolves a conflict BY DELETING the path. A deleted path carries no content at all, so it can't
+ * carry marker debris either; refusing the land there was a false positive with only a human
+ * force-land as the workaround. {@link conflictMarkerReasonForFiles} now checks {@link
+ * pathExistsInTree} (a tree-only `ls-tree`, never opens the blob) to tell a legitimate deletion
+ * (path absent from the tree — safe, nothing to scan) apart from a path that's still tracked but
+ * genuinely unreadable (corrupt blob, or a gitlink/submodule pointer — still fails closed, its
+ * content is unproven and it WILL land with the merge).
+ *
  * ESCAPE HATCH: there is exactly one, and it is not settable by the candidate diff — a human's
  * explicit force-land (`LandOpts.conflictMarkerGate: false`), OR the operator-level
  * `OMP_SQUAD_CONFLICT_MARKER_GATE=0` kill switch. Added-lines-only scanning at the range-based sites
@@ -68,8 +78,21 @@ import { classifyProbeFailure } from "./classify-probe-failure.ts";
 import { errText } from "./err-text.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV } from "./git-harden.ts";
 
-/** On by default — a structural git conflict and marker debris left in mergeable content are
- *  different signals; set OMP_SQUAD_CONFLICT_MARKER_GATE=0 to disable (old behavior). */
+/**
+ * On by default — a structural git conflict and marker debris left in mergeable content are
+ * different signals; set OMP_SQUAD_CONFLICT_MARKER_GATE=0 to disable (old behavior).
+ *
+ * SCOPE NOTE (#355 doc fix): this is an OPERATOR-plane control, not an agent-reachable one. It only
+ * ever takes effect via the daemon's OWN launch environment — the same plane as `land.ts`'s
+ * `staleGateEnabled` (`OMP_SQUAD_STALE_GATE`) and `rail/land-risk.ts`'s equivalent kill switch
+ * (`OMP_SQUAD_LAND_RISK_GATE`) — because `spawn-env.ts` (`isSquadEnvCompatKey`)
+ * scrubs every `OMP_SQUAD_*`/`GLANCE_*` var from the environment handed to spawned agent/tenant
+ * processes; no candidate diff or resolver output can set or influence this at land time. Read THE
+ * THREAT MODEL above precisely: "force-land is the only way through" describes the sole PER-LAND,
+ * diff-influenceable exemption (a human's explicit `LandOpts.conflictMarkerGate: false`) — it is not
+ * a claim that this env var doesn't exist. An operator retains this global env disable exactly like
+ * every sibling gate; it is simply not a lever the agent-authored side of a land can reach.
+ */
 export function conflictMarkerGateEnabled(): boolean {
 	return envBool("OMP_SQUAD_CONFLICT_MARKER_GATE", true);
 }
@@ -159,10 +182,38 @@ function formatReason(subject: string, hits: MarkerHit[]): string {
 
 /** Fetch a file's full content at `ref` (`git show ref:path`; pass `""` for the INDEX — `git show
  *  :path` reads stage 0). Returns undefined on any failure (deleted path, binary blob, unreadable
- *  object) — callers must treat that as "cannot verify", never as "nothing to scan". */
+ *  object) — callers must treat that as "cannot verify", never as "nothing to scan", UNLESS the path
+ *  is confirmed absent from the tree (see {@link pathExistsInTree}) — a path that carries no content
+ *  at `ref` at all cannot carry marker debris either, deleted-resolution false positive, #355. */
 async function showFile(repo: string, ref: string, file: string): Promise<string | undefined> {
 	const r = await git(["show", `${ref}:${file}`], repo);
 	return r.code === 0 ? r.stdout : undefined;
+}
+
+/**
+ * True when `file` is still a tracked tree entry at `ref` — a cheap tree-only lookup (`ls-tree`,
+ * which never opens the blob) used to tell apart the two very different reasons `showFile` above can
+ * fail (#355):
+ *   - the path is a legitimate AUTORESOLVE delete-resolution (or was otherwise never present at
+ *     `ref`) — `ls-tree` returns nothing, there is zero content at this path, so there is zero
+ *     possible marker debris; safe to treat as "nothing to scan", not a fail-closed refusal.
+ *   - the path IS still a tree entry (this returns true) but its content still couldn't be read —
+ *     e.g. a corrupt/missing blob object, or a gitlink (mode 160000, a submodule pointer, which
+ *     `git show ref:path` always fails on with "bad object" since there is no blob to read) — this
+ *     path WILL carry whatever it carries into the merged result and its content is unproven, so it
+ *     must still fail closed.
+ * `ls-tree` deliberately never touches blob content, so a corrupt/unreadable blob doesn't make this
+ * return false — only genuine absence from the tree does.
+ */
+async function pathExistsInTree(repo: string, ref: string, file: string): Promise<boolean> {
+	const r = await git(["ls-tree", "--name-only", "-z", ref, "--", file], repo);
+	// Only a CLEAN exit (code 0) with EMPTY output proves genuine absence — the legitimate-deletion
+	// case the caller may skip. A NON-ZERO exit is an `ls-tree` ERROR (a bad ref, a git failure), which
+	// is NOT proof of absence (grok #355 round 2): returning false there would let the caller SKIP a
+	// path it never actually checked — a fail-open. Treat any error as "present" so the caller fails
+	// CLOSED, exactly as it does for a readable-but-unshowable path.
+	if (r.code !== 0) return true;
+	return r.stdout.length > 0;
 }
 
 // ── parsing a unified diff into per-file, per-kind hits ───────────────────────────────────────────
@@ -263,14 +314,38 @@ export async function conflictMarkerReasonStaged(repo: string): Promise<string |
  *
  * A touched file this can't READ (delta-verify round, codex LOW) refuses the land outright rather
  * than silently skipping it — an unreadable path can't be proven clean, and "couldn't check" must
- * never collapse to "assume it's fine" for content a resolver just wrote.
+ * never collapse to "assume it's fine" for content a resolver just wrote — UNLESS the path is
+ * genuinely absent from `ref`'s tree (#355, MEDIUM false-positive): `land.ts`'s `touchedFiles` is
+ * every path that was ever unresolved (`--diff-filter=U`) during the rebase, including one an
+ * AUTORESOLVE resolver resolved BY DELETING outright. A deleted path is gone from the merged result
+ * entirely — there is no content there to carry marker debris — so `git show ref:path` failing
+ * because the path simply isn't in the tree at `ref` is not the same failure as a path that IS still
+ * a tree entry but whose content can't be read (corrupt object, or a gitlink/submodule pointer that
+ * `git show` can never read as text). {@link pathExistsInTree} (tree-only, never opens the blob)
+ * tells the two apart; only the latter still fails closed.
+ *
+ * `ref` itself is checked up front so a wholly bad ref (which would make every path look "absent")
+ * fails closed for the whole call instead of being silently read as "every touched file got deleted".
  */
 export async function conflictMarkerReasonForFiles(repo: string, ref: string, files: readonly string[]): Promise<string | undefined> {
 	try {
+		if (files.length > 0) {
+			const refCheck = await git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], repo);
+			if (refCheck.code !== 0) return probeFailureReason(`could not resolve ${ref} — cannot confirm the resolver's output is free of conflict-marker debris`);
+		}
 		const byFile = new Map<string, RawHit[]>();
 		for (const file of new Set(files)) {
 			const content = await showFile(repo, ref, file);
-			if (content === undefined) return probeFailureReason(`could not read ${file} at ${ref} (git show failed) — cannot confirm it is free of conflict-marker debris`);
+			if (content === undefined) {
+				// git show failed. A path absent from the tree at ref (ls-tree returns nothing) carries
+				// zero content — nothing a resolver's delete-resolution left behind can be unsafe, so this
+				// is not a fail-closed case (#355). A path still IN the tree but unreadable (corrupt blob,
+				// gitlink) will still land with unproven content, so that case still refuses below.
+				if (await pathExistsInTree(repo, ref, file)) {
+					return probeFailureReason(`could not read ${file} at ${ref} (git show failed) — cannot confirm it is free of conflict-marker debris`);
+				}
+				continue; // legitimately absent from the resolved tree (e.g. a delete-resolution) — nothing to scan
+			}
 			const rawHits: RawHit[] = [];
 			for (const line of content.split("\n")) {
 				const kind = classifyMarkerLine(line);

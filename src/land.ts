@@ -988,9 +988,33 @@ async function attemptAutoResolve(a: {
 	// either exit path below (confirm-hold or immediate merge) so a human is never handed a "ready to
 	// land" that secretly still has markers. Never touches the resolver/prompt itself — this only
 	// reads what it already wrote.
-	if (conflictMarkerGate && conflictMarkerGateEnabled() && touchedFiles.size > 0) {
-		const markerReason = await conflictMarkerReasonForFiles(repo, branch, [...touchedFiles]);
-		if (markerReason) return fail(`auto-resolve: ${markerReason}`);
+	if (conflictMarkerGate && conflictMarkerGateEnabled()) {
+		// Scan the FULL set of files the rebased branch changed vs head0 — NOT just `touchedFiles` (the
+		// conflicted subset). A resolver can write marker debris into a file it was NEVER handed as a
+		// conflict — an UNTOUCHED sibling: that file is a real change in `head0..HEAD` but absent from
+		// `touchedFiles`, so a touchedFiles-only scan never reads it. Before #355 that attack was
+		// incidentally blocked (deleting the conflicted paths made their `git show` fail → fail-closed);
+		// #355 correctly stopped fail-closing on a deletion, which removed that incidental cover, so the
+		// sibling must now be scanned on purpose (grok #355 round 2, fail-open). The clean-merge path
+		// (~line 668) already scans the whole range for this reason; here we use the FULL-FILE reader
+		// (ForFiles) the autoresolve path needs for the teaching-triple case (a resolver reusing an old
+		// marker triple as context an added-lines range scan would miss), applied to the full changed
+		// set. `-z` survives unusual paths, same as the touchedFiles gather above. Deleted paths in the
+		// set are correctly skipped by ForFiles (absent from HEAD's tree → no content to carry debris).
+		const changedProbe = await git(["diff", "-z", "--name-only", `${head0}..HEAD`], worktree);
+		if (changedProbe.code !== 0) {
+			// Fail CLOSED on a probe failure (grok #355 round 2, F1): an empty listing from a FAILED diff
+			// would silently shrink the scan back to `touchedFiles` and reopen the sibling hole — the same
+			// "a missing measurement read as a confident empty" class this whole gate exists to refuse. A
+			// land we cannot fully enumerate for markers is a land we do not allow.
+			return fail(`auto-resolve: could not list changed files for the conflict-marker scan (git diff ${head0}..HEAD exited ${changedProbe.code}: ${changedProbe.stderr || "no output"}) — refusing rather than scanning an incomplete set`);
+		}
+		const changed = changedProbe.stdout.split("\0").filter((s) => s.length > 0);
+		const scanSet = new Set<string>([...touchedFiles, ...changed]);
+		if (scanSet.size > 0) {
+			const markerReason = await conflictMarkerReasonForFiles(repo, branch, [...scanSet]);
+			if (markerReason) return fail(`auto-resolve: ${markerReason}`);
+		}
 	}
 
 	// Confirm hold (OMPSQ-138): the conflict is resolved on the rebased branch, but the merge is held
