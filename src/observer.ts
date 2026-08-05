@@ -35,7 +35,7 @@ import { classifyProbeFailure } from "./classify-probe-failure.ts";
 import type { ComplianceFinding } from "./compliance.ts";
 import { getDoneProofByBranch, proofCoversTip } from "./done-proof.ts";
 import { errText } from "./err-text.ts";
-import type { LandLedger } from "./land-ledger.ts";
+import type { LandLedger } from "./rail/index.ts";
 import { aheadUnknown } from "./land-mode.ts";
 import { stripAnsi } from "./text-util.ts";
 import type { AgentDTO, AutomationSkipReason, IssueRef } from "./types.ts";
