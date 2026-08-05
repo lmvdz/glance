@@ -56,6 +56,28 @@ export interface RunReceipt {
 	parentId?: string;
 	/** Which harness drove the run ("omp" for daemon-spawned; external ingests set their own). */
 	harness?: string;
+	/** Set ONLY by `scripts/backfill-receipt-attribution.ts` when it audited this receipt's missing
+	 *  `harness`. The script does not attempt to attribute a harness VALUE at all — the two paths
+	 *  tried (blind-stamp-from-absence, then a `state.json` roster cross-reference) both turned
+	 *  out to be fabrication risks: absence of `harness` doesn't prove the omp lane wrote a row
+	 *  (pre-fix daemon-managed ACP units — claude-code, grok, legacy `runtime:"acp"` → auggie —
+	 *  also predate the write-time harness stamp), and a roster join is AGENT-scoped, not
+	 *  RUN-scoped (`squad-manager.ts`'s deterministic ids are a legitimate resurrection target, so
+	 *  a recreated agent under a different harness could reuse an old id and misattribute an old
+	 *  receipt). A small fixed vocabulary of machine-readable codes, NOT free prose — e.g.
+	 *  `"no_run_scoped_harness_evidence"`, `"agent_id_prefix_ambiguous"`. Distinguishes "audited,
+	 *  genuinely unattributable" from "nobody has looked yet". */
+	harnessUnattributableReason?: string;
+	/** Set ONLY by `scripts/backfill-receipt-attribution.ts` when it audited this receipt's missing
+	 *  `model`. The script does not attempt to attribute a model at all (no durable, run-scoped
+	 *  source exists in this codebase to cross-reference — `task-outcomes.jsonl` is agentId-keyed
+	 *  with no `runId`, so it can't be pinned to one specific run of a possibly-restarted unit
+	 *  without risking a cross-run guess), so every missing-model row gets the single fixed code
+	 *  `"no_run_scoped_model_evidence"` — a statement that no attributable source exists, NOT a claim
+	 *  about what did or didn't happen inside the run itself (this field cannot prove whether an
+	 *  assistant-usage frame arrived, a poll backfill ran, or anything else about the run's history).
+	 *  Distinguishes "audited, genuinely unattributable" from "nobody has looked yet". */
+	modelUnattributableReason?: string;
 	/** Epic 3 independent-validator verdict for this run's land attempt, copied from `AgentDTO.validation`
 	 *  at finalize time so it survives the run durably (Epic 5's confidence input, DESIGN §5). */
 	validation?: ValidationRecord;
