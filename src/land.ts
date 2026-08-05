@@ -18,6 +18,7 @@ import { gateExec, gateRunUnrunnable, greenGateUnproven } from "./gate-runner.ts
 import { reduceOutput } from "./output-reduce.ts";
 import { proofGate, recordProof } from "./proof.ts";
 import { landRiskGateEnabled, landRiskReason } from "./rail/land-risk.ts";
+import { conflictMarkerGateEnabled, conflictMarkerReasonForFiles, conflictMarkerReasonForRange, conflictMarkerReasonStaged } from "./conflict-markers.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV, gitNoSignEnv } from "./git-harden.ts";
 import { harnessAuthEnv, scrubbedSpawnEnv } from "./spawn-env.ts";
 import type { FeatureCriterion } from "./types.ts";
@@ -136,6 +137,12 @@ export interface LandOpts {
 	 * (mirrors how force skips the proof gate). OMP_SQUAD_STALE_GATE=0 disables it globally.
 	 */
 	staleGate?: boolean;
+	/**
+	 * Conflict-marker gate (#330, default ON): refuse to land a branch whose diff ADDS a live
+	 * conflict-marker line (`<<<<<<< `/`=======`/`>>>>>>> `). Pass false on a force-land (mirrors
+	 * `staleGate`). OMP_SQUAD_CONFLICT_MARKER_GATE=0 disables it globally.
+	 */
+	conflictMarkerGate?: boolean;
 	/**
 	 * PR-mode plumbing (concern 06): threaded into `ensurePr`'s ledger entry and the DoneProof a
 	 * PR-mode merge records, so `closeLandedIssue`'s issue-identifier lookup finds it same as the
@@ -532,6 +539,15 @@ async function landAgentImpl(opts: LandOpts): Promise<LandResult> {
 		if (status.code === 0 && status.stdout.length > 0) {
 			const add = await git(["add", "-A", "--", ".", ":(exclude).omp"], worktree);
 			if (add.code !== 0) return { ok: false, committed: false, merged: false, message, detail: `git add failed: ${add.stderr}` };
+			// Conflict-marker gate (#330; gauntlet round 1 finding #2): the in-place path (worktree ===
+			// repo, below) commits and returns success right after this block, with NO other gate ever
+			// running — a complete bypass. Scan the STAGED diff here, before the commit, so it's covered
+			// too. Cheap for the branch-worktree path as well (it merges later, where the post-merge check
+			// also applies) — catching it here just fails faster.
+			if (opts.conflictMarkerGate !== false && conflictMarkerGateEnabled()) {
+				const markerReason = await conflictMarkerReasonStaged(worktree);
+				if (markerReason) return { ok: false, committed: false, merged: false, message, detail: markerReason };
+			}
 			const commit = await git(["commit", "-m", message], worktree);
 			if (commit.code !== 0) return { ok: false, committed: false, merged: false, message, detail: `git commit failed: ${commit.stderr || commit.stdout}` };
 			committed = true;
@@ -638,6 +654,23 @@ async function landAgentImpl(opts: LandOpts): Promise<LandResult> {
 	// Verify the merged main; if the gate fails, reset main to head0 so it stays green. The
 	// worktree branch keeps its commit (only main is reset), so it can be re-landed after a fix.
 	const verifyMerged = async (detail: string, reMerge: () => Promise<GitRun>): Promise<LandResult> => {
+		// Conflict-marker gate (#330; gauntlet round 1 vs #351 fixed #1/#9's over-scan by moving this
+		// POST-merge): a cheap textual scan of what THIS merge actually added to main since head0 — git's
+		// structural conflict check only fires on an unresolved merge, never on marker text that happens
+		// to sit in otherwise-mergeable content (a careless human, or a resolver resolving a DIFFERENT
+		// conflict on the same rebase, can leave it behind). Scanning `head0..HEAD` (the real merge
+		// result) rather than `merge-base(baseRef,branch)..branch` (a branch's own historical diff) means
+		// content that independently converged onto main by land time is never re-flagged. Runs before
+		// the language-toolchain gate below so markers block regardless of whether one exists.
+		// `conflictMarkerGate:false` (mirrors `staleGate`) bypasses it on a force-land;
+		// OMP_SQUAD_CONFLICT_MARKER_GATE=0 disables it globally.
+		if (opts.conflictMarkerGate !== false && conflictMarkerGateEnabled()) {
+			const markerReason = await conflictMarkerReasonForRange(repo, head0, "HEAD");
+			if (markerReason) {
+				await git(["reset", "--hard", head0], repo).catch(() => {});
+				return { ok: false, committed, merged: false, message, detail: markerReason };
+			}
+		}
 		if (!gate) {
 			// No acceptance gate — still run the full-suite regression gate if armed.
 			const rg = await applyRegressionGate({ repo, head0, committed, message, branch: branch ?? "", reMerge, agentId: opts.agentId });
@@ -777,6 +810,7 @@ async function landAgentImpl(opts: LandOpts): Promise<LandResult> {
 		return attemptAutoResolve({
 			repo, worktree, branch, head0, gate, message, committed,
 			confirmResolved: opts.confirmResolved ?? false,
+			conflictMarkerGate: opts.conflictMarkerGate !== false,
 			resolver: opts.resolver ?? defaultResolver(),
 			reviewer: opts.reviewer ?? defaultReviewer(),
 			agentId: opts.agentId,
@@ -903,18 +937,30 @@ const RESOLVE_TIMEOUT_MS = 600_000;
 async function attemptAutoResolve(a: {
 	repo: string; worktree: string; branch: string; head0: string; gate: string | undefined; message: string; committed: boolean;
 	confirmResolved: boolean;
+	/** Threaded from `LandOpts.conflictMarkerGate` (force-land passes false) — combined with the
+	 *  global {@link conflictMarkerGateEnabled} the same way the top-level check combines them. */
+	conflictMarkerGate: boolean;
 	resolver: ConflictResolver; reviewer: ResolutionReviewer;
 	agentId?: string;
 }): Promise<LandResult> {
-	const { repo, worktree, branch, head0, gate, message, committed, confirmResolved, resolver, reviewer, agentId } = a;
+	const { repo, worktree, branch, head0, gate, message, committed, confirmResolved, conflictMarkerGate, resolver, reviewer, agentId } = a;
 	const fail = (detail: string): LandResult => ({ ok: false, committed, merged: false, message, detail });
 
-	// (a) Rebase the branch onto main; (b) the resolver clears each conflicted step.
+	// (a) Rebase the branch onto main; (b) the resolver clears each conflicted step. `touchedFiles`
+	// accumulates every path the resolver was ever handed, across every step — the conflict-marker
+	// full-file scan below reads exactly this set (gauntlet round 1 finding #8), not a diff.
+	const touchedFiles = new Set<string>();
 	let r = await git(["rebase", head0], worktree);
 	for (let step = 0; r.code !== 0 && step < REBASE_STEP_CAP; step++) {
-		const files = (await git(["diff", "--name-only", "--diff-filter=U"], worktree)).stdout
-			.split("\n").map((s) => s.trim()).filter((s) => s.length > 0);
+		// `-z`: NUL-separated RAW byte paths — plain `--name-only` quotes/escapes any path core.quotePath
+		// considers "unusual" (default: anything outside the printable-ASCII range, e.g. `docs/é.md`), so
+		// a newline-split would enter `touchedFiles` a quoted string like `"docs/\303\251.md"` that `git
+		// show <ref>:<that string>` can never resolve — the full-file conflict-marker scan below would
+		// then silently skip a real conflicted file (gauntlet delta-verify round, finding #2, codex).
+		const files = (await git(["diff", "-z", "--name-only", "--diff-filter=U"], worktree)).stdout
+			.split("\0").filter((s) => s.length > 0);
 		if (files.length === 0) break; // stopped for a non-conflict reason → bail out below
+		for (const f of files) touchedFiles.add(f);
 		const resolved = await resolver({ worktree, files, branch, target: head0 }).catch(() => false);
 		if (!resolved) {
 			await git(["rebase", "--abort"], worktree).catch(() => undefined);
@@ -927,6 +973,24 @@ async function attemptAutoResolve(a: {
 	if (r.code !== 0) {
 		await git(["rebase", "--abort"], worktree).catch(() => undefined);
 		return fail(`auto-resolve: rebase of ${branch} failed: ${r.stderr || r.stdout}`);
+	}
+
+	// Conflict-marker gate (#330; gauntlet round 1 finding #8): the rebase+resolve loop above just
+	// wrote (possibly LLM-authored) resolutions for whatever conflicted — prove they don't ALSO leave
+	// live conflict-marker debris behind before staging or merging. A FULL-FILE scan (not an
+	// added-lines diff) of exactly the files the resolver touched: a resolver that inserts unresolved
+	// arms INSIDE an old teaching triple (reusing pre-existing marker lines as context the diff would
+	// treat as unchanged) would slip past an added-lines-only scan — full-file reading catches it, and
+	// is safe against false positives because the allowlist inside conflict-markers.ts exempts
+	// legitimate marker-carrying content a full scan would otherwise flag. `branch` now points at the
+	// rebased commits (the resolver's own output), never the pre-conflict branch (the landAgentImpl-
+	// level staged/post-merge checks already cover the ordinary, non-conflicting case). Runs before
+	// either exit path below (confirm-hold or immediate merge) so a human is never handed a "ready to
+	// land" that secretly still has markers. Never touches the resolver/prompt itself — this only
+	// reads what it already wrote.
+	if (conflictMarkerGate && conflictMarkerGateEnabled() && touchedFiles.size > 0) {
+		const markerReason = await conflictMarkerReasonForFiles(repo, branch, [...touchedFiles]);
+		if (markerReason) return fail(`auto-resolve: ${markerReason}`);
 	}
 
 	// Confirm hold (OMPSQ-138): the conflict is resolved on the rebased branch, but the merge is held

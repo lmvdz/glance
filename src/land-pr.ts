@@ -20,6 +20,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { classifyProbeFailure } from "./classify-probe-failure.ts";
+import { conflictMarkerGateEnabled, conflictMarkerReasonForRange } from "./conflict-markers.ts";
 import { getStorageBackend } from "./dal/storage.ts";
 import { hardenedGit } from "./git-harden.ts";
 import { budgetedExcerpt } from "./gate-logs.ts";
@@ -763,6 +764,21 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 			return attemptCleanAutomergeAndRetry(opts, stateDir, retry, ensure, onOrphan);
 		}
 
+		// Conflict-marker gate (#330; gauntlet round 1 finding #1 — CRITICAL): PR mode never ran this
+		// check at all before, a complete production-path bypass (most repos land via PR mode, not
+		// `landAgent`). Scan exactly what THIS scratch merge adds relative to the freshly-fetched
+		// `origin/<default>` tip — never a merge-base diff (finding #9's over-scan) — so a fixture that
+		// already converged onto the target independently is never re-flagged. Runs before any gate
+		// spends time on deps/tests. `conflictMarkerGate:false` (mirrors `staleGate`) bypasses it on a
+		// force-land; OMP_SQUAD_CONFLICT_MARKER_GATE=0 disables it globally.
+		const head0 = (await git(["rev-parse", `origin/${opts.defaultBranch}`], repo)).stdout;
+		if (opts.conflictMarkerGate !== false && conflictMarkerGateEnabled()) {
+			const markerReason = await conflictMarkerReasonForRange(scratch, head0, "HEAD");
+			if (markerReason) {
+				return { ok: false, committed, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: markerReason };
+			}
+		}
+
 		// Stale-branch gate (visual-plan-blocks incident, ported to PR mode via the SAME
 		// `staleBranchReason` primitive land.ts's local path uses — now generalized with a `baseRef`
 		// param), ENFORCED HERE — only on this textually-clean merge — mirroring land.ts's own ordering
@@ -838,8 +854,7 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 			}
 		}
 
-		const head0 = (await git(["rev-parse", `origin/${opts.defaultBranch}`], repo)).stdout;
-		prBaseTip = head0 || undefined; // receipt rollback point (T6): the base the PR merges INTO, captured pre-merge
+		prBaseTip = head0 || undefined; // receipt rollback point (T6): the base the PR merges INTO, captured pre-merge (reuses the head0 captured above for the conflict-marker scan — same origin tip, T2×T6 compose)
 		const regressionBlock = await applyRegressionGate({
 			repo: scratch,
 			head0,

@@ -31,6 +31,17 @@ the resolve-conflict workflow) and re-land, or force-land with a reason.
 </Step>
 
 <Step>
+### Refuse live conflict-marker debris
+A cheap textual scan of the branch's **added** lines refuses to land any file — `.md`/`.json`/
+`.txt` included — that still carries a live conflict-marker line (a start, a bare `=======`, or
+an end marker). Git's structural conflict check only fires on an actual unresolved merge; this
+catches debris a careless human, or AUTORESOLVE's own resolver, left behind in content that
+otherwise merges and compiles/parses fine. Only newly **added** lines are scanned, so a doc that
+already discussed markers before this branch is never flagged — that's the whole escape hatch.
+(`GLANCE_CONFLICT_MARKER_GATE=0` disables the gate globally; force skips it per-land.)
+</Step>
+
+<Step>
 ### Merge into main
 A **fast-forward** when the branch is a clean descendant of main (`git merge --ff-only`); a
 **merge commit** when main has diverged (`git merge --no-ff`). Nothing to merge (in-place agent,
@@ -121,7 +132,9 @@ the branch onto main, hands each conflicted file to a resolver (default: a one-s
 agent), then **proves** the result — the full verify gate **and** an independent reviewer pass
 must both approve — before completing the land. **Any failing step rolls `main` back** to where
 it was; an unproven resolution is never kept. It runs only when the worktree is clean, so a
-live agent's uncommitted edits are never clobbered.
+live agent's uncommitted edits are never clobbered. The conflict-marker gate above runs again
+here too, against the **resolver's own output** — a resolver that reports success while leaving
+`<<<<<<<`-style debris behind is caught before a human is ever shown "ready to land".
 </Callout>
 
 Because a verify gate plus reviewer can still miss a *semantic* conflict that is textually
@@ -150,6 +163,7 @@ safety valves shape it:
 | `GLANCE_AUTORESOLVE` | on | `landAgent`'s automated conflict resolver |
 | `GLANCE_AUTORESOLVE_CONFIRM` | on | An auto-resolved land is staged, never merged unattended |
 | `GLANCE_STALE_GATE` | on | Refuse clean merges from branches stale against evolved main |
+| `GLANCE_CONFLICT_MARKER_GATE` | on | Refuse a land whose diff adds a live conflict-marker line |
 | `GLANCE_REGRESSION_GATE` | off | Full-suite gate on the merged result; new failures block |
 | `GLANCE_AUTOLAND_FAIL_CAP` | `3` | Consecutive failed auto-lands before the branch is parked |
 | `GLANCE_REPAIR_BUDGET` | `3` | Red-gate retry budget before escalating — see [Autonomy](/docs/architecture/autonomy) |

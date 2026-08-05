@@ -3656,6 +3656,7 @@ export class SquadManager extends EventEmitter {
 				requireProof: !force,
 				staleGate: !force,
 				riskOverride: force, // human force-land clears the blast-radius gate too (C-LAND)
+				conflictMarkerGate: !force, // human force-land clears the conflict-marker gate too (#330)
 				verify: pf.acceptance ?? undefined,
 				issueId: rec?.dto.issue?.id,
 				issueIdentifier: rec?.dto.issue?.identifier,
@@ -4449,6 +4450,7 @@ export class SquadManager extends EventEmitter {
 			requireProof: !opts.force,
 			staleGate: !opts.force,
 			riskOverride: opts.force, // a human force-land clears the blast-radius gate too (C-LAND)
+			conflictMarkerGate: !opts.force, // a human force-land clears the conflict-marker gate too (#330)
 			issueId: dto.issue?.id,
 			issueIdentifier: dto.issue?.identifier,
 			issueProjectId: dto.issue?.projectId,
