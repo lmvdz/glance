@@ -61,3 +61,51 @@ test('GateVerdictCard renders pinned verdict material without answer controls', 
   expect(html).not.toContain('Submit');
   expect(html).not.toContain('Answer');
 });
+
+test('GateVerdictCard cites the reviewer-precision receipt line when present (glance#332)', () => {
+  const withPrecision: ChannelEntry = {
+    ...entry,
+    event: {
+      ...entry.event!,
+      payload: {
+        ...(entry.event!.payload as Record<string, unknown>),
+        face: {
+          ...(entry.event!.payload as { face: Record<string, unknown> }).face,
+          validation: {
+            ...(entry.event!.payload as { face: { validation: Record<string, unknown> } }).face.validation,
+            reviewerPrecision: { lineage: 'codex', n: 52, survived: 39, survivedRate: 0.75, provisional: false },
+          },
+        },
+      },
+    },
+  };
+  const view = dispatchChannelCard(withPrecision);
+  const html = renderToStaticMarkup(<GateVerdictCard view={view} />);
+  expect(html).toContain('Reviewer precision');
+  expect(html).toContain('codex, measured precision 75% (n=52 adjudicated rows)');
+});
+
+test('GateVerdictCard never fabricates a 0% for an unmeasured (n=0) reviewer-precision stamp', () => {
+  const withZero: ChannelEntry = {
+    ...entry,
+    event: {
+      ...entry.event!,
+      payload: {
+        ...(entry.event!.payload as Record<string, unknown>),
+        face: {
+          ...(entry.event!.payload as { face: Record<string, unknown> }).face,
+          validation: {
+            ...(entry.event!.payload as { face: { validation: Record<string, unknown> } }).face.validation,
+            reviewerPrecision: { lineage: 'grok', n: 0, survived: 0, provisional: true },
+          },
+        },
+      },
+    },
+  };
+  const view = dispatchChannelCard(withZero);
+  const html = renderToStaticMarkup(<GateVerdictCard view={view} />);
+  // Base fixture's Agreement/Confidence tiles legitimately show "100%"/"92%" (containing the substring
+  // "0%"), so the assertion targets the precision line itself, not the whole page.
+  expect(html).toContain('grok, unmeasured (n=0)');
+  expect(html).not.toContain('n=0, rate unavailable');
+});

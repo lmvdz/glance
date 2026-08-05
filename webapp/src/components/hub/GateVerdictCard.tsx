@@ -39,6 +39,38 @@ function pct(value: number | undefined): string {
   return typeof value === 'number' && Number.isFinite(value) ? `${Math.round(value * 100)}%` : 'unknown';
 }
 
+/** `Math.round` alone collapses any true rate below 0.5% to a printed "0%" — indistinguishable from an
+ *  honest, exact zero (gauntlet round 1, grok). A nonzero rate under 1% renders "<1%" instead; an EXACT
+ *  zero still renders "0%", so the two stay distinguishable. Mirrors the backend's
+ *  `formatPrecisionPct` (src/memory/reviewer-weights.ts). */
+function formatPrecisionPct(rate: number): string {
+  const p = rate * 100;
+  if (p > 0 && p < 1) return '<1%';
+  return `${Math.round(p)}%`;
+}
+
+/** glance#332's moat centerpiece, rendered on the receipt a human actually reads: "reviewer X, measured
+ *  precision p% (n=N adjudicated rows)", or an honest "unmeasured (n=0)" — mirrors the backend's
+ *  `renderReviewerPrecision` (src/memory/reviewer-weights.ts) wording exactly. Never fabricates a rate
+ *  for n=0 (gauntlet round 1 hardened this further: an unreadable or too-corrupt-to-trust ledger gets
+ *  its own distinct "unmeasured" reason, and a genuinely missing rate on an n>0 stamp is never rendered
+ *  as a fabricated "0%" via `?? 0`). */
+function reviewerPrecisionLabel(validation: ValidationRecordDTO | undefined): string | undefined {
+  const stamp = validation?.reviewerPrecision;
+  if (!stamp) return undefined;
+  if (stamp.unreadable) return `${stamp.lineage}, unmeasured (ledger unreadable: ${stamp.unreadable})`;
+  if (stamp.corrupt) {
+    const rows = stamp.rejected ?? 0;
+    return `${stamp.lineage}, unmeasured (ledger too corrupt to trust: ${rows} unparseable row${rows === 1 ? '' : 's'})`;
+  }
+  if (stamp.n === 0) return `${stamp.lineage}, unmeasured (n=0)`;
+  if (typeof stamp.survivedRate !== 'number' || !Number.isFinite(stamp.survivedRate)) return `${stamp.lineage}, unmeasured (n=${stamp.n}, rate unavailable)`;
+  const p = formatPrecisionPct(stamp.survivedRate);
+  const tag = stamp.provisional ? ' [provisional]' : '';
+  const corruptionNote = stamp.rejected ? `; ${stamp.rejected} row${stamp.rejected === 1 ? '' : 's'} unparseable` : '';
+  return `${stamp.lineage}, measured precision ${p} (n=${stamp.n} adjudicated row${stamp.n === 1 ? '' : 's'}${corruptionNote})${tag}`;
+}
+
 function refsFor(view: ChannelCardView): { channelId: string; entryId: string; unitId?: string } {
   const payload = recordObject(view.entry.event?.payload) ?? {};
   const refs = recordObject(payload.refs) ?? {};
@@ -57,6 +89,7 @@ export function GateVerdictCard({ view }: { view: ChannelCardView }) {
   const refs = refsFor(view);
   const verdict = validation?.verdict ?? (typeof face.verdict === 'string' ? face.verdict : 'unknown');
   const criteria = validation?.perCriterion ?? [];
+  const precisionLabel = reviewerPrecisionLabel(validation);
   const doorHref = gateVerdictHref(refs.channelId, refs.entryId);
 
   const openDoor = async (event: React.MouseEvent<HTMLAnchorElement>) => {
@@ -108,6 +141,11 @@ export function GateVerdictCard({ view }: { view: ChannelCardView }) {
                 <dd className="mt-0.5 truncate text-xs font-medium">{typeof face.unitName === 'string' ? face.unitName : refs.unitId ?? 'unknown'}</dd>
               </div>
             </dl>
+            {precisionLabel ? (
+              <p className="mt-2 text-[11px] opacity-70" title="Measured from plans/.reviews/reviewer-ledger.jsonl — never fabricated or smoothed.">
+                Reviewer precision: {precisionLabel}
+              </p>
+            ) : null}
             {criteria.length ? (
               <div className="mt-3 rounded-xl border border-current/10 bg-black/10 p-2">
                 <div className="text-[10px] font-medium uppercase tracking-[0.12em] opacity-50">Criteria</div>

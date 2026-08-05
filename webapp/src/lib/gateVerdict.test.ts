@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { absences, confidenceLine, consideredNotSurfaced, notSurfacedSentence, restsOn, verdictSentence, type VerdictCriterion } from './gateVerdict';
+import { absences, confidenceLine, consideredNotSurfaced, notSurfacedSentence, restsOn, reviewerPrecisionLine, verdictSentence, type VerdictCriterion } from './gateVerdict';
 
 describe('verdictSentence', () => {
   it('distinguishes a missing verdict from a verdict of unknown', () => {
@@ -58,6 +58,57 @@ describe('notSurfacedSentence', () => {
   });
   it('says plainly when nothing was left out', () => {
     expect(notSurfacedSentence(0)).toContain('Nothing was left out');
+  });
+});
+
+describe('reviewerPrecisionLine', () => {
+  it('renders an unmeasured lineage honestly, never a fabricated 0%', () => {
+    const line = reviewerPrecisionLine({ lineage: 'grok', n: 0 });
+    expect(line).toContain('unmeasured');
+    expect(line).not.toContain('0%');
+  });
+
+  it('states a measured precision with its n', () => {
+    const line = reviewerPrecisionLine({ lineage: 'codex', n: 52, survivedRate: 0.75, provisional: false });
+    expect(line).toContain('75%');
+    expect(line).toContain('52');
+    expect(line).not.toContain('provisional');
+  });
+
+  it('names a provisional lineage as provisional', () => {
+    const line = reviewerPrecisionLine({ lineage: 'native', n: 6, survivedRate: 1, provisional: true });
+    expect(line).toContain('provisional');
+    expect(line).toContain('6');
+  });
+
+  it('says nothing when no reviewer identity was resolved', () => {
+    expect(reviewerPrecisionLine(undefined)).toBeUndefined();
+  });
+
+  // ── gauntlet round 1 ──────────────────────────────────────────────────────────────────────────
+
+  it('renders a true rate under 1% as "<1%", never an indistinguishable "0%"', () => {
+    const line = reviewerPrecisionLine({ lineage: 'grok', n: 201, survivedRate: 1 / 201, provisional: false });
+    expect(line).toContain('<1%');
+    expect(line).not.toContain('0%');
+  });
+
+  it('renders an unreadable ledger with its own reason, distinct from plain unmeasured', () => {
+    const line = reviewerPrecisionLine({ lineage: 'grok', n: 0, unreadable: 'EACCES: permission denied' });
+    expect(line).toContain('could not be read');
+    expect(line).toContain('permission denied');
+  });
+
+  it('renders a too-corrupt-to-trust ledger with its own reason, citing the unparseable count', () => {
+    const line = reviewerPrecisionLine({ lineage: 'grok', n: 0, corrupt: true, rejected: 9 });
+    expect(line).toContain('too corrupt to trust');
+    expect(line).toContain('9 unparseable rows');
+  });
+
+  it('never fabricates a 0% when n>0 but the rate is genuinely missing', () => {
+    const line = reviewerPrecisionLine({ lineage: 'grok', n: 5, provisional: true });
+    expect(line).toContain('unmeasured');
+    expect(line).not.toContain('0%');
   });
 });
 

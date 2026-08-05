@@ -458,6 +458,30 @@ export async function assertMerged(input: { repo: string; defaultBranch: string;
 }
 
 /**
+ * THIS PR's OWN merge commit OID — PR-scoped, for the land receipt's `landedCommit` (T6, glance#334,
+ * gauntlet r3 codex delta-verify HIGH+MEDIUM). It must be the commit `gh pr merge` produced FOR THIS
+ * pr, never the branch-latest `origin/<default>` tip: a second PR Q merging into the same default
+ * branch before/during our fetch moves that tip to Q's commit, and the in-process `withRepoLandLock`
+ * can't serialize GitHub / a second daemon / a human merging concurrently. `gh pr view <pr> --json
+ * mergeCommit` is scoped to THIS pr and returns the right commit uniformly across merge/squash/rebase
+ * (the same source squash/rebase's `assertMerged` already reads).
+ *
+ * Returns a VALIDATED 40-hex OID, or undefined when it can't be obtained — a `gh` failure (ghJson
+ * already maps a non-zero exit to undefined) OR a null/short/non-hex `mergeCommit.oid`. The caller then
+ * records attribution as UNAVAILABLE (a receipt that renders "landed commit: unavailable"), NEVER the
+ * branch tip and NEVER a racing land's SHA. This is the honest-over-wrong contract: a missing ref must
+ * fall through to unavailable, so we validate the shape here rather than trusting a truthy string.
+ */
+async function prMergeCommitOid(repo: string, prNumber: number): Promise<string | undefined> {
+	const view = await ghJson<{ mergeCommit?: { oid?: string } }>(
+		["pr", "view", String(prNumber), "--repo", slugOf(repo), "--json", "mergeCommit"],
+		repo,
+	);
+	const oid = view?.mergeCommit?.oid;
+	return typeof oid === "string" && /^[0-9a-f]{40}$/i.test(oid) ? oid : undefined;
+}
+
+/**
  * Post-merge orphan assertion (the guard behind FIVE manual-audit incidents — see MEMORY.md "omp-squad
  * orphaned merged-PR audit"): runs AFTER `assertMerged` already passed, using the complementary check
  * `scripts/orphan-audit.ts` sweeps the whole repo with (`git cherry`, src/orphan-audit.ts) —
@@ -640,6 +664,11 @@ export async function transplantedCommitsReason(repo: string, branch: string, de
 
 async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, stateDir: string, retry: number, onOrphan?: AutomationRecorder): Promise<LandResult> {
 	const { repo, worktree, branch, message } = opts;
+	// Receipt attribution (T6, glance#334): the `origin/<default>` base the PR merges INTO, captured
+	// pre-merge inside the scratch-gate block below and surfaced on the merged result as `head0` (the
+	// receipt's rollback point). `gh pr merge` never moves the local checkout HEAD, so the receipt must
+	// use the PR's own merge commit + this base, NOT local HEAD.
+	let prBaseTip: string | undefined;
 
 	// In-place agent (no branch, or worktree === repo): nothing to merge, mirrors landAgentImpl.
 	if (!branch || worktree === repo) {
@@ -825,6 +854,7 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 			}
 		}
 
+		prBaseTip = head0 || undefined; // receipt rollback point (T6): the base the PR merges INTO, captured pre-merge (reuses the head0 captured above for the conflict-marker scan — same origin tip, T2×T6 compose)
 		const regressionBlock = await applyRegressionGate({
 			repo: scratch,
 			head0,
@@ -883,7 +913,19 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 	});
 	updatePendingPr(stateDir, branch, { state: "merged", mergedAt: Date.now(), proofAt: Date.now() });
 
-	return { ok: true, committed: true, merged: true, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, prState: "merged" };
+	// Receipt attribution (T6, gauntlet round 3 — codex delta-verify HIGH+MEDIUM): the landed commit must
+	// be THIS PR's OWN merge commit, so a human can find it AND a concurrent land can't be mis-attributed
+	// to this receipt. The post-fetch `origin/<default>` tip is NOT safe: a second PR Q merging into the
+	// same default branch before/during our fetch moves that tip to Q's commit (so `head0..tip` would span
+	// Q's work), and the in-process land lock can't serialize GitHub / a second daemon / a human. The old
+	// fallback chain also had a ref-read defect — `git rev-parse` on a missing ref returns exit 128 with a
+	// non-OID but truthy stdout, bypassing every fallback; and for `--merge`, `assertMerged.mergeCommit`
+	// IS the branch tip (the original r2 defect). Both are gone: `prMergeCommitOid` reads THIS pr's
+	// mergeCommit.oid (uniform across merge/squash/rebase) and VALIDATES a real 40-hex OID. When it can't
+	// be obtained, `landedCommit` is undefined — the receipt records attribution as UNAVAILABLE (honest),
+	// NEVER the branch tip and NEVER a racing land's SHA.
+	const landedCommit = await prMergeCommitOid(repo, ensure.prNumber);
+	return { ok: true, committed: true, merged: true, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, prState: "merged", head0: prBaseTip, landedCommit };
 }
 
 /**

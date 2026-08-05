@@ -21,10 +21,12 @@ import {
 	DEFAULT_HARNESS,
 	getHarness,
 	globalDefaultHarness,
+	harnessAcceptsModel,
 	harnessTierInfo,
 	hasSecondVerifiedProviderLane,
 	listHarnesses,
 	listHarnessTiers,
+	nearestCompatibleModel,
 	registerHarness,
 	resolveAcpCommand,
 	resolveBin,
@@ -99,9 +101,8 @@ test("listHarnesses hides unverified harnesses unless OMP_SQUAD_UNVERIFIED_HARNE
 	stashEnv("OMP_SQUAD_UNVERIFIED_HARNESS");
 	delete process.env.OMP_SQUAD_UNVERIFIED_HARNESS;
 	const visible = listHarnesses().map((d) => d.name);
-	expect(visible).toEqual(expect.arrayContaining(["omp", "pi", "opencode", "claude-code"])); // live-verified (claude-code: 2026-07-16 smoke, daily-onramp 02)
+	expect(visible).toEqual(expect.arrayContaining(["omp", "pi", "opencode", "claude-code", "codex"])); // live-verified (claude-code: 2026-07-16 smoke, daily-onramp 02; codex: 2026-08-04 smoke, ticket #336)
 	expect(visible).not.toContain("gemini"); // unverified (binary absent) — hidden
-	expect(visible).not.toContain("codex");
 	const all = listHarnesses(true).map((d) => d.name);
 	expect(all).toEqual(expect.arrayContaining(["omp", "pi", "gemini", "opencode", "claude-code", "codex", "auggie"]));
 });
@@ -115,6 +116,82 @@ test("capability descriptors: pi has no host-tools/approval; ACP harnesses are n
 	expect(gemini.resumable).toBe(false); // direct ACP spawn — no reattach (concern 07)
 	expect(gemini.contextInjection).toBe("none"); // ACP has no system-prompt slot (concern 06)
 	expect(gemini.hostTools).toBe(false);
+});
+
+// ── harness↔model-family compatibility (ticket #347) ─────────────────────────
+
+test("harnessAcceptsModel: codex (openai-pinned) refuses an anthropic-family literal", () => {
+	const codex = getHarness("codex")!;
+	expect(harnessAcceptsModel(codex, "opus")).toBe(false);
+	expect(harnessAcceptsModel(codex, "sonnet")).toBe(false);
+	expect(harnessAcceptsModel(codex, "anthropic/claude-sonnet-4-5")).toBe(false);
+});
+
+test("harnessAcceptsModel: codex accepts its own family / an unset model", () => {
+	const codex = getHarness("codex")!;
+	expect(harnessAcceptsModel(codex, "gpt-5.6-sol[high]")).toBe(true); // same lineage (openai)
+	expect(harnessAcceptsModel(codex, undefined)).toBe(true); // nothing to check
+});
+
+test("harnessAcceptsModel: grok (xai-pinned) refuses opus, accepts its own family", () => {
+	const grok = getHarness("grok")!;
+	expect(harnessAcceptsModel(grok, "opus")).toBe(false);
+	expect(harnessAcceptsModel(grok, "grok-4.5")).toBe(true);
+});
+
+test("harnessAcceptsModel: claude-code (anthropic-pinned) accepts opus/sonnet, refuses an openai family", () => {
+	const claudeCode = getHarness("claude-code")!;
+	expect(harnessAcceptsModel(claudeCode, "opus")).toBe(true);
+	expect(harnessAcceptsModel(claudeCode, "sonnet")).toBe(true);
+	expect(harnessAcceptsModel(claudeCode, "gpt-5.6-sol")).toBe(false);
+});
+
+test("harnessAcceptsModel: multi-vendor harnesses (omp/pi/opencode/auggie) fail OPEN for any model — no static vendor pin to enforce", () => {
+	for (const name of ["omp", "pi", "opencode", "auggie"]) {
+		const d = getHarness(name)!;
+		expect(harnessAcceptsModel(d, "opus")).toBe(true);
+		expect(harnessAcceptsModel(d, "gpt-5.6-sol")).toBe(true);
+		expect(harnessAcceptsModel(d, "grok-4.5")).toBe(true);
+	}
+});
+
+// ── PR #359 blind review round (codex, HIGH #1): single-vendor harnesses fail CLOSED on an
+// unclassifiable model, not just a confirmed-different one ────────────────────────────────────
+
+test("harnessAcceptsModel: a KNOWN single-vendor harness fails CLOSED on an UNCLASSIFIABLE model — 'o1' on claude-code, exactly the gauntlet's reproduction", () => {
+	const claudeCode = getHarness("claude-code")!;
+	// modelFamily() (omp-graph/attribution.ts) only recognizes o3/o4 via `\bo[34]\b` — "o1" is a real
+	// OpenAI model but resolves to lineage "unknown" today. A vendor-PINNED harness must never read an
+	// unknown lineage as "assume compatible": that is precisely the leak that would let a wrong-vendor
+	// model through every time the classifier lags a new model name (whack-a-mole, not a fix).
+	expect(harnessAcceptsModel(claudeCode, "o1")).toBe(false);
+	// The mirror case still holds: a model that DOES resolve, and matches, is fine.
+	expect(harnessAcceptsModel(claudeCode, "sonnet")).toBe(true);
+});
+
+test("harnessAcceptsModel: single-vendor fail-closed generalizes across codex/grok/gemini, never a per-model patch", () => {
+	// codex: same unclassifiable-model shape, different vendor pin (openai).
+	expect(harnessAcceptsModel(getHarness("codex")!, "o1")).toBe(false);
+	expect(harnessAcceptsModel(getHarness("codex")!, "some-unclassifiable-string")).toBe(false);
+	// grok: xai-pinned, same posture.
+	expect(harnessAcceptsModel(getHarness("grok")!, "some-unclassifiable-string")).toBe(false);
+	// gemini: registered (unverified) but still google-pinned by harnessLineage — the compat function
+	// itself doesn't gate on `verified`, so this exercises the lineage logic in isolation.
+	expect(harnessAcceptsModel(getHarness("gemini")!, "some-unclassifiable-string")).toBe(false);
+});
+
+test("harnessAcceptsModel: multi-vendor harnesses (omp) still fail OPEN on the SAME unclassifiable string — the asymmetry is deliberate, not a blanket fail-closed", () => {
+	expect(harnessAcceptsModel(getHarness("omp")!, "some-unclassifiable-string")).toBe(true);
+	expect(harnessAcceptsModel(getHarness("omp")!, "o1")).toBe(true);
+});
+
+test("nearestCompatibleModel: falls back to the descriptor's own staticModels[0] when declared, else undefined", () => {
+	expect(nearestCompatibleModel(getHarness("claude-code")!)).toBe("default");
+	expect(nearestCompatibleModel(getHarness("grok")!)).toBe("grok-4.5");
+	// codex/gemini declare no staticModels (live-probed catalogs, not a small stable set) — honestly
+	// undefined, never a guessed id.
+	expect(nearestCompatibleModel(getHarness("codex")!)).toBeUndefined();
+	expect(nearestCompatibleModel(getHarness("gemini")!)).toBeUndefined();
 });
 
 // ── makeDriver selection (real makeDriver, no spawn — start() is what spawns) ──
@@ -204,6 +281,29 @@ test("create() rejects sandbox on a non-omp harness (sandbox×non-omp is unbuild
 	const repo = await makeRepo();
 	const mgr = mgrFor(stateDir);
 	await expect(mgr.create({ name: "g", repo, harness: "gemini", approvalMode: "yolo", sandbox: { image: "alpine", workdir: "/w" }, autoRoute: false })).rejects.toThrow(/cannot run sandboxed/);
+	await mgr.stop();
+});
+
+test("create() rejects an EXPLICIT cross-family model on a vendor-pinned harness (ticket #347) — same loud-reject idiom as sandbox/approval/thinking", async () => {
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "harness-modelcompat-explicit-"));
+	tmps.push(stateDir);
+	const repo = await makeRepo();
+	const mgr = mgrFor(stateDir);
+	// codex is openai-pinned; "opus" is an anthropic-family literal an operator explicitly chose —
+	// the router never ran, so this must be a loud config error, not a silent remap.
+	await expect(mgr.create({ name: "c", repo, harness: "codex", model: "opus", approvalMode: "yolo", autoRoute: false })).rejects.toThrow(/incompatible with harness "codex"/);
+	await mgr.stop();
+});
+
+test("create() rejects an EXPLICIT UNCLASSIFIABLE model on a vendor-pinned harness (PR #359 blind review, codex, HIGH) — 'o1' on claude-code, never silently accepted", async () => {
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "harness-modelcompat-unclassified-"));
+	tmps.push(stateDir);
+	const repo = await makeRepo();
+	const mgr = mgrFor(stateDir);
+	// "o1" is a real OpenAI model, but modelFamily()'s `\bo[34]\b` regex doesn't recognize it, so it
+	// resolves to lineage "unknown" — the exact gap that used to read as "assume compatible" on a
+	// harness explicitly pinned to a SINGLE vendor (claude-code → anthropic). Must reject, not pass.
+	await expect(mgr.create({ name: "u", repo, harness: "claude-code", model: "o1", approvalMode: "yolo", autoRoute: false })).rejects.toThrow(/incompatible with harness "claude-code"/);
 	await mgr.stop();
 });
 
@@ -300,13 +400,16 @@ test("hasSecondVerifiedProviderLane: TRUE today — grok is verified and vendor-
 test("hasSecondVerifiedProviderLane: false when grok is the only pinned lane and it is unverified", () => {
 	stashEnv("OMP_SQUAD_UNVERIFIED_HARNESS");
 	delete process.env.OMP_SQUAD_UNVERIFIED_HARNESS;
-	// Roll back to the pre-grok, pre-claude-code world: omp/pi/opencode are verified but multi-model
-	// (unknown lineage), and gemini/codex are registered-but-unsmoked ⇒ no differentiation for the
-	// ladder. claude-code passed its own live smoke on 2026-07-16 (daily-onramp 02), so it must be
-	// held unverified here too for the pre-pinned-lane world to exist at all.
+	// Roll back to the pre-grok, pre-claude-code, pre-codex world: omp/pi/opencode are verified but
+	// multi-model (unknown lineage), and gemini is registered-but-unsmoked ⇒ no differentiation for the
+	// ladder. claude-code (2026-07-16, daily-onramp 02) and codex (2026-08-04, ticket #336) each passed
+	// their own live smoke since, so both must be held unverified here too for the pre-pinned-lane world
+	// to exist at all.
 	withHarnessOverride("grok", { verified: false }, () => {
 		withHarnessOverride("claude-code", { verified: false }, () => {
-			expect(hasSecondVerifiedProviderLane("omp")).toBe(false);
+			withHarnessOverride("codex", { verified: false }, () => {
+				expect(hasSecondVerifiedProviderLane("omp")).toBe(false);
+			});
 		});
 	});
 });
@@ -314,13 +417,15 @@ test("hasSecondVerifiedProviderLane: false when grok is the only pinned lane and
 test("hasSecondVerifiedProviderLane: OMP_SQUAD_UNVERIFIED_HARNESS=1 does NOT fabricate a lane (verified-only contract)", () => {
 	stashEnv("OMP_SQUAD_UNVERIFIED_HARNESS");
 	process.env.OMP_SQUAD_UNVERIFIED_HARNESS = "1"; // surfaces unverified harnesses on create UIs...
-	// ...but an unsmoked codex/gemini registration is NOT a real second subscription lane: telling the
-	// dispatcher otherwise would trade the fleet-safety freeze for a lane that half-works. grok AND
-	// claude-code (both genuinely verified today) are held unverified here so the ONLY thing that
-	// could flip this true is the env escape hatch.
+	// ...but an unsmoked gemini registration is NOT a real second subscription lane: telling the
+	// dispatcher otherwise would trade the fleet-safety freeze for a lane that half-works. grok,
+	// claude-code, AND codex (all genuinely verified today) are held unverified here so the ONLY thing
+	// that could flip this true is the env escape hatch.
 	withHarnessOverride("grok", { verified: false }, () => {
 		withHarnessOverride("claude-code", { verified: false }, () => {
-			expect(hasSecondVerifiedProviderLane("omp")).toBe(false);
+			withHarnessOverride("codex", { verified: false }, () => {
+				expect(hasSecondVerifiedProviderLane("omp")).toBe(false);
+			});
 		});
 	});
 });
@@ -331,11 +436,13 @@ test("hasSecondVerifiedProviderLane: true once a vendor-pinned harness is actual
 	// claude-code HAS passed a live smoke (2026-07-16, daily-onramp 02) — the "simulate" of this
 	// test's first life is now the registry's real state; the override just makes the flip explicit.
 	withHarnessOverride("grok", { verified: false }, () => {
-		withHarnessOverride("claude-code", { verified: true }, () => {
-			expect(hasSecondVerifiedProviderLane("omp")).toBe(true); // anthropic-pinned lane, distinct from omp's unknown
-		});
-		withHarnessOverride("claude-code", { verified: false }, () => {
-			expect(hasSecondVerifiedProviderLane("omp")).toBe(false); // both pinned lanes held down — pre-grok world
+		withHarnessOverride("codex", { verified: false }, () => {
+			withHarnessOverride("claude-code", { verified: true }, () => {
+				expect(hasSecondVerifiedProviderLane("omp")).toBe(true); // anthropic-pinned lane, distinct from omp's unknown
+			});
+			withHarnessOverride("claude-code", { verified: false }, () => {
+				expect(hasSecondVerifiedProviderLane("omp")).toBe(false); // all three pinned lanes held down — pre-grok world
+			});
 		});
 	});
 });
@@ -344,12 +451,14 @@ test("hasSecondVerifiedProviderLane: a vendor-pinned DEFAULT harness needs a gen
 	stashEnv("OMP_SQUAD_UNVERIFIED_HARNESS");
 	delete process.env.OMP_SQUAD_UNVERIFIED_HARNESS;
 	withHarnessOverride("grok", { verified: false }, () => {
-		withHarnessOverride("claude-code", { verified: true }, () => {
-			// default = claude-code (anthropic); the only other verified vendor-pinned harness is itself ⇒ false.
-			expect(hasSecondVerifiedProviderLane("claude-code")).toBe(false);
-			// A verified GOOGLE lane appears ⇒ genuinely different vendor ⇒ true.
-			withHarnessOverride("gemini", { verified: true }, () => {
-				expect(hasSecondVerifiedProviderLane("claude-code")).toBe(true);
+		withHarnessOverride("codex", { verified: false }, () => {
+			withHarnessOverride("claude-code", { verified: true }, () => {
+				// default = claude-code (anthropic); the only other verified vendor-pinned harness is itself ⇒ false.
+				expect(hasSecondVerifiedProviderLane("claude-code")).toBe(false);
+				// A verified GOOGLE lane appears ⇒ genuinely different vendor ⇒ true.
+				withHarnessOverride("gemini", { verified: true }, () => {
+					expect(hasSecondVerifiedProviderLane("claude-code")).toBe(true);
+				});
 			});
 		});
 	});

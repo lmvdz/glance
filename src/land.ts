@@ -17,7 +17,7 @@ import { envBool } from "./config.ts";
 import { gateExec, gateRunUnrunnable, greenGateUnproven } from "./gate-runner.ts";
 import { reduceOutput } from "./output-reduce.ts";
 import { proofGate, recordProof } from "./proof.ts";
-import { landRiskGateEnabled, landRiskReason } from "./land-risk.ts";
+import { landRiskGateEnabled, landRiskReason } from "./rail/land-risk.ts";
 import { conflictMarkerGateEnabled, conflictMarkerReasonForFiles, conflictMarkerReasonForRange, conflictMarkerReasonStaged } from "./conflict-markers.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV, gitNoSignEnv } from "./git-harden.ts";
 import { harnessAuthEnv, scrubbedSpawnEnv } from "./spawn-env.ts";
@@ -57,6 +57,21 @@ export interface LandResult {
 	/** PR mode only: the PR's lifecycle state at the moment this result was produced. `merged` is set
 	 *  ONLY after the post-merge reachability assertion passes — never optimistically on `gh pr merge`'s exit code alone. */
 	prState?: "draft" | "open" | "merged" | "closed";
+	/**
+	 * Receipt attribution (T6, glance#334) — the land's own facts, captured IN-LOCK and keyed to THIS
+	 * land so a concurrent land cannot move HEAD out from under a post-hoc re-read (the TOCTOU the land
+	 * receipt would otherwise mis-attribute). Both are STABLE commit SHAs, so any later diff/rollback the
+	 * receipt computes from them (`head0..landedCommit`, `head0` as the revert target) is deterministic
+	 * regardless of what HEAD points at when the receipt is rendered.
+	 *
+	 * `head0` is the pre-land tip main returns to on a revert (local: main's HEAD before the merge; PR:
+	 * the `origin/<default>` base the PR merged into). `landedCommit` is the commit that actually landed
+	 * (local: main's HEAD after the merge; PR: the merge commit `gh` produced — NOT the local checkout
+	 * HEAD, which `gh pr merge` never moves). Both are set ONLY on a real merge (`merged: true`); absent
+	 * on any no-merge result, so the receipt shows no commit for a land that didn't merge.
+	 */
+	head0?: string;
+	landedCommit?: string;
 }
 
 /**
@@ -606,6 +621,15 @@ async function landAgentImpl(opts: LandOpts): Promise<LandResult> {
 	const head0 = (await git(["rev-parse", "HEAD"], repo)).stdout;
 	const gate = opts.verify !== undefined ? opts.verify : await detectVerify(repo);
 
+	// Receipt attribution (T6, glance#334): stamp the land's own facts onto a merged result WHILE still
+	// holding the repo land lock — `head0` (captured above, pre-merge) and the landed commit (main's HEAD
+	// right now, i.e. after the merge). Both are stable SHAs, so the receipt renderer can diff/rollback
+	// from them without racing a concurrent land's HEAD move. Only called on a real merge.
+	const withMergedFacts = async (result: LandResult): Promise<LandResult> => {
+		const landedCommit = (await git(["rev-parse", "HEAD"], repo)).stdout || undefined;
+		return { ...result, head0: head0 || undefined, landedCommit };
+	};
+
 	// Finding #10 (eap-borrows wave 2): detectVerify() collapses "genuinely no toolchain" and "package.json
 	// exists but is unreadable/malformed" into the SAME undefined — the right answer for a router/observer,
 	// but the land path used to then silently treat a broken node repo as "no acceptance gate, proceed"
@@ -653,7 +677,7 @@ async function landAgentImpl(opts: LandOpts): Promise<LandResult> {
 			if (rg) return rg;
 			// Record the landed main even without a gate: an inspectable "landed, no acceptance gate ran" proof.
 			await recordMainProof(repo, "(no acceptance gate)", true, detail, false);
-			return { ok: true, committed, merged: true, message, detail };
+			return withMergedFacts({ ok: true, committed, merged: true, message, detail });
 		}
 		const v = await runGate(gate, repo);
 		if (v.code === 0) {
@@ -680,7 +704,7 @@ async function landAgentImpl(opts: LandOpts): Promise<LandResult> {
 			if (rg) return rg;
 			// The merged main passed the gate — record it as a durable, inspectable post-merge proof.
 			await recordMainProof(repo, gate, true, `${detail}; verified (${gate})\n${(await reduceOutput(v.output, 800, { command: gate, agentId: opts.agentId, source: "land-detail" })).text}`.trim(), v.sandboxed);
-			return { ok: true, committed, merged: true, message, detail: `${detail}; verified (${gate})` };
+			return withMergedFacts({ ok: true, committed, merged: true, message, detail: `${detail}; verified (${gate})` });
 		}
 		// Merged gate failed — distinguish "branch regressed a green base" from "base was already red".
 		await git(["reset", "--hard", head0], repo).catch(() => {});
@@ -752,7 +776,7 @@ async function landAgentImpl(opts: LandOpts): Promise<LandResult> {
 		// Landed onto a red baseline — record it honestly: ok:false so the post-merge proof reflects that
 		// main was not green (the branch introduced no NEW failure, but main is still red).
 		await recordMainProof(repo, gate, false, `landed onto a red baseline — main was not green at head0 (${gate})\n${await excerptForDetail(v.output, 800, opts.agentId)}`.trim(), v.sandboxed);
-		return { ok: true, committed, merged: true, message, detail: `${detail}; landed onto a red baseline — main was not green at head0 (${gate})` };
+		return withMergedFacts({ ok: true, committed, merged: true, message, detail: `${detail}; landed onto a red baseline — main was not green at head0 (${gate})` });
 	};
 
 	const ff = await git(["merge", "--ff-only", branch], repo);
@@ -1005,7 +1029,10 @@ async function attemptAutoResolve(a: {
 
 	// (e) Proven ⇒ keep it, and record the landed main as a durable post-merge proof.
 	await recordMainProof(repo, gate || "(no acceptance gate)", true, `auto-resolved conflict and merged ${branch}${gate ? `; verified (${gate})` : ""}; reviewer approved`, gateSandboxed);
-	return { ok: true, committed, merged: true, message, detail: `auto-resolved conflict and merged ${branch}${gate ? `; verified (${gate})` : ""}; reviewer approved` };
+	// Receipt attribution (T6, glance#334): stamp in-lock, same as `withMergedFacts` on the direct path —
+	// head0 is the pre-merge tip, HEAD is now the landed (auto-resolved+ff'd) commit.
+	const landedCommit = (await git(["rev-parse", "HEAD"], repo)).stdout || undefined;
+	return { ok: true, committed, merged: true, message, head0: head0 || undefined, landedCommit, detail: `auto-resolved conflict and merged ${branch}${gate ? `; verified (${gate})` : ""}; reviewer approved` };
 }
 
 /**

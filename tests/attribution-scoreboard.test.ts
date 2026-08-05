@@ -74,7 +74,22 @@ describe("buildScoreboard", () => {
 			{ harness: "codex", runs: 1, costUsd: 5.0 }, // sorted by cost desc
 			{ harness: "omp", runs: 4, costUsd: 1.6 },
 		]);
-		expect(sb.totals).toEqual({ landed: 5, rejected: 3, daemonCostUsd: 1.6, totalCostUsd: 6.6 });
+		expect(sb.totals).toEqual({ landed: 5, rejected: 3, daemonCostUsd: 1.6, totalCostUsd: 6.6, unattributedRuns: 0 });
+	});
+
+	/** ticket #336 gauntlet finding 3 (grok, HIGH): codex's `usageVerified` is unset — a run whose usage
+	 *  never arrived stamps `costUnknown: true` with `costUsd` left undefined. Before this fix,
+	 *  `costUsd ?? 0` folded that into harnessSpend's sum — a verified-but-usage-unconfirmed harness
+	 *  rendered as literally free. Pin: excluded from the cost sum, tallied as unattributedRuns instead. */
+	test("a costUnknown receipt is excluded from harnessSpend's cost sum and tallied as unattributedRuns", () => {
+		const known = rc("gpt-5.5", 5.0, "codex");
+		const unknown: RunReceipt = { ...rc("gpt-5.6-sol[high]", 0, "codex"), costUsd: undefined, costUnknown: true };
+		const sb2 = buildScoreboard([known, unknown], {});
+
+		const codex = sb2.harnessSpend.find((h) => h.harness === "codex")!;
+		expect(codex).toEqual({ harness: "codex", runs: 2, costUsd: 5.0, unattributedRuns: 1 }); // the unknown run never became a fabricated $0
+		expect(sb2.totals.totalCostUsd).toBe(5.0);
+		expect(sb2.totals.unattributedRuns).toBe(1);
 	});
 
 	test("a model with lands but no daemon receipts has null $/landed (no cost to divide)", () => {

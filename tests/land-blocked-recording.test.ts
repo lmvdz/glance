@@ -17,7 +17,7 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { landFailureCount } from "../src/land-ledger.ts";
+import { landFailureCount } from "../src/rail/land-ledger.ts";
 import { modelOutcomes } from "../src/model-outcomes.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import { SubagentTracker } from "../src/subagents.ts";
