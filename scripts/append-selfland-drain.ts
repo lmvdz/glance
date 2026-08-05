@@ -30,7 +30,7 @@ import * as path from "node:path";
 import { parseArgs } from "../src/cli-args.ts";
 import { insertLedgerRow } from "../src/meta-ledger.ts";
 import { resolveStateDir } from "../src/state-dir.ts";
-import { landReceiptDir } from "../src/rail/index.ts";
+import { normalizeGitUrl } from "../src/repo-identity.ts";
 import { readLandReceiptIndex, landMetricsWindow, utcDayOf } from "../src/rail/land-metrics.ts";
 
 const { flags } = parseArgs(process.argv.slice(2));
@@ -39,21 +39,28 @@ const metaPath = typeof flags.meta === "string" ? path.resolve(flags.meta) : pat
 const days = typeof flags.days === "string" && Number.isFinite(Number(flags.days)) ? Math.max(1, Math.trunc(Number(flags.days))) : 7;
 // The self-vs-fleet filter (grok #361): a state dir can hold lands for MANY repos. Only when --repo is
 // given can the row honestly say "self-lands"; without it the row counts ALL repos and says so.
-const repo = typeof flags.repo === "string" && flags.repo.length > 0 ? flags.repo : undefined;
+// Normalize the flag through the SAME path the writer derives receipt.repo from
+// (repoIdentity → normalizeGitUrl → last two segments), so `Lmvdz/Glance`, a trailing slash, a `.git`
+// suffix, or a full URL all match the stored lowercase `owner/repo` slug instead of silently zeroing
+// a real week (grok #361 R1). A bare `--repo` (no value) parses to boolean true → treated as absent.
+const rawRepo = typeof flags.repo === "string" && flags.repo.length > 0 ? flags.repo : undefined;
+const repo = rawRepo ? normalizeGitUrl(rawRepo).split("/").slice(-2).join("/") : undefined;
 
 const fail = (msg: string): never => {
 	console.error(`append-selfland-drain: ${msg}`);
 	process.exit(1);
 };
 
-// 1a) Wrong-state-dir guard (grok #361). A MISSING index file is an honest "no lands yet" ONLY when
-// the state dir is genuinely a daemon state dir. If the land-receipts DIRECTORY itself is absent, the
-// path is almost certainly wrong (a fresh mktemp, a typo, the daemon's dir not resolved) — appending a
-// confident "0 land(s)" week from a never-used path would poison the gate exactly the way a fabricated
-// zero would. Fail-closed instead. (An empty-but-present dir, or a present dir with no in-window lands,
-// remains an honest measured zero.)
-if (!existsSync(landReceiptDir(stateDir))) {
-	fail(`no land-receipts/ dir under ${stateDir} — this state dir has never run a rail land. Point --state-dir at the daemon's state dir (is it the right one?); refusing to append a 0-land row from an unused path`);
+// 1a) Wrong-state-dir guard (grok #361 G1). A MISSING index file is an honest "no lands yet" ONLY when
+// the state dir is genuinely a daemon state dir. Guard on a real DAEMON MARKER (daemon.lock or
+// state.json — written on daemon start, long before any land), NOT on the land-receipts/ dir:
+//  - guarding on land-receipts/ FALSE-NEGATIVED a correct virgin daemon that had started but never
+//    landed (no receipts dir yet) → it could never record an honest week-0 "0 lands" row (grok G1b);
+//  - and it FALSE-POSITIVED a wrong path where someone had `mkdir`'d land-receipts/ (grok G1a).
+// A daemon marker is present exactly when a daemon has run here, and absent for a typo/empty path.
+const daemonMarkers = ["daemon.lock", "state.json"];
+if (!daemonMarkers.some((m) => existsSync(path.join(stateDir, m)))) {
+	fail(`${stateDir} has no daemon marker (${daemonMarkers.join(" / ")}) — no daemon has run here. Point --state-dir at the daemon's state dir (is it the right one?); refusing to append a 0-land row from a path that isn't a daemon state dir`);
 }
 
 // 1b) Read the index. ENOENT ⇒ honest empty (dir exists, rail hasn't landed yet). Any other error ⇒
