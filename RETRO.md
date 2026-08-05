@@ -40,6 +40,24 @@ Three standing rules (campaign doctrine):
 - Builder caught a design estimate wrong (8 test files vs ~4) by grepping with .ts extensions
   — the verify-claims-against-the-tree dispatch line keeps earning its place.
 
+### 2026-08-04 — T2 #330 (conflict-marker gate) — closed after 2 CRITICALs, 2 gauntlet + 2 delta-verify rounds
+- **The headline lesson of the whole campaign, stated sharpest here: a gate whose adversary is
+  the agent cannot accept ANY agent-controllable exemption.** The false-positive fix (a path/token
+  allowlist so legit fixture content wouldn't be blocked) opened a false-NEGATIVE against the exact
+  adversary the gate exists to catch — the token literal even self-exempted the gate's own source
+  file. Both foreign lineages found it independently. Resolution: no agent-settable exemption at
+  all; the human force-land (already the stale-gate/land-risk authority) is the sole per-land
+  exemption. Design any autonomous-agent gate this way from the start.
+- Also a first-principles reminder: the FIRST gauntlet found the gate had a total PR-mode bypass
+  (a whole production land path it never ran on). A merge-safety gate with an unguarded path is
+  worse than no gate — it reads as protection that isn't there. Enumerate every land path before
+  claiming a gate covers "the land."
+- Close-by-severity again: CRITICAL bypasses fixed + proven; a delete-resolution false-positive
+  (fails safe, force-land workaround) + an operator-env doc → follow-up #355. The env disable is
+  operator-plane (not agent-reachable — spawn-env scrubs OMP_SQUAD_* from children), so it's not
+  the bypass class; the overstated "sole human authority" claim narrowed to "sole per-land
+  diff-influenceable exemption."
+
 ### 2026-08-04 — T12 #345 (state-lock double-owner) — closed after redesign + 3 gauntlet rounds
 - The builder made a sound AUTONOMOUS design override: handed my adjudicated atomic-rename
   suggestion, it found atomic-rename had a residual 3-process gap and chose kernel flock instead
