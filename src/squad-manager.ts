@@ -25,7 +25,7 @@ import { FlueServiceDriver } from "./flue-service-driver.ts";
 import { type BranchSpec, deriveBranchAgentId, WorkflowDriver, type WorkflowFleet } from "./workflow-driver.ts";
 import { SandboxAgentDriver } from "./sandbox-agent-driver.ts";
 import { AcpAgentDriver } from "./acp-agent-driver.ts";
-import { contextReachesAgent, getHarness, type HarnessDescriptor, hasSecondVerifiedProviderLane, resolveAcpCommand, resolveBin, resolveHarness, resolveHarnessName, unverifiedHarnessesEnabled } from "./harness-registry.ts";
+import { contextReachesAgent, getHarness, harnessAcceptsModel, type HarnessDescriptor, hasSecondVerifiedProviderLane, nearestCompatibleModel, resolveAcpCommand, resolveBin, resolveHarness, resolveHarnessName, unverifiedHarnessesEnabled } from "./harness-registry.ts";
 import { resolveProvider } from "./model-lineage.ts";
 import { type Architect, OmpArchitect } from "./architect.ts";
 import { validateWorker } from "./validate.ts";
@@ -7138,12 +7138,92 @@ export class SquadManager extends EventEmitter {
 				this.log("warn", `model-route decision failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
 			}
 		}
+
+		const kind = opts.flue ? "flue-service" : opts.workflow || opts.verify ? "workflow" : "omp-operator";
+
+		// Resolve the harness backing a plain-agent unit and gate on its capabilities BEFORE cutting a
+		// worktree (fail fast, no leaked worktree) AND — as of ticket #347 — BEFORE the cost-gate
+		// projection just below, not after it. flue/workflow kinds use their own drivers, so the
+		// harness concept doesn't apply to them.
+		const harnessDesc = kind === "omp-operator" ? resolveHarness({ harness: opts.harness, runtime: opts.runtime }) : undefined;
+		if (harnessDesc) {
+			// Honest gating (concern 08): an unverified harness (not smoke-tested against a live binary) is
+			// refused unless the operator explicitly opts in — so a harness that half-works can't be picked
+			// by accident, the way this repo's `/make-it-work` history warns against.
+			if (!harnessDesc.verified && !unverifiedHarnessesEnabled()) {
+				throw new Error(`harness "${harnessDesc.name}" is unverified (not smoke-tested against a live binary)${harnessDesc.note ? ` — ${harnessDesc.note}` : ""}. Set OMP_SQUAD_UNVERIFIED_HARNESS=1 to use it.`);
+			}
+			// A no-approval harness (pi: host perms, no approval channel) cannot enforce anything stricter
+			// than yolo — refuse rather than silently granting full autonomy under an "always-ask"/"write"
+			// label (the "inverted safety" failure mode). Surfaced, never coerced.
+			if (harnessDesc.capabilities.toolApproval === "none" && approvalMode !== "yolo") {
+				throw new Error(`harness "${harnessDesc.name}" has no approval channel — only approvalMode "yolo" is supported (got "${approvalMode}")`);
+			}
+			// sandbox × non-omp is unbuildable today: SandboxAgentDriver is an omp-RPC client over
+			// docker-exec stdio. Reject rather than silently produce a broken driver (Phase 3 makes
+			// containment protocol-aware so any harness can be sandboxed).
+			if (opts.sandbox && harnessDesc.protocol !== "omp-rpc") {
+				throw new Error(`harness "${harnessDesc.name}" cannot run sandboxed yet — sandbox currently supports only omp-rpc harnesses`);
+			}
+			// Capability validation for a profile-selected axis the resolved harness can't honor: ACP
+			// harnesses have no thinking-level channel (makeDriver never threads `thinking` through to
+			// AcpAgentDriver), so a profile that sets `thinking` there would otherwise be silently dropped.
+			// Reject loudly instead — the operator picked an incompatible profile/harness pair.
+			if (profile?.thinking && !harnessDesc.capabilities.thinking) {
+				throw new Error(`profile "${profile.id}" sets thinking:"${profile.thinking}" but harness "${harnessDesc.name}" has no thinking-level channel (capabilities.thinking=false) — drop the profile's thinking field or pick a different harness`);
+			}
+			// Harness↔model-family compatibility (ticket #347, grok T8 gauntlet HIGH): a route/profile/
+			// operator model literal must never be handed raw to a harness whose adapter is pinned to a
+			// DIFFERENT vendor (codex verification, #336/PR #346, is what made this reachable — see
+			// harness-registry.ts's module doc for the full defect chain). `harnessAcceptsModel` fails
+			// open ONLY for a multi-vendor harness (omp/pi/opencode/auggie); a KNOWN single-vendor harness
+			// (codex/gemini/claude-code/grok) fails CLOSED on an unclassifiable model too, not just a
+			// confirmed-different one (PR #359 blind review, codex, HIGH: an unclassifiable model like
+			// "o1" against `modelFamily()`'s narrower-than-reality `\bo[34]\b` regex must never read as
+			// "assume compatible" on a harness that IS pinned to one vendor).
+			//
+			// DELIBERATELY placed BEFORE the cost-gate projection below (PR #359 blind review, codex,
+			// HIGH): moved here from after it, because the cost gate must price the model that will
+			// ACTUALLY run. Landing this check after the cost gate let a routed "opus" pick pass the
+			// gate under Opus's (cheap) cost history and then get silently remapped to a DIFFERENT
+			// model whose real cost/ceiling was never evaluated — a cost-gate bypass via ordering, not
+			// a logic bug in either check individually.
+			if (opts.model !== undefined && !harnessAcceptsModel(harnessDesc, opts.model)) {
+				if (routedModel !== undefined && opts.model === routedModel) {
+					// System-caused (the model-route block above, not the operator): mirror
+					// `routeModelForTaskClass`'s own "no basis, no shift, never block" idiom instead of
+					// throwing on a decision the operator never made. Map to the harness's nearest declared
+					// model when the registry names one, else drop the override so the harness's own
+					// account/config default applies — never a guessed id. `routedModel` is updated in step
+					// so `declaredModelOf`'s rate-limit-key exclusion invariant (routing.routedModel === the
+					// applied model) keeps holding after the remap, AND so the cost-gate projection below
+					// prices this same, actually-applied model.
+					const fallback = nearestCompatibleModel(harnessDesc);
+					this.log(
+						"warn",
+						`model-route picked "${opts.model}" but harness "${harnessDesc.name}" is vendor-pinned to a different model family — ${fallback ? `remapped to "${fallback}"` : "dropped (harness account/config default applies)"}`,
+					);
+					opts = { ...opts, model: fallback };
+					routedModel = fallback;
+				} else {
+					// Operator/profile-chosen — same "reject loudly" idiom the sandbox/approval/thinking
+					// checks above already use for an incompatible profile/harness pair.
+					throw new Error(
+						`model "${opts.model}" is incompatible with harness "${harnessDesc.name}" (vendor-pinned to a different model family) — pick a model in "${harnessDesc.name}"'s family or a different harness`,
+					);
+				}
+			}
+		}
+
 		// Pre-execution cost projection (C-COST), per-lane ENFORCE (adw-factory-borrows concern 09),
-		// deliberately placed AFTER model routing: the gate must judge the model that will actually
-		// run — verdicting on the pre-route default admitted a chore spawn under the cheap family's
-		// history and then routed it onto a frontier model whose lane cell projected far over ceiling
-		// (code-review, CONFIRMED under-deny). The
-		// lane's own `costAction` (LANE_POLICY, v1: only "chore" is "deny") decides how far this can go.
+		// deliberately placed AFTER model routing AND (as of ticket #347) after the harness-compat
+		// remap above — the gate must judge the model that will ACTUALLY run: verdicting on the
+		// pre-route default admitted a chore spawn under the cheap family's history and then routed it
+		// onto a frontier model whose lane cell projected far over ceiling (code-review, CONFIRMED
+		// under-deny); verdicting on a routed model the harness-compat guard was about to remap or drop
+		// let a spawn pass the gate under one model's cost history and then silently run a DIFFERENT
+		// one (PR #359 blind review, codex, HIGH — a cost-gate bypass via ordering). The lane's own
+		// `costAction` (LANE_POLICY, v1: only "chore" is "deny") decides how far this can go.
 		// `OMP_SQUAD_COST_GATE=enforce` + a "deny" verdict refuses the spawn outright, BEFORE any worktree
 		// or agent record exists — surfaced as both a create error (thrown below) and an attention-lane
 		// event; there is no live `AgentRecord` yet to attach to, so this reuses the SAME "unattached
@@ -7183,40 +7263,6 @@ export class SquadManager extends EventEmitter {
 					void this.emitFleetTokenBurnRollup(verdict);
 				}
 			});
-		}
-
-		const kind = opts.flue ? "flue-service" : opts.workflow || opts.verify ? "workflow" : "omp-operator";
-
-		// Resolve the harness backing a plain-agent unit and gate on its capabilities BEFORE cutting a
-		// worktree (fail fast, no leaked worktree). flue/workflow kinds use their own drivers, so the
-		// harness concept doesn't apply to them.
-		const harnessDesc = kind === "omp-operator" ? resolveHarness({ harness: opts.harness, runtime: opts.runtime }) : undefined;
-		if (harnessDesc) {
-			// Honest gating (concern 08): an unverified harness (not smoke-tested against a live binary) is
-			// refused unless the operator explicitly opts in — so a harness that half-works can't be picked
-			// by accident, the way this repo's `/make-it-work` history warns against.
-			if (!harnessDesc.verified && !unverifiedHarnessesEnabled()) {
-				throw new Error(`harness "${harnessDesc.name}" is unverified (not smoke-tested against a live binary)${harnessDesc.note ? ` — ${harnessDesc.note}` : ""}. Set OMP_SQUAD_UNVERIFIED_HARNESS=1 to use it.`);
-			}
-			// A no-approval harness (pi: host perms, no approval channel) cannot enforce anything stricter
-			// than yolo — refuse rather than silently granting full autonomy under an "always-ask"/"write"
-			// label (the "inverted safety" failure mode). Surfaced, never coerced.
-			if (harnessDesc.capabilities.toolApproval === "none" && approvalMode !== "yolo") {
-				throw new Error(`harness "${harnessDesc.name}" has no approval channel — only approvalMode "yolo" is supported (got "${approvalMode}")`);
-			}
-			// sandbox × non-omp is unbuildable today: SandboxAgentDriver is an omp-RPC client over
-			// docker-exec stdio. Reject rather than silently produce a broken driver (Phase 3 makes
-			// containment protocol-aware so any harness can be sandboxed).
-			if (opts.sandbox && harnessDesc.protocol !== "omp-rpc") {
-				throw new Error(`harness "${harnessDesc.name}" cannot run sandboxed yet — sandbox currently supports only omp-rpc harnesses`);
-			}
-			// Capability validation for a profile-selected axis the resolved harness can't honor: ACP
-			// harnesses have no thinking-level channel (makeDriver never threads `thinking` through to
-			// AcpAgentDriver), so a profile that sets `thinking` there would otherwise be silently dropped.
-			// Reject loudly instead — the operator picked an incompatible profile/harness pair.
-			if (profile?.thinking && !harnessDesc.capabilities.thinking) {
-				throw new Error(`profile "${profile.id}" sets thinking:"${profile.thinking}" but harness "${harnessDesc.name}" has no thinking-level channel (capabilities.thinking=false) — drop the profile's thinking field or pick a different harness`);
-			}
 		}
 
 		let cwd: string;

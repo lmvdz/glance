@@ -20,6 +20,7 @@ import { LANE_POLICY, type WorkLane } from "../src/lane.ts";
 import { recordModelOutcome, type ComplexityTier } from "../src/model-outcomes.ts";
 import { appendReceipt } from "../src/receipts.ts";
 import { recordCostLanded } from "../src/cost-aggregate.ts";
+import { recordTaskOutcome } from "../src/task-outcomes.ts";
 import { SquadManager, UNATTACHED_ESCALATION_MARKER } from "../src/squad-manager.ts";
 import type { PersistedAgent, RpcSessionState } from "../src/types.ts";
 
@@ -221,5 +222,64 @@ test("lane-classification learning metric is recorded on every spawn, regardless
 	const row = rollup.find((r) => r.name === "lane-classification");
 	expect(row).toBeDefined();
 	expect(row!.byTag?.lane?.chore?.count).toBeGreaterThanOrEqual(1);
+	await mgr.stop();
+});
+
+// ── ticket #347 / PR #359 blind review (codex, HIGH #2): the cost gate must price the model that
+// will ACTUALLY run, not a routed pick the harness-compat guard is about to remap away ────────────
+//
+// Reproduces the exact bypass codex's review named: routing selects "opus" (cheap, well under the
+// chore lane's $2 ceiling); the unit's harness is "grok" (xai-pinned), so ticket #347's compat guard
+// remaps the applied model to "grok-4.5" — which is EXPENSIVE, well over the ceiling. Before the
+// squad-manager.ts reorder (compat guard now runs BEFORE `shadowCostCheck`, not after), the cost gate
+// would have projected against "opus"'s cheap history, returned no verdict, and let the spawn through
+// — which would then silently run the over-ceiling "grok-4.5", a complete enforce-mode bypass via
+// ordering. With the reorder, the gate prices "grok-4.5" and denies.
+
+/** Seeds the ("none","heavy") task-class cell with strong opus-over-sonnet evidence — same shape as
+ *  model-route-dispatch.test.ts's `seedStrongShiftEvidenceNoneHeavy`, duplicated locally so this file
+ *  stays self-contained (it already owns its own cost-axis seeding helper, `seedOverCeilingCost`). */
+async function seedStrongShiftEvidenceNoneHeavy(stateDir: string): Promise<void> {
+	for (let i = 0; i < 10; i++) {
+		await recordTaskOutcome(stateDir, { agentId: `sonnet-none-heavy-${i}`, routing: { mode: "none", tier: "heavy" }, model: "claude-sonnet-5", costUsd: 1, outcome: i < 2 ? "landed" : "rejected", source: "land", ts: Date.now() }); // 0.2 land-rate
+		await recordTaskOutcome(stateDir, { agentId: `opus-none-heavy-${i}`, routing: { mode: "none", tier: "heavy" }, model: "claude-opus-4-8", costUsd: 1, outcome: i < 9 ? "landed" : "rejected", source: "land", ts: Date.now() }); // 0.9 land-rate
+	}
+}
+
+test("cost gate prices the REMAPPED model, not the pre-remap route: routed opus (cheap) → grok harness remaps to grok-4.5 (over ceiling) → enforce DENIES on grok-4.5, never silently passes as opus", async () => {
+	const { mgr, repo, stateDir } = await makeMgr("cost-compat-order");
+	await seedStrongShiftEvidenceNoneHeavy(stateDir); // routes "opus" for the ("none","heavy") taskClass
+	await seedOverCeilingCost(stateDir, "opus", "heavy", 5, 5); // $1/landed — cheap, under chore's $2 ceiling
+	await seedOverCeilingCost(stateDir, "grok-4.5", "heavy", 5, 25); // $5/landed — over chore's $2 ceiling
+	process.env.OMP_SQUAD_MODEL_OUTCOMES = "1";
+	process.env.OMP_SQUAD_MODEL_ROUTE_SHADOW = "0"; // apply the route, don't just shadow-log it
+	process.env.OMP_SQUAD_COST_GATE = "enforce";
+
+	await expect(
+		mgr.create({ name: "route-remap-cost", repo, harness: "grok", approvalMode: "yolo", thinking: "high" as const, autoRoute: false, lane: "chore" as const }),
+	).rejects.toThrow(/cost-gate/i);
+
+	const events = mgr.automationActivity({ loop: "land" }).events;
+	expect(events.length).toBeGreaterThanOrEqual(1);
+	// The denied projection is priced against the model that would ACTUALLY run (grok-4.5) — not the
+	// pre-remap routed pick (opus), which never appears in the verdict at all.
+	expect(events[0]?.detail).toContain("grok-4.5");
+	expect(events[0]?.detail).not.toContain("opus");
+	expect(mgr.list().some((a) => a.name === "route-remap-cost")).toBe(false); // never spawned
+	await mgr.stop();
+});
+
+test("flip side: same setup but claude-code (anthropic-pinned, compatible with routed opus) — opus's OWN cheap history is what the gate sees, and it passes", async () => {
+	const { mgr, repo, stateDir } = await makeMgr("cost-compat-order-compatible");
+	await seedStrongShiftEvidenceNoneHeavy(stateDir);
+	await seedOverCeilingCost(stateDir, "opus", "heavy", 5, 5); // cheap — under ceiling
+	await seedOverCeilingCost(stateDir, "grok-4.5", "heavy", 5, 25); // irrelevant to this harness
+	process.env.OMP_SQUAD_MODEL_OUTCOMES = "1";
+	process.env.OMP_SQUAD_MODEL_ROUTE_SHADOW = "0";
+	process.env.OMP_SQUAD_COST_GATE = "enforce";
+
+	const dto = await mgr.create({ name: "route-compatible-cost", repo, harness: "claude-code", approvalMode: "yolo", thinking: "high" as const, autoRoute: false, lane: "chore" as const });
+	expect(dto.model).toBe("opus"); // no remap — same-vendor pass-through
+	expect(mgr.automationActivity({ loop: "land" }).events).toEqual([]); // opus's cheap history clears the ceiling
 	await mgr.stop();
 });

@@ -16,7 +16,7 @@
 
 import * as path from "node:path";
 import { augmentPathWithWellKnownDirs } from "./bin-dirs.ts";
-import { harnessLineage } from "./model-lineage.ts";
+import { harnessLineage, modelLineage } from "./model-lineage.ts";
 
 export type HarnessProtocol = "omp-rpc" | "acp";
 
@@ -314,6 +314,73 @@ export function resolveBin(d: HarnessDescriptor, perAgentBin?: string): string {
 	if (perAgentBin) return perAgentBin;
 	if (d.name === globalDefaultHarness() && process.env.GLANCE_BIN?.trim()) return process.env.GLANCE_BIN.trim();
 	return d.bin;
+}
+
+// ── Model-family compatibility (ticket #347, grok T8 gauntlet HIGH) ────────────────────────────
+//
+// model-route.ts's dispatch-time literals (`"opus"`/`"sonnet"`), a profile's `model`, or an
+// operator's explicit `opts.model` are all just strings by the time they reach a spawn — nothing
+// checked whether the harness the unit will actually run on can honor the vendor they imply. Once
+// codex (ticket #336/PR #346) and grok became `verified:true`, a plain harness:"codex"/"grok"/
+// "gemini"/"claude-code" unit became reachable with an Anthropic-family literal on it: codex-acp's
+// `session/set_model` (see acp-agent-driver.ts's `applyModelPin`) either drops the pin silently or
+// rejects it, and — for the omp-rpc family, which has no `confirmedModel` channel at all — nothing
+// downstream would even notice. T8's `confirmedModel` correction (squad-manager.ts's `wire()`)
+// already stops the FINAL receipt from lying about what ran, but only for ACP harnesses with a live
+// pin-and-confirm round trip; it does nothing to stop the wasted pin attempt itself, a cost-gate
+// projection pricing the wrong family before the session even starts, or an omp-rpc harness with no
+// confirmation channel. This is the PRE-SPAWN guard that closes all three, reusing the SAME
+// `harnessLineage`/`modelLineage` oracle T8's cross-lineage-review and the rate-limit degradation
+// ladder already trust — no new classification heuristic invented for this ticket.
+
+/**
+ * Would `model` (a bare family like `"opus"`, a vendor-qualified spec, or any other model
+ * reference `modelLineage` can parse) actually run on harness `d`?
+ *
+ * The multi-vendor branch fails OPEN — the same "never guessed" posture `model-lineage.ts`
+ * documents on every one of its own exports:
+ *  - no model requested (`undefined`) ⇒ compatible, nothing to check.
+ *  - `d`'s harness name carries no static vendor pin (`harnessLineage` "unknown" — every genuinely
+ *    multi-model runtime: omp, pi, opencode, auggie) ⇒ compatible. These harnesses are not
+ *    restricted to one family (omp's own `pickModel` accepts `anthropic/…`, `openai/…`,
+ *    `google-vertex/…` specs — see model-lineage.ts's `PROVIDER_LINEAGE` doc), so there is no fact
+ *    to enforce; inventing one would fabricate a restriction the harness doesn't actually have.
+ *
+ * But a KNOWN single-vendor harness (codex/gemini/claude-code/grok — the ones `harnessLineage`
+ * actually pins) fails CLOSED on an unclassifiable model, deliberately asymmetric with the branch
+ * above (PR #359 blind review, codex, HIGH): `modelLineage` returning `"unknown"` means "we don't
+ * know what vendor this is", not "assume it's fine" — assuming fine is exactly the leak that let
+ * `{harness:"claude-code", model:"o1"}` through, because `modelFamily()` (omp-graph/attribution.ts)
+ * only recognizes `o3`/`o4` via its `\bo[34]\b` regex, so `o1` (a real, wrong-vendor OpenAI model)
+ * resolves to lineage `"unknown"` today and would every time a new model name outran the
+ * classifier — whack-a-mole, not a fix. A harness whose vendor IS pinned has no "maybe" case: any
+ * model that doesn't provably match that vendor is a mismatch, known-wrong or merely
+ * unclassified alike. Only a harness with NO static pin gets the benefit of the doubt.
+ */
+export function harnessAcceptsModel(d: HarnessDescriptor, model?: string): boolean {
+	if (!model) return true;
+	const harness = harnessLineage(d.name);
+	if (harness === "unknown") return true; // multi-vendor harness — no fact to enforce, stays fail-open
+	const requested = modelLineage(model);
+	// Single-vendor harness: no benefit of the doubt. `requested === "unknown"` falls through to
+	// `false` here exactly as intended — an unclassifiable model on a vendor-pinned harness is a
+	// mismatch, not a pass.
+	return requested === harness;
+}
+
+/**
+ * The nearest declared/default model to fall back to once `harnessAcceptsModel` refuses a raw
+ * literal for `d` — `d.staticModels[0]` (the descriptor's own known-good roster: claude-code's
+ * `"default"`, grok's `"grok-4.5"`) when one is declared, else `undefined` so the caller drops the
+ * override entirely and lets the harness run its own account/config default. Mirrors
+ * `model-route.ts`'s own `noShift` idiom (an empty `model` field means "leave the default
+ * untouched") rather than inventing an id nothing in the registry actually promised — codex and
+ * gemini declare no `staticModels` (their catalogs are live-probed, not a small stable set), so
+ * this honestly returns `undefined` for them, same as `staticModels` being absent means everywhere
+ * else in this module.
+ */
+export function nearestCompatibleModel(d: HarnessDescriptor): string | undefined {
+	return d.staticModels?.[0];
 }
 
 // ── Built-in harnesses ──────────────────────────────────────────────────────────────────────────

@@ -21,10 +21,12 @@ import {
 	DEFAULT_HARNESS,
 	getHarness,
 	globalDefaultHarness,
+	harnessAcceptsModel,
 	harnessTierInfo,
 	hasSecondVerifiedProviderLane,
 	listHarnesses,
 	listHarnessTiers,
+	nearestCompatibleModel,
 	registerHarness,
 	resolveAcpCommand,
 	resolveBin,
@@ -116,6 +118,82 @@ test("capability descriptors: pi has no host-tools/approval; ACP harnesses are n
 	expect(gemini.hostTools).toBe(false);
 });
 
+// ── harness↔model-family compatibility (ticket #347) ─────────────────────────
+
+test("harnessAcceptsModel: codex (openai-pinned) refuses an anthropic-family literal", () => {
+	const codex = getHarness("codex")!;
+	expect(harnessAcceptsModel(codex, "opus")).toBe(false);
+	expect(harnessAcceptsModel(codex, "sonnet")).toBe(false);
+	expect(harnessAcceptsModel(codex, "anthropic/claude-sonnet-4-5")).toBe(false);
+});
+
+test("harnessAcceptsModel: codex accepts its own family / an unset model", () => {
+	const codex = getHarness("codex")!;
+	expect(harnessAcceptsModel(codex, "gpt-5.6-sol[high]")).toBe(true); // same lineage (openai)
+	expect(harnessAcceptsModel(codex, undefined)).toBe(true); // nothing to check
+});
+
+test("harnessAcceptsModel: grok (xai-pinned) refuses opus, accepts its own family", () => {
+	const grok = getHarness("grok")!;
+	expect(harnessAcceptsModel(grok, "opus")).toBe(false);
+	expect(harnessAcceptsModel(grok, "grok-4.5")).toBe(true);
+});
+
+test("harnessAcceptsModel: claude-code (anthropic-pinned) accepts opus/sonnet, refuses an openai family", () => {
+	const claudeCode = getHarness("claude-code")!;
+	expect(harnessAcceptsModel(claudeCode, "opus")).toBe(true);
+	expect(harnessAcceptsModel(claudeCode, "sonnet")).toBe(true);
+	expect(harnessAcceptsModel(claudeCode, "gpt-5.6-sol")).toBe(false);
+});
+
+test("harnessAcceptsModel: multi-vendor harnesses (omp/pi/opencode/auggie) fail OPEN for any model — no static vendor pin to enforce", () => {
+	for (const name of ["omp", "pi", "opencode", "auggie"]) {
+		const d = getHarness(name)!;
+		expect(harnessAcceptsModel(d, "opus")).toBe(true);
+		expect(harnessAcceptsModel(d, "gpt-5.6-sol")).toBe(true);
+		expect(harnessAcceptsModel(d, "grok-4.5")).toBe(true);
+	}
+});
+
+// ── PR #359 blind review round (codex, HIGH #1): single-vendor harnesses fail CLOSED on an
+// unclassifiable model, not just a confirmed-different one ────────────────────────────────────
+
+test("harnessAcceptsModel: a KNOWN single-vendor harness fails CLOSED on an UNCLASSIFIABLE model — 'o1' on claude-code, exactly the gauntlet's reproduction", () => {
+	const claudeCode = getHarness("claude-code")!;
+	// modelFamily() (omp-graph/attribution.ts) only recognizes o3/o4 via `\bo[34]\b` — "o1" is a real
+	// OpenAI model but resolves to lineage "unknown" today. A vendor-PINNED harness must never read an
+	// unknown lineage as "assume compatible": that is precisely the leak that would let a wrong-vendor
+	// model through every time the classifier lags a new model name (whack-a-mole, not a fix).
+	expect(harnessAcceptsModel(claudeCode, "o1")).toBe(false);
+	// The mirror case still holds: a model that DOES resolve, and matches, is fine.
+	expect(harnessAcceptsModel(claudeCode, "sonnet")).toBe(true);
+});
+
+test("harnessAcceptsModel: single-vendor fail-closed generalizes across codex/grok/gemini, never a per-model patch", () => {
+	// codex: same unclassifiable-model shape, different vendor pin (openai).
+	expect(harnessAcceptsModel(getHarness("codex")!, "o1")).toBe(false);
+	expect(harnessAcceptsModel(getHarness("codex")!, "some-unclassifiable-string")).toBe(false);
+	// grok: xai-pinned, same posture.
+	expect(harnessAcceptsModel(getHarness("grok")!, "some-unclassifiable-string")).toBe(false);
+	// gemini: registered (unverified) but still google-pinned by harnessLineage — the compat function
+	// itself doesn't gate on `verified`, so this exercises the lineage logic in isolation.
+	expect(harnessAcceptsModel(getHarness("gemini")!, "some-unclassifiable-string")).toBe(false);
+});
+
+test("harnessAcceptsModel: multi-vendor harnesses (omp) still fail OPEN on the SAME unclassifiable string — the asymmetry is deliberate, not a blanket fail-closed", () => {
+	expect(harnessAcceptsModel(getHarness("omp")!, "some-unclassifiable-string")).toBe(true);
+	expect(harnessAcceptsModel(getHarness("omp")!, "o1")).toBe(true);
+});
+
+test("nearestCompatibleModel: falls back to the descriptor's own staticModels[0] when declared, else undefined", () => {
+	expect(nearestCompatibleModel(getHarness("claude-code")!)).toBe("default");
+	expect(nearestCompatibleModel(getHarness("grok")!)).toBe("grok-4.5");
+	// codex/gemini declare no staticModels (live-probed catalogs, not a small stable set) — honestly
+	// undefined, never a guessed id.
+	expect(nearestCompatibleModel(getHarness("codex")!)).toBeUndefined();
+	expect(nearestCompatibleModel(getHarness("gemini")!)).toBeUndefined();
+});
+
 // ── makeDriver selection (real makeDriver, no spawn — start() is what spawns) ──
 
 function mgrFor(stateDir: string): SquadManager {
@@ -203,6 +281,29 @@ test("create() rejects sandbox on a non-omp harness (sandbox×non-omp is unbuild
 	const repo = await makeRepo();
 	const mgr = mgrFor(stateDir);
 	await expect(mgr.create({ name: "g", repo, harness: "gemini", approvalMode: "yolo", sandbox: { image: "alpine", workdir: "/w" }, autoRoute: false })).rejects.toThrow(/cannot run sandboxed/);
+	await mgr.stop();
+});
+
+test("create() rejects an EXPLICIT cross-family model on a vendor-pinned harness (ticket #347) — same loud-reject idiom as sandbox/approval/thinking", async () => {
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "harness-modelcompat-explicit-"));
+	tmps.push(stateDir);
+	const repo = await makeRepo();
+	const mgr = mgrFor(stateDir);
+	// codex is openai-pinned; "opus" is an anthropic-family literal an operator explicitly chose —
+	// the router never ran, so this must be a loud config error, not a silent remap.
+	await expect(mgr.create({ name: "c", repo, harness: "codex", model: "opus", approvalMode: "yolo", autoRoute: false })).rejects.toThrow(/incompatible with harness "codex"/);
+	await mgr.stop();
+});
+
+test("create() rejects an EXPLICIT UNCLASSIFIABLE model on a vendor-pinned harness (PR #359 blind review, codex, HIGH) — 'o1' on claude-code, never silently accepted", async () => {
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "harness-modelcompat-unclassified-"));
+	tmps.push(stateDir);
+	const repo = await makeRepo();
+	const mgr = mgrFor(stateDir);
+	// "o1" is a real OpenAI model, but modelFamily()'s `\bo[34]\b` regex doesn't recognize it, so it
+	// resolves to lineage "unknown" — the exact gap that used to read as "assume compatible" on a
+	// harness explicitly pinned to a SINGLE vendor (claude-code → anthropic). Must reject, not pass.
+	await expect(mgr.create({ name: "u", repo, harness: "claude-code", model: "o1", approvalMode: "yolo", autoRoute: false })).rejects.toThrow(/incompatible with harness "claude-code"/);
 	await mgr.stop();
 });
 
