@@ -207,7 +207,13 @@ async function showFile(repo: string, ref: string, file: string): Promise<string
  */
 async function pathExistsInTree(repo: string, ref: string, file: string): Promise<boolean> {
 	const r = await git(["ls-tree", "--name-only", "-z", ref, "--", file], repo);
-	return r.code === 0 && r.stdout.length > 0;
+	// Only a CLEAN exit (code 0) with EMPTY output proves genuine absence — the legitimate-deletion
+	// case the caller may skip. A NON-ZERO exit is an `ls-tree` ERROR (a bad ref, a git failure), which
+	// is NOT proof of absence (grok #355 round 2): returning false there would let the caller SKIP a
+	// path it never actually checked — a fail-open. Treat any error as "present" so the caller fails
+	// CLOSED, exactly as it does for a readable-but-unshowable path.
+	if (r.code !== 0) return true;
+	return r.stdout.length > 0;
 }
 
 // ── parsing a unified diff into per-file, per-kind hits ───────────────────────────────────────────
