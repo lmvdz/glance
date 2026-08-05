@@ -22,7 +22,7 @@ export {
 
 // The land-receipt surface (glance#334, rail T6) — the self-contained HTML a human approves per land,
 // plus its compact PR comment. Renderers are pure; write/post live in receipt/write.ts.
-export type { LandReceipt, LandReceiptGate, LandReceiptCost, GateStatus, PanelVerdict, CommentOptions } from "./receipt/index.ts";
+export type { LandReceipt, LandReceiptGate, LandReceiptCost, GateStatus, PanelVerdict, CommentOptions, LandReceiptIndexRow, LandReceiptPrecision } from "./receipt/index.ts";
 export {
 	renderReceiptHtml,
 	renderReceiptComment,
@@ -32,7 +32,21 @@ export {
 	postReceiptComment,
 	landReceiptDir,
 	landReceiptFilename,
+	landReceiptIndexRow,
+	landReceiptIndexPath,
+	LAND_RECEIPT_INDEX_FILE,
 } from "./receipt/index.ts";
+
+// Dogfood-window instrumentation (landing-rail #339): the READ + COUNT side of the land-receipt
+// index writeLandReceipt appends. See src/rail/land-metrics.ts.
+export type { LandReceiptIndexRead, LandMetricsWindow } from "./land-metrics.ts";
+export {
+	readLandReceiptIndex,
+	landsByDay,
+	measuredLandsByDay,
+	isMeasuredLand,
+	landMetricsWindow,
+} from "./land-metrics.ts";
 
 // The GitHub-App wedge (glance#337, rail T9) — gates agent-authored PRs on an external repo with a
 // glance receipt via the Checks API, zero adoption by that repo. Reuses the receipt renderer above as

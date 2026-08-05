@@ -130,3 +130,47 @@ export interface LandReceipt {
 	// ── 5. COST ───────────────────────────────────────────────────────────────────────────────────
 	cost: LandReceiptCost;
 }
+
+/**
+ * The measured reviewer-precision facts carried onto an index row — the honest subset of
+ * `ReviewerPrecisionStamp` the dogfood counter needs. `n` is adjudicated findings this lineage raised
+ * across the whole ledger; `survived` how many were real. A row with `n === 0` is a land whose
+ * reviewer precision is UNMEASURED (no history yet), NOT a land with a perfect/empty record — the
+ * counter treats it as non-evidence, never as a measured zero.
+ */
+export interface LandReceiptPrecision {
+	lineage: string;
+	n: number;
+	survived: number;
+}
+
+/**
+ * One structured, greppable row per land — the countable substrate the self-contained HTML receipt
+ * can't be counted from (dogfood window, landing-rail #339). `writeLandReceipt` appends one of these
+ * to `<stateDir>/land-receipts/index.jsonl` beside each HTML file. This is the ONLY artifact that
+ * answers "how many of glance's own PRs did the rail land, with measured reviewer precision, per
+ * day" — the evidence the 2-week destination gate reviews.
+ *
+ * Honesty invariants (the class every gauntlet round caught — absence rendered as a confident value):
+ *   - `precision` is present ONLY when a validator actually ran and stamped a lineage. Absent = no
+ *     validator; it is never coerced to a zero-precision object.
+ *   - `landed` is the merge truth, independent of `gateStatus` — a `forced` land merged without a
+ *     passing proof still has `landed: true` but must never count as measured evidence.
+ */
+export interface LandReceiptIndexRow {
+	/** Epoch ms the land resolved (receipt.at) — the counter's UTC-day bucketing key. */
+	at: number;
+	/** "owner/repo" slug. Lets a future self-vs-fleet split ask "was this glance's OWN repo". */
+	repo: string;
+	branch: string;
+	/** Landed commit SHA, when something merged. Absent on a rejected land. */
+	commit?: string;
+	/** True when the change actually merged into main (receipt.landed). */
+	landed: boolean;
+	/** Merged without a passing proof — a human override (receipt.forcedWithoutProof). */
+	forced: boolean;
+	/** What the gate said (receipt.gate.status). */
+	gateStatus: GateStatus;
+	/** The validator's measured reviewer-precision stamp, when a validator ran. Absent otherwise. */
+	precision?: LandReceiptPrecision;
+}

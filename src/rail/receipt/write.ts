@@ -17,7 +17,7 @@ import * as path from "node:path";
 import type { LandResult } from "../../land.ts";
 import { gh } from "../../gh.ts";
 import type { LandReceiptGate } from "./types.ts";
-import type { LandReceipt } from "./types.ts";
+import type { LandReceipt, LandReceiptIndexRow } from "./types.ts";
 import { renderReceiptHtml } from "./render-html.ts";
 import { renderReceiptComment, type CommentOptions } from "./render-comment.ts";
 
@@ -40,6 +40,34 @@ export function landReceiptFilename(branch: string, at: number, token?: string):
 	const safe = branch.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "land";
 	const uniq = (token && token.replace(/[^a-zA-Z0-9]+/g, "").slice(0, 12)) || Math.random().toString(36).slice(2, 10);
 	return `${safe}-${at}-${uniq}.html`;
+}
+
+/** The structured, append-only index beside the HTML receipts: `<stateDir>/land-receipts/index.jsonl`.
+ *  One `LandReceiptIndexRow` per land — the countable substrate the dogfood counter (`land-metrics.ts`)
+ *  reads. The HTML files are for humans; this is for counting. */
+export const LAND_RECEIPT_INDEX_FILE = "index.jsonl";
+export function landReceiptIndexPath(stateDir: string): string {
+	return path.join(landReceiptDir(stateDir), LAND_RECEIPT_INDEX_FILE);
+}
+
+/**
+ * Distill a `LandReceipt` into its structured index row. Pure. The precision field is carried ONLY
+ * when a validator actually ran and stamped a lineage — a land with no validator gets no `precision`
+ * key at all (never a fabricated zero-precision object), so the counter can tell "unmeasured" from
+ * "measured with n=0" by presence, exactly as the receipt itself does.
+ */
+export function landReceiptIndexRow(receipt: LandReceipt): LandReceiptIndexRow {
+	const p = receipt.validation?.reviewerPrecision;
+	return {
+		at: receipt.at,
+		repo: receipt.repo,
+		branch: receipt.branch,
+		...(receipt.commit ? { commit: receipt.commit } : {}),
+		landed: receipt.landed,
+		forced: receipt.forcedWithoutProof,
+		gateStatus: receipt.gate.status,
+		...(p ? { precision: { lineage: p.lineage, n: p.n, survived: p.survived } } : {}),
+	};
 }
 
 /**
@@ -117,6 +145,15 @@ export async function writeLandReceipt(stateDir: string, receipt: LandReceipt): 
 		const file = path.join(dir, landReceiptFilename(receipt.branch, receipt.at, token));
 		try {
 			await fs.writeFile(file, html, { encoding: "utf8", flag: "wx" });
+			// Append the structured index row (the dogfood counter's substrate) beside the HTML we just
+			// wrote. Deliberately its OWN try/catch, separate from the caller's best-effort land wrapper:
+			// an index-append failure must never lose the human-facing HTML receipt already on disk, so it
+			// is swallowed here. Undercounting is the failure mode, never a lost receipt or a failed land.
+			try {
+				await fs.appendFile(landReceiptIndexPath(stateDir), JSON.stringify(landReceiptIndexRow(receipt)) + "\n", "utf8");
+			} catch {
+				/* index is best-effort; the HTML receipt is the durable record */
+			}
 			return file;
 		} catch (err) {
 			if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") throw err;

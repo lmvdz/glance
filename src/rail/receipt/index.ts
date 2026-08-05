@@ -4,7 +4,7 @@
  * the product surface, write.ts for the write/post side, types.ts for the boundary object.
  */
 
-export type { LandReceipt, LandReceiptGate, LandReceiptCost, GateStatus, PanelVerdict } from "./types.ts";
+export type { LandReceipt, LandReceiptGate, LandReceiptCost, GateStatus, PanelVerdict, LandReceiptIndexRow, LandReceiptPrecision } from "./types.ts";
 export { renderReceiptHtml } from "./render-html.ts";
 export { renderReceiptComment, mdEsc, type CommentOptions } from "./render-comment.ts";
-export { classifyLand, writeLandReceipt, postReceiptComment, landReceiptDir, landReceiptFilename } from "./write.ts";
+export { classifyLand, writeLandReceipt, postReceiptComment, landReceiptDir, landReceiptFilename, landReceiptIndexRow, landReceiptIndexPath, LAND_RECEIPT_INDEX_FILE } from "./write.ts";
