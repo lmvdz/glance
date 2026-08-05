@@ -40,6 +40,27 @@ Three standing rules (campaign doctrine):
 - Builder caught a design estimate wrong (8 test files vs ~4) by grepping with .ts extensions
   — the verify-claims-against-the-tree dispatch line keeps earning its place.
 
+### 2026-08-05 — T6 #334 (the receipt surface) — CLOSED, the product face — dual-lineage gauntlet + 3 delta-verify rounds
+- The deliverable the whole thesis rests on: a human approves a RECEIPT, not a diff. Live-verified
+  it works (a real land → a human answers what/proved/reviewed/rollback/cost cold).
+- **The T2 lesson recurred and cost a full round: agent-authored content must be escaped at EVERY
+  output boundary.** The builder hardened the HTML boundary (esc) but not the markdown boundary —
+  so the PR comment had a CRITICAL injection where an agent's test-title/branch forged a "✅ Landed"
+  verdict + phishing link. Standing rule: for any surface rendering agent content, enumerate ALL
+  output boundaries (HTML, markdown, the terminal, a log, a JSON field) and escape each; hardening
+  one is not hardening the surface.
+- **A receipt must attribute the RIGHT land — and "right" is subtle.** Three narrowing rounds:
+  wrong-commit (local HEAD in PR mode) → branch-tip-not-merge-commit → branch-latest-tip-under-
+  concurrency. The robust end state: bind to THIS PR's own mergeCommit.oid (gh pr view), never a
+  proxy like "whatever's latest on the branch," and render "commit unavailable" before ever showing
+  a wrong SHA. A product that says "trust the receipt" cannot show a commit a human can't find on main.
+- Cross-lineage severity adjudication mattered: on the bare-URL autolink and the merge-commit-OID,
+  grok under-rated (LOW / "nuance") what codex correctly called HIGH. Run both, then adjudicate
+  against the code and the PRODUCT's purpose — a finding's severity depends on what the artifact is FOR.
+- Operational: the original T6 builder's transcript was GC'd mid-campaign; a fresh opus agent picked
+  up the branch via git fetch+checkout and finished cleanly. Long-running builds must be resumable
+  from the BRANCH, not the agent — never leave state only in an agent's memory.
+
 ### 2026-08-05 — T5 #333 (in-code gauntlet) — PARKED after 2 gauntlet + 3 delta-verify rounds (tripwire fired)
 - The daemon-spawns-its-own-blind-panel feature is sound in every part (spawn, blindness, group-kill,
   3-state verify, receipt field) EXCEPT its ledger projection lane, which reintroduced the same
