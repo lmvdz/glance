@@ -115,7 +115,26 @@ cmd_stop() {
 	fi
 }
 
-cmd_restart() { cmd_stop; sleep 1; cmd_start; }
+# Single-instance upgrade boundary (#350). The new daemon MUST NOT start while the old one
+# still holds the state-dir lock: an OLD (pre-fence, origin/main) binary ignores the kernel
+# flock T12 added, so overlapping the two daemons risks two owners of the same state dir —
+# a window the new code alone cannot close (the old binary doesn't honor the fence). cmd_stop
+# already SIGTERMs then SIGKILLs the old daemon (found via daemon.lock, which every protocol
+# version writes) after 10s; here we VERIFY the lock owner is actually gone before launching
+# the replacement, converting an incidental guarantee into an enforced one. `squadctl restart`
+# is the sole supported upgrade path — hand-starting a daemon around it re-opens the window.
+cmd_restart() {
+	local pid
+	cmd_stop
+	sleep 1
+	if pid="$(daemon_pid)"; then
+		echo "restart aborted: a daemon (pid $pid) still holds $LOCK after stop." >&2
+		echo "  Not starting a second daemon — an old fenceless binary overlapping the new one" >&2
+		echo "  could race into two owners of $STATE_DIR. Kill pid $pid, confirm 'status', retry." >&2
+		return 1
+	fi
+	cmd_start
+}
 
 case "${1:-}" in
 	start)   cmd_start ;;
