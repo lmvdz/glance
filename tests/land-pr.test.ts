@@ -178,8 +178,13 @@ function githubMerge(branch: string, defaultBranch = "main"): (cwd: string) => P
 		const tmp = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "gh-merge-")), "m");
 		await git(cwd, "worktree", "add", "-q", "--detach", tmp, `origin/${defaultBranch}`);
 		await git(tmp, "merge", "-q", "--no-ff", branch, "-m", "merge via gh (simulated)");
+		const mergeOid = await gitOut(tmp, "rev-parse", "HEAD"); // the merge commit gh just produced
 		await git(tmp, "push", "-q", "origin", `HEAD:${defaultBranch}`);
 		await git(cwd, "worktree", "remove", "--force", tmp);
+		// Mirror GitHub: after the merge, `gh pr view --json mergeCommit` reports the commit the merge
+		// produced FOR THIS pr. The receipt's PR-scoped landedCommit read (prMergeCommitOid) reads this,
+		// NOT the branch-latest origin/<default> tip — so a later concurrent land can't move it.
+		prViewResponse = { ...(prViewResponse as GhPr | undefined), state: "MERGED", mergeCommit: { oid: mergeOid } } as GhPr;
 	};
 }
 
@@ -653,6 +658,99 @@ test("landAgentPr: default merge method preserves ancestry (assertMerged ok via 
 	expect(mergeMethod()).toBe("merge");
 	const res = await landAgentPr({ repo, worktree: wt, branch: "squad/a1", message: "m", commitWip: false, defaultBranch: "main" }, stateDir);
 	expect(res.ok).toBe(true);
+});
+
+test("landAgentPr surfaces receipt attribution: landedCommit = THIS PR's merge commit (NOT the branch tip or local HEAD), head0 = the pre-merge base (T6, glance#334, gauntlet r2)", async () => {
+	const { repo, origin } = await baseline("lp-receipt-facts-");
+	const wt = await branchWorktree(repo, "squad/a1", { "feature.txt": "new\n" });
+	const stateDir = await tmpDir("lp-receipt-facts-state-");
+	prList = [];
+	mergeSimulator = githubMerge("squad/a1"); // a --no-ff merge ⇒ a NEW merge commit M on main, parent = branch tip
+
+	const localMainBefore = await gitOut(repo, "rev-parse", "main"); // the PRIMARY checkout — never merged into
+	const originBaseBefore = await gitOut(origin, "rev-parse", "main"); // the base the PR merges INTO
+	const branchTip = await gitOut(wt, "rev-parse", "HEAD"); // the branch's own tip — a PARENT of the merge commit
+
+	const res = await landAgentPr({ repo, worktree: wt, branch: "squad/a1", message: "m", commitWip: false, defaultBranch: "main" }, stateDir);
+
+	expect(res.ok).toBe(true);
+	expect(res.merged).toBe(true);
+	// The r2/r3 defect: a `--merge` PR creates a merge commit M on main; recording the branch tip gives a
+	// SHA a human can't find as the landed commit. landedCommit must be THIS PR's OWN merge commit — the
+	// oid `gh pr view --json mergeCommit` reports for THIS pr (r3: PR-scoped, not the branch-latest tip).
+	const mergeCommitOnMain = await gitOut(origin, "rev-parse", "main");
+	expect(res.landedCommit).toBe(mergeCommitOnMain);
+	expect(res.landedCommit).not.toBe(branchTip); // NOT the branch tip (the r2 fix)
+	expect(res.landedCommit).not.toBe(localMainBefore); // NOT the stale local checkout HEAD (the r1 fix)
+	expect(await gitOut(repo, "rev-parse", "main")).toBe(localMainBefore); // local main truly never moved
+	// head0 (rollback point) is the base the PR merged into, captured pre-merge.
+	expect(res.head0).toBe(originBaseBefore);
+	// The branch tip is a PARENT of the merge commit — i.e. landedCommit is downstream of the tip on main.
+	expect(await gitOut(repo, "rev-list", `${branchTip}..${res.landedCommit}`)).not.toBe("");
+});
+
+test("landAgentPr receipt attribution is PR-SCOPED: a SECOND merge landing on the default branch between our fetch and read does NOT rebind landedCommit to the racing commit (gauntlet r3, concurrency)", async () => {
+	const { repo, origin } = await baseline("lp-receipt-race-");
+	const wt = await branchWorktree(repo, "squad/a1", { "feature.txt": "new\n" });
+	const stateDir = await tmpDir("lp-receipt-race-state-");
+	prList = [];
+	// Our PR merges (producing merge commit M, reported by `gh pr view`), and THEN a concurrent PR Q lands
+	// its own commit N on top of origin/main before we read the attribution — the exact race the
+	// in-process land lock cannot serialize (GitHub / a second daemon / a human). origin/main tip is now N,
+	// not M. The old code recorded that branch-latest tip (N); the fix records THIS pr's own M.
+	let racingCommitN = "";
+	let ourMergeCommitM = "";
+	mergeSimulator = async (cwd: string) => {
+		await githubMerge("squad/a1")(cwd); // merges our PR → M is now origin/main tip AND gh-pr-view mergeCommit
+		ourMergeCommitM = (prViewResponse as GhPr).mergeCommit?.oid ?? ""; // M, as gh pr view will report it
+		// A concurrent land Q advances origin/main to N (a commit our receipt must NEVER be attributed to).
+		const clone = path.join(await tmpDir("lp-receipt-race-Q-"), "c");
+		await git(cwd, "clone", "-q", origin, clone);
+		await git(clone, "config", "user.email", "q@party");
+		await git(clone, "config", "user.name", "concurrent-q");
+		await git(clone, "config", "commit.gpgsign", "false");
+		racingCommitN = await commit(clone, "q.txt", "concurrent land\n", "PR Q lands concurrently");
+		await git(clone, "push", "-q", "origin", "main");
+	};
+
+	const res = await landAgentPr({ repo, worktree: wt, branch: "squad/a1", message: "m", commitWip: false, defaultBranch: "main" }, stateDir);
+
+	expect(res.ok).toBe(true);
+	expect(res.merged).toBe(true);
+	// origin/main's tip is now Q's commit N — the branch-latest tip the OLD code would have recorded.
+	expect(await gitOut(origin, "rev-parse", "main")).toBe(racingCommitN);
+	// The load-bearing assertion: THIS receipt records THIS pr's merge commit M, never Q's racing commit N.
+	expect(res.landedCommit).toBe(ourMergeCommitM);
+	expect(res.landedCommit).not.toBe(racingCommitN);
+	expect(res.landedCommit).not.toBe("");
+	expect(racingCommitN).not.toBe("");
+	expect(ourMergeCommitM).not.toBe(racingCommitN);
+});
+
+test("landAgentPr receipt attribution is HONEST on a failed ref read: an unobtainable / non-OID mergeCommit ⇒ landedCommit UNAVAILABLE (undefined), never the branch tip or the origin tip (gauntlet r3)", async () => {
+	const { repo, origin } = await baseline("lp-receipt-noattr-");
+	const wt = await branchWorktree(repo, "squad/a1", { "feature.txt": "new\n" });
+	const stateDir = await tmpDir("lp-receipt-noattr-state-");
+	prList = [];
+	const branchTip = await gitOut(wt, "rev-parse", "HEAD");
+	// The merge really happens (assertMerged's --merge ancestry check passes), but `gh pr view` cannot
+	// yield a valid merge-commit oid — GitHub hasn't populated it yet, or returns a non-OID. The receipt
+	// must degrade to UNAVAILABLE, never silently fall back to the branch tip (the original r2 defect) or
+	// the branch-latest origin tip.
+	mergeSimulator = async (cwd: string) => {
+		await githubMerge("squad/a1")(cwd);
+		prViewResponse = { state: "MERGED", mergeCommit: { oid: "not-a-real-oid" } } as GhPr; // non-40-hex ⇒ rejected
+	};
+
+	const res = await landAgentPr({ repo, worktree: wt, branch: "squad/a1", message: "m", commitWip: false, defaultBranch: "main" }, stateDir);
+
+	expect(res.ok).toBe(true);
+	expect(res.merged).toBe(true);
+	// Honest: attribution is UNAVAILABLE (undefined), NOT a wrong SHA. The receipt renderer shows
+	// "commit unavailable" for a landed result with no commit — never "nothing merged", never a bad SHA.
+	expect(res.landedCommit).toBeUndefined();
+	expect(res.landedCommit).not.toBe(branchTip);
+	expect(res.landedCommit).not.toBe(await gitOut(origin, "rev-parse", "main"));
 });
 
 // ── landAgentPr — scratch gate red (acceptance) ──────────────────────────────────────────────────
