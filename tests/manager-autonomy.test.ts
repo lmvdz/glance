@@ -17,7 +17,7 @@ import { Orchestrator } from "../src/orchestrator.ts";
 import type { AgentDriver } from "../src/agent-driver.ts";
 import { SubagentTracker } from "../src/subagents.ts";
 import type { LandResult } from "../src/land.ts";
-import { recordLandOutcome } from "../src/land-ledger.ts";
+import { recordLandOutcome } from "../src/rail/land-ledger.ts";
 import type { AgentDTO, IssueRef, PersistedAgent, RpcExtensionUIRequest, RpcSessionState } from "../src/types.ts";
 
 const tmps: string[] = [];

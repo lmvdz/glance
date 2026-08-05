@@ -31,6 +31,9 @@
     // types) — named explicitly, same reasoning as the entry above, so `bun run check` actually
     // typechecks the skills-verify gate itself rather than trusting bun's untyped execution.
     "scripts/skills-verify.ts",
+    // The wedge spike's CLI entrypoint (glance#337, rail T9) — the daemon-invocation surface the
+    // install runbook documents; worth typechecking like skills-verify.ts above.
+    "scripts/post-wedge-check.ts",
     // Same reasoning: backfill-receipt-attribution.ts's schema guard is deliberately built as a
     // `satisfies Record<keyof RunReceipt, true>` literal (gauntlet round 3, glance#331) so a new
     // RunReceipt field fails typecheck here until the guard is updated — that ratchet is INERT

@@ -334,6 +334,7 @@ const RECEIPT_KEY_RECORD = {
 	toolTally: true,
 	tokens: true,
 	costUsd: true,
+	costUnknown: true,
 	filesTouched: true,
 	traceId: true,
 	spans: true,

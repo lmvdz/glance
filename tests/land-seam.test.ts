@@ -34,6 +34,11 @@ async function mockGh(args: string[], cwd: string): Promise<{ code: number; stdo
 		if (mergeSimulator) await mergeSimulator(cwd);
 		return { code: 0, stdout: "", stderr: "" };
 	}
+	// Receipt attribution (T6, gauntlet r3): the land path reads THIS pr's own merge commit via
+	// `gh pr view --json mergeCommit`. This seam only asserts the PRIMARY checkout is never merged into,
+	// not the receipt's commit — so return a parseable body with no oid (attribution honestly unavailable),
+	// which is all the land path needs here. Returning valid JSON also keeps ghJson from a parse throw.
+	if (args[0] === "pr" && args[1] === "view") return { code: 0, stdout: JSON.stringify({ mergeCommit: null }), stderr: "" };
 	return { code: 0, stdout: "", stderr: "" };
 }
 
