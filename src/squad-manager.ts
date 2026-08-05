@@ -204,7 +204,7 @@ import { addPlanRevisionCandidate, appendCommentEvent, type ArtifactComment, typ
 import { castPlanVote as appendPlanVoteCast, closePlanVoteRound as appendPlanVoteClose, currentPlanVoteRound as readCurrentPlanVoteRound, listPlanVoteRounds as readPlanVoteRounds, type OpenPlanVoteInput, openPlanVoteRound, recordPlanVoteCommit, tallyPlanVoteRound } from "./plan-votes.ts";
 import { isPlanDocPath, planDocHeadRevision, resolveSafeDocPath } from "./plan-doc.ts";
 import type { VoteQuorum } from "./plan-vote-quorum.ts";
-import { landFailureCount, readForcedLands, readLandLedger, readValidatorOverrides, recordForcedLand, recordLandOutcome, recordValidatorOverride } from "./rail/index.ts";
+import { landFailureCount, readForcedLands, readLandLedger, readValidatorOverrides, recordForcedLand, recordLandOutcome, recordValidatorOverride, classifyLand, writeLandReceipt, postReceiptComment, type LandReceipt } from "./rail/index.ts";
 import { isLandingUnit, landingRosterOf } from "./is-landing-unit.ts";
 import { readTaskOutcomes, recordTaskOutcome, type TaskOutcomeRow } from "./task-outcomes.ts";
 import { buildTaskClassMatrix } from "./omp-graph/task-class-matrix.ts";
@@ -1046,6 +1046,27 @@ function validationRecord(value: unknown): ValidationRecord | undefined {
 	if (typeof rec.agreement !== "number" || typeof rec.confidence !== "number" || typeof rec.rationale !== "string" || typeof rec.ranAt !== "number") return undefined;
 	if (!Array.isArray(rec.perCriterion)) return undefined;
 	return rec as unknown as ValidationRecord;
+}
+
+/** Parse `git diff --numstat` into a files list and summed insertions/deletions for a land receipt
+ *  (T6, glance#334). Binary files show "-\t-\t<path>" — counted as a touched file, no line delta.
+ *  Tolerant: an unparseable line is skipped, never thrown. */
+function parseNumstat(out: string): { files: string[]; insertions: number; deletions: number } {
+	const files: string[] = [];
+	let insertions = 0;
+	let deletions = 0;
+	for (const line of out.split("\n")) {
+		if (!line.trim()) continue;
+		const parts = line.split("\t");
+		if (parts.length < 3) continue;
+		const [add, del, ...rest] = parts;
+		const file = rest.join("\t");
+		if (!file) continue;
+		files.push(file);
+		if (add !== "-") insertions += Number(add) || 0;
+		if (del !== "-") deletions += Number(del) || 0;
+	}
+	return { files, insertions, deletions };
 }
 
 export class SquadManager extends EventEmitter {
@@ -4467,6 +4488,10 @@ export class SquadManager extends EventEmitter {
 		// receipts read it doesn't need.
 		const lastReceipt = !result.retryable ? (await readReceipts(this.stateDir, dto.id)).at(-1) : undefined;
 		const effectiveModel = lastReceipt?.model ?? dto.model;
+		// Snapshot the validator record for the land receipt (T6, glance#334) BEFORE the success block
+		// below clears a now-stale veto (`rec.dto.validation = undefined` on a successful override-land):
+		// the receipt should honestly cite the review that ran, veto-then-overridden included.
+		const validationForReceipt = rec.dto.validation;
 		// Update the branch's failure streak: an auto-land failure bumps it (drives the cap above), any
 		// success clears it. A manual (auto:false) failure is the operator's call — never penalized.
 		// A retryable refusal (dirty main checkout) is an environmental precondition, not a branch failure —
@@ -4707,7 +4732,88 @@ export class SquadManager extends EventEmitter {
 		}
 		void this.recordAudit(LOCAL_ACTOR, "land", id, result.ok ? "ok" : "error", result.detail ?? result.message);
 		void this.store.appendAudit({ actor: LOCAL_ACTOR.id, action: "land", target: id, detail: { outcome: result.ok ? "ok" : "error" } }).catch(() => {});
+		// The land receipt (T6, glance#334): a self-contained HTML the human approves instead of the
+		// diff, plus a compact PR comment linking it. Only for a terminal outcome — a retryable deferral
+		// (dirty main) isn't a land, so it gets no receipt. Best-effort, after the fact: never gates or
+		// delays the land it records (mirrors every other post-land ledger write above).
+		if (!result.retryable) void this.emitLandReceipt(rec, result, effectiveModel, lastReceipt, validationForReceipt);
 		return result;
+	}
+
+	/**
+	 * Write the land receipt (T6, glance#334) and post its compact PR comment. Reads the land's own
+	 * outputs — the `LandResult`, the validator record (T4's `reviewerPrecision`), the run's cost
+	 * receipt — and renders them; it never touches the land gate. Best-effort by contract: every fault
+	 * (a git read, a disk write, a `gh` call) degrades to a log line, never a thrown land failure.
+	 */
+	private async emitLandReceipt(
+		rec: AgentRecord,
+		result: LandResult,
+		effectiveModel: string | undefined,
+		lastReceipt: RunReceipt | undefined,
+		validation: ValidationRecord | undefined,
+	): Promise<void> {
+		try {
+			const dto = rec.dto;
+			const branch = dto.branch ?? "";
+			if (!branch) return; // a receipt is branch-keyed, like the land ledger — nothing to key on
+			const merged = result.merged;
+			let commit: string | undefined;
+			let rollbackPoint: string | undefined;
+			let files: string[] = lastReceipt?.filesTouched ?? [];
+			let insertions: number | undefined;
+			let deletions: number | undefined;
+			if (merged) {
+				// The landed commit, and the rollback point — git's OWN record of where main sat before this
+				// land (reflog `HEAD@{1}`), which is exactly head0 for both the ff and merge-commit paths (and
+				// after a regression-gate reset+re-merge). Best-effort: any git fault leaves the field blank,
+				// which the renderer shows honestly rather than fabricating.
+				commit = (await hardenedGit(["rev-parse", "HEAD"], { cwd: dto.repo })).stdout.trim() || undefined;
+				const prev = await hardenedGit(["rev-parse", "HEAD@{1}"], { cwd: dto.repo });
+				rollbackPoint = prev.code === 0 ? prev.stdout.trim() || undefined : undefined;
+				if (commit && rollbackPoint) {
+					const ns = await hardenedGit(["diff", "--numstat", `${rollbackPoint}..${commit}`], { cwd: dto.repo });
+					if (ns.code === 0) {
+						const parsed = parseNumstat(ns.stdout);
+						if (parsed.files.length) files = parsed.files;
+						insertions = parsed.insertions;
+						deletions = parsed.deletions;
+					}
+				}
+			} else {
+				commit = (await headCommit(dto.worktree).catch(() => "")) || undefined; // the attempted branch tip
+			}
+			const slug = repoIdentity(dto.repo).split("/").slice(-2).join("/");
+			const costUsd = lastReceipt?.costUsd ?? dto.receipt?.costUsd;
+			const receipt: LandReceipt = {
+				repo: slug,
+				branch,
+				commit,
+				files,
+				insertions,
+				deletions,
+				landed: merged,
+				at: Date.now(),
+				gate: classifyLand(result),
+				validation,
+				rollbackPoint: merged ? rollbackPoint : undefined,
+				forcedWithoutProof: !!result.forcedWithoutProof,
+				cost: {
+					costUsd,
+					costUnknown: costUsd === undefined,
+					model: effectiveModel ?? lastReceipt?.model,
+					tokens: lastReceipt?.tokens?.total,
+				},
+			};
+			const htmlPath = await writeLandReceipt(this.stateDir, receipt);
+			this.log("info", `land receipt written for ${dto.name}: ${htmlPath}`);
+			if (result.prNumber) {
+				const posted = await postReceiptComment(dto.repo, slug, result.prNumber, receipt, { receiptHref: htmlPath, hrefKind: "path" });
+				if (!posted) this.log("warn", `land receipt PR comment failed for ${dto.name} (#${result.prNumber}) — non-fatal`);
+			}
+		} catch (err) {
+			this.log("warn", `land receipt failed for ${rec.dto.name} (non-fatal): ${errText(err)}`);
+		}
 	}
 
 	/**

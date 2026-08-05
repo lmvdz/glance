@@ -19,3 +19,16 @@ export {
 	readValidatorOverrides,
 	recordValidatorOverride,
 } from "./land-ledger.ts";
+
+// The land-receipt surface (glance#334, rail T6) — the self-contained HTML a human approves per land,
+// plus its compact PR comment. Renderers are pure; write/post live in receipt/write.ts.
+export type { LandReceipt, LandReceiptGate, LandReceiptCost, GateStatus, PanelVerdict, CommentOptions } from "./receipt/index.ts";
+export {
+	renderReceiptHtml,
+	renderReceiptComment,
+	classifyLand,
+	writeLandReceipt,
+	postReceiptComment,
+	landReceiptDir,
+	landReceiptFilename,
+} from "./receipt/index.ts";
