@@ -1,12 +1,17 @@
 /**
- * Conflict-marker gate wired into the land path (#330, per #327's resolution) — drives the REAL
- * `landAgent` end to end (real temp git repos, no mocks), covering both call sites:
- *   1. the ordinary pre-merge check in `landAgentImpl` (a branch that already carries a live marker
- *      line before any conflict ever happens), and
- *   2. the auto-resolve path in `attemptAutoResolve` (the scenario the ticket actually names: an
- *      AUTORESOLVE resolver — real or injected here — writes a "resolution" that still leaves live
- *      conflict-marker debris behind, which the verify gate's typecheck/test alone would never catch
- *      for a .md/.json/.txt file).
+ * Conflict-marker gate wired into the local land path (#330, per #327's resolution; hardened in
+ * gauntlet round 1 against PR #351) — drives the REAL `landAgent` end to end (real temp git repos,
+ * no mocks), covering all three local-mode call sites:
+ *   1. the ORDINARY path: a POST-merge scan inside `verifyMerged` (`head0..HEAD`, gauntlet #9 — not
+ *      a merge-base diff) for a branch that carries a live marker line before any conflict happens.
+ *   2. the IN-PLACE path (gauntlet #2): `worktree === repo` used to commit and return success with
+ *      no gate ever running — now scans the STAGED diff before the commit.
+ *   3. the AUTORESOLVE path (`attemptAutoResolve`, gauntlet #8): a FULL-FILE scan of resolver-touched
+ *      files, not an added-lines diff — the scenario the ticket actually names, an AUTORESOLVE
+ *      resolver that writes a "resolution" which still leaves live conflict-marker debris behind,
+ *      surviving typecheck+test for a .md/.json/.txt file.
+ * PR-mode coverage (the round's CRITICAL finding — PR mode never ran this check at all) lives in
+ * tests/land-pr.test.ts, alongside its existing gh-mock + scratch-merge infrastructure.
  */
 
 import { afterAll, afterEach, expect, test } from "bun:test";
@@ -110,6 +115,45 @@ test("OMP_SQUAD_CONFLICT_MARKER_GATE=0 disables the gate globally", async () => 
 	} finally {
 		delete process.env.OMP_SQUAD_CONFLICT_MARKER_GATE;
 	}
+});
+
+// ── 1b. The IN-PLACE path (worktree === repo, gauntlet #2): used to commit before any gate ran ───────
+
+test("in-place land (worktree === repo): a staged file with markers is refused BEFORE the commit", async () => {
+	const repo = await baseRepo("cm-inplace-");
+	const head0 = await out(repo, "rev-parse", "HEAD");
+	await fs.mkdir(path.join(repo, "docs"), { recursive: true });
+	await fs.writeFile(path.join(repo, "docs", "plan.md"), ["<<<<<<< HEAD", "ours", "=======", "theirs", ">>>>>>> feat", ""].join("\n"));
+
+	const res = await landAgent({ repo, worktree: repo, message: "wip commit", commitWip: true, verify: "" });
+
+	expect(res.ok).toBe(false);
+	expect(res.committed).toBe(false);
+	expect(res.detail).toContain("conflict-markers gate:");
+	expect(res.detail).toContain("docs/plan.md");
+	expect(await out(repo, "rev-parse", "HEAD")).toBe(head0); // nothing committed — refused before the commit
+});
+
+test("in-place land: a clean staged change commits normally (the gate never blocks ordinary WIP sweeps)", async () => {
+	const repo = await baseRepo("cm-inplace-clean-");
+	await fs.writeFile(path.join(repo, "src.ts"), "export const a = 1;\n");
+
+	const res = await landAgent({ repo, worktree: repo, message: "wip commit", commitWip: true, verify: "" });
+
+	expect(res.ok).toBe(true);
+	expect(res.committed).toBe(true);
+	expect(res.merged).toBe(false); // in-place: nothing to merge, unchanged contract
+});
+
+test("in-place land: conflictMarkerGate:false (force) commits a staged file carrying markers", async () => {
+	const repo = await baseRepo("cm-inplace-forced-");
+	await fs.mkdir(path.join(repo, "docs"), { recursive: true });
+	await fs.writeFile(path.join(repo, "docs", "plan.md"), ["<<<<<<< HEAD", "ours", "=======", "theirs", ">>>>>>> feat", ""].join("\n"));
+
+	const res = await landAgent({ repo, worktree: repo, message: "wip commit", commitWip: true, verify: "", conflictMarkerGate: false });
+
+	expect(res.ok).toBe(true);
+	expect(res.committed).toBe(true);
 });
 
 // ── 2. The AUTORESOLVE path: the ticket's actual scenario ────────────────────────────────────────────

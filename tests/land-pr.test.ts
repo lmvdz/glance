@@ -83,7 +83,7 @@ const { repoIdentity } = await import("../src/repo-identity.ts");
 const { setGateLogRoot } = await import("../src/gate-logs.ts");
 import type { AutomationReport } from "../src/automation-log.ts";
 
-const ENV_KEYS = ["OMP_SQUAD_PR_DRAFT", "OMP_SQUAD_PR_MERGE_METHOD", "OMP_SQUAD_REGRESSION_GATE"] as const;
+const ENV_KEYS = ["OMP_SQUAD_PR_DRAFT", "OMP_SQUAD_PR_MERGE_METHOD", "OMP_SQUAD_REGRESSION_GATE", "OMP_SQUAD_CONFLICT_MARKER_GATE"] as const;
 const saved: Record<string, string | undefined> = {};
 for (const k of ENV_KEYS) saved[k] = process.env[k];
 
@@ -164,7 +164,11 @@ async function baseline(prefix: string): Promise<{ repo: string; origin: string 
 async function branchWorktree(repo: string, branch: string, files: Record<string, string>): Promise<string> {
 	const dir = path.join(await tmpDir(`${branch.replace(/\//g, "-")}-wt-`), "wt");
 	await git(repo, "worktree", "add", "-q", "-b", branch, dir, "main");
-	for (const [name, content] of Object.entries(files)) await fs.writeFile(path.join(dir, name), content);
+	for (const [name, content] of Object.entries(files)) {
+		const abs = path.join(dir, name);
+		await fs.mkdir(path.dirname(abs), { recursive: true });
+		await fs.writeFile(abs, content);
+	}
 	await git(dir, "add", "-A");
 	await git(dir, "commit", "-qm", `${branch} changes`);
 	return dir;
@@ -537,6 +541,74 @@ test("landAgentPr: OMP_SQUAD_STALE_GATE=0 disables the stale-branch gate in PR m
 		expect(res.merged).toBe(true);
 	} finally {
 		delete process.env.OMP_SQUAD_STALE_GATE;
+	}
+});
+
+// ── landAgentPr — conflict-marker gate (#330; gauntlet round 1 finding #1 — CRITICAL) ─────────────
+// PR mode used to run NO conflict-marker check at all — a complete production-path bypass, since
+// most repos land via PR mode, not the local `landAgent`. Verified against the REAL scratch-merge
+// machinery (a genuine `git merge --no-ff` in a disposable worktree), not a stub.
+
+test("landAgentPr: a docs marker triple in the scratch merge is refused — never reaches gh pr merge", async () => {
+	const { repo } = await baseline("lp-marker-");
+	const wt = await branchWorktree(repo, "squad/a1", {
+		"docs/plan.md": ["# Plan", "", "<<<<<<< HEAD", "old approach", "=======", "new approach", ">>>>>>> feat", ""].join("\n"),
+	});
+	const stateDir = await tmpDir("lp-marker-state-");
+	prList = [];
+
+	const res = await landAgentPr({ repo, worktree: wt, branch: "squad/a1", message: "m", commitWip: false, defaultBranch: "main" }, stateDir);
+
+	expect(res.ok).toBe(false);
+	expect(res.detail).toContain("conflict-markers gate:");
+	expect(res.detail).toContain("docs/plan.md");
+	expect(mergeCalled).toBe(false); // refused before ever calling gh pr merge
+});
+
+test("landAgentPr: a clean branch (no markers) still merges normally — the gate never blocks ordinary work", async () => {
+	const { repo } = await baseline("lp-marker-clean-");
+	const wt = await branchWorktree(repo, "squad/a1", { "feature.txt": "new\n" });
+	const stateDir = await tmpDir("lp-marker-clean-state-");
+	prList = [];
+	mergeSimulator = githubMerge("squad/a1");
+
+	const res = await landAgentPr({ repo, worktree: wt, branch: "squad/a1", message: "m", commitWip: false, defaultBranch: "main" }, stateDir);
+
+	expect(res.ok).toBe(true);
+	expect(res.merged).toBe(true);
+});
+
+test("landAgentPr: conflictMarkerGate:false (force-land) merges a branch carrying markers", async () => {
+	const { repo } = await baseline("lp-marker-forced-");
+	const wt = await branchWorktree(repo, "squad/a1", { "docs/plan.md": ["<<<<<<< HEAD", "a", "=======", "b", ">>>>>>> feat", ""].join("\n") });
+	const stateDir = await tmpDir("lp-marker-forced-state-");
+	prList = [];
+	mergeSimulator = githubMerge("squad/a1");
+
+	const res = await landAgentPr(
+		{ repo, worktree: wt, branch: "squad/a1", message: "m", commitWip: false, defaultBranch: "main", conflictMarkerGate: false },
+		stateDir,
+	);
+
+	expect(res.ok).toBe(true);
+	expect(res.merged).toBe(true);
+});
+
+test("landAgentPr: OMP_SQUAD_CONFLICT_MARKER_GATE=0 disables the gate globally in PR mode too", async () => {
+	process.env.OMP_SQUAD_CONFLICT_MARKER_GATE = "0";
+	try {
+		const { repo } = await baseline("lp-marker-envoff-");
+		const wt = await branchWorktree(repo, "squad/a1", { "docs/plan.md": ["<<<<<<< HEAD", "a", "=======", "b", ">>>>>>> feat", ""].join("\n") });
+		const stateDir = await tmpDir("lp-marker-envoff-state-");
+		prList = [];
+		mergeSimulator = githubMerge("squad/a1");
+
+		const res = await landAgentPr({ repo, worktree: wt, branch: "squad/a1", message: "m", commitWip: false, defaultBranch: "main" }, stateDir);
+
+		expect(res.ok).toBe(true);
+		expect(res.merged).toBe(true);
+	} finally {
+		delete process.env.OMP_SQUAD_CONFLICT_MARKER_GATE;
 	}
 });
 
