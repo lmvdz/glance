@@ -51,6 +51,31 @@ describe("squadctl _pidof", () => {
 			await fsp.rm(dir, { recursive: true, force: true });
 		}
 	});
+
+	// grok #350 F2: a live daemon owned by ANOTHER uid fails `kill -0` with EPERM, which the old
+	// daemon_pid misread as "dead" — clearing the way for cmd_start/cmd_restart to launch a SECOND
+	// daemon over a live one (the two-owner window). pid 1 (init/systemd) is the portable fixture:
+	// for a non-root test process it is alive-but-unsignalable (EPERM), so before the fix _pidof
+	// returned "" and after it returns "1" via the /proc fallback. As root, kill -0 1 succeeds and it
+	// returns "1" anyway — the assertion holds either way, and specifically exercises the /proc branch
+	// when non-root. Skipped where /proc/1 is absent (no procfs, e.g. macOS).
+	test("EPERM (alive-but-unsignalable, other-uid) reads as ALIVE, not dead", async () => {
+		let hasProc1 = false;
+		try {
+			await fsp.access("/proc/1");
+			hasProc1 = true;
+		} catch {
+			/* no procfs — skip */
+		}
+		if (!hasProc1) return;
+		const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "squadctl-"));
+		try {
+			await fsp.writeFile(path.join(dir, "daemon.lock"), JSON.stringify({ pid: 1, host: os.hostname(), startedAt: Date.now() }));
+			expect(await pidof(dir)).toBe("1");
+		} finally {
+			await fsp.rm(dir, { recursive: true, force: true });
+		}
+	});
 });
 
 describe("squadctl state-dir resolution (mirrors src/state-dir.ts)", () => {

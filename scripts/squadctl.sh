@@ -63,7 +63,15 @@ parse_pid() {
 daemon_pid() {
 	local pid
 	pid="$(parse_pid "$LOCK")" || return 1
-	[ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && { echo "$pid"; return 0; }
+	[ -n "$pid" ] || return 1
+	# Liveness parity with state-lock.ts's `ownerAlive` (grok #350 F2): `kill -0` fails BOTH when the
+	# process is gone (ESRCH) AND when it exists but we may not signal it (EPERM — the lock owner is
+	# another uid, e.g. a daemon started via sudo / systemd User=). Reading EPERM as "dead" would let
+	# cmd_start / cmd_restart launch a SECOND daemon over a live one — the two-owner window #350 is
+	# about. Fall back to the /proc entry (Linux) so an existing-but-unsignalable process reads as
+	# ALIVE, conservatively, matching the daemon's own ownerAlive. Without /proc (e.g. macOS) this
+	# degrades to kill-0-only (EPERM⇒dead), unchanged.
+	if kill -0 "$pid" 2>/dev/null || [ -e "/proc/$pid" ]; then echo "$pid"; return 0; fi
 	return 1   # no lock, or stale lock (owner gone)
 }
 
@@ -115,7 +123,29 @@ cmd_stop() {
 	fi
 }
 
-cmd_restart() { cmd_stop; sleep 1; cmd_start; }
+# Single-instance upgrade boundary (#350). An OLD (pre-fence, origin/main) daemon ignores the
+# kernel flock T12 added, so overlapping it with a NEW daemon risks two owners of one state dir.
+# The launcher is the only place this can be prevented (the old binary can't be taught to honor
+# the fence). cmd_start ALREADY refuses to launch while daemon_pid reports a live owner; this
+# guard is belt-and-suspenders that (a) upgrades the previously-silent "already up" exit 0 to a
+# loud exit-1 abort after a stop that failed to clear the owner, and (b) makes the invariant
+# legible. The actual exclusivity rests on daemon_pid detecting the old owner — now hardened to
+# read EPERM (other-uid daemon) as ALIVE, closing grok #350 F2. Known residuals it does NOT close
+# (deeper daemon-lifecycle, tracked on #350): a live old daemon with NO parseable lock (F3), and a
+# mid-boot orphan whose setsid child outlives a supervisor-only kill (F4). `squadctl restart` is
+# the sole supported upgrade path — hand-starting a daemon around it re-opens the window.
+cmd_restart() {
+	local pid
+	cmd_stop
+	sleep 1
+	if pid="$(daemon_pid)"; then
+		echo "restart aborted: a daemon (pid $pid) still holds $LOCK after stop." >&2
+		echo "  Not starting a second daemon — an old fenceless binary overlapping the new one" >&2
+		echo "  could race into two owners of $STATE_DIR. Kill pid $pid, confirm 'status', retry." >&2
+		return 1
+	fi
+	cmd_start
+}
 
 case "${1:-}" in
 	start)   cmd_start ;;
