@@ -15,9 +15,18 @@
  *   2. branch prefix — the head branch starts with a configured prefix (`agent/`, `copilot/`,
  *                      `codex/`, …). Operator convention, not GitHub-enforced (except Copilot's own
  *                      prefix) — a human can name a branch `agent/whatever` and pass this check.
- *   3. commit trailer — a commit in the PR carries a configured trailer key (default
- *                      `co-authored-by`). The WEAKEST signal: purely advisory metadata a human can
- *                      add or omit freely, and the ecosystem has no consensus trailer convention.
+ *   3. commit trailer — a commit in the PR carries a configured trailer key. OFF BY DEFAULT (empty
+ *                      `trailerKeys`) — gauntlet round 1 (glance#337 PR #358), both lineages: the
+ *                      previous default (`co-authored-by`) force-gated ORDINARY HUMAN COLLABORATION
+ *                      PRs, because `Co-authored-by:` is GitHub's own standard trailer for any
+ *                      multi-author commit (added automatically by its web UI for paired commits) —
+ *                      nothing about it implies an agent. Requiring an agent-SPECIFIC co-author (e.g.
+ *                      matching `Codex <noreply@openai.com>` by name/email) was considered and
+ *                      rejected: it reintroduces the exact "no registry of agent identities" problem
+ *                      this file's own header names, for a signal already documented as the weakest
+ *                      in the chain. An operator whose repo has a real trailer convention can opt back
+ *                      in via `GLANCE_GH_APP_TRAILER_KEYS` (config.ts) — it's a deliberate default, not
+ *                      a state to migrate away from.
  *
  * None of these signals is spoof-proof except (1) for GitHub-enforced bot accounts. The wedge's own
  * threat model (R1, open question notes) is single-operator/single-repo for v1: glance is meant to be
@@ -25,6 +34,12 @@
  * receipt), not adversarial attribution. A future multi-agent/multi-repo iteration that needs to trust
  * this gate against an ADVERSARIAL author needs a stronger signal than any of the three above —
  * documented as an open question, not solved here.
+ *
+ * IMPORTANT — this gate does NOT decide whether a check is posted (gauntlet round 1, both lineages
+ * HIGH): every PR gets a check-run regardless of this classification (`post-check.ts`), because a
+ * Ruleset's required-status-check applies to every PR update and a wedge that posts nothing for
+ * human PRs would block them outright. This function decides only which VERIFICATION PATH runs —
+ * "does this PR need a landing-rail receipt to pass" — never whether it gets a check at all.
  */
 
 import type { PullRequestInfo } from "./pull-request.ts";
@@ -42,7 +57,9 @@ export interface AuthorshipConfig {
 export const DEFAULT_AUTHORSHIP_CONFIG: AuthorshipConfig = {
 	botLogins: ["copilot-swe-agent[bot]"],
 	branchPrefixes: ["agent/", "copilot/", "codex/"],
-	trailerKeys: ["co-authored-by"],
+	// Empty by default — see this file's header. `GLANCE_GH_APP_TRAILER_KEYS=co-authored-by` opts back
+	// in for a repo that wants it, with the false-positive risk now documented at the point of choice.
+	trailerKeys: [],
 };
 
 export type AuthorshipSignal = "bot-login" | "branch-prefix" | "co-authored-by-trailer" | "none";

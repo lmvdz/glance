@@ -17,6 +17,7 @@ import type { LandReceipt } from "../receipt/types.ts";
 import { mdEsc, renderReceiptComment } from "../receipt/render-comment.ts";
 import type { AuthorshipVerdict } from "./authorship.ts";
 import type { PullRequestInfo } from "./pull-request.ts";
+import type { ReceiptRejectReason, ReceiptVerifyResult } from "./receipt-verify.ts";
 
 export interface CheckRunOutput {
 	title: string;
@@ -54,14 +55,21 @@ export function receiptToCheckOutput(receipt: LandReceipt): CheckRunOutput {
 	};
 }
 
-/** The gate path: an agent-authored PR classified by authorship.ts but WITHOUT a receipt for its head
- *  SHA. `pr.authorLogin` / `pr.headRef` are attacker-influenceable (a PR author picks their own login
- *  name and branch name), so they're `mdEsc`'d the same as any other agent-authored string landing on
- *  this trust surface (T6's own discipline — see render-comment.ts's TRUST BOUNDARY comment). */
-export function noReceiptOutput(pr: PullRequestInfo, authorship: AuthorshipVerdict): CheckRunOutput {
-	const summary = "❌ **No glance receipt found** — this PR looks agent-authored and landing-rail has no verified receipt for its head commit.";
+/** The gate path: an agent-authored PR classified by authorship.ts but WITHOUT any receipt to check —
+ *  either none was ever supplied, or the one supplied was malformed (schema decode failed BEFORE this
+ *  function is ever called; `malformedReason`, when set, replaces the generic "no receipt" wording
+ *  with what specifically went wrong reading it). `pr.authorLogin` / `pr.headRef` are
+ *  attacker-influenceable (a PR author picks their own login name and branch name), so they're
+ *  `mdEsc`'d the same as any other agent-authored string landing on this trust surface (T6's own
+ *  discipline — see render-comment.ts's TRUST BOUNDARY comment). */
+export function noReceiptOutput(pr: PullRequestInfo, authorship: AuthorshipVerdict, malformedReason?: string): CheckRunOutput {
+	const summary = malformedReason
+		? "❌ **Malformed glance receipt** — the supplied receipt could not be read; treated as no receipt."
+		: "❌ **No glance receipt found** — this PR looks agent-authored and landing-rail has no verified receipt for its head commit.";
 	const text = [
-		"This PR was classified as agent-authored by the glance GitHub-App wedge, but no landing-rail receipt exists for its current head commit.",
+		malformedReason
+			? `This PR was classified as agent-authored by the glance GitHub-App wedge, and a receipt was supplied, but it could not be read: ${mdEsc(malformedReason)}`
+			: "This PR was classified as agent-authored by the glance GitHub-App wedge, but no landing-rail receipt exists for its current head commit.",
 		"A glance land receipt proves the change passed the acceptance gate and an independent validator before merge — land the change through glance's landing-rail pipeline to produce one, or push a new commit once it has.",
 		"",
 		"<details><summary>Why this PR was gated</summary>",
@@ -70,6 +78,62 @@ export function noReceiptOutput(pr: PullRequestInfo, authorship: AuthorshipVerdi
 		`- head branch: \`${mdEsc(pr.headRef)}\``,
 		`- authorship signal: ${mdEsc(authorship.signal)} — ${mdEsc(authorship.detail)}`,
 		`- head SHA: \`${pr.headSha}\``,
+		"",
+		"</details>",
+	].join("\n");
+	return { title: CHECK_TITLE, summary, text: truncateUtf8(text, MAX_OUTPUT_BYTES) };
+}
+
+/** A receipt WAS supplied and is well-formed, but FAILED verification against this PR (wrong
+ *  repo/SHA, an unproven gate outcome, or staleness — see `verifyReceiptForPr`). Distinct from
+ *  `noReceiptOutput`: something was submitted, it just doesn't check out — the summary says exactly
+ *  why so an operator can tell "nothing submitted" from "the wrong thing was submitted" at a glance.
+ *  Every receipt-derived string is `mdEsc`'d: a well-FORMED (schema-valid) receipt can still carry
+ *  attacker-chosen free-text in `repo`/`commit`/`branch` (an operator-supplied JSON file, or a receipt
+ *  copied from elsewhere), so it's exactly as untrusted as any other field on this surface. */
+export function receiptRejectedOutput(receipt: LandReceipt, verify: Extract<ReceiptVerifyResult, { ok: false }>, pr: PullRequestInfo): CheckRunOutput {
+	const reasonWord: Record<ReceiptRejectReason, string> = {
+		"repo-mismatch": "wrong repo",
+		"sha-mismatch": "wrong commit",
+		"gate-not-proven": "gate not proven",
+		stale: "stale",
+	};
+	const summary = `❌ **Glance receipt rejected** (${reasonWord[verify.reason]}) — ${mdEsc(verify.detail)}`;
+	const text = [
+		"A landing-rail receipt was supplied for this PR, but it failed verification and cannot green this check.",
+		`Reason: **${reasonWord[verify.reason]}** — ${mdEsc(verify.detail)}`,
+		"",
+		"<details><summary>What the receipt claims vs. this PR</summary>",
+		"",
+		`- receipt repo: \`${mdEsc(receipt.repo)}\``,
+		`- receipt commit: \`${mdEsc(receipt.commit ?? "(none — nothing merged)")}\``,
+		`- receipt landed: ${receipt.landed ? "true" : "false"}`,
+		`- receipt gate status: \`${mdEsc(receipt.gate.status)}\``,
+		`- receipt forced-without-proof: ${receipt.forcedWithoutProof ? "true" : "false"}`,
+		`- receipt timestamp: ${new Date(receipt.at).toISOString()}`,
+		`- this PR's head SHA: \`${pr.headSha}\``,
+		"",
+		"</details>",
+	].join("\n");
+	return { title: CHECK_TITLE, summary, text: truncateUtf8(text, MAX_OUTPUT_BYTES) };
+}
+
+/** A PR that did NOT classify as agent-authored. Posted for EVERY such PR — never skipped — because a
+ *  Ruleset's required-status-check applies to every PR update to the protected branch; a wedge that
+ *  posts nothing for human PRs would block them outright (gauntlet round 1, both lineages HIGH: "gate
+ *  only agent PRs" is not representable by a static Ruleset). This conclusion is `success` and says so
+ *  PLAINLY as informational, not a real proof — never worded to look like a passed landing-rail check. */
+export function notRequiredOutput(pr: PullRequestInfo, authorship: AuthorshipVerdict): CheckRunOutput {
+	const summary = "▫️ **Not required** — human-authored PR, no landing-rail receipt required.";
+	const text = [
+		"This PR did not classify as agent-authored, so the glance GitHub-App wedge does not require a landing-rail receipt for it.",
+		"This is an INFORMATIONAL pass, not a proof of anything about this change — it exists only so the repo's required-status-check Ruleset (which applies to every PR) doesn't block ordinary human-authored work.",
+		"",
+		"<details><summary>Authorship classification</summary>",
+		"",
+		`- author login: \`${mdEsc(pr.authorLogin || "(none)")}\``,
+		`- head branch: \`${mdEsc(pr.headRef)}\``,
+		`- signal: ${mdEsc(authorship.signal)} — ${mdEsc(authorship.detail)}`,
 		"",
 		"</details>",
 	].join("\n");

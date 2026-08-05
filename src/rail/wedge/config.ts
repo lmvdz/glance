@@ -13,6 +13,7 @@
 import { readFileSync } from "node:fs";
 import type { WedgeCredentials } from "./types.ts";
 import { DEFAULT_AUTHORSHIP_CONFIG, type AuthorshipConfig } from "./authorship.ts";
+import { DEFAULT_MAX_RECEIPT_AGE_MS } from "./receipt-verify.ts";
 
 function readPrivateKeyFile(path: string | undefined): string | undefined {
 	if (!path) return undefined;
@@ -55,6 +56,19 @@ export function loadAuthorshipConfigFromEnv(env: NodeJS.ProcessEnv = process.env
 	return {
 		botLogins: splitList(env.GLANCE_GH_APP_BOT_LOGINS) ?? DEFAULT_AUTHORSHIP_CONFIG.botLogins,
 		branchPrefixes: splitList(env.GLANCE_GH_APP_BRANCH_PREFIXES) ?? DEFAULT_AUTHORSHIP_CONFIG.branchPrefixes,
+		// Empty by default (see authorship.ts's header) — reading the var at all is opt-in, not a
+		// widened default; an unset/blank var keeps the empty default, never silently re-enables it.
 		trailerKeys: splitList(env.GLANCE_GH_APP_TRAILER_KEYS) ?? DEFAULT_AUTHORSHIP_CONFIG.trailerKeys,
 	};
+}
+
+/** How old a receipt is allowed to be (ms) before `verifyReceiptForPr` rejects it as stale. Not a
+ *  `src/config.ts` `envInt` read: that helper reads `process.env` directly, which would defeat this
+ *  module's env-DI-param testability convention (every loader here accepts an explicit `env` for
+ *  tests) — a small inline parse instead. */
+export function loadMaxReceiptAgeMsFromEnv(env: NodeJS.ProcessEnv = process.env): number {
+	const raw = env.GLANCE_GH_APP_RECEIPT_MAX_AGE_MS;
+	if (!raw) return DEFAULT_MAX_RECEIPT_AGE_MS;
+	const n = Number(raw);
+	return Number.isFinite(n) && n >= 0 ? n : DEFAULT_MAX_RECEIPT_AGE_MS;
 }

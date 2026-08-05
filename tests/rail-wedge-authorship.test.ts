@@ -46,16 +46,32 @@ test("branch-prefix match is case-insensitive on the branch name", () => {
 	expect(v.signal).toBe("branch-prefix");
 });
 
-test("commit-trailer match when neither bot-login nor branch-prefix match", () => {
-	const v = classifyAgentAuthorship(pr({ commitTrailerLines: ["Reviewed-by: someone", "Co-Authored-By: Devin <bot@devin.ai>"] }));
+test("commit-trailer match when neither bot-login nor branch-prefix match — WITH the signal explicitly opted in", () => {
+	const v = classifyAgentAuthorship(pr({ commitTrailerLines: ["Reviewed-by: someone", "Co-Authored-By: Devin <bot@devin.ai>"] }), {
+		...DEFAULT_AUTHORSHIP_CONFIG,
+		trailerKeys: ["co-authored-by"],
+	});
 	expect(v.isAgentAuthored).toBe(true);
 	expect(v.signal).toBe("co-authored-by-trailer");
 });
 
-test("commit-trailer key match is case-insensitive on both the key and the trailer line", () => {
-	const v = classifyAgentAuthorship(pr({ commitTrailerLines: ["CO-AUTHORED-BY: Someone <x@y.com>"] }));
+test("commit-trailer key match is case-insensitive on both the key and the trailer line, when opted in", () => {
+	const v = classifyAgentAuthorship(pr({ commitTrailerLines: ["CO-AUTHORED-BY: Someone <x@y.com>"] }), {
+		...DEFAULT_AUTHORSHIP_CONFIG,
+		trailerKeys: ["co-authored-by"],
+	});
 	expect(v.isAgentAuthored).toBe(true);
 	expect(v.signal).toBe("co-authored-by-trailer");
+});
+
+test("gauntlet round 1 fix: the bare Co-Authored-By trailer does NOT match under the DEFAULT config — it force-gated ordinary human collab PRs (GitHub's own standard multi-author trailer, not agent-specific)", () => {
+	const v = classifyAgentAuthorship(pr({ commitTrailerLines: ["Co-Authored-By: A Human Pair <human2@example.com>"] }));
+	expect(v.isAgentAuthored).toBe(false);
+	expect(v.signal).toBe("none");
+});
+
+test("default config's trailerKeys is empty — the commit-trailer signal is opt-in, not on by default", () => {
+	expect(DEFAULT_AUTHORSHIP_CONFIG.trailerKeys).toEqual([]);
 });
 
 test("no signal matches ⇒ honestly reported human-authored, never guessed", () => {

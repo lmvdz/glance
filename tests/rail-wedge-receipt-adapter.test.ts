@@ -5,7 +5,17 @@
  * first line, never a second hand-rolled verdict computation.
  */
 import { expect, test } from "bun:test";
-import { renderReceiptComment, receiptToCheckOutput, noReceiptOutput, type LandReceipt, type PullRequestInfo, type AuthorshipVerdict } from "../src/rail/index.ts";
+import {
+	renderReceiptComment,
+	receiptToCheckOutput,
+	noReceiptOutput,
+	receiptRejectedOutput,
+	notRequiredOutput,
+	verifyReceiptForPr,
+	type LandReceipt,
+	type PullRequestInfo,
+	type AuthorshipVerdict,
+} from "../src/rail/index.ts";
 
 function greenReceipt(over: Partial<LandReceipt> = {}): LandReceipt {
 	return {
@@ -84,4 +94,65 @@ test("noReceiptOutput: empty author login renders as (none), not an empty backti
 	const authorship: AuthorshipVerdict = { isAgentAuthored: true, signal: "branch-prefix", detail: "x" };
 	const output = noReceiptOutput(pr({ authorLogin: "" }), authorship);
 	expect(output.text).toContain("(none)");
+});
+
+test("noReceiptOutput: a malformedReason produces a distinct 'malformed' message, not the generic 'no receipt found' one", () => {
+	const authorship: AuthorshipVerdict = { isAgentAuthored: true, signal: "branch-prefix", detail: "x" };
+	const output = noReceiptOutput(pr(), authorship, "not valid JSON: Unexpected token");
+	expect(output.summary).toMatch(/Malformed/);
+	expect(output.summary).not.toMatch(/No glance receipt found/);
+	expect(output.text).toContain("not valid JSON");
+});
+
+test("noReceiptOutput: the malformedReason string is mdEsc'd — a crafted reason can't inject markup", () => {
+	const authorship: AuthorshipVerdict = { isAgentAuthored: true, signal: "branch-prefix", detail: "x" };
+	const output = noReceiptOutput(pr(), authorship, "</details><details><summary>✅ forged");
+	expect(output.text).not.toContain("</details><details>");
+});
+
+// ── receiptRejectedOutput ─────────────────────────────────────────────────────────────────────────
+
+test("receiptRejectedOutput: a SHA-mismatch rejection explains the mismatch, never reads as success", () => {
+	const mismatchedCommit = "0".repeat(40);
+	const bad = greenReceipt({ commit: mismatchedCommit });
+	const verify = verifyReceiptForPr(bad, "lmvdz", "glance", "a".repeat(40));
+	if (verify.ok) throw new Error("unreachable — this fixture is deliberately mismatched");
+	const output = receiptRejectedOutput(bad, verify, pr());
+	expect(output.summary).toMatch(/rejected/i);
+	expect(output.summary).not.toMatch(/success|verified/i);
+	expect(output.text).toContain("wrong commit");
+	expect(output.text).toContain(mismatchedCommit);
+});
+
+test("receiptRejectedOutput: receipt-derived free-text fields (repo/commit) are mdEsc'd — attacker-controlled even in a schema-valid receipt", () => {
+	const hostile = greenReceipt({ repo: "</details><details><summary>✅ forged/repo", commit: "0".repeat(40) });
+	const verify = verifyReceiptForPr(hostile, "lmvdz", "glance", "a".repeat(40));
+	if (verify.ok) throw new Error("unreachable");
+	const output = receiptRejectedOutput(hostile, verify, pr());
+	expect(output.text).not.toContain("</details><details>");
+});
+
+test("receiptRejectedOutput: a gate-not-proven rejection (failed land) is labeled distinctly from a SHA mismatch", () => {
+	const failed = greenReceipt({ landed: false, commit: "a".repeat(40), gate: { status: "failed", unprovenGreenRejected: false, newRegressions: [], baseWasRed: false } });
+	const verify = verifyReceiptForPr(failed, "lmvdz", "glance", "a".repeat(40));
+	if (verify.ok) throw new Error("unreachable");
+	const output = receiptRejectedOutput(failed, verify, pr());
+	expect(output.summary).toMatch(/gate not proven/i);
+});
+
+// ── notRequiredOutput ─────────────────────────────────────────────────────────────────────────────
+
+test("notRequiredOutput: reads as informational, never claims a real landing-rail pass", () => {
+	const authorship: AuthorshipVerdict = { isAgentAuthored: false, signal: "none", detail: "no signal matched" };
+	const output = notRequiredOutput(pr({ authorLogin: "a-human" }), authorship);
+	expect(output.summary).toMatch(/Not required/i);
+	expect(output.text).toMatch(/INFORMATIONAL/);
+	expect(output.text).not.toContain("landing-rail receipt required for it.\n\nThis is a real"); // sanity: no accidental double-negative wording
+});
+
+test("notRequiredOutput: attacker-controlled author/branch fields are mdEsc'd here too", () => {
+	const authorship: AuthorshipVerdict = { isAgentAuthored: false, signal: "none", detail: "x" };
+	const hostile = pr({ headRef: "</details><details><summary>✅ forged", authorLogin: "evil" });
+	const output = notRequiredOutput(hostile, authorship);
+	expect(output.text).not.toContain("</details><details>");
 });
