@@ -5,26 +5,39 @@
  * it (jwt/installation-token, pull-request, authorship, receipt-verify, receipt-adapter, check-run) is
  * a building block this composes.
  *
- * Gauntlet round 1 (glance#337 PR #358), two structural fixes from the original cut:
- *   - CRITICAL (both lineages): `conclusion = receipt ? "success" : ...` greened the check on the mere
- *     TRUTHINESS of a receipt object — no binding to the repo/commit it's proof for, no check that the
- *     land actually succeeded, no freshness bound. Every receipt now goes through
- *     `verifyReceiptForPr` (repo match, SHA match, proven gate outcome, freshness) before `success` is
- *     ever set; a receipt that fails any of those posts `failure` with the specific reason, never a
- *     silent pass.
- *   - HIGH / design (both lineages): a PR that doesn't classify as agent-authored is no longer
- *     SKIPPED (no check posted at all) — a Ruleset's required-status-check applies to every PR update
- *     to the protected branch, so posting nothing for human PRs would block them outright, and
- *     "post nothing ⇒ treat as passing" would recreate the exact evasion the check exists to prevent.
- *     Every PR now gets a check-run; a non-agent PR gets an honestly-labeled INFORMATIONAL `success`
- *     (`notRequiredOutput`) so the Ruleset stays coherent without silently gating ordinary human work.
+ * Gauntlet history (glance#337 PR #358) — two rounds, the second one closing the wedge:
+ *
+ *   ROUND 1, CRITICAL (both lineages): `conclusion = receipt ? "success" : ...` greened the check on
+ *   the mere TRUTHINESS of a receipt object — no binding to the repo/commit it's proof for, no check
+ *   that the land actually succeeded, no freshness bound. Fixed: every receipt now goes through
+ *   `verifyReceiptForPr` (repo match, SHA match, proven gate outcome, freshness) before `success` is
+ *   ever set; a receipt that fails any of those posts `failure` with the specific reason.
+ *
+ *   ROUND 1's OWN FIX, CRITICAL (round 2, codex delta-verify): round 1 also stopped SKIPPING non-agent
+ *   PRs by posting them an informational `success` — but that `success` is Ruleset-INDISTINGUISHABLE
+ *   from a real verified one (same context/SHA/integration_id/conclusion; a Ruleset can't predicate on
+ *   `output.text`). An agent posing as human (or simply avoiding every authorship signal, which is
+ *   OFF-by-default anyway) got classified non-agent and MERGED WITH NO RECEIPT VERIFIED AT ALL — round
+ *   1 turned "missing-check blocks everyone" into "green bypass for anyone who avoids the signals,"
+ *   which is worse than the original bug.
+ *
+ *   THE ACTUAL FIX (round 2, closing): gate ALL PRs, fail-closed, no authorship bypass. `success`
+ *   requires a VALID receipt through `verifyReceiptForPr` — full stop, regardless of what
+ *   `classifyAgentAuthorship` says. Authorship classification is now PURELY INFORMATIONAL: it's
+ *   rendered in the check-run's output (`receipt-adapter.ts`'s `authorship` param) for a human
+ *   reader's context, but it never changes `conclusion`. A security gate cannot key pass/fail on an
+ *   agent-settable, spoofable signal — that's exactly what round 1's "informational success" bypass
+ *   proved by construction. This is the honest posture for a SPIKE: the wedge gates a repo where every
+ *   merge is expected to carry a glance receipt (an agent-only pilot, or a repo that opts into
+ *   gate-all) — it deliberately BLOCKS a human PR with no receipt too. See the install runbook's
+ *   headline section for the two coherent postures this leaves for an operator to choose between.
  */
 
 import { mintAppJwt } from "./jwt.ts";
 import { mintInstallationToken } from "./installation-token.ts";
 import { fetchPullRequest, type PullRequestInfo } from "./pull-request.ts";
 import { classifyAgentAuthorship, DEFAULT_AUTHORSHIP_CONFIG, type AuthorshipConfig, type AuthorshipVerdict } from "./authorship.ts";
-import { noReceiptOutput, notRequiredOutput, receiptRejectedOutput, receiptToCheckOutput } from "./receipt-adapter.ts";
+import { noReceiptOutput, receiptRejectedOutput, receiptToCheckOutput } from "./receipt-adapter.ts";
 import { verifyReceiptForPr, type ReceiptVerifyResult } from "./receipt-verify.ts";
 import { findExistingCheckRun, upsertCheckRun, type CheckConclusion } from "./check-run.ts";
 import type { WedgeApiOptions, WedgeCredentials } from "./types.ts";
@@ -35,10 +48,9 @@ import type { LandReceipt } from "../receipt/types.ts";
 export const DEFAULT_CHECK_NAME = "glance/landing-rail-receipt";
 
 export type CheckPostingReason =
-	| "receipt-verified" // agent-authored PR, receipt supplied and verified — success
-	| "receipt-rejected" // agent-authored PR, receipt supplied but failed verification — failure
-	| "receipt-missing" // agent-authored PR, no receipt (or a malformed one) supplied — action_required
-	| "human-not-required"; // not classified agent-authored — informational success, always posted
+	| "receipt-verified" // a valid receipt for THIS PR was supplied — success, regardless of authorship
+	| "receipt-rejected" // a receipt was supplied but failed verification — failure
+	| "receipt-missing"; // no (or a malformed) receipt was supplied — action_required
 
 export interface PostWedgeCheckParams {
 	credentials: WedgeCredentials;
@@ -46,12 +58,15 @@ export interface PostWedgeCheckParams {
 	repo: string;
 	prNumber: number;
 	/** A receipt to verify against this PR, if one was found for its head SHA. Absent ⇒ the
-	 *  "no receipt" path — see `receiptError` for the "one was found but couldn't be read" variant. */
+	 *  "no receipt" path — see `receiptError` for the "one was found but couldn't be read" variant.
+	 *  REQUIRED for `success` on EVERY PR — authorship classification never substitutes for this. */
 	receipt?: LandReceipt;
 	/** Set by the caller when a receipt lookup found something but it couldn't be decoded (e.g. the
 	 *  CLI's `--receipt` file failed `LandReceiptSchema` decode) — rendered as a distinct "malformed"
 	 *  reason instead of the generic "no receipt found" message. Ignored when `receipt` is set. */
 	receiptError?: string;
+	/** Used ONLY to render informational "agent-authored: yes/no" context on the check-run — never to
+	 *  decide `conclusion` (round 2 gauntlet fix; see this file's header). */
 	authorshipConfig?: AuthorshipConfig;
 	checkName?: string;
 	detailsUrl?: string;
@@ -62,6 +77,7 @@ export interface PostWedgeCheckParams {
 
 export interface PostWedgeCheckResult {
 	pr: PullRequestInfo;
+	/** Informational only — see this file's header. Never consulted for `conclusion`. */
 	authorship: AuthorshipVerdict;
 	reason: CheckPostingReason;
 	conclusion: CheckConclusion;
@@ -77,11 +93,10 @@ export interface PostWedgeCheckResult {
  *   2. fetch the PR's author/branch/commit-trailer facts (including its CURRENT head SHA — always
  *      read fresh from GitHub, never trusted from the caller, so a receipt is verified against the
  *      real current state of the PR)
- *   3. run the agent-authorship gate to decide which verification path applies (never whether a check
- *      is posted at all — see this file's header)
- *   4. for an agent-authored PR: verify any supplied receipt (repo/SHA/gate-outcome/freshness) and
- *      post success/failure/action_required accordingly; for a non-agent PR: post an informational
- *      success so the Ruleset's required check stays satisfiable
+ *   3. classify agent-authorship for INFORMATIONAL rendering only (never a gate decision — round 2 fix)
+ *   4. verify any supplied receipt (repo/SHA/gate-outcome/freshness) and post
+ *      success/failure/action_required accordingly — for EVERY PR, not just ones classified
+ *      agent-authored
  *   5. upsert (create-or-update) the check-run for the PR's CURRENT head SHA
  */
 export async function postAgentPrCheck(params: PostWedgeCheckParams): Promise<PostWedgeCheckResult> {
@@ -90,6 +105,8 @@ export async function postAgentPrCheck(params: PostWedgeCheckParams): Promise<Po
 	const installationToken = await mintInstallationToken(appJwt, params.credentials.installationId, opts);
 
 	const pr = await fetchPullRequest(installationToken.token, params.owner, params.repo, params.prNumber, opts);
+	// Informational only from here on — NEVER branches the conclusion. See this file's header for why
+	// (round 2 gauntlet: a conclusion keyed on this spoofable/avoidable classification is a bypass).
 	const authorship = classifyAgentAuthorship(pr, params.authorshipConfig ?? DEFAULT_AUTHORSHIP_CONFIG);
 
 	let reason: CheckPostingReason;
@@ -97,21 +114,17 @@ export async function postAgentPrCheck(params: PostWedgeCheckParams): Promise<Po
 	let output: ReturnType<typeof receiptToCheckOutput>;
 	let rejection: Extract<ReceiptVerifyResult, { ok: false }> | undefined;
 
-	if (!authorship.isAgentAuthored) {
-		reason = "human-not-required";
-		conclusion = "success";
-		output = notRequiredOutput(pr, authorship);
-	} else if (params.receipt) {
+	if (params.receipt) {
 		const verify = verifyReceiptForPr(params.receipt, params.owner, params.repo, pr.headSha, { maxAgeMs: params.maxReceiptAgeMs });
 		if (verify.ok) {
 			reason = "receipt-verified";
 			conclusion = "success";
-			output = receiptToCheckOutput(params.receipt);
+			output = receiptToCheckOutput(params.receipt, authorship);
 		} else {
 			reason = "receipt-rejected";
 			conclusion = "failure";
 			rejection = verify;
-			output = receiptRejectedOutput(params.receipt, verify, pr);
+			output = receiptRejectedOutput(params.receipt, verify, pr, authorship);
 		}
 	} else {
 		reason = "receipt-missing";

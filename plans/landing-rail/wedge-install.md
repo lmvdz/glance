@@ -1,11 +1,16 @@
 # Operator install runbook — the GitHub-App wedge (glance#337, rail T9)
 
-Gates agent-authored PRs on ONE external repo with a glance landing-rail receipt, via the Checks API,
-with **zero adoption** by that repo — no workflow file, no Action, no dependency added to their CI.
-This is the SPIKE build: the mechanism (`src/rail/wedge/`) is built and unit-tested against a mocked
-GitHub API; this document is the missing piece — the exact steps an operator with admin rights on the
-target repo runs to actually install it. Design source: `plans/landing-rail/research/github-app-wedge.md`
-(R1, on `research/github-app-wedge` — the adjudicated recommendation this build implements verbatim).
+Requires every pull request on ONE external repo to carry a verified glance landing-rail receipt, via
+the Checks API, with **zero adoption** by that repo — no workflow file, no Action, no dependency added
+to their CI. (An earlier design gated only PRs classified agent-authored; two gauntlet rounds proved
+that's not a safe posture with a static Ruleset and no provenance signal — see the headline section
+below for why this now gates ALL PRs, fail-closed, with agent-authorship rendered as informational
+context only.) This is the SPIKE build: the mechanism (`src/rail/wedge/`) is built and unit-tested
+against a mocked GitHub API; this document is the missing piece — the exact steps an operator with
+admin rights on the target repo runs to actually install it. Design source:
+`plans/landing-rail/research/github-app-wedge.md` (R1, on `research/github-app-wedge` — the adjudicated
+recommendation this build's MECHANICS implement verbatim; the gating POSTURE was corrected post-R1 by
+the gauntlet, see below).
 
 No live install has been performed. This repo's build environment has no `GLANCE_GH_APP_*` credentials
 and no admin rights on an external target repo — every step below is written from R1's research plus
@@ -13,35 +18,56 @@ GitHub's own API docs, not verified against a real App registration. Treat step 
 the highest-risk unverified step: it's typed from the API reference, not round-tripped against a live
 repo.
 
-## HEADLINE OPEN PRODUCT QUESTION (gauntlet round 1, both lineages HIGH — for Lars, not solved here)
+## HEADLINE OPEN PRODUCT QUESTION (gauntlet rounds 1 and 2 — for Lars, not solved here)
 
 **"Gate only agent-authored PRs" is not safely representable by a static required-status-check
-Ruleset.** A Ruleset's required check applies to EVERY PR update to the protected branch — there is no
-"only require this check for agent PRs" option in GitHub's model. The wedge's original cut posted a
-check only for PRs it classified as agent-authored and SKIPPED everything else; under an active
-Ruleset that would have blocked every ordinary human PR too (no check ⇒ required check never
-satisfied ⇒ can't merge), and the alternative — "no check posted ⇒ treat as passing" — recreates the
-exact evasion the check exists to prevent (an attacker just avoids every authorship signal).
+Ruleset, full stop.** This took TWO gauntlet rounds to converge on the real answer, and the failure
+mode in between is the important part to understand:
 
-This build resolves it for the pilot by making **every PR get a check-run**: an agent-authored PR runs
-the real receipt-verification pipeline (success/failure/action_required); a PR that does NOT classify
-as agent-authored gets an honestly-labeled, INFORMATIONAL `success` (`notRequiredOutput` —
-`src/rail/wedge/receipt-adapter.ts`) so the Ruleset stays coherent without silently gating human work.
-**This is the simpler-and-honest choice, not "gate all PRs for real"** — a human PR is never asked to
-produce a landing-rail receipt, its check just always passes. The two live options were (a) this
-informational-pass-for-everyone posture, or (b) scope the pilot to a repo where every PR really is
-agent-authored by convention and the skip branch is simply never exercised; (a) was picked because it
-degrades safely on an arbitrary pilot repo instead of depending on an assumption about that repo's
-traffic holding forever. Whether the wedge should ever gate a genuinely mixed human+agent repo for
-real — which needs a trustworthy provenance signal glance does not have today, not merely a better
-allowlist — is the open product question. Not invented or solved here; surfaced for a decision.
+- **Round 1** flagged: a Ruleset's required check applies to EVERY PR update — there is no "only
+  require this check for agent PRs" option in GitHub's model. The wedge's original cut posted a check
+  only for PRs it classified agent-authored and SKIPPED everything else, which would have blocked
+  every ordinary human PR outright under an active Ruleset.
+- **Round 1's OWN fix** — post an honestly-labeled, INFORMATIONAL `success` for any PR NOT classified
+  agent-authored, so the Ruleset stays satisfiable without gating humans — was ITSELF the round 2
+  CRITICAL finding (codex delta-verify): that `success` is **Ruleset-indistinguishable** from a real
+  verified one. Same context string, same head SHA, same `integration_id`, same `conclusion` — a
+  Ruleset can only see `conclusion`, never `output.text`. So an agent posing as human (or simply
+  avoiding the classification signals, which cost it nothing since they're avoidable by construction —
+  a login name and a branch name are both attacker-chosen) got classified non-agent, received the
+  automatic `success`, and **merged with no receipt ever verified.** Round 1's fix turned "missing-check
+  blocks everyone" into "green bypass for anyone who dodges the signals" — strictly worse than the
+  original bug, because it LOOKS like a working gate on the Checks tab.
 
-Composing point: the previous default authorship signal (`Co-Authored-By:` trailer) is now OFF by
-default (see Step 5) because it's GitHub's own standard trailer for ANY multi-author human commit —
-defaulting it on would classify an ordinary human pair-programming PR as agent-authored, sending it
-down the RECEIPT-REQUIRED path (not the informational "not required" one) even though no landing-rail
-receipt for it will ever exist, force-`action_required`-blocking normal human collaboration. This isn't
-a full fix for the deeper question above; it just removes the worst false-positive from today's default.
+**THE ACTUAL ANSWER (round 2, closing): gate ALL PRs, fail-closed, no authorship exception.**
+`success` now requires a receipt that verifies through `verifyReceiptForPr` — repo/SHA/gate-outcome/
+freshness, all four — for EVERY PR, regardless of what `classifyAgentAuthorship` says.
+Authorship classification is now **purely informational**: it's rendered as an "agent-authored:
+yes/no" context tag on every check-run output (`receipt-adapter.ts`), but it never changes
+`conclusion` (`post-check.ts`). A security gate cannot key pass/fail on a signal the actor being
+gated can set or avoid — that is the literal shape of round 2's finding, proven by construction, not
+a theoretical concern.
+
+**What this means for a deployer — TWO coherent postures, and this build implements only the first:**
+
+1. **Gate-all, fail-closed, for a repo where every merge is expected to carry a glance receipt** — an
+   agent-only pilot repo, or a repo that deliberately opts into "every PR needs a landing-rail receipt
+   to merge." This is what the wedge does now. **The known, correct cost: a human PR with no glance
+   receipt is BLOCKED too** (`action_required`, same as an agent PR with no receipt). That's not a bug
+   to work around — a gate that greens un-verified PRs is not a gate, which is exactly what round 2
+   proved about the alternative.
+2. **Don't deploy the required check on a genuinely mixed human+agent repo at all**, until a
+   trustworthy provenance signal exists that can't be spoofed or avoided by the actor being classified
+   — glance does not have one today. This build deliberately does NOT invent one (codex's explicit
+   instruction, and the right call: a fabricated provenance mechanism would just be a more elaborate
+   version of the same bypass).
+
+Composing point on the authorship signal itself: the `Co-Authored-By:` trailer default is still OFF
+(see Step 5) — not because it could force-gate humans anymore (it can't; authorship no longer decides
+`conclusion`), but because `Co-authored-by:` is GitHub's own standard trailer for ANY multi-author
+human commit, and defaulting it on would MISLABEL ordinary human pair-programming PRs as
+"agent-authored: yes" in the informational context, which is misleading even though harmless to the
+actual gate outcome.
 
 ## Prerequisites
 
@@ -168,21 +194,22 @@ GLANCE_GH_APP_INSTALLATION_ID=78901234
 GLANCE_GH_APP_PRIVATE_KEY=/home/glance/.glance/secrets/gh-app-private-key.pem
 ```
 
-Optional authorship-gate overrides (comma-separated; defaults live in
-`src/rail/wedge/authorship.ts`'s `DEFAULT_AUTHORSHIP_CONFIG` and are almost certainly fine as-is for a
-glance-only pilot repo):
+Optional authorship-CLASSIFICATION overrides (comma-separated; informational only since the round 2
+gauntlet fix — see the headline section above — defaults live in `src/rail/wedge/authorship.ts`'s
+`DEFAULT_AUTHORSHIP_CONFIG` and are almost certainly fine as-is for a glance-only pilot repo):
 
 ```
 GLANCE_GH_APP_BOT_LOGINS=copilot-swe-agent[bot]
 GLANCE_GH_APP_BRANCH_PREFIXES=agent/,copilot/,codex/
-GLANCE_GH_APP_TRAILER_KEYS=              # OFF by default — see the headline product question above
+GLANCE_GH_APP_TRAILER_KEYS=              # OFF by default — see below
 ```
 
-`GLANCE_GH_APP_TRAILER_KEYS` is empty by default (gauntlet round 1, both lineages): `Co-authored-by:`
-is GitHub's own standard trailer for any multi-author human commit, so leaving it on by default
-force-gated ordinary human collaboration PRs into the receipt-required path. Only set it if your repo's
-own convention makes the trailer actually mean "an agent wrote this," e.g. a repo-specific practice of
-tagging agent commits with a distinct trailer key.
+`GLANCE_GH_APP_TRAILER_KEYS` is empty by default: `Co-authored-by:` is GitHub's own standard trailer
+for any multi-author human commit, so leaving it on by default would MISLABEL ordinary human
+collaboration PRs as "agent-authored: yes" in the check-run's informational text (it can no longer
+force-gate them into anything — the gate outcome doesn't depend on this classification). Only set it if
+your repo's own convention makes the trailer actually mean "an agent wrote this," e.g. a repo-specific
+practice of tagging agent commits with a distinct trailer key.
 
 Optional freshness override (defaults to 24h — `DEFAULT_MAX_RECEIPT_AGE_MS`,
 `src/rail/wedge/receipt-verify.ts`):
@@ -199,16 +226,20 @@ See `.env.example`'s "GitHub-App wedge" section for all of the above, inline.
 bun run scripts/post-wedge-check.ts --owner <o> --repo <r> --pr <n> [--receipt <path-to-LandReceipt.json>] [--details-url <url>]
 ```
 
-Every invocation posts a check-run — never a skip (see the headline product question above). Which
-outcome, by PR classification and receipt state:
+Every invocation posts a check-run — never a skip, and **authorship classification never changes the
+outcome** (round 2 gauntlet fix). Which outcome, by receipt state ONLY:
 
-| PR classification | Receipt state | Conclusion | Reason |
-|---|---|---|---|
-| not agent-authored | (irrelevant) | `success` (informational) | `human-not-required` |
-| agent-authored | none supplied | `action_required` | `receipt-missing` |
-| agent-authored | supplied, malformed (fails `LandReceiptSchema`) | `action_required` | `receipt-missing` (with a "malformed" note) |
-| agent-authored | supplied, wrong repo/commit/gate-outcome/stale | `failure` | `receipt-rejected` (the summary says exactly which check failed) |
-| agent-authored | supplied, verified against THIS PR's head | `success` | `receipt-verified` |
+| Receipt state | Conclusion | Reason |
+|---|---|---|
+| none supplied | `action_required` | `receipt-missing` |
+| supplied, malformed (fails `LandReceiptSchema`) | `action_required` | `receipt-missing` (with a "malformed" note) |
+| supplied, wrong repo/commit/gate-outcome/stale | `failure` | `receipt-rejected` (the summary says exactly which check failed) |
+| supplied, verified against THIS PR's head | `success` | `receipt-verified` |
+
+This table is IDENTICAL for an agent-classified PR and a human-classified PR — that symmetry is the
+whole point of the round 2 fix. `classifyAgentAuthorship`'s result is rendered as an "agent-authored:
+yes/no" informational tag inside every one of the four outcomes above, but never picked as, or
+substituted for, one of the outcomes themselves.
 
 A receipt only reaches `success` after `verifyReceiptForPr` (`src/rail/wedge/receipt-verify.ts`) checks
 ALL of: the receipt's `repo` matches this PR's repo, `receipt.commit` equals the PR's CURRENT head SHA
@@ -216,6 +247,16 @@ ALL of: the receipt's `repo` matches this PR's repo, `receipt.commit` equals the
 one (`landed === true`, `gate.status` is `"green"` or `"red-baseline"`, NOT `forcedWithoutProof`), and
 the receipt is no older than the freshness window (Step 5). This is the gauntlet round-1 CRITICAL fix —
 previously ANY truthy receipt object greened the check regardless of what it actually said.
+
+**Freshness caveat (codex, round 2)**: `receipt.at` is SELF-ASSERTED by whatever produced the receipt —
+there is no external signature or timestamp anchor. An actor who can construct/rewrite a receipt file
+can reset its `at` field to "now" and pass the freshness check trivially; freshness alone is not an
+authenticity guarantee. Accepted as a documented limitation, not a spike blocker: the SHA-binding and
+gate-outcome checks are the load-bearing ones (they bind the receipt to a specific commit and a
+specific proven outcome, which a self-asserted timestamp can't fake around), and freshness is a
+secondary hygiene check (catches accidental staleness, not a determined forger). A future fast-follow
+would sign receipts (e.g. with the same App private key, or a daemon-held signing key) so `at` — and
+the rest of the receipt — carries real provenance instead of being trusted as-typed.
 
 - `output.text` carries the full T6 receipt (identical to the PR-comment renderer's markdown —
   `src/rail/receipt/render-comment.ts`) only on the `success` path; the other paths explain what's
@@ -247,30 +288,39 @@ and periodically pruning them — neither built here.
 - With the Ruleset from Step 4 active, a PR whose check is `action_required`/`failure` cannot merge
   through the UI's "Merge" button (rules-required-check enforcement) — an admin can still bypass via the
   Ruleset's bypass list if one is configured, by design (audit-trailed, not a wedge concern).
-- An ordinary human PR (no agent-authorship signal matched) shows `success` too — confirm its summary
-  reads "Not required — human-authored PR" (`notRequiredOutput`), not the receipt-verified wording, so
-  it's visibly distinguishable from a real landing-rail pass on the Checks tab even though both are
-  green.
+- Open an ordinary human PR with NO glance receipt (no agent-authorship signal matched, nothing
+  supplied via `--receipt`) and confirm it gets `action_required`, exactly like an agent PR with no
+  receipt would — **this IS the correct, intended behavior** (round 2 gauntlet fix: gate-all,
+  fail-closed, no authorship exception). If this PR instead shows `success`, the gate-all fix
+  regressed — that is the ONE thing to check before trusting this build in production.
+  See the headline product question above for why a human-authored PR being blocked here is the known,
+  accepted cost of this posture, not a bug.
 - Feed a receipt whose `commit` deliberately does NOT match the PR's head SHA (or one with
   `gate.status: "failed"`) through `--receipt` and confirm the check posts `failure`, not `success` —
   this is the gauntlet round-1 CRITICAL fix; a mismatched or unproven receipt must never green the
-  check.
+  check, for ANY PR regardless of its authorship classification.
+- Confirm the check-run's `output.text` shows an "Authorship classification (informational only —
+  never affects this check's conclusion)" block on every outcome — that label is the visible proof the
+  classification is context, not a gate decision.
 
 ## Live-vs-test-proven status of this build
 
 No `GLANCE_GH_APP_*` credentials were available in the build environment (checked; none present), and
 registering a real App + installing it on an external repo + provisioning a Ruleset needs admin rights
 this build could not obtain headlessly — exactly the reality constraint the ticket named. So: the
-mechanism (JWT mint → installation-token exchange → PR fetch → authorship gate → receipt verification →
-check-run create/update) is built and covered by **93 unit tests** against a mocked GitHub API
-(`tests/rail-wedge-*.test.ts`), covering the auth flow, the receipt-verification policy (repo/SHA/gate-
-outcome/freshness — every gauntlet round-1 CRITICAL scenario: mismatched commit, mismatched repo, a
-failed-land receipt, a stale receipt, each asserted NON-success), the `LandReceiptSchema` decode
-(well-formed and malformed shapes), all four check-run outcomes (verified/rejected/missing/
-not-required), the idempotent find-existing-then-PATCH path, every authorship signal plus the default
-opt-out of the trailer signal, and the trust-boundary escaping into the check-run's markdown output.
-This document is what closes the gap between "the mechanism works" and "the mechanism is installed on a
-real repo" — running it end to end against a real target repo is the next, not-yet-taken step.
+mechanism (JWT mint → installation-token exchange → PR fetch → receipt verification → check-run
+create/update, with authorship classification as informational context only) is built and covered by
+**96 unit tests** against a mocked GitHub API (`tests/rail-wedge-*.test.ts`), covering the auth flow,
+the receipt-verification policy (repo/SHA/gate-outcome/freshness — every gauntlet round-1 CRITICAL
+scenario: mismatched commit, mismatched repo, a failed-land receipt, a stale receipt, each asserted
+NON-success), the `LandReceiptSchema` decode (well-formed and malformed shapes), all THREE check-run
+outcomes (verified/rejected/missing) proven IDENTICAL for an agent-classified and a human-classified
+PR (the round 2 CRITICAL fix — no authorship exception on either the success or failure path), the
+idempotent find-existing-then-PATCH path, every authorship signal plus the default opt-out of the
+trailer signal, and the trust-boundary escaping into the check-run's markdown output (including the
+informational authorship block itself). This document is what closes the gap between "the mechanism
+works" and "the mechanism is installed on a real repo" — running it end to end against a real target
+repo is the next, not-yet-taken step.
 
 ## Fog — open product questions this spike deliberately doesn't solve
 
@@ -297,10 +347,20 @@ real repo" — running it end to end against a real target repo is the next, not
    fast-follow — mark the prior check `neutral`/`stale` the moment a new commit lands, so a
    stale-but-green required check never sits load-bearing. Not built; webhooks are entirely unused in
    this spike (Step 1 explicitly disables the webhook).
-5. **Conditional agent-only gating needs a real provenance signal, or the wedge gates everyone.** The
-   headline open product question at the top of this document, restated here for the fog list: this
-   build's answer for the pilot is "post an informational success for every non-agent PR" (option (a)
-   in that section), not "invent a trustworthy way to tell agent PRs from human ones." If a future
-   iteration wants the check to be MEANINGFUL for human PRs too (not just a pass-through), that needs a
-   provenance mechanism glance doesn't have today — not a better allowlist. Explicitly not designed
-   here; this is Lars's call.
+5. **Conditional agent-only gating needs a real provenance signal — CLOSED by gating everyone instead
+   (round 2).** The headline open product question at the top of this document, restated for the fog
+   list: two gauntlet rounds converged on "there is no safe middle ground between gate-all and
+   gate-nothing without a provenance signal glance doesn't have." This build now gates ALL PRs,
+   fail-closed. The genuinely open piece for Lars is which of the two coherent postures the headline
+   section lists (gate-all-fail-closed on an opt-in/agent-only repo, vs. don't deploy the required
+   check on a mixed repo at all) fits the actual pilot target once #1 above is answered — not whether
+   conditional gating can be made safe (it can't, without a provenance signal this spike deliberately
+   didn't invent).
+6. **Receipt authenticity has no anchor (round 2, codex).** `receipt.at`, and every other field on a
+   `LandReceipt`, is self-asserted — there is no signature or external timestamp binding it to the
+   process that produced it. `verifyReceiptForPr`'s SHA-binding and gate-outcome checks are the
+   load-bearing security properties (they tie the receipt to a specific commit and a specific proven
+   pipeline outcome); freshness is a hygiene check on top, not an authenticity guarantee — an actor who
+   can construct a receipt file can set its timestamp to whatever passes. Accepted as a documented
+   limitation for the spike (see Step 6's freshness caveat); a signed-receipt fast-follow (the App's own
+   key, or a daemon-held signing key) is the real fix, not built here.

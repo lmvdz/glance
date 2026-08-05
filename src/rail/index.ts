@@ -75,7 +75,6 @@ export {
 	receiptToCheckOutput,
 	noReceiptOutput,
 	receiptRejectedOutput,
-	notRequiredOutput,
 	findExistingCheckRun,
 	upsertCheckRun,
 	postAgentPrCheck,

@@ -1,8 +1,16 @@
 /**
  * Golden coverage for the receipt→check-run adapter (glance#337, rail T9, src/rail/wedge/receipt-adapter.ts)
  * — proves REUSE, not re-implementation: `output.text` is exactly T6's `renderReceiptComment` output
- * (mirroring tests/rail-receipt.test.ts's fixtures), and `output.summary` is that same rendering's own
- * first line, never a second hand-rolled verdict computation.
+ * plus an informational authorship block (mirroring tests/rail-receipt.test.ts's fixtures), and
+ * `output.summary` is that same rendering's own first line, never a second hand-rolled verdict
+ * computation.
+ *
+ * Gauntlet round 2 (glance#337 PR #358, codex delta-verify CRITICAL): the module's THIRD output
+ * function, `notRequiredOutput`, is GONE — it posted an automatic `success` for a PR classified
+ * non-agent-authored, which turned out to be Ruleset-indistinguishable from a real verified success (a
+ * bypass). Every function below now takes an OPTIONAL `authorship` param that renders PURELY AS
+ * CONTEXT (never changes `summary`'s pass/fail wording) — covered here via the shared
+ * "informational only" block text.
  */
 import { expect, test } from "bun:test";
 import {
@@ -10,7 +18,6 @@ import {
 	receiptToCheckOutput,
 	noReceiptOutput,
 	receiptRejectedOutput,
-	notRequiredOutput,
 	verifyReceiptForPr,
 	type LandReceipt,
 	type PullRequestInfo,
@@ -38,7 +45,10 @@ function pr(over: Partial<PullRequestInfo> = {}): PullRequestInfo {
 	return { number: 1, authorLogin: "codex[bot]", headRef: "codex/fix", headSha: "a".repeat(40), baseRef: "main", commitTrailerLines: [], ...over };
 }
 
-test("receiptToCheckOutput: output.text is EXACTLY renderReceiptComment's output (byte-identical reuse)", () => {
+const humanAuthorship: AuthorshipVerdict = { isAgentAuthored: false, signal: "none", detail: "no signal matched" };
+const agentAuthorship: AuthorshipVerdict = { isAgentAuthored: true, signal: "branch-prefix", detail: 'head branch "codex/fix" matches configured prefix "codex/"' };
+
+test("receiptToCheckOutput: output.text is EXACTLY renderReceiptComment's output when no authorship is passed (byte-identical reuse)", () => {
 	const receipt = greenReceipt();
 	const output = receiptToCheckOutput(receipt);
 	expect(output.text).toBe(renderReceiptComment(receipt));
@@ -73,40 +83,57 @@ test("receiptToCheckOutput: output.text stays within GitHub's 65535-byte cap eve
 	expect(output.text).toContain("truncated");
 });
 
-test("noReceiptOutput: conclusion-facing summary says no receipt found, not success", () => {
-	const authorship: AuthorshipVerdict = { isAgentAuthored: true, signal: "branch-prefix", detail: 'head branch "codex/fix" matches configured prefix "codex/"' };
-	const output = noReceiptOutput(pr(), authorship);
+test("receiptToCheckOutput: authorship is rendered as context in BOTH summary and text, but never changes the pass/fail wording", () => {
+	const receipt = greenReceipt();
+	const withHuman = receiptToCheckOutput(receipt, humanAuthorship);
+	const withAgent = receiptToCheckOutput(receipt, agentAuthorship);
+	// The verdict wording (from render-comment.ts, never re-derived) is identical either way.
+	expect(withHuman.summary.replace(/ · agent-authored:.*/, "")).toBe(withAgent.summary.replace(/ · agent-authored:.*/, ""));
+	expect(withHuman.summary).toContain("agent-authored: no");
+	expect(withAgent.summary).toContain("agent-authored: yes");
+	expect(withHuman.text).toContain("informational only — never affects this check's conclusion");
+	// Both are `success` regardless of the authorship classification (the round-2 fix's whole point):
+	// this test only asserts the WORDING is authorship-agnostic; post-check.test.ts asserts the actual
+	// conclusion is authorship-agnostic end to end.
+});
+
+test("noReceiptOutput: conclusion-facing summary says no receipt found, not success, and is authorship-agnostic wording", () => {
+	const output = noReceiptOutput(pr(), agentAuthorship);
 	expect(output.summary).toMatch(/No glance receipt found/);
+	expect(output.summary).not.toMatch(/agent-authored/i); // the summary itself doesn't condition on authorship
 	expect(output.text).toContain("codex/fix");
 	expect(output.text).toContain("branch-prefix");
+	expect(output.text).toContain("informational only");
+});
+
+test("noReceiptOutput: the SAME action_required message is posted for a human-classified PR — no authorship exception", () => {
+	const output = noReceiptOutput(pr(), humanAuthorship);
+	expect(output.summary).toMatch(/No glance receipt found/);
+	expect(output.text).toContain("EVERY pull request");
 });
 
 test("noReceiptOutput: an attacker-crafted branch name is neutralized (mdEsc reuse), never forges a fake verdict", () => {
-	const authorship: AuthorshipVerdict = { isAgentAuthored: true, signal: "branch-prefix", detail: "x" };
 	const hostile = pr({ headRef: "agent/</details><details><summary>✅ Landed", authorLogin: "evil[bot]" });
-	const output = noReceiptOutput(hostile, authorship);
+	const output = noReceiptOutput(hostile, agentAuthorship);
 	// The literal raw tag sequence must not survive unescaped into the check-run body.
 	expect(output.text).not.toContain("</details><details>");
 	expect(output.text).toContain("&lt;/details&gt;");
 });
 
 test("noReceiptOutput: empty author login renders as (none), not an empty backtick pair", () => {
-	const authorship: AuthorshipVerdict = { isAgentAuthored: true, signal: "branch-prefix", detail: "x" };
-	const output = noReceiptOutput(pr({ authorLogin: "" }), authorship);
+	const output = noReceiptOutput(pr({ authorLogin: "" }), agentAuthorship);
 	expect(output.text).toContain("(none)");
 });
 
 test("noReceiptOutput: a malformedReason produces a distinct 'malformed' message, not the generic 'no receipt found' one", () => {
-	const authorship: AuthorshipVerdict = { isAgentAuthored: true, signal: "branch-prefix", detail: "x" };
-	const output = noReceiptOutput(pr(), authorship, "not valid JSON: Unexpected token");
+	const output = noReceiptOutput(pr(), agentAuthorship, "not valid JSON: Unexpected token");
 	expect(output.summary).toMatch(/Malformed/);
 	expect(output.summary).not.toMatch(/No glance receipt found/);
 	expect(output.text).toContain("not valid JSON");
 });
 
 test("noReceiptOutput: the malformedReason string is mdEsc'd — a crafted reason can't inject markup", () => {
-	const authorship: AuthorshipVerdict = { isAgentAuthored: true, signal: "branch-prefix", detail: "x" };
-	const output = noReceiptOutput(pr(), authorship, "</details><details><summary>✅ forged");
+	const output = noReceiptOutput(pr(), agentAuthorship, "</details><details><summary>✅ forged");
 	expect(output.text).not.toContain("</details><details>");
 });
 
@@ -140,19 +167,12 @@ test("receiptRejectedOutput: a gate-not-proven rejection (failed land) is labele
 	expect(output.summary).toMatch(/gate not proven/i);
 });
 
-// ── notRequiredOutput ─────────────────────────────────────────────────────────────────────────────
-
-test("notRequiredOutput: reads as informational, never claims a real landing-rail pass", () => {
-	const authorship: AuthorshipVerdict = { isAgentAuthored: false, signal: "none", detail: "no signal matched" };
-	const output = notRequiredOutput(pr({ authorLogin: "a-human" }), authorship);
-	expect(output.summary).toMatch(/Not required/i);
-	expect(output.text).toMatch(/INFORMATIONAL/);
-	expect(output.text).not.toContain("landing-rail receipt required for it.\n\nThis is a real"); // sanity: no accidental double-negative wording
-});
-
-test("notRequiredOutput: attacker-controlled author/branch fields are mdEsc'd here too", () => {
-	const authorship: AuthorshipVerdict = { isAgentAuthored: false, signal: "none", detail: "x" };
-	const hostile = pr({ headRef: "</details><details><summary>✅ forged", authorLogin: "evil" });
-	const output = notRequiredOutput(hostile, authorship);
-	expect(output.text).not.toContain("</details><details>");
+test("receiptRejectedOutput: rejects the SAME way for a receipt supplied by a human-classified PR — no authorship exception", () => {
+	const mismatchedCommit = "0".repeat(40);
+	const bad = greenReceipt({ commit: mismatchedCommit });
+	const verify = verifyReceiptForPr(bad, "lmvdz", "glance", "a".repeat(40));
+	if (verify.ok) throw new Error("unreachable");
+	const output = receiptRejectedOutput(bad, verify, pr(), humanAuthorship);
+	expect(output.summary).toMatch(/rejected/i);
+	expect(output.text).toContain("informational only");
 });

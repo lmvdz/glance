@@ -35,11 +35,16 @@
  * this gate against an ADVERSARIAL author needs a stronger signal than any of the three above —
  * documented as an open question, not solved here.
  *
- * IMPORTANT — this gate does NOT decide whether a check is posted (gauntlet round 1, both lineages
- * HIGH): every PR gets a check-run regardless of this classification (`post-check.ts`), because a
- * Ruleset's required-status-check applies to every PR update and a wedge that posts nothing for
- * human PRs would block them outright. This function decides only which VERIFICATION PATH runs —
- * "does this PR need a landing-rail receipt to pass" — never whether it gets a check at all.
+ * IMPORTANT — this classification is now PURELY INFORMATIONAL (gauntlet round 2, glance#337 PR #358,
+ * codex delta-verify CRITICAL). It once decided BOTH whether a check was posted at all (round 1: a
+ * non-agent PR was skipped) AND, after round 1's own fix, which check-run OUTCOME applied (a non-agent
+ * PR got an automatic informational `success`). Round 2 proved that second form was itself a bypass:
+ * that `success` is Ruleset-indistinguishable from a real verified one, so an agent posing as human —
+ * or simply avoiding these signals, which cost it nothing since they're avoidable by construction —
+ * merged with no receipt ever checked. `classifyAgentAuthorship`'s result is now rendered as CONTEXT on
+ * every check-run output (`receipt-adapter.ts`) and NEVER consulted for `conclusion` (`post-check.ts`).
+ * `success` requires a verified receipt (`receipt-verify.ts`), full stop, for every PR — see
+ * `post-check.ts`'s header for the full history and the install runbook for the resulting posture.
  */
 
 import type { PullRequestInfo } from "./pull-request.ts";

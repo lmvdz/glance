@@ -2,13 +2,15 @@
 /**
  * scripts/post-wedge-check.ts — the one-command daemon invocation for the GitHub-App wedge spike
  * (glance#337, rail T9). Mints an installation token from the App's credentials, fetches PR metadata,
- * and pushes a Checks API check-run — the outcome depends on authorship + receipt verification (see
- * `postAgentPrCheck`'s doc comment for the full decision table): `success` only for a receipt that
- * verifies against THIS PR's current head (repo/SHA/gate-outcome/freshness all bound — gauntlet round
- * 1 CRITICAL fix), `failure` for a receipt that was supplied but doesn't verify, `action_required` for
- * an agent-authored PR with no (or an unreadable) receipt, and an honestly-labeled informational
- * `success` for a PR that isn't classified agent-authored at all (so the Ruleset's required check
- * doesn't block ordinary human PRs — see authorship.ts's header).
+ * and pushes a Checks API check-run for EVERY PR, gated purely on receipt verification (see
+ * `postAgentPrCheck`'s doc comment for the full history): `success` only for a receipt that verifies
+ * against THIS PR's current head (repo/SHA/gate-outcome/freshness all bound — gauntlet round 1
+ * CRITICAL fix), `failure` for a receipt that was supplied but doesn't verify, `action_required` for
+ * any PR with no (or an unreadable) receipt. Agent-authorship classification is rendered as
+ * INFORMATIONAL CONTEXT on every outcome above but never changes which one applies (gauntlet round 2
+ * CRITICAL: round 1's "informational success for non-agent PRs" turned out to be a Ruleset-invisible
+ * bypass — an agent avoiding the classification signals merged with no receipt ever checked — so
+ * conclusion now depends ONLY on receipt verification, for every PR, with no authorship exception).
  *
  * Usage:
  *   bun run scripts/post-wedge-check.ts --owner <o> --repo <r> --pr <n> \

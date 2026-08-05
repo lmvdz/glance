@@ -10,10 +10,15 @@
  * blatant SHA mismatch that the pre-fix orchestrator happily greened anyway (any truthy receipt =
  * success). That's exactly the CRITICAL bug both lineages converged on; the fixture below now uses a
  * MATCHING commit for the success case, and the mismatched-SHA case is its own dedicated test that
- * asserts NON-success. Also: a human-authored PR is no longer "skipped" (no check posted) — it now
- * gets an informational `success` check, because a Ruleset's required-status-check applies to every
- * PR and a skip would either block ordinary human PRs or, if treated as passing, recreate the same
- * evasion the check exists to prevent (see post-check.ts's header and authorship.ts's header).
+ * asserts NON-success.
+ *
+ * Gauntlet round 2 (codex delta-verify, CRITICAL): round 1's OWN fix — an informational `success` for
+ * any PR NOT classified agent-authored — turned out to be a Ruleset-invisible BYPASS: that `success`
+ * is indistinguishable from a real verified one, so an agent posing as human (or simply avoiding the
+ * classification signals) merged with no receipt ever checked. Round 2 removes the bypass entirely:
+ * EVERY PR requires a verified receipt for `success`, with NO authorship exception. The
+ * "human-authored PR gets a free pass" tests below are replaced with tests proving the OPPOSITE — a
+ * human-classified PR is gated exactly the same as an agent-classified one.
  */
 import { afterEach, beforeAll, expect, test } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
@@ -168,18 +173,34 @@ test("agent-authored PR + a receiptError (malformed --receipt file) ⇒ action_r
 	expect((captured.checkRunBody?.output as { summary: string }).summary).toMatch(/Malformed/);
 });
 
-test("gauntlet HIGH fix: a human-authored PR (no signal matches) gets an INFORMATIONAL success check-run — never skipped, never blocking", async () => {
+test("gauntlet round 2 CRITICAL fix: a human-classified PR with NO receipt is gated exactly like an agent-classified one — action_required, never a free pass", async () => {
 	const captured: { checkRunBody?: Record<string, unknown> } = {};
 	mockFullFlow({ authorLogin: "a-human", headRef: "feature/whatever", captured });
-	const result = await postAgentPrCheck({ credentials: credentials(), owner: "acme", repo: "widgets", prNumber: 42, receipt: verifiedReceipt() });
-	expect(result.conclusion).toBe("success");
-	expect(result.reason).toBe("human-not-required");
-	expect(captured.checkRunBody).toBeDefined();
-	expect(captured.checkRunBody?.conclusion).toBe("success");
-	expect((captured.checkRunBody?.output as { summary: string }).summary).toMatch(/Not required/);
+	const result = await postAgentPrCheck({ credentials: credentials(), owner: "acme", repo: "widgets", prNumber: 42 });
+	expect(result.authorship.isAgentAuthored).toBe(false);
+	expect(result.conclusion).toBe("action_required");
+	expect(result.reason).toBe("receipt-missing");
+	expect(captured.checkRunBody?.conclusion).toBe("action_required");
 });
 
-test("commit-trailer signal, explicitly opted in via authorshipConfig, still gates the PR when no stronger signal matches", async () => {
+test("gauntlet round 2 CRITICAL fix: a human-classified PR WITH a verified receipt still reaches success — authorship never blocks a genuinely proven land either", async () => {
+	mockFullFlow({ authorLogin: "a-human", headRef: "feature/whatever" });
+	const result = await postAgentPrCheck({ credentials: credentials(), owner: "acme", repo: "widgets", prNumber: 42, receipt: verifiedReceipt() });
+	expect(result.authorship.isAgentAuthored).toBe(false);
+	expect(result.conclusion).toBe("success");
+	expect(result.reason).toBe("receipt-verified");
+});
+
+test("gauntlet round 2 CRITICAL fix: a human-classified PR with a MISMATCHED receipt is rejected exactly like an agent-classified one — no authorship bypass on the failure path either", async () => {
+	mockFullFlow({ authorLogin: "a-human", headRef: "feature/whatever" });
+	const mismatched = verifiedReceipt({ commit: "0".repeat(40) });
+	const result = await postAgentPrCheck({ credentials: credentials(), owner: "acme", repo: "widgets", prNumber: 42, receipt: mismatched });
+	expect(result.authorship.isAgentAuthored).toBe(false);
+	expect(result.conclusion).toBe("failure");
+	expect(result.rejection?.reason).toBe("sha-mismatch");
+});
+
+test("commit-trailer signal, explicitly opted in via authorshipConfig, is rendered informationally but the conclusion is identical either way (receipt-verified)", async () => {
 	mockFullFlow({ authorLogin: "a-human", headRef: "feature/whatever", commitTrailerLines: ["Co-Authored-By: Codex <noreply@openai.com>"] });
 	const result = await postAgentPrCheck({
 		credentials: credentials(),
@@ -191,14 +212,15 @@ test("commit-trailer signal, explicitly opted in via authorshipConfig, still gat
 	});
 	expect(result.authorship.signal).toBe("co-authored-by-trailer");
 	expect(result.reason).toBe("receipt-verified");
+	expect(result.conclusion).toBe("success");
 });
 
-test("under the DEFAULT authorship config, a bare Co-Authored-By trailer does NOT gate the PR — it's the human-not-required path", async () => {
+test("under the DEFAULT authorship config, a bare Co-Authored-By trailer classifies as human-authored but STILL requires a receipt for success", async () => {
 	mockFullFlow({ authorLogin: "a-human", headRef: "feature/whatever", commitTrailerLines: ["Co-Authored-By: A Human Pair <human2@example.com>"] });
 	const result = await postAgentPrCheck({ credentials: credentials(), owner: "acme", repo: "widgets", prNumber: 42 });
 	expect(result.authorship.isAgentAuthored).toBe(false);
-	expect(result.reason).toBe("human-not-required");
-	expect(result.conclusion).toBe("success");
+	expect(result.reason).toBe("receipt-missing");
+	expect(result.conclusion).toBe("action_required");
 });
 
 test("an existing check-run for this SHA is PATCHed (idempotent upsert), not duplicated", async () => {
