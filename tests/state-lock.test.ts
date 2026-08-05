@@ -5,10 +5,10 @@
 
 import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { acquireStateLock, StateLockError } from "../src/state-lock.ts";
+import { acquireStateLock, StateLockError, loadFlock, probeFlockExclusive, reclaimFencePath, type Flock } from "../src/state-lock.ts";
 
 const cleanups: Array<() => Promise<void> | void> = [];
 afterEach(async () => {
@@ -92,7 +92,7 @@ test("concurrent acquirers never both own the lock (no empty-file TOCTOU window)
 	expect(codes).not.toContain(3); // 0 = won or cleanly refused; 3 = double-owned a corrupted lock
 });
 
-test("N reclaimers racing a SEEDED stale lock (plus an abandoned reclaim file) end with exactly one owner (#345)", async () => {
+test("N reclaimers racing a SEEDED stale lock (plus garbage at the fence path) end with exactly one owner (#345)", async () => {
 	// This is the gauntlet's exact interleaving: backfill is SIGKILLed leaving a
 	// stale lock; daemons D1..Dn start together, all read it and determine its
 	// pid is dead. Under the original bug, one unlinks-and-recreates, and a peer's
@@ -101,9 +101,8 @@ test("N reclaimers racing a SEEDED stale lock (plus an abandoned reclaim file) e
 	// starts from an empty dir and never seeds a stale lock racers must all
 	// reclaim — this closes that gap.
 	//
-	// Also seeds an ABANDONED `daemon.lock.reclaim` file with garbage content, as
-	// if left behind by some earlier interrupted run (e.g. the round-1 mkdir-mutex
-	// design's own leftover, or any other debris). The fix must not care what's
+	// Also seeds garbage content at the ACTUAL fence path (`<file>.fence`), as if
+	// left behind by some earlier interrupted run. The fix must not care what's
 	// in it or how it got there — flock locks live with the kernel, not in the
 	// file's bytes, so a pre-existing file is just an inert target to open, never
 	// something that gets "reclaimed" or "stolen" on a timer.
@@ -111,7 +110,7 @@ test("N reclaimers racing a SEEDED stale lock (plus an abandoned reclaim file) e
 	const file = path.join(dir, "daemon.lock");
 	// Pid 2^31-1 is effectively never a running process — a seeded stale lock.
 	writeFileSync(file, JSON.stringify({ pid: 2147483647, host: os.hostname(), startedAt: 0 }));
-	writeFileSync(`${file}.reclaim`, "leftover debris from an earlier run — must be irrelevant to the fix");
+	writeFileSync(reclaimFencePath(file), "leftover debris from an earlier run — must be irrelevant to the fix");
 	const child = path.join(import.meta.dir, "fixtures", "lock-race-stale-reclaimer-child.ts");
 	// No artificial delay: the fix's real kernel lock makes the outcome
 	// deterministic regardless of scheduling. More racers just gives adversarial
@@ -124,4 +123,83 @@ test("N reclaimers racing a SEEDED stale lock (plus an abandoned reclaim file) e
 	const losers = codes.filter((c) => c === 1).length;
 	expect(owners).toBe(1); // exactly one racer may believe it owns the dir
 	expect(losers).toBe(N - 1); // everyone else gets a clean StateLockError
+});
+
+test("real round-1 debris — a DIRECTORY at the old <file>.reclaim path — never causes EISDIR (#345 round 3, #4)", async () => {
+	// A SIGKILLed round-1 (mkdir-mutex) daemon left `<file>.reclaim` behind as a
+	// DIRECTORY (that design used mkdirSync on this exact path). The round-2 fix
+	// alone would `openSync(reclaimFile, "a+")` on it and throw EISDIR — this
+	// test seeds the real shape (a directory, not a file) that the round-2
+	// self-verification missed. The round-3 fix moves the fence to a new
+	// filename (`.fence`) so this path is never opened, and opportunistically
+	// cleans the leftover directory up.
+	const dir = await tmpdir();
+	const file = path.join(dir, "daemon.lock");
+	writeFileSync(file, JSON.stringify({ pid: 2147483647, host: os.hostname(), startedAt: 0 }));
+	mkdirSync(`${file}.reclaim`); // real round-1 debris shape: a directory, not a file
+	const lock = await acquireStateLock(dir);
+	cleanups.push(() => lock.release());
+	const rec = JSON.parse(await fs.readFile(lock.file, "utf8"));
+	expect(rec.pid).toBe(process.pid);
+	// Opportunistic cleanup: the stray directory should be gone afterward.
+	await expect(fs.stat(`${file}.reclaim`)).rejects.toThrow();
+});
+
+test("probeFlockExclusive: true for the real flock on a local filesystem, false for a no-op stub (#345 round 3, #3/#5)", async () => {
+	// Direct, deterministic unit test of the self-test itself — must fail the
+	// suite if this logic regresses (e.g. someone breaks the LOCK_NB flag),
+	// independent of whether the slower multi-process race test happens to
+	// notice. Grok's finding: the suite must ASSERT exclusion, not just rely on
+	// the race test's absence of failure.
+	const dir = await tmpdir();
+	const testPath = path.join(dir, "probe-target");
+	const flock = loadFlock();
+	expect(flock).not.toBeNull();
+	if (!flock) return; // unreachable after the assert above; narrows the type
+
+	// Real flock on this (local, ext4/tmpfs-class) filesystem must be exclusive.
+	expect(probeFlockExclusive(flock, testPath)).toBe(true);
+
+	// A deliberately no-op stub — as if flock silently didn't exclude anything,
+	// the exact failure mode of a client-local NFS mount — must be caught.
+	const noopStub: Flock = { lock: () => 0, errno: () => 0 }; // "always succeeds"
+	expect(probeFlockExclusive(noopStub, path.join(dir, "probe-target-2"))).toBe(false);
+});
+
+test("a fence held by a wedged/stopped reclaimer cannot wedge boot forever (#345 round 3, #1)", async () => {
+	// Simulates the exact round-3 failure mode: a process holding the reclaim
+	// fence gets SIGSTOPped or wedged in a stuck syscall — it never releases,
+	// but it's also not dead (a live, real process). A blocking `flock(LOCK_EX)`
+	// would block every future acquirer in the libc call itself, forever, since
+	// the deadline is never even consulted. The fix (bounded LOCK_EX|LOCK_NB
+	// retry) must give up and throw StateLockError well before the holder's
+	// hold time elapses — proving boot is bounded, not just "usually fast."
+	const dir = await tmpdir();
+	const file = path.join(dir, "daemon.lock");
+	writeFileSync(file, JSON.stringify({ pid: 2147483647, host: os.hostname(), startedAt: 0 })); // seeded stale
+	const readyFile = path.join(dir, "holder-ready");
+	const holderChild = path.join(import.meta.dir, "fixtures", "lock-fence-holder-child.ts");
+	const holder = Bun.spawn(["bun", holderChild, dir, readyFile], { stdout: "ignore", stderr: "inherit" });
+	cleanups.push(async () => {
+		holder.kill();
+		await holder.exited.catch(() => {});
+	});
+	// Wait for the holder to actually acquire the fence before racing it.
+	const readyDeadline = Date.now() + 3_000;
+	while (Date.now() < readyDeadline) {
+		const isReady = await fs
+			.stat(readyFile)
+			.then(() => true)
+			.catch(() => false);
+		if (isReady) break;
+		await Bun.sleep(10);
+	}
+
+	const handoffMs = 500;
+	const t0 = Date.now();
+	await expect(acquireStateLock(dir, { handoffMs })).rejects.toBeInstanceOf(StateLockError);
+	const elapsedMs = Date.now() - t0;
+	// The holder holds for 4s; if we ever blocked in flock(LOCK_EX) itself, this
+	// would take ~4s (or hang, for a truly wedged process). Bounded well under that.
+	expect(elapsedMs).toBeLessThan(2_000);
 });

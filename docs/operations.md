@@ -73,6 +73,17 @@ scripts/squadctl.sh stop      # stop supervisor FIRST (so it can't relaunch), th
 `~/.omp/squad`), so a stale lock (owner gone) reads as DOWN. Override `GLANCE_STATE_DIR` /
 `GLANCE_LAUNCHER` / `GLANCE_PORT` (legacy `OMP_SQUAD_*` also honored) for a non-default daemon.
 
+**`GLANCE_STATE_DIR` must be a local filesystem.** Stale-lock reclamation (`src/state-lock.ts`,
+lmvdz/glance#345) relies on `flock(2)` providing real, cross-process mutual exclusion — the kernel
+releases it instantly when a holder dies for any reason, which is what makes reclaiming a dead
+daemon's lock safe. Some network mounts (NFS with `local_lock=flock`/`all` being the confirmed
+case) make `flock` a *client-local* no-op: two hosts can each believe they hold it, silently
+reopening the double-owner race the fence exists to prevent. glance self-tests this on every
+reclaim and refuses to reclaim (`StateLockReclaimUnsupportedError`) if flock doesn't actually
+exclude on the resolved state dir's filesystem — plus a best-effort startup warning (cheap
+`/proc/mounts` check, Linux only) if it looks like a known network filesystem. Point
+`GLANCE_STATE_DIR` at a local disk (the defaults, `~/.glance`/`~/.omp/squad`, always are).
+
 For **planning** (vs. the agent/inbox monitor views), use the **project view**: the sidebar drills
 into each repo → its features → their tasks (description / acceptance criteria / context / properties),
 served behind `OMP_SQUAD_WEBAPP=1` like the rest of the SPA.
