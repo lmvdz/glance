@@ -15,7 +15,7 @@
  * could accumulate dead entries. Upgrade path: prune on write, or fold into the sqlite ledger.
  */
 
-import { listFile, mapFile } from "./ledger.ts";
+import { listFile, mapFile } from "../ledger.ts";
 
 export interface LandFailure {
 	/** Consecutive failed auto-lands for this branch (a successful land clears the entry). */

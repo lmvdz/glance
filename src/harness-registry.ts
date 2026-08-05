@@ -16,7 +16,7 @@
 
 import * as path from "node:path";
 import { augmentPathWithWellKnownDirs } from "./bin-dirs.ts";
-import { harnessLineage } from "./model-lineage.ts";
+import { harnessLineage, modelLineage } from "./model-lineage.ts";
 
 export type HarnessProtocol = "omp-rpc" | "acp";
 
@@ -316,6 +316,73 @@ export function resolveBin(d: HarnessDescriptor, perAgentBin?: string): string {
 	return d.bin;
 }
 
+// ── Model-family compatibility (ticket #347, grok T8 gauntlet HIGH) ────────────────────────────
+//
+// model-route.ts's dispatch-time literals (`"opus"`/`"sonnet"`), a profile's `model`, or an
+// operator's explicit `opts.model` are all just strings by the time they reach a spawn — nothing
+// checked whether the harness the unit will actually run on can honor the vendor they imply. Once
+// codex (ticket #336/PR #346) and grok became `verified:true`, a plain harness:"codex"/"grok"/
+// "gemini"/"claude-code" unit became reachable with an Anthropic-family literal on it: codex-acp's
+// `session/set_model` (see acp-agent-driver.ts's `applyModelPin`) either drops the pin silently or
+// rejects it, and — for the omp-rpc family, which has no `confirmedModel` channel at all — nothing
+// downstream would even notice. T8's `confirmedModel` correction (squad-manager.ts's `wire()`)
+// already stops the FINAL receipt from lying about what ran, but only for ACP harnesses with a live
+// pin-and-confirm round trip; it does nothing to stop the wasted pin attempt itself, a cost-gate
+// projection pricing the wrong family before the session even starts, or an omp-rpc harness with no
+// confirmation channel. This is the PRE-SPAWN guard that closes all three, reusing the SAME
+// `harnessLineage`/`modelLineage` oracle T8's cross-lineage-review and the rate-limit degradation
+// ladder already trust — no new classification heuristic invented for this ticket.
+
+/**
+ * Would `model` (a bare family like `"opus"`, a vendor-qualified spec, or any other model
+ * reference `modelLineage` can parse) actually run on harness `d`?
+ *
+ * The multi-vendor branch fails OPEN — the same "never guessed" posture `model-lineage.ts`
+ * documents on every one of its own exports:
+ *  - no model requested (`undefined`) ⇒ compatible, nothing to check.
+ *  - `d`'s harness name carries no static vendor pin (`harnessLineage` "unknown" — every genuinely
+ *    multi-model runtime: omp, pi, opencode, auggie) ⇒ compatible. These harnesses are not
+ *    restricted to one family (omp's own `pickModel` accepts `anthropic/…`, `openai/…`,
+ *    `google-vertex/…` specs — see model-lineage.ts's `PROVIDER_LINEAGE` doc), so there is no fact
+ *    to enforce; inventing one would fabricate a restriction the harness doesn't actually have.
+ *
+ * But a KNOWN single-vendor harness (codex/gemini/claude-code/grok — the ones `harnessLineage`
+ * actually pins) fails CLOSED on an unclassifiable model, deliberately asymmetric with the branch
+ * above (PR #359 blind review, codex, HIGH): `modelLineage` returning `"unknown"` means "we don't
+ * know what vendor this is", not "assume it's fine" — assuming fine is exactly the leak that let
+ * `{harness:"claude-code", model:"o1"}` through, because `modelFamily()` (omp-graph/attribution.ts)
+ * only recognizes `o3`/`o4` via its `\bo[34]\b` regex, so `o1` (a real, wrong-vendor OpenAI model)
+ * resolves to lineage `"unknown"` today and would every time a new model name outran the
+ * classifier — whack-a-mole, not a fix. A harness whose vendor IS pinned has no "maybe" case: any
+ * model that doesn't provably match that vendor is a mismatch, known-wrong or merely
+ * unclassified alike. Only a harness with NO static pin gets the benefit of the doubt.
+ */
+export function harnessAcceptsModel(d: HarnessDescriptor, model?: string): boolean {
+	if (!model) return true;
+	const harness = harnessLineage(d.name);
+	if (harness === "unknown") return true; // multi-vendor harness — no fact to enforce, stays fail-open
+	const requested = modelLineage(model);
+	// Single-vendor harness: no benefit of the doubt. `requested === "unknown"` falls through to
+	// `false` here exactly as intended — an unclassifiable model on a vendor-pinned harness is a
+	// mismatch, not a pass.
+	return requested === harness;
+}
+
+/**
+ * The nearest declared/default model to fall back to once `harnessAcceptsModel` refuses a raw
+ * literal for `d` — `d.staticModels[0]` (the descriptor's own known-good roster: claude-code's
+ * `"default"`, grok's `"grok-4.5"`) when one is declared, else `undefined` so the caller drops the
+ * override entirely and lets the harness run its own account/config default. Mirrors
+ * `model-route.ts`'s own `noShift` idiom (an empty `model` field means "leave the default
+ * untouched") rather than inventing an id nothing in the registry actually promised — codex and
+ * gemini declare no `staticModels` (their catalogs are live-probed, not a small stable set), so
+ * this honestly returns `undefined` for them, same as `staticModels` being absent means everywhere
+ * else in this module.
+ */
+export function nearestCompatibleModel(d: HarnessDescriptor): string | undefined {
+	return d.staticModels?.[0];
+}
+
 // ── Built-in harnesses ──────────────────────────────────────────────────────────────────────────
 // Registered at module load (pure data — no driver imports, no cycles). External harnesses default
 // to verified:false and are hidden until a live smoke (concern 08) proves them.
@@ -428,9 +495,66 @@ registerHarness({
 	staticModels: ["default", "sonnet", "haiku"],
 });
 
-/** codex — via the `codex-acp` adapter over `codex app-server`. Adapter is mid-migration between
- *  orgs; pin a version before relying on it. */
-registerHarness({ name: "codex", protocol: "acp", bin: "npx", acpCommand: ["npx", "-y", "@agentclientprotocol/codex-acp"], capabilities: ACP_CAPS, verified: false, note: "adapter mid-migration between orgs — pin a version" });
+/**
+ * codex — via the `@agentclientprotocol/codex-acp` adapter (bundles its OWN `@openai/codex`
+ * dependency; does NOT shell out to whatever `codex` binary is on PATH — the operator's system
+ * codex CLI and the version this adapter actually drives can and do differ, see below).
+ *
+ * LIVE-VERIFIED 2026-08-04 against codex-acp v1.1.9 (bundled @openai/codex 0.145.0 — the operator's
+ * own system `codex` CLI on this host was 0.144.0 at the time, confirming the two are independent
+ * installs, exactly the "adapter mid-migration" risk this descriptor already flagged) — the ticket
+ * #336 bar (a green fake-server test does not count, see concern 08): `initialize` succeeds,
+ * `session/new` returns a real sessionId plus `models.availableModels` (32 entries across
+ * gpt-5.6-sol/terra/luna × 5 reasoning-effort tiers, gpt-5.5, gpt-5.4[-mini], gpt-5.3-codex-spark).
+ * `session/prompt` was run twice end-to-end against a throwaway scratch git repo with a trivial
+ * task ("append a line, commit it") — both times codex read/edited the file, ran real shell tool
+ * calls, and produced a real commit (auth rides ~/.codex/auth.json, a cached ChatGPT login under
+ * HOME — HOME survives `scrubbedSpawnEnv`'s keep-list, the identical pattern claude-code's
+ * ~/.claude relies on; no OPENAI_API_KEY needed or present on this host).
+ *
+ * REPRODUCED live (twice, independently): codex-acp's own CLI parses exactly THREE argv forms
+ * (`--version`, `login`, `cli`) and silently ignores everything else, including the trailing
+ * `--model <m>` `resolveAcpCommand`'s default `acpModelArgv` appends for every ACP harness. Spawned
+ * with `--model gpt-9999-does-not-exist` (a model that doesn't exist — would have errored if the flag
+ * were read at all), `session/new`'s `currentModelId` still came back as the account's own config
+ * default (`gpt-5.6-sol[high]`) both times — a SILENT drop, worse than the grok acpModelArgv defect
+ * (that one at least errored loudly; this one leaves no signal anywhere in the wire protocol that the
+ * pin never took). codex-acp does expose a model channel beyond argv: an extension method literally
+ * named `session/set_model` (`{sessionId, modelId}`, where `modelId` must be the adapter's own
+ * bracket-suffixed `"<model>[<effort>]"` form).
+ *
+ * `AcpAgentDriver.applyModelPin` (added for this ticket, round 1 gauntlet, grok findings 1/4) calls it
+ * best-effort after every `session/new` — the same fallback contract `applyApprovalMode` already uses
+ * for `session/set_mode`. IMPORTANT, softened from an earlier draft that overclaimed "fixed": this does
+ * NOT guarantee the requested model runs — it can still fail (unsupported extension, a model name
+ * codex doesn't recognize). What it actually buys is HONESTY: `confirmedModel` is verified and recorded
+ * either way — the session's ACTUAL model on a pin failure, the confirmed-pinned one on success — and
+ * the manager (`squad-manager.ts`'s `wire()`) corrects `rec.dto.model`/`RunReceipt.model` off it before
+ * any receipt is stamped, so a codex-class silent drop can never leave a receipt claiming a model the
+ * session didn't confirm. Live-reconfirmed with a THIRD session pinning `gpt-5.4[low]` (`modelpin`
+ * event fired `{ok:true}`, `confirmedModel` read back as the pinned string) and a FOURTH re-smoke
+ * pinning `gpt-5.4[medium]` after the gauntlet fix landed — both agree — and pinned as regression tests
+ * (tests/acp-agent-driver.test.ts, a codex-shaped fake covering success/no-request/pin-failure) since
+ * the real defect was silent, not a crash, and would otherwise regress invisibly.
+ *
+ * `usageVerified` is deliberately NOT set: `message_end`'s `usage` came back `{}` on all three live
+ * turns above — codex-acp never emitted a `usage_update` notification during any of them. This is a
+ * CONFIRMED gap (not merely "untested" like the other ACP descriptors' default). Round-1 gauntlet
+ * finding 3 (grok, HIGH): an absent `usageVerified` used to still let `costUsd ?? 0` render a codex
+ * unit as literally FREE across every cost aggregate (receipts, `attribution-scoreboard.ts`,
+ * `token-burn.ts`) — fixed by stamping `RunReceipt.costUnknown` (squad-manager.ts's `finalizeRun`) for
+ * exactly this case, which the aggregates now exclude from cost sums and tally separately instead of
+ * fabricating a zero.
+ */
+registerHarness({
+	name: "codex",
+	protocol: "acp",
+	bin: "npx",
+	acpCommand: ["npx", "-y", "@agentclientprotocol/codex-acp"],
+	capabilities: ACP_CAPS,
+	verified: true,
+	note: "third-party ACP adapter bundling its own @openai/codex (pin a version — it can drift from the operator's system codex CLI); initialize/session/new/session/prompt live-verified end-to-end (real commits in a scratch repo); --model argv is silently ignored by the adapter's CLI — AcpAgentDriver.applyModelPin verifies+records the actual model (best-effort, not a guarantee) so the receipt is never a claim the session didn't confirm — usage_update is CONFIRMED absent (usageVerified stays unset, not just untested; costUsd is stamped costUnknown, never a fabricated $0)",
+});
 
 /**
  * grok (xAI Grok Build) — native first-party ACP, no adapter: `grok agent stdio`.

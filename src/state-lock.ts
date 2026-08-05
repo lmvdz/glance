@@ -216,7 +216,7 @@ const LOCK_FILE = "daemon.lock";
 const HANDOFF_TIMEOUT_MS = 5_000;
 const HANDOFF_POLL_MS = 200;
 
-interface LockRecord {
+export interface LockRecord {
 	pid: number;
 	host: string;
 	startedAt: number;
@@ -232,6 +232,34 @@ export interface StateLock {
 	readonly file: string;
 	/** Release the lock (idempotent). Safe to call from a signal handler. */
 	release(): void;
+}
+
+/** Result of a read-only lock probe: whether a LIVE daemon currently owns `stateDir`, and the
+ *  lock record found on disk (whether or not its owner is still alive). `owner` is null only
+ *  when no lock file exists at all. */
+export interface DaemonLockProbe {
+	live: boolean;
+	owner: LockRecord | null;
+}
+
+/**
+ * Read-only: does a LIVE daemon currently hold `stateDir`'s single-writer lock? Uses the SAME
+ * check `acquireStateLock` uses to decide whether to block a second daemon (`daemon.lock`'s
+ * recorded pid + host, with the Linux `/proc` start-time pin to rule out pid reuse) — but never
+ * creates, reclaims, or deletes anything, so it's safe to call from a read-mostly tool (e.g. the
+ * receipt-attribution backfill script) that needs to refuse running against a state dir the
+ * daemon might be actively writing to, without racing `acquireStateLock`'s own
+ * reclaim-a-stale-lock logic.
+ *
+ * @substrate its only caller is `scripts/backfill-receipt-attribution.ts` (a CLI tool, outside
+ * the dead-export scanner's src/+webapp reference universe by design) plus its own test
+ * (tests/backfill-receipt-attribution.test.ts, tests/state-lock.test.ts) — a deliberate reuse of
+ * `acquireStateLock`'s own liveness/pid-reuse logic rather than a second implementation of it.
+ */
+export function probeDaemonLock(stateDir: string): DaemonLockProbe {
+	const rec = readRecord(lockPath(stateDir));
+	if (!rec) return { live: false, owner: null };
+	return { live: ownerAlive(rec), owner: rec };
 }
 
 export class StateLockError extends Error {

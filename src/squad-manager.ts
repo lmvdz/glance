@@ -8,7 +8,7 @@
  */
 
 import { EventEmitter } from "node:events";
-import { envBool, envBoolAliased, envInt, envNumber, raceOnceEnabled } from "./config.ts";
+import { envBool, envBoolAliased, envInt, envNumber, landConfirmEnabled, raceOnceEnabled } from "./config.ts";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import { existsSync, realpathSync } from "node:fs";
@@ -25,7 +25,7 @@ import { FlueServiceDriver } from "./flue-service-driver.ts";
 import { type BranchSpec, deriveBranchAgentId, WorkflowDriver, type WorkflowFleet } from "./workflow-driver.ts";
 import { SandboxAgentDriver } from "./sandbox-agent-driver.ts";
 import { AcpAgentDriver } from "./acp-agent-driver.ts";
-import { contextReachesAgent, type HarnessDescriptor, hasSecondVerifiedProviderLane, resolveAcpCommand, resolveBin, resolveHarness, resolveHarnessName, unverifiedHarnessesEnabled } from "./harness-registry.ts";
+import { contextReachesAgent, getHarness, harnessAcceptsModel, type HarnessDescriptor, hasSecondVerifiedProviderLane, nearestCompatibleModel, resolveAcpCommand, resolveBin, resolveHarness, resolveHarnessName, unverifiedHarnessesEnabled } from "./harness-registry.ts";
 import { resolveProvider } from "./model-lineage.ts";
 import { type Architect, OmpArchitect } from "./architect.ts";
 import { validateWorker } from "./validate.ts";
@@ -182,7 +182,7 @@ import { selectReapable, type WorktreeInfo } from "./worktree-reaper.ts";
 import { scrubbedSpawnEnv } from "./spawn-env.ts";
 import { changedFiles, filesTouchedSinceBase } from "./explore.ts";
 import { appendReceipt, confirmDeliveredFlags, EFFICIENCY_FLAG_PREFIX, readAllReceipts, readReceipts, RunAccumulator, splitCapabilityTokens } from "./receipts.ts";
-import { DecisionLedger } from "./memory/index.ts";
+import { DecisionLedger, renderReviewerPrecision } from "./memory/index.ts";
 import { classifyWhereToLookEntry, listSymptoms, readSymptom, saveSymptom, statWhereToLookEntry, symptomId, validateSymptomText, validateWhereToLookCount, type SymptomEntry } from "./memory/symptoms.ts";
 import { buildPrBody } from "./pr-body.ts";
 import { membraneBreakerCadence } from "./membrane-breaker-cadence.ts";
@@ -204,7 +204,7 @@ import { addPlanRevisionCandidate, appendCommentEvent, type ArtifactComment, typ
 import { castPlanVote as appendPlanVoteCast, closePlanVoteRound as appendPlanVoteClose, currentPlanVoteRound as readCurrentPlanVoteRound, listPlanVoteRounds as readPlanVoteRounds, type OpenPlanVoteInput, openPlanVoteRound, recordPlanVoteCommit, tallyPlanVoteRound } from "./plan-votes.ts";
 import { isPlanDocPath, planDocHeadRevision, resolveSafeDocPath } from "./plan-doc.ts";
 import type { VoteQuorum } from "./plan-vote-quorum.ts";
-import { landFailureCount, readForcedLands, readLandLedger, readValidatorOverrides, recordForcedLand, recordLandOutcome, recordValidatorOverride } from "./land-ledger.ts";
+import { landFailureCount, readForcedLands, readLandLedger, readValidatorOverrides, recordForcedLand, recordLandOutcome, recordValidatorOverride, classifyLand, writeLandReceipt, postReceiptComment, type LandReceipt } from "./rail/index.ts";
 import { isLandingUnit, landingRosterOf } from "./is-landing-unit.ts";
 import { readTaskOutcomes, recordTaskOutcome, type TaskOutcomeRow } from "./task-outcomes.ts";
 import { buildTaskClassMatrix } from "./omp-graph/task-class-matrix.ts";
@@ -1048,6 +1048,27 @@ function validationRecord(value: unknown): ValidationRecord | undefined {
 	return rec as unknown as ValidationRecord;
 }
 
+/** Parse `git diff --numstat` into a files list and summed insertions/deletions for a land receipt
+ *  (T6, glance#334). Binary files show "-\t-\t<path>" — counted as a touched file, no line delta.
+ *  Tolerant: an unparseable line is skipped, never thrown. */
+function parseNumstat(out: string): { files: string[]; insertions: number; deletions: number } {
+	const files: string[] = [];
+	let insertions = 0;
+	let deletions = 0;
+	for (const line of out.split("\n")) {
+		if (!line.trim()) continue;
+		const parts = line.split("\t");
+		if (parts.length < 3) continue;
+		const [add, del, ...rest] = parts;
+		const file = rest.join("\t");
+		if (!file) continue;
+		files.push(file);
+		if (add !== "-") insertions += Number(add) || 0;
+		if (del !== "-") deletions += Number(del) || 0;
+	}
+	return { files, insertions, deletions };
+}
+
 export class SquadManager extends EventEmitter {
 	readonly agents = new Map<string, AgentRecord>();
 	private readonly bus: FederationBus;
@@ -1148,8 +1169,14 @@ export class SquadManager extends EventEmitter {
 	private readonly store: Store;
 	/** True when the registry owns the machine-global janitors (DB mode). */
 	private readonly skipGlobalJanitors: boolean;
-	/** Safety valve (OMP_SQUAD_LAND_CONFIRM, default ON; set =0 to auto-merge): a GREEN verify stages a one-tap Land instead of blind-merging into the shared checkout. */
-	private readonly landConfirm = process.env.OMP_SQUAD_LAND_CONFIRM !== "0";
+	/** Safety valve (OMP_SQUAD_LAND_CONFIRM, default ON; set =0 to auto-merge): a GREEN verify stages a one-tap Land instead of blind-merging into the shared checkout. Resolved ONCE, at construction, from `config.ts`'s `landConfirmEnabled()` — never re-read afterward. `effectiveLandConfirm` below exposes THIS cached value (not a fresh env re-read) so `glance doctor` reports exactly what this running instance will act on, even in the (today theoretical — nothing mutates this env var post-boot) case where the process env changes after construction (glance#329, gauntlet round 1: codex found the server's payload previously re-read the env per-request while this field was cached at construction, a lifetime mismatch that could report the opposite of what a GREEN verify would actually do). */
+	private readonly landConfirm = landConfirmEnabled();
+	/** The land-confirm posture THIS instance is actually running under (see `landConfirm` above) — read
+	 *  this from the doctor/observability payload, never `landConfirmEnabled()` directly, so a report can
+	 *  never diverge from what this manager will do on its next GREEN verify. */
+	get effectiveLandConfirm(): boolean {
+		return this.landConfirm;
+	}
 	private pollTimer?: Timer;
 	/** Throttle counter for the periodic orphan-host reap in poll(). */
 	private reapTicks = 0;
@@ -4467,6 +4494,10 @@ export class SquadManager extends EventEmitter {
 		// receipts read it doesn't need.
 		const lastReceipt = !result.retryable ? (await readReceipts(this.stateDir, dto.id)).at(-1) : undefined;
 		const effectiveModel = lastReceipt?.model ?? dto.model;
+		// Snapshot the validator record for the land receipt (T6, glance#334) BEFORE the success block
+		// below clears a now-stale veto (`rec.dto.validation = undefined` on a successful override-land):
+		// the receipt should honestly cite the review that ran, veto-then-overridden included.
+		const validationForReceipt = rec.dto.validation;
 		// Update the branch's failure streak: an auto-land failure bumps it (drives the cap above), any
 		// success clears it. A manual (auto:false) failure is the operator's call — never penalized.
 		// A retryable refusal (dirty main checkout) is an environmental precondition, not a branch failure —
@@ -4707,7 +4738,93 @@ export class SquadManager extends EventEmitter {
 		}
 		void this.recordAudit(LOCAL_ACTOR, "land", id, result.ok ? "ok" : "error", result.detail ?? result.message);
 		void this.store.appendAudit({ actor: LOCAL_ACTOR.id, action: "land", target: id, detail: { outcome: result.ok ? "ok" : "error" } }).catch(() => {});
+		// The land receipt (T6, glance#334): a self-contained HTML the human approves instead of the
+		// diff, plus a compact PR comment linking it. Only for a terminal outcome — a retryable deferral
+		// (dirty main) isn't a land, so it gets no receipt. Best-effort, after the fact: never gates or
+		// delays the land it records (mirrors every other post-land ledger write above).
+		if (!result.retryable) void this.emitLandReceipt(rec, result, effectiveModel, lastReceipt, validationForReceipt);
 		return result;
+	}
+
+	/**
+	 * Write the land receipt (T6, glance#334) and post its compact PR comment. Reads the land's own
+	 * outputs — the `LandResult`, the validator record (T4's `reviewerPrecision`), the run's cost
+	 * receipt — and renders them; it never touches the land gate. Best-effort by contract: every fault
+	 * (a git read, a disk write, a `gh` call) degrades to a log line, never a thrown land failure.
+	 */
+	private async emitLandReceipt(
+		rec: AgentRecord,
+		result: LandResult,
+		effectiveModel: string | undefined,
+		lastReceipt: RunReceipt | undefined,
+		validation: ValidationRecord | undefined,
+	): Promise<void> {
+		try {
+			const dto = rec.dto;
+			const branch = dto.branch ?? "";
+			if (!branch) return; // a receipt is branch-keyed, like the land ledger — nothing to key on
+			const merged = result.merged;
+			// Attribution comes from the land's OWN in-lock SHAs (`result.head0`/`result.landedCommit`,
+			// captured while the land held the repo lock — land.ts/land-pr.ts), NOT a post-hoc HEAD re-read:
+			// a concurrent land moving HEAD between the merge and here would otherwise attribute another
+			// land's commit + rollback to this receipt (the TOCTOU). Nothing merged ⇒ no commit at all, per
+			// LandReceipt's contract (a rejected land shows no "What landed" commit).
+			const commit = merged ? result.landedCommit : undefined;
+			const rollbackPoint = merged ? result.head0 : undefined;
+			let files: string[] = [];
+			let insertions: number | undefined;
+			let deletions: number | undefined;
+			let commitMessage: string | undefined;
+			if (merged && commit) {
+				// The landed set + LOC + subject, all from FIXED SHAs (`head0..landedCommit`) — deterministic
+				// regardless of what HEAD points at now. An EMPTY numstat is the real (empty) landed set, never
+				// silently replaced by a prior receipt's file list. Best-effort: a git fault leaves the field
+				// blank (honest absence), never fabricated. In PR mode `landedCommit` is the PR's merge commit,
+				// fetched into this checkout by the land-pr path, so these reads resolve here too.
+				if (result.head0) {
+					const ns = await hardenedGit(["diff", "--numstat", `${result.head0}..${commit}`], { cwd: dto.repo });
+					if (ns.code === 0) {
+						const parsed = parseNumstat(ns.stdout);
+						files = parsed.files;
+						insertions = parsed.insertions;
+						deletions = parsed.deletions;
+					}
+				}
+				const subj = await hardenedGit(["log", "-1", "--format=%s", commit], { cwd: dto.repo });
+				commitMessage = (subj.code === 0 ? subj.stdout.trim() : "") || result.message || undefined;
+			}
+			const slug = repoIdentity(dto.repo).split("/").slice(-2).join("/");
+			const costUsd = lastReceipt?.costUsd ?? dto.receipt?.costUsd;
+			const receipt: LandReceipt = {
+				repo: slug,
+				branch,
+				commit,
+				message: commitMessage,
+				files,
+				insertions,
+				deletions,
+				landed: merged,
+				at: Date.now(),
+				gate: classifyLand(result),
+				validation,
+				rollbackPoint,
+				forcedWithoutProof: !!result.forcedWithoutProof,
+				cost: {
+					costUsd,
+					costUnknown: costUsd === undefined,
+					model: effectiveModel ?? lastReceipt?.model,
+					tokens: lastReceipt?.tokens?.total,
+				},
+			};
+			const htmlPath = await writeLandReceipt(this.stateDir, receipt);
+			this.log("info", `land receipt written for ${dto.name}: ${htmlPath}`);
+			if (result.prNumber) {
+				const posted = await postReceiptComment(dto.repo, slug, result.prNumber, receipt, { receiptHref: htmlPath, hrefKind: "path" });
+				if (!posted) this.log("warn", `land receipt PR comment failed for ${dto.name} (#${result.prNumber}) — non-fatal`);
+			}
+		} catch (err) {
+			this.log("warn", `land receipt failed for ${rec.dto.name} (non-fatal): ${errText(err)}`);
+		}
 	}
 
 	/**
@@ -5174,6 +5291,18 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
+	 * Injection seam (mirrors `validatorJudgeOverride` above) so tests can point the land receipt's
+	 * reviewer-precision reader at a fixture ledger instead of the repo-committed one — DELIBERATELY a
+	 * method, never an environment variable (gauntlet round 1, codex's "env-ledger-shadow" finding: an
+	 * env hatch here is reachable from a launch-directory `.env`, which Bun auto-loads at boot, letting
+	 * a malicious/misplaced `.env` redirect the land path's ledger read). `undefined` ⇒ `validatorGate`'s
+	 * own default (`DEFAULT_REVIEWER_LEDGER_PATH`, the real repo-committed ledger).
+	 */
+	protected reviewerLedgerPathOverride(): string | undefined {
+		return undefined;
+	}
+
+	/**
 	 * Independent-validator veto (Epic 3, DESIGN §1) — runs BEFORE any mode dispatch, on every
 	 * `landBranch` call INCLUDING forced lands (`requireProof:false` never skips it — a forced land
 	 * bypasses the proof gate, not the semantic one). Scores the diff against the feature's declared
@@ -5200,6 +5329,7 @@ export class SquadManager extends EventEmitter {
 			authorModel: rec?.dto.model,
 			authorHarness: rec?.dto.harness,
 			agentId: opts.agentId,
+			reviewerLedgerPath: this.reviewerLedgerPathOverride(),
 		});
 		if (rec) {
 			rec.dto.validation = record;
@@ -7008,12 +7138,92 @@ export class SquadManager extends EventEmitter {
 				this.log("warn", `model-route decision failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
 			}
 		}
+
+		const kind = opts.flue ? "flue-service" : opts.workflow || opts.verify ? "workflow" : "omp-operator";
+
+		// Resolve the harness backing a plain-agent unit and gate on its capabilities BEFORE cutting a
+		// worktree (fail fast, no leaked worktree) AND — as of ticket #347 — BEFORE the cost-gate
+		// projection just below, not after it. flue/workflow kinds use their own drivers, so the
+		// harness concept doesn't apply to them.
+		const harnessDesc = kind === "omp-operator" ? resolveHarness({ harness: opts.harness, runtime: opts.runtime }) : undefined;
+		if (harnessDesc) {
+			// Honest gating (concern 08): an unverified harness (not smoke-tested against a live binary) is
+			// refused unless the operator explicitly opts in — so a harness that half-works can't be picked
+			// by accident, the way this repo's `/make-it-work` history warns against.
+			if (!harnessDesc.verified && !unverifiedHarnessesEnabled()) {
+				throw new Error(`harness "${harnessDesc.name}" is unverified (not smoke-tested against a live binary)${harnessDesc.note ? ` — ${harnessDesc.note}` : ""}. Set OMP_SQUAD_UNVERIFIED_HARNESS=1 to use it.`);
+			}
+			// A no-approval harness (pi: host perms, no approval channel) cannot enforce anything stricter
+			// than yolo — refuse rather than silently granting full autonomy under an "always-ask"/"write"
+			// label (the "inverted safety" failure mode). Surfaced, never coerced.
+			if (harnessDesc.capabilities.toolApproval === "none" && approvalMode !== "yolo") {
+				throw new Error(`harness "${harnessDesc.name}" has no approval channel — only approvalMode "yolo" is supported (got "${approvalMode}")`);
+			}
+			// sandbox × non-omp is unbuildable today: SandboxAgentDriver is an omp-RPC client over
+			// docker-exec stdio. Reject rather than silently produce a broken driver (Phase 3 makes
+			// containment protocol-aware so any harness can be sandboxed).
+			if (opts.sandbox && harnessDesc.protocol !== "omp-rpc") {
+				throw new Error(`harness "${harnessDesc.name}" cannot run sandboxed yet — sandbox currently supports only omp-rpc harnesses`);
+			}
+			// Capability validation for a profile-selected axis the resolved harness can't honor: ACP
+			// harnesses have no thinking-level channel (makeDriver never threads `thinking` through to
+			// AcpAgentDriver), so a profile that sets `thinking` there would otherwise be silently dropped.
+			// Reject loudly instead — the operator picked an incompatible profile/harness pair.
+			if (profile?.thinking && !harnessDesc.capabilities.thinking) {
+				throw new Error(`profile "${profile.id}" sets thinking:"${profile.thinking}" but harness "${harnessDesc.name}" has no thinking-level channel (capabilities.thinking=false) — drop the profile's thinking field or pick a different harness`);
+			}
+			// Harness↔model-family compatibility (ticket #347, grok T8 gauntlet HIGH): a route/profile/
+			// operator model literal must never be handed raw to a harness whose adapter is pinned to a
+			// DIFFERENT vendor (codex verification, #336/PR #346, is what made this reachable — see
+			// harness-registry.ts's module doc for the full defect chain). `harnessAcceptsModel` fails
+			// open ONLY for a multi-vendor harness (omp/pi/opencode/auggie); a KNOWN single-vendor harness
+			// (codex/gemini/claude-code/grok) fails CLOSED on an unclassifiable model too, not just a
+			// confirmed-different one (PR #359 blind review, codex, HIGH: an unclassifiable model like
+			// "o1" against `modelFamily()`'s narrower-than-reality `\bo[34]\b` regex must never read as
+			// "assume compatible" on a harness that IS pinned to one vendor).
+			//
+			// DELIBERATELY placed BEFORE the cost-gate projection below (PR #359 blind review, codex,
+			// HIGH): moved here from after it, because the cost gate must price the model that will
+			// ACTUALLY run. Landing this check after the cost gate let a routed "opus" pick pass the
+			// gate under Opus's (cheap) cost history and then get silently remapped to a DIFFERENT
+			// model whose real cost/ceiling was never evaluated — a cost-gate bypass via ordering, not
+			// a logic bug in either check individually.
+			if (opts.model !== undefined && !harnessAcceptsModel(harnessDesc, opts.model)) {
+				if (routedModel !== undefined && opts.model === routedModel) {
+					// System-caused (the model-route block above, not the operator): mirror
+					// `routeModelForTaskClass`'s own "no basis, no shift, never block" idiom instead of
+					// throwing on a decision the operator never made. Map to the harness's nearest declared
+					// model when the registry names one, else drop the override so the harness's own
+					// account/config default applies — never a guessed id. `routedModel` is updated in step
+					// so `declaredModelOf`'s rate-limit-key exclusion invariant (routing.routedModel === the
+					// applied model) keeps holding after the remap, AND so the cost-gate projection below
+					// prices this same, actually-applied model.
+					const fallback = nearestCompatibleModel(harnessDesc);
+					this.log(
+						"warn",
+						`model-route picked "${opts.model}" but harness "${harnessDesc.name}" is vendor-pinned to a different model family — ${fallback ? `remapped to "${fallback}"` : "dropped (harness account/config default applies)"}`,
+					);
+					opts = { ...opts, model: fallback };
+					routedModel = fallback;
+				} else {
+					// Operator/profile-chosen — same "reject loudly" idiom the sandbox/approval/thinking
+					// checks above already use for an incompatible profile/harness pair.
+					throw new Error(
+						`model "${opts.model}" is incompatible with harness "${harnessDesc.name}" (vendor-pinned to a different model family) — pick a model in "${harnessDesc.name}"'s family or a different harness`,
+					);
+				}
+			}
+		}
+
 		// Pre-execution cost projection (C-COST), per-lane ENFORCE (adw-factory-borrows concern 09),
-		// deliberately placed AFTER model routing: the gate must judge the model that will actually
-		// run — verdicting on the pre-route default admitted a chore spawn under the cheap family's
-		// history and then routed it onto a frontier model whose lane cell projected far over ceiling
-		// (code-review, CONFIRMED under-deny). The
-		// lane's own `costAction` (LANE_POLICY, v1: only "chore" is "deny") decides how far this can go.
+		// deliberately placed AFTER model routing AND (as of ticket #347) after the harness-compat
+		// remap above — the gate must judge the model that will ACTUALLY run: verdicting on the
+		// pre-route default admitted a chore spawn under the cheap family's history and then routed it
+		// onto a frontier model whose lane cell projected far over ceiling (code-review, CONFIRMED
+		// under-deny); verdicting on a routed model the harness-compat guard was about to remap or drop
+		// let a spawn pass the gate under one model's cost history and then silently run a DIFFERENT
+		// one (PR #359 blind review, codex, HIGH — a cost-gate bypass via ordering). The lane's own
+		// `costAction` (LANE_POLICY, v1: only "chore" is "deny") decides how far this can go.
 		// `OMP_SQUAD_COST_GATE=enforce` + a "deny" verdict refuses the spawn outright, BEFORE any worktree
 		// or agent record exists — surfaced as both a create error (thrown below) and an attention-lane
 		// event; there is no live `AgentRecord` yet to attach to, so this reuses the SAME "unattached
@@ -7053,40 +7263,6 @@ export class SquadManager extends EventEmitter {
 					void this.emitFleetTokenBurnRollup(verdict);
 				}
 			});
-		}
-
-		const kind = opts.flue ? "flue-service" : opts.workflow || opts.verify ? "workflow" : "omp-operator";
-
-		// Resolve the harness backing a plain-agent unit and gate on its capabilities BEFORE cutting a
-		// worktree (fail fast, no leaked worktree). flue/workflow kinds use their own drivers, so the
-		// harness concept doesn't apply to them.
-		const harnessDesc = kind === "omp-operator" ? resolveHarness({ harness: opts.harness, runtime: opts.runtime }) : undefined;
-		if (harnessDesc) {
-			// Honest gating (concern 08): an unverified harness (not smoke-tested against a live binary) is
-			// refused unless the operator explicitly opts in — so a harness that half-works can't be picked
-			// by accident, the way this repo's `/make-it-work` history warns against.
-			if (!harnessDesc.verified && !unverifiedHarnessesEnabled()) {
-				throw new Error(`harness "${harnessDesc.name}" is unverified (not smoke-tested against a live binary)${harnessDesc.note ? ` — ${harnessDesc.note}` : ""}. Set OMP_SQUAD_UNVERIFIED_HARNESS=1 to use it.`);
-			}
-			// A no-approval harness (pi: host perms, no approval channel) cannot enforce anything stricter
-			// than yolo — refuse rather than silently granting full autonomy under an "always-ask"/"write"
-			// label (the "inverted safety" failure mode). Surfaced, never coerced.
-			if (harnessDesc.capabilities.toolApproval === "none" && approvalMode !== "yolo") {
-				throw new Error(`harness "${harnessDesc.name}" has no approval channel — only approvalMode "yolo" is supported (got "${approvalMode}")`);
-			}
-			// sandbox × non-omp is unbuildable today: SandboxAgentDriver is an omp-RPC client over
-			// docker-exec stdio. Reject rather than silently produce a broken driver (Phase 3 makes
-			// containment protocol-aware so any harness can be sandboxed).
-			if (opts.sandbox && harnessDesc.protocol !== "omp-rpc") {
-				throw new Error(`harness "${harnessDesc.name}" cannot run sandboxed yet — sandbox currently supports only omp-rpc harnesses`);
-			}
-			// Capability validation for a profile-selected axis the resolved harness can't honor: ACP
-			// harnesses have no thinking-level channel (makeDriver never threads `thinking` through to
-			// AcpAgentDriver), so a profile that sets `thinking` there would otherwise be silently dropped.
-			// Reject loudly instead — the operator picked an incompatible profile/harness pair.
-			if (profile?.thinking && !harnessDesc.capabilities.thinking) {
-				throw new Error(`profile "${profile.id}" sets thinking:"${profile.thinking}" but harness "${harnessDesc.name}" has no thinking-level channel (capabilities.thinking=false) — drop the profile's thinking field or pick a different harness`);
-			}
 		}
 
 		let cwd: string;
@@ -8848,6 +9024,26 @@ export class SquadManager extends EventEmitter {
 		a.on("ready", () => {
 			this.refreshCommands(rec);
 			this.registerHostTools(rec);
+			// ACP model-receipt honesty (ticket #336 gauntlet finding 1, grok HIGH): duck-typed on
+			// `confirmedModel` — only AcpAgentDriver has it (mirrors the `spawnedCommand` duck-type
+			// above). This is the session's ACTUAL model (session/new's reported default, corrected to
+			// the requested model only on a CONFIRMED `session/set_model` success) — never the merely
+			// REQUESTED one a pin failure would otherwise leave stamped on the receipt. Runs before any
+			// frame ("agent_start" et al.) can seed `rec.run` off `rec.dto.model` (finalizeRun's
+			// `RunAccumulator.start` reads `rec.dto.model` fresh on every turn), so the correction is
+			// always in place before a receipt is ever built.
+			const d = rec.agent as Partial<{ confirmedModel: string }>;
+			if (typeof d.confirmedModel === "string" && d.confirmedModel !== rec.dto.model) {
+				this.log("info", `${rec.dto.name}: ACP session confirmed model "${d.confirmedModel}" (requested "${rec.dto.model ?? "(harness default)"}")`);
+				rec.dto.model = d.confirmedModel;
+			}
+		});
+		// The pin's own success/failure signal (acp-agent-driver.ts's `applyModelPin`) — a real consumer
+		// so a silently-dropped `--model` argv (the codex-acp defect ticket #336 found) is at least
+		// logged, not just corrected invisibly via `confirmedModel` above.
+		a.on("modelpin", (info: { ok: boolean; model?: string; error?: string }) => {
+			if (info.ok) this.log("info", `${rec.dto.name}: ACP model pin confirmed (${info.model})`);
+			else this.log("warn", `${rec.dto.name}: ACP model pin for "${info.model}" not confirmed (${info.error}) — recording the session's actual model instead`);
 		});
 		a.on("ui", (req: RpcExtensionUIRequest) => this.onUi(rec, req));
 		a.on("hosttool", (call: { id: string; toolName: string; arguments: unknown }) => this.onHostTool(rec, call));
@@ -10230,6 +10426,14 @@ export class SquadManager extends EventEmitter {
 		if (rec.dto.model) run.noteModel(rec.dto.model);
 		run.finish(rec.dto.status, await this.runFilesTouched(rec));
 		const receipt = run.snapshot({ sampleRatio: traceSampleRatio(), maxSpans: traceMaxSpans() });
+		// Cost-attribution honesty (ticket #336 gauntlet finding 3, grok HIGH): an absent `costUsd` from a
+		// harness whose usage ingestion isn't verified (`usageVerified` unset — every ACP descriptor
+		// except once a future live smoke confirms its `usage_update` field names; codex CONFIRMED absent
+		// on every live turn, ticket #336) is UNKNOWN, not a genuinely free run. Stamped here — the one
+		// place `receipts.ts`'s pure accumulator meets the registry — so every downstream cost aggregate
+		// (`attribution-scoreboard.ts`, `token-burn.ts`, `cost-aggregate.ts` via `appendReceipt`) can tell
+		// "verified $0" from "we don't know" instead of folding both into the same fabricated zero.
+		if (receipt.costUsd === undefined && getHarness(receipt.harness ?? "omp")?.usageVerified !== true) receipt.costUnknown = true;
 		// Epic 3 (leaf 04): copy the land gate's ValidationRecord onto the durable receipt so it
 		// survives the run — the input Epic 5's confidence scorer reads via buildDigest.
 		if (rec.dto.validation) receipt.validation = rec.dto.validation;
@@ -10244,7 +10448,10 @@ export class SquadManager extends EventEmitter {
 		const conf = scoreConfidence({ verificationState: rec.dto.verificationState ?? "unknown", filesTouched: receipt.filesTouched.length, validator, sameLineage: rec.dto.validation?.sameLineage, lensAdvisory: lensAdvisoryBucket(rec.dto.validation) });
 		receipt.confidence = conf;
 		await appendReceipt(this.stateDir, receipt); // full receipt on disk (both modes)
-		this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_TOKEN_BURN_SNAPSHOT, `token burn · ${this.safeEventLabel(receipt.name)} · ${receipt.tokens?.total ?? 0} tokens · $${(receipt.costUsd ?? 0).toFixed(4)}`, unitTokenBurnPayload(receipt));
+		// costUnknown: say so, not "$0.0000" — the same fabricated-zero the receipt itself now refuses to
+		// claim (ticket #336 gauntlet finding 3).
+		const costLabel = receipt.costUnknown ? "cost unattributed (usage unverified)" : `$${(receipt.costUsd ?? 0).toFixed(4)}`;
+		this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_TOKEN_BURN_SNAPSHOT, `token burn · ${this.safeEventLabel(receipt.name)} · ${receipt.tokens?.total ?? 0} tokens · ${costLabel}`, unitTokenBurnPayload(receipt));
 		if (receipt.spans?.length) this.traceExporter?.enqueue(receipt.spans, { service: "omp-squad", repo: receipt.repo, operator: this.operator.id, org: this.operator.orgId });
 		// Queryable per-org cost/token ledger (DB mode); FileStore is a no-op since the receipt is on disk.
 		await this.store.appendUsage(receipt).catch((err) => this.log("warn", `usage write failed for ${rec.dto.name}: ${err instanceof Error ? err.message : String(err)}`));
@@ -12847,7 +13054,12 @@ export class SquadManager extends EventEmitter {
 	}
 
 	private emitValidationVerdictEvent(rec: AgentRecord, record: ValidationRecord): void {
-		this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_GATE_VERDICT, `The gate says ${record.verdict}, with reviewers agreeing ${(record.agreement * 100).toFixed(0)}% of the time and ${(record.confidence * 100).toFixed(0)}% confidence. ${record.verdict === "pass" ? "Nothing is waiting on you unless you disagree with it." : "This one needs you before it can go further."}`, {
+		// glance#332: the receipt a human approves cites the judging lineage's MEASURED ledger precision
+		// — a real number ("reviewer X, measured precision p% (n adjudicated rows)") or an honest
+		// "unmeasured (n=0)", never fabricated. Absent only on the no-criteria "skipped" verdict, which
+		// never resolves a reviewer identity in the first place.
+		const precisionNote = record.reviewerPrecision ? ` (${renderReviewerPrecision(record.reviewerPrecision)})` : "";
+		this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_GATE_VERDICT, `The gate says ${record.verdict}, with reviewers agreeing ${(record.agreement * 100).toFixed(0)}% of the time and ${(record.confidence * 100).toFixed(0)}% confidence${precisionNote}. ${record.verdict === "pass" ? "Nothing is waiting on you unless you disagree with it." : "This one needs you before it can go further."}`, {
 			verdict: record.verdict,
 			agreement: record.agreement,
 			confidence: record.confidence,
@@ -12857,6 +13069,7 @@ export class SquadManager extends EventEmitter {
 			authorLineage: record.authorLineage,
 			reviewerLineage: record.reviewerLineage,
 			sameLineage: record.sameLineage,
+			reviewerPrecision: record.reviewerPrecision,
 			lensAdvisory: record.lensAdvisory,
 			lensVerify: record.lensVerify,
 			gateLogPaths: record.gateLogPaths,

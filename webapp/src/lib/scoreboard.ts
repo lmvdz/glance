@@ -26,13 +26,17 @@ export interface ModelScore {
 export interface HarnessSpend {
   harness: string;
   runs: number;
+  /** Sum of costUsd across KNOWN-cost runs only — see unattributedRuns. */
   costUsd: number;
+  /** Runs on this harness whose cost is UNKNOWN (unverified usage ingestion), excluded from costUsd
+   *  rather than folded in as a fabricated $0 (ticket #336 gauntlet finding 3). */
+  unattributedRuns?: number;
 }
 
 export interface Scoreboard {
   models: ModelScore[];
   harnessSpend: HarnessSpend[];
-  totals: { landed: number; rejected: number; daemonCostUsd: number; totalCostUsd: number };
+  totals: { landed: number; rejected: number; daemonCostUsd: number; totalCostUsd: number; unattributedRuns: number };
 }
 
 export const pct = (r: number | null): string => (r == null ? '—' : `${Math.round(r * 100)}%`);

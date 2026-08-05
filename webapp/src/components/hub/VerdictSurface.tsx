@@ -2,7 +2,7 @@ import React from 'react';
 import { apiJson } from '../../lib/api';
 import { hubHref, unitHref } from '../../lib/router';
 import type { DoneProofDTO, ValidationRecordDTO } from '../../lib/dto';
-import { absences, confidenceLine, consideredNotSurfaced, notSurfacedSentence, restsOn, verdictSentence } from '../../lib/gateVerdict';
+import { absences, confidenceLine, consideredNotSurfaced, notSurfacedSentence, restsOn, reviewerPrecisionLine, verdictSentence } from '../../lib/gateVerdict';
 
 /**
  * VerdictSurface — a judgement, opened from the card that made it.
@@ -104,6 +104,7 @@ export function VerdictSurface({ routeId }: { routeId?: string }) {
   const carried = restsOn(criteria);
   const quiet = consideredNotSurfaced(criteria);
   const sure = confidenceLine({ agreement: validation?.agreement, confidence: validation?.confidence });
+  const precision = reviewerPrecisionLine(validation?.reviewerPrecision);
   const missing = absences(proof);
 
   return (
@@ -122,6 +123,9 @@ export function VerdictSurface({ routeId }: { routeId?: string }) {
           {verdictSentence({ unitName: proof.unitName ?? proof.unitId, verdict: validation?.verdict, agreement: validation?.agreement, confidence: validation?.confidence })}
         </div>
         {sure ? <div className="mt-2" style={{ fontFamily: MONO, fontSize: 10.5, color: '#6A6A72' }}>{sure} stated, not scored</div> : null}
+        {precision ? (
+          <div className="mt-2 text-[12px] leading-[1.5]" style={{ color: '#8A8A91', textWrap: 'pretty', maxWidth: 700 }}>{precision}</div>
+        ) : null}
         {validation?.rationale ? (
           <div className="mt-3 text-[13px] leading-[1.55]" style={{ color: '#C9C9CF', textWrap: 'pretty', maxWidth: 700 }}>“{validation.rationale}”</div>
         ) : null}

@@ -19,6 +19,15 @@
  * Follows the FakeDriver + real-temp-git-repo harness pattern from execution-role.test.ts so
  * `create()` runs its real dispatch path (routeIntake skipped via explicit `verify`, worktree cut for
  * real) without spawning a live omp process.
+ *
+ * Ticket #347 (grok T8 gauntlet HIGH, harness-aware model routing) extends this file with the
+ * harness↔model-family compatibility guard that now sits immediately after this block, inside
+ * `createWithId`'s `harnessDesc` gate: a ROUTED family literal ("opus") applied above is checked
+ * against the unit's resolved harness before a driver is ever built. Those tests below need
+ * `kind === "omp-operator"` (no `verify`/`workflow`) so `harnessDesc` — undefined for a
+ * workflow-kind unit, see `actualUnitHarness`'s doc — actually resolves, so they seed the
+ * `("none", <tier>)` taskClass cell (an `opts.verifyMode`-less create() call) rather than
+ * `("tdd", "heavy")` above.
  */
 
 import { afterEach, expect, test } from "bun:test";
@@ -239,5 +248,88 @@ test("per-lane minEdge override (adw-factory-borrows concern 09): hotfix's lower
 	process.env.OMP_SQUAD_MODEL_ROUTE_SHADOW = "0";
 	const dto = await mgr.create(createOpts(repo, "min-edge", { lane: "hotfix" }));
 	expect(dto.model).toBe("opus");
+	await mgr.stop();
+});
+
+// ── ticket #347: harness↔model-family compatibility, at the exact createWithId call site ────────
+
+/** Same shape as `seedStrongShiftEvidence` above, but for the `("none", "heavy")` cell a `verify`-less
+ *  create() call resolves to (`opts.verifyMode ?? "none"` × `tierOf("high") === "heavy"`) — the taskClass
+ *  a `kind === "omp-operator"` unit actually routes under, which is the ONLY kind whose `harnessDesc`
+ *  resolves (a workflow/verify unit's inner agent is always plain "omp" — `actualUnitHarness`'s doc —
+ *  so `opts.harness` has no effect there and ticket #347's gate never runs for it). */
+async function seedStrongShiftEvidenceNoneHeavy(stateDir: string): Promise<void> {
+	await seedOutcomes(stateDir, "none", "heavy", "claude-sonnet-5", 10, 2); // 0.2 land-rate
+	await seedOutcomes(stateDir, "none", "heavy", "claude-opus-4-8", 10, 9); // 0.9 land-rate
+}
+
+const harnessOpts = (repo: string, name: string, harness: string, over: Record<string, unknown> = {}) => ({
+	name,
+	repo,
+	harness,
+	approvalMode: "yolo" as const,
+	thinking: "high" as const,
+	autoRoute: false,
+	...over,
+});
+
+test("ticket #347: a ROUTED model incompatible with the unit's harness (opus → codex, openai-pinned) is never applied raw — dropped, harness default applies", async () => {
+	const { mgr, repo, stateDir } = await makeMgr("route-compat-codex");
+	await seedStrongShiftEvidenceNoneHeavy(stateDir);
+	process.env.OMP_SQUAD_MODEL_OUTCOMES = "1";
+	process.env.OMP_SQUAD_MODEL_ROUTE_SHADOW = "0";
+	const dto = await mgr.create(harnessOpts(repo, "codex-compat", "codex"));
+	// codex declares no staticModels (its catalog is live-probed, not a small stable set) — the
+	// fallback idiom is "drop the override, let the harness's own account default run", never a
+	// guessed id and NEVER the router's raw "opus" pick.
+	expect(dto.model).not.toBe("opus");
+	expect(dto.model).toBeUndefined();
+	const rec = (mgr as unknown as { agents: Map<string, { options: PersistedAgent }> }).agents.get(dto.id)!;
+	// The audit trail is honest too: `routing.routedModel` tracks the model actually APPLIED, never
+	// the refused "opus" — `declaredModelOf`'s rate-limit provider-key exclusion invariant requires
+	// this equality (routing.routedModel === persisted.model) to keep holding after a remap.
+	expect(rec.options.routing?.routedModel).toBe(dto.model);
+	await mgr.stop();
+});
+
+test("ticket #347: a ROUTED model incompatible with grok (xai-pinned, HAS a declared staticModels roster) remaps to grok's own default, never opus", async () => {
+	const { mgr, repo, stateDir } = await makeMgr("route-compat-grok");
+	await seedStrongShiftEvidenceNoneHeavy(stateDir);
+	process.env.OMP_SQUAD_MODEL_OUTCOMES = "1";
+	process.env.OMP_SQUAD_MODEL_ROUTE_SHADOW = "0";
+	const dto = await mgr.create(harnessOpts(repo, "grok-compat", "grok"));
+	expect(dto.model).toBe("grok-4.5"); // grok's own staticModels[0] — a concrete, declared fallback
+	expect(dto.model).not.toBe("opus");
+	await mgr.stop();
+});
+
+test("ticket #347: a COMPATIBLE routed model (opus → claude-code, anthropic-pinned) passes through unchanged", async () => {
+	const { mgr, repo, stateDir } = await makeMgr("route-compat-claudecode");
+	await seedStrongShiftEvidenceNoneHeavy(stateDir);
+	process.env.OMP_SQUAD_MODEL_OUTCOMES = "1";
+	process.env.OMP_SQUAD_MODEL_ROUTE_SHADOW = "0";
+	const dto = await mgr.create(harnessOpts(repo, "claudecode-compat", "claude-code"));
+	expect(dto.model).toBe("opus"); // same lineage — never remapped, never dropped
+	await mgr.stop();
+});
+
+test("ticket #347: flip-the-input — identical seeded evidence and env, only the harness differs, and the routed/recorded model changes accordingly", async () => {
+	const { mgr, repo, stateDir } = await makeMgr("route-compat-flip");
+	await seedStrongShiftEvidenceNoneHeavy(stateDir);
+	process.env.OMP_SQUAD_MODEL_OUTCOMES = "1";
+	process.env.OMP_SQUAD_MODEL_ROUTE_SHADOW = "0";
+	const codexDto = await mgr.create(harnessOpts(repo, "flip-codex", "codex"));
+	const claudeDto = await mgr.create(harnessOpts(repo, "flip-claude", "claude-code"));
+	expect(claudeDto.model).toBe("opus");
+	expect(codexDto.model).toBeUndefined();
+	expect(codexDto.model).not.toBe(claudeDto.model);
+	await mgr.stop();
+});
+
+test("ticket #347: an explicit, ALREADY-compatible model on a vendor-pinned harness passes unchanged (operator's own pick, not a routed one)", async () => {
+	const { mgr, repo } = await makeMgr("route-compat-explicit-ok");
+	// No seeded evidence / route gate needed — this is opts.model set directly by the caller.
+	const dto = await mgr.create(harnessOpts(repo, "explicit-ok", "codex", { model: "gpt-5.6-sol" }));
+	expect(dto.model).toBe("gpt-5.6-sol");
 	await mgr.stop();
 });
