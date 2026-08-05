@@ -87,6 +87,15 @@ describe("isMeasuredLand (the evidence predicate)", () => {
 	test("flip precision→absent ⇒ NOT evidence", () => {
 		expect(isMeasuredLand(row({ precision: undefined }))).toBe(false);
 	});
+	test("flip forced→true ⇒ NOT evidence (a human override bypassed the proof gate — not the rail deciding)", () => {
+		expect(isMeasuredLand(row({ forced: true }))).toBe(false);
+	});
+	test("a corrupt-ledger stamp (even with n>0) ⇒ NOT evidence (defence in depth)", () => {
+		expect(isMeasuredLand(row({ precision: { lineage: "codex", n: 52, survived: 39, corrupt: true } }))).toBe(false);
+	});
+	test("an unreadable-ledger stamp (even with n>0) ⇒ NOT evidence", () => {
+		expect(isMeasuredLand(row({ precision: { lineage: "codex", n: 52, survived: 39, unreadable: "EACCES" } }))).toBe(false);
+	});
 });
 
 describe("by-day counting", () => {
@@ -137,6 +146,36 @@ describe("landMetricsWindow (pure over rows + now)", () => {
 		const flipped = { rows: [row({ at: DAY("2026-08-08"), precision: { lineage: "codex", n: 0, survived: 0 } })], malformed: 0 };
 		expect(landMetricsWindow(flipped, 7, now).measured).toBe(0);
 	});
+
+	test("the repo filter is USED, not just stored (grok #361 HIGH): flip a row's repo and the count moves", () => {
+		const read = { rows: [row({ at: DAY("2026-08-08"), repo: "lmvdz/glance" }), row({ at: DAY("2026-08-08"), repo: "other/tenant" })], malformed: 0 };
+		// unfiltered: both repos counted, result.repo undefined (caller must not call these "self-lands")
+		const all = landMetricsWindow(read, 7, now);
+		expect(all.lands).toBe(2);
+		expect(all.repo).toBeUndefined();
+		// filtered to glance: only the glance row counts
+		const mine = landMetricsWindow(read, 7, now, "lmvdz/glance");
+		expect(mine.lands).toBe(1);
+		expect(mine.measured).toBe(1);
+		expect(mine.repo).toBe("lmvdz/glance");
+		// filter to a repo with no rows → zero (proves the filter, not a coincidence)
+		expect(landMetricsWindow(read, 7, now, "nobody/here").lands).toBe(0);
+	});
+
+	test("flagged counts landed rows whose ledger was unreadable/corrupt at land time — a measurement problem, not silence", () => {
+		const read = {
+			rows: [
+				row({ at: DAY("2026-08-08"), precision: { lineage: "codex", n: 0, survived: 0, unreadable: "EACCES" } }),
+				row({ at: DAY("2026-08-08"), precision: { lineage: "grok", n: 0, survived: 0, corrupt: true } }),
+				row({ at: DAY("2026-08-08") }), // clean measured
+			],
+			malformed: 0,
+		};
+		const w = landMetricsWindow(read, 7, now);
+		expect(w.lands).toBe(3);
+		expect(w.measured).toBe(1); // only the clean one
+		expect(w.flagged).toBe(2); // the two ledger-quality-flagged lands
+	});
 });
 
 describe("readLandReceiptIndex (the I/O boundary)", () => {
@@ -174,6 +213,15 @@ describe("readLandReceiptIndex (the I/O boundary)", () => {
 		const read = await readLandReceiptIndex(stateDir);
 		expect(read.rows.length).toBe(1);
 		expect(read.rows[0].precision).toBeUndefined(); // malformed stamp → unmeasured
+		expect(isMeasuredLand(read.rows[0])).toBe(false);
+	});
+
+	test("corrupt/unreadable ledger flags survive the parse round-trip (not silently dropped)", async () => {
+		const stateDir = mkStateDir();
+		const idx = landReceiptIndexPath(stateDir);
+		writeFileSync(idx, JSON.stringify({ at: DAY("2026-08-04"), repo: "r", branch: "b", landed: true, forced: false, gateStatus: "green", precision: { lineage: "grok", n: 0, survived: 0, unreadable: "EACCES: /plans/.reviews/reviewer-ledger.jsonl" } }) + "\n");
+		const read = await readLandReceiptIndex(stateDir);
+		expect(read.rows[0].precision).toEqual({ lineage: "grok", n: 0, survived: 0, unreadable: "EACCES: /plans/.reviews/reviewer-ledger.jsonl" });
 		expect(isMeasuredLand(read.rows[0])).toBe(false);
 	});
 

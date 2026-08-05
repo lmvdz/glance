@@ -19,27 +19,45 @@
  *  - a ledger file without a `## Ledger` section exits 1 untouched (insertLedgerRow, the shared write
  *    path that also refuses verdict language — the gate VERDICT is Lars's alone, #339).
  *
- *   bun scripts/append-selfland-drain.ts [--state-dir <path>] [--meta <ledger.md>] [--days N] [--dry-run]
+ * `--repo owner/name` scopes the count to ONE repo so the row can honestly say "self-lands"; without
+ * it the row counts every repo sharing the state dir and labels itself accordingly.
+ *
+ *   bun scripts/append-selfland-drain.ts [--state-dir <path>] [--repo owner/name] [--meta <ledger.md>] [--days N] [--dry-run]
  */
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import * as path from "node:path";
 import { parseArgs } from "../src/cli-args.ts";
 import { insertLedgerRow } from "../src/meta-ledger.ts";
 import { resolveStateDir } from "../src/state-dir.ts";
+import { landReceiptDir } from "../src/rail/index.ts";
 import { readLandReceiptIndex, landMetricsWindow, utcDayOf } from "../src/rail/land-metrics.ts";
 
 const { flags } = parseArgs(process.argv.slice(2));
 const stateDir = typeof flags["state-dir"] === "string" ? path.resolve(flags["state-dir"]) : resolveStateDir();
 const metaPath = typeof flags.meta === "string" ? path.resolve(flags.meta) : path.resolve("plans/landing-rail/self-land-ledger.md");
 const days = typeof flags.days === "string" && Number.isFinite(Number(flags.days)) ? Math.max(1, Math.trunc(Number(flags.days))) : 7;
+// The self-vs-fleet filter (grok #361): a state dir can hold lands for MANY repos. Only when --repo is
+// given can the row honestly say "self-lands"; without it the row counts ALL repos and says so.
+const repo = typeof flags.repo === "string" && flags.repo.length > 0 ? flags.repo : undefined;
 
 const fail = (msg: string): never => {
 	console.error(`append-selfland-drain: ${msg}`);
 	process.exit(1);
 };
 
-// 1) Read the index. ENOENT ⇒ honest empty (rail hasn't landed yet). Any other error ⇒ fail-closed.
+// 1a) Wrong-state-dir guard (grok #361). A MISSING index file is an honest "no lands yet" ONLY when
+// the state dir is genuinely a daemon state dir. If the land-receipts DIRECTORY itself is absent, the
+// path is almost certainly wrong (a fresh mktemp, a typo, the daemon's dir not resolved) — appending a
+// confident "0 land(s)" week from a never-used path would poison the gate exactly the way a fabricated
+// zero would. Fail-closed instead. (An empty-but-present dir, or a present dir with no in-window lands,
+// remains an honest measured zero.)
+if (!existsSync(landReceiptDir(stateDir))) {
+	fail(`no land-receipts/ dir under ${stateDir} — this state dir has never run a rail land. Point --state-dir at the daemon's state dir (is it the right one?); refusing to append a 0-land row from an unused path`);
+}
+
+// 1b) Read the index. ENOENT ⇒ honest empty (dir exists, rail hasn't landed yet). Any other error ⇒
+// fail-closed (unmeasurable, not empty).
 let read;
 try {
 	read = await readLandReceiptIndex(stateDir);
@@ -50,13 +68,17 @@ try {
 // The window ends "now" in UTC. Date.now() is intentional here (a CLI, not a resume-safe workflow
 // script) and only sets the window's upper bound + the row's date stamp.
 const now = Date.now();
-const w = landMetricsWindow(read!, days, now);
+const w = landMetricsWindow(read!, days, now, repo);
 
 const floor = w.malformed > 0 ? ` (floor — ${w.malformed} malformed index line(s) skipped)` : "";
+const flaggedClause = w.flagged > 0 ? `; ${w.flagged} with an unreadable/corrupt ledger at land time` : "";
 const measuredClause = w.measured > 0
 	? `${w.measured} citing measured reviewer precision across ${w.measuredDays} day(s)`
 	: `0 citing measured reviewer precision`;
-const row = `- ${utcDayOf(now)} — rail self-lands (dogfood #339): last ${days}d ${w.lands} land(s) through the rail, ${measuredClause}; ${w.unmeasured} unmeasured${floor}.`;
+// Honest scope label: only a repo-filtered count is "self-lands"; an unfiltered count spans every repo
+// sharing this state dir and must say so (grok #361 HIGH — never claim "glance's own PRs" unfiltered).
+const scope = repo ? `rail self-lands (${repo})` : `rail lands (ALL repos in this state dir — not self-filtered; pass --repo to scope)`;
+const row = `- ${utcDayOf(now)} — ${scope} (dogfood #339): last ${days}d ${w.lands} land(s) through the rail, ${measuredClause}; ${w.unmeasured} unmeasured${flaggedClause}${floor}.`;
 
 // 2) Insert into the ledger's `## Ledger` section (byte-identical everywhere else). insertLedgerRow
 // throws if the section is absent — we do NOT auto-create it, so the append target is always a file a

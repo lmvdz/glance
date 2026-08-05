@@ -59,7 +59,15 @@ function parseIndexRow(line: string): LandReceiptIndexRow | null {
 	if (o.precision != null) {
 		const p = o.precision as Record<string, unknown>;
 		if (typeof p.lineage === "string" && typeof p.n === "number" && Number.isFinite(p.n) && typeof p.survived === "number" && Number.isFinite(p.survived)) {
-			precision = { lineage: p.lineage, n: p.n, survived: p.survived };
+			precision = {
+				lineage: p.lineage,
+				n: p.n,
+				survived: p.survived,
+				// Preserve the "couldn't trust the ledger" flags (grok #361) — they both hard-exclude the
+				// row from `measured`, so dropping them would be unsafe, not just lossy.
+				...(p.corrupt === true ? { corrupt: true as const } : {}),
+				...(typeof p.unreadable === "string" ? { unreadable: p.unreadable } : {}),
+			};
 		}
 	}
 	return {
@@ -97,12 +105,15 @@ export async function readLandReceiptIndex(stateDir: string): Promise<LandReceip
 	return { rows, malformed };
 }
 
-/** True when a row is a real merge with a measured reviewer-precision stamp — the destination's
- *  evidence. `landed` AND a `precision` present with `n > 0`. A forced land (no proof) still counts
- *  here only if a validator nonetheless ran and measured a lineage; the gate review can further
- *  exclude `forced` rows, which is why `forced` is carried on the row. */
+/** True when a row is a real merge with a *trustworthy* measured reviewer-precision stamp — the
+ *  destination's evidence. Requires: `landed`, NOT `forced` (a human override that bypassed the proof
+ *  gate is not the rail deciding safely — grok #361 / the row type's own contract), a `precision`
+ *  with `n > 0`, and neither the `corrupt` nor `unreadable` ledger-quality flag set (both are forced
+ *  to `n === 0` upstream, but a hand-built/wire row could carry `n > 0` alongside them — exclude
+ *  explicitly, defence in depth). */
 export function isMeasuredLand(row: LandReceiptIndexRow): boolean {
-	return row.landed === true && row.precision != null && row.precision.n > 0;
+	const p = row.precision;
+	return row.landed === true && row.forced !== true && p != null && p.n > 0 && p.corrupt !== true && p.unreadable == null;
 }
 
 const bump = (acc: Record<string, number>, day: string): void => {
@@ -124,14 +135,18 @@ export function measuredLandsByDay(rows: LandReceiptIndexRow[]): Record<string, 
 }
 
 export interface LandMetricsWindow {
+	/** The repo the window was filtered to, or `undefined` for "all repos sharing this state dir".
+	 *  When `undefined` the counts are NOT self-scoped — the caller must not label them "self-lands". */
+	repo?: string;
 	/** Inclusive UTC-day bounds of the window, `YYYY-MM-DD`. */
 	sinceDay: string;
 	untilDay: string;
 	/** Days in the window (e.g. 7). */
 	days: number;
-	/** Rows that merged within the window. */
+	/** Rows that merged within the window (after the optional repo filter). */
 	lands: number;
-	/** Of those, rows carrying a measured reviewer-precision stamp (n>0) — the gate's evidence. */
+	/** Of those, rows carrying a TRUSTWORTHY measured stamp (see `isMeasuredLand`) — the gate's
+	 *  evidence. */
 	measured: number;
 	/** Merged-but-unmeasured within the window (`lands - measured`) — surfaced so the gap is legible,
 	 *  never hidden. */
@@ -139,36 +154,49 @@ export interface LandMetricsWindow {
 	/** Distinct UTC days within the window that had at least one MEASURED land — the "how continuous"
 	 *  signal the 2-week gate cares about (14 lands on one day is not 2 weeks of dogfooding). */
 	measuredDays: number;
+	/** Landed rows in the window whose precision carried a `corrupt`/`unreadable` ledger-quality flag —
+	 *  the validator ran but couldn't trust its own ledger. Surfaced so a run of these reads as a
+	 *  measurement problem, not as honest silence. */
+	flagged: number;
 	/** Malformed index lines seen (carried through from the read) — a nonzero value means the count
 	 *  is a floor, not exact. */
 	malformed: number;
 }
 
 /**
- * Summarize the last `days` UTC days ending at `now` (epoch ms). Pure over (rows, now). The window is
- * [untilDay - (days-1) .. untilDay] inclusive by UTC calendar day, so `days: 7` with `now` = today
- * covers today and the six prior days. Rows outside the window are ignored; rows exactly on the
- * boundary days are included.
+ * Summarize the last `days` UTC days ending at `now` (epoch ms). Pure over (rows, now, repo). The
+ * window is [untilDay - (days-1) .. untilDay] inclusive by UTC calendar day, so `days: 7` with `now`
+ * = today covers today and the six prior days. Rows outside the window are ignored; rows exactly on
+ * the boundary days are included.
+ *
+ * `repo`, when given, filters to lands of THAT repo only — the self-vs-fleet split (grok #361 HIGH):
+ * many repos can share one state dir, so a count that means "glance's OWN PRs" MUST filter on repo,
+ * not sum everything the daemon landed. When `repo` is omitted the result's `repo` is `undefined` and
+ * the counts span all repos — honest, but the caller must label them "rail lands", never "self-lands".
  */
-export function landMetricsWindow(read: LandReceiptIndexRead, days: number, now: number): LandMetricsWindow {
+export function landMetricsWindow(read: LandReceiptIndexRead, days: number, now: number, repo?: string): LandMetricsWindow {
 	const untilDay = utcDayOf(now);
 	// sinceDay = now shifted back (days-1) whole days, in UTC.
 	const sinceMs = now - (days - 1) * 86_400_000;
 	const sinceDay = utcDayOf(sinceMs);
 	let lands = 0;
 	let measured = 0;
+	let flagged = 0;
 	const measuredDaySet = new Set<string>();
 	for (const r of read.rows) {
+		if (repo != null && r.repo !== repo) continue; // self-vs-fleet filter
 		const day = utcDayOf(r.at);
 		if (day < sinceDay || day > untilDay) continue;
 		if (!r.landed) continue;
 		lands++;
+		if (r.precision?.corrupt === true || r.precision?.unreadable != null) flagged++;
 		if (isMeasuredLand(r)) {
 			measured++;
 			measuredDaySet.add(day);
 		}
 	}
 	return {
+		repo,
 		sinceDay,
 		untilDay,
 		days,
@@ -176,6 +204,7 @@ export function landMetricsWindow(read: LandReceiptIndexRead, days: number, now:
 		measured,
 		unmeasured: lands - measured,
 		measuredDays: measuredDaySet.size,
+		flagged,
 		malformed: read.malformed,
 	};
 }

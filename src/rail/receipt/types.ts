@@ -142,6 +142,13 @@ export interface LandReceiptPrecision {
 	lineage: string;
 	n: number;
 	survived: number;
+	/** Carried straight from the stamp (grok #361): a ledger the validator could NOT read (`unreadable`)
+	 *  or found too corrupt to trust (`corrupt`) is forced to `n === 0` upstream, but the counter must
+	 *  still tell those apart from an honest "no history yet" — the distinction the receipt renderer
+	 *  treats as sacred, which the first cut flattened. Present only when set; both also hard-exclude
+	 *  the row from `measured` (defence in depth beyond `n > 0`). */
+	corrupt?: true;
+	unreadable?: string;
 }
 
 /**

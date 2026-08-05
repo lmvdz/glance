@@ -66,7 +66,19 @@ export function landReceiptIndexRow(receipt: LandReceipt): LandReceiptIndexRow {
 		landed: receipt.landed,
 		forced: receipt.forcedWithoutProof,
 		gateStatus: receipt.gate.status,
-		...(p ? { precision: { lineage: p.lineage, n: p.n, survived: p.survived } } : {}),
+		...(p
+			? {
+					precision: {
+						lineage: p.lineage,
+						n: p.n,
+						survived: p.survived,
+						// Carry the "couldn't trust the ledger" flags so the counter can distinguish them from
+						// an honest empty history (grok #361). Present only when set on the stamp.
+						...(p.corrupt ? { corrupt: p.corrupt } : {}),
+						...(p.unreadable != null ? { unreadable: p.unreadable } : {}),
+					},
+				}
+			: {}),
 	};
 }
 
@@ -151,8 +163,15 @@ export async function writeLandReceipt(stateDir: string, receipt: LandReceipt): 
 			// is swallowed here. Undercounting is the failure mode, never a lost receipt or a failed land.
 			try {
 				await fs.appendFile(landReceiptIndexPath(stateDir), JSON.stringify(landReceiptIndexRow(receipt)) + "\n", "utf8");
-			} catch {
-				/* index is best-effort; the HTML receipt is the durable record */
+			} catch (e) {
+				// index is best-effort; the HTML receipt is the durable record. WARN rather than swallow
+				// silently (grok #361): a persistent append failure (disk full, index-only perms) would
+				// otherwise under-report the gate's evidence with no signal at all.
+				try {
+					process.stderr.write(`writeLandReceipt: land-receipt index append failed (${e instanceof Error ? e.message : String(e)}) — HTML receipt written, dogfood count may under-report\n`);
+				} catch {
+					/* stderr unavailable — nothing more we can safely do */
+				}
 			}
 			return file;
 		} catch (err) {
