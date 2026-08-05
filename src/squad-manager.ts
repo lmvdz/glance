@@ -204,7 +204,7 @@ import { addPlanRevisionCandidate, appendCommentEvent, type ArtifactComment, typ
 import { castPlanVote as appendPlanVoteCast, closePlanVoteRound as appendPlanVoteClose, currentPlanVoteRound as readCurrentPlanVoteRound, listPlanVoteRounds as readPlanVoteRounds, type OpenPlanVoteInput, openPlanVoteRound, recordPlanVoteCommit, tallyPlanVoteRound } from "./plan-votes.ts";
 import { isPlanDocPath, planDocHeadRevision, resolveSafeDocPath } from "./plan-doc.ts";
 import type { VoteQuorum } from "./plan-vote-quorum.ts";
-import { landFailureCount, readForcedLands, readLandLedger, readValidatorOverrides, recordForcedLand, recordLandOutcome, recordValidatorOverride } from "./rail/index.ts";
+import { landFailureCount, type PanelReviewerSpec, type PanelVerifyReviewer, readForcedLands, readLandLedger, readValidatorOverrides, recordForcedLand, recordLandOutcome, recordValidatorOverride } from "./rail/index.ts";
 import { isLandingUnit, landingRosterOf } from "./is-landing-unit.ts";
 import { readTaskOutcomes, recordTaskOutcome, type TaskOutcomeRow } from "./task-outcomes.ts";
 import { buildTaskClassMatrix } from "./omp-graph/task-class-matrix.ts";
@@ -5186,6 +5186,21 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
+	 * Injection seam (T5, glance#333; mirrors `validatorJudgeOverride` above) so tests can supply a fake
+	 * cross-lineage gauntlet-panel reviewer pool without real `codex`/`grok`/`omp` binaries on PATH.
+	 * `undefined` ⇒ `validatorGate`'s own default (`defaultPanelReviewers`, `src/rail/panel.ts`).
+	 */
+	protected panelReviewersOverride(): (() => PanelReviewerSpec[]) | undefined {
+		return undefined;
+	}
+
+	/** Injection seam (mirrors `panelReviewersOverride` above) for the panel's high-severity recheck
+	 *  reviewer. `undefined` ⇒ `validatorGate`'s own default (`defaultPanelVerifyReviewer`). */
+	protected panelVerifyOverride(): (() => PanelVerifyReviewer) | undefined {
+		return undefined;
+	}
+
+	/**
 	 * Independent-validator veto (Epic 3, DESIGN §1) — runs BEFORE any mode dispatch, on every
 	 * `landBranch` call INCLUDING forced lands (`requireProof:false` never skips it — a forced land
 	 * bypasses the proof gate, not the semantic one). Scores the diff against the feature's declared
@@ -5213,6 +5228,8 @@ export class SquadManager extends EventEmitter {
 			authorHarness: rec?.dto.harness,
 			agentId: opts.agentId,
 			reviewerLedgerPath: this.reviewerLedgerPathOverride(),
+			panelReviewers: this.panelReviewersOverride(),
+			panelVerify: this.panelVerifyOverride(),
 		});
 		if (rec) {
 			rec.dto.validation = record;
@@ -5227,6 +5244,16 @@ export class SquadManager extends EventEmitter {
 				const sev = l.disposition === "object" ? ` (${l.severity})` : "";
 				const recheck = record.lensVerify ? `, re-check confirmed=${record.lensVerify.confirmed}` : "";
 				this.log("info", `lens-review [${l.lens}] ${l.disposition}${sev}: ${l.claim || "—"} — unit ${rec?.dto.name ?? opts.agentId ?? "?"}, criteria verdict ${record.verdict}${recheck}`);
+			}
+		}
+		// T5 (glance#333) — same shadow catch-log discipline as the lens panel above, for the in-code
+		// cross-lineage gauntlet panel: one line per reviewer so panel behavior is measurable (and
+		// greppable) from day one, before T6's UI renders it.
+		if (record.panel?.length) {
+			for (const p of record.panel) {
+				const sev = p.verdict === "object" ? ` (${p.severity})` : "";
+				const survived = p.survived !== undefined ? `, survived=${p.survived}` : "";
+				this.log("info", `gauntlet-panel [${p.lineage}/${p.harness}] ${p.verdict}${sev}: ${p.claim || "—"} — unit ${rec?.dto.name ?? opts.agentId ?? "?"}, criteria verdict ${record.verdict}${survived}`);
 			}
 		}
 		if (veto && !opts.validatorOverride) {
@@ -12878,6 +12905,7 @@ export class SquadManager extends EventEmitter {
 			reviewerPrecision: record.reviewerPrecision,
 			lensAdvisory: record.lensAdvisory,
 			lensVerify: record.lensVerify,
+			panel: record.panel,
 			gateLogPaths: record.gateLogPaths,
 			ranAt: record.ranAt,
 		});

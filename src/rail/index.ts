@@ -19,3 +19,16 @@ export {
 	readValidatorOverrides,
 	recordValidatorOverride,
 } from "./land-ledger.ts";
+
+// ── in-code cross-lineage gauntlet panel (T5, glance#333) ──────────────────────────────────────────
+export type { PanelVerdict, PanelReviewerVerdict, PanelReviewer, PanelReviewerSpec, PanelVerifyReviewer, ReviewPanelOpts } from "./panel.ts";
+export {
+	runReviewPanel,
+	reviewPanelEnabled,
+	panelMax,
+	panelTimeoutMs,
+	diffRiskTier,
+	defaultPanelReviewers,
+	defaultPanelVerifyReviewer,
+	PANEL_INVARIANTS,
+} from "./panel.ts";

@@ -19,6 +19,7 @@ import { reviewerPrecisionFromLedger, type ReviewerPrecisionStamp } from "./memo
 import { decideTyped, extractJsonObject } from "./omp-call.ts";
 import type { Proof } from "./proof.ts";
 import { type LensId, selectLenses } from "./lens-select.ts";
+import { type PanelReviewerSpec, type PanelVerifyReviewer, runReviewPanel } from "./rail/index.ts";
 import { truncate } from "./text-util.ts";
 import type { FeatureCriterion, LensVerdict, ValidationRecord } from "./types.ts";
 
@@ -566,6 +567,13 @@ export interface ValidatorGateOpts {
 	/** Injected re-check factory (concern 05); production uses `ompLensVerifyJudge`. Reached only after a
 	 *  panel objection, under both the master flag and the VERIFY sub-flag. */
 	lensVerifyJudge?: () => LensVerifyJudge;
+	/** Injected review-panel reviewer pool (T5, glance#333) — tests pass fakes; production uses
+	 *  `defaultPanelReviewers` (`src/rail/panel.ts`). Only consulted when `OMP_SQUAD_REVIEW_PANEL` is on
+	 *  AND the diff's risk tier warrants a panel (`diffRiskTier`). */
+	panelReviewers?: () => PanelReviewerSpec[];
+	/** Injected review-panel recheck reviewer (T5, glance#333); production uses
+	 *  `defaultPanelVerifyReviewer`. Reached only for a high-severity panel objection. */
+	panelVerify?: () => PanelVerifyReviewer;
 	/** Test-only DI hatch (gauntlet round 1, codex's "env-ledger-shadow" finding): points the reviewer-
 	 *  precision reader at a fixture ledger instead of the repo-committed one, so a test can prove the
 	 *  land receipt's number moves when the fixture ledger changes, without touching real repo data.
@@ -897,6 +905,32 @@ export async function validatorGate(opts: ValidatorGateOpts): Promise<ValidatorG
 					}
 				} catch {
 					// advisory only — a lens failure never touches the record's verdict or the land decision
+				}
+			}
+			// Cross-lineage gauntlet panel (T5, glance#333): a blind, distinct-lineage reviewer panel for
+			// a diff whose risk tier warrants one (`diffRiskTier` reuses land-risk.ts's own sensitive-path/
+			// blast-radius signal). Runs on BOTH "pass" and "veto" (a human overriding a veto still deserves
+			// the panel's context) — never on "skipped"/"abstain" (no diff was genuinely scored). Placed
+			// AFTER the lens panel, same reasoning as that panel's own placement: strictly after the
+			// AUTHORITATIVE criteria judge resolves, never concurrent with it, so an advisory feature can
+			// never risk a resource/timeout contention that degrades the authoritative call. Purely
+			// additive — `runReviewPanel` has no veto/inconclusive authority; it never changes `verdict`.
+			if ((record.verdict === "pass" || record.verdict === "veto") && diff.trim()) {
+				// Defensive outer catch (mirrors the lens panel's own): `runReviewPanel` is fail-open by
+				// construction, but this is the trust-critical land path — an outer catch guarantees that
+				// even a future throw outside its own guards can never fail-CLOSE (or otherwise disturb) a
+				// land.
+				try {
+					const panel = await runReviewPanel({
+						diff,
+						source: `land ${opts.branch ?? "?"}@${(opts.proof?.commit ?? "nocommit").slice(0, 12)}`,
+						reviewers: opts.panelReviewers,
+						verify: opts.panelVerify,
+						ledgerPath: opts.reviewerLedgerPath,
+					});
+					if (panel && panel.length > 0) record = { ...record, panel };
+				} catch {
+					// advisory only — a panel failure never touches the record's verdict or the land decision
 				}
 			}
 		}

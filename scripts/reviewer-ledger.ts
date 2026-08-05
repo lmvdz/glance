@@ -9,9 +9,8 @@
  * bills are not rows; refuted claims are). The ledger is repo-committed JSONL so the record
  * versions with the code it judged.
  */
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
-import path from "node:path";
-import { DEFAULT_REVIEWER_LEDGER_PATH, parseReviewerLedger, renderReviewerReport, type ReviewerLedgerEntry } from "../src/memory/reviewer-weights.ts";
+import { existsSync, readFileSync } from "node:fs";
+import { appendReviewerLedgerEntry, DEFAULT_REVIEWER_LEDGER_PATH, parseReviewerLedger, renderReviewerReport, type ReviewerLedgerEntry } from "../src/memory/reviewer-weights.ts";
 
 const LEDGER = DEFAULT_REVIEWER_LEDGER_PATH;
 
@@ -44,8 +43,7 @@ if (cmd === "add") {
 		note,
 		...(severity === "high" || severity === "medium" || severity === "low" ? { severity } : {}),
 	};
-	mkdirSync(path.dirname(LEDGER), { recursive: true });
-	appendFileSync(LEDGER, `${JSON.stringify(entry)}\n`);
+	appendReviewerLedgerEntry(entry, LEDGER);
 	console.log(`recorded: [${entry.lineage}] ${entry.concernClass} survived=${entry.survived} — ${entry.note}`);
 } else if (cmd === "report") {
 	const text = existsSync(LEDGER) ? readFileSync(LEDGER, "utf8") : "";

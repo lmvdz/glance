@@ -47,7 +47,7 @@
  * differ in their actual finding (`note`) are, correctly, two distinct adjudications and both count.
  */
 
-import { readFileSync, statSync, type BigIntStats } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, statSync, type BigIntStats } from "node:fs";
 import path from "node:path";
 import { errText } from "../err-text.ts";
 
@@ -217,6 +217,27 @@ export function reviewerPrecision(entries: ReviewerLedgerEntry[]): LineagePrecis
  *  dirs below repo root) — mirrors `scripts/reviewer-ledger.ts`'s own `LEDGER` constant so the two
  *  never drift onto different files. Callers may override for tests/fixtures. */
 export const DEFAULT_REVIEWER_LEDGER_PATH = path.join(import.meta.dir, "..", "..", "plans", ".reviews", "reviewer-ledger.jsonl");
+
+/**
+ * Append one row to the reviewer ledger — the SAME write `scripts/reviewer-ledger.ts`'s `add` command
+ * performs, extracted here (T5, glance#333) so an IN-PROCESS caller (the in-daemon review panel,
+ * `src/rail/panel.ts`) can record an adjudicated finding without shelling out to a subprocess. The CLI
+ * now delegates to this function too — there is exactly ONE write path, never two independently
+ * drifting implementations of "append a JSONL row".
+ *
+ * Deliberately does NOT catch: a genuine write fault (disk full, permission denied, a bad `ledgerPath`)
+ * must be visible to the caller, not silently swallowed here — this module's own honesty discipline
+ * (never fabricate, never silently drop) applies to the WRITE side too. The land path's caller wraps
+ * this in its own try/catch (mirrors the lens-panel's "advisory only, never break a land" discipline) so
+ * a ledger-write fault can degrade a MEASUREMENT, never a MERGE.
+ *
+ * No cache invalidation needed: `readReviewerLedgerEntries`'s cache keys on the file's own (mtimeNs,
+ * size), which this write changes by construction — the very next read sees the new row.
+ */
+export function appendReviewerLedgerEntry(entry: ReviewerLedgerEntry, ledgerPath: string = DEFAULT_REVIEWER_LEDGER_PATH): void {
+	mkdirSync(path.dirname(ledgerPath), { recursive: true });
+	appendFileSync(ledgerPath, `${JSON.stringify(entry)}\n`);
+}
 
 export interface ReviewerPrecisionStamp {
 	/** The ledger lineage tag this stamp was computed for (e.g. "codex", "grok", "native"). */
