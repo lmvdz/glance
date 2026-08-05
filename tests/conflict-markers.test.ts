@@ -1,8 +1,13 @@
 /**
- * Conflict-marker gate (#330, per #327's resolution) — hardened in gauntlet round 1 against PR #351
- * (dual-lineage, codex gpt-5.6-sol + grok-4.5). Drives every exported function against REAL
- * throwaway git repos, the same style as tests/land-risk.test.ts. Sections below are grouped by the
- * same finding numbers as the gauntlet report.
+ * Conflict-marker gate (#330, per #327's resolution) — hardened in gauntlet round 1 AND the
+ * delta-verify round against PR #351 (dual-lineage, codex gpt-5.6-sol + grok-4.5). Drives every
+ * exported function against REAL throwaway git repos, the same style as tests/land-risk.test.ts.
+ * Sections below are grouped by the same finding numbers as the gauntlet reports.
+ *
+ * Delta-verify round (CRITICAL, both lineages): round 1's path allowlist and MARKER_EXEMPT_TOKEN
+ * were both agent-settable exemptions — the diff being scanned is authored by the very thing the
+ * gate guards against, so no exemption it can set is acceptable. Both are DELETED; every marker hit
+ * now refuses unconditionally, and the tests below that used to prove "allowed" now prove "refused".
  */
 
 import { afterEach, beforeEach, expect, test } from "bun:test";
@@ -14,7 +19,6 @@ import {
 	conflictMarkerReasonForFiles,
 	conflictMarkerReasonForRange,
 	conflictMarkerReasonStaged,
-	MARKER_EXEMPT_TOKEN,
 } from "../src/conflict-markers.ts";
 
 let repo: string;
@@ -161,33 +165,47 @@ test("gauntlet #4: a .gitattributes marking the path binary (-diff) does not hid
 	expect(r).toContain("docs/plan.md");
 });
 
-// ── gauntlet #7: allowlist (paths + in-file exempt token) ─────────────────────────────────────────
+// ── delta-verify #1 (CRITICAL, both lineages): the allowlist and exempt token are GONE ────────────
+// Round 1 shipped a path allowlist and an in-file token as agent-writable exemptions — the candidate
+// diff is authored by the thing the gate guards against, so both were a self-serve bypass. Deleted;
+// every one of these now REFUSES (the cases below used to assert `toBeUndefined()`).
 
-test("gauntlet #7: a tests/fixtures/ path carrying real markers is ALLOWED (path allowlist)", async () => {
+test("delta-verify #1: a tests/fixtures/ path carrying real markers is now REFUSED (path allowlist deleted)", async () => {
 	const head0 = shOut(["rev-parse", "HEAD"]);
-	commitFiles({ "tests/fixtures/conflict-example.md": ["<<<<<<< HEAD", "ours", "=======", "theirs", ">>>>>>> feat", ""].join("\n") }, "new fixture teaching about markers");
-	expect(await conflictMarkerReasonForRange(repo, head0, "HEAD")).toBeUndefined();
+	commitFiles({ "tests/fixtures/conflict-example.md": ["<<<<<<< HEAD", "ours", "=======", "theirs", ">>>>>>> feat", ""].join("\n") }, "an agent writes real debris under a formerly-allowlisted path");
+	const r = await conflictMarkerReasonForRange(repo, head0, "HEAD");
+	expect(r).toBeDefined();
+	expect(r).toContain("tests/fixtures/conflict-example.md");
 });
 
-test("gauntlet #7: a .patch file carrying real markers is ALLOWED (extension allowlist)", async () => {
+test("delta-verify #1: a .patch file carrying real markers is now REFUSED (extension allowlist deleted)", async () => {
 	const head0 = shOut(["rev-parse", "HEAD"]);
 	commitFiles({ "hotfix.patch": ["<<<<<<< HEAD", "ours", "=======", "theirs", ">>>>>>> feat", ""].join("\n") }, "a literal patch file");
-	expect(await conflictMarkerReasonForRange(repo, head0, "HEAD")).toBeUndefined();
+	const r = await conflictMarkerReasonForRange(repo, head0, "HEAD");
+	expect(r).toBeDefined();
+	expect(r).toContain("hotfix.patch");
 });
 
-test("gauntlet #7: a non-allowlisted doc carrying the in-file exempt token is ALLOWED", async () => {
+test("delta-verify #1: a doc carrying what used to be the exempt-token string is now REFUSED (token deleted, no bypass)", async () => {
 	const head0 = shOut(["rev-parse", "HEAD"]);
 	commitFiles(
-		{ "docs/landing.md": [`<!-- ${MARKER_EXEMPT_TOKEN} -->`, "<<<<<<< HEAD", "ours", "=======", "theirs", ">>>>>>> feat", ""].join("\n") },
-		"doc that must show real marker syntax, carries the exempt token",
+		{ "docs/landing.md": ["<!-- glance-conflict-marker-check:allow -->", "<<<<<<< HEAD", "ours", "=======", "theirs", ">>>>>>> feat", ""].join("\n") },
+		"an agent types the old magic comment string, which is no longer meaningful",
 	);
-	expect(await conflictMarkerReasonForRange(repo, head0, "HEAD")).toBeUndefined();
+	const r = await conflictMarkerReasonForRange(repo, head0, "HEAD");
+	expect(r).toBeDefined();
+	expect(r).toContain("docs/landing.md");
 });
 
-test("without the exempt token, the SAME non-allowlisted content is refused (control)", async () => {
+test("delta-verify #1: this module's OWN source, if it carried added marker debris, would be refused too (no self-exemption)", async () => {
+	// Round 1's bug, made concrete: conflict-markers.ts itself contained the exempt token's literal
+	// value, so debris added to THAT file would have self-exempted. Prove the file is judged like any
+	// other now — no special-casing by path, filename, or content.
 	const head0 = shOut(["rev-parse", "HEAD"]);
-	commitFiles({ "docs/landing.md": ["<<<<<<< HEAD", "ours", "=======", "theirs", ">>>>>>> feat", ""].join("\n") }, "same content, no exempt token");
-	expect(await conflictMarkerReasonForRange(repo, head0, "HEAD")).toBeDefined();
+	commitFiles({ "src/conflict-markers.ts": ["export const X = 1;", "<<<<<<< HEAD", "a", "=======", "b", ">>>>>>> feat", ""].join("\n") }, "debris added to the gate's own module");
+	const r = await conflictMarkerReasonForRange(repo, head0, "HEAD");
+	expect(r).toBeDefined();
+	expect(r).toContain("src/conflict-markers.ts");
 });
 
 // ── probe failures / default-on ────────────────────────────────────────────────────────────────
@@ -254,12 +272,33 @@ test("conflictMarkerReasonForFiles: a clean resolved file is not flagged", async
 	expect(await conflictMarkerReasonForFiles(repo, ref, ["docs/plan.md"])).toBeUndefined();
 });
 
-test("conflictMarkerReasonForFiles: allowlisted paths are exempt even under a full-file scan", async () => {
+test("delta-verify #1: a tests/fixtures/ path is now REFUSED under the full-file scan too (path allowlist deleted everywhere)", async () => {
 	commitFiles({ "tests/fixtures/example.md": ["<<<<<<< HEAD", "ours", "=======", "theirs", ">>>>>>> feat", ""].join("\n") }, "fixture");
 	const ref = shOut(["rev-parse", "HEAD"]);
-	expect(await conflictMarkerReasonForFiles(repo, ref, ["tests/fixtures/example.md"])).toBeUndefined();
+	const r = await conflictMarkerReasonForFiles(repo, ref, ["tests/fixtures/example.md"]);
+	expect(r).toBeDefined();
+	expect(r).toContain("tests/fixtures/example.md");
 });
 
 test("conflictMarkerReasonForFiles: an empty file list is never flagged (nothing to scan)", async () => {
 	expect(await conflictMarkerReasonForFiles(repo, "HEAD", [])).toBeUndefined();
+});
+
+// ── delta-verify #2 continued (codex, LOW): an unreadable touched file fails CLOSED, not skip ─────
+
+test("delta-verify (codex LOW): a touched file that git show cannot read fails CLOSED (refuses), not silently skipped", async () => {
+	// The path was never committed at `ref` at all — the exact shape `git show ref:path` fails on.
+	const ref = shOut(["rev-parse", "HEAD"]);
+	const r = await conflictMarkerReasonForFiles(repo, ref, ["docs/never-committed.md"]);
+	expect(r).toBeDefined();
+	expect(r).toContain("conflict-markers gate:");
+	expect(r).toContain("could not read docs/never-committed.md");
+});
+
+test("conflictMarkerReasonForFiles: a mix of one readable-clean and one unreadable file still fails CLOSED overall", async () => {
+	commitFiles({ "docs/plan.md": "clean\n" }, "clean file");
+	const ref = shOut(["rev-parse", "HEAD"]);
+	const r = await conflictMarkerReasonForFiles(repo, ref, ["docs/plan.md", "docs/does-not-exist.md"]);
+	expect(r).toBeDefined();
+	expect(r).toContain("could not read docs/does-not-exist.md");
 });

@@ -1,51 +1,66 @@
 /**
- * Conflict-marker gate (#330, per #327's resolution; hardened in gauntlet round 1 against #351).
- * A cheap textual scan for LIVE git conflict-marker lines that made it into a land — git's own
- * structural conflict detection only fires on an ACTUAL unresolved merge, never on marker debris a
- * resolver (or a careless human) left BEHIND in content that git considers perfectly mergeable.
- * AUTORESOLVE's LLM resolver is exactly the failure mode this closes: it writes files that pass
- * typecheck+test — a `.md`/`.json`/`.txt` file with marker lines still compiles/parses fine.
+ * Conflict-marker gate (#330, per #327's resolution; hardened in gauntlet round 1 and the
+ * delta-verify round against #351). A cheap textual scan for LIVE git conflict-marker lines that
+ * made it into a land — git's own structural conflict detection only fires on an ACTUAL unresolved
+ * merge, never on marker debris a resolver (or a careless human) left BEHIND in content that git
+ * considers perfectly mergeable. AUTORESOLVE's LLM resolver is exactly the failure mode this closes:
+ * it writes files that pass typecheck+test — a `.md`/`.json`/`.txt` file with marker lines still
+ * compiles/parses fine.
  *
- * Round-1 gauntlet (dual-lineage, codex + grok) found the first cut trusted a raw `git diff` too
- * much and covered only one of three land paths. Fixes, grouped by the same finding numbers as the
+ * THE THREAT MODEL (why there is no agent-settable exemption of any kind): the diff being scanned is
+ * AUTHORED BY THE THING THE GATE GUARDS AGAINST — an agent (or its resolver) that left live markers
+ * behind. Round 1 shipped a path allowlist and an in-file exempt token as escape hatches for
+ * legitimate marker-carrying content. The delta-verify round (dual-lineage, both CRITICAL) found the
+ * obvious consequence: an agent can single-handedly satisfy either one. A token is just a string in
+ * the diff the agent controls — `conflict-markers.ts` even contained the token's own literal value,
+ * so debris added to THIS file would have self-exempted. A path allowlist is just a location the
+ * agent controls — write real debris under `tests/fixtures/` and it merges. Both are DELETED. The
+ * only exemption left is `LandOpts.conflictMarkerGate: false` — the SAME force-land authority that
+ * already overrides the stale-branch and land-risk gates, set only by a human's explicit Force action
+ * (`squad-manager.ts`'s `conflictMarkerGate: !force`), never by anything the candidate diff can write.
+ * Legitimate literal-marker content (a git tutorial doc, a fixture for this gate's own tests) lands
+ * through that human path, exactly like any other deliberately-unusual land.
+ *
+ * Round-1 gauntlet (dual-lineage, codex + grok) found the first cut trusted a raw `git diff` too much
+ * and covered only one of three land paths. Fixes, grouped by the same finding numbers as the
  * gauntlet report:
- *
- *   (1/9) SCAN THE RIGHT THING. The first cut scanned `merge-base(baseRef,branch)..branch` — a
- *   branch's OWN historical diff since its (possibly stale) fork point. That over-scans: content
- *   that independently converged onto the current target between the fork and land time reads as
- *   "newly added" even though the actual merge introduces nothing for it. Every range-based scan
- *   here now takes an explicit `(fromRef, toRef)` pair representing what the land ACTUALLY
- *   introduces relative to the CURRENT target — the caller supplies the pre-merge target tip and
- *   the post-merge (or scratch-merge) result, never a merge-base. `landAgentPr`'s scratch worktree
- *   already gives PR mode this for free (`origin/<default>..HEAD` in the scratch tree).
- *   (2) COVER ALL LAND PATHS. The in-place early-return in `landAgentImpl` (worktree === repo) used
- *   to commit before any gate ran — {@link conflictMarkerReasonStaged} scans the STAGED diff right
- *   after `git add`, before the commit. PR mode ({@link conflictMarkerReasonForRange} against the
- *   scratch merge) closes the complete production-path bypass that was the round's CRITICAL finding.
+ *   (1/9) SCAN THE RIGHT THING. Every range-based scan takes an explicit `(fromRef, toRef)` pair
+ *   representing what the land ACTUALLY introduces relative to the CURRENT target — never a
+ *   merge-base diff over a branch's own (possibly stale) history, which over-scans content that
+ *   independently converged onto the target by land time.
+ *   (2) COVER ALL LAND PATHS. {@link conflictMarkerReasonStaged} covers the in-place early-return
+ *   (`landAgentImpl`'s `worktree === repo` branch, which used to commit before any gate ran).
+ *   {@link conflictMarkerReasonForRange} against PR mode's scratch merge closes the CRITICAL
+ *   production-path bypass (PR mode ran no check at all).
  *   (3/4) HARDEN THE DIFF INVOCATION. `-c color.ui=false` neutralizes an inherited/malicious
  *   `color.ui=always` that would wrap every line in ANSI escapes so no line starts with a literal
- *   `+`/`diff --git` — the parser would then see zero markers. `--text` forces a textual diff
- *   regardless of a `.gitattributes` `-diff`/`binary` attribute that would otherwise make git treat
- *   a path as binary and omit its content entirely.
- *   (5/6) ROBUST MARKER DETECTION. `conflict-marker-size` is a `.gitattributes`-configurable integer
- *   (git's default is 7); the regexes now match VARIABLE-width runs (`{7,}`) of the marker character
- *   so a `conflict-marker-size=10` config doesn't dodge an exact 7-char match. The diff3/zdiff3 base
- *   marker (`|||||||`) is now detected unconditionally, same variable width.
- *   (7) ALLOWLIST. A narrow path allowlist (`tests/fixtures/**`, `*.patch`/`*.rej`/`*.diff`) plus an
- *   in-file exempt token ({@link MARKER_EXEMPT_TOKEN}) covers legitimate marker-carrying content
- *   (a fixture teaching about markers, a patch file, this very module's own docs) that added-lines-
- *   only alone doesn't protect once full-file scanning (next point) is in play.
- *   (8) The AUTORESOLVE site now does a FULL-FILE scan of resolver-touched files
- *   ({@link conflictMarkerReasonForFiles}), not an added-lines diff — a resolver that inserts
- *   unresolved arms INSIDE an old teaching triple (reusing pre-existing marker lines as context)
- *   would slip past an added-lines-only scan there. Safe now specifically because the allowlist (7)
- *   exempts the legitimate marker content full-file scanning would otherwise false-positive on.
+ *   `+`/`diff --git`. `--text` forces a textual diff regardless of a `.gitattributes` `-diff`/binary
+ *   attribute that would otherwise make git omit a path's content entirely.
+ *   (5/6) ROBUST MARKER DETECTION. `conflict-marker-size` is `.gitattributes`-configurable (git's
+ *   default is 7); the regexes match VARIABLE-width runs (`{7,}`). The diff3/zdiff3 base marker
+ *   (`|||||||`) is detected unconditionally, same variable width.
+ *   (8) The AUTORESOLVE site ({@link conflictMarkerReasonForFiles}) does a FULL-FILE scan of
+ *   resolver-touched files, not an added-lines diff — a resolver that inserts unresolved arms INSIDE
+ *   an old teaching triple (reusing pre-existing marker lines as context) would slip past an
+ *   added-lines-only scan there.
  *
- * ESCAPE HATCHES (both, now — round-1 folded the two options the ticket offered into one design
- * instead of picking just one): (a) the path/token allowlist above, for content that must exist as
- * committed source, and (b) added-lines-only scanning at the ordinary/PR-mode sites, so a marker-
- * looking line that already existed on the target before this land is never flagged there (the
- * AUTORESOLVE site trades this one away deliberately, per (8) above, in exchange for the allowlist).
+ * Delta-verify round (dual-lineage) on round 1's own output:
+ *   (1, CRITICAL, both lineages) The path allowlist and `MARKER_EXEMPT_TOKEN` were both agent-settable
+ *   exemptions — DELETED (see THE THREAT MODEL above). Every path fails closed now; force-land is the
+ *   only way through.
+ *   (2, codex) `attemptAutoResolve`'s file-gathering (`land.ts`) used non-NUL `git diff --name-only`,
+ *   which quotes/escapes any path `core.quotePath` considers unusual (default: non-ASCII, e.g.
+ *   `docs/é.md`) — the escaped string then entered `touchedFiles` in a form `git show` can never
+ *   resolve, silently skipping that file's scan. Fixed with `-z` (NUL-separated raw bytes).
+ *   (codex, LOW) {@link conflictMarkerReasonForFiles} used to treat an unreadable touched-file path
+ *   (`git show` failing) as "nothing to scan" — fail-OPEN. It now refuses instead: an unreadable file
+ *   can't be PROVEN clean, so it is never silently waved through.
+ *
+ * ESCAPE HATCH: there is exactly one, and it is not settable by the candidate diff — a human's
+ * explicit force-land (`LandOpts.conflictMarkerGate: false`), OR the operator-level
+ * `OMP_SQUAD_CONFLICT_MARKER_GATE=0` kill switch. Added-lines-only scanning at the range-based sites
+ * still means a marker-looking line that already existed on the target before this land is never
+ * flagged there — that is a scope limit (only NEW lines are judged), not an exemption anyone sets.
  */
 
 import { envBool } from "./config.ts";
@@ -107,34 +122,13 @@ interface RawHit {
 	kind: MarkerKind;
 }
 
-// ── allowlist (gauntlet #7) ─────────────────────────────────────────────────────────────────────
-
-/** Fixture/patch paths that legitimately carry marker text as their actual payload. Narrow and
- *  auditable by design — widen only with a specific, named reason, never a broad glob. */
-const ALLOWLISTED_PATH_RE = /(^|\/)tests\/fixtures\//i;
-const ALLOWLISTED_EXT_RE = /\.(patch|rej|diff)$/i;
-
-function isAllowlistedPath(file: string): boolean {
-	return ALLOWLISTED_PATH_RE.test(file) || ALLOWLISTED_EXT_RE.test(file);
-}
-
-/**
- * In-file exempt token (gauntlet #7's second half): a file whose content contains this EXACT string
- * anywhere is exempted from the scan entirely — covers docs that must show real marker syntax as
- * teaching material (this module's own doc comments avoid the token so they never need it; a file
- * that genuinely needs to display markers, e.g. a `--verify` grep example, adds this token once).
- * Deliberately a plain substring (not a comment syntax) so it works in any file type, JSON included.
- */
-export const MARKER_EXEMPT_TOKEN = "glance-conflict-marker-check:allow";
-
-// ── shared hit-filtering: allowlist + exempt-token + the mid-marker co-occurrence rule ───────────
-
 /**
  * A bare `=======` (`mid`) is genuinely ambiguous with a Markdown Setext H1 underline
  * (`Title\n=======`) — on its own it would false-positive on ordinary docs. Real conflict debris
  * (standard OR diff3/zdiff3) always has a `start`, `end`, or `base` line SOMEWHERE among the flagged
  * lines; a `mid` hit is only kept when at least one of those is ALSO present, which loses no real
- * detection power while eliminating the Markdown false positive.
+ * detection power while eliminating the Markdown false positive. This is a DETECTION-accuracy rule,
+ * not an exemption — it never makes a genuine marker triple pass.
  */
 function applyMidCoOccurrenceRule(hits: RawHit[]): RawHit[] {
 	const hasUnambiguous = hits.some((h) => h.kind !== "mid");
@@ -157,15 +151,15 @@ function formatReason(subject: string, hits: MarkerHit[]): string {
 	const more = hits.length > HIT_LIST_CAP ? ` (+${hits.length - HIT_LIST_CAP} more)` : "";
 	return (
 		`conflict-markers gate: ${subject} carries live conflict-marker line(s): ${shown}${more} — refusing to land ` +
-		`(git's own structural conflict check doesn't catch marker debris a resolver or human left in otherwise-mergeable content). ` +
+		`(git's own structural conflict check doesn't catch marker debris a resolver or human left in otherwise-mergeable content; ` +
+		`no path or in-file token can exempt this — force-land is the only way through). ` +
 		`(OMP_SQUAD_CONFLICT_MARKER_GATE=0 disables this gate.)`
 	);
 }
 
 /** Fetch a file's full content at `ref` (`git show ref:path`; pass `""` for the INDEX — `git show
- *  :path` reads stage 0) — used for the exempt-token check on a diff-flagged file and by the
- *  full-file scan. Returns undefined on any failure (deleted path, binary blob) — callers treat that
- *  as "can't confirm exemption", never as "exempt". */
+ *  :path` reads stage 0). Returns undefined on any failure (deleted path, binary blob, unreadable
+ *  object) — callers must treat that as "cannot verify", never as "nothing to scan". */
 async function showFile(repo: string, ref: string, file: string): Promise<string | undefined> {
 	const r = await git(["show", `${ref}:${file}`], repo);
 	return r.code === 0 ? r.stdout : undefined;
@@ -198,17 +192,13 @@ function parseAddedLinesByFile(diffText: string): Map<string, RawHit[]> {
 	return byFile;
 }
 
-/** Apply the allowlist + exempt-token + mid-co-occurrence filters to a per-file hit map, returning
- *  the final flat hit list. `contentRef` is the ref to `git show` a flagged file's content from for
- *  the exempt-token check (the diff's "to" side — the content actually landing; `""` for the index). */
-async function resolveHits(repo: string, contentRef: string, byFile: Map<string, RawHit[]>): Promise<MarkerHit[]> {
+/** Apply the mid-co-occurrence detection rule to a per-file hit map and flatten to the final hit
+ *  list. No allowlist, no exempt token (delta-verify round, finding #1) — every file that survives
+ *  the co-occurrence rule is reported, full stop. */
+function flattenHits(byFile: Map<string, RawHit[]>): MarkerHit[] {
 	const out: MarkerHit[] = [];
 	for (const [file, rawHits] of byFile) {
-		if (isAllowlistedPath(file)) continue;
 		const kept = applyMidCoOccurrenceRule(rawHits);
-		if (kept.length === 0) continue;
-		const content = await showFile(repo, contentRef, file);
-		if (content?.includes(MARKER_EXEMPT_TOKEN)) continue;
 		for (const h of kept) out.push({ file, line: h.line });
 	}
 	return out;
@@ -237,7 +227,7 @@ export async function conflictMarkerReasonForRange(repo: string, fromRef: string
 		if (diff.code !== 0) return probeFailureReason(`diff ${fromRef}..${toRef} exited ${diff.code}`);
 		const byFile = parseAddedLinesByFile(diff.stdout);
 		if (byFile.size === 0) return undefined;
-		const hits = await resolveHits(repo, toRef, byFile);
+		const hits = flattenHits(byFile);
 		if (hits.length === 0) return undefined;
 		return formatReason(`this land (${fromRef}..${toRef})`, hits);
 	} catch (err) {
@@ -257,9 +247,7 @@ export async function conflictMarkerReasonStaged(repo: string): Promise<string |
 		if (diff.code !== 0) return probeFailureReason(`diff --cached exited ${diff.code}`);
 		const byFile = parseAddedLinesByFile(diff.stdout);
 		if (byFile.size === 0) return undefined;
-		// The staged content IS the working tree's index right now — read it back via `git show :path`
-		// (the `:0` stage) for the exempt-token check, not a ref.
-		const hits = await resolveHits(repo, "", byFile);
+		const hits = flattenHits(byFile);
 		if (hits.length === 0) return undefined;
 		return formatReason("the staged commit", hits);
 	} catch (err) {
@@ -271,18 +259,18 @@ export async function conflictMarkerReasonStaged(repo: string): Promise<string |
  * The AUTORESOLVE path (gauntlet #8): a FULL-FILE scan of `files` as they exist at `ref` — not an
  * added-lines diff. A resolver that inserts unresolved arms INSIDE an old teaching triple (reusing
  * pre-existing marker lines the diff would treat as unchanged context) would slip past an
- * added-lines-only scan; a full-file read catches it. Safe against false positives specifically
- * because the allowlist exempts legitimate marker-carrying content that a full scan would otherwise
- * flag.
+ * added-lines-only scan; a full-file read catches it.
+ *
+ * A touched file this can't READ (delta-verify round, codex LOW) refuses the land outright rather
+ * than silently skipping it — an unreadable path can't be proven clean, and "couldn't check" must
+ * never collapse to "assume it's fine" for content a resolver just wrote.
  */
 export async function conflictMarkerReasonForFiles(repo: string, ref: string, files: readonly string[]): Promise<string | undefined> {
 	try {
 		const byFile = new Map<string, RawHit[]>();
 		for (const file of new Set(files)) {
-			if (isAllowlistedPath(file)) continue;
 			const content = await showFile(repo, ref, file);
-			if (content === undefined) continue; // deleted / unreadable — nothing to scan
-			if (content.includes(MARKER_EXEMPT_TOKEN)) continue;
+			if (content === undefined) return probeFailureReason(`could not read ${file} at ${ref} (git show failed) — cannot confirm it is free of conflict-marker debris`);
 			const rawHits: RawHit[] = [];
 			for (const line of content.split("\n")) {
 				const kind = classifyMarkerLine(line);

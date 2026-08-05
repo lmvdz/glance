@@ -928,8 +928,13 @@ async function attemptAutoResolve(a: {
 	const touchedFiles = new Set<string>();
 	let r = await git(["rebase", head0], worktree);
 	for (let step = 0; r.code !== 0 && step < REBASE_STEP_CAP; step++) {
-		const files = (await git(["diff", "--name-only", "--diff-filter=U"], worktree)).stdout
-			.split("\n").map((s) => s.trim()).filter((s) => s.length > 0);
+		// `-z`: NUL-separated RAW byte paths — plain `--name-only` quotes/escapes any path core.quotePath
+		// considers "unusual" (default: anything outside the printable-ASCII range, e.g. `docs/é.md`), so
+		// a newline-split would enter `touchedFiles` a quoted string like `"docs/\303\251.md"` that `git
+		// show <ref>:<that string>` can never resolve — the full-file conflict-marker scan below would
+		// then silently skip a real conflicted file (gauntlet delta-verify round, finding #2, codex).
+		const files = (await git(["diff", "-z", "--name-only", "--diff-filter=U"], worktree)).stdout
+			.split("\0").filter((s) => s.length > 0);
 		if (files.length === 0) break; // stopped for a non-conflict reason → bail out below
 		for (const f of files) touchedFiles.add(f);
 		const resolved = await resolver({ worktree, files, branch, target: head0 }).catch(() => false);

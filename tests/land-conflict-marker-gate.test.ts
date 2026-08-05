@@ -1,7 +1,7 @@
 /**
  * Conflict-marker gate wired into the local land path (#330, per #327's resolution; hardened in
- * gauntlet round 1 against PR #351) — drives the REAL `landAgent` end to end (real temp git repos,
- * no mocks), covering all three local-mode call sites:
+ * gauntlet round 1 AND the delta-verify round against PR #351) — drives the REAL `landAgent` end to
+ * end (real temp git repos, no mocks), covering all three local-mode call sites:
  *   1. the ORDINARY path: a POST-merge scan inside `verifyMerged` (`head0..HEAD`, gauntlet #9 — not
  *      a merge-base diff) for a branch that carries a live marker line before any conflict happens.
  *   2. the IN-PLACE path (gauntlet #2): `worktree === repo` used to commit and return success with
@@ -10,8 +10,18 @@
  *      files, not an added-lines diff — the scenario the ticket actually names, an AUTORESOLVE
  *      resolver that writes a "resolution" which still leaves live conflict-marker debris behind,
  *      surviving typecheck+test for a .md/.json/.txt file.
- * PR-mode coverage (the round's CRITICAL finding — PR mode never ran this check at all) lives in
+ * PR-mode coverage (round 1's CRITICAL finding — PR mode never ran this check at all) lives in
  * tests/land-pr.test.ts, alongside its existing gh-mock + scratch-merge infrastructure.
+ *
+ * Delta-verify round (CRITICAL, both lineages): round 1's path allowlist and in-file exempt token
+ * were both agent-settable — DELETED. The ONLY exemption now is `conflictMarkerGate: false`, the
+ * SAME force-land authority that already overrides `staleGate`/`riskOverride`, set only by a human's
+ * explicit Force action — never by anything the candidate diff can write. "conflictMarkerGate:false
+ * (force-land) merges a branch carrying markers" below (and its AUTORESOLVE twin further down) prove
+ * that path still works; every allowlist/token case that used to prove "allowed" now lives in
+ * tests/conflict-markers.test.ts proving "refused unless force". `attemptAutoResolve`'s unicode-path
+ * test (delta-verify finding #2, codex) proves the `-z`/NUL fix to `land.ts`'s conflicted-file
+ * gathering — a non-ASCII filename no longer silently escapes the full-file scan.
  */
 
 import { afterAll, afterEach, expect, test } from "bun:test";
@@ -101,6 +111,27 @@ test("conflictMarkerGate:false (force-land) merges a branch carrying markers", a
 
 	expect(res.ok).toBe(true);
 	expect(res.merged).toBe(true);
+});
+
+// Delta-verify #1: the human-authority-only exemption model, made concrete. A tests/fixtures/ path
+// with real markers (round 1's deleted path allowlist) is refused by DEFAULT — legitimate
+// marker-carrying content only lands through the SAME force-land a human uses for any other
+// deliberately-unusual land, never through anything the candidate diff itself can set.
+test("delta-verify #1: a tests/fixtures/*.md with real markers is refused by default, but a human force-land still lands it", async () => {
+	const repo = await baseRepo("cm-fixtures-default-");
+	const wt = await branchWorktree(repo, "feat", async (dir) => {
+		await fs.mkdir(path.join(dir, "tests", "fixtures"), { recursive: true });
+		await fs.writeFile(path.join(dir, "tests", "fixtures", "conflict-example.md"), ["<<<<<<< HEAD", "ours", "=======", "theirs", ">>>>>>> feat", ""].join("\n"));
+	});
+
+	const refused = await landAgent({ repo, worktree: wt, branch: "feat", message: "land feat", commitWip: false, verify: "" });
+	expect(refused.ok).toBe(false);
+	expect(refused.detail).toContain("conflict-markers gate:");
+	expect(refused.detail).toContain("tests/fixtures/conflict-example.md");
+
+	const forced = await landAgent({ repo, worktree: wt, branch: "feat", message: "land feat", commitWip: false, verify: "", conflictMarkerGate: false });
+	expect(forced.ok).toBe(true);
+	expect(forced.merged).toBe(true);
 });
 
 test("OMP_SQUAD_CONFLICT_MARKER_GATE=0 disables the gate globally", async () => {
@@ -238,4 +269,26 @@ test("AUTORESOLVE: conflictMarkerGate:false (force-land) keeps a marker-laden au
 
 	expect(res.ok).toBe(true);
 	expect(res.merged).toBe(true);
+});
+
+// ── delta-verify #2 (codex): a unicode conflicted filename must not silently escape the scan ──────
+// `attemptAutoResolve`'s file-gathering used to run plain `git diff --name-only --diff-filter=U`.
+// With the default `core.quotePath=true`, git quotes/octal-escapes any path it considers "unusual"
+// (anything outside 7-bit ASCII, e.g. `é.md`) — the ESCAPED string then entered `touchedFiles`, and
+// `git show <ref>:<that escaped string>` can never resolve it, silently skipping the file's scan.
+// Fixed with `-z` (NUL-separated raw bytes, no quoting). Reproduced with a REAL non-ASCII filename.
+
+test("delta-verify #2 (codex): AUTORESOLVE catches marker debris in a real unicode-named conflicted file", async () => {
+	process.env.OMP_SQUAD_AUTORESOLVE = "1";
+	const { repo, wt } = await conflictRepo("é.md");
+	const head0 = await out(repo, "rev-parse", "HEAD");
+
+	const res = await landAgent({ repo, worktree: wt, branch: "feat", message: "land feat", commitWip: false, verify: "true", resolver: resolverLeavesMarkers, reviewer: approve });
+
+	expect(res.ok).toBe(false);
+	expect(res.merged).toBe(false);
+	expect(res.detail).toContain("auto-resolve:");
+	expect(res.detail).toContain("conflict-markers gate:");
+	expect(res.detail).toContain("é.md");
+	expect(await out(repo, "rev-parse", "HEAD")).toBe(head0); // main never advanced past head0
 });
