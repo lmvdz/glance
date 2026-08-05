@@ -141,6 +141,66 @@
  * and can still race a new one during a mixed-version upgrade window. This
  * code can't retroactively fence a binary that predates the fence; #352
  * tracks the rollout/version-gate question separately.
+ *
+ * ROUND 4 (this fix). A scoped delta-verify of round 3 (codex) closed EISDIR
+ * (#4 above) but found residual depth in the other three:
+ *
+ * 1. (BOOT-HANG, still open) The round-3 deadline check ran only after an
+ *    EWOULDBLOCK, so two paths escaped it: (a) a corrupt/unreadable
+ *    `daemon.lock` at give-up time made `reclaimOrCreate` return `{kind:
+ *    "retry"}`, and the OUTER loop's `continue` for "retry" never checked
+ *    the deadline — an infinite loop with a held fence and a corrupt lock
+ *    file; (b) EINTR retried via `continue` BEFORE the deadline check, so an
+ *    EINTR storm could bypass it entirely. Fixed: {@link acquireFenceOrThrow}
+ *    checks the deadline FIRST on every loop iteration — before the flock
+ *    attempt, before any retry path — and throws {@link StateLockError}
+ *    directly the instant it's exceeded, never entering the critical section
+ *    and never returning an ambiguous "keep going" signal for the outer loop
+ *    to mishandle. One check governs every exit path.
+ *
+ * 2. (LIBC-ABSENT LIVE-OWNER TOCTOU, still open) Round 3 fixed the INITIAL
+ *    observation ordering but left a window: process A observes stale, then
+ *    calls `loadFlock()`/`ensureFlockExclusive` and hits the unsupported
+ *    path — but a peer could have reclaimed and installed a LIVE record in
+ *    that exact window, and A would still throw the fatal "confirmed stale,
+ *    rm it by hand" error against a lock that is live RIGHT NOW. Fixed:
+ *    {@link recheckLiveBeforeUnsupported} re-reads and re-checks liveness
+ *    immediately before either unsupported-error throw site; if the lock has
+ *    gone live, A takes the normal wait/handoff path instead — the fatal
+ *    error is only ever thrown against a lock re-confirmed stale at the
+ *    instant of throwing.
+ *
+ * 3. (MOUNT-LOCAL, split) Five fixable defects in {@link probeFlockExclusive}
+ *    / {@link ensureFlockExclusive}: (a) the exclusivity verdict was cached
+ *    in ONE global boolean, so a local-disk success made every later state
+ *    dir on any OTHER filesystem (including a genuinely non-exclusive one)
+ *    skip probing entirely — now cached per-device (`statSync(dir).dev`);
+ *    (b) the second lock's failure was accepted as proof of exclusion
+ *    without checking *why* it failed — any errno counted, not just
+ *    EWOULDBLOCK/EAGAIN — now the errno is checked explicitly, since only
+ *    that specific failure is actual proof; (c) `fd1` leaked if the second
+ *    `openSync` threw (both fds were only closed in a `finally` that never
+ *    ran) — now each open is wrapped so both fds always close; (d) the
+ *    `.selftest` probe file was left on disk forever — now removed in a
+ *    `finally`; (e) a FIXED shared `.selftest` path meant two concurrent
+ *    processes probing at once could make one's LEGITIMATE lock collision
+ *    look like broken flock — now a unique-per-process, per-call path.
+ *
+ *    The cross-host NFS case itself — client-local locking that passes a
+ *    same-host self-test while a DIFFERENT host acquires independently — is
+ *    DOCUMENTED AND ACCEPTED, not chased further: no in-process probe run on
+ *    one host can observe another host's lock state, so this is an
+ *    unsupportable-by-construction limit of any advisory-lock approach, not
+ *    a bug. `GLANCE_STATE_DIR` MUST be a local filesystem; network
+ *    filesystems are explicitly unsupported and exclusion there is the
+ *    operator's responsibility (see docs/operations.md). The `/proc/mounts`
+ *    warning stays as an early, cheap heads-up.
+ *
+ * 4. (Darwin, new) `loadFlock()` always requested glibc's
+ *    `__errno_location`, but libSystem (Darwin/BSD) exposes `__error`
+ *    instead — every stale reclaim on macOS failed as "unsupported" even
+ *    though flock itself works fine there. Fixed: the errno symbol name is
+ *    now platform-branched.
  */
 
 import { openSync, writeSync, closeSync, readFileSync, unlinkSync, linkSync, statSync, rmdirSync } from "node:fs";
@@ -249,8 +309,14 @@ function cleanupRound1Debris(file: string): void {
 /** Network filesystems whose `flock` support is commonly client-local or a
  * no-op (ROUND 3 #3) — NFS confirmed by the gauntlet; the others are the same
  * class of risk. This is only used for an early, cheap, best-effort WARNING;
- * {@link probeFlockExclusive} is the actual correctness backstop regardless of
- * whether this detection fires. */
+ * {@link probeFlockExclusive} catches the SAME-HOST case of this. The
+ * CROSS-HOST case (client-local locking that passes a same-host probe while a
+ * DIFFERENT host acquires independently) is DOCUMENTED AND ACCEPTED, not
+ * chased further (ROUND 4 #3) — no in-process probe run on one host can ever
+ * observe another host's lock state, so this is an unsupportable-by-
+ * construction limit of any advisory-lock approach, not a bug. `GLANCE_STATE_DIR`
+ * MUST be a local filesystem; network filesystems are unsupported and
+ * exclusion there is the operator's responsibility. */
 const NETWORK_FS_TYPES = new Set(["nfs", "nfs4", "cifs", "smb", "smbfs", "9p", "afs", "ncpfs"]);
 
 let networkFsWarned = false;
@@ -275,12 +341,13 @@ function warnOnNetworkFilesystem(dirPath: string): void {
 		if (best && NETWORK_FS_TYPES.has(best.fsType)) {
 			networkFsWarned = true;
 			process.stderr.write(
-				`WARNING: ${dirPath} looks like it's on a network filesystem (${best.fsType}, mounted at ` +
-					`${best.mountPoint}). glance's stale-lock reclamation relies on flock(2) providing REAL ` +
-					`cross-host mutual exclusion, which some network mounts silently do not (e.g. NFS with ` +
-					`local_lock=flock/all makes it client-local). glance self-tests this and fails closed if ` +
-					`flock doesn't actually exclude here, but a local filesystem is the supported, ` +
-					`recommended setup for GLANCE_STATE_DIR — see docs/operations.md.\n`,
+				`WARNING: ${dirPath} is on a network filesystem (${best.fsType}, mounted at ${best.mountPoint}).\n` +
+					`  GLANCE_STATE_DIR MUST be a local filesystem — network filesystems (NFS/SMB/etc.) are ` +
+					`UNSUPPORTED for stale-lock reclamation. glance's self-test can catch a SAME-HOST no-op ` +
+					`(e.g. NFS with local_lock=flock/all), but it cannot detect the CROSS-HOST case: a ` +
+					`same-host probe can pass while a DIFFERENT host still acquires the lock independently — ` +
+					`no in-process check can observe another host's lock state. Exclusion on a network ` +
+					`filesystem is not guaranteed and is YOUR responsibility. See docs/operations.md.\n`,
 			);
 		}
 	} catch {
@@ -352,6 +419,32 @@ function ownerAlive(rec: LockRecord): boolean {
 	return true;
 }
 
+/** Used only when we give up waiting for the reclaim fence AND the lock file
+ * is unreadable/corrupt/absent at that exact moment (ROUND 4 #1) — we know
+ * SOMETHING is contending (the fence is genuinely held), we just can't
+ * identify it. `pid: -1` is a sentinel, never a real pid. */
+function unknownOwnerPlaceholder(): LockRecord {
+	return { pid: -1, host: os.hostname(), startedAt: 0 };
+}
+
+/**
+ * ROUND 4 #2: before ever throwing the fatal "can't reclaim safely, remove it
+ * by hand" error, re-check RIGHT NOW whether the lock has gone live — a peer
+ * may have reclaimed and installed a live record in the window between the
+ * caller's own staleness observation and this point (e.g. immediately after
+ * `loadFlock()` returns null, or immediately after the exclusion self-test
+ * fails). Never advise manual `rm` against a lock that's live right now.
+ * Returns the live owner (take the normal wait/handoff path instead) or null
+ * (still genuinely unreclaimable — safe to throw the fatal error).
+ * @substrate exported for tests only — `reclaimOrCreate` (same file) is the
+ * one production caller, at both unsupported-error throw sites.
+ */
+export function recheckLiveBeforeUnsupported(file: string): { owner: LockRecord } | null {
+	const current = readRecord(file);
+	if (current && ownerAlive(current)) return { owner: current };
+	return null;
+}
+
 /** Atomically create the lock file with our record. Returns false on EEXIST, throws on other errors. */
 function tryCreate(file: string): boolean {
 	// Write our record to a private temp file, then atomically link it into place.
@@ -410,6 +503,45 @@ export interface Flock {
 
 let flock: Flock | null | undefined; // undefined = not yet attempted
 
+/** Binds `flock` + the platform's errno accessor from one dlopen'd library, or
+ * null if either symbol is missing. ROUND 4 #4: libSystem (Darwin/BSD)
+ * exposes `__error`, not glibc/musl's `__errno_location` — binding the wrong
+ * name for the platform silently loaded (dlopen doesn't validate unused
+ * symbols eagerly the same way) but crashed or misbehaved on first real use,
+ * so this is platform-branched explicitly rather than guessed. */
+function dlopenLibc(name: string): Flock | null {
+	try {
+		if (process.platform === "darwin") {
+			const lib = dlopen(name, {
+				flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
+				__error: { args: [], returns: FFIType.ptr },
+			});
+			return {
+				lock: (fd, op) => lib.symbols.flock(fd, op),
+				errno: () => {
+					const errnoPtr = lib.symbols.__error();
+					if (!errnoPtr) throw new Error("__error returned null");
+					return read.i32(errnoPtr, 0);
+				},
+			};
+		}
+		const lib = dlopen(name, {
+			flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
+			__errno_location: { args: [], returns: FFIType.ptr },
+		});
+		return {
+			lock: (fd, op) => lib.symbols.flock(fd, op),
+			errno: () => {
+				const errnoPtr = lib.symbols.__errno_location();
+				if (!errnoPtr) throw new Error("__errno_location returned null");
+				return read.i32(errnoPtr, 0);
+			},
+		};
+	} catch {
+		return null;
+	}
+}
+
 /** Exported so tests can get the REAL flock binding directly, to validate
  * {@link probeFlockExclusive} against genuine flock semantics on this
  * filesystem (ROUND 3 #5) rather than only against a stub.
@@ -427,22 +559,10 @@ export function loadFlock(): Flock | null {
 			? ["libSystem.B.dylib"]
 			: ["libc.so.6", "libc.so", `libc.musl-${muslArch}.so.1`, "libc.musl-x86_64.so.1", "libc.musl-aarch64.so.1"];
 	for (const name of candidates) {
-		try {
-			const lib = dlopen(name, {
-				flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
-				__errno_location: { args: [], returns: FFIType.ptr },
-			});
-			flock = {
-				lock: (fd, op) => lib.symbols.flock(fd, op),
-				errno: () => {
-					const errnoPtr = lib.symbols.__errno_location();
-					if (!errnoPtr) throw new Error("__errno_location returned null");
-					return read.i32(errnoPtr, 0);
-				},
-			};
+		const bound = dlopenLibc(name);
+		if (bound) {
+			flock = bound;
 			return flock;
-		} catch {
-			// Try the next candidate library name.
 		}
 	}
 	flock = null;
@@ -450,15 +570,19 @@ export function loadFlock(): Flock | null {
 }
 
 /**
- * ROUND 3 #3/#5: does flock actually provide mutual exclusion for `testPath` on
- * whatever filesystem it lives on? Opens it TWICE in this process and confirms
- * the second `LOCK_EX|LOCK_NB` fails with EWOULDBLOCK/EAGAIN. Some mounts (NFS
- * with `local_lock=flock`/`all`, or other misconfigured network filesystems)
- * make flock a client-local no-op — both "acquire" it and the original
- * double-owner race returns silently. Exported so it can be unit-tested
- * directly against both the real flock (expect true) and a deliberately no-op
- * stub (expect false) — a regression here must fail the suite even if the
- * slower multi-process race test doesn't happen to reproduce it.
+ * ROUND 3 #3/#5, hardened in ROUND 4 #3: does flock actually provide mutual
+ * exclusion for `testPath` on whatever filesystem it lives on? Opens it TWICE
+ * in this process and confirms the second `LOCK_EX|LOCK_NB` fails with
+ * SPECIFICALLY EWOULDBLOCK/EAGAIN (ROUND 4 #3b — any OTHER errno is
+ * inconclusive, not proof of exclusion). Some mounts (NFS with
+ * `local_lock=flock`/`all`, or other misconfigured network filesystems) make
+ * flock a client-local no-op — both "acquire" it and the original
+ * double-owner race returns silently. Both fds are guaranteed closed even if
+ * the second `openSync` throws (ROUND 4 #3c — `fd1` used to leak in that
+ * case). Exported so it can be unit-tested directly against both the real
+ * flock (expect true) and a deliberately no-op stub (expect false) — a
+ * regression here must fail the suite even if the slower multi-process race
+ * test doesn't happen to reproduce it.
  * @substrate exported for tests only — `ensureFlockExclusive` (same file) is
  * the one production caller; `tests/state-lock.test.ts` is the only
  * out-of-file caller, asserting this function directly against both a real
@@ -466,42 +590,114 @@ export function loadFlock(): Flock | null {
  */
 export function probeFlockExclusive(f: Flock, testPath: string): boolean {
 	const fd1 = openSync(testPath, "a+");
-	const fd2 = openSync(testPath, "a+");
 	try {
-		if (f.lock(fd1, LOCK_EX | LOCK_NB) !== 0) return false; // couldn't even get the first — treat as unusable
+		const fd2 = openSync(testPath, "a+");
 		try {
-			if (f.lock(fd2, LOCK_EX | LOCK_NB) === 0) {
-				f.lock(fd2, LOCK_UN); // it "succeeded" — not exclusive; release before reporting failure
-				return false;
+			if (f.lock(fd1, LOCK_EX | LOCK_NB) !== 0) return false; // couldn't even get the first — inconclusive, treat as unusable
+			try {
+				if (f.lock(fd2, LOCK_EX | LOCK_NB) === 0) {
+					f.lock(fd2, LOCK_UN); // it "succeeded" — not exclusive; release before reporting failure
+					return false;
+				}
+				// Only a genuine EWOULDBLOCK/EAGAIN counts as proof of exclusion — any
+				// OTHER errno (EBADF, EINVAL, a transient failure, ...) is inconclusive,
+				// not evidence flock actually excludes here (ROUND 4 #3b).
+				return f.errno() === EWOULDBLOCK;
+			} finally {
+				f.lock(fd1, LOCK_UN);
 			}
-			return true; // expected: second lock failed (EWOULDBLOCK/EAGAIN) — genuinely exclusive
 		} finally {
-			f.lock(fd1, LOCK_UN);
+			closeSync(fd2);
 		}
 	} finally {
-		closeSync(fd1);
-		closeSync(fd2);
+		closeSync(fd1); // always closes, even if the second openSync above threw (ROUND 4 #3c)
 	}
 }
 
-let flockExclusiveVerified: boolean | undefined; // cached per process — the mount doesn't change mid-run
+/** Cached PER FILESYSTEM DEVICE (ROUND 4 #3a), not one global boolean — a
+ * local-disk success must never make a LATER state dir on a different (and
+ * possibly genuinely non-exclusive) mount skip probing entirely. */
+const flockExclusiveByDevice = new Map<number, boolean>();
 
-function ensureFlockExclusive(f: Flock, fenceFile: string): boolean {
-	if (flockExclusiveVerified !== undefined) return flockExclusiveVerified;
-	// Probe a DEDICATED path, never the live fence file: the fence can be
-	// legitimately held by another racer at any moment (that's the whole
-	// point of it), and `probeFlockExclusive`'s first lock attempt failing
-	// because of real contention is not evidence flock is broken — it would
-	// misclassify an ordinary busy fence as "unsupported". A sibling path on
-	// the same directory (same mount) is representative of the same
-	// filesystem's flock behavior without ever colliding with real traffic.
-	flockExclusiveVerified = probeFlockExclusive(f, `${fenceFile}.selftest`);
-	return flockExclusiveVerified;
+/** @substrate exported for tests only — `reclaimOrCreate` (same file) is the
+ * one production caller; `tests/state-lock.test.ts` calls this directly
+ * against paths on two genuinely different real devices (`/tmp` and
+ * `/dev/shm`, both root-free) to prove the cache is keyed per-device and not
+ * one global flag (ROUND 4 #3a). */
+export function ensureFlockExclusive(f: Flock, fenceFile: string): boolean {
+	let dev: number;
+	try {
+		dev = statSync(path.dirname(fenceFile)).dev;
+	} catch {
+		dev = -1; // can't stat the dir (astonishingly unlikely) — shared fallback bucket, still correct, just not device-specific
+	}
+	const cached = flockExclusiveByDevice.get(dev);
+	if (cached !== undefined) return cached;
+	// A DEDICATED, UNIQUE-per-process-per-call path, never the live fence file
+	// and never a fixed shared name: the fence can be legitimately held by
+	// another racer at any moment (that's the whole point of it), and a fixed
+	// shared `.selftest` path could ALSO be probed by another process at the
+	// same instant — either way, a probe's first lock attempt failing because
+	// of real, unrelated contention is not evidence flock is broken; it would
+	// misclassify an ordinary collision as "unsupported" (ROUND 4 #3e). A
+	// sibling path on the same directory (same device) is representative of
+	// the same filesystem's flock behavior without ever colliding with
+	// anyone else's traffic.
+	const probePath = `${fenceFile}.selftest.${process.pid}.${Math.random().toString(36).slice(2)}`;
+	let result: boolean;
+	try {
+		result = probeFlockExclusive(f, probePath);
+	} finally {
+		try {
+			unlinkSync(probePath); // never leave the probe file behind (ROUND 4 #3d)
+		} catch {
+			// Best-effort — the path is unique, so a leftover is harmless either way.
+		}
+	}
+	flockExclusiveByDevice.set(dev, result);
+	return result;
 }
 
 type ReclaimOutcome = { kind: "created" } | { kind: "retry" } | { kind: "live"; owner: LockRecord };
 
 const RECLAIM_POLL_MS = 20;
+
+/**
+ * ROUND 3 #1, hardened in ROUND 4 #1: acquire the fence non-blockingly
+ * (`LOCK_EX|LOCK_NB`), retried against a HARD `deadline` ceiling checked
+ * FIRST on every loop iteration — before the flock attempt, before ANY retry
+ * path (EWOULDBLOCK, EINTR). One check governs every exit: once we're past
+ * budget we throw {@link StateLockError} immediately and NEVER attempt to
+ * enter the critical section, no matter which retry path got us there (a
+ * stuck/STOPPED holder, a corrupt-or-unreadable lock record at give-up time,
+ * or a storm of EINTR retries that would otherwise `continue` straight past
+ * the check). Never a blocking `LOCK_EX`, which would let a STOPPED or
+ * wedged holder block every future boot forever with no bound.
+ * @substrate exported for tests only — `reclaimOrCreate` (same file) is the
+ * one production caller; `tests/state-lock.test.ts` unit-tests this directly
+ * against a fake always-EINTR `Flock` stub to prove an EINTR storm is bounded
+ * (ROUND 4 #1) without needing to engineer a real signal-interrupted syscall.
+ */
+export async function acquireFenceOrThrow(f: Flock, fd: number, file: string, fenceFile: string, deadline: number): Promise<void> {
+	for (;;) {
+		if (Date.now() > deadline) {
+			// Someone (or something stuck/stopped) has held the fence past our
+			// whole budget, or a storm of retries burned it. We never entered the
+			// critical section, so we can't have stomped anything — give up and
+			// report the most current view (falling back to a placeholder if the
+			// lock file is itself unreadable/corrupt/absent right now — we still
+			// know SOMETHING is contending, even if we can't identify it).
+			const current = readRecord(file);
+			throw new StateLockError(file, current ?? unknownOwnerPlaceholder());
+		}
+		const ret = f.lock(fd, LOCK_EX | LOCK_NB);
+		if (ret === 0) return; // acquired, within budget
+		const errno = f.errno();
+		if (errno === EINTR) continue; // interrupted syscall — loop re-checks the deadline FIRST, not bypassed
+		if (errno !== EWOULDBLOCK) throw new Error(`flock(LOCK_EX|LOCK_NB) on ${fenceFile} failed with errno ${errno}`);
+		await Bun.sleep(RECLAIM_POLL_MS);
+	}
+}
 
 /**
  * Reclaim-and-create, holding a real kernel advisory lock (flock) for the
@@ -510,41 +706,33 @@ const RECLAIM_POLL_MS = 20;
  * a time for a given `file` — the kernel enforces it and releases it the
  * instant a holder exits, by any means, with no timeout and no steal.
  *
- * The flock itself is acquired non-blockingly (`LOCK_EX|LOCK_NB`) and retried
- * against `deadline` (ROUND 3 #1) — never a blocking `LOCK_EX`, which would
- * let a STOPPED or wedged holder block every future boot forever with no
- * bound. On timeout we give up WITHOUT ever entering the critical section:
- * fencing is intact (we never steal, we just don't take it) and boot is
- * bounded either way.
- *
- * Throws {@link StateLockReclaimUnsupportedError} if no advisory lock is
- * available, or if one loaded but failed {@link probeFlockExclusive}.
+ * Throws {@link StateLockError} if the fence can't be acquired within budget
+ * (see {@link acquireFenceOrThrow}), or {@link StateLockReclaimUnsupportedError}
+ * if no advisory lock is available or one loaded but failed
+ * {@link probeFlockExclusive} — in both unsupported cases, RE-CHECKING first
+ * (ROUND 4 #2, {@link recheckLiveBeforeUnsupported}) whether the lock has
+ * gone live in the meantime, since the fatal error's advice ("remove it by
+ * hand") must never be given against a lock that's live right now.
  */
 async function reclaimOrCreate(file: string, deadline: number): Promise<ReclaimOutcome> {
 	const f = loadFlock();
-	if (!f) throw new StateLockReclaimUnsupportedError(file, "no-flock");
+	if (!f) {
+		const live = recheckLiveBeforeUnsupported(file);
+		if (live) return { kind: "live", owner: live.owner };
+		throw new StateLockReclaimUnsupportedError(file, "no-flock");
+	}
 
 	cleanupRound1Debris(file);
 	const fenceFile = reclaimFencePath(file);
-	if (!ensureFlockExclusive(f, fenceFile)) throw new StateLockReclaimUnsupportedError(file, "flock-not-exclusive");
+	if (!ensureFlockExclusive(f, fenceFile)) {
+		const live = recheckLiveBeforeUnsupported(file);
+		if (live) return { kind: "live", owner: live.owner };
+		throw new StateLockReclaimUnsupportedError(file, "flock-not-exclusive");
+	}
 
 	const fd = openSync(fenceFile, "a+"); // create if missing; content is never used
 	try {
-		for (;;) {
-			const ret = f.lock(fd, LOCK_EX | LOCK_NB);
-			if (ret === 0) break; // acquired
-			const errno = f.errno();
-			if (errno === EINTR) continue; // interrupted syscall — retry immediately, no sleep
-			if (errno !== EWOULDBLOCK) throw new Error(`flock(LOCK_EX|LOCK_NB) on ${fenceFile} failed with errno ${errno}`);
-			if (Date.now() >= deadline) {
-				// Someone (or something stuck/stopped) has held the fence past our
-				// whole budget. We never entered the critical section, so we can't
-				// have stomped anything — give up and report the most current view.
-				const current = readRecord(file);
-				return current ? { kind: "live", owner: current } : { kind: "retry" };
-			}
-			await Bun.sleep(RECLAIM_POLL_MS);
-		}
+		await acquireFenceOrThrow(f, fd, file, fenceFile, deadline);
 		try {
 			// A peer may have reclaimed and recreated between our caller's own
 			// tryCreate miss and our getting the flock — check for real.
@@ -605,14 +793,18 @@ export async function acquireStateLock(stateDir: string, opts: { handoffMs?: num
 			continue;
 		}
 
+		// reclaimOrCreate throws directly (ROUND 4 #1) if the fence itself can't
+		// be acquired within budget — it never returns here on a timeout, so a
+		// "live" outcome below is always a genuine, just-observed peer (either it
+		// legitimately won the reclaim, or ROUND 4 #2's re-check caught the lock
+		// going live around an unsupported-reclaim throw).
 		const outcome = await reclaimOrCreate(file, deadline);
 		if (outcome.kind === "created") break;
 		if (outcome.kind === "retry") continue;
 
-		// Either a peer legitimately won the reclaim, or we gave up waiting on the
-		// fence (ROUND 3 #1) and `file` currently shows some owner. During upgrade
-		// the outgoing daemon dies within the handoff window; a genuine
-		// double-start never will, so we eventually throw.
+		// A genuinely live peer holds it. During upgrade the outgoing daemon dies
+		// within the handoff window; a genuine double-start never will, so we
+		// eventually throw.
 		if (Date.now() >= deadline) throw new StateLockError(file, outcome.owner);
 		await Bun.sleep(HANDOFF_POLL_MS);
 	}

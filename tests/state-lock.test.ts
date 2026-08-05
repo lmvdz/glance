@@ -5,10 +5,25 @@
 
 import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { acquireStateLock, StateLockError, loadFlock, probeFlockExclusive, reclaimFencePath, type Flock } from "../src/state-lock.ts";
+import {
+	acquireStateLock,
+	StateLockError,
+	loadFlock,
+	probeFlockExclusive,
+	reclaimFencePath,
+	acquireFenceOrThrow,
+	recheckLiveBeforeUnsupported,
+	ensureFlockExclusive,
+	type Flock,
+} from "../src/state-lock.ts";
+
+// EINTR is 4 on every POSIX platform this targets (Linux, Darwin/BSD) — same
+// stability assumption this file already makes for e.g. pid 2147483647 as a
+// "never a real process" sentinel.
+const EINTR = 4;
 
 const cleanups: Array<() => Promise<void> | void> = [];
 afterEach(async () => {
@@ -19,6 +34,22 @@ async function tmpdir(): Promise<string> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "lock-"));
 	cleanups.push(() => fs.rm(dir, { recursive: true, force: true }));
 	return dir;
+}
+
+/** Poll for a fixture's readiness marker (a file it writes once it holds
+ * whatever it's simulating), bounded so a broken fixture fails fast instead
+ * of hanging the test. */
+async function waitForReadyFile(readyFile: string, timeoutMs = 3_000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		const isReady = await fs
+			.stat(readyFile)
+			.then(() => true)
+			.catch(() => false);
+		if (isReady) return;
+		await Bun.sleep(10);
+	}
+	throw new Error(`fixture never became ready: ${readyFile}`);
 }
 
 test("acquire writes a lock file and release removes it", async () => {
@@ -184,16 +215,7 @@ test("a fence held by a wedged/stopped reclaimer cannot wedge boot forever (#345
 		holder.kill();
 		await holder.exited.catch(() => {});
 	});
-	// Wait for the holder to actually acquire the fence before racing it.
-	const readyDeadline = Date.now() + 3_000;
-	while (Date.now() < readyDeadline) {
-		const isReady = await fs
-			.stat(readyFile)
-			.then(() => true)
-			.catch(() => false);
-		if (isReady) break;
-		await Bun.sleep(10);
-	}
+	await waitForReadyFile(readyFile); // wait for the holder to actually acquire the fence before racing it
 
 	const handoffMs = 500;
 	const t0 = Date.now();
@@ -202,4 +224,135 @@ test("a fence held by a wedged/stopped reclaimer cannot wedge boot forever (#345
 	// The holder holds for 4s; if we ever blocked in flock(LOCK_EX) itself, this
 	// would take ~4s (or hang, for a truly wedged process). Bounded well under that.
 	expect(elapsedMs).toBeLessThan(2_000);
+});
+
+test("a CORRUPT daemon.lock plus a held fence gives up bounded, never loops forever (#345 round 4, #1a)", async () => {
+	// The exact residual codex found in round 3: the deadline was only checked
+	// AFTER an EWOULDBLOCK, and giving up with an unreadable lock record
+	// returned {kind:"retry"} — which the OUTER loop's `continue` accepted
+	// WITHOUT checking the deadline, looping forever. This seeds a genuinely
+	// UNPARSEABLE daemon.lock (not a valid stale record) plus a held fence, so
+	// give-up-time `readRecord` returns null on every attempt — the exact
+	// input that used to spin. The fix's hard, top-of-loop deadline check
+	// must still bound this.
+	const dir = await tmpdir();
+	const file = path.join(dir, "daemon.lock");
+	writeFileSync(file, "not json {{{ — genuinely unparseable, not a stale-but-valid record");
+	const readyFile = path.join(dir, "holder-ready");
+	const holderChild = path.join(import.meta.dir, "fixtures", "lock-fence-holder-child.ts");
+	const holder = Bun.spawn(["bun", holderChild, dir, readyFile], { stdout: "ignore", stderr: "inherit" });
+	cleanups.push(async () => {
+		holder.kill();
+		await holder.exited.catch(() => {});
+	});
+	await waitForReadyFile(readyFile);
+
+	const handoffMs = 500;
+	const t0 = Date.now();
+	await expect(acquireStateLock(dir, { handoffMs })).rejects.toBeInstanceOf(StateLockError);
+	const elapsedMs = Date.now() - t0;
+	// Bounded near handoffMs, not the holder's 4s hold time, and CRITICALLY not
+	// a hang — this is the assertion the round-3 code would never have reached.
+	expect(elapsedMs).toBeLessThan(2_000);
+});
+
+test("acquireFenceOrThrow: an EINTR storm cannot bypass the deadline (#345 round 4, #1b)", async () => {
+	// Direct unit test against a fake Flock stub that ALWAYS reports EINTR and
+	// NEVER succeeds or reports EWOULDBLOCK — the exact shape that, before the
+	// fix, would `continue` straight past the deadline check on every
+	// iteration (the check ran only after EWOULDBLOCK) and spin forever.
+	// Engineering a genuine signal-interrupted syscall is impractical to do
+	// deterministically; this proves the LOOP LOGIC itself is bounded
+	// regardless of how EINTR is triggered in practice.
+	const dir = await tmpdir();
+	const file = path.join(dir, "daemon.lock");
+	const fenceFile = reclaimFencePath(file);
+	const fd = openSync(fenceFile, "a+");
+	cleanups.push(() => closeSync(fd));
+
+	const alwaysEintr: Flock = { lock: () => -1, errno: () => EINTR };
+	const deadline = Date.now() + 100;
+	const t0 = Date.now();
+	await expect(acquireFenceOrThrow(alwaysEintr, fd, file, fenceFile, deadline)).rejects.toBeInstanceOf(StateLockError);
+	const elapsedMs = Date.now() - t0;
+	// Bounded near the 100ms deadline, not an infinite tight loop.
+	expect(elapsedMs).toBeLessThan(1_000);
+});
+
+test("recheckLiveBeforeUnsupported: null while stale, the live owner once a peer reclaims (#345 round 4, #2)", async () => {
+	// Direct unit test of the TOCTOU re-check itself: process A observes
+	// stale, then (in the window before A's fatal "confirmed stale, rm it"
+	// error) a peer B reclaims and installs a LIVE record. The re-check must
+	// see B's live record, not A's stale snapshot — proving A would take the
+	// normal wait/handoff path instead of advising `rm` against a live lock.
+	const dir = await tmpdir();
+	const file = path.join(dir, "daemon.lock");
+
+	// A's observation: genuinely stale (dead pid).
+	writeFileSync(file, JSON.stringify({ pid: 2147483647, host: os.hostname(), startedAt: 0 }));
+	expect(recheckLiveBeforeUnsupported(file)).toBeNull();
+
+	// B reclaims in the window and installs a live record (parent process —
+	// live and signalable in both host and rootless docker runs, same
+	// pattern the "a live owner blocks a second acquire" test above uses).
+	writeFileSync(file, JSON.stringify({ pid: process.ppid, host: os.hostname(), startedAt: 0 }));
+	const live = recheckLiveBeforeUnsupported(file);
+	expect(live).not.toBeNull();
+	expect(live?.owner.pid).toBe(process.ppid);
+});
+
+test("probeFlockExclusive only accepts a genuine EWOULDBLOCK/EAGAIN as proof of exclusion (#345 round 4, #3b)", async () => {
+	// Before the fix, ANY nonzero return from the second lock attempt was
+	// accepted as "exclusive" — even an unrelated failure (EBADF, EINVAL, a
+	// transient error) that says nothing about whether flock actually
+	// excludes here. A stub whose second lock fails for a DIFFERENT reason
+	// must be rejected as inconclusive, not accepted as proof.
+	const dir = await tmpdir();
+	const testPath = path.join(dir, "errno-probe-target");
+	const NOT_EWOULDBLOCK = 9; // EBADF on Linux — deliberately not EWOULDBLOCK/EAGAIN (11)
+	let callCount = 0;
+	const wrongErrnoStub: Flock = {
+		lock: () => {
+			callCount++;
+			return callCount === 1 ? 0 : -1; // first lock "succeeds", second "fails" for an unrelated reason
+		},
+		errno: () => NOT_EWOULDBLOCK,
+	};
+	expect(probeFlockExclusive(wrongErrnoStub, testPath)).toBe(false);
+});
+
+test("ensureFlockExclusive caches the exclusivity verdict PER FILESYSTEM DEVICE, not one global flag (#345 round 4, #3a)", async () => {
+	// Before the fix, a single global boolean meant a local-disk success on
+	// the FIRST state dir made every LATER state dir — even one on a
+	// genuinely different, non-exclusive filesystem — skip probing entirely.
+	// /tmp and /dev/shm are genuinely different real devices here (confirmed
+	// via `stat -c %d`), so this proves per-device isolation without needing
+	// root to fabricate a fake mount.
+	const tmpDir = await tmpdir();
+	const shmDir = await fs.mkdtemp(path.join("/dev/shm", "glance-lock-test-"));
+	cleanups.push(() => fs.rm(shmDir, { recursive: true, force: true }));
+
+	const tmpFence = reclaimFencePath(path.join(tmpDir, "daemon.lock"));
+	const shmFence = reclaimFencePath(path.join(shmDir, "daemon.lock"));
+
+	const realFlock = loadFlock();
+	expect(realFlock).not.toBeNull();
+	if (!realFlock) return; // unreachable after the assert above; narrows the type
+
+	// A stub that reports NOT exclusive (the second lock "succeeds" — a no-op,
+	// the exact shape of a client-local network mount).
+	const nonExclusiveStub: Flock = { lock: () => 0, errno: () => 0 };
+
+	// /tmp: real flock, genuinely exclusive here.
+	expect(ensureFlockExclusive(realFlock, tmpFence)).toBe(true);
+	// /dev/shm: a DIFFERENT device, probed independently — the fake stub is
+	// actually consulted (not skipped via a stale cached verdict from /tmp).
+	expect(ensureFlockExclusive(nonExclusiveStub, shmFence)).toBe(false);
+
+	// Re-query each device with the OPPOSITE flock instance: the CACHED verdict
+	// per device must win, proving this isn't just "always re-evaluate whatever
+	// was passed" — /tmp stays true even handed the non-exclusive stub, and
+	// /dev/shm stays false even handed the real, genuinely-working flock.
+	expect(ensureFlockExclusive(nonExclusiveStub, tmpFence)).toBe(true);
+	expect(ensureFlockExclusive(realFlock, shmFence)).toBe(false);
 });
