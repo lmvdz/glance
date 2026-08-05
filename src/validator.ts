@@ -66,15 +66,25 @@ function activeReviewer(): { model: string; lineage: ModelLineage; harness: "omp
 }
 
 /**
- * `activeReviewer().harness` → the ledger's own lineage tag (glance#332). The reviewer-ledger
- * (plans/.reviews/reviewer-ledger.jsonl, written by `scripts/reviewer-ledger.ts`/the blind-review
- * skill) uses "codex"/"grok"/"native" — matching the harness vocabulary for the two foreign-vendor
- * lanes exactly, but calling the first-party `omp` judge "native" rather than "omp" (what every
- * historical ledger row and the review-closing skill both already write). Kept as its own tiny
- * function rather than inlined so the mapping is named and greppable at the one place it can drift.
+ * Ledger lineage tag for an ALREADY-JUDGED record — reversed from the record's OWN `reviewerLineage`,
+ * NEVER from `activeReviewer()`/whatever harness is configured right now (gauntlet round 2,
+ * delta-verify, "precision-lineage-mismatch-on-cache-hit"): `validatorGate`'s `gateCache` can serve
+ * the SAME cached verdict across two resolutions whose ACTIVE harness differs — an operator flipping
+ * `OMP_SQUAD_VALIDATOR_HARNESS` between lands, or codex/grok's binary coming or going — and restamping
+ * precision from the CURRENT harness would then disagree with the cached verdict's own `model`/
+ * `reviewerLineage` fields, showing the approver an inconsistent receipt (judged by X, precision cited
+ * for Y). The mapping mirrors the ledger's own vocabulary, reversed from the VENDOR lineage the record
+ * already carries: `openai` → "codex", `xai` → "grok", anything else (`anthropic`/`google`/`unknown`)
+ * → "native" — the omp judge is Anthropic-vendored by default and is `activeReviewer()`'s own fallback
+ * for every other case, so this mirrors that fallback exactly. Round 1's version of this function
+ * (removed) derived the tag from `activeReviewer().harness` — the CURRENT config — which is exactly
+ * the bug this fixes: the tag must come from the record that was ACTUALLY judged, not from whatever is
+ * configured at restamp time.
  */
-function ledgerLineageTag(harness: "omp" | "codex" | "grok"): string {
-	return harness === "omp" ? "native" : harness;
+function ledgerLineageTagForRecord(record: ValidationRecord): string {
+	if (record.reviewerLineage === "openai") return "codex";
+	if (record.reviewerLineage === "xai") return "grok";
+	return "native";
 }
 
 /**
@@ -92,8 +102,7 @@ function ledgerLineageTag(harness: "omp" | "codex" | "grok"): string {
  * threaded here from `validatorGate`/`SquadManager`'s own test-only override method — a real function
  * parameter, not ambient global state a launch directory can set.
  */
-function reviewerPrecisionStamp(harness: "omp" | "codex" | "grok", ledgerPath?: string): ReviewerPrecisionStamp {
-	const tag = ledgerLineageTag(harness);
+function reviewerPrecisionStampFor(tag: string, ledgerPath?: string): ReviewerPrecisionStamp {
 	return ledgerPath ? reviewerPrecisionFromLedger(tag, ledgerPath) : reviewerPrecisionFromLedger(tag);
 }
 
@@ -796,13 +805,20 @@ export async function runLensVerify(verdicts: LensVerdict[], diff: string, proof
  * itself, which no longer carries `reviewerPrecision` at all since `scoreAgainstCriteria` stopped
  * stamping it, is never mutated). `skipped`/`inconclusive` verdicts never resolved a reviewer identity
  * in the first place (see `scoreAgainstCriteria`'s own skip path and the diff-fault branch below), so
- * they're left untouched. Never throws — `reviewerPrecisionStamp` degrades to an honest stamp on any
- * read fault.
+ * they're left untouched. Never throws — `reviewerPrecisionStampFor` degrades to an honest stamp on
+ * any read fault.
+ *
+ * The lineage tag comes from `ledgerLineageTagForRecord(record)` — the CACHED verdict's OWN
+ * `reviewerLineage` — NOT from `activeReviewer()` (gauntlet round 2, delta-verify, fixed a real
+ * mismatch: round 1's version read the CURRENT active harness here, which can differ from the harness
+ * that actually judged a cache-hit record, showing the approver a precision number for a different
+ * reviewer than the one credited with the verdict).
  */
-function withFreshReviewerPrecision(record: ValidationRecord, reviewerLedgerPath?: string): ValidationRecord {
+/** @substrate exported for tests only — validatorGate's own live callers never need this directly. */
+export function withFreshReviewerPrecision(record: ValidationRecord, reviewerLedgerPath?: string): ValidationRecord {
 	if (record.verdict === "skipped" || record.verdict === "inconclusive") return record;
-	const reviewer = activeReviewer();
-	return { ...record, reviewerPrecision: reviewerPrecisionStamp(reviewer.harness, reviewerLedgerPath) };
+	const tag = ledgerLineageTagForRecord(record);
+	return { ...record, reviewerPrecision: reviewerPrecisionStampFor(tag, reviewerLedgerPath) };
 }
 
 /**

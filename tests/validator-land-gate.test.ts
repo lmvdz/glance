@@ -24,7 +24,8 @@ import {
 } from "../src/transcript-event-kinds.ts";
 import { SubagentTracker } from "../src/subagents.ts";
 import type { AgentDTO, PersistedAgent, PersistedFeature } from "../src/types.ts";
-import { validatorGate, type Judge } from "../src/validator.ts";
+import { validatorGate, withFreshReviewerPrecision, type Judge } from "../src/validator.ts";
+import type { ValidationRecord } from "../src/types.ts";
 
 const tmps: string[] = [];
 afterEach(async () => {
@@ -405,6 +406,80 @@ test("SHIP-BLOCKER FIX: re-scoring the SAME (commit,tree,criteria) after the led
 	expect(second.record.reviewerPrecision).toEqual({ lineage: "native", n: 2, survived: 1, survivedRate: 0.5, provisional: true });
 	expect(second.record.reviewerPrecision?.n).not.toBe(first.record.reviewerPrecision?.n);
 	expect(second.record.reviewerPrecision?.survivedRate).not.toBe(first.record.reviewerPrecision?.survivedRate);
+});
+
+// ── SERIOUS new defect (gauntlet round 2, delta-verify) — precision-lineage-mismatch-on-cache-hit:
+// withFreshReviewerPrecision must restamp using the CACHED VERDICT's own judge lineage, never
+// whatever harness happens to be active right now — those can differ across two resolutions of the
+// same cached record (an operator flipping OMP_SQUAD_VALIDATOR_HARNESS, or a foreign judge binary
+// coming or going), and restamping from the wrong lineage would show the approver a precision number
+// for a DIFFERENT reviewer than the one credited with the verdict.
+test("withFreshReviewerPrecision restamps using the CACHED record's OWN reviewerLineage, never the currently active harness", async () => {
+	// Built directly (not via the shared `ledgerRow` helper, which hardcodes lineage "native") — three
+	// codex rows (2 survived) and one native row, with visibly different math, so a lineage mix-up is
+	// unmistakable in the result.
+	const ledgerPath = await tmpLedgerFile([]);
+	await fs.writeFile(
+		ledgerPath,
+		[
+			JSON.stringify({ at: "2026-08-01", lineage: "codex", concernClass: "test-fixture", survived: true, source: "fixture", note: "codex finding one" }),
+			JSON.stringify({ at: "2026-08-01", lineage: "codex", concernClass: "test-fixture", survived: true, source: "fixture", note: "codex finding two" }),
+			JSON.stringify({ at: "2026-08-01", lineage: "codex", concernClass: "test-fixture", survived: false, source: "fixture", note: "codex finding three" }),
+			JSON.stringify({ at: "2026-08-01", lineage: "native", concernClass: "test-fixture", survived: true, source: "fixture", note: "native finding one" }),
+		]
+			.map((l) => `${l}\n`)
+			.join(""),
+	);
+
+	// A verdict that was ACTUALLY judged by the codex (openai-lineage) harness — as if it were cached
+	// from a resolution where OMP_SQUAD_VALIDATOR_HARNESS=codex was active.
+	const cachedAsCodex: ValidationRecord = {
+		verdict: "pass",
+		agreement: 1,
+		confidence: 1,
+		perCriterion: [{ id: "c1", satisfied: true }],
+		rationale: "",
+		model: "codex",
+		reviewerLineage: "openai",
+		authorLineage: "unknown",
+		ranAt: 0,
+	};
+
+	// Simulate the active harness having since changed to something else entirely — restamping must
+	// NOT be swayed by this; the env var isn't even read by withFreshReviewerPrecision at all anymore.
+	const savedHarness = process.env.OMP_SQUAD_VALIDATOR_HARNESS;
+	process.env.OMP_SQUAD_VALIDATOR_HARNESS = "grok";
+	try {
+		const restamped = withFreshReviewerPrecision(cachedAsCodex, ledgerPath);
+		expect(restamped.reviewerPrecision?.lineage).toBe("codex");
+		expect(restamped.reviewerPrecision).toEqual({ lineage: "codex", n: 3, survived: 2, survivedRate: 2 / 3, provisional: true });
+	} finally {
+		if (savedHarness === undefined) delete process.env.OMP_SQUAD_VALIDATOR_HARNESS;
+		else process.env.OMP_SQUAD_VALIDATOR_HARNESS = savedHarness;
+	}
+});
+
+test("withFreshReviewerPrecision restamps as 'native' for an anthropic-judged cached verdict, regardless of active harness", async () => {
+	const ledgerPath = await tmpLedgerFile([ledgerRow(true), ledgerRow(false, "second finding")]);
+	const cachedAsNative: ValidationRecord = {
+		verdict: "pass",
+		agreement: 1,
+		confidence: 1,
+		perCriterion: [],
+		rationale: "",
+		model: "opus",
+		reviewerLineage: "anthropic",
+		ranAt: 0,
+	};
+	const restamped = withFreshReviewerPrecision(cachedAsNative, ledgerPath);
+	expect(restamped.reviewerPrecision).toEqual({ lineage: "native", n: 2, survived: 1, survivedRate: 0.5, provisional: true });
+});
+
+test("withFreshReviewerPrecision leaves skipped/inconclusive verdicts untouched (no reviewer identity to restamp)", () => {
+	const skipped: ValidationRecord = { verdict: "skipped", agreement: 1, confidence: 0, perCriterion: [], rationale: "no declared criteria", ranAt: 0 };
+	expect(withFreshReviewerPrecision(skipped)).toEqual(skipped);
+	const inconclusive: ValidationRecord = { verdict: "inconclusive", agreement: 0, confidence: 0, perCriterion: [], rationale: "git fault", ranAt: 0 };
+	expect(withFreshReviewerPrecision(inconclusive)).toEqual(inconclusive);
 });
 
 // ── HIGH: env-ledger-shadow closed (gauntlet round 1, codex) — there is no environment-variable path

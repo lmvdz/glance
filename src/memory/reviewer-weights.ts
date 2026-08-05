@@ -34,13 +34,20 @@
  * FIFO/device path) is never conflated with an honestly ABSENT ledger (`unreadable` vs a plain `n:0`);
  * a ledger that's PARTIALLY corrupt (some malformed lines) still measures from its valid rows but
  * flags `rejected` on the stamp, and degrades FULLY to unmeasured only once malformed lines are a
- * large FRACTION of the file (a single stray bad line must not zero out real history); near-duplicate
- * rows (same adjudication, differently-worded note/severity) are now deduped on a semantic key, not
- * byte-identity, so a reworded retry can't inflate `n` either. See `reviewerPrecisionFromLedger` and
- * `parseReviewerLedger` below for the specifics.
+ * large FRACTION of the file (a single stray bad line must not zero out real history).
+ *
+ * Round 1's own de-dup fix (keying on `at`+`lineage`+`concernClass`+`source`+`survived`, dropping
+ * `note`/`severity`) was ITSELF a regression, caught in gauntlet round 2 (delta-verify, blind):
+ * measured damage on the real committed ledger was 86 rows → 79, codex n 52 → 45 — four genuinely
+ * DISTINCT PR #311 statistical-honesty findings collapsed into one because they happened to share
+ * that 5-field tuple. The corrected rule (`semanticKey` below): two rows collapse ONLY when they are
+ * identical across EVERY field after whitespace normalization (`note`/`severity` included) — this
+ * still catches a byte-for-byte retried `add` (round 1's original target) and a whitespace-only
+ * variant of the same row, but two rows that merely share date/lineage/class/source/outcome and
+ * differ in their actual finding (`note`) are, correctly, two distinct adjudications and both count.
  */
 
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync, statSync, type BigIntStats } from "node:fs";
 import path from "node:path";
 import { errText } from "../err-text.ts";
 
@@ -66,22 +73,27 @@ export interface ReviewerLedgerEntry {
 /** Below this many adjudicated findings, a lineage's precision is provisional, not a weight. */
 export const MIN_FINDINGS_FOR_WEIGHT = 10;
 
-/** Semantic identity for de-duplication (gauntlet round 1, "near-dup" finding, grok-4.5): `note` and
- *  `severity` are free-form commentary, not what makes two rows "the same adjudication" — a retried
- *  `add` with a slightly reworded note (or a severity added/omitted on the retry) must not inflate a
- *  lineage's `n` any more than a byte-identical retry does. Two rows collapse when they agree on
- *  WHEN, WHO, WHAT CLASS, WHERE, and the OUTCOME (`at`+`lineage`+`concernClass`+`source`+`survived`).
- *  `\0`-joined so a field value containing the literal separator can't forge a collision with a
- *  genuinely different tuple. */
-function semanticKey(e: Pick<ReviewerLedgerEntry, "at" | "lineage" | "concernClass" | "source" | "survived">): string {
-	return [e.at, e.lineage, e.concernClass, e.source, String(e.survived)].join("\0");
+/**
+ * Full-content identity for de-duplication, CORRECTED in gauntlet round 2 (delta-verify): round 1's
+ * key dropped `note`/`severity`, which collapsed genuinely DISTINCT findings that merely happened to
+ * share `at`+`lineage`+`concernClass`+`source`+`survived` — measured damage on the real ledger was
+ * 86→79 rows, codex n 52→45. Every field (INCLUDING `note` and `severity`) must agree, after trimming
+ * incidental whitespace, for two rows to count as the same adjudication — this still catches a
+ * byte-for-byte retried `add` and a whitespace-only variant of the same row (round 1's actual target),
+ * but never merges two rows whose underlying finding differs. `\0`-joined so a field value containing
+ * an ordinary space/newline can't forge a collision with a genuinely different row.
+ */
+function semanticKey(e: Pick<ReviewerLedgerEntry, "at" | "lineage" | "concernClass" | "source" | "survived" | "note" | "severity">): string {
+	return [e.at.trim(), e.lineage.trim(), e.concernClass.trim(), e.source.trim(), String(e.survived), e.note.trim(), e.severity ?? ""].join("\0");
 }
 
 /** Parse the JSONL ledger text. Malformed lines are counted in `rejected`, never guessed at;
- *  semantically-identical duplicate rows (same `at`+`lineage`+`concernClass`+`source`+`survived` —
- *  see `semanticKey`) are counted in `duplicates` and kept once — a retried `add` command, even one
- *  whose note/severity was reworded, must not inflate a lineage's precision or clear its provisional
- *  floor (adversarial-review finding, sharpened by gauntlet round 1). */
+ *  fully-identical-after-normalization duplicate rows (see `semanticKey` — EVERY field, `note`/
+ *  `severity` included, whitespace-trimmed) are counted in `duplicates` and kept once — a retried
+ *  `add` command must not inflate a lineage's precision or clear its provisional floor, but two rows
+ *  that differ in their actual finding are always both counted, however similar their other fields
+ *  (adversarial-review finding; corrected in gauntlet round 2 after round 1's coarser key regressed
+ *  this — see the module doc above). */
 export function parseReviewerLedger(text: string): { entries: ReviewerLedgerEntry[]; rejected: number; duplicates: number } {
 	const entries: ReviewerLedgerEntry[] = [];
 	const seen = new Set<string>();
@@ -107,7 +119,8 @@ export function parseReviewerLedger(text: string): { entries: ReviewerLedgerEntr
 				typeof raw.source === "string" &&
 				typeof raw.note === "string"
 			) {
-				const key = semanticKey({ at: raw.at, lineage: raw.lineage, concernClass: raw.concernClass, source: raw.source, survived: raw.survived });
+				const severity = raw.severity === "high" || raw.severity === "medium" || raw.severity === "low" ? raw.severity : undefined;
+				const key = semanticKey({ at: raw.at, lineage: raw.lineage, concernClass: raw.concernClass, source: raw.source, survived: raw.survived, note: raw.note, severity });
 				if (seen.has(key)) {
 					duplicates++;
 					continue;
@@ -120,7 +133,7 @@ export function parseReviewerLedger(text: string): { entries: ReviewerLedgerEntr
 					survived: raw.survived,
 					source: raw.source,
 					note: raw.note,
-					...(raw.severity === "high" || raw.severity === "medium" || raw.severity === "low" ? { severity: raw.severity } : {}),
+					...(severity ? { severity } : {}),
 				});
 			} else {
 				rejected++;
@@ -248,12 +261,50 @@ export function reviewerPrecisionFor(entries: ReviewerLedgerEntry[], lineage: st
 	};
 }
 
-/** `rejected` lines at/above this FRACTION of the ledger's total lines (valid + duplicate + rejected)
- *  means the surviving rows can no longer be trusted to represent the true picture — degrade fully to
- *  unmeasured rather than confidently reporting a number computed from a shrinking, unrepresentative
- *  subset (gauntlet round 1, codex's "partial-corrupt ledger", adjudicated: NOT a blanket zero-on-any-
- *  corruption rule, which would make the whole feature flap on every ordinary mid-append race). */
+/** `rejected` lines AT OR PAST this FRACTION of the ledger's total lines (valid + duplicate +
+ *  rejected) means the surviving rows can no longer be trusted to represent the true picture —
+ *  degrade fully to unmeasured rather than confidently reporting a number computed from a shrinking,
+ *  unrepresentative subset (gauntlet round 1, codex's "partial-corrupt ledger", adjudicated: NOT a
+ *  blanket zero-on-any-corruption rule, which would make the whole feature flap on every ordinary
+ *  mid-append race). `>=` is deliberate, not `>` (gauntlet round 2, delta-verify, finding 4): AT
+ *  exactly the threshold the surviving half is no more trustworthy than the rejected half, so
+ *  degrading is the SAFER read — the boundary sits ON the unmeasured side, not off it. */
 const CORRUPT_REJECTED_FRACTION = 0.5;
+
+interface ParsedLedgerCacheEntry {
+	mtimeNs: bigint;
+	size: bigint;
+	parsed: { entries: ReviewerLedgerEntry[]; rejected: number; duplicates: number };
+}
+
+/**
+ * Module-level cache of the last successfully parsed ledger PER PATH, invalidated on (mtimeNs, size)
+ * — gauntlet round 2 (delta-verify), "hot-path-full-ledger-reread": every non-skipped land resolution
+ * calls this reader, and a full `readFileSync` + re-parse of the WHOLE ledger on every call — even
+ * when nothing changed since the last read — is an unbounded, event-loop-blocking cost as the ledger
+ * grows; two cache hits in a row meant two full re-reads. `statSync` still runs on every call (cheap,
+ * no full read), so the FRESHNESS invariant is unchanged: an append changes the file's mtime and size,
+ * which busts this cache and forces a real re-read on the very next call. Combining mtimeNs (bigint,
+ * nanosecond-resolution where the filesystem supports it) WITH size means even a same-nanosecond-tick
+ * append (a real risk in a fast test loop) still invalidates correctly, since appending necessarily
+ * changes the byte count too.
+ */
+const parsedLedgerCache = new Map<string, ParsedLedgerCacheEntry>();
+
+// Test-only instrumentation: counts actual `readFileSync`+parse calls (cache MISSES only), so a test
+// can assert the mtime/size cache is doing its job without reaching into fs internals. Never read by
+// production code.
+let readCountForTests = 0;
+/** @substrate exported for tests only — no production caller needs the raw miss count. */
+export function reviewerLedgerReadCountForTests(): number {
+	return readCountForTests;
+}
+/** Resets the miss counter AND clears the parsed-ledger cache, so tests don't leak state into each
+ *  other via the shared module-level cache. @substrate exported for tests only. */
+export function resetReviewerLedgerCacheForTests(): void {
+	readCountForTests = 0;
+	parsedLedgerCache.clear();
+}
 
 /**
  * Read + parse the ledger file. Never throws — every failure mode degrades to an honest stamp instead
@@ -265,23 +316,36 @@ const CORRUPT_REJECTED_FRACTION = 0.5;
  *    synchronous land-path read (gauntlet round 1, codex's "env ledger-shadow" finding).
  *  - any OTHER read fault (permission denied, I/O error) ⇒ `unreadable` set, distinct from an absent
  *    file (gauntlet round 1, grok's "read-error == no-history" finding).
+ *  - otherwise: a cheap `statSync` decides whether the parsed-ledger cache is still valid (gauntlet
+ *    round 2's cache, above) before paying for a full read + re-parse.
  * `ledgerPath` defaults to the repo-committed ledger; tests pass a fixture path directly (dependency
  * injection — there is deliberately no environment-variable override reachable from production, so a
  * launch-directory `.env` can never redirect this read; see `src/validator.ts`'s `ValidatorGateOpts.reviewerLedgerPath`).
  */
 export function readReviewerLedgerEntries(ledgerPath: string = DEFAULT_REVIEWER_LEDGER_PATH): { entries: ReviewerLedgerEntry[]; rejected: number; duplicates: number; unreadable?: string } {
-	let stat: ReturnType<typeof statSync>;
+	let stat: BigIntStats;
 	try {
-		stat = statSync(ledgerPath);
+		stat = statSync(ledgerPath, { bigint: true });
 	} catch (err) {
-		if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return { entries: [], rejected: 0, duplicates: 0 };
+		if ((err as NodeJS.ErrnoException)?.code === "ENOENT") {
+			parsedLedgerCache.delete(ledgerPath); // a previously-cached path can genuinely disappear
+			return { entries: [], rejected: 0, duplicates: 0 };
+		}
 		return { entries: [], rejected: 0, duplicates: 0, unreadable: errText(err) };
 	}
 	if (!stat.isFile()) {
+		parsedLedgerCache.delete(ledgerPath); // a previously-valid path can become a non-regular file
 		return { entries: [], rejected: 0, duplicates: 0, unreadable: `not a regular file: ${ledgerPath}` };
 	}
+	const cached = parsedLedgerCache.get(ledgerPath);
+	if (cached && cached.mtimeNs === stat.mtimeNs && cached.size === stat.size) {
+		return cached.parsed;
+	}
 	try {
-		return parseReviewerLedger(readFileSync(ledgerPath, "utf8"));
+		readCountForTests++;
+		const parsed = parseReviewerLedger(readFileSync(ledgerPath, "utf8"));
+		parsedLedgerCache.set(ledgerPath, { mtimeNs: stat.mtimeNs, size: stat.size, parsed });
+		return parsed;
 	} catch (err) {
 		return { entries: [], rejected: 0, duplicates: 0, unreadable: errText(err) };
 	}

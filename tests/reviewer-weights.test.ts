@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -8,6 +9,8 @@ import {
 	readReviewerLedgerEntries,
 	renderReviewerPrecision,
 	renderReviewerReport,
+	resetReviewerLedgerCacheForTests,
+	reviewerLedgerReadCountForTests,
 	reviewerPrecision,
 	reviewerPrecisionFor,
 	reviewerPrecisionFromLedger,
@@ -26,8 +29,6 @@ const row = (over: Partial<ReviewerLedgerEntry> = {}): ReviewerLedgerEntry => ({
 
 describe("parseReviewerLedger", () => {
 	test("parses well-formed rows and counts malformed lines instead of guessing", () => {
-		// Distinct `source`s: at+lineage+concernClass+source+survived is the SEMANTIC identity now
-		// (gauntlet round 1) — two rows must differ in one of those five fields to both count.
 		const text = [JSON.stringify(row()), "", "{not json", JSON.stringify({ at: "2026-08-03", lineage: "codex" }), JSON.stringify(row({ source: "PR #1000", severity: "high" }))].join("\n");
 		const { entries, rejected } = parseReviewerLedger(text);
 		expect(entries.length).toBe(2);
@@ -47,21 +48,51 @@ describe("parseReviewerLedger", () => {
 		expect(duplicates).toBe(9);
 	});
 
-	test("NEAR-DUP (gauntlet round 1, grok finding): rows sharing at+lineage+concernClass+source+survived collapse even when note/severity differ — a REWORDED retry must not inflate n", () => {
-		const text = [JSON.stringify(row({ note: "original wording" })), JSON.stringify(row({ note: "reworded on a retry", severity: "high" }))].join("\n");
+	// ── gauntlet round 2 (delta-verify): round 1's dedup key regressed real data — 86 ledger rows
+	// collapsed to 79, codex n 52→45, by merging genuinely distinct findings that happened to share
+	// at+lineage+concernClass+source+survived. Corrected: only rows identical across EVERY field
+	// (note/severity included, whitespace-normalized) collapse.
+
+	test("REGRESSION FIX (gauntlet round 2): two rows sharing at+lineage+concernClass+source+survived but with DIFFERENT notes are genuinely distinct findings — BOTH must count", () => {
+		const text = [JSON.stringify(row({ note: "the reviewer flagged issue A" })), JSON.stringify(row({ note: "the reviewer flagged a DIFFERENT issue B" }))].join("\n");
+		const { entries, duplicates } = parseReviewerLedger(text);
+		expect(entries.length).toBe(2);
+		expect(duplicates).toBe(0);
+		expect(entries.map((e) => e.note)).toEqual(["the reviewer flagged issue A", "the reviewer flagged a DIFFERENT issue B"]);
+	});
+
+	test("two rows sharing every field but differing in severity are genuinely distinct — severity is part of the finding, not commentary to ignore", () => {
+		const text = [JSON.stringify(row({ severity: "low" })), JSON.stringify(row({ severity: "high" }))].join("\n");
+		const { entries, duplicates } = parseReviewerLedger(text);
+		expect(entries.length).toBe(2);
+		expect(duplicates).toBe(0);
+	});
+
+	test("a row that is identical to another after trimming incidental whitespace (the true accidental-re-append case) still collapses to one", () => {
+		const text = [JSON.stringify(row({ note: "finding" })), JSON.stringify(row({ note: "  finding  " }))].join("\n");
 		const { entries, duplicates } = parseReviewerLedger(text);
 		expect(entries.length).toBe(1);
 		expect(duplicates).toBe(1);
-		// First occurrence wins — its own note/severity are what survive, not the retry's.
-		expect(entries[0]!.note).toBe("original wording");
-		expect(entries[0]!.severity).toBeUndefined();
 	});
 
-	test("rows that differ in ANY of the five identity fields (at/lineage/concernClass/source/survived) are genuinely distinct, note aside", () => {
+	test("rows that differ in ANY of the five tuple fields (at/lineage/concernClass/source/survived) are genuinely distinct", () => {
 		const text = [JSON.stringify(row({ survived: true })), JSON.stringify(row({ survived: false }))].join("\n");
 		const { entries, duplicates } = parseReviewerLedger(text);
 		expect(entries.length).toBe(2);
 		expect(duplicates).toBe(0);
+	});
+
+	test("REGRESSION FIX (gauntlet round 2): re-parsing the REAL committed ledger's pre-fix content returns codex n to 52", () => {
+		// A frozen, verbatim snapshot of plans/.reviews/reviewer-ledger.jsonl taken BEFORE this round's
+		// own campaign-bookkeeping rows were appended (tests/fixtures/reviewer-ledger-round2-regression-
+		// snapshot.jsonl) — reading the LIVE ledger here would make this assertion drift every time a
+		// legitimate future `add` grows the real file, which is not what this regression test is for.
+		// Measured damage under round 1's broken key: 86 rows parsed to 79 entries, codex 52→45.
+		const fixture = readFileSync(path.join(import.meta.dir, "fixtures", "reviewer-ledger-round2-regression-snapshot.jsonl"), "utf8");
+		const { entries } = parseReviewerLedger(fixture);
+		expect(entries.length).toBe(86); // no rows lost — round 1's over-collapse is fully undone
+		const codexRows = entries.filter((e) => e.lineage === "codex");
+		expect(codexRows.length).toBe(52);
 	});
 });
 
@@ -241,6 +272,70 @@ describe("readReviewerLedgerEntries + reviewerPrecisionFromLedger (file boundary
 		const result = readReviewerLedgerEntries(dir);
 		expect(result.entries).toEqual([]);
 		expect(result.unreadable).toBeDefined();
+	});
+});
+
+// ── gauntlet round 2 (delta-verify), "hot-path-full-ledger-reread": every non-skipped land resolution
+// reads the ledger; without a cache, two cache-hit lands in a row meant two full readFileSync+parse
+// passes over the whole file — an unbounded, event-loop-blocking cost as the ledger grows. The fix
+// caches the parsed ledger per path, invalidated on (mtimeNs, size) — statSync still runs every call
+// (cheap), so an append is still picked up on the VERY NEXT read (the freshness invariant is preserved).
+
+describe("readReviewerLedgerEntries: mtime/size parsed-ledger cache", () => {
+	const tmps: string[] = [];
+	beforeEach(() => resetReviewerLedgerCacheForTests());
+	afterEach(async () => {
+		for (const d of tmps.splice(0)) await fs.rm(d, { recursive: true, force: true }).catch(() => {});
+	});
+	async function tmpLedger(lines: string[]): Promise<string> {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "reviewer-ledger-cache-"));
+		tmps.push(dir);
+		const file = path.join(dir, "reviewer-ledger.jsonl");
+		await fs.writeFile(file, lines.map((l) => `${l}\n`).join(""));
+		return file;
+	}
+
+	test("two resolutions of an UNCHANGED ledger perform exactly ONE real read+parse", async () => {
+		const file = await tmpLedger([JSON.stringify(row({ source: "PR #1" }))]);
+		readReviewerLedgerEntries(file);
+		readReviewerLedgerEntries(file);
+		readReviewerLedgerEntries(file);
+		expect(reviewerLedgerReadCountForTests()).toBe(1);
+	});
+
+	test("appending a row causes the NEXT resolution to re-read — the freshness invariant survives the cache", async () => {
+		const file = await tmpLedger([JSON.stringify(row({ source: "PR #1" }))]);
+		readReviewerLedgerEntries(file);
+		expect(reviewerLedgerReadCountForTests()).toBe(1);
+
+		await fs.appendFile(file, `${JSON.stringify(row({ survived: false, source: "PR #2" }))}\n`);
+		const afterAppend = readReviewerLedgerEntries(file);
+
+		expect(reviewerLedgerReadCountForTests()).toBe(2);
+		expect(afterAppend.entries.length).toBe(2);
+	});
+
+	test("FLIP THE INPUT still holds through the cache: reviewerPrecisionFromLedger's number moves after an append, and does not re-read for a repeated identical call in between", async () => {
+		const file = await tmpLedger([JSON.stringify(row({ source: "PR #1" }))]);
+		const before = reviewerPrecisionFromLedger("grok", file);
+		const beforeAgain = reviewerPrecisionFromLedger("grok", file); // cache hit — no new read
+		expect(before.n).toBe(1);
+		expect(beforeAgain.n).toBe(1);
+		expect(reviewerLedgerReadCountForTests()).toBe(1);
+
+		await fs.appendFile(file, `${JSON.stringify(row({ survived: false, source: "PR #2" }))}\n`);
+		const after = reviewerPrecisionFromLedger("grok", file);
+
+		expect(after.n).toBe(2);
+		expect(reviewerLedgerReadCountForTests()).toBe(2);
+	});
+
+	test("a MISSING or non-regular-file path never counts as a real read (statSync-only paths are free)", async () => {
+		readReviewerLedgerEntries("/nonexistent/path/reviewer-ledger.jsonl");
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "reviewer-ledger-cache-notafile-"));
+		tmps.push(dir);
+		readReviewerLedgerEntries(dir);
+		expect(reviewerLedgerReadCountForTests()).toBe(0);
 	});
 });
 
