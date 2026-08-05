@@ -10,6 +10,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { appendReceipt, confirmDeliveredFlags, ingest, readAllReceipts, readReceipts, receiptPath, RunAccumulator, splitCapabilityTokens, unitEfficiencyFlags } from "../src/receipts.ts";
 import type { RunReceipt } from "../src/types.ts";
+import { readCostAggregateDoc } from "../src/cost-aggregate.ts";
 
 const tmps: string[] = [];
 
@@ -102,6 +103,55 @@ test("readReceipts tolerates a crash-torn tail line instead of throwing", async 
 
 	const all = await readAllReceipts(baseDir);
 	expect(all.length).toBe(1);
+});
+
+/**
+ * ticket #336 gauntlet finding 3 (grok, HIGH): a receipt whose cost is UNKNOWN (unverified-usage
+ * harness, e.g. codex — usage_update confirmed absent on every live smoke turn) must never feed a
+ * fabricated `costUsd ?? 0` into the lane-keyed cost-aggregate cache (`cost-aggregate.ts`, read at
+ * `receipts.ts`'s `appendReceipt`). Before this fix, EVERY receipt unconditionally called
+ * `recordCostAttempt`, so an unattributed run silently degraded that (model, tier, lane) cell's
+ * `costPerLandedChange` toward zero — the same "renders as free" defect scoreboard/token-burn had.
+ */
+test("appendReceipt skips recordCostAttempt for a costUnknown receipt — never feeds a fabricated $0 into the cost-aggregate cache", async () => {
+	const baseDir = await fs.mkdtemp(path.join(os.tmpdir(), "receipts-"));
+	tmps.push(baseDir);
+
+	const acc = new RunAccumulator({ agentId: "ag-unknown", name: "zeta", repo: "/repo", model: "gpt-5.6-sol[high]" });
+	feed(acc, [{ type: "agent_start" }, { type: "agent_end" }]);
+	acc.finish("idle", []);
+	const receipt = acc.snapshot();
+	expect(receipt.costUsd).toBeUndefined(); // no usage ever ingested — the case this fix covers
+	receipt.costUnknown = true; // stamped by squad-manager.ts's finalizeRun in production; set directly here
+
+	await appendReceipt(baseDir, receipt);
+
+	// The receipt itself still lands on disk (durable JSONL is unconditional)...
+	const back = await readReceipts(baseDir, "ag-unknown");
+	expect(back).toHaveLength(1);
+	expect(back[0].costUnknown).toBe(true);
+	// ...but the cost-aggregate cache never saw an attempt for it — no cell was created at all.
+	const doc = readCostAggregateDoc(baseDir);
+	expect(Object.keys(doc.cells)).toEqual([]);
+});
+
+/** The counterpart: a receipt with a KNOWN cost (costUnknown absent/false) still records normally —
+ *  this fix must not accidentally suppress attribution for the common, honest case. */
+test("appendReceipt still records a known-cost receipt into the cost-aggregate cache", async () => {
+	const baseDir = await fs.mkdtemp(path.join(os.tmpdir(), "receipts-"));
+	tmps.push(baseDir);
+
+	const acc = new RunAccumulator({ agentId: "ag-known", name: "eta", repo: "/repo", model: "claude-sonnet-5" });
+	feed(acc, [{ type: "agent_start" }, { type: "message_end", message: { role: "assistant", usage } }, { type: "agent_end" }]);
+	acc.finish("idle", []);
+	const receipt = acc.snapshot();
+	expect(receipt.costUsd).toBeCloseTo(0.0021, 10);
+	expect(receipt.costUnknown).toBeUndefined();
+
+	await appendReceipt(baseDir, receipt);
+
+	const doc = readCostAggregateDoc(baseDir);
+	expect(Object.keys(doc.cells).length).toBeGreaterThan(0);
 });
 
 test("readReceipts returns [] for an unknown agent", async () => {

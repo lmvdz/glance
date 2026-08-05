@@ -445,26 +445,39 @@ registerHarness({
  * HOME — HOME survives `scrubbedSpawnEnv`'s keep-list, the identical pattern claude-code's
  * ~/.claude relies on; no OPENAI_API_KEY needed or present on this host).
  *
- * REPRODUCED live (twice, independently) and FIXED, not just noted: codex-acp's own CLI parses
- * exactly THREE argv forms (`--version`, `login`, `cli`) and silently ignores everything else,
- * including the trailing `--model <m>` `resolveAcpCommand`'s default `acpModelArgv` appends for
- * every ACP harness. Spawned with `--model gpt-9999-does-not-exist` (a model that doesn't exist —
- * would have errored if the flag were read at all), `session/new`'s `currentModelId` still came back
- * as the account's own config default (`gpt-5.6-sol[high]`) both times — a SILENT drop, worse than
- * the grok acpModelArgv defect (that one at least errored loudly; this one leaves no signal anywhere
- * in the wire protocol that the pin never took). codex-acp does expose a working model channel: an
- * extension method literally named `session/set_model` (`{sessionId, modelId}`, where `modelId` must
- * be the adapter's own bracket-suffixed `"<model>[<effort>]"` form). `AcpAgentDriver.applyModelPin`
- * (added for this ticket) now calls it best-effort after every `session/new`, the same fallback
- * contract `applyApprovalMode` already uses for `session/set_mode` — live-reconfirmed with a THIRD
- * session pinning `gpt-5.4[low]` (`modelpin` event fired `{ok:true}`), and pinned as a regression test
- * (tests/acp-agent-driver.test.ts, a codex-shaped fake) since the real defect was silent, not a crash,
- * and would otherwise regress invisibly.
+ * REPRODUCED live (twice, independently): codex-acp's own CLI parses exactly THREE argv forms
+ * (`--version`, `login`, `cli`) and silently ignores everything else, including the trailing
+ * `--model <m>` `resolveAcpCommand`'s default `acpModelArgv` appends for every ACP harness. Spawned
+ * with `--model gpt-9999-does-not-exist` (a model that doesn't exist — would have errored if the flag
+ * were read at all), `session/new`'s `currentModelId` still came back as the account's own config
+ * default (`gpt-5.6-sol[high]`) both times — a SILENT drop, worse than the grok acpModelArgv defect
+ * (that one at least errored loudly; this one leaves no signal anywhere in the wire protocol that the
+ * pin never took). codex-acp does expose a model channel beyond argv: an extension method literally
+ * named `session/set_model` (`{sessionId, modelId}`, where `modelId` must be the adapter's own
+ * bracket-suffixed `"<model>[<effort>]"` form).
+ *
+ * `AcpAgentDriver.applyModelPin` (added for this ticket, round 1 gauntlet, grok findings 1/4) calls it
+ * best-effort after every `session/new` — the same fallback contract `applyApprovalMode` already uses
+ * for `session/set_mode`. IMPORTANT, softened from an earlier draft that overclaimed "fixed": this does
+ * NOT guarantee the requested model runs — it can still fail (unsupported extension, a model name
+ * codex doesn't recognize). What it actually buys is HONESTY: `confirmedModel` is verified and recorded
+ * either way — the session's ACTUAL model on a pin failure, the confirmed-pinned one on success — and
+ * the manager (`squad-manager.ts`'s `wire()`) corrects `rec.dto.model`/`RunReceipt.model` off it before
+ * any receipt is stamped, so a codex-class silent drop can never leave a receipt claiming a model the
+ * session didn't confirm. Live-reconfirmed with a THIRD session pinning `gpt-5.4[low]` (`modelpin`
+ * event fired `{ok:true}`, `confirmedModel` read back as the pinned string) and a FOURTH re-smoke
+ * pinning `gpt-5.4[medium]` after the gauntlet fix landed — both agree — and pinned as regression tests
+ * (tests/acp-agent-driver.test.ts, a codex-shaped fake covering success/no-request/pin-failure) since
+ * the real defect was silent, not a crash, and would otherwise regress invisibly.
  *
  * `usageVerified` is deliberately NOT set: `message_end`'s `usage` came back `{}` on all three live
  * turns above — codex-acp never emitted a `usage_update` notification during any of them. This is a
- * CONFIRMED gap (not merely "untested" like the other ACP descriptors' default) — every real codex
- * unit's usage/cost dashboards are stamped 0 tokens until that's fixed.
+ * CONFIRMED gap (not merely "untested" like the other ACP descriptors' default). Round-1 gauntlet
+ * finding 3 (grok, HIGH): an absent `usageVerified` used to still let `costUsd ?? 0` render a codex
+ * unit as literally FREE across every cost aggregate (receipts, `attribution-scoreboard.ts`,
+ * `token-burn.ts`) — fixed by stamping `RunReceipt.costUnknown` (squad-manager.ts's `finalizeRun`) for
+ * exactly this case, which the aggregates now exclude from cost sums and tally separately instead of
+ * fabricating a zero.
  */
 registerHarness({
 	name: "codex",
@@ -473,7 +486,7 @@ registerHarness({
 	acpCommand: ["npx", "-y", "@agentclientprotocol/codex-acp"],
 	capabilities: ACP_CAPS,
 	verified: true,
-	note: "third-party ACP adapter bundling its own @openai/codex (pin a version — it can drift from the operator's system codex CLI); initialize/session/new/session/prompt live-verified end-to-end (real commits in a scratch repo); --model argv is silently ignored by the adapter's CLI (fixed via a session/set_model pin, see AcpAgentDriver.applyModelPin) — usage_update is CONFIRMED absent (usageVerified stays unset, not just untested)",
+	note: "third-party ACP adapter bundling its own @openai/codex (pin a version — it can drift from the operator's system codex CLI); initialize/session/new/session/prompt live-verified end-to-end (real commits in a scratch repo); --model argv is silently ignored by the adapter's CLI — AcpAgentDriver.applyModelPin verifies+records the actual model (best-effort, not a guarantee) so the receipt is never a claim the session didn't confirm — usage_update is CONFIRMED absent (usageVerified stays unset, not just untested; costUsd is stamped costUnknown, never a fabricated $0)",
 });
 
 /**

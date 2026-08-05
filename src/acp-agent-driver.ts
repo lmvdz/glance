@@ -199,6 +199,19 @@ export class AcpAgentDriver extends EventEmitter implements AgentDriver {
 	 *  the manager's per-harness roster query the way RpcAgent does, instead of ACP harnesses being
 	 *  silently absent from `manager.modelOptions()` even WITH a live agent connected. */
 	private availableModels?: unknown[];
+	/**
+	 * The model the session ACTUALLY reports running — never assumed from `opts.model`. Captured from
+	 * `session/new`'s `models.currentModelId` at handshake (the account/config default, since ACP's
+	 * model-selection channel is per-adapter — see `applyModelPin`), then corrected to `opts.model` ONLY
+	 * on a CONFIRMED `session/set_model` success. Never set to a requested model that wasn't confirmed.
+	 *
+	 * Ticket #336 gauntlet finding 1 (grok, HIGH): `applyModelPin` is best-effort/non-fatal, so a PIN
+	 * FAILURE (codex-acp's argv `--model` is silently ignored; `session/set_model` can also reject) used
+	 * to leave `RunReceipt.model`/`dto.model` claiming the REQUESTED model while the session ran on its
+	 * own default — a receipt lie. `confirmedModel` is the one place that knows the true answer; the
+	 * manager (`squad-manager.ts`'s `wire()`) reads it off `ready` and corrects `rec.dto.model` before any
+	 * receipt is stamped. */
+	private actualModel?: string;
 	private ready = false;
 	private exited = false;
 	private detaching = false;
@@ -251,6 +264,11 @@ export class AcpAgentDriver extends EventEmitter implements AgentDriver {
 	get spawnedCommand(): string[] | undefined {
 		return this.launched;
 	}
+	/** The model the session CONFIRMED it is actually running — see `actualModel`'s doc comment.
+	 *  Undefined until `start()`'s `session/new` resolves (or if the adapter reported no model at all). */
+	get confirmedModel(): string | undefined {
+		return this.actualModel;
+	}
 
 	private get turnSilenceMs(): number {
 		return this.opts.turnSilenceMs ?? 60_000;
@@ -297,6 +315,12 @@ export class AcpAgentDriver extends EventEmitter implements AgentDriver {
 		this.sessionId = isObj(sess) ? asString(sess.sessionId) : undefined;
 		const models = isObj(sess) && isObj(sess.models) ? sess.models.availableModels : undefined;
 		if (Array.isArray(models)) this.availableModels = models;
+		// The account/config default the session ACTUALLY started with — ticket #336's ground truth for
+		// `confirmedModel` before any pin is attempted. Read from wherever the adapter puts it (codex-acp:
+		// nested under `models.currentModelId`; other adapters may answer at the top level, or not at
+		// all — absence here just means `confirmedModel` stays undefined until/unless a pin succeeds).
+		const reportedModelId = isObj(sess) && isObj(sess.models) ? asString(sess.models.currentModelId) : isObj(sess) ? asString(sess.currentModelId) : undefined;
+		if (reportedModelId) this.actualModel = reportedModelId;
 		// Best-effort approval mode: ACP's set-mode is `unstable_`, so map yolo → an advertised auto-approve
 		// mode when one exists, and fall back silently to the per-call session/request_permission round-trip
 		// otherwise. Never fatal.
@@ -330,17 +354,30 @@ export class AcpAgentDriver extends EventEmitter implements AgentDriver {
 	 * argv pin already worked; only a bare (non-bracketed) model string on codex still falls through
 	 * silently (`ModelId.fromString` requires the `[effort]` suffix and throws otherwise) — pin the
 	 * exact string codex's own catalog advertises to get a live pin.
+	 *
+	 * IMPORTANT (ticket #336 gauntlet, round 1, grok finding 4 — softened from an earlier draft that
+	 * overclaimed): this method does NOT "fix" the ignored-argv problem in the sense of guaranteeing the
+	 * requested model runs. It is still best-effort and can still fail (unsupported extension, malformed
+	 * modelId, a model name codex doesn't recognize). What it actually buys is HONESTY: it verifies and
+	 * records the model the session is ACTUALLY running (`confirmedModel`), succeed or fail, so the
+	 * receipt this run stamps is never a claim the session didn't confirm. Whether the requested model
+	 * ends up running is a best-effort side effect, not the guarantee.
 	 */
 	private async applyModelPin(): Promise<void> {
 		if (!this.opts.model || !this.sessionId) return;
 		try {
 			await this.send("session/set_model", { sessionId: this.sessionId, modelId: this.opts.model }, 10_000);
+			// CONFIRMED: a clean (non-error) response means codex-acp's own `unstable_setSessionModel`
+			// handler validated the model/effort and mutated the running session's state before
+			// returning — see the module doc's live-verify note. Safe to record as the actual model.
+			this.actualModel = this.opts.model;
 			this.emit("modelpin", { ok: true, model: this.opts.model });
 		} catch (err) {
 			// unstable extension — unsupported (or non-compliant-string) adapters keep whatever --model
-			// argv (or their own config default) already gave them. Surfaced (not swallowed silently) so
-			// an operator who pinned a model that silently didn't take can tell — the exact gap this
-			// method exists to close.
+			// argv (or their own config default) already gave them, which is exactly what `actualModel`
+			// already holds from `session/new`'s `currentModelId` — left untouched here, never
+			// overwritten with the unconfirmed request (ticket #336 gauntlet finding 1: a pin failure
+			// must never leave the recorded model claiming something the session didn't confirm).
 			this.emit("modelpin", { ok: false, model: this.opts.model, error: errText(err) });
 		}
 	}

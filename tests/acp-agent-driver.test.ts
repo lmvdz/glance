@@ -596,7 +596,9 @@ process.stdin.on("data", (ch) => {
         send({ jsonrpc: "2.0", id, result: { protocolVersion: 1, agentCapabilities: {} } });
         break;
       case "session/new":
-        send({ jsonrpc: "2.0", id, result: { sessionId: "s1" } });
+        // Reports a real account/config default — the SAME shape codex-acp itself returns — so the test
+        // can prove a pin failure records THIS, never the unconfirmed requested model.
+        send({ jsonrpc: "2.0", id, result: { sessionId: "s1", models: { currentModelId: "fake-default[medium]" } } });
         break;
       case "session/set_model":
         send({ jsonrpc: "2.0", id, error: { code: -32601, message: "method not found" } });
@@ -632,12 +634,19 @@ test("codex-class defect, reproduced+fixed: a `--model` argv pin that a codex-li
 	// proof this is a REAL second channel, not merely restating whatever the (silently-ignored) argv said.
 	const check = await driver.send<{ currentModel: string }>("test/current_model", {}, 5_000);
 	expect(check.currentModel).toBe("fake-fast[low]");
+
+	// ticket #336 gauntlet finding 1 (grok, HIGH): on a CONFIRMED pin, confirmedModel — what the manager
+	// reads to correct rec.dto.model/RunReceipt.model — must equal the actual (now-pinned) model.
+	expect(driver.confirmedModel).toBe("fake-fast[low]");
 });
 
 test("no model requested → session/set_model is never called (guard clause, not just a lucky no-op)", async () => {
 	const { driver, modelpins } = await codexLikeDriver(FAKE_ACP_CODEX_LIKE, undefined);
 	await driver.start(30_000);
 	expect(modelpins).toEqual([]);
+	// No pin was ever attempted — confirmedModel is whatever session/new reported as the account default,
+	// never a fabricated pin that didn't happen.
+	expect(driver.confirmedModel).toBe("fake-default[medium]");
 });
 
 test("an adapter with no session/set_model extension degrades exactly like applyApprovalMode: start() still resolves, modelpin reports ok:false, never fatal", async () => {
@@ -645,4 +654,10 @@ test("an adapter with no session/set_model extension degrades exactly like apply
 	await expect(driver.start(30_000)).resolves.toBeUndefined();
 	expect(driver.isReady).toBe(true);
 	expect(modelpins).toEqual([{ ok: false, model: "fake-fast[low]", error: expect.stringContaining("method not found") }]);
+
+	// ticket #336 gauntlet finding 1 (grok, HIGH) — the core of the fix: on a pin FAILURE, confirmedModel
+	// must be the session's ACTUAL reported model ("fake-default[medium]"), never the requested-but-
+	// unconfirmed "fake-fast[low]" — a receipt built from the unconfirmed model would be a receipt lie.
+	expect(driver.confirmedModel).toBe("fake-default[medium]");
+	expect(driver.confirmedModel).not.toBe("fake-fast[low]");
 });

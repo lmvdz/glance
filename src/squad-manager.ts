@@ -25,7 +25,7 @@ import { FlueServiceDriver } from "./flue-service-driver.ts";
 import { type BranchSpec, deriveBranchAgentId, WorkflowDriver, type WorkflowFleet } from "./workflow-driver.ts";
 import { SandboxAgentDriver } from "./sandbox-agent-driver.ts";
 import { AcpAgentDriver } from "./acp-agent-driver.ts";
-import { contextReachesAgent, type HarnessDescriptor, hasSecondVerifiedProviderLane, resolveAcpCommand, resolveBin, resolveHarness, resolveHarnessName, unverifiedHarnessesEnabled } from "./harness-registry.ts";
+import { contextReachesAgent, getHarness, type HarnessDescriptor, hasSecondVerifiedProviderLane, resolveAcpCommand, resolveBin, resolveHarness, resolveHarnessName, unverifiedHarnessesEnabled } from "./harness-registry.ts";
 import { resolveProvider } from "./model-lineage.ts";
 import { type Architect, OmpArchitect } from "./architect.ts";
 import { validateWorker } from "./validate.ts";
@@ -8848,6 +8848,26 @@ export class SquadManager extends EventEmitter {
 		a.on("ready", () => {
 			this.refreshCommands(rec);
 			this.registerHostTools(rec);
+			// ACP model-receipt honesty (ticket #336 gauntlet finding 1, grok HIGH): duck-typed on
+			// `confirmedModel` — only AcpAgentDriver has it (mirrors the `spawnedCommand` duck-type
+			// above). This is the session's ACTUAL model (session/new's reported default, corrected to
+			// the requested model only on a CONFIRMED `session/set_model` success) — never the merely
+			// REQUESTED one a pin failure would otherwise leave stamped on the receipt. Runs before any
+			// frame ("agent_start" et al.) can seed `rec.run` off `rec.dto.model` (finalizeRun's
+			// `RunAccumulator.start` reads `rec.dto.model` fresh on every turn), so the correction is
+			// always in place before a receipt is ever built.
+			const d = rec.agent as Partial<{ confirmedModel: string }>;
+			if (typeof d.confirmedModel === "string" && d.confirmedModel !== rec.dto.model) {
+				this.log("info", `${rec.dto.name}: ACP session confirmed model "${d.confirmedModel}" (requested "${rec.dto.model ?? "(harness default)"}")`);
+				rec.dto.model = d.confirmedModel;
+			}
+		});
+		// The pin's own success/failure signal (acp-agent-driver.ts's `applyModelPin`) — a real consumer
+		// so a silently-dropped `--model` argv (the codex-acp defect ticket #336 found) is at least
+		// logged, not just corrected invisibly via `confirmedModel` above.
+		a.on("modelpin", (info: { ok: boolean; model?: string; error?: string }) => {
+			if (info.ok) this.log("info", `${rec.dto.name}: ACP model pin confirmed (${info.model})`);
+			else this.log("warn", `${rec.dto.name}: ACP model pin for "${info.model}" not confirmed (${info.error}) — recording the session's actual model instead`);
 		});
 		a.on("ui", (req: RpcExtensionUIRequest) => this.onUi(rec, req));
 		a.on("hosttool", (call: { id: string; toolName: string; arguments: unknown }) => this.onHostTool(rec, call));
@@ -10230,6 +10250,14 @@ export class SquadManager extends EventEmitter {
 		if (rec.dto.model) run.noteModel(rec.dto.model);
 		run.finish(rec.dto.status, await this.runFilesTouched(rec));
 		const receipt = run.snapshot({ sampleRatio: traceSampleRatio(), maxSpans: traceMaxSpans() });
+		// Cost-attribution honesty (ticket #336 gauntlet finding 3, grok HIGH): an absent `costUsd` from a
+		// harness whose usage ingestion isn't verified (`usageVerified` unset — every ACP descriptor
+		// except once a future live smoke confirms its `usage_update` field names; codex CONFIRMED absent
+		// on every live turn, ticket #336) is UNKNOWN, not a genuinely free run. Stamped here — the one
+		// place `receipts.ts`'s pure accumulator meets the registry — so every downstream cost aggregate
+		// (`attribution-scoreboard.ts`, `token-burn.ts`, `cost-aggregate.ts` via `appendReceipt`) can tell
+		// "verified $0" from "we don't know" instead of folding both into the same fabricated zero.
+		if (receipt.costUsd === undefined && getHarness(receipt.harness ?? "omp")?.usageVerified !== true) receipt.costUnknown = true;
 		// Epic 3 (leaf 04): copy the land gate's ValidationRecord onto the durable receipt so it
 		// survives the run — the input Epic 5's confidence scorer reads via buildDigest.
 		if (rec.dto.validation) receipt.validation = rec.dto.validation;
@@ -10244,7 +10272,10 @@ export class SquadManager extends EventEmitter {
 		const conf = scoreConfidence({ verificationState: rec.dto.verificationState ?? "unknown", filesTouched: receipt.filesTouched.length, validator, sameLineage: rec.dto.validation?.sameLineage, lensAdvisory: lensAdvisoryBucket(rec.dto.validation) });
 		receipt.confidence = conf;
 		await appendReceipt(this.stateDir, receipt); // full receipt on disk (both modes)
-		this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_TOKEN_BURN_SNAPSHOT, `token burn · ${this.safeEventLabel(receipt.name)} · ${receipt.tokens?.total ?? 0} tokens · $${(receipt.costUsd ?? 0).toFixed(4)}`, unitTokenBurnPayload(receipt));
+		// costUnknown: say so, not "$0.0000" — the same fabricated-zero the receipt itself now refuses to
+		// claim (ticket #336 gauntlet finding 3).
+		const costLabel = receipt.costUnknown ? "cost unattributed (usage unverified)" : `$${(receipt.costUsd ?? 0).toFixed(4)}`;
+		this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_TOKEN_BURN_SNAPSHOT, `token burn · ${this.safeEventLabel(receipt.name)} · ${receipt.tokens?.total ?? 0} tokens · ${costLabel}`, unitTokenBurnPayload(receipt));
 		if (receipt.spans?.length) this.traceExporter?.enqueue(receipt.spans, { service: "omp-squad", repo: receipt.repo, operator: this.operator.id, org: this.operator.orgId });
 		// Queryable per-org cost/token ledger (DB mode); FileStore is a no-op since the receipt is on disk.
 		await this.store.appendUsage(receipt).catch((err) => this.log("warn", `usage write failed for ${rec.dto.name}: ${err instanceof Error ? err.message : String(err)}`));
