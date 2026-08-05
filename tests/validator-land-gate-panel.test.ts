@@ -333,12 +333,16 @@ test("SELF-LAND OF THIS REPO (A1 CRITICAL): a clean branch with a confirmed pane
 	expect(result.ok).toBe(true);
 	expect(result.merged).toBe(true);
 
-	// (2) The tree is CLEAN immediately after land() returns — queuing under stateDir never touched
-	// the repo being landed, unlike the old direct-append bug (this holds true regardless of whether
-	// the fire-and-forget projection below has already raced ahead and completed by this point — the
-	// PROPERTY under test is "the tree was never dirtied by the QUEUE write", which the projection lane
-	// preserves too: it always returns the tree to clean before releasing its lock).
-	const afterLand = await git(repo, "status", "--porcelain");
+	// (2) The tree is CLEAN of TRACKED changes immediately after land() returns — queuing under
+	// stateDir never touched the repo being landed, unlike the old direct-append bug. `--untracked-files=no`
+	// deliberately matches `land.ts`'s OWN real dirty-main gate (`landAgentLocked`'s
+	// `git status --porcelain --untracked-files=no`) — that is the actual invariant a "would this block
+	// the next land" check must reproduce. A strict, untracked-files-included check here would be a
+	// FALSE ALARM: the fire-and-forget projection below may already be mid-flight, and its atomic-write
+	// step legitimately creates a short-lived UNTRACKED temp file next to the ledger before renaming it
+	// into place — real, harmless, and by construction invisible to the actual land gate, which is
+	// exactly why that gate excludes untracked files in the first place.
+	const afterLand = await git(repo, "status", "--porcelain", "--untracked-files=no");
 	expect(afterLand.out).toBe("");
 
 	// (3) `land()` already kicked off the projection fire-and-forget (post-merge, out of the critical
@@ -371,6 +375,70 @@ test("SELF-LAND OF THIS REPO (A1 CRITICAL): a clean branch with a confirmed pane
 	const mgr2 = new TestManager({ stateDir: await tmpDir("panel-selfland-state2-") });
 	mgr2.judge = passJudge;
 	seedAgent(mgr2, "a2", repo, worktree2, "squad/self-land-2", "f2");
+	(mgr2 as unknown as { featureStore: Map<string, PersistedFeature> }).featureStore.set("f2", { id: "f2", title: "F2", repo, createdAt: 0, updatedAt: 0, acceptanceCriteria: [{ id: "c1", text: "x", completed: false }] });
+	await runProof({ repo, worktree: worktree2, command: "true" });
+	const secondResult = await mgr2.land("a2", undefined, {});
+	expect(secondResult.ok).toBe(true);
+	expect(secondResult.merged).toBe(true);
+});
+
+test("SELF-LAND OF THIS REPO — GAUNTLET ROUND 2 RE-PROOF: even when the projection commit FAILS, the land still succeeds, the tree stays byte-clean, and the NEXT land into the same repo is NOT blocked", async () => {
+	// This is the invariant round 2 found broken: the OLD projection cleared the queue (or left a
+	// staged-dirty tree) on a commit failure, so a land immediately AFTER a failed projection attempt
+	// could itself get blocked by the projection's own leftover dirt — reopening A1 one step later than
+	// round 1's fix reached. Forcing the projection's DURABLE WRITE itself to fail (an invalid ledger
+	// path) rather than fighting git identity keeps this test from also breaking the LAND's own
+	// (unrelated) merge commit, which needs a working identity in this same repo.
+	process.env.OMP_SQUAD_REVIEW_PANEL = "1";
+	const stateDir = await tmpDir("panel-selfland-projfail-state-");
+	const { repo, worktree, branch } = await selfLandRepo("panel-selfland-projfail-");
+	// An invalid ledger path (a directory, not a file) forces `projectPendingPanelFindings`'s atomic
+	// write to fail — a real, reproducible failure, not a mock of git identity.
+	const badLedgerPath = path.join(repo, "plans", ".reviews"); // the DIRECTORY itself, not a file inside it
+	const mgr = new TestManager({ stateDir });
+	mgr.judge = passJudge;
+	mgr.ledgerPath = badLedgerPath;
+	mgr.ledgerRepo = repo;
+	mgr.panelReviewers = () => [
+		{ lineage: "xai", harness: "grok", review: async () => ({ disposition: "object", severity: "high" as const, claim: "a real-looking finding", concernClass: "fail-open" }) },
+		acceptPanel("openai", "codex"),
+	];
+	mgr.panelVerify = () => async () => true;
+	seedAgent(mgr, "a1", repo, worktree, branch, "f1");
+	(mgr as unknown as { featureStore: Map<string, PersistedFeature> }).featureStore.set("f1", { id: "f1", title: "F1", repo, createdAt: 0, updatedAt: 0, acceptanceCriteria: CRITERIA });
+	await runProof({ repo, worktree, command: "true" });
+
+	const result = await mgr.land("a1", undefined, {});
+
+	// (1) The land STILL succeeds — a projection that hasn't even run yet (let alone failed) can never
+	// affect this land's own outcome.
+	expect(result.ok).toBe(true);
+	expect(result.merged).toBe(true);
+
+	// (2) The fire-and-forget projection genuinely failed against the bad path — `projectPanelFindingsSafe`
+	// catches the rejection (best-effort: a projection fault is logged, never surfaced through `land()`'s
+	// own return) and degrades to an honest `{projected:0, committed:false}`, never a fabricated success.
+	const projection = await mgr.waitForPanelProjection();
+	expect(projection).toEqual({ projected: 0, committed: false });
+
+	// (3) THE RE-PROVEN INVARIANT: even after a FAILED projection attempt, the tree is byte-clean — no
+	// leftover temp file, no staged-but-uncommitted ledger change, nothing.
+	const afterFailedProjection = await git(repo, "status", "--porcelain");
+	expect(afterFailedProjection.out).toBe("");
+
+	// (4) The finding is still safely queued (never lost) for a future retry against a fixed path.
+	expect(readPendingPanelFindings(stateDir).length).toBe(1);
+
+	// (5) THE CORE RE-PROOF: a SECOND, otherwise-unrelated land into the SAME repo, immediately after
+	// the failed projection, is NOT blocked by it.
+	const worktree2 = path.join(await tmpDir("panel-selfland-projfail-wt2-"), "wt");
+	await git(repo, "worktree", "add", "-q", "-b", "squad/self-land-projfail-2", worktree2, "main");
+	await fs.writeFile(path.join(worktree2, "feature2.txt"), "second change\n");
+	await git(worktree2, "add", "-A");
+	await git(worktree2, "commit", "-qm", "second change");
+	const mgr2 = new TestManager({ stateDir: await tmpDir("panel-selfland-projfail-state2-") });
+	mgr2.judge = passJudge;
+	seedAgent(mgr2, "a2", repo, worktree2, "squad/self-land-projfail-2", "f2");
 	(mgr2 as unknown as { featureStore: Map<string, PersistedFeature> }).featureStore.set("f2", { id: "f2", title: "F2", repo, createdAt: 0, updatedAt: 0, acceptanceCriteria: [{ id: "c1", text: "x", completed: false }] });
 	await runProof({ repo, worktree: worktree2, command: "true" });
 	const secondResult = await mgr2.land("a2", undefined, {});

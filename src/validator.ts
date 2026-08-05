@@ -933,6 +933,12 @@ export async function validatorGate(opts: ValidatorGateOpts): Promise<ValidatorG
 						reviewers: opts.panelReviewers,
 						verify: opts.panelVerify,
 						stateDir: opts.panelStateDir,
+						// B4/C3 round 2: repo/worktree/proof-tree/criteria all fold into the panel's own
+						// coalescing key and cwd-escape validation — see ReviewPanelOpts's doc.
+						repo: opts.repo,
+						worktree: opts.worktree,
+						proofTree: opts.proof?.tree,
+						criteriaKey: criteriaSig,
 					});
 					if (panel && panel.length > 0) record = { ...record, panel };
 				} catch {

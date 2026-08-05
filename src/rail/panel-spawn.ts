@@ -6,13 +6,17 @@
  * reviewer — see the findings below. Widening `ompOneShot` itself would touch every other call site's
  * blast radius for a fix that only the panel needs.
  *
- * B2 (HIGH, both lineages): `AbortSignal.timeout` (what `ompOneShot` uses) kills the DIRECT CLI process
- * but not its process TREE — codex reproduced a grandchild surviving under PPID 1, keeping a stdout
- * pipe read pending forever. Fix: every reviewer/recheck CLI here is spawned `detached: true` (POSIX
- * `setsid()` — the child becomes its own session AND process-group leader), so a timeout kills the
- * WHOLE GROUP via `process.kill(-pid, signal)`, SIGTERM first with a short grace period then SIGKILL,
- * and the caller stops awaiting the stdout pipe at the deadline (a leaked grandchild's still-open pipe
- * can no longer wedge the function past its own bound).
+ * B2 (HIGH, both lineages, round 1 fix INCOMPLETE — closed properly in round 2): `AbortSignal.timeout`
+ * (what `ompOneShot` uses) kills the DIRECT CLI process but not its process TREE — codex reproduced a
+ * grandchild surviving under PPID 1, keeping a stdout pipe read pending forever. Round 1 spawned every
+ * reviewer/verification CLI `detached: true` (its own process group) and killed the group on timeout —
+ * but RACED the SIGKILL escalation against the group LEADER's own `exited` promise, so if the leader
+ * died from SIGTERM while a DESCENDANT ignored SIGTERM and kept the group alive, the race resolved
+ * "not still alive" (the LEADER was gone) and SIGKILL was never sent to the survivor. Round 2 fix:
+ * `killProcessGroup` now waits out the FULL grace period unconditionally and ALWAYS sends SIGKILL to
+ * the whole group afterward, regardless of whether the leader itself already exited — a SIGKILL to an
+ * already-fully-gone group is harmless (ESRCH, caught). Applies to BOTH the reviewer call and the
+ * claim-verification call, since both share this one spawn primitive.
  *
  * B4 (HIGH): panel concurrency was globally unbounded — `panelMax()` bounds ONE panel invocation, not
  * the daemon process, so N concurrent lands each spawn their own panel. `withGlobalPanelSlot` is a
@@ -20,21 +24,27 @@
  * CONFIRMED dead (not merely "the function returned") — bounding real concurrent OS processes, not
  * just in-flight promises.
  *
- * C3 (HIGH, both lineages): a reviewer subprocess spawned with no explicit `cwd` inherits the DAEMON's
- * launch directory — for an agentic CLI (codex/grok/omp can all read files, not just the argv they were
- * given) that IS the managed repo, so AGENTS.md / plan docs / commit messages / `.git` history leak the
- * builder's own framing even though argv+diff are clean, defeating blind review entirely. Fix: every
- * spawn here runs with `cwd` pointed at a FRESH, EMPTY scratch directory containing no repo, no
- * history, nothing to discover. Honesty, not a blanket claim: grok's `--sandbox read-only` is Landlock-
- * enforced at the kernel level (per this project's own model policy notes) — combined with an empty
- * cwd it is genuinely hermetic. codex's `-s read-only` sandbox plus an empty cwd is also expected to be
- * hermetic (no repo present to read), but is a CLI-level sandbox, not a kernel one. `omp` has no
- * sandbox flag at all in this codebase — the empty cwd is a real, meaningful mitigation (it can no
- * longer casually `ls .` into a real repo), but a sufficiently agentic run COULD still probe an
- * absolute path if it somehow guessed one; `omp` is therefore the LEAST hermetic of the three and is
- * documented as such rather than claimed fully blind.
+ * C3 (HIGH, both lineages, round 1 fix INCOMPLETE — hardened in round 2): a reviewer subprocess spawned
+ * with no explicit `cwd` inherits the DAEMON's launch directory — for an agentic CLI (codex/grok/omp can
+ * all read files, not just the argv they were given) that IS the managed repo, so AGENTS.md/plan docs/
+ * commit messages/`.git` history leak the builder's own framing even though argv+diff are clean,
+ * defeating blind review entirely. Round 1's `hermeticCwd()` trusted `mktemp`/`TMPDIR` blindly and its
+ * fallback path left a non-empty `.keep` file behind. Round 2: the resolved directory is REALPATH'd and
+ * validated to be outside `process.cwd()` AND every path the caller names as a managed repo/worktree
+ * (`avoid`) before it is ever handed to a reviewer — a hostile/misconfigured `TMPDIR`, or a PATH-shadowed
+ * `mktemp` binary, that would place the "scratch" cwd INSIDE a managed repo is rejected and retried
+ * (bounded attempts), and if no valid candidate can be obtained at all, `hermeticCwd` THROWS rather than
+ * silently handing a reviewer an unsafe cwd — fail closed, never fail open on the one property blind
+ * review depends on. The fallback path no longer touches the directory's contents at all (no `.keep`),
+ * so it stays genuinely empty. Honesty, not a blanket claim, is unchanged from round 1: grok's
+ * `--sandbox read-only` is Landlock-enforced at the kernel level — combined with a validated empty cwd
+ * it is genuinely hermetic. codex's `-s read-only` sandbox plus the validated empty cwd is CLI-level.
+ * `omp` has no sandbox flag at all in this codebase — the validated empty cwd is a real, meaningful
+ * mitigation, but `omp` remains the LEAST hermetic of the three and is documented as such.
  */
 
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { GIT_HARDEN_ENV } from "../git-harden.ts";
 import { harnessAuthEnv, scrubbedSpawnEnv } from "../spawn-env.ts";
 
@@ -91,11 +101,19 @@ export function resetGlobalPanelLimiterForTests(): void {
 
 // ── hermetic cwd (C3) ────────────────────────────────────────────────────────────────────────────────
 
-/** A fresh, empty scratch directory with no repo, no history, nothing an agentic reviewer could
- *  discover by exploring its own `cwd` — the caller MUST remove it when the run (or panel) is done. */
-export async function hermeticCwd(): Promise<string> {
+const HERMETIC_CWD_ATTEMPTS = 3;
+
+/** One candidate scratch directory, via `mktemp -d` (preferred — atomic, race-free creation) or a
+ *  manual fallback (a random-named directory under `TMPDIR`/`/tmp`) if `mktemp` is missing. The
+ *  fallback creates ONLY the directory itself — no placeholder file — so it stays genuinely empty
+ *  (round 1 left a `.keep` file behind here, a real if minor honesty gap in the "empty" claim). */
+async function rawScratchDir(): Promise<string> {
 	try {
-		const proc = Bun.spawn(["mktemp", "-d"], { stdout: "pipe", stderr: "ignore" });
+		// `env` must be passed EXPLICITLY: `Bun.spawn`'s default env is a snapshot taken at Bun's own
+		// process startup, not a live reference to `process.env` — a runtime mutation (a test setting
+		// `TMPDIR`, or a genuinely hostile deployment environment) would otherwise silently NOT be seen
+		// by `mktemp`, defeating the very validation this module exists to perform.
+		const proc = Bun.spawn(["mktemp", "-d"], { stdout: "pipe", stderr: "ignore", env: process.env });
 		const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
 		const dir = out.trim();
 		if (code === 0 && dir) return dir;
@@ -104,9 +122,49 @@ export async function hermeticCwd(): Promise<string> {
 	}
 	// mktemp is POSIX-universal in this codebase's target environments, but degrade gracefully rather
 	// than ever fail a panel over a missing coreutil.
-	const dir = `${process.env.TMPDIR ?? "/tmp"}/glance-panel-hermetic-${crypto.randomUUID()}`;
-	await Bun.write(`${dir}/.keep`, "");
+	const dir = path.join(process.env.TMPDIR ?? "/tmp", `glance-panel-hermetic-${crypto.randomUUID()}`);
+	await fs.mkdir(dir, { recursive: true });
 	return dir;
+}
+
+/** Resolve `p` to its real, symlink-free absolute path — falling back to a plain `path.resolve` if the
+ *  path doesn't exist yet or can't be stat'd (never throws), so a validation comparison always has
+ *  SOMETHING concrete to compare against rather than aborting. */
+async function realOrResolved(p: string): Promise<string> {
+	try {
+		return await fs.realpath(p);
+	} catch {
+		return path.resolve(p);
+	}
+}
+
+function isInside(candidate: string, ancestor: string): boolean {
+	return candidate === ancestor || candidate.startsWith(ancestor.endsWith(path.sep) ? ancestor : `${ancestor}${path.sep}`);
+}
+
+/**
+ * A fresh, empty scratch directory with no repo, no history, nothing an agentic reviewer could
+ * discover by exploring its own `cwd` — VALIDATED (gauntlet round 2, finding C3) to resolve outside
+ * `process.cwd()` (the daemon's own launch directory — the original C3 threat model) AND every path in
+ * `avoid` (the specific repo/worktree a caller is reviewing, when known). A hostile/misconfigured
+ * `TMPDIR`, or a PATH-shadowed `mktemp` binary, that would otherwise place the "scratch" cwd INSIDE a
+ * managed repo is rejected (the rejected candidate is cleaned up) and retried up to
+ * `HERMETIC_CWD_ATTEMPTS` times; if no valid candidate can be obtained at all, this THROWS rather than
+ * ever handing a reviewer a cwd that might leak the tree it's supposed to be blind to (fail closed —
+ * every caller in this file already treats a thrown/rejected review as an honest "error" verdict, never
+ * a fabricated one). The caller MUST remove the returned directory (`removeHermeticCwd`) when done.
+ */
+export async function hermeticCwd(avoid: string[] = []): Promise<string> {
+	const avoidResolved = await Promise.all([process.cwd(), ...avoid].map(realOrResolved));
+	let lastRejected: string | undefined;
+	for (let attempt = 0; attempt < HERMETIC_CWD_ATTEMPTS; attempt++) {
+		const dir = await rawScratchDir();
+		const resolved = await realOrResolved(dir);
+		if (!avoidResolved.some((a) => isInside(resolved, a))) return dir;
+		lastRejected = resolved;
+		await removeHermeticCwd(dir);
+	}
+	throw new Error(`hermeticCwd: could not obtain a scratch directory outside every managed repo after ${HERMETIC_CWD_ATTEMPTS} attempts (last rejected candidate resolved inside a managed path: ${lastRejected}) — refusing to hand a reviewer a cwd that might leak the tree`);
 }
 
 export async function removeHermeticCwd(dir: string): Promise<void> {
@@ -143,19 +201,24 @@ export interface BoundedSpawnResult {
  *  slot and reap the OS process, never to feed the caller anything further. `pid` is the group leader's
  *  pid (the direct child's own pid, since it was spawned `detached: true`), so `-pid` addresses the
  *  whole group on POSIX. */
-async function killProcessGroup(pid: number, exited: Promise<number>): Promise<void> {
+async function killProcessGroup(pid: number): Promise<void> {
 	try {
 		process.kill(-pid, "SIGTERM");
 	} catch {
 		return; // already gone (ESRCH) — nothing left to escalate against
 	}
-	const GRACE_MS = 2_000;
-	const stillAlive = await Promise.race([exited.then(() => false), new Promise<boolean>((r) => setTimeout(() => r(true), GRACE_MS))]);
-	if (!stillAlive) return;
+	// Round 2 fix (B2, both lineages): give the group a grace period, but NEVER decide whether to
+	// escalate by racing the LEADER's own `exited` promise — the leader dying from SIGTERM does not
+	// mean the whole process GROUP is gone (a descendant that ignores SIGTERM can survive after the
+	// leader exits, and round 1's race resolved "not still alive" the instant the leader alone died,
+	// so SIGKILL never reached that survivor). Wait out the FULL grace period unconditionally, then
+	// ALWAYS send SIGKILL to the group — harmless (ESRCH, caught) if everything already exited on its
+	// own during the grace window.
+	await new Promise((r) => setTimeout(r, 2_000));
 	try {
 		process.kill(-pid, "SIGKILL");
 	} catch {
-		/* already gone between the grace check and here — fine */
+		/* the whole group is already gone — fine, this was a mopping-up kill, not a required one */
 	}
 }
 
@@ -206,7 +269,7 @@ export async function boundedHermeticSpawn(opts: BoundedSpawnOpts): Promise<Boun
 		if (result === TIMED_OUT) {
 			// Do NOT await the pipe/exit here — that is precisely the wedge B2 closes. Kill + release
 			// continue in the background; this function returns now.
-			void killProcessGroup(proc.pid, exited)
+			void killProcessGroup(proc.pid)
 				.catch(() => {})
 				.finally(release);
 			return { out: "", code: 1, timedOut: true };
@@ -214,7 +277,7 @@ export async function boundedHermeticSpawn(opts: BoundedSpawnOpts): Promise<Boun
 		release();
 		return { ...result, timedOut: false };
 	} catch {
-		void killProcessGroup(proc.pid, exited)
+		void killProcessGroup(proc.pid)
 			.catch(() => {})
 			.finally(release);
 		return { out: "", code: 1, timedOut: false };

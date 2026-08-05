@@ -25,8 +25,11 @@ import {
 	resetGlobalPanelLimiterForTests,
 } from "../src/rail/panel-spawn.ts";
 
+const savedTmpdir = process.env.TMPDIR;
 afterEach(() => {
 	delete process.env.OMP_SQUAD_REVIEW_PANEL_GLOBAL_MAX;
+	if (savedTmpdir === undefined) delete process.env.TMPDIR;
+	else process.env.TMPDIR = savedTmpdir;
 	resetGlobalPanelLimiterForTests();
 });
 
@@ -177,4 +180,84 @@ test("globalPanelInFlightForTests / resetGlobalPanelLimiterForTests round-trip c
 	// The slot is released once the process is confirmed gone — by the time the await above resolves,
 	// it must be back to 0.
 	expect(globalPanelInFlightForTests()).toBe(0);
+});
+
+// ── B2 round 2: the teardown-race fix — SIGKILL the GROUP regardless of the leader's own exit ──────
+// Round 1's `killProcessGroup` raced SIGKILL-escalation against the group LEADER's `exited` promise: if
+// the leader died from SIGTERM (the default, un-trapped reaction) while a DESCENDANT explicitly ignored
+// SIGTERM and kept running, the race resolved "not still alive" the instant the LEADER alone exited, and
+// SIGKILL was never sent to the survivor. This test's descendant explicitly traps/ignores SIGTERM (round
+// 1's own process-group test did NOT do this, so it never actually exercised this specific race) — only
+// an unconditional SIGKILL escalation, sent regardless of the leader's exit status, can kill it.
+
+test("B2 ROUND 2 PROOF: a descendant that IGNORES SIGTERM (only the leader dies from it) is still killed by the unconditional SIGKILL escalation", async () => {
+	const cwd = await hermeticCwd();
+	tmps.push(cwd);
+	const markerDir = await fs.mkdtemp(path.join(os.tmpdir(), "panel-spawn-marker-r2-"));
+	tmps.push(markerDir);
+	const marker = path.join(markerDir, "descendant-survived.txt");
+
+	// The descendant explicitly ignores SIGTERM (`trap '' TERM`) and sleeps far longer than
+	// `killProcessGroup`'s 2s grace period before writing the marker — so the marker can only be
+	// created if the descendant survives PAST the grace-period SIGKILL. The leader itself does NOT trap
+	// SIGTERM, so it dies immediately when the group is signaled — exactly the shape that defeated
+	// round 1's "race against the leader's own exit" logic.
+	const { timedOut } = await boundedHermeticSpawn({
+		bin: "sh",
+		args: ["-c", `(trap '' TERM; sleep 10; touch '${marker}') & sleep 30`],
+		cwd,
+		timeoutMs: 100,
+	});
+	expect(timedOut).toBe(true);
+
+	// Wait past the 2s grace period (plus margin for the SIGKILL to actually land and the process to
+	// die) but well short of the descendant's own 10s sleep — if the round-1 race had shipped, the
+	// descendant would still be alive and unaffected at this point, eventually writing the marker at
+	// the 10s mark; the round-2 fix must have already killed it well before then.
+	await new Promise((r) => setTimeout(r, 3_000));
+	await expect(fs.stat(marker)).rejects.toThrow(); // never written — the descendant was killed, not merely the leader
+}, 15_000);
+
+// ── C3 round 2: hermetic cwd must be VALIDATED outside every managed repo ───────────────────────────
+
+test("C3 ROUND 2: a hostile TMPDIR resolving INSIDE an avoided (managed-repo) path is rejected on every attempt — hermeticCwd throws rather than handing back an unsafe cwd", async () => {
+	const managedRepo = await fs.mkdtemp(path.join(os.tmpdir(), "hostile-managed-repo-"));
+	tmps.push(managedRepo);
+	process.env.TMPDIR = managedRepo; // hostile: every mktemp -d call lands INSIDE the "managed repo"
+	await expect(hermeticCwd([managedRepo])).rejects.toThrow(/could not obtain a scratch directory outside every managed repo/);
+});
+
+test("C3 ROUND 2: a normal (non-hostile) TMPDIR still returns a valid cwd outside an unrelated avoided path", async () => {
+	const unrelatedRepo = await fs.mkdtemp(path.join(os.tmpdir(), "unrelated-managed-repo-"));
+	tmps.push(unrelatedRepo);
+	const dir = await hermeticCwd([unrelatedRepo]);
+	tmps.push(dir);
+	const resolvedDir = await fs.realpath(dir);
+	const resolvedRepo = await fs.realpath(unrelatedRepo);
+	expect(resolvedDir === resolvedRepo || resolvedDir.startsWith(`${resolvedRepo}/`)).toBe(false);
+});
+
+test("C3 ROUND 2: hermeticCwd still validates against process.cwd() even when an unrelated avoid list is passed", async () => {
+	const unrelatedRepo = await fs.mkdtemp(path.join(os.tmpdir(), "unrelated-managed-repo-2-"));
+	tmps.push(unrelatedRepo);
+	const dir = await hermeticCwd([unrelatedRepo]);
+	tmps.push(dir);
+	expect(path.resolve(dir).startsWith(path.resolve(process.cwd()))).toBe(false);
+});
+
+test("C3 ROUND 2: a rejected candidate directory is cleaned up (not leaked) before retrying", async () => {
+	const managedRepo = await fs.mkdtemp(path.join(os.tmpdir(), "hostile-managed-repo-cleanup-"));
+	tmps.push(managedRepo);
+	process.env.TMPDIR = managedRepo;
+	let threw = false;
+	try {
+		await hermeticCwd([managedRepo]);
+	} catch {
+		threw = true;
+	}
+	expect(threw).toBe(true);
+	// Every rejected candidate should have been `rm -rf`'d — the hostile TMPDIR directory itself should
+	// contain no leftover scratch subdirectories after all attempts were exhausted.
+	const leftovers = await fs.readdir(managedRepo);
+	expect(leftovers).toEqual([]);
 });

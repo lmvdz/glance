@@ -426,6 +426,88 @@ test("B4: distinct sources for the SAME diff do NOT coalesce — each gets its o
 	expect(calls).toBe(2);
 });
 
+test("B4 ROUND 2 CRITICAL: identical source+diff (e.g. two tenants landing a cloned SHA) but DIFFERENT repo/stateDir do NOT coalesce — no cross-tenant queue contamination", async () => {
+	process.env.OMP_SQUAD_REVIEW_PANEL = "1";
+	const diff = fakeDiff([".github/workflows/deploy.yml"]);
+	const sameSource = "land shared-template@abc123"; // an identical cloned SHA/diff, same source label
+	let calls = 0;
+	const reviewers = (): PanelReviewerSpec[] => [
+		{
+			lineage: "xai",
+			harness: "grok",
+			review: async () => {
+				calls++;
+				return { disposition: "object", severity: "high", claim: "a tenant-specific finding", concernClass: "fail-open" };
+			},
+		},
+		accept("openai", "codex"),
+	];
+	const verify = () => async () => true;
+	const stateDirA = await tmpStateDir();
+	const stateDirB = await tmpStateDir();
+
+	// The OLD narrow key (`source::hash(diff)`) would have been IDENTICAL for both calls — the round-1
+	// bug: the SECOND caller would have received the FIRST caller's in-flight promise, and its finding
+	// would have been queued under the FIRST tenant's stateDir instead of its own.
+	const [resultA, resultB] = await Promise.all([
+		runReviewPanel({ diff, source: sameSource, reviewers, verify, stateDir: stateDirA, repo: "/tenant/a/repo" }),
+		runReviewPanel({ diff, source: sameSource, reviewers, verify, stateDir: stateDirB, repo: "/tenant/b/repo" }),
+	]);
+
+	expect(calls).toBe(2); // did NOT coalesce — two genuinely independent panel runs
+	expect(resultA).toBeDefined();
+	expect(resultB).toBeDefined();
+	const queuedA = readPendingPanelFindings(stateDirA);
+	const queuedB = readPendingPanelFindings(stateDirB);
+	expect(queuedA.length).toBe(1); // tenant A's finding landed in tenant A's OWN queue
+	expect(queuedB.length).toBe(1); // tenant B's finding landed in tenant B's OWN queue — never lost, never merged
+});
+
+test("B4 ROUND 2: identical source+diff+repo but DIFFERENT proofTree/criteriaKey do NOT coalesce (a retry against a genuinely different tree/criteria is not 'the same proof')", async () => {
+	process.env.OMP_SQUAD_REVIEW_PANEL = "1";
+	const diff = fakeDiff([".github/workflows/deploy.yml"]);
+	let calls = 0;
+	const reviewers = (): PanelReviewerSpec[] => [
+		{
+			lineage: "xai",
+			harness: "grok",
+			review: async () => {
+				calls++;
+				return { disposition: "accept" };
+			},
+		},
+		accept("openai", "codex"),
+	];
+	await Promise.all([
+		runReviewPanel({ diff, source: "same-source", reviewers, repo: "/same/repo", proofTree: "tree-1", criteriaKey: "criteria-1" }),
+		runReviewPanel({ diff, source: "same-source", reviewers, repo: "/same/repo", proofTree: "tree-2", criteriaKey: "criteria-2" }),
+	]);
+	expect(calls).toBe(2);
+});
+
+test("B4 ROUND 2: truly identical requests (same source+diff+repo+worktree+stateDir+proofTree+criteriaKey+pool) STILL coalesce into one run", async () => {
+	process.env.OMP_SQUAD_REVIEW_PANEL = "1";
+	const diff = fakeDiff([".github/workflows/deploy.yml"]);
+	let calls = 0;
+	const reviewers = (): PanelReviewerSpec[] => [
+		{
+			lineage: "xai",
+			harness: "grok",
+			review: async () => {
+				calls++;
+				await new Promise((r) => setTimeout(r, 15));
+				return { disposition: "accept" };
+			},
+		},
+		accept("openai", "codex"),
+	];
+	const stateDir = await tmpStateDir();
+	const shared = { diff, source: "identical", reviewers, stateDir, repo: "/r", worktree: "/r/wt", proofTree: "t1", criteriaKey: "c1" };
+	const [a, b] = await Promise.all([runReviewPanel(shared), runReviewPanel(shared)]);
+	expect(calls).toBe(1);
+	expect(a).toEqual(b);
+});
+
 test("B4: sequential (non-concurrent) identical requests do NOT stay coalesced forever — a later call re-runs the panel", async () => {
 	process.env.OMP_SQUAD_REVIEW_PANEL = "1";
 	const diff = fakeDiff([".github/workflows/deploy.yml"]);

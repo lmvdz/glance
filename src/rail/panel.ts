@@ -241,11 +241,109 @@ function parsePanelVerdictGrok(raw: string): PanelRawVerdict | undefined {
 	return undefined;
 }
 
-function parseVerifyConfirmed(raw: string): boolean | undefined {
+/** The raw `verdict` string a claim-verification call emitted, or `undefined` if `obj` doesn't carry
+ *  a string `verdict` field at all — kept SEPARATE from `coerceVerdictString` below (round 2, finding
+ *  A5) because "no candidate found in this line yet, keep scanning" and "found a candidate that
+ *  legitimately decodes to `undefined` (a genuine `\"inconclusive\"`)" are different facts; conflating
+ *  them broke the codex/grok JSONL-stream scan's "last usable line wins" logic. */
+function extractVerdictString(obj: Record<string, unknown> | undefined): string | undefined {
+	const v = obj?.verdict;
+	return typeof v === "string" ? v : undefined;
+}
+
+/**
+ * A5 (round 2 — the bug lived HERE, in the real parser, not just at the call site): round 1's parser
+ * mapped the literal string `"inconclusive"` to `false`, indistinguishable from a genuine `"refuted"` —
+ * so a model that faithfully answered "inconclusive" per `PANEL_VERIFY_SYSTEM`'s own contract got
+ * queued as a FABRICATED refutation. Round 1's fix only touched the CALL SITE's handling of an
+ * injected-fake `undefined`; the real parser's `"inconclusive"` path was never exercised by a test.
+ * Fixed here: `"confirmed"` → `true`, `"refuted"` → `false`, EVERYTHING else (`"inconclusive"`, a
+ * missing/malformed verdict, garbage) → `undefined` — the genuine third state, never coerced.
+ */
+function coerceVerdictString(v: string | undefined): boolean | undefined {
+	if (v === "confirmed") return true;
+	if (v === "refuted") return false;
+	return undefined;
+}
+
+/** Plain single-object stdout (the `omp` verify case — no event framing). */
+/** @substrate exported for tests only. */
+export function parseVerifyPlain(raw: string): boolean | undefined {
 	try {
-		const v = extractJsonObject(raw)?.verdict;
-		if (v === "confirmed") return true;
-		if (v === "refuted" || v === "inconclusive") return false;
+		return coerceVerdictString(extractVerdictString(extractJsonObject(raw)));
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * codex's claim-verification call may ALSO emit a JSONL event stream, exactly like its review call
+ * (`parsePanelVerdictCodex`) — round 1 shipped ONE generic parser (`extractJsonObject(raw)?.verdict`)
+ * for every harness's verify output, which only ever matches plain `omp` stdout; codex's real output
+ * silently failed to parse and ALWAYS degraded to "unavailable," defeating C6's cross-lineage
+ * verification in production without ever showing up as a test failure (round 1 only exercised
+ * verification through injected fakes, never the real parser against real CLI output shapes). Fixed:
+ * the SAME stream-tolerant, "last usable line wins" scan `parsePanelVerdictCodex` uses, adapted to
+ * pull a verdict STRING (not a whole verdict object) so an `"inconclusive"` line is recognized as a
+ * real (if unconfirmed) answer rather than "no candidate yet, keep scanning".
+ */
+/** @substrate exported for tests only. */
+export function parseVerifyCodex(raw: string): boolean | undefined {
+	try {
+		let verdictStr: string | undefined;
+		for (const line of raw.split("\n")) {
+			const t = line.trim();
+			if (!t.startsWith("{")) continue;
+			let obj: Record<string, unknown> | undefined;
+			try {
+				const parsed: unknown = JSON.parse(t);
+				obj = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : undefined;
+			} catch {
+				continue;
+			}
+			if (!obj) continue;
+			const direct = extractVerdictString(obj);
+			if (direct !== undefined) {
+				verdictStr = direct;
+				continue;
+			}
+			const text = pickCodexText(obj);
+			if (text) {
+				const embedded = extractVerdictString(extractJsonObject(text));
+				if (embedded !== undefined) verdictStr = embedded;
+			}
+		}
+		if (verdictStr !== undefined) return coerceVerdictString(verdictStr);
+		return parseVerifyPlain(raw); // plain single-object stdout, no event framing
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * grok's `--json-schema` envelope (`{ "text": "<json string>", "structuredOutput": {…}, … }`) — same
+ * bug class as codex above: round 1's generic parser looked for `verdict` at the TOP level of the
+ * envelope, but grok's real answer lives NESTED at `structuredOutput.verdict`, so it ALWAYS silently
+ * failed to parse in production. Fixed: mirrors `parsePanelVerdictGrok`'s envelope-unwrapping, adapted
+ * to pull a verdict STRING.
+ */
+/** @substrate exported for tests only. */
+export function parseVerifyGrok(raw: string): boolean | undefined {
+	try {
+		const envelope = extractJsonObject(raw);
+		if (envelope) {
+			const structured = envelope.structuredOutput;
+			if (structured && typeof structured === "object") {
+				const v = extractVerdictString(structured as Record<string, unknown>);
+				if (v !== undefined) return coerceVerdictString(v);
+			}
+			if (typeof envelope.text === "string") {
+				const v = extractVerdictString(extractJsonObject(envelope.text));
+				if (v !== undefined) return coerceVerdictString(v);
+			}
+			const v = extractVerdictString(envelope);
+			if (v !== undefined) return coerceVerdictString(v);
+		}
 		return undefined;
 	} catch {
 		return undefined;
@@ -267,10 +365,11 @@ const PANEL_VERDICT_SCHEMA = JSON.stringify({
 
 /** omp (native, Anthropic-lineage) reviewer — an independent one-shot `omp -p` call. LEAST hermetic of
  *  the three (module doc's C3 note): no sandbox flag exists for `omp` in this codebase, so the empty
- *  `cwd` is a real but not kernel-enforced mitigation. */
-function ompPanelReviewer(): PanelReviewer {
+ *  `cwd` is a real but not kernel-enforced mitigation. `avoid` (round 2, C3): paths `hermeticCwd`
+ *  validates its scratch directory resolves OUTSIDE, on top of `process.cwd()` (checked internally). */
+function ompPanelReviewer(avoid: string[]): PanelReviewer {
 	return async ({ diff, invariants }) => {
-		const cwd = await hermeticCwd();
+		const cwd = await hermeticCwd(avoid);
 		try {
 			const { out, code, timedOut } = await boundedHermeticSpawn({
 				bin: "omp",
@@ -290,9 +389,9 @@ function ompPanelReviewer(): PanelReviewer {
 /** codex (OpenAI-lineage) reviewer via `codex exec -s read-only` — sandboxed, never edits the tree it
  *  is reviewing. Combined with a hermetic cwd (C3), there is no repo present for it to read even if the
  *  sandbox's read restriction is scoped to writes rather than reads. */
-function codexPanelReviewer(): PanelReviewer {
+function codexPanelReviewer(avoid: string[]): PanelReviewer {
 	return async ({ diff, invariants }) => {
-		const cwd = await hermeticCwd();
+		const cwd = await hermeticCwd(avoid);
 		try {
 			const { out, code, timedOut } = await boundedHermeticSpawn({
 				bin: "codex",
@@ -314,9 +413,9 @@ function codexPanelReviewer(): PanelReviewer {
  *  constrains the model to the verdict shape. Combined with a hermetic cwd (C3), this reviewer is
  *  GENUINELY hermetic — kernel-enforced, not merely CLI-level. Stdin closed: grok is an agentic CLI and
  *  would otherwise wait on a TTY. */
-function grokPanelReviewer(): PanelReviewer {
+function grokPanelReviewer(avoid: string[]): PanelReviewer {
 	return async ({ diff, invariants }) => {
-		const cwd = await hermeticCwd();
+		const cwd = await hermeticCwd(avoid);
 		try {
 			const { out, code, timedOut } = await boundedHermeticSpawn({
 				bin: "grok",
@@ -348,11 +447,11 @@ function grokPanelReviewer(): PanelReviewer {
  *  fill, not the first choice). Filtered to binaries actually present (`Bun.which`), so the stamped
  *  lineage can never claim a cross-vendor review that didn't happen — the same discipline
  *  `validator.ts`'s `activeReviewer()` already applies to the single criteria judge. */
-export function defaultPanelReviewers(): PanelReviewerSpec[] {
+export function defaultPanelReviewers(avoid: string[] = []): PanelReviewerSpec[] {
 	const candidates: PanelReviewerSpec[] = [];
-	if (Bun.which("grok")) candidates.push({ lineage: "xai", harness: "grok", review: grokPanelReviewer() });
-	if (Bun.which("codex")) candidates.push({ lineage: "openai", harness: "codex", review: codexPanelReviewer() });
-	if (Bun.which("omp")) candidates.push({ lineage: "anthropic", harness: "omp", review: ompPanelReviewer() });
+	if (Bun.which("grok")) candidates.push({ lineage: "xai", harness: "grok", review: grokPanelReviewer(avoid) });
+	if (Bun.which("codex")) candidates.push({ lineage: "openai", harness: "codex", review: codexPanelReviewer(avoid) });
+	if (Bun.which("omp")) candidates.push({ lineage: "anthropic", harness: "omp", review: ompPanelReviewer(avoid) });
 	return candidates;
 }
 
@@ -399,13 +498,24 @@ function verifyArgs(bin: VerifyCandidate["bin"], claim: string, diff: string): s
 	return ["-p", "--system-prompt", PANEL_VERIFY_SYSTEM, user];
 }
 
+/** Dispatch to the per-harness verify parser (round 2, A5) — `candidate.bin` decides the SAME way
+ *  `defaultJudge`/`activeReviewer` dispatch in `validator.ts`, so the parser used always matches the
+ *  CLI that actually ran; never the single generic parser round 1 shipped, which only ever matched
+ *  plain `omp` output and silently degraded codex/grok verification to "unavailable". */
+function parseVerifyOutput(bin: VerifyCandidate["bin"], raw: string): boolean | undefined {
+	if (bin === "codex") return parseVerifyCodex(raw);
+	if (bin === "grok") return parseVerifyGrok(raw);
+	return parseVerifyPlain(raw);
+}
+
 /** The claim-verification reviewer, cross-lineage-preferring (C6) and hermetic/process-group-bounded
- *  (B2/C3) like every other production spawn in this file. */
-export function defaultPanelVerifyReviewer(): PanelVerifyReviewer {
+ *  (B2/C3) like every other production spawn in this file. `avoid` (round 2, C3): threaded down to
+ *  `hermeticCwd` exactly like the review reviewers above. */
+export function defaultPanelVerifyReviewer(avoid: string[] = []): PanelVerifyReviewer {
 	return async ({ lineage, claim, diff }) => {
 		const candidate = pickCrossLineageVerifier(lineage);
 		if (!candidate) return undefined;
-		const cwd = await hermeticCwd();
+		const cwd = await hermeticCwd(avoid);
 		try {
 			const { out, code, timedOut } = await boundedHermeticSpawn({
 				bin: candidate.bin,
@@ -415,7 +525,7 @@ export function defaultPanelVerifyReviewer(): PanelVerifyReviewer {
 				timeoutMs: panelTimeoutMs(),
 			});
 			if (timedOut || code !== 0 || !out) return undefined;
-			return parseVerifyConfirmed(out);
+			return parseVerifyOutput(candidate.bin, out);
 		} finally {
 			await removeHermeticCwd(cwd);
 		}
@@ -521,11 +631,27 @@ export interface ReviewPanelOpts {
 	source: string;
 	/** stateDir the panel QUEUES findings under (A1) — required whenever the panel might find anything
 	 *  to record; `runReviewPanel` still runs (and returns verdicts) without it, but any finding that
-	 *  would have queued is instead logged and dropped rather than risking a tracked-tree write. */
+	 *  would have queued is instead logged and dropped rather than risking a tracked-tree write. Also
+	 *  part of the coalescing key (B4 round 2) — see `ReviewPanelOpts`'s module note below. */
 	stateDir?: string;
-	/** Injected reviewer pool (tests pass fakes); `undefined` ⇒ `defaultPanelReviewers()`. */
+	/** The repo/worktree of the land this diff belongs to — used for TWO things (round 2): (1) part of
+	 *  the single-flight coalescing key (B4), so two DIFFERENT tenants/orgs landing an identical
+	 *  cloned diff never share one panel run and cross-contaminate which tenant's queue/reviewers get
+	 *  used; (2) threaded into `hermeticCwd`'s validation (C3) as an extra path a reviewer's scratch cwd
+	 *  must resolve OUTSIDE. */
+	repo?: string;
+	worktree?: string;
+	/** The land's proof tree hash and a stable digest of the declared criteria — round 2 (B4): both fold
+	 *  into the coalescing key alongside `source`+`diff`, since `source`+`hash(diff)` ALONE was too
+	 *  narrow — two different org managers landing an identical cloned SHA/diff (same source label,
+	 *  same diff bytes) would otherwise coalesce onto the SAME in-flight promise, and the SECOND
+	 *  tenant's finding would silently queue under the FIRST tenant's `stateDir`/reviewer pool. */
+	proofTree?: string;
+	criteriaKey?: string;
+	/** Injected reviewer pool (tests pass fakes); `undefined` ⇒ `defaultPanelReviewers(avoid)`. */
 	reviewers?: () => PanelReviewerSpec[];
-	/** Injected claim-verification reviewer (tests pass a fake); `undefined` ⇒ `defaultPanelVerifyReviewer()`. */
+	/** Injected claim-verification reviewer (tests pass a fake); `undefined` ⇒
+	 *  `defaultPanelVerifyReviewer(avoid)`. */
 	verify?: () => PanelVerifyReviewer;
 }
 
@@ -539,7 +665,8 @@ async function runPanelUncoalesced(opts: ReviewPanelOpts, selected: PanelReviewe
 	// them, since the panel itself is capped), cross-lineage-preferring (C6). A `confirmed:true` NEVER
 	// escalates beyond recording it; it still never vetoes — the land gate's own veto path is untouched
 	// by this module entirely.
-	const verify = (opts.verify ?? defaultPanelVerifyReviewer)();
+	const avoidPaths = [opts.repo, opts.worktree].filter((p): p is string => !!p);
+	const verify = (opts.verify ?? (() => defaultPanelVerifyReviewer(avoidPaths)))();
 	for (let i = 0; i < verdicts.length; i++) {
 		const v = verdicts[i];
 		if (v.verdict !== "object" || v.severity !== "high" || !v.claim) continue;
@@ -607,7 +734,8 @@ export async function runReviewPanel(opts: ReviewPanelOpts): Promise<PanelVerdic
 		const tier = diffRiskTier(opts.diff);
 		if (!tier.warrants) return undefined;
 
-		const pool = (opts.reviewers ?? defaultPanelReviewers)();
+		const avoidPaths = [opts.repo, opts.worktree].filter((p): p is string => !!p);
+		const pool = opts.reviewers ? opts.reviewers() : defaultPanelReviewers(avoidPaths);
 		const seen = new Set<ModelLineage>();
 		const selected: PanelReviewerSpec[] = [];
 		for (const spec of pool) {
@@ -618,7 +746,16 @@ export async function runReviewPanel(opts: ReviewPanelOpts): Promise<PanelVerdic
 		}
 		if (selected.length < MIN_PANEL_LINEAGES) return undefined; // no real cross-lineage panel possible
 
-		const key = `${opts.source}::${Bun.hash(opts.diff)}`;
+		// B4 round 2: `source`+`hash(diff)` ALONE was too narrow — two different org managers landing an
+		// IDENTICAL cloned SHA/diff (same source label, same diff bytes, e.g. a shared upstream template
+		// repo forked into two tenants) would coalesce onto the SAME in-flight promise; the first
+		// tenant's `stateDir`/reviewer pool would win, and the SECOND tenant's finding would silently
+		// queue under the FIRST tenant. The key now folds in everything that could make two "identical"
+		// requests actually belong to different lands: the proof tree, the criteria digest, the
+		// repo/worktree, the stateDir, AND the resolved reviewer pool's identity (lineage+harness pairs) —
+		// only a request that agrees on ALL of these is genuinely the same panel run.
+		const poolIdentity = selected.map((s) => `${s.lineage}:${s.harness}`).sort().join(",");
+		const key = [opts.source, Bun.hash(opts.diff).toString(), opts.proofTree ?? "", opts.criteriaKey ?? "", opts.repo ?? "", opts.worktree ?? "", opts.stateDir ?? "", poolIdentity].join("::");
 		const existing = inFlightPanels.get(key);
 		if (existing) return existing;
 		const run = runPanelUncoalesced(opts, selected);

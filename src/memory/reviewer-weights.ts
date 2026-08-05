@@ -90,8 +90,15 @@ export const MIN_FINDINGS_FOR_WEIGHT = 10;
  * and uses the array's own comma/bracket structure as the delimiter, so no field content — NUL
  * included — can forge a collision with a genuinely different tuple, regardless of what's inside any
  * one field.
+ *
+ * Exported (T5 gauntlet round 2, glance#333, finding #1) so `src/rail/panel-ledger.ts`'s projection
+ * lane can reuse this EXACT identity definition as its idempotency key — a crash between a successful
+ * commit and clearing the pending queue must never double-append a finding on the retry; checking a
+ * pending entry's `semanticKey` against the ledger's already-parsed entries before writing it again
+ * is precisely the same "a retried write must not inflate the count" guarantee this function already
+ * gives the CLI's own `add` command, reused rather than reinvented with a new field on the wire schema.
  */
-function semanticKey(e: Pick<ReviewerLedgerEntry, "at" | "lineage" | "concernClass" | "source" | "survived" | "note" | "severity">): string {
+export function semanticKey(e: Pick<ReviewerLedgerEntry, "at" | "lineage" | "concernClass" | "source" | "survived" | "note" | "severity">): string {
 	return JSON.stringify([e.at.trim(), e.lineage.trim(), e.concernClass.trim(), e.source.trim(), e.survived, e.note.trim(), e.severity ?? ""]);
 }
 
