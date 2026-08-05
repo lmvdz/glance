@@ -40,6 +40,21 @@ Three standing rules (campaign doctrine):
 - Builder caught a design estimate wrong (8 test files vs ~4) by grepping with .ts extensions
   — the verify-claims-against-the-tree dispatch line keeps earning its place.
 
+### 2026-08-05 — T9 #337 (GitHub-App wedge) — CLOSED — build phase complete
+- The spike proved the plumbing (JWT/token/check-run/renderer-reuse, all auth-clean) but the
+  gauntlet found the VERIFICATION was stubbed twice: the check greened on any receipt object
+  (verified nothing), then — after that fix — the "informational success for non-agent PRs" was
+  itself a Ruleset-indistinguishable bypass. Both CRITICAL. End state: gate-all-fail-closed.
+- **The deepest lesson of the wedge: a security gate cannot key its decision on an agent-settable,
+  spoofable signal.** Authorship (bot-login/branch-prefix/trailer) is all agent-controllable, so
+  gating on it is theater — codex proved every conditional path is a bypass. The honest answer was
+  to make authorship INFORMATIONAL and gate everything on the one unspoofable thing: a receipt whose
+  commit is re-fetched from GitHub and bound to the head SHA with a proven gate outcome.
+- **When the gauntlet surfaces a genuine PRODUCT decision, surface it — don't let a builder guess
+  it into code.** "Should a mixed human/agent repo be gated at all" needs a provenance signal glance
+  doesn't have; the builder's first attempt guessed (informational success) and it was a bypass.
+  Escalating the decision to Lars is the right move, not routing another patch at a design question.
+
 ### 2026-08-05 — #347 (harness-aware routing) — CLOSED after 1 review + fix
 - A deliberately CONSERVATIVE fail-open sweep still had 2 HIGH. Lesson: "fail-open is the safe
   default" is wrong for a SINGLE-VENDOR context — a codex harness has a KNOWN family, so an
