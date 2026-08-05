@@ -40,6 +40,24 @@ Three standing rules (campaign doctrine):
 - Builder caught a design estimate wrong (8 test files vs ~4) by grepping with .ts extensions
   — the verify-claims-against-the-tree dispatch line keeps earning its place.
 
+### 2026-08-04 — T12 #345 (state-lock double-owner) — closed after redesign + 3 gauntlet rounds
+- The builder made a sound AUTONOMOUS design override: handed my adjudicated atomic-rename
+  suggestion, it found atomic-rename had a residual 3-process gap and chose kernel flock instead
+  — the better call, made with reasoning, not deference. Trust a builder's mechanism override
+  when it comes with a constructed counterexample.
+- The fix reintroduced its own bug class TWICE (a fence-able-but-hangable lock; then a
+  timeout-steal that re-minted double-owners) — each caught by the next gauntlet/delta-verify.
+  A concurrency fix must be re-verified as adversarially as the original; the "fix" is where the
+  next bug hides.
+- **Loop-stop discipline, applied by severity not by round count**: closed on the PROVEN core
+  invariant (2-owners→1, bounded boot, refuted deadlock) with four NON-two-owner residuals
+  (6ms soft-deadline overshoot, EINTR spin, libc-absent rm-advice, remount cache) split to a
+  hygiene ticket (#354). The test: does the residual violate the ticket's actual invariant?
+  If not, it's a follow-up, not a blocker. Don't spend a 4th round on microsecond timing edges.
+- Documented the cross-host NFS limit as unsupportable-by-advisory-locks rather than chase an
+  impossible in-process detection — an honest "won't fix, here's why + the operator contract"
+  is a valid gauntlet outcome.
+
 ### 2026-08-04 — T4 #332 (measured reviewer precision) — MOAT LOOP CLOSED — 3 rounds + 3 delta-verifies
 - The campaign's centerpiece: land verdicts now cite each lineage's MEASURED precision. Took the
   most review of any lane and earned it (live land path, the thesis rests on it).
