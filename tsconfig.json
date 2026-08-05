@@ -30,6 +30,9 @@
     // scripts/ is otherwise outside the tsc program (bun runs scripts/*.ts directly, stripping
     // types) — named explicitly, same reasoning as the entry above, so `bun run check` actually
     // typechecks the skills-verify gate itself rather than trusting bun's untyped execution.
-    "scripts/skills-verify.ts"
+    "scripts/skills-verify.ts",
+    // The wedge spike's CLI entrypoint (glance#337, rail T9) — the daemon-invocation surface the
+    // install runbook documents; worth typechecking like skills-verify.ts above.
+    "scripts/post-wedge-check.ts"
   ]
 }

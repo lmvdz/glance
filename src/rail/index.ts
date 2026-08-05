@@ -33,3 +33,44 @@ export {
 	landReceiptDir,
 	landReceiptFilename,
 } from "./receipt/index.ts";
+
+// The GitHub-App wedge (glance#337, rail T9) — gates agent-authored PRs on an external repo with a
+// glance receipt via the Checks API, zero adoption by that repo. Reuses the receipt renderer above as
+// the check-run's output.text. See src/rail/wedge/index.ts for the internal module layout.
+export type {
+	WedgeCredentials,
+	WedgeApiOptions,
+	InstallationToken,
+	PullRequestInfo,
+	AuthorshipConfig,
+	AuthorshipSignal,
+	AuthorshipVerdict,
+	CheckRunOutput,
+	CheckConclusion,
+	CheckRunParams,
+	UpsertedCheckRun,
+	PostWedgeCheckParams,
+	PostWedgeCheckResult,
+} from "./wedge/index.ts";
+export {
+	mintAppJwt,
+	WedgeApiError,
+	githubApiRequest,
+	InstallationTokenResponseSchema,
+	PullResponseSchema,
+	CommitListResponseSchema,
+	CheckRunListResponseSchema,
+	CheckRunResponseSchema,
+	mintInstallationToken,
+	fetchPullRequest,
+	classifyAgentAuthorship,
+	DEFAULT_AUTHORSHIP_CONFIG,
+	receiptToCheckOutput,
+	noReceiptOutput,
+	findExistingCheckRun,
+	upsertCheckRun,
+	postAgentPrCheck,
+	DEFAULT_CHECK_NAME,
+	loadWedgeCredentialsFromEnv,
+	loadAuthorshipConfigFromEnv,
+} from "./wedge/index.ts";
