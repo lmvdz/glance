@@ -219,3 +219,56 @@ Three standing rules (campaign doctrine):
   (campaign discipline — a wrong-branch edit fails loudly instead of appending silently).
 - Held by design, reopenable: #340 (DIRECTION.md — Lars's ratification, a judgment call),
   #353 (T5 in-code gauntlet — parked; rework spec on #356).
+
+### 2026-08-05 — Finishing phase: arm the dogfood window + clear the off-path sweeps
+Lars authorized (AskUserQuestion) arming the dogfood window and clearing #348/#350/#354/#355.
+Sixteen PRs merged this session; every gauntlet caught a real defect the build had left — usually
+the fix reintroducing its own bug class. That is the campaign thesis holding under load.
+
+- **#361 dogfood-window measurement (the destination's evidence apparatus).** An Explore mapped the
+  receipt→precision→drain surface: 3 of 5 pieces already live (HTML receipt emission, measured
+  reviewerPrecision stamp on every validatorGate, ledger persistence), 2 missing (a countable
+  substrate + a drain). Built both (land-receipts/index.jsonl + land-metrics + fail-closed drain).
+  Two grok rounds: R1 found the HIGH self-repo filter (repo STORED but never USED — the signature
+  "value present, not used" class; flip the repo, the count didn't move); R2 found a latent probe
+  fail-open (an unmeasurable state-dir read as a confident zero). Both closed. Lesson: the
+  measurement half is buildable autonomously and is genuinely armed; the SELF-LAND ROUTING half
+  (#362) is a daemon feature AND a 2-week-commitment decision reserved for Lars — the gate can't
+  start its clock without him. Naming that fork honestly is the deliverable, not building around it.
+- **#350 launcher single-instance.** grok's first read: my fix was COSMETIC — cmd_start already
+  refused to launch over a live daemon_pid, so cmd_restart's guard only upgraded a silent exit-0 to
+  exit-1. The real hole was daemon_pid reading EPERM (an other-uid daemon) as dead. Fixed (fall back
+  to /proc; pid 1 as a non-root test proves it). Deeper lifecycle residuals (F3/F4/F6) → #363.
+  Lesson: a foreign lineage will tell you your fix is theater; believe it and find the real hole.
+- **#355 conflict-marker gate — a real FAIL-OPEN grok found.** The delete-tolerance fix removed the
+  incidental fail-close that had blocked an attack: a resolver deletes every conflicted path
+  (→ skipped) while planting markers in an UNTOUCHED sibling never scanned. Fixed by widening the
+  autoresolve scan to the full head0..HEAD set (full-file, ∪ touchedFiles); R2 found the probe still
+  didn't check the diff's exit code (empty-on-failure reopens it) → fail-closed. Non-vacuous test
+  (revert the widening → the sibling markers land). Lesson: a "polish" ticket on a trust gate is
+  still a trust gate — gauntlet it like one.
+- **#354 state-lock hygiene.** codex confirmed the reclaim-timing changes preserve the double-owner
+  invariant, but found the NEW 5-min POSITIVE flock cache could let a cached `true` survive a
+  same-device remount → two owners. Fixed with codex's own recommendation: cache only NEGATIVE
+  verdicts (fail-closed); a `true` never caches, re-probes every reclaim. The builder also
+  un-skipped the backfill test and root-caused a latent handoffMs:0 regression the ticket never
+  named. Lesson: "hygiene" that touches a fence's timing is not hygiene — it earns a concurrency
+  gauntlet, and a bounded window on a double-owner invariant is still a double-owner window.
+- **#348 cost-unknown sweep.** 6 server-side sites; grok flip-tested each and confirmed complete.
+  The builder corrected a wrong ticket claim (omp-graph/* DOES exist — my dispatch inherited a
+  too-narrow grep) and found derive.ts had no exclusion at all. Client-side residual (webapp
+  costSurface.ts) → #367. Lesson: verify a ticket's own factual claims against the tree — the
+  omp-graph "grep found nothing" was a false negative that would have left half the surface unswept.
+
+**Cross-cutting process lessons (promote to memory):**
+- **The gauntlet earns its keep every single time.** 6 of 6 gauntleted PRs this phase had a real
+  defect survive the build — cosmetic fix (#350), fail-open (#355), two-owner window (#354),
+  stored-not-used (#361). A briefed-and-green build is a hypothesis, not a bill of health.
+- **Workflow relay agents stall on backgrounded suites.** Four agents this session backgrounded a
+  `bun test` then "waited for a notification" that fires to the ORCHESTRATOR, not to them, and
+  returned control unfinished. The dispatch must say: run the gate in the FOREGROUND, block in the
+  same bash call, and only then commit/push/report. Resuming a stalled relay costs a round-trip.
+- **Worktree isolation does not stop a builder hardcoding the shared-checkout path.** The #348
+  builder edited /home/lars/sui/omp-squad/... directly (not its worktree prefix), caught it, and
+  restored to pristine — but a write-subagent that string-builds absolute paths can escape its
+  worktree. Verify the shared checkout is clean (git status) after any write-subagent completes.
