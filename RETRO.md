@@ -40,6 +40,17 @@ Three standing rules (campaign doctrine):
 - Builder caught a design estimate wrong (8 test files vs ~4) by grepping with .ts extensions
   — the verify-claims-against-the-tree dispatch line keeps earning its place.
 
+### 2026-08-05 — #347 (harness-aware routing) — CLOSED after 1 review + fix
+- A deliberately CONSERVATIVE fail-open sweep still had 2 HIGH. Lesson: "fail-open is the safe
+  default" is wrong for a SINGLE-VENDOR context — a codex harness has a KNOWN family, so an
+  unclassifiable model must fail CLOSED (assuming-compatible leaks the exact cross-family model
+  the check exists to catch). Fail-open only where there's genuinely no fact to enforce (multi-
+  vendor). And fix the CLASS (fail-closed for single-vendor) not the instance (add o1 to the
+  classifier) — classifiers always lag new model names.
+- The other HIGH was pure ordering: a guard placed AFTER the thing it should gate (cost check saw
+  the pre-remap model). Enforcement order is a correctness property — a check that runs after the
+  decision it should constrain is decoration.
+
 ### 2026-08-05 — T6 #334 (the receipt surface) — CLOSED, the product face — dual-lineage gauntlet + 3 delta-verify rounds
 - The deliverable the whole thesis rests on: a human approves a RECEIPT, not a diff. Live-verified
   it works (a real land → a human answers what/proved/reviewed/rollback/cost cold).
