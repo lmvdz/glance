@@ -135,7 +135,39 @@
  *   than an in-place overwrite (which would reopen the same crash-truncation window Finding 1
  *   round 1 fixed). Fixed: a minimal assertion that the file's inode NUMBER changes across a
  *   rewrite — cheap and sufficient to distinguish rename-based replacement from in-place write,
- *   without a full syscall-spy harness (adjudicated overkill for what this needs to prove).
+ *   without a full syscall-spy harness (adjudicated overkill for what this needs to prove) —
+ *   **superseded in the delta-verify round below, which found this assertion alone insufficient.**
+ *
+ * DELTA-VERIFY ROUND (scoped re-check of rounds 1-3's fixes, fresh codex — 5/7 confirmed CLOSED,
+ * 2 residuals, both fixed here):
+ *
+ *   Residual 1 (real code defect): round 3 fixed the DIRECTORY-level `readdir` error-swallowing
+ *   (Finding 2 there), but `readFileWithStat` still caught EVERY per-FILE `fs.open` failure —
+ *   not just `ENOENT` — and returned `null`, which the caller silently treats as "vanished
+ *   between readdir and open, skip it". A `receipts/a.jsonl` that exists but is unreadable
+ *   (EACCES — mode `0000`) or is a symlink loop (ELOOP) hit that SAME catch-all and got silently
+ *   skipped too — a run would exit 0 reporting success with that file's rows never audited, no
+ *   different from the directory-level bug Finding 2 already fixed one level up. Fixed: only
+ *   `ENOENT` still degrades to a skip (a file genuinely deleted in the readdir→open race, not a
+ *   failure); every other errno throws {@link ReceiptFileUnreadable}, naming the file and the
+ *   underlying error, surfaced by the CLI as exit 3 — same posture, same exit code, as the
+ *   directory-level `ReceiptsDirUnreadable`. Tested with a `0000`-mode fixture file (EACCES).
+ *
+ *   Residual 2 (test-integrity gap): the round-3 inode-change assertion doesn't actually PIN
+ *   atomic rename — a non-atomic `unlink(file); link(tmp, file); unlink(tmp)` sequence also
+ *   changes the destination's inode and would pass that assertion, while reopening a real
+ *   missing-file window (the exact crash-truncation risk Finding 1 round 1 fixed). The
+ *   IMPLEMENTATION already uses real `rename` (unchanged, still correct) — this was a
+ *   test-strength gap, not a code regression. Fixed: the test now polls `fs.stat(file)`
+ *   continuously (every `setImmediate` tick, maximizing scheduling opportunities across
+ *   `writeIfUnchanged`'s real async gaps — the `chmod(1)` subprocess spawn in particular takes
+ *   several event-loop turns) for the FULL duration of the write and asserts the destination path
+ *   is NEVER momentarily unstatable. A real `rename(2)` atomically replaces the destination in
+ *   one step — there is structurally no window for the poll to observe absence; an
+ *   `unlink`-then-`link` implementation has a real (if brief) one, and this test is tuned to
+ *   catch it. The weaker inode-only check is kept alongside as corroborating (not load-bearing)
+ *   evidence, per the adjudicated "at minimum" bar — a full syscall-spy facade remains out of
+ *   scope (round 3's adjudication on that stands).
  *
  * Usage:
  *   bun scripts/backfill-receipt-attribution.ts --state-dir <dir> [--dry-run]
@@ -194,6 +226,24 @@ export class ReceiptsDirUnreadable extends Error {
 	) {
 		super(`refusing to report success: could not read receipts dir "${dir}": ${cause instanceof Error ? cause.message : String(cause)}`);
 		this.name = "ReceiptsDirUnreadable";
+	}
+}
+
+/** Refusing to report success because ONE receipt file couldn't actually be read — delta-verify
+ *  Residual 1: round 3 fixed this at the DIRECTORY level (`ReceiptsDirUnreadable`), but
+ *  `readFileWithStat`'s own `fs.open` catch treated every per-file failure the same as
+ *  "vanished between readdir and open" (a legitimate race, fine to skip). A file that exists but
+ *  is unreadable (EACCES, e.g. mode `0000`) or a symlink loop (ELOOP) hit that same catch-all and
+ *  was silently skipped — success-shaped output for a file this script couldn't actually read.
+ *  Only `ENOENT` still degrades to a skip; every other errno throws this instead, naming the
+ *  file, surfaced by the CLI as the SAME exit code (3) as the directory-level failure. */
+export class ReceiptFileUnreadable extends Error {
+	constructor(
+		public readonly file: string,
+		public readonly cause: unknown,
+	) {
+		super(`refusing to report success: could not read receipt file "${file}": ${cause instanceof Error ? cause.message : String(cause)}`);
+		this.name = "ReceiptFileUnreadable";
 	}
 }
 
@@ -605,13 +655,18 @@ export function markAborted(report: FileReport): void {
 }
 
 /** Read a file's content AND its stat as of that read, via one open fd — ties the two together
- *  so "before" reflects the exact bytes just parsed, not a separately-raced stat call. */
+ *  so "before" reflects the exact bytes just parsed, not a separately-raced stat call. Only
+ *  `ENOENT` (a file genuinely deleted in the readdir→open race) degrades to `null`; any other
+ *  open failure — EACCES (unreadable), ELOOP (symlink loop), EISDIR, EIO, … — throws
+ *  {@link ReceiptFileUnreadable} rather than being silently treated as "nothing to see here"
+ *  (delta-verify Residual 1). */
 async function readFileWithStat(file: string): Promise<{ text: string; stat: Stats } | null> {
 	let fh: fs.FileHandle;
 	try {
 		fh = await fs.open(file, "r");
-	} catch {
-		return null;
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+		throw new ReceiptFileUnreadable(file, err);
 	}
 	try {
 		const stat = await fh.stat();
@@ -815,10 +870,11 @@ Exit codes: 0 = ran (see printed counts for what it did/skipped); 2 = REFUSED to
 live daemon holds --state-dir's single-writer lock (state-lock.ts's daemon.lock — see
 DaemonLockRefusal). This script ACQUIRES AND HOLDS that same lock for its entire pass (both
 modes), so a daemon trying to start while this script is running blocks at ITS OWN startup
-instead of racing an open append descriptor against this script's rename. 3 = the receipts
-directory could not actually be read (permissions, I/O error, a "receipts" path that's a plain
-file — anything other than it simply not existing yet) — see ReceiptsDirUnreadable; this is
-NEVER silently reported as "0 files scanned".
+instead of racing an open append descriptor against this script's rename. 3 = either the
+receipts directory (ReceiptsDirUnreadable) or one specific receipt FILE (ReceiptFileUnreadable)
+could not actually be read — permissions, I/O error, a symlink loop, a path that's a plain file
+where a directory was expected — anything other than it simply not existing yet. NEVER silently
+reported as "0 files scanned" or "that file just wasn't there".
 
 Rules (see the module doc at the top of this file for the full two-round gauntlet rationale):
   - harness/model VALUES are NEVER written by this script. Every missing-harness row gets
@@ -893,7 +949,7 @@ if (import.meta.main) {
 			console.error(err.message);
 			process.exit(2);
 		}
-		if (err instanceof ReceiptsDirUnreadable) {
+		if (err instanceof ReceiptsDirUnreadable || err instanceof ReceiptFileUnreadable) {
 			console.error(err.message);
 			process.exit(3);
 		}

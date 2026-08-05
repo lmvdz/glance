@@ -37,6 +37,17 @@
  *   - `--state-dir` rejects a following `--`-prefixed token as a misplaced flag.
  *   - two test-gap fixes: a barrier proves the lock is genuinely HELD during the write phase (not
  *     just acquired-then-released), and an inode-change assertion pins rename-based replacement.
+ *
+ * Delta-verify round (scoped re-check of rounds 1-3, fresh codex — 5/7 confirmed CLOSED, 2
+ * residuals fixed here):
+ *   - readFileWithStat now only degrades ENOENT to a skip; any other per-FILE open failure
+ *     (EACCES from a 0000-mode file, ELOOP, …) throws ReceiptFileUnreadable — the same posture
+ *     round 3 already gave the directory-level readdir failure.
+ *   - the round-3 inode-change assertion didn't actually pin ATOMIC rename (a non-atomic
+ *     unlink+link also changes the inode and would pass it). Replaced with a stronger assertion:
+ *     the destination path is polled continuously and must NEVER be momentarily unstatable
+ *     during the write — true for a real rename, false for unlink-then-link. The weaker
+ *     inode-only check is kept alongside as corroborating, non-load-bearing evidence.
  */
 
 import { afterAll, afterEach, expect, test } from "bun:test";
@@ -52,6 +63,7 @@ import {
 	MODEL_UNATTRIBUTABLE_REASON,
 	planFile,
 	printReport,
+	ReceiptFileUnreadable,
 	ReceiptsDirUnreadable,
 	runBackfill,
 	writeIfUnchanged,
@@ -554,6 +566,37 @@ test("runBackfill: a genuinely-missing receipts dir (ENOENT) still degrades to z
 	expect(report.filesScanned).toBe(0);
 });
 
+// ── Delta-verify round: per-file read errors (Residual 1) ────────────────────────────────────
+
+test("runBackfill: a receipts/a.jsonl file that exists but is UNREADABLE (mode 0000, EACCES) throws ReceiptFileUnreadable — never silently skipped", async () => {
+	if (process.getuid?.() === 0) return; // root ignores file permission bits — this test needs a non-root process to observe EACCES
+	const stateDir = await tmpStateDir();
+	await writeRawLines(stateDir, "a1", [baseReceipt({ agentId: "a1", harness: undefined })]);
+	const file = receiptPath(stateDir, "a1");
+	await fs.chmod(file, 0o000);
+	try {
+		await expect(runBackfill({ stateDir, dryRun: true })).rejects.toBeInstanceOf(ReceiptFileUnreadable);
+	} finally {
+		await fs.chmod(file, 0o644); // restore so the tmpdir cleanup in afterAll can actually remove it
+	}
+});
+
+test("runBackfill: an unreadable file blocks the WHOLE run (never reports partial success) — a sibling that WOULD have been processed doesn't hide it", async () => {
+	if (process.getuid?.() === 0) return;
+	const stateDir = await tmpStateDir();
+	await writeRawLines(stateDir, "unreadable", [baseReceipt({ agentId: "unreadable", harness: undefined })]);
+	await writeRawLines(stateDir, "normal", [baseReceipt({ agentId: "normal", harness: undefined })]);
+	const file = receiptPath(stateDir, "unreadable");
+	await fs.chmod(file, 0o000);
+	try {
+		const err = await runBackfill({ stateDir, dryRun: true }).catch((e) => e);
+		expect(err).toBeInstanceOf(ReceiptFileUnreadable);
+		expect((err as ReceiptFileUnreadable).file).toContain("unreadable");
+	} finally {
+		await fs.chmod(file, 0o644);
+	}
+});
+
 // ── Round 3: mode preservation widened to special bits (Finding 4) ──────────────────────────────
 
 /** Bun 1.3.14's `fs.chmod`/`FileHandle.chmod` silently drops the setgid bit even under
@@ -636,17 +679,50 @@ test("runBackfill: the real lock is HELD for the whole pass — a concurrent acq
 	expect(await probeLockFromChildProcess(stateDir)).toBe(0);
 });
 
-// ── Round 3: pin rename-based atomicity via inode change (Finding 7 — test gap) ──────────────────
+// ── Delta-verify round: pin ATOMIC rename, not just "the inode changed" (Residual 2) ─────────────
+//
+// The round-3 inode-only assertion below is real but INSUFFICIENT: a non-atomic
+// `unlink(file); link(tmp, file); unlink(tmp)` sequence ALSO changes the destination's inode and
+// would pass it, while reopening a genuine missing-file window. The stronger test polls the
+// destination continuously during the write and requires it to be statable at every single poll
+// — true by construction for a real `rename(2)` (which replaces the destination atomically, in
+// one step — there is no window for an unlink-then-link race to hide in), false for the
+// non-atomic alternative. The inode check is kept as secondary, non-load-bearing evidence.
 
-test("writeIfUnchanged: the file's inode CHANGES across a rewrite — proves replacement via rename, not an in-place overwrite", async () => {
+test("writeIfUnchanged: the destination path is NEVER momentarily unstatable during the write — pins ATOMIC rename, not just an inode side effect", async () => {
 	const stateDir = await tmpStateDir();
 	await writeRawLines(stateDir, "a1", [baseReceipt({ agentId: "a1" })]);
 	const file = receiptPath(stateDir, "a1");
 	const before = await fs.stat(file);
 
-	const result = await writeIfUnchanged(file, `${JSON.stringify(baseReceipt({ agentId: "a1", harnessUnattributableReason: "no_run_scoped_harness_evidence" }))}\n`, before);
-	expect(result.written).toBe(true);
+	let sawMissing = false;
+	let polling = true;
+	const pollLoop = (async () => {
+		while (polling) {
+			try {
+				await fs.stat(file);
+			} catch {
+				sawMissing = true;
+				break;
+			}
+			// Yield as tightly as the event loop allows — setImmediate fires between I/O phases, so
+			// this gets maximum scheduling opportunities across writeIfUnchanged's real async gaps
+			// (temp-file write, the chmodLikeSource subprocess spawn+exit, fsync, the rename itself).
+			// A real rename has NO window to observe; a hypothetical unlink-then-link regression does,
+			// however brief, and this loop is tuned to catch it.
+			await new Promise((r) => setImmediate(r));
+		}
+	})();
 
+	const result = await writeIfUnchanged(file, `${JSON.stringify(baseReceipt({ agentId: "a1", harnessUnattributableReason: "no_run_scoped_harness_evidence" }))}\n`, before);
+	polling = false;
+	await pollLoop;
+
+	expect(result.written).toBe(true);
+	expect(sawMissing).toBe(false); // the destination was ALWAYS statable throughout — the actual atomicity guarantee
+
+	// Secondary, non-load-bearing corroboration (round 3): a genuinely new inode, consistent with
+	// replacement rather than an in-place content overwrite of the SAME inode.
 	const after = await fs.stat(file);
-	expect(after.ino).not.toBe(before.ino); // a genuinely new inode — an in-place overwrite would keep the same one
+	expect(after.ino).not.toBe(before.ino);
 });
