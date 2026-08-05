@@ -8,7 +8,7 @@
  */
 
 import { EventEmitter } from "node:events";
-import { envBool, envBoolAliased, envInt, envNumber, raceOnceEnabled } from "./config.ts";
+import { envBool, envBoolAliased, envInt, envNumber, landConfirmEnabled, raceOnceEnabled } from "./config.ts";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import { existsSync, realpathSync } from "node:fs";
@@ -1148,8 +1148,14 @@ export class SquadManager extends EventEmitter {
 	private readonly store: Store;
 	/** True when the registry owns the machine-global janitors (DB mode). */
 	private readonly skipGlobalJanitors: boolean;
-	/** Safety valve (OMP_SQUAD_LAND_CONFIRM, default ON; set =0 to auto-merge): a GREEN verify stages a one-tap Land instead of blind-merging into the shared checkout. */
-	private readonly landConfirm = process.env.OMP_SQUAD_LAND_CONFIRM !== "0";
+	/** Safety valve (OMP_SQUAD_LAND_CONFIRM, default ON; set =0 to auto-merge): a GREEN verify stages a one-tap Land instead of blind-merging into the shared checkout. Resolved ONCE, at construction, from `config.ts`'s `landConfirmEnabled()` — never re-read afterward. `effectiveLandConfirm` below exposes THIS cached value (not a fresh env re-read) so `glance doctor` reports exactly what this running instance will act on, even in the (today theoretical — nothing mutates this env var post-boot) case where the process env changes after construction (glance#329, gauntlet round 1: codex found the server's payload previously re-read the env per-request while this field was cached at construction, a lifetime mismatch that could report the opposite of what a GREEN verify would actually do). */
+	private readonly landConfirm = landConfirmEnabled();
+	/** The land-confirm posture THIS instance is actually running under (see `landConfirm` above) — read
+	 *  this from the doctor/observability payload, never `landConfirmEnabled()` directly, so a report can
+	 *  never diverge from what this manager will do on its next GREEN verify. */
+	get effectiveLandConfirm(): boolean {
+		return this.landConfirm;
+	}
 	private pollTimer?: Timer;
 	/** Throttle counter for the periodic orphan-host reap in poll(). */
 	private reapTicks = 0;
