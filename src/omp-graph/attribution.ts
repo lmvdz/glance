@@ -35,6 +35,11 @@ export interface AttributionDoc {
 	/** harness → model → total $ over the range. */
 	matrix: Record<string, Record<string, number>>;
 	totalCost: number;
+	/** Receipts in range whose cost is UNKNOWN (unverified-usage harness — see `RunReceipt.costUnknown`),
+	 *  excluded from `totalCost`/`byModel`/`byHarness`/`matrix` rather than folded in as a fabricated $0
+	 *  (ticket #348, same honesty rule as attribution-scoreboard.ts/token-burn.ts). Absent/0 when every
+	 *  in-range receipt had a known cost. */
+	unattributedRuns?: number;
 	plan?: PlanWorth;
 	generatedAt: number;
 }
@@ -97,14 +102,24 @@ export function buildAttribution(
 	const byHarness: Record<string, number[]> = {};
 	const matrix: Record<string, Record<string, number>> = {};
 	let totalCost = 0;
+	let unattributedRuns = 0;
 
 	const bins = (rec: Record<string, number[]>, key: string): number[] => (rec[key] ??= new Array<number>(n).fill(0));
 
 	for (const r of receipts) {
-		const cost = r.costUsd ?? 0;
-		if (cost <= 0) continue;
 		const at = r.endedAt ?? r.startedAt; // same convention as the receipts adapter's $/hr
 		if (!inRange(at, range)) continue;
+		// costUnknown (ticket #348, same honesty rule as attribution-scoreboard.ts/token-burn.ts): tallied
+		// separately, excluded from every $ sum below — never folded in as a fabricated $0. Checked
+		// explicitly rather than relying on the `cost <= 0` skip below (costUnknown always pairs with an
+		// absent costUsd today, but that pairing is `squad-manager.ts`'s stamping contract, not this
+		// module's to assume forever).
+		if (r.costUnknown) {
+			unattributedRuns += 1;
+			continue;
+		}
+		const cost = r.costUsd ?? 0;
+		if (cost <= 0) continue;
 		const i = Math.min(n - 1, Math.floor((at - range.start) / binMs));
 		const model = modelFamily(r.model);
 		const harness = r.harness || "omp";
@@ -139,6 +154,7 @@ export function buildAttribution(
 		byHarness,
 		matrix,
 		totalCost,
+		unattributedRuns: unattributedRuns || undefined,
 		plan,
 		generatedAt: opts.now ?? Date.now(),
 	};

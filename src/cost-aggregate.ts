@@ -226,6 +226,13 @@ export function buildCostAggregateFromReceipts(receipts: RunReceipt[], outcomes:
 	const doc = emptyDoc(now);
 	const sorted = [...receipts].sort((a, b) => (a.endedAt ?? a.startedAt) - (b.endedAt ?? b.startedAt));
 	for (const r of sorted) {
+		// Ticket #348 (T8's sibling): `appendReceipt` (receipts.ts) SKIPS a costUnknown receipt entirely
+		// rather than recording it with `costUsd ?? 0` — a full-scan rebuild must reproduce the exact
+		// same cells a live incremental process would have reached feeding this same receipt history
+		// (the module doc's "rebuild equals incremental" property), so it must skip identically here.
+		// Without this, a rebuild (triggered by a missing/corrupt cache) would silently re-admit every
+		// costUnknown receipt as a fabricated $0 attempt that live incremental writes always excluded.
+		if (r.costUnknown) continue;
 		applyAttemptToDoc(doc, r.model, r.tier, r.lane, r.costUsd ?? 0, r.endedAt ?? r.startedAt);
 	}
 	for (const [key, counts] of Object.entries(outcomes)) {

@@ -43,10 +43,17 @@ export interface SpanSeed {
 export interface TraceRollup {
 	runs: number;
 	toolCalls: number;
+	/** Sum of costUsd across KNOWN-cost runs only — a `costUnknown` receipt (see `RunReceipt.costUnknown`)
+	 *  contributes to `runs`/`unattributedRuns` but never here (ticket #348, same honesty rule as
+	 *  attribution-scoreboard.ts/token-burn.ts: summing `costUsd ?? 0` for an unverified-usage harness
+	 *  fabricates a $0 that reads as "free"). */
 	costUsd: number;
 	tokens: number;
 	durationMs: number;
 	errors: number;
+	/** Runs rolled up here whose cost is UNKNOWN — excluded from `costUsd` above; a consumer that ignores
+	 *  this field silently under-counts spend. Absent/0 when every run had a known cost. */
+	unattributedRuns: number;
 }
 
 export interface TraceNode extends Span {
@@ -102,7 +109,7 @@ function attrs(input: Record<string, unknown>): Record<string, string> | undefin
 }
 
 function emptyRollup(): TraceRollup {
-	return { runs: 0, toolCalls: 0, costUsd: 0, tokens: 0, durationMs: 0, errors: 0 };
+	return { runs: 0, toolCalls: 0, costUsd: 0, tokens: 0, durationMs: 0, errors: 0, unattributedRuns: 0 };
 }
 
 function addRollup(a: TraceRollup, b: TraceRollup): void {
@@ -112,16 +119,20 @@ function addRollup(a: TraceRollup, b: TraceRollup): void {
 	a.tokens += b.tokens;
 	a.durationMs += b.durationMs;
 	a.errors += b.errors;
+	a.unattributedRuns += b.unattributedRuns;
 }
 
 function receiptRollup(r: RunReceipt): TraceRollup {
 	return {
 		runs: 1,
 		toolCalls: r.toolCalls,
-		costUsd: r.costUsd ?? 0,
+		// costUnknown (ticket #348): excluded from the sum, tallied into unattributedRuns instead — never
+		// folded into costUsd as a fabricated zero. See the TraceRollup.costUsd doc.
+		costUsd: r.costUnknown ? 0 : (r.costUsd ?? 0),
 		tokens: r.tokens?.total ?? 0,
 		durationMs: r.durationMs ?? (r.endedAt && r.startedAt ? Math.max(0, r.endedAt - r.startedAt) : 0),
 		errors: r.status === "error" ? 1 : 0,
+		unattributedRuns: r.costUnknown ? 1 : 0,
 	};
 }
 
