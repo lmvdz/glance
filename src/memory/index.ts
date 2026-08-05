@@ -23,8 +23,8 @@ export type { DecisionLedgerStore, RecordDecisionOutcome, CaptureDecisionInput, 
 // ── reviewer-ensemble weights: measured per-lineage precision (Weaver-lite) ─────
 export {
 	MIN_FINDINGS_FOR_WEIGHT, parseReviewerLedger, renderReviewerReport, reviewerPrecision,
-	DEFAULT_REVIEWER_LEDGER_PATH, reviewerPrecisionFor, readReviewerLedgerEntries,
-	reviewerPrecisionFromLedger, renderReviewerPrecision,
+	DEFAULT_REVIEWER_LEDGER_PATH, DEFAULT_REVIEWER_LEDGER_REPO, reviewerPrecisionFor, readReviewerLedgerEntries,
+	reviewerPrecisionFromLedger, renderReviewerPrecision, appendReviewerLedgerEntry, semanticKey,
 } from "./reviewer-weights.ts";
 export type { ReviewerLineage, ReviewerLedgerEntry, LineagePrecision, ReviewerPrecisionStamp } from "./reviewer-weights.ts";
 

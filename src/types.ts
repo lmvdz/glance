@@ -27,6 +27,7 @@ import type { LadderPriority } from "./attention-ladder.ts";
 import type { StoredTranscriptEntry } from "./voice-call-projection.ts";
 import type { VoiceCallParticipant } from "./voice-call-manager.ts";
 import type { ReviewerPrecisionStamp } from "./memory/index.ts";
+import type { PanelVerdict } from "./rail/index.ts";
 
 
 /** One recorded (or denied) `{from,to,reason,at}` transition — the persisted shape written to
@@ -312,6 +313,14 @@ export interface ValidationRecord {
 	/** The one-shot re-check of a high-severity lens objection (concern 05): did a second, claim-scoped
 	 *  look confirm it? `confirmed:true` maxes the confidence penalty; it still never vetoes. */
 	lensVerify?: { lens: LensId; claim: string; confirmed: boolean };
+	/** T5 (glance#333) — the in-code cross-lineage gauntlet panel's outcome, when the diff's risk tier
+	 *  warranted spawning one (`src/rail/panel.ts`'s `runReviewPanel`, reusing `land-risk.ts`'s sensitive-
+	 *  path/blast-radius tiering). Distinct-lineage blind reviewers, never shown the criteria/rationale
+	 *  above or each other's verdicts. PURELY ADDITIVE — recording + surfacing only; it never changes
+	 *  `verdict`/`veto`/`inconclusive` above. Absent means the panel never ran (docs-only diff, tier
+	 *  didn't warrant one, the master flag is off, or fewer than 2 distinct-lineage reviewers were
+	 *  available) — never an empty array standing in for "ran and found nothing". */
+	panel?: PanelVerdict[];
 	/** Lossless gate-log offload (plans/eap-borrows/ concern 03): pointer path(s) under
 	 *  `<stateDir>/gate-logs/<agentId>/` to the FULL diff/proof text when either exceeded the judge's
 	 *  excerpt budget — the judge prompt itself only saw a diff-aware/head+tail excerpt with the same

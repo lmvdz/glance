@@ -27,15 +27,19 @@ export function landRiskGateEnabled(): boolean {
 	return envBool("OMP_SQUAD_LAND_RISK_GATE", false);
 }
 
-/** Auto-land is blocked once the branch changes at least this many files (env-tunable). */
-function maxDiffFiles(): number {
+/** Auto-land is blocked once the branch changes at least this many files (env-tunable). Exported
+ *  (T5, glance#333) so the in-daemon review-panel gate (`src/rail/panel.ts`) can reuse the SAME
+ *  blast-radius threshold for its OWN, separately-flagged tier decision — "reuse land-risk's tiering"
+ *  means share the signal, not the blocking enablement (`landRiskGateEnabled` stays this gate's own). */
+export function maxDiffFiles(): number {
 	return envInt("OMP_SQUAD_LAND_MAX_DIFF_FILES", 40);
 }
 
 /** Sensitive PATHS whose unattended modification warrants a human glance — secrets, env, CI/CD,
  *  release/deploy config, dependency lockfiles, infra. Mirrors the spirit of squad-manager's RISKY_RE
- *  (which classifies destructive request TEXT) but matches changed FILE paths. */
-const RISKY_PATH_RE =
+ *  (which classifies destructive request TEXT) but matches changed FILE paths. Exported (T5,
+ *  glance#333) for the SAME reuse reason as `maxDiffFiles` above. */
+export const RISKY_PATH_RE =
 	/(^|\/)\.env($|\.|\/)|(^|\/)\.github\/workflows\/|(^|\/)(Dockerfile|docker-compose)|(^|\/)(package-lock\.json|bun\.lock|yarn\.lock|pnpm-lock\.yaml|Cargo\.lock|poetry\.lock)$|(^|\/)(secrets?|credentials?)(\/|\.)|(^|\/)\.?(deploy|release|infra|terraform|k8s|kubernetes|helm)(\/|\.)|(^|\/)id_(rsa|ed25519)($|\.)/i;
 
 const LIST_CAP = 8;

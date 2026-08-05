@@ -101,6 +101,21 @@ export interface LensVerdictDTO {
   claim: string;
 }
 
+/** Mirrors backend `PanelVerdict` (src/rail/panel.ts) — T5 (glance#333)'s in-code cross-lineage
+ *  gauntlet panel: one blind reviewer's outcome for a diff whose risk tier warranted spawning a panel.
+ *  `survived` is present ONLY when a high-severity objection was independently rechecked (mirrors
+ *  `lensVerify`'s discipline below) — never a fabricated adjudication for a finding nobody rechecked. */
+export interface PanelVerdictDTO {
+  lineage: "anthropic" | "openai" | "google" | "xai" | "unknown";
+  harness: string;
+  verdict: "accept" | "object" | "timeout" | "error";
+  severity?: "low" | "high";
+  claim?: string;
+  concernClass?: string;
+  survived?: boolean;
+  ranAt: number;
+}
+
 /** Mirrors backend `ReviewerPrecisionStamp` (src/memory/reviewer-weights.ts) — glance#332's land-path
  *  moat centerpiece: the judging lineage's MEASURED precision from the repo-committed reviewer ledger
  *  at judgment time. `survivedRate` is ABSENT (not merely `undefined`-valued) exactly when `n === 0`
@@ -154,6 +169,10 @@ export interface ValidationRecordDTO {
   /** The one-shot re-check of a high-severity lens objection. `confirmed:true` maxes the confidence
    *  penalty; it still never vetoes. */
   lensVerify?: { lens: "regression"; claim: string; confirmed: boolean };
+  /** T5 (glance#333): the in-code cross-lineage gauntlet panel's outcome, when the diff's risk tier
+   *  warranted spawning one. Purely additive — never changes `verdict` above. Absent means the panel
+   *  never ran; never an empty array standing in for "ran and found nothing". */
+  panel?: PanelVerdictDTO[];
   /** Lossless gate-log offload (plans/eap-borrows/ concern 03): pointer path(s) under
    *  `<stateDir>/gate-logs/<agentId>/` to the FULL diff/proof text when either exceeded the judge's
    *  excerpt budget. Absent ⇒ nothing was oversized (the common case). Type hygiene only — not rendered
