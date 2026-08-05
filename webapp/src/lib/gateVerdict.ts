@@ -97,6 +97,50 @@ export function notSurfacedSentence(count: number): string {
   return `${count} check${count === 1 ? '' : 's'} passed with nothing to say about ${count === 1 ? 'it' : 'them'}. They are named here so you can tell a quiet pass from a check that never ran — the second is the one worth worrying about.`;
 }
 
+export interface ReviewerPrecisionInput {
+  lineage?: string;
+  n?: number;
+  survivedRate?: number;
+  provisional?: boolean;
+  /** Gauntlet round 1 additions — see `ReviewerPrecisionStampDTO` (lib/dto.ts) for the full contract. */
+  rejected?: number;
+  corrupt?: true;
+  unreadable?: string;
+}
+
+/** `Math.round` alone collapses any true rate below 0.5% to a printed "0%" — indistinguishable from an
+ *  honest, exact zero (gauntlet round 1, grok). Mirrors the backend's `formatPrecisionPct`. */
+function precisionPct(rate: number): string {
+  const p = rate * 100;
+  if (p > 0 && p < 1) return '<1%';
+  return `${Math.round(p)}%`;
+}
+
+/**
+ * How trustworthy THIS reviewer's own track record is, as a sentence — glance#332's land-path moat:
+ * the number is read straight from the repo-committed reviewer ledger (plans/.reviews/reviewer-ledger.jsonl)
+ * at judgment time, never fabricated or smoothed. A lineage with no adjudicated findings yet is
+ * reported as UNMEASURED, never as a 0% precision — a 0% would read as "checked and found untrustworthy",
+ * which is a different (and false) claim from "never checked at all". Gauntlet round 1 hardened this
+ * further: an unreadable or too-corrupt-to-trust ledger gets its OWN sentence, distinct from plain
+ * "no history yet"; a genuinely missing rate on an n>0 input is never rendered as a fabricated 0%.
+ */
+export function reviewerPrecisionLine(input: ReviewerPrecisionInput | undefined): string | undefined {
+  if (!input || !input.lineage) return undefined;
+  if (input.unreadable) return `${input.lineage}’s ledger record could not be read (${input.unreadable}) — this is a read fault, not an honest "no history".`;
+  if (input.corrupt) {
+    const rows = input.rejected ?? 0;
+    return `${input.lineage}’s ledger is too corrupt to trust (${rows} unparseable row${rows === 1 ? '' : 's'}) — its precision is unmeasured, not assumed.`;
+  }
+  const n = input.n ?? 0;
+  if (n === 0) return `${input.lineage}’s findings have no adjudicated history yet — its precision is unmeasured, not assumed to be good or bad.`;
+  if (typeof input.survivedRate !== 'number' || !Number.isFinite(input.survivedRate)) return `${input.lineage}’s precision is unmeasured (n=${n}, rate unavailable) — never a fabricated percentage.`;
+  const pct = precisionPct(input.survivedRate);
+  const corruptionNote = input.rejected ? `; ${input.rejected} unparseable row${input.rejected === 1 ? '' : 's'} ignored` : '';
+  const basis = input.provisional ? `provisional — only ${n} adjudicated finding${n === 1 ? '' : 's'} so far${corruptionNote}` : `measured across ${n} adjudicated findings${corruptionNote}`;
+  return `${input.lineage}’s findings have survived adjudication ${pct} of the time (${basis}).`;
+}
+
 /** What is missing from the record, stated rather than left blank. */
 export function absences(input: { validation?: unknown; doneProof?: unknown; landAttempt?: unknown; malformedLandRecords?: number }): string[] {
   const out: string[] = [];

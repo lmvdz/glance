@@ -182,7 +182,7 @@ import { selectReapable, type WorktreeInfo } from "./worktree-reaper.ts";
 import { scrubbedSpawnEnv } from "./spawn-env.ts";
 import { changedFiles, filesTouchedSinceBase } from "./explore.ts";
 import { appendReceipt, confirmDeliveredFlags, EFFICIENCY_FLAG_PREFIX, readAllReceipts, readReceipts, RunAccumulator, splitCapabilityTokens } from "./receipts.ts";
-import { DecisionLedger } from "./memory/index.ts";
+import { DecisionLedger, renderReviewerPrecision } from "./memory/index.ts";
 import { classifyWhereToLookEntry, listSymptoms, readSymptom, saveSymptom, statWhereToLookEntry, symptomId, validateSymptomText, validateWhereToLookCount, type SymptomEntry } from "./memory/symptoms.ts";
 import { buildPrBody } from "./pr-body.ts";
 import { membraneBreakerCadence } from "./membrane-breaker-cadence.ts";
@@ -5180,6 +5180,18 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
+	 * Injection seam (mirrors `validatorJudgeOverride` above) so tests can point the land receipt's
+	 * reviewer-precision reader at a fixture ledger instead of the repo-committed one — DELIBERATELY a
+	 * method, never an environment variable (gauntlet round 1, codex's "env-ledger-shadow" finding: an
+	 * env hatch here is reachable from a launch-directory `.env`, which Bun auto-loads at boot, letting
+	 * a malicious/misplaced `.env` redirect the land path's ledger read). `undefined` ⇒ `validatorGate`'s
+	 * own default (`DEFAULT_REVIEWER_LEDGER_PATH`, the real repo-committed ledger).
+	 */
+	protected reviewerLedgerPathOverride(): string | undefined {
+		return undefined;
+	}
+
+	/**
 	 * Independent-validator veto (Epic 3, DESIGN §1) — runs BEFORE any mode dispatch, on every
 	 * `landBranch` call INCLUDING forced lands (`requireProof:false` never skips it — a forced land
 	 * bypasses the proof gate, not the semantic one). Scores the diff against the feature's declared
@@ -5206,6 +5218,7 @@ export class SquadManager extends EventEmitter {
 			authorModel: rec?.dto.model,
 			authorHarness: rec?.dto.harness,
 			agentId: opts.agentId,
+			reviewerLedgerPath: this.reviewerLedgerPathOverride(),
 		});
 		if (rec) {
 			rec.dto.validation = record;
@@ -12884,7 +12897,12 @@ export class SquadManager extends EventEmitter {
 	}
 
 	private emitValidationVerdictEvent(rec: AgentRecord, record: ValidationRecord): void {
-		this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_GATE_VERDICT, `The gate says ${record.verdict}, with reviewers agreeing ${(record.agreement * 100).toFixed(0)}% of the time and ${(record.confidence * 100).toFixed(0)}% confidence. ${record.verdict === "pass" ? "Nothing is waiting on you unless you disagree with it." : "This one needs you before it can go further."}`, {
+		// glance#332: the receipt a human approves cites the judging lineage's MEASURED ledger precision
+		// — a real number ("reviewer X, measured precision p% (n adjudicated rows)") or an honest
+		// "unmeasured (n=0)", never fabricated. Absent only on the no-criteria "skipped" verdict, which
+		// never resolves a reviewer identity in the first place.
+		const precisionNote = record.reviewerPrecision ? ` (${renderReviewerPrecision(record.reviewerPrecision)})` : "";
+		this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_GATE_VERDICT, `The gate says ${record.verdict}, with reviewers agreeing ${(record.agreement * 100).toFixed(0)}% of the time and ${(record.confidence * 100).toFixed(0)}% confidence${precisionNote}. ${record.verdict === "pass" ? "Nothing is waiting on you unless you disagree with it." : "This one needs you before it can go further."}`, {
 			verdict: record.verdict,
 			agreement: record.agreement,
 			confidence: record.confidence,
@@ -12894,6 +12912,7 @@ export class SquadManager extends EventEmitter {
 			authorLineage: record.authorLineage,
 			reviewerLineage: record.reviewerLineage,
 			sameLineage: record.sameLineage,
+			reviewerPrecision: record.reviewerPrecision,
 			lensAdvisory: record.lensAdvisory,
 			lensVerify: record.lensVerify,
 			gateLogPaths: record.gateLogPaths,

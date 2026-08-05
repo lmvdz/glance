@@ -26,6 +26,7 @@ import type { ComplexityTier } from "./model-outcomes.ts";
 import type { LadderPriority } from "./attention-ladder.ts";
 import type { StoredTranscriptEntry } from "./voice-call-projection.ts";
 import type { VoiceCallParticipant } from "./voice-call-manager.ts";
+import type { ReviewerPrecisionStamp } from "./memory/index.ts";
 
 
 /** One recorded (or denied) `{from,to,reason,at}` transition — the persisted shape written to
@@ -297,6 +298,13 @@ export interface ValidationRecord {
 	authorLineage?: ModelLineage;
 	reviewerLineage?: ModelLineage;
 	sameLineage?: boolean;
+	/** glance#332 — the judging lineage's MEASURED precision from plans/.reviews/reviewer-ledger.jsonl
+	 *  at judgment time (`src/memory/reviewer-weights.ts`'s `reviewerPrecisionFromLedger`), so the land
+	 *  receipt a human approves cites "reviewer X, measured precision p (n adjudicated rows)" — a real
+	 *  number, never fabricated or smoothed. Absent only when no reviewer identity was resolved (e.g.
+	 *  the "skipped"/no-criteria path, which never reads a reviewer at all); a resolved reviewer with
+	 *  zero ledger history still gets a stamp, with `n: 0` and no `survivedRate`. */
+	reviewerPrecision?: ReviewerPrecisionStamp;
 	/** Perspective-diversified review (plans/perspective-diversified-review/): advisory out-of-criteria
 	 *  lens verdicts that ran ALONGSIDE the authoritative criteria judge. Advisory only — they adjust the
 	 *  confidence score and can trigger a narrow re-check, but NEVER change the veto. Absent ⇒ none ran. */
