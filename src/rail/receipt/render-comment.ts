@@ -24,6 +24,12 @@ import { renderReviewerPrecision } from "../../memory/index.ts";
  *   - backtick → entity (no inline-code, and no ```-fence close)
  *   - `[` `]` → entities (no `[label](url)` / `![img]()` disguised links)
  *   - `*` → entity (no `**bold**` forging a verdict-like emphasis inside a cell)
+ *   - bare `http(s)://…` and `www.` → de-linkified (gauntlet round 2, codex HIGH / grok LOW): GFM
+ *     AUTO-LINKS a bare URL an agent plants in a branch/message/note/path into a clickable link on the
+ *     trust surface — a phishing sink even though it can't forge the verdict. Breaking the scheme's `:`
+ *     (and `www.`'s dot) with an HTML entity kills the autolink in the raw source while still RENDERING
+ *     the exact URL text (entity-decoded) — so a reviewer sees `http://evil…` as plain, non-clickable
+ *     text. The receipt's OWN validated link (renderHref) never passes through here, so it stays live.
  * Everything else (parens, %, digits) is inert without those. `&` is escaped first so the entities
  * this inserts are themselves literal.
  */
@@ -38,6 +44,11 @@ export function mdEsc(s: string): string {
 		.replace(/\[/g, "&#91;")
 		.replace(/\]/g, "&#93;")
 		.replace(/\*/g, "&#42;")
+		// De-linkify bare autolinks: break the scheme colon / www dot with an entity (`:`→`&#58;`,
+		// `.`→`&#46;`) so GFM's autolink pattern no longer matches the raw text, but the rendered,
+		// entity-decoded string is byte-identical to the original URL — visible, not clickable.
+		.replace(/\bhttps?:\/\//gi, (m) => m.replace(":", "&#58;"))
+		.replace(/\bwww\./gi, "www&#46;")
 		.trim();
 }
 

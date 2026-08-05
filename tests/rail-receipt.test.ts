@@ -305,6 +305,18 @@ describe("mdEsc — markdown/HTML injection neutralization (gauntlet round 1)", 
 		expect(mdEsc("</details>")).toBe("&lt;/details&gt;");
 		expect(mdEsc("x\r\ny")).toBe("x y"); // CRLF collapses, no new row
 	});
+
+	test("de-linkifies bare autolinks (gauntlet r2) — visible text, no clickable link", () => {
+		// The scheme colon (and a `www.` dot) is broken with an entity so GFM's autolink pattern no longer
+		// matches the raw source, but the rendered (entity-decoded) text is byte-identical to the URL. A
+		// non-scheme dot (evil.example) is left alone — a bare domain isn't autolinked by GFM.
+		expect(mdEsc("see http://evil.example/x")).toBe("see http&#58;//evil.example/x");
+		expect(mdEsc("HTTPS://Evil.example")).toBe("HTTPS&#58;//Evil.example");
+		expect(mdEsc("go to www.evil.example now")).toBe("go to www&#46;evil.example now");
+		// No raw `http://` / `www.` substring survives to be autolinked.
+		expect(mdEsc("http://evil.example")).not.toContain("http://");
+		expect(mdEsc("www.evil.example")).not.toContain("www.");
+	});
 });
 
 describe("renderReceiptComment — injection cannot forge a verdict", () => {
@@ -357,6 +369,18 @@ describe("renderReceiptComment — injection cannot forge a verdict", () => {
 		expect(md).not.toContain("](javascript:");
 		const md2 = renderReceiptComment(greenReceipt(), { receiptHref: "https://ok.example/r.html", hrefKind: "url" });
 		expect(md2).toContain("[open the full receipt](https://ok.example/r.html)");
+	});
+
+	test("a bare URL in an agent field is NOT clickable, but the legit receipt link still is (gauntlet r2)", () => {
+		const md = renderReceiptComment(
+			greenReceipt({ message: "ship it, details at https://evil.example/approve", branch: "feat/x", validation: validation(measured) }),
+			{ receiptHref: "https://ok.example/r.html", hrefKind: "url" },
+		);
+		// The agent-authored bare URL is de-linked (no raw scheme survives to autolink)…
+		expect(md).not.toContain("https://evil.example");
+		expect(md).toContain("https&#58;//evil.example"); // still visible as text
+		// …while the receipt's own validated link stays a real, clickable link.
+		expect(md).toContain("[open the full receipt](https://ok.example/r.html)");
 	});
 });
 

@@ -874,10 +874,16 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 	});
 	updatePendingPr(stateDir, branch, { state: "merged", mergedAt: Date.now(), proofAt: Date.now() });
 
-	// Receipt attribution (T6): the landed commit is the PR's OWN merge commit (`gh pr merge` produced
-	// it on the remote; local HEAD was never moved), and the rollback point is the base captured
-	// pre-merge. Both are stable SHAs the receipt diffs/rolls-back from without racing local HEAD.
-	return { ok: true, committed: true, merged: true, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, prState: "merged", head0: prBaseTip, landedCommit: assertion.mergeCommit ?? assertion.commit };
+	// Receipt attribution (T6, gauntlet round 2 — codex HIGH): the landed commit must be the SHA that
+	// actually SITS ON MAIN, so a human can find it. `assertMerged(..., "merge")` shortcuts to the branch
+	// TIP — but a `--merge` PR creates a NEW merge commit M on the base whose parent is that tip, so the
+	// tip is NOT the landed commit and `head0..tip` can diverge from `head0..M` once the base advanced.
+	// The post-merge `origin/<default>` tip IS that landed commit uniformly across merge/squash/rebase
+	// (it's whatever `gh pr merge` just produced), captured here under the land lock right after the
+	// authoritative fetch above. Fall back to the assertion's own merge-commit (squash/rebase already
+	// carry the real oid), then the branch tip, only if that ref read fails.
+	const onMain = (await git(["rev-parse", `origin/${opts.defaultBranch}`], repo)).stdout || undefined;
+	return { ok: true, committed: true, merged: true, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, prState: "merged", head0: prBaseTip, landedCommit: onMain ?? assertion.mergeCommit ?? assertion.commit };
 }
 
 /**
