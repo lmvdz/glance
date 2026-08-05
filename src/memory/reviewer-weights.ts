@@ -102,6 +102,45 @@ export function semanticKey(e: Pick<ReviewerLedgerEntry, "at" | "lineage" | "con
 	return JSON.stringify([e.at.trim(), e.lineage.trim(), e.concernClass.trim(), e.source.trim(), e.survived, e.note.trim(), e.severity ?? ""]);
 }
 
+/** Trim an arbitrary (possibly not-yet-validated) severity value and accept it only if it's one of the
+ *  three known enum values afterward — anything else (out-of-enum, non-string, absent) normalizes to
+ *  `undefined`, same treatment a malformed file row already gets. `unknown`-typed input on purpose:
+ *  the ledger's file parser calls this on a raw, not-yet-narrowed JSON field (this codebase's own
+ *  "json-parse-as-cast" rule forbids casting untrusted parsed JSON to a type before narrowing it). */
+export function normalizeSeverity(value: unknown): ReviewerLedgerEntry["severity"] {
+	const trimmed = typeof value === "string" ? value.trim() : value;
+	return trimmed === "high" || trimmed === "medium" || trimmed === "low" ? trimmed : undefined;
+}
+
+/**
+ * Normalize a full, already-typed entry EXACTLY the way `parseReviewerLedger` normalizes a raw line
+ * read from the file — trim `at`/`lineage`/`concernClass`/`source`/`note`, and normalize `severity` via
+ * `normalizeSeverity` above.
+ *
+ * T5 gauntlet round 3 (glance#356, finding #2): `semanticKey` itself does NOT trim `severity` — only
+ * `parseReviewerLedger`'s per-line loop trimmed it before calling `semanticKey`. `src/rail/panel-
+ * ledger.ts`'s projection lane called `semanticKey` DIRECTLY on a queued (never round-tripped through
+ * this parser) entry, so a pending finding whose `severity` carried incidental whitespace (e.g.
+ * `" high "`, plausible from an LLM-authored JSON verdict) produced a DIFFERENT key than the SAME row
+ * once it had been written to the ledger and re-parsed — invisible to the `seen` set built from
+ * `parseReviewerLedger`'s (trimmed) output, so a retry double-appended it. Exported so BOTH sides of
+ * every `semanticKey` comparison — the file parser below and the projection lane's pending-queue
+ * comparison — normalize identically, from ONE definition, rather than risking the two drifting apart
+ * again (exactly how this bug was introduced the first time).
+ */
+export function normalizeReviewerLedgerEntry(e: ReviewerLedgerEntry): ReviewerLedgerEntry {
+	const severity = normalizeSeverity(e.severity);
+	return {
+		at: e.at.trim(),
+		lineage: e.lineage.trim(),
+		concernClass: e.concernClass.trim(),
+		survived: e.survived,
+		source: e.source.trim(),
+		note: e.note.trim(),
+		...(severity ? { severity } : {}),
+	};
+}
+
 /** Parse the JSONL ledger text. Malformed lines are counted in `rejected`, never guessed at;
  *  fully-identical-after-normalization duplicate rows (see `semanticKey` — EVERY field, `note`/
  *  `severity` included, whitespace-trimmed) are counted in `duplicates` and kept once — a retried
@@ -138,9 +177,10 @@ export function parseReviewerLedger(text: string): { entries: ReviewerLedgerEntr
 				// a strict `=== "high"` comparison discarded " high " as invalid instead of accepting it as
 				// the same severity with incidental whitespace, so it silently dropped out of the dedup
 				// key while every other field was trimmed consistently — two rows differing only in that
-				// whitespace wrongly counted as distinct).
-				const trimmedSeverity = typeof raw.severity === "string" ? raw.severity.trim() : raw.severity;
-				const severity = trimmedSeverity === "high" || trimmedSeverity === "medium" || trimmedSeverity === "low" ? trimmedSeverity : undefined;
+				// whitespace wrongly counted as distinct). Routed through the shared `normalizeSeverity`
+				// (T5 gauntlet round 3, finding #2) so this file's own normalization and the projection
+				// lane's (`panel-ledger.ts`, via `normalizeReviewerLedgerEntry`) can never drift apart again.
+				const severity = normalizeSeverity(raw.severity);
 				const key = semanticKey({ at: raw.at, lineage: raw.lineage, concernClass: raw.concernClass, source: raw.source, survived: raw.survived, note: raw.note, severity });
 				if (seen.has(key)) {
 					duplicates++;

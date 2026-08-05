@@ -10,6 +10,8 @@
  * tries automated resolution (#12): rebase → resolver → verify gate → reviewer, kept only if proven.
  */
 
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { classifyProbeFailure } from "./classify-probe-failure.ts";
 import { budgetedExcerpt } from "./gate-logs.ts";
 import { detectVerify, packageManifestError } from "./intake.ts";
@@ -156,9 +158,34 @@ export interface LandOpts {
  * too — otherwise it can `(fail)` transiently against a half-merged / mid-rollback main and file a
  * false `regression:` bug (OMPSQ-168).
  * ponytail: in-process map — one squad daemon owns a checkout. Add a file lock if work ever races
- * across processes/hosts.
+ * across processes/hosts (`src/rail/panel-ledger.ts`'s projection lane, which DOES have a
+ * cross-process-shared target — the reviewer ledger repo, a daemon-global constant every daemon
+ * instance writes to — layers its OWN interprocess lock on top of this one for exactly that reason;
+ * see its module doc).
+ *
+ * T5 gauntlet round 3 (glance#356, finding #4): keyed by `canonicalRepoKey` below, NOT the raw `repo`
+ * string a caller happened to pass. Two callers landing the SAME checkout via textually different but
+ * filesystem-identical paths (`/repo` vs `/repo/.`, a trailing slash, a symlinked worktree mount) used
+ * to get DIFFERENT `Map` keys and therefore DIFFERENT serialization queues — the whole point of this
+ * lock (two lands never interleaving `git merge`/corrupting the index on the SAME checkout) silently
+ * didn't apply. `fs.realpathSync` is a cheap, synchronous syscall (the repo directory already exists by
+ * the time anything lands against it), so canonicalization stays on the SAME synchronous tick as the
+ * `Map` get/set below — no `await` is introduced between reading the previous chain and re-publishing
+ * it, which is what keeps two same-tick calls for the SAME repo correctly chained rather than racing.
  */
 const repoLands = new Map<string, Promise<unknown>>();
+
+/** Resolve `repo` to the key `withRepoLandLock` actually serializes on — realpath when the path exists
+ *  (collapses `/repo`, `/repo/.`, a trailing slash, and a symlink hop to one canonical string), falling
+ *  back to a plain `path.resolve` (never throws) so a not-yet-existent or racily-removed path still
+ *  gets SOME normalized key rather than aborting the lock entirely. */
+function canonicalRepoKey(repo: string): string {
+	try {
+		return fs.realpathSync(repo);
+	} catch {
+		return path.resolve(repo);
+	}
+}
 
 interface GitRun {
 	code: number;
@@ -473,9 +500,10 @@ export async function applyRegressionGate(p: {
  * e.g. the Observer's acceptance gate — so it never observes a half-merged / mid-rollback main.
  */
 export function withRepoLandLock<T>(repo: string, fn: () => Promise<T>): Promise<T> {
-	const prev = repoLands.get(repo) ?? Promise.resolve();
+	const key = canonicalRepoKey(repo);
+	const prev = repoLands.get(key) ?? Promise.resolve();
 	const run = prev.catch(() => {}).then(fn);
-	repoLands.set(repo, run.catch(() => {}));
+	repoLands.set(key, run.catch(() => {}));
 	return run;
 }
 
