@@ -40,6 +40,28 @@ Three standing rules (campaign doctrine):
 - Builder caught a design estimate wrong (8 test files vs ~4) by grepping with .ts extensions
   — the verify-claims-against-the-tree dispatch line keeps earning its place.
 
+### 2026-08-05 — T5 #333 (in-code gauntlet) — PARKED after 2 gauntlet + 3 delta-verify rounds (tripwire fired)
+- The daemon-spawns-its-own-blind-panel feature is sound in every part (spawn, blindness, group-kill,
+  3-state verify, receipt field) EXCEPT its ledger projection lane, which reintroduced the same
+  dirty-main self-land CRITICAL THREE times — each a narrower crash-window variant. Root cause both
+  lineages converged on: it treats a working-tree write as durable when only a git COMMIT is.
+- **The tripwire worked as designed.** I pre-committed: "if the projection sprouts a defect a 3rd
+  time, STOP and escalate keep-vs-park to Lars, don't autonomously route round 4." It did; I did.
+  Lars chose park. Lesson: for a build that reintroduces its own bug class, set the escalation
+  tripwire BEFORE round N, not after — and honor it. Grinding a tier-2 automation while the
+  destination waits is the drift the destination-gate exists to catch.
+- **Park ≠ abandon.** #333 stays open-but-parked; both lineages' precise fix (HEAD-based durability,
+  not WT-presence) is captured verbatim in #356; T6 rebased off T4 (not T5) so the product path
+  proceeds and the panel field slots in when #356 lands. The manual cross-lineage gauntlet — which
+  this whole campaign has run successfully by hand — remains the working substitute.
+- Transactional-git-as-durability is genuinely subtle: 3 competent fix rounds, each closing the
+  prior window and opening a narrower one. When a lane fools single passes repeatedly, that IS the
+  signal it needs a different level of attention (a design rethink or a human call), not another patch.
+- Process nit for the RETRO: a relay agent returned a meta-summary ("relayed verbatim above")
+  instead of the verdict — but only an agent's FINAL message reaches the orchestrator, so the
+  verdict was invisible until I re-asked. Relay dispatches must say "the verbatim output IS your
+  final message; a summary loses it."
+
 ### 2026-08-04 — T2 #330 (conflict-marker gate) — closed after 2 CRITICALs, 2 gauntlet + 2 delta-verify rounds
 - **The headline lesson of the whole campaign, stated sharpest here: a gate whose adversary is
   the agent cannot accept ANY agent-controllable exemption.** The false-positive fix (a path/token
