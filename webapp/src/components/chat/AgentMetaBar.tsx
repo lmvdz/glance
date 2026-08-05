@@ -24,7 +24,7 @@ export const AgentMetaBar = ({ agent, changedFiles, children }: { agent?: AgentD
   const validation = validationBadge(agent);
   const confidence = confidenceBadge(agent);
   return (
-    <div className="flex flex-shrink-0 items-center gap-2 border-b border-ink-border bg-white px-4 py-1.5 text-caption text-ink-text0 border-ink-border bg-ink text-ink-text-subtle" aria-label="Agent mode and git status">
+    <div className="flex flex-shrink-0 items-center gap-2 border-b border-ink-border bg-white px-4 py-1.5 text-caption text-ink-text border-ink-border bg-ink text-ink-text-subtle" aria-label="Agent mode and git status">
       <span className="rounded-full border border-ink-border px-1.5 py-0.5 uppercase text-ink-text-label border-ink-border text-ink-text-label" title={agent.blockedReason ? `Blocked: ${agent.blockedReason}` : `Requested ${agent.autonomyMode ?? 'assist'}; effective ${agent.effectiveMode ?? 'assist'}`}>{agent.effectiveMode ?? 'assist'}</span>
       {/* Unit chrome for a promoted console chat (daily-onramp 06): same thread, same agent id —
           only its standing changed, and this pill is the visible half of that flip. */}

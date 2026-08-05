@@ -16,7 +16,7 @@ export interface KbdProps {
 
 export const Kbd: React.FC<KbdProps> = ({ keys, label, className }) => (
   <span className={`inline-flex flex-shrink-0 items-center gap-1.5 font-mono text-caption text-ink-text-subtle ${className ?? ''}`}>
-    <kbd className="rounded border border-ink-border-2 bg-ink-surface px-1 py-0.5 leading-none text-ink-text0 border-ink-border-2 bg-ink-surface text-ink-text-subtle">
+    <kbd className="rounded border border-ink-border-2 bg-ink-surface px-1 py-0.5 leading-none text-ink-text border-ink-border-2 bg-ink-surface text-ink-text-subtle">
       {keys}
     </kbd>
     {label && <span className="whitespace-nowrap">{label}</span>}

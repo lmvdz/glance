@@ -22,10 +22,10 @@ export const TodoPanel = ({ phases, collapsed, onToggle }: { phases: TodoPhaseDT
       <button
         type="button"
         onClick={onToggle}
-        className="flex min-h-10 w-full items-center gap-2 px-4 py-2 text-left hover:bg-ink focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 dark:hover:bg-panel dark:focus-visible:ring-offset-gray-950"
+        className="flex min-h-10 w-full items-center gap-2 px-4 py-2 text-left hover:bg-ink focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 dark:hover:bg-panel focus-visible:ring-offset-ink"
         aria-expanded={!collapsed}
       >
-        <ChevronRight className={`h-3.5 w-3.5 flex-shrink-0 text-ink-text0 transition-transform ${collapsed ? '' : 'rotate-90'}`} aria-hidden />
+        <ChevronRight className={`h-3.5 w-3.5 flex-shrink-0 text-ink-text transition-transform ${collapsed ? '' : 'rotate-90'}`} aria-hidden />
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-2">
             <span className="text-caption font-semibold uppercase tracking-wide text-ink-text-muted">Todo</span>
@@ -48,7 +48,7 @@ export const TodoPanel = ({ phases, collapsed, onToggle }: { phases: TodoPhaseDT
                     <span className={`flex h-3.5 w-3.5 flex-shrink-0 items-center justify-center rounded-full border ${todoDotStyle[task.status]}`}>
                       {task.status === 'completed' ? <Check className="h-2.5 w-2.5" aria-hidden /> : task.status === 'in_progress' ? <span className="h-1.5 w-1.5 rounded-full bg-current" /> : null}
                     </span>
-                    <span className={`truncate ${task.status === 'completed' ? 'text-ink-text-subtle line-through decoration-current/40 text-ink-text0' : ''}`}>{task.content}</span>
+                    <span className={`truncate ${task.status === 'completed' ? 'text-ink-text-subtle line-through decoration-current/40 text-ink-text' : ''}`}>{task.content}</span>
                   </div>
                 ))}
               </div>

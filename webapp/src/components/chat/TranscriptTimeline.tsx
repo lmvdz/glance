@@ -94,7 +94,7 @@ export const RunStatusHeader = ({
   <button
     type="button"
     onClick={onToggle}
-    className="flex min-h-9 w-full items-center gap-2 border-t border-ink-border pt-3 text-left text-xs text-ink-text0 transition-colors hover:text-ink-text-body focus-visible:ring-2 focus-visible:ring-amber-500 border-ink-border text-ink-text-subtle dark:hover:text-ink-text-body"
+    className="flex min-h-9 w-full items-center gap-2 border-t border-ink-border pt-3 text-left text-xs text-ink-text transition-colors hover:text-ink-text-body focus-visible:ring-2 focus-visible:ring-amber-500 border-ink-border text-ink-text-subtle dark:hover:text-ink-text-body"
     aria-expanded={expanded}
   >
     <ChevronRight className={`h-3.5 w-3.5 flex-shrink-0 transition-transform ${expanded ? 'rotate-90' : ''}`} aria-hidden />
@@ -305,7 +305,7 @@ export const TranscriptEntryView = React.memo(({ entry }: { entry: TranscriptEnt
     const running = entry.status === 'running';
     return (
       <details data-chat-message open={running} className="group rounded-md">
-        <summary className="flex min-h-9 cursor-pointer list-none items-center gap-2 rounded-md px-1.5 text-xs text-ink-text0 transition-colors hover:bg-ink-surface focus-visible:ring-2 focus-visible:ring-amber-500 text-ink-text-subtle dark:hover:bg-panel">
+        <summary className="flex min-h-9 cursor-pointer list-none items-center gap-2 rounded-md px-1.5 text-xs text-ink-text transition-colors hover:bg-ink-surface focus-visible:ring-2 focus-visible:ring-amber-500 text-ink-text-subtle dark:hover:bg-panel">
           <ChevronRight className="h-3.5 w-3.5 flex-shrink-0 transition-transform group-open:rotate-90" aria-hidden />
           <Sparkles className="h-3.5 w-3.5 flex-shrink-0 text-amber-500 dark:text-amber-400" aria-hidden />
           <span className={`font-medium uppercase tracking-wide ${running ? 'shimmer' : 'text-ink-text-label'}`}>Thinking</span>
@@ -328,7 +328,7 @@ export const TranscriptEntryView = React.memo(({ entry }: { entry: TranscriptEnt
 
   return (
     <div data-chat-message className="w-full text-ink-text-body text-ink-text-label">
-      <div className="mb-1.5 flex items-center gap-2 text-caption text-ink-text0">
+      <div className="mb-1.5 flex items-center gap-2 text-caption text-ink-text">
         {entry.kind === 'assistant' ? 'glance' : entry.kind} <span className="w-1 h-1 rounded-full bg-ink-border-2 bg-ink-text-label"></span> {new Date(entry.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
         {entry.status === 'running' && <span className="shimmer text-caption">streaming</span>}
       </div>

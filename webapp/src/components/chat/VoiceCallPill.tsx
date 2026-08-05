@@ -127,7 +127,7 @@ export const VoiceCallPillView = ({
           aria-label="View console agent"
           title="View the console agent's work (turns, tool calls)"
           onClick={onViewAgent}
-          className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-ink-text-subtle transition-colors hover:bg-ink-surface hover:text-ink-text-label focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 dark:hover:bg-ink-surface dark:hover:text-ink-text-body dark:focus-visible:ring-offset-gray-950"
+          className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-ink-text-subtle transition-colors hover:bg-ink-surface hover:text-ink-text-label focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 dark:hover:bg-ink-surface dark:hover:text-ink-text-body focus-visible:ring-offset-ink"
         >
           <Bot className="h-4 w-4" aria-hidden />
         </button>
@@ -137,7 +137,7 @@ export const VoiceCallPillView = ({
         aria-label="End voice call"
         title="End voice call"
         onClick={onEndCall}
-        className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-ink-text-subtle transition-colors hover:bg-red-50 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:ring-offset-2 dark:hover:bg-red-900/20 dark:hover:text-red-400 dark:focus-visible:ring-offset-gray-950"
+        className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-ink-text-subtle transition-colors hover:bg-red-50 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:ring-offset-2 dark:hover:bg-red-900/20 dark:hover:text-red-400 focus-visible:ring-offset-ink"
       >
         <PhoneOff className="h-4 w-4" aria-hidden />
       </button>
@@ -155,7 +155,7 @@ export const VoiceCallPillView = ({
         onPointerUp={onPttUp}
         onPointerLeave={onPttLeave}
         onPointerCancel={onPttCancel}
-        className={`flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-950 active:scale-[0.99] ${
+        className={`flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 focus-visible:ring-offset-ink active:scale-[0.99] ${
           pttEngaged
             ? 'bg-amber-500 text-white'
             : 'bg-panel text-white hover:bg-black bg-ink-border text-ink-text dark:hover:bg-white'
