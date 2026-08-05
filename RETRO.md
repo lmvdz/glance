@@ -40,6 +40,27 @@ Three standing rules (campaign doctrine):
 - Builder caught a design estimate wrong (8 test files vs ~4) by grepping with .ts extensions
   — the verify-claims-against-the-tree dispatch line keeps earning its place.
 
+### 2026-08-04 — T4 #332 (measured reviewer precision) — MOAT LOOP CLOSED — 3 rounds + 3 delta-verifies
+- The campaign's centerpiece: land verdicts now cite each lineage's MEASURED precision. Took the
+  most review of any lane and earned it (live land path, the thesis rests on it).
+- **Both foreign lineages independently found the round-1 ship-blocker** (cache froze the precision
+  stamp → re-lands showed stale numbers) — the strongest confidence signal a finding can carry.
+  Doctrine: when codex AND grok converge on the same defect with disjoint reasoning, treat it as
+  confirmed and fix the APPROACH, not the line.
+- **The delta-verify caught the fix round's OWN regression**: the fix for grok's near-dup finding
+  over-collapsed the dedup key and silently dropped 7 real ledger rows (codex n 52→45). This is
+  the single most important process lesson of the campaign: a fix round is a change like any
+  other and must be verified against the SAME adversarial bar as the original — the verify pass,
+  not the fix, is what kept a data-loss bug out of the moat. Never close on "the findings are
+  fixed"; close on "the fixes were re-verified."
+- **Absence-as-value, 4th instance** (after T3 $0-cost, T8 wrong-model, T8 free-usage): an absent
+  reviewer lineage was silently bucketed as "native." This pattern is now the campaign's
+  signature and a standing critic-prompt line: "find every place a missing measurement becomes a
+  confident value." Four independent tickets, same root — that is a HARNESS-level lesson, not a
+  per-ticket one.
+- Deliberate loop-stop after round 3 (findings shrank each round to edge-config/theoretical
+  input); budget redirected to T12, the other live path. State when you stop and why.
+
 ### 2026-08-04 — T3 #331 (receipt backfill) — closed after 3 rounds + delta-verify + round-4
 - Rounds: 3 blind codex + a scoped delta-verify (5/7) + a 2-item round-4. The premise inverted
   under review: "stamp 430 rows" became "stamp 0, annotate reasons" once round 2 proved roster
