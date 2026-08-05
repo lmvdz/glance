@@ -11,7 +11,7 @@
 
 import type { AuditQuery } from "./audit.ts";
 import { envInt } from "./config.ts";
-import type { ForcedLand, LandLedger, ValidatorOverride } from "./land-ledger.ts";
+import type { ForcedLand, LandLedger, ValidatorOverride } from "./rail/index.ts";
 import type { AuditEntry } from "./types.ts";
 
 export type ComplianceSeverity = "low" | "high" | "structural";

@@ -17,10 +17,10 @@
  * persistently failing probe surfaces to a human instead of retrying forever unseen.
  */
 
-import { envBool, envInt } from "./config.ts";
-import { classifyProbeFailure } from "./classify-probe-failure.ts";
-import { errText } from "./err-text.ts";
-import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV } from "./git-harden.ts";
+import { envBool, envInt } from "../config.ts";
+import { classifyProbeFailure } from "../classify-probe-failure.ts";
+import { errText } from "../err-text.ts";
+import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV } from "../git-harden.ts";
 
 /** OFF by default — an operator opts in during rollout, like OMP_SQUAD_REGRESSION_GATE. */
 export function landRiskGateEnabled(): boolean {

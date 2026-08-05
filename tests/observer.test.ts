@@ -15,7 +15,7 @@ import type { AutomationReport } from "../src/automation-log.ts";
 import { Observer, type ObserverDeps, auditCompliance, auditLandedSurvivors, auditStaleDone, auditStrandedUncommitted, auditTestsGreen, landFailureFindings, stripAnsi } from "../src/observer.ts";
 import { recordDoneProof } from "../src/done-proof.ts";
 import type { ComplianceFinding } from "../src/compliance.ts";
-import type { LandLedger } from "../src/land-ledger.ts";
+import type { LandLedger } from "../src/rail/land-ledger.ts";
 import type { AgentDTO, AgentStatus, IssueRef } from "../src/types.ts";
 
 const ENV_KEYS = ["OMP_SQUAD_OBSERVE", "OMP_SQUAD_OBSERVE_MAX", "OMP_SQUAD_OBSERVE_AUTODISPATCH", "OMP_SQUAD_OBSERVE_AUTOFIX", "OMP_SQUAD_OBSERVE_REPRODUCE", "OMP_SQUAD_AUTOLAND_FAIL_CAP"] as const;
