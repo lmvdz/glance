@@ -730,19 +730,24 @@ export function probeFlockExclusive(f: Flock, testPath: string): boolean {
  * possibly genuinely non-exclusive) mount skip probing entirely. */
 const flockExclusiveByDevice = new Map<number, { result: boolean; checkedAt: number }>();
 
-/** How long a per-device exclusivity verdict is trusted before being
- * re-probed (glance#354 residual 4): without an expiry, a cached 'exclusive'
- * verdict can survive a same-device remount with different lock semantics
- * (a remount typically keeps the same `st_dev`, so the cache key alone
- * doesn't change) or an `st_dev` value being reused after the original
- * device was unmounted. Genuine mount-change detection would need
- * continuous `/proc/mounts` polling (or mount-namespace notifications) for
- * what's an exotic edge case in practice — a bounded TTL instead trades a
- * small amount of re-probing for an upper bound on how long a stale verdict
- * can survive.
+/** How long a per-device NEGATIVE ("not exclusive") verdict is trusted before being re-probed
+ * (glance#354 residual 4). Only negatives are cached now (codex #354 round 2): a stale POSITIVE would
+ * be the dangerous one — a same-device remount to non-exclusive-flock semantics, or an `st_dev` reuse,
+ * could let a cached `true` skip the self-test and admit a second owner — so `ensureFlockExclusive`
+ * never caches `true` and re-probes on every reclaim. A cached `false` is fail-closed (it can only
+ * DELAY a device's return to service), so bounding it with a TTL — rather than continuous
+ * `/proc/mounts` polling for an exotic mount-change — is the right trade: a device whose flock support
+ * recovers is re-probed within the TTL instead of staying refused forever.
  * @substrate exported for tests only, so a TTL-expiry test can assert
  * against the real value rather than a hardcoded duplicate. */
 export const FLOCK_CACHE_TTL_MS = 5 * 60_000;
+
+/** Test-only: clear the per-device negative-verdict cache so a cache test starts from a known-empty
+ * state (codex #354 round 2, LOW — module-level cache state otherwise leaks across tests on the same
+ * device). Never called in production. */
+export function __resetFlockExclusiveCacheForTests(): void {
+	flockExclusiveByDevice.clear();
+}
 
 /** @substrate exported for tests only — `reclaimOrCreate` (same file) is the
  * one production caller; `tests/state-lock.test.ts` calls this directly
@@ -761,8 +766,17 @@ export function ensureFlockExclusive(f: Flock, fenceFile: string, now: number = 
 	} catch {
 		dev = -1; // can't stat the dir (astonishingly unlikely) — shared fallback bucket, still correct, just not device-specific
 	}
+	// Only NEGATIVE verdicts are cached (codex #354 round 2, HIGH). A `false` ("flock is not exclusive
+	// on this device") is fail-closed — caching it merely delays a device's return to service, never
+	// admits an owner. A `true` verdict is NEVER cached: a same-device remount to non-exclusive-flock
+	// semantics, or `st_dev` reuse, could otherwise let a stale `true` skip this self-test for up to the
+	// TTL and admit a SECOND owner — the exact invariant the fence exists to hold. The self-test is a
+	// single local flock pair; re-running it before every (rare) reclaim costs ~nothing and removes the
+	// remount window UNCONDITIONALLY rather than bounding it to 5 minutes. The `age >= 0` guard rejects a
+	// future `checkedAt` (a clock/test artifact) so a bogus entry can't read as fresh (codex LOW).
 	const cached = flockExclusiveByDevice.get(dev);
-	if (cached !== undefined && now - cached.checkedAt < FLOCK_CACHE_TTL_MS) return cached.result;
+	const age = cached ? now - cached.checkedAt : Infinity;
+	if (cached !== undefined && cached.result === false && age >= 0 && age < FLOCK_CACHE_TTL_MS) return false;
 	// A DEDICATED, UNIQUE-per-process-per-call path, never the live fence file
 	// and never a fixed shared name: the fence can be legitimately held by
 	// another racer at any moment (that's the whole point of it), and a fixed
@@ -784,7 +798,10 @@ export function ensureFlockExclusive(f: Flock, fenceFile: string, now: number = 
 			// Best-effort — the path is unique, so a leftover is harmless either way.
 		}
 	}
-	flockExclusiveByDevice.set(dev, { result, checkedAt: now });
+	// Store ONLY a negative verdict (see above). On a positive, clear any prior entry for this device so
+	// a now-stale `false` can't linger, and never record the `true` — the next reclaim re-probes.
+	if (result === false) flockExclusiveByDevice.set(dev, { result, checkedAt: now });
+	else flockExclusiveByDevice.delete(dev);
 	return result;
 }
 

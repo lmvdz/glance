@@ -18,6 +18,7 @@ import {
 	acquireFenceOrThrow,
 	recheckLiveBeforeUnsupported,
 	ensureFlockExclusive,
+	__resetFlockExclusiveCacheForTests,
 	monotonicNow,
 	FLOCK_CACHE_TTL_MS,
 	type Flock,
@@ -422,13 +423,12 @@ test("probeFlockExclusive only accepts a genuine EWOULDBLOCK/EAGAIN as proof of 
 	expect(probeFlockExclusive(wrongErrnoStub, testPath)).toBe(false);
 });
 
-test("ensureFlockExclusive caches the exclusivity verdict PER FILESYSTEM DEVICE, not one global flag (#345 round 4, #3a)", async () => {
-	// Before the fix, a single global boolean meant a local-disk success on
-	// the FIRST state dir made every LATER state dir — even one on a
-	// genuinely different, non-exclusive filesystem — skip probing entirely.
-	// /tmp and /dev/shm are genuinely different real devices here (confirmed
-	// via `stat -c %d`), so this proves per-device isolation without needing
-	// root to fabricate a fake mount.
+test("ensureFlockExclusive caches a NEGATIVE verdict PER FILESYSTEM DEVICE, and never leaks it across devices (#345 round 4 #3a; #354 r2)", async () => {
+	// Before the per-device fix, a single global boolean meant a local-disk success on the FIRST state
+	// dir made every LATER one skip probing. Now (codex #354 r2) only NEGATIVE verdicts are cached, and
+	// per-device: /dev/shm's `false` must not leak onto /tmp. /tmp and /dev/shm are genuinely different
+	// real devices here (confirmed via `stat -c %d`), so this proves per-device isolation without root.
+	__resetFlockExclusiveCacheForTests();
 	const tmpDir = await tmpdir();
 	const shmDir = await fs.mkdtemp(path.join("/dev/shm", "glance-lock-test-"));
 	cleanups.push(() => fs.rm(shmDir, { recursive: true, force: true }));
@@ -440,32 +440,46 @@ test("ensureFlockExclusive caches the exclusivity verdict PER FILESYSTEM DEVICE,
 	expect(realFlock).not.toBeNull();
 	if (!realFlock) return; // unreachable after the assert above; narrows the type
 
-	// A stub that reports NOT exclusive (the second lock "succeeds" — a no-op,
-	// the exact shape of a client-local network mount).
+	// A stub that reports NOT exclusive (the second lock "succeeds" — a no-op, the exact shape of a
+	// client-local network mount).
 	const nonExclusiveStub: Flock = { lock: () => 0, errno: () => 0 };
 
-	// /tmp: real flock, genuinely exclusive here.
-	expect(ensureFlockExclusive(realFlock, tmpFence)).toBe(true);
-	// /dev/shm: a DIFFERENT device, probed independently — the fake stub is
-	// actually consulted (not skipped via a stale cached verdict from /tmp).
+	// /dev/shm: probed non-exclusive → false, cached per shm's device.
 	expect(ensureFlockExclusive(nonExclusiveStub, shmFence)).toBe(false);
-
-	// Re-query each device with the OPPOSITE flock instance: the CACHED verdict
-	// per device must win, proving this isn't just "always re-evaluate whatever
-	// was passed" — /tmp stays true even handed the non-exclusive stub, and
-	// /dev/shm stays false even handed the real, genuinely-working flock.
-	expect(ensureFlockExclusive(nonExclusiveStub, tmpFence)).toBe(true);
+	// /tmp: a DIFFERENT device — shm's cached `false` must NOT leak here; probed with the real flock →
+	// genuinely exclusive → true.
+	expect(ensureFlockExclusive(realFlock, tmpFence)).toBe(true);
+	// Re-query shm with the REAL flock: the cached NEGATIVE wins per-device (within TTL), proving the
+	// negative is genuinely cached and device-scoped, not re-evaluated from whatever was passed.
 	expect(ensureFlockExclusive(realFlock, shmFence)).toBe(false);
 });
 
-test("ensureFlockExclusive re-probes after its per-device cache TTL expires — a stale verdict can't survive forever (#354 residual 4)", async () => {
-	// Without an expiry, a cached 'exclusive' verdict could survive a
-	// same-device remount with different lock semantics (or an st_dev reuse)
-	// forever. This proves the cache actually expires: same device, same
-	// fenceFile, same stub — only the injected clock moves — and the verdict
-	// flips from the cached `true` to a freshly-probed `false` once the TTL
-	// has elapsed. The `now` param lets this be deterministic without
-	// sleeping the real 5-minute TTL.
+test("ensureFlockExclusive NEVER caches a POSITIVE — a stale `true` can't survive a device flipping non-exclusive (#354 r2, the two-owner fix)", async () => {
+	// The dangerous stale verdict is a cached `true`: a same-device remount to non-exclusive-flock
+	// semantics (or st_dev reuse) could let it skip the self-test and admit a SECOND owner. So a `true`
+	// is never cached — every reclaim re-probes. Flip-the-input WITHIN the TTL window (1ms later): the
+	// device "loses" exclusivity and the verdict flips true→false immediately, with NO stale grace.
+	__resetFlockExclusiveCacheForTests();
+	const dir = await tmpdir();
+	const fenceFile = reclaimFencePath(path.join(dir, "daemon.lock"));
+	const realFlock = loadFlock();
+	expect(realFlock).not.toBeNull();
+	if (!realFlock) return;
+	const nonExclusiveStub: Flock = { lock: () => 0, errno: () => 0 };
+
+	const t0 = 1_000_000;
+	expect(ensureFlockExclusive(realFlock, fenceFile, t0)).toBe(true); // exclusive now
+	// 1ms later — deep inside any TTL — the same device handed the non-exclusive stub returns false.
+	// If positives were cached, this would wrongly stay `true` for up to 5 minutes (the two-owner window).
+	expect(ensureFlockExclusive(nonExclusiveStub, fenceFile, t0 + 1)).toBe(false);
+});
+
+test("ensureFlockExclusive re-probes after its NEGATIVE cache TTL expires — a fail-closed verdict can't refuse forever (#354 residual 4)", async () => {
+	// A negative verdict is fail-closed (refuse to reclaim), so it's the safe one to cache — but it must
+	// still expire so a device whose flock support recovers isn't refused forever. Same device, same
+	// fenceFile — only the injected clock moves — and the cached `false` flips to a freshly-probed
+	// `true` once the TTL elapses. The `now` param makes this deterministic without a real 5-min sleep.
+	__resetFlockExclusiveCacheForTests();
 	const dir = await tmpdir();
 	const fenceFile = reclaimFencePath(path.join(dir, "daemon.lock"));
 
@@ -473,22 +487,14 @@ test("ensureFlockExclusive re-probes after its per-device cache TTL expires — 
 	expect(realFlock).not.toBeNull();
 	if (!realFlock) return; // unreachable after the assert above; narrows the type
 
-	// A stub that reports NOT exclusive (the second lock "succeeds" — a
-	// no-op) — as if this device's flock support broke since the cache was
-	// last populated.
 	const nonExclusiveStub: Flock = { lock: () => 0, errno: () => 0 };
 
-	const t0 = 1_000_000; // arbitrary base instant in the injected clock
-	expect(ensureFlockExclusive(realFlock, fenceFile, t0)).toBe(true);
-
-	// Still within TTL: the cached `true` verdict wins even when handed a
-	// stub that would report non-exclusive if actually consulted — proves
-	// this is a real cache hit, not a coincidence.
-	expect(ensureFlockExclusive(nonExclusiveStub, fenceFile, t0 + FLOCK_CACHE_TTL_MS - 1)).toBe(true);
-
-	// Past TTL: same device, same stub — but now re-probed instead of
-	// trusting the stale cached verdict. Flip-the-input: only the clock
-	// moved, and the verdict flips true -> false because it was actually
-	// re-consulted this time.
-	expect(ensureFlockExclusive(nonExclusiveStub, fenceFile, t0 + FLOCK_CACHE_TTL_MS + 1)).toBe(false);
+	const t0 = 1_000_000;
+	// Probe non-exclusive → false, cached at t0.
+	expect(ensureFlockExclusive(nonExclusiveStub, fenceFile, t0)).toBe(false);
+	// Still within TTL: the cached `false` wins even when handed the REAL, genuinely-exclusive flock —
+	// proves it's a real negative-cache hit, not a coincidence.
+	expect(ensureFlockExclusive(realFlock, fenceFile, t0 + FLOCK_CACHE_TTL_MS - 1)).toBe(false);
+	// Past TTL: same device, real flock — now re-probed → exclusive → true. Only the clock moved.
+	expect(ensureFlockExclusive(realFlock, fenceFile, t0 + FLOCK_CACHE_TTL_MS + 1)).toBe(true);
 });
