@@ -4761,10 +4761,35 @@ export class SquadManager extends EventEmitter {
 		lastReceipt: RunReceipt | undefined,
 		validation: ValidationRecord | undefined,
 	): Promise<void> {
+		await this.writeReceiptFor(
+			{ repo: rec.dto.repo, branch: rec.dto.branch ?? "", label: rec.dto.name, costUsdFallback: rec.dto.receipt?.costUsd },
+			result,
+			effectiveModel,
+			lastReceipt,
+			validation,
+		);
+	}
+
+	/**
+	 * The AGENT-RECORD-FREE receipt assembler `emitLandReceipt` above delegates to (glance#391 G1b):
+	 * everything a receipt needs is in the land's own `LandOpts`/`LandResult` plus the validator record
+	 * — an `AgentRecord` was only ever the carrier. Hoisting it here lets a branch-keyed land path emit
+	 * the SAME receipt through the SAME writer instead of reimplementing one (the duplication hazard
+	 * #362 warns about). Returns the written receipt + its HTML path so a caller can report what it
+	 * wrote (and whether it was MEASURED); `undefined` on any fault — the best-effort contract is
+	 * unchanged: no receipt fault ever throws into a land.
+	 */
+	private async writeReceiptFor(
+		ctx: { repo: string; branch: string; label: string; costUsdFallback?: number },
+		result: LandResult,
+		effectiveModel: string | undefined,
+		lastReceipt: RunReceipt | undefined,
+		validation: ValidationRecord | undefined,
+	): Promise<{ receipt: LandReceipt; htmlPath: string } | undefined> {
 		try {
-			const dto = rec.dto;
-			const branch = dto.branch ?? "";
-			if (!branch) return; // a receipt is branch-keyed, like the land ledger — nothing to key on
+			const dto = { repo: ctx.repo, name: ctx.label };
+			const branch = ctx.branch;
+			if (!branch) return undefined; // a receipt is branch-keyed, like the land ledger — nothing to key on
 			const merged = result.merged;
 			// Attribution comes from the land's OWN in-lock SHAs (`result.head0`/`result.landedCommit`,
 			// captured while the land held the repo lock — land.ts/land-pr.ts), NOT a post-hoc HEAD re-read:
@@ -4796,7 +4821,7 @@ export class SquadManager extends EventEmitter {
 				commitMessage = (subj.code === 0 ? subj.stdout.trim() : "") || result.message || undefined;
 			}
 			const slug = repoIdentity(dto.repo).split("/").slice(-2).join("/");
-			const costUsd = lastReceipt?.costUsd ?? dto.receipt?.costUsd;
+			const costUsd = lastReceipt?.costUsd ?? ctx.costUsdFallback;
 			const receipt: LandReceipt = {
 				repo: slug,
 				branch,
@@ -4824,8 +4849,10 @@ export class SquadManager extends EventEmitter {
 				const posted = await postReceiptComment(dto.repo, slug, result.prNumber, receipt, { receiptHref: htmlPath, hrefKind: "path" });
 				if (!posted) this.log("warn", `land receipt PR comment failed for ${dto.name} (#${result.prNumber}) — non-fatal`);
 			}
+			return { receipt, htmlPath };
 		} catch (err) {
-			this.log("warn", `land receipt failed for ${rec.dto.name} (non-fatal): ${errText(err)}`);
+			this.log("warn", `land receipt failed for ${ctx.label} (non-fatal): ${errText(err)}`);
+			return undefined;
 		}
 	}
 
