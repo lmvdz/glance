@@ -24,6 +24,16 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
+## Round 3, iteration 5 (2026-08-11, goal mode — PR #373) — CONCERN 24 SLICE 1
+DTO conformance 1→39 gated pairs; the wall was real: SquadEvent was missing audit/automation/
+voice-call-participant ENTIRELY (round-2 headline), ClientCommand missing six variants, IssueRef
+lacked the whole dispatch scope contract, + nine leaf drifts — all fixed type-only. Codex round
+went after the MACHINERY and won: variant checks were key-set-blind (H), skipReason concretely
+wrong in a mirror born this branch (M), optionality modifiers erased by value-indexing (M) — all
+three fixed, deliberate divergences now NAMED allowances (variant.field grain). Grok
+narration-only (gap row). Gates: check 0, root 5332/2-inherited, webapp 2002/0. Slice 2 open:
+AgentDTO (18 unmirrored + 11 mismatches through the workflow family, enumerated in the concern).
+
 ## Round 2 (2026-08-04, iteration 37 — the goal's completion clause)
 Queue was dry (14 done, 3 needs-lars) → fresh review round executed: two Explore agents over
 current main (daemon: squad-manager regions with per-region coupling counts, Store, CLI,
