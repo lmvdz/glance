@@ -19,7 +19,7 @@ squad-manager with inconsistent warn loggers — make it a field beside nodeStor
 ## Provenance
 Round-2 review, daemon agent, rank 3, Strong.
 
-## Done (2026-08-12, round 3 iteration 11 — PR pending)
+## Done (2026-08-12, round 3 iteration 11 — PR #378)
 Exactly as designed: five lane interfaces (Snapshot/Audit/ChannelBackend/GraphBackend/
 Governance), Store = the extends-intersection, FileStore/DbStore + the factory untouched;
 consumers narrowed to their quarters (ChannelStore's two genuine graph methods and NodeStore's

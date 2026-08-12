@@ -24,7 +24,7 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
-## Round 3, iteration 11 (2026-08-12, goal mode — PR pending) — CONCERN 20 DONE
+## Round 3, iteration 11 (2026-08-12, goal mode — PR #378) — CONCERN 20 DONE
 Store: 36-member bag → five lane interfaces + intersection; consumers narrowed to quarters;
 26 inline NodeRecordStore constructions (16 silently unlogged) → one field, one logger. BOTH
 lineages fully delivered, both clean (independent 36/36 parity proofs; statelessness proven).
