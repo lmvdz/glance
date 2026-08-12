@@ -1371,8 +1371,8 @@ export class SquadManager extends EventEmitter {
 	private readonly channelStore: ChannelStore;
 	private readonly nodeStore: NodeStore;
 	/** ONE NodeRecordStore beside its siblings (concern 20's cheap fix): it was constructed 26×
-	 *  inline with INCONSISTENT warn loggers — half the call sites logged validation failures to
-	 *  nowhere. One field, one logger, every caller gets the same forensics. */
+	 *  inline with INCONSISTENT warn loggers — 16 of the 26 call sites logged validation failures
+	 *  to nowhere (10 passed a logger). One field, one logger, every caller gets the same forensics. */
 	private readonly nodeRecords: NodeRecordStore;
 	/** Concern 02's per-thread live-call durable owner (plans/voice-orchestrated-room-integration).
 	 *  One coordinator per manager (i.e. per org in DB mode) — bindings are keyed by channelId, which

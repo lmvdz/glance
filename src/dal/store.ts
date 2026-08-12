@@ -239,6 +239,7 @@ export interface AuditStore {
 /** Durable org-scoped channel primitives (ChannelStore's quarter). File mode stores JSON/JSONL;
  *  DB mode stores rows. */
 export interface ChannelBackend {
+	/** Durable org-scoped channel list. File mode stores JSON/JSONL; DB mode stores rows. */
 	listChannels(): Promise<Channel[]>;
 	getChannel(id: string): Promise<Channel | undefined>;
 	putChannel(channel: Channel): Promise<void>;
@@ -255,6 +256,7 @@ export interface ChannelBackend {
 /** Work graph primitives (NodeStore/NodeRecordStore's quarter). Node visibility is always
  *  inherited from the bound channel. */
 export interface GraphBackend {
+	/** Work graph primitives. Node visibility is always inherited from the bound channel. */
 	listNodes(): Promise<Node[]>;
 	getNode(id: string): Promise<Node | undefined>;
 	putNode(node: Node): Promise<void>;
@@ -277,7 +279,7 @@ export interface GovernanceStore {
 	putPlanProposal(proposal: PlanProposal): Promise<void>;
 }
 
-/** The full backend — the INTERSECTION of the five lanes (concern 20: it was a 30-member bag;
+/** The full backend — the INTERSECTION of the five lanes (concern 20: it was a 36-member bag;
  *  the lanes are the modules). FileStore/DbStore still `implements Store` (both modes really do
  *  provide every lane; the manager-registry factory is untouched); CONSUMERS narrow to their
  *  quarter (ChannelStore/NodeStore/NodeRecordStore constructor params) so a test fake implements
