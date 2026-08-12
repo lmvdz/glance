@@ -375,6 +375,9 @@ describe('thread status region', () => {
   test('every state the concern names is reachable', () => {
     expect(threadStatus({ ...base, binding: binding({ state: 'ended', terminalReason: 'journal-end' }) }).kind).toBe('ended-unexpectedly');
     expect(threadStatus({ ...base, binding: binding({ state: 'degraded' }) }).kind).toBe('degraded');
+    // The degraded copy's HONESTY contract (codex L, concern 25 round): the deleted hud test was
+    // the only assertion that this says the socket dropped rather than something falsely calm.
+    expect(threadStatus({ ...base, binding: binding({ state: 'degraded' }) }).detail).toContain('socket');
     expect(threadStatus({ ...base, binding: binding(), decisions: [decision({ requiresConfirmation: true })] }).kind).toBe('open-decisions');
     expect(threadStatus({ ...base, binding: binding(), decisions: [decision()] }).kind).toBe('review-queue');
     expect(threadStatus({ ...base, binding: binding(), activeAgents: 2 }).kind).toBe('active-agents');

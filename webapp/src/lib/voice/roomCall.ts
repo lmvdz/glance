@@ -170,8 +170,11 @@ export function retentionNotice(binding: VoiceCallBindingDTO): RetentionNotice {
 // =================================================================================================
 // Idle policy (concern 05: 10-minute idle hangup, spoken warning at ~9 minutes)
 // =================================================================================================
-/** @substrate the daemon-side idle policy constant's client mirror — display surface pending (concern 25 named gap: the deleted hud was the countdown's only renderer) */
-export const IDLE_WARNING_MS = 9 * 60 * 1000;
+/** The recorded 10-minute idle-hangup policy value (OMP_COVEN_IDLE_HANGUP_MS default) — a POLICY
+ *  MIRROR, not display code: tests/voice-spine-policy.test.ts pins it cross-tree (concern 05
+ *  default #2). RESTORED after slice 2a wrongly swept it with the hud display helpers (the root
+ *  policy suite caught it — grok's dying narration had flagged exactly this). */
+export const IDLE_HANGUP_MS = 10 * 60 * 1000;
 
 /** Which decision classes the room refuses to resolve by voice (concern 05: destructive/outward
  *  actions are UI-only). Everything else is voice-resolvable through read-back plus confirmation. */
@@ -764,10 +767,6 @@ export function reconcileArtifactPane(stack: PaneStackEntry[], artifactRowById: 
   if (top.pane === 'artifact' && top.artifactId && !artifactRowById.has(top.artifactId)) return popPane(stack);
   return stack;
 }
-
-// =================================================================================================
-// The call HUD lives in the fixed header — it never scrolls out of view
-// =================================================================================================
 
 /**
  * What pressing a `voice-call` card's "Open the call" door actually does.
