@@ -134,3 +134,14 @@ the test flips + this file's first update) caught by codex and the root suite to
 ## Provenance
 Lecture 6 (DAPO 30→50 via dynamic sampling), lecture 7 (Absolute-Zero proposer reward maximized
 at intermediate difficulty). Pre-adjudicated in the brief; do not re-research.
+
+## Recovery (2026-08-11, round 3 iteration 1): PR #313 was merged into a dead base — never on main
+The stacked-PR wrong-base failure mode (memory: omp-squad-stacked-pr-wrong-base): #313's base was
+`deepen/05-route-table`, not main, so its MERGED state put the 9 implementation commits on a branch
+main never absorbed. Detected restarting the loop: the concern file on main still read STATUS: open
+while this file (travelling with the branch) said done — `git log --oneline --merges origin/main`
+had no #313, and `git cherry origin/main origin/deepen/14-difficulty-dispatch` showed 9 orphans.
+Recovered by merging the branch onto fresh main (deepen/14-recovery); one docs conflict (concern 17
+add/add — kept main's resolved version). The starved-rows actionItemsPayload port survived via the
+branch's own pre-integration merge. Full gates + fresh blind cross-lineage review on the recovery
+diff, since main moved (rail campaign) after the branch died.

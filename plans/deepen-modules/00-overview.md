@@ -24,6 +24,15 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
+## Round 3, iteration 1 (2026-08-11, goal mode — PR pending) — CONCERN 14 RECOVERED FROM ORPHAN
+Restarting the loop on fresh main surfaced that PR #313 (concern 14, difficulty-targeted
+dispatch) had merged into a dead base branch (`deepen/05-route-table`) — MERGED on GitHub, never
+on main. All other train PRs (312, 314–320, 322) based main correctly; the orphan was exactly
+concern 14's 9 commits. Recovery: merge origin/deepen/14-difficulty-dispatch onto fresh main
+(deepen/14-recovery), one docs conflict (17 add/add, kept main's resolved side), full gates +
+fresh blind grok/codex round targeted at integration-with-moved-main (rail campaign landed since
+the branch died). Detection recipe in the concern file and the stacked-pr-wrong-base memory.
+
 ## Round 2 (2026-08-04, iteration 37 — the goal's completion clause)
 Queue was dry (14 done, 3 needs-lars) → fresh review round executed: two Explore agents over
 current main (daemon: squad-manager regions with per-region coupling counts, Store, CLI,

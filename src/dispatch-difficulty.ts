@@ -82,8 +82,8 @@ export function difficultyDispatchMode(raw = process.env.OMP_SQUAD_DIFFICULTY_DI
 }
 
 export interface DifficultyDispatchDecision {
-	/** Always true while gating is unshipped (module doc); the field exists so the dispatcher's
-	 *  defer seam is already honored the day the redesigned gate can return false. */
+	/** Always true from the tick-global class decision (telemetry-only); false only from the
+	 *  per-issue verdict (issueDifficultyDecision) in apply mode — the shipped 3b gate. */
 	proceed: boolean;
 	/** Always populated — the audit line, logged on transitions in every mode but off. */
 	reason: string;
@@ -115,8 +115,8 @@ export function difficultyDispatchDecision(
 // finding by construction. Written at the SAME single site as recordModelOutcome (judged
 // outcomes only — retryable refusals and race "pending" placeholders write nothing), keyed
 // runId-idempotent so finalize/terminal double-fire cannot double-bill (grok finding).
-// GATING REMAINS UNSHIPPED until 3b lands the rendered surface + audited human clear verb
-// (DESIGN v2 points 3–5): verdicts here are shadow-only, like everything else in this module.
+// Gating SHIPPED with 3b (rendered surface + audited human clear verb, DESIGN v2 points 3–5):
+// per-issue verdicts defer in apply mode; the tick-global class decision stays telemetry-only.
 
 import { mapFile } from "./ledger.ts";
 import type { IssueRef } from "./types.ts";
@@ -255,8 +255,8 @@ export function clearIssueStarvation(stateDir: string, issueId: string, actorId:
 	return { prior: rec };
 }
 
-/** Per-issue verdict for the dispatcher's `difficultyFor` seam. Always proceeds while
- *  gating is unshipped; the reason carries the starve evidence when present. */
+/** Per-issue verdict for the dispatcher's `difficultyFor` seam. Defers (proceed=false) in
+ *  apply mode on a starved issue; shadow mode logs the same reason but proceeds. */
 export function issueDifficultyDecision(stateDir: string, issue: Pick<IssueRef, "id" | "identifier">, mode: DifficultyDispatchMode): DifficultyDispatchDecision | undefined {
 	if (mode === "off") return undefined;
 	const rec = issueAttemptsSnapshot(stateDir)[issue.id];

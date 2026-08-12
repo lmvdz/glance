@@ -2223,7 +2223,11 @@ export class SquadServer {
 			const body: unknown = await req.json().catch(() => ({}));
 			const reason = body && typeof body === "object" && "reason" in body && typeof body.reason === "string" ? body.reason : undefined;
 			const cleared = await manager.clearIssueStarvationVerdict(decodeURIComponent(mstarve[1]), actor, reason);
-			return cleared ? Response.json({ ok: true }) : new Response("no starvation verdict to clear for this issue", { status: 404 });
+			// audit-failed is NOT 404 (grok, recovery round): the verdict still stands (rolled back) —
+			// telling the operator "nothing to clear" would read as healthy. 503 = retry the endpoint.
+			if (cleared === "cleared") return Response.json({ ok: true });
+			if (cleared === "audit-failed") return new Response("starvation clear rolled back — audit write failed; the verdict stands, retry", { status: 503 });
+			return new Response("no starvation verdict to clear for this issue", { status: 404 });
 		}
 		const mfsupersede = url.pathname.match(/^\/api\/features\/([^/]+)\/decisions\/supersede$/);
 		if (mfsupersede && req.method === "POST") {

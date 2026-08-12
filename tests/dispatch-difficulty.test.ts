@@ -101,7 +101,7 @@ describe("issue attempts (DESIGN v2 slice 3a) — evidence half, shadow verdicts
 		expect(Object.keys(readIssueAttempts(d)).length).toBe(0);
 	});
 
-	test("starve verdict appears at 3/3 failed, stays shadow in every mode, and is silent below", () => {
+	test("starve verdict appears at 3/3 failed, proceeds in shadow, DEFERS in apply, silent below/off", () => {
 		const d = dir();
 		for (let i = 0; i < ISSUE_STARVE_ATTEMPTS - 1; i++) recordIssueAttempt(d, "ISS-2", `run-${i}`, false);
 		expect(issueDifficultyDecision(d, { id: "ISS-2", identifier: "OMPSQ-9" }, "shadow")).toBeUndefined();
@@ -114,7 +114,7 @@ describe("issue attempts (DESIGN v2 slice 3a) — evidence half, shadow verdicts
 		expect(issueDifficultyDecision(d, { id: "ISS-2", identifier: "OMPSQ-9" }, "off")).toBeUndefined();
 	});
 
-	test("slice 3b (post-retreat): starved verdicts stay shadow in apply; clear verb acks starved rows only", () => {
+	test("slice 3b-final: starved verdicts DEFER in apply; clear verb acks starved rows only", () => {
 		const d = dir();
 		const { clearIssueStarvation, starvedIssues } = require("../src/dispatch-difficulty.ts") as typeof import("../src/dispatch-difficulty.ts");
 		for (let i = 0; i < 3; i++) recordIssueAttempt(d, "ISS-4", `run-${i}`, false, "agent-x", undefined, "OMPSQ-77");
