@@ -24,6 +24,16 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
+## Round 3, iteration 4 (2026-08-11, goal mode — PR #372) — CONCERN 23 DONE (both slices)
+Slice 2: the root corpus (449 test files) joins as check clause 4 — 301 errors paid to zero by
+FOUR PARALLEL fixers under a written playbook, then both lineages attacked the no-assertion-
+changes claim: codex audited all 48 changed expect-pairs (weak-assertion M on the rebuilt
+projection test — the headline contract is now actually proven with an unnamed control), grok
+caught the wire-unfaithful voice-fleet-action fixture. First recorded CROSS-LINEAGE
+DISAGREEMENT: grok passed the land-type widening, codex refuted it (fake never reaches tryLand;
+only adapter is boolean) — codex won on the code, ledgered. Root gate 5333 pass/2 fail (both
+main-inherited ratchets, fixed on #370); webapp 2002/0; 4-clause check green. 9 ledger rows.
+
 ## Round 3, iteration 3 (2026-08-11, goal mode — PR #372) — CONCERN 23 SLICE 1 (webapp)
 The webapp test corpus joins the tsc program: webapp/tsconfig.tests.json = clause 3 of bun run
 check (codex verified: all 116 test files in the program, failure propagates, zero ts-nocheck).
