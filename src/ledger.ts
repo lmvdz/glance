@@ -144,7 +144,7 @@ export function mapFileStrict<T>(stateDir: string, fileName: string): MapFile<T>
 			if (!b.exists(file)) return {};
 			const raw = b.readTextSync(file);
 			if (raw === undefined) throw new Error(`${fileName}: exists but is unreadable`);
-			return decodeRecord<T>(JSON.parse(raw) as unknown);
+			return decodeRecord<T>(JSON.parse(raw));
 		},
 		write: (all) => getStorageBackend().writeDurableSync(file, JSON.stringify(all)),
 	};

@@ -19,6 +19,7 @@ import { buildScoreboard, type Scoreboard } from "./attribution-scoreboard.ts";
 import type { AutomationEvent, AutomationLoop, AutomationQuery, AutomationRollupRow } from "./automation-log.ts";
 import type { ComplianceFinding } from "./compliance.ts";
 import { envInt } from "./config.ts";
+import { errText } from "./err-text.ts";
 import { ingestHarnesses } from "./ingest/index.ts";
 import type { FabricSnapshot } from "./memory/index.ts";
 import { learningFlags, type MetricName, type MetricRollupRow } from "./metrics.ts";
@@ -678,7 +679,7 @@ export async function actionItemsPayload(managers: SquadManager[], url: URL, act
 				severity: "high",
 				source: "land",
 				subject: "issue-attempts ledger unreadable — starvation verdicts are invisible",
-				rootCause: err instanceof Error ? err.message : String(err),
+				rootCause: errText(err),
 				nextAction: "Inspect/restore issue-attempts.json in the state dir; verdicts and the apply-mode gate are dark until it reads",
 				targetRoute: "#/tasks",
 			});

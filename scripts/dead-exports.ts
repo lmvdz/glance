@@ -102,7 +102,20 @@ export interface DeadExport {
  *  `done-proof.ts#readDoneProofLedger` picking up a real cross-file reference from
  *  `corpus.ts#reconstructFfLocalLandTriples` (same batch), which flips it dead→live. Tightening for
  *  real. */
-export const BASELINE = 210;
+/** 2026-08-11 (deepen 14 recovery): 210→225 — NOT new dead code; the reference scan itself was
+ *  repaired. The raw token scan desynced at every template interpolation (the `}` re-scanned as a
+ *  plain brace, template tail text scanned as CODE, the closing backtick opened a phantom template
+ *  swallowing real code to the next backtick) and at regex literals — so template prose counted as
+ *  references (false LIVE) and code in swallowed regions didn't (false DEAD). Replaced with a real
+ *  parse (createSourceFile + AST identifier walk). Honest re-measure: 4 false-dead rescued
+ *  (commandTier, mapFileStrict, tierDifficulty+readIssueAttempts via @substrate) and 15 genuinely
+ *  dead exports revealed that prose had been hiding (isDerivedReason, chatAttachmentPromptRef,
+ *  rebuildCostAggregate, projectCost, matchSymptom, installScratchDeps, changedFilesFromDiff,
+ *  auditLandedSurvivors, auditStaleDone, parseConcernDrafts, applyFeatureFlags,
+ *  harnessDefaultModelOptions, actualUnitHarness, acceptanceEnv, resolveEffectiveSessionRoot) —
+ *  each verified by grep to have only comment mentions elsewhere. They are the top paydown
+ *  candidates for ratcheting back below 210. */
+export const BASELINE = 225;
 
 function scriptKindFor(rel: string): ts.ScriptKind {
 	return rel.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
@@ -180,13 +193,21 @@ function extractExports(rel: string, text: string): Candidate[] {
  *  the TS scanner never classifies their contents as `SyntaxKind.Identifier`). A set, not a count: this
  *  ratchet only asks "does this name appear anywhere in another file", never "how many times". */
 function identifierSet(rel: string, text: string): Set<string> {
-	const scanner = ts.createScanner(ts.ScriptTarget.Latest, /* skipTrivia */ false, scriptKindFor(rel), text);
+	// A real PARSE, not a raw token scan (2026-08-11, deepen 14 recovery): the raw scanner cannot
+	// lex TypeScript correctly without grammar context — the `}` ending a template interpolation
+	// re-scans as a plain CloseBrace, so template tail text scans as CODE and the closing backtick
+	// opens a phantom template that swallows real code to the next backtick (measured: 8.4KB of
+	// dispatch-difficulty.ts swallowed, hiding mapFileStrict's real reference = false DEAD, while
+	// template prose scanned as identifiers = false LIVE). Regex literals desync it the same way.
+	// The parser resolves all of it; identifiers in template interpolations are AST nodes, and
+	// comments / string bodies / template text produce none — structurally excluded, as before.
+	const sf = ts.createSourceFile(rel, text, ts.ScriptTarget.Latest, /* setParentNodes */ false, scriptKindFor(rel));
 	const ids = new Set<string>();
-	let tok = scanner.scan();
-	while (tok !== ts.SyntaxKind.EndOfFileToken) {
-		if (tok === ts.SyntaxKind.Identifier) ids.add(scanner.getTokenText());
-		tok = scanner.scan();
-	}
+	const walk = (node: ts.Node): void => {
+		if (ts.isIdentifier(node)) ids.add(node.text);
+		ts.forEachChild(node, walk);
+	};
+	walk(sf);
 	return ids;
 }
 

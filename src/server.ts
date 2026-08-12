@@ -2221,7 +2221,7 @@ export class SquadServer {
 			try {
 				return Response.json({ starved: manager.starvedIssueAttempts() });
 			} catch (err) {
-				return new Response(`issue-attempts ledger unreadable: ${err instanceof Error ? err.message : String(err)}`, { status: 503 });
+				return new Response(`issue-attempts ledger unreadable: ${errText(err)}`, { status: 503 });
 			}
 		}
 		const mstarve = url.pathname.match(/^\/api\/issues\/([^/]+)\/redispatch$/);

@@ -57,7 +57,8 @@ export interface DifficultyVerdict {
 /** An all-fail/all-pass call needs at least this many judged attempts in the class. */
 export const DIFFICULTY_MIN_ATTEMPTS = 4;
 
-/** Pool judged outcomes for one tier across every model family in the ledger. */
+/** Pool judged outcomes for one tier across every model family in the ledger.
+ *  @substrate exported-for-tests; live caller in-file (difficultyDispatchDecision) */
 export function tierDifficulty(outcomes: ModelOutcomes, tier: ComplexityTier, minAttempts = DIFFICULTY_MIN_ATTEMPTS): DifficultyVerdict {
 	let landed = 0;
 	let attempts = 0;
@@ -118,6 +119,7 @@ export function difficultyDispatchDecision(
 // Gating SHIPPED with 3b (rendered surface + audited human clear verb, DESIGN v2 points 3–5):
 // per-issue verdicts defer in apply mode; the tick-global class decision stays telemetry-only.
 
+import { errText } from "./err-text.ts";
 import { mapFileStrict } from "./ledger.ts";
 import type { IssueRef } from "./types.ts";
 
@@ -218,6 +220,7 @@ export function effectiveEvidence(r: IssueAttemptRecord): { attempts: number; fa
 	return { attempts: r.attempts - (r.attemptsAtClear ?? r.attempts), fails: r.fails - (r.failsAtClear ?? r.fails) };
 }
 
+/** @substrate exported-for-tests; live caller in-file (starvedIssues, issueAttemptsSnapshot) */
 export function readIssueAttempts(stateDir: string): Record<string, IssueAttemptRecord> {
 	return issueAttempts(stateDir).read();
 }
@@ -274,7 +277,7 @@ export function issueDifficultyDecision(stateDir: string, issue: Pick<IssueRef, 
 		// autonomous loop (house rule: a broken guard never blocks dispatch — see alreadyDone), but
 		// it must not read as healthy either. The reason string changes ⇒ transition logging
 		// re-logs it, and GET /api/issues/starved 503s off the same throw so the UI shows failure.
-		return { proceed: true, reason: `issue-attempts ledger UNREADABLE — difficulty gate disabled (fail-open): ${err instanceof Error ? err.message : String(err)}` };
+		return { proceed: true, reason: `issue-attempts ledger UNREADABLE — difficulty gate disabled (fail-open): ${errText(err)}` };
 	}
 	if (!rec) return undefined;
 	const e = effectiveEvidence(rec);
