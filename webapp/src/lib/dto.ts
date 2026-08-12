@@ -385,7 +385,7 @@ export interface FeatureDTO {
   workflowAgentId?: string;
 }
 
-export type TodoStatus = "pending" | "in_progress" | "completed";
+export type TodoStatus = "pending" | "in_progress" | "completed" | "abandoned";
 
 export interface TodoTaskDTO {
   content: string;
@@ -476,7 +476,7 @@ export interface WorkflowRunStateDTO {
   preferredLabel?: string;
   rollup: { label: string; status: "in_progress" | "completed" }[];
   runId?: string;
-  terminal?: { reason: string; at?: number; forkPoint?: { runId?: string; seq: number }; supersededBy?: string };
+  terminal?: { reason: string; at: number; forkPoint: { runId: string; seq: number }; supersededBy?: string };
 }
 
 /** One node in an agent's subagent tree (task-spawned children) — mirrors src/subagents.ts's

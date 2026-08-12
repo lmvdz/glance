@@ -8,6 +8,9 @@ const todoDotStyle: Record<TodoStatus, string> = {
   completed: 'border-emerald-500 bg-emerald-500 text-white dark:border-emerald-400 dark:bg-emerald-400 dark:text-emerald-950',
   in_progress: 'border-blue-500 bg-blue-500 text-white dark:border-blue-400 dark:bg-blue-400 dark:text-blue-950',
   pending: 'border-ink-border-2 bg-transparent text-transparent border-ink-border-2',
+  // Backend todo.ts marks tasks abandoned when a plan is cut short — render it as a closed-but-not-
+  // done dot (codex M, concern 24 round: this status used to index an UNDECLARED style).
+  abandoned: 'border-ink-border-2 bg-ink-border-2/40 text-transparent',
 };
 
 export const TodoPanel = ({ phases, collapsed, onToggle }: { phases: TodoPhaseDTO[]; collapsed: boolean; onToggle: () => void }) => {

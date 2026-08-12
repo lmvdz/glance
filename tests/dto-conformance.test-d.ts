@@ -30,7 +30,8 @@
 
 import type { ValidationRecord , AutomationEvent as SrcAutomationEvent, AutomationLoop as SrcAutomationLoop, AutomationSkipReason as SrcAutomationSkipReason } from "../src/types.ts";
 import type { VoiceCallParticipant as SrcVoiceCallParticipant } from "../src/voice-call-manager.ts";
-import type { ValidationRecordDTO , AutomationEventDTO, AutomationLoopDTO, AutomationSkipReasonDTO, VoiceCallParticipantDTO } from "../webapp/src/lib/dto.ts";
+import type { WorkflowGraphEdge as SrcWorkflowGraphEdge, WorkflowGraphNode as SrcWorkflowGraphNode, WorkflowGraphSnapshot as SrcWorkflowGraphSnapshot, WorkflowRunState as SrcWorkflowRunState } from "../src/workflow/types.ts";
+import type { ValidationRecordDTO , AutomationEventDTO, AutomationLoopDTO, AutomationSkipReasonDTO, VoiceCallParticipantDTO, WorkflowGraphEdgeDTO, WorkflowGraphNodeDTO, WorkflowGraphSnapshotDTO, WorkflowRunStateDTO } from "../webapp/src/lib/dto.ts";
 
 /** Mutual-assignability type equality — `true` only when `A` and `B` are the EXACT same type (not
  *  merely assignable one way), so a widened/narrowed DTO field is caught, not just a missing one. The
@@ -124,11 +125,17 @@ export type DriftedVariants<DtoU extends { type: string }, SrcU extends { type: 
  *  - transitions: the dto widens TransitionEntry.reason to string (AllowedTransitionEntryMismatches).
  *  - workflowGraph: the dto widens node.kind (engine NodeKind) to string — the timeline renders
  *    labels, never branches on engine node kinds.
- *  - workflowState: the dto is a deliberate RENDER SUBSET of WorkflowRunState (an engine
- *    checkpoint with fork lineage, autonomy, proof state — none of which the wire carries).
+ *  - workflowState: the dto DECLARATION is a deliberate render subset of WorkflowRunState — the
+ *    JSON on the wire carries the full engine object (builders assign it verbatim); the subset is
+ *    what the client PROMISES to read, gated leaf-level below (OmittedFromWorkflowRunStateDto).
  *  - todoPhases: the dto names its own TodoPhaseDTO/TodoStatus instead of reaching into
  *    RpcSessionState's harness-shaped type. */
-export type AllowedAgentDtoMismatches = "transitions" | "workflowGraph" | "workflowState" | "todoPhases";
+/** NOTE on allowance grain (codex M2): a field named here is suppressed WHOLESALE at the
+ *  AgentDTO level — wrapper drift included. That is why each allowed field carries its own
+ *  LEAF pair gate below (WorkflowRunStateDTO / WorkflowGraphSnapshotDTO / WorkflowGraphNodeDTO;
+ *  transitions' element is gated by the TransitionEntry pair) — the residual blind spot is
+ *  wrapper-shape drift on transitions alone, named here rather than silently absorbed. */
+export type AllowedAgentDtoMismatches = "transitions" | "workflowGraph" | "workflowState";
 export type OmittedFromAgentDto = never;
 export type _AgentDtoHasNoExtraKeys = Expect<[ExtraDtoKeys<AgentDTO, SrcAgentDTO>] extends [never] ? true : false>;
 export type _AgentDtoSharedKeysMatch = Expect<[MismatchedSharedKeys<AgentDTO, SrcAgentDTO, AllowedAgentDtoMismatches>] extends [never] ? true : false>;
@@ -365,3 +372,27 @@ export type OmittedFromVoiceCallParticipantDto = never;
 export type _VoiceCallParticipantDtoHasNoExtraKeys = Expect<[ExtraDtoKeys<VoiceCallParticipantDTO, SrcVoiceCallParticipant>] extends [never] ? true : false>;
 export type _VoiceCallParticipantDtoSharedKeysMatch = Expect<[MismatchedSharedKeys<VoiceCallParticipantDTO, SrcVoiceCallParticipant>] extends [never] ? true : false>;
 export type _VoiceCallParticipantDtoMirrorsEveryBackendField = Expect<[UnmirroredSourceKeys<VoiceCallParticipantDTO, SrcVoiceCallParticipant, OmittedFromVoiceCallParticipantDto>] extends [never] ? true : false>;
+
+// ── Leaf gates under the AgentDTO allowances (codex M2, concern 24 round) ───────────────────────
+/** The engine-only fields the render-subset DTO deliberately does not promise to read — each
+ *  present in the wire JSON, none consumed by the client. A NEW engine field must be named here
+ *  or mirrored; it can no longer hide behind the AgentDTO-level workflowState allowance. */
+export type OmittedFromWorkflowRunStateDto = "index" | "goal" | "cold" | "proof" | "sessionId" | "forkedFrom" | "autonomy" | "resumeAttempts" | "transient" | "branchOutcomes";
+export type _WorkflowRunStateDtoHasNoExtraKeys = Expect<[ExtraDtoKeys<WorkflowRunStateDTO, SrcWorkflowRunState>] extends [never] ? true : false>;
+export type _WorkflowRunStateDtoSharedKeysMatch = Expect<[MismatchedSharedKeys<WorkflowRunStateDTO, SrcWorkflowRunState>] extends [never] ? true : false>;
+export type _WorkflowRunStateDtoMirrorsRest = Expect<[UnmirroredSourceKeys<WorkflowRunStateDTO, SrcWorkflowRunState, OmittedFromWorkflowRunStateDto>] extends [never] ? true : false>;
+
+/** nodes diverges only through the node's kind widening — gated at the node pair below. */
+export type AllowedWorkflowGraphSnapshotMismatches = "nodes";
+export type _WorkflowGraphSnapshotDtoHasNoExtraKeys = Expect<[ExtraDtoKeys<WorkflowGraphSnapshotDTO, SrcWorkflowGraphSnapshot>] extends [never] ? true : false>;
+export type _WorkflowGraphSnapshotDtoSharedKeysMatch = Expect<[MismatchedSharedKeys<WorkflowGraphSnapshotDTO, SrcWorkflowGraphSnapshot, AllowedWorkflowGraphSnapshotMismatches>] extends [never] ? true : false>;
+export type _WorkflowGraphSnapshotDtoMirrorsRest = Expect<[UnmirroredSourceKeys<WorkflowGraphSnapshotDTO, SrcWorkflowGraphSnapshot>] extends [never] ? true : false>;
+
+/** The one deliberate node divergence: engine NodeKind widens to string on the wire mirror —
+ *  the timeline renders labels, never branches on engine node kinds. */
+export type AllowedWorkflowGraphNodeMismatches = "kind";
+export type _WorkflowGraphNodeDtoHasNoExtraKeys = Expect<[ExtraDtoKeys<WorkflowGraphNodeDTO, SrcWorkflowGraphNode>] extends [never] ? true : false>;
+export type _WorkflowGraphNodeDtoSharedKeysMatch = Expect<[MismatchedSharedKeys<WorkflowGraphNodeDTO, SrcWorkflowGraphNode, AllowedWorkflowGraphNodeMismatches>] extends [never] ? true : false>;
+export type _WorkflowGraphNodeDtoMirrorsRest = Expect<[UnmirroredSourceKeys<WorkflowGraphNodeDTO, SrcWorkflowGraphNode>] extends [never] ? true : false>;
+
+export type _WorkflowGraphEdgeDtoIdentical = Expect<[ExtraDtoKeys<WorkflowGraphEdgeDTO, SrcWorkflowGraphEdge> | MismatchedSharedKeys<WorkflowGraphEdgeDTO, SrcWorkflowGraphEdge> | UnmirroredSourceKeys<WorkflowGraphEdgeDTO, SrcWorkflowGraphEdge>] extends [never] ? true : false>;
