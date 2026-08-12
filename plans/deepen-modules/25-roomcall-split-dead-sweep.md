@@ -18,7 +18,7 @@ shape (PR #318) applied to the voice stack.
 ## Provenance
 Round-2 review, webapp agent, rank 3, Strong.
 
-## Step 1 done (2026-08-12, round 3 iteration 12 — PR pending); steps 2-3 remain
+## Step 1 done (2026-08-12, round 3 iteration 12 — PR #379); steps 2-3 remain
 The 10-component sweep landed (~1,300 lines incl. tests) with the strongest review round of the
 queue: grok's forensic table + codex's request-changes converged on the SAME five feature
 orphans, and the adjudication split them honestly — two were standing-surface STATUS gaps fixed

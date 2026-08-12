@@ -24,7 +24,7 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
-## Round 3, iteration 12 (2026-08-12, goal mode — PR pending) — CONCERN 25 STEP 1
+## Round 3, iteration 12 (2026-08-12, goal mode — PR #379) — CONCERN 25 STEP 1
 The dead-component sweep (~1,300 lines) with the queue's best convergent round: both lineages
 independently named the same five feature orphans. Adjudicated three ways: 2 standing-status
 gaps FIXED here (retention-mismatch precedence + role=alert; browser-audio error/retry
