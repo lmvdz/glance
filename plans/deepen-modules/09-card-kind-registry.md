@@ -25,7 +25,7 @@ wrong-base trap. Design sketch recorded here so the slice is ready the moment th
 ## Provenance
 Whole-repo report candidate 4 (Worth exploring).
 
-## Done (2026-08-11, round 3 iteration 8 — PR pending)
+## Done (2026-08-11, round 3 iteration 8 — PR #376)
 The registry exists and is the ONE registration: webapp/src/lib/cardKindRegistry.ts carries tone
 policy + door label + icon per kind, satisfies-exhaustive over concern 08's shared list + the
 local kinds; toneFor/DOOR_LABELS/iconClass are derivations, and (codex round) the POINTER/LOCAL
