@@ -27,9 +27,11 @@ a bug — the design must ration. Everything still open in this concern IS the g
 two new kinds (report-raised, attention) are precisely the cards the question asks about, so
 there is no pre-gate slice left — concern 19 already shipped the daemon-side chokepoint
 (UnitAttentionLane), and concern 09's registry means the moment Lars rules, each new kind is
-one registry entry + one schema entry + one emit site through the lane. If the ruling is NO
-(ration harder), the honest alternative recorded here: reports/attentionEvents surface only
-through the unit drawer (already rendered) + the weekly episode digest, never the room timeline.
+one registry entry + one schema entry + one emit site through the lane. If the ruling is NO (ration harder), the alternative must be BUILT, not assumed: production has
+ZERO reads of agent.reports / agent.attentionEvents today (codex verified — UnitPanel does not
+render them; insights.ts records the old render path's deletion). Concern 17 named this gap;
+either ruling therefore requires a build: YES → the two room-card kinds; NO → a unit-drawer
+section + weekly-episode digest line. These P1 signals stay write-only until one of them ships.
 
 ## Provenance
 Round-2 review, webapp agent, rank 4, Worth exploring. Pre-named by concern 17's codex HIGH.

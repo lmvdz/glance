@@ -140,6 +140,15 @@ export interface VoiceKeyStatus {
   updatedBy?: string;
 }
 
+/** Read the session org's voice-key status (admin tier server-side; a non-admin call 403s).
+ *  RESTORED after a dead-code sweep deleted it (codex H, concern 27 round): it had zero callers
+ *  because PeopleSurface fetched the WRONG raw URL (/api/org/voice-key GETs 404 — that path only
+ *  supports PUT/DELETE) and swallowed the 404 into "no key stored" — a false admin surface.
+ *  The helper is the one place the real route is spelled. */
+export function getOrgVoiceStatus(): Promise<VoiceKeyStatus> {
+  return apiJson<VoiceKeyStatus>("/api/org/voice");
+}
+
 /** Persist a candidate key for the session org. The server verifies it against the provider BEFORE
  *  storing (a rejected key writes nothing) and this wrapper never persists or logs `apiKey` — it goes
  *  into the request body and nowhere else. Throws (via `apiJson`) with the server's message on reject. */
