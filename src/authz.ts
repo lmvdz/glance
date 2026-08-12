@@ -89,6 +89,10 @@ export function restActionTier(method: string, pathname: string): Role {
 	if (/^\/api\/agents\/[^/]+\/(land|vision)$/.test(pathname) || /^\/api\/features\/[^/]+\/(land|verify)$/.test(pathname)) {
 		return "admin";
 	}
+	// The self-land entry (glance#391) merges a branch/PR into a trunk with no agent record behind it —
+	// the same destructive-lifecycle class as `/api/agents/:id/land` above, and gated identically. An
+	// operator tier here would let a DB-mode org member merge the host's own repo.
+	if (pathname === "/api/self-land") return "admin";
 	// Assignees are the plan-vote substrate: any viewer may read them; only an admin may reassign
 	// (a reassignment changes who the future majority-of-assignees vote counts).
 	if (/^\/api\/features\/[^/]+\/assignees$/.test(pathname)) return method === "GET" ? "viewer" : "admin";

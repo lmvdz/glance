@@ -476,6 +476,19 @@ export const PushTapBodySchema = Schema.Struct({
 	agentId: Schema.String,
 });
 
+/** POST /api/self-land (glance#391) — `repo` REQUIRED (self-landing "whatever repo" is not a thing;
+ *  mirrors ConsoleReleaseBodySchema's ruling). Everything else is optional and independently narrowed
+ *  in the handler: `branch`/`pr` name the target, `criteria` supplies acceptance criteria when the PR
+ *  body declares none, `expectBase` pins the branch the land is allowed to merge INTO. */
+export const SelfLandBodySchema = Schema.Struct({
+	repo: Schema.String,
+	branch: Schema.optional(Schema.Unknown),
+	pr: Schema.optional(Schema.Unknown),
+	criteria: Schema.optional(Schema.Unknown),
+	message: Schema.optional(Schema.Unknown),
+	expectBase: Schema.optional(Schema.Unknown),
+});
+
 /** POST /api/agents/:id/land — no required field. */
 export const AgentLandBodySchema = Schema.Struct({
 	force: Schema.optional(Schema.Unknown),

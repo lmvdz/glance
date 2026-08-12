@@ -48,6 +48,7 @@ import {
 	CommentsCreateBodySchema,
 	ConsoleBodySchema,
 	ConsoleReleaseBodySchema,
+	SelfLandBodySchema,
 	decodeBody,
 	decodeBodyOrEmpty,
 	DiscardHeldSyncBodySchema,
@@ -2806,6 +2807,31 @@ export class SquadServer {
 			if (Result.isFailure(decoded)) return new Response("repo required", { status: 400 });
 			const released = manager.releaseEphemeralProject(decoded.success.repo);
 			return Response.json(released, { status: released.ok ? 200 : 500 });
+		}
+		// Self-land (glance#391 / #362): route a branch or PR of THIS repo through the rail — validator
+		// gate, real proof run, receipt — with no agent record behind it. Admin tier (authz.ts), same as
+		// `/api/agents/:id/land`: it merges into a trunk. Every refusal is a 409 with a `refusal` code,
+		// never a 5xx — "no acceptance criteria" and "gate red" are answers, not transport errors.
+		//
+		// `measured` in the response is read back off the receipt row that was written; a caller must
+		// never infer it from `ok`. A merged-but-unmeasured land returns `ok:true, measured:false`.
+		if (url.pathname === "/api/self-land" && req.method === "POST") {
+			const decodedSelfLand = decodeBody(SelfLandBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decodedSelfLand)) return new Response("repo required", { status: 400 });
+			const b = decodedSelfLand.success;
+			const prNumber = typeof b.pr === "number" ? b.pr : typeof b.pr === "string" && /^\d+$/.test(b.pr.trim()) ? Number(b.pr.trim()) : undefined;
+			if (b.pr !== undefined && prNumber === undefined) return new Response("pr must be a PR number", { status: 400 });
+			const criteria = Array.isArray(b.criteria) ? b.criteria.filter((c): c is string => typeof c === "string") : undefined;
+			const selfLandResult = await manager.selfLand({
+				repo: b.repo,
+				branch: typeof b.branch === "string" ? b.branch : undefined,
+				pr: prNumber,
+				criteria,
+				message: typeof b.message === "string" ? b.message : undefined,
+				expectBase: typeof b.expectBase === "string" ? b.expectBase : undefined,
+				actor,
+			});
+			return Response.json(selfLandResult, { status: selfLandResult.ok ? 200 : 409 });
 		}
 		// Push-tap beacon (daily-dogfood-engine 02): the webapp fires this ONCE per notification-tap
 		// page open (`?push=1` marker on push payload URLs, sessionStorage-deduped client-side).

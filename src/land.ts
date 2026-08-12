@@ -21,7 +21,7 @@ import { landRiskGateEnabled, landRiskReason } from "./rail/land-risk.ts";
 import { conflictMarkerGateEnabled, conflictMarkerReasonForFiles, conflictMarkerReasonForRange, conflictMarkerReasonStaged } from "./conflict-markers.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV, gitNoSignEnv } from "./git-harden.ts";
 import { harnessAuthEnv, scrubbedSpawnEnv } from "./spawn-env.ts";
-import type { FeatureCriterion } from "./types.ts";
+import type { FeatureCriterion, ValidationRecord } from "./types.ts";
 
 export interface LandResult {
 	ok: boolean;
@@ -165,6 +165,16 @@ export interface LandOpts {
 	featureId?: string;
 	criteria?: FeatureCriterion[];
 	validatorOverride?: boolean;
+	/**
+	 * Observer for the validator record this land produced (glance#391). `runValidatorGate` stamps the
+	 * record onto the AGENT DTO (`rec.dto.validation`) — which only exists when `agentId` resolves to a
+	 * live roster entry, so a record-free land (`selfLand`) had no way to see the verdict its own land
+	 * was graded on, and therefore no way to put `reviewerPrecision` on its receipt. This is that seam:
+	 * called exactly once per `landBranch`, with the FINAL record (post-`withFreshReviewerPrecision`),
+	 * whether it vetoed or passed. Ignored by land.ts/land-pr.ts — like every other field in this block,
+	 * it is read at the manager's dispatch seam, never by the land primitives.
+	 */
+	onValidation?: (record: ValidationRecord) => void;
 	/** Bypass the land blast-radius gate (C-LAND) — set by the human Land / force-land path so a
 	 *  deliberate large/sensitive merge always lands. Mirrors `validatorOverride`. */
 	riskOverride?: boolean;

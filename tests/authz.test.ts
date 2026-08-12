@@ -62,6 +62,9 @@ test("restActionTier: reads viewer, mutations operator, destructive admin, auth/
 	expect(restActionTier("POST", "/api/settings/feature-flags")).toBe("admin");
 	expect(restActionTier("POST", "/api/agents/a1/land")).toBe("admin");
 	expect(restActionTier("POST", "/api/features/f1/land")).toBe("admin");
+	// Self-land merges a branch/PR into a trunk with no agent record behind it (glance#391) — same
+	// destructive-lifecycle tier as the agent land route above.
+	expect(restActionTier("POST", "/api/self-land")).toBe("admin");
 	expect(restActionTier("POST", "/api/features/f1/verify")).toBe("admin");
 	// vision drives the daemon's browser off-box (SSRF surface, OMPSQ-152) — admin, not operator.
 	expect(restActionTier("POST", "/api/agents/a1/vision")).toBe("admin");

@@ -402,6 +402,85 @@ export async function ensurePr(input: EnsurePrInput): Promise<EnsurePrResult> {
 	return { ok: true, prNumber, prUrl: url, prState: draftEnabled() ? "draft" : "open" };
 }
 
+// ── PR lookup — the direction `ensurePr` never needed (glance#391 G5) ──────────────────────────
+//
+// `ensurePr` above resolves branch → PR (adopting an open one). The self-land entry needs the
+// OPPOSITE direction too — a human routes a PR NUMBER ("land #378"), and the rail is branch-keyed
+// all the way down (proof, worktree, land ledger, receipt). These two are that lookup, deliberately
+// sitting beside the adoption they mirror so both directions read the same `gh` surface.
+//
+// Both return a DISCRIMINATED result rather than `PrRef | undefined`: `ghJson` returns `undefined`
+// for BOTH "no such PR" and "gh failed", and a self-land must never treat a gh outage as "no PR
+// here, carry on" — that is the fail-open shape this codebase keeps finding. `{ ok: false }` means
+// "we could not tell", and the caller refuses.
+
+/** The PR facts a self-land needs: where it points, what state it is in, and its declared body. */
+export interface PrRef {
+	number: number;
+	url: string;
+	/** Head branch — the branch the rail actually lands. */
+	branch: string;
+	/** Base branch the merge would go INTO — a self-land guards on this so it can never merge to an
+	 *  unintended trunk. */
+	baseBranch: string;
+	/** `OPEN` / `CLOSED` / `MERGED`, verbatim from gh. */
+	state: string;
+	isDraft?: boolean;
+	title?: string;
+	/** Raw markdown body — the acceptance-criteria source (`acceptanceCriteriaFromPrBody`). */
+	body?: string;
+}
+
+export type PrLookup = { ok: true; pr?: PrRef } | { ok: false; detail: string };
+
+const PR_FIELDS = "number,url,state,headRefName,baseRefName,isDraft,title,body";
+
+interface PrJson {
+	number: number;
+	url: string;
+	state: string;
+	headRefName: string;
+	baseRefName: string;
+	isDraft?: boolean;
+	title?: string;
+	body?: string;
+}
+
+function toPrRef(p: PrJson): PrRef {
+	return { number: p.number, url: p.url, branch: p.headRefName, baseBranch: p.baseRefName, state: p.state, isDraft: p.isDraft, title: p.title, body: p.body };
+}
+
+/** One PR by number. `{ok:true, pr:undefined}` is impossible here — a number either resolves or the
+ *  lookup failed — so an absent PR comes back as `{ok:false}` with gh's own reason. */
+export async function prByNumber(repo: string, prNumber: number): Promise<PrLookup> {
+	if (!Number.isInteger(prNumber) || prNumber <= 0) return { ok: false, detail: `not a PR number: ${String(prNumber)}` };
+	const view = await ghJson<PrJson>(["pr", "view", String(prNumber), "--repo", slugOf(repo), "--json", PR_FIELDS], repo);
+	if (view === undefined) return { ok: false, detail: `gh pr view ${prNumber} failed (no such PR, or gh is unavailable/unauthenticated)` };
+	// Shape-check what came back rather than trusting the type parameter: `ghJson` parses whatever gh
+	// printed, so a future/failed/mocked gh can hand back a string, null, or an array. An unexpected
+	// shape is "we could not tell", never a usable PR.
+	if (typeof view !== "object" || view === null || Array.isArray(view) || typeof view.headRefName !== "string" || !view.headRefName) {
+		return { ok: false, detail: `gh pr view ${prNumber} returned an unexpected shape (no head branch)` };
+	}
+	return { ok: true, pr: toPrRef(view) };
+}
+
+/** The OPEN PR whose head is `branch`, if any — the same query `ensurePr`'s adopt path runs, minus
+ *  the push/sync side effects. `{ok:true, pr:undefined}` genuinely means "no open PR on this branch". */
+export async function prForBranch(repo: string, branch: string): Promise<PrLookup> {
+	const list = await ghJson<PrJson[]>(["pr", "list", "--head", branch, "--repo", slugOf(repo), "--state", "open", "--json", PR_FIELDS], repo);
+	if (list === undefined) return { ok: false, detail: `gh pr list --head ${branch} failed (gh unavailable/unauthenticated)` };
+	// Same shape-check as `prByNumber`: a non-array here is an unreadable answer, not "no PRs" — the
+	// difference matters, because "no PRs" would silently drop the criteria source and the receipt
+	// comment while looking like a clean lookup.
+	if (!Array.isArray(list)) return { ok: false, detail: `gh pr list --head ${branch} returned an unexpected shape` };
+	const open = list.find((p) => p?.state === "OPEN") ?? list[0];
+	if (open !== undefined && (typeof open !== "object" || open === null || typeof open.headRefName !== "string")) {
+		return { ok: false, detail: `gh pr list --head ${branch} returned a row with no head branch` };
+	}
+	return { ok: true, pr: open ? toPrRef(open) : undefined };
+}
+
 // ── scratch worktree — disposable, never the primary checkout ──────────────────────────────────
 
 async function mkScratchWorktree(repo: string, defaultBranch: string): Promise<string> {
