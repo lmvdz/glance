@@ -30,6 +30,13 @@ The product gate is the whole remaining surface: report-raised/attention cards A
 shipped (19's lane chokepoint, 09's one-entry registry). Disposition recorded with the question
 verbatim + the ration-harder alternative named. No pre-gate slice existed.
 
+## Round 3, iteration 10b (2026-08-12, goal mode — docs branch) — CONCERN 27 DONE (adjudicated)
+The dead-region inventory decayed under this round's own landings: 3 of 8 families ALIVE, the
+split half executed by #373/#375, and deleting conformance-gated mirrors hours after gating them
+would whipsaw. Executed the residue (4 dead api.ts client functions, one-sided by design — CLI
+still consumes the endpoints); the reader-less wire fields stay as documented mirrors, each
+future deletion a named omit-list decision. Full adjudication in the concern file.
+
 ## Round 2 (2026-08-04, iteration 37 — the goal's completion clause)
 Queue was dry (14 done, 3 needs-lars) → fresh review round executed: two Explore agents over
 current main (daemon: squad-manager regions with per-region coupling counts, Store, CLI,
