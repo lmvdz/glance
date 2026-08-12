@@ -26,6 +26,8 @@ import { hardenedGit } from "./git-harden.ts";
 import { budgetedExcerpt } from "./gate-logs.ts";
 import { gateExec, greenGateUnproven } from "./gate-runner.ts";
 import { detectVerify, packageManifestError } from "./intake.ts";
+import { runManifestGates } from "./tenant-gate-run.ts";
+import { refusalIsEnvironmental } from "./tenant-gates.ts";
 import { proofGate } from "./proof.ts";
 import { gh, ghJson } from "./gh.ts";
 import { hasModelDeltaMarker } from "./pr-body.ts";
@@ -802,6 +804,32 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 		const installErr = await installScratchDeps(scratch);
 		if (installErr) return { ok: false, committed, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: `acceptance failed on scratch merge: ${installErr}` };
 
+		// A registered tenant contract governs the PR-mode scratch gate too (glance#393). Threaded here
+		// as well as in land.ts because PR mode is a SEPARATE gate path — closing the fail-open only on
+		// the local path would leave the fleet's default land route running on detection.
+		if (opts.manifest) {
+			const outcome = await runManifestGates({ manifest: opts.manifest, cwd: scratch });
+			acceptanceGateExcerpt = await excerptForDetail(outcome.output, 600, opts.agentId);
+			if (!outcome.ok) {
+				const refusal = outcome.refusal;
+				return {
+					ok: false,
+					committed,
+					merged: false,
+					retryable: refusal ? refusalIsEnvironmental(refusal.code) : true,
+					message,
+					mode: "pr",
+					pushed: true,
+					prUrl: ensure.prUrl,
+					prNumber: ensure.prNumber,
+					detail: `tenant gate contract REFUSED the land (${refusal?.code ?? "unknown"}): ${refusal?.reason ?? "no reason recorded"}\n${acceptanceGateExcerpt}`,
+				};
+			}
+			// Green against the contract. The manifest IS the tenant's full gate set, so the
+			// detection-driven regression gate below is skipped rather than re-admitting the guessing.
+			prBaseTip = head0 || undefined; // receipt rollback point (T6), same as the detection path
+			// falls through to the gh merge below — the contract has been satisfied
+		} else {
 		const verify = opts.verify ?? (await detectVerify(repo));
 		// Finding #10 (eap-borrows wave 2): detectVerify(repo) collapses "genuinely no toolchain" and
 		// "package.json exists but is unreadable/malformed" into the same undefined — only intervene when
@@ -864,6 +892,7 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 			reMerge: () => git(["merge", "--no-ff", branch], scratch),
 		});
 		if (regressionBlock) return { ...regressionBlock, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber };
+		}
 	} finally {
 		await removeScratchWorktree(repo, scratch);
 	}

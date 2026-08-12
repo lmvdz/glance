@@ -57,6 +57,9 @@ import { openRemovedLedger, type RemovedLedger } from "./removed-ledger.ts";
 import { buildDeadPlaceholder, composePriorContext, DEAD_PLACEHOLDER_TTL_MS, type DeadSessionPlaceholder, reattachMarker } from "./reattach-context.ts";
 import { reapAcpOrphanChain } from "./acp-orphan-reaper.ts";
 import { normalizeRepoPath } from "./project-registry.ts";
+import { openTenantGateRegistry, type TenantGateRegistry } from "./tenant-gate-registry.ts";
+import { manifestCommand, manifestHash, manifestStages, refusalIsEnvironmental, type TenantGateManifest } from "./tenant-gates.ts";
+import { missingCommandRefusal, runManifestGates } from "./tenant-gate-run.ts";
 import { ProjectLane } from "./project-lane.ts";
 import { Orchestrator } from "./orchestrator.ts";
 import { Observer, type Finding } from "./observer.ts";
@@ -1404,6 +1407,9 @@ export class SquadManager extends EventEmitter {
 	private planFeatureSignature = "";
 	private readonly mainGateCache = new Map<string, { fp: string; result: { ok: boolean; firstFailure?: string; skipped?: boolean; unrunnable?: boolean }; tick: number }>();
 
+	/** Per-org registered tenant gate contracts (glance#393). Built in the constructor, after stateDir. */
+	private readonly tenantGates: TenantGateRegistry;
+
 	constructor(opts: SquadManagerOptions = {}) {
 		super();
 		this.operator = opts.operator ?? LOCAL_ACTOR;
@@ -1417,6 +1423,10 @@ export class SquadManager extends EventEmitter {
 		setGateLogRoot(this.stateDir);
 		setCompactionLogRoot(this.stateDir);
 		if (envBool("OMP_SQUAD_LAND_ASSESSMENT", false)) this.landAssessment = new LandAssessmentHook(this.stateDir, (level, msg) => this.log(level, msg));
+		// Per-ORG tenant gate contracts (glance#393). Opened off `this.stateDir`, which ManagerRegistry
+		// makes `<root>/orgs/<orgId>` in DB mode — so the record is per-org by construction, which is
+		// precisely what the daemon-global `OMP_SQUAD_GATE_*` env knobs could never be.
+		this.tenantGates = openTenantGateRegistry(this.stateDir);
 		this.scoutCursor = readScoutCursors(this.stateDir);
 		this.removedLedger = openRemovedLedger(this.stateDir);
 		this.goalOverlapLedger = openGoalOverlapLedger(this.stateDir);
@@ -5305,6 +5315,32 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/**
+	 * The registered TenantGateManifest for `repo` (glance#393), or the refusal a BROKEN registration
+	 * earns. Three states, never two: unregistered (`{}` — detection still governs, the whole existing
+	 * fleet), registered-and-usable, and registered-but-unreadable. Collapsing the third into the first
+	 * would mean a tenant's gates silently vanish the moment someone hand-edits the record badly —
+	 * the fail-open shape this ticket exists to remove.
+	 */
+	protected tenantManifest(repo: string): { manifest?: TenantGateManifest; error?: string } {
+		const found = this.tenantGates.get(repo);
+		if (!found) return {};
+		return "error" in found ? { error: found.error } : { manifest: found.manifest };
+	}
+
+	/**
+	 * The reviewer ledger a land receipt for `repo` must cite. R1's subtler coupling (via R2 #384):
+	 * `DEFAULT_REVIEWER_LEDGER_PATH` is `path.join(import.meta.dir, "..", "..", "plans", ".reviews",
+	 * …)` — pinned to GLANCE's own tree — so tenant 2's receipts would quote glance's measured reviewer
+	 * precision as if it were their own. A registered tenant names its own ledger.
+	 *
+	 * The test-only DI override still wins: it exists so a fixture ledger can be pointed at without
+	 * touching real data, and a manifest must not be able to shadow it.
+	 */
+	protected reviewerLedgerPathFor(repo: string): string | undefined {
+		return this.reviewerLedgerPathOverride() ?? this.tenantManifest(repo).manifest?.reviewerLedgerPath;
+	}
+
+	/**
 	 * Independent-validator veto (Epic 3, DESIGN §1) — runs BEFORE any mode dispatch, on every
 	 * `landBranch` call INCLUDING forced lands (`requireProof:false` never skips it — a forced land
 	 * bypasses the proof gate, not the semantic one). Scores the diff against the feature's declared
@@ -5321,6 +5357,7 @@ export class SquadManager extends EventEmitter {
 		// spec (applyState) on the common omp/pi path; `harness` is the fallback for vendor-pinned ACP
 		// runtimes. Threaded so the ValidationRecord can flag a same-lineage (self-graded) review.
 		const rec = opts.agentId ? this.agents.get(opts.agentId) : undefined;
+		const tenantContract = this.tenantManifest(opts.repo).manifest;
 		const { record, veto, inconclusive } = await validatorGate({
 			criteria,
 			repo: opts.repo,
@@ -5331,7 +5368,9 @@ export class SquadManager extends EventEmitter {
 			authorModel: rec?.dto.model,
 			authorHarness: rec?.dto.harness,
 			agentId: opts.agentId,
-			reviewerLedgerPath: this.reviewerLedgerPathOverride(),
+			reviewerLedgerPath: this.reviewerLedgerPathFor(opts.repo),
+			// The contract this land was gated by, stamped into the receipt (glance#393).
+			manifestHash: tenantContract ? manifestHash(tenantContract) : undefined,
 		});
 		if (rec) {
 			rec.dto.validation = record;
@@ -5380,6 +5419,17 @@ export class SquadManager extends EventEmitter {
 	protected async landBranch(opts: LandOpts): Promise<LandResult> {
 		const validatorBlocked = await this.runValidatorGate(opts);
 		if (validatorBlocked) return validatorBlocked;
+		// Resolve the tenant contract HERE, at the single seam every land path funnels through, so no
+		// land route can be added later that silently misses it (glance#393). A registration that exists
+		// but cannot be read refuses the land outright — the one thing it must never do is fall back to
+		// detection, which is what "registered" was supposed to end.
+		const tenant = this.tenantManifest(opts.repo);
+		if (tenant.error) {
+			const refusal = missingCommandRefusal(opts.repo, tenant.error);
+			this.log("warn", `land refused for ${opts.repo}: ${refusal.reason}`);
+			return { ok: false, committed: false, merged: false, retryable: true, message: opts.message, detail: `${refusal.code}: ${refusal.reason}` };
+		}
+		if (tenant.manifest) opts = { ...opts, manifest: tenant.manifest };
 		const mode = await this.resolveLandModeFor(opts.repo);
 		if (mode.mode === "pr") {
 			if (!mode.defaultBranch) {
@@ -5438,8 +5488,12 @@ export class SquadManager extends EventEmitter {
 		if (!pf) return null;
 		// A repo-detected gate runs as ordered fail-fast stages (typecheck → test); a custom acceptance
 		// command stays a single opaque stage (we can't safely split arbitrary shell).
-		const stages = pf.acceptance ? undefined : await detectVerifyStages(pf.repo);
-		const command = pf.acceptance ?? (stages?.length ? stages.map((s) => s.command).join(" && ") : undefined);
+		// A registered tenant's contract OUTRANKS both a feature's custom acceptance command and
+		// detection: the point of registration is that the gate is not something the work being gated
+		// (or a per-feature field an agent can set) gets to choose.
+		const manifest = this.tenantManifest(pf.repo).manifest;
+		const stages = manifest ? manifestStages(manifest) : pf.acceptance ? undefined : await detectVerifyStages(pf.repo);
+		const command = manifest ? manifestCommand(manifest) : (pf.acceptance ?? (stages?.length ? stages.map((s) => s.command).join(" && ") : undefined));
 		if (!command) return { ok: false, results: [{ ok: false, detail: "no acceptance command — set the feature's acceptance or add a test script to the repo", artifacts: 0 }] };
 		// Sweep every live member's uncommitted work BEFORE snapshotting tips and running the gate — the
 		// feature path hits the same `runProof` dirty refusal as the single-agent path (see
@@ -5461,7 +5515,7 @@ export class SquadManager extends EventEmitter {
 		}
 		const results: { agentId?: string; branch?: string; ok: boolean; detail?: string; artifacts: number }[] = [];
 		for (const m of members) {
-			const proof = await runProof({ repo: pf.repo, worktree: m.worktree, command, stages });
+			const proof = await runProof({ repo: pf.repo, worktree: m.worktree, command, stages, manifest });
 			results.push({ agentId: m.agentId, branch: m.branch, ok: proof.ok, detail: proof.detail, artifacts: proof.artifacts.length });
 		}
 		this.emitFeaturesChanged();
@@ -5872,10 +5926,12 @@ export class SquadManager extends EventEmitter {
 		if (!rec) return false;
 		this.syncAuthority(rec.dto);
 		if (rec.dto.effectiveMode === "observe") throw new Error("verify blocked in observe mode");
-		const stages = await detectVerifyStages(rec.dto.repo);
-		const command = stages.length ? stages.map((s) => s.command).join(" && ") : undefined;
+		// Registered tenant ⇒ the contract IS the gate; detection is not consulted at all (glance#393).
+		const manifest = this.tenantManifest(rec.dto.repo).manifest;
+		const stages = manifest ? manifestStages(manifest) : await detectVerifyStages(rec.dto.repo);
+		const command = manifest ? manifestCommand(manifest) : stages.length ? stages.map((s) => s.command).join(" && ") : undefined;
 		if (!command) return false;
-		const proof = await runProof({ repo: rec.dto.repo, worktree: rec.dto.worktree, command, stages });
+		const proof = await runProof({ repo: rec.dto.repo, worktree: rec.dto.worktree, command, stages, manifest });
 		await this.refreshProofState(rec);
 		this.transition(rec, rec.dto.status, "verification", { ok: proof.ok, detail: proof.detail, command, artifacts: proof.artifacts.length });
 		this.emitAgent(rec);
@@ -6068,16 +6124,45 @@ export class SquadManager extends EventEmitter {
 		const status = await hardenedGit(["status", "--porcelain", "--untracked-files=all"], { cwd: repo });
 		if (status.code !== 0) return undefined;
 		let lock = "";
-		try {
-			lock = await fs.readFile(path.join(repo, "bun.lock"), "utf8");
-		} catch (e) {
-			if ((e as { code?: string }).code !== "ENOENT") return undefined;
+		// R2 #384 finding #6: this hashed `bun.lock` ONLY, so a committed `pnpm-lock.yaml` change on an
+		// otherwise-clean tree did not invalidate the cached green — a foreign tenant could ride a stale
+		// pass for up to 10 ticks after a dependency change. Every lockfile shape, not just this repo's.
+		for (const name of ["bun.lock", "bun.lockb", "pnpm-lock.yaml", "package-lock.json", "yarn.lock"]) {
+			try {
+				lock += await fs.readFile(path.join(repo, name), "utf8");
+			} catch (e) {
+				if ((e as { code?: string }).code !== "ENOENT") return undefined;
+			}
 		}
-		return createHash("sha256").update(status.stdout).update("\0").update(lock).digest("hex");
+		// The tenant CONTRACT is an input to the gate's result, so it must be an input to the cache key:
+		// re-registering a stricter manifest (a higher minTests, a new required service) has to bust a
+		// cached green, or the fleet would keep serving a pass earned under the looser contract.
+		const tenant = this.tenantManifest(repo);
+		const contract = tenant.error ?? (tenant.manifest ? manifestHash(tenant.manifest) : "");
+		return createHash("sha256").update(status.stdout).update("\0").update(lock).update("\0").update(contract).digest("hex");
 	}
 
 	private async runMainGateUncached(repo: string): Promise<{ ok: boolean; firstFailure?: string; skipped?: boolean; unrunnable?: boolean }> {
 		try {
+			// A REGISTERED tenant is gated by its contract, and detection never runs for it (glance#393 /
+			// G3 #387: detection becomes suggest-only once a repo is registered). Every refusal below is
+			// fail-closed and carries its distinct code, so an operator reading the Observer's finding
+			// knows whether to start docker, fix a test, or fix the registration.
+			const tenant = this.tenantManifest(repo);
+			if (tenant.error) {
+				const refusal = missingCommandRefusal(repo, tenant.error);
+				return { ok: false, unrunnable: true, firstFailure: `${refusal.code}: ${refusal.reason}`.slice(0, 200) };
+			}
+			if (tenant.manifest) {
+				const outcome = await runManifestGates({ manifest: tenant.manifest, cwd: repo });
+				if (outcome.ok) return { ok: true };
+				const refusal = outcome.refusal;
+				return {
+					ok: false,
+					unrunnable: refusal ? refusalIsEnvironmental(refusal.code) : true,
+					firstFailure: (refusal ? `${refusal.code}: ${refusal.reason}` : "manifest gate refused without a reason").slice(0, 200),
+				};
+			}
 			const command = await detectVerify(repo);
 			// Finding #13 (eap-borrows wave 2): `ok: true` here used to be indistinguishable from "the gate
 			// actually ran and passed" — a repo with no detectable verify command reads byte-identical to a
@@ -13075,6 +13160,7 @@ export class SquadManager extends EventEmitter {
 			lensAdvisory: record.lensAdvisory,
 			lensVerify: record.lensVerify,
 			gateLogPaths: record.gateLogPaths,
+			manifestHash: record.manifestHash,
 			ranAt: record.ranAt,
 		});
 	}

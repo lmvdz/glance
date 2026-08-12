@@ -15,6 +15,8 @@ import { budgetedExcerpt } from "./gate-logs.ts";
 import { detectVerify, packageManifestError } from "./intake.ts";
 import { envBool } from "./config.ts";
 import { gateExec, gateRunUnrunnable, greenGateUnproven } from "./gate-runner.ts";
+import { runManifestGates } from "./tenant-gate-run.ts";
+import { manifestCommand, refusalIsEnvironmental, type TenantGateManifest } from "./tenant-gates.ts";
 import { reduceOutput } from "./output-reduce.ts";
 import { proofGate, recordProof } from "./proof.ts";
 import { landRiskGateEnabled, landRiskReason } from "./rail/land-risk.ts";
@@ -143,6 +145,13 @@ export interface LandOpts {
 	 * `staleGate`). OMP_SQUAD_CONFLICT_MARKER_GATE=0 disables it globally.
 	 */
 	conflictMarkerGate?: boolean;
+	/**
+	 * The repo's REGISTERED tenant gate contract (glance#393), resolved by the manager from its per-org
+	 * registry. Present ⇒ the acceptance gate is the manifest, run fail-closed by `runManifestGates`,
+	 * and neither `verify` nor package.json detection is consulted. Absent ⇒ everything below behaves
+	 * exactly as it did, which is what every un-registered repo in the fleet gets.
+	 */
+	manifest?: TenantGateManifest;
 	/**
 	 * PR-mode plumbing (concern 06): threaded into `ensurePr`'s ledger entry and the DoneProof a
 	 * PR-mode merge records, so `closeLandedIssue`'s issue-identifier lookup finds it same as the
@@ -619,7 +628,9 @@ async function landAgentImpl(opts: LandOpts): Promise<LandResult> {
 	// Capture pre-merge main HEAD so a failed verification can roll main back, and resolve the
 	// gate to run after merge (caller override wins; undefined ⇒ auto-detect; empty ⇒ skip).
 	const head0 = (await git(["rev-parse", "HEAD"], repo)).stdout;
-	const gate = opts.verify !== undefined ? opts.verify : await detectVerify(repo);
+	// A registered tenant's contract outranks BOTH the caller's `verify` override and detection: the
+	// gate a land is judged by must not be selectable by the caller of the land (glance#393).
+	const gate = opts.manifest ? manifestCommand(opts.manifest) : opts.verify !== undefined ? opts.verify : await detectVerify(repo);
 
 	// Receipt attribution (T6, glance#334): stamp the land's own facts onto a merged result WHILE still
 	// holding the repo land lock — `head0` (captured above, pre-merge) and the landed commit (main's HEAD
@@ -678,6 +689,35 @@ async function landAgentImpl(opts: LandOpts): Promise<LandResult> {
 			// Record the landed main even without a gate: an inspectable "landed, no acceptance gate ran" proof.
 			await recordMainProof(repo, "(no acceptance gate)", true, detail, false);
 			return withMergedFacts({ ok: true, committed, merged: true, message, detail });
+		}
+		// ── Registered tenant: the manifest path, fail-closed ────────────────────────────────────────
+		// Deliberately BEFORE `runGate` and deliberately NOT falling through to the red-baseline
+		// allowance below. That allowance exists so a brownfield repo whose suite is already red is not
+		// wedged forever — it compares extracted failure SETS and lands when nothing new broke. Under a
+		// registered contract that reasoning does not hold: a `count-violated` or `zero-tests` refusal
+		// produces no failure lines at all, so both sides would extract to the empty set, compare equal,
+		// and the land would proceed on a suite that ran nothing. Registration means the gates mean
+		// something; a refusal is a refusal. Environmental refusals (docker/service/runner) are
+		// RETRYABLE — the environment is broken, not the branch.
+		if (opts.manifest) {
+			const outcome = await runManifestGates({ manifest: opts.manifest, cwd: repo });
+			if (!outcome.ok) {
+				await git(["reset", "--hard", head0], repo).catch(() => {});
+				const refusal = outcome.refusal;
+				return {
+					ok: false,
+					committed,
+					merged: false,
+					retryable: refusal ? refusalIsEnvironmental(refusal.code) : true,
+					message,
+					detail: `tenant gate contract REFUSED the land (${refusal?.code ?? "unknown"}): ${refusal?.reason ?? "no reason recorded"} — main rolled back\n${await excerptForDetail(outcome.output, 400, opts.agentId)}`,
+				};
+			}
+			// The manifest IS the tenant's full gate set, so the detection-driven regression gate is not
+			// run for a registered repo — running it would re-admit the guessing this contract replaced.
+			const counts = outcome.results.map((r) => `${r.name}${r.tests === undefined ? "" : `=${r.tests} tests`}`).join(", ");
+			await recordMainProof(repo, gate, true, `${detail}; verified against tenant contract ${outcome.manifestHash.slice(0, 12)} (${counts})`, outcome.results.every((r) => r.sandboxed !== false));
+			return withMergedFacts({ ok: true, committed, merged: true, message, detail: `${detail}; verified against tenant contract ${outcome.manifestHash.slice(0, 12)} (${counts})` });
 		}
 		const v = await runGate(gate, repo);
 		if (v.code === 0) {
