@@ -84,8 +84,9 @@ test('a decision about a plan admits when the plan did not come with it', () => 
   // buttons. Answering it meant answering blind, and nothing on screen said so.
   const html = renderToStaticMarkup(
     <DecisionPanel
-      request={{ id: 'g', agentName: 'ompsq-480', address: 'ompsq-480', question: 'Approve plan', options: [{ label: 'Approve' }, { label: 'Revise' }], unitHref: '#/channel/node%3Aompsq-480' }}
+      request={{ id: 'g', agentName: 'ompsq-480', address: 'ompsq-480', question: 'Approve plan', options: [{ label: 'Approve', consequence: 'ompsq-480 starts implementing' }, { label: 'Revise', consequence: 'ompsq-480 reworks the plan' }], unitHref: '#/channel/node%3Aompsq-480' }}
       onAnswer={() => {}}
+      onClose={() => {}}
     />,
   );
   expect(html).toContain('THE PLAN ITSELF DID NOT COME WITH THE QUESTION');
@@ -96,8 +97,9 @@ test('a decision about a plan admits when the plan did not come with it', () => 
 test('a decision that is not about a document does not apologise for having none', () => {
   const html = renderToStaticMarkup(
     <DecisionPanel
-      request={{ id: 'g', agentName: 'wren', address: 'wren', question: 'Allow tool: bash', options: [{ label: 'Allow' }] }}
+      request={{ id: 'g', agentName: 'wren', address: 'wren', question: 'Allow tool: bash', options: [{ label: 'Allow', consequence: 'wren runs the command' }] }}
       onAnswer={() => {}}
+      onClose={() => {}}
     />,
   );
   expect(html).not.toContain('DID NOT COME WITH THE QUESTION');

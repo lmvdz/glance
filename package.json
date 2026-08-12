@@ -9,7 +9,7 @@
   },
   "scripts": {
     "start": "bun src/index.ts",
-    "check": "tsc --noEmit && tsc --noEmit -p webapp/tsconfig.json",
+    "check": "tsc --noEmit && tsc --noEmit -p webapp/tsconfig.json && tsc --noEmit -p webapp/tsconfig.tests.json",
     "prepare": "effect-language-service patch",
     "test": "bun test && cd webapp && bun test"
   },

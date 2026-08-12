@@ -98,7 +98,7 @@ function stubBrowserEnv(startHash: string) {
       }
     }
     return new Response("{}", { status: 200 });
-  }) as typeof fetch;
+  }) as unknown as typeof fetch;
   return {
     calls,
     setHash: (h: string) => {

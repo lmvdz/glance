@@ -14,7 +14,6 @@ import {
   type HealthSample,
   type UsageRun,
   type AutomationRollup,
-  type ServerActionItem,
 } from './insights';
 import type { AgentDTO, FeatureDTO } from './dto';
 

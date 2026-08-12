@@ -1,0 +1,13 @@
+{
+	// Concern 23 (deepen-modules): the test corpus was type-checked NOWHERE — webapp/tsconfig.json
+	// deliberately excludes *.test.* and bun runs tests with types stripped, so a deleted-module
+	// import or a drifted fixture passed every gate (proven twice: concern 17's stranded import,
+	// concern 18's TestManager reaching deleted private methods). This program is clause 3 of
+	// `bun run check`: same compiler options as the app, tests INCLUDED, plus bun's test globals.
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		"types": ["bun"]
+	},
+	"include": ["src"],
+	"exclude": []
+}

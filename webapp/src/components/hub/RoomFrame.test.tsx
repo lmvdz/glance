@@ -18,6 +18,7 @@ const baseProps = {
   onOpenRoom: noop,
   nodes: [],
   plans: 0,
+  children: null,
   now: 0,
   onSelect: noop,
   onEnter: noop,
