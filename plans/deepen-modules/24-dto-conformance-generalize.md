@@ -1,5 +1,5 @@
 # DTO conformance: 1 guarded pair → 42
-STATUS: open
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: mechanical, batched
@@ -38,7 +38,7 @@ except AgentDTO (extra-keys arm only). REAL DRIFT FIXED in webapp dto.ts (all ty
   DELIBERATE widening is now a NAMED allowance (AllowedTransitionEntryMismatches) instead of
   invisible.
 
-## Slice 2 (open): AgentDTO
+## Slice 2 (DONE 2026-08-11, round 3 iteration 9): AgentDTO
 18 unmirrored source fields (approvalMode, lane, adopted, verified, requires, owns, produces,
 scopeSource, harness, repoId, etaAt, queued, harnessCaps, mcpServerNames, completionPushArmed,
 completionPushKind, completionArmedAt, ladderPriority) + 11 shared-key mismatches (kind +
@@ -48,3 +48,16 @@ workflow-type family needing WorkflowGraphSnapshotDTO/WorkflowRunState/TodoPhase
 availableActions/verificationState union drift; transitions resurfaces the reason allowance).
 Each is a mirror-or-omit decision; the extra-keys arm is already gated so the DTO cannot invent
 fields while this is open.
+
+## Done (2026-08-11, both slices — PR #373)
+44 gated pairs total (39 from slice 1 + AgentDTO three-arm + the four workflow-family leaf pairs).
+Slice 2: 18 backend fields mirrored (codex verified every one exact, unions included), six
+optionality corrections landed the wire's truth with zero production read changes needed, and the
+codex round turned the allowance mechanism itself deeper — a REAL drift it had hidden (TodoStatus
+missing abandoned: TodoPanel indexed an undeclared style) got fixed so thoroughly the todoPhases
+allowance is DELETED (exact equality), and the remaining three field allowances now carry LEAF
+pair gates (WorkflowRunStateDTO's 10 engine-only omissions NAMED; the node kind widening is the
+one named graph divergence; Edge exact). Residual named: wrapper drift on transitions alone.
+Grok narration-only both slices (gaps ledgered). Follow-up queued for the review round: codex M2
+from slice 1 (daemon projectionClasses/doorSurface quiet defaults — filed under concern 09's
+round too).

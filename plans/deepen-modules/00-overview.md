@@ -34,6 +34,14 @@ three fixed, deliberate divergences now NAMED allowances (variant.field grain). 
 narration-only (gap row). Gates: check 0, root 5332/2-inherited, webapp 2002/0. Slice 2 open:
 AgentDTO (18 unmirrored + 11 mismatches through the workflow family, enumerated in the concern).
 
+## Round 3, iteration 9 (2026-08-11, goal mode — PR #373) — CONCERN 24 DONE (both slices)
+AgentDTO joins the gate: 18 mirrors (codex-verified exact), six optionality truths, four named
+allowances → then the codex round bit hard: a REAL drift hidden by an allowance (TodoStatus
+missing abandoned — undeclared render style) fixed so completely the allowance is deleted; the
+rest gained leaf pair gates (10 engine omissions named). 44 pairs gated total. Native row: cwd
+accident FOURTH strike (git rm + bun check both fooled from webapp/). Gates: check 0 both
+programs, root 5331/2-inherited+1-proven-flake, webapp 2002/0.
+
 ## Round 2 (2026-08-04, iteration 37 — the goal's completion clause)
 Queue was dry (14 done, 3 needs-lars) → fresh review round executed: two Explore agents over
 current main (daemon: squad-manager regions with per-region coupling counts, Store, CLI,
