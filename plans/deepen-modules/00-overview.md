@@ -24,6 +24,14 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
+## Round 3, iteration 7 (2026-08-11, goal mode — PR pending) — CONCERN 08 DONE (slice 2)
+The wire-contract decision lands: kernel = type-only RE-EXPORTS of a now-truly-zero-import
+core-types (WorkLane flip shipped; types.ts honors its own barrel promise), domain DTOs =
+conformance-gated mirrors (24's file), payloads = runtime test. Codex proved the bundle graph
+carries zero daemon modules under the real vite config and every semantic widening has zero
+production reads; 2 doc Lows fixed. Grok narration-only x2. Gates: check 0, vite green, root
+5332/2-inherited, webapp 2002/0.
+
 ## Round 2 (2026-08-04, iteration 37 — the goal's completion clause)
 Queue was dry (14 done, 3 needs-lars) → fresh review round executed: two Explore agents over
 current main (daemon: squad-manager regions with per-region coupling counts, Store, CLI,
