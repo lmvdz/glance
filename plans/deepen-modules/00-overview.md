@@ -24,6 +24,17 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
+## Round 3, iteration 3 (2026-08-11, goal mode — PR pending) — CONCERN 23 SLICE 1 (webapp)
+The webapp test corpus joins the tsc program: webapp/tsconfig.tests.json = clause 3 of bun run
+check (codex verified: all 116 test files in the program, failure propagates, zero ts-nocheck).
+75 pre-existing errors across 24 files paid to zero without touching a single assertion — codex
+attacked exactly that claim and confirmed it, finding the two honest exceptions: partial voice
+bindings hidden by as-never (M — complete VoiceCallBindingDTO fixtures now) and
+SessionTypeSource requiring a name the impl deliberately tolerates missing (L — type widened to
+match the code). Native row: the cwd accident struck a THIRD time (foreground cd webapp leaked
+into a bg root-suite launch — caught by test-count sanity). Root corpus (~283 errors/119 files)
+is slice 2; concern stays open. (Iteration lines 1-2 live on their PR branches; keep-both-sides.)
+
 ## Round 2 (2026-08-04, iteration 37 — the goal's completion clause)
 Queue was dry (14 done, 3 needs-lars) → fresh review round executed: two Explore agents over
 current main (daemon: squad-manager regions with per-region coupling counts, Store, CLI,
