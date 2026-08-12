@@ -571,7 +571,7 @@ export interface AgentDTO {
   name: string;
   status: AgentStatus;
   /** Which runtime backs this agent. */
-  kind?: AgentKind;
+  kind: AgentKind;
   /** Specialization of this unit ("tester" writes the test first, "observer" reproduces a
    *  regression), orthogonal to `kind`. Absent = general coder (today's default). */
   executionRole?: ExecutionRole;
@@ -586,7 +586,7 @@ export interface AgentDTO {
   subagents?: SubagentNodeDTO[];
   /** Static workflow graph topology, captured once per run (concern 03's workflow.graph journal event). */
   workflowGraph?: WorkflowGraphSnapshotDTO;
-  workflow?: { path?: string; verify?: { command: string } };
+  workflow?: { path?: string; verify?: { command: string; maxFixups?: number; mode?: "verify" | "tdd" | "observe" } };
   repo: string;
   worktree: string;
   /** Originating room channel for this unit. Absent routes active-work cards to #fleet. */
@@ -617,18 +617,20 @@ export interface AgentDTO {
   transitions?: TransitionEntry[];
   errorTransitions1h?: number;
   lastActivity: number;
-  messageCount?: number;
+  messageCount: number;
   error?: string;
   issue?: IssueRef;
   featureId?: string;
-  autonomyMode: AutonomyMode;
-  effectiveMode: AutonomyMode;
-  verificationState: VerificationState;
+  /** Optional ON THE WIRE (an old daemon omits them) — the dto requiring these was drift the
+   *  conformance pair caught; read sites default explicitly instead of trusting a lie. */
+  autonomyMode?: AutonomyMode;
+  effectiveMode?: AutonomyMode;
+  verificationState?: VerificationState;
   proof?: { commit?: string; command?: string; ranAt?: number; fingerprint?: string };
   /** Epic 3 independent-validator verdict for this agent's most recent land attempt. */
   validation?: ValidationRecordDTO;
   blockedReason?: string;
-  availableActions: AgentAction[];
+  availableActions?: AgentAction[];
   /** Run-end self-confidence 0..1; absent until a run has finished. Below the daemon's confidence
    *  floor caps `effectiveMode` to `assist` (propose-only). */
   confidence?: number;
@@ -655,6 +657,37 @@ export interface AgentDTO {
   workflowState?: WorkflowRunStateDTO;
   /** Pre-dispatch harness scorecard (advisory shadow) — see `HarnessScorecardDTO`. */
   harnessScorecard?: HarnessScorecardDTO;
+  // ── Mirrored from the backend facets (concern 24 slice 2) — previously unmirrored ──────────────
+  approvalMode: "always-ask" | "write" | "yolo";
+  /** Resolved work lane (operator > label > classifier > "feature" default). */
+  lane?: "hotfix" | "feature" | "chore";
+  /** Re-adopted from a surviving worktree on relaunch and not yet re-run. */
+  adopted?: boolean;
+  /** flue-service only: passed the acceptance gate at onboard time. */
+  verified?: boolean;
+  /** Scope contract (repo-relative path prefixes) + its provenance. */
+  requires?: string[];
+  owns?: string[];
+  produces?: string[];
+  scopeSource?: "inferred" | "operator";
+  /** Which coding-agent harness backs this unit (omp/pi/claude-code/…). Absent ⇒ "omp". */
+  harness?: string;
+  /** Cross-host repo identity (normalized git origin) — federation collision-matching. */
+  repoId?: string;
+  /** Rough estimated completion time (ms epoch); a hint, not a deadline. */
+  etaAt?: number;
+  /** True only on the synthetic DTO create() returns when a spawn is parked at the WIP cap. */
+  queued?: boolean;
+  /** Harness capability summary (approval channel + restart survival). */
+  harnessCaps?: { toolApproval: "native" | "none" | "preauth-allowlist"; resumable: boolean; hostTools: boolean; contextInjection: "native" | "none" | "mcp" };
+  /** NAMES ONLY of resolved MCP servers — never the full spec (secrets/exec stay server-side). */
+  mcpServerNames?: string[];
+  /** Completion-push latch, exposed only at the genuine terminal event. */
+  completionPushArmed?: boolean;
+  completionPushKind?: "voice" | "category";
+  completionArmedAt?: number;
+  /** The needs-you ladder's computed, viewer-agnostic priority state. */
+  ladderPriority?: "error" | "pending-approval" | "awaiting-input" | "working" | "plan-ready" | "completed-unseen" | "idle";
 }
 
 export interface TranscriptTool {

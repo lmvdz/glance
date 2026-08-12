@@ -119,16 +119,20 @@ export type DriftedVariants<DtoU extends { type: string }, SrcU extends { type: 
 		: K;
 }[DtoU["type"] & SrcU["type"]];
 
-// ── AgentDTO: SLICE 2 (concern 24) ──────────────────────────────────────────────────────────────
-// The one pair NOT yet fully gated: 18 unmirrored source fields + 11 shared-key mismatches, most
-// cascading through the workflow-type family (WorkflowGraphSnapshot/WorkflowRunState/TodoPhase
-// mirrors) and the deliberate TransitionEntry.reason widening resurfacing through `transitions`.
-// Each needs a mirror-or-omit decision; landing them half-decided behind a bulk omit list would
-// defeat this file's purpose. The enumerated drift lives in the concern doc
-// (plans/deepen-modules/24-dto-conformance-generalize.md). _AgentDtoHasNoExtraKeys is the one arm
-// that already holds (the DTO invents no fields) — gated now so it cannot regress while slice 2
-// is open.
+// ── AgentDTO == AgentDTO \ omits, with NAMED deliberate divergences (slice 2) ──────────────────
+/** The four fields whose value types deliberately diverge, each a documented decision:
+ *  - transitions: the dto widens TransitionEntry.reason to string (AllowedTransitionEntryMismatches).
+ *  - workflowGraph: the dto widens node.kind (engine NodeKind) to string — the timeline renders
+ *    labels, never branches on engine node kinds.
+ *  - workflowState: the dto is a deliberate RENDER SUBSET of WorkflowRunState (an engine
+ *    checkpoint with fork lineage, autonomy, proof state — none of which the wire carries).
+ *  - todoPhases: the dto names its own TodoPhaseDTO/TodoStatus instead of reaching into
+ *    RpcSessionState's harness-shaped type. */
+export type AllowedAgentDtoMismatches = "transitions" | "workflowGraph" | "workflowState" | "todoPhases";
+export type OmittedFromAgentDto = never;
 export type _AgentDtoHasNoExtraKeys = Expect<[ExtraDtoKeys<AgentDTO, SrcAgentDTO>] extends [never] ? true : false>;
+export type _AgentDtoSharedKeysMatch = Expect<[MismatchedSharedKeys<AgentDTO, SrcAgentDTO, AllowedAgentDtoMismatches>] extends [never] ? true : false>;
+export type _AgentDtoMirrorsEveryBackendField = Expect<[UnmirroredSourceKeys<AgentDTO, SrcAgentDTO, OmittedFromAgentDto>] extends [never] ? true : false>;
 
 // ── AgentReport == AgentReport \ OmittedFromAgentReportDto ─────────────────────────────
 export type OmittedFromAgentReportDto = never;
