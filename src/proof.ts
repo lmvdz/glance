@@ -19,6 +19,8 @@ import { getStorageBackend } from "./dal/storage.ts";
 import { runVisionPass, type VisionProducer } from "./vision.ts";
 import { gateExec } from "./gate-runner.ts";
 import type { GateStage } from "./intake.ts";
+import { runManifestGates } from "./tenant-gate-run.ts";
+import type { TenantGateManifest } from "./tenant-gates.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV } from "./git-harden.ts";
 
 let proofRoot = path.join(resolveStateDir(), "proof");
@@ -63,6 +65,23 @@ export interface Proof {
 	 * later stages were skipped (fail-fast). Undefined on single-command / pre-staging records.
 	 */
 	stages?: StageResult[];
+	/**
+	 * The gate plan fell back to the DEGRADED bare sandbox image (the suite-deps build failed), so the
+	 * run happened in an environment missing git/jq/npm. R2 #384 fail-open #2: `runProof` captured
+	 * `plan.sandboxed` and never read `plan.degraded`, so a green Verify inside the bare-base image was
+	 * recorded `ok: true` — exactly the case land.ts refuses on its own gate. Recorded for every proof;
+	 * it only BLOCKS under a registered manifest (an un-registered repo keeps its historical behavior,
+	 * so fixing the record does not change what the existing fleet lands).
+	 */
+	degraded?: boolean;
+	/**
+	 * The TenantGateManifest this proof was judged against (tenant-gates.ts's `manifestHash`). Present
+	 * only for a registered tenant — a receipt then states WHICH contract it passed, and a contract
+	 * edited between two lands produces two different hashes.
+	 */
+	manifestHash?: string;
+	/** The distinct refusal code when a manifest gate refused (`gate-red`, `zero-tests`, …). */
+	refusalCode?: string;
 }
 
 /** Outcome of one gate stage. `exitCode` null ⇒ stage was skipped (an earlier stage failed fast). */
@@ -71,6 +90,11 @@ export interface StageResult {
 	command: string;
 	exitCode: number | null;
 	durationMs: number;
+	/** Tests the declared parser could PROVE executed (manifest gates only). The number a count
+	 *  assertion was judged against — in the receipt, not just in the judgment. */
+	tests?: number;
+	/** Named counts from a `counts-script` gate. */
+	counts?: Record<string, number>;
 }
 
 /** Manager/org state root owns proof storage; tests/standalone callers use the default. */
@@ -239,7 +263,23 @@ export async function proofFingerprint(repo: string, worktree: string, command?:
  * optional browser-vision pass (off unless `visionUrl` or env `OMP_SQUAD_APP_URL` is set) only
  * appends evidence to `artifacts`; it can never flip the gate.
  */
-export async function runProof(opts: { repo: string; worktree: string; command: string; stages?: GateStage[]; visionUrl?: string; producer?: VisionProducer }): Promise<Proof> {
+export async function runProof(opts: {
+	repo: string;
+	worktree: string;
+	command: string;
+	stages?: GateStage[];
+	visionUrl?: string;
+	producer?: VisionProducer;
+	/**
+	 * The tenant's registered gate contract. When present it REPLACES detection entirely: the gates,
+	 * their order, their required services, their count assertions and the per-tenant sandbox policy
+	 * all come from the contract, and the run is judged fail-closed against it (see tenant-gate-run.ts).
+	 * Absent ⇒ the historical detection path, unchanged, which is what every un-registered repo gets.
+	 */
+	manifest?: TenantGateManifest;
+	/** Injected runner for the manifest path (tests). */
+	manifestRunner?: typeof runManifestGates;
+}): Promise<Proof> {
 	// Total by contract: a missing worktree (reaped / never created) or any spawn failure yields a
 	// FAILED proof, never a throw — an unhandled rejection here crashes the daemon's orchestrator tick.
 	const before = existsSync(opts.worktree) ? await proofFingerprint(opts.repo, opts.worktree, opts.command) : undefined;
@@ -251,35 +291,57 @@ export async function runProof(opts: { repo: string; worktree: string; command: 
 	// FAIL-FAST — stop at the first red stage so a typecheck failure never pays for the test suite, and
 	// the record says which stage failed + which were skipped. `command` (and its fingerprint) stays the
 	// joined string for proof-freshness compatibility; stages are additive observability, not the grade.
-	const staged = !!(opts.stages && opts.stages.length);
+	let degraded = false;
+	let manifestHashStamp: string | undefined;
+	let refusalCode: string | undefined;
+	const staged = !!opts.manifest || !!(opts.stages && opts.stages.length);
 	const stageResults: StageResult[] = [];
 	try {
 		if (!existsSync(opts.worktree)) throw new Error(`worktree missing: ${opts.worktree}`);
 		if (before?.dirty) throw new Error("worktree has uncommitted changes (tracked edits or new files) — commit or discard them before Verify");
-		// gateExec: scrubbed env always; hermetic docker container by default when docker is usable
-		// (else a legible host fallback). plan.sandboxed records which — a host-run proof is weaker.
-		const runOne = async (command: string): Promise<{ out: string; err: string; code: number }> => {
-			const plan = await gateExec(command, opts.worktree, { mounts: [opts.repo] });
-			sandboxed = plan.sandboxed;
-			const proc = Bun.spawn(plan.argv, { cwd: opts.worktree, stdout: "pipe", stderr: "pipe", env: plan.env });
-			const [o, e, c] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
-			return { out: o, err: e, code: c };
-		};
-		const gateStages: GateStage[] = staged ? opts.stages! : [{ name: "verify", command: opts.command }];
-		code = 0;
-		for (let i = 0; i < gateStages.length; i++) {
-			const stage = gateStages[i]!;
-			const started = Date.now();
-			const r = await runOne(stage.command);
-			stageResults.push({ name: stage.name, command: stage.command, exitCode: r.code, durationMs: Date.now() - started });
-			out = out ? `${out}\n${r.out}` : r.out;
-			err = err ? `${err}\n${r.err}` : r.err;
-			if (r.code !== 0) {
-				code = r.code;
-				const skipped = gateStages.slice(i + 1);
-				if (staged) err = `${err}\n[gate] stage "${stage.name}" failed (exit ${r.code})${skipped.length ? `; ${skipped.length} later stage(s) skipped` : ""}`.trim();
-				for (const s of skipped) stageResults.push({ name: s.name, command: s.command, exitCode: null, durationMs: 0 });
-				break; // fail-fast
+		if (opts.manifest) {
+			// Registered tenant: the contract runs, fail-closed, and detection never enters this path.
+			const outcome = await (opts.manifestRunner ?? runManifestGates)({ manifest: opts.manifest, cwd: opts.worktree, mounts: [opts.repo] });
+			manifestHashStamp = outcome.manifestHash;
+			for (const r of outcome.results) stageResults.push({ name: r.name, command: r.command, exitCode: r.exitCode, durationMs: r.durationMs, tests: r.tests, counts: r.counts });
+			out = outcome.output;
+			sandboxed = outcome.results.every((r) => r.exitCode === null || r.sandboxed === true);
+			code = outcome.ok ? 0 : 1;
+			if (outcome.refusal) {
+				refusalCode = outcome.refusal.code;
+				degraded = outcome.refusal.code === "degraded-sandbox";
+				err = `[gate] REFUSED (${outcome.refusal.code}): ${outcome.refusal.reason}`;
+			}
+		} else {
+			// gateExec: scrubbed env always; hermetic docker container by default when docker is usable
+			// (else a legible host fallback). plan.sandboxed records which — a host-run proof is weaker.
+			const runOne = async (command: string): Promise<{ out: string; err: string; code: number }> => {
+				const plan = await gateExec(command, opts.worktree, { mounts: [opts.repo] });
+				sandboxed = plan.sandboxed;
+				// R2 fail-open #2: `plan.degraded` was computed and then dropped on the floor here. Sticky
+				// across stages — one degraded stage taints the whole proof, and a later clean stage must
+				// not erase that.
+				degraded = degraded || plan.degraded === true;
+				const proc = Bun.spawn(plan.argv, { cwd: opts.worktree, stdout: "pipe", stderr: "pipe", env: plan.env });
+				const [o, e, c] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+				return { out: o, err: e, code: c };
+			};
+			const gateStages: GateStage[] = staged ? opts.stages! : [{ name: "verify", command: opts.command }];
+			code = 0;
+			for (let i = 0; i < gateStages.length; i++) {
+				const stage = gateStages[i]!;
+				const started = Date.now();
+				const r = await runOne(stage.command);
+				stageResults.push({ name: stage.name, command: stage.command, exitCode: r.code, durationMs: Date.now() - started });
+				out = out ? `${out}\n${r.out}` : r.out;
+				err = err ? `${err}\n${r.err}` : r.err;
+				if (r.code !== 0) {
+					code = r.code;
+					const skipped = gateStages.slice(i + 1);
+					if (staged) err = `${err}\n[gate] stage "${stage.name}" failed (exit ${r.code})${skipped.length ? `; ${skipped.length} later stage(s) skipped` : ""}`.trim();
+					for (const s of skipped) stageResults.push({ name: s.name, command: s.command, exitCode: null, durationMs: 0 });
+					break; // fail-fast
+				}
 			}
 		}
 	} catch (spawnErr) {
@@ -310,6 +372,9 @@ export async function runProof(opts: { repo: string; worktree: string; command: 
 		artifacts: await collectArtifacts(opts.worktree),
 		sandboxed,
 		stages: staged ? stageResults : undefined,
+		degraded: degraded || undefined,
+		manifestHash: manifestHashStamp,
+		refusalCode,
 	};
 	// Optional, evidence-only browser-vision pass. Never touches the gate fields above — it only
 	// merges its screenshots/notes into artifacts (deduped, since collectArtifacts may already
