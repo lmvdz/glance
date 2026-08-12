@@ -94,3 +94,28 @@ graduated (B2 #391 / B3 #392 / B4 #393 / B5 #394, edges wired). What the round t
 - **Two foreign-lineage relays backgrounded their CLI runs and stalled** (the documented
   pattern) — both recovered by a SendMessage nudge to collect the backgrounded job. Dispatch
   relays foreground+blocking; when they background anyway, nudge, don't re-dispatch.
+
+## 2026-08-12 — the cross-lane finding (tree-binding)
+
+Both self-land (B2 #391) and the tenant manifest (B4 #393) reached round 3, and the deepest
+Critical in each is the SAME defect, found independently by codex on two unrelated diffs:
+**a gate/measurement result is not bound to the tree that actually lands.** B2: `gh pr merge`
+has no `--match-head-commit`, so a descendant pushed between measure and merge lands unseen
+and passes the ancestry assertion. B4: the manifest gates a deleted local scratch merge, then
+GitHub merges a later, possibly-different tree — and auto-resolve runs a reviewer in the real
+repo that can commit after the gate. Same shape: check tree T, mutate to T', record green.
+
+This is the campaign's most valuable structural output so far. It is not a bug in either lane —
+it is a missing PRIMITIVE the harness needs before it can honestly gate any repo it does not
+freeze: *bind the proof to an exact tree hash, and re-verify the landed tree equals the gated
+one, atomically with the mutation.* Both round-3 fixes implement it locally; if they converge
+on a shared helper, that helper is the real deliverable and should be lifted into a named
+follow-up. Recorded here (not just on the tickets) because it transfers: it is the same
+guarantee atrium's actor floor makes at reduce.ts:698 — the thing certified must be the thing
+that happened — one layer down, in git rather than in the ledger. A candidate for auto-memory
+once a lane closes on it.
+
+Second theme, security-shaped: B4's env scrub was a suffix DENYLIST (codex reproduced a
+`SECRET_CANARY` leak past it). A scrub that enumerates what to remove is not a boundary; the
+fix is a positive allowlist of what a tenant gate may see. The lesson generalizes to every
+place the harness hands a tenant's code an environment.
