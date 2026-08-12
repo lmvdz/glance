@@ -158,6 +158,22 @@ export interface DispatchDeps {
 	 * The implementation may also close the issue to heal the drift. Errors ⇒ treated as not-done.
 	 */
 	alreadyDone?: (repo: string, issue: IssueRef) => Promise<boolean>;
+	/**
+	 * Difficulty-targeted dispatch gate (plans/deepen-modules/14, CS329A borrow #1): consulted
+	 * ONCE PER TICK — the work class is the dispatch tier, which every dispatcher spawn shares,
+	 * so one verdict covers the tick (and one ledger read replaces N; codex review). Undefined ⇒
+	 * gate off, nothing logged. `proceed:false` defers every candidate this tick — never stamped
+	 * into the persistent ledger, so issues retry as evidence changes. The dispatcher logs only
+	 * on verdict TRANSITIONS (reason changed), never per issue or per tick.
+	 */
+	difficulty?: () => { proceed: boolean; reason: string } | undefined;
+	/**
+	 * Per-issue difficulty verdict (DESIGN v2's real seam — the tick-global `difficulty` above is
+	 * tier telemetry only). Consulted inside the candidate loop; `undefined` = nothing to say (no
+	 * log, no gate). `proceed:false` defers THAT issue only — no ledger stamp, no dispatched.add.
+	 * Logged once per (issue, reason) transition, never per tick.
+	 */
+	difficultyFor?: (repo: string, issue: IssueRef) => { proceed: boolean; reason: string } | undefined;
 	/** Current live/queued agents; used to defer read-after-write hazards until producers land. */
 	liveAgents?: () => AgentDTO[];
 	/** Advisory scope finding sink. */
@@ -175,6 +191,11 @@ export class Dispatcher {
 	private readonly skipLogged = new Set<string>();
 	/** Issue ids skipped by the state gate — tracked only to log the skip once per episode (concern 03). */
 	private readonly stateGateLogged = new Set<string>();
+	/** Last difficulty verdict reason — logged only when it CHANGES (transition logging, so a mode
+	 *  flip or fresh evidence always re-logs and a steady state never spams; codex review). */
+	private lastDifficultyReason?: string;
+	/** Per-issue last verdict reason — same transition-only logging discipline, keyed by issue. */
+	private readonly lastIssueDifficulty = new Map<string, string>();
 	private timer?: Timer;
 	private running = false;
 	/** True while a rate-limit pause is in effect — so the pause/resume is logged once per episode, not per tick.
@@ -205,6 +226,20 @@ export class Dispatcher {
 		// partially-wired install fails SAFE). Absent either, fall back to the pre-ladder top-of-tick
 		// global check byte-for-byte — no regression.
 		const perUnitGating = !!this.deps.providerFor && this.deps.secondLaneAvailable?.() === true;
+		// Per-issue transition-log hygiene: entries for issues that no longer reach the gate
+		// (dispatched/closed) are swept at tick end — the map is bounded by the candidate set
+		// (codex finding: the delete-on-clear path alone was unreachable once an issue dispatched).
+		const seenIssueIds = new Set<string>();
+		// One difficulty verdict per tick (the class is the shared dispatch tier); log transitions only.
+		const difficulty = this.deps.difficulty?.();
+		if (difficulty && difficulty.reason !== this.lastDifficultyReason) {
+			this.lastDifficultyReason = difficulty.reason;
+			this.deps.log(difficulty.reason);
+		} else if (!difficulty) {
+			// Gate off/unwired: forget the last reason so re-enabling ALWAYS logs the fresh verdict,
+			// even when the evidence (and thus the reason string) hasn't changed (codex finding 4).
+			this.lastDifficultyReason = undefined;
+		}
 		if (!perUnitGating && this.deps.providerFor && !this.inertLogged) {
 			this.inertLogged = true;
 			this.deps.log("per-provider dispatch gating inert — no second verified provider lane confirmed (unconfigured or not wired); behaves like the single global pause");
@@ -374,6 +409,26 @@ export class Dispatcher {
 						noteSkip("already-done", "open issue's plan concern is already closed in the repo");
 						continue;
 					}
+					// Per-issue starve verdict (deepen 14, DESIGN v2): transition-logged, defer honored.
+					seenIssueIds.add(issue.id);
+					const issueDifficulty = this.deps.difficultyFor?.(repo, issue);
+					if (issueDifficulty && issueDifficulty.reason !== this.lastIssueDifficulty.get(issue.id)) {
+						this.lastIssueDifficulty.set(issue.id, issueDifficulty.reason);
+						this.deps.log(issueDifficulty.reason);
+					} else if (!issueDifficulty) {
+						this.lastIssueDifficulty.delete(issue.id); // verdict cleared → a future one re-logs
+					}
+					if (issueDifficulty && !issueDifficulty.proceed) {
+						noteSkip("difficulty", issueDifficulty.reason);
+						continue;
+					}
+					// Tick-global difficulty defer seam (deepen 14): permanently dormant in production —
+					// the tier-telemetry dep can never return proceed:false (only the per-issue
+					// difficultyFor above gates). Kept as the data-shaped seam; test-driven.
+					if (difficulty && !difficulty.proceed) {
+						noteSkip("difficulty", difficulty.reason);
+						continue;
+					}
 					// Scope dependency gate: operator-declared requires are real ordering constraints.
 					// Inferred requirements are advisory only; never let a hallucinated path wedge dispatch.
 					const requires = issue.requires ?? [];
@@ -418,6 +473,9 @@ export class Dispatcher {
 		} finally {
 			this.running = false;
 		}
+		// Sweep per-issue transition-log entries whose issue no longer reaches the gate this tick
+		// (dispatched/closed) — bounds lastIssueDifficulty by the live candidate set.
+		for (const id of this.lastIssueDifficulty.keys()) if (!seenIssueIds.has(id)) this.lastIssueDifficulty.delete(id);
 		// A no-op tick names why it did nothing; a productive tick is a plain heartbeat.
 		if (spawned === 0) {
 			this.deps.record?.({ durationMs: Date.now() - t0, found: considered, spawned, skipReason: skipReason ?? "idle", detail: skipDetail || "no open issues to dispatch" });
