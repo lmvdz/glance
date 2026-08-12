@@ -129,14 +129,18 @@ test("startVoiceCall: POSTs to /api/channels/:id/voice-call with the retention/s
   const original = globalThis.fetch;
   let calledUrl: string | undefined;
   let calledInit: RequestInit | undefined;
-  const body = { channelId: "room-1", state: "live" };
+  // A COMPLETE binding fixture (codex M, concern 23): the wrapper's declared return is the full
+  // redacted VoiceCallBindingDTO — a partial fixture behind a cast would keep this test green if
+  // the route ever drifted to a bare acknowledgment, which is exactly the drift this gate exists
+  // to catch.
+  const body: import("./api").VoiceCallBindingDTO = { channelId: "room-1", sessionRoot: "/tmp/voice/room-1", ownerActorId: "db:u1", retention: "full", startedAt: 1, updatedAt: 1, state: "live" };
   globalThis.fetch = (async (url: string, init?: RequestInit) => {
     calledUrl = url;
     calledInit = init;
     return { ok: true, status: 201, json: async () => body } as unknown as Response;
   }) as unknown as typeof fetch;
   try {
-    expect(await startVoiceCall("room-1", { retention: "full" })).toEqual(body as never);
+    expect(await startVoiceCall("room-1", { retention: "full" })).toEqual(body);
     expect(calledUrl).toBe("/api/channels/room-1/voice-call");
     expect(calledInit?.method).toBe("POST");
     expect(JSON.parse(calledInit?.body as string)).toEqual({ retention: "full" });
@@ -158,12 +162,15 @@ test("startVoiceCall: a 409 (already an active call) throws with the daemon's ow
 test("endVoiceCall: DELETEs the channel's voice-call binding", async () => {
   const original = globalThis.fetch;
   let calledMethod: string | undefined;
+  // Same complete-fixture rule as startVoiceCall above (codex M): DELETE also returns the full
+  // ended binding, never a bare { state } acknowledgment.
+  const ended: import("./api").VoiceCallBindingDTO = { channelId: "room-1", sessionRoot: "/tmp/voice/room-1", ownerActorId: "db:u1", retention: "full", startedAt: 1, updatedAt: 2, state: "ended" };
   globalThis.fetch = (async (_url: string, init?: RequestInit) => {
     calledMethod = init?.method;
-    return { ok: true, status: 200, json: async () => ({ state: "ended" }) } as unknown as Response;
+    return { ok: true, status: 200, json: async () => ended } as unknown as Response;
   }) as unknown as typeof fetch;
   try {
-    expect(await endVoiceCall("room-1")).toEqual({ state: "ended" } as never);
+    expect(await endVoiceCall("room-1")).toEqual(ended);
     expect(calledMethod).toBe("DELETE");
   } finally {
     globalThis.fetch = original;

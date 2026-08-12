@@ -29,8 +29,11 @@ const TYPE_PATTERNS: ReadonlyArray<readonly [RegExp, SessionType]> = [
 ];
 
 /** The subset of AgentDTO this classifier reads — kept narrow so callers (and tests) can pass a
- *  fixture without constructing a full AgentDTO. */
-export type SessionTypeSource = Pick<AgentDTO, 'name' | 'workflowGraph' | 'workflowState'>;
+ *  fixture without constructing a full AgentDTO. `name` is optional BY CONTRACT (codex L,
+ *  concern 23): the implementation has always tolerated a missing name (`agent.name ?? ''` →
+ *  the 'Session' fallback), but the type demanded one — callers exercising that supported
+ *  behavior had to cast. The type now says what the code does. */
+export type SessionTypeSource = Partial<Pick<AgentDTO, 'name'>> & Pick<AgentDTO, 'workflowGraph' | 'workflowState'>;
 
 /** Classify one agent/session into a task-pipeline type chip. The spawn-time NAME wins: the chip
  *  answers "what kind of session is this?", not "what phase is it in right now" (verified live: a

@@ -15,7 +15,7 @@ describe('deriveSessionType', () => {
     expect(deriveSessionType({ name: 'chat' })).toBe('Session');
     expect(deriveSessionType({ name: 'fixup-worker-3' })).toBe('Session');
     expect(deriveSessionType({ name: '' })).toBe('Session');
-    expect(deriveSessionType({} as import('./sessionType').SessionTypeSource)).toBe('Session');
+    expect(deriveSessionType({})).toBe('Session');
   });
 
   test('uses the live workflow node label when the name carries no phase word', () => {
