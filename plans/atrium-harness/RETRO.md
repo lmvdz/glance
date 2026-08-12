@@ -140,3 +140,39 @@ base-advance during one PR's gate is not the operative threat, and the fix — a
 `gh pr merge` for measured lands — is deferred to Lars as its own ticket. A builder catching the
 exact gap a critic named, from the other lane, is the strongest convergence signal the campaign
 has produced: the limitation is real, bounded, and honestly named rather than papered.
+
+## 2026-08-12 — B2 self-land CLOSED (#391), four rounds
+
+The lane closed on grok's round-4 confirm: SOUND-WITH-CHANGES, all Criticals fixed, only a
+shallow undercount-direction High left (folded into B3). The four-round arc is the record worth
+keeping — each round found a genuinely deeper defect than the last, and both foreign lineages
+independently capped the depth so the convergence was measurable, not felt:
+- **R1 (naming)**: the base guard named the wrong branch; measured-merge returned 200; worktree
+  graded off-tip. Triple-converged (codex+grok+opus).
+- **R2 (atomicity)**: the fixes were snapshot checks, not atomic with the merge — a descendant
+  pushed between measure and merge landed unseen. Codex.
+- **R3 (seam-coverage)**: `--match-head-commit` closed the adopt path but the create path (no
+  open PR) skipped it; the base side binds a name not a tree. Both lineages, both ranked EQUAL.
+- **R4 (converged)**: require an open PR; crash-safe journal; guarded retry; merge-queue as
+  `queued`; idempotent index — with the mutation-proof test the first three rounds lacked (real
+  `landAgentPr`, fake gh moving head/base BETWEEN the live read and the merge).
+The process caught its own error twice (my θ-band remedy; the detached-checkout directive) — a
+builder refuted each with code. What closed the lane was not "no findings" but "findings only
+equal-or-shallower than the class already fixed" — the honest convergence test. The scoped C-2
+base-tree limitation stands as Lars's call (map #382). B3 (#392) builds on the b2 branch (stacked,
+not merged) and folds B2's two undercount residuals; B2 must merge before B3.
+
+Cost note: the fully-correct self-land took FOUR build rounds + a mutation-proof test suite. That
+is the true price of "glance lands its own PRs, measured, fail-closed" — and it is exactly the
+price the campaign exists to pay before glance ever touches a real atrium ticket. The dogfood is
+being made trustworthy, not asserted trustworthy.
+
+## 2026-08-12 — codex relay hung (ops)
+
+The codex B4 round-3 review hung >40min in a tool loop (only trace output, never a verdict) and
+its relay's bash task respawned the process against a force-reap. Abandoned; grok (the assigned
+security reviewer) had already delivered a complete pass, so B4 r3 stands on single-lineage +
+a fresh codex confirm on the round-4 diff. Recorded as a measured coverage gap, the same way
+grok narration-flakes are — foreign-lineage CLI reliability is an ops fact of this harness, not
+an anecdote. When a relay hangs, read its backgrounded output file directly (that worked twice
+this session) rather than trusting the relay to collect.
