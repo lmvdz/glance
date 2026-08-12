@@ -754,13 +754,23 @@ async function cmdPromote(args: string[]): Promise<void> {
 		}
 		process.exit(1);
 	}
-	if (!res.ok) {
-		const text = await res.text().catch(() => "");
-		process.stderr.write(`promote failed: ${res.status} ${text}\n`);
+	// Parse the body REGARDLESS of HTTP status (codex M, concern 22 round): the daemon's refusals
+	// (409 already-promoted etc.) carry machine-readable JSON that --json consumers pipe to jq —
+	// the first cut of the api() unification turned those into empty-stdout text errors, silently
+	// breaking the script contract origin honored. Non-JSON error bodies still fail as text.
+	const raw = await res.text().catch(() => "");
+	type PromoteResult = { ok: boolean; issue?: string; message: string; error?: string; draft?: string };
+	let result: PromoteResult | null = null;
+	try {
+		result = JSON.parse(raw) as PromoteResult;
+	} catch {
+		result = null;
+	}
+	if (!res.ok && !result) {
+		process.stderr.write(`promote failed: ${res.status} ${raw}\n`);
 		process.exit(1);
 		return;
 	}
-	const result = (await res.json().catch(() => null)) as { ok: boolean; issue?: string; message: string; error?: string; draft?: string } | null;
 	if (!result) {
 		process.stderr.write(`promote failed: ${res.status} ${res.statusText}\n`);
 		process.exit(1);
