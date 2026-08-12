@@ -18,7 +18,7 @@ anything → clean cut. Pairs with concern 26 (this is its daemon-side chokepoin
 ## Provenance
 Round-2 review, daemon agent, rank 2, Strong.
 
-## Done (2026-08-11, round 3 iteration 6 — PR pending)
+## Done (2026-08-11, round 3 iteration 6 — PR #374)
 Shipped as designed minus one deliberate scope cut: UnitAttentionLane.raise is the one
 append-then-emit chokepoint (fail-open BY CONTRACT, quiet mode for the three tail-broadcast
 sites, pre-minted-id passthrough for baseline/membrane events); EscalationLedger replaces the

@@ -24,7 +24,7 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
-## Round 3, iteration 6 (2026-08-11, goal mode — PR pending) — CONCERN 19 DONE
+## Round 3, iteration 6 (2026-08-11, goal mode — PR #374) — CONCERN 19 DONE
 UnitAttentionLane: eight hand-rolled append-then-emit raisers become one fail-open chokepoint;
 five escalation Map/Sets become two EscalationLedgers (tick-exact at the cap, both lineages
 verified). Codex M: the first cut minted randomUUID OUTSIDE the try — the fail-open had a hole
