@@ -20,12 +20,11 @@
 import type { Classify } from "./intake.ts";
 import { extractJsonObject } from "./omp-call.ts";
 
-export type WorkLane = "hotfix" | "feature" | "chore";
-
-/** Where a resolved lane came from — the privilege clamp keys on this (only "operator" may move a
- *  privilege axis), so it is persisted alongside the lane: a restart must not upgrade a classifier
- *  lane into an operator one. */
-export type WorkLaneSource = "operator" | "label" | "classifier" | "default";
+// WorkLane/WorkLaneSource VALUE unions live in core-types.ts (concern 08 slice 2's dependency
+// flip: the kernel must be a zero-import leaf so the webapp's type-only re-exports pull exactly
+// one file into its tsc program). Re-exported here so lane policy importers keep one home.
+export type { WorkLane, WorkLaneSource } from "./core-types.ts";
+import type { WorkLane } from "./core-types.ts";
 
 /** Every `WorkLane` value, for exhaustive iteration (tests, dashboards) without re-deriving the list
  *  from `LANE_POLICY`'s keys. */

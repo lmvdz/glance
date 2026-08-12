@@ -8,7 +8,18 @@
  * types.ts re-exports all of these, so existing importers keep compiling; new code should
  * import from here.
  */
-import type { WorkLane } from "./lane.ts";
+// (deliberately NO imports — see the module doc above; WorkLane moved IN here for exactly
+// that reason: concern 08 slice 2's dependency flip.)
+
+/** Lane taxonomy value union (adw-factory-borrows concern 01) — the closed set model routing,
+ *  cost gating, and racing key on. Policy and classification stay in src/lane.ts; only the VALUE
+ *  UNIONS live here so the kernel stays a zero-import leaf the webapp can re-export from. */
+export type WorkLane = "hotfix" | "feature" | "chore";
+
+/** Where a resolved lane came from — the privilege clamp keys on this (only "operator" may move a
+ *  privilege axis), so it is persisted alongside the lane: a restart must not upgrade a classifier
+ *  lane into an operator one. */
+export type WorkLaneSource = "operator" | "label" | "classifier" | "default";
 
 /** Derived, human-meaningful lifecycle state of one managed agent. */
 export type AgentStatus =
