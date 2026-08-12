@@ -28,8 +28,9 @@
  * either — this file's only job is to exist inside the `tsc` program).
  */
 
-import type { ValidationRecord } from "../src/types.ts";
-import type { ValidationRecordDTO } from "../webapp/src/lib/dto.ts";
+import type { ValidationRecord , AutomationEvent as SrcAutomationEvent, AutomationLoop as SrcAutomationLoop, AutomationSkipReason as SrcAutomationSkipReason } from "../src/types.ts";
+import type { VoiceCallParticipant as SrcVoiceCallParticipant } from "../src/voice-call-manager.ts";
+import type { ValidationRecordDTO , AutomationEventDTO, AutomationLoopDTO, AutomationSkipReasonDTO, VoiceCallParticipantDTO } from "../webapp/src/lib/dto.ts";
 
 /** Mutual-assignability type equality — `true` only when `A` and `B` are the EXACT same type (not
  *  merely assignable one way), so a widened/narrowed DTO field is caught, not just a missing one. The
@@ -52,7 +53,11 @@ export type ExtraDtoKeys<Dto, Source> = Exclude<keyof Dto, keyof Source>;
  *  key(s) whose type drifted between the backend source and its DTO mirror. */
 export type MismatchedSharedKeys<Dto, Source, Allowed extends keyof Source = never> = Exclude<
 	{
-		[K in keyof Dto & keyof Source]: Equals<Dto[K], Source[K]> extends true ? never : K;
+		// Pick-based, not Dto[K] vs Source[K] (codex M, concern 24 round): indexing erases the
+		// optionality MODIFIER — `foo?: string` and `foo: string | undefined` both index to
+		// `string | undefined`, so a field flipping presence-required passed silently. Comparing
+		// the one-key Pick keeps the modifier in the compared type.
+		[K in keyof Dto & keyof Source]: Equals<Pick<Dto, K>, Pick<Source, K & keyof Dto>> extends true ? never : K;
 	}[keyof Dto & keyof Source],
 	Allowed
 >;
@@ -98,8 +103,20 @@ export type ExtraVariants<DtoU extends { type: string }, SrcU extends { type: st
  *  equality is deliberately not required at this level — variant payloads embed further mirrored
  *  types with their own pair checks; key-set equality keeps one drifted leaf from cascading into a
  *  wall of variant errors. */
-export type DriftedVariants<DtoU extends { type: string }, SrcU extends { type: string }> = {
-	[K in DtoU["type"] & SrcU["type"]]: Equals<keyof Extract<DtoU, { type: K }>, keyof Extract<SrcU, { type: K }>> extends true ? never : K;
+export type DriftedVariants<DtoU extends { type: string }, SrcU extends { type: string }, AllowedFields extends string = never> = {
+	// Key sets AND shared-field types (codex H, concern 24 round): key-set-only comparison let a
+	// variant field's type or optionality drift silently. Field-level allowances are named as
+	// "variant.field" strings — the shallow create.options/commission.spec payloads are visible
+	// decisions now, not comment-only ones.
+	[K in DtoU["type"] & SrcU["type"]]: Equals<keyof Extract<DtoU, { type: K }>, keyof Extract<SrcU, { type: K }>> extends true
+		? {
+				[F in keyof Extract<DtoU, { type: K }> & keyof Extract<SrcU, { type: K }> & string]: `${K & string}.${F}` extends AllowedFields
+					? never
+					: Equals<Pick<Extract<DtoU, { type: K }>, F>, Pick<Extract<SrcU, { type: K }>, F & keyof Extract<DtoU, { type: K }>>> extends true
+						? never
+						: K;
+			}[keyof Extract<DtoU, { type: K }> & keyof Extract<SrcU, { type: K }> & string]
+		: K;
 }[DtoU["type"] & SrcU["type"]];
 
 // ── AgentDTO: SLICE 2 (concern 24) ──────────────────────────────────────────────────────────────
@@ -313,11 +330,34 @@ export type _FeatureReadinessStateDtoIdentical = Expect<Equals<FeatureReadinessS
 export type _PlanRevisionCandidateStateDtoIdentical = Expect<Equals<PlanRevisionCandidateStateDTO, SrcPlanRevisionCandidateState>>;
 
 // ── SquadEvent union == SquadEvent union, variant-keyed ─────────────────────────────────────────────────────
+/** Named field-level allowances: agent.agent + roster.agents carry AgentDTO, whose divergence is
+ *  concern 24 SLICE 2 (see the deferred block above) — allowing the FIELD here keeps every other
+ *  field of those variants gated while the pair itself is open. transition.entry carries
+ *  TransitionEntry, whose sole divergence is the named reason widening
+ *  (AllowedTransitionEntryMismatches) — allowed here so it doesn't double-report. */
+export type AllowedSquadEventFieldDrift = "agent.agent" | "roster.agents" | "transition.entry";
 export type _SquadEventDtoNoMissingVariants = Expect<[MissingVariants<SquadEvent, SrcSquadEvent>] extends [never] ? true : false>;
 export type _SquadEventDtoNoExtraVariants = Expect<[ExtraVariants<SquadEvent, SrcSquadEvent>] extends [never] ? true : false>;
-export type _SquadEventDtoNoDriftedVariants = Expect<[DriftedVariants<SquadEvent, SrcSquadEvent>] extends [never] ? true : false>;
+export type _SquadEventDtoNoDriftedVariants = Expect<[DriftedVariants<SquadEvent, SrcSquadEvent, AllowedSquadEventFieldDrift>] extends [never] ? true : false>;
 
 // ── ClientCommand union == ClientCommand union, variant-keyed ─────────────────────────────────────────────────────
+/** Named field-level allowances: the webapp deliberately mirrors create.options and
+ *  commission.spec SHALLOWLY (Record<string, unknown>) — the daemon decodes them with its own
+ *  schemas, and the webapp gains typed builders when it grows those affordances. The allowance
+ *  makes that a compiler-visible decision (codex H, concern 24 round), not a comment-only one. */
+export type AllowedClientCommandFieldDrift = "create.options" | "commission.spec";
 export type _ClientCommandDtoNoMissingVariants = Expect<[MissingVariants<ClientCommand, SrcClientCommand>] extends [never] ? true : false>;
 export type _ClientCommandDtoNoExtraVariants = Expect<[ExtraVariants<ClientCommand, SrcClientCommand>] extends [never] ? true : false>;
-export type _ClientCommandDtoNoDriftedVariants = Expect<[DriftedVariants<ClientCommand, SrcClientCommand>] extends [never] ? true : false>;
+export type _ClientCommandDtoNoDriftedVariants = Expect<[DriftedVariants<ClientCommand, SrcClientCommand, AllowedClientCommandFieldDrift>] extends [never] ? true : false>;
+
+// ── The mirrors concern 24 itself introduced — gated from birth (codex M, concern 24 round) ─────
+export type OmittedFromAutomationEventDto = never;
+export type _AutomationEventDtoHasNoExtraKeys = Expect<[ExtraDtoKeys<AutomationEventDTO, SrcAutomationEvent>] extends [never] ? true : false>;
+export type _AutomationEventDtoSharedKeysMatch = Expect<[MismatchedSharedKeys<AutomationEventDTO, SrcAutomationEvent>] extends [never] ? true : false>;
+export type _AutomationEventDtoMirrorsEveryBackendField = Expect<[UnmirroredSourceKeys<AutomationEventDTO, SrcAutomationEvent, OmittedFromAutomationEventDto>] extends [never] ? true : false>;
+export type _AutomationLoopDtoIdentical = Expect<Equals<AutomationLoopDTO, SrcAutomationLoop>>;
+export type _AutomationSkipReasonDtoIdentical = Expect<Equals<AutomationSkipReasonDTO, SrcAutomationSkipReason>>;
+export type OmittedFromVoiceCallParticipantDto = never;
+export type _VoiceCallParticipantDtoHasNoExtraKeys = Expect<[ExtraDtoKeys<VoiceCallParticipantDTO, SrcVoiceCallParticipant>] extends [never] ? true : false>;
+export type _VoiceCallParticipantDtoSharedKeysMatch = Expect<[MismatchedSharedKeys<VoiceCallParticipantDTO, SrcVoiceCallParticipant>] extends [never] ? true : false>;
+export type _VoiceCallParticipantDtoMirrorsEveryBackendField = Expect<[UnmirroredSourceKeys<VoiceCallParticipantDTO, SrcVoiceCallParticipant, OmittedFromVoiceCallParticipantDto>] extends [never] ? true : false>;
