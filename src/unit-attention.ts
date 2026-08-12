@@ -43,17 +43,26 @@ export class UnitAttentionLane {
 	 * `opts.quiet` skips the emit for call sites whose surrounding method already broadcasts
 	 * unconditionally (onUi's notify) — the append still happens through the one chokepoint.
 	 */
-	raise(rec: AttentionSession, input: { summary: string; detail?: string; source: AttentionEvent["source"] } & Partial<Pick<AttentionEvent, "id" | "createdAt">>, opts?: { quiet?: boolean }): AttentionEvent {
-		// Pre-minted id/createdAt pass through untouched — upstream modules (baseline-tracker's
-		// staleness events, the membrane breaker) build full AttentionEvents before a rec exists.
-		const event: AttentionEvent = { id: input.id ?? randomUUID(), summary: input.summary, detail: input.detail, source: input.source, createdAt: input.createdAt ?? Date.now() };
+	raise(rec: AttentionSession, input: { summary: string; detail?: string; source: AttentionEvent["source"] } & Partial<Pick<AttentionEvent, "id" | "createdAt">>, opts?: { quiet?: boolean }): AttentionEvent | undefined {
 		try {
+			// EVERYTHING inside the guard, construction included (codex M, concern 19 round): the
+			// first cut minted randomUUID() before the try, so a throwing mint escaped the fail-open
+			// contract exactly where callers had already armed their once-per-episode flags — the
+			// escalation would be marked fired yet never filed, permanently, and the cost-gate path
+			// could reject a creation whose roster record already existed. Pre-minted id/createdAt
+			// pass through untouched (baseline-tracker staleness, the membrane breaker build full
+			// events before a rec exists).
+			const event: AttentionEvent = { id: input.id ?? randomUUID(), summary: input.summary, detail: input.detail, source: input.source, createdAt: input.createdAt ?? Date.now() };
 			rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
 			if (!opts?.quiet) this.deps.emit(rec);
+			return event;
 		} catch (err) {
-			this.deps.log("warn", `attention-lane attach failed for ${rec.dto.name} (non-fatal): ${errText(err)}`);
+			// The warn carries source + summary head (grok F2, concern 19 round): the old per-site
+			// prefixes died in the consolidation, and a forensic grep still needs to tell WHICH
+			// escalation failed to attach without a live debugger.
+			this.deps.log("warn", `attention-lane attach failed for ${rec.dto.name} (source ${input.source}, "${input.summary.slice(0, 80)}", non-fatal): ${errText(err)}`);
+			return undefined;
 		}
-		return event;
 	}
 }
 
