@@ -1370,7 +1370,7 @@ export class SquadManager extends EventEmitter {
 	private readonly attentionStore: AttentionStore;
 	private readonly channelStore: ChannelStore;
 	private readonly nodeStore: NodeStore;
-	/** ONE NodeRecordStore beside its siblings (concern 20's cheap fix): it was constructed 16×
+	/** ONE NodeRecordStore beside its siblings (concern 20's cheap fix): it was constructed 26×
 	 *  inline with INCONSISTENT warn loggers — half the call sites logged validation failures to
 	 *  nowhere. One field, one logger, every caller gets the same forensics. */
 	private readonly nodeRecords: NodeRecordStore;
