@@ -32,7 +32,7 @@ import { insertLedgerRow } from "../src/meta-ledger.ts";
 import { resolveStateDir } from "../src/state-dir.ts";
 import { normalizeGitUrl } from "../src/repo-identity.ts";
 import { readLandReceiptIndex, landMetricsWindow, utcDayOf } from "../src/rail/land-metrics.ts";
-import { journalRowsForWindow } from "../src/rail/self-land/journal.ts";
+import { journalRowsForWindow, unconfirmedSelfLands } from "../src/rail/self-land/journal.ts";
 
 const { flags } = parseArgs(process.argv.slice(2));
 const stateDir = typeof flags["state-dir"] === "string" ? path.resolve(flags["state-dir"]) : resolveStateDir();
@@ -75,11 +75,15 @@ try {
 // H-3 (glance#391 round 3): fold in FINALIZED self-land journal rows whose index-append faulted after
 // a confirmed merge — so a receipt-write failure can never hide a merged measured land from the window.
 // Deduped against the index by (branch, commit); a land already in the index is not double-counted.
+// FAIL CLOSED on a journal read error (round 4 C-3): an unreadable journal is unmeasurable, never
+// silently "no fold" — otherwise a disk fault would hide exactly the lands the journal exists to save.
+let unconfirmed = 0;
 try {
 	const folded = await journalRowsForWindow(stateDir, read!.rows);
 	if (folded.length) read = { rows: [...read!.rows, ...folded], malformed: read!.malformed };
-} catch {
-	/* the journal is a best-effort fallback; a read fault here just means no fold, never a throw */
+	unconfirmed = (await unconfirmedSelfLands(stateDir)).length;
+} catch (err) {
+	fail(`cannot read the self-land journal under ${stateDir} (${err instanceof Error ? err.message : String(err)}) — the measured-land fallback is unreadable; the count is unmeasurable, not empty`);
 }
 
 // The window ends "now" in UTC. Date.now() is intentional here (a CLI, not a resume-safe workflow
@@ -95,7 +99,10 @@ const measuredClause = w.measured > 0
 // Honest scope label: only a repo-filtered count is "self-lands"; an unfiltered count spans every repo
 // sharing this state dir and must say so (grok #361 HIGH — never claim "glance's own PRs" unfiltered).
 const scope = repo ? `rail self-lands (${repo})` : `rail lands (ALL repos in this state dir — not self-filtered; pass --repo to scope)`;
-const row = `- ${utcDayOf(now)} — ${scope} (dogfood #339): last ${days}d ${w.lands} land(s) through the rail, ${measuredClause}; ${w.unmeasured} unmeasured${flaggedClause}${floor}.`;
+// Round 4 H-2/C-3: surface self-lands still awaiting confirmation (pending after a crash, or enqueued
+// in a merge queue). They are NOT counted as measured and NOT aborted — a floor the operator can act on.
+const unconfirmedClause = unconfirmed > 0 ? `; ${unconfirmed} awaiting confirmation (pending/merge-queued — reconcile before the window closes)` : "";
+const row = `- ${utcDayOf(now)} — ${scope} (dogfood #339): last ${days}d ${w.lands} land(s) through the rail, ${measuredClause}; ${w.unmeasured} unmeasured${flaggedClause}${unconfirmedClause}${floor}.`;
 
 // 2) Insert into the ledger's `## Ledger` section (byte-identical everywhere else). insertLedgerRow
 // throws if the section is absent — we do NOT auto-create it, so the append target is always a file a

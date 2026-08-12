@@ -72,6 +72,14 @@ export interface LandResult {
 	 */
 	head0?: string;
 	landedCommit?: string;
+	/**
+	 * PR mode only (glance#391 round 4, H-2): `gh pr merge` exited 0 but ENQUEUED the PR into a merge
+	 * queue rather than merging synchronously — the merge will happen later, asynchronously. `ok`/`merged`
+	 * stay false (nothing has landed YET), but the caller must NOT record this as a failed/aborted land:
+	 * a queued PR that later merges is a real land, so the self-land journals it `queued` and the drain
+	 * reconciles it, never writing `aborted` for an exit-zero enqueue.
+	 */
+	enqueued?: boolean;
 }
 
 /**

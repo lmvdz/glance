@@ -769,6 +769,15 @@ export async function landAgentPr(opts: LandOpts & { defaultBranch: string }, st
  * land that happened to carry a fresh proof anyway is not flagged — no crying wolf, same as local.
  */
 async function landAgentPrLocked(opts: LandOpts & { defaultBranch: string }, stateDir: string, onOrphan?: AutomationRecorder): Promise<LandResult> {
+	// Fail-closed measurement invariant (glance#391 round 4, C-1): a MEASURED PR-mode land
+	// (`requireValidationPass`) must carry a pinned 40-hex head, or it can never reach `gh pr merge`.
+	// This closes the create-path hole codex found: the merge-point CAS keys on `expectHeadOid`, so a
+	// self-land of a branch with no open PR (which would take the mutating-create path) had no head to
+	// pin. selfLand already refuses no-open-PR in PR mode; this is the last-line guarantee at the primitive
+	// itself — no measured PR-mode land can merge without `--match-head-commit` binding the exact tree.
+	if (opts.requireValidationPass && !(typeof opts.expectHeadOid === "string" && /^[0-9a-f]{40}$/.test(opts.expectHeadOid))) {
+		return { ok: false, committed: false, merged: false, message: opts.message, mode: "pr", detail: `self-land refused: a measured PR-mode land requires a pinned 40-char head commit (expectHeadOid) so the merge is bound to the exact tree the validator measured — none was resolved (no existing open PR?)` };
+	}
 	const forced = opts.requireProof === false;
 	const unproven = forced ? (await proofGate(opts.repo, opts.worktree, opts.branch, opts.verify)) !== undefined : false;
 	const result = await landAgentPrOnce(opts, stateDir, 0, onOrphan);
@@ -978,6 +987,14 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 		if (merge.code !== 0) {
 			const files = (await git(["diff", "--name-only", "--diff-filter=U"], scratch)).stdout.split("\n").map((s) => s.trim()).filter(Boolean);
 			await git(["merge", "--abort"], scratch).catch(() => {});
+			// Self-land (glance#391 round 4, H-1): a conflict means the branch trails main. The auto-merge
+			// retry path REWRITES the branch (merges base in) and FORCE-PUSHES it — moving the remote head
+			// to an unmeasured descendant that, with auto-merge enabled, could land async. A measured land
+			// must never mutate local OR origin: refuse WITHOUT touching either. A rebased descendant is a
+			// new tree and needs a fresh self-land + full remeasurement, not a silent in-flight rewrite.
+			if (opts.expectHeadOid !== undefined) {
+				return { ok: false, committed, merged: false, retryable: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: `self-land refused: ${branch} conflicts with origin/${opts.defaultBranch} (${files.join(", ") || "unknown files"}) — refusing to auto-merge/force-push a measured head. Rebase the PR onto ${opts.defaultBranch} and re-run the self-land so the new tree is re-measured.` };
+			}
 			if (retry >= MAX_CLEAN_AUTOMERGE_RETRIES) {
 				return { ok: false, committed, merged: false, retryable: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: `conflict in ${files.join(", ") || "unknown files"}` };
 			}
@@ -1132,10 +1149,52 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 	const merged = await gh(prMergeArgs(ensure.prNumber, method, repoSlug, opts.expectHeadOid), repo);
 	if (merged.code !== 0) return { ok: false, committed, merged: false, retryable: true, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, prState: "open", detail: `gh pr merge failed${opts.expectHeadOid ? " (head may have moved since it was gated — --match-head-commit refused)" : ""}: ${merged.stderr || merged.stdout}` };
 
+	// Merge-queue detection (glance#391 round 4, H-2): `gh pr merge` can exit 0 having ENQUEUED the PR
+	// into a merge queue rather than merging synchronously. For a measured self-land, re-read the live
+	// state: if it is not yet MERGED, this is an enqueue — NOT a failed land. Return `enqueued` so the
+	// caller journals it QUEUED and reconciles it later, never writing `aborted` for a PR that will merge
+	// asynchronously (which would drop a real land from the window).
+	if (opts.expectHeadOid !== undefined) {
+		// Self-land only (expectHeadOid gated) — never on the normal agent land loop, so these outcomes
+		// are handled explicitly by `selfLand` (enqueue ⇒ journal QUEUED; confirm-fault ⇒ refuse) and do
+		// NOT carry a hand-written `retryable` (the self-land is a one-shot operator call, not the ~30s
+		// auto-retry loop the retryable flag drives).
+		const stRaw = await ghJson<unknown>(["pr", "view", String(ensure.prNumber), "--repo", repoSlug, "--json", "state,mergeStateStatus"], repo);
+		if (stRaw === undefined || typeof stRaw !== "object" || stRaw === null || Array.isArray(stRaw) || typeof (stRaw as { state?: unknown }).state !== "string") {
+			return { ok: false, committed, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: `self-land: could not confirm PR #${ensure.prNumber}'s state after gh pr merge — refusing to claim a merge that isn't verified` };
+		}
+		const st = stRaw as { state: string; mergeStateStatus?: unknown };
+		if (st.state !== "MERGED") {
+			return { ok: false, committed, merged: false, enqueued: true, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, prState: "open", detail: `gh pr merge enqueued PR #${ensure.prNumber} (state=${st.state}${typeof st.mergeStateStatus === "string" ? `, ${st.mergeStateStatus}` : ""}) — not merged synchronously. Recorded as QUEUED and reconciled, never as a failed/aborted land.` };
+		}
+	}
+
 	await git(["fetch", "origin", opts.defaultBranch], repo);
 	const branchTip = (await git(["rev-parse", branch], repo)).stdout;
 	const assertion = await assertMerged({ repo, defaultBranch: opts.defaultBranch, branchTipSha: branchTip, prNumber: ensure.prNumber }, method);
 	if (!assertion.ok) return { ok: false, committed, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: assertion.detail };
+
+	// Base-tree binding — CHEAP PARTIAL (glance#391 round 4, C-2). Verify THIS PR's ACTUAL merge commit
+	// is reachable from `origin/<expectBase>` for EVERY merge method (assertMerged's method="merge" path
+	// only checks the branch TIP's ancestry, not the merge commit) — this DETECTS a wrong-base /
+	// retarget-and-merge-elsewhere mutation after the fact.
+	//
+	// KNOWN LIMITATION, documented not silent: `gh pr merge` offers NO base-commit compare-and-swap. We
+	// bind `baseRefName` (the NAME) pre-merge and verify merge-commit ancestry here, but if another PR
+	// ADVANCES the base B→C between the gate and the merge, GitHub merges H onto C — a DIFFERENT tree
+	// than the gated merge(B,H) — and this ancestry check still passes. Measured lands therefore ASSUME
+	// the base does not advance between gate and merge; the dogfood window is serial / operator-routed,
+	// so this holds. A concurrent-fleet setting needs local-merge tree-CAS (construct the merge commit
+	// locally and `--force-with-lease` the base ref against an expected OID, abandoning `gh pr merge`) —
+	// a scoped design decision deferred to Lars (glance#391 C-2), NOT round 4.
+	const landedCommit = await prMergeCommitOid(repo, ensure.prNumber);
+	if (opts.expectHeadOid !== undefined && opts.expectBase !== undefined) {
+		const mergeCommit = landedCommit ?? assertion.mergeCommit;
+		if (mergeCommit) {
+			const reachable = await git(["merge-base", "--is-ancestor", mergeCommit, `origin/${opts.expectBase}`], repo);
+			if (reachable.code !== 0) return { ok: false, committed, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: `self-land base guard (post-merge): PR #${ensure.prNumber}'s merge commit ${mergeCommit.slice(0, 12)} is NOT reachable from origin/${opts.expectBase} — it landed on a different base than authorized. Refusing to record it as a measured land.` };
+		}
+	}
 
 	// Orphan assertion (concern: post-merge guard) — additional to the reachability check just above,
 	// never blocking (the merge already happened): see `assertNoOrphanedCommits`'s doc comment.
@@ -1173,8 +1232,7 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 	// IS the branch tip (the original r2 defect). Both are gone: `prMergeCommitOid` reads THIS pr's
 	// mergeCommit.oid (uniform across merge/squash/rebase) and VALIDATES a real 40-hex OID. When it can't
 	// be obtained, `landedCommit` is undefined — the receipt records attribution as UNAVAILABLE (honest),
-	// NEVER the branch tip and NEVER a racing land's SHA.
-	const landedCommit = await prMergeCommitOid(repo, ensure.prNumber);
+	// NEVER the branch tip and NEVER a racing land's SHA. Fetched above (C-2 check reuses it).
 	return { ok: true, committed: true, merged: true, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, prState: "merged", head0: prBaseTip, landedCommit };
 }
 

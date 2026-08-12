@@ -7,11 +7,13 @@ export { acceptanceCriteriaFromPrBody, criteriaFromTexts } from "./criteria.ts";
 export {
 	journalPending,
 	journalFinalized,
+	journalQueued,
 	journalAborted,
 	readSelfLandJournal,
 	journalRowsForWindow,
+	unconfirmedSelfLands,
 	selfLandJournalPath,
-	selfLandJournalId,
+	newSelfLandAttemptId,
 	type SelfLandJournalEntry,
 	type SelfLandJournalStatus,
 } from "./journal.ts";

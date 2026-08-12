@@ -83,6 +83,9 @@ function parseIndexRow(line: string): LandReceiptIndexRow | null {
 		// missing verdict is preserved as absent, and `isMeasuredLand` fails closed on it.
 		...(typeof o.verdict === "string" ? { verdict: o.verdict as LandReceiptIndexRow["verdict"] } : {}),
 		...(o.criteriaSource === "pr-body" || o.criteriaSource === "call" ? { criteriaSource: o.criteriaSource } : {}),
+		// Stable land id for read-dedupe (round 4 M-1). Back-fill from branch+commit for older rows
+		// written before the field existed, so dedupe is uniform across the file's history.
+		...(typeof o.landId === "string" ? { landId: o.landId } : typeof o.commit === "string" ? { landId: `${o.branch as string}\0${o.commit}` } : {}),
 	};
 }
 
@@ -99,12 +102,23 @@ export async function readLandReceiptIndex(stateDir: string): Promise<LandReceip
 	}
 	const rows: LandReceiptIndexRow[] = [];
 	let malformed = 0;
+	// Dedupe on the stable land id (round 4 M-1): a double-append — the retry-after-a-late-EIO case,
+	// where the line persisted but the write reported failure — must not double-count. First row for a
+	// given landId wins; a not-landed row (no landId) is always kept (nothing to collide on).
+	const seenLandIds = new Set<string>();
 	for (const line of text.split("\n")) {
 		const t = line.trim();
 		if (!t) continue;
 		const row = parseIndexRow(t);
-		if (row) rows.push(row);
-		else malformed++;
+		if (!row) {
+			malformed++;
+			continue;
+		}
+		if (row.landId) {
+			if (seenLandIds.has(row.landId)) continue; // duplicate of a land already recorded — drop
+			seenLandIds.add(row.landId);
+		}
+		rows.push(row);
 	}
 	return { rows, malformed };
 }

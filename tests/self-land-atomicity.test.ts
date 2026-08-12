@@ -15,7 +15,7 @@ import { isMeasuredLand } from "../src/rail/land-metrics.ts";
 import type { LandReceiptIndexRow } from "../src/rail/receipt/types.ts";
 import { appendLandReceiptIndexRow } from "../src/rail/receipt/write.ts";
 import { readLandReceiptIndex } from "../src/rail/land-metrics.ts";
-import { journalPending, journalFinalized, journalAborted, readSelfLandJournal, journalRowsForWindow } from "../src/rail/self-land/journal.ts";
+import { journalPending, journalFinalized, journalQueued, journalAborted, readSelfLandJournal, journalRowsForWindow, unconfirmedSelfLands, newSelfLandAttemptId } from "../src/rail/self-land/journal.ts";
 import type { LandReceipt } from "../src/rail/receipt/types.ts";
 
 const tmps: string[] = [];
@@ -102,11 +102,15 @@ test("H-3: appendLandReceiptIndexRow durably records a row the window reads back
 	expect(isMeasuredLand(rows[0]!)).toBe(true);
 });
 
+const BASE = "main";
+const mkId = (branch: string, head: string): string => newSelfLandAttemptId("lmvdz/glance", branch, head, BASE);
+
 test("H-3: a finalized-but-not-indexed journal row is FOLDED into the window (receipt-write-failure fallback)", async () => {
 	const stateDir = await tmpDir("selfland-journal-fold-");
 	// Simulate the failure: a merged measured land whose index append faulted — only the journal has it.
-	const id = await journalPending(stateDir, { repo: "lmvdz/glance", branch: "deepen/lost", headOid: H, criteriaSource: "pr-body", criteriaCount: 1 });
-	await journalFinalized(stateDir, id, { repo: "lmvdz/glance", branch: "deepen/lost", headOid: H, landedCommit: "merge1", row: passRow("deepen/lost", "merge1") });
+	const id = mkId("deepen/lost", H);
+	await journalPending(stateDir, id, { repo: "lmvdz/glance", branch: "deepen/lost", headOid: H, base: BASE, criteriaSource: "pr-body", criteriaCount: 1 });
+	await journalFinalized(stateDir, id, { repo: "lmvdz/glance", branch: "deepen/lost", headOid: H, base: BASE, landedCommit: "merge1", row: passRow("deepen/lost", "merge1") });
 	// The index is empty (the append never happened), but the fold recovers the row.
 	const folded = await journalRowsForWindow(stateDir, []);
 	expect(folded.length).toBe(1);
@@ -117,15 +121,54 @@ test("H-3: a finalized-but-not-indexed journal row is FOLDED into the window (re
 	expect(already.length).toBe(0);
 });
 
-test("H-3: a pending/aborted journal entry is NEVER folded (only a confirmed finalized merge counts)", async () => {
-	const stateDir = await tmpDir("selfland-journal-pending-");
-	const idA = await journalPending(stateDir, { repo: "lmvdz/glance", branch: "deepen/pending", headOid: H, criteriaSource: "call", criteriaCount: 1 });
-	void idA; // left pending — the merge never confirmed
-	const idB = await journalPending(stateDir, { repo: "lmvdz/glance", branch: "deepen/aborted", headOid: H2, criteriaSource: "call", criteriaCount: 1 });
-	await journalAborted(stateDir, idB, { repo: "lmvdz/glance", branch: "deepen/aborted", headOid: H2, detail: "gate red" });
+test("C-3: a later attempt's abort CANNOT overwrite an earlier attempt's finalized row (unique per-attempt id)", async () => {
+	const stateDir = await tmpDir("selfland-journal-unique-");
+	// Attempt 1 finalizes a real merge.
+	const id1 = mkId("deepen/x", H);
+	await journalPending(stateDir, id1, { repo: "lmvdz/glance", branch: "deepen/x", headOid: H, base: BASE });
+	await journalFinalized(stateDir, id1, { repo: "lmvdz/glance", branch: "deepen/x", headOid: H, base: BASE, landedCommit: "merge1", row: passRow("deepen/x", "merge1") });
+	// Attempt 2 (same repo:branch:head) aborts — with the OLD repo:branch:head id this would overwrite
+	// attempt 1's finalized entry and vanish the land. Distinct ids keep both.
+	const id2 = mkId("deepen/x", H);
+	expect(id2).not.toBe(id1);
+	await journalPending(stateDir, id2, { repo: "lmvdz/glance", branch: "deepen/x", headOid: H, base: BASE });
+	await journalAborted(stateDir, id2, { repo: "lmvdz/glance", branch: "deepen/x", headOid: H, base: BASE, detail: "conflict" });
+	// The finalized land still folds — attempt 2's abort didn't erase it.
 	const folded = await journalRowsForWindow(stateDir, []);
-	expect(folded).toEqual([]);
-	// last-status-per-id: the aborted entry's latest state is "aborted", not "pending".
-	const latest = await readSelfLandJournal(stateDir);
-	expect(latest.get(idB)?.status).toBe("aborted");
+	expect(folded.length).toBe(1);
+	expect(folded[0]!.commit).toBe("merge1");
+});
+
+test("H-2: a QUEUED entry is never folded and is surfaced as unconfirmed (not a defect, not a drop)", async () => {
+	const stateDir = await tmpDir("selfland-journal-queued-");
+	const id = mkId("deepen/queued", H);
+	await journalPending(stateDir, id, { repo: "lmvdz/glance", branch: "deepen/queued", headOid: H, base: BASE });
+	await journalQueued(stateDir, id, { repo: "lmvdz/glance", branch: "deepen/queued", headOid: H, base: BASE, prNumber: 380, detail: "enqueued" });
+	// Not folded (not a confirmed measured land)...
+	expect(await journalRowsForWindow(stateDir, [])).toEqual([]);
+	// ...but surfaced as awaiting confirmation, so the drain reports it rather than silently dropping it.
+	const unconfirmed = await unconfirmedSelfLands(stateDir);
+	expect(unconfirmed.length).toBe(1);
+	expect(unconfirmed[0]!.status).toBe("queued");
+});
+
+test("C-3: readSelfLandJournal FAILS CLOSED on an unreadable journal (never a silent empty map)", async () => {
+	const stateDir = await tmpDir("selfland-journal-failclosed-");
+	// A missing file is honest-empty.
+	expect((await readSelfLandJournal(stateDir)).size).toBe(0);
+	// A directory where the journal file should be → EISDIR on read → THROW, not empty.
+	await fs.mkdir(path.join(stateDir, "land-receipts"), { recursive: true });
+	await fs.mkdir(path.join(stateDir, "land-receipts", "self-land-journal.jsonl"));
+	await expect(readSelfLandJournal(stateDir)).rejects.toThrow();
+});
+
+test("M-1: readLandReceiptIndex dedupes a double-appended row on the stable land id (no double-count)", async () => {
+	const stateDir = await tmpDir("selfland-dedupe-");
+	const receipt: LandReceipt = { repo: "lmvdz/glance", branch: "deepen/dup", commit: "cc", files: [], landed: true, at: Date.now(), gate: { status: "green" }, validation: { verdict: "pass", agreement: 1, confidence: 1, perCriterion: [{ id: "ac1", satisfied: true }], rationale: "ok", ranAt: 1, reviewerPrecision: { lineage: "native", n: 3, survived: 2, survivedRate: 2 / 3, provisional: true } }, forcedWithoutProof: false, cost: { costUnknown: true } };
+	// The retry-after-a-late-EIO case: the same row lands in the index TWICE.
+	await appendLandReceiptIndexRow(stateDir, receipt);
+	await appendLandReceiptIndexRow(stateDir, receipt);
+	const { rows } = await readLandReceiptIndex(stateDir);
+	expect(rows.length).toBe(1); // deduped on landId — counted exactly once
+	expect(rows[0]!.landId).toBe(`deepen/dup\0cc`);
 });

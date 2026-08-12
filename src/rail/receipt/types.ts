@@ -197,4 +197,8 @@ export interface LandReceiptIndexRow {
 	 *  `"call"` (supplied at land time, weaker). Absent on an ordinary agent land. Lets the window
 	 *  count declared-criteria lands separately from call-supplied ones. */
 	criteriaSource?: "pr-body" | "call";
+	/** Stable identity of the LAND this row records — `<branch>\0<commit>` (glance#391 round 4 M-1).
+	 *  A land is uniquely (branch, merge-commit); the reader dedupes on this so a double-append (the
+	 *  retry-after-a-late-EIO case) can never double-count. Absent on a not-landed row (no commit). */
+	landId?: string;
 }

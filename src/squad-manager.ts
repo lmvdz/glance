@@ -204,7 +204,7 @@ import { addPlanRevisionCandidate, appendCommentEvent, type ArtifactComment, typ
 import { castPlanVote as appendPlanVoteCast, closePlanVoteRound as appendPlanVoteClose, currentPlanVoteRound as readCurrentPlanVoteRound, listPlanVoteRounds as readPlanVoteRounds, type OpenPlanVoteInput, openPlanVoteRound, recordPlanVoteCommit, tallyPlanVoteRound } from "./plan-votes.ts";
 import { isPlanDocPath, planDocHeadRevision, resolveSafeDocPath } from "./plan-doc.ts";
 import type { VoteQuorum } from "./plan-vote-quorum.ts";
-import { acceptanceCriteriaFromPrBody, appendLandReceiptIndexRow, criteriaFromTexts, isMeasuredLand, journalAborted, journalFinalized, journalPending, landFailureCount, landReceiptIndexRow, readForcedLands, readLandLedger, readValidatorOverrides, recordForcedLand, recordLandOutcome, recordValidatorOverride, classifyLand, writeLandReceipt, postReceiptComment, type LandReceipt, type LandReceiptPrecision } from "./rail/index.ts";
+import { acceptanceCriteriaFromPrBody, appendLandReceiptIndexRow, criteriaFromTexts, isMeasuredLand, journalAborted, journalFinalized, journalPending, journalQueued, landFailureCount, landReceiptIndexRow, newSelfLandAttemptId, readForcedLands, readLandLedger, readValidatorOverrides, recordForcedLand, recordLandOutcome, recordValidatorOverride, classifyLand, writeLandReceipt, postReceiptComment, type LandReceipt, type LandReceiptPrecision } from "./rail/index.ts";
 import { isLandingUnit, landingRosterOf } from "./is-landing-unit.ts";
 import { readTaskOutcomes, recordTaskOutcome, type TaskOutcomeRow } from "./task-outcomes.ts";
 import { buildTaskClassMatrix } from "./omp-graph/task-class-matrix.ts";
@@ -1015,6 +1015,7 @@ export type SelfLandRefusal =
 	| "no-target"
 	| "pr-lookup-failed"
 	| "pr-not-open"
+	| "no-pr"
 	| "pr-draft"
 	| "no-criteria"
 	| "base-mismatch"
@@ -1023,6 +1024,7 @@ export type SelfLandRefusal =
 	| "head-mismatch"
 	| "gate-red"
 	| "unmeasured"
+	| "queued"
 	| "busy";
 
 /** The outcome of a self-land. `measured` is derived from the validator VERDICT graded before the
@@ -5098,9 +5100,14 @@ export class SquadManager extends EventEmitter {
 		if (prMode) {
 			if (!mode.defaultBranch) return refuse("base-mismatch", "self-land refused", `PR mode is active for ${repo} but no default branch resolved: ${mode.reason}`, base);
 			target = mode.defaultBranch;
+			// C-1 (round 4): a MEASURED PR-mode land REQUIRES an existing open PR. Without one, the land
+			// would take the mutating-create path and reach `gh pr merge` with no head to pin
+			// (`--match-head-commit`), reopening the measure-H/merge-H2 window. The dogfood routes existing
+			// glance PRs (#370–381 all have PRs), so refuse rather than create-and-merge an unpinned land.
+			if (!pr) return refuse("no-pr", "self-land refused: no open PR", `${branch} has no open PR — a measured PR-mode self-land requires one so the merge can be pinned to the exact gated head (--match-head-commit). Open a PR for ${branch} (ready, not draft) and retry.`, base);
 			// gh pr merge lands into the PR's OWN base; ensurePr never retargets it. So the PR's base must
 			// equal the rail's merge target AND the caller's authorized branch — all three agree or refuse.
-			if (pr && pr.baseBranch !== target) {
+			if (pr.baseBranch !== target) {
 				return refuse("base-mismatch", "self-land refused", `PR #${pr.number} targets ${pr.baseBranch}, but the rail's PR-mode land merges into ${target} (the repo's default branch, or OMP_SQUAD_PR_BASE). Retarget the PR, or point the rail's base at ${pr.baseBranch}.`, base);
 			}
 		} else {
@@ -5170,15 +5177,15 @@ export class SquadManager extends EventEmitter {
 				return refuse("gate-red", "self-land refused: gate red", `the repo's own gate failed on ${branch} — no merge, no receipt. Command: ${command}\n${proof.detail}`, { ...base, criteriaSource, criteriaCount: criteria.length, gateCommand: command });
 			}
 
-			// 6. Durable pre-merge journal (round 3, H-3): a "measured land of <branch>@<head> is about to
-			// happen" intent, written BEFORE any merge. If the merge succeeds but the receipt-index append
-			// then faults, this + the finalized entry below are the fallback evidence, so a merged measured
-			// land is never lost to a disk hiccup. `journalHead` keys it (the SHA we gate == what merges).
+			// 6. Durable pre-merge journal (round 3 H-3, hardened round 4 C-3): a "measured land of
+			// <branch>@<head> is about to happen" intent, written BEFORE any merge, under a UNIQUE
+			// per-attempt id (so a later attempt can never overwrite this attempt's finalized row). If the
+			// merge succeeds but the receipt-index append faults, the finalized entry below is the fallback.
 			const slug = repoIdentity(repo).split("/").slice(-2).join("/");
 			const journalHead = expectHeadOid ?? (await hardenedGit(["rev-parse", "HEAD"], { cwd: worktree })).stdout.trim();
-			let journalId: string | undefined;
+			const journalId = newSelfLandAttemptId(slug, branch, journalHead, expectBase);
 			try {
-				journalId = await journalPending(this.stateDir, { repo: slug, branch, headOid: journalHead, criteriaSource, criteriaCount: criteria.length });
+				await journalPending(this.stateDir, journalId, { repo: slug, branch, headOid: journalHead, base: expectBase, prNumber: pr?.number, criteriaSource, criteriaCount: criteria.length });
 			} catch (err) {
 				// A pending-journal write that can't even start is a disk fault — refuse rather than merge a
 				// land we could not durably record (fail closed, the invariant this whole path protects).
@@ -5219,9 +5226,19 @@ export class SquadManager extends EventEmitter {
 			const merged = result.ok && result.merged === true;
 			const measured = merged && validation?.verdict === "pass";
 			if (!merged) {
-				// No merge ⇒ close the journal so a pending never lingers as a false "this landed".
-				if (journalId) await journalAborted(this.stateDir, journalId, { repo: slug, branch, headOid: journalHead, detail: result.detail ?? result.message }).catch((e) => this.log("warn", `self-land journal abort failed (non-fatal): ${errText(e)}`));
-				const refusal: SelfLandRefusal = result.retryable ? "busy" : validation && validation.verdict !== "pass" ? "unmeasured" : "gate-red";
+				// H-2 (round 4): an ENQUEUED merge is NOT a failed land — a queued PR that later merges is
+				// real. Journal it QUEUED (never `aborted`) so the drain reconciles it, and surface it as a
+				// distinct, non-defect outcome. Every OTHER non-merge (guard refused, conflict, gate) aborts
+				// the journal so a pending never lingers as a false "this landed".
+				if (result.enqueued) {
+					await journalQueued(this.stateDir, journalId, { repo: slug, branch, headOid: journalHead, base: expectBase, prNumber: pr?.number ?? result.prNumber ?? 0, detail: result.detail ?? result.message }).catch((e) => this.log("warn", `self-land journal queued-write failed (non-fatal): ${errText(e)}`));
+					return { ok: false, measured: false, refusal: "queued", message: result.message, detail: result.detail ?? result.message, ...base, criteriaSource, criteriaCount: criteria.length, gateCommand: command, targetBranch: target, verdict: validation?.verdict, land: result };
+				}
+				await journalAborted(this.stateDir, journalId, { repo: slug, branch, headOid: journalHead, base: expectBase, detail: result.detail ?? result.message }).catch((e) => this.log("warn", `self-land journal abort failed (non-fatal): ${errText(e)}`));
+				// verdict !== pass ⇒ the measurement gate refused (unmeasured). verdict === pass but no merge
+				// ⇒ the land was refused AFTER the gate (a merge-point guard, a conflict, a confirm fault) —
+				// "busy" (retry-worthy) is the honest label, never "gate-red" (the gate passed).
+				const refusal: SelfLandRefusal = validation && validation.verdict !== "pass" ? "unmeasured" : "busy";
 				return {
 					ok: false,
 					measured: false,
@@ -5238,28 +5255,33 @@ export class SquadManager extends EventEmitter {
 				};
 			}
 
-			// 8. Durable receipt (H-3): append the index row FIRST, retried, as a must-succeed step —
-			// decoupled from the best-effort HTML — so the merged measured land always has a window row.
-			// Then finalize the journal (carrying the full row) as the crash/fault fallback, then the HTML.
+			// 8. Durable receipt. C-3 (round 4): FINALIZE the journal FIRST — from the LandResult, the moment
+			// the merge is confirmed — carrying the full row, BEFORE the best-effort index/HTML I/O. So a
+			// crash between the merge and the index append still leaves a finalized entry the window folds;
+			// the old order (index-then-finalize) could crash pending-only and vanish the land.
 			const receipt = await this.buildLandReceipt({ repo, branch, criteriaSource }, result, undefined, undefined, validation);
 			if (!receipt) {
-				this.log("error", `self-land of ${branch} MERGED but could not build a receipt (no branch?) — impossible here; finalizing journal without a row`);
+				this.log("error", `self-land of ${branch} MERGED but could not build a receipt (no branch?) — impossible here`);
 				return { ok: true, measured, message: `self-land merged ${branch} into ${target}`, ...base, criteriaSource, criteriaCount: criteria.length, gateCommand: command, targetBranch: target, verdict: validation?.verdict, receiptWritten: false, land: result };
 			}
 			const row = landReceiptIndexRow(receipt);
 			const countedByWindow = isMeasuredLand(row);
 			const precision: LandReceiptPrecision | undefined = validation?.reviewerPrecision;
+			if (receipt.commit) {
+				try {
+					await journalFinalized(this.stateDir, journalId, { repo: slug, branch, headOid: journalHead, base: expectBase, landedCommit: receipt.commit, row });
+				} catch (e) {
+					this.log("error", `self-land of ${branch} MERGED but the crash-safe journal finalize FAILED: ${errText(e)} — attempting the index append anyway`);
+				}
+			}
+			// Then the durable index append (retried). If it faults, the finalized journal above is the
+			// fallback the drain folds — the merged measured land is never lost.
 			let receiptWritten = false;
 			try {
 				await appendLandReceiptIndexRow(this.stateDir, receipt);
 				receiptWritten = true;
 			} catch (err) {
 				this.log("error", `self-land of ${branch} MERGED (measured) but the receipt index append FAILED after retries: ${errText(err)} — the finalized journal is the fallback evidence, the window folds it`);
-			}
-			// Finalize the journal with the full row EITHER way: on index success it is a redundant record;
-			// on index failure it is THE record the window folds in (journalRowsForWindow). Best-effort.
-			if (journalId && receipt.commit) {
-				await journalFinalized(this.stateDir, journalId, { repo: slug, branch, headOid: journalHead, landedCommit: receipt.commit, row }).catch((e) => this.log("warn", `self-land journal finalize failed (non-fatal): ${errText(e)}`));
 			}
 			// The human-facing HTML + PR comment: best-effort, index already durable (skipIndex).
 			let receiptPath: string | undefined;

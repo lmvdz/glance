@@ -85,6 +85,9 @@ export function landReceiptIndexRow(receipt: LandReceipt): LandReceiptIndexRow {
 		// Self-land criteria provenance (glance#391 M-1) — carried through so the window can report
 		// declared (pr-body) vs call-supplied lands separately. Absent on an ordinary agent land.
 		...(receipt.criteriaSource ? { criteriaSource: receipt.criteriaSource } : {}),
+		// Stable land identity for read-dedupe (glance#391 round 4 M-1): a land is uniquely
+		// (branch, merge-commit). Present only when something merged (a commit exists).
+		...(receipt.commit ? { landId: `${receipt.branch}\0${receipt.commit}` } : {}),
 	};
 }
 
