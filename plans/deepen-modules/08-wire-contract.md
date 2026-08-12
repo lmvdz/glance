@@ -40,7 +40,7 @@ precedent). Slice 1 (event kinds, PR #317) is complete and independently mergeab
 ## Provenance
 Whole-repo report candidate 3 (Strong).
 
-## Done (2026-08-11, round 3 iteration 7 — slice 2, PR pending)
+## Done (2026-08-11, round 3 iteration 7 — slice 2, PR #375)
 The shared-vs-generated decision is made and landed per-domain: the KERNEL is shared — dto.ts's
 hand-mirrored head cluster (AgentStatus, PendingRequest, IssueRef, the five transcript blocks)
 is now type-only re-exports of src/core-types.ts, which became a true ZERO-IMPORT leaf via the

@@ -24,7 +24,7 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
-## Round 3, iteration 7 (2026-08-11, goal mode — PR pending) — CONCERN 08 DONE (slice 2)
+## Round 3, iteration 7 (2026-08-11, goal mode — PR #375) — CONCERN 08 DONE (slice 2)
 The wire-contract decision lands: kernel = type-only RE-EXPORTS of a now-truly-zero-import
 core-types (WorkLane flip shipped; types.ts honors its own barrel promise), domain DTOs =
 conformance-gated mirrors (24's file), payloads = runtime test. Codex proved the bundle graph
