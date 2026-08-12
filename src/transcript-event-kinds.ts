@@ -35,7 +35,7 @@ export const TRANSCRIPT_EVENT_GOAL_OVERLAP = "goal-overlap";
 // (connecting/live/degraded/ended); `voice-decision` carries one arbiter-minted decision's state at
 // the moment it was journaled (open/awaiting-confirmation/answered/expired/cancelled/failed). Both
 // are bespoke inline emit sites (VoiceCallCoordinator/CallProjectionStore), never routed through the
-// per-unit `projectUnitTranscriptEvent` funnel — a call is bound to a thread/channel, not to a fleet
+// per-unit `unit-card-projector.ts#event` funnel — a call is bound to a thread/channel, not to a fleet
 // unit, and the daemon must not pretend the OMP live session is an `AgentDTO` to project it.
 export const TRANSCRIPT_EVENT_VOICE_CALL = "voice-call";
 export const TRANSCRIPT_EVENT_VOICE_DECISION = "voice-decision";

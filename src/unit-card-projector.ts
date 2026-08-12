@@ -43,7 +43,10 @@ import type { TranscriptEntry } from "./core-types.ts";
  *  (id, name, status, repo, branch, issue, proof, channelId, pending) rather than a narrow one. */
 export interface ProjectedUnitSession {
 	dto: AgentDTO;
-	options: { channelId?: string };
+	/** `task` is read by node materialization (`ensureProjectedNode` persists it as the node's goal)
+	 *  — it crosses the port even though the projector itself never reads it, so it belongs in the
+	 *  declared slice rather than behind a cast (codex M, concern 21 round). */
+	options: { channelId?: string; task?: string };
 }
 
 /** Where a projected card lands: the unit's room, or its own node thread (mirrors the
@@ -72,12 +75,18 @@ export interface UnitCardProjectorDeps {
 	/** True while `rec`'s pending backlog is being rebuilt by replay — suppresses re-announcing a
 	 *  pending that was already announced before a restart. */
 	isSettling(id: string): boolean;
+	/** Does this pending deserve a CARD IN THE ROOM? (`isRoomWorthyPending`, squad-manager.ts.)
+	 *  Deliberately a SEPARATE closure from `gateClassOf` even though their predicates currently
+	 *  coincide — the manager documents them as two different questions (room = permanent history,
+	 *  lane = act-now), and the planned grace-period widening (plans/the-room/26) changes this one
+	 *  without changing gate classification. Collapsing them here would silently pin needs-you cards
+	 *  to gate-only forever (codex M, concern 21 round). */
+	roomWorthy(req: PendingRequest): boolean;
 	/** A gate-class request is never auto-answered by any supervisor — the same predicate the
-	 *  attention lane uses (`gateClassOf`/`isRoomWorthyPending`, squad-manager.ts), collapsed to one
-	 *  closure since `needsYou()` uses it for both the room-worthiness filter and the payload's
-	 *  `gateClass` field, which are always the identical boolean. Kept manager-side rather than
-	 *  duplicated here: it is public, independently tested (tests/acp-permission-is-a-gate.test.ts),
-	 *  and security-relevant (an untrusted agent frame must never opt itself out of human review). */
+	 *  attention lane uses (`gateClassOf`, squad-manager.ts). Feeds only the payload's `gateClass`
+	 *  field; the emit filter is `roomWorthy` above. Kept manager-side rather than duplicated here:
+	 *  it is public, independently tested (tests/acp-permission-is-a-gate.test.ts), and
+	 *  security-relevant (an untrusted agent frame must never opt itself out of human review). */
 	gateClassOf(req: PendingRequest): boolean;
 }
 
@@ -323,7 +332,7 @@ export class UnitCardProjector {
 			// A pending restored by replay was announced before the restart. Re-announcing it says the
 			// fleet stopped again, which it did not.
 			if (replaying) continue;
-			if (!this.deps.gateClassOf(request)) continue;
+			if (!this.deps.roomWorthy(request)) continue;
 			this.deps.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_NEEDS_YOU, `${this.deps.label(request.title)} — ${this.deps.label(rec.dto.name)} stopped rather than guess. Everything else in the fleet is still moving.`, {
 				status: "pending",
 				pendingId: request.id,
@@ -339,7 +348,7 @@ export class UnitCardProjector {
 			if (upcoming.has(request.id)) continue;
 			// Symmetric with the emit above: a pending that never became a card must never emit a
 			// resolution card, or the room fills with orphan "resolved" faces for facts it never showed.
-			if (!this.deps.gateClassOf(request)) continue;
+			if (!this.deps.roomWorthy(request)) continue;
 			// A pending goes away for two very different reasons and the card said "is answered" for
 			// both. `pending-cancel` is the unit being stopped, killed, reaped or replay-pruned —
 			// nobody answered it and nothing is picking the work back up. Telling a person their

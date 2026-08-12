@@ -264,7 +264,7 @@ import {
 	type VoiceOwnerActor,
 } from "./voice-fleet.ts";
 import { NodeStore, compareActivity, type NodeState } from "./memory/nodes.ts";
-import { UnitCardProjector } from "./unit-card-projector.ts";
+import { UnitCardProjector, type ProjectedUnitSession } from "./unit-card-projector.ts";
 import { coldStartLearningState } from "./unknowns.ts";
 import { RECOVERY_DELAY_MS, gateHealth, notificationText, readGateEvaluation, shouldLeaveTheApp, type GateEvaluation, type GateHealth, type WorthItReview } from "./leaving-the-app.ts";
 import { GateStore } from "./gate-store.ts";
@@ -1438,7 +1438,7 @@ export class SquadManager extends EventEmitter {
 		this.nodeStore = new NodeStore(this.store);
 		this.cardProjector = new UnitCardProjector({
 			log: (level, msg) => this.log(level, msg),
-			node: (rec) => this.ensureProjectedNode(rec as AgentRecord),
+			node: (rec) => this.ensureProjectedNode(rec),
 			appendCard: async (target, input) => {
 				const card = "room" in target
 					? await this.channelStore.appendManager(target.room, input)
@@ -1450,6 +1450,7 @@ export class SquadManager extends EventEmitter {
 			label: (value) => this.safeEventLabel(value),
 			operatorId: () => this.operator.id,
 			isSettling: (id) => this.settling.has(id),
+			roomWorthy: (req) => isRoomWorthyPending(req),
 			gateClassOf: (req) => gateClassOf(req),
 		});
 		this.attentionStore = new AttentionStore({ stateDir: this.stateDir, log: (m) => this.log("warn", `attention: ${m}`) });
@@ -12794,7 +12795,10 @@ export class SquadManager extends EventEmitter {
 		}
 	}
 
-	private async ensureProjectedNode(rec: AgentRecord): Promise<{ id: string }> {
+	// Takes the projector's structural slice rather than AgentRecord: the projector's `node` dep
+	// calls this with a ProjectedUnitSession, and the slice declares exactly what this reads
+	// (dto + options.task) — every AgentRecord caller satisfies it for free.
+	private async ensureProjectedNode(rec: ProjectedUnitSession): Promise<{ id: string }> {
 		const existing = await this.nodeStore.get(rec.dto.id);
 		if (existing) return existing;
 		return this.nodeStore.create({
