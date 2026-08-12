@@ -19,7 +19,7 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { rootFactoryEnabled } from "../src/index.ts";
+import { rootFactoryEnabled } from "../src/boot.ts";
 import { ROOT_FACTORY_ORG, SquadServer } from "../src/server.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import type { ManagerRegistry } from "../src/manager-registry.ts";

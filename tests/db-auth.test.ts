@@ -16,7 +16,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { openDatabase } from "../src/db/index.ts";
 import { DEV_INSECURE_SECRET, makeAuth, expandLoopbackOrigins } from "../src/db/auth.ts";
-import { secretBootDecision } from "../src/index.ts";
+import { secretBootDecision } from "../src/boot.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import { SquadServer } from "../src/server.ts";
 

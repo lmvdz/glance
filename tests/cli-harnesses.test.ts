@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { renderHarnessTable } from "../src/index.ts";
+import { renderHarnessTable } from "../src/cli/render.ts";
 
 describe("renderHarnessTable", () => {
 	test("renders tier, protocol, usage-verified bit, and marks the default harness", () => {

@@ -85,7 +85,8 @@ test("applyWellKnownDirsToProcessPath defaults to mutating the REAL process.env 
 // comparable CLI-wiring test in this repo already does (cli-harnesses.test.ts only proves rendering,
 // relying on server.ts's own route tests — same division of labor here).
 test("cmdUp calls applyWellKnownDirsToProcessPath as its very first statement, before any Plane/DB/TLS/spawn setup", () => {
-	const src = fs.readFileSync(path.join(import.meta.dir, "..", "src", "index.ts"), "utf8");
+	// cmdUp lives in src/boot.ts (deepen concern 22: the composition root split out of index.ts).
+	const src = fs.readFileSync(path.join(import.meta.dir, "..", "src", "boot.ts"), "utf8");
 	const fnStart = src.indexOf("async function cmdUp(");
 	expect(fnStart).toBeGreaterThan(-1);
 	const body = src.slice(fnStart, fnStart + 1000);
