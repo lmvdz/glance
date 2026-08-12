@@ -24,6 +24,14 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
+## Round 3, iteration 12 (2026-08-12, goal mode — PR pending) — CONCERN 25 STEP 1
+The dead-component sweep (~1,300 lines) with the queue's best convergent round: both lineages
+independently named the same five feature orphans. Adjudicated three ways: 2 standing-status
+gaps FIXED here (retention-mismatch precedence + role=alert; browser-audio error/retry
+remounted), 3 pre-existing inert flows QUEUED with evidence (spawn-proposal doorless, adoption
+surfaceless, D3 lib halves test-only), 3 replaced + 2 safely-dead confirmed. Concern stays open
+for slices 2-3 (helper deletion + region lifts + consumer split).
+
 ## Round 2 (2026-08-04, iteration 37 — the goal's completion clause)
 Queue was dry (14 done, 3 needs-lars) → fresh review round executed: two Explore agents over
 current main (daemon: squad-manager regions with per-region coupling counts, Store, CLI,
