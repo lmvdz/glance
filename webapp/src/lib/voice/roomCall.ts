@@ -24,6 +24,10 @@ import type {
   VoiceCallState,
   VoiceCallTerminalReason,
 } from '../api';
+// registerPresentation + withoutRawRoomEvents moved to channelTimeline.ts (concern 25 slice 2b —
+// they were card-system code that only HISTORICALLY lived here); re-exported so voice-side
+// importers keep one hop.
+export { isRawRoomEvent, registerPresentation, withoutRawRoomEvents, type RegisterPresentation } from '../channelTimeline';
 import type { ChannelCardRegister } from '../channelTimeline';
 import type { ChannelEntry } from '../dto';
 
@@ -31,76 +35,6 @@ import type { ChannelEntry } from '../dto';
 // Epistemic register (DESIGN.md addendum — first real emitter is the voice-decision card)
 // =================================================================================================
 
-/**
- * How a face's TEXT is presented given the register its emitter asserted.
- *
- * Three rules, all from the addendum:
- *
- * 1. **Claim renders italic, unverified renders with a dashed underline.** A register that only
- *    changed a colour would be indistinguishable from every other muted thing on the card.
- * 2. **WCAG-AA-checked ink tokens, and NO opacity stacking.** The card body is already muted; a
- *    second `opacity` layer on top of it is how "this is the agent's own account" quietly becomes
- *    "this is unreadable". Each colour below is a literal, contrast-checked value against the
- *    room's `#09090A` timeline backdrop — never `opacity-60` over an already-dimmed parent.
- * 3. **The register is ANNOUNCED, not only styled.** Italics and a dashed underline are invisible
- *    to a screen reader. `ariaLabel` names the register on a `role="note"` wrapper, which gives the
- *    region an accessible name while still exposing the text inside it.
- */
-export interface RegisterPresentation {
-  /** Inline style for the text element. Colour is a checked token; never an opacity. */
-  style: { fontStyle?: 'italic'; color: string; textDecoration?: string; textDecorationStyle?: 'dashed'; textUnderlineOffset?: string; textDecorationColor?: string };
-  /** Accessible name for the `role="note"` wrapper, so the register is spoken. */
-  ariaLabel: string;
-  /** The short visible marker beside the text, for readers who cannot see italics as meaning. */
-  marker?: string;
-  /** Hover/`title` explanation — the long form of the same fact. */
-  title: string;
-}
-
-/**
- * Contrast against the room timeline's `#09090A` backdrop, measured, not guessed:
- *  - `#E6E4E0` → 14.4:1 (claim)      — AA and AAA for body text.
- *  - `#DEDEE2` → 14.7:1 (checked)    — the timeline's own body colour, unchanged.
- *  - `#E4E1DC` → 14.2:1 (unverified) — same family; the dashed underline carries the meaning.
- * All three clear 4.5:1 by a wide margin, which is the point: the register must never be paid for
- * in legibility.
- */
-const REGISTER_INK: Record<ChannelCardRegister, string> = {
-  claim: '#E6E4E0',
-  checked: '#DEDEE2',
-  unverified: '#E4E1DC',
-};
-
-/** The dashed rule under unverified text. Ember-muted rather than full ember: it is a caveat, not
- *  the view's one focal action. 4.6:1 against the backdrop, so it is visible on its own. */
-const UNVERIFIED_RULE = '#B98A55';
-
-export function registerPresentation(register: ChannelCardRegister | undefined): RegisterPresentation | undefined {
-  if (register === 'claim') {
-    return {
-      style: { fontStyle: 'italic', color: REGISTER_INK.claim },
-      ariaLabel: "The agent's own account",
-      marker: 'the agent says',
-      title: "The agent's own account of the question. The room recorded that it was asked — not that it is true.",
-    };
-  }
-  if (register === 'unverified') {
-    return {
-      style: { color: REGISTER_INK.unverified, textDecoration: 'underline', textDecorationStyle: 'dashed', textDecorationColor: UNVERIFIED_RULE, textUnderlineOffset: '3px' },
-      ariaLabel: 'Unverified',
-      marker: 'unverified',
-      title: 'Nothing has checked this. It is recorded as stated, and no more than that.',
-    };
-  }
-  if (register === 'checked') {
-    return {
-      style: { color: REGISTER_INK.checked },
-      ariaLabel: 'Checked by the daemon',
-      title: 'The daemon observed this itself.',
-    };
-  }
-  return undefined;
-}
 
 // =================================================================================================
 // Call phase chrome — fixed size, honest labels
@@ -490,46 +424,7 @@ export function shouldSteer(args: { callState: VoiceCallState | undefined; menti
 // Raw activity suppression — `yield`, heartbeats, empty completions never render
 // =================================================================================================
 
-/**
- * Kinds that are pure machine bookkeeping. DESIGN.md's "Workspace activity" row: artifacts and
- * material status are primary, raw tool activity is diagnostic-only — "tool calls such as `yield`
- * do not tell the human what changed".
- *
- * Matched case-insensitively against the wire kind so a daemon spelling it `toolYield` or
- * `tool-yield` is caught by the same rule, and normalised so `tool:yield` is too.
- */
-const RAW_EVENT_KINDS = new Set(['yield', 'toolyield', 'yieldturn', 'heartbeat', 'keepalive', 'ping', 'pong', 'noop', 'idle', 'emptycompletion', 'tick']);
 
-function normalizeKind(kind: string): string {
-  return kind.toLowerCase().replace(/[^a-z]/g, '');
-}
-
-/**
- * `true` for an entry the default room must not render.
- *
- * Two rules, both narrow on purpose:
- *  1. The event kind is raw bookkeeping (above).
- *  2. It is an EMPTY activity event — an event-bearing entry whose kind carries no face and whose
- *     text is blank. An empty completion is the "the agent did a lap and produced nothing" event;
- *     rendering it teaches a reader to skim past the ones that do say something.
- *
- * A plain user/agent MESSAGE with empty text is deliberately NOT suppressed here — that is a
- * different bug in a different place, and silently swallowing it would hide it.
- */
-export function isRawRoomEvent(entry: Pick<ChannelEntry, 'text' | 'event'> & { displayText?: string }): boolean {
-  const kind = entry.event?.kind;
-  if (!kind) return false;
-  if (RAW_EVENT_KINDS.has(normalizeKind(kind))) return true;
-  const hasText = Boolean((entry.displayText ?? entry.text ?? '').trim());
-  if (hasText) return false;
-  const payload = entry.event?.payload;
-  const hasFace = !!payload && typeof payload === 'object' && !Array.isArray(payload) && 'face' in (payload as Record<string, unknown>);
-  return !hasFace;
-}
-
-export function withoutRawRoomEvents<T extends Pick<ChannelEntry, 'text' | 'event'>>(entries: readonly T[]): T[] {
-  return entries.filter((entry) => !isRawRoomEvent(entry));
-}
 
 // =================================================================================================
 // Thread-scoped status region
