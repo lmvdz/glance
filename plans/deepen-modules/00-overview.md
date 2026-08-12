@@ -24,6 +24,12 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
+## Round 3, iteration 10 (2026-08-11, goal mode — docs) — CONCERN 26 → needs-lars
+The product gate is the whole remaining surface: report-raised/attention cards ARE the thing
+"does a non-blocking proposal earn a room card?" asks about, and both enabling seams already
+shipped (19's lane chokepoint, 09's one-entry registry). Disposition recorded with the question
+verbatim + the ration-harder alternative named. No pre-gate slice existed.
+
 ## Round 2 (2026-08-04, iteration 37 — the goal's completion clause)
 Queue was dry (14 done, 3 needs-lars) → fresh review round executed: two Explore agents over
 current main (daemon: squad-manager regions with per-region coupling counts, Store, CLI,
