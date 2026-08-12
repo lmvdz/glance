@@ -423,9 +423,15 @@ export interface PrRef {
 	/** Base branch the merge would go INTO — a self-land guards on this so it can never merge to an
 	 *  unintended trunk. */
 	baseBranch: string;
+	/** The PR's current head commit SHA. The self-land pins its worktree to THIS so the tree it gates
+	 *  is exactly the tree that merges (glance#391 C-3) — a stale local branch tip is refused, never
+	 *  force-pushed over. */
+	headRefOid: string;
 	/** `OPEN` / `CLOSED` / `MERGED`, verbatim from gh. */
 	state: string;
-	isDraft?: boolean;
+	/** GitHub reports a draft PR's state as `OPEN`, so this is the ONLY way to tell — a self-land
+	 *  refuses drafts (glance#391 H-1), and glance's own PRs are normally drafts. */
+	isDraft: boolean;
 	title?: string;
 	/** Raw markdown body — the acceptance-criteria source (`acceptanceCriteriaFromPrBody`). */
 	body?: string;
@@ -433,52 +439,74 @@ export interface PrRef {
 
 export type PrLookup = { ok: true; pr?: PrRef } | { ok: false; detail: string };
 
-const PR_FIELDS = "number,url,state,headRefName,baseRefName,isDraft,title,body";
+const PR_FIELDS = "number,url,state,headRefName,headRefOid,baseRefName,isDraft,title,body";
 
-interface PrJson {
-	number: number;
-	url: string;
-	state: string;
-	headRefName: string;
-	baseRefName: string;
-	isDraft?: boolean;
-	title?: string;
-	body?: string;
-}
-
-function toPrRef(p: PrJson): PrRef {
-	return { number: p.number, url: p.url, branch: p.headRefName, baseBranch: p.baseRefName, state: p.state, isDraft: p.isDraft, title: p.title, body: p.body };
+/**
+ * STRICT shape-decode of ONE gh PR row (glance#391 H-2). `ghJson` parses whatever gh printed, so a
+ * future/failed/mocked gh can hand back a string, a null, an array, or a row missing fields — and a
+ * self-land that trusted the type parameter would authorize a land off a malformed row (PR A's body
+ * grading branch B). Returns a fully-typed `PrRef` or a reason; NEVER throws (a non-string `body`
+ * would otherwise throw at `.trim()` downstream, breaking the never-throws contract). `expectHead`,
+ * when given, additionally requires the row's head === the branch we asked about — so a row for a
+ * different branch can never authorize this land.
+ *
+ * @substrate exported for tests only — production reaches it through `prByNumber`/`prForBranch`. */
+export function decodePrRow(raw: unknown, ctx: string, expectHead?: string): { ok: true; pr: PrRef } | { ok: false; detail: string } {
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return { ok: false, detail: `${ctx} returned a non-object row` };
+	const p = raw as Record<string, unknown>;
+	const number = p.number;
+	if (typeof number !== "number" || !Number.isInteger(number) || number <= 0) return { ok: false, detail: `${ctx} row has no positive PR number` };
+	if (typeof p.state !== "string" || !p.state) return { ok: false, detail: `${ctx} row #${number} has no state` };
+	if (typeof p.headRefName !== "string" || !p.headRefName) return { ok: false, detail: `${ctx} row #${number} has no head branch` };
+	if (typeof p.headRefOid !== "string" || !/^[0-9a-f]{7,40}$/.test(p.headRefOid)) return { ok: false, detail: `${ctx} row #${number} has no valid head commit sha` };
+	if (typeof p.baseRefName !== "string" || !p.baseRefName) return { ok: false, detail: `${ctx} row #${number} has no base branch` };
+	if (typeof p.url !== "string" || !p.url) return { ok: false, detail: `${ctx} row #${number} has no url` };
+	if (typeof p.isDraft !== "boolean") return { ok: false, detail: `${ctx} row #${number} has no draft flag` };
+	if (expectHead !== undefined && p.headRefName !== expectHead) {
+		return { ok: false, detail: `${ctx} row #${number} heads ${p.headRefName}, not the requested ${expectHead} — refusing (a row for another branch must never authorize this land)` };
+	}
+	return {
+		ok: true,
+		pr: {
+			number,
+			url: p.url,
+			branch: p.headRefName,
+			baseBranch: p.baseRefName,
+			headRefOid: p.headRefOid,
+			state: p.state,
+			isDraft: p.isDraft,
+			title: typeof p.title === "string" ? p.title : undefined,
+			body: typeof p.body === "string" ? p.body : undefined,
+		},
+	};
 }
 
 /** One PR by number. `{ok:true, pr:undefined}` is impossible here — a number either resolves or the
  *  lookup failed — so an absent PR comes back as `{ok:false}` with gh's own reason. */
 export async function prByNumber(repo: string, prNumber: number): Promise<PrLookup> {
 	if (!Number.isInteger(prNumber) || prNumber <= 0) return { ok: false, detail: `not a PR number: ${String(prNumber)}` };
-	const view = await ghJson<PrJson>(["pr", "view", String(prNumber), "--repo", slugOf(repo), "--json", PR_FIELDS], repo);
+	const view = await ghJson<unknown>(["pr", "view", String(prNumber), "--repo", slugOf(repo), "--json", PR_FIELDS], repo);
 	if (view === undefined) return { ok: false, detail: `gh pr view ${prNumber} failed (no such PR, or gh is unavailable/unauthenticated)` };
-	// Shape-check what came back rather than trusting the type parameter: `ghJson` parses whatever gh
-	// printed, so a future/failed/mocked gh can hand back a string, null, or an array. An unexpected
-	// shape is "we could not tell", never a usable PR.
-	if (typeof view !== "object" || view === null || Array.isArray(view) || typeof view.headRefName !== "string" || !view.headRefName) {
-		return { ok: false, detail: `gh pr view ${prNumber} returned an unexpected shape (no head branch)` };
-	}
-	return { ok: true, pr: toPrRef(view) };
+	return decodePrRow(view, `gh pr view ${prNumber}`);
 }
 
-/** The OPEN PR whose head is `branch`, if any — the same query `ensurePr`'s adopt path runs, minus
- *  the push/sync side effects. `{ok:true, pr:undefined}` genuinely means "no open PR on this branch". */
+/** The OPEN PR whose head is `branch`, if any. `{ok:true, pr:undefined}` genuinely means "no OPEN PR
+ *  on this branch" (a valid local-mode state); `{ok:false}` means the lookup could not be trusted and
+ *  the caller must refuse. A non-OPEN row is NOT a candidate (a draft reports OPEN, but a closed/merged
+ *  row never authorizes a land), and every returned row's head must equal `branch`. */
 export async function prForBranch(repo: string, branch: string): Promise<PrLookup> {
-	const list = await ghJson<PrJson[]>(["pr", "list", "--head", branch, "--repo", slugOf(repo), "--state", "open", "--json", PR_FIELDS], repo);
+	const list = await ghJson<unknown>(["pr", "list", "--head", branch, "--repo", slugOf(repo), "--state", "open", "--json", PR_FIELDS], repo);
 	if (list === undefined) return { ok: false, detail: `gh pr list --head ${branch} failed (gh unavailable/unauthenticated)` };
-	// Same shape-check as `prByNumber`: a non-array here is an unreadable answer, not "no PRs" — the
-	// difference matters, because "no PRs" would silently drop the criteria source and the receipt
-	// comment while looking like a clean lookup.
+	// A non-array is an unreadable answer, not "no PRs" — the difference matters: "no PRs" would
+	// silently drop the criteria source and the receipt comment while looking like a clean lookup.
 	if (!Array.isArray(list)) return { ok: false, detail: `gh pr list --head ${branch} returned an unexpected shape` };
-	const open = list.find((p) => p?.state === "OPEN") ?? list[0];
-	if (open !== undefined && (typeof open !== "object" || open === null || typeof open.headRefName !== "string")) {
-		return { ok: false, detail: `gh pr list --head ${branch} returned a row with no head branch` };
-	}
-	return { ok: true, pr: open ? toPrRef(open) : undefined };
+	// Only an OPEN row is a candidate — no fall-back to list[0] (a closed/merged row must never
+	// authorize a land). Each candidate is strictly decoded and its head pinned to `branch`.
+	const openRaw = list.find((p) => (p as { state?: unknown } | null)?.state === "OPEN");
+	if (openRaw === undefined) return { ok: true, pr: undefined };
+	const decoded = decodePrRow(openRaw, `gh pr list --head ${branch}`, branch);
+	if (!decoded.ok) return decoded;
+	return { ok: true, pr: decoded.pr };
 }
 
 // ── scratch worktree — disposable, never the primary checkout ──────────────────────────────────
@@ -945,6 +973,29 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 		if (regressionBlock) return { ...regressionBlock, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber };
 	} finally {
 		await removeScratchWorktree(repo, scratch);
+	}
+
+	// Self-land merge-point guards (glance#391 C-2 / C-3 / H-1), enforced HERE — under the repo land
+	// lock, immediately before `gh pr merge` — by re-reading the PR's LIVE facts, not the early
+	// `ensurePr` snapshot a concurrent edit could have invalidated. `gh pr merge` lands into the PR's
+	// OWN GitHub base (which `ensurePr` never retargets), so the base the caller authorized must be
+	// re-verified against what GitHub will actually merge into. Any of the three unset ⇒ a normal
+	// agent land, unaffected.
+	if (opts.expectBase !== undefined || opts.expectHeadOid !== undefined || opts.refuseDraft) {
+		const liveRaw = await ghJson<unknown>(["pr", "view", String(ensure.prNumber), "--repo", slugOf(repo), "--json", "state,baseRefName,headRefOid,isDraft"], repo);
+		if (liveRaw === undefined || typeof liveRaw !== "object" || liveRaw === null || Array.isArray(liveRaw)) {
+			return { ok: false, committed, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: `self-land merge guard: could not re-read PR #${ensure.prNumber}'s live base/head/draft state before merge — refusing rather than merging unverified` };
+		}
+		const live = liveRaw as { state?: unknown; baseRefName?: unknown; headRefOid?: unknown; isDraft?: unknown };
+		if (opts.expectBase !== undefined && live.baseRefName !== opts.expectBase) {
+			return { ok: false, committed, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: `self-land base guard: PR #${ensure.prNumber} now targets "${String(live.baseRefName)}", not the authorized "${opts.expectBase}" — refusing (gh pr merge lands into the PR's own base, not the branch gated)` };
+		}
+		if (opts.expectHeadOid !== undefined && typeof live.headRefOid === "string" && live.headRefOid !== opts.expectHeadOid) {
+			return { ok: false, committed, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: `self-land head guard: PR #${ensure.prNumber}'s head moved to ${live.headRefOid.slice(0, 12)} since it was gated at ${opts.expectHeadOid.slice(0, 12)} — refusing (the tree that was verified is not the tree that would merge)` };
+		}
+		if (opts.refuseDraft && live.isDraft === true) {
+			return { ok: false, committed, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: `self-land refuses a DRAFT PR: #${ensure.prNumber} is still a draft (GitHub reports drafts as OPEN) — mark it ready for review before landing, so the land is a deliberate act, not a silent draft→ready→merge` };
+		}
 	}
 
 	// Green — merge via gh, not git. `--repo` is required on every gh invocation here (not just

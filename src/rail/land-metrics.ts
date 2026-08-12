@@ -79,6 +79,7 @@ function parseIndexRow(line: string): LandReceiptIndexRow | null {
 		forced: o.forced === true,
 		gateStatus: (typeof o.gateStatus === "string" ? o.gateStatus : "failed") as LandReceiptIndexRow["gateStatus"],
 		...(precision ? { precision } : {}),
+		...(o.criteriaSource === "pr-body" || o.criteriaSource === "call" ? { criteriaSource: o.criteriaSource } : {}),
 	};
 }
 

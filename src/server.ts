@@ -2809,16 +2809,19 @@ export class SquadServer {
 			return Response.json(released, { status: released.ok ? 200 : 500 });
 		}
 		// Self-land (glance#391 / #362): route a branch or PR of THIS repo through the rail — validator
-		// gate, real proof run, receipt — with no agent record behind it. Admin tier (authz.ts), same as
-		// `/api/agents/:id/land`: it merges into a trunk. Every refusal is a 409 with a `refusal` code,
-		// never a 5xx — "no acceptance criteria" and "gate red" are answers, not transport errors.
+		// gate, real proof run, measured receipt — with no agent record behind it. Admin tier (authz.ts),
+		// same as `/api/agents/:id/land`: it merges into a trunk. Every refusal is a 409 with a `refusal`
+		// code, never a 5xx — "no acceptance criteria" / "gate red" / "unmeasured" are answers.
 		//
-		// `measured` in the response is read back off the receipt row that was written; a caller must
-		// never infer it from `ok`. A merged-but-unmeasured land returns `ok:true, measured:false`.
+		// `measured` is the validator VERDICT (a judge graded every criterion and passed, BEFORE the
+		// merge), never inferred from `ok` or from precision.n alone (glance#391 C-1). `expectBase` is
+		// required — the branch the land is authorized to merge into (C-2).
 		if (url.pathname === "/api/self-land" && req.method === "POST") {
 			const decodedSelfLand = decodeBody(SelfLandBodySchema, await req.json().catch(() => null));
 			if (Result.isFailure(decodedSelfLand)) return new Response("repo required", { status: 400 });
 			const b = decodedSelfLand.success;
+			const expectBase = typeof b.expectBase === "string" ? b.expectBase.trim() : "";
+			if (!expectBase) return new Response("expectBase required: name the branch the land may merge into", { status: 400 });
 			const prNumber = typeof b.pr === "number" ? b.pr : typeof b.pr === "string" && /^\d+$/.test(b.pr.trim()) ? Number(b.pr.trim()) : undefined;
 			if (b.pr !== undefined && prNumber === undefined) return new Response("pr must be a PR number", { status: 400 });
 			const criteria = Array.isArray(b.criteria) ? b.criteria.filter((c): c is string => typeof c === "string") : undefined;
@@ -2828,7 +2831,7 @@ export class SquadServer {
 				pr: prNumber,
 				criteria,
 				message: typeof b.message === "string" ? b.message : undefined,
-				expectBase: typeof b.expectBase === "string" ? b.expectBase : undefined,
+				expectBase,
 				actor,
 			});
 			return Response.json(selfLandResult, { status: selfLandResult.ok ? 200 : 409 });

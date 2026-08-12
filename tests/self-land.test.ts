@@ -69,6 +69,10 @@ async function repoWithFeatureBranch(prefix: string): Promise<string> {
 
 /** Every criterion satisfied — a clean pass, whatever ids the criteria source produced. */
 const passJudge: Judge = async ({ criteria }) => ({ perCriterion: criteria.map((c) => ({ id: c.id, satisfied: true })), confidence: 0.9, rationale: "all declared criteria met" });
+/** One criterion unsatisfied — a real veto. */
+const vetoJudge: Judge = async ({ criteria }) => ({ perCriterion: criteria.map((c, i) => ({ id: c.id, satisfied: i > 0, note: i === 0 ? "not met" : undefined })), confidence: 0.8, rationale: "first criterion unmet" });
+/** The judge is unreachable — validatorGate falls open to `abstain` (judge down / empty diff). */
+const throwJudge: Judge = async () => { throw new Error("judge process is down"); };
 
 class TestManager extends SquadManager {
 	judge: Judge | undefined;
@@ -210,17 +214,22 @@ test("HAPPY PATH: a self-land into a scratch target branch merges and writes a M
 	expect(result.verdict).toBe("pass");
 	// The measurement itself: a real lineage, a real n, read off the fixture reviewer ledger.
 	expect(result.precision).toEqual({ lineage: "native", n: 3, survived: 2, survivedRate: 2 / 3, provisional: true });
+	// `measured` is the VERDICT (a judge graded every criterion, pass, before the merge); `countedByWindow`
+	// adds precision.n>0 (the reviewer has history). Both hold here.
 	expect(result.measured).toBe(true);
+	expect(result.countedByWindow).toBe(true);
+	expect(result.receiptWritten).toBe(true);
 	expect(result.receiptPath).toBeTruthy();
 	expect(await headOf(repo, TARGET)).not.toBe(before);
 
-	// Read the evidence back off disk — `measured` must be a property of the written row, not a claim.
+	// Read the evidence back off disk — the drain's count must be a property of the written row.
 	const { rows } = await readLandReceiptIndex(stateDir);
 	expect(rows.length).toBe(1);
 	expect(rows[0]!.branch).toBe(BRANCH);
 	expect(rows[0]!.landed).toBe(true);
 	expect(rows[0]!.forced).toBe(false);
 	expect(rows[0]!.precision?.n).toBe(3);
+	expect(rows[0]!.criteriaSource).toBe("call"); // M-1: provenance stamped on the row
 	expect(isMeasuredLand(rows[0]!)).toBe(true);
 	// The HTML receipt exists beside the index.
 	expect(await fs.stat(result.receiptPath!).then((s) => s.isFile())).toBe(true);
@@ -234,6 +243,120 @@ test("HAPPY PATH: the self-land worktree is torn down after the land (no state-d
 
 	const left = await fs.readdir(path.join(stateDir, "self-land")).catch(() => [] as string[]);
 	expect(left).toEqual([]);
+});
+
+// ── C-1: the mandatory-measurement gate runs BEFORE the merge, on the REAL validator path ──────
+// Every one of these rigs the ACTUAL validator (an injected judge / OMP_SQUAD_VALIDATOR=0 / an
+// empty diff) — never the `selfLandGateStages` proof stub — and proves the land REFUSES rather than
+// merging an unmeasured land. The gate is GREEN in each, so the ONLY thing stopping the merge is the
+// verdict. A merged, then a clean state (target SHA unchanged, no receipt row) proves nothing landed.
+
+async function expectUnmeasuredRefusal(mgr: TestManager, repo: string, stateDir: string, expectedVerdict: string): Promise<void> {
+	const before = await headOf(repo, TARGET);
+	const result = await mgr.selfLand({ repo, branch: BRANCH, criteria: CRITERIA, expectBase: TARGET });
+	expect(result.ok).toBe(false);
+	expect(result.measured).toBe(false);
+	expect(result.refusal).toBe("unmeasured");
+	expect(result.verdict).toBe(expectedVerdict);
+	expect(await headOf(repo, TARGET)).toBe(before); // nothing merged
+	expect((await readLandReceiptIndex(stateDir)).rows).toEqual([]); // no receipt
+}
+
+test("C-1: judge THROWS → validator abstains → self-land REFUSES (never an ok:true unmeasured merge)", async () => {
+	const { mgr, repo, stateDir } = await mkManager("self-land-abstain-judge-");
+	mgr.stages = GREEN;
+	mgr.judge = throwJudge;
+	await expectUnmeasuredRefusal(mgr, repo, stateDir, "abstain");
+});
+
+test("C-1: OMP_SQUAD_VALIDATOR=0 → validator skipped → self-land REFUSES (a disabled validator never lands measured)", async () => {
+	const saved = process.env.OMP_SQUAD_VALIDATOR;
+	process.env.OMP_SQUAD_VALIDATOR = "0";
+	try {
+		const { mgr, repo, stateDir } = await mkManager("self-land-validator-off-");
+		mgr.stages = GREEN;
+		mgr.judge = passJudge; // even a would-pass judge is never consulted when the validator is off
+		await expectUnmeasuredRefusal(mgr, repo, stateDir, "skipped");
+	} finally {
+		if (saved === undefined) delete process.env.OMP_SQUAD_VALIDATOR;
+		else process.env.OMP_SQUAD_VALIDATOR = saved;
+	}
+});
+
+test("C-1: a VETO (a declared criterion unmet) → self-land REFUSES, never merges the failing change", async () => {
+	const { mgr, repo, stateDir } = await mkManager("self-land-veto-");
+	mgr.stages = GREEN;
+	mgr.judge = vetoJudge;
+	await expectUnmeasuredRefusal(mgr, repo, stateDir, "veto");
+});
+
+test("C-1: an EMPTY diff → validator abstains → self-land REFUSES (an empty-diff land is not measured evidence)", async () => {
+	// A branch at the SAME tip as the target: the land diff is empty, so scoreAgainstCriteria abstains.
+	const stateDir = await tmpDir("self-land-emptydiff-state-");
+	const repo = await tmpDir("self-land-emptydiff-");
+	await git(repo, "init", "-q", "-b", TARGET);
+	await git(repo, "config", "user.email", "t@t");
+	await git(repo, "config", "user.name", "t");
+	await git(repo, "config", "commit.gpgsign", "false");
+	await fs.writeFile(path.join(repo, "base.txt"), "base\n");
+	await git(repo, "add", "-A");
+	await git(repo, "commit", "-qm", "base");
+	await git(repo, "branch", BRANCH); // BRANCH === TARGET tip — no diff
+	const mgr = new TestManager({ stateDir });
+	mgr.judge = passJudge;
+	mgr.ledgerPath = await tmpLedgerFile([ledgerRow(true, 1)]);
+	mgr.stages = GREEN;
+	await expectUnmeasuredRefusal(mgr, repo, stateDir, "abstain");
+});
+
+// ── C-3: worktree isolation — collisions can't reuse, concurrent lands serialize ───────────────
+
+test("C-3: two branches whose sanitized names COLLIDE get distinct worktrees (mkdtemp), not a reused tree", async () => {
+	// `deepen/a+b` and `deepen/a-b` both sanitize to `deepen-a-b`; the OLD fixed-path key would have
+	// reused one tree for both. Land each and prove both succeed independently, with no litter.
+	const stateDir = await tmpDir("self-land-collide-state-");
+	const repo = await tmpDir("self-land-collide-");
+	await git(repo, "init", "-q", "-b", TARGET);
+	await git(repo, "config", "user.email", "t@t");
+	await git(repo, "config", "user.name", "t");
+	await git(repo, "config", "commit.gpgsign", "false");
+	await fs.writeFile(path.join(repo, "base.txt"), "base\n");
+	await git(repo, "add", "-A");
+	await git(repo, "commit", "-qm", "base");
+	for (const b of ["deepen/a+b", "deepen/a-b"]) {
+		await git(repo, "checkout", "-q", "-b", b, TARGET);
+		await fs.writeFile(path.join(repo, `${b.replace(/\//g, "_").replace(/\+/g, "plus")}.txt`), b);
+		await git(repo, "add", "-A");
+		await git(repo, "commit", "-qm", `work ${b}`);
+		await git(repo, "checkout", "-q", TARGET);
+	}
+	const mgr = new TestManager({ stateDir });
+	mgr.judge = passJudge;
+	mgr.ledgerPath = await tmpLedgerFile([ledgerRow(true, 1), ledgerRow(true, 2)]);
+	mgr.stages = GREEN;
+	const a = await mgr.selfLand({ repo, branch: "deepen/a+b", criteria: CRITERIA, expectBase: TARGET });
+	const b = await mgr.selfLand({ repo, branch: "deepen/a-b", criteria: CRITERIA, expectBase: TARGET });
+	expect(a.ok).toBe(true);
+	expect(b.ok).toBe(true);
+	// Both landed distinct commits; no leftover worktrees.
+	expect((await readLandReceiptIndex(stateDir)).rows.map((r) => r.branch).sort()).toEqual(["deepen/a+b", "deepen/a-b"]);
+	expect(await fs.readdir(path.join(stateDir, "self-land")).catch(() => [])).toEqual([]);
+});
+
+test("C-3/M-2: two CONCURRENT self-lands of the same branch serialize (mutex) — neither errors on a shared worktree", async () => {
+	const { mgr, repo } = await mkManager("self-land-concurrent-");
+	mgr.stages = GREEN;
+	// Fire both without awaiting the first: the per-(repo,branch) mutex must serialize them so they
+	// never share/destroy one worktree. The first lands; the second finds nothing ahead (already
+	// merged) but must not throw or corrupt state.
+	const [r1, r2] = await Promise.all([
+		mgr.selfLand({ repo, branch: BRANCH, criteria: CRITERIA, expectBase: TARGET }),
+		mgr.selfLand({ repo, branch: BRANCH, criteria: CRITERIA, expectBase: TARGET }),
+	]);
+	// Exactly one merged; both returned a structured result (no throw).
+	expect([r1.ok, r2.ok].filter(Boolean).length).toBeGreaterThanOrEqual(1);
+	expect(typeof r1.measured).toBe("boolean");
+	expect(typeof r2.measured).toBe("boolean");
 });
 
 // ── guards: the land can never merge into a branch the caller did not name ─────────────────────
@@ -253,9 +376,19 @@ test("GUARD: expectBase that does not match the real target refuses BEFORE runni
 
 test("GUARD: a self-land with neither branch nor PR refuses", async () => {
 	const { mgr, repo } = await mkManager("self-land-notarget-");
-	const result = await mgr.selfLand({ repo });
+	const result = await mgr.selfLand({ repo, expectBase: TARGET });
 	expect(result.ok).toBe(false);
 	expect(result.refusal).toBe("no-target");
+});
+
+test("GUARD (C-2): a self-land with NO expectBase refuses — it must name the branch it may merge into", async () => {
+	const { mgr, repo } = await mkManager("self-land-nobase-");
+	mgr.stages = GREEN;
+	// @ts-expect-error deliberately omitting the now-required expectBase to prove the runtime guard
+	const result = await mgr.selfLand({ repo, branch: BRANCH, criteria: CRITERIA });
+	expect(result.ok).toBe(false);
+	expect(result.refusal).toBe("base-mismatch");
+	expect(result.detail).toContain("expectBase");
 });
 
 test("GUARD: a repo with NO detectable verification gate refuses — a land with no gate is not evidence", async () => {
@@ -328,13 +461,15 @@ test("ROUTE: POST /api/self-land is admin-tier — an operator token is stopped 
 	try {
 		const post = (t: string, body: unknown): Promise<Response> =>
 			fetch(`${url}/api/self-land`, { method: "POST", headers: { authorization: `Bearer ${t}`, "content-type": "application/json" }, body: JSON.stringify(body) });
-		expect((await post(tokens.operator, { repo: "/nonexistent" })).status).toBe(403);
+		expect((await post(tokens.operator, { repo: "/nonexistent", expectBase: "main" })).status).toBe(403);
 		// Admin clears the gate; the handler then REFUSES (409 + a refusal code), proving authz passed.
-		const denied = await post(tokens.admin, { repo: "/nonexistent" });
+		const denied = await post(tokens.admin, { repo: "/nonexistent", expectBase: "main" });
 		expect(denied.status).toBe(409);
 		expect(((await denied.json()) as { refusal?: string }).refusal).toBe("no-target");
 		// A missing repo is a 400 at the schema boundary, not a mystery 500.
-		expect((await post(tokens.admin, { branch: "x" })).status).toBe(400);
+		expect((await post(tokens.admin, { branch: "x", expectBase: "main" })).status).toBe(400);
+		// A missing expectBase is likewise a 400 — the route requires the authorized target (C-2).
+		expect((await post(tokens.admin, { repo: "/nonexistent" })).status).toBe(400);
 	} finally {
 		server.stop();
 		await mgr.stop();

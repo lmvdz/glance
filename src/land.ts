@@ -166,6 +166,23 @@ export interface LandOpts {
 	criteria?: FeatureCriterion[];
 	validatorOverride?: boolean;
 	/**
+	 * Self-land merge-point guards (glance#391 C-2 / C-3 / H-1), all enforced UNDER the repo land lock
+	 * immediately before the merge — closing the TOCTOU between an early check and the actual merge.
+	 * All three are self-land-only (a normal agent land leaves them undefined and is unaffected):
+	 *  - `expectBase`: the branch this land is ALLOWED to merge INTO. Local mode asserts the repo's
+	 *    checked-out branch equals it; PR mode asserts the PR's live base equals it. A mismatch refuses
+	 *    (non-retryable) rather than merging into a trunk the caller never named — "whatever is checked
+	 *    out" is never an acceptable target.
+	 *  - `expectHeadOid`: the commit SHA the proof + validator actually graded. PR mode re-reads the
+	 *    PR's live head under the lock and refuses if it moved — so the tree that was gated is exactly
+	 *    the tree that merges, never "gate one branch, merge another".
+	 *  - `refuseDraft`: refuse a PR still marked draft (GitHub reports drafts as OPEN, and glance's own
+	 *    PRs are normally drafts) rather than silently `gh pr ready`-ing and merging it.
+	 */
+	expectBase?: string;
+	expectHeadOid?: string;
+	refuseDraft?: boolean;
+	/**
 	 * Observer for the validator record this land produced (glance#391). `runValidatorGate` stamps the
 	 * record onto the AGENT DTO (`rec.dto.validation`) — which only exists when `agentId` resolves to a
 	 * live roster entry, so a record-free land (`selfLand`) had no way to see the verdict its own land
@@ -624,6 +641,19 @@ async function landAgentImpl(opts: LandOpts): Promise<LandResult> {
 	if (!opts.riskOverride && landRiskGateEnabled()) {
 		const riskReason = await landRiskReason(repo, branch);
 		if (riskReason) return { ok: false, committed, merged: false, message, detail: riskReason };
+	}
+
+	// Self-land base guard (glance#391 C-2), checked HERE — under the repo land lock, immediately
+	// before the merge — not at an early caller check a checkout switch could invalidate. Local mode
+	// merges the branch INTO whatever `repo` has checked out, so the target IS the repo's current
+	// branch: assert it equals the branch the caller explicitly authorized, or refuse. `--show-current`
+	// is empty on a detached HEAD, which is likewise not the named target.
+	if (opts.expectBase !== undefined) {
+		const cur = await git(["branch", "--show-current"], repo);
+		const current = cur.code === 0 ? cur.stdout.trim() : "";
+		if (current !== opts.expectBase) {
+			return { ok: false, committed, merged: false, message, detail: `self-land base guard: ${repo} has "${current || "a detached HEAD"}" checked out, not the authorized target "${opts.expectBase}" — refusing to merge into a branch the caller never named` };
+		}
 	}
 
 	// Capture pre-merge main HEAD so a failed verification can roll main back, and resolve the

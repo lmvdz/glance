@@ -79,6 +79,9 @@ export function landReceiptIndexRow(receipt: LandReceipt): LandReceiptIndexRow {
 					},
 				}
 			: {}),
+		// Self-land criteria provenance (glance#391 M-1) — carried through so the window can report
+		// declared (pr-body) vs call-supplied lands separately. Absent on an ordinary agent land.
+		...(receipt.criteriaSource ? { criteriaSource: receipt.criteriaSource } : {}),
 	};
 }
 

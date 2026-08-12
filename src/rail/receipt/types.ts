@@ -129,6 +129,15 @@ export interface LandReceipt {
 
 	// ── 5. COST ───────────────────────────────────────────────────────────────────────────────────
 	cost: LandReceiptCost;
+
+	// ── 6. SELF-LAND PROVENANCE (glance#391 M-1) ────────────────────────────────────────────────────
+	/** How this land's acceptance criteria were sourced, on a self-land. `"pr-body"` = declared in the
+	 *  PR's own `## Acceptance` checklist (tied to a durable, reviewable artifact); `"call"` = supplied
+	 *  in the land request (weaker provenance — a criterion invented at land time has no independent
+	 *  tie to the diff). Absent on an ordinary agent land (criteria came from the feature store). The
+	 *  window reports the two sources separately so a run of `"call"` lands can't quietly pad the
+	 *  measured count. */
+	criteriaSource?: "pr-body" | "call";
 }
 
 /**
@@ -180,4 +189,8 @@ export interface LandReceiptIndexRow {
 	gateStatus: GateStatus;
 	/** The validator's measured reviewer-precision stamp, when a validator ran. Absent otherwise. */
 	precision?: LandReceiptPrecision;
+	/** Self-land criteria provenance (glance#391 M-1) — `"pr-body"` (declared, tied to the PR) vs
+	 *  `"call"` (supplied at land time, weaker). Absent on an ordinary agent land. Lets the window
+	 *  count declared-criteria lands separately from call-supplied ones. */
+	criteriaSource?: "pr-body" | "call";
 }
