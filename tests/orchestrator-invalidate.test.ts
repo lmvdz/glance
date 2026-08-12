@@ -47,10 +47,10 @@ function stagingOrchestrator(verified: string[]): Orchestrator {
 			verified.push(id);
 			return true;
 		},
-		// `land`'s declared type is `Promise<boolean>`, but the orchestrator's own tick() checks
-		// `outcome === "staged"` on this exact return value (src/orchestrator.ts:320-324) — the
-		// interface is narrower than the implementation it types. Bridged, not fixed (src is off-limits).
-		land: async () => "staged" as const,
+		// Unreachable in this test (codex, concern 23 round): holdForConfirm:true stages and
+		// returns BEFORE tick() ever calls tryLand, so this fake's value is never observed —
+		// the old "staged" return here was dead theater behind a cast.
+		land: async () => false,
 		holdForConfirm: true,
 		notifyReady: () => {},
 		log: () => {},

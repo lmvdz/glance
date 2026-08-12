@@ -462,10 +462,32 @@ test("a NAMED accountable human reaches the card headline; an unnamed operator d
 	host.onUi(rec, { method: "confirm", id: "gate_named", title: "Ship it?", message: "3 services" } as RpcExtensionUIRequest);
 	const opened = await card;
 	if (!isEventPayload(opened.event?.payload)) throw new Error("bad payload");
-	// Whether or not this deployment names its operator, the id is on the payload for anyone who can
-	// resolve it — the headline is a rendering decision, not the record.
-	expect(String(JSON.stringify(opened.event.payload))).toContain("accountableHuman");
+	// The CONTRACT, not just the field's existence (codex M, concern 23 round): a named operator's
+	// id rides the payload AND transforms the headline — dropping either regresses concern 19.
+	expect(opened.event.payload.face.accountableHuman).toBe("db:lars");
+	expect(opened.event.payload.face.title).toBe("Needs you · Ship it? — db:lars is accountable.");
 	await mgr.stop();
+
+	// The unnamed control the test's own title promises: file mode's literal "local" names nobody —
+	// the headline stays bare (an identifier that identifies no one reads like an answer), while the
+	// id still rides the payload for anyone who can resolve it.
+	const localStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "projection-accountable-local-"));
+	const localWtBase = await fs.mkdtemp(path.join(os.tmpdir(), "projection-accountable-lwt-"));
+	tmps.push(localStateDir, localWtBase);
+	const localMgr = new SquadManager({ stateDir: localStateDir, worktreeBase: localWtBase });
+	await localMgr.start();
+	const localHost = localMgr as unknown as InternalHost;
+	localHost.makeDriver = () => new ControlDriver();
+	const localDto = await localMgr.create({ name: "unit-local", repo, approvalMode: "yolo", autoRoute: false });
+	const localRec = localHost.agents.get(localDto.id);
+	if (!localRec) throw new Error("missing record");
+	const localCard = waitForChannelEntry(localMgr, DEFAULT_CHANNEL_ID, (entry) => entry.event?.kind === "needs-you");
+	localHost.onUi(localRec, { method: "confirm", id: "gate_local", title: "Ship it?", message: "3 services" } as RpcExtensionUIRequest);
+	const localOpened = await localCard;
+	if (!isEventPayload(localOpened.event?.payload)) throw new Error("bad payload");
+	expect(localOpened.event.payload.face.title).toBe("Needs you · Ship it?");
+	expect(localOpened.event.payload.face.title).not.toContain("accountable");
+	await localMgr.stop();
 });
 
 test("a steer that arrived from OUTSIDE the room still reaches the room", async () => {

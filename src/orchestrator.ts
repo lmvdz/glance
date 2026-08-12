@@ -32,11 +32,13 @@ export interface OrchestratorDeps {
 	spawn: (opts: CreateAgentOptions) => Promise<AgentDTO>;
 	/** Run the acceptance gate for a feature; true ⇒ green. */
 	verify: (featureId: string) => Promise<boolean>;
-	/** Land a feature's branches; true ⇒ merged. Widened to carry the same non-boolean outcomes as
-	 *  `landAgentWork` (concern 23, bucket-2 flag): `tryLand` itself checks `outcome === "staged"`
-	 *  on THIS return value — the declared type was narrower than the code consuming it, so a
-	 *  staged-returning implementation type-checked only behind a cast. */
-	land: (featureId: string) => Promise<boolean | "staged" | "retryable">;
+	/** Land a feature's branches; true ⇒ merged. Deliberately boolean-only (codex, concern 23
+	 *  round): the shared `tryLand` consumer checks "staged"/"retryable" for `landAgentWork`'s
+	 *  sake, but the ONLY production feature-land adapter (squad-manager's landFeature) is
+	 *  boolean — widening this would let a future adapter return "staged" without establishing
+	 *  the staged state anywhere, compiler-blessed. If feature landing ever stages for real,
+	 *  widen this TOGETHER with landFeature and a holdForConfirm:false test. */
+	land: (featureId: string) => Promise<boolean>;
 	/**
 	 * Featureless auto-land edges (the typed-prompt path). A plain agent has no featureId, so its
 	 * OWN branch is the work unit: `agentHasWork` gates the costly suite (skip idles with nothing to
