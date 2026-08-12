@@ -50,6 +50,7 @@ import { AFTER_ACTION_MARKER, type AfterActionInput, type AfterActionReport, com
 import { AttentionStore, type AttentionEvent as OperatorAttentionEvent, type AttentionRecordInput, type RecordResult, type SeenMap, type SurpriseCountMap } from "./attention.ts";
 import { computeLadderPriority, type LadderPriority } from "./attention-ladder.ts";
 import { errText } from "./err-text.ts";
+import { EscalationLedger, UnitAttentionLane } from "./unit-attention.ts";
 import { armCompletionPushKind, completionMinTurnMs, completionTurnLongEnough, type CompletionPushKind } from "./completion-push.ts";
 import { allowPushTap, isKnownPushTapAgentId, isValidPushTapAgentId } from "./authz.ts";
 import { isConsolePrompt, stripConsolePrompt } from "./console-prompt.ts";
@@ -1304,28 +1305,20 @@ export class SquadManager extends EventEmitter {
 	 *  `${repo}::${branch}` → `${headSha}::${reasonClass}`; increment only when the episode value
 	 *  changes, cleared for a branch when a non-retryable outcome records for it. In-memory on purpose:
 	 *  a daemon restart re-records at most once per still-live episode, which is acceptable noise. */
-	private readonly landBlockedEpisode = new Map<string, string>();
+	private readonly landBlockedLedger = new EscalationLedger();
 	/** Last warn-emit ms per `${repo}::${reasonClass}` for the land-blocked automation event — one
 	 *  re-emit per LAND_BLOCKED_WARN_COOLDOWN_MS per repo condition (a dirty main is ONE repo-level
 	 *  fact, not a per-agent fact), keeping the factory-status banner alive without the per-tick flood. */
 	private readonly landBlockedWarnAt = new Map<string, number>();
-	/** Bounded-escalation budget (finding #2, cross-lineage review): consecutive `land()` attempts on
-	 *  the SAME `landBlockedEpisode` value, keyed identically (`${repo}::${branch}`). Reset to 0 the
-	 *  moment the episode changes (a new commit or a different refusal reason is a genuinely new
-	 *  problem, not a continuation) and cleared entirely once a non-retryable outcome lands/rejects. */
-	private readonly landBlockedAttempts = new Map<string, number>();
-	/** Idempotency for `fileLandBlockedEscalation` — fires the "Needs you" attention item at most once
-	 *  per live episode (mirrors `unverifiedProofEscalated`'s pattern), not once per tick past the cap. */
-	private readonly landBlockedEscalated = new Set<string>();
-	/** Consecutive `aheadUnknown` reads for `agentHasUnlandedWork`'s `${repo}::${branch}` scope (finding
-	 *  #1, cross-lineage review of af3d534). Reset to 0 the INSTANT `aheadOfBase` next returns a real
-	 *  number for that scope — a persistent fault must reach a human, but a transient one must self-clear
-	 *  with no human involvement, and the reset is what makes the self-clear automatic. */
-	private readonly aheadUnknownStreak = new Map<string, number>();
-	/** Idempotency for `fileAheadUnknownEscalation` — fires at most once per unresolved streak (mirrors
-	 *  `landBlockedEscalated`'s pattern). Cleared alongside `aheadUnknownStreak` the moment the scope's
-	 *  git read recovers, so a LATER persistent fault on the same branch can escalate again. */
-	private readonly aheadUnknownEscalated = new Set<string>();
+	/** Bounded ahead-unknown escalation state (finding #1, cross-lineage review of af3d534) — same
+	 *  ledger shape as landBlockedLedger; both replaced five hand-rolled Map/Set fields (concern 19).
+	 *  Episode/attempt/once semantics live in unit-attention.ts's EscalationLedger. */
+	private readonly aheadUnknownLedger = new EscalationLedger();
+	/** THE per-unit attention raiser (concern 19): every append-then-emit onto
+	 *  `AgentDTO.attentionEvents` goes through this lane — one fail-open contract instead of eight
+	 *  hand-rolled variants. (Boundary-sync's kind-keyed REPLACE rows are a different behavior and
+	 *  deliberately keep their own path — see unit-attention.ts's module doc.) */
+	private readonly attention = new UnitAttentionLane({ log: (level, msg) => this.log(level, msg), emit: (rec) => this.emitAgent(rec as AgentRecord) });
 	/** Deterministic branch agent ids `reconcileParallelResume` just stopped, so the next `spawnFleetBranch`
 	 *  call under the same id knows to append the "resuming after a restart" addendum to the branch's
 	 *  re-prompt. Consumed (deleted) the moment spawnFleetBranch checks it — short-lived, not persisted. */
@@ -4507,11 +4500,9 @@ export class SquadManager extends EventEmitter {
 		if (!result.retryable && (auto || result.ok)) {
 			// Any non-retryable outcome (landed OR rejected) closes the branch's blocked EPISODE: the next
 			// retryable refusal is a genuinely new "attempted, couldn't land cleanly" fact, not a repeat.
-			this.landBlockedEpisode.delete(`${dto.repo}::${dto.branch ?? ""}`);
+			this.landBlockedLedger.clear(`${dto.repo}::${dto.branch ?? ""}`);
 			// Bounded-escalation state closes with the same episode (finding #2): a branch that lands or
 			// gets a genuine rejection starts the NEXT retryable episode's attempt count from zero.
-			this.landBlockedAttempts.delete(`${dto.repo}::${dto.branch ?? ""}`);
-			this.landBlockedEscalated.delete(`${dto.repo}::${dto.branch ?? ""}`);
 			recordLandOutcome(this.stateDir, dto.branch, result.ok, result.detail ?? result.message);
 			// Model-outcome ledger (Epic 6 concern 06): a cheap, always-on statistic — like land-ledger
 			// itself — so concern 07's default-shift has data on day one even before it's turned on.
@@ -4591,13 +4582,10 @@ export class SquadManager extends EventEmitter {
 			const episodeScope = `${dto.repo}::${dto.branch ?? ""}`;
 			const headSha = await headCommit(dto.worktree).catch(() => "");
 			const episode = `${headSha}::${reasonClass}`;
-			const isNewEpisode = this.landBlockedEpisode.get(episodeScope) !== episode;
+			const isNewEpisode = this.landBlockedLedger.noteEpisode(episodeScope, episode);
+			// A new episode is a genuinely NEW problem (different commit or different refusal reason) —
+			// noteEpisode restarted the escalation budget from zero, same rationale as the counter below.
 			if (isNewEpisode) {
-				this.landBlockedEpisode.set(episodeScope, episode);
-				// A new episode is a genuinely NEW problem (different commit or different refusal reason) —
-				// restart the escalation budget below from zero, same rationale as the model-outcome counter.
-				this.landBlockedAttempts.set(episodeScope, 0);
-				this.landBlockedEscalated.delete(episodeScope);
 				try {
 					recordModelOutcomeBlocked(this.stateDir, dto.model, tierOf(rec.options.thinking));
 					this.learningMetrics.record("model-outcome-blocked", 1, { flag: "model-outcomes", variant: learningFlags(dto.id).modelOutcomes });
@@ -4620,11 +4608,9 @@ export class SquadManager extends EventEmitter {
 			// review. Count every ATTEMPT (not edge-triggered like the model-outcome stat above — the
 			// budget must actually track how long the SAME episode has been stuck) and fire a "Needs you"
 			// attention item, once per episode, the moment it crosses the cap.
-			const attempts = (this.landBlockedAttempts.get(episodeScope) ?? 0) + 1;
-			this.landBlockedAttempts.set(episodeScope, attempts);
+			const attempts = this.landBlockedLedger.bump(episodeScope);
 			const cap = landBlockedEscalateCap();
-			if (cap > 0 && attempts >= cap && !this.landBlockedEscalated.has(episodeScope)) {
-				this.landBlockedEscalated.add(episodeScope);
+			if (cap > 0 && attempts >= cap && this.landBlockedLedger.escalateOnce(episodeScope)) {
 				this.fileLandBlockedEscalation(rec, dto.repo, blockDetail, reasonClass, attempts);
 			}
 		}
@@ -5502,8 +5488,7 @@ export class SquadManager extends EventEmitter {
 		// re-paying for that wasted run every tick once a human has been notified, instead of thrashing
 		// the acceptance suite forever (finding #1, cross-lineage review of af3d534).
 		if (aheadUnknown(ahead)) return this.trackAheadUnknown(rec, scope);
-		this.aheadUnknownStreak.delete(scope);
-		this.aheadUnknownEscalated.delete(scope);
+		this.aheadUnknownLedger.clear(scope);
 		return ahead > 0;
 	}
 
@@ -5522,14 +5507,10 @@ export class SquadManager extends EventEmitter {
 	 * with no human action required for the transient case.
 	 */
 	private trackAheadUnknown(rec: AgentRecord, scope: string): boolean {
-		const streak = (this.aheadUnknownStreak.get(scope) ?? 0) + 1;
-		this.aheadUnknownStreak.set(scope, streak);
+		const streak = this.aheadUnknownLedger.bump(scope);
 		const cap = aheadUnknownEscalateCap();
 		if (cap > 0 && streak >= cap) {
-			if (!this.aheadUnknownEscalated.has(scope)) {
-				this.aheadUnknownEscalated.add(scope);
-				this.fileAheadUnknownEscalation(rec, streak);
-			}
+			if (this.aheadUnknownLedger.escalateOnce(scope)) this.fileAheadUnknownEscalation(rec, streak);
 			return false;
 		}
 		return true;
@@ -5547,13 +5528,7 @@ export class SquadManager extends EventEmitter {
 	private fileAheadUnknownEscalation(rec: AgentRecord, streak: number): void {
 		const summary = `aheadOfBase has returned "unknown" for ${rec.dto.branch ?? rec.dto.name} on ${streak} consecutive checks — needs a human to look`;
 		const detail = `agentHasUnlandedWork(${rec.dto.id}) — repo ${rec.dto.repo}, branch ${rec.dto.branch ?? "?"}: the underlying git read (aheadOfBase) keeps failing, so the auto-land loop is holding this unit rather than re-running the acceptance suite against an unresolved fault. It resumes automatically the moment aheadOfBase next returns a real count.`;
-		try {
-			const event: AttentionEvent = { id: randomUUID(), summary, detail, source: "notify", createdAt: Date.now() };
-			rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
-			this.emitAgent(rec);
-		} catch (err) {
-			this.log("warn", `ahead-unknown attention-lane attach failed for ${rec.dto.name} (non-fatal): ${errText(err)}`);
-		}
+		this.attention.raise(rec, { summary, detail, source: "notify" });
 		try {
 			this.log("warn", `${summary} — ${detail}`);
 			this.automation.for("land", rec.dto.repo)({ durationMs: 0, level: "warn", detail: `${summary} — ${detail}` });
@@ -5684,13 +5659,7 @@ export class SquadManager extends EventEmitter {
 	 */
 	private fileLandBlockedEscalation(rec: AgentRecord, repo: string, detail: string, reasonClass: string, attempts: number): void {
 		const summary = `auto-land has been blocked on ${rec.dto.branch ?? rec.dto.name} for ${attempts} consecutive attempts (${reasonClass}) — needs a human to look`;
-		try {
-			const event: AttentionEvent = { id: randomUUID(), summary, detail, source: "notify", createdAt: Date.now() };
-			rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
-			this.emitAgent(rec);
-		} catch (err) {
-			this.log("warn", `land-blocked attention-lane attach failed for ${rec.dto.name} (non-fatal): ${errText(err)}`);
-		}
+		this.attention.raise(rec, { summary, detail, source: "notify" });
 		try {
 			this.log("warn", `${summary} — ${detail}`);
 			this.automation.for("land", repo)({ durationMs: 0, level: "warn", skipReason: reasonClass === "dirty-main" ? "dirty-main" : undefined, detail: `${summary} — ${detail}` });
@@ -5709,13 +5678,7 @@ export class SquadManager extends EventEmitter {
 	 * fresh approve button. Best-effort; never throws.
 	 */
 	private stageCostGateConfirm(rec: AgentRecord, verdict: CostVerdict): void {
-		try {
-			const event: AttentionEvent = { id: randomUUID(), summary: `cost-gate(enforce) ASK: ${rec.dto.name} — ${verdict.line}`, detail: verdict.line, source: "notify", createdAt: Date.now() };
-			rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
-			this.emitAgent(rec);
-		} catch (err) {
-			this.log("warn", `cost-gate attention-lane attach failed for ${rec.dto.name} (non-fatal): ${errText(err)}`);
-		}
+		this.attention.raise(rec, { summary: `cost-gate(enforce) ASK: ${rec.dto.name} — ${verdict.line}`, detail: verdict.line, source: "notify" });
 	}
 
 	/**
@@ -5765,14 +5728,7 @@ export class SquadManager extends EventEmitter {
 	 * point of having a breaker. Best-effort; never throws.
 	 */
 	private fileMembraneBreakerFinding(rec: AgentRecord | undefined, repo: string, event: AttentionEvent): void {
-		if (rec) {
-			try {
-				rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
-				this.emitAgent(rec);
-			} catch (err) {
-				this.log("warn", `membrane-breaker attention-lane attach failed for ${rec.dto.name} (non-fatal): ${errText(err)}`);
-			}
-		}
+		if (rec) this.attention.raise(rec, event);
 		try {
 			const text = `${event.summary}${event.detail ? ` — ${event.detail}` : ""}`;
 			this.log("warn", text);
@@ -8469,8 +8425,7 @@ export class SquadManager extends EventEmitter {
 			case "notify": {
 				// Operator/scriptable ingress (`glance notify`, cmux-research concern 03): non-blocking,
 				// never a PendingRequest — mirrors squad_attention/the harness "notify" wiring below.
-				const event: AttentionEvent = { id: randomUUID(), summary: cmd.summary, detail: cmd.detail, source: "notify", createdAt: Date.now() };
-				rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
+				this.attention.raise(rec, { summary: cmd.summary, detail: cmd.detail, source: "notify" }, { quiet: true });
 				this.append(rec, "system", `🔔 attention (${actor.id}): ${truncateLabel(cmd.summary, 200)}`);
 				void this.recordAudit(actor, "notify", cmd.id, "ok", truncateLabel(cmd.summary, 120));
 				this.emitAgent(rec);
@@ -9711,15 +9666,7 @@ export class SquadManager extends EventEmitter {
 		const summary = `Plane issue ${identifier} landed via an UNVERIFIED merge (out-of-band GitHub-UI merge, never re-run through the daemon's own gate) — NOT auto-closed; needs a human to confirm and close manually`;
 		const detail = ctx?.branch ? `branch ${ctx.branch}` : undefined;
 		const rec = ctx?.branch ? this.agentByBranch(ctx.branch) : undefined;
-		if (rec) {
-			try {
-				const event: AttentionEvent = { id: randomUUID(), summary, detail, source: "notify", createdAt: Date.now() };
-				rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
-				this.emitAgent(rec);
-			} catch (err) {
-				this.log("warn", `unverified-proof attention-lane attach failed for ${identifier} (non-fatal): ${errText(err)}`);
-			}
-		}
+		if (rec) this.attention.raise(rec, { summary, detail, source: "notify" });
 		try {
 			this.log("warn", `${summary}${detail ? ` — ${detail}` : ""}`);
 			this.automation.for("land", ctx?.repo ?? "unknown")({ durationMs: 0, level: "warn", detail: `${summary}${detail ? ` — ${detail}` : ""}` });
@@ -11374,8 +11321,7 @@ export class SquadManager extends EventEmitter {
 			// append with no way to surface it — now also a real attention row for non-omp harnesses
 			// (which have no host-tool channel, so squad_attention is unreachable for them).
 			this.append(rec, "system", `(${req.notifyType ?? "info"}) ${req.message}`);
-			const event: AttentionEvent = { id: randomUUID(), summary: req.message, detail: undefined, source: "harness", createdAt: Date.now() };
-			rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
+			this.attention.raise(rec, { summary: req.message, source: "harness" }, { quiet: true });
 			// emitAgent fires unconditionally at the end of this method (below) — no extra broadcast needed here.
 		} else if (BLOCKING_UI_METHODS[req.method]) {
 			added = {
@@ -11773,8 +11719,7 @@ export class SquadManager extends EventEmitter {
 			return;
 		}
 		const detail = typeof args.detail === "string" ? args.detail : undefined;
-		const event: AttentionEvent = { id: randomUUID(), summary, detail, source: "tool", createdAt: Date.now() };
-		rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
+		this.attention.raise(rec, { summary, detail, source: "tool" }, { quiet: true });
 		this.append(rec, "system", `🔔 attention: ${truncateLabel(summary, 200)}`, { status: "ok", tool: { callId: call.id, name: ATTENTION_TOOL, args: call.arguments, argsText: safeJson(call.arguments) } });
 		rec.agent.respondHostTool(call.id, "attention recorded — continue working, a human will look when they can");
 		void this.recordAudit(agentActor(rec.dto.id), "attention.raised", rec.dto.id, "ok", truncateLabel(summary, 120));
