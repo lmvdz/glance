@@ -3,7 +3,9 @@
 // hand-maintained mirrors. Slice 1 proved the cross-tree type-only import shape on the event-kind
 // list (zero daemon modules in the browser bundle; types erase). A kernel change is now ONE edit;
 // the conformance file (tests/dto-conformance.test-d.ts) still gates the pairs, which are now
-// trivially exact. The kernel stays a zero-import leaf BY CONTRACT (its module doc + the WorkLane
+// exact by construction (concern 24's conformance file gates the DOMAIN-DTO pairs on its own
+// branch; for these re-exported kernel types the alias itself is the guarantee — there is no
+// second declaration left to drift). The kernel stays a zero-import leaf BY CONTRACT (its module doc + the WorkLane
 // dependency flip this slice shipped), so the webapp's tsc program grows by exactly one file.
 export type { AgentStatus, IssueRef, PendingRequest, TranscriptEntry, TranscriptEvent, TranscriptFormat, TranscriptKind, TranscriptPending, TranscriptStatus, TranscriptTool } from "../../../src/core-types.ts";
 import type { AgentStatus, IssueRef, PendingRequest, TranscriptEntry, TranscriptEvent, TranscriptFormat, TranscriptTool } from "../../../src/core-types.ts";

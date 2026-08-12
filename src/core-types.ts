@@ -2,8 +2,9 @@
  * The shared kernel (deepen 06, final slice) - the vocabulary every lane speaks: actor identity
  * and RBAC tier, the agent lifecycle state, the transcript grammar every surface renders, the
  * human-input request shape, and the work-item reference agents advance. These types have no
- * dependency on any lane (the single import below is the lane-owned WorkLane, referenced by
- * IssueRef's clamp-rule field) and everything depends on them - which is exactly the deletion
+ * dependency on any lane (ZERO imports — the WorkLane value union moved IN here, concern 08
+ * slice 2, so IssueRef's clamp-rule field needs no lane edge) and everything depends on them -
+ * which is exactly the deletion
  * test for a kernel: removing this file breaks every lane; removing any lane leaves it intact.
  * types.ts re-exports all of these, so existing importers keep compiling; new code should
  * import from here.
