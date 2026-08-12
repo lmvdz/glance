@@ -53,7 +53,7 @@ export type CallPhase = VoiceCallState | 'none' | 'checking';
 
 /**
  * The phase word. Deliberately short and, crucially, RESERVED to a constant width by the caller —
- * the HUD reserves `PHASE_LABEL_CH` characters so the chrome never reflows as a call moves through
+ * surfaces reserve a fixed label width so chrome never reflows as a call moves through
  * connecting → live → degraded → ended. A control row that resizes under the pointer is a control
  * row you mis-click.
  */

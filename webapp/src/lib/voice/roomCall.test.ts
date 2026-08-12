@@ -673,7 +673,7 @@ describe('browserAudioStatusLine', () => {
 // read resolving must never look like "no call".
 // -------------------------------------------------------------------------------------------------
 
-describe('callPhase / phaseExplanation: the checking window', () => {
+describe('callPhase: the checking window', () => {
   test('no binding, still loading: "checking" — never "none"', () => {
     expect(callPhase(null, true)).toBe('checking');
   });
