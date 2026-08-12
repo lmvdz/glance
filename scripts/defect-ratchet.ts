@@ -95,7 +95,14 @@ export const PATTERNS: DefectPattern[] = [
 		// diff itself couldn't be COMPUTED (environmental git fault), so there is no verdict to park on;
 		// the retry lane + the same escalate-cap episode accounting bound it. Correct polarity. #160 and
 		// #166 merged as siblings, so this baseline was locked before the 15th literal existed.
-		baseline: 15,
+		// 16th reviewed 2026-08-12 (glance#393, B4): `landBranch`'s refusal when a repo HAS a registered
+		// tenant gate manifest whose record cannot be decoded. Polarity checked against both failure
+		// modes above. It is not a branch defect — the branch is untouched and unjudged — and it clears
+		// the moment a human repairs the record, which is precisely the "environmental precondition"
+		// half of the rule. Parking instead (`retryable: false`) would strand every unit in the org
+		// behind one bad JSON edit with no path back except manual un-parking; the escalate cap already
+		// bounds the retry side and surfaces it as "Needs you".
+		baseline: 16,
 	},
 	{
 		id: "raw-truncate-on-judged-path",

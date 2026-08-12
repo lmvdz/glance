@@ -33,6 +33,8 @@
 import { type AdoptionCounters, type AdoptionSummary, summarizeAdoption } from "./adoption-counters.ts";
 import { errText } from "./err-text.ts";
 import { tokenize } from "./memory/fabric-search.ts";
+import { openTenantGateRegistry, readTenantManifestInput, TENANT_MANIFEST_INPUT_PATH } from "./tenant-gate-registry.ts";
+import { manifestHash, manifestNeedsDocker, suggestTenantGateManifest } from "./tenant-gates.ts";
 
 export type DoctorStatus = "ok" | "warn" | "error" | "unknown";
 
@@ -378,6 +380,72 @@ export function matchSymptom(text: string, symptoms: SymptomIndexEntry[], thresh
  * Assemble the report. Every check is independent and every probe is guarded, so one broken subsystem
  * cannot hide the diagnosis of the others — the failure mode of every health check ever written.
  */
+/**
+ * Tenant gate contracts (glance#393): registered, un-registered, or registered-but-broken.
+ *
+ * The un-registered row is `ok`, not `warn`, and that is a deliberate restraint: detection is the
+ * state of the ENTIRE existing fleet, and a warning every healthy daemon prints forever is how
+ * warnings stop being read. It says plainly that the gate is detected rather than declared, and moves
+ * on. One state DOES warn — a repo that SHIPS a `.glance/gates.json` nobody ever registered, because
+ * someone wrote a contract and it is being ignored, which is an unfinished intent rather than a
+ * settled one. A registration that exists but cannot be READ is an `error`: every land for that repo
+ * refuses while it stays broken, so the doctor should say so before the operator finds out from a
+ * blocked unit.
+ */
+async function tenantGateChecks(probe: DoctorProbe): Promise<DoctorCheck[]> {
+	const s = await probe.stateDir();
+	if (!s.exists) return [{ id: "tenant.gates", title: "Are the gates declared, or guessed?", status: "warn", detail: "no state dir yet — nothing can be registered until the daemon has booted once" }];
+	const registry = openTenantGateRegistry(s.path);
+	const projects = await probe.projects();
+	if (projects.length === 0) return [{ id: "tenant.gates", title: "Are the gates declared, or guessed?", status: "warn", detail: `no projects registered; gate contracts would live in ${registry.file()}` }];
+	const checks: DoctorCheck[] = [];
+	for (const r of projects) {
+		const name = r.repo.split("/").pop() || r.repo;
+		const found = registry.get(r.repo);
+		if (found && "error" in found) {
+			checks.push({ id: `tenant.gates.${name}`, title: `Gate contract for ${name}`, status: "error", detail: found.error, remedy: `fix or remove the entry in ${registry.file()} — every land for this repo refuses while it is unreadable` });
+			continue;
+		}
+		if (found) {
+			const gates = found.manifest.gates.map((g) => g.name).join(", ");
+			// Whether the contract can run AT ALL on this host is the operator-actionable half: a manifest
+			// that declares services or a runner image refuses every land when docker is down, and the
+			// pre-existing "gate" check above only knows about the daemon-global sandbox setting.
+			const dockerNote = manifestNeedsDocker(found.manifest) ? " — needs docker (declared services/runner image); every land refuses without it" : "";
+			checks.push({
+				id: `tenant.gates.${name}`,
+				title: `Gate contract for ${name}`,
+				status: "ok",
+				detail: `${found.manifest.gates.length} declared gate(s): ${gates} — contract ${manifestHash(found.manifest).slice(0, 12)}${dockerNote}`,
+			});
+			continue;
+		}
+		const input = await readTenantManifestInput(r.repo);
+		if (input && "manifest" in input) {
+			checks.push({
+				id: `tenant.gates.${name}`,
+				title: `Gate contract for ${name}`,
+				status: "warn",
+				detail: `${r.repo}/${TENANT_MANIFEST_INPUT_PATH} declares ${input.manifest.gates.length} gate(s) but nothing is REGISTERED — the repo's own file is never consulted at land time`,
+				remedy: "review the file and register it glance-side; a gate a unit can edit is not a gate",
+			});
+			continue;
+		}
+		const suggestion = await suggestTenantGateManifest(r.repo);
+		checks.push({
+			id: `tenant.gates.${name}`,
+			title: `Gate contract for ${name}`,
+			status: "ok",
+			// No `remedy` — a passing check must not carry one (doctor's own invariant), and detection is
+			// not a fault. The path to the record is in the detail so it is still one copy-paste away.
+			detail: suggestion
+				? `no registered contract — gated by DETECTION (${suggestion.gates.map((g) => g.command).join(" && ")}), which cannot assert a test count or require a service; declare one in ${registry.file()}`
+				: `no registered contract, and detection recognises no toolchain — nothing gates this repo; declare gates in ${registry.file()}`,
+		});
+	}
+	return checks;
+}
+
 export async function runDoctor(probe: DoctorProbe): Promise<DoctorReport> {
 	// Fetched ONCE, shared by the summary row below AND the per-check auto-match — a probe that hits
 	// the daemon must not pay for that round trip twice just because two consumers want it. Deliberately
@@ -428,6 +496,11 @@ export async function runDoctor(probe: DoctorProbe): Promise<DoctorReport> {
 			return [{ id: "gate", title: "Can the verification gate run?", status: "ok" as const, detail: `docker + gate image "${g.image}" present` }];
 		}),
 		attempt("projects", "Which repos is glance working on?", async () => repoChecks(await probe.projects())),
+		// glance#393 — which repos are gated by a CONTRACT and which are still gated by a GUESS. This is
+		// where detection's demotion becomes visible: for an un-registered repo the doctor prints the
+		// manifest it WOULD suggest, and says plainly that until someone registers it the gate is
+		// package.json name-matching, which cannot express a count assertion or a required service.
+		attempt("tenant.gates", "Are the gates declared, or guessed?", async () => tenantGateChecks(probe)),
 		attempt("webapp.dist", "Is the UI built?", async () => [(await probe.webappBuilt()) ? { id: "webapp.dist", title: "Is the UI built?", status: "ok" as const, detail: "webapp/dist is present" } : { id: "webapp.dist", title: "Is the UI built?", status: "error" as const, detail: "webapp/dist is missing — the UI will 404", remedy: "cd webapp && bun run build" }]),
 		// A harness whose hooks are not installed is invisible while it runs — glance learns of the
 		// session only when a transcript walk catches up minutes later. `warn`, never `error`: the
