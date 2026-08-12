@@ -189,7 +189,10 @@ export type StateSnapshotSave = Omit<StateSnapshot, "features" | "transcripts" |
 	capabilities?: CapabilitySnapshot;
 };
 
-export interface Store {
+/** The manager's whole-fleet persistence lane (concern 12's split-file shape): the snapshot
+ *  blob plus the per-lane split methods (feedback/transcripts/features/capabilities). The one
+ *  quarter whose consumers are the manager's own persist chains. */
+export interface SnapshotStore {
 	/** True if there is prior persisted state to recover (gates start()'s reattach/reap). */
 	hasState(): Promise<boolean>;
 	/** Load the full persisted snapshot ({} when none). */
@@ -219,15 +222,39 @@ export interface Store {
 	 *  agents + every transcript through the full-blob save (its write amplification and crash
 	 *  window become its own; same escape shape feedback took). */
 	saveCapabilities(snapshot: CapabilitySnapshot): Promise<void>;
+	/** Cumulative save() failures this process, when the store tracks them (FileStore only — DbStore's
+	 *  per-write failures throw rather than swallow, so there's nothing to count). Surfaced through
+	 *  factory-status since the topology guarantee now rests on this write actually landing. */
+	saveFailures?(): number;
+}
+
+/** The accountability lane — append-only, no reads (readers go straight to audit.jsonl / DB). */
+export interface AuditStore {
 	/** Append one audit row (no-op for single-tenant file mode). */
 	appendAudit(entry: AuditEntry): Promise<void>;
 	/** Append/replace one run usage row (no-op for file mode — receipts already on disk). */
 	appendUsage(receipt: RunReceipt): Promise<void>;
-	/** Durable org-scoped channel primitives. File mode stores JSON/JSONL; DB mode stores rows. */
+}
+
+/** Durable org-scoped channel primitives (ChannelStore's quarter). File mode stores JSON/JSONL;
+ *  DB mode stores rows. */
+export interface ChannelBackend {
 	listChannels(): Promise<Channel[]>;
 	getChannel(id: string): Promise<Channel | undefined>;
 	putChannel(channel: Channel): Promise<void>;
-	/** Work graph primitives. Node visibility is always inherited from the bound channel. */
+	listChannelEntries(channelId: string, since?: number): Promise<ChannelEntry[]>;
+	searchChannelEntries?(q: string, limit?: number, offset?: number): Promise<ChannelSearchResult[]>;
+	appendChannelEntry(entry: Omit<ChannelEntry, "seq">): Promise<ChannelEntry>;
+	nextChannelSeq(channelId: string): Promise<number>;
+	listChannelMemberships(channelId: string): Promise<ChannelMembership[]>;
+	putChannelMembership(row: ChannelMembership): Promise<void>;
+	getChannelReadCursor(channelId: string, userId: string): Promise<ChannelReadCursor | undefined>;
+	putChannelReadCursor(row: ChannelReadCursor): Promise<void>;
+}
+
+/** Work graph primitives (NodeStore/NodeRecordStore's quarter). Node visibility is always
+ *  inherited from the bound channel. */
+export interface GraphBackend {
 	listNodes(): Promise<Node[]>;
 	getNode(id: string): Promise<Node | undefined>;
 	putNode(node: Node): Promise<void>;
@@ -238,25 +265,26 @@ export interface Store {
 	putNodeRecord(record: NodeRecord): Promise<void>;
 	/** Remove records by id. Only reachable through an authorized compaction — see `archive.ts`. */
 	deleteNodeRecords(nodeId: string, ids: readonly string[]): Promise<number>;
+}
+
+/** Human-authority records (grants a human made; plans a human has seen). */
+export interface GovernanceStore {
 	/** Human grants out of the non-delegatable class. An empty list means autonomy takes none of it. */
 	listDelegationGrants(): Promise<DelegationGrant[]>;
 	putDelegationGrant(grant: DelegationGrant): Promise<void>;
 	/** Plans a human has been shown but not yet started. A proposal is not work. */
 	listPlanProposals(): Promise<PlanProposal[]>;
 	putPlanProposal(proposal: PlanProposal): Promise<void>;
-	listChannelEntries(channelId: string, since?: number): Promise<ChannelEntry[]>;
-	searchChannelEntries?(q: string, limit?: number, offset?: number): Promise<ChannelSearchResult[]>;
-	appendChannelEntry(entry: Omit<ChannelEntry, "seq">): Promise<ChannelEntry>;
-	nextChannelSeq(channelId: string): Promise<number>;
-	listChannelMemberships(channelId: string): Promise<ChannelMembership[]>;
-	putChannelMembership(row: ChannelMembership): Promise<void>;
-	getChannelReadCursor(channelId: string, userId: string): Promise<ChannelReadCursor | undefined>;
-	putChannelReadCursor(row: ChannelReadCursor): Promise<void>;
-	/** Cumulative save() failures this process, when the store tracks them (FileStore only — DbStore's
-	 *  per-write failures throw rather than swallow, so there's nothing to count). Surfaced through
-	 *  factory-status since the topology guarantee now rests on this write actually landing. */
-	saveFailures?(): number;
 }
+
+/** The full backend — the INTERSECTION of the five lanes (concern 20: it was a 30-member bag;
+ *  the lanes are the modules). FileStore/DbStore still `implements Store` (both modes really do
+ *  provide every lane; the manager-registry factory is untouched); CONSUMERS narrow to their
+ *  quarter (ChannelStore/NodeStore/NodeRecordStore constructor params) so a test fake implements
+ *  7–11 methods instead of 30, and the deletion test finally passes: delete the name Store and
+ *  only the two whole-backend owners (manager, factory) notice. */
+export interface Store extends SnapshotStore, AuditStore, ChannelBackend, GraphBackend, GovernanceStore {}
+
 
 const EMPTY: StateSnapshot = { agents: [], transcripts: {}, features: [] };
 

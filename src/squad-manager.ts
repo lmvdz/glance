@@ -1370,6 +1370,10 @@ export class SquadManager extends EventEmitter {
 	private readonly attentionStore: AttentionStore;
 	private readonly channelStore: ChannelStore;
 	private readonly nodeStore: NodeStore;
+	/** ONE NodeRecordStore beside its siblings (concern 20's cheap fix): it was constructed 16×
+	 *  inline with INCONSISTENT warn loggers — half the call sites logged validation failures to
+	 *  nowhere. One field, one logger, every caller gets the same forensics. */
+	private readonly nodeRecords: NodeRecordStore;
 	/** Concern 02's per-thread live-call durable owner (plans/voice-orchestrated-room-integration).
 	 *  One coordinator per manager (i.e. per org in DB mode) — bindings are keyed by channelId, which
 	 *  is already scoped to this manager's own ChannelStore. */
@@ -1440,6 +1444,7 @@ export class SquadManager extends EventEmitter {
 		this.store = opts.store ?? new FileStore(this.stateDir);
 		this.channelStore = new ChannelStore(this.stateDir, this.store, (m) => this.log("warn", `channels: ${m}`));
 		this.nodeStore = new NodeStore(this.store);
+		this.nodeRecords = new NodeRecordStore(this.store, (m) => this.log("warn", `node-records: ${m}`));
 		this.attentionStore = new AttentionStore({ stateDir: this.stateDir, log: (m) => this.log("warn", `attention: ${m}`) });
 		this.bin = opts.bin;
 		this.autoLand = opts.autoLand ?? false;
@@ -3743,7 +3748,7 @@ export class SquadManager extends EventEmitter {
 			if (!(await nodes.get(rootId))) {
 				await nodes.create({ id: rootId, kind: "plan", title: "the fleet", state: "working", createdAt: Date.now() });
 			}
-			const records = new NodeRecordStore(this.store, (m) => this.log("warn", `node-records: ${m}`));
+			const records = this.nodeRecords;
 			if ((await records.list(rootId)).some((record) => record.kind === "learning-state")) return;
 			await records.put(coldStartLearningState(rootId, Date.now()));
 			this.log("info", "cold start: recorded six borrowed defaults and the unknowns ledger — nothing here was learned from you yet");
@@ -3759,7 +3764,7 @@ export class SquadManager extends EventEmitter {
 	 */
 	async planMotionHealth(nodeId: string, now = Date.now()): Promise<{ noticed: number; falsePositive: number }> {
 		try {
-			const records = (await new NodeRecordStore(this.store).list(nodeId)).filter((record): record is PlanMotionRecord => record.kind === "plan-motion");
+			const records = (await this.nodeRecords.list(nodeId)).filter((record): record is PlanMotionRecord => record.kind === "plan-motion");
 			return planMotionMetrics(records, now);
 		} catch (err) {
 			this.log("warn", `plan motion health unavailable for ${nodeId}: ${errText(err)}`);
@@ -3804,7 +3809,7 @@ export class SquadManager extends EventEmitter {
 	async costSummary(nodeId: string, context: { changesTheDecision?: boolean; notableCents?: number } = {}): Promise<CostSummary & { disclose: boolean }> {
 		let summary: CostSummary;
 		try {
-			summary = summariseCost(costEventsFrom(await new NodeRecordStore(this.store).list(nodeId)));
+			summary = summariseCost(costEventsFrom(await this.nodeRecords.list(nodeId)));
 		} catch (err) {
 			this.log("warn", `cost summary unavailable for ${nodeId}: ${errText(err)}`);
 			summary = summariseCost([]);
@@ -3821,7 +3826,7 @@ export class SquadManager extends EventEmitter {
 	 */
 	async rulesQuotedFor(nodeId: string, action: string): Promise<string[]> {
 		try {
-			return (await new NodeRecordStore(this.store).rulesSettling(nodeId, action)).map(quoteRule);
+			return (await this.nodeRecords.rulesSettling(nodeId, action)).map(quoteRule);
 		} catch (err) {
 			this.log("warn", `rules for ${nodeId}/${action} unavailable: ${errText(err)}`);
 			return [];
@@ -3960,7 +3965,7 @@ export class SquadManager extends EventEmitter {
 		proposals: RuleProposal[];
 	}> {
 		try {
-			const records = await new NodeRecordStore(this.store).list(nodeId);
+			const records = await this.nodeRecords.list(nodeId);
 			const rules = records
 				.filter((record): record is Extract<NodeRecord, { kind: "rule" }> => record.kind === "rule" && record.status === "active")
 				.map((rule) => ({
@@ -3989,7 +3994,7 @@ export class SquadManager extends EventEmitter {
 	/** The learning state: what is borrowed, what is unknown, and what would settle each. */
 	async learningState(): Promise<NodeRecord | undefined> {
 		try {
-			return (await new NodeRecordStore(this.store).list(SquadManager.ROOT_NODE_ID)).find((record) => record.kind === "learning-state");
+			return (await this.nodeRecords.list(SquadManager.ROOT_NODE_ID)).find((record) => record.kind === "learning-state");
 		} catch (err) {
 			this.log("warn", `learning state unavailable: ${errText(err)}`);
 			return undefined;
@@ -4025,7 +4030,7 @@ export class SquadManager extends EventEmitter {
 			if (!isRoomWorthyPending(req)) return; // routine tool approvals are noise, not decisions
 			const node = await this.ensureProjectedNode(rec);
 			const chose = typeof value === "string" ? value : JSON.stringify(value ?? "");
-			await new NodeRecordStore(this.store, (m) => this.log("warn", `node-records: ${m}`)).put({
+			await this.nodeRecords.put({
 				kind: "decision",
 				id: `decision:${rec.dto.id}:${req.id}`,
 				nodeId: node.id,
@@ -4050,7 +4055,7 @@ export class SquadManager extends EventEmitter {
 	 */
 	private async recordQuestionAuthority(rec: AgentRecord, questionId: string): Promise<void> {
 		const node = await this.ensureProjectedNode(rec);
-		const records = new NodeRecordStore(this.store, (message) => this.log("warn", `node-records: ${message}`));
+		const records = this.nodeRecords;
 		await records.put({
 			kind: "human-authority",
 			id: `human-authority:${node.id}:${questionId}`,
@@ -4068,12 +4073,12 @@ export class SquadManager extends EventEmitter {
 		if (!rec) return undefined;
 		await this.authorityWrites.get(`${agentId}:${questionId}`);
 		const node = await this.ensureProjectedNode(rec);
-		return new NodeRecordStore(this.store).accountableHumanForQuestion(node.id, questionId);
+		return this.nodeRecords.accountableHumanForQuestion(node.id, questionId);
 	}
 
 	/** Competing rules stay inspectable as disagreement until humans decide precedence semantics. */
 	async ruleDisagreements(nodeId: string, action?: string) {
-		return new NodeRecordStore(this.store).ruleDisagreements(nodeId, action);
+		return this.nodeRecords.ruleDisagreements(nodeId, action);
 	}
 	/**
 	 * Notice a plan that has gone still from its own movement history. This is deliberately invoked
@@ -4092,7 +4097,7 @@ export class SquadManager extends EventEmitter {
 				createdAt: input.now,
 			});
 		}
-		const records = new NodeRecordStore(this.store, (message) => this.log("warn", `node-records: ${message}`));
+		const records = this.nodeRecords;
 		const id = `plan-motion:${input.planId}:${assessment.record.lastMeaningfulMovementAt}`;
 		const prior = (await records.list(input.planId)).filter((record): record is PlanMotionRecord => record.kind === "plan-motion").find((record) => record.id === id);
 		const record = {
@@ -4119,7 +4124,7 @@ export class SquadManager extends EventEmitter {
 
 	/** Record the human's outcome, so the false-positive rate is evidence rather than a dashboard claim. */
 	async resolvePlanMotion(planId: string, lastMeaningfulMovementAt: number, outcome: "acknowledged" | "parked" | "dropped" | "resumed" | "false-positive", now = Date.now()): Promise<void> {
-		const records = new NodeRecordStore(this.store, (message) => this.log("warn", `node-records: ${message}`));
+		const records = this.nodeRecords;
 		const id = `plan-motion:${planId}:${lastMeaningfulMovementAt}`;
 		const record = (await records.list(planId)).filter((candidate): candidate is PlanMotionRecord => candidate.kind === "plan-motion").find((candidate) => candidate.id === id);
 		if (!record) throw new Error(`plan motion evidence ${id} not found`);
@@ -4142,23 +4147,23 @@ export class SquadManager extends EventEmitter {
 		readback: InstructionReadbackRecord,
 		reversibleWork: () => Promise<void>,
 	): Promise<InstructionExecution> {
-		return beginInstruction(new NodeRecordStore(this.store, (m) => this.log("warn", `node-records: ${m}`)), readback, reversibleWork);
+		return beginInstruction(this.nodeRecords, readback, reversibleWork);
 	}
 
 	async approveInstructionIrreversible(nodeId: string, instructionId: string): Promise<InstructionReadbackRecord> {
-		return approveIrreversible(new NodeRecordStore(this.store), nodeId, instructionId);
+		return approveIrreversible(this.nodeRecords, nodeId, instructionId);
 	}
 
 	async rejectInstructionIrreversible(nodeId: string, instructionId: string): Promise<InstructionReadbackRecord> {
-		return rejectIrreversible(new NodeRecordStore(this.store), nodeId, instructionId);
+		return rejectIrreversible(this.nodeRecords, nodeId, instructionId);
 	}
 
 	async raiseInstructionObjection(objection: ObjectionRecord): Promise<ObjectionRecord> {
-		return raiseObjection(new NodeRecordStore(this.store), objection);
+		return raiseObjection(this.nodeRecords, objection);
 	}
 
 	async overruleInstructionObjection(nodeId: string, objectionId: string, overruledBy: string): Promise<ObjectionRecord> {
-		return overruleObjection(new NodeRecordStore(this.store), nodeId, objectionId, overruledBy);
+		return overruleObjection(this.nodeRecords, nodeId, objectionId, overruledBy);
 	}
 
 	async recordInstructionObjectionOutcome(
@@ -4168,7 +4173,7 @@ export class SquadManager extends EventEmitter {
 		matchedPrediction: boolean,
 		at = Date.now(),
 	): Promise<ObjectionRecord> {
-		return recordObjectionOutcome(new NodeRecordStore(this.store), nodeId, objectionId, outcome, matchedPrediction, at);
+		return recordObjectionOutcome(this.nodeRecords, nodeId, objectionId, outcome, matchedPrediction, at);
 	}
 
 	/**
@@ -4178,7 +4183,7 @@ export class SquadManager extends EventEmitter {
 	 */
 	async ruleProposals(nodeId: string): Promise<RuleProposal[]> {
 		try {
-			return proposeRules(await new NodeRecordStore(this.store).list(nodeId));
+			return proposeRules(await this.nodeRecords.list(nodeId));
 		} catch (err) {
 			this.log("warn", `rule proposals for ${nodeId} unavailable: ${errText(err)}`);
 			return [];
@@ -4188,12 +4193,12 @@ export class SquadManager extends EventEmitter {
 	/** One agent's evidence record. There is deliberately no fleet-wide equivalent to rank people. */
 	async agentRecord(agentId: string, now = Date.now()): Promise<AgentRecordView | undefined> {
 		if (!this.agents.has(agentId)) return undefined;
-		return agentRecordView(agentId, await new NodeRecordStore(this.store).list(agentId), now);
+		return agentRecordView(agentId, await this.nodeRecords.list(agentId), now);
 	}
 
 	/** Every new agent starts with a role default and an explicit provisional checking contract. */
 	private async ensureAgentProfile(rec: AgentRecord): Promise<void> {
-		const records = new NodeRecordStore(this.store, (message) => this.log("warn", `node-records: ${message}`));
+		const records = this.nodeRecords;
 		const existing = await records.list(rec.dto.id);
 		if (existing.some((record) => record.kind === "agent-profile" && record.agentId === rec.dto.id)) return;
 		await records.put({
@@ -4214,7 +4219,7 @@ export class SquadManager extends EventEmitter {
 	 * destroys things.
 	 */
 	async planCompaction(nodeId: string, policy: CompactionPolicy, now = Date.now()): Promise<CompactionPlan> {
-		return planCompaction(await new NodeRecordStore(this.store).list(nodeId), policy, now);
+		return planCompaction(await this.nodeRecords.list(nodeId), policy, now);
 	}
 
 	/**
@@ -4230,7 +4235,7 @@ export class SquadManager extends EventEmitter {
 	): Promise<{ plan: CompactionPlan; removed: number; notice: string }> {
 		const now = opts.now ?? Date.now();
 		assertHumanAuthority("compactNodeRecords", opts.authority ?? "autonomous", await this.delegationGrants());
-		const records = new NodeRecordStore(this.store, (m) => this.log("warn", `node-records: ${m}`));
+		const records = this.nodeRecords;
 		const plan = await this.planCompaction(nodeId, policy, now);
 		const retention = { ...plan.retention, id: `retention:${nodeId}:${now}`, nodeId };
 		await records.put(retention);
@@ -4240,7 +4245,7 @@ export class SquadManager extends EventEmitter {
 
 	/** What moves to the next agent and what does not, stated before the handover is confirmed. */
 	async planHandover(nodeId: string, from: string, to: string, opts: { now?: number; ref?: string } = {}): Promise<HandoverPlan> {
-		return planHandover(await new NodeRecordStore(this.store).list(nodeId), { from, to, now: opts.now ?? Date.now(), ref: opts.ref });
+		return planHandover(await this.nodeRecords.list(nodeId), { from, to, now: opts.now ?? Date.now(), ref: opts.ref });
 	}
 
 	/** Plans a person has been shown. A proposal is never work — see `startProposal`. */
@@ -5134,7 +5139,7 @@ export class SquadManager extends EventEmitter {
 			// `refreshNodeSummaries`, which needs a live `AgentRecord` under the same id — precisely what
 			// an orphan does not have — so without this the row reads "stopped" while its own recorded
 			// summary goes on saying the unit is working, forever. Regenerate them from the corrected node.
-			const records = new NodeRecordStore(this.store, (m) => this.log("warn", `node-records: ${m}`));
+			const records = this.nodeRecords;
 			const now = Date.now();
 			for (const node of stopped) {
 				const summaries = regenerateNodeSummaries({ node, records: await records.list(node.id), now });
@@ -5241,7 +5246,7 @@ export class SquadManager extends EventEmitter {
 		if (!projected) return undefined;
 		const node = await this.nodeStore.transition(projected.id, rec.dto.status as NodeState);
 		if (!node) return undefined;
-		const records = new NodeRecordStore(this.store, (m) => this.log("warn", `node-records: ${m}`));
+		const records = this.nodeRecords;
 		const summaries = regenerateNodeSummaries({ node, records: await records.list(node.id), now: Date.now() });
 		await Promise.all(summaries.map((summary) => records.put(summary)));
 		return summaries[0].markdown;

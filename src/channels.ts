@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Store } from "./dal/store.ts";
+import type { ChannelBackend, GraphBackend } from "./dal/store.ts";
 import { neutralizeDelimiters } from "./memory/digest.ts";
 import { errText } from "./err-text.ts";
 import { redact } from "./redact.ts";
@@ -179,7 +179,7 @@ export class ChannelStore {
 
 	constructor(
 		_stateDir: string,
-		private readonly store: Store,
+		private readonly store: ChannelBackend & Pick<GraphBackend, "getNode" | "bindNodeChannel">,
 		private readonly _log: (msg: string) => void = () => {},
 		private readonly now: () => number = Date.now,
 	) {}

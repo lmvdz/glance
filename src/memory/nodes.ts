@@ -1,4 +1,4 @@
-import type { Store } from "../dal/store.ts";
+import type { GraphBackend, SnapshotStore } from "../dal/store.ts";
 import type { PersistedAgent } from "../types.ts";
 
 export type NodeKind = "plan" | "unit" | "subagent" | "landing";
@@ -92,7 +92,7 @@ export class NodeStore {
 	private migration?: Promise<void>;
 
 	constructor(
-		private readonly store: Store,
+		private readonly store: GraphBackend & Pick<SnapshotStore, "load">,
 		private readonly now: () => number = Date.now,
 	) {}
 
