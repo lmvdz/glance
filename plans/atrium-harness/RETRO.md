@@ -55,3 +55,42 @@ graduated (B2 #391 / B3 #392 / B4 #393 / B5 #394, edges wired). What the round t
 - Process lesson: resolving G2/G1/G3 the same hour their blockers cleared kept the
   frontier hot — but all three resolutions are autonomous-on-authority and explicitly
   reopenable; the map indexes them, the tickets carry the detail.
+
+## 2026-08-12 — BUILD round (three lanes) (orchestrator)
+
+- **B1 bridge doc (#388): three gauntlet rounds, and the failures were the deliverable.**
+  Round 1 (codex+grok+opus, blind): two UNSOUND + one SOUND-WITH-CHANGES, converging on a
+  missing trust seam and a `claim`-type choice that fed atrium's live auto-accept. Round 2
+  (codex) found a third path to the same attention-miss (a self-posted receipt is always
+  the newest room message → `receipt_not_certifiable`/quiet). The reframe was the win:
+  round 3 told the builder to SOLVE or NAME each blocker. Result — 7 solved in-doc, 3 named
+  as atrium-side preconditions Phase 5 must fund first (P1 certifiable-window, P2
+  attention-persistence, P3 interpreter author-filter). The builder REFUSED a P1 workaround
+  (a self-sealing corroboration message) as the actor-floor tautology one level up. A doc
+  that says precisely what atrium must build first is a stronger Phase-5 input than a false
+  soundness — the gauntlet turned a "write the bridge" task into "map the preconditions".
+- **The orchestrator's own remedy was wrong, and a builder caught it with code.** Round 1's
+  receipt told the builder to set confidence in [θ_min, θ_auto) for needs_you visibility.
+  That band is `quiet` for every type (acceptance.ts:866-880); needs_you needs ≥θ_auto +
+  autoAccept:false. The builder pushed back with the dispatch trace, set 0.9, and was right.
+  Ledgered as a refuted native row. Lesson: a receipt directive is a hypothesis too — the
+  blind-review discipline has to point back at the adjudicator.
+- **B2 self-land (#391): two blind lineages converged on three defects the window most
+  needed caught.** opus + grok independently: an `abstain`/unmeasured land returns HTTP 200
+  and reads `measured:true` (isMeasuredLand checks precision.n>0, not verdict==pass); the
+  `expectBase` guard names a different branch than `gh pr merge` actually targets; the
+  worktree is reused off-tip so the gate grades a different tree than it merges. opus added
+  a force-push-over-PR-head and silent draft-merge; grok added a PR-row not bound to its
+  branch. Fix round pending codex's third pass. Three shared defects from two lineages is
+  the strongest signal the campaign produces.
+- **B4 tenant manifest (#393): the builder overrode its own ticket correctly.** G3 said
+  "zod"; the tree has none and an established Effect-Schema convention — a second schema lib
+  would be the drift the deepen program spent months removing, so it used Schema and said
+  so. It also caught the fail-open this program targets: a count-violated refusal emits no
+  failure lines, so land.ts's red-baseline set-diff would pass it through — guarded by
+  returning before that allowance. Ticket-fact corrections (reviewer-weights moved to
+  memory/, dead-exports 211/210, squad-manager line drift) all verified against pristine
+  main, not trusted. Gauntlet ×3 in flight.
+- **Two foreign-lineage relays backgrounded their CLI runs and stalled** (the documented
+  pattern) — both recovered by a SendMessage nudge to collect the backgrounded job. Dispatch
+  relays foreground+blocking; when they background anyway, nudge, don't re-dispatch.
