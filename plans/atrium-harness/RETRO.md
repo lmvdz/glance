@@ -32,3 +32,26 @@ body). Native sub-issues + blocked-by wired via the GitHub API, 7 edges.
 Settled inputs carried from the 2026-08-12 terrain survey and the ratified #208-thread
 sequencing — tickets cite them instead of re-litigating. ~/atrium is read-only reference
 for the entire campaign; a live /campaign session is building it and will not be raced.
+
+## 2026-08-12 — DRIVE round 1 (orchestrator)
+
+Both scouts resolved same-day; every grilling ticket closed on their evidence; fog fully
+graduated (B2 #391 / B3 #392 / B4 #393 / B5 #394, edges wired). What the round taught:
+
+- **Both research tickets carried wrong facts, and both scouts caught them** — the
+  skill's "tickets decay" rule proved itself at charting distance, not just dispatch
+  distance: R1's premise said gate commands were hardcoded (they're DETECTED —
+  intake.ts:149-180), R2's said DB mode disables the root factory (it's opt-in). The
+  corrections are in the resolutions and the map.
+- **The audit found the dogfood's silent killer before a single PR routed**: a self-land
+  today would return validator "skipped" (no acceptance criteria) → no precision stamp →
+  an UNMEASURED land that looks green — #362 would have run two weeks and measured
+  nothing. That is now B2's central acceptance criterion instead of a post-window
+  surprise.
+- **Two new fail-opens ledger-worthy in their own right** (R2): Vitest --passWithNoTests
+  exits 0 under a bun-only zero-tests regex (a foreign tenant's suite could land having
+  run NOTHING), and the docker-absent unsandboxed fallback warns once per process — orgs
+  2..N are never warned. Both are B4 kill-targets with mutation-proof required.
+- Process lesson: resolving G2/G1/G3 the same hour their blockers cleared kept the
+  frontier hot — but all three resolutions are autonomous-on-authority and explicitly
+  reopenable; the map indexes them, the tickets carry the detail.
