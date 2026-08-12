@@ -176,7 +176,7 @@ async function liveCoordinator() {
 	const stateDir = tmpDir("voice-mute-state-");
 	const journalDir = tmpDir("voice-mute-journal-");
 	const bridge = startRecordingBridge("mute-session");
-	const broker = new OneCallBroker(journalDir, bridge.url, bridge.port);
+	const broker = new OneCallBroker(journalDir, bridge.url, bridge.port!);
 	const cards: EmitCardInput[] = [];
 	const coordinator = new VoiceCallCoordinator({
 		stateDir,

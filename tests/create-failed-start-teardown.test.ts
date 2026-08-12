@@ -11,10 +11,13 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentDriver } from "../src/agent-driver.ts";
+import type { Actor } from "../src/core-types.ts";
 import { SquadManager } from "../src/squad-manager.ts";
-import type { PersistedAgent } from "../src/types.ts";
+import type { PersistedAgent, RpcSessionState } from "../src/types.ts";
 
 process.env.OMP_SQUAD_AUTODISPATCH = "0";
+
+const actor: Actor = { id: "local", origin: "local", role: "admin" };
 
 const tmps: string[] = [];
 afterAll(async () => {
@@ -36,7 +39,7 @@ class FailStartDriver extends EventEmitter implements AgentDriver {
 	async abort(): Promise<unknown> {
 		return undefined;
 	}
-	async getState(): never {
+	async getState(): Promise<never> {
 		throw new Error("unused in failed-start path");
 	}
 	respondUi(): void {}
@@ -52,8 +55,8 @@ class ReadyDriver extends EventEmitter implements AgentDriver {
 	async abort(): Promise<unknown> {
 		return undefined;
 	}
-	async getState(): Promise<unknown> {
-		return {};
+	async getState(): Promise<RpcSessionState> {
+		return {} as unknown as RpcSessionState;
 	}
 	respondUi(): void {}
 	respondHostTool(): void {}
@@ -180,7 +183,7 @@ test("create(): a SEMANTIC goal overlap discloses in the room and lets both unit
 	expect(await fs.readdir(worktreeBase)).toHaveLength(2);
 
 	// But it IS disclosed, in the room, naming the owner and nothing else.
-	const cards = (await mgr.channelEntries("fleet")).filter((entry) => entry.event?.kind === "goal-overlap");
+	const cards = (await mgr.channelEntries("fleet", 0, actor)).filter((entry) => entry.event?.kind === "goal-overlap");
 	expect(cards).toHaveLength(1);
 	expect(cards[0]!.text).toContain("rate-owner");
 	expect(cards[0]!.text).toContain("nothing was blocked");

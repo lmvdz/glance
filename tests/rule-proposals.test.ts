@@ -142,7 +142,7 @@ test("proposals are ordered by how much evidence stands behind them", () => {
 test("end to end: a proposal's evidence is exactly what a rule may then cite", async () => {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rule-proposal-"));
 	const store = new FileStore(dir);
-	await store.putNode({ id: "n1", kind: "unit", title: "unit", state: "working", createdAt: 1, channelId: null });
+	await store.putNode({ id: "n1", kind: "unit", title: "unit", state: "working", createdAt: 1, channelId: undefined });
 	const records = new NodeRecordStore(store);
 	for (const record of fourYeses) await records.put(record);
 

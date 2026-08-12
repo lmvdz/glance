@@ -34,7 +34,8 @@ import { SquadManager } from "../src/squad-manager.ts";
 import type { Actor } from "../src/types.ts";
 import { CallBindingStore } from "../src/voice-call-binding.ts";
 import { FakeOmpBroker } from "./fixtures/fake-omp-call.ts";
-import { decisionDoorModel, endedUnexpectedly, IDLE_HANGUP_MS, terminalReasonCopy, type VoiceCallDecisionDTO } from "../webapp/src/lib/voice/roomCall.ts";
+import { decisionDoorModel, endedUnexpectedly, IDLE_HANGUP_MS, terminalReasonCopy } from "../webapp/src/lib/voice/roomCall.ts";
+import type { VoiceCallDecisionDTO } from "../webapp/src/lib/api.ts";
 
 function actor(userId: string, orgId = "org-a"): Actor {
 	return { id: `db:${userId}`, displayName: userId, origin: "local", role: "operator", orgId };
@@ -172,8 +173,9 @@ describe("concern 05 default #3: destructive decision classes are UI-only", () =
 			expect(uiResult.ok).toBe(true);
 			if (uiResult.ok) {
 				expect(uiResult.value.ok).toBe(true);
-				expect(uiResult.value.decision?.state).toBe("answered");
-				expect(uiResult.value.decision?.resolution).toEqual({ optionIndex: 0, label: "Merge it", source: "ui" });
+				const decision = uiResult.value.decision as { state?: string; resolution?: unknown } | undefined;
+				expect(decision?.state).toBe("answered");
+				expect(decision?.resolution).toEqual({ optionIndex: 0, label: "Merge it", source: "ui" });
 			}
 
 			// The webapp's own view model renders this as a wire-declared FACT, not the text heuristic's

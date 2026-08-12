@@ -172,7 +172,7 @@ function seedAgent(mgr: SquadManager, id: string, repo: string, worktree: string
 		approvalMode: "yolo", pending: [], lastActivity: 0, messageCount: 0, featureId,
 	};
 	const options: PersistedAgent = { id, name: id, repo, worktree, approvalMode: "yolo" };
-	mgr.agents.set(id, { dto, agent: undefined as never, options, transcript: [], assistantBuf: "", streaming: false, subs: new SubagentTracker() });
+	mgr.agents.set(id, { dto, agent: undefined as never, options, transcript: [], assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map() });
 }
 
 test("SquadManager.land(): a diff-computation FAILURE is retryable and never lands — declared criteria are never silently skipped by a git hiccup", async () => {

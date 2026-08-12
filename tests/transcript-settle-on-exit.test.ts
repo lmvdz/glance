@@ -60,7 +60,7 @@ class DiesMidStreamDriver extends EventEmitter implements AgentDriver {
 	}
 	async abort(): Promise<unknown> { return undefined; }
 	async getState(): Promise<RpcSessionState> {
-		return { todoPhases: [], isStreaming: true } as RpcSessionState;
+		return { todoPhases: [], isStreaming: true } as unknown as RpcSessionState;
 	}
 	respondUi(): void {}
 	respondHostTool(): void {}

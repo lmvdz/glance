@@ -17,7 +17,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { answerBrief, extractPathTokens, listAnswers, possiblyStale, readAnswer, saveAnswer, type Answer } from "../src/memory/answers.ts";
 import { isLandingUnit } from "../src/is-landing-unit.ts";
-import type { AgentDTO, PersistedAgent, RunReceipt, TranscriptEntry } from "../src/types.ts";
+import type { AgentDTO, CreateAgentOptions, PersistedAgent, RunReceipt, TranscriptEntry } from "../src/types.ts";
 
 const { SquadManager } = await import("../src/squad-manager.ts");
 
@@ -357,8 +357,8 @@ test("ask() spawns an OBSERVER, never routed, never tracked", async () => {
 	let seen: Record<string, unknown> | undefined;
 
 	class SpyManager extends SquadManager {
-		override async create(opts: Record<string, unknown>): Promise<AgentDTO> {
-			seen = opts;
+		override async create(opts: CreateAgentOptions): Promise<AgentDTO> {
+			seen = opts as unknown as Record<string, unknown>;
 			return { id: "u1", name: "u1", repo: String(opts.repo), model: "sonnet", harness: "omp" } as AgentDTO;
 		}
 	}

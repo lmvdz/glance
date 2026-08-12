@@ -15,7 +15,7 @@ import { NodeRecordStore, type InstructionReadbackRecord, type ObjectionRecord }
 async function fixture(): Promise<{ dir: string; records: NodeRecordStore }> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "instructions-"));
 	const store = new FileStore(dir);
-	await store.putNode({ id: "n1", kind: "unit", title: "Release work", state: "working", createdAt: 1, channelId: null });
+	await store.putNode({ id: "n1", kind: "unit", title: "Release work", state: "working", createdAt: 1, channelId: undefined });
 	return { dir, records: new NodeRecordStore(store) };
 }
 

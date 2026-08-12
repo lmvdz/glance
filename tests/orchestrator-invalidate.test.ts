@@ -47,7 +47,10 @@ function stagingOrchestrator(verified: string[]): Orchestrator {
 			verified.push(id);
 			return true;
 		},
-		land: async () => "staged",
+		// `land`'s declared type is `Promise<boolean>`, but the orchestrator's own tick() checks
+		// `outcome === "staged"` on this exact return value (src/orchestrator.ts:320-324) — the
+		// interface is narrower than the implementation it types. Bridged, not fixed (src is off-limits).
+		land: async () => "staged" as const,
 		holdForConfirm: true,
 		notifyReady: () => {},
 		log: () => {},
@@ -97,7 +100,7 @@ test("invalidate() un-halts a parked unit — that is what 'step in' means", asy
 		},
 		landAgentWork: async () => true,
 		agentHasWork: async () => true,
-		routeFailure: () => "escalate",
+		route: () => "escalate",
 		log: () => {},
 	});
 

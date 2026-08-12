@@ -54,7 +54,7 @@ describe("currentState — what the read-only --status/--handoff flags resolve a
 	// an explicit stateDir — the same read path the CLI takes — so the assertions cover the real logic
 	// without a subprocess (a subprocess would inherit a sibling test's GLANCE_STATE_DIR from the
 	// shared process env and read the wrong oracle under parallel load).
-	const args = { goal: "plans/demo", fixture: undefined, once: false, handoff: true, status: false };
+	const args = { goal: "plans/demo", fixture: false, once: false, handoff: true, status: false };
 
 	test("before any oracle exists, resolves a continuable seed whose handoff doc still round-trips", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "conv-handoff-a-"));

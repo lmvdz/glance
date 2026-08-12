@@ -17,7 +17,7 @@ class InertBroker implements BrokerClient {
 	async createCall(): Promise<BrokerCallCreated> {
 		throw new Error("no bridge configured for this test — start() is not expected to succeed");
 	}
-	async endCall(): Promise<void> {}
+	async endCall(_callId: string): Promise<void> {}
 	async listCalls(): Promise<BrokerCallView[]> {
 		return [];
 	}

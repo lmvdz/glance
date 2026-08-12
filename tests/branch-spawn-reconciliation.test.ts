@@ -44,7 +44,7 @@ class FakeDriver extends EventEmitter implements AgentDriver {
 		return undefined;
 	}
 	async getState(): Promise<RpcSessionState> {
-		return { todoPhases: [], isStreaming: false } as RpcSessionState;
+		return { todoPhases: [], isStreaming: false } as unknown as RpcSessionState;
 	}
 	respondUi(): void {}
 	respondHostTool(): void {}
@@ -67,7 +67,7 @@ class HangingDriver extends EventEmitter implements AgentDriver {
 		return undefined;
 	}
 	async getState(): Promise<RpcSessionState> {
-		return { todoPhases: [], isStreaming: false } as RpcSessionState;
+		return { todoPhases: [], isStreaming: false } as unknown as RpcSessionState;
 	}
 	respondUi(): void {}
 	respondHostTool(): void {}

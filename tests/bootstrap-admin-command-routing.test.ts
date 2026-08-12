@@ -74,7 +74,6 @@ function terminalWorkflowRecord(id: string, name: string, repo: string, worktree
 			visits: { escalate: 2 },
 			vars: {},
 			index: 4,
-			coldReentryCount: 0,
 			rollup: [],
 			terminal: { reason: 'node "escalate" exceeded its visit cap (2)', at: Date.now(), forkPoint: { runId: "run-1", seq: 4 } },
 		},

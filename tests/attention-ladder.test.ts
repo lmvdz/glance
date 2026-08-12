@@ -6,7 +6,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { computeLadderPriority, maxLadderPriority, LADDER_RANK, type LadderCandidate } from "../src/attention-ladder.ts";
+import { computeLadderPriority, maxLadderPriority, LADDER_RANK, type LadderCandidate, type LadderPriority } from "../src/attention-ladder.ts";
 import type { PendingRequest } from "../src/types.ts";
 
 function pending(overrides: Partial<PendingRequest> = {}): PendingRequest {
@@ -82,7 +82,7 @@ describe("computeLadderPriority: one state per unit, ranked cascade", () => {
 	});
 
 	test("the full cascade order end-to-end, highest to lowest", () => {
-		const cases: { input: LadderCandidate; signals?: { completedAt?: number; visitedAt?: number }; want: string }[] = [
+		const cases: { input: LadderCandidate; signals?: { completedAt?: number; visitedAt?: number }; want: LadderPriority }[] = [
 			{ input: unit({ status: "error" }), want: "error" },
 			{ input: unit({ status: "input", pending: [pending({ gateClass: true })] }), want: "pending-approval" },
 			{ input: unit({ status: "input", pending: [pending()] }), want: "awaiting-input" },

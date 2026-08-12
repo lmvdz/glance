@@ -43,6 +43,70 @@ test("applyCommand audits RBAC denials and accepted mutations", async () => {
 			audits.push({ actor: e.actor, action: e.action, source: e.source });
 		},
 		async appendUsage() {},
+		async loadTranscripts() {
+			return {};
+		},
+		async saveTranscripts() {},
+		async loadFeatures() {
+			return [];
+		},
+		async saveFeatures() {},
+		async loadCapabilities() {
+			return {} as never;
+		},
+		async saveCapabilities() {},
+		async listChannels() {
+			return [];
+		},
+		async getChannel() {
+			return undefined;
+		},
+		async putChannel() {},
+		async listNodes() {
+			return [];
+		},
+		async getNode() {
+			return undefined;
+		},
+		async putNode() {},
+		async bindNodeChannel() {
+			return undefined;
+		},
+		async listNodeRecords() {
+			return [];
+		},
+		async putNodeRecord() {},
+		async deleteNodeRecords() {
+			return 0;
+		},
+		async listDelegationGrants() {
+			return [];
+		},
+		async putDelegationGrant() {},
+		async listPlanProposals() {
+			return [];
+		},
+		async putPlanProposal() {},
+		async listChannelEntries() {
+			return [];
+		},
+		async searchChannelEntries() {
+			return [];
+		},
+		async appendChannelEntry(entry) {
+			return { ...entry, seq: 0 };
+		},
+		async nextChannelSeq() {
+			return 0;
+		},
+		async listChannelMemberships() {
+			return [];
+		},
+		async putChannelMembership() {},
+		async getChannelReadCursor() {
+			return undefined;
+		},
+		async putChannelReadCursor() {},
 	};
 	const mgr = new SquadManager({ stateDir: dir, store });
 	await mgr.start();
@@ -88,6 +152,70 @@ test("applyCommand: a voice-originated command's source rides along to the audit
 			audits.push(e.source !== undefined ? { actor: e.actor, action: e.action, source: e.source } : { actor: e.actor, action: e.action });
 		},
 		async appendUsage() {},
+		async loadTranscripts() {
+			return {};
+		},
+		async saveTranscripts() {},
+		async loadFeatures() {
+			return [];
+		},
+		async saveFeatures() {},
+		async loadCapabilities() {
+			return {} as never;
+		},
+		async saveCapabilities() {},
+		async listChannels() {
+			return [];
+		},
+		async getChannel() {
+			return undefined;
+		},
+		async putChannel() {},
+		async listNodes() {
+			return [];
+		},
+		async getNode() {
+			return undefined;
+		},
+		async putNode() {},
+		async bindNodeChannel() {
+			return undefined;
+		},
+		async listNodeRecords() {
+			return [];
+		},
+		async putNodeRecord() {},
+		async deleteNodeRecords() {
+			return 0;
+		},
+		async listDelegationGrants() {
+			return [];
+		},
+		async putDelegationGrant() {},
+		async listPlanProposals() {
+			return [];
+		},
+		async putPlanProposal() {},
+		async listChannelEntries() {
+			return [];
+		},
+		async searchChannelEntries() {
+			return [];
+		},
+		async appendChannelEntry(entry) {
+			return { ...entry, seq: 0 };
+		},
+		async nextChannelSeq() {
+			return 0;
+		},
+		async listChannelMemberships() {
+			return [];
+		},
+		async putChannelMembership() {},
+		async getChannelReadCursor() {
+			return undefined;
+		},
+		async putChannelReadCursor() {},
 	};
 	const mgr = new SquadManager({ stateDir: dir, store });
 	await mgr.start();
@@ -187,9 +315,9 @@ test("applyCommand: source reaches the REAL audit.jsonl trail, not just the DB s
 
 	const promptLine = lines.find((e) => e.action === "prompt" && e.actor === "o");
 	expect(promptLine).toBeDefined();
-	expect(promptLine.source).toBe("voice");
+	expect(promptLine!.source).toBe("voice");
 
 	const interruptLine = lines.find((e) => e.action === "interrupt" && e.actor === "o");
 	expect(interruptLine).toBeDefined();
-	expect("source" in interruptLine).toBe(false);
+	expect("source" in interruptLine!).toBe(false);
 });

@@ -22,7 +22,7 @@ class RichDriver extends EventEmitter implements AgentDriver {
 	get isAlive(): boolean { return this.alive; }
 	async start(): Promise<void> { this.ready = true; this.alive = true; this.emit("ready"); }
 	async stop(): Promise<void> { this.ready = false; this.alive = false; }
-	async prompt(): Promise<void> {
+	async prompt(_message?: string): Promise<void> {
 		this.emit("event", { type: "agent_start" });
 		this.emit("event", { type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "checking " } });
 		this.emit("event", { type: "thinking_delta", delta: "state" });

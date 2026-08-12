@@ -84,8 +84,8 @@ test("proof persistence routes through the active backend (runProof write, proof
 test("ArchilStorageBackend loud-fails until provisioned; backendFromEnv selects it", async () => {
 	const archil = new ArchilStorageBackend();
 	expect(archil.name).toBe("archil");
-	await expect(archil.writeDurable("/x", "y")).rejects.toThrow(/not provisioned/i);
-	expect(() => archil.exists("/x")).toThrow(/not provisioned/i);
+	await expect(archil.writeDurable()).rejects.toThrow(/not provisioned/i);
+	expect(() => archil.exists()).toThrow(/not provisioned/i);
 	expect(backendFromEnv({ OMP_SQUAD_STORAGE_BACKEND: "archil" } as never).name).toBe("archil");
 	expect(backendFromEnv({} as never).name).toBe("local");
 });

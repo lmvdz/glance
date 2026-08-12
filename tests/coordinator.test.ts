@@ -56,7 +56,9 @@ test("relays a frame to other peers but not the sender", async () => {
 
 	// The sender must never see its own frame echoed back.
 	const selfEcho: unknown[] = [];
-	client1.onmessage = (event: MessageEvent): void => selfEcho.push(event.data);
+	client1.onmessage = (event: MessageEvent): void => {
+		selfEcho.push(event.data);
+	};
 
 	const payload = { kind: "presence", n: 1 };
 	client1.send(JSON.stringify(payload));

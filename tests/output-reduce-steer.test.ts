@@ -85,7 +85,7 @@ describe("runCommand steer body: signal-preserving reduce + identity safety", ()
 
 		expect(res.outcome).toBe("failed");
 		expect(res.text).toContain(TAIL_FAILURE_LINE); // the tail signal survived reduction
-		expect(res.text.length).toBeLessThanOrEqual(4096); // checkpoint-log's MAX_FIELD_BYTES headroom
+		expect(res.text!.length).toBeLessThanOrEqual(4096); // checkpoint-log's MAX_FIELD_BYTES headroom
 		expect(res.text).toMatch(/\[\d+ bytes omitted — full: .*\]/); // offload pointer present
 	});
 
@@ -104,7 +104,7 @@ describe("runCommand steer body: signal-preserving reduce + identity safety", ()
 		// Both are within budget and both preserved the tail failure line.
 		for (const r of [first, second]) {
 			expect(r.text).toContain(TAIL_FAILURE_LINE);
-			expect(r.text.length).toBeLessThanOrEqual(4096);
+			expect(r.text!.length).toBeLessThanOrEqual(4096);
 		}
 
 		// The raw strings differ — writeGateLog mints a fresh ts+nonce offload path on every call, even
@@ -114,12 +114,12 @@ describe("runCommand steer body: signal-preserving reduce + identity safety", ()
 		// But normalized (pointer/ANSI/timing-stripped), they compare EQUAL — this is the exact property
 		// noProgressRoute (engine.ts) and reflectionNote's hashOutput (executor.ts) depend on to detect
 		// "the same failure reproduced again" despite the differing offload nonce (red-team RT2-1).
-		expect(identityNormalize(first.text)).toBe(identityNormalize(second.text));
+		expect(identityNormalize(first.text!)).toBe(identityNormalize(second.text!));
 
 		// Negative control: a GENUINELY different failure must NOT collapse to the same normalized text.
 		const differentRaw = syntheticBunFailure().replace(TAIL_FAILURE_LINE, "(fail) fixture suite > an entirely unrelated case broke");
 		const e2 = exec(cwd, async () => ({ code: 1, stdout: differentRaw, stderr: "" }));
 		const third = await e2.runCommand(node, { goal: "g", vars: {} });
-		expect(identityNormalize(third.text)).not.toBe(identityNormalize(first.text));
+		expect(identityNormalize(third.text!)).not.toBe(identityNormalize(first.text!));
 	});
 });

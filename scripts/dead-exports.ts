@@ -180,7 +180,8 @@ function extractExports(rel: string, text: string): Candidate[] {
  *  the TS scanner never classifies their contents as `SyntaxKind.Identifier`). A set, not a count: this
  *  ratchet only asks "does this name appear anywhere in another file", never "how many times". */
 function identifierSet(rel: string, text: string): Set<string> {
-	const scanner = ts.createScanner(ts.ScriptTarget.Latest, /* skipTrivia */ false, scriptKindFor(rel), text);
+	const languageVariant = scriptKindFor(rel) === ts.ScriptKind.TSX ? ts.LanguageVariant.JSX : ts.LanguageVariant.Standard;
+	const scanner = ts.createScanner(ts.ScriptTarget.Latest, /* skipTrivia */ false, languageVariant, text);
 	const ids = new Set<string>();
 	let tok = scanner.scan();
 	while (tok !== ts.SyntaxKind.EndOfFileToken) {

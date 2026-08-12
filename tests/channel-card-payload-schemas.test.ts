@@ -41,6 +41,7 @@ import {
 	TRANSCRIPT_EVENT_VERIFICATION_RAN,
 	TRANSCRIPT_EVENT_VOICE_CALL,
 	TRANSCRIPT_EVENT_VOICE_DECISION,
+	TRANSCRIPT_EVENT_VOICE_FLEET_ACTION,
 	type TranscriptEventKind,
 } from "../src/transcript-event-kinds.ts";
 
@@ -136,6 +137,19 @@ const FIXTURES: Record<TranscriptEventKind, unknown> = {
 			optionLabels: ["Keep it", "Rename to session.ts"],
 			tone: "warning",
 			register: "claim",
+		},
+	},
+	[TRANSCRIPT_EVENT_VOICE_FLEET_ACTION]: {
+		refs: { callId: "call-7-8790", unitId: "room-16" },
+		face: {
+			title: "Steer relayed to Room 16",
+			status: "relayed",
+			tone: "info",
+			register: "claim",
+			callId: "call-7-8790",
+			tool: "steer",
+			actionStatus: "relayed",
+			unitId: "room-16",
 		},
 	},
 };

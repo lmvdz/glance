@@ -24,10 +24,11 @@ import {
 	type BuildFactoryStatusInput,
 } from "../src/factory-status.ts";
 import type { MetricEvent } from "../src/metrics.ts";
+import type { AutomationLoop } from "../src/types.ts";
 
 const NOW = 1_700_000_000_000;
 
-function roll(loop: string, p: Partial<AutomationRollupRow> = {}): AutomationRollupRow {
+function roll(loop: AutomationLoop, p: Partial<AutomationRollupRow> = {}): AutomationRollupRow {
 	return { loop, events: 0, llmCalls: 0, found: 0, filed: 0, spawned: 0, errors: 0, lastAt: 0, ...p };
 }
 

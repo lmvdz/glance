@@ -75,6 +75,7 @@ interface TransitionLogEntry {
 	reason: string;
 	at: number;
 	denied?: boolean;
+	cause?: { error?: string; priorId?: string; [k: string]: unknown };
 }
 
 interface AttachHost {
