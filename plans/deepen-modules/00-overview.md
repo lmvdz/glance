@@ -24,6 +24,17 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
+## Round 3, iteration 2 (2026-08-11, goal mode — PR pending) — CONCERN 18 DONE
+BoundarySyncLane extracted (round-2 rank 1): ~470 lines of turn-boundary wiring leave
+squad-manager for src/boundary-sync-lane.ts behind a 5-closure port + structural session slice;
+every fail-closed annotation moved verbatim. Codex: bodies normalized-identical, one Medium —
+the wiring suite's TestManager bracket-accessed the deleted privates, 20/22 tests TypeError'd
+at RUNTIME (concern 23's untyped-test blind spot, live again); seams migrated. Grok
+narration-only x3 (gap ledgered). Root 5332 pass; only reds are main-inherited ratchets
+(idiom 89/88 rail's unpaid hit, dead-exports 211/210 scanner position artifact) — both fixed
+on PR #370. (This branch is off main, so iteration 1's line lives on the #370 branch;
+keep-both-sides at merge.)
+
 ## Round 2 (2026-08-04, iteration 37 — the goal's completion clause)
 Queue was dry (14 done, 3 needs-lars) → fresh review round executed: two Explore agents over
 current main (daemon: squad-manager regions with per-region coupling counts, Store, CLI,
