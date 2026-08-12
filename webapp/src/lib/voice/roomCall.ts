@@ -596,7 +596,7 @@ export function withoutRawRoomEvents<T extends Pick<ChannelEntry, 'text' | 'even
 // Thread-scoped status region
 // =================================================================================================
 
-export type ThreadStatusKind = 'no-call' | 'ended-unexpectedly' | 'degraded' | 'open-decisions' | 'review-queue' | 'active-agents' | 'all-clear';
+export type ThreadStatusKind = 'no-call' | 'ended-unexpectedly' | 'retention-mismatch' | 'degraded' | 'open-decisions' | 'review-queue' | 'active-agents' | 'all-clear';
 
 export interface ThreadStatus {
   kind: ThreadStatusKind;
@@ -639,6 +639,20 @@ export function threadStatus(input: ThreadStatusInput): ThreadStatus {
   }
   if (endedUnexpectedly(binding)) {
     return { kind: 'ended-unexpectedly', headline: 'The call ended unexpectedly.', detail: terminalReasonCopy(binding.terminalReason, binding.terminalError), tone: 'destructive', count: 0 };
+  }
+  // Retention mismatch outranks everything but a dead call (codex H, concern 25 round): the room
+  // asked for one recording posture and the live session reports another — a privacy/trust fact.
+  // The daemon's durable mismatch CARD scrolls away with the timeline; this standing region was
+  // saying "All clear" over it. The deleted call HUD was the only alert renderer; the precedence
+  // ladder is its honest replacement on the surface that actually stands.
+  if (binding.retentionMismatch && binding.state !== 'ended') {
+    return {
+      kind: 'retention-mismatch',
+      headline: `Recording mismatch: the room asked for "${binding.retentionMismatch.expected}" but the live session reports "${binding.retentionMismatch.reported}".`,
+      detail: 'What is actually being kept follows the SESSION, not the room setting. End the call if the reported posture is not acceptable.',
+      tone: 'destructive',
+      count: 0,
+    };
   }
   if (binding.state === 'degraded') {
     return { kind: 'degraded', headline: 'The live view is degraded.', detail: 'The socket dropped and the room is confirming with the broker whether the session is still running. The record is unaffected — it comes from the journal, not this socket.', tone: 'warning', count: 0 };

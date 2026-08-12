@@ -46,9 +46,13 @@ export interface VoiceStatusRegionProps {
    *  above, this is never gated on the CURRENT room having a call — the whole point of that surface
    *  is seeing calls (and broker orphans) this room's own state cannot show at all. */
   onOpenCalls?: () => void;
+  /** Browser audio relay/mic status for an audio-less call (codex H, concern 25 round): the
+   *  deleted call HUD was the only renderer of this line and its Retry — a denied mic or refused
+   *  relay looked like a healthy call with no sound and no recourse. */
+  audio?: { line: { text: string; tone: 'neutral' | 'error'; showRetry: boolean }; onRetry: () => void };
 }
 
-export function VoiceStatusRegion({ status, chipLabel, announcement, onOpenDecisions, onOpenArtifacts, artifactCount, onOpenCalls }: VoiceStatusRegionProps) {
+export function VoiceStatusRegion({ status, chipLabel, announcement, onOpenDecisions, onOpenArtifacts, artifactCount, onOpenCalls, audio }: VoiceStatusRegionProps) {
   return (
     <div
       className="flex-none"
@@ -62,7 +66,7 @@ export function VoiceStatusRegion({ status, chipLabel, announcement, onOpenDecis
         {announcement ?? ''}
       </div>
 
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2" {...(status.kind === 'retention-mismatch' ? { role: 'alert' } : {})}>
         <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2.5 gap-y-0.5">
           <span className="text-[12.5px] font-semibold" style={{ color: TONE_INK[status.tone] }}>{status.headline}</span>
           {status.detail ? (
@@ -106,6 +110,22 @@ export function VoiceStatusRegion({ status, chipLabel, announcement, onOpenDecis
           ) : null}
         </div>
       </div>
+      {audio ? (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 pb-2" {...(audio.line.tone === 'error' ? { role: 'alert' } : {})}>
+          <span className="min-w-0 text-[12px] leading-[1.5]" style={{ color: audio.line.tone === 'error' ? '#E8B4AC' : '#7A7A82' }}>{audio.line.text}</span>
+          {audio.line.showRetry ? (
+            <button
+              type="button"
+              onClick={audio.onRetry}
+              className="inline-flex min-h-8 items-center rounded-full px-3 text-[11px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ember focus-visible:ring-offset-2"
+              style={{ border: '1px solid #4A3319', background: '#161211', color: '#D9A03C', fontFamily: MONO, letterSpacing: '.06em' }}
+              aria-label="Retry browser audio"
+            >
+              Retry audio
+            </button>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }

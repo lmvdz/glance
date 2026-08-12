@@ -425,6 +425,17 @@ describe('thread status region', () => {
     expect(threadStatus({ ...base, binding: binding() }).kind).toBe('all-clear');
   });
 
+  test('a retention mismatch outranks everything but a dead call — privacy first (codex H, concern 25)', () => {
+    const mm = binding({ retention: 'off', retentionMismatch: { expected: 'off', reported: 'full' } });
+    const s = threadStatus({ ...base, binding: mm, decisions: [decision({ requiresConfirmation: true })], activeAgents: 3 });
+    expect(s.kind).toBe('retention-mismatch');
+    expect(s.tone).toBe('destructive');
+    expect(s.headline).toContain('"off"');
+    expect(s.headline).toContain('"full"');
+    // …but a DEAD call's honest terminal state still wins (nothing is being recorded anymore).
+    expect(threadStatus({ ...base, binding: binding({ state: 'ended', terminalReason: 'journal-end', retentionMismatch: { expected: 'off', reported: 'full' } }) }).kind).toBe('ended-unexpectedly');
+  });
+
   test('a broken relay outranks a question you cannot answer through it', () => {
     // A decision sitting behind a dead socket is not "a question waiting" — saying so first is what
     // stops someone clicking an option four times.
