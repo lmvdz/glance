@@ -79,6 +79,9 @@ export function landReceiptIndexRow(receipt: LandReceipt): LandReceiptIndexRow {
 					},
 				}
 			: {}),
+		// The validator verdict (glance#391 round 3, C-3): `isMeasuredLand` requires `verdict==="pass"`,
+		// so an abstain/skipped land can never be counted as measured on precision.n alone.
+		...(receipt.validation?.verdict ? { verdict: receipt.validation.verdict } : {}),
 		// Self-land criteria provenance (glance#391 M-1) — carried through so the window can report
 		// declared (pr-body) vs call-supplied lands separately. Absent on an ordinary agent land.
 		...(receipt.criteriaSource ? { criteriaSource: receipt.criteriaSource } : {}),
@@ -144,11 +147,39 @@ function parseNewRegressions(detail: string): string[] {
 }
 
 /**
+ * Durably append ONE index row to `<stateDir>/land-receipts/index.jsonl` — the window's countable
+ * substrate — DECOUPLED from the best-effort HTML receipt (glance#391 round 3, H-3). A self-land calls
+ * this as a must-succeed step after a confirmed merge, so a failure to render/write the HTML can never
+ * leave a merged, measured land with no window row. Retries a bounded number of times, then THROWS so
+ * the caller can be loud (and fall back to the journal), never silently drop the row.
+ */
+export async function appendLandReceiptIndexRow(stateDir: string, receipt: LandReceipt): Promise<void> {
+	await fs.mkdir(landReceiptDir(stateDir), { recursive: true });
+	const line = JSON.stringify(landReceiptIndexRow(receipt)) + "\n";
+	let lastErr: unknown;
+	for (let attempt = 0; attempt < 3; attempt++) {
+		try {
+			await fs.appendFile(landReceiptIndexPath(stateDir), line, "utf8");
+			return;
+		} catch (err) {
+			lastErr = err;
+			await new Promise((r) => setTimeout(r, 20 * (attempt + 1)));
+		}
+	}
+	if (lastErr instanceof Error) throw lastErr;
+	throw new Error(String(lastErr));
+}
+
+/**
  * Write the self-contained HTML receipt under `<stateDir>/land-receipts/`. Returns the absolute path.
  * Best-effort caller contract: a receipt-write failure must NEVER fail the land — the caller wraps
  * this in a try/catch (same posture as every other post-land ledger write).
+ *
+ * `skipIndex` (glance#391 round 3): the self-land path appends the index row itself, DURABLY, via
+ * `appendLandReceiptIndexRow` BEFORE this best-effort HTML — so pass `skipIndex:true` there to avoid a
+ * duplicate index row. The agent path leaves it false (HTML + index together, both best-effort).
  */
-export async function writeLandReceipt(stateDir: string, receipt: LandReceipt): Promise<string> {
+export async function writeLandReceipt(stateDir: string, receipt: LandReceipt, opts: { skipIndex?: boolean } = {}): Promise<string> {
 	const dir = landReceiptDir(stateDir);
 	await fs.mkdir(dir, { recursive: true });
 	const html = renderReceiptHtml(receipt);
@@ -164,8 +195,9 @@ export async function writeLandReceipt(stateDir: string, receipt: LandReceipt): 
 			// wrote. Deliberately its OWN try/catch, separate from the caller's best-effort land wrapper:
 			// an index-append failure must never lose the human-facing HTML receipt already on disk, so it
 			// is swallowed here. Undercounting is the failure mode, never a lost receipt or a failed land.
+			// `skipIndex` (self-land): the row was already appended durably before this HTML.
 			try {
-				await fs.appendFile(landReceiptIndexPath(stateDir), JSON.stringify(landReceiptIndexRow(receipt)) + "\n", "utf8");
+				if (!opts.skipIndex) await fs.appendFile(landReceiptIndexPath(stateDir), JSON.stringify(landReceiptIndexRow(receipt)) + "\n", "utf8");
 			} catch (e) {
 				// index is best-effort; the HTML receipt is the durable record. WARN rather than swallow
 				// silently (grok #361): a persistent append failure (disk full, index-only perms) would

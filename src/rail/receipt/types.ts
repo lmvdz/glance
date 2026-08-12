@@ -189,6 +189,10 @@ export interface LandReceiptIndexRow {
 	gateStatus: GateStatus;
 	/** The validator's measured reviewer-precision stamp, when a validator ran. Absent otherwise. */
 	precision?: LandReceiptPrecision;
+	/** The validator's VERDICT (glance#391 round 3, C-3). A measured land is one a judge evaluated to
+	 *  `pass` — `isMeasuredLand` requires this, so an `abstain` (which IS precision-stamped) can never
+	 *  be counted as measured on `precision.n>0` alone. Absent when no validator ran. */
+	verdict?: ValidationRecord["verdict"];
 	/** Self-land criteria provenance (glance#391 M-1) — `"pr-body"` (declared, tied to the PR) vs
 	 *  `"call"` (supplied at land time, weaker). Absent on an ordinary agent land. Lets the window
 	 *  count declared-criteria lands separately from call-supplied ones. */

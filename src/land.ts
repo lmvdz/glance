@@ -183,6 +183,16 @@ export interface LandOpts {
 	expectHeadOid?: string;
 	refuseDraft?: boolean;
 	/**
+	 * Self-land measurement invariant (glance#391 round 3, C-3): when set, `landBranch`'s OWN validator
+	 * gate refuses unless the verdict is an evaluated `pass` over every declared criterion — not merely
+	 * "not a veto/inconclusive". This makes `landBranch` the SINGLE authoritative verdict site: there is
+	 * no separate pre-gate the inner gate can silently disagree with (the earlier design let a pre-gate
+	 * pass while the dispatch-time gate abstained, merging on an unmeasured verdict). `skipped`,
+	 * `abstain`, and any non-`pass` verdict block the land here, before any merge. Ignored by the land
+	 * primitives (read at the manager's runValidatorGate seam, like every field in this block).
+	 */
+	requireValidationPass?: boolean;
+	/**
 	 * Observer for the validator record this land produced (glance#391). `runValidatorGate` stamps the
 	 * record onto the AGENT DTO (`rec.dto.validation`) — which only exists when `agentId` resolves to a
 	 * live roster entry, so a record-free land (`selfLand`) had no way to see the verdict its own land

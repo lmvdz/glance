@@ -32,6 +32,7 @@ import { insertLedgerRow } from "../src/meta-ledger.ts";
 import { resolveStateDir } from "../src/state-dir.ts";
 import { normalizeGitUrl } from "../src/repo-identity.ts";
 import { readLandReceiptIndex, landMetricsWindow, utcDayOf } from "../src/rail/land-metrics.ts";
+import { journalRowsForWindow } from "../src/rail/self-land/journal.ts";
 
 const { flags } = parseArgs(process.argv.slice(2));
 const stateDir = typeof flags["state-dir"] === "string" ? path.resolve(flags["state-dir"]) : resolveStateDir();
@@ -70,6 +71,15 @@ try {
 	read = await readLandReceiptIndex(stateDir);
 } catch (err) {
 	fail(`cannot read the land-receipt index under ${stateDir} (${err instanceof Error ? err.message : String(err)}) — no row appended; the index is unmeasurable, not empty`);
+}
+// H-3 (glance#391 round 3): fold in FINALIZED self-land journal rows whose index-append faulted after
+// a confirmed merge — so a receipt-write failure can never hide a merged measured land from the window.
+// Deduped against the index by (branch, commit); a land already in the index is not double-counted.
+try {
+	const folded = await journalRowsForWindow(stateDir, read!.rows);
+	if (folded.length) read = { rows: [...read!.rows, ...folded], malformed: read!.malformed };
+} catch {
+	/* the journal is a best-effort fallback; a read fault here just means no fold, never a throw */
 }
 
 // The window ends "now" in UTC. Date.now() is intentional here (a CLI, not a resume-safe workflow

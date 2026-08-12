@@ -78,12 +78,17 @@ class TestManager extends SquadManager {
 	protected lookupPrForBranch(): Promise<PrLookup> {
 		return Promise.resolve(this.forBranch ?? { ok: true, pr: undefined });
 	}
-	/** Capture the LandOpts selfLand threads down, and simulate a merged PR-mode land WITHOUT gh. */
+	/** Capture the LandOpts selfLand threads down, and simulate a merged PR-mode land WITHOUT gh. When
+	 *  `fakeLand` is set it stands in for the real merge; it calls `onValidation` with a pass record so
+	 *  the pass-derived `measured` holds (the real gate is exercised in tests/self-land-merge.test.ts). */
 	captured: LandOpts | undefined;
 	fakeLand: ((opts: LandOpts) => LandResult) | undefined;
 	protected landBranch(opts: LandOpts): Promise<LandResult> {
 		this.captured = opts;
-		if (this.fakeLand) return Promise.resolve(this.fakeLand(opts));
+		if (this.fakeLand) {
+			opts.onValidation?.({ verdict: "pass", agreement: 1, confidence: 1, perCriterion: (opts.criteria ?? []).map((c) => ({ id: c.id, satisfied: true })), rationale: "fake pass", ranAt: Date.now(), reviewerPrecision: { lineage: "native", n: 2, survived: 2, survivedRate: 1, provisional: true } });
+			return Promise.resolve(this.fakeLand(opts));
+		}
 		return super.landBranch(opts);
 	}
 }
@@ -188,11 +193,12 @@ test("PR mode: selfLand threads expectBase / expectHeadOid / refuseDraft into La
 	mgr.fakeLand = (opts) => ({ ok: true, committed: true, merged: true, message: opts.message, mode: "pr", prNumber: 377, head0: "aaaa", landedCommit: "bbbb" });
 	const result = await mgr.selfLand({ repo, pr: 377, expectBase: "main" });
 	expect(result.ok).toBe(true);
-	expect(result.measured).toBe(true); // verdict pass, graded before dispatch
+	expect(result.measured).toBe(true); // verdict pass (via the gate), and a real merge
 	expect(result.criteriaSource).toBe("pr-body"); // criteria came from the PR's own checklist
 	expect(mgr.captured?.expectBase).toBe("main");
 	expect(mgr.captured?.expectHeadOid).toBe(tip);
 	expect(mgr.captured?.refuseDraft).toBe(true);
+	expect(mgr.captured?.requireValidationPass).toBe(true); // C-3: the pass invariant is threaded INTO landBranch
 	expect(mgr.captured?.criteria?.length).toBe(1);
 });
 

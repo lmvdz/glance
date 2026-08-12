@@ -20,7 +20,7 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { acceptanceCriteriaFromPrBody, criteriaFromTexts, isMeasuredLand, landReceiptIndexRow, readLandReceiptIndex } from "../src/rail/index.ts";
+import { acceptanceCriteriaFromPrBody, criteriaFromTexts, isMeasuredLand, landReceiptIndexRow, readLandReceiptIndex, readSelfLandJournal } from "../src/rail/index.ts";
 import type { GateStage } from "../src/intake.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import { SquadServer } from "../src/server.ts";
@@ -230,9 +230,15 @@ test("HAPPY PATH: a self-land into a scratch target branch merges and writes a M
 	expect(rows[0]!.forced).toBe(false);
 	expect(rows[0]!.precision?.n).toBe(3);
 	expect(rows[0]!.criteriaSource).toBe("call"); // M-1: provenance stamped on the row
+	expect(rows[0]!.verdict).toBe("pass"); // C-3: measured rows carry an evaluated pass verdict
 	expect(isMeasuredLand(rows[0]!)).toBe(true);
 	// The HTML receipt exists beside the index.
 	expect(await fs.stat(result.receiptPath!).then((s) => s.isFile())).toBe(true);
+	// H-3: the durable journal recorded this land as finalized (the fallback evidence).
+	const journal = await readSelfLandJournal(stateDir);
+	const finalized = [...journal.values()].filter((e) => e.status === "finalized" && e.branch === BRANCH);
+	expect(finalized.length).toBe(1);
+	expect(finalized[0]!.landedCommit).toBeTruthy();
 });
 
 test("HAPPY PATH: the self-land worktree is torn down after the land (no state-dir litter)", async () => {

@@ -275,6 +275,14 @@ export interface EnsurePrInput {
 	agentId?: string;
 	/** The unit's feature id, threaded straight onto the recorded `PendingPr` entry (concern 06). */
 	featureId?: string;
+	/**
+	 * Self-land NON-MUTATING adopt (glance#391 round 3, C-2): when set, `ensurePr` must adopt the EXACT
+	 * open PR at EXACTLY this head SHA and do nothing else — no push, no force-push, no create, no `gh
+	 * pr ready`, no body edit. A head mismatch (the PR advanced to a descendant we never gated) is a
+	 * REFUSAL, never a force-push of our stale tip back over the PR head. The whole point of the earlier
+	 * fixes evaporates if `ensurePr` can rewrite the head between measurement and merge; this closes that.
+	 */
+	expectHeadOid?: string;
 }
 
 export interface EnsurePrResult {
@@ -300,13 +308,43 @@ export async function ensurePr(input: EnsurePrInput): Promise<EnsurePrResult> {
 	// `gh pr list --head` with --state all in one call: OPEN ⇒ adopt (no push, no create); anything
 	// else present ⇒ the branch name was used by a prior (closed/merged) PR, so the next push must be
 	// force-with-lease, not a plain push (which would fail non-fast-forward against that stale ref).
-	const list = await ghJson<{ number: number; url: string; state: string; headRefOid?: string; isDraft?: boolean }[]>(
+	const listRaw = await ghJson<unknown>(
 		["pr", "list", "--head", input.branch, "--repo", repoSlug, "--state", "all", "--json", "number,url,state,headRefOid,isDraft"],
 		input.repo,
 	);
-	if (list === undefined) return { ok: false, detail: `gh pr list --head ${input.branch} failed` };
+	if (listRaw === undefined) return { ok: false, detail: `gh pr list --head ${input.branch} failed` };
+	// Strict decode of every executed gh row (glance#391 round 3, H-1): a non-array is not "no PRs" — it
+	// is an unreadable answer, and trusting a partial row (missing headRefOid) is exactly how a wrong
+	// tip gets adopted. Fail closed rather than throw.
+	// A non-array is not "no PRs" — it is an unreadable answer, and trusting it is how a wrong tip gets
+	// adopted (glance#391 round 3, H-1). Fail closed rather than throw. Individual ROW fields stay
+	// leniently typed for the normal agent path (gh has historically omitted headRefOid/isDraft there);
+	// the SELF-LAND path below validates every field it keys on strictly, since it merges no-record work.
+	if (!Array.isArray(listRaw)) return { ok: false, detail: `gh pr list --head ${input.branch} returned an unexpected shape (not an array)` };
+	const list = listRaw as { number?: unknown; url?: unknown; state?: unknown; headRefOid?: unknown; isDraft?: unknown }[];
 
-	const openPr = list.find((p) => p.state === "OPEN");
+	const openPr = list.find((p) => p?.state === "OPEN") as { number: number; url: string; state: string; headRefOid?: string; isDraft?: boolean } | undefined;
+
+	// Self-land NON-MUTATING adopt (C-2): adopt the EXACT PR at EXACTLY the gated head, or refuse. No
+	// push/force-push/create/ready/edit — so the head we measured cannot be rewritten before the merge.
+	// STRICT here (H-1): every field the decision keys on must be well-formed, or fail closed.
+	if (input.expectHeadOid !== undefined) {
+		if (!openPr) return { ok: false, detail: `self-land: no OPEN PR on ${input.branch} to adopt at the gated head ${input.expectHeadOid.slice(0, 12)}` };
+		if (typeof openPr.number !== "number" || !Number.isInteger(openPr.number) || openPr.number <= 0 || typeof openPr.url !== "string" || !openPr.url) {
+			return { ok: false, detail: `self-land: gh pr list --head ${input.branch} returned an OPEN row with no valid number/url — refusing to adopt an under-specified PR row` };
+		}
+		if (typeof openPr.headRefOid !== "string" || !/^[0-9a-f]{7,40}$/.test(openPr.headRefOid)) {
+			return { ok: false, detail: `self-land: gh pr list --head ${input.branch} returned no valid head sha for PR #${openPr.number} — refusing (H-1 fail closed)` };
+		}
+		const refusal = nonMutatingAdoptDecision(input.expectHeadOid, { number: openPr.number, headRefOid: openPr.headRefOid }, input.branch);
+		if (refusal) return { ok: false, detail: refusal };
+		const existing = getPendingPr(input.stateDir, input.branch);
+		if (!existing || existing.prNumber !== openPr.number) {
+			recordPendingPr(input.stateDir, { branch: input.branch, repo: repoIdentity(input.repo), prNumber: openPr.number, prUrl: openPr.url, issueId: input.issueId, issueIdentifier: input.issueIdentifier, issueProjectId: input.issueProjectId, agentId: input.agentId, featureId: input.featureId, createdAt: Date.now(), state: "open" });
+		}
+		return { ok: true, prNumber: openPr.number, prUrl: openPr.url, prState: openPr.isDraft ? "draft" : "open" };
+	}
+
 	if (openPr) {
 		// CRITICAL: the downstream scratch gate always re-checks proof/merges against the LOCAL branch
 		// tip, but `gh pr merge` merges the PR's REMOTE head. If a prior attempt pushed tip-1 (gate
@@ -509,6 +547,73 @@ export async function prForBranch(repo: string, branch: string): Promise<PrLooku
 	return { ok: true, pr: decoded.pr };
 }
 
+// ── self-land merge-point atomicity (glance#391 round 3) — pure, unit-tested decisions ─────────
+
+/** The live PR facts re-read UNDER the repo land lock immediately before `gh pr merge`. */
+export interface LiveMergeFacts {
+	state?: unknown;
+	baseRefName?: unknown;
+	headRefOid?: unknown;
+	isDraft?: unknown;
+}
+
+/**
+ * The base/head/draft compare-and-swap decision, factored out PURE so it is unit-tested without gh
+ * (glance#391 round 3, C-1/C-2/H-1). Returns a refusal reason, or `undefined` to proceed. STRICT: a
+ * missing/mistyped field the guard keys on fails CLOSED — a self-land never merges on an unreadable
+ * live row. `expectBase`/`expectHeadOid` undefined ⇒ that facet isn't guarded (a normal agent land).
+ *
+ * @substrate exported for tests only — production reaches it from `landAgentPrOnce` in this file; the
+ * export exists so the merge-point compare-and-swap is unit-provable WITHOUT a gh module-mock.
+ */
+export function selfLandMergeGuard(live: LiveMergeFacts, opts: { expectBase?: string; expectHeadOid?: string; refuseDraft?: boolean }, prNumber: number): string | undefined {
+	if (opts.expectBase !== undefined) {
+		if (typeof live.baseRefName !== "string") return `self-land base guard: PR #${prNumber} returned no base branch at merge time — refusing`;
+		if (live.baseRefName !== opts.expectBase) return `self-land base guard: PR #${prNumber} now targets "${live.baseRefName}", not the authorized "${opts.expectBase}" — refusing (gh pr merge lands into the PR's own base, not the branch gated)`;
+	}
+	if (opts.expectHeadOid !== undefined) {
+		if (typeof live.headRefOid !== "string" || !/^[0-9a-f]{7,40}$/.test(live.headRefOid)) return `self-land head guard: PR #${prNumber} returned no valid head sha at merge time — refusing`;
+		const h = live.headRefOid;
+		const same = h === opts.expectHeadOid || h.startsWith(opts.expectHeadOid) || opts.expectHeadOid.startsWith(h);
+		if (!same) return `self-land head guard: PR #${prNumber}'s head moved to ${h.slice(0, 12)} since it was gated at ${opts.expectHeadOid.slice(0, 12)} — refusing (the tree that was verified is not the tree that would merge)`;
+	}
+	if (opts.refuseDraft) {
+		if (typeof live.isDraft !== "boolean") return `self-land draft guard: PR #${prNumber} returned no draft flag at merge time — refusing`;
+		if (live.isDraft === true) return `self-land refuses a DRAFT PR: #${prNumber} is still a draft (GitHub reports drafts as OPEN) — mark it ready for review before landing`;
+	}
+	return undefined;
+}
+
+/**
+ * The `gh pr merge` argv (glance#391 round 3, C-1). When `expectHeadOid` is set, `--match-head-commit`
+ * binds the merge to EXACTLY that SHA — GitHub refuses server-side if the head moved to a descendant
+ * since we measured it, closing the window where an H2 pushed after our read merges under an H-only
+ * proof. Pure so the CAS wiring is unit-provable without gh.
+ *
+ * @substrate exported for tests only — production reaches it from `landAgentPrOnce` in this file.
+ */
+export function prMergeArgs(prNumber: number, method: MergeMethod, repoSlug: string, expectHeadOid?: string): string[] {
+	const args = ["pr", "merge", String(prNumber), `--${method}`, "--delete-branch=false", "--repo", repoSlug];
+	if (expectHeadOid) args.push("--match-head-commit", expectHeadOid);
+	return args;
+}
+
+/**
+ * The NON-MUTATING adopt decision for a self-land (glance#391 round 3, C-2), factored PURE. With
+ * `expectHeadOid` set, `ensurePr` adopts the exact open PR at exactly the gated head or REFUSES — it
+ * never pushes/force-pushes the gated tip back over a newer PR head. `openHead` is the live open PR's
+ * head SHA (undefined ⇒ no open PR). Returns a refusal reason, or `undefined` to adopt as-is.
+ *
+ * @substrate exported for tests only — production reaches it from `ensurePr` in this file.
+ */
+export function nonMutatingAdoptDecision(expectHeadOid: string, openPr: { number: number; headRefOid: string } | undefined, branch: string): string | undefined {
+	if (!openPr) return `self-land: no OPEN PR on ${branch} to adopt at the gated head ${expectHeadOid.slice(0, 12)}`;
+	const h = openPr.headRefOid;
+	const same = h === expectHeadOid || h.startsWith(expectHeadOid) || expectHeadOid.startsWith(h);
+	if (!same) return `self-land: PR #${openPr.number}'s head is ${h.slice(0, 12)}, not the gated ${expectHeadOid.slice(0, 12)} — refusing (a non-mutating adopt never force-pushes the gated tip back over a newer PR head)`;
+	return undefined;
+}
+
 // ── scratch worktree — disposable, never the primary checkout ──────────────────────────────────
 
 async function mkScratchWorktree(repo: string, defaultBranch: string): Promise<string> {
@@ -550,14 +655,19 @@ export async function assertMerged(input: { repo: string; defaultBranch: string;
 		if (!ok) return { ok: false, detail: `${input.branchTipSha} is not an ancestor of ${base} after gh pr merge --merge — merge did not land as expected` };
 		return { ok: true, commit: input.branchTipSha, mergeCommit: input.branchTipSha };
 	}
-	const view = await ghJson<{ state: string; headRefOid: string; mergeCommit?: { oid: string } }>(
+	// Strict decode of THIS executed gh row (glance#391 round 3, H-1): a non-object or a row missing
+	// state/headRefOid must fail closed, never coerce to a truthy pass. `mergeCommit` is validated below.
+	const viewRaw = await ghJson<unknown>(
 		["pr", "view", String(input.prNumber), "--repo", slugOf(input.repo), "--json", "state,headRefOid,mergeCommit"],
 		input.repo,
 	);
-	if (!view) return { ok: false, detail: `gh pr view ${input.prNumber} failed` };
+	if (viewRaw === undefined || typeof viewRaw !== "object" || viewRaw === null || Array.isArray(viewRaw)) return { ok: false, detail: `gh pr view ${input.prNumber} failed or returned an unexpected shape` };
+	const view = viewRaw as { state?: unknown; headRefOid?: unknown; mergeCommit?: unknown };
+	if (typeof view.state !== "string") return { ok: false, detail: `gh pr view ${input.prNumber} returned no state` };
 	if (view.state !== "MERGED") return { ok: false, detail: `gh pr view ${input.prNumber} reports state=${view.state}, expected MERGED` };
-	if (view.headRefOid !== input.branchTipSha) return { ok: false, detail: `PR #${input.prNumber}'s recorded head ${view.headRefOid} != branch tip ${input.branchTipSha} — a later force-push landed without re-review` };
-	const mergeCommit = view.mergeCommit?.oid;
+	if (typeof view.headRefOid !== "string" || view.headRefOid !== input.branchTipSha) return { ok: false, detail: `PR #${input.prNumber}'s recorded head ${String(view.headRefOid)} != branch tip ${input.branchTipSha} — a later force-push landed without re-review` };
+	const mergeCommitRaw = view.mergeCommit && typeof view.mergeCommit === "object" && !Array.isArray(view.mergeCommit) ? (view.mergeCommit as { oid?: unknown }).oid : undefined;
+	const mergeCommit = typeof mergeCommitRaw === "string" ? mergeCommitRaw : undefined;
 	if (!mergeCommit) return { ok: false, detail: `gh pr view ${input.prNumber} reports MERGED but no mergeCommit oid` };
 	const reachable = await isAncestor(mergeCommit, base, input.repo);
 	if (!reachable) return { ok: false, detail: `merge commit ${mergeCommit} for PR #${input.prNumber} is not reachable from ${base}` };
@@ -834,6 +944,9 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 		issueProjectId: opts.issueProjectId,
 		agentId: opts.agentId,
 		stateDir,
+		// Self-land (C-2): a NON-MUTATING adopt of the exact PR at the gated head — ensurePr refuses a
+		// head mismatch instead of force-pushing the gated tip back over a newer PR head.
+		expectHeadOid: opts.expectHeadOid,
 	});
 	if (!ensure.ok || ensure.prNumber === undefined || ensure.prUrl === undefined) {
 		return { ok: false, committed, merged: false, message, mode: "pr", detail: ensure.detail ?? "ensurePr failed" };
@@ -982,19 +1095,15 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 	// re-verified against what GitHub will actually merge into. Any of the three unset ⇒ a normal
 	// agent land, unaffected.
 	if (opts.expectBase !== undefined || opts.expectHeadOid !== undefined || opts.refuseDraft) {
+		// Strict decode of THIS executed gh row (H-1): a missing headRefOid/isDraft/baseRefName the guard
+		// keys on must fail closed, never be read as "no head" / "not draft".
 		const liveRaw = await ghJson<unknown>(["pr", "view", String(ensure.prNumber), "--repo", slugOf(repo), "--json", "state,baseRefName,headRefOid,isDraft"], repo);
 		if (liveRaw === undefined || typeof liveRaw !== "object" || liveRaw === null || Array.isArray(liveRaw)) {
 			return { ok: false, committed, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: `self-land merge guard: could not re-read PR #${ensure.prNumber}'s live base/head/draft state before merge — refusing rather than merging unverified` };
 		}
-		const live = liveRaw as { state?: unknown; baseRefName?: unknown; headRefOid?: unknown; isDraft?: unknown };
-		if (opts.expectBase !== undefined && live.baseRefName !== opts.expectBase) {
-			return { ok: false, committed, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: `self-land base guard: PR #${ensure.prNumber} now targets "${String(live.baseRefName)}", not the authorized "${opts.expectBase}" — refusing (gh pr merge lands into the PR's own base, not the branch gated)` };
-		}
-		if (opts.expectHeadOid !== undefined && typeof live.headRefOid === "string" && live.headRefOid !== opts.expectHeadOid) {
-			return { ok: false, committed, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: `self-land head guard: PR #${ensure.prNumber}'s head moved to ${live.headRefOid.slice(0, 12)} since it was gated at ${opts.expectHeadOid.slice(0, 12)} — refusing (the tree that was verified is not the tree that would merge)` };
-		}
-		if (opts.refuseDraft && live.isDraft === true) {
-			return { ok: false, committed, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: `self-land refuses a DRAFT PR: #${ensure.prNumber} is still a draft (GitHub reports drafts as OPEN) — mark it ready for review before landing, so the land is a deliberate act, not a silent draft→ready→merge` };
+		const guardReason = selfLandMergeGuard(liveRaw as LiveMergeFacts, { expectBase: opts.expectBase, expectHeadOid: opts.expectHeadOid, refuseDraft: opts.refuseDraft }, ensure.prNumber);
+		if (guardReason) {
+			return { ok: false, committed, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: guardReason };
 		}
 	}
 
@@ -1004,13 +1113,24 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 	// mode resolve as usable and then permanently fail every merge.
 	const method = mergeMethod();
 	const repoSlug = slugOf(repo);
-	const wasDraft = ensure.prState === "draft";
-	const ready = await gh(["pr", "ready", String(ensure.prNumber), "--repo", repoSlug], repo); // draft→ready; harmless if already ready
-	if (ready.code !== 0 && wasDraft) {
-		return { ok: false, committed, merged: false, retryable: true, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, prState: "draft", detail: `gh pr ready failed: ${ready.stderr || ready.stdout}` };
+	// Self-land (C-1): DO NOT `gh pr ready` — the live guard already refused a draft, and a `ready` call
+	// would UN-DRAFT a PR that flipped to draft mid-window (the very race). A non-self-land keeps the
+	// existing draft→ready behaviour. A self-land PR that flips to draft makes `gh pr merge` itself fail
+	// server-side (GitHub refuses to merge a draft), which is the correct refusal.
+	const selfLandMerge = opts.expectHeadOid !== undefined;
+	if (!selfLandMerge) {
+		const wasDraft = ensure.prState === "draft";
+		const ready = await gh(["pr", "ready", String(ensure.prNumber), "--repo", repoSlug], repo); // draft→ready; harmless if already ready
+		if (ready.code !== 0 && wasDraft) {
+			return { ok: false, committed, merged: false, retryable: true, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, prState: "draft", detail: `gh pr ready failed: ${ready.stderr || ready.stdout}` };
+		}
 	}
-	const merged = await gh(["pr", "merge", String(ensure.prNumber), `--${method}`, "--delete-branch=false", "--repo", repoSlug], repo);
-	if (merged.code !== 0) return { ok: false, committed, merged: false, retryable: true, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, prState: "open", detail: `gh pr merge failed: ${merged.stderr || merged.stdout}` };
+	// Self-land (C-1): bind the merge to the EXACT gated SHA. `--match-head-commit` makes GitHub REFUSE
+	// the merge server-side if the PR head has moved to a descendant since we measured it — closing the
+	// window where H2 (pushed after our read) merges under an H-only proof and passes assertMerged's
+	// ancestry check. The tree the validator measured is the ONLY tree that can merge.
+	const merged = await gh(prMergeArgs(ensure.prNumber, method, repoSlug, opts.expectHeadOid), repo);
+	if (merged.code !== 0) return { ok: false, committed, merged: false, retryable: true, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, prState: "open", detail: `gh pr merge failed${opts.expectHeadOid ? " (head may have moved since it was gated — --match-head-commit refused)" : ""}: ${merged.stderr || merged.stdout}` };
 
 	await git(["fetch", "origin", opts.defaultBranch], repo);
 	const branchTip = (await git(["rev-parse", branch], repo)).stdout;

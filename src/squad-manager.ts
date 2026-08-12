@@ -204,7 +204,7 @@ import { addPlanRevisionCandidate, appendCommentEvent, type ArtifactComment, typ
 import { castPlanVote as appendPlanVoteCast, closePlanVoteRound as appendPlanVoteClose, currentPlanVoteRound as readCurrentPlanVoteRound, listPlanVoteRounds as readPlanVoteRounds, type OpenPlanVoteInput, openPlanVoteRound, recordPlanVoteCommit, tallyPlanVoteRound } from "./plan-votes.ts";
 import { isPlanDocPath, planDocHeadRevision, resolveSafeDocPath } from "./plan-doc.ts";
 import type { VoteQuorum } from "./plan-vote-quorum.ts";
-import { acceptanceCriteriaFromPrBody, criteriaFromTexts, isMeasuredLand, landFailureCount, landReceiptIndexRow, readForcedLands, readLandLedger, readValidatorOverrides, recordForcedLand, recordLandOutcome, recordValidatorOverride, classifyLand, writeLandReceipt, postReceiptComment, type LandReceipt, type LandReceiptPrecision } from "./rail/index.ts";
+import { acceptanceCriteriaFromPrBody, appendLandReceiptIndexRow, criteriaFromTexts, isMeasuredLand, journalAborted, journalFinalized, journalPending, landFailureCount, landReceiptIndexRow, readForcedLands, readLandLedger, readValidatorOverrides, recordForcedLand, recordLandOutcome, recordValidatorOverride, classifyLand, writeLandReceipt, postReceiptComment, type LandReceipt, type LandReceiptPrecision } from "./rail/index.ts";
 import { isLandingUnit, landingRosterOf } from "./is-landing-unit.ts";
 import { readTaskOutcomes, recordTaskOutcome, type TaskOutcomeRow } from "./task-outcomes.ts";
 import { buildTaskClassMatrix } from "./omp-graph/task-class-matrix.ts";
@@ -4864,74 +4864,85 @@ export class SquadManager extends EventEmitter {
 		validation: ValidationRecord | undefined,
 	): Promise<{ receipt: LandReceipt; htmlPath: string } | undefined> {
 		try {
-			const dto = { repo: ctx.repo, name: ctx.label };
-			const branch = ctx.branch;
-			if (!branch) return undefined; // a receipt is branch-keyed, like the land ledger — nothing to key on
-			const merged = result.merged;
-			// Attribution comes from the land's OWN in-lock SHAs (`result.head0`/`result.landedCommit`,
-			// captured while the land held the repo lock — land.ts/land-pr.ts), NOT a post-hoc HEAD re-read:
-			// a concurrent land moving HEAD between the merge and here would otherwise attribute another
-			// land's commit + rollback to this receipt (the TOCTOU). Nothing merged ⇒ no commit at all, per
-			// LandReceipt's contract (a rejected land shows no "What landed" commit).
-			const commit = merged ? result.landedCommit : undefined;
-			const rollbackPoint = merged ? result.head0 : undefined;
-			let files: string[] = [];
-			let insertions: number | undefined;
-			let deletions: number | undefined;
-			let commitMessage: string | undefined;
-			if (merged && commit) {
-				// The landed set + LOC + subject, all from FIXED SHAs (`head0..landedCommit`) — deterministic
-				// regardless of what HEAD points at now. An EMPTY numstat is the real (empty) landed set, never
-				// silently replaced by a prior receipt's file list. Best-effort: a git fault leaves the field
-				// blank (honest absence), never fabricated. In PR mode `landedCommit` is the PR's merge commit,
-				// fetched into this checkout by the land-pr path, so these reads resolve here too.
-				if (result.head0) {
-					const ns = await hardenedGit(["diff", "--numstat", `${result.head0}..${commit}`], { cwd: dto.repo });
-					if (ns.code === 0) {
-						const parsed = parseNumstat(ns.stdout);
-						files = parsed.files;
-						insertions = parsed.insertions;
-						deletions = parsed.deletions;
-					}
-				}
-				const subj = await hardenedGit(["log", "-1", "--format=%s", commit], { cwd: dto.repo });
-				commitMessage = (subj.code === 0 ? subj.stdout.trim() : "") || result.message || undefined;
-			}
-			const slug = repoIdentity(dto.repo).split("/").slice(-2).join("/");
-			const costUsd = lastReceipt?.costUsd ?? ctx.costUsdFallback;
-			const receipt: LandReceipt = {
-				repo: slug,
-				branch,
-				commit,
-				message: commitMessage,
-				files,
-				insertions,
-				deletions,
-				landed: merged,
-				at: Date.now(),
-				gate: classifyLand(result),
-				validation,
-				rollbackPoint,
-				forcedWithoutProof: !!result.forcedWithoutProof,
-				cost: {
-					costUsd,
-					costUnknown: costUsd === undefined,
-					model: effectiveModel ?? lastReceipt?.model,
-					tokens: lastReceipt?.tokens?.total,
-				},
-				...(ctx.criteriaSource ? { criteriaSource: ctx.criteriaSource } : {}),
-			};
+			const receipt = await this.buildLandReceipt(ctx, result, effectiveModel, lastReceipt, validation);
+			if (!receipt) return undefined;
 			const htmlPath = await writeLandReceipt(this.stateDir, receipt);
-			this.log("info", `land receipt written for ${dto.name}: ${htmlPath}`);
+			this.log("info", `land receipt written for ${ctx.label}: ${htmlPath}`);
 			if (result.prNumber) {
-				const posted = await postReceiptComment(dto.repo, slug, result.prNumber, receipt, { receiptHref: htmlPath, hrefKind: "path" });
-				if (!posted) this.log("warn", `land receipt PR comment failed for ${dto.name} (#${result.prNumber}) — non-fatal`);
+				const slug = repoIdentity(ctx.repo).split("/").slice(-2).join("/");
+				const posted = await postReceiptComment(ctx.repo, slug, result.prNumber, receipt, { receiptHref: htmlPath, hrefKind: "path" });
+				if (!posted) this.log("warn", `land receipt PR comment failed for ${ctx.label} (#${result.prNumber}) — non-fatal`);
 			}
 			return { receipt, htmlPath };
 		} catch (err) {
 			this.log("warn", `land receipt failed for ${ctx.label} (non-fatal): ${errText(err)}`);
 			return undefined;
 		}
+	}
+
+	/**
+	 * Build the `LandReceipt` object from a land's own outputs — split out of `writeReceiptFor` (round 3)
+	 * so the self-land path can APPEND ITS INDEX ROW DURABLY (`appendLandReceiptIndexRow`) before the
+	 * best-effort HTML, guaranteeing a merged measured land is never lost to a receipt-write fault (H-3).
+	 * `ctx.repo` is the checkout PATH (the git reads and the slug derive from it). Returns `undefined`
+	 * only when there is no branch to key on; the git reads for the landed set/subject degrade to blank
+	 * (honest absence), never throw.
+	 */
+	private async buildLandReceipt(
+		ctx: { repo: string; branch: string; costUsdFallback?: number; criteriaSource?: "pr-body" | "call" },
+		result: LandResult,
+		effectiveModel: string | undefined,
+		lastReceipt: RunReceipt | undefined,
+		validation: ValidationRecord | undefined,
+	): Promise<LandReceipt | undefined> {
+		const branch = ctx.branch;
+		if (!branch) return undefined; // a receipt is branch-keyed, like the land ledger — nothing to key on
+		const merged = result.merged;
+		// Attribution comes from the land's OWN in-lock SHAs (`result.head0`/`result.landedCommit`,
+		// captured while the land held the repo lock), NOT a post-hoc HEAD re-read (the TOCTOU).
+		const commit = merged ? result.landedCommit : undefined;
+		const rollbackPoint = merged ? result.head0 : undefined;
+		let files: string[] = [];
+		let insertions: number | undefined;
+		let deletions: number | undefined;
+		let commitMessage: string | undefined;
+		if (merged && commit) {
+			if (result.head0) {
+				const ns = await hardenedGit(["diff", "--numstat", `${result.head0}..${commit}`], { cwd: ctx.repo });
+				if (ns.code === 0) {
+					const parsed = parseNumstat(ns.stdout);
+					files = parsed.files;
+					insertions = parsed.insertions;
+					deletions = parsed.deletions;
+				}
+			}
+			const subj = await hardenedGit(["log", "-1", "--format=%s", commit], { cwd: ctx.repo });
+			commitMessage = (subj.code === 0 ? subj.stdout.trim() : "") || result.message || undefined;
+		}
+		const slug = repoIdentity(ctx.repo).split("/").slice(-2).join("/");
+		const costUsd = lastReceipt?.costUsd ?? ctx.costUsdFallback;
+		return {
+			repo: slug,
+			branch,
+			commit,
+			message: commitMessage,
+			files,
+			insertions,
+			deletions,
+			landed: merged,
+			at: Date.now(),
+			gate: classifyLand(result),
+			validation,
+			rollbackPoint,
+			forcedWithoutProof: !!result.forcedWithoutProof,
+			cost: {
+				costUsd,
+				costUnknown: costUsd === undefined,
+				model: effectiveModel ?? lastReceipt?.model,
+				tokens: lastReceipt?.tokens?.total,
+			},
+			...(ctx.criteriaSource ? { criteriaSource: ctx.criteriaSource } : {}),
+		};
 	}
 
 	// ── self-land (glance#391 / #362) ───────────────────────────────────────────────────────────────
@@ -4981,17 +4992,36 @@ export class SquadManager extends EventEmitter {
 	 * Never throws: every fault is a returned refusal with a reason.
 	 */
 	async selfLand(input: SelfLandInput): Promise<SelfLandResult> {
-		const repo = input.repo;
 		const actor = input.actor ?? LOCAL_ACTOR;
-		const branchKey = input.branch?.trim() || (input.pr !== undefined ? `#${input.pr}` : "");
-		// Per-(repo,branch) mutex over the WHOLE lifecycle (C-3 / M-2). Keyed on the request's branch
-		// when known; a PR-number request without a branch keys on the number until it resolves (two
-		// requests for the same PR still serialize). Serialize by chaining onto the prior promise.
-		const lockKey = `${path.resolve(repo || ".")}::${branchKey}`;
+		// H-2 (round 3): canonicalize the lock identity BEFORE taking the mutex, so a PR-NUMBER request
+		// and a BRANCH request that resolve to the SAME PR share one key (and path/symlink aliases of the
+		// repo don't fracture it). Resolve pr→branch read-only here; the authoritative lookup still runs
+		// fresh under the lock. `realpathSync` collapses symlink aliases; a resolve() fallback covers a
+		// not-yet-existing path. When a PR number can't be pre-resolved, key on the number so two
+		// number-requests still serialize.
+		const lockKey = await this.canonicalSelfLandKey(input);
 		const prior = this.selfLandLocks.get(lockKey) ?? Promise.resolve();
 		const run = prior.catch(() => {}).then(() => this.selfLandLocked(input, actor));
 		this.selfLandLocks.set(lockKey, run.catch(() => {}));
 		return run;
+	}
+
+	/** Canonical `<realpath repo>::<branch>` key for the self-land mutex (H-2). Read-only. */
+	private async canonicalSelfLandKey(input: SelfLandInput): Promise<string> {
+		let repoKey: string;
+		try {
+			repoKey = realpathSync(input.repo || ".");
+		} catch {
+			repoKey = path.resolve(input.repo || ".");
+		}
+		let branch = input.branch?.trim();
+		if (!branch && input.pr !== undefined) {
+			// Best-effort pre-resolve so a #370 request and a deepen/x request for the same PR collide on
+			// one key. A lookup fault falls back to the PR number — two number-requests still serialize.
+			const look = await this.lookupPrByNumber(input.repo, input.pr).catch(() => undefined);
+			if (look?.ok && look.pr) branch = look.pr.branch;
+		}
+		return `${repoKey}::${branch ?? (input.pr !== undefined ? `#${input.pr}` : "")}`;
 	}
 
 	private async selfLandLocked(input: SelfLandInput, actor: Actor): Promise<SelfLandResult> {
@@ -5140,30 +5170,28 @@ export class SquadManager extends EventEmitter {
 				return refuse("gate-red", "self-land refused: gate red", `the repo's own gate failed on ${branch} — no merge, no receipt. Command: ${command}\n${proof.detail}`, { ...base, criteriaSource, criteriaCount: criteria.length, gateCommand: command });
 			}
 
-			// 6. MANDATORY MEASUREMENT GATE, BEFORE the merge (C-1). Run the validator ourselves on the
-			// proven tree and refuse anything that isn't an evaluated `pass` over EVERY declared
-			// criterion. This closes every unmeasured-merge path the gauntlet found: OMP_SQUAD_VALIDATOR=0
-			// ⇒ skipped ⇒ refuse; judge down / empty diff ⇒ abstain ⇒ refuse; git fault ⇒ inconclusive ⇒
-			// refuse; criteria unmet ⇒ veto ⇒ refuse. `landBranch` below re-runs the SAME gate (cache hit
-			// on (commit,tree,criteria)), so the judge is invoked once and both agree.
-			const proofRec = await proofFor(repo, worktree);
-			const { record: preVerdict } = await validatorGate({
-				criteria,
-				repo,
-				worktree,
-				branch,
-				proof: proofRec,
-				judge: this.validatorJudgeOverride(),
-				reviewerLedgerPath: this.reviewerLedgerPathOverride(),
-			});
-			const graded = preVerdict.verdict === "pass" && preVerdict.perCriterion.length === criteria.length && preVerdict.perCriterion.every((p) => p.satisfied);
-			if (!graded) {
-				return refuse("unmeasured", "self-land refused: unmeasured", `the validator did not return an evaluated pass over all ${criteria.length} criteria (verdict: ${preVerdict.verdict}${preVerdict.rationale ? ` — ${preVerdict.rationale}` : ""}). A self-land merges ONLY on a measured pass — a skipped/abstain/inconclusive/veto verdict is a refusal, never a green-looking unmeasured land.`, { ...base, criteriaSource, criteriaCount: criteria.length, gateCommand: command, verdict: preVerdict.verdict });
+			// 6. Durable pre-merge journal (round 3, H-3): a "measured land of <branch>@<head> is about to
+			// happen" intent, written BEFORE any merge. If the merge succeeds but the receipt-index append
+			// then faults, this + the finalized entry below are the fallback evidence, so a merged measured
+			// land is never lost to a disk hiccup. `journalHead` keys it (the SHA we gate == what merges).
+			const slug = repoIdentity(repo).split("/").slice(-2).join("/");
+			const journalHead = expectHeadOid ?? (await hardenedGit(["rev-parse", "HEAD"], { cwd: worktree })).stdout.trim();
+			let journalId: string | undefined;
+			try {
+				journalId = await journalPending(this.stateDir, { repo: slug, branch, headOid: journalHead, criteriaSource, criteriaCount: criteria.length });
+			} catch (err) {
+				// A pending-journal write that can't even start is a disk fault — refuse rather than merge a
+				// land we could not durably record (fail closed, the invariant this whole path protects).
+				return refuse("worktree-failed", "self-land refused", `could not durably journal the pending self-land (disk fault) — refusing to merge a land we cannot record: ${errText(err)}`, { ...base, criteriaSource, criteriaCount: criteria.length, gateCommand: command });
 			}
 
-			// 7. The land itself, through the one seam every land goes through — with the base/head/draft
-			// guards threaded so they are re-checked UNDER the repo land lock at the merge point (C-2/C-3).
-			let validation: ValidationRecord | undefined = preVerdict;
+			// 7. The land, through the one seam every land goes through. The measurement is now enforced
+			// INSIDE landBranch (`requireValidationPass`): its OWN validator gate refuses unless the verdict
+			// is an evaluated `pass` — so there is ONE authoritative verdict record (captured via
+			// onValidation), never a pre-gate the inner gate can disagree with (round 3, C-3). The
+			// base/head/draft guards ride down and are re-checked UNDER the repo land lock at the merge
+			// point; `--match-head-commit` binds the merge to exactly this SHA (round 3, C-1).
+			let validation: ValidationRecord | undefined;
 			const result = await this.landBranch({
 				repo,
 				worktree,
@@ -5171,6 +5199,7 @@ export class SquadManager extends EventEmitter {
 				message: input.message?.trim() || `glance(self-land): ${branch}`,
 				commitWip: false,
 				requireProof: true, // never forced: a forced land is excluded from `isMeasuredLand`
+				requireValidationPass: true, // C-3: only an evaluated pass merges — skipped/abstain refuse HERE
 				staleGate: true,
 				conflictMarkerGate: true,
 				criteria,
@@ -5182,38 +5211,72 @@ export class SquadManager extends EventEmitter {
 				},
 			});
 			void this.recordAudit(actor, "land", branch, result.ok ? "ok" : "error", `self-land ${branch}${pr ? ` (#${pr.number})` : ""}: ${result.detail ?? result.message}`);
-			void this.store.appendAudit({ actor: actor.id, action: "self-land", target: branch, detail: { pr: pr?.number, ok: result.ok, merged: result.merged, target, criteria: criteria.length, criteriaSource } }).catch(() => {});
+			void this.store.appendAudit({ actor: actor.id, action: "self-land", target: branch, detail: { pr: pr?.number, ok: result.ok, merged: result.merged, target, criteria: criteria.length, criteriaSource, verdict: validation?.verdict } }).catch(() => {});
 
-			// `measured` is the VERDICT (C-1): a judge graded every criterion and passed, enforced above
-			// before any merge. Never precision.n alone. If the land itself refused after the gate (a
-			// merge-point guard, a conflict), it did not merge and is not "measured evidence".
-			const measured = result.ok && result.merged === true;
-			// The receipt — same writer the agent path uses. `countedByWindow` is the SECONDARY question:
-			// does the reviewer have enough ledger history for the drain's `isMeasuredLand` to count it.
-			let receiptPath: string | undefined;
-			let receiptWritten = false;
-			let countedByWindow = false;
-			let precision: LandReceiptPrecision | undefined;
-			if (!result.retryable) {
-				const written = await this.writeReceiptFor({ repo, branch, label: `self-land ${branch}`, criteriaSource }, result, undefined, undefined, validation);
-				receiptPath = written?.htmlPath;
-				receiptWritten = !!written;
-				if (written) {
-					precision = written.receipt.validation?.reviewerPrecision;
-					countedByWindow = isMeasuredLand(landReceiptIndexRow(written.receipt));
-				}
+			// `measured` derives from the VERDICT (round 3, C-3): a real merge AND `verdict === "pass"`.
+			// `requireValidationPass` makes result.ok imply a pass, but assert it explicitly — measured is
+			// never `ok && merged` alone, and never `precision.n` alone.
+			const merged = result.ok && result.merged === true;
+			const measured = merged && validation?.verdict === "pass";
+			if (!merged) {
+				// No merge ⇒ close the journal so a pending never lingers as a false "this landed".
+				if (journalId) await journalAborted(this.stateDir, journalId, { repo: slug, branch, headOid: journalHead, detail: result.detail ?? result.message }).catch((e) => this.log("warn", `self-land journal abort failed (non-fatal): ${errText(e)}`));
+				const refusal: SelfLandRefusal = result.retryable ? "busy" : validation && validation.verdict !== "pass" ? "unmeasured" : "gate-red";
+				return {
+					ok: false,
+					measured: false,
+					refusal,
+					message: result.message,
+					detail: result.detail ?? result.message,
+					...base,
+					criteriaSource,
+					criteriaCount: criteria.length,
+					gateCommand: command,
+					targetBranch: target,
+					verdict: validation?.verdict,
+					land: result,
+				};
 			}
-			if (result.ok && result.merged && !receiptWritten) {
-				this.log("warn", `self-land of ${branch} MERGED and was graded pass, but the receipt failed to persist — the window has no evidence row for it (recorded as receiptWritten:false)`);
+
+			// 8. Durable receipt (H-3): append the index row FIRST, retried, as a must-succeed step —
+			// decoupled from the best-effort HTML — so the merged measured land always has a window row.
+			// Then finalize the journal (carrying the full row) as the crash/fault fallback, then the HTML.
+			const receipt = await this.buildLandReceipt({ repo, branch, criteriaSource }, result, undefined, undefined, validation);
+			if (!receipt) {
+				this.log("error", `self-land of ${branch} MERGED but could not build a receipt (no branch?) — impossible here; finalizing journal without a row`);
+				return { ok: true, measured, message: `self-land merged ${branch} into ${target}`, ...base, criteriaSource, criteriaCount: criteria.length, gateCommand: command, targetBranch: target, verdict: validation?.verdict, receiptWritten: false, land: result };
+			}
+			const row = landReceiptIndexRow(receipt);
+			const countedByWindow = isMeasuredLand(row);
+			const precision: LandReceiptPrecision | undefined = validation?.reviewerPrecision;
+			let receiptWritten = false;
+			try {
+				await appendLandReceiptIndexRow(this.stateDir, receipt);
+				receiptWritten = true;
+			} catch (err) {
+				this.log("error", `self-land of ${branch} MERGED (measured) but the receipt index append FAILED after retries: ${errText(err)} — the finalized journal is the fallback evidence, the window folds it`);
+			}
+			// Finalize the journal with the full row EITHER way: on index success it is a redundant record;
+			// on index failure it is THE record the window folds in (journalRowsForWindow). Best-effort.
+			if (journalId && receipt.commit) {
+				await journalFinalized(this.stateDir, journalId, { repo: slug, branch, headOid: journalHead, landedCommit: receipt.commit, row }).catch((e) => this.log("warn", `self-land journal finalize failed (non-fatal): ${errText(e)}`));
+			}
+			// The human-facing HTML + PR comment: best-effort, index already durable (skipIndex).
+			let receiptPath: string | undefined;
+			try {
+				receiptPath = await writeLandReceipt(this.stateDir, receipt, { skipIndex: true });
+				if (result.prNumber) await postReceiptComment(repo, slug, result.prNumber, receipt, { receiptHref: receiptPath, hrefKind: "path" }).catch(() => {});
+			} catch (err) {
+				this.log("warn", `self-land HTML receipt failed for ${branch} (non-fatal, index row already durable): ${errText(err)}`);
 			}
 			if (measured && !countedByWindow) {
 				this.log("info", `self-land of ${branch} is measured (verdict pass) but the ${precision?.lineage ?? "reviewing"} lineage has n=${precision?.n ?? 0} adjudicated rows, so the window drain won't COUNT it yet — honest, not a defect`);
 			}
 			return {
-				ok: result.ok,
+				ok: true,
 				measured,
 				countedByWindow,
-				message: result.ok ? `self-land ${result.merged ? "merged" : "completed"} ${branch} into ${target}` : result.message,
+				message: `self-land merged ${branch} into ${target}`,
 				detail: result.detail ?? result.message,
 				...base,
 				criteriaSource,
@@ -5764,6 +5827,16 @@ export class SquadManager extends EventEmitter {
 		}
 		if (veto && !opts.validatorOverride) {
 			return { ok: false, committed: false, merged: false, message: opts.message, detail: veto };
+		}
+		// Self-land measurement invariant (glance#391 round 3, C-3): the ONE authoritative pass check.
+		// `veto` and `inconclusive` already block above/below, but `skipped` (validator off / no criteria)
+		// and `abstain` (judge down / empty diff) would otherwise fall through to a merge — and `abstain`
+		// is STAMPED with reviewerPrecision, so a downstream `precision.n>0` count would read it as
+		// measured. Require an evaluated `pass` HERE, inside the gate, so the verdict the merge proceeds
+		// on and the verdict the receipt records are the SAME record — no pre-gate the inner gate can
+		// disagree with. Not overridable: a measured self-land that isn't a pass is a refusal, full stop.
+		if (opts.requireValidationPass && record.verdict !== "pass") {
+			return { ok: false, committed: false, merged: false, message: opts.message, detail: `validation is not a pass (verdict: ${record.verdict}${record.rationale ? ` — ${record.rationale}` : ""}) — a measured land requires an evaluated pass over every declared criterion; skipped/abstain/veto/inconclusive never merge` };
 		}
 		// eap-borrows follow-up 7: a diff-computation FAILURE (git fault) is an ENVIRONMENTAL precondition,
 		// not a branch defect — never a permanent park. `retryable: true` routes it through the exact same

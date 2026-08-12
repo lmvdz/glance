@@ -4,3 +4,14 @@
  */
 
 export { acceptanceCriteriaFromPrBody, criteriaFromTexts } from "./criteria.ts";
+export {
+	journalPending,
+	journalFinalized,
+	journalAborted,
+	readSelfLandJournal,
+	journalRowsForWindow,
+	selfLandJournalPath,
+	selfLandJournalId,
+	type SelfLandJournalEntry,
+	type SelfLandJournalStatus,
+} from "./journal.ts";
