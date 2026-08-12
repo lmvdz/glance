@@ -2216,7 +2216,13 @@ export class SquadServer {
 		// reads this; same manager the redispatch POST resolves — org binding by construction
 		// (item 5). The cross-org bootstrap aggregate in actionItemsPayload stays view-only.
 		if (url.pathname === "/api/issues/starved" && req.method === "GET") {
-			return Response.json({ starved: manager.starvedIssueAttempts() });
+			// 503, never an empty 200, on an unreadable ledger (codex, recovery round): a corrupt
+			// control file must render as FAILURE on MondaySurface, not as "no starved issues".
+			try {
+				return Response.json({ starved: manager.starvedIssueAttempts() });
+			} catch (err) {
+				return new Response(`issue-attempts ledger unreadable: ${err instanceof Error ? err.message : String(err)}`, { status: 503 });
+			}
 		}
 		const mstarve = url.pathname.match(/^\/api\/issues\/([^/]+)\/redispatch$/);
 		if (mstarve && req.method === "POST") {

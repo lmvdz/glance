@@ -118,7 +118,7 @@ export function difficultyDispatchDecision(
 // Gating SHIPPED with 3b (rendered surface + audited human clear verb, DESIGN v2 points 3–5):
 // per-issue verdicts defer in apply mode; the tick-global class decision stays telemetry-only.
 
-import { mapFile } from "./ledger.ts";
+import { mapFileStrict } from "./ledger.ts";
 import type { IssueRef } from "./types.ts";
 
 export interface IssueAttemptRecord {
@@ -151,7 +151,12 @@ export interface IssueAttemptRecord {
  *  original + raced sibling + one more). */
 export const ISSUE_STARVE_ATTEMPTS = 3;
 
-const issueAttempts = (stateDir: string) => mapFile<IssueAttemptRecord>(stateDir, "issue-attempts.json");
+// STRICT accessor (codex, recovery round): this is a CONTROL ledger — it gates apply-mode
+// dispatch and is mutated by the audited clear verb. The best-effort mapFile collapsed corrupt/
+// unreadable to {} (a false all-clear that fails the gate open and hides every verdict from the
+// UI) and swallowed write failures (a clear that reported success without persisting). Strict:
+// missing ⇒ empty, corrupt/unreadable/unwritable ⇒ throw; each caller decides loudly.
+const issueAttempts = (stateDir: string) => mapFileStrict<IssueAttemptRecord>(stateDir, "issue-attempts.json");
 
 // One ledger parse per dispatch tick, not per candidate (codex: O(N×M) JSON on the event loop).
 // TTL sits under the dispatcher's poll interval, and every WRITE invalidates the snapshot, so
@@ -159,7 +164,9 @@ const issueAttempts = (stateDir: string) => mapFile<IssueAttemptRecord>(stateDir
 const SNAPSHOT_TTL_MS = 2000;
 const snapshotCache = new Map<string, { at: number; data: Record<string, IssueAttemptRecord> }>();
 
-/** Record one judged outcome for an issue. Record-only, never gates, never throws. */
+/** Record one judged outcome for an issue. Record-only, never gates. THROWS on an unreadable or
+ *  unwritable ledger (strict accessor) — the land-outcome call site catches and warn-logs, which
+ *  beats the old silent drop of gating evidence. */
 export function recordIssueAttempt(stateDir: string, issueId: string | undefined, runId: string | undefined, ok: boolean, agentId?: string, now = Date.now(), identifier?: string, opts?: { repo?: string; runStartedAt?: number }): void {
 	if (!issueId) return;
 	const file = issueAttempts(stateDir);
@@ -198,7 +205,7 @@ export function recordIssueAttempt(stateDir: string, issueId: string | undefined
 /** Compensating restore for a failed clear-audit (atomicity by compensation — the clear must
  *  not survive an unaudited write; see SquadManager.clearIssueStarvationVerdict). */
 export function restoreIssueAttemptRecord(stateDir: string, issueId: string, record: IssueAttemptRecord): void {
-	const file = mapFile<IssueAttemptRecord>(stateDir, "issue-attempts.json");
+	const file = issueAttempts(stateDir);
 	const all = file.read();
 	all[issueId] = record;
 	file.write(all);
@@ -239,7 +246,7 @@ export function starvedIssues(stateDir: string, now = Date.now()): Array<{ issue
  *  never deletes history, never touches the dispatch ledger, never implicit. Returns false when
  *  there is nothing to clear (route maps that to 404, not a silent 200). */
 export function clearIssueStarvation(stateDir: string, issueId: string, actorId: string, now = Date.now()): { prior: IssueAttemptRecord } | undefined {
-	const file = mapFile<IssueAttemptRecord>(stateDir, "issue-attempts.json");
+	const file = issueAttempts(stateDir);
 	const all = file.read();
 	const rec = all[issueId];
 	// Only a currently-starved row (on its CURRENT generation) is clearable: acking a healthy or
@@ -259,7 +266,16 @@ export function clearIssueStarvation(stateDir: string, issueId: string, actorId:
  *  apply mode on a starved issue; shadow mode logs the same reason but proceeds. */
 export function issueDifficultyDecision(stateDir: string, issue: Pick<IssueRef, "id" | "identifier">, mode: DifficultyDispatchMode): DifficultyDispatchDecision | undefined {
 	if (mode === "off") return undefined;
-	const rec = issueAttemptsSnapshot(stateDir)[issue.id];
+	let rec: IssueAttemptRecord | undefined;
+	try {
+		rec = issueAttemptsSnapshot(stateDir)[issue.id];
+	} catch (err) {
+		// Fail OPEN but LOUD (codex, recovery round): a corrupt control ledger must not wedge the
+		// autonomous loop (house rule: a broken guard never blocks dispatch — see alreadyDone), but
+		// it must not read as healthy either. The reason string changes ⇒ transition logging
+		// re-logs it, and GET /api/issues/starved 503s off the same throw so the UI shows failure.
+		return { proceed: true, reason: `issue-attempts ledger UNREADABLE — difficulty gate disabled (fail-open): ${err instanceof Error ? err.message : String(err)}` };
+	}
 	if (!rec) return undefined;
 	const e = effectiveEvidence(rec);
 	if (e.attempts < ISSUE_STARVE_ATTEMPTS || e.fails !== e.attempts || e.attempts === 0) return undefined; // nothing noteworthy on the CURRENT generation

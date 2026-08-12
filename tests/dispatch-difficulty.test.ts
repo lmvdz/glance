@@ -155,3 +155,44 @@ describe("issue attempts (DESIGN v2 slice 3a) — evidence half, shadow verdicts
 		expect(issueDifficultyDecision(d, { id: "ISS-3" }, "shadow")).toBeUndefined();
 	});
 });
+
+describe("strict control ledger (recovery round: fail loud, never a false all-clear)", () => {
+	const { mkdtempSync, writeFileSync } = require("node:fs") as typeof import("node:fs");
+	const { tmpdir } = require("node:os") as typeof import("node:os");
+	const path = require("node:path") as typeof import("node:path");
+	const { issueDifficultyDecision, recordIssueAttempt } = require("../src/dispatch-difficulty.ts") as typeof import("../src/dispatch-difficulty.ts");
+	const { mapFileStrict } = require("../src/ledger.ts") as typeof import("../src/ledger.ts");
+	const { openDispatchLedger } = require("../src/dispatch-ledger.ts") as typeof import("../src/dispatch-ledger.ts");
+	const dir = () => mkdtempSync(path.join(tmpdir(), "issue-attempts-strict-"));
+
+	test("mapFileStrict: missing file reads {}, corrupt file THROWS (never an empty success)", () => {
+		const d = dir();
+		expect(mapFileStrict(d, "issue-attempts.json").read()).toEqual({});
+		writeFileSync(path.join(d, "issue-attempts.json"), "{ not json");
+		expect(() => mapFileStrict(d, "issue-attempts.json").read()).toThrow();
+	});
+
+	test("issueDifficultyDecision on a corrupt ledger: fails OPEN with a LOUD reason, never silent-undefined", () => {
+		const d = dir();
+		writeFileSync(path.join(d, "issue-attempts.json"), "{ not json");
+		const verdict = issueDifficultyDecision(d, { id: "ISS-X" }, "apply")!;
+		expect(verdict.proceed).toBeTrue(); // a broken guard must never wedge the loop…
+		expect(verdict.reason).toContain("UNREADABLE"); // …but it must say so, transition-logged
+	});
+
+	test("dispatch ledger: operator forget (delete) makes a stamped issue dispatchable again, durably", () => {
+		const d = dir();
+		const ledger = openDispatchLedger(d);
+		ledger.add("ISS-CLEARED");
+		expect(ledger.has("ISS-CLEARED")).toBeTrue();
+		ledger.delete("ISS-CLEARED");
+		expect(ledger.has("ISS-CLEARED")).toBeFalse();
+		expect(openDispatchLedger(d).has("ISS-CLEARED")).toBeFalse(); // survives a fresh open (restart)
+	});
+
+	test("recordIssueAttempt on a corrupt ledger THROWS (the land site warn-logs) instead of silently dropping evidence", () => {
+		const d = dir();
+		writeFileSync(path.join(d, "issue-attempts.json"), "{ not json");
+		expect(() => recordIssueAttempt(d, "ISS-Y", "run-1", false)).toThrow();
+	});
+});

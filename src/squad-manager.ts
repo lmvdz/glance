@@ -10299,7 +10299,16 @@ export class SquadManager extends EventEmitter {
 	 *  Touches neither the dispatch ledger nor race eligibility (once-per-issue-ever stays spent —
 	 *  post-starvation a human is in the loop, strictly stronger than another race). */
 	async clearIssueStarvationVerdict(issueId: string, actor: Actor, reason?: string): Promise<"cleared" | "not-starved" | "audit-failed"> {
-		const cleared = clearIssueStarvation(this.stateDir, issueId, actor.id);
+		let cleared: ReturnType<typeof clearIssueStarvation>;
+		try {
+			cleared = clearIssueStarvation(this.stateDir, issueId, actor.id);
+		} catch (err) {
+			// Strict ledger (codex, recovery round): an unreadable ledger or a failed verdict write
+			// now THROWS instead of reporting a success that never persisted. The verdict (if any)
+			// stands; 503 tells the operator to retry.
+			this.log("warn", `starvation clear for ${issueId} failed — ledger read/write error: ${errText(err)}`);
+			return "audit-failed";
+		}
 		if (!cleared) return "not-starved";
 		const prior = cleared.prior;
 		// The audit reports the EFFECTIVE (current-generation) verdict the operator actually acked —
@@ -10318,12 +10327,30 @@ export class SquadManager extends EventEmitter {
 		} catch (err) {
 			// Atomicity by compensation (codex finding): a clear whose audit failed must not survive —
 			// restore the pre-clear row so the verdict stands and the operator can retry the endpoint.
-			restoreIssueAttemptRecord(this.stateDir, issueId, prior);
+			try {
+				restoreIssueAttemptRecord(this.stateDir, issueId, prior);
+			} catch (restoreErr) {
+				// Strict write can fail here too: the clear persisted but its audit did not, and the
+				// rollback could not undo it. The loudest honest signal available short of crashing.
+				this.log("error", `starvation clear for ${issueId}: audit failed AND rollback failed — clear persisted UNAUDITED: ${errText(restoreErr)}`);
+				return "audit-failed";
+			}
+			// The disk audit may already carry the "cleared" line (it lands before the DB backend) —
+			// append the compensation so the trail tells the truth. Best-effort recordAudit is right
+			// here: the rollback itself must never fail on its own audit (codex #5, recovery round).
+			await this.recordAudit(actor, "dispatch.starvation.clear-rolled-back", issueId, "error", `audit backend failed, verdict restored: ${errText(err)}`);
 			this.log("warn", `starvation clear for ${issueId} rolled back — audit write failed: ${errText(err)}`);
 			return "audit-failed";
 		}
 		// Broadcast only after both backends landed — a rolled-back clear must not have announced itself.
 		this.emit("event", { type: "audit", entry } satisfies SquadEvent);
+		// Make "let auto-dispatch try again" TRUE (codex finding, recovery round): the dispatcher's
+		// already-handled gate runs before difficultyFor and its ledger was add-only, so a cleared
+		// issue was never reconsidered. Forget it through the LIVE dispatcher (shared ledger
+		// instance — a second openSetLedger would resurrect the id from the stale in-memory copy);
+		// with auto-dispatch off no live instance exists, so an ad-hoc open is safe.
+		if (this.dispatcher) this.dispatcher.forgetIssue(issueId);
+		else openDispatchLedger(this.stateDir).delete(issueId);
 		return "cleared";
 	}
 

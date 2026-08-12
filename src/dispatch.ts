@@ -490,6 +490,15 @@ export class Dispatcher {
 		return this.deps.maxWip !== undefined && (this.deps.liveCount?.() ?? 0) >= this.deps.maxWip;
 	}
 
+	/** Operator-driven forget (starvation clear, deepen 14 recovery — codex finding: the already-
+	 *  handled gate at the top of the tick runs BEFORE difficultyFor, and the ledger was add-only,
+	 *  so "clear → auto-dispatch tries again" was structurally false). Drops the issue from the
+	 *  session set and the durable ledger; the next tick reconsiders it like new work. */
+	forgetIssue(issueId: string): void {
+		this.dispatched.delete(issueId);
+		this.deps.ledger?.delete(issueId);
+	}
+
 	start(intervalMs: number): void {
 		if (this.timer) return;
 		void this.tick();

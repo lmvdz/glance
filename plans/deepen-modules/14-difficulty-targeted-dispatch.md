@@ -145,3 +145,15 @@ Recovered by merging the branch onto fresh main (deepen/14-recovery); one docs c
 add/add — kept main's resolved version). The starved-rows actionItemsPayload port survived via the
 branch's own pre-integration merge. Full gates + fresh blind cross-lineage review on the recovery
 diff, since main moved (rail campaign) after the branch died.
+
+## Recovery round adjudications (2026-08-11): 7 survived (3 high-convergent), 4 by-design
+Both lineages re-reviewed the recovery diff against moved main. Fixed: generation-billing race
+(grok F1 = codex #6 — double-convergent), audit fail-open + unverifiable ledger writes (grok F2 +
+codex #4/#5 — strict mapFileStrict accessor, 3-way clear verdict, 503 mapping, compensating
+rollback audit), cleared-issue-never-redispatches (codex #1 — DispatchLedger.delete +
+Dispatcher.forgetIssue; the MondaySurface promise is now true), corrupt-ledger false all-clear
+(codex #3 — fail open LOUD + 503 + high-severity action row), comment/test-name drift (grok F3/F4).
+By-design: view-only cross-org action rows (grok F5), starve-before-C05-escalation + the
+auto-vs-manual evidence scope (codex #2 — starvation counts judged AUTO compute; a human already
+in the loop is what starvation exists to summon). FUTURE REFINEMENT if starvation bites real
+work: model-aware starvation budget (grant one frontier escalation before declaring starved).

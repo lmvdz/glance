@@ -666,8 +666,25 @@ export async function actionItemsPayload(managers: SquadManager[], url: URL, act
 	const items: ActionItem[] = [];
 	// Starved issues (deepen 14): derived per request from the attempts ledger — emit-from-state,
 	// so a crash can never lose the announcement and an ack silences it everywhere at once.
-	for (const m of managers) {
-		for (const s of m.starvedIssueAttempts()) {
+	for (const [mi, m] of managers.entries()) {
+		// Strict ledger may throw (codex, recovery round): an unreadable file becomes a visible
+		// high-severity row instead of silently emptying the starved section (false all-clear).
+		let starvedRows: ReturnType<SquadManager["starvedIssueAttempts"]>;
+		try {
+			starvedRows = m.starvedIssueAttempts();
+		} catch (err) {
+			items.push({
+				id: `starved-ledger-unreadable:${mi}`,
+				severity: "high",
+				source: "land",
+				subject: "issue-attempts ledger unreadable — starvation verdicts are invisible",
+				rootCause: err instanceof Error ? err.message : String(err),
+				nextAction: "Inspect/restore issue-attempts.json in the state dir; verdicts and the apply-mode gate are dark until it reads",
+				targetRoute: "#/tasks",
+			});
+			continue;
+		}
+		for (const s of starvedRows) {
 			// 3b-final item 2 + codex: equality filter — and a LEGACY row with no repo stays VISIBLE
 			// under any filter (fail-visible; hiding an active verdict is the worse failure).
 			if (repo && s.repo && s.repo !== repo) continue;
