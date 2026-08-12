@@ -24,7 +24,7 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
-## Round 3, iteration 2 (2026-08-11, goal mode — PR pending) — CONCERN 18 DONE
+## Round 3, iteration 2 (2026-08-11, goal mode — PR #371) — CONCERN 18 DONE
 BoundarySyncLane extracted (round-2 rank 1): ~470 lines of turn-boundary wiring leave
 squad-manager for src/boundary-sync-lane.ts behind a 5-closure port + structural session slice;
 every fail-closed annotation moved verbatim. Codex: bodies normalized-identical, one Medium —
