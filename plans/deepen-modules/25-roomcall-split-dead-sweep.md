@@ -1,5 +1,5 @@
 # roomCall.ts split + the dead-component sweep
-STATUS: open
+STATUS: done
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: moderate (steps 1–3 pure moves)
@@ -32,3 +32,17 @@ PanelShell, HeatGrid (the magma tree was dropped by design — GRAPH-FOLD.md).
 REMAINING SLICES: (2) delete the 8 orphaned hud-only roomCall helpers (browserAudio* RETAINED —
 remounted by this PR's fix), lift the three non-voice regions out of lib/voice; (3) split
 roomCall.ts along consumer boundaries; separate later PR: VoiceCallSession behind the context.
+
+## Done (2026-08-12, round 3 iterations 12-13 — PR #379); step 3 carried to round 4
+Steps 1 + 2 delivered: ~1,500 lines of dead code gone (10 components + 6 hud helpers + tests),
+two LIVE status fixes shipped from the review rounds (retention-mismatch precedence with
+role=alert; browser-audio error/retry remounted), the card-system regions re-homed into
+channelTimeline (byte-identical moves, SHA-verified by codex; import direction now one-way),
+and one policy near-miss caught by three independent signals (IDLE_HANGUP_MS is a cross-tree
+policy mirror, restored; its sibling IDLE_WARNING_MS deleted as a default-mirror that would lie
+under runtime overrides). CARRIED TO ROUND 4 as a named candidate, not silently dropped:
+step 3 (the consumer-boundary split of the remaining ~800-line roomCall.ts + the PaneStack
+parameterization — its mechanism is generic but its types are voice-workspace-bound) and the
+separate-later-PR VoiceCallSession class. Also queued from this concern's reviews: the inert
+spawn-proposal flow, the surfaceless adoption bridge, the idle-countdown display gap, and
+VoiceCallContext's false 10-minute copy vs callHud's 3-minute cap.
