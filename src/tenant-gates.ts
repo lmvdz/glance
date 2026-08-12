@@ -112,6 +112,12 @@ const TenantGatePolicySchema = Schema.Struct({
 	sandboxStrict: Schema.optional(Schema.Boolean),
 	sandboxImage: Schema.optional(Schema.String),
 	sandboxNetwork: Schema.optional(Schema.String),
+	/** Per-tenant env-var names re-admitted into the gate's POSITIVE-allowlist env (round 3, THEME B).
+	 *  The gate env is a boundary (only PATH/HOME/… + GLANCE_SERVICE_* by default); a tenant whose
+	 *  suite genuinely needs `CARGO_HOME`/`NODE_ENV` names it HERE — an explicit per-tenant act, never
+	 *  a denylist that a new secret name slips past. Values still come from the daemon env; this only
+	 *  chooses which NAMES cross the boundary. */
+	env: Schema.optional(Schema.Array(Schema.String)),
 });
 
 export const TenantGateManifestSchema = Schema.Struct({

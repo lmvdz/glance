@@ -68,16 +68,22 @@ export interface TenantGateRegistry {
 type RegistryReadState = { ok: true; records: Record<string, unknown> } | { ok: false; error: string };
 
 function readState(file: string): RegistryReadState {
+	const b = getStorageBackend();
+	// C-3 (round 3): discriminate ABSENT from READ-ERROR at the storage boundary. `readTextSync`
+	// swallows every I/O failure to `undefined`, indistinguishable from "file not there". So consult
+	// `exists()` FIRST: an absent file is honest "unregistered"; a file that EXISTS but reads as
+	// undefined is a read error (EIO/EACCES/EISDIR/truncation), which is "unknowable" and fails closed
+	// — never silently unregistered. A present BLANK/whitespace/zero-byte file also refuses: a human
+	// registering a gate never leaves it blank, so blank is a truncated write, i.e. corruption.
 	let raw: string | undefined;
 	try {
-		const b = getStorageBackend();
-		if (!b.exists(file)) return { ok: true, records: {} };
+		if (!b.exists(file)) return { ok: true, records: {} }; // absent ⇒ nothing registered
 		raw = b.readTextSync(file);
 	} catch (e) {
-		// An IO error reading a file that EXISTS is not "unregistered" — it is "unknowable", fail closed.
 		return { ok: false, error: `could not read ${file}: ${errText(e)}` };
 	}
-	if (raw === undefined || raw.trim() === "") return { ok: true, records: {} }; // absent/empty ⇒ nothing registered
+	if (raw === undefined) return { ok: false, error: `${file} exists but could not be read (I/O error) — refusing every land until it is repaired (fail-closed)` };
+	if (raw.trim() === "") return { ok: false, error: `${file} exists but is blank/whitespace — a truncated or clobbered registration; refusing every land until it is repaired (fail-closed)` };
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(raw);

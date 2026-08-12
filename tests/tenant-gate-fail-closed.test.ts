@@ -270,11 +270,12 @@ const serviceGate: TenantGate = {
 	requires: { services: [{ name: "db", image: "postgres:16", healthcheckCommand: "pg_isready -U postgres", ports: ["55432:5432"], env: { POSTGRES_PASSWORD: "x" } }] },
 };
 
-describe("H-1 (SECURITY) — service gates receive gateEnv's SCRUB, not the raw daemon env", () => {
-	test("FLIP: a secret in the daemon env is ABSENT from the gate's env; only GLANCE_SERVICE_* is added", async () => {
-		const saved = { canary: process.env.CANARY_SECRET, db: process.env.DATABASE_URL };
-		process.env.CANARY_SECRET = "leak-me"; // matches gateEnv's SECRET_NAME shape → must be scrubbed
-		process.env.DATABASE_URL = "postgres://daemon-secret"; // the exact host-DB fall-through H-1 names
+describe("THEME B (SECURITY) — the tenant gate env is a POSITIVE ALLOWLIST, not a denylist", () => {
+	test("FLIP: EVERY secret shape is absent — including SECRET_CANARY the round-2 denylist missed", async () => {
+		const names = ["CANARY_SECRET", "DATABASE_URL", "VENDOR_API_KEY", "SECRET_CANARY"] as const;
+		const saved = Object.fromEntries(names.map((n) => [n, process.env[n]]));
+		for (const n of names) process.env[n] = `leak-${n}`;
+		process.env.PATH ??= "/usr/bin"; // an allowlisted var the gate legitimately keeps
 		try {
 			let captured: Record<string, string> | undefined;
 			await runManifestGates({
@@ -288,16 +289,36 @@ describe("H-1 (SECURITY) — service gates receive gateEnv's SCRUB, not the raw 
 				},
 			});
 			expect(captured).toBeDefined();
-			// The canary and DATABASE_URL — anything a tenant test could read to reach the daemon's DB —
-			// are gone. The old `{...process.env, ...serviceEnv}` would have kept both.
-			expect(captured?.CANARY_SECRET).toBeUndefined();
-			expect(captured?.DATABASE_URL).toBeUndefined();
-			// Only the service-discovery vars the rail can prove it published are added.
-			expect(captured?.GLANCE_SERVICE_DB_HOST).toBe("127.0.0.1");
-			expect(captured?.GLANCE_SERVICE_DB_PORT).toBe("55432");
+			// codex reproduced SECRET_CANARY leaking under the suffix denylist; the positive allowlist
+			// admits it nowhere. DATABASE_URL / VENDOR_API_KEY / CANARY_SECRET likewise absent.
+			for (const n of names) expect(captured?.[n]).toBeUndefined();
+			// The allowlist keeps operational vars and adds only the rail's service-discovery vars —
+			// now service-name : container-port (reachable on the joined compose network), not 127.0.0.1.
+			expect(captured?.PATH).toBeDefined();
+			expect(captured?.GLANCE_SERVICE_DB_HOST).toBe("db");
+			expect(captured?.GLANCE_SERVICE_DB_PORT).toBe("5432");
 		} finally {
-			if (saved.canary === undefined) delete process.env.CANARY_SECRET; else process.env.CANARY_SECRET = saved.canary;
-			if (saved.db === undefined) delete process.env.DATABASE_URL; else process.env.DATABASE_URL = saved.db;
+			for (const n of names) { if (saved[n] === undefined) delete process.env[n]; else process.env[n] = saved[n]; }
+		}
+	});
+
+	test("policy.env re-admits a NAMED toolchain var across the boundary, nothing else", async () => {
+		const saved = { cargo: process.env.CARGO_HOME, secret: process.env.MY_SECRET };
+		process.env.CARGO_HOME = "/home/t/.cargo";
+		process.env.MY_SECRET = "nope";
+		try {
+			let captured: Record<string, string> | undefined;
+			await runManifestGates({
+				manifest: contract([{ ...testGate, expects: { exit: 0, parser: "raw" } }], { env: ["CARGO_HOME"] }),
+				cwd: "/wt",
+				dockerProbe: hasDocker,
+				exec: async (_c, _cwd, o) => { captured = o.env; return { code: 0, stdout: "", stderr: "", sandboxed: true }; },
+			});
+			expect(captured?.CARGO_HOME).toBe("/home/t/.cargo"); // named in policy.env → admitted
+			expect(captured?.MY_SECRET).toBeUndefined(); // not named → absent
+		} finally {
+			if (saved.cargo === undefined) delete process.env.CARGO_HOME; else process.env.CARGO_HOME = saved.cargo;
+			if (saved.secret === undefined) delete process.env.MY_SECRET; else process.env.MY_SECRET = saved.secret;
 		}
 	});
 });

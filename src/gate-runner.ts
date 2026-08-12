@@ -109,6 +109,56 @@ const HOST_ONLY = new Set(["PATH", "HOME", "TMPDIR", "TMP", "TEMP", "XDG_CACHE_H
 /** Values of OMP_SQUAD_GATE_SANDBOX that mean "explicitly run on the host" (opt-out). */
 const HOST_SENTINELS = new Set(["host", "off", "0", "no", "false", "disable", "disabled", "none-host"]);
 
+/** A spawned child reduced to what {@link runBounded} needs. */
+interface BoundableProc {
+	pid?: number;
+	exited: Promise<number>;
+	stdout: ReadableStream;
+	stderr: ReadableStream;
+}
+
+/** Kill a process and the group it leads; ignore ESRCH. Negative pid targets the group (reaches
+ *  grandchildren a docker/compose invocation spawns); a child that isn't a group leader simply has no
+ *  matching group, so `-pid` is a safe no-op there and never signals the daemon's own group. */
+function killTree(pid: number | undefined, signal: NodeJS.Signals): void {
+	if (pid === undefined) return;
+	try { process.kill(-pid, signal); } catch { /* group gone or unsupported */ }
+	try { process.kill(pid, signal); } catch { /* already reaped */ }
+}
+
+/**
+ * Await `proc` under a HARD wall-clock ceiling (round 3 High). A single SIGTERM then an unbounded
+ * await is not a bound: a child that ignores SIGTERM, or one whose stdio pipes are held open by a
+ * surviving grandchild, hangs the await forever and with it the daemon. On timeout: SIGTERM the
+ * group, SIGKILL after a grace, then RESOLVE with a synthetic 124 after a final deadline even if the
+ * exit promise never settles. Never throws; the code is non-zero on timeout so a gate fails closed.
+ */
+export async function runBounded(proc: BoundableProc, timeoutMs: number | undefined, label: string): Promise<{ code: number; output: string }> {
+	const output = Promise.all([new Response(proc.stdout).text().catch(() => ""), new Response(proc.stderr).text().catch(() => "")]);
+	if (!timeoutMs || timeoutMs <= 0) {
+		const code = await proc.exited;
+		const [o, e] = await output;
+		return { code, output: `${o}${e}`.trim() };
+	}
+	const GRACE_MS = 5_000;
+	let timedOut = false;
+	const result = await new Promise<number>((resolve) => {
+		let settled = false;
+		const done = (code: number): void => { if (!settled) { settled = true; resolve(code); } };
+		proc.exited.then((c) => done(c), () => done(1));
+		setTimeout(() => {
+			if (settled) return;
+			timedOut = true;
+			killTree(proc.pid, "SIGTERM");
+			setTimeout(() => killTree(proc.pid, "SIGKILL"), GRACE_MS);
+			setTimeout(() => done(124), GRACE_MS + 2_000); // hard deadline, independent of stream closure
+		}, timeoutMs);
+	});
+	const [o, e] = await Promise.race([output, new Promise<[string, string]>((r) => setTimeout(() => r(["", ""]), 2_000))]);
+	const text = `${o}${e}`.trim();
+	return { code: result, output: timedOut ? `${text}\n[gate] "${label}" exceeded ${timeoutMs}ms — process group killed`.trim() : text };
+}
+
 /** Thrown when STRICT is set but docker is unavailable — the gate must refuse, not silently host-run. */
 export class GateSandboxUnavailableError extends Error {
 	constructor(reason: string) {
@@ -396,19 +446,15 @@ export async function execGatedCommand(
 ): Promise<{ code: number; stdout: string; stderr: string; sandboxed: boolean; degraded?: boolean }> {
 	const plan = await gateExec(command, cwd, { mounts: opts.mounts, env: opts.env, network: opts.network, hostArgv: opts.hostArgv, policy: opts.policy, requireSandbox: opts.requireSandbox });
 	const proc = Bun.spawn(plan.argv, { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", env: plan.env });
-	let timedOut = false;
-	const timer = opts.timeoutMs && opts.timeoutMs > 0 ? setTimeout(() => { timedOut = true; proc.kill(); }, opts.timeoutMs) : undefined;
-	try {
-		const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-		const code = await proc.exited;
-		// R2 #384 fail-open #3: this used to return only code/stdout/stderr, so BOTH its consumers (the
-		// workflow verify node and the Observer's main gate) were structurally incapable of noticing that
-		// the run happened in a degraded bare-base sandbox — a classification `gateRunUnrunnable` was
-		// already able to make, on evidence that never reached it.
-		return { code: timedOut ? (code === 0 ? 124 : code) : code, stdout, stderr: timedOut ? `${stderr}\n[gate] killed after ${opts.timeoutMs}ms timeout` : stderr, sandboxed: plan.sandboxed, degraded: plan.degraded };
-	} finally {
-		if (timer) clearTimeout(timer);
-	}
+	// Round 3 High: the previous `setTimeout(() => proc.kill())` sent ONE SIGTERM then awaited
+	// proc.exited forever — a child ignoring SIGTERM, or a surviving docker grandchild holding the
+	// stdio pipes open, hung the daemon. `runBounded` (below) kills the process group, escalates to
+	// SIGKILL, and resolves on a hard deadline independent of stream closure. R2 #384 fail-open #3: the
+	// return still carries sandboxed/degraded so callers can classify a degraded run.
+	const { code, output } = await runBounded(proc, opts.timeoutMs, command);
+	// `runBounded` merges stdout+stderr; gateRunUnrunnable/greenGateUnproven scan the combined text, so
+	// hand the whole thing back as stdout and leave stderr empty rather than re-splitting.
+	return { code, stdout: output, stderr: "", sandboxed: plan.sandboxed, degraded: plan.degraded };
 }
 
 // ── Unrunnable-gate classifier ─────────────────────────────────────────────────────────────────

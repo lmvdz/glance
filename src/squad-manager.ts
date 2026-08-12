@@ -6123,6 +6123,12 @@ export class SquadManager extends EventEmitter {
 	private async mainGateFingerprint(repo: string): Promise<string | undefined> {
 		const status = await hardenedGit(["status", "--porcelain", "--untracked-files=all"], { cwd: repo });
 		if (status.code !== 0) return undefined;
+		// Round 3 High: the fingerprint omitted HEAD/tree, so TWO different clean commits (both empty
+		// porcelain, same lockfiles, same contract) produced the SAME key — a cached green from commit A
+		// was served for commit B, up to 10 ticks. Bind the fingerprint to the committed tree so every
+		// land (which moves HEAD^{tree}) invalidates it.
+		const tree = await hardenedGit(["rev-parse", "HEAD^{tree}"], { cwd: repo });
+		const headTree = tree.code === 0 ? tree.stdout.trim() : "";
 		let lock = "";
 		// R2 #384 finding #6: this hashed `bun.lock` ONLY, so a committed `pnpm-lock.yaml` change on an
 		// otherwise-clean tree did not invalidate the cached green — a foreign tenant could ride a stale
@@ -6139,7 +6145,7 @@ export class SquadManager extends EventEmitter {
 		// cached green, or the fleet would keep serving a pass earned under the looser contract.
 		const tenant = this.tenantManifest(repo);
 		const contract = tenant.error ?? (tenant.manifest ? manifestHash(tenant.manifest) : "");
-		return createHash("sha256").update(status.stdout).update("\0").update(lock).update("\0").update(contract).digest("hex");
+		return createHash("sha256").update(status.stdout).update("\0").update(headTree).update("\0").update(lock).update("\0").update(contract).digest("hex");
 	}
 
 	private async runMainGateUncached(repo: string): Promise<{ ok: boolean; firstFailure?: string; skipped?: boolean; unrunnable?: boolean }> {

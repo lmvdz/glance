@@ -29,7 +29,7 @@ import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { errText } from "./err-text.ts";
-import { dockerAvailable } from "./gate-runner.ts";
+import { dockerAvailable, runBounded } from "./gate-runner.ts";
 import type { GateRefusal, TenantComposeService } from "./tenant-gates.ts";
 
 /** A spawn result reduced to what this module judges on. Injected in tests. `timeoutMs` bounds the
@@ -52,7 +52,12 @@ export interface ServiceStopResult {
 export interface ServiceHandle {
 	/** The compose project name — also the container name prefix, for an operator hunting strays. */
 	project: string;
-	/** Env the gate command receives so it can reach the services (published host ports). */
+	/** The compose network the gate container must JOIN to reach the services (round 3 High): with
+	 *  `--network none` a gate can't reach 127.0.0.1:published-port, so the gate runs ON this network
+	 *  and reaches each service by its service-name at its container-port. Empty ⇒ no services. */
+	network: string;
+	/** Env the gate command receives so it can reach the services — service-name host + container port,
+	 *  resolvable on {@link network}. */
 	env: Record<string, string>;
 	/** Idempotent. Always called, including on the refusal paths. `ok:false` ⇒ containers may be
 	 *  alive and the caller must not write a green receipt. */
@@ -64,15 +69,15 @@ export type ServiceStart = { ok: true; handle: ServiceHandle } | { ok: false; re
 /** Default teardown/health ceiling when a gate does not name a tighter one. */
 const DEFAULT_SERVICE_TIMEOUT_MS = 120_000;
 
+/**
+ * Spawn `argv`, bounded by `timeoutMs` via {@link runBounded} (round 3 High): a single SIGTERM then
+ * an unbounded await is not a bound (a child ignoring SIGTERM, or a docker grandchild holding the
+ * stdio pipes open, hangs forever), so runBounded kills the process group, escalates to SIGKILL, and
+ * resolves on a hard deadline independent of stream closure.
+ */
 async function realSpawn(argv: string[], cwd: string, timeoutMs?: number): Promise<ServiceSpawnResult> {
 	const proc = Bun.spawn(argv, { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-	const timer = timeoutMs ? setTimeout(() => proc.kill(), timeoutMs) : undefined;
-	try {
-		const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
-		return { code, output: `${out}${err}`.trim() };
-	} finally {
-		if (timer) clearTimeout(timer);
-	}
+	return runBounded(proc, timeoutMs, argv.join(" "));
 }
 
 /** `serviceName` → an env-var-safe suffix (`test-db` → `TEST_DB`). */
@@ -134,7 +139,7 @@ export async function startGateServices(opts: {
 	const spawn = opts.spawn ?? realSpawn;
 	const timeoutMs = opts.timeoutMs > 0 ? opts.timeoutMs : DEFAULT_SERVICE_TIMEOUT_MS;
 	const noop = async (): Promise<ServiceStopResult> => ({ ok: true });
-	if (!opts.services.length) return { ok: true, handle: { project: "", env: {}, stop: noop } };
+	if (!opts.services.length) return { ok: true, handle: { project: "", network: "", env: {}, stop: noop } };
 
 	const available = await (opts.dockerProbe ? opts.dockerProbe() : dockerAvailable());
 	if (!available) {
@@ -199,12 +204,21 @@ export async function startGateServices(opts: {
 		};
 	}
 
+	// Round 3 High (grok's round-1 reachability caveat, promoted): the gate runs sandboxed under
+	// `--network none` by default, from which 127.0.0.1:published-port is UNREACHABLE — the published
+	// port lives on the daemon host, not inside the gate container. So the gate JOINS this compose
+	// project's default network and reaches each service by its SERVICE NAME at its CONTAINER port.
+	// (compose names the default network `<project>_default`.)
+	const network = `${project}_default`;
 	const env: Record<string, string> = { GLANCE_GATE_COMPOSE_PROJECT: project };
 	for (const s of opts.services) {
 		const key = envKey(s.name);
-		env[`GLANCE_SERVICE_${key}_HOST`] = "127.0.0.1";
-		const published = s.ports?.[0]?.split(":")[0];
-		if (published) env[`GLANCE_SERVICE_${key}_PORT`] = published;
+		// Reachable on the joined network: the service's own name, at the CONTAINER port (the right
+		// half of a `host:container` mapping), NOT the published host port.
+		env[`GLANCE_SERVICE_${key}_HOST`] = s.name;
+		const mapped = s.ports?.[0];
+		const containerPort = mapped ? (mapped.includes(":") ? mapped.split(":")[1] : mapped) : undefined;
+		if (containerPort) env[`GLANCE_SERVICE_${key}_PORT`] = containerPort;
 	}
-	return { ok: true, handle: { project, env, stop: down } };
+	return { ok: true, handle: { project, network, env, stop: down } };
 }

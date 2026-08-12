@@ -113,14 +113,32 @@ describe("glance's own gate contract", () => {
 		}
 	});
 
-	test("C-2: an ABSENT or empty registry file is honest 'unregistered', not an error", async () => {
+	test("C-3 (round 3): an ABSENT file is honest 'unregistered'; a present BLANK file REFUSES", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "tenant-empty-"));
 		try {
 			const registry = openTenantGateRegistry(dir);
 			expect(registry.readError()).toBeUndefined(); // absent ⇒ nothing registered, not corrupt
 			expect(registry.get("/any/repo")).toBeUndefined();
+			// A present blank/whitespace file is a truncated/clobbered write, i.e. corruption — it must
+			// NOT read as "unregistered" (round 2 did; codex C-3 flagged it). Every land refuses.
 			await fs.writeFile(path.join(dir, "tenant-gates.json"), "   \n");
-			expect(openTenantGateRegistry(dir).readError()).toBeUndefined(); // empty/whitespace ⇒ same
+			const blank = openTenantGateRegistry(dir);
+			expect(blank.readError()).toContain("blank");
+			expect(blank.get("/any/repo")).toEqual({ error: expect.stringContaining("unreadable") });
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("C-3 (round 3): a present-but-unreadable file (a directory in its place) fails closed, not 'absent'", async () => {
+		// A path that exists() but readTextSync cannot read (EISDIR) is the deterministic stand-in for
+		// the EIO/EACCES/truncation class — exists()===true + read===undefined must be registry-unreadable.
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "tenant-eisdir-"));
+		try {
+			await fs.mkdir(path.join(dir, "tenant-gates.json")); // a DIRECTORY where the file should be
+			const registry = openTenantGateRegistry(dir);
+			expect(registry.readError()).toBeDefined();
+			expect(registry.get("/any/repo")).toEqual({ error: expect.stringContaining("unreadable") });
 		} finally {
 			await fs.rm(dir, { recursive: true, force: true });
 		}

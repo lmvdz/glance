@@ -752,6 +752,12 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 	// Carries the acceptance gate's excerpt (full text always persisted — see excerptForDetail) past the
 	// scratch-worktree try/finally so a GREEN land's DoneProof records it too, not just a refusal's detail.
 	let acceptanceGateExcerpt: string | undefined;
+	// THEME A / C-4 (round 3): the SHA whose merge we are about to GATE. `gh pr merge` later merges
+	// whatever the PR head is ON GITHUB at merge time — a force-push or base advance in the window
+	// between this gate and the merge lands a DIFFERENT tree while still recording verified:green.
+	// Captured here, passed to `gh pr merge --match-head-commit` so GitHub refuses to merge anything
+	// but the exact commit we gated. (Same class as the self-land lane's `--match-head-commit`.)
+	const gatedBranchTip = (await git(["rev-parse", branch], repo)).stdout.trim();
 	try {
 		// Scratch-merge gate: disposable detached worktree of freshly-fetched origin/<default>, merge
 		// the branch into it, run acceptance + the (default-ON, concern 03) regression gate THERE —
@@ -908,8 +914,21 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 	if (ready.code !== 0 && wasDraft) {
 		return { ok: false, committed, merged: false, retryable: true, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, prState: "draft", detail: `gh pr ready failed: ${ready.stderr || ready.stdout}` };
 	}
-	const merged = await gh(["pr", "merge", String(ensure.prNumber), `--${method}`, "--delete-branch=false", "--repo", repoSlug], repo);
-	if (merged.code !== 0) return { ok: false, committed, merged: false, retryable: true, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, prState: "open", detail: `gh pr merge failed: ${merged.stderr || merged.stdout}` };
+	// `--match-head-commit <gatedBranchTip>` (round 3, C-4): GitHub REFUSES the merge unless the PR
+	// head is still the exact commit the scratch gate proved — a force-push or new push in the window
+	// between gate and merge is rejected here instead of landing an ungated tree as verified:green.
+	const mergeArgv = ["pr", "merge", String(ensure.prNumber), `--${method}`, "--delete-branch=false", "--repo", repoSlug];
+	if (gatedBranchTip) mergeArgv.push("--match-head-commit", gatedBranchTip);
+	const merged = await gh(mergeArgv, repo);
+	if (merged.code !== 0) {
+		// A head-mismatch (the window race this guards) reads as retryable: the branch moved, so re-run
+		// the whole gate against the new tip rather than merging the old, gated one.
+		const headMoved = /match-head-commit|head branch was modified|not match|Base branch was modified/i.test(`${merged.stderr}\n${merged.stdout}`);
+		const detail = headMoved
+			? `gh pr merge refused: the PR head moved after it was gated (--match-head-commit ${gatedBranchTip.slice(0, 12)}) — re-gating the new tip rather than landing an unverified tree`
+			: `gh pr merge failed: ${merged.stderr || merged.stdout}`;
+		return { ok: false, committed, merged: false, retryable: true, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, prState: "open", detail };
+	}
 
 	await git(["fetch", "origin", opts.defaultBranch], repo);
 	const branchTip = (await git(["rev-parse", branch], repo)).stdout;

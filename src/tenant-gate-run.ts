@@ -23,7 +23,7 @@
  */
 
 import { errText } from "./err-text.ts";
-import { gateEnv } from "./gate-env.ts";
+import { tenantGateEnv } from "./gate-env.ts";
 import { execGatedCommand, GateSandboxUnavailableError, dockerAvailable } from "./gate-runner.ts";
 import { startGateServices, type ServiceSpawn } from "./tenant-services.ts";
 import {
@@ -132,11 +132,12 @@ export async function runManifestGates(opts: ManifestRunOpts): Promise<ManifestR
 		sandboxImage: opts.manifest.policy?.sandboxImage,
 		sandboxNetwork: opts.manifest.policy?.sandboxNetwork,
 	};
+	const policyEnv = opts.manifest.policy?.env;
 
 	for (let i = 0; i < opts.manifest.gates.length; i++) {
 		const gate = opts.manifest.gates[i]!;
 		const started = Date.now();
-		const outcome = await runOneGate(gate, policy, opts, exec).catch(
+		const outcome = await runOneGate(gate, policy, policyEnv, opts, exec).catch(
 			(e: unknown): OneGateOutcome => ({ code: null, output: "", refusal: { code: "service-unavailable", reason: `gate "${gate.name}" runner threw before it could judge (${errText(e)}) — treated as a refusal, never a silent pass` } }),
 		);
 		chunks.push(outcome.output);
@@ -178,6 +179,7 @@ interface OneGateOutcome {
 async function runOneGate(
 	gate: TenantGate,
 	policy: { sandboxStrict?: boolean; sandboxImage?: string; sandboxNetwork?: string },
+	manifestPolicyEnv: readonly string[] | undefined,
 	opts: ManifestRunOpts,
 	exec: GateCommandRunner,
 ): Promise<OneGateOutcome> {
@@ -217,6 +219,11 @@ async function runOneGate(
 		return { code: null, output: "", refusal: services.refusal };
 	}
 	const stopServices = services.handle.stop;
+	// Round 3 High: a service gate must run ON the compose network to reach its services (see
+	// startGateServices) — `--network none` cannot reach 127.0.0.1:published-port. Override the gate's
+	// sandbox network to the compose default network; the discovery vars already point at
+	// service-name:container-port, which resolves there.
+	if (services.handle.network) gatePolicy = { ...gatePolicy, sandboxNetwork: services.handle.network };
 
 	// The gate runs, then teardown, then service `down` — none in a `finally`, because a failed `down`
 	// must be able to turn a GREEN gate into a refusal (a gate that "passed" with its Postgres still
@@ -235,13 +242,15 @@ async function runOneGate(
 				policy: gatePolicy,
 				requireSandbox,
 				timeoutMs: gate.timeoutMs,
-				// H-1 (SECURITY, round 1): merge service vars INTO gateEnv's scrub — never over raw
-				// process.env. The old `{...process.env, ...serviceEnv}` REPLACED the scrub, handing
-				// agent-authored tenant tests the daemon's DATABASE_URL / *_API_KEY / OMP_SQUAD_* inside
-				// the container — the exact host-DB fall-through the module claims to refuse. gateEnv
-				// already runs for the no-service path (inside gateExec); this makes the service path use
-				// the SAME scrubbed base, then layers only the GLANCE_SERVICE_* discovery vars on top.
-				...(Object.keys(services.handle.env).length ? { env: { ...gateEnv(process.env), ...services.handle.env } } : {}),
+				// SECURITY, round 3 (THEME B / codex C-2): the tenant gate env is a POSITIVE ALLOWLIST, not
+				// gateEnv's suffix denylist. Round 1's H-1 fix merged service vars into gateEnv, but gateEnv
+				// is a denylist — codex reproduced `SECRET_CANARY` (no matching suffix rule) reaching the
+				// child. A registered tenant runs agent-authored code, so only PATH/HOME/… + the tenant's
+				// declared `policy.env` + the rail's GLANCE_SERVICE_* discovery vars cross the boundary; a
+				// newly-invented secret name leaks nothing because it was never on the list. Applied to
+				// BOTH the service and no-service paths (the no-service path used to fall through to
+				// gateEnv inside gateExec).
+				env: tenantGateEnv(process.env, { allow: manifestPolicyEnv, add: services.handle.env }),
 			});
 		} catch (e) {
 			// A strict-policy sandbox refusal. Returned as a refusal rather than rethrown: the land paths

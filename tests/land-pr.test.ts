@@ -599,6 +599,42 @@ test("landAgentPr: conflictMarkerGate:false (force-land) merges a branch carryin
 	expect(res.merged).toBe(true);
 });
 
+test("C-4 (round 3): gh pr merge is bound to the GATED branch tip via --match-head-commit", async () => {
+	const { repo } = await baseline("lp-matchhead-");
+	const wt = await branchWorktree(repo, "squad/a1", { "feature.txt": "new\n" });
+	const stateDir = await tmpDir("lp-matchhead-state-");
+	prList = [];
+	mergeSimulator = githubMerge("squad/a1");
+	const gatedTip = await gitOut(repo, "rev-parse", "squad/a1");
+
+	const res = await landAgentPr({ repo, worktree: wt, branch: "squad/a1", message: "m", commitWip: false, defaultBranch: "main" }, stateDir);
+
+	expect(res.ok).toBe(true);
+	// The merge argv must pin the exact commit the scratch gate proved — a force-push mid-window is
+	// then rejected by GitHub instead of landing an ungated tree as verified:green.
+	expect(mergeCalls[0]).toContain("--match-head-commit");
+	const idx = mergeCalls[0]!.indexOf("--match-head-commit");
+	expect(mergeCalls[0]![idx + 1]).toBe(gatedTip);
+});
+
+test("C-4 (round 3): a mid-window head move → gh refuses (--match-head-commit) → retryable, not verified:green", async () => {
+	const { repo } = await baseline("lp-headmove-");
+	const wt = await branchWorktree(repo, "squad/a1", { "feature.txt": "new\n" });
+	const stateDir = await tmpDir("lp-headmove-state-");
+	prList = [];
+	// GitHub rejects the merge exactly as it would when the head moved after gating.
+	mergeShouldSucceed = false;
+	const originalGh = mergeSimulator;
+	void originalGh;
+
+	const res = await landAgentPr({ repo, worktree: wt, branch: "squad/a1", message: "m", commitWip: false, defaultBranch: "main" }, stateDir);
+
+	expect(res.ok).toBe(false);
+	expect(res.merged).toBe(false);
+	expect(res.retryable).toBe(true); // re-gate the new tip rather than merging the old gated one
+	expect(mergeCalls[0]).toContain("--match-head-commit");
+});
+
 test("landAgentPr: OMP_SQUAD_CONFLICT_MARKER_GATE=0 disables the gate globally in PR mode too", async () => {
 	process.env.OMP_SQUAD_CONFLICT_MARKER_GATE = "0";
 	try {

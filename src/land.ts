@@ -192,10 +192,65 @@ export interface LandOpts {
  */
 const repoLands = new Map<string, Promise<unknown>>();
 
+/**
+ * Repos where a rollback (`git reset --hard head0`) FAILED to restore the pre-merge tip (C-5, round
+ * 3). Main is in an unknown state — a rejected merge or gate may be sitting at HEAD — so every
+ * subsequent land for that repo is halted until a human clears it. A land that cannot undo its own
+ * merge must not let the NEXT land build on a corrupted main.
+ */
+const catastrophicRepos = new Map<string, string>();
+
 interface GitRun {
 	code: number;
 	stdout: string;
 	stderr: string;
+}
+
+/**
+ * The tree-binding primitive (round 3, THEME A — the SAME class as the self-land lane's
+ * `--match-head-commit`): a gate result is only trustworthy for the EXACT tree it ran against, so a
+ * seam that does anything between gating and landing (run a reviewer that can commit, ask GitHub to
+ * merge a remote head) must re-verify the landed tree equals the gated one. `headTree` reads the
+ * identity; `landedTreeMoved` compares. Named and exported so the self-land lane can converge on the
+ * same primitive rather than reinventing a second tree check.
+ *
+ * @substrate exported for the round-3 tree-binding tests + cross-lane reuse; the production callers
+ * (attemptAutoResolve, the in-place path) are in-file.
+ */
+export async function headTree(repo: string): Promise<string> {
+	return (await git(["rev-parse", "HEAD^{tree}"], repo)).stdout.trim();
+}
+
+/** True iff `repo`'s current HEAD tree differs from `gatedTree` (or either could not be read — a
+ *  tree we cannot confirm is a tree we do not trust).
+ *  @substrate half of the round-3 tree-binding primitive (with {@link headTree}); the production caller
+ *  (attemptAutoResolve) is in-file, exported for the tree-binding tests + the self-land lane's reuse. */
+export async function landedTreeMoved(repo: string, gatedTree: string): Promise<boolean> {
+	const now = await headTree(repo);
+	return !gatedTree || !now || now !== gatedTree;
+}
+
+/**
+ * `git reset --hard target` with the result CHECKED (C-5, round 3). The bare `.catch(()=>{})` form
+ * asserts "main restored" without ever confirming it — an EROFS / index.lock / nonzero reset leaves
+ * the rejected merge at HEAD while the land reports it rolled back. Returns true only when the reset
+ * exited 0 AND HEAD is now `target`; on failure it records the repo as catastrophic (halting further
+ * lands) and returns false so the caller can report an unknown-state land.
+ */
+async function restoreOrHalt(repo: string, target: string): Promise<boolean> {
+	const reset = await git(["reset", "--hard", target], repo);
+	const head = (await git(["rev-parse", "HEAD"], repo)).stdout.trim();
+	if (reset.code === 0 && head === target) return true;
+	const detail = `reset --hard ${target.slice(0, 12)} did not restore ${repo} (exit ${reset.code}, HEAD now ${head.slice(0, 12) || "?"}): ${reset.stderr || reset.stdout || "no output"}`;
+	catastrophicRepos.set(repo, detail);
+	return false;
+}
+
+/** Reset the catastrophic-halt marker for a repo (C-5): an operator's "I verified main, resume lands"
+ *  clear, and the tests' teardown.
+ *  @substrate the operator/recovery + test seam for the C-5 halt; the halt itself is set in-file. */
+export function clearCatastrophicLandState(repo: string): void {
+	catastrophicRepos.delete(repo);
 }
 
 async function git(args: string[], cwd: string): Promise<GitRun> {
@@ -275,8 +330,12 @@ export async function runManifestLandGate(a: {
 	 *  throw-restores-head0 path deterministically without needing a genuinely broken filesystem. */
 	runner?: typeof runManifestGates;
 }): Promise<{ ok: true; detail: string; sandboxed: boolean } | { refusal: LandResult }> {
-	const rollback = async (): Promise<void> => {
-		if (a.rollbackTo) await git(["reset", "--hard", a.rollbackTo], a.repo).catch(() => {});
+	// C-5 (round 3): the rollback is CHECKED. If `restoreOrHalt` cannot put main back at `rollbackTo`,
+	// the repo is marked catastrophic and every later land halts — reporting "main rolled back" on an
+	// unverified reset is exactly the fail-open C-5 names. Returns the tail suffix for the detail.
+	const rollback = async (): Promise<string> => {
+		if (!a.rollbackTo) return "";
+		return (await restoreOrHalt(a.repo, a.rollbackTo)) ? " — main rolled back" : " — WARNING: rollback FAILED, main may be in an unknown state; further lands halted";
 	};
 	let outcome: Awaited<ReturnType<typeof runManifestGates>>;
 	try {
@@ -284,11 +343,11 @@ export async function runManifestLandGate(a: {
 	} catch (e) {
 		// C-4 belt-and-suspenders: the runner is total, but a throw here must never leave a merged main
 		// standing. Restore, refuse, retryable (the environment threw, the branch is unjudged).
-		await rollback();
-		return { refusal: { ok: false, committed: a.committed, merged: false, retryable: true, message: a.message, detail: `tenant gate contract runner threw before it could judge (${errText(e)})${a.rollbackTo ? " — main restored" : ""}; retryable` } };
+		const restored = await rollback();
+		return { refusal: { ok: false, committed: a.committed, merged: false, retryable: true, message: a.message, detail: `tenant gate contract runner threw before it could judge (${errText(e)})${restored}; retryable` } };
 	}
 	if (!outcome.ok) {
-		await rollback();
+		const restored = await rollback();
 		const refusal = outcome.refusal;
 		return {
 			refusal: {
@@ -297,7 +356,7 @@ export async function runManifestLandGate(a: {
 				merged: false,
 				retryable: refusal ? refusalIsEnvironmental(refusal.code) : true,
 				message: a.message,
-				detail: `tenant gate contract REFUSED the land (${refusal?.code ?? "unknown"}): ${refusal?.reason ?? "no reason recorded"}${a.rollbackTo ? " — main rolled back" : ""}\n${await excerptForDetail(outcome.output, 400, a.agentId)}`,
+				detail: `tenant gate contract REFUSED the land (${refusal?.code ?? "unknown"}): ${refusal?.reason ?? "no reason recorded"}${restored}\n${await excerptForDetail(outcome.output, 400, a.agentId)}`,
 			},
 		};
 	}
@@ -599,12 +658,23 @@ async function landAgentLocked(opts: LandOpts): Promise<LandResult> {
 async function landAgentImpl(opts: LandOpts): Promise<LandResult> {
 	const { repo, worktree, branch, message, commitWip } = opts;
 
+	// C-5 (round 3): a prior land could not restore main after a rejected merge — main is in an unknown
+	// state. Refuse every subsequent land for this repo (not retryable — a human must inspect and clear
+	// it) rather than build the next merge on top of a corrupted tree.
+	const catastrophic = catastrophicRepos.get(repo);
+	if (catastrophic) {
+		return { ok: false, committed: false, merged: false, message, detail: `land halted: ${repo} is in an unknown state from a failed rollback (${catastrophic}) — a human must verify main and clear the halt before any further land` };
+	}
+
 	// Only sweep the worktree's uncommitted edits into a commit when the caller says it's safe
 	// (agent idle/stopped). For a LIVE agent (working/starting/input) commitWip is false: we merge
 	// only its committed history and never touch its in-progress edits.
 	// `.omp/` is excluded from the sweep on both sides: it's the daemon's own evidence dir
 	// (vision screenshots, proof artifacts) — sweeping it committed screenshots into main AND,
 	// because the proof fingerprint also ignores `.omp/`, would land content the gate never saw.
+	// Captured BEFORE any in-place commit so a manifest refusal on the in-place path can restore the
+	// exact pre-commit tip (C-1, round 3) instead of leaving the rejected commit at HEAD.
+	const preCommitHead = (await git(["rev-parse", "HEAD"], worktree)).stdout.trim();
 	let committed = false;
 	if (commitWip) {
 		const status = await git(["status", "--porcelain", "--", ".", ":(exclude).omp"], worktree);
@@ -628,17 +698,20 @@ async function landAgentImpl(opts: LandOpts): Promise<LandResult> {
 
 	// In-place agent (no separate branch / worktree === repo): nothing to merge.
 	if (!branch || worktree === repo) {
-		// C-3 (gauntlet round 1): a registered tenant's manifest must run here too. This path committed
-		// WIP straight into the checkout and returned ok:true with NO gate ever running — a complete
-		// bypass for any repo an agent works in-place (`glance here`). Only when something was actually
-		// committed: an empty land has nothing to gate. There is no separate main to roll back (the
-		// worktree IS the repo), so a refusal reports ok:false and records no green proof; the commit is
-		// the agent's own in-place work and is left for them to fix and re-verify, not destroyed.
-		if (committed && opts.manifest) {
-			const gateResult = await runManifestLandGate({ manifest: opts.manifest, repo, committed, message, agentId: opts.agentId });
+		// C-1 (round 3): the manifest must run before ANY in-place success is reported — not only when
+		// THIS call committed. Round 2 gated on `committed && manifest`, so an already-committed or
+		// `commitWip=false` session returned ok:true at the bottom with no gate, and the manager stamped
+		// `landed` on an ungated HEAD. Now: a registered tenant ALWAYS gates the current HEAD before an
+		// in-place land is declared successful. On refusal, if THIS call made the commit, restore the
+		// pre-commit tip (checked — C-5); a pre-existing commit is the agent's own state, left untouched
+		// but the land is refused (never reported landed).
+		if (opts.manifest) {
+			// `rollbackTo` only when this call created the commit — we never reset someone else's commit.
+			const rollbackTo = committed ? preCommitHead || undefined : undefined;
+			const gateResult = await runManifestLandGate({ manifest: opts.manifest, repo, rollbackTo, committed, message, agentId: opts.agentId });
 			if ("refusal" in gateResult) return gateResult.refusal;
-			await recordMainProof(repo, manifestCommand(opts.manifest), true, `committed in place; ${gateResult.detail}`, gateResult.sandboxed);
-			return { ok: true, committed, merged: false, message, detail: `committed in place; ${gateResult.detail}` };
+			await recordMainProof(repo, manifestCommand(opts.manifest), true, `${committed ? "committed in place; " : ""}${gateResult.detail}`, gateResult.sandboxed);
+			return { ok: true, committed, merged: false, message, detail: `${committed ? "committed in place; " : "verified in place; "}${gateResult.detail}` };
 		}
 		return {
 			ok: true,
@@ -1161,9 +1234,26 @@ async function attemptAutoResolve(a: {
 		if (rgr) return rgr;
 	}
 
+	// THEME A / C-4 (round 3): the gate just proved a SPECIFIC tree. The reviewer below runs in the
+	// REAL repo and can commit — an injected/compromised reviewer that commits after the gate would
+	// make an UNGATED HEAD the landed commit while the receipt still says "verified". Bind the gate to
+	// the exact tree it saw and re-verify after the reviewer.
+	let gatedTree = await headTree(repo);
+
 	// (d) Independent second opinion before keeping an LLM-merged result.
 	const approved = await reviewer({ repo, worktree, branch }).catch(() => false);
 	if (!approved) return rollback(`auto-resolved ${branch} but reviewer rejected the resolution — rolled main back`);
+
+	// The reviewer moved the tree ⇒ what would land is not what was gated. Re-run the manifest against
+	// the new tree (registered tenant); with no manifest we cannot cheaply re-verify, so fail closed.
+	if (await landedTreeMoved(repo, gatedTree)) {
+		if (!manifest) return rollback(`auto-resolved ${branch} but the reviewer changed the tree AFTER the gate — refusing to land an unverified tree; rolled main back`);
+		const reGate = await runManifestLandGate({ manifest, repo, rollbackTo: head0, committed, message, agentId });
+		if ("refusal" in reGate) return reGate.refusal;
+		gateSandboxed = reGate.sandboxed;
+		gateDetail = `; ${reGate.detail} (re-verified after reviewer moved the tree)`;
+		gatedTree = await headTree(repo);
+	}
 
 	// (e) Proven ⇒ keep it, and record the landed main as a durable post-merge proof.
 	await recordMainProof(repo, gate || (manifest ? manifestCommand(manifest) : "(no acceptance gate)"), true, `auto-resolved conflict and merged ${branch}${gateDetail}; reviewer approved`, gateSandboxed);

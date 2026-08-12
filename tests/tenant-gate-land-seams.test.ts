@@ -2,7 +2,7 @@ import { afterAll, expect, test, describe } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { landAgent, runManifestLandGate } from "../src/land.ts";
+import { landAgent, runManifestLandGate, clearCatastrophicLandState } from "../src/land.ts";
 import { setProofRoot, proofFor } from "../src/proof.ts";
 import { resolveStateDir } from "../src/state-dir.ts";
 import type { TenantGateManifest } from "../src/tenant-gates.ts";
@@ -151,13 +151,25 @@ describe("C-3 · in-place land (worktree === repo) runs the manifest", () => {
 		expect((await proofFor(repo, repo))?.ok).toBe(true);
 	}, 60_000);
 
-	test("an in-place land with NOTHING to commit does not invent a gate run", async () => {
+	test("C-1 (round 3): an ALREADY-COMMITTED in-place session still gates HEAD — the bypass is closed", async () => {
+		// commitWip:false ⇒ `committed` stays false; round 2 returned ok:true here with NO gate. Now the
+		// current HEAD is gated regardless, so a failing gate REFUSES an already-committed session.
 		await proofRoot();
-		const repo = await baseRepo("seam-c3-noop-");
-		const manifest = manifestOf(repo, [shellGate("suite", "exit 1", { exit: 0, parser: "raw" })]);
-		const res = await landAgent({ repo, worktree: repo, branch: "main", message: "noop", commitWip: true, verify: "", manifest });
-		expect(res.ok).toBe(true); // nothing committed ⇒ nothing to gate
-		expect(res.detail).toContain("no changes to commit");
+		const repo = await baseRepo("seam-c3-already-");
+		const ran = path.join(repo, "GATE_RAN");
+		const manifest = manifestOf(repo, [shellGate("suite", `touch ${JSON.stringify(ran)}; exit 1`, { exit: 0, parser: "raw" })]);
+		const res = await landAgent({ repo, worktree: repo, branch: "main", message: "already committed", commitWip: false, verify: "", manifest });
+		expect(res.ok).toBe(false); // the bypass (ok:true with no gate) is gone
+		expect(await fs.exists(ran)).toBe(true); // the gate ran against the existing HEAD
+	}, 60_000);
+
+	test("C-1 (round 3): a clean already-committed in-place session that PASSES the gate lands", async () => {
+		await proofRoot();
+		const repo = await baseRepo("seam-c3-clean-");
+		const manifest = manifestOf(repo, [shellGate("suite", "echo ok", { exit: 0, parser: "raw" })]);
+		const res = await landAgent({ repo, worktree: repo, branch: "main", message: "clean", commitWip: false, verify: "", manifest });
+		expect(res.ok).toBe(true);
+		expect(res.detail).toContain("verified in place");
 	}, 60_000);
 });
 
@@ -180,5 +192,66 @@ describe("C-4 · a thrown runner restores head0 (never leaves main merged on a t
 		expect(result.refusal.retryable).toBe(true);
 		expect(result.refusal.detail).toContain("threw before it could judge");
 		expect(await out(repo, "rev-parse", "HEAD")).toBe(head0); // main restored — not left merged
+	}, 60_000);
+});
+
+describe("THEME A · the reviewer cannot slip an ungated tree past the manifest (auto-resolve)", () => {
+	// A reviewer that COMMITS after the manifest passed, then approves — the new HEAD is ungated.
+	const commitThenApprove = async ({ repo }: { repo: string; worktree: string; branch: string }): Promise<boolean> => {
+		await fs.writeFile(path.join(repo, "sneak.txt"), "ungated change after the gate\n");
+		await Bun.spawn(["git", "-C", repo, "add", "-A"], { stdout: "ignore", stderr: "ignore" }).exited;
+		await Bun.spawn(["git", "-C", repo, "-c", "user.email=r@r", "-c", "user.name=r", "commit", "-qm", "reviewer sneak"], { stdout: "ignore", stderr: "ignore" }).exited;
+		return true;
+	};
+
+	test("PASS: a reviewer commit re-runs the manifest against the moved tree (green re-verify lands)", async () => {
+		await proofRoot();
+		const { repo, wt } = await conflictingBranch("seam-treemove-pass-");
+		// Real seam, real runner: the reviewer commits after the gate, so `landedTreeMoved` fires and the
+		// manifest re-runs. The re-run gate (echo ok) passes, so the detail records the re-verify — proof
+		// the moved tree was gated, not the pre-reviewer one.
+		const manifest = manifestOf(repo, [shellGate("suite", "echo ok", { exit: 0, parser: "raw" })]);
+		const res = await landAgent({ repo, worktree: wt, branch: "unit", message: "land unit", commitWip: false, verify: "", manifest, resolver: resolveToBranch, reviewer: commitThenApprove });
+		expect(res.ok).toBe(true);
+		expect(res.detail).toContain("re-verified after reviewer moved the tree");
+	}, 60_000);
+
+	test("FLIP: a reviewer commit whose re-verify FAILS rolls main back — the ungated tree never lands", async () => {
+		await proofRoot();
+		const { repo, wt, head0 } = await conflictingBranch("seam-treemove-refuse-");
+		// The gate command fails whenever the reviewer's sneak file is present — so the FIRST run (on the
+		// resolved branch, no sneak) passes, and the RE-RUN (after the reviewer committed sneak.txt)
+		// refuses. Real runner throughout.
+		const manifest = manifestOf(repo, [shellGate("suite", "test ! -f sneak.txt", { exit: 0, parser: "raw" })]);
+		const res = await landAgent({ repo, worktree: wt, branch: "unit", message: "land unit", commitWip: false, verify: "", manifest, resolver: resolveToBranch, reviewer: commitThenApprove });
+		expect(res.ok).toBe(false);
+		expect(res.detail).toContain("REFUSED");
+		expect(await out(repo, "rev-parse", "HEAD")).toBe(head0); // rolled back — the reviewer's tree never landed
+	}, 60_000);
+});
+
+describe("C-5 · a failed rollback halts every subsequent land", () => {
+	test("restoreOrHalt marks the repo catastrophic, and the NEXT land refuses instead of building on it", async () => {
+		const repo = await baseRepo("seam-c5-");
+		clearCatastrophicLandState(repo);
+		const head0 = await out(repo, "rev-parse", "HEAD");
+		await fs.writeFile(path.join(repo, "shared.txt"), "merged\n");
+		await git(repo, "add", "-A");
+		await git(repo, "commit", "-qm", "pretend-merge");
+		// rollbackTo is a BOGUS sha ⇒ `git reset --hard` fails ⇒ restoreOrHalt cannot restore ⇒ the repo
+		// is marked catastrophic. A refusing runner triggers the rollback path.
+		const refuseRunner = async (): Promise<ManifestRunOutcome> => ({ ok: false, manifestHash: "h".repeat(64), refusal: { code: "gate-red", reason: "red" }, results: [], output: "" });
+		const manifest = manifestOf(repo, [shellGate("suite", "true", { exit: 0, parser: "raw" })]);
+		const result = await runManifestLandGate({ manifest, repo, rollbackTo: "0".repeat(40), committed: true, message: "m", runner: refuseRunner });
+		expect("refusal" in result).toBe(true);
+		if (!("refusal" in result)) throw new Error("unreachable");
+		expect(result.refusal.detail).toContain("rollback FAILED");
+
+		// The next land for this repo is HALTED — not retried onto a corrupted main.
+		const next = await landAgent({ repo, worktree: repo, branch: "main", message: "next", commitWip: false, verify: "", manifest });
+		expect(next.ok).toBe(false);
+		expect(next.detail).toContain("land halted");
+		clearCatastrophicLandState(repo); // don't leak the halt to other tests sharing this process
+		void head0;
 	}, 60_000);
 });
